@@ -2368,19 +2368,15 @@ request body, so an assignment that flips between turns invalidates the prompt p
 exact damage `pi-cache-optimizer` existed to undo. So: compute the assignment once per
 *registration-set epoch* and cache it on the plan, recomputing only when the live set changes or a
 route is reselected. `Registry::projection_hash()` (`crates/tool/src/registry.rs:2690-2711`) is nearly the key:
-a blake3 digest over the ordered `(name, family, rev)` identities, length-delimited, `BTreeMap`-ordered
-so it is registration-order independent, and computed "without allocation or serialization" per its own
-doc comment.
+a SHA-256 digest (`Hash32`) over the ordered `(name, family, rev)` identities, length-delimited, `BTreeMap`-ordered
+so it is registration-order independent.
 
 **But it is the wrong digest for this, for the same reason `advertise` is currently wrong.**
-`live_hash` hashes all of `self.live`, which includes worker declarations. Key a prompt-cache-stable
-assignment on it and every device enable/disable changes the key — which would make availability behave
-like re-registration and falsify the notification-instead-of-re-registration property that
-`docs/py/01-devices.md` depends on. The two digests answer different questions: "what does the model
-see" must exclude workers, "what can the host dispatch" must include them. Key the assignment cache on
-`(slot_hash(), route_id)` — the core-slot-only digest that must exist alongside `live_hash` once the
-`advertise` route filter lands, and which `docs/py/01-devices.md` specifies. Reusing `live_hash` here
-would be a correctness bug, not a shortcut.
+`projection_hash` spans every registered revision and the live host-tool rosters rather than the
+policy-resolved model-visible slots, so a registration change moves the key even when the
+model-visible set is unchanged. Key the assignment cache on `(slot_hash(), route_id)` — the
+core-slot-only digest — as `docs/py/01-devices.md` specifies. Reusing a whole-registry digest
+here would be a correctness bug, not a shortcut.
 
 Cost of the epoch approach either way: an extension that arrives mid-session may wait a turn for its
 intent to be honored. That is the right trade — a stable prefix is worth more than one turn of
