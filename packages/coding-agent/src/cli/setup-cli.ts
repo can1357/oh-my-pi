@@ -163,8 +163,10 @@ function buildSpeechComponents(): SpeechComponent[] {
 	return [
 		{
 			name: "Speech-to-Text model",
-			isReady: () => isSttModelCached(settings.get("stt.modelName")),
+			isReady: async () =>
+				settings.get("stt.backend") === "cloud" || isSttModelCached(settings.get("stt.modelName")),
 			status: async () => {
+				if (settings.get("stt.backend") === "cloud") return "cloud (gpt-4o-transcribe, no download)";
 				const key = settings.get("stt.modelName");
 				return (await isSttModelCached(key)) ? key : `${key} — not downloaded`;
 			},
@@ -181,10 +183,12 @@ function buildSpeechComponents(): SpeechComponent[] {
 				}
 				return true;
 			},
-			ensure: onProgress =>
-				downloadSttModel(settings.get("stt.modelName"), progress =>
+			ensure: onProgress => {
+				if (settings.get("stt.backend") === "cloud") return Promise.resolve();
+				return downloadSttModel(settings.get("stt.modelName"), progress =>
 					onProgress({ stage: `Downloading ${progress.label} model`, percent: progress.percent }),
-				),
+				);
+			},
 		},
 		{
 			name: "Text-to-Speech model",
