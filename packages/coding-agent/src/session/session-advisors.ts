@@ -261,12 +261,7 @@ export interface SessionAdvisorsHost {
 	preserveAdvisorCard(card: CustomMessage): void;
 	hasPendingNextTurnMessages(): boolean;
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
-	/**
-	 * Effective wire tier for one advisor request. `reasoning`/`disableReasoning`
-	 * are the advisor request's own final values — never the parent UI thinking
-	 * selection; omitted reasoning stays omitted instead of inheriting the
-	 * parent's active effort.
-	 */
+	/** Uses the advisor's final reasoning options; omitted effort never inherits the parent's. */
 	effectiveServiceTier(model: Model, reasoning?: Effort, disableReasoning?: boolean): ServiceTier | undefined;
 	resolveContextPromotionTarget(
 		currentModel: Model,
@@ -832,12 +827,6 @@ export class SessionAdvisors {
 			advisorTierSetting === "inherit"
 				? undefined
 				: serviceTierForAllFamilies(serviceTierSettingToTier(advisorTierSetting));
-		// The resolver receives the advisor loop's FINAL per-request reasoning —
-		// the advisor's own effort/disable state — never the parent UI thinking
-		// selection. Exact `tier.modelOverrides` rules key on that effort ahead of
-		// the `tier.advisor` baseline; "inherit" defers to the host resolver,
-		// which layers live family overrides, the same exact rules, and
-		// per-session suppression on top.
 		const advisorServiceTierResolver = (
 			model: Model,
 			reasoning: Effort | undefined,
@@ -1726,6 +1715,7 @@ export class SessionAdvisors {
 					signal,
 					{
 						thinkingLevel: advisorCompactionThinkingLevel,
+						serviceTierResolver: agent.serviceTierResolver,
 						convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 						telemetry,
 						tools: agent.state.tools,

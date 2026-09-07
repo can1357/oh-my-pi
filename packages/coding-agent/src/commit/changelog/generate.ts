@@ -28,7 +28,6 @@ export const changelogTool = {
 	parameters: type({ entries: changelogEntriesSchema }),
 };
 
-/** Frozen stand-in so an absent `modelServiceTierOverrides` skips per-call allocation. */
 const EMPTY_TIER_OVERRIDES: Readonly<Record<string, string>> = {};
 
 export interface ChangelogPromptInput {
@@ -65,8 +64,6 @@ export async function generateChangelogEntries({
 		diff,
 	});
 	const reasoning = toReasoningEffort(thinkingLevel);
-	// Direct completeSimple calls bypass the agent's service-tier resolver, so match
-	// `tier.modelOverrides` against the actual model and the effort this request sends.
 	const tierResolution = resolveModelServiceTierOverride(modelServiceTierOverrides, model, thinkingLevel);
 	const response = await retryTransientCompletion(() =>
 		completeSimple(

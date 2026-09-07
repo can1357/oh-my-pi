@@ -84,7 +84,6 @@ export interface GenerateBranchSummaryOptions {
 	metadata?: Record<string, unknown>;
 	/** Convert app-specific messages before serializing the branch summary prompt. */
 	convertToLlm?: ConvertToLlm;
-	/** Optional per-request service-tier resolver for the branch-summary call. */
 	serviceTierResolver?: ServiceTierResolver;
 	/**
 	 * Optional telemetry handle. When provided, the branch summary LLM call is

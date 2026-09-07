@@ -84,13 +84,8 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 }
 
 /**
- * Service tier for one vision one-shot request. The session's live explicit
- * per-family selection wins (an override, or explicit off via `null`);
- * otherwise the configured `tier.modelOverrides` rule is matched against the
- * request's actual model and the reasoning it actually sends. A nonmatch —
- * including family-less providers like Fireworks and effort-keyed rules with
- * no sent effort — leaves the tier omitted: previously untiered requests never
- * gain a family baseline here.
+ * Resolve a vision request's tier from live family overrides or exact model rules.
+ * Family-less models remain untiered.
  */
 export function resolveVisionRequestServiceTier(
 	model: Model<Api>,
@@ -156,8 +151,7 @@ export async function askImageQuestion(
 				availableModels.some(candidate => candidate.provider === provider && candidate.id === id),
 		}),
 	);
-	// The tier lookup sees the reasoning this request actually sends — the
-	// resolved role/selector suffix, never the parent session's live effort.
+	// Match the selector-derived effort, not the parent session's live effort.
 	const finalThinkingLevel = resolveThinkingLevelForModel(model, configuredThinking);
 	const reasoning = toReasoningEffort(finalThinkingLevel);
 	const serviceTier = resolveVisionRequestServiceTier(

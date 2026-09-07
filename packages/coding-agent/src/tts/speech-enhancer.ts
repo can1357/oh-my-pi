@@ -83,9 +83,6 @@ export class SpeechEnhancer {
 			if (!apiKey) return null;
 			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 			const metadata = this.#deps.metadataResolver?.(model.provider);
-			// Direct completeSimple calls bypass the agent's service-tier resolver. This
-			// request pins `disableReasoning: true`, so the override matches at the off
-			// level: `:max` effort rules stay inert, base model rules (and `none`) apply.
 			const tierResolution = resolveModelServiceTierOverride(settings.get("tier.modelOverrides"), model, undefined);
 			const response = await retryTransientCompletion(
 				() => {

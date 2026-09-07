@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tier.modelOverrides` for exact `provider/model` or `provider/model:effort` service-tier rules, resolved from each request's selected model and final reasoning state.
+
+### Changed
+
+- Persist explicit per-family tier choices separately from configured policy, including `/fast off`, and retain a child's own choices when it is revived.
+- Apply exact tier rules to auxiliary requests and advisor compaction while keeping pinned advisors isolated from the primary session's manual choices. Unmatched auxiliary requests retain their existing no-tier behavior.
+- Record each request's service tier in assistant messages and model-usage entries; `null` records an omitted tier and absent metadata remains legacy.
+- Scope rejected tier suppression to one session: successful session changes and branches clear it, while reloads and failed switches retain it.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
@@ -27,13 +38,6 @@
 
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added opt-in `bash.allowCompoundCommands` approval for conservative literal `&&` chains, with ordered per-segment rules and normal bash policy fallback for unmatched segments. The opt-in requires a positively classified POSIX-quoting shell; incompatible and unknown shells retain legacy approval. Whole-chain denies take precedence over earlier prompts.
-- Added the `tier.modelOverrides` setting for exact per-model service tiers: config-file keys `provider/model` or `provider/model:effort` mapped to `none`, `auto`, `default`, `flex`, `scale`, or `priority`. Matching keys off the model and reasoning effort each request actually sends; a match replaces the family `tier.*` selection for that model, an effort entry shadows the model-only entry, and `none` is an explicit off that shadows the family tier. Entries are validated on load, and keys naming models that never resolve stay inert.
-
-### Changed
-
-- Resuming a session now restores the explicit source recorded with the tier snapshot — per-family manual selections and explicit offs such as `/fast off` — so they survive restart instead of being re-derived from configured baselines or `tier.modelOverrides` rules; legacy snapshots reload with their recorded effective state preserved.
-- Auxiliary one-off completions (commit messages, session titles, image questions, and similar side requests) now honor `tier.modelOverrides` matched against the exact model and effort each request sends; unmatched requests keep the service tier omitted rather than picking up a family default.
-- Model-usage entries now record the concrete service tier requested for each call (`null` marks an explicit no-tier request), and service-tier change entries record explicit per-family overrides alongside the snapshot, enabling per-request usage attribution.
 
 ### Fixed
 

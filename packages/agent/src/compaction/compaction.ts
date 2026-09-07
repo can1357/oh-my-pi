@@ -637,12 +637,6 @@ function resolveCompactionEffort(model: Model, level: ThinkingLevel | undefined)
 	return clampThinkingLevelForModel(model, requested);
 }
 
-/**
- * Resolve the tier for one compaction provider call from the same concrete
- * reasoning values sent to that call. A resolver is authoritative when set,
- * including when it deliberately returns undefined; this mirrors the agent
- * loop's per-request service-tier contract.
- */
 function resolveCompactionServiceTier(
 	model: Model,
 	reasoning: Effort | undefined,
@@ -705,10 +699,8 @@ export interface SummaryOptions {
 	 */
 	thinkingLevel?: ThinkingLevel;
 	/**
-	 * Optional per-request service-tier resolver. When present it is authoritative
-	 * (replacing any static tier) and receives the candidate model together with
-	 * the concrete effort sent on that provider call. A ThinkingLevel.Off request
-	 * passes undefined effort and disableReasoning=true.
+	 * Receives the candidate model and clamped effort. Off passes undefined
+	 * effort and disableReasoning=true.
 	 */
 	serviceTierResolver?: ServiceTierResolver;
 	/** Session routing key for remote compaction transports with sticky provider sessions. */
@@ -1075,7 +1067,6 @@ export interface HandoffOptions {
 	 * `resolveCompactionEffort` for the conversion contract.
 	 */
 	thinkingLevel?: ThinkingLevel;
-	/** Optional authoritative per-request service-tier resolver. */
 	serviceTierResolver?: ServiceTierResolver;
 }
 
@@ -1107,7 +1098,6 @@ export interface HandoffFromContextOptions {
 	telemetry?: AgentTelemetry;
 	/** See {@link HandoffOptions.thinkingLevel}. */
 	thinkingLevel?: ThinkingLevel;
-	/** Optional authoritative per-request service-tier resolver. */
 	serviceTierResolver?: ServiceTierResolver;
 }
 

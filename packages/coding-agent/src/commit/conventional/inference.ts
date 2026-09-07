@@ -87,10 +87,6 @@ export class OmpCommitInference implements CommitInference {
 		const target = this.#targets[request.role];
 		const modelKey = `${target.model.provider}/${target.model.id}`;
 		const reasoning = toReasoningEffort(target.thinkingLevel);
-		// Direct completeSimple calls bypass the agent's service-tier resolver, so match
-		// `tier.modelOverrides` against the actual per-role target and the effort this
-		// request sends; a nonmatch keeps the tier omitted instead of inventing a
-		// family default.
 		const tierResolution = resolveModelServiceTierOverride(
 			this.#modelServiceTierOverrides,
 			target.model,

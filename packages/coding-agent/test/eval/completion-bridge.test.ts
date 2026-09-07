@@ -357,9 +357,6 @@ describe("runEvalCompletion", () => {
 
 	it("keeps requests without a matching rule untiered", async () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
-		// The rule targets an unrelated model and the resolved p/smol has no tier
-		// family at all: completion() was previously untiered, so a nonmatch must
-		// keep the tier omitted instead of inventing a family baseline.
 		const session = makeSession({ modelOverrides: { "openai/gpt-smol": "flex" } });
 
 		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
@@ -376,12 +373,10 @@ describe("runEvalCompletion", () => {
 			modelOverrides: { "openai/gpt-slow:high": "priority" },
 		});
 
-		// slow sends Effort.High on the reasoning-capable model: the effort key matches.
 		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
 		const slowOpts = spy.mock.calls[0]?.[2] as { serviceTier?: unknown };
 		expect(slowOpts.serviceTier).toBe("priority");
 
-		// smol sends no reasoning: the slow-model effort key must not leak onto it.
 		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
 		const smolOpts = spy.mock.calls[1]?.[2] as { serviceTier?: unknown };
 		expect(smolOpts.serviceTier).toBeUndefined();
@@ -389,8 +384,6 @@ describe("runEvalCompletion", () => {
 
 	it("leaves effort-keyed rules inert when the request sends no reasoning", async () => {
 		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
-		// SLOW is reasoning:false, so the slow tier resolves it but sends no effort:
-		// the `:high` entry must stay inert even though its key names this model.
 		const session = makeSession({ modelOverrides: { "p/slow:high": "priority" } });
 
 		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });

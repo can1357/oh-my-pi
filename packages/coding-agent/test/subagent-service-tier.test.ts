@@ -3,6 +3,8 @@ import { Effort, type Api, type Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildServiceTierByFamily } from "@oh-my-pi/pi-coding-agent/config/service-tier";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { CreateAgentSessionOptions } from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -152,8 +154,6 @@ describe("subagent service-tier inheritance and revival", () => {
 			parentServiceTierOverrides: { openai: null },
 		});
 		expect(childControls(options).effectiveServiceTier(sol, Effort.Max)).toBeUndefined();
-		// Clearing the inherited off (e.g. the child re-enables the tier) reveals
-		// the parent baseline still stamped underneath it.
 		expect(childControls({ ...options, serviceTierOverrides: undefined }).effectiveServiceTier(sol, Effort.Max)).toBe(
 			"flex",
 		);
@@ -166,8 +166,6 @@ describe("subagent service-tier inheritance and revival", () => {
 			parentServiceTierOverrides: { openai: null },
 		});
 		expect(options.serviceTierOverrides).toBeUndefined();
-		// Neither the parent's live priority nor its explicit off may leak into a
-		// pinned child: its own flex baseline governs the request.
 		expect(childControls(options).effectiveServiceTier(sol, Effort.Max)).toBe("flex");
 	});
 
@@ -189,8 +187,6 @@ describe("subagent service-tier inheritance and revival", () => {
 		});
 		expect(options.model?.id).toBe(sol.id);
 		const controls = childControls(options);
-		// The final request model falls outside the rule keyed to the requested
-		// model, so it carries no tier; the rule itself still binds to luna.
 		expect(controls.effectiveServiceTier(sol, Effort.Max)).toBeUndefined();
 		expect(controls.effectiveServiceTier(luna, Effort.Max)).toBe("priority");
 	});
@@ -223,29 +219,24 @@ describe("subagent service-tier inheritance and revival", () => {
 			parentServiceTierOverrides: { openai: null },
 		});
 		const controls = childControls(options);
-		// The exact rule shadows the pinned baseline for its model; every other
-		// model in the family stays on that baseline (and never on the parent's
-		// live priority, which must not reach a pinned child).
 		expect(controls.effectiveServiceTier(sol, Effort.Max)).toBe("priority");
 		expect(controls.effectiveServiceTier(luna, Effort.Max)).toBe("flex");
 	});
-
-	it("keeps the inherited explicit off and the model rule layered after a park-and-revive", async () => {
+	it("uses persisted child tier overrides when reviving a parked child", async () => {
 		const tempDir = TempDir.createSync("@tier-subagent-revive-");
 		tempDirs.push(tempDir);
 		const sol = makeModel("openai-codex", "gpt-5.6-sol");
-		const id = `tier-revive-${++childId}`;
+		const id = "tier-revive-" + ++childId;
 		const settings = Settings.isolated({
 			"tier.subagent": "inherit",
 			"task.agentIdleTtlMs": 0,
-			"tier.modelOverrides": { "openai-codex/gpt-5.6-sol:max": "priority" },
 		});
 		const createSpy = vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async (options = {}) => {
 			if (options.sessionManager) sessionManagers.push(options.sessionManager);
 			const session = createYieldingSession();
 			if (options.expectedAgentRef == null) {
-				// Stand in for createAgentSession's own fresh-spawn registry claim;
-				// revival calls pass the parked ref and must not re-claim the id.
+				// Stand in for createAgentSession's fresh-spawn registry claim;
+				// revival passes the parked ref and must not re-claim the id.
 				const registry = AgentRegistry.global();
 				const sessionFile = options.sessionManager?.getSessionFile() ?? null;
 				registry.register({
@@ -268,7 +259,7 @@ describe("subagent service-tier inheritance and revival", () => {
 			settings,
 			artifactsDir: tempDir.path(),
 			parentServiceTier: { openai: "flex" },
-			parentServiceTierOverrides: { openai: null },
+			parentServiceTierOverrides: { openai: "priority" },
 			modelRegistry: { refresh: async () => {} } as never,
 			enableIrc: false,
 			enableLsp: false,
@@ -276,29 +267,64 @@ describe("subagent service-tier inheritance and revival", () => {
 		expect(result.exitCode).toBe(0);
 		const launchOptions = createSpy.mock.calls[0]?.[0];
 		if (!launchOptions) throw new Error("Expected launch options");
-		expect(childControls(launchOptions).effectiveServiceTier(sol, Effort.Max)).toBeUndefined();
 
-		// The same lifecycle seam an IRC wake uses: park the finished keep-alive
-		// child, then rebuild it through the executor's reviver, which re-invokes
-		// createAgentSession with the captured launch options. The stub session
-		// does not own the run's SessionManager (park would close it via session
-		// dispose), so close the writer before the reviver reopens the file.
+		// Persist the child's later explicit off, then use the same park/revive
+		// lifecycle seam as an IRC wake.
 		const launchSessionManager = launchOptions.sessionManager as SessionManager | undefined;
 		if (!launchSessionManager) throw new Error("Expected a persisted child session manager");
+		launchSessionManager.appendServiceTierChange(null, { openai: null });
+		await launchSessionManager.flush();
 		await launchSessionManager.close();
 		await AgentLifecycleManager.global().park(id);
 		await AgentLifecycleManager.global().ensureLive(id);
 
 		const revivedOptions = createSpy.mock.calls[1]?.[0];
-		if (!revivedOptions) throw new Error("Expected revival to replay the launch options");
-		const revivedControls = childControls(revivedOptions);
-		// The replayed explicit off still suppresses the persisted model rule for
-		// the revived child's requests...
-		expect(revivedControls.effectiveServiceTier(sol, Effort.Max)).toBeUndefined();
-		// ...and remains a separate launch layer: clearing it brings the persisted
-		// rule back instead of the layer having been folded into the baseline.
-		expect(
-			childControls({ ...revivedOptions, serviceTierOverrides: undefined }).effectiveServiceTier(sol, Effort.Max),
-		).toBe("priority");
+		if (!revivedOptions) throw new Error("Expected lifecycle revival");
+		createSpy.mockRestore();
+
+		// Feed the executor's revived options into the real SDK. A stale launch
+		// priority would win here; the persisted child off must instead remain off.
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorage.setRuntimeApiKey("openai-codex", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage);
+		const resumedManager = revivedOptions.sessionManager;
+		if (!resumedManager) throw new Error("Expected revived session manager");
+		const {
+			agentId: _agentId,
+			agentDisplayName: _agentDisplayName,
+			expectedAgentRef: _expectedAgentRef,
+			parentAgentId: _parentAgentId,
+			parentTaskPrefix: _parentTaskPrefix,
+			model: _launchModel,
+			modelRegistry: _launchRegistry,
+			authStorage: _launchAuthStorage,
+			sessionManager: _launchSessionManager,
+			...commonOptions
+		} = revivedOptions;
+		let resumed: AgentSession | undefined;
+		try {
+			({ session: resumed } = await sdkModule.createAgentSession({
+				...commonOptions,
+				cwd: tempDir.path(),
+				agentDir: tempDir.path(),
+				model: sol,
+				modelRegistry,
+				authStorage,
+				sessionManager: resumedManager,
+				agentRegistry: new AgentRegistry(),
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+				skipPythonPreflight: true,
+			}));
+			expect(resumed.serviceTierByFamily).toEqual({});
+		} finally {
+			await resumed?.dispose();
+			authStorage.close();
+		}
 	});
 });

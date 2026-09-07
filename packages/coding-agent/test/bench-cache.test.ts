@@ -603,7 +603,6 @@ describe("bench cache mode", () => {
 		expect(calls).toHaveLength(2);
 		expect(calls[0]?.serviceTier).toBe("priority");
 		expect(calls[1]?.serviceTier).toBe("priority");
-		// The model rule never leaks into the reported family snapshot.
 		expect(summary.serviceTierByFamily).toEqual({});
 	});
 

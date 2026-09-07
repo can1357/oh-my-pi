@@ -108,10 +108,7 @@ export async function generateCommitMessage(
 
 		try {
 			const maxTokens = COMMIT_MAX_TOKENS;
-			// Direct completeSimple calls bypass the agent's service-tier resolver, so
-			// match `tier.modelOverrides` against the actual fallback candidate and the
-			// effort this request sends; a nonmatch keeps the tier omitted instead of
-			// inventing a family default.
+			// Resolve each fallback candidate independently; unmatched requests stay untiered.
 			const reasoning = toReasoningEffort(candidate.thinkingLevel);
 			const tierResolution = resolveModelServiceTierOverride(
 				tierOverrides,

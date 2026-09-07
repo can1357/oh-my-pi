@@ -333,17 +333,11 @@ export interface ToolSession {
 	getActiveModelString?: () => string | undefined;
 	/** Get the current session model object (provider/api capabilities), regardless of how it was chosen. */
 	getActiveModel?: () => Model | undefined;
-	/** Get the session's live per-family service tiers (undefined = none). Source of truth for subagent tier.subagent: inherit. */
+	/** Effective family tiers after live overrides; excludes model rules. */
 	getServiceTierByFamily?: () => ServiceTierByFamily | undefined;
 	/** Get the configured per-family tier baseline, excluding explicit live/saved overrides. */
 	getConfiguredServiceTierByFamily?: () => ServiceTierByFamily | undefined;
-	/**
-	 * Explicit per-family service-tier overrides for this session (absent =
-	 * inherit the configured family policy, null = explicit off). Kept
-	 * separate from getServiceTierByFamily: the family map is the
-	 * configured baseline, this is the live manual layer. Forwarded to child
-	 * sessions so spawned agents keep the parent's explicit tier choices.
-	 */
+	/** Explicit source state, kept separate from the configured baseline for inheriting children. */
 	getServiceTierOverrides?: () => ServiceTierOverrides | undefined;
 	/** Auth storage for passing to subagents (avoids re-discovery) */
 	authStorage?: import("../session/auth-storage").AuthStorage;

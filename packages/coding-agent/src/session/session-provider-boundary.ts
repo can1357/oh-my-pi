@@ -33,12 +33,7 @@ export interface SessionProviderBoundaryHost {
 	model(): Model | undefined;
 	sessionId(): string;
 	localProtocolOptions(): LocalProtocolOptions;
-	/**
-	 * Accessor for explicit service-tier overrides to forward into vision
-	 * one-shot requests (child-session owners inject the parent's live map).
-	 * Absent: vision requests consult the configured `tier.modelOverrides`
-	 * policy only.
-	 */
+	/** Live vision overrides; without this accessor, only configured model rules apply. */
 	getServiceTierOverrides?: () => ServiceTierOverrides | undefined;
 	transformContext(messages: AgentMessage[], signal?: AbortSignal): AgentMessage[] | Promise<AgentMessage[]>;
 	convertToLlm(messages: AgentMessage[]): Message[] | Promise<Message[]>;

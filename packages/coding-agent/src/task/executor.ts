@@ -516,23 +516,11 @@ export interface ExecutorOptions {
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 	/**
-	 * Parent session's CONFIGURED per-family service-tier baseline, the source
-	 * of truth for a subagent whose `tier.subagent` is "inherit". This must
-	 * never be the composed live map when paired with
-	 * {@link parentServiceTierOverrides}: folding explicit choices into the
-	 * baseline would resurrect a tier the child explicitly cleared. `null` =
-	 * the parent explicitly has no tier (e.g. `/fast off`); omitted = no live
-	 * session, so inherit falls back to the subagent's configured `tier.*` settings.
+	 * Configured parent baseline, excluding live overrides so clearing one in the
+	 * child cannot resurrect it. Null means no tier; undefined uses child settings.
 	 */
 	parentServiceTier?: ServiceTierByFamily | null;
-	/**
-	 * Parent session's explicit per-family service-tier overrides (absent =
-	 * inherit the family policy, `null` = explicit off). Forwarded into the
-	 * child session only when `tier.subagent` is "inherit"`, so a pinned
-	 * subagent keeps its own baseline. This never carries a per-model
-	 * `tier.modelOverrides` match: the child re-resolves that rule against its
-	 * own final model and clamped effort per request.
-	 */
+	/** Parent overrides for inheriting children only; model rules re-resolve against each child's request. */
 	parentServiceTierOverrides?: ServiceTierOverrides;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
@@ -963,12 +951,7 @@ export function createSubagentSettings(
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		snapshot[key] = baseSettings.get(key);
 	}
-	// Resolve the subagent's per-family baseline from `tier.subagent` ("inherit" =
-	// use the parent's configured baseline when a live session supplied it, else
-	// the subagent's own configured tier.* settings). Explicit live overrides are
-	// forwarded separately so the child can clear them without resurrecting the
-	// value from this baseline. The result is stamped back onto the snapshot so
-	// createAgentSession's tier.* reads pick it up.
+	// Keep live overrides out of the baseline so children can clear them independently.
 	const inheritedTiers =
 		inheritedServiceTier === undefined
 			? buildServiceTierByFamily(
@@ -3002,10 +2985,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		},
 		options.parentServiceTier,
 	);
-	// Forward the parent's explicit live tier overrides only to an inheriting
-	// spawn: a pinned tier.subagent owns its own baseline, and an empty map
-	// carries no explicit choice (absent = inherit policy), so forwarding it
-	// would only force a redundant service_tier_change entry onto the child.
+	// Pinned children ignore parent choices; empty maps must not create manual transcript entries.
 	const inheritedServiceTierOverrides =
 		options.parentServiceTierOverrides !== undefined &&
 		Object.keys(options.parentServiceTierOverrides).length > 0 &&
@@ -3348,10 +3328,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// live peer rows scoped to it, so a session switch hides stale parked trees.
 			let ircRootSessionFile: string | undefined;
 
-			// Captured by the lifecycle reviver: rebuilding an equivalent session from
-			// the same JSONL file re-invokes createAgentSession with the exact options
-			// of the original run (same agent id, tools, model, system prompt,
-			// artifacts dir) — only the SessionManager differs.
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
@@ -3372,10 +3348,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
-				// Keep the launch layer in the captured options so lifecycle revival
-				// replays the same explicit source/off state; the child still resolves
-				// tier.modelOverrides against its own final model and request effort.
-				...(inheritedServiceTierOverrides ? { serviceTierOverrides: inheritedServiceTierOverrides } : {}),
 				toolNames,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
@@ -3458,7 +3430,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				);
 			}
 
-			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager, null));
+			const sessionPromise = createAgentSession({
+				...buildSubagentSessionOptions(sessionManager, null),
+				// Only the initial launch inherits the parent's live overrides.
+				...(inheritedServiceTierOverrides ? { serviceTierOverrides: inheritedServiceTierOverrides } : {}),
+			});
 			let session: AgentSession;
 			try {
 				({ session } = await awaitAbortable(sessionPromise));

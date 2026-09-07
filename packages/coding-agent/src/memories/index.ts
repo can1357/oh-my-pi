@@ -758,8 +758,6 @@ async function runStage1Job(options: {
 		});
 
 		const reasoning = clampThinkingLevelForModel(model, Effort.Low);
-		// Direct completeSimple calls bypass the agent's service-tier resolver, so match
-		// `tier.modelOverrides` against the actual model and the effort this request sends.
 		const tierResolution = resolveModelServiceTierOverride(options.modelServiceTierOverrides, model, reasoning);
 		const response = await retryTransientCompletion(() =>
 			completeSimple(
@@ -905,8 +903,6 @@ async function runConsolidationModel(options: {
 	});
 
 	const reasoning = clampThinkingLevelForModel(model, Effort.Medium);
-	// Direct completeSimple calls bypass the agent's service-tier resolver, so match
-	// `tier.modelOverrides` against the actual model and the effort this request sends.
 	const tierResolution = resolveModelServiceTierOverride(options.modelServiceTierOverrides, model, reasoning);
 	const response = await retryTransientCompletion(() =>
 		completeSimple(

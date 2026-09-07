@@ -149,9 +149,7 @@ async function describeImage(
 			{
 				apiKey: deps.modelRegistry.resolver(visionModel, deps.sessionId),
 				signal,
-				// Describe requests send no reasoning option, so only base-key
-				// `tier.modelOverrides` rules can match here — effort-keyed rules
-				// stay a nonmatch by contract.
+				// Description requests send no reasoning, so effort-scoped rules do not match.
 				serviceTier: resolveVisionRequestServiceTier(
 					visionModel,
 					undefined,

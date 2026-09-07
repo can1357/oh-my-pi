@@ -1368,12 +1368,6 @@ export class AgentSession {
 			memoryTaskDepth: config.memoryTaskDepth,
 			createMemoryTools: config.createMemoryTools,
 		});
-		// Resolve the wire service-tier per request: explicit live overrides
-		// (including explicit off) win, then per-model `tier.modelOverrides`
-		// matched against the request's actual reasoning effort, then the
-		// configured family policy. Forwarding the real per-request effort (even
-		// when undefined) is what lets `provider/model:effort` keys match the
-		// request that runs; Fireworks keeps its dedicated priority control.
 		this.agent.serviceTierResolver = (model, reasoning, disableReasoning) =>
 			this.#models.effectiveServiceTier(model, reasoning, disableReasoning);
 		this.#titleSystemPrompt = config.titleSystemPrompt;
@@ -3053,11 +3047,7 @@ export class AgentSession {
 					});
 				}
 				if (assistantMsg.disabledFeatures?.includes("priority")) {
-					// Suppress priority for the exact model that rejected it rather
-					// than clearing the family map: the user's family choice survives
-					// for other models, the rejected model never automatically
-					// re-arms priority this session, and the retried request proceeds
-					// without the tier (existing provider recovery behavior).
+					// Suppress only the rejected model, preserving family choices for other models.
 					const activeModel = this.model;
 					const matchesActive =
 						activeModel?.provider === assistantMsg.provider && activeModel?.id === assistantMsg.model;
@@ -4965,12 +4955,7 @@ export class AgentSession {
 		return this.#models.configuredServiceTierByFamily;
 	}
 
-	/**
-	 * Explicit per-family service-tier overrides (absent = inherit the
-	 * configured family policy, `null` = explicit off). The saved/manual layer
-	 * on top of {@link serviceTierByFamily}; persisted via service-tier change
-	 * entries and restored on resume/switch.
-	 */
+	/** Explicit saved/live choices; absent families inherit policy and null explicitly disables them. */
 	get serviceTierOverrides(): ServiceTierOverrides | undefined {
 		return this.#models.serviceTierOverrides;
 	}
@@ -7647,6 +7632,7 @@ export class AgentSession {
 				// point keeps the status line honest even if a later step below throws.
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
+				this.#models.resetSuppressedServiceTiers();
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
@@ -7678,9 +7664,7 @@ export class AgentSession {
 			this.#usagePreflightReadyForNextModelCall = false;
 
 			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
-			// Only explicit overrides carry into the fresh transcript: configured
-			// family defaults re-derive from settings on resume, so they must not
-			// freeze here as authoritative manual entries.
+			// Do not freeze configured defaults into the new transcript's manual overrides.
 			const carriedTierOverrides = this.#models.serviceTierOverrides;
 			if (carriedTierOverrides && Object.keys(carriedTierOverrides).length > 0) {
 				this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry(), carriedTierOverrides);
@@ -8597,8 +8581,6 @@ export class AgentSession {
 		const snapshot = this.#buildEphemeralSnapshot(args.promptText);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		const context = await this.agent.buildSideRequestContext(llmMessages);
-		// The side request's own effort — not the main turn's — feeds exact
-		// `provider/model:effort` override matching and the wire tier.
 		const sideReasoning = toReasoningEffort(this.thinkingLevel);
 		const sideDisableReasoning = shouldDisableReasoning(this.thinkingLevel);
 		const options = this.prepareSimpleStreamOptions(
@@ -8975,9 +8957,7 @@ export class AgentSession {
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
-			// The configured family policy is always the baseline; explicit
-			// overrides reconstructed from this transcript's tier entries (legacy
-			// snapshots included) layer on top. No entry = inherit config.
+			// A transcript without explicit tier entries inherits current configuration.
 			this.#models.restoreServiceTiers(
 				configuredServiceTierByFamily,
 				hasServiceTierEntry ? sessionContext.serviceTierOverrides : undefined,
@@ -9020,6 +9000,9 @@ export class AgentSession {
 				this.#advisors.restoreCost(costs, providersBySlug);
 			}
 			this.#bash.finishSessionTransition(bashTransition, true);
+			if (switchingToDifferentSession) {
+				this.#models.resetSuppressedServiceTiers();
+			}
 			if (previousSessionState.sessionId !== this.sessionManager.getSessionId()) {
 				this.#notifySessionChangeCallbacks();
 			}
@@ -9180,6 +9163,7 @@ export class AgentSession {
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
+				this.#models.resetSuppressedServiceTiers();
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}
@@ -9304,6 +9288,7 @@ export class AgentSession {
 				this.#bash.markSessionTransition(bashTransition);
 				this.#advisors.clearCost();
 				sessionTransitioned = true;
+				this.#models.resetSuppressedServiceTiers();
 			} finally {
 				this.#bash.finishSessionTransition(bashTransition, sessionTransitioned);
 			}

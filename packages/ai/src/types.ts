@@ -419,10 +419,8 @@ export interface StreamOptions {
 	apiKey?: string;
 	cacheRetention?: CacheRetention;
 	/**
-	 * Service tier requested for this request (`flex`/`priority`, …). Providers
-	 * that expose the knob forward it per family (`shouldSendServiceTier`);
-	 * others ignore it. The resolved request fact is stamped onto the resulting
-	 * `AssistantMessage.serviceTier` by the completion entry points.
+	 * Requested tier; unsupported providers ignore it. Completion entry points
+	 * record this value in {@link AssistantMessage.serviceTier}.
 	 */
 	serviceTier?: ServiceTier;
 	/**
@@ -1015,12 +1013,9 @@ export interface AssistantMessage {
 	/** Structured machine-readable error classifier; see `utils/error-id.ts` for bit layout and helpers. */
 	errorId?: number;
 	/**
-	 * Service tier requested for this concrete request, as the caller resolved
-	 * it and passed it to the provider (`"priority"`, `"flex"`, …). `null`
-	 * records an authoritative no-tier request; `undefined` marks legacy
-	 * messages written before this field existed. This is the per-request
-	 * request fact — never the session setting and never the server-granted
-	 * serving tier (server-side tier drops surface via `disabledFeatures`).
+	 * Requested tier, not the session setting or server-granted tier. Null
+	 * records no tier; undefined marks legacy messages. Provider-side drops
+	 * are reported separately in disabledFeatures.
 	 */
 	serviceTier?: ServiceTier | null;
 	/**

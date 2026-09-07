@@ -1663,20 +1663,15 @@ async function streamAssistantResponse(
 
 	const streamFunction = streamFn || streamSimple;
 
-	// Concrete request values for reasoning are resolved once and shared by
-	// the stream options, telemetry, and the service-tier resolver below.
 	const effectiveReasoning = config.getReasoning?.() ?? config.reasoning;
-	const effectiveDisableReasoning = config.getDisableReasoning?.() ?? config.disableReasoning;
-	// `getServiceTier` is authoritative when present (replaces the static tier
-	// for both the wire request and telemetry), so callers can scope priority
-	// per model — and per concrete request — without touching the shared
-	// session `serviceTier`.
+	const effectiveForceReasoningOff = config.getForceReasoningOff?.(model) ?? config.forceReasoningOff;
+	const effectiveDisableReasoning =
+		effectiveForceReasoningOff || (config.getDisableReasoning?.() ?? config.disableReasoning);
+	// Unlike reasoning, a resolver returning undefined must not fall back to the static tier.
 	const effectiveServiceTier = config.getServiceTier
 		? config.getServiceTier(model, effectiveReasoning, effectiveDisableReasoning)
 		: config.serviceTier;
-	// The message-level fact records what THIS request asked for: the resolved
-	// tier, or `null` for an authoritative no-tier request. `undefined` stays
-	// reserved for legacy messages written before the field existed.
+	// Reserve undefined for legacy messages without request-tier metadata.
 	const requestServiceTier: ServiceTier | null = effectiveServiceTier ?? null;
 	const harmonyMitigationEnabled = isHarmonyLeakMitigationTarget(model);
 	const harmonyAbortController = harmonyMitigationEnabled ? new AbortController() : undefined;
@@ -1763,6 +1758,7 @@ async function streamAssistantResponse(
 				toolChoice: effectiveToolChoice,
 				reasoning: effectiveReasoning,
 				disableReasoning: effectiveDisableReasoning,
+				forceReasoningOff: effectiveForceReasoningOff,
 				temperature: effectiveTemperature,
 				serviceTier: effectiveServiceTier,
 				cwd: effectiveCwd,
@@ -1857,8 +1853,7 @@ async function streamAssistantResponse(
 							retainCompletedToolCalls(await response.result(), completedToolCallIds),
 							context.tools ?? [],
 						);
-						// Stamp before the snapshot: the `message_end` payload, the
-						// context/persisted copy, and telemetry all fan out from it.
+						// Stamp before snapshotting so emitted and persisted messages agree.
 						finalMessage.serviceTier = requestServiceTier;
 						if (harmonyMitigationEnabled) {
 							const detection = detectHarmonyLeakInAssistantMessage(finalMessage);

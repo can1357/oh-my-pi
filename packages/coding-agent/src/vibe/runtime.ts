@@ -1365,8 +1365,7 @@ export class VibeSessionRegistry {
 			parentTelemetry: session.getTelemetry?.(),
 			parentEvalSessionId: session.getEvalSessionId?.() ?? undefined,
 			parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
-			// Keep the configured baseline separate from the parent's live choices;
-			// the composed getter remains only for legacy ToolSession contracts.
+			// Pass the configured baseline separately; the composed getter is a legacy fallback.
 			parentServiceTier: session.getConfiguredServiceTierByFamily
 				? (session.getConfiguredServiceTierByFamily() ?? null)
 				: session.getServiceTierByFamily

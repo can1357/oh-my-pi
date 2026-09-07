@@ -1804,12 +1804,7 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
-	// Per-model service-tier overrides (YAML / omp config; no /settings editor): exact
-	// `provider/model` or `provider/model:effort` keys → SERVICE_TIER_OVERRIDE_VALUES.
-	// A matched entry replaces the per-family `tier.*` selection for that model;
-	// `"none"` is an explicit off that shadows the family tier. Syntax and tier
-	// values are validated on load and set by validateServiceTierOverrides;
-	// keys naming models that never resolve stay inert.
+	// Config-only: no per-model /settings editor.
 	"tier.modelOverrides": { type: "record", default: EMPTY_STRING_RECORD },
 
 	// Retries

@@ -13,14 +13,6 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
-/**
- * User-contract coverage for per-model service-tier policy (`tier.modelOverrides`)
- * observed at the actual AgentSession/SDK request boundary: every assertion reads
- * the `serviceTier` the agent loop handed to the provider stream function, the
- * real ModelControls fast-mode indicators, or persisted/resumed transcript
- * behavior — never internal map copies or resolver wiring.
- */
-
 describe("session tier policy at the request boundary", () => {
 	let tempDir: TempDir;
 	let authStorage: AuthStorage;
@@ -239,8 +231,6 @@ describe("session tier policy at the request boundary", () => {
 		expect(calls[0]?.serviceTier).toBe("priority");
 		expect(notices.some(notice => notice.message.includes("Priority/fast mode rejected"))).toBe(true);
 
-		// The configured rule still matches, but the rejection suppresses the
-		// tier for this exact model: the next request must not re-arm it.
 		await session.prompt("Follow-up turn after the rejection");
 		expect(calls).toHaveLength(2);
 		expect(calls[1]?.selector).toBe("openai-codex/gpt-5.6-luna");
@@ -264,28 +254,21 @@ describe("session tier policy at the request boundary", () => {
 			settings: tierSettings({ modelOverrides: { "openai-codex/gpt-5.6-luna:high": "priority" } }),
 		});
 
-		// Turn 1: the rule fires, the provider drops priority, the session suppresses it.
 		await session.prompt("Implement a focused parser fix");
 		expect(calls[0]?.serviceTier).toBe("priority");
 
-		// Turn 2: the automatic rule must not re-arm the rejected tier by itself.
 		await session.prompt("Follow-up turn after the rejection");
 		expect(calls[1]?.serviceTier).toBeUndefined();
 		expect(session.isFastModeEnabled()).toBe(false);
 
-		// An explicit /fast on clears that model+tier suppression: priority rides again.
 		expect(session.setFastMode(true)).toBe(true);
 		expect(session.isFastModeEnabled()).toBe(true);
 		await session.prompt("Follow-up turn after the explicit re-arm");
 		expect(calls[2]?.serviceTier).toBe("priority");
 
-		// The provider drops priority on this re-armed request too; the session
-		// must re-suppress despite the explicit override now being set.
 		await session.prompt("Follow-up turn that gets rejected again");
 		expect(calls[3]?.serviceTier).toBeUndefined();
 		expect(session.isFastModeEnabled()).toBe(false);
-		// Re-issuing the same explicit selection (the override already reads
-		// priority) lifts the fresh suppression and re-arms the wire again.
 		expect(session.setFastMode(true)).toBe(true);
 		await session.prompt("Follow-up turn after the second re-arm");
 		expect(calls[4]?.serviceTier).toBe("priority");
@@ -320,7 +303,6 @@ describe("session tier policy at the request boundary", () => {
 		const solCalls = calls.filter(entry => entry.selector === "openai-codex/gpt-5.6-sol");
 		expect(solCalls.length).toBeGreaterThan(0);
 		for (const call of solCalls) {
-			// The fallback model's own rule applies — never the primary's priority.
 			expect(call.serviceTier).toBe("flex");
 		}
 	});
@@ -421,8 +403,6 @@ describe("session tier policy at the request boundary", () => {
 		await session.prompt("Follow-up turn after the extension clear");
 		expect(calls.at(-1)?.serviceTier).toBe("priority");
 
-		// Clearing a family with no manual selection is a no-op: no synthetic
-		// tier entry may appear for a rule- or config-driven tier.
 		const entriesBefore = tierEntries(session).length;
 		session.setServiceTierFamily("openai", undefined);
 		expect(tierEntries(session)).toHaveLength(entriesBefore);

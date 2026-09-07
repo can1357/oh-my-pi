@@ -409,7 +409,6 @@ describe("bench service tier", () => {
 			modelOverrides: { "openai-codex/gpt-5.6-luna:max": "priority" },
 		});
 		expect(wire).toBe("priority");
-		// The model rule never freezes into the reported family snapshot.
 		expect(summary).toEqual({ openai: "flex" });
 	});
 
@@ -472,8 +471,6 @@ describe("bench service tier", () => {
 		);
 
 		expect(summary.models[0].model).toBe("openai-codex/gpt-5.6-luna");
-		// The fallback model's own key applies; the sticky key naming the
-		// originally resolved provider must not suppress it.
 		expect(captured?.serviceTier).toBe("priority");
 	});
 });

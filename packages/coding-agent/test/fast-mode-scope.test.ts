@@ -5,6 +5,7 @@ import type { Api, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { ModelControls, type ModelControlsHost } from "@oh-my-pi/pi-coding-agent/session/model-controls";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -71,6 +72,35 @@ describe("/fast targets the current model's service-tier family", () => {
 		session.setFastMode(true);
 		expect(session.serviceTierByFamily).toEqual({ anthropic: "priority" });
 		expect(session.isFastModeEnabled()).toBe(true);
+	});
+
+	it("keeps model-tier rejections scoped to controls and clears them explicitly", () => {
+		const model = getBundledModel("openai", "gpt-5.2");
+		if (!model) throw new Error("Expected bundled test model openai/gpt-5.2 to exist");
+		const agent = new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } });
+		const host = {
+			agent,
+			settings: Settings.isolated(),
+			model: () => model,
+			providerSessionState: new Map(),
+		} as unknown as ModelControlsHost;
+		const controls = new ModelControls(host, { serviceTierByFamily: { openai: "priority" } });
+
+		expect(controls.suppressServiceTier(model, "priority")).toBe(true);
+		expect(controls.effectiveServiceTier()).toBeUndefined();
+		controls.restoreServiceTiers({}, undefined);
+		controls.restoreServiceTiers({ openai: "priority" }, undefined);
+		expect(controls.effectiveServiceTier()).toBeUndefined();
+
+		const freshControls = new ModelControls(host, { serviceTierByFamily: { openai: "priority" } });
+		expect(freshControls.effectiveServiceTier()).toBe("priority");
+		controls.resetSuppressedServiceTiers();
+		expect(controls.effectiveServiceTier()).toBe("priority");
+	});
+	it("treats a null model override root as an empty policy", async () => {
+		const settings = Settings.isolated({ "tier.modelOverrides": null });
+		const session = await createSession("openai", "gpt-5.2", settings);
+		expect(session.isFastModeEnabled()).toBe(false);
 	});
 
 	it("keeps Anthropic priority enabled while an exact-model provider fallback makes it inactive", async () => {
@@ -211,7 +241,6 @@ describe("/fast targets the current model's service-tier family", () => {
 
 		expect(resolveTier(model, ThinkingLevel.High, false)).toBe("priority");
 		expect(resolveTier(model, ThinkingLevel.Low, false)).toBeUndefined();
-		// An explicitly absent request effort must not inherit the active session effort.
 		expect(resolveTier(model, undefined, false)).toBeUndefined();
 		expect(resolveTier(model, ThinkingLevel.High, true)).toBeUndefined();
 

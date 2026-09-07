@@ -299,9 +299,6 @@ export async function attemptEditAutoRepair(options: {
 	// an unauthenticated smol role bails before any region work.
 	const apiKey = await registry.getApiKey(model, sessionId);
 	if (!apiKey) return undefined;
-	// Direct completeSimple calls bypass the agent's service-tier resolver. This
-	// request pins `disableReasoning: true`, so the override matches at the off
-	// level: `:max` effort rules stay inert, base model rules (and `none`) apply.
 	const tierResolution = resolveModelServiceTierOverride(
 		session.settings.get("tier.modelOverrides"),
 		model,

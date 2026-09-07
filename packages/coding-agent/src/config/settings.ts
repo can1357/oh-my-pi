@@ -661,13 +661,11 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
-		if (path === "tier.modelOverrides") {
-			validateServiceTierOverrides(value);
-		}
+		const normalizedValue = path === "tier.modelOverrides" ? validateServiceTierOverrides(value) : value;
 		const prev = this.get(path);
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
-		setByPath(this.#global, segments, value);
+		setByPath(this.#global, segments, normalizedValue);
 		this.#persistedMutationGeneration++;
 		this.#modified.add(path);
 		this.#rebuildMerged();
@@ -689,9 +687,10 @@ export class Settings {
 		if (path === "modelRoles") {
 			this.#savedRuntimeModelRoleOverrides.clear();
 		}
+		const normalizedValue = path === "tier.modelOverrides" ? validateServiceTierOverrides(value) : value;
 		const prev = this.get(path);
 		const segments = path.split(".");
-		setByPath(this.#overrides, segments, value);
+		setByPath(this.#overrides, segments, normalizedValue);
 		this.#rebuildMerged();
 		this.#fireEffectiveSettingChanged(path, this.get(path), prev);
 	}
@@ -2632,6 +2631,14 @@ export class Settings {
 		}
 		delete raw["computer.backend"];
 
+		const tier = isRecord(raw.tier) ? raw.tier : undefined;
+		if (tier && Object.hasOwn(tier, "modelOverrides")) {
+			tier.modelOverrides = validateServiceTierOverrides(tier.modelOverrides);
+		}
+		if (Object.hasOwn(raw, "tier.modelOverrides")) {
+			raw["tier.modelOverrides"] = validateServiceTierOverrides(raw["tier.modelOverrides"]);
+		}
+
 		return raw;
 	}
 
@@ -3084,9 +3091,6 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	},
 	"providers.maxInFlightRequests": value => {
 		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
-	},
-	"tier.modelOverrides": value => {
-		validateServiceTierOverrides(value);
 	},
 	"secrets.enabled": value => {
 		configureCredentialRedaction(value === true);

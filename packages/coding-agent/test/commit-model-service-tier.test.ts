@@ -1,11 +1,3 @@
-/**
- * The commit flows call `completeSimple` directly, bypassing the agent's
- * service-tier resolver. These tests pin the observable invocation contract:
- * `tier.modelOverrides` applies to the actually selected candidate at the
- * effort the request actually sends, an explicit `none` stays off the wire,
- * and nonmatching candidates keep the historical omission instead of newly
- * inheriting family defaults.
- */
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, Model, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-ai";
@@ -132,8 +124,6 @@ describe("commit message generator service tiers", () => {
 		expect(calls[0]?.modelId).toBe("commit-tier-max");
 		expect(calls[0]?.options.reasoning).toBe(Effort.Max);
 		expect(calls[0]?.options.serviceTier).toBe("priority");
-		// The fallback candidate runs untiered at no explicit effort: the `:max`
-		// rule must not follow it, and no family default may be invented.
 		expect(calls.at(-1)?.modelId).toBe("commit-tier-fallback");
 		expect(calls.at(-1)?.options.reasoning).toBeUndefined();
 		expect(calls.at(-1)?.options.serviceTier).toBeUndefined();
@@ -244,8 +234,6 @@ describe("conventional commit inference service tiers", () => {
 		});
 		await forced.complete(inferenceRequest("summary"), parse);
 		forced.dispose();
-		// Same role, different actual target: the smol rule must not leak onto
-		// the untiered primary standing in for it.
 		expect(calls[1]?.modelId).toBe("commit-primary");
 		expect(calls[1]?.options.serviceTier).toBeUndefined();
 	});

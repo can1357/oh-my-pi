@@ -155,8 +155,6 @@ async function consolidateLocked(
 		});
 
 		const reasoning = clampThinkingLevelForModel(model, Effort.Medium);
-		// Direct completeSimple calls bypass the agent's service-tier resolver, so match
-		// `tier.modelOverrides` against the actual model and the effort this request sends.
 		const tierOverrides = options.settings.get("tier.modelOverrides");
 		const tierResolution = resolveModelServiceTierOverride(tierOverrides, model, reasoning);
 		const response = await retryTransientCompletion(() =>

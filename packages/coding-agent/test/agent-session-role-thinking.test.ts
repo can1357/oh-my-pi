@@ -879,7 +879,6 @@ describe("AgentSession role model thinking behavior", () => {
 		await session.prompt("Follow-up turn on the default model");
 		expect(calls[1]?.selector).toBe(`${defaultModel.provider}/${defaultModel.id}`);
 		expect(calls[1]?.reasoning).toBe(Effort.High);
-		// The Luna-only rule must not follow the request onto other models.
 		expect(calls[1]?.serviceTier).toBeUndefined();
 	});
 
@@ -908,8 +907,6 @@ describe("AgentSession role model thinking behavior", () => {
 		classifierSpy.mockResolvedValue(Effort.High);
 		await session.prompt("Investigate another update");
 		expect(calls[1]?.reasoning).toBe(Effort.High);
-		// Anthropic realizes only priority, so the high-effort rule is an
-		// explicit none: the max→high transition must drop priority on the wire.
 		expect(calls[1]?.serviceTier).toBeUndefined();
 		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
 	});
@@ -932,7 +929,6 @@ describe("AgentSession role model thinking behavior", () => {
 		await session.prompt("Implement a focused parser fix");
 
 		expect(calls[0]?.reasoning).toBeUndefined();
-		// disableReasoning binds no effort, so neither effort-qualified rule fires.
 		expect(calls[0]?.serviceTier).toBeUndefined();
 	});
 
@@ -964,7 +960,6 @@ describe("AgentSession role model thinking behavior", () => {
 
 		expect(calls[0]?.selector).toBe(`${model.provider}/${model.id}`);
 		expect(calls[0]?.reasoning).toBeUndefined();
-		// An effort-qualified rule binds nothing when the request has no effort.
 		expect(calls[0]?.serviceTier).toBeUndefined();
 	});
 });

@@ -144,9 +144,6 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 	// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 	const metadata = deps.metadataResolver?.(model.provider);
 	const maxTokens = ONLINE_REASONING_SAFE_MAX_TOKENS;
-	// Direct completeSimple calls bypass the agent's service-tier resolver. This
-	// request pins `disableReasoning: true`, so the override matches at the off
-	// level: `:max` effort rules stay inert, base model rules (and `none`) apply.
 	const tierResolution = resolveModelServiceTierOverride(deps.settings.get("tier.modelOverrides"), model, undefined);
 
 	const response = await retryTransientCompletion(

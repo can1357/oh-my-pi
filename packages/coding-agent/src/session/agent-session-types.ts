@@ -171,14 +171,7 @@ export interface AgentSessionConfig {
 	planYolo?: PlanYolo;
 	/** Configured per-family service-tier baseline for the live session (from the `tier.*` settings). */
 	serviceTierByFamily?: ServiceTierByFamily;
-	/**
-	 * Explicit per-family service-tier overrides layered over
-	 * {@link serviceTierByFamily}: absent = inherit the configured family
-	 * policy, `null` = explicit off. This is the saved/manual layer
-	 * (reconstructed from the transcript or supplied by launch options) and is
-	 * kept separate from the family baseline so fresh sessions never freeze
-	 * configured defaults as authoritative manual entries.
-	 */
+	/** Saved/launch overrides, kept separate so configured defaults do not become manual choices. */
 	serviceTierOverrides?: ServiceTierOverrides;
 	/** Prompt templates for expansion. */
 	promptTemplates?: PromptTemplate[];

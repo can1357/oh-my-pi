@@ -214,8 +214,6 @@ async function runSharpshooterExtraction(
 
 	const input = prompt.render(extractInputTemplate, { ...envelope });
 	const reasoning = clampThinkingLevelForModel(model, Effort.Low);
-	// Direct completeSimple calls bypass the agent's service-tier resolver, so match
-	// `tier.modelOverrides` against the actual model and the effort this request sends.
 	const tierResolution = resolveModelServiceTierOverride(settings.get("tier.modelOverrides"), model, reasoning);
 	const response = await retryTransientCompletion(() =>
 		completeSimple(

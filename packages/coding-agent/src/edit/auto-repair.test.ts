@@ -257,8 +257,6 @@ describe("attemptEditAutoRepair service tiers", () => {
 		const { calls, outcome } = await runTierRepair({ "openai/smol-fast:high": "priority" });
 		expect(outcome).toBeDefined();
 		expect(calls).toHaveLength(1);
-		// disableReasoning sends no effort, so `:effort` keys never match and the
-		// previously untiered request keeps omitting the tier.
 		expect(calls[0]?.serviceTier).toBeUndefined();
 	});
 

@@ -153,55 +153,29 @@ export function resolveSubagentServiceTier(setting: string, inherited: ServiceTi
 	return serviceTierForAllFamilies(serviceTierSettingToTier(setting));
 }
 
-// ── Per-model service-tier overrides ────────────────────────────────────────
-
-/**
- * Per-family service-tier overrides carrying an explicit-off state: absent =
- * inherit the family policy, `null` = explicitly off for that family (shadow
- * the base selection). {@link ServiceTierByFamily} cannot express "off"
- * because an absent key already means "unset", so consumers that must
- * distinguish the two states (session persistence, live overrides) use this
- * shape instead.
- */
+/** Absent keys inherit policy; null explicitly disables the family tier. */
 export type ServiceTierOverrides = Partial<Record<ServiceTierFamily, ServiceTier | null>>;
 
-/**
- * Allowed `tier.modelOverrides` values: the union of what every tier family
- * realizes (a key may target any family's model) plus the `"none"` sentinel
- * that explicitly disables the tier for the keyed model.
- */
 export const SERVICE_TIER_OVERRIDE_VALUES = ["none", "auto", "default", "flex", "scale", "priority"] as const;
 
 export type ServiceTierOverrideSettingValue = (typeof SERVICE_TIER_OVERRIDE_VALUES)[number];
 
-/** Whether a runtime value is a supported `tier.modelOverrides` value. */
 export function isServiceTierOverrideValue(value: unknown): value is ServiceTierOverrideSettingValue {
 	return SERVICE_TIER_OVERRIDE_VALUES.some(tier => tier === value);
 }
 
 /**
- * Whether a runtime key is a valid `tier.modelOverrides` target: an exact
- * `provider/model` or `provider/model:effort` string. Model ids may
- * themselves contain `:` — exact-first matching keeps those literal, so the
- * suffix is deliberately not interpreted here — and keys that name no real
- * model simply stay inert (absent catalog entries are deferred, not errors).
+ * Validate selector syntax only. Colons may belong to a literal model ID;
+ * resolution derives effort candidates from the model, not by splitting keys.
  */
 export function isValidServiceTierOverrideKey(key: string): boolean {
 	if (key.length === 0 || /\s/.test(key)) return false;
-	// Resolution is exact identity matching only — no globs, aliases, or routing.
 	if (key.includes("*") || key.includes("?")) return false;
 	const slash = key.indexOf("/");
 	return slash > 0 && slash < key.length - 1;
 }
 
-/**
- * Validate a `tier.modelOverrides` record, returning it unchanged when every
- * entry is well-formed and throwing with the offending entries listed
- * otherwise. Same contract as {@link validateProviderMaxInFlightRequests}:
- * wired into the settings hook so invalid values fail load and `set` loudly
- * instead of silently never matching. Catalog existence is deliberately not
- * consulted — validation is syntax plus tier value only.
- */
+/** Validate selector syntax and tier values without requiring catalog entries. */
 export function validateServiceTierOverrides(value: unknown): Record<string, string> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return {};
 	const invalid: string[] = [];
@@ -223,30 +197,15 @@ export function validateServiceTierOverrides(value: unknown): Record<string, str
 	return validated;
 }
 
-/** Outcome of per-model service-tier override resolution for one request. */
 export type ModelServiceTierOverrideResolution = { matched: false } | { matched: true; tier: ServiceTier | undefined };
 
 const NO_MODEL_SERVICE_TIER_OVERRIDE = Object.freeze({ matched: false as const });
 
 /**
- * Resolve the per-model service-tier override for one concrete request.
- *
- * Lookup derives candidate keys from the model's actual resolved identity —
- * never by splitting configured keys — so literal model ids containing `:`
- * (e.g. `…:max`) keep exact-first semantics: the model+effort candidate
- * `provider/id:effort` is tried before the bare `provider/id`, and
- * `thinkingLevel` contributes an effort suffix only when it is a concrete
- * effort (`inherit`/`off`/undefined bind nothing; undefined never invents a
- * level like `max`). A model+effort entry shadows the model-only entry.
- *
- * A matched `"none"` returns `{ matched: true, tier: undefined }` — an
- * explicit off that must shadow the per-family tier. Entries the model's
- * family cannot realize stay inert and fall through to the next candidate,
- * and models with no tier family at all never match, which keeps Fireworks'
- * dedicated priority control authoritative. `{ matched: false }` means "no
- * opinion": family-aware callers keep their existing baseline
- * (`matched ? tier : existingTier`), previously untiered callers keep
- * omitting the tier.
+ * Try provider/model:effort before provider/model, using the concrete model ID
+ * verbatim. Off, inherit and undefined add no effort suffix. Unsupported family
+ * values are inert. A matched "none" is authoritative off; no match leaves
+ * the caller's baseline unchanged.
  */
 export function resolveModelServiceTierOverride(
 	overrides: Readonly<Record<string, string>>,

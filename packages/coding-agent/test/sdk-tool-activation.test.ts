@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { type } from "@oh-my-pi/omptype";
-import type { AgentTool, StreamFn } from "@oh-my-pi/pi-agent-core";
+import { type AgentTool, type StreamFn, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -293,9 +293,10 @@ describe("createAgentSession defaultInactive tool activation", () => {
 		}
 	});
 
-	it("forces think and sends reasoning effort off for a Responses turn", async () => {
+	it("matches service tiers after forcing native reasoning off for an external-thinking turn", async () => {
 		const tempDir = makeTempDir();
 		const settings = Settings.isolated({ externalThinking: true });
+		settings.set("tier.modelOverrides", { "openai/gpt-5": "none", "openai/gpt-5:high": "priority" });
 		const requestTexts: string[] = [];
 		const sse = (events: unknown[]): Response =>
 			new Response(events.map(event => `data: ${JSON.stringify(event)}\n\n`).join(""), {
@@ -377,6 +378,7 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			...baseOptions(tempDir),
 			settings,
 			model: { ...model, baseUrl: `${server.url}v1` },
+			thinkingLevel: ThinkingLevel.High,
 			getApiKey: () => "test-key",
 		});
 		expect(session.getActiveToolNames()).toContain("think");
@@ -393,6 +395,24 @@ describe("createAgentSession defaultInactive tool activation", () => {
 					tool_choice: expect.objectContaining({ name: "think" }),
 				}),
 			);
+			expect(requestTexts.map(text => JSON.parse(text).service_tier)).toEqual([undefined, undefined]);
+			expect(
+				session.agent.state.messages
+					.filter(message => message.role === "assistant")
+					.map(message => message.serviceTier),
+			).toEqual([null, null]);
+
+			settings.set("externalThinking", false);
+			await session.setThinkToolEnabled(false);
+			await session.prompt("Use native reasoning now.");
+			expect(JSON.parse(requestTexts[2]!)).toEqual(
+				expect.objectContaining({
+					reasoning: expect.objectContaining({ effort: "high" }),
+					service_tier: "priority",
+				}),
+			);
+			const finalMessage = session.agent.state.messages.at(-1);
+			expect(finalMessage?.role === "assistant" && finalMessage.serviceTier).toBe("priority");
 		} finally {
 			await session.dispose();
 			server.stop(true);

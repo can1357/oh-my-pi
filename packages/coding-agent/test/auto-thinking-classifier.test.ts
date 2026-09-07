@@ -196,9 +196,6 @@ describe("auto thinking classifier helpers", () => {
 			| { disableReasoning?: boolean; serviceTier?: string }
 			| undefined;
 
-		// The classifier pins `disableReasoning: true`, so the override matches at
-		// the off level: the `:max` effort rule is inert and the exact base rule
-		// tiers the wire request.
 		expect(options?.disableReasoning).toBe(true);
 		expect(options?.serviceTier).toBe("priority");
 	});

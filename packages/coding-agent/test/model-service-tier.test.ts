@@ -42,7 +42,6 @@ describe("resolveModelServiceTierOverride", () => {
 			matched: true,
 			tier: "priority",
 		});
-		// A different concrete effort leaves the effort key behind and reads the base entry.
 		expect(resolveModelServiceTierOverride(overrides, gpt, ThinkingLevel.Low)).toEqual({
 			matched: true,
 			tier: "flex",
@@ -55,7 +54,6 @@ describe("resolveModelServiceTierOverride", () => {
 			matched: true,
 			tier: "priority",
 		});
-		// undefined must not invent a level (e.g. max): the entry stays inert.
 		expect(resolveModelServiceTierOverride(overrides, gpt, undefined)).toEqual({ matched: false });
 		expect(resolveModelServiceTierOverride(overrides, gpt, "inherit")).toEqual({ matched: false });
 		expect(resolveModelServiceTierOverride(overrides, gpt, "off")).toEqual({ matched: false });
@@ -168,6 +166,23 @@ describe("tier.modelOverrides settings surface", () => {
 		const overrides = { "openai/gpt-5.6": "priority", "openai/gpt-5.6:high": "flex" };
 		const settings = await loadWith({ tier: { modelOverrides: overrides } });
 		expect(settings.get("tier.modelOverrides")).toEqual(overrides);
+	});
+
+	it("normalizes null model overrides at load, set, and persisted boundaries", async () => {
+		const settings = await loadWith({ tier: { modelOverrides: null } });
+		expect(settings.get("tier.modelOverrides")).toEqual({});
+
+		settings.set("tier.modelOverrides", null as unknown as Record<string, string>);
+		expect(settings.get("tier.modelOverrides")).toEqual({});
+		await settings.flush();
+
+		const persisted = YAML.parse(await Bun.file(path.join(agentDir, "config.yml")).text()) as {
+			tier?: { modelOverrides?: unknown };
+		};
+		expect(persisted.tier?.modelOverrides).toEqual({});
+
+		const isolated = Settings.isolated({ "tier.modelOverrides": null });
+		expect(isolated.get("tier.modelOverrides")).toEqual({});
 	});
 
 	it("fails settings load loudly on a malformed entry", async () => {

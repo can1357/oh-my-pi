@@ -228,7 +228,6 @@ describe("maybeStartSharpshooterExtraction", () => {
 			await waitFor(() => completion.mock.calls.length === 1, "completion was not called");
 			await Promise.resolve();
 			await Promise.resolve();
-			// Canonical empty `tier.modelOverrides` record: extraction stays on the base tier.
 			expect(completion.mock.calls[0]?.[2]?.serviceTier).toBeUndefined();
 
 			expect(await listSharpshooterDeltas(agentDir, cwd)).toEqual([]);

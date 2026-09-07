@@ -164,12 +164,8 @@ async function executeCompletion(
 		: undefined;
 	const telemetry = resolveTelemetry(session.getTelemetry?.(), session.getSessionId?.() ?? undefined);
 	const reasoning = reasoningForTier(finalTier, model);
-	// completion() bypasses the agent's per-request service-tier resolver, so match
-	// `tier.modelOverrides` against the actual model and the effort this request
-	// sends (undefined whenever no reasoning goes out — `smol`/`default`, or
-	// `slow` on a model that cannot reason). A matched rule tiers the request; a
-	// nonmatch keeps the tier omitted — completion() was previously untiered and
-	// never gains a family default here.
+	// completion() runs outside the agent loop: match the actual effort and keep
+	// nonmatching requests untiered.
 	const tierResolution = resolveModelServiceTierOverride(
 		session.settings.get("tier.modelOverrides"),
 		model,

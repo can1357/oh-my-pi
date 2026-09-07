@@ -580,9 +580,7 @@ async function resolveMnemopiProviderOptions(
 					});
 					return null;
 				}
-				// Direct completeSimple calls bypass the agent's service-tier resolver, so match
-				// `tier.modelOverrides` against the actual model and the effort this request
-				// sends; this request pins no effort, so only base `provider/model` rules apply.
+				// This side request sends no reasoning, so effort-scoped rules do not match.
 				const tierResolution = resolveModelServiceTierOverride(
 					settings.get("tier.modelOverrides"),
 					model,

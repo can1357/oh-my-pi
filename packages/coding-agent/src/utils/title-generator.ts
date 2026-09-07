@@ -279,9 +279,6 @@ export async function generateTitleOnline(
 		// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
 		const maxTokens = TITLE_MAX_TOKENS;
 		logger.debug("title-generator: request", { ...modelContext, maxTokens });
-		// Direct completeSimple calls bypass the agent's service-tier resolver. This
-		// request pins `disableReasoning: true`, so the override matches at the off
-		// level: `:max` effort rules stay inert, base model rules (and `none`) apply.
 		const tierResolution = resolveModelServiceTierOverride(settings.get("tier.modelOverrides"), model, undefined);
 
 		const response = await retryTransientCompletion(

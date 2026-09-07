@@ -186,10 +186,7 @@ function extractStats(
 		api: msg.api,
 		identity: classifyModel(msg.provider, msg.model, { lenient: true }),
 	};
-	// New entries carry the concrete tier chosen for this request. Its presence
-	// is authoritative, including null (an explicit no-tier request), so an old
-	// family-level snapshot cannot leak into a request written by a newer
-	// producer. Legacy messages omit the field and use the session snapshot.
+	// Null is authoritative no-tier; only legacy messages without this field use the session snapshot.
 	const tier = Object.prototype.hasOwnProperty.call(msg, "serviceTier")
 		? msg.serviceTier
 		: resolveModelServiceTier(currentServiceTier, model);

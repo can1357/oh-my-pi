@@ -91,9 +91,6 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 		const sessionId = Bun.randomUUIDv7();
 		if (!(await registry.getApiKey(model, sessionId)))
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
-		// Direct completeSimple calls bypass the agent's service-tier resolver. This
-		// request pins `disableReasoning: true`, so the override matches at the off
-		// level: `:max` effort rules stay inert, base model rules (and `none`) apply.
 		const tierResolution = resolveModelServiceTierOverride(settings.get("tier.modelOverrides"), model, undefined);
 		const complete = createCompleter(
 			model,

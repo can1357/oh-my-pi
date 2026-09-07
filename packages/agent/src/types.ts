@@ -142,11 +142,9 @@ export interface SteeringQueueState {
 }
 
 /**
- * Authoritative per-request service-tier resolver. Receives the model being
- * requested plus that request's concrete effective reasoning effort and
- * disable-reasoning flag (the same values passed to the provider stream), so
- * the tier can be scoped per provider/model and per request without mutating
- * the shared session `serviceTier`.
+ * Resolves a request's tier from its final model and reasoning options.
+ * The result is authoritative: undefined omits the tier rather than
+ * falling back to a static session value.
  */
 export type ServiceTierResolver = (
 	model: Model,
@@ -460,18 +458,12 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * to the next provider call.
 	 */
 	getDisableReasoning?: () => boolean | undefined;
+	/** Resolve native reasoning suppression before matching request policies. */
+	getForceReasoningOff?: (model: Model) => boolean | undefined;
 
 	/**
-	 * Per-call effective service-tier resolver. Unlike {@link getReasoning},
-	 * this is *authoritative*: when set, its return value (including
-	 * `undefined`) fully replaces the static `serviceTier` for the request and
-	 * its telemetry. The resolver receives the model being requested together
-	 * with that request's concrete effective reasoning effort and
-	 * disable-reasoning flag (the same values passed to the provider stream),
-	 * so the caller can scope the tier per provider/model and per request
-	 * without mutating the shared session `serviceTier` (e.g. opting a
-	 * Fireworks model into the Priority serving path while leaving the
-	 * OpenAI/Anthropic tier untouched).
+	 * Unlike {@link getReasoning}, an undefined result explicitly omits the
+	 * static serviceTier from the request and its telemetry.
 	 */
 	getServiceTier?: ServiceTierResolver;
 

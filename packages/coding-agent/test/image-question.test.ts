@@ -138,7 +138,6 @@ describe("askImageQuestion tier.modelOverrides", () => {
 		const calls = await askVision(settings, { availableModels: [maxVisionModel] });
 
 		expect(calls).toHaveLength(1);
-		// The rule matched the effort this request actually sends, not a hypothetical one.
 		expect(calls[0]?.reasoning).toBe("max");
 		expect(calls[0]?.serviceTier).toBe("priority");
 	});
@@ -148,8 +147,6 @@ describe("askImageQuestion tier.modelOverrides", () => {
 		const calls = await askVision(settings, { availableModels: [visionModel] });
 
 		expect(calls).toHaveLength(1);
-		// No own reasoning means no invented max: the request stays untiered instead
-		// of borrowing the parent session's effort to activate the rule.
 		expect(calls[0]?.reasoning).toBeUndefined();
 		expect(calls[0]?.serviceTier).toBeUndefined();
 	});
@@ -254,7 +251,6 @@ describe("describeAttachedImagesForTextModel tier.modelOverrides", () => {
 		);
 
 		expect(stub.calls).toHaveLength(1);
-		// Describe requests never send a reasoning option; the tier still applies.
 		expect(stub.calls[0]?.reasoning).toBeUndefined();
 		expect(stub.calls[0]?.serviceTier).toBe("flex");
 	});
