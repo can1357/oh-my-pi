@@ -248,10 +248,12 @@ describe("grokbot requested model mapping", () => {
 			sandWireModelId: "gemini-3.8-flash",
 		});
 		expect(variant).toEqual({ modelId: "gemini-3.8-flash" });
-		expect(resolveGrokbotRequestedModel("gemini-3.8-flash", { sandParameterIds: ["effort"], effort: "low" })).toEqual({
-			modelId: "gemini-3.8-flash",
-			parameters: [{ id: "effort", value: "low" }],
-		});
+		expect(resolveGrokbotRequestedModel("gemini-3.8-flash", { sandParameterIds: ["effort"], effort: "low" })).toEqual(
+			{
+				modelId: "gemini-3.8-flash",
+				parameters: [{ id: "effort", value: "low" }],
+			},
+		);
 	});
 
 	test("sand-default stays bare with no maxMode or parameters", () => {
@@ -1143,6 +1145,73 @@ describe("grokbot incomplete tool calls", () => {
 		expect(result.content.some(b => b.type === "text" && b.text.includes("tools-pong-read"))).toBe(true);
 	});
 
+	test("remaps streamed contentIndex after dropping a leading incomplete sibling", async () => {
+		// Incomplete at index 0 + complete at index 1: compacting content must remap
+		// buffered toolcall events from 1 → 0, or ACP resolves the wrong block.
+		mockAuth();
+		const leftover = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c0", toolName: "Write", args: '{"path":', isComplete: false },
+			}),
+		);
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "Read",
+					args: '{"path":"/tmp/x"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(leftover, complete, trailer)) as FetchImpl;
+		const toolsContext: Context = {
+			messages: [{ role: "user", content: "call", timestamp: 1 }],
+			tools: [
+				{
+					name: "Read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" } },
+						required: ["path"],
+					},
+				},
+				{
+					name: "Write",
+					description: "write file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" }, content: { type: "string" } },
+						required: ["path", "content"],
+					},
+				},
+			],
+		};
+
+		const stream = streamGrokBot(model, toolsContext, { apiKey: "renew", fetch: fetchImpl });
+		const toolEvents: Array<{ type: string; contentIndex: number; id?: string }> = [];
+		for await (const event of stream) {
+			if (event.type === "toolcall_start" || event.type === "toolcall_end") {
+				const block = event.partial.content[event.contentIndex];
+				toolEvents.push({
+					type: event.type,
+					contentIndex: event.contentIndex,
+					id: block?.type === "toolCall" ? block.id : undefined,
+				});
+			}
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([expect.objectContaining({ type: "toolCall", id: "c1", name: "Read" })]);
+		expect(toolEvents.some(e => e.id === "c0")).toBe(false);
+		expect(toolEvents.filter(e => e.id === "c1")).toEqual([
+			{ type: "toolcall_start", contentIndex: 0, id: "c1" },
+			{ type: "toolcall_end", contentIndex: 0, id: "c1" },
+		]);
+	});
+
 	test("finalizes complete tool calls as toolUse", async () => {
 		mockAuth();
 		const complete = frameConnectProto(
@@ -1463,9 +1532,7 @@ describe("grokbot request headers", () => {
 		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
 
 		const body = Buffer.concat([
-			frameConnectProto(
-				encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }),
-			),
+			frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } })),
 			frameConnectProto(
 				encodeInferenceStreamResponse({
 					responseInfo: { id: "resp-1", model: "claude-4.6-sonnet" },
@@ -1477,8 +1544,7 @@ describe("grokbot request headers", () => {
 			new Response(body, {
 				status: 200,
 				headers: { "content-type": "application/connect+proto" },
-			}),
-		) as FetchImpl;
+			})) as FetchImpl;
 
 		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
 		expect(result.stopReason).toBe("stop");

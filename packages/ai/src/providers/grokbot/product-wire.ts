@@ -263,9 +263,7 @@ export function augmentToolIndexForProductWire(
 		const name = typeof tool.name === "string" ? tool.name : "";
 		if (!name) continue;
 		const customWire =
-			typeof tool.customWireName === "string" && tool.customWireName.trim()
-				? tool.customWireName.trim()
-				: undefined;
+			typeof tool.customWireName === "string" && tool.customWireName.trim() ? tool.customWireName.trim() : undefined;
 		const sandName = customWire ?? toSandField2Name(name);
 		const meta = index.get(name);
 		if (!meta || sandName === name) continue;

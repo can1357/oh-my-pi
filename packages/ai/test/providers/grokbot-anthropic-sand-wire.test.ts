@@ -380,7 +380,12 @@ describe("product wire helpers", () => {
 
 	test("prefers built-in omp owner when customWireName collides with product alias", () => {
 		const tools = [
-			{ name: "extension_shell", description: "ext", parameters: { type: "object", properties: {} }, customWireName: "Shell" },
+			{
+				name: "extension_shell",
+				description: "ext",
+				parameters: { type: "object", properties: {} },
+				customWireName: "Shell",
+			},
 			{ name: "bash", description: "bash", parameters: { type: "object", properties: {} } },
 		];
 		const product = toProductField2Tools(tools as never, "automation");

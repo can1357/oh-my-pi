@@ -748,8 +748,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			/** Buffer first tool-enabled attempt until text/tool appears (or accept), so empty retries do not leak thinking_delta. */
 			let attemptEventBuffer: AssistantMessageEvent[] = [];
 			let attemptStreamingLive = false;
-			const shouldBufferAttemptEvents = () =>
-				tools.length > 0 && !emptyToolRetryUsed && !incompleteToolRetryUsed;
+			const shouldBufferAttemptEvents = () => tools.length > 0 && !emptyToolRetryUsed && !incompleteToolRetryUsed;
 			const emitAttemptEvent = (event: AssistantMessageEvent) => {
 				if (attemptStreamingLive || !shouldBufferAttemptEvents()) {
 					stream.push(event);
@@ -1270,16 +1269,41 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					);
 					if (hasComplete || hasText) {
 						const drop = new Set(leftovers.map(s => s.index));
+						// Compacting content shifts later blocks left — remap retained
+						// event/tool indices so flush does not point at the wrong slot.
+						const oldToNew = new Map<number, number>();
+						let nextIndex = 0;
+						for (let i = 0; i < output.content.length; i++) {
+							if (!drop.has(i)) oldToNew.set(i, nextIndex++);
+						}
 						output.content = output.content.filter((_, i) => !drop.has(i));
 						for (const state of leftovers) state.ended = true;
-						// Retract unpublished incomplete sibling events before flush.
-						attemptEventBuffer = attemptEventBuffer.filter(event => {
+						for (const state of states) {
+							if (drop.has(state.index)) continue;
+							const mapped = oldToNew.get(state.index);
+							if (mapped !== undefined) state.index = mapped;
+						}
+						// Retract unpublished incomplete sibling events, then reindex.
+						const remappedEvents: AssistantMessageEvent[] = [];
+						for (const event of attemptEventBuffer) {
 							const index =
 								"contentIndex" in event && typeof event.contentIndex === "number"
 									? event.contentIndex
 									: undefined;
-							return index === undefined || !drop.has(index);
-						});
+							if (index === undefined) {
+								remappedEvents.push(event);
+								continue;
+							}
+							if (drop.has(index)) continue;
+							const mapped = oldToNew.get(index);
+							if (mapped === undefined) continue;
+							if (mapped === index) {
+								remappedEvents.push(event);
+								continue;
+							}
+							remappedEvents.push({ ...event, contentIndex: mapped } as AssistantMessageEvent);
+						}
+						attemptEventBuffer = remappedEvents;
 						logger.info("grokbot: dropped incomplete leftover tool call", {
 							count: leftovers.length,
 							wireMode: anthropicWire.wireMode,

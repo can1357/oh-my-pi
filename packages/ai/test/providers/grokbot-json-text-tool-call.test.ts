@@ -61,9 +61,10 @@ describe("parseJsonTextToolCall", () => {
 				advertised,
 			),
 		).toEqual({ name: "bash", arguments: { command: "echo tools-pong-gemini" } });
-		expect(
-			parseGeminiInbandToolCall('default_api.Shell(command="echo hi")', ["Shell", "bash"]),
-		).toEqual({ name: "Shell", arguments: { command: "echo hi" } });
+		expect(parseGeminiInbandToolCall('default_api.Shell(command="echo hi")', ["Shell", "bash"])).toEqual({
+			name: "Shell",
+			arguments: { command: "echo hi" },
+		});
 		expect(parseGeminiInbandToolCall("just thinking about files", advertised)).toBeUndefined();
 	});
 
