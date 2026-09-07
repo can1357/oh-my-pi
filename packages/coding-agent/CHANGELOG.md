@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added accessible collapse controls to the HTML export’s session tree for folding branches with visible descendants.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
