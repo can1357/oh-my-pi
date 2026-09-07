@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed empty or null models configuration loading, preserved schema-valid null values, and corrected legacy JSON migration and validation cache invalidation.
+
 ## [16.4.15] - 2026-09-06
 
 ### Fixed

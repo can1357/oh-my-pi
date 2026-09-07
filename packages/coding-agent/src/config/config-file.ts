@@ -35,18 +35,12 @@ function migrateJsonToYml(jsonPath: string, ymlPath: string) {
 			return;
 		}
 		if (!fs.existsSync(jsonPath)) {
-			migratedPaths.add(key);
 			return;
 		}
 
-		const content = fs.readFileSync(jsonPath, "utf-8");
-		const parsed = JSONC.parse(content);
-		if (!parsed) {
-			logger.warn("migrateJsonToYml: invalid json structure", { path: jsonPath });
-			migratedPaths.add(key);
-			return;
-		}
-		fs.writeFileSync(ymlPath, YAML.stringify(parsed, null, 2));
+		const content = fs.readFileSync(jsonPath, "utf-8").trim();
+		const parsed: unknown = content === "" ? {} : JSONC.parse(content);
+		fs.writeFileSync(ymlPath, YAML.stringify(parsed, null, 2), { flag: "wx" });
 		migratedPaths.add(key);
 	} catch (error) {
 		logger.warn("migrateJsonToYml: migration failed", { error: String(error) });
@@ -189,6 +183,7 @@ export class ConfigFile<T> implements IConfigFile<T> {
 				throw new ConfigError(this.id, undefined, { err: error, stage: `Validate(${name})` });
 			}
 		};
+		this.invalidate();
 		return this;
 	}
 
@@ -211,14 +206,23 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	#parseContent(content: string): LoadResult<T> {
 		try {
 			let parsed: unknown;
-			if (this.#basePath.endsWith(".json") || this.#basePath.endsWith(".jsonc")) {
+			if (content === "") {
+				// Empty (or whitespace-only, post-trim) files carry no settings.
+				// Validate an empty object so all-optional schemas (e.g. models)
+				// load cleanly instead of failing with "root: must be an object (was null)".
+				parsed = {};
+			} else if (this.#basePath.endsWith(".json") || this.#basePath.endsWith(".jsonc")) {
 				parsed = JSONC.parse(content);
 			} else if (this.#basePath.endsWith(".yml") || this.#basePath.endsWith(".yaml")) {
 				parsed = YAML.parse(content);
 			} else {
 				throw new Error(`Invalid config file path: ${this.#basePath}`);
 			}
-
+			if ((parsed === null || parsed === undefined) && !this.schema.allows(parsed)) {
+				// Empty/null documents represent no settings for object schemas.
+				// Preserve null when the schema explicitly accepts it.
+				parsed = {};
+			}
 			const checked = this.schema(parsed);
 			if (checked instanceof ArkErrors || checked instanceof Error) {
 				const error = new ConfigError(this.id, [
@@ -299,11 +303,13 @@ export class ConfigFile<T> implements IConfigFile<T> {
 	}
 
 	loadOrDefault(): T {
-		return this.tryLoad().value ?? this.createDefault();
+		const result = this.tryLoad();
+		return result.status === "ok" ? result.value : this.createDefault();
 	}
 
 	async loadOrDefaultAsync(): Promise<T> {
-		return (await this.tryLoadAsync()).value ?? this.createDefault();
+		const result = await this.tryLoadAsync();
+		return result.status === "ok" ? result.value : this.createDefault();
 	}
 
 	path(): string {
@@ -312,5 +318,8 @@ export class ConfigFile<T> implements IConfigFile<T> {
 
 	invalidate() {
 		this.#cache = undefined;
+		if (this.#jsonMigrationPath) {
+			migratedPaths.delete(migrationKey(this.#jsonMigrationPath, this.#basePath));
+		}
 	}
 }
