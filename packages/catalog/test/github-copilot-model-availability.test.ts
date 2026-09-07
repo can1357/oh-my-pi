@@ -6,7 +6,6 @@
  * compatibility with legacy/minimal `/models` shapes).
  */
 import { describe, expect, it, vi } from "bun:test";
-import { PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 /** `/models` entry; grant fields are opt-in so absent means "no gate". */
@@ -34,11 +33,6 @@ describe("github-copilot /models availability prune contract", () => {
 		const options = githubCopilotModelManagerOptions({ apiKey: "copilot-test-key", fetch });
 		const specs = (await options.fetchDynamicModels?.()) ?? [];
 		expect(specs.map(s => s.id).sort()).toEqual(["claude-opus-5", "gpt-5.3-codex"]);
-	});
-
-	it("marks the github-copilot provider descriptor authoritative so the preflight and manager agree", () => {
-		const descriptor = PROVIDER_DESCRIPTORS.find(d => d.providerId === "github-copilot");
-		expect(descriptor?.dynamicModelsAuthoritative).toBe(true);
 	});
 
 	it("treats `policy` as authoritative over `model_picker_enabled`", async () => {

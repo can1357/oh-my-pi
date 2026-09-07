@@ -454,6 +454,69 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("openai-codex", "gpt-5.4-nano")).toBeUndefined();
 	});
 
+	test("online-if-uncached refreshes expired OAuth for the descriptor-authoritative github-copilot provider even with a fresh cache", async () => {
+		// Regression for #11144: github-copilot is authoritative only because its
+		// provider descriptor sets dynamicModelsAuthoritative — the preflight reads
+		// that flag from the descriptor (model-registry #resolveBuiltInDiscoveryApiKey
+		// / model-patch AUTHORITATIVE_RUNTIME_CATALOG_PROVIDERS), not the manager
+		// factory. Pruning the disabled bundled Copilot models happens only when the
+		// github-copilot manager is actually constructed, which requires an
+		// authenticated key. With an expired OAuth token, a fresh cache must NOT take
+		// the no-refresh shortcut (which would leave the disabled models selectable
+		// for the whole cache TTL); it must refresh, build the manager, and run the
+		// account-scoped /models filter.
+		const { refreshCalls } = await useAuthStorageWithRefreshTracker();
+		await authStorage.set("github-copilot", {
+			type: "oauth",
+			access: "expired-github-copilot",
+			refresh: "refresh-github-copilot",
+			expires: Date.now() - 60_000,
+		});
+		writeModelCache(
+			resolveModelCacheProviderId("github-copilot", {}),
+			Date.now() - 60_000,
+			[],
+			true,
+			"",
+			cacheDbPath,
+		);
+		let modelListCalls = 0;
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			if (url === "https://api.github.com/copilot_internal/user") {
+				return Response.json({ endpoints: { api: "https://api.githubcopilot.com" } });
+			}
+			if (url === "https://api.githubcopilot.com/models") {
+				modelListCalls++;
+				expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer fresh-github-copilot");
+				return Response.json({
+					data: [
+						{
+							id: "gpt-5.6-terra",
+							name: "GPT-5.6 Terra",
+							capabilities: { type: ["chat"] },
+						},
+						{
+							id: "gpt-5.4-nano",
+							name: "GPT-5.4 Nano",
+							capabilities: { type: ["chat"] },
+							policy: { state: "disabled" },
+						},
+					],
+				});
+			}
+			throw new Error(`Unexpected URL: ${url}`);
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("github-copilot", "online-if-uncached");
+
+		expect(refreshCalls).toEqual(["github-copilot"]);
+		expect(modelListCalls).toBe(1);
+		expect(registry.find("github-copilot", "gpt-5.6-terra")).toBeDefined();
+		expect(registry.find("github-copilot", "gpt-5.4-nano")).toBeUndefined();
+	});
+
 	test("Codex discovery falls back to a resolved non-OAuth token when no OAuth accounts exist", async () => {
 		authStorage.setRuntimeApiKey("openai-codex", "runtime-openai-codex");
 		let modelListCalls = 0;
