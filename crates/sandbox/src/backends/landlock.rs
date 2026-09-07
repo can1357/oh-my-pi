@@ -150,10 +150,7 @@ pub fn compile(
 	Ok(plan)
 }
 
-pub const fn prepare(
-	spec: &SandboxSpec,
-	prepared: &mut PreparedSandbox,
-) -> Result<(), SandboxError> {
+pub fn prepare(spec: &SandboxSpec, prepared: &mut PreparedSandbox) -> Result<(), SandboxError> {
 	#[cfg(not(target_os = "linux"))]
 	{
 		let _ = (spec, prepared);
@@ -293,7 +290,7 @@ fn write_paths(writer: &mut impl Write, paths: &[PathBuf]) -> io::Result<()> {
 
 /// Returns the running kernel's Landlock ABI, or `None` when unavailable.
 #[must_use]
-pub const fn abi() -> Option<u32> {
+pub fn abi() -> Option<u32> {
 	#[cfg(not(target_os = "linux"))]
 	{
 		None
@@ -345,7 +342,7 @@ pub fn probe() -> BackendStatus {
 /// The caller must dispatch this before launching untrusted work. The helper
 /// reads an owned BPF artifact, optionally applies an owned Landlock manifest,
 /// and then `execve(2)`s the command following the required `--` separator.
-pub const fn run_child_entry() -> Result<(), SandboxError> {
+pub fn run_child_entry() -> Result<(), SandboxError> {
 	#[cfg(not(target_os = "linux"))]
 	{
 		Err(SandboxError::UnsupportedHost { os: std::env::consts::OS })
@@ -838,6 +835,8 @@ fn proxy_relay(socket: &Path, listener: TcpListener) -> io::Result<()> {
 	loop {
 		match listener.accept() {
 			Ok((client, _)) if live.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS => {
+				// Over the connection ceiling: close the accepted socket instead of serving it.
+				drop(client);
 				live.fetch_sub(1, Ordering::AcqRel);
 			},
 			Ok((client, _)) => {
