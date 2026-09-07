@@ -64,41 +64,63 @@ describe("PluginManager.doctor version drift", () => {
 		expect(drift?.message).toContain("v1.0.2");
 	});
 
-	test("force-reinstalls dependencies before marking version drift fixed", async () => {
+	test("reconciles version drift by re-extracting only the drifted package", async () => {
 		const name = "@scope/plugin";
 		const expectedVersion = "1.0.3";
 		await seed(name, "1.0.2", expectedVersion);
 		const packagePath = path.join(pluginsNodeModules, name, "package.json");
-		const replacement = JSON.stringify({
-			name,
-			version: expectedVersion,
-			omp: { version: expectedVersion },
-		});
-		const repair = Bun.spawn(["bun", "-e", ""], {
-			stdin: "ignore",
-			stdout: "pipe",
-			stderr: "pipe",
-		});
-		Object.defineProperty(repair, "exited", {
+		const reinstalled = JSON.stringify({ name, version: expectedVersion, omp: { version: expectedVersion } });
+		const install = Bun.spawn(["bun", "-e", ""], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+		Object.defineProperty(install, "exited", {
 			get: async () => {
-				await Bun.write(packagePath, replacement);
+				await Bun.write(packagePath, reinstalled);
 				return 0;
 			},
 		});
-		const spawnSpy = vi.spyOn(Bun, "spawn").mockReturnValue(repair);
+		const spawnSpy = vi.spyOn(Bun, "spawn").mockReturnValue(install);
 
 		const checks = await new PluginManager(tmpRoot).doctor({ fix: true });
-		expect(spawnSpy).toHaveBeenCalledWith(
-			["bun", "install", "--force"],
-			expect.objectContaining({ cwd: pluginsDir }),
-		);
-		const drift = checks.find(c => c.name === `plugin:${name}:version`);
 
-		expect(drift).toEqual({
+		// Targeted repair: bare `bun install` (no global `--force` that would
+		// re-extract sibling plugins).
+		expect(spawnSpy).toHaveBeenCalledWith(["bun", "install"], expect.objectContaining({ cwd: pluginsDir }));
+		expect(checks.find(c => c.name === `plugin:${name}:version`)).toEqual({
 			name: `plugin:${name}:version`,
 			status: "ok",
 			message: `Reconciled version drift: node_modules now matches lock v${expectedVersion}`,
 			fixed: true,
+		});
+		// Rescan: the plugin check reflects the freshly installed version.
+		expect(checks.find(c => c.name === `plugin:${name}`)?.message).toBe(`v${expectedVersion}`);
+	});
+
+	test("revalidates the repaired plugin so a newly broken manifest surfaces", async () => {
+		const name = "@scope/plugin";
+		const expectedVersion = "1.0.3";
+		await seed(name, "1.0.2", expectedVersion);
+		const packagePath = path.join(pluginsNodeModules, name, "package.json");
+		// The repaired version declares a tools entry that is missing on disk.
+		const reinstalled = JSON.stringify({
+			name,
+			version: expectedVersion,
+			omp: { version: expectedVersion, tools: "./missing.js" },
+		});
+		const install = Bun.spawn(["bun", "-e", ""], { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+		Object.defineProperty(install, "exited", {
+			get: async () => {
+				await Bun.write(packagePath, reinstalled);
+				return 0;
+			},
+		});
+		vi.spyOn(Bun, "spawn").mockReturnValue(install);
+
+		const checks = await new PluginManager(tmpRoot).doctor({ fix: true });
+
+		expect(checks.find(c => c.name === `plugin:${name}:version`)?.fixed).toBe(true);
+		expect(checks.find(c => c.name === `plugin:${name}:tools`)).toEqual({
+			name: `plugin:${name}:tools`,
+			status: "error",
+			message: `Tools entry "./missing.js" not found`,
 		});
 	});
 
