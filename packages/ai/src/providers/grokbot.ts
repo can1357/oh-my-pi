@@ -782,7 +782,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					thinking: replayToolTurn ? false : options?.thinking,
 					context: options?.context,
 					sandParameterDefaults: model.sandParameterDefaults,
-					sandParameterIds: replayToolTurn ? [] : model.sandParameterIds,
+					// Keep the allowlist so thinking:false (and other overrides) still
+					// serialize on retry — an empty allowlist drops the thinking param.
+					sandParameterIds: model.sandParameterIds,
 					sandMaxMode: model.sandMaxMode,
 					canonicalModelId: model.requestModelId,
 					sandVariantStringRepresentation: model.sandVariantStringRepresentation,
@@ -941,7 +943,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					openIndex = output.content.length;
 					output.content.push({ type: "text", text: "" });
 					openKind = "text";
-					flushAttemptEvents();
+					// Visible text accepts the attempt at end-of-stream; keep buffering
+					// so incomplete sibling toolcall_* events are not published early.
 					emitAttemptEvent({ type: "text_start", contentIndex: openIndex, partial: output });
 					return openIndex;
 				};
@@ -972,7 +975,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					);
 					clearStreamingPartialJson(state.block);
 					state.ended = true;
-					flushAttemptEvents();
+					// Do not flush here — sibling incomplete toolcall_* events may still
+					// be in the buffer and must not publish until the attempt is accepted
+					// (or dropped) as a whole.
 					emitAttemptEvent({
 						type: "toolcall_end",
 						contentIndex: state.index,
@@ -1267,6 +1272,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						const drop = new Set(leftovers.map(s => s.index));
 						output.content = output.content.filter((_, i) => !drop.has(i));
 						for (const state of leftovers) state.ended = true;
+						// Retract unpublished incomplete sibling events before flush.
+						attemptEventBuffer = attemptEventBuffer.filter(event => {
+							const index =
+								"contentIndex" in event && typeof event.contentIndex === "number"
+									? event.contentIndex
+									: undefined;
+							return index === undefined || !drop.has(index);
+						});
 						logger.info("grokbot: dropped incomplete leftover tool call", {
 							count: leftovers.length,
 							wireMode: anthropicWire.wireMode,

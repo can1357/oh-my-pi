@@ -6,6 +6,7 @@ import {
 	encodeGrokbotAvailableModelsRequest,
 } from "../src/discovery/grokbot-available-models";
 import { resolveProviderModels } from "../src/model-manager";
+import { getBundledModels } from "../src/models";
 import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
 import type { ModelSpec } from "../src/types";
 
@@ -270,6 +271,15 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(buildModel(models.find(m => m.id === "sand-cua")!).reasoning).toBe(false);
 		expect(sandDefault?.input).toEqual(["text"]);
 		expect(models.find(m => m.id === "sand-cua")?.input).toEqual(["text"]);
+
+		// Bundled offline rows must bake KDL sand-tools-wire — getBundledModels
+		// serves models.json verbatim without re-running buildModel.
+		const bundled = getBundledModels("grokbot");
+		expect(bundled.find(m => m.id === "sand-default")?.sandToolsWire).toBe("parent-chat");
+		expect(bundled.find(m => m.id === "sand-automation")?.sandToolsWire).toBe("automation");
+		expect(bundled.find(m => m.id === "sand-cua")?.sandToolsWire).toBe("parent-chat");
+		expect(bundled.find(m => m.id === "default")?.sandToolsWire).toBe("parent-chat");
+		expect(bundled.find(m => m.id === "auto")?.sandToolsWire).toBe("parent-chat");
 
 		const withMinimal = models.find(m => m.id === "effort-with-minimal");
 		expect([...((withMinimal?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual([

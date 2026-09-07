@@ -11,6 +11,7 @@
 ### Fixed
 - Fixed Grok Bot file-backed model caches to scope by the real renewer instead of the shared `<authenticated>` sentinel.
 - Fixed Grok Bot file-only auth so the authenticated sentinel is never used as a renewal credential override, and added `sand-tools-wire` for router tool-wire policy.
+- Bundled Grok Bot router rows now include `sandToolsWire` from KDL so cold starts without AvailableModels still use product parent-chat/automation wires.
 
 ## [18.1.12] - 2026-09-06
 

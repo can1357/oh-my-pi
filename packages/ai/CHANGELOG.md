@@ -15,7 +15,7 @@
 - Grok Bot Write follow-ups that empty-stop after a tool result no longer fail the turn; Write accepts a `contents` alias.
 - Grok Bot empty follow-up acceptance is limited to Gemini turns whose last message is the current Write `toolResult` (older or non-Write results no longer silence a new user question).
 - Grok Bot product Write advertises a cloned `contents` alias so native-wire schemas are not mutated.
-- Grok Bot thinking-only / incomplete-tool first attempts stay buffered until accepted; discarded retries re-emit `start` and do not publish abandoned `toolcall_start` events.
+- Grok Bot thinking-only / incomplete-tool first attempts stay fully buffered until the attempt is accepted; discarded retries re-emit `start`, incomplete sibling `toolcall_*` events are filtered out, and empty-tool retries keep the model's parameter allowlist so `thinking: false` still serializes.
 - Grok Bot automation/parent-chat product wire for non-Anthropic routers requires catalog `sand-tools-wire` (no raw `sand-automation` / `sand-default` id exceptions).
 - Grok Bot keep-model probes share checksum/JWT/auth helpers via `scripts/grokbot-probe-config.mjs`.
 - Grok Bot `sand-automation` now promotes grok-4.5-high fenced `{"name":"Shell",…}` text into a real Shell/bash tool call, and native-family matrix rows report `wire: native` instead of the internal `error` sentinel.
