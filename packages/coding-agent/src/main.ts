@@ -1343,7 +1343,8 @@ export async function buildSessionOptions(
 	// Tools
 	if (parsed.noTools) {
 		// Empty whitelist keeps ambient tools off the provider wire via
-		// alwaysInclude skipping in sdk.ts. Do not set restrictToolNames —
+		// alwaysInclude skipping in sdk.ts and blocks createTools feature
+		// auto-includes (autolearn/memory/goal). Do not set restrictToolNames —
 		// that also disables extension discovery/commands and defaults LSP off
 		// (use --no-extensions / --no-lsp for those).
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];

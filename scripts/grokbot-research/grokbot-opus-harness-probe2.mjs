@@ -14,9 +14,14 @@ import {
 	encodeInferenceStreamRequest,
 	frameConnectProto,
 } from "../../packages/ai/src/providers/grokbot/proto.ts";
+import * as prompt from "../../packages/utils/src/prompt.ts";
+import minimalSystemPrompt from "./prompts/minimal-system.md" with { type: "text" };
+import replyExactlyTokenShortPrompt from "./prompts/reply-exactly-token-short.md" with { type: "text" };
 
 const STREAM = "/aiserver.v1.InferenceService/Stream";
 const TOKEN = "pong42";
+const TEXT_SYSTEM = prompt.render(minimalSystemPrompt).trim();
+const TEXT_USER = prompt.render(replyExactlyTokenShortPrompt, { token: TOKEN }).trim();
 const concat = (b) => Buffer.concat(b.filter((x) => x?.length));
 const encVarint = (v) => {
 	let n = BigInt(v);
@@ -104,8 +109,8 @@ const rm = resolveGrokbotRequestedModel("claude-opus-5", {
 });
 const base = {
 	messages: [
-		{ role: 4, text: "a" },
-		{ role: 1, text: `Reply exactly: ${TOKEN}` },
+		{ role: 4, text: TEXT_SYSTEM },
+		{ role: 1, text: TEXT_USER },
 	],
 	tools,
 	requestedModel: rm,

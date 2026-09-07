@@ -326,6 +326,44 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(sandDefault?.aliases).toBeUndefined();
 	});
 
+	test("canonical AvailableModels rows replace earlier colliding variant selectors", () => {
+		// A prior row's legacySlug equal to a later live row's name must not keep
+		// requestModelId / variant params when the canonical row arrives.
+		const rows = decodeGrokbotAvailableModelsResponse({
+			models: [
+				{
+					name: "composer-parent",
+					clientDisplayName: "Composer Parent",
+					supportsThinking: false,
+					parameterDefinitions: [{ id: "fast" }],
+					variants: [
+						{
+							legacySlug: "composer-live",
+							displayName: "Composer via legacy",
+							parameterValues: [{ id: "fast", value: "true" }],
+						},
+					],
+				},
+				{
+					name: "composer-live",
+					clientDisplayName: "Composer Live",
+					supportsThinking: true,
+					supportsImages: true,
+					parameterDefinitions: [{ id: "effort" }, { id: "fast" }],
+					variants: [],
+				},
+			],
+		});
+		expect(rows).not.toBeNull();
+		const models = normalizeGrokbotAvailableModels(rows!);
+		const live = models.find(m => m.id === "composer-live");
+		expect(live?.requestModelId).toBeUndefined();
+		expect(live?.name).toBe("Composer Live");
+		expect(live?.sandParameterIds).toEqual(["effort", "fast"]);
+		expect(live?.input).toEqual(["text", "image"]);
+		expect(live?.reasoning).toBe(true);
+	});
+
 	test("recomputes contextWindow for legacy max-mode variants", () => {
 		const rows = decodeGrokbotAvailableModelsResponse({
 			models: [

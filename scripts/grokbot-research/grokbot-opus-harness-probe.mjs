@@ -15,9 +15,14 @@ import {
 	encodeInferenceStreamRequest,
 	frameConnectProto,
 } from "../../packages/ai/src/providers/grokbot/proto.ts";
+import * as prompt from "../../packages/utils/src/prompt.ts";
+import codingAssistantSystemPrompt from "./prompts/coding-assistant-system.md" with { type: "text" };
+import replyExactlyTokenPrompt from "./prompts/reply-exactly-token.md" with { type: "text" };
 
 const STREAM = "/aiserver.v1.InferenceService/Stream";
 const TOKEN = "pong42";
+const TEXT_SYSTEM = prompt.render(codingAssistantSystemPrompt).trim();
+const TEXT_USER = prompt.render(replyExactlyTokenPrompt, { token: TOKEN }).trim();
 
 function concat(chunks) {
 	return Buffer.concat(chunks.filter(c => c?.length));
@@ -146,8 +151,8 @@ const requestedModel = resolveGrokbotRequestedModel("claude-opus-5", {
 });
 const baseBody = {
 	messages: [
-		{ role: 4, text: "You are a coding assistant." },
-		{ role: 1, text: `Reply with exactly: ${TOKEN}.` },
+		{ role: 4, text: TEXT_SYSTEM },
+		{ role: 1, text: TEXT_USER },
 	],
 	tools: field2Tools,
 	requestedModel,

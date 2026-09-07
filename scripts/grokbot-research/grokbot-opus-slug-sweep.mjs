@@ -24,10 +24,15 @@ import {
 	fieldNumbers,
 	frameConnectProto,
 } from "../../packages/ai/src/providers/grokbot/proto.ts";
+import * as prompt from "../../packages/utils/src/prompt.ts";
+import textSystemPrompt from "../grokbot-catalog-matrix/text-system.md" with { type: "text" };
+import textUserPrompt from "../grokbot-catalog-matrix/text-user.md" with { type: "text" };
 
 const STREAM = "/aiserver.v1.InferenceService/Stream";
 const TOKEN = "pong42";
 const PARAMS = ["thinking", "context", "effort", "fast"];
+const TEXT_SYSTEM = prompt.render(textSystemPrompt).trim();
+const TEXT_USER = prompt.render(textUserPrompt, { token: TOKEN }).trim();
 
 const tools = [
 	{
@@ -42,8 +47,8 @@ const tools = [
 ];
 
 const baseMessages = [
-	{ role: 4, text: "You are a concise assistant." },
-	{ role: 1, text: `Reply with exactly: ${TOKEN}. Do not call tools.` },
+	{ role: 4, text: TEXT_SYSTEM },
+	{ role: 1, text: TEXT_USER },
 ];
 
 function parseFrames(buf) {

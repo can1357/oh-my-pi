@@ -15,9 +15,16 @@ import {
 	encodeInferenceStreamRequest,
 	frameConnectProto,
 } from "../../packages/ai/src/providers/grokbot/proto.ts";
+import * as prompt from "../../packages/utils/src/prompt.ts";
+import f3onlySystemPrompt from "./prompts/f3only-system.md" with { type: "text" };
+import f3onlyToolUserPrompt from "./prompts/f3only-tool-user.md" with { type: "text" };
+import replyExactlyTokenShortPrompt from "./prompts/reply-exactly-token-short.md" with { type: "text" };
 
 const STREAM = "/aiserver.v1.InferenceService/Stream";
 const TOKEN = "pong42";
+const F3_SYSTEM = prompt.render(f3onlySystemPrompt).trim();
+const F3_TEXT_USER = prompt.render(replyExactlyTokenShortPrompt, { token: TOKEN }).trim();
+const F3_TOOL_USER = prompt.render(f3onlyToolUserPrompt).trim();
 
 function decodeFields(buf) {
 	const fields = [];
@@ -113,17 +120,14 @@ const rm = resolveGrokbotRequestedModel("claude-opus-5", {
 	sandParameterIds: ["thinking", "context", "effort", "fast"],
 });
 
-for (const [label, prompt] of [
-	["text pong42", `Reply exactly: ${TOKEN}`],
-	[
-		"tool task",
-		"Use Shell to run: echo f3only > /tmp/f3only.txt. Then use read on /tmp/f3only.txt. Reply with exactly the file contents.",
-	],
+for (const [label, promptText] of [
+	["text pong42", F3_TEXT_USER],
+	["tool task", F3_TOOL_USER],
 ]) {
 	const base = {
 		messages: [
-			{ role: 4, text: "coding assistant" },
-			{ role: 1, text: prompt },
+			{ role: 4, text: F3_SYSTEM },
+			{ role: 1, text: promptText },
 		],
 		tools: [],
 		requestedModel: rm,

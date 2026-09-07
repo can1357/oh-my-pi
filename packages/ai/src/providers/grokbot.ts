@@ -22,6 +22,8 @@ import { clearStreamingPartialJson, setStreamingPartialJson } from "../utils/blo
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { notifyProviderResponse } from "../utils/provider-response";
 import { toolWireSchema } from "../utils/schema/wire";
+import { normalizeSystemPrompts } from "../utils";
+import { transformMessages } from "./transform-messages";
 import {
 	clearGrokbotTokenCache,
 	createGrokbotChecksum,
@@ -389,11 +391,11 @@ function toolResultPayload(msg: Record<string, unknown>): unknown {
 }
 
 /** @internal Exported for Grok Bot message-conversion contract tests. */
-export function toInferenceMessages(context: Context) {
+export function toInferenceMessages(context: Context, model: Model<"grokbot-sand">) {
 	const out: Array<Record<string, unknown>> = [];
-	const system = context.systemPrompt;
-	if (Array.isArray(system)) {
-		const joined = system.filter((s): s is string => typeof s === "string").join("\n");
+	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
+	if (systemPrompts.length) {
+		const joined = systemPrompts.join("\n");
 		if (joined.trim()) out.push({ role: ROLE.system, text: joined });
 	}
 
@@ -416,7 +418,9 @@ export function toInferenceMessages(context: Context) {
 	// history, so looking up the current context.tools would mismatch names.
 	const wireNameByCallId = new Map<string, string>();
 
-	for (const msg of context.messages ?? []) {
+	// Same outbound credential redaction / tool-call sanitization every other
+	// provider applies when `secrets.enabled` configures transform-messages.
+	for (const msg of transformMessages(context.messages ?? [], model)) {
 		if (!msg || typeof msg !== "object") continue;
 		const roleName = msg.role;
 		const record = msg as unknown as Record<string, unknown>;
@@ -765,7 +769,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
 			);
 			let jwtRemintUsed = false;
-			const messages = toInferenceMessages(context);
+			const messages = toInferenceMessages(context, model);
 			const identity = classifyModel("grokbot", model.id, { lenient: true });
 			const tools = toInferenceTools(context.tools, identity);
 			const grammarTools = buildGrammarToolIndex(context.tools);

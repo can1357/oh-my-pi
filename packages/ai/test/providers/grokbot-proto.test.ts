@@ -29,9 +29,23 @@ import {
 	fieldNumbers,
 	frameConnectProto,
 } from "../../src/providers/grokbot/proto";
+import { configureCredentialRedaction } from "../../src/providers/transform-messages";
 import { loginGrokbot } from "../../src/registry/grokbot";
 import { streamSimple } from "../../src/stream";
 import type { Context, FetchImpl, Model } from "../../src/types";
+
+const conversionModel: Model<"grokbot-sand"> = buildModel({
+	id: "grok-4.5",
+	name: "Grok 4.5",
+	api: "grokbot-sand",
+	provider: "grokbot",
+	baseUrl: "https://api2.cursor.sh",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 100_000,
+	maxTokens: 8_000,
+});
 
 describe("grokbot proto", () => {
 	test("round-trips InferenceStreamRequest without harness fields", () => {
@@ -682,46 +696,66 @@ describe("grokbot sand-host client parity", () => {
 		expect(toSandImageDataUrl({ data: "data:image/png;base64,x", mimeType: "image/png" })).toBe(
 			"data:image/png;base64,x",
 		);
-		const messages = toInferenceMessages({
-			messages: [
-				{
-					role: "user",
-					content: [
-						{ type: "text", text: "look" },
-						{ type: "image", data: "qq", mimeType: "image/webp" },
-					],
-					timestamp: 1,
-				},
-				{
-					role: "assistant",
-					content: [{ type: "thinking", thinking: "hmm", thinkingSignature: "sig-replay" }],
-					api: "grokbot-sand",
-					provider: "grokbot",
-					model: "grok-4.5",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		const messages = toInferenceMessages(
+			{
+				messages: [
+					{
+						role: "user",
+						content: [
+							{ type: "text", text: "look" },
+							{ type: "image", data: "qq", mimeType: "image/webp" },
+						],
+						timestamp: 1,
 					},
-					stopReason: "stop",
-					timestamp: 2,
-				},
-				{
-					role: "toolResult",
-					toolCallId: "c1",
-					toolName: "shot",
-					content: [
-						{ type: "text", text: "ok" },
-						{ type: "image", data: "zz", mimeType: "image/png" },
-					],
-					isError: false,
-					timestamp: 3,
-				},
-			],
-		});
+					{
+						role: "assistant",
+						content: [{ type: "thinking", thinking: "hmm", thinkingSignature: "sig-replay" }],
+						api: "grokbot-sand",
+						provider: "grokbot",
+						model: "grok-4.5",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: 2,
+					},
+					{
+						role: "assistant",
+						content: [{ type: "toolCall", id: "c1", name: "shot", arguments: {} }],
+						api: "grokbot-sand",
+						provider: "grokbot",
+						model: "grok-4.5",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: 3,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "c1",
+						toolName: "shot",
+						content: [
+							{ type: "text", text: "ok" },
+							{ type: "image", data: "zz", mimeType: "image/png" },
+						],
+						isError: false,
+						timestamp: 4,
+					},
+				],
+			},
+			conversionModel,
+		);
 		expect(messages[0]).toEqual({
 			role: 1,
 			parts: {
@@ -736,6 +770,10 @@ describe("grokbot sand-host client parity", () => {
 			reasoningParts: [{ isRedacted: false, text: "hmm", signature: "sig-replay" }],
 		});
 		expect(messages[2]).toEqual({
+			role: 2,
+			toolCalls: [{ toolCallId: "c1", toolName: "shot", args: {} }],
+		});
+		expect(messages[3]).toEqual({
 			role: 3,
 			toolContent: {
 				parts: [
@@ -755,35 +793,38 @@ describe("grokbot sand-host client parity", () => {
 
 	test("replays grammar tool calls with wire name and rawToolCallArgs", () => {
 		const patch = "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch";
-		const messages = toInferenceMessages({
-			messages: [
-				{
-					role: "assistant",
-					content: [
-						{
-							type: "toolCall",
-							id: "c1",
-							name: "edit",
-							customWireName: "apply_patch",
-							arguments: { input: patch },
+		const messages = toInferenceMessages(
+			{
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "c1",
+								name: "edit",
+								customWireName: "apply_patch",
+								arguments: { input: patch },
+							},
+						],
+						api: "grokbot-sand",
+						provider: "grokbot",
+						model: "grok-4.5",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 						},
-					],
-					api: "grokbot-sand",
-					provider: "grokbot",
-					model: "grok-4.5",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						stopReason: "toolUse",
+						timestamp: 2,
 					},
-					stopReason: "toolUse",
-					timestamp: 2,
-				},
-			],
-		});
+				],
+			},
+			conversionModel,
+		);
 		const assistant = messages.find(m => m.role === 2) as {
 			toolCalls?: Array<{ toolCallId: string; toolName: string; args?: unknown; rawToolCallArgs?: string }>;
 		};
@@ -829,28 +870,66 @@ describe("grokbot sand-host client parity", () => {
 	});
 
 	test("replays grammar tool results with wire name from context.tools", () => {
-		const messages = toInferenceMessages({
-			tools: [
-				{
-					name: "edit",
-					description: "Apply a patch",
-					parameters: {},
-					customWireName: "apply_patch",
-					customFormat: { syntax: "lark", definition: "start: ANY" },
-				},
-			],
-			messages: [
-				{
-					role: "toolResult",
-					toolCallId: "c1",
-					toolName: "edit",
-					content: [{ type: "text", text: "patched" }],
-					isError: false,
-					timestamp: 3,
-				},
-			],
-		});
+		const messages = toInferenceMessages(
+			{
+				tools: [
+					{
+						name: "edit",
+						description: "Apply a patch",
+						parameters: {},
+						customWireName: "apply_patch",
+						customFormat: { syntax: "lark", definition: "start: ANY" },
+					},
+				],
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "c1",
+								name: "edit",
+								customWireName: "apply_patch",
+								arguments: { input: "patch" },
+							},
+						],
+						api: "grokbot-sand",
+						provider: "grokbot",
+						model: "grok-4.5",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: 2,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "c1",
+						toolName: "edit",
+						content: [{ type: "text", text: "patched" }],
+						isError: false,
+						timestamp: 3,
+					},
+				],
+			},
+			conversionModel,
+		);
 		expect(messages).toEqual([
+			{
+				role: 2,
+				toolCalls: [
+					{
+						toolCallId: "c1",
+						toolName: "apply_patch",
+						rawToolCallArgs: "patch",
+					},
+				],
+			},
 			{
 				role: 3,
 				toolContent: {
@@ -868,52 +947,55 @@ describe("grokbot sand-host client parity", () => {
 
 	test("pairs tool results with the historical call wire name when tools change", () => {
 		const patch = "*** Begin Patch\n*** Update File: a.ts\n@@\n-old\n+new\n*** End Patch";
-		const messages = toInferenceMessages({
-			// Current tools use hashline (no customWireName) after edit.mode switched.
-			tools: [
-				{
-					name: "edit",
-					description: "hashline edit",
-					parameters: {},
-					customFormat: { syntax: "lark", definition: "start: ANY" },
-				},
-			],
-			messages: [
-				{
-					role: "assistant",
-					content: [
-						{
-							type: "toolCall",
-							id: "c1",
-							name: "edit",
-							customWireName: "apply_patch",
-							arguments: { input: patch },
-						},
-					],
-					api: "grokbot-sand",
-					provider: "grokbot",
-					model: "grok-4.5",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		const messages = toInferenceMessages(
+			{
+				// Current tools use hashline (no customWireName) after edit.mode switched.
+				tools: [
+					{
+						name: "edit",
+						description: "hashline edit",
+						parameters: {},
+						customFormat: { syntax: "lark", definition: "start: ANY" },
 					},
-					stopReason: "toolUse",
-					timestamp: 2,
-				},
-				{
-					role: "toolResult",
-					toolCallId: "c1",
-					toolName: "edit",
-					content: [{ type: "text", text: "patched" }],
-					isError: false,
-					timestamp: 3,
-				},
-			],
-		});
+				],
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "c1",
+								name: "edit",
+								customWireName: "apply_patch",
+								arguments: { input: patch },
+							},
+						],
+						api: "grokbot-sand",
+						provider: "grokbot",
+						model: "grok-4.5",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: 2,
+					},
+					{
+						role: "toolResult",
+						toolCallId: "c1",
+						toolName: "edit",
+						content: [{ type: "text", text: "patched" }],
+						isError: false,
+						timestamp: 3,
+					},
+				],
+			},
+			conversionModel,
+		);
 		const assistant = messages.find(m => m.role === 2) as {
 			toolCalls?: Array<{ toolCallId: string; toolName: string }>;
 		};
@@ -930,42 +1012,45 @@ describe("grokbot sand-host client parity", () => {
 
 	test("replays hashline grammar calls as raw even without customWireName", () => {
 		const hashline = "[src/a.ts#abcd]\n1|-old\n1|+new\n";
-		const messages = toInferenceMessages({
-			tools: [
-				{
-					name: "edit",
-					description: "hashline edit",
-					parameters: {},
-					customFormat: { syntax: "lark", definition: "start: ANY" },
-				},
-			],
-			messages: [
-				{
-					role: "assistant",
-					content: [
-						{
-							type: "toolCall",
-							id: "c1",
-							name: "edit",
-							arguments: { input: hashline },
-						},
-					],
-					api: "grokbot-sand",
-					provider: "grokbot",
-					model: "grok-4.5",
-					usage: {
-						input: 0,
-						output: 0,
-						cacheRead: 0,
-						cacheWrite: 0,
-						totalTokens: 0,
-						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		const messages = toInferenceMessages(
+			{
+				tools: [
+					{
+						name: "edit",
+						description: "hashline edit",
+						parameters: {},
+						customFormat: { syntax: "lark", definition: "start: ANY" },
 					},
-					stopReason: "toolUse",
-					timestamp: 2,
-				},
-			],
-		});
+				],
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "c1",
+								name: "edit",
+								arguments: { input: hashline },
+							},
+						],
+						api: "grokbot-sand",
+						provider: "grokbot",
+						model: "grok-4.5",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: 2,
+					},
+				],
+			},
+			conversionModel,
+		);
 		const assistant = messages.find(m => m.role === 2) as {
 			toolCalls?: Array<{ toolCallId: string; toolName: string; args?: unknown; rawToolCallArgs?: string }>;
 		};
@@ -976,6 +1061,27 @@ describe("grokbot sand-host client parity", () => {
 				rawToolCallArgs: hashline,
 			},
 		]);
+	});
+
+	test("redacts credential-shaped tokens from system and history when enabled", () => {
+		configureCredentialRedaction(true);
+		try {
+			const token = "sk-ant-api03-AbCdEfGhIjKlMnOpQrStUvWxYz0123456789AbCd";
+			const messages = toInferenceMessages(
+				{
+					systemPrompt: [`Keep secret ${token}`],
+					messages: [{ role: "user", content: `Use ${token} carefully`, timestamp: 1 }],
+				},
+				conversionModel,
+			);
+			const joined = JSON.stringify(messages);
+			expect(joined).not.toContain(token);
+			expect(joined).toContain("[anthropic_token_redacted]");
+			expect(messages[0]).toEqual({ role: 4, text: "Keep secret [anthropic_token_redacted]" });
+			expect(messages[1]).toEqual({ role: 1, text: "Use [anthropic_token_redacted] carefully" });
+		} finally {
+			configureCredentialRedaction(false);
+		}
 	});
 });
 

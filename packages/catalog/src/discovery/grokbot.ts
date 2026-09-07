@@ -121,7 +121,16 @@ export function normalizeGrokbotAvailableModels(
 		const id = row.name?.trim();
 		if (!id) continue;
 		for (const spec of toGrokbotModelSpecs(row, baseUrl, id)) {
-			if (!byId.has(spec.id)) {
+			const existing = byId.get(spec.id);
+			if (!existing) {
+				byId.set(spec.id, spec);
+				continue;
+			}
+			// Canonical live rows (no requestModelId) replace a prior variant alias
+			// that collided on the same selector id.
+			const existingIsVariant = Boolean(existing.requestModelId);
+			const incomingIsCanonical = !spec.requestModelId;
+			if (existingIsVariant && incomingIsCanonical) {
 				byId.set(spec.id, spec);
 			}
 		}

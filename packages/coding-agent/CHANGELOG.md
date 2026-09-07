@@ -23,6 +23,7 @@
 - Grok Bot catalog matrix reports `wire: native` for grok/gpt/gemini families (was the internal `error` sentinel). `sand-automation` JSON-as-text Shell dumps are promoted to real tool calls.
 - Grok Bot catalog matrix accepts tool smokes only when the call targets the expected path/token/payload (not tool name alone).
 - `--no-tools` keeps an empty provider tool whitelist without `restrictToolNames`, so extension commands and LSP remain available unless `--no-extensions` / `--no-lsp` are set.
+- `--no-tools` also blocks createTools feature auto-includes (autolearn/memory/goal/think/yield) so the empty whitelist stays empty on the wire.
 - `--api-key` early binding skips multi-provider `--models` scopes and any bare (unqualified) selector (single shared qualified provider only).
 - Bare `--model` no longer falls through to `--models` for early `--api-key` ownership (session options prefer `--model`).
 - `--provider` alone no longer early-binds `--api-key` without `--model` / `--models` (keeps the missing-model CLI guard).
