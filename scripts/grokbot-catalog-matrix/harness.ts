@@ -211,11 +211,6 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 	return false;
 }
 
-/** Turn 1 already invoked the tool; these follow-up classes must not FAIL the id. */
-export function isSoftPassToolFollowup(errorClass: string): boolean {
-	return errorClass === "incomplete-tool" || errorClass === "empty-body" || errorClass === "provider-policy-block";
-}
-
 /**
  * Turn-2 text gate after a successful tool call. The unique ping must appear
  * unless this is the documented Gemini Write empty-stop exception.
@@ -234,6 +229,17 @@ export function evaluateToolFollowupText(opts: {
 		pass: false,
 		detail: `${opts.kind}: follow-up omitted ping; text=${opts.body.slice(0, 120)}`,
 	};
+}
+
+/**
+ * Evidence that the omp tools smoke actually ran the echo command (not just
+ * answered with the token as free text).
+ */
+export function ompToolsExecutionEvidence(out: string, token: string): boolean {
+	const echoCmd = `echo ${token}`;
+	if (out.includes(echoCmd)) return true;
+	// TUI / JSONL tool previews often show Shell/bash near the command.
+	return /(?:\bShell\b|\bbash\b)[\s\S]{0,400}echo\s+/.test(out) && out.includes(token);
 }
 
 // Live keep-model: explicit Read/Write tools trip Anthropic Usage Policy on

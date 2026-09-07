@@ -220,6 +220,19 @@ export function looksLikePromotableToolText(text: string): boolean {
 }
 
 /**
+ * Hold flush for text that is still an undecided promotion candidate: empty /
+ * whitespace, an incomplete fence opener (` / `` / ``` / ```json), or a
+ * classified promotable dump. Ordinary prose returns false so live text can flush.
+ */
+export function shouldHoldPromotableToolText(text: string): boolean {
+	if (looksLikePromotableToolText(text)) return true;
+	const t = text.trim();
+	if (!t) return true;
+	if (/^`{1,3}(?:json|jsonc|javascript|js|tool_code)?$/i.test(t)) return true;
+	return false;
+}
+
+/**
  * Promote Gemini ```tool_code / default_api.bash(...) dumps that sand leaves
  * as thinking or text instead of toolCallPart (gemini-3-flash empty-body).
  */

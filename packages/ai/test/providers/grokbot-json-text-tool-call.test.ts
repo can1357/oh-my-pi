@@ -8,6 +8,7 @@ import {
 	looksLikePromotableToolText,
 	parseGeminiInbandToolCall,
 	parseJsonTextToolCall,
+	shouldHoldPromotableToolText,
 } from "../../src/providers/grokbot/json-text-tool-call";
 import {
 	CONNECT_END_STREAM_FLAG,
@@ -82,6 +83,9 @@ describe("parseJsonTextToolCall", () => {
 		expect(looksLikePromotableToolText('{"name":"Shell","arguments":{}}')).toBe(true);
 		expect(looksLikePromotableToolText("```json\n{")).toBe(true);
 		expect(looksLikePromotableToolText("pong42")).toBe(false);
+		expect(shouldHoldPromotableToolText("")).toBe(true);
+		expect(shouldHoldPromotableToolText("```")).toBe(true);
+		expect(shouldHoldPromotableToolText("pong42")).toBe(false);
 	});
 
 	test("assistantTextForJsonPromotion joins thinking so thought-only JSON can promote", () => {

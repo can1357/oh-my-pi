@@ -5,9 +5,9 @@ import {
 	expectedWritePath,
 	evaluateToolFollowupText,
 	idSafe,
-	isSoftPassToolFollowup,
 	matchesToolSmokeCall,
 	matrixRowFlag,
+	ompToolsExecutionEvidence,
 	parseArgs,
 	readLikeShellCommand,
 	resolveExplicitMatrixIds,
@@ -179,12 +179,13 @@ describe("classifyError", () => {
 		expect(classifyError("ERROR_PROVIDER_ERROR: invalid tools", 400)).toBe("http-400");
 		expect(classifyError("HTTP 400 bad request")).toBe("http-400");
 	});
+});
 
-	test("soft-passes tool follow-up after a successful turn-1 call", () => {
-		// Anthropic often blocks the echo follow-up after a successful Shell call.
-		expect(isSoftPassToolFollowup("provider-policy-block")).toBe(true);
-		expect(isSoftPassToolFollowup("incomplete-tool")).toBe(true);
-		expect(isSoftPassToolFollowup("empty-body")).toBe(true);
-		expect(isSoftPassToolFollowup("http-400")).toBe(false);
+describe("ompToolsExecutionEvidence", () => {
+	test("requires echo/tool evidence, not just the free-text token", () => {
+		const token = "omp-echo-sand-default";
+		expect(ompToolsExecutionEvidence(`done ${token}`, token)).toBe(false);
+		expect(ompToolsExecutionEvidence(`Shell\necho ${token}\n${token}`, token)).toBe(true);
+		expect(ompToolsExecutionEvidence(`running: echo ${token}`, token)).toBe(true);
 	});
 });

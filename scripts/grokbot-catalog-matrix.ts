@@ -34,10 +34,10 @@ import {
 import {
 	classifyError,
 	idSafe,
-	isSoftPassToolFollowup,
 	evaluateToolFollowupText,
 	matchesToolSmokeCall,
 	matrixRowFlag,
+	ompToolsExecutionEvidence,
 	parseArgs,
 	resolveExplicitMatrixIds,
 	toolSmokePrompt,
@@ -265,17 +265,6 @@ async function runOneTool(
 	const status2 = httpStatusOf(turn2);
 	if (turn2.stopReason === "error") {
 		const errorClass = classifyError(turn2.errorMessage, status2);
-		// Turn 1 already proved the named tool. Hanging leftovers, empty
-		// follow-ups, and Anthropic Usage Policy on the echo follow-up after a
-		// successful Shell call must not fail the id.
-		if (isSoftPassToolFollowup(errorClass)) {
-			return {
-				pass: true,
-				routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
-				httpStatus: status2,
-				toolNames: names,
-			};
-		}
 		return {
 			pass: false,
 			routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
@@ -382,9 +371,9 @@ function ompCommand(args: string[]): string[] {
 }
 
 function runOmp(model: string, { tools }: { tools: boolean }): { pass: boolean; status: number; out: string } {
-	const ping = `tools-pong-${idSafe(model)}`;
+	const token = tools ? `omp-echo-${idSafe(model)}` : TEXT_TOKEN;
 	const promptText = tools
-		? prompt.render(ompToolsUserPrompt, { token: TEXT_TOKEN }).trim()
+		? prompt.render(ompToolsUserPrompt, { token }).trim()
 		: prompt.render(ompTextUserPrompt, { token: TEXT_TOKEN }).trim();
 	const args = [
 		"-p",
@@ -409,7 +398,9 @@ function runOmp(model: string, { tools }: { tools: boolean }): { pass: boolean; 
 		stderr: "pipe",
 	});
 	const out = `${r.stdout?.toString() ?? ""}\n${r.stderr?.toString() ?? ""}`;
-	const pass = r.exitCode === 0 && (out.includes(TEXT_TOKEN) || out.includes(ping));
+	const pass = tools
+		? r.exitCode === 0 && out.includes(token) && ompToolsExecutionEvidence(out, token)
+		: r.exitCode === 0 && out.includes(TEXT_TOKEN);
 	return { pass, status: r.exitCode ?? 1, out: out.slice(-500) };
 }
 

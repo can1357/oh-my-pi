@@ -43,7 +43,7 @@ import {
 import {
 	advertisedNamesForJsonTextToolCall,
 	assistantTextForJsonPromotion,
-	looksLikePromotableToolText,
+	shouldHoldPromotableToolText,
 	parseGeminiInbandToolCall,
 	parseJsonTextToolCall,
 } from "./grokbot/json-text-tool-call";
@@ -873,12 +873,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					const text = block?.type === "text" && typeof block.text === "string" ? block.text : "";
 					const hasPromotableThinking = output.content.some(
 						b =>
-							b.type === "thinking" && typeof b.thinking === "string" && looksLikePromotableToolText(b.thinking),
+							b.type === "thinking" &&
+							typeof b.thinking === "string" &&
+							shouldHoldPromotableToolText(b.thinking),
 					);
 					// Also hold while earlier thinking still looks promotable — flushing
 					// SendToUser text would publish thinking at index 0 that promotion
 					// later removes without remapping live consumers.
-					if (!looksLikePromotableToolText(text) && !hasPromotableThinking) flushAttemptEvents();
+					if (!shouldHoldPromotableToolText(text) && !hasPromotableThinking) flushAttemptEvents();
 				}
 			};
 
