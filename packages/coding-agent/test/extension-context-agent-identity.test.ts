@@ -229,11 +229,6 @@ describe("ExtensionContext agentIdentity", () => {
 		}
 	});
 
-	const CYCLE_SESSION = {
-		cwd: "",
-		authStorage: null as AuthStorage | null,
-	};
-
 	it("walks a cyclic agent registry to termination, self-exclusion, and nearest-first order through the public SDK path", async () => {
 		// Regression guard for the sdk.ts parent-chain walk: the registry holds a
 		// genuine A -> B -> A cycle, so a `seen`-less walk would loop forever and
