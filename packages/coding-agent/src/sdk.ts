@@ -237,6 +237,9 @@ import {
 } from "./tools";
 import { createBrowserPrelude } from "./tools/browser";
 import {
+	expandDisallowedTools,
+	HIDDEN_TOOL_NAMES,
+	type HiddenToolName,
 	isMCPToolName,
 	isToolDisallowed,
 	isToolScopedIn,
@@ -1742,7 +1745,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let hasRegistered = false;
 	const restrictToolNames = options.restrictToolNames === true;
 	const enforceToolAllowlist = options.enforceToolAllowlist === true;
-	const disallowedPatterns = options.disallowedTools ? normalizeToolNames(options.disallowedTools) : [];
+	const disallowedPatterns = options.disallowedTools
+		? normalizeToolNames(expandDisallowedTools(options.disallowedTools))
+		: [];
 	const enableLsp = options.enableLsp ?? !restrictToolNames;
 	const lspReadOnly = options.lspReadOnly ?? restrictToolNames;
 	const asyncMaxJobs = Math.min(100, Math.max(1, settings.get("async.maxJobs") ?? 100));
@@ -2894,6 +2899,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				? []
 				: (options.customTools?.filter(tool => !isLegacyBuiltinToolDefinition(tool)) ?? []);
 		const sdkCustomToolNames = new Set(sdkCustomTools.map(tool => tool.name));
+		for (const tool of sdkCustomTools) {
+			if (HIDDEN_TOOL_NAMES.includes(tool.name as HiddenToolName)) {
+				throw new Error(`Cannot register custom tool '${tool.name}': '${tool.name}' is a reserved protocol tool.`);
+			}
+		}
 		const allCustomTools = [
 			...registeredTools,
 			...sdkCustomTools.map(tool => {
@@ -2937,6 +2947,9 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 		}
 		for (const tool of wrappedExtensionTools) {
+			if (HIDDEN_TOOL_NAMES.includes(tool.name as HiddenToolName)) {
+				continue;
+			}
 			toolRegistry.set(tool.name, tool);
 			builtInRegistryToolNames.delete(tool.name);
 		}
@@ -2987,12 +3000,14 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// so `mcp__<server>_*` still matches length-capped minted names (a plain
 			// name-prefix match misses the truncated + hashed registry key).
 			const mcpServerName = (toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
+			const isBuiltIn = builtInRegistryToolNames.has(name);
 			return isToolScopedIn(
 				name,
 				disallowedPatterns,
 				{
 					enforceToolAllowlist,
 					allowedToolNames: cursorRequestedToolNames,
+					isBuiltIn,
 				},
 				typeof mcpServerName === "string" ? mcpServerName : undefined,
 			);
@@ -3218,11 +3233,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// would reject (guaranteed unavailable-tool errors). Same rule as
 			// the auto-learn guidance below — tool-specific guidance follows the
 			// effective set.
-			const memoryToolsDisallowed =
+			const memoryToolsScopedOut =
+				restrictToolNames ||
+				(enforceToolAllowlist &&
+					!MEMORY_BACKEND_TOOL_NAMES.some(name => explicitlyRequestedToolNameSet?.has(name))) ||
 				MEMORY_BACKEND_TOOL_NAMES.some(name => isToolDisallowed(name, disallowedPatterns)) ||
 				disallowedPatterns.includes("*");
-			const memoryBackend =
-				restrictToolNames || memoryToolsDisallowed ? undefined : await resolveMemoryBackend(settings);
+			const memoryBackend = memoryToolsScopedOut ? undefined : await resolveMemoryBackend(settings);
 			const memoryInstructions = memoryBackend
 				? await memoryBackend.buildDeveloperInstructions(agentDir, settings, session)
 				: undefined;
@@ -3307,6 +3324,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						// length-capped minted names (the name prefix alone is
 						// truncated + hashed and would silently retain the server).
 						const mcpServerName = (tool as { mcpServerName?: unknown }).mcpServerName;
+						const isBuiltIn = builtInRegistryToolNames.has(name);
 						if (
 							!isToolScopedIn(
 								name,
@@ -3314,6 +3332,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 								{
 									enforceToolAllowlist,
 									allowedToolNames: explicitlyRequestedToolNameSet,
+									isBuiltIn,
 								},
 								typeof mcpServerName === "string" ? mcpServerName : undefined,
 							)

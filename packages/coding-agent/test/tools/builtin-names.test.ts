@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createMCPToolName } from "@oh-my-pi/pi-coding-agent/mcp/tool-bridge";
 import {
+	expandDisallowedTools,
 	isToolDisallowed,
 	isToolScopedIn,
 	mcpDisallowTargetsServer,
@@ -49,6 +50,22 @@ describe("isToolDisallowed", () => {
 		expect(isToolDisallowed("yield", ["*"])).toBe(false);
 		expect(isToolDisallowed("goal", ["goal"])).toBe(false);
 		expect(isToolDisallowed("think", ["think"])).toBe(false);
+	});
+
+	test("disallows eval and bash when pattern is exec", () => {
+		expect(isToolDisallowed("eval", ["exec"])).toBe(true);
+		expect(isToolDisallowed("bash", ["exec"])).toBe(true);
+		expect(isToolDisallowed("read", ["exec"])).toBe(false);
+	});
+
+	test("non-built-in hidden tool names are not exempt when isBuiltIn is false", () => {
+		expect(isToolDisallowed("yield", ["*"], { isBuiltIn: false })).toBe(true);
+		expect(isToolDisallowed("yield", ["yield"], { isBuiltIn: false })).toBe(true);
+		expect(isToolDisallowed("goal", ["*"], { isBuiltIn: false })).toBe(true);
+		expect(isToolDisallowed("think", ["*"], { isBuiltIn: false })).toBe(true);
+		// Built-in or unspecified stays exempt:
+		expect(isToolDisallowed("yield", ["*"], { isBuiltIn: true })).toBe(false);
+		expect(isToolDisallowed("yield", ["*"])).toBe(false);
 	});
 
 	test("capped minted names need mcpServerName metadata to match a server wildcard", () => {
@@ -116,6 +133,24 @@ describe("isToolScopedIn", () => {
 	test("hidden protocol tools stay scoped in under an enforced allowlist with metadata", () => {
 		expect(isToolScopedIn("yield", ["*"], { enforceToolAllowlist: true }, LONG_SERVER_NAME)).toBe(true);
 	});
+
+	test("non-built-in hidden tool names are not exempt when isBuiltIn is false", () => {
+		expect(isToolScopedIn("yield", ["*"], { enforceToolAllowlist: true, isBuiltIn: false })).toBe(false);
+		expect(
+			isToolScopedIn("yield", [], {
+				enforceToolAllowlist: true,
+				allowedToolNames: new Set(["read"]),
+				isBuiltIn: false,
+			}),
+		).toBe(false);
+		expect(
+			isToolScopedIn("yield", [], {
+				enforceToolAllowlist: true,
+				allowedToolNames: new Set(["yield"]),
+				isBuiltIn: false,
+			}),
+		).toBe(true);
+	});
 });
 describe("mcpDisallowTargetsServer", () => {
 	test("blanket mcp__* targets every server", () => {
@@ -148,5 +183,20 @@ describe("mcpDisallowTargetsServer", () => {
 		expect(mcpDisallowTargetsServer(["mcp__foo_query*"], "foo")).toBe(false);
 		// An exact tool name is not a server target.
 		expect(mcpDisallowTargetsServer(["mcp__foo_query"], "foo")).toBe(false);
+	});
+});
+
+describe("expandDisallowedTools", () => {
+	test("expands exec alias to include eval and bash", () => {
+		const expanded = expandDisallowedTools(["exec", "mcp__*"]);
+		expect(expanded).toContain("exec");
+		expect(expanded).toContain("eval");
+		expect(expanded).toContain("bash");
+		expect(expanded).toContain("mcp__*");
+	});
+
+	test("leaves patterns without exec unchanged", () => {
+		expect(expandDisallowedTools(["bash", "read"])).toEqual(["bash", "read"]);
+		expect(expandDisallowedTools([])).toEqual([]);
 	});
 });

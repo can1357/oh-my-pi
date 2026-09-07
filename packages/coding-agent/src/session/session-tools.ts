@@ -854,12 +854,14 @@ export class SessionTools {
 		// so `mcp__<server>_*` still matches length-capped minted names (a plain
 		// name-prefix match misses the truncated + hashed registry key).
 		const mcpServerName = (this.#toolRegistry.get(name) as { mcpServerName?: unknown } | undefined)?.mcpServerName;
+		const isBuiltIn = this.#builtInToolNames.has(name);
 		return isToolScopedIn(
 			name,
 			this.#disallowedToolPatterns,
 			{
 				enforceToolAllowlist: this.#enforceToolAllowlist,
 				allowedToolNames: this.#allowedToolNames,
+				isBuiltIn,
 			},
 			typeof mcpServerName === "string" ? mcpServerName : undefined,
 		);
@@ -912,9 +914,13 @@ export class SessionTools {
 			const tool = this.#toolRegistry.get(name);
 			return tool ? [{ name, tool }] : [];
 		});
-		const xdevReadAvailable = this.#builtInToolNames.has("read") && selectedTools.some(({ name }) => name === "read");
+		const xdevReadAvailable =
+			this.#builtInToolNames.has("read") &&
+			this.#isToolScopedIn("read") &&
+			selectedTools.some(({ name }) => name === "read");
 		const xdevWriteAvailable =
 			builtInWriteAvailable &&
+			this.#isToolScopedIn("write") &&
 			(selectedTools.some(({ name }) => name === "write") || this.#deviceOnlyWriteTransportAvailable);
 		const isPresentationPinned = (name: string): boolean =>
 			this.#presentationPinnedToolNames?.has(name) === true || this.#runtimeSelectedToolNames?.has(name) === true;
@@ -1000,11 +1006,12 @@ export class SessionTools {
 		const restoreDormantDeviceOnlyWrite =
 			!validToolNames.includes("write") &&
 			this.#deviceOnlyWriteTransportAvailable &&
+			this.#isToolScopedIn("write") &&
 			this.#isDeviceOnlyWrite?.() !== true &&
 			this.#setDeviceOnlyWrite !== undefined;
 		const deactivateDeviceOnlyWrite =
-			!validToolNames.includes("write") &&
-			!this.#deviceOnlyWriteTransportAvailable &&
+			(!validToolNames.includes("write") || !this.#isToolScopedIn("write")) &&
+			(!this.#deviceOnlyWriteTransportAvailable || !this.#isToolScopedIn("write")) &&
 			this.#isDeviceOnlyWrite?.() === true &&
 			this.#setDeviceOnlyWrite !== undefined;
 		const previousMounted = new Set(this.#xdev?.mountedNames ?? []);

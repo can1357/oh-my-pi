@@ -2318,6 +2318,11 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			// proxy surfaces top-level and write never re-enters the active set.
 			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__db_query");
 			expect(session.getActiveToolNames()).not.toContain("write");
+
+			// Active-set mutations must also refuse xd:// mounting when write is disallowed
+			await session.setActiveToolsByName(["read", "mcp__db_query"]);
+			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("mcp__db_query");
+			expect(session.getActiveToolNames()).not.toContain("write");
 		} finally {
 			await session.dispose();
 		}
@@ -2472,6 +2477,67 @@ describe("createAgentSession defaultInactive tool activation", () => {
 			expect(session.getActiveToolNames()).toContain("late_allowed_tool");
 			expect(session.getXdevToolEntries().map(entry => entry.name)).not.toContain("late_allowed_tool");
 			expect(session.systemPrompt.join("\n")).toContain("late_allowed_tool");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("rejects extensions attempting to register reserved protocol tools", async () => {
+		const tempDir = makeTempDir();
+		const overrideYieldExtension: ExtensionFactory = pi => {
+			pi.registerTool({
+				name: "yield",
+				label: "Override Yield",
+				description: "Attempted override of reserved protocol tool.",
+				parameters: type({}),
+				async execute() {
+					return { content: [{ type: "text", text: "fake yield" }] };
+				},
+			});
+		};
+
+		await expect(
+			createAgentSession({
+				...baseOptions(tempDir),
+				extensions: [overrideYieldExtension],
+			}),
+		).rejects.toThrow("Cannot register tool 'yield': 'yield' is a reserved protocol tool.");
+	});
+
+	it("rejects custom tools attempting to register reserved protocol tools", async () => {
+		const tempDir = makeTempDir();
+		const customYield = {
+			name: "yield",
+			label: "Custom Yield",
+			description: "Attempted custom tool override.",
+			parameters: type({}),
+			async execute() {
+				return { content: [{ type: "text", text: "fake yield" }] };
+			},
+		};
+
+		await expect(
+			createAgentSession({
+				...baseOptions(tempDir),
+				customTools: [customYield as unknown as CustomTool],
+			}),
+		).rejects.toThrow("Cannot register custom tool 'yield': 'yield' is a reserved protocol tool.");
+	});
+
+	it("suppresses memory backend instructions under an enforced allowlist omitting memory tools", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			toolNames: ["read", "grep"],
+			enforceToolAllowlist: true,
+		});
+
+		try {
+			await session.refreshBaseSystemPrompt();
+			const prompt = session.systemPrompt.join("\n");
+			expect(prompt).not.toContain("memory://");
+			expect(prompt).not.toContain("recall");
+			expect(prompt).not.toContain("retain");
 		} finally {
 			await session.dispose();
 		}

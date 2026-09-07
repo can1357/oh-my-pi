@@ -1,5 +1,5 @@
 import type { EvalBackendsAllowance } from "../tools/eval-backends";
-import { expandExecToolAlias, isToolDisallowed } from "../tools/builtin-names";
+import { expandDisallowedTools, expandExecToolAlias, isToolDisallowed } from "../tools/builtin-names";
 import type { AgentDefinition } from "./types";
 
 // Built-in tools whose approval tier is "read" (see tool classes' `approval`).
@@ -37,7 +37,7 @@ export function isReadOnlyAgent(agent: AgentDefinition, evalBackends?: EvalBacke
 	// needs an exact-name disallow here or relies on the sdk-level metadata-aware
 	// filters. A MCP tool surviving this check is at worst classified non-read-only
 	// (fail-safe) — it can never turn a mutating MCP tool "read-only".
-	const patterns = agent.disallowedTools ?? [];
+	const patterns = expandDisallowedTools(agent.disallowedTools ?? []);
 	// A deny-all disallow (`disallowedTools: ["*"]`) without a `tools` list
 	// removes every non-hidden tool at runtime, leaving a protocol-only scope —
 	// the effective set is empty BECAUSE everything was stripped, so the agent

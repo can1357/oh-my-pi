@@ -859,6 +859,35 @@ describe("runSubprocess yield reminders", () => {
 		expect(callArgs.toolNames).not.toContain("exec");
 	});
 
+	it("expands disallowed exec alias without an explicit allowlist", async () => {
+		const session = createMockSession(({ emit }) => {
+			emit({
+				type: "tool_execution_end",
+				toolCallId: "yield-exec-disallow-only",
+				toolName: "yield",
+				result: {
+					content: [{ type: "text", text: "Result submitted." }],
+					details: { status: "success", data: { ok: true } },
+				},
+				isError: false,
+			});
+		});
+		const spy = mockCreateAgentSession(session);
+
+		const result = await runSubprocess({
+			...baseOptions,
+			id: "subagent-exec-disallow-only",
+			agent: { ...baseAgent, disallowedTools: ["exec"] },
+		});
+
+		expect(result.exitCode).toBe(0);
+		const callArgs = spy.mock.calls[0][0] as { toolNames?: string[]; disallowedTools?: string[] };
+		expect(callArgs.toolNames).toBeUndefined();
+		expect(callArgs.disallowedTools).toContain("exec");
+		expect(callArgs.disallowedTools).toContain("eval");
+		expect(callArgs.disallowedTools).toContain("bash");
+	});
+
 	it("leaves scoping flags unset when the agent declares no tools", async () => {
 		const session = createMockSession(({ emit }) => {
 			emit({

@@ -56,7 +56,7 @@ import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
-import { expandExecToolAlias, isToolDisallowed } from "../tools/builtin-names";
+import { expandDisallowedTools, expandExecToolAlias, isToolDisallowed } from "../tools/builtin-names";
 import { resolveEvalBackends } from "../tools/eval-backends";
 import { isIrcEnabled } from "../tools/hub";
 import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
@@ -3025,7 +3025,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// too (not just built-ins) — an explicit empty list enforces down to the
 	// protocol tools; `disallowedTools:` removes matching names after.
 	const enforceToolAllowlist = Array.isArray(agent.tools);
-	const disallowedTools = agent.disallowedTools?.length ? agent.disallowedTools : undefined;
+	const rawDisallowed = agent.disallowedTools ?? [];
+	const expandedDisallowed = expandDisallowedTools(rawDisallowed);
+	const disallowedTools = expandedDisallowed.length ? expandedDisallowed : undefined;
 
 	if (atMaxDepth && toolNames?.includes("task")) {
 		toolNames = toolNames.filter(name => name !== "task");
@@ -3037,7 +3039,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 	const evalBackends = resolveEvalBackends({ settings } as ToolSession);
 	if (toolNames) {
-		toolNames = expandExecToolAlias(toolNames, agent.disallowedTools ?? [], evalBackends);
+		toolNames = expandExecToolAlias(toolNames, expandedDisallowed, evalBackends);
 	}
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
@@ -3051,7 +3053,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				: agent.spawns.join(",");
 
 	const lspEnabled = enableLsp ?? true;
-	const skipPythonPreflight = Array.isArray(toolNames) && !toolNames.includes("eval");
+	const skipPythonPreflight =
+		(Array.isArray(toolNames) && !toolNames.includes("eval")) ||
+		(disallowedTools !== undefined && isToolDisallowed("eval", disallowedTools));
 
 	const monitor = createSubagentRunMonitor({
 		index,

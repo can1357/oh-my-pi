@@ -75,16 +75,24 @@ export function normalizeToolNames(names: Iterable<string>): string[] {
  * under an explicit `patterns`). Shared by the executor spawn path and
  * read-only classification so both see the same effective set.
  */
+export function expandDisallowedTools(patterns: readonly string[]): string[] {
+	if (!patterns.includes("exec")) return [...patterns];
+	const set = new Set(patterns);
+	set.add("eval");
+	set.add("bash");
+	return Array.from(set);
+}
+
 export function expandExecToolAlias(
 	names: readonly string[],
 	patterns: readonly string[],
 	backends: EvalBackendsAllowance,
 ): string[] {
-	if (!names.includes("exec")) return [...names];
+	if (!names.includes("exec")) return names.filter(name => !isToolDisallowed(name, patterns));
 	const withoutAlias = names.filter(name => name !== "exec");
 	// `exec` is an alias for eval+bash: a deny on the alias blocks the whole
 	// expansion; an explicit deny on either child still wins downstream.
-	if (isToolDisallowed("exec", patterns)) return withoutAlias;
+	if (isToolDisallowed("exec", patterns)) return withoutAlias.filter(name => !isToolDisallowed(name, patterns));
 	const expanded = [...withoutAlias];
 	if (backends.python || backends.js) expanded.push("eval");
 	expanded.push("bash");
@@ -172,8 +180,19 @@ export function mcpDisallowTargetsServer(patterns: readonly string[], serverName
  * segment equals {@link sanitizeMCPToolNamePart} of the raw name, matching by
  * ownership instead of the lossy prefix.
  */
-export function isToolDisallowed(name: string, patterns: readonly string[], mcpServerName?: string): boolean {
-	if (HIDDEN_TOOL_NAMES.includes(name as HiddenToolName)) return false;
+export interface ToolDisallowOptions {
+	mcpServerName?: string;
+	isBuiltIn?: boolean;
+}
+
+export function isToolDisallowed(
+	name: string,
+	patterns: readonly string[],
+	options?: string | ToolDisallowOptions,
+): boolean {
+	const mcpServerName = typeof options === "string" ? options : options?.mcpServerName;
+	const isBuiltIn = typeof options === "object" ? options?.isBuiltIn : undefined;
+	if (HIDDEN_TOOL_NAMES.includes(name as HiddenToolName) && isBuiltIn !== false) return false;
 	for (const pattern of patterns) {
 		if (pattern.endsWith("*")) {
 			if (name.startsWith(pattern.slice(0, -1))) return true;
@@ -183,7 +202,7 @@ export function isToolDisallowed(name: string, patterns: readonly string[], mcpS
 					return true;
 				}
 			}
-		} else if (name === pattern) {
+		} else if (name === pattern || (pattern === "exec" && (name === "eval" || name === "bash"))) {
 			return true;
 		}
 	}
@@ -204,10 +223,11 @@ export function isToolDisallowed(name: string, patterns: readonly string[], mcpS
 export function isToolScopedIn(
 	name: string,
 	disallowedPatterns: readonly string[],
-	options: { enforceToolAllowlist?: boolean; allowedToolNames?: ReadonlySet<string> },
+	options: { enforceToolAllowlist?: boolean; allowedToolNames?: ReadonlySet<string>; isBuiltIn?: boolean },
 	mcpServerName?: string,
 ): boolean {
-	if (isToolDisallowed(name, disallowedPatterns, mcpServerName)) return false;
+	if (isToolDisallowed(name, disallowedPatterns, { mcpServerName, isBuiltIn: options.isBuiltIn })) return false;
 	if (!options.enforceToolAllowlist) return true;
-	return HIDDEN_TOOL_NAMES.includes(name as HiddenToolName) || options.allowedToolNames?.has(name) === true;
+	const isCanonicalHidden = options.isBuiltIn !== false && HIDDEN_TOOL_NAMES.includes(name as HiddenToolName);
+	return isCanonicalHidden || options.allowedToolNames?.has(name) === true;
 }
