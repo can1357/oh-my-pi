@@ -1766,7 +1766,9 @@ The verdict half of this namespace's contract is likewise already in Rust and mu
 as novel: `crates/tool/src/lib.rs` has `Verdict<P, F>`, `VerdictDetails` (inline-vs-spilled,
 discriminated by `#[serde(tag = "storage")]`), the `VerdictSpill` trait, `TOOL_REV_PROP`
 (`"omp/tool-rev"`), and `Tool::lift`; `crates/tool/src/registry.rs` has `project_verdict`, `lift`,
-`project`, and `live_hash() -> [u8; 32]`. Three consequences bear directly on `omp.env`:
+`project`, and the shipped digests — `slot_hash` over policy-resolved model-visible slots,
+`device_hash` over mounted availability and claimant-qualified reachability, and `projection_hash`
+over every registered `(name, rev)` plus its projection code. Three consequences bear directly on `omp.env`:
 `VerdictSpill` is a trait with no wired Environment implementation, so `Completed.artifact` and
 every "the spill gate stores it whole" claim above depend on `BlobHost` being connected to it;
 `Tool::lift` defaults to `None`, so no device migrates history yet; and `ToolComplete.is_error` is

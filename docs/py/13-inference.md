@@ -2367,7 +2367,7 @@ priority-ordered assignment recomputed per request is trivial and wrong: grammar
 request body, so an assignment that flips between turns invalidates the prompt prefix cache — the
 exact damage `pi-cache-optimizer` existed to undo. So: compute the assignment once per
 *registration-set epoch* and cache it on the plan, recomputing only when the live set changes or a
-route is reselected. `Registry::live_hash()` (`crates/tool/src/registry.rs:457-467`) is nearly the key:
+route is reselected. `Registry::projection_hash()` (`crates/tool/src/registry.rs:2690-2711`) is nearly the key:
 a blake3 digest over the ordered `(name, family, rev)` identities, length-delimited, `BTreeMap`-ordered
 so it is registration-order independent, and computed "without allocation or serialization" per its own
 doc comment.
@@ -2422,7 +2422,8 @@ What remains is narrower and more precise than "build the lowering":
   advertised set rather than a per-entry `filter_map`; and — first, because it is a correctness
   prerequisite rather than an optimization — give `advertise` the `ToolRoute::Worker` filter it is
   missing, so the set being arbitrated is the set the model actually sees. Cache the result on the
-  core-slot digest described above, **not** on `live_hash()`, which includes worker identities.
+  core-slot digest described above — shipped as `Registry::slot_hash()` (`crates/tool/src/registry.rs:2623-2650`);
+  **not** on `device_hash` or `projection_hash`, which include device and worker identities.
 - **`Fallback::ERROR` is unrepresentable in `crates/tool` too, not just on the wire.** `Constraint` has
   a `priority` but no degradation policy, and `lower()` therefore *always* degrades — every
   unsatisfiable constraint becomes `Prefer`, never an error. So an extension declaring

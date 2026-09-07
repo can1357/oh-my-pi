@@ -2153,10 +2153,11 @@ already enforced.
 What is missing is *resolution*, not the axis. `ToolRoute::Worker` is one bit: it
 says "somebody else executes this" and cannot say *which* somebody. The work is to
 carry the resolved target — kind plus, for `PlaceKind.WORKER`, the name — alongside
-that variant, and to thread it through `live_hash()` (`registry.rs:450-458`) so that
+that variant, and to thread it through `Registry::device_hash()` (`registry.rs:2654-2686`), the
+shipped digest that hashes each mounted device's tool route, so that
 moving a device from `place="host"` to `place="env"` changes the live registry
 identity. It must, because it changes where effects happen; a placement change that
-left `live_hash()` byte-identical would be an invisible authority change. This stays
+left `device_hash()` byte-identical would be an invisible authority change. This stays
 within the crate's remit — `omp-tool` "contains contracts and deterministic lowering
 only" (`crates/tool/README.md`) and placement resolution is lowering.
 
