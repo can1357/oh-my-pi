@@ -2191,7 +2191,7 @@ stamps it onto the outbound device request. Telemetry reads that property. Propo
 stamp would have created exactly the divergence Lesson #8 warns about.
 
 `Registry::projection_hash()` (`crates/tool/src/registry.rs:2688-2711`) similarly already answers "did the
-reachable identity set change": BLAKE3 with the `b"omp-tool/projections/v1\0"` domain separator over
+reachable identity set change": SHA-256 with the `b"omp-tool/projections/v1\0"` domain separator over
 every registered `(name, rev)` identity plus its `projection_code` — the schema and description
 digest — registration-order independent via `BTreeMap`. `SessionStart.registry_hash`
 (`crates/observability/src/firehose.rs:227`, `telemetry.proto:53`) is the reserved hex slot —

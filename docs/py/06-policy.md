@@ -2478,7 +2478,7 @@ already apply. Until it does, a policy extension cannot honestly claim it regist
 with the model.
 
 **3. The registry's identity digests are split, not single.** `slot_hash()`
-(`registry.rs:2623`, blake3 over the policy-resolved model-visible slots),
+(`registry.rs:2623`, SHA-256 over the policy-resolved model-visible slots),
 `device_hash()` (`registry.rs:2654`, mounted device availability and
 claimant-qualified reachability), and `projection_hash()` (`registry.rs:2690`,
 every registered revision plus its projection code) are the shipped surface. The

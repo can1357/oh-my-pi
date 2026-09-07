@@ -847,7 +847,7 @@ decode compatibility (which registered types decode a recorded call) and the `li
 chain (which steps re-express it). It bumps when the argument schema or the verdict shape
 changes *meaning*, and for nothing else.
 
-The **artifact digest** is the second identity: a BLAKE3-256 content digest over the exact
+The **artifact digest** is the second identity: a SHA-256 content digest over the exact
 build that produced a projection — device docs wording, `prompt()` code, renderer code,
 and the package build they shipped in. It is the projection half of the provenance septet
 (`docs/py/14-deploy.md` owns package identity); the Rust-side computation is

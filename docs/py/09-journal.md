@@ -1688,7 +1688,7 @@ implemented, and this document must not present it as novel. `omp_tool::Rev`
 the types; `TOOL_REV_PROP = "omp/tool-rev"` (`:46`) is the durable carrier;
 `Tool::lift(&self, from: &Rev, call: RecordedCall) -> Option<LiftedCall>` (`:214`)
 is the upgrade path; `Registry::project` performs the adjacent-lift walk and
-`Registry::projection_hash() -> Hash32` gives the live registry a stable blake3
+`Registry::projection_hash() -> Hash32` gives the live registry a stable SHA-256
 identity (`registry.rs` `project` at `:2988`, `projection_hash` at `:2690`). The stamping is
 wired end to end in the session projection:
 `crates/session/src/projection.rs:167-176` writing and `:188-203` reading.
@@ -2262,7 +2262,7 @@ must come from Rust, because which schemes resolve depends on the deployment.
 
 And `schemes()` needs no new change-detection mechanism, only the right one.
 `Registry::device_hash() -> Hash32` (`crates/tool/src/registry.rs:2654`) already
-gives the mounted device set a content-derived blake3 identity — mounted
+gives the mounted device set a content-derived SHA-256 identity — mounted
 availability plus claimant-qualified reachability, exactly the shape of
 the "did the reachable capability set change" question — so a host that caches
 `schemes()` invalidates on that identity rather than growing a parallel version

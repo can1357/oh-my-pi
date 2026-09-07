@@ -2941,7 +2941,7 @@ resolution, integrity, trust, CLI — is missing. Verified before writing this s
 | Supervisor mailboxes | `flume::unbounded()` (`worker.rs:248`), RAII cancel on `WorkerInvocation::drop` (`worker.rs:220-229`) | **exists** |
 | Content-addressed store | `omp_journal::BlobStore` — BLAKE3-256 `BlobRef { hash: [u8;32], size }` (`crates/journal/src/blob.rs:36-41`), `put_reader` streaming at 64 KiB (`:179`), `has`, `verify`, `path` | **exists** |
 | Blob transport | `crates/proto/proto/omp/blob/v1` — `Blob` service with `Stat`/`Get`(stream)/`Put`(stream)/`Delete` | **exists** |
-| Registry identity digests | `crates/tool/src/registry.rs` — `slot_hash()` `:2623` (model-visible slots), `device_hash()` `:2654` (device availability), `projection_hash()` `:2690` (registered revisions + projection code), all blake3 | **exists**; §6.0.2 records the notification gap |
+| Registry identity digests | `crates/tool/src/registry.rs` — `slot_hash()` `:2623` (model-visible slots), `device_hash()` `:2654` (device availability), `projection_hash()` `:2690` (registered revisions + projection code), all SHA-256 | **exists**; §6.0.2 records the notification gap |
 | Rev stamping | `crates/tool/src/lib.rs:46` `TOOL_REV_PROP = "omp/tool-rev"` | **exists** |
 | `uv`-driven install | `crates/py/scripts/fetch-python.sh` shells `uv pip install --link-mode=copy --python … --target …` and rejects native output | **exists** |
 
@@ -2997,7 +2997,7 @@ cost the user explicitly bought.
 
 The live-hash question this section was written against is settled: `live_hash`
 no longer exists in `crates/tool`, and the registry ships exactly the split
-argued for here — `slot_hash()` (`registry.rs:2623`) is the BLAKE3 digest of the
+argued for here — `slot_hash()` (`registry.rs:2623`) is the SHA-256 digest of the
 policy-resolved model-visible slots, `device_hash()` (`registry.rs:2654`) the
 digest of mounted device availability and claimant-qualified reachability.
 Installing or enabling an extension moves only the device digest, so an install
