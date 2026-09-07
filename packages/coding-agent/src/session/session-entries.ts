@@ -98,6 +98,22 @@ export interface ThinkingLevelChangeEntry extends SessionEntryBase {
 	 * before auto-mode persistence existed; readers fall back to `thinkingLevel`.
 	 */
 	configured?: string | null;
+	/**
+	 * True when this transition was written by a settings-derived application —
+	 * the settings-derived startup level, or the settings-tracking re-apply in
+	 * `#applyReloadedModel` — rather than a user/RPC/ACP selection. Mirrors
+	 * {@link ModelChangeEntry.settingsTracking}: it marks a selection that still
+	 * FOLLOWS the configured default, so a later `/refresh settings` may replace
+	 * it. Absent means an explicit session-level choice a reload must not clobber.
+	 */
+	settingsTracking?: true;
+	/**
+	 * True when this entry is a per-turn `auto` classification receipt, not a
+	 * selection. Like the ephemeral retry-fallback `model_change` role, it masks
+	 * whatever selector sits beneath it without being a choice of its own, so
+	 * settings-tracking classification walks PAST it to the real selection.
+	 */
+	autoResolved?: true;
 }
 
 export interface ModelChangeEntry extends SessionEntryBase {
@@ -106,6 +122,15 @@ export interface ModelChangeEntry extends SessionEntryBase {
 	model: string;
 	/** Role: "default", "smol", "slow", etc. Undefined treated as "default" */
 	role?: string;
+	/**
+	 * True when this transition was written by the settings-tracking auto-swap
+	 * (`#applyReloadedModel`), not a user action. Like the ephemeral fallback
+	 * role, it marks a change that still tracks the configured default rather
+	 * than a user pin, so a later `/refresh settings` may swap it again. Kept as
+	 * a dedicated flag (not an overloaded `role` sentinel) so a user's real
+	 * `modelRoles` entry named "settings" is never mistaken for the marker.
+	 */
+	settingsTracking?: true;
 	/** True when this transition selected a retry-fallback model rather than the configured model. */
 	resolvedModelIsFallback?: boolean;
 }

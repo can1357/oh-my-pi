@@ -39,6 +39,22 @@ import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } fro
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
+/**
+ * Equality over the skill fields that affect the rendered system prompt.
+ * Mirrors the rule-side `ruleIdentityEqual`: an existing SKILL.md whose
+ * `description`/`hide` frontmatter changes without a rename/move must count as
+ * a roster change so the prompt rebuilds. `hide` is normalized so `undefined`
+ * and `false` (both "advertised") compare equal.
+ */
+function skillIdentityEqual(a: Skill, b: Skill): boolean {
+	return (
+		a.name === b.name &&
+		a.filePath === b.filePath &&
+		a.description === b.description &&
+		(a.hide ?? false) === (b.hide ?? false)
+	);
+}
+
 /** Capabilities borrowed from the owning AgentSession. */
 export interface SessionToolsHost {
 	agent: Agent;
@@ -353,6 +369,56 @@ export class SessionTools {
 		return this.#skills;
 	}
 
+	/**
+	 * Swap in a freshly reloaded skills snapshot (from an in-session `refresh`)
+	 * and report whether the set actually changed. `skill://` binds this
+	 * per-session snapshot, so a `setActiveSkills` global swap alone does not
+	 * reach it. Positional prompt-identity compare (name, path, description,
+	 * `hide`) mirrors discovery's stable order and the rule-side
+	 * `ruleIdentityEqual`: editing an existing SKILL.md's `description`/`hide`
+	 * frontmatter WITHOUT renaming still counts as a change and rebuilds the
+	 * advertised roster. An unchanged set returns `false` so the prompt rebuild
+	 * is skipped and Anthropic prompt caching keeps hitting.
+	 */
+	applyReloadedSkills(skills: readonly Skill[], skillsSettings?: SkillsSettings): boolean {
+		let changed = this.#skills.length !== skills.length;
+		if (!changed) {
+			for (let i = 0; i < skills.length; i++) {
+				if (!skillIdentityEqual(this.#skills[i], skills[i])) {
+					changed = true;
+					break;
+				}
+			}
+		}
+		this.#skills = [...skills];
+		// Refresh the settings snapshot too: `skills.enableSkillCommands` gates
+		// skill slash-command availability (available-commands.ts), so a stale
+		// construction-time snapshot would keep the old command surface after a
+		// config change. Only overwrite when the caller supplies a fresh group.
+		if (skillsSettings !== undefined) this.#skillsSettings = skillsSettings;
+		return changed;
+	}
+
+	/**
+	 * Install a freshly reloaded `skills.*` settings group WITHOUT touching the
+	 * discovered skill roster, and report whether the command-gating flag
+	 * (`skills.enableSkillCommands`) actually moved.
+	 *
+	 * A `settings`-only refresh reloads the live `Settings` but runs no roster
+	 * rediscovery, so it has no `applyReloadedSkills` call to piggyback the
+	 * snapshot on — yet the cached snapshot is exactly what gates the skill
+	 * command surface (available-commands.ts, acp-agent.ts, rpc-mode.ts), so
+	 * leaving it stale keeps those consumers honoring the old flag until an
+	 * unrelated `skills`/`all` refresh. Returning the flag delta lets the caller
+	 * notify command-metadata subscribers only on a real change, so an unchanged
+	 * config stays a no-op.
+	 */
+	applyReloadedSkillsSettings(skillsSettings: SkillsSettings): boolean {
+		const changed = this.#skillsSettings?.enableSkillCommands !== skillsSettings.enableSkillCommands;
+		this.#skillsSettings = skillsSettings;
+		return changed;
+	}
+
 	/** Diagnostics produced while loading the current skills. */
 	get skillWarnings(): SkillWarning[] {
 		return this.#skillWarnings;
@@ -361,6 +427,11 @@ export class SessionTools {
 	/** Settings snapshot used for the current skill discovery. */
 	get skillsSettings(): SkillsSettings | undefined {
 		return this.#skillsSettings;
+	}
+
+	/** Whether runtime reloads may rediscover disk-backed skills (false under `--no-skills`/SDK `skills: []`). */
+	get skillsReloadable(): boolean {
+		return this.#skillsReloadable;
 	}
 
 	/** Drops cached per-session ACP `allow_always`/`reject_always` decisions. */

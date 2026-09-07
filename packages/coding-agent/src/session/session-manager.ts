@@ -2344,13 +2344,23 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	/** Append a thinking level change as child of current leaf, then advance leaf. Returns entry id. */
-	appendThinkingLevelChange(thinkingLevel?: string, configured?: string): string {
+	/**
+	 * Append a thinking level change as child of current leaf, then advance leaf. Returns entry id.
+	 * @param options.settingsTracking Marks a settings-derived application (not an explicit session choice), leaving it replaceable by a later `/refresh settings`.
+	 * @param options.autoResolved Marks a per-turn `auto` classification receipt rather than a selection, so tracking classification walks past it.
+	 */
+	appendThinkingLevelChange(
+		thinkingLevel?: string,
+		configured?: string,
+		options?: { settingsTracking?: boolean; autoResolved?: boolean },
+	): string {
 		const entry: ThinkingLevelChangeEntry = {
 			type: "thinking_level_change",
 			...this.#freshEntryFields(),
 			thinkingLevel: thinkingLevel ?? null,
 			configured: configured ?? null,
+			...(options?.settingsTracking ? { settingsTracking: true } : {}),
+			...(options?.autoResolved ? { autoResolved: true } : {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;
@@ -2373,14 +2383,21 @@ export class SessionManager {
 	 * @param model Model in "provider/modelId" format
 	 * @param role Optional role (default: "default")
 	 * @param resolvedModelIsFallback Whether this transition selected a retry-fallback model
+	 * @param options.settingsTracking Marks a settings-tracking auto-swap (not a user pin), leaving `role` free for a real user role.
 	 */
-	appendModelChange(model: string, role?: string, resolvedModelIsFallback = false): string {
+	appendModelChange(
+		model: string,
+		role?: string,
+		resolvedModelIsFallback = false,
+		options?: { settingsTracking?: boolean },
+	): string {
 		const entry: ModelChangeEntry = {
 			type: "model_change",
 			...this.#freshEntryFields(),
 			model,
 			role,
 			resolvedModelIsFallback,
+			...(options?.settingsTracking ? { settingsTracking: true } : {}),
 		};
 		this.#recordEntry(entry);
 		return entry.id;

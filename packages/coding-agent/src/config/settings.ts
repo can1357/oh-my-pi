@@ -795,6 +795,53 @@ export class Settings {
 		}
 	}
 
+	/**
+	 * Re-read every settings layer (global + project + overlays) from disk *in
+	 * place* and rebuild the merged view, WITHOUT writing anything back. This is
+	 * the in-session config-reload counterpart to {@link reloadForCwd}: it picks
+	 * up an on-disk edit to config.yml (a changed default model, a flipped
+	 * setting) that a running session would otherwise not see until restart.
+	 *
+	 * Pure re-READ — it delegates to {@link #loadReadOnly} (no `#load`, no
+	 * migration, no `#queueSave`/`#saveNow`), so config.yml is never rewritten.
+	 * This matters: the write path re-serializes the whole file, so a reload that
+	 * round-tripped through `set()` would reformat config.yml and strip comments
+	 * (the `/model` reformat footgun). Runtime `#overrides` (an in-session
+	 * `/model` pick, etc.) are the highest-precedence layer and survive untouched.
+	 *
+	 * Returns whether the merged view changed, so a caller can skip downstream
+	 * work (model re-resolve, prompt rebuild) on a no-op reload.
+	 */
+	async reload(): Promise<{ changed: boolean }> {
+		const before = JSON.stringify(this.#merged);
+		if (this.#persist) {
+			// Route the persisted re-read through the hardened primitive, which
+			// FLUSHES any pending debounced save first (so a queued `set()` /
+			// `setModelRole()` write lands on disk before the layers are re-read),
+			// serializes concurrent reloads, and retries around mutation
+			// generations. The raw `#loadReadOnly` path used here previously
+			// clobbered `#global`/`#project` with stale disk values while the
+			// changed paths stayed marked modified, so the later `#saveNow` wrote
+			// the OLD disk value back and discarded the user's pending change.
+			await this.reloadFromDisk();
+			return { changed: JSON.stringify(this.#merged) !== before };
+		}
+		// No persisted layers to flush (in-memory instance): keep the pure
+		// re-read. `#loadReadOnly` still picks up project/overlay dirs on disk.
+		const prevModelRoles = this.get("modelRoles");
+		await this.#loadReadOnly();
+		const changed = JSON.stringify(this.#merged) !== before;
+		this.#fireEffectiveSettingChanged("modelRoles", this.get("modelRoles"), prevModelRoles);
+		// Only re-sync the setting hooks on a real change. `reload()` is a pure
+		// re-read designed to be broadcast fleet-wide and run repeatedly (the
+		// `refresh` tool); several SETTING_HOOKS entries fire signals
+		// unconditionally (extendedContext, hindsight scope, appendOnlyContext),
+		// so firing them on a byte-identical no-op reload is avoidable churn.
+		// `#fireEffectiveSettingChanged` already self-guards on Object.is.
+		if (changed) this.#fireAllHooks();
+		return { changed };
+	}
+
 	async cloneForCwd(cwd: string): Promise<Settings> {
 		const cloned = new Settings({
 			cwd,
@@ -1396,18 +1443,33 @@ export class Settings {
 	}
 
 	async #loadReadOnly(): Promise<Settings> {
-		const [globalResult, projectResult] = await Promise.allSettled([
-			this.#loadExistingMainYaml(),
-			this.#loadProjectSettings(),
+		// Non-quarantining readers (`quarantineInvalid = false`), exactly as the
+		// hardened `#reloadPersistedLayers` uses: a pure re-read (startup read-only
+		// load AND the in-session `reload()`/`/refresh settings` path) must never
+		// MOVE a malformed config aside — the startup loaders acquire a write lock
+		// and rename invalid YAML to `.broken-*`, which would let a read reload
+		// relocate the user's file. Malformed files are preserved in place and
+		// surface as a thrown read error instead.
+		const [globalResult, projectResult, overlayResult] = await Promise.allSettled([
+			this.#readExistingMainYaml(false),
+			this.#readProjectSettings(false),
+			this.#readConfigOverlays(false),
 		]);
 		if (globalResult.status === "rejected") throw globalResult.reason;
 		if (projectResult.status === "rejected") throw projectResult.reason;
-		if (globalResult.value) {
-			this.#global = globalResult.value;
-		}
+		if (overlayResult.status === "rejected") throw overlayResult.reason;
 
-		this.#project = projectResult.value;
-		this.#configOverlay = await this.#loadConfigOverlays();
+		this.#configPath = globalResult.value.configPath;
+		// Replace the global layer even when the file is absent. If a global
+		// config.yml existed at start and was later deleted or renamed, the read
+		// returns null; the layer must reset to empty rather than retain stale
+		// values, matching `#reloadPersistedLayers` (`?? {}`).
+		this.#global = globalResult.value.settings ?? {};
+		this.#project = projectResult.value.settings;
+		this.#projectFileSettings = projectResult.value.fileSettings;
+		this.#projectShellPathSource = projectResult.value.shellPathSource;
+		this.#configOverlay = overlayResult.value.settings;
+		this.#overlayShellPathSource = overlayResult.value.shellPathSource;
 		this.#rebuildMerged();
 		return this;
 	}

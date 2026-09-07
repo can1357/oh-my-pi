@@ -62,7 +62,14 @@ export function formatMCPConnectingMessage(serverNames: readonly string[]): stri
 	return `Connecting to MCP servers: ${formatServerList(serverNames)}…`;
 }
 
-function formatFailedServer({ serverName, error, sourcePath }: McpConnectionFailure): string {
+/**
+ * Render one failed MCP server as `name[ config]: error`, sanitized for TUI
+ * display: control chars/ANSI stripped, tabs expanded, newlines flattened,
+ * embedded absolute paths home-shortened, and each field truncated to its
+ * preview width. Shared by the connection-status message and the `refresh`
+ * summary so both surfaces normalize identically.
+ */
+export function formatFailedServer({ serverName, error, sourcePath }: McpConnectionFailure): string {
 	const source = sourcePath
 		? ` [config: ${sanitizeMcpStatusText(shortenPath(sourcePath), TRUNCATE_LENGTHS.CONTENT)}]`
 		: "";

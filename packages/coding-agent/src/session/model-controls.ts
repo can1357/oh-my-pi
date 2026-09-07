@@ -219,6 +219,13 @@ export class ModelControls {
 			selector?: string;
 			thinkingLevel?: ThinkingLevel;
 			persist?: boolean;
+			/**
+			 * Records this transition as a settings-tracking auto-swap (not a user
+			 * pin): the `model_change` carries the `settingsTracking` flag and no
+			 * role, so a later `/refresh settings` may swap it again and a user's
+			 * real role named "default"/"settings" is never mistaken for it.
+			 */
+			settingsTracking?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
 		const previousEditMode = this.#host.resolveActiveEditMode();
@@ -231,7 +238,12 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(targetModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(targetModel);
-		this.#host.sessionManager.appendModelChange(`${targetModel.provider}/${targetModel.id}`, role);
+		this.#host.sessionManager.appendModelChange(
+			`${targetModel.provider}/${targetModel.id}`,
+			options?.settingsTracking ? undefined : role,
+			false,
+			options?.settingsTracking ? { settingsTracking: true } : undefined,
+		);
 		if (options?.persist) {
 			this.#host.settings.setModelRole(
 				role,
@@ -249,7 +261,12 @@ export class ModelControls {
 
 		// Re-apply thinking for the newly selected model. Prefer the model's
 		// configured defaultLevel; otherwise preserve the current level (or auto).
-		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+		// A settings-tracking swap's re-apply is settings-derived too — marking it
+		// keeps the receipt classifiable as "still follows settings", so the next
+		// `/refresh settings` may move the level again.
+		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel, {
+			settingsTracking: options?.settingsTracking,
+		});
 		await this.#host.syncAfterModelChange(previousEditMode);
 		return { switched: true };
 	}
@@ -436,7 +453,10 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(next.model));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(next.model);
-		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`);
+		// An explicit cycle is a user pin, exactly like `setModel`: record the
+		// model_change with role "default" and no `settingsTracking` flag so a
+		// later `/refresh settings` does not treat it as a swappable auto-track.
+		this.#host.sessionManager.appendModelChange(`${next.model.provider}/${next.model.id}`, "default");
 		this.#host.settings.getStorage()?.recordModelUsage(`${next.model.provider}/${next.model.id}`);
 
 		// Apply the scoped model's configured thinking level, preserving auto.
@@ -467,7 +487,10 @@ export class ModelControls {
 		this.#host.modelRegistry.clearSuppressedSelector(formatModelStringWithRouting(nextModel));
 		this.#host.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(nextModel);
-		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`);
+		// An explicit cycle is a user pin, exactly like `setModel`: record the
+		// model_change with role "default" and no `settingsTracking` flag so a
+		// later `/refresh settings` does not treat it as a swappable auto-track.
+		this.#host.sessionManager.appendModelChange(`${nextModel.provider}/${nextModel.id}`, "default");
 		this.#host.settings.getStorage()?.recordModelUsage(`${nextModel.provider}/${nextModel.id}`);
 		// Re-apply the current thinking level (or auto) for the newly selected model
 		this.#reapplyThinkingLevel();
@@ -501,8 +524,18 @@ export class ModelControls {
 	 * auto writes its provisional level plus `configured: "auto"` immediately,
 	 * giving external readers an authoritative selection receipt before the next
 	 * user turn. Later classifications persist only changed concrete resolutions.
+	 *
+	 * `options.settingsTracking` marks the persisted receipt as a
+	 * settings-derived application rather than an explicit session choice, so a
+	 * later `/refresh settings` may replace it (see
+	 * `AgentSession.#thinkingFollowsSettings`). Callers that represent a real
+	 * user/RPC/ACP selection must leave it unset.
 	 */
-	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
+	setThinkingLevel(
+		level: ConfiguredThinkingLevel | undefined,
+		persist: boolean = false,
+		options?: { settingsTracking?: boolean },
+	): void {
 		if (level === AUTO_THINKING) {
 			const provisional = clampThinkingLevelToCeiling(
 				this.#model,
@@ -523,7 +556,9 @@ export class ModelControls {
 			}
 			const isChanging = !wasAuto || previousLevel !== provisional;
 			if (isChanging) {
-				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING);
+				this.#host.sessionManager.appendThinkingLevelChange(provisional, AUTO_THINKING, {
+					settingsTracking: options?.settingsTracking,
+				});
 				this.#host.emit({ type: "thinking_level_changed", thinkingLevel: provisional, configured: AUTO_THINKING });
 			}
 			return;
@@ -546,7 +581,9 @@ export class ModelControls {
 
 		if (isChanging) {
 			this.#host.clearInheritedProviderPromptCacheKey();
-			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel);
+			this.#host.sessionManager.appendThinkingLevelChange(effectiveLevel, effectiveLevel, {
+				settingsTracking: options?.settingsTracking,
+			});
 			if (persist && effectiveLevel !== undefined && effectiveLevel !== ThinkingLevel.Off) {
 				this.#host.settings.set("defaultThinkingLevel", effectiveLevel);
 			}
@@ -559,8 +596,12 @@ export class ModelControls {
 	 * (re-clamping the provisional level to the new model); otherwise re-applies the
 	 * preferred default or the current effective level.
 	 */
-	#reapplyThinkingLevel(preferredDefault?: ThinkingLevel): void {
-		this.setThinkingLevel(this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel));
+	#reapplyThinkingLevel(preferredDefault?: ThinkingLevel, options?: { settingsTracking?: boolean }): void {
+		this.setThinkingLevel(
+			this.#autoThinking ? AUTO_THINKING : (preferredDefault ?? this.#thinkingLevel),
+			false,
+			options,
+		);
 	}
 
 	/**
@@ -655,7 +696,10 @@ export class ModelControls {
 		this.#thinkingLevel = effort;
 		this.#applyThinkingLevelToAgent(effort);
 		if (shouldPersistResolution) {
-			this.#host.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING);
+			// A per-turn classification receipt, not a selection: mark it so the
+			// settings-tracking scan walks past it to the underlying `auto`
+			// selection rather than reading a resolved effort as an explicit pin.
+			this.#host.sessionManager.appendThinkingLevelChange(effort, AUTO_THINKING, { autoResolved: true });
 		}
 		this.#host.emit({
 			type: "thinking_level_changed",
