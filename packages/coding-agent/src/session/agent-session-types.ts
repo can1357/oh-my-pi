@@ -39,6 +39,8 @@ import type { SecretObfuscator } from "../secrets/obfuscator";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import type { XdevState } from "../tools/xdev";
 import type { CodexAutoRedeemCoordinator } from "./codex-auto-reset";
+import type { SessionToolPolicy } from "./tool-policy";
+import type { PersonaRuntime } from "./persona-runtime";
 import type { SessionManager } from "./session-manager";
 
 /** Maximum time the interactive shutdown path waits for Mnemopi consolidation. */
@@ -131,9 +133,11 @@ export interface AgentSessionConfig {
 	/**
 	 * Live extension-root policy inherited from the owning session. Subagents use
 	 * this provider so explicit roots, discovery mode, configured roots, and
-	 * provenance survive recursive task discovery.
+	 * provenance survive recursive task discovery. The optional session cwd lets
+	 * multi-workspace hosts (ACP) rebase relative extension spellings per
+	 * client workspace; an omitted argument resolves against the launch cwd.
 	 */
-	extensionRoots?: () => EffectiveExtensionRoots;
+	extensionRoots?: (sessionCwd?: string) => EffectiveExtensionRoots;
 	/**
 	 * Parent-imported extension factories rebound to this session's own
 	 * ExtensionAPI. Forwarded by session forks (e.g. `/tan`) so the child
@@ -152,8 +156,6 @@ export interface AgentSessionConfig {
 	additionalExtensionPaths?: readonly string[];
 	/** Mirror of `disableExtensionDiscovery`; used when no inherited root provider exists. */
 	disableExtensionDiscovery?: boolean;
-	/** Whether the session spawn policy permits the read-only `scout` subagent. Defaults to true. */
-	scoutAllowedBySpawnPolicy?: boolean;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag). */
@@ -321,6 +323,31 @@ export interface AgentSessionConfig {
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */
 	disconnectOwnedMcpManager?: () => Promise<void>;
+	/**
+	 * Session-wide tool policy owning effective-set computation for this session.
+	 *
+	 * Ownership: the AgentSession owns this instance once constructed. It is set
+	 * by sdk.ts (`createAgentSessionScoped`) at construction time; PersonaRuntime
+	 * (later stage) reads and mutates it via `enterPersona`/`exitPersona`.
+	 *
+	 * TODO(stage 2+): not yet consumed — stage 1 only wires the seam. The field
+	 * is inert until later stages replace the shadow tool-state machinery.
+	 */
+	toolPolicy?: SessionToolPolicy;
+	/**
+	 * Persona runtime owning persona enter/exit/reconcile for this session.
+	 * @internal placeholder — PersonaRuntime is constructed by a later stage;
+	 * the concrete type replaces `unknown` once the runtime module exists.
+	 */
+	personaRuntime?: PersonaRuntime;
+	/** System prompt used by automatic session-title generation. */
+	/**
+	 * Host spawn-policy fallback consulted by the persona-owned
+	 * `AgentSession.setSessionSpawns` override. A string is CLI `--spawns`
+	 * (comma-separated names, `*` = unrestricted); `null` = unrestricted.
+	 * Absent = unrestricted.
+	 */
+	getSessionSpawns?: () => string | string[] | "*" | null;
 	/** System prompt used by automatic session-title generation. */
 	titleSystemPrompt?: string;
 }

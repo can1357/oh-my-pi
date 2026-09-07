@@ -1,6 +1,7 @@
 # Changelog
 
 ## [Unreleased]
+- Added `--agent` and `/agent` to run a discovered agent definition as the main-session persona (tools, model, thinking, spawns, system prompt), restorable on exit and across resume.
 
 ## [18.1.12] - 2026-09-06
 

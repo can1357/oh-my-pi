@@ -444,6 +444,13 @@ export interface InteractiveModeContext {
 	showGitUi(revision?: string): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
 	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
+	/** Live persona switch through the session's PersonaRuntime (`/agent <name>`). */
+	switchAgentPersona(agentName: string): Promise<void>;
+	/** Clear the active persona (`/agent` with an active persona). */
+	exitAgentPersona(): Promise<void>;
+	/** Open the agent persona picker (bare `/agent` with no persona active). */
+	showAgentPersonaPicker(): Promise<void>;
+	/** Session-only switch to an already-resolved model (`/switch <selector>`); compacts first when over context. */
 	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void>;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;

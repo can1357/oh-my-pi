@@ -10,9 +10,19 @@ import type { SettingPath, Settings } from "../config/settings";
 import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import type { InteractiveModeContext } from "../modes/types";
 import type { AgentSession } from "../session/agent-session";
+import { createDefaultPersonaModelHooks } from "../session/persona-model-hooks";
+import { appendPersonaJournalEntry, clearPersonaJournalEntry } from "../session/persisted-persona";
+import { discoverAgents, getAgent } from "../task";
+import type { PersonaExplicitOverrides } from "../session/tool-policy";
 import { commandConsumed, errorMessage, usage } from "./helpers/parse";
 import { handleSecurityCommand } from "./helpers/security";
-import type { ParsedSlashCommand, SlashCommandSpec, TuiSlashCommandRuntime } from "./types";
+import type {
+	ParsedSlashCommand,
+	SlashCommandResult,
+	SlashCommandRuntime,
+	SlashCommandSpec,
+	TuiSlashCommandRuntime,
+} from "./types";
 
 export function refreshStatusLine(ctx: InteractiveModeContext): void {
 	ctx.statusLine.invalidate();
@@ -635,4 +645,105 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 			return commandConsumed();
 		},
 	},
+	{
+		name: "agent",
+		icon: "agents",
+		description: "Switch agent persona for this session (/agent <name>; bare /agent clears the active persona)",
+		acpDescription: "Switch agent persona for this session",
+		acpInputHint: "<name>",
+		inlineHint: "<name>",
+		allowArgs: true,
+		getTuiAutocompleteDescription: runtime => {
+			const session = runtime.ctx.session;
+			if (session.getToolPolicy()?.isPersonaActive()) return "Agent persona: active (/agent to exit)";
+			return "Agent persona: none";
+		},
+		handle: handleAgentCommand,
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const name = command.args.trim();
+			if (name) {
+				await runtime.ctx.switchAgentPersona(name);
+				return;
+			}
+			if (runtime.ctx.session.getToolPolicy()?.isPersonaActive()) {
+				await runtime.ctx.exitAgentPersona();
+				return;
+			}
+			await runtime.ctx.showAgentPersonaPicker();
+		},
+	},
 ];
+
+/** Bare `/agent` with no persona active: usage message in ACP/text mode (TUI opens the picker). */
+async function handleAgentCommandNoName(runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	const session = runtime.session;
+	if (session.getToolPolicy()?.isPersonaActive()) {
+		// No mode guard: exiting the persona is the recovery path out of the
+		// mode-entry refusal — a guard here would deadlock the user inside the
+		// persona (TUI exitAgentPersona mirrors this).
+		await session.getPersonaRuntime()?.exit(createDefaultPersonaModelHooks(session));
+		clearPersonaJournalEntry(session);
+		// Exit reverts the model/thinking/toolset to the pre-persona baseline;
+		// ACP and text-mode clients must see the reverted configuration.
+		await runtime.notifyConfigChanged?.();
+		await runtime.output("Agent persona cleared.");
+		return commandConsumed();
+	}
+	await runtime.output("Usage: /agent <name> to activate an agent persona.");
+	return commandConsumed();
+}
+
+/** `/agent <name>`: discover the agent and enter its persona through the session runtime. */
+async function handleAgentCommandSwitch(name: string, runtime: SlashCommandRuntime): Promise<SlashCommandResult> {
+	const session = runtime.session;
+	const modeState = typeof session.getPlanModeState === "function" ? session.getPlanModeState() : undefined;
+	if (modeState?.enabled) {
+		return usage("Plan mode is active. Exit plan mode before switching agent personas.", runtime);
+	}
+	const personaRuntime = session.getPersonaRuntime();
+	if (!personaRuntime) {
+		return usage("Persona switching is unavailable: this session has no persona runtime.", runtime);
+	}
+	const discovery = await discoverAgents(runtime.cwd, undefined, session.effectiveExtensionRoots);
+	const agent = getAgent(discovery.agents, name);
+	if (!agent) {
+		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
+		return usage(`Unknown agent: ${name}. Available: ${available}`, runtime);
+	}
+	// j2m: the CLI `--tools`/`--no-tools` ceiling is durable policy state the
+	// runtime does not know about — `enter` with empty explicit overrides would
+	// let a wider persona frontmatter widen the session past it. Serialize the
+	// ceiling into `explicit.tools` BEFORE enter so #computePersonaGrant's
+	// intersect path runs (cliGrant null → leave explicit.tools undefined).
+	const cliGrant = session.getToolPolicy()?.cliGrant ?? null;
+	const explicitOverrides: PersonaExplicitOverrides = cliGrant ? { tools: [...cliGrant] } : {};
+	try {
+		await personaRuntime.enter(agent, explicitOverrides, createDefaultPersonaModelHooks(session));
+	} catch (error) {
+		return usage(`Persona switch failed: ${errorMessage(error)}`, runtime);
+	}
+	// Caller-owned journal persistence (runtime stays pure; resume reconcile reads).
+	// j2g: the pre-persona baseline rides the entry for the resume reconcile.
+	appendPersonaJournalEntry(session, {
+		name: agent.name,
+		explicit: explicitOverrides,
+		baseline: personaRuntime.getActiveBaseline(),
+	});
+	await runtime.output(`Agent persona: ${agent.name}`);
+	await runtime.notifyConfigChanged?.();
+	return commandConsumed();
+}
+
+/**
+ * ACP/text-mode `/agent` handler. Interactive TUI behavior (picker) lives in
+ * `handleTui`; this path answers with text and switches directly by name.
+ */
+async function handleAgentCommand(
+	command: ParsedSlashCommand,
+	runtime: SlashCommandRuntime,
+): Promise<SlashCommandResult> {
+	const name = command.args.trim();
+	if (!name) return handleAgentCommandNoName(runtime);
+	return handleAgentCommandSwitch(name, runtime);
+}

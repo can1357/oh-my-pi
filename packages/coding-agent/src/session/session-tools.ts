@@ -57,6 +57,12 @@ export interface SessionToolsHost {
 	model(): Model | undefined;
 	memoryBackendSession(): MemoryBackendStartOptions["session"];
 	clearInheritedProviderPromptCacheKey(): void;
+	/**
+	 * Host spawn-policy fallback consulted by AgentSession.getSessionSpawns.
+	 * A string is CLI `--spawns` (comma-separated names, `*` = unrestricted);
+	 * `null` = unrestricted.
+	 */
+	getSessionSpawns(): string | string[] | "*" | null;
 	clearMemoryPromotionSnapshot(): void;
 	captureMemoryPromotionSnapshot(prompt: string[]): void;
 	emitNotice(level: "info" | "warning" | "error", message: string, source?: string): void;
@@ -64,6 +70,16 @@ export interface SessionToolsHost {
 	localProtocolOptions(): LocalProtocolOptions;
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
+	/**
+	 * Policy seam for every presentation mutation ({@link SessionTools.setActiveToolsByName},
+	 * {@link SessionTools.setActiveToolPresentation}, MCP/RPC refreshes, late extension
+	 * registration). Implemented by AgentSession as `name => toolPolicy.granted(name)`;
+	 * policy-less sessions leave it undefined (ungated, the pre-persona behavior).
+	 * This is the PERMISSION question (cliGrant ∩ personaGrant) — NOT the
+	 * effective() default-activity derivation, which would pin `defaultInactive`
+	 * tools off and block `/mcp` toggles and RPC activation from ever enabling them.
+	 */
+	isToolGranted?(name: string): boolean;
 }
 
 interface SessionToolsOptions {
@@ -188,6 +204,8 @@ interface XdevMountNoticeDetails {
 /** Owns tool registration, presentation, prompt rebuilding, skills, and permissions. */
 export class SessionTools {
 	readonly #host: SessionToolsHost;
+	/** Permission gate (cliGrant ∩ personaGrant) consulted before a name enters the enabled surface; `undefined` = no policy (ungated). */
+	#isToolGranted: ((name: string) => boolean) | undefined;
 	#autoApprove: boolean;
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
@@ -261,6 +279,7 @@ export class SessionTools {
 
 	constructor(host: SessionToolsHost, options: SessionToolsOptions) {
 		this.#host = host;
+		this.#isToolGranted = host.isToolGranted;
 		this.#autoApprove = options.autoApprove === true;
 		this.#toolRegistry = options.toolRegistry ?? new Map();
 		this.#createVibeTools = options.createVibeTools;
@@ -576,7 +595,7 @@ export class SessionTools {
 				this.#installedVibeToolNames.add(tool.name);
 			}
 
-			await this.#applyActiveToolsByName([...new Set([...baseToolNames, ...vibeToolNames])]);
+			await this.#applyActiveToolsByName(this.#policyFilter([...new Set([...baseToolNames, ...vibeToolNames])]));
 		});
 	}
 
@@ -584,7 +603,7 @@ export class SessionTools {
 	deactivateVibeTools(nextToolNames: string[]): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
 			this.#uninstallVibeTools();
-			await this.#applyActiveToolsByName(nextToolNames);
+			await this.#applyActiveToolsByName(this.#policyFilter(nextToolNames));
 		});
 	}
 
@@ -1286,10 +1305,16 @@ export class SessionTools {
 		this.#host.notifyCommandMetadataChanged();
 	}
 
-	/** Selects enabled tools, ignoring names absent from the registry. */
+	/**
+	 * Selects enabled tools, ignoring names absent from the registry. The session
+	 * tool policy filters the incoming names first, so this funnel is the single
+	 * activation gate for /mcp toggles, RPC activation, and extension
+	 * `setActiveTools()` — no policy-ineligible tool can reach the enabled
+	 * surface through any of them.
+	 */
 	setActiveToolsByName(toolNames: string[]): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
-			const normalized = normalizeToolNames(toolNames);
+			const normalized = this.#policyFilter(normalizeToolNames(toolNames));
 			// Transport-write eligibility keys off the *current* active set: an ordinary
 			// selection change should not demote `write` unless it is already active.
 			await this.#applyToolPresentation(
@@ -1324,7 +1349,7 @@ export class SessionTools {
 		signal?: AbortSignal,
 	): Promise<void> {
 		return this.runToolRegistryMutation(async () => {
-			const normalized = normalizeToolNames(toolNames);
+			const normalized = this.#policyFilter(normalizeToolNames(toolNames));
 			// Restoration targets a snapshot, so write eligibility comes from the
 			// *target* set rather than whatever happens to be active mid-rollback.
 			await this.#applyToolPresentation(
@@ -1347,6 +1372,18 @@ export class SessionTools {
 				[...nonMCPMountedToolNames, ...currentMountedMCPToolNames],
 			);
 		});
+	}
+
+	/**
+	 * Drops names the session tool policy does not currently grant. Identity when
+	 * no policy exists (policy-less session stubs, tests). Mounted names the
+	 * policy excludes are filtered with the same predicate by the caller's
+	 * mounted-set narrowing in {@link #applyToolPresentation}'s inputs.
+	 */
+	#policyFilter(toolNames: string[]): string[] {
+		const isToolGranted = this.#isToolGranted;
+		if (isToolGranted === undefined) return toolNames;
+		return toolNames.filter(name => isToolGranted(name));
 	}
 
 	/**
@@ -1402,7 +1439,10 @@ export class SessionTools {
 				this.#builtInToolNames.add(wrapped.name);
 				nextActive.push(wrapped.name);
 			}
-			await this.#applyActiveToolsByName([...new Set(nextActive)]);
+			// Persona/restricted policies must gate internally-driven applies too:
+			// a memory backend swap must not widen the enabled surface past the
+			// policy (same seam the public funnels consult).
+			await this.#applyActiveToolsByName(this.#policyFilter([...new Set(nextActive)]));
 		});
 	}
 
@@ -1421,7 +1461,12 @@ export class SessionTools {
 	/** Reconciles the external scratchpad after the active model changes. */
 	reconcileThinkTool(): Promise<boolean> {
 		return this.#setThinkToolActive(
-			this.#host.settings.get("externalThinking") && supportsExternalThinking(this.#host.model()),
+			this.#host.settings.get("externalThinking") &&
+				supportsExternalThinking(this.#host.model()) &&
+				// The scratchpad is a granted-surface tool: a policy that does not
+				// grant it keeps it dormant (the internal apply funnel consults the
+				// same permission question as the public funnels).
+				(this.#isToolGranted?.("think") ?? true),
 		);
 	}
 
@@ -1430,7 +1475,7 @@ export class SessionTools {
 			const active = this.getEnabledToolNames();
 			if (!enabled) {
 				if (active.includes("think")) {
-					await this.#applyActiveToolsByName(active.filter(name => name !== "think"));
+					await this.#applyActiveToolsByName(this.#policyFilter(active.filter(name => name !== "think")));
 				}
 				return true;
 			}
@@ -1441,8 +1486,13 @@ export class SessionTools {
 				this.#toolRegistry.set(wrapped.name, wrapped);
 				this.#builtInToolNames.add(wrapped.name);
 			}
-			if (!active.includes("think")) {
-				await this.#applyActiveToolsByName([...active, "think"]);
+			// Persona/restricted policies must gate internally-driven applies too
+			// (same seam the public funnels consult): the scratchpad stays
+			// registered-but-dormant when the policy does not grant it. The apply
+			// runs whenever the enable decision and the live set disagree — a
+			// policy-revoked name is dropped here, not just an absent one.
+			if (!active.includes("think") || !this.#policyFilter(["think"]).includes("think")) {
+				await this.#applyActiveToolsByName(this.#policyFilter([...active, "think"]));
 			}
 			return true;
 		});
@@ -1660,19 +1710,21 @@ export class SessionTools {
 			this.#toolRegistry.set(tool.name, tool);
 			if (managerToolSet.has(tool)) this.#mcpManagerToolNames.add(tool.name);
 		}
-
-		// Connected manager tools become active immediately. Extension-owned MCP
-		// tools retain their prior selection while both sets share one registry.
 		const retainedActiveExtensionToolNames = previousActiveMcpToolNames.filter(
 			name => this.#extensionMcpTools.has(name) && this.#toolRegistry.has(name),
 		);
-		const nextActive = [
+
+		// Connected manager tools become active immediately — but only what the
+		// session tool policy grants (a persona/restricted policy keeps policy-
+		// ineligible MCP tools registered-but-dormant). Extension-owned MCP
+		// tools retain their prior selection while both sets share one registry.
+		const nextActive = this.#policyFilter([
 			...new Set([
 				...this.#getActiveNonMCPToolNames(),
 				...this.#mcpManagerToolNames,
 				...retainedActiveExtensionToolNames,
 			]),
-		];
+		]);
 		try {
 			await this.#applyActiveToolsByName(nextActive);
 			if (this.#host.isDisposed()) restorePreviousMcpTools();
@@ -1731,9 +1783,14 @@ export class SessionTools {
 		const autoActivatedRpcToolNames = rpcTools
 			.filter(tool => !tool.hidden && !previousRpcHostToolNames.has(tool.name))
 			.map(tool => tool.name);
+		// RPC host tools activate like any other mutation: the policy filter drops
+		// names the session tool policy does not grant, so an RPC-attached tool
+		// stays registered-but-dormant under an ineligible policy.
 		try {
 			await this.#applyActiveToolsByName(
-				Array.from(new Set([...activeNonRpcToolNames, ...preservedRpcToolNames, ...autoActivatedRpcToolNames])),
+				this.#policyFilter(
+					Array.from(new Set([...activeNonRpcToolNames, ...preservedRpcToolNames, ...autoActivatedRpcToolNames])),
+				),
 			);
 		} catch (error) {
 			for (const name of this.#rpcHostToolNames) this.#toolRegistry.delete(name);

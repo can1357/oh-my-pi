@@ -56,7 +56,8 @@ import { SessionManager } from "../session/session-manager";
 import { truncateTail } from "../session/streaming-output";
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop, resolveTaskEffortLevel, type TaskEffort } from "../thinking";
 import type { ContextFileEntry, ToolSession } from "../tools";
-import { resolveEvalBackends } from "../tools/eval-backends";
+import { type EvalBackendsAllowance, resolveEvalBackends } from "../tools/eval-backends";
+import { expandExecToolShorthand } from "../tools/builtin-names";
 import { isIrcEnabled } from "../tools/hub";
 import { LIST_STATUS_ORDER } from "../tools/hub/messaging";
 import { DEFAULT_HUB_LIST_LIMIT } from "../tools/hub/types";
@@ -465,6 +466,16 @@ export interface ExecutorOptions {
 	 * tool, suppressing discovered and always-included capabilities.
 	 */
 	restrictToolNames?: boolean;
+	/**
+	 * The parent session's BASELINE tool grant (`SessionToolPolicy.baselineEffectiveSet()`:
+	 * registry ∩ cliGrant ∩ toggles) when the parent is CLI/session-restricted;
+	 * `undefined`/`null` for unrestricted parents. Caps the child's tool list
+	 * (spawn inheritance). The persona layer is deliberately EXCLUDED — the
+	 * persona scopes the main agent's own behavior; it does not cage spawned
+	 * descendants (maintainer ruling): a child is bounded by the original
+	 * main's restriction state plus its own frontmatter.
+	 */
+	parentEffectiveGrant?: ReadonlySet<string> | null;
 	signal?: AbortSignal;
 	onProgress?: (progress: AgentProgress) => void;
 	/**
@@ -2903,6 +2914,61 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	});
 }
 
+interface ChildToolNameDerivation {
+	/** Parent's effective grant when the parent session is restricted; `null`/`undefined` when unrestricted. */
+	parentEffectiveGrant?: ReadonlySet<string> | null;
+	/** Child runs with `restrictToolNames` (plan mode or restricted host). */
+	restrictToolNames?: boolean;
+	/** Child is at the recursion ceiling: `task` is stripped regardless of grants. */
+	atMaxDepth?: boolean;
+	/** Eval backend availability for the `exec` → eval/bash expansion. */
+	evalBackends?: EvalBackendsAllowance;
+}
+
+/**
+ * Derive a child subagent's tool list from its agent definition and the parent's
+ * capability state. Spawn inheritance: a restricted parent (launch `--agent`
+ * persona or live `/agent` switch — both policy-driven, so parity is structural)
+ * caps the child at the parent's own effective grant; an unrestricted parent
+ * leaves the child's tool list exactly as before.
+ */
+export function deriveChildToolNames(agent: AgentDefinition, options: ChildToolNameDerivation): string[] | undefined {
+	const parentGrant = options.parentEffectiveGrant ?? null;
+	let toolNames: string[] | undefined;
+	if (agent.tools) {
+		// fr-vW: expand the `exec` shorthand on the CHILD side BEFORE the parent
+		// intersect — the parent grant only ever holds concrete tool names, so a
+		// child declaring `tools: [exec]` under a [bash]-granting parent must
+		// keep bash here, not vanish in the intersect.
+		const expanded = expandExecToolShorthand(agent.tools, options.evalBackends);
+		toolNames = parentGrant ? expanded.filter(name => parentGrant.has(name)) : expanded;
+		// Auto-include task tool if spawns defined but task not in tools. The
+		// intersection may have dropped it — re-add only if the parent can run it.
+		if (
+			agent.spawns !== undefined &&
+			!toolNames.includes("task") &&
+			!options.atMaxDepth &&
+			(!parentGrant || parentGrant.has("task"))
+		) {
+			toolNames = [...toolNames, "task"];
+		}
+	} else if (parentGrant) {
+		// No tools frontmatter: child inherits the parent's full effective grant.
+		toolNames = [...parentGrant];
+	}
+
+	if (options.atMaxDepth && toolNames?.includes("task")) {
+		toolNames = toolNames.filter(name => name !== "task");
+	}
+	// Ordinary agents retain the host's always-on collaboration capability.
+	// Restricted sessions must not widen their explicit host tool list with hub:
+	// for a restricted parent, hub is either already in the grant or out by policy.
+	if (toolNames && !options.restrictToolNames && !parentGrant && !toolNames.includes("hub")) {
+		toolNames = [...toolNames, "hub"];
+	}
+	return toolNames;
+}
+
 /**
  * Run a single agent in-process.
  */
@@ -3002,32 +3068,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const childDepth = parentDepth + 1;
 	const atMaxDepth = maxRecursionDepth >= 0 && childDepth >= maxRecursionDepth;
 	const ircEnabled = options.enableIrc !== false && isIrcEnabled(subagentSettings, childDepth);
-
-	// Add tools if specified
-	let toolNames: string[] | undefined;
-	if (agent.tools) {
-		toolNames = agent.tools;
-		// Auto-include task tool if spawns defined but task not in tools
-		if (agent.spawns !== undefined && !toolNames.includes("task") && !atMaxDepth) {
-			toolNames = [...toolNames, "task"];
-		}
-	}
-
-	if (atMaxDepth && toolNames?.includes("task")) {
-		toolNames = toolNames.filter(name => name !== "task");
-	}
-	// Ordinary agents retain the host's always-on collaboration capability.
-	// Restricted sessions must not widen their explicit host tool list with hub.
-	if (toolNames && !options.restrictToolNames && !toolNames.includes("hub")) {
-		toolNames = [...toolNames, "hub"];
-	}
-	if (toolNames?.includes("exec")) {
-		const backends = resolveEvalBackends({ settings } as ToolSession);
-		const expanded = toolNames.filter(name => name !== "exec");
-		if (backends.python || backends.js) expanded.push("eval");
-		expanded.push("bash");
-		toolNames = Array.from(new Set(expanded));
-	}
+	const toolNames = deriveChildToolNames(agent, {
+		parentEffectiveGrant: options.parentEffectiveGrant,
+		restrictToolNames: options.restrictToolNames === true,
+		atMaxDepth,
+		evalBackends: resolveEvalBackends({ settings } as ToolSession),
+	});
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
 	const sessionFile = subtaskSessionFile ?? null;

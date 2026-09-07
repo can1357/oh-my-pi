@@ -4,7 +4,9 @@
  * This file handles CLI argument parsing and translates them into
  * createAgentSession() options. The SDK does the heavy lifting.
  */
+import * as fs from "node:fs/promises";
 import * as fsSync from "node:fs";
+import * as path from "node:path";
 import * as os from "node:os";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
@@ -41,6 +43,7 @@ import {
 	resolveCliModel,
 	resolveModelRoleValue,
 	resolveModelScope,
+	type ResolveCliModelResult,
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
@@ -53,11 +56,13 @@ import {
 	preloadPluginRoots,
 	resolveActiveProjectRegistryPath,
 } from "./discovery/helpers";
-import { injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
+import { buildEffectiveExtensionRoots, injectOmpExtensionCliRoots } from "./discovery/omp-extension-roots";
+import type { EffectiveExtensionRoots } from "./capability/types";
 import { formatExtensionLoadNotifications } from "./extensibility/extensions/load-errors";
 import { loadExtensions } from "./extensibility/extensions/loader";
 import { ExtensionRunner } from "./extensibility/extensions/runner";
 import type { ExtensionUIContext } from "./extensibility/extensions/types";
+import { resolvePath } from "./extensibility/utils";
 import { scheduleMarketplaceAutoUpdate } from "./extensibility/plugins/marketplace-auto-update";
 import { registerDaemonProjectPresence } from "./launch/presence";
 import { discoverStartupLspServers } from "./lsp/servers";
@@ -102,6 +107,8 @@ import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
 import { shouldShowStartupSplash } from "./startup-splash";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "./system-prompt";
+import { discoverAgents, getAgent } from "./task/discovery";
+import type { PersonaExplicitOverrides } from "./session/tool-policy";
 import { createPersistedSubagentReviverFactory } from "./task/persisted-revive";
 import { createTelemetryExportConfig, initTelemetryExport, isTelemetryExportEnabled } from "./telemetry-export";
 import { concreteThinkingLevel, parseConfiguredThinkingLevel } from "./thinking";
@@ -379,8 +386,10 @@ export interface AcpSessionFactoryOptions {
 	sessionDir?: string;
 	authStorage: AuthStorage;
 	modelRegistry: ModelRegistry;
-	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools">;
+	parsedArgs: Pick<Args, "apiKey" | "trustedExtensions" | "tools" | "agent">;
 	rawArgs: string[];
+	/** Per-workspace async re-derivation of persona discovery roots (relative extension spellings). */
+	rederivePersonaExtensionRoots?: (sessionCwd: string, sessionSettings?: Settings) => Promise<EffectiveExtensionRoots>;
 	createSession: (options: CreateAgentSessionOptions) => Promise<CreateAgentSessionResult>;
 }
 
@@ -427,6 +436,29 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		const titleSystemPromptSource = discoverTitleSystemPromptFile(cwd);
 		const titleSystemPrompt = await resolvePromptInput(titleSystemPromptSource, "title system prompt");
 		const eventBus = new EventBus();
+		// Per-client-cwd roots: the launch workspace's definitions must not
+		// leak into a different workspace. Derived for EVERY session (not only
+		// when a launch persona was requested) — a later live `/agent` on
+		// workspace B discovers through the session's roots provider, which
+		// must carry B's relative-extension package roots.
+		let pendingPersonaAgent = undefined;
+		let sessionRoots: EffectiveExtensionRoots | undefined;
+		{
+			// fw2QD: consume the TARGET workspace's settings (nextSettings), not
+			// the launch workspace's — B's configured extensions belong to B.
+			const roots = args.rederivePersonaExtensionRoots
+				? await args.rederivePersonaExtensionRoots(cwd, nextSettings)
+				: args.baseOptions.extensionRoots?.(cwd);
+			if (args.parsedArgs.agent) {
+				const { agents } = await discoverAgents(cwd, undefined, roots);
+				pendingPersonaAgent = getAgent(agents, args.parsedArgs.agent) ?? undefined;
+			}
+			// fwdEb/fwu7x: pin the workspace-scoped view on the CREATED session
+			// too — baseOptions.extensionRoots is a sync closure serving the
+			// launch view, so later /agent or persisted-persona discovery on
+			// workspace B would scan A's roots without this override.
+			sessionRoots = roots;
+		}
 		const trustedExtensions =
 			args.parsedArgs.trustedExtensions && args.parsedArgs.trustedExtensions.length > 0
 				? await loadTrustedSessionExtensions(args.baseOptions, cwd, eventBus)
@@ -438,6 +470,8 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 		}
 		const { session: nextSession, setToolUIContext } = await args.createSession({
 			...args.baseOptions,
+			extensionRoots: sessionRoots ? () => sessionRoots : args.baseOptions.extensionRoots,
+			pendingPersonaAgent,
 			cwd,
 			sessionManager: nextSessionManager,
 			settings: nextSettings,
@@ -1076,6 +1110,25 @@ export function applyResolvedSystemPromptInputs(
 	}
 }
 
+/**
+ * Selector persisted as the persona's explicit model override. The CLI resolver
+ * honors `--provider <name> --model <pattern>` together, but the bare pattern
+ * alone can match the same id on another provider; persisting the resolved
+ * `provider/model` form keeps resume reconcile pinned to the requested provider.
+ */
+function personaExplicitModelPattern(parsed: Args, resolved: ResolveCliModelResult | undefined): string | undefined {
+	if (!parsed.model) return undefined;
+	if (!parsed.provider) return parsed.model;
+	if (!resolved?.model) return `${parsed.provider}/${parsed.model}`;
+	// A thinking suffix on the CLI pattern (`--provider openai --model gpt-5:high`)
+	// must survive the provider-qualified composition: the resume reconcile
+	// re-resolves the persisted pattern, so dropping the suffix silently
+	// re-classifies the thinking effort. `resolved.thinkingLevel` is set exactly
+	// when the resolver stripped a valid suffix — append it back.
+	const qualified = `${resolved.model.provider}/${resolved.model.id}`;
+	return resolved.thinkingLevel ? `${qualified}:${resolved.thinkingLevel}` : qualified;
+}
+
 /** Builds startup session options from parsed CLI flags, scoped models, and resolved session lineage. */
 export async function buildSessionOptions(
 	parsed: Args,
@@ -1136,7 +1189,6 @@ export async function buildSessionOptions(
 			options.providerPromptCacheKeySource = "fork";
 		}
 	}
-
 	// Model from CLI
 	// - supports --provider <name> --model <pattern>
 	// - supports --model <provider>/<pattern>
@@ -1145,8 +1197,9 @@ export async function buildSessionOptions(
 	// createAgentSession's post-extension re-resolution (issue #6694); the
 	// scoped thinking-level seed below must be deferred along with the model.
 	let deferredDefaultRole = false;
+	let resolvedCliModel: ResolveCliModelResult | undefined;
 	if (parsed.model) {
-		const resolved = resolveCliModel({
+		resolvedCliModel = resolveCliModel({
 			cliProvider: parsed.provider,
 			cliModel: parsed.model,
 			modelRegistry,
@@ -1154,35 +1207,38 @@ export async function buildSessionOptions(
 			settings: activeSettings,
 			preferences: modelMatchPreferences,
 		});
-		if (resolved.warning) {
-			process.stderr.write(`${chalk.yellow(`Warning: ${resolved.warning}`)}\n`);
+		if (resolvedCliModel.warning) {
+			process.stderr.write(`${chalk.yellow(`Warning: ${resolvedCliModel.warning}`)}\n`);
 		}
-		const matchedAfterMissingRolePattern = (resolved.configuredPatternIndex ?? 0) > 0;
+		const matchedAfterMissingRolePattern = (resolvedCliModel.configuredPatternIndex ?? 0) > 0;
 		if (matchedAfterMissingRolePattern) {
 			// Extensions may register an earlier configured role candidate.
 			options.modelPattern = parsed.model;
-		} else if (resolved.error) {
-			if (!parsed.provider && ((resolved.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))) {
+		} else if (resolvedCliModel.error) {
+			if (
+				!parsed.provider &&
+				((resolvedCliModel.configuredPatterns?.length ?? 0) > 0 || !parsed.model.includes(":"))
+			) {
 				// Model not found in built-in registry — defer resolution to after extensions load
 				// (extensions may register additional providers/models via registerProvider)
 				options.modelPattern = parsed.model;
 			} else {
-				process.stderr.write(`${chalk.red(resolved.error)}\n`);
+				process.stderr.write(`${chalk.red(resolvedCliModel.error)}\n`);
 				process.exit(1);
 			}
-		} else if (resolved.model) {
-			options.model = resolved.model;
+		} else if (resolvedCliModel.model) {
+			options.model = resolvedCliModel.model;
 			options.rebindModelAfterDiscovery = true;
 			// The recorded role must carry the effort the session actually starts
 			// at, or the first cycle back into `default` overrides it.
 			activeSettings.overrideModelRoles({
 				default: formatModelSelectorValue(
-					resolved.selector ?? `${resolved.model.provider}/${resolved.model.id}`,
-					parsed.thinking ?? resolved.thinkingLevel,
+					resolvedCliModel.selector ?? `${resolvedCliModel.model.provider}/${resolvedCliModel.model.id}`,
+					parsed.thinking ?? resolvedCliModel.thinkingLevel,
 				),
 			});
-			if (!parsed.thinking && resolved.thinkingLevel) {
-				options.thinkingLevel = resolved.thinkingLevel;
+			if (!parsed.thinking && resolvedCliModel.thinkingLevel) {
+				options.thinkingLevel = resolvedCliModel.thinkingLevel;
 			}
 		}
 	} else if (scopedModels.length > 0 && !restoringSession) {
@@ -1351,6 +1407,15 @@ export async function buildSessionOptions(
 		options.rules = [];
 	}
 
+	// Extension-root inputs MUST be resolved BEFORE `--agent` discovery: the CLI
+	// `--extension`/`--hook`/`--trusted-extension` roots the session WILL use are
+	// also where extension-package agents live, and `discoverAgents` sub-discovers
+	// `<root>/agents/*.md` through the same `EffectiveExtensionRoots` struct the
+	// SDK session factory later derives (buildEffectiveExtensionRoots). Resolving
+	// the persona first — without the roots — made `--agent <ext-agent>` fail with
+	// "Unknown --agent" whenever the definition shipped in a CLI extension.
+	const trustedExtensionCount = parsed.trustedExtensions?.length ?? 0;
+
 	// Trusted extension paths are an exact allowlist for extension modules.
 	if (parsed.trustedExtensions && parsed.trustedExtensions.length > 0) {
 		const trustedPaths = parsed.trustedExtensions.map(trustedPath => {
@@ -1380,10 +1445,139 @@ export async function buildSessionOptions(
 			options.disableExtensionDiscovery = true;
 		}
 	}
+	// j2u: a FILE-form `--trusted-extension /pkg/index.ts` must also contribute
+	// its PACKAGE root to `--agent` discovery: the module file loads as an
+	// extension, but agent discovery needs the package directory (the
+	// `agents/` sub-tree lives at the package root, not beside the module).
+	// Derive the nearest package.json ancestor for each file path and union it
+	// into the explicit roots; listOmpExtensionRoots' directory filter drops
+	// the file path itself while the package directory scans.
+	const agentExtensionRoots: string[] =
+		trustedExtensionCount > 0
+			? (options.additionalExtensionPaths ?? [])
+			: [...(parsed.extensions ?? []), ...(parsed.hooks ?? [])];
+	const options_cwd = parsed.cwd ?? getProjectDir();
+	// Package roots are derived lazily per session cwd below
+	// (derivePackageRoots) — the pre-pass is gone.
+	// The package root rides ONLY the discovery roots: the trusted loader
+	// validates that every explicit path is a module FILE (loadTrustedSessionExtensions),
+	// while agent discovery needs the package directory (the `agents/` subtree
+	// lives at the package root, not beside the module). The roots closure
+	// re-derives the nearest package.json ancestor against the REQUESTING
+	// session's cwd — an ACP host invokes it per client workspace, and a
+	// relative `--extension ./pkg/index.ts` must resolve to project B's package
+	// directory for B's sessions, not the launch workspace's absolute root.
+	const derivePackageRoots = async (sessionCwd: string): Promise<string[]> => {
+		const roots: string[] = [];
+		for (const extensionPath of agentExtensionRoots) {
+			// Absolute spellings are workspace-independent; resolvePath is a
+			// no-op for them, so both forms derive through the same walk.
+			try {
+				const resolved = resolvePath(extensionPath, sessionCwd);
+				const stat = await fs.stat(resolved);
+				if (!stat.isFile()) continue;
+				let dir = path.dirname(resolved);
+				while (true) {
+					if (await Bun.file(path.join(dir, "package.json")).exists()) {
+						roots.push(dir);
+						break;
+					}
+					const parent = path.dirname(dir);
+					if (parent === dir) break;
+					dir = parent;
+				}
+			} catch {
+				continue;
+			}
+		}
+		return roots;
+	};
+	const packageRootsByCwd = new Map<string, string[]>();
+	const packageRootsFor = async (sessionCwd?: string): Promise<string[]> => {
+		const effectiveCwd = sessionCwd ?? options_cwd;
+		let roots = packageRootsByCwd.get(effectiveCwd);
+		if (!roots) {
+			roots = await derivePackageRoots(effectiveCwd);
+			packageRootsByCwd.set(effectiveCwd, roots);
+		}
+		return roots;
+	};
+	const buildPersonaExtensionRoots = async (
+		sessionCwd?: string,
+		sessionSettings?: Settings,
+	): Promise<EffectiveExtensionRoots> => {
+		const sessionPackageRoots = await packageRootsFor(sessionCwd);
+		const settingsFor = sessionSettings ?? activeSettings;
+		return buildEffectiveExtensionRoots({
+			additionalExtensionPaths: [...agentExtensionRoots, ...sessionPackageRoots],
+			disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
+			configured: settingsFor.get("extensions") ?? [],
+			configuredLevel: settingsFor.extensionsSourceLevel(),
+		});
+	};
+	const launchRootsView = await buildPersonaExtensionRoots();
+	// `options.extensionRoots` is a SYNC provider (subagent discovery reads it
+	// synchronously). The as-derivable parts recompute per call: settings
+	// reloads change `extensions`, and a TUI/RPC session switch changes the
+	// live cwd — recomputing keeps `/agent`, task-agent, and skill discovery
+	// tied to the CURRENT workspace. The package-root portion is the only
+	// async part; it is cached per cwd (fs walks are not callable sync).
+	const packageRootsCache = new Map<string, string[]>(packageRootsByCwd);
+	options.extensionRoots = (sessionCwd?: string): EffectiveExtensionRoots => {
+		const cachedRoots = packageRootsCache.get(sessionCwd ?? options_cwd) ?? [];
+		const hasCacheableRoots = (packageRootsCache.size ?? 0) > 0 || agentExtensionRoots.length === 0;
+		// Without package roots to derive, the view is fully synchronous.
+		if (hasCacheableRoots && cachedRoots.length === 0 && agentExtensionRoots.length > 0) {
+			// Package roots exist for some cwd but not this one yet — serve the
+			// last-known view; the async path refreshes the cache.
+			return launchRootsView;
+		}
+		return buildEffectiveExtensionRoots({
+			additionalExtensionPaths: [...agentExtensionRoots, ...cachedRoots],
+			disableExtensionDiscovery: trustedExtensionCount > 0 || parsed.noExtensions === true,
+			configured: activeSettings.get("extensions") ?? [],
+			configuredLevel: activeSettings.extensionsSourceLevel(),
+		});
+	};
+	const agentResolutionRoots = launchRootsView;
 
+	// `--agent <name>`: resolve the persona BEFORE the session is built so its
+	// definition can enter through the PersonaRuntime seam (CreateAgentSessionOptions
+	// → sdk.ts constructs the runtime + enter() after the session exists but before
+	// the first user turn). Unresolvable names are a hard launch error.
+	if (parsed.agent) {
+		const options_cwd = parsed.cwd ?? getProjectDir();
+		const { agents } = await discoverAgents(options_cwd, undefined, agentResolutionRoots);
+		const agent = getAgent(agents, parsed.agent);
+		// ACP defers persona validation to the per-client workspace: the server
+		// runs across client-supplied cwds, and the requested name may exist only
+		// in a target workspace. The factory re-discovers against each session/new
+		// cwd; a miss there simply leaves the session persona-less.
+		if (!agent && parsed.mode !== "acp") {
+			throw new Error(`Unknown --agent "${parsed.agent}". Run "omp agents" to list discovered agents.`);
+		}
+		options.pendingPersonaAgent = agent;
+		// Explicit CLI flags win over the persona's frontmatter: the persona model
+		// apply only uses agent.model when no explicit pattern was resolved (the
+		// PersonaModelApplyHooks defaults handle precedence), so threading the CLI
+		// values as explicit overrides keeps `--model`/`--thinking` authoritative.
+		const explicit: PersonaExplicitOverrides = {};
+		if (parsed.model) explicit.model = personaExplicitModelPattern(parsed, resolvedCliModel);
+		if (parsed.thinking) explicit.thinking = parsed.thinking;
+		// fr-vU: `--no-tools` is a launch-time grant of NOTHING — on resume there
+		// is no flag, so the empty list must persist as the durable explicit grant
+		// or the persona would widen back to its full frontmatter toolset.
+		if (parsed.tools) explicit.tools = parsed.tools;
+		else if (parsed.noTools) explicit.tools = [];
+		if (Object.keys(explicit).length > 0) {
+			options.pendingPersonaExplicit = explicit;
+		}
+	}
+	// Per-workspace re-derivation hook for ACP (relative extension spellings):
+	// the factory re-derives package roots against each client cwd.
+	options.rederivePersonaExtensionRoots = buildPersonaExtensionRoots;
 	return options;
 }
-
 interface RunRootCommandDependencies {
 	createAgentSession?: typeof createAgentSession;
 	discoverAuthStorage?: typeof discoverAuthStorage;
@@ -1872,6 +2066,7 @@ export async function runRootCommand(
 				modelRegistry,
 				parsedArgs,
 				rawArgs,
+				rederivePersonaExtensionRoots: sessionOptions.rederivePersonaExtensionRoots,
 				createSession,
 			});
 			// Branch-only protocol runner: keep ACP server code out of normal interactive startup.

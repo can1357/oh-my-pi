@@ -118,6 +118,7 @@ import { releaseCompletionHandles } from "../eval/completion-bridge";
 import type { EvalPreludeDefinition } from "../eval/preludes";
 import type { PythonResult } from "../eval/py/executor";
 import { WorkPoolRegistry } from "../task/workpool";
+import { isScoutSpawnable } from "../task/spawn-policy";
 import type { BashPtyOptions, BashResult } from "../exec/bash-executor";
 import type { TtsrManager } from "../export/ttsr";
 import type { LoadedCustomCommand } from "../extensibility/custom-commands";
@@ -362,6 +363,10 @@ import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-sta
 import { SessionTools, type SessionToolsHost } from "./session-tools";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
+import type { PersonaRuntime } from "./persona-runtime";
+import type { SessionToolPolicy } from "./tool-policy";
+import { readPersistedAgentPersona, reconcileSessionPersona } from "./persisted-persona";
+import { createDefaultPersonaModelHooks } from "./persona-model-hooks";
 import { ToolChoiceQueue } from "./tool-choice-queue";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
@@ -561,10 +566,22 @@ export class AgentSession {
 
 	readonly configWarnings: string[] = [];
 
+	/** Session-wide tool policy; populated from `AgentSessionConfig.toolPolicy` at construction. Inert until later stages consume it. */
+	readonly toolPolicy: SessionToolPolicy | undefined;
+
+	/** Session-level spawn policy override (`null` = unrestricted/unset → falls back to the host config getter). */
+	#sessionSpawns: string[] | "*" | null = null;
+	/** Persona identity prompt appended by the active persona; `undefined` when no persona is active. */
+	#personaAppendPrompt: string | undefined;
+	/** Persona runtime owning persona enter/exit/reconcile; installed by the session factory when constructed. */
+	#personaRuntime: PersonaRuntime | undefined;
+
 	readonly #models: ModelControls;
 	readonly #tools: SessionTools;
 	readonly #prewalk: PrewalkCoordinator;
 
+	/** Host config captured at construction; source of the spawn-policy fallback. */
+	#toolsHost: SessionToolsHost;
 	readonly #providerBoundary: SessionProviderBoundary;
 	#promptTemplates: PromptTemplate[];
 	#slashCommands: FileSlashCommand[];
@@ -669,7 +686,6 @@ export class AgentSession {
 	// Agent identity (registry id) used for IRC routing and job ownership.
 	#agentId: string | undefined;
 	#agentKind: "main" | "sub" = "main";
-	#scoutAllowedBySpawnPolicy = true;
 	#providerSessionId: string | undefined;
 	#freshProviderSessionId: string | undefined;
 	#inheritedProviderPromptCacheKey: string | undefined;
@@ -1164,6 +1180,7 @@ export class AgentSession {
 		this.#preparedExtensions = config.preparedExtensions;
 		this.#extensionPaths = config.extensionPaths;
 		this.#codexResetCoordinator = config.codexResetCoordinator ?? defaultCodexAutoRedeemCoordinator;
+		this.toolPolicy = config.toolPolicy;
 		const bashHost: BashRunnerHost = {
 			agent: this.agent,
 			sessionManager: this.sessionManager,
@@ -1501,7 +1518,15 @@ export class AgentSession {
 			emitNotice: (level, message, source) => this.emitNotice(level, message, source),
 			notifyCommandMetadataChanged: () => this.#notifyCommandMetadataChanged(),
 			localProtocolOptions: () => this.#localProtocolOptions(),
+			// Host spawn-policy fallback (CLI `--spawns` / ToolSession contract); `null` = unrestricted.
+			getSessionSpawns: () => config.getSessionSpawns?.() ?? null,
+			// Policy seam: every presentation mutation consults the session tool
+			// policy. `this.toolPolicy` is assigned before this host (constructor
+			// line ordering), so the arrow reads the live field.
+			isToolGranted: name => this.toolPolicy?.granted(name) ?? true,
 		};
+		// Captured so the persona spawn override can fall back to the host config getter.
+		this.#toolsHost = sessionToolsHost;
 		this.#tools = new SessionTools(sessionToolsHost, {
 			autoApprove: config.autoApprove,
 			toolRegistry: config.toolRegistry,
@@ -1570,7 +1595,6 @@ export class AgentSession {
 		this.#loopGuards = new LoopGuards(streamGuardsHost);
 		this.#agentId = config.agentId;
 		this.#agentKind = config.agentKind ?? "main";
-		this.#scoutAllowedBySpawnPolicy = config.scoutAllowedBySpawnPolicy ?? true;
 		this.#providerSessionId = config.providerSessionId;
 		this.#inheritedProviderPromptCacheKey =
 			config.providerPromptCacheKeySource === "fork" ? this.agent.promptCacheKey : undefined;
@@ -1858,6 +1882,75 @@ export class AgentSession {
 		return this.#modelRegistry;
 	}
 
+	/**
+	 * Exposes the session-wide tool policy for callers that need the effective
+	 * tool-set derivations (cursor bridge, structured subagents, later stages).
+	 * Returns `undefined` for sessions constructed without one (all callers
+	 * until sdk.ts wires the policy through `AgentSessionConfig`).
+	 */
+	getToolPolicy(): SessionToolPolicy | undefined {
+		return this.toolPolicy;
+	}
+
+	/** Installs the session's persona runtime (called once by the session factory). */
+	setPersonaRuntime(runtime: PersonaRuntime): void {
+		this.#personaRuntime = runtime;
+	}
+
+	/** The session's persona runtime, or `undefined` for persona-incapable sessions. */
+	getPersonaRuntime(): PersonaRuntime | undefined {
+		return this.#personaRuntime;
+	}
+
+	/**
+	 * Effective session spawn policy. The persona-owned override wins when set;
+	 * otherwise the host config getter (CLI `--spawns`) applies.
+	 */
+	getSessionSpawns(): string[] | "*" | null {
+		if (this.#sessionSpawns !== null) return this.#sessionSpawns;
+		const hostSpawns = this.#toolsHost.getSessionSpawns();
+		if (hostSpawns === null || hostSpawns === "*") return hostSpawns ?? "*";
+		if (Array.isArray(hostSpawns)) return hostSpawns;
+		return hostSpawns
+			.split(",")
+			.map(s => s.trim())
+			.filter(Boolean);
+	}
+
+	/**
+	 * Single source of truth for scout availability: `task.disabledAgents`
+	 * ∩ the LIVE persona-aware spawn policy ({@link getSessionSpawns} — the
+	 * persona-owned override wins when set, else the host CLI `--spawns`).
+	 * Every prompt/advisory surface reads THIS, never a construction-time
+	 * `options.spawns` snapshot.
+	 */
+	isScoutSpawnable(): boolean {
+		return isScoutSpawnable(
+			this.settings.get("task.disabledAgents") as string[] | undefined,
+			this.getSessionSpawns(),
+		);
+	}
+
+	/** Sets the persona-owned spawn policy override (`null` clears it back to the host config). */
+	setSessionSpawns(spawns: string[] | "*" | null): void {
+		this.#sessionSpawns = spawns;
+	}
+
+	/** Applies (or clears, with `undefined`) the persona identity append prompt. */
+	applyPersonaAppendPrompt(personaText: string | undefined): void {
+		this.#personaAppendPrompt = personaText;
+	}
+
+	/** The persona identity append prompt; `undefined` when no persona is active. */
+	getPersonaAppendPrompt(): string | undefined {
+		return this.#personaAppendPrompt;
+	}
+
+	/** Public persona/switch entry point for the private provider prompt-cache-key clear. */
+	clearInheritedProviderPromptCacheKey(): void {
+		this.#clearInheritedProviderPromptCacheKey();
+	}
+
 	get asyncJobManager(): AsyncJobManager | undefined {
 		return this.#asyncJobManager;
 	}
@@ -1972,6 +2065,52 @@ export class AgentSession {
 	}
 
 	/**
+	 * j2n: session-level persona reconcile for headless surfaces (ACP/RPC/SDK).
+	 * The TUI installs a single-slot reconciler (#reconcilePersonaFromSession)
+	 * that owns this; when the slot is empty, switchSession calls THIS instead so
+	 * a switch to (or reload of) a persona session re-enters the persona from the
+	 * target journal, and a failed switch re-enters the SOURCE journal's persona.
+	 * Never journal-writes on success (the entry already exists); a persona the
+	 * journal names but discovery can no longer resolve degrades to unrestricted
+	 * — via the shared helper, so this surface journals the clear marker too
+	 * (matching the ACP load path, minus client notices).
+	 */
+	async #reconcilePersonaAfterSwitch(
+		sessionFile: string | undefined,
+		options: { fromRollback: boolean },
+	): Promise<void> {
+		// Target has no persona entry: the teardown before the switch already
+		// exited the source persona (and a rollback restored the source state,
+		// whose persona was ALSO exited by that same teardown — nothing to do).
+		if (options.fromRollback && !readPersistedAgentPersona(this.sessionManager.getEntries())) {
+			logger.warn("Persona re-activation after switch rollback skipped: journal has no agent entry", {
+				sessionFile,
+			});
+			return;
+		}
+		await reconcileSessionPersona(this, {
+			buildHooks: createDefaultPersonaModelHooks,
+			// fured: the gone-persona degrade must reach the client on headless
+			// surfaces too — a session-level notice (TUI forwards it as a status
+			// line, RPC includes `notice` in its event stream, ACP maps it onto
+			// an agent_message_chunk). Matching the TUI reconcile wording.
+			onGone: (session, persona) => {
+				session.emitNotice(
+					"warning",
+					`Agent persona "${persona}" is no longer available; session resumed without it.`,
+				);
+			},
+			onError: (session, persona, error) => {
+				logger.warn("Failed to reconcile persisted persona after session switch", {
+					sessionFile,
+					persona,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			},
+		});
+	}
+
+	/**
 	 * Re-anchor mode state to the session a branch just minted. Branching mints a
 	 * new session id/file (see {@link SessionManager.createBranchedSession}), so
 	 * without this the interactive-mode reconciler keeps the pre-branch vibe owner
@@ -1982,7 +2121,13 @@ export class AgentSession {
 	 */
 	async #reconcileModeAfterBranch(): Promise<void> {
 		try {
-			await this.#sessionSwitchReconciler?.();
+			// j2n: headless surfaces get the session-level persona reconcile here
+			// too — a branch of a persona session keeps the persona active.
+			if (this.#sessionSwitchReconciler === undefined) {
+				await this.#reconcilePersonaAfterSwitch(this.sessionFile, { fromRollback: false });
+				return;
+			}
+			await this.#sessionSwitchReconciler();
 		} catch (error) {
 			logger.warn("Failed to reconcile session mode after branch", {
 				sessionFile: this.sessionFile,
@@ -5692,8 +5837,7 @@ export class AgentSession {
 	}
 
 	#isScoutAvailable(): boolean {
-		const disabledAgents = this.settings.get("task.disabledAgents") as string[] | undefined;
-		return this.#scoutAllowedBySpawnPolicy && !disabledAgents?.includes("scout");
+		return this.isScoutSpawnable();
 	}
 
 	async #buildPlanModeMessage(): Promise<CustomMessage | null> {
@@ -7564,6 +7708,12 @@ export class AgentSession {
 	 */
 	async newSession(options?: NewSessionOptions): Promise<boolean> {
 		this.#assertVibeSessionTransitionAllowed("start a new session");
+		// Persona teardown is deliberately AFTER the session_before_switch veto
+		// check below: a cancelled switch must leave the outgoing session exactly
+		// as it was — persona metadata included. The teardown still runs before
+		// the transcript/context clear so the outgoing session's journal records
+		// the persona exit while the state still belongs to it. Default hooks:
+		// teardown cannot defer (no streaming is possible here).
 		const previousSessionFile = this.sessionFile;
 
 		// Emit session_before_switch event with reason "new" (can be cancelled)
@@ -7581,11 +7731,42 @@ export class AgentSession {
 		this.#disconnectFromAgent();
 		let advisorRecordersDetached = false;
 		await this.abort();
+		// Persona teardown, after the veto check above and before the
+		// transcript/context clear so the outgoing session's journal still records
+		// the persona exit while the state belongs to it.
+		const personaRuntime = this.getPersonaRuntime();
+		// Pre-transition failure recovery: capture the persona-complete state
+		// before the exit — if the following flush fails, restore it so the
+		// surviving session matches what its journal records.
+		const personaSnapshot =
+			personaRuntime && this.toolPolicy?.isPersonaActive() ? await personaRuntime.snapshot() : undefined;
+		if (personaRuntime && this.toolPolicy?.isPersonaActive()) {
+			try {
+				await personaRuntime.exit(createDefaultPersonaModelHooks(this));
+			} catch (error) {
+				// The failed exit already rolled the runtime back to the active
+				// persona; reconnect the agent event pipeline (the disconnect above
+				// severed it) before propagating so the surviving session stays
+				// fully alive — persistence and events must not be dead while the
+				// user keeps working in it.
+				this.#reconnectToAgent();
+				throw error;
+			}
+		}
 		this.#cancelOwnAsyncJobs();
 		this.#closeAllProviderSessions("new session");
-		await this.#bash.flushPending();
+		try {
+			await this.#bash.flushPending();
+		} catch (error) {
+			this.#reconnectToAgent();
+			if (personaRuntime && personaSnapshot) {
+				await personaRuntime.restore(personaSnapshot);
+			}
+			throw error;
+		}
 		const bashTransition = this.#bash.beginSessionTransition({ persistDetached: options?.drop !== true });
 		let sessionTransitioned = false;
+		let personaRestoreDone = false;
 		try {
 			advisorRecordersDetached = true;
 			await this.#advisors.drainAndDetachRecorders();
@@ -7673,6 +7854,23 @@ export class AgentSession {
 			if (advisorRecordersDetached) {
 				if (sessionTransitioned) this.#advisors.resetSessionState();
 				else this.#advisors.reattachRecorderFeeds();
+			}
+			if (!sessionTransitioned && !personaRestoreDone) {
+				// fwdEZ: the transition failed before committing — the old session
+				// survives, so its journaled persona must too. The pre-transition
+				// exit cleared it; restore the captured snapshot and reconnect the
+				// agent pipeline the disconnect severed.
+				personaRestoreDone = true;
+				if (personaRuntime && personaSnapshot && !this.toolPolicy?.isPersonaActive()) {
+					try {
+						await personaRuntime.restore(personaSnapshot);
+					} catch (restoreError) {
+						logger.error("Failed to restore the persona after a failed new-session transition", {
+							error: String(restoreError),
+						});
+					}
+				}
+				this.#reconnectToAgent();
 			}
 		}
 	}
@@ -7791,21 +7989,23 @@ export class AgentSession {
 			persist?: boolean;
 		},
 	): Promise<{ switched: boolean }> {
-		return this.#models.setModel(model, role, options);
+		return await this.#models.setModel(model, role, options);
 	}
 
 	/** Selects a model for this session without updating persisted model settings. */
-	setModelTemporary(
+	async setModelTemporary(
 		model: Model,
 		thinkingLevel?: ConfiguredThinkingLevel,
 		options?: { ephemeral?: boolean },
 	): Promise<void> {
-		return this.#models.setModelTemporary(model, thinkingLevel, options);
+		await this.#models.setModelTemporary(model, thinkingLevel, options);
 	}
 
-	/** Cycles the scoped model set, or all available models when no scope exists. */
-	cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
-		return this.#models.cycleModel(direction);
+	/**
+	 * Cycles the scoped model set, or all available models when no scope exists.
+	 */
+	async cycleModel(direction: "forward" | "backward" = "forward"): Promise<ModelCycleResult | undefined> {
+		return await this.#models.cycleModel(direction);
 	}
 
 	/** Resolves configured role models and the currently active role index. */
@@ -7813,17 +8013,21 @@ export class AgentSession {
 		return this.#models.getRoleModelCycle(roleOrder);
 	}
 
-	/** Applies a resolved role model without changing global settings. */
-	applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
-		return this.#models.applyRoleModel(entry);
+	/**
+	 * Applies a resolved role model without changing global settings.
+	 */
+	async applyRoleModel(entry: ResolvedRoleModel): Promise<void> {
+		await this.#models.applyRoleModel(entry);
 	}
 
-	/** Cycles the configured role models in the supplied order. */
-	cycleRoleModels(
+	/**
+	 * Cycles the configured role models in the supplied order.
+	 */
+	async cycleRoleModels(
 		roleOrder: readonly string[],
 		direction: "forward" | "backward" = "forward",
 	): Promise<RoleModelCycleResult | undefined> {
-		return this.#models.cycleRoleModels(roleOrder, direction);
+		return await this.#models.cycleRoleModels(roleOrder, direction);
 	}
 
 	/** Lists available models after applying the configured enabled-model filter. */
@@ -7835,7 +8039,6 @@ export class AgentSession {
 	setThinkingLevel(level: ConfiguredThinkingLevel | undefined, persist: boolean = false): void {
 		this.#models.setThinkingLevel(level, persist);
 	}
-
 	/** Advances through the thinking selectors supported by the active model. */
 	cycleThinkingLevel(): ConfiguredThinkingLevel | undefined {
 		return this.#models.cycleThinkingLevel();
@@ -8730,13 +8933,62 @@ export class AgentSession {
 
 		this.#disconnectFromAgent();
 		await this.abort({ goalReason: "internal" });
-		await this.#sessionBeforeSwitchReconciler?.();
-
-		await this.#bash.flushPending();
-		// Flush pending writes before switching so restore snapshots reflect committed state.
-		await this.sessionManager.flush();
-		const previousSessionState = this.sessionManager.captureState();
+		// Persona teardown runs before the surface reconciler and before any
+		// target-state restore: the runtime's exit re-applies the SOURCE
+		// persona's baseline, which must land while the source session still
+		// owns the state — a later exit would clobber the restored target
+		// model and journal over it. Surface-agnostic (TUI, ACP, RPC) since
+		// the reconciler slot is single-tenant.
+		const runtime = this.getPersonaRuntime();
+		// Post-teardown failure recovery: capture the persona-complete state
+		// BEFORE the exit runs — if a later flush fails, this snapshot restores
+		// the persona the journal still records instead of stranding a
+		// persona-cleared session.
+		const personaSnapshot = runtime && this.toolPolicy?.isPersonaActive() ? await runtime.snapshot() : undefined;
+		if (runtime && this.toolPolicy?.isPersonaActive()) {
+			try {
+				await runtime.exit(createDefaultPersonaModelHooks(this));
+			} catch (error) {
+				// fvIn0: the failed exit already ROLLED BACK inside runtime.exit —
+				// the source persona is still active, and its grant/prompt/
+				// presentation would leak onto the target if the switch continued.
+				// Abort the switch: the rollback keeps the source persona intact and
+				// the caller surfaces the error. (The runtime's own exit-restore
+				// already reverted the model/thinking it managed to apply.)
+				logger.warn("Failed to exit the active persona before switching sessions", {
+					sessionFile: this.sessionFile,
+					error: String(error),
+				});
+				// The disconnect above severed the agent-event pipeline; the
+				// switch is aborted, so restore it before returning. Without
+				// this, the source session keeps running but persistence and
+				// event emission are dead until the next successful switch.
+				this.#reconnectToAgent();
+				return false;
+			}
+		}
+		// Post-teardown failures (reconciler, bash flush, journal flush) must
+		// not strand the source session either: reconnect the agent pipeline
+		// and restore the captured persona state before propagating, so the
+		// source session keeps its recorded persona alive.
+		try {
+			await this.#sessionBeforeSwitchReconciler?.();
+			await this.#bash.flushPending();
+			// Flush pending writes before switching so restore snapshots reflect committed state.
+			await this.sessionManager.flush();
+		} catch (error) {
+			logger.warn("Session switch failed after persona teardown", {
+				sessionFile: this.sessionFile,
+				error: String(error),
+			});
+			this.#reconnectToAgent();
+			if (runtime && personaSnapshot) {
+				await runtime.restore(personaSnapshot);
+			}
+			throw error;
+		}
 		const bashTransition = this.#bash.beginSessionTransition();
+		const previousSessionState = this.sessionManager.captureState();
 		// Only same-session reloads compare against the prior context to detect
 		// rollback edits (`#didSessionMessagesChange` below). Building it for a
 		// different-session switch is a pure waste — and on huge pre-fix sessions
@@ -8938,8 +9190,22 @@ export class AgentSession {
 				this.#clearSessionScopedToolState();
 			}
 			this.#reconnectToAgent();
+			// j2n: persona re-activation on headless surfaces. The TUI owns a
+			// single-slot reconciler (#reconcilePersonaFromSession); when it is
+			// installed the surface handles both persona and mode reconciliation.
+			// When it is NOT (ACP/RPC/SDK/embedder surfaces), the source persona's
+			// teardown above left nothing re-activating the TARGET journal's
+			// persona — and a FAILED switch's rollback must reinstate the SOURCE
+			// persona. The session-level reconcile covers both. Best-effort either
+			// way: a reconcile failure must not roll back an otherwise-successful
+			// switch (the helper swallows internally; the TUI reconciler's errors
+			// were swallowed here before j2n — keep that).
 			try {
-				await this.#sessionSwitchReconciler?.();
+				if (this.#sessionSwitchReconciler === undefined) {
+					await this.#reconcilePersonaAfterSwitch(sessionPath, { fromRollback: false });
+				} else {
+					await this.#sessionSwitchReconciler();
+				}
 			} catch (error) {
 				logger.warn("Failed to reconcile session mode after switch", {
 					targetSessionFile: sessionPath,
@@ -9026,8 +9292,15 @@ export class AgentSession {
 			this.#advisors.resetAllRuntimes();
 			this.#advisors.reattachRecorderFeeds();
 			this.#reconnectToAgent();
+			// j2n: a rolled-back switch reinstates the SOURCE session (the restored
+			// state above) — headless surfaces must re-enter its persona; the TUI
+			// reconciler already covers it when installed.
 			try {
-				await this.#sessionSwitchReconciler?.();
+				if (this.#sessionSwitchReconciler === undefined) {
+					await this.#reconcilePersonaAfterSwitch(previousSessionFile, { fromRollback: true });
+				} else {
+					await this.#sessionSwitchReconciler();
+				}
 			} catch (reconcileError) {
 				logger.warn("Failed to reconcile session mode after switch rollback", {
 					targetSessionFile: sessionPath,

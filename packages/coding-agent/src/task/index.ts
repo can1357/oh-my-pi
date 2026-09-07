@@ -133,7 +133,9 @@ interface TaskDescriptionOptions {
 	evalToolsEnabled: boolean;
 	asyncEnabled: boolean;
 	ircEnabled: boolean;
-	parentSpawns: string;
+	parentSpawns: string | string[] | "*";
+	/** Session carrying the LIVE persona-aware scout accessor; optional for stub callers. */
+	parentSpawnsSession?: ToolSession;
 }
 
 /** Render the tool description from a cached agent list and current settings. */
@@ -156,16 +158,18 @@ function renderDescription(options: TaskDescriptionOptions): string {
 		readOnly: isReadOnlyAgent(agent),
 		blocking: agent.blocking === true,
 	}));
-	const scoutAvailable = isScoutSpawnable(options.disabledAgents, options.parentSpawns);
+	const scoutAvailable =
+		options.parentSpawnsSession?.isScoutSpawnable?.() ??
+		isScoutSpawnable(options.disabledAgents, options.parentSpawns);
 	return prompt.render(taskDescriptionTemplate, {
 		agents: renderedAgents,
 		scoutAvailable,
 		spawningDisabled,
 		defaultAgent: spawnPolicy.defaultAgent,
 		isolationEnabled: options.isolationEnabled,
-		applyIsolatedChanges: options.applyIsolatedChanges,
 		batchEnabled: options.batchEnabled,
 		effortEnabled: options.effortEnabled,
+		applyIsolatedChanges: options.applyIsolatedChanges,
 		evalToolsEnabled: options.evalToolsEnabled,
 		asyncEnabled: options.asyncEnabled,
 		hasBlockingAgents: renderedAgents.some(agent => agent.blocking),
@@ -615,6 +619,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			asyncEnabled: this.session.settings.get("async.enabled"),
 			ircEnabled: isIrcEnabled(this.session.settings, this.session.taskDepth ?? 0),
 			parentSpawns: this.session.getSessionSpawns() ?? "*",
+			parentSpawnsSession: this.session,
 		});
 	}
 	private constructor(
@@ -766,10 +771,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						depthCapacity,
 						ircEnabled,
 						willRunAsync: false,
-						scoutAvailable: isScoutSpawnable(
-							this.session.settings.get("task.disabledAgents") as string[] | undefined,
-							this.session.getSessionSpawns?.() ?? "*",
-						),
+						scoutAvailable:
+							this.session.isScoutSpawnable?.() ??
+							isScoutSpawnable(
+								this.session.settings.get("task.disabledAgents") as string[] | undefined,
+								this.session.getSessionSpawns?.() ?? "*",
+							),
 					});
 			const result = await this.#executeSyncFanout(
 				toolCallId,
@@ -803,10 +810,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					depthCapacity,
 					ircEnabled,
 					willRunAsync: asyncItems.length > 0,
-					scoutAvailable: isScoutSpawnable(
-						this.session.settings.get("task.disabledAgents") as string[] | undefined,
-						this.session.getSessionSpawns?.() ?? "*",
-					),
+					scoutAvailable:
+						this.session.isScoutSpawnable?.() ??
+						isScoutSpawnable(
+							this.session.settings.get("task.disabledAgents") as string[] | undefined,
+							this.session.getSessionSpawns?.() ?? "*",
+						),
 				});
 		// Returns a fresh result (copied content array, copied text part) rather
 		// than mutating the caller's — task results are short-lived here, but an

@@ -87,7 +87,16 @@ import "./discovery";
 import { createImageUrlServiceFromSettings } from "./blob-broker/service";
 import { wrapStreamFnWithBlobUrlFallback } from "./blob-broker/stream-fallback";
 import { initializeWithSettings } from "./discovery";
-import { setInvocationConfiguredExtensions, withOmpExtensionRootScope } from "./discovery/omp-extension-roots";
+import {
+	buildEffectiveExtensionRoots,
+	setInvocationConfiguredExtensions,
+	withOmpExtensionRootScope,
+} from "./discovery/omp-extension-roots";
+import {
+	appendPersonaJournalEntry,
+	deserializePersonaBaseline,
+	readPersistedAgentPersona,
+} from "./session/persisted-persona";
 import { disposeVmContextsByOwner } from "./eval/js/context-manager";
 import { getEnabledEvalPreludes, type EvalPreludeDefinition } from "./eval/preludes";
 import { disposeAllKernelSessions, disposeKernelSessionsByOwner } from "./eval/py/executor";
@@ -157,6 +166,9 @@ import {
 	type SecretObfuscator,
 } from "./secrets";
 import { AgentSession, type InitialRetryFallbackState, type PlanYolo, type Prewalk } from "./session/agent-session";
+import { createDefaultPersonaModelHooks } from "./session/persona-model-hooks";
+import { PersonaRuntime } from "./session/persona-runtime";
+import type { DiscoveredAgent, PersonaExplicitOverrides } from "./session/tool-policy";
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { DateCwdReminderInjector } from "./session/date-cwd-reminder";
@@ -183,6 +195,7 @@ import { collectMountedMCPToolRoutes, projectMountedMCPXdevGuidance } from "./se
 import { createSettingsAwareStreamFn } from "./session/settings-stream-fn";
 import { SnapcompactInlineTransformer } from "./session/snapcompact-inline";
 import { createSnapcompactSavingsRecorder } from "./session/snapcompact-savings-journal";
+import { SessionToolPolicy } from "./session/tool-policy";
 import { closeAllConnections } from "./ssh/connection-manager";
 import { unmountAll } from "./ssh/sshfs-mount";
 import {
@@ -383,6 +396,17 @@ export interface CreateAgentSessionOptions {
 	agentDir?: string;
 	/** Spawns to allow. Default: "*" */
 	spawns?: string;
+	/**
+	 * `--agent <name>` launch-as-switch seam: the resolved persona to activate
+	 * right after the session exists but before the first user turn. sdk.ts
+	 * constructs the PersonaRuntime against the session's toolPolicy, wires it
+	 * onto the `personaRuntime` config slot, and calls `enter()`; any error
+	 * propagates as a session-construction failure. Explicit CLI flags
+	 * (model/thinking/tools) win via `pendingPersonaExplicit`.
+	 */
+	pendingPersonaAgent?: DiscoveredAgent;
+	/** Explicit per-invocation overrides for {@link pendingPersonaAgent}; absent fields defer to the agent definition. */
+	pendingPersonaExplicit?: PersonaExplicitOverrides;
 
 	/** Auth storage for credentials. Default: discoverAuthStorage(agentDir) */
 	authStorage?: AuthStorage;
@@ -467,7 +491,15 @@ export interface CreateAgentSessionOptions {
 	 *
 	 * @internal
 	 */
-	extensionRoots?: () => EffectiveExtensionRoots;
+	extensionRoots?: (sessionCwd?: string) => EffectiveExtensionRoots;
+	/**
+	 * Async per-workspace re-derivation of the persona discovery roots (the
+	 * CLI computes it once launch options are built; ACP hosts use it per
+	 * client workspace). Absent on subagent sessions.
+	 *
+	 * @internal
+	 */
+	rederivePersonaExtensionRoots?: (sessionCwd: string, sessionSettings?: Settings) => Promise<EffectiveExtensionRoots>;
 	/**
 	 * Pre-loaded extensions (skips file discovery and the per-session factory
 	 * call). Used by the CLI when extensions are loaded early to parse custom
@@ -1777,7 +1809,26 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const fileMutationVersions = new Map<string, number>();
 		const disposeCallbacks = new Set<() => void>();
 		const activeToolNames = new Set<string>();
-		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive">>();
+		const toolRegistry = new Map<string, Tool & Pick<ToolDefinition, "defaultInactive" | "hidden">>();
+		// Session-wide tool policy owns effective tool-set derivation. Stage 1:
+		// constructed here (registry closure available), passed through the
+		// AgentSessionConfig seam, and consumed by the presentation funnel
+		// (SessionTools `isToolEffective`) plus PersonaRuntime.
+		// `isDefaultActive` mirrors the defaultActive derivation used when the
+		// initial active set is built (sdk.ts `defaultInactiveToolNames`): a tool
+		// defaults to active unless its registry definition marks it
+		// `defaultInactive` or `hidden` (hidden tools are registered but never
+		// default-active).
+		const toolPolicy = new SessionToolPolicy({
+			toolNames: options.toolNames,
+			restrictToolNames: options.restrictToolNames,
+			lspReadOnly: options.lspReadOnly,
+			registry: () => new Set(toolRegistry.keys()),
+			isDefaultActive: name => {
+				const def = toolRegistry.get(name);
+				return def === undefined ? true : def.defaultInactive !== true && def.hidden !== true;
+			},
+		});
 		const setActiveToolNames = (names: Iterable<string>): void => {
 			activeToolNames.clear();
 			for (const name of names) {
@@ -1798,7 +1849,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				return sessionManager.getAdditionalDirectories();
 			},
 			enableLsp,
-			lspReadOnly,
+			// LIVE read-only flag: the session tool policy derives it (a persona
+			// dropping write/edit forces it on; exit restores). Policy-less
+			// tool-session consumers (tests, direct createTools callers) fall
+			// back to the session-start derivation.
+			get lspReadOnly() {
+				return toolPolicy ? toolPolicy.lspReadOnly() : lspReadOnly;
+			},
 			enableIrc: restrictToolNames ? false : options.enableIrc,
 			restrictToolNames,
 			get hasEditTool() {
@@ -1846,7 +1903,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// unrelated global ref. With no lifecycle, hub cancel falls back to
 			// dispose + unregister on the session's own registry.
 			agentLifecycle: options.agentRegistry ? undefined : () => AgentLifecycleManager.global(),
-			getSessionSpawns: () => options.spawns ?? "*",
+			// Effective spawn policy (persona `spawns` override first, CLI `--spawns`
+			// fallback): read through AgentSession so task preflight sees persona
+			// narrowing live. Before construction falls back to the launch config.
+			getSessionSpawns: () => session?.getSessionSpawns() ?? (options.spawns ? options.spawns : "*"),
+			getToolPolicy: () => toolPolicy,
 			getModelString: () => (hasExplicitModel && model ? formatModelString(model) : undefined),
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
@@ -1998,12 +2059,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// settings on every discovery call.
 		const buildSessionExtensionRoots =
 			options.extensionRoots ??
-			((): EffectiveExtensionRoots => ({
-				explicit: options.additionalExtensionPaths ?? [],
-				mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
-				configured: settings.get("extensions") ?? [],
-				configuredLevel: settings.extensionsSourceLevel(),
-			}));
+			((): EffectiveExtensionRoots =>
+				buildEffectiveExtensionRoots({
+					additionalExtensionPaths: options.additionalExtensionPaths,
+					disableExtensionDiscovery: options.disableExtensionDiscovery,
+					configured: settings.get("extensions") ?? [],
+					configuredLevel: settings.extensionsSourceLevel(),
+				}));
 		const mcpDiscoverOptions = {
 			onStatus: onMCPStatus,
 			enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
@@ -3125,6 +3187,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						learn: builtInToolNames.includes("learn"),
 					});
 			const appendParts: string[] = [];
+			// Persona identity channel (plan §2): the active persona's system prompt
+			// rides the same append path as memory/auto-learn so refreshBaseSystemPrompt
+			// rebuilds with it and exit removes it.
+			const personaAppendPrompt = session?.getPersonaAppendPrompt();
+			if (personaAppendPrompt) appendParts.push(personaAppendPrompt);
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
 			const projection = projectMountedMCPXdevGuidance(
@@ -3192,12 +3259,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				eagerTasksAlways,
 				taskBatch: settings.get("task.batch"),
 				taskMaxConcurrency: settings.get("task.maxConcurrency"),
-				scoutAvailable: isScoutSpawnable(
-					settings.get("task.disabledAgents") as string[] | undefined,
-					options.spawns ?? "*",
-				),
+				scoutAvailable: session ? session.isScoutSpawnable() : isScoutSpawnable(undefined, options.spawns ?? "*"),
 				delegationBias: sessionDelegationBias(toolSession),
-				taskIrcEnabled: !restrictToolNames && isIrcEnabled(settings, options.taskDepth ?? 0),
+				// Hub/IRC affordance guidance follows the LIVE policy: a persona
+				// without `hub` (or a disabled toggle) suppresses it; persona exit
+				// restores it on the next rebuild. Policy-less sessions keep the
+				// creation-time derivation.
+				taskIrcEnabled:
+					(toolPolicy ? toolPolicy.hubEnabled() : !restrictToolNames) &&
+					isIrcEnabled(settings, options.taskDepth ?? 0),
 				autoQaEnabled: !restrictToolNames && isAutoQaEnabled(settings),
 				writeTransportOnly:
 					toolSession.deviceOnlyWrite === true && toolSession.pendingFullWriteDescription !== true,
@@ -3730,13 +3800,13 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			serviceTierByFamily: initialServiceTierByFamily,
 			sessionManager,
 			settings,
+			toolPolicy,
 			additionalExtensionPaths: options.additionalExtensionPaths,
 			extensionRoots: buildSessionExtensionRoots,
 			preparedExtensions: extensionsResult.preparedExtensions,
 			extensionPaths,
 			disableExtensionDiscovery: options.disableExtensionDiscovery,
 			autoApprove: options.autoApprove,
-			scoutAllowedBySpawnPolicy: isScoutSpawnable(undefined, options.spawns ?? "*"),
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global
@@ -3822,15 +3892,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			agentId: resolvedAgentId,
 			agentKind,
 			providerSessionId: options.providerSessionId,
+			// Host spawn-policy fallback for AgentSession.getSessionSpawns (persona
+			// override wins when set). `""` is a DELIBERATE deny-all
+			// (persisted-revive passes `init.spawns ?? ""` so legacy revived
+			// subagents cannot re-spawn); only null/undefined mean unrestricted.
+			getSessionSpawns: () => options.spawns ?? null,
 			providerPromptCacheKeySource,
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
 			// Same per-call `grep` seam the primary bridge gets, built against the
 			// advisor's own tool session so a `pi_grep` frame's context width and
 			// match cap are honored there too.
-			advisorCreateGrepTool: createBridgeGrepFactory(advisorToolSession, extensionRunner),
-			// Same `replace`-mode requirement as the primary bridge; the advisor
-			// path gates it on the advisor's own `edit` grant.
+			// Same per-call `edit` seam; the pi_edit approval and read-only
 			advisorCreateEditTool: () => createBridgeEditTool(advisorToolSession, extensionRunner),
 			// The advisor's bridge tools are wrapped for approval, but the wrapper
 			// reads the mode and per-tool policies only from the execute-time
@@ -3904,11 +3977,19 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 						);
 						return;
 					}
-					// Re-registration refreshes the implementation, but it must not reverse an
-					// explicit setActiveTools() decision that disabled the previous definition.
+					// Policy gate for late registration (review foy5b/fo0dM): a
+					// default-active tool registered after persona activation must not
+					// bypass the persona grant. Route the presentation apply through
+					// the session funnel; the funnel's policy filter drops the name
+					// when the policy does not grant it, keeping it
+					// registered-but-dormant. Non-granting paths (existing tool not
+					// enabled, default-inactive/hidden without explicit request) are
+					// unchanged above.
 					if (existingTool && !alreadyEnabled) return;
+					const policyGrants = toolPolicy.granted(name);
 					const shouldMount =
 						!explicitlyRequested &&
+						policyGrants &&
 						toolSession.xdev !== undefined &&
 						builtInRegistryToolNames.has("read") &&
 						builtInRegistryToolNames.has("write") &&
@@ -3962,6 +4043,44 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			isStale: entry => entry.isStale(),
 		});
 
+		// Persona runtime exists for EVERY session (not just `--agent <name>`
+		// launches): resume, ACP-created, and plain launches all need it so
+		// `/agent` and persona reconcile work. When a persona was resolved
+		// pre-launch, activate it here — before the first user turn — inside the
+		// same construction transaction; any error fails session construction
+		// (the catch below disposes the half-built session). PersonaRuntime stays
+		// pure — the journal entry for a future `--resume` reconcile is appended
+		// HERE, by the caller, after enter succeeds.
+		if (toolPolicy) {
+			const personaRuntime = new PersonaRuntime(toolPolicy, session);
+			session.setPersonaRuntime(personaRuntime);
+			if (options.pendingPersonaAgent) {
+				// fvInv: `--agent X --resume` re-enters the CLI persona over a stored
+				// journal. The persisted persona's baseline (the pre-persona state
+				// captured at the ORIGINAL enter) is authoritative for the eventual
+				// exit — the live session state is persona-produced, so a live
+				// capture would restore the persona model. Read it from the target
+				// journal and pass it through `enter`, exactly as
+				// reconcileSessionPersona does for the resume path.
+				const persisted = readPersistedAgentPersona(sessionManager.getEntries());
+				const baselineOverride = persisted?.baseline
+					? deserializePersonaBaseline(session, persisted.baseline)
+					: undefined;
+				await personaRuntime.enter(
+					options.pendingPersonaAgent,
+					options.pendingPersonaExplicit ?? {},
+					createDefaultPersonaModelHooks(session),
+					baselineOverride,
+				);
+				// j2g: the pre-persona baseline rides the journal entry so a resume
+				// re-enter uses it as the authoritative exit baseline.
+				appendPersonaJournalEntry(session, {
+					name: options.pendingPersonaAgent.name,
+					explicit: options.pendingPersonaExplicit,
+					baseline: personaRuntime.getActiveBaseline(),
+				});
+			}
+		}
 		// Attach the live session to the pre-registered ref so peers can route IRC
 		// messages here. Refresh sessionFile in case it was unavailable at pre-register
 		// time. The dispose wrapper below unregisters on teardown (unless parked).

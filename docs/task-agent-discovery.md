@@ -267,3 +267,54 @@ When parent plan mode is enabled, `resolveEffectiveSubagentPolicy()` builds an `
 - clears `prewalk` (read-only exploration must not receive the prewalk plan/implement nudges)
 
 Plan mode also rejects per-spawn isolation, apply, and merge controls. The same `effectiveAgent` is used for subprocess launch, model/thinking overrides, and output-schema selection.
+
+## Using agents as a main-session persona
+
+Any discovered task agent can also drive the **main session** instead of a
+subagent. The persona feature applies the agent's definition to the top-level
+session:
+
+```sh
+# Start a session as a persona
+omp --agent reviewer
+
+# Combine with resume: the persona re-applies to the restored session
+omp --agent reviewer --resume <id>
+```
+
+- `--agent <name>` looks up the agent through normal discovery (project,
+  user, extension, bundled). Unknown names fail with the same
+  `Unknown agent "..."` error as task dispatch.
+- The persona's frontmatter `model` and thinking level become the session's
+  starting selection unless you pass `--model` / `--thinking` explicitly:
+  CLI flags win over the persona.
+- The persona's system prompt is appended to the session's base prompt
+  (memory and conventions still apply); its `tools:` frontmatter restricts the effective tool set
+  (intersected with any `--tools` grant you pass, never widened by it).
+- `spawns:` frontmatter controls which subagents the session may spawn; a
+  declared-but-empty `spawns: ""` disables spawning entirely (an omitted
+  `spawns` with a `tools:` list including `task` defaults to `*` per the
+  discovery backward-compat rule).
+
+Inside a session, `/agent <name>` switches the live session to another
+persona. `/agent` with no arguments exits an active persona and returns the
+session to the plain main-agent setup, or opens the interactive agent picker
+when no persona is active (TUI only). A switch is applied atomically: tool
+grant, system prompt, model/thinking selection, and spawn policy all flip
+together, and the previous state is restored when you switch away. Two
+behaviors to expect:
+
+- Model and thinking changes are **persona-scoped**: selecting a different
+  model or thinking level while a persona is active applies to the persona's
+  session, and exiting the persona restores the model and thinking the
+  session had before the persona was entered (the same symmetric
+  enter/exit behavior plan mode uses). Pick a base-session model before
+  entering a persona, or re-pick it after exiting, if you want it to persist.
+- Tools registered while the persona was active (extension or MCP
+  registrations) stay available after exit.
+
+While streaming, the tool grant and prompt change immediately and the model
+change is queued for turn end.
+
+The persona choice persists in the session record, so `--resume` restores it;
+run `/agent` after resuming to drop the persona.

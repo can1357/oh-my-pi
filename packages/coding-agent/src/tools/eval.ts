@@ -159,9 +159,10 @@ export interface EvalToolDescriptionOptions {
 	js?: boolean;
 	/**
 	 * Parent spawn policy (`getSessionSpawns`). `true`/omitted means unrestricted,
-	 * `false`/`""` hides `agent()`, and a comma list drives the advertised default.
+	 * `false`/`""` hides `agent()`, and a comma list or name array drives the
+	 * advertised default.
 	 */
-	spawns?: boolean | string | null;
+	spawns?: boolean | string | string[] | "*" | null;
 	/** Advertise auto-backgrounding of long-running cells in the tool prompt. */
 	autoBackgroundEnabled?: boolean;
 	/** Advertise `@tool` / `tool(fn)` and the `tools` spawn option (`eval.tools.enabled`). */
@@ -175,7 +176,13 @@ export interface EvalToolDescriptionOptions {
 export function getEvalToolDescription(options: EvalToolDescriptionOptions = {}): string {
 	const py = options.py ?? true;
 	const js = options.js ?? true;
-	const spawnPolicy = resolveSpawnPolicy(options.spawns ?? true);
+	const spawnPolicy = resolveSpawnPolicy(
+		typeof options.spawns === "string" || typeof options.spawns === "boolean"
+			? options.spawns
+			: Array.isArray(options.spawns)
+				? [...options.spawns]
+				: (options.spawns ?? true),
+	);
 	return prompt.render(evalDescription, {
 		py,
 		js,
