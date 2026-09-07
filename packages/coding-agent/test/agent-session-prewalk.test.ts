@@ -708,7 +708,7 @@ describe("AgentSession prewalk", () => {
 		expect(notices.some(message => message.includes("nothing to switch"))).toBe(true);
 	});
 
-	it("/prewalk reports success only when the requested arm remains active", async () => {
+	it("/prewalk commands report success only when the requested arm becomes active", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
 
@@ -760,6 +760,30 @@ describe("AgentSession prewalk", () => {
 		settings.setModelRole("smol", `${primary.provider}/${primary.id}:medium`);
 		expect(await executeBuiltinSlashCommand("/prewalk", runtime)).toBe(true);
 		expect(showStatus).toHaveBeenCalledTimes(1);
+
+		// Restart must not move the active model when an existing arm rejects the requested target.
+		settings.setModelRole("default", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(showStatus).toHaveBeenCalledTimes(1);
+
+		// A matching arm remains active while restart restores the configured planning model.
+		await session.setModelTemporary(target, Effort.Medium, { ephemeral: true });
+		settings.setModelRole("default", `${primary.provider}/${primary.id}:medium`);
+		settings.setModelRole("smol", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(showStatus).toHaveBeenCalledTimes(2);
+
+		// If both roles now coincide, restart resets the model and clears the obsolete matching arm.
+		settings.setModelRole("default", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(target.id);
+		expect(session.getPrewalkState()).toBeUndefined();
+		expect(showStatus).toHaveBeenCalledTimes(3);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk reset"));
 	});
 
 	it("/prewalk restart returns to @default and re-arms @smol", async () => {
@@ -792,7 +816,7 @@ describe("AgentSession prewalk", () => {
 			},
 		});
 		const settings = Settings.isolated({ "compaction.enabled": false });
-		settings.setModelRole("default", `${primary.provider}/${primary.id}:medium`);
+		settings.setModelRole("default", `anthropic/missing-model,${primary.provider}/${primary.id}:medium`);
 		settings.setModelRole("smol", `${target.provider}/${target.id}:medium`);
 		const sessionManager = SessionManager.inMemory();
 		session = new AgentSession({
@@ -824,9 +848,10 @@ describe("AgentSession prewalk", () => {
 		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
 		expect(session.model?.id).toBe(primary.id);
 		expect(session.getPrewalkState()?.target.id).toBe(target.id);
-		expect(showStatus).toHaveBeenCalledWith(
-			`Prewalk restarted: using @default (${primary.provider}/${primary.id}) for planning, then switching to @smol (${target.provider}/${target.id}) at the next edit/write (todo-gated).`,
-		);
+		expect(showStatus).toHaveBeenCalledTimes(1);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk restarted"));
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining(`${primary.provider}/${primary.id}`));
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining(`${target.provider}/${target.id}`));
 
 		await session.prompt("second task");
 		expect(requested.slice(firstRunCallCount)).toEqual([
@@ -835,6 +860,13 @@ describe("AgentSession prewalk", () => {
 			`${target.provider}/${target.id}`,
 		]);
 		expect(session.model?.id).toBe(target.id);
+
+		settings.setModelRole("smol", `${primary.provider}/${primary.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()).toBeUndefined();
+		expect(showStatus).toHaveBeenCalledTimes(2);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk reset"));
 	});
 
 	it("requires a fresh todo before a later explicit prewalk can hand off", async () => {
