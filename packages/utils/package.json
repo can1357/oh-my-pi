@@ -1,6 +1,6 @@
 {
 	"name": "@oh-my-pi/pi-utils",
-	"version": "18.1.12",
+	"version": "18.1.13",
 	"description": "Shared utilities for pi packages",
 	"keywords": [
 		"cli",
