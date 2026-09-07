@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added collapsible `/tree` branches: `Space` folds one visible subtree and `Shift+Tab` focuses the active thread while preserving existing paging keys.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
