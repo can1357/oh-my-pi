@@ -27,6 +27,9 @@ import {
 	encodeInferenceStreamRequest,
 	frameConnectProto,
 } from "../packages/ai/src/providers/grokbot/proto.ts";
+import * as prompt from "../packages/utils/src/prompt.ts";
+import codingAgentSystemPrompt from "./grokbot-probes/coding-agent-system.md" with { type: "text" };
+import shellEchoUserPrompt from "./grokbot-probes/shell-echo-user.md" with { type: "text" };
 
 import {
 	GROKBOT_BACKEND,
@@ -175,12 +178,14 @@ async function testModel(token, cfg, modelId, tools, label) {
 	}
 
 	const conversationId = crypto.randomUUID();
+	const systemText = prompt.render(codingAgentSystemPrompt).trim();
+	const userText = prompt.render(shellEchoUserPrompt, { token: "probe-ok" }).trim();
 
 	// Turn 1: ask model to call Shell
 	const body1 = {
 		messages: [
-			{ role: 4, text: "You are a coding agent with shell, read, write, grep, and glob tools." },
-			{ role: 1, text: `Use the Shell tool to run: echo probe-ok. Do not explain, just call the tool.` },
+			{ role: 4, text: systemText },
+			{ role: 1, text: userText },
 		],
 		tools: wired.tools,
 		requestedModel: wired.requestedModel,
@@ -205,8 +210,8 @@ async function testModel(token, cfg, modelId, tools, label) {
 	const shellArgs = { command: "echo probe-ok" };
 	const body2 = {
 		messages: [
-			{ role: 4, text: "You are a coding agent with shell, read, write, grep, and glob tools." },
-			{ role: 1, text: `Use the Shell tool to run: echo probe-ok. Do not explain, just call the tool.` },
+			{ role: 4, text: systemText },
+			{ role: 1, text: userText },
 			{
 				role: 2,
 				toolCalls: [

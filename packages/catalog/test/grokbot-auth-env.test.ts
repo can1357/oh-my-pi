@@ -12,6 +12,7 @@ import {
 	GROKBOT_AUTHENTICATED_SENTINEL,
 	resolveGrokbotCacheCredential,
 	resolveGrokbotEnvApiKey,
+	resolveGrokbotMachineId,
 	loadGrokbotSecretFile,
 	loadGrokbotSecretFileSync,
 	mintGrokbotAccessToken,
@@ -250,9 +251,11 @@ describe("grokbot secrets dotenv parsing", () => {
 
 			process.env.GROKBOT_RENEWAL_CREDENTIAL = "env-renewal";
 			expect(resolveGrokbotEnvApiKey()).toBeUndefined();
+			expect(resolveGrokbotMachineId()).toBeUndefined();
 
 			process.env.GROKBOT_MACHINE_ID = "env-machine";
 			expect(resolveGrokbotEnvApiKey()).toBe("env-renewal");
+			expect(resolveGrokbotMachineId()).toBe("env-machine");
 		} finally {
 			setAgentDir(previousAgentDir);
 			if (previousGrokbot === undefined) delete process.env.GROKBOT_RENEWAL_CREDENTIAL;

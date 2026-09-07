@@ -35,6 +35,11 @@ import {
 	encodeInferenceStreamRequest,
 	frameConnectProto,
 } from "../packages/ai/src/providers/grokbot/proto.ts";
+import * as prompt from "../packages/utils/src/prompt.ts";
+import automationShellUserPrompt from "./grokbot-probes/automation-shell-user.md" with { type: "text" };
+import automationSystemPrompt from "./grokbot-probes/automation-system.md" with { type: "text" };
+import codingAgentSystemPrompt from "./grokbot-probes/coding-agent-system.md" with { type: "text" };
+import shellEchoUserPrompt from "./grokbot-probes/shell-echo-user.md" with { type: "text" };
 
 import {
 	GROKBOT_BACKEND,
@@ -148,12 +153,14 @@ async function testKeepModelRoundTrip(token, cfg, modelId) {
 	const wireOk = asserts.every(([, ok]) => ok);
 
 	const conversationId = crypto.randomUUID();
+	const systemText = prompt.render(codingAgentSystemPrompt).trim();
+	const userText = prompt.render(shellEchoUserPrompt, { token: `keep-model-${modelId}-ok` }).trim();
 
 	// Turn 1: ask model to call Shell
 	const body1 = {
 		messages: [
-			{ role: 4, text: "You are a coding agent with shell, read, write, grep, and glob tools." },
-			{ role: 1, text: `Use the Shell tool to run: echo keep-model-${modelId}-ok. Do not explain, just call the tool.` },
+			{ role: 4, text: systemText },
+			{ role: 1, text: userText },
 		],
 		tools: wired.tools,
 		requestedModel: wired.requestedModel,
@@ -185,8 +192,8 @@ async function testKeepModelRoundTrip(token, cfg, modelId) {
 	const shellArgs = { command: `echo keep-model-${modelId}-ok` };
 	const body2 = {
 		messages: [
-			{ role: 4, text: "You are a coding agent with shell, read, write, grep, and glob tools." },
-			{ role: 1, text: `Use the Shell tool to run: echo keep-model-${modelId}-ok. Do not explain, just call the tool.` },
+			{ role: 4, text: systemText },
+			{ role: 1, text: userText },
 			{
 				role: 2,
 				toolCalls: [
@@ -285,8 +292,8 @@ async function testAutomationStillGrok(token, cfg) {
 
 	const body = {
 		messages: [
-			{ role: 4, text: "You are a coding agent with shell and read tools." },
-			{ role: 1, text: "Use the Shell tool to run: echo automation-still-grok. Do not explain." },
+			{ role: 4, text: prompt.render(automationSystemPrompt).trim() },
+			{ role: 1, text: prompt.render(automationShellUserPrompt, { token: "automation-still-grok" }).trim() },
 		],
 		tools: wired.tools,
 		requestedModel: wired.requestedModel,

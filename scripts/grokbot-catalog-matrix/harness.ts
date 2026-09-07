@@ -118,6 +118,76 @@ export function readLikeShellCommand(command: string): boolean {
 	return /(?:^|[;&|\n]\s*)(?:cat|head|sed)\b/.test(cmd);
 }
 
+export function expectedReadPath(safeId: string): string {
+	return `notes/grokbot-read-${safeId}.txt`;
+}
+
+export function expectedWritePath(safeId: string): string {
+	return `notes/grokbot-write-${safeId}.txt`;
+}
+
+type SmokeToolCall = {
+	name: string;
+	arguments?: unknown;
+};
+
+function argRecord(call: SmokeToolCall): Record<string, unknown> {
+	return call.arguments && typeof call.arguments === "object" && !Array.isArray(call.arguments)
+		? (call.arguments as Record<string, unknown>)
+		: {};
+}
+
+function shellCommandOf(call: SmokeToolCall): string {
+	return String(argRecord(call).command ?? "");
+}
+
+function filePathOf(call: SmokeToolCall): string {
+	const args = argRecord(call);
+	return String(args.path ?? args.target_file ?? "");
+}
+
+function fileContentOf(call: SmokeToolCall): string {
+	const args = argRecord(call);
+	return String(args.content ?? args.contents ?? "");
+}
+
+/**
+ * Accept a tool call only when it targets the smoke operation under test
+ * (token / path / payload), not merely a matching tool name.
+ */
+export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, ping: string, id: string): boolean {
+	const safe = idSafe(id);
+	const name = call.name;
+	if (kind === "bash") {
+		if (!/^(bash|Shell|shell)$/i.test(name)) return false;
+		return shellCommandOf(call).includes(ping);
+	}
+	if (kind === "read") {
+		const path = expectedReadPath(safe);
+		if (/^(read|Read)$/i.test(name)) {
+			const filePath = filePathOf(call);
+			return filePath === path || filePath.endsWith(`/${path}`) || filePath.endsWith(path);
+		}
+		if (/^(bash|Shell|shell)$/i.test(name)) {
+			const cmd = shellCommandOf(call);
+			return readLikeShellCommand(cmd) && cmd.includes(path);
+		}
+		return false;
+	}
+	const path = expectedWritePath(safe);
+	if (/^(write|Write)$/i.test(name)) {
+		const filePath = filePathOf(call);
+		const content = fileContentOf(call);
+		const pathOk = filePath === path || filePath.endsWith(`/${path}`) || filePath.endsWith(path);
+		return pathOk && content.includes(ping);
+	}
+	if (/^(bash|Shell|shell)$/i.test(name)) {
+		const cmd = shellCommandOf(call);
+		return writeLikeShellCommand(cmd) && cmd.includes(path) && cmd.includes(ping);
+	}
+	return false;
+}
+
 /** Turn 1 already invoked the tool; these follow-up classes must not FAIL the id. */
 export function isSoftPassToolFollowup(errorClass: string): boolean {
 	return errorClass === "incomplete-tool" || errorClass === "empty-body" || errorClass === "provider-policy-block";

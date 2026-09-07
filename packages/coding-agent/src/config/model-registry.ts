@@ -21,6 +21,7 @@ import { resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-win
 import {
 	resolveGrokbotDiscoveryIdentity,
 	resolveGrokbotDiscoveryIdentityAsync,
+	resolveGrokbotMachineId,
 } from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -967,7 +968,14 @@ export class ModelRegistry {
 	#resolveCredentialScopedStartupApiKey(providerId: string): string | undefined {
 		// Match AuthStorage.peekApiKey: runtime/config overrides beat env so the
 		// startup cache row matches the credential discovery will hash later.
-		return this.authStorage.peekApiKeyOverrides(providerId) ?? getEnvApiKey(providerId);
+		const override = this.authStorage.peekApiKeyOverrides(providerId)?.trim();
+		if (providerId === "grokbot") {
+			// Overrides bypass resolveGrokbotEnvApiKey — still require the machine
+			// id pair or streamGrokBot fails with “machine id missing”.
+			if (override) return resolveGrokbotMachineId() ? override : undefined;
+			return getEnvApiKey(providerId);
+		}
+		return override || getEnvApiKey(providerId);
 	}
 
 	#resolveStartupModelCacheProviderId(providerId: string): string {

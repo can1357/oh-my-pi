@@ -19,7 +19,9 @@
 - Model lookup keeps a canonical model id resolvable when another catalog row lists that id as an alias (aliases no longer null out exact matches).
 - Login success UI only claims credentials were saved to the agent DB when AuthStorage actually stored an identity (host-secret flows like Grok Bot no longer misreport the backup location).
 - CLI `--api-key` is installed before ModelRegistry construction when `--provider` / `provider/model` is known, so credential-scoped catalogs (Grok Bot) can warm live cache rows instead of failing with “Model not found” on offline seeds.
+- Grok Bot credential overrides (`--api-key` / `models.yml`) only warm the startup cache when a machine id is also present, matching env-pair validation.
 - Grok Bot catalog matrix reports `wire: native` for grok/gpt/gemini families (was the internal `error` sentinel). `sand-automation` JSON-as-text Shell dumps are promoted to real tool calls.
+- Grok Bot catalog matrix accepts tool smokes only when the call targets the expected path/token/payload (not tool name alone).
 - `--no-tools` keeps an empty provider tool whitelist without `restrictToolNames`, so extension commands and LSP remain available unless `--no-extensions` / `--no-lsp` are set.
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
 - Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.

@@ -723,6 +723,37 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "pong42" })]);
 	});
 
+	test("preserves output-token-limit stopReason when only thinking was emitted", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinking = frameConnectProto(
+			encodeInferenceStreamResponse({
+				thinkingPart: { text: "still thinking", isFinal: true },
+			}),
+		);
+		const limit = frameConnectProto(
+			encodeInferenceStreamResponse({
+				error: { isOutputTokenLimitError: true },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(thinking, limit, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [],
+		};
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("length");
+		expect(result.errorMessage).toBeUndefined();
+	});
+
 	test("synthetic parent-chat SendToUser becomes assistant text", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",

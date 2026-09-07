@@ -1,15 +1,17 @@
 import { describe, expect, test } from "bun:test";
 import {
 	classifyError,
+	expectedReadPath,
+	expectedWritePath,
+	idSafe,
 	isSoftPassToolFollowup,
+	matchesToolSmokeCall,
 	parseArgs,
 	readLikeShellCommand,
 	splitMatrixIds,
 	toolSmokePrompt,
 	writeLikeShellCommand,
 } from "./grokbot-catalog-matrix/harness";
-import toolsFollowupSystemPrompt from "./grokbot-catalog-matrix/tools-followup-system.md" with { type: "text" };
-import toolsSystemPrompt from "./grokbot-catalog-matrix/tools-system.md" with { type: "text" };
 
 describe("splitMatrixIds", () => {
 	test("keeps commas inside bracket params as one id", () => {
@@ -39,18 +41,15 @@ describe("parseArgs --ids", () => {
 });
 
 describe("toolSmokePrompt", () => {
-	test("uses live-verified Shell probes", () => {
+	test("embeds the smoke token and expected paths", () => {
 		const safe = "claude-opus-5-thinking-max";
 		const read = toolSmokePrompt("read", "tools-pong-read-x", safe);
 		const write = toolSmokePrompt("write", "tools-pong-write-x", safe);
 		const bash = toolSmokePrompt("bash", "tools-pong-bash-x", safe);
-		expect(bash).toBe("Please use the Shell tool to run: echo tools-pong-bash-x");
-		expect(read).toBe(
-			"Please use the Shell tool to run exactly: cat notes/grokbot-read-claude-opus-5-thinking-max.txt",
-		);
-		expect(write).toBe(
-			"Please use the Shell tool to run exactly: printf '%s\\n' tools-pong-write-x > notes/grokbot-write-claude-opus-5-thinking-max.txt",
-		);
+		expect(bash).toContain("tools-pong-bash-x");
+		expect(read).toContain(expectedReadPath(safe));
+		expect(write).toContain("tools-pong-write-x");
+		expect(write).toContain(expectedWritePath(safe));
 		for (const text of [read, write, bash]) {
 			expect(text).not.toMatch(/coding agent/i);
 			expect(text).not.toMatch(/\bRead\b/);
@@ -66,9 +65,50 @@ describe("toolSmokePrompt", () => {
 		expect(readLikeShellCommand("printf '%s\\n' x > notes/grokbot-write-x.txt")).toBe(false);
 	});
 
-	test("tool-turn system prompts match the live-verified wording", () => {
-		expect(toolsSystemPrompt.trim()).toBe("You are a helpful assistant. When a tool is needed, call it.");
-		expect(toolsFollowupSystemPrompt.trim()).toBe("After a tool result, reply with the exact result text.");
+	test("rejects tool calls that only match by name", () => {
+		const id = "claude-opus-5-thinking-max";
+		const ping = "tools-pong-write-x";
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Write", arguments: { path: "notes/wrong.txt", content: ping } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{
+					name: "Shell",
+					arguments: { command: `printf '%s\\n' ${ping} > ${expectedWritePath(idSafe(id))}` },
+				},
+				ping,
+				id,
+			),
+		).toBe(true);
+		expect(matchesToolSmokeCall("bash", { name: "Shell", arguments: { command: "echo unrelated" } }, ping, id)).toBe(
+			false,
+		);
+		expect(matchesToolSmokeCall("bash", { name: "Shell", arguments: { command: `echo ${ping}` } }, ping, id)).toBe(
+			true,
+		);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat ${expectedReadPath(idSafe(id))}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(true);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: "cat notes/other.txt" } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
 	});
 });
 

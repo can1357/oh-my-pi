@@ -35,10 +35,9 @@ import {
 	classifyError,
 	idSafe,
 	isSoftPassToolFollowup,
+	matchesToolSmokeCall,
 	parseArgs,
-	readLikeShellCommand,
 	toolSmokePrompt,
-	writeLikeShellCommand,
 	type Mode,
 	type ToolSmokeKind,
 	type ToolsSet,
@@ -194,29 +193,6 @@ async function runText(model: Model<Api>): Promise<{
 	};
 }
 
-const TOOL_NAME_RE: Record<ToolSmokeKind, RegExp> = {
-	bash: /^(bash|Shell|shell)$/i,
-	read: /^(read|Read)$/i,
-	write: /^(write|Write)$/i,
-};
-
-function shellCommandOf(call: ToolCall): string {
-	const args = call.arguments;
-	return args && typeof args === "object" && !Array.isArray(args) ? String(args.command ?? "") : "";
-}
-
-function isWriteLikeCall(call: ToolCall): boolean {
-	if (TOOL_NAME_RE.write.test(call.name)) return true;
-	if (!TOOL_NAME_RE.bash.test(call.name)) return false;
-	return writeLikeShellCommand(shellCommandOf(call));
-}
-
-function isReadLikeCall(call: ToolCall): boolean {
-	if (TOOL_NAME_RE.read.test(call.name)) return true;
-	if (!TOOL_NAME_RE.bash.test(call.name)) return false;
-	return readLikeShellCommand(shellCommandOf(call));
-}
-
 async function runOneTool(
 	model: Model<Api>,
 	kind: ToolSmokeKind,
@@ -251,12 +227,7 @@ async function runOneTool(
 	}
 	const calls = toolCallsOf(turn1);
 	const names = calls.map(c => c.name);
-	const match =
-		kind === "write"
-			? calls.find(c => isWriteLikeCall(c))
-			: kind === "read"
-				? calls.find(c => isReadLikeCall(c))
-				: calls.find(c => TOOL_NAME_RE[kind].test(c.name));
+	const match = calls.find(c => matchesToolSmokeCall(kind, c, ping, model.id));
 	if (!match) {
 		const body = textOf(turn1);
 		return {

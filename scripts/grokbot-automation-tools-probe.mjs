@@ -25,6 +25,9 @@ import {
 	encodeInferenceStreamRequest,
 	frameConnectProto,
 } from "../packages/ai/src/providers/grokbot/proto.ts";
+import * as prompt from "../packages/utils/src/prompt.ts";
+import automationShellUserPrompt from "./grokbot-probes/automation-shell-user.md" with { type: "text" };
+import automationSystemPrompt from "./grokbot-probes/automation-system.md" with { type: "text" };
 
 const STREAM = "/aiserver.v1.InferenceService/Stream";
 
@@ -97,10 +100,10 @@ async function main() {
 	);
 	const body = {
 		messages: [
-			{ role: 4, text: "You are a coding agent with shell and read tools." },
+			{ role: 4, text: prompt.render(automationSystemPrompt).trim() },
 			{
 				role: 1,
-				text: "Use the Shell tool to run: echo automation-probe-ok. Do not explain.",
+				text: prompt.render(automationShellUserPrompt, { token: "automation-probe-ok" }).trim(),
 			},
 		],
 		tools: wired.tools,

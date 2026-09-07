@@ -1506,6 +1506,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				// retry or show — require visible text or a completed tool call, unless the
 				// caller opted into empty responses (passive/zero-output advisors).
 				if (!hasVisibleText && !hasToolCall && options?.acceptEmptyResponse !== true) {
+					// Output-token limit with only thinking is a real length stop — do not
+					// rewrite it into empty-body so callers can continue normally.
+					if (output.stopReason === "length") {
+						flushAttemptEvents();
+						break;
+					}
 					// Gemini 3 flash / GPT-5-mini often spend a low maxTokens budget on
 					// thinking and emit nothing. One replay with thinking off + a larger
 					// cap is enough for native bash/read/write to appear.

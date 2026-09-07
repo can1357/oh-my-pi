@@ -174,6 +174,18 @@ export async function resolveGrokbotDiscoveryIdentityAsync(overrides?: {
 }
 
 /**
+ * Sync machine-id resolver for availability / cache-warm gates.
+ * Env wins over secrets-file, matching `loadGrokbotConfig`.
+ */
+export function resolveGrokbotMachineId(): string | undefined {
+	const fromEnv = $env.GROKBOT_MACHINE_ID?.trim() || undefined;
+	if (fromEnv) return fromEnv;
+	const file = loadGrokbotSecretFileSync();
+	const fromFile = file.GROKBOT_MACHINE_ID?.trim() || undefined;
+	return fromFile || undefined;
+}
+
+/**
  * Sync resolver for registry `envKeys` / AuthStorage availability.
  *
  * Process-env renewal credentials are returned literally so broker migrate

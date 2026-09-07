@@ -20,6 +20,10 @@ import { buildModel } from "../packages/catalog/src/build.ts";
 import type { ModelSpec } from "../packages/catalog/src/types.ts";
 import { streamGrokBot } from "../packages/ai/src/providers/grokbot.ts";
 import type { Context, Tool, Message, AssistantMessage, ToolCall } from "../packages/ai/src/types.ts";
+import * as prompt from "../packages/utils/src/prompt.ts";
+import pipelineSystemPrompt from "./grokbot-probes/pipeline-system.md" with { type: "text" };
+import readPathUserPrompt from "./grokbot-probes/read-path-user.md" with { type: "text" };
+import shellEchoUserPrompt from "./grokbot-probes/shell-echo-user.md" with { type: "text" };
 
 const modelSpec: ModelSpec<"grokbot-sand"> = {
 	id: "claude-fable-5",
@@ -97,9 +101,7 @@ const tools: Tool[] = [
 
 function makeContext(messages: Message[]): Context {
 	return {
-		systemPrompt: [
-			"You are a coding agent with Shell, Read, Write, Grep, and Glob tools. When asked to use a tool, call it immediately without explanation.",
-		],
+		systemPrompt: [prompt.render(pipelineSystemPrompt).trim()],
 		messages,
 		tools,
 	};
@@ -147,7 +149,7 @@ async function main() {
 	const turn1Messages: Message[] = [
 		{
 			role: "user",
-			content: "Use the Shell tool to run: echo pipeline-probe-ok. Do not explain, just call the tool.",
+			content: prompt.render(shellEchoUserPrompt, { token: "pipeline-probe-ok" }).trim(),
 			timestamp: Date.now(),
 		},
 	];
@@ -223,7 +225,7 @@ async function main() {
 		turn2.assistant,
 		{
 			role: "user",
-			content: "Now use the Read tool to read /tmp/pipeline-test.txt. Do not explain, just call the tool.",
+			content: prompt.render(readPathUserPrompt, { path: "/tmp/pipeline-test.txt" }).trim(),
 			timestamp: Date.now(),
 		},
 	];
