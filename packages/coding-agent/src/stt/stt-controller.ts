@@ -251,6 +251,7 @@ export class STTController {
 		const stream = useCloud
 			? startCloudSttStream({
 					apiKey: this.#cloudApiKey as string,
+					model: settings.get("stt.modelName") as string | undefined,
 					language: language || undefined,
 					keywords: keywords.length ? keywords : undefined,
 					signal: this.#streamAbort.signal,
