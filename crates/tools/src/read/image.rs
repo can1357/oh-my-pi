@@ -906,12 +906,8 @@ fn parse_png(header: &[u8]) -> Option<ImageMetadata> {
 	if !header.starts_with(MAGIC) {
 		return None;
 	}
-	let dimensions = (header.len() >= 26 && &header[12..16] == b"IHDR").then(|| {
-		(
-			u32::from_be_bytes(header[16..20].try_into().unwrap()),
-			u32::from_be_bytes(header[20..24].try_into().unwrap()),
-		)
-	});
+	let dimensions = (header.len() >= 26 && &header[12..16] == b"IHDR")
+		.then(|| (read_u32_be(&header[16..20]), read_u32_be(&header[20..24])));
 	Some(ImageMetadata {
 		kind:   ImageKind::Png,
 		width:  dimensions.map(|value| value.0),
@@ -1000,7 +996,7 @@ fn parse_webp(header: &[u8]) -> Option<ImageMetadata> {
 	let dimensions = if &header[12..16] == b"VP8X" {
 		Some((read_u24_le(&header[24..27]) + 1, read_u24_le(&header[27..30]) + 1))
 	} else if &header[12..16] == b"VP8L" {
-		let bits = u32::from_le_bytes(header[21..25].try_into().unwrap());
+		let bits = read_u32_le(&header[21..25]);
 		Some(((bits & 0x3fff) + 1, ((bits >> 14) & 0x3fff) + 1))
 	} else if &header[12..16] == b"VP8 " {
 		Some((
@@ -1019,6 +1015,20 @@ fn parse_webp(header: &[u8]) -> Option<ImageMetadata> {
 
 fn read_u24_le(bytes: &[u8]) -> u32 {
 	u32::from(bytes[0]) | (u32::from(bytes[1]) << 8) | (u32::from(bytes[2]) << 16)
+}
+
+fn read_u32_be(bytes: &[u8]) -> u32 {
+	(u32::from(bytes[0]) << 24)
+		| (u32::from(bytes[1]) << 16)
+		| (u32::from(bytes[2]) << 8)
+		| u32::from(bytes[3])
+}
+
+fn read_u32_le(bytes: &[u8]) -> u32 {
+	u32::from(bytes[0])
+		| (u32::from(bytes[1]) << 8)
+		| (u32::from(bytes[2]) << 16)
+		| (u32::from(bytes[3]) << 24)
 }
 
 fn format_bytes(bytes: usize) -> String {
