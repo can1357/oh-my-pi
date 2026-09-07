@@ -63,6 +63,7 @@ import { DEFAULT_HUB_LIST_LIMIT } from "../tools/hub/types";
 import { normalizeSchema } from "../tools/jtd-to-json-schema";
 import { buildOutputValidator, summarizeValidationFailure } from "../tools/output-schema-validator";
 import { ToolAbortError } from "../tools/tool-errors";
+import { YieldTool } from "../tools/yield";
 import { type EventBus, emitSubagentFrame } from "../utils/event-bus";
 import { trackLateCleanup } from "../utils/late-cleanup";
 import { buildNamedToolChoice } from "../utils/tool-choice";
@@ -2905,6 +2906,11 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 		session = live;
 		await acquireOwnership();
 	}
+	// A kept-alive session reuses its YieldTool across turns; clear the prior
+	// run's incremental-section flag and retry counters so this turn's guards
+	// evaluate against its own state, not stale accumulators.
+	const yieldTool = session.getToolByName("yield");
+	if (yieldTool instanceof YieldTool) yieldTool.resetTurnState();
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 

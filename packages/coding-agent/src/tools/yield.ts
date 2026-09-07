@@ -358,6 +358,22 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		this.#parameters = parameters;
 	}
 
+	/**
+	 * Clear per-run accumulator state before a kept-alive session continues with a
+	 * new monitored turn. The tool instance is stored once in the session's tool
+	 * registry and reused across follow-up turns (`runSubagentFollowUpTurn`), so a
+	 * prior run's incremental-section flag and retry counters would otherwise leak
+	 * forward: a later thinking-only `{type:"result"}` would skip the empty-last-
+	 * turn and schema guards (which require `!#hasIncrementalSections`) and fail
+	 * the run post-mortem. Workpool submission state resets separately via the
+	 * batch key in {@link #workPoolItems}.
+	 */
+	resetTurnState(): void {
+		this.#hasIncrementalSections = false;
+		this.#schemaValidationFailures = 0;
+		this.#emptyResultFailures = 0;
+	}
+
 	#workPoolItems(): readonly WorkPoolYieldItem[] {
 		const items = this.#session.getWorkPoolYieldItems?.() ?? [];
 		const key = items.map(item => `${item.index}:${item.id}`).join("\0");
