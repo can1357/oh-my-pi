@@ -367,7 +367,7 @@ every availability change, because devices were never in it. A device becoming
 available, unavailable, or shadowed appends exactly one system thread item
 naming the delta, built on the same mechanism that already delivers job
 settlements (`crates/agent/src/jobs.rs:341-350`,
-`crates/agent/src/mailbox.rs:64-71`). The model reads the notice, and runs
+mailbox half a reported gap: no surviving implementation in the tree). The model reads the notice, and runs
 `dyn` if it wants the new catalog.
 
 This is the ratified redesign in the port tree:
@@ -1145,7 +1145,7 @@ One disambiguation, because the vocabulary collides with a locked decision.
 `precedence` orders **claims on a name**, resolved once at load, and the shadow
 ordering it produces is a static registry fact. It is not a gate chain and not
 an admission order: nothing is evaluated per call, nothing short-circuits, and
-no claimant can veto another's invocation. D6 
+no claimant can veto another's invocation. D6
 prohibits batch-level admission scheduling in the loop (the scope reading in
 the `dyn` path section above), and this mechanism is not scheduling of any
 kind — by the time a device is dispatched, precedence has already been spent and only
@@ -1882,7 +1882,7 @@ non-blockingly sends a cancel for one request id
 (`crates/env/src/guard.rs:13-60`); speculative-then-committed invocation
 framing (`crates/agent/src/batch.rs:360-420`); and the system-item constructor
 plus interrupt mailbox that will carry availability notices
-(`crates/agent/src/jobs.rs:341-350`, `crates/agent/src/mailbox.rs:64-71`).
+(`crates/agent/src/jobs.rs:341-350`).
 
 ### `crates/tool` — presentation, precedence, and two hashes
 

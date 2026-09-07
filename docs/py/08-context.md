@@ -298,7 +298,7 @@ projection and shipped as a flat array; never constructed by extension code.
 | Field | Semantics |
 |---|---|
 | `id` | Stable opaque item identifier. The only value patch operations accept. Unique within a session for the item's lifetime, including across compaction. |
-| `event` | Physical transcript event index — the `u64` the live chain in `crates/journal/src/transcript/reader.rs` manipulates. Exposed because `omp.journal` and `omp.sessions` (`docs/py/09-journal.md`) key on it, and because ordering comparisons are integer comparisons. |
+| `event` | Journal entry identity — the `EntryId` (`crates/journal/src/entry.rs:13`) the live chain in `crates/journal/src/chain.rs:12-15` walks. Exposed because `omp.journal` and `omp.sessions` (`docs/py/09-journal.md`) key on it, and because ordering comparisons are integer comparisons. |
 | `seq` | Dense gateway thread sequence assigned when the item was accepted. `0` for items appended optimistically whose `amend_seq` correction has not landed. |
 | `kind` | See `omp.MessageKind`. |
 | `role` | Wire role: `"system"`, `"user"`, `"assistant"`, `"tool"`. Derived from `kind`; present because provider-shaped reasoning is more natural for some rules. |
@@ -1973,8 +1973,10 @@ Three provider quirks belong in the same pass, and the argument for putting them
 
 ### Compaction
 
-Nothing exists agent-side. `Kind::Compact` exists in storage and `Log::live`
-(`crates/journal/src/transcript/reader.rs:123-133`) already splices it correctly, which is a
+Nothing exists agent-side. The `compaction@1` kind exists in the journal's closed vocabulary
+(`crates/journal/src/kind.rs:32-33`) with a typed payload (`crates/journal/src/data.rs:757-781`), and the
+session fold already records the compaction boundary into the projected DOM
+(`crates/session/src/fold.rs:517-528`), which is a
 much better starting position than it sounds — the *durable* half of compaction is done and
 tested (`crates/journal/tests/gc.rs`). What is missing is the ladder:
 
@@ -1994,10 +1996,10 @@ tested (`crates/journal/tests/gc.rs`). What is missing is the ladder:
   recorded by `project.rs` and `tool_result_item`. They also cover the majority of what the
   catalog's context extensions hand-roll, so shipping them shrinks the problem before any
   extension surface exists.
-- The `REMOTE` tier has an unusual amount of groundwork already: `Kind::NativeCheckpoint
-  { provider, model, items }` exists in storage for replacing accumulated provider-native
-  history with checkpoint items, and `crates/journal/src/transcript/capsule.rs` owns
-  provider-native replay residue. What is missing is the portability guard — pi's
+- The `REMOTE` tier's groundwork is a design slot, not code: no provider-native checkpoint
+  kind (`provider`, `model`, `items`) exists in the journal's closed vocabulary, and nothing
+  owns provider-native replay residue — reported gap. What is missing first is the
+  portability guard — pi's
   `remotePreserveReusable` judges reusability against the *active* model, and getting that
   wrong left provider-switched sessions permanently context-less (pi #6343). Any
   `CustomSummary` must therefore stay a real textual summary and never an opaque

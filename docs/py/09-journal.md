@@ -135,9 +135,10 @@ about. That is what `omp.state` exists to make unnecessary.
 These are enforced, not advisory.
 
 1. **Append-only.** There is no update and no delete. A later entry supersedes an
-   earlier one; the fold decides. The transcript never rewrites existing bytes —
-   malformed lines survive as tombstones so physical indexes stay stable
-   (`crates/journal/src/transcript/mod.rs:1-11`).
+   earlier one; the fold decides. The journal never rewrites committed bytes —
+   reopening truncates only the uncommitted tail after the last commit point, so
+   physical indexes stay stable (`crates/journal/src/lib.rs:95-119`,
+   `crates/journal/src/sse.rs:3-4`).
 2. **One writer.** Only the Agent Core writes the journal. The host *requests*
    appends over CONTROL and receives the assigned index. There is no path by
    which two processes append concurrently, which is the entire class of bug that
@@ -1686,10 +1687,10 @@ implemented, and this document must not present it as novel. `omp_tool::Rev`
 the types; `TOOL_REV_PROP = "omp/tool-rev"` (`:46`) is the durable carrier;
 `Tool::lift(&self, from: &Rev, call: RecordedCall) -> Option<LiftedCall>` (`:214`)
 is the upgrade path; `Registry::project` performs the adjacent-lift walk and
-`Registry::live_hash() -> [u8; 32]` gives the live registry a stable blake3
-identity (`registry.rs:544`, `:458`). The stamping is wired end to end:
-`crates/agent/src/project.rs:165,171,258`, `crates/agent/src/loop.rs:1368-1370`
-writing and `:1129-1131` reading.
+`Registry::projection_hash() -> Hash32` gives the live registry a stable blake3
+identity (`registry.rs` `project` at `:2988`, `projection_hash` at `:2690`). The stamping is
+wired end to end in the session projection:
+`crates/session/src/projection.rs:167-176` writing and `:188-203` reading.
 
 What is *not* wired is the migration itself. `Tool::lift` (`lib.rs:214`) and the
 erased default in `registry.rs:219` both return `None`, so today no tool actually
@@ -1805,7 +1806,13 @@ This is the same shape `docs/py/08-context.md` arrives at for context patching �
 plan over a presence set, treat "keep" as a move rather than a copy — and the two
 should share the primitive rather than each growing one.
 
-**New: `crates/journal/src/index.rs`, the sessions index.** `omp.sessions.list`
+**The sessions indexes exist: the list side is `omp_driver::sessions::SessionIndex`
+(`crates/driver/src/sessions.rs:316-330`), a disposable in-memory lookup rebuilt by scanning
+`.oms` genesis frames through `Journal::scan`; the usage side is `omp_cache::stats_cache`
+(`crates/cache/src/stats_cache.rs:1-8`), a rebuildable SQLite index behind `/stats`
+(`crates/app/src/chat_services/stats.rs:1-6`) holding one row per journaled turn receipt and
+tool call plus a per-file `file_offsets` sync cursor, with the journals staying
+authoritative.** `omp.sessions.list`
 and `omp.sessions.usage` need rows, and pi proves what happens without them: two
 independent re-parsers (`stats.db` with a `file_offsets` watermark table, and the
 extension's own `(size, mtime)` cache), both racing, both wrong on live files.

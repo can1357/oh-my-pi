@@ -3358,17 +3358,17 @@ which is opt-in shared-memory concurrency, not isolation — or splitting into t
 **Satisfied.** `plugin`: install, uninstall, link, list,
 doctor, features, config, enable/disable, marketplace, discover, upgrade — §3.13 covers all
 eleven, with `marketplace` folded into `omp ext index` + `omp ext search`.
-`:73` (install target classification local/npm/marketplace) — §3.3's spec grammar, with
+Install target classification (local/npm/marketplace) — §3.3's spec grammar, with
 `npm` → `pypi`/`index` and classification made explicit rather than heuristic; pi guessed
 from string shape (`/work/pi/…/classify-install-target.ts:46-67`), which is why
 `pkg@marketplace` needed a dist-tag exclusion list.
-`:685` (`--trusted-extension`: absolute path, exclusivity, exact-module load, hard-fail) —
+(`--trusted-extension`: absolute path, exclusivity, exact-module load, hard-fail) —
 §3.9.7, decomposed into `link --tier trusted` + `--ext-only` + `RECORD` membership +
 `E-TRUSTED-LOAD`.
-`:987` (manifest `package.json#omp`, lockfile state, feature toggles, per-plugin settings,
+(manifest `package.json#omp`, lockfile state, feature toggles, per-plugin settings,
 project overrides) — §3.1.3, §3.7.
-`:988` (doctor: integrity diagnostics, auto-repair, env/API-key health) — §3.13.10.
-`--apply` to commit, default dry-run) — §3.13.9 `gc`.
+(doctor: integrity diagnostics, auto-repair, env/API-key health) — §3.13.10.
+gc deletes only under `--apply` and otherwise dry-runs — §3.13.9 `omp ext gc`.
 
 **Conflicts, deliberately.**
 

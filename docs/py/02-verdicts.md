@@ -1205,14 +1205,16 @@ Three rules govern it:
    information was gone. Its own `prunedAt` field marks the moment.
 
 **What the transcript can express today, honestly.** The live chain is reconstructed by one
-forward fold, `Log::live() -> Vec<u64>` (`crates/journal/src/chain.rs:12-15`),
-which splices `Reset`, `Rewind`, and `Compact` over the physical event-index list —
-`Kind::Compact { first_kept, … }` rotates the chain so the summary stands in for the
-discarded prefix (`reader.rs:123-133`). That is the patch protocol, and it operates at
-**whole-event granularity**. Field-level correction is `Kind::Amend { target, patch }`
-carrying `AmendPatch::{Prune { keep_blocks }, RetryRecovery { … }, Seq { seq }}`
-(`transcript/types.rs:203-228`), and `Prune` prunes an *assistant* message to a prefix of its
-blocks. **No existing amendment drops a tool result's `content` while retaining its
+forward walk, `live_chain(&[Entry]) -> impl Iterator<Item = &Entry>`
+(`crates/journal/src/chain.rs:12-15`): an absent `prior` selects the preceding entry in file
+order, an explicit `prior` walks to that identity, and a missing target or cycle terminates
+the walk rather than inventing ancestry. It operates at
+**whole-event granularity**. Field-level correction is the `patch@1` entry — `KindName::Patch`
+(`crates/journal/src/kind.rs:93`) carrying a serialized DOM operation list in `data::Patch`
+(`crates/journal/src/data.rs:742-747`); `omp-dom` owns the operation types. The earlier
+`AmendPatch::{Prune { keep_blocks }, RetryRecovery { … }, Seq { seq }}` vocabulary has no
+surviving implementation in the tree, and no journal type expresses pruning an *assistant*
+message to a prefix of its blocks. **No existing amendment drops a tool result's `content` while retaining its
 `details`.** So rule 1 above is a property of this design, not yet a capability of the
 journal; build item 6 specifies the missing amendment and why adding one is less trivial
 than it looks.
@@ -1532,26 +1534,31 @@ following are load-bearing and shipped:
   independent of registration (`registry.rs:458-467`). This is already the right primitive
   for detecting when the advertised set changed.
 
-**`crates/agent`** — the loop-side wiring.
+**`crates/session`** — the projection-side wiring.
 
 - `TOOL_REV_PROP = "omp/tool-rev"` stamped onto both the tool-call and tool-result thread
-  items (`crates/agent/src/project.rs:257-261`, `:164-173`) and parsed back by
-  `tool_revision()` (`:278-299`).
+  items (`crates/session/src/projection.rs:167-169`, `:174-176`) and parsed back by
+  `tool_revision()` (`projection.rs:188-203`).
 - `project_thread_history(thread, registry, caps)` — the exact "call `lift()` once per turn
   for calls whose rev differs, skip already-live calls without decoding them" pass
-  (`project.rs:87-186`).
-- `batch.rs:811-818` — harness branches projected first, then `registry.prompt`, with
-  canonical wire parts as the fallback.
+  (`projection.rs:92-186`), driven through the serve seed and turn paths
+  (`crates/serve/src/inference.rs:503`, `:576-581`, `:2279`).
 
 **`crates/journal`** — the durable shape.
 
-- `Msg::ToolResult { call, tool, content, details: Option<Box<RawValue>>, error, useless,
-  provider_meta }` (`crates/journal/src/transcript/msg.rs:60-76`). `details` is already the
-  verdict slot and already holds verbatim JSON; `PartialEq` on `Msg` is byte equality of
-  stored JSON text specifically to preserve verbatim round trips (`msg.rs:78-80`).
-- `Kind::Compact { summary, short, first_kept, tokens_before, warning }`
-  (`event.rs:243-255`), `Kind::Amend { target, patch }` (`:298-304`),
-  `Kind::ToolBatchAuthorized` (`:317-318`), and content-addressed `BlobRef` throughout.
+- `ToolResult` — the `tool.result@1` terminal payload (`crates/journal/src/data.rs:538-564`) —
+  is an untagged `Outcome { outcome, prompt_parts, source_blob }` / `Fault { fault,
+  prompt_parts, source_blob }` pair. Its `outcome`/`fault` JSON is already the verdict slot
+  and already holds verbatim JSON; entries store payloads as single-line JSON text
+  (`crates/journal/src/entry.rs:81-82`), and derived `PartialEq` on `Entry` is byte equality
+  of that stored text specifically to preserve verbatim round trips
+  (`crates/journal/src/entry.rs:68-83`).
+- `compaction@1` — `KindName::Compaction` (`crates/journal/src/kind.rs:97`) with payload
+  `data::Compaction` (`crates/journal/src/data.rs:757-781`: content-addressed `summary`,
+  `boundary`, `method`, token estimates, `warning`, retained `frames`); field-level correction is
+  `patch@1` (`crates/journal/src/kind.rs:93`, `crates/journal/src/data.rs:742-747`); and
+  content-addressed `BlobRef` throughout (`crates/journal/src/blob.rs:47`).
+  `Kind::ToolBatchAuthorized` has no surviving implementation in the tree.
 - **The transcript patch protocol already ships**, and it is `Log::live() -> Vec<u64>`
   (`transcript/reader.rs:69-177`) — one forward fold splicing `Reset` / `Rewind` / `Compact`
   over the physical event-index list, replacing what the doc comment records as 6.1 million
@@ -1883,18 +1890,17 @@ Design points:
 This design's central compaction claim has no mechanism behind it yet, and the reason is
 worth stating precisely rather than working around.
 
-The live chain fold is `Log::live() -> Vec<u64>`
-(`crates/journal/src/transcript/reader.rs:69-177`). It is the real patch protocol —
-`Kind::Rewind` truncates the working chain (`reader.rs:108-118`), `Kind::Reset` starts a new
-boundary (`:119-122`), `Kind::Compact { first_kept }` rotates the summary in front of the
-retained suffix (`:123-133`), and tombstones stay addressable as opaque ordinary events
-(`:173`). Every one of those operations removes or replaces **whole events**.
+The live chain walk is `live_chain(&[Entry]) -> impl Iterator<Item = &Entry>`
+(`crates/journal/src/chain.rs:12-15`), one forward pass over `prior` links from the file tail;
+the entries it does not reach are what `abandoned` returns
+(`crates/journal/src/chain.rs:17-27`), and the file stays append-only — no stored byte is
+rewritten. The projection it feeds replaces **whole events**, never fields.
 
-Field-level correction is `Kind::Amend { target, patch }` with
-`AmendPatch::{Prune { keep_blocks }, RetryRecovery { … }, Seq { seq }}`
-(`crates/journal/src/data.rs:742-747`). `Prune` truncates an *assistant* message
-to a prefix of its blocks. Nothing drops a `Msg::ToolResult`'s `content` while retaining its
-`details`. Until that exists, "compaction drops projections and keeps verdicts" is a design
+Field-level correction does not exist: the journal's only patch payload is `patch@1`'s
+`Patch { ops }` (`crates/journal/src/data.rs:742-747`) — a serialized array of DOM operations
+whose Rust types `omp-dom` owns. Nothing drops a tool result's model-facing `prompt_parts`
+while retaining its `outcome` (`crates/journal/src/data.rs:543-552`). Until that kind of
+amendment exists, "compaction drops projections and keeps verdicts" is a design
 property, not a shipped one — the only available move is to discard the whole tool-result
 event, which takes the verdict with it and defeats the entire point.
 
@@ -1931,14 +1937,16 @@ Two non-obvious constraints:
 makes provider prefix caches survive a session reload. It is *asserted* by this design and
 not currently *enforced* anywhere. Enforcing it is discrete work.
 
-What already holds: `Msg` and `Kind` implement `PartialEq` as byte equality over stored JSON
-text specifically to preserve verbatim round trips
-(`crates/journal/src/transcript/msg.rs:78-80`, `event.rs:347-349`), and
-`Kind::Unknown(Box<RawValue>)` preserves foreign journal objects verbatim
-(`event.rs:344-345`). `project_thread_history` deliberately does not decode calls already at
+What already holds: `Kind` derives `PartialEq` (`crates/journal/src/kind.rs:100-107`), and
+entries store payloads as single-line JSON text with derived `PartialEq`, so entry equality
+is byte equality over the stored JSON specifically to preserve verbatim round trips
+(`crates/journal/src/entry.rs:68-83`), and
+`Kind::Unknown(Box<RawValue>)` has no surviving implementation: the journal accepts only the
+closed revision-1 vocabulary and rejects unknown kinds (`crates/journal/src/sse.rs:276-279`,
+`crates/journal/src/lib.rs:423-425`); payload bytes survive verbatim as single-line JSON text
+inside known kinds. `project_thread_history` deliberately does not decode calls already at
 the live rev, so their bytes and field presence pass through untouched
-(`crates/agent/src/project.rs:88-91,111-113`).
-
+(`crates/session/src/projection.rs:110-112`).
 What does not hold yet, in dependency order:
 
 1. **Canonical verdict serialization is not pinned.** `verdict_details` uses

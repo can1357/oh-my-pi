@@ -1225,7 +1225,7 @@ broadcast to a session that just exited is normal, not an error.
 | `DeliveryMode.NEXT_TURN` | `"next_turn"` | Queued behind the current turn; observed at the turn boundary. |
 
 These map onto the Core's three interrupt classes (`Immediate`,
-`TurnBoundary`, `Idle` — `crates/agent/src/mailbox.rs:10`). An idle recipient
+`TurnBoundary`, `Idle` — `crates/py/python/omp/events.py:162`). An idle recipient
 is woken by any of the three.
 
 #### `class omp.agents.Receipt(enum.StrEnum)`
@@ -1970,19 +1970,26 @@ More than the assignment implies, which changes the shape of the work from
   interrupts (which continue the loop) from job settlements (which do not) by
   matching `InterruptSource::Producer(_)`.
 - **The mailbox is exactly the right primitive.**
-  `crates/agent/src/mailbox.rs` gives us `InterruptClass::{Immediate,
+  No surviving mailbox implementation in the tree supplies `InterruptClass::{Immediate,
   TurnBoundary, Idle}` and `DrainPoint` with a nonblocking cloneable
   `MailboxSender` over a `flume::unbounded`. `DeliveryMode` in this document is
   a one-to-one renaming of `InterruptClass` for the Python surface; no new
   transport is needed for messaging, steering, injection, or schedule delivery.
-- **Journal rewind is done.** `Journal::rewind`
-  (`crates/agent/src/journal.rs:576`) appends `Kind::Rewind { to }`;
-  `Log::live()` (`crates/journal/src/chain.rs:12-15`) folds it by
-  truncating the working chain; `Agent::rewind` and `Agent::rewind_targets`
-  (`crates/agent/src/loop.rs:235,251`) are public today, and `RewindTarget`
-  already carries `{ event, keep, text }`. `RewindWhilePending`
-  (`journal.rs:114`) is the precondition this document surfaces as
-  `RewindPending`.
+- **Journal rewind is done.** `Session::rewind(target)`
+  (`crates/session/src/session.rs:937-961`) selects the target by canonical prefix replay and
+  stages it as the next entry's `prior`; `live_chain` (`crates/journal/src/chain.rs:12-15`) folds
+  the tail-selected chain and `abandoned` (`crates/journal/src/chain.rs:17-27`) keeps unreachable
+  entries inspectable, so rewinding never destroys abandoned history. The Python surface is
+  already wired: `rewind_targets()` (`crates/py/python/omp/agents.py:1342`) returns
+  `RewindTarget { event, keep, text, ts_ms, snapshot_id }`
+  (`crates/py/python/omp/agents.py:1236-1244`), `rewind(...)`
+  (`crates/py/python/omp/agents.py:1363`) drives the same journal selection, and `RewindPending`
+  (`crates/py/python/omp/agents.py:98-103`) is the pending-turn precondition this document
+  surfaces. The `Agent::rewind` / `Agent::rewind_targets` methods
+  (`crates/agent/src/loop.rs:235,251`) and the `RewindWhilePending` precondition have no
+  surviving Rust implementation; the loop's Rust rewinds run through `session.rewind(target)` in
+  `retry_tool_tail` (`crates/agent/src/loop.rs:1062`) and the checkpoint path
+  (`crates/agent/src/dispatch.rs:673`).
 - **Detached jobs are the `background=True` machinery.** `JobBoard`
   (`crates/agent/src/jobs.rs:31`) registers work, watches for terminal
   settlement, uploads the artifact as a blob, and posts a settlement item into
@@ -2037,8 +2044,8 @@ More than the assignment implies, which changes the shape of the work from
 - **Per-rev attribution already has a carrier.** `TOOL_REV_PROP`
   (`crates/tool/src/lib.rs:46`, `"omp/tool-rev"`) is the namespaced thread-item
   property holding a committed revision, stamped in
-  `crates/agent/src/project.rs:165,171,258` and `crates/agent/src/loop.rs:1368-1370`
-  and read back at `loop.rs:1129-1131`. `Firing` records, continuation
+  `crates/session/src/projection.rs:167-176` and read back at
+  `projection.rs:188-203`. `Firing` records, continuation
   refusals, and rewind reports use it rather than a parallel stamp; likewise
   `Registry::live_hash()` (`registry.rs:458`, blake3) is the existing stable
   identity for the ordered live registry, so nothing new is needed to answer
@@ -2484,10 +2491,11 @@ selected against the wait future — no polling.
 
 **`src/schedule.rs`** — the durable clock.
 
-New journal `Kind::Schedule { id, spec }` and
-`Kind::Firing { id, key, at, outcome }` in
-`crates/journal/src/transcript/event.rs`, with codec arms in `codec.rs`
-alongside the existing `payload!(RewindPayload { … })` macro (`codec.rs:402`).
+New journal kinds — a `schedule` intent carrying `id` and `spec`, and a `firing` outcome
+carrying `id`, `key`, `at`, and `outcome`. Neither exists in the journal's closed
+revision-1 vocabulary (`crates/journal/src/kind.rs:11-33`); landing them is a journal
+schema-revision change with typed payloads beside the existing ones
+(`crates/journal/src/data.rs`).
 The firing `key` is the idempotency key: the scheduler journals intent before
 delivery and outcome after, and recovery replays any intent without an
 outcome — at-least-once by construction, deduplicated by `key` at the
@@ -2724,12 +2732,9 @@ worktree capability.
   matters, the answer is the `paths` filter or design 3's CoW capture, not a
   cheaper hash.
 - **A rewind pays one projection, and must not add a second.**
-  `Log::live()` (`crates/journal/src/chain.rs:12-15`) returns
-  `Vec<u64>` and is already called per projection — it is the shipped patch
-  protocol, splicing `Reset`/`Compact`/`Rewind` over the live event-index list.
-  (`crates/journal/src/transcript/patch.rs` is *not* that: it defines
-  `Patch<T>`, a tri-state field patch for partial record updates. Do not cite it
-  as precedent here.) `omp.agents.rewind` appends one event and lets the
+  `live_chain` (`crates/journal/src/chain.rs:12-15`) walks the live chain as an iterator over
+  `&Entry`, and the projection consumes it per pass. No field-patch module exists in the
+  journal to cite as precedent (reported gap). `omp.agents.rewind` appends one event and lets the
   existing fold do the work; it must not build a parallel index or re-walk the
   chain to compute `RewindReport.dropped_items`, which is a length difference
   over the fold the projection already produced. If the rewind path ever needs

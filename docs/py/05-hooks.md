@@ -1198,9 +1198,10 @@ journal-derived environment state (todo slot restore, background-job policy). `r
 background jobs still pending after the rewrite; `cancelled_jobs` lists jobs whose launch the
 rewrite dropped and which were therefore cancelled (checkpoint rewinds cancel nothing). State
 rehydration remains fold-on-hook: `omp.sessions.journal(live=True)` opens a fresh reader per
-request and is immediately consistent with the truncated view. `session_reset` corresponds to
-journal `Kind::Reset`; `session_branch*` to `Kind::Branch`; `forked_from` to `Kind::ForkedFrom`
-(`crates/journal/src/transcript/event.rs:256-283`). `restore_workspace=True` is served by env
+request and is immediately consistent with the truncated view. `session_branch*` corresponds
+to entries carrying an explicit `prior` branch parent (`crates/journal/src/entry.rs:77-78`);
+`session_reset` and `forked_from` have no counterpart in the journal's closed revision-1
+vocabulary (`crates/journal/src/kind.rs:11-33`) — reported gap. `restore_workspace=True` is served by env
 snapshot/restore ([`11-env.md`](11-env.md)), not by an extension's shadow git repository — the
 `@ayulab/pi-rewind` pattern of maintaining `.git_checkpoint` is a dead end.
 
@@ -1360,7 +1361,7 @@ class DeadlineScope(enum.StrEnum):
 ```
 
 `AgentPhase`, `InterruptClass`, `DrainPoint` and `InterruptSource` mirror the Rust enums exactly
-(`crates/agent/src/events.rs:19-29`, `crates/agent/src/mailbox.rs:10-60`), so an extension that
+(a reported gap: no surviving Rust implementation of these enums in the tree), so an extension that
 reasons about interrupt timing reasons about the same taxonomy the loop does rather than a
 reinvented one. A previous revision exported the loop mirror as bare `Phase`, colliding with
 two other "phase" meanings across the set; it is renamed `AgentPhase` (matching the Rust name),
@@ -2287,7 +2288,7 @@ Three things the omp shape gets for free. Resolution is first-`Continue`-wins in
 `(layer, publisher, extension_id)` order with an explicit `Settle()` veto — domain-return hooks
 take no `phase=` — so an autoresearch auto-resume hook and this goal loop
 compose deterministically instead of one silently losing. `event.reason is
-SettleReason.INTERRUPTED` is the loop's own taxonomy (`crates/agent/src/mailbox.rs:10-17`,
+SettleReason.INTERRUPTED` is the loop's own taxonomy (
 `loop.rs:386-411`), not a heuristic over message shapes — so "pause on SIGINT, preserve budget on
 internal aborts" is a two-line distinction rather than a guess. And `agent_settled` fires exactly
 once per submission at the `DrainPoint::Idle` boundary (`loop.rs:580-597`), never after a tool
@@ -2464,7 +2465,7 @@ the protobuf files themselves.
   `AgentEvent` (`crates/agent/src/events.rs:19-119`) already enumerate the observations hooks need;
   `EventBus` already distinguishes a lossless journal subscription from a bounded lossy UI
   subscription with drop accounting (`events.rs:140-149`, `222-253`); `Mailbox` / `MailboxSender` /
-  `Interrupt` / `InterruptClass` / `DrainPoint` (`crates/agent/src/mailbox.rs:8-94`) are the exact
+  `Interrupt` / `InterruptClass` / `DrainPoint` (no surviving implementation in the tree) are the exact
   taxonomy `InterruptEvent` exposes; and the loop already carries a deadline (`wait_deadline`,
   `loop.rs:1177-1182`; `sleep_with_deadline`, `loop.rs:1184-1192`) and an out-of-band abort
   (`AbortHandle`, `loop.rs:101-114`).
@@ -2473,29 +2474,30 @@ the protobuf files themselves.
   `request_id` with an explicit `relinquish` for ownership transfer. A hook dispatch guard is the
   same type with a different sender; there is nothing to invent.
 - **`crates/tool`** already defines the vocabulary a denied or failed call lowers into: `Verdict`
-  (`crates/tool/src/lib.rs:251-260`), `Abort` (`308-328`, including the `Skipped`,
+  (`crates/tool/src/lib.rs:1697`), `Abort` (`crates/tool/src/lib.rs:1712`, including the `Skipped`,
   `Interrupted` and `EffectsUnknown` variants this document's failure table depends on),
-  `ArgIssue` / `ArgIssueKind` (`275-303`), `ArtifactLifetime` (`336-344`), `PromptCaps`
-  (`134-142`).
-- **`crates/journal`** already has a durable, verbatim-preserving journal: `Kind::Custom`
-  (`crates/journal/src/transcript/event.rs:334-343`) plus `Kind::ToolBatchAuthorized`,
-  `Kind::TurnStart`, `Kind::TurnReceipt`, `Kind::JobRegistered`, `Kind::JobSettled`,
-  `Kind::Rewind`, `Kind::Branch`, `Kind::Reset`, `Kind::ForkedFrom` — one journal event per hook
-  site in families A, B and I. (Not `transcript/patch.rs`: its `Patch<T>`
-  (`patch.rs:7`) is a tri-state *field* patch — unchanged / set / clear — for partial record
-  updates, and has nothing to do with rewriting a message list. The shipped projection patch
-  protocol is `Log::live` (`transcript/reader.rs:81`), which splices `Reset` / `Compact` / `Rewind`
-  over the live event-index list, with `AmendPatch::{Prune, RetryRecovery, Seq}`
-  (`transcript/types.rs:206-228`). Neither is on a hook path; they are named here only so this
-  document does not repeat a citation error other docs had to correct.)
+  `ArgIssue` / `ArgIssueKind` (`crates/tool/src/lib.rs:1674` / `:1655`), `ArtifactLifetime`
+  (`crates/tool/src/lib.rs:1856`), `PromptCaps` (`crates/tool/src/lib.rs:896`).
+- **`crates/journal`** already has a durable, verbatim-preserving journal: append-only
+  raw-SSE frames whose blank line commits an entry (`crates/journal/src/lib.rs:1-5`), one
+  writer under an exclusive sidecar lock (`crates/journal/src/lib.rs:37-57`), and a closed
+  revision-1 kind vocabulary (`crates/journal/src/kind.rs:11-33`) covering turn starts and
+  receipts, tool calls/updates/results, patches, and compaction. One journal event per hook
+  site in families A, B and I where a kind exists; hook-specific kinds beyond that
+  vocabulary are a reported gap, not existing entries. (The journal's patch surface is
+  `patch@1`'s DOM-operation batch (`crates/journal/src/data.rs:742-747`), not a message-list
+  rewrite; neither is on a hook path.)
 - **`crates/tool` already implements the revision and verdict architecture this design assumes.**
   It is not to be invented: `TOOL_REV_PROP = "omp/tool-rev"` (`crates/tool/src/lib.rs:46`) is the
   existing namespaced thread-item property carrying the committed rev, stamped by
-  `crates/agent/src/project.rs:165,171,258` and `crates/agent/src/loop.rs:1368-1370` and read at
-  `loop.rs:1129-1131`; `VerdictDetails` (`lib.rs:420`) already discriminates inline JSON from
-  spilled by `#[serde(tag = "storage")]`; `Registry::project_verdict`, `lift` and
-  `project(RecordedCallOwned) -> ProjectedCall` (`registry.rs:202`, `219`, `544`) already implement
-  the adjacent-lift walk. Anything in this document needing per-rev attribution — `HookOutcome`,
+  `crates/session/src/projection.rs:165-180` onto projected call and result items (and onto the
+  outbound device request by `crates/serve/src/inference.rs:2518-2526`) and read back by the
+  projection's `tool_revision` (`crates/session/src/projection.rs:188-196`); the inline-vs-spilled
+  details discriminator `CallOutcomeDetails` (`crates/tool/src/lib.rs:2045-2061`) separates inline
+  JSON from blob spill by `#[serde(tag = "storage")]`; `Registry::project_verdict`, `lift` and
+  `project(RecordedCallOwned) -> ProjectedCall` (`crates/tool/src/registry.rs:2942`, `:1288`,
+  `:2988`) already implement the adjacent-lift walk. Anything in this document needing per-rev
+  attribution — `HookOutcome`,
   telemetry, audit records — rides `TOOL_REV_PROP` rather than a parallel stamp. Note that
   `EventSpec.rev` / `HookOutcome.event_rev` are a *different* axis: the hook payload schema
   revision, not the tool dialect revision. Both are recorded; neither substitutes for the other.

@@ -466,10 +466,10 @@ devices both carry one; MCP endpoints do not.
 
 The rev a call actually settled under is not reconstructed by this namespace. It is read from
 `omp_tool::TOOL_REV_PROP` — the namespaced thread-item property `"omp/tool-rev"`
-(`crates/tool/src/lib.rs:46`) — which the agent loop already stamps and reads
-(`crates/agent/src/loop.rs:1368-1370` and `:1129-1131`, `crates/agent/src/journal.rs:1300-1302`,
-`crates/agent/src/project.rs:165,171,258`). Telemetry is a consumer of that stamp, never a second
-source of it.
+(`crates/tool/src/lib.rs:46`) — which the session projection already stamps and reads
+(`crates/session/src/projection.rs:165-180` stamps it onto projected call and result items, and
+`:188-196` reads it back; `crates/serve/src/inference.rs:2518-2526` stamps the outbound device
+request). Telemetry is a consumer of that stamp, never a second source of it.
 
 ```python
 rev = omp.telemetry.Rev.parse("edit@hl.47")
@@ -2045,7 +2045,7 @@ impl Firehose {
 
 `publish` is a plain `fn`, not `async` and not returning a future, so no `BoxFuture` and no
 `.await` appears at an emit site. `Subscription::offer` is `flume::bounded(queue).try_send` plus an
-`AtomicU64` drop counter — copying `crates/agent/src/mailbox.rs`'s `MailboxSender::try_enqueue`
+`AtomicU64` drop counter — copying the mailbox's nonblocking enqueue
 pattern but **bounded**, because that mailbox is deliberately unbounded (`flume::unbounded`,
 `mailbox.rs:114`) and an unbounded firehose behind a wedged Python host is a heap leak with a
 timestamp on it.
@@ -2182,10 +2182,11 @@ already are `<family>.<number>`, and `Rev.parse` has a real grammar to parse. `R
 registry key to that `Display` with `@` purely for presentation; the `@` form never rides a wire.
 
 The committed rev is likewise already carried and already stamped. `omp_tool::TOOL_REV_PROP`
-(`lib.rs:46`) is the namespaced thread-item property `"omp/tool-rev"`; `crates/agent/src/loop.rs`
-stamps it at `:1368-1370` and reads it at `:1129-1131`, `crates/agent/src/journal.rs` at
-`:1300-1302`, and `crates/agent/src/project.rs` at `:165`, `:171`, `:258`. Telemetry reads that
-property. Proposing a second stamp would have created exactly the divergence Lesson #8 warns about.
+(`lib.rs:46`) is the namespaced thread-item property `"omp/tool-rev"`; the session projection
+stamps it onto projected call and result items (`crates/session/src/projection.rs:165-180`) and
+reads it back (`crates/session/src/projection.rs:188-196`); `crates/serve/src/inference.rs:2518-2526`
+stamps it onto the outbound device request. Telemetry reads that property. Proposing a second
+stamp would have created exactly the divergence Lesson #8 warns about.
 
 `Registry::live_hash()` (`crates/tool/src/registry.rs:458-467`) similarly already answers "did the
 reachable identity set change": BLAKE3 over the ordered live `(name, family, n)` triples with
@@ -2313,7 +2314,8 @@ boundary limitation rather than a device that declined to use the pull cursor.
 source for `HostWarning` events whose `subject` is a worker: map the code into `HostWarning.code`
 rather than adding a second error vocabulary.
 
-`crates/agent/src/journal.rs` (1970 lines) owns durable session events; the firehose must **not**
+`crates/journal` owns durable session events (one flat raw-SSE `.oms` file per session; a blank
+line commits an entry, `crates/journal/src/lib.rs:3-4`); the firehose must **not**
 duplicate it. Journal entries are ordered and durable; firehose events are droppable projections. A
 firehose event referencing a journal entry does so by index, and `Branch.from_entry`/`to_entry` are
 exactly that.
@@ -2339,9 +2341,11 @@ value types, with the enums generated from the same `vocab!` tables as their Rus
 
 ### `crates/journal` — the query substrate, and the real work
 
-`query`, `rev_metrics`, and `issues` need an index. Nothing suitable exists: `transcript` is an
-append-only event log with a `reader` (`crates/journal/src/transcript/reader.rs`) built for replay,
-not for `WHERE payload.rebase.fuzzy = true GROUP BY rev`.
+`query`, `rev_metrics`, and `issues` need an index. Nothing suitable exists: the journal is an
+append-only raw-SSE event log whose read paths are replay — `Journal::scan`
+(`crates/journal/src/lib.rs:142-156`) for lock-free consumers and the live-chain walk
+(`crates/journal/src/chain.rs:12-15`) — built for projection, not for
+`WHERE payload.rebase.fuzzy = true GROUP BY rev`.
 
 - *Option A — replay-only.* Answer every query by streaming transcripts through `reader`. No new
   store, correct by construction, and O(total bytes) per query. A ninety-day cross-project query

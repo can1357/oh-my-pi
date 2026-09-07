@@ -442,7 +442,7 @@ device might eventually do from its name and arbitrary JSON args.
 class BashIR:
     source: str                       # exact script text as submitted
     rev: str                          # IR schema revision, e.g. "bashir@3"
-    parser_rev: str                   # shell-engine parser revision that produced it
+    parser_rev: str                   # shell parser revision that produced it
     parse_ok: bool
     parse_error: ParseError | None
     truncated: bool                   # source exceeded BASH_IR_MAX_SOURCE
@@ -593,7 +593,7 @@ class BashCommandIR:
     depth: int                            # 0 at program level
     container: CompoundKind | None        # innermost enclosing compound, if any
     subshell: bool                        # executes in a subshell (pipe stage, `(...)`, sub)
-    builtin: bool                         # resolves to a shell-engine builtin
+    builtin: bool                         # resolves to a shell builtin
     coreutil: bool                        # resolves to an in-process coreutil
     external: bool                        # would resolve a binary on $PATH
     read_only: bool                       # core classification for this argv
@@ -2028,7 +2028,7 @@ caller either supplies `default=` or accepts `omp.agents.CompletionFailed`. A gu
 returned `Allow` because a 350M model timed out would be worse than no guardian, so the API
 makes that a caller bug rather than a default. `fell_back=True` says the deterministic path
 ran, which is a fact worth journaling — this mirrors the failure semantics of the auto-thinking
-classifier already shipping in Rust("online backend:
+classifier already shipping in Rust ("online backend:
 tiny model, allowMax variant, 5-level output, earliest-match parsing, transient retry" with
 "fallback to provisional or previous level on failure").
 

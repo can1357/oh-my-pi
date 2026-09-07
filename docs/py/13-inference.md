@@ -2621,7 +2621,7 @@ optimization modes" — per-family service tiers become declared `ServiceTier` p
 `omp.intent.service_tier`; "append-only context auto-detect" and "inline tool descriptor stripping for
 Gemini" are `CompatFlags` axes. `registerProvider` /
 `unregisterProvider` / `fetchDynamicModels` becomes `omp.provider` / `handle.retract` /
-`models_discover`, and lines 168-169 (`before_provider_request` / `after_provider_response`) become
+`models_discover`; the provider lifecycle hooks are
 `before_request` / `provider_error`. The speech, STT, and realtime endpoints
 are `Operation.SPEAK`/`TRANSCRIBE`/`REALTIME` with their capability records.
 The search providers are `Operation.SEARCH` plus a `SEARCH_*` codec — the
@@ -2662,6 +2662,16 @@ overlay wiring (item 1 above) is a prerequisite and belongs earlier.
    (`crates/app/src/chat.rs:511`), reached through `ParentSessionHost::completion`
    (`crates/app/src/envd/eval/bridge.rs:483`), is the same call the eval prelude's `completion()`
    already exposes.
+   omp's local-model stack is real and verifiable on disk, and it is the natural substrate:
+   the tiny-model catalog (`crates/ai/src/local/tiny_catalog.rs:103-160`) ships exactly the
+   weight class this argument needs — `lfm2-350m`, `qwen3-0.6b`, `gemma-270m`,
+   `qwen2.5-0.5b` — on top of a local runtime with admission control, memory pooling, and
+   idle unloading (`crates/ai/src/local/runtime.rs:235-330`). The shipped adapter seam is
+   speech — `SpeechToTextAdapter` (`crates/ai/src/local/stt.rs:168`) with typed
+   `TranscriptionOptions` (`stt.rs:116`) and its own idle unloading (`stt.rs:251`). A
+   text-side adapter — `TextAdapter::generate`, `GenerationOptions`, `TextCapabilities` —
+   has no on-disk home under `crates/ai/src/local/`; that is the reported gap this seam
+   names, not a dropped implementation.
    The blogpost's "Extra: Use local models!" argues for exactly this,
    and `FEATURES.md:356-360` shows omp already doing it in Rust for auto-thinking difficulty
    classification: "online backend: tiny model, allowMax variant, 5-level output, earliest-match
