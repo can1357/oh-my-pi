@@ -29,7 +29,7 @@ export type MatrixArgs = {
  * Split a `--ids` list on commas, but keep commas inside `[...]`
  * (`gpt-5.3-codex[reasoning=medium,fast=false]` is one id).
  */
-export function splitIdList(raw: string): string[] {
+export function splitMatrixIds(raw: string): string[] {
 	const out: string[] = [];
 	let current = "";
 	let depth = 0;
@@ -72,7 +72,7 @@ export function parseArgs(argv: string[]): MatrixArgs {
 		mode: mode === "text" || mode === "tools" ? mode : "all",
 		slice: slice === "representative" ? "representative" : "all",
 		limit: limitRaw ? Number(limitRaw) : undefined,
-		ids: idsRaw ? splitIdList(idsRaw) : undefined,
+		ids: idsRaw ? splitMatrixIds(idsRaw) : undefined,
 		concurrency: Math.max(1, Number(concurrencyRaw ?? 3) || 3),
 		json: get("--json"),
 		omp: argv.includes("--omp"),
@@ -115,14 +115,17 @@ export function writeLikeShellCommand(command: string): boolean {
 export function readLikeShellCommand(command: string): boolean {
 	const cmd = command.trim();
 	if (!cmd || writeLikeShellCommand(cmd)) return false;
-	return /(?:^|[;&|\n]\s*)(?:cat|head|tail)\b/.test(cmd);
+	return /(?:^|[;&|\n]\s*)(?:cat|head|sed)\b/.test(cmd);
 }
 
-// Soft wording + product Shell + relative sandbox paths.
-// Live keep-model: "use the Write/Read tool" still 400s opus-thinking with
-// Anthropic Usage Policy after bash/Shell echo passed. Write/read smokes
-// therefore use Shell (`printf > notes/…`, `cat notes/…`); the matrix
-// already counts those as write/read via writeLike/readLike helpers.
+/** Turn 1 already invoked the tool; these follow-up classes must not FAIL the id. */
+export function isSoftPassToolFollowup(errorClass: string): boolean {
+	return errorClass === "incomplete-tool" || errorClass === "empty-body" || errorClass === "provider-policy-block";
+}
+
+// Live keep-model: explicit Read/Write tools trip Anthropic Usage Policy on
+// opus-thinking ids. Shell echo/cat/printf-redirect is accepted and remaps
+// to product Shell; isReadLikeCall / isWriteLikeCall count those as read/write.
 export function toolSmokePrompt(kind: ToolSmokeKind, ping: string, id: string): string {
 	const safe = idSafe(id);
 	if (kind === "bash") {

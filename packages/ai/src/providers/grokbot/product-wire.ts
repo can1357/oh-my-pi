@@ -186,6 +186,21 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 			};
 		}
 	}
+	if ((name === "read" || wireName === "Read") && schema.properties && typeof schema.properties === "object") {
+		const props = (parametersSchema.properties ?? schema.properties) as Record<string, unknown>;
+		if (props.path && !props.target_file) {
+			parametersSchema = {
+				...parametersSchema,
+				properties: {
+					...props,
+					target_file: {
+						type: "string",
+						description: "File path (alias of path)",
+					},
+				},
+			};
+		}
+	}
 	const entry: ProductWireTool = {
 		name: wireName,
 		description: typeof tool.description === "string" ? tool.description : "",

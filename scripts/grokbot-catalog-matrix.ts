@@ -34,6 +34,7 @@ import {
 import {
 	classifyError,
 	idSafe,
+	isSoftPassToolFollowup,
 	parseArgs,
 	readLikeShellCommand,
 	toolSmokePrompt,
@@ -83,7 +84,10 @@ const OMP_TOOLS: Tool[] = [
 		description: "Read a file from disk.",
 		parameters: {
 			type: "object",
-			properties: { path: { type: "string", description: "Absolute path" } },
+			properties: {
+				path: { type: "string", description: "Absolute path" },
+				target_file: { type: "string", description: "File path (alias of path)" },
+			},
 			required: ["path"],
 		},
 	} as Tool,
@@ -287,9 +291,10 @@ async function runOneTool(
 	const status2 = httpStatusOf(turn2);
 	if (turn2.stopReason === "error") {
 		const errorClass = classifyError(turn2.errorMessage, status2);
-		// Turn 1 already proved the named tool. A hanging leftover or empty
-		// follow-up (gemini-3-flash Write, parent-chat Read) must not fail the id.
-		if (errorClass === "incomplete-tool" || errorClass === "empty-body") {
+		// Turn 1 already proved the named tool. Hanging leftovers, empty
+		// follow-ups, and Anthropic Usage Policy on the echo follow-up after a
+		// successful Shell call must not fail the id.
+		if (isSoftPassToolFollowup(errorClass)) {
 			return {
 				pass: true,
 				routedModel: turn2.upstreamModel ?? turn1.upstreamModel,

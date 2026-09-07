@@ -293,6 +293,27 @@ describe("product wire helpers", () => {
 		);
 	});
 
+	test("Read schema advertises target_file as an alias of path", () => {
+		const tools = toProductField2Tools(
+			[
+				{
+					name: "read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" } },
+						required: ["path"],
+					},
+				},
+			],
+			"automation",
+		);
+		expect(tools[0]?.name).toBe("Read");
+		const schema = (tools[0]?.parameters as { jsonSchema?: { properties?: Record<string, unknown> } }).jsonSchema;
+		expect(schema?.properties).toHaveProperty("path");
+		expect(schema?.properties).toHaveProperty("target_file");
+	});
+
 	test("Write schema advertises contents as an alias of content", () => {
 		const tools = toProductField2Tools(
 			[

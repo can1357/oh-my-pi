@@ -624,6 +624,18 @@ function normalizeProductWriteArgs(name: string, args: Record<string, unknown>):
 	return args;
 }
 
+/** Cursor Read sometimes emits `target_file` instead of omp `path`. */
+function normalizeProductReadArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
+	if (toSandField2Name(name) !== "Read" && !/^(read|Read)$/i.test(name)) return args;
+	if (typeof args.path === "string") return args;
+	if (typeof args.target_file === "string") return { ...args, path: args.target_file };
+	return args;
+}
+
+function normalizeProductToolArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
+	return normalizeProductReadArgs(name, normalizeProductWriteArgs(name, args));
+}
+
 function uniqueToolStates(toolStates: Map<string, GrokbotToolState>): GrokbotToolState[] {
 	const seen = new Set<GrokbotToolState>();
 	const out: GrokbotToolState[] = [];
@@ -1060,7 +1072,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					if (state.ended) return;
 					// Parse before marking ended so malformed JSON does not leave a
 					// "completed" state without a successful toolcall_end.
-					state.block.arguments = normalizeProductWriteArgs(
+					state.block.arguments = normalizeProductToolArgs(
 						state.block.name,
 						parseCompletedToolArgs(state.argsText, state.isGrammar),
 					);
