@@ -11,6 +11,10 @@
 
 - Grok Bot catalog matrix reports `wire: native` for grok/gpt/gemini families (was the internal `error` sentinel). `sand-automation` JSON-as-text Shell dumps are promoted to real tool calls.
 - `--no-tools` keeps an empty provider tool whitelist without `restrictToolNames`, so extension commands and LSP remain available unless `--no-extensions` / `--no-lsp` are set.
+### Fixed
+
+- Fixed `/copy` link captions showing Markdown delimiters for formatted labels and splitting across two rows for multiline labels ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).
+- Fixed Ask custom answers requiring another submission after paste or remaining on the same multi-select question; pending clipboard text is preserved before submission, and single-question multi-select answers still go through review ([#11099](https://github.com/can1357/oh-my-pi/pull/11099) by [@camjac251](https://github.com/camjac251)).
 
 ## [18.1.12] - 2026-09-06
 
