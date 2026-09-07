@@ -15,7 +15,7 @@
 import { buildModel } from "../packages/catalog/src/build.ts";
 import type { ModelSpec } from "../packages/catalog/src/types.ts";
 import { streamGrokBot } from "../packages/ai/src/providers/grokbot.ts";
-import type { Context, Tool, Message, AssistantMessage, ToolCall } from "../packages/ai/src/types.ts";
+import type { Context, Model, Tool, Message, AssistantMessage, ToolCall } from "../packages/ai/src/types.ts";
 
 const ANTHROPIC_IDS = [
 	"claude-opus-5",
@@ -84,7 +84,7 @@ function makeContext(messages: Message[]): Context {
 }
 
 async function runTurn(
-	model: ReturnType<typeof buildModel>,
+	model: Model<"grokbot-sand">,
 	messages: Message[],
 ): Promise<{ assistant: AssistantMessage; toolCalls: ToolCall[]; error?: string }> {
 	const context = makeContext(messages);

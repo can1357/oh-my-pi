@@ -34,9 +34,11 @@ function unwrapFunctionCall(obj: Record<string, unknown>): Record<string, unknow
 /** Join visible text and thinking so JSON-as-text dumps in thought-only turns promote. */
 export function assistantTextForJsonPromotion(
 	content: ReadonlyArray<{ type: string; text?: string; thinking?: string }>,
+	excludeIndexes?: ReadonlySet<number>,
 ): string {
 	return content
-		.map(block => {
+		.map((block, index) => {
+			if (excludeIndexes?.has(index)) return "";
 			if (block.type === "text" && typeof block.text === "string") return block.text;
 			if (block.type === "thinking" && typeof block.thinking === "string") return block.thinking;
 			return "";

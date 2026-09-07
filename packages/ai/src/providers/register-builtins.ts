@@ -39,6 +39,7 @@ import type { DevinOptions } from "./devin";
 import type { GoogleOptions } from "./google";
 import type { GoogleGeminiCliOptions } from "./google-gemini-cli";
 import type { GoogleVertexOptions } from "./google-vertex";
+import { streamGrokBot as streamGrokBotProvider } from "./grokbot";
 import type { OllamaChatOptions } from "./ollama";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./openai-completions";
@@ -134,14 +135,6 @@ interface CursorProviderModule {
 
 interface DevinProviderModule {
 	streamDevin: (model: Model<"devin-agent">, context: Context, options: DevinOptions) => AssistantMessageEventStream;
-}
-
-interface GrokbotProviderModule {
-	streamGrokBot: (
-		model: Model<"grokbot-sand">,
-		context: Context,
-		options: OptionsForApi<"grokbot-sand">,
-	) => AssistantMessageEventStream;
 }
 
 interface BedrockProviderModule {
@@ -468,9 +461,10 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 }
 
 function loadGrokbotProviderModule(): Promise<LazyProviderModule<"grokbot-sand">> {
-	grokbotProviderModulePromise ||= import("./grokbot").then(module => {
-		const provider = module as GrokbotProviderModule;
-		return { stream: provider.streamGrokBot };
+	// Top-level import (AGENTS.md); neighbors still use dynamic import for lazy
+	// graphs, but new inline imports are banned — keep the stream export wired.
+	grokbotProviderModulePromise ||= Promise.resolve({
+		stream: streamGrokBotProvider,
 	});
 	return grokbotProviderModulePromise;
 }

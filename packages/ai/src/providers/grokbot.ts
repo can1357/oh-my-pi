@@ -1023,6 +1023,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				let openIndex = -1;
 				let sendToUserArgsText = "";
 				let sendToUserLastContent = "";
+				/** Content indexes whose text came from synthetic SendToUser — never promote. */
+				const sendToUserTextIndexes = new Set<number>();
 				const toolStates = new Map<
 					string,
 					{ key: string; index: number; block: ToolCall; argsText: string; ended: boolean; isGrammar: boolean }
@@ -1108,6 +1110,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						sendToUserLastContent = parsed;
 						if (delta) {
 							const idx = ensureText();
+							sendToUserTextIndexes.add(idx);
 							(output.content[idx] as TextContent).text += delta;
 							emitAttemptEvent({ type: "text_delta", contentIndex: idx, delta, partial: output });
 						}
@@ -1475,16 +1478,17 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				// Gemini/GPT-mini thought-only turns hide the same JSON in thinking,
 				// or emit ```tool_code / default_api.bash(...) instead.
 				if (!output.content.some(b => b.type === "toolCall")) {
-					const text = assistantTextForJsonPromotion(output.content);
+					const text = assistantTextForJsonPromotion(output.content, sendToUserTextIndexes);
 					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
 					const promoted = parseJsonTextToolCall(text, advertised) ?? parseGeminiInbandToolCall(text, advertised);
 					if (promoted) {
 						const removedIndexes = new Set<number>();
 						for (let i = 0; i < output.content.length; i++) {
+							if (sendToUserTextIndexes.has(i)) continue;
 							const block = output.content[i];
 							if (block?.type === "text" || block?.type === "thinking") removedIndexes.add(i);
 						}
-						output.content = output.content.filter(b => b.type !== "text" && b.type !== "thinking");
+						output.content = output.content.filter((_, i) => !removedIndexes.has(i));
 						// Drop buffered thinking/text events for removed blocks before
 						// upsertTool flushes — otherwise ACP sees the JSON as reasoning
 						// at index 0 while the final transcript is only a tool call.
