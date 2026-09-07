@@ -1,12 +1,6 @@
 import { expect, test } from "bun:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
-import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { resolveMaxContextWindow } from "@oh-my-pi/pi-catalog/compat/context-window";
-import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 function bundledAstra() {
 	const astra = getBundledModels("openai-codex").find(model => model.id === "gpt-6-astra");
@@ -14,38 +8,35 @@ function bundledAstra() {
 	return astra;
 }
 
-test("prefers a live maximum when no rule fallback owns one", () => {
+function bundledLegacy() {
+	const legacy = getBundledModels("openai-codex").find(model => model.id === "gpt-5.5");
+	if (!legacy) throw new Error("Expected bundled legacy Codex model");
+	return legacy;
+}
+
+test("corrects a stale live maximum up to the curated window", () => {
 	const astra = bundledAstra();
-	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: 872_000 })).toBe(872_000);
-	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: undefined })).toBeUndefined();
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: 872_000 })).toBe(1_050_000);
 });
 
-test("ignores non-positive cached maxima without a rule fallback", () => {
+test("keeps a higher live maximum above the curated window", () => {
 	const astra = bundledAstra();
-	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: Number.NaN })).toBeUndefined();
-	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: 0 })).toBeUndefined();
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: 1_200_000 })).toBe(1_200_000);
 });
 
-test("floors stale Astra windows to the documented 1.05M at build time", () => {
-	const now = 1_000_000;
-	const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "pi-context-window-"));
-	const dbPath = path.join(tempDir, "models.db");
-	try {
-		writeModelCache(
-			"openai-codex",
-			now,
-			[{ ...bundledAstra(), contextWindow: 272_000, maxContextWindow: 0 }],
-			true,
-			"",
-			dbPath,
-		);
-		const cachedSpec = readModelCache("openai-codex", 1_000, () => now, dbPath)?.models.find(
-			model => model.id === "gpt-6-astra",
-		);
-		if (!cachedSpec) throw new Error("Expected cached Astra model");
+test("falls back to the curated window when the live maximum is missing or invalid", () => {
+	const astra = bundledAstra();
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: undefined })).toBe(1_050_000);
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: 0 })).toBe(1_050_000);
+	expect(resolveMaxContextWindow({ ...astra, maxContextWindow: Number.NaN })).toBe(1_050_000);
+});
 
-		expect(buildModel(cachedSpec).contextWindow).toBe(1_050_000);
-	} finally {
-		removeSyncWithRetries(tempDir);
-	}
+test("leaves models without a curated maximum to the live value or undefined", () => {
+	const legacy = bundledLegacy();
+	// No `max-context-window` rule owns this SKU, so extended-context widening
+	// sees exactly what discovery reported — nothing curated is injected.
+	expect(resolveMaxContextWindow({ ...legacy, maxContextWindow: 640_000 })).toBe(640_000);
+	expect(resolveMaxContextWindow({ ...legacy, maxContextWindow: undefined })).toBeUndefined();
+	expect(resolveMaxContextWindow({ ...legacy, maxContextWindow: 0 })).toBeUndefined();
+	expect(resolveMaxContextWindow({ ...legacy, maxContextWindow: Number.NaN })).toBeUndefined();
 });
