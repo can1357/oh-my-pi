@@ -569,11 +569,12 @@ describe("grokbot AvailableModels headers", () => {
 		expect(seen[1]?.headers["connect-protocol-version"]).toBe("1");
 	});
 
-	test("clears the cached token after AvailableModels returns 401", async () => {
+	test("remints once and retries AvailableModels after a cached JWT is rejected", async () => {
 		process.env.GROKBOT_MACHINE_ID = "machine";
 		process.env.GROKBOT_NAMESPACE = "prod";
 		process.env.GROKBOT_CLIENT_VERSION = "0.30.0";
 		let mintCount = 0;
+		let availableModelsCalls = 0;
 		const fetchImpl = Object.assign(
 			async (url: string | URL | Request) => {
 				if (String(url).includes("inference-credential")) {
@@ -583,7 +584,8 @@ describe("grokbot AvailableModels headers", () => {
 						{ status: 200, headers: { "content-type": "application/json" } },
 					);
 				}
-				if (mintCount === 1) {
+				availableModelsCalls += 1;
+				if (availableModelsCalls === 1) {
 					return new Response("Unauthorized", { status: 401 });
 				}
 				return new Response(JSON.stringify({ models: [] }), {
@@ -593,21 +595,44 @@ describe("grokbot AvailableModels headers", () => {
 			},
 			{ preconnect: fetch.preconnect },
 		) as typeof fetch;
-		const first = await fetchGrokbotAvailableModels({
+		const models = await fetchGrokbotAvailableModels({
 			apiKey: "renewer",
 			baseUrl: "https://proxy.example/grokbot",
 			fetch: fetchImpl,
 		});
-		expect(first).toBeNull();
-		expect(mintCount).toBe(1);
+		// One discovery call remints and replays instead of failing until a later refresh.
+		expect(models).not.toBeNull();
+		expect(availableModelsCalls).toBe(2);
+		expect(mintCount).toBe(2);
+	});
 
-		const second = await fetchGrokbotAvailableModels({
+	test("gives up after a second AvailableModels 401", async () => {
+		process.env.GROKBOT_MACHINE_ID = "machine";
+		process.env.GROKBOT_NAMESPACE = "prod";
+		process.env.GROKBOT_CLIENT_VERSION = "0.30.0";
+		let mintCount = 0;
+		let availableModelsCalls = 0;
+		const fetchImpl = Object.assign(
+			async (url: string | URL | Request) => {
+				if (String(url).includes("inference-credential")) {
+					mintCount += 1;
+					return new Response(
+						JSON.stringify({ accessToken: `tok-${mintCount}`, expiresAtMs: Date.now() + 600_000 }),
+						{ status: 200, headers: { "content-type": "application/json" } },
+					);
+				}
+				availableModelsCalls += 1;
+				return new Response("Unauthorized", { status: 401 });
+			},
+			{ preconnect: fetch.preconnect },
+		) as typeof fetch;
+		const models = await fetchGrokbotAvailableModels({
 			apiKey: "renewer",
 			baseUrl: "https://proxy.example/grokbot",
 			fetch: fetchImpl,
 		});
-		expect(second).not.toBeNull();
-		// Without clearing on 401, the second call would reuse tok-1 and never remint.
+		expect(models).toBeNull();
+		expect(availableModelsCalls).toBe(2);
 		expect(mintCount).toBe(2);
 	});
 });

@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels remints and retries once after HTTP 401 instead of failing the current refresh on a revoked cached JWT.
 - Fixed Grok Bot `sand-default` reasoning capability to be owned by catalog KDL instead of discovery id compares, and excluded host-secret file credentials from env-only auth-broker migration.
 - Grok Bot AvailableModels discovery emits separate catalog rows for variant **`legacySlug`** values with `requestModelId` pointing at the canonical model and variant `sandParameterIds`.
 - Grok Bot offline seeds stay neutral for image input and output caps so live AvailableModels rows are not enriched on merge.

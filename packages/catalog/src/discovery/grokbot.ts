@@ -61,27 +61,38 @@ export async function fetchGrokbotAvailableModels(
 
 	try {
 		const cfg = await loadGrokbotConfig(options.apiKey);
-		if (!cfg.renewal || !cfg.machineId) {
+		const machineId = cfg.machineId;
+		if (!cfg.renewal || !machineId) {
 			return null;
 		}
 		const fetchImpl = discoveryFetch(options.fetch);
-		const accessToken = await mintGrokbotAccessToken(cfg, fetchImpl, resolvedBaseUrl, signal, options.headers);
-		const response = await fetchImpl(requestUrl, {
-			method: "POST",
-			headers: mergeGrokbotHeaders(options.headers, grokbotClientHeaders(cfg), {
-				authorization: `Bearer ${accessToken}`,
-				"x-cursor-checksum": createGrokbotChecksum(cfg.machineId),
-				"x-ghost-mode": "true",
-				"content-type": "application/json",
-				accept: "application/json",
-				"connect-protocol-version": "1",
-			}),
-			body: encodeGrokbotAvailableModelsRequest({
-				useModelParameters: true,
-				includeLongContextModels: true,
-			}),
-			signal,
+		const requestBody = encodeGrokbotAvailableModelsRequest({
+			useModelParameters: true,
+			includeLongContextModels: true,
 		});
+		const postAvailableModels = async (accessToken: string) =>
+			fetchImpl(requestUrl, {
+				method: "POST",
+				headers: mergeGrokbotHeaders(options.headers, grokbotClientHeaders(cfg), {
+					authorization: `Bearer ${accessToken}`,
+					"x-cursor-checksum": createGrokbotChecksum(machineId),
+					"x-ghost-mode": "true",
+					"content-type": "application/json",
+					accept: "application/json",
+					"connect-protocol-version": "1",
+				}),
+				body: requestBody,
+				signal,
+			});
+
+		let accessToken = await mintGrokbotAccessToken(cfg, fetchImpl, resolvedBaseUrl, signal, options.headers);
+		let response = await postAvailableModels(accessToken);
+		// Cached JWTs can be revoked while still unexpired — remint once like stream.
+		if (response.status === 401) {
+			clearGrokbotTokenCache();
+			accessToken = await mintGrokbotAccessToken(cfg, fetchImpl, resolvedBaseUrl, signal, options.headers);
+			response = await postAvailableModels(accessToken);
+		}
 		if (!response.ok) {
 			if (response.status === 401) clearGrokbotTokenCache();
 			return null;
