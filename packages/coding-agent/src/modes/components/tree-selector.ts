@@ -160,6 +160,13 @@ class TreeList implements Component {
 	onSelect?: (entryId: string, options: { summarize: boolean }) => void;
 	onCancel?: () => void;
 	onLabelEdit?: (entryId: string, currentLabel: string | undefined) => void;
+	/** Reveal or re-hide archived branches. The node set changes, so the caller rebuilds the list. */
+	onToggleArchived?: () => void;
+	/**
+	 * Hide the highlighted branch, or reveal it when it is already archived. The
+	 * node set changes either way, so the caller rebuilds the list.
+	 */
+	onArchiveToggle?: (entryId: string) => void;
 
 	constructor(
 		tree: SessionTreeNode[],
@@ -375,6 +382,7 @@ class TreeList implements Component {
 			// no conversation content, so the tree only shows them in "all" mode.
 			const isSettingsEntry =
 				entry.type === "label" ||
+				entry.type === "archive" ||
 				entry.type === "custom" ||
 				entry.type === "model_change" ||
 				entry.type === "model_usage" ||
@@ -523,6 +531,9 @@ class TreeList implements Component {
 				break;
 			case "session_init":
 				parts.push("session init");
+				break;
+			case "archive":
+				parts.push("archive", entry.targetId);
 				break;
 		}
 
@@ -819,6 +830,12 @@ class TreeList implements Component {
 			case "credential_pin":
 				result = theme.fg("dim", `[credential pin: ${entry.provider}]`);
 				break;
+			case "archive":
+				result = theme.fg(
+					"dim",
+					entry.archived ? `[archived: ${entry.targetId}]` : `[restored: ${entry.targetId}]`,
+				);
+				break;
 			default:
 				// Bookkeeping entries with nothing worth spelling out still get their
 				// type. A row that renders to the empty string is worse than a
@@ -1017,6 +1034,11 @@ class TreeList implements Component {
 		} else if (matchesKey(keyData, "alt+a")) {
 			this.#filterMode = "all";
 			this.#applyFilter();
+		} else if (matchesKey(keyData, "alt+r")) {
+			// The archived branches are not in this list at all — they were filtered
+			// out of the tree before it got here — so the controller has to fetch a
+			// new tree and rebuild, rather than us re-filtering what we hold.
+			this.onToggleArchived?.();
 		} else if (matchesKey(keyData, "backspace")) {
 			if (this.#searchQuery.length > 0) {
 				this.#searchQuery = this.#searchQuery.slice(0, -1);
@@ -1026,6 +1048,13 @@ class TreeList implements Component {
 			const selected = this.#filteredNodes[this.#selectedIndex];
 			if (selected && this.onLabelEdit) {
 				this.onLabelEdit(selected.node.entry.id, selected.node.label);
+			}
+		} else if (matchesKey(keyData, "shift+a") && !this.#searchQuery) {
+			// Capital A is also a search character, so this only fires while no
+			// search is being typed — the same rule Shift+L follows for labels.
+			const selected = this.#filteredNodes[this.#selectedIndex];
+			if (selected && this.onArchiveToggle) {
+				this.onArchiveToggle(selected.node.entry.id);
 			}
 		} else {
 			const printableText = extractPrintableText(keyData);
@@ -1109,8 +1138,13 @@ export class TreeSelectorComponent extends OverlayPanel {
 		onCancel: () => void,
 		private readonly onLabelChangeCallback?: (entryId: string, label: string | undefined) => void,
 		initialFilterMode: FilterMode = "default",
+		archive: { showing?: boolean; onToggle?: () => void; onArchiveToggle?: (entryId: string) => void } = {},
 	) {
-		super("Session Tree");
+		super(
+			archive.showing
+				? "Session Tree  [showing archived]  Alt+R: hide  Shift+A: archive/restore"
+				: "Session Tree  Alt+R: show archived  Shift+A: archive",
+		);
 		// The outer panel has eight fixed rows around the tree list: top/bottom
 		// borders, the two spacers, help, search, and section divider.
 		const PANEL_CHROME_ROWS = 8;
@@ -1123,6 +1157,8 @@ export class TreeSelectorComponent extends OverlayPanel {
 		this.#treeList.onSelect = onSelect;
 		this.#treeList.onCancel = onCancel;
 		this.#treeList.onLabelEdit = (entryId, currentLabel) => this.#showLabelInput(entryId, currentLabel);
+		if (archive.onToggle) this.#treeList.onToggleArchived = archive.onToggle;
+		if (archive.onArchiveToggle) this.#treeList.onArchiveToggle = archive.onArchiveToggle;
 
 		this.#treeContainer = new Container();
 		this.#treeContainer.addChild(this.#treeList);

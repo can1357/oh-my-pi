@@ -75,6 +75,37 @@ const WELCOME_TIMEOUT_MS = 30_000;
 const SNAPSHOT_PROGRESS_TIMEOUT_MS = 30_000;
 
 /**
+ * Project the append-only session journal into the transcript visible to a
+ * browser guest. Archive records are state transitions rather than transcript
+ * rows; the last record for each target wins, and an archived root hides its
+ * complete descendant subtree until a later restore record arrives.
+ */
+export function visibleTranscriptEntries(entries: readonly SessionEntry[]): readonly SessionEntry[] {
+	const archivedRoots = new Set<string>();
+	const children = new Map<string | null, string[]>();
+	for (const entry of entries) {
+		const siblings = children.get(entry.parentId);
+		if (siblings) siblings.push(entry.id);
+		else children.set(entry.parentId, [entry.id]);
+		if (entry.type !== "archive") continue;
+		if (entry.archived) archivedRoots.add(entry.targetId);
+		else archivedRoots.delete(entry.targetId);
+	}
+
+	const hidden = new Set<string>();
+	const pending = [...archivedRoots];
+	while (pending.length > 0) {
+		const id = pending.pop() as string;
+		if (hidden.has(id)) continue;
+		hidden.add(id);
+		const descendants = children.get(id);
+		if (descendants) pending.push(...descendants);
+	}
+
+	return entries.filter(entry => entry.type !== "archive" && !hidden.has(entry.id));
+}
+
+/**
  * One fetch-transcript round trip.
  * - `rows`: decoded JSONL from `fromByte`; `newSize` is the next offset base.
  * - `error`: terminal read failure reported by the host (unchanged cursor);
@@ -106,6 +137,7 @@ export class GuestClient {
 	#endedReason: string | null = null;
 	#header: SessionHeader | null = null;
 	#entries: readonly SessionEntry[] = [];
+	#visibleEntries: readonly SessionEntry[] = [];
 	#state: SessionState | null = null;
 	#agents: readonly AgentSnapshot[] = [];
 	#progress: ReadonlyMap<string, SubagentProgressPayload> = new Map();
@@ -289,6 +321,7 @@ export class GuestClient {
 				// supersedes any partially-streamed snapshot from the prior session.
 				this.#header = frame.header;
 				this.#entries = [];
+				this.#visibleEntries = [];
 				this.#state = frame.state;
 				this.#agents = [...frame.agents];
 				this.#stream = null;
@@ -310,11 +343,12 @@ export class GuestClient {
 				this.#endedReason = null;
 				break;
 			case "snapshot-chunk": {
-				// Stream transcript fragments into the live snapshot. The host
-				// always closes the train with `final: true`; that flip is what
-				// moves the guest from "waiting" to "live".
+				// Keep an incomplete journal private: archive records can arrive in
+				// a later chunk, so exposing the prefix could briefly reveal a branch
+				// the completed snapshot hides. Publish only after the final chunk.
 				this.#entries = [...this.#entries, ...frame.entries];
 				if (frame.final) {
+					this.#visibleEntries = visibleTranscriptEntries(this.#entries);
 					this.#clearSnapshotProgressTimer();
 					this.#phase = "live";
 				} else {
@@ -324,6 +358,7 @@ export class GuestClient {
 			}
 			case "entry":
 				this.#entries = [...this.#entries, frame.entry];
+				this.#visibleEntries = visibleTranscriptEntries(this.#entries);
 				if (this.#streamDone && frame.entry.type === "message" && frame.entry.message.role === "assistant") {
 					this.#stream = null;
 					this.#streamDone = false;
@@ -508,7 +543,7 @@ export class GuestClient {
 			phase: this.#phase,
 			endedReason: this.#endedReason,
 			header: this.#header,
-			entries: this.#entries,
+			entries: this.#visibleEntries,
 			state: this.#state,
 			agents: this.#agents,
 			progress: this.#progress,

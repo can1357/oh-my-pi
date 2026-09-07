@@ -441,7 +441,10 @@ export class CollabGuestLink {
 		await Bun.write(replicaPath, `${lines}\n`);
 
 		// Resume through AgentSession without adopting the host's cwd.
-		const switched = await this.#ctx.session.switchSession(replicaPath, { preserveLocalCwd: true });
+		const switched = await this.#ctx.session.switchSession(replicaPath, {
+			preserveLocalCwd: true,
+			skipBeforeSwitchHook: pending.isResync,
+		});
 		if (switched === false) {
 			throw new Error("Collab replica activation was cancelled");
 		}

@@ -212,7 +212,7 @@ mkdir -p "$TARBALL_APP_DIR"
       exit 1
    }
    wire_proto="$(bun -e 'import { COLLAB_PROTO } from "@oh-my-pi/pi-wire"; process.stdout.write(String(COLLAB_PROTO));')"
-   [ "$wire_proto" = "3" ] || {
+   [ "$wire_proto" = "4" ] || {
       echo "Unexpected @oh-my-pi/pi-wire COLLAB_PROTO: $wire_proto"
       exit 1
    }

@@ -4,8 +4,9 @@ import type { AgentState } from "@oh-my-pi/pi-agent-core";
 import { APP_NAME, isEnoent } from "@oh-my-pi/pi-utils";
 import { getResolvedThemeColors, getThemeExportColors } from "../../modes/theme/theme";
 import type { SessionEntry, SessionHeader } from "../../session/session-entries";
-import { loadEntriesFromFile } from "../../session/session-loader";
+import { loadSessionFile } from "../../session/session-loader";
 import { SessionManager } from "../../session/session-manager";
+import { isTaskToolDetails } from "../../task/tool-details";
 import type { ExportThemeNames } from "./args";
 import templateCssPath from "./template.css" with { type: "file" };
 import templateHtmlPath from "./template.html" with { type: "file" };
@@ -55,6 +56,8 @@ export interface ExportOptions {
 	themeNames?: ExportThemeNames;
 	/** Embed subagent session transcripts found next to the session file (default true). */
 	includeSubSessions?: boolean;
+	/** Include archived branches, hidden by default so a shared page never leaks them. */
+	includeArchived?: boolean;
 }
 
 /** Parse a color string to RGB values. */
@@ -188,15 +191,70 @@ function sessionHeaderForExport(header: SessionHeader | null): SessionHeader | n
 	return exported;
 }
 
+/**
+ * Entries the exported page may render. Archived subtrees stay out unless asked
+ * for — an export is what gets shared, so a branch hidden in the TUI leaking
+ * into it defeats the point. The `archive` bookkeeping records go regardless:
+ * they carry no message content and would render as blank rows in the tree.
+ *
+ * The leaf comes back with them because dropping entries can strand it.
+ * `archiveEmptyBranches()` appends its records like any other entry, so the
+ * last one is the session leaf until the next turn; an export taken in between
+ * would otherwise name an entry the page does not have. Falls back to the
+ * nearest surviving ancestor, or null when nothing survives.
+ */
+function visibleForExport(sm: SessionManager, includeArchived: boolean): Pick<SessionData, "entries" | "leafId"> {
+	const all = sm.getEntries();
+	const hidden = includeArchived ? undefined : sm.getArchivedEntryIds();
+	const retained = all.filter(
+		entry =>
+			entry.type !== "archive" && !hidden?.has(entry.id) && !(entry.type === "label" && hidden?.has(entry.targetId)),
+	);
+	if (retained.length === all.length) return { entries: retained, leafId: sm.getLeafId() };
+	const visible = new Set(retained.map(entry => entry.id));
+	const parentOf = new Map(all.map(entry => [entry.id, entry.parentId]));
+	const nearestVisibleAncestor = (start: string | null): string | null => {
+		let cursor = start;
+		const seen = new Set<string>();
+		while (cursor !== null && !visible.has(cursor) && !seen.has(cursor)) {
+			seen.add(cursor);
+			cursor = parentOf.get(cursor) ?? null;
+		}
+		return cursor !== null && visible.has(cursor) ? cursor : null;
+	};
+	const entries = retained.map(entry => {
+		const parentId = nearestVisibleAncestor(entry.parentId);
+		return parentId === entry.parentId ? entry : { ...entry, parentId };
+	});
+
+	const leafId = nearestVisibleAncestor(sm.getLeafId());
+	return { entries, leafId };
+}
+
 /** Snapshot the session (plus optional agent state) into the JSON shape the viewer renders. */
-export function buildSessionData(sm: SessionManager, state?: AgentState): SessionData {
+export function buildSessionData(
+	sm: SessionManager,
+	state?: AgentState,
+	options?: { includeArchived?: boolean },
+): SessionData {
 	return {
 		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
-		leafId: sm.getLeafId(),
+		...visibleForExport(sm, options?.includeArchived === true),
 		systemPrompt: state?.systemPrompt.join("\n\n"),
 		tools: state?.tools?.map(t => ({ name: t.name, description: t.description })),
 	};
+}
+
+function referencedSubagentIds(entries: SessionEntry[]): Set<string> {
+	const ids = new Set<string>();
+	for (const entry of entries) {
+		if (entry.type !== "message" || entry.message.role !== "toolResult" || entry.message.toolName !== "task")
+			continue;
+		if (!isTaskToolDetails(entry.message.details)) continue;
+		for (const result of entry.message.details.results) ids.add(result.id);
+		for (const progress of entry.message.details.progress ?? []) ids.add(progress.id);
+	}
+	return ids;
 }
 
 /**
@@ -207,10 +265,19 @@ export function buildSessionData(sm: SessionManager, state?: AgentState): Sessio
  * returned record are slash-joined ids relative to the main session ("ToolAsk", "ToolAsk/Helper").
  * Corrupt or empty files are skipped silently.
  */
-export async function collectSubSessions(sessionFile: string): Promise<Record<string, SubSession>> {
+export async function collectSubSessions(
+	sessionFile: string,
+	options?: { includeArchived?: boolean; referencedAgentIds?: ReadonlySet<string> },
+): Promise<Record<string, SubSession>> {
 	const result: Record<string, SubSession> = {};
 	if (!sessionFile.endsWith(".jsonl")) return result;
-	await collectSubSessionsFromDir(sessionFile.slice(0, -6), null, result);
+	await collectSubSessionsFromDir(
+		sessionFile.slice(0, -6),
+		null,
+		result,
+		options?.includeArchived === true,
+		options?.referencedAgentIds,
+	);
 	return result;
 }
 
@@ -218,6 +285,8 @@ async function collectSubSessionsFromDir(
 	dir: string,
 	parentKey: string | null,
 	out: Record<string, SubSession>,
+	includeArchived: boolean,
+	referencedAgentIds: ReadonlySet<string> | undefined,
 ): Promise<void> {
 	let names: string[];
 	try {
@@ -229,21 +298,25 @@ async function collectSubSessionsFromDir(
 	for (const name of names) {
 		if (!name.endsWith(".jsonl") || name.includes(".bak")) continue;
 		const agentId = name.slice(0, -6);
+		if (referencedAgentIds && !referencedAgentIds.has(agentId)) continue;
 		const key = parentKey ? `${parentKey}/${agentId}` : agentId;
-		const fileEntries = await loadEntriesFromFile(path.join(dir, name));
+		const sessionPath = path.join(dir, name);
+		const loaded = await loadSessionFile(sessionPath);
 		// Empty/corrupt files (no valid session header) load as [] — skip silently.
-		if (fileEntries.length > 0) {
-			const header = (fileEntries.find(e => e.type === "session") as SessionHeader | undefined) ?? null;
-			const entries = fileEntries.filter((e): e is SessionEntry => e.type !== "session");
-			out[key] = {
-				agentId,
-				parent: parentKey,
-				header: sessionHeaderForExport(header),
-				entries,
-				leafId: entries.length > 0 ? entries[entries.length - 1].id : null,
-			};
+		if (loaded.entries.length > 0) {
+			const subSession = await SessionManager.open(sessionPath, undefined, undefined, {
+				suppressBreadcrumb: true,
+				loadedSession: loaded,
+			});
+			try {
+				const data = buildSessionData(subSession, undefined, { includeArchived });
+				out[key] = { agentId, parent: parentKey, ...data };
+			} finally {
+				await subSession.close();
+			}
 		}
-		await collectSubSessionsFromDir(path.join(dir, agentId), key, out);
+		const childAgentIds = referencedAgentIds ? referencedSubagentIds(out[key]?.entries ?? []) : undefined;
+		await collectSubSessionsFromDir(path.join(dir, agentId), key, out, includeArchived, childAgentIds);
 	}
 }
 
@@ -275,9 +348,12 @@ export async function exportSessionToHtml(
 	const sessionFile = sm.getSessionFile();
 	if (!sessionFile) throw new Error("Cannot export in-memory session to HTML");
 
-	const sessionData = buildSessionData(sm, state);
+	const sessionData = buildSessionData(sm, state, opts);
 	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectSubSessions(sessionFile);
+		const subSessions = await collectSubSessions(sessionFile, {
+			includeArchived: opts.includeArchived,
+			referencedAgentIds: referencedSubagentIds(sessionData.entries),
+		});
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
 
@@ -301,13 +377,12 @@ export async function exportFromFile(inputPath: string, options?: ExportOptions 
 		throw err;
 	}
 
-	const sessionData: SessionData = {
-		header: sessionHeaderForExport(sm.getHeader()),
-		entries: sm.getEntries(),
-		leafId: sm.getLeafId(),
-	};
+	const sessionData = buildSessionData(sm, undefined, opts);
 	if (opts.includeSubSessions !== false) {
-		const subSessions = await collectSubSessions(inputPath);
+		const subSessions = await collectSubSessions(inputPath, {
+			includeArchived: opts.includeArchived,
+			referencedAgentIds: referencedSubagentIds(sessionData.entries),
+		});
 		if (Object.keys(subSessions).length > 0) sessionData.subSessions = subSessions;
 	}
 

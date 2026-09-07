@@ -140,6 +140,54 @@ function newAnswerResult(): AgentToolResult<AskToolDetails> {
 }
 
 describe("AgentSession tree navigation onto an ask toolResult", () => {
+	it("reveals an archived target for every navigation caller after the move commits", async () => {
+		const ctx = await createTestSession({ inMemory: true });
+		try {
+			const { session, sessionManager } = ctx;
+			const rootId = sessionManager.appendMessage(userMsg("root"));
+			const activeId = sessionManager.appendMessage(assistantMsg("active answer"));
+			sessionManager.branch(rootId);
+			const archivedRootId = sessionManager.appendMessage(userMsg("hidden question"));
+			const archivedTargetId = sessionManager.appendMessage(assistantMsg("hidden answer"));
+			sessionManager.branch(activeId);
+			await sessionManager.archiveBranch(archivedRootId);
+
+			const result = await session.navigateTree(archivedTargetId);
+
+			expect(result.cancelled).toBe(false);
+			expect(sessionManager.getArchivedRootIds()).toEqual([]);
+			expect(sessionManager.getBranch().map(entry => entry.id)).toContain(archivedTargetId);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
+	it("keeps an archived target hidden when shared navigation is cancelled", async () => {
+		const extensionRunner = {
+			hasHandlers: (eventType: string) => eventType === "session_before_tree",
+			emit: vi.fn(async () => ({ cancel: true })),
+		} as unknown as ExtensionRunner;
+		const ctx = await createTestSession({ inMemory: true, extensionRunner });
+		try {
+			const { session, sessionManager } = ctx;
+			const rootId = sessionManager.appendMessage(userMsg("root"));
+			const activeId = sessionManager.appendMessage(assistantMsg("active answer"));
+			sessionManager.branch(rootId);
+			const archivedRootId = sessionManager.appendMessage(userMsg("hidden question"));
+			const archivedTargetId = sessionManager.appendMessage(assistantMsg("hidden answer"));
+			sessionManager.branch(activeId);
+			await sessionManager.archiveBranch(archivedRootId);
+
+			const result = await session.navigateTree(archivedTargetId);
+
+			expect(result.cancelled).toBe(true);
+			expect(sessionManager.getArchivedRootIds()).toEqual([archivedRootId]);
+			expect(sessionManager.getLeafId()).not.toBe(archivedTargetId);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
 	it("(a) hands back reopenAsk with the original questions instead of moving the leaf", async () => {
 		const ctx = await createTestSession({ inMemory: true });
 		try {

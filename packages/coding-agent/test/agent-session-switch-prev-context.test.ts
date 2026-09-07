@@ -297,4 +297,29 @@ describe("AgentSession.switchSession previous-context build", () => {
 			expect.objectContaining({ type: "session_before_switch", targetSessionFile: sessionFile }),
 		);
 	});
+
+	it("cannot cancel an authoritative same-session replica refresh", async () => {
+		const tempDir = TempDir.createSync("@pi-switch-replica-authoritative-");
+		tempDirs.push(tempDir);
+
+		const emit = vi.fn(async () => ({ cancel: true }));
+		const extensionRunner = {
+			hasHandlers: (eventType: string) => eventType === "session_before_switch",
+			emit,
+		} as unknown as ExtensionRunner;
+		const { session, sessionManager } = buildSession(tempDir, extensionRunner);
+		sessionManager.appendMessage({ role: "user", content: "host snapshot", timestamp: 1 });
+		await sessionManager.flush();
+		const sessionFile = session.sessionFile;
+		expect(sessionFile).toBeString();
+
+		const switched = await session.switchSession(sessionFile!, {
+			preserveLocalCwd: true,
+			skipBeforeSwitchHook: true,
+		});
+
+		expect(switched).toBe(true);
+		expect(emit).not.toHaveBeenCalledWith(expect.objectContaining({ type: "session_before_switch" }));
+		expect(emit).toHaveBeenCalledWith(expect.objectContaining({ type: "session_switch" }));
+	});
 });

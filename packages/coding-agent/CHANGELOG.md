@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Breaking Changes
+
+- Upgraded collaboration sessions to protocol version 4 so guests receive archived branch state.
+
+### Added
+
+- Added `/prune` to archive conversation branches with no completed assistant reply, with `/prune delete` available for permanent removal.
+- Added `/unarchive` and tree controls for revealing, archiving, and restoring branches; exports and shares omit archived content by default.
+
+### Fixed
+
+- Archived branches retain the ancestry, selected branch, and active bookkeeping needed for cycle-safe pruning and branching, nested restoration from every navigation API, privacy-safe live collaboration resynchronization, and efficient leak-free exports.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
@@ -40,7 +53,6 @@
 - `memory://` now resolves against the session that issued it: a caller's own memory backend answers `memory://<id>`, so co-located sessions no longer read each other's memory rows, and a caller whose session is no longer live fails closed instead of being answered by a peer. Prompt completion binds to the same caller, so `memory://<memory-id>` stays on offer while a subagent shares the working directory. Advisors retain their owning session's memory access even without a session file.
 - Fullscreen `/copy` now opens on the recent tail of the branch instead of replaying the whole session, so it appears immediately and steps without lag on long sessions (`a` loads the earlier turns). Both it and the esc-esc rewind selector also cache each transcript row set instead of re-stripping it every frame.
 - Fixed the fullscreen `/copy` and esc-esc rewind selectors repainting the whole frame for a wheel notch that cannot move the viewport; because both open scrolled to the newest turn, wheeling down there made the frame twitch.
-
 ## [18.1.11] - 2026-09-05
 
 ### Added

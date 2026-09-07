@@ -5251,6 +5251,32 @@ export class AgentSession {
 		void this.#maintenance.abortCompaction(reason);
 	}
 
+	/** Prune all empty branches (ones with no AI assistant messages) from the session history. */
+	async pruneEmptyBranches(): Promise<number> {
+		// SessionManager rewrites the session file itself when it prunes anything.
+		return this.sessionManager.pruneEmptyBranches();
+	}
+
+	/** Hide every empty branch behind an archive record instead of deleting it. */
+	async archiveEmptyBranches(): Promise<{ branches: number; entries: number }> {
+		return this.sessionManager.archiveEmptyBranches();
+	}
+
+	/** Hide one branch by id, whatever is in it. Returns how many entries it hid. */
+	async archiveBranch(targetId: string): Promise<number> {
+		return this.sessionManager.archiveBranch(targetId);
+	}
+
+	/** Bring archived branches back into view; omit the id to restore them all. */
+	async restoreArchived(targetId?: string): Promise<number> {
+		return this.sessionManager.restoreArchived(targetId);
+	}
+
+	/** Roots of the branches currently hidden by an archive record. */
+	getArchivedRootIds(): string[] {
+		return this.sessionManager.getArchivedRootIds();
+	}
+
 	/** Trigger idle compaction through the automatic maintenance flow. */
 	async runIdleCompaction(): Promise<void> {
 		// A pending async wake means the session is waiting, not idle: a
@@ -8717,6 +8743,8 @@ export class AgentSession {
 			onCwdChange?: (newCwd: string, previousCwd: string) => Promise<boolean>;
 			/** Collab snapshot adoption keeps the guest's process cwd and marks the replica runtime-only. */
 			preserveLocalCwd?: boolean;
+			/** Authoritative replica refreshes cannot be vetoed after their journal file has been replaced. */
+			skipBeforeSwitchHook?: boolean;
 		},
 	): Promise<boolean> {
 		const previousSessionFile = this.sessionManager.getSessionFile();
@@ -8724,7 +8752,7 @@ export class AgentSession {
 			? path.resolve(previousSessionFile) !== path.resolve(sessionPath)
 			: true;
 		// Emit session_before_switch event (can be cancelled)
-		if (this.#extensionRunner?.hasHandlers("session_before_switch")) {
+		if (!options?.skipBeforeSwitchHook && this.#extensionRunner?.hasHandlers("session_before_switch")) {
 			const result = (await this.#extensionRunner.emit({
 				type: "session_before_switch",
 				reason: "resume",
@@ -9381,6 +9409,7 @@ export class AgentSession {
 			targetEntry.message.role === "toolResult" &&
 			targetEntry.message.toolName === "ask";
 		const targetIsUserMessage = targetEntry.type === "message" && targetEntry.message.role === "user";
+		const targetIsArchived = this.sessionManager.getArchivedRootId(targetId) !== undefined;
 
 		// No-op if already at target — except for a user message, which always
 		// rewinds PAST itself (leaf → parent, text → editor), so a leaf user
@@ -9392,7 +9421,12 @@ export class AgentSession {
 		// navigated straight onto the ask result), and must still return
 		// `reopenAsk` / branch the new answer instead of silently reporting a
 		// no-op (chatgpt-codex review on #5895).
-		if (targetId === oldLeafId && !targetIsUserMessage && !(options.allowAskReopen && targetIsAskResult)) {
+		if (
+			targetId === oldLeafId &&
+			!targetIsArchived &&
+			!targetIsUserMessage &&
+			!(options.allowAskReopen && targetIsAskResult)
+		) {
 			return { cancelled: false };
 		}
 
@@ -9599,6 +9633,7 @@ export class AgentSession {
 		} finally {
 			this.#bash.finishSessionTransition(bashTransition, branchTransitioned);
 		}
+		if (targetIsArchived) await this.sessionManager.restoreArchived(targetId);
 
 		// Update agent state — build display context to populate agent messages.
 		const stateContext = this.sessionManager.buildSessionContext();

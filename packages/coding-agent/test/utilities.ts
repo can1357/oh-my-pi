@@ -76,6 +76,39 @@ export function assistantMsg(text: string) {
 }
 
 /**
+ * An assistant message that never landed — the shape the agent loop writes when
+ * a turn dies mid-flight ("error") or the user interrupts it ("aborted").
+ */
+export function failedAssistantMsg(text: string, stopReason: "error" | "aborted" = "error") {
+	return { ...assistantMsg(text), stopReason, errorMessage: "boom" };
+}
+
+/**
+ * A mid-turn assistant reply: the model asked for a tool and stopped. Whatever
+ * it answers with, if anything, is the reply that follows below it.
+ */
+export function toolCallMsg(text: string, toolName = "bash") {
+	const base = assistantMsg(text);
+	return {
+		...base,
+		content: [...base.content, { type: "toolCall" as const, id: `call-${text}`, name: toolName, arguments: {} }],
+		stopReason: "toolUse" as const,
+	};
+}
+
+/** A tool result entry — the traffic that hangs under an assistant tool call. */
+export function toolResultMsg(text: string, toolName = "bash") {
+	return {
+		role: "toolResult" as const,
+		toolCallId: `call-${text}`,
+		toolName,
+		content: [{ type: "text" as const, text }],
+		isError: false,
+		timestamp: Date.now(),
+	};
+}
+
+/**
  * Create an AgentSession for testing with proper setup and cleanup.
  * Use this for e2e tests that need real LLM calls.
  */

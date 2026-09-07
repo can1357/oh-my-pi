@@ -38,6 +38,66 @@ function sessionJsonl(id: string, entryIds: string[], previousSessionFiles?: str
 	return `${lines.join("\n")}\n`;
 }
 
+function archivedSessionJsonl(id: string): string {
+	const lines = sessionJsonl(id, ["visible", "hidden"]).trimEnd().split("\n");
+	lines.push(
+		JSON.stringify({
+			type: "archive",
+			id: "archive-record",
+			parentId: "visible",
+			timestamp: "2026-06-12T00:00:02.000Z",
+			targetId: "hidden",
+			archived: true,
+		}),
+	);
+	return `${lines.join("\n")}\n`;
+}
+
+function taskResultEntry(id: string, parentId: string, agentIds: string[]): string {
+	return JSON.stringify({
+		type: "message",
+		id,
+		parentId,
+		timestamp: "2026-06-12T00:00:02.000Z",
+		message: {
+			role: "toolResult",
+			toolCallId: `${id}-call`,
+			toolName: "task",
+			content: [{ type: "text", text: "task result" }],
+			details: {
+				projectAgentsDir: null,
+				results: agentIds.map((agentId, index) => ({ id: agentId, index })),
+				totalDurationMs: 1,
+			},
+			isError: false,
+			timestamp: 1,
+		},
+	});
+}
+
+function sessionWithTaskReferencesJsonl(id: string, agentIds: string[]): string {
+	const lines = sessionJsonl(id, ["root"]).trimEnd().split("\n");
+	lines.push(taskResultEntry("task-result", "root", agentIds));
+	return `${lines.join("\n")}\n`;
+}
+
+function sessionWithArchivedTaskReferenceJsonl(id: string): string {
+	const lines = sessionJsonl(id, ["root"]).trimEnd().split("\n");
+	lines.push(taskResultEntry("visible-task", "root", ["Alpha"]));
+	lines.push(taskResultEntry("hidden-task", "root", ["Secret"]));
+	lines.push(
+		JSON.stringify({
+			type: "archive",
+			id: "archive-record",
+			parentId: "visible-task",
+			timestamp: "2026-06-12T00:00:03.000Z",
+			targetId: "hidden-task",
+			archived: true,
+		}),
+	);
+	return `${lines.join("\n")}\n`;
+}
+
 describe("collectSubSessions", () => {
 	let root: string;
 	let mainFile: string;
@@ -70,7 +130,9 @@ describe("collectSubSessions", () => {
 	test("omits internal move history from standalone HTML", async () => {
 		const mainPreviousPath = "/Users/private/main.jsonl";
 		const subPreviousPath = "/Users/private/Alpha.jsonl";
-		await Bun.write(mainFile, sessionJsonl("main", ["m1"], [mainPreviousPath]));
+		const mainLines = sessionJsonl("main", ["m1"], [mainPreviousPath]).trimEnd().split("\n");
+		mainLines.push(taskResultEntry("task-result", "m1", ["Alpha"]));
+		await Bun.write(mainFile, `${mainLines.join("\n")}\n`);
 		await Bun.write(path.join(root, "main/Alpha.jsonl"), sessionJsonl("alpha", ["a1"], [subPreviousPath]));
 		const outputPath = path.join(root, "export.html");
 
@@ -87,6 +149,36 @@ describe("collectSubSessions", () => {
 		expect(data.subSessions.Alpha.header.previousSessionFiles).toBeUndefined();
 		expect(html).not.toContain(mainPreviousPath);
 		expect(html).not.toContain(subPreviousPath);
+	});
+
+	test("filters archived subagent branches unless explicitly included", async () => {
+		await Bun.write(path.join(root, "main/Alpha.jsonl"), archivedSessionJsonl("alpha"));
+
+		const hidden = await collectSubSessions(mainFile);
+		expect(hidden.Alpha.entries.map(entry => entry.id)).toEqual(["visible"]);
+		expect(hidden.Alpha.leafId).toBe("visible");
+
+		const revealed = await collectSubSessions(mainFile, { includeArchived: true });
+		expect(revealed.Alpha.entries.map(entry => entry.id)).toEqual(["visible", "hidden"]);
+	});
+
+	test("exports only subagents referenced by retained task results, recursively", async () => {
+		await Bun.write(mainFile, sessionWithArchivedTaskReferenceJsonl("main"));
+		await Bun.write(path.join(root, "main/Alpha.jsonl"), sessionWithTaskReferencesJsonl("alpha", ["Child"]));
+		await Bun.write(path.join(root, "main/Secret.jsonl"), sessionJsonl("secret", ["s1"]));
+		await Bun.write(path.join(root, "main/Alpha/Child.jsonl"), sessionJsonl("child", ["c1"]));
+		await Bun.write(path.join(root, "main/Alpha/Orphan.jsonl"), sessionJsonl("orphan", ["o1"]));
+		const outputPath = path.join(root, "filtered-export.html");
+
+		await exportFromFile(mainFile, { outputPath });
+
+		const html = await Bun.file(outputPath).text();
+		const encoded = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/)?.[1];
+		expect(encoded).toBeDefined();
+		const data = JSON.parse(Buffer.from(encoded!, "base64").toString("utf8")) as {
+			subSessions: Record<string, unknown>;
+		};
+		expect(Object.keys(data.subSessions).sort()).toEqual(["Alpha", "Alpha/Child"]);
 	});
 
 	test("skips corrupt, empty, backup, and non-jsonl files", async () => {

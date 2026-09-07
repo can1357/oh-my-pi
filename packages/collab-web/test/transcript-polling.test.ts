@@ -7,7 +7,7 @@
  */
 import { describe, expect, it, vi } from "bun:test";
 import type { HostFrame, SessionEntry } from "@oh-my-pi/pi-wire";
-import { GuestClient } from "../src/lib/client";
+import { GuestClient, visibleTranscriptEntries } from "../src/lib/client";
 import { encodeBase64Url } from "../src/lib/link";
 import { decideTranscriptPoll } from "../src/lib/transcript-poll";
 
@@ -24,6 +24,17 @@ function messageEntry(id: string, content: string, timestamp: number): SessionEn
 		parentId: null,
 		timestamp: "2026-06-12T00:00:01Z",
 		message: { role: "user", content, timestamp },
+	};
+}
+
+function archiveEntry(id: string, parentId: string, targetId: string): SessionEntry {
+	return {
+		type: "archive",
+		id,
+		parentId,
+		timestamp: "2026-06-12T00:00:02Z",
+		targetId,
+		archived: true,
 	};
 }
 
@@ -124,6 +135,18 @@ describe("decideTranscriptPoll", () => {
 			carry: "",
 			fresh: [entry],
 		});
+	});
+
+	it("projects archived branches out of incrementally polled subagent rows", () => {
+		const root = messageEntry("root", "root", 1);
+		const hidden = { ...messageEntry("hidden", "private branch", 2), parentId: root.id };
+		const visible = { ...messageEntry("visible", "kept branch", 3), parentId: root.id };
+		const archived = archiveEntry("archive-hidden", visible.id, hidden.id);
+		const rows = [root, hidden, visible, archived].map(entry => JSON.stringify(entry)).join("\n") + "\n";
+		const decision = decideTranscriptPoll({ kind: "rows", text: rows, newSize: rows.length }, "");
+		if (decision.action !== "advance") throw new Error("Expected transcript rows to advance");
+
+		expect(visibleTranscriptEntries(decision.fresh).map(entry => entry.id)).toEqual([root.id, visible.id]);
 	});
 
 	it("surfaces the error after rows were already read (rows then error sequence)", () => {

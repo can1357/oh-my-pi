@@ -2,7 +2,7 @@ import type { AgentSnapshot, SessionEntry, SubagentProgressPayload } from "@oh-m
 import { OctagonX, RotateCcw, SendHorizontal, X } from "lucide-react";
 import type { ReactNode } from "react";
 import { useEffect, useState } from "react";
-import type { GuestClient } from "../../lib/client";
+import { type GuestClient, visibleTranscriptEntries } from "../../lib/client";
 import { fmtCost, fmtDuration, fmtTokens } from "../../lib/format";
 import { decideTranscriptPoll } from "../../lib/transcript-poll";
 import type { TranscriptProps } from "../transcript/Transcript";
@@ -74,7 +74,7 @@ export function AgentDrawer(props: {
 						carry = decision.carry;
 						if (decision.fresh.length > 0) {
 							acc = [...acc, ...decision.fresh];
-							setEntries(acc);
+							setEntries(visibleTranscriptEntries(acc));
 						}
 						return;
 				}
