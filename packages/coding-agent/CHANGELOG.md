@@ -24,6 +24,7 @@
 - Grok Bot catalog matrix accepts tool smokes only when the call targets the expected path/token/payload (not tool name alone).
 - `--no-tools` keeps an empty provider tool whitelist without `restrictToolNames`, so extension commands and LSP remain available unless `--no-extensions` / `--no-lsp` are set.
 - `--api-key` early binding skips multi-provider `--models` scopes and any bare (unqualified) selector (single shared qualified provider only).
+- Bare `--model` no longer falls through to `--models` for early `--api-key` ownership (session options prefer `--model`).
 - Grok Bot catalog matrix text probes require the exact expected token (no loose `pong` match).
 
 ## [18.1.14] - 2026-09-07

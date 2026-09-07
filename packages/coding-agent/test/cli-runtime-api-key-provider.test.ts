@@ -26,4 +26,13 @@ describe("resolveCliRuntimeApiKeyProvider", () => {
 	test("returns undefined for bare model ids without --provider", () => {
 		expect(resolveCliRuntimeApiKeyProvider({ model: "composer-2.5" })).toBeUndefined();
 	});
+
+	test("does not derive key ownership from --models when --model is bare", () => {
+		expect(
+			resolveCliRuntimeApiKeyProvider({
+				model: "gpt-4o",
+				models: ["grokbot/sand-default"],
+			}),
+		).toBeUndefined();
+	});
 });

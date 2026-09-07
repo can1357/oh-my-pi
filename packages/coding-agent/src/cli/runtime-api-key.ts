@@ -9,7 +9,8 @@ import { parseModelString } from "../config/model-resolver";
  *
  * Multi-provider `--models` scopes and any bare (unqualified) selector are
  * intentionally unbound: ownership is indeterminate until a concrete model is
- * selected.
+ * selected. A bare `--model` also wins over `--models` in session options, so
+ * it must not fall through to deriving ownership from the secondary scope.
  */
 export function resolveCliRuntimeApiKeyProvider(
 	parsed: Pick<Args, "provider" | "model" | "models">,
@@ -18,6 +19,8 @@ export function resolveCliRuntimeApiKeyProvider(
 	if (parsed.model?.trim()) {
 		const parsedModel = parseModelString(parsed.model.trim());
 		if (parsedModel?.provider) return parsedModel.provider;
+		// Bare --model takes precedence over --models; do not consult models.
+		return undefined;
 	}
 	const providers = new Set<string>();
 	for (const pattern of parsed.models ?? []) {

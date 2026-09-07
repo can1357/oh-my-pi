@@ -4,18 +4,22 @@
  * Calls the actual provider stream function with real Model, Context, tools.
  *
  * Per model: 2-turn round-trip (Shell call → result → final text).
- * Verifies: toolcall_end event, stopReason=toolUse, model stays Anthropic,
- * turn 2 completes with stopReason=stop, history replay works.
+ * Verifies: toolcall_end event, stopReason=toolUse, upstream model stays Anthropic,
+ * turn 2 completes with stopReason=stop and consumes the result token.
  *
  * Usage:
  *   bun scripts/grokbot-keep-model-pipeline-all.ts
  *
  * Success marker: PIPELINE_ALL_PASS
  */
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { buildModel } from "../packages/catalog/src/build.ts";
 import type { ModelSpec } from "../packages/catalog/src/types.ts";
 import { streamGrokBot } from "../packages/ai/src/providers/grokbot.ts";
 import type { Context, Model, Tool, Message, AssistantMessage, ToolCall } from "../packages/ai/src/types.ts";
+import * as prompt from "../packages/utils/src/prompt.ts";
+import pipelineAllSystemPrompt from "./grokbot-probes/pipeline-all-system.md" with { type: "text" };
+import pipelineAllShellUserPrompt from "./grokbot-probes/pipeline-all-shell-user.md" with { type: "text" };
 
 const ANTHROPIC_IDS = [
 	"claude-opus-5",
@@ -75,12 +79,17 @@ const tools: Tool[] = [
 
 function makeContext(messages: Message[]): Context {
 	return {
-		systemPrompt: [
-			"You are a coding agent with Shell, Read, Write, Grep, and Glob tools. When asked to use a tool, call it. After receiving the tool result, briefly describe the output.",
-		],
+		systemPrompt: [prompt.render(pipelineAllSystemPrompt).trim()],
 		messages,
 		tools,
 	};
+}
+
+function textOf(assistant: AssistantMessage): string {
+	return assistant.content
+		.filter((block): block is Extract<AssistantMessage["content"][number], { type: "text" }> => block.type === "text")
+		.map(block => block.text)
+		.join("");
 }
 
 async function runTurn(
@@ -127,11 +136,13 @@ async function testModel(
 		sandParameterIds: ["thinking", "context", "effort", "fast"],
 	} satisfies ModelSpec<"grokbot-sand">);
 
+	const token = `pipeline-${modelId}-ok`;
+
 	// Turn 1
 	const t1Msgs: Message[] = [
 		{
 			role: "user",
-			content: `Use the Shell tool to run: echo pipeline-${modelId}-ok. Then tell me what the output was.`,
+			content: prompt.render(pipelineAllShellUserPrompt, { token }).trim(),
 			timestamp: Date.now(),
 		},
 	];
@@ -143,7 +154,15 @@ async function testModel(
 		return { modelId, pass: false, reason: `turn1-no-shell:${t1.toolCalls.map(tc => tc.name).join(",")}` };
 
 	const stopOk = t1.assistant.stopReason === "toolUse";
-	const modelOk = /claude|fable|opus|sonnet|haiku|anthropic/i.test(t1.assistant.model);
+	const routed = t1.assistant.upstreamModel?.trim();
+	if (!routed) {
+		return {
+			modelId,
+			pass: false,
+			reason: `turn1-no-upstream-model:stop=${t1.assistant.stopReason}`,
+		};
+	}
+	const modelOk = classifyModel("grokbot", routed, { lenient: true }).class === "anthropic";
 
 	// Turn 2
 	const t2Msgs: Message[] = [
@@ -153,21 +172,24 @@ async function testModel(
 			role: "toolResult",
 			toolCallId: shellCall.id,
 			toolName: shellCall.name,
-			content: [{ type: "text", text: `pipeline-${modelId}-ok` }],
+			content: [{ type: "text", text: token }],
 			isError: false,
 			timestamp: Date.now(),
 		},
 	];
 	const t2 = await runTurn(model, t2Msgs);
-	if (t2.error) return { modelId, pass: false, routed: t1.assistant.model, reason: `turn2-err:${t2.error}` };
+	if (t2.error) return { modelId, pass: false, routed, reason: `turn2-err:${t2.error}` };
 
-	const t2Ok = t2.assistant.stopReason === "stop" || t2.assistant.stopReason === "toolUse";
+	const followup = textOf(t2.assistant);
+	const t2Ok = t2.assistant.stopReason === "stop" && followup.includes(token);
 	const pass = stopOk && modelOk && t2Ok;
 	return {
 		modelId,
 		pass,
-		routed: t1.assistant.model,
-		reason: pass ? "ok" : `stop=${t1.assistant.stopReason} modelOk=${modelOk} t2Ok=${t2Ok}`,
+		routed,
+		reason: pass
+			? "ok"
+			: `stop=${t1.assistant.stopReason} modelOk=${modelOk} t2Stop=${t2.assistant.stopReason} tokenInFollowup=${followup.includes(token)}`,
 	};
 }
 
