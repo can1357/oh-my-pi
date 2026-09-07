@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `tui.math` setting (`unicode` | `raw`, default `unicode`): `raw` emits delimited TeX (`$…$` / `$$…$$`) verbatim in terminal output so an external formula renderer (e.g. a TFormula PTY proxy) can render it, in place of the built-in Unicode conversion.
+
 ### Fixed
 
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.

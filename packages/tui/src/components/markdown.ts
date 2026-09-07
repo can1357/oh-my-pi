@@ -1388,6 +1388,14 @@ export interface MarkdownTheme {
 	 * Return null to fall back to fenced code rendering.
 	 */
 	resolveMermaidAscii?: (source: string, maxWidth?: number) => string | null;
+	/**
+	 * Render a math token's LaTeX. Receives the raw LaTeX body and a display
+	 * (block) flag; returns terminal text shown in place of the built-in
+	 * Unicode conversion, or null/undefined to fall back to it. Intended for
+	 * hosts handing math to an external renderer that needs verbatim,
+	 * delimited TeX on screen (e.g. a TFormula PTY proxy).
+	 */
+	renderMath?: (text: string, display: boolean) => string | null;
 	symbols: SymbolTheme;
 }
 
@@ -1452,6 +1460,25 @@ function isMathToken(token: Token): token is Token & { text: string; display: bo
 /** Convert a `math` token's LaTeX to single-line Unicode for inline rendering. */
 function renderMathToken(text: string): string {
 	return latexToUnicode(text).replace(MATH_NEWLINES, " ");
+}
+
+/**
+ * Display-math lines for a `math` token: the theme's custom `renderMath`
+ * output (split on newlines) when supplied, else the built-in Unicode block
+ * layout.
+ */
+function displayMathLines(theme: MarkdownTheme, text: string): readonly string[] {
+	const custom = theme.renderMath?.(text, true);
+	return custom === null || custom === undefined ? latexToBlock(text) : custom.split("\n");
+}
+
+/**
+ * Inline-math text for a `math` token: the theme's custom `renderMath` output
+ * when supplied, else the built-in single-line Unicode conversion.
+ */
+function inlineMathText(theme: MarkdownTheme, text: string): string {
+	const custom = theme.renderMath?.(text, false);
+	return custom === null || custom === undefined ? renderMathToken(text) : custom;
 }
 
 /**
@@ -2898,7 +2925,8 @@ export class Markdown implements Component {
 		// Display math block (own-line `$$…$$` / `\[…\]`): stack `\frac` vertically
 		// and keep `\\` row breaks, so fractions and matrices span multiple lines.
 		if (isMathToken(token)) {
-			for (const mathLine of latexToBlock(token.text)) lines.push(renderedLine(this.#applyDefaultStyle(mathLine)));
+			for (const mathLine of displayMathLines(this.#theme, token.text))
+				lines.push(renderedLine(this.#applyDefaultStyle(mathLine)));
 			if (nextTokenType && nextTokenType !== "space") lines.push(renderedLine(""));
 			return lines;
 		}
@@ -2939,7 +2967,7 @@ export class Markdown implements Component {
 			case "paragraph": {
 				const displayMath = soleDisplayMath(token.tokens);
 				if (displayMath) {
-					for (const mathLine of latexToBlock(displayMath.text))
+					for (const mathLine of displayMathLines(this.#theme, displayMath.text))
 						lines.push(renderedLine(this.#applyDefaultStyle(mathLine)));
 					if (nextTokenType && nextTokenType !== "list" && nextTokenType !== "space") lines.push(renderedLine(""));
 					break;
@@ -3169,7 +3197,7 @@ export class Markdown implements Component {
 		for (const token of collapseInlineHtml(tokens)) {
 			if (isMathToken(token)) {
 				markHtmlItemWhenContent(token.text);
-				result += applyTextWithNewlines(renderMathToken(token.text));
+				result += applyTextWithNewlines(inlineMathText(this.#theme, token.text));
 				continue;
 			}
 			switch (token.type) {
@@ -3390,7 +3418,7 @@ export class Markdown implements Component {
 				const displayMath = soleDisplayMath(token.tokens);
 				if (displayMath) {
 					const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));
-					for (const mathLine of latexToBlock(displayMath.text))
+					for (const mathLine of displayMathLines(this.#theme, displayMath.text))
 						lines.push({ text: apply(mathLine), nested: false });
 				} else {
 					const text =
@@ -3404,7 +3432,7 @@ export class Markdown implements Component {
 				const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));
 				const displayMath = soleDisplayMath(token.tokens);
 				if (displayMath) {
-					for (const mathLine of latexToBlock(displayMath.text))
+					for (const mathLine of displayMathLines(this.#theme, displayMath.text))
 						lines.push({ text: apply(mathLine), nested: false });
 				} else {
 					lines.push({ text: this.#renderInlineTokens(token.tokens || [], styleContext), nested: false });
@@ -3420,7 +3448,8 @@ export class Markdown implements Component {
 			} else if (isMathToken(token)) {
 				// Display math block inside a list item: stack fractions / matrix rows.
 				const apply = styleContext?.applyText ?? ((t: string) => this.#applyDefaultStyle(t));
-				for (const mathLine of latexToBlock(token.text)) lines.push({ text: apply(mathLine), nested: false });
+				for (const mathLine of displayMathLines(this.#theme, token.text))
+					lines.push({ text: apply(mathLine), nested: false });
 			} else {
 				// Other token types - try to render as inline
 				const text = this.#renderInlineTokens([token], styleContext);
@@ -3674,7 +3703,7 @@ export function renderInlineMarkdown(text: string, mdTheme: MarkdownTheme, baseC
 	let result = "";
 	for (const token of tokens) {
 		if (isMathToken(token)) {
-			result += applyText(renderMathToken(token.text));
+			result += applyText(inlineMathText(mdTheme, token.text));
 			continue;
 		}
 		if (token.type === "paragraph" && token.tokens) {
@@ -3699,7 +3728,7 @@ function renderInlineTokens(tokens: Token[], mdTheme: MarkdownTheme, applyText: 
 	const styleReset = applyText("");
 	for (const token of collapseInlineHtml(tokens)) {
 		if (isMathToken(token)) {
-			result += applyText(renderMathToken(token.text));
+			result += applyText(inlineMathText(mdTheme, token.text));
 			continue;
 		}
 		switch (token.type) {

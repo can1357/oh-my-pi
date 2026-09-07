@@ -113,3 +113,49 @@ describe("Markdown math rendering", () => {
 		expect(lines[barRow + 1]).toContain("c");
 	});
 });
+
+describe("Markdown custom renderMath hook", () => {
+	const renderMathLines = (
+		md: string,
+		renderMath: (text: string, display: boolean) => string | null,
+		width = 100,
+	): string[] =>
+		new Markdown(md, 0, 0, { ...defaultMarkdownTheme, renderMath })
+			.render(width)
+			.map(line => stripVTControlCharacters(line).replace(/\s+$/, ""))
+			.filter(line => line !== "");
+
+	it("passes delimited TeX through for inline math", () => {
+		const [line] = renderMathLines("the area is $A = \\pi r^2$ exactly", (text, display) =>
+			display ? `$$${text.trim()}$$` : `$${text.trim()}$`,
+		);
+		expect(line).toBe("the area is $A = \\pi r^2$ exactly");
+	});
+
+	it("passes delimited TeX through for display math", () => {
+		const lines = renderMathLines("$$\n\\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}\n$$", (text, display) =>
+			display ? `$$${text.trim()}$$` : `$${text.trim()}$`,
+		);
+		expect(lines).toEqual(["$$\\begin{bmatrix} a & b \\\\ c & d \\end{bmatrix}$$"]);
+	});
+
+	it("splits multi-line display math around the delimiters", () => {
+		const lines = renderMathLines("$$\n\\begin{aligned}\na &= 1 \\\\\nb &= 2\n\\end{aligned}\n$$", (text, display) =>
+			display ? `$$${text.trim()}$$` : `$${text.trim()}$`,
+		);
+		expect(lines[0]).toBe("$$\\begin{aligned}");
+		expect(lines[lines.length - 1]).toBe("\\end{aligned}$$");
+	});
+
+	it("falls back to Unicode conversion when the hook returns null", () => {
+		const [line] = renderMathLines("the area is $A = \\pi r^2$ exactly", () => null);
+		expect(line).toBe("the area is A = π r² exactly");
+	});
+
+	it("keeps code-span math literal regardless of the hook", () => {
+		const [line] = renderMathLines("use `$x^2$` literally and $y^2$ as math", (text, display) =>
+			display ? `$$${text.trim()}$$` : `$${text.trim()}$`,
+		);
+		expect(line).toBe("use $x^2$ literally and $y^2$ as math");
+	});
+});

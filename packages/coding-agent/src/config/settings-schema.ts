@@ -1209,6 +1209,31 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.math": {
+		type: "enum",
+		values: ["unicode", "raw"] as const,
+		default: "unicode",
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Math Rendering",
+			description:
+				"How LaTeX math in terminal output is displayed: the built-in Unicode conversion, or raw delimited TeX left on screen for an external formula renderer (e.g. a TFormula PTY proxy)",
+			options: [
+				{
+					value: "unicode",
+					label: "Unicode",
+					description: "Convert LaTeX to Unicode text (built-in rendering)",
+				},
+				{
+					value: "raw",
+					label: "Raw TeX",
+					description: "Emit $…$ / $$…$$ verbatim so an external terminal renderer can overlay it",
+				},
+			],
+		},
+	},
+
 	"tui.reactions": {
 		type: "boolean",
 		default: true,

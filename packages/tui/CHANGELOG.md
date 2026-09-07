@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added an optional `MarkdownTheme.renderMath` hook so hosts can substitute custom math rendering (e.g. raw TeX passthrough for an external terminal formula renderer); returning `null` falls back to the built-in Unicode conversion.
+
 ### Fixed
 
 - `extractMarkdownLinks()` now returns one-row visible labels for formatted and multiline links ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).

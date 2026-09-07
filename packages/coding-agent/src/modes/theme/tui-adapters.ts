@@ -167,10 +167,17 @@ export function getSymbolTheme(): SymbolTheme {
 let cachedMarkdownTheme: MarkdownTheme | undefined;
 let cachedMarkdownThemeRef: Theme | undefined;
 let markdownMermaidRendering = true;
+let markdownMathRaw = false;
 
 export function setMarkdownMermaidRendering(enabled: boolean): void {
 	if (markdownMermaidRendering === enabled) return;
 	markdownMermaidRendering = enabled;
+	cachedMarkdownTheme = undefined;
+}
+
+export function setMarkdownMathRaw(raw: boolean): void {
+	if (markdownMathRaw === raw) return;
+	markdownMathRaw = raw;
 	cachedMarkdownTheme = undefined;
 }
 
@@ -218,6 +225,9 @@ export function getMarkdownTheme(): MarkdownTheme {
 						theme: mermaid.mermaidTheme,
 						colorMode: mermaid.mermaidColorMode,
 					})
+			: undefined,
+		renderMath: markdownMathRaw
+			? (text, display) => (display ? `$$${text.trim()}$$` : `$${text.trim()}$`)
 			: undefined,
 		highlightCode: (code: string, lang?: string): string[] => {
 			const validLang = lang && nativeSupportsLanguage(lang) ? lang : undefined;

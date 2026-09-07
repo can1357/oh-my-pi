@@ -225,6 +225,7 @@ import {
 	getMarkdownTheme,
 	onTerminalAppearanceChange,
 	onThemeChange,
+	setMarkdownMathRaw,
 	setMarkdownMermaidRendering,
 	startMacOSAppearanceReprobeFallback,
 	theme,
@@ -925,6 +926,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		setTuiTight(settings.get("tui.tight"));
 		setMarkdownMermaidRendering(settings.get("tui.renderMermaid"));
+		setMarkdownMathRaw(settings.get("tui.math") === "raw");
 		// A cold-start composer already owns the terminal. Reuse it so input
 		// buffered during startup remains in the same editor instance.
 		this.ui.setMaxInlineImages(settings.get("tui.maxInlineImages"));

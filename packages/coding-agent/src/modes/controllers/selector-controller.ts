@@ -37,6 +37,7 @@ import {
 	getSymbolTheme,
 	previewTheme,
 	setColorBlindMode,
+	setMarkdownMathRaw,
 	setMarkdownMermaidRendering,
 	setSymbolPreset,
 	setTheme,
@@ -671,6 +672,12 @@ export class SelectorController {
 				this.ctx.session.refreshBaseSystemPrompt().catch(err => {
 					this.ctx.showError(`Failed to apply Mermaid rendering setting: ${err}`);
 				});
+				this.ctx.rebuildChatFromMessages();
+				this.ctx.ui.resetDisplay();
+				break;
+
+			case "tui.math":
+				setMarkdownMathRaw(value === "raw");
 				this.ctx.rebuildChatFromMessages();
 				this.ctx.ui.resetDisplay();
 				break;
