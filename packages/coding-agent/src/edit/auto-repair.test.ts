@@ -1,11 +1,9 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import { Effort, type AssistantMessage, type Model, type ServiceTier, type SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { summarizeCode } from "@oh-my-pi/pi-natives";
+import { TempDir } from "@oh-my-pi/pi-utils";
 import { writethroughNoop } from "../lsp";
 import { attemptEditAutoRepair, computeRepairRegion, repairParseRegression } from "./auto-repair";
 import type { AppliedEditSnapshot } from "./blackbox";
@@ -153,11 +151,11 @@ describe("repairParseRegression", () => {
 
 describe("attemptEditAutoRepair service tiers", () => {
 	const broken = BASE.replace("const doubled = b * 2;", "const doubled = (b * 2;");
-	const tempDirs: string[] = [];
+	const tempDirs: TempDir[] = [];
 
-	afterEach(() => {
+	afterEach(async () => {
 		vi.restoreAllMocks();
-		for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
+		await Promise.all(tempDirs.splice(0).map(dir => dir.remove()));
 	});
 
 	function makeTierModel(): Model<"openai-completions"> {
@@ -227,10 +225,10 @@ describe("attemptEditAutoRepair service tiers", () => {
 	/** Committed broken edit on real disk bytes; the completer closes the paren without reverting. */
 	async function runTierRepair(tierOverrides?: Record<string, string>) {
 		const model = makeTierModel();
-		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "auto-repair-tier-"));
+		const dir = await TempDir.create("@auto-repair-tier-");
 		tempDirs.push(dir);
-		const filePath = path.join(dir, "sample.ts");
-		fs.writeFileSync(filePath, broken);
+		const filePath = dir.join("sample.ts");
+		await Bun.write(filePath, broken);
 		const calls = spyTieredCompleteSimple(() => assistantText("const doubled = (b * 2);"));
 		const writes: string[] = [];
 		const outcome = await attemptEditAutoRepair({
