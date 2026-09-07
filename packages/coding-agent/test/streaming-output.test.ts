@@ -16,7 +16,7 @@ import {
 	truncateTail,
 	truncateTailBytes,
 } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
-import { formatOutputNotice, outputMeta } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { formatOutputNotice, outputMeta, stripOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const createdTempDirs: string[] = [];
@@ -818,13 +818,43 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		const meta = outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get();
 		// No window truncation → no styled TUI warning and no range/limit footer.
 		expect(meta?.truncation).toBeUndefined();
-		expect(meta?.limits?.columnTruncated).toEqual({ maxColumn: 8 });
+		expect(meta?.limits?.columnTruncated).toEqual({ maxColumn: 8, unit: "bytes" });
 
 		const notice = formatOutputNotice(meta);
-		expect(notice).toContain("Some lines truncated to 8 chars");
+		expect(notice).toContain("Some lines truncated to 8 bytes");
 		expect(notice).not.toContain("Showing lines");
 		expect(notice).not.toContain("limit");
 		expect(notice).not.toContain("artifact://");
+	});
+
+	test("multibyte line: cap counts UTF-8 bytes and the notice says bytes", async () => {
+		// Regression for #10888: a 385-char line is 770 UTF-8 bytes. A char cap of
+		// 768 would leave it untouched; the sink enforces bytes, so it trims. The
+		// notice must name the enforced unit, not "chars".
+		const sink = new OutputSink({ maxColumns: 768, spillThreshold: 100_000 });
+		await sink.push("é".repeat(385));
+		const dumped = await sink.dump();
+
+		expect(dumped.columnTruncatedLines).toBe(1);
+		// 3 bytes reserved for "…" inside the 768-byte cap → 765 bytes of room →
+		// 382 two-byte "é" (764 bytes) kept, then the ellipsis.
+		const keptAccents = (dumped.output.match(/é/g) ?? []).length;
+		expect(keptAccents).toBe(382);
+		expect(dumped.output).toContain("…");
+
+		const meta = outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get();
+		expect(formatOutputNotice(meta)).toContain("Some lines truncated to 768 bytes");
+	});
+
+	test("legacy metadata without a unit falls back to chars", () => {
+		// Sessions persisted before the unit field carry `{ maxColumn }` only.
+		// Resuming one must not render "768 undefined", and the reconstructed
+		// notice must still match the persisted "768 chars" text so stripping works.
+		const legacyMeta = { limits: { columnTruncated: { maxColumn: 768 } } };
+		const notice = formatOutputNotice(legacyMeta);
+		expect(notice).toContain("Some lines truncated to 768 chars");
+		expect(notice).not.toContain("undefined");
+		expect(stripOutputNotice(`body${notice}`, legacyMeta)).toBe("body");
 	});
 
 	test("persists per-line state across chunk boundaries", async () => {

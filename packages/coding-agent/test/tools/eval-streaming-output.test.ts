@@ -106,6 +106,6 @@ describe("EvalTool live stdout streaming", () => {
 		);
 
 		expect(result.details?.meta?.truncation).toBeUndefined();
-		expect(formatOutputNotice(result.details?.meta)).toContain("Some lines truncated to 8 chars");
+		expect(formatOutputNotice(result.details?.meta)).toContain("Some lines truncated to 8 bytes");
 	});
 });

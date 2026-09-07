@@ -16,6 +16,7 @@ import {
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import * as sshFileTransfer from "@oh-my-pi/pi-coding-agent/ssh/file-transfer";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { GlobTool } from "../../src/tools/glob";
@@ -287,6 +288,24 @@ describe("GrepTool internal URL resolution", () => {
 		const tool = new GrepTool(createSession());
 		const result = await tool.execute("big-virtual", { pattern: "(?i)NEEDLE", path: "virtual://big.md" });
 		expect(getResultText(result)).toContain("needle");
+	});
+
+	it("truncates a multibyte virtual match by UTF-8 bytes and labels the notice bytes", async () => {
+		// Regression for #10888: virtual-resource matches must truncate in the
+		// same unit as native on-disk matches (bytes), and the notice must say so.
+		// "needle " + "é"*300 is 307 chars but 607 bytes; a char cap of 512 would
+		// leave it whole, the byte cap trims it.
+		const line = `needle ${"é".repeat(300)}`;
+		registerVirtualDocs(new Map([["mb.md", `${line}\n`]]));
+		const result = await new GrepTool(createSession()).execute("mb-virtual", {
+			pattern: "needle",
+			path: "virtual://mb.md",
+		});
+		const text = getResultText(result);
+		expect(text).toContain("…");
+		expect((text.match(/é/g) ?? []).length).toBeLessThan(300);
+		expect(result.details?.meta?.limits?.columnTruncated).toEqual({ maxColumn: 512, unit: "bytes" });
+		expect(formatOutputNotice(result.details?.meta)).toContain("Some lines truncated to 512 bytes");
 	});
 
 	it("rejects a malformed selector on a selector-capable internal URL instead of widening the search", async () => {
