@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed cancelled `lsp reload *` leaving a rejected workspace reload barrier, so a later unused nested language server under the same workspace no longer fails with the cancellation error.
 - Fixed cancelled `lsp reload *` restoring only unowned pending identities, so a session that shared a live client with another session could not reattach after abort.
 - Fixed a cancelled overlapping `lsp reload *` writing the earlier generation back over a later in-flight reload, so captured nested configs could start superseded command, args, or settings.
 - Fixed file/glob diagnostics and raw `lsp request` stamping nested language-server configs after overlapping `lsp reload *` finished, so those operations no longer start superseded command, args, or settings.

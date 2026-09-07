@@ -1328,6 +1328,17 @@ export function shutdownStaleClients(
 	for (const root of barrierRoots) rememberPreviousBarrier(clientReloadBarriers.get(root));
 	for (const leftoverKey of leftoverKeys) rememberPreviousBarrier(clientIdentityReloadBarriers.get(leftoverKey));
 	const cleanupHolder: { promise?: Promise<string[]> } = {};
+	const dropThisCleanupBarriers = (keepIdentityKeys?: ReadonlySet<string>): void => {
+		const cleanupPromise = cleanupHolder.promise;
+		for (const root of barrierRoots) {
+			if (clientReloadBarriers.get(root) === cleanupPromise) clientReloadBarriers.delete(root);
+		}
+		for (const leftoverKey of leftoverKeys) {
+			if (clientIdentityReloadBarriers.get(leftoverKey) !== cleanupPromise) continue;
+			if (keepIdentityKeys?.has(leftoverKey)) continue;
+			clientIdentityReloadBarriers.delete(leftoverKey);
+		}
+	};
 	const cleanup = (async (): Promise<string[]> => {
 		const restoreReleasedOwners = (): void => {
 			if (!owner) return;
@@ -1389,17 +1400,10 @@ export function shutdownStaleClients(
 					...stalePending.filter(([key]) => !clients.has(key) && !clientLocks.has(key)),
 				];
 				for (const [key] of gone) invalidatedClientKeys.delete(key);
-				const cleanupPromise = cleanupHolder.promise;
-				for (const root of barrierRoots) {
-					if (clientReloadBarriers.get(root) === cleanupPromise) clientReloadBarriers.delete(root);
-				}
 				const failedLeftoverKeys = new Set(
 					failed.map(([, client]) => clientServerRootKey(client.config, client.cwd)),
 				);
-				for (const leftoverKey of leftoverKeys) {
-					if (clientIdentityReloadBarriers.get(leftoverKey) !== cleanupPromise) continue;
-					if (!failedLeftoverKeys.has(leftoverKey)) clientIdentityReloadBarriers.delete(leftoverKey);
-				}
+				dropThisCleanupBarriers(failedLeftoverKeys);
 				throw new Error(
 					"Failed to stop LSP server(s) with superseded configuration: " +
 						failed.map(([, client]) => client.config.command).join(", "),
@@ -1447,6 +1451,11 @@ export function shutdownStaleClients(
 						if (coveredRoots.size === 0) ownerReloadRootGenerations.delete(owner);
 					}
 				}
+				// Cancellation rolls the owner and tombstones back, so this
+				// cleanup's rejected barriers must not remain. A later unused
+				// nested identity under the same workspace would otherwise
+				// collect the aborted promise and fail until another reload.
+				dropThisCleanupBarriers();
 			}
 			throw error;
 		}
@@ -1456,14 +1465,7 @@ export function shutdownStaleClients(
 	for (const leftoverKey of leftoverKeys) clientIdentityReloadBarriers.set(leftoverKey, cleanup);
 	void cleanup.then(
 		() => {
-			for (const root of barrierRoots) {
-				if (clientReloadBarriers.get(root) === cleanup) clientReloadBarriers.delete(root);
-			}
-			for (const leftoverKey of leftoverKeys) {
-				if (clientIdentityReloadBarriers.get(leftoverKey) === cleanup) {
-					clientIdentityReloadBarriers.delete(leftoverKey);
-				}
-			}
+			dropThisCleanupBarriers();
 		},
 		() => {},
 	);

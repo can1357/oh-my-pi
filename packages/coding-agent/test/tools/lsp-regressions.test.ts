@@ -6048,6 +6048,54 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("cancelled workspace reload does not leave a rejected barrier for unused nested identities", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-reload-abort-unused-barrier-");
+		try {
+			const pendingRoot = path.join(tempDir.path(), "pending");
+			const unusedRoot = path.join(tempDir.path(), "unused");
+			fs.mkdirSync(pendingRoot);
+			fs.mkdirSync(unusedRoot);
+			const pendingConfig: ServerConfig = {
+				command: "pending-reload-abort-barrier-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+				resolvedRoot: pendingRoot,
+			};
+			const unusedConfig: ServerConfig = {
+				command: "unused-reload-abort-barrier-lsp",
+				fileTypes: ["ts"],
+				rootMarkers: [],
+				resolvedRoot: unusedRoot,
+			};
+			const pendingServer = installFakeLsp((message, server) => {
+				if (message.method === "shutdown") {
+					server.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					server.exit(0);
+				}
+			});
+			const owner = lspClient.createLspClientOwner();
+			const pending = lspClient.getOrCreateClient(pendingConfig, tempDir.path(), undefined, undefined, owner);
+			const initialize = await pendingServer.waitFor(message => message.method === "initialize");
+			const controller = new AbortController();
+			const cleanup = lspClient.shutdownStaleClients(tempDir.path(), [], controller.signal, [tempDir.path()], owner);
+			controller.abort(new Error("reload cancelled"));
+			await expect(cleanup).rejects.toBeInstanceOf(ToolAbortError);
+
+			const unusedServer = installHandshakeLsp();
+			await expect(
+				lspClient.getOrCreateClient(unusedConfig, unusedRoot, 1_000, undefined, owner),
+			).resolves.toMatchObject({ config: { command: "unused-reload-abort-barrier-lsp" } });
+			expect(unusedServer.received.map(message => message.method)).toContain("initialize");
+
+			pendingServer.send({ jsonrpc: "2.0", id: initialize.id, result: { capabilities: {} } });
+			await expect(pending).resolves.toMatchObject({ config: { command: "pending-reload-abort-barrier-lsp" } });
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("cancelled overlapping reload does not restore a newer owner generation", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-reload-abort-newer-generation-");
 		try {
