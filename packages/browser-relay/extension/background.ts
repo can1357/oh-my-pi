@@ -20,6 +20,7 @@ import {
 	consumeGuardInitiatedDetach,
 	consumeRelayInitiatedDetach,
 	createRetryableLoader,
+	detachThenBestEffortCleanup,
 	detachWithRecoveryLoaderObservation,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
@@ -998,9 +999,13 @@ async function runRpc(
 		case "detach":
 			relayInitiatedDetachTabs.add(msg.tabId);
 			try {
-				await trackPendingDetach(chrome.debugger.detach({ tabId: msg.tabId }));
-				attachmentGuard.untrack(msg.tabId);
-				await forgetRecoverable(msg.tabId, true);
+				await detachThenBestEffortCleanup(
+					() => trackPendingDetach(chrome.debugger.detach({ tabId: msg.tabId })),
+					async () => {
+						attachmentGuard.untrack(msg.tabId);
+						await forgetRecoverable(msg.tabId, true);
+					},
+				);
 				return {};
 			} catch (error) {
 				relayInitiatedDetachTabs.delete(msg.tabId);

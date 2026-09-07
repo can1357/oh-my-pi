@@ -1075,6 +1075,12 @@ export class RelayBridge {
 		const script = clientIdentifier ? this.#preloadScript(tab, sessionId, clientIdentifier) : undefined;
 		const params = script && clientIdentifier ? { ...msg.params, identifier: script.rootIdentifier } : msg.params;
 		try {
+			await this.#rpc({
+				op: "send",
+				tabId: ref.tabId,
+				method: msg.method,
+				params,
+			});
 			if (script?.cleanupRootIdentifier) {
 				try {
 					await this.#rpc({
@@ -1092,12 +1098,6 @@ export class RelayBridge {
 					});
 				}
 			}
-			await this.#rpc({
-				op: "send",
-				tabId: ref.tabId,
-				method: msg.method,
-				params,
-			});
 		} catch (err) {
 			// Chrome may have accepted this removal before the socket dropped and
 			// the result never reached us. The stable client identifier now points

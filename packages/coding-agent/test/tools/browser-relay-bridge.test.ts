@@ -3290,7 +3290,7 @@ describe("RelayBridge tab grouping", () => {
 		});
 	});
 
-	it("runs a preload once when navigation lands during registration handoff", async () => {
+	it("runs a preload once during registration handoff and removes its producer before cleanup", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
 		connect(bridge, ext, [tab({ tabId: 1 })]);
@@ -3299,10 +3299,11 @@ describe("RelayBridge tab grouping", () => {
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 		const source = "let relayValue = 1; class RelayValue {}; this.__preloadRuns = (this.__preloadRuns ?? 0) + 1;";
 
+		const addId = ++msgSeq;
 		bridge.cdpMessage(
 			connId,
 			JSON.stringify({
-				id: ++msgSeq,
+				id: addId,
 				sessionId: pageSession,
 				method: "Page.addScriptToEvaluateOnNewDocument",
 				params: { source, runImmediately: true },
@@ -3313,6 +3314,17 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
 		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
 		await flush();
+		const addReply = cdp.messages.find(message => message.id === addId);
+		const clientIdentifier =
+			addReply &&
+			"result" in addReply &&
+			addReply.result &&
+			typeof addReply.result === "object" &&
+			"identifier" in addReply.result &&
+			typeof addReply.result.identifier === "string"
+				? addReply.result.identifier
+				: undefined;
+		expect(clientIdentifier).toBeDefined();
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -3333,6 +3345,18 @@ describe("RelayBridge tab grouping", () => {
 		ack(bridge, ext2, "send", { identifier: "root-script-marker-only" });
 		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Runtime.evaluate"));
 		ack(bridge, ext2, "send", { result: { value: true } });
+		await waitFor(() =>
+			ext2
+				.pending("send")
+				.some(
+					rpc =>
+						rpc.method === "Page.disable" ||
+						(rpc.method === "Runtime.evaluate" &&
+							(rpc.params as { expression?: string } | undefined)?.expression?.includes("delete this")),
+				),
+		);
+		ack(bridge, ext2, "send");
+		await flush();
 		const markedSource = (marked?.params as { source?: string } | undefined)?.source;
 		const cleanupSource = (cleanup?.params as { source?: string } | undefined)?.source;
 		const overlapDocument: Record<string, unknown> = {};
@@ -3350,6 +3374,29 @@ describe("RelayBridge tab grouping", () => {
 		expect(vm.runInContext("relayValue", laterDocument)).toBe(1);
 		expect(vm.runInContext("typeof RelayValue", laterDocument)).toBe("function");
 		expect(Object.keys(laterDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.removeScriptToEvaluateOnNewDocument",
+				params: { identifier: clientIdentifier },
+			}),
+		);
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		const producerRemoval = ext2
+			.pending("send")
+			.find(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument");
+		expect(producerRemoval?.params).toEqual({ identifier: "root-script-with-marker" });
+		ack(bridge, ext2, "send");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument"));
+		const cleanupRemoval = ext2
+			.pending("send")
+			.find(rpc => rpc.method === "Page.removeScriptToEvaluateOnNewDocument");
+		expect(cleanupRemoval?.params).toEqual({ identifier: "root-script-marker-only" });
+		ack(bridge, ext2, "send");
+		await flush();
 	});
 
 	it.each(["remove", "retry"] as const)(

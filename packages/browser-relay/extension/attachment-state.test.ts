@@ -4,6 +4,7 @@ import {
 	consumeGuardInitiatedDetach,
 	consumeRelayInitiatedDetach,
 	createRetryableLoader,
+	detachThenBestEffortCleanup,
 	detachWithRecoveryLoaderObservation,
 	extensionOwnedAttachedTabIds,
 	filterFreshAttachmentState,
@@ -345,6 +346,39 @@ describe("attachment-state", () => {
 		noteRelayDetachOutcome(replacementWorker, 1, false);
 		restoreRecoverableState(replacementWorker, storedIds, new Set([1]));
 		expect(replacementWorker.has(1)).toBe(false);
+	});
+
+	it("reports detach success after cleanup persistence fails", async () => {
+		const calls: string[] = [];
+
+		await expect(
+			detachThenBestEffortCleanup(
+				async () => {
+					calls.push("detach");
+				},
+				async () => {
+					calls.push("cleanup");
+					throw new Error("storage unavailable");
+				},
+			),
+		).resolves.toBeUndefined();
+		expect(calls).toEqual(["detach", "cleanup"]);
+	});
+
+	it("preserves failures that happen before detach completes", async () => {
+		let cleanedUp = false;
+
+		await expect(
+			detachThenBestEffortCleanup(
+				async () => {
+					throw new Error("detach denied");
+				},
+				async () => {
+					cleanedUp = true;
+				},
+			),
+		).rejects.toThrow("detach denied");
+		expect(cleanedUp).toBe(false);
 	});
 
 	it("preserves detach retry state when target discovery fails", () => {

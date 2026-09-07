@@ -119,6 +119,14 @@ export function noteRelayDetachOutcome(
 	else completedTabs.delete(tabId);
 }
 
+export async function detachThenBestEffortCleanup(
+	detach: () => Promise<void>,
+	cleanup: () => Promise<void>,
+): Promise<void> {
+	await detach();
+	await cleanup().catch(() => {});
+}
+
 export function shouldRetrackAfterDetachFailure(
 	targets: ReadonlyArray<{ tabId?: number; attached: boolean }> | null,
 	tabId: number,

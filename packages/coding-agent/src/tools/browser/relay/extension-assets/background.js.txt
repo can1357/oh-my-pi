@@ -146,6 +146,10 @@ function noteRelayDetachOutcome(completedTabs, tabId, relayInitiated) {
   else
     completedTabs.delete(tabId);
 }
+async function detachThenBestEffortCleanup(detach, cleanup) {
+  await detach();
+  await cleanup().catch(() => {});
+}
 function shouldRetrackAfterDetachFailure(targets, tabId) {
   return targets === null || targets.some((target) => target.tabId === tabId && target.attached);
 }
@@ -828,9 +832,10 @@ async function runRpc(msg, socket) {
     case "detach":
       relayInitiatedDetachTabs.add(msg.tabId);
       try {
-        await trackPendingDetach(chrome.debugger.detach({ tabId: msg.tabId }));
-        attachmentGuard.untrack(msg.tabId);
-        await forgetRecoverable(msg.tabId, true);
+        await detachThenBestEffortCleanup(() => trackPendingDetach(chrome.debugger.detach({ tabId: msg.tabId })), async () => {
+          attachmentGuard.untrack(msg.tabId);
+          await forgetRecoverable(msg.tabId, true);
+        });
         return {};
       } catch (error) {
         relayInitiatedDetachTabs.delete(msg.tabId);
