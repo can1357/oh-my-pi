@@ -937,6 +937,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						env: options.resolvedEnv,
 						artifactPath,
 						artifactId,
+						// Auto-background routes even a foreground eval-bridge call
+						// through here, so the sink's model-facing caps and the shell
+						// minimizer must be off on this path too — the final inline
+						// cap alone cannot restore what they already dropped.
+						unboundedOutput: options.ctx?.programmaticCaller === true,
 						onChunk: chunk => {
 							tailBuffer.append(chunk);
 							latestText = tailBuffer.text();
@@ -1319,7 +1324,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					env: bridgeEnv
 						? Object.entries(bridgeEnv).map(([name, value]) => ({ name, value: value as string }))
 						: undefined,
-					outputByteLimit: DEFAULT_MAX_BYTES,
+					// The client enforces this limit before OMP sees a byte, so a
+					// programmatic caller (`eval` bridge) takes no limit at all;
+					// nothing downstream can recover what the client dropped.
+					outputByteLimit: ctx?.programmaticCaller === true ? undefined : DEFAULT_MAX_BYTES,
 				});
 				const createRaced = await Promise.race([
 					createP.then(createdHandle => ({ kind: "created" as const, handle: createdHandle })),
@@ -1347,6 +1355,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						requestedTimeoutSec,
 						notices: pendingNotices,
 						wallTimeMs: performance.now() - bridgeWallTimeStart,
+						ctx,
 					});
 				}
 
@@ -1422,6 +1431,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 							requestedTimeoutSec,
 							notices: pendingNotices,
 							wallTimeMs: performance.now() - bridgeWallTimeStart,
+							ctx,
 						});
 					}
 

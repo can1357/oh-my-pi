@@ -489,7 +489,11 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		!isPersistentShellCdCommand(command);
 	const snapshotPath = bashShell ? await getOrCreateSnapshot(shell, shellEnv) : null;
 
-	const minimizer = buildMinimizerOptions(settings.getGroup("shellMinimizer"));
+	// The minimizer summarizes recognized commands (`jq`, `git`, test runners)
+	// and the result replaces the captured stream wholesale. That is a
+	// presentation win for the model and data loss for a programmatic caller
+	// parsing the text, so an unbounded caller runs the shell without it.
+	const minimizer = options?.unboundedOutput ? undefined : buildMinimizerOptions(settings.getGroup("shellMinimizer"));
 
 	const commandCwd = resolveShellCwd(options?.cwd);
 	// Fold the repo's direnv/devenv env into the command + env so devenv tools

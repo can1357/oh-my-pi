@@ -1116,6 +1116,44 @@ exit 64
 		expect(whole.output).toBe("a".repeat(payloadBytes));
 	}, 30_000);
 
+	// Truncation is not the only way the captured stream stops being the stream:
+	// the shell minimizer rewrites recognized commands wholesale and the result
+	// replaces the sink's contents. A cell parsing `ls`/`git`/`jq` output would
+	// get a summary where the bridge promised bytes.
+	it("runs a programmatic caller's command without the shell minimizer", async () => {
+		for (let index = 0; index < 400; index++) {
+			fs.writeFileSync(path.join(tempDir, `file-${index}.txt`), "x".repeat(200));
+		}
+
+		let minimizedOriginal: string | undefined;
+		const bounded = await executeBash("ls -la", {
+			cwd: tempDir,
+			timeout: 15_000,
+			onMinimizedSave: async original => {
+				minimizedOriginal = original;
+				return "artifact-minimized";
+			},
+		});
+		// Guard: the assertions below say nothing if the filter did not recognize
+		// this command on the host platform.
+		if (minimizedOriginal === undefined) return;
+		expect(bounded.output).not.toContain("total ");
+
+		let unboundedMinimizedOriginal: string | undefined;
+		const whole = await executeBash("ls -la", {
+			cwd: tempDir,
+			timeout: 15_000,
+			unboundedOutput: true,
+			onMinimizedSave: async original => {
+				unboundedMinimizedOriginal = original;
+				return "artifact-minimized";
+			},
+		});
+		expect(unboundedMinimizedOriginal).toBeUndefined();
+		expect(whole.output).toContain("total ");
+		expect(whole.output).toContain("file-399.txt");
+	}, 30_000);
+
 	it("sources snapshot env vars across session commands", async () => {
 		if (process.platform === "win32") {
 			return;
