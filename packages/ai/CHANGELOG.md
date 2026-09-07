@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Thinking-loop guard no longer discards a legitimate final answer whose tail is homogeneous structured data (a markdown table or JSON array of same-shape rows): such content is exempted from the near-duplicate/lexical heuristics, which are meant for reasoning prose ([#11129](https://github.com/can1357/oh-my-pi/issues/11129)).
+
 ## [18.1.12] - 2026-09-06
 
 ### Added
