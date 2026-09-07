@@ -10,6 +10,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import type { HighlightStream } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import {
@@ -29,7 +30,7 @@ import { couldBecomeXdUrl, parseXdUrl } from "../internal-urls/xd-protocol";
 import { createLspWritethrough, type FileDiagnosticsResult, type WritethroughCallback, writethroughNoop } from "../lsp";
 import { DeferredDiagnostics } from "../lsp/deferred-diagnostics";
 import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
-import { getLanguageFromPath, highlightCode, type Theme } from "../modes/theme/theme";
+import { createHighlightStream, getLanguageFromPath, highlightCode, type Theme } from "../modes/theme/theme";
 import writeDescription from "../prompts/tools/write.md" with { type: "text" };
 import writeDeviceOnlyDescription from "../prompts/tools/write-device-only.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -1440,67 +1441,93 @@ const WRITE_GUTTER_MIN_WIDTH = 3;
  * Tracking the newline count incrementally and extracting only the tail
  * window makes each tick O(delta + preview lines).
  */
-interface WriteStreamingLineIndex {
+interface WriteStreamingPreviewState {
 	/** Number of content code units scanned so far. */
 	length: number;
 	/** Bounded suffix used to detect a restarted/non-append stream. */
 	suffix: string;
 	/** `1 + count("\n")` over the scanned content. */
 	lineCount: number;
+	/** Raw offset immediately after the last newline consumed by `highlighter`. */
+	completeLength: number;
+	/** Highlighted, complete logical lines; the unfinished trailing line is rendered plain. */
+	highlightedLines: string[];
+	/** Stateful parser carrying syntax scopes across appended complete lines. */
+	highlighter: HighlightStream | null;
+	language: string | undefined;
+	uiTheme: Theme;
 }
 
-const writeStreamingLineIndex = new WeakMap<object, WriteStreamingLineIndex>();
+const writeStreamingPreviewState = new WeakMap<object, WriteStreamingPreviewState>();
 
 /** Keep append validation constant-time instead of comparing the entire prior payload. */
 const WRITE_STREAMING_APPEND_GUARD_LENGTH = 64;
 
-/** Total logical line count of `content`, resuming from the cached prefix scan when append-only. */
-function streamingTotalLines(streamKey: object | undefined, content: string): number {
-	if (streamKey === undefined) {
-		let lines = 1;
-		for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) lines++;
-		return lines;
-	}
-	let entry = writeStreamingLineIndex.get(streamKey);
-	const continuesPrevious =
-		entry !== undefined &&
-		content.length >= entry.length &&
-		content.startsWith(entry.suffix, entry.length - entry.suffix.length);
-	if (entry !== undefined && continuesPrevious) {
-		let lines = entry.lineCount;
-		for (let i = entry.length; i < content.length; i++) if (content.charCodeAt(i) === 10) lines++;
-		entry.length = content.length;
-		entry.suffix = content.slice(-WRITE_STREAMING_APPEND_GUARD_LENGTH);
-		entry.lineCount = lines;
-		return lines;
-	}
-	let lines = 1;
-	for (let i = 0; i < content.length; i++) if (content.charCodeAt(i) === 10) lines++;
-	entry = {
-		length: content.length,
-		suffix: content.slice(-WRITE_STREAMING_APPEND_GUARD_LENGTH),
-		lineCount: lines,
+function createWriteStreamingPreviewState(language: string | undefined, uiTheme: Theme): WriteStreamingPreviewState {
+	return {
+		length: 0,
+		suffix: "",
+		lineCount: 1,
+		completeLength: 0,
+		highlightedLines: [],
+		highlighter: createHighlightStream(language, uiTheme),
+		language,
+		uiTheme,
 	};
-	writeStreamingLineIndex.set(streamKey, entry);
-	return lines;
 }
 
 /**
- * Raw offset just after the (totalLines - previewLines)-th newline — i.e. the
- * start of the last `previewLines` logical lines — scanning back from the end.
- * Returns 0 when the whole content fits in the window. Equivalent to
- * `content.split("\n").slice(-previewLines).join("\n")` without materializing
- * the full line array.
+ * Advance line counting and syntax highlighting only across newly appended
+ * content. Complete lines are retained because Ctrl+O can expand the preview;
+ * the current partial line stays plain until its terminating newline arrives.
  */
-function tailWindowStart(content: string, previewLines: number): number {
-	let newlinesSeen = 0;
-	for (let i = content.length - 1; i >= 0; i--) {
+function updateStreamingPreview(
+	streamKey: object | undefined,
+	content: string,
+	language: string | undefined,
+	uiTheme: Theme,
+): WriteStreamingPreviewState | undefined {
+	if (streamKey === undefined) return undefined;
+
+	let state = writeStreamingPreviewState.get(streamKey);
+	if (
+		state === undefined ||
+		state.language !== language ||
+		state.uiTheme !== uiTheme ||
+		content.length < state.length ||
+		!content.startsWith(state.suffix, state.length - state.suffix.length)
+	) {
+		state = createWriteStreamingPreviewState(language, uiTheme);
+		writeStreamingPreviewState.set(streamKey, state);
+	}
+
+	let completeLength = state.completeLength;
+	for (let i = state.length; i < content.length; i++) {
 		if (content.charCodeAt(i) === 10) {
-			newlinesSeen++;
-			if (newlinesSeen === previewLines) return i + 1;
+			state.lineCount++;
+			completeLength = i + 1;
 		}
 	}
-	return 0;
+	if (completeLength > state.completeLength) {
+		const chunk = content.slice(state.completeLength, completeLength).replace(/\r/g, "");
+		let chunkHighlighted = chunk;
+		if (state.highlighter) {
+			try {
+				chunkHighlighted = state.highlighter.push(chunk);
+			} catch {
+				state.highlighter = null;
+			}
+		}
+		const lines = chunkHighlighted.split("\n");
+		lines.pop();
+		for (let i = 0; i < lines.length; i++) {
+			state.highlightedLines.push(lines[i]!);
+		}
+		state.completeLength = completeLength;
+	}
+	state.length = content.length;
+	state.suffix = content.slice(-WRITE_STREAMING_APPEND_GUARD_LENGTH);
+	return state;
 }
 
 function formatStreamingContent(
@@ -1512,40 +1539,42 @@ function formatStreamingContent(
 	cache?: RenderedStringCache,
 	streamKey?: object,
 ): string {
-	if (!content) return "";
+	if (!content) {
+		if (streamKey !== undefined) writeStreamingPreviewState.delete(streamKey);
+		return "";
+	}
 	const bodyText = cachedRenderedString(cache, uiTheme, expanded, language ?? "", content, () => {
-		// Collapsed: follow the streaming edge with a bounded tail window so the box
-		// stays short enough not to strand its scrolled-off head above the viewport
-		// while the block is volatile. `Ctrl+O` (expanded) lifts the cap for a
-		// deliberate full view — matching the eval streaming preview.
+		const state = updateStreamingPreview(streamKey, content, language, uiTheme);
 		let totalLines: number;
 		let startIndex: number;
-		let visibleText: string;
-		if (expanded) {
-			visibleText = normalizeDisplayText(content);
-			totalLines = 1;
-			for (let i = 0; i < visibleText.length; i++) if (visibleText.charCodeAt(i) === 10) totalLines++;
-			startIndex = 0;
+		let visibleLines: string[];
+		if (state) {
+			totalLines = state.lineCount;
+			startIndex = expanded ? 0 : Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
+			const trailingLine = content.slice(state.completeLength).replace(/\r/g, "");
+			if (totalLines === 1 && trailingLine.length === 0) return "";
+			visibleLines = [...state.highlightedLines.slice(startIndex), trailingLine];
 		} else {
-			totalLines = streamingTotalLines(streamKey, content);
-			startIndex = Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
-			const tail =
-				startIndex === 0 ? content : content.slice(tailWindowStart(content, WRITE_STREAMING_PREVIEW_LINES));
-			visibleText = tail.replace(/\r/g, "");
+			// Fallback when no persistent streamKey exists: render plain text rather
+			// than running whole-window synchronous tokenization on volatile frames.
+			const normalized = normalizeDisplayText(content);
+			if (normalized.length === 0) return "";
+			const lines = normalized.split("\n");
+			totalLines = lines.length;
+			startIndex = expanded ? 0 : Math.max(0, totalLines - WRITE_STREAMING_PREVIEW_LINES);
+			visibleLines = lines.slice(startIndex);
 		}
-		if (visibleText.length === 0) return "";
 		const hidden = startIndex;
-		const highlighted = highlightCode(visibleText, language);
 		const lineNumberWidth = Math.max(WRITE_GUTTER_MIN_WIDTH, String(totalLines).length);
 
 		let text = "\n\n";
 		if (hidden > 0) {
 			text += `${uiTheme.fg("dim", `… (${hidden} earlier line${hidden === 1 ? "" : "s"})`)}\n`;
 		}
-		for (let i = 0; i < highlighted.length; i++) {
+		for (let i = 0; i < visibleLines.length; i++) {
 			const lineNum = startIndex + i + 1;
 			const gutter = uiTheme.fg("dim", `${String(lineNum).padStart(lineNumberWidth, " ")} `);
-			const body = replaceTabs(highlighted[i] ?? "");
+			const body = replaceTabs(visibleLines[i] ?? "");
 			text += `${gutter}${body}\n`;
 		}
 		return text;
@@ -1659,6 +1688,9 @@ export const writeToolRenderer = {
 		// cost formatStreamingContent avoids. Non-string content still falls
 		// back to the normalizing stringify.
 		const content = typeof args.content === "string" ? args.content : normalizeDisplayText(args.content);
+		if (!content && options) {
+			writeStreamingPreviewState.delete(options);
+		}
 		const streamingCache = createRenderedStringCache();
 		return framedBlock(uiTheme, width => {
 			const body = content

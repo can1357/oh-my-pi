@@ -1,4 +1,4 @@
-import { describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as themeModule from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { writeToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/write";
 
@@ -6,6 +6,16 @@ const stripAnsi = (s: string): string => s.replace(/\[[0-9;]*m/g, "");
 const hasLine = (lines: readonly string[], n: number): boolean =>
 	new RegExp(`\\bline ${n}\\b`).test(stripAnsi(lines.join("\n")));
 
+/**
+ * Normalizes adjacent duplicate foreground resets (\x1b[39m\x1b[39m -> \x1b[39m) at the
+ * gutter boundary, matching the leading-reset convention between one-shot and streaming
+ * highlighters without stripping meaningful resets or masking color bleed.
+ */
+const normalizeRedundantResets = (lines: readonly string[]): string[] =>
+	lines.map(line => line.replace(/\x1b\[39m\x1b\[39m/g, "\x1b[39m"));
+
+/** Extracts the rendered code rows between the framed block header and the status/footer rows. */
+const extractCodeRows = (lines: readonly string[]): string[] => lines.slice(1, -2);
 /**
  * Reference algorithm: the pre-incremental formatter normalized the whole
  * payload, split every line, and sliced the tail window. The incremental
@@ -20,6 +30,9 @@ function referenceWindow(content: string): { total: number; start: number; visib
 
 describe("write streaming preview incremental line tracking", () => {
 	let initialized = false;
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
 
 	async function getUiTheme() {
 		if (!initialized) {
@@ -79,28 +92,106 @@ describe("write streaming preview incremental line tracking", () => {
 			if (start > 0) expect(rendered).toContain(`… (${start} earlier line${start === 1 ? "" : "s"})`);
 		}
 	});
-
-	it("does not compare the full accumulated payload when validating append-only growth", async () => {
+	it("retains multiline syntax highlighting across collapsed scroll boundaries", async () => {
 		const uiTheme = await getUiTheme();
 		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
-		const first = Array.from({ length: 2_000 }, () => "x".repeat(64)).join("\n");
-		writeToolRenderer.renderCall({ path: "/tmp/inc.ts", content: first }, options, uiTheme)?.render(120);
+		const chunks = [
+			"/*\n",
+			Array.from({ length: 14 }, (_, i) => `comment line ${i + 1}\n`).join(""),
+			"const insideComment = 123;\n",
+			"*/\n",
+			"const outsideComment = 456;\n",
+		];
 
-		const originalStartsWith = String.prototype.startsWith;
-		let wholePrefixComparisons = 0;
-		String.prototype.startsWith = function (this: string, searchString: string, position?: number): boolean {
-			if (searchString === first) wholePrefixComparisons++;
-			return originalStartsWith.call(this, searchString, position);
-		};
-		try {
-			writeToolRenderer
-				.renderCall({ path: "/tmp/inc.ts", content: `${first}\nlast` }, options, uiTheme)
-				?.render(120);
-		} finally {
-			String.prototype.startsWith = originalStartsWith;
+		let acc = "";
+		for (let i = 0; i < chunks.length; i++) {
+			acc += chunks[i];
+			const component = writeToolRenderer.renderCall(
+				{ path: "/tmp/multiline.ts", content: acc },
+				options,
+				uiTheme,
+			);
+			if (!component) throw new Error("expected rendered component");
+			const rendered = component.render(120);
+			const fullText = stripAnsi(rendered.join("\n"));
+
+			if (i === 2) {
+				// Chunk 3: /* has scrolled offscreen into earlier lines header
+				expect(fullText).toContain("earlier line");
+				expect(fullText).not.toContain("/*");
+				const insideLine = rendered.find(line => line.includes("insideComment"));
+				expect(insideLine).toBeDefined();
+				expect(insideLine).toContain(uiTheme.getFgAnsi("syntaxComment"));
+				expect(insideLine).not.toContain(uiTheme.getFgAnsi("syntaxKeyword"));
+				expect(stripAnsi(insideLine!)).toContain("const insideComment = 123;");
+			}
+
+			if (i === 4) {
+				// Chunk 5: outside multiline comment
+				const outsideLine = rendered.find(line => line.includes("outsideComment"));
+				expect(outsideLine).toBeDefined();
+				expect(outsideLine).toContain(uiTheme.getFgAnsi("syntaxKeyword"));
+				expect(outsideLine).not.toContain(uiTheme.getFgAnsi("syntaxComment"));
+				expect(stripAnsi(outsideLine!)).toContain("const outsideComment = 456;");
+			}
+		}
+	});
+
+	it("produces identical completed-line highlighting and text integrity across chunk boundaries", async () => {
+		const uiTheme = await getUiTheme();
+		const splits = [
+			"/",
+			"* comment\n",
+			" * more comment\n*",
+			"/\nconst answer = 42;\n",
+		];
+		const fixture = splits.join("");
+
+		// Path A (One-shot)
+		const optionsA = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const compA = writeToolRenderer.renderCall(
+			{ path: "/tmp/fixture.ts", content: fixture },
+			optionsA,
+			uiTheme,
+		);
+		if (!compA) throw new Error("expected rendered component");
+		const renderedA = compA.render(120);
+
+		// Path B (Streamed)
+		const optionsB = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		let accB = "";
+		let renderedB: readonly string[] = [];
+		for (let i = 0; i < splits.length; i++) {
+			accB += splits[i];
+			const compB = writeToolRenderer.renderCall(
+				{ path: "/tmp/fixture.ts", content: accB },
+				optionsB,
+				uiTheme,
+			);
+			if (!compB) throw new Error("expected rendered component");
+			renderedB = compB.render(120);
+
+			if (i === 0) {
+				// Partial line after Split 1: "/"
+				const text1 = stripAnsi(renderedB.join("\n"));
+				expect(text1).toContain("1 /");
+				expect(text1).not.toContain("/*");
+			}
+
+			if (i === 2) {
+				// Partial line after Split 3: trailing "*"
+				const text3 = stripAnsi(renderedB.join("\n"));
+				expect(text3).toContain("1 /* comment");
+				expect(text3).toContain("2  * more comment");
+				expect(text3).toContain("3 *");
+				expect(text3).not.toContain("3 */");
+			}
 		}
 
-		expect(wholePrefixComparisons).toBe(0);
+		// Completed lines after Split 4: extract code rows (lines between header and footer)
+		const codeRowsA = normalizeRedundantResets(extractCodeRows(renderedA));
+		const codeRowsB = normalizeRedundantResets(extractCodeRows(renderedB));
+		expect(codeRowsB).toEqual(codeRowsA);
 	});
 
 	it("normalizes CRLF only in the rendered tail, with correct line numbers", async () => {
@@ -140,19 +231,43 @@ describe("write streaming preview incremental line tracking", () => {
 		expect(carriageReturns).toEqual(empty);
 	});
 
-	it("resets cleanly when a restarted stream is longer but not append-only", async () => {
-		// A restarted stream can reuse the component render state with a longer
-		// replacement buffer; the bounded suffix guard must reset the index.
-		const options = { expanded: false, isPartial: true, spinnerFrame: 0 };
-		const first = "alpha 1\nalpha 2";
-		await renderCollapsed(first, options);
+	it("resets state and purges old source from screen when content is replaced", async () => {
+		const uiTheme = await getUiTheme();
+		const options = { expanded: true, isPartial: true, spinnerFrame: 0 };
+		const first = "const original = 1;\nconst common = 2;\n";
+		const comp1 = writeToolRenderer.renderCall(
+			{ path: "/tmp/restart.ts", content: first },
+			options,
+			uiTheme,
+		);
+		if (!comp1) throw new Error("expected rendered component");
+		comp1.render(120);
 
-		const restarted = `beta ${"x".repeat(100)}\nbeta 2`;
-		const rendered = await renderCollapsed(restarted, options);
-		const text = stripAnsi(rendered.join("\n"));
-		expect(text).not.toContain("earlier line");
-		expect(text).toContain("beta");
-		expect(text).not.toContain("alpha");
+		const second = "const restarted = 99;\nconst common = 2;\nconst extra = 3;\n";
+		const comp2 = writeToolRenderer.renderCall(
+			{ path: "/tmp/restart.ts", content: second },
+			options,
+			uiTheme,
+		);
+		if (!comp2) throw new Error("expected rendered component");
+		const rendered2 = comp2.render(120);
+
+		const optionsFresh = { expanded: true, isPartial: true, spinnerFrame: 0 };
+		const compFresh = writeToolRenderer.renderCall(
+			{ path: "/tmp/restart.ts", content: second },
+			optionsFresh,
+			uiTheme,
+		);
+		if (!compFresh) throw new Error("expected rendered component");
+		const renderedFresh = compFresh.render(120);
+
+		const text2 = stripAnsi(rendered2.join("\n"));
+		expect(text2).toContain("const restarted = 99;");
+		expect(text2).not.toContain("const original = 1;");
+
+		const codeRows2 = extractCodeRows(rendered2);
+		const codeRowsFresh = extractCodeRows(renderedFresh);
+		expect(codeRows2).toEqual(codeRowsFresh);
 	});
 
 	it("resumes append tracking across a CR boundary without miscounting", async () => {
