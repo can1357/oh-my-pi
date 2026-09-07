@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Extension command argument completions now refresh after typing a Space when the previous argument had no suggestions. ([#11060](https://github.com/can1357/oh-my-pi/issues/11060))
+
 ## [18.1.12] - 2026-09-06
 
 ### Fixed
