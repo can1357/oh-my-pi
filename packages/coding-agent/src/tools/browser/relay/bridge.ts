@@ -3142,11 +3142,14 @@ export class RelayBridge {
 		const [, currentLoaderId] = await Promise.all([enablePageEvents, currentLoaderPromise]);
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
+			const previousLoaderId = recoveryLoaderId ?? script.loaderId;
 			const runImmediately =
 				script.params?.runImmediately === true &&
-				(recoveryLoaderId !== undefined && currentLoaderId !== undefined
-					? recoveryLoaderId !== currentLoaderId
-					: runImmediatePreloads ||
+				(previousLoaderId !== undefined && currentLoaderId !== undefined
+					? previousLoaderId !== currentLoaderId
+					: previousLoaderId === undefined ||
+						currentLoaderId === undefined ||
+						runImmediatePreloads ||
 						(recoveryNavigationGeneration !== undefined &&
 							tab.mainFrameNavigationGeneration !== recoveryNavigationGeneration));
 			const applicationMarker =

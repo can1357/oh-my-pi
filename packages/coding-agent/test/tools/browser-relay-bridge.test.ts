@@ -3805,6 +3805,50 @@ describe("RelayBridge tab grouping", () => {
 		expect(ext2.rpcs("send").map(rpc => rpc.method)).toContain("Page.disable");
 	});
 
+	it("reruns an immediate preload when recovery has no prior loader baseline", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1, url: "https://example.test/same" })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: {} } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, url: "https://example.test/same", groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(
+			() =>
+				ext2.pending("send").some(rpc => rpc.method === "Page.enable") &&
+				ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"),
+		);
+		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-after-navigation" } } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const replay = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(replay?.params).toEqual({
+			source: "window.__relayInjected = true;",
+			runImmediately: true,
+		});
+	});
+
 	it("reruns immediate preload scripts on a forced fresh root", async () => {
 		const bridge = new RelayBridge({});
 		const ext = new FakeExtSocket();
