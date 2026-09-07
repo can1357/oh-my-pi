@@ -1111,6 +1111,15 @@ export class UiHelpers {
 		);
 	}
 
+	/**
+	 * Park the loop when drain dispatch consumes the armed body locally (void
+	 * custom command) instead of starting a turn. The drain otherwise discards
+	 * prompt()'s result, and the next idle tick would resubmit a local action.
+	 */
+	#parkLoopOnLocalConsume(text: string, forwarded: boolean): void {
+		if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
+	}
+
 	async #deliverQueuedMessage(message: CompactionQueuedMessage): Promise<void> {
 		if (
 			await invokeSkillCommandFromText(this.ctx, message.text, message.mode, {
@@ -1122,7 +1131,8 @@ export class UiHelpers {
 			return;
 		}
 		if (this.ctx.isKnownSlashCommand(message.text)) {
-			await this.ctx.session.prompt(message.text);
+			const forwarded = await this.ctx.session.prompt(message.text);
+			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
 		}
 		await this.ctx.withLocalSubmission(
@@ -1192,7 +1202,8 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					await this.ctx.session.prompt(message.text);
+					const forwarded = await this.ctx.session.prompt(message.text);
+					this.#parkLoopOnLocalConsume(message.text, forwarded);
 				}
 				return;
 			}
