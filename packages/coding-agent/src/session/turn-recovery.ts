@@ -90,6 +90,19 @@ const IMMUTABLE_ANTHROPIC_THINKING_ERROR_PATTERN =
 function hasNonWhitespace(value: string): boolean {
 	return NON_WHITESPACE_RE.test(value);
 }
+/** Resolves the effective retry budget for a failing turn's provider.
+ *  Keys: provider id, or "*" fallback. Values: attempt cap, or "unlimited".
+ *  Malformed entries are skipped (same defensive reading as getRetryFallbackChains). */
+export function resolveProviderMaxRetries(
+	overrides: Record<string, number | "unlimited"> | undefined,
+	provider: string | undefined,
+): number | "unlimited" | undefined {
+	if (!overrides || typeof overrides !== "object" || Array.isArray(overrides)) return undefined;
+	const entry = (provider !== undefined ? overrides[provider] : undefined) ?? overrides["*"];
+	if (entry === "unlimited") return "unlimited";
+	if (typeof entry === "number" && Number.isFinite(entry) && entry >= 0) return Math.max(0, Math.floor(entry));
+	return undefined;
+}
 
 function syntheticToolResultTailStart(messages: readonly AgentMessage[]): number {
 	let index = messages.length;
@@ -2124,9 +2137,17 @@ export class TurnRecovery {
 		// (every rotation sets switchedCredential and skips it), so without
 		// this last resort a provider-wide usage cap never fails over to the
 		// configured chain.
+		const providerMaxRetries = resolveProviderMaxRetries(
+			retrySettings.maxRetriesOverrides,
+			this.#host.model()?.provider,
+		);
+		const effectiveMaxRetries =
+			providerMaxRetries === "unlimited"
+				? Number.POSITIVE_INFINITY
+				: (providerMaxRetries ?? retrySettings.maxRetries);
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
-			? Math.min(retrySettings.maxRetries, 1)
-			: retrySettings.maxRetries;
+			? Math.min(effectiveMaxRetries, 1)
+			: effectiveMaxRetries;
 		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
 
 		const errorMessage = message.errorMessage || "Unknown error";
@@ -2330,12 +2351,16 @@ export class TurnRecovery {
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
 				await this.persistTerminalEmptyErrorTurn(message);
 				const retryErrors = await this.#markPendingRetryErrors({ status: "superseded" });
+				const currentModel = this.#host.model();
 				await this.#host.emitSessionEvent({
 					type: "auto_retry_end",
 					success: false,
 					attempt,
 					finalError: errorMessage,
 					retryErrors,
+					reason: "budget-exhausted",
+					provider: currentModel?.provider,
+					model: currentModel?.id,
 				});
 				this.#clearPendingRetryErrors();
 				this.#retryAttempt = 0;
@@ -2424,11 +2449,15 @@ export class TurnRecovery {
 			await this.persistTerminalEmptyErrorTurn(message);
 			const attempt = this.#retryAttempt;
 			this.#retryAttempt = 0;
+			const currentModel = this.#host.model();
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
 				success: false,
 				attempt,
 				finalError: `Provider requested ${Math.ceil(delayMs)}ms wait, exceeds retry.maxDelayMs (${maxDelayMs}ms). Original error: ${errorMessage}`,
+				reason: "delay-cap-exceeded",
+				provider: currentModel?.provider,
+				model: currentModel?.id,
 			});
 			this.#clearPendingRetryErrors();
 			this.resolveRetry();

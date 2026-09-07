@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Per-provider retry budget overrides via retry.maxRetriesOverrides (number or "unlimited", "*" fallback key); terminal auto_retry_end failures now carry reason/provider/model enrichment fields.
+
 ### Fixed
 
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.

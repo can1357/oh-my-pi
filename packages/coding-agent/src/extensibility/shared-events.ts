@@ -264,6 +264,12 @@ export interface AutoRetryEndEvent {
 	attempt: number;
 	finalError?: string;
 	retryErrors?: RetryErrorUpdate[];
+	/** Set only on terminal failure: why the saga gave up without another retry. */
+	reason?: "budget-exhausted" | "delay-cap-exceeded";
+	/** Provider of the failing model when the saga ended. */
+	provider?: string;
+	/** Model id of the failing model when the saga ended. */
+	model?: string;
 }
 
 /** Fired when auto-retry switches to a configured fallback model/provider. */
