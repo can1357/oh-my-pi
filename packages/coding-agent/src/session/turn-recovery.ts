@@ -273,7 +273,14 @@ type UsageLimitOutcome = {
 export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
+	/** Saga-wide attempt index. Cumulative across model switches (reset only on an exhausted switch, preserving the long-standing fresh-numbering contract); drives event numbering, backoff growth, and the `shouldContinue` guard. */
 	#retryAttempt = 0;
+	/** Serving route the per-route budget belongs to. Compared at handler entry to detect model switches (including usage-aware pre-request switches, which never increment the counters). */
+	#retryRouteKey: string | undefined;
+	/** Attempts served by the current route. Restarted on every serving-route change so a fallback switch grants the new route its own override budget; credential rotation keeps the same route and stays cumulative. */
+	#retryRouteAttempts = 0;
+	/** Cumulative handler entries in this saga. Never reset by switches: bounds classifier-refusal chain walks, which stop at the saga-wide budget even after switching routes. */
+	#retrySagaAttempts = 0;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -468,7 +475,7 @@ export class TurnRecovery {
 			retryErrors,
 		});
 		this.#clearPendingRetryErrors();
-		this.#retryAttempt = 0;
+		this.#clearRetrySaga();
 		this.resolveRetry();
 	}
 
@@ -476,7 +483,7 @@ export class TurnRecovery {
 	async onErrorSettledWithoutRetry(message: AssistantMessage, compaction: RecoveryCompactionResult): Promise<void> {
 		if (message.stopReason !== "error" || this.#retryAttempt === 0 || compaction.continuationScheduled) return;
 		const attempt = this.#retryAttempt;
-		this.#retryAttempt = 0;
+		this.#clearRetrySaga();
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_end",
 			success: false,
@@ -666,6 +673,13 @@ export class TurnRecovery {
 
 	#clearPendingRetryErrors(): void {
 		this.#pendingRetryErrors = [];
+	}
+	/** Reset saga-wide and per-route retry counters for a fresh saga. */
+	#clearRetrySaga(): void {
+		this.#retryAttempt = 0;
+		this.#retryRouteKey = undefined;
+		this.#retryRouteAttempts = 0;
+		this.#retrySagaAttempts = 0;
 	}
 
 	/**
@@ -873,7 +887,7 @@ export class TurnRecovery {
 				finalError,
 			});
 			this.#clearPendingRetryErrors();
-			this.#retryAttempt = 0;
+			this.#clearRetrySaga();
 			this.resolveRetry();
 			// A turn with no actionable output carries no transcript value, while its
 			// provider usage can anchor the next prompt at the full failed-request size
@@ -2122,6 +2136,19 @@ export class TurnRecovery {
 
 		const generation = this.#host.promptGeneration();
 		this.#retryAttempt++;
+		// Per-route budget: a serving-route change (model fallback switch,
+		// including usage-aware pre-request switches) restarts the budget
+		// counter for the new route. Credential rotation keeps the same model
+		// selector, so its count stays cumulative as documented. The
+		// saga-wide attempt index above stays cumulative across switches.
+		const servingModel = this.#host.model();
+		const routeKey = servingModel ? formatRetryFallbackSelector(servingModel, this.#host.thinkingLevel()) : undefined;
+		if (routeKey !== this.#retryRouteKey) {
+			this.#retryRouteKey = routeKey;
+			this.#retryRouteAttempts = 0;
+		}
+		this.#retryRouteAttempts++;
+		this.#retrySagaAttempts++;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
@@ -2148,7 +2175,7 @@ export class TurnRecovery {
 		const maxRetries = this.#isBoundedThinkingStreamClose(message)
 			? Math.min(effectiveMaxRetries, 1)
 			: effectiveMaxRetries;
-		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
+		const retryBudgetExhausted = this.#retryRouteAttempts > maxRetries;
 
 		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
@@ -2311,6 +2338,10 @@ export class TurnRecovery {
 			/\bGoUsageLimitError\b/.test(errorMessage) &&
 			(!this.#hasReplayUnsafeOutput(message) || this.#unexecutedToolCallsReplaySafe(message));
 
+		// Cumulative saga budget. The per-route `retryBudgetExhausted` below
+		// restarts on every switch; refusal chain walks must still stop at the
+		// saga-wide budget or each switch would grant the walk a fresh budget.
+		const sagaBudgetExhausted = this.#retrySagaAttempts > maxRetries;
 		if (!staleOpenAIResponsesReplayError && !switchedCredential && currentSelector) {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
@@ -2319,7 +2350,7 @@ export class TurnRecovery {
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
 				!waitForSiblingCredential &&
-				!(retryBudgetExhausted && classifierRefusal)
+				!(sagaBudgetExhausted && classifierRefusal)
 			) {
 				if (!classifierRefusal) {
 					this.noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
@@ -2345,10 +2376,21 @@ export class TurnRecovery {
 			}
 		}
 
-		if (retryBudgetExhausted) {
+		// A saga-exhausted refusal takes the same terminal path (with its
+		// superseded-error aggregation) that the single-counter code reached
+		// via `retryBudgetExhausted`: the refusal branch below stays bare,
+		// as it is for non-exhausted mid-saga refusals.
+		if (retryBudgetExhausted || (sagaBudgetExhausted && classifierRefusal)) {
 			if (!switchedModel && !switchedCredential) {
+				// The message counts retries spent on the exhausted route —
+				// except for a saga-exhausted refusal, where the route was just
+				// entered and the saga count preserves the long-standing text.
+				// The event carries the cumulative saga attempt for progress
+				// bookkeeping. All three are identical on single-route sagas.
+				const routeRetries = this.#retryRouteAttempts - 1;
 				const attempt = this.#retryAttempt - 1;
-				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
+				const messageRetries = classifierRefusal ? attempt : routeRetries;
+				message.errorMessage = `Retry budget exhausted after ${messageRetries} ${messageRetries === 1 ? "retry" : "retries"}: ${errorMessage}`;
 				await this.persistTerminalEmptyErrorTurn(message);
 				const retryErrors = await this.#markPendingRetryErrors({ status: "superseded" });
 				const currentModel = this.#host.model();
@@ -2363,13 +2405,17 @@ export class TurnRecovery {
 					model: currentModel?.id,
 				});
 				this.#clearPendingRetryErrors();
-				this.#retryAttempt = 0;
+				this.#clearRetrySaga();
 				this.resolveRetry(); // Resolve so waitForRetry() completes
 				return false;
 			}
-			// A fallback model gets a fresh retry budget. Credential rotation
-			// instead keeps the cumulative attempt count while bypassing the
-			// same-route budget: every distinct account must be tried first.
+			// A fallback switch on an exhausted call restarts the saga
+			// numbering for the new route (long-standing contract: the
+			// switching call's own `auto_retry_start` carries attempt 1).
+			// Switches on non-exhausted calls need no in-call reset: the next
+			// entry's route-change detection restarts the route budget there.
+			// Credential rotation keeps the same route, so its count stays
+			// cumulative: every distinct account must be tried first.
 			if (switchedModel) this.#retryAttempt = 1;
 		}
 		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
@@ -2390,7 +2436,7 @@ export class TurnRecovery {
 				});
 				this.#clearPendingRetryErrors();
 			}
-			this.#retryAttempt = 0;
+			this.#clearRetrySaga();
 			this.resolveRetry();
 			return false;
 		}
@@ -2415,7 +2461,7 @@ export class TurnRecovery {
 				});
 				this.#clearPendingRetryErrors();
 			}
-			this.#retryAttempt = 0;
+			this.#clearRetrySaga();
 			this.resolveRetry();
 			return false;
 		}
@@ -2448,7 +2494,7 @@ export class TurnRecovery {
 		if (maxDelayMs > 0 && delayMs > maxDelayMs && !switchedCredential && !switchedModel && !waitForUsageReset) {
 			await this.persistTerminalEmptyErrorTurn(message);
 			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
+			this.#clearRetrySaga();
 			const currentModel = this.#host.model();
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
@@ -2469,7 +2515,12 @@ export class TurnRecovery {
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
 			attempt: this.#retryAttempt,
-			maxAttempts: maxRetries,
+			// `Infinity` is not JSON-safe (`JSON.stringify(Infinity)` → `null`),
+			// which would violate the declared contract for RPC/collab
+			// consumers. Serialize an unlimited budget as the explicit
+			// `"unlimited"` sentinel; render sites already guard non-finite
+			// values and now also accept the string form.
+			maxAttempts: Number.isFinite(maxRetries) ? maxRetries : "unlimited",
 			delayMs,
 			errorMessage,
 			errorId: message.errorId,
@@ -2499,7 +2550,7 @@ export class TurnRecovery {
 			}
 			// Aborted during sleep - emit end event so UI can clean up
 			const attempt = this.#retryAttempt;
-			this.#retryAttempt = 0;
+			this.#clearRetrySaga();
 			this.#retryAbortController = undefined;
 			await this.#host.emitSessionEvent({
 				type: "auto_retry_end",
@@ -2572,7 +2623,7 @@ export class TurnRecovery {
 	async #failRetryAfterLocalContinueError(message: AssistantMessage, error: unknown): Promise<void> {
 		if (this.#retryAttempt === 0) return;
 		const attempt = this.#retryAttempt;
-		this.#retryAttempt = 0;
+		this.#clearRetrySaga();
 		const localError = error instanceof Error ? error.message : String(error);
 		await this.persistTerminalEmptyErrorTurn(message);
 		await this.#host.emitSessionEvent({
@@ -2730,7 +2781,7 @@ export class TurnRecovery {
 		}
 
 		// Reset retry budget for a fresh attempt
-		this.#retryAttempt = 0;
+		this.#clearRetrySaga();
 
 		// Re-attempt the turn
 		this.#host.scheduleAgentContinue({ source: "manual-retry", delayMs: 1 });

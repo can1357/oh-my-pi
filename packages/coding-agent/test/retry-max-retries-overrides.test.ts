@@ -13,6 +13,8 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { resolveProviderMaxRetries } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import type { CustomTool, CustomToolSessionEvent } from "@oh-my-pi/pi-coding-agent/extensibility/custom-tools/types";
+import { createCustomToolsExtension } from "@oh-my-pi/pi-coding-agent/sdk";
 
 type AutoRetryStartEvent = Extract<AgentSessionEvent, { type: "auto_retry_start" }>;
 type AutoRetryEndEvent = Extract<AgentSessionEvent, { type: "auto_retry_end" }>;
@@ -208,7 +210,11 @@ describe("retry.maxRetriesOverrides", () => {
 
 		// Four failures each retried; the fifth turn succeeds and ends the saga.
 		expect(retryStartEvents).toHaveLength(4);
-		expect(retryStartEvents[0].maxAttempts).toBe(Number.POSITIVE_INFINITY);
+		expect(retryStartEvents[0].maxAttempts).toBe("unlimited");
+		// RPC (`rpc-frame.ts`) and collab (`crypto.ts`) serialize events with raw
+		// `JSON.stringify`, which maps `Infinity` to `null`. The sentinel must
+		// survive that exact encoding.
+		expect(JSON.parse(JSON.stringify(retryStartEvents[0])).maxAttempts).toBe("unlimited");
 		expect(retryEndEvents).toHaveLength(1);
 		expect(retryEndEvents[0]).toMatchObject({ success: true });
 		expect(retryEndEvents[0].reason).toBeUndefined();
@@ -264,5 +270,166 @@ describe("retry.maxRetriesOverrides", () => {
 		});
 		expect(retryEndEvents[0].finalError).toContain("exceeds retry.maxDelayMs");
 		expect(session.isRetrying).toBe(false);
+	});
+
+	it("a fallback switch grants the new route its own override budget", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) {
+			throw new Error("Expected bundled test models to exist");
+		}
+		const requestedModels: string[] = [];
+		let fallbackCalls = 0;
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (requestedModel, context, options) => {
+				requestedModels.push(`${requestedModel.provider}/${requestedModel.id}`);
+				if (requestedModel.provider === primaryModel.provider) {
+					mock.push({ throw: RETRIABLE_SERVER_ERROR });
+				} else if (requestedModel.provider === fallbackModel.provider) {
+					fallbackCalls++;
+					mock.push(
+						fallbackCalls === 1
+							? { throw: RETRIABLE_SERVER_ERROR }
+							: { content: ["recovered on fallback route"] },
+					);
+				} else {
+					throw new Error(`Unexpected model requested: ${requestedModel.provider}/${requestedModel.id}`);
+				}
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 10,
+			"retry.maxRetriesOverrides": { openai: 1 },
+			"retry.modelFallback": true,
+			"retry.fallbackChains": {
+				default: [`${fallbackModel.provider}/${fallbackModel.id}`],
+			},
+		});
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+		// The fallback consult resolves the candidate's key through the
+		// registry (not the Agent's getApiKey): without this the switch is
+		// skipped and the saga stays on the primary.
+		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const retryStartEvents: AutoRetryStartEvent[] = [];
+		const retryEndEvents: AutoRetryEndEvent[] = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start") retryStartEvents.push(event);
+			if (event.type === "auto_retry_end") retryEndEvents.push(event);
+		});
+
+		await session.prompt("Fail once on primary, then recover on fallback");
+		await session.waitForIdle();
+
+		// Primary fails once (saga attempt 1 of its global-10 budget) and the
+		// chain switches. The fallback's own override (1) then owns its route:
+		// its first failure retries under its own budget and the second serve
+		// succeeds. Event numbering stays saga-cumulative while the budget
+		// check is per-route. A saga-wide budget counter would check the
+		// fallback's first failure as global attempt 2 > 1 and kill the saga
+		// before the fallback ever retried.
+		expect(requestedModels).toEqual([
+			`${primaryModel.provider}/${primaryModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+			`${fallbackModel.provider}/${fallbackModel.id}`,
+		]);
+		expect(retryStartEvents).toHaveLength(2);
+		expect(retryStartEvents[0]).toMatchObject({ attempt: 1, maxAttempts: 10 });
+		expect(retryStartEvents[1]).toMatchObject({ attempt: 2, maxAttempts: 1 });
+		expect(retryEndEvents).toHaveLength(1);
+		expect(retryEndEvents[0]).toMatchObject({ success: true });
+		expect(retryEndEvents[0].reason).toBeUndefined();
+		expect(session.isRetrying).toBe(false);
+	});
+
+	it("the SDK custom-tools bridge forwards terminal enrichment to onSession", async () => {
+		// AgentSession only stores `preparedExtensions` for fork forwarding —
+		// binding happens in the SDK/CLI loader — so the observable `onSession`
+		// translation is driven here through the real factory with a stub API.
+		// The translation under test is the exact handler the extension runner
+		// invokes on `auto_retry_end`; runner emission itself is pre-existing
+		// machinery covered by session.subscribe assertions above.
+		const seen: CustomToolSessionEvent[] = [];
+		const probe: CustomTool = {
+			name: "retry_enrichment_probe",
+			label: "retry-enrichment-probe",
+			description: "Captures session events for the retry enrichment test.",
+			parameters: { type: "object" },
+			async execute() {
+				return { content: [{ type: "text", text: "" }] };
+			},
+			onSession: event => {
+				seen.push(event);
+			},
+		};
+		const handlers: Record<string, (event: unknown, ctx: unknown) => Promise<void>> = {};
+		createCustomToolsExtension([probe])({
+			registerTool: () => {},
+			on: (event: string, handler: (event: unknown, ctx: unknown) => Promise<void>) => {
+				handlers[event] = handler;
+			},
+		} as never);
+		const ctx = {
+			sessionManager: undefined,
+			modelRegistry: undefined,
+			model: undefined,
+			isIdle: true,
+			hasPendingMessages: false,
+			abort: () => {},
+			localProtocolOptions: undefined,
+		};
+		await handlers["auto_retry_end"]?.(
+			{
+				type: "auto_retry_end",
+				success: false,
+				attempt: 2,
+				finalError: RETRIABLE_SERVER_ERROR,
+				reason: "budget-exhausted",
+				provider: "anthropic",
+				model: "claude-sonnet-4-5",
+			},
+			ctx,
+		);
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toMatchObject({
+			reason: "auto_retry_end",
+			success: false,
+			// `reason` is the envelope discriminator, so the failure cause
+			// travels as `failureReason`.
+			failureReason: "budget-exhausted",
+			provider: "anthropic",
+			model: "claude-sonnet-4-5",
+		});
+		// Terminal success carries no enrichment: the optional fields stay absent.
+		seen.length = 0;
+		await handlers["auto_retry_end"]?.({ type: "auto_retry_end", success: true, attempt: 3 }, ctx);
+		expect(seen).toHaveLength(1);
+		expect(seen[0]).toMatchObject({ reason: "auto_retry_end", success: true });
+		// The bridge forwards enrichment keys unconditionally (same as the
+		// pre-existing finalError/retryErrors forwarding): on success they
+		// are present-but-undefined, which JSON.stringify drops on the wire.
+		if (seen[0].reason !== "auto_retry_end") throw new Error("Expected auto_retry_end event");
+		expect(seen[0].failureReason).toBeUndefined();
+		expect(seen[0].provider).toBeUndefined();
+		expect(seen[0].model).toBeUndefined();
 	});
 });

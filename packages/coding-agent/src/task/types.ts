@@ -464,7 +464,7 @@ export interface AgentProgress {
 	 */
 	retryState?: {
 		attempt: number;
-		maxAttempts: number;
+		maxAttempts: number | "unlimited";
 		delayMs: number;
 		errorMessage: string;
 		startedAtMs: number;

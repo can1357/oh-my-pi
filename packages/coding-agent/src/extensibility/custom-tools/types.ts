@@ -129,7 +129,7 @@ export type CustomToolSessionEvent =
 	| {
 			reason: "auto_retry_start";
 			attempt: number;
-			maxAttempts: number;
+			maxAttempts: number | "unlimited";
 			delayMs: number;
 			errorMessage: string;
 			errorId?: number;
@@ -140,6 +140,12 @@ export type CustomToolSessionEvent =
 			attempt: number;
 			finalError?: string;
 			retryErrors?: RetryErrorUpdate[];
+			/** Terminal failure cause. Named `failureReason` (not `reason`) because `reason` is this envelope's discriminator. */
+			failureReason?: "budget-exhausted" | "delay-cap-exceeded";
+			/** Provider of the failing model when the saga ended. */
+			provider?: string;
+			/** Model id of the failing model when the saga ended. */
+			model?: string;
 	  }
 	| {
 			reason: "ttsr_triggered";

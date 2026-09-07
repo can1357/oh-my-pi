@@ -1048,7 +1048,11 @@ export function customToolToDefinition(tool: CustomTool, sourcePath?: string): T
 	return definition;
 }
 
-function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyMap<string, string>): ExtensionFactory {
+/** Builds the session extension that exposes CustomTools and forwards session lifecycle events to `onSession`. Exported for tests. */
+export function createCustomToolsExtension(
+	tools: CustomTool[],
+	sourcePaths?: ReadonlyMap<string, string>,
+): ExtensionFactory {
 	const uniqueTools = deduplicateMCPToolsByName(tools);
 	return api => {
 		for (const tool of uniqueTools) {
@@ -1118,6 +1122,9 @@ function createCustomToolsExtension(tools: CustomTool[], sourcePaths?: ReadonlyM
 					attempt: event.attempt,
 					finalError: event.finalError,
 					retryErrors: event.retryErrors,
+					failureReason: event.reason,
+					provider: event.provider,
+					model: event.model,
 				},
 				ctx,
 			),

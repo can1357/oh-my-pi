@@ -243,7 +243,8 @@ export interface AutoCompactionEndEvent {
 export interface AutoRetryStartEvent {
 	type: "auto_retry_start";
 	attempt: number;
-	maxAttempts: number;
+	/** Attempt cap for the serving route, or "unlimited" when the provider override removes the cap. JSON-safe by design. */
+	maxAttempts: number | "unlimited";
 	delayMs: number;
 	errorMessage: string;
 	errorId?: number;
