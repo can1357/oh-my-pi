@@ -16,12 +16,8 @@ import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatModelSelectorValue, formatModelString } from "../config/model-resolver";
-import {
-	buildServiceTierByFamily,
-	resolveModelServiceTierOverride,
-	serviceTierForAllFamilies,
-	serviceTierSettingToTier,
-} from "../config/service-tier";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
+import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import cachePrefixTemplate from "../prompts/bench/cache-prefix.md" with { type: "text" };
 import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { type: "text" };
 import cacheSuffixTemplate from "../prompts/bench/cache-suffix.md" with { type: "text" };

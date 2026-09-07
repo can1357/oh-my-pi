@@ -69,11 +69,8 @@ import {
 	resolveModelOverride,
 } from "../config/model-resolver";
 import { MODEL_ROLES } from "../config/model-roles";
-import {
-	resolveModelServiceTierOverride,
-	serviceTierForAllFamilies,
-	serviceTierSettingToTier,
-} from "../config/service-tier";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
+import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
 import { bridgeToolMap } from "../cursor-bridge-tools";

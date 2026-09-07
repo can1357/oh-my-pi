@@ -6,7 +6,7 @@ import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking"
 import { prompt, withFileLock } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
-import { resolveModelServiceTierOverride } from "../config/service-tier";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
 import type { Settings } from "../config/settings";
 import { truncateApproxTokens } from "../mnemopi/config";
 import consolidateInputTemplate from "../prompts/memories/sharpshooter-consolidate-input.md" with { type: "text" };

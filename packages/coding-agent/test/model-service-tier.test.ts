@@ -5,10 +5,8 @@ import { YAML } from "bun";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import {
-	resolveModelServiceTierOverride,
-	validateServiceTierOverrides,
-} from "@oh-my-pi/pi-coding-agent/config/service-tier";
+import { resolveModelServiceTierOverride } from "@oh-my-pi/pi-coding-agent/config/model-service-tier";
+import { validateServiceTierOverrides } from "@oh-my-pi/pi-coding-agent/config/service-tier";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { getProjectAgentDir, TempDir } from "@oh-my-pi/pi-utils";

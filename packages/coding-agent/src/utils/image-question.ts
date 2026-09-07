@@ -16,7 +16,8 @@ import {
 	getModelMatchPreferences,
 	resolveModelFromString,
 } from "../config/model-resolver";
-import { type ServiceTierOverrides, resolveModelServiceTierOverride } from "../config/service-tier";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
+import type { ServiceTierOverrides } from "../config/service-tier";
 import imageQuestionSystemPromptTemplate from "../prompts/tools/image-question-system.md" with { type: "text" };
 import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
 import type { ToolSession } from "../tools";

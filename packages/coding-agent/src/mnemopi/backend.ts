@@ -9,7 +9,7 @@ import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
-import { resolveModelServiceTierOverride } from "../config/service-tier";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
 import type {
 	MemoryBackend,
 	MemoryBackendSaveInput,

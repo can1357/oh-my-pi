@@ -1,5 +1,5 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { coerceServiceTierByFamily } from "@oh-my-pi/pi-ai";
+import { coerceServiceTierByFamily } from "@oh-my-pi/pi-ai/types";
 import type {
 	ImageContent,
 	MessageAttribution,
@@ -9,7 +9,7 @@ import type {
 	StopReason,
 	TextContent,
 	Usage,
-} from "@oh-my-pi/pi-ai";
+} from "@oh-my-pi/pi-ai/types";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import type { ServiceTierOverrides } from "../config/service-tier";
 import type { StructuredSubagentSchemaMode } from "../task/types";

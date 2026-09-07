@@ -24,7 +24,7 @@ import { parseFileDiffs, parseFileHunks } from "../../commit/git/diff";
 import type { FileDiff } from "../../commit/types";
 import { ModelRegistry } from "../../config/model-registry";
 import { resolveRoleSelection } from "../../config/model-resolver";
-import { resolveModelServiceTierOverride } from "../../config/service-tier";
+import { resolveModelServiceTierOverride } from "../../config/model-service-tier";
 import { Settings } from "../../config/settings";
 import filesPromptTemplate from "../../prompts/system/git-ai-stage-files.md" with { type: "text" };
 import hunkPromptTemplate from "../../prompts/system/git-ai-stage-hunk.md" with { type: "text" };

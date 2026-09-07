@@ -22,7 +22,8 @@ import {
 	resolveModelRoleValue,
 } from "../config/model-resolver";
 import { getKnownRoleIds } from "../config/model-roles";
-import { type ServiceTierOverrides, resolveModelServiceTierOverride } from "../config/service-tier";
+import { resolveModelServiceTierOverride } from "../config/model-service-tier";
+import type { ServiceTierOverrides } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { containsUltrathink } from "../modes/ultrathink";
 import {

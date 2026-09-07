@@ -13,6 +13,10 @@
 - Record each request's service tier in assistant messages and model-usage entries; `null` records an omitted tier and absent metadata remains legacy.
 - Scope rejected tier suppression to one session: successful session changes and branches clear it, while reloads and failed switches retain it.
 
+### Fixed
+
+- Keep service-tier settings and session listing independent of provider runtime imports so CLI startup preserves lazy native loading and profile environment initialization.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
