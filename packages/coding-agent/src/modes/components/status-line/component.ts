@@ -2333,21 +2333,25 @@ export class StatusLineComponent implements Component {
 		// past the window label — `──200K─120%` with the percent in error color.
 		const percentOverflow = pct > 100;
 		if (embedContext) {
-			const candidatePercent = embedCompactContext
-				? ctx.startupPlaceholder
+			// The live label widths drive every fit decision below. Startup paints
+			// shortened placeholders (`ctx:…` / `…`), but sizing the fit off those
+			// narrower strings would let a gap that only fits the placeholders show
+			// a window label at startup that the first live frame then drops (or the
+			// reverse). Reserve/decide on the live widths so the label set is stable
+			// across the placeholder→live transition, and paint the placeholder text.
+			const livePercent = embedCompactContext
+				? `ctx:${formatCompactContextPercent(percentOverflow ? pct : clampedPct)}`
+				: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
+			const liveWindow = showEmbeddedContextWindow ? formatNumber(ctx.contextWindow) : "";
+			const candidatePercent = ctx.startupPlaceholder
+				? embedCompactContext
 					? "ctx:…"
-					: `ctx:${formatCompactContextPercent(percentOverflow ? pct : clampedPct)}`
-				: ctx.startupPlaceholder
-					? "…%"
-					: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
-			const candidateWindow = showEmbeddedContextWindow
-				? ctx.startupPlaceholder
-					? "…"
-					: formatNumber(ctx.contextWindow)
-				: "";
+					: "…%"
+				: livePercent;
+			const candidateWindow = showEmbeddedContextWindow ? (ctx.startupPlaceholder ? "…" : liveWindow) : "";
 			const minimumLabelWidth = showEmbeddedContextWindow
-				? candidatePercent.length + candidateWindow.length + 4
-				: candidatePercent.length;
+				? livePercent.length + liveWindow.length + 4
+				: livePercent.length;
 			if (gapWidth >= minimumLabelWidth) {
 				percentLabel = candidatePercent;
 				if (!showEmbeddedContextWindow) {
@@ -2363,7 +2367,7 @@ export class StatusLineComponent implements Component {
 					}
 					scaleWidth = windowStart;
 				}
-			} else if (gapWidth >= candidatePercent.length) {
+			} else if (gapWidth >= livePercent.length) {
 				// The compact percentage is the primary readout. Keep it when an
 				// explicitly configured context total cannot share the narrow gauge.
 				percentLabel = candidatePercent;
