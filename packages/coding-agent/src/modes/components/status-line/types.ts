@@ -23,10 +23,13 @@ export interface StatusLineSegmentOptions {
 	model?: { showThinkingLevel?: boolean };
 	path?: { abbreviate?: boolean; maxLength?: number; stripWorkPrefix?: boolean };
 	git?: { showBranch?: boolean; showStaged?: boolean; showUnstaged?: boolean; showUntracked?: boolean };
+	token_total?: { breakdown?: boolean };
+	context_pct?: { compact?: boolean };
 	time?: { format?: "12h" | "24h"; showSeconds?: boolean };
 }
 
 export interface StatusLineSettings {
+	gitEnabled?: boolean;
 	preset?: StatusLinePreset;
 	leftSegments?: StatusLineSegmentId[];
 	rightSegments?: StatusLineSegmentId[];

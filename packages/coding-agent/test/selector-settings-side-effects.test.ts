@@ -57,6 +57,91 @@ describe("selector setting side effects", () => {
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
+	it("preserves status-line segment options while previewing and closing settings", async () => {
+		const testTheme = await getThemeByName("dark");
+		if (!testTheme) throw new Error("Failed to load dark theme for settings selector test");
+		setThemeInstance(testTheme);
+		const model = getBundledModel("openai", "gpt-5.6");
+		if (!model) throw new Error("Expected bundled OpenAI model for settings selector test");
+		Settings.instance.override("statusLine.segmentOptions", {
+			context_pct: { compact: true },
+			token_total: { breakdown: true },
+		});
+		const updateSettings = vi.fn();
+		const overlayShown = Promise.withResolvers<void>();
+		let captured: unknown;
+		const controller = new SelectorController({
+			ui: {
+				requestRender: vi.fn(),
+				setFocus: vi.fn(),
+				showOverlay: vi.fn((component: unknown) => {
+					captured = component;
+					overlayShown.resolve();
+					return { hide: vi.fn() };
+				}),
+				terminal: { columns: 120, rows: 40 },
+			},
+			editorContainer: { children: [], clear: vi.fn(), addChild: vi.fn() },
+			editor: { getTopBorderAvailableWidth: () => 100 },
+			statusLine: {
+				getPreviewLines: () => [],
+				updateSettings,
+			},
+			session: {
+				getAvailableThinkingLevels: () => [],
+				getAvailableModels: () => [],
+				thinkingLevel: AUTO_THINKING,
+				model,
+			},
+		} as unknown as InteractiveModeContext);
+
+		controller.showSettingsSelector();
+		await overlayShown.promise;
+		const selector = captured as { handleInput(data: string): void } | undefined;
+		if (!selector) throw new Error("Expected settings overlay to be shown");
+
+		selector.handleInput("/");
+		selector.handleInput("s");
+		selector.handleInput("t");
+		selector.handleInput("a");
+		selector.handleInput("t");
+		selector.handleInput("u");
+		selector.handleInput("s");
+		selector.handleInput(" ");
+		selector.handleInput("l");
+		selector.handleInput("i");
+		selector.handleInput("n");
+		selector.handleInput("e");
+		selector.handleInput(" ");
+		selector.handleInput("t");
+		selector.handleInput("r");
+		selector.handleInput("a");
+		selector.handleInput("n");
+		selector.handleInput("s");
+		selector.handleInput("p");
+		selector.handleInput("a");
+		selector.handleInput("r");
+		selector.handleInput("e");
+		selector.handleInput("n");
+		selector.handleInput("t");
+		selector.handleInput("\n");
+		// The first Escape leaves search mode; the second closes settings and
+		// restores the saved status-line configuration.
+		selector.handleInput("\x1b");
+		updateSettings.mockClear();
+		selector.handleInput("\x1b");
+
+		expect(updateSettings).toHaveBeenCalledTimes(1);
+		expect(updateSettings).toHaveBeenCalledWith(
+			expect.objectContaining({
+				segmentOptions: {
+					context_pct: { compact: true },
+					token_total: { breakdown: true },
+				},
+			}),
+		);
+	});
+
 	it("invalidates the UI and requests a repaint when tui.tight changes", () => {
 		const invalidate = vi.fn();
 		const requestRender = vi.fn();

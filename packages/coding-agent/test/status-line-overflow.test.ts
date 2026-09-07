@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -10,9 +10,20 @@ import { renderSegment } from "@oh-my-pi/pi-coding-agent/modes/components/status
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { getSessionAccentAnsi, getSessionAccentHex } from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import { visibleWidth } from "@oh-my-pi/pi-tui";
-import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import { __resetDirsFromEnvForTests, getProjectDir, setProfile, setProjectDir } from "@oh-my-pi/pi-utils";
+import { restoreEnvValue } from "./helpers/settings-test-state";
 
 const originalProjectDir = getProjectDir();
+const originalOmpProfile = process.env.OMP_PROFILE;
+const originalPiProfile = process.env.PI_PROFILE;
+const originalPiCodingAgentDir = process.env.PI_CODING_AGENT_DIR;
+
+function restoreProfileEnvironment(): void {
+	restoreEnvValue("OMP_PROFILE", originalOmpProfile);
+	restoreEnvValue("PI_PROFILE", originalPiProfile);
+	restoreEnvValue("PI_CODING_AGENT_DIR", originalPiCodingAgentDir);
+	__resetDirsFromEnvForTests();
+}
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -20,8 +31,16 @@ beforeAll(async () => {
 	await initTheme();
 });
 
+afterEach(() => {
+	// Profile is process-wide; restore it after every test so a mutation (or an
+	// assertion failure before a manual reset) can't leak into sibling tests or
+	// concurrently executing files. AGENTS.md: tests must isolate global state.
+	restoreProfileEnvironment();
+});
+
 afterAll(() => {
 	resetSettingsForTest();
+	restoreProfileEnvironment();
 	setProjectDir(originalProjectDir);
 });
 
@@ -190,6 +209,41 @@ describe("status line session accent", () => {
 		const enabled = renderSegment("session_name", createCtx({ sessionName: "Named session", sessionAccent: true }));
 		expect(enabled.visible).toBe(true);
 		expect(enabled.content).toContain(ansi);
+	});
+});
+
+describe("profile status-line segment", () => {
+	it("hides the profile segment for the default profile", () => {
+		setProfile(undefined);
+		const seg = renderSegment("profile", createCtx());
+		expect(seg.visible).toBe(false);
+		expect(seg.content).toBe("");
+	});
+
+	it("bounds long profile labels for narrow status lines", () => {
+		setProfile(`profile-${"x".repeat(56)}`);
+		const seg = renderSegment("profile", createCtx());
+		expect(seg.visible).toBe(true);
+		expect(visibleWidth(seg.content)).toBeLessThanOrEqual(40);
+		expect(stripAnsi(seg.content)).toEndWith("…");
+		setProfile(undefined);
+	});
+});
+
+describe("token_total breakdown", () => {
+	it("fails closed for a non-boolean breakdown value", () => {
+		const seg = renderSegment("token_total", {
+			...createCtx(),
+			options: { token_total: { breakdown: "false" } },
+			usageStats: {
+				...createCtx().usageStats,
+				input: 25,
+				output: 5,
+			},
+		} as unknown as SegmentContext);
+
+		expect(stripAnsi(seg.content)).not.toContain("in:");
+		expect(stripAnsi(seg.content)).not.toContain("out:");
 	});
 });
 
