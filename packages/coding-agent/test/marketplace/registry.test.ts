@@ -20,6 +20,7 @@ import {
 	readMarketplacesRegistry,
 	removeInstalledPlugin,
 	removeMarketplaceEntry,
+	upsertMarketplaceEntry,
 	writeInstalledPluginsRegistry,
 	writeMarketplacesRegistry,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
@@ -123,20 +124,36 @@ describe("marketplace registry CRUD", () => {
 	};
 	const empty: MarketplacesRegistry = { version: 1, marketplaces: [] };
 
-	it("addMarketplaceEntry + getMarketplaceEntry round-trip", () => {
-		const reg = addMarketplaceEntry(empty, entry);
+	it("upsertMarketplaceEntry + getMarketplaceEntry round-trip", () => {
+		const reg = upsertMarketplaceEntry(empty, entry);
 		expect(getMarketplaceEntry(reg, "test-market")).toEqual(entry);
 	});
 
-	it("addMarketplaceEntry throws on duplicate", () => {
+	it("addMarketplaceEntry (the strict public variant) throws on a duplicate name", () => {
 		const reg = addMarketplaceEntry(empty, entry);
+		expect(getMarketplaceEntry(reg, "test-market")).toEqual(entry);
 		expect(() => addMarketplaceEntry(reg, entry)).toThrow(/already exists/);
+	});
+
+	it("upsertMarketplaceEntry repoints an existing name without duplicating it", () => {
+		const reg = upsertMarketplaceEntry(empty, entry);
+		const moved: MarketplaceRegistryEntry = {
+			...entry,
+			sourceUri: "https://mirror.example/market.git",
+			updatedAt: "2025-06-01T00:00:00.000Z",
+		};
+		const after = upsertMarketplaceEntry(reg, moved);
+		expect(after.marketplaces).toHaveLength(1);
+		expect(getMarketplaceEntry(after, "test-market")?.sourceUri).toBe("https://mirror.example/market.git");
+		// The marketplace did not become a different one by moving.
+		expect(getMarketplaceEntry(after, "test-market")?.addedAt).toBe(entry.addedAt);
+		expect(getMarketplaceEntry(after, "test-market")?.updatedAt).toBe("2025-06-01T00:00:00.000Z");
 	});
 
 	it("removeMarketplaceEntry removes entry, leaves others", () => {
 		const other: MarketplaceRegistryEntry = { ...entry, name: "other" };
-		let reg = addMarketplaceEntry(empty, entry);
-		reg = addMarketplaceEntry(reg, other);
+		let reg = upsertMarketplaceEntry(empty, entry);
+		reg = upsertMarketplaceEntry(reg, other);
 		reg = removeMarketplaceEntry(reg, "test-market");
 		expect(getMarketplaceEntry(reg, "test-market")).toBeUndefined();
 		expect(getMarketplaceEntry(reg, "other")).toEqual(other);

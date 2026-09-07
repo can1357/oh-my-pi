@@ -17,7 +17,7 @@ import type { InteractiveModeContext } from "../modes/types";
 import { refreshAgentDiscovery } from "../task";
 import { createMarketplaceManager } from "./helpers/marketplace-manager";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
-import { parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
+import { parseAddArgs, parseMarketplaceInstallArgs, parsePluginScopeArgs } from "./marketplace-install-parser";
 import type { SlashCommandSpec } from "./types";
 
 /**
@@ -47,7 +47,11 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 		acpDescription: "Manage plugins from marketplaces",
 		acpInputHint: "<subcommand>",
 		subcommands: [
-			{ name: "add", description: "Add a marketplace source", usage: "<source>" },
+			{
+				name: "add",
+				description: "Add a marketplace source, or repoint one with --force",
+				usage: "<source> [--force]",
+			},
 			{ name: "remove", description: "Remove a marketplace source", usage: "<name>" },
 			{ name: "update", description: "Update marketplace catalog(s)", usage: "[name]" },
 			{ name: "list", description: "List configured marketplaces" },
@@ -89,7 +93,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 					[
 						"Marketplace commands:",
 						"  /marketplace                              List configured marketplaces",
-						"  /marketplace add <source>                  Add a marketplace (e.g. owner/repo)",
+						"  /marketplace add <source> [--force]        Add a marketplace, --force repoints an existing name",
 						"  /marketplace remove <name>                 Remove a marketplace",
 						"  /marketplace update [name]                 Re-fetch catalog(s)",
 						"  /marketplace list                          List configured marketplaces",
@@ -115,9 +119,13 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 				const manager = await createMarketplaceManager(runtime);
 				switch (verb) {
 					case "add": {
-						if (!rest) return usage("Usage: /marketplace add <source>", runtime);
-						const entry = await manager.addMarketplace(rest);
-						await runtime.output(`Added marketplace: ${entry.name}`);
+						const parsed = parseAddArgs(rest ?? "");
+						if ("error" in parsed) return usage(parsed.error, runtime);
+						const entry = await manager.addMarketplace(parsed.source, { force: parsed.force });
+						// Neutral verb: only the manager knows whether this replaced
+						// an existing registration, and "Repointed" on a fresh add
+						// misstates what happened.
+						await runtime.output(`Marketplace ${entry.name} now sources from ${entry.sourceUri}`);
 						return commandConsumed();
 					}
 					case "remove":
@@ -234,9 +242,13 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 		},
 		handleTui: async (command, runtime) => {
 			runtime.ctx.editor.setText("");
-			const args = command.args.trim().split(/\s+/);
+			const trimmedArgs = command.args.trim();
+			const args = trimmedArgs.split(/\s+/);
 			const sub = args[0] || "install";
-			const rest = args.slice(1).join(" ").trim();
+			// Slice, do not re-join: tokenising collapses repeated whitespace, and a
+			// local marketplace path may contain it. The parsers tokenise for
+			// themselves where that is safe.
+			const rest = trimmedArgs.slice(sub.length).trim();
 
 			// /marketplace (no args) or /marketplace install (no args) → interactive browser
 			if ((sub === "install" && !rest) || (!args[0] && !command.args.trim())) {
@@ -262,12 +274,13 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 			try {
 				switch (sub) {
 					case "add": {
-						if (!rest) {
-							runtime.ctx.showStatus("Usage: /marketplace add <source>");
+						const parsed = parseAddArgs(rest ?? "");
+						if ("error" in parsed) {
+							runtime.ctx.showStatus(parsed.error);
 							return;
 						}
-						const entry = await mgr.addMarketplace(rest);
-						runtime.ctx.showStatus(`Added marketplace: ${entry.name}`);
+						const entry = await mgr.addMarketplace(parsed.source, { force: parsed.force });
+						runtime.ctx.showStatus(`Marketplace ${entry.name} now sources from ${entry.sourceUri}`);
 						break;
 					}
 					case "remove":
@@ -382,7 +395,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 							[
 								"Marketplace commands:",
 								"  /marketplace                              Browse and install plugins",
-								"  /marketplace add <source>                  Add a marketplace (e.g. owner/repo)",
+								"  /marketplace add <source> [--force]        Add a marketplace, --force repoints an existing name",
 								"  /marketplace remove <name>                 Remove a marketplace",
 								"  /marketplace update [name]                 Re-fetch catalog(s)",
 								"  /marketplace list                          List configured marketplaces",
