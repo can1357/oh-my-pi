@@ -7,6 +7,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import type { ModelRegistry, ProviderDiscoveryState } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ModelRegistry as ModelRegistryImpl } from "@oh-my-pi/pi-coding-agent/config/model-registry";
+import { kNoAuth } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ModelHubComponent } from "@oh-my-pi/pi-coding-agent/modes/components/model-hub";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -468,6 +469,81 @@ describe("issue #970 custom provider discovery", () => {
 		await registry.refreshProvider("vllm");
 
 		expect(registry.getProviderDiscoveryState("vllm")?.status).toBe("ok");
+	});
+
+	test("does not send exllamav3-local placeholder as discovery bearer", async () => {
+		fs.writeFileSync(
+			modelsPath,
+			["providers:", "  exllamav3:", "    baseUrl: http://127.0.0.1:5000/v1", "    auth: none"].join("\n"),
+		);
+
+		await authStorage.set("exllamav3", { type: "api_key", key: "exllamav3-local" });
+
+		const fetchMock: (input: string | URL | Request, init?: RequestInit) => Promise<Response> = async (
+			input,
+			init,
+		) => {
+			const url = String(input);
+			if (url !== "http://127.0.0.1:5000/v1/models" && url !== "http://127.0.0.1:5000/v1/model") {
+				throw new Error(`Unexpected URL: ${url}`);
+			}
+			const headers = init?.headers as Headers | Record<string, string> | undefined;
+			const authHeader = headers instanceof Headers ? headers.get("Authorization") : headers?.Authorization;
+			expect(authHeader).toBeUndefined();
+			if (url.endsWith("/models")) {
+				return new Response(JSON.stringify({ data: [{ id: "Qwen3.8-Flash-Next-exl3", parameters: null }] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}
+			return new Response(
+				JSON.stringify({ id: "Qwen3.8-Flash-Next-exl3", parameters: { max_seq_len: 262_144, use_vision: true } }),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+		};
+
+		const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+		await registry.refreshProvider("exllamav3");
+
+		expect(registry.find("exllamav3", "Qwen3.8-Flash-Next-exl3")?.contextWindow).toBe(262_144);
+	});
+
+	test("EXLLAMAV3_BASE_URL opts built-in exllamav3 discovery in without a key", async () => {
+		fs.writeFileSync(modelsPath, ["providers: {}"].join("\n"));
+		const previousBaseUrl = Bun.env.EXLLAMAV3_BASE_URL;
+		Bun.env.EXLLAMAV3_BASE_URL = "http://10.0.0.5:5000/v1";
+		try {
+			const probed: string[] = [];
+			const fetchMock: (input: string | URL | Request) => Promise<Response> = async input => {
+				const url = String(input);
+				probed.push(url);
+				if (url.endsWith("/models")) {
+					return new Response(JSON.stringify({ data: [{ id: "GLM-5.2-exl3", parameters: null }] }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				return new Response(JSON.stringify({ id: "GLM-5.2-exl3", parameters: { max_seq_len: 131_072 } }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			};
+
+			const registry = new ModelRegistryImpl(authStorage, modelsPath, { fetch: fetchMock });
+			await registry.refreshProvider("exllamav3");
+
+			expect(probed).toContain("http://10.0.0.5:5000/v1/model");
+			expect(registry.find("exllamav3", "GLM-5.2-exl3")?.contextWindow).toBe(131_072);
+			// Availability and request auth must follow the env opt-in: the
+			// provider is usable keyless (kNoAuth), not discovered-but-locked.
+			expect(registry.getAvailableForProviders(new Set(["exllamav3"])).map(model => model.id)).toContain(
+				"GLM-5.2-exl3",
+			);
+			await expect(registry.getApiKeyForProvider("exllamav3")).resolves.toBe(kNoAuth);
+		} finally {
+			if (previousBaseUrl === undefined) delete Bun.env.EXLLAMAV3_BASE_URL;
+			else Bun.env.EXLLAMAV3_BASE_URL = previousBaseUrl;
+		}
 	});
 
 	test("does not send llama.cpp-local placeholder as discovery bearer", async () => {

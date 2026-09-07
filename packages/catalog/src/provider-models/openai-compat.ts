@@ -6006,6 +6006,224 @@ export function vllmModelManagerOptions(config?: VllmModelManagerConfig): ModelM
 }
 
 // ---------------------------------------------------------------------------
+// 22.1. ExLlamaV3 (via TabbyAPI)
+// ---------------------------------------------------------------------------
+
+const EXLLAMAV3_MODEL_CARD_TIMEOUT_MS = 2500;
+
+export interface Exllamav3ModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+/**
+ * Metadata for the model TabbyAPI currently has loaded, from `GET /v1/model`.
+ *
+ * TabbyAPI's `/v1/models` returns bare ids only — `parameters` is always null
+ * there — so the servable model's context window and vision support live on
+ * the model-card endpoint. With an admin key the list also enumerates every
+ * directory under `model_dir` plus dummy OpenAI-compatibility ids, none of
+ * which are separately servable through the chat API.
+ */
+interface Exllamav3LoadedModelCard {
+	id: string;
+	contextWindow?: number;
+	inputs: ("text" | "image")[];
+}
+
+/**
+ * Probe result for the TabbyAPI model-card endpoint.
+ *
+ * - `noModelLoaded` — the server answered its documented 503 "No models are
+ *   currently loaded": reachable, but nothing is servable and the admin-key
+ *   `/v1/models` listing (directories + dummy ids) must not be published.
+ * - `endpointMissing` — HTTP 404: the route genuinely does not exist (older
+ *   TabbyAPI fork); discovery falls back to the raw list.
+ * - `card: null` otherwise (no card) — transient failure (timeout, unrelated
+ *   5xx, auth, malformed body); discovery keeps the cached catalog.
+ */
+interface Exllamav3ModelCardProbe {
+	card: Exllamav3LoadedModelCard | null;
+	noModelLoaded: boolean;
+	endpointMissing: boolean;
+}
+
+async function fetchExllamav3ModelCardProbe(
+	baseUrl: string,
+	apiKey: string | undefined,
+	fetchImpl: FetchImpl,
+): Promise<Exllamav3ModelCardProbe> {
+	const fetchCard = async (signal: AbortSignal): Promise<Exllamav3ModelCardProbe> => {
+		try {
+			const response = await fetchImpl(`${baseUrl.replace(/\/+$/, "")}/model`, {
+				method: "GET",
+				headers: {
+					Accept: "application/json",
+					...(apiKey ? { Authorization: `Bearer ${apiKey}` } : {}),
+				},
+				signal,
+			});
+			if (response.status === 503) {
+				// Only TabbyAPI's own "no models loaded" answer is the no-model
+				// signal; an unrelated 503 (transient failure, reverse proxy) is a
+				// probe failure and keeps the cached catalog.
+				const body: unknown = await response.json().catch(() => null);
+				const detail = isRecord(body) && typeof body.detail === "string" ? body.detail.toLowerCase() : "";
+				return {
+					card: null,
+					noModelLoaded: detail.includes("no models are currently loaded"),
+					endpointMissing: false,
+				};
+			}
+			if (response.status === 404) {
+				return { card: null, noModelLoaded: false, endpointMissing: true };
+			}
+			if (!response.ok) {
+				return { card: null, noModelLoaded: false, endpointMissing: false };
+			}
+			const payload: unknown = await response.json();
+			if (!isRecord(payload) || typeof payload.id !== "string" || payload.id.length === 0) {
+				return { card: null, noModelLoaded: false, endpointMissing: false };
+			}
+			const parameters = isRecord(payload.parameters) ? payload.parameters : undefined;
+			const maxSeqLen = parameters === undefined ? null : toPositiveNumber(parameters.max_seq_len, null);
+			return {
+				card: {
+					id: payload.id,
+					...(maxSeqLen === null ? {} : { contextWindow: maxSeqLen }),
+					inputs: parameters?.use_vision === true ? (["text", "image"] as const) : (["text"] as const),
+				},
+				noModelLoaded: false,
+				endpointMissing: false,
+			};
+		} catch {
+			return { card: null, noModelLoaded: false, endpointMissing: false };
+		}
+	};
+	return withCatalogDiscoveryTimeout(EXLLAMAV3_MODEL_CARD_TIMEOUT_MS, fetchCard);
+}
+
+export function exllamav3ModelManagerOptions(
+	config?: Exllamav3ModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("exllamav3")!;
+	return {
+		providerId: "exllamav3",
+		cacheProviderId: resolveModelCacheProviderId("exllamav3", { baseUrl }),
+		// TabbyAPI serves exactly the one loaded model; a successful fetch IS the
+		// whole catalog. Without this, a reload from model A to B merges B into
+		// the cached snapshot and leaves stale A selectable — silently served by
+		// B under A's id.
+		dynamicModelsAuthoritative: true,
+		fetchDynamicModels: async () => {
+			const fetchImpl = discoveryFetch(config?.fetch);
+			const discover = (loadedCard: Exllamav3LoadedModelCard | null) =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "exllamav3",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => mapExllamav3Model(entry, defaults, loadedCard),
+					fetch: config?.fetch,
+					timeoutMs: DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+				});
+			// Card stability is field-wise, not id-wise: reloading the same model
+			// with a different max_seq_len or vision flag changes what discovery
+			// must publish, so a same-id card with different capabilities counts as
+			// a change.
+			const cardAt = () => fetchExllamav3ModelCardProbe(baseUrl, apiKey, fetchImpl);
+			const sameLoadedCard = (left: Exllamav3LoadedModelCard, right: Exllamav3LoadedModelCard): boolean =>
+				left.id === right.id &&
+				left.contextWindow === right.contextWindow &&
+				left.inputs.length === right.inputs.length &&
+				left.inputs.every((input, index) => input === right.inputs[index]);
+			// One redo round with the newer card, bracketed by another card read:
+			// publish only a clean card-stable match, else keep the cached catalog.
+			const redoRound = async (newer: Exllamav3ModelCardProbe) => {
+				if (newer.card === null) return null;
+				const redo = await discover(newer.card);
+				const third = await cardAt();
+				if (third.noModelLoaded) return [];
+				return third.card !== null && sameLoadedCard(third.card, newer.card) && redo !== null && redo.length > 0
+					? redo
+					: null;
+			};
+			const probe = await cardAt();
+			if (probe.noModelLoaded) {
+				// TabbyAPI answered its documented 503 "No models are currently
+				// loaded". An admin key still enumerates directories and dummy ids on
+				// /v1/models, but none of them are servable — publish an authoritative
+				// empty catalog instead of ids inference would immediately fail on.
+				return [];
+			}
+			const models = await discover(probe.card);
+			if (models === null) {
+				return null;
+			}
+			if (probe.card === null) {
+				// Raw-list fallback only for a definitively missing endpoint (older
+				// fork without the route). A transient failure (timeout, unrelated
+				// 5xx, malformed body) must keep the cached catalog — with an admin
+				// key the raw list is unservable directory/dummy ids.
+				return probe.endpointMissing ? models : null;
+			}
+			if (models.length > 0) {
+				// Bracket the list request with a second card read. With an admin key
+				// the list also enumerates on-disk directories, so a reload between
+				// the card and the list can leave the reloaded-away model passing the
+				// filter — only a stable card across the list proves the entry fresh.
+				const second = await cardAt();
+				if (second.noModelLoaded) return [];
+				if (second.card !== null && sameLoadedCard(second.card, probe.card)) {
+					return models;
+				}
+				return redoRound(second);
+			}
+			// Empty filtered result: the card names a model the list lacks — either a
+			// reload between the two requests (recoverable) or persistent
+			// disagreement (report failure and keep the cached catalog).
+			const second = await cardAt();
+			if (second.noModelLoaded) return [];
+			if (second.card === null || second.card.id === probe.card.id) {
+				// Failed re-probe after a valid card, or the same card still missing
+				// from a fresh list: not conclusive, never fall back to the raw list.
+				return null;
+			}
+			return redoRound(second);
+		},
+	};
+}
+
+function mapExllamav3Model(
+	entry: OpenAICompatibleModelRecord,
+	defaults: ModelSpec<"openai-completions">,
+	loadedCard: Exllamav3LoadedModelCard | null,
+): ModelSpec<"openai-completions"> | null {
+	// TabbyAPI serves exactly the loaded model. When the card is reachable,
+	// drop the unloaded directory entries and dummy ids an admin key
+	// enumerates — any other id silently generates on the loaded model.
+	if (loadedCard && entry.id !== loadedCard.id) return null;
+	// Future-proofing: some TabbyAPI forks populate parameters on the list
+	// entries themselves.
+	const entryParameters = isRecord(entry.parameters) ? entry.parameters : undefined;
+	const entryMaxSeqLen = entryParameters === undefined ? null : toPositiveNumber(entryParameters.max_seq_len, null);
+	const contextWindow = loadedCard?.contextWindow ?? entryMaxSeqLen ?? defaults.contextWindow;
+	const identity = classifyModel("exllamav3", defaults.id, { lenient: true });
+	return {
+		...defaults,
+		...(contextWindow === null ? {} : { contextWindow }),
+		...(loadedCard ? { input: [...loadedCard.inputs] } : {}),
+		// TabbyAPI reports no capability metadata on /v1/models. Qwen 3.8+ open
+		// weights always think (the template cannot disable it), so light up the
+		// effort dial; buildModel derives the template ladder from the id +
+		// local-backend compat.
+		reasoning: defaults.reasoning || (identity.class === "qwen" && revisionAtLeast(identity.revision, "3.8")),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 23. NanoGPT
 // ---------------------------------------------------------------------------
 
