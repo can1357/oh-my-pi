@@ -496,7 +496,10 @@ export class PluginManager {
 			}
 
 			// Step 1: write the spec into plugins/package.json + node_modules.
-			const installProc = Bun.spawn(["bun", "install", packageInstallSpec], {
+			const installCommand = options.force
+				? ["bun", "install", "--force", packageInstallSpec]
+				: ["bun", "install", packageInstallSpec];
+			const installProc = Bun.spawn(installCommand, {
 				cwd: getPluginsDir(),
 				stdin: "ignore",
 				stdout: "pipe",
@@ -990,7 +993,7 @@ export class PluginManager {
 				if (isEnoent(err)) {
 					if (!fs.existsSync(pluginPath)) {
 						if (fromDependencies) {
-							const fixed = options.fix ? await this.#fixMissingPlugin() : false;
+							const fixed = options.fix ? await this.#installPluginDependencies() : false;
 							checks.push({
 								name: `plugin:${name}`,
 								status: "error",
@@ -1027,6 +1030,21 @@ export class PluginManager {
 					? `v${pluginPkg.version}${pluginPkg.description ? ` - ${pluginPkg.description}` : ""}`
 					: `v${pluginPkg.version} - No omp/pi manifest (not an omp plugin)`,
 			});
+
+			// The runtime lock records the version observed after installation.
+			// Report any later divergence from the package currently on disk.
+			const recordedVersion = config.plugins[name]?.version;
+			if (recordedVersion && pluginPkg.version && recordedVersion !== pluginPkg.version) {
+				const fixed = options.fix ? await this.#reconcileVersionDrift(name, recordedVersion) : false;
+				checks.push({
+					name: `plugin:${name}:version`,
+					status: fixed ? "ok" : "error",
+					message: fixed
+						? `Reconciled version drift: node_modules now matches lock v${recordedVersion}`
+						: `Version drift: lock records v${recordedVersion} but node_modules has v${pluginPkg.version} (run \`omp plugin install ${name} --force\`)`,
+					fixed,
+				});
+			}
 
 			// Check tools path exists if specified
 			if (manifest?.tools) {
@@ -1086,9 +1104,10 @@ export class PluginManager {
 		return checks;
 	}
 
-	async #fixMissingPlugin(): Promise<boolean> {
+	async #installPluginDependencies(options: { force?: boolean } = {}): Promise<boolean> {
 		try {
-			const proc = Bun.spawn(["bun", "install"], {
+			const command = options.force ? ["bun", "install", "--force"] : ["bun", "install"];
+			const proc = Bun.spawn(command, {
 				cwd: getPluginsDir(),
 				stdin: "ignore",
 				stdout: "pipe",
@@ -1103,6 +1122,22 @@ export class PluginManager {
 				new Response(proc.stderr).text(),
 			]);
 			return exit === 0;
+		} catch {
+			return false;
+		}
+	}
+
+	/**
+	 * Force-reinstall dependencies and confirm node_modules matches the
+	 * lock-recorded version before claiming the drift is fixed.
+	 */
+	async #reconcileVersionDrift(name: string, expected: string): Promise<boolean> {
+		if (!(await this.#installPluginDependencies({ force: true }))) return false;
+		try {
+			const pkg: { version?: string } = await Bun.file(
+				path.join(getPluginsNodeModules(), name, "package.json"),
+			).json();
+			return pkg.version === expected;
 		} catch {
 			return false;
 		}
