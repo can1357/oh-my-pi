@@ -1,5 +1,13 @@
-import { instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
-import { type Api, type AssistantMessage, completeSimple, type Model, type Usage } from "@oh-my-pi/pi-ai";
+import { type ThinkingLevel, instrumentedCompleteSimple, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import {
+	type Api,
+	type AssistantMessage,
+	completeSimple,
+	type Model,
+	serviceTierFamily,
+	type ServiceTier,
+	type Usage,
+} from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { extractTextContent } from "../commit/utils";
 import {
@@ -8,6 +16,7 @@ import {
 	getModelMatchPreferences,
 	resolveModelFromString,
 } from "../config/model-resolver";
+import { type ServiceTierOverrides, resolveModelServiceTierOverride } from "../config/service-tier";
 import imageQuestionSystemPromptTemplate from "../prompts/tools/image-question-system.md" with { type: "text" };
 import { concreteThinkingLevel, resolveThinkingLevelForModel, toReasoningEffort } from "../thinking";
 import type { ToolSession } from "../tools";
@@ -74,6 +83,30 @@ export function resolveImageQuestionModel(session: ToolSession): ResolvedImageQu
 	return { model, selectedPattern };
 }
 
+/**
+ * Service tier for one vision one-shot request. The session's live explicit
+ * per-family selection wins (an override, or explicit off via `null`);
+ * otherwise the configured `tier.modelOverrides` rule is matched against the
+ * request's actual model and the reasoning it actually sends. A nonmatch —
+ * including family-less providers like Fireworks and effort-keyed rules with
+ * no sent effort — leaves the tier omitted: previously untiered requests never
+ * gain a family baseline here.
+ */
+export function resolveVisionRequestServiceTier(
+	model: Model<Api>,
+	thinkingLevel: ThinkingLevel | undefined,
+	modelOverrides: Readonly<Record<string, string>>,
+	liveOverrides: ServiceTierOverrides | undefined,
+): ServiceTier | undefined {
+	const family = serviceTierFamily(model);
+	if (!family) return undefined;
+	if (liveOverrides && Object.hasOwn(liveOverrides, family)) {
+		return liveOverrides[family] ?? undefined;
+	}
+	const matched = resolveModelServiceTierOverride(modelOverrides, model, thinkingLevel);
+	return matched.matched ? matched.tier : undefined;
+}
+
 /** Ask the resolved vision model a question about an already-loaded image. */
 export async function askImageQuestion(
 	session: ToolSession,
@@ -123,7 +156,16 @@ export async function askImageQuestion(
 				availableModels.some(candidate => candidate.provider === provider && candidate.id === id),
 		}),
 	);
-	const reasoning = toReasoningEffort(resolveThinkingLevelForModel(model, configuredThinking));
+	// The tier lookup sees the reasoning this request actually sends — the
+	// resolved role/selector suffix, never the parent session's live effort.
+	const finalThinkingLevel = resolveThinkingLevelForModel(model, configuredThinking);
+	const reasoning = toReasoningEffort(finalThinkingLevel);
+	const serviceTier = resolveVisionRequestServiceTier(
+		model,
+		finalThinkingLevel,
+		session.settings.get("tier.modelOverrides"),
+		session.getServiceTierOverrides?.(),
+	);
 
 	let response: AssistantMessage;
 	try {
@@ -146,6 +188,7 @@ export async function askImageQuestion(
 				apiKey: modelRegistry.resolver(model, session.getSessionId?.() ?? undefined),
 				signal: effectiveSignal,
 				reasoning,
+				serviceTier,
 			},
 			{ telemetry, oneshotKind: "image_question", completeImpl },
 		);

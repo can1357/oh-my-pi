@@ -117,6 +117,7 @@ async function createOmpInference(
 		return new OmpCommitInference({
 			primary,
 			smol,
+			modelServiceTierOverrides: settings.get("tier.modelOverrides"),
 			forcePrimaryForEveryRole: options.modelOverride !== undefined,
 			config,
 			cache,

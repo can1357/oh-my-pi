@@ -473,7 +473,15 @@ function buildExecutorOptions(
 		parentTelemetry: session.getTelemetry?.(),
 		parentEvalSessionId: request.shareEvalSession === false ? undefined : (session.getEvalSessionId?.() ?? undefined),
 		parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
-		parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+		// Use the configured baseline when available; the composed getter is only
+		// a fallback for legacy ToolSession implementations. Keep explicit live
+		// choices separate so a child can clear them without resurrecting them.
+		parentServiceTier: session.getConfiguredServiceTierByFamily
+			? (session.getConfiguredServiceTierByFamily() ?? null)
+			: session.getServiceTierByFamily
+				? (session.getServiceTierByFamily() ?? null)
+				: undefined,
+		parentServiceTierOverrides: session.getServiceTierOverrides?.(),
 	};
 }
 

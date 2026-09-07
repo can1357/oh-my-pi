@@ -26,6 +26,7 @@ import type {
 	AssistantMessage,
 	CodexCompactionContext,
 	Context,
+	Effort,
 	Message,
 	Model,
 	ProviderSessionState,
@@ -68,7 +69,11 @@ import {
 	resolveModelOverride,
 } from "../config/model-resolver";
 import { MODEL_ROLES } from "../config/model-roles";
-import { serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
+import {
+	resolveModelServiceTierOverride,
+	serviceTierForAllFamilies,
+	serviceTierSettingToTier,
+} from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "../cursor";
 import { bridgeToolMap } from "../cursor-bridge-tools";
@@ -256,7 +261,13 @@ export interface SessionAdvisorsHost {
 	preserveAdvisorCard(card: CustomMessage): void;
 	hasPendingNextTurnMessages(): boolean;
 	convertToLlmForSideRequest(messages: AgentMessage[]): Message[];
-	effectiveServiceTier(model: Model): ServiceTier | undefined;
+	/**
+	 * Effective wire tier for one advisor request. `reasoning`/`disableReasoning`
+	 * are the advisor request's own final values — never the parent UI thinking
+	 * selection; omitted reasoning stays omitted instead of inheriting the
+	 * parent's active effort.
+	 */
+	effectiveServiceTier(model: Model, reasoning?: Effort, disableReasoning?: boolean): ServiceTier | undefined;
 	resolveContextPromotionTarget(
 		currentModel: Model,
 		contextWindow: number,
@@ -821,10 +832,28 @@ export class SessionAdvisors {
 			advisorTierSetting === "inherit"
 				? undefined
 				: serviceTierForAllFamilies(serviceTierSettingToTier(advisorTierSetting));
-		const advisorServiceTierResolver = (model: Model): ServiceTier | undefined =>
-			advisorTierSetting === "inherit"
-				? this.#host.effectiveServiceTier(model)
-				: resolveModelServiceTier(advisorTierMap, model);
+		// The resolver receives the advisor loop's FINAL per-request reasoning —
+		// the advisor's own effort/disable state — never the parent UI thinking
+		// selection. Exact `tier.modelOverrides` rules key on that effort ahead of
+		// the `tier.advisor` baseline; "inherit" defers to the host resolver,
+		// which layers live family overrides, the same exact rules, and
+		// per-session suppression on top.
+		const advisorServiceTierResolver = (
+			model: Model,
+			reasoning: Effort | undefined,
+			disableReasoning?: boolean,
+		): ServiceTier | undefined => {
+			if (advisorTierSetting === "inherit") {
+				return this.#host.effectiveServiceTier(model, reasoning, disableReasoning);
+			}
+			const exactOverride = resolveModelServiceTierOverride(
+				this.#host.settings.get("tier.modelOverrides"),
+				model,
+				disableReasoning ? undefined : reasoning,
+			);
+			if (exactOverride.matched) return exactOverride.tier;
+			return resolveModelServiceTier(advisorTierMap, model);
+		};
 
 		for (const descriptor of descriptors) {
 			const {

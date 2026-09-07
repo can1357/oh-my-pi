@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, ApiKey, AssistantMessage, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { completeSimple } from "@oh-my-pi/pi-ai";
+import { resolveModelServiceTierOverride } from "../../config/service-tier";
 import { toReasoningEffort } from "../../thinking";
 import type { ResolvedCommitModel } from "../model-selection";
 import { type CommitInferenceCache, computeCommitCacheKey } from "./cache";
@@ -47,6 +48,7 @@ export class OmpCommitInference implements CommitInference {
 	readonly #targets: Record<CommitInferenceRole, InferenceTarget>;
 	readonly #config: ConventionalGenerationConfig;
 	readonly #cache: CommitInferenceCache | null;
+	readonly #modelServiceTierOverrides: Readonly<Record<string, string>>;
 	readonly #authStorage: AuthStorage | null;
 	readonly #onProgress?: CommitProgress;
 	readonly #signal?: AbortSignal;
@@ -58,6 +60,8 @@ export class OmpCommitInference implements CommitInference {
 		forcePrimaryForEveryRole?: boolean;
 		config: ConventionalGenerationConfig;
 		cache: CommitInferenceCache | null;
+		/** `tier.modelOverrides` record; matched rules tier the actual per-role target. */
+		modelServiceTierOverrides?: Readonly<Record<string, string>>;
 		/** Closed on dispose; broker-backed storage runs a background sync loop that pins the event loop. */
 		authStorage?: AuthStorage;
 		onProgress?: CommitProgress;
@@ -72,6 +76,7 @@ export class OmpCommitInference implements CommitInference {
 		};
 		this.#config = options.config;
 		this.#cache = options.cache;
+		this.#modelServiceTierOverrides = options.modelServiceTierOverrides ?? {};
 		this.#authStorage = options.authStorage ?? null;
 		this.#onProgress = options.onProgress;
 		this.#signal = options.signal;
@@ -82,6 +87,16 @@ export class OmpCommitInference implements CommitInference {
 		const target = this.#targets[request.role];
 		const modelKey = `${target.model.provider}/${target.model.id}`;
 		const reasoning = toReasoningEffort(target.thinkingLevel);
+		// Direct completeSimple calls bypass the agent's service-tier resolver, so match
+		// `tier.modelOverrides` against the actual per-role target and the effort this
+		// request sends; a nonmatch keeps the tier omitted instead of inventing a
+		// family default.
+		const tierResolution = resolveModelServiceTierOverride(
+			this.#modelServiceTierOverrides,
+			target.model,
+			target.thinkingLevel,
+		);
+		const serviceTier = tierResolution.matched ? tierResolution.tier : undefined;
 		const key = computeCommitCacheKey({
 			operation: request.operation,
 			model: modelKey,
@@ -127,6 +142,7 @@ export class OmpCommitInference implements CommitInference {
 						sessionId: this.#sessionId,
 						maxTokens: 16_384,
 						reasoning,
+						serviceTier,
 						signal,
 					},
 				);

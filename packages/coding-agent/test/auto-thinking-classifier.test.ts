@@ -147,6 +147,7 @@ describe("auto thinking classifier helpers", () => {
 		const settings = {
 			get(path: string) {
 				if (path === "providers.autoThinkingModel") return "online";
+				if (path === "tier.modelOverrides") return {};
 				return undefined;
 			},
 			getModelRole(role: string) {
@@ -185,12 +186,35 @@ describe("auto thinking classifier helpers", () => {
 		expect(options?.maxTokens).toBeGreaterThan(1024);
 	});
 
-	function createOnlineFixture(targetModel: Model, answer: string, maxEffort: "xhigh" | "max" = "xhigh") {
+	it("tiers the fixed-off classifier request by the exact base rule while effort rules stay inert", async () => {
+		const fixture = createOnlineFixture(buildLadderModel("mock-max", MAX_LADDER), "high", "xhigh", {
+			"anthropic/claude-sonnet-4-6:max": "none",
+			"anthropic/claude-sonnet-4-6": "priority",
+		});
+		await classifyDifficulty("refactor the scheduler", fixture.deps);
+		const options = fixture.completeSimpleMock.mock.calls[0]?.[2] as
+			| { disableReasoning?: boolean; serviceTier?: string }
+			| undefined;
+
+		// The classifier pins `disableReasoning: true`, so the override matches at
+		// the off level: the `:max` effort rule is inert and the exact base rule
+		// tiers the wire request.
+		expect(options?.disableReasoning).toBe(true);
+		expect(options?.serviceTier).toBe("priority");
+	});
+
+	function createOnlineFixture(
+		targetModel: Model,
+		answer: string,
+		maxEffort: "xhigh" | "max" = "xhigh",
+		tierOverrides: Record<string, string> = {},
+	) {
 		const classifierModel = getBundledModel("anthropic", "claude-sonnet-4-6");
 		if (!classifierModel) throw new Error("Expected bundled Claude Sonnet 4.6 model");
 		const settings = {
 			get(path: string) {
 				if (path === "providers.autoThinkingModel") return "online";
+				if (path === "tier.modelOverrides") return tierOverrides;
 				return path === "providers.autoThinkingMaxEffort" ? maxEffort : undefined;
 			},
 			getModelRole(role: string) {
@@ -283,6 +307,7 @@ describe("auto thinking classifier helpers", () => {
 			usage: fixture.usage,
 			stopReason: "stop",
 			errorMessage: undefined,
+			serviceTier: null,
 		});
 	});
 

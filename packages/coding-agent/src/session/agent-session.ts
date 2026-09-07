@@ -104,7 +104,7 @@ import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mod
 import type { ModelRegistry } from "../config/model-registry";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
 import { expandPromptTemplate, type PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily } from "../config/service-tier";
+import { buildServiceTierByFamily, type ServiceTierOverrides } from "../config/service-tier";
 import type { Settings, SkillsSettings } from "../config/settings";
 import {
 	onAppendOnlyModeChanged,
@@ -1269,6 +1269,7 @@ export class AgentSession {
 			thinkingLevel: config.thinkingLevel,
 			thinkingLevelCeiling: config.thinkingLevelCeiling,
 			serviceTierByFamily: config.serviceTierByFamily,
+			serviceTierOverrides: config.serviceTierOverrides,
 		});
 
 		this.#promptTemplates = config.promptTemplates ?? [];
@@ -1367,10 +1368,14 @@ export class AgentSession {
 			memoryTaskDepth: config.memoryTaskDepth,
 			createMemoryTools: config.createMemoryTools,
 		});
-		// Resolve the wire service-tier per request so the Fireworks Priority
-		// toggle scopes priority to Fireworks alone, without mutating the shared
-		// session `serviceTier` that drives `/fast` and OpenAI/Anthropic priority.
-		this.agent.serviceTierResolver = model => this.#models.effectiveServiceTier(model);
+		// Resolve the wire service-tier per request: explicit live overrides
+		// (including explicit off) win, then per-model `tier.modelOverrides`
+		// matched against the request's actual reasoning effort, then the
+		// configured family policy. Forwarding the real per-request effort (even
+		// when undefined) is what lets `provider/model:effort` keys match the
+		// request that runs; Fireworks keeps its dedicated priority control.
+		this.agent.serviceTierResolver = (model, reasoning, disableReasoning) =>
+			this.#models.effectiveServiceTier(model, reasoning, disableReasoning);
 		this.#titleSystemPrompt = config.titleSystemPrompt;
 		this.#pruneToolDescriptions = config.pruneToolDescriptions === true;
 		this.#transformContext = config.transformContext ?? (messages => messages);
@@ -1542,6 +1547,7 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			settings: this.settings,
 			modelRegistry: this.#modelRegistry,
+			getServiceTierOverrides: () => this.#models.serviceTierOverrides,
 			model: () => this.model,
 			sessionId: () => this.sessionId,
 			localProtocolOptions: () => this.#localProtocolOptions(),
@@ -1685,7 +1691,8 @@ export class AgentSession {
 			preserveAdvisorCard: card => this.#preserveAdvisorCard(card),
 			hasPendingNextTurnMessages: () => this.#pendingNextTurnMessages.length > 0,
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
-			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
+			effectiveServiceTier: (model, reasoning?: Effort, disableReasoning?: boolean) =>
+				this.#models.effectiveServiceTier(model, reasoning, disableReasoning),
 			resolveContextPromotionTarget: (model, contextWindow, signal) =>
 				this.#maintenance.resolveContextPromotionTarget(model, contextWindow, signal),
 			resolveCompactionModelCandidates: (model, availableModels) =>
@@ -1752,6 +1759,8 @@ export class AgentSession {
 			drainStrandedQueuedMessages: () => this.#drainStrandedQueuedMessages(),
 			buildDisplaySessionContext: () => this.buildDisplaySessionContext(),
 			convertToLlmForSideRequest: messages => this.#convertToLlmForSideRequest(messages),
+			effectiveServiceTier: (model: Model, reasoning: Effort | undefined, disableReasoning?: boolean) =>
+				this.#models.effectiveServiceTier(model, reasoning, disableReasoning),
 			obfuscateTextForProvider: text => this.#obfuscateTextForProvider(text),
 			obfuscatePreparationForProvider: preparation => this.#obfuscatePreparationForProvider(preparation),
 			closeCodexProviderSessionsForHistoryRewrite: () => this.#closeCodexProviderSessionsForHistoryRewrite(),
@@ -1800,7 +1809,8 @@ export class AgentSession {
 			deobfuscateFromProvider: text => this.#deobfuscateFromProvider(text),
 			convertMessagesToLlm: (messages, signal) => this.convertMessagesToLlm(messages, signal),
 			prepareSimpleStreamOptions: (options, provider) => this.prepareSimpleStreamOptions(options, provider),
-			effectiveServiceTier: model => this.#models.effectiveServiceTier(model),
+			effectiveServiceTier: (model, reasoning?: Effort, disableReasoning?: boolean) =>
+				this.#models.effectiveServiceTier(model, reasoning, disableReasoning),
 		};
 		this.#handoff = new SessionHandoff(handoffHost);
 
@@ -3042,11 +3052,24 @@ export class AgentSession {
 						ttftMs: assistantMsg.ttft,
 					});
 				}
-				if (
-					assistantMsg.disabledFeatures?.includes("priority") &&
-					this.serviceTierByFamily.anthropic === "priority"
-				) {
-					this.setServiceTierFamily("anthropic", undefined);
+				if (assistantMsg.disabledFeatures?.includes("priority")) {
+					// Suppress priority for the exact model that rejected it rather
+					// than clearing the family map: the user's family choice survives
+					// for other models, the rejected model never automatically
+					// re-arms priority this session, and the retried request proceeds
+					// without the tier (existing provider recovery behavior).
+					const activeModel = this.model;
+					const matchesActive =
+						activeModel?.provider === assistantMsg.provider && activeModel?.id === assistantMsg.model;
+					const rejectedModel = matchesActive
+						? activeModel
+						: this.#modelRegistry
+								.getAvailable()
+								.find(
+									candidate =>
+										candidate.provider === assistantMsg.provider && candidate.id === assistantMsg.model,
+								);
+					if (rejectedModel) this.#models.suppressServiceTier(rejectedModel, "priority");
 					this.emitNotice(
 						"warning",
 						"Priority/fast mode rejected for this model; retried without it. Fast mode is now off.",
@@ -4936,6 +4959,20 @@ export class AgentSession {
 	/** Live per-family service tiers (OpenAI / Anthropic / Google). */
 	get serviceTierByFamily(): ServiceTierByFamily {
 		return this.#models.serviceTierByFamily;
+	}
+	/** Configured per-family tier baseline, excluding explicit live/saved overrides. */
+	get configuredServiceTierByFamily(): ServiceTierByFamily {
+		return this.#models.configuredServiceTierByFamily;
+	}
+
+	/**
+	 * Explicit per-family service-tier overrides (absent = inherit the
+	 * configured family policy, `null` = explicit off). The saved/manual layer
+	 * on top of {@link serviceTierByFamily}; persisted via service-tier change
+	 * entries and restored on resume/switch.
+	 */
+	get serviceTierOverrides(): ServiceTierOverrides | undefined {
+		return this.#models.serviceTierOverrides;
 	}
 
 	/** Whether agent is currently streaming a response */
@@ -7641,7 +7678,13 @@ export class AgentSession {
 			this.#usagePreflightReadyForNextModelCall = false;
 
 			this.sessionManager.appendThinkingLevelChange(this.thinkingLevel, this.configuredThinkingLevel());
-			this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry());
+			// Only explicit overrides carry into the fresh transcript: configured
+			// family defaults re-derive from settings on resume, so they must not
+			// freeze here as authoritative manual entries.
+			const carriedTierOverrides = this.#models.serviceTierOverrides;
+			if (carriedTierOverrides && Object.keys(carriedTierOverrides).length > 0) {
+				this.sessionManager.appendServiceTierChange(this.#models.serviceTierEntry(), carriedTierOverrides);
+			}
 
 			this.#todo.resetCycle();
 			this.#planReferenceSent = false;
@@ -8554,6 +8597,10 @@ export class AgentSession {
 		const snapshot = this.#buildEphemeralSnapshot(args.promptText);
 		const llmMessages = await this.convertMessagesToLlm(snapshot, args.signal);
 		const context = await this.agent.buildSideRequestContext(llmMessages);
+		// The side request's own effort — not the main turn's — feeds exact
+		// `provider/model:effort` override matching and the wire tier.
+		const sideReasoning = toReasoningEffort(this.thinkingLevel);
+		const sideDisableReasoning = shouldDisableReasoning(this.thinkingLevel);
 		const options = this.prepareSimpleStreamOptions(
 			{
 				apiKey: this.#modelRegistry.resolver(model, cacheSessionId),
@@ -8567,10 +8614,10 @@ export class AgentSession {
 				promptCacheKey: this.agent.promptCacheKey ?? this.agent.sessionId,
 				preferWebsockets: this.#preferWebsockets,
 				providerSessionState: this.#providerSessionState,
-				reasoning: toReasoningEffort(this.thinkingLevel),
-				disableReasoning: shouldDisableReasoning(this.thinkingLevel),
+				reasoning: sideReasoning,
+				disableReasoning: sideDisableReasoning,
 				hideThinkingSummary: this.agent.hideThinkingSummary,
-				serviceTier: this.#models.effectiveServiceTier(model),
+				serviceTier: this.#models.effectiveServiceTier(model, sideReasoning, sideDisableReasoning),
 				signal: args.signal,
 			},
 			model.provider,
@@ -8761,7 +8808,8 @@ export class AgentSession {
 		const previousThinkingLevel = this.thinkingLevel;
 		const previousAutoThinking = this.isAutoThinking;
 		const previousAutoResolvedLevel = this.autoResolvedThinkingLevel();
-		const previousServiceTierByFamily = this.serviceTierByFamily;
+		const previousConfiguredServiceTierByFamily = this.#models.configuredServiceTierByFamily;
+		const previousServiceTierOverrides = this.#models.serviceTierOverrides;
 		const previousTools = [...this.agent.state.tools];
 		const previousBaseSystemPrompt = this.#tools.baseSystemPrompt;
 		const previousSystemPrompt = this.agent.state.systemPrompt;
@@ -8927,8 +8975,12 @@ export class AgentSession {
 						: (sessionContext.thinkingLevel as ThinkingLevel | undefined)
 					: defaultThinkingLevel;
 			this.#models.restoreThinkingLevel(restoredThinkingLevel);
+			// The configured family policy is always the baseline; explicit
+			// overrides reconstructed from this transcript's tier entries (legacy
+			// snapshots included) layer on top. No entry = inherit config.
 			this.#models.restoreServiceTiers(
-				hasServiceTierEntry ? (sessionContext.serviceTier ?? {}) : configuredServiceTierByFamily,
+				configuredServiceTierByFamily,
+				hasServiceTierEntry ? sessionContext.serviceTierOverrides : undefined,
 			);
 
 			if (switchingToDifferentSession) {
@@ -9018,7 +9070,7 @@ export class AgentSession {
 				modelRolledBack = !modelsAreEqual(rolledBackModel, previousModel);
 			}
 			this.#models.restoreThinkingSnapshot(previousThinkingLevel, previousAutoThinking, previousAutoResolvedLevel);
-			this.#models.restoreServiceTiers(previousServiceTierByFamily);
+			this.#models.restoreServiceTiers(previousConfiguredServiceTierByFamily, previousServiceTierOverrides);
 			if (modelRolledBack) {
 				this.#emit({ type: "model_changed" });
 			}
@@ -9486,6 +9538,8 @@ export class AgentSession {
 				reserveTokens: branchSummarySettings.reserveTokens,
 				metadata: this.agent.metadataForProvider(model.provider),
 				convertToLlm: messages => this.#convertToLlmForSideRequest(messages),
+				serviceTierResolver: (requestModel: Model, reasoning: Effort | undefined, disableReasoning?: boolean) =>
+					this.#models.effectiveServiceTier(requestModel, reasoning, disableReasoning),
 				telemetry: resolveTelemetry(this.agent.telemetry, this.sessionId),
 				// Same per-provider concurrency cap rationale as the compaction
 				// path above (chatgpt-codex review on #3751).

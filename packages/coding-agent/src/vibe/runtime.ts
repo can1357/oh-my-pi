@@ -1365,7 +1365,14 @@ export class VibeSessionRegistry {
 			parentTelemetry: session.getTelemetry?.(),
 			parentEvalSessionId: session.getEvalSessionId?.() ?? undefined,
 			parentAgentId: session.getAgentId?.() ?? MAIN_AGENT_ID,
-			parentServiceTier: session.getServiceTierByFamily ? (session.getServiceTierByFamily() ?? null) : undefined,
+			// Keep the configured baseline separate from the parent's live choices;
+			// the composed getter remains only for legacy ToolSession contracts.
+			parentServiceTier: session.getConfiguredServiceTierByFamily
+				? (session.getConfiguredServiceTierByFamily() ?? null)
+				: session.getServiceTierByFamily
+					? (session.getServiceTierByFamily() ?? null)
+					: undefined,
+			parentServiceTierOverrides: session.getServiceTierOverrides?.(),
 			keepAlive: true,
 		};
 	}

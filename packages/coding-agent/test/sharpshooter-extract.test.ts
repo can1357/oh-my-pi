@@ -7,7 +7,7 @@ import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import type { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
-import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
 	buildSharpshooterEnvelope,
@@ -42,18 +42,9 @@ function assistantResponse(content: AssistantMessage["content"]): AssistantMessa
 function extractionDependencies(cwd: string, messages: AgentMessage[], sessionId = "session-extract") {
 	const model = getBundledModel("anthropic", "claude-haiku-4-5");
 	if (!model) throw new Error("Expected bundled Claude Haiku model");
-	const settings = {
-		get(key: string) {
-			if (key === "sharpshooter.model") return `${model.provider}/${model.id}`;
-			return undefined;
-		},
-		getModelRole() {
-			return undefined;
-		},
-		getStorage() {
-			return undefined;
-		},
-	} as unknown as Settings;
+	const settings = Settings.isolated({
+		"sharpshooter.model": `${model.provider}/${model.id}`,
+	});
 	const modelRegistry = {
 		getAll: () => [model],
 		getAvailable: () => [model],
@@ -237,6 +228,8 @@ describe("maybeStartSharpshooterExtraction", () => {
 			await waitFor(() => completion.mock.calls.length === 1, "completion was not called");
 			await Promise.resolve();
 			await Promise.resolve();
+			// Canonical empty `tier.modelOverrides` record: extraction stays on the base tier.
+			expect(completion.mock.calls[0]?.[2]?.serviceTier).toBeUndefined();
 
 			expect(await listSharpshooterDeltas(agentDir, cwd)).toEqual([]);
 		} finally {

@@ -12,6 +12,7 @@ import type {
 	Model,
 	SimpleStreamOptions,
 } from "@oh-my-pi/pi-ai";
+import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runBenchCommand } from "@oh-my-pi/pi-coding-agent/cli/bench-cli";
 import type { BenchModelRegistry } from "@oh-my-pi/pi-coding-agent/cli/bench-runtime";
 
@@ -35,6 +36,17 @@ const codexModel = {
 	id: "gpt-cache-codex-test",
 	name: "gpt-cache-codex-test",
 	api: "openai-codex-responses",
+} as unknown as Model<Api>;
+/**
+ * Reasoning-capable variant: the effort-suffix tier rules key off the
+ * resolved thinking level, so the fake must declare a supported ladder.
+ */
+const lunaModel = {
+	...model,
+	id: "gpt-5.6-luna",
+	name: "gpt-5.6-luna",
+	reasoning: true,
+	thinking: { mode: "effort", efforts: ["low", "medium", "high", "max"] },
 } as unknown as Model<Api>;
 
 const registry: BenchModelRegistry = {
@@ -558,5 +570,73 @@ describe("bench cache mode", () => {
 		const pair = summary.models[0]?.cachePairs?.[0];
 		expect(pair?.cold.observations).toEqual(["no_provider_proof"]);
 		expect(pair?.warm.observations).toEqual(["no_provider_proof"]);
+	});
+
+	it("sends a matching model:effort tier rule to both cache phases", async () => {
+		const calls: SimpleStreamOptions[] = [];
+		const settings = {
+			get: (key: string) => (key === "tier.modelOverrides" ? { "openai/gpt-5.6-luna:max": "priority" } : undefined),
+		} as unknown as Settings;
+		const summary = await runBenchCommand(
+			{ models: ["openai/gpt-5.6-luna:max"], flags: { cache: true, json: true } },
+			{
+				createRuntime: async () => ({
+					modelRegistry: { ...registry, getAll: () => [lunaModel] },
+					settings,
+					close: () => {},
+				}),
+				randomSessionId: (() => {
+					let id = 0;
+					return () => `session-${++id}`;
+				})(),
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+				streamSimple: (_model, _context, options) => {
+					calls.push(options!);
+					return streamWithMessage(successfulMessage(0, 0));
+				},
+				stdoutIsTTY: false,
+			},
+		);
+
+		expect(calls).toHaveLength(2);
+		expect(calls[0]?.serviceTier).toBe("priority");
+		expect(calls[1]?.serviceTier).toBe("priority");
+		// The model rule never leaks into the reported family snapshot.
+		expect(summary.serviceTierByFamily).toEqual({});
+	});
+
+	it("treats an explicit --service-tier none as authoritative off in cache mode", async () => {
+		const calls: SimpleStreamOptions[] = [];
+		const settings = {
+			get: (key: string) => (key === "tier.modelOverrides" ? { "openai/gpt-5.6-luna:max": "priority" } : undefined),
+		} as unknown as Settings;
+		await runBenchCommand(
+			{ models: ["openai/gpt-5.6-luna:max"], flags: { cache: true, json: true, serviceTier: "none" } },
+			{
+				createRuntime: async () => ({
+					modelRegistry: { ...registry, getAll: () => [lunaModel] },
+					settings,
+					close: () => {},
+				}),
+				randomSessionId: (() => {
+					let id = 0;
+					return () => `session-${++id}`;
+				})(),
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+				streamSimple: (_model, _context, options) => {
+					calls.push(options!);
+					return streamWithMessage(successfulMessage(0, 0));
+				},
+				stdoutIsTTY: false,
+			},
+		);
+
+		expect(calls).toHaveLength(2);
+		expect(calls[0]?.serviceTier).toBeUndefined();
+		expect(calls[1]?.serviceTier).toBeUndefined();
 	});
 });

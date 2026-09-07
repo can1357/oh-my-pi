@@ -1,7 +1,8 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel, type StreamFn } from "@oh-my-pi/pi-agent-core";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as autoThinkingClassifier from "@oh-my-pi/pi-coding-agent/auto-thinking/classifier";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -59,9 +60,11 @@ describe("AgentSession role model thinking behavior", () => {
 
 	async function createSession(options: {
 		initialModelId: string;
-		initialThinkingLevel: Effort;
+		initialThinkingLevel?: Effort;
 		modelRoles: Record<string, string>;
 		runtimeApiKeys?: Record<string, string>;
+		modelOverrides?: Record<string, string>;
+		streamFn?: StreamFn;
 	}) {
 		const model = getAnthropicModelOrThrow(options.initialModelId);
 		const agent = new Agent({
@@ -72,14 +75,15 @@ describe("AgentSession role model thinking behavior", () => {
 				messages: [],
 				thinkingLevel: options.initialThinkingLevel,
 			},
+			...(options.streamFn ? { streamFn: options.streamFn } : {}),
 		});
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const runtimeApiKeys = options.runtimeApiKeys ?? {};
 		for (const provider in runtimeApiKeys) {
 			authStorage.setRuntimeApiKey(provider, runtimeApiKeys[provider]);
 		}
-
 		sessionSettings = Settings.isolated();
+		if (options.modelOverrides) sessionSettings.set("tier.modelOverrides", options.modelOverrides);
 		for (const [role, modelRoleValue] of Object.entries(options.modelRoles)) {
 			sessionSettings.setModelRole(role, modelRoleValue);
 		}
@@ -88,7 +92,27 @@ describe("AgentSession role model thinking behavior", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: sessionSettings,
 			modelRegistry,
+			thinkingLevel: options.initialThinkingLevel,
 		});
+	}
+
+	/** Record the tier the agent loop resolves for each request at the provider stream boundary. */
+	function recordingStreamFn(): {
+		calls: Array<{ selector: string; reasoning: string | undefined; serviceTier: string | undefined }>;
+		streamFn: StreamFn;
+	} {
+		const calls: Array<{ selector: string; reasoning: string | undefined; serviceTier: string | undefined }> = [];
+		const mock = createMockModel();
+		const streamFn: StreamFn = (model, context, options) => {
+			calls.push({
+				selector: `${model.provider}/${model.id}`,
+				reasoning: options?.reasoning,
+				serviceTier: options?.serviceTier,
+			});
+			mock.push({ content: [`ok:${model.id}`] });
+			return mock.stream(model, context, options);
+		};
+		return { calls, streamFn };
 	}
 
 	it("re-applies explicit role thinking each time that role is selected", async () => {
@@ -818,5 +842,129 @@ describe("AgentSession role model thinking behavior", () => {
 		expect(result?.role).toBe("slow");
 		expect(result?.model.id).toBe(slowModel.id);
 		expect(session.model?.id).toBe(slowModel.id);
+	});
+
+	it("keys the model-tier rule off the effort a role resolves onto the wire", async () => {
+		const defaultModel = getAnthropicModelOrThrow("claude-sonnet-4-5");
+		const slowModel = getBundledModel("openai-codex", "gpt-5.6-luna");
+		if (!slowModel) throw new Error("Expected bundled test model openai-codex/gpt-5.6-luna to exist");
+
+		const { calls, streamFn } = recordingStreamFn();
+		await createSession({
+			initialModelId: defaultModel.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: {
+				default: `${defaultModel.provider}/${defaultModel.id}:high`,
+				slow: `${slowModel.provider}/${slowModel.id}:max`,
+			},
+			modelOverrides: {
+				[`${slowModel.provider}/${slowModel.id}:max`]: "priority",
+				[`${slowModel.provider}/${slowModel.id}:high`]: "flex",
+			},
+			runtimeApiKeys: { "openai-codex": "test-key" },
+			streamFn,
+		});
+
+		const toSlow = await session.cycleRoleModels(["default", "slow"]);
+		expect(toSlow?.role).toBe("slow");
+		expect(toSlow?.thinkingLevel).toBe(Effort.Max);
+		await session.prompt("Implement a focused parser fix");
+		expect(calls[0]?.selector).toBe(`${slowModel.provider}/${slowModel.id}`);
+		expect(calls[0]?.reasoning).toBe(Effort.Max);
+		expect(calls[0]?.serviceTier).toBe("priority");
+
+		const backToDefault = await session.cycleRoleModels(["default", "slow"]);
+		expect(backToDefault?.role).toBe("default");
+		expect(backToDefault?.thinkingLevel).toBe(Effort.High);
+		await session.prompt("Follow-up turn on the default model");
+		expect(calls[1]?.selector).toBe(`${defaultModel.provider}/${defaultModel.id}`);
+		expect(calls[1]?.reasoning).toBe(Effort.High);
+		// The Luna-only rule must not follow the request onto other models.
+		expect(calls[1]?.serviceTier).toBeUndefined();
+	});
+
+	it("lets auto thinking's resolved effort key the model-tier rule on the wire", async () => {
+		const model = getAnthropicModelOrThrow("claude-opus-4-7");
+		const { calls, streamFn } = recordingStreamFn();
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+			modelOverrides: {
+				[`${model.provider}/${model.id}:max`]: "priority",
+				[`${model.provider}/${model.id}:high`]: "none",
+			},
+			streamFn,
+		});
+		const classifierSpy = vi.spyOn(autoThinkingClassifier, "classifyDifficulty").mockResolvedValue(Effort.Max);
+
+		session.setThinkingLevel(AUTO_THINKING);
+		await session.prompt("Implement a focused parser fix");
+		expect(classifierSpy).toHaveBeenCalledTimes(1);
+		expect(calls[0]?.reasoning).toBe(Effort.Max);
+		expect(calls[0]?.serviceTier).toBe("priority");
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+
+		classifierSpy.mockResolvedValue(Effort.High);
+		await session.prompt("Investigate another update");
+		expect(calls[1]?.reasoning).toBe(Effort.High);
+		// Anthropic realizes only priority, so the high-effort rule is an
+		// explicit none: the max→high transition must drop priority on the wire.
+		expect(calls[1]?.serviceTier).toBeUndefined();
+		expect(session.configuredThinkingLevel()).toBe(AUTO_THINKING);
+	});
+
+	it("keeps effort-qualified tier rules inert when reasoning is disabled", async () => {
+		const model = getAnthropicModelOrThrow("claude-opus-4-7");
+		const { calls, streamFn } = recordingStreamFn();
+		await createSession({
+			initialModelId: model.id,
+			initialThinkingLevel: Effort.High,
+			modelRoles: { default: `${model.provider}/${model.id}` },
+			modelOverrides: {
+				[`${model.provider}/${model.id}:max`]: "priority",
+				[`${model.provider}/${model.id}:high`]: "none",
+			},
+			streamFn,
+		});
+
+		session.setThinkingLevel(ThinkingLevel.Off);
+		await session.prompt("Implement a focused parser fix");
+
+		expect(calls[0]?.reasoning).toBeUndefined();
+		// disableReasoning binds no effort, so neither effort-qualified rule fires.
+		expect(calls[0]?.serviceTier).toBeUndefined();
+	});
+
+	it("never invents an effort for undefined-effort requests, keeping `:max` rules inert", async () => {
+		const model = getBundledModel("openai", "gpt-4o-mini");
+		if (!model) throw new Error("Expected bundled gpt-4o-mini model");
+		const { calls, streamFn } = recordingStreamFn();
+		const agent = new Agent({
+			initialState: {
+				model,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+				thinkingLevel: undefined,
+			},
+			streamFn,
+		});
+		authStorage.setRuntimeApiKey("openai", "test-key");
+		sessionSettings = Settings.isolated();
+		sessionSettings.set("tier.modelOverrides", { [`${model.provider}/${model.id}:max`]: "priority" });
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: sessionSettings,
+			modelRegistry,
+		});
+
+		await session.prompt("Implement a tiny change");
+
+		expect(calls[0]?.selector).toBe(`${model.provider}/${model.id}`);
+		expect(calls[0]?.reasoning).toBeUndefined();
+		// An effort-qualified rule binds nothing when the request has no effort.
+		expect(calls[0]?.serviceTier).toBeUndefined();
 	});
 });

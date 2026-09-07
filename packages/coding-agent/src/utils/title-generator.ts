@@ -11,6 +11,7 @@ import { isTerminalHeadless, logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 
 import { resolveRoleSelection } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import titleMarkerInstruction from "../prompts/system/title-marker-instruction.md" with { type: "text" };
 import titleSystemPrompt from "../prompts/system/title-system.md" with { type: "text" };
@@ -278,6 +279,10 @@ export async function generateTitleOnline(
 		// backends that ignore `disableReasoning` (see TITLE_MAX_TOKENS above).
 		const maxTokens = TITLE_MAX_TOKENS;
 		logger.debug("title-generator: request", { ...modelContext, maxTokens });
+		// Direct completeSimple calls bypass the agent's service-tier resolver. This
+		// request pins `disableReasoning: true`, so the override matches at the off
+		// level: `:max` effort rules stay inert, base model rules (and `none`) apply.
+		const tierResolution = resolveModelServiceTierOverride(settings.get("tier.modelOverrides"), model, undefined);
 
 		const response = await retryTransientCompletion(
 			() =>
@@ -292,6 +297,7 @@ export async function generateTitleOnline(
 						sessionId,
 						maxTokens,
 						disableReasoning: true,
+						serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 						// Greedy decode: titling is extraction, not generation. Backends that
 						// default temperature high (e.g. Ollama's 0.8) otherwise garble names
 						// from the message ("hashline" → "HasHroshi"). Providers whose models

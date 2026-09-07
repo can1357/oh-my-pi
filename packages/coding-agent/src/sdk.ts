@@ -79,7 +79,7 @@ import {
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
-import { buildServiceTierByFamily } from "./config/service-tier";
+import { buildServiceTierByFamily, type ServiceTierOverrides } from "./config/service-tier";
 import { Settings, type SkillsSettings } from "./config/settings";
 import { CursorExecHandlers, type CursorMcpResourceAdapter } from "./cursor";
 import { createBridgeEditTool, createBridgeGrepFactory } from "./cursor-bridge-tools";
@@ -418,8 +418,26 @@ export interface CreateAgentSessionOptions {
 	thinkingLevel?: ConfiguredThinkingLevel;
 	/** Hard ceiling on the session's thinking effort (e.g. a task spawn's `task.maxEffort`-capped hint); retry-fallback recovery re-clamps to it. */
 	thinkingLevelCeiling?: Effort;
-	/** OpenAI service-tier override for this session. `null` omits `service_tier`. */
+	/**
+	 * OpenAI-only service-tier override for this session (the `--service-tier`
+	 * CLI flag). `null` (CLI `none`) is explicit off. Lands in
+	 * {@link serviceTierOverrides} as the `openai` key with the highest launch
+	 * precedence over saved and settings state.
+	 */
 	openAIServiceTier?: ServiceTier | null;
+	/**
+	 * Explicit per-family service-tier overrides launched with the session
+	 * (absent = inherit the configured family policy, `null` = explicit off).
+	 * Layered over the configured `tier.*` family baseline and persisted as
+	 * this session's authoritative manual layer.
+	 */
+	serviceTierOverrides?: ServiceTierOverrides;
+	/**
+	 * Accessor for explicit service-tier overrides to forward into this
+	 * session's tools (child-session owners inject the parent's live map).
+	 * Defaults to this session's own live overrides.
+	 */
+	getServiceTierOverrides?: () => ServiceTierOverrides | undefined;
 	/** Models available for cycling (Ctrl+P in interactive mode) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Prewalk from the starting model to a fast/cheap target at the first edit/write once the todo list exists. */
@@ -1851,6 +1869,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			getActiveModelString,
 			getActiveModel: () => agent?.state.model ?? model,
 			getServiceTierByFamily: () => session?.serviceTierByFamily,
+			getConfiguredServiceTierByFamily: () => session?.configuredServiceTierByFamily,
+			getServiceTierOverrides: options.getServiceTierOverrides ?? (() => session?.serviceTierOverrides),
 			getImageAttachments: () => session?.getImageAttachments() ?? [],
 			getPlanModeState: () => session?.getPlanModeState(),
 			getPlanReferencePath: () => session?.getPlanReferencePath() ?? "local://PLAN.md",
@@ -3486,18 +3506,41 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		const openaiWebsocketSetting = settings.get("providers.openaiWebsockets") ?? "off";
 		const preferOpenAICodexWebsockets =
 			openaiWebsocketSetting === "on" ? true : openaiWebsocketSetting === "off" ? false : undefined;
-		const configuredServiceTierByFamily = hasServiceTierEntry
-			? (existingSession.serviceTier ?? {})
-			: buildServiceTierByFamily(
-					settings.get("tier.openai"),
-					settings.get("tier.anthropic"),
-					settings.get("tier.google"),
-				);
-		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
+		// The family map is the pure configured baseline. Explicit overrides are
+		// a separate layer: reconstructed from the transcript when the session has
+		// tier entries (legacy family-map snapshots included), then launch options
+		// on top — `serviceTierOverrides` per family, and the OpenAI-only
+		// `--service-tier` flag with the highest precedence (CLI `none` →
+		// explicit off). Configured defaults never become manual entries here.
+		const configuredServiceTierByFamily = buildServiceTierByFamily(
+			settings.get("tier.openai"),
+			settings.get("tier.anthropic"),
+			settings.get("tier.google"),
+		);
+		const savedServiceTierOverrides = hasServiceTierEntry ? existingSession.serviceTierOverrides : undefined;
+		const hasExplicitServiceTierOptions =
+			options.serviceTierOverrides !== undefined || options.openAIServiceTier !== undefined;
+		const initialServiceTierOverrides: ServiceTierOverrides | undefined =
+			savedServiceTierOverrides === undefined && !hasExplicitServiceTierOptions
+				? undefined
+				: {
+						...savedServiceTierOverrides,
+						...options.serviceTierOverrides,
+					};
 		if (options.openAIServiceTier === null) {
-			delete initialServiceTierByFamily.openai;
+			initialServiceTierOverrides!.openai = null;
 		} else if (options.openAIServiceTier !== undefined) {
-			initialServiceTierByFamily.openai = options.openAIServiceTier;
+			initialServiceTierOverrides!.openai = options.openAIServiceTier;
+		}
+
+		// Effective live family snapshot for the persisted tier entry: the
+		// configured baseline with explicit overrides applied (`null` removes the
+		// family key so the wire omits the parameter).
+		const initialServiceTierByFamily = { ...configuredServiceTierByFamily };
+		for (const family of ["openai", "anthropic", "google"] as const) {
+			const tier = initialServiceTierOverrides?.[family];
+			if (tier === null) delete initialServiceTierByFamily[family];
+			else if (tier !== undefined) initialServiceTierByFamily[family] = tier;
 		}
 
 		// One-shot launch-latency marker: fired the first time the loop dispatches
@@ -3627,9 +3670,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// Restore messages if session has existing data
 		if (hasExistingSession) {
 			agent.replaceMessages(existingSession.messages);
-			if (options.openAIServiceTier !== undefined) {
+			if (hasExplicitServiceTierOptions) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+					initialServiceTierOverrides ?? {},
 				);
 			}
 		} else {
@@ -3642,9 +3686,10 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// classification persists its concrete effort once a real user turn runs.
 				sessionManager.appendThinkingLevelChange(effectiveThinkingLevel);
 			}
-			if (options.openAIServiceTier !== undefined || Object.keys(initialServiceTierByFamily).length > 0) {
+			if (hasExplicitServiceTierOptions) {
 				sessionManager.appendServiceTierChange(
 					Object.keys(initialServiceTierByFamily).length > 0 ? initialServiceTierByFamily : null,
+					initialServiceTierOverrides ?? {},
 				);
 			}
 		}
@@ -3727,7 +3772,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			initialRetryFallback,
 			prewalk: options.prewalk,
 			planYolo: options.planYolo,
-			serviceTierByFamily: initialServiceTierByFamily,
+			serviceTierByFamily: configuredServiceTierByFamily,
+			serviceTierOverrides: initialServiceTierOverrides,
 			sessionManager,
 			settings,
 			additionalExtensionPaths: options.additionalExtensionPaths,

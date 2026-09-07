@@ -9,7 +9,7 @@ import {
 	type ThinkingLevel,
 } from "@oh-my-pi/pi-agent-core";
 import { generateHandoffFromContext, renderHandoffPrompt } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Message, Model, ServiceTier, SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import { type Effort, type Message, type Model, type ServiceTier, type SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import { logger, Snowflake } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import type { Settings } from "../config/settings";
@@ -51,7 +51,17 @@ export interface SessionHandoffHost {
 	deobfuscateFromProvider(text: string): string;
 	convertMessagesToLlm(messages: AgentMessage[], signal?: AbortSignal): Promise<Message[]>;
 	prepareSimpleStreamOptions(options: SimpleStreamOptions, provider?: string): SimpleStreamOptions;
-	effectiveServiceTier(model: Model | undefined): ServiceTier | undefined;
+	/**
+	 * Effective wire tier for one handoff request. `reasoning`/`disableReasoning`
+	 * are the handoff oneshot's own final values (its compaction effort contract),
+	 * never the parent UI thinking selection alone; omitted reasoning stays
+	 * omitted instead of inheriting the parent's active effort.
+	 */
+	effectiveServiceTier(
+		model: Model | undefined,
+		reasoning?: Effort,
+		disableReasoning?: boolean,
+	): ServiceTier | undefined;
 }
 
 /** Generates handoff documents with a cache-friendly oneshot LLM call. */
@@ -161,7 +171,6 @@ export class SessionHandoff {
 					sessionId: `${cacheSessionId}:side:${Snowflake.next()}`,
 					promptCacheKey: handoffPromptCacheKey,
 					preferWebsockets: false,
-					serviceTier: this.#host.effectiveServiceTier(model),
 					hideThinkingSummary: this.#host.agent.hideThinkingSummary,
 					initiatorOverride: "agent",
 					signal: handoffSignal,
@@ -173,6 +182,15 @@ export class SessionHandoff {
 				model,
 				{
 					streamOptions: handoffStreamOptions,
+					// Authoritative per-request tier: `generateHandoffFromContext`
+					// computes the oneshot's actual effort (its compaction effort
+					// contract) and invokes this resolver with the final
+					// reasoning/disable values, so exact `provider/model:effort`
+					// override rules bind on the effort the request really carries
+					// and `Off` resolves as disabled — never the parent UI thinking
+					// selection alone, and never selected before the effort is known.
+					serviceTierResolver: (requestModel, reasoning, disableReasoning) =>
+						this.#host.effectiveServiceTier(requestModel, reasoning, disableReasoning),
 					completeImpl: async (requestModel, requestContext, requestOptions) => {
 						const stream = await this.#host.sideStreamFn(requestModel, requestContext, requestOptions);
 						return stream.result();

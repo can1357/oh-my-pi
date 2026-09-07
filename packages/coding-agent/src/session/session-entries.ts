@@ -1,12 +1,17 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { coerceServiceTierByFamily } from "@oh-my-pi/pi-ai";
 import type {
 	ImageContent,
 	MessageAttribution,
+	ServiceTier,
 	ServiceTierByFamily,
+	ServiceTierFamily,
 	StopReason,
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
+import { isRecord } from "@oh-my-pi/pi-utils";
+import type { ServiceTierOverrides } from "../config/service-tier";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import type { CompactionMethod } from "./compaction-methods";
 
@@ -84,6 +89,8 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	api: string;
 	provider: string;
 	model: string;
+	/** Concrete service tier requested for this call; null records an explicit no-tier request. */
+	serviceTier?: ServiceTier | null;
 	usage: Usage;
 	stopReason: StopReason;
 	errorMessage?: string;
@@ -112,7 +119,70 @@ export interface ModelChangeEntry extends SessionEntryBase {
 
 export interface ServiceTierChangeEntry extends SessionEntryBase {
 	type: "service_tier_change";
+	/** Authoritative effective tier snapshot; ancient entries stored a bare scalar ("priority", "openai-only", …). Legacy readers and stats fold this field. */
 	serviceTier: ServiceTierByFamily | null;
+	/**
+	 * Per-family override selections recorded alongside the snapshot. Absent on
+	 * entries written before overrides existed (legacy format); `{}` records an
+	 * explicit clearing of every override; a `null` family is explicit off.
+	 */
+	overrides?: ServiceTierOverrides;
+}
+
+const SERVICE_TIER_FAMILIES: readonly ServiceTierFamily[] = ["openai", "anthropic", "google"];
+
+function isServiceTierValue(value: unknown): value is ServiceTier {
+	return value === "auto" || value === "default" || value === "flex" || value === "scale" || value === "priority";
+}
+
+/**
+ * Validate raw persisted per-family override selections: keys outside the
+ * three families and values that are neither a {@link ServiceTier} nor `null`
+ * are dropped. A non-object (corrupt record) yields `undefined`.
+ */
+export function coerceServiceTierOverrides(value: unknown): ServiceTierOverrides | undefined {
+	if (!isRecord(value)) return undefined;
+	const out: ServiceTierOverrides = {};
+	for (const family of SERVICE_TIER_FAMILIES) {
+		const tier = value[family];
+		if (tier === null) out[family] = null;
+		else if (isServiceTierValue(tier)) out[family] = tier;
+	}
+	return out;
+}
+
+/**
+ * Express a legacy entry's authoritative tier snapshot as overrides: every
+ * family is listed, with absent families explicit off. Ancient bare-scalar
+ * snapshots ("priority", "openai-only", "claude-only", plus OpenAI-only
+ * values) expand through {@link coerceServiceTierByFamily}. A `null` snapshot
+ * is all-off; corrupt or unknown values yield `undefined`.
+ */
+export function serviceTierSnapshotToOverrides(serviceTier: unknown): ServiceTierOverrides | undefined {
+	if (serviceTier === null) return { openai: null, anthropic: null, google: null };
+	if (typeof serviceTier !== "string" && !isRecord(serviceTier)) return undefined;
+	const snapshot = coerceServiceTierByFamily(serviceTier);
+	// The coercer rejects unknown scalars and familyless records alike: only
+	// records fall through to the all-off reading, unknown scalars stay absent.
+	if (snapshot === undefined && !isRecord(serviceTier)) return undefined;
+	const out: ServiceTierOverrides = {};
+	for (const family of SERVICE_TIER_FAMILIES) {
+		out[family] = snapshot?.[family] ?? null;
+	}
+	return out;
+}
+
+/**
+ * Overrides carried by a `service_tier_change` entry: new-format entries read
+ * their `overrides` field, legacy entries fall back to the authoritative
+ * full-family `serviceTier` snapshot.
+ */
+export function serviceTierChangeOverrides(entry: ServiceTierChangeEntry): ServiceTierOverrides | undefined {
+	if (entry.overrides !== undefined && entry.overrides !== null) {
+		const coerced = coerceServiceTierOverrides(entry.overrides);
+		if (coerced !== undefined) return coerced;
+	}
+	return serviceTierSnapshotToOverrides(entry.serviceTier);
 }
 
 export interface CompactionEntry<T = unknown> extends SessionEntryBase {

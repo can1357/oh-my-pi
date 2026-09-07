@@ -17,6 +17,7 @@ import { completeSimple, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { diffLineRuns, editDiffString, summarizeCode } from "@oh-my-pi/pi-natives";
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { resolveRoleSelection } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/service-tier";
 import type { WritethroughCallback } from "../lsp";
 import type { ToolSession } from "../tools";
 import { invalidateFsScanAfterWrite } from "../tools/fs-cache-invalidation";
@@ -298,6 +299,14 @@ export async function attemptEditAutoRepair(options: {
 	// an unauthenticated smol role bails before any region work.
 	const apiKey = await registry.getApiKey(model, sessionId);
 	if (!apiKey) return undefined;
+	// Direct completeSimple calls bypass the agent's service-tier resolver. This
+	// request pins `disableReasoning: true`, so the override matches at the off
+	// level: `:max` effort rules stay inert, base model rules (and `none`) apply.
+	const tierResolution = resolveModelServiceTierOverride(
+		session.settings.get("tier.modelOverrides"),
+		model,
+		undefined,
+	);
 
 	// Repair against the bytes on disk, not the snapshot: a later operation in
 	// the same call or a format-on-write pass may have moved the file since the
@@ -323,6 +332,7 @@ export async function attemptEditAutoRepair(options: {
 						sessionId,
 						maxTokens: COMPLETION_MAX_TOKENS,
 						disableReasoning: true,
+						serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 						signal,
 					},
 				),

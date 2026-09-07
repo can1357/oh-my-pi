@@ -19,6 +19,7 @@ import { type AssistantMessage, completeSimple, retryTransientCompletion } from 
 import { logger, prompt } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import speechRewritePrompt from "../prompts/system/speech-rewrite.md" with { type: "text" };
 
@@ -82,6 +83,10 @@ export class SpeechEnhancer {
 			if (!apiKey) return null;
 			// Resolve metadata after getApiKey so the session-sticky credential is recorded first.
 			const metadata = this.#deps.metadataResolver?.(model.provider);
+			// Direct completeSimple calls bypass the agent's service-tier resolver. This
+			// request pins `disableReasoning: true`, so the override matches at the off
+			// level: `:max` effort rules stay inert, base model rules (and `none`) apply.
+			const tierResolution = resolveModelServiceTierOverride(settings.get("tier.modelOverrides"), model, undefined);
 			const response = await retryTransientCompletion(
 				() => {
 					const timeout = AbortSignal.timeout(REWRITE_TIMEOUT_MS);
@@ -97,6 +102,7 @@ export class SpeechEnhancer {
 							maxTokens: ANSWER_MAX_TOKENS,
 							disableReasoning: true,
 							metadata,
+							serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 							signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
 						},
 					);

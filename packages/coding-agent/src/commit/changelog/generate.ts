@@ -6,6 +6,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import changelogSystemPrompt from "../../commit/prompts/changelog-system.md" with { type: "text" };
 import changelogUserPrompt from "../../commit/prompts/changelog-user.md" with { type: "text" };
 import type { ChangelogGenerationResult } from "../../commit/types";
+import { resolveModelServiceTierOverride } from "../../config/service-tier";
 import { toReasoningEffort } from "../../thinking";
 import { extractTextContent, extractToolCall, parseJsonPayload } from "../utils";
 
@@ -27,11 +28,16 @@ export const changelogTool = {
 	parameters: type({ entries: changelogEntriesSchema }),
 };
 
+/** Frozen stand-in so an absent `modelServiceTierOverrides` skips per-call allocation. */
+const EMPTY_TIER_OVERRIDES: Readonly<Record<string, string>> = {};
+
 export interface ChangelogPromptInput {
 	model: Model<Api>;
 	apiKey: ApiKey;
 	sessionId: string;
 	thinkingLevel?: ThinkingLevel;
+	/** `tier.modelOverrides` record; matched per-model rules tier the actual request, absent/nonmatching omit. */
+	modelServiceTierOverrides?: Readonly<Record<string, string>>;
 	changelogPath: string;
 	isPackageChangelog: boolean;
 	existingEntries?: string;
@@ -44,6 +50,7 @@ export async function generateChangelogEntries({
 	apiKey,
 	sessionId,
 	thinkingLevel,
+	modelServiceTierOverrides = EMPTY_TIER_OVERRIDES,
 	changelogPath,
 	isPackageChangelog,
 	existingEntries,
@@ -57,6 +64,10 @@ export async function generateChangelogEntries({
 		stat,
 		diff,
 	});
+	const reasoning = toReasoningEffort(thinkingLevel);
+	// Direct completeSimple calls bypass the agent's service-tier resolver, so match
+	// `tier.modelOverrides` against the actual model and the effort this request sends.
+	const tierResolution = resolveModelServiceTierOverride(modelServiceTierOverrides, model, thinkingLevel);
 	const response = await retryTransientCompletion(() =>
 		completeSimple(
 			model,
@@ -65,7 +76,13 @@ export async function generateChangelogEntries({
 				messages: [{ role: "user", content: userContent, timestamp: Date.now() }],
 				tools: [changelogTool],
 			},
-			{ apiKey, sessionId, maxTokens: 1200, reasoning: toReasoningEffort(thinkingLevel) },
+			{
+				apiKey,
+				sessionId,
+				maxTokens: 1200,
+				reasoning,
+				serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
+			},
 		),
 	);
 

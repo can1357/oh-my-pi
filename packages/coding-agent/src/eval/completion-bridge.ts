@@ -25,6 +25,7 @@ import {
 	getModelMatchPreferences,
 	resolveModelFromString,
 } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/service-tier";
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { ToolError } from "../tools/tool-errors";
@@ -162,6 +163,18 @@ async function executeCompletion(
 			]
 		: undefined;
 	const telemetry = resolveTelemetry(session.getTelemetry?.(), session.getSessionId?.() ?? undefined);
+	const reasoning = reasoningForTier(finalTier, model);
+	// completion() bypasses the agent's per-request service-tier resolver, so match
+	// `tier.modelOverrides` against the actual model and the effort this request
+	// sends (undefined whenever no reasoning goes out — `smol`/`default`, or
+	// `slow` on a model that cannot reason). A matched rule tiers the request; a
+	// nonmatch keeps the tier omitted — completion() was previously untiered and
+	// never gains a family default here.
+	const tierResolution = resolveModelServiceTierOverride(
+		session.settings.get("tier.modelOverrides"),
+		model,
+		reasoning,
+	);
 	const systemPrompt = system ? [system] : ["You are a helpful assistant."];
 	const response = await instrumentedCompleteSimple(
 		model,
@@ -173,7 +186,8 @@ async function executeCompletion(
 		{
 			apiKey: registry.resolver(model, session.getSessionId?.() ?? undefined),
 			signal,
-			reasoning: reasoningForTier(finalTier, model),
+			reasoning,
+			serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 			toolChoice: schema ? { type: "tool", name: STRUCTURED_TOOL_NAME } : undefined,
 		},
 		{ telemetry, oneshotKind: "eval_completion" },

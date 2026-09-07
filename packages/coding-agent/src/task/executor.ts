@@ -25,7 +25,11 @@ import {
 	resolveModelOverrideWithAuthFallback,
 } from "../config/model-resolver";
 import type { PromptTemplate } from "../config/prompt-templates";
-import { buildServiceTierByFamily, resolveSubagentServiceTier } from "../config/service-tier";
+import {
+	buildServiceTierByFamily,
+	resolveSubagentServiceTier,
+	type ServiceTierOverrides,
+} from "../config/service-tier";
 import { Settings } from "../config/settings";
 import { SETTINGS_SCHEMA, type SettingPath } from "../config/settings-schema";
 import type { ToolPathWithSource } from "../extensibility/custom-tools";
@@ -512,12 +516,24 @@ export interface ExecutorOptions {
 	modelRegistry?: ModelRegistry;
 	settings?: Settings;
 	/**
-	 * Parent session's live per-family service tiers, the source of truth for a
-	 * subagent whose `tier.subagent` is `"inherit"`. `null` = the parent
-	 * explicitly has no tier (e.g. `/fast off`); omitted = no live session, so
-	 * inherit falls back to the subagent's configured `tier.*` settings.
+	 * Parent session's CONFIGURED per-family service-tier baseline, the source
+	 * of truth for a subagent whose `tier.subagent` is "inherit". This must
+	 * never be the composed live map when paired with
+	 * {@link parentServiceTierOverrides}: folding explicit choices into the
+	 * baseline would resurrect a tier the child explicitly cleared. `null` =
+	 * the parent explicitly has no tier (e.g. `/fast off`); omitted = no live
+	 * session, so inherit falls back to the subagent's configured `tier.*` settings.
 	 */
 	parentServiceTier?: ServiceTierByFamily | null;
+	/**
+	 * Parent session's explicit per-family service-tier overrides (absent =
+	 * inherit the family policy, `null` = explicit off). Forwarded into the
+	 * child session only when `tier.subagent` is "inherit"`, so a pinned
+	 * subagent keeps its own baseline. This never carries a per-model
+	 * `tier.modelOverrides` match: the child re-resolves that rule against its
+	 * own final model and clamped effort per request.
+	 */
+	parentServiceTierOverrides?: ServiceTierOverrides;
 	/** Override local:// protocol options so subagent shares parent's local:// root */
 	localProtocolOptions?: LocalProtocolOptions;
 	/**
@@ -947,10 +963,12 @@ export function createSubagentSettings(
 	for (const key of Object.keys(SETTINGS_SCHEMA) as SettingPath[]) {
 		snapshot[key] = baseSettings.get(key);
 	}
-	// Resolve the subagent's per-family tiers from `tier.subagent` ("inherit" =
-	// match the parent's live tiers when a live session supplied them, else the
-	// subagent's own configured tier.* settings). The result is stamped back onto
-	// the snapshot so createAgentSession's tier.* reads pick it up.
+	// Resolve the subagent's per-family baseline from `tier.subagent` ("inherit" =
+	// use the parent's configured baseline when a live session supplied it, else
+	// the subagent's own configured tier.* settings). Explicit live overrides are
+	// forwarded separately so the child can clear them without resurrecting the
+	// value from this baseline. The result is stamped back onto the snapshot so
+	// createAgentSession's tier.* reads pick it up.
 	const inheritedTiers =
 		inheritedServiceTier === undefined
 			? buildServiceTierByFamily(
@@ -2984,6 +3002,16 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		},
 		options.parentServiceTier,
 	);
+	// Forward the parent's explicit live tier overrides only to an inheriting
+	// spawn: a pinned tier.subagent owns its own baseline, and an empty map
+	// carries no explicit choice (absent = inherit policy), so forwarding it
+	// would only force a redundant service_tier_change entry onto the child.
+	const inheritedServiceTierOverrides =
+		options.parentServiceTierOverrides !== undefined &&
+		Object.keys(options.parentServiceTierOverrides).length > 0 &&
+		subagentSettings.get("tier.subagent") === "inherit"
+			? options.parentServiceTierOverrides
+			: undefined;
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	const maxRuntimeMs = Math.max(
 		0,
@@ -3344,6 +3372,10 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					model || modelOverride === undefined ? undefined : inheritedRetryFallbackChain,
 				thinkingLevel: effectiveThinkingLevel,
 				thinkingLevelCeiling: spawnEffortCeiling,
+				// Keep the launch layer in the captured options so lifecycle revival
+				// replays the same explicit source/off state; the child still resolves
+				// tier.modelOverrides against its own final model and request effort.
+				...(inheritedServiceTierOverrides ? { serviceTierOverrides: inheritedServiceTierOverrides } : {}),
 				toolNames,
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,

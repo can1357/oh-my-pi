@@ -16,7 +16,12 @@ import { replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, prompt } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { formatModelSelectorValue, formatModelString } from "../config/model-resolver";
-import { buildServiceTierByFamily, serviceTierForAllFamilies, serviceTierSettingToTier } from "../config/service-tier";
+import {
+	buildServiceTierByFamily,
+	resolveModelServiceTierOverride,
+	serviceTierForAllFamilies,
+	serviceTierSettingToTier,
+} from "../config/service-tier";
 import cachePrefixTemplate from "../prompts/bench/cache-prefix.md" with { type: "text" };
 import cachePrefixChunk from "../prompts/bench/cache-prefix-chunk.md" with { type: "text" };
 import cacheSuffixTemplate from "../prompts/bench/cache-suffix.md" with { type: "text" };
@@ -946,8 +951,10 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 		const targets = resolveBenchTargets(command.models, runtime.modelRegistry, runtime.settings, writeStderr);
 		if (cacheMode) assertCacheModeSupported(targets);
 		// Explicit `--service-tier` (a single value broadcast across families) wins;
-		// otherwise fall back to the configured per-family `tier.*` settings. Each
-		// model resolves its own family's tier below before reaching the wire.
+		// otherwise fall back to the configured per-family `tier.*` settings, with
+		// per-model `tier.modelOverrides` rules matched against each request's
+		// actual reasoning before the family baseline. Each model resolves below
+		// before reaching the wire.
 		const flagTier = command.flags.serviceTier ? serviceTierSettingToTier(command.flags.serviceTier) : undefined;
 		const serviceTierByFamily = command.flags.serviceTier
 			? serviceTierForAllFamilies(flagTier)
@@ -956,6 +963,10 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 					runtime.settings?.get("tier.anthropic") ?? "none",
 					runtime.settings?.get("tier.google") ?? "none",
 				);
+		// Model rules live outside the family snapshot: the flag (including
+		// `none`) stays an authoritative family broadcast, and a matched rule
+		// must never freeze into the reported `serviceTierByFamily`.
+		const modelTierOverrides = command.flags.serviceTier ? undefined : runtime.settings?.get("tier.modelOverrides");
 		if (!json && flagTier) print(chalk.dim(`service tier: ${flagTier}`));
 		const reports: BenchModelReport[] = [];
 		for (const { selector, model, thinking } of targets) {
@@ -998,7 +1009,22 @@ export async function runBenchCommand(command: BenchCommandArgs, deps: BenchDepe
 				continue;
 			}
 
-			const serviceTier = resolveModelServiceTier(serviceTierByFamily, model);
+			// Wire tier precedence: a matched `tier.modelOverrides` rule (exact
+			// effort key before the bare model key) replaces the family baseline;
+			// an unmatched model keeps the configured family tier. The lookup sees
+			// the request's actual final reasoning — an explicit `:off` selector
+			// disables reasoning and binds no effort key — and uses the resolved
+			// (possibly credential-fallback) model's identity, never the selector.
+			const modelOverride = modelTierOverrides
+				? resolveModelServiceTierOverride(
+						modelTierOverrides,
+						model,
+						shouldDisableReasoning(thinking) ? undefined : thinking,
+					)
+				: { matched: false as const };
+			const serviceTier = modelOverride.matched
+				? modelOverride.tier
+				: resolveModelServiceTier(serviceTierByFamily, model);
 			if (cacheMode) {
 				const pairs = await runWithConcurrency(
 					cachePairs!,

@@ -267,6 +267,34 @@ describe("bench empty-output guard", () => {
 	});
 });
 
+/**
+ * Reasoning-capable fake: the `:effort` tier rules key off the resolved
+ * thinking level, so the fake must declare a supported effort ladder.
+ */
+const lunaModel = {
+	provider: "openai-codex",
+	id: "gpt-5.6-luna",
+	name: "gpt-5.6-luna",
+	api: "openai-completions",
+	maxTokens: 4096,
+	contextWindow: 128_000,
+	reasoning: true,
+	thinking: { mode: "effort", efforts: ["low", "medium", "high", "max"] },
+} as unknown as Model<Api>;
+
+function modelOverridesSettings(modelOverrides: Record<string, string>, tierOpenai?: string): Settings {
+	return {
+		get: (key: string) =>
+			key === "tier.modelOverrides"
+				? modelOverrides
+				: key === "tier.openai"
+					? (tierOpenai ?? "none")
+					: key === "tier.anthropic" || key === "tier.google"
+						? "none"
+						: undefined,
+	} as unknown as Settings;
+}
+
 function settingsStub(serviceTier: string | undefined): Settings | undefined {
 	if (serviceTier === undefined) return undefined;
 	return {
@@ -278,18 +306,27 @@ function settingsStub(serviceTier: string | undefined): Settings | undefined {
 async function captureServiceTier(opts: {
 	flag?: string;
 	setting?: string;
+	modelOverrides?: Record<string, string>;
+	selector?: string;
 }): Promise<{ wire: SimpleStreamOptions["serviceTier"]; summary: BenchSummary["serviceTierByFamily"] }> {
-	const registry = fakeRegistry({ models: [fakeModel("openai-codex", "gpt-5.5")], authedProviders: ["openai-codex"] });
+	const registry = fakeRegistry({
+		models: opts.modelOverrides
+			? [fakeModel("openai-codex", "gpt-5.5"), lunaModel]
+			: [fakeModel("openai-codex", "gpt-5.5")],
+		authedProviders: ["openai-codex"],
+	});
 	let captured: SimpleStreamOptions | undefined;
 	const summary = await runBenchCommand(
 		{
-			models: ["openai-codex/gpt-5.5"],
+			models: [opts.selector ?? "openai-codex/gpt-5.5"],
 			flags: { runs: 1, maxTokens: 64, json: true, serviceTier: opts.flag },
 		},
 		{
 			createRuntime: async () => ({
 				modelRegistry: registry,
-				settings: settingsStub(opts.setting),
+				settings: opts.modelOverrides
+					? modelOverridesSettings(opts.modelOverrides, opts.setting)
+					: settingsStub(opts.setting),
 				close: () => {},
 			}),
 			randomSessionId: () => "sess-1",
@@ -363,5 +400,80 @@ describe("bench service tier", () => {
 		const { wire, summary } = await captureServiceTier({});
 		expect(wire).toBeUndefined();
 		expect(summary).toEqual({});
+	});
+
+	it("sends a matching model:effort rule ahead of the family setting", async () => {
+		const { wire, summary } = await captureServiceTier({
+			selector: "openai-codex/gpt-5.6-luna:max",
+			setting: "flex",
+			modelOverrides: { "openai-codex/gpt-5.6-luna:max": "priority" },
+		});
+		expect(wire).toBe("priority");
+		// The model rule never freezes into the reported family snapshot.
+		expect(summary).toEqual({ openai: "flex" });
+	});
+
+	it("keeps the family baseline when the effort suffix does not match the rule", async () => {
+		const { wire } = await captureServiceTier({
+			selector: "openai-codex/gpt-5.6-luna:high",
+			setting: "flex",
+			modelOverrides: { "openai-codex/gpt-5.6-luna:max": "priority" },
+		});
+		expect(wire).toBe("flex");
+	});
+
+	it("keeps the family baseline for a candidate the rules never key", async () => {
+		const { wire } = await captureServiceTier({
+			setting: "flex",
+			modelOverrides: { "openai/gpt-5.6-luna:max": "priority" },
+		});
+		expect(wire).toBe("flex");
+	});
+
+	it("treats an explicit --service-tier none as authoritative off over a matching rule", async () => {
+		const { wire } = await captureServiceTier({
+			flag: "none",
+			selector: "openai-codex/gpt-5.6-luna:max",
+			modelOverrides: { "openai-codex/gpt-5.6-luna:max": "priority" },
+		});
+		expect(wire).toBeUndefined();
+	});
+
+	it("re-resolves rules against the credential-fallback model, not the original resolution", async () => {
+		// Catalog order makes the unauthenticated `openai` entry win the initial
+		// resolution; bench redirects to the authenticated openai-codex twin.
+		const registry = fakeRegistry({
+			models: [fakeModel("openai", "gpt-5.6-luna"), fakeModel("openai-codex", "gpt-5.6-luna")],
+			authedProviders: ["openai-codex"],
+		});
+		let captured: SimpleStreamOptions | undefined;
+		const summary = await runBenchCommand(
+			{ models: ["gpt-5.6-luna"], flags: { runs: 1, maxTokens: 64, json: true } },
+			{
+				createRuntime: async () => ({
+					modelRegistry: registry,
+					settings: modelOverridesSettings({
+						"openai/gpt-5.6-luna": "none",
+						"openai-codex/gpt-5.6-luna": "priority",
+					}),
+					close: () => {},
+				}),
+				randomSessionId: () => "sess-1",
+				writeStdout: () => {},
+				writeStderr: () => {},
+				setExitCode: () => {},
+				streamSimple: (_model, _context, options) => {
+					captured = options;
+					return fakeStream();
+				},
+				now: () => 0,
+				stdoutIsTTY: false,
+			},
+		);
+
+		expect(summary.models[0].model).toBe("openai-codex/gpt-5.6-luna");
+		// The fallback model's own key applies; the sticky key naming the
+		// originally resolved provider must not suppress it.
+		expect(captured?.serviceTier).toBe("priority");
 	});
 });

@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, spyOn, vi } from "bun:test";
 import type { Api, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	disposeTerminalTitleState,
 	generateSessionTitle,
@@ -25,19 +27,13 @@ function getModelFor(provider: GeneratedProvider, id: string): Model<Api> {
 	return model;
 }
 
-function createSettings(model: Model<Api>, tinyModel = "online") {
-	return {
-		get(path: string) {
-			if (path === "providers.tinyModel") return tinyModel;
-			return undefined;
-		},
-		getModelRole(role: string) {
-			return role === "smol" ? `${model.provider}/${model.id}` : undefined;
-		},
-		getStorage() {
-			return undefined;
-		},
-	} as never;
+function createSettings(model: Model<Api>, tinyModel = "online", tierModelOverrides: Record<string, string> = {}) {
+	const settings = Settings.isolated({
+		"providers.tinyModel": tinyModel,
+		"tier.modelOverrides": tierModelOverrides,
+	});
+	settings.setModelRole("smol", `${model.provider}/${model.id}`);
+	return settings;
 }
 
 function createRegistry(model: Model<Api>) {
@@ -76,6 +72,26 @@ describe("title generator", () => {
 		expect(request?.tools).toBeUndefined();
 		expect(options?.toolChoice).toBeUndefined();
 		expect(options?.disableReasoning).toBe(true);
+	});
+
+	it("applies a configured base tier to the fixed-off title request", async () => {
+		const model = getModelFor("openai", "gpt-5.6");
+		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
+			stopReason: "stop",
+			content: [{ type: "text", text: "<title>Tiered Title</title>" }],
+		} as never);
+
+		const title = await generateSessionTitle(
+			"Investigate the resolver",
+			createRegistry(model),
+			createSettings(model, "online", { [`${model.provider}/${model.id}`]: "priority" }),
+		);
+
+		expect(title).toBe("Tiered Title");
+		expect(completeSimpleMock.mock.calls[0]?.[2]).toMatchObject({
+			disableReasoning: true,
+			serviceTier: "priority",
+		});
 	});
 
 	it.each([
@@ -374,7 +390,7 @@ describe("title generator", () => {
 	// before it can be emitted.
 	it("uses a reasoning-safe output budget even when the model declares reasoning: false", async () => {
 		const baseModel = getModelOrThrow("claude-sonnet-4-5");
-		const model = { ...baseModel, reasoning: false } as Model<Api>;
+		const model = buildModel({ ...baseModel, reasoning: false });
 		const completeSimpleMock = vi.spyOn(ai, "completeSimple").mockResolvedValue({
 			stopReason: "stop",
 			content: [{ type: "text", text: "<title>Budget Title</title>" }],
@@ -506,21 +522,10 @@ describe("title generator", () => {
 		} as never);
 
 		// Case 1: All three roles configured. 'tiny' should be used.
-		let currentSettings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				return undefined;
-			},
-			getModelRole(role: string) {
-				if (role === "tiny") return `${tinyModel.provider}/${tinyModel.id}`;
-				if (role === "commit") return `${commitModel.provider}/${commitModel.id}`;
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		let currentSettings = Settings.isolated({ "providers.tinyModel": "online" });
+		currentSettings.setModelRole("tiny", `${tinyModel.provider}/${tinyModel.id}`);
+		currentSettings.setModelRole("commit", `${commitModel.provider}/${commitModel.id}`);
+		currentSettings.setModelRole("smol", `${smolModel.provider}/${smolModel.id}`);
 
 		const registry = {
 			getAvailable: () => [tinyModel, commitModel, smolModel],
@@ -537,20 +542,9 @@ describe("title generator", () => {
 		mockComplete.mockClear();
 
 		// Case 2: 'tiny' role not configured, 'commit' and 'smol' configured. 'commit' should be used.
-		currentSettings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				return undefined;
-			},
-			getModelRole(role: string) {
-				if (role === "commit") return `${commitModel.provider}/${commitModel.id}`;
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		currentSettings = Settings.isolated({ "providers.tinyModel": "online" });
+		currentSettings.setModelRole("commit", `${commitModel.provider}/${commitModel.id}`);
+		currentSettings.setModelRole("smol", `${smolModel.provider}/${smolModel.id}`);
 
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();
@@ -559,19 +553,8 @@ describe("title generator", () => {
 		mockComplete.mockClear();
 
 		// Case 3: Only 'smol' role configured. 'smol' should be used.
-		currentSettings = {
-			get(path: string) {
-				if (path === "providers.tinyModel") return "online";
-				return undefined;
-			},
-			getModelRole(role: string) {
-				if (role === "smol") return `${smolModel.provider}/${smolModel.id}`;
-				return undefined;
-			},
-			getStorage() {
-				return undefined;
-			},
-		} as never;
+		currentSettings = Settings.isolated({ "providers.tinyModel": "online" });
+		currentSettings.setModelRole("smol", `${smolModel.provider}/${smolModel.id}`);
 
 		await generateSessionTitle("Some message", registry, currentSettings);
 		expect(mockComplete).toHaveBeenCalled();

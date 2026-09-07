@@ -110,6 +110,7 @@ describe("classifyUnexpectedStop", () => {
 		const settings = {
 			get(path: string) {
 				if (path === "providers.unexpectedStopModel") return "online";
+				if (path === "tier.modelOverrides") return {};
 				return undefined;
 			},
 			getModelRole(role: string) {

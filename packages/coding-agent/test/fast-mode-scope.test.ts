@@ -1,6 +1,6 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as path from "node:path";
-import { Agent } from "@oh-my-pi/pi-agent-core";
+import { Agent, ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
@@ -36,15 +36,22 @@ describe("/fast targets the current model's service-tier family", () => {
 		tempDir.removeSync();
 	});
 
-	async function createSession(provider: "anthropic" | "openai", modelId: string): Promise<AgentSession> {
+	async function createSession(
+		provider: "anthropic" | "openai" | "openai-codex",
+		modelId: string,
+		settings: Settings = Settings.isolated(),
+	): Promise<AgentSession> {
 		const model = getBundledModel(provider, modelId);
 		if (!model) {
-			throw new Error(`Expected bundled test model ${provider}/${modelId} to exist`);
+			throw new Error("Expected bundled test model " + provider + "/" + modelId + " to exist");
 		}
-		return createSessionForModel(model);
+		return createSessionForModel(model, settings);
 	}
 
-	async function createSessionForModel(model: Model<Api>): Promise<AgentSession> {
+	async function createSessionForModel(
+		model: Model<Api>,
+		settings: Settings = Settings.isolated(),
+	): Promise<AgentSession> {
 		const agent = new Agent({
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 		});
@@ -52,7 +59,7 @@ describe("/fast targets the current model's service-tier family", () => {
 		session = new AgentSession({
 			agent,
 			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated(),
+			settings,
 			modelRegistry,
 		});
 		session.subscribe(() => {});
@@ -137,12 +144,79 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.isFastModeActive()).toBe(false);
 	});
 
-	it("clears only the current model's family when disabled", async () => {
+	it("persists explicit off for the current family when disabled", async () => {
 		const session = await createSession("anthropic", "claude-sonnet-4-5");
 		session.setFastMode(true);
 		session.setFastMode(false);
 		expect(session.serviceTierByFamily).toEqual({});
+		expect(session.serviceTierOverrides).toEqual({ anthropic: null });
 		expect(session.isFastModeEnabled()).toBe(false);
+	});
+
+	it("distinguishes explicit /fast off from an unset family override", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-luna");
+		if (!model) throw new Error("Expected bundled test model openai-codex/gpt-5.6-luna to exist");
+		const settings = Settings.isolated();
+		settings.set("tier.modelOverrides", { "openai-codex/gpt-5.6-luna": "priority" });
+		const session = await createSessionForModel(model, settings);
+
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({});
+
+		session.setFastMode(false);
+		expect(session.serviceTierByFamily).toEqual({});
+		expect(session.serviceTierOverrides).toEqual({ openai: null });
+		expect(session.isFastModeEnabled()).toBe(false);
+		const tierEntry = [...session.sessionManager.getEntries()]
+			.reverse()
+			.find(entry => entry.type === "service_tier_change");
+		expect(tierEntry).toMatchObject({ serviceTier: null, overrides: { openai: null } });
+
+		session.setServiceTierFamily("openai", undefined);
+		expect(session.serviceTierOverrides).toEqual({});
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({});
+	});
+
+	it("keeps a model override scoped to Luna during a Luna to Sol transition", async () => {
+		const luna = getBundledModel("openai-codex", "gpt-5.6-luna");
+		const sol = getBundledModel("openai-codex", "gpt-5.6-sol");
+		if (!luna || !sol) throw new Error("Expected bundled GPT-5.6 Luna and Sol models to exist");
+		const settings = Settings.isolated();
+		settings.set("tier.modelOverrides", { "openai-codex/gpt-5.6-luna": "priority" });
+		const session = await createSessionForModel(luna, settings);
+
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.isFastModeActive()).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({});
+
+		await session.setModelTemporary(sol);
+		expect(session.isFastModeEnabled()).toBe(false);
+		expect(session.isFastModeActive()).toBe(false);
+		expect(session.serviceTierByFamily).toEqual({});
+
+		await session.setModelTemporary(luna);
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({});
+	});
+
+	it("resolves model-tier rules from the actual request effort", async () => {
+		const model = getBundledModel("openai-codex", "gpt-5.6-luna");
+		if (!model) throw new Error("Expected bundled test model openai-codex/gpt-5.6-luna to exist");
+		const settings = Settings.isolated();
+		settings.set("tier.modelOverrides", { "openai-codex/gpt-5.6-luna:high": "priority" });
+		const session = await createSessionForModel(model, settings);
+		const resolveTier = session.agent.serviceTierResolver;
+		if (!resolveTier) throw new Error("Expected AgentSession to install a service-tier resolver");
+
+		expect(resolveTier(model, ThinkingLevel.High, false)).toBe("priority");
+		expect(resolveTier(model, ThinkingLevel.Low, false)).toBeUndefined();
+		// An explicitly absent request effort must not inherit the active session effort.
+		expect(resolveTier(model, undefined, false)).toBeUndefined();
+		expect(resolveTier(model, ThinkingLevel.High, true)).toBeUndefined();
+
+		session.setThinkingLevel(ThinkingLevel.High);
+		expect(session.isFastModeEnabled()).toBe(true);
 	});
 
 	it("toggle reports the resulting state", async () => {

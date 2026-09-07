@@ -18,6 +18,7 @@ import {
 	stringifyJson,
 	toError,
 } from "@oh-my-pi/pi-utils";
+import type { ServiceTierOverrides } from "../config/service-tier";
 import type { StructuredSubagentSchemaMode } from "../task/types";
 import { ArtifactManager } from "./artifacts";
 import { type BlobPutOptions, type BlobPutResult, BlobStore } from "./blob-store";
@@ -37,6 +38,7 @@ import {
 	type BranchSummaryEntry,
 	type CompactionEntry,
 	type CredentialPinEntry,
+	coerceServiceTierOverrides,
 	CURRENT_SESSION_VERSION,
 	type CustomEntry,
 	type CustomMessageEntry,
@@ -2324,7 +2326,7 @@ export class SessionManager {
 	appendModelUsage(
 		usage: Pick<
 			ModelUsageEntry,
-			"purpose" | "role" | "api" | "provider" | "model" | "usage" | "stopReason" | "errorMessage"
+			"purpose" | "role" | "api" | "provider" | "model" | "serviceTier" | "usage" | "stopReason" | "errorMessage"
 		>,
 		owner: { sessionId: string; parentId: string | null },
 	): string | undefined {
@@ -2356,8 +2358,16 @@ export class SessionManager {
 		return entry.id;
 	}
 
-	appendServiceTierChange(serviceTier: ServiceTierByFamily | null): string {
-		const entry: ServiceTierChangeEntry = { type: "service_tier_change", ...this.#freshEntryFields(), serviceTier };
+	appendServiceTierChange(serviceTier: ServiceTierByFamily | null, overrides?: ServiceTierOverrides): string {
+		// `undefined` keeps the legacy on-disk shape (no `overrides` field);
+		// `{}` records an explicit clearing of every override.
+		const coercedOverrides = overrides === undefined ? undefined : coerceServiceTierOverrides(overrides);
+		const entry: ServiceTierChangeEntry = {
+			type: "service_tier_change",
+			...this.#freshEntryFields(),
+			serviceTier,
+			...(coercedOverrides !== undefined ? { overrides: coercedOverrides } : {}),
+		};
 		this.#recordEntry(entry);
 		return entry.id;
 	}

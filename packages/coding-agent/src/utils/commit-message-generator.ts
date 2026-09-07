@@ -9,6 +9,7 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 
 import type { ModelRegistry } from "../config/model-registry";
 import { getModelMatchPreferences, resolveModelRoleValue } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/service-tier";
 import type { Settings } from "../config/settings";
 import MODEL_PRIO from "../priority.json" with { type: "json" };
 import commitSystemPrompt from "../prompts/system/commit-message-system.md" with { type: "text" };
@@ -86,6 +87,7 @@ export async function generateCommitMessage(
 	sessionId?: string,
 ): Promise<string | null> {
 	const candidates = getSmolModelCandidates(registry, settings);
+	const tierOverrides = settings.get("tier.modelOverrides");
 	if (candidates.length === 0) {
 		logger.debug("commit-msg-generator: no smol model found");
 		return null;
@@ -106,6 +108,16 @@ export async function generateCommitMessage(
 
 		try {
 			const maxTokens = COMMIT_MAX_TOKENS;
+			// Direct completeSimple calls bypass the agent's service-tier resolver, so
+			// match `tier.modelOverrides` against the actual fallback candidate and the
+			// effort this request sends; a nonmatch keeps the tier omitted instead of
+			// inventing a family default.
+			const reasoning = toReasoningEffort(candidate.thinkingLevel);
+			const tierResolution = resolveModelServiceTierOverride(
+				tierOverrides,
+				candidate.model,
+				candidate.thinkingLevel,
+			);
 			const response = await retryTransientCompletion(() =>
 				completeSimple(
 					candidate.model,
@@ -117,7 +129,8 @@ export async function generateCommitMessage(
 						apiKey: registry.resolver(candidate.model, sessionId),
 						sessionId,
 						maxTokens,
-						reasoning: toReasoningEffort(candidate.thinkingLevel),
+						reasoning,
+						serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 					},
 				),
 			);

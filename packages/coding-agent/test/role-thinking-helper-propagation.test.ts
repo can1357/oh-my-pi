@@ -1,7 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { generateCommitMessage } from "@oh-my-pi/pi-coding-agent/utils/commit-message-generator";
 import { generateSessionTitle } from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 
@@ -12,18 +14,11 @@ function getModelOrThrow(id: string) {
 }
 
 function createSettings(modelRoles: Record<string, string>) {
-	return {
-		get(path: string) {
-			if (path === "providers.tinyModel") return "online";
-			return undefined;
-		},
-		getModelRole(role: string) {
-			return modelRoles[role];
-		},
-		getStorage() {
-			return undefined;
-		},
-	} as never;
+	const settings = Settings.isolated({ "providers.tinyModel": "online" });
+	for (const [role, modelId] of Object.entries(modelRoles)) {
+		settings.setModelRole(role, modelId);
+	}
+	return settings;
 }
 
 beforeEach(() => {
@@ -60,7 +55,7 @@ describe("role thinking helper propagation", () => {
 	});
 
 	it("keeps the commit budget reasoning-safe when the catalog disables reasoning", async () => {
-		const model = { ...getModelOrThrow("claude-sonnet-4-5"), reasoning: false };
+		const model = buildModel({ ...getModelOrThrow("claude-sonnet-4-5"), reasoning: false });
 		const settings = createSettings({
 			smol: `${model.provider}/${model.id}`,
 		});

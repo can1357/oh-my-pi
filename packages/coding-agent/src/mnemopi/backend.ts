@@ -9,6 +9,7 @@ import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
+import { resolveModelServiceTierOverride } from "../config/service-tier";
 import type {
 	MemoryBackend,
 	MemoryBackendSaveInput,
@@ -579,6 +580,14 @@ async function resolveMnemopiProviderOptions(
 					});
 					return null;
 				}
+				// Direct completeSimple calls bypass the agent's service-tier resolver, so match
+				// `tier.modelOverrides` against the actual model and the effort this request
+				// sends; this request pins no effort, so only base `provider/model` rules apply.
+				const tierResolution = resolveModelServiceTierOverride(
+					settings.get("tier.modelOverrides"),
+					model,
+					undefined,
+				);
 				const message = await retryTransientCompletion(() =>
 					completeSimple(
 						model,
@@ -591,6 +600,7 @@ async function resolveMnemopiProviderOptions(
 							sessionId,
 							maxTokens: opts?.maxTokens,
 							temperature: opts?.temperature,
+							serviceTier: tierResolution.matched ? tierResolution.tier : undefined,
 						},
 					),
 				);

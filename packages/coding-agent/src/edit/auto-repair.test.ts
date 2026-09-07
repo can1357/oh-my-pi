@@ -1,6 +1,14 @@
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test, vi } from "bun:test";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
+import { Effort, type AssistantMessage, type Model, type ServiceTier, type SimpleStreamOptions } from "@oh-my-pi/pi-ai";
+import * as ai from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { summarizeCode } from "@oh-my-pi/pi-natives";
-import { computeRepairRegion, repairParseRegression } from "./auto-repair";
+import { writethroughNoop } from "../lsp";
+import { attemptEditAutoRepair, computeRepairRegion, repairParseRegression } from "./auto-repair";
+import type { AppliedEditSnapshot } from "./blackbox";
 
 const PATH = "/repo/src/sample.ts";
 
@@ -140,5 +148,124 @@ describe("repairParseRegression", () => {
 			async () => "const doubled = (b * 2; // still broken",
 		);
 		expect(repair).toBeUndefined();
+	});
+});
+
+describe("attemptEditAutoRepair service tiers", () => {
+	const broken = BASE.replace("const doubled = b * 2;", "const doubled = (b * 2;");
+	const tempDirs: string[] = [];
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+	});
+
+	function makeTierModel(): Model<"openai-completions"> {
+		return buildModel({
+			provider: "openai",
+			id: "smol-fast",
+			name: "smol-fast",
+			api: "openai-completions",
+			baseUrl: "https://example.test/v1",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High, Effort.Max] },
+			compat: {
+				thinkingFormat: "openai",
+				supportsReasoningParams: true,
+				supportsReasoningEffort: true,
+			},
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 16_384,
+		});
+	}
+
+	function assistantText(text: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "text", text }],
+			stopReason: "stop",
+			usage: { input: 1, output: 1 },
+		} as unknown as AssistantMessage;
+	}
+
+	interface TieredCall {
+		serviceTier: ServiceTier | undefined;
+	}
+
+	/** Spy on the barrel so the repair completer's `completeSimple` lands here. */
+	function spyTieredCompleteSimple(respond: () => AssistantMessage): TieredCall[] {
+		const calls: TieredCall[] = [];
+		vi.spyOn(ai, "completeSimple").mockImplementation((_model, _context, options) => {
+			calls.push({ serviceTier: (options as Partial<SimpleStreamOptions> | undefined)?.serviceTier });
+			return Promise.resolve(respond());
+		});
+		return calls;
+	}
+
+	function tierSession(model: Model<"openai-completions">, tierOverrides?: Record<string, string>) {
+		return {
+			settings: {
+				get(settingPath: string) {
+					if (settingPath === "edit.autoRepair.enabled") return true;
+					if (settingPath === "tier.modelOverrides") return tierOverrides;
+					return undefined;
+				},
+				getModelRole(role: string) {
+					return role === "smol" ? `${model.provider}/${model.id}` : undefined;
+				},
+			},
+			modelRegistry: {
+				getAvailable: () => [model],
+				getApiKey: async () => "test-key",
+				resolver: () => async () => "test-key",
+			},
+		} as never;
+	}
+
+	/** Committed broken edit on real disk bytes; the completer closes the paren without reverting. */
+	async function runTierRepair(tierOverrides?: Record<string, string>) {
+		const model = makeTierModel();
+		const dir = mkdtempSync(path.join(tmpdir(), "auto-repair-tier-"));
+		tempDirs.push(dir);
+		const filePath = path.join(dir, "sample.ts");
+		writeFileSync(filePath, broken);
+		const calls = spyTieredCompleteSimple(() => assistantText("const doubled = (b * 2);"));
+		const writes: string[] = [];
+		const outcome = await attemptEditAutoRepair({
+			session: tierSession(model, tierOverrides),
+			snapshot: { path: filePath, prev: BASE, next: broken } satisfies AppliedEditSnapshot,
+			writethrough: (dst: string, content: string) => {
+				writes.push(content);
+				return writethroughNoop(dst, content);
+			},
+		});
+		return { calls, writes, outcome };
+	}
+
+	test("applies a matched tier.modelOverrides entry for the actual smol model", async () => {
+		const { calls, writes, outcome } = await runTierRepair({ "openai/smol-fast": "flex" });
+		expect(outcome).toBeDefined();
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.serviceTier).toBe("flex");
+		expect(writes).toHaveLength(1);
+		expect(writes[0]).toContain("const doubled = (b * 2);");
+	});
+
+	test("keeps effort-scoped rules inert because the request pins disableReasoning", async () => {
+		const { calls, outcome } = await runTierRepair({ "openai/smol-fast:high": "priority" });
+		expect(outcome).toBeDefined();
+		expect(calls).toHaveLength(1);
+		// disableReasoning sends no effort, so `:effort` keys never match and the
+		// previously untiered request keeps omitting the tier.
+		expect(calls[0]?.serviceTier).toBeUndefined();
+	});
+
+	test("matched none stays an explicit off: the tier is omitted, not 'none'", async () => {
+		const { calls, outcome } = await runTierRepair({ "openai/smol-fast": "none" });
+		expect(outcome).toBeDefined();
+		expect(calls).toHaveLength(1);
+		expect(calls[0]?.serviceTier).toBeUndefined();
 	});
 });

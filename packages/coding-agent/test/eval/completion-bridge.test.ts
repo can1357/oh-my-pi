@@ -3,6 +3,8 @@ import * as path from "node:path";
 import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { Effort } from "@oh-my-pi/pi-ai";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import { $ } from "bun";
 import type { ModelRegistry } from "../../src/config/model-registry";
@@ -40,8 +42,8 @@ async function runEvalCompletionAndWait(
 	return entry.result;
 }
 
-function makeModel(provider: string, id: string, extra: Partial<Model<Api>> = {}): Model<Api> {
-	return {
+function makeModel(provider: string, id: string, extra: Partial<ModelSpec<Api>> = {}): Model<Api> {
+	return buildModel({
 		id,
 		name: id,
 		api: "openai-responses",
@@ -53,7 +55,7 @@ function makeModel(provider: string, id: string, extra: Partial<Model<Api>> = {}
 		contextWindow: 128000,
 		maxTokens: 4096,
 		...extra,
-	} as Model<Api>;
+	});
 }
 
 const SMOL = makeModel("p", "smol");
@@ -64,16 +66,29 @@ const REASONING_SLOW = makeModel("p", "slow", {
 	reasoning: true,
 	thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High], mode: "anthropic-adaptive" },
 });
+// OpenAI-family fixtures: serviceTierFamily() resolves provider "openai" directly,
+// while the bare-"p" fixtures above stay family-less and never match a tier rule.
+const OPENAI_SMOL = makeModel("openai", "gpt-smol");
+const OPENAI_DEFAULT = makeModel("openai", "gpt-default");
+const OPENAI_REASONING_SLOW = makeModel("openai", "gpt-slow", {
+	reasoning: true,
+	thinking: { efforts: [Effort.Low, Effort.Medium, Effort.High], mode: "effort" },
+});
 
 interface SessionOptions {
 	available?: Model<Api>[];
 	apiKey?: string | null;
 	activeModel?: string;
-	roles?: Partial<Record<"smol" | "default" | "slow", string>>;
+	roles?: Record<string, string>;
+	modelOverrides?: Record<string, string>;
 }
 
 function makeSession(opts: SessionOptions = {}): ToolSession {
-	const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false });
+	const settings = Settings.isolated({
+		"async.enabled": false,
+		"task.isolation.enabled": false,
+		...(opts.modelOverrides ? { "tier.modelOverrides": opts.modelOverrides } : {}),
+	});
 	const roles = opts.roles ?? { smol: "p/smol", slow: "p/slow" };
 	for (const role in roles) {
 		const value = roles[role as keyof typeof roles];
@@ -129,6 +144,7 @@ async function runPythonCompletionsInSubprocess(tempDir: TempDir): Promise<Pytho
 	const aiPath = path.resolve(import.meta.dir, "../../../ai/src/index.ts");
 	const executorPath = path.resolve(import.meta.dir, "../../src/eval/py/executor.ts");
 	const settingsPath = path.resolve(import.meta.dir, "../../src/config/settings.ts");
+	const catalogBuildPath = path.resolve(import.meta.dir, "../../../catalog/src/build.ts");
 	const code = [
 		"import json",
 		'plain = completion("hi", model="smol").wait()',
@@ -140,10 +156,11 @@ async function runPythonCompletionsInSubprocess(tempDir: TempDir): Promise<Pytho
 		`
 import { vi } from "bun:test";
 import * as ai from ${JSON.stringify(aiPath)};
+import { buildModel } from ${JSON.stringify(catalogBuildPath)};
 import { executePython } from ${JSON.stringify(executorPath)};
 import { Settings } from ${JSON.stringify(settingsPath)};
 
-const SMOL = {
+const SMOL = buildModel({
 	id: "smol",
 	name: "smol",
 	api: "openai-responses",
@@ -154,7 +171,7 @@ const SMOL = {
 	cost: { input: 1, output: 1, cacheRead: 0, cacheWrite: 1 },
 	contextWindow: 128000,
 	maxTokens: 4096,
-};
+});
 const settings = Settings.isolated({ "async.enabled": false, "task.isolation.enabled": false });
 settings.setModelRole("smol", "p/smol");
 settings.setModelRole("slow", "p/slow");
@@ -308,6 +325,78 @@ describe("runEvalCompletion", () => {
 		expect(result.text).toBe("ok");
 		const opts = spy.mock.calls[0]?.[2] as { reasoning?: unknown };
 		expect(opts.reasoning).toBeUndefined();
+	});
+
+	it("tiers the request when tier.modelOverrides matches the resolved model", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const session = makeSession({
+			available: [OPENAI_SMOL, DEFAULT, SLOW],
+			roles: { smol: "openai/gpt-smol" },
+			modelOverrides: { "openai/gpt-smol": "flex" },
+		});
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		const opts = spy.mock.calls[0]?.[2] as { serviceTier?: unknown };
+		expect(opts.serviceTier).toBe("flex");
+	});
+
+	it("matches the rule against the default tier's active model", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const session = makeSession({
+			available: [SMOL, DEFAULT, SLOW, OPENAI_DEFAULT],
+			activeModel: "openai/gpt-default",
+			modelOverrides: { "openai/gpt-default": "scale" },
+		});
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "default" }, { session });
+
+		const opts = spy.mock.calls[0]?.[2] as { serviceTier?: unknown };
+		expect(opts.serviceTier).toBe("scale");
+	});
+
+	it("keeps requests without a matching rule untiered", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		// The rule targets an unrelated model and the resolved p/smol has no tier
+		// family at all: completion() was previously untiered, so a nonmatch must
+		// keep the tier omitted instead of inventing a family baseline.
+		const session = makeSession({ modelOverrides: { "openai/gpt-smol": "flex" } });
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+
+		const opts = spy.mock.calls[0]?.[2] as { serviceTier?: unknown };
+		expect(opts.serviceTier).toBeUndefined();
+	});
+
+	it("matches effort-keyed rules against the effort the request actually sends", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		const session = makeSession({
+			available: [OPENAI_SMOL, DEFAULT, OPENAI_REASONING_SLOW],
+			roles: { smol: "openai/gpt-smol", slow: "openai/gpt-slow" },
+			modelOverrides: { "openai/gpt-slow:high": "priority" },
+		});
+
+		// slow sends Effort.High on the reasoning-capable model: the effort key matches.
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+		const slowOpts = spy.mock.calls[0]?.[2] as { serviceTier?: unknown };
+		expect(slowOpts.serviceTier).toBe("priority");
+
+		// smol sends no reasoning: the slow-model effort key must not leak onto it.
+		await runEvalCompletionAndWait({ prompt: "q", model: "smol" }, { session });
+		const smolOpts = spy.mock.calls[1]?.[2] as { serviceTier?: unknown };
+		expect(smolOpts.serviceTier).toBeUndefined();
+	});
+
+	it("leaves effort-keyed rules inert when the request sends no reasoning", async () => {
+		const spy = vi.spyOn(ai, "completeSimple").mockResolvedValue(assistant({ text: "ok" }));
+		// SLOW is reasoning:false, so the slow tier resolves it but sends no effort:
+		// the `:high` entry must stay inert even though its key names this model.
+		const session = makeSession({ modelOverrides: { "p/slow:high": "priority" } });
+
+		await runEvalCompletionAndWait({ prompt: "q", model: "slow" }, { session });
+
+		const opts = spy.mock.calls[0]?.[2] as { serviceTier?: unknown };
+		expect(opts.serviceTier).toBeUndefined();
 	});
 
 	it("throws ToolError on invalid arguments", async () => {
