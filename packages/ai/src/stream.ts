@@ -888,6 +888,7 @@ function withRequestedServiceTier(
 			for await (const event of inner) {
 				if (event.type === "done") event.message.serviceTier = serviceTier;
 				else if (event.type === "error") event.error.serviceTier = serviceTier;
+				else event.partial.serviceTier = serviceTier;
 				outer.push(event);
 				if (outer.done) return;
 			}

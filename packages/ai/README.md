@@ -548,6 +548,8 @@ The option is a request hint with provider-specific support; unsupported transpo
 - `serviceTier: null` records an authoritative no-tier request (the host's `none` setting maps to this omitted-wire state).
 - An absent/undefined `serviceTier` is a legacy message written before the field existed; it is not evidence that the server granted no tier.
 
+`stream` and `streamSimple` stamp this requested-tier metadata on every partial event before delivery, as well as on terminal messages and results.
+
 Provider response echoes are authoritative for a served/downgraded tier where available; usage accounting and `disabledFeatures` expose the resulting billing or dropped-feature facts. Never use `AssistantMessage.serviceTier` as the server-granted tier.
 
 ## Stop Reasons

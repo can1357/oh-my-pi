@@ -1,6 +1,7 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { coerceServiceTierByFamily } from "@oh-my-pi/pi-ai/types";
 import type {
+	AssistantMessage,
 	ImageContent,
 	MessageAttribution,
 	ServiceTier,
@@ -92,6 +93,7 @@ export interface ModelUsageEntry extends SessionEntryBase {
 	/** Concrete service tier requested for this call; null records an explicit no-tier request. */
 	serviceTier?: ServiceTier | null;
 	usage: Usage;
+	disabledFeatures?: AssistantMessage["disabledFeatures"];
 	stopReason: StopReason;
 	errorMessage?: string;
 }

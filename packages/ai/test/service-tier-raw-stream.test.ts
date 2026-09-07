@@ -62,6 +62,16 @@ function syncErrorStream(error: AssistantMessage): AssistantMessageEventStream {
 	return inner;
 }
 
+function livePartialStream(tail: AssistantMessage): AssistantMessageEventStream {
+	const inner = new AssistantMessageEventStream();
+	inner.push({ type: "start", partial: tail });
+	setTimeout(() => {
+		inner.push({ type: "text_delta", contentIndex: 0, delta: "!", partial: tail });
+		setTimeout(() => inner.push({ type: "done", reason: "stop", message: tail }), 0);
+	}, 0);
+	return inner;
+}
+
 async function collect(s: AsyncIterable<AssistantMessageEvent>): Promise<AssistantMessageEvent[]> {
 	const events: AssistantMessageEvent[] = [];
 	for await (const event of s) events.push(event);
@@ -75,6 +85,60 @@ function terminalMessage(events: AssistantMessageEvent[]): AssistantMessage {
 }
 
 describe("requested service tier on raw streams", () => {
+	test("live raw consumers stamp every partial before delivery", async () => {
+		const api = "tier-live-partial";
+		registerCustomApi(
+			api,
+			() => livePartialStream(message({ serviceTier: "flex" })),
+			SOURCE_ID,
+			() => livePartialStream(message({ serviceTier: "flex" })),
+		);
+		try {
+			const priorityStream = stream(probeModel(api), context(), { serviceTier: "priority" });
+			let prioritySawTerminal = false;
+			let prioritySawStart = false;
+			let prioritySawDelta = false;
+			for await (const event of priorityStream) {
+				if (event.type === "done" || event.type === "error") {
+					prioritySawTerminal = true;
+					continue;
+				}
+				// Capture the scalar now; retaining event.partial would observe the
+				// terminal event's later mutation of the same provider object.
+				const priorityTier = event.partial.serviceTier;
+				expect(priorityTier).toBe("priority");
+				if (event.type === "start") prioritySawStart = true;
+				if (event.type === "text_delta") prioritySawDelta = true;
+			}
+			expect(prioritySawStart).toBe(true);
+			expect(prioritySawDelta).toBe(true);
+			expect(prioritySawTerminal).toBe(true);
+			expect((await priorityStream.result()).serviceTier).toBe("priority");
+
+			const unsetStream = streamSimple(probeModel(api), context(), { serviceTier: undefined });
+			let unsetSawTerminal = false;
+			let unsetSawStart = false;
+			let unsetSawDelta = false;
+			for await (const event of unsetStream) {
+				if (event.type === "done" || event.type === "error") {
+					unsetSawTerminal = true;
+					continue;
+				}
+				// Omitted/undefined requests are normalized to an explicit null.
+				const unsetTier = event.partial.serviceTier;
+				expect(unsetTier).toBeNull();
+				if (event.type === "start") unsetSawStart = true;
+				if (event.type === "text_delta") unsetSawDelta = true;
+			}
+			expect(unsetSawStart).toBe(true);
+			expect(unsetSawDelta).toBe(true);
+			expect(unsetSawTerminal).toBe(true);
+			expect((await unsetStream.result()).serviceTier).toBeNull();
+		} finally {
+			unregisterCustomApis(SOURCE_ID);
+		}
+	});
+
 	test("stream() records requested tiers on synchronously-queued events and results", async () => {
 		const api = "tier-sync-stream";
 		const done = message();

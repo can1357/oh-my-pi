@@ -250,6 +250,7 @@ function extractModelUsageStats(
 		errorMessage: entry.errorMessage,
 		timestamp: Number.isFinite(timestamp) ? timestamp : 0,
 		...(entry.serviceTier !== undefined ? { serviceTier: entry.serviceTier } : {}),
+		disabledFeatures: entry.disabledFeatures,
 	};
 	return extractStats(
 		sessionFile,

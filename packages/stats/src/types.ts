@@ -88,6 +88,7 @@ export interface SessionModelUsageEntry {
 	/** Concrete service tier requested for this call; null records an explicit no-tier request. */
 	serviceTier?: ServiceTier | null;
 	usage: Usage;
+	disabledFeatures?: AssistantMessage["disabledFeatures"];
 	stopReason?: StopReason;
 	errorMessage?: string;
 }

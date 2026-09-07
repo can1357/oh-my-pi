@@ -4,7 +4,7 @@
 
 ### Changed
 
-- Record `StreamOptions.serviceTier` on terminal messages from `stream`, `streamSimple`, `complete`, and `completeSimple`, including retry attempts. `null` means no tier was requested; absent metadata remains legacy.
+- Record `StreamOptions.serviceTier` on live partial events and terminal messages from `stream`, `streamSimple`, `complete`, and `completeSimple`, including retry attempts. `null` means no tier was requested; absent metadata remains legacy.
 
 ## [18.1.12] - 2026-09-06
 

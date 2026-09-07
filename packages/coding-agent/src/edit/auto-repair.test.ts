@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import path from "node:path";
+import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Effort, type AssistantMessage, type Model, type ServiceTier, type SimpleStreamOptions } from "@oh-my-pi/pi-ai";
 import * as ai from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -157,7 +157,7 @@ describe("attemptEditAutoRepair service tiers", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
-		for (const dir of tempDirs.splice(0)) rmSync(dir, { recursive: true, force: true });
+		for (const dir of tempDirs.splice(0)) fs.rmSync(dir, { recursive: true, force: true });
 	});
 
 	function makeTierModel(): Model<"openai-completions"> {
@@ -227,10 +227,10 @@ describe("attemptEditAutoRepair service tiers", () => {
 	/** Committed broken edit on real disk bytes; the completer closes the paren without reverting. */
 	async function runTierRepair(tierOverrides?: Record<string, string>) {
 		const model = makeTierModel();
-		const dir = mkdtempSync(path.join(tmpdir(), "auto-repair-tier-"));
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "auto-repair-tier-"));
 		tempDirs.push(dir);
 		const filePath = path.join(dir, "sample.ts");
-		writeFileSync(filePath, broken);
+		fs.writeFileSync(filePath, broken);
 		const calls = spyTieredCompleteSimple(() => assistantText("const doubled = (b * 2);"));
 		const writes: string[] = [];
 		const outcome = await attemptEditAutoRepair({

@@ -8,7 +8,7 @@
 
 ### Fixed
 
-- Exclude provider-rejected priority requests from inferred premium usage while preserving positive provider-reported usage.
+- Exclude provider-rejected priority requests from inferred premium usage, including persisted auxiliary model-usage entries, while preserving positive provider-reported usage.
 
 ## [18.1.3] - 2026-09-02
 

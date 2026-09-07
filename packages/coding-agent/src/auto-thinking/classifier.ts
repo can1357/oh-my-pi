@@ -106,6 +106,7 @@ export interface ClassifierUsage {
 	stopReason: AssistantMessage["stopReason"];
 	serviceTier?: AssistantMessage["serviceTier"];
 	errorMessage?: string;
+	disabledFeatures?: AssistantMessage["disabledFeatures"];
 }
 
 /**
@@ -171,13 +172,12 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 							usage: attempt.usage,
 							serviceTier: attempt.serviceTier ?? null,
 							stopReason: attempt.stopReason,
-							errorMessage: attempt.errorMessage,
+							disabledFeatures: attempt.disabledFeatures,
 						}),
 				},
 			),
 		{ signal: deps.signal },
 	);
-
 	if (response.stopReason === "error") {
 		throw new Error(`auto-thinking: online classification failed: ${response.errorMessage ?? "unknown error"}`);
 	}
