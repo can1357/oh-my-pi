@@ -270,44 +270,6 @@ describe("auto thinking classifier helpers", () => {
 	const MAX_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max];
 	const XHIGH_LADDER = [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh];
 
-	it("reports usage for each response when a transient classifier failure is retried", async () => {
-		const fixture = createOnlineFixture(buildLadderModel("mock-max", MAX_LADDER), "high");
-		fixture.completeSimpleMock.mockImplementationOnce(async (_model, _context, options) => {
-			const response = {
-				api: fixture.classifierModel.api,
-				provider: fixture.classifierModel.provider,
-				model: fixture.classifierModel.id,
-				usage: fixture.usage,
-				stopReason: "error",
-				errorStatus: 500,
-				errorMessage: "Internal Server Error",
-				content: [],
-			} as never;
-			options?.onAttempt?.(response);
-			return response;
-		});
-		const onUsage = vi.fn();
-
-		await classifyDifficulty("refactor the scheduler", { ...fixture.deps, onUsage });
-
-		expect(fixture.completeSimpleMock).toHaveBeenCalledTimes(2);
-		expect(onUsage).toHaveBeenCalledTimes(2);
-		expect(onUsage).toHaveBeenNthCalledWith(
-			1,
-			expect.objectContaining({ stopReason: "error", errorMessage: "Internal Server Error" }),
-		);
-		expect(onUsage).toHaveBeenNthCalledWith(2, {
-			role: "smol",
-			api: fixture.classifierModel.api,
-			provider: fixture.classifierModel.provider,
-			model: fixture.classifierModel.id,
-			usage: fixture.usage,
-			stopReason: "stop",
-			errorMessage: undefined,
-			serviceTier: null,
-		});
-	});
-
 	it("offers the max label only when opted in on a model that exposes the tier", async () => {
 		const optedIn = createOnlineFixture(buildLadderModel("mock-max", MAX_LADDER), "high", "max");
 		await classifyDifficulty("refactor the scheduler", optedIn.deps);

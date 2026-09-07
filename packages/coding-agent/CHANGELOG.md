@@ -10,7 +10,7 @@
 
 - Persist explicit per-family tier choices separately from configured policy, including `/fast off`, and retain a child's own choices when it is revived.
 - Apply exact tier rules to auxiliary requests and advisor compaction while keeping pinned advisors isolated from the primary session's manual choices. Unmatched auxiliary requests retain their existing no-tier behavior.
-- Record each request's service tier in assistant messages and model-usage entries, preserving provider-disabled features through auxiliary usage persistence; `null` records an omitted tier and absent metadata remains legacy.
+- Record each request's service tier in assistant messages and model-usage entries, preserving provider-disabled features and failed-attempt errors through auxiliary usage persistence; `null` records an omitted tier and absent metadata remains legacy.
 - Scope rejected tier suppression to one session: successful session changes and branches clear it, while reloads and failed switches retain it.
 
 ### Fixed

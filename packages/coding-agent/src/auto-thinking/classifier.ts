@@ -172,6 +172,7 @@ async function classifyOnline(input: string, deps: ClassifyDifficultyDeps, ceili
 							usage: attempt.usage,
 							serviceTier: attempt.serviceTier ?? null,
 							stopReason: attempt.stopReason,
+							errorMessage: attempt.errorMessage,
 							disabledFeatures: attempt.disabledFeatures,
 						}),
 				},

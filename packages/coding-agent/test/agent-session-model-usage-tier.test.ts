@@ -89,6 +89,28 @@ describe("auto-thinking model usage service-tier metadata", () => {
 			fetch: async request => {
 				const body = (await request.json()) as Record<string, unknown>;
 				requestBodies.push(body);
+				if (requestBodies.length === 4) {
+					return new Response(
+						encodeAnthropicEvents([
+							{
+								type: "message_start",
+								message: {
+									id: "msg_transient",
+									model: "claude-sonnet-4-5",
+									role: "assistant",
+									usage: { input_tokens: 8, output_tokens: 0 },
+								},
+							},
+							{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+							{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "lo" } },
+							{
+								type: "error",
+								error: { type: "overloaded_error", message: "local transient classifier failure" },
+							},
+						]),
+						{ status: 200, headers: { "content-type": "text/event-stream" } },
+					);
+				}
 				if (rejectFast && body.speed === "fast") {
 					return new Response(
 						JSON.stringify({
@@ -151,6 +173,7 @@ describe("auto-thinking model usage service-tier metadata", () => {
 
 			await session.prompt("Classify this first request");
 			await session.prompt("Classify this second request");
+			await session.prompt("Retry this third classification");
 			await manager.flush();
 
 			const sessionFile = manager.getSessionFile();
@@ -160,18 +183,24 @@ describe("auto-thinking model usage service-tier metadata", () => {
 				.split("\n")
 				.map(line => JSON.parse(line) as Record<string, unknown>);
 			const usageEntries = lines.filter(line => line.type === "model_usage");
-			expect(usageEntries).toHaveLength(2);
-			expect(usageEntries.map(entry => entry.serviceTier)).toEqual(["priority", "priority"]);
-			expect(usageEntries.map(entry => entry.disabledFeatures)).toEqual([["priority"], undefined]);
+			expect(usageEntries.map(entry => entry.stopReason)).toEqual(["stop", "stop", "error", "stop"]);
+			expect(usageEntries[2]?.errorMessage).toContain("local transient classifier failure");
+			expect(usageEntries.map(entry => entry.serviceTier)).toEqual(["priority", "priority", "priority", "priority"]);
+			expect(usageEntries.map(entry => entry.disabledFeatures)).toEqual([
+				["priority"],
+				undefined,
+				undefined,
+				undefined,
+			]);
 
-			expect(requestBodies.map(body => body.speed)).toEqual(["fast", undefined, "fast"]);
+			expect(requestBodies.map(body => body.speed)).toEqual(["fast", undefined, "fast", "fast", "fast"]);
 
 			await initDb();
 			const parsed = await parseSessionFile(sessionFile);
-			expect(parsed.stats).toHaveLength(2);
-			expect(insertMessageStats(parsed.stats)).toBe(2);
-			expect(parsed.stats.map(stat => stat.usage.premiumRequests ?? 0)).toEqual([0, 1]);
-			expect(getOverallStats()).toMatchObject({ totalRequests: 2, totalPremiumRequests: 1 });
+			expect(parsed.stats).toHaveLength(4);
+			expect(insertMessageStats(parsed.stats)).toBe(4);
+			expect(parsed.stats.map(stat => stat.usage.premiumRequests ?? 0)).toEqual([0, 1, 1, 1]);
+			expect(getOverallStats()).toMatchObject({ totalRequests: 4, totalPremiumRequests: 3 });
 		} finally {
 			server.stop(true);
 		}
