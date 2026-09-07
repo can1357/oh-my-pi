@@ -385,6 +385,12 @@ export interface ToolSession {
 	setTodoPhases?: (phases: TodoPhase[]) => void;
 	/** Active workpool items whose incremental yields complete the current turn. */
 	getWorkPoolYieldItems?: () => readonly WorkPoolYieldItem[];
+	/**
+	 * Trimmed text of the most recent assistant message, or `undefined` when the
+	 * turn carries no text (e.g. thinking-only). The yield tool uses it to reject
+	 * a data-less `useLastTurn` finalize that would assemble to an empty result.
+	 */
+	getLastAssistantText?: () => string | undefined;
 	/** Replace the active workpool item contract and refresh its provider-facing prompt. */
 	setWorkPoolYieldItems?: (items: readonly WorkPoolYieldItem[]) => Promise<void>;
 	/** The tool-choice queue used to force forthcoming tool invocations and carry invocation handlers. */

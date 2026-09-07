@@ -455,6 +455,45 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 					`Submit the full object: {"data":<object matching the schema>}.`,
 			);
 		}
+		// Free-form analog of the schema guard above: a data-less `useLastTurn`
+		// finalize resolves to the last assistant turn's text, but a thinking-only
+		// turn carries none. Finalization would then assemble an empty result and
+		// fail the whole run post-mortem with SUBAGENT_WARNING_NULL_YIELD, even
+		// though this call was accepted as success — with no chance for the child
+		// to correct it. Reject at the boundary so the reminder ladder re-prompts
+		// for `data`. Schema-bound sessions never reach here (rejected above);
+		// incremental sections carry their own data and finalize legitimately.
+		if (
+			status === "success" &&
+			useLastTurn &&
+			!isIncremental &&
+			!this.#hasIncrementalSections &&
+			this.#session.getLastAssistantText !== undefined
+		) {
+			const lastTurnText = this.#session.getLastAssistantText();
+			if (lastTurnText === undefined || lastTurnText.trim().length === 0) {
+				this.#emptyResultFailures++;
+				if (this.#emptyResultFailures > MAX_EMPTY_RESULT_RETRIES) {
+					const attemptCount = this.#emptyResultFailures;
+					this.#emptyResultFailures = 0;
+					const error = `yield resolved to an empty last-turn result after ${attemptCount} consecutive attempt(s); aborting child instead of retrying forever. ${YIELD_FORMAT_HINT}`;
+					return {
+						content: [{ type: "text", text: `Task aborted: ${error}` }],
+						details: {
+							data: undefined,
+							status: "aborted",
+							error,
+							type: yieldType,
+						},
+					};
+				}
+				const remaining = MAX_EMPTY_RESULT_RETRIES - this.#emptyResultFailures;
+				throw new Error(
+					`yield used the last assistant turn as the result, but that turn contains no text (thinking only). ` +
+						`Put your result in \`data\`: ${YIELD_FORMAT_HINT} Empty last-turn result retries remaining before abort: ${remaining}.`,
+				);
+			}
+		}
 		if (status === "success" && !useLastTurn) {
 			const validateData = (value: unknown): JsonSchemaValidationResult | undefined =>
 				workPoolItemId !== undefined

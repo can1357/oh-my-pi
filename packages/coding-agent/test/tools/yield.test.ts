@@ -195,6 +195,39 @@ describe("YieldTool", () => {
 			/structured output matching the declared schema/,
 		);
 	});
+	it("rejects a data-less useLastTurn finalize when the last turn carries no text", async () => {
+		// Thinking-only final turn: `useLastTurn` extraction resolves to empty, so
+		// finalization would fail the run post-mortem with a null-data warning and
+		// no retry. The free-form analog of the schema guard bounces it in-band.
+		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
+		await expect(tool.execute("call-empty-last-turn", { type: "result" } as never)).rejects.toThrow(
+			/no text \(thinking only\)/,
+		);
+	});
+
+	it("accepts a data-less useLastTurn finalize when the last turn has text", async () => {
+		const tool = new YieldTool(createSession({ getLastAssistantText: () => "the actual answer" }));
+		const result = await tool.execute("call-text-last-turn", { type: "result" } as never);
+		expect(result.details).toEqual({
+			data: undefined,
+			status: "success",
+			error: undefined,
+			type: "result",
+			useLastTurn: true,
+		});
+	});
+
+	it("aborts a persistently empty last-turn finalize instead of retrying forever", async () => {
+		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
+		for (let attempt = 0; attempt < 3; attempt++) {
+			await expect(tool.execute("call-empty-retry", { type: "result" } as never)).rejects.toThrow(
+				/retries remaining before abort/,
+			);
+		}
+		const aborted = await tool.execute("call-empty-final", { type: "result" } as never);
+		expect(aborted.details?.status).toBe("aborted");
+		expect(aborted.details?.error).toMatch(/empty last-turn result after \d+ consecutive attempt/);
+	});
 
 	it("accepts a data-less finalize after incremental sections even when schema-bound", async () => {
 		const tool = new YieldTool(
