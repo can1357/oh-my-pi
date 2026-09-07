@@ -211,20 +211,15 @@ function parseEnvLine(line: string): { key: string; value: string } | undefined 
 }
 
 /**
- * Parses a .env file synchronously into key-value string pairs using
- * {@link parseEnvLine} for Bun-compatible line semantics, then mirrors valid
- * `OMP_` variables to their `PI_` aliases.
+ * Parses dotenv text into key-value string pairs using {@link parseEnvLine}
+ * for Bun-compatible line semantics, then mirrors valid `OMP_` variables to
+ * their `PI_` aliases.
  */
-export function parseEnvFile(filePath: string): Record<string, string> {
+function parseEnvContent(content: string): Record<string, string> {
 	const result: Record<string, string> = {};
-	try {
-		const content = fs.readFileSync(filePath, "utf-8");
-		for (const line of content.split("\n")) {
-			const parsed = parseEnvLine(line);
-			if (parsed && isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
-		}
-	} catch {
-		// File doesn't exist or can't be read - return empty result
+	for (const line of content.split("\n")) {
+		const parsed = parseEnvLine(line);
+		if (parsed && isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
 	}
 
 	// OMP_ overrides PI_
@@ -235,6 +230,33 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 	}
 
 	return result;
+}
+
+/**
+ * Parses a .env file synchronously into key-value string pairs using
+ * {@link parseEnvLine} for Bun-compatible line semantics, then mirrors valid
+ * `OMP_` variables to their `PI_` aliases.
+ */
+export function parseEnvFile(filePath: string): Record<string, string> {
+	try {
+		return parseEnvContent(fs.readFileSync(filePath, "utf-8"));
+	} catch {
+		// File doesn't exist or can't be read - return empty result
+		return {};
+	}
+}
+
+/**
+ * Asynchronous {@link parseEnvFile}: prefer this on login/discovery/stream paths
+ * so a slow home/agent filesystem does not block the event loop. Missing files
+ * still return `{}`.
+ */
+export async function parseEnvFileAsync(filePath: string): Promise<Record<string, string>> {
+	try {
+		return parseEnvContent(await Bun.file(filePath).text());
+	} catch {
+		return {};
+	}
 }
 
 // Eagerly parse the user's $HOME/.env and the current project's .env (from cwd)

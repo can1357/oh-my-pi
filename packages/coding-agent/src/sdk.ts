@@ -3296,11 +3296,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 
 		// Custom tools and extension-registered tools are always included
 		// unless the effective registry winner is hidden / defaultInactive. Restricted callers own the list.
-		const alwaysInclude: string[] = restrictToolNames
-			? []
-			: [...sdkCustomTools.map(t => t.name), ...registeredTools.map(t => t.definition.name)].filter(
-					name => !defaultInactiveToolNames.has(name),
-				);
+		// An explicit empty `--no-tools` whitelist must also skip alwaysInclude so
+		// MCP/custom tools stay off the wire without the broader restrictToolNames lockdown.
+		const emptyToolWhitelist = Array.isArray(options.toolNames) && options.toolNames.length === 0;
+		const alwaysInclude: string[] =
+			restrictToolNames || emptyToolWhitelist
+				? []
+				: [...sdkCustomTools.map(t => t.name), ...registeredTools.map(t => t.definition.name)].filter(
+						name => !defaultInactiveToolNames.has(name),
+					);
 		for (const name of alwaysInclude) {
 			if (toolRegistry.has(name) && !initialToolNames.includes(name)) {
 				initialToolNames.push(name);

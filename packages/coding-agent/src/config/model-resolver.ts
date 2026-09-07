@@ -4,8 +4,8 @@
  * Layering:
  * - `matchModel` is the single matching engine. Order: exact `provider/id`
  *   reference (with variant-alias and OpenRouter routed/date fallbacks) →
- *   exact bare id → retired variant alias → provider-scoped fuzzy → substring
- *   with alias-vs-dated pick.
+ *   exact bare id → exact bare `Model.aliases` → retired variant alias →
+ *   provider-scoped fuzzy → substring with alias-vs-dated pick.
  * - `parseModelPatternWithContext`/`parseModelPattern` layer the selector
  *   grammar on top: trailing `:level` thinking suffixes (`splitThinkingSuffix`)
  *   and `@upstream` provider routing (`splitUpstreamRouting`).
@@ -434,12 +434,30 @@ function buildProviderIndex(
 	idKey: (id: string) => string,
 ): Map<string, Model<Api> | null> {
 	const index = new Map<string, Model<Api> | null>();
+	const canonicalKeys = new Set<string>();
+	// Pass 1: canonical ids win. Duplicate canonical rows become the ambiguous sentinel.
 	for (const m of availableModels) {
 		const key = `${m.provider.toLowerCase()}\u0000${idKey(m.id)}`;
+		canonicalKeys.add(key);
 		if (index.has(key)) {
-			index.set(key, null); // ambiguous sentinel; do not overwrite back
+			index.set(key, null);
 		} else {
 			index.set(key, m);
+		}
+	}
+	// Pass 2: client-side aliases (Grok Bot AvailableModels idAliases, etc.).
+	// Never overwrite a canonical id; competing aliases for the same key are ambiguous.
+	for (const m of availableModels) {
+		for (const alias of m.aliases ?? []) {
+			const aliasKey = `${m.provider.toLowerCase()}\u0000${idKey(alias)}`;
+			if (canonicalKeys.has(aliasKey)) continue;
+			if (index.has(aliasKey)) {
+				if (index.get(aliasKey) !== m) {
+					index.set(aliasKey, null);
+				}
+			} else {
+				index.set(aliasKey, m);
+			}
 		}
 	}
 	return index;
@@ -779,13 +797,14 @@ function findExactModelReferenceMatch(modelReference: string, availableModels: M
  * 1. exact `provider/id` reference (variant-alias and OpenRouter routed/date
  *    fallbacks included),
  * 2. exact bare id (preference-ranked),
- * 3. retired effort-tier variant alias (collapsed catalog entries),
- * 4. provider-scoped fuzzy match,
- * 5. substring match with the alias-vs-dated pick.
+ * 3. exact bare `Model.aliases` (preference-ranked; never when a live id matched),
+ * 4. retired effort-tier variant alias (collapsed catalog entries),
+ * 5. provider-scoped fuzzy match,
+ * 6. substring match with the alias-vs-dated pick.
  * Returns the matched model or undefined if no match found.
  *
- * `exactOnly` stops after the exact phases (1-3), skipping the fuzzy/substring
- * fallbacks (4-5). Callers use it to resolve the full selector exactly before
+ * `exactOnly` stops after the exact phases (1-4), skipping the fuzzy/substring
+ * fallbacks (5-6). Callers use it to resolve the full selector exactly before
  * a trailing `:<level>` thinking suffix is split off, so the suffix can never
  * be fuzzily absorbed into a longer sibling id (e.g. `kimi-for-coding:high`
  * must not match `kimi-for-coding-highspeed`).
@@ -811,6 +830,20 @@ function matchModel(
 	const exactMatches = availableModels.filter(m => m.id.toLowerCase() === lowerPattern);
 	if (exactMatches.length > 0) {
 		const unlockedMatches = exactMatches.filter(m => !isProviderLockedCrossMatch(modelPattern, m));
+		if (unlockedMatches.length > 0) {
+			return pickPreferredModel(unlockedMatches, context);
+		}
+		return undefined;
+	}
+
+	// Exact client-side aliases (Grok Bot AvailableModels idAliases, etc.).
+	// Only after no canonical id matched the bare selector, so a live row always
+	// beats another row's alias for the same spelling — mirroring getProviderModelIndex.
+	const exactAliasMatches = availableModels.filter(m =>
+		(m.aliases ?? []).some(alias => alias.toLowerCase() === lowerPattern),
+	);
+	if (exactAliasMatches.length > 0) {
+		const unlockedMatches = exactAliasMatches.filter(m => !isProviderLockedCrossMatch(modelPattern, m));
 		if (unlockedMatches.length > 0) {
 			return pickPreferredModel(unlockedMatches, context);
 		}

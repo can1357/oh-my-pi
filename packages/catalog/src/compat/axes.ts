@@ -41,6 +41,8 @@ export interface AxisDef {
 
 const OAI = ["openai", "openai-responses"] as const;
 const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
+/** Reviewed Grok Bot Anthropic+tools auto wire profiles (routers). */
+const SAND_TOOLS_WIRES = ["parent-chat", "automation", "keep-model", "error", "sand-default-fallback"] as const;
 
 /** Effort tiers accepted by taxonomy collapse/override vocabulary (`Effort` ∪ `"off"`). */
 export const EFFORT_TIERS: readonly string[] = [...EFFORTS, "off"];
@@ -276,6 +278,16 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"input-modalities": { key: "inputModalities", set: "catalog", shape: "array", values: ["text", "image"] },
 	"limits-patch": { key: "limitsPatch", set: "catalog", shape: "object" },
 	"long-context-cost": { key: "longContext", set: "catalog", shape: "object" },
+	/**
+	 * Generator must not clear/re-derive thinking (AvailableModels / seed-owned
+	 * ladders). Consumed by `rebakeModelThinking`.
+	 */
+	"preserve-authored-thinking": { key: "preserveAuthoredThinking", set: "catalog", shape: "scalar" },
+	/**
+	 * Credential-scoped catalogs (live discovery authoritative): generation must
+	 * not enrich limits from canonical-family or stencil.so same-id references.
+	 */
+	"credential-scoped-catalog": { key: "credentialScopedCatalog", set: "catalog", shape: "scalar" },
 	"long-usage-limit-fallback": { key: "longUsageLimitFallback", set: "catalog", shape: "scalar" },
 	"max-context-window": { key: "maxContextWindow", set: "catalog", shape: "scalar" },
 	"requires-cursor-tool-schema-projection": {
@@ -284,6 +296,38 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		shape: "scalar",
 	},
 	priority: { key: "priority", set: "catalog", shape: "scalar" },
+	/**
+	 * Offline Sand wire-parameter allowlist (e.g. `effort`/`fast`). Applied only
+	 * when the model has not already declared `sandParameterIds` (live discovery
+	 * wins). Empty lists are unsupported — omit the property for bare routing.
+	 */
+	"sand-parameter-ids": { key: "sandParameterIds", set: "catalog", shape: "array" },
+	/**
+	 * Reviewed Grok Bot Anthropic+tools wire profile for synthetic routers.
+	 * Discovery/seeds stay unset; stream auto-mode branches on this fact instead
+	 * of comparing model ids in TypeScript.
+	 */
+	"sand-tools-wire": {
+		key: "sandToolsWire",
+		set: "catalog",
+		shape: "scalar",
+		values: SAND_TOOLS_WIRES,
+	},
+	/**
+	 * Reviewed Grok Bot requestedModel rewrite. Discovery/seeds keep the listed
+	 * AvailableModels id; the stream sends this bare wire id (same pattern as
+	 * Auto → sand-default). Used when a listed slug is a broken peer of a
+	 * working live id (`gemini-3-flash` → `gemini-3.8-flash`).
+	 */
+	"sand-wire-model-id": { key: "sandWireModelId", set: "catalog", shape: "scalar" },
+	/**
+	 * Reviewed reasoning capability. Applied as a correction so synthetic
+	 * discovery/seed rows can stay neutral (`reasoning: false`) while KDL
+	 * upgrades specific routers (e.g. sand-default) without id compares in TS.
+	 */
+	"reasoning": { key: "reasoning", set: "catalog", shape: "scalar" },
+	/** Reviewed native tool-calling support. Live discovery may leave unset; KDL can force false. */
+	"supports-tools": { key: "supportsTools", set: "catalog", shape: "scalar" },
 	"service-tier-cost": { key: "serviceTierCost", set: "catalog", shape: "object" },
 };
 

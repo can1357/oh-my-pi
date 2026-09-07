@@ -2,6 +2,24 @@
 
 ## [Unreleased]
 
+### Added
+
+- Grok Bot family tool-wire policy: Anthropic keep-model product Shell/Read/Write, catalog `sand-tools-wire` for sand routers (including `sand-cua` parent-chat), native bash/read/write for other families, and a live AvailableModels catalog matrix.
+
+### Fixed
+
+- Grok Bot Auto routers (`default`, `default[]`) now use product parent-chat tools so they do not land on grok-4.5 with native tools (HTTP 422).
+- Grok Bot Auto parent-chat aliases now rewrite to a bare `sand-default` requestedModel, and incomplete leftover tool fragments after a completed call are finalized or dropped instead of failing the turn.
+- Grok Bot Gemini/OpenAI native tool schemas are family-normalized, thought-only JSON in thinking is promoted, and an empty tool turn retries once with thinking off.
+- Grok Bot `gemini-3-flash` / `gemini-3-flash[]` now send a bare `gemini-3.8-flash` requestedModel (`sand-wire-model-id`) so native bash/read/write use the working peer.
+- Grok Bot Write follow-ups that empty-stop after a tool result no longer fail the turn; Write accepts a `contents` alias.
+- Grok Bot empty follow-up acceptance is limited to Gemini turns whose last message is the current Write `toolResult` (older or non-Write results no longer silence a new user question).
+- Grok Bot product Write advertises a cloned `contents` alias so native-wire schemas are not mutated.
+- Grok Bot thinking-only / incomplete-tool first attempts stay fully buffered until the attempt is accepted; discarded retries re-emit `start`, incomplete sibling `toolcall_*` events are filtered out, and empty-tool retries keep the model's parameter allowlist so `thinking: false` still serializes.
+- Grok Bot automation/parent-chat product wire for non-Anthropic routers requires catalog `sand-tools-wire` (no raw `sand-automation` / `sand-default` id exceptions).
+- Grok Bot keep-model probes share checksum/JWT/auth helpers via `scripts/grokbot-probe-config.mjs`.
+- Grok Bot `sand-automation` now promotes grok-4.5-high fenced `{"name":"Shell",…}` text into a real Shell/bash tool call, and native-family matrix rows report `wire: native` instead of the internal `error` sentinel.
+
 ## [18.1.12] - 2026-09-06
 
 ### Added
@@ -11,6 +29,11 @@
 ## [18.1.11] - 2026-09-05
 
 ### Fixed
+- Fixed Grok Bot router responses to publish the concrete `responseInfo.model` on `upstreamModel` for session stats.
+- Fixed Grok Bot Anthropic+tools auto wire to read catalog `sand-tools-wire` for routers instead of hard-coded model ids.
+
+### Fixed
+- Fixed Grok Bot discovered `thinking: false` defaults being overridden by effort, and product-wire tool collisions preferring built-in omp owners.
 
 - Fixed OpenCode Go usage polls (`GET /zen/go/v1/usage`) missing `x-opencode-session` and omp's `User-Agent`: background polls now attribute with the stable install id so the requests OpenCode flags as `Bun fetch` carry the required session header.
 - GitHub Copilot sign-in now requests only basic profile access, restoring login for Enterprise organizations that reject repository, gist, and Codespaces permissions ([#10656](https://github.com/can1357/oh-my-pi/issues/10656)).
@@ -118,6 +141,60 @@
 
 ### Added
 
+- Grok Bot **product sand wire** for Anthropic-labeled models + tools: `GROKBOT_ANTHROPIC_TOOLS_WIRE=auto` (default) rewrites to `sand-automation` + `generalPurpose`, maps omp tools to PascalCase field-2 names (`bash`→`Shell`, `read`→`Read`) with `{ jsonSchema: … }` envelopes, field-9 host allowlists, and `automationId`. Parent-chat profile (`parent-chat` / `sand-default`) injects `SendToUser`; responses promote `SendToUser` toolCallPart streams to assistant text. Probe: `scripts/grokbot-automation-tools-probe.mjs`; matrix gate: `--mode opus-tools`.
+- Grok Bot discovery synthesizes **legacySlug variant rows** (`requestModelId` + variant `sandParameterIds`) from AvailableModels variants.
+
+### Fixed
+
+- `/grokbot` reports the configured provider base URL (proxy override) instead of always showing the default sand host.
+- Grok Bot connect trailer errors surface `ERROR_PROVIDER_ERROR` / HTTP status / detail instead of opaque `Error` / `internal error` messages.
+- Grok Bot sends complete sand parameter sets (`thinking` / `context` / `effort` / `fast`) when AvailableModels advertises them, matching Cursor variant wire (Anthropic defaults `fast:false`; context follows `sandMaxMode`).
+- Grok Bot context tiers follow discovered AvailableModels variant defaults instead of hard-coded `300k` / `1m` when upstream advertises different values.
+- Grok Bot product wire prefers `write` over `edit` for the shared sand `Write` tool so advertised schema and dispatch stay aligned.
+- Grok Bot product wire aliases (Shell/Read/Write) stay off `customWireName` so later OpenAI Responses replay does not treat them as custom tools.
+- Grok Bot Anthropic sand tools routing uses catalog taxonomy identity (`classifyModel` class anthropic), not model-id string prefixes.
+- Grok Bot product-wire turns rewrite replayed history tool names (`bash`/`read`/`write`) to Shell/Read/Write to match advertised schemas.
+- Grok Bot bare-wire routing follows catalog `sandParameterIds` / `sandMaxMode` instead of a hard-coded model-id set.
+- Grok Bot preserves empty-string grammar `rawToolCallArgs` on history replay instead of dropping the raw oneof field.
+- `/grokbot` reports Renewer present when the credential comes from `providers.grokbot.apiKey` or a runtime API-key override.
+- Grok Bot pairs tool-result wire names with the historical assistant call id when tools/`edit.mode` change after the call.
+- Grok Bot rejects completed tool calls whose arguments are a JSON array instead of an object.
+- Grok Bot honors `acceptEmptyResponse` so passive/zero-output callers can accept trailer-only completions.
+- Grok Bot rejects trailer-only or thinking-only streams with no text or tool call instead of emitting an empty successful stop.
+- Grok Bot floors effort to the model's minimum supported tier when reasoning is disabled, instead of omitting the parameter (server default high).
+- Grok Bot sends `fast: true` by default when a model advertises the `fast` parameter (explicit `false` is preserved).
+- Grok Bot keeps JSON-shaped grammar tool output as `{ input: rawText }` instead of JSON-decoding it into structured arguments.
+- Grok Bot merges request headers case-insensitively so reserved names like `Authorization` / `Content-Type` are replaced rather than comma-joined.
+- Grok Bot Connect end-stream `unauthenticated` errors clear the JWT cache and surface as HTTP 401 for credential retry.
+- Grok Bot marks every grammar/customFormat tool call (including hashline/sloppy without a renamed wire id) so previews and history replay use raw args.
+- Grok Bot tool-result replay maps grammar tools to their wire name (`customWireName`) so call/result names stay paired.
+- Grok Bot protobuf decoding rejects nested stream-response fields with incorrect wire types instead of coercing them to empty values.
+- Grok Bot sends discovered `minimal` / `max` effort values on the wire instead of collapsing them to `low` / `xhigh` (aliases only via `thinking.effortMap`).
+- Grok Bot protobuf decoding rejects known InferenceStreamResponse fields with the wrong wire type instead of emitting empty parts.
+- Grok Bot protobuf decoding rejects illegal field number zero instead of treating malformed frames as empty successful messages.
+- Grok Bot inference requests include `model.headers` (merged under provider-owned auth/client headers) so reverse-proxy API keys are sent.
+- Grok Bot token minting forwards the same caller/model headers so reverse-proxy gateways accept renewal before inference.
+- Grok Bot grammar/customFormat tools (`apply_patch`, hashline, sloppy) accept raw non-JSON args as `{ input }` and preserve `customWireName`.
+- Grok Bot streams update `ToolCall.arguments` (and the streamed partial buffer) on every tool chunk so live previews are not empty until completion.
+- Grok Bot assistant-history replay sends grammar calls as wire name + `rawToolCallArgs` instead of internal name + Struct args.
+- Grok Bot rejects completed tool calls with malformed JSON arguments and correlates tool chunks by id or index.
+- Grok Bot streams that end with `ToolCallPart.isComplete: false` now fail as incomplete streams instead of parsing partial JSON as `{}` and emitting a successful `toolUse`.
+- `/grokbot` status truncation uses shared `TRUNCATE_LENGTHS.TITLE` from `@oh-my-pi/pi-tui` instead of a provider-local width constant.
+- Grok Bot stream requests keep reverse-proxy path prefixes on the configured backend when joining `InferenceService/Stream`.
+- `/grokbot` status sanitizes namespace, client version, and secrets path with `replaceTabs`/`truncateToWidth`/`shortenPath` before TUI display.
+- `/login grokbot` host-install prompt names the resolved agent secrets path (`getAgentDir()` / profile / `PI_CODING_AGENT_DIR` / XDG), not a hardcoded `~/.omp/agent` or unsupported `OMP_AGENT_DIR`.
+- Grok Bot Connect streams surface input-token-limit frames as context-overflow errors (for compaction), reject malformed trailers/protobuf frames, and no longer store routed model ids in `upstreamProvider`.
+- Grok Bot checksum encoding no longer wraps 32-bit shifts; JWT mint cache is scoped per renewal/backend/namespace; request `apiKey` wins over ambient secrets; incomplete Connect streams and caller aborts surface correctly.
+- Grok Bot provider (`grokbot` / `grokbot-sand`): separate from the Cursor provider (`cursor` / AgentService) and from xAI / Grok CLI (`xai`, `xai-oauth`), including independent usage allowances (using one does not consume Cursor or xAI quota). Speaks `InferenceService/Stream` via renewal-credential minting. Default `sand-default` is sent as a bare sand router slug (no grok rewrite / maxMode / effort stamp). Live picker models come from `AiService/AvailableModels` (sand client); each model only gets its own `parameterDefinitions` on the wire. Stream rejects malformed Connect trailers and protobuf frames instead of treating them as successful completions. `/login grokbot` shows a host-install prompt to run inside the Grok Bot system (writes `secrets/grokbot.env`; does not use Cursor or xAI login). JWT mint cache is keyed by renewer+backend; explicit `apiKey` wins over ambient secrets; catalog cost stays $0 (renewer-billed).
+- Added compatibility opt-outs for Anthropic proxies that reject optional `context_management` and OpenAI Responses proxies with incomplete reasoning-summary streams ([#10358](https://github.com/can1357/oh-my-pi/pull/10358) by [@jubueche](https://github.com/jubueche)).
+- Added API-key authentication for ClinePass through the official `CLINE_API_KEY` variable, including account-route validation and rolling quota-window reporting in `omp usage` ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- ClinePass login now validates the API key against the `/users/me` account identity route instead of a probe chat completion, so roster churn cannot break sign-in and validation no longer consumes subscription quota ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- ClinePass failures now surface actionable messages: subscription-window and free-tier limit markers classify as usage limits (fail fast, rotate sibling credentials), while not-subscribed, organization-account, and roster-rotation `model not found` responses are rewritten with recovery guidance ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- ClinePass requests now mirror the official Cline CLI's client-identity headers (with Cline's blessing), unlocking roster entries the gateway restricts to Cline product surfaces — including free-tier `deepseek/deepseek-v4-flash`. A surface-gate 403 is classified as per-model client policy rather than a credential failure, so it no longer rotates sibling keys ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- Updated ClinePass requests to use the current Cline client identity and stable task ids, per-model reasoning and Qwen cache controls, and gateway-reported billed costs ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- Devin router models (`compat.modelRouter`, e.g. `adaptive`) now resolve through `AssignModel` before chatting: the provider sends the current user prompt with the turn's cascade id, then issues `GetChatMessage` with the assigned model uid and its assignment JWT. The router uid is never sent as `chatModelUid`, and a missing assignment fails the turn instead of silently degrading ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Devin responses surface credit metering on `usage.credits` (`cost`, `committedCost`, `acuCost`) and the concrete routed model on `upstreamModel` (assigned uid, replaced by the response's `actualModelUid` when reported) ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Devin accounts report plan and credit usage in `/usage` through a new `devin` usage provider backed by `SeatManagementService/GetUserStatus`: prompt/flow/flex credit balances against the plan period, daily and weekly quota percent windows with their reset timestamps, plan tier, overage balance, and account/org identity. Credit-billed plans (no dated quota window) surface credits only ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added an optional `completeSimple` callback that observes every result, including results from internal thinking-loop retries.
 - Added compatibility options for Anthropic-compatible proxies that reject `context_management` and OpenAI Responses proxies that provide incomplete reasoning-summary streams.
 - Added ClinePass API-key authentication via the official `CLINE_API_KEY` environment variable, with account validation, actionable subscription and quota errors, support for eligible ClinePass model rosters, and rolling quota-window reporting in `omp usage`.

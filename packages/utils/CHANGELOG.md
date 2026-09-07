@@ -51,6 +51,7 @@
 
 ### Added
 
+- Added `parseEnvFileAsync` for non-blocking dotenv reads on login/discovery/stream paths.
 - Added `postmortem.fatal` for terminal-safe top-level failure reporting.
 
 ### Fixed

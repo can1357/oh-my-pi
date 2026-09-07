@@ -95,6 +95,9 @@ function keepsExplicitThinking(row: RowLike): boolean {
 	}
 	if (row.provider === "cline-pass" && row.thinking) return true;
 	if (row.provider === "openrouter" && row.thinking?.requiresEffort === true) return true;
+	if (resolveModelPolicy(row as unknown as ModelSpec<Api>).catalog.preserveAuthoredThinking === true) {
+		return true;
+	}
 	return false;
 }
 

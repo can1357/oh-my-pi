@@ -3,11 +3,14 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import type { Api, Model, ModelSpec, Provider } from "@oh-my-pi/pi-catalog/types";
 import {
 	applyAntigravityPricingFallback,
+	applyCanonicalLimitFallback,
 	applyGeneratedModelPolicies,
 	applyOllamaCloudOutputCap,
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
 import { buildModel } from "../src/build";
+import { resolveModelPolicy } from "../src/compat/resolve";
+import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
 
 function createSpec<TApi extends Api>(overrides: {
 	id: string;
@@ -824,5 +827,159 @@ describe("applyAntigravityPricingFallback", () => {
 		expect(result[2]?.cost).toEqual(zeroCost);
 		// Already-billable antigravity rows keep their own pricing.
 		expect(result[3]?.cost).toEqual(pricedCost);
+	});
+});
+
+describe("Grok Bot generated thinking policy", () => {
+	it("preserves seed/live ladders and does not invent one for routers", () => {
+		const models = [
+			createSpec({
+				id: "sand-default",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				reasoning: true,
+				thinking: undefined,
+			}),
+			createSpec({
+				id: "grok-4.6",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				thinking: {
+					mode: "effort",
+					efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+				},
+			}),
+		];
+
+		applyGeneratedModelPolicies(models);
+
+		expect(models[0]?.thinking).toBeUndefined();
+		expect(models[1]?.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		});
+	});
+
+	it("derives grok-4.6 seed effort ladder and sand params from provider KDL via buildModel", () => {
+		const [seed] = buildGrokbotStaticSeed().filter(m => m.id === "grok-4.6");
+		expect(seed?.thinking).toBeUndefined();
+		expect(seed?.sandParameterIds).toBeUndefined();
+		const built = buildModel(seed!);
+		expect(built.thinking).toEqual({
+			mode: "effort",
+			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
+		});
+		expect(built.sandParameterIds).toEqual(["effort", "fast"]);
+		const router = buildModel(buildGrokbotStaticSeed().find(m => m.id === "sand-default")!);
+		expect(router.thinking).toBeUndefined();
+		expect(router.sandParameterIds).toBeUndefined();
+	});
+
+	it("does not overwrite live AvailableModels sandParameterIds with KDL", () => {
+		const live = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: null,
+			sandParameterIds: ["effort"],
+		});
+		expect(live.sandParameterIds).toEqual(["effort"]);
+	});
+
+	it("does not backfill grok-4.6 KDL ladder when live discovery marked unrecognized efforts", () => {
+		const live = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			thinking: { mode: "effort", efforts: [] },
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(live.thinking).toBeUndefined();
+	});
+
+	it("keeps grokbot offline seeds free of canonical maxTokens fallback before buildModel", () => {
+		const models = buildGrokbotStaticSeed().map(seed => ({ ...seed }));
+		applyCanonicalLimitFallback(models);
+		for (const model of models) {
+			expect(model.maxTokens).toBeNull();
+		}
+		const built = buildModel(models.find(m => m.id === "sand-default")!);
+		expect(built.maxTokens).toBeNull();
+		expect(built.contextWindow).toBe(200_000);
+	});
+
+	it("marks grokbot credential-scoped catalog via provider KDL", () => {
+		const [seed] = buildGrokbotStaticSeed();
+		expect(resolveModelPolicy(seed).catalog.credentialScopedCatalog).toBe(true);
+	});
+
+	it("forces supportsTools false for grok-4.5 via provider KDL", () => {
+		const live = buildModel({
+			id: "grok-4.5",
+			name: "Grok 4.5",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(live.supportsTools).toBe(false);
+		const grok46 = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(grok46.supportsTools).toBeUndefined();
+	});
+
+	it("applies reviewed context-window-floor to known routers when discovery left limits unset", () => {
+		const router = buildModel({
+			id: "sand-default",
+			name: "sand-default (routed)",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(router.contextWindow).toBe(200_000);
+		const unknown = buildModel({
+			id: "some-live-model",
+			name: "Some Live Model",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+		expect(unknown.contextWindow).toBeNull();
 	});
 });

@@ -19,8 +19,10 @@ import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
 import { isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
+import { resolveModelPolicy } from "../src/compat/resolve";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo-workflow";
+import { resolveGrokbotDiscoveryIdentityAsync } from "../src/discovery/grokbot-auth";
 import { createModelManager } from "../src/model-manager";
 import prevModelsJson from "../src/models.json" with { type: "json" };
 import { toModelSpec } from "../src/provider-models/bundled-references";
@@ -31,6 +33,7 @@ import {
 	isCatalogDescriptor,
 } from "../src/provider-models/descriptor-types";
 import { PROVIDER_DESCRIPTORS } from "../src/provider-models/descriptors";
+import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
 import { filterModelsDevCatalogRows } from "../src/provider-models/models-dev-policies";
 import {
 	ABLITERATION_STATIC_MODELS,
@@ -120,9 +123,10 @@ export function mergePreviousSnapshotModels(
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
 				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
-				// Yolo-Auto's documented static seed is the complete fallback
-				// catalog; never resurrect retired ids from the previous snapshot.
+				// Yolo-Auto / Grok Bot documented static seeds are the complete
+				// offline fallback; never resurrect retired ids from the previous snapshot.
 				model.provider !== "yolo-auto" &&
+				model.provider !== "grokbot" &&
 				!isRetiredProvider(model.provider) &&
 				!excludedProviders.has(model.provider)
 			) {
@@ -187,7 +191,11 @@ async function fetchProviderModelsFromCatalog(
 		const discoveryConfig = { apiKey };
 		const preparedConfig =
 			getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ?? discoveryConfig;
-		const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+		const managerConfig =
+			descriptor.providerId === "grokbot"
+				? { ...preparedConfig, ...(await resolveGrokbotDiscoveryIdentityAsync()) }
+				: preparedConfig;
+		const managerOptions = descriptor.createModelManagerOptions(managerConfig);
 		const manager = createModelManager(managerOptions);
 		const result = await manager.refresh("online");
 		// `stale: true` means the dynamic fetch failed and the manager fell back
@@ -264,9 +272,8 @@ function applyGlobalModelsDevFallback(
 			providerScopedKeys.has(`${model.provider}/${model.id}`) ||
 			model.provider === "devin" ||
 			model.provider === "baseten" ||
-			// Meta's first-party rows come from the reviewed seed; a same-id
-			// gateway row would overwrite their display names.
-			model.provider === "meta"
+			model.provider === "meta" ||
+			resolveModelPolicy(model).catalog.credentialScopedCatalog === true
 		) {
 			return model;
 		}
@@ -583,6 +590,12 @@ async function generateModels() {
 	// persisted `modelRoles.default = "xai-oauth/<id>"` is honored before the
 	// async refresh fires (interactive boot does not await refresh).
 	allModels.push(...buildXaiOAuthStaticSeed());
+	// Grok Bot — tiny offline seed (sand routers + Auto + grok-4.6). Live
+	// AvailableModels is authoritative when renewer is present; previous-snapshot
+	// grokbot rows are excluded below so retired alias forests do not resurrect.
+	if (!authoritativeCatalogProviders.has("grokbot")) {
+		allModels.push(...buildGrokbotStaticSeed());
+	}
 	// Daybreak is separately provisioned and absent from stencil.so. Keep its
 	// documented aliases and current Cyber snapshot in every generated bundle.
 	allModels.push(...OPENAI_DAYBREAK_CURATED_FALLBACK_MODELS);

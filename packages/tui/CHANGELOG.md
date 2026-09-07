@@ -14,6 +14,7 @@
 
 ### Added
 
+- Exported shared `TRUNCATE_LENGTHS` and `PREVIEW_LIMITS` display budgets for consumers outside coding-agent (e.g. provider status sanitization).
 - Added Markdown hyperlink target resolution while preserving the displayed URL text.
 
 ## [18.1.6] - 2026-09-03

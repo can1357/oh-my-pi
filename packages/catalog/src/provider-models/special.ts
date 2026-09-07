@@ -4,12 +4,15 @@ import { apiRouteFor } from "../compat/behavior";
 import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/codex";
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
+import { fetchGrokbotAvailableModels } from "../discovery/grokbot";
+import { resolveGrokbotDiscoveryIdentity } from "../discovery/grokbot-auth";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec } from "../types";
 import { DEVIN_DEFAULT_BASE_URL } from "../wire/devin";
 import { toModelSpec } from "./bundled-references";
 import { resolveModelCacheProviderId } from "./cache-provider-id";
+import { buildGrokbotStaticSeed } from "./grokbot";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -398,6 +401,57 @@ export function devinModelManagerOptions(config: DevinModelManagerConfig = {}): 
 }
 
 const devinDiscovery = once(() => import("../discovery/devin"));
+
+// ---------------------------------------------------------------------------
+// Grok Bot provider (InferenceService Stream)
+// ---------------------------------------------------------------------------
+
+export interface GrokbotModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+	/** Override `x-sand-box-namespace` for cache scoping (defaults to GROKBOT_NAMESPACE). */
+	namespace?: string;
+	/** Override `x-cursor-client-version` for cache scoping (defaults to GROKBOT_CLIENT_VERSION). */
+	clientVersion?: string;
+	/** Caller/model headers forwarded to AvailableModels mint + request. */
+	headers?: Record<string, string>;
+}
+
+export function grokbotModelManagerOptions(
+	config: GrokbotModelManagerConfig = {},
+): ModelManagerOptions<"grokbot-sand"> {
+	const { apiKey, baseUrl, fetch, headers } = config;
+	// Prefer a fully resolved identity from async prep (catalog refresh) so
+	// construction never sync-reads secrets/grokbot.env on the TUI event loop.
+	const ns = config.namespace?.trim();
+	const ver = config.clientVersion?.trim();
+	const identity =
+		ns && ver
+			? { namespace: ns, clientVersion: ver }
+			: resolveGrokbotDiscoveryIdentity({
+					namespace: config.namespace,
+					clientVersion: config.clientVersion,
+				});
+	return {
+		providerId: "grokbot",
+		cacheProviderId: resolveModelCacheProviderId("grokbot", {
+			apiKey,
+			baseUrl,
+			namespace: identity.namespace,
+			clientVersion: identity.clientVersion,
+			headers,
+		}),
+		staticModels: buildGrokbotStaticSeed(baseUrl),
+		...(apiKey
+			? {
+					dynamicModelsAuthoritative: true,
+					fetchDynamicModels: async () => fetchGrokbotAvailableModels({ apiKey, baseUrl, fetch, headers }),
+				}
+			: undefined),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // Zai
 // ---------------------------------------------------------------------------

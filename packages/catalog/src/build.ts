@@ -33,8 +33,10 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
  * `context-window-floor`) overwrite upstream values; selection metadata
  * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
- * `requires-cursor-tool-schema-projection`) is rule-owned;
- * `context-promotion-target` fills only when the spec left it unset.
+ * `requires-cursor-tool-schema-projection`, `sand-parameter-ids`) is
+ * rule-owned; `context-promotion-target` and `sand-parameter-ids` fill
+ * only when the spec left them unset (live AvailableModels wins for
+ * sand params).
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
 	const serviceTierCost = objectPayload(catalog.serviceTierCost);
@@ -66,18 +68,37 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
 		model.contextPromotionTarget = contextPromotionTarget;
 	}
+	const sandParameterIds = catalog.sandParameterIds;
+	if (Array.isArray(sandParameterIds) && model.sandParameterIds === undefined) {
+		model.sandParameterIds = sandParameterIds.filter((entry): entry is string => typeof entry === "string");
+	}
+	const sandToolsWire = catalog.sandToolsWire;
+	if (
+		(sandToolsWire === "parent-chat" ||
+			sandToolsWire === "automation" ||
+			sandToolsWire === "keep-model" ||
+			sandToolsWire === "error" ||
+			sandToolsWire === "sand-default-fallback") &&
+		model.sandToolsWire === undefined
+	) {
+		model.sandToolsWire = sandToolsWire;
+	}
+	const sandWireModelId = catalog.sandWireModelId;
+	if (typeof sandWireModelId === "string" && sandWireModelId.trim() && model.sandWireModelId === undefined) {
+		model.sandWireModelId = sandWireModelId.trim();
+	}
 }
 
 /**
  * Applies reviewed catalog-data value corrections (`cost-patch`,
  * `limits-patch`, `long-context-cost`, `context-window-floor`,
- * `input-modalities`) onto an upstream-sourced spec. Applied by
+ * `input-modalities`, `supports-tools`, `reasoning`) onto an upstream-sourced spec. Applied by
  * `buildModel` to every upstream-sourced spec; user-authored overrides are
  * recomposed after building by the override applicators, so explicit user
  * limits and pricing still win.
  */
 export function applyCatalogCorrections(
-	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input">,
+	model: Pick<ModelSpec<Api>, "cost" | "contextWindow" | "maxTokens" | "input" | "supportsTools" | "reasoning">,
 	catalog: Record<string, unknown>,
 ): void {
 	const longContext = objectPayload(catalog.longContext);
@@ -140,6 +161,12 @@ export function applyCatalogCorrections(
 	const inputModalities = catalog.inputModalities;
 	if (isInputModalities(inputModalities)) {
 		model.input = inputModalities;
+	}
+	if (typeof catalog.supportsTools === "boolean") {
+		model.supportsTools = catalog.supportsTools;
+	}
+	if (typeof catalog.reasoning === "boolean") {
+		model.reasoning = catalog.reasoning;
 	}
 }
 

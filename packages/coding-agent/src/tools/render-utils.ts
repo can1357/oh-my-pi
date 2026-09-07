@@ -5,13 +5,12 @@
  * tool renderers to ensure a unified TUI experience.
  */
 
-import * as os from "node:os";
 import * as path from "node:path";
 import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { pluralize } from "@oh-my-pi/pi-utils";
+import { getKeybindings, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui";
+import { pluralize, shortenPath } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
@@ -20,7 +19,7 @@ import { Hasher } from "../tui/utils";
 import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
 
 export { Ellipsis } from "@oh-my-pi/pi-natives";
-export { replaceTabs, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
+export { PREVIEW_LIMITS, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth, wrapTextWithAnsi } from "@oh-my-pi/pi-tui";
 
 // =============================================================================
 // Standardized Display Constants
@@ -49,44 +48,8 @@ export function resolveImageOptions(): { maxWidthCells: number; maxHeightCells?:
 	return { maxWidthCells, maxHeightCells };
 }
 
-/** Preview limits for collapsed/expanded views */
-export const PREVIEW_LIMITS = {
-	/** Lines shown in collapsed view */
-	COLLAPSED_LINES: 3,
-	/** Lines shown in expanded view */
-	EXPANDED_LINES: 12,
-	/** Items (files, results) shown in collapsed view */
-	COLLAPSED_ITEMS: 8,
-	/** Output preview lines in collapsed view */
-	OUTPUT_COLLAPSED: 3,
-	/** Output preview lines in expanded view */
-	OUTPUT_EXPANDED: 10,
-	/** Computer script lines shown in collapsed view */
-	COMPUTER_CODE_COLLAPSED: 10,
-	/** Max hunks shown when collapsed (edit tool) */
-	DIFF_COLLAPSED_HUNKS: 8,
-	/** Max diff lines shown when collapsed (edit tool) */
-	DIFF_COLLAPSED_LINES: 40,
-} as const;
-
 /** Default number of terminal output rows shown before expansion. */
 export const DEFAULT_TERMINAL_PREVIEW_LINES = 10;
-
-/** Truncation lengths for different content types */
-export const TRUNCATE_LENGTHS = {
-	/** Short titles, labels */
-	TITLE: 60,
-	/** Medium-length content (messages, previews) */
-	CONTENT: 80,
-	/** Longer content (code, explanations) */
-	LONG: 100,
-	/** Full line content */
-	LINE: 110,
-	/** Very short (task previews, badges) */
-	SHORT: 40,
-	/** Idle recap status line (~40-word LLM reply) */
-	RECAP: 280,
-} as const;
 
 /** Keybinding action that toggles tool-output expansion. */
 const EXPAND_ACTION = "app.tools.expand";
@@ -711,23 +674,7 @@ export function truncateDiffByHunk(
 // Path Utilities
 // =============================================================================
 
-export function shortenPath(filePath: unknown, homeDir?: string): string {
-	if (typeof filePath !== "string") {
-		return "";
-	}
-	const home = homeDir ?? os.homedir();
-	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
-	const hasHomePrefix = windowsStyle
-		? filePath.toLowerCase().startsWith(home.toLowerCase())
-		: filePath.startsWith(home);
-	if (home && hasHomePrefix) {
-		const suffix = filePath.slice(home.length);
-		if (suffix === "" || suffix.startsWith(path.posix.sep) || suffix.startsWith(path.win32.sep)) {
-			return `~${suffix.replaceAll(path.win32.sep, path.posix.sep)}`;
-		}
-	}
-	return filePath;
-}
+export { shortenPath };
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {
 	if (!workdir) return undefined;

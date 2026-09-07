@@ -1,6 +1,6 @@
 # Providers
 
-Providers are the model backends `omp` can route requests to: Anthropic, OpenAI, Google Gemini, Groq, OpenRouter, Mistral, xAI, local engines like Ollama, hosted gateways, custom `models.yml` providers, and providers registered by extensions.
+Providers are the model backends `omp` can route requests to: Anthropic, OpenAI, Google Gemini, Groq, OpenRouter, Mistral, xAI, Grok Bot (`grokbot`), local engines like Ollama, hosted gateways, custom `models.yml` providers, and providers registered by extensions.
 
 A **provider** is the account or backend namespace, such as `anthropic`, `openai`, `google`, or `ollama`. A **model** is a concrete model under that provider, selected as `provider/model-id`, such as `anthropic/claude-opus-4-6`. Disabling a provider removes every model under it from selection; if you only want to narrow individual models, use model settings instead.
 
@@ -93,6 +93,7 @@ Each provider has one or more environment variables that supply a key when no st
 | `xai-oauth`      | `XAI_OAUTH_TOKEN`, then `XAI_API_KEY`                                                                                                            |
 | `github-copilot` | `COPILOT_GITHUB_TOKEN`                                                                                                                           |
 | `cursor`         | `CURSOR_ACCESS_TOKEN`                                                                                                                            |
+| `grokbot`        | `GROKBOT_RENEWAL_CREDENTIAL` (alias `SAND_INFERENCE_RENEWAL_CREDENTIAL`); also requires `GROKBOT_MACHINE_ID` — see [Grok Bot](./grokbot.md)       |
 | `azure`          | `AZURE_OPENAI_API_KEY`                                                                                                                           |
 | `amazon-bedrock` | `AWS_PROFILE`, or `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY`, or an ECS/IRSA credential chain                                                 |
 
@@ -155,6 +156,8 @@ Each provider has one or more environment variables that supply a key when no st
 | `yolo-auto`                      | `YOLO_AUTO_API_KEY`                                                            |
 
 `/login cloudflare-ai-gateway` prompts for the gateway token, Cloudflare account ID, and gateway ID, then stores all three together. To use environment variables, set all three values listed above. OMP selects the Anthropic, OpenAI, or Workers AI gateway route for each model; you do not need a `models.yml` base URL override.
+
+`grokbot` is not Cursor OAuth and not xAI. `/login grokbot` only surfaces the host-install prompt for `~/.omp/agent/secrets/grokbot.env`. One-shot probes and the live catalog matrix: [Grok Bot](./grokbot.md).
 
 OAuth-backed providers such as `anthropic`, `github-copilot`, `cursor`, `ollama-cloud`, `qwen-portal`, `kimi-code`, `xai-oauth`, `wafer-serverless`, `google-gemini-cli`, `google-antigravity`, `devin`, and the GitLab providers (`gitlab-duo`, `gitlab-duo-agent`) are normally reached through `/login` rather than an environment variable. Interactive API-key logins exist too: `/login baseten`, `/login coreweave`, and `/login sakana` prompt for a dashboard/API key (`coreweave` additionally requires `COREWEAVE_PROJECT` for the `OpenAI-Project` header). See [Environment variables](./environment-variables.md) for search-tool and configuration variables not listed here.
 

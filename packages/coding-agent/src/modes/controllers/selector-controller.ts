@@ -2039,7 +2039,11 @@ export class SelectorController {
 					0,
 				),
 			);
-			block.addChild(new Text(theme.fg("dim", `Credentials saved to ${getAgentDbPath()}`), 1, 0));
+			// Empty-string login flows (grokbot host secrets, ollama, …) store nothing
+			// in the agent DB — only claim a DB write when AuthStorage returned an identity.
+			if (identity) {
+				block.addChild(new Text(theme.fg("dim", `Credentials saved to ${getAgentDbPath()}`), 1, 0));
+			}
 			this.ctx.present(block);
 			return true;
 		} catch (error: unknown) {

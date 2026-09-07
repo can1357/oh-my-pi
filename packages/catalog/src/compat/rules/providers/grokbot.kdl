@@ -1,0 +1,54 @@
+// Provider-wire compat for "grokbot" (sand InferenceService).
+// Offline seed effort ladders are rule-owned here so buildModel derives them
+// from neutral seeds instead of TypeScript per-id branches.
+
+provider "grokbot" {
+	// AvailableModels / seed-owned ladders must survive generate-models rebake,
+	// and buildModel must not invent fallback efforts when no thinking-efforts
+	// rule matched (routers, fast-only, unrecognized upstream-only values).
+	preserve-authored-thinking #true
+	// Live discovery owns limits/modality; gen:models must not backfill from
+	// canonical-family or stencil.so same-id references.
+	credential-scoped-catalog #true
+	// Synthetic routers + offline seeds: reviewed budgeting floor when live
+	// AvailableModels omits contextTokenLimit (proto3 zero/absent).
+	// Synthetic sand-default router: reviewed reasoning capability (discovery/seeds stay neutral).
+	models "sand-default" {
+		reasoning #true
+		sand-tools-wire "parent-chat"
+	}
+	models "sand-cua" {
+		sand-tools-wire "parent-chat"
+	}
+	models "sand-automation" {
+		sand-tools-wire "automation"
+	}
+	// Auto / default sand routers land on cursor-grok-4.5-high with native omp
+	// tools (HTTP 422). Product parent-chat is the same wire as sand-default;
+	// the stream rewrites these aliases to a bare sand-default requestedModel
+	// so a follow-up Read/Write does not hang as an incomplete tool call.
+	models "default" "default[]" "auto" "auto[]" {
+		sand-tools-wire "parent-chat"
+	}
+	// Live AvailableModels still lists gemini-3-flash / gemini-3-flash[], but
+	// that slug empty-bodies on tools. The working peer is gemini-3.8-flash
+	// (and its effort variants). Rewrite requestedModel to a bare 3.8-flash.
+	models "gemini-3-flash" "gemini-3-flash[]" {
+		sand-wire-model-id "gemini-3.8-flash"
+	}
+	models "sand-default" "sand-cua" "sand-automation" "default" "default[]" "auto" "auto[]" {
+		context-window-floor 200000
+	}
+	// Static offline seed for grok-4.6: sand effort dial + wire params when no
+	// live ladder was supplied (neutral seeds / unrecognized-only discovery).
+	models "grok-4.6*" {
+		thinking-mode "effort"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		context-window-floor 200000
+		sand-parameter-ids "effort" "fast"
+	}
+	// Sand rejects any tools payload for grok-4.5 (HTTP 422); keep text-only.
+	models "grok-4.5*" {
+		supports-tools #false
+	}
+}

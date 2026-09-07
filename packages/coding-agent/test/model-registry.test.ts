@@ -8,6 +8,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -403,6 +404,24 @@ describe("ModelRegistry", () => {
 				else Bun.env.OPENAI_API_KEY = originalOpenAiKey;
 			}
 		});
+
+		test("merges models.yml Grokbot headers when runtime only overrides baseUrl", () => {
+			writeRawModelsJson({
+				grokbot: {
+					headers: { "X-Proxy-Tenant": "from-yml" },
+				},
+			});
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+			registry.registerProvider("grokbot", {
+				baseUrl: "https://proxy.example/grokbot",
+			});
+			// Discovery uses the same merge as getProviderHeaders; a baseUrl-only
+			// runtime override must not drop models.yml tenant/proxy headers.
+			expect({ ...registry.getProviderHeaders("grokbot") }).toEqual({
+				"X-Proxy-Tenant": "from-yml",
+			});
+		});
+
 		test("zhipu-coding-plan glm-5.2 chat resolves the zhipu credential with model-scoped hints", async () => {
 			const registry = new ModelRegistry(authStorage, modelsJsonPath);
 			const model = registry.find("zhipu-coding-plan", "glm-5.2");
@@ -2663,6 +2682,104 @@ describe("ModelRegistry", () => {
 					source: "bundled",
 				});
 				expect(discovery?.fetchedAt).toBeUndefined();
+			}
+		});
+
+		test("warms credential-scoped startup cache from models.yml apiKey", () => {
+			const originalCopilotToken = Bun.env.COPILOT_GITHUB_TOKEN;
+			delete Bun.env.COPILOT_GITHUB_TOKEN;
+			try {
+				const apiKey = "yml-copilot-warm-key";
+				const cachedModel = buildModel({
+					id: "discovered-yml-credential-only",
+					name: "Discovered YML Credential Only",
+					api: "openai-responses",
+					provider: "github-copilot",
+					baseUrl: "https://api.githubcopilot.com",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 16_384,
+				});
+				writeRawModelsJson({
+					"github-copilot": { apiKey },
+				});
+				writeModelCache(
+					resolveModelCacheProviderId("github-copilot", { apiKey }),
+					Date.now(),
+					[cachedModel],
+					true,
+					"",
+					path.join(tempDir, "models.db"),
+				);
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				expect(registry.find("github-copilot", "discovered-yml-credential-only")).toBeDefined();
+			} finally {
+				if (originalCopilotToken === undefined) delete Bun.env.COPILOT_GITHUB_TOKEN;
+				else Bun.env.COPILOT_GITHUB_TOKEN = originalCopilotToken;
+			}
+		});
+
+		test("prefers models.yml apiKey over env when scoping startup caches", () => {
+			// Regression: env-first hashing selected a different cache row than
+			// AuthStorage.peekApiKey (config beats env), so live models stayed hidden.
+			const originalCopilotToken = Bun.env.COPILOT_GITHUB_TOKEN;
+			const ymlKey = "yml-copilot-wins-over-env";
+			const envKey = "env-copilot-should-lose";
+			Bun.env.COPILOT_GITHUB_TOKEN = envKey;
+			try {
+				const cachedModel = buildModel({
+					id: "discovered-yml-beats-env",
+					name: "Discovered YML Beats Env",
+					api: "openai-responses",
+					provider: "github-copilot",
+					baseUrl: "https://api.githubcopilot.com",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 16_384,
+				});
+				writeRawModelsJson({
+					"github-copilot": { apiKey: ymlKey },
+				});
+				writeModelCache(
+					resolveModelCacheProviderId("github-copilot", { apiKey: ymlKey }),
+					Date.now(),
+					[cachedModel],
+					true,
+					"",
+					path.join(tempDir, "models.db"),
+				);
+				// Env-scoped row must not be the one startup reads.
+				writeModelCache(
+					resolveModelCacheProviderId("github-copilot", { apiKey: envKey }),
+					Date.now(),
+					[
+						buildModel({
+							id: "discovered-env-only-wrong-row",
+							name: "Env Only Wrong Row",
+							api: "openai-responses",
+							provider: "github-copilot",
+							baseUrl: "https://api.githubcopilot.com",
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128_000,
+							maxTokens: 16_384,
+						}),
+					],
+					true,
+					"",
+					path.join(tempDir, "models.db"),
+				);
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				expect(registry.find("github-copilot", "discovered-yml-beats-env")).toBeDefined();
+				expect(registry.find("github-copilot", "discovered-env-only-wrong-row")).toBeUndefined();
+			} finally {
+				if (originalCopilotToken === undefined) delete Bun.env.COPILOT_GITHUB_TOKEN;
+				else Bun.env.COPILOT_GITHUB_TOKEN = originalCopilotToken;
 			}
 		});
 	});
