@@ -22,7 +22,6 @@
  *   shared root session and passed through verbatim
  */
 import type { ExtToRelayMessage, RelayRpcRequest, RelayToExtMessage, TabSnapshot } from "./protocol";
-import { parse as parseBabel } from "@babel/parser";
 
 /** Transport-agnostic websocket surface the bridge writes to. */
 export interface RelaySocket {
@@ -84,37 +83,13 @@ interface PreservedPreloadScript {
 	sequence: number;
 }
 
-function preloadDirectiveEnd(source: string): number {
-	let offset = 0;
-	try {
-		const parsed = parseBabel(source, {
-			sourceType: "unambiguous",
-			allowAwaitOutsideFunction: true,
-			allowReturnOutsideFunction: true,
-		});
-		// Babel separates actual directive statements from the body, so a string
-		// expression continued on the next line is never mistaken for a directive.
-		offset = parsed.program.body[0]?.start ?? source.length;
-	} catch {
-		// Chrome remains authoritative for syntax Babel does not recognize. Keep
-		// recovery guards after prefixes that are only legal at the beginning.
-		offset = source.startsWith("\uFEFF") ? 1 : 0;
-		if (source.startsWith("#!", offset)) {
-			const newline = source.indexOf("\n", offset);
-			offset = newline === -1 ? source.length : newline + 1;
-		}
-	}
-	return offset;
-}
-
 function markPreloadApplication(source: unknown, marker: string): string {
 	if (typeof source !== "string") throw new Error("preload source must be a string");
-	// `this` cannot be shadowed by top-level lexical bindings. Avoid every global
-	// identifier here: even `Object` can be in the TDZ when the client preload
-	// declares `const Object`, which would prevent the preload body from running.
+	// Run the caller source before exposing the marker. Prepending it makes global
+	// enumeration and feature detection observe relay-private state while the
+	// preload runs. `this` also cannot be shadowed by top-level lexical bindings.
 	const markerStatement = `this[${JSON.stringify(marker)}] = true;`;
-	const offset = preloadDirectiveEnd(source);
-	return `${source.slice(0, offset)}${markerStatement}\n${source.slice(offset)}`;
+	return `${source}\n${markerStatement}`;
 }
 
 function clearPreloadApplicationMarker(marker: string): string {
@@ -1007,13 +982,15 @@ export class RelayBridge {
 			this.#replyError(conn, msg, `No tab with id ${ref.tabId}`);
 			return;
 		}
-		const loaderId =
-			msg.params?.runImmediately === true
-				? await this.#mainFrameLoaderId(ref.tabId).catch(err => {
-						if (isExtensionTransportInterrupted(err)) throw err;
-						return undefined;
-					})
-				: undefined;
+		// Keep the pre-registration read to distinguish a navigation that overlaps
+		// the command from one that happened earlier, but never persist it as the
+		// successful invocation's baseline.
+		if (msg.params?.runImmediately === true) {
+			await this.#mainFrameLoaderId(ref.tabId).catch(err => {
+				if (isExtensionTransportInterrupted(err)) throw err;
+				return undefined;
+			});
+		}
 		let result: Record<string, unknown> | undefined;
 		try {
 			result = (await this.#rpc({
@@ -1037,6 +1014,16 @@ export class RelayBridge {
 			this.#replyError(conn, msg, "Page.addScriptToEvaluateOnNewDocument did not return an identifier");
 			return;
 		}
+		const loaderId =
+			msg.params?.runImmediately === true
+				? await this.#mainFrameLoaderId(ref.tabId).catch(err => {
+						if (isExtensionTransportInterrupted(err)) {
+							tab.forceFreshRootBeforeReplay = true;
+							throw err;
+						}
+						return undefined;
+					})
+				: undefined;
 		if (conn.sessions.get(sessionId) !== ref) {
 			this.#enqueuePreloadScriptCleanup(tab, [
 				{

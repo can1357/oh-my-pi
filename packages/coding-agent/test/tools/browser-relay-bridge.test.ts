@@ -139,6 +139,21 @@ async function waitFor(predicate: () => boolean, label = "condition"): Promise<v
 	throw new Error(`waitFor timed out waiting for ${label}`);
 }
 
+async function acknowledgeImmediatePreloadRegistration(
+	bridge: RelayBridge,
+	ext: FakeExtSocket,
+	identifier: string,
+	loaderId?: string,
+): Promise<void> {
+	ack(bridge, ext, "send", { identifier });
+	await waitFor(
+		() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"),
+		"post-registration loader snapshot",
+	);
+	ack(bridge, ext, "send", { frameTree: { frame: loaderId !== undefined ? { loaderId } : {} } });
+	await flush();
+}
+
 let msgSeq = 100;
 
 /** Attach to a tab's page target and return the minted page session id. */
@@ -3126,70 +3141,63 @@ describe("RelayBridge tab grouping", () => {
 	it.each([
 		{
 			name: "after a hashbang",
-			source:
-				'#!/usr/bin/env node\n"use strict";\nconst Object = {}; const globalThis = {}; this.__preloadRan = true;',
-			prefix: '#!/usr/bin/env node\n"use strict";\nthis[',
+			source: '#!/usr/bin/env node\n"use strict";\nthis.__preloadRan = true;',
 		},
 		{
 			name: "after a leading BOM",
-			source: '\uFEFF"use strict";\nconst Object = {}; const globalThis = {}; this.__preloadRan = true;',
-			prefix: '\uFEFF"use strict";\nthis[',
+			source: '\uFEFF"use strict";\nthis.__preloadRan = true;',
 		},
-	])(
-		"does not rerun immediate preload scripts when guard recovery preserves contexts $name",
-		async ({ source, prefix }) => {
-			const bridge = new RelayBridge({});
-			const ext = new FakeExtSocket();
-			connect(bridge, ext, [tab({ tabId: 1 })]);
-			const cdp = new FakeCdpSocket();
-			const connId = bridge.cdpConnected(cdp);
-			const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+	])("does not rerun immediate preload scripts when guard recovery preserves contexts $name", async ({ source }) => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
 
-			bridge.cdpMessage(
-				connId,
-				JSON.stringify({
-					id: ++msgSeq,
-					sessionId: pageSession,
-					method: "Page.addScriptToEvaluateOnNewDocument",
-					params: {
-						source,
-						runImmediately: true,
-					},
-				}),
-			);
-			await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
-			ack(bridge, ext, "send", {
-				frameTree: { frame: { loaderId: "loader-before" } },
-			});
-			await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-			ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-			await flush();
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: {
+					source,
+					runImmediately: true,
+				},
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", {
+			frameTree: { frame: { loaderId: "loader-before" } },
+		});
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
 
-			bridge.extClosed(ext);
-			const ext2 = new FakeExtSocket();
-			connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
-				recoverableTabIds: [1],
-			});
-			await waitFor(() => ext2.rpcs("attach").length === 1, "preload-script runImmediately recovery attach RPC");
-			ack(bridge, ext2, "attach");
-			await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
-			ack(bridge, ext2, "send", {
-				frameTree: { frame: { loaderId: "loader-before" } },
-			});
-			await waitFor(
-				() => ext2.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
-				"preload-script runImmediately replay",
-			);
-			const replay = ext2.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
-			expect(replay?.params).toMatchObject({ runImmediately: false });
-			const replaySource = (replay?.params as { source?: string } | undefined)?.source;
-			expect(replaySource).toStartWith(prefix);
-			const replayContext: Record<string, unknown> = {};
-			vm.runInNewContext(replaySource!, replayContext);
-			expect(replayContext.__preloadRan).toBe(true);
-			expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(true);
-		},
-	);
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], {
+			recoverableTabIds: [1],
+		});
+		await waitFor(() => ext2.rpcs("attach").length === 1, "preload-script runImmediately recovery attach RPC");
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", {
+			frameTree: { frame: { loaderId: "loader-before" } },
+		});
+		await waitFor(
+			() => ext2.rpcs("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"),
+			"preload-script runImmediately replay",
+		);
+		const replay = ext2.rpcs("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(replay?.params).toMatchObject({ runImmediately: false });
+		const replaySource = (replay?.params as { source?: string } | undefined)?.source;
+		expect(replaySource).toStartWith(source);
+		const replayContext: Record<string, unknown> = {};
+		vm.runInNewContext(replaySource!, replayContext);
+		expect(replayContext.__preloadRan).toBe(true);
+		expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(true);
+	});
 
 	it("preserves an immediate preload whose leading string expression continues on the next line", async () => {
 		const bridge = new RelayBridge({});
@@ -3212,8 +3220,7 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -3234,6 +3241,43 @@ describe("RelayBridge tab grouping", () => {
 		vm.runInNewContext(replaySource!, replayContext);
 		expect(replayContext.__preloadRan).toBe(true);
 		expect(Object.keys(replayContext).some(key => key.startsWith("__ompRelayPreload"))).toBe(true);
+	});
+
+	it("records the loader after an initial immediate preload registration", async () => {
+		const bridge = new RelayBridge({});
+		const ext = new FakeExtSocket();
+		connect(bridge, ext, [tab({ tabId: 1 })]);
+		const cdp = new FakeCdpSocket();
+		const connId = bridge.cdpConnected(cdp);
+		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
+
+		bridge.cdpMessage(
+			connId,
+			JSON.stringify({
+				id: ++msgSeq,
+				sessionId: pageSession,
+				method: "Page.addScriptToEvaluateOnNewDocument",
+				params: { source: "window.__relayInjected = true;", runImmediately: true },
+			}),
+		);
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
+		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-after" } } });
+		await flush();
+
+		bridge.extClosed(ext);
+		const ext2 = new FakeExtSocket();
+		connect(bridge, ext2, [tab({ tabId: 1, groupId: -1 })], { recoverableTabIds: [1] });
+		await waitFor(() => ext2.pending("attach").length === 1);
+		ack(bridge, ext2, "attach");
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
+		ack(bridge, ext2, "send", { frameTree: { frame: { loaderId: "loader-after" } } });
+		await waitFor(() => ext2.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
+		const replay = ext2.pending("send").find(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument");
+		expect(replay?.params).toMatchObject({ runImmediately: false });
 	});
 
 	it("reruns an immediate preload after a same-URL navigation during subscription recovery", async () => {
@@ -3259,8 +3303,7 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -3297,7 +3340,8 @@ describe("RelayBridge tab grouping", () => {
 		const cdp = new FakeCdpSocket();
 		const connId = bridge.cdpConnected(cdp);
 		const pageSession = await attachPage(bridge, ext, cdp, connId, 1);
-		const source = "let relayValue = 1; class RelayValue {}; this.__preloadRuns = (this.__preloadRuns ?? 0) + 1;";
+		const source =
+			"this.__preloadSawRelayMarker = Object.keys(this).some(key => key.startsWith('__ompRelayPreload')); let relayValue = 1; class RelayValue {}; this.__preloadRuns = (this.__preloadRuns ?? 0) + 1;";
 
 		const addId = ++msgSeq;
 		bridge.cdpMessage(
@@ -3312,8 +3356,7 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
 		const addReply = cdp.messages.find(message => message.id === addId);
 		const clientIdentifier =
 			addReply &&
@@ -3364,6 +3407,7 @@ describe("RelayBridge tab grouping", () => {
 		vm.runInContext(markedSource!, overlapDocument);
 		vm.runInContext(cleanupSource!, overlapDocument);
 		expect(overlapDocument.__preloadRuns).toBe(1);
+		expect(overlapDocument.__preloadSawRelayMarker).toBe(false);
 		expect(Object.keys(overlapDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
 		const laterDocument: Record<string, unknown> = {};
 		laterDocument.window = laterDocument;
@@ -3371,6 +3415,7 @@ describe("RelayBridge tab grouping", () => {
 		vm.runInContext(markedSource ?? "", laterDocument);
 		vm.runInContext(cleanupSource ?? "", laterDocument);
 		expect(laterDocument.__preloadRuns).toBe(1);
+		expect(laterDocument.__preloadSawRelayMarker).toBe(false);
 		expect(vm.runInContext("relayValue", laterDocument)).toBe(1);
 		expect(vm.runInContext("typeof RelayValue", laterDocument)).toBe("function");
 		expect(Object.keys(laterDocument).some(key => key.startsWith("__ompRelayPreload"))).toBe(false);
@@ -3426,8 +3471,7 @@ describe("RelayBridge tab grouping", () => {
 				frameTree: { frame: { loaderId: "loader-before" } },
 			});
 			await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-			ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-			await flush();
+			await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
 
 			bridge.extClosed(ext);
 			const ext2 = new FakeExtSocket();
@@ -3505,8 +3549,7 @@ describe("RelayBridge tab grouping", () => {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-replayed" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-replayed", "loader-before");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -3568,8 +3611,7 @@ describe("RelayBridge tab grouping", () => {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-replayed" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-replayed", "loader-before");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -3656,8 +3698,7 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -3734,8 +3775,7 @@ describe("RelayBridge tab grouping", () => {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -3825,8 +3865,7 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", { frameTree: { frame: {} } });
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery");
 
 		bridge.extClosed(ext);
 		const ext2 = new FakeExtSocket();
@@ -3874,8 +3913,7 @@ describe("RelayBridge tab grouping", () => {
 			frameTree: { frame: { loaderId: "loader-before" } },
 		});
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
 
 		// Lose a mutating result so recovery must detach and establish a fresh root.
 		bridge.cdpMessage(
@@ -4029,8 +4067,7 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery", "loader-before");
 
 		bridge.extClosed(ext);
 		const recovering = new FakeExtSocket();
@@ -4081,8 +4118,7 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", { frameTree: { frame: { loaderId: "loader-before" } } });
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery");
 
 		bridge.extClosed(ext);
 		const recovering = new FakeExtSocket();
@@ -7874,8 +7910,7 @@ describe("RelayBridge tab grouping", () => {
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.getFrameTree"));
 		ack(bridge, ext, "send", {});
 		await waitFor(() => ext.pending("send").some(rpc => rpc.method === "Page.addScriptToEvaluateOnNewDocument"));
-		ack(bridge, ext, "send", { identifier: "root-script-before-recovery" });
-		await flush();
+		await acknowledgeImmediatePreloadRegistration(bridge, ext, "root-script-before-recovery");
 
 		const replacement = new FakeExtSocket();
 		bridge.extConnected(replacement);
