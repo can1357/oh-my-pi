@@ -94,13 +94,24 @@ const projectEnvNamesLoadedByOmp = new Set<string>();
 function expandDotenvValues(values: Record<string, string>, env: Record<string, string>): Record<string, string> {
 	const expanded: Record<string, string> = {};
 	for (const key in values) {
+		// Bun expands `$NAME`, `${NAME}`, and `${NAME:-default}` (unset only;
+		// an empty-but-set value is kept). Other `${...}` forms are left intact
+		// so ownership can fail closed instead of treating them as trusted.
 		expanded[key] = values[key].replace(
-			/(\\)?\$(?:\{([A-Za-z_][A-Za-z0-9_]*)\}|([A-Za-z_][A-Za-z0-9_]*))/g,
-			(match, escaped: string | undefined, braced: string | undefined, bare: string | undefined) => {
+			/(\\)?\$(?:\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}|([A-Za-z_][A-Za-z0-9_]*))/g,
+			(
+				match,
+				escaped: string | undefined,
+				braced: string | undefined,
+				fallback: string | undefined,
+				bare: string | undefined,
+			) => {
 				if (escaped) return match.slice(1);
 				const name = braced ?? bare;
 				if (!name) return match;
-				return env[name] ?? expanded[name] ?? "";
+				const current = env[name] ?? expanded[name];
+				if (current !== undefined) return current;
+				return fallback ?? "";
 			},
 		);
 	}
@@ -385,7 +396,8 @@ function envLookup(
  * parent `PI_CODING_AGENT_DIR`/`PI_CONFIG_DIR` that now holds a dotenv value
  * is still project-owned. Mode files follow Bun's pre-dotenv `NODE_ENV`
  * selection, including a `.env.development` fallback when dotenv itself
- * mutates `NODE_ENV`.
+ * mutates `NODE_ENV`. Value matching reproduces Bun `$NAME` / `${NAME}` /
+ * `${NAME:-default}` expansion; unrecognized `$` syntax fails closed.
  */
 export function isEnvOwnedByProjectDotenv(name: string): boolean {
 	if (envKeysInclude(projectEnvNamesLoadedByOmp, name)) return true;
@@ -397,12 +409,19 @@ export function isEnvOwnedByProjectDotenv(name: string): boolean {
 	}
 	const current = process.env[name];
 	if (current === undefined) return false;
-	return (
+	if (
 		current === envLookup(launchProjectDotenv.launchEnv, name) ||
 		current === envLookup(launchProjectDotenv.expandedLaunchEnv, name) ||
 		current === envLookup(launchProjectDotenv.fallbackLaunchEnv, name) ||
 		current === envLookup(launchProjectDotenv.expandedFallbackLaunchEnv, name)
-	);
+	) {
+		return true;
+	}
+	// No snapshot (or an empty launcher value) and a `$` in the dotenv source
+	// means Bun may have expanded syntax we do not reproduce. Fail closed.
+	const raw = envLookup(launchProjectDotenv.launchEnv, name);
+	const rawFallback = envLookup(launchProjectDotenv.fallbackLaunchEnv, name);
+	return Boolean(raw?.includes("$") || rawFallback?.includes("$"));
 }
 
 /**

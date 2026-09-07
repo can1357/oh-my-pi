@@ -221,6 +221,32 @@ describe("filterChildShellEnv", () => {
 		expect(JSON.parse(stdout)).toEqual({ UNCHANGED: "parent-value" });
 	});
 
+	it("drops launch-cwd values expanded from bun ${" + "VAR:-fallback} syntax", async () => {
+		const cwd = path.dirname(writeTempEnv("PI_CODING_AGENT_DIR=${" + "UNSET:-./attacker-dir}\n"));
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const script = [
+			`import { filterChildShellEnv } from ${JSON.stringify(envModulePath)};`,
+			"const child = filterChildShellEnv(",
+			'  { PI_CODING_AGENT_DIR: "./attacker-dir", UNCHANGED: "parent-value" },',
+			`  ${JSON.stringify(cwd)},`,
+			");",
+			"process.stdout.write(JSON.stringify(child));",
+		].join("\n");
+		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+			env: { ...process.env, NODE_ENV: "test", PI_CODING_AGENT_DIR: undefined },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout)).toEqual({ UNCHANGED: "parent-value" });
+	});
+
 	it("uses the launch mode when dotenv changes NODE_ENV", async () => {
 		const cwd = path.dirname(writeTempEnv("NODE_ENV=production\n"));
 		fs.writeFileSync(
@@ -353,6 +379,37 @@ describe("isEnvOwnedByProjectDotenv", () => {
 	it("treats a bun-decoded escaped-newline PI_CODING_AGENT_DIR as project-owned", async () => {
 		expect(
 			await probeProjectDotenvOwnership('PI_CODING_AGENT_DIR="./attacker\\n-dir"\n', {
+				PI_CODING_AGENT_DIR: "",
+				OMP_CODING_AGENT_DIR: undefined,
+			}),
+		).toBe(true);
+	});
+
+	it("treats a bun-expanded ${" + "VAR:-fallback} PI_CODING_AGENT_DIR as project-owned", async () => {
+		expect(
+			await probeProjectDotenvOwnership("PI_CODING_AGENT_DIR=${" + "UNSET:-./attacker-dir}\n", {
+				PI_CODING_AGENT_DIR: "",
+				OMP_CODING_AGENT_DIR: undefined,
+			}),
+		).toBe(true);
+	});
+
+	it("treats a bun-expanded ${" + "VAR:-fallback} PI_CONFIG_DIR as project-owned", async () => {
+		expect(
+			await probeProjectDotenvOwnership(
+				"PI_CONFIG_DIR=${" + "UNSET:-./attacker-config}\n",
+				{
+					PI_CONFIG_DIR: "",
+					OMP_CONFIG_DIR: undefined,
+				},
+				"PI_CONFIG_DIR",
+			),
+		).toBe(true);
+	});
+
+	it("treats unrecognized bun $ syntax in PI_CODING_AGENT_DIR as project-owned", async () => {
+		expect(
+			await probeProjectDotenvOwnership("PI_CODING_AGENT_DIR=${" + "UNSET:=./attacker-dir}\n", {
 				PI_CODING_AGENT_DIR: "",
 				OMP_CODING_AGENT_DIR: undefined,
 			}),

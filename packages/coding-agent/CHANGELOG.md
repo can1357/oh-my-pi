@@ -32,6 +32,7 @@
 - Shortened collab and MCP status home paths even when the home directory contains spaces.
 - Closed the collab relay socket when host start is cancelled after the handshake opens.
 - Distrusted collab auto-start when a project dotenv uses Bun-decoded escaped newlines in `PI_CODING_AGENT_DIR`.
+- Distrusted collab auto-start when a project dotenv uses Bun `${VAR:-fallback}` expansion in agent or config directory variables.
 
 ## [18.1.12] - 2026-09-06
 
