@@ -9,6 +9,7 @@
 
 ### Fixed
 
+- CLI `--api-key` is installed before ModelRegistry construction when `--provider` / `provider/model` is known, so credential-scoped catalogs (Grok Bot) can warm live cache rows instead of failing with “Model not found” on offline seeds.
 - Grok Bot catalog matrix reports `wire: native` for grok/gpt/gemini families (was the internal `error` sentinel). `sand-automation` JSON-as-text Shell dumps are promoted to real tool calls.
 - `--no-tools` keeps an empty provider tool whitelist without `restrictToolNames`, so extension commands and LSP remain available unless `--no-extensions` / `--no-lsp` are set.
 ### Fixed

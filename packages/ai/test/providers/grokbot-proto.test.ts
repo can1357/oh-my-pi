@@ -1183,6 +1183,67 @@ describe("grokbot incomplete tool calls", () => {
 		expect(thinking.some(t => t.includes("abandoned-plan"))).toBe(false);
 	});
 
+	test("rebuffers after a later incomplete tool opens once the attempt was live", async () => {
+		// Complete tool at 0 goes live; incomplete at 1 must pull subsequent text
+		// back into the buffer so end-of-stream drop/remap does not leave ACP with
+		// stale indices pointing at a tool the final message removed.
+		mockAuth();
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c-ok",
+					toolName: "Read",
+					args: '{"path":"/tmp/x"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const incomplete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c-bad", toolName: "Read", args: '{"path":', isComplete: false },
+			}),
+		);
+		const text = frameConnectProto(
+			encodeInferenceStreamResponse({ textPart: { text: "after-incomplete", isFinal: true } }),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(complete, incomplete, text, trailer)) as FetchImpl;
+		const toolsContext: Context = {
+			messages: [{ role: "user", content: "call", timestamp: 1 }],
+			tools: [
+				{
+					name: "Read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" } },
+						required: ["path"],
+					},
+				},
+			],
+		};
+
+		const stream = streamGrokBot(model, toolsContext, { apiKey: "renew", fetch: fetchImpl });
+		const textEvents: Array<{ type: string; contentIndex: number; delta?: string }> = [];
+		for await (const event of stream) {
+			if (event.type === "text_start" || event.type === "text_delta" || event.type === "text_end") {
+				textEvents.push({
+					type: event.type,
+					contentIndex: event.contentIndex,
+					...(event.type === "text_delta" ? { delta: event.delta } : {}),
+				});
+			}
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({ type: "toolCall", id: "c-ok", name: "Read" }),
+			expect.objectContaining({ type: "text", text: "after-incomplete" }),
+		]);
+		expect(textEvents.some(e => e.type === "text_delta" && e.delta === "after-incomplete")).toBe(true);
+		expect(textEvents.every(e => e.contentIndex === 1)).toBe(true);
+	});
+
 	test("drops a hanging leftover tool when a completed call and text already exist", async () => {
 		mockAuth();
 		const complete = frameConnectProto(

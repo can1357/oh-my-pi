@@ -2839,6 +2839,42 @@ describe("ModelRegistry", () => {
 				else Bun.env.COPILOT_GITHUB_TOKEN = originalCopilotToken;
 			}
 		});
+
+		test("warms credential-scoped startup cache from runtime --api-key override", () => {
+			// Regression: CLI --api-key installed after ModelRegistry left startup
+			// unauthenticated, so live-only ids were invisible behind offline seeds.
+			const originalCopilotToken = Bun.env.COPILOT_GITHUB_TOKEN;
+			delete Bun.env.COPILOT_GITHUB_TOKEN;
+			try {
+				const apiKey = "runtime-cli-api-key-warm";
+				const cachedModel = buildModel({
+					id: "discovered-runtime-api-key-only",
+					name: "Discovered Runtime API Key Only",
+					api: "openai-responses",
+					provider: "github-copilot",
+					baseUrl: "https://api.githubcopilot.com",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 16_384,
+				});
+				writeModelCache(
+					resolveModelCacheProviderId("github-copilot", { apiKey }),
+					Date.now(),
+					[cachedModel],
+					true,
+					"",
+					path.join(tempDir, "models.db"),
+				);
+				authStorage.setRuntimeApiKey("github-copilot", apiKey);
+				const registry = new ModelRegistry(authStorage, modelsJsonPath);
+				expect(registry.find("github-copilot", "discovered-runtime-api-key-only")).toBeDefined();
+			} finally {
+				if (originalCopilotToken === undefined) delete Bun.env.COPILOT_GITHUB_TOKEN;
+				else Bun.env.COPILOT_GITHUB_TOKEN = originalCopilotToken;
+			}
+		});
 	});
 
 	describe("effort-tier variant collapsing", () => {

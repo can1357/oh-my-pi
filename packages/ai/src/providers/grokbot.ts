@@ -813,6 +813,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					const buf = pendingToolEventBuffers.get(index) ?? [];
 					buf.push(event);
 					pendingToolEventBuffers.set(index, buf);
+					if (event.type === "toolcall_start" && attemptStreamingLive) {
+						// A later incomplete tool can still force content compaction —
+						// leave live mode so subsequent text/thinking stay buffered.
+						attemptStreamingLive = false;
+					}
 					if (event.type === "toolcall_end") {
 						// Defer live publish while an earlier incomplete sibling could still
 						// force content compaction — otherwise flushed contentIndex drifts.
@@ -823,6 +828,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					return;
 				}
 				if (attemptStreamingLive) {
+					// Guard against races where text/thinking arrives after an incomplete
+					// sibling opened but before we leave live mode on its start event.
+					const contentIndex = "contentIndex" in event ? event.contentIndex : undefined;
+					if (typeof contentIndex === "number" && hasEarlierIncompleteTool(contentIndex)) {
+						attemptStreamingLive = false;
+						attemptEventBuffer.push(event);
+						return;
+					}
 					stream.push(event);
 					return;
 				}

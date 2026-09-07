@@ -28,6 +28,7 @@ import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/arg
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import { resolveCliRuntimeApiKeyProvider } from "./cli/runtime-api-key";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
@@ -1527,6 +1528,13 @@ export async function runRootCommand(
 			applyAcpDefaultSettingOverrides(settingsInstance);
 		}
 
+		// Install --api-key before ModelRegistry so credential-scoped startup cache
+		// ids (grokbot renewer hash, etc.) match discovery and warm live rows.
+		const cliApiKeyProvider = parsedArgs.apiKey ? resolveCliRuntimeApiKeyProvider(parsedArgs) : undefined;
+		if (parsedArgs.apiKey && cliApiKeyProvider) {
+			authStorage.setRuntimeApiKey(cliApiKeyProvider, parsedArgs.apiKey);
+		}
+
 		// The registry composes policy-dependent metadata synchronously, including
 		// extended-context window caps, so it must receive the finalized settings.
 		const modelRegistry = logger.time(
@@ -1844,9 +1852,11 @@ export async function runRootCommand(
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
 		}
 
-		// Handle CLI --api-key as runtime override (not persisted)
+		// Handle CLI --api-key as runtime override (not persisted). Prefer the
+		// early install above when the provider was known from --provider/--model;
+		// this path covers deferred model resolution (extensions / discovery).
 		if (parsedArgs.apiKey) {
-			if (!sessionOptions.model && !sessionOptions.modelPattern) {
+			if (!sessionOptions.model && !sessionOptions.modelPattern && !cliApiKeyProvider) {
 				process.stderr.write(
 					`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
 				);
