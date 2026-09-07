@@ -1,4 +1,4 @@
-use omp_core::{IntoStr, Str};
+use omp_core::{IntoStr, Str, sf};
 use serde_json::Value;
 use smol_bitmap::SmolBitmap;
 
@@ -206,7 +206,7 @@ impl Projector<'_> {
 			Value::Array(values) if !values.is_empty() => {
 				let count = values.len();
 				for (index, value) in values.iter().enumerate() {
-					self.node(value, &format!("[{index}]"), &mut ancestors, 0, index + 1 == count, 1);
+					self.node(value, &sf!("[{index}]"), &mut ancestors, 0, index + 1 == count, 1);
 					if self.full() {
 						break;
 					}
@@ -225,7 +225,7 @@ impl Projector<'_> {
 			ancestor_depth: 0,
 			last:           true,
 			content:        RowContent::Invalid(clipped(
-				&format!("Invalid JSON: {error}"),
+				&sf!("Invalid JSON: {error}"),
 				self.bounds.max_chars,
 			)),
 		});
@@ -269,7 +269,7 @@ impl Projector<'_> {
 			},
 			Value::Number(value) => RowContent::Scalar {
 				key,
-				value: clipped(&value.to_string(), self.bounds.max_chars),
+				value: clipped(&sf!("{value}"), self.bounds.max_chars),
 				kind: ScalarKind::Number,
 			},
 			Value::String(_) => RowContent::Scalar {
@@ -317,7 +317,7 @@ impl Projector<'_> {
 				for (index, value) in values.iter().enumerate() {
 					self.node(
 						value,
-						&format!("[{index}]"),
+						&sf!("[{index}]"),
 						ancestors,
 						ancestor_depth + 1,
 						index + 1 == count,
