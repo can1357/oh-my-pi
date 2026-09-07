@@ -30,7 +30,7 @@ The driver supplies application policy rather than adding it to the loop. `sessi
 4. appends caller and interrupt items with `Journal::append_turn_input`;
 5. publishes current live history and emits the `agent_start` observation.
 
-The journal is the authority. `Journal` owns an `omp_storage::transcript::Writer`, cached reader/live projection, turn starts and receipts, pending inputs, invocation transitions, tool-batch authorizations, regime facts, jobs, and session-index integration (`crates/agent/src/journal.rs`). `Journal::create` creates transcript v4 lazily; `Journal::open` rebuilds all live indexes from durable events.
+The journal is the authority. `Journal` owns an `omp_journal::transcript::Writer`, cached reader/live projection, turn starts and receipts, pending inputs, invocation transitions, tool-batch authorizations, regime facts, jobs, and session-index integration (`crates/agent/src/journal.rs`). `Journal::create` creates transcript v4 lazily; `Journal::open` rebuilds all live indexes from durable events.
 
 ### 2. Projection and prompt
 
@@ -40,7 +40,7 @@ The journal is the authority. `Journal` owns an `omp_storage::transcript::Writer
 
 `TurnClient` and `TurnSession` are the transport seam (`crates/agent/src/turn.rs`). `TurnClient::turn` opens one logical turn from either `TurnInput::Full(Thread)` or `TurnInput::Delta(ContextRef, ThreadDelta)`. `TurnSession::events` yields canonical protobuf `TurnEvent` values; `TurnSession::submit` sends responses to server-initiated invocations. Dropping a session structurally cancels both sides.
 
-Inside inference, provider codecs normalize vendor frames to `ChatEvent` (`crates/inference/src/event.rs`). Its important variants are block starts, text/thinking deltas, tool-call start and argument deltas, the sole executable `ToolCallReady`, usage, workflow control, and completion. `AnswerLayer` and the remaining Tower layers preserve this canonical stream (`crates/inference/src/layer/answer.rs`, `crates/inference/src/lib.rs`). `InferenceRpc::turn_events` converts `ChatEvent` into protocol `TurnEvent::{Accepted, PartStart, PartDelta, PartEnd, Invoke, Outcome, Error}` and constructs the terminal canonical output (`crates/serve/src/inference.rs`). The agent therefore does not consume provider-specific events.
+Inside inference, provider codecs normalize vendor frames to `ChatEvent` (`crates/ai/src/event.rs`). Its important variants are block starts, text/thinking deltas, tool-call start and argument deltas, the sole executable `ToolCallReady`, usage, workflow control, and completion. `AnswerLayer` and the remaining Tower layers preserve this canonical stream (`crates/ai/src/layer/answer.rs`, `crates/ai/src/lib.rs`). `InferenceRpc::turn_events` converts `ChatEvent` into protocol `TurnEvent::{Accepted, PartStart, PartDelta, PartEnd, Invoke, Outcome, Error}` and constructs the terminal canonical output (`crates/serve/src/inference.rs`). The agent therefore does not consume provider-specific events.
 
 `drive_session` publishes every visible protocol event as `AgentEvent::Turn` before interpreting it (`crates/agent/src/loop.rs`). It also services host control and duplex provider invocations while the stream is live. Text and thinking parts become presentation deltas. A tool `PartStart` resolves the exact live `ToolIdentity`, checks it against the frozen enabled-tool list, resolves the ADMISSION regime point, opens a speculative environment invocation, and records `InvocationPhase::Open`. Each tool `PartDelta` is relayed as raw argument text and is also offered to STREAM regimes.
 
@@ -185,12 +185,12 @@ flowchart LR
 
 The interactive chat adapter deliberately uses a lossless subscription through `subscribe_chat_events` (`crates/app/src/chat_ui.rs`). `handle_agent_event` maps `AgentEvent::Turn` part events to assistant begin/delta/end operations, speculative tool events to live argument views, `ToolUpdate` to folded progress, and `ToolFinished` to a terminal tool card. Its `BridgeState` retains active part ids, markdown buffers, streaming tool argument bytes, `ToolDisplay` state, jobs, usage, and extension renderer routes.
 
-Durability is not delegated to a UI subscriber. The loop commits `TurnStart`, terminal inference outcomes, tool-batch authorization, invocation transitions, regime facts, and follow-up items directly through its sole mutable `Journal` before or at their authority boundary (`crates/agent/src/loop.rs`, `crates/agent/src/journal.rs`). It then publishes immutable presentation events. On resume, `project_journal` rebuilds canonical items from `omp_storage::transcript`; the UI can replay those items without treating ephemeral `ToolUpdate` events as history.
+Durability is not delegated to a UI subscriber. The loop commits `TurnStart`, terminal inference outcomes, tool-batch authorization, invocation transitions, regime facts, and follow-up items directly through its sole mutable `Journal` before or at their authority boundary (`crates/agent/src/loop.rs`, `crates/agent/src/journal.rs`). It then publishes immutable presentation events. On resume, `project_journal` rebuilds canonical items from `omp_journal::transcript`; the UI can replay those items without treating ephemeral `ToolUpdate` events as history.
 
 ```mermaid
 flowchart TD
     L[Agent loop authority] --> J[Journal append APIs]
-    J --> W[omp_storage transcript Writer]
+    J --> W[omp_journal transcript Writer]
     W --> S[Durable session log and index]
     S --> P[project_journal on resume]
     L --> E[EventBus publish AgentEvent]
@@ -231,8 +231,8 @@ This produces one final ANSI materialization boundary: streamed inference and to
 | Hook subscription and decision procedure | `crates/agent/src/hooks.rs` |
 | Regime arbiter | `crates/agent/src/arbiter.rs` |
 | Regime state and draft semantics | `crates/agent/src/regime.rs` |
-| Canonical inference events | `crates/inference/src/event.rs` |
-| Tower inference surface | `crates/inference/src/lib.rs` |
+| Canonical inference events | `crates/ai/src/event.rs` |
+| Tower inference surface | `crates/ai/src/lib.rs` |
 | ChatEvent to TurnEvent service projection | `crates/serve/src/inference.rs` |
 | Tool argument feed | `crates/tool/src/incoming.rs` |
 | Typed tool outcomes | `crates/tool/src/lib.rs` |

@@ -171,7 +171,7 @@ structural problems that cannot recur here:
    OpenAI `prompt_cache_key`, stripping `prompt_cache_retention` on models that 400 on it,
    and reordering Anthropic's mixed cache-control TTLs. This one is real work and it does
    not belong to an extension either — it is provider-dialect normalization, and it belongs
-   in `crates/inference` beside every other quirk (`docs/py/13-inference.md`).
+   in `crates/ai` beside every other quirk (`docs/py/13-inference.md`).
 
 So the useful reading of that package is not "a competing context extension." It is a bug
 report with four items, filed against the harness, three of which are answered by making
@@ -179,8 +179,7 @@ ordering a type and one by moving it behind the provider boundary.
 
 ### Compaction as a tiered negotiation
 
-omp does not have one compaction; it has a rescue ladder (`.plan/feature-map/FEATURES.md`
-"multi-tier rescue: prune, drop images, elide, local, remote/native, handoff"). The
+("multi-tier rescue: prune, drop images, elide, local, remote/native, handoff"). The
 `compaction` hook fires once per tier attempt, named, so an extension can take over the
 cheap tier and leave the expensive ones alone, or vice versa.
 
@@ -299,7 +298,7 @@ projection and shipped as a flat array; never constructed by extension code.
 | Field | Semantics |
 |---|---|
 | `id` | Stable opaque item identifier. The only value patch operations accept. Unique within a session for the item's lifetime, including across compaction. |
-| `event` | Physical transcript event index — the `u64` the live chain in `crates/storage/src/transcript/reader.rs` manipulates. Exposed because `omp.journal` and `omp.sessions` (`docs/py/09-journal.md`) key on it, and because ordering comparisons are integer comparisons. |
+| `event` | Physical transcript event index — the `u64` the live chain in `crates/journal/src/transcript/reader.rs` manipulates. Exposed because `omp.journal` and `omp.sessions` (`docs/py/09-journal.md`) key on it, and because ordering comparisons are integer comparisons. |
 | `seq` | Dense gateway thread sequence assigned when the item was accepted. `0` for items appended optimistically whose `amend_seq` correction has not landed. |
 | `kind` | See `omp.MessageKind`. |
 | `role` | Wire role: `"system"`, `"user"`, `"assistant"`, `"tool"`. Derived from `kind`; present because provider-shaped reasoning is more natural for some rules. |
@@ -613,8 +612,8 @@ application order `prune → drop_parts → replace → insert → reorder` and 
 define which op is earlier. The later op is dropped; both the drop and the winning op are
 journaled.
 
-**This is not a gate chain, and the distinction is load-bearing.** `PLAN.md` §D6
-locks **D6 — One mailbox, no gate chain**, amended 2026-08-19: a tool batch runs concurrently
+**This is not a gate chain, and the distinction is load-bearing.** Locked decision
+**D6 — One mailbox, no gate chain**, amended 2026-08-19, says: a tool batch runs concurrently
 exactly as the model issued it, with "no batch-level admission scheduler, no parallelism
 detection, no reordering," each invocation gating independently, and safety
 living in env invariants. Nothing in this document is an admission decision. A
@@ -1949,7 +1948,7 @@ the Python function's determinism is checked at *pull* time by calling it twice 
 and after that the agent renders from immutable bytes. A slot that is nondeterministic is
 caught in Python, where the traceback names the extension.
 
-**Cache breakpoint emission.** `crates/inference` needs a per-provider breakpoint budget
+**Cache breakpoint emission.** `crates/ai` needs a per-provider breakpoint budget
 and a placement pass consuming `[BandHash; 4]` plus the trailing message window — this pass
 *is* the semantic-groups-into-marker-budget packing `docs/py/13-inference.md` owns. Anthropic
 gets four `cache_control` markers, three at band transitions and one trailing; providers with
@@ -1975,9 +1974,9 @@ Three provider quirks belong in the same pass, and the argument for putting them
 ### Compaction
 
 Nothing exists agent-side. `Kind::Compact` exists in storage and `Log::live`
-(`crates/storage/src/transcript/reader.rs:123-133`) already splices it correctly, which is a
+(`crates/journal/src/transcript/reader.rs:123-133`) already splices it correctly, which is a
 much better starting position than it sounds — the *durable* half of compaction is done and
-tested (`crates/storage/tests/transcript_roundtrip.rs`). What is missing is the ladder:
+tested (`crates/journal/tests/gc.rs`). What is missing is the ladder:
 
 - `crates/agent/src/compact.rs`: tier definitions, threshold evaluation against
   `ContextUsage`, the hysteresis band that prevents compaction loops, and the hook dispatch
@@ -1997,14 +1996,14 @@ tested (`crates/storage/tests/transcript_roundtrip.rs`). What is missing is the 
   extension surface exists.
 - The `REMOTE` tier has an unusual amount of groundwork already: `Kind::NativeCheckpoint
   { provider, model, items }` exists in storage for replacing accumulated provider-native
-  history with checkpoint items, and `crates/storage/src/transcript/capsule.rs` owns
+  history with checkpoint items, and `crates/journal/src/transcript/capsule.rs` owns
   provider-native replay residue. What is missing is the portability guard — pi's
   `remotePreserveReusable` judges reusability against the *active* model, and getting that
   wrong left provider-switched sessions permanently context-less (pi #6343). Any
   `CustomSummary` must therefore stay a real textual summary and never an opaque
   provider blob, which is why `CustomSummary.summary` is `str` and not bytes.
 
-There is no `crates/snapcompact`, and `.plan/feature-map/compact/` is a compacted copy of the
+There is no `crates/snapcompact`, and the retired port plan's `compact/` notes were a compacted copy of the
 feature map, not compaction code — worth stating because both names invite the wrong guess.
 The `snapcompact` tier (`FEATURES.md:238`: PNG frames, shape selection, image budget, savings
 journal) is a genuinely separate subsystem and is out of this document's scope beyond having
@@ -2179,7 +2178,7 @@ function call becomes `omp.services` (`docs/py/00-overview.md`) — and `docs/py
 benchmark matrix is what measures them. The one item Rev 2 left flagged rather than
 absorbed is now closed: D5's "warm pool of one" wording no longer matched the topology,
 the ruling recommended amending it, and the amendment was ratified 2026-08-19 — D5's
-third clause (`PLAN.md` §D5) now reads "supervised worker processes, one per
+third clause now reads "supervised worker processes, one per
 active extension, keyed `(layer, tier, extension)`; pooling is explicit opt-in
 fate-sharing", with approval a durable Core-owned ticket (`docs/py/06-policy.md`)
 removing the long-suspension pressure that motivated the pool. The Rev 2 flag is kept
@@ -2287,7 +2286,7 @@ Changes this file made in the post-review revision, and the review points that d
 - **P0#10 / D5** — the Rev 1 lead "defect" in *Open questions* (session-wide cancellation
   blast radius) is resolved by the per-extension-process topology this document had
   recommended; rewritten as a recorded resolution, with the D5 amendment recommendation
-  flagged against `PLAN.md` rather than silently contradicted. Handler-concurrency
+  flagged rather than silently contradicted. Handler-concurrency
   prose now states actor semantics: serialized within an extension, concurrent across
   extensions.
 - **P0#6 linkage** — chaining, dedupe, and `CustomSummary` winner selection replace
@@ -2306,7 +2305,7 @@ Changes this file made in the post-review revision, and the review points that d
   `@omp.entry_kind` instances instead of raw string + dict; session reads filter by declared
   entry type.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Dispatch surface.** The memory-device paragraph now reaches `recall` through the `dyn`
   core tool (`{"do_": "docs/recall"}` for schema, `{"do_": "invoke/recall", …}` for the
@@ -2316,7 +2315,7 @@ Changes this file made in the post-review revision, and the review points that d
   device URL scheme; the Rev 2.1 ruling deletes that scheme entirely — discovery, docs,
   and dispatch are `dyn` ops (`search`/`docs`/`invoke`), owned by `docs/py/01-devices.md`
   along with the ergonomic `@omp.tool` soft default and the typed `omp.ToolPath`.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. The `thread_projection`
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. The `thread_projection`
   gate-chain paragraph now cites D6's amended text (batch-level scheduling prohibited, the
   per-invocation decision procedure explicitly permitted) instead of the recommended
   wording amendment, and the resolved cancellation item records the D5 amendment as

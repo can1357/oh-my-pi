@@ -42,7 +42,7 @@ plus 4 000 Python frames. Second, cancellation: a Python sink in the token path 
 can hang the token path, which is Lesson #2 with extra steps.
 
 Mid-stream interception is a real feature, and it is deliberately **not** here. pi's TTSR engine
-(`.plan/feature-map/observability.md:150`) matches partial model output and time-travels the request;
+matches partial model output and time-travels the request;
 that stays a Rust-side facility on the inference path. If you want to react to output as it forms,
 the honest answer is that you cannot from Python, and this document says so rather than shipping a
 hook that quietly costs a millisecond a token.
@@ -159,7 +159,7 @@ journal-side storage aspects in `docs/py/09-journal.md`.
 
 ### Semconv is a compatibility contract
 
-`crates/telemetry/src/attrs.rs` opens by stating that its literal attribute strings are a contract:
+`crates/observability/src/attrs.rs` opens by stating that its literal attribute strings are a contract:
 "changing even one breaks downstream dashboards, collectors, and alerts." That authority is *not*
 duplicated into Python. `omp.telemetry.semconv` maps event field paths onto those exact keys, and
 extension-defined instruments are forced under the `omp.ext.` prefix so no extension can shadow
@@ -324,7 +324,7 @@ The complete event vocabulary. Every member is also accepted as its bare string.
 
 ### `class Accuracy(StrEnum)`
 
-Mirrors `omp.inference.v1.Usage.Accuracy` and `omp_telemetry::config::UsageAccuracy`.
+Mirrors `omp.inference.v1.Usage.Accuracy` and `omp_observability::config::UsageAccuracy`.
 
 - `Accuracy.EXACT` = `"exact"` — every bucket came from the provider.
 - `Accuracy.ESTIMATED` = `"estimated"` — every bucket was counted locally, because the provider
@@ -345,7 +345,7 @@ Mirrors `omp.inference.v1.StopReason`.
 ### `class FinishReason(StrEnum)`
 
 The normalized value emitted in `gen_ai.response.finish_reasons`, derived from `StopReason` exactly
-as `omp_telemetry::semconv::StopReason::finish_reason` does. Present so a Python sink emitting OTLP
+as `omp_observability::semconv::StopReason::finish_reason` does. Present so a Python sink emitting OTLP
 attributes produces byte-identical series to the Rust exporter.
 
 - `FinishReason.STOP` = `"stop"`
@@ -355,7 +355,7 @@ attributes produces byte-identical series to the Rust exporter.
 
 ### `class CallStatus(StrEnum)`
 
-Terminal status of an invocation, wire-identical to `omp_telemetry::semconv::ToolStatus`. This is the
+Terminal status of an invocation, wire-identical to `omp_observability::semconv::ToolStatus`. This is the
 **metrics-facing** vocabulary, kept byte-exact so `omp.tool.status` series survive; it is *not* the
 durable truth, which is `ToolCall.outcome` plus `abort`. Every status derives **structurally** from
 the settled `omp.CallOutcome` (`docs/py/02-verdicts.md`) — never from the prose of a fault or a
@@ -1022,7 +1022,7 @@ discriminant, because conflating them is easy and produces nonsense byte counts.
 - `origin: str` — what produced the payload: a tool or device wire name such as `"read"` or `"grep"`.
 - `rev: Rev | None` — the producing tool's rev, `None` for non-tool origins.
 - `blob: str` — BLAKE3 digest of the stored payload. Identical bytes from two sessions share it, which
-  is what makes `crates/storage`'s blob writes idempotent.
+  is what makes `crates/journal`'s blob writes idempotent.
 - `bytes_total: int` — stored size. For `"verdict"` this is `VerdictDetails::Spilled.byte_len`, the
   original serialized length.
 - `bytes_shown: int` — projected size. Always `0` for `"verdict"`: a spilled verdict is not shown at
@@ -1103,7 +1103,7 @@ Creates or returns an extension-owned monotonic counter.
 `name` is forced under `METRIC_PREFIX` (`"omp.ext."`) and namespaced by extension id, so
 `counter("cache.regressions", …)` becomes `omp.ext.supi-cache.cache.regressions`. A `name` that
 already starts with `omp.`, `gen_ai.`, or `openai.` raises `SubscriptionError`: those namespaces are
-a wire contract owned by `crates/telemetry/src/attrs.rs`, and an extension may not shadow them.
+a wire contract owned by `crates/observability/src/attrs.rs`, and an extension may not shadow them.
 
 **Channel** CONTROL at creation only; `add` is a host-side accumulation flushed with the exporter.
 **Latency class** creation once per activation; `add` is lock-free and allocation-free.
@@ -1503,7 +1503,7 @@ producing its own attributes produces byte-identical series to the Rust exporter
 `semconv["tokens.cache_read"] == "gen_ai.usage.cache_read.input_tokens"`,
 `semconv["compaction.reason"] == "omp.compaction.reason"`.
 
-The keys themselves are **not** redefined here. `crates/telemetry/src/attrs.rs` is the single
+The keys themselves are **not** redefined here. `crates/observability/src/attrs.rs` is the single
 authority and its own doc comment explains why: these literals are a compatibility contract, and
 changing one breaks live dashboards. Look up, never hardcode.
 
@@ -1611,7 +1611,7 @@ watermark rather than inheriting the old one.
 - `QUEUE_MAX: int = 65_536` — upper bound on `queue`.
 - `BATCH_MAX: int = 1024` — upper bound on `batch`.
 - `FLUSH_INTERVAL: omp.Duration = omp.Duration("30s")` — export flush period and batch timeout.
-  Matches `omp_telemetry::export::FLUSH_INTERVAL_MS` (the Rust constant keeps its millisecond
+  Matches `omp_observability::export::FLUSH_INTERVAL_MS` (the Rust constant keeps its millisecond
   spelling; the Python surface exposes the one duration type per the `omp.Duration` rule): the two
   are one value, not two that agree.
 - `QUERY_LIMIT_MAX: int = 10_000` — hard cap on `Query.limit`.
@@ -1983,13 +1983,13 @@ sorts the pile. Nobody maintains a spreadsheet.
 
 ## What this requires us to build
 
-The firehose does not exist. Nothing in `crates/agent` references `omp_telemetry` today — a grep for
-`telemetry|span|metric` across `crates/agent/src` returns zero matches — so `crates/telemetry` is a
+The firehose does not exist. Nothing in `crates/agent` references `omp_observability` today — a grep for
+`telemetry|span|metric` across `crates/agent/src` returns zero matches — so `crates/observability` is a
 complete, wire-compatible instrumentation library with **no callers**. That is the actual state, and
 it is good news: the emit sites are greenfield, so they can be designed around the firehose from the
 start instead of retrofitted around an existing span-only API.
 
-### `crates/telemetry` — a new `firehose` module
+### `crates/observability` — a new `firehose` module
 
 The existing modules stay exactly as they are and remain the vocabulary authority. `firehose` is
 additive.
@@ -2080,7 +2080,7 @@ verbatim; the `AbortKind` restructuring changed that, and the change is stated r
   it never appears on the toolhost wire.
 
 **The `Usage` divergence must be settled first.** There are two token structs today:
-`omp_telemetry::collector::Usage` (six `u64` buckets, `collector.rs:115`) and
+`omp_observability::collector::Usage` (six `u64` buckets, `collector.rs:115`) and
 `omp.inference.v1.Usage` (thirteen fields including `orchestration`, `cache_ttl`, `server_tools`,
 `premium_requests`, and a `detail` `ValueMap`, `common.proto:66`). The firehose cannot pick one
 without either losing provider truth or contradicting the metrics path.
@@ -2337,10 +2337,10 @@ dataclass construction to one allocation per event plus the tuple/map fields.
 `Tokens`, `Cost`, `Rev`, `PromptFingerprint`, and the enums become `#[pyclass(frozen, eq, hash)]`
 value types, with the enums generated from the same `vocab!` tables as their Rust counterparts.
 
-### `crates/storage` — the query substrate, and the real work
+### `crates/journal` — the query substrate, and the real work
 
 `query`, `rev_metrics`, and `issues` need an index. Nothing suitable exists: `transcript` is an
-append-only event log with a `reader` (`crates/storage/src/transcript/reader.rs`) built for replay,
+append-only event log with a `reader` (`crates/journal/src/transcript/reader.rs`) built for replay,
 not for `WHERE payload.rebase.fuzzy = true GROUP BY rev`.
 
 - *Option A — replay-only.* Answer every query by streaming transcripts through `reader`. No new
@@ -2348,7 +2348,7 @@ not for `WHERE payload.rebase.fuzzy = true GROUP BY rev`.
   over thousands of sessions is seconds to minutes.
 - *Option B — a side index.* Append a per-session varint-framed `telemetry.bin` next to the
   transcript using the same `codec`, plus an incremental indexer maintaining byte-offset watermarks —
-  precisely pi's `file_offsets` design (`.plan/feature-map/observability.md:196`), which
+  precisely pi's `file_offsets` design, which
   `ROADMAP.md:1247` already schedules for M3 as `~/.omp/stats.db`.
 - *Option C — index only, no raw file.* Smaller, but unindexed fields become unqueryable forever,
   which is the write-only-data failure again.
@@ -2364,7 +2364,7 @@ The issue store is a table in the same database. `FEATURES.md:643` describes `re
 late if AutoQA is meant to drive device revisions, because the loop is worth most while devices are
 still churning. Pulling it forward is a sequencing recommendation, not a design one.
 
-### `crates/tools`, `crates/tool`, `crates/inference`, `crates/env`
+### `crates/tools`, `crates/tool`, `crates/ai`, `crates/env`
 
 - `crates/tools/src/render/truncate.rs` already computes every `ArtifactSpill` field for
   `layer="render"`: `DEFAULT_MAX_BYTES` (51 200), `DEFAULT_MAX_LINES` (3 000), `DEFAULT_MAX_COLUMN`
@@ -2376,7 +2376,7 @@ still churning. Pulling it forward is a sequencing recommendation, not a design 
   claim in this document that the loop needed a `rev()` accessor added. It already stamps
   `TOOL_REV_PROP`. What `layer="verdict"` needs is an environment implementation of the existing
   `VerdictSpill` trait, plus the defect below.
-- `crates/inference` emits `ModelRequest` where it already holds `Outcome`. Field mapping is
+- `crates/ai` emits `ModelRequest` where it already holds `Outcome`. Field mapping is
   direct: `Outcome.usage`→`Tokens`, `Outcome.cost`→`Cost`, `Outcome.unsupported`→`Degradation`
   (`Unsupported.Action` maps 1:1 onto `DegradeAction`), `Outcome.diagnostics`→`Diagnostic`,
   `Outcome.duration_ms`/`ttft_ms`, `Outcome.provider`/`model`/`upstream_provider`. `Accepted.replay`
@@ -2464,7 +2464,7 @@ needs anyway.
 
 ### Redaction
 
-`crates/telemetry/src/redact.rs:27-28` says credential redaction is "deliberately off until the host
+`crates/observability/src/redact.rs:27-28` says credential redaction is "deliberately off until the host
 opts in", and `TelemetryConfig::redact_sensitive_credentials` mirrors a process-global switch. That
 default is defensible for a Rust-internal exporter under the operator's control. It is **not**
 defensible for `ToolCall.args_raw` and `Usage.detail` delivered into third-party extension code,
@@ -2520,7 +2520,7 @@ Satisfied by this design:
 
 - `observability.md:90-106` / `FEATURES.md:1827-1833` — OTLP export over `http/protobuf`, OTEL env
   configuration, the nine agent metric instruments, run-coverage attributes, run-summary and warning
-  events, and periodic/turn-boundary/shutdown flush. `crates/telemetry` already implements all of it;
+  events, and periodic/turn-boundary/shutdown flush. `crates/observability` already implements all of it;
   the firehose supplies the callers it lacks, and `OtlpTarget` exposes it to extensions.
 - `observability.md:107-115` / `FEATURES.md:1834-1837` — session statistics, context breakdown, and
   compaction-aware anchoring. `ContextSnapshot` (with `history_rewrite_tokens_removed`) plus
@@ -2666,7 +2666,7 @@ Changes this file made in the post-review revision, and the review point that dr
   deletes that scheme entirely — discovery, docs, and dispatch are `dyn` ops, declarations
   carry soft/hard intent, and the surface is decided by the dynamic tool policy
   (`docs/py/01-devices.md`).
-- **D5/D6.** `PLAN.md` §D5/§D6 was amended 2026-08-19 (D5: per-extension worker
+- **D5/D6.** Locked decisions D5 and D6 were amended 2026-08-19 (D5: per-extension worker
   processes; D6: per-invocation decision procedure permitted). This file carried no
   flagged-amendment passages, so no claims changed.
 

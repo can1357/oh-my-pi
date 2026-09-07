@@ -52,7 +52,7 @@ flowchart TD
 ```
 
 This maps one-to-one onto the durable shape that already exists in
-`crates/storage/src/transcript/event.rs:334-343`:
+`crates/journal/src/entry.rs:68-83`:
 
 ```rust
 Kind::Custom {
@@ -137,7 +137,7 @@ These are enforced, not advisory.
 1. **Append-only.** There is no update and no delete. A later entry supersedes an
    earlier one; the fold decides. The transcript never rewrites existing bytes —
    malformed lines survive as tombstones so physical indexes stay stable
-   (`crates/storage/src/transcript/mod.rs:1-11`).
+   (`crates/journal/src/transcript/mod.rs:1-11`).
 2. **One writer.** Only the Agent Core writes the journal. The host *requests*
    appends over CONTROL and receives the assigned index. There is no path by
    which two processes append concurrently, which is the entire class of bug that
@@ -857,7 +857,7 @@ able to see that it is wrong.
 
 Mirrors `omp.inference.v1.Usage` (`crates/proto/proto/omp/inference/v1/common.proto:66-90`),
 which is the authoritative accounting shape — not the narrower four-field
-`omp_storage::transcript::Usage` (`types.rs:40-51`) that the journal records per
+`omp_journal::transcript::Usage` (`types.rs:40-51`) that the journal records per
 turn. Aggregation must not flatten to the narrow form: `reasoning_tokens` and
 `premium_requests` are separately billed, and cache reads and cache writes price
 differently, so collapsing any of them is how cost dashboards start lying.
@@ -975,7 +975,7 @@ how long it lives.
 > it.**
 
 Content-addressing already makes writes idempotent and cross-session deduplicated
-(`crates/storage/src/blob.rs:1-12`). What it does not give is a reason to keep a
+(`crates/journal/src/blob.rs:1-12`). What it does not give is a reason to keep a
 blob, and that reason has to be a reference from durable truth. So:
 
 - `omp.artifacts.put` returns an `omp.ArtifactRef` that is **not yet durable**.
@@ -1666,7 +1666,7 @@ neither has a job.
 
 ## What this requires us to build
 
-### `crates/storage` — the durable layer
+### `crates/journal` — the durable layer
 
 **Exists and is directly reusable.** `Kind::Custom { kind, data, context, display }`
 (`src/transcript/event.rs:334-343`) is already the three-projection shape this
@@ -1805,16 +1805,7 @@ This is the same shape `docs/py/08-context.md` arrives at for context patching �
 plan over a presence set, treat "keep" as a move rather than a copy — and the two
 should share the primitive rather than each growing one.
 
-One correction to note here, because this document could easily have inherited it:
-`crates/storage/src/transcript/patch.rs` is **not** a transcript patch protocol. It
-defines `pub enum Patch<T> { Unchanged, Set(T), Clear }`, a tri-state *field*
-update used by `Kind::Infer` to distinguish omission from explicit clearing. The
-real precedent for rewriting a projection is `Log::live` splicing `Kind::Reset`,
-`Kind::Compact { summary, short, first_kept, tokens_before, warning }`, and
-`Kind::Rewind { to }` (`event.rs:238-264`) over the index list — which is why the
-design above builds on `live` and not on `Patch<T>`.
-
-**New: `crates/storage/src/index.rs`, the sessions index.** `omp.sessions.list`
+**New: `crates/journal/src/index.rs`, the sessions index.** `omp.sessions.list`
 and `omp.sessions.usage` need rows, and pi proves what happens without them: two
 independent re-parsers (`stats.db` with a `file_offsets` watermark table, and the
 extension's own `(size, mtime)` cache), both racing, both wrong on live files.
@@ -1839,7 +1830,7 @@ the right store: `omp.sessions.usage`'s `group_by` and `bucket` are exactly what
 dependency is the wrong trade. The index is a cache of the journals by
 construction, so a corrupt index is a rebuild, never data loss.
 
-**New: `crates/storage/src/gc.rs`.** No sweep, refcount, or retention logic exists
+**New: `crates/journal/src/gc.rs`.** No sweep, refcount, or retention logic exists
 anywhere in `blob.rs` — confirmed by search; the store only ever grows. Retention
 needs:
 
@@ -2000,7 +1991,7 @@ the wrong default.
 `common.proto:66-90` and `:108-117` are the authoritative shapes, and
 `omp.UsageBucket` projects them verbatim rather than defining a parallel
 vocabulary. This is also where the narrow-vs-rich discrepancy has to be resolved
-in one direction: `omp_storage::transcript::Usage` records four fields per turn,
+in one direction: `omp_journal::transcript::Usage` records four fields per turn,
 while the inference layer reports thirteen. Aggregation that reads only the
 journal cannot report `reasoning`, `premium_requests`, or `accuracy` at all. So
 the sessions index must be fed from the *inference* `Usage` at receipt time — one
@@ -2303,8 +2294,7 @@ Satisfied:
   standalone `omp-stats` server with cross-process file locking, port-conflict
   recovery, and a worker-thread parser pool.
 
-Roadmap sequencing, so the dependency order is explicit
-(`.plan/feature-map/ROADMAP.md`):
+Roadmap sequencing, so the dependency order is explicit:
 
 | Milestone | Already sequenced there | What this namespace adds to it |
 |---|---|---|
@@ -2413,7 +2403,7 @@ and `--pool` is explicit opt-in fate-sharing that shares exactly this failure.
 D5's "warm pool of one" wording predated that ruling; it was a locked decision,
 so this document did not silently contradict it and instead recorded the flagged
 recommendation. That recommendation was ratified 2026-08-19: D5's third clause
-(`PLAN.md` §D5) now reads "supervised worker processes, one per active
+now reads "supervised worker processes, one per active
 extension, keyed `(layer, tier, extension)`; pooling is explicit opt-in
 fate-sharing", with SIGKILL granularity one extension's process group and
 approval a durable Core-owned ticket (`docs/py/06-policy.md`), removing the
@@ -2464,8 +2454,8 @@ as the historical record.
    the topology ruling is final — one process and one site tree per extension,
    host key `(layer, tier, extension)`, SIGKILL granularity one extension's
    process group, `--pool` as explicit opt-in fate-sharing. The D5 wording
-   amendment this document flagged was ratified 2026-08-19
-   (`PLAN.md` §D5), as the correction above records.
+   amendment this document flagged was ratified 2026-08-19,
+   as the correction above records.
 
    What remains is the *within-extension* residue, and its durable-state
    consequences are specific — they are why this item stays on the list:
@@ -2544,7 +2534,7 @@ Changes this file made in response to the external review, by review point:
   question 6 are rewritten: SIGKILL granularity is one extension's process
   group, the cross-extension blast radius Revision 1 left unresolved is
   resolved by the per-extension-process ruling, and the recommended D5
-  amendment is stated explicitly against `PLAN.md` §D5 rather than
+  amendment is stated explicitly against the locked decision rather than
   silently applied.
 - **§0 renames, file-wide.** `append_batch` → `append_many`; late-activation
   `session_start` → `extension_activate` (rebuild example, failure table);
@@ -2554,7 +2544,7 @@ Changes this file made in response to the external review, by review point:
   examples; `duration_ms` becomes `omp.Duration`; the durable call outcome is
   referred to as `omp.CallOutcome`.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Device scheme deleted.** Rev 2's `omp.Scheme` table carried a mintable read/write
   device row and named a typed device URL value; the Rev 2.1 ruling deletes the device URL
@@ -2566,10 +2556,10 @@ Changes this file made in response to the external review, by review point:
   scheme is ever writable. Declarations carry soft/hard intent; the surface is decided by
   the dynamic tool policy (`docs/py/01-devices.md`). The Lesson #6 defect paragraph and
   the protocol-handler reconciliation entry were respelled accordingly.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. The cancellation
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. The cancellation
   correction and open question 6 now record the D5 amendment as ratified — per-extension
   worker processes keyed `(layer, tier, extension)`, pooling as opt-in fate-sharing,
-  durable approval tickets (`PLAN.md` §D5) — where Rev 2 flagged it as a
+  durable approval tickets — where Rev 2 flagged it as a
   recommendation. The Rev 2 flags are kept in prose as historical records.
 
 **Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.

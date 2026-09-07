@@ -338,7 +338,7 @@ tradeoff I accept.** Mitigations, in order of importance:
    Environment. No second connection, no second handshake, no second auth.
 2. Agent Core dispatches to both hosts **concurrently**, so the cost of the workspace layer
    is `max(local, remote)`, not `local + remote`. Note what this is *not*: there is no
-   batch-level admission scheduler inside the mailbox loop. `PLAN.md` §D6 **D6 — One
+   batch-level admission scheduler inside the mailbox loop. Locked decision **D6 — One
    mailbox, no gate chain** forbids exactly that — a tool batch runs concurrently as the
    model issued it, and one slow approval never serializes the batch — and does *not* forbid
    the per-invocation decision procedure, which Agent Core **runs**:
@@ -353,7 +353,7 @@ tradeoff I accept.** Mitigations, in order of importance:
    order TRANSFORM, or persist a durable approval ticket). The scope split is no longer a
    reading this document must defend: **D6 was amended 2026-08-19** and the decision's own
    text now names it — "the prohibition binds the batch dispatch path, not the
-   per-invocation decision procedure" (`PLAN.md` §D6) — so this passage cites
+   per-invocation decision procedure" — so this passage cites
    ratified text, where Revision 2 could only flag a recommended amendment.
    See [`06-policy.md`](06-policy.md) for the authoritative framing.
 3. Per-host, per-event deadlines. A host that misses its deadline yields the fail-open or
@@ -813,8 +813,6 @@ work without contortion.
 
 #### 3.2.1 Umbrella bundles are the norm, not the exception
 
-`.plan/user-requests/2026-08-10-pi-extension-survey/catalog.md`:
-
 - `@bdsqqq/pi` — "Registers **33 separate extension entrypoints** covering tools,
   subagents, code review, session management, and custom UI components" (`catalog.md:26`).
 - `@howaboua/pi-stuff` — "Bundles all **14** Howaboua Pi extensions and **11 skills** into
@@ -867,7 +865,7 @@ Hence `[[tool.omp.binaries]]` (§3.1.3) is a first-class declaration, resolved b
 is also the only side where an `exec` capability means anything
 ([`11-env.md`](11-env.md)). A package that needs a binary needs no cp314t wheel.
 
-The genuinely hard subset is *in-process* native code: `.plan/…/py-host-design.md` §9 marks
+The genuinely hard subset is *in-process* native code: the py-host design review marks
 `@ff-labs/fff-node` (N-API) and `web-tree-sitter` (WASM) as dead ends — "cannot load in
 CPython. Must be reimplemented as CPython/PyO3 extensions or absorbed into env as core
 capability." Those become either a cp314t wheel (§3.11.2) or a core env capability, and the
@@ -957,7 +955,7 @@ Per layer, in order. Each entry is scanned for extensions per §3.1.2 `P-MANIFES
    not, at the repo's discretion).
 
 **Compatibility roots.** pi's multi-root precedence `.omp > .claude > .codex > .gemini`
-(`.plan/feature-map/config.md:4`, `.plan/feature-map/FEATURES.md:95`) applies to *skills,
+applies to *skills,
 rules, agents, and prompts* discovery, which is not this namespace. omp extensions are read
 from `.omp` only. A `.claude/`-shaped plugin is not a Python distribution and there is
 nothing to load; `omp ext doctor` reports such directories as `W-FOREIGN-ROOT` so the user
@@ -1165,7 +1163,7 @@ Each extension gets its own host child (§2.2), hence its own interpreter, its o
   each `.so`, which is what the loader has always supported.
 - **It does not fight free-threading.** Nothing about `Py_GIL_DISABLED` interacts with process
   separation, whereas subinterpreters × free-threading is a composition with caveats.
-- **The cancellation unit becomes an extension.** Under `PLAN.md` §D5 D5 (amended
+- **The cancellation unit becomes an extension.** Under locked decision D5 (amended
   2026-08-19), cancel is SIGKILL of the extension's process group + respawn; with one child
   per extension the unit of loss is one extension's
   in-flight work, not every extension in the session. §6.5.
@@ -1417,7 +1415,7 @@ exec   = "acme-index"
 | `ship` | `"installed"` \| `"source"` \| `"pickle"` | yes | Code-shipping grant level (§3.9.2). |
 | `requires` | array of PEP 508 | yes | Recorded verbatim so a `--check` can detect a manifest edit. |
 | `extension_requires` | array of `{id, version}` | no | Extension-to-extension edges (§3.4.2). |
-| `wheel` | table | yes | `file`, `tag`, `size`, `blake3`, `sha256`. Both digests: blake3 because `omp_storage::BlobRef` is BLAKE3-256 (`crates/storage/src/blob.rs:36-41`), sha256 because that is what PyPI and `RECORD` publish. Either mismatch is `E-INTEGRITY`. |
+| `wheel` | table | yes | `file`, `tag`, `size`, `blake3`, `sha256`. Both digests: blake3 because `omp_journal::BlobRef` is BLAKE3-256 (`crates/journal/src/blob.rs:36-41`), sha256 because that is what PyPI and `RECORD` publish. Either mismatch is `E-INTEGRITY`. |
 
 *`[[package]]`*
 
@@ -1568,8 +1566,8 @@ serialization of everything the manifest asks for, with a fixed normalization:
 - `capability_digest` hashes only the effective base-plus-selected set. Enabling a feature
   changes this consent digest; disabling one removes its authority. Install/upgrade prompts
   only for newly effective capabilities.
-- The digest is `blake3-256` over that byte string, matching `omp_storage::BlobRef`'s hash
-  (`crates/storage/src/blob.rs:37`) so one hash function covers the whole system.
+- The digest is `blake3-256` over that byte string, matching `omp_journal::BlobRef`'s hash
+  (`crates/journal/src/blob.rs:37`) so one hash function covers the whole system.
 
 Effect: `2.3.0 → 2.3.1` with no capability change reprompts **never**. `2.3.1 → 2.4.0`
 that adds `net` reprompts **always**. This is the property that makes consent survivable,
@@ -1735,7 +1733,7 @@ string cannot say which machine it names; the class can.
 #### 3.10.1 Hashes
 
 Every artifact carries both `blake3` and `sha256` in the lock. blake3 because the rest of
-omp is BLAKE3-256 (`crates/storage/src/blob.rs:36-41`,
+omp is BLAKE3-256 (`crates/journal/src/blob.rs:36-41`,
 `omp_core::encoding::hex`) so store keys, blob refs, and lock digests share one function;
 sha256 because that is what PyPI's JSON API and wheel `RECORD` files publish, so a
 third-party audit can check our lock against upstream without trusting us. Verification
@@ -1829,7 +1827,7 @@ liability: availability, abuse, storage cost, name squatting, legal takedowns, a
 migration path you can never abandon. `uv` already resolves, caches, hash-pins, and
 installs from PyPI, and PyPI already has authenticated publishing with trusted publishers.
 pi's marketplace UX — `discover`, `features`, `upgrade`, auto-update
-(`.plan/feature-map/FEATURES.md:72`, `:989`) — is *catalog* UX, and a catalog is a JSON file
+— is *catalog* UX, and a catalog is a JSON file
 on a CDN, not an index. Most of what people mean by "we need a registry" is satisfied by a
 signed catalog plus PyPI.
 
@@ -2033,14 +2031,14 @@ uppercase — and `--project <PATH>` matches `ChatArgs::project`, `--data-dir <P
 | `--data-dir <PATH>` | path | `$OMP_DATA_DIR` | Client-scope state root. |
 | `--layer <client\|workspace\|all>` | enum | command-specific | Which layer to act on. Mutating commands default to `client`; read commands default to `all`. |
 | `--scope <user\|project>` | enum | `user` | Which install record / config scope to write. |
-| `--json` | flag | off | Machine-readable output on stdout; human output goes to stderr. Matches the `--json` convention throughout `.plan/feature-map/cli.md`. |
+| `--json` | flag | off | Machine-readable output on stdout; human output goes to stderr. Matches the `--json` convention throughout the CLI. |
 | `--offline` | flag | off | No network. Equivalent to `OMP_EXT_OFFLINE=1`. |
 | `--locked` | flag | off | Refuse to modify any lock; error if the lock does not already satisfy the request. The CI flag. |
 | `--index <URL>` | url, repeatable | configured list | Override the index list for this invocation. |
 | `-v, --verbose` | flag | off | Include resolver steps and per-artifact verification lines. |
 
 **Exit codes** (uniform across the subtree; `2` for usage matches
-`.plan/feature-map/FEATURES.md:26`'s "unrecognized-flag typo rejection, exit 2"):
+"unrecognized-flag typo rejection, exit 2"):
 
 | Code | Meaning |
 |---|---|
@@ -2941,7 +2939,7 @@ resolution, integrity, trust, CLI — is missing. Verified before writing this s
 | Bounded framing | `DEFAULT_MAX_FRAME_BYTES = 64 MiB` (`worker.rs:53`), `WorkerError::FrameTooLarge` (`:308-315`) | **exists** |
 | Declaration verification at handshake | `WorkerProcess::spawn` collects `registrations: Vec<ToolDecl>`; `ToolWorkerSupervisor::registrations()` (`worker.rs:254-258`) | **exists** |
 | Supervisor mailboxes | `flume::unbounded()` (`worker.rs:248`), RAII cancel on `WorkerInvocation::drop` (`worker.rs:220-229`) | **exists** |
-| Content-addressed store | `omp_storage::BlobStore` — BLAKE3-256 `BlobRef { hash: [u8;32], size }` (`crates/storage/src/blob.rs:36-41`), `put_reader` streaming at 64 KiB (`:179`), `has`, `verify`, `path` | **exists** |
+| Content-addressed store | `omp_journal::BlobStore` — BLAKE3-256 `BlobRef { hash: [u8;32], size }` (`crates/journal/src/blob.rs:36-41`), `put_reader` streaming at 64 KiB (`:179`), `has`, `verify`, `path` | **exists** |
 | Blob transport | `crates/proto/proto/omp/blob/v1` — `Blob` service with `Stat`/`Get`(stream)/`Put`(stream)/`Delete` | **exists** |
 | Live-set identity | `crates/tool/src/registry.rs:458` `live_hash() -> [u8; 32]` via blake3 | **exists, but see §6.0.2** |
 | Rev stamping | `crates/tool/src/lib.rs:46` `TOOL_REV_PROP = "omp/tool-rev"` | **exists** |
@@ -3091,7 +3089,7 @@ belongs to [`06-policy.md`](06-policy.md), which records the same correction.
 
 **Hash unification, low priority.** `_pack_function` uses
 `hashlib.sha256(payload).hexdigest()[:16]` (`omp_remote.py:219`). Everything else is
-BLAKE3-256 (`crates/storage/src/blob.rs:36-41`). Worth unifying eventually, and worth
+BLAKE3-256 (`crates/journal/src/blob.rs:36-41`). Worth unifying eventually, and worth
 documenting *now* that this 64-bit truncated digest is a **cache key, not an integrity
 claim**, so nobody mistakes it for a security boundary.
 
@@ -3203,7 +3201,7 @@ piece and it is a generalization, not a rewrite. Today: one `ToolWorkerConfig` w
 reach Agent Core across the network. Multiplex it over the **existing** session channel to
 the Environment rather than opening a second connection: a second connection means a second
 auth, a second reconnect path, and a second thing to get wrong. Dispatch across hosts is
-**concurrent**, per `PLAN.md` §D6 D6 (amended 2026-08-19) as read in §2.3 — no
+**concurrent**, per locked decision D6 (amended 2026-08-19) as read in §2.3 — no
 batch-level admission
 scheduler in the loop; Agent Core runs the per-invocation decision procedure and answers
 the environment's admission query ([`06-policy.md`](06-policy.md),
@@ -3230,10 +3228,10 @@ atomic writers; `settings.rs`'s write-temp-then-rename is the pattern. ed25519 v
 a new dependency; `sha2` is already in the workspace (`Cargo.toml:194`) and `blake3` is a
 workspace dep (`Cargo.toml:27`), so the hashing half needs nothing new.
 
-### 6.4 `crates/env` and `crates/storage`
+### 6.4 `crates/env` and `crates/journal`
 
-**The store is `BlobStore`, not a new subsystem.** `omp_storage::BlobStore`
-(`crates/storage/src/blob.rs`) is already content-addressed BLAKE3-256 with `put`,
+**The store is `BlobStore`, not a new subsystem.** `omp_journal::BlobStore`
+(`crates/journal/src/blob.rs`) is already content-addressed BLAKE3-256 with `put`,
 `put_reader` (streaming, 64 KiB buffer, `:179`), `get`, `has`, `path`, and `verify`, and
 `BlobRef` already serializes as `{h, n}` (`:69-98`). §3.5's store is that, plus a naming
 convention for unpacked wheel directories. What is genuinely missing: unpacking (a wheel is a
@@ -3271,7 +3269,7 @@ ordering. Reported separately.
 Not strictly a distribution question, but the answer is determined by a decision this document
 owns (host keying), so it belongs here.
 
-**The facts.** `PLAN.md` §D5 **D5 — Cancellation is resource-owned**, amended
+**The facts.** Locked decision **D5 — Cancellation is resource-owned**, amended
 2026-08-19, is explicit for Python: "supervised worker processes, one per active
 extension, keyed `(layer, tier, extension)`; pooling is explicit opt-in fate-sharing.
 Cancel = SIGKILL of that extension's process group + respawn; blast radius is one
@@ -3317,7 +3315,7 @@ the unit of loss and the unit of head-of-line blocking *one extension*:
 **D5 amendment, ratified.** Revision 2 flagged rather than smuggled a wording change: D5
 then said "warm pool of one", this design needed a warm process per *active extension*,
 and the recommendation was recorded against the locked decision instead of silently
-contradicting it. The amendment has since landed: `PLAN.md` §D5 (amended
+contradicting it. The amendment has since landed: locked decision D5 (amended
 2026-08-19) now states per-extension supervised worker processes keyed
 `(layer, tier, extension)`, SIGKILL granularity of one extension's process group, pooling
 as explicit opt-in fate-sharing, and approval as a durable Core-owned ticket that never
@@ -3357,8 +3355,8 @@ which is opt-in shared-memory concurrency, not isolation — or splitting into t
 
 ### 6.6 Feature-map reconciliation
 
-**Satisfied.** `.plan/feature-map/FEATURES.md:72` (`plugin`: install, uninstall, link, list,
-doctor, features, config, enable/disable, marketplace, discover, upgrade) — §3.13 covers all
+**Satisfied.** `plugin`: install, uninstall, link, list,
+doctor, features, config, enable/disable, marketplace, discover, upgrade — §3.13 covers all
 eleven, with `marketplace` folded into `omp ext index` + `omp ext search`.
 `:73` (install target classification local/npm/marketplace) — §3.3's spec grammar, with
 `npm` → `pypi`/`index` and classification made explicit rather than heuristic; pi guessed
@@ -3370,7 +3368,7 @@ from string shape (`/work/pi/…/classify-install-target.ts:46-67`), which is wh
 `:987` (manifest `package.json#omp`, lockfile state, feature toggles, per-plugin settings,
 project overrides) — §3.1.3, §3.7.
 `:988` (doctor: integrity diagnostics, auto-repair, env/API-key health) — §3.13.10.
-`.plan/feature-map/cli.md:224` (`--apply` to commit, default dry-run) — §3.13.9 `gc`.
+`--apply` to commit, default dry-run) — §3.13.9 `gc`.
 
 **Conflicts, deliberately.**
 
@@ -3523,7 +3521,7 @@ missing and the other two are decoration.
   short and immutable — exactly `Str`'s case.
 - `CowBytes` for artifact bodies moving between fetch, verify, and store. Verification is
   streaming: `BlobStore::put_reader` already hashes while copying with a 64 KiB buffer
-  (`crates/storage/src/blob.rs:179`), so a wheel is never fully resident.
+  (`crates/journal/src/blob.rs:179`), so a wheel is never fully resident.
 - `SmallVec` for per-extension collections that are almost always tiny: `targets` (1–2),
   `features` (0–4), `requires` (0–8), a child's own resolution closure (usually <16).
   Heap-allocating a 2-element target list per resolution step is the kind of avoidable
@@ -3756,14 +3754,14 @@ review round; reversals recorded here and at the point of change:
   user's explicit choice (§6.0.1) — so a hard-tool grant or a `tools.policy` change, and
   only those, move the slot digest, by consented design (§6.0.2, §6.2 items 5–6).
 - **D5 ratified.** Rev 2 flagged a recommended amendment ("warm pool of one" → warm
-  process per active extension). `PLAN.md` §D5 was amended 2026-08-19: supervised
+  process per active extension). Locked decision D5 was amended 2026-08-19: supervised
   worker processes, one per active extension, keyed `(layer, tier, extension)`; SIGKILL
   granularity of one extension's process group; pooling as explicit opt-in fate-sharing;
   approval as a durable Core-owned ticket. §3.6.1 and §6.5 now cite the ratified text, and
   §6.5's "the shipped code matches" claim is reversed in prose — the one-worker supervisor
   now lags the amended decision instead of matching it.
 - **D6 ratified.** Rev 2 flagged the scope-split reading as a recommended amendment.
-  `PLAN.md` §D6 was amended 2026-08-19 — "the prohibition binds the batch
+  Locked decision D6 was amended 2026-08-19 — "the prohibition binds the batch
   dispatch path, not the per-invocation decision procedure" — and §2.3 item 2 and §6.3
   now cite it as decision text.
 

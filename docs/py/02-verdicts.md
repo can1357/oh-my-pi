@@ -870,7 +870,7 @@ replaces it.
 4. the `artifact_digest` that produced projections 2 and 3.
 
 The journal already has the shape: `Msg::ToolResult { content, details, … }`
-(`crates/storage/src/transcript/msg.rs:60-76`) stores parts beside verdict, and the split
+(`crates/journal/src/data.rs:538-564`) stores parts beside verdict, and the split
 blesses that pairing instead of fighting it. Ordinary replay — same model, same dialect —
 reuses the materialized original byte-for-byte, with no Python in the loop. Reprojection
 runs only on an **explicit model or dialect transition**, which is exactly when `lift()`
@@ -1205,7 +1205,7 @@ Three rules govern it:
    information was gone. Its own `prunedAt` field marks the moment.
 
 **What the transcript can express today, honestly.** The live chain is reconstructed by one
-forward fold, `Log::live() -> Vec<u64>` (`crates/storage/src/transcript/reader.rs:69-177`),
+forward fold, `Log::live() -> Vec<u64>` (`crates/journal/src/chain.rs:12-15`),
 which splices `Reset`, `Rewind`, and `Compact` over the physical event-index list —
 `Kind::Compact { first_kept, … }` rotates the chain so the summary stands in for the
 discarded prefix (`reader.rs:123-133`). That is the patch protocol, and it operates at
@@ -1482,7 +1482,7 @@ What changed:
   per-invocation decision procedure Core runs, with the Environment owning the gate
   (`docs/py/06-policy.md`) — where "redact `p.output`" is a field operation with an
   `ArtifactRef` swap, not a regex over prose that also has to avoid corrupting the
-  renderer's ability to parse it back. `PLAN.md` §D6 (D6, amended 2026-08-19)
+  renderer's ability to parse it back. Locked decision D6 (amended 2026-08-19)
   now says this in its own text — "no batch-level admission scheduler, no parallelism
   detection, no reordering", with each invocation gated independently by the
   per-invocation admission query Core answers — so the scope reading this document once
@@ -1543,10 +1543,10 @@ following are load-bearing and shipped:
 - `batch.rs:811-818` — harness branches projected first, then `registry.prompt`, with
   canonical wire parts as the fallback.
 
-**`crates/storage`** — the durable shape.
+**`crates/journal`** — the durable shape.
 
 - `Msg::ToolResult { call, tool, content, details: Option<Box<RawValue>>, error, useless,
-  provider_meta }` (`crates/storage/src/transcript/msg.rs:60-76`). `details` is already the
+  provider_meta }` (`crates/journal/src/transcript/msg.rs:60-76`). `details` is already the
   verdict slot and already holds verbatim JSON; `PartialEq` on `Msg` is byte equality of
   stored JSON text specifically to preserve verbatim round trips (`msg.rs:78-80`).
 - `Kind::Compact { summary, short, first_kept, tokens_before, warning }`
@@ -1878,13 +1878,13 @@ Design points:
 - Ownership: `docs/py/07-ui.md` owns `Tml`, `RenderCtx`, and the effect channel; this
   document owns the `(name, rev)` keying and the fold semantics.
 
-#### 5. An amendment that drops a projection and keeps the verdict (`crates/storage`)
+#### 5. An amendment that drops a projection and keeps the verdict (`crates/journal`)
 
 This design's central compaction claim has no mechanism behind it yet, and the reason is
 worth stating precisely rather than working around.
 
 The live chain fold is `Log::live() -> Vec<u64>`
-(`crates/storage/src/transcript/reader.rs:69-177`). It is the real patch protocol —
+(`crates/journal/src/transcript/reader.rs:69-177`). It is the real patch protocol —
 `Kind::Rewind` truncates the working chain (`reader.rs:108-118`), `Kind::Reset` starts a new
 boundary (`:119-122`), `Kind::Compact { first_kept }` rotates the summary in front of the
 retained suffix (`:123-133`), and tombstones stay addressable as opaque ordinary events
@@ -1892,7 +1892,7 @@ retained suffix (`:123-133`), and tombstones stay addressable as opaque ordinary
 
 Field-level correction is `Kind::Amend { target, patch }` with
 `AmendPatch::{Prune { keep_blocks }, RetryRecovery { … }, Seq { seq }}`
-(`crates/storage/src/transcript/types.rs:203-228`). `Prune` truncates an *assistant* message
+(`crates/journal/src/data.rs:742-747`). `Prune` truncates an *assistant* message
 to a prefix of its blocks. Nothing drops a `Msg::ToolResult`'s `content` while retaining its
 `details`. Until that exists, "compaction drops projections and keeps verdicts" is a design
 property, not a shipped one — the only available move is to discard the whole tool-result
@@ -1925,7 +1925,7 @@ Two non-obvious constraints:
   `live()` a second time to apply patches is the wrong shape under the workspace allocation
   discipline.
 
-#### 6. Byte-stable replay (`crates/storage`, `crates/tool`)
+#### 6. Byte-stable replay (`crates/journal`, `crates/tool`)
 
 "Replaying a transcript at the same rev gives byte-identical output" is the invariant that
 makes provider prefix caches survive a session reload. It is *asserted* by this design and
@@ -1933,7 +1933,7 @@ not currently *enforced* anywhere. Enforcing it is discrete work.
 
 What already holds: `Msg` and `Kind` implement `PartialEq` as byte equality over stored JSON
 text specifically to preserve verbatim round trips
-(`crates/storage/src/transcript/msg.rs:78-80`, `event.rs:347-349`), and
+(`crates/journal/src/transcript/msg.rs:78-80`, `event.rs:347-349`), and
 `Kind::Unknown(Box<RawValue>)` preserves foreign journal objects verbatim
 (`event.rs:344-345`). `project_thread_history` deliberately does not decode calls already at
 the live rev, so their bytes and field presence pass through untouched
@@ -1975,7 +1975,7 @@ per registry mutation, and it turns "projections changed" from an invisible cach
 event into a loud one. That is the right trade; the alternative is a class of bug that
 manifests as unexplained cache misses and subtly different history weeks later.
 
-#### 7. Per-rev metrics and AutoQA attribution (`crates/telemetry`)
+#### 7. Per-rev metrics and AutoQA attribution (`crates/observability`)
 
 Feature-map `observability.md:101` records `pi.omp.agent.tool.calls` partitioned by *tool
 name and status* and `observability.md:193` records a `tool_calls` table keyed on tool name.
@@ -2086,7 +2086,7 @@ resource owner is the cleanup, and the verdict records which of the two honest o
 occurred. `docs/py/00-overview.md` owns the mechanism.
 
 That holds for Rust built-ins and for exec, whose `RunGuard` drop kills one command's process
-tree while the session survives (`PLAN.md` §D5, D5). For Python devices the unit is
+tree while the session survives (locked decision D5). For Python devices the unit is
 coarser: the topology ruling (one process and one site tree per extension, keyed
 `(layer, tier, extension)` — `docs/py/00-overview.md`) makes SIGKILL granularity one
 *extension's* process group, so cancelling one call takes down that extension's concurrent
@@ -2188,7 +2188,7 @@ what the ruling resolved, what it did not, and does not claim the residue is saf
    consequence: "Dropping a live handle requests cancellation. The supervisor then kills
    only the worker process group, reports effects-unknown, and replaces the worker"
    (`:169-172`). The kill is `killpg(…, SIGKILL)` against a process group the worker leads
-   (`:404`, `:513-517`), followed by `respawn` (`:806`). `PLAN.md` §D5 (D5)
+   (`:404`, `:513-517`), followed by `respawn` (`:806`). Locked decision D5
    fixes that mechanism — "Cancel = SIGKILL of that extension's process group +
    respawn"; "Interpreter interrupts are courtesy, never the mechanism" — and it stands.
    The wording mismatch this question used to carry is gone: D5 was amended 2026-08-19,
@@ -2270,11 +2270,11 @@ type collided with `docs/py/05-hooks.md`'s decision type of the same name; renam
   open question 8 were rewritten: per-extension processes bound collateral loss to one
   extension's process group, reversing Rev 1's "cancelling one device call takes every
   concurrently running device with it"; the recommended D5 amendment is stated and flagged
-  against `PLAN.md`, never silently contradicted; the residual open items (a
+  against the locked decision, never silently contradicted; the residual open items (a
   distinct collateral-loss abort reason, per-invocation isolation opt-in) stay in open
   question 8.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Dispatch surface.** The `Faulted` hint in the `prompt()` example now retries via the
   `dyn` core tool (`{"do_": "invoke/lsp/restart"}`) where it previously named the retired
@@ -2283,7 +2283,7 @@ type collided with `docs/py/05-hooks.md`'s decision type of the same name; renam
   (`search`/`docs`/`invoke`), defined in `docs/py/01-devices.md` — which also defines
   `@omp.tool`, the ergonomic soft default alongside the path-aware `@omp.device`, and
   `omp.ToolPath`, the typed tool-tree path that replaces the retired device URL type.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19: D5's third clause is
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19: D5's third clause is
   now per-extension worker processes keyed `(layer, tier, extension)`, with pooling as
   explicit opt-in fate-sharing and approval as a durable Core-owned ticket; D6 explicitly
   permits the per-invocation decision procedure while prohibiting batch-level scheduling.
