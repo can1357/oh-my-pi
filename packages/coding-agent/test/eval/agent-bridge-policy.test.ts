@@ -729,6 +729,7 @@ describe("agent() through eval runtimes", () => {
 		using tempDir = TempDir.createSync("@omp-eval-agent-progress-");
 		const { session, sessionFile } = makeEvalSession(tempDir, "js-agent-progress");
 		mockAgents();
+		const releaseCompletion = Promise.withResolvers<void>();
 
 		const makeProgress = (options: ExecutorOptions, overrides: Partial<AgentProgress>): AgentProgress => ({
 			index: options.index,
@@ -764,6 +765,7 @@ describe("agent() through eval runtimes", () => {
 					resolvedModel: "p/model",
 				}),
 			);
+			await releaseCompletion.promise;
 			options.onProgress?.(
 				makeProgress(options, {
 					status: "completed",
@@ -786,16 +788,28 @@ describe("agent() through eval runtimes", () => {
 				sessionId: sharedJsSessionId,
 				session,
 				sessionFile,
-				onStatus: event => events.push(event),
+				onStatus: event => {
+					events.push(event);
+					if (event.op === "agent" && event.status === "running") releaseCompletion.resolve();
+				},
 			},
 		);
 
 		expect(result.exitCode).toBe(0);
 
 		const agentEvents = events.filter(event => event.op === "agent");
-		expect(agentEvents).toHaveLength(1);
+		const completedIndex = agentEvents.findIndex(event => event.status === "completed");
+		expect(completedIndex).toBeGreaterThan(0);
+		expect(completedIndex).toBe(agentEvents.length - 1);
+		expect(agentEvents.slice(0, completedIndex).every(event => event.status === "running")).toBe(true);
 
-		const completed = agentEvents[0];
+		const running = agentEvents[completedIndex - 1];
+		const completed = agentEvents[completedIndex];
+		if (!running || !completed) throw new Error("agent progress was not streamed");
+		expect(running.currentTool).toBe("read");
+		expect(running.lastIntent).toBe("Reading config");
+		expect(running.toolCount).toBe(4);
+
 		expect(completed.status).toBe("completed");
 		expect(completed.toolCount).toBe(7);
 		expect(completed.cost).toBeCloseTo(0.06);
@@ -803,11 +817,12 @@ describe("agent() through eval runtimes", () => {
 		expect(completed.taskPreview).toBe("investigate");
 		expect(typeof completed.id).toBe("string");
 
-		// The same final snapshot is retained in the executor's display outputs.
+		// The latest retained agent snapshot matches the latest streamed one.
 		const displayAgentEvents = result.displayOutputs.filter(
-			(output): output is Extract<typeof output, { type: "status" }> => output.type === "status",
+			(output): output is Extract<typeof output, { type: "status" }> =>
+				output.type === "status" && output.event.op === "agent",
 		);
-		expect(displayAgentEvents).toHaveLength(1);
+		expect(displayAgentEvents.at(-1)?.event).toEqual(completed);
 	});
 
 	it("pauses the idle watchdog while a quiet agent() runs past the budget", async () => {
