@@ -87,4 +87,83 @@ describe("issue #10966: Responses synthetic reasoning suppression when filterRea
 		expect(functionCall).toBeDefined();
 		expect(functionCall?.call_id).toBe("call_12345");
 	});
+
+	it("also suppresses synthetic reasoning items for Anthropic models on OpenRouter", () => {
+		const claudeOpenRouterModel = buildModel({
+			id: "anthropic/claude-sonnet-4",
+			name: "Claude Sonnet 4",
+			api: "openrouter",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 200_000,
+			maxTokens: 8_192,
+		});
+
+		expect(claudeOpenRouterModel.compat.filterReasoningHistory).toBe(true);
+
+		const userMessage: UserMessage = {
+			role: "user",
+			content: "Run echo test",
+			timestamp: Date.now(),
+		};
+
+		const assistantMessage: AssistantMessage = {
+			role: "assistant",
+			content: [
+				{ type: "thinking", thinking: "running command" },
+				{
+					type: "toolCall",
+					id: "call_abc123",
+					name: "bash",
+					arguments: { command: "echo test" },
+				},
+			],
+			api: "openrouter",
+			provider: "openrouter",
+			model: "anthropic/claude-sonnet-4",
+			usage: { input: 10, output: 10, cacheRead: 0, cacheWrite: 0, totalTokens: 20 },
+			stopReason: "toolUse",
+			timestamp: Date.now(),
+		};
+
+		const toolResultMessage: ToolResultMessage = {
+			role: "toolResult",
+			toolCallId: "call_abc123",
+			toolName: "bash",
+			content: [{ type: "text", text: "test\n" }],
+			isError: false,
+			timestamp: Date.now(),
+		};
+
+		const followUpUserMessage: UserMessage = {
+			role: "user",
+			content: "Next step",
+			timestamp: Date.now(),
+		};
+
+		const context: Context = {
+			messages: [userMessage, assistantMessage, toolResultMessage, followUpUserMessage],
+		};
+
+		const { params } = buildParams(
+			claudeOpenRouterModel as unknown as Model<"openai-responses">,
+			context,
+			{ reasoning: "medium" },
+			undefined,
+		);
+
+		const reasoningItems = (params.input as Array<{ type?: string; id?: string }>).filter(
+			item => item.type === "reasoning",
+		);
+
+		expect(reasoningItems).toHaveLength(0);
+
+		const functionCall = (params.input as Array<{ type?: string; call_id?: string }>).find(
+			item => item.type === "function_call",
+		);
+		expect(functionCall).toBeDefined();
+		expect(functionCall?.call_id).toBe("call_abc123");
+	});
 });
