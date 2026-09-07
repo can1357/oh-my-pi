@@ -17,6 +17,12 @@
 - Matched project-dotenv ownership case-insensitively on Windows so a differently-cased dotenv key cannot masquerade as a trusted launcher variable.
 - Decoded Bun double-quoted dotenv `\n` and `\r` escapes when matching project-owned environment values.
 
+## [18.1.13] - 2026-09-07
+
+### Fixed
+
+- Fixed `filterChildShellEnv` applying the omp process's own launch-environment provenance (the pre-dotenv `NODE_ENV` and launcher-owned names read from `/proc/self/environ`) to caller-supplied environment objects; launch provenance now only applies when filtering the live `process.env`/`Bun.env`, and an explicit env resolves its dotenv mode from its own `NODE_ENV`.
+
 ## [18.1.11] - 2026-09-05
 
 ### Fixed

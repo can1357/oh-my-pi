@@ -112,14 +112,16 @@ export function filterChildShellEnv(
 	env: Record<string, string | undefined>,
 	cwd: string = process.cwd(),
 ): Record<string, string> {
+	const runtimeLaunchEnvValues = env === Bun.env || env === process.env ? launchEnvValues : undefined;
 	const result = filterProcessEnv(env);
 	const { launchEnv, expandedLaunchEnv, fallbackLaunchEnv, expandedFallbackLaunchEnv } = loadLaunchCwdDotenv(
 		cwd,
 		result,
+		runtimeLaunchEnvValues,
 	);
 	const allLaunchEnv = fallbackLaunchEnv ? { ...launchEnv, ...fallbackLaunchEnv } : launchEnv;
 	for (const key in allLaunchEnv) {
-		const launchValue = launchEnvValues?.get(key);
+		const launchValue = runtimeLaunchEnvValues?.get(key);
 		if (launchValue !== undefined) {
 			// Launcher-owned name: it keeps the launcher's own value. Bun overwrites
 			// an empty launcher value with the dotenv one, so restore the launcher
@@ -135,7 +137,7 @@ export function filterChildShellEnv(
 			}
 			continue;
 		}
-		if (launchEnvValues || projectEnvNamesLoadedByOmp.has(key)) {
+		if (runtimeLaunchEnvValues || projectEnvNamesLoadedByOmp.has(key)) {
 			// Strong provenance: the launch environment is known and this name is
 			// absent from it, or OMP itself injected the value — either way it came
 			// from a project dotenv file, not the parent shell.
@@ -251,10 +253,15 @@ export function parseEnvFile(filePath: string): Record<string, string> {
  * environment. After autoload, `process.env.NODE_ENV` may already be the
  * value from `.env` itself (e.g. `production`), which would point a second
  * implementation at the wrong mode file.
+ *
+ * `runtimeLaunchEnvValues` is the omp process's own pre-dotenv snapshot and
+ * must only be supplied when `env` is that live process environment. Isolated
+ * caller-built env objects resolve mode from their own `NODE_ENV`.
  */
 function loadLaunchCwdDotenv(
 	cwd: string,
 	env: Record<string, string>,
+	runtimeLaunchEnvValues: ReadonlyMap<string, string> | undefined,
 ): {
 	launchEnv: Record<string, string>;
 	expandedLaunchEnv: Record<string, string>;
@@ -262,7 +269,7 @@ function loadLaunchCwdDotenv(
 	expandedFallbackLaunchEnv?: Record<string, string>;
 } {
 	const cwdProjectEnv = parseEnvFile(path.join(cwd, ".env"));
-	const launchNodeEnv = launchEnvValues ? launchEnvValues.get("NODE_ENV") : env.NODE_ENV;
+	const launchNodeEnv = runtimeLaunchEnvValues ? runtimeLaunchEnvValues.get("NODE_ENV") : env.NODE_ENV;
 	const nodeEnvName = `.env.${launchNodeEnv || "development"}`;
 	const modeEnv = parseEnvFile(path.join(cwd, nodeEnvName));
 	const localEnv = parseEnvFile(path.join(cwd, ".env.local"));
@@ -274,7 +281,7 @@ function loadLaunchCwdDotenv(
 		...expandDotenvValues(localEnv, env),
 		...expandDotenvValues(modeLocalEnv, env),
 	};
-	if (!launchEnvValues && nodeEnvName !== ".env.development") {
+	if (!runtimeLaunchEnvValues && nodeEnvName !== ".env.development") {
 		const fallbackModeEnv = parseEnvFile(path.join(cwd, ".env.development"));
 		const fallbackModeLocalEnv = parseEnvFile(path.join(cwd, ".env.development.local"));
 		const fallbackLaunchEnv = { ...cwdProjectEnv, ...fallbackModeEnv, ...localEnv, ...fallbackModeLocalEnv };
@@ -323,7 +330,7 @@ refreshDirsFromEnv();
 const launchProjectDotenv = (() => {
 	const cwd = getProjectDir();
 	const processValues = filterProcessEnv(process.env);
-	const loaded = loadLaunchCwdDotenv(cwd, processValues);
+	const loaded = loadLaunchCwdDotenv(cwd, processValues, launchEnvValues);
 	const names = new Set(Object.keys(loaded.launchEnv));
 	if (loaded.fallbackLaunchEnv) {
 		for (const key in loaded.fallbackLaunchEnv) names.add(key);
@@ -343,25 +350,30 @@ function envKeysInclude(keys: Iterable<string>, name: string): boolean {
 	return false;
 }
 
+function lookupMap(source: ReadonlyMap<string, string>, name: string): string | undefined {
+	if (process.platform !== "win32") return source.get(name);
+	const needle = name.toLowerCase();
+	for (const [key, value] of source) {
+		if (key.toLowerCase() === needle) return value;
+	}
+	return undefined;
+}
+
+function lookupRecord(source: Record<string, string>, name: string): string | undefined {
+	if (process.platform !== "win32") return source[name];
+	const needle = name.toLowerCase();
+	for (const key in source) {
+		if (key.toLowerCase() === needle) return source[key];
+	}
+	return undefined;
+}
+
 function envLookup(
 	source: ReadonlyMap<string, string> | Record<string, string> | undefined,
 	name: string,
 ): string | undefined {
 	if (!source) return undefined;
-	if (process.platform !== "win32") {
-		return source instanceof Map ? source.get(name) : source[name];
-	}
-	const needle = name.toLowerCase();
-	if (source instanceof Map) {
-		for (const [key, value] of source) {
-			if (key.toLowerCase() === needle) return value;
-		}
-		return undefined;
-	}
-	for (const key in source) {
-		if (key.toLowerCase() === needle) return source[key];
-	}
-	return undefined;
+	return source instanceof Map ? lookupMap(source, name) : lookupRecord(source as Record<string, string>, name);
 }
 
 /**
