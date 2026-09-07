@@ -773,6 +773,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			requestedTimeoutSec?: number;
 			notices?: readonly string[];
 			wallTimeMs?: number;
+			ctx?: AgentToolContext;
 		} = {},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
@@ -823,7 +824,10 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		// that id instead of saving a second (already-truncated) copy, so the
 		// `[raw output: artifact://N]` footer and the truncation notice agree.
 		const inlineCap = {
-			maxBytes: resolveInlineByteCapBudget(this.session.settings),
+			// A programmatic caller (`eval` bridge) hands this text to a kernel, so
+			// the model-facing budget must not elide its middle. `enforceInlineByteCap`
+			// treats a 0 budget as "return unchanged".
+			maxBytes: options.ctx?.programmaticCaller === true ? 0 : resolveInlineByteCapBudget(this.session.settings),
 			saveArtifact: (full: string) => result.artifactId ?? saveBashOriginalArtifact(this.session, full),
 		};
 
@@ -904,6 +908,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		resolvedEnv?: Record<string, string>;
 		onUpdate?: AgentToolUpdateCallback<BashToolDetails>;
 		forwardUpdates: boolean;
+		ctx?: AgentToolContext;
 	}): ManagedBashJobHandle {
 		const manager = this.session.asyncJobManager;
 		if (!manager) {
@@ -944,6 +949,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						requestedTimeoutSec: options.requestedTimeoutSec,
 						notices: options.notices ?? [],
 						wallTimeMs,
+						ctx: options.ctx,
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -1136,6 +1142,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				resolvedEnv,
 				onUpdate,
 				forwardUpdates: false,
+				ctx,
 			});
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
@@ -1174,6 +1181,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				resolvedEnv,
 				onUpdate,
 				forwardUpdates: !startBackgrounded,
+				ctx,
 			});
 			if (startBackgrounded) {
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
@@ -1482,6 +1490,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					requestedTimeoutSec,
 					notices: bridgeNotices,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
+					ctx,
 				});
 			} finally {
 				clearTimeout(timeoutTimer);
@@ -1505,6 +1514,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		// Allocate artifact for truncated output storage
 		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
+		// The eval kernel consumes this capture programmatically, so the sink's
+		// model-facing spill budget and per-line column cap must not shred it.
+		const unboundedOutput = ctx?.programmaticCaller === true;
 
 		const interactiveUi = canUseInteractiveBashPty(pty, ctx) ? ctx?.ui : undefined;
 		if (pty && !interactiveUi) {
@@ -1523,6 +1535,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					env: backendPreflight?.env ?? resolvedEnv,
 					artifactPath,
 					artifactId,
+					unboundedOutput,
 				})
 			: // executeBash runs its OWN direnv preflight internally — pass the RAW
 				// command + resolvedEnv here so the unset prefix / env merge is not
@@ -1535,6 +1548,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					env: resolvedEnv,
 					artifactPath,
 					artifactId,
+					unboundedOutput,
 					onChunk: streamTailUpdates(tailBuffer, onUpdate),
 					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
 				});
@@ -1566,6 +1580,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			requestedTimeoutSec,
 			notices: pendingNotices,
 			wallTimeMs,
+			ctx,
 		});
 	}
 }

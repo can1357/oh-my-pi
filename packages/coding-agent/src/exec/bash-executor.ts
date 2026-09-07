@@ -35,6 +35,15 @@ export interface BashExecutorOptions {
 	artifactPath?: string;
 	artifactId?: string;
 	/**
+	 * Keep the captured output whole: no inline spill budget and no per-line
+	 * column cap. Set for programmatic callers (the `eval` tool bridge), whose
+	 * consumer is a kernel, not the model — eliding the middle of a value a
+	 * cell is about to decode is silent data corruption, and the model-facing
+	 * budget it would otherwise inherit protects a context window that is not
+	 * in play on that path.
+	 */
+	unboundedOutput?: boolean;
+	/**
 	 * Invoked when the native minimizer rewrote the command's output, giving
 	 * the caller a chance to persist the lossless original capture (typically
 	 * via the session's `ArtifactManager`). The returned id is spliced into
@@ -505,14 +514,18 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			? buildUserShellCommand(shell, args, preflight.command)
 			: preflight.command;
 
-	// Create output sink for truncation and artifact handling
+	// Create output sink for truncation and artifact handling. An unbounded
+	// caller keeps both mechanisms off: the spill budget would elide the middle
+	// of the capture and the column cap would cut every long line, either of
+	// which corrupts a payload the caller decodes rather than reads.
 	const graphics = new TerminalGraphicsDecoder();
 	const sink = new OutputSink({
 		onChunk: usePty ? undefined : options?.onChunk,
 		artifactPath: options?.artifactPath,
 		artifactId: options?.artifactId,
-		headBytes: resolveOutputSinkHeadBytes(settings),
-		maxColumns: resolveOutputMaxColumns(settings),
+		...(options?.unboundedOutput
+			? { spillThreshold: Number.MAX_SAFE_INTEGER, headBytes: 0, maxColumns: 0 }
+			: { headBytes: resolveOutputSinkHeadBytes(settings), maxColumns: resolveOutputMaxColumns(settings) }),
 		chunkThrottleMs: !usePty && options?.onChunk ? (options.chunkThrottleMs ?? 50) : 0,
 	});
 

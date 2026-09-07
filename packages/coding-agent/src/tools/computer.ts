@@ -1,5 +1,5 @@
 import { type Type, type } from "@oh-my-pi/omptype";
-import type { AgentToolResult, ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult, ToolApprovalDecision } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import type { DesktopCapabilities } from "@oh-my-pi/pi-natives";
@@ -169,7 +169,7 @@ async function invokeComputer(
 		case "run":
 		case "call":
 			if (lifetime.isClosed()) throw new ToolError("Computer session is closed");
-			return await runComputer(session, controller, params, context.signal);
+			return await runComputer(session, controller, params, context.signal, context.context);
 		case "capabilities": {
 			const capabilities = lifetime.isClosed() ? undefined : await controller.capabilities();
 			throwIfAborted(context.signal);
@@ -213,6 +213,7 @@ async function runComputer(
 	controller: ComputerController,
 	params: ComputerRunParams | ComputerCallParams,
 	signal?: AbortSignal,
+	ctx?: AgentToolContext,
 ): Promise<AgentToolResult<unknown>> {
 	const code = resolveComputerRunCode(params);
 	// Direct inspection calls run read-only so the desktop guard backs the read approval tier.
@@ -249,6 +250,9 @@ async function runComputer(
 		.map(content => content.text)
 		.join("\n");
 	const cappedText = await enforceInlineByteCap(text, {
+		// A programmatic caller (`eval` bridge) decodes this text verbatim;
+		// middle elision there is silent data corruption, not context defense.
+		maxBytes: ctx?.programmaticCaller === true ? 0 : undefined,
 		saveArtifact: full => saveComputerOutputArtifact(session, full),
 	});
 	const content: AgentToolResult<ComputerPreludeDetails>["content"] = [];

@@ -1,4 +1,4 @@
-import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentTool, AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -157,6 +157,19 @@ function normalizeAgentToolResult(
 	return value;
 }
 
+/**
+ * Tool context for calls the kernel makes on the cell's behalf. Model-facing
+ * inline caps and artifact spilling would hand the cell a middle-elided
+ * string, which silently corrupts anything it decodes or writes to disk. The
+ * flag must also survive a session that exposes no tool context (SDK
+ * embedding, tests) — tools already read the context defensively, and the caps
+ * this flag suppresses are the only members those tools consult here.
+ */
+function programmaticToolContext(session: ToolSession): AgentToolContext {
+	const base = session.getToolContext?.();
+	return base ? { ...base, programmaticCaller: true } : ({ programmaticCaller: true } as AgentToolContext);
+}
+
 export async function callSessionTool(name: string, args: unknown, options: ToolBridgeOptions): Promise<ToolValue> {
 	if (name === "__prelude__") {
 		const request = parsePreludeRequest(args);
@@ -166,7 +179,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 				session: options.session,
 				toolCallId,
 				signal: options.signal,
-				context: options.session.getToolContext?.(),
+				context: programmaticToolContext(options.session),
 			});
 			return normalizeAgentToolResult(request.name, request.parameters, result, options);
 		} catch (error) {
@@ -249,7 +262,7 @@ export async function callSessionTool(name: string, args: unknown, options: Tool
 			normalizedArgs,
 			options.signal,
 			undefined,
-			options.session.getToolContext?.(),
+			programmaticToolContext(options.session),
 		);
 		return normalizeAgentToolResult(name, normalizedArgs, result, options);
 	} catch (error) {

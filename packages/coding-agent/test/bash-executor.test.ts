@@ -1095,6 +1095,27 @@ exit 64
 		expect(elapsed).toBeLessThan(10_000);
 	}, 15_000);
 
+	// A programmatic caller (the `eval` tool bridge) decodes this capture instead
+	// of reading it, so both of the sink's model-facing truncation mechanisms —
+	// the inline spill budget and the per-line column cap — must be off. Eliding
+	// the middle of a base64 payload is exactly how a corrupt screenshot got
+	// written to disk and wedged a session against the provider.
+	it("keeps a programmatic caller's capture whole on both truncation axes", async () => {
+		// One line, far past both the 50 KiB inline budget and the per-line cap.
+		// Emitted through this runner's own binary so the case is exercised on
+		// every platform, not just where `awk` exists.
+		const payloadBytes = DEFAULT_MAX_BYTES * 4;
+		const command = `${shellQuote(process.execPath)} -e ${shellQuote(`process.stdout.write("a".repeat(${payloadBytes}))`)}`;
+
+		const bounded = await executeBash(command, { cwd: tempDir, timeout: 15_000 });
+		expect(bounded.totalBytes).toBe(payloadBytes);
+		expect(bounded.outputBytes).toBeLessThan(payloadBytes);
+
+		const whole = await executeBash(command, { cwd: tempDir, timeout: 15_000, unboundedOutput: true });
+		expect(whole.exitCode).toBe(0);
+		expect(whole.output).toBe("a".repeat(payloadBytes));
+	}, 30_000);
+
 	it("sources snapshot env vars across session commands", async () => {
 		if (process.platform === "win32") {
 			return;

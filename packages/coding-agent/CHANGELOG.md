@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed `tool.*()` calls inside `eval` returning the model-facing, middle-elided output: a cell now receives the tool's full text, so decoding a base64 payload no longer silently corrupts it.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

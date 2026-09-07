@@ -326,6 +326,8 @@ export async function runInteractiveBashPty(
 		env?: Record<string, string>;
 		artifactPath?: string;
 		artifactId?: string;
+		/** See `BashExecutorOptions.unboundedOutput`: keep a programmatic caller's capture whole. */
+		unboundedOutput?: boolean;
 	},
 ): Promise<BashInteractiveResult> {
 	const settings = await Settings.init();
@@ -336,8 +338,9 @@ export async function runInteractiveBashPty(
 	const sink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
-		headBytes: resolveOutputSinkHeadBytes(settings),
-		maxColumns: resolveOutputMaxColumns(settings),
+		...(options.unboundedOutput
+			? { spillThreshold: Number.MAX_SAFE_INTEGER, headBytes: 0, maxColumns: 0 }
+			: { headBytes: resolveOutputSinkHeadBytes(settings), maxColumns: resolveOutputMaxColumns(settings) }),
 	});
 	try {
 		const result = await ui.custom<BashInteractiveResult>(
