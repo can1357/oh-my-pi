@@ -782,6 +782,9 @@ describe("AgentSession prewalk", () => {
 		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
 		expect(session.model?.id).toBe(target.id);
 		expect(session.getPrewalkState()).toBeUndefined();
+		expect(
+			agent.state.messages.some(message => message.role === "custom" && message.customType === "prewalk-plan"),
+		).toBe(false);
 		expect(showStatus).toHaveBeenCalledTimes(3);
 		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk reset"));
 	});

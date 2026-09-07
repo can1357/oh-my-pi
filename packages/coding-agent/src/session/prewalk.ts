@@ -278,6 +278,7 @@ export class PrewalkCoordinator {
 		await this.#host.setModelTemporary(source, sourceThinkingLevel, { ephemeral: true });
 		if (!active) return this.arm(target, targetThinkingLevel) ? "armed" : "reset";
 		if (this.#isNoop(active)) {
+			this.#scrubPlanNudge();
 			this.#disarmNoop(active);
 			return "reset";
 		}
@@ -315,13 +316,15 @@ export class PrewalkCoordinator {
 		this.#host.setPlanProposalHandler(title => this.#finalizePlanYoloProposal(title));
 	}
 
-	#scrubPlanNudge(liveMessages: AgentMessage[]): void {
+	#scrubPlanNudge(liveMessages?: AgentMessage[]): void {
 		if (!this.#planInjected) return;
 		const isPlanNudge = isPrewalkPlanNudge;
-		for (let index = liveMessages.length - 1; index >= 0; index--) {
-			if (!isPlanNudge(liveMessages[index])) continue;
-			invalidateMessageCache(liveMessages[index]);
-			liveMessages.splice(index, 1);
+		if (liveMessages) {
+			for (let index = liveMessages.length - 1; index >= 0; index--) {
+				if (!isPlanNudge(liveMessages[index])) continue;
+				invalidateMessageCache(liveMessages[index]);
+				liveMessages.splice(index, 1);
+			}
 		}
 		const stateMessages = this.#host.agent.state.messages;
 		const filtered = stateMessages.filter(message => !isPlanNudge(message));
