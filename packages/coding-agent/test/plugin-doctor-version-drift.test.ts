@@ -102,6 +102,29 @@ describe("PluginManager.doctor version drift", () => {
 		});
 	});
 
+	test("does not report version drift for a config-only local link", async () => {
+		const name = "@scope/plugin";
+		await seed(name, "1.0.2", "1.0.2");
+		const sourcePath = path.join(tmpRoot, "linked-plugin");
+		await fs.mkdir(sourcePath, { recursive: true });
+		await Bun.write(
+			path.join(sourcePath, "package.json"),
+			JSON.stringify({ name, version: "1.0.3", omp: { version: "1.0.3" } }),
+		);
+		const installedPath = path.join(pluginsNodeModules, name);
+		await fs.rm(installedPath, { recursive: true });
+		await fs.symlink(sourcePath, installedPath);
+		await Bun.write(
+			path.join(pluginsDir, "package.json"),
+			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }),
+		);
+
+		const checks = await new PluginManager(tmpRoot).doctor();
+
+		expect(checks.find(c => c.name === `plugin:${name}`)?.message).toBe("v1.0.3");
+		expect(checks.some(c => c.name === `plugin:${name}:version`)).toBe(false);
+	});
+
 	test("does not report drift when the lock version matches the installed version", async () => {
 		await seed("@scope/plugin", "1.0.3", "1.0.3");
 

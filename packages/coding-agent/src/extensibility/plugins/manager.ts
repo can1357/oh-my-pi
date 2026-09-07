@@ -1031,10 +1031,10 @@ export class PluginManager {
 					: `v${pluginPkg.version} - No omp/pi manifest (not an omp plugin)`,
 			});
 
-			// The runtime lock records the version observed after installation.
-			// Report any later divergence from the package currently on disk.
+			// Config-only entries are live local links; their source package version
+			// may change without relinking. Drift only applies to managed dependencies.
 			const recordedVersion = config.plugins[name]?.version;
-			if (recordedVersion && pluginPkg.version && recordedVersion !== pluginPkg.version) {
+			if (fromDependencies && recordedVersion && pluginPkg.version && recordedVersion !== pluginPkg.version) {
 				const fixed = options.fix ? await this.#reconcileVersionDrift(name, recordedVersion) : false;
 				checks.push({
 					name: `plugin:${name}:version`,
