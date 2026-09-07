@@ -14,7 +14,12 @@ import {
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
-import { DEFAULT_STT_BACKEND, STT_BACKEND_VALUES } from "../stt/cloud-transcribe-client";
+import {
+	CLOUD_STT_MODEL_OPTIONS,
+	CLOUD_STT_MODEL_VALUES,
+	DEFAULT_STT_BACKEND,
+	STT_BACKEND_VALUES,
+} from "../stt/cloud-transcribe-client";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -2601,15 +2606,15 @@ export const SETTINGS_SCHEMA = {
 
 	"stt.modelName": {
 		type: "enum",
-		values: STT_MODEL_VALUES,
+		values: [...STT_MODEL_VALUES, ...CLOUD_STT_MODEL_VALUES],
 		default: DEFAULT_STT_MODEL_KEY,
 		ui: {
 			tab: "interaction",
 			group: "Speech",
 			label: "Speech Model",
 			description:
-				"Local on-device speech model. Parakeet TDT v3 (sherpa-onnx) is the SoTA default; Whisper base/small/large-v3-turbo tiers (transformers.js) trade size for multilingual coverage. Downloaded on first use.",
-			options: STT_MODEL_OPTIONS,
+				"Local tiers (fast/balanced/turbo/parakeet) apply when stt.backend is local; transcription ids (gpt-4o-transcribe, gpt-4o-mini-transcribe, whisper-1) apply when it is cloud. Parakeet is the local default.",
+			options: [...STT_MODEL_OPTIONS, ...CLOUD_STT_MODEL_OPTIONS],
 		},
 	},
 	"stt.submitTrigger": {

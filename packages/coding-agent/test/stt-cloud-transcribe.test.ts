@@ -1,8 +1,9 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import { Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
-	CLOUD_STT_MODEL,
+	DEFAULT_CLOUD_STT_MODEL,
 	encodeWav16k,
+	resolveCloudSttModel,
 	startCloudSttStream,
 } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
 import { STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
@@ -54,7 +55,7 @@ describe("cloud STT stream", () => {
 		expect(init.method).toBe("POST");
 		expect((init.headers as Record<string, string>)["Authorization"]).toBe("Bearer sk-test");
 		const form = init.body as FormData;
-		expect(form.get("model")).toBe(CLOUD_STT_MODEL);
+		expect(form.get("model")).toBe(DEFAULT_CLOUD_STT_MODEL);
 		expect(form.get("language")).toBe("en");
 		expect(form.get("prompt")).toBe("AC-42");
 		expect(form.get("response_format")).toBe("json");
@@ -63,6 +64,17 @@ describe("cloud STT stream", () => {
 		expect(file.size).toBe(44 + 1600 * 2);
 	});
 
+	it("sends the selected cloud model and falls back for local tier keys", async () => {
+		expect(resolveCloudSttModel("gpt-4o-mini-transcribe")).toBe("gpt-4o-mini-transcribe");
+		expect(resolveCloudSttModel("whisper-1")).toBe("whisper-1");
+		expect(resolveCloudSttModel("parakeet")).toBe(DEFAULT_CLOUD_STT_MODEL);
+		expect(resolveCloudSttModel(undefined)).toBe(DEFAULT_CLOUD_STT_MODEL);
+		const stub = stubFetch("ok");
+		const handle = startCloudSttStream({ apiKey: "sk-test", model: "whisper-1", fetchImpl: stub.impl });
+		handle.pushAudio(sine16kHz(160));
+		await expect(handle.stop()).resolves.toBe("ok");
+		expect((stub.calls[0]!.init.body as FormData).get("model")).toBe("whisper-1");
+	});
 	it("resolves empty text without a request when nothing was recorded", async () => {
 		const stub = stubFetch();
 		const handle = startCloudSttStream({ apiKey: "sk-test", fetchImpl: stub.impl });
@@ -108,6 +120,7 @@ describe("cloud backend in STTController", () => {
 		state = beginSettingsTest();
 		await Settings.init({ inMemory: true });
 		settings.set("stt.backend", "cloud");
+		settings.set("stt.modelName", "gpt-4o-mini-transcribe");
 	});
 
 	afterEach(() => {
@@ -159,7 +172,7 @@ describe("cloud backend in STTController", () => {
 			expect(controller.state).toBe("idle");
 			expect(editor.committed).toContain("hello world");
 			expect(stub.calls).toHaveLength(1);
-			expect(warnings).toHaveLength(0);
+			expect((stub.calls[0]!.init.body as FormData).get("model")).toBe("gpt-4o-mini-transcribe");
 		} finally {
 			controller.dispose();
 		}

@@ -9,6 +9,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings, settings } from "../config/settings";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { theme } from "../modes/theme/theme";
+import { resolveCloudSttModel } from "../stt/cloud-transcribe-client";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
 import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODEL_OPTIONS } from "../tts";
@@ -166,7 +167,8 @@ function buildSpeechComponents(): SpeechComponent[] {
 			isReady: async () =>
 				settings.get("stt.backend") === "cloud" || isSttModelCached(settings.get("stt.modelName")),
 			status: async () => {
-				if (settings.get("stt.backend") === "cloud") return "cloud (gpt-4o-transcribe, no download)";
+				if (settings.get("stt.backend") === "cloud")
+					return `cloud (${resolveCloudSttModel(settings.get("stt.modelName"))}, no download)`;
 				const key = settings.get("stt.modelName");
 				return (await isSttModelCached(key)) ? key : `${key} — not downloaded`;
 			},
