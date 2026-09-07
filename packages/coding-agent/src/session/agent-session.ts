@@ -7900,10 +7900,14 @@ export class AgentSession {
 			// tools: every path through which the model can still reach a reader.
 			const hasSkillReader = this.getEnabledToolNames().some(name => toolReadsSkillUris(this.getToolByName(name)));
 			const renderedSkills = hasSkillReader ? this.skills.filter(skill => skill.hide !== true) : [];
+			// Hidden-only sessions have no catalog rows, but the notice template
+			// still carries the `skill://<name>` syntax the model needs: hidden
+			// skills stay reachable by URI even though they are never listed.
+			const hasReadableSkills = hasSkillReader && this.skills.length > 0;
 			const alreadyAnnounced = this.agent.state.messages.some(
 				message => message.role === "custom" && message.customType === "skillful-notice",
 			);
-			if (renderedSkills.length > 0 && !alreadyAnnounced) {
+			if (hasReadableSkills && !alreadyAnnounced) {
 				await this.sendCustomMessage(
 					{
 						customType: "skillful-notice",
