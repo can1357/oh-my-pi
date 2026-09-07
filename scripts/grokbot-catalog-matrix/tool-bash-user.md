@@ -1,1 +1,1 @@
-Use the bash or Shell tool to run exactly: echo {{ping}}. Do not explain. Call the tool now.
+Please use the Shell tool to run: echo {{ping}}

@@ -1,1 +1,1 @@
-You are a coding agent. Prefer the named file/shell tool when asked.
+You are a helpful assistant. When a tool is needed, call it.

@@ -31,37 +31,27 @@ import {
 	resolveGrokbotSandToolPolicy,
 	selectGrokbotMatrixIds,
 } from "../packages/ai/src/providers/grokbot/tool-policy.ts";
+import {
+	classifyError,
+	idSafe,
+	isSoftPassToolFollowup,
+	parseArgs,
+	readLikeShellCommand,
+	toolSmokePrompt,
+	writeLikeShellCommand,
+	type Mode,
+	type ToolSmokeKind,
+	type ToolsSet,
+} from "./grokbot-catalog-matrix/harness";
 import textSystemPrompt from "./grokbot-catalog-matrix/text-system.md" with { type: "text" };
 import textUserPrompt from "./grokbot-catalog-matrix/text-user.md" with { type: "text" };
 import toolsSystemPrompt from "./grokbot-catalog-matrix/tools-system.md" with { type: "text" };
 import toolsFollowupSystemPrompt from "./grokbot-catalog-matrix/tools-followup-system.md" with { type: "text" };
-import toolBashUserPrompt from "./grokbot-catalog-matrix/tool-bash-user.md" with { type: "text" };
-import toolReadUserPrompt from "./grokbot-catalog-matrix/tool-read-user.md" with { type: "text" };
-import toolWriteUserPrompt from "./grokbot-catalog-matrix/tool-write-user.md" with { type: "text" };
 import ompToolsUserPrompt from "./grokbot-catalog-matrix/omp-tools-user.md" with { type: "text" };
 import ompTextUserPrompt from "./grokbot-catalog-matrix/omp-text-user.md" with { type: "text" };
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const TEXT_TOKEN = "pong42";
-
-type Mode = "text" | "tools" | "all";
-type Slice = "representative" | "all";
-
-type ToolsSet = "bash" | "core";
-
-type MatrixArgs = {
-	mode: Mode;
-	slice: Slice;
-	limit?: number;
-	ids?: string[];
-	concurrency: number;
-	json?: string;
-	omp: boolean;
-	allowMissingCreds: boolean;
-	probeGated: boolean;
-	dryRun: boolean;
-	toolsSet: ToolsSet;
-};
 
 type Row = {
 	id: string;
@@ -79,37 +69,6 @@ type Row = {
 	detail?: string;
 };
 
-function parseArgs(argv: string[]): MatrixArgs {
-	const get = (flag: string) => {
-		const i = argv.indexOf(flag);
-		return i >= 0 ? argv[i + 1] : undefined;
-	};
-	const mode = (get("--mode") ?? "all") as Mode;
-	const slice = (get("--slice") ?? "all") as Slice;
-	const limitRaw = get("--limit");
-	const idsRaw = get("--ids");
-	const concurrencyRaw = get("--concurrency");
-	const toolsSetRaw = get("--tools-set");
-	return {
-		mode: mode === "text" || mode === "tools" ? mode : "all",
-		slice: slice === "representative" ? "representative" : "all",
-		limit: limitRaw ? Number(limitRaw) : undefined,
-		ids: idsRaw
-			? idsRaw
-					.split(",")
-					.map(s => s.trim())
-					.filter(Boolean)
-			: undefined,
-		concurrency: Math.max(1, Number(concurrencyRaw ?? 3) || 3),
-		json: get("--json"),
-		omp: argv.includes("--omp"),
-		allowMissingCreds: argv.includes("--allow-missing-creds"),
-		probeGated: argv.includes("--probe-gated"),
-		dryRun: argv.includes("--dry-run"),
-		toolsSet: toolsSetRaw === "bash" ? "bash" : "core",
-	};
-}
-
 const OMP_TOOLS: Tool[] = [
 	{
 		name: "bash",
@@ -125,7 +84,10 @@ const OMP_TOOLS: Tool[] = [
 		description: "Read a file from disk.",
 		parameters: {
 			type: "object",
-			properties: { path: { type: "string", description: "Absolute path" } },
+			properties: {
+				path: { type: "string", description: "Absolute path" },
+				target_file: { type: "string", description: "File path (alias of path)" },
+			},
 			required: ["path"],
 		},
 	} as Tool,
@@ -142,24 +104,6 @@ const OMP_TOOLS: Tool[] = [
 		},
 	} as Tool,
 ];
-
-function idSafe(id: string): string {
-	return id.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80);
-}
-
-function classifyError(message: string | undefined, status?: number): string {
-	const text = message ?? "";
-	if (status === 422 || /HTTP 422/.test(text)) return "http-422";
-	if (status === 400 || /HTTP 400/.test(text) || /ERROR_PROVIDER_ERROR/.test(text)) return "http-400";
-	if (status === 401 || /HTTP 401|unauthenticated/i.test(text)) return "http-401";
-	if (status === 504 || /HTTP 504|gateway timeout/i.test(text)) return "http-504";
-	if (status === 502 || /HTTP 502|bad gateway/i.test(text)) return "http-502";
-	if (status === 404 || /model.?not.?found/i.test(text)) return "model-not-found";
-	if (/no text or tool call/i.test(text)) return "empty-body";
-	if (/incomplete tool call/i.test(text)) return "incomplete-tool";
-	if (text) return "provider-error";
-	return "unknown";
-}
 
 function isRetriableStreamError(status?: number, message?: string): boolean {
 	const cls = classifyError(message, status);
@@ -250,37 +194,27 @@ async function runText(model: Model<Api>): Promise<{
 	};
 }
 
-type ToolSmokeKind = "bash" | "read" | "write";
-
 const TOOL_NAME_RE: Record<ToolSmokeKind, RegExp> = {
 	bash: /^(bash|Shell|shell)$/i,
 	read: /^(read|Read)$/i,
 	write: /^(write|Write)$/i,
 };
 
-function writeLikeShellCommand(command: string): boolean {
-	const cmd = command.trim();
-	if (!cmd) return false;
-	return /(?:^|[;&|\n]\s*)(?:echo|printf|cat|tee)\b/.test(cmd) && /(?:>>?|tee\b)/.test(cmd);
+function shellCommandOf(call: ToolCall): string {
+	const args = call.arguments;
+	return args && typeof args === "object" && !Array.isArray(args) ? String(args.command ?? "") : "";
 }
 
 function isWriteLikeCall(call: ToolCall): boolean {
 	if (TOOL_NAME_RE.write.test(call.name)) return true;
 	if (!TOOL_NAME_RE.bash.test(call.name)) return false;
-	const args = call.arguments;
-	const command = args && typeof args === "object" && !Array.isArray(args) ? String(args.command ?? "") : "";
-	return writeLikeShellCommand(command);
+	return writeLikeShellCommand(shellCommandOf(call));
 }
 
-function toolSmokePrompt(kind: ToolSmokeKind, ping: string, id: string): string {
-	const safe = idSafe(id);
-	if (kind === "bash") {
-		return prompt.render(toolBashUserPrompt, { ping }).trim();
-	}
-	if (kind === "read") {
-		return prompt.render(toolReadUserPrompt, { safeId: safe }).trim();
-	}
-	return prompt.render(toolWriteUserPrompt, { ping, safeId: safe }).trim();
+function isReadLikeCall(call: ToolCall): boolean {
+	if (TOOL_NAME_RE.read.test(call.name)) return true;
+	if (!TOOL_NAME_RE.bash.test(call.name)) return false;
+	return readLikeShellCommand(shellCommandOf(call));
 }
 
 async function runOneTool(
@@ -318,7 +252,11 @@ async function runOneTool(
 	const calls = toolCallsOf(turn1);
 	const names = calls.map(c => c.name);
 	const match =
-		kind === "write" ? calls.find(c => isWriteLikeCall(c)) : calls.find(c => TOOL_NAME_RE[kind].test(c.name));
+		kind === "write"
+			? calls.find(c => isWriteLikeCall(c))
+			: kind === "read"
+				? calls.find(c => isReadLikeCall(c))
+				: calls.find(c => TOOL_NAME_RE[kind].test(c.name));
 	if (!match) {
 		const body = textOf(turn1);
 		return {
@@ -353,9 +291,10 @@ async function runOneTool(
 	const status2 = httpStatusOf(turn2);
 	if (turn2.stopReason === "error") {
 		const errorClass = classifyError(turn2.errorMessage, status2);
-		// Turn 1 already proved the named tool. A hanging leftover or empty
-		// follow-up (gemini-3-flash Write, parent-chat Read) must not fail the id.
-		if (errorClass === "incomplete-tool" || errorClass === "empty-body") {
+		// Turn 1 already proved the named tool. Hanging leftovers, empty
+		// follow-ups, and Anthropic Usage Policy on the echo follow-up after a
+		// successful Shell call must not fail the id.
+		if (isSoftPassToolFollowup(errorClass)) {
 			return {
 				pass: true,
 				routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
@@ -504,7 +443,15 @@ async function main() {
 	if (!cfg.renewal || !cfg.machineId) {
 		console.log("GROKBOT_MATRIX_SKIP_NO_CREDS");
 		console.log("Need GROKBOT_RENEWAL_CREDENTIAL + GROKBOT_MACHINE_ID (or ~/.omp/agent/secrets/grokbot.env).");
-		if (args.allowMissingCreds || args.dryRun) {
+		if (args.dryRun) {
+			const parsed = args.ids ?? [];
+			console.log(`parsed --ids selected=${parsed.length}`);
+			for (const id of parsed) console.log(id);
+			console.log("GROKBOT_MATRIX_DRY_RUN");
+			process.exitCode = 0;
+			return;
+		}
+		if (args.allowMissingCreds) {
 			process.exitCode = 0;
 			return;
 		}
@@ -531,7 +478,7 @@ async function main() {
 	if (args.limit && Number.isFinite(args.limit)) selected = selected.slice(0, args.limit);
 
 	console.log(
-		`=== GROKBOT CATALOG MATRIX  live=${specs.length} selected=${selected.length} slice=${args.slice} mode=${args.mode} tools=${args.toolsSet} ===`,
+		`=== GROKBOT CATALOG MATRIX  live=${specs.length} selected=${selected.length} ids_parsed=${args.ids?.length ?? "all"} slice=${args.slice} mode=${args.mode} tools=${args.toolsSet} ===`,
 	);
 	if (args.dryRun) {
 		for (const id of selected) console.log(id);
@@ -654,4 +601,6 @@ async function main() {
 	console.log("GROKBOT_CATALOG_MATRIX_PASS");
 }
 
-await main();
+if (import.meta.main) {
+	await main();
+}

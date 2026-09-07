@@ -1,1 +1,1 @@
-Use the read or Read tool to read the file /tmp/grokbot-read-{{safeId}}.txt. Do not explain. Call the tool now.
+Please use the Shell tool to run exactly: cat notes/grokbot-read-{{safeId}}.txt
