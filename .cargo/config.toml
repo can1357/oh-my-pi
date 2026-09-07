@@ -84,6 +84,9 @@ codegen-backend = "llvm"
 # `catch_unwind`; cranelift does not emit the required landing pads.
 [profile.dev.package.omp-observability]
 codegen-backend = "llvm"
+# Audio shutdown joins failed workers and must unwind through callback frames.
+[profile.dev.package.omp-audio]
+codegen-backend = "llvm"
 [profile.dev.build-override]
 codegen-backend = "llvm"
 [profile.release]
