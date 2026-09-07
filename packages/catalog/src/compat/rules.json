@@ -8875,7 +8875,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:30",
+				"source": "providers/grokbot.kdl:31",
 				"providers": [
 					"grokbot"
 				],
@@ -8898,11 +8898,12 @@
 					}
 				],
 				"catalog": {
-					"sandToolsWire": "parent-chat"
+					"sandToolsWire": "parent-chat",
+					"sandWireModelId": "sand-default"
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:36",
+				"source": "providers/grokbot.kdl:38",
 				"providers": [
 					"grokbot"
 				],
@@ -8921,7 +8922,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:39",
+				"source": "providers/grokbot.kdl:41",
 				"providers": [
 					"grokbot"
 				],
@@ -8960,7 +8961,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:48",
+				"source": "providers/grokbot.kdl:50",
 				"providers": [
 					"grokbot"
 				],
@@ -8988,7 +8989,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:55",
+				"source": "providers/grokbot.kdl:57",
 				"providers": [
 					"grokbot"
 				],

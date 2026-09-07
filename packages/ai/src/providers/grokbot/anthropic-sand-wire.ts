@@ -89,6 +89,12 @@ export type AnthropicSandToolWireInput = {
 	 * take the product profile without TypeScript id compares.
 	 */
 	sandToolsWire?: AnthropicSandWireResolveContext["sandToolsWire"];
+	/**
+	 * Catalog `sand-wire-model-id` rewrite for product parent-chat. Auto
+	 * aliases set this to `sand-default`; sand-default / sand-cua omit it so
+	 * the wire keeps the router id.
+	 */
+	sandWireModelId?: string;
 };
 
 export type AnthropicSandToolWireResult = AnthropicSandToolWireInput & {
@@ -180,13 +186,18 @@ export function applyAnthropicSandToolWire(
 				originalModelId: anthropic ? modelId : undefined,
 			});
 		}
-		// sand-default / sand-cua keep their router id but drop thinking/effort
-		// params (same bare-wire lesson as automation). Auto aliases
-		// (`default`, `default[]`, `auto`) rewrite to bare sand-default so a
-		// Read/Write follow-up does not hang mid-tool on cursor-grok-4.5-high.
-		const keepCua = modelId === "sand-cua" || input.requestedModel.modelId === "sand-cua";
+		// Parent-chat: catalog `sand-wire-model-id` is the bare rewrite target
+		// (Auto aliases → sand-default). Catalog-owned routers without a rewrite
+		// keep their id (sand-default, sand-cua). Do not special-case router
+		// spellings in TypeScript.
+		const rewrite = input.sandWireModelId?.trim();
+		const keepRouter = !anthropic && catalogOwns && !rewrite;
 		return applyProductWire(input, profile, wire, {
-			requestedModel: keepCua ? { modelId: "sand-cua" } : { modelId: "sand-default" },
+			requestedModel: rewrite
+				? { modelId: rewrite }
+				: keepRouter
+					? { modelId: input.requestedModel.modelId }
+					: { modelId: "sand-default" },
 			originalModelId: anthropic ? modelId : undefined,
 		});
 	}

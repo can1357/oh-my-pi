@@ -47,6 +47,7 @@ function wireFor(
 	id: string,
 	opts: {
 		sandToolsWire?: "parent-chat" | "automation" | "keep-model";
+		sandWireModelId?: string;
 		supportsTools?: boolean;
 		envWire?: string;
 	} = {},
@@ -65,6 +66,7 @@ function wireFor(
 			modelId: id,
 			ompTools: OMP_CORE,
 			sandToolsWire: opts.sandToolsWire,
+			sandWireModelId: opts.sandWireModelId,
 		},
 		policy,
 	);
@@ -111,7 +113,10 @@ describe("grokbot family tool mapping", () => {
 
 	test("catalog parent-chat on Auto routers (default / default[] / auto) rewrites to bare sand-default", () => {
 		for (const id of ["default", "default[]", "auto", "auto[]"]) {
-			const { policy, applied, names } = wireFor(id, { sandToolsWire: "parent-chat" });
+			const { policy, applied, names } = wireFor(id, {
+				sandToolsWire: "parent-chat",
+				sandWireModelId: "sand-default",
+			});
 			expect(policy.kind).toBe("product");
 			expect(policy.wire).toBe("parent-chat");
 			expect(applied.requestedModel).toEqual({ modelId: "sand-default" });
@@ -173,6 +178,7 @@ describe("grokbot family tool mapping", () => {
 				modelId: "default",
 				ompTools: OMP_CORE,
 				sandToolsWire: "parent-chat",
+				sandWireModelId: "sand-default",
 			},
 			"parent-chat",
 		);

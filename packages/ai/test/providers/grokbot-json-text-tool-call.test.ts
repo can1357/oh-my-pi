@@ -180,7 +180,14 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 			tools: [bashTool],
 		};
 
-		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		const stream = streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl });
+		const thinkingEvents: string[] = [];
+		for await (const event of stream) {
+			if (event.type === "thinking_start" || event.type === "thinking_delta" || event.type === "thinking_end") {
+				thinkingEvents.push(event.type);
+			}
+		}
+		const result = await stream.result();
 		expect(result.stopReason).toBe("toolUse");
 		expect(result.content).toEqual([
 			expect.objectContaining({
@@ -189,6 +196,8 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 				arguments: { command: "echo tools-pong-think" },
 			}),
 		]);
+		// Promoted call must not flush the discarded thinking buffer as reasoning.
+		expect(thinkingEvents).toEqual([]);
 	});
 
 	test("promotes Gemini default_api tool_code hidden in thinking", async () => {

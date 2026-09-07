@@ -283,6 +283,10 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(bundled.find(m => m.id === "sand-cua")?.sandToolsWire).toBe("parent-chat");
 		expect(bundled.find(m => m.id === "default")?.sandToolsWire).toBe("parent-chat");
 		expect(bundled.find(m => m.id === "auto")?.sandToolsWire).toBe("parent-chat");
+		expect(bundled.find(m => m.id === "default")?.sandWireModelId).toBe("sand-default");
+		expect(bundled.find(m => m.id === "auto")?.sandWireModelId).toBe("sand-default");
+		expect(bundled.find(m => m.id === "sand-cua")?.sandWireModelId).toBeUndefined();
+		expect(bundled.find(m => m.id === "sand-default")?.sandWireModelId).toBeUndefined();
 
 		const withMinimal = models.find(m => m.id === "effort-with-minimal");
 		expect([...((withMinimal?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual([

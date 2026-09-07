@@ -12,6 +12,7 @@
 - Fixed Grok Bot file-backed model caches to scope by the real renewer instead of the shared `<authenticated>` sentinel.
 - Fixed Grok Bot file-only auth so the authenticated sentinel is never used as a renewal credential override, and added `sand-tools-wire` for router tool-wire policy.
 - Bundled Grok Bot router rows now include `sandToolsWire` from KDL so cold starts without AvailableModels still use product parent-chat/automation wires.
+- Grok Bot Auto routers bake catalog `sand-wire-model-id=sand-default` so parent-chat rewrite no longer special-cases `sand-cua` in TypeScript.
 - Grok Bot auth is only advertised when both the renewer and machine id are present, so models are not selectable before streaming can succeed.
 ### Fixed
 

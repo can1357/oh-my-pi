@@ -896,6 +896,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						modelId: model.id,
 						ompTools: context.tools,
 						sandToolsWire: retrySandWire,
+						sandWireModelId: model.sandWireModelId,
 					},
 					resolvedWire,
 				);
@@ -1441,7 +1442,21 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
 					const promoted = parseJsonTextToolCall(text, advertised) ?? parseGeminiInbandToolCall(text, advertised);
 					if (promoted) {
+						const removedIndexes = new Set<number>();
+						for (let i = 0; i < output.content.length; i++) {
+							const block = output.content[i];
+							if (block?.type === "text" || block?.type === "thinking") removedIndexes.add(i);
+						}
 						output.content = output.content.filter(b => b.type !== "text" && b.type !== "thinking");
+						// Drop buffered thinking/text events for removed blocks before
+						// upsertTool flushes — otherwise ACP sees the JSON as reasoning
+						// at index 0 while the final transcript is only a tool call.
+						if (removedIndexes.size > 0) {
+							attemptEventBuffer = attemptEventBuffer.filter(event => {
+								const idx = "contentIndex" in event ? event.contentIndex : undefined;
+								return typeof idx !== "number" || !removedIndexes.has(idx);
+							});
+						}
 						upsertTool({
 							toolCallId: `call_json_${crypto.randomUUID()}`,
 							toolName: promoted.name,
