@@ -252,12 +252,13 @@ describe("Codex model discovery", () => {
 			const builtModel = buildModel(model);
 			// Codex credits keep this base rate and do not charge for cache
 			// writes; unlike the API card, there is no long-context tier. The
-			// default window stays at the deployment-advertised 272K; the
-			// 1.05M documented window is the `/extended-context` maximum.
+			// stale 272K wire window floors to the documented 1.05M at build
+			// time — live traffic succeeds past the wire's 872K maximum — so
+			// Astra is not gated behind `/extended-context`.
 			expect(builtModel.cost).toEqual({ input: 10, output: 50, cacheRead: 1, cacheWrite: 0 });
 			expect(builtModel.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5 });
 			expect(builtModel).toMatchObject({
-				contextWindow: 272_000,
+				contextWindow: 1_050_000,
 				maxTokens: 128_000,
 			});
 		}

@@ -384,4 +384,168 @@ describe("CopySelectorComponent", () => {
 		expect(boxed).toContain("const answer = 42;");
 		expect(boxed).not.toContain("bun test");
 	});
+
+	/** A picker over `entries` with the harness deps, recording picks. */
+	function pickerOver(
+		entries: SessionMessageEntry[],
+		picks: Array<{ content: string; label: string }>,
+		onRender: () => void = () => {},
+	): CopySelectorComponent {
+		return new CopySelectorComponent(entries, {
+			ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+			cwd: "/tmp",
+			requestRender: onRender,
+			onPick: (content, label) => picks.push({ content, label }),
+			onCancel: () => {},
+		});
+	}
+
+	/** `count` user turns, oldest first, chained by parent id. */
+	function promptChain(count: number): SessionMessageEntry[] {
+		const entries: SessionMessageEntry[] = [];
+		for (let index = 0; index < count; index++) {
+			entries.push(
+				entry(`u${index}`, index === 0 ? null : `u${index - 1}`, {
+					role: "user",
+					content: `prompt ${index}`,
+					timestamp: index,
+				} as AgentMessage),
+			);
+		}
+		return entries;
+	}
+
+	it("does not repaint for a wheel notch that cannot move the viewport", () => {
+		// The picker opens scrolled to the newest turn, so every wheel-down
+		// notch there used to repaint the whole frame and make it twitch.
+		let renders = 0;
+		const selector = pickerOver(promptChain(120), [], () => renders++);
+		const wheelDown = "\x1b[<65;1;10M";
+		const wheelUp = "\x1b[<64;1;10M";
+		try {
+			selector.render(100);
+
+			selector.handleInput(wheelDown);
+			selector.handleInput(wheelDown);
+			expect(renders).toBe(0);
+
+			// A notch that moves the viewport still repaints, in both directions.
+			selector.handleInput(wheelUp);
+			expect(renders).toBe(1);
+			selector.handleInput(wheelDown);
+			expect(renders).toBe(2);
+
+			selector.handleInput(wheelDown);
+			expect(renders).toBe(2);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("replays only the recent tail of a long branch until `a` loads the earlier turns", () => {
+		// One component is built and rendered per entry, so a long session cost
+		// seconds before its first frame; the picker starts at the tail instead.
+		const entries = promptChain(900);
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = pickerOver(entries, picks);
+		try {
+			expect(selector.targetCount).toBeLessThan(entries.length);
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("a earlier turns");
+
+			// Step off the newest turn: the reload must restore this turn, not
+			// fall back to the last target of the fuller transcript.
+			selector.handleInput(UP);
+			selector.handleInput(UP);
+			selector.handleInput("a");
+			expect(selector.targetCount).toBe(entries.length);
+			const loaded = Bun.stripANSI(selector.render(100).join("\n"));
+			expect(loaded).not.toContain("a earlier turns");
+			expect(loaded).toContain(`${entries.length - 2}/${entries.length}`);
+
+			selector.handleInput(ENTER);
+			expect(picks).toEqual([{ content: "prompt 897", label: "user message" }]);
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("keeps a copyable target when the final turn is longer than the replay cap", () => {
+		// Cutting blindly at `length - limit` would start the tail inside the
+		// tool results, whose calls are gone: the builder drops them and the
+		// picker mounts with nothing to copy.
+		const entries: SessionMessageEntry[] = [
+			entry("u1", null, { role: "user", content: "run the sweep", timestamp: 1 } as AgentMessage),
+		];
+		for (let index = 0; index < 700; index++) {
+			const call = `call-${index}`;
+			entries.push(
+				entry(`a${index}`, entries.at(-1)!.id, {
+					role: "assistant",
+					content: [{ type: "toolCall", id: call, name: "bash", arguments: { command: `step ${index}` } }],
+					api: "anthropic-messages",
+					provider: "anthropic",
+					model: "claude-sonnet-4-5",
+					stopReason: "toolUse",
+					usage: {
+						input: 1,
+						output: 1,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 2,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					timestamp: 2 + index * 2,
+				} as unknown as AgentMessage),
+			);
+			entries.push(
+				entry(`t${index}`, entries.at(-1)!.id, {
+					role: "toolResult",
+					toolCallId: call,
+					toolName: "bash",
+					content: [{ type: "text", text: `output ${index}` }],
+					isError: false,
+					timestamp: 3 + index * 2,
+				} as unknown as AgentMessage),
+			);
+		}
+		const picks: Array<{ content: string; label: string }> = [];
+		const selector = pickerOver(entries, picks);
+		try {
+			// The single user turn is the only boundary, so the whole branch replays.
+			expect(selector.targetCount).toBeGreaterThan(0);
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).not.toContain("a earlier turns");
+
+			selector.handleInput(ENTER);
+			expect(picks).toHaveLength(1);
+			expect(picks[0]!.content).toContain("output 699");
+		} finally {
+			selector.dispose();
+		}
+	});
+
+	it("cuts the tail at a directly invoked skill prompt, not only at a user message", () => {
+		// A `/skill:` prompt the user invoked starts a turn of its own, so a
+		// branch whose recent history is skill turns must not walk back to a
+		// far older user message and replay thousands of entries.
+		const entries = promptChain(50);
+		for (let index = 0; index < 900; index++) {
+			entries.push(
+				entry(`s${index}`, entries.at(-1)!.id, {
+					role: "custom",
+					customType: "skill-prompt",
+					attribution: "user",
+					content: `skill step ${index}`,
+					display: true,
+					timestamp: 1000 + index,
+				} as unknown as AgentMessage),
+			);
+		}
+		const selector = pickerOver(entries, []);
+		try {
+			expect(selector.targetCount).toBeLessThan(700);
+			expect(Bun.stripANSI(selector.render(100).join("\n"))).toContain("a earlier turns");
+		} finally {
+			selector.dispose();
+		}
+	});
 });
