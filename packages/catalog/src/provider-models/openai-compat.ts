@@ -6035,15 +6035,18 @@ interface Exllamav3LoadedModelCard {
 /**
  * Probe result for the TabbyAPI model-card endpoint.
  *
- * - `noModelLoaded` — the server answered HTTP 503 "No models are currently
- *   loaded": reachable, but nothing is servable and the admin-key `/v1/models`
- *   listing (directories + dummy ids) must not be published.
- * - `card: null` otherwise (no card) — endpoint missing, unauthorized, or the
- *   request failed; discovery falls back to the raw list.
+ * - `noModelLoaded` — the server answered its documented 503 "No models are
+ *   currently loaded": reachable, but nothing is servable and the admin-key
+ *   `/v1/models` listing (directories + dummy ids) must not be published.
+ * - `endpointMissing` — HTTP 404: the route genuinely does not exist (older
+ *   TabbyAPI fork); discovery falls back to the raw list.
+ * - `card: null` otherwise (no card) — transient failure (timeout, unrelated
+ *   5xx, auth, malformed body); discovery keeps the cached catalog.
  */
 interface Exllamav3ModelCardProbe {
 	card: Exllamav3LoadedModelCard | null;
 	noModelLoaded: boolean;
+	endpointMissing: boolean;
 }
 
 async function fetchExllamav3ModelCardProbe(
@@ -6064,17 +6067,24 @@ async function fetchExllamav3ModelCardProbe(
 			if (response.status === 503) {
 				// Only TabbyAPI's own "no models loaded" answer is the no-model
 				// signal; an unrelated 503 (transient failure, reverse proxy) is a
-				// probe failure and falls back to the raw-list path.
+				// probe failure and keeps the cached catalog.
 				const body: unknown = await response.json().catch(() => null);
 				const detail = isRecord(body) && typeof body.detail === "string" ? body.detail.toLowerCase() : "";
-				return { card: null, noModelLoaded: detail.includes("no models are currently loaded") };
+				return {
+					card: null,
+					noModelLoaded: detail.includes("no models are currently loaded"),
+					endpointMissing: false,
+				};
+			}
+			if (response.status === 404) {
+				return { card: null, noModelLoaded: false, endpointMissing: true };
 			}
 			if (!response.ok) {
-				return { card: null, noModelLoaded: false };
+				return { card: null, noModelLoaded: false, endpointMissing: false };
 			}
 			const payload: unknown = await response.json();
 			if (!isRecord(payload) || typeof payload.id !== "string" || payload.id.length === 0) {
-				return { card: null, noModelLoaded: false };
+				return { card: null, noModelLoaded: false, endpointMissing: false };
 			}
 			const parameters = isRecord(payload.parameters) ? payload.parameters : undefined;
 			const maxSeqLen = parameters === undefined ? null : toPositiveNumber(parameters.max_seq_len, null);
@@ -6085,9 +6095,10 @@ async function fetchExllamav3ModelCardProbe(
 					inputs: parameters?.use_vision === true ? (["text", "image"] as const) : (["text"] as const),
 				},
 				noModelLoaded: false,
+				endpointMissing: false,
 			};
 		} catch {
-			return { card: null, noModelLoaded: false };
+			return { card: null, noModelLoaded: false, endpointMissing: false };
 		}
 	};
 	return withCatalogDiscoveryTimeout(EXLLAMAV3_MODEL_CARD_TIMEOUT_MS, fetchCard);
@@ -6119,6 +6130,15 @@ export function exllamav3ModelManagerOptions(
 					timeoutMs: DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 				});
 			const cardAt = () => fetchExllamav3ModelCardProbe(baseUrl, apiKey, fetchImpl);
+			// One redo round with the newer card, bracketed by another card read:
+			// publish only a clean card-stable match, else keep the cached catalog.
+			const redoRound = async (newer: Exllamav3ModelCardProbe) => {
+				if (newer.card === null) return null;
+				const redo = await discover(newer.card);
+				const third = await cardAt();
+				if (third.noModelLoaded) return [];
+				return third.card?.id === newer.card.id && redo !== null && redo.length > 0 ? redo : null;
+			};
 			const probe = await cardAt();
 			if (probe.noModelLoaded) {
 				// TabbyAPI answered its documented 503 "No models are currently
@@ -6132,8 +6152,11 @@ export function exllamav3ModelManagerOptions(
 				return null;
 			}
 			if (probe.card === null) {
-				// Card endpoint unavailable: raw-list fallback for older forks.
-				return models;
+				// Raw-list fallback only for a definitively missing endpoint (older
+				// fork without the route). A transient failure (timeout, unrelated
+				// 5xx, malformed body) must keep the cached catalog — with an admin
+				// key the raw list is unservable directory/dummy ids.
+				return probe.endpointMissing ? models : null;
 			}
 			if (models.length > 0) {
 				// Bracket the list request with a second card read. With an admin key
@@ -6145,14 +6168,7 @@ export function exllamav3ModelManagerOptions(
 				if (second.card?.id === probe.card.id) {
 					return models;
 				}
-				// The card changed mid-flight: redo once with the newer card, again
-				// bracketed, and give up on anything less than a clean match.
-				const redo = await discover(second.card);
-				const third = await cardAt();
-				if (third.noModelLoaded) return [];
-				return second.card !== null && third.card?.id === second.card.id && redo !== null && redo.length > 0
-					? redo
-					: null;
+				return redoRound(second);
 			}
 			// Empty filtered result: the card names a model the list lacks — either a
 			// reload between the two requests (recoverable) or persistent
@@ -6164,8 +6180,7 @@ export function exllamav3ModelManagerOptions(
 				// from a fresh list: not conclusive, never fall back to the raw list.
 				return null;
 			}
-			const redo = await discover(second.card);
-			return redo !== null && redo.length > 0 ? redo : null;
+			return redoRound(second);
 		},
 	};
 }

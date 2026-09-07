@@ -89,7 +89,7 @@ describe("ExLlamaV3 (TabbyAPI) provider discovery", () => {
 
 		const models = await exllamav3ModelManagerOptions({ baseUrl: BASE_URL, fetch: fetchMock }).fetchDynamicModels?.();
 
-		expect(modelCardCalls).toBe(2);
+		expect(modelCardCalls).toBe(3);
 		expect(models?.map(model => model.id)).toEqual(["GLM-5.2-exl3"]);
 		expect(models?.[0]?.contextWindow).toBe(131_072);
 	});
@@ -200,7 +200,60 @@ describe("ExLlamaV3 (TabbyAPI) provider discovery", () => {
 		expect(tabbyNoModels.listCalls).toBe(0);
 
 		const proxyError = await probe(new Response("Service Unavailable", { status: 503 }));
-		expect(proxyError.models?.map(model => model.id)).toEqual(["gpt-4", "unloaded-directory-model"]);
+		expect(proxyError.models).toBeNull();
+	});
+
+	test("keeps the cached catalog when the initial card probe fails transiently", async () => {
+		// A 5xx/timeout/malformed card is NOT a missing endpoint: the raw
+		// admin-key list (unservable directories + dummy ids) must not replace
+		// the usable cache. Only a definitive 404 falls back to the raw list.
+		for (const cardResponse of [
+			new Response("Internal Server Error", { status: 500 }),
+			new Response("{not json", { status: 200, headers: { "Content-Type": "application/json" } }),
+		]) {
+			let listCalls = 0;
+			const fetchMock: FetchImpl = (async (input: string | URL | Request) => {
+				const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+				if (url.endsWith("/models")) {
+					listCalls++;
+					return jsonResponse({ data: [{ id: "unloaded-directory-model", object: "model", parameters: null }] });
+				}
+				return cardResponse;
+			}) as FetchImpl;
+			const models = await exllamav3ModelManagerOptions({
+				baseUrl: BASE_URL,
+				fetch: fetchMock,
+			}).fetchDynamicModels?.();
+			expect(models).toBeNull();
+			expect(listCalls).toBe(1);
+		}
+	});
+
+	test("brackets the empty-result recovery round against a second reload", async () => {
+		// Card A → list without A → card B → redo list (server already reloaded
+		// to C; admin list still contains directory B) → card C. Publishing the
+		// redo's [B] would expose B while requests execute C; the bracketing
+		// third read must reject it and keep the cached catalog.
+		const cards = ["Qwen3.8-Flash-Next-exl3", "GLM-5.2-exl3", "Llama-4-70B-exl3"];
+		let modelCardCalls = 0;
+		const fetchMock: FetchImpl = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.endsWith("/models")) {
+				return jsonResponse({
+					data: [
+						{ id: "GLM-5.2-exl3", object: "model", parameters: null },
+						{ id: "Llama-4-70B-exl3", object: "model", parameters: null },
+					],
+				});
+			}
+			const id = cards[Math.min(modelCardCalls++, cards.length - 1)];
+			return jsonResponse({ id, parameters: { max_seq_len: 131_072, use_vision: false } });
+		}) as FetchImpl;
+
+		const models = await exllamav3ModelManagerOptions({ baseUrl: BASE_URL, fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(modelCardCalls).toBe(3);
+		expect(models).toBeNull();
 	});
 
 	test("routes thinking through the flat enable_thinking dialect like llama.cpp", () => {
