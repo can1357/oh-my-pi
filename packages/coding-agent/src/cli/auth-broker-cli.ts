@@ -32,13 +32,20 @@ import {
 	PROVIDER_REGISTRY,
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
-import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import {
+	AuthBrokerClient,
+	canonicalizePlan,
+	DEFAULT_AUTH_BROKER_BIND,
+	type SubscriptionLookup,
+	startAuthBroker,
+} from "@oh-my-pi/pi-ai/auth-broker";
 import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
+import { Settings } from "../config/settings";
 import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
 import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
@@ -51,6 +58,8 @@ export interface AuthBrokerCommandArgs {
 		json?: boolean;
 		bind?: string;
 		regenerate?: boolean;
+		/** `token`/`serve`: operate on the scrape-scoped `/metrics` token. */
+		metrics?: boolean;
 		via?: string;
 		provider?: string;
 		dryRun?: boolean;
@@ -64,6 +73,22 @@ export interface AuthBrokerCommandArgs {
 		includeEnv?: boolean;
 		/** `migrate`: required `--from-local` source. Reserved for future sources. */
 		fromLocal?: boolean;
+		/** `serve`: path to the JSON subscription-config file. */
+		subscriptionsConfig?: string;
+		/**
+		 * `serve`: expose the scrape-scoped `GET /metrics` endpoint. Absent means
+		 * "not specified" so env and config can still enable it; the flag itself
+		 * wins whenever it is passed.
+		 */
+		enableMetrics?: boolean;
+		/**
+		 * `serve`: force `/metrics` off. The parser cannot express `false` for a
+		 * boolean flag (a present flag is always `true`, and `--enable-metrics=false`
+		 * is a usage error), so without this spelling an inherited env/config `true`
+		 * could not be overridden from the command line and the documented
+		 * flag-over-env-over-config precedence only worked in one direction.
+		 */
+		noEnableMetrics?: boolean;
 	};
 }
 
@@ -85,13 +110,26 @@ const CALLBACK_PORTS: Record<string, number> = Object.fromEntries(
 	),
 );
 
+/** Master bearer token file — authorizes the entire vault. */
 function getTokenFilePath(): string {
 	return path.join(getConfigRootDir(), "auth-broker.token");
 }
 
-async function readToken(): Promise<string | null> {
+/**
+ * Scrape-scoped read-only token file. Authorizes ONLY `GET /metrics`, never the
+ * vault routes, so a scrape credential is least-privilege and distinct from the
+ * master bearer. A fixed path mirroring the master bearer's convention: this
+ * file — not a one-shot stdout print — is a stable deterministic source a
+ * secrets-staging step can read. Rotation: re-mint (rewrites the file),
+ * re-stage, re-converge.
+ */
+function getMetricsTokenFilePath(): string {
+	return path.join(getConfigRootDir(), "auth-broker-metrics.token");
+}
+
+async function readTokenFile(file: string): Promise<string | null> {
 	try {
-		const raw = await Bun.file(getTokenFilePath()).text();
+		const raw = await Bun.file(file).text();
 		const trimmed = raw.trim();
 		return trimmed.length > 0 ? trimmed : null;
 	} catch (err) {
@@ -100,9 +138,10 @@ async function readToken(): Promise<string | null> {
 	}
 }
 
-async function writeToken(token: string): Promise<void> {
-	const file = getTokenFilePath();
+async function writeTokenFile(file: string, token: string): Promise<void> {
 	await fs.mkdir(path.dirname(file), { recursive: true, mode: 0o700 });
+	// No trailing newline: the raw file bytes ARE the token value a secrets-staging
+	// step stages verbatim.
 	await Bun.write(file, token);
 	try {
 		await fs.chmod(file, 0o600);
@@ -115,12 +154,490 @@ function generateToken(): string {
 	return crypto.randomBytes(32).toString("base64url");
 }
 
-async function ensureToken(): Promise<string> {
-	const existing = await readToken();
+/** Read-or-mint the token at `file`, persisting a freshly generated one. */
+async function ensureTokenFile(file: string): Promise<string> {
+	const existing = await readTokenFile(file);
 	if (existing) return existing;
 	const token = generateToken();
-	await writeToken(token);
+	await writeTokenFile(file, token);
 	return token;
+}
+
+/** Env var honored by `serve` when `--subscriptions-config` is not passed (flag wins). */
+const SUBSCRIPTIONS_ENV = "OMP_AUTH_BROKER_SUBSCRIPTIONS";
+
+/** Env var honored by `serve` when `--enable-metrics` is not passed (flag wins). */
+const METRICS_ENABLED_ENV = "OMP_AUTH_BROKER_METRICS";
+
+/** Env var carrying the scrape token value directly. */
+const METRICS_TOKEN_ENV = "OMP_AUTH_BROKER_METRICS_TOKEN";
+
+/**
+ * Env var pointing at a file holding the scrape token — the shape a k8s secret
+ * mount or a systemd credential takes.
+ */
+const METRICS_TOKEN_FILE_ENV = "OMP_AUTH_BROKER_METRICS_TOKEN_FILE";
+
+/**
+ * Strict truthy parse for the enablement env var: only `1` and `true` (any
+ * case) enable. Unset, empty, and every other value are false, so a typo or a
+ * leftover `OMP_AUTH_BROKER_METRICS=0` never silently opens the endpoint.
+ */
+function parseMetricsEnv(raw: string | undefined): boolean {
+	if (raw === undefined) return false;
+	const normalized = raw.trim().toLowerCase();
+	return normalized === "1" || normalized === "true";
+}
+
+/**
+ * Whether `serve` exposes `GET /metrics`. Off unless an operator asks for it:
+ * an existing deployment that changes nothing gains neither the endpoint nor
+ * the scrape-token file.
+ *
+ * Precedence: flag > env > config. `enableMetrics` is only meaningful when
+ * explicitly passed, so an absent flag arrives as `undefined` and falls through
+ * to the env and config layers; `--enable-metrics` present means enabled.
+ */
+async function resolveMetricsEnabled(enableMetrics: boolean | undefined): Promise<boolean> {
+	if (enableMetrics !== undefined) return enableMetrics;
+	const env = process.env[METRICS_ENABLED_ENV];
+	if (env !== undefined) return parseMetricsEnv(env);
+	try {
+		const settings = await Settings.loadReadOnly({ cwd: process.cwd() });
+		return settings.get("auth.broker.metrics");
+	} catch {
+		// Config is the weakest source and the broker must still boot without it;
+		// an unreadable or malformed config leaves the endpoint off, matching the
+		// default rather than failing the whole service.
+		return false;
+	}
+}
+
+/**
+ * The scrape token for `GET /metrics`, in precedence order: the literal env
+ * value, then a file the env points at, then the mint-to-disk file.
+ *
+ * A provisioned token never touches disk — the injecting env vars exist so a
+ * secret can live only in the orchestrator, so minting alongside one would
+ * write the operator a second copy they did not ask for.
+ *
+ * Setting both injection vars is rejected rather than resolved: the two would
+ * disagree on rotation, and silently preferring one leaves an operator staging
+ * a value the broker is not accepting.
+ */
+async function resolveMetricsToken(): Promise<{ token: string; source: string }> {
+	const literal = process.env[METRICS_TOKEN_ENV];
+	const file = process.env[METRICS_TOKEN_FILE_ENV];
+	if (literal !== undefined && literal.length > 0 && file !== undefined && file.length > 0) {
+		throw new Error(
+			`Set only one of ${METRICS_TOKEN_ENV} or ${METRICS_TOKEN_FILE_ENV} (both are set; they would disagree on rotation)`,
+		);
+	}
+	if (literal !== undefined && literal.length > 0) {
+		// `isAuthorized()` trims the bearer value out of the Authorization header
+		// before comparing, so an injected token carrying a stray newline (common
+		// when a file-backed secret is piped into the environment) would never
+		// match and every scrape would 401. Trim to the same shape the file path
+		// already uses, and reject a whitespace-only value rather than storing an
+		// empty token that silently disables auth.
+		const token = literal.trim();
+		if (token.length === 0) throw new Error(`${METRICS_TOKEN_ENV} is set but contains only whitespace`);
+		return { token, source: METRICS_TOKEN_ENV };
+	}
+	if (file !== undefined && file.length > 0) {
+		// A mounted secret almost always ends in a newline, which is not part of
+		// the bearer value.
+		const token = (await Bun.file(file).text()).trim();
+		if (token.length === 0) throw new Error(`${METRICS_TOKEN_FILE_ENV} points at an empty file: ${file}`);
+		return { token, source: file };
+	}
+	const mintPath = getMetricsTokenFilePath();
+	return { token: await ensureTokenFile(mintPath), source: mintPath };
+}
+
+/**
+ * What `serve` should do about `/metrics`. A discriminated union so a disabled
+ * broker has no token to accidentally wire up: the token only exists on the
+ * enabled arm.
+ */
+export type ServeMetricsDecision = { enabled: false } | { enabled: true; token: string; source: string };
+
+/**
+ * The whole `/metrics` decision for `serve`. Resolving enablement first is the
+ * load-bearing ordering: when the endpoint is off this returns before touching
+ * the scrape token, so no file is minted and nothing new appears on disk for a
+ * deployment that simply upgraded.
+ */
+export async function resolveServeMetrics(enableMetrics: boolean | undefined): Promise<ServeMetricsDecision> {
+	if (!(await resolveMetricsEnabled(enableMetrics))) return { enabled: false };
+	const { token, source } = await resolveMetricsToken();
+	return { enabled: true, token, source };
+}
+
+/**
+ * Collapse the `--enable-metrics` / `--no-enable-metrics` pair into the tri-state
+ * {@link resolveMetricsEnabled} expects: `true`, `false`, or `undefined` to defer
+ * to env then config. Both flags together is operator error with two opposite
+ * readings, so it is rejected rather than silently resolved.
+ */
+export function resolveEnableMetricsFlag(
+	enableMetrics: boolean | undefined,
+	noEnableMetrics: boolean | undefined,
+): boolean | undefined {
+	if (enableMetrics === true && noEnableMetrics === true) {
+		throw new Error("--enable-metrics and --no-enable-metrics cannot be used together");
+	}
+	if (noEnableMetrics === true) return false;
+	return enableMetrics;
+}
+
+/**
+ * On-disk JSON shape for the subscription config. `accounts` is keyed by the
+ * opaque provider accountId (`accountLabelOf`); `plans` by
+ * `"<provider>:<canonical-plan>"`. `renewsAt` is an ISO `YYYY-MM-DD` date the
+ * loader converts to unix seconds before it reaches the renderer.
+ *
+ * One account id can hold subscriptions in several organizations. The
+ * account-level `plan`/`renewsAt` describe the account's `org` scope (or the
+ * org-less fallback when `org` is absent); the optional `orgs` map carries the
+ * remaining org scopes, each keyed by its organization id with its own
+ * `plan`/`renewsAt`. A single JSON property per account id cannot represent the
+ * same account in two orgs, so the extra scopes live inside `orgs` rather than
+ * as duplicate top-level keys.
+ */
+interface SubscriptionsConfigFile {
+	accounts?: Record<string, { provider?: unknown; org?: unknown; plan?: unknown; renewsAt?: unknown; orgs?: unknown }>;
+	plans?: Record<string, { capacityWeight?: unknown; monthlyPriceUsd?: unknown }>;
+}
+
+/**
+ * Read + parse the subscription-config file into a {@link SubscriptionLookup}.
+ * Fails loudly (throws) on a parse error or malformed shape so the broker never
+ * silently emits partial series. Converts each account's `renewsAt` ISO date to
+ * unix seconds. Returns `undefined` when no path is configured (env or flag).
+ *
+ * `metricsEnabled` short-circuits the read entirely, mirroring how
+ * {@link resolveServeMetrics} returns before touching the scrape token when the
+ * endpoint is off. Subscription data is consumed ONLY by the `/metrics` route,
+ * so with the route disabled — the default, or an explicit
+ * `--no-enable-metrics` — a stale, missing, or malformed file must not keep the
+ * broker from starting. Reading it anyway would make disabling the feature
+ * unable to recover from a metrics-only misconfiguration.
+ */
+export async function loadSubscriptionsConfig(
+	pathArg: string | undefined,
+	metricsEnabled: boolean,
+): Promise<SubscriptionLookup | undefined> {
+	if (!metricsEnabled) return undefined;
+	const file = pathArg ?? process.env[SUBSCRIPTIONS_ENV];
+	if (!file) return undefined;
+	const raw = await Bun.file(file).text();
+	return parseSubscriptionsConfig(raw, file);
+}
+
+/** A non-null, non-array plain JSON object. */
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+/**
+ * Canonicalize a config-supplied provider id to the form live usage reports
+ * carry: trimmed and lowercased.
+ *
+ * The renderer joins config to reports on an exact `provider` key, and every id
+ * in the catalog table is lowercase, so a report's `provider` is always the
+ * bare lowercase id. An operator writing `"Anthropic"` would otherwise be stored
+ * verbatim, match no report, and silently drop that account's plan/renewal
+ * series while the broker logged a healthy start — the same silent omission the
+ * surrounding trim-and-reject checks exist to prevent.
+ *
+ * Normalizing beats rejecting here because the exported `org`, `email`, and
+ * `plan` labels are already case-folded on both sides (see `orgLabelOf`,
+ * `emailLabelOf`, `canonicalizePlan`); making `provider` the one field where
+ * casing is fatal rather than folded would be the surprising rule.
+ */
+function canonicalizeProviderId(provider: string): string {
+	return provider.trim().toLowerCase();
+}
+
+/**
+ * Parse a strict `YYYY-MM-DD` string as UTC midnight, rejecting shaped-valid but
+ * out-of-range dates (`2026-02-29`) that {@link Date.parse} would silently
+ * normalize into the next month. Returns epoch milliseconds, or `undefined` if
+ * the components do not round-trip back to the input.
+ */
+function parseUtcDate(value: string): number | undefined {
+	const [year, month, day] = value.split("-").map(Number);
+	const ms = Date.UTC(year, month - 1, day);
+	const date = new Date(ms);
+	if (date.getUTCFullYear() !== year || date.getUTCMonth() !== month - 1 || date.getUTCDate() !== day) {
+		return undefined;
+	}
+	return ms;
+}
+
+/**
+ * Validate + normalize the `plan`/`renewsAt` pair shared by an account-level
+ * entry and each nested `orgs` entry. `label` names the offending entry in the
+ * fail-loudly error (`account foo` or `account foo org bar`). Converts a
+ * `YYYY-MM-DD` `renewsAt` to unix seconds; throws on any malformed field.
+ */
+/**
+ * Reject keys the loader does not understand. The per-field checks below only
+ * validate keys they know, so a misspelling (`renewAt` for `renewsAt`, `plans`
+ * nested under an account) would be silently ignored and the corresponding
+ * series quietly omitted — the opposite of this loader's fail-loudly contract.
+ */
+function rejectUnknownKeys(entry: object, allowed: readonly string[], file: string, label: string): void {
+	const unknown = Object.keys(entry).filter(key => !allowed.includes(key));
+	if (unknown.length > 0) {
+		throw new Error(
+			`subscription config ${file}: ${label} has unknown key(s) ${unknown.map(k => `"${k}"`).join(", ")}; allowed: ${allowed.map(k => `"${k}"`).join(", ")}`,
+		);
+	}
+}
+
+function parsePlanRenewal(
+	entry: { plan?: unknown; renewsAt?: unknown },
+	file: string,
+	label: string,
+): { plan?: string; renewsAtSeconds?: number } {
+	if (entry.plan !== undefined) {
+		if (typeof entry.plan !== "string") {
+			throw new Error(`subscription config ${file}: ${label} "plan" must be a string`);
+		}
+		// The renderer canonicalizes an explicit plan and emits it as the
+		// `plan` label. An empty/whitespace-only plan canonicalizes to "" and
+		// would emit `plan=""` instead of falling back to the provider-reported
+		// plan, so reject it here — omitting the field entirely stays valid.
+		if (canonicalizePlan(entry.plan).length === 0) {
+			throw new Error(`subscription config ${file}: ${label} "plan" must not be empty`);
+		}
+	}
+	let renewsAtSeconds: number | undefined;
+	if (entry.renewsAt !== undefined) {
+		if (typeof entry.renewsAt !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(entry.renewsAt)) {
+			throw new Error(`subscription config ${file}: ${label} "renewsAt" must be a YYYY-MM-DD string`);
+		}
+		const ms = parseUtcDate(entry.renewsAt);
+		if (ms === undefined) {
+			throw new Error(`subscription config ${file}: ${label} "renewsAt" is not a valid date: ${entry.renewsAt}`);
+		}
+		renewsAtSeconds = ms / 1000;
+	}
+	return { plan: entry.plan as string | undefined, renewsAtSeconds };
+}
+
+/**
+ * Parse raw subscription-config JSON into a {@link SubscriptionLookup}. Pure and
+ * synchronous (no I/O): `file` is used only in error messages. Fails loudly
+ * (throws) on a parse error or malformed shape so the broker never silently
+ * emits partial series. Converts each account's `renewsAt` ISO date to unix
+ * seconds.
+ */
+export function parseSubscriptionsConfig(raw: string, file: string): SubscriptionLookup {
+	let root: unknown;
+	try {
+		root = JSON.parse(raw);
+	} catch (error) {
+		throw new Error(
+			`subscription config ${file} is not valid JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (!isPlainObject(root)) {
+		throw new Error(`subscription config ${file} must be a JSON object`);
+	}
+	// `isPlainObject` proves a non-null, non-array object; the per-field shapes
+	// (all `unknown`) are validated below before any value is read.
+	rejectUnknownKeys(root, ["accounts", "plans"], file, "root");
+	const parsed = root as SubscriptionsConfigFile;
+
+	// Per-account map, keyed by "<provider>\x00<account>\x00<org>" for the lookup.
+	// `org` is the canonicalized organization scope (trim + lowercase, "" when the
+	// entry declares none) so an account email's several org-scoped subscriptions
+	// each carry their own plan/renewal instead of one config applying to both.
+	// The same account id can appear in several orgs via the nested `orgs` map.
+	const accounts = new Map<string, { plan?: string; renewsAtSeconds?: number }>();
+	if (parsed.accounts !== undefined && !isPlainObject(parsed.accounts)) {
+		throw new Error(`subscription config ${file}: "accounts" must be a JSON object`);
+	}
+	for (const [account, entry] of Object.entries(parsed.accounts ?? {})) {
+		if (typeof entry !== "object" || entry === null) {
+			throw new Error(`subscription config ${file}: account ${account} must be an object`);
+		}
+		rejectUnknownKeys(entry, ["provider", "org", "plan", "renewsAt", "orgs"], file, `account ${account}`);
+		if (typeof entry.provider !== "string") {
+			throw new Error(`subscription config ${file}: account ${account} is missing a string "provider"`);
+		}
+		// Trimmed, not just length-checked: a whitespace-only `provider` or account
+		// key parses fine and is stored under a composite key no usage report can
+		// ever produce, so the account's plan and renewal series vanish while the
+		// broker reports a healthy start — the silent omission this loader exists
+		// to prevent.
+		if (entry.provider.trim().length === 0 || account.trim().length === 0) {
+			throw new Error(
+				`subscription config ${file}: account ${account} "provider" and account key must be non-empty and not whitespace-only`,
+			);
+		}
+		// A malformed `org` (e.g. a number) must fail loudly, not silently coerce
+		// to the empty scope — an empty-scope entry would then answer for EVERY
+		// org of the account, defeating org scoping.
+		if (entry.org !== undefined && typeof entry.org !== "string") {
+			throw new Error(`subscription config ${file}: account ${account} "org" must be a string`);
+		}
+		// A whitespace-only `org` (e.g. "   ") canonicalizes to the empty scope,
+		// which the lookup below treats as the all-orgs fallback — so a typo would
+		// silently apply this plan/renewal to every org of the account. An org-less
+		// entry (no `org` key, or a legitimately empty "") is the intended
+		// fallback; only a value that was non-empty as written but trims away is
+		// rejected.
+		if (typeof entry.org === "string" && entry.org.length > 0 && entry.org.trim().length === 0) {
+			throw new Error(`subscription config ${file}: account ${account} "org" must not be whitespace-only`);
+		}
+		const org = typeof entry.org === "string" ? entry.org.trim().toLowerCase() : "";
+		// Store the canonical identity: the lookup key is built from live credential
+		// fields, so a padded config value ("  anthropic  ") would never match.
+		// Case-folded for the same reason — see {@link canonicalizeProviderId}.
+		const provider = canonicalizeProviderId(entry.provider);
+		const accountKey = account.trim();
+		// Two JSON properties that normalize to the same identity (e.g. "acct-1"
+		// and " acct-1 ") would collide on this key, and the surviving plan would
+		// depend on property order. Reject rather than resolve: the operator's
+		// intent is unknowable and silently picking one contradicts the
+		// fail-loudly contract the rest of this loader keeps.
+		const accountIdentity = `${provider}\x00${accountKey}\x00${org}`;
+		if (accounts.has(accountIdentity)) {
+			throw new Error(
+				`subscription config ${file}: account ${account} duplicates an earlier entry after trimming (provider "${provider}", account "${accountKey}", org "${org}")`,
+			);
+		}
+		accounts.set(accountIdentity, parsePlanRenewal(entry, file, `account ${account}`));
+
+		// Additional org scopes for the same account id: keyed by org id, each
+		// with its own plan/renewal. A top-level `org` plus an `orgs` entry for
+		// the same canonical scope would collide, so reject the duplicate.
+		if (entry.orgs !== undefined) {
+			if (!isPlainObject(entry.orgs)) {
+				throw new Error(`subscription config ${file}: account ${account} "orgs" must be a JSON object`);
+			}
+			for (const [orgKey, orgEntry] of Object.entries(entry.orgs)) {
+				if (typeof orgEntry !== "object" || orgEntry === null || Array.isArray(orgEntry)) {
+					throw new Error(`subscription config ${file}: account ${account} org ${orgKey} must be an object`);
+				}
+				// An `orgs` key whose canonical (trimmed) scope is empty — the literal
+				// empty string "" or whitespace-only like "   " — canonicalizes to the
+				// empty scope, which, absent a bare entry, the lookup treats as the
+				// all-orgs fallback, so it would apply this plan/renewal to unrelated
+				// orgs. An org key is meant to name a specific scope, so reject one
+				// that canonicalizes away entirely.
+				rejectUnknownKeys(orgEntry, ["plan", "renewsAt"], file, `account ${account} org ${orgKey}`);
+				if (orgKey.trim().length === 0) {
+					throw new Error(
+						`subscription config ${file}: account ${account} "orgs" key must name a scope, not be empty or whitespace-only`,
+					);
+				}
+				const orgScope = orgKey.trim().toLowerCase();
+				const key = `${provider}\x00${accountKey}\x00${orgScope}`;
+				if (accounts.has(key)) {
+					throw new Error(
+						`subscription config ${file}: account ${account} declares org scope "${orgScope}" more than once`,
+					);
+				}
+				accounts.set(
+					key,
+					parsePlanRenewal(
+						orgEntry as { plan?: unknown; renewsAt?: unknown },
+						file,
+						`account ${account} org ${orgKey}`,
+					),
+				);
+			}
+		}
+	}
+
+	// Per-plan table, keys are "<provider>:<plan>".
+	const plans: Array<{ provider: string; plan: string; capacityWeight: number; monthlyPriceUsd: number }> = [];
+	// Two plan keys whose {provider, canonicalized plan} collapse to one exported
+	// identity (e.g. "anthropic:Max Plan" and "anthropic:max-plan") would both be
+	// accepted here, but the renderer dedups by that identity and silently keeps
+	// only the first — so config order would decide the reported facts. Reject
+	// the collision loudly instead.
+	const seenPlanIdentities = new Set<string>();
+	if (parsed.plans !== undefined && !isPlainObject(parsed.plans)) {
+		throw new Error(`subscription config ${file}: "plans" must be a JSON object`);
+	}
+	for (const [key, entry] of Object.entries(parsed.plans ?? {})) {
+		if (typeof entry !== "object" || entry === null) {
+			throw new Error(`subscription config ${file}: plan ${key} must be an object`);
+		}
+		rejectUnknownKeys(entry, ["capacityWeight", "monthlyPriceUsd"], file, `plan ${key}`);
+		const sep = key.indexOf(":");
+		if (sep <= 0 || sep === key.length - 1) {
+			throw new Error(`subscription config ${file}: plan key ${key} must be "<provider>:<plan>"`);
+		}
+		if (typeof entry.capacityWeight !== "number" || typeof entry.monthlyPriceUsd !== "number") {
+			throw new Error(
+				`subscription config ${file}: plan ${key} needs numeric "capacityWeight" and "monthlyPriceUsd"`,
+			);
+		}
+		// A capacity multiplier and a list price are exported straight to
+		// `/metrics`; a negative or non-finite (NaN/Inf) value would publish a
+		// nonsense gauge, so reject it at parse the same way a bad type is. Zero
+		// price is a valid free plan; zero capacityWeight is degenerate but not
+		// invalid on its face, so only strictly-negative and non-finite are
+		// rejected here.
+		if (!Number.isFinite(entry.capacityWeight) || entry.capacityWeight < 0) {
+			throw new Error(
+				`subscription config ${file}: plan ${key} "capacityWeight" must be a non-negative finite number`,
+			);
+		}
+		if (!Number.isFinite(entry.monthlyPriceUsd) || entry.monthlyPriceUsd < 0) {
+			throw new Error(
+				`subscription config ${file}: plan ${key} "monthlyPriceUsd" must be a non-negative finite number`,
+			);
+		}
+		// Canonicalize the provider segment: account providers are canonicalized
+		// above and live usage reports arrive with the bare lowercase id, so a
+		// padded or mis-cased plan key like " Anthropic :max" would publish
+		// capacity/price series under a provider label that joins no account's
+		// subscription series.
+		const provider = canonicalizeProviderId(key.slice(0, sep));
+		const plan = key.slice(sep + 1);
+		if (provider.length === 0) {
+			throw new Error(`subscription config ${file}: plan ${key} has an empty provider segment`);
+		}
+		// A raw suffix that canonicalizes to empty (e.g. "anthropic:chatgpt_" or
+		// trailing whitespace) passes the separator check above but would export
+		// capacity/price samples with `plan=""` that join no valid account.
+		// Mirror the empty-plan rejection parsePlanRenewal applies to the
+		// account path.
+		if (canonicalizePlan(plan).length === 0) {
+			throw new Error(`subscription config ${file}: plan key ${key} "plan" must not be canonically empty`);
+		}
+		const identity = `${provider}:${canonicalizePlan(plan)}`;
+		if (seenPlanIdentities.has(identity)) {
+			throw new Error(
+				`subscription config ${file}: plan key ${key} duplicates canonical plan ${canonicalizePlan(plan)}`,
+			);
+		}
+		seenPlanIdentities.add(identity);
+		plans.push({
+			provider,
+			plan,
+			capacityWeight: entry.capacityWeight,
+			monthlyPriceUsd: entry.monthlyPriceUsd,
+		});
+	}
+
+	return {
+		// Prefer the exact org-scoped entry; fall back to an org-less config entry
+		// so a pre-org config (no `org` key) still resolves for every org of that
+		// account, matching the prior single-key behavior.
+		lookup: (provider, account, org) =>
+			accounts.get(`${provider}\x00${account}\x00${org}`) ??
+			(org.length > 0 ? accounts.get(`${provider}\x00${account}\x00`) : undefined),
+		plans,
+	};
 }
 
 /**
@@ -158,7 +675,10 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	setLoggerTransports({ console: true, file: false });
 
 	const bind = flags.bind ?? DEFAULT_AUTH_BROKER_BIND;
-	const token = await ensureToken();
+	const token = await ensureTokenFile(getTokenFilePath());
+	// Opt-in: resolved before anything touches the scrape token, so a deployment
+	// that never asked for `/metrics` performs no token I/O at all.
+	const metrics = await resolveServeMetrics(resolveEnableMetricsFlag(flags.enableMetrics, flags.noEnableMetrics));
 	const dbPath = getAgentDbPath();
 	const store = await SqliteAuthCredentialStore.open(dbPath);
 	const storage = new AuthStorage(store, {
@@ -166,14 +686,25 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 			refreshBrokerOAuthCredential(provider, credential, signal),
 	});
 	await storage.reload();
+	// Load the static subscription config if a path is set via the flag or
+	// `OMP_AUTH_BROKER_SUBSCRIPTIONS`; a parse/shape error throws so the broker
+	// never boots emitting partial series. Unset → omit, broker runs exactly as
+	// before. Skipped entirely while `/metrics` is off — the disabled route is
+	// its only consumer, so a bad file must not block startup.
+	const subscriptions = await loadSubscriptionsConfig(flags.subscriptionsConfig, metrics.enabled);
+	if (subscriptions) logger.info("auth-broker subscription config loaded", { plans: subscriptions.plans.length });
 	const handle = startAuthBroker({
 		storage,
 		bind,
 		bearerTokens: [token],
+		metricsEnabled: metrics.enabled,
+		...(metrics.enabled ? { metricsTokens: [metrics.token] } : {}),
+		...(subscriptions ? { subscriptions } : {}),
 		version: VERSION,
 	});
 	logger.info("auth-broker listening", { url: handle.url });
 	logger.info("auth-broker bearer token loaded", { path: getTokenFilePath(), mode: "0600" });
+	if (metrics.enabled) logger.info("auth-broker metrics endpoint enabled", { tokenSource: metrics.source });
 
 	const credentialDisabledUnsub = storage.onCredentialDisabled((event: CredentialDisabledEvent) => {
 		logger.warn("auth-broker credential disabled", { ...event });
@@ -194,19 +725,22 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 }
 
 async function runToken(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
+	// `--metrics` selects the scrape-scoped read-only token; otherwise this
+	// manages the master bearer, unchanged.
+	const file = flags.metrics ? getMetricsTokenFilePath() : getTokenFilePath();
 	if (flags.regenerate) {
 		const next = generateToken();
-		await writeToken(next);
+		await writeTokenFile(file, next);
 		if (flags.json) {
-			process.stdout.write(`${JSON.stringify({ token: next, path: getTokenFilePath() })}\n`);
+			process.stdout.write(`${JSON.stringify({ token: next, path: file })}\n`);
 		} else {
 			process.stdout.write(`${next}\n`);
 		}
 		return;
 	}
-	const token = await ensureToken();
+	const token = await ensureTokenFile(file);
 	if (flags.json) {
-		process.stdout.write(`${JSON.stringify({ token, path: getTokenFilePath() })}\n`);
+		process.stdout.write(`${JSON.stringify({ token, path: file })}\n`);
 	} else {
 		process.stdout.write(`${token}\n`);
 	}

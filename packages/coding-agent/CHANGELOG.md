@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added a Prometheus text-exposition `/metrics` endpoint to the auth-broker, authorized by a scrape-scoped read-only token distinct from the master bearer, for scraping LLM usage into a monitoring backend ([#10290](https://github.com/can1357/oh-my-pi/pull/10290) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+- The auth-broker `/metrics` endpoint is now opt-in via `--enable-metrics`, `OMP_AUTH_BROKER_METRICS`, or `auth.broker.metrics` (flag beats env beats config), so upgrading an existing broker adds neither the endpoint nor a new on-disk secret. Its scrape token can be provisioned through `OMP_AUTH_BROKER_METRICS_TOKEN` or `OMP_AUTH_BROKER_METRICS_TOKEN_FILE` instead of minted to disk ([#10290](https://github.com/can1357/oh-my-pi/pull/10290) by [@mattwilkinsonn](https://github.com/mattwilkinsonn)).
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

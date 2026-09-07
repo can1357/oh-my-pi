@@ -14,6 +14,7 @@ import { type Type, type } from "@oh-my-pi/omptype";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { AuthStorage, StoredCredentialBlock } from "../auth-storage";
 import { parseBind } from "../utils/parse-bind";
+import { PROMETHEUS_CONTENT_TYPE, renderUsageMetrics, type SubscriptionLookup } from "./prometheus-metrics";
 import { AuthBrokerRefresher, type AuthBrokerRefresherSchedule } from "./refresher";
 import type {
 	ClientUsageReportRequest,
@@ -57,6 +58,30 @@ export interface AuthBrokerServerOptions {
 	bind?: string;
 	/** Accept any of these bearer tokens. Empty disables auth (loopback only). */
 	bearerTokens: string[];
+	/**
+	 * Scrape-scoped read-only tokens accepted ONLY for `GET /metrics`.
+	 * These never reach the vault routes — a metrics token authorizes the usage
+	 * exposition and nothing else, so the scrape cred is least-privilege and
+	 * distinct from the master bearer. Master `bearerTokens` also satisfy
+	 * `/metrics`; a metrics token does not satisfy any other route.
+	 */
+	metricsTokens?: string[];
+	/**
+	 * Whether to register `GET /metrics` at all. Defaults to `true` so an
+	 * embedding caller keeps the route it already had. `false` makes the route
+	 * genuinely absent — it 404s like any unknown path — because gating on
+	 * `metricsTokens` alone would not close it: master `bearerTokens` are folded
+	 * into the accepted set below, so an operator who never asked for the
+	 * endpoint would still be exposing usage data to any master-bearer holder.
+	 */
+	metricsEnabled?: boolean;
+	/**
+	 * Static subscription-config input. Threaded into the `/metrics` renderer as
+	 * its `subscriptions` opts member, producing the four `llm_subscription_*`
+	 * families. Absent → those families are not emitted and `/metrics` is
+	 * byte-identical to before.
+	 */
+	subscriptions?: SubscriptionLookup;
 	/** Broker version string surfaced on `/v1/healthz`. */
 	version?: string;
 	/** Refresh credentials expiring within this window. Default 5 min. */
@@ -104,6 +129,29 @@ function isAuthorized(req: Request, tokens: ReadonlySet<string>): boolean {
 	const match = header.match(/^Bearer\s+(.+)$/i);
 	if (!match) return false;
 	return tokens.has(match[1].trim());
+}
+
+/**
+ * Canonicalize a configured token list into the exact shape
+ * {@link isAuthorized} compares against. That function trims the presented
+ * bearer out of the `Authorization` header, so a configured token must be
+ * trimmed to the same form or it can never match and every request carrying it
+ * 401s forever.
+ *
+ * A token that trims away entirely is rejected rather than stored: the bearer
+ * regex's `.+` can match pure whitespace (`Authorization: "Bearer  "` yields a
+ * trimmed `""`), so an empty entry would be a live credential any caller could
+ * present. An empty ARRAY is untouched — that is the documented "auth disabled"
+ * signal, not an empty token.
+ */
+function normalizeTokens(tokens: readonly string[], label: string): string[] {
+	return tokens.map(token => {
+		const normalized = token.trim();
+		if (normalized.length === 0) {
+			throw new Error(`auth-broker: ${label} contains an empty or whitespace-only token`);
+		}
+		return normalized;
+	});
 }
 
 function supportsCodexMeterBlockScopes(req: Request): boolean {
@@ -647,7 +695,33 @@ function serveSnapshotStream(
 /** Boot the broker. Caller owns lifecycle; `handle.close()` to stop. */
 export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServerHandle {
 	const bind = parseBind(opts.bind ?? DEFAULT_AUTH_BROKER_BIND);
-	const tokens = new Set<string>(opts.bearerTokens);
+	// Normalize both lists to the shape `isAuthorized` compares against BEFORE
+	// either set is built, so the overlap test below sees the same bytes the
+	// request path will. A byte-for-byte comparison of the raw values would miss
+	// a whitespace-equivalent pair (`bearerTokens: ["master"]` +
+	// `metricsTokens: [" master "]`), and the scraper would then authenticate as
+	// `master` on the vault routes — exactly the over-privilege the check exists
+	// to prevent.
+	const bearerTokens = normalizeTokens(opts.bearerTokens, "bearerTokens");
+	const metricsEnabled = opts.metricsEnabled ?? true;
+	const scrapeTokens = metricsEnabled ? normalizeTokens(opts.metricsTokens ?? [], "metricsTokens") : [];
+	const tokens = new Set<string>(bearerTokens);
+	// A scrape token that equals a master bearer is not scrape-scoped at all: the
+	// vault routes check `tokens`, which holds the bearers, so the identical bytes
+	// would authorize credential reads through a credential advertised as
+	// metrics-only. Least privilege here is the whole point of a separate token,
+	// so an overlap is a provisioning fault and the broker refuses to boot rather
+	// than serving a silently over-privileged scraper.
+	if (metricsEnabled) {
+		const overlap = scrapeTokens.filter(token => tokens.has(token));
+		if (overlap.length > 0) {
+			throw new Error(
+				"auth-broker: a /metrics scrape token must not equal a master bearer token (scrape tokens are scrape-scoped; an overlap would authorize credential access)",
+			);
+		}
+	}
+	// Scrape-scoped tokens reach ONLY `/metrics`; master bearers also satisfy it.
+	const metricsTokens = new Set<string>([...bearerTokens, ...scrapeTokens]);
 	const version = opts.version;
 	const streamKeepaliveMs = opts.streamKeepaliveMs ?? DEFAULT_STREAM_KEEPALIVE_MS;
 	const externalChangePollMs = opts.externalChangePollMs ?? DEFAULT_EXTERNAL_CHANGE_POLL_MS;
@@ -675,6 +749,31 @@ export function startAuthBroker(opts: AuthBrokerServerOptions): AuthBrokerServer
 				if (req.method === "GET" && pathname === "/v1/healthz") {
 					const body: HealthzResponse = { ok: true, version };
 					return json(200, body);
+				}
+				if (metricsEnabled && req.method === "GET" && pathname === "/metrics") {
+					if (!isAuthorized(req, metricsTokens)) {
+						logger.info("auth-broker metrics unauthorized", { method: req.method, path: pathname, peer });
+						return json(401, { error: "unauthorized" });
+					}
+					try {
+						// Same cache read as `/v1/usage`: within the 5-min TTL this is a
+						// cache hit; on expiry it performs the underlying provider fetch,
+						// capped by the TTL. `?? []` on last-good expiry / absent method
+						// renders an empty 200 exposition so the dashboard sees absent
+						// series, not a 5xx.
+						const reports = (await opts.storage.fetchUsageReports?.({ signal: req.signal })) ?? [];
+						const body = renderUsageMetrics(reports, { subscriptions: opts.subscriptions });
+						logger.info("auth-broker metrics served", { peer, reports: reports.length });
+						return new Response(body, { status: 200, headers: { "Content-Type": PROMETHEUS_CONTENT_TYPE } });
+					} catch (error) {
+						// Only a storage-level THROW reaches here. The common degradations
+						// (provider-fetch failure → last-good → null, dropped credentials)
+						// never throw; they shrink the series set, which the dashboard's
+						// expected-accounts panel detects.
+						const message = error instanceof Error ? error.message : String(error);
+						logger.warn("auth-broker metrics fetch failed", { peer, error: message });
+						return empty(503);
+					}
 				}
 				if (!isAuthorized(req, tokens)) {
 					logger.info("auth-broker request unauthorized", { method: req.method, path: pathname, peer });
