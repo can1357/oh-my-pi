@@ -250,8 +250,11 @@ export async function spawnObsidian(
 ): Promise<ObsidianSpawnResult> {
 	if (signal?.aborted) throw abortError();
 
+	// Bun rejects backslash-delimited .com paths as unresolved command names.
+	// Forward slashes preserve the Windows path and allow direct execution.
+	const executable = process.platform === "win32" ? bin.replaceAll("\\", "/") : bin;
 	const proc = Bun.spawn({
-		cmd: [bin, ...args],
+		cmd: [executable, ...args],
 		stdout: "pipe",
 		stderr: "pipe",
 	});
@@ -292,6 +295,14 @@ export function resolveObsidianBinary(): string | null {
 	const onPath = $which("obsidian");
 	if (onPath) {
 		cachedObsidianBinary = onPath;
+		// Bun.which resolves the GUI .exe on Windows, not Obsidian's .com CLI
+		// launcher. The GUI can exit 255 without output for piped CLI commands.
+		if (process.platform === "win32" && path.extname(onPath).toLowerCase() === ".exe") {
+			const consoleLauncher = `${onPath.slice(0, -4)}.com`;
+			if (fs.statSync(consoleLauncher, { throwIfNoEntry: false })?.isFile()) {
+				cachedObsidianBinary = consoleLauncher;
+			}
+		}
 		return cachedObsidianBinary;
 	}
 

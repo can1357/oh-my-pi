@@ -249,6 +249,83 @@ describe("VaultProtocolHandler", () => {
 		);
 	});
 
+	it.skipIf(process.platform !== "win32")(
+		"prefers the Windows console launcher beside the resolved executable",
+		async () => {
+			await withTempDir(async dir => {
+				const binDir = path.join(dir, "Obsidian CLI");
+				await fs.mkdir(binDir);
+				const executable = path.join(binDir, "obsidian.exe");
+				const consoleLauncher = path.join(binDir, "obsidian.com");
+				await fs.copyFile(process.execPath, executable);
+				const resolverScript = path.join(dir, "resolve.ts");
+				const protocolPath = path.resolve(import.meta.dir, "../../src/internal-urls/vault-protocol.ts");
+				await fs.writeFile(
+					resolverScript,
+					`import * as fs from "node:fs";
+import { resolveObsidianBinary, VaultProtocolHandler } from ${JSON.stringify(protocolPath)};
+const launcher = ${JSON.stringify(consoleLauncher)};
+const results = [resolveObsidianBinary()];
+fs.mkdirSync(launcher);
+VaultProtocolHandler.resetForTests();
+results.push(resolveObsidianBinary());
+fs.rmdirSync(launcher);
+fs.copyFileSync(process.execPath, launcher);
+VaultProtocolHandler.resetForTests();
+results.push(resolveObsidianBinary());
+process.stdout.write(JSON.stringify(results));`,
+				);
+				const proc = Bun.spawn({
+					cmd: [process.execPath, resolverScript],
+					env: { ...process.env, PATH: binDir },
+					stdout: "pipe",
+					stderr: "pipe",
+				});
+				const timeout = setTimeout(() => proc.kill(), 10_000);
+				let resolved: string;
+				try {
+					const [exitCode, stdout, stderr] = await Promise.all([
+						proc.exited,
+						new Response(proc.stdout).text(),
+						new Response(proc.stderr).text(),
+					]);
+					expect(stderr).toBe("");
+					expect(exitCode).toBe(0);
+					const binaries = JSON.parse(stdout);
+					expect(binaries).toEqual([executable, executable, consoleLauncher]);
+					resolved = binaries[2];
+				} finally {
+					clearTimeout(timeout);
+				}
+
+				const argvScript = path.join(dir, "capture-argv.ts");
+				await fs.writeFile(argvScript, "process.stdout.write(JSON.stringify(process.argv.slice(2)));");
+				const handler = testHandler(
+					(bin, args, signal, timeoutMs) =>
+						vaultProtocol.spawnObsidian(bin, [argvScript, ...args], signal, timeoutMs),
+					resolved,
+				);
+				const query = '"release plan" & #todo';
+				const resource = await handler.resolve(
+					resourceUrl(
+						`vault://Work%20Notes/?op=search&q=${encodeURIComponent(query)}&path=Project%20Plans&limit=5&case`,
+					),
+				);
+				expect(resource.contentType).toBe("application/json");
+				expect(JSON.parse(resource.content)).toEqual([
+					"search:context",
+					`query=${query}`,
+					"path=Project Plans",
+					"limit=5",
+					"case",
+					"format=json",
+					"vault=Work Notes",
+				]);
+			});
+		},
+		15_000,
+	);
+
 	it("constructs exact obsidian argv for supported CLI operations", async () => {
 		const calls: Record<string, string[]> = {};
 		const spawnSpy = vi.spyOn(vaultProtocol, "spawnObsidian").mockImplementation(async () => {
@@ -347,14 +424,33 @@ describe("VaultProtocolHandler", () => {
 	});
 
 	it("aborts an in-flight spawn when the AbortSignal is cancelled", async () => {
-		if (!(await Bun.file("/bin/sleep").exists())) return;
-		const controller = new AbortController();
-		const promise = vaultProtocol.spawnObsidian("/bin/sleep", ["10"], controller.signal, 30_000);
+		await withTempDir(async dir => {
+			const script = path.join(dir, "wait.ts");
+			await fs.writeFile(script, "setInterval(() => {}, 1000);");
+			const controller = new AbortController();
+			const promise = vaultProtocol.spawnObsidian(process.execPath, [script], controller.signal, 30_000);
 
-		await Bun.sleep(20);
-		controller.abort();
+			await Bun.sleep(20);
+			controller.abort();
 
-		await expect(promise).rejects.toThrow("obsidian command cancelled");
+			await expect(promise).rejects.toThrow("obsidian command cancelled");
+		});
+	});
+
+	it("times out an in-flight executable without returning empty success", async () => {
+		await withTempDir(async dir => {
+			const script = path.join(dir, "wait.ts");
+			await fs.writeFile(script, "setInterval(() => {}, 1000);");
+			await expect(vaultProtocol.spawnObsidian(process.execPath, [script], undefined, 30)).rejects.toThrow(
+				"obsidian command timed out after 30ms",
+			);
+		});
+	});
+
+	it("rejects pre-cancelled commands before trying to spawn", async () => {
+		await expect(vaultProtocol.spawnObsidian("/missing/obsidian", [], AbortSignal.abort())).rejects.toThrow(
+			"obsidian command cancelled",
+		);
 	});
 
 	it("does not forward vault= for active or empty-host sentinel CLI URLs", async () => {

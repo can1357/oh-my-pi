@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Windows `vault://` CLI operations failing with exit code 255 by selecting Obsidian's console launcher and normalizing its executable path for Bun.
+
 ## [16.4.17] - 2026-09-07
 
 ### Fixed
