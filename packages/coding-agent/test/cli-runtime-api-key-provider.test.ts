@@ -11,6 +11,16 @@ describe("resolveCliRuntimeApiKeyProvider", () => {
 		).toBe("grokbot");
 	});
 
+	test("requires a model selector when binding via --provider", () => {
+		expect(resolveCliRuntimeApiKeyProvider({ provider: "grokbot" })).toBeUndefined();
+		expect(
+			resolveCliRuntimeApiKeyProvider({
+				provider: "grokbot",
+				models: ["grokbot/sand-default"],
+			}),
+		).toBe("grokbot");
+	});
+
 	test("parses provider from --model provider/id", () => {
 		expect(resolveCliRuntimeApiKeyProvider({ model: "grokbot/composer-2.5" })).toBe("grokbot");
 	});
