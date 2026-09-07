@@ -218,8 +218,11 @@ describe("Hindsight tool factories", () => {
 		expect(MemoryReflectTool.createIf(session)).toBeNull();
 	});
 
-	it("retain/recall/reflect factories return tool instances when memory.backend === hindsight", () => {
-		const settings = Settings.isolated({ "memory.backend": "hindsight" });
+	it("retain/recall/reflect factories return tool instances when Hindsight is configured", () => {
+		const settings = Settings.isolated({
+			"memory.backend": "hindsight",
+			"hindsight.apiUrl": "http://localhost:8888",
+		});
 		const session = makeSession(settings);
 		expect(MemoryRetainTool.createIf(session)).toBeInstanceOf(MemoryRetainTool);
 		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
@@ -995,24 +998,27 @@ describe("Mnemopi backend lifecycle", () => {
 		}
 	});
 
-	it("dispose with no timeoutMs retains, flushes, and closes without sleeping (#3641)", async () => {
-		const state = registerMnemopiState();
-		const retainMemory = state.getScopedRetainTarget().memory;
-		const flushSpy = vi.spyOn(retainMemory, "flushExtractions").mockResolvedValue();
-		const sleepSpy = vi.spyOn(retainMemory, "sleep");
-		const closeSpy = vi.spyOn(retainMemory, "close");
+	it.each([{}, { retain: false }])(
+		"unbounded dispose drains and closes without sleeping (options: %j)",
+		async options => {
+			const state = registerMnemopiState();
+			const retainMemory = state.getScopedRetainTarget().memory;
+			const flushSpy = vi.spyOn(retainMemory, "flushExtractions").mockResolvedValue();
+			const sleepSpy = vi.spyOn(retainMemory, "sleep");
+			const closeSpy = vi.spyOn(retainMemory, "close");
 
-		await state.dispose();
+			await state.dispose(options);
 
-		// Unbounded dispose still runs the consolidate-then-close pipeline, but
-		// skips the synchronous bank sleep so the interactive shutdown path stays
-		// fast (#3641). Full consolidation remains reachable via `/memory enqueue`.
-		expect(flushSpy).toHaveBeenCalledTimes(1);
-		expect(sleepSpy).not.toHaveBeenCalled();
-		expect(closeSpy).toHaveBeenCalledTimes(1);
+			// Unbounded dispose still runs the consolidate-then-close pipeline, but
+			// skips the synchronous bank sleep so the interactive shutdown path stays
+			// fast (#3641). Full consolidation remains reachable via `/memory enqueue`.
+			expect(flushSpy).toHaveBeenCalledTimes(1);
+			expect(sleepSpy).not.toHaveBeenCalled();
+			expect(closeSpy).toHaveBeenCalledTimes(1);
 
-		registeredMnemopiState = undefined;
-	});
+			registeredMnemopiState = undefined;
+		},
+	);
 
 	it("dispose retains the current session without scheduling LLM fact extraction", async () => {
 		const state = registerMnemopiState();

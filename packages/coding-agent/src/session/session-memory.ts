@@ -144,7 +144,7 @@ export class SessionMemory {
 		if (this.#localMemoryStartupAbort?.signal === signal) this.#localMemoryStartupAbort = undefined;
 	}
 
-	async #disposeMemoryBackendState(consolidateMnemopi = true): Promise<void> {
+	async #disposeMemoryBackendState(consolidateMnemopi = true, retainMnemopi = true): Promise<void> {
 		this.cancelLocalMemoryStartup();
 		try {
 			releaseSharpshooterSession(this.#host.memoryBackendSession());
@@ -165,7 +165,7 @@ export class SessionMemory {
 		const mnemopi = this.#host.takeMnemopiSessionState();
 		if (mnemopi) {
 			try {
-				await mnemopi.dispose({ consolidate: consolidateMnemopi });
+				await mnemopi.dispose({ consolidate: consolidateMnemopi, retain: retainMnemopi });
 			} catch (error) {
 				logger.warn("Memory lifecycle: Mnemopi dispose failed", { error: String(error) });
 			}
@@ -175,10 +175,11 @@ export class SessionMemory {
 	/**
 	 * Apply the selected memory backend to runtime state, tools, and prompt.
 	 * Concurrent settings changes run in order and settle before the next turn.
+	 * Cwd rebinding can disable Mnemopi auto-retention without skipping its drain.
 	 */
-	async applyMemoryBackend(): Promise<void> {
+	async applyMemoryBackend(options: { retainMnemopi?: boolean } = {}): Promise<void> {
 		if (this.#host.isDisposed()) return;
-		const transition = this.#memoryBackendTransition.then(() => this.#applyMemoryBackend());
+		const transition = this.#memoryBackendTransition.then(() => this.#applyMemoryBackend(options.retainMnemopi));
 		this.#memoryBackendTransition = transition.then(
 			() => undefined,
 			() => undefined,
@@ -186,10 +187,10 @@ export class SessionMemory {
 		await transition;
 	}
 
-	async #applyMemoryBackend(): Promise<void> {
+	async #applyMemoryBackend(retainMnemopi = true): Promise<void> {
 		if (this.#host.isDisposed()) return;
 		try {
-			await this.#disposeMemoryBackendState();
+			await this.#disposeMemoryBackendState(true, retainMnemopi);
 			if (this.#memoryAgentDir && this.#memoryTaskDepth === 0 && !this.#host.isDisposed()) {
 				const backend = await resolveMemoryBackend(this.#host.settings);
 				await backend.start({
