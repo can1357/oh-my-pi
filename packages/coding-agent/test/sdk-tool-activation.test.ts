@@ -14,6 +14,7 @@ import {
 	EXTENSION_HANDLER_TIMEOUT_MS,
 	testSetExtensionHandlerTimeoutMs,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import type { MCPManager } from "@oh-my-pi/pi-coding-agent/mcp/manager";
 import * as memoryBackendModule from "@oh-my-pi/pi-coding-agent/memory-backend";
 import { initializeExtensions } from "@oh-my-pi/pi-coding-agent/modes/runtime-init";
@@ -27,6 +28,7 @@ import {
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
+import { resetYieldTurnState } from "@oh-my-pi/pi-coding-agent/tools/yield";
 import { logger, removeSyncWithRetries, Snowflake, untilAborted } from "@oh-my-pi/pi-utils";
 
 const toolActivationExtension: ExtensionFactory = pi => {
@@ -1743,6 +1745,30 @@ describe("createAgentSession defaultInactive tool activation", () => {
 
 		try {
 			expect(session.getActiveToolNames()).toContain("yield");
+		} finally {
+			await session.dispose();
+		}
+	});
+
+	it("resets reused yield state through the SDK extension wrapper", async () => {
+		const tempDir = makeTempDir();
+		const { session } = await createAgentSession({
+			...baseOptions(tempDir),
+			requireYieldTool: true,
+			toolNames: ["yield"],
+		});
+
+		try {
+			const yieldTool = session.getToolByName("yield");
+			if (!yieldTool) throw new Error("expected wrapped yield tool");
+			expect(yieldTool).toBeInstanceOf(ExtensionToolWrapper);
+
+			await yieldTool.execute("run1-section", { type: ["findings"], data: "one finding" });
+			const keptWithinRun = await yieldTool.execute("run1-finalize", { type: "result" });
+			expect(keptWithinRun.content).toEqual([{ type: "text", text: "Result submitted." }]);
+
+			resetYieldTurnState(yieldTool);
+			await expect(yieldTool.execute("run2-empty", { type: "result" })).rejects.toThrow(/no text \(thinking only\)/);
 		} finally {
 			await session.dispose();
 		}

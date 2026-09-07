@@ -229,26 +229,6 @@ describe("YieldTool", () => {
 		expect(aborted.details?.error).toMatch(/empty last-turn result after \d+ consecutive attempt/);
 	});
 
-	it("re-guards an empty last-turn finalize on the next run after resetTurnState clears stale sections", async () => {
-		// A kept-alive session reuses the same YieldTool across turns. A prior run
-		// that emitted an incremental section leaves #hasIncrementalSections set;
-		// within that run a data-less finalize is legitimately accepted (the
-		// sections carry the data). resetTurnState (called by
-		// runSubagentFollowUpTurn at each new turn) must clear it so the next
-		// turn's thinking-only {type:"result"} is guarded again instead of
-		// skipping the guard and failing the run post-mortem with null data.
-		const tool = new YieldTool(createSession({ getLastAssistantText: () => undefined }));
-		await tool.execute("run1-section", { type: ["findings"], data: "one finding" } as never);
-		const keptWithinRun = await tool.execute("run1-finalize", { type: "result" } as never);
-		expect(keptWithinRun.details?.status).toBe("success");
-		expect(keptWithinRun.details?.useLastTurn).toBe(true);
-
-		tool.resetTurnState();
-		await expect(tool.execute("run2-empty", { type: "result" } as never)).rejects.toThrow(
-			/no text \(thinking only\)/,
-		);
-	});
-
 	it("accepts a data-less finalize after incremental sections even when schema-bound", async () => {
 		const tool = new YieldTool(
 			createSession({

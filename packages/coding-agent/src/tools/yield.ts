@@ -619,6 +619,21 @@ export class YieldTool implements AgentTool<TSchema, YieldDetails> {
 		return undefined;
 	}
 }
+interface TurnStateResettable {
+	resetTurnState(): void;
+}
+
+function canResetTurnState(tool: AgentTool): tool is AgentTool & TurnStateResettable {
+	return "resetTurnState" in tool && typeof tool.resetTurnState === "function";
+}
+
+/**
+ * Reset per-run yield state through either a native tool or an
+ * `ExtensionToolWrapper` proxy.
+ */
+export function resetYieldTurnState(tool: AgentTool | undefined): void {
+	if (tool && canResetTurnState(tool)) tool.resetTurnState();
+}
 
 // Register subprocess tool handler for extraction + termination.
 subprocessToolRegistry.register<YieldDetails>("yield", {
