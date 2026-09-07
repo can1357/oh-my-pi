@@ -2,6 +2,39 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added opt-in interactive collab auto-hosting with configurable relay safety and write-link file output.
+
+### Fixed
+
+- Delayed collab auto-hosting until interactive startup reconciliation, setup, and the initial transcript are ready.
+- Made `/collab stop` cancel an in-flight host handshake instead of reporting that hosting has not started.
+- Stopped collab auto-hosting on interactive shutdown, including in-flight host handshakes.
+- Treated a collab host that dropped during write-link publication as a failed start instead of reporting a live session.
+- Sanitized collab auto-start and write-link errors so they no longer leak home paths or inject raw layout characters into the transcript.
+- Avoided deleting a collab write-link file that this start never published, including a destination replaced after publication.
+- Stopped an already-attached collab host immediately on `/collab stop` and shutdown instead of waiting out write-link publication.
+- Stopped collab hosting on signal teardown before waiting for draft persistence.
+- Rejected collab auto-start and write-link paths from config overlays, including dotenv-injected `PI_CONFIG_FILES`.
+- Ignored project- and overlay-sourced `collab.relayUrl` and `collab.webUrl` during auto-start so a repository overlay cannot retarget a user-enabled host.
+- Rejected collab auto-start from a global config.yml whose agent directory was redirected by a project dotenv `PI_CODING_AGENT_DIR`.
+- Rejected collab auto-start from a global config.yml whose config directory was redirected by a project dotenv `PI_CONFIG_DIR`.
+- Honored project and overlay `collab.autoStart: false` over a trusted global enablement.
+- Honored a project `collab.autoStart: false` even when a higher overlay tried to re-enable hosting.
+- Honored a lower-precedence overlay `collab.autoStart: false` even when a later overlay tried to re-enable hosting.
+- Refused to attach a collab host that closed fatally before start completed.
+- Made `/collab stop` abort a contended write-link lock wait instead of blocking through lock retries.
+- Distrusted collab auto-start when a project dotenv overwrites an empty launcher `PI_CODING_AGENT_DIR` or `PI_CONFIG_DIR`.
+- Distrusted collab auto-start when a project `.env` sets `NODE_ENV` and the agent or config directory redirect lives in `.env.development`.
+- Rejected collab auto-start from a profile selected by a project dotenv `OMP_PROFILE` or `PI_PROFILE`.
+- Stopped collab hosting on interactive shutdown before awaiting live-mode teardown.
+- Shortened collab and MCP status home paths even when the home directory contains spaces.
+- Closed the collab relay socket when host start is cancelled after the handshake opens.
+- Distrusted collab auto-start when a project dotenv uses Bun-decoded escaped newlines in `PI_CODING_AGENT_DIR`.
+- Distrusted collab auto-start when a project dotenv uses Bun `${VAR:-fallback}` expansion in agent or config directory variables.
+- Distrusted collab auto-start when a project dotenv uses a quoted multiline `PI_CODING_AGENT_DIR` or `PI_CONFIG_DIR`.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

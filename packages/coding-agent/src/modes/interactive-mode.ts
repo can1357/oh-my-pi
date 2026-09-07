@@ -57,6 +57,7 @@ import { reset as resetCapabilities } from "../capability";
 import { restartArgv } from "../cli/flag-tables";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
+import { stopCollabHost } from "../collab/start";
 import { formatKeyHint, KeybindingsManager } from "../config/keybindings";
 import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
@@ -711,7 +712,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	skillCommands: Map<string, Skill> = new Map();
 	oauthManualInput: OAuthManualInputManager = new OAuthManualInputManager();
 	collabHost?: CollabHost;
+	collabHostStart?: Promise<CollabHost>;
+	collabHostAbort?: AbortController;
 	collabGuest?: CollabGuestLink;
+	collabGuestStart?: Promise<CollabGuestLink>;
 
 	#pendingCommandOutput: Component[] = [];
 	#pendingCommandOutputSessionId: string | undefined;
@@ -1128,6 +1132,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			getDraftText: () => this.#inputController.getDraftText(),
 			beginDispose: () => this.session.beginDispose(),
 			saveDraft: text => this.sessionManager.saveDraft(text),
+			stopCollab: async () => {
+				await stopCollabHost(this, "session shutdown");
+			},
 			disposeSession: reason =>
 				this.session.dispose({ mnemopiConsolidateTimeoutMs: SHUTDOWN_CONSOLIDATE_BUDGET_MS, reason }),
 		});
@@ -1302,7 +1309,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 		});
 
-		// Initialize hooks with TUI-based UI context
 		await logger.time("InteractiveMode.init:hooks", () => this.initHooksAndCustomTools());
 
 		// Restore mode from session (e.g. plan mode on resume)
@@ -4870,6 +4876,11 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
 	async #teardown(): Promise<void> {
+		try {
+			await stopCollabHost(this, "session shutdown");
+		} catch (err) {
+			logger.warn("Failed to stop collab host during teardown", { error: String(err) });
+		}
 		await this.#liveCommandController.stop();
 
 		this.#btwController.dispose();

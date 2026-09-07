@@ -1,8 +1,10 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
+import type { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { LiveCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/live-command-controller";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
@@ -81,5 +83,28 @@ describe("InteractiveMode long shutdown status", () => {
 		vi.advanceTimersByTime(10_000);
 		await flushMicrotasks();
 		expect(statuses).toHaveLength(2);
+	});
+
+	it("stops collab hosting before awaiting live-mode teardown", async () => {
+		const order: string[] = [];
+		const liveGate = Promise.withResolvers<void>();
+		vi.spyOn(LiveCommandController.prototype, "stop").mockImplementation(async () => {
+			order.push("liveStop:start");
+			await liveGate.promise;
+			order.push("liveStop:done");
+		});
+		mode.collabHost = {
+			stop: async () => {
+				order.push("collabStop");
+			},
+		} as unknown as CollabHost;
+
+		const shutdown = mode.shutdown();
+		await flushMicrotasks();
+		expect(order).toEqual(["collabStop", "liveStop:start"]);
+
+		liveGate.resolve();
+		await shutdown;
+		expect(order).toEqual(["collabStop", "liveStop:start", "liveStop:done"]);
 	});
 });

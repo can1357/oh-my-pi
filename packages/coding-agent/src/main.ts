@@ -31,6 +31,7 @@ import { buildInitialMessage } from "./cli/initial-message";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
+import { autoStartCollab } from "./collab/start";
 import { findConfigFile } from "./config";
 import { ModelRegistry } from "./config/model-registry";
 import {
@@ -576,6 +577,9 @@ async function runInteractiveMode(
 	await logger.time("InteractiveMode.renderInitialMessages", () =>
 		mode.renderInitialMessages({ preserveExistingChat: true }),
 	);
+	if (joinLink === undefined && process.stdin.isTTY && process.stdout.isTTY) {
+		await autoStartCollab(mode);
+	}
 	// A resolved version check must not insert its banner into a partial transcript.
 	checkedVersionPromise.then(newVersion => {
 		if (!settings.get("startup.checkUpdate")) {

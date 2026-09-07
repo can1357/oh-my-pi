@@ -1,10 +1,11 @@
 /**
- * Signal-safe session teardown: persists the in-progress editor draft, then
- * disposes the session (which emits `session_shutdown`, cancels the session's
- * background async jobs, and closes the session manager). Shared by the TUI
- * Ctrl+C/Ctrl+D/`/exit` keypress path in `InteractiveMode.shutdown()` and by
- * the postmortem `SIGINT`/`SIGTERM`/`SIGHUP`/`uncaughtException` handlers so a
- * real kernel signal executes the exact same teardown as a keypress exit.
+ * Signal-safe session teardown: stops collab hosting, persists the in-progress
+ * editor draft, then disposes the session (which emits `session_shutdown`,
+ * cancels the session's background async jobs, and closes the session manager).
+ * Shared by the TUI Ctrl+C/Ctrl+D/`/exit` keypress path in
+ * `InteractiveMode.shutdown()` and by the postmortem
+ * `SIGINT`/`SIGTERM`/`SIGHUP`/`uncaughtException` handlers so a real kernel
+ * signal executes the exact same teardown as a keypress exit.
  *
  * Extracted (rather than inlined into `InteractiveMode`) so the callback body
  * is directly unit-testable without instantiating the full TUI stack.
@@ -27,6 +28,13 @@ export interface SessionTeardownDeps {
 	 */
 	saveDraft: (text: string) => Promise<void>;
 	/**
+	 * Cancel an in-flight collab host handshake and stop an attached host
+	 * before draft persistence and session disposal. Optional so unit tests
+	 * and non-TUI callers can omit it; when present, failures are logged and
+	 * never abort disposal.
+	 */
+	stopCollab?: () => Promise<void>;
+	/**
 	 * Dispose the session — emits `session_shutdown`, drains async jobs, closes
 	 * the manager. Receives the postmortem reason that triggered the teardown
 	 * (undefined on the keypress/`/exit` path) so `AgentSession.dispose()` can
@@ -45,12 +53,12 @@ export type SessionTeardown = (reason?: postmortem.Reason) => Promise<void>;
 
 /**
  * Build a promise-memoized teardown function. The first call snapshots the
- * draft text, marks the session disposing synchronously, runs `saveDraft`
- * (draft-loss protection for `--resume`), then `disposeSession`; subsequent
- * calls await the same settled promise, so the keypress
- * `InteractiveMode.shutdown()` path and the postmortem signal callback cannot
- * double-emit `session_shutdown`, double-dispose the session's async-job
- * manager, or race each other.
+ * draft text, marks the session disposing synchronously, stops collab hosting,
+ * runs `saveDraft` (draft-loss protection for `--resume`), then
+ * `disposeSession`; subsequent calls await the same settled promise, so the
+ * keypress `InteractiveMode.shutdown()` path and the postmortem signal
+ * callback cannot double-emit `session_shutdown`, double-dispose the
+ * session's async-job manager, or race each other.
  *
  * The postmortem callback forwards its `Reason` so the persisted
  * `session_exit` diagnostic carries the real trigger (`sigterm`, `sighup`,
@@ -68,6 +76,13 @@ export function createSessionTeardown(deps: SessionTeardownDeps): SessionTeardow
 	const run = async (reason?: postmortem.Reason): Promise<void> => {
 		const draftText = deps.getDraftText();
 		deps.beginDispose();
+		if (deps.stopCollab) {
+			try {
+				await deps.stopCollab();
+			} catch (err) {
+				logger.warn("Failed to stop collab host during teardown", { error: String(err) });
+			}
+		}
 		try {
 			await deps.saveDraft(draftText);
 		} catch (err) {

@@ -137,6 +137,7 @@ type ProjectSettingsReadResult = {
 
 type ConfigOverlayReadResult = {
 	settings: RawSettings;
+	layers: RawSettings[];
 	shellPathSource: string | undefined;
 };
 
@@ -487,6 +488,8 @@ export class Settings {
 	#quarantinedYamlTargets = new Map<string, string>();
 	/** Extra config.yml-style overlays passed by CLI */
 	#configOverlay: RawSettings = {};
+	/** Individual `--config`/`PI_CONFIG_FILES` overlays before they are merged. */
+	#configOverlayLayers: RawSettings[] = [];
 	/** Project settings file that most recently supplied shellPath. */
 	#projectShellPathSource: string | undefined;
 	/** Explicit config overlay that most recently supplied shellPath. */
@@ -654,6 +657,16 @@ export class Settings {
 		return getByPath(this.#merged, SETTING_PATH_SEGMENTS[path]) !== undefined;
 	}
 
+	/** Return the highest-precedence layer that explicitly supplies `path`. */
+	getProvenance(path: SettingPath): "runtime" | "overlay" | "project" | "global" | "default" {
+		const segments = SETTING_PATH_SEGMENTS[path];
+		if (getByPath(this.#overrides, segments) !== undefined) return "runtime";
+		if (getByPath(this.#configOverlay, segments) !== undefined) return "overlay";
+		if (getByPath(this.#project, segments) !== undefined) return "project";
+		if (getByPath(this.#global, segments) !== undefined) return "global";
+		return "default";
+	}
+
 	/**
 	 * Set a setting value (sync).
 	 * Updates global settings and queues a background save.
@@ -808,6 +821,7 @@ export class Settings {
 		if (!this.#persist) cloned.#projectShellPathSource = this.#projectShellPathSource;
 		cloned.#configFiles = [...this.#configFiles];
 		cloned.#configOverlay = structuredClone(this.#configOverlay);
+		cloned.#configOverlayLayers = this.#configOverlayLayers.map(layer => structuredClone(layer));
 		cloned.#overlayShellPathSource = this.#overlayShellPathSource;
 		cloned.#overrides = this.#buildOriginalOverrides();
 		cloned.#rebuildMerged();
@@ -868,6 +882,7 @@ export class Settings {
 			this.#projectFileSettings = projectResult.value.fileSettings;
 			this.#projectShellPathSource = projectResult.value.shellPathSource;
 			this.#configOverlay = overlayResult.value.settings;
+			this.#configOverlayLayers = overlayResult.value.layers;
 			this.#overlayShellPathSource = overlayResult.value.shellPathSource;
 			this.#rebuildMerged();
 
@@ -958,6 +973,16 @@ export class Settings {
 	 */
 	getProjectSettings(): RawSettings {
 		return structuredClone(this.#project);
+	}
+
+	/**
+	 * Individual `--config`/`PI_CONFIG_FILES` overlay layers, deep-cloned and
+	 * ordered from lowest to highest precedence. Companion to
+	 * {@link getProjectSettings} so callers can inspect a value that later
+	 * overlays collapsed out of the merged overlay view.
+	 */
+	getConfigOverlayLayers(): RawSettings[] {
+		return this.#configOverlayLayers.map(layer => structuredClone(layer));
 	}
 
 	getPlansDirectory(): string {
@@ -1850,17 +1875,20 @@ export class Settings {
 	async #readConfigOverlays(captureLegacyChangelogVersion = true): Promise<ConfigOverlayReadResult> {
 		let shellPathSource: string | undefined;
 		let settings: RawSettings = {};
+		const layers: RawSettings[] = [];
 		for (const filePath of this.#configFiles) {
 			const overlay = await this.#loadOverlayYaml(filePath, captureLegacyChangelogVersion);
+			layers.push(overlay);
 			settings = this.#deepMerge(settings, overlay);
 			if (Object.hasOwn(overlay, "shellPath")) shellPathSource = filePath;
 		}
-		return { settings, shellPathSource };
+		return { settings, layers, shellPathSource };
 	}
 
 	async #loadConfigOverlays(): Promise<RawSettings> {
 		const result = await this.#readConfigOverlays();
 		this.#overlayShellPathSource = result.shellPathSource;
+		this.#configOverlayLayers = result.layers;
 		return result.settings;
 	}
 

@@ -11,7 +11,7 @@ import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { pluralize } from "@oh-my-pi/pi-utils";
+import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
@@ -727,6 +727,40 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 		}
 	}
 	return filePath;
+}
+
+function escapeRegExp(value: string): string {
+	return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function shortenEmbeddedPaths(text: string): string {
+	const home = os.homedir();
+	if (home) {
+		const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
+		const homePattern = escapeRegExp(home).replaceAll(/\\\\|\//g, String.raw`[\\/]`);
+		text = text.replace(new RegExp(`${homePattern}(?=$|[\\\\/])`, windowsStyle ? "gi" : "g"), "~");
+		text = text.replaceAll("~\\", "~/");
+	}
+	return text
+		.split(" ")
+		.map(segment => {
+			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
+			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
+			const end = segment.length - trailing.length;
+			if (leading.length >= end) return segment;
+			return `${leading}${shortenPath(segment.slice(leading.length, end))}${trailing}`;
+		})
+		.join(" ");
+}
+
+/** Collapse layout/control characters, shorten home paths, and truncate status errors. */
+export function sanitizeStatusText(value: string, maxWidth: number, empty = "(unnamed)"): string {
+	const text = shortenEmbeddedPaths(
+		replaceTabs(sanitizeText(value))
+			.replace(/[\r\n]+/g, " ")
+			.trim(),
+	);
+	return truncateToWidth(text.length > 0 ? text : empty, maxWidth);
 }
 
 export function formatToolWorkingDirectory(workdir: string | undefined, projectDir: string): string | undefined {

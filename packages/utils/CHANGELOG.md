@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `isEnvOwnedByProjectDotenv` to identify environment variables that came from the launch project's dotenv files rather than the parent shell.
+
+### Changed
+
+- `withFileLock` now honors an optional `AbortSignal` and cancels lock-acquisition retries immediately.
+
+### Fixed
+
+- Treated empty launcher environment variables overwritten by project dotenv files as project-owned.
+- Detected project-dotenv ownership using Bun's pre-dotenv `NODE_ENV` mode so a `.env` that sets `NODE_ENV` cannot hide redirects in `.env.development`.
+- Matched project-dotenv ownership case-insensitively on Windows so a differently-cased dotenv key cannot masquerade as a trusted launcher variable.
+- Decoded Bun double-quoted dotenv `\n` and `\r` escapes when matching project-owned environment values.
+- Expanded Bun `${VAR:-fallback}` when matching project-owned dotenv values and treated unrecognized `$` syntax as project-owned.
+- Treated Bun-quoted dotenv values that span literal newlines as project-owned instead of trusted global configuration.
+
 ## [18.1.13] - 2026-09-07
 
 ### Fixed
