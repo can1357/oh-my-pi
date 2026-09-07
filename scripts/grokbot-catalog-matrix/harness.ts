@@ -213,8 +213,9 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 }
 
 /**
- * Turn-2 text gate after a successful tool call. The unique row ping must
- * appear unless this is the documented Gemini Write empty-stop exception.
+ * Turn-2 text gate after a successful tool call. Requires a finished `stop`
+ * reply that includes the unique row ping, unless this is the documented
+ * Gemini Write empty-stop exception.
  */
 export function evaluateToolFollowupText(opts: {
 	kind: ToolSmokeKind;
@@ -224,11 +225,17 @@ export function evaluateToolFollowupText(opts: {
 	/** Catalog model id — empty Write acceptance is Gemini-class only. */
 	modelId: string;
 }): { pass: boolean; detail?: string } {
-	if (opts.body.includes(opts.ping)) return { pass: true };
 	const isGemini = classifyModel("grokbot", opts.modelId, { lenient: true }).class === "gemini";
 	if (isGemini && opts.kind === "write" && opts.body.trim().length === 0 && opts.stopReason === "stop") {
 		return { pass: true, detail: "empty-followup-after-write" };
 	}
+	if (opts.stopReason !== "stop") {
+		return {
+			pass: false,
+			detail: `${opts.kind}: follow-up stopReason=${opts.stopReason} (expected stop); text=${opts.body.slice(0, 120)}`,
+		};
+	}
+	if (opts.body.includes(opts.ping)) return { pass: true };
 	return {
 		pass: false,
 		detail: `${opts.kind}: follow-up omitted ping; text=${opts.body.slice(0, 120)}`,

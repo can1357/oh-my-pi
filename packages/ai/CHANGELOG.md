@@ -10,6 +10,7 @@
 - Buffer unlabeled markdown JSON fences until end-of-stream promotion
 - Remint and replay once after a rejected Grok Bot JWT (HTTP 401 / Connect unauthenticated)
 - Catalog matrix Write empty-stop follow-up acceptance is Gemini-class only and requires the row's exact ping
+- Catalog matrix tool follow-up turns require a finished `stop` (ping alone with `toolUse` fails), retaining only the Gemini Write empty-stop exception
 - Catalog matrix omp tools smoke uses `--mode json` and requires bash `tool_execution_end` / toolResult evidence (assistant prose alone fails)
 - Grok Bot representative matrix slice picks OpenAI samples by classifyModel class/family/revision buckets (no luna/terra/sol id substrings)
 - Grok Bot representative matrix routers come from catalog `sand-tools-wire` (`parent-chat` / `automation`), not `default` / `auto` / `sand-` id spelling
@@ -20,7 +21,7 @@
 
 ### Added
 
-- Grok Bot **product sand wire** for Anthropic-labeled models + tools: `GROKBOT_ANTHROPIC_TOOLS_WIRE=auto` (default) rewrites to `sand-automation` + `generalPurpose`, maps omp tools to PascalCase field-2 names (`bash`→`Shell`, `read`→`Read`) with `{ jsonSchema: … }` envelopes, field-9 host allowlists, and `automationId`. Parent-chat profile (`parent-chat` / `sand-default`) injects `SendToUser`; responses promote `SendToUser` toolCallPart streams to assistant text. Probe: `scripts/grokbot-automation-tools-probe.mjs`; matrix gate: `--mode opus-tools`.
+- Grok Bot **product sand wire** for Anthropic-labeled models + tools: `GROKBOT_ANTHROPIC_TOOLS_WIRE=auto` (default) keeps the original Anthropic `requestedModel` with product PascalCase field-2 tools (`bash`→`Shell`, `read`→`Read`), `{ jsonSchema: … }` envelopes, and field-9 host allowlists. Explicit `automation` rewrites to `sand-automation` + `generalPurpose` + `automationId`. Parent-chat profile (`parent-chat` / `sand-default`) injects `SendToUser`; responses promote `SendToUser` toolCallPart streams to assistant text. Probe: `scripts/grokbot-automation-tools-probe.mjs`; matrix gate: `--mode opus-tools`.
 - Grok Bot family tool-wire policy: Anthropic keep-model product Shell/Read/Write, catalog `sand-tools-wire` for sand routers (including `sand-cua` parent-chat), native bash/read/write for other families, and a live AvailableModels catalog matrix.
 
 ### Fixed

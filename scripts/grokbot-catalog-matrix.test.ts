@@ -114,6 +114,18 @@ describe("evaluateToolFollowupText", () => {
 			}).pass,
 		).toBe(false);
 	});
+
+	test("fails when the follow-up includes the ping but stops with toolUse", () => {
+		expect(
+			evaluateToolFollowupText({
+				kind: "bash",
+				body: "tools-pong-bash-x and calling another tool",
+				ping: "tools-pong-bash-x",
+				stopReason: "toolUse",
+				modelId: "grok-4.6",
+			}).pass,
+		).toBe(false);
+	});
 });
 
 describe("toolSmokePrompt", () => {
