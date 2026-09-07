@@ -116,14 +116,8 @@ pub struct ModelClassification {
 pub fn classify(input: ClassificationInput<'_>) -> ModelClassification {
 	match classify_with_taxonomy(input, taxonomy()) {
 		Ok(classification) => classification,
-		// Both error sources degrade to conservative ranks in the
-		// DiscoveryNormalizer phase and the compiler path returns the
-		// taxonomy error as a `Result`, so this arm only runs on a tie in
-		// the checked-in bundled taxonomy: a repository invariant failure
-		// that artifact compilation rejects before the catalog ships.
-		Err(error) => {
-			unreachable!("DiscoveryNormalizer degrades ties and the compiler path returns errors, so a bundled taxonomy tie is unreachable: {error}")
-		},
+		// Only a tie in the checked-in bundled taxonomy reaches here; see docs above.
+		Err(error) => unreachable!("DiscoveryNormalizer degrades ties and the compiler path returns errors, so a bundled taxonomy tie is unreachable: {error}"),
 	}
 }
 
