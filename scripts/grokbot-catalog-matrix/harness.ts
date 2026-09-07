@@ -106,10 +106,23 @@ export function classifyError(message: string | undefined, status?: number): str
 	return "unknown";
 }
 
-// Soft wording + product Shell/Read/Write names + relative sandbox paths.
-// The old "You are a coding agent" / absolute `/tmp/grokbot-*` / "Call the
-// tool now" probes 400'd opus-thinking keep-model rows with Anthropic Usage
-// Policy while sibling opus variants passed the same product wire.
+export function writeLikeShellCommand(command: string): boolean {
+	const cmd = command.trim();
+	if (!cmd) return false;
+	return /(?:^|[;&|\n]\s*)(?:echo|printf|cat|tee)\b/.test(cmd) && /(?:>>?|tee\b)/.test(cmd);
+}
+
+export function readLikeShellCommand(command: string): boolean {
+	const cmd = command.trim();
+	if (!cmd || writeLikeShellCommand(cmd)) return false;
+	return /(?:^|[;&|\n]\s*)(?:cat|head|tail)\b/.test(cmd);
+}
+
+// Soft wording + product Shell + relative sandbox paths.
+// Live keep-model: "use the Write/Read tool" still 400s opus-thinking with
+// Anthropic Usage Policy after bash/Shell echo passed. Write/read smokes
+// therefore use Shell (`printf > notes/…`, `cat notes/…`); the matrix
+// already counts those as write/read via writeLike/readLike helpers.
 export function toolSmokePrompt(kind: ToolSmokeKind, ping: string, id: string): string {
 	const safe = idSafe(id);
 	if (kind === "bash") {

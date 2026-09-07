@@ -30,7 +30,7 @@
 - Grok Bot automation/parent-chat product wire for non-Anthropic routers requires catalog `sand-tools-wire` (no raw `sand-automation` / `sand-default` id exceptions).
 - Grok Bot keep-model probes share checksum/JWT/auth helpers via `scripts/grokbot-probe-config.mjs`.
 - Grok Bot `sand-automation` now promotes grok-4.5-high fenced `{"name":"Shell",…}` text into a real Shell/bash tool call, and native-family matrix rows report `wire: native` instead of the internal `error` sentinel.
-- Grok Bot catalog matrix `--ids` keeps commas inside `[...]`, core tool probes use bland product Read/Write/Shell wording, and Anthropic Usage Policy blocks report as `provider-policy-block`.
+- Grok Bot catalog matrix `--ids` keeps commas inside `[...]`, core tool probes use bland Shell wording (write via `printf > notes/…`, read via `cat`), and Anthropic Usage Policy blocks report as `provider-policy-block`.
 
 ## [18.1.12] - 2026-09-06
 

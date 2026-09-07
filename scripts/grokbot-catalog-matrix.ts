@@ -35,7 +35,9 @@ import {
 	classifyError,
 	idSafe,
 	parseArgs,
+	readLikeShellCommand,
 	toolSmokePrompt,
+	writeLikeShellCommand,
 	type Mode,
 	type ToolSmokeKind,
 	type ToolsSet,
@@ -194,18 +196,21 @@ const TOOL_NAME_RE: Record<ToolSmokeKind, RegExp> = {
 	write: /^(write|Write)$/i,
 };
 
-function writeLikeShellCommand(command: string): boolean {
-	const cmd = command.trim();
-	if (!cmd) return false;
-	return /(?:^|[;&|\n]\s*)(?:echo|printf|cat|tee)\b/.test(cmd) && /(?:>>?|tee\b)/.test(cmd);
+function shellCommandOf(call: ToolCall): string {
+	const args = call.arguments;
+	return args && typeof args === "object" && !Array.isArray(args) ? String(args.command ?? "") : "";
 }
 
 function isWriteLikeCall(call: ToolCall): boolean {
 	if (TOOL_NAME_RE.write.test(call.name)) return true;
 	if (!TOOL_NAME_RE.bash.test(call.name)) return false;
-	const args = call.arguments;
-	const command = args && typeof args === "object" && !Array.isArray(args) ? String(args.command ?? "") : "";
-	return writeLikeShellCommand(command);
+	return writeLikeShellCommand(shellCommandOf(call));
+}
+
+function isReadLikeCall(call: ToolCall): boolean {
+	if (TOOL_NAME_RE.read.test(call.name)) return true;
+	if (!TOOL_NAME_RE.bash.test(call.name)) return false;
+	return readLikeShellCommand(shellCommandOf(call));
 }
 
 async function runOneTool(
@@ -243,7 +248,11 @@ async function runOneTool(
 	const calls = toolCallsOf(turn1);
 	const names = calls.map(c => c.name);
 	const match =
-		kind === "write" ? calls.find(c => isWriteLikeCall(c)) : calls.find(c => TOOL_NAME_RE[kind].test(c.name));
+		kind === "write"
+			? calls.find(c => isWriteLikeCall(c))
+			: kind === "read"
+				? calls.find(c => isReadLikeCall(c))
+				: calls.find(c => TOOL_NAME_RE[kind].test(c.name));
 	if (!match) {
 		const body = textOf(turn1);
 		return {

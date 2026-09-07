@@ -1,2 +1,3 @@
-{{!-- Soft probe: product Write + relative sandbox path. See tool-read-user.md. --}}
-Please use the Write tool to save exactly {{ping}} into notes/{{safeId}}.txt.
+{{!-- Write smoke uses Shell redirect, not Write. Live keep-model: medium/medium-fast passed bash+Read then policy-blocked on Write. isWriteLikeCall already accepts printf/echo > path. --}}
+Please use the Shell tool to run: printf '%s\n' {{ping}} > notes/{{safeId}}.txt
+

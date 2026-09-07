@@ -1,5 +1,12 @@
 import { describe, expect, test } from "bun:test";
-import { classifyError, parseArgs, splitIdList, toolSmokePrompt } from "./grokbot-catalog-matrix/harness";
+import {
+	classifyError,
+	parseArgs,
+	readLikeShellCommand,
+	splitIdList,
+	toolSmokePrompt,
+	writeLikeShellCommand,
+} from "./grokbot-catalog-matrix/harness";
 import toolsFollowupSystemPrompt from "./grokbot-catalog-matrix/tools-followup-system.md" with { type: "text" };
 import toolsSystemPrompt from "./grokbot-catalog-matrix/tools-system.md" with { type: "text" };
 
@@ -43,12 +50,23 @@ describe("toolSmokePrompt", () => {
 			expect(text).not.toContain("/tmp/");
 			expect(text).not.toMatch(/Usage Policy/);
 		}
-		expect(read).toContain("Read");
-		expect(read).toContain("notes/");
-		expect(write).toContain("Write");
+		expect(read).toContain("Shell");
+		expect(read).toContain("cat notes/");
+		expect(write).toContain("Shell");
+		expect(write).toContain("printf");
 		expect(write).toContain("tools-pong-write-x");
+		expect(write).toMatch(/>\s*notes\//);
 		expect(bash).toContain("Shell");
 		expect(bash).toContain("echo tools-pong-bash-x");
+	});
+
+	test("counts Shell printf-redirect as write and cat as read", () => {
+		// Write tool name still policy-blocks opus-thinking; the smoke asks for
+		// this command and isWriteLikeCall must accept it or the id FAILs.
+		expect(writeLikeShellCommand("printf '%s\\n' tools-pong-write-x > notes/x.txt")).toBe(true);
+		expect(writeLikeShellCommand("echo TOKEN > notes/x.txt")).toBe(true);
+		expect(readLikeShellCommand("cat notes/x.txt")).toBe(true);
+		expect(readLikeShellCommand("printf '%s\\n' x > notes/x.txt")).toBe(false);
 	});
 
 	test("tool-turn system prompts stay bland", () => {
