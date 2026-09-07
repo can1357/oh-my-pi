@@ -99,6 +99,18 @@ export class IrcBridge {
 		this.#asides.push(...records);
 	}
 
+	/**
+	 * Re-queue records as asides that missed their wake turn — used when a
+	 * cooperative restart (or a torn-down session) refuses to start the turn
+	 * that {@link IrcBridgeHost.wakeForIrc} would have driven. They flush to the
+	 * transcript on a successful restart's dispose (`flushPending`) or ride the
+	 * next drain for the resumed session on a recoverable pre-dispose failure —
+	 * never dropped.
+	 */
+	requeuePending(records: AgentMessage[]): void {
+		this.#asides.push(...records);
+	}
+
 	/** Surfaces and consumes queued incoming records before automatic injection. */
 	drainInboxMessages(agentId: string, opts?: { from?: string; limit?: number }): IrcMessage[] {
 		const messages: IrcMessage[] = [];

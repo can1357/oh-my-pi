@@ -960,7 +960,14 @@ export class AcpAgent implements Agent {
 
 	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
 		const skillResult = await this.#tryRunSkillCommand(record, text);
-		if (skillResult) {
+		if (skillResult !== "none") {
+			// A skill command that never started a turn (cooperative restart latched
+			// the session, or it was disposed) emits no `agent_end`, so settle the
+			// ACP turn here or the `session/prompt` request hangs forever (#9206).
+			if (skillResult === "no-turn") {
+				await this.#waitForPromptEventHandlers(record);
+				this.#finishPrompt(record, { stopReason: "end_turn" });
+			}
 			return;
 		}
 
@@ -1038,20 +1045,20 @@ export class AcpAgent implements Agent {
 		}
 	}
 
-	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string): Promise<boolean> {
+	async #tryRunSkillCommand(record: ManagedSessionRecord, text: string): Promise<"none" | "started" | "no-turn"> {
 		if (!record.session.skillsSettings?.enableSkillCommands) {
-			return false;
+			return "none";
 		}
 		const parsed = parseSkillInvocation(text);
 		if (!parsed) {
-			return false;
+			return "none";
 		}
 		const skill = record.session.skills.find(candidate => candidate.name === parsed.name);
 		if (!skill) {
-			return false;
+			return "none";
 		}
 		const built = await buildSkillPromptMessage(skill, parsed.args, "user");
-		await record.session.promptCustomMessage(
+		const started = await record.session.promptCustomMessage(
 			{
 				customType: SKILL_PROMPT_MESSAGE_TYPE,
 				content: built.message,
@@ -1061,7 +1068,7 @@ export class AcpAgent implements Agent {
 			},
 			{ streamingBehavior: "steer" },
 		);
-		return true;
+		return started ? "started" : "no-turn";
 	}
 
 	async cancel(params: { sessionId: string }): Promise<void> {

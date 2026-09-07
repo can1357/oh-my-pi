@@ -53,6 +53,15 @@ export interface BashRunnerHost {
 export class BashRunner {
 	readonly #host: BashRunnerHost;
 	#abortControllers = new Set<AbortController>();
+	// Foreground executions in flight, counted from `executeBash()` ENTRY rather
+	// than from abort-controller creation. `#abortControllers` is populated only
+	// AFTER the awaited `user_bash` extension hook resolves (below), so while an
+	// async hook is in flight a controller-backed `isRunning` reads false and a
+	// concurrent restart can dispose and seal this session; when the hook resumes
+	// it appends its result through the sealed manager and the result is lost.
+	// The counted region strictly encloses every controller's lifetime, so this is
+	// the sole running-state source of truth (see `isRunning`).
+	#activeExecutionCount = 0;
 	#pendingMessages: PendingBashMessage[] = [];
 	#sessionTarget: BashSessionTarget;
 
@@ -75,6 +84,7 @@ export class BashRunner {
 		let targetTransferred = false;
 		const excludeFromContext = options?.excludeFromContext === true;
 		const cwd = this.#host.sessionManager.getCwd();
+		this.#activeExecutionCount++;
 		try {
 			const extensionRunner = this.#host.extensionRunner();
 			if (extensionRunner?.hasHandlers("user_bash")) {
@@ -129,6 +139,7 @@ export class BashRunner {
 			await this.#recordResultForTarget(target, command, result, options);
 			return result;
 		} finally {
+			this.#activeExecutionCount--;
 			if (!targetTransferred) await this.#releaseSessionTarget(target);
 		}
 	}
@@ -159,9 +170,10 @@ export class BashRunner {
 		for (const abortController of this.#abortControllers) abortController.abort();
 	}
 
-	/** Whether a bash command is currently running. */
+	/** Whether a bash command is currently running, counted from `executeBash()` entry
+	 *  so the pre-controller `user_bash` hook window counts as running too. */
 	get isRunning(): boolean {
-		return this.#abortControllers.size > 0;
+		return this.#activeExecutionCount > 0;
 	}
 
 	/** Whether bash results are waiting for a safe persistence boundary. */

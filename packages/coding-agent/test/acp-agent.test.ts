@@ -274,7 +274,7 @@ class FakeAgentSession {
 	async promptCustomMessage(
 		message: { customType: string; content: string; details?: unknown },
 		options?: { streamingBehavior?: "steer" | "followUp"; queueChipText?: string },
-	): Promise<void> {
+	): Promise<boolean> {
 		this.customMessages.push(message);
 		this.customMessageOptions.push(options);
 		this.isStreaming = true;
@@ -294,6 +294,7 @@ class FakeAgentSession {
 			} as AgentSessionEvent);
 		}
 		this.isStreaming = false;
+		return true;
 	}
 
 	async refreshMCPTools(_tools: unknown[]): Promise<void> {}
