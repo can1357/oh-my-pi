@@ -6175,6 +6175,14 @@ function isCopilotChatModel(entry: OpenAICompatibleModelRecord): boolean {
 	return typeof type !== "string" || type === "chat";
 }
 
+/** Only an explicit unavailable signal hides a model: `policy.state === "disabled"` (admin-deactivated), or — with no `policy` gate — `model_picker_enabled === false`. Absence of either is treated as available for backward compatibility; a present `policy` is authoritative (e.g. `gpt-4.1` is granted even though `model_picker_enabled` is false). */
+function isCopilotModelAvailableForAccount(entry: OpenAICompatibleModelRecord): boolean {
+	if (isRecord(entry.policy)) {
+		return entry.policy.state !== "disabled";
+	}
+	return toBoolean(entry.model_picker_enabled) !== false;
+}
+
 function copilotTierCost(
 	tier: CopilotTokenPriceTier | undefined,
 ): Omit<ModelSpec<Api>["cost"], "cacheWrite"> | undefined {
@@ -6243,6 +6251,10 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 		providerId: "github-copilot",
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
 		dropCachedModelIdsOnStaticMismatch: COPILOT_CACHE_INVALIDATED_MODEL_IDS,
+		// The discovered set is already filtered to this account's granted models
+		// (see isCopilotModelAvailableForAccount), so treat it as the complete
+		// catalog and prune bundled models the account isn't granted.
+		dynamicModelsAuthoritative: true,
 		// COPILOT_API_HEADERS are compile-time wire identity constants, not
 		// credentials. The cache omits all request headers for
 		// safety and can only restore them from a bundled static entry — so a
@@ -6270,7 +6282,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 						defaults: ModelSpec<Api>,
 						_context: OpenAICompatibleModelMapperContext<Api>,
 					): ModelSpec<Api> | null => {
-						if (!isCopilotChatModel(entry)) {
+						if (!isCopilotChatModel(entry) || !isCopilotModelAvailableForAccount(entry)) {
 							return null;
 						}
 						const reference = resolveReference(defaults.id);

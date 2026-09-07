@@ -212,6 +212,7 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "gpt-5.5",
 		envVars: ["COPILOT_GITHUB_TOKEN"],
 		createModelManagerOptions: (config: ModelManagerConfig) => githubCopilotModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "gitlab-duo",

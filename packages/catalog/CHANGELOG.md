@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed the GitHub Copilot picker showing models the account can't use; it now lists only the models the account is granted.
 - Fixed Codex Astra using its larger window without opt-in; its default is 272K and Extended Context enables at least the documented 1.05M window.
 
 ## [18.1.13] - 2026-09-07
