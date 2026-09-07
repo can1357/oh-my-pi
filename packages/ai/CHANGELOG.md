@@ -5,7 +5,9 @@
 ### Fixed
 
 - Block Grok Bot JWT remint/replay after no-tool events were already published live
+- Remint after start-only Connect `unauthenticated` (no published content) while keeping a single start event
 - Empty/incomplete tool retries clear effort defaults when forcing thinking off
+- `/grokbot` Host status redacts URL userinfo and credential-shaped query params
 - Grok Bot omits `thinking` from streamSimple/completeSimple when effort is unset so discovered `sandParameterDefaults` apply
 - Buffer unlabeled markdown JSON fences until end-of-stream promotion
 - Remint and replay once after a rejected Grok Bot JWT (HTTP 401 / Connect unauthenticated)

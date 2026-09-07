@@ -786,12 +786,15 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			 * Incomplete sibling toolcall_* stay in a per-index buffer until end or drop. */
 			let attemptEventBuffer: AssistantMessageEvent[] = [];
 			let attemptStreamingLive = false;
-			/** True once any attempt event has been pushed to the consumer stream. */
-			let consumerSawEvents = false;
+			/** True once a non-start event has been pushed to the consumer stream. */
+			let consumerSawContent = false;
+			/** True once `start` was published live (text-only path is unbuffered). */
+			let consumerSawStart = false;
 			const pendingToolEventBuffers = new Map<number, AssistantMessageEvent[]>();
 			const pushConsumerEvent = (event: AssistantMessageEvent) => {
 				stream.push(event);
-				consumerSawEvents = true;
+				if (event.type === "start") consumerSawStart = true;
+				else consumerSawContent = true;
 			};
 			const shouldBufferAttemptEvents = () =>
 				// Keep buffering while either empty or incomplete retry is still
@@ -828,9 +831,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				started = false;
 			};
 			const remintAfterUnauthorized = async (): Promise<boolean> => {
-				// Never replay after the consumer already saw start/text/tool events
-				// (no-tool turns push live without setting attemptStreamingLive).
-				if (jwtRemintUsed || consumerSawEvents) return false;
+				// Never replay after the consumer already saw text/tool content.
+				// A published `start` alone (text-only Connect unauthenticated) may remint.
+				if (jwtRemintUsed || consumerSawContent) return false;
 				jwtRemintUsed = true;
 				clearGrokbotTokenCache();
 				accessToken = await mintGrokbotAccessToken(
@@ -841,6 +844,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
 				);
 				discardAttemptEvents();
+				// Retain a live-published start across remint so the consumer does not
+				// see a second start event.
+				if (consumerSawStart) started = true;
 				clearAbandonedAttemptMetadata();
 				output.content = [];
 				output.usage = {

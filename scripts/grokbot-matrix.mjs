@@ -26,10 +26,21 @@ import {
 	encodeInferenceStreamRequest,
 	frameConnectProto,
 } from "../packages/ai/src/providers/grokbot/proto.ts";
+import * as prompt from "../packages/utils/src/prompt.ts";
+import textSystemPrompt from "./grokbot-catalog-matrix/text-system.md" with { type: "text" };
+import textUserPrompt from "./grokbot-catalog-matrix/text-user.md" with { type: "text" };
+import matrixOpusSystemPrompt from "./grokbot-probes/matrix-opus-system.md" with { type: "text" };
+import matrixOpusShellUserPrompt from "./grokbot-probes/matrix-opus-shell-user.md" with { type: "text" };
+import matrixBashThenTokenUserPrompt from "./grokbot-probes/matrix-bash-then-token-user.md" with { type: "text" };
 
 const ROOT = resolve(import.meta.dir, "..");
 const STREAM = "/aiserver.v1.InferenceService/Stream";
 const TOKEN = "pong42";
+const TEXT_SYSTEM = prompt.render(textSystemPrompt).trim();
+const TEXT_USER = prompt.render(textUserPrompt, { token: TOKEN }).trim();
+const OPUS_SYSTEM = prompt.render(matrixOpusSystemPrompt).trim();
+const OPUS_SHELL_USER = prompt.render(matrixOpusShellUserPrompt, { token: "opus-tools-matrix" }).trim();
+const BASH_THEN_TOKEN_USER = prompt.render(matrixBashThenTokenUserPrompt, { token: TOKEN }).trim();
 
 /** Models exercised for tool-capable agent use (non-Anthropic sand paths). */
 const TOOL_MODELS = [
@@ -121,8 +132,8 @@ async function sandProbe({ id, sandParameterIds, effort, tools }) {
 	});
 	const body = {
 		messages: [
-			{ role: 4, text: "You are a concise assistant." },
-			{ role: 1, text: `Reply with exactly: ${TOKEN}. Do not call tools.` },
+			{ role: 4, text: TEXT_SYSTEM },
+			{ role: 1, text: TEXT_USER },
 		],
 		tools: tools
 			? [
@@ -173,7 +184,7 @@ function runOmpa(args, { timeout = 120_000, cwd = ROOT } = {}) {
 	return { status: r.exitCode, out, signal: r.signalCode };
 }
 
-function ompaPrint(model, { tools = false, thinking = "low", prompt = `Reply with exactly: ${TOKEN}` } = {}) {
+function ompaPrint(model, { tools = false, thinking = "low", promptText = TEXT_USER } = {}) {
 	const args = [
 		"-p",
 		"--no-session",
@@ -185,7 +196,7 @@ function ompaPrint(model, { tools = false, thinking = "low", prompt = `Reply wit
 		model,
 		"--thinking",
 		thinking,
-		prompt,
+		promptText,
 	];
 	const r = runOmpa(args);
 	const pass = r.status === 0 && r.out.includes(TOKEN);
@@ -303,8 +314,8 @@ async function sandAutomationProbe() {
 	);
 	const body = {
 		messages: [
-			{ role: 4, text: "You are a coding agent." },
-			{ role: 1, text: "Use Shell to run: echo opus-tools-matrix. Reply briefly after." },
+			{ role: 4, text: OPUS_SYSTEM },
+			{ role: 1, text: OPUS_SHELL_USER },
 		],
 		tools: wired.tools,
 		requestedModel: wired.requestedModel,
@@ -350,7 +361,7 @@ async function runOpusTools() {
 	const g5 = ompaPrint("grokbot/claude-opus-5:max", {
 		tools: true,
 		thinking: "low",
-		prompt: `Use bash to run: echo ${TOKEN}. Then reply with exactly: ${TOKEN}`,
+		promptText: BASH_THEN_TOKEN_USER,
 	});
 	if (prevWire === undefined) delete process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE;
 	else process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE = prevWire;
@@ -386,7 +397,7 @@ function runOmpaIntegration() {
 	// G5: agent turn with built-in tools enabled
 	const g5 = ompaPrint("grokbot/grok-4.6", {
 		tools: true,
-		prompt: `Use bash to run: echo ${TOKEN}. Then reply with exactly: ${TOKEN}.`,
+		promptText: BASH_THEN_TOKEN_USER,
 	});
 	rows.push({ gate: "G5", label: "ompa tools grok-4.6", ...g5 });
 	console.log(`${g5.pass ? "PASS" : "FAIL"}  G5  ompa+tools  grokbot/grok-4.6  exit=${g5.status}`);
@@ -395,14 +406,14 @@ function runOmpaIntegration() {
 	// G6: sand-default bare router
 	const g6 = ompaPrint("grokbot/sand-default", {
 		thinking: "off",
-		prompt: `Reply with exactly: ${TOKEN}`,
+		promptText: TEXT_USER,
 	});
 	rows.push({ gate: "G6", label: "sand-default", ...g6 });
 	console.log(`${g6.pass ? "PASS" : "FAIL"}  G6  sand-default  exit=${g6.status}`);
 	if (!g6.pass) console.log(g6.out);
 
 	// G7: composer alias → composer-2.5
-	const g7 = ompaPrint("grokbot/composer", { prompt: `Reply with exactly: ${TOKEN}` });
+	const g7 = ompaPrint("grokbot/composer", { promptText: TEXT_USER });
 	rows.push({ gate: "G7", label: "composer alias", ...g7 });
 	console.log(`${g7.pass ? "PASS" : "FAIL"}  G7  grokbot/composer  exit=${g7.status}`);
 	if (!g7.pass) console.log(g7.out);
@@ -425,7 +436,7 @@ function runOmpaIntegration() {
 	console.log(`${g8pass ? "PASS" : "FAIL"}  G8  models grokbot  ${g8detail}  exit=${g8r.status}`);
 
 	// G8b: bare Model.aliases selector (no grokbot/ prefix)
-	const g8b = ompaPrint("composer", { prompt: `Reply with exactly: ${TOKEN}` });
+	const g8b = ompaPrint("composer", { promptText: TEXT_USER });
 	rows.push({ gate: "G8b", label: "bare composer alias", ...g8b });
 	console.log(`${g8b.pass ? "PASS" : "FAIL"}  G8b  bare composer  exit=${g8b.status}`);
 	if (!g8b.pass) console.log(g8b.out);

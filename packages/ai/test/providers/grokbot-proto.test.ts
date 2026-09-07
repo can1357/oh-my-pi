@@ -639,6 +639,26 @@ describe("grokbot checksum", () => {
 		expect(status).toContain("Host: https://proxy.example/grokbot");
 		expect(status).not.toContain("Host: https://api2.cursor.sh");
 	});
+
+	test("redacts URL userinfo and credential query params from Host status", async () => {
+		spyOn(grokbotCatalogAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew-present",
+			machineId: "machine-present",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotCatalogAuth, "grokbotSecretsPath").mockReturnValue("/tmp/agent/secrets/grokbot.env");
+
+		const status = await formatGrokbotStatus({
+			baseUrl: "https://token:sekrit@proxy.example/grokbot?api_key=leak&keep=1",
+		});
+		const hostLine = status.split("\n").find(line => line.startsWith("Host:"));
+		expect(hostLine).toBe("Host: https://proxy.example/grokbot?keep=1");
+		expect(hostLine).not.toContain("token");
+		expect(hostLine).not.toContain("sekrit");
+		expect(hostLine).not.toContain("api_key");
+		expect(hostLine).not.toContain("leak");
+	});
 });
 
 describe("grokbot sand-host client parity", () => {
@@ -2063,6 +2083,53 @@ describe("grokbot request headers", () => {
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(401);
 		expect(mintSpy).toHaveBeenCalledTimes(1);
+		expect(starts).toEqual(["start"]);
+	});
+
+	test("remints after start-only Connect unauthenticated with no published content", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		const mintSpy = spyOn(grokbotAuth, "mintGrokbotAccessToken")
+			.mockResolvedValueOnce("stale-jwt")
+			.mockResolvedValueOnce("fresh-jwt");
+		spyOn(grokbotAuth, "clearGrokbotTokenCache").mockImplementation(() => {});
+
+		const unauthorized = frameConnectProto(
+			Buffer.from(JSON.stringify({ error: { code: "unauthenticated", message: "jwt expired" } })),
+			CONNECT_END_STREAM_FLAG,
+		);
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }));
+		const okTrailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		let calls = 0;
+		const fetchImpl = (async () => {
+			calls += 1;
+			if (calls === 1) {
+				return new Response(unauthorized, {
+					status: 200,
+					headers: { "content-type": "application/connect+proto" },
+				});
+			}
+			return new Response(Buffer.concat([text, okTrailer]), {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			});
+		}) as FetchImpl;
+
+		const starts: string[] = [];
+		const stream = streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl });
+		for await (const event of stream) {
+			if (event.type === "start") starts.push("start");
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([{ type: "text", text: "ok" }]);
+		expect(mintSpy).toHaveBeenCalledTimes(2);
+		expect(calls).toBe(2);
+		// Start was published before remint and must not be duplicated.
 		expect(starts).toEqual(["start"]);
 	});
 });

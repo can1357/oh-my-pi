@@ -49,6 +49,25 @@ function formatGrokbotStatusValue(value: string): string {
 	return truncateToWidth(cleaned, TRUNCATE_LENGTHS.TITLE);
 }
 
+/** Strip URL userinfo and credential-shaped query params before /grokbot Host display. */
+function formatGrokbotDisplayHost(raw: string): string {
+	const trimmed = raw.replace(/\/+$/, "") || GROKBOT_BACKEND;
+	try {
+		const url = new URL(trimmed);
+		url.username = "";
+		url.password = "";
+		for (const key of [...url.searchParams.keys()]) {
+			if (/^(?:api[_-]?key|access[_-]?token|auth|password|secret|token|key)$/i.test(key)) {
+				url.searchParams.delete(key);
+			}
+		}
+		const display = `${url.protocol}//${url.host}${url.pathname}${url.search}${url.hash}`.replace(/\/+$/, "");
+		return formatGrokbotStatusValue(display || GROKBOT_BACKEND);
+	} catch {
+		return formatGrokbotStatusValue(trimmed);
+	}
+}
+
 export type FormatGrokbotStatusOptions = {
 	/**
 	 * Effective renewal credential from AuthStorage / `providers.grokbot.apiKey`
@@ -69,7 +88,7 @@ export async function formatGrokbotStatus(options?: FormatGrokbotStatusOptions):
 		"Grok Bot provider (`grokbot` / `grokbot-sand`) — InferenceService/Stream",
 		"Not the Cursor provider (`cursor` / AgentService/Run) and not xAI / Grok CLI (`xai`, `xai-oauth`).",
 		"Usage allowances are independent: Grok Bot, Cursor, and xAI / Grok CLI each have their own quota — using one does not consume the others.",
-		`Host: ${formatGrokbotStatusValue(host)}`,
+		`Host: ${formatGrokbotDisplayHost(host)}`,
 		"Wire: application/connect+proto (InferenceService/Stream only; no harness / AgentService fields)",
 		"Auth: Grok Bot renewal credential + machine-id checksum (not Cursor OAuth, not XAI_API_KEY)",
 		`Renewer: ${cfg.renewal ? "present" : "missing"}`,

@@ -12,16 +12,16 @@ import { parseModelString } from "../config/model-resolver";
  * selected. A bare `--model` also wins over `--models` in session options, so
  * it must not fall through to deriving ownership from the secondary scope.
  *
- * `--provider` alone (no `--model` / `--models`) stays unbound so main.ts can
- * still enforce `--api-key requires a model`.
+ * `--provider` only claims the key when `--model` is also present (the form it
+ * scopes). `--provider` with `--models` alone is ignored by session options, and
+ * `--provider` alone stays unbound so main.ts can enforce `--api-key requires a
+ * model`.
  */
 export function resolveCliRuntimeApiKeyProvider(
 	parsed: Pick<Args, "provider" | "model" | "models">,
 ): string | undefined {
-	const hasModelSelector =
-		Boolean(parsed.model?.trim()) || (parsed.models ?? []).some(pattern => pattern.trim().length > 0);
 	if (parsed.provider?.trim()) {
-		if (!hasModelSelector) return undefined;
+		if (!parsed.model?.trim()) return undefined;
 		return parsed.provider.trim();
 	}
 	if (parsed.model?.trim()) {

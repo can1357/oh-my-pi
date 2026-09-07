@@ -26,6 +26,7 @@
 - `--api-key` early binding skips multi-provider `--models` scopes and any bare (unqualified) selector (single shared qualified provider only).
 - Bare `--model` no longer falls through to `--models` for early `--api-key` ownership (session options prefer `--model`).
 - `--provider` alone no longer early-binds `--api-key` without `--model` / `--models` (keeps the missing-model CLI guard).
+- `--provider` with `--models` (no `--model`) no longer early-binds `--api-key` to that provider (session options ignore provider in that form).
 - Grok Bot catalog matrix text probes require the exact expected token (no loose `pong` match).
 
 ## [18.1.14] - 2026-09-07
