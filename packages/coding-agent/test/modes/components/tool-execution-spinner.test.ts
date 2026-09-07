@@ -4,6 +4,7 @@ import { generateRoomKey, importRoomKey } from "@oh-my-pi/pi-coding-agent/collab
 import { CollabGuestLink } from "@oh-my-pi/pi-coding-agent/collab/guest";
 import { COLLAB_PROTO, formatCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
+import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	SPINNER_RENDER_INTERVAL_MS,
 	stopSharedSpinnerTicker,
@@ -12,6 +13,7 @@ import {
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { TUI } from "@oh-my-pi/pi-tui";
 import { installInMemoryRelay, uninstallInMemoryRelay } from "../../collab/helpers/in-memory-relay";
 
@@ -357,6 +359,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 			chatContainer.addChild(liveBlock);
 			expect(vi.getTimerCount()).toBeGreaterThan(0);
 
+			await Settings.init({ inMemory: true });
 			const ctx = {
 				settings: { get: () => "" },
 				sessionManager: { getSessionFile: () => null, getSessionName: () => "local", getCwd: () => "/local" },
@@ -372,12 +375,17 @@ describe("ToolExecutionComponent live preview spinners", () => {
 					},
 				},
 				statusContainer: { clear: () => {}, disposeChildren: () => {} },
-				pendingMessagesContainer: { clear: () => {} },
+				pendingMessagesContainer: { clear: () => {}, disposeChildren: () => {} },
 				compactionQueuedMessages: [],
 				streamingComponent: undefined,
 				streamingMessage: undefined,
 				transcriptMessageComponents: new WeakMap(),
 				pendingTools: new Map(),
+				pendingBashComponents: [],
+				pendingPythonComponents: [],
+				lastAssistantUsage: undefined,
+				initialChatRendered: true,
+				hideToolActivity: false,
 				loadingAnimation: undefined,
 				statusLine: {
 					setCollabStatus: () => {},
@@ -389,7 +397,38 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				ui: { requestRender: () => {} },
 				chatContainer,
 				resetObserverRegistry: () => {},
-				renderInitialMessages: () => Promise.resolve(),
+				// The real transcript-commit path is the contract under test: the
+				// guest resync performs no eager teardown, so the orphaned live
+				// block's ticker registration must drop exactly when
+				// UiHelpers.renderInitialMessages() swaps the staged transcript in
+				// and disposes the previously visible children.
+				renderInitialMessages: (options?: { clearTerminalHistory?: boolean }) =>
+					uiHelpers.renderInitialMessages(options),
+				renderSessionContext: (context: unknown, options: unknown) =>
+					(uiHelpers.renderSessionContext as (c: unknown, o: unknown) => void)(context, options),
+				renderSessionContextIncrementally: (context: unknown, options: unknown, renderChunk?: () => void) =>
+					(
+						uiHelpers.renderSessionContextIncrementally as (
+							c: unknown,
+							o: unknown,
+							r?: () => void,
+						) => Promise<void>
+					)(context, options, renderChunk),
+				viewSession: {
+					isStreaming: false,
+					buildTranscriptSessionContext: () => ({
+						messages: [],
+						thinkingLevel: "off",
+						serviceTier: undefined,
+						models: {},
+						injectedTtsrRules: [],
+						mode: "none",
+					}),
+					getToolByName: () => undefined,
+					hasBuiltInTool: () => true,
+					extensionRunner: undefined,
+					sessionManager: { getEntries: () => [], getCwd: () => "/local" },
+				},
 				reloadTodos: () => Promise.resolve(),
 				showStatus: () => {},
 				showError: () => {},
@@ -397,6 +436,7 @@ describe("ToolExecutionComponent live preview spinners", () => {
 				updateEditorBorderColor: () => {},
 				syncRunningSubagentBadge: () => {},
 			} as unknown as InteractiveModeContext;
+			const uiHelpers = new UiHelpers(ctx);
 
 			const roomId = "spinner-resync-room";
 			const roomKey = generateRoomKey();
