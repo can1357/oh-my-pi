@@ -177,6 +177,7 @@ Lifecycle/state transition:
 9. restore the first available recorded model in role/default fallback order
 10. if the loaded branch ended with an interrupted tool flow, append a synthetic abort message and rebuild display context
 11. restore configured thinking (`auto` survives as auto) and per-family service tiers, falling back to current settings when no corresponding entry exists
+   Restored service-tier state keeps the effective family snapshot separate from raw explicit overrides. A persisted legacy all-off, scalar, or family-map entry remains authoritative; when no entry exists, current settings provide the baseline and `tier.modelOverrides` resolves at each request's actual model/effort. Clearing an explicit override restores that current policy.
 12. reset memory/tool session state as required, reconnect listeners, run mode reconciliation, and refresh the workspace-aware base system prompt
 13. restore advisor cost for a different session, finish the bash transition, notify session-change callbacks, and return `true` on success
 `switchSession()` returns `false` when a before-switch hook cancels or cwd policy rejects the transition. A cross-project switch without a cwd-change callback is rejected rather than silently adopting the target cwd; callback rejection is also cancellation.

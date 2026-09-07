@@ -2,6 +2,14 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `Agent`'s `serviceTierResolver` option and the agent loop's `getServiceTier` now receive each request's effective reasoning effort and disable-reasoning flag alongside the model and are authoritative per request, so returning `undefined` omits the tier for that call; resolvers that only inspect the model keep working, with the full signature captured by the new exported `ServiceTierResolver` type.
+
+### Added
+
+- Compaction summaries, handoffs, and branch summaries accept an optional `serviceTierResolver` that resolves the tier from the same concrete effort each provider call sends.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

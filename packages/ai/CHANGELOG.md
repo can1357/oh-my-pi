@@ -9,6 +9,7 @@
 - Added Muse Code subscription sign-in, credential refresh, inference, and quota reporting in `/usage`, with durable rate-limit backoff so quota refresh recovers instead of repeatedly retrying.
 
 ## [18.1.11] - 2026-09-05
+- `StreamOptions.serviceTier` sets the service tier requested for a single call, and the completion entry points stamp the resolved per-request tier onto the resulting `AssistantMessage.serviceTier` — `null` records an authoritative no-tier request and absence marks messages written before the field existed.
 
 ### Fixed
 

@@ -179,6 +179,14 @@ const { session } = await createAgentSession({
 });
 ```
 
+### Service-tier resolution
+
+The session keeps service-tier sources separate. `session.configuredServiceTierByFamily` is the raw configured `tier.*` baseline; `session.serviceTierOverrides` is the raw explicit family layer (an absent family inherits policy, while `null` is explicit off); and `session.serviceTierByFamily` is their effective family snapshot. The effective snapshot intentionally does not include model-specific `tier.modelOverrides` rules.
+
+At request time, `ModelControls.effectiveServiceTier(model, reasoning, disableReasoning?)` (wired as the agent's `ServiceTierResolver`) receives the concrete request model, its actual final reasoning effort, and the disable-reasoning flag. It tries an exact effort key before the bare model key, then falls back to the existing consumer baseline. Explicit family override/null wins over that configured rule. `disableReasoning` makes the effort undefined, so no effort suffix is matched; the resolver never inherits a parent effort or invents one. Unsupported-family rule values are inert.
+
+SDK launch options `serviceTierOverrides` and `openAIServiceTier` are explicit manual state layered above restored session state and settings (`openAIServiceTier: null` is explicit off). A new config-only session persists no manual tier entry; restored legacy all-off, scalar, and family-map entries remain authoritative. Clearing an explicit family override reveals the current model rule/baseline.
+
 ### Selection order when `model` is omitted
 
 When no explicit `model`/`modelPattern` is provided:

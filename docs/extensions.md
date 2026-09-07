@@ -127,7 +127,9 @@ Core methods:
 - `registerFileWriteFallback`, `registerFileDeleteFallback`
 - `events` (shared event bus)
 
-`getServiceTiers()` returns a detached snapshot of the session's live per-family tier map. `setServiceTier(family, tier)` changes one family for subsequent requests; pass `undefined` to clear that session override. OpenAI accepts `auto`, `default`, `flex`, `scale`, or `priority`; Anthropic accepts `priority`; Google accepts `flex` or `priority`. Changes made while a response is streaming do not alter that in-flight request.
+`getServiceTiers()` returns a detached snapshot of the effective per-family map: the configured `tier.openai`/`tier.anthropic`/`tier.google` baseline plus explicit live family overrides. It deliberately does not flatten `tier.modelOverrides`, which is resolved per provider request. `setServiceTier(family, tier)` records an explicit family choice for subsequent requests; pass `undefined` to clear that choice and reveal the current exact model rule or family baseline. Changes made while a response is streaming do not alter that in-flight request.
+
+Family-aware resolution gives explicit family override/null (including CLI, `/fast`, extension, and restored legacy state) precedence over an exact `tier.modelOverrides` rule, which takes precedence over the existing consumer baseline. Rule matching uses the request model's actual final effort; `off`/absent effort has no suffix and never inherits a parent effort. A rule value unsupported by the target family is inert. Config-only sessions do not persist a manual tier entry; clearing an override restores current policy.
 
 ### Provider registration
 

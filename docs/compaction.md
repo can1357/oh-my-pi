@@ -258,6 +258,8 @@ Remote summarization modes, consulted in order (each stage falls back to the nex
 
 When a native remote compaction (V2 or V1) succeeds, local LLM summarization is skipped entirely — the durable history lives in the provider replay payload and the stored `summary` is a placeholder lead-in plus the file-operation list.
 
+Remote compaction has intentionally separate transports. Native V1 `/responses/compact`, V2 streaming compaction, and custom `compaction.remoteEndpoint` payloads do not carry `service_tier`; those endpoints cannot be assumed to honor the live/model tier policy. Ordinary local summarizer and handoff side requests use the request-level resolver when they go through a provider stream, but the remote compaction endpoint formats intentionally omit the tier.
+
 ### Handoff generation
 
 `packages/agent/src/compaction/compaction.ts` also exports `generateHandoff(...)`. Handoff generation uses the same `completeSimple(...)` oneshot style as summarization, but it preserves the live agent cache prefix by sending the active system prompt, tool array, and real LLM message history, then appending one agent-attributed `user` message containing the handoff prompt. It forces `toolChoice: "none"` and returns joined text blocks directly.

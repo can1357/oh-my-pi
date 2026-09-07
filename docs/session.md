@@ -184,11 +184,16 @@ Stores an `AgentMessage` directly.
   "id": "c1d2e3f4",
   "parentId": "b1c2d3e4",
   "timestamp": "2026-02-16T10:21:45.000Z",
-  "serviceTier": { "openai": "priority", "google": "flex" }
+  "serviceTier": { "openai": "priority", "google": "flex" },
+  "overrides": { "openai": "priority", "anthropic": null }
 }
 ```
 
-`serviceTier` is a per-family map keyed by `openai`/`anthropic`/`google` (each value `auto`/`default`/`flex`/`scale`/`priority`), or `null` when no tier is active. Legacy entries that stored a single string (`"flex"`, `"openai-only"`, `"claude-only"`, …) are normalized to this map on read.
+`serviceTier` is the authoritative effective per-family snapshot keyed by `openai`/`anthropic`/`google`, or `null` when all families are off. `overrides` is the raw explicit family layer: an absent family inherits current policy, while `null` records explicit off. New-format entries carry both fields; entries without `overrides` use the legacy snapshot as their authoritative state.
+
+Configured `tier.*` policy is not written as a manual entry for a config-only session.
+On resume or switch, the latest entry's raw override state is restored. For entries without `overrides`, the legacy snapshot is converted to authoritative full-family state: all-off (`null`), scalar, and family-map snapshots remain authoritative, and missing families in a legacy map are explicit off rather than current-setting fallbacks.
+When no entry exists, current settings provide the baseline and `tier.modelOverrides` is resolved per request against the actual model and effort. A new-format entry with an empty `overrides` map intentionally restores the current baseline; clearing a live family override therefore restores current policy.
 
 ### `thinking_level_change`
 

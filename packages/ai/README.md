@@ -20,6 +20,7 @@ Unified LLM API with automatic model discovery, provider configuration, token an
    - [Unified Interface](#unified-interface-streamsimplecompletesimple)
    - [Provider-Specific Options](#provider-specific-options-streamcomplete)
    - [Streaming Thinking Content](#streaming-thinking-content)
+- [Service tiers](#service-tiers)
 - [Stop Reasons](#stop-reasons)
 - [Error Handling](#error-handling)
    - [Aborting Requests](#aborting-requests)
@@ -529,6 +530,25 @@ for await (const event of s) {
 	}
 }
 ```
+
+## Service tiers
+
+Pass `serviceTier` to `stream`/`complete` (or the simplified wrappers) when the request should ask for a provider service tier:
+
+```typescript
+const response = await completeSimple(model, context, {
+  reasoning: "high",
+  serviceTier: "priority",
+});
+```
+
+The option is a request hint with provider-specific support; unsupported transports may omit or ignore it. In `AssistantMessage`, distinguish the request fact from the server result:
+
+- A concrete `serviceTier` records the tier requested for that concrete completion. It is not proof that the provider granted or billed that tier.
+- `serviceTier: null` records an authoritative no-tier request (the host's `none` setting maps to this omitted-wire state).
+- An absent/undefined `serviceTier` is a legacy message written before the field existed; it is not evidence that the server granted no tier.
+
+Provider response echoes are authoritative for a served/downgraded tier where available; usage accounting and `disabledFeatures` expose the resulting billing or dropped-feature facts. Never use `AssistantMessage.serviceTier` as the server-granted tier.
 
 ## Stop Reasons
 

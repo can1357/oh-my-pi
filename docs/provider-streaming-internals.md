@@ -174,6 +174,21 @@ There is no hard backpressure mechanism between provider SDK stream and downstre
 
 Current design favors responsiveness and simple ordering over bounded-buffer flow control.
 
+## Service-tier request facts
+
+`ServiceTierResolver` is a request-level hook: it receives the model being requested, that request's actual final reasoning effort, and `disableReasoning`. An off/disabled request passes no effort, so model-rule lookup does not inherit the parent session's effort or synthesize a suffix. The resolver's order is explicit family override/null, exact `tier.modelOverrides` effort key then base key, and the existing consumer baseline; unsupported-family values are inert.
+The resolver shape is:
+
+```ts
+type ServiceTierResolver = (
+  model: Model,
+  reasoning: Effort | undefined,
+  disableReasoning?: boolean,
+) => ServiceTier | undefined;
+```
+
+The `AssistantMessage.serviceTier` field is the requested tier fact passed to the completion transport, not a server-granted tier. A concrete value records the request, `null` records an authoritative no-tier request, and an absent/undefined field is from older messages that predate this field. Provider response echoes and `disabledFeatures`/usage are the places to account for a server downgrade or dropped feature; do not interpret `AssistantMessage.serviceTier` as proof of what was granted.
+
 ## How stream events surface as agent/session events
 
 `agentLoop.streamAssistantResponse()` bridges `AssistantMessageEvent` to `AgentEvent`:
