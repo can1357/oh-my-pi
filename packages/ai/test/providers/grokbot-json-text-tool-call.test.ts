@@ -358,6 +358,83 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.upstreamModel).toBeUndefined();
 	});
 
+	test("empty-tool retry clears effort defaults when forcing thinking off", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinkingOnly = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					thinkingPart: { text: "planning", isFinal: true },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const toolCall = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					toolCallPart: {
+						toolCallId: "c-retry",
+						toolName: "bash",
+						args: '{"command":"echo retried"}',
+						isComplete: true,
+					},
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const paramSnapshots: Array<Record<string, string>> = [];
+		let calls = 0;
+		const fetchImpl = (async () => {
+			calls += 1;
+			return connectBody(...(calls === 1 ? [thinkingOnly] : [toolCall]));
+		}) as FetchImpl;
+		const model = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+			sandParameterIds: ["thinking", "context", "effort", "fast"],
+			sandParameterDefaults: { thinking: "true", context: "200k", effort: "high", fast: "false" },
+		});
+		const context: Context = {
+			messages: [{ role: "user", content: "Use bash", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(model as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+			maxTokens: 512,
+			onPayload: body => {
+				const params = (body as { requestedModel?: { parameters?: Array<{ id: string; value: string }> } })
+					.requestedModel?.parameters;
+				const map: Record<string, string> = {};
+				for (const p of params ?? []) map[p.id] = p.value;
+				paramSnapshots.push(map);
+				return body;
+			},
+		}).result();
+		expect(calls).toBe(2);
+		expect(result.stopReason).toBe("toolUse");
+		expect(paramSnapshots).toHaveLength(2);
+		expect(paramSnapshots[0]).toMatchObject({ thinking: "true", effort: "high" });
+		expect(paramSnapshots[1]?.thinking).toBe("false");
+		expect(paramSnapshots[1]?.effort).toBeUndefined();
+		expect(paramSnapshots[1]?.reasoning).toBeUndefined();
+	});
+
 	test("accepts an empty follow-up after a Write tool result (gemini-3-flash write)", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",

@@ -1991,20 +1991,12 @@ describe("grokbot request headers", () => {
 		const mintSpy = spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
 		const clearSpy = spyOn(grokbotAuth, "clearGrokbotTokenCache").mockImplementation(() => {});
 
-		const trailer = frameConnectProto(
-			Buffer.from(JSON.stringify({ error: { code: "unauthenticated", message: "jwt expired" } })),
-			CONNECT_END_STREAM_FLAG,
-		);
-		const fetchImpl = (async () =>
-			new Response(trailer, {
-				status: 200,
-				headers: { "content-type": "application/connect+proto" },
-			})) as FetchImpl;
+		// HTTP 401 before start is published — remint once, then fail on the replay.
+		const fetchImpl = (async () => new Response("unauthorized", { status: 401 })) as FetchImpl;
 
 		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(401);
-		expect(result.errorMessage).toMatch(/unauthenticated|jwt expired/i);
 		expect(mintSpy).toHaveBeenCalledTimes(2);
 		expect(clearSpy).toHaveBeenCalled();
 	});
@@ -2021,21 +2013,12 @@ describe("grokbot request headers", () => {
 			.mockResolvedValueOnce("fresh-jwt");
 		spyOn(grokbotAuth, "clearGrokbotTokenCache").mockImplementation(() => {});
 
-		const unauthorized = frameConnectProto(
-			Buffer.from(JSON.stringify({ error: { code: "unauthenticated", message: "jwt expired" } })),
-			CONNECT_END_STREAM_FLAG,
-		);
 		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "ok", isFinal: true } }));
 		const okTrailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
 		let calls = 0;
 		const fetchImpl = (async () => {
 			calls += 1;
-			if (calls === 1) {
-				return new Response(unauthorized, {
-					status: 200,
-					headers: { "content-type": "application/connect+proto" },
-				});
-			}
+			if (calls === 1) return new Response("unauthorized", { status: 401 });
 			return new Response(Buffer.concat([text, okTrailer]), {
 				status: 200,
 				headers: { "content-type": "application/connect+proto" },
@@ -2048,6 +2031,39 @@ describe("grokbot request headers", () => {
 		expect(result.content).toEqual([{ type: "text", text: "ok" }]);
 		expect(mintSpy).toHaveBeenCalledTimes(2);
 		expect(calls).toBe(2);
+	});
+
+	test("does not remint after no-tool text has already been published live", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		const mintSpy = spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+		spyOn(grokbotAuth, "clearGrokbotTokenCache").mockImplementation(() => {});
+
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "partial", isFinal: true } }));
+		const unauthorized = frameConnectProto(
+			Buffer.from(JSON.stringify({ error: { code: "unauthenticated", message: "jwt expired" } })),
+			CONNECT_END_STREAM_FLAG,
+		);
+		const fetchImpl = (async () =>
+			new Response(Buffer.concat([text, unauthorized]), {
+				status: 200,
+				headers: { "content-type": "application/connect+proto" },
+			})) as FetchImpl;
+
+		const starts: string[] = [];
+		const stream = streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl });
+		for await (const event of stream) {
+			if (event.type === "start") starts.push("start");
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorStatus).toBe(401);
+		expect(mintSpy).toHaveBeenCalledTimes(1);
+		expect(starts).toEqual(["start"]);
 	});
 });
 

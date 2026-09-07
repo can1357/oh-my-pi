@@ -785,7 +785,13 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			 * Incomplete sibling toolcall_* stay in a per-index buffer until end or drop. */
 			let attemptEventBuffer: AssistantMessageEvent[] = [];
 			let attemptStreamingLive = false;
+			/** True once any attempt event has been pushed to the consumer stream. */
+			let consumerSawEvents = false;
 			const pendingToolEventBuffers = new Map<number, AssistantMessageEvent[]>();
+			const pushConsumerEvent = (event: AssistantMessageEvent) => {
+				stream.push(event);
+				consumerSawEvents = true;
+			};
 			const shouldBufferAttemptEvents = () =>
 				// Keep buffering while either empty or incomplete retry is still
 				// available — sequential retries must not publish abandoned events.
@@ -795,7 +801,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			): event is Extract<AssistantMessageEvent, { type: "toolcall_start" | "toolcall_delta" | "toolcall_end" }> =>
 				event.type === "toolcall_start" || event.type === "toolcall_delta" || event.type === "toolcall_end";
 			const flushAttemptEvents = () => {
-				for (const event of attemptEventBuffer) stream.push(event);
+				for (const event of attemptEventBuffer) pushConsumerEvent(event);
 				attemptEventBuffer = [];
 				// Publish completed tool buffers in index order; leave incomplete siblings pending.
 				for (const index of [...pendingToolEventBuffers.keys()].sort((a, b) => a - b)) {
@@ -809,7 +815,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const flushToolEventBuffer = (contentIndex: number) => {
 				const buffered = pendingToolEventBuffers.get(contentIndex);
 				if (!buffered) return;
-				for (const event of buffered) stream.push(event);
+				for (const event of buffered) pushConsumerEvent(event);
 				pendingToolEventBuffers.delete(contentIndex);
 			};
 			const discardAttemptEvents = () => {
@@ -820,7 +826,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				started = false;
 			};
 			const remintAfterUnauthorized = async (): Promise<boolean> => {
-				if (jwtRemintUsed || attemptStreamingLive) return false;
+				// Never replay after the consumer already saw start/text/tool events
+				// (no-tool turns push live without setting attemptStreamingLive).
+				if (jwtRemintUsed || consumerSawEvents) return false;
 				jwtRemintUsed = true;
 				clearGrokbotTokenCache();
 				accessToken = await mintGrokbotAccessToken(
@@ -857,7 +865,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			};
 			const emitAttemptEvent = (event: AssistantMessageEvent) => {
 				if (!shouldBufferAttemptEvents()) {
-					stream.push(event);
+					pushConsumerEvent(event);
 					return;
 				}
 				if (isToolcallEvent(event)) {
@@ -888,7 +896,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						attemptEventBuffer.push(event);
 						return;
 					}
-					stream.push(event);
+					pushConsumerEvent(event);
 					return;
 				}
 				attemptEventBuffer.push(event);
@@ -925,13 +933,22 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					...options,
 					maxTokens: replayToolTurn ? Math.max(Number(options?.maxTokens) || 0, 4096) : options?.maxTokens,
 				});
+				const replaySandDefaults = (() => {
+					if (!replayToolTurn || !model.sandParameterDefaults) return model.sandParameterDefaults;
+					const next: Record<string, string> = { ...model.sandParameterDefaults };
+					delete next.effort;
+					delete next.reasoning;
+					// Retry forces thinking off; don't revive the discovered thinking=true default.
+					next.thinking = "false";
+					return next;
+				})();
 				const reqModel = resolveGrokbotRequestedModel(model.id, {
-					effort: options?.effort,
+					effort: replayToolTurn ? undefined : options?.effort,
 					effortMap: model.thinking?.effortMap,
 					fast: options?.fast,
 					thinking: replayToolTurn ? false : options?.thinking,
 					context: options?.context,
-					sandParameterDefaults: model.sandParameterDefaults,
+					sandParameterDefaults: replaySandDefaults,
 					// Keep the allowlist so thinking:false (and other overrides) still
 					// serialize on retry — an empty allowlist drops the thinking param.
 					sandParameterIds: model.sandParameterIds,

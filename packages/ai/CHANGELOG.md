@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Block Grok Bot JWT remint/replay after no-tool events were already published live
+- Empty/incomplete tool retries clear effort defaults when forcing thinking off
 - Grok Bot omits `thinking` from streamSimple/completeSimple when effort is unset so discovered `sandParameterDefaults` apply
 - Buffer unlabeled `JSON fences (for example`\\n{) until end-of-stream promotion
 - Remint and replay once after a rejected Grok Bot JWT (HTTP 401 / Connect unauthenticated)

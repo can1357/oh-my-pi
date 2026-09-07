@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `--api-key` early binding skips multi-provider `--models` scopes (single shared provider only)
+
 ### Added
 
 - Added `/grokbot` to show Grok Bot provider status (credentials/client; no secrets). Distinct from Cursor (`/login cursor`) and xAI / Grok CLI (`xai`, `xai-oauth`), with independent usage allowances. `/login grokbot` surfaces the host-install prompt for the Grok Bot system. Model lookup resolves Grok Bot `idAliases` (e.g. `grokbot/composer` → live `composer-2.5`) without separate catalog rows.
