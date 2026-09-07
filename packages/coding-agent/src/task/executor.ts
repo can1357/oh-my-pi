@@ -2576,6 +2576,10 @@ export function attachIrcWakeTurnMonitor(session: AgentSession, options: IrcWake
 	const index = options.index ?? 0;
 	const maxRuntimeMs = options.maxRuntimeMs ?? 0;
 	session.setIrcWakeTurnObserver(records => {
+		// Autonomous IRC wake turns reuse the session's YieldTool just like
+		// runSubagentFollowUpTurn; clear the prior run's incremental-section flag
+		// and retry counters so this wake turn's guards see only its own state.
+		resetYieldTurnState(session.getToolByName("yield"));
 		const ircTask =
 			records
 				.map(record => {

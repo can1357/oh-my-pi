@@ -59,6 +59,7 @@ function createRevivedSession(activeToolNames: string[][], extensionRunner?: unk
 	const session = {
 		...createSessionDefaults(),
 		getMountedXdevToolNames: () => [],
+		getToolByName: () => undefined,
 		setActiveToolsByName: async (names: string[]) => {
 			activeToolNames.push(names);
 		},
