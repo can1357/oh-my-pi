@@ -321,6 +321,52 @@ describe("AgentSession Hindsight leave-path retain", () => {
 		}
 	});
 
+	it("retains a below-cadence tail before /tree leaves the branch", async () => {
+		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
+		const retain = vi.spyOn(HindsightApi.prototype, "retain").mockResolvedValue({} as never);
+		const ctx = await createTestSession({
+			inMemory: true,
+			settingsOverrides: {
+				"memory.backend": "hindsight",
+				"hindsight.apiUrl": "http://localhost:8888",
+				"hindsight.retainEveryNTurns": 5,
+				"hindsight.retainOverlapTurns": 0,
+			},
+		});
+		try {
+			const { session, sessionManager } = ctx;
+			sessionManager.appendMessage(userMsg("kept turn has enough text"));
+			const firstAssistantId = sessionManager.appendMessage(assistantMsg("kept reply has enough text"));
+			sessionManager.appendMessage(userMsg("abandoned turn has enough text"));
+			sessionManager.appendMessage(assistantMsg("abandoned reply has enough text"));
+			session.hindsightCloseRetainBaselineTurns = 0;
+
+			await hindsightBackend.start({
+				session,
+				settings: session.settings,
+				modelRegistry: {} as never,
+				agentDir: ctx.tempDir,
+				taskDepth: 0,
+				hindsightCloseRetainBaselineTurns: 0,
+			});
+
+			const result = await session.navigateTree(firstAssistantId, { summarize: false });
+			expect(result.cancelled).toBe(false);
+			expect(retain).toHaveBeenCalledTimes(1);
+			const treeRetain = String(retain.mock.calls[0]?.[1]);
+			expect(treeRetain).toContain("abandoned turn has enough text");
+			expect(treeRetain).toContain("kept turn has enough text");
+
+			await session.getHindsightSessionState()!.drainOnClose();
+			expect(retain.mock.calls.some(call => String(call[1]).includes("abandoned turn has enough text"))).toBe(true);
+			expect(
+				retain.mock.calls.slice(1).every(call => !String(call[1]).includes("abandoned turn has enough text")),
+			).toBe(true);
+		} finally {
+			await ctx.cleanup();
+		}
+	});
+
 	it("does not duplicate a retained tail after /fresh", async () => {
 		vi.spyOn(HindsightApi.prototype, "createBank").mockResolvedValue({} as never);
 		const retain = vi.spyOn(HindsightApi.prototype, "retain").mockResolvedValue({} as never);

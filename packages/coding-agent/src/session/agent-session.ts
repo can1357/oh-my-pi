@@ -9711,6 +9711,11 @@ export class AgentSession {
 			newLeafId = targetId;
 		}
 
+		// Drain while the outgoing branch is still the active transcript.
+		// extractMessages() reads getBranch(), so a later rebase cannot recover
+		// a below-cadence suffix after resetLeaf()/branch().
+		await this.#memory.drainHindsightPendingRetain();
+
 		// Switch leaf (with or without summary)
 		// Summary is attached at the navigation target position (newLeafId), not the old branch
 		const bashTransition = this.#bash.beginSessionTransition();
