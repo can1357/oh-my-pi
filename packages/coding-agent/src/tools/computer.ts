@@ -171,7 +171,9 @@ async function invokeComputer(
 			if (lifetime.isClosed()) throw new ToolError("Computer session is closed");
 			return await runComputer(session, controller, params, context.signal);
 		case "capabilities": {
-			const capabilities = lifetime.isClosed() ? undefined : await controller.capabilities();
+			const capabilities = lifetime.isClosed()
+				? undefined
+				: await controller.capabilities(buildComputerSnapshot(session, true), context.signal);
 			throwIfAborted(context.signal);
 			return {
 				content: [
@@ -208,20 +210,12 @@ function resolveComputerRunCode(params: ComputerRunParams | ComputerCallParams):
 	throw new ToolError("Action 'run' requires exactly one of 'code' or 'fn'.");
 }
 
-async function runComputer(
-	session: ToolSession,
-	controller: ComputerController,
-	params: ComputerRunParams | ComputerCallParams,
-	signal?: AbortSignal,
-): Promise<AgentToolResult<unknown>> {
-	const code = resolveComputerRunCode(params);
-	// Direct inspection calls run read-only so the desktop guard backs the read approval tier.
-	const readOnly = params.action === "call" ? isReadOnlyComputerCall(params.chain) : (params.read_only ?? false);
-	const timeoutSeconds = clampTimeout("computer", params.timeout, session.settings.get("tools.maxTimeout"));
+/** Freezes the current session settings into the snapshot every worker command carries. */
+function buildComputerSnapshot(session: ToolSession, readOnly: boolean): ComputerSessionSnapshot {
 	const coordinateSafe = usesCoordinateSafeImageSizing(session.getActiveModel?.());
 	const configuredMaxWidth = session.settings.get("computer.maxWidth");
 	const configuredMaxHeight = session.settings.get("computer.maxHeight");
-	const snapshot: ComputerSessionSnapshot = {
+	return {
 		cwd: session.cwd,
 		sessionId: session.getEvalSessionId?.() ?? session.getSessionId?.() ?? "computer",
 		captureMaxWidth: coordinateSafe
@@ -233,6 +227,19 @@ async function runComputer(
 		display: session.settings.get("computer.display") ?? "all",
 		readOnly,
 	};
+}
+
+async function runComputer(
+	session: ToolSession,
+	controller: ComputerController,
+	params: ComputerRunParams | ComputerCallParams,
+	signal?: AbortSignal,
+): Promise<AgentToolResult<unknown>> {
+	const code = resolveComputerRunCode(params);
+	// Direct inspection calls run read-only so the desktop guard backs the read approval tier.
+	const readOnly = params.action === "call" ? isReadOnlyComputerCall(params.chain) : (params.read_only ?? false);
+	const timeoutSeconds = clampTimeout("computer", params.timeout, session.settings.get("tools.maxTimeout"));
+	const snapshot = buildComputerSnapshot(session, readOnly);
 	const run = await controller.run(code, timeoutSeconds * 1000, snapshot, signal);
 	throwIfAborted(signal);
 

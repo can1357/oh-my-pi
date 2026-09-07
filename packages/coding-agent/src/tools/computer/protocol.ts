@@ -21,6 +21,7 @@ export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunEr
 export type ComputerWorkerInbound =
 	| { type: "ping"; id: string }
 	| { type: "run"; id: string; code: string; timeoutMs: number; session: ComputerSessionSnapshot }
+	| { type: "capabilities"; id: string; session: ComputerSessionSnapshot }
 	| { type: "abort"; id: string }
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
@@ -58,6 +59,8 @@ export type ComputerWorkerOutbound =
 	| { type: "pong"; id: string }
 	| { type: "result"; id: string; ok: true; payload: ComputerRunOk }
 	| { type: "result"; id: string; ok: false; error: RunErrorPayload }
+	| { type: "capabilities"; id: string; ok: true; capabilities: DesktopCapabilities }
+	| { type: "capabilities"; id: string; ok: false; error: RunErrorPayload }
 	| { type: "tool-call"; id: string; runId: string; name: string; args: unknown }
 	| { type: "closed" };
 
