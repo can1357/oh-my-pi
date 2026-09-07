@@ -45,6 +45,7 @@ export default {
 			kernelOwnerId: identity.ownerId,
 			sessionFile: opts.sessionFile,
 			reset: opts.reset,
+			unboundedOutput: opts.unboundedOutput,
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,
 			session: opts.session,

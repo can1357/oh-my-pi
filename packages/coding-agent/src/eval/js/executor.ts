@@ -28,6 +28,13 @@ export interface JsExecutorOptions {
 	session: ToolSession;
 	/** On-disk roots the helpers substitute for internal-URL schemes (e.g. `local://`). */
 	localRoots?: Record<string, string>;
+	/**
+	 * Keep the captured stdout whole: no inline spill budget and no per-line
+	 * column cap. Set when the cell's consumer is a kernel rather than the model
+	 * (a nested `tool.eval()` through the eval bridge), where eliding the middle
+	 * of a value the caller decodes is silent corruption.
+	 */
+	unboundedOutput?: boolean;
 }
 
 export interface JsResult {
@@ -79,9 +86,13 @@ export async function executeJs(code: string, options: JsExecutorOptions): Promi
 	const outputSink = new OutputSink({
 		artifactPath: options.artifactPath,
 		artifactId: options.artifactId,
-		spillThreshold: DEFAULT_MAX_BYTES,
-		headBytes: resolveOutputSinkHeadBytes(options.session.settings),
-		maxColumns: resolveOutputMaxColumns(options.session.settings),
+		...(options.unboundedOutput
+			? { spillThreshold: Number.MAX_SAFE_INTEGER, headBytes: 0, maxColumns: 0 }
+			: {
+					spillThreshold: DEFAULT_MAX_BYTES,
+					headBytes: resolveOutputSinkHeadBytes(options.session.settings),
+					maxColumns: resolveOutputMaxColumns(options.session.settings),
+				}),
 		onChunk: chunk => options.onChunk?.(chunk),
 	});
 	const legacyTimeoutMs = getExecutionTimeoutMs(options);

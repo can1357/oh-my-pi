@@ -1,7 +1,9 @@
 import { afterEach, describe, expect, it, mock, spyOn } from "bun:test";
 import * as os from "node:os";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import type { ClientBridge, ClientBridgeTerminalHandle } from "@oh-my-pi/pi-coding-agent/session/client-bridge";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
 
@@ -109,6 +111,33 @@ describe("BashTool ACP terminal routing", () => {
 
 		// The handle must always be released
 		expect(releaseSpy).toHaveBeenCalledTimes(1);
+	});
+
+	// The client truncates at `outputByteLimit` before OMP sees a byte, so the
+	// eval bridge's untruncated-output contract has to be honoured at terminal
+	// creation. The final inline cap cannot restore what the client dropped.
+	it("creates the terminal without an output limit for a programmatic caller", async () => {
+		const handle: ClientBridgeTerminalHandle = {
+			terminalId: "term-eval",
+			waitForExit: async () => ({ exitCode: 0, signal: null }),
+			currentOutput: async () => ({ output: "payload", truncated: false }),
+			kill: async () => {},
+			release: async () => {},
+		};
+		const bridge: ClientBridge = {
+			capabilities: { terminal: true },
+			createTerminal: async () => handle,
+		};
+		const createSpy = spyOn(bridge, "createTerminal");
+		const tool = new BashTool(makeSession(bridge));
+
+		await tool.execute("call-model", { command: "echo hi" }, undefined, undefined, undefined);
+		expect(createSpy.mock.calls[0]![0].outputByteLimit).toBe(DEFAULT_MAX_BYTES);
+
+		await tool.execute("call-kernel", { command: "echo hi" }, undefined, undefined, {
+			programmaticCaller: true,
+		} as AgentToolContext);
+		expect(createSpy.mock.calls[1]![0].outputByteLimit).toBeUndefined();
 	});
 
 	it("extracts graphics from cumulative terminal snapshots without leaking escapes", async () => {

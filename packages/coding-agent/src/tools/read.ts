@@ -1267,7 +1267,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		params: ReadParams,
 		signal?: AbortSignal,
 		_onUpdate?: AgentToolUpdateCallback<ReadToolDetails>,
-		_toolContext?: AgentToolContext,
+		toolContext?: AgentToolContext,
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		let { path: readPath } = params;
 		if (readPath.startsWith("file://")) {
@@ -1320,7 +1320,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					immutable: true,
 				});
 			}
-			return executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal);
+			return executeReadUrl(this.session, { path: parsedUrlTarget.path, raw: urlRaw }, signal, {
+				unbounded: toolContext?.programmaticCaller === true,
+			});
 		}
 
 		// Handle native OMP URLs and custom-scheme resources advertised by MCP servers.

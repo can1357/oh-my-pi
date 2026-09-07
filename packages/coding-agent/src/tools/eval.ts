@@ -447,6 +447,10 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 				signal: runSignal,
 				sessionAbortController,
 				emitUpdate,
+				// A nested `tool.eval()` from a cell is still a kernel consuming the
+				// text: the sink's spill budget and column cap would shred the inner
+				// cell's output before the bridge's own guard ever sees it.
+				unboundedOutput: ctx?.programmaticCaller === true,
 			});
 			return session.trackEvalExecution?.(execution, sessionAbortController) ?? execution;
 		};
@@ -613,6 +617,8 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		signal: AbortSignal | undefined;
 		sessionAbortController: AbortController;
 		emitUpdate?: (text: string, details: EvalToolDetails) => void;
+		/** See `BashExecutorOptions.unboundedOutput`: keep a programmatic caller's capture whole. */
+		unboundedOutput?: boolean;
 	}): Promise<AgentToolResult<EvalToolDetails | undefined>> {
 		const { session, cells, languages, notice, excludeWebP, signal, sessionAbortController, emitUpdate } = options;
 		let outputSink: OutputSink | undefined;
@@ -691,8 +697,12 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			outputSink = new OutputSink({
 				artifactPath,
 				artifactId,
-				headBytes: resolveOutputSinkHeadBytes(session.settings),
-				maxColumns: resolveOutputMaxColumns(session.settings),
+				...(options.unboundedOutput
+					? { spillThreshold: Number.MAX_SAFE_INTEGER, headBytes: 0, maxColumns: 0 }
+					: {
+							headBytes: resolveOutputSinkHeadBytes(session.settings),
+							maxColumns: resolveOutputMaxColumns(session.settings),
+						}),
 				onChunk: chunk => {
 					appendTail(chunk);
 					if (activeLiveCell) {
@@ -749,6 +759,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 						session,
 						idleTimeoutMs,
 						reset: cell.reset,
+						unboundedOutput: options.unboundedOutput,
 						onChunk: chunk => {
 							outputSink!.push(chunk);
 						},

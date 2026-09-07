@@ -1,5 +1,5 @@
 import { type } from "@oh-my-pi/omptype";
-import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import type { AgentToolContext, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { untilAborted } from "@oh-my-pi/pi-utils";
 import type { EvalPreludeContext, EvalPreludeDefinition } from "../eval/preludes";
 import browserDescription from "../prompts/tools/browser.md" with { type: "text" };
@@ -182,7 +182,7 @@ async function invokeBrowser(
 				return await closeBrowser(name, parsed, details, timeoutMs, context.signal);
 			case "run":
 			case "call":
-				return await runBrowser(session, name, parsed, details, timeoutMs, context.signal);
+				return await runBrowser(session, name, parsed, details, timeoutMs, context.signal, context.context);
 		}
 	} catch (error) {
 		if (error instanceof ToolAbortError) throw error;
@@ -336,6 +336,7 @@ async function runBrowser(
 	details: BrowserPreludeDetails,
 	timeoutMs: number,
 	signal?: AbortSignal,
+	ctx?: AgentToolContext,
 ): Promise<AgentToolResult<unknown>> {
 	const code = resolveBrowserRunCode(params);
 	const tab = getTab(name);
@@ -364,6 +365,9 @@ async function runBrowser(
 	// text inline; the full text stays recoverable via the artifact footer
 	// when allocation succeeds.
 	const cappedText = await enforceInlineByteCap(textOnly, {
+		// A programmatic caller (`eval` bridge) decodes this text; elide it and
+		// binary payloads (screenshot base64) silently lose their middle bytes.
+		maxBytes: ctx?.programmaticCaller === true ? 0 : undefined,
 		saveArtifact: full => saveBrowserOutputArtifact(session, full),
 	});
 	const nonText = content.filter(part => part.type !== "text");

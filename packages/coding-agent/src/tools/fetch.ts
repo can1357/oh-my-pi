@@ -1723,13 +1723,22 @@ export async function executeReadUrl(
 	session: ToolSession,
 	params: { path: string; raw?: boolean },
 	signal?: AbortSignal,
+	options?: {
+		/**
+		 * Skip the model-facing presentation cap below. Set for programmatic
+		 * callers (the `eval` tool bridge), whose consumer parses the response —
+		 * a head-truncated JSON body or base64 payload is corrupt, not shortened.
+		 * The scraper's own `MAX_OUTPUT_CHARS` normalization still applies.
+		 */
+		unbounded?: boolean;
+	},
 ): Promise<AgentToolResult<ReadUrlToolDetails>> {
 	let entry = await fetchReadUrl(session, params, signal);
 	const truncation = truncateHead(entry.output, {
 		maxBytes: DEFAULT_MAX_BYTES,
 		maxLines: FETCH_DEFAULT_MAX_LINES,
 	});
-	const needsArtifact = truncation.truncated;
+	const needsArtifact = truncation.truncated && options?.unbounded !== true;
 	if (needsArtifact && !entry.artifactId) {
 		entry = await ensureReadUrlArtifact(session, entry);
 	}

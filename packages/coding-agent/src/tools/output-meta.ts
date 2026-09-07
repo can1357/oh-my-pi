@@ -726,6 +726,9 @@ async function spillLargeResultToArtifact(
 	toolName: string,
 	context: AgentToolContext | undefined,
 ): Promise<AgentToolResult> {
+	// The `eval` bridge feeds this straight to a kernel; eliding the middle of
+	// the text there is silent data corruption, not context-window protection.
+	if (context?.programmaticCaller === true) return result;
 	const sessionManager = context?.sessionManager;
 	if (!sessionManager) return result;
 	const { threshold, tailBytes, tailLines, headBytes } = getSpillConfig(context?.settings);

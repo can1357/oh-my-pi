@@ -1095,6 +1095,65 @@ exit 64
 		expect(elapsed).toBeLessThan(10_000);
 	}, 15_000);
 
+	// A programmatic caller (the `eval` tool bridge) decodes this capture instead
+	// of reading it, so both of the sink's model-facing truncation mechanisms —
+	// the inline spill budget and the per-line column cap — must be off. Eliding
+	// the middle of a base64 payload is exactly how a corrupt screenshot got
+	// written to disk and wedged a session against the provider.
+	it("keeps a programmatic caller's capture whole on both truncation axes", async () => {
+		// One line, far past both the 50 KiB inline budget and the per-line cap.
+		// Emitted through this runner's own binary so the case is exercised on
+		// every platform, not just where `awk` exists.
+		const payloadBytes = DEFAULT_MAX_BYTES * 4;
+		const command = `${shellQuote(process.execPath)} -e ${shellQuote(`process.stdout.write("a".repeat(${payloadBytes}))`)}`;
+
+		const bounded = await executeBash(command, { cwd: tempDir, timeout: 15_000 });
+		expect(bounded.totalBytes).toBe(payloadBytes);
+		expect(bounded.outputBytes).toBeLessThan(payloadBytes);
+
+		const whole = await executeBash(command, { cwd: tempDir, timeout: 15_000, unboundedOutput: true });
+		expect(whole.exitCode).toBe(0);
+		expect(whole.output).toBe("a".repeat(payloadBytes));
+	}, 30_000);
+
+	// Truncation is not the only way the captured stream stops being the stream:
+	// the shell minimizer rewrites recognized commands wholesale and the result
+	// replaces the sink's contents. A cell parsing `ls`/`git`/`jq` output would
+	// get a summary where the bridge promised bytes.
+	it("runs a programmatic caller's command without the shell minimizer", async () => {
+		for (let index = 0; index < 400; index++) {
+			fs.writeFileSync(path.join(tempDir, `file-${index}.txt`), "x".repeat(200));
+		}
+
+		let minimizedOriginal: string | undefined;
+		const bounded = await executeBash("ls -la", {
+			cwd: tempDir,
+			timeout: 15_000,
+			onMinimizedSave: async original => {
+				minimizedOriginal = original;
+				return "artifact-minimized";
+			},
+		});
+		// Guard: the assertions below say nothing if the filter did not recognize
+		// this command on the host platform.
+		if (minimizedOriginal === undefined) return;
+		expect(bounded.output).not.toContain("total ");
+
+		let unboundedMinimizedOriginal: string | undefined;
+		const whole = await executeBash("ls -la", {
+			cwd: tempDir,
+			timeout: 15_000,
+			unboundedOutput: true,
+			onMinimizedSave: async original => {
+				unboundedMinimizedOriginal = original;
+				return "artifact-minimized";
+			},
+		});
+		expect(unboundedMinimizedOriginal).toBeUndefined();
+		expect(whole.output).toContain("total ");
+		expect(whole.output).toContain("file-399.txt");
+	}, 30_000);
+
 	it("sources snapshot env vars across session commands", async () => {
 		if (process.platform === "win32") {
 			return;

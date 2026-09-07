@@ -29,6 +29,13 @@ export interface ExecutorBackendExecOptions {
 	 * progress (e.g. `agent()` subagents) into the UI mid-execution.
 	 */
 	onStatus?: (event: EvalStatusEvent) => void;
+	/**
+	 * Keep the captured stdout whole: no inline spill budget and no per-line
+	 * column cap. Set when the cell's consumer is a kernel rather than the model
+	 * (a nested `tool.eval()` through the eval bridge), where eliding the middle
+	 * of a value the caller decodes is silent corruption.
+	 */
+	unboundedOutput?: boolean;
 }
 
 /** Result returned by a backend's execute(). */

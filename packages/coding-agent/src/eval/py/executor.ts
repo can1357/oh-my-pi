@@ -98,6 +98,13 @@ export interface PythonExecutorOptions {
 	artifactPath?: string;
 	artifactId?: string;
 	/**
+	 * Keep the captured stdout whole: no inline spill budget and no per-line
+	 * column cap. Set when the cell's consumer is a kernel rather than the model
+	 * (a nested `tool.eval()` through the eval bridge), where eliding the middle
+	 * of a value the caller decodes is silent corruption.
+	 */
+	unboundedOutput?: boolean;
+	/**
 	 * On-disk roots the prelude helpers (`read`/`write`) substitute for
 	 * internal-URL schemes (e.g. `{ local: "/…/artifacts/local" }`). Exported to
 	 * the kernel as `PI_EVAL_LOCAL_ROOTS` (JSON) so `write("local://x")` lands
