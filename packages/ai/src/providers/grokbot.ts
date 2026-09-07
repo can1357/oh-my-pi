@@ -564,7 +564,6 @@ function applyUsage(output: AssistantMessage, usage: Record<string, unknown>) {
 			usage.output ??
 			0,
 	);
-	const total = Number(usage.totalTokens ?? usage.total_tokens ?? input + outTok);
 	const cacheRead = Number(
 		usage.cachedTokens ??
 			usage.cached_tokens ??
@@ -574,11 +573,22 @@ function applyUsage(output: AssistantMessage, usage: Record<string, unknown>) {
 			0,
 	);
 	const cacheWrite = Number(usage.cacheWriteTokens ?? usage.cache_write_tokens ?? usage.cacheWrite ?? 0);
-	output.usage.input = Number.isFinite(input) ? input : 0;
-	output.usage.output = Number.isFinite(outTok) ? outTok : 0;
-	output.usage.totalTokens = Number.isFinite(total) ? total : 0;
-	output.usage.cacheRead = Number.isFinite(cacheRead) ? cacheRead : 0;
-	output.usage.cacheWrite = Number.isFinite(cacheWrite) ? cacheWrite : 0;
+	const safeInput = Number.isFinite(input) ? input : 0;
+	const safeOutput = Number.isFinite(outTok) ? outTok : 0;
+	const safeCacheRead = Number.isFinite(cacheRead) ? cacheRead : 0;
+	const safeCacheWrite = Number.isFinite(cacheWrite) ? cacheWrite : 0;
+	// `extendedUsage` has no totalTokens field — synthesize from all four buckets
+	// so prompt-cache sessions do not undercount context/telemetry totals.
+	const explicitTotal = usage.totalTokens ?? usage.total_tokens;
+	const total =
+		explicitTotal !== undefined && explicitTotal !== null && Number.isFinite(Number(explicitTotal))
+			? Number(explicitTotal)
+			: safeInput + safeOutput + safeCacheRead + safeCacheWrite;
+	output.usage.input = safeInput;
+	output.usage.output = safeOutput;
+	output.usage.totalTokens = total;
+	output.usage.cacheRead = safeCacheRead;
+	output.usage.cacheWrite = safeCacheWrite;
 }
 
 function canFinalizeIncompleteToolArgs(argsText: string, isGrammar: boolean): boolean {

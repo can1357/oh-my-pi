@@ -82,6 +82,8 @@
 - Grok Bot probe helpers resolve `secrets/grokbot.env` through shared `getAgentDir()` (profile / XDG / `PI_CODING_AGENT_DIR`), matching `/login grokbot`.
 - Grok Bot stream registration loads `./grokbot` lazily like other providers (no eager protobuf/TUI import on `register-builtins` startup).
 - Grok Bot requests honor discovered `sandParameterDefaults.fast` when the caller omits `fast` (variant rows like `composer-2` keep `fast=false`).
+- Grok Bot synthesizes `usage.totalTokens` from input+output+cacheRead+cacheWrite when `extendedUsage` omits a total.
+- Grok Bot product Read/Write schemas treat `target_file` / `contents` as required-field alternatives via `anyOf`.
 
 ### Fixed
 

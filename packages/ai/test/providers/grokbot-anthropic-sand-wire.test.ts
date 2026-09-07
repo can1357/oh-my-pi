@@ -309,9 +309,19 @@ describe("product wire helpers", () => {
 			"automation",
 		);
 		expect(tools[0]?.name).toBe("Read");
-		const schema = (tools[0]?.parameters as { jsonSchema?: { properties?: Record<string, unknown> } }).jsonSchema;
+		const schema = (
+			tools[0]?.parameters as {
+				jsonSchema?: {
+					properties?: Record<string, unknown>;
+					required?: string[];
+					anyOf?: Array<{ required?: string[] }>;
+				};
+			}
+		).jsonSchema;
 		expect(schema?.properties).toHaveProperty("path");
 		expect(schema?.properties).toHaveProperty("target_file");
+		expect(schema?.required ?? []).not.toContain("path");
+		expect(schema?.anyOf).toEqual([{ required: ["path"] }, { required: ["target_file"] }]);
 	});
 
 	test("Write schema advertises contents as an alias of content", () => {
@@ -330,9 +340,19 @@ describe("product wire helpers", () => {
 			"automation",
 		);
 		expect(tools[0]?.name).toBe("Write");
-		const schema = (tools[0]?.parameters as { jsonSchema?: { properties?: Record<string, unknown> } }).jsonSchema;
+		const schema = (
+			tools[0]?.parameters as {
+				jsonSchema?: {
+					properties?: Record<string, unknown>;
+					required?: string[];
+					anyOf?: Array<{ required?: string[] }>;
+				};
+			}
+		).jsonSchema;
 		expect(schema?.properties).toHaveProperty("content");
 		expect(schema?.properties).toHaveProperty("contents");
+		expect(schema?.required).toEqual(["path"]);
+		expect(schema?.anyOf).toEqual([{ required: ["content"] }, { required: ["contents"] }]);
 	});
 
 	test("parent profile injects SendToUser", () => {

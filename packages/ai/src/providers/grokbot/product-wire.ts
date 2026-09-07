@@ -157,6 +157,27 @@ function toolParametersToJson(tool: Tool): Record<string, unknown> {
 
 type Tool = NonNullable<Context["tools"]>[number];
 
+/**
+ * When advertising a property alias (e.g. `contents` for `content`), keep the
+ * rest of `required` and express the alias pair as `anyOf` so strict schema
+ * consumers accept either key.
+ */
+function withRequiredPropertyAlias(
+	schema: Record<string, unknown>,
+	canonical: string,
+	alias: string,
+): Record<string, unknown> {
+	const required = Array.isArray(schema.required)
+		? (schema.required as unknown[]).filter((key): key is string => typeof key === "string")
+		: [];
+	if (!required.includes(canonical)) return schema;
+	return {
+		...schema,
+		required: required.filter(key => key !== canonical),
+		anyOf: [{ required: [canonical] }, { required: [alias] }],
+	};
+}
+
 function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 	if (!tool || typeof tool !== "object") return undefined;
 	const name = typeof tool.name === "string" ? tool.name : "";
@@ -174,31 +195,39 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 	if ((name === "write" || wireName === "Write") && schema.properties && typeof schema.properties === "object") {
 		const props = schema.properties as Record<string, unknown>;
 		if (props.content && !props.contents) {
-			parametersSchema = {
-				...schema,
-				properties: {
-					...props,
-					contents: {
-						type: "string",
-						description: "File contents (alias of content)",
+			parametersSchema = withRequiredPropertyAlias(
+				{
+					...schema,
+					properties: {
+						...props,
+						contents: {
+							type: "string",
+							description: "File contents (alias of content)",
+						},
 					},
 				},
-			};
+				"content",
+				"contents",
+			);
 		}
 	}
 	if ((name === "read" || wireName === "Read") && schema.properties && typeof schema.properties === "object") {
 		const props = (parametersSchema.properties ?? schema.properties) as Record<string, unknown>;
 		if (props.path && !props.target_file) {
-			parametersSchema = {
-				...parametersSchema,
-				properties: {
-					...props,
-					target_file: {
-						type: "string",
-						description: "File path (alias of path)",
+			parametersSchema = withRequiredPropertyAlias(
+				{
+					...parametersSchema,
+					properties: {
+						...props,
+						target_file: {
+							type: "string",
+							description: "File path (alias of path)",
+						},
 					},
 				},
-			};
+				"path",
+				"target_file",
+			);
 		}
 	}
 	const entry: ProductWireTool = {

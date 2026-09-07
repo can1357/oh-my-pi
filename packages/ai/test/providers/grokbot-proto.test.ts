@@ -1108,6 +1108,32 @@ describe("grokbot incomplete tool calls", () => {
 		]);
 	});
 
+	test("synthesizes totalTokens from extendedUsage including cache buckets", async () => {
+		mockAuth();
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "hi", isFinal: true } }));
+		const usage = frameConnectProto(
+			encodeInferenceStreamResponse({
+				extendedUsage: {
+					inputTokens: 10,
+					outputTokens: 3,
+					cacheReadTokens: 40,
+					cacheWriteTokens: 5,
+					maxTokens: 1000,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(text, usage, trailer)) as FetchImpl;
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.usage.input).toBe(10);
+		expect(result.usage.output).toBe(3);
+		expect(result.usage.cacheRead).toBe(40);
+		expect(result.usage.cacheWrite).toBe(5);
+		expect(result.usage.totalTokens).toBe(58);
+	});
+
 	test("finalizes isComplete:false when args are already a complete JSON object", async () => {
 		mockAuth();
 		const incomplete = frameConnectProto(
