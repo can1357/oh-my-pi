@@ -1,0 +1,46 @@
+%YAML 1.2
+---
+# Astro component syntax for syntect.
+#
+# An Astro file is an optional `---` fenced TypeScript frontmatter followed by
+# an HTML-like template whose `{…}` holes are TypeScript expressions. Sublime
+# ships no Astro grammar, so this one composes the vendored TypeScript syntax
+# (`source.ts`) with syntect's bundled HTML (`text.html.basic`).
+name: Astro
+file_extensions:
+  - astro
+scope: source.astro
+contexts:
+  main:
+    # The frontmatter fence is only valid before any template content.
+    - match: '^(---)[ \t]*$'
+      captures:
+        1: punctuation.section.frontmatter.begin.astro
+      set: frontmatter
+    - match: '(?=\S)'
+      set: template
+
+  frontmatter:
+    - meta_content_scope: source.ts.embedded.astro
+    - match: '^(---)[ \t]*$'
+      captures:
+        1: punctuation.section.frontmatter.end.astro
+      set: template
+    - include: scope:source.ts
+
+  template:
+    - include: expression
+    - include: scope:text.html.basic
+
+  # `{expr}` holes in template text. Nested braces are balanced by the
+  # TypeScript grammar's own block/object contexts, so the first unmatched `}`
+  # closes the hole.
+  expression:
+    - match: '\{'
+      scope: punctuation.section.embedded.begin.astro
+      push:
+        - meta_content_scope: source.ts.embedded.astro
+        - match: '\}'
+          scope: punctuation.section.embedded.end.astro
+          pop: true
+        - include: scope:source.ts
