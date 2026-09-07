@@ -50,5 +50,5 @@ failure of the request, never silently downgraded.
   paragraph); "The inference" opening lesson
 - 0015 (Directors), 0017 (compatibility as structured knowledge), 0018 (provider infrastructure),
   0019 (forced-call escalation), 0021 (constrained sampling ownership)
-- `crates/agent/src/regime.rs`, `crates/agent/src/tool_choice.rs`, `crates/inference/src/call.rs`,
-  `crates/inference/src/plan.rs`, `crates/inference/src/codec/openai_chat.rs`
+- `crates/agent/src/regime.rs`, `crates/agent/src/tool_choice.rs`, `crates/ai/src/call.rs`,
+  `crates/ai/src/plan.rs`, `crates/ai/src/codec/openai_chat.rs`

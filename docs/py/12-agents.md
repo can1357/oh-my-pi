@@ -177,7 +177,7 @@ flowchart LR
 
 The thread half is *already real*: `Journal::rewind` appends a `Kind::Rewind`
 event and `Log::live()` folds it forward by truncating the working chain
-(`crates/storage/src/transcript/reader.rs:108`). Nothing is deleted; a rewind is
+(`crates/journal/src/chain.rs:12-15`). Nothing is deleted; a rewind is
 a fact appended to an append-only log, which is why redo is free and why two
 agents rewinding the same session do not corrupt each other.
 
@@ -642,8 +642,7 @@ exactly the reason a subagent does: it spends the user's tokens.
   depends entirely on `default`, below.
 - One stateless, non-streaming, tool-less model call. No thread, no history, no
   journal item. Use it for classification, extraction, and titling — the
-  `ctx.model.call` / `ctx.model.stream` shape from
-  `.plan/feature-map/discovery.md:190`.
+  `ctx.model.call` / `ctx.model.stream` shape.
 - **`context="thread"` trades statelessness for the live conversation.** The
   call becomes one non-persisted side-channel turn over the caller's projected
   thread — the same mechanism behind the interactive `/btw` command and the
@@ -1978,7 +1977,7 @@ More than the assignment implies, which changes the shape of the work from
   transport is needed for messaging, steering, injection, or schedule delivery.
 - **Journal rewind is done.** `Journal::rewind`
   (`crates/agent/src/journal.rs:576`) appends `Kind::Rewind { to }`;
-  `Log::live()` (`crates/storage/src/transcript/reader.rs:108-118`) folds it by
+  `Log::live()` (`crates/journal/src/chain.rs:12-15`) folds it by
   truncating the working chain; `Agent::rewind` and `Agent::rewind_targets`
   (`crates/agent/src/loop.rs:235,251`) are public today, and `RewindTarget`
   already carries `{ event, keep, text }`. `RewindWhilePending`
@@ -2090,7 +2089,7 @@ More than the assignment implies, which changes the shape of the work from
   `env/v1`. `crates/app/src/envd/workspace.rs` is walker traversal and byte
   search only.
 - **No scheduler.** No cron, no durable timer, no persistent trigger anywhere
-  in `crates/agent`, `crates/app`, or `crates/storage`. The only clocks are
+  in `crates/agent`, `crates/app`, or `crates/journal`. The only clocks are
   `AgentSnapshot.deadline`, `RetryPolicy` backoff, and the envd worker's ping
   interval.
 - **No inter-agent broker.** `Mailbox` is single-consumer and in-crate. There
@@ -2363,7 +2362,7 @@ allocation-free. `SpawnPermit` is RAII: dropping it releases the concurrency
 permit, so a spawn that fails between admission and start cannot leak a slot.
 
 One clarification, because the word "admission" is loaded here.
-`PLAN.md` §D6 (**D6 — One mailbox, no gate chain**, amended 2026-08-19)
+Locked decision **D6 — One mailbox, no gate chain** (amended 2026-08-19)
 forbids exactly this word applied to tool calls: "A tool batch runs concurrently
 exactly as the model issued it: no batch-level admission scheduler, no
 parallelism detection, no reordering." `AgentTree::admit` is not that. It
@@ -2487,7 +2486,7 @@ selected against the wait future — no polling.
 
 New journal `Kind::Schedule { id, spec }` and
 `Kind::Firing { id, key, at, outcome }` in
-`crates/storage/src/transcript/event.rs`, with codec arms in `codec.rs`
+`crates/journal/src/transcript/event.rs`, with codec arms in `codec.rs`
 alongside the existing `payload!(RewindPayload { … })` macro (`codec.rs:402`).
 The firing `key` is the idempotency key: the scheduler journals intent before
 delivery and outcome after, and recovery replays any intent without an
@@ -2725,10 +2724,10 @@ worktree capability.
   matters, the answer is the `paths` filter or design 3's CoW capture, not a
   cheaper hash.
 - **A rewind pays one projection, and must not add a second.**
-  `Log::live()` (`crates/storage/src/transcript/reader.rs:81`) returns
+  `Log::live()` (`crates/journal/src/chain.rs:12-15`) returns
   `Vec<u64>` and is already called per projection — it is the shipped patch
   protocol, splicing `Reset`/`Compact`/`Rewind` over the live event-index list.
-  (`crates/storage/src/transcript/patch.rs` is *not* that: it defines
+  (`crates/journal/src/transcript/patch.rs` is *not* that: it defines
   `Patch<T>`, a tri-state field patch for partial record updates. Do not cite it
   as precedent here.) `omp.agents.rewind` appends one event and lets the
   existing fold do the work; it must not build a parallel index or re-walk the
@@ -2887,7 +2886,7 @@ worktree capability.
    that wording, and this document described a warm process **per active
    extension** — so Rev 2 recorded **a D5 wording amendment as recommended**
    rather than silently contradicting a locked decision. That amendment was
-   ratified 2026-08-19: D5's third clause (`PLAN.md` §D5) now reads
+   ratified 2026-08-19: D5's third clause now reads
    "supervised worker processes, one per active extension, keyed `(layer,
    tier, extension)`; pooling is explicit opt-in fate-sharing", with SIGKILL
    blast radius one extension and approval "a durable Core-owned ticket". The
@@ -2969,7 +2968,7 @@ Changes this file made for Revision 2, and the review point that drove each:
   §"Principal identity"): open question 1 rewritten as resolved-for-semantics
   with the residual daemon-token work owned by `docs/py/13-inference.md`.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Dispatch surface.** The two load-bearing sibling facts, the `pi-subagent-scheduler`
   pattern, the `allowed_devices` row, and the `task.md` conflict entry were rewritten from
@@ -2979,13 +2978,13 @@ Changes this file made for Revision 2, and the review point that drove each:
   `target=DeviceCall(...)`. Declarations carry soft/hard intent and the surface is decided
   by the dynamic tool policy; the `do_` grammar, `@omp.tool`, and `omp.ToolPath` are owned
   by `docs/py/01-devices.md`.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. The `AgentTree::admit`
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. The `AgentTree::admit`
   clarification and the `subagent_spawn` paragraph now quote D6's amended text ("no
   batch-level admission scheduler, no parallelism detection, no reordering"; per-invocation
   procedure explicitly permitted) instead of flagging a recommended wording amendment, and
   open question 7's user-facing flag records the D5 amendment as ratified — per-extension
   worker processes keyed `(layer, tier, extension)`, pooling as opt-in fate-sharing,
-  durable approval tickets (`PLAN.md` §D5). Rev 2's flags and Revision 1's "not
+  durable approval tickets (locked decision D5). Rev 2's flags and Revision 1's "not
   mine to make" quote are kept as historical records.
 
 **Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.

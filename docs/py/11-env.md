@@ -75,7 +75,7 @@ a durable Core-owned ticket (`docs/py/06-policy.md`). This document previously d
 process wrongly, twice; both retractions are recorded under
 [Failure and cancellation semantics](#failure-and-cancellation-semantics).
 
-This is also the clause that `PLAN.md` §D6 (D6, one mailbox, no gate chain, amended
+This is also the clause that locked decision **D6, One mailbox, no gate chain** (amended
 2026-08-19) leans on. D6
 deletes the batch-level admission scheduler and parallelism detection from the loop, and
 says plainly where the guarantees moved instead: "Safety lives in env invariants (docserver
@@ -1745,7 +1745,7 @@ once the edge exists*.
 | `env/v1` typed client, request correlation, `RunGuard` | `crates/env/src/client.rs`, `crates/env/src/guard.rs` | Complete. `RunGuard::relinquish` already models detached work; drop already queues cancellation on a separate unbounded control channel so drop never blocks. |
 | `env/v1` server dispatch, UDS + in-process serving, hello/retire, connection ownership tables | `crates/app/src/envd/server.rs` | Complete for the frames that exist. `MIN_SCHEMA_REV = 4`, 64 MiB frame limit, 300 s default tool deadline, 250 ms native cancel grace. |
 | Exec host: persistent sessions, PTY, per-command `ExecRun` with TERM-then-KILL drop, spawn-observed process groups, named processes with restart and readiness | `crates/app/src/envd/exec.rs` | Complete. `ExecRun::drop` → `cancel(250 ms)`; `SpawnBook` implements `SpawnObserver` so every process group is tracked from birth. |
-| In-process bash: full AST, expansion, 51 Bash builtins, 58 coreutils, 8 process builtins, job control | `crates/shell-engine/src/builtins/factory.rs`, `crates/shell-builtins/src/factory.rs` | Complete. `sh.parse` is a thin projection of `parser::ast`. Counts are registration-site names, several platform-gated (`exec`, `ulimit`, `umask`, `errno` are Unix-only; `kill`/`printf` Unix-or-Windows). |
+| In-process bash: full AST, expansion, 51 Bash builtins, 58 coreutils, 8 process builtins, job control | `crates/shell/src/builtins/factory.rs`, `crates/shell-builtins/src/factory.rs` | Complete. `sh.parse` is a thin projection of `parser::ast`. Counts are registration-site names, several platform-gated (`exec`, `ulimit`, `umask`, `errno` are Unix-only; `kill`/`printf` Unix-or-Windows). |
 | Document authority: leases, `Revision` (BLAKE3-256 + sequence), transactions, fuzzy 3-way rebase, LSP mux, formatting roundtrip, `workspace/applyEdit` lowering, native watches, tree-sitter summaries, hashline/replace edit adapters | `crates/envd/src/docserver/` | Complete, over `document/v1`. |
 | Env-side document client with revision-pinned lease type whose `Drop` sends a best-effort close | `crates/app/src/envd/docs.rs` | Complete. `DocumentLease`, `DocumentHost::{open,read,summarize,commit,commit_transaction,close}` — this is exactly the Rust shape `omp.env.docs` mirrors. |
 | Walker: cached, gitignore-layered, parallel, cancellation-heartbeat, glob filters, ranking | `crates/walker/` | Complete. `WorkspaceHost` in `crates/app/src/envd/workspace.rs` already enforces root containment by canonicalization. |
@@ -2125,8 +2125,8 @@ renumbered an existing field would be wrong on its face; none here does.
   literally said "warm pool of **one**", so this document flagged **a D5 amendment as
   recommended** (warm pool of one → warm process per active extension; SIGKILL granularity per
   extension; durable approval tickets remove long-suspension pressure) for the owner of
-  `PLAN.md` rather than silently rewriting it. That amendment was ratified 2026-08-19:
-  D5's third clause (`PLAN.md` §D5) now reads "supervised worker processes, one per
+  the locked decision rather than silently rewriting it. That amendment was ratified 2026-08-19:
+  D5's third clause now reads "supervised worker processes, one per
   active extension, keyed `(layer, tier, extension)`; pooling is explicit opt-in fate-sharing",
   and D5's substance — cancellation is resource-owned; SIGKILL + respawn is the
   mechanism — is preserved and strengthened. The flag is kept as the historical record. The shipped
@@ -2157,16 +2157,16 @@ renumbered an existing field would be wrong on its face; none here does.
 
 #### Feature-map reconciliation
 
-**Satisfied.** `.plan/feature-map/tools-file.md`: *Read Tool Execution & Dispatch* (3-33),
+**Satisfied.** *Read Tool Execution & Dispatch* (3-33),
 *Line Range & View Selectors* (46-62), *Tree-Sitter Structural Code Summaries* (86-94),
 *Hashline Header Stamping & Snapshot Recording* (95-102) — subsumed by `Revision`, which is
 strictly stronger than a 4-hex tag, *Write Tool Execution & Protections* (111-130),
 *Edit Tool Core & Modes* (138-148) and all four engines (149-189).
-`.plan/feature-map/tools-exec.md`: *Bash tool execution and parameter handling* (3-23),
+*Bash tool execution and parameter handling* (3-23),
 *Interactive PTY overlay mode* (80-92), *Non-interactive environment construction* (116-126),
 *Direnv integration* (127-137) — as an `EnvironmentDelta` computed by a preflight,
 *Hub process supervision operations* (221-240) — `StartProcess`/`ReadyProbe`/`AttachOutput` cover
-it verbatim. `.plan/feature-map/lsp-dap.md`: *Multi-server coordination, startup, and workspace
+it verbatim. *Multi-server coordination, startup, and workspace
 synchronization* (100-108), *Atomic text edit and workspace edit application engine* (109-119),
 *LSP writethrough, deferred diagnostics, and auto-formatting pipeline* (138-152).
 
@@ -2331,7 +2331,7 @@ Changes this file made for Rev 2, and the review point that drove each:
   `crates/app/src/envd/worker.rs:592-727`, queueing at `:612-614`, fatal `request_id` mismatch at
   `:670-673`) and the retracted all-extensions blast radius. The D5 open question is restated as
   resolved by the final per-extension topology, with a **D5 amendment recommended** (never a
-  silent contradiction of `PLAN.md` §D5) and the subinterpreter no-process-group
+  silent contradiction of locked decision D5) and the subinterpreter no-process-group
   argument kept as supporting evidence. The Concepts teaser and the D6 paragraph (explicit scope
   reading, **D6 wording amendment recommended**) were updated to match.
 - **P0#4 / P0#3** — "Speculation and effect" became
@@ -2369,7 +2369,7 @@ Changes this file made for Rev 2, and the review point that drove each:
   and blob-retention rule, and `Denied`/`EffectsNotAuthorized`/`Conflict` naming throughout the
   build section.
 
-**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the PLAN.md amendment:
+**Revision 2.1** — the `dyn`/`@omp.tool` rulings addendum and the D5/D6 amendment:
 
 - **Dispatch surface.** The pi-mechanism table's "disabling the built-in edit" row now says
   an extension's editor is a device dispatched through the `dyn` core tool, with soft/hard
@@ -2377,12 +2377,12 @@ Changes this file made for Rev 2, and the review point that drove each:
   the typed-location cousin list names `omp.ToolPath` where Rev 2 named the retired device
   URL type. The Rev 2.1 ruling deletes the read/write device URL scheme and its transport
   vocabulary entirely; discovery, docs, and dispatch are `dyn` ops.
-- **D5/D6 ratified.** `PLAN.md` §D5/§D6 was amended 2026-08-19. The Concepts D6
+- **D5/D6 ratified.** Locked decisions D5 and D6 were amended 2026-08-19. The Concepts D6
   paragraph now cites the amended text (batch-level scheduling prohibited, per-invocation
   decision procedure permitted) instead of flagging a recommended wording amendment, and
   the Python-cancellation reversal records the D5 amendment as ratified — per-extension
   worker processes keyed `(layer, tier, extension)`, pooling as opt-in fate-sharing,
-  durable approval tickets (`PLAN.md` §D5). Both Rev 2 flags are kept in prose as
+  durable approval tickets (locked decision D5). Both Rev 2 flags are kept in prose as
   historical records.
 
 **Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
