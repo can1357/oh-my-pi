@@ -6677,14 +6677,14 @@ export class AgentSession {
 	async #queueUserMessage(
 		text: string,
 		images: ImageContent[] | undefined,
-		mode: "steer" | "followUp" | "aside",
+		mode: "steer" | "followUp" | "aside" | "nonInterrupting",
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
 	): Promise<void> {
-		// Captured before any await below so the aside branch can detect a
+		// Captured before any await below so queued branches can detect a
 		// newSession()/switchSession() that completed while normalization/vision
-		// description was in flight and drop a record that would otherwise land in a
-		// different session's queue.
+		// description was in flight: aside delivery drops the stale record, while
+		// acknowledged noninterrupting delivery rejects it.
 		const sessionGeneration = this.#sessionGeneration;
 		// A queued user message (RPC/SDK/collab steer or follow-up, or a typed message
 		// while streaming) is a deliberate resume; re-enable advisor auto-resume that
@@ -6723,8 +6723,16 @@ export class AgentSession {
 			this.#resumeStrandedIrcAsides();
 			return;
 		}
+		if (mode === "nonInterrupting") {
+			if (this.#isDisposed) throw new Error("Session disposed before message delivery");
+			if ((await this.#sessionGenerationChanged(sessionGeneration)) || !this.#unsubscribeAgent) {
+				throw new Error("Session changed before message delivery");
+			}
+			if (this.#isDisposed) throw new Error("Session disposed before message delivery");
+		}
+		const queueMode = mode === "nonInterrupting" ? (this.isStreaming ? "followUp" : "steer") : mode;
 		this.#allowQueuedMessageDrainRetry();
-		if (mode === "followUp") {
+		if (queueMode === "followUp") {
 			for (const notice of videoAttachmentNotices) this.agent.followUp(notice);
 			if (imageDescriptionNotice) this.agent.followUp(imageDescriptionNotice);
 			this.agent.followUp({
@@ -7122,6 +7130,14 @@ export class AgentSession {
 			normalizedAppMessage.attribution,
 		);
 		return false;
+	}
+	/** Queue a user message behind active work, or resume it immediately when idle. */
+	async queueNonInterruptingUserMessage(content: string, expectedSessionId: string): Promise<void> {
+		if (this.#isDisposed) throw new Error("Session disposed before message delivery");
+		if (!this.#unsubscribeAgent || this.sessionManager.getSessionId() !== expectedSessionId) {
+			throw new Error("Session changed before message delivery");
+		}
+		await this.#queueUserMessage(content, undefined, "nonInterrupting");
 	}
 
 	/**

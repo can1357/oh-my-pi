@@ -11,6 +11,7 @@ import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
+	DAEMON_CAPABILITY_LIVE_SESSIONS,
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_PTY_COLUMNS,
@@ -24,6 +25,8 @@ import {
 	type DaemonSnapshot,
 	type DaemonSpec,
 	type DaemonWireRequest,
+	type LiveSessionMessageAck,
+	type LiveSessionRegistration,
 	parseDaemonSnapshot,
 	parseDaemonSpec,
 	parseDaemonWireMessage,
@@ -38,6 +41,7 @@ const MAX_LOG_BYTES = 25 * 1024 * 1024;
 const LOG_READ_BYTES = 2 * 1024 * 1024;
 const READINESS_BUFFER_CHARS = 64 * 1024;
 const RESTART_MAX_DELAY_MS = 30_000;
+const LIVE_SESSION_DELIVERY_TIMEOUT_MS = 5_000;
 const RESTART_BACKOFF_BASE_MS = 1_000;
 /**
  * Cap on terminal (exited/failed) daemons surfaced by `list`. Active daemons
@@ -101,6 +105,18 @@ interface DaemonLogRead {
 	text: string;
 	terminalOutput: string;
 	cursor: number;
+}
+
+interface HostedLiveSession {
+	registration: LiveSessionRegistration;
+	socket: net.Socket;
+}
+
+interface PendingLiveSessionMessage {
+	socket: net.Socket;
+	resolve: () => void;
+	reject: (error: Error) => void;
+	timer: NodeJS.Timeout;
 }
 
 function quoteShellArg(value: string): string {
@@ -370,6 +386,9 @@ class DaemonBroker {
 	readonly #pendingCompletions = new Map<string, Map<string, DaemonCompletionNotification>>();
 	readonly #finished = Promise.withResolvers<void>();
 	readonly #sockets = new Set<net.Socket>();
+	readonly #liveSessions = new Map<string, HostedLiveSession>();
+	readonly #liveSessionBySocket = new Map<net.Socket, string>();
+	readonly #pendingLiveSessionMessages = new Map<string, PendingLiveSessionMessage>();
 	#server: net.Server | undefined;
 	#idleTimer: NodeJS.Timeout | undefined;
 	#shuttingDown = false;
@@ -417,6 +436,13 @@ class DaemonBroker {
 			await record.persistQueue;
 		}
 		this.#ownerSockets.clear();
+		for (const pending of this.#pendingLiveSessionMessages.values()) {
+			clearTimeout(pending.timer);
+			pending.reject(new Error("Daemon broker shut down before delivering the live session message"));
+		}
+		this.#pendingLiveSessionMessages.clear();
+		this.#liveSessions.clear();
+		this.#liveSessionBySocket.clear();
 		for (const socket of this.#sockets) socket.destroy();
 		this.#sockets.clear();
 		this.#clients.clear();
@@ -466,6 +492,7 @@ class DaemonBroker {
 			for (const [owner, registration] of this.#ownerSockets) {
 				if (registration.socket === socket) this.#ownerSockets.delete(owner);
 			}
+			this.#removeLiveSession(socket, "Live session disconnected before accepting the message");
 		});
 	}
 
@@ -477,6 +504,8 @@ class DaemonBroker {
 			id = request.id;
 			if (request.token !== this.#token) throw new Error("Daemon broker authentication failed");
 			onAuthenticated();
+			if (request.liveSessionEvents === true) this.#syncLiveSession(socket, request.liveSession);
+			this.#ackLiveSessionMessages(socket, request.liveSessionMessageAcks ?? []);
 			for (const owner of request.completionUnsubscribes ?? []) {
 				const subscriptionId = this.#completionSubscriptions.get(owner);
 				if (
@@ -561,7 +590,11 @@ class DaemonBroker {
 	async #dispatch(operation: DaemonOperation): Promise<DaemonRpcResult> {
 		switch (operation.op) {
 			case "ping":
-				return { op: "ping", projectDir: this.#projectDir };
+				return {
+					op: "ping",
+					projectDir: this.#projectDir,
+					capabilities: [DAEMON_CAPABILITY_LIVE_SESSIONS],
+				};
 			case "start":
 				return this.#start(operation.spec, operation.owner);
 			case "list": {
@@ -589,9 +622,107 @@ class DaemonBroker {
 				await this.#refreshDetached(record);
 				return { op: "describe", daemon: record.snapshot, spec: record.spec };
 			}
+			case "session-list":
+				return {
+					op: "session-list",
+					sessions: [...this.#liveSessions.values()]
+						.map(({ registration }) => ({ ...registration, cwd: this.#projectDir }))
+						.sort((left, right) => right.startedAt.localeCompare(left.startedAt)),
+				};
+			case "session-send":
+				return this.#sendLiveSessionMessage(operation);
 			case "shutdown":
 				return { op: "shutdown" };
 		}
+	}
+
+	#syncLiveSession(socket: net.Socket, registration: LiveSessionRegistration | undefined): void {
+		const previousEndpointId = this.#liveSessionBySocket.get(socket);
+		if (!registration) {
+			if (previousEndpointId) {
+				if (this.#liveSessions.get(previousEndpointId)?.socket === socket) {
+					this.#liveSessions.delete(previousEndpointId);
+				}
+				this.#liveSessionBySocket.delete(socket);
+			}
+			return;
+		}
+		const existing = this.#liveSessions.get(registration.endpointId);
+		if (existing && existing.socket !== socket) {
+			throw new Error(`Live session endpoint is already registered: ${registration.endpointId}`);
+		}
+		if (previousEndpointId && previousEndpointId !== registration.endpointId) {
+			if (this.#liveSessions.get(previousEndpointId)?.socket === socket) {
+				this.#liveSessions.delete(previousEndpointId);
+			}
+		}
+		this.#liveSessions.set(registration.endpointId, { registration, socket });
+		this.#liveSessionBySocket.set(socket, registration.endpointId);
+	}
+
+	#removeLiveSession(socket: net.Socket, reason: string): void {
+		const endpointId = this.#liveSessionBySocket.get(socket);
+		if (endpointId) {
+			this.#liveSessionBySocket.delete(socket);
+			if (this.#liveSessions.get(endpointId)?.socket === socket) this.#liveSessions.delete(endpointId);
+		}
+		for (const [deliveryId, pending] of this.#pendingLiveSessionMessages) {
+			if (pending.socket !== socket) continue;
+			clearTimeout(pending.timer);
+			this.#pendingLiveSessionMessages.delete(deliveryId);
+			pending.reject(new Error(reason));
+		}
+	}
+
+	#ackLiveSessionMessages(socket: net.Socket, acknowledgements: LiveSessionMessageAck[]): void {
+		for (const acknowledgement of acknowledgements) {
+			const pending = this.#pendingLiveSessionMessages.get(acknowledgement.deliveryId);
+			if (!pending || pending.socket !== socket) continue;
+			clearTimeout(pending.timer);
+			this.#pendingLiveSessionMessages.delete(acknowledgement.deliveryId);
+			if (acknowledgement.error !== undefined) {
+				pending.reject(new Error(acknowledgement.error || "Live session rejected the message"));
+			} else {
+				pending.resolve();
+			}
+		}
+	}
+
+	async #sendLiveSessionMessage(
+		operation: Extract<DaemonOperation, { op: "session-send" }>,
+	): Promise<DaemonRpcResult> {
+		const hosted = this.#liveSessions.get(operation.endpointId);
+		if (!hosted || hosted.socket.destroyed) {
+			throw new Error(`Live session endpoint not found: ${operation.endpointId}`);
+		}
+		if (hosted.registration.sessionId !== operation.sessionId) {
+			throw new Error("The OMP process switched sessions; attach again");
+		}
+		const deliveryId = crypto.randomUUID();
+		const { promise, resolve, reject } = Promise.withResolvers<void>();
+		const timer = setTimeout(() => {
+			if (!this.#pendingLiveSessionMessages.delete(deliveryId)) return;
+			reject(new Error("Timed out waiting for the live session to accept the message"));
+		}, LIVE_SESSION_DELIVERY_TIMEOUT_MS);
+		timer.unref();
+		this.#pendingLiveSessionMessages.set(deliveryId, { socket: hosted.socket, resolve, reject, timer });
+		try {
+			hosted.socket.write(
+				`${JSON.stringify({
+					event: "session-message",
+					deliveryId,
+					endpointId: operation.endpointId,
+					sessionId: operation.sessionId,
+					message: operation.message,
+				})}\n`,
+			);
+		} catch (error) {
+			clearTimeout(timer);
+			this.#pendingLiveSessionMessages.delete(deliveryId);
+			throw error;
+		}
+		await promise;
+		return { op: "session-send", endpointId: operation.endpointId, sessionId: operation.sessionId };
 	}
 
 	async #start(spec: DaemonSpec, owner?: string): Promise<DaemonRpcResult> {
@@ -1308,7 +1439,9 @@ class DaemonBroker {
 						if ("pendingCompletions" in decoded && Array.isArray(decoded.pendingCompletions)) {
 							return decoded.pendingCompletions.map(value => {
 								const message = parseDaemonWireMessage(value);
-								if (!("event" in message)) throw new Error("Pending daemon completion is not an event");
+								if (!("event" in message) || message.event !== "daemon-completed") {
+									throw new Error("Pending daemon completion is not a completion event");
+								}
 								return message;
 							});
 						}

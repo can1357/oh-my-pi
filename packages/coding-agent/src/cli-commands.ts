@@ -17,6 +17,7 @@ import {
 	STRING_VALUE_FLAGS,
 	VALUELESS_FLAGS,
 } from "./cli/flag-tables";
+import Attach from "./commands/attach";
 import { launchHelp } from "./commands/launch-help";
 
 export const commands: CommandEntry[] = [
@@ -25,6 +26,11 @@ export const commands: CommandEntry[] = [
 		name: "acp",
 		load: () => import("./commands/acp").then(m => m.default),
 		help: commandHelp.acpHelp,
+	},
+	{
+		name: "attach",
+		load: () => Promise.resolve(Attach),
+		help: commandHelp.attachHelp,
 	},
 	{
 		name: "auth-broker",

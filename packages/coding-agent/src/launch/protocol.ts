@@ -67,6 +67,29 @@ export interface DaemonSnapshot {
 	detached: boolean;
 }
 
+export const DAEMON_CAPABILITY_LIVE_SESSIONS = "live-sessions";
+export const LIVE_SESSION_PROTOCOL_VERSION = 1;
+
+/** One interactive session hosted by a broker client in this project scope. */
+export interface LiveSessionRegistration {
+	version: typeof LIVE_SESSION_PROTOCOL_VERSION;
+	endpointId: string;
+	sessionId: string;
+	title?: string;
+	startedAt: string;
+}
+
+/** Session metadata returned to attach clients. */
+export interface LiveSessionInfo extends LiveSessionRegistration {
+	cwd: string;
+}
+
+/** Delivery acknowledgement sent by the hosting client. */
+export interface LiveSessionMessageAck {
+	deliveryId: string;
+	error?: string;
+}
+
 /** Signals accepted by daemon input operations. */
 export type DaemonSignal = "SIGINT" | "SIGTERM" | "SIGHUP" | "SIGQUIT" | "SIGKILL";
 
@@ -92,11 +115,13 @@ export type DaemonOperation =
 	| { op: "stop"; name: string; timeoutMs: number }
 	| { op: "restart"; name: string }
 	| { op: "describe"; name: string }
+	| { op: "session-list" }
+	| { op: "session-send"; endpointId: string; sessionId: string; message: string }
 	| { op: "shutdown" };
 
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
-	| { op: "ping"; projectDir: string }
+	| { op: "ping"; projectDir: string; capabilities?: string[] }
 	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
 	| { op: "list"; daemons: DaemonSnapshot[] }
 	| {
@@ -116,6 +141,8 @@ export type DaemonRpcResult =
 	| { op: "stop"; daemon: DaemonSnapshot }
 	| { op: "restart"; daemon: DaemonSnapshot }
 	| { op: "describe"; daemon: DaemonSnapshot; spec: DaemonSpec }
+	| { op: "session-list"; sessions: LiveSessionInfo[] }
+	| { op: "session-send"; endpointId: string; sessionId: string }
 	| { op: "shutdown" };
 
 /** Authenticated request envelope used by socket clients. */
@@ -129,6 +156,9 @@ export interface DaemonWireRequest {
 	completionUnsubscribes?: string[];
 	completionReplays?: string[];
 	completionSubscriptionId?: string;
+	liveSessionEvents?: boolean;
+	liveSession?: LiveSessionRegistration;
+	liveSessionMessageAcks?: LiveSessionMessageAck[];
 	operation: DaemonOperation;
 }
 
@@ -143,7 +173,16 @@ export interface DaemonCompletionNotification {
 	daemon: DaemonSnapshot;
 }
 
-export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification;
+/** User-authored message delivered to the client hosting an interactive session. */
+export interface LiveSessionMessageNotification {
+	event: "session-message";
+	deliveryId: string;
+	endpointId: string;
+	sessionId: string;
+	message: string;
+}
+
+export type DaemonWireMessage = DaemonWireResponse | DaemonCompletionNotification | LiveSessionMessageNotification;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -284,6 +323,40 @@ export function parseDaemonSnapshot(value: unknown): DaemonSnapshot {
 	};
 }
 
+function parseLiveSessionRegistration(value: unknown): LiveSessionRegistration {
+	const source = record(value, "live session");
+	const version = numberValue(source.version, "live session.version");
+	if (version !== LIVE_SESSION_PROTOCOL_VERSION) {
+		throw new Error(`Unsupported live session protocol version: ${version}`);
+	}
+	return {
+		version,
+		endpointId: stringValue(source.endpointId, "live session.endpointId"),
+		sessionId: stringValue(source.sessionId, "live session.sessionId"),
+		title: optionalRawString(source.title, "live session.title"),
+		startedAt: stringValue(source.startedAt, "live session.startedAt"),
+	};
+}
+
+function parseLiveSessionInfo(value: unknown): LiveSessionInfo {
+	const source = record(value, "live session info");
+	return {
+		...parseLiveSessionRegistration(source),
+		cwd: stringValue(source.cwd, "live session.cwd"),
+	};
+}
+
+function parseLiveSessionMessageAcks(value: unknown): LiveSessionMessageAck[] {
+	if (!Array.isArray(value)) throw new Error("request.liveSessionMessageAcks must be an array");
+	return value.map((item, index) => {
+		const source = record(item, `request.liveSessionMessageAcks[${index}]`);
+		return {
+			deliveryId: stringValue(source.deliveryId, "live session acknowledgement.deliveryId"),
+			error: optionalRawString(source.error, "live session acknowledgement.error"),
+		};
+	});
+}
+
 /** Decode a socket request before the broker acts on it. */
 export function parseDaemonWireRequest(value: unknown): DaemonWireRequest {
 	const source = record(value, "daemon request");
@@ -311,6 +384,15 @@ export function parseDaemonWireRequest(value: unknown): DaemonWireRequest {
 			source.completionSubscriptionId === undefined
 				? undefined
 				: stringValue(source.completionSubscriptionId, "request.completionSubscriptionId"),
+		liveSessionEvents:
+			source.liveSessionEvents === undefined
+				? undefined
+				: booleanValue(source.liveSessionEvents, "request.liveSessionEvents"),
+		liveSession: source.liveSession === undefined ? undefined : parseLiveSessionRegistration(source.liveSession),
+		liveSessionMessageAcks:
+			source.liveSessionMessageAcks === undefined
+				? undefined
+				: parseLiveSessionMessageAcks(source.liveSessionMessageAcks),
 		operation: parseDaemonOperation(source.operation),
 	};
 }
@@ -324,7 +406,7 @@ export function parseDaemonWireResponse(value: unknown): DaemonWireResponse {
 	throw new Error("response.ok must be a boolean");
 }
 
-/** Decode one broker response or unsolicited completion notification. */
+/** Decode one broker response or unsolicited notification. */
 export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 	const source = record(value, "daemon message");
 	if (source.event === "daemon-completed") {
@@ -333,6 +415,15 @@ export function parseDaemonWireMessage(value: unknown): DaemonWireMessage {
 			completionId: stringValue(source.completionId, "completion.id"),
 			owner: stringValue(source.owner, "completion.owner"),
 			daemon: parseDaemonSnapshot(source.daemon),
+		};
+	}
+	if (source.event === "session-message") {
+		return {
+			event: "session-message",
+			deliveryId: stringValue(source.deliveryId, "session message.deliveryId"),
+			endpointId: stringValue(source.endpointId, "session message.endpointId"),
+			sessionId: stringValue(source.sessionId, "session message.sessionId"),
+			message: stringValue(source.message, "session message.message"),
 		};
 	}
 	return parseDaemonWireResponse(value);
@@ -345,6 +436,7 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 		case "ping":
 		case "list":
 		case "shutdown":
+		case "session-list":
 			return { op };
 		case "start":
 			return {
@@ -385,6 +477,13 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				data: optionalString(source.data, "operation.data"),
 				signal: source.signal === undefined ? undefined : daemonSignal(source.signal),
 			};
+		case "session-send":
+			return {
+				op,
+				endpointId: stringValue(source.endpointId, "operation.endpointId"),
+				sessionId: stringValue(source.sessionId, "operation.sessionId"),
+				message: stringValue(source.message, "operation.message"),
+			};
 		case "stop":
 			return {
 				op,
@@ -403,8 +502,15 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown): DaemonRpcResult {
 	const source = record(value, `${operation.op} result`);
 	switch (operation.op) {
-		case "ping":
-			return { op: "ping", projectDir: stringValue(source.projectDir, "result.projectDir") };
+		case "ping": {
+			const capabilities =
+				source.capabilities === undefined ? undefined : stringArray(source.capabilities, "result.capabilities");
+			return {
+				op: "ping",
+				projectDir: stringValue(source.projectDir, "result.projectDir"),
+				...(capabilities ? { capabilities } : {}),
+			};
+		}
 		case "start":
 			return {
 				op: "start",
@@ -414,6 +520,10 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 		case "list": {
 			if (!Array.isArray(source.daemons)) throw new Error("result.daemons must be an array");
 			return { op: "list", daemons: source.daemons.map(parseDaemonSnapshot) };
+		}
+		case "session-list": {
+			if (!Array.isArray(source.sessions)) throw new Error("result.sessions must be an array");
+			return { op: "session-list", sessions: source.sessions.map(parseLiveSessionInfo) };
 		}
 		case "logs":
 			return {
@@ -437,6 +547,12 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 			};
 		case "send":
 			return { op: "send", daemon: parseDaemonSnapshot(source.daemon) };
+		case "session-send":
+			return {
+				op: "session-send",
+				endpointId: stringValue(source.endpointId, "result.endpointId"),
+				sessionId: stringValue(source.sessionId, "result.sessionId"),
+			};
 		case "stop":
 			return { op: "stop", daemon: parseDaemonSnapshot(source.daemon) };
 		case "restart":

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Live interactive sessions can be discovered by project and receive nonblocking messages through `omp attach`.
+
 ## [18.1.12] - 2026-09-06
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.

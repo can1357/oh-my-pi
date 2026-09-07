@@ -28,6 +28,22 @@ export function workerHostEntry(): string | null {
 	return workerHostMain;
 }
 
+const BUN_TEST_ENTRY_PATTERN = /[._](?:test|spec)\.[cm]?[jt]sx?$/;
+
+/** True when the process is an explicitly marked test child or Bun is running a test entrypoint. */
+export function isBunTestRuntime(): boolean {
+	if (Bun.env.PI_TEST_RUNTIME === "1") return true;
+	const hasTestEnvironment = Bun.env.BUN_ENV === "test" || Bun.env.NODE_ENV === "test";
+	return hasTestEnvironment && BUN_TEST_ENTRY_PATTERN.test(Bun.main);
+}
+
+/** True when this code is running inside a `bun build --compile` standalone binary. */
+export function isCompiledBinary(): boolean {
+	if (process.env.PI_COMPILED || Bun.env.PI_COMPILED) return true;
+	const url = import.meta.url;
+	return url.includes("$bunfs") || url.includes("~BUN") || url.includes("%7EBUN");
+}
+
 /**
  * Buffers messages a Bun worker thread receives before its real handler is
  * attached, then hands them off once it is.

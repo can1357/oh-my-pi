@@ -97,6 +97,7 @@ import {
 	persistForeignSession,
 } from "./session/foreign-session-import";
 import type { ForeignSessionInfo, ForeignSessionSource, ForeignSessionStore } from "./session/foreign-session-store";
+import { startLiveSessionRegistration } from "./session/live-attach";
 import { resolveResumableSession, type SessionInfo } from "./session/session-listing";
 import { SessionManager } from "./session/session-manager";
 import { executeBuiltinSlashCommand } from "./slash-commands/builtin-registry";
@@ -598,42 +599,51 @@ async function runInteractiveMode(
 			mode.showStatus(notify.message);
 		}
 	}
-
-	// `omp join <link>`: dispatch through the same builtin path as a typed
-	// `/join` so collab guards and error rendering stay in one place.
-	if (joinLink !== undefined) {
-		await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
-	}
-
-	if (initialMessage !== undefined) {
-		session.maybeStartTitleGeneration(initialMessage);
-		try {
-			using _keepalive = new EventLoopKeepalive();
-			// `steer` covers the race where the user submits a prompt of their own
-			// before this dispatch runs (the composer accepts input as soon as the
-			// first turn starts): the CLI message queues into that turn instead of
-			// dying with AgentBusyError.
-			await session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" });
-		} catch (error: unknown) {
-			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-			mode.showError(errorMessage);
+	const liveSessionRegistration = await startLiveSessionRegistration(session).catch(error => {
+		mode.showWarning(`Live session attach unavailable: ${String(error)}`);
+		return undefined;
+	});
+	try {
+		// `omp join <link>`: dispatch through the same builtin path as a typed
+		// `/join` so collab guards and error rendering stay in one place.
+		if (joinLink !== undefined) {
+			await executeBuiltinSlashCommand(`/join ${joinLink}`, { ctx: mode });
 		}
-	}
 
-	for (const message of initialMessages) {
-		session.maybeStartTitleGeneration(message);
-		try {
-			using _keepalive = new EventLoopKeepalive();
-			await session.prompt(message, { streamingBehavior: "steer" });
-		} catch (error: unknown) {
-			const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
-			mode.showError(errorMessage);
+		if (initialMessage !== undefined) {
+			session.maybeStartTitleGeneration(initialMessage);
+			try {
+				using _keepalive = new EventLoopKeepalive();
+				// `steer` covers the race where the user submits a prompt of their own
+				// before this dispatch runs (the composer accepts input as soon as the
+				// first turn starts): the CLI message queues into that turn instead of
+				// dying with AgentBusyError.
+				await session.prompt(initialMessage, { images: initialImages, streamingBehavior: "steer" });
+			} catch (error: unknown) {
+				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+				mode.showError(errorMessage);
+			}
 		}
-	}
 
-	while (true) {
-		const input = await mode.getUserInput();
-		await submitInteractiveInput(mode, session, input);
+		for (const message of initialMessages) {
+			session.maybeStartTitleGeneration(message);
+			try {
+				using _keepalive = new EventLoopKeepalive();
+				await session.prompt(message, { streamingBehavior: "steer" });
+			} catch (error: unknown) {
+				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+				mode.showError(errorMessage);
+			}
+		}
+
+		while (true) {
+			const input = await mode.getUserInput();
+			await submitInteractiveInput(mode, session, input);
+		}
+	} finally {
+		await liveSessionRegistration
+			?.close()
+			.catch(error => logger.warn("Live session attach cleanup failed", { error: String(error) }));
 	}
 }
 
