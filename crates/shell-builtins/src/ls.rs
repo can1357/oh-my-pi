@@ -1360,8 +1360,7 @@ mod config {
 	fn extract_hyperlink(options: &clap::ArgMatches, stdout_is_terminal: bool) -> bool {
 		let hyperlink = options
 			.get_one::<String>(options::HYPERLINK)
-			.unwrap()
-			.as_str();
+			.map_or("never", String::as_str);
 
 		match hyperlink {
 			"always" | "yes" | "force" => true,
@@ -1630,7 +1629,11 @@ mod config {
 			// the other format options. If so, we set the appropriate format.
 			if format != Format::Long {
 				let idx = opt
-					.and_then(|opt| options.indices_of(opt).map(|x| x.max().unwrap()))
+					.and_then(|opt| {
+						options
+							.indices_of(opt)
+							.and_then(|mut indices| indices.next_back())
+					})
 					.unwrap_or(0);
 				if [
 					options::format::LONG_NO_OWNER,
@@ -1773,8 +1776,10 @@ mod config {
 			let mut ignore_patterns = Vec::new();
 
 			if options.get_flag(options::IGNORE_BACKUPS) {
-				ignore_patterns.push(CompiledPattern::new("*~").unwrap());
-				ignore_patterns.push(CompiledPattern::new(".*~").unwrap());
+				ignore_patterns
+					.push(CompiledPattern::new("*~").expect("literal backup pattern is valid"));
+				ignore_patterns
+					.push(CompiledPattern::new(".*~").expect("literal hidden-backup pattern is valid"));
 			}
 
 			for pattern in options
@@ -2002,10 +2007,15 @@ mod config {
 		{
 			//If both FULL_TIME and TIME_STYLE are present
 			//The one added last is dominant
-			if options.get_flag(options::FULL_TIME)
-				&& options.indices_of(options::FULL_TIME).unwrap().next_back()
-					> options.indices_of(options::TIME_STYLE).unwrap().next_back()
-			{
+			let full_time_index = options
+				.indices_of(options::FULL_TIME)
+				.and_then(|mut indices| indices.next_back())
+				.unwrap_or(0);
+			let time_style_index = options
+				.indices_of(options::TIME_STYLE)
+				.and_then(|mut indices| indices.next_back())
+				.unwrap_or(0);
+			if options.get_flag(options::FULL_TIME) && full_time_index > time_style_index {
 				ok((format::FULL_ISO, None))
 			} else {
 				let field = if let Some(field) = field.strip_prefix("posix-") {
@@ -2027,18 +2037,23 @@ mod config {
 					// ISO older format needs extra padding.
 					"iso" => Ok(("%m-%d %H:%M".to_string(), Some(format::ISO.to_string() + " "))),
 					"locale" => ok(LOCALE_FORMAT),
-					_ => match field.chars().next().unwrap() {
-						'+' => {
-							// recent/older formats are (optionally) separated by a newline
-							let mut it = field[1..].split('\n');
-							let recent = it.next().unwrap_or_default();
-							let older = it.next();
-							match it.next() {
-								None => ok((recent, older)),
-								Some(_) => Err(LsError::TimeStyleParseError(String::from(field))),
-							}
-						},
-						_ => Err(LsError::TimeStyleParseError(String::from(field))),
+					_ => {
+						let Some(first) = field.chars().next() else {
+							return Err(LsError::TimeStyleParseError(String::from(field)));
+						};
+						match first {
+							'+' => {
+								// recent/older formats are (optionally) separated by a newline
+								let mut it = field[1..].split('\n');
+								let recent = it.next().unwrap_or_default();
+								let older = it.next();
+								match it.next() {
+									None => ok((recent, older)),
+									Some(_) => Err(LsError::TimeStyleParseError(String::from(field))),
+								}
+							},
+							_ => Err(LsError::TimeStyleParseError(String::from(field))),
+						}
 					},
 				}
 			}
@@ -2743,7 +2758,10 @@ mod display {
 				let more_info = if should_display_leading_info {
 					let mut s = Vec::new();
 					display_additional_leading_info(i, &padding, config, &mut s)?;
-					Some(String::from_utf8(s).unwrap()) // Should always be UTF-8
+					Some(
+						String::from_utf8(s)
+							.map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?,
+					)
 				} else {
 					None
 				};

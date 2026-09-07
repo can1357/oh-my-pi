@@ -331,13 +331,15 @@ mod utf8 {
 				Err(error) => {
 					let valid_up_to = error.valid_up_to();
 					if valid_up_to > 0 {
-						let consumed = valid_up_to.checked_sub(initial_buffer_len).unwrap();
+						let consumed = valid_up_to
+							.checked_sub(initial_buffer_len)
+							.expect("UTF-8 valid prefix includes the buffered incomplete prefix");
 						self.buffer_len = valid_up_to as u8;
 						(consumed, Some(Ok(())))
 					} else if let Some(invalid_sequence_length) = error.error_len() {
 						let consumed = invalid_sequence_length
 							.checked_sub(initial_buffer_len)
-							.unwrap();
+							.expect("UTF-8 error sequence includes the buffered incomplete prefix");
 						self.buffer_len = invalid_sequence_length as u8;
 						(consumed, Some(Err(())))
 					} else {
@@ -737,7 +739,11 @@ impl Inputs {
 					Ok(Self::Files0From(items))
 				}
 			},
-			(Some(mut files), Some(_)) => Err(WcError::files_disabled(files.next().unwrap())),
+			(Some(mut files), Some(_)) => Err(WcError::files_disabled(
+				files
+					.next()
+					.expect("clap supplies a file operand when --files0-from is combined"),
+			)),
 		}
 	}
 

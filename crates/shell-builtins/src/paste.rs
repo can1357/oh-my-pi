@@ -139,7 +139,10 @@ fn paste(
 	let source_count = sources.len();
 	let stdout = &mut host.stdout;
 	if !serial && source_count == 1 {
-		return write_single_input_source(stdout, sources.pop().unwrap(), line_ending)
+		let Some(source) = sources.pop() else {
+			return Err("missing input source".to_owned());
+		};
+		return write_single_input_source(stdout, source, line_ending)
 			.map_err(|err| strip_errno(&err));
 	}
 
@@ -326,7 +329,9 @@ impl<'a> DelimiterState<'a> {
 			Self::NoDelimiters => {},
 			Self::OneDelimiter(d) => output.extend_from_slice(d),
 			Self::MultipleDelimiters { current, iterator, .. } => {
-				let d = iterator.next().unwrap();
+				let d = iterator
+					.next()
+					.expect("multiple-delimiter state always cycles a non-empty list");
 				output.extend_from_slice(d);
 				*current = d;
 			},
