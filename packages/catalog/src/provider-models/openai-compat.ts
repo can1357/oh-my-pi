@@ -6129,7 +6129,16 @@ export function exllamav3ModelManagerOptions(
 					fetch: config?.fetch,
 					timeoutMs: DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 				});
+			// Card stability is field-wise, not id-wise: reloading the same model
+			// with a different max_seq_len or vision flag changes what discovery
+			// must publish, so a same-id card with different capabilities counts as
+			// a change.
 			const cardAt = () => fetchExllamav3ModelCardProbe(baseUrl, apiKey, fetchImpl);
+			const sameLoadedCard = (left: Exllamav3LoadedModelCard, right: Exllamav3LoadedModelCard): boolean =>
+				left.id === right.id &&
+				left.contextWindow === right.contextWindow &&
+				left.inputs.length === right.inputs.length &&
+				left.inputs.every((input, index) => input === right.inputs[index]);
 			// One redo round with the newer card, bracketed by another card read:
 			// publish only a clean card-stable match, else keep the cached catalog.
 			const redoRound = async (newer: Exllamav3ModelCardProbe) => {
@@ -6137,7 +6146,9 @@ export function exllamav3ModelManagerOptions(
 				const redo = await discover(newer.card);
 				const third = await cardAt();
 				if (third.noModelLoaded) return [];
-				return third.card?.id === newer.card.id && redo !== null && redo.length > 0 ? redo : null;
+				return third.card !== null && sameLoadedCard(third.card, newer.card) && redo !== null && redo.length > 0
+					? redo
+					: null;
 			};
 			const probe = await cardAt();
 			if (probe.noModelLoaded) {
@@ -6165,7 +6176,7 @@ export function exllamav3ModelManagerOptions(
 				// filter — only a stable card across the list proves the entry fresh.
 				const second = await cardAt();
 				if (second.noModelLoaded) return [];
-				if (second.card?.id === probe.card.id) {
+				if (second.card !== null && sameLoadedCard(second.card, probe.card)) {
 					return models;
 				}
 				return redoRound(second);

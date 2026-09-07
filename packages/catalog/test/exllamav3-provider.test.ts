@@ -256,6 +256,30 @@ describe("ExLlamaV3 (TabbyAPI) provider discovery", () => {
 		expect(models).toBeNull();
 	});
 
+	test("re-maps when the same model id reloads with different capabilities", async () => {
+		// Card stability is field-wise: reloading the same id with a smaller
+		// max_seq_len (or a flipped vision flag) between the bracket reads must
+		// not publish the stale context window mapped from the first card.
+		let modelCardCalls = 0;
+		const fetchMock: FetchImpl = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.endsWith("/models")) {
+				return jsonResponse({ data: [{ id: "Qwen3.8-Flash-Next-exl3", object: "model", parameters: null }] });
+			}
+			modelCardCalls++;
+			const maxSeqLen = modelCardCalls === 1 ? 262_144 : 131_072;
+			return jsonResponse({
+				id: "Qwen3.8-Flash-Next-exl3",
+				parameters: { max_seq_len: maxSeqLen, use_vision: false },
+			});
+		}) as FetchImpl;
+
+		const models = await exllamav3ModelManagerOptions({ baseUrl: BASE_URL, fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(modelCardCalls).toBe(3);
+		expect(models?.[0]?.contextWindow).toBe(131_072);
+	});
+
 	test("routes thinking through the flat enable_thinking dialect like llama.cpp", () => {
 		// TabbyAPI accepts top-level enable_thinking / reasoning_effort
 		// directly (forwarded into the chat template), so exllamav3 rides the
