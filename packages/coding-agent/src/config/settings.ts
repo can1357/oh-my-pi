@@ -44,6 +44,7 @@ import { replaceFileAtomically } from "../utils/atomic-file";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import { stringifyYamlConfig } from "./config-file";
+import { validateServiceTierOverrides } from "./service-tier";
 import {
 	type BashInterceptorRule,
 	type GroupPrefix,
@@ -660,6 +661,9 @@ export class Settings {
 	 * Triggers hooks for settings that have side effects.
 	 */
 	set<P extends SettingPath>(path: P, value: SettingValue<P>): void {
+		if (path === "tier.modelOverrides") {
+			validateServiceTierOverrides(value);
+		}
 		const prev = this.get(path);
 		const segments = path.split(".");
 		this.#captureGlobalMutation(path, this.#modifiedPathMutations, getByPath(this.#global, segments));
@@ -3080,6 +3084,9 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 	},
 	"providers.maxInFlightRequests": value => {
 		configureProviderMaxInFlightRequests(validateProviderMaxInFlightRequests(value));
+	},
+	"tier.modelOverrides": value => {
+		validateServiceTierOverrides(value);
 	},
 	"secrets.enabled": value => {
 		configureCredentialRedaction(value === true);
