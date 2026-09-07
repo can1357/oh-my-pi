@@ -106,6 +106,8 @@ export interface SubagentModelRoutingRequest {
 	readonly requestedModel?: string | readonly string[];
 	/** Requested subtask difficulty; independent from `AgentTier`. */
 	readonly requestedDifficulty?: SubagentTaskDifficulty;
+	/** Explicit semantic workload; never inferred from assignment prose or a specialist's display name. */
+	readonly taskKind?: "evidence-digest";
 	/** Agent type name, used to look up `task.agentModelOverrides[agentName]`. */
 	readonly agentName?: string;
 	/** Agent definition's own `model` field (frontmatter default). */
@@ -388,6 +390,7 @@ export function isThinkingOrMaxIntelligencePattern(pattern: string | undefined, 
  * - Tasks/work delegated by those models (or general delegated tasks) go to the task model (pi/task).
  * - Browser work goes to browser models (pi/browser-control / pi/browser-operation).
  * - Low-key context gathering or tool-less work goes to the SMOL fast model (pi/smol).
+ * - Explicit bulk evidence-digest assignments use the task role, not the low-key lookup route.
  */
 function resolveTokenSavingsFallbackRoute(request: SubagentModelRoutingRequest): SubagentModelRoutingResult {
 	const { agentName, agentModelDefault, settings, parentActiveModelPattern } = request;
@@ -405,7 +408,10 @@ function resolveTokenSavingsFallbackRoute(request: SubagentModelRoutingRequest):
 	}
 
 	let targetSelectors: string[];
-	if (isBrowserAgent(agentName)) {
+	if (request.taskKind === "evidence-digest") {
+		// Bulk evidence synthesis is task work even when a context-gathering agent performs it.
+		targetSelectors = ["pi/task"];
+	} else if (isBrowserAgent(agentName)) {
 		// Browser work goes to browser models
 		targetSelectors = ["pi/browser-control", "pi/browser-operation"];
 	} else if (isPlanningOrIntelligenceAgent(agentName)) {
@@ -442,6 +448,7 @@ function resolveTokenSavingsFallbackRoute(request: SubagentModelRoutingRequest):
 		ok: true,
 		decision: Object.freeze({
 			source: "fusion-token-savings",
+			...(request.taskKind === "evidence-digest" ? { role: "task" as const } : {}),
 			candidateSelectors: freezeList(candidateSelectors),
 		}),
 		modelPatterns: freezeList(targetSelectors),

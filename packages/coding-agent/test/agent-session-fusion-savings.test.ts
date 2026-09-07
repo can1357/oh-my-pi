@@ -53,7 +53,7 @@ async function createSavingsHarness(fusionOverrides: Record<string, unknown> = {
 		| ((messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void)
 		| undefined;
 
-	const mockModel = createMockModel({ responses: [{ content: ["Done"] }] });
+	const mockModel = createMockModel({ handler: { content: ["Done"] } });
 	const agent = new Agent({
 		getApiKey: () => "test-key",
 		initialState: {
@@ -206,6 +206,62 @@ describe("AgentSession — Fusion Token Savings Mode call limit", () => {
 
 		// Model restored to default model
 		expect(harness.session.model?.id).toBe(defaultModel.id);
+	});
+
+	it("enforces the call limit again after each next-prompt restoration", async () => {
+		const harness = await createSavingsHarness();
+		cleanups.push(harness.cleanup);
+		const context = makeContinuingContext();
+
+		await harness.onTurnEndFn([context.message], undefined, context);
+		await harness.onTurnEndFn([context.message], undefined, context);
+		expect(harness.session.model?.id).toBe(taskModel.id);
+
+		for (const prompt of ["Second question", "Third question"]) {
+			// The preceding synthetic callbacks leave a reminder queued; a real
+			// completed turn would already have consumed it on the task model.
+			harness.agent.clearAllQueues();
+			await harness.session.prompt(prompt, { userInitiated: true });
+			expect(harness.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+			expect(harness.session.model?.id).toBe(defaultModel.id);
+
+			// prompt() made the first default-model call; its next continuing
+			// callback must hit the reset two-call limit, not latch a manual override.
+			await harness.onTurnEndFn([context.message], undefined, context);
+			expect(harness.session.model?.id).toBe(taskModel.id);
+			expect(harness.agent.peekSteeringQueue()).toHaveLength(1);
+		}
+	});
+
+	it.each(["before", "after"] as const)("preserves a manual model choice %s next-prompt restoration", async timing => {
+		const harness = await createSavingsHarness();
+		cleanups.push(harness.cleanup);
+		const context = makeContinuingContext();
+		await harness.onTurnEndFn([context.message], undefined, context);
+		await harness.onTurnEndFn([context.message], undefined, context);
+		harness.agent.clearAllQueues();
+
+		if (timing === "before") await harness.session.setModelTemporary(slowModel);
+		await harness.session.prompt("Next question", { userInitiated: true });
+		expect(harness.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		if (timing === "after") {
+			expect(harness.session.model?.id).toBe(defaultModel.id);
+			await harness.session.setModelTemporary(slowModel);
+		}
+		expect(harness.session.model?.id).toBe(slowModel.id);
+		await harness.onTurnEndFn([context.message], undefined, context);
+		expect(harness.session.model?.id).toBe(slowModel.id);
+		expect(harness.agent.peekSteeringQueue()).toHaveLength(0);
+
+		// A detected manual override remains latched even if the user later
+		// selects the default model again on another prompt.
+		await harness.session.setModelTemporary(defaultModel);
+		await harness.session.prompt("Keep my selected model", { userInitiated: true });
+		expect(harness.agent.state.messages.at(-1)).toMatchObject({ role: "assistant", stopReason: "stop" });
+		await harness.onTurnEndFn([context.message], undefined, context);
+		await harness.onTurnEndFn([context.message], undefined, context);
+		expect(harness.session.model?.id).toBe(defaultModel.id);
+		expect(harness.agent.peekSteeringQueue()).toHaveLength(0);
 	});
 
 	it("does not enforce the limit when fusion.mode is off", async () => {

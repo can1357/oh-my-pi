@@ -24,6 +24,7 @@
   - `siblingFindings?`: text summary of sibling worker findings for staged synthesis (required when `revealSiblingFindings` is true)
   - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
   - `difficulty?`: `low` (bounded/simple), `medium` (normal implementation), `high` (architecture/debugging/review) — routes through fixed `smol`/`task`/`slow` model roles, independent from `agent.tier`; explicit `model` wins when both are set. Fresh spawns only — errors with `fork: true`, which inherits the parent's model
+  - `evidenceDigest?`: `{ paths: string[], question: string }` — bulk read-only evidence work with named paths and one exact question; returns concise [path:line] bullets covering relevant exports and side effects, never implementation dumps. Fresh spawns only. Token-savings mode uses the task model role unless an explicit model, difficulty, or configured agent override wins
   - `cwd?`: working directory; defaults to parent session cwd
   - `fork?`: inherit the parent's exact context (system prompt, tools, model, and a snapshot of this conversation's history) instead of a fresh one — the provider re-reads the parent's warm prompt cache; agent-specific prompts/tools and output schemas are ignored. Use fresh (default) for independent work
 {{#if isolationEnabled}}
@@ -40,6 +41,7 @@
 - `siblingFindings?`: text summary of sibling worker findings for staged synthesis (required when `revealSiblingFindings` is true)
 - `model?`: explicit model selector; aliases and concrete catalog names resolve before agent defaults
 - `difficulty?`: `low` (bounded/simple), `medium` (normal implementation), `high` (architecture/debugging/review) — routes through fixed `smol`/`task`/`slow` model roles, independent from `agent.tier`; explicit `model` wins when both are set. Fresh spawns only — errors with `fork: true`, which inherits the parent's model
+- `evidenceDigest?`: `{ paths: string[], question: string }` — bulk read-only evidence work with named paths and one exact question; returns concise [path:line] bullets covering relevant exports and side effects, never implementation dumps. Fresh spawns only. Token-savings mode uses the task model role unless an explicit model, difficulty, or configured agent override wins
 - `cwd?`: working directory; defaults to parent session cwd
 {{#if isolationEnabled}}
 - `isolated?`: run in isolated env; returns patches. Agent is torn down at completion — not addressable afterwards

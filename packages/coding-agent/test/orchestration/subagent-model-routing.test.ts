@@ -497,3 +497,97 @@ describe("resolveSubagentModelRouting — token savings mode", () => {
 		expect(result.modelPatterns).toEqual(["openai/gpt-4o"]);
 	});
 });
+
+describe("resolveSubagentModelRouting — explicit evidence digest", () => {
+	test.each(["task", "explore", "quick_task", "custom-specialist"])(
+		"routes bulk evidence through the configured task role for %s",
+		agentName => {
+			const settings = Settings.isolated({
+				"fusion.enabled": true,
+				"fusion.mode": "token-savings",
+				modelRoles: { ...baseModelRoles, task: "openai/gpt-4o" },
+			});
+			const result = resolveSubagentModelRouting({
+				taskKind: "evidence-digest",
+				agentName,
+				agentModelDefault: "pi/smol",
+				settings,
+				modelRegistry: registry,
+			});
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(result.decision).toMatchObject({
+				source: "fusion-token-savings",
+				role: "task",
+				candidateSelectors: [settings.getModelRole("task")],
+			});
+			expect(result.modelPatterns).toEqual(["pi/task"]);
+		},
+	);
+
+	test("does not classify an agent name as an evidence contract", () => {
+		const settings = Settings.isolated({ "fusion.enabled": true, "fusion.mode": "token-savings" });
+		const result = resolveSubagentModelRouting({
+			agentName: "evidence-digest",
+			agentModelDefault: "pi/smol",
+			settings,
+			modelRegistry: registry,
+		});
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.decision.source).toBe("agent-definition");
+		expect(result.decision.role).toBeUndefined();
+	});
+
+	test.each([
+		{ requestedModel: "openai/gpt-4o", source: "explicit", selectors: ["openai/gpt-4o"] },
+		{ requestedDifficulty: "high" as const, source: "difficulty-profile", selectors: ["pi/slow"] },
+		{ source: "agent-override", selectors: ["openai/gpt-4o-mini"] },
+	])("preserves $source over digest routing", ({ source, selectors, ...request }) => {
+		const settings = Settings.isolated({
+			"fusion.enabled": true,
+			"fusion.mode": "token-savings",
+			modelRoles: baseModelRoles,
+			"task.agentModelOverrides": { explore: "openai/gpt-4o-mini" },
+		});
+		const result = resolveSubagentModelRouting({
+			...request,
+			taskKind: "evidence-digest",
+			agentName: "explore",
+			settings,
+			modelRegistry: registry,
+		});
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.decision.source).toBe(source);
+		expect(result.modelPatterns).toEqual(selectors);
+	});
+
+	test("preserves an unresolved explicit model failure", () => {
+		const result = resolveSubagentModelRouting({
+			taskKind: "evidence-digest",
+			requestedModel: "missing-provider/missing-model",
+			settings: Settings.isolated({ "fusion.enabled": true, "fusion.mode": "token-savings" }),
+			modelRegistry: registry,
+		});
+		expect(result.ok).toBe(false);
+		if (result.ok) return;
+		expect(result.error.kind).toBe("explicit-model-unresolved");
+	});
+
+	test.each([
+		{ "fusion.enabled": false, "fusion.mode": "token-savings" },
+		{ "fusion.enabled": true, "fusion.mode": "escalate" },
+		{ "fusion.enabled": true, "fusion.mode": "delegate" },
+	])("leaves normal routing identical with and without digest metadata (%j)", fusionSettings => {
+		const request = {
+			agentName: "explore",
+			agentModelDefault: "pi/smol",
+			settings: Settings.isolated({ ...fusionSettings, modelRoles: baseModelRoles }),
+			modelRegistry: registry,
+		};
+		expect(resolveSubagentModelRouting({ ...request, taskKind: "evidence-digest" })).toEqual(
+			resolveSubagentModelRouting(request),
+		);
+	});
+});

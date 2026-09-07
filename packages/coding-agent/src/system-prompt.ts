@@ -787,6 +787,11 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		renderMermaid,
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
+	// Keep mode-dependent policy after project context, including with a custom base.
+	const savingsBlockPattern = /<fusion-token-savings>[\s\S]*?<\/fusion-token-savings>/g;
+	const savingsEnabled = fusionTokenSavings && toolNames.includes("task");
+	const savingsSource = savingsEnabled && resolvedCustomPrompt ? prompt.render(systemPromptTemplate, data) : rendered;
+	const savingsPolicy = savingsEnabled ? savingsSource.match(savingsBlockPattern)?.at(-1) : undefined;
 	const systemPrompt = [rendered];
 	// Custom prompt templates already render context files and append text; the
 	// project footer still carries environment, cwd, workspace, and dir-context.
@@ -800,5 +805,15 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		systemPrompt.push(activeRepoContextPrompt);
 	}
 
-	return { systemPrompt };
+	// Strip copied policy from every source before appending the current block once.
+	// This also removes stale policy when mode or task capability changes on rebuild.
+	const terminalSystemPrompt = systemPrompt
+		.map(block => {
+			const stripped = block.replace(savingsBlockPattern, "");
+			return stripped === block ? block : stripped.trim();
+		})
+		.filter(block => block.length > 0);
+	if (savingsPolicy) terminalSystemPrompt.push(savingsPolicy);
+
+	return { systemPrompt: terminalSystemPrompt };
 }

@@ -6672,6 +6672,8 @@ export class AgentSession {
 				const current = this.model;
 				if (current && this.#fusionLastAutoModel && modelsAreEqual(current, this.#fusionLastAutoModel)) {
 					await this.setModelTemporary(this.#fusionTokenSavingsSavedModel, undefined, { ephemeral: true });
+					// Restoration is another automatic switch, not a manual override.
+					this.#fusionLastAutoModel = this.model ?? this.#fusionTokenSavingsSavedModel;
 				}
 				this.#fusionTokenSavingsSavedModel = undefined;
 			}

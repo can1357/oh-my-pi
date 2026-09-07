@@ -14,8 +14,11 @@ import * as executorModule from "@pk-nerdsaver-ai/pi-coding-agent/task/executor"
 import { AgentOutputManager } from "@pk-nerdsaver-ai/pi-coding-agent/task/output-manager";
 import type { SpawnPlan } from "@pk-nerdsaver-ai/pi-coding-agent/task/spawn-plan";
 import type { AgentDefinition, SingleResult } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
+import { getTaskSchema } from "@pk-nerdsaver-ai/pi-coding-agent/task/types";
 import type { ToolSession } from "@pk-nerdsaver-ai/pi-coding-agent/tools";
 import { TempDir } from "@pk-nerdsaver-ai/pi-utils";
+import { type } from "arktype";
+import { parseHTML } from "linkedom";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -251,5 +254,167 @@ describe("TaskTool spawn profile integration", () => {
 		expect(capturedPlan?.maxRequests).toBe(7);
 		expect(capturedBridge).toBe(clientBridge);
 		expect(capturedPlan?.maxRuntimeMs).toBe(1234);
+	});
+
+	it.each([
+		{ batchEnabled: false, isolationEnabled: false },
+		{ batchEnabled: false, isolationEnabled: true },
+		{ batchEnabled: true, isolationEnabled: false },
+		{ batchEnabled: true, isolationEnabled: true },
+	])("passes the digest wire contract to a fresh child (%j)", async ({ batchEnabled, isolationEnabled }) => {
+		const fixture = createSession({
+			"async.enabled": false,
+			"task.batch": batchEnabled,
+			"task.prefetch.enabled": false,
+			"fusion.enabled": true,
+			"fusion.mode": "token-savings",
+			modelRoles: { task: selector },
+		});
+		const executorSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => successfulResult(options));
+		const tool = await TaskTool.create(fixture.session);
+		const evidenceDigest = {
+			paths: ["src/task/types.ts", "src/tools/read&search.ts"],
+			question: "Which Map<K,V> exports register tools & change session state?",
+		};
+		const item = {
+			assignment: "Inspect the module contracts.",
+			role: "Evidence contract analyst",
+			evidenceDigest,
+		};
+		const parsed = getTaskSchema({ batchEnabled, isolationEnabled })(
+			batchEnabled ? { agent: "task", context: "Review task behavior.", tasks: [item] } : { agent: "task", ...item },
+		);
+		expect(parsed instanceof type.errors).toBe(false);
+		if (parsed instanceof type.errors) return;
+		const result = await tool.execute("spawn-evidence-digest", parsed);
+		expect(result.isError).not.toBe(true);
+		expect(executorSpy).toHaveBeenCalledTimes(1);
+		const options = executorSpy.mock.calls[0]![0];
+		expect(options.role).toBe(item.role);
+		expect(options.modelRouting).toMatchObject({ source: "fusion-token-savings", role: "task" });
+		expect(options.spawnPlan?.eligible.map(candidate => candidate.selector)).toContain("pi/task");
+		const document = parseHTML(options.task).document;
+		const contracts = document.querySelectorAll("evidence-digest");
+		expect(contracts.length).toBe(1);
+		const contract = contracts[0]!;
+		expect(
+			Object.fromEntries(
+				Array.from(contract.attributes, (attr: { name: string; value: string }) => [attr.name, attr.value]),
+			),
+		).toEqual({
+			format: "bullets",
+			citations: "path:line",
+			include: "exports side-effects",
+			exclude: "implementation-dumps",
+		});
+		expect(
+			Array.from(contract.querySelectorAll("path"), (node: { textContent: string | null }) => node.textContent),
+		).toEqual(evidenceDigest.paths);
+		expect(contract.querySelector("question")?.textContent).toBe(evidenceDigest.question);
+	});
+
+	it.each([
+		{ paths: [], question: "What is exported?" },
+		{ paths: [" "], question: "What is exported?" },
+		{ paths: ["src/task/index.ts"], question: " " },
+	])("rejects incomplete digest scope before allocation (%j)", async evidenceDigest => {
+		const fixture = createSession({ "async.enabled": false });
+		const allocateSpy = vi.spyOn(fixture.outputManager, "allocate");
+		const executorSpy = vi.spyOn(executorModule, "runSubprocess");
+		const tool = await TaskTool.create(fixture.session);
+		const result = await tool.execute("invalid-digest", { agent: "task", assignment: "Inspect.", evidenceDigest });
+		expect(result.details?.results).toEqual([]);
+		expect(allocateSpy).not.toHaveBeenCalled();
+		expect(executorSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects inherited-context digest spawns before allocation", async () => {
+		const fixture = createSession({ "async.enabled": false, "fusion.enabled": true, "fusion.mode": "token-savings" });
+		const allocateSpy = vi.spyOn(fixture.outputManager, "allocate");
+		const executorSpy = vi.spyOn(executorModule, "runSubprocess");
+		const tool = await TaskTool.create(fixture.session);
+		const result = await tool.execute("forked-digest", {
+			agent: "task",
+			assignment: "Inspect.",
+			evidenceDigest: { paths: ["src/task/index.ts"], question: "What is exported?" },
+			fork: true,
+		});
+		expect(result.details?.results).toEqual([]);
+		expect(allocateSpy).not.toHaveBeenCalled();
+		expect(executorSpy).not.toHaveBeenCalled();
+	});
+
+	it.each([true, false])("keeps explicit model selection and digest delivery with savings=%s", async enabled => {
+		const fixture = createSession({
+			"async.enabled": false,
+			"task.prefetch.enabled": false,
+			"fusion.enabled": enabled,
+			"fusion.mode": "token-savings",
+		});
+		const executorSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => successfulResult(options));
+		const tool = await TaskTool.create(fixture.session);
+		const result = await tool.execute("explicit-digest", {
+			agent: "task",
+			assignment: "Inspect.",
+			model: selector,
+			evidenceDigest: { paths: ["src/task/index.ts"], question: "What is exported?" },
+		});
+		expect(result.isError).not.toBe(true);
+		const options = executorSpy.mock.calls[0]![0];
+		expect(options.modelRouting?.source).toBe("explicit");
+		expect(options.modelOverride).toEqual([selector]);
+		expect(parseHTML(options.task).document.querySelectorAll("evidence-digest").length).toBe(1);
+	});
+
+	it("omits digest instructions from ordinary task spawns", async () => {
+		const fixture = createSession({ "async.enabled": false, "task.prefetch.enabled": false });
+		const executorSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => successfulResult(options));
+		const tool = await TaskTool.create(fixture.session);
+		const result = await tool.execute("ordinary-task", { agent: "task", assignment: "Implement.", model: selector });
+		expect(result.isError).not.toBe(true);
+		expect(parseHTML(executorSpy.mock.calls[0]![0].task).document.querySelectorAll("evidence-digest").length).toBe(0);
+	});
+
+	it("delivers the digest contract through background job spawning", async () => {
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		managers.push(manager);
+		const fixture = createSession(
+			{
+				"async.enabled": true,
+				"task.batch": true,
+				"task.prefetch.enabled": false,
+				"fusion.enabled": true,
+				"fusion.mode": "savings",
+				modelRoles: { task: selector },
+			},
+			manager,
+		);
+		const executorSpy = vi
+			.spyOn(executorModule, "runSubprocess")
+			.mockImplementation(async options => successfulResult(options));
+		const tool = await TaskTool.create(fixture.session);
+		const evidenceDigest = { paths: ["src/task/index.ts"], question: "What is exported?" };
+		const result = await tool.execute("background-digest", {
+			agent: "task",
+			context: "Inspect task behavior.",
+			tasks: [{ assignment: "Inspect.", evidenceDigest }],
+		});
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBeDefined();
+		const job = manager.getJob(jobId!);
+		await job!.promise;
+		expect(job?.status).toBe("completed");
+		expect(executorSpy).toHaveBeenCalledTimes(1);
+		const options = executorSpy.mock.calls[0]![0];
+		expect(options.modelRouting).toMatchObject({ source: "fusion-token-savings", role: "task" });
+		expect(parseHTML(options.task).document.querySelector("evidence-digest question")?.textContent).toBe(
+			evidenceDigest.question,
+		);
 	});
 });

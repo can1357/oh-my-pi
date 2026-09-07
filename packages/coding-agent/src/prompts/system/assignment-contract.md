@@ -45,3 +45,10 @@ Yield one `assignment-result/v1` (or `/v2` when the contract specifies it) objec
 ## Independent Workers
 
 Provide only the objective, hard constraints, and observable acceptance outcomes unless the parent explicitly supplies a full assignment contract. Avoid procedural scaffolding that dictates planning or collaboration. The independent worker may choose its own method, but it must still report concrete outputs, changed paths, evidence, and blockers truthfully.
+
+## Compact Bulk-Work Reports
+
+- Without a full contract, the parent's requested compact success report below takes precedence over generic independent-worker reporting. Failures and blockers MUST still be reported.
+- For a requested evidence digest, the parent MUST supply paths and the exact question. Return answer bullets with verified `[path:line]` citations, relevant exports, and side effects; NEVER return implementation dumps.
+- For settled boilerplate, the parent MUST supply the target path, reference pattern, and edge cases. Write directly within the allowed scope; return only the written line count on success. Report failures and blockers truthfully.
+- These compact payloads NEVER replace a required `assignment-result` envelope, acceptance evidence, or changed-path report. An evidence digest is a cited summary, not the cryptographic assignment `digest`; NEVER substitute one for the other.

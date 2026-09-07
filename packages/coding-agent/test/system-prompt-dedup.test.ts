@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import {
+	type BuildSystemPromptOptions,
 	buildSystemPrompt,
 	loadProjectContextFiles,
 	loadSystemPromptFiles,
@@ -265,4 +266,54 @@ describe("SYSTEM.md prompt assembly", () => {
 		const matches = promptText.match(new RegExp(escapeRegExp(sharedContent), "g")) ?? [];
 		expect(matches).toHaveLength(1);
 	});
+
+	it.each([false, true])(
+		"deduplicates copied savings contracts across prompt sources and repeated builds (custom=%j)",
+		async custom => {
+			const base: BuildSystemPromptOptions = {
+				cwd: tempDir,
+				contextFiles: [],
+				skills: [],
+				rules: [],
+				toolNames: ["task"],
+				fusionTokenSavings: true,
+				activeRepoContext: null,
+				workspaceTree: { rootPath: tempDir, rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+			};
+			const first = await buildSystemPrompt(base);
+			const savingsBlock = first.systemPrompt
+				.join("\n\n")
+				.match(/<fusion-token-savings>[\s\S]*?<\/fusion-token-savings>/)?.[0];
+			expect(savingsBlock).toBeDefined();
+			if (!savingsBlock) throw new Error("Missing rendered savings contract");
+			const opts: BuildSystemPromptOptions = {
+				...base,
+				resolvedCustomPrompt: custom ? `<test-custom-source />\n\n${savingsBlock}` : undefined,
+				resolvedAppendSystemPrompt: `<test-append-source />\n\n${savingsBlock}`,
+				contextFiles: [{ path: "context.txt", content: `<test-context-source />\n\n${savingsBlock}` }],
+				alwaysApplyRules: [
+					{ name: "source-rule", path: "source-rule.md", content: `<test-rule-source />\n\n${savingsBlock}` },
+				],
+			};
+			const rebuilt = await buildSystemPrompt(opts);
+			const repeated = await buildSystemPrompt(opts);
+			expect(repeated.systemPrompt).toEqual(rebuilt.systemPrompt);
+			const text = rebuilt.systemPrompt.join("\n\n");
+			expect(text.match(/<fusion-token-savings>/g)).toHaveLength(1);
+			expect(text.match(/<bulk-work-delegation>/g)).toHaveLength(1);
+			expect(rebuilt.systemPrompt.at(-1)?.trim()).toBe(savingsBlock);
+			for (const source of ["append", "context", "rule", ...(custom ? ["custom"] : [])]) {
+				expect(text.match(new RegExp(`<test-${source}-source />`, "g"))).toHaveLength(1);
+			}
+			for (const state of [{ fusionTokenSavings: false }, { toolNames: ["read"] }]) {
+				const disabled = await buildSystemPrompt({ ...opts, ...state });
+				const disabledText = disabled.systemPrompt.join("\n\n");
+				expect(disabledText).not.toContain("<fusion-token-savings>");
+				expect(disabledText).not.toContain("<bulk-work-delegation>");
+				expect(disabledText).toContain("<test-append-source />");
+				expect(disabledText).toContain("<test-context-source />");
+				expect(disabledText).toContain("<test-rule-source />");
+			}
+		},
+	);
 });

@@ -65,6 +65,7 @@ import {
 	type AgentDefinition,
 	type AgentProgress,
 	canSpawnAtDepth,
+	type EvidenceDigestRequest,
 	getTaskSchema,
 	type SingleResult,
 	type TaskItem,
@@ -109,6 +110,7 @@ import {
 interface RenderSubagentPromptOptions {
 	readonly assignment: string;
 	readonly prefetchEvidence?: string;
+	readonly evidenceDigest?: EvidenceDigestRequest;
 }
 
 interface PrefetchEvidenceResult {
@@ -181,6 +183,7 @@ function renderSubagentUserPrompt(options: RenderSubagentPromptOptions): string 
 	return prompt.render(subagentUserPromptTemplate, {
 		assignment: options.assignment.trim(),
 		prefetchEvidence: evidence,
+		evidenceDigest: options.evidenceDigest,
 	});
 }
 
@@ -489,6 +492,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 			role: params.role,
 			model: params.model,
 			difficulty: params.difficulty,
+			evidenceDigest: params.evidenceDigest,
 			assignment: params.assignment,
 			executionProfile: internal.executionProfile,
 			toolProfile: internal.toolProfile,
@@ -520,6 +524,7 @@ function spawnParamsFor(params: TaskParams, item: TaskItem): OrchestratedTaskPar
 	if (item.role !== undefined) spawn.role = item.role;
 	if (item.model !== undefined) spawn.model = item.model;
 	if (item.difficulty !== undefined) spawn.difficulty = item.difficulty;
+	if (item.evidenceDigest !== undefined) spawn.evidenceDigest = item.evidenceDigest;
 	if (item.assignment !== undefined) spawn.assignment = item.assignment;
 	if (item.fork !== undefined) spawn.fork = item.fork;
 	if (params.context !== undefined) spawn.context = params.context;
@@ -821,6 +826,23 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				}
 			: agent;
 
+		if (params.evidenceDigest !== undefined) {
+			const digest = params.evidenceDigest;
+			if (
+				!digest ||
+				!Array.isArray(digest.paths) ||
+				digest.paths.length === 0 ||
+				digest.paths.some(value => typeof value !== "string" || !value.trim()) ||
+				typeof digest.question !== "string" ||
+				!digest.question.trim()
+			) {
+				return fail("Task evidenceDigest requires non-empty paths and an exact question.");
+			}
+			if (params.fork === true) {
+				return fail("Task evidenceDigest requires a fresh spawn; fork mode inherits the parent's model.");
+			}
+		}
+
 		if (params.difficulty && params.fork === true) {
 			return fail(
 				`Task spawn rejected: "difficulty" cannot be combined with "fork: true". Fork mode inherits the parent's exact model, so it is incompatible with difficulty-based routing; omit "difficulty" for a forked spawn, or set "fork: false" (or omit it) to route by difficulty.`,
@@ -831,6 +853,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const routingResult = resolveSubagentModelRouting({
 			requestedModel: explicitModelSelector,
 			requestedDifficulty: params.difficulty,
+			taskKind: params.evidenceDigest ? "evidence-digest" : undefined,
 			agentName,
 			agentModelDefault: effectiveAgent.model,
 			settings: this.session.settings,
@@ -1171,7 +1194,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 					agent: agentLabel,
 					agentSource: prepared.agent.source,
 					status: "pending",
-					task: renderSubagentUserPrompt({ assignment }),
+					task: renderSubagentUserPrompt({ assignment, evidenceDigest: item.evidenceDigest }),
 					assignment,
 					description: item.description,
 					executionProfile: prepared.plan.profile,
@@ -1755,7 +1778,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				agent: agentName,
 				agentSource: agent.source,
 				status: "pending",
-				task: renderSubagentUserPrompt({ assignment }),
+				task: renderSubagentUserPrompt({ assignment, evidenceDigest: params.evidenceDigest }),
 				assignment,
 				executionProfile: spawnPlan.profile,
 				toolProfile,
@@ -1821,7 +1844,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				emitProgress();
 			}
 			const verificationSession = this.session as VerificationCapableToolSession;
-			const renderedTask = renderSubagentUserPrompt({ assignment, prefetchEvidence: prefetch.evidence });
+			const renderedTask = renderSubagentUserPrompt({
+				assignment,
+				prefetchEvidence: prefetch.evidence,
+				evidenceDigest: params.evidenceDigest,
+			});
 
 			const sharedRunOptions = {
 				cwd: spawnCwd,
@@ -1964,7 +1991,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 						id: agentId,
 						agent: agent.name,
 						agentSource: agent.source,
-						task: renderSubagentUserPrompt({ assignment }),
+						task: renderedTask,
 						assignment,
 						description: params.description,
 						exitCode: 1,

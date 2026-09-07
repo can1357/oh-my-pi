@@ -91,12 +91,21 @@ export const ROLE_LABEL_MAX = 80;
 export const ROLE_INPUT_MAX = 256;
 const ROLE_INPUT_SCHEMA = `string <= ${ROLE_INPUT_MAX}` as const;
 
+/** Explicit bulk-evidence assignment, independent of agent names and model providers. */
+const evidenceDigestSchema = type({
+	paths: "string[] > 0",
+	question: "string > 0",
+	"+": "delete",
+});
+export type EvidenceDigestRequest = typeof evidenceDigestSchema.infer;
+
 export const taskItemSchema = type({
 	"id?": "string",
 	"description?": "string",
 	"role?": ROLE_INPUT_SCHEMA,
 	"model?": "string",
 	"difficulty?": "'low'|'medium'|'high'",
+	"evidenceDigest?": evidenceDigestSchema,
 	assignment: "string",
 	"fork?": "boolean",
 	"cwd?": "string",
@@ -109,6 +118,7 @@ const taskItemSchemaIsolated = type({
 	assignment: "string",
 	"model?": "string",
 	"difficulty?": "'low'|'medium'|'high'",
+	"evidenceDigest?": evidenceDigestSchema,
 	"isolated?": "boolean",
 	"fork?": "boolean",
 	"cwd?": "string",
@@ -127,6 +137,8 @@ export interface TaskItem {
 	model?: string;
 	/** Requested subtask difficulty; independent from execution tier. Maps deterministically to `pi/smol` | `pi/task` | `pi/slow` via `resolveSubagentModelRouting`. */
 	difficulty?: SubagentTaskDifficulty;
+	/** Read the named paths to answer one exact question with a cited evidence digest. Fresh spawns only. */
+	evidenceDigest?: EvidenceDigestRequest;
 	/** The work; required by the schema. */
 	assignment?: string;
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
@@ -172,6 +184,7 @@ export const taskSchema = type({
 	"role?": ROLE_INPUT_SCHEMA,
 	"model?": "string",
 	"difficulty?": "'low'|'medium'|'high'",
+	"evidenceDigest?": evidenceDigestSchema,
 	assignment: "string",
 	"isolated?": "boolean",
 	"fork?": "boolean",
@@ -185,6 +198,7 @@ const taskSchemaNoIsolation = type({
 	"role?": ROLE_INPUT_SCHEMA,
 	"model?": "string",
 	"difficulty?": "'low'|'medium'|'high'",
+	"evidenceDigest?": evidenceDigestSchema,
 	assignment: "string",
 	"fork?": "boolean",
 	"cwd?": "string",
@@ -235,6 +249,8 @@ export interface TaskParams {
 	model?: string;
 	/** Requested subtask difficulty (flat form). See {@link TaskItem.difficulty}. */
 	difficulty?: SubagentTaskDifficulty;
+	/** Explicit bulk-evidence contract (flat form). See {@link TaskItem.evidenceDigest}. */
+	evidenceDigest?: EvidenceDigestRequest;
 	/** The work (flat form). */
 	assignment?: string;
 	/** Batch form (`task.batch`): one subagent per item. */

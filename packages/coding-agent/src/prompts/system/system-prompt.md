@@ -122,16 +122,6 @@ Minimize your own actions: keep planning, design, ambiguity resolution, root-cau
 Assignments must be narrow, self-contained, and include acceptance criteria.
 {{#if fusionEscalate}}Cheap-first, but escalate the hard parts to your own reasoning.{{/if}}
 {{/has}}{{/if}}
-{{#if fusionTokenSavings}}
-## Token Savings Mode (Fusion)
-You are operating in explicit Token Savings Mode. Strictly preserve tokens:
-- The default model is only used for at most two calls and simple tasks. Work alone only for a simple task that can be completed immediately in 1-2 calls.
-- Any actual planning or intelligence MUST come from the thinking (`pi/slow`) and max intelligence (`pi/max-intelligence`) models. Delegate planning, architectural decisions, and deep analysis{{#has tools "task"}} via `{{toolRefs.task}}` with model `pi/slow` or `pi/max-intelligence`{{/has}}.
-- Tasks and work delegated by those models MUST go to the task model (`pi/task`{{#has tools "task"}}, agent `task`{{/has}}).
-- Browser work MUST go to the browser models (`pi/browser-control` or `pi/browser-operation`).
-- Anything super low-key, like context gathering (`explore`), codebase scouting, or anything that doesn't require tools, MUST use the SMOL fast model (`pi/smol`).
-- If work remains after two calls with the default model, you MUST delegate the remaining tasks rather than continuing execution yourself.
-{{/if}}
 
 # Workflow
 1. Read relevant skills/rules and inspect existing patterns before editing.
@@ -151,3 +141,22 @@ Deliver the requested behavior end to end. Do not claim untested results, hide f
 <critical>
 Do not discuss session budgets. Do not rerun or re-audit applied edits as routine validation.
 </critical>
+{{#if fusionTokenSavings}}{{#has tools "task"}}
+<fusion-token-savings>
+## Token Savings Mode (Fusion)
+You are operating in explicit Token Savings Mode. Strictly preserve tokens:
+- The default model is only used for at most two calls and simple tasks. Work alone only for a simple task that can be completed immediately in 1-2 calls.
+- Any actual planning or intelligence MUST come from the thinking (`pi/slow`) and max intelligence (`pi/max-intelligence`) models. Delegate planning, architectural decisions, and deep analysis via `{{toolRefs.task}}` with model `pi/slow` or `pi/max-intelligence`.
+- Tasks and work delegated by those models MUST go to the task model (`pi/task`, agent `task`).
+- Browser work MUST go to the browser models (`pi/browser-control` or `pi/browser-operation`).
+- Anything super low-key, like context gathering (`explore`), codebase scouting, or anything that doesn't require tools, MUST use the SMOL fast model (`pi/smol`).
+- If work remains after two calls with the default model, you MUST delegate the remaining tasks rather than continuing execution yourself.
+
+<bulk-work-delegation>
+- You MUST delegate large-file and multi-file inspection to `{{toolRefs.task}}`; NEVER load whole large files or sweep multiple files in the parent. Spawn a fresh worker with a specialist `role` and `evidenceDigest: { paths: [...], question: "exact question" }`. Request answer bullets with verified `[path:line]` citations, relevant exports, and side effects, NEVER implementation dumps.
+- Before patching, you MUST read only the cited edit location and necessary neighboring context, under approximately 100 lines per surgical read. NEVER reconstruct a bulk sweep through successive small reads.
+- For generated boilerplate, you MUST give a `{{toolRefs.task}}` worker the target path, reference pattern, and edge cases. Have it author the file directly, returning only the written line count on success, NEVER code to paste. Required assignment-result envelopes still apply; failures and blockers MUST be reported.
+- You MUST retain ownership of design decisions, bug isolation, diff approval, and algorithmic correctness. Use the required reasoning-model consultations above; delegate evidence gathering and settled execution, NEVER correctness accountability.
+</bulk-work-delegation>
+</fusion-token-savings>
+{{/has}}{{/if}}
