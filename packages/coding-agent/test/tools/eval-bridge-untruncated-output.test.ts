@@ -15,18 +15,23 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { callSessionTool } from "@oh-my-pi/pi-coding-agent/eval/js/tool-bridge";
-import { BrowserTool } from "@oh-my-pi/pi-coding-agent/tools/browser";
+import type { EvalPreludeDefinition } from "@oh-my-pi/pi-coding-agent/eval/preludes";
+import { createBrowserPrelude } from "@oh-my-pi/pi-coding-agent/tools/browser";
 import * as tabSupervisor from "@oh-my-pi/pi-coding-agent/tools/browser/tab-supervisor";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 
 /** Comfortably past the 50 KiB `enforceInlineByteCap` default. */
 const HUGE_OUTPUT = Array.from({ length: 4000 }, (_, i) => `line-${i}-${"payload".repeat(4)}`).join("\n");
 
-function makeSession(): ToolSession {
-	return {
+function makeSession(): { session: ToolSession; prelude: EvalPreludeDefinition } {
+	const session = {
 		cwd: "/tmp/eval-bridge-untruncated",
 		settings: Settings.isolated(),
 	} as unknown as ToolSession;
+	const prelude = createBrowserPrelude(session);
+	// The bridge resolves preludes from the session's live enabled set.
+	(session as { getEvalPreludes?: () => EvalPreludeDefinition[] }).getEvalPreludes = () => [prelude];
+	return { session, prelude };
 }
 
 function textOf(result: { content: Array<{ type: string; text?: string }> }): string {
@@ -46,20 +51,17 @@ describe("eval bridge tool output", () => {
 			screenshots: [],
 		} as never);
 
-		const session = makeSession();
-		const tool = new BrowserTool(session);
+		const { session, prelude } = makeSession();
 		const args = { action: "run", code: "return capture()" };
 
-		// Model path: the tool executes with no programmatic-caller context.
-		const modelResult = await tool.execute("call-model", args as never, undefined, undefined, undefined);
+		// Model path: the prelude runs with no programmatic-caller tool context.
+		const modelResult = await prelude.invoke(args, { session, toolCallId: "call-model" });
 		const modelText = textOf(modelResult);
 		expect(modelText).toMatch(/\[…\d+B elided…\]/);
 		expect(modelText).not.toBe(HUGE_OUTPUT);
 
-		// Kernel path: the same tool driven through the eval bridge.
-		const bridgeValue = await callSessionTool("browser", args, {
-			session: { ...session, getToolByName: () => tool } as unknown as ToolSession,
-		});
+		// Kernel path: the same prelude driven through the eval bridge.
+		const bridgeValue = await callSessionTool("__prelude__", { name: "browser", parameters: args }, { session });
 		const bridgeText = typeof bridgeValue === "string" ? bridgeValue : "text" in bridgeValue ? bridgeValue.text : "";
 		expect(bridgeText).toBe(HUGE_OUTPUT);
 		expect(bridgeText).not.toContain("elided");

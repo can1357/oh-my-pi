@@ -115,7 +115,7 @@ describe("shell-snapshot fn-env helper", () => {
 	it("emits export lines for env vars referenced by captured functions, skips unset and shell-internal names", async () => {
 		const funcs = [
 			`mise () { command "$__MISE_EXE" "$@"; }`,
-			// biome-ignore lint/suspicious/noTemplateCurlyInString: literal shell parameter expansion `${FOO_TEST_DIR}`
+			// oxlint-disable-next-line no-template-curly-in-string -- literal shell parameter expansion `${FOO_TEST_DIR}`
 			'my_fn () { echo "$FOO_TEST_DIR ${FOO_TEST_DIR}"; }',
 			`uses_path () { echo "$PATH"; }`,
 			`uses_locale () { echo "$LC_ALL"; }`,

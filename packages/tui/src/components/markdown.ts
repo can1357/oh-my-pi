@@ -137,7 +137,7 @@ function normalizeHtmlEntitiesForTerminal(raw: string): string {
 		if (Number.isFinite(value) && value >= 0 && value <= 0x10ffff) {
 			try {
 				return String.fromCodePoint(value);
-			} catch (_) {
+			} catch {
 				// Fallback to empty string or original if invalid codepoint
 			}
 		}
@@ -261,7 +261,7 @@ function normalizeHtmlForTerminal(
 		}
 		lastIndex = index + tag.length;
 
-		const isClosing = /^<\//.test(tag);
+		const isClosing = tag.startsWith("</");
 		const isSelfClosing = /\/\s*>$/.test(tag);
 
 		switch (name) {
@@ -794,7 +794,7 @@ export function urlTokenPossible(src: string): boolean {
 	}
 	if (i === 0) return false;
 	if (i >= URL_GATE_EMAIL_SCAN_LIMIT) return true; // over-long run: give up conservatively
-	return src.charCodeAt(i) === 64 /* @ */;
+	return src.charCodeAt(i) === 64; /* @ */
 }
 
 // Setext-underline pre-gate for marked's `lheading` rule. The rule's lazy body
@@ -1131,7 +1131,7 @@ function listMayContinueAt(text: string, tailStart: number, listRaw: string): bo
 	// bare newline, or end-of-input (which appends can still extend).
 	if (i >= n) return true;
 	const after = text.charCodeAt(i);
-	return after === 0x20 /* space */ || after === 0x09 /* tab */ || after === 0x0a /* \n */;
+	return after === 0x20 /* space */ || after === 0x09 /* tab */ || after === 0x0a; /* \n */
 }
 
 const NO_BLOCK_BOUNDARY = { end: 0, count: 0 } as const;
@@ -1254,6 +1254,52 @@ function lexDocument(text: string): Token[] {
 	return lexWindowed(text);
 }
 
+/** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
+export interface MarkdownLink {
+	/** Visible link text (equals `href` for autolinks and bare URLs). */
+	text: string;
+	/** Destination exactly as marked resolved it (references resolved, no normalization). */
+	href: string;
+}
+
+/**
+ * Every link token in `text`, in document order, from the same configured
+ * lexer the renderer uses — so fenced code, code spans, escapes, reference
+ * definitions and the GFM autolink rules agree with what is drawn on screen.
+ * Duplicate hrefs are kept; callers decide how to fold them.
+ */
+export function extractMarkdownLinks(text: string): MarkdownLink[] {
+	const links: MarkdownLink[] = [];
+	const walk = (tokens: readonly Token[] | undefined): void => {
+		if (!tokens) return;
+		for (const token of tokens) {
+			if (token.type === "link") {
+				const link = token as Tokens.Link;
+				if (typeof link.href === "string" && link.href.length > 0) {
+					links.push({
+						text: typeof link.text === "string" && link.text.length > 0 ? link.text : link.href,
+						href: link.href,
+					});
+				}
+				continue;
+			}
+			// Containers: paragraphs, emphasis, lists, blockquotes, table cells.
+			const any = token as {
+				tokens?: Token[];
+				items?: Token[];
+				header?: Array<{ tokens?: Token[] }>;
+				rows?: Array<Array<{ tokens?: Token[] }>>;
+			};
+			walk(any.tokens);
+			walk(any.items);
+			if (any.header) for (const cell of any.header) walk(cell.tokens);
+			if (any.rows) for (const row of any.rows) for (const cell of row) walk(cell.tokens);
+		}
+	};
+	walk(lexDocument(text));
+	return links;
+}
+
 /** Drop all L2 cache entries. Call on theme change to prevent stale styled output. */
 export function clearRenderCache(): void {
 	renderCache.clear();
@@ -1300,6 +1346,15 @@ export interface HighlightStreamSession {
 	push(chunk: string): string;
 }
 
+/** Collect distinct hyperlink destinations using the renderer's Markdown grammar, excluding images and code. */
+export function getMarkdownLinkUrls(text: string): string[] {
+	const urls = new Set<string>();
+	markdownParser.walkTokens(markdownParser.lexer(text), token => {
+		if (token.type === "link" && typeof token.href === "string") urls.add(token.href);
+	});
+	return [...urls];
+}
+
 /**
  * Theme functions for markdown elements.
  * Each function takes text and returns styled text with ANSI codes.
@@ -1308,6 +1363,8 @@ export interface MarkdownTheme {
 	heading: (text: string) => string;
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
+	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
+	resolveLink?: (href: string) => string | undefined;
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
 	codeBlockBorder: (text: string) => string;
@@ -1515,11 +1572,11 @@ const DEFAULT_COLOR_SWATCH_GLYPH = "■";
 
 // `#` + 3-8 hex digits, not glued to a surrounding word/`#`/`&` (avoids HTML
 // entities like &#9731; and paths like foo#fff), not the start of a canonical
-// UUID, and not trailed by more hex (so over-long runs never produce a
-// misleading swatch). Length/letter rules are enforced in classifyHexColor
-// since the alternation can't express "exactly 3, 6, or 8".
-const HEX_COLOR_REGEX =
-	/(?<![\w#&])#(?![0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})([0-9a-fA-F]{3,8})(?![0-9a-fA-F])/g;
+// UUID, and not trailed by another word char (over-long runs and word
+// fragments like the "#eac" of "#each" never produce a misleading swatch).
+// Length/letter rules are enforced in classifyHexColor since the alternation
+// can't express "exactly 3, 6, or 8".
+const HEX_COLOR_REGEX = /(?<![\w#&])#(?![0-9a-fA-F]{8}(?:-[0-9a-fA-F]{4}){3}-[0-9a-fA-F]{12})([0-9a-fA-F]{3,8})(?!\w)/g;
 const HEX_COLOR_EXACT_REGEX = /^#([0-9a-fA-F]{3,8})$/;
 
 /**
@@ -2355,8 +2412,11 @@ export class Markdown implements Component {
 		}
 
 		const recorder: TailRenderRecorder = {
+			// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 			rows: new Array(tokens.length - spliceEnd).fill(undefined),
+			// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 			raws: new Array(tokens.length - spliceEnd).fill(undefined),
+			// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 			nextTypes: new Array(tokens.length - spliceEnd).fill(undefined),
 		};
 		const fresh = this.#renderContentLines(tokens, spliceEnd, tokens.length, contentWidth, signature, recorder);
@@ -2369,8 +2429,11 @@ export class Markdown implements Component {
 		// `start`), so a mostly-frozen document allocates only for the
 		// unfrozen tail instead of the whole token list every frame.
 		const tailCount = tokens.length - start;
+		// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 		const rows: (readonly string[] | undefined)[] = new Array(tailCount).fill(undefined);
+		// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 		const raws: (string | undefined)[] = new Array(tailCount).fill(undefined);
+		// oxlint-disable-next-line unicorn/no-new-array -- render-cache length preallocation
 		const nextTypes: (string | undefined)[] = new Array(tailCount).fill(undefined);
 		if (cache !== undefined && cache.tokenStart === start) {
 			for (let i = start; i < Math.min(cache.cachedThrough, spliceEnd); i++) {
@@ -3155,17 +3218,22 @@ export class Markdown implements Component {
 					markHtmlItemWhenContent(token.text);
 					const linkText = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
-					const clickableLinkText = formatHyperlink(styledLinkText, token.href);
-					// If link text matches href, only show the link once
+					const href = typeof token.href === "string" ? token.href : "";
+					const target = (href && this.#theme.resolveLink?.(href)) || href;
+					const clickableLinkText = formatHyperlink(styledLinkText, target);
+					// If link text matches href, only show the link once. A missing
+					// href (malformed/partial link token) renders as plain link text
+					// instead of crashing the renderer or emitting an empty "()"
+					// (issue #10283).
 					// Compare raw text (token.text) not styled text (linkText) since linkText has ANSI codes
 					// For mailto: links, strip the prefix before comparing (autolinked emails have
 					// text="foo@bar.com" but href="mailto:foo@bar.com")
-					const hrefForComparison = token.href.startsWith("mailto:") ? token.href.slice(7) : token.href;
-					if (token.text === token.href || token.text === hrefForComparison)
+					const hrefForComparison = href.startsWith("mailto:") ? href.slice(7) : href;
+					if (!href || token.text === href || token.text === hrefForComparison)
 						result += clickableLinkText + stylePrefix;
 					else {
-						const styledLinkUrl = this.#theme.linkUrl(`(${token.href})`);
-						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, token.href)}${stylePrefix}`;
+						const styledLinkUrl = this.#theme.linkUrl(`(${href})`);
+						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, target)}${stylePrefix}`;
 					}
 					break;
 				}
@@ -3464,6 +3532,7 @@ export class Markdown implements Component {
 		let minCellsWidth = minColumnWidths.reduce((a, b) => a + b, 0);
 
 		if (minCellsWidth > availableForCells) {
+			// oxlint-disable-next-line unicorn/no-new-array -- column-width allocation
 			minColumnWidths = new Array(numCols).fill(1);
 			const remaining = availableForCells - numCols;
 

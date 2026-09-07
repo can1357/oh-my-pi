@@ -21,10 +21,10 @@
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
 | `pattern` | `string` | Yes | Regex pattern. `grep.ts` rejects whitespace-only input but preserves it verbatim. The native matcher tries Rust regex first, then PCRE2 for features such as lookaround/backreferences, then targeted literal recovery for malformed braces/parentheses. Multiline is enabled only when the pattern contains a literal newline or the two-character sequence `\\n`. |
-| `path` | `string` | No | File, directory, glob, archive member, internal URL, fetched URL, or one-file line selector such as `src/foo.ts:50-100`. Separate multiple roots with `;`. Omitted or empty defaults to `.`. Existing paths containing semicolons remain literal; internal URLs cannot contain glob characters. |
+| `path` | `string` | No | One file path, directory path, glob-like path, archive member, readable external URL, internal URL, or one-file line selector such as `src/foo.ts:50-100` — or several of those as a semicolon-delimited list (`"src; tests"`). Omitted or empty defaults to `.`. Empty entries are rejected. Semicolon-delimited lists split unconditionally; entries accidentally joined with comma or whitespace are expanded only after existence validation; existing paths containing delimiters stay intact. Internal URLs cannot contain glob characters. |
 | `case` | `boolean` | No | Case-sensitive search. Defaults to `true`. Passed to native `ignoreCase` or JS `RegExp` flags for virtual resources. |
 | `gitignore` | `boolean` | No | Respect `.gitignore` during directory scans. Defaults to `true`. |
-| `skip` | `number \| null` | No | File-page offset for multi-file results. Defaults to `0`; finite values are floored and negatives/non-finite values fail. Single-file searches ignore it. |
+| `skip` | `number` | No | File-page offset for multi-file results. Defaults to `0`; `grep.ts` floors finite numbers and rejects negative or non-finite values. Single-file searches ignore it because they do not paginate by file. |
 
 `grep` is enabled by default (`grep.enabled = true`) and is discoverable rather than essential. Context defaults are configurable with `grep.contextBefore` and `grep.contextAfter`.
 
@@ -49,15 +49,18 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 ## Flow
 1. `GrepTool.execute()` validates and normalizes input in `packages/coding-agent/src/tools/grep.ts`:
    - rejects whitespace-only patterns while preserving the pattern verbatim;
-   - defaults omitted or empty `path` to `.` and splits semicolon-delimited roots while preserving existing delimiter-containing paths;
+   - defaults omitted or empty `path` to `["."]` (the workspace root);
    - normalizes `skip` to a non-negative integer;
-   - peels any line-range selector from each root;
+   - expands delimiter-flattened `path` entries with `expandDelimitedPathEntries()`, keeping existing delimiter-containing paths intact, splitting semicolon-delimited lists unconditionally, accepting comma splits when at least one part resolves, and accepting whitespace splits only when every part resolves;
+   - peels any line-range selector from each resulting entry;
    - reads `grep.contextBefore` and `grep.contextAfter` from session settings (`1` and `3` by default);
    - enables multiline only when `pattern` contains `\n` or an actual newline.
 2. Each `path` root is normalized with `normalizePathLikeInput()` again during shared scope resolution; this is a no-op for entries already normalized by delimiter expansion.
 3. Archive member paths such as `bundle.zip:src/foo.ts` are materialized to temporary UTF-8 scratch files before native grep. Binary or non-UTF-8 archive members are reported as skipped/unreadable.
-4. Internal URLs are resolved before filesystem scope resolution:
+4. Internal URLs and external URLs are resolved before filesystem scope resolution (`resolveToolSearchScope()`):
    - glob metacharacters (`*`, `?`, `[`, `{`) are rejected for internal URLs;
+   - `ssh://` paths fail early (`ssh://` has no local backing file);
+   - readable external URLs (`http(s)://`, collapsed `http(s):/host`, `www.` spellings when no local path exists) are fetched and materialized to immutable local files; `ftp`/`ws`/`wss` and declined fetches fail with an explicit error;
    - resources with `sourcePath` are searched through their backing file;
    - resources without `sourcePath` are searched in memory with JavaScript `RegExp`;
    - `omp://` expands to every embedded documentation file via URL completion;
@@ -71,7 +74,6 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 9. It calls native `grep()` from `@oh-my-pi/pi-natives` with:
    - `pattern`, `ignoreCase`, `multiline`, `gitignore`;
    - `hidden: true`;
-   - `cache: false`;
    - `contextBefore` / `contextAfter` from settings;
    - `maxColumns: DEFAULT_MAX_COLUMN` (`512`);
    - `maxCount: INTERNAL_TOTAL_CAP` (`2000`);
@@ -138,18 +140,20 @@ The tool returns a single text block in `content[0].text` plus structured `detai
 - Final text truncation: `truncateHead()` default byte cap `50 * 1024` bytes (`DEFAULT_MAX_BYTES` in `packages/coding-agent/src/session/streaming-output.ts`). `grep.ts` overrides `maxLines` to `Number.MAX_SAFE_INTEGER`, so normal grep output is byte-capped, not line-capped.
 - Context defaults: `grep.contextBefore = 1`, `grep.contextAfter = 3` in `packages/coding-agent/src/config/settings-schema.ts`.
 - Pagination: `skip` is a file-page offset for multi-file scopes. The result text says `Use skip=<N> for the next page` when more files remain.
-- Native directory-scan cache: available in `grep.rs`, but this tool always sets `cache: false`.
+- Native directory-scan cache: disabled natively for this tool — `GrepOptions` has no `cache` field; `build_grep_walk_request` hard-codes `.cache(false)` in `crates/pi-natives/src/grep.rs`.
 - Native grep wall-clock budget: `30_000ms` per invocation (`SEARCH_GREP_TIMEOUT_MS` in `packages/coding-agent/src/tools/grep.ts`); hitting it raises `Grep timed out after 30s; ...`.
 - Native per-file size cap: `4 * 1024 * 1024` bytes (`MAX_FILE_BYTES` in `crates/pi-natives/src/grep.rs`, mirrored as `NATIVE_GREP_MAX_FILE_BYTES` in `grep.ts`). Oversized filesystem files are skipped and surfaced as partial coverage (names for explicit files, a count for directory scans). Oversized virtual resources are searched in line-boundary chunks for line mode; multiline virtual searches fall back to JavaScript regex.
 
 ## Errors
 - `Pattern must not be empty` when trimmed `pattern` is empty.
 - `Skip must be a non-negative number` for negative or non-finite `skip`.
-- `` `path` must contain non-empty paths or globs `` when a normalized root is empty.
+- `Search scope entries must be non-empty paths or globs` when any normalized `path` entry is empty.
 - `Glob patterns are not supported for internal URLs: ...` for internal URL + glob metacharacters.
+- `Cannot search a remote ssh:// path (no local file): ...` for `ssh://` inputs, with a hint to `read` the remote path or grep a specific remote file.
+- `Cannot search external URL: ... Use \`read\` to fetch web content, then search the returned text.` for non-fetchable external URL schemes (`ftp`/`ws`/`wss`) or declined fetches.
 - Line-range selector errors include `Line-range selector requires a single file, not a glob: ...`, `Line-range selector requires a single file: ... is a directory`, and `Path not found for line-range selector: ...`.
 - `Cannot search archive member(s): ...` when all archive selectors are unreadable, binary, or non-UTF-8.
-- `Path not found: ...; list each target in the semicolon-delimited \`path\`` when a filesystem-backed resolved base path is missing, or when every multi-root filesystem entry is missing (with an archive hint when unreadable archive members contributed).
+- `Path not found: ...` when a filesystem-backed resolved base path is missing (multi-path calls append the hint `(\`path\` list entries must each exist relative to cwd)`), or `Path not found: ...; list each target in the semicolon-delimited \`path\`` when every multi-path filesystem entry is missing (with an archive hint when unreadable archive members contributed).
 - Virtual-resource JavaScript regex compilation can report `Invalid regex: ...`. Filesystem-backed native search normally falls back from Rust regex to PCRE2 and finally to a literal pattern rather than rejecting regex syntax.
 - Multi-file native scans skip per-file open/search failures inside `grep.rs`; the scan continues with surviving files.
 - ``Grep timed out after 30s; narrow paths or pattern, or scope with `glob` first`` when native grep hits `SEARCH_GREP_TIMEOUT_MS`.

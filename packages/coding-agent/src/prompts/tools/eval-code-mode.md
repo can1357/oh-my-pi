@@ -2,7 +2,7 @@
 
 Codex Code Mode is active: this tool is your primary work surface and the direct tool surface is restricted.
 Plan multiple operations into ONE cell whenever the next steps are known, calling session tools via `await tool.<name>(args)`;
-use `parallel([() => tool.read(…), () => tool.grep(…)])` for independent calls. Prefer `tool.*` calls over raw `Bun.file`/fs so operations flow through the session tool pipeline.
+spawn independent calls without awaiting, then `await Promise.all([…])`. Prefer `tool.*` calls over raw `Bun.file`/fs so operations flow through the session tool pipeline.
 Reserve separate cells for steps that must inspect earlier results.
 
 exec tool declarations:
@@ -10,4 +10,8 @@ exec tool declarations:
 declare const tool: {
 {{declarations}}
 };
+{{#if preludeDeclarations}}
+
+{{{preludeDeclarations}}}
+{{/if}}
 ```

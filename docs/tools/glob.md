@@ -18,7 +18,7 @@
 
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | `string` | No | Glob, file, directory, or path-backed internal URL. Separate multiple targets with `;`; omitted or empty defaults to `.`. Existing paths containing delimiters remain literal when they exist. Each target becomes its own walk root and multi-target scans run concurrently. `memory://` alone supports internal-URL glob patterns; `ssh://` is rejected because it has no local backing path. |
+| `path` | `string` | No | Glob, file, directory, or path-backed internal URL — or several of those as a semicolon-delimited list (`"src/**/*.ts; test/**/*.ts"`); omitted or empty defaults to `.`. Empty entries are rejected. Semicolon-delimited lists split unconditionally; entries accidentally joined with comma or whitespace are expanded only after existence validation; existing paths containing delimiters remain literal. Each target becomes its own walk root and multi-target scans run concurrently. `memory://` alone supports internal-URL glob patterns; `ssh://` is rejected because it has no local backing path. |
 | `hidden` | `boolean` | No | Include hidden files. Defaults to `true`. |
 | `gitignore` | `boolean` | No | Respect `.gitignore` during local native globbing. Defaults to `true`; set `false` to include gitignored files. |
 | `limit` | `number` | No | Max returned paths. Defaults to `200`; finite positive inputs are floored then clamped to `1..200`. |
@@ -43,7 +43,7 @@ The tool returns a single text block plus structured `details`.
 
 ## Flow
 
-1. `GlobTool.execute()` converts the optional semicolon-delimited `path` string into roots (default `.`), preserving an existing delimiter-containing path. Unless custom operations are injected, it expands the roots with `expandDelimitedPathEntries(..., parseFindPattern)`.
+1. `GlobTool.execute()` converts the optional semicolon-delimited `path` string into roots (default `.`). Unless custom operations are injected, it expands the roots with `expandDelimitedPathEntries(..., parseFindPattern)`: existing delimiter-containing paths stay intact, semicolon-delimited lists split unconditionally, comma splits are accepted when at least one part resolves, and whitespace splits only when every part resolves.
 2. The tool normalizes each entry with `normalizePathLikeInput()` and `/\\/g -> "/"`. Empty normalized entries fail with `` `path` must contain non-empty globs or paths ``.
 3. For multi-path local calls, `partitionExistingPaths(..., parseFindPattern)` (`packages/coding-agent/src/tools/path-utils.ts`) stats each base path. Missing entries are skipped; if all are missing, the tool throws `Path not found: ...`. Single missing paths still hard-fail.
 4. The tool calls `resolveExplicitFindPatterns()` for multi-entry calls; it parses each entry into its own `(basePath, globPattern, hasGlob)` target so every path is walked as its own root (collapsing to a shared ancestor would scan unrelated siblings). Single-entry calls parse with `parseFindPattern()` directly.

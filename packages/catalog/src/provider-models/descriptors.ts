@@ -9,6 +9,7 @@ import type { ModelManagerConfig, ProviderCatalogEntry, ProviderDescriptor } fro
 import { googleModelManagerOptions, googleVertexModelManagerOptions } from "./google";
 import { ollamaCloudModelManagerOptions } from "./ollama";
 import {
+	abliterationModelManagerOptions,
 	aiandModelManagerOptions,
 	aimlApiModelManagerOptions,
 	alibabaCodingPlanModelManagerOptions,
@@ -17,6 +18,7 @@ import {
 	basetenModelManagerOptions,
 	bedrockMantleModelManagerOptions,
 	cerebrasModelManagerOptions,
+	clinePassModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepinfraModelManagerOptions,
@@ -32,6 +34,7 @@ import {
 	litellmModelManagerOptions,
 	lmStudioModelManagerOptions,
 	metaModelManagerOptions,
+	museCodeModelManagerOptions,
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
@@ -69,6 +72,14 @@ import {
 } from "./special";
 
 export const CATALOG_PROVIDERS = [
+	{
+		id: "abliteration",
+		defaultModel: "abliterated-model",
+		envVars: ["ABLITERATION_API_KEY", "ABLIT_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => abliterationModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "Abliteration" },
+	},
 	{
 		id: "aiand",
 		defaultModel: "moonshotai/kimi-k2.7-code",
@@ -174,6 +185,14 @@ export const CATALOG_PROVIDERS = [
 		createModelManagerOptions: (config: ModelManagerConfig) => devinModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
 		catalogDiscovery: { label: "Devin", envVars: ["DEVIN_API_KEY"], oauthProvider: "devin" },
+	},
+	{
+		id: "cline-pass",
+		defaultModel: "kimi-k3",
+		envVars: ["CLINE_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => clinePassModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
+		catalogDiscovery: { label: "ClinePass", allowUnauthenticated: true },
 	},
 	{
 		id: "firepass",
@@ -296,6 +315,12 @@ export const CATALOG_PROVIDERS = [
 		defaultModel: "devstral-medium-latest",
 		envVars: ["MISTRAL_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => mistralModelManagerOptions(config),
+	},
+	{
+		id: "muse-code",
+		defaultModel: "muse-spark-1.3",
+		createModelManagerOptions: (config: ModelManagerConfig) => museCodeModelManagerOptions(config),
+		dynamicModelsAuthoritative: true,
 	},
 	{
 		id: "meta",

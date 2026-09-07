@@ -19,12 +19,12 @@ afterEach(() => {
 	server = null;
 });
 
-async function connectedTransport(): Promise<HttpTransport> {
+async function connectedTransport(timeout = REQUEST_TIMEOUT_MS): Promise<HttpTransport> {
 	if (!server) throw new Error("Test server was not started");
 	const transport = new HttpTransport({
 		type: "http",
 		url: `http://127.0.0.1:${server.port}/mcp`,
-		timeout: REQUEST_TIMEOUT_MS,
+		timeout,
 	});
 	await transport.connect();
 	return transport;
@@ -657,7 +657,7 @@ describe("MCP Streamable HTTP GET listener resumption", () => {
 						{ headers: { "Content-Type": "text/event-stream" } },
 					);
 				}
-				return new Response(
+				const response = new Response(
 					new ReadableStream<Uint8Array>({
 						start(controller) {
 							controller.enqueue(
@@ -668,9 +668,13 @@ describe("MCP Streamable HTTP GET listener resumption", () => {
 					}),
 					{ headers: { "Content-Type": "text/event-stream" } },
 				);
+				return response;
 			},
 		});
-		const transport = await connectedTransport();
+		// This is a resumption test, not a deadline test. The 50ms request
+		// fixture above gives the optional GET only 12ms to connect, so a busy
+		// runner can abort it before any stream exists to resume.
+		const transport = await connectedTransport(0);
 		const notifications: string[] = [];
 		let closed = false;
 		const secondNotification = Promise.withResolvers<void>();
@@ -678,17 +682,22 @@ describe("MCP Streamable HTTP GET listener resumption", () => {
 			notifications.push(method);
 			if (notifications.length === 2) secondNotification.resolve();
 		};
+		transport.onError = error => secondNotification.reject(error);
 		transport.onClose = () => {
 			closed = true;
+			secondNotification.reject(new Error("Logical SSE listener closed before the resumed notification"));
 		};
 
-		await transport.startSSEListener();
-		await withPendingGuard(secondNotification.promise, "resumed notification");
+		try {
+			await transport.startSSEListener();
+			await secondNotification.promise;
 
-		expect(notifications).toEqual(["notifications/first", "notifications/second"]);
-		expect(observed.lastEventIds).toEqual([null, "poll-1"]);
-		// The resume replaced the manager-level reconnect: no close fired.
-		expect(closed).toBe(false);
-		await transport.close();
+			expect(notifications).toEqual(["notifications/first", "notifications/second"]);
+			expect(observed.lastEventIds).toEqual([null, "poll-1"]);
+			// The resume replaced the manager-level reconnect: no close fired.
+			expect(closed).toBe(false);
+		} finally {
+			await transport.close();
+		}
 	});
 });

@@ -336,6 +336,7 @@ export class CmuxSocketClient {
 
 	#nextLine(timeoutMs: number): Promise<string> {
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
+		// oxlint-disable-next-line prefer-const -- captured by the timeout closure before assignment
 		let waiter: LineWaiter;
 		const timer = setTimeout(() => {
 			const index = this.#lineWaiters.indexOf(waiter);

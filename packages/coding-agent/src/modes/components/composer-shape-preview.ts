@@ -12,6 +12,7 @@ import {
 	type ComposerChromeContext,
 	type EditorTopBorder,
 	getComposerStyle,
+	isFilledComposerStyle,
 	padding,
 	truncateToWidth,
 	visibleWidth,
@@ -78,7 +79,11 @@ export function renderComposerShapePreview(
 	const gutter = style.defaultPromptGutter ?? "";
 	const contentWidth = Math.max(1, previewWidth - chromeWidth * 2 - visibleWidth(gutter));
 	const promptText = truncateToWidth("Ask anything, edit files, run tools", Math.max(1, contentWidth - 1));
-	const text = `${theme.fg("text", promptText)}${theme.inverse(" ")}`;
+	// Mirror the live editor: filled shapes let `surfaceColor` paint their own
+	// foreground, while transparent shapes resolve `text` to a contrast-safe
+	// color so an empty token never falls back to the terminal default.
+	const promptRow = `${promptText}${theme.inverse(" ")}`;
+	const text = isFilledComposerStyle(style) ? promptRow : theme.fgResolved("text", promptRow);
 	const pad = padding(Math.max(0, contentWidth - visibleWidth(promptText) - 1));
 	const styledGutter = gutter ? theme.fg("accent", gutter) : "";
 

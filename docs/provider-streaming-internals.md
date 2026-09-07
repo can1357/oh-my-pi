@@ -5,7 +5,7 @@ This document explains how token/tool streaming is normalized in `@oh-my-pi/pi-a
 ## End-to-end flow
 
 1. `streamSimple()` (`packages/ai/src/stream.ts`) maps generic options and dispatches to a provider stream function. Heavy built-ins are reached through the lazy wrappers in `packages/ai/src/providers/register-builtins.ts`; thin routing wrappers remain eager.
-2. Provider stream functions translate provider-native stream events into the unified `AssistantMessageEvent` sequence. Current built-ins include Anthropic, OpenAI Responses/Completions/Codex/Azure Responses, Google Gemini/Gemini CLI/Vertex, Bedrock Converse, Ollama, Cursor, Devin, pi-native gateway transport, plus GitLab Duo/Kimi/Synthetic wrappers and extension-registered custom APIs.
+2. Provider stream functions translate provider-native stream events into the unified `AssistantMessageEvent` sequence. Current built-ins include Anthropic, OpenAI Responses/Completions/Codex/Azure Responses, Google Gemini/Gemini CLI/Vertex, Bedrock Converse, Ollama, Cursor, Devin, pi-native gateway transport, plus GitLab Duo, GitLab Duo Workflow, Kimi, and Synthetic wrappers, and extension-registered custom APIs. (xAI Grok has no dedicated wrapper: both `xai-oauth` and API-key `xai` models are catalog specs with `api: "openai-responses"` at `https://api.x.ai/v1`, riding the shared OpenAI Responses path with catalog-level compat.)
 3. Each provider pushes events into `AssistantMessageEventStream` (`packages/ai/src/utils/event-stream.ts`), which exposes:
    - async iteration for incremental updates
    - `result()` for the final `AssistantMessage`

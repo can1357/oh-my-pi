@@ -10,7 +10,7 @@
  * in the session), deterministic per `(date, cwd)`, so the bytes are stable
  * for the lifetime of a session/day and refresh automatically at midnight.
  */
-import type { Context, Message } from "@oh-my-pi/pi-ai";
+import type { Context, Message, UserMessage } from "@oh-my-pi/pi-ai";
 import { prompt } from "@oh-my-pi/pi-utils";
 import dateCwdReminderTemplate from "../prompts/system/date-cwd-reminder.md" with { type: "text" };
 
@@ -19,59 +19,99 @@ export function renderDateCwdReminder(date: string, cwd: string): string {
 	return prompt.render(dateCwdReminderTemplate, { date, cwd }).trim();
 }
 
-/**
- * Prepends `reminder` to the content of the first user message in `messages`,
- * returning a new array. The input is never mutated. Returns the input
- * unchanged when there is no user message to attach to, when the first user
- * message already carries the exact reminder, or when an identical input was
- * injected before with the same reminder.
- *
- * The memo is required by the append-only context path: it syncs the converted
- * message objects into its log and reuses them across requests, and callers
- * assert that identity is preserved for the stable prefix. Re-injecting the
- * same pristine first user message with the same reminder must hand back the
- * same injected message object, not a fresh clone. Keyed on the pristine
- * message object (the append-only log hands back fresh array copies every
- * turn, so array identity is not stable), with entries garbage-collected
- * alongside the messages they belong to.
- */
-const injectCache = new WeakMap<Message, { reminder: string; injected: Message }>();
+function messageStartsWithReminder(message: UserMessage, reminder: string): boolean {
+	if (typeof message.content === "string") return message.content.startsWith(reminder);
+	return message.content[0]?.type === "text" && message.content[0].text === reminder;
+}
 
-export function injectDateCwdReminder(messages: Message[], reminder: string): Message[] {
-	const index = messages.findIndex(message => message.role === "user");
-	if (index < 0) return messages;
-	const first = messages[index]!;
-	if (typeof first.content === "string") {
-		if (first.content.startsWith(reminder)) return messages;
-	} else if (first.content[0]?.type === "text" && first.content[0].text === reminder) {
-		return messages;
-	}
-	const cached = injectCache.get(first);
-	if (cached !== undefined && cached.reminder === reminder) {
-		const out = messages.slice();
-		out[index] = cached.injected;
-		return out;
-	}
-	const content =
-		typeof first.content === "string"
-			? `${reminder}\n\n${first.content}`
-			: ([{ type: "text", text: reminder }, ...first.content] as Message["content"]);
-	const injected = { ...first, content } as Message;
-	injectCache.set(first, { reminder, injected });
-	const out = messages.slice();
-	out[index] = injected;
-	return out;
+function injectReminder(message: UserMessage, reminder: string): UserMessage {
+	const content: UserMessage["content"] =
+		typeof message.content === "string"
+			? `${reminder}\n\n${message.content}`
+			: [{ type: "text", text: reminder }, ...message.content];
+	return { ...message, content };
 }
 
 /**
- * Applies the date/cwd reminder to a provider `Context`, keeping the system
- * prompt byte-stable for prompt caching. Skips NULL_PROMPT-style contexts
- * (empty system prompt) so a no-prompt session stays byte-for-byte unchanged.
+ * Keeps volatile date/cwd reminders append-only across provider requests.
+ *
+ * The first value is attached to the first user turn. A changed value attaches
+ * to a newly appended user turn or a persistent developer turn, leaving every
+ * previously sent message byte-identical.
  */
-export function withDateCwdReminder(context: Context, date: string, cwd: string): Context {
-	if (!context.systemPrompt || context.systemPrompt.length === 0) return context;
-	if (context.messages.length === 0) return context;
-	const reminder = renderDateCwdReminder(date, cwd);
-	const messages = injectDateCwdReminder(context.messages, reminder);
-	return messages === context.messages ? context : { ...context, messages };
+export class DateCwdReminderInjector {
+	#root: UserMessage | undefined;
+	#currentReminder: string | undefined;
+	#injections = new Map<Message, Message>();
+	#controls: Array<{ anchor: Message; message: Message }> = [];
+	#seen = new WeakSet<object>();
+
+	/** Apply the current reminder while preserving all earlier injected bytes. */
+	transform(context: Context, date: string, cwd: string): Context {
+		if (!context.systemPrompt || context.systemPrompt.length === 0 || context.messages.length === 0) return context;
+		const reminder = renderDateCwdReminder(date, cwd);
+		const messages = this.#inject(context.messages, reminder);
+		return messages === context.messages ? context : { ...context, messages };
+	}
+
+	#inject(messages: Message[], reminder: string): Message[] {
+		const firstUser = messages.find((message): message is UserMessage => message.role === "user");
+		if (!firstUser) return messages;
+		if (this.#root !== firstUser) {
+			this.#root = firstUser;
+			this.#currentReminder = reminder;
+			this.#injections.clear();
+			this.#controls = [];
+			this.#seen = new WeakSet();
+			if (!messageStartsWithReminder(firstUser, reminder)) {
+				this.#injections.set(firstUser, injectReminder(firstUser, reminder));
+			}
+		} else if (this.#currentReminder !== reminder) {
+			let newUser: UserMessage | undefined;
+			for (let index = messages.length - 1; index >= 0; index--) {
+				const candidate = messages[index]!;
+				if (candidate.role === "user" && !this.#seen.has(candidate)) {
+					newUser = candidate;
+					break;
+				}
+			}
+			if (newUser) {
+				this.#injections.set(newUser, injectReminder(newUser, reminder));
+			} else {
+				const anchor = messages.at(-1)!;
+				this.#controls.push({
+					anchor,
+					message: {
+						role: "developer",
+						content: reminder,
+						synthetic: true,
+						timestamp: Date.now(),
+					},
+				});
+			}
+			this.#currentReminder = reminder;
+		}
+
+		const controlsByAnchor = new Map<Message, Message[]>();
+		for (const control of this.#controls) {
+			const controls = controlsByAnchor.get(control.anchor);
+			if (controls) controls.push(control.message);
+			else controlsByAnchor.set(control.anchor, [control.message]);
+		}
+
+		let changed = false;
+		const out: Message[] = [];
+		for (const message of messages) {
+			const injected = this.#injections.get(message);
+			out.push(injected ?? message);
+			if (injected) changed = true;
+			const controls = controlsByAnchor.get(message);
+			if (controls) {
+				out.push(...controls);
+				changed = true;
+			}
+			this.#seen.add(message);
+		}
+		return changed ? out : messages;
+	}
 }

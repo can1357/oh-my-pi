@@ -26,6 +26,16 @@ export function isBuiltinComposerStyle(id: string): boolean {
 }
 
 /**
+ * Whether a style paints its own row foreground.
+ *
+ * Extensions registered before `filledSurface` existed received undecorated
+ * row text, so an omitted flag remains filled for extension-owned ids.
+ */
+export function isFilledComposerStyle(style: ComposerStyle): boolean {
+	return style.filledSurface ?? !isBuiltinComposerStyle(style.id);
+}
+
+/**
  * Register one extension-owned composer style for this process.
  *
  * Built-in ids and duplicate extension ids are rejected. The returned disposer

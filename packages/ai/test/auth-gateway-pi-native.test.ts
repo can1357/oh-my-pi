@@ -207,6 +207,15 @@ describe("pi-native parseRequest", () => {
 			guardrailTrace: "enabled_full",
 		});
 	});
+	it("preserves requestMetadata in the canonical options bag", () => {
+		const parsed = parseRequest({
+			modelId: "amazon-bedrock/amazon.nova-lite-v1:0",
+			context: baseContext,
+			options: { requestMetadata: { team: "growth" } },
+		});
+
+		expect(parsed.options.requestMetadata).toEqual({ team: "growth" });
+	});
 
 	it("forwards the explicit prompt-cache policy through the canonical options bag", () => {
 		const parsed = parseRequest({

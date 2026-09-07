@@ -53,6 +53,7 @@ function shrinkValue(value: unknown, pass: ShrinkPass): unknown {
 	if (typeof value === "string") return shrinkString(value, pass.stringCap);
 	if (Array.isArray(value)) {
 		const keep = Math.min(value.length, pass.arrayLimit);
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const output: unknown[] = new Array(keep + (keep < value.length ? 1 : 0));
 		for (let index = 0; index < keep; index++) output[index] = shrinkValue(value[index], pass);
 		if (keep < value.length) output[keep] = `…[${value.length - keep} items elided for RPC frame]`;

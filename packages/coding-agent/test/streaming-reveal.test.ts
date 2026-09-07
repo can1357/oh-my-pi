@@ -156,11 +156,11 @@ describe("streaming reveal", () => {
 		const target = makeMessage([{ type: "thinking", thinking: "```js\nconst x = 1;\n```" }]);
 		const { component, controller } = makeController({ smooth: false, proseOnly: () => proseOnly });
 
-		controller.begin(component, target);
+		controller.begin(component, target, false);
 		expect(thinkingAt(latestMessage(component), 0)).toBe("...");
 
 		proseOnly = false;
-		controller.setTarget(target);
+		controller.setTarget(target, false);
 		expect(thinkingAt(latestMessage(component), 0)).toBe("```js\nconst x = 1;\n```");
 	});
 
@@ -193,12 +193,12 @@ describe("streaming reveal", () => {
 		const first = makeMessage([{ type: "text", text: "Hello" }]);
 		const second = makeMessage([{ type: "text", text: "Hello world" }]);
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(first);
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(first, false);
 		for (let i = 0; i < 4; i++) {
 			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		}
-		controller.setTarget(second);
+		controller.setTarget(second, false);
 		for (let i = 0; i < 4; i++) {
 			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		}
@@ -215,13 +215,13 @@ describe("streaming reveal", () => {
 		vi.useFakeTimers();
 		const { component, controller } = makeController();
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "ab👨" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "ab👨" }]), false);
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		// The appended ZWJ sequence merges into the previous final grapheme:
 		// "👨" + "\u200D👩" becomes a single cluster, so the cached per-block
 		// count must re-segment from that cluster, not just add the suffix.
-		controller.setTarget(makeMessage([{ type: "text", text: "ab👨\u200D👩x" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "ab👨\u200D👩x" }]), false);
 		for (let i = 0; i < 6; i++) {
 			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		}
@@ -234,8 +234,8 @@ describe("streaming reveal", () => {
 		const requestRender = vi.fn();
 		const { component, controller } = makeController({ smooth: false, requestRender });
 
-		controller.begin(component, makeMessage([{ type: "text", text: "chunk" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "chunky" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "chunk" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "chunky" }]), false);
 		const updates = component.messages.length;
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 10);
 
@@ -247,8 +247,8 @@ describe("streaming reveal", () => {
 	it("marks unsmoothed in-flight updates as transient", () => {
 		const { component, controller } = makeController({ smooth: false });
 
-		controller.begin(component, makeMessage([{ type: "text", text: "chunk" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "chunky" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "chunk" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "chunky" }]), false);
 
 		expect(component.transientFlags).toEqual([true, true]);
 	});
@@ -257,8 +257,8 @@ describe("streaming reveal", () => {
 		vi.useFakeTimers();
 		const { component, controller } = makeController();
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "abc" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "abc" }]), false);
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 
 		expect(textAt(latestMessage(component), 0)).toBe("abc");
@@ -270,8 +270,8 @@ describe("streaming reveal", () => {
 		vi.useFakeTimers();
 		const { component, controller } = makeController();
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghi" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghi" }]), false);
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		controller.stop();
 		const updates = component.messages.length;
@@ -287,23 +287,34 @@ describe("streaming reveal", () => {
 		const requestRender = vi.fn();
 		const { component, controller } = makeController({ requestRender });
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghi" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghi" }]), false);
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		expect(textAt(latestMessage(component), 0)).toBe("abc");
 
-		controller.setTarget(
-			makeMessage([
-				{ type: "text", text: "abcdefghi" },
-				{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } },
-			]),
-		);
+		// Production hands the reveal the tool-stripped `beforeTools` segment plus
+		// an explicit `hasToolCalls` flag — the target itself never carries a
+		// toolCall block, so the boundary must be signalled, not re-derived.
+		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghi" }]), true);
 		const updates = component.messages.length;
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 10);
 
 		expect(textAt(latestMessage(component), 0)).toBe("abcdefghi");
 		expect(component.messages).toHaveLength(updates);
 		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("snaps to full text when a tool call arrives before the first reveal tick", () => {
+		// #10318: when the tool call lands before any 30fps tick runs, #revealed
+		// is still 0. Without force-completing at the boundary the block commits
+		// blank and the entire reply vanishes, not just its tail.
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "Let me wait for that result." }]), true);
+
+		expect(textAt(latestMessage(component), 0)).toBe("Let me wait for that result.");
 	});
 
 	it("passes the bound component to requestRender on each smooth tick", () => {
@@ -314,8 +325,8 @@ describe("streaming reveal", () => {
 		const requestRender = vi.fn();
 		const { component, controller } = makeController({ requestRender });
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "abcdef" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "abcdef" }]), false);
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 
 		expect(requestRender).toHaveBeenCalled();
@@ -435,8 +446,8 @@ describe("frame-skip coalescing", () => {
 		const tail = "x".repeat(30);
 		const fullText = base + tail;
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: base }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: base }]), false);
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 10);
 		expect(textAt(latestMessage(component), 0)).toBe(base);
 
@@ -445,7 +456,7 @@ describe("frame-skip coalescing", () => {
 		let text = base;
 		for (let i = 0; i < 30; i++) {
 			text += tail[i];
-			controller.setTarget(makeMessage([{ type: "text", text }]));
+			controller.setTarget(makeMessage([{ type: "text", text }]), false);
 			vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS / 5);
 		}
 		const burstRenders = component.messages.length - before;
@@ -463,37 +474,72 @@ describe("frame-skip coalescing", () => {
 		vi.useFakeTimers();
 		const { component, controller } = makeController();
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]), false);
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		expect(textAt(latestMessage(component), 0)).toBe("hi");
 
 		// Same reveal budget as "hi" -> caught up: drain is deferred to a tick.
-		controller.setTarget(makeMessage([{ type: "text", text: "yo" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "yo" }]), false);
 		const pending = component.messages.length;
 		expect(textAt(latestMessage(component), 0)).toBe("hi");
-		controller.setTarget(
-			makeMessage([
-				{ type: "text", text: "yo" },
-				{ type: "toolCall", id: "call-1", name: "read", arguments: { path: "README.md" } },
-			]),
-		);
+		controller.setTarget(makeMessage([{ type: "text", text: "yo" }]), true);
 		// The toolCall boundary still renders synchronously, before any tick.
 		expect(component.messages.length).toBe(pending + 1);
 		expect(textAt(latestMessage(component), 0)).toBe("yo");
-		expect(latestMessage(component).content.at(-1)?.type).toBe("toolCall");
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 4);
 		expect(component.messages.length).toBe(pending + 1);
+	});
+
+	it("does not rebuild an unchanged target after the tool-call boundary", () => {
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "before tool" }]), true);
+		const snapped = component.messages.length;
+
+		// Cumulative tool argument deltas repeat the unchanged beforeTools segment.
+		controller.setTarget(makeMessage([{ type: "text", text: "before tool" }]), true);
+		expect(component.messages).toHaveLength(snapped);
+
+		// A provider rewrite of the leading segment must still repaint, even when
+		// the replacement has the same reveal-unit count.
+		controller.setTarget(makeMessage([{ type: "text", text: "after  tool" }]), true);
+		expect(component.messages).toHaveLength(snapped + 1);
+		expect(textAt(latestMessage(component), 0)).toBe("after  tool");
+	});
+
+	it("detects an in-place block rewrite of the snapped tool-boundary content", () => {
+		// OpenAI Responses reuses the cumulative output object and can replace
+		// streamed text with authoritative terminal content in place. Aliasing the
+		// snapped array would compare it to itself and keep the stale text; an
+		// immutable snapshot must still repaint even when the rewrite has the same
+		// grapheme count.
+		vi.useFakeTimers();
+		const { component, controller } = makeController();
+
+		const message = makeMessage([{ type: "text", text: "streamed abc" }]);
+		const block = message.content[0]! as Extract<AssistantMessage["content"][number], { type: "text" }>;
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(message, true);
+		const snapped = component.messages.length;
+
+		// Same array, same length, block rewritten in place.
+		block.text = "streamed xyz";
+		controller.setTarget(message, true);
+		expect(component.messages).toHaveLength(snapped + 1);
+		expect(textAt(latestMessage(component), 0)).toBe("streamed xyz");
 	});
 
 	it("keeps synchronous per-setTarget renders when smooth streaming is off", () => {
 		vi.useFakeTimers();
 		const { component, controller } = makeController({ smooth: false });
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "one" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "one" }]), false);
 		const before = component.messages.length;
-		controller.setTarget(makeMessage([{ type: "text", text: "one two" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "one two" }]), false);
 
 		expect(component.messages.length).toBe(before + 1);
 		expect(textAt(latestMessage(component), 0)).toBe("one two");
@@ -511,13 +557,13 @@ describe("frame-skip coalescing", () => {
 			requestRender: () => {},
 		});
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]), false);
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
-		controller.setTarget(makeMessage([{ type: "text", text: "yo" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "yo" }]), false);
 
 		smooth = false;
-		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghij" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "abcdefghij" }]), false);
 		expect(textAt(latestMessage(component), 0)).toBe("abcdefghij");
 
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
@@ -529,12 +575,12 @@ describe("frame-skip coalescing", () => {
 		vi.useFakeTimers();
 		const { component, controller } = makeController();
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]), false);
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		expect(textAt(latestMessage(component), 0)).toBe("hi");
 
-		controller.setTarget(makeMessage([{ type: "text", text: "hi!" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "hi!" }]), false);
 		const before = component.messages.length;
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		expect(component.messages.length).toBe(before + 1);
@@ -549,13 +595,13 @@ describe("frame-skip coalescing", () => {
 		vi.useFakeTimers();
 		const { component, controller } = makeController();
 
-		controller.begin(component, makeMessage([{ type: "text", text: "" }]));
-		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]));
+		controller.begin(component, makeMessage([{ type: "text", text: "" }]), false);
+		controller.setTarget(makeMessage([{ type: "text", text: "hi" }]), false);
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		expect(textAt(latestMessage(component), 0)).toBe("hi");
 
 		// Caught up: "yo" has the same reveal budget, so the render is deferred.
-		controller.setTarget(makeMessage([{ type: "text", text: "yo" }]));
+		controller.setTarget(makeMessage([{ type: "text", text: "yo" }]), false);
 		const before = component.messages.length;
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS);
 		expect(component.messages.length).toBe(before + 1);

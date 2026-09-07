@@ -47,7 +47,8 @@ impl Utility for Ts {
 	fn run(self, host: &mut Host) -> i32 {
 		match timestamp_lines(&self.matches, host) {
 			Ok(code) => code,
-			Err(err) if err.kind() == io::ErrorKind::BrokenPipe => 0,
+			// Stop pumping once the reader is gone.
+			Err(err) if err.kind() == io::ErrorKind::BrokenPipe => crate::host::SIGPIPE_EXIT_CODE,
 			Err(err) => {
 				host.error(err, 1);
 				1

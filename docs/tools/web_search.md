@@ -141,10 +141,11 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - Ignores `recency`, `max_tokens`, and `temperature`. `num_search_results ?? limit` slices parsed sources locally.
     - Output may include `answer`, `sources`, `usage`, `model`, `requestId`. If the stream has no `url_citation` annotations, the adapter falls back to markdown links and bare URLs from the answer.
   - **xAI** — `packages/coding-agent/src/web/search/providers/xai.ts`
-    - Availability: xAI OAuth when preferred by the shared auth policy, or an `xai` credential such as `XAI_API_KEY`.
+    - Availability: `shouldPreferXAIOAuth()` prefers the `xai-oauth` credential — true when `XAI_OAUTH_TOKEN` is set or a stored `xai-oauth` credential exists whose origin would not be shadowed by a shared `XAI_API_KEY` env key — otherwise `authStorage.hasAuth("xai")` (`XAI_API_KEY` env or `agent.db` credential for `xai`).
     - Querying: POSTs the Responses API with model `grok-4.5`, `tools: [{ type: "web_search", ... }]`, and reasoning effort `low`. A custom model-registry endpoint is supported, but official xAI OAuth credentials are refused for custom endpoints.
     - Up to five `site:` or `-site:` hosts map to mutually exclusive `allowed_domains` / `excluded_domains` filters (allow-list wins); path restrictions remain for central filtering. Absolute dates stay as query hints because the current Responses `web_search` tool has no date fields.
-    - `max_tokens` and `temperature` pass through. `num_search_results` (or `limit`) only caps parsed sources/citations locally, default `10`, max `30`; it is not sent as an upstream search-count parameter.
+    - The request carries no `search_parameters` (the deprecated Live Search field now returns 410), so `recency` is ignored beyond natural-language date hints in the query text.
+    - `max_tokens` and `temperature` pass through. `num_search_results` (or `limit`) only caps parsed sources/citations locally via `clampNumResults(...)`, default `10`, max `30`; it is not sent as an upstream search-count parameter.
     - Output may include `answer`, `sources`, `citations`, `usage`, `model`, `requestId`, `authMode: "api_key"`.
   - **Z.AI** — `packages/coding-agent/src/web/search/providers/zai.ts`
     - Availability: env or `agent.db` credential for `zai`.
@@ -180,8 +181,9 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - Output: `answer`, `sources`, `requestId`, `authMode: "api_key"`.
   - **Firecrawl** — `packages/coding-agent/src/web/search/providers/firecrawl.ts`
     - Availability: credentials admit it to the automatic chain; explicit/configured selection is always available and uses keyless mode when no credential resolves.
-    - Querying: POST `https://api.firecrawl.dev/v2/search` with `sources: [{ type: "web" }]`. Google-style operators are formatted into the query; `recency` and parsed absolute dates map to `tbs`.
+    - Querying: POST `https://api.firecrawl.dev/v2/search` with `sources: [{ type: "web" }]`. The endpoint is built by the shared resolver in `packages/coding-agent/src/web/firecrawl.ts`, which applies the `FIRECRAWL_BASE_URL` (alias `FIRECRAWL_API_URL`) self-hosting override. Google-style operators are formatted into the query; `recency` and parsed absolute dates map to `tbs`.
     - `limit` / `num_search_results`: collapsed and clamped to `1..100`, default `10`; output `sources`, `requestId`, and `authMode: "api_key" | "keyless"`.
+    - The same module exposes Firecrawl `/scrape` as a `providers.fetch` reader backend for the fetch/read URL tool (requires `FIRECRAWL_API_KEY`). API reference: [docs.firecrawl.dev](https://docs.firecrawl.dev).
   - **Brave** — `packages/coding-agent/src/web/search/providers/brave.ts`
     - Availability: `BRAVE_API_KEY` only.
     - Querying: GET `https://api.search.brave.com/res/v1/web/search` with `count`, `extra_snippets=true`, and `freshness=pd|pw|pm|py` for `recency`.

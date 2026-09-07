@@ -2625,7 +2625,18 @@ describe("AuthStorage codex oauth ranking", () => {
 		["gpt-5.3-codex-spark", 1, 1, false, true, 0.06, 0.09, true, false, "chat"],
 	] as const)(
 		"reports %s healthy after splitting a legacy shared block when only its meter has headroom",
-		async (modelId, chatPrimary, chatSecondary, chatAllowed, chatLimitReached, sparkPrimary, sparkSecondary, sparkAllowed, sparkLimitReached, remainingBlockScope) => {
+		async (
+			modelId,
+			chatPrimary,
+			chatSecondary,
+			chatAllowed,
+			chatLimitReached,
+			sparkPrimary,
+			sparkSecondary,
+			sparkAllowed,
+			sparkLimitReached,
+			remainingBlockScope,
+		) => {
 			if (!authStorage || !store?.listCredentialBlocks) throw new Error("test setup failed");
 			await authStorage.set("openai-codex", [
 				{ type: "oauth", ...createCredential("acct-legacy-meter", "legacy-meter@example.com") },

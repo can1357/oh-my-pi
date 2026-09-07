@@ -6,7 +6,7 @@
 - Entry: `packages/coding-agent/src/tools/write.ts`
 - Model-facing prompt: `packages/coding-agent/src/prompts/tools/write.md`
 - Key collaborators:
-  - `packages/coding-agent/src/utils/zip.ts` — parse archive selectors and atomically rewrite ZIP/tar containers.
+  - `packages/utils/src/ar` (`@oh-my-pi/pi-utils/ar`) — unified archive registry: `parseArchivePathCandidates()` parses archive selectors, `readArchiveEntries()`/`writeArchive()` rewrite containers atomically.
   - `packages/coding-agent/src/tools/sqlite-reader.ts` — detect SQLite paths and perform row insert/update/delete.
   - `packages/coding-agent/src/tools/conflict-detect.ts` — parse `conflict://` URIs, register/validate regions, and expand side tokens.
   - `packages/coding-agent/src/internal-urls/router.ts` / `packages/coding-agent/src/tools/xdev.ts` — writable internal resources and `xd://` tool-device dispatch.
@@ -18,7 +18,7 @@
 ## Inputs
 | Field | Type | Required | Description |
 | --- | --- | --- | --- |
-| `path` | `string` | Yes | Target path. Plain paths write files. Writable internal URLs delegate to their handler. `xd://<device>` dispatches a mounted tool using JSON in `content`. `archive.ext:inner/path` writes an archive entry for `.tar`, `.tar.gz`, `.tgz`, `.zip`, `.jar`, `.war`, `.ear`, or `.apk`. `db.sqlite:table` inserts a row; `db.sqlite:table:key` updates/deletes one. `conflict://<id>` resolves a registered conflict and `conflict://*` performs a bulk resolution. A copied `[path#TAG]` wrapper is accepted and removed. |
+| `path` | `string` | Yes | Target path. Plain paths write files. Writable internal URLs delegate to their handler. `xd://<device>` dispatches a mounted tool using JSON in `content`. `archive.ext:inner/path` writes an archive entry for `.zip` and ZIP-format aliases (`.jar`, `.war`, `.ear`, `.apk`, …), `.tar`, `.tar.gz`/`.tgz`, `.tar.zst`/`.tzst`, or `.asar`. `db.sqlite:table` inserts a row; `db.sqlite:table:key` updates/deletes one. `conflict://<id>` resolves a registered conflict and `conflict://*` performs a bulk resolution. A copied `[path#TAG]` wrapper is accepted and removed. |
 | `content` | `string` | Yes | Full replacement file/archive/internal-resource content, conflict replacement, or SQLite row payload. SQLite non-delete writes must parse as a JSON5 object; empty or whitespace-only content deletes a keyed row. For `xd://`, this is the mounted tool's JSON argument object. |
 
 Worked examples:
@@ -64,7 +64,7 @@ Single-shot result.
    - The parent directory is created recursively.
    - Existing entries are loaded through `readArchiveEntries()`, the target is replaced in the entry map, and `writeArchive()` serializes a complete replacement.
    - The replacement is written to a sibling temporary path and renamed over the destination. Existing archive symlinks are resolved first so the target is updated rather than replacing the symlink.
-   - ZIP-format aliases remain ZIP. Tar gzip compression is selected for `.tar.gz`/`.tgz`.
+   - ZIP-format aliases remain ZIP. Tar gzip compression is selected for `.tar.gz`/`.tgz`, zstd for `.tar.zst`/`.tzst`; `.asar` containers are rewritten through the same boundary. Read-only formats (`.7z`, `.rar`, …) are rejected.
    - `invalidateFsScanAfterWrite()` runs on the archive file path.
 8. If not an archive, it tries SQLite candidates. Existing non-SQLite files suppress SQLite interpretation.
 9. SQLite writes call `enforcePlanModeWrite(..., { op: "update" })`, then `#writeSqliteRow()`.
@@ -95,7 +95,7 @@ content: "hello\n"
 
 ### Archive entry write
 - Selector syntax: `archive.ext:inner/path`.
-- Supported suffixes: `.tar`, `.tar.gz`, `.tgz`, `.zip`, and ZIP-format `.jar`, `.war`, `.ear`, `.apk`.
+- Supported suffixes: `.zip` and ZIP-format aliases (`.jar`, `.war`, `.ear`, `.apk`, and the other zip-family extensions), `.tar`, `.tar.gz`/`.tgz`, `.tar.zst`/`.tzst`, and `.asar`.
 - The inner path is normalized to `/`, strips empty and `.` segments, rejects `..`, and rejects directory targets ending in `/`.
 - Rewrites the whole archive through a temporary file and rename after replacing one entry.
 - Creates the parent directory for the archive file if needed.
@@ -163,7 +163,7 @@ content: ""
   - May chmod a shebang file executable after a successful plain-file write.
 - Subprocesses / native bindings
   - Uses Bun SQLite bindings via `bun:sqlite`.
-  - Uses the unified archive utilities: Bun Archive for tar serialization/indexing and `node:zlib`-backed framing for ZIP.
+  - Uses the unified archive utilities in `packages/utils/src/ar`: tar serialization plus gzip/zstd framing for compressed tars, `node:zlib`-backed DEFLATE framing for ZIP, and an ASAR encoder.
   - May talk to configured LSP servers through `packages/coding-agent/src/lsp/index.ts`.
 - Session state
   - Invalidates shared filesystem scan cache entries through `invalidateFsScanAfterWrite()`.

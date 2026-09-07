@@ -77,6 +77,12 @@ export interface ComposerRowContext extends ComposerChromeContext {
 
 export interface ComposerStyle {
 	readonly id: EditorBorderStyle;
+	/**
+	 * True when rows paint their own foreground through `surfaceColor`.
+	 * Built-ins default to transparent; registered extensions that omit this
+	 * field retain the pre-field behavior and receive undecorated row text.
+	 */
+	readonly filledSurface?: boolean;
 	/** Content rows carry left/right border glyphs; drives the cursor-reserve
 	 *  column, IME-safe layout, and the right-border scrollbar. */
 	readonly sideBorders: boolean;

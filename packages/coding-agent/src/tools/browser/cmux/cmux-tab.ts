@@ -509,10 +509,10 @@ export class CmuxTab {
 		return new CmuxElementHandle(this, selector);
 	}
 
-	async evaluate<TResult, TArgs extends unknown[]>(
-		fn: string | ((...args: TArgs) => TResult | Promise<TResult>),
+	async evaluate<R, TArgs extends unknown[]>(
+		fn: string | ((...args: TArgs) => R | Promise<R>),
 		...args: TArgs
-	): Promise<TResult> {
+	): Promise<R> {
 		// A script that throws inside the daemon comes back as a bare
 		// `js_error: A JavaScript exception occurred` with no message or stack.
 		// Catch page-side instead so the exception is diagnosable, and turn the
@@ -520,7 +520,7 @@ export class CmuxTab {
 		// serialize — into an actionable error instead of "unsupported type".
 		const script = serializeEvalWithEnvelope(fn as string | ((...args: unknown[]) => unknown), args);
 		const result = (await this.#request("browser.eval", { script })) as CmuxEvalResult;
-		return unwrapEvalEnvelope<TResult>(result.value, "tab.evaluate()");
+		return unwrapEvalEnvelope<R>(result.value, "tab.evaluate()");
 	}
 
 	async scrollIntoView(selector: string): Promise<void> {
@@ -795,7 +795,7 @@ export class CmuxTab {
 		return await this.#selectorBox(this.#selectorSpec(selector));
 	}
 
-	async evaluateOnSelector<TResult>(selector: string, source: string, args: unknown[]): Promise<TResult> {
+	async evaluateOnSelector<R>(selector: string, source: string, args: unknown[]): Promise<R> {
 		const spec = this.#selectorSpec(selector);
 		const script = `(() => {
 			const spec = ${JSON.stringify(spec)};
@@ -812,7 +812,7 @@ export class CmuxTab {
 		const result = (await this.#request("browser.eval", {
 			script: serializeEvalWithEnvelope(script, []),
 		})) as CmuxEvalResult;
-		return unwrapEvalEnvelope<TResult>(result.value, "elementHandle.evaluate()");
+		return unwrapEvalEnvelope<R>(result.value, "elementHandle.evaluate()");
 	}
 
 	async pageContent(): Promise<string> {
@@ -842,9 +842,9 @@ export class CmuxTab {
 		throw new ToolError(`page.waitForFunction() timed out after ${timeoutMs}ms`);
 	}
 
-	async #evalScript<TResult>(script: string, timeoutMs?: number): Promise<TResult> {
+	async #evalScript<R>(script: string, timeoutMs?: number): Promise<R> {
 		const result = (await this.#request("browser.eval", { script }, timeoutMs)) as CmuxEvalResult;
-		return result.value as TResult;
+		return result.value as R;
 	}
 
 	async #captureScreenshotPng(timeoutMs: number): Promise<CmuxScreenshotResult & { png_base64: string }> {
@@ -855,52 +855,44 @@ export class CmuxTab {
 		return result as CmuxScreenshotResult & { png_base64: string };
 	}
 
-	async #selectorAction<TResult = void>(
-		selector: string,
-		action: string,
-		args: Record<string, unknown> = {},
-	): Promise<TResult> {
+	async #selectorAction<R = void>(selector: string, action: string, args: Record<string, unknown> = {}): Promise<R> {
 		const spec = this.#selectorSpec(selector);
 		const nativeSelector = this.#nativeSelector(spec);
 		if (nativeSelector && action !== "select" && action !== "uploadFile") {
 			switch (action) {
 				case "click":
 					await this.#request("browser.click", { selector: nativeSelector });
-					return undefined as TResult;
+					return undefined as R;
 				case "dblclick":
 					await this.#request("browser.dblclick", { selector: nativeSelector });
-					return undefined as TResult;
+					return undefined as R;
 				case "hover":
 					await this.#request("browser.hover", { selector: nativeSelector });
-					return undefined as TResult;
+					return undefined as R;
 				case "focus":
 					await this.#request("browser.focus", { selector: nativeSelector });
-					return undefined as TResult;
+					return undefined as R;
 				case "check":
 					await this.#request("browser.check", { selector: nativeSelector });
-					return undefined as TResult;
+					return undefined as R;
 				case "uncheck":
 					await this.#request("browser.uncheck", { selector: nativeSelector });
-					return undefined as TResult;
+					return undefined as R;
 				case "type":
 					await this.#request("browser.type", { selector: nativeSelector, text: String(args.text ?? "") });
-					return undefined as TResult;
+					return undefined as R;
 				case "fill":
 					await this.#request("browser.fill", { selector: nativeSelector, text: String(args.value ?? "") });
-					return undefined as TResult;
+					return undefined as R;
 				case "scrollIntoView":
 					await this.#request("browser.scroll_into_view", { selector: nativeSelector });
-					return undefined as TResult;
+					return undefined as R;
 			}
 		}
-		return await this.#evalSelectorAction<TResult>(spec, action, args);
+		return await this.#evalSelectorAction<R>(spec, action, args);
 	}
 
-	async #evalSelectorAction<TResult>(
-		spec: SelectorSpec,
-		action: string,
-		args: Record<string, unknown>,
-	): Promise<TResult> {
+	async #evalSelectorAction<R>(spec: SelectorSpec, action: string, args: Record<string, unknown>): Promise<R> {
 		const script = `(() => {
 			const spec = ${JSON.stringify(spec)};
 			const action = ${JSON.stringify(action)};
@@ -974,7 +966,7 @@ export class CmuxTab {
 			throw new Error("Unsupported selector action " + action);
 		})()`;
 		const result = (await this.#request("browser.eval", { script }, this.#runContext?.timeoutMs)) as CmuxEvalResult;
-		return result.value as TResult;
+		return result.value as R;
 	}
 
 	async #waitForSelector(selector: string, timeoutMs: number): Promise<void> {
@@ -1198,11 +1190,11 @@ class CmuxElementHandle {
 		await this.#tab.hover(this.#selector);
 	}
 
-	async evaluate<TResult, TArgs extends unknown[]>(
-		fn: (element: unknown, ...args: TArgs) => TResult | Promise<TResult>,
+	async evaluate<R, TArgs extends unknown[]>(
+		fn: (element: unknown, ...args: TArgs) => R | Promise<R>,
 		...args: TArgs
-	): Promise<TResult> {
-		return await this.#tab.evaluateOnSelector<TResult>(this.#selector, fn.toString(), args);
+	): Promise<R> {
+		return await this.#tab.evaluateOnSelector<R>(this.#selector, fn.toString(), args);
 	}
 
 	async boundingBox(): Promise<BoundingBox | null> {
@@ -1299,10 +1291,10 @@ class CmuxPageFacade {
 		return { url: this.#tab.url() };
 	}
 
-	async evaluate<TResult, TArgs extends unknown[]>(
-		fn: string | ((...args: TArgs) => TResult | Promise<TResult>),
+	async evaluate<R, TArgs extends unknown[]>(
+		fn: string | ((...args: TArgs) => R | Promise<R>),
 		...args: TArgs
-	): Promise<TResult> {
+	): Promise<R> {
 		return await this.#tab.evaluate(fn, ...args);
 	}
 

@@ -1,0 +1,59 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"categories": {
+		"correctness": "warn"
+	},
+	"rules": {
+		"eslint/prefer-const": "error",
+		"eslint/no-unused-vars": [
+			"warn",
+			{
+				"argsIgnorePattern": "^_",
+				"varsIgnorePattern": "^_",
+				"caughtErrorsIgnorePattern": "^_",
+				"destructuredArrayIgnorePattern": "^_"
+			}
+		],
+		"unicorn/no-thenable": "warn",
+		"eslint/no-unused-private-class-members": "warn",
+		"eslint/no-eval": "warn",
+		"eslint/no-shadow-restricted-names": "warn",
+		"eslint/no-template-curly-in-string": "warn",
+		"react/no-array-index-key": "warn",
+		"typescript/no-explicit-any": "off",
+		"eslint/no-control-regex": "off",
+		"typescript/no-empty-interface": "off",
+		"typescript/no-non-null-assertion": "off",
+		"typescript/no-this-alias": "off",
+		"eslint/no-unmodified-loop-condition": "off",
+		"eslint/no-unused-expressions": "off"
+	},
+	"ignorePatterns": [
+		"**/vendor/**",
+		"**/node_modules/**",
+		"**/test-sessions.ts",
+		"**/agent_pb.ts",
+		"**/devin-gen/**",
+		"packages/natives/native/index.d.ts",
+		"packages/catalog/src/discovery/cursor-proto.ts",
+		"packages/catalog/src/discovery/devin-proto.ts",
+		".worktrees/**",
+		".wt/**",
+		".omp/**",
+		"crates/**",
+		"docs/**",
+		"python/**",
+		"types/**",
+		"packages/browser-relay/extension/**",
+		"packages/natives/native/**",
+		"packages/metaharness/adapters/**",
+		"packages/collab-web/test/**",
+		"packages/stats/test/**",
+		"packages/snapcompact/research/**",
+		"packages/coding-agent/src/export/html/**",
+		"**/*.js",
+		"**/*.mjs",
+		"**/*.cjs",
+		"**/*.d.ts"
+	]
+}

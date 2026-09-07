@@ -199,7 +199,6 @@ type NaryAndOutput<definitions extends readonly unknown[]> = definitions extends
 type NaryAndInput<definitions extends readonly unknown[]> = definitions extends readonly []
 	? unknown
 	: SimplifyNary<UnionToIntersection<InferDefIn<definitions[number]>>>;
-// biome-ignore lint/complexity/noBannedTypes: generic accumulator default
 type ReduceNaryMergeOutput<definitions extends readonly unknown[], result = {}> = definitions extends readonly [
 	infer head,
 	...infer tail,
@@ -207,9 +206,7 @@ type ReduceNaryMergeOutput<definitions extends readonly unknown[], result = {}> 
 	? ReduceNaryMergeOutput<tail, SimplifyNary<MergeTypes<result, InferDef<head>>>>
 	: definitions extends readonly []
 		? result
-		: // biome-ignore lint/complexity/noBannedTypes: empty object fallback
-			{};
-// biome-ignore lint/complexity/noBannedTypes: generic accumulator default
+		: {};
 type ReduceNaryMergeInput<definitions extends readonly unknown[], result = {}> = definitions extends readonly [
 	infer head,
 	...infer tail,
@@ -217,8 +214,7 @@ type ReduceNaryMergeInput<definitions extends readonly unknown[], result = {}> =
 	? ReduceNaryMergeInput<tail, SimplifyNary<MergeTypes<result, InferDefIn<head>>>>
 	: definitions extends readonly []
 		? result
-		: // biome-ignore lint/complexity/noBannedTypes: empty object fallback
-			{};
+		: {};
 type NaryMergeOutput<definitions extends readonly unknown[]> = definitions extends readonly []
 	? object
 	: ReduceNaryMergeOutput<definitions>;
@@ -560,7 +556,8 @@ const EMPTY_META: TypeMeta = {};
 const ARK_COMPAT_SCOPE = Object.freeze({ internal: Object.freeze({ name: "ark" as const }) });
 
 interface InternalType
-	extends Type<unknown, unknown>,
+	extends
+		Type<unknown, unknown>,
 		FluentMethods<unknown, unknown>,
 		ObjectMethods<Record<PropertyKey, unknown>, unknown> {
 	(data: unknown): unknown;
@@ -2575,13 +2572,14 @@ function parseGenericArgument(definition: unknown, outer?: AliasResolver): IR {
 			if (!(error instanceof OmpTypeError) || !error.message.includes('unknown keyword "this"')) throw error;
 		}
 	}
-	let root: IR | undefined;
+	const root: { current?: IR } = {};
 	const self: IR = {
 		k: "alias",
 		name: "this",
 		resolve: () => {
-			if (root === undefined || root === self) throw new OmpTypeError('"this" cannot be used as a root definition');
-			return root;
+			if (root.current === undefined || root.current === self)
+				throw new OmpTypeError('"this" cannot be used as a root definition');
+			return root.current;
 		},
 	};
 	const resolve = ((name: string) => (name === "this" ? self : outer?.(name))) as AliasResolver;
@@ -2593,9 +2591,9 @@ function parseGenericArgument(definition: unknown, outer?: AliasResolver): IR {
 		// strings inside the definition may still share the string cache.
 		markThisOnlyResolver(resolve);
 	}
-	root = parseDef(definition, resolve);
-	if (root === self) throw new OmpTypeError('"this" cannot be used as a root definition');
-	return root;
+	root.current = parseDef(definition, resolve);
+	if (root.current === self) throw new OmpTypeError('"this" cannot be used as a root definition');
+	return root.current;
 }
 
 function genericBodyIR(
@@ -2681,17 +2679,15 @@ export function type<const expression extends readonly unknown[]>(
 	...definition: expression
 ): FluentType<InferDef<expression>, InferDefIn<expression>>;
 export function type(first?: unknown): FluentType<unknown> | Generic {
-	// biome-ignore lint/complexity/noArguments: Avoid allocating a rest array for the dominant single-definition call.
 	const count = arguments.length;
 	if (count === 2 && typeof first === "string" && first.trimStart().startsWith("<")) {
-		// biome-ignore lint/complexity/noArguments: The generic path reads its second positional argument without a rest array.
 		return createRuntimeGeneric(parseGenericParameters(first), arguments[1]);
 	}
 	let definition: unknown = first;
 	if (count !== 1) {
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const expression: unknown[] = new Array(count);
 		for (let index = 0; index < count; index++) {
-			// biome-ignore lint/complexity/noArguments: Only multi-part expressions pay to materialize an argument array.
 			expression[index] = arguments[index];
 		}
 		definition = expression;
@@ -3160,7 +3156,6 @@ export interface DeclaredParser<declared> {
 }
 
 /** Fix a schema's externally declared static type without changing its runtime validation. */
-// biome-ignore lint/complexity/noBannedTypes: empty default options object
 export function declare<declared, _options = {}>(): DeclaredParser<declared> {
 	return {
 		type: definition => type(definition) as unknown as FluentType<declared, InferDefIn<typeof definition>>,
@@ -3463,7 +3458,6 @@ export namespace type {
 		RegExp: keywordSchema<RegExp>("RegExp"),
 		File: keywordSchema<File>("File"),
 		Error: keywordSchema<Error>("Error"),
-		// biome-ignore lint/complexity/noBannedTypes: built-in Function keyword
 		Function: keywordSchema<Function>("Function"),
 		Array: {
 			liftFrom<const definition>(
@@ -3567,7 +3561,6 @@ export namespace type {
 		unknown: { any: keywordSchema<unknown>("unknown.any") },
 	};
 	/** Date instance validator. */
-	// biome-ignore lint/suspicious/noShadowRestrictedNames: ArkType exposes this exact keyword.
 	export const Date = makeType<globalThis.Date>({ k: "instance", ctor: globalThis.Date, expected: "a Date" }, [], {});
 
 	/** Validate instances of `ctor`. */
@@ -3604,7 +3597,6 @@ export namespace type {
 	}
 
 	/** Enumerate an enum-like object's forward values, excluding numeric reverse mappings. */
-	// biome-ignore lint/suspicious/noShadowRestrictedNames: Object.prototype.valueOf method name API
 	export function valueOf<const values extends Record<PropertyKey, unknown>>(
 		values: values,
 	): FluentType<values[keyof values]> {
@@ -3629,7 +3621,6 @@ export namespace type {
 	export const fn: FnParser = makeFn();
 
 	/** Fix an externally declared static type while retaining runtime validation. */
-	// biome-ignore lint/complexity/noBannedTypes: empty default options object
 	export const declare = <declared, _options = {}>(): DeclaredParser<declared> =>
 		({
 			type: definition => type(definition) as unknown as FluentType<declared, InferDefIn<typeof definition>>,
@@ -3802,7 +3793,7 @@ function buildScope(aliases: Record<string, unknown>, options?: ScopeOptions): T
 
 	const references = new Map<string, IR>();
 	const targets = new Map<string, IR>();
-	let scopeValue: TypeScope;
+	const scopeValue: { current?: TypeScope } = {};
 
 	const materialize = (entry: ScopeAlias): unknown => {
 		if (entry.materialized) return entry.definition;
@@ -3889,7 +3880,7 @@ function buildScope(aliases: Record<string, unknown>, options?: ScopeOptions): T
 	};
 
 	const bind = (schema: InternalType): InternalType => {
-		Reflect.set(schema, "$", scopeValue);
+		Reflect.set(schema, "$", scopeValue.current);
 		Reflect.set(schema, "resolver", resolve);
 		return schema;
 	};
@@ -3915,7 +3906,7 @@ function buildScope(aliases: Record<string, unknown>, options?: ScopeOptions): T
 
 	const bindModule = (names: readonly string[]): RuntimeModule => {
 		const module = {} as RuntimeModule;
-		Object.defineProperty(module, MODULE_SCOPE, { value: scopeValue });
+		Object.defineProperty(module, MODULE_SCOPE, { value: scopeValue.current });
 		for (const name of names) {
 			const entry = entries.get(name);
 			if (entry === undefined) continue;
@@ -3929,7 +3920,7 @@ function buildScope(aliases: Record<string, unknown>, options?: ScopeOptions): T
 		return module;
 	};
 
-	scopeValue = {
+	scopeValue.current = {
 		type: scoped,
 		match: scopedMatch,
 		define<const definition>(definition: definition): definition {
@@ -3979,7 +3970,7 @@ function buildScope(aliases: Record<string, unknown>, options?: ScopeOptions): T
 			return json;
 		},
 	};
-	return scopeValue;
+	return scopeValue.current;
 }
 
 /** A schema whose output type is not statically known (`type.raw` results). */

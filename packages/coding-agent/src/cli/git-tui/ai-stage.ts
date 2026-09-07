@@ -86,8 +86,10 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 		await loadCliExtensionProviders(registry, settings, cwd);
 		const model = resolveRoleSelection(["tiny", "smol"], settings, registry.getAvailable())?.model;
 		if (!model) throw new Error("No tiny/smol model available for AI staging");
-		if (!(await registry.getApiKey(model))) throw new Error(`No API key for ${model.provider}/${model.id}`);
-		const complete = createCompleter(model, registry.resolver(model), signal);
+		const sessionId = Bun.randomUUIDv7();
+		if (!(await registry.getApiKey(model, sessionId)))
+			throw new Error(`No API key for ${model.provider}/${model.id}`);
+		const complete = createCompleter(model, registry.resolver(model, sessionId), sessionId, signal);
 
 		const rawDiff = tracked.length > 0 ? await repo.diffText({ files: tracked.map(file => file.path) }, signal) : "";
 		const fileDiffs = new Map(parseFileDiffs(rawDiff).map(entry => [entry.filename, entry]));
@@ -219,6 +221,7 @@ export async function aiStage(options: AiStageOptions): Promise<AiStageOutcome> 
 function createCompleter(
 	model: Model<Api>,
 	apiKey: ApiKey,
+	sessionId: string,
 	signal?: AbortSignal,
 ): (userPrompt: string) => Promise<string> {
 	return async userPrompt => {
@@ -227,7 +230,7 @@ function createCompleter(
 				completeSimple(
 					model,
 					{ messages: [{ role: "user", content: userPrompt, timestamp: Date.now() }] },
-					{ apiKey, maxTokens: SAFE_MAX_TOKENS, temperature: 0, disableReasoning: true, signal },
+					{ apiKey, sessionId, maxTokens: SAFE_MAX_TOKENS, temperature: 0, disableReasoning: true, signal },
 				),
 			{ signal },
 		);

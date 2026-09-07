@@ -152,7 +152,7 @@ pub(super) fn displays(selector: &DisplaySelector) -> CoreResult<Vec<DesktopDisp
 	Ok(snapshots.into_iter().map(|item| item.display).collect())
 }
 
-fn hwnd_from_id(id: u32) -> *mut c_void {
+const fn hwnd_from_id(id: u32) -> *mut c_void {
 	std::ptr::with_exposed_provenance_mut(id as usize)
 }
 
@@ -164,6 +164,7 @@ fn process_id(id: u32) -> Option<u32> {
 	(pid != 0).then_some(pid)
 }
 
+#[allow(clippy::suboptimal_flops, reason = "clarity of coordinate calculations")]
 pub(super) fn windows() -> CoreResult<Vec<DesktopWindow>> {
 	let native = Window::all().map_err(|error| metadata_error("window enumeration", error))?;
 	let monitor_layout = displays(&DisplaySelector::All)?;

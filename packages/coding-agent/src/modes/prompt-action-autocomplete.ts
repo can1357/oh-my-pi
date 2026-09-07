@@ -13,6 +13,7 @@ import { getGithubRefContext, getGithubRefSuggestions } from "./github-ref-autoc
 import {
 	applyInternalUrlCompletion,
 	getInternalUrlSuggestions,
+	type InternalUrlCallerContext,
 	isInternalUrlPrefix,
 } from "./internal-url-autocomplete";
 
@@ -34,6 +35,8 @@ interface PromptActionAutocompleteOptions {
 	basePath: string;
 	/** Usage count per command name for frequency-ranked slash completions. */
 	commandUsage?: (name: string) => number;
+	/** Read the receiving session at lookup time, following focus and session replacement. */
+	internalUrlCaller?: () => InternalUrlCallerContext;
 	keybindings: KeybindingsManager;
 	copyCurrentLine: () => void;
 	copyPrompt: () => void;
@@ -131,17 +134,18 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 	#commands: SlashCommand[];
 	#baseProvider: CombinedAutocompleteProvider;
 	#actions: PromptActionDefinition[];
-	#basePath: string;
+	#internalUrlCaller: () => InternalUrlCallerContext;
 
 	constructor(
 		commands: SlashCommand[],
 		basePath: string,
 		actions: PromptActionDefinition[],
 		commandUsage?: (name: string) => number,
+		internalUrlCaller?: () => InternalUrlCallerContext,
 	) {
 		this.#commands = commands;
 		this.#baseProvider = new CombinedAutocompleteProvider(commands, basePath, { commandUsage });
-		this.#basePath = basePath;
+		this.#internalUrlCaller = internalUrlCaller ?? (() => ({ cwd: basePath }));
 		this.#actions = actions;
 	}
 
@@ -172,7 +176,7 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 				// tokens such as `#copy` literal.
 				const githubRefSuggestions = getGithubRefSuggestions(textBeforeCursor);
 				if (githubRefSuggestions) return githubRefSuggestions;
-				return getInternalUrlSuggestions(textBeforeCursor, this.#basePath, signal);
+				return getInternalUrlSuggestions(textBeforeCursor, undefined, signal, this.#internalUrlCaller);
 			}
 		}
 
@@ -202,7 +206,12 @@ export class PromptActionAutocompleteProvider implements AutocompleteProvider {
 			}
 		}
 
-		const urlSuggestions = await getInternalUrlSuggestions(textBeforeCursor, this.#basePath, signal);
+		const urlSuggestions = await getInternalUrlSuggestions(
+			textBeforeCursor,
+			undefined,
+			signal,
+			this.#internalUrlCaller,
+		);
 		if (urlSuggestions) return urlSuggestions;
 
 		if (!isSettingsInitialized() || settings.get("emojiAutocomplete")) {
@@ -299,33 +308,39 @@ export function createPromptActionAutocompleteProvider(
 		},
 		{
 			id: "cursor-message-end",
-			label: "Move cursor to end of message",
+			label: "Move cursor to message end",
 			description: "Current message",
 			keywords: ["move", "cursor", "message", "end", "prompt", "last", "bottom"],
 			execute: options.moveCursorToMessageEnd,
 		},
 		{
 			id: "cursor-message-start",
-			label: "Move cursor to beginning of message",
+			label: "Move cursor to message start",
 			description: "Current message",
 			keywords: ["move", "cursor", "message", "start", "beginning", "prompt", "first", "top"],
 			execute: options.moveCursorToMessageStart,
 		},
 		{
 			id: "cursor-line-start",
-			label: "Move cursor to beginning of line",
+			label: "Move cursor to line start",
 			description: formatKeyHints(editorKeybindings.getKeys("tui.editor.cursorLineStart")),
 			keywords: ["move", "cursor", "line", "start", "beginning", "home"],
 			execute: options.moveCursorToLineStart,
 		},
 		{
 			id: "cursor-line-end",
-			label: "Move cursor to end of line",
+			label: "Move cursor to line end",
 			description: formatKeyHints(editorKeybindings.getKeys("tui.editor.cursorLineEnd")),
 			keywords: ["move", "cursor", "line", "end"],
 			execute: options.moveCursorToLineEnd,
 		},
 	];
 
-	return new PromptActionAutocompleteProvider(options.commands, options.basePath, actions, options.commandUsage);
+	return new PromptActionAutocompleteProvider(
+		options.commands,
+		options.basePath,
+		actions,
+		options.commandUsage,
+		options.internalUrlCaller,
+	);
 }

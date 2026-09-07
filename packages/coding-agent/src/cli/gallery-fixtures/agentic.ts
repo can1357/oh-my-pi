@@ -21,19 +21,17 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 	task: {
 		label: "Task",
 		customRendered: true,
-		// Streaming: agent chosen, assignment still landing.
+		// Streaming: agent chosen, assignment still landing. The args follow the
+		// tool schema `renderCall` reads (`agent`, `name`, `task`).
 		streamingArgs: {
 			agent: "task",
-			id: "AuthLoader",
-			description: "Load auth middleware",
-			assignment: "Read packages/server/src/auth/*.ts and summarize the session-cookie",
+			name: "AuthLoader",
+			task: "Read packages/server/src/auth/*.ts and summarize the session-cookie",
 		},
 		args: {
 			agent: "task",
-			id: "AuthLoader",
-			description: "Load auth middleware",
-			assignment:
-				"Read packages/server/src/auth/session.ts and middleware.ts, then document the session-cookie validation flow and any TODOs.",
+			name: "AuthLoader",
+			task: "Read packages/server/src/auth/session.ts and middleware.ts, then document the session-cookie validation flow and any TODOs.",
 		},
 		result: {
 			content: [

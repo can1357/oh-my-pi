@@ -19,9 +19,9 @@ import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/componen
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 const usage = {
 	input: 1,
@@ -45,41 +45,12 @@ const danglingAssistant = {
 } as unknown as AgentMessage;
 
 function createFixture(opts: { isStreaming: boolean }) {
-	const chatContainer = new TranscriptContainer();
-	const session = {
-		retryAttempt: 0,
-		getToolByName: () => undefined,
-		hasBuiltInTool: () => true,
-		sessionManager: { getCwd: () => process.cwd() },
-		isStreaming: opts.isStreaming,
-	};
-	let helpers!: UiHelpers;
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		chatContainer,
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
-		ui: { requestRender: vi.fn() },
-		statusLine: { invalidate: vi.fn() },
-		updateEditorBorderColor: vi.fn(),
-		settings: { get: () => false },
-		addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
-		session,
-		viewSession: session,
-		toolOutputExpanded: false,
-		hideThinkingBlock: false,
-		lastAssistantUsage: undefined,
-		clearTransientSessionUi: () => {},
-		ensureLoadingAnimation: vi.fn(),
-		loadingAnimation: undefined,
-		autoCompactionLoader: undefined,
-		retryLoader: undefined,
-		setTodos: vi.fn(),
-		showWarning: vi.fn(),
-	} as unknown as InteractiveModeContext;
-	helpers = new UiHelpers(ctx);
-	return { ctx, helpers, chatContainer };
+	const ctx = createInteractiveModeContext({ session: { isStreaming: opts.isStreaming } });
+	const helpers = new UiHelpers(ctx);
+	ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+	const controller = new EventController(ctx);
+	ctx.eventController = controller;
+	return { ctx, helpers, controller, chatContainer: ctx.chatContainer };
 }
 
 function pendingComponents(chatContainer: TranscriptContainer): ToolExecutionComponent[] {
@@ -103,7 +74,7 @@ describe("mid-turn transcript rebuild keeps in-flight tool calls", () => {
 	});
 
 	it("renders a dangling toolCall as pending, tracks it, and routes the live result into it", async () => {
-		const { ctx, helpers, chatContainer } = createFixture({ isStreaming: true });
+		const { ctx, helpers, controller, chatContainer } = createFixture({ isStreaming: true });
 
 		helpers.renderSessionContext({ messages: [danglingAssistant] } as SessionContext);
 
@@ -117,7 +88,6 @@ describe("mid-turn transcript rebuild keeps in-flight tool calls", () => {
 
 		// The tool finishes after the rebuild: the result must land in the same
 		// rebuilt component instead of being dropped.
-		const controller = new EventController(ctx);
 		await controller.handleEvent({
 			type: "tool_execution_end",
 			toolCallId: "call-1",

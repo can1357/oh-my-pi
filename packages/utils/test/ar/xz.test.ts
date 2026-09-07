@@ -47,7 +47,7 @@ describe("XZ container", () => {
 
 	test("decodes unknown-size LZMA-alone streams through their end marker", async () => {
 		const bytes = await fixture("lzma-alone.lzma");
-		expect(Array.from(bytes.subarray(5, 13))).toEqual(new Array(8).fill(0xff));
+		expect(Array.from(bytes.subarray(5, 13))).toEqual(Array.from({ length: 8 }, () => 0xff));
 		expect(sha256(await lzmaAloneDecompress(bytes, 215))).toBe(TEXT_HASH);
 		await expect(lzmaAloneDecompress(bytes, 10)).rejects.toThrow("size limit");
 	});
