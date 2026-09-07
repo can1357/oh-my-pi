@@ -7,6 +7,7 @@ import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "@oh-my-pi/pi
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HindsightSessionState } from "@oh-my-pi/pi-coding-agent/hindsight/state";
+import * as hindsightTranscript from "@oh-my-pi/pi-coding-agent/hindsight/transcript";
 import { MnemopiSessionState, setMnemopiSessionState } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -381,6 +382,7 @@ describe("AgentSession concurrent disposal", () => {
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("expected bundled model");
 		const mock = createMockModel({ handler: () => ({ content: ["ok"] }) });
+		const extract = vi.spyOn(hindsightTranscript, "extractMessages");
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 		sessionManager.appendMessage({
 			role: "user",
@@ -397,9 +399,32 @@ describe("AgentSession concurrent disposal", () => {
 			settings: Settings.isolated(),
 			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
 		});
+		expect(extract).not.toHaveBeenCalled();
 		expect(session.loadedUserTurnCount).toBe(0);
 		expect(session.hindsightCloseRetainBaselineTurns).toBeUndefined();
 		expect(session.hindsightLoadedMessageCount).toBeUndefined();
+		await session.dispose();
+		session = undefined;
+
+		const enabledManager = SessionManager.inMemory(tempDir.path());
+		enabledManager.appendMessage({
+			role: "user",
+			content: "this historical turn has enough text",
+			timestamp: Date.now(),
+		});
+		session = new AgentSession({
+			agent: new Agent({
+				getApiKey: () => "test-key",
+				initialState: { model, systemPrompt: ["test"], tools: [] },
+				streamFn: mock.stream,
+			}),
+			sessionManager: enabledManager,
+			settings: Settings.isolated({ "memory.backend": "hindsight" }),
+			modelRegistry: new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml")),
+		});
+		expect(extract).toHaveBeenCalledTimes(1);
+		expect(extract).toHaveBeenCalledWith(enabledManager);
+		expect(session.loadedUserTurnCount).toBe(1);
 		await session.dispose();
 		session = undefined;
 	});
