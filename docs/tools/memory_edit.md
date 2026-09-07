@@ -55,7 +55,7 @@
 ## Limits & Caps
 - Availability requires `memory.backend = "mnemopi"`; Hindsight and local file-backed memory do not expose this tool.
 - `id` must be supplied directly; the tool does not search by content.
-- Recall previews are capped at 500 characters by default. Always fetch `read memory://<id>` before `update`; the URL resolves the full row across the same scoped banks.
+- Recall previews are capped at 500 characters by default. Always fetch `read memory://<id>` before `update`; the URL resolves the full row from the calling session's scoped banks.
 - `update` with neither `content` nor `importance` is rejected before any backend write.
 - `importance` values outside `0..1` are clamped rather than rejected.
 
@@ -63,7 +63,7 @@
 - Throws `Mnemopi backend is not initialised for this session.` when the tool is exposed but session state is missing.
 - Throws `memory_edit update requires content or importance.` for an empty update.
 - Missing, episodic-for-update/forget, and fact ids are normal results rather than thrown errors; inspect `details.status`.
-- `read memory://<id>` throws `Mnemopi memory <id> not found` when no scoped bank contains the row.
+- `read memory://<id>` throws `Mnemopi memory <id> not found in the calling session's scoped bank` when that session's banks do not contain the row; a row held only by another live session is not reachable.
 
 ## Notes
 - Read the full `memory://<id>` row before every update. Copying a clipped recall preview into `content` would delete the unseen tail.

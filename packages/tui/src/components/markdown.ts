@@ -1254,6 +1254,52 @@ function lexDocument(text: string): Token[] {
 	return lexWindowed(text);
 }
 
+/** A hyperlink as the renderer sees it: inline `[text](href)`, `<autolink>`, bare GFM URL, or reference link. */
+export interface MarkdownLink {
+	/** Visible link text (equals `href` for autolinks and bare URLs). */
+	text: string;
+	/** Destination exactly as marked resolved it (references resolved, no normalization). */
+	href: string;
+}
+
+/**
+ * Every link token in `text`, in document order, from the same configured
+ * lexer the renderer uses — so fenced code, code spans, escapes, reference
+ * definitions and the GFM autolink rules agree with what is drawn on screen.
+ * Duplicate hrefs are kept; callers decide how to fold them.
+ */
+export function extractMarkdownLinks(text: string): MarkdownLink[] {
+	const links: MarkdownLink[] = [];
+	const walk = (tokens: readonly Token[] | undefined): void => {
+		if (!tokens) return;
+		for (const token of tokens) {
+			if (token.type === "link") {
+				const link = token as Tokens.Link;
+				if (typeof link.href === "string" && link.href.length > 0) {
+					links.push({
+						text: typeof link.text === "string" && link.text.length > 0 ? link.text : link.href,
+						href: link.href,
+					});
+				}
+				continue;
+			}
+			// Containers: paragraphs, emphasis, lists, blockquotes, table cells.
+			const any = token as {
+				tokens?: Token[];
+				items?: Token[];
+				header?: Array<{ tokens?: Token[] }>;
+				rows?: Array<Array<{ tokens?: Token[] }>>;
+			};
+			walk(any.tokens);
+			walk(any.items);
+			if (any.header) for (const cell of any.header) walk(cell.tokens);
+			if (any.rows) for (const row of any.rows) for (const cell of row) walk(cell.tokens);
+		}
+	};
+	walk(lexDocument(text));
+	return links;
+}
+
 /** Drop all L2 cache entries. Call on theme change to prevent stale styled output. */
 export function clearRenderCache(): void {
 	renderCache.clear();
@@ -1300,6 +1346,15 @@ export interface HighlightStreamSession {
 	push(chunk: string): string;
 }
 
+/** Collect distinct hyperlink destinations using the renderer's Markdown grammar, excluding images and code. */
+export function getMarkdownLinkUrls(text: string): string[] {
+	const urls = new Set<string>();
+	markdownParser.walkTokens(markdownParser.lexer(text), token => {
+		if (token.type === "link" && typeof token.href === "string") urls.add(token.href);
+	});
+	return [...urls];
+}
+
 /**
  * Theme functions for markdown elements.
  * Each function takes text and returns styled text with ANSI codes.
@@ -1308,6 +1363,8 @@ export interface MarkdownTheme {
 	heading: (text: string) => string;
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
+	/** Resolve the OSC 8 destination without changing visible text; undefined preserves the authored URL. */
+	resolveLink?: (href: string) => string | undefined;
 	code: (text: string) => string;
 	codeBlock: (text: string) => string;
 	codeBlockBorder: (text: string) => string;
@@ -3162,7 +3219,8 @@ export class Markdown implements Component {
 					const linkText = this.#renderInlineTokens(token.tokens || [], resolvedStyleContext);
 					const styledLinkText = this.#theme.link(this.#theme.underline(linkText));
 					const href = typeof token.href === "string" ? token.href : "";
-					const clickableLinkText = formatHyperlink(styledLinkText, href);
+					const target = (href && this.#theme.resolveLink?.(href)) || href;
+					const clickableLinkText = formatHyperlink(styledLinkText, target);
 					// If link text matches href, only show the link once. A missing
 					// href (malformed/partial link token) renders as plain link text
 					// instead of crashing the renderer or emitting an empty "()"
@@ -3175,7 +3233,7 @@ export class Markdown implements Component {
 						result += clickableLinkText + stylePrefix;
 					else {
 						const styledLinkUrl = this.#theme.linkUrl(`(${href})`);
-						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, href)}${stylePrefix}`;
+						result += `${clickableLinkText} ${formatHyperlink(styledLinkUrl, target)}${stylePrefix}`;
 					}
 					break;
 				}

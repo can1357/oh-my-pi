@@ -948,12 +948,16 @@ export function transformMessages<TApi extends Api>(
 
 					let normalizedId: string | undefined;
 					if (isAnthropicTarget) {
-						normalizedId = normalizeAnthropicTargetToolCallId(
-							toolCall.id,
-							model,
-							assistantMsg,
-							normalizeToolCallId,
-						);
+						// Custom same-model endpoints own opaque correlation IDs; official
+						// endpoints and cross-model replays require Anthropic-valid IDs.
+						if (!isSameModel || model.compat.officialEndpoint) {
+							normalizedId = normalizeAnthropicTargetToolCallId(
+								toolCall.id,
+								model,
+								assistantMsg,
+								normalizeToolCallId,
+							);
+						}
 					} else if (!isSameModel && normalizeToolCallId) {
 						normalizedId = normalizeToolCallId(toolCall.id, model, assistantMsg);
 					}

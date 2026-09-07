@@ -6,9 +6,9 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
+import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	getConfigRootDir,
@@ -18,6 +18,11 @@ import {
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import {
+	createInteractiveModeContext,
+	createMcpManagerStub,
+	type McpManagerOverrides,
+} from "./helpers/interactive-mode-context";
 
 const RAW_SERVER_URL = `https://\${MCP_HOST}/mcp`;
 const EXPANDED_SERVER_URL = "https://mcp.example.com/mcp";
@@ -42,42 +47,15 @@ function restoreEnvValue(name: string, value: string | undefined): void {
 	Bun.env[name] = value;
 	process.env[name] = value;
 }
-function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<string, unknown> = {}) {
-	const showError = vi.fn();
-	const showStatus = vi.fn();
-	const present = vi.fn();
-	const editor: { onEscape?: () => void } = {};
+function createController(authStorage: AuthStorage, mcpManagerOverrides: McpManagerOverrides = {}) {
 	const prepareConfig = vi.fn(async (config: MCPServerConfig) => config);
-	const mcpManager = {
-		prepareConfig,
-		disconnectAll: vi.fn(async () => {}),
-		discoverAndConnect: vi.fn(async () => ({ errors: new Map<string, string>() })),
-		getTools: vi.fn(() => []),
-		waitForConnection: vi.fn(async () => {}),
-		getConnectionStatus: vi.fn(() => "connected"),
-		...mcpManagerOverrides,
-	};
-	const oauthManualInput = new OAuthManualInputManager();
-	const ctx = {
-		chatContainer: { addChild: vi.fn() },
-		present,
-		presentCommandOutput: present,
-		ui: { requestRender: vi.fn() },
-		editor,
-		showError,
-		showStatus,
-		oauthManualInput,
-		settings: {
-			get: vi.fn((_key: string): unknown => undefined),
-		},
-		session: {
-			refreshMCPTools: vi.fn(),
-			setMCPPromptCommands: vi.fn(),
-			modelRegistry: { authStorage },
-		},
+	const mcpManager = createMcpManagerStub({ prepareConfig, ...mcpManagerOverrides });
+	const ctx = createInteractiveModeContext({
+		session: { modelRegistry: { authStorage } },
 		mcpManager,
-	} as never;
+	});
 	const controller = new MCPCommandController(ctx);
+	const { showError, showStatus, present, editor, oauthManualInput } = ctx;
 
 	return { controller, ctx, showError, showStatus, present, editor, oauthManualInput, prepareConfig, mcpManager };
 }
@@ -1014,8 +992,13 @@ describe("/mcp auth commands", () => {
 			expires: Date.now() + 3_600_000,
 		});
 		const { controller, showError } = createController(authStorage, {
-			getServerConfig: vi.fn(() => ({ type: "http", url: EXPANDED_SERVER_URL })),
-			getSource: vi.fn(() => ({ provider: "test", path: "/tmp/discovered.json" })),
+			getServerConfig: vi.fn((): MCPServerConfig => ({ type: "http", url: EXPANDED_SERVER_URL })),
+			getSource: vi.fn((): SourceMeta => ({
+				provider: "test",
+				providerName: "Test",
+				path: "/tmp/discovered.json",
+				level: "project",
+			})),
 		});
 
 		await controller.handle("/mcp unauth discovered");

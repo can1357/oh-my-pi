@@ -329,8 +329,9 @@ export class InspectorPanel implements Component {
 		if (data.condition) this.#pushLabeledList(surface, "condition", data.condition, width);
 		if (data.astCondition) this.#pushLabeledList(surface, "ast", data.astCondition, width);
 		if (data.scope) this.#pushLabeledList(surface, "scope", data.scope, width);
+		if (data.agents) this.#pushLabeledList(surface, "agents", data.agents, width);
 		if (data.interruptMode) this.#pushLabeled(surface, "interrupt", data.interruptMode, width, "dim");
-		if (!data.alwaysApply && !data.globs && !data.condition && !data.astCondition) {
+		if (!data.alwaysApply && !data.globs && !data.condition && !data.astCondition && !data.agents) {
 			surface.push(theme.fg("dim", "  (no apply conditions)"));
 		}
 		surface.push("");

@@ -1,9 +1,10 @@
-import { type Component, Container, Markdown } from "@oh-my-pi/pi-tui";
+import { applyBackgroundToLine, type Component, Container, Markdown, padding, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
 import { getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { attachmentSgr, collapseImageMarkers, renderPlaceholders } from "../composer-attachments";
 import { imageReferenceHyperlink } from "../image-references";
 import { highlightMagicKeywords } from "../magic-keywords";
+import type { ReactionTarget } from "./reaction";
 
 // OSC 133 shell integration: marks prompt zones for terminal multiplexers.
 //
@@ -28,15 +29,18 @@ const OSC133_COMMAND_DONE = "\x1b]133;D;0\x07";
 const OSC133_ZONE_CLOSE = OSC133_ZONE_END + OSC133_COMMAND_START + OSC133_COMMAND_DONE;
 
 /**
- * Component that renders a user message
+ * Component that renders a user message. Accepts an agent reaction badge
+ * (see {@link ReactionTarget}) drawn right-aligned in the bubble's top padding row.
  */
-export class UserMessageComponent extends Container {
+export class UserMessageComponent extends Container implements ReactionTarget {
 	// Memoized OSC 133 zone wrapping keyed on the underlying container render
 	// (same source ref ⇒ identical rows ⇒ reuse the wrapped copy). Keeps this
 	// component reference-stable for the transcript's incremental assembly and
 	// never mutates the container's cached array.
 	#zoneSource: readonly string[] | undefined;
 	#zoneLines: string[] | undefined;
+	readonly #bgColor: (value: string) => string;
+	#reaction: string | undefined;
 
 	constructor(text: string, synthetic = false, imageLinks?: readonly (string | undefined)[]) {
 		super();
@@ -45,6 +49,7 @@ export class UserMessageComponent extends Container {
 		// Markdown layout so wrapping and bubble padding are computed on the visible text.
 		text = collapseImageMarkers(text, Number.POSITIVE_INFINITY, () => {});
 		const bgColor = (value: string) => theme.bg("userMessageBg", value);
+		this.#bgColor = bgColor;
 		// Paint the magic keywords ("ultrathink"/"orchestrate"/"workflowz") inside the rendered
 		// bubble too — matching the live editor glow. The Markdown component routes code spans and
 		// fenced blocks through its own code styling (never `color`), so those are already excluded;
@@ -65,7 +70,9 @@ export class UserMessageComponent extends Container {
 						form === "chip"
 							? `${attachmentSgr(kind, index)}\x1b[1m${label}\x1b[22m${keywordReset}`
 							: theme.fg("accent", `\x1b[1m${label}\x1b[22m`);
-					return kind === "image" ? imageReferenceHyperlink(label, index, imageLinks, () => styled) : styled;
+					return kind === "image" || kind === "video"
+						? imageReferenceHyperlink(label, index, imageLinks, () => styled)
+						: styled;
 				},
 			});
 		const md = new Markdown(text, 1, 1, getMarkdownTheme(), {
@@ -74,6 +81,18 @@ export class UserMessageComponent extends Container {
 		});
 		md.setIgnoreTight(true);
 		this.addChild(md);
+	}
+
+	setReaction(emoji: string): void {
+		if (this.#reaction === emoji) return;
+		this.#reaction = emoji;
+		this.#zoneLines = undefined;
+	}
+
+	/** The top padding row with the reaction badge right-aligned inside the horizontal padding. */
+	#reactionRow(width: number): string {
+		const emoji = this.#reaction!;
+		return applyBackgroundToLine(padding(width - 1 - visibleWidth(emoji)) + emoji, width, this.#bgColor);
 	}
 
 	override render(width: number): readonly string[] {
@@ -85,6 +104,7 @@ export class UserMessageComponent extends Container {
 			return this.#zoneLines;
 		}
 		const wrapped = lines.slice();
+		if (this.#reaction !== undefined) wrapped[0] = this.#reactionRow(width);
 		wrapped[0] = OSC133_ZONE_START + wrapped[0];
 		wrapped[wrapped.length - 1] = wrapped[wrapped.length - 1] + OSC133_ZONE_CLOSE;
 		this.#zoneSource = lines;

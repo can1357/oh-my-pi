@@ -4,13 +4,15 @@
  * Uses brush-core via native bindings for shell execution.
  */
 import { ExponentialYield } from "@oh-my-pi/pi-agent-core/utils/yield";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { type MinimizerOptions, PtySession, Shell, type ShellRunResult } from "@oh-my-pi/pi-natives";
 import { $env } from "@oh-my-pi/pi-utils/env";
 import { isCmdShell, isExecutable, type ShellConfig } from "@oh-my-pi/pi-utils/procmgr";
 import { Settings, type ShellMinimizerSettings } from "../config/settings";
-import { OutputSink } from "../session/streaming-output";
+import { OutputSink, type OutputSummary } from "../session/streaming-output";
 import { resolveOutputMaxColumns, resolveOutputSinkHeadBytes } from "../tools/output-meta";
 import { getOrCreateSnapshot } from "../utils/shell-snapshot";
+import { TerminalGraphicsDecoder } from "../utils/terminal-graphics";
 import { loadDirenvEnv } from "./direnv";
 import { buildNonInteractiveEnv } from "./non-interactive-env";
 
@@ -66,6 +68,8 @@ export interface BashResult {
 	outputBytes: number;
 	artifactId?: string;
 	workingDir?: string;
+	/** Terminal graphics extracted from raw stdout before sanitization or truncation. */
+	images?: ImageContent[];
 }
 
 /** POSIX-safe variable name — gates which direnv unsets we inject into the
@@ -405,6 +409,8 @@ async function executeUserShellPty(run: {
 	timeoutMs: number | undefined;
 	signal: AbortSignal | undefined;
 	sink: OutputSink;
+	graphics: TerminalGraphicsDecoder;
+	dump: (notice?: string) => Promise<OutputSummary & { images?: ImageContent[] }>;
 }): Promise<BashResult> {
 	const session = new PtySession();
 	const result = await session.startArgv(
@@ -421,8 +427,10 @@ async function executeUserShellPty(run: {
 		(err, chunk) => {
 			if (err || !chunk) return;
 			run.pty.onChunk(chunk);
-			// CRLF → LF for the capture; the sink strips ANSI itself.
-			run.sink.push(chunk.replace(/\r\n?/gu, "\n"));
+			// Preserve raw bytes for the terminal display, but extract graphics
+			// before the transcript sink sanitizes or truncates the clean text.
+			const clean = run.graphics.push(chunk);
+			if (clean) run.sink.push(clean.replace(/\r\n?/gu, "\n"));
 		},
 	);
 	if (result.timedOut) {
@@ -430,7 +438,7 @@ async function executeUserShellPty(run: {
 			exitCode: undefined,
 			cancelled: true,
 			timedOut: true,
-			...(await run.sink.dump(
+			...(await run.dump(
 				run.timeoutMs !== undefined
 					? `Command timed out after ${Math.round(run.timeoutMs / 1000)} seconds`
 					: "Command timed out",
@@ -441,13 +449,13 @@ async function executeUserShellPty(run: {
 		return {
 			exitCode: undefined,
 			cancelled: true,
-			...(await run.sink.dump("Command cancelled")),
+			...(await run.dump("Command cancelled")),
 		};
 	}
 	return {
 		exitCode: result.exitCode,
 		cancelled: false,
-		...(await run.sink.dump()),
+		...(await run.dump()),
 	};
 }
 
@@ -498,6 +506,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			: preflight.command;
 
 	// Create output sink for truncation and artifact handling
+	const graphics = new TerminalGraphicsDecoder();
 	const sink = new OutputSink({
 		onChunk: usePty ? undefined : options?.onChunk,
 		artifactPath: options?.artifactPath,
@@ -511,15 +520,31 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 	// all run inline. File writes (artifact path) are handled asynchronously
 	// inside the sink. No promise chain needed.
 	let acceptingChunks = true;
+	let graphicsFinished = false;
+	let decodedImages: ImageContent[] = [];
 	const enqueueChunk = (chunk: string) => {
-		if (acceptingChunks) sink.push(chunk);
+		if (!acceptingChunks) return;
+		const clean = graphics.push(chunk);
+		if (clean) sink.push(clean);
+	};
+	const dump = async (notice?: string): Promise<OutputSummary & { images?: ImageContent[] }> => {
+		if (!graphicsFinished) {
+			graphicsFinished = true;
+			const tail = graphics.finish();
+			if (tail) sink.push(tail);
+			decodedImages = await graphics.images();
+		}
+		return {
+			...(await sink.dump(notice)),
+			...(decodedImages.length > 0 ? { images: decodedImages } : {}),
+		};
 	};
 
 	if (options?.signal?.aborted) {
 		return {
 			exitCode: undefined,
 			cancelled: true,
-			...(await sink.dump("Command cancelled")),
+			...(await dump("Command cancelled")),
 		};
 	}
 
@@ -536,6 +561,8 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				timeoutMs: requestedMs === 0 ? undefined : Math.max(1_000, requestedMs ?? 300_000),
 				signal: options?.signal,
 				sink,
+				graphics,
+				dump,
 			});
 		} finally {
 			await sink.dispose();
@@ -663,7 +690,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				...(winner.kind === "timeout" ? { timedOut: true } : {}),
-				...(await sink.dump(notice)),
+				...(await dump(notice)),
 			};
 		}
 		if (timeoutTimer) {
@@ -684,7 +711,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 				exitCode: undefined,
 				cancelled: true,
 				timedOut: true,
-				...(await sink.dump(annotation)),
+				...(await dump(annotation)),
 			};
 		}
 
@@ -697,7 +724,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			return {
 				exitCode: undefined,
 				cancelled: true,
-				...(await sink.dump("Command cancelled")),
+				...(await dump("Command cancelled")),
 			};
 		}
 
@@ -707,7 +734,12 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 		// the agent can retrieve the raw bytes losslessly.
 		const minimized = winner.result.minimized;
 		if (minimized && minimized.text !== minimized.originalText) {
-			sink.replace(minimized.text);
+			// The decoder above already owns image extraction from the streamed
+			// lossless output. Scrub any graphics frames repeated by the native
+			// minimizer without feeding them back into that decoder.
+			const minimizedGraphics = new TerminalGraphicsDecoder();
+			const minimizedText = minimizedGraphics.push(minimized.text) + minimizedGraphics.finish();
+			sink.replace(minimizedText);
 			if (options?.onMinimizedSave) {
 				const artifactId = await options.onMinimizedSave(minimized.originalText, {
 					filter: minimized.filter,
@@ -715,7 +747,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 					outputBytes: minimized.outputBytes,
 				});
 				if (artifactId) {
-					const sep = minimized.text.endsWith("\n") ? "" : "\n";
+					const sep = minimizedText.endsWith("\n") ? "" : "\n";
 					sink.push(`${sep}[raw output: artifact://${artifactId}]\n`);
 				}
 			}
@@ -726,7 +758,7 @@ export async function executeBash(command: string, options?: BashExecutorOptions
 			exitCode: winner.result.exitCode,
 			cancelled: false,
 			workingDir: winner.result.workingDir,
-			...(await sink.dump()),
+			...(await dump()),
 		};
 	} catch (err) {
 		resetSession = true;

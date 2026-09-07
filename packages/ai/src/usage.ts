@@ -359,6 +359,8 @@ export interface UsageProvider {
 	validatesCredentials?: boolean;
 	/** Whether a failed refresh may serve the previous successful report. Defaults to true. */
 	retainLastGoodOnFailure?: boolean;
+	/** Provider-specific cool-down after a failed refresh. Defaults to the shared short backoff. */
+	failureBackoffMs?: number;
 }
 
 /** Request context used when ranking usage for a specific model. */

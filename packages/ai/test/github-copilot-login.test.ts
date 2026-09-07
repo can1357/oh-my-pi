@@ -28,7 +28,7 @@ function accessTokenResponse(token = "ghu_test") {
 	return {
 		access_token: token,
 		token_type: "bearer",
-		scope: "read:user,read:org,repo,gist,codespace",
+		scope: "read:user",
 	};
 }
 
@@ -48,7 +48,7 @@ function modelPolicyOk() {
 }
 
 describe("loginGitHubCopilot", () => {
-	it("happy path (github.com)", async () => {
+	it("requests only the scopes needed for Copilot API access", async () => {
 		let pollCount = 0;
 		const fetchMock = vi.fn(async (input: string | URL, init?: RequestInit) => {
 			const url = typeof input === "string" ? input : input.toString();
@@ -56,7 +56,7 @@ describe("loginGitHubCopilot", () => {
 				expect(init?.method).toBe("POST");
 				expectOfficialOAuthRequest(init, {
 					client_id: "Ov23ctDVkRmgkPke0Mmm",
-					scope: "read:user,read:org,repo,gist,codespace",
+					scope: "read:user",
 				});
 				return new Response(JSON.stringify(deviceCodeResponse()), {
 					status: 200,

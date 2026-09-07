@@ -15,7 +15,7 @@ import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: TempDir[] = [];
@@ -89,7 +89,7 @@ async function createPersistedSession(
 	restrictToolNames?: boolean,
 	modelRole?: string,
 	advisor?: string,
-	contract?: { tools?: string[]; readOnly?: boolean },
+	contract?: { tools?: string[]; readOnly?: boolean; agent?: string },
 ): Promise<string> {
 	const manager = SessionManager.create(cwd, path.join(cwd, "sessions"));
 	const sessionFile = manager.getSessionFile();
@@ -103,6 +103,7 @@ async function createPersistedSession(
 		resolvedModel: modelRole ? "anthropic/claude-sonnet-4-5" : undefined,
 		advisor,
 		readOnly: contract?.readOnly,
+		agent: contract?.agent,
 	});
 	manager.appendMessage({
 		role: "assistant",
@@ -276,6 +277,87 @@ describe("persisted subagent revival", () => {
 		expect(capturedOptions?.mcpManager).toBe(hostileMcp);
 		expect(capturedOptions?.customTools?.map(tool => tool.name)).toEqual(["mcp__server_read"]);
 	});
+
+	it("restores the persisted agent definition name on cold revival so agent-scoped rules keep matching", async () => {
+		const cwd = makeTempDir("@pi-revive-agent-name-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "scout" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// `ref.displayName` is the registry's generated label ("Persisted
+		// Restricted") for a cold-revived ref, not the durable agent definition
+		// name. `agents: [scout]` rule scoping must key on the latter.
+		expect(capturedOptions?.agentName).toBe("scout");
+	});
+
+	it("falls back to the ref display name reviving a legacy session file without a persisted agent name", async () => {
+		const cwd = makeTempDir("@pi-revive-agent-name-legacy-");
+		const sessionFile = await createPersistedSession(cwd);
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		expect(capturedOptions?.agentName).toBe(ref.displayName);
+	});
+	it("treats a persisted legacy 'main'-named subagent as scoped to the ref display name, not the top-level sentinel", async () => {
+		const cwd = makeTempDir("@pi-revive-agent-name-legacy-main-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "main" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// A parked transcript from before "main" was reserved as a definition
+		// name could still carry `init.agent === "main"`. That must not resolve
+		// to the top-level sentinel here, or `agents: [main]` rules documented
+		// as top-level-only would load into this subagent.
+		expect(capturedOptions?.agentName).toBe(ref.displayName);
+		expect(capturedOptions?.agentName).not.toBe("main");
+	});
+	it("treats a persisted legacy 'sub'-named subagent as scoped to the ref display name, not the shared sub sentinel", async () => {
+		const cwd = makeTempDir("@pi-revive-agent-name-legacy-sub-");
+		const sessionFile = await createPersistedSession(cwd, undefined, undefined, undefined, { agent: "sub" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: createRevivedSession([]).session } as CreateAgentSessionResult;
+		});
+
+		const ref = createRef(sessionFile);
+		const reviver = await createFactory(cwd)(ref);
+		if (!reviver) throw new Error("Expected a persisted reviver");
+		await reviver(ref);
+
+		// A parked transcript from before "sub" was reserved as a definition
+		// name could still carry `init.agent === "sub"`. That must not resolve
+		// to the shared subagent-fallback sentinel here, or `agents: [sub]`
+		// rules meant for that specific legacy definition would load into every
+		// unnamed subagent session.
+		expect(capturedOptions?.agentName).toBe(ref.displayName);
+		expect(capturedOptions?.agentName).not.toBe("sub");
+	});
+
 	it("restores the persisted per-agent advisor opt-in on cold revival", async () => {
 		const cwd = makeTempDir("@pi-advisor-revive-");
 		const advisedFile = await createPersistedSession(cwd, undefined, undefined, "moonshot/k3");
@@ -535,6 +617,44 @@ describe("persisted subagent revival", () => {
 			await handle.trackedReplies[0];
 
 			expect(await duplicate).toBeNull();
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
+		it("never relays a wake turn woken by another relay", async () => {
+			// Two idle subagents exchanging one message used to ping-pong forever:
+			// each relay woke the peer, whose stop-text was relayed straight back.
+			// Relay messages are answers, not wake sources, so the echo stops here.
+			const cwd = makeTempDir("@pi-revive-relay-echo-");
+			const { handle } = await reviveWithWaker(cwd);
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+
+			// A live peer captures whatever the turn relays instead of a null
+			// `bus.wait`: fully deterministic, no timer dependence.
+			const delivered: IrcMessage[] = [];
+			AgentRegistry.global().register({
+				id: "Peer",
+				displayName: "Peer",
+				kind: "sub",
+				status: "idle",
+				session: {
+					deliverIrcMessage: async (msg: IrcMessage) => {
+						delivered.push(msg);
+						return "injected" as const;
+					},
+				} as unknown as AgentSession,
+			});
+			const relayRecord: CustomMessage = {
+				...wakeRecord("Peer"),
+				details: { id: "irc-43", from: "Peer", message: "You hang up", wakeRelay: true },
+			};
+			const finish = observer?.([relayRecord]);
+			handle.setLastAssistantText("No YOU hang up");
+			await finish?.();
+			await handle.trackedReplies[0];
+
+			expect(delivered).toHaveLength(0);
 			AgentLifecycleManager.resetGlobalForTests();
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();

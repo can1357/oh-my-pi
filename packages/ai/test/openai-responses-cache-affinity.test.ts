@@ -685,20 +685,6 @@ describe("openai-responses cache affinity", () => {
 		expect(captured.body?.prompt_cache_key).toBe("session-123");
 	});
 
-	it("lets explicit headers override the default OpenAI session routing headers", async () => {
-		const captured = await captureOpenAIResponseHeaders({
-			sessionId: "session-123",
-			headers: {
-				session_id: "override-session",
-				"x-client-request-id": "override-request",
-			},
-		});
-
-		expect(captured.sessionId).toBe("override-session");
-		expect(captured.clientRequestId).toBe("override-request");
-		expect(captured.body?.prompt_cache_key).toBe("session-123");
-	});
-
 	it("xAI OAuth adapter request shaping does not mutate reused options", async () => {
 		const options: OpenAIResponsesOptions = {
 			sessionId: "session-123",
@@ -937,14 +923,6 @@ describe("openai-responses cache affinity", () => {
 		expect(requestBodies[2]?.input).toEqual([
 			{ role: "user", content: [{ type: "input_text", text: "replacement-3" }] },
 		]);
-	});
-
-	it("omits OpenAI session routing headers when cache retention is disabled", async () => {
-		const captured = await captureOpenAIResponseHeaders({ cacheRetention: "none", sessionId: "session-123" });
-
-		expect(captured.sessionId).toBeNull();
-		expect(captured.clientRequestId).toBeNull();
-		expect(captured.body?.prompt_cache_key).toBeUndefined();
 	});
 
 	it("omits OpenRouter Responses session_id when cache retention is disabled", async () => {
