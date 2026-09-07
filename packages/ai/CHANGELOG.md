@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- Catalog matrix Write empty-stop follow-up acceptance is Gemini-class only and requires the row's exact ping
+- Catalog matrix omp tools smoke uses `--mode json` and requires bash `tool_execution_end` / toolResult evidence (assistant prose alone fails)
+- Grok Bot representative matrix slice picks OpenAI samples by classifyModel class/family/revision buckets (no luna/terra/sol id substrings)
 - Buffer incomplete undecided-prefix fence fragments (for example bare ```) until more text arrives before flushing as plain content
 - Catalog matrix omp tools smoke requires model-specific echo evidence in tool results or assistant output, not free-text alone
 - Catalog matrix tool follow-up turns fail on empty body, incomplete tool, and provider policy blocks instead of soft-passing

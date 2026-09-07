@@ -280,6 +280,7 @@ async function runOneTool(
 		body,
 		ping,
 		stopReason: turn2.stopReason,
+		modelId: model.id,
 	});
 	if (!followup.pass) {
 		return {
@@ -377,6 +378,7 @@ function runOmp(model: string, { tools }: { tools: boolean }): { pass: boolean; 
 		: prompt.render(ompTextUserPrompt, { token: TEXT_TOKEN }).trim();
 	const args = [
 		"-p",
+		...(tools ? ["--mode", "json"] : []),
 		"--no-session",
 		"--no-extensions",
 		"--no-skills",
@@ -399,7 +401,7 @@ function runOmp(model: string, { tools }: { tools: boolean }): { pass: boolean; 
 	});
 	const out = `${r.stdout?.toString() ?? ""}\n${r.stderr?.toString() ?? ""}`;
 	const pass = tools
-		? r.exitCode === 0 && out.includes(token) && ompToolsExecutionEvidence(out, token)
+		? r.exitCode === 0 && ompToolsExecutionEvidence(out, token)
 		: r.exitCode === 0 && out.includes(TEXT_TOKEN);
 	return { pass, status: r.exitCode ?? 1, out: out.slice(-500) };
 }

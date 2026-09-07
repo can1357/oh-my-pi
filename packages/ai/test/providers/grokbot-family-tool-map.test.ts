@@ -234,7 +234,7 @@ describe("grokbot family tool mapping", () => {
 		expect(wired.wireMode).toBeUndefined();
 	});
 
-	test("representative slice picks live ids by classifyModel class/family plus routers", () => {
+	test("representative slice picks live ids by classifyModel identity buckets plus routers", () => {
 		const live = [
 			"claude-opus-5",
 			"grok-4.6",
@@ -256,12 +256,21 @@ describe("grokbot family tool mapping", () => {
 		expect(picked).toContain("claude-opus-5");
 		expect(picked).toContain("grok-4.6");
 		expect(picked).toContain("gemini-3-flash");
+		// Distinct openai revisions each keep a sample (taxonomy revision, not id tokens).
 		expect(picked).toContain("gpt-5.6-sol");
 		expect(picked).toContain("gpt-5.4-luna");
 		expect(picked).toContain("gpt-5.3-terra");
+		expect(picked).toContain("gpt-5-mini");
 		expect(picked).toContain("composer-2.5");
 		expect(picked).not.toContain("unrelated-other");
 		expect(selectGrokbotMatrixIds(live, "all")).toEqual(live);
+
+		// Same-revision openai peers collapse to one sample via preferMatrixId.
+		const sameRev = selectGrokbotMatrixIds(
+			["gpt-5.6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "sand-default"],
+			"representative",
+		);
+		expect(sameRev.filter(id => id.startsWith("gpt-5.6-"))).toHaveLength(1);
 
 		// Renamed anthropic catalog ids still gate via classifyModel class, not a TypeScript id table.
 		// At most one unclassified non-router is kept (composer-like unknowns); extra noise is dropped.

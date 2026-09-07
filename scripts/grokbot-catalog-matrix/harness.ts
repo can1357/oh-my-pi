@@ -1,6 +1,7 @@
 /**
  * Pure catalog-matrix harness helpers (no grokbot/natives imports).
  */
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import toolBashUserPrompt from "./tool-bash-user.md" with { type: "text" };
 import toolReadUserPrompt from "./tool-read-user.md" with { type: "text" };
@@ -212,17 +213,20 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 }
 
 /**
- * Turn-2 text gate after a successful tool call. The unique ping must appear
- * unless this is the documented Gemini Write empty-stop exception.
+ * Turn-2 text gate after a successful tool call. The unique row ping must
+ * appear unless this is the documented Gemini Write empty-stop exception.
  */
 export function evaluateToolFollowupText(opts: {
 	kind: ToolSmokeKind;
 	body: string;
 	ping: string;
 	stopReason: string;
+	/** Catalog model id — empty Write acceptance is Gemini-class only. */
+	modelId: string;
 }): { pass: boolean; detail?: string } {
-	if (opts.body.includes(opts.ping) || opts.body.includes("tools-pong")) return { pass: true };
-	if (opts.kind === "write" && opts.body.trim().length === 0 && opts.stopReason === "stop") {
+	if (opts.body.includes(opts.ping)) return { pass: true };
+	const isGemini = classifyModel("grokbot", opts.modelId, { lenient: true }).class === "gemini";
+	if (isGemini && opts.kind === "write" && opts.body.trim().length === 0 && opts.stopReason === "stop") {
 		return { pass: true, detail: "empty-followup-after-write" };
 	}
 	return {
@@ -231,15 +235,55 @@ export function evaluateToolFollowupText(opts: {
 	};
 }
 
+function jsonContainsToken(value: unknown, token: string): boolean {
+	if (typeof value === "string") return value.includes(token);
+	if (Array.isArray(value)) return value.some(entry => jsonContainsToken(entry, token));
+	if (value && typeof value === "object") {
+		return Object.values(value as Record<string, unknown>).some(entry => jsonContainsToken(entry, token));
+	}
+	return false;
+}
+
+function isBashLikeToolName(name: unknown): boolean {
+	return typeof name === "string" && /^(bash|Shell|shell)$/i.test(name);
+}
+
 /**
- * Evidence that the omp tools smoke actually ran the echo command (not just
- * answered with the token as free text).
+ * Evidence that the omp tools smoke actually executed bash (not assistant prose).
+ * Expects `--mode json` event lines: only `tool_execution_end` / toolResult payloads count.
  */
 export function ompToolsExecutionEvidence(out: string, token: string): boolean {
-	const echoCmd = `echo ${token}`;
-	if (out.includes(echoCmd)) return true;
-	// TUI / JSONL tool previews often show Shell/bash near the command.
-	return /(?:\bShell\b|\bbash\b)[\s\S]{0,400}echo\s+/.test(out) && out.includes(token);
+	for (const line of out.split("\n")) {
+		const trimmed = line.trim();
+		if (!trimmed.startsWith("{")) continue;
+		let event: unknown;
+		try {
+			event = JSON.parse(trimmed);
+		} catch {
+			continue;
+		}
+		if (!event || typeof event !== "object") continue;
+		const rec = event as Record<string, unknown>;
+		if (rec.type === "tool_execution_end" && rec.isError !== true && isBashLikeToolName(rec.toolName)) {
+			if (jsonContainsToken(rec.result, token)) return true;
+		}
+		if (rec.type === "turn_end" && Array.isArray(rec.toolResults)) {
+			for (const toolResult of rec.toolResults) {
+				if (!toolResult || typeof toolResult !== "object") continue;
+				const tr = toolResult as Record<string, unknown>;
+				if (tr.isError === true) continue;
+				if (!isBashLikeToolName(tr.toolName) && !isBashLikeToolName(tr.name)) continue;
+				if (jsonContainsToken(tr, token)) return true;
+			}
+		}
+		if (rec.type === "message_end" && rec.message && typeof rec.message === "object") {
+			const message = rec.message as Record<string, unknown>;
+			if (message.role !== "toolResult" || message.isError === true) continue;
+			if (!isBashLikeToolName(message.toolName)) continue;
+			if (jsonContainsToken(message, token)) return true;
+		}
+	}
+	return false;
 }
 
 // Live keep-model: explicit Read/Write tools trip Anthropic Usage Policy on

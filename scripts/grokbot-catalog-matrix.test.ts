@@ -67,13 +67,14 @@ describe("matrixRowFlag", () => {
 });
 
 describe("evaluateToolFollowupText", () => {
-	test("fails when the follow-up omits the unique ping outside Write empty-stop", () => {
+	test("fails when the follow-up omits the unique ping outside Gemini Write empty-stop", () => {
 		expect(
 			evaluateToolFollowupText({
 				kind: "bash",
 				body: "ok, done.",
 				ping: "tools-pong-bash-x",
 				stopReason: "stop",
+				modelId: "gemini-3-flash",
 			}).pass,
 		).toBe(false);
 		expect(
@@ -82,16 +83,36 @@ describe("evaluateToolFollowupText", () => {
 				body: "",
 				ping: "tools-pong-write-x",
 				stopReason: "stop",
+				modelId: "gemini-3-flash",
 			}),
 		).toEqual({ pass: true, detail: "empty-followup-after-write" });
+		expect(
+			evaluateToolFollowupText({
+				kind: "write",
+				body: "",
+				ping: "tools-pong-write-x",
+				stopReason: "stop",
+				modelId: "grok-4.6",
+			}).pass,
+		).toBe(false);
 		expect(
 			evaluateToolFollowupText({
 				kind: "bash",
 				body: "tools-pong-bash-x",
 				ping: "tools-pong-bash-x",
 				stopReason: "stop",
+				modelId: "grok-4.6",
 			}).pass,
 		).toBe(true);
+		expect(
+			evaluateToolFollowupText({
+				kind: "bash",
+				body: "tools-pong",
+				ping: "tools-pong-bash-x",
+				stopReason: "stop",
+				modelId: "grok-4.6",
+			}).pass,
+		).toBe(false);
 	});
 });
 
@@ -182,10 +203,47 @@ describe("classifyError", () => {
 });
 
 describe("ompToolsExecutionEvidence", () => {
-	test("requires echo/tool evidence, not just the free-text token", () => {
+	test("requires structured bash tool_execution_end evidence, not assistant prose", () => {
 		const token = "omp-echo-sand-default";
 		expect(ompToolsExecutionEvidence(`done ${token}`, token)).toBe(false);
-		expect(ompToolsExecutionEvidence(`Shell\necho ${token}\n${token}`, token)).toBe(true);
-		expect(ompToolsExecutionEvidence(`running: echo ${token}`, token)).toBe(true);
+		expect(ompToolsExecutionEvidence(`bash: echo ${token}\n${token}`, token)).toBe(false);
+		expect(
+			ompToolsExecutionEvidence(
+				JSON.stringify({
+					type: "tool_execution_end",
+					toolCallId: "1",
+					toolName: "bash",
+					isError: false,
+					result: { content: [{ type: "text", text: token }] },
+				}),
+				token,
+			),
+		).toBe(true);
+		expect(
+			ompToolsExecutionEvidence(
+				JSON.stringify({
+					type: "tool_execution_end",
+					toolCallId: "1",
+					toolName: "bash",
+					isError: true,
+					result: { content: [{ type: "text", text: token }] },
+				}),
+				token,
+			),
+		).toBe(false);
+		expect(
+			ompToolsExecutionEvidence(
+				JSON.stringify({
+					type: "message_end",
+					message: {
+						role: "toolResult",
+						toolName: "Shell",
+						isError: false,
+						content: [{ type: "text", text: `${token}\n` }],
+					},
+				}),
+				token,
+			),
+		).toBe(true);
 	});
 });

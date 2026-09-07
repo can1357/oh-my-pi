@@ -28,9 +28,6 @@ export type GrokbotSandToolPolicy = {
 	reason?: string;
 };
 
-/** Extra live-id tokens to pick one openai-family row each (sol already listed). */
-const OPENAI_SLICE_TOKENS = ["luna", "terra", "sol"] as const;
-
 /** Sand / Auto routers — product wire ids, not versioned model lines. */
 function isGrokbotRouterId(id: string): boolean {
 	const base = id.split("[")[0]?.trim().toLowerCase() ?? "";
@@ -151,8 +148,10 @@ export function selectGrokbotMatrixIds(liveIds: readonly string[], slice: "repre
 		if (isGrokbotRouterId(id)) take(id);
 	}
 
-	// One live row per classifyModel class/family so renamed catalog ids still gate.
-	const byClassFamily = new Map<string, string[]>();
+	// One live row per classifyModel identity bucket so renamed catalog ids still gate.
+	// OpenAI peers that share class/family but differ by revision (luna/terra/sol
+	// generations) each keep a sample — still taxonomy facts, never id substrings.
+	const byIdentity = new Map<string, string[]>();
 	const unknown: string[] = [];
 	for (const id of liveIds) {
 		if (seen.has(id)) continue;
@@ -161,24 +160,17 @@ export function selectGrokbotMatrixIds(liveIds: readonly string[], slice: "repre
 			unknown.push(id);
 			continue;
 		}
-		const key = `${identity.class}:${identity.family ?? "_"}`;
-		const list = byClassFamily.get(key) ?? [];
+		const key =
+			identity.class === "openai"
+				? `${identity.class}:${identity.family ?? "_"}:${identity.revision ?? "_"}`
+				: `${identity.class}:${identity.family ?? "_"}`;
+		const list = byIdentity.get(key) ?? [];
 		list.push(id);
-		byClassFamily.set(key, list);
+		byIdentity.set(key, list);
 	}
-	for (const ids of byClassFamily.values()) {
+	for (const ids of byIdentity.values()) {
 		const sorted = [...ids].sort(preferMatrixId);
 		take(sorted[0]!);
-	}
-	// OpenAI deployments also keep one luna/terra/sol peer when present.
-	for (const token of OPENAI_SLICE_TOKENS) {
-		const match = liveIds.find(
-			id =>
-				!seen.has(id) &&
-				id.toLowerCase().includes(token) &&
-				classifyModel("grokbot", id, { lenient: true }).class === "openai",
-		);
-		if (match) take(match);
 	}
 	// One unclassified product row (e.g. composer) — shortest non-router.
 	const unknownSorted = unknown.filter(id => !isGrokbotRouterId(id)).sort(preferMatrixId);
