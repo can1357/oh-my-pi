@@ -1,14 +1,602 @@
+// ../coding-agent/src/tools/browser/relay/attachment-guard.ts
+class AttachmentGuard {
+  options;
+  #attached = new Set;
+  #targetedRetries = new Map;
+  #disconnected = false;
+  #pending = null;
+  constructor(options) {
+    this.options = options;
+  }
+  track(tabId, preserveRetry = false) {
+    this.#attached.add(tabId);
+    if (!preserveRetry)
+      this.#cancelRetry(tabId);
+    this.#scheduleSweep();
+  }
+  untrack(tabId) {
+    this.#attached.delete(tabId);
+    this.#cancelRetry(tabId);
+    if (this.#attached.size === 0)
+      this.#cancel();
+  }
+  #cancelRetry(tabId) {
+    const retry = this.#targetedRetries.get(tabId);
+    if (retry !== undefined) {
+      this.options.clearTimer(retry);
+      this.#targetedRetries.delete(tabId);
+    }
+  }
+  retry(tabId, isFresh = () => true) {
+    this.#attached.add(tabId);
+    if (this.#targetedRetries.has(tabId))
+      return;
+    const pending = this.options.setTimer(() => {
+      this.#targetedRetries.delete(tabId);
+      if (!isFresh())
+        return;
+      if (!this.#attached.delete(tabId))
+        return;
+      this.options.detachAll([tabId], "retry");
+    }, this.options.graceMs);
+    this.#targetedRetries.set(tabId, pending);
+  }
+  attachedTabIds() {
+    return [...this.#attached];
+  }
+  onConnected() {
+    this.#disconnected = false;
+    this.#cancel();
+  }
+  onDisconnected() {
+    this.#disconnected = true;
+    this.#scheduleSweep();
+  }
+  onSuspend() {
+    this.#cancel();
+    this.#sweep();
+  }
+  #cancel() {
+    if (this.#pending === null)
+      return;
+    this.options.clearTimer(this.#pending);
+    this.#pending = null;
+  }
+  #scheduleSweep() {
+    if (!this.#disconnected || this.#pending !== null || this.#attached.size === 0)
+      return;
+    this.#pending = this.options.setTimer(() => {
+      this.#pending = null;
+      this.#sweep();
+    }, this.options.graceMs);
+  }
+  #sweep() {
+    if (this.#attached.size === 0)
+      return;
+    const tabIds = [...this.#attached];
+    this.#attached.clear();
+    for (const retry of this.#targetedRetries.values())
+      this.options.clearTimer(retry);
+    this.#targetedRetries.clear();
+    this.options.detachAll(tabIds, "sweep");
+  }
+}
+
+// extension/attachment-state.ts
+function noteAttachmentStateChange(epochs, tabId) {
+  epochs.set(tabId, (epochs.get(tabId) ?? 0) + 1);
+}
+function noteDebuggerDetach(attachmentEpochs, loaderGenerations, tabId) {
+  noteAttachmentStateChange(attachmentEpochs, tabId);
+  noteAttachmentStateChange(loaderGenerations, tabId);
+}
+function captureRecoveryLoaderNavigation(loaderIds, loaderGenerations, tabId, method, params) {
+  if (method !== "Page.frameNavigated" || !params || typeof params !== "object")
+    return false;
+  const frame = params.frame;
+  if (!frame || typeof frame !== "object")
+    return false;
+  const { loaderId, parentId } = frame;
+  if (parentId !== undefined || typeof loaderId !== "string")
+    return false;
+  noteAttachmentStateChange(loaderGenerations, tabId);
+  loaderIds.set(tabId, loaderId);
+  return true;
+}
+async function detachWithRecoveryLoaderObservation(loaderIds, loaderGenerations, tabId, enablePage, readMainFrameLoaderId, detach, onObservationStarted, onObservedDetachSuccess) {
+  const loaderGeneration = loaderGenerations.get(tabId) ?? 0;
+  let observingPage = false;
+  try {
+    await enablePage();
+    observingPage = true;
+  } catch {}
+  if (observingPage) {
+    try {
+      await onObservationStarted();
+    } catch {}
+  }
+  const loaderId = await readMainFrameLoaderId().catch(() => {
+    return;
+  });
+  if (loaderGeneration === loaderGenerations.get(tabId) && typeof loaderId === "string")
+    loaderIds.set(tabId, loaderId);
+  await detach();
+  if (observingPage)
+    await onObservedDetachSuccess();
+}
+function isAttachmentStateCurrent(epochs, tabId, epoch) {
+  return (epochs.get(tabId) ?? 0) === epoch;
+}
+function consumeRelayInitiatedDetach(markedTabs, tabId, reason) {
+  const relayMarked = markedTabs.delete(tabId);
+  const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
+  return relayMarked && !userDetach;
+}
+function consumeGuardInitiatedDetach(guardMarkedTabs, relayMarkedTabs, tabId, reason) {
+  const guardMarked = guardMarkedTabs.delete(tabId);
+  const userDetach = reason === "canceled_by_user" || reason === "replaced_with_devtools";
+  if (!guardMarked || userDetach)
+    return false;
+  relayMarkedTabs.delete(tabId);
+  return true;
+}
+function noteRelayDetachOutcome(completedTabs, tabId, relayInitiated) {
+  if (relayInitiated)
+    completedTabs.add(tabId);
+  else
+    completedTabs.delete(tabId);
+}
+async function detachThenBestEffortCleanup(detach, cleanup) {
+  await detach();
+  await cleanup().catch(() => {});
+}
+function shouldRetrackAfterDetachFailure(targets, tabId) {
+  return targets === null || targets.some((target) => target.tabId === tabId && target.attached);
+}
+function serializeRecoverableStateUpdate(previousUpdate, immediateWrite, isCurrent, persistCurrent) {
+  return Promise.allSettled([previousUpdate, immediateWrite]).then(async () => {
+    if (!isCurrent())
+      return;
+    await persistCurrent();
+  });
+}
+function retryFailedStateUpdate(failedUpdate, currentUpdate, createRetry) {
+  return failedUpdate === currentUpdate ? createRetry() : null;
+}
+function restoreRecoverableState(target, storedIds, mutatedTabIds) {
+  if (!Array.isArray(storedIds))
+    return;
+  for (const id of storedIds) {
+    if (typeof id === "number" && !mutatedTabIds.has(id))
+      target.add(id);
+  }
+}
+function extensionOwnedAttachedTabIds(targets, recoverableTabIds) {
+  return targets.filter((target) => target.attached && target.tabId !== undefined && recoverableTabIds.has(target.tabId)).map((target) => target.tabId);
+}
+function requireRecoveryStateLoaded(loaded) {
+  if (!loaded)
+    throw new Error("browser relay recovery state failed to load");
+}
+function createRetryableLoader(load) {
+  let pending = null;
+  return () => {
+    if (pending)
+      return pending;
+    const attempt = load().catch((error) => {
+      if (pending === attempt)
+        pending = null;
+      throw error;
+    });
+    pending = attempt;
+    return attempt;
+  };
+}
+function snapshotAttachmentState(epochs, tabIds) {
+  const snapshot = new Map;
+  for (const tabId of tabIds)
+    snapshot.set(tabId, epochs.get(tabId) ?? 0);
+  return snapshot;
+}
+function filterFreshAttachmentState(epochs, snapshot, tabIds) {
+  return tabIds.filter((tabId) => isAttachmentStateCurrent(epochs, tabId, snapshot.get(tabId) ?? 0));
+}
+
+// extension/orphan-sweep.ts
+function orphanSweepSeesRelayDisconnected(state) {
+  return state.forceDisconnected === true || state.socketReadyState !== state.openReadyState;
+}
+function nextOrphanSweepDeadline(state) {
+  if (!state.disconnected || !state.hasTrackedAttachments)
+    return null;
+  if (state.existingDeadlineMs !== null)
+    return state.existingDeadlineMs;
+  return state.nowMs + state.graceMs;
+}
+function shouldRunOrphanSweep(state) {
+  return state.deadlineMs !== null && state.disconnected && state.hasTrackedAttachments && state.nowMs >= state.deadlineMs;
+}
+function shouldProceedWithOrphanSweep(state) {
+  return state.disconnected && state.hasTrackedAttachments && !state.connectionReplaced;
+}
+async function runAfterStartupReconciliation(reconcile, runSweep) {
+  await reconcile();
+  await runSweep();
+}
+function orphanSweepAlarmDelayMinutes(deadlineMs, nowMs) {
+  return Math.max((deadlineMs - nowMs) / 60000, 0.01);
+}
+function restoreOrphanSweepDeadline(storedDeadline, isCurrent) {
+  if (!isCurrent)
+    return;
+  return typeof storedDeadline === "number" && Number.isFinite(storedDeadline) ? storedDeadline : null;
+}
+function seedOrphanSweepDeadline(currentDeadlineMs, scheduledTime, generation) {
+  if (currentDeadlineMs !== null) {
+    return { deadlineMs: currentDeadlineMs, generation };
+  }
+  return { deadlineMs: scheduledTime, generation: generation + 1 };
+}
+function serializeOrphanSweepDeadlineUpdate(previousUpdate, alarmUpdate, isCurrent, persist, repairStaleAlarm) {
+  return previousUpdate.catch(() => {}).then(async () => {
+    await alarmUpdate.catch(() => {});
+    if (!isCurrent()) {
+      repairStaleAlarm();
+      return;
+    }
+    await persist();
+  });
+}
+
+// extension/pending-attaches.ts
+class PendingAttaches {
+  #byTab = new Map;
+  begin(tabId) {
+    const token = { canceled: false, canceledAtEpoch: null };
+    const pending = this.#byTab.get(tabId) ?? new Set;
+    pending.add(token);
+    this.#byTab.set(tabId, pending);
+    return token;
+  }
+  finish(tabId, token) {
+    const pending = this.#byTab.get(tabId);
+    if (!pending)
+      return;
+    pending.delete(token);
+    if (pending.size === 0)
+      this.#byTab.delete(tabId);
+  }
+  cancel(tabId, attachmentEpoch) {
+    for (const token of this.#byTab.get(tabId) ?? []) {
+      token.canceled = true;
+      token.canceledAtEpoch = attachmentEpoch;
+    }
+  }
+  has(tabId) {
+    return (this.#byTab.get(tabId)?.size ?? 0) > 0;
+  }
+}
+
+// extension/pending-ops.ts
+async function afterPendingOperationsSettle(operations, callback) {
+  await Promise.allSettled(operations);
+  return callback();
+}
+async function snapshotAfterPendingOperationsSettle(getGeneration, getPendingOperations, takeSnapshot) {
+  for (;; ) {
+    const generation = getGeneration();
+    await Promise.allSettled(getPendingOperations());
+    if (getGeneration() !== generation)
+      continue;
+    const snapshot = await takeSnapshot();
+    if (getGeneration() === generation)
+      return snapshot;
+  }
+}
+
 // extension/background.ts
 var DEFAULT_PORT = 9224;
 var PING_INTERVAL_MS = 20000;
 var RECONNECT_MIN_MS = 1000;
 var RECONNECT_MAX_MS = 1e4;
+var ORPHAN_GRACE_MS = 30000;
+var KEEPALIVE_ALARM = "omp-relay-keepalive";
+var ORPHAN_SWEEP_ALARM = "omp-relay-orphan-sweep";
+var ORPHAN_SWEEP_DEADLINE_KEY = "ompOrphanSweepDeadlineMs";
 var ws = null;
+var helloDeliveredSocket = null;
 var reconnectDelay = RECONNECT_MIN_MS;
 var pingTimer = null;
+var pendingAttaches = new Set;
+var pendingDetaches = new Set;
+var pendingOperationGeneration = 0;
+var pendingAttachOperations = new PendingAttaches;
+var guardDetachments = new Set;
+var attachmentStateEpochs = new Map;
 var relayInitiatedDetachTabs = new Set;
+var relayDetachedTabIds = new Set;
+var RECOVERABLE_TAB_IDS_KEY = "ompRecoverableTabIds";
+var LIVE_OWNED_TAB_IDS_KEY = "ompLiveOwnedTabIds";
+var RELAY_DETACHED_TAB_IDS_KEY = "ompRelayDetachedTabIds";
+var RECOVERY_LOADER_IDS_KEY = "ompRecoveryLoaderIds";
+var FRESH_ROOT_REQUIRED_TAB_IDS_KEY = "ompFreshRootRequiredTabIds";
+var recoverableTabIds = new Set;
+var liveOwnedTabIds = new Set;
+var recoveryLoaderIds = new Map;
+var freshRootRequiredTabIds = new Set;
+var recoveryLoaderGenerations = new Map;
+var recoverableUpdateGeneration = 0;
+var recoverableStartupMutations = new Set;
+var orphanSweepDeadlineMs = null;
+var connectionGeneration = 0;
+var orphanSweepDeadlineGeneration = 0;
+var loadRecoverableState = createRetryableLoader(() => {
+  const loaderGenerations = new Map(recoveryLoaderGenerations);
+  return chrome.storage.session.get({
+    [RECOVERABLE_TAB_IDS_KEY]: [],
+    [LIVE_OWNED_TAB_IDS_KEY]: [],
+    [RELAY_DETACHED_TAB_IDS_KEY]: [],
+    [RECOVERY_LOADER_IDS_KEY]: {},
+    [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [],
+    [ORPHAN_SWEEP_DEADLINE_KEY]: null
+  }).then((stored) => {
+    const ids = stored[RECOVERABLE_TAB_IDS_KEY];
+    restoreRecoverableState(recoverableTabIds, ids, recoverableStartupMutations);
+    restoreRecoverableState(liveOwnedTabIds, stored[LIVE_OWNED_TAB_IDS_KEY], recoverableStartupMutations);
+    restoreRecoverableState(relayDetachedTabIds, stored[RELAY_DETACHED_TAB_IDS_KEY], recoverableStartupMutations);
+    restoreRecoverableState(freshRootRequiredTabIds, stored[FRESH_ROOT_REQUIRED_TAB_IDS_KEY], recoverableStartupMutations);
+    recoverableStartupMutations.clear();
+    const storedLoaderIds = stored[RECOVERY_LOADER_IDS_KEY];
+    if (storedLoaderIds && typeof storedLoaderIds === "object") {
+      for (const [tabId, loaderId] of Object.entries(storedLoaderIds)) {
+        const parsed = Number(tabId);
+        if (Number.isInteger(parsed) && typeof loaderId === "string" && (recoveryLoaderGenerations.get(parsed) ?? 0) === (loaderGenerations.get(parsed) ?? 0))
+          recoveryLoaderIds.set(parsed, loaderId);
+      }
+    }
+    const deadline = restoreOrphanSweepDeadline(stored[ORPHAN_SWEEP_DEADLINE_KEY], orphanSweepDeadlineGeneration === 0);
+    if (deadline !== undefined)
+      orphanSweepDeadlineMs = deadline;
+    return true;
+  });
+});
+var initialRecoverableReady = loadRecoverableState().then(() => {});
+var recoverableUpdates = initialRecoverableReady.catch(() => {});
+var orphanSweepDeadlineUpdates = initialRecoverableReady.catch(() => {});
+async function flushRecoverableUpdates() {
+  const failedUpdate = recoverableUpdates;
+  try {
+    await failedUpdate;
+  } catch {
+    const retry = retryFailedStateUpdate(failedUpdate, recoverableUpdates, () => {
+      const generation = ++recoverableUpdateGeneration;
+      return serializeRecoverableStateUpdate(Promise.resolve(), Promise.resolve(), () => generation === recoverableUpdateGeneration, () => persistRecoveryState());
+    });
+    if (retry === null) {
+      await recoverableUpdates;
+      return;
+    }
+    recoverableUpdates = retry;
+    await retry;
+  }
+}
+function trackPendingDetach(promise) {
+  pendingOperationGeneration++;
+  invalidateHelloRefresh();
+  const tracked = promise.finally(() => {
+    pendingDetaches.delete(tracked);
+  });
+  pendingDetaches.add(tracked);
+  return tracked;
+}
+function updateRecoverable(tabIds, update) {
+  const affectedTabIds = tabIds();
+  for (const tabId of affectedTabIds)
+    recoverableStartupMutations.add(tabId);
+  update(affectedTabIds);
+  const generation = ++recoverableUpdateGeneration;
+  const loadCurrent = async () => {
+    await loadRecoverableState();
+  };
+  const immediateWrite = loadCurrent().then(() => chrome.storage.session.set({
+    [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+    [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+    [RELAY_DETACHED_TAB_IDS_KEY]: [...relayDetachedTabIds],
+    [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds]
+  })).catch(() => {});
+  recoverableUpdates = serializeRecoverableStateUpdate(recoverableUpdates, immediateWrite, () => generation === recoverableUpdateGeneration, async () => {
+    await loadCurrent();
+    await persistRecoveryState();
+  });
+  return recoverableUpdates;
+}
+function persistRecoveryState() {
+  return chrome.storage.session.set({
+    [RECOVERABLE_TAB_IDS_KEY]: [...recoverableTabIds],
+    [LIVE_OWNED_TAB_IDS_KEY]: [...liveOwnedTabIds],
+    [RELAY_DETACHED_TAB_IDS_KEY]: [...relayDetachedTabIds],
+    [RECOVERY_LOADER_IDS_KEY]: Object.fromEntries(recoveryLoaderIds),
+    [FRESH_ROOT_REQUIRED_TAB_IDS_KEY]: [...freshRootRequiredTabIds]
+  });
+}
+function persistRecoveryLoaderIds() {
+  const update = recoverableUpdates.catch(() => {}).then(persistRecoveryState);
+  recoverableUpdates = update;
+  return update;
+}
+function rememberRecoverable(freshTabIds) {
+  return updateRecoverable(freshTabIds, (tabIds) => {
+    for (const tabId of tabIds) {
+      recoverableTabIds.add(tabId);
+      liveOwnedTabIds.add(tabId);
+    }
+  });
+}
+function forgetRecoverable(tabId, preserveRelayDetach = false) {
+  return updateRecoverable(() => [tabId], () => {
+    recoverableTabIds.delete(tabId);
+    liveOwnedTabIds.delete(tabId);
+    recoveryLoaderIds.delete(tabId);
+    freshRootRequiredTabIds.delete(tabId);
+    if (!preserveRelayDetach)
+      relayDetachedTabIds.delete(tabId);
+  });
+}
+function requireFreshRoot(tabId) {
+  return updateRecoverable(() => [tabId], () => {
+    freshRootRequiredTabIds.add(tabId);
+  });
+}
+function clearFreshRootRequirement(tabId) {
+  return updateRecoverable(() => [tabId], () => {
+    freshRootRequiredTabIds.delete(tabId);
+  });
+}
+function forgetLiveOwnership(tabId) {
+  return updateRecoverable(() => [tabId], () => {
+    liveOwnedTabIds.delete(tabId);
+  });
+}
+function forgetRelayDetach(tabId) {
+  return updateRecoverable(() => [tabId], () => {
+    relayDetachedTabIds.delete(tabId);
+  });
+}
+async function setOrphanSweepDeadline(deadlineMs) {
+  const generation = ++orphanSweepDeadlineGeneration;
+  orphanSweepDeadlineMs = deadlineMs;
+  let alarmUpdate = Promise.resolve();
+  if (deadlineMs === null) {
+    alarmUpdate = chrome.alarms.clear(ORPHAN_SWEEP_ALARM);
+  } else {
+    chrome.alarms.create(ORPHAN_SWEEP_ALARM, {
+      delayInMinutes: orphanSweepAlarmDelayMinutes(deadlineMs, Date.now())
+    });
+  }
+  const update = serializeOrphanSweepDeadlineUpdate(orphanSweepDeadlineUpdates, alarmUpdate, () => generation === orphanSweepDeadlineGeneration, () => chrome.storage.session.set({
+    [ORPHAN_SWEEP_DEADLINE_KEY]: deadlineMs
+  }), () => {
+    if (orphanSweepDeadlineMs !== null) {
+      chrome.alarms.create(ORPHAN_SWEEP_ALARM, {
+        delayInMinutes: orphanSweepAlarmDelayMinutes(orphanSweepDeadlineMs, Date.now())
+      });
+    }
+  });
+  orphanSweepDeadlineUpdates = update.catch(() => {});
+  await update;
+}
+async function maybeScheduleOrphanSweep(forceDisconnected = false) {
+  requireRecoveryStateLoaded(await loadRecoverableState());
+  await flushRecoverableUpdates();
+  const nextDeadlineMs = computeNextOrphanSweepDeadline(forceDisconnected);
+  await setOrphanSweepDeadline(nextDeadlineMs);
+}
+function relayInitializedReadyState() {
+  if (ws !== null && ws === helloDeliveredSocket)
+    return ws.readyState;
+  return null;
+}
+function computeNextOrphanSweepDeadline(forceDisconnected) {
+  const disconnected = orphanSweepSeesRelayDisconnected({
+    socketReadyState: relayInitializedReadyState(),
+    openReadyState: WebSocket.OPEN,
+    forceDisconnected
+  });
+  return nextOrphanSweepDeadline({
+    nowMs: Date.now(),
+    graceMs: ORPHAN_GRACE_MS,
+    disconnected,
+    hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
+    existingDeadlineMs: orphanSweepDeadlineMs
+  });
+}
+function scheduleOrphanSweepBeforeSuspend() {
+  const nextDeadlineMs = computeNextOrphanSweepDeadline(true);
+  setOrphanSweepDeadline(nextDeadlineMs);
+}
+async function maybeRunOrphanSweep(alarmScheduledTime) {
+  if (orphanSweepDeadlineMs === null && typeof alarmScheduledTime === "number" && Number.isFinite(alarmScheduledTime))
+    orphanSweepDeadlineMs = alarmScheduledTime;
+  if (!shouldRunOrphanSweep({
+    nowMs: Date.now(),
+    deadlineMs: orphanSweepDeadlineMs,
+    disconnected: orphanSweepSeesRelayDisconnected({
+      socketReadyState: relayInitializedReadyState(),
+      openReadyState: WebSocket.OPEN
+    }),
+    hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0
+  })) {
+    await maybeScheduleOrphanSweep();
+    return;
+  }
+  const sweepGeneration = connectionGeneration;
+  await setOrphanSweepDeadline(null);
+  if (!shouldProceedWithOrphanSweep({
+    disconnected: orphanSweepSeesRelayDisconnected({
+      socketReadyState: relayInitializedReadyState(),
+      openReadyState: WebSocket.OPEN
+    }),
+    hasTrackedAttachments: attachmentGuard.attachedTabIds().length > 0,
+    connectionReplaced: connectionGeneration !== sweepGeneration
+  })) {
+    await maybeScheduleOrphanSweep();
+    return;
+  }
+  attachmentGuard.onSuspend();
+}
+var attachmentGuard = new AttachmentGuard({
+  graceMs: ORPHAN_GRACE_MS,
+  setTimer: (fn, ms) => setTimeout(fn, ms),
+  clearTimer: (handle) => clearTimeout(handle),
+  detachAll: (tabIds, source) => {
+    for (const tabId of tabIds) {
+      noteAttachmentStateChange(recoveryLoaderGenerations, tabId);
+      const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
+      guardDetachments.add(tabId);
+      recoveryLoaderIds.delete(tabId);
+      trackPendingDetach(detachWithRecoveryLoaderObservation(recoveryLoaderIds, recoveryLoaderGenerations, tabId, () => chrome.debugger.sendCommand({ tabId }, "Page.enable"), async () => {
+        const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree");
+        const loaderId = frameTree?.frameTree?.frame?.loaderId;
+        return typeof loaderId === "string" ? loaderId : undefined;
+      }, () => chrome.debugger.detach({ tabId }), () => requireFreshRoot(tabId), () => clearFreshRootRequirement(tabId)).catch(async () => {
+        guardDetachments.delete(tabId);
+        const targets = await chrome.debugger.getTargets().catch(() => null);
+        if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {
+          const isCurrent = () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch;
+          try {
+            await trackAttachments([tabId], isCurrent);
+            if (source === "retry" && isCurrent())
+              attachmentGuard.retry(tabId, isCurrent);
+          } catch {
+            if (!isCurrent())
+              return;
+            if (source === "retry") {
+              attachmentGuard.retry(tabId, isCurrent);
+            } else {
+              attachmentGuard.onDisconnected();
+              attachmentGuard.track(tabId);
+              maybeScheduleOrphanSweep(true);
+            }
+          }
+        }
+      }));
+    }
+    afterPendingOperationsSettle([...pendingDetaches], persistRecoveryLoaderIds);
+  }
+});
+async function trackAttachments(tabIds, isFresh = () => true, attachmentState = snapshotAttachmentState(attachmentStateEpochs, tabIds), preserveRetry = false) {
+  if (tabIds.length === 0)
+    return;
+  const freshTabIds = () => isFresh() ? filterFreshAttachmentState(attachmentStateEpochs, attachmentState, tabIds) : [];
+  await rememberRecoverable(freshTabIds);
+  for (const tabId of freshTabIds())
+    attachmentGuard.track(tabId, preserveRetry);
+}
 async function loadSettings() {
-  const stored = await chrome.storage.local.get({ port: DEFAULT_PORT, token: "" });
+  const stored = await chrome.storage.local.get({
+    port: DEFAULT_PORT,
+    token: ""
+  });
   const port = Number(stored.port);
   return {
     port: Number.isInteger(port) && port > 0 && port <= 65535 ? port : DEFAULT_PORT,
@@ -93,45 +681,170 @@ function post(msg) {
 async function setBadge(connected) {
   try {
     await chrome.action.setBadgeText({ text: connected ? "on" : "off" });
-    await chrome.action.setBadgeBackgroundColor({ color: connected ? "#1a7f37" : "#8b8b8b" });
+    await chrome.action.setBadgeBackgroundColor({
+      color: connected ? "#1a7f37" : "#8b8b8b"
+    });
   } catch {}
 }
+var helloRefresh = null;
+function refreshHello(onSent) {
+  const socket = ws;
+  if (!socket || socket.readyState !== WebSocket.OPEN)
+    return;
+  if (helloRefresh?.socket === socket) {
+    helloRefresh.dirty = true;
+    if (onSent)
+      helloRefresh.afterSend = onSent;
+    return;
+  }
+  const startRefresh = (afterSend) => {
+    const entry = {
+      socket,
+      dirty: false,
+      done: Promise.resolve(),
+      afterSend
+    };
+    entry.done = buildHello().then(async (hello) => {
+      if (entry.dirty)
+        return;
+      await trackAttachments(hello.attachedTabIds, () => helloRefresh === entry && !entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN);
+      if (entry.dirty)
+        return;
+      if (ws === socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify(hello));
+        const done = entry.afterSend;
+        entry.afterSend = null;
+        done?.();
+      }
+    }).catch(() => {
+      if (ws === socket && socket.readyState === WebSocket.OPEN) {
+        socket.close();
+      }
+    }).finally(() => {
+      if (helloRefresh !== entry)
+        return;
+      if (entry.dirty && ws === socket && socket.readyState === WebSocket.OPEN) {
+        startRefresh(entry.afterSend);
+      } else {
+        helloRefresh = null;
+      }
+    });
+    helloRefresh = entry;
+  };
+  startRefresh(onSent ?? null);
+}
+function invalidateHelloRefresh() {
+  if (helloRefresh)
+    helloRefresh.dirty = true;
+}
 async function buildHello() {
-  const [tabs, targets] = await Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]);
+  requireRecoveryStateLoaded(await loadRecoverableState());
+  await flushRecoverableUpdates();
+  const [tabs, targets] = await snapshotAfterPendingOperationsSettle(() => pendingOperationGeneration, () => [...pendingAttaches, ...pendingDetaches], () => Promise.all([chrome.tabs.query({}), chrome.debugger.getTargets()]));
   const snapshots = [];
   for (const tab of tabs) {
     const snap = snapshot(tab);
     if (snap)
       snapshots.push(snap);
   }
-  const attachedTabIds = [];
-  for (const target of targets) {
-    if (target.attached && target.tabId !== undefined)
-      attachedTabIds.push(target.tabId);
-  }
+  const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
+  await flushRecoverableUpdates();
   const versionMatch = /Chrome\/[\d.]+/.exec(navigator.userAgent);
+  const hardwareConcurrency = Number.isInteger(navigator.hardwareConcurrency) && navigator.hardwareConcurrency > 0 ? navigator.hardwareConcurrency : undefined;
   return {
     t: "hello",
     userAgent: navigator.userAgent,
     browserVersion: versionMatch?.[0] ?? "Chrome/unknown",
+    hardwareConcurrency,
     tabs: snapshots,
-    attachedTabIds
+    attachedTabIds,
+    recoverableTabIds: [...recoverableTabIds],
+    relayDetachedTabIds: [...relayDetachedTabIds],
+    recoveryLoaderIds: Object.fromEntries([...recoveryLoaderIds].map(([tabId, loaderId]) => [
+      String(tabId),
+      loaderId
+    ])),
+    freshRootRequiredTabIds: [...freshRootRequiredTabIds]
   };
 }
-async function runRpc(msg) {
+async function attachTab(tabId, socket) {
+  const operation = pendingAttachOperations.begin(tabId);
+  const pending = attachTabOperation(tabId, socket, operation);
+  pendingOperationGeneration++;
+  invalidateHelloRefresh();
+  pendingAttaches.add(pending);
+  try {
+    await pending;
+  } finally {
+    pendingAttaches.delete(pending);
+    pendingAttachOperations.finish(tabId, operation);
+  }
+}
+async function attachTabOperation(tabId, socket, operation) {
+  await chrome.debugger.attach({ tabId }, "1.3");
+  freshRootRequiredTabIds.delete(tabId);
+  noteAttachmentStateChange(attachmentStateEpochs, tabId);
+  const attachmentEpoch = attachmentStateEpochs.get(tabId) ?? 0;
+  if (ws !== socket) {
+    guardDetachments.add(tabId);
+    await trackPendingDetach(chrome.debugger.detach({ tabId }).catch(async () => {
+      guardDetachments.delete(tabId);
+      const targets = await chrome.debugger.getTargets().catch(() => null);
+      if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {
+        try {
+          await trackAttachments([tabId], () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch);
+        } catch {
+          if ((attachmentStateEpochs.get(tabId) ?? 0) !== attachmentEpoch)
+            return;
+          attachmentGuard.retry(tabId, () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch);
+        }
+      }
+    }));
+    return;
+  }
+  try {
+    await trackAttachments([tabId]);
+  } catch (error) {
+    guardDetachments.add(tabId);
+    await trackPendingDetach(chrome.debugger.detach({ tabId })).catch(async () => {
+      guardDetachments.delete(tabId);
+      const targets = await chrome.debugger.getTargets().catch(() => null);
+      if ((attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch && shouldRetrackAfterDetachFailure(targets, tabId)) {
+        attachmentGuard.retry(tabId, () => (attachmentStateEpochs.get(tabId) ?? 0) === attachmentEpoch);
+      }
+    });
+    throw error;
+  }
+  if (operation.canceled) {
+    if (operation.canceledAtEpoch !== null && isAttachmentStateCurrent(attachmentStateEpochs, tabId, operation.canceledAtEpoch)) {
+      attachmentGuard.untrack(tabId);
+      await forgetRecoverable(tabId);
+    }
+    throw new Error("debugger attachment detached before attach completed");
+  }
+  await forgetRelayDetach(tabId);
+}
+async function runRpc(msg, socket) {
   switch (msg.op) {
     case "attach":
-      await chrome.debugger.attach({ tabId: msg.tabId }, "1.3");
+      await attachTab(msg.tabId, socket);
       return {};
     case "detach":
       relayInitiatedDetachTabs.add(msg.tabId);
       try {
-        await chrome.debugger.detach({ tabId: msg.tabId });
+        await detachThenBestEffortCleanup(() => trackPendingDetach(chrome.debugger.detach({ tabId: msg.tabId })), async () => {
+          attachmentGuard.untrack(msg.tabId);
+          await forgetRecoverable(msg.tabId, true);
+        });
         return {};
       } catch (error) {
         relayInitiatedDetachTabs.delete(msg.tabId);
         throw error;
       }
+    case "forgetRecovery":
+      attachmentGuard.untrack(msg.tabId);
+      await forgetRecoverable(msg.tabId);
+      return {};
     case "send":
       return await chrome.debugger.sendCommand(msg.sessionId ? { tabId: msg.tabId, sessionId: msg.sessionId } : { tabId: msg.tabId }, msg.method, msg.params);
     case "createTab": {
@@ -157,7 +870,7 @@ async function runRpc(msg) {
       return {};
   }
 }
-function handleRelayMessage(raw) {
+function handleRelayMessage(socket, raw) {
   let msg;
   try {
     msg = JSON.parse(raw);
@@ -166,8 +879,24 @@ function handleRelayMessage(raw) {
   }
   if (msg.t === "pong")
     return;
-  runRpc(msg).then((result) => post({ t: "rpcResult", id: msg.id, ok: true, result })).catch((err) => {
-    post({ t: "rpcResult", id: msg.id, ok: false, error: err instanceof Error ? err.message : String(err) });
+  runRpc(msg, socket).then((result) => {
+    if (ws === socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        t: "rpcResult",
+        id: msg.id,
+        ok: true,
+        result
+      }));
+    }
+  }).catch((err) => {
+    if (ws === socket && socket.readyState === WebSocket.OPEN) {
+      socket.send(JSON.stringify({
+        t: "rpcResult",
+        id: msg.id,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err)
+      }));
+    }
   });
 }
 function scheduleReconnect() {
@@ -175,6 +904,25 @@ function scheduleReconnect() {
   reconnectDelay = Math.min(reconnectDelay * 2, RECONNECT_MAX_MS);
   setTimeout(() => void connect(), delay);
 }
+async function reconcileOrphans() {
+  await loadRecoverableState();
+  const attachmentState = snapshotAttachmentState(attachmentStateEpochs, [
+    ...attachmentStateEpochs.keys()
+  ]);
+  const targets = await chrome.debugger.getTargets();
+  const attachedTabIds = extensionOwnedAttachedTabIds(targets, liveOwnedTabIds);
+  await trackAttachments(attachedTabIds, () => true, attachmentState, true);
+  if (attachedTabIds.length > 0 && orphanSweepSeesRelayDisconnected({
+    socketReadyState: relayInitializedReadyState(),
+    openReadyState: WebSocket.OPEN
+  })) {
+    attachmentGuard.onDisconnected();
+    await maybeRunOrphanSweep();
+    return;
+  }
+  await setOrphanSweepDeadline(null);
+}
+var ensureStartupReconciled = createRetryableLoader(reconcileOrphans);
 async function connect() {
   if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING))
     return;
@@ -185,24 +933,52 @@ async function connect() {
   socket.onopen = () => {
     reconnectDelay = RECONNECT_MIN_MS;
     setBadge(true);
-    buildHello().then((hello) => post(hello));
+    refreshHello(() => {
+      helloDeliveredSocket = socket;
+      attachmentGuard.onConnected();
+      setOrphanSweepDeadline(null);
+    });
     clearInterval(pingTimer ?? undefined);
     pingTimer = setInterval(() => post({ t: "ping" }), PING_INTERVAL_MS);
   };
   socket.onmessage = (event) => {
     if (typeof event.data === "string")
-      handleRelayMessage(event.data);
+      handleRelayMessage(socket, event.data);
   };
   socket.onclose = () => {
     if (ws !== socket)
       return;
     ws = null;
+    if (helloDeliveredSocket === socket)
+      helloDeliveredSocket = null;
+    const captureLoaderIds = async () => {
+      await loadRecoverableState();
+      await Promise.all(attachmentGuard.attachedTabIds().map(async (tabId) => {
+        noteAttachmentStateChange(recoveryLoaderGenerations, tabId);
+        const loaderGeneration = recoveryLoaderGenerations.get(tabId) ?? 0;
+        const frameTree = await chrome.debugger.sendCommand({ tabId }, "Page.getFrameTree").catch(() => {
+          return;
+        });
+        if (loaderGeneration !== recoveryLoaderGenerations.get(tabId))
+          return;
+        recoveryLoaderIds.delete(tabId);
+        const loaderId = frameTree?.frameTree?.frame?.loaderId;
+        if (typeof loaderId === "string")
+          recoveryLoaderIds.set(tabId, loaderId);
+      }));
+      await persistRecoveryState();
+    };
+    const loaderUpdate = recoverableUpdates.catch(() => {}).then(captureLoaderIds);
+    recoverableUpdates = loaderUpdate;
+    connectionGeneration++;
     if (pingTimer !== null) {
       clearInterval(pingTimer);
       pingTimer = null;
     }
     setBadge(false);
     restoreGroups();
+    attachmentGuard.onDisconnected();
+    maybeScheduleOrphanSweep();
     scheduleReconnect();
   };
   socket.onerror = () => {
@@ -212,13 +988,34 @@ async function connect() {
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (source.tabId === undefined)
     return;
-  post({ t: "cdpEvent", tabId: source.tabId, sessionId: source.sessionId, method, params });
+  if (guardDetachments.has(source.tabId))
+    captureRecoveryLoaderNavigation(recoveryLoaderIds, recoveryLoaderGenerations, source.tabId, method, params);
+  post({
+    t: "cdpEvent",
+    tabId: source.tabId,
+    sessionId: source.sessionId,
+    method,
+    params
+  });
 });
 chrome.debugger.onDetach.addListener((source, reason) => {
   if (source.tabId === undefined)
     return;
-  const relayInitiated = relayInitiatedDetachTabs.delete(source.tabId);
+  noteDebuggerDetach(attachmentStateEpochs, recoveryLoaderGenerations, source.tabId);
+  forgetLiveOwnership(source.tabId);
+  attachmentGuard.untrack(source.tabId);
+  if (consumeGuardInitiatedDetach(guardDetachments, relayInitiatedDetachTabs, source.tabId, reason)) {
+    refreshHello();
+    return;
+  }
+  const relayInitiated = consumeRelayInitiatedDetach(relayInitiatedDetachTabs, source.tabId, reason);
+  noteRelayDetachOutcome(relayDetachedTabIds, source.tabId, relayInitiated);
+  if (!relayInitiated && pendingAttachOperations.has(source.tabId)) {
+    pendingAttachOperations.cancel(source.tabId, attachmentStateEpochs.get(source.tabId) ?? 0);
+  }
+  forgetRecoverable(source.tabId, relayInitiated);
   post({ t: "detached", tabId: source.tabId, reason, relayInitiated });
+  refreshHello();
 });
 chrome.tabs.onCreated.addListener((tab) => {
   const snap = snapshot(tab);
@@ -231,12 +1028,22 @@ chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
     post({ t: "tabUpdated", tab: snap });
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
+  forgetRecoverable(tabId);
   post({ t: "tabRemoved", tabId });
 });
-chrome.alarms.create("omp-relay-keepalive", { periodInMinutes: 0.5 });
+chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
 chrome.alarms.onAlarm.addListener((alarm) => {
-  if (alarm.name === "omp-relay-keepalive")
+  if (alarm.name === KEEPALIVE_ALARM) {
+    reconcileOrphans();
     connect();
+    return;
+  }
+  if (alarm.name === ORPHAN_SWEEP_ALARM) {
+    const seeded = seedOrphanSweepDeadline(orphanSweepDeadlineMs, alarm.scheduledTime, orphanSweepDeadlineGeneration);
+    orphanSweepDeadlineMs = seeded.deadlineMs;
+    orphanSweepDeadlineGeneration = seeded.generation;
+    runAfterStartupReconciliation(ensureStartupReconciled, () => maybeRunOrphanSweep(alarm.scheduledTime)).catch(() => {});
+  }
 });
 chrome.storage.onChanged.addListener((_changes, areaName) => {
   if (areaName !== "local")
@@ -245,6 +1052,16 @@ chrome.storage.onChanged.addListener((_changes, areaName) => {
   connect();
 });
 chrome.action.onClicked.addListener(() => void chrome.runtime.openOptionsPage());
-chrome.runtime.onInstalled.addListener(() => void connect());
-chrome.runtime.onStartup.addListener(() => void connect());
+chrome.runtime.onInstalled.addListener(() => {
+  reconcileOrphans();
+  connect();
+});
+chrome.runtime.onStartup.addListener(() => {
+  reconcileOrphans();
+  connect();
+});
+chrome.runtime.onSuspend.addListener(() => {
+  scheduleOrphanSweepBeforeSuspend();
+});
+ensureStartupReconciled().catch(() => {});
 connect();

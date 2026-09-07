@@ -48,24 +48,46 @@ declare const chrome: {
 	tabs: {
 		query(queryInfo: { url?: string; groupId?: number }): Promise<ChromeTab[]>;
 		get(tabId: number): Promise<ChromeTab>;
-		create(createProperties: { url?: string; active?: boolean }): Promise<ChromeTab>;
+		create(createProperties: {
+			url?: string;
+			active?: boolean;
+		}): Promise<ChromeTab>;
 		remove(tabId: number): Promise<void>;
-		update(tabId: number, updateProperties: { active?: boolean }): Promise<ChromeTab>;
+		update(
+			tabId: number,
+			updateProperties: { active?: boolean },
+		): Promise<ChromeTab>;
 		group(options: { tabIds: number[]; groupId?: number }): Promise<number>;
 		ungroup(tabIds: number[]): Promise<void>;
 		onCreated: ChromeEvent<(tab: ChromeTab) => void>;
-		onUpdated: ChromeEvent<(tabId: number, changeInfo: ChromeTabChangeInfo, tab: ChromeTab) => void>;
-		onRemoved: ChromeEvent<(tabId: number, removeInfo: { windowId: number }) => void>;
+		onUpdated: ChromeEvent<
+			(tabId: number, changeInfo: ChromeTabChangeInfo, tab: ChromeTab) => void
+		>;
+		onRemoved: ChromeEvent<
+			(tabId: number, removeInfo: { windowId: number }) => void
+		>;
 	};
 	tabGroups: {
-		query(queryInfo: { title?: string; windowId?: number }): Promise<Array<{ id: number; windowId: number; title?: string }>>;
-		update(groupId: number, updateProperties: { title?: string; color?: string; collapsed?: boolean }): Promise<unknown>;
+		query(queryInfo: {
+			title?: string;
+			windowId?: number;
+		}): Promise<Array<{ id: number; windowId: number; title?: string }>>;
+		update(
+			groupId: number,
+			updateProperties: { title?: string; color?: string; collapsed?: boolean },
+		): Promise<unknown>;
 	};
 	windows: {
-		update(windowId: number, updateInfo: { focused?: boolean }): Promise<unknown>;
+		update(
+			windowId: number,
+			updateInfo: { focused?: boolean },
+		): Promise<unknown>;
 	};
 	debugger: {
-		attach(target: ChromeDebuggerSession, requiredVersion: string): Promise<void>;
+		attach(
+			target: ChromeDebuggerSession,
+			requiredVersion: string,
+		): Promise<void>;
 		detach(target: ChromeDebuggerSession): Promise<void>;
 		sendCommand(
 			target: ChromeDebuggerSession,
@@ -73,8 +95,16 @@ declare const chrome: {
 			commandParams?: Record<string, unknown>,
 		): Promise<Record<string, unknown> | undefined>;
 		getTargets(): Promise<ChromeDebuggerTargetInfo[]>;
-		onEvent: ChromeEvent<(source: ChromeDebuggerSession, method: string, params?: Record<string, unknown>) => void>;
-		onDetach: ChromeEvent<(source: ChromeDebuggerSession, reason: string) => void>;
+		onEvent: ChromeEvent<
+			(
+				source: ChromeDebuggerSession,
+				method: string,
+				params?: Record<string, unknown>,
+			) => void
+		>;
+		onDetach: ChromeEvent<
+			(source: ChromeDebuggerSession, reason: string) => void
+		>;
 	};
 	storage: {
 		local: {
@@ -85,11 +115,17 @@ declare const chrome: {
 			get(keys: Record<string, unknown>): Promise<Record<string, unknown>>;
 			set(items: Record<string, unknown>): Promise<void>;
 		};
-		onChanged: ChromeEvent<(changes: Record<string, unknown>, areaName: string) => void>;
+		onChanged: ChromeEvent<
+			(changes: Record<string, unknown>, areaName: string) => void
+		>;
 	};
 	alarms: {
-		create(name: string, alarmInfo: { periodInMinutes?: number; delayInMinutes?: number }): void;
-		onAlarm: ChromeEvent<(alarm: { name: string }) => void>;
+		create(
+			name: string,
+			alarmInfo: { periodInMinutes?: number; delayInMinutes?: number },
+		): void;
+		clear(name: string): Promise<boolean>;
+		onAlarm: ChromeEvent<(alarm: { name: string; scheduledTime: number }) => void>;
 	};
 	action: {
 		setBadgeText(details: { text: string }): Promise<void>;
@@ -100,5 +136,6 @@ declare const chrome: {
 		openOptionsPage(): Promise<void>;
 		onInstalled: ChromeEvent<() => void>;
 		onStartup: ChromeEvent<() => void>;
+		onSuspend: ChromeEvent<() => void>;
 	};
 };
