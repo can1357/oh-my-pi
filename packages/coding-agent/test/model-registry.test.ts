@@ -1841,6 +1841,32 @@ describe("ModelRegistry", () => {
 			expect(registry.cappedExtendedContextWindow(unchanged!)).toBeUndefined();
 		});
 
+		test("every reported unlock is the window the setting actually restores", async () => {
+			// The metadata must describe the model that won composition, not
+			// whichever same-named catalog source a policy pass visited last. Flip
+			// the setting and check the promise against reality for the whole
+			// bundled catalog rather than one hand-picked pair.
+			await Settings.init({ inMemory: true });
+			settings.set("extendedContext", false);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			const promised = new Map<string, number>();
+			for (const model of registry.getAll()) {
+				const full = registry.cappedExtendedContextWindow(model);
+				if (full !== undefined) promised.set(`${model.provider}/${model.id}`, full);
+			}
+			// Guard: the loop below is vacuous if the bundled catalog caps nothing.
+			expect(promised.size).toBeGreaterThan(0);
+
+			settings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			for (const [selector, full] of promised) {
+				const [provider, ...idParts] = selector.split("/");
+				const restored = registry.find(provider!, idParts.join("/"));
+				expect({ selector, window: restored?.contextWindow }).toEqual({ selector, window: full });
+			}
+		});
+
 		test("an override pinned to the clamp value is not reported as a cap unlock", async () => {
 			// Boundary case of the same ordering: the override names exactly the
 			// window the clamp would have installed, so the final window matches

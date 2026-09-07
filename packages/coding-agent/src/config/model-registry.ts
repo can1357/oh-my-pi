@@ -273,15 +273,6 @@ export class ModelRegistry {
 	#ignoreLocalModelConfig: boolean;
 	#fetch: FetchImpl;
 	#settings: Settings | undefined;
-	// Long-context cap bookkeeping for every model `extendedContext: false`
-	// clamped, keyed `provider\0id`. `full` is the pre-clamp window, which is
-	// otherwise unrecoverable after the clamp and makes the shrink invisible: a
-	// 1M Codex window silently reports 272K and compaction starts firing.
-	// `clamped` is the window the clamp installed; later composition steps
-	// (`#applyModelOverrides`, provider guardrails) can overwrite it, so only a
-	// model still reporting `clamped` is capped by this setting today.
-	#cappedExtendedWindows: Map<string, { full: number; clamped: number }> = new Map();
-
 	#captureCatalogMetrics(models: readonly Model<Api>[], replace: boolean): void {
 		if (replace) {
 			const incoming = new CatalogMetricsIndex(models);
@@ -2136,8 +2127,6 @@ export class ModelRegistry {
 	}
 	#applyHardcodedModelPolicies(models: Model<Api>[]): Model<Api>[] {
 		const extendedContext = isExtendedContextEnabledFromSettings(this.#settings);
-		// Setting on: nothing is capped, so no model may keep advertising an unlock.
-		if (extendedContext) this.#cappedExtendedWindows.clear();
 		return models.map(model => {
 			if (extendedContext) {
 				const maximum = resolveMaxContextWindow(model);
@@ -2155,15 +2144,20 @@ export class ModelRegistry {
 			// this cap.
 			if (!extendedContext && model.provider !== "xai-oauth") {
 				const threshold = model.cost.longContext?.inputThreshold;
-				const key = `${model.provider}\u0000${model.id}`;
 				if (threshold !== undefined && model.contextWindow !== null && model.contextWindow > threshold) {
-					this.#cappedExtendedWindows.set(key, { full: model.contextWindow, clamped: threshold });
+					const full = model.contextWindow;
 					model = applyModelOverride(model, { contextWindow: threshold });
-				} else {
-					// A model can stop being capped mid-session (setting toggled,
-					// upstream window shrank); a stale entry would keep advertising
-					// an unlock that no longer applies.
-					this.#cappedExtendedWindows.delete(key);
+					// The pre-clamp window is otherwise unrecoverable, and the shrink is
+					// invisible without it: a 1M Codex window silently reports 272K and
+					// compaction starts firing. Record it on the model rather than in a
+					// `provider\u0000id` map — a bundled and a discovered model can share
+					// that key with different windows, and the map would keep whichever
+					// source was processed last instead of the one that wins composition.
+					// `maxContextWindow` is already what the `extendedContext: true` branch
+					// above reads, so this states exactly what the setting would restore.
+					if ((resolveMaxContextWindow(model) ?? 0) < full) {
+						model = { ...model, maxContextWindow: full };
+					}
 				}
 			}
 			if (model.provider === "ollama-cloud" && model.omitMaxOutputTokens !== true) {
@@ -2415,19 +2409,29 @@ export class ModelRegistry {
 	 * Context window `extendedContext: true` would unlock for this model, or
 	 * `undefined` when the setting is not currently capping it.
 	 *
-	 * Reports the pre-clamp window recorded by the long-context cap, and only
-	 * while the clamp is still what owns the model's final window. A smaller
-	 * window is not proof of that, and neither is a window equal to the clamp's:
-	 * an explicit per-model `contextWindow` override reapplies after the cap and
-	 * wins over it, whether it names 500K on a 1M model or exactly the 272K the
-	 * clamp would have installed. Both stay put when the setting flips, so
-	 * promising an unlock there would advertise a restore that cannot happen.
+	 * Derived from the model handed in, so it always describes the model that
+	 * won composition rather than whichever same-named source a policy pass
+	 * happened to visit last. The clamp is the cause only while it still owns
+	 * the final window: a smaller window is not proof of that, and neither is a
+	 * window equal to the clamp's, because an explicit per-model `contextWindow`
+	 * override reapplies after the cap and wins over it — whether it names 500K
+	 * on a 1M model or exactly the 272K the clamp would have installed. Both
+	 * stay put when the setting flips, so promising an unlock there would
+	 * advertise a restore that cannot happen.
 	 */
-	cappedExtendedContextWindow(model: Pick<Model<Api>, "provider" | "id" | "contextWindow">): number | undefined {
-		const cap = this.#cappedExtendedWindows.get(`${model.provider}\u0000${model.id}`);
-		if (cap === undefined) return undefined;
-		if (model.contextWindow !== cap.clamped) return undefined;
-		return this.#contextWindowPinnedByOverride(model) ? undefined : cap.full;
+	cappedExtendedContextWindow(
+		model: Pick<Model<Api>, "provider" | "id" | "contextWindow" | "cost" | "maxContextWindow">,
+	): number | undefined {
+		if (isExtendedContextEnabledFromSettings(this.#settings)) return undefined;
+		// Mirrors the clamp's own guards: the SuperGrok tier is an estimate that
+		// never constrains the runtime window, so nothing there is capped.
+		if (model.provider === "xai-oauth") return undefined;
+		const threshold = model.cost.longContext?.inputThreshold;
+		if (threshold === undefined || model.contextWindow === null) return undefined;
+		if (model.contextWindow !== threshold) return undefined;
+		if (this.#contextWindowPinnedByOverride(model)) return undefined;
+		const full = resolveMaxContextWindow(model as Model<Api>);
+		return full !== undefined && full > model.contextWindow ? full : undefined;
 	}
 
 	/**
