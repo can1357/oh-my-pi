@@ -674,6 +674,10 @@ export class PluginManager {
 			throw new Error(`npm uninstall failed for ${name}`);
 		}
 
+		// Linked plugins have no package.json dependency, so Bun has no entry to
+		// remove. Clean the runtime path explicitly after Bun updates its lockfile.
+		await fs.promises.rm(path.join(getPluginsNodeModules(), name), { recursive: true, force: true });
+
 		// Remove from runtime config
 		const config = await this.#ensureConfigLoaded();
 		delete config.plugins[name];

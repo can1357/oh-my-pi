@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Uninstalling a locally linked plugin now removes its `node_modules` symlink, so a later registry install cannot continue running the linked checkout ([#11172](https://github.com/can1357/oh-my-pi/issues/11172)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

@@ -32,13 +32,13 @@ const FAKE_INSTALLED: InstalledPlugin = {
 	enabled: true,
 };
 
-async function createLocalPlugin(root: string): Promise<string> {
-	const localPlugin = path.join(root, "kimi-datasource");
+async function createLocalPlugin(root: string, name = "kimi-datasource"): Promise<string> {
+	const localPlugin = path.join(root, name);
 	await fs.mkdir(localPlugin, { recursive: true });
 	await Bun.write(
 		path.join(localPlugin, "package.json"),
 		JSON.stringify({
-			name: "kimi-datasource",
+			name,
 			version: "1.0.0",
 			omp: { extensions: ["./src/extension.ts"] },
 		}),
@@ -142,6 +142,18 @@ describe("runPluginCommand({ action: 'install', args: [<local>] })", () => {
 			enabled: true,
 		});
 	});
+	test("uninstall removes a linked scoped plugin from node_modules", async () => {
+		const pluginName = "@getpipher/omp-statusline";
+		const localPlugin = await createLocalPlugin(tmpRoot, pluginName);
+		const manager = new PluginManager(tmpRoot);
+		const linkPath = path.join(tmpRoot, "plugins", "node_modules", pluginName);
+
+		await manager.link(localPlugin);
+		await manager.uninstall(pluginName);
+
+		await expect(fs.lstat(linkPath)).rejects.toHaveProperty("code", "ENOENT");
+	});
+
 	test("list --json includes linked local plugin without package dependencies", async () => {
 		const localPlugin = await createLocalPlugin(tmpRoot);
 		const output: string[] = [];
