@@ -1415,7 +1415,7 @@ exec   = "acme-index"
 | `ship` | `"installed"` \| `"source"` \| `"pickle"` | yes | Code-shipping grant level (§3.9.2). |
 | `requires` | array of PEP 508 | yes | Recorded verbatim so a `--check` can detect a manifest edit. |
 | `extension_requires` | array of `{id, version}` | no | Extension-to-extension edges (§3.4.2). |
-| `wheel` | table | yes | `file`, `tag`, `size`, `blake3`, `sha256`. Both digests: blake3 because `omp_journal::BlobRef` is BLAKE3-256 (`crates/journal/src/blob.rs:36-41`), sha256 because that is what PyPI and `RECORD` publish. Either mismatch is `E-INTEGRITY`. |
+| `wheel` | table | yes | `file`, `tag`, `size`, `blake3`, `sha256`. Both digests: blake3 because every other extension digest in the lock is `b3:` (`crates/ext/src/lock.rs:281`), sha256 because that is what PyPI and `RECORD` publish. Either mismatch is `E-INTEGRITY`. |
 
 *`[[package]]`*
 
@@ -1566,8 +1566,8 @@ serialization of everything the manifest asks for, with a fixed normalization:
 - `capability_digest` hashes only the effective base-plus-selected set. Enabling a feature
   changes this consent digest; disabling one removes its authority. Install/upgrade prompts
   only for newly effective capabilities.
-- The digest is `blake3-256` over that byte string, matching `omp_journal::BlobRef`'s hash
-  (`crates/journal/src/blob.rs:37`) so one hash function covers the whole system.
+- The digest is `SHA-256` over that byte string, matching `omp_journal::BlobRef`'s hash
+  (`crates/journal/src/blob.rs:48`) so one hash function covers the whole system.
 
 Effect: `2.3.0 → 2.3.1` with no capability change reprompts **never**. `2.3.1 → 2.4.0`
 that adds `net` reprompts **always**. This is the property that makes consent survivable,
@@ -1732,9 +1732,9 @@ string cannot say which machine it names; the class can.
 
 #### 3.10.1 Hashes
 
-Every artifact carries both `blake3` and `sha256` in the lock. blake3 because the rest of
-omp is BLAKE3-256 (`crates/journal/src/blob.rs:36-41`,
-`omp_core::encoding::hex`) so store keys, blob refs, and lock digests share one function;
+Every artifact carries both `blake3` and `sha256` in the lock. blake3 because every other
+extension digest — store keys, lock digests, and the capability graph — is `b3:`
+(`crates/ext/src/lock.rs:281`, `crates/ext/src/config.rs:1894`) so they share one function;
 sha256 because that is what PyPI's JSON API and wheel `RECORD` files publish, so a
 third-party audit can check our lock against upstream without trusting us. Verification
 order: size (cheap reject), then blake3 while streaming into the store, then sha256 from
@@ -2939,7 +2939,7 @@ resolution, integrity, trust, CLI — is missing. Verified before writing this s
 | Bounded framing | `DEFAULT_MAX_FRAME_BYTES = 64 MiB` (`worker.rs:53`), `WorkerError::FrameTooLarge` (`:308-315`) | **exists** |
 | Declaration verification at handshake | `WorkerProcess::spawn` collects `registrations: Vec<ToolDecl>`; `ToolWorkerSupervisor::registrations()` (`worker.rs:254-258`) | **exists** |
 | Supervisor mailboxes | `flume::unbounded()` (`worker.rs:248`), RAII cancel on `WorkerInvocation::drop` (`worker.rs:220-229`) | **exists** |
-| Content-addressed store | `omp_journal::BlobStore` — BLAKE3-256 `BlobRef { hash: [u8;32], size }` (`crates/journal/src/blob.rs:36-41`), `put_reader` streaming at 64 KiB (`:179`), `has`, `verify`, `path` | **exists** |
+| Content-addressed store | `omp_journal::BlobStore` — SHA-256 `BlobRef { hash: [u8;32], size }` (`crates/journal/src/blob.rs:36-41`), `put_reader` streaming at 64 KiB (`:179`), `has`, `verify`, `path` | **exists** |
 | Blob transport | `crates/proto/proto/omp/blob/v1` — `Blob` service with `Stat`/`Get`(stream)/`Put`(stream)/`Delete` | **exists** |
 | Registry identity digests | `crates/tool/src/registry.rs` — `slot_hash()` `:2623` (model-visible slots), `device_hash()` `:2654` (device availability), `projection_hash()` `:2690` (registered revisions + projection code), all SHA-256 | **exists**; §6.0.2 records the notification gap |
 | Rev stamping | `crates/tool/src/lib.rs:46` `TOOL_REV_PROP = "omp/tool-rev"` | **exists** |
@@ -3091,7 +3091,7 @@ belongs to [`06-policy.md`](06-policy.md), which records the same correction.
 
 **Hash unification, low priority.** `_pack_function` uses
 `hashlib.sha256(payload).hexdigest()[:16]` (`omp_remote.py:219`). Everything else is
-BLAKE3-256 (`crates/journal/src/blob.rs:36-41`). Worth unifying eventually, and worth
+SHA-256 (`crates/journal/src/blob.rs:48`). Worth unifying eventually, and worth
 documenting *now* that this 64-bit truncated digest is a **cache key, not an integrity
 claim**, so nobody mistakes it for a security boundary.
 
@@ -3234,7 +3234,7 @@ workspace dep (`Cargo.toml:27`), so the hashing half needs nothing new.
 ### 6.4 `crates/env` and `crates/journal`
 
 **The store is `BlobStore`, not a new subsystem.** `omp_journal::BlobStore`
-(`crates/journal/src/blob.rs`) is already content-addressed BLAKE3-256 with `put`,
+(`crates/journal/src/blob.rs`) is already content-addressed SHA-256 with `put`,
 `put_reader` (streaming, 64 KiB buffer, `:179`), `get`, `has`, `path`, and `verify`, and
 `BlobRef` already serializes as `{h, n}` (`:69-98`). §3.5's store is that, plus a naming
 convention for unpacked wheel directories. What is genuinely missing: unpacking (a wheel is a

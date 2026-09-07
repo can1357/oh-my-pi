@@ -93,7 +93,7 @@ flowchart LR
     CORE --> SCOPED[("Scoped store<br/>omp.state, cross-session")]
     CORE --> INDEX[("Sessions index<br/>write-time, cross-session")]
     EXT -->|DATA| ENV["Environment"]
-    ENV --> BLOBS[("Blob store<br/>BLAKE3, content-addressed")]
+    ENV --> BLOBS[("Blob store<br/>SHA-256, content-addressed")]
     ENV --> STATE[("State dir<br/>per-extension, rebuildable")]
     JOURNAL -.->|"reachability"| BLOBS
 ```
@@ -591,7 +591,7 @@ totally ordered within its scope instance, hashable, and `str()`-able.
 
 The content-addressed half, for immutable values too large or too cold for log
 entries: embedding shards, compiled rule sets, model-weight manifests. Same
-BLAKE3 addressing as the blob store (`omp.BlobRef`, `docs/py/11-env.md`);
+SHA-256 addressing as the blob store (`omp.BlobRef`, `docs/py/11-env.md`);
 retention is rooted in the scope rather than in a session journal, so a
 `PROJECT` value lives as long as the project retains it. The reachability
 discipline applies unchanged: a CAS value referenced by no scoped log entry is

@@ -175,7 +175,7 @@ def loads(data: bytes, shape: type[T]) -> T: ...
 
 The canonical codec for verdict values. `dumps` produces deterministic UTF-8 bytes — object keys in sorted order, no insignificant
 whitespace, no non-finite floats, and integers never widened to floats — which is what
-makes `blake3(verdict)` a usable cache key and a rebuilt transcript byte-stable.
+makes `sha256(verdict)` a usable cache key and a rebuilt transcript byte-stable.
 `loads` decodes against an explicit `shape`, which is required rather than inferred because
 a `lift()` step must decode a *previous* revision's types (see `omp.RecordedCall`).
 
@@ -1160,7 +1160,7 @@ the gate writes when it spills a whole verdict.
 | `byte_len` | Exact stored length. Present so a projection can say "12.4 MB" without fetching anything. |
 | `url` | The typed `omp.ArtifactUrl` (`docs/py/09-journal.md`), rendering as `artifact://<id>`. The form to put in a projection; raw URL strings left every public signature with the typed-location ruling (UX#2). |
 
-On the wire this is `omp.thread.v1.Blob { hash (BLAKE3-256), mime, size, inline }`
+On the wire this is `omp.thread.v1.Blob { hash (SHA-256), mime, size, inline }`
 (`crates/proto/proto/omp/thread/v1/thread.proto:110-119`), whose own contract already states
 the rule this section exists to enforce: "inline/thumbnail/stub treatment is projection
 policy, never part shape." `hash` and `byte_len` are that message's `hash` and `size`;
@@ -1613,7 +1613,7 @@ Rust-side survey suggests.
   (`toolhost.proto:89-97`). The split this document describes exists on the wire; what is
   missing is laziness and branch fidelity (see build item 1).
 - `omp/thread/v1/thread.proto` supplies the blob shape a spilled verdict needs:
-  `Blob { hash (BLAKE3-256), mime, size, inline }` with the explicit rule that
+  `Blob { hash (SHA-256), mime, size, inline }` with the explicit rule that
   "inline/thumbnail/stub treatment is projection policy, never part shape"
   (`thread.proto:110-119`), and `Part`'s oneof of `text | thinking | blob | fallback`
   (`:67-75`). The design's "results reference, they do not embed" rule is already the
@@ -1686,7 +1686,7 @@ is the whole design decision:
 |---|---|---|---|
 | **A. One frame per projection** | reuse the existing per-`request_id` pattern, one round trip each | 1 RTT × items; `project_thread_history` walks every item, so ~400 items at ~30 µs is ~12 ms serialized behind request assembly, every turn | Rejected. A visible stall on long sessions, and it forces `ErasedTool::project_verdict` to become async on a path that is synchronous for every native tool. |
 | **B. Ship the projection to Rust** | compile a declarative projection DSL at `RegisterTools` time, evaluate in-process | 0 RTT | Rejected. `prompt()` is where a device expresses judgement. A DSL expressive enough to replace it is a language; one that is not pushes authors back to formatting inside `call()` — the exact disease. |
-| **C. Batched frames + content-addressed cache** | one `ProjectVerdicts` carrying every `(name, rev, details, caps)` still needed; reply carries parts in request order. Cache by `blake3(verdict ‖ caps ‖ rev ‖ projection_hash)` | 1 RTT per turn, amortized ~0 once warm | **Recommended.** |
+| **C. Batched frames + content-addressed cache** | one `ProjectVerdicts` carrying every `(name, rev, details, caps)` still needed; reply carries parts in request order. Cache by `sha256(verdict ‖ caps ‖ rev ‖ projection_hash)` | 1 RTT per turn, amortized ~0 once warm | **Recommended.** |
 
 Option C keeps `ErasedTool::project_verdict` synchronous by splitting it: a synchronous cache
 probe (`fn project_cached(&self, key: &ProjectionKey) -> Option<&ProjectedVerdict>`) plus one
@@ -1955,7 +1955,7 @@ What does not hold yet, in dependency order:
    `serde_json::to_vec` (`crates/tool/src/lib.rs:466`), which is deterministic for a given
    Rust type but not for a Python-authored value where field order comes from a dict.
    `omp.dumps` must emit declaration order, and the host must reject a device whose codec is
-   not order-stable. Without this, `blake3(verdict)` is not a valid cache key and re-running
+   not order-stable. Without this, `sha256(verdict)` is not a valid cache key and re-running
    a lift produces different bytes for the same input.
 2. **Projection is not fingerprinted.** Add `Registry::projection_hash(&self) -> [u8; 32]`
    — shipped as `projection_hash() -> Hash32` (`registry.rs:2690-2711`) — digesting `(name, rev, projection code
@@ -1976,7 +1976,7 @@ What does not hold yet, in dependency order:
    rev to `hl.3`, project twice, assert byte equality of both the lifted args and the lifted
    verdict, then assert the projected `Vec<Part>` is byte-identical across the two passes.
 4. **The projection cache must be keyed on everything that can change it.** From item 1 and
-   2: `blake3(verdict ‖ caps ‖ rev ‖ projection_hash)`. Omitting `projection_hash` is the
+   2: `sha256(verdict ‖ caps ‖ rev ‖ projection_hash)`. Omitting `projection_hash` is the
    subtle bug — a hot-reloaded extension would serve stale parts from cache while claiming
    determinism.
 

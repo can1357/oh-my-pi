@@ -525,7 +525,7 @@ buckets are `0`, never `None`, so arithmetic never needs a guard.
 
 `@dataclass(frozen=True, slots=True)`. One assembler-owned prompt-slot contribution.
 
-- `digest: str` — the slot's BLAKE3-128 content digest.
+- `digest: str` — the slot's truncated SHA-256 (128-bit) content digest.
 - `size_bytes: int` — encoded size contributed to the assembled prompt.
 - `band: SlotClass` — the assembler band that placed the contribution.
 
@@ -534,7 +534,7 @@ buckets are `0`, never `None`, so arithmetic never needs a guard.
 `@dataclass(frozen=True, slots=True)`. The prompt-cache truth, computed by the assembler that built
 the prompt rather than reconstructed by an extension hashing whatever it could reach.
 
-- `digest: str` — BLAKE3-128 hex over the assembled cacheable prefix.
+- `digest: str` — truncated SHA-256 (128-bit) hex over the assembled cacheable prefix.
 - `slots: Mapping[str, PromptSlotFingerprint]` — per-slot facts keyed by prompt-slot key
   (`docs/py/08-context.md`). Each value carries `digest: str`, `size_bytes: int`, and
   `band: SlotClass`; the band uses the frozen stability vocabulary from that page. Covers every
@@ -1023,7 +1023,7 @@ discriminant, because conflating them is easy and produces nonsense byte counts.
   sliceable through `read` like a file.
 - `origin: str` — what produced the payload: a tool or device wire name such as `"read"` or `"grep"`.
 - `rev: Rev | None` — the producing tool's rev, `None` for non-tool origins.
-- `blob: str` — BLAKE3 digest of the stored payload. Identical bytes from two sessions share it, which
+- `blob: str` — SHA-256 digest of the stored payload. Identical bytes from two sessions share it, which
   is what makes `crates/journal`'s blob writes idempotent.
 - `bytes_total: int` — stored size. For `"verdict"` this is `VerdictDetails::Spilled.byte_len`, the
   original serialized length.
@@ -2378,7 +2378,7 @@ still churning. Pulling it forward is a sequencing recommendation, not a design 
 - `crates/tools/src/render/truncate.rs` already computes every `ArtifactSpill` field for
   `layer="render"`: `DEFAULT_MAX_BYTES` (51 200), `DEFAULT_MAX_LINES` (3 000), `DEFAULT_MAX_COLUMN`
   (512), `TruncationResult`, `SpilledText`, and `append_blob_truncation_notice`. It needs one
-  `publish` call and the BLAKE3 digest it already has from the blob store.
+  `publish` call and the SHA-256 digest it already has from the blob store.
 - `crates/tool` already retains revision and lift behaviour and "advertises only the live revision"
   (`crates/tool/README.md`). `Registry::projection_hash()`, `Registry::project`, `project_verdict`, and
   `Tool::lift` all exist, so telemetry needs **no** new rev plumbing here — correcting an earlier
@@ -2461,8 +2461,8 @@ threat model belongs in `docs/py/06-policy.md`; the observability gap belongs he
 ### Prompt fingerprint
 
 `PromptFingerprint` requires the prompt assembler to hash per slot. Given slots already render into
-owned strings (`docs/py/08-context.md`), this is one BLAKE3 per slot plus one over the concatenation
-— BLAKE3 runs at gigabytes per second, so a 100 KB prompt with thirty slots costs well under 100 µs,
+owned strings (`docs/py/08-context.md`), this is one SHA-256 per slot plus one over the concatenation
+— SHA-256 runs at gigabytes per second, so a 100 KB prompt with thirty slots costs well under 100 µs,
 once per request, on a path that already spent milliseconds assembling the text.
 
 `changed` is a digest comparison against the previous request's map: thirty `Str` comparisons, no

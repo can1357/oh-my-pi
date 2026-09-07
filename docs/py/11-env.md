@@ -1234,7 +1234,7 @@ one `ReadyProbe.oneof` arm; `ReadyAll` is the Python combining value for the rep
 
 ### Blobs — `omp.env.blobs`
 
-Content-addressed storage in the Environment. Hashes are BLAKE3-256. `put` is idempotent by
+Content-addressed storage in the Environment. Hashes are SHA-256. `put` is idempotent by
 construction: re-putting existing content is a no-op returning the same reference, so dedup is not
 a feature, it is what content addressing means.
 

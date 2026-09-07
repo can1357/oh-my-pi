@@ -37,7 +37,7 @@ flowchart TB
     H -->|ContextPatch| A["patch application<br/>agent-side, working copy"]
     T --> A
     A --> G["gateway context<br/>what the provider sees"]
-    S["@omp.prompt_slot contributions"] --> PH["prompt head<br/>render_prompt(), BLAKE3-hashed"]
+    S["@omp.prompt_slot contributions"] --> PH["prompt head<br/>render_prompt(), SHA-256-hashed"]
     PH --> G
 ```
 
@@ -384,7 +384,7 @@ class ContextView:
 
 The immutable argument to a `thread_projection` handler. `messages` is in projection order and includes
 prompt-head items so index arithmetic never lies about position. `prompt_hash` is the hex
-BLAKE3 of the canonical prompt head (`crates/agent/src/prompt.rs`), which is what a
+64-bit digest of the canonical prompt head (`crates/agent/src/loop.rs:3467-3480`), which is what a
 cache-health extension should key on instead of hashing prompt options the way
 `@mrclrchtr/supi-cache` does. `reset_event` is the transcript index of the live `Reset`
 boundary, or `None` if the chain reaches the session root.
@@ -1935,7 +1935,7 @@ implements `PromptSource`, so `render_prompt`'s double-render and hashing apply 
 the volatility rejection becomes per-slot: render both passes into per-slot byte ranges and
 compare ranges, so one bad extension is dropped rather than the whole head failing.
 
-`BandHash` is the real new artifact: a BLAKE3 per stability band, computed during assembly. It
+`BandHash` is the real new artifact: a SHA-256 per stability band, computed during assembly. It
 gives us (a) per-band cache-breakpoint placement, (b) the ability to answer "which band
 changed" when a prefix cache misses, which today is guesswork, and (c) a cheap
 `PromptHash = H(band0 ‖ band1 ‖ band2 ‖ band3)` that stays compatible with the existing

@@ -1881,7 +1881,7 @@ slot-facing.
 | Same-binary child re-exec | `crates/app/src/envd/eval/process.rs:40` (`EVAL_CHILD_ARG`), spawn at `:228-231` | The pattern for spawning a worker: `Command::new(executable).arg(ARG)`, piped stdio, `kill_on_drop(true)` |
 | A Python tool worker with a protobuf stdio protocol | `crates/app/src/envd/worker.rs:379-433`; `crates/proto/proto/omp/toolhost/v1/toolhost.proto` | `WorkerHello`/`RegisterTools` handshake with `schema_rev` + `python_rev` validation (`worker.rs:435-463`), process-group isolation (`:401-410`), `OMP_PY_SITE`/`OMP_PY_MODULES` injection (`:387-400`) |
 | Named-process supervision in `env/v1` | `crates/proto/proto/omp/env/v1/env.proto:230-362` | `RestartSpec` + `RestartPolicy`, `ReadyProbe` (`ReadyLog` regex, `ReadyTcp`), `ProcessState`, `ProcessInfo`, `StartProcess`/`StopProcess`/`SignalProcess`/`AttachOutput`/`SendInput`, `generation` counters |
-| Content-addressed blob store | `crates/proto/proto/omp/blob/v1/blob.proto` | BLAKE3-256 digests, streaming `Put`/`Get` with first-chunk hash+size, idempotent puts. Client surface at `crates/env/src/client.rs:381-416` |
+| Content-addressed blob store | `crates/proto/proto/omp/blob/v1/blob.proto` | SHA-256 digests, streaming `Put`/`Get` with first-chunk hash+size, idempotent puts. Client surface at `crates/env/src/client.rs:381-416` |
 | Verdict spill contracts | `crates/tool/src/lib.rs:146` (`BlobRef`), `:417-433` (`VerdictDetails::{Inline,Spilled}`, discriminated by `#[serde(tag = "storage")]`), `:435-442` (`trait VerdictSpill`), `:444-453` (`VerdictDetailsError`), `:455-476` (`verdict_details`) | The durable half of spilling already exists as a contract: a serialized verdict above `inline_limit` becomes `Spilled { blob, byte_len }`. `omp.BlobRef` is this `BlobRef` |
 | Request-scoped structural cancellation | `crates/env/src/guard.rs` | `RunGuard`: armed-on-create, `Drop` queues cancellation for exactly one `request_id` over an unbounded flume control channel (`:69-79`), `relinquish()` to transfer ownership |
 | Correlated multiplexed client | `crates/env/src/client.rs:175-482` | `EnvClient` with request-id allocation, `open_guarded`, `RequestStream` correlation, an in-process transport for colocated deployment (`:208-215`) |
@@ -2014,7 +2014,7 @@ Design consequences of (c) that must be built, not assumed:
 - **The supervisor sits in the data path, and that is a feature.** It is the only
   party positioned to perform the `omp.Spill` frame surgery: read the header's
   spill index list, stream those frames into `blob_put`, rewrite the header with
-  BLAKE3 digests, forward the rest. It never unpickles. Implement this as a framing
+  SHA-256 digests, forward the rest. It never unpickles. Implement this as a framing
   codec over `CowBytes` slices, not as a parse-and-rebuild.
 - **`omp.Spill` is not redundant with `verdict_details`, and the reason is the
   order of operations.** `verdict_details` (`crates/tool/src/lib.rs:455-476`)
