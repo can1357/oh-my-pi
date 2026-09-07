@@ -708,7 +708,7 @@ describe("AgentSession prewalk", () => {
 		expect(notices.some(message => message.includes("nothing to switch"))).toBe(true);
 	});
 
-	it("/prewalk reports success only when the requested arm remains active", async () => {
+	it("/prewalk commands report success only when the requested arm becomes active", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");
 
@@ -760,6 +760,116 @@ describe("AgentSession prewalk", () => {
 		settings.setModelRole("smol", `${primary.provider}/${primary.id}:medium`);
 		expect(await executeBuiltinSlashCommand("/prewalk", runtime)).toBe(true);
 		expect(showStatus).toHaveBeenCalledTimes(1);
+
+		// Restart must not move the active model when an existing arm rejects the requested target.
+		settings.setModelRole("default", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(showStatus).toHaveBeenCalledTimes(1);
+
+		// A matching arm remains active while restart restores the configured planning model.
+		await session.setModelTemporary(target, Effort.Medium, { ephemeral: true });
+		settings.setModelRole("default", `${primary.provider}/${primary.id}:medium`);
+		settings.setModelRole("smol", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(showStatus).toHaveBeenCalledTimes(2);
+
+		// If both roles now coincide, restart resets the model and clears the obsolete matching arm.
+		settings.setModelRole("default", `${target.provider}/${target.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(target.id);
+		expect(session.getPrewalkState()).toBeUndefined();
+		expect(
+			agent.state.messages.some(message => message.role === "custom" && message.customType === "prewalk-plan"),
+		).toBe(false);
+		expect(showStatus).toHaveBeenCalledTimes(3);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk reset"));
+	});
+
+	it("/prewalk restart returns to @default and re-arms @smol", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		const mock = createMockModel({
+			responses: [
+				toolCall("first-todo", "todo"),
+				toolCall("first-write", "write"),
+				{ content: ["first done"] },
+				toolCall("second-todo", "todo"),
+				toolCall("second-write", "write"),
+				{ content: ["second done"] },
+			],
+		});
+		const requested: string[] = [];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: {
+				model: primary,
+				systemPrompt: ["Test"],
+				tools: [todoTool as AgentTool, writeTool as AgentTool],
+				messages: [],
+				thinkingLevel: Effort.Medium,
+			},
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				requested.push(`${model.provider}/${model.id}`);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		settings.setModelRole("default", `anthropic/missing-model,${primary.provider}/${primary.id}:medium`);
+		settings.setModelRole("smol", `${target.provider}/${target.id}:medium`);
+		const sessionManager = SessionManager.inMemory();
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			toolRegistry,
+			prewalk: { target, thinkingLevel: Effort.Medium },
+			thinkingLevel: Effort.Medium,
+		});
+
+		await session.prompt("first task");
+		expect(session.model?.id).toBe(target.id);
+		const firstRunCallCount = requested.length;
+
+		const showStatus = vi.fn();
+		const ctx = {
+			session,
+			sessionManager,
+			settings,
+			collabGuest: false,
+			showStatus,
+			editor: { setText: vi.fn() },
+			refreshSlashCommandState: vi.fn(),
+		} as unknown as InteractiveModeContext;
+		const runtime = { ctx } satisfies TuiSlashCommandRuntime;
+
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()?.target.id).toBe(target.id);
+		expect(showStatus).toHaveBeenCalledTimes(1);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk restarted"));
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining(`${primary.provider}/${primary.id}`));
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining(`${target.provider}/${target.id}`));
+
+		await session.prompt("second task");
+		expect(requested.slice(firstRunCallCount)).toEqual([
+			`${primary.provider}/${primary.id}`,
+			`${primary.provider}/${primary.id}`,
+			`${target.provider}/${target.id}`,
+		]);
+		expect(session.model?.id).toBe(target.id);
+
+		settings.setModelRole("smol", `${primary.provider}/${primary.id}:medium`);
+		expect(await executeBuiltinSlashCommand("/prewalk restart", runtime)).toBe(true);
+		expect(session.model?.id).toBe(primary.id);
+		expect(session.getPrewalkState()).toBeUndefined();
+		expect(showStatus).toHaveBeenCalledTimes(2);
+		expect(showStatus).toHaveBeenCalledWith(expect.stringContaining("Prewalk reset"));
 	});
 
 	it("requires a fresh todo before a later explicit prewalk can hand off", async () => {

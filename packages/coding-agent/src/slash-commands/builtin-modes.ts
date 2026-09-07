@@ -1,6 +1,5 @@
 import * as path from "node:path";
 import {
-	expandRoleAlias,
 	formatModelString,
 	getModelMatchPreferences,
 	resolveCliModel,
@@ -611,25 +610,48 @@ export const BUILTIN_MODE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "prewalk",
 		icon: "prewalk",
-		description: "Switch to a fast/cheap model at the next action (works even without --prewalk)",
-		acpDescription: "Prewalk at the next action",
-		handle: async (_command, runtime) => {
-			const rolePattern = expandRoleAlias("@smol", runtime.settings);
-			const resolved = resolveCliModel({
-				cliModel: rolePattern,
-				modelRegistry: runtime.session.modelRegistry,
-				preferences: getModelMatchPreferences(runtime.settings),
-			});
-			if (resolved.error || !resolved.model) {
-				return usage(resolved.error ?? `Model "${rolePattern}" not found`, runtime);
+		description: "Arm or restart a one-shot model handoff",
+		allowArgs: true,
+		acpDescription: "Arm or restart prewalk",
+		acpInputHint: "[restart]",
+		subcommands: [{ name: "restart", description: "Return to @default and re-arm the handoff to @smol" }],
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (arg && arg !== "restart") return usage("Usage: /prewalk [restart]", runtime);
+			const target = resolveSessionModelSelector("@smol", runtime.session, runtime.settings);
+			if (target.error || !target.model) {
+				return usage(target.error ?? 'Model "@smol" not found', runtime);
 			}
-			if (!runtime.session.modelRegistry.hasConfiguredAuth(resolved.model)) {
-				return usage(`No API key for ${resolved.model.provider}/${resolved.model.id}`, runtime);
+			if (!runtime.session.modelRegistry.hasConfiguredAuth(target.model)) {
+				return usage(`No API key for ${target.model.provider}/${target.model.id}`, runtime);
 			}
-			const armed = runtime.session.armPrewalk(resolved.model, resolved.thinkingLevel);
+			if (arg === "restart") {
+				const source = resolveSessionModelSelector("@default", runtime.session, runtime.settings);
+				if (source.error || !source.model) {
+					return usage(source.error ?? 'Model "@default" not found', runtime);
+				}
+				if (!runtime.session.modelRegistry.hasConfiguredAuth(source.model)) {
+					return usage(`No API key for ${source.model.provider}/${source.model.id}`, runtime);
+				}
+				const result = await runtime.session.restartPrewalk(
+					source.model,
+					source.thinkingLevel,
+					target.model,
+					target.thinkingLevel,
+				);
+				if (result === "rejected") return commandConsumed();
+				const restartSource = `${source.model.provider}/${source.model.id}`;
+				await runtime.output(
+					result === "armed"
+						? `Prewalk restarted: using @default (${restartSource}) for planning, then switching to @smol (${target.model.provider}/${target.model.id}) at the next edit/write (todo-gated).`
+						: `Prewalk reset: using @default (${restartSource}); @smol resolves to the same model and thinking level, so no handoff was armed.`,
+				);
+				return commandConsumed();
+			}
+			const armed = runtime.session.armPrewalk(target.model, target.thinkingLevel);
 			if (armed) {
 				await runtime.output(
-					`Prewalk on: switching to ${resolved.model.provider}/${resolved.model.id} at the next edit/write (todo-gated).`,
+					`Prewalk on: switching to ${target.model.provider}/${target.model.id} at the next edit/write (todo-gated).`,
 				);
 			}
 			return commandConsumed();

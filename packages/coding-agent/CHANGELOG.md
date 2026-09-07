@@ -6,6 +6,10 @@
 
 - Fixed edit and write results to report the formatted bytes actually committed by LSP writethrough.
 
+### Added
+
+- Added `/prewalk restart` to return an active session to its `@default` model and re-arm the one-shot handoff to `@smol`.
+
 ### Changed
 
 - Ranged reads of text without bracket characters skip unnecessary lexical context scanning.
