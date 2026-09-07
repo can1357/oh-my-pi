@@ -2394,20 +2394,40 @@ export class ModelRegistry {
 	}
 
 	/**
+	 * Whether an explicit per-model `contextWindow` override owns this model's
+	 * final window. Overrides reapply after the long-context clamp and win over
+	 * it in both settings states, so the clamp is never the reason a model with
+	 * one reports the window it does — not even when the override happens to
+	 * name the clamp's own value.
+	 */
+	#contextWindowPinnedByOverride(model: Pick<Model<Api>, "provider" | "id">): boolean {
+		const providerOverrides = this.#modelOverrides.get(model.provider);
+		if (!providerOverrides) return false;
+		const override = resolveModelOverrideWithAliases(
+			providerOverrides,
+			model as Model<Api>,
+			(provider, id) => this.find(provider, id) !== undefined,
+		);
+		return override?.contextWindow !== undefined;
+	}
+
+	/**
 	 * Context window `extendedContext: true` would unlock for this model, or
 	 * `undefined` when the setting is not currently capping it.
 	 *
 	 * Reports the pre-clamp window recorded by the long-context cap, and only
-	 * while the model's final window is still the one the clamp installed. An
-	 * explicit per-model `contextWindow` override reapplies after the cap and
-	 * wins over it, so a smaller window is not proof the cap owns it: a 500K
-	 * override on a 1M model stays 500K when the setting flips, and promising a
-	 * 1M unlock there would advertise a restore that cannot happen.
+	 * while the clamp is still what owns the model's final window. A smaller
+	 * window is not proof of that, and neither is a window equal to the clamp's:
+	 * an explicit per-model `contextWindow` override reapplies after the cap and
+	 * wins over it, whether it names 500K on a 1M model or exactly the 272K the
+	 * clamp would have installed. Both stay put when the setting flips, so
+	 * promising an unlock there would advertise a restore that cannot happen.
 	 */
 	cappedExtendedContextWindow(model: Pick<Model<Api>, "provider" | "id" | "contextWindow">): number | undefined {
 		const cap = this.#cappedExtendedWindows.get(`${model.provider}\u0000${model.id}`);
 		if (cap === undefined) return undefined;
-		return model.contextWindow === cap.clamped ? cap.full : undefined;
+		if (model.contextWindow !== cap.clamped) return undefined;
+		return this.#contextWindowPinnedByOverride(model) ? undefined : cap.full;
 	}
 
 	/**

@@ -1840,6 +1840,29 @@ describe("ModelRegistry", () => {
 			expect(unchanged?.contextWindow).toBe(500_000);
 			expect(registry.cappedExtendedContextWindow(unchanged!)).toBeUndefined();
 		});
+
+		test("an override pinned to the clamp value is not reported as a cap unlock", async () => {
+			// Boundary case of the same ordering: the override names exactly the
+			// window the clamp would have installed, so the final window matches
+			// the clamp's without the clamp owning it. The override reapplies with
+			// the setting on and holds 272K, so there is no unlock to advertise.
+			writeRawModelsJson({
+				"openai-codex": { modelOverrides: { "gpt-5.6-sol": { contextWindow: 272_000 } } },
+			});
+			await Settings.init({ inMemory: true });
+			settings.set("extendedContext", false);
+			const registry = new ModelRegistry(authStorage, modelsJsonPath);
+
+			const pinned = registry.find("openai-codex", "gpt-5.6-sol");
+			expect(pinned?.contextWindow).toBe(272_000);
+			expect(registry.cappedExtendedContextWindow(pinned!)).toBeUndefined();
+
+			settings.set("extendedContext", true);
+			await registry.reapplyModelPolicies();
+			const stillPinned = registry.find("openai-codex", "gpt-5.6-sol");
+			expect(stillPinned?.contextWindow).toBe(272_000);
+			expect(registry.cappedExtendedContextWindow(stillPinned!)).toBeUndefined();
+		});
 	});
 	describe("bundled Anthropic catalog availability", () => {
 		let anthropicAuth: AuthStorage;

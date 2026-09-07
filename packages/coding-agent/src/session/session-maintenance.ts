@@ -378,13 +378,18 @@ export class SessionMaintenance {
 	#speculation: SpeculationRun | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
 	/**
-	 * Whether this session already explained that `extendedContext: false` is
-	 * what shrank the active model's window. Compaction that fires only because
-	 * of the cap is otherwise indistinguishable from a genuinely full context —
+	 * Session whose user already heard that `extendedContext: false` is what
+	 * shrank the active model's window. Compaction that fires only because of
+	 * the cap is otherwise indistinguishable from a genuinely full context —
 	 * the user sees the smaller number in the status line with no way to learn
 	 * it is a setting, not the model.
+	 *
+	 * Keyed by session id rather than latched as a boolean: `AgentSession` reuses
+	 * one `SessionMaintenance` across `/new`, `switchSession()` and resume, and a
+	 * latch would silence the explanation for every session opened after the
+	 * first in the same process.
 	 */
-	#extendedContextCapExplained = false;
+	#extendedContextCapExplainedFor: string | undefined;
 	/**
 	 * Consecutive no-progress `response.incomplete` (length-stop) recoveries in
 	 * the current continuation loop. Bounded by {@link INCOMPLETE_RECOVERY_MAX_RETRIES};
@@ -1710,10 +1715,11 @@ export class SessionMaintenance {
 		contextTokens: number,
 		compactionSettings: ConfiguredCompactionSettings,
 	): void {
-		if (this.#extendedContextCapExplained) return;
+		const sessionId = this.#host.sessionId();
+		if (this.#extendedContextCapExplainedFor === sessionId) return;
 		const fullWindow = this.#host.modelRegistry.cappedExtendedContextWindow(model);
 		if (fullWindow === undefined || shouldCompact(contextTokens, fullWindow, compactionSettings)) return;
-		this.#extendedContextCapExplained = true;
+		this.#extendedContextCapExplainedFor = sessionId;
 		this.#host.emitNotice(
 			"warning",
 			`${model.id} is capped at ${formatNumber(model.contextWindow ?? 0)} tokens because extendedContext is off; ` +

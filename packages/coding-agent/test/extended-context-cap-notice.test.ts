@@ -16,7 +16,7 @@
  *    ordinary response instead of before a prompt.
  */
 
-import { afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, test, vi } from "bun:test";
 import { Agent, type AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -67,6 +67,14 @@ describe("extended-context cap explanation", () => {
 		// Guard: the rest of this file is meaningless if the fixture is not capped.
 		expect(cappedModel.contextWindow).toBe(CLAMPED_WINDOW);
 		expect(modelRegistry.cappedExtendedContextWindow(cappedModel)).toBe(FULL_WINDOW);
+	});
+
+	afterAll(() => {
+		// `Settings.init` memoizes a global promise, so leaving this file's
+		// in-memory instance installed hands it to every later file in a
+		// full-suite run instead of the cwd or disk-backed settings they ask for.
+		authStorage.close();
+		resetSettingsForTest();
 	});
 
 	beforeEach(() => {
@@ -226,6 +234,21 @@ describe("extended-context cap explanation", () => {
 
 		expect(autoCompactionCalls).toEqual(["threshold:pre_turn", "threshold:pre_turn"]);
 		expect(notices).toHaveLength(1);
+	});
+
+	test("a session transition re-arms the explanation for the new session", async () => {
+		// `AgentSession` keeps one `SessionMaintenance` across `/new` and
+		// `switchSession()`, so a latched boolean would silence every session
+		// opened after the first in the same process.
+		const maintenance = createMaintenance({ contextTokens: 250_000, thresholdPercent: 80 });
+		await maintenance.runPrePromptCompactionIfNeeded([]);
+		expect(notices).toHaveLength(1);
+
+		sessionManager = SessionManager.inMemory();
+		await maintenance.runPrePromptCompactionIfNeeded([]);
+
+		expect(autoCompactionCalls).toEqual(["threshold:pre_turn", "threshold:pre_turn"]);
+		expect(notices).toHaveLength(2);
 	});
 
 	test("the mid-run tool-loop path explains the cap too", async () => {
