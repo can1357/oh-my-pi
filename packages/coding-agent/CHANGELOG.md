@@ -448,6 +448,12 @@
 - Fixed the git TUI sidebar jumping back to the top of the file list after staging or unstaging a file; selection now stays on the nearest remaining row
 - Fixed the `aarch64-linux` `nix build` output segfaulting in the dynamic loader before startup by repointing the stale `DT_VERDEF` that `patchelf` leaves behind when it grows `.dynamic`, and surfaced smoke-test signal deaths in the build log instead of masking them ([#9881](https://github.com/can1357/oh-my-pi/issues/9881)).
 - Added custom RPC launcher builders so embedded clients can transport omp RPC through SSH and remote process managers.
+- Added opt-in ACP subagent activity surface `_omp/agents/list|update|progress|messages` ([#9878](https://github.com/can1357/oh-my-pi/pull/9878), building on [#8728](https://github.com/can1357/oh-my-pi/issues/8728) by [@Alek7eeey](https://github.com/Alek7eeey)): roster, live progress, and transcripts for ACP clients, gated behind `clientCapabilities.extensions.agents`.
+
+### Changed
+
+- ACP `_omp/agents/progress` is now driven by the task executor's subagent channels instead of task tool-call updates, so background spawns stream live work and reach explicit terminal states.
+- `_omp/agents/messages` reads are capped per request and advisor transcripts are no longer readable.
 
 ## [18.0.7] - 2026-08-26
 

@@ -60,8 +60,10 @@ import { resolveLocalUrlToPath } from "../../internal-urls";
 import { MCPManager } from "../../mcp/manager";
 import type { MCPServerConfig } from "../../mcp/types";
 import { loadAllExtensions } from "../../modes/components/extensions/state-manager";
+import { readRpcSubagentTranscript } from "../../modes/rpc/rpc-subagents";
 import { theme } from "../../modes/theme/theme";
 import { normalizePlanTitle, type PlanApprovalDetails, resolveApprovedPlan } from "../../plan-mode/approved-plan";
+import { type AgentRef, AgentRegistry, type AgentStatus } from "../../registry/agent-registry";
 import type { AgentSession, AgentSessionEvent } from "../../session/agent-session";
 import { BlobStore, resolveImageDataSync } from "../../session/blob-store";
 import { isSilentAbort, SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
@@ -71,7 +73,14 @@ import { SessionManager } from "../../session/session-manager";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands, toAcpAvailableCommands } from "../../slash-commands/available-commands";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS } from "../../stt/models";
-import { refreshAgentDiscovery } from "../../task";
+import {
+	type AgentProgress,
+	refreshAgentDiscovery,
+	type SubagentLifecyclePayload,
+	type SubagentProgressPayload,
+	TASK_SUBAGENT_LIFECYCLE_CHANNEL,
+	TASK_SUBAGENT_PROGRESS_CHANNEL,
+} from "../../task";
 import { AUTO_THINKING, parseConfiguredThinkingLevel } from "../../thinking";
 import { OTHER_OPTION } from "../../tools/ask";
 import { normalizeLocalScheme } from "../../tools/path-utils";
@@ -82,6 +91,7 @@ import {
 	TTS_LOCAL_MODELS,
 	TTS_LOCAL_VOICE_OPTIONS,
 } from "../../tts/models";
+import type { EventBus } from "../../utils/event-bus";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { createAcpClientBridge } from "./acp-client-bridge";
 import {
@@ -114,6 +124,211 @@ export const ACP_BOOTSTRAP_RACE_GUARD_MS = 50;
 const ACP_CANCEL_CLEANUP_TIMEOUT_MS = 5_000;
 const ACP_ASYNC_DELIVERY_DRAIN_TIMEOUT_MS = 250;
 const ACP_ASYNC_DELIVERY_DRAIN_MAX_PASSES = 3;
+
+/**
+ * Debounce for pushing `_omp/agents/update` after an AgentRegistry change.
+ * Exported so the ACP test harness can drive it with fake timers.
+ */
+export const ACP_AGENTS_DEBOUNCE_MS = 100;
+
+/**
+ * Wire shape of one agent for the `_omp/agents/*` ACP extension surface.
+ *
+ * Field names mirror the collab wire `AgentSnapshot` where they overlap and
+ * add the registry's work/usage telemetry (`activity`, `metrics`, `resolvedModel`),
+ * so an ACP client can render subagent lifecycle, current work, and spend
+ * without polling internal surfaces.
+ */
+export interface AcpAgentSnapshot {
+	id: string;
+	displayName: string;
+	kind: "main" | "sub";
+	parentId?: string;
+	status: AgentStatus;
+	/** Transcript session file, when the agent has one; null when none is known. */
+	sessionFile: string | null;
+	createdAt: number;
+	lastActivity: number;
+	/** One-line gist of the agent's current work; present only while `running`. */
+	activity?: string;
+	/** Last resolved model id, when recorded. */
+	resolvedModel?: string;
+	/** Persisted usage totals, when the agent has finished at least one turn. */
+	metrics?: {
+		tokens: number;
+		requests: number;
+		tools: number;
+		cost: number;
+		durationMs: number;
+		contextTokens?: number;
+		contextWindow?: number;
+	};
+}
+
+/**
+ * Live transcript path for a registry ref. The static `sessionFile` captured
+ * at registration goes stale after `session/load`, `session/resume`, or fork
+ * switches the underlying SessionManager, so the wire prefers the live
+ * session's current file and falls back only for parked/aborted refs.
+ */
+function resolveRefSessionFile(ref: AgentRef): string | null {
+	return ref.session?.sessionManager.getSessionFile() ?? ref.sessionFile;
+}
+
+/** Serialize a registry ref into the `_omp/agents/*` wire shape. Advisor refs are observability-only and excluded. */
+function toAcpAgentSnapshot(ref: AgentRef): AcpAgentSnapshot | undefined {
+	if (ref.kind === "advisor") return undefined;
+	const history = ref.history;
+	return {
+		id: ref.id,
+		displayName: ref.displayName,
+		kind: ref.kind,
+		parentId: ref.parentId,
+		status: ref.status,
+		sessionFile: resolveRefSessionFile(ref),
+		createdAt: ref.createdAt,
+		lastActivity: ref.lastActivity,
+		...(ref.activity ? { activity: ref.activity } : {}),
+		...(history?.resolvedModel ? { resolvedModel: history.resolvedModel } : {}),
+		...(history?.metrics
+			? {
+					metrics: {
+						tokens: history.metrics.tokens,
+						requests: history.metrics.requests,
+						tools: history.metrics.tools,
+						cost: history.metrics.cost,
+						durationMs: history.metrics.durationMs,
+						...(history.metrics.contextTokens !== undefined
+							? { contextTokens: history.metrics.contextTokens }
+							: {}),
+						...(history.metrics.contextWindow !== undefined
+							? { contextWindow: history.metrics.contextWindow }
+							: {}),
+					},
+				}
+			: {}),
+	};
+}
+
+/** Current agent roster (main + subagents, advisors excluded), oldest-first. */
+function snapshotAcpAgents(): AcpAgentSnapshot[] {
+	return AgentRegistry.global()
+		.list()
+		.flatMap(ref => {
+			const snapshot = toAcpAgentSnapshot(ref);
+			return snapshot ? [snapshot] : [];
+		});
+}
+
+/** Cap for the verbose task/assignment texts on the progress wire. */
+const ACP_AGENT_PROGRESS_TASK_CAP = 400;
+
+/** Per-request byte ceiling for `_omp/agents/messages` transcript windows. */
+export const ACP_AGENTS_MESSAGES_MAX_BYTES = 512 * 1024;
+
+/**
+ * Wire shape of one subagent's live progress for the `_omp/agents/progress`
+ * notification. Mirrors the task executor's `AgentProgress` snapshots and
+ * lifecycle transitions delivered over the session's task event channels,
+ * so background spawns stream live work and reach an explicit terminal state.
+ */
+export interface AcpAgentProgress {
+	id: string;
+	index: number;
+	agent: string;
+	status: "pending" | "running" | "completed" | "failed" | "aborted";
+	/** One-line label of the subagent's assignment (bounded). */
+	description?: string;
+	/** Spawned task prompt (bounded). */
+	task?: string;
+	/** Latest model intent (bounded). */
+	lastIntent?: string;
+	currentTool?: string;
+	currentToolArgs?: string;
+	recentOutput: string[];
+	toolCount: number;
+	requests: number;
+	tokens: number;
+	contextTokens?: number;
+	contextWindow?: number;
+	cost: number;
+	durationMs: number;
+	resolvedModel?: string;
+}
+
+function bounded(value: string | undefined, cap: number): string | undefined {
+	if (value === undefined || value === "") return undefined;
+	return value.length > cap ? `${value.slice(0, cap)}…` : value;
+}
+
+function toAcpAgentProgress(progress: AgentProgress): AcpAgentProgress {
+	return {
+		id: progress.id,
+		index: progress.index,
+		agent: progress.agent,
+		status: progress.status,
+		description: bounded(progress.description, 200),
+		task: bounded(progress.task, ACP_AGENT_PROGRESS_TASK_CAP),
+		lastIntent: bounded(progress.lastIntent, 200),
+		currentTool: progress.currentTool,
+		currentToolArgs: progress.currentToolArgs,
+		recentOutput: progress.recentOutput,
+		toolCount: progress.toolCount,
+		requests: progress.requests,
+		tokens: progress.tokens,
+		...(progress.contextTokens !== undefined ? { contextTokens: progress.contextTokens } : {}),
+		...(progress.contextWindow !== undefined ? { contextWindow: progress.contextWindow } : {}),
+		cost: progress.cost,
+		durationMs: progress.durationMs,
+		...(progress.resolvedModel ? { resolvedModel: progress.resolvedModel } : {}),
+	};
+}
+
+/**
+ * Fold a subagent lifecycle transition into the last mirrored progress frame.
+ * Terminal transitions keep clients failure-blind even when the final progress
+ * frame raced ahead of the lifecycle event or was never emitted.
+ */
+function applyLifecycleToProgress(
+	existing: AcpAgentProgress | undefined,
+	payload: SubagentLifecyclePayload,
+): AcpAgentProgress {
+	const status = payload.status === "started" ? "running" : payload.status;
+	if (!existing) {
+		return {
+			id: payload.id,
+			index: payload.index,
+			agent: payload.agent,
+			status,
+			recentOutput: [],
+			toolCount: 0,
+			requests: 0,
+			tokens: 0,
+			cost: 0,
+			durationMs: 0,
+		};
+	}
+	return { ...existing, index: payload.index, agent: payload.agent, status };
+}
+
+/**
+ * Resolve an `_omp/agents/messages` request to a transcript file. Only files
+ * currently claimed by a registered agent (main or sub) are readable, so the
+ * surface can never be used to read arbitrary paths.
+ */
+function resolveAcpAgentTranscript(params: { agentId?: unknown; sessionFile?: unknown }): string | undefined {
+	if (typeof params.sessionFile === "string") {
+		const registered = AgentRegistry.global()
+			.list()
+			.some(ref => ref.kind !== "advisor" && resolveRefSessionFile(ref) === params.sessionFile);
+		if (registered) return params.sessionFile;
+	}
+	if (typeof params.agentId === "string") {
+		const ref = AgentRegistry.global().get(params.agentId);
+		return ref !== undefined && ref.kind !== "advisor" ? (resolveRefSessionFile(ref) ?? undefined) : undefined;
+	}
+	return undefined;
+}
 
 type AgentImageContent = {
 	type: "image";
@@ -176,10 +391,21 @@ type ManagedSessionRecord = {
 	liveMessageId: string | undefined;
 	liveMessageProgress: { textEmitted: boolean; thoughtEmitted: boolean } | undefined;
 	toolArgsById: Map<string, unknown>;
+	/**
+	 * toolCallIds whose `tool_execution_end` already streamed to the client.
+	 * Async tool progress (task/job callbacks) can push `tool_execution_update`
+	 * events after the loop finalized the call; those late `in_progress`
+	 * updates must not clobber the terminal `completed`/`failed` status on the
+	 * wire. Maintained in the synchronous event-handler prefix; ids are unique
+	 * per session lifetime, so the set is never cleared.
+	 */
+	endedToolCallIds: Set<string>;
 	extensionsConfigured: boolean;
 	// Installed inside `#scheduleBootstrapUpdates` (post-race-guard); released
 	// in `#disposeSessionRecord`. Lives independent of any prompt turn.
 	lifetimeUnsubscribe: (() => void) | undefined;
+	// `_omp/agents/progress` channel subscriptions; released in `#disposeSessionRecord`.
+	progressUnsubscribers: Array<() => void>;
 	closedError: PromptLifecycleError | undefined;
 	promptEventHandlers: Set<Promise<void>>;
 	extensionUserMessageTasks: Set<Promise<void>>;
@@ -221,6 +447,7 @@ type MCPSourceMap = {
 type AcpSessionHandle = {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	eventBus?: EventBus;
 };
 
 type CreateAcpSession = (
@@ -231,8 +458,9 @@ type CreateAcpSession = (
 function normalizeCreatedAcpSession(created: AgentSession | AcpSessionHandle): {
 	session: AgentSession;
 	setToolUIContext: AcpSessionHandle["setToolUIContext"] | undefined;
+	eventBus?: EventBus;
 } {
-	return "session" in created ? created : { session: created, setToolUIContext: undefined };
+	return "session" in created ? created : { session: created, setToolUIContext: undefined, eventBus: undefined };
 }
 
 type AcpSpeechOption = {
@@ -615,6 +843,16 @@ export class AcpAgent implements Agent {
 	#clientCapabilities: ClientCapabilities | undefined;
 	#cancelCleanupTimeoutMs = ACP_CANCEL_CLEANUP_TIMEOUT_MS;
 	#blobs = new BlobStore(getBlobsDir());
+	#agentsDebounce: Timer | undefined;
+	#registryUnsubscribe: (() => void) | undefined;
+	/**
+	 * Continuation cursors for `_omp/agents/messages` are only valid against the
+	 * transcript they were produced from. Keyed by caller identity (agentId, or
+	 * the resolved sessionFile for path-keyed polls); when a load/resume/fork
+	 * repoints an agent, the next poll with a stale offset restarts at zero with
+	 * `reset: true` instead of tearing into mid-record bytes.
+	 */
+	#messagesCursorBindings = new Map<string, { sessionFile: string }>();
 
 	constructor(connection: AgentSideConnection, createSession: CreateAcpSession, initialSession?: AgentSession) {
 		this.#connection = connection;
@@ -629,6 +867,15 @@ export class AcpAgent implements Agent {
 	async initialize(params: InitializeRequest): Promise<InitializeResponse> {
 		this.#registerConnectionCleanup();
 		this.#clientCapabilities = params.clientCapabilities;
+		// Live-track subagent activity: mirror the registry into `_omp/agents/update`
+		// notifications once the client has processed `initialize` (in-order JSON-RPC
+		// guarantees the initial push lands after the response). Opt-in only: a
+		// client that does not declare `extensions.agents` receives no unsolicited
+		// traffic. The subscription is released in `dispose()`.
+		if (!this.#registryUnsubscribe && this.#clientCapabilities?.extensions?.agents === true) {
+			this.#registryUnsubscribe = AgentRegistry.global().onChange(() => this.#scheduleAgentsBroadcast());
+			this.#scheduleAgentsBroadcast();
+		}
 		const authMethods: AuthMethod[] = [
 			{
 				id: "agent",
@@ -1123,6 +1370,38 @@ export class AcpAgent implements Agent {
 		switch (method) {
 			case SPEECH_MODELS_LIST_METHOD:
 				return buildAcpSpeechModelsCatalog();
+			case "_omp/agents/list":
+				this.#requireAgentsSurface();
+				return { agents: snapshotAcpAgents() };
+			case "_omp/agents/messages": {
+				this.#requireAgentsSurface();
+				const sessionFile = resolveAcpAgentTranscript({
+					agentId: params.agentId,
+					sessionFile: params.sessionFile,
+				});
+				if (!sessionFile) {
+					throw new Error("Unknown ACP agent: provide a registered agentId or sessionFile");
+				}
+				const fromByte =
+					typeof params.fromByte === "number" && Number.isFinite(params.fromByte)
+						? Math.max(0, Math.trunc(params.fromByte))
+						: 0;
+				const cursorKey = typeof params.agentId === "string" ? `id:${params.agentId}` : `file:${sessionFile}`;
+				const binding = this.#messagesCursorBindings.get(cursorKey);
+				const switched = binding !== undefined && binding.sessionFile !== sessionFile && fromByte > 0;
+				const result = await readRpcSubagentTranscript(sessionFile, switched ? 0 : fromByte, {
+					maxBytes: ACP_AGENTS_MESSAGES_MAX_BYTES,
+				});
+				this.#rememberMessagesCursor(cursorKey, sessionFile);
+				return {
+					sessionFile: result.sessionFile,
+					fromByte: result.fromByte,
+					nextByte: result.nextByte,
+					reset: switched || result.reset,
+					messages: result.messages,
+					...(result.pendingOversizedRecord ? { pendingOversizedRecord: true } : {}),
+				};
+			}
 			case "_omp/sessions/listAll": {
 				const limit = typeof params.limit === "number" ? Math.max(1, Math.min(5000, params.limit as number)) : 1000;
 				const sessions = await SessionManager.listAll();
@@ -1201,6 +1480,104 @@ export class AcpAgent implements Agent {
 
 	async extNotification(_method: string, _params: { [key: string]: unknown }): Promise<void> {}
 
+	/** Rejects `_omp/agents/*` requests from connections that never declared the capability. */
+	#requireAgentsSurface(): void {
+		if (this.#clientCapabilities?.extensions?.agents !== true) {
+			throw RequestError.methodNotFound(
+				"_omp/agents surface not enabled: declare clientCapabilities.extensions.agents",
+			);
+		}
+	}
+	/**
+	 * Debounced push of the agent roster as an `_omp/agents/update` notification.
+	 * Mirrors the collab host's broadcast: any registry change (spawn, status,
+	 * usage metadata, removal) schedules one full snapshot so ACP clients can
+	 * live-track subagent lifecycle without polling.
+	 */
+	#scheduleAgentsBroadcast(): void {
+		if (this.#agentsDebounce) return;
+		this.#agentsDebounce = setTimeout(() => {
+			this.#agentsDebounce = undefined;
+			// Fire-and-forget: never let a dead or partial connection turn the
+			// registry mirror into an unhandled timer error.
+			if (this.#connection.signal.aborted) return;
+			let delivery: Promise<void> | undefined;
+
+			try {
+				delivery = this.#connection.extNotification("_omp/agents/update", {
+					agents: snapshotAcpAgents(),
+				});
+			} catch (error) {
+				logger.warn("Failed to push ACP agents/update notification", { error });
+				return;
+			}
+			delivery?.catch(error => logger.warn("Failed to push ACP agents/update notification", { error }));
+		}, ACP_AGENTS_DEBOUNCE_MS);
+	}
+
+	/**
+	 * Fire-and-forget push of one subagent progress snapshot. Never throws on
+	 * a dead or partial connection — same contract as `#scheduleAgentsBroadcast`.
+	 */
+	#pushAgentsProgressNotification(agent: AcpAgentProgress): void {
+		if (this.#connection.signal.aborted) return;
+		let delivery: Promise<void> | undefined;
+		try {
+			delivery = this.#connection.extNotification("_omp/agents/progress", { agent });
+		} catch (error) {
+			logger.warn("Failed to push ACP agents/progress notification", { error });
+			return;
+		}
+		delivery?.catch(error => logger.warn("Failed to push ACP agents/progress notification", { error }));
+	}
+
+	/** Track the transcript a continuation cursor is bound to; pruned oldest-first. */
+	#rememberMessagesCursor(key: string, sessionFile: string): void {
+		this.#messagesCursorBindings.delete(key);
+		this.#messagesCursorBindings.set(key, { sessionFile });
+		while (this.#messagesCursorBindings.size > 256) {
+			const oldest = this.#messagesCursorBindings.keys().next();
+			if (oldest.done) break;
+			this.#messagesCursorBindings.delete(oldest.value);
+		}
+	}
+
+	/** Roster push for transcript repoints that bypass the registry (extension-style switches). */
+	#scheduleTranscriptRosterRefresh(): void {
+		if (this.#clientCapabilities?.extensions?.agents === true) {
+			this.#scheduleAgentsBroadcast();
+		}
+	}
+
+	/**
+	 * Subscribe a record's task-event channels so executor-side subagent work
+	 * streams to the client as `_omp/agents/progress`. Driven by channels —
+	 * not `tool_execution_update` payloads — because background spawns settle
+	 * their task tool call before any subagent frame arrives, and terminal
+	 * completed/failed states must survive that suppression.
+	 */
+	#subscribeRecordToTaskChannels(record: ManagedSessionRecord, eventBus: EventBus): void {
+		const lastByAgentId = new Map<string, AcpAgentProgress>();
+		record.progressUnsubscribers.push(
+			eventBus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, data => {
+				const payload = data as SubagentProgressPayload;
+				const agent = toAcpAgentProgress(payload.progress);
+				lastByAgentId.set(agent.id, agent);
+				if (lastByAgentId.size > 256) {
+					const oldest = lastByAgentId.keys().next().value;
+					if (oldest !== undefined) lastByAgentId.delete(oldest);
+				}
+				this.#pushAgentsProgressNotification(agent);
+			}),
+			eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+				const payload = data as SubagentLifecyclePayload;
+				const merged = applyLifecycleToProgress(lastByAgentId.get(payload.id), payload);
+				lastByAgentId.set(merged.id, merged);
+				if (payload.status !== "started") this.#pushAgentsProgressNotification(merged);
+			}),
+		);
+	}
+
 	get signal(): AbortSignal {
 		return this.#connection.signal;
 	}
@@ -1224,7 +1601,7 @@ export class AcpAgent implements Agent {
 	}
 
 	async #createNewSessionRecord(cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, eventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1235,7 +1612,7 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
+		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext, eventBus);
 	}
 
 	async #loadManagedSession(sessionId: string, cwd: string, mcpServers: McpServer[]): Promise<ManagedSessionRecord> {
@@ -1270,7 +1647,7 @@ export class AcpAgent implements Agent {
 
 	async #forkManagedSession(params: ForkSessionRequest): Promise<ManagedSessionRecord> {
 		const sourcePath = await this.#resolveForkSourceSessionPath(params.sessionId);
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, eventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(params.cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1288,7 +1665,9 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext);
+		const record = await this.#registerPreparedSession(session, params.mcpServers ?? [], setToolUIContext, eventBus);
+		this.#scheduleTranscriptRosterRefresh();
+		return record;
 	}
 
 	async #openStoredSession(
@@ -1297,7 +1676,7 @@ export class AcpAgent implements Agent {
 		mcpServers: McpServer[],
 		sessionId: string,
 	): Promise<ManagedSessionRecord> {
-		const { session, setToolUIContext } = normalizeCreatedAcpSession(
+		const { session, setToolUIContext, eventBus } = normalizeCreatedAcpSession(
 			await this.#createSession(path.resolve(cwd), {
 				interactivePrompts: this.#clientCapabilities?.elicitation?.form != null,
 			}),
@@ -1311,18 +1690,26 @@ export class AcpAgent implements Agent {
 			await this.#disposeStandaloneSession(session);
 			throw error;
 		}
-		return await this.#registerPreparedSession(session, mcpServers, setToolUIContext);
+		const record = await this.#registerPreparedSession(session, mcpServers, setToolUIContext, eventBus);
+		this.#scheduleTranscriptRosterRefresh();
+		return record;
 	}
 
 	async #registerPreparedSession(
 		session: AgentSession,
 		mcpServers: McpServer[],
 		setToolUIContext: ((uiContext: ExtensionUIContext, hasUI: boolean) => void) | undefined,
+		eventBus?: EventBus,
 	): Promise<ManagedSessionRecord> {
 		const record = this.#createManagedSessionRecord(session, setToolUIContext);
 		session.setClientBridge(createAcpClientBridge(this.#connection, session.sessionId, this.#clientCapabilities));
-		// `record.lifetimeUnsubscribe` is installed in `#scheduleBootstrapUpdates`
-		// so it shares the bootstrap race guard — see that comment for why.
+		if (eventBus !== undefined && this.#clientCapabilities?.extensions?.agents === true) {
+			this.#subscribeRecordToTaskChannels(record, eventBus);
+		}
+		// `_omp/agents/*` is opt-in (`extensions.agents`); when declared, channel
+		// subscriptions stream executor-side subagent work without touching prompt
+		// routing. `record.lifetimeUnsubscribe` itself installs later in
+		// `#scheduleBootstrapUpdates`, sharing the bootstrap race guard.
 		try {
 			await this.#configureExtensions(record);
 			await this.#configureMcpServers(record, mcpServers);
@@ -1348,11 +1735,13 @@ export class AcpAgent implements Agent {
 			liveMessageId: undefined,
 			liveMessageProgress: undefined,
 			toolArgsById: new Map(),
+			endedToolCallIds: new Set(),
 			extensionsConfigured: false,
 			closedError: undefined,
 			promptEventHandlers: new Set(),
 			extensionUserMessageTasks: new Set(),
 			lifetimeUnsubscribe: undefined,
+			progressUnsubscribers: [],
 		};
 	}
 
@@ -1415,7 +1804,18 @@ export class AcpAgent implements Agent {
 		}
 
 		if (event.type === "tool_execution_start" || event.type === "tool_execution_update") {
+			// Async tool progress can fire after the loop finalized the call; a
+			// late `in_progress` would clobber the terminal status already sent
+			// (the ACP tool state machine has no transitions after completion).
+			// The ended-set is maintained in the synchronous prefix of the
+			// event handlers, so an update's check always observes an end that
+			// was emitted before it.
+			if (event.type === "tool_execution_update" && record.endedToolCallIds.has(event.toolCallId)) {
+				return;
+			}
 			record.toolArgsById.set(event.toolCallId, event.args);
+		} else if (event.type === "tool_execution_end") {
+			record.endedToolCallIds.add(event.toolCallId);
 		}
 
 		this.#prepareLiveAssistantMessage(record, event);
@@ -2593,10 +2993,16 @@ export class AcpAgent implements Agent {
 					if (success && options?.setup) {
 						await options.setup(record.session.sessionManager);
 					}
+					// In-place transcript switch: no registry event fires, so the
+					// roster push must be scheduled explicitly.
+					if (success) this.#scheduleTranscriptRosterRefresh();
 					return { cancelled: !success };
 				},
 				branch: async entryId => {
 					const result = await record.session.branch(entryId);
+					// branch() creates a new transcript file in place — same
+					// roster-staleness hazard as switchSession.
+					if (!result.cancelled) this.#scheduleTranscriptRosterRefresh();
 					return { cancelled: result.cancelled };
 				},
 				navigateTree: async (targetId, options) => {
@@ -2605,6 +3011,7 @@ export class AcpAgent implements Agent {
 				},
 				switchSession: async sessionPath => {
 					const success = await record.session.switchSession(sessionPath);
+					if (success) this.#scheduleTranscriptRosterRefresh();
 					return { cancelled: !success };
 				},
 				reload: async () => {
@@ -2742,6 +3149,7 @@ export class AcpAgent implements Agent {
 
 	async #disposeSessionRecord(record: ManagedSessionRecord, reason?: postmortem.Reason): Promise<void> {
 		record.lifetimeUnsubscribe?.();
+		for (const unsubscribe of record.progressUnsubscribers.splice(0)) unsubscribe();
 		if (record.mcpManager) {
 			try {
 				await record.mcpManager.disconnectAll();
@@ -2773,6 +3181,12 @@ export class AcpAgent implements Agent {
 		}
 
 		this.#disposePromise = (async () => {
+			this.#registryUnsubscribe?.();
+			this.#registryUnsubscribe = undefined;
+			if (this.#agentsDebounce !== undefined) {
+				clearTimeout(this.#agentsDebounce);
+				this.#agentsDebounce = undefined;
+			}
 			const records = Array.from(this.#sessions.entries());
 			this.#sessions.clear();
 			await Promise.all(

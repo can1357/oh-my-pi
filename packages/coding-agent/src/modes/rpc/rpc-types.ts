@@ -186,6 +186,12 @@ export interface RpcSubagentMessagesResult {
 	reset: boolean;
 	entries: FileEntry[];
 	messages: AgentMessage[];
+	/**
+	 * Set (only by capped reads) when the JSONL record starting at `fromByte`
+	 * exceeds the caller's byte ceiling, so no complete line could be consumed.
+	 * `nextByte` is unchanged; the record must be skipped or fetched differently.
+	 */
+	pendingOversizedRecord?: boolean;
 }
 
 // ============================================================================

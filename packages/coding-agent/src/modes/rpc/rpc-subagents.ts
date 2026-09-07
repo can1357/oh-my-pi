@@ -65,7 +65,43 @@ function addPruned(set: Set<string>, value: string, maxSize: number): void {
 	}
 }
 
-export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 0): Promise<RpcSubagentMessagesResult> {
+/** Hard cap on how far a capped read may span past its budget to find a record's terminating newline. */
+export const RPC_SUBAGENT_TRANSCRIPT_MAX_RECORD_BYTES = 8 * 1024 * 1024;
+
+/** Clamp a window to whole UTF-8 code points: back over continuation bytes; drop a lead byte whose cluster is cut. */
+function clampWindowToUtf8Boundary(bytes: Uint8Array): number {
+	const length = bytes.length;
+	if (length === 0 || bytes[length - 1]! < 0x80) return length;
+	let index = length - 1;
+	const floor = Math.max(0, length - 4);
+	while (index > floor && bytes[index]! >= 0x80 && bytes[index]! < 0xc0) index--;
+	const lead = bytes[index]!;
+	const width = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc0 ? 2 : 1;
+	return lead >= 0xc0 && lead < 0xf5 && length - index < width ? index : length;
+}
+
+export interface RpcSubagentTranscriptReadOptions {
+	/**
+	 * Upper bound on transcript bytes consumed per call, starting at `fromByte`.
+	 * The window is clamped to complete lines and full UTF-8 code points, so
+	 * continuation reads at `nextByte` never lose data. Values below 1 are
+	 * floored to a single byte so every finite budget makes forward progress;
+	 * non-finite values disable the cap.
+	 */
+	maxBytes?: number;
+	/**
+	 * How far past `maxBytes` a read may reach to swallow one record whose
+	 * terminating newline lies beyond the budget. Defaults to
+	 * {@link RPC_SUBAGENT_TRANSCRIPT_MAX_RECORD_BYTES}.
+	 */
+	oversizedRecordCeilingBytes?: number;
+}
+
+export async function readRpcSubagentTranscript(
+	sessionFile: string,
+	fromByte = 0,
+	options?: RpcSubagentTranscriptReadOptions,
+): Promise<RpcSubagentMessagesResult> {
 	let startByte = Number.isFinite(fromByte) ? Math.max(0, Math.trunc(fromByte)) : 0;
 	const file = Bun.file(sessionFile);
 	let size: number;
@@ -87,12 +123,45 @@ export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 
 		startByte = 0;
 		reset = true;
 	}
+	const maxBytes =
+		options?.maxBytes !== undefined && Number.isFinite(options.maxBytes)
+			? Math.max(1, Math.trunc(options.maxBytes))
+			: undefined;
+	const oversizedCeilingBytes =
+		options?.oversizedRecordCeilingBytes !== undefined &&
+		Number.isFinite(options.oversizedRecordCeilingBytes) &&
+		options.oversizedRecordCeilingBytes > 0
+			? Math.trunc(options.oversizedRecordCeilingBytes)
+			: RPC_SUBAGENT_TRANSCRIPT_MAX_RECORD_BYTES;
 
-	const text = startByte >= size ? "" : await file.slice(startByte).text();
-	const lastNewline = text.lastIndexOf("\n");
-	const completeText = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
-	const entries = completeText.length > 0 ? parseSessionEntries(completeText) : [];
-	const nextByte = startByte + Buffer.byteLength(completeText, "utf8");
+	// A capped window can land mid-record (no newline yet). Grow the window
+	// toward the ceiling so one record larger than maxBytes still ships whole;
+	// past the ceiling there is nothing sane left to do but report it.
+	let endByte = maxBytes !== undefined ? Math.min(size, startByte + maxBytes) : size;
+	let bytes = new Uint8Array(0);
+	let ceilingReached = false;
+	for (;;) {
+		bytes =
+			startByte < endByte ? new Uint8Array(await file.slice(startByte, endByte).arrayBuffer()) : new Uint8Array(0);
+		if (bytes.length === 0 || endByte >= size) break;
+		const hasCompleteLine = bytes.lastIndexOf(0x0a, clampWindowToUtf8Boundary(bytes) - 1) >= 0;
+		if (hasCompleteLine) break;
+		const span = endByte - startByte;
+		if (span >= oversizedCeilingBytes) {
+			ceilingReached = true;
+			break;
+		}
+		endByte = Math.min(size, startByte + span * 2);
+	}
+
+	const windowEnd = clampWindowToUtf8Boundary(bytes);
+	const newlineIdx = bytes.lastIndexOf(0x0a, windowEnd - 1);
+	const consumed = newlineIdx >= 0 ? newlineIdx + 1 : 0;
+	const pendingOversizedRecord = consumed === 0 && ceilingReached;
+
+	const nextByte = startByte + consumed;
+	const text = consumed > 0 ? new TextDecoder().decode(bytes.subarray(0, consumed)) : "";
+	const entries = text.length > 0 ? parseSessionEntries(text) : [];
 
 	return {
 		sessionFile,
@@ -101,6 +170,7 @@ export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 
 		reset,
 		entries,
 		messages: entries.filter(isSessionMessageEntry).map(entry => entry.message),
+		...(pendingOversizedRecord ? { pendingOversizedRecord } : {}),
 	};
 }
 

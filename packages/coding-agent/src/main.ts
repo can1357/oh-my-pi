@@ -369,6 +369,8 @@ export async function submitInteractiveInput(
 interface AcpSessionHandle {
 	session: AgentSession;
 	setToolUIContext: (uiContext: ExtensionUIContext, hasUI: boolean) => void;
+	/** Session-owned task/extension bus carrying subagent progress/lifecycle channels for `_omp/agents/*`. */
+	eventBus?: EventBus;
 }
 
 type AcpSessionFactory = (cwd: string, options?: { interactivePrompts?: boolean }) => Promise<AcpSessionHandle>;
@@ -477,7 +479,7 @@ export function createAcpSessionFactory(args: AcpSessionFactoryOptions): AcpSess
 				throw error;
 			}
 		}
-		return { session: nextSession, setToolUIContext };
+		return { session: nextSession, setToolUIContext, eventBus };
 	};
 }
 

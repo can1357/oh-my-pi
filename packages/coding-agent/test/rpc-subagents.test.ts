@@ -359,6 +359,196 @@ describe("readRpcSubagentTranscript", () => {
 			messages: [],
 		});
 	});
+
+	test("caps reads by bytes without splitting lines or code points", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-transcript-capped-"));
+		tempPaths.push(dir);
+		const sessionFile = path.join(dir, "session.jsonl");
+		const headerLine = `${JSON.stringify({ type: "session", id: "s1", timestamp: "2026-06-09T00:00:00.000Z", cwd: dir })}\n`;
+		// Multi-byte content means a naive byte cut can split a code point; every
+		// line stays well under the cap so each window always contains a newline.
+		const lines = [headerLine];
+		for (let i = 0; i < 12; i++) {
+			lines.push(
+				`${JSON.stringify({
+					type: "message",
+					id: `m${i}`,
+					parentId: "s1",
+					timestamp: "2026-06-09T00:00:00.000Z",
+					message: { role: "user", content: [{ type: "text", text: `🌍📖 ${(i + 1).toString().repeat(40)}` }] },
+				})}\n`,
+			);
+		}
+		await Bun.write(sessionFile, lines.join(""));
+
+		const full = await readRpcSubagentTranscript(sessionFile);
+		let fromByte = 0;
+		const seen = [];
+		for (let window = 0; window < 200; window++) {
+			const read = await readRpcSubagentTranscript(sessionFile, fromByte, { maxBytes: 512 });
+			if (read.nextByte === fromByte) break;
+			expect(read.messages.length).toBeGreaterThan(0);
+			seen.push(...read.messages);
+			fromByte = read.nextByte;
+			expect(fromByte).toBeLessThanOrEqual(full.nextByte);
+		}
+
+		expect(seen).toEqual(full.messages);
+		expect(fromByte).toBe(full.nextByte);
+	});
+
+	test("covers continuation past nextByte after the transcript grows", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-transcript-append-"));
+		tempPaths.push(dir);
+		const sessionFile = path.join(dir, "session.jsonl");
+		const headerLine = `${JSON.stringify({ type: "session", id: "s1", timestamp: "2026-06-09T00:00:00.000Z", cwd: dir })}\n`;
+		const firstLine = `${JSON.stringify({
+			type: "message",
+			id: "m1",
+			parentId: null,
+			timestamp: "2026-06-09T00:00:00.000Z",
+			message: { role: "user", content: [{ type: "text", text: "first" }] },
+		})}\n`;
+		await Bun.write(sessionFile, `${headerLine}${firstLine}`);
+
+		const first = await readRpcSubagentTranscript(sessionFile);
+		expect(first.nextByte).toBe(Buffer.byteLength(`${headerLine}${firstLine}`, "utf8"));
+
+		const secondLine = `${JSON.stringify({
+			type: "message",
+			id: "m2",
+			parentId: "m1",
+			timestamp: "2026-06-09T00:00:01.000Z",
+			message: { role: "assistant", content: [{ type: "text", text: "🌍 final" }] },
+		})}\n`;
+		fs.appendFileSync(sessionFile, secondLine);
+
+		const resumed = await readRpcSubagentTranscript(sessionFile, first.nextByte);
+		expect(resumed.messages).toHaveLength(1);
+		expect(resumed.nextByte).toBe(first.nextByte + Buffer.byteLength(secondLine, "utf8"));
+	});
+
+	test("delivers an oversized record whole by spanning past the byte cap", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-transcript-oversized-"));
+		tempPaths.push(dir);
+		const sessionFile = path.join(dir, "session.jsonl");
+		const headerLine = `${JSON.stringify({ type: "session", id: "s1", timestamp: "2026-06-09T00:00:00.000Z", cwd: dir })}\n`;
+		const giantText = "x".repeat(2000);
+		const giantLine = `${JSON.stringify({
+			type: "message",
+			id: "giant",
+			parentId: "s1",
+			timestamp: "2026-06-09T00:00:00.000Z",
+			message: { role: "assistant", content: [{ type: "text", text: giantText }] },
+		})}\n`;
+		const tailLine = `${JSON.stringify({
+			type: "message",
+			id: "tail",
+			parentId: "giant",
+			timestamp: "2026-06-09T00:00:01.000Z",
+			message: { role: "user", content: [{ type: "text", text: "after" }] },
+		})}\n`;
+		await Bun.write(sessionFile, `${headerLine}${giantLine}${tailLine}`);
+
+		const full = await readRpcSubagentTranscript(sessionFile);
+		let fromByte = 0;
+		const seen = [];
+		for (let window = 0; window < 100; window++) {
+			const read = await readRpcSubagentTranscript(sessionFile, fromByte, { maxBytes: 512 });
+			if (read.nextByte === fromByte) break;
+			seen.push(...read.messages);
+			fromByte = read.nextByte;
+		}
+
+		// The >512 KiB—well, >512-byte—record ships WHOLE inside a capped stream,
+		// and polling never reports silent completion while data remains.
+		expect(seen).toEqual(full.messages);
+		expect(fromByte).toBe(full.nextByte);
+		// Header yields no messages; the oversized record and the tail ride
+		// together in the spanning window: [giant, tail].
+		const giantSeen = seen[0] as { content: Array<{ text?: string }> };
+		expect(giantSeen.content[0]?.text).toBe(giantText);
+		expect(seen).toHaveLength(2);
+	});
+
+	test("reports pendingOversizedRecord instead of stalling silently", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-transcript-flag-"));
+		tempPaths.push(dir);
+		const sessionFile = path.join(dir, "session.jsonl");
+		const headerLine = `${JSON.stringify({ type: "session", id: "s1", timestamp: "2026-06-09T00:00:00.000Z", cwd: dir })}\n`;
+		await Bun.write(sessionFile, `${headerLine}${"a".repeat(400)}\n`);
+
+		// First window consumes the header normally.
+		const first = await readRpcSubagentTranscript(sessionFile, 0, { maxBytes: 128 });
+		expect(first.pendingOversizedRecord).toBeUndefined();
+		expect(first.nextByte).toBe(Buffer.byteLength(headerLine, "utf8"));
+
+		// The remaining record exceeds the caller-declared ceiling of 128:
+		// unchanged cursor + explicit flag beats a fake completion signal.
+		const stalled = await readRpcSubagentTranscript(sessionFile, first.nextByte, {
+			maxBytes: 64,
+			oversizedRecordCeilingBytes: 128,
+		});
+		expect(stalled.nextByte).toBe(first.nextByte);
+		expect(stalled.messages).toEqual([]);
+		expect(stalled.pendingOversizedRecord).toBe(true);
+
+		// Reads without a cap keep returning plain results (flag absent).
+		const uncapped = await readRpcSubagentTranscript(sessionFile, first.nextByte);
+		expect(uncapped.messages).toHaveLength(0);
+		expect(uncapped.pendingOversizedRecord).toBeUndefined();
+		expect(uncapped.reset).toBe(false);
+	});
+
+	test("ordinary pages carry no oversized marker", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-transcript-plain-"));
+		tempPaths.push(dir);
+		const sessionFile = path.join(dir, "session.jsonl");
+		const headerLine = `${JSON.stringify({ type: "session", id: "s1", timestamp: "2026-06-09T00:00:00.000Z", cwd: dir })}\n`;
+		const messageLine = `${JSON.stringify({
+			type: "message",
+			id: "m1",
+			parentId: "s1",
+			timestamp: "2026-06-09T00:00:01.000Z",
+			message: { role: "user", content: [{ type: "text", text: "small" }] },
+		})}\n`;
+		await Bun.write(sessionFile, `${headerLine}${messageLine}`);
+
+		const page = await readRpcSubagentTranscript(sessionFile, 0, { maxBytes: 512 });
+
+		expect(page.messages).toHaveLength(1);
+		// A window ending on a complete line must not speculate about the next
+		// record (no lookahead read ⇒ no premature flag key on the wire).
+		expect("pendingOversizedRecord" in page).toBe(false);
+	});
+	test("degenerate finite budgets are floored and still make progress", async () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-rpc-subagent-transcript-floor-"));
+		tempPaths.push(dir);
+		const sessionFile = path.join(dir, "session.jsonl");
+		const headerLine = `${JSON.stringify({ type: "session", id: "s1", timestamp: "2026-06-09T00:00:00.000Z", cwd: dir })}\n`;
+		const messageLine = `${JSON.stringify({
+			type: "message",
+			id: "m1",
+			parentId: "s1",
+			timestamp: "2026-06-09T00:00:01.000Z",
+			message: { role: "user", content: [{ type: "text", text: "small" }] },
+		})}\n`;
+		await Bun.write(sessionFile, `${headerLine}${messageLine}`);
+
+		// A paginator feeding any validly-typed budget must observe cursor
+		// movement: zero/negative/fractional values floor to a 1-byte minimum,
+		// so polling terminates instead of seeing an unchanged nextByte forever.
+		for (const maxBytes of [0, -5, 0.4]) {
+			const read = await readRpcSubagentTranscript(sessionFile, 0, { maxBytes });
+			expect(read.nextByte).toBe(Buffer.byteLength(headerLine, "utf8"));
+			expect(read.reset).toBe(false);
+			expect(read.pendingOversizedRecord).toBeUndefined();
+		}
+		// Non-finite budgets keep their documented meaning: the cap is off.
+		const uncapped = await readRpcSubagentTranscript(sessionFile, 0, { maxBytes: Number.NaN });
+		expect(uncapped.messages).toHaveLength(1);
+		expect(uncapped.nextByte).toBe(Buffer.byteLength(`${headerLine}${messageLine}`, "utf8"));
+	});
 });
 
 describe("RpcClient subagent frames", () => {
