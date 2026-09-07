@@ -78,6 +78,8 @@
 - Grok Bot keep-model probes share checksum/JWT/auth helpers via `scripts/grokbot-probe-config.mjs`.
 - Grok Bot `sand-automation` now promotes grok-4.5-high fenced `{"name":"Shell",…}` text into a real Shell/bash tool call, and native-family matrix rows report `wire: native` instead of the internal `error` sentinel.
 - Grok Bot catalog matrix `--ids` keeps commas inside `[...]`, core tool probes use bland Shell wording (write via `printf > notes/…`, read via `cat`), Anthropic Usage Policy blocks report as `provider-policy-block`, and a successful tool call still PASSes if the echo follow-up is policy-blocked.
+- Grok Bot matrix `--slice representative` picks live AvailableModels ids by `classifyModel` class/family (plus sand/Auto routers), not a hardcoded id table.
+- Grok Bot probe helpers resolve `secrets/grokbot.env` through shared `getAgentDir()` (profile / XDG / `PI_CODING_AGENT_DIR`), matching `/login grokbot`.
 
 ### Fixed
 

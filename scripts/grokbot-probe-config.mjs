@@ -1,13 +1,13 @@
 /**
  * Shared Grok Bot probe config loader.
  *
- * Mirrors `loadGrokbotConfig` / agent-dir resolution without importing the
- * `@oh-my-pi/pi-utils` barrel (which pulls native bindings). Env credentials
- * work even when the secrets file is absent.
+ * Agent-dir resolution uses the same `getAgentDir()` leaf helper as the CLI
+ * (profile / XDG aware). Env credentials still work when the secrets file is
+ * absent.
  */
 import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
+import { getAgentDir } from "../packages/utils/src/dirs.ts";
 
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
 export const GROKBOT_RENEWAL_PATH = "/sand-box/inference-credential";
@@ -51,11 +51,9 @@ export function parseEnvFile(filePath) {
 	return out;
 }
 
-/** Resolve agent dir like omp (`PI_CODING_AGENT_DIR`, else `~/.omp/agent`). */
+/** Profile/XDG-aware agent dir — same resolver the CLI uses. */
 export function resolveAgentDir() {
-	const override = process.env.PI_CODING_AGENT_DIR?.trim();
-	if (override) return override;
-	return path.join(os.homedir(), ".omp", "agent");
+	return getAgentDir();
 }
 
 export function grokbotSecretsPath(agentDir = resolveAgentDir()) {

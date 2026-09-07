@@ -5,7 +5,6 @@ import { resolveGrokbotRequestedModel } from "../../src/providers/grokbot/model-
 import {
 	advertisedSandToolNames,
 	applyGrokbotSandToolPolicy,
-	GROKBOT_MATRIX_REPRESENTATIVE_IDS,
 	grokbotToolsSkipReason,
 	nativeToolParametersForIdentity,
 	resolveGrokbotSandToolPolicy,
@@ -235,7 +234,7 @@ describe("grokbot family tool mapping", () => {
 		expect(wired.wireMode).toBeUndefined();
 	});
 
-	test("representative slice picks listed live ids plus one luna/terra openai row", () => {
+	test("representative slice picks live ids by classifyModel class/family plus routers", () => {
 		const live = [
 			"claude-opus-5",
 			"grok-4.6",
@@ -244,25 +243,37 @@ describe("grokbot family tool mapping", () => {
 			"gpt-5.3-terra",
 			"composer-2.5",
 			"sand-default",
+			"sand-cua",
 			"default",
 			"gemini-3-flash",
 			"gpt-5-mini",
 			"unrelated-other",
 		];
 		const picked = selectGrokbotMatrixIds(live, "representative");
+		expect(picked).toContain("sand-default");
+		expect(picked).toContain("sand-cua");
+		expect(picked).toContain("default");
 		expect(picked).toContain("claude-opus-5");
 		expect(picked).toContain("grok-4.6");
-		expect(picked).toContain("gpt-5.6-sol");
-		expect(picked).toContain("composer-2.5");
-		expect(picked).toContain("sand-default");
-		expect(picked).toContain("default");
 		expect(picked).toContain("gemini-3-flash");
-		expect(picked).toContain("gpt-5-mini");
+		expect(picked).toContain("gpt-5.6-sol");
 		expect(picked).toContain("gpt-5.4-luna");
 		expect(picked).toContain("gpt-5.3-terra");
+		expect(picked).toContain("composer-2.5");
 		expect(picked).not.toContain("unrelated-other");
 		expect(selectGrokbotMatrixIds(live, "all")).toEqual(live);
-		expect(GROKBOT_MATRIX_REPRESENTATIVE_IDS).toContain("sand-cua");
+
+		// Renamed anthropic catalog ids still gate via classifyModel class, not a TypeScript id table.
+		// At most one unclassified non-router is kept (composer-like unknowns); extra noise is dropped.
+		const renamed = selectGrokbotMatrixIds(
+			["claude-brand-new-9", "sand-default", "noise-aaa", "noise-bbbb"],
+			"representative",
+		);
+		expect(renamed).toEqual(expect.arrayContaining(["claude-brand-new-9", "sand-default"]));
+		expect(renamed.filter(id => id.startsWith("noise-"))).toHaveLength(1);
+		expect(renamed).toContain("noise-aaa"); // shortest unclassified wins
+		expect(renamed).not.toContain("noise-bbbb");
+		expect(classifyModel("grokbot", "claude-brand-new-9", { lenient: true }).class).toBe("anthropic");
 	});
 
 	test("gemini native schema strips Google-unsupported keywords (empty-body regression)", () => {

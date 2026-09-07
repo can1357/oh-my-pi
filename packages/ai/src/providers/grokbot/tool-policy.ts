@@ -28,29 +28,22 @@ export type GrokbotSandToolPolicy = {
 	reason?: string;
 };
 
-export const GROKBOT_MATRIX_REPRESENTATIVE_IDS = [
-	"claude-opus-5",
-	"claude-sonnet-5",
-	"claude-haiku-4-5",
-	"claude-fable-5",
-	"grok-4.6",
-	"grok-4.5",
-	"gemini-3.7-flash",
-	"gemini-3-flash",
-	"gpt-5.6-sol",
-	"gpt-5-mini",
-	"gpt-5.2-fast",
-	"composer-2.5",
-	"kimi-k3",
-	"glm-5.2",
-	"sand-default",
-	"sand-cua",
-	"sand-automation",
-	"default",
-] as const;
-
 /** Extra live-id tokens to pick one openai-family row each (sol already listed). */
-const OPENAI_SLICE_TOKENS = ["luna", "terra"] as const;
+const OPENAI_SLICE_TOKENS = ["luna", "terra", "sol"] as const;
+
+/** Sand / Auto routers — product wire ids, not versioned model lines. */
+function isGrokbotRouterId(id: string): boolean {
+	const base = id.split("[")[0]?.trim().toLowerCase() ?? "";
+	return base === "default" || base === "auto" || base.startsWith("sand-");
+}
+
+/** Prefer non-parameterized, shorter catalog ids when choosing a class sample. */
+function preferMatrixId(a: string, b: string): number {
+	const aParam = a.includes("[") ? 1 : 0;
+	const bParam = b.includes("[") ? 1 : 0;
+	if (aParam !== bParam) return aParam - bParam;
+	return a.length - b.length || a.localeCompare(b);
+}
 
 export function grokbotToolsSkipReason(model: { id: string; supportsTools?: boolean }): string | undefined {
 	if (model.supportsTools === false) {
@@ -152,11 +145,45 @@ export function selectGrokbotMatrixIds(liveIds: readonly string[], slice: "repre
 		seen.add(id);
 		picked.push(id);
 	};
-	for (const id of GROKBOT_MATRIX_REPRESENTATIVE_IDS) take(id);
+
+	// Routers first (product wire ids — not versioned model lines).
+	for (const id of liveIds) {
+		if (isGrokbotRouterId(id)) take(id);
+	}
+
+	// One live row per classifyModel class/family so renamed catalog ids still gate.
+	const byClassFamily = new Map<string, string[]>();
+	const unknown: string[] = [];
+	for (const id of liveIds) {
+		if (seen.has(id)) continue;
+		const identity = classifyModel("grokbot", id, { lenient: true });
+		if (!identity.class || identity.class === "unknown") {
+			unknown.push(id);
+			continue;
+		}
+		const key = `${identity.class}:${identity.family ?? "_"}`;
+		const list = byClassFamily.get(key) ?? [];
+		list.push(id);
+		byClassFamily.set(key, list);
+	}
+	for (const ids of byClassFamily.values()) {
+		const sorted = [...ids].sort(preferMatrixId);
+		take(sorted[0]!);
+	}
+	// OpenAI deployments also keep one luna/terra/sol peer when present.
 	for (const token of OPENAI_SLICE_TOKENS) {
-		const match = liveIds.find(id => id.toLowerCase().includes(token) && !seen.has(id));
+		const match = liveIds.find(
+			id =>
+				!seen.has(id) &&
+				id.toLowerCase().includes(token) &&
+				classifyModel("grokbot", id, { lenient: true }).class === "openai",
+		);
 		if (match) take(match);
 	}
+	// One unclassified product row (e.g. composer) — shortest non-router.
+	const unknownSorted = unknown.filter(id => !isGrokbotRouterId(id)).sort(preferMatrixId);
+	if (unknownSorted[0]) take(unknownSorted[0]);
+
 	return picked;
 }
 
