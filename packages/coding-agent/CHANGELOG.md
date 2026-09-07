@@ -11,6 +11,10 @@
 - Ranged reads of text without bracket characters skip unnecessary lexical context scanning.
 - Muse Code sessions send a compact hashline edit description (~3 KB less per request); all other models keep the full prompt.
 
+### Changed
+
+- Task results now carry a typed model receipt naming the requested model, role, and effort, what resolution actually selected, and coded reasons whenever the two diverge. The parent agent reads it in the task summary and the TUI shows it on each finished spawn.
+
 ### Fixed
 
 	- Fixed GPT-6 Astra extended-context support and preserved maximum context windows reported by OpenAI Codex discovery ([#10980](https://github.com/can1357/oh-my-pi/pull/10980) by [@H4vC](https://github.com/H4vC)).

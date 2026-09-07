@@ -449,7 +449,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 			if (requested.provider === parentModel.provider) return "test-key";
 			return undefined;
 		});
-		const { session, modelFallbackMessage } = await createAgentSession({
+		const { session, modelFallbackMessage, modelPatternAuthFallbackUsed } = await createAgentSession({
 			cwd: tempDir,
 			agentDir: tempDir,
 			authStorage,
@@ -474,6 +474,7 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		try {
 			expect(session.model?.provider).toBe(parentModel.provider);
 			expect(session.model?.id).toBe(parentModel.id);
+			expect(modelPatternAuthFallbackUsed).toBe(true);
 			expect(modelFallbackMessage).toBeUndefined();
 		} finally {
 			await session.dispose();

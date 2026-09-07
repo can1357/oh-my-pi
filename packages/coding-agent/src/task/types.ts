@@ -1,5 +1,5 @@
 import { type BaseType, type } from "@oh-my-pi/omptype";
-import type { Usage } from "@oh-my-pi/pi-ai";
+import type { Effort, Usage } from "@oh-my-pi/pi-ai";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel, TaskEffort } from "../thinking";
@@ -489,6 +489,54 @@ export interface AgentProgress {
 	inflightTaskDetails?: TaskToolDetails;
 }
 
+/**
+ * Why a spawn's resolved model or thinking effort differs from what the caller
+ * requested. A closed set, so consumers branch on a code instead of parsing prose.
+ */
+export type TaskModelOverrideReason =
+	/** Patterns were requested but spawn-time resolution matched no model, so the session picked its own (it retries the patterns once extension providers register, then falls back to the `default` role). */
+	| "model-unresolved"
+	/** The requested model had no working credentials, so resolution fell back to the parent session model. */
+	| "model-auth-fallback"
+	/** A retry-fallback model served at least one turn instead of the resolved model. */
+	| "model-retry-fallback"
+	/** An effort was requested but the resolved model exposes no controllable thinking effort. */
+	| "effort-unsupported"
+	/** The `task.maxEffort` ceiling lowered the requested effort. */
+	| "effort-clamped";
+
+/**
+ * Terminal receipt for one spawn's model decision: what the caller asked for,
+ * what actually ran, and typed reasons whenever the two differ.
+ *
+ * Present on an initial run that resolved a model or received a model/effort
+ * request, so a failed unresolved request remains reportable. A follow-up turn
+ * on an already-live session reuses that session's model and carries no receipt.
+ *
+ * {@link resolvedModel} is the resolution-time choice, without a thinking-level
+ * suffix. {@link SingleResult.resolvedModel} reports the model that last served a
+ * turn, which a runtime retry fallback can change mid-run.
+ */
+export interface TaskModelReceipt {
+	/** Coarse effort the caller requested. Absent when the caller requested none. */
+	requestedEffort?: TaskEffort;
+	/** Pre-expansion model patterns requested for this spawn: the caller's override, else the agent definition's list. Absent when neither supplied one. */
+	requestedModel?: string[];
+	/** Pre-expansion model role alias requested for this spawn (`task` for `@task`). */
+	requestedRole?: string;
+	/** Model that resolution selected, as `<provider>/<id>`. Absent when nothing resolved. */
+	resolvedModel?: string;
+	/** Thinking effort the run started at, after the `task.maxEffort` ceiling. Absent when no effort was requested or the model exposes none. */
+	resolvedEffort?: Effort;
+	/**
+	 * Every divergence between request and resolution, in a fixed order:
+	 * `model-unresolved`, `model-auth-fallback`, `effort-unsupported`,
+	 * `effort-clamped`, `model-retry-fallback`. Absent when resolution honored
+	 * the request exactly.
+	 */
+	overrides?: TaskModelOverrideReason[];
+}
+
 /** Result from a single agent execution */
 export interface SingleResult {
 	index: number;
@@ -524,6 +572,8 @@ export interface SingleResult {
 	resolvedModel?: string;
 	/** True when {@link resolvedModel} is the target of an active retry fallback. Mirrors {@link AgentProgress.resolvedModelIsFallback} onto the settled result. */
 	resolvedModelIsFallback?: boolean;
+	/** Terminal record of this run's model decision: request, resolution, and typed divergences. */
+	modelReceipt?: TaskModelReceipt;
 	error?: string;
 	aborted?: boolean;
 	abortReason?: string;

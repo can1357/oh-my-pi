@@ -218,6 +218,28 @@ describe("task live progress rendering", () => {
 		expect(text).not.toContain("\r");
 	});
 
+	it("renders the model receipt for the user", () => {
+		const details: TaskToolDetails = {
+			projectAgentsDir: null,
+			results: [
+				makeSingleResult(0, {
+					modelReceipt: {
+						requestedModel: ["@task"],
+						requestedRole: "task",
+						resolvedModel: "openai/gpt-5.6-sol",
+						overrides: ["effort-clamped"],
+					},
+				}),
+			],
+			totalDurationMs: 1,
+		};
+
+		const text = renderResultText(details, true, uiTheme);
+
+		expect(text).toContain("model receipt: @task → openai/gpt-5.6-sol");
+		expect(text).toContain("overrides effort-clamped");
+	});
+
 	it("caps collapsed nested task progress at four rows plus an elision line", () => {
 		setViewportRows(40);
 		const text = renderProgressText(makeParentWithNestedProgress(6), false, uiTheme);
