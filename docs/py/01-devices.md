@@ -1859,10 +1859,18 @@ declarations, MCP endpoints, and shadowed claimants are never advertised
 under `auto` or `device_only`, whatever their route; `tool_only` advertises
 every declaration and drops `dyn`.
 
-`live_hash` (`:458-467`) inherits the same conflation: one digest over every
-live identity, which is only correct while everything live is also advertised.
-Reused as prompt-cache identity once devices exist, it would falsify this
-document's central claim.
+The hash half of this conflation has already closed in shipped code: the
+undifferentiated `live_hash` this paragraph once warned about is gone from
+`crates/tool`, and the split exists as shipped SHA-256 methods — `slot_hash()`
+(`crates/tool/src/registry.rs:2623-2650`) digests the policy-resolved
+model-visible slots, the digest the request and the prompt cache care about,
+while `device_hash()` (`:2654-2686`) digests mounted availability and
+claimant-qualified reachability, and `projection_hash()` (`:2690-2711`) covers
+registered revisions and their projection code. A device mounting moves the
+availability digest and cannot move the prompt-cache identity —
+`crates/tool/tests/contracts.rs:443-505` mounts and unmounts a device and
+asserts `slot_hash()` is unchanged. The correction this section still owes is
+the advertise filter above, not a hash split.
 
 This is the single most important correction here, and it is a small diff in a
 load-bearing place.

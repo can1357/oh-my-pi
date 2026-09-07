@@ -1965,12 +1965,13 @@ under `omp.Scheme` describes as costing "zero registered tool slots." That desig
 fix is clean because route-awareness already exists elsewhere: `invoke` checks
 route and refuses `ToolRoute::Worker` (`:476-478`), and `live_identities`
 (`:439-440`) documents that callers must inspect `route` before granting execution;
-`advertise` simply does not use it. Relatedly, `live_hash` (`:458-467`) is one
-digest over *all* live identities, so reusing it unchanged as prompt-cache identity
-would falsify the availability-as-notification property the moment devices exist —
-the `slot_hash`/`device_hash` split in `docs/py/01-devices.md` is the correction,
-and the `schemes()` invalidation note earlier in this section should be read
-against that split rather than against today's single digest.
+`advertise` simply does not use it. The hash caveat this paragraph once raised
+is already paid: the undifferentiated `live_hash` is gone from `crates/tool`,
+and the split exists as shipped SHA-256 methods — `slot_hash()`
+(`registry.rs:2623-2650`) for the prompt-cache identity, `device_hash()`
+(`registry.rs:2654-2686`) for availability. A device appearing moves
+`device_hash()` and never the prompt prefix, so the `schemes()` invalidation
+note earlier in this section reads against the shipped split directly.
 
 Three things this namespace needs already have a wire home.
 
@@ -2446,7 +2447,7 @@ as the historical record.
    for the durable tier only. The second keeps the common case short and makes the
    long form exactly as long as it needs to be, but it means two syntaxes for one
    scheme.
-5. **Resolved (2026-08-19 user ruling): consumed means the referencing entry leaves the live chain — sweep is tied to Log::live membership, so a rewind that resurrects the reference finds the blob alive.** **Ephemeral sweep timing.** `ArtifactLifetime::Ephemeral` is "retain only long
+5. **Resolved (2026-08-19 user ruling): consumed means the referencing entry leaves the live chain — sweep is tied to live-chain membership, so a rewind that resurrects the reference finds the blob alive.** **Ephemeral sweep timing.** `ArtifactLifetime::Ephemeral` is "retain only long
    enough to consume the settlement," and nothing currently defines *consumed*. Is
    it when the model's turn including the reference completes, or when the
    referencing entry leaves the live chain? The two differ after a rewind, and a

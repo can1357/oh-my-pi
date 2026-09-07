@@ -2053,13 +2053,14 @@ More than the assignment implies, which changes the shape of the work from
   `crates/session/src/projection.rs:167-176` and read back at
   `projection.rs:188-203`. `Firing` records, continuation
   refusals, and rewind reports use it rather than a parallel stamp; likewise
-  `Registry::projection_hash()` (`crates/tool/src/registry.rs:2688-2711`, blake3) is the
-  existing stable identity for the registered revisions and their projections, so nothing
-  new is needed to answer
-  "did the reachable capability set change" — with the caveat recorded above
-  that it currently digests *all* live identities, so it becomes a
-  model-advertised-subset identity only once the device split in
-  `docs/py/01-devices.md` lands.
+  `Registry::projection_hash()` (`crates/tool/src/registry.rs:2690-2711`, SHA-256) is the
+  existing stable identity for the registered revisions and their projections,
+  and it ships alongside the split the identity paragraph above records —
+  `slot_hash()` (`registry.rs:2623-2650`) is the model-advertised-subset
+  identity, and "did the reachable capability set change" is `device_hash()`'s
+  (`registry.rs:2654-2686`) question. The earlier caveat that one digest
+  covered *all* live identities until the device split in
+  `docs/py/01-devices.md` lands is already paid; nothing new is needed.
 - **The host protocol already exists.** `omp/toolhost/v1`
   (`crates/proto/proto/omp/toolhost/v1/toolhost.proto`) is a
   varint-length-delimited `HostFrame`/`WorkerFrame` pair with `request_id`

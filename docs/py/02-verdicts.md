@@ -1530,7 +1530,7 @@ following are load-bearing and shipped:
   walk documented above is `registry.rs:558-575` verbatim.
 - Harness-owned `Args`/`Aborted` projection, with `useless` forced false for both
   (`registry.rs:339-348`, `render_arg_issue` at `:603-632`, `render_abort` at `:634-646`).
-- `slot_hash()` — a BLAKE3-256 digest over the policy-resolved model-visible slots
+- `slot_hash()` — a SHA-256 digest over the policy-resolved model-visible slots
   (`registry.rs:2623-2650`), hashing only `Presentation::Slot` entries with
   model-callable routes. This is already the right primitive for detecting when
   the advertised set changed; `projection_hash()` (`registry.rs:2690-2711`) is the
@@ -1923,13 +1923,15 @@ Two non-obvious constraints:
   variant.** An amendment nobody understands should be inert, not fatal — that is already the
   rule everywhere else in this file, and the asymmetry looks like an oversight rather than a
   decision.
-- **Do not add a second allocation to the `live()` path.** `live()` returns a freshly
-  allocated `Vec<u64>` per call and is invoked per projection. Amendment application must not
-  add another pass over it. Plan the amendments once into a `SparseMap` keyed by target event
-  index plus a bitvec of dropped-projection targets, then have the single existing fold
-  consult it — treating an untouched event as a move, not a copy. Anything that walks
-  `live()` a second time to apply patches is the wrong shape under the workspace allocation
-  discipline.
+- **Do not add a second pass over the live chain.** Live membership is not a
+  materialized identity list: `live_chain(entries)` (`crates/journal/src/chain.rs:12-15`)
+  is a lazily-computed iterator over the tail-selected chain, so there is no
+  `Vec<u64>` allocation to amortize — and no excuse to walk the chain twice.
+  Plan the amendments once into a `SparseMap` keyed by target event index plus
+  a bitvec of dropped-projection targets, then have the single existing fold
+  consult it — treating an untouched event as a move, not a copy. Anything that
+  replays `live_chain` a second time to apply patches is the wrong shape under
+  the workspace allocation discipline.
 
 #### 6. Byte-stable replay (`crates/journal`, `crates/tool`)
 
@@ -2059,10 +2061,11 @@ verdict is retained. Structured verdicts make reports *diffable*; the rev makes 
   `flume::Sender` (`crates/tool/src/incoming.rs:5,54`); batched projection/lift frames ride
   the same mailbox discipline. Renderer output is a coalesced state push, so the TUI's frame
   loop never awaits Python.
-- **Cache-key hashing is BLAKE3 over `verdict ‖ caps ‖ rev ‖ projection_hash`**, matching
-  `live_hash`'s length-delimited style (`registry.rs:597-601`) so the digest is
-  unambiguous; build item 6 explains why omitting `projection_hash` (the
-  `artifact_digest`) is the subtle bug.
+- **Cache-key hashing is SHA-256 over `verdict ‖ caps ‖ rev ‖ projection_hash`**, matching
+  the shipped registry digests: `slot_hash()` and `projection_hash()`
+  (`registry.rs:2623-2711`) open a versioned domain string and feed
+  length-delimited fields, so the digest is unambiguous; build item 6 explains
+  why omitting `projection_hash` (the `artifact_digest`) is the subtle bug.
 - **The gate's cost is one comparison on the common path — but its peak memory is not
   bounded today.** `verdict_details` compares `json.len() <= inline_limit` and returns without
   touching the network (`lib.rs:467-469`), so the *inline* path is I/O-free as designed. What
