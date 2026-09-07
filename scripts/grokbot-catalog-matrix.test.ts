@@ -6,8 +6,10 @@ import {
 	idSafe,
 	isSoftPassToolFollowup,
 	matchesToolSmokeCall,
+	matrixRowFlag,
 	parseArgs,
 	readLikeShellCommand,
+	resolveExplicitMatrixIds,
 	splitMatrixIds,
 	toolSmokePrompt,
 	writeLikeShellCommand,
@@ -37,6 +39,29 @@ describe("parseArgs --ids", () => {
 	test("selects exactly one bracketed gpt-5.3-codex id", () => {
 		const args = parseArgs(["--ids", "gpt-5.3-codex[reasoning=medium,fast=false]"]);
 		expect(args.ids).toEqual(["gpt-5.3-codex[reasoning=medium,fast=false]"]);
+	});
+});
+
+describe("resolveExplicitMatrixIds", () => {
+	test("rejects missing catalog ids instead of silently dropping them", () => {
+		const live = new Set(["sand-default", "grok-4.6"]);
+		expect(resolveExplicitMatrixIds(["sand-default", "typo-model"], live)).toEqual({
+			missing: ["typo-model"],
+		});
+		expect(resolveExplicitMatrixIds(["sand-default", "grok-4.6"], live)).toEqual({
+			selected: ["sand-default", "grok-4.6"],
+		});
+	});
+});
+
+describe("matrixRowFlag", () => {
+	test("text failures on tool-gated rows still count as FAIL", () => {
+		expect(
+			matrixRowFlag({ skip: "catalog supports-tools=false", textPass: false, toolsPass: undefined }, "all"),
+		).toBe("FAIL");
+		expect(matrixRowFlag({ skip: "catalog supports-tools=false", textPass: true, toolsPass: undefined }, "all")).toBe(
+			"SKIP",
+		);
 	});
 });
 

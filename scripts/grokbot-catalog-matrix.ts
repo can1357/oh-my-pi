@@ -36,7 +36,9 @@ import {
 	idSafe,
 	isSoftPassToolFollowup,
 	matchesToolSmokeCall,
+	matrixRowFlag,
 	parseArgs,
+	resolveExplicitMatrixIds,
 	toolSmokePrompt,
 	type Mode,
 	type ToolSmokeKind,
@@ -351,11 +353,7 @@ async function mapPool<T, R>(items: T[], concurrency: number, fn: (item: T) => P
 }
 
 function printRow(row: Row, mode: Mode) {
-	const flag = row.skip
-		? "SKIP"
-		: row.toolsPass === false || (mode !== "tools" && row.textPass === false)
-			? "FAIL"
-			: "PASS";
+	const flag = matrixRowFlag(row, mode);
 	const extra = [
 		row.skip ?? "",
 		row.wireKind,
@@ -440,12 +438,21 @@ async function main() {
 	const byId = new Map<string, ModelSpec<"grokbot-sand">>();
 	for (const spec of specs) byId.set(spec.id, spec);
 
-	let selected = args.ids?.length
-		? args.ids.filter(id => byId.has(id))
-		: selectGrokbotMatrixIds(
-				specs.map(s => s.id),
-				args.slice,
-			);
+	let selected: string[];
+	if (args.ids?.length) {
+		const resolved = resolveExplicitMatrixIds(args.ids, new Set(byId.keys()));
+		if ("missing" in resolved) {
+			console.error(`GROKBOT_MATRIX_UNKNOWN_IDS ${resolved.missing.join(",")}`);
+			process.exitCode = 1;
+			return;
+		}
+		selected = resolved.selected;
+	} else {
+		selected = selectGrokbotMatrixIds(
+			specs.map(s => s.id),
+			args.slice,
+		);
+	}
 	if (args.limit && Number.isFinite(args.limit)) selected = selected.slice(0, args.limit);
 
 	console.log(
@@ -531,7 +538,7 @@ async function main() {
 		}
 	}
 
-	const textFail = rows.filter(r => r.textPass === false && !r.skip);
+	const textFail = rows.filter(r => r.textPass === false);
 	const toolsFail = rows.filter(r => r.toolsPass === false && !r.skip);
 	const skipped = rows.filter(r => r.skip);
 	const toolsPass = rows.filter(r => r.toolsPass === true);
@@ -561,11 +568,11 @@ async function main() {
 		console.log(`wrote ${args.json}`);
 	}
 
-	if (args.mode !== "text" && toolsFail.length) {
+	if (args.mode !== "tools" && textFail.length) {
 		process.exitCode = 1;
 		return;
 	}
-	if (args.mode === "text" && textFail.length) {
+	if (args.mode !== "text" && toolsFail.length) {
 		process.exitCode = 1;
 		return;
 	}

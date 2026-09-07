@@ -871,7 +871,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					// promotion — early flush cannot retract published deltas.
 					const block = output.content[event.contentIndex];
 					const text = block?.type === "text" && typeof block.text === "string" ? block.text : "";
-					if (!looksLikePromotableToolText(text)) flushAttemptEvents();
+					const hasPromotableThinking = output.content.some(
+						b =>
+							b.type === "thinking" && typeof b.thinking === "string" && looksLikePromotableToolText(b.thinking),
+					);
+					// Also hold while earlier thinking still looks promotable — flushing
+					// SendToUser text would publish thinking at index 0 that promotion
+					// later removes without remapping live consumers.
+					if (!looksLikePromotableToolText(text) && !hasPromotableThinking) flushAttemptEvents();
 				}
 			};
 
@@ -1488,15 +1495,37 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							const block = output.content[i];
 							if (block?.type === "text" || block?.type === "thinking") removedIndexes.add(i);
 						}
+						// Compacting content shifts retained SendToUser text left —
+						// remap buffered event indices so flush matches the final message.
+						const oldToNew = new Map<number, number>();
+						let nextIndex = 0;
+						for (let i = 0; i < output.content.length; i++) {
+							if (!removedIndexes.has(i)) oldToNew.set(i, nextIndex++);
+						}
 						output.content = output.content.filter((_, i) => !removedIndexes.has(i));
-						// Drop buffered thinking/text events for removed blocks before
-						// upsertTool flushes — otherwise ACP sees the JSON as reasoning
-						// at index 0 while the final transcript is only a tool call.
+						const remappedSendToUser = new Set<number>();
+						for (const idx of sendToUserTextIndexes) {
+							const mapped = oldToNew.get(idx);
+							if (mapped !== undefined) remappedSendToUser.add(mapped);
+						}
+						sendToUserTextIndexes.clear();
+						for (const idx of remappedSendToUser) sendToUserTextIndexes.add(idx);
 						if (removedIndexes.size > 0) {
-							attemptEventBuffer = attemptEventBuffer.filter(event => {
+							const remappedEvents: AssistantMessageEvent[] = [];
+							for (const event of attemptEventBuffer) {
 								const idx = "contentIndex" in event ? event.contentIndex : undefined;
-								return typeof idx !== "number" || !removedIndexes.has(idx);
-							});
+								if (typeof idx !== "number") {
+									remappedEvents.push(event);
+									continue;
+								}
+								if (removedIndexes.has(idx)) continue;
+								const mapped = oldToNew.get(idx);
+								if (mapped === undefined) continue;
+								remappedEvents.push(
+									mapped === idx ? event : ({ ...event, contentIndex: mapped } as AssistantMessageEvent),
+								);
+							}
+							attemptEventBuffer = remappedEvents;
 						}
 						upsertTool({
 							toolCallId: `call_json_${crypto.randomUUID()}`,

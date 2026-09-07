@@ -85,6 +85,8 @@
 - Grok Bot synthesizes `usage.totalTokens` from input+output+cacheRead+cacheWrite when `extendedUsage` omits a total.
 - Grok Bot product Read/Write schemas treat `target_file` / `contents` as required-field alternatives via `anyOf`.
 - Grok Bot parent-chat keeps synthetic SendToUser text out of JSON-as-text tool promotion (user-visible examples stay text).
+- Grok Bot remaps retained SendToUser event indices when promoting thinking JSON to a tool call, and holds flush while promotable thinking remains.
+- Grok Bot catalog matrix rejects unknown `--ids` and counts text failures on tool-gated (supportsTools=false) rows.
 
 ### Fixed
 

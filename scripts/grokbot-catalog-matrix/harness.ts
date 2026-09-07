@@ -83,6 +83,29 @@ export function parseArgs(argv: string[]): MatrixArgs {
 	};
 }
 
+/**
+ * Resolve `--ids` against the live catalog. Missing ids must fail the gate —
+ * silently dropping them can yield an empty PASS.
+ */
+export function resolveExplicitMatrixIds(
+	requested: readonly string[],
+	liveIds: ReadonlySet<string>,
+): { selected: string[] } | { missing: string[] } {
+	const missing = requested.filter(id => !liveIds.has(id));
+	if (missing.length > 0) return { missing };
+	return { selected: [...requested] };
+}
+
+/** Row status for matrix printing: text failures beat tool-skip labels. */
+export function matrixRowFlag(
+	row: { skip?: string; textPass?: boolean; toolsPass?: boolean },
+	mode: Mode,
+): "PASS" | "FAIL" | "SKIP" {
+	if (row.toolsPass === false || (mode !== "tools" && row.textPass === false)) return "FAIL";
+	if (row.skip) return "SKIP";
+	return "PASS";
+}
+
 export function idSafe(id: string): string {
 	return id.replace(/[^a-zA-Z0-9._-]+/g, "-").slice(0, 80);
 }

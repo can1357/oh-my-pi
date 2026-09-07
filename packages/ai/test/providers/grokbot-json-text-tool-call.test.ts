@@ -852,6 +852,91 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
 	});
 
+	test("promotes thinking JSON while remapping retained SendToUser text indices", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const parent = buildModel({
+			id: "sand-default",
+			name: "sand-default",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandToolsWire: "parent-chat",
+			sandParameterIds: [],
+		});
+		const thinking = frameConnectProto(
+			encodeInferenceStreamResponse({
+				thinkingPart: {
+					text: '```json\n{"name":"Shell","arguments":{"command":"echo from-thought"}}\n```',
+					isFinal: true,
+				},
+			}),
+		);
+		const sendToUser = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu-after-thought",
+					toolName: "SendToUser",
+					args: '{"type":"text","content":"visible-after-thought"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(thinking, sendToUser, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "run", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const stream = streamGrokBot(parent as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+		});
+		const events: Array<{ type: string; contentIndex?: number }> = [];
+		for await (const event of stream) {
+			if (
+				event.type === "thinking_start" ||
+				event.type === "thinking_delta" ||
+				event.type === "thinking_end" ||
+				event.type === "text_start" ||
+				event.type === "text_delta" ||
+				event.type === "text_end" ||
+				event.type === "toolcall_start" ||
+				event.type === "toolcall_end"
+			) {
+				events.push({
+					type: event.type,
+					contentIndex: "contentIndex" in event ? event.contentIndex : undefined,
+				});
+			}
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({ type: "text", text: "visible-after-thought" }),
+			expect.objectContaining({
+				type: "toolCall",
+				name: "bash",
+				arguments: expect.objectContaining({ command: "echo from-thought" }),
+			}),
+		]);
+		// Retained SendToUser text lifecycle must land at compacted index 0, not stale 1.
+		expect(events.some(e => e.type.startsWith("text_") && e.contentIndex === 0)).toBe(true);
+		expect(events.some(e => e.type.startsWith("thinking_"))).toBe(false);
+	});
+
 	test("extension-owned SendToUser is dispatched as a tool call", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
