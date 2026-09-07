@@ -16,6 +16,7 @@ import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
 import { invalidate as invalidateFsCache, readDirEntries, readFile } from "../capability/fs";
+import type { MCPServer } from "../capability/mcp";
 import {
 	MAIN_AGENT_RULE_NAME,
 	parseRuleAgents,
@@ -209,6 +210,23 @@ export function parseMCPToolFilterEntry(serverName: string, value: unknown): str
 		return undefined;
 	}
 	return filtered.length > 0 ? filtered : undefined;
+}
+
+/**
+ * Parse both per-server tool filters in one step, for spreading into an
+ * `MCPServer` object: `...parseMCPToolFilters(name, config)`. Undefined
+ * members are omitted, so the spread adds only configured filters.
+ */
+export function parseMCPToolFilters(
+	serverName: string,
+	config: { enabledTools?: unknown; disabledTools?: unknown },
+): Pick<MCPServer, "enabledTools" | "disabledTools"> {
+	const enabledTools = parseMCPToolFilterEntry(serverName, config.enabledTools);
+	const disabledTools = parseMCPToolFilterEntry(serverName, config.disabledTools);
+	return {
+		...(enabledTools !== undefined && { enabledTools }),
+		...(disabledTools !== undefined && { disabledTools }),
+	};
 }
 
 /**

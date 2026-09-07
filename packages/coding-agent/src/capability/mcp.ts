@@ -5,7 +5,6 @@
  * All providers translate their native format to this shape.
  */
 
-import { mcpToolFilterKey } from "../mcp/tool-filter";
 import type { MCPRequestIdFormat } from "../mcp/types";
 import { defineCapability } from ".";
 import type { SourceMeta } from "./types";
@@ -81,9 +80,11 @@ export function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean 
 	if (!Bun.deepEquals(left.auth, right.auth) || !Bun.deepEquals(left.oauth, right.oauth)) return false;
 	// Filter members determine which tools a connection contributes; compare
 	// normalized (unique, sorted) so alias order/duplicates dedup to one.
+	const filterMembers = (list: readonly string[] | undefined) =>
+		list?.length ? [...new Set(list)].sort() : undefined;
 	if (
-		mcpToolFilterKey(left.enabledTools, left.disabledTools) !==
-		mcpToolFilterKey(right.enabledTools, right.disabledTools)
+		!Bun.deepEquals(filterMembers(left.enabledTools), filterMembers(right.enabledTools)) ||
+		!Bun.deepEquals(filterMembers(left.disabledTools), filterMembers(right.disabledTools))
 	) {
 		return false;
 	}

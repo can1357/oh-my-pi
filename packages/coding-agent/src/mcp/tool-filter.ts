@@ -75,7 +75,7 @@ export interface MCPToolFilterResult {
  * is treated as a literal by picomatch, keeping every entry's semantics
  * uniform regardless of whether it also contains `*`/`?`.
  */
-const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true } as const;
+const MATCH_OPTIONS = { dot: true, nonegate: true, noextglob: true, windows: false } as const;
 
 /** The code character a transliterated `/` is replaced with (see rationale above). */
 const SLASH_CODE = "§";
@@ -205,19 +205,4 @@ export function applyMCPToolFilter(
 
 	const allowedSet = new Set(allowed);
 	return tools.filter(t => allowedSet.has(t.name));
-}
-
-/**
- * Normalized comparison key for the filter of a server: unique members, sorted.
- * Two alias configs with the same members in any order/duplicates have
- * identical filtering behavior and must dedup to a single connection.
- */
-export function mcpToolFilterKey(
-	enabledTools: readonly string[] | undefined,
-	disabledTools: readonly string[] | undefined,
-): string {
-	return JSON.stringify([
-		enabledTools?.length ? [...new Set(enabledTools)].sort() : null,
-		disabledTools?.length ? [...new Set(disabledTools)].sort() : null,
-	]);
 }

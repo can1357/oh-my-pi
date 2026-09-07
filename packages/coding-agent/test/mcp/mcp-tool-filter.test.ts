@@ -14,7 +14,7 @@
  *   description, annotations, and original ordering.
  */
 import { expect, test } from "bun:test";
-import { applyMCPToolFilter, filterMCPTools, mcpToolFilterKey } from "../../src/mcp/tool-filter";
+import { applyMCPToolFilter, filterMCPTools } from "../../src/mcp/tool-filter";
 import type { MCPToolDefinition } from "../../src/mcp/types";
 
 const NAMES = ["search", "read_channel", "send_message", "create_doc", "admin/delete"];
@@ -100,17 +100,6 @@ test("picomatch classes agree with standard glob semantics", () => {
 	expect(run(["}ax", "ax"], ["[}]].*"]).allowed).toEqual([]);
 });
 
-test("normalized filter key collapses alias filter sets for connection dedup", () => {
-	expect(mcpToolFilterKey(["b", "a"], undefined)).toBe(mcpToolFilterKey(["a", "b", "a"], undefined));
-	expect(mcpToolFilterKey(undefined, ["x"])).toBe(mcpToolFilterKey(undefined, ["x"]));
-	expect(mcpToolFilterKey(["a"], undefined)).not.toBe(mcpToolFilterKey(undefined, ["a"]));
-});
-
-test("filter key treats absent and empty filters as equal", () => {
-	expect(mcpToolFilterKey(undefined, undefined)).toBe(mcpToolFilterKey([], undefined));
-	expect(mcpToolFilterKey(undefined, undefined)).toBe(mcpToolFilterKey(undefined, []));
-});
-
 test("applyMCPToolFilter preserves tool definitions and schemas", () => {
 	const defs: MCPToolDefinition[] = [
 		{
@@ -180,22 +169,22 @@ test("slash encoding is injective (sentinel-carrying names cannot collide with s
 	expect(run(["admin¤delete", "admin§delete"], ["admin§delete"]).allowed).toEqual(["admin§delete"]);
 });
 
-test("valid classes still match after the slash-class guard", () => {
-	expect(run(["file_1", "file_a"], ["file_[0-9]"]).allowed).toEqual(["file_1"]);
-	expect(run(NAMES, ["admin/*"]).allowed).toEqual(["admin/delete"]);
-	// Negated classes without a slash member are unaffected.
-	expect(run(["file_a", "file_b"], ["file_[^a]"]).allowed).toEqual(["file_b"]);
+test("matching is host-independent: windows separators never alter semantics", () => {
+	// picomatch auto-injects `windows: true` on win32 hosts when the option is
+	// unset, making `*`/`?`/negated classes treat `\` as a path separator. Tool
+	// names are opaque strings, so the matcher must behave identically there:
+	expect(run(["a\\b"], ["a*"]).allowed).toEqual(["a\\b"]);
+	expect(run(["a\\b"], ["a?b"]).allowed).toEqual(["a\\b"]);
+	expect(run(["a\\b"], ["a[^x]b"]).allowed).toEqual(["a\\b"]);
 });
 
-test("a literal slash BETWEEN classes is not over-rejected (multi-class pattern stays routable)", () => {
-	// `[a]/[b]` is a valid documented glob: class, literal `/`, class. The guard
-	// must detect a slash INSIDE one class only, not across the `[`…`]` span.
+test("a literal slash between classes routes (class, literal /, class)", () => {
 	expect(run(["a/1", "a/b"], ["a/[12]"]).allowed).toEqual(["a/1"]);
 	expect(run(["x/y"], ["[a-z]/[a-z]"]).allowed).toEqual(["x/y"]);
 });
 
 test("an escaped open bracket is a literal, so a slash after it is outside any class", () => {
 	// `foo\[/bar*` must match `foo[/bar1` — \[ is a literal char, the slash is
-	// outside any class, so the pattern is routable and NOT flagged unsupported.
+	// outside any class, and picomatch's own parser resolves the escape.
 	expect(run(["foo[/bar1", "foo[/bar2"], ["foo\\[/bar*"]).allowed).toEqual(["foo[/bar1", "foo[/bar2"]);
 });
