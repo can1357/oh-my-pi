@@ -6,7 +6,7 @@ import {
 	resolveCloudSttModel,
 	startCloudSttStream,
 } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
-import { STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
+import { resolveSttCloudKey, STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 function sine16kHz(length = 1600): Float32Array {
@@ -177,5 +177,27 @@ describe("cloud backend in STTController", () => {
 		} finally {
 			controller.dispose();
 		}
+	});
+});
+
+describe("resolveSttCloudKey", () => {
+	function registry(codex: string | undefined, openai: string | undefined) {
+		return {
+			async getApiKeyForProvider(provider: string): Promise<string | undefined> {
+				return provider === "openai-codex" ? codex : openai;
+			},
+		};
+	}
+
+	it("prefers the ChatGPT subscription over the API key", async () => {
+		await expect(resolveSttCloudKey(registry("sub-token", "sk-key"), "s1")).resolves.toBe("sub-token");
+	});
+
+	it("falls back to the API key without a subscription", async () => {
+		await expect(resolveSttCloudKey(registry(undefined, "sk-key"), "s1")).resolves.toBe("sk-key");
+	});
+
+	it("resolves nothing without any credential", async () => {
+		await expect(resolveSttCloudKey(registry(undefined, undefined), "s1")).resolves.toBeUndefined();
 	});
 });
