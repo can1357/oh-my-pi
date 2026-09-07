@@ -35,7 +35,7 @@ export class LspLinterClient implements LinterClient {
 
 	async format(filePath: string, content: string): Promise<string> {
 		const client = await this.#getClient();
-		const uri = fileToUri(filePath);
+		const uri = fileToUri(filePath, client.cwd);
 
 		// Sync content to LSP
 		await syncContent(client, filePath, content);
@@ -61,7 +61,7 @@ export class LspLinterClient implements LinterClient {
 
 	async lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]> {
 		const client = await this.#getClient(signal);
-		const uri = fileToUri(filePath);
+		const uri = fileToUri(filePath, client.cwd);
 
 		// Notify that file was saved to trigger diagnostics
 		await notifySaved(client, filePath, signal);

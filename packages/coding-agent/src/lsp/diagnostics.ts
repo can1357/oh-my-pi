@@ -3,7 +3,13 @@ import path from "node:path";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { formatPathRelativeToCwd } from "../tools/path-utils";
 import { throwIfAborted } from "../tools/tool-errors";
-import { getOrCreateClient, sendRequest, supportsDocumentDiagnostics, waitForProjectLoaded } from "./client";
+import {
+	getOrCreateClient,
+	type LspClientOwner,
+	sendRequest,
+	supportsDocumentDiagnostics,
+	waitForProjectLoaded,
+} from "./client";
 import { getLinterClient } from "./clients";
 import { hasRootMarkerAncestor } from "./config";
 import { applyTextEditsToString } from "./edits";
@@ -356,6 +362,7 @@ interface GetDiagnosticsForFileOptions {
 	 * {@link DIAGNOSTICS_PIPELINE_GRACE_MS}. Exposed as a test seam.
 	 */
 	pipelineBudgetMs?: number;
+	owner?: LspClientOwner;
 }
 
 /**
@@ -367,12 +374,13 @@ export async function captureDiagnosticVersions(
 	servers: Array<[string, ServerConfig]>,
 	initTimeoutMs?: number,
 	signal?: AbortSignal,
+	owner?: LspClientOwner,
 ): Promise<ServerVersionMap> {
 	const versions = new Map<string, number>();
 	await Promise.allSettled(
 		servers.map(async ([serverName, serverConfig]) => {
 			if (serverConfig.createClient) return;
-			const client = await getOrCreateClient(serverConfig, cwd, initTimeoutMs, signal);
+			const client = await getOrCreateClient(serverConfig, cwd, initTimeoutMs, signal, owner);
 			versions.set(serverName, client.diagnosticsVersion);
 		}),
 	);
@@ -384,12 +392,13 @@ export async function captureOpenFileVersions(
 	cwd: string,
 	servers: Array<[string, ServerConfig]>,
 	signal?: AbortSignal,
+	owner?: LspClientOwner,
 ): Promise<ServerVersionMap> {
-	const uri = fileToUri(absolutePath);
 	const versions = new Map<string, number>();
 	await Promise.allSettled(
 		servers.map(async ([serverName, serverConfig]) => {
-			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
+			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal, owner);
+			const uri = fileToUri(absolutePath, serverConfig.resolvedRoot ?? client.cwd);
 			const version = client.openFiles.get(uri)?.version;
 			if (version !== undefined) {
 				versions.set(serverName, version);
@@ -414,14 +423,13 @@ export async function getDiagnosticsForFile(
 	servers: Array<[string, ServerConfig]>,
 	options: GetDiagnosticsForFileOptions = {},
 ): Promise<FileDiagnosticsResult | undefined> {
-	const { signal, minVersions, expectedDocumentVersions, timeoutMs } = options;
+	const { signal, minVersions, expectedDocumentVersions, timeoutMs, owner } = options;
 	if (servers.length === 0) {
 		return undefined;
 	}
 	const waitBudgetMs = timeoutMs ?? SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
 	const pipelineBudgetMs = options.pipelineBudgetMs ?? waitBudgetMs + DIAGNOSTICS_PIPELINE_GRACE_MS;
 
-	const uri = fileToUri(absolutePath);
 	const relPath = formatPathRelativeToCwd(absolutePath, cwd);
 	const allDiagnostics: Diagnostic[] = [];
 	const serverNames: string[] = [];
@@ -442,19 +450,19 @@ export async function getDiagnosticsForFile(
 				throwIfAborted(boundSignal);
 				// Use custom linter client if configured
 				if (serverConfig.createClient) {
-					const linterClient = getLinterClient(serverName, serverConfig, cwd);
+					const linterClient = getLinterClient(serverName, serverConfig, serverConfig.resolvedRoot ?? cwd);
 					const diagnostics = await linterClient.lint(absolutePath, boundSignal);
 					return { serverName, serverConfig, diagnostics };
 				}
 
 				// Default: use LSP
-				const client = await getOrCreateClient(serverConfig, cwd, undefined, boundSignal);
+				const client = await getOrCreateClient(serverConfig, cwd, undefined, boundSignal, owner);
 				throwIfAborted(boundSignal);
 				if (isProjectAwareLspServer(serverConfig)) {
 					await waitForProjectLoaded(client, boundSignal);
 					throwIfAborted(boundSignal);
 				}
-				// Content already synced + didSave sent, wait for fresh diagnostics
+				const uri = fileToUri(absolutePath, serverConfig.resolvedRoot ?? client.cwd);
 				const minVersion = minVersions?.get(serverName);
 				const expectedDocumentVersion = expectedDocumentVersions?.get(serverName);
 				const diagnostics = await waitForDiagnostics(client, uri, {
@@ -552,37 +560,33 @@ export async function formatContent(
 	cwd: string,
 	servers: Array<[string, ServerConfig]>,
 	signal?: AbortSignal,
+	owner?: LspClientOwner,
 ): Promise<FormatContentResult> {
 	if (servers.length === 0) {
 		// No formatters configured at all
 		return { content, failed: false, unsupported: true };
 	}
 
-	const uri = fileToUri(absolutePath);
 	let hadFailure = false;
 
 	for (const [serverName, serverConfig] of servers) {
 		try {
 			throwIfAborted(signal);
-			// Use custom linter client if configured
 			if (serverConfig.createClient) {
-				const linterClient = getLinterClient(serverName, serverConfig, cwd);
+				const linterClient = getLinterClient(serverName, serverConfig, serverConfig.resolvedRoot ?? cwd);
 				const formattedContent = await linterClient.format(absolutePath, content);
 				return { content: formattedContent, failed: false, unsupported: false };
 			}
 
-			// Default: use LSP. Initialization failures are formatter failures;
-			// a successfully initialized server without formatting support is unsupported.
-			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
+			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal, owner);
 			throwIfAborted(signal);
 
 			const caps = client.serverCapabilities;
 			if (!caps?.documentFormattingProvider) {
-				// Server exists but doesn't support formatting; not a failure
 				continue;
 			}
 
-			// Request formatting (content already synced)
+			const uri = fileToUri(absolutePath, serverConfig.resolvedRoot ?? client.cwd);
 			const edits = (await sendRequest(
 				client,
 				"textDocument/formatting",

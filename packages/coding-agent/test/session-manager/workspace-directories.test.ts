@@ -6,8 +6,10 @@ import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manage
 import {
 	additionalWorkspaceDirectories,
 	normalizeSessionWorkspace,
+	workspaceContainsPath,
+	workspaceRootForPath,
 } from "@oh-my-pi/pi-coding-agent/session/session-workspace";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { resolveEquivalentPath, TempDir } from "@oh-my-pi/pi-utils";
 import { makeAssistantMessage } from "./helpers";
 
 describe("normalizeSessionWorkspace", () => {
@@ -38,6 +40,128 @@ describe("additionalWorkspaceDirectories", () => {
 	it("is empty for a single-root workspace", () => {
 		const workspace = normalizeSessionWorkspace({ cwd: "/a" });
 		expect(additionalWorkspaceDirectories(workspace)).toEqual([]);
+	});
+});
+
+describe("workspaceRootForPath", () => {
+	it("returns the longest matching workspace directory", () => {
+		const workspace = normalizeSessionWorkspace({
+			cwd: "/repo",
+			directories: ["/repo/apps", "/other"],
+		});
+		expect(workspaceRootForPath("/repo/apps/web/src/a.ts", workspace)).toBe(path.resolve("/repo/apps"));
+		expect(workspaceRootForPath("/repo/src/a.ts", workspace)).toBe(path.resolve("/repo"));
+		expect(workspaceRootForPath("/other/lib/b.ts", workspace)).toBe(path.resolve("/other"));
+	});
+
+	it("does not treat a path outside every workspace directory as contained", () => {
+		const workspace = normalizeSessionWorkspace({ cwd: "/repo", directories: ["/other"] });
+		expect(workspaceRootForPath("/home/user/secret.py", workspace)).toBeNull();
+	});
+
+	it("matches a canonical file path when the workspace was opened through a symlink", () => {
+		using tempDir = TempDir.createSync("@pi-session-workspace-symlink-");
+		const realRoot = tempDir.path();
+		const linkRoot = path.join(path.dirname(realRoot), `${path.basename(realRoot)}-link`);
+		fs.symlinkSync(realRoot, linkRoot);
+		try {
+			const filePath = path.join(realRoot, "src", "a.ts");
+			fs.mkdirSync(path.dirname(filePath), { recursive: true });
+			fs.writeFileSync(filePath, "export const a = 1;\n");
+			const workspace = normalizeSessionWorkspace({ cwd: linkRoot });
+			expect(workspaceRootForPath(filePath, workspace)).toBe(path.resolve(linkRoot));
+		} finally {
+			fs.rmSync(linkRoot, { force: true });
+		}
+	});
+
+	it("matches a not-yet-created file when the workspace was opened through a symlink", () => {
+		using tempDir = TempDir.createSync("@pi-session-workspace-symlink-new-");
+		const realRoot = tempDir.path();
+		const linkRoot = path.join(path.dirname(realRoot), `${path.basename(realRoot)}-link`);
+		fs.symlinkSync(realRoot, linkRoot);
+		try {
+			const filePath = path.join(linkRoot, "src", "new.ts");
+			const workspace = normalizeSessionWorkspace({ cwd: linkRoot });
+			expect(workspaceRootForPath(filePath, workspace)).toBe(path.resolve(linkRoot));
+		} finally {
+			fs.rmSync(linkRoot, { force: true });
+		}
+	});
+
+	it("prefers a nested additional workspace over a longer symlink cwd", () => {
+		using tempDir = TempDir.createSync("@pi-session-workspace-symlink-rank-");
+		const realOuter = tempDir.path();
+		const nested = path.join(realOuter, "pkg");
+		fs.mkdirSync(nested, { recursive: true });
+		const filePath = path.join(nested, "src", "a.ts");
+		fs.mkdirSync(path.dirname(filePath), { recursive: true });
+		fs.writeFileSync(filePath, "export const a = 1;\n");
+		const linkRoot = path.join(path.dirname(realOuter), `${path.basename(realOuter)}-very-long-symlink-alias`);
+		fs.symlinkSync(realOuter, linkRoot);
+		try {
+			expect(linkRoot.length).toBeGreaterThan(nested.length);
+			const workspace = normalizeSessionWorkspace({ cwd: linkRoot, directories: [nested] });
+			expect(workspaceRootForPath(filePath, workspace)).toBe(path.resolve(nested));
+			expect(workspaceRootForPath(path.join(linkRoot, "pkg", "src", "a.ts"), workspace)).toBe(path.resolve(nested));
+		} finally {
+			fs.rmSync(linkRoot, { force: true });
+		}
+	});
+
+	it("prefers a lexically nested symlink additional workspace over a longer cwd", () => {
+		using cwdDir = TempDir.createSync("@pi-session-workspace-lexical-cwd-");
+		using targetDir = TempDir.createSync("@pi-ws-t-");
+		const cwd = path.join(cwdDir.path(), "very-long-session-cwd-alias");
+		fs.mkdirSync(cwd);
+		const nestedLink = path.join(cwd, "pkg");
+		fs.symlinkSync(targetDir.path(), nestedLink);
+		fs.mkdirSync(path.join(targetDir.path(), "src"), { recursive: true });
+		fs.writeFileSync(path.join(targetDir.path(), "src", "a.ts"), "export const a = 1;\n");
+		const filePath = path.join(nestedLink, "src", "a.ts");
+		expect(resolveEquivalentPath(nestedLink).length).toBeLessThan(path.resolve(cwd).length);
+		const workspace = normalizeSessionWorkspace({ cwd, directories: [nestedLink] });
+		expect(workspaceRootForPath(filePath, workspace)).toBe(path.resolve(nestedLink));
+	});
+
+	it("keeps a leaf symlink file inside the workspace", () => {
+		using tempDir = TempDir.createSync("@pi-session-workspace-leaf-symlink-");
+		using shared = TempDir.createSync("@pi-session-workspace-leaf-shared-");
+		const sharedFile = path.join(shared.path(), "shared.ts");
+		fs.writeFileSync(sharedFile, "export const shared = 1;\n");
+		const alias = path.join(tempDir.path(), "src", "alias.ts");
+		fs.mkdirSync(path.dirname(alias), { recursive: true });
+		fs.symlinkSync(sharedFile, alias);
+		const workspace = normalizeSessionWorkspace({ cwd: tempDir.path() });
+		expect(workspaceRootForPath(alias, workspace)).toBe(path.resolve(tempDir.path()));
+		expect(workspaceRootForPath(sharedFile, workspace)).toBeNull();
+	});
+
+	it("workspaceContainsPath keeps a leaf symlink inside the directory", () => {
+		using tempDir = TempDir.createSync("@pi-session-workspace-contains-leaf-");
+		using shared = TempDir.createSync("@pi-session-workspace-contains-leaf-shared-");
+		const sharedFile = path.join(shared.path(), "shared.ts");
+		fs.writeFileSync(sharedFile, "export const shared = 1;\n");
+		const alias = path.join(tempDir.path(), "src", "alias.ts");
+		fs.mkdirSync(path.dirname(alias), { recursive: true });
+		fs.symlinkSync(sharedFile, alias);
+		expect(workspaceContainsPath(tempDir.path(), alias)).toBe(true);
+		expect(workspaceContainsPath(tempDir.path(), sharedFile)).toBe(false);
+	});
+
+	it("keeps a directory symlink inside the workspace", () => {
+		using tempDir = TempDir.createSync("@pi-session-workspace-dir-symlink-");
+		using shared = TempDir.createSync("@pi-session-workspace-dir-symlink-shared-");
+		const sharedFile = path.join(shared.path(), "foo.ts");
+		fs.writeFileSync(sharedFile, "export const foo = 1;\n");
+		const aliasDir = path.join(tempDir.path(), "src");
+		fs.symlinkSync(shared.path(), aliasDir);
+		const alias = path.join(aliasDir, "foo.ts");
+		const workspace = normalizeSessionWorkspace({ cwd: tempDir.path() });
+		expect(workspaceContainsPath(tempDir.path(), alias)).toBe(true);
+		expect(workspaceRootForPath(alias, workspace)).toBe(path.resolve(tempDir.path()));
+		expect(workspaceContainsPath(tempDir.path(), sharedFile)).toBe(false);
+		expect(workspaceRootForPath(sharedFile, workspace)).toBeNull();
 	});
 });
 

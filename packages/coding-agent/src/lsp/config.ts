@@ -5,6 +5,7 @@ import { $which, isRecord, logger, pathIsWithin, type WhichOptions } from "@oh-m
 import { YAML } from "bun";
 import { getConfigDirPaths } from "../config";
 import { type ClaudePluginRoot, getPreloadedPluginRoots } from "../discovery/helpers";
+import { normalizeSessionWorkspace, workspaceContainsPath, workspaceRootForPath } from "../session/session-workspace";
 import { BiomeClient } from "./clients/biome-client";
 import { SwiftLintClient } from "./clients/swiftlint-client";
 import DEFAULTS from "./defaults.json" with { type: "json" };
@@ -12,8 +13,21 @@ import type { ServerConfig } from "./types";
 
 export interface LspConfig {
 	servers: Record<string, ServerConfig>;
+	/**
+	 * All non-disabled server definitions for this session, including servers
+	 * whose root markers are not present at the session cwd. Startup discovery
+	 * and `lsp status` use `servers`; concrete-file routing uses this catalog.
+	 */
+	definitions?: Record<string, ServerConfig>;
 	/** Idle timeout in milliseconds. If set, LSP clients will be shutdown after this period of inactivity. Disabled by default. */
 	idleTimeoutMs?: number;
+}
+
+/** A server rooted at a concrete language-project directory for one file. */
+export interface ResolvedLspServer {
+	name: string;
+	config: ServerConfig;
+	root: string;
 }
 
 // =============================================================================
@@ -209,12 +223,35 @@ export function hasRootMarkers(cwd: string, markers: string[]): boolean {
  */
 export function hasRootMarkerAncestor(filePath: string, markers: string[]): boolean {
 	if (markers.length === 0) return false;
+	return findServerRoot(filePath, markers) !== null;
+}
 
-	let dir = path.dirname(path.resolve(filePath));
+/**
+ * Nearest ancestor of `filePath` that contains one of `markers`, bounded by
+ * `workspaceRoots` (session cwd plus additional directories). Without roots,
+ * the walk is unbounded — used only for diagnostic filtering, not server spawn.
+ */
+export function findServerRoot(filePath: string, markers: string[], workspaceRoots?: readonly string[]): string | null {
+	const resolvedFile = path.resolve(filePath);
+	const startDir = path.dirname(resolvedFile);
+	const boundary =
+		workspaceRoots && workspaceRoots.length > 0
+			? workspaceRootForPath(
+					resolvedFile,
+					normalizeSessionWorkspace({ cwd: workspaceRoots[0], directories: workspaceRoots.slice(1) }),
+				)
+			: null;
+	if (workspaceRoots && workspaceRoots.length > 0 && !boundary) return null;
+	if (markers.length === 0) return boundary ?? startDir;
+	if (markers.includes(".")) return boundary ?? startDir;
+
+	let dir = startDir;
 	while (true) {
-		if (hasRootMarkers(dir, markers)) return true;
+		if (boundary && !workspaceContainsPath(boundary, dir)) return null;
+		if (hasRootMarkers(dir, markers)) return dir;
+		if (boundary && dir === boundary) return null;
 		const parent = path.dirname(dir);
-		if (parent === dir) return false;
+		if (parent === dir) return null;
 		dir = parent;
 	}
 }
@@ -505,11 +542,14 @@ export function loadConfig(cwd: string): LspConfig {
 	}
 
 	// Filter to servers whose project markers exist and whose binary resolves (local or $PATH)
+	const catalog = applyRuntimeDefaults(mergedServers);
+	const definitions: Record<string, ServerConfig> = {};
 	const servers: Record<string, ServerConfig> = {};
-	const candidates = applyRuntimeDefaults(mergedServers);
-	for (const name in candidates) {
-		const config = candidates[name];
+
+	for (const name in catalog) {
+		const config = catalog[name];
 		if (config.disabled) continue;
+		definitions[name] = config;
 		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
 		const resolved = resolveCommand(config.command, cwd);
 		if (!resolved) continue;
@@ -517,7 +557,7 @@ export function loadConfig(cwd: string): LspConfig {
 	}
 	selectTypescriptServer(servers);
 
-	return { servers, idleTimeoutMs };
+	return { servers, definitions, idleTimeoutMs };
 }
 
 // =============================================================================
@@ -527,14 +567,93 @@ export function loadConfig(cwd: string): LspConfig {
 /**
  * Find all servers that can handle a file based on extension.
  * Returns servers sorted with primary (non-linter) servers first.
+ *
+ * When `workspaceRoots` is provided, candidates come from the session catalog
+ * (`definitions`, falling back to `servers`) and each match is rooted at the
+ * nearest ancestor that contains that server's `rootMarkers`, bounded by those
+ * workspace directories. Project-local binaries are resolved from that nested
+ * root. Without `workspaceRoots`, matching stays on `config.servers` as before.
  */
-export function getServersForFile(config: LspConfig, filePath: string): Array<[string, ServerConfig]> {
+export function getServersForFile(
+	config: LspConfig,
+	filePath: string,
+	workspaceRoots?: readonly string[],
+): Array<[string, ServerConfig]> {
+	if (workspaceRoots && workspaceRoots.length > 0 && config.definitions) {
+		return resolveServersForFile(config, filePath, workspaceRoots).map(server => [server.name, server.config]);
+	}
+	if (workspaceRoots && workspaceRoots.length > 0) {
+		return matchServersForFile(config.servers, filePath).map(([name, serverConfig]) => [
+			name,
+			{ ...serverConfig, resolvedRoot: serverConfig.resolvedRoot ?? workspaceRoots[0] },
+		]);
+	}
+	return matchServersForFile(config.servers, filePath).map(([name, serverConfig]) => [name, { ...serverConfig }]);
+}
+
+/**
+ * Find the primary server for a file (prefers type-checkers over linters).
+ * Used for operations like definition, hover, references that need type intelligence.
+ */
+export function getServerForFile(
+	config: LspConfig,
+	filePath: string,
+	workspaceRoots?: readonly string[],
+): [string, ServerConfig] | null {
+	const servers = getServersForFile(config, filePath, workspaceRoots);
+	return servers.length > 0 ? servers[0] : null;
+}
+
+/**
+ * Resolve matching language servers for a concrete file, rooted at the nearest
+ * nested project that contains that server's root markers.
+ */
+export function resolveServersForFile(
+	config: LspConfig,
+	filePath: string,
+	workspaceRoots: readonly string[],
+): ResolvedLspServer[] {
+	const workspace = normalizeSessionWorkspace({ cwd: workspaceRoots[0], directories: workspaceRoots.slice(1) });
+	const boundary = workspaceRootForPath(path.resolve(filePath), workspace);
+	if (!boundary) return [];
+
+	const catalog = config.definitions ?? config.servers;
+	const resolved: ResolvedLspServer[] = [];
+	for (const [name, definition] of matchServersForFile(catalog, filePath)) {
+		const root = findServerRoot(filePath, definition.rootMarkers, workspaceRoots);
+		if (!root) continue;
+
+		const localRoots = root === boundary ? [root] : [root, boundary];
+		const primaryResolvedCommand = boundary === workspace.cwd ? config.servers[name]?.resolvedCommand : undefined;
+		const resolvedCommand =
+			resolveCommand(definition.command, root, { localRoots }) ??
+			primaryResolvedCommand ??
+			definition.resolvedCommand;
+		if (!resolvedCommand) continue;
+
+		resolved.push({
+			name,
+			root,
+			config: {
+				...definition,
+				resolvedCommand,
+				resolvedRoot: root,
+			},
+		});
+	}
+
+	const selected = Object.fromEntries(resolved.map(server => [server.name, server.config]));
+	selectTypescriptServer(selected);
+	return resolved.filter(server => selected[server.name]);
+}
+
+function matchServersForFile(servers: Record<string, ServerConfig>, filePath: string): Array<[string, ServerConfig]> {
 	const ext = path.extname(filePath).toLowerCase();
 	const extNoDot = ext.startsWith(".") ? ext.slice(1) : ext;
 	const fileName = path.basename(filePath).toLowerCase();
 	const matches: Array<[string, ServerConfig]> = [];
 
-	for (const [name, serverConfig] of Object.entries(config.servers)) {
+	for (const [name, serverConfig] of Object.entries(servers)) {
 		const supportsFile = serverConfig.fileTypes.some(fileType => {
 			// Accept both `.ts` and `ts` forms in user config / fixtures so a
 			// missing dot in `fileTypes` doesn't silently exclude the server
@@ -554,21 +673,11 @@ export function getServersForFile(config: LspConfig, filePath: string): Array<[s
 		}
 	}
 
-	// Sort: primary servers (non-linters) first, then linters
 	return matches.sort((a, b) => {
 		const aIsLinter = a[1].isLinter ? 1 : 0;
 		const bIsLinter = b[1].isLinter ? 1 : 0;
 		return aIsLinter - bIsLinter;
 	});
-}
-
-/**
- * Find the primary server for a file (prefers type-checkers over linters).
- * Used for operations like definition, hover, references that need type intelligence.
- */
-export function getServerForFile(config: LspConfig, filePath: string): [string, ServerConfig] | null {
-	const servers = getServersForFile(config, filePath);
-	return servers.length > 0 ? servers[0] : null;
 }
 
 /**

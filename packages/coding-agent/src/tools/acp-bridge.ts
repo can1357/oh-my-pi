@@ -9,6 +9,7 @@
  */
 
 import { FileChangeType, notifyWorkspaceWatchedFiles } from "../lsp/client";
+import { sessionWorkspaceDirectories } from "../session/session-workspace";
 import type { ToolSession } from ".";
 import { invalidateFsScanAfterWrite } from "./fs-cache-invalidation";
 import { isInternalUrlPath } from "./path-utils";
@@ -97,7 +98,11 @@ export async function routeWriteThroughBridge(
 		throw new ToolError(error instanceof Error ? error.message : String(error));
 	}
 	if (session.enableLsp ?? true) {
-		await notifyWorkspaceWatchedFiles(session.cwd, [{ filePath: absolutePath, type: changeType }], signal);
+		await notifyWorkspaceWatchedFiles(
+			sessionWorkspaceDirectories(session.cwd, session.additionalDirectories),
+			[{ filePath: absolutePath, type: changeType }],
+			signal,
+		);
 	}
 	invalidateFsScanAfterWrite(absolutePath);
 	session.bumpFileMutationVersion?.(absolutePath);

@@ -39,12 +39,13 @@ function createCwdContext(sourceDir: string, isStreaming = false, showImages = t
 		session: {
 			isStreaming,
 			executeBash,
+			moveSession: vi.fn(async (cwd: string) => {
+				state.cwd = cwd;
+			}),
+			commitMovedWorkspaceRoots: vi.fn(async () => {}),
 		},
 		sessionManager: {
 			getCwd: () => state.cwd,
-			moveTo: vi.fn(async (cwd: string) => {
-				state.cwd = cwd;
-			}),
 			captureState: vi.fn(() => ({ cwd: state.cwd, sessionDir: "/tmp/bash-sessions" })),
 			restoreState: vi.fn((snapshot: { cwd: string }) => {
 				state.cwd = snapshot.cwd;
@@ -162,6 +163,13 @@ describe("bash shortcut command", () => {
 
 			expect(state.cwd).toBe(sourceDir);
 			expect(state.executedCwds).toEqual([sourceDir, childDir, sourceDir]);
+			expect(ctx.session.moveSession).toHaveBeenNthCalledWith(1, childDir, undefined, {
+				deferWorkspaceCleanup: true,
+			});
+			expect(ctx.session.moveSession).toHaveBeenNthCalledWith(2, sourceDir, undefined, {
+				deferWorkspaceCleanup: true,
+			});
+			expect(ctx.session.commitMovedWorkspaceRoots).toHaveBeenCalledTimes(2);
 			expect(executeBash).toHaveBeenCalledTimes(3);
 			expect(executeBash).toHaveBeenNthCalledWith(1, "cd child", expect.any(Function), {
 				excludeFromContext: false,
@@ -216,6 +224,7 @@ describe("bash shortcut command", () => {
 			await controller.handleBashCommand("pushd child >/dev/null");
 
 			expect(state.cwd).toBe(sourceDir);
+			expect(ctx.session.moveSession).not.toHaveBeenCalled();
 			expect(state.executedCwds).toEqual([sourceDir]);
 			expect(executeBash).toHaveBeenCalledTimes(1);
 			expect(ctx.applyCwdChange).not.toHaveBeenCalled();

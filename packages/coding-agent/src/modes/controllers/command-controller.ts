@@ -1278,7 +1278,7 @@ export class CommandController {
 
 		const previousState = this.ctx.sessionManager.captureState();
 		try {
-			await this.ctx.session.moveSession(resolvedPath);
+			await this.ctx.session.moveSession(resolvedPath, undefined, { deferWorkspaceCleanup: true });
 		} catch (err) {
 			this.ctx.showError(`Move failed: ${err instanceof Error ? err.message : String(err)}`);
 			return false;
@@ -1288,12 +1288,15 @@ export class CommandController {
 			applied = await this.ctx.applyCwdChange(resolvedPath);
 		} catch (error) {
 			await this.#restoreAfterMoveFailure(previousState, error);
+			await this.ctx.session.commitMovedWorkspaceRoots();
 			return false;
 		}
 		if (!applied) {
 			await this.#restoreAfterMoveFailure(previousState);
+			await this.ctx.session.commitMovedWorkspaceRoots();
 			return false;
 		}
+		await this.ctx.session.commitMovedWorkspaceRoots();
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
@@ -1383,18 +1386,21 @@ export class CommandController {
 
 	async #moveInteractiveCwd(resolvedPath: string): Promise<void> {
 		const previousState = this.ctx.sessionManager.captureState();
-		await this.ctx.sessionManager.moveTo(resolvedPath);
+		await this.ctx.session.moveSession(resolvedPath, undefined, { deferWorkspaceCleanup: true });
 		let applied = false;
 		try {
 			applied = await this.ctx.applyCwdChange(resolvedPath);
 		} catch (error) {
 			await this.#restoreAfterMoveFailure(previousState, error);
+			await this.ctx.session.commitMovedWorkspaceRoots();
 			return;
 		}
 		if (!applied) {
 			await this.#restoreAfterMoveFailure(previousState);
+			await this.ctx.session.commitMovedWorkspaceRoots();
 			return;
 		}
+		await this.ctx.session.commitMovedWorkspaceRoots();
 
 		this.ctx.updateEditorBorderColor();
 		await this.ctx.reloadTodos();
