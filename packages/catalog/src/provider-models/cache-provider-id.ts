@@ -92,9 +92,15 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// switching `COPILOT_GITHUB_TOKEN` to a different account misses the
 			// prior endpoint's cache and re-runs discovery instead of hitting the
 			// stale host and 403ing (PR #8510 review).
+			// v2: rows cached before the cross-provider routing strip inherit
+			// Cursor collapsed-family wire ids (e.g. enterprise-only
+			// `gpt-5.6-sol-fast` pinned to `-none-fast`); use a fresh namespace
+			// so they refetch instead of serving the poisoned rows. Listing ids
+			// cannot cover this class — any enterprise-only sibling can carry
+			// another provider's routing — so version the namespace instead.
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `github-copilot:models-v1:${Bun.hash(scope).toString(36)}`;
+			return `github-copilot:models-v2:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";
