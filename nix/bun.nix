@@ -1121,6 +1121,10 @@
     url = "https://registry.npmjs.org/@types/node/-/node-26.4.1.tgz";
     hash = "sha512-k97ENvZWtvA6yqz5/FS6a7duDgOPEeOQOc2iKS/nY6mX6qJUKtLnWzQS+Xj6tXweyj6ZcTAK2Qecetnvi9nCLA==";
   };
+  "@types/picomatch@4.0.3" = fetchurl {
+    url = "https://registry.npmjs.org/@types/picomatch/-/picomatch-4.0.3.tgz";
+    hash = "sha512-iG0T6+nYJ9FAPmx9SsUlnwcq1ZVRuCXcVEvWnntoPlrOpwtSTKNDC9uVAxTsC3PUvJ+99n4RpAcNgBbHX3JSnQ==";
+  };
   "@types/react-dom@19.2.7" = fetchurl {
     url = "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.2.7.tgz";
     hash = "sha512-I8bPpDLcHBv1qiIiXDCy71Rt8eQDKJP0sMSWJphDdAcdqiJ1sGpZamavoEIRZmYzjia9LuEb2HlYdDpmoENpvQ==";
