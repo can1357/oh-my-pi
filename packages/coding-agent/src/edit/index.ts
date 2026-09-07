@@ -679,8 +679,8 @@ export class EditTool implements AgentTool<TInput> {
 		invalidateFsScanAfterWrite(request.path);
 		this.session.bumpFileMutationVersion?.(request.path);
 		return {
-			written: request.content,
-			diagnosticsJson: diagnostics ? JSON.stringify(diagnostics) : undefined,
+			written: diagnostics.finalContent,
+			diagnosticsJson: diagnostics.diagnostics ? JSON.stringify(diagnostics.diagnostics) : undefined,
 		};
 	}
 }

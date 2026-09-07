@@ -13,6 +13,13 @@ const CLOSE_TO_OPEN: Record<string, string> = {
 	"}": "{",
 };
 
+/**
+ * Lines containing any of these characters need char-by-char scanning when
+ * the scanner is in code mode: brackets, string quotes, or comment markers.
+ * Anything else can neither add boundaries nor change scanner state.
+ */
+const LINE_SCAN_PATTERN = /[()[\]{}'"`/#]/;
+
 export interface LineSpan {
 	startLine: number;
 	endLine: number;
@@ -164,10 +171,18 @@ function lexicalBracketContext(fullLines: readonly string[], visible: ReadonlySe
 	const stack: StackEntry[] = [];
 	let mode: ScannerMode = "code";
 	let escaped = false;
-
+	// Set when the single pass below sees a bracket opener outside strings
+	// and comments. Without one, no boundary lines can exist and the trailing
+	// visible-line sweep is skipped.
+	let sawBracket = false;
 	for (let lineIndex = 0; lineIndex < fullLines.length; lineIndex++) {
-		const lineNumber = lineIndex + 1;
 		const line = fullLines[lineIndex] ?? "";
+		// In code mode a line without brackets, quotes, or comment markers can
+		// neither add boundaries nor change scanner state: skip it char-by-char
+		// cost without a separate pre-scan pass. Other modes still scan every
+		// line so multi-line strings and block comments track their end.
+		if (mode === "code" && !LINE_SCAN_PATTERN.test(line)) continue;
+		const lineNumber = lineIndex + 1;
 		const lineVisible = visible.has(lineNumber);
 		let index = 0;
 		while (index < line.length) {
@@ -233,6 +248,7 @@ function lexicalBracketContext(fullLines: readonly string[], visible: ReadonlySe
 			}
 
 			if (OPEN_TO_CLOSE[ch]) {
+				sawBracket = true;
 				stack.push({ opener: ch, lineNumber, text: line, visible: lineVisible });
 				index++;
 				continue;
@@ -258,8 +274,9 @@ function lexicalBracketContext(fullLines: readonly string[], visible: ReadonlySe
 			escaped = false;
 		}
 	}
-
-	for (const lineNumber of visible) context.delete(lineNumber);
+	// No openers outside strings/comments means no boundary lines exist;
+	// skip the visible-line sweep entirely.
+	if (sawBracket) for (const lineNumber of visible) context.delete(lineNumber);
 	return context;
 }
 

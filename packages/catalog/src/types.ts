@@ -1121,6 +1121,8 @@ export interface Model<TApi extends Api = Api> {
 	/** Premium Copilot requests charged per user-initiated request (defaults to 1). */
 	premiumMultiplier?: number;
 	contextWindow: number | null;
+	/** Optional larger prompt window available when extended context is enabled. */
+	maxContextWindow?: number;
 	maxTokens: number | null;
 	/**
 	 * When `true`, providers MUST omit `max_output_tokens` (Responses) /
