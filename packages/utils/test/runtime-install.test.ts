@@ -1,9 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import * as fsSync from "node:fs";
 import * as fs from "node:fs/promises";
 import * as Module from "node:module";
 import * as os from "node:os";
 import * as path from "node:path";
+import { isEnoent } from "../src/fs-error";
 import {
+	ensureRuntimeInstalled,
 	installRuntimeModuleResolver,
 	resolveRuntimeModule,
 	splitBareSpecifier,
@@ -238,4 +241,170 @@ describe("writeRuntimeManifest", () => {
 		const empty = await readManifest({ dependencies: { "kokoro-js": "1.2.1" }, overrides: {} });
 		expect("overrides" in empty).toBe(false);
 	});
+});
+
+// Contract under test: ensureRuntimeInstalled serializes installs with the
+// crash-safe OS-backed lock (issue #10120). A lock left behind by a process
+// that died mid-install must not wedge later attempts, and the pre-18.x
+// `${runtimeDir}.lock` mkdir *directory* must not permanently break the new
+// file-backed lock path.
+describe("ensureRuntimeInstalled install lock", () => {
+	// A local `file:` dependency keeps the real `bun install` offline and
+	// deterministic — no registry, no network.
+	async function makeFileDependency(): Promise<{ spec: string; probe: string }> {
+		const src = await fs.mkdtemp(path.join(os.tmpdir(), "omp-runtime-dep-"));
+		tempDirs.push(src);
+		await fs.writeFile(
+			path.join(src, "package.json"),
+			JSON.stringify({ name: "omp-runtime-fixture", version: "1.0.0" }),
+		);
+		return { spec: `file:${src}`, probe: "omp-runtime-fixture" };
+	}
+
+	async function makeRuntimeDir(): Promise<string> {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-runtime-cache-"));
+		tempDirs.push(root);
+		return path.join(root, "cache", "fixture-runtime");
+	}
+
+	test("a stale legacy .lock directory does not block install and is cleared", async () => {
+		const { spec, probe } = await makeFileDependency();
+		const runtimeDir = await makeRuntimeDir();
+		// A pre-18.x crash orphan, older than any live install: reclaimed at once.
+		await fs.mkdir(`${runtimeDir}.lock`, { recursive: true });
+		const stale = new Date(Date.now() - 60 * 60_000);
+		await fs.utimes(`${runtimeDir}.lock`, stale, stale);
+
+		await ensureRuntimeInstalled({
+			runtimeDir,
+			install: { dependencies: { [probe]: spec } },
+			probePackage: probe,
+			lockAttempts: 8,
+			lockSleepMs: 50,
+		});
+
+		expect(await Bun.file(path.join(runtimeDir, "node_modules", probe, "package.json")).exists()).toBe(true);
+		await expect(fs.stat(`${runtimeDir}.lock`)).rejects.toThrow();
+	}, 15_000);
+
+	test("a live legacy .lock owner is waited out, never reclaimed on retry exhaustion", async () => {
+		const { spec, probe } = await makeFileDependency();
+		const runtimeDir = await makeRuntimeDir();
+		// A recently created directory may still belong to a live pre-18.x
+		// installer. Retry exhaustion must NOT reclaim it — that would race two
+		// installs against the same tree — only its owner releasing the lock may
+		// let the new install proceed.
+		await fs.mkdir(`${runtimeDir}.lock`, { recursive: true });
+
+		const sleepMs = 40;
+		const install = ensureRuntimeInstalled({
+			runtimeDir,
+			install: { dependencies: { [probe]: spec } },
+			probePackage: probe,
+			lockAttempts: 3,
+			lockSleepMs: sleepMs,
+		});
+
+		// Integration timing: the reclaim decision runs on the module's own
+		// `Bun.sleep` poll loop and a real `bun install` subprocess, so fake
+		// timers cannot drive it. Wait past the retry window (lockAttempts x
+		// lockSleepMs) — under the old bug the install would have reclaimed the
+		// fresh lock and populated node_modules by now; it must not have.
+		await Bun.sleep(sleepMs * 8);
+		expect((await fs.stat(`${runtimeDir}.lock`)).isDirectory()).toBe(true);
+		expect(await Bun.file(path.join(runtimeDir, "node_modules", probe, "package.json")).exists()).toBe(false);
+
+		// The legacy owner finishes and releases; only now does the install proceed.
+		await fs.rm(`${runtimeDir}.lock`, { recursive: true, force: true });
+		await install;
+		expect(await Bun.file(path.join(runtimeDir, "node_modules", probe, "package.json")).exists()).toBe(true);
+		await expect(fs.stat(`${runtimeDir}.lock`)).rejects.toThrow();
+	}, 15_000);
+
+	test("reserves the legacy namespace before the new install starts", async () => {
+		const { spec, probe } = await makeFileDependency();
+		const runtimeDir = await makeRuntimeDir();
+		let observedDownload = false;
+
+		await ensureRuntimeInstalled({
+			runtimeDir,
+			install: { dependencies: { [probe]: spec } },
+			probePackage: probe,
+			lockAttempts: 8,
+			lockSleepMs: 50,
+			onPhase: phase => {
+				if (phase !== "download") return;
+				observedDownload = true;
+				// A legacy process racing in after the handoff must lose its
+				// atomic mkdir before the new process mutates node_modules.
+				expect(() => fsSync.mkdirSync(`${runtimeDir}.lock`)).toThrow();
+			},
+		});
+
+		expect(observedDownload).toBe(true);
+		expect(await Bun.file(path.join(runtimeDir, "node_modules", probe, "package.json")).exists()).toBe(true);
+		await expect(fs.stat(`${runtimeDir}.lock`)).rejects.toThrow();
+	}, 15_000);
+
+	test("a crashed installer does not wedge a later install", async () => {
+		const { spec, probe } = await makeFileDependency();
+		const runtimeDir = await makeRuntimeDir();
+		await fs.mkdir(path.dirname(runtimeDir), { recursive: true });
+		const readyPath = `${runtimeDir}.holder-ready`;
+		// Enter the real ensureRuntimeInstalled critical section, including its
+		// legacy namespace reservation, then die before bun install starts.
+		const holder = Bun.spawn(
+			[
+				process.execPath,
+				path.join(import.meta.dir, "fixtures/runtime-install-holder.ts"),
+				runtimeDir,
+				spec,
+				readyPath,
+			],
+			{
+				cwd: path.resolve(import.meta.dir, "../../.."),
+				env: { HOME: process.env.HOME ?? "", PATH: process.env.PATH ?? "" },
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "pipe",
+			},
+		);
+
+		try {
+			for (;;) {
+				try {
+					await fs.access(readyPath);
+					break;
+				} catch (error) {
+					if (!isEnoent(error)) throw error;
+					if (holder.exitCode !== null) {
+						throw new Error(
+							`runtime installer exited before readiness (${holder.exitCode}): ${await new Response(holder.stderr).text()}`,
+						);
+					}
+				}
+			}
+			expect((await fs.stat(`${runtimeDir}.lock`)).isFile()).toBe(true);
+
+			holder.kill("SIGKILL");
+			await holder.exited;
+
+			// The kernel released the OS lock; the identifiable compatibility
+			// reservation must not turn this real crash into another long wait.
+			await ensureRuntimeInstalled({
+				runtimeDir,
+				install: { dependencies: { [probe]: spec } },
+				probePackage: probe,
+				lockAttempts: 20,
+				lockSleepMs: 50,
+			});
+			expect(await Bun.file(path.join(runtimeDir, "node_modules", probe, "package.json")).exists()).toBe(true);
+			await expect(fs.stat(`${runtimeDir}.lock`)).rejects.toThrow();
+		} finally {
+			if (holder.exitCode === null) {
+				holder.kill("SIGKILL");
+				await holder.exited;
+			}
+		}
+	}, 20_000);
 });

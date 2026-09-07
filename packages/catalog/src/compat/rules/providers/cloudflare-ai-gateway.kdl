@@ -1,0 +1,26 @@
+// Provider-wire compat for "cloudflare-ai-gateway"; regenerated from the frozen census using deployment contract selectors.
+
+provider "cloudflare-ai-gateway" {
+	// residue: the bare `deepseek/*` namespace rides the Anthropic route, whose
+	// ladder is the generic five-tier scale, unlike the workers-ai chat rows.
+	models "deepseek/*" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	class "anthropic" {
+		revision ">=4 <4.6" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "workers-ai/@cf/nvidia/nemotron-3-120b-a12b" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	// residue: the reasoning-suffixed Grok SKU cannot disable thinking.
+	models "xai/grok-4.20-0309-reasoning" {
+		thinking-requires-effort #true
+	}
+}

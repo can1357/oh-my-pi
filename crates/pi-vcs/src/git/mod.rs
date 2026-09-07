@@ -130,6 +130,18 @@ impl GitRepo {
 		relative_prefix(&self.info.repo_root, dir)
 	}
 }
+
+/// Pin the worktree index mtime to reproduce same-tick snapshot races in tests.
+#[cfg(test)]
+pub(crate) fn pin_index_mtime(repo: &GitRepo) {
+	let pinned = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_700_000_000);
+	std::fs::File::options()
+		.write(true)
+		.open(repo.info().git_dir.join("index"))
+		.expect("open index")
+		.set_modified(pinned)
+		.expect("pin index mtime");
+}
 /// Discover repository metadata for `dir` without opening gitoxide.
 pub fn discover_info(dir: &Path) -> Result<Option<GitRepoInfo>> {
 	let mut current = std::path::absolute(dir)?;

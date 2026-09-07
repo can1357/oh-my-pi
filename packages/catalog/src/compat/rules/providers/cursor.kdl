@@ -1,0 +1,52 @@
+// Provider-wire compat for "cursor"; regenerated from the frozen census using deployment contract selectors.
+
+provider "cursor" {
+	thinking-mode "effort"
+	class "anthropic" {
+		family "fable" {
+			requires-cursor-tool-schema-projection #true
+		}
+	}
+	// GetUsableModels advertises no input modalities or context windows.
+	// K3 (including the bare `k3` alias Cursor serves) is natively
+	// multimodal and 1M-context.
+	class "kimi" {
+		family "k3" {
+			input-modalities "text" "image"
+			context-window-floor 1000000
+		}
+	}
+	models "k3" "*/k3" {
+		input-modalities "text" "image"
+		context-window-floor 1000000
+	}
+	// Cursor-only families verified to accept selectedImages even though the
+	// roster carries no modality metadata.
+	models "cursor-grok-4" "cursor-grok-4.*" "cursor-grok-4-*" "cursor-grok-4:*" "cursor-grok-4_*" {
+		input-modalities "text" "image"
+	}
+	models "composer-2.5" "composer-2.5.*" "composer-2.5-*" "composer-2.5:*" "composer-2.5_*" {
+		input-modalities "text" "image"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "claude-4.6-opus" {
+		thinking-efforts "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "claude-fable-5" "claude-opus-4-7" "claude-opus-4-8" "claude-sonnet-5" {
+		thinking-efforts "low" "medium" "high" "xhigh" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "claude-opus-4*fast" "gpt-5.1-codex-max*" "claude-opus-5-high-fast" \
+		"claude-opus-5-low-fast" "claude-opus-5-medium-fast" "gpt-5-mini" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "claude-opus-5" {
+		thinking-efforts "low" "medium" "high"
+	}
+	// residue: Cursor's Gemini 3.7 Flash lane drops the minimal tier.
+	models "gemini-3.7-flash*" {
+		thinking-efforts "low" "medium" "high"
+	}
+}

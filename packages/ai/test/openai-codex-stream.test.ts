@@ -407,7 +407,7 @@ describe("openai-codex streaming", () => {
 		expect(requestHeaders?.get("Authorization")).toBe("Bearer opaque-proxy-key");
 		expect(requestHeaders?.has("chatgpt-account-id")).toBe(false);
 		expect(requestHeaders?.get("OpenAI-Beta")).toBe("responses=experimental");
-		expect(requestHeaders?.get("originator")).toBe("pi");
+		expect(requestHeaders?.get("originator")).toBe("omp");
 		// An opaque proxy key is not a JWT, so no residency claim to declare.
 		expect(requestHeaders?.has("x-openai-internal-codex-residency")).toBe(false);
 	});
@@ -529,7 +529,7 @@ describe("openai-codex streaming", () => {
 		expect(capturedHeaders?.authorization).toBe("Bearer opaque-proxy-key");
 		expect(capturedHeaders?.["chatgpt-account-id"]).toBeUndefined();
 		expect(capturedHeaders?.["openai-beta"]).toBe("responses_websockets=2026-02-06");
-		expect(capturedHeaders?.originator).toBe("pi");
+		expect(capturedHeaders?.originator).toBe("omp");
 		expect(capturedHeaders?.["x-openai-internal-codex-residency"]).toBeUndefined();
 	});
 
@@ -1915,7 +1915,7 @@ describe("openai-codex streaming", () => {
 				expect(headers?.get("Authorization")).toBe(`Bearer ${token}`);
 				expect(headers?.get("chatgpt-account-id")).toBe("acc_test");
 				expect(headers?.get("OpenAI-Beta")).toBe("responses=experimental");
-				expect(headers?.get("originator")).toBe("pi");
+				expect(headers?.get("originator")).toBe("omp");
 				expect(headers?.get("accept")).toBe("text/event-stream");
 				expect(headers?.has("x-api-key")).toBe(false);
 				return new Response(stream, {
@@ -1972,7 +1972,7 @@ describe("openai-codex streaming", () => {
 		expect(sawDone).toBe(true);
 	});
 
-	it("includes the default service_tier in SSE payloads when requested", async () => {
+	it("includes the default service_tier in SSE payloads and the routing hint header when requested", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 
@@ -1982,6 +1982,7 @@ describe("openai-codex streaming", () => {
 		).toBase64();
 		const token = `aaa.${payload}.bbb`;
 		let capturedBody: Record<string, unknown> | undefined;
+		let capturedHeaders: Headers | undefined;
 
 		const sse = `${[
 			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] } })}`,
@@ -1992,6 +1993,7 @@ describe("openai-codex streaming", () => {
 		].join("\n\n")}\n\n`;
 		const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
 			capturedBody = JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>;
+			capturedHeaders = new Headers(init?.headers);
 			return new Response(sse, {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },
@@ -2023,9 +2025,67 @@ describe("openai-codex streaming", () => {
 		}).result();
 		expect(result.stopReason).toBe("stop");
 		expect(capturedBody?.service_tier).toBe("default");
+		// codex-rs `x-codex-routing-hint`: model plus the explicit tier.
+		expect(capturedHeaders?.get("x-codex-routing-hint")).toBe("model=gpt-5.1-codex;tier=default");
 		expect(result.usage.cost.input).toBeCloseTo(0.00001);
 		expect(result.usage.cost.output).toBeCloseTo(0.000012);
 		expect(result.usage.cost.total).toBeCloseTo(0.000022);
+	});
+	it("bills priority turns at the model's baked serviceTierCost multiplier (gpt-5.5 = 2.5x)", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+			"utf8",
+		).toBase64();
+		const token = `aaa.${payload}.bbb`;
+
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", service_tier: "priority", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock: FetchImpl = async () =>
+			new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+
+		const context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+		const spec: Omit<ModelSpec<"openai-codex-responses">, "id"> = {
+			name: "Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+
+		// gpt-5.5: the exact `service-tier-cost` rule bakes { flex: 0.5, priority: 2.5 }.
+		const tiered = buildModel({ ...spec, id: "gpt-5.5" });
+		expect(tiered.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5 });
+		const tieredResult = await streamOpenAICodexResponses(tiered, context, {
+			fetch: fetchMock,
+			apiKey: token,
+			serviceTier: "priority",
+		}).result();
+		// 5 input tokens at $1/MTok * 2.5, 3 output at $2/MTok * 2.5.
+		expect(tieredResult.usage.cost.input).toBeCloseTo(0.0000125);
+		expect(tieredResult.usage.cost.output).toBeCloseTo(0.000015);
+
+		// Other Codex models inherit the provider-root { flex: 0.5, priority: 2 } rule.
+		const generic = buildModel({ ...spec, id: "gpt-5.1-codex" });
+		expect(generic.serviceTierCost).toEqual({ flex: 0.5, priority: 2 });
+		const genericResult = await streamOpenAICodexResponses(generic, context, {
+			fetch: fetchMock,
+			apiKey: token,
+			serviceTier: "priority",
+		}).result();
+		expect(genericResult.usage.cost.input).toBeCloseTo(0.00001);
+		expect(genericResult.usage.cost.output).toBeCloseTo(0.000012);
 	});
 
 	it("fails truncated SSE streams that never emit a terminal response event", async () => {
@@ -5230,7 +5290,6 @@ describe("openai-codex streaming", () => {
 
 		const sentTypesByConnection: string[][] = [];
 		let constructorCount = 0;
-		let abortSecondRequest: (() => void) | undefined;
 
 		class AbortResetWebSocket extends MockWebSocket {
 			#connectionIndex: number;
@@ -5318,7 +5377,7 @@ describe("openai-codex streaming", () => {
 		expect(firstResult.role).toBe("assistant");
 
 		const secondAbortController = new AbortController();
-		abortSecondRequest = () => {
+		const abortSecondRequest = () => {
 			secondAbortController.abort();
 		};
 		const secondResult = await streamOpenAICodexResponses(model, secondContext, {

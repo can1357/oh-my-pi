@@ -75,7 +75,51 @@ export interface SessionServiceTierChangeEntry {
 	serviceTier: ServiceTierByFamily | ServiceTier | null;
 }
 
-export type SessionEntry = SessionHeader | SessionMessageEntry | SessionServiceTierChangeEntry | { type: string };
+export interface SessionModelUsageEntry {
+	type: "model_usage";
+	id: string;
+	parentId: string | null;
+	timestamp: string;
+	purpose: string;
+	role?: string;
+	api: string;
+	provider: string;
+	model: string;
+	usage: Usage;
+	stopReason?: StopReason;
+	errorMessage?: string;
+}
+
+/**
+ * Custom journal entry (`tool_execution_start`, `session_exit`, …). Mirrors
+ * the coding-agent shape structurally — stats never imports coding-agent.
+ */
+export interface SessionCustomEntry {
+	type: "custom";
+	id?: string;
+	parentId?: string | null;
+	timestamp?: string;
+	customType: string;
+	data?: Record<string, unknown>;
+}
+
+/** Structural variants the trace builder matches on beyond messages. */
+export interface SessionTypedEntry {
+	type: "session_init" | "compaction" | "model_change" | "mode_change" | "reset_boundary";
+	id?: string;
+	parentId?: string | null;
+	timestamp?: string;
+	[key: string]: unknown;
+}
+
+export type SessionEntry =
+	| SessionHeader
+	| SessionMessageEntry
+	| SessionServiceTierChangeEntry
+	| SessionModelUsageEntry
+	| SessionCustomEntry
+	| SessionTypedEntry
+	| { type: string };
 
 /**
  * Behavioral stats extracted from a single user message.

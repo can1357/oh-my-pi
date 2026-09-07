@@ -78,7 +78,13 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 		const composer = priced[2];
 		if (!paid || !oauth || !composer) throw new Error("xAI pricing policy dropped a model");
 
-		expect(paid.cost.longContext).toEqual({
+		// The >200K tier is rule-owned (`classes/xai.kdl` multiplier axis) and
+		// derives in buildModel from the mirrored base price.
+		expect(oauth.cost).toEqual(paid.cost);
+		expect(composer.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		const genPaid = buildModel(paid);
+		expect(buildModel(composer).cost.longContext).toBeUndefined();
+		expect(genPaid.cost.longContext).toEqual({
 			inputThreshold: 200_000,
 			inputThresholdInclusive: true,
 			input: 4,
@@ -86,8 +92,8 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 			cacheRead: 0.6,
 			cacheWrite: 0,
 		});
-		expect(oauth.cost).toEqual(paid.cost);
-		expect(composer.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+		const genOauth = buildModel(oauth);
+		expect(genOauth.cost).toEqual(genPaid.cost);
 
 		const usage: Usage = {
 			input: 100_000,
@@ -97,7 +103,7 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 			totalTokens: 201_000,
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
 		};
-		calculateCost(buildModel(oauth), usage);
+		calculateCost(genOauth, usage);
 		expect(usage.cost.input).toBeCloseTo(0.4, 10);
 		expect(usage.cost.output).toBeCloseTo(0.012, 10);
 		expect(usage.cost.cacheRead).toBeCloseTo(0.06, 10);
@@ -122,7 +128,8 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 		const [paid, oauth] = applyXaiCatalogPricing([paidSpec, oauthSpec]);
 		if (!paid || !oauth) throw new Error("xAI pricing policy dropped a model");
 
-		expect(paid.cost.longContext).toEqual({
+		expect(oauth.cost).toEqual(paid.cost);
+		expect(buildModel(paid).cost.longContext).toEqual({
 			inputThreshold: 200_000,
 			inputThresholdInclusive: true,
 			input: 4,
@@ -130,7 +137,7 @@ describe("paid xai (XAI_API_KEY) Responses contract", () => {
 			cacheRead: 0.4,
 			cacheWrite: 0,
 		});
-		expect(oauth.cost).toEqual(paid.cost);
+		expect(buildModel(oauth).cost).toEqual(buildModel(paid).cost);
 	});
 
 	it("drops stale Chat Completions cache rows so Responses takes effect immediately", async () => {

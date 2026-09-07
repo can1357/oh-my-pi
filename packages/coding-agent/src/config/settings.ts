@@ -11,6 +11,7 @@
  *   const isolated = Settings.isolated({ "compaction.enabled": false });
  */
 
+import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import * as fs from "node:fs";
 import * as os from "node:os";
@@ -38,9 +39,9 @@ import { isLightTheme, setAutoThemeMapping, setColorBlindMode, setSymbolPreset }
 import { AgentStorage } from "../session/agent-storage";
 import { type CompactionMethod, DEFAULT_COMPACTION_METHOD_ORDER } from "../session/compaction-methods";
 import { AUTO_IMAGE_PROVIDER_ORDER, isImageProviderId } from "../tools/image-providers";
+import { applyHyperlinkSetting } from "../tui/hyperlink";
 import { replaceFileAtomically } from "../utils/atomic-file";
 import { type EditMode, normalizeEditMode } from "../utils/edit-mode";
-import { INSPECT_IMAGE_MODES } from "../utils/inspect-image-mode";
 import { isSearchProviderId, SEARCH_PROVIDER_ORDER } from "../web/search/types";
 import { stringifyYamlConfig } from "./config-file";
 import {
@@ -264,7 +265,7 @@ export function validateProviderMaxInFlightRequests(value: unknown): Record<stri
 	return normalized;
 }
 
-const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders"]);
+const PATH_SCOPED_ARRAY_SETTINGS = new Set<SettingPath>(["enabledModels", "disabledProviders", "enabledProviders"]);
 type PathScopedStringArrayEntry = {
 	path?: unknown;
 	paths?: unknown;
@@ -427,6 +428,44 @@ function resolvePathScopedStringArray(settingPath: SettingPath, value: unknown, 
 	return resolved;
 }
 
+/**
+ * Upper bound on symlink hops while resolving a dangling config chain by hand.
+ * `realpath()` already rejects a fully-linked cycle with ELOOP; this caps the
+ * manual walk so a chain that turns cyclic AFTER realpath reported ENOENT (a
+ * concurrent retarget mid-walk) surfaces a bounded ELOOP instead of spinning
+ * forever. Matches Linux's MAXSYMLINKS (40).
+ */
+const MAX_SYMLINK_HOPS = 40;
+
+/**
+ * Split a dangling symlink target into the physical path segments the flush
+ * walk should follow. Two platform-correctness rules that a naive
+ * `target.split(/[\\/]+/)` gets wrong:
+ *
+ *  1. Root double-count. An ABSOLUTE target seeds the accumulator at
+ *     `parse(target).root` — `C:\` on Windows, the `\\server\share\` prefix of
+ *     a UNC path, `/` on POSIX. The root must therefore be STRIPPED from the
+ *     string before splitting; otherwise it is re-emitted as a leading segment
+ *     and `C:\managed\final.yml` resolves to `C:\` + `C:` + `managed` + … =
+ *     `C:\C:\managed\final.yml`, so the flush fails against a dangling absolute
+ *     link on Windows. (POSIX escaped this by luck: the leading `/` splits to an
+ *     empty leading segment that the walk already skips.) A RELATIVE target
+ *     seeds at the link's real parent dir and keeps every segment unchanged.
+ *  2. Separator set. `\` is a separator only on Windows. On POSIX it is a valid
+ *     filename character, so a target literally named `managed\config.yml` must
+ *     stay ONE segment, not two. Split on the platform separator set: `/` only
+ *     on POSIX, `/` or `\` on Windows. Keyed off `pathApi.sep` so the rule is
+ *     driven by the platform, not a hardcoded cross-platform class.
+ *
+ * `pathApi` is injectable so the platform-specific behavior is testable off the
+ * host OS (drive with `path.win32` / `path.posix`); it defaults to the host.
+ */
+function physicalTargetSegments(target: string, pathApi: typeof path = path): string[] {
+	const separator = pathApi.sep === "\\" ? /[\\/]+/ : /\/+/;
+	const body = pathApi.isAbsolute(target) ? target.slice(pathApi.parse(target).root.length) : target;
+	return body.split(separator);
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Settings Class
 // ═══════════════════════════════════════════════════════════════════════════
@@ -458,6 +497,7 @@ export class Settings {
 	#merged: RawSettings = {};
 	/** Cached resolved values from the merged view, including defaults/path scoping */
 	#resolvedCache = new Map<SettingPath, unknown>();
+	#effectiveChangeListeners = new Set<(path: SettingPath, value: unknown, previous: unknown) => void>();
 	#editVariantCache: readonly EditVariantEntry[] | undefined;
 
 	/** Paths modified during this session (for partial save) */
@@ -685,6 +725,13 @@ export class Settings {
 
 	#fireEffectiveSettingChanged(path: SettingPath, value: unknown, prev: unknown): void {
 		if (Object.is(value, prev)) return;
+		for (const listener of Array.from(this.#effectiveChangeListeners)) {
+			try {
+				listener(path, value, prev);
+			} catch (error) {
+				logger.warn("Settings: effective-change listener failed", { path, error: String(error) });
+			}
+		}
 		if (path === "statusLine.sessionAccent") {
 			statusLineSessionAccentSignal.fire();
 		}
@@ -694,6 +741,14 @@ export class Settings {
 		if (CODE_MODE_SIGNAL_PATHS.includes(path)) {
 			codeModeSignal.fire();
 		}
+	}
+
+	/** Observe effective changes on this settings instance. */
+	onEffectiveChange(listener: (path: SettingPath, value: unknown, previous: unknown) => void): () => void {
+		this.#effectiveChangeListeners.add(listener);
+		return () => {
+			this.#effectiveChangeListeners.delete(listener);
+		};
 	}
 
 	/** Set once this instance is discarded; background saves become no-ops. */
@@ -882,6 +937,27 @@ export class Settings {
 
 	getAgentDir(): string {
 		return this.#agentDir;
+	}
+
+	/**
+	 * Raw global settings layer (`config.yml`/`config.yaml`), deep-cloned.
+	 *
+	 * Exposes arbitrary namespaced keys (e.g. an extension's own `piVim` block)
+	 * that the typed, schema-bound {@link get} cannot reach. Used by the legacy
+	 * pi `SettingsManager` shim to match upstream Pi's `getGlobalSettings()`.
+	 * The clone means callers cannot mutate internal state.
+	 */
+	getGlobalSettings(): RawSettings {
+		return structuredClone(this.#global);
+	}
+
+	/**
+	 * Raw project settings layer (`.claude/settings.yml`, `.omp/config.yml`,
+	 * etc.), deep-cloned. Companion to {@link getGlobalSettings} for the legacy
+	 * pi `SettingsManager` shim's `getProjectSettings()`.
+	 */
+	getProjectSettings(): RawSettings {
+		return structuredClone(this.#project);
 	}
 
 	getPlansDirectory(): string {
@@ -1263,6 +1339,20 @@ export class Settings {
 	}
 
 	/**
+	 * Get enabled providers (for compatibility with discovery system).
+	 */
+	getEnabledProviders(): string[] {
+		return this.get("enabledProviders");
+	}
+
+	/**
+	 * Set enabled providers (for compatibility with discovery system).
+	 */
+	setEnabledProviders(ids: string[]): void {
+		this.set("enabledProviders", ids);
+	}
+
+	/**
 	 * Set disabled providers (for compatibility with discovery system).
 	 */
 	setDisabledProviders(ids: string[]): void {
@@ -1403,14 +1493,215 @@ export class Settings {
 			if (!isEnoent(error)) throw error;
 		}
 
-		// realpath fails for a dangling symlink. Resolve its immediate target so
-		// recreating a quarantined config repairs the target without replacing
-		// the user-managed link.
+		// realpath fails for a dangling symlink. Resolve its target so recreating
+		// a quarantined config repairs the target without replacing the
+		// user-managed link. Walk the symlink chain hop by hop: realpath already
+		// handled the case where every referent exists, so we only reach here when
+		// the final referent is missing. Follow each existing intermediate link
+		// until the referent is a non-symlink or does not exist, so the write
+		// lands on the final target and preserves every intermediate link instead
+		// of clobbering one into a regular file.
 		try {
-			const stat = await fs.promises.lstat(filePath);
-			if (stat.isSymbolicLink()) {
-				const target = await fs.promises.readlink(filePath);
-				return path.resolve(path.dirname(filePath), target);
+			if ((await fs.promises.lstat(filePath)).isSymbolicLink()) {
+				let current = filePath;
+				for (let hops = 0; ; hops++) {
+					// realpath() rejects a fully-linked cycle up front, so we only
+					// reach the manual walk on a chain that dangles today. It can
+					// still turn cyclic mid-walk if another process retargets an
+					// intermediate link, at which point readlink() would alternate
+					// forever. Cap the hops and surface an ELOOP so a cycle has
+					// bounded behavior instead of hanging flush().
+					if (hops >= MAX_SYMLINK_HOPS) {
+						const cyclic = new Error(
+							`ELOOP: symlink chain for ${filePath} exceeds ${MAX_SYMLINK_HOPS} hops (possible cycle)`,
+						) as Error & { code?: string };
+						cyclic.code = "ELOOP";
+						throw cyclic;
+					}
+					let target: string;
+					try {
+						target = await fs.promises.readlink(current);
+					} catch (error) {
+						if (!isEnoent(error)) throw error;
+						// An intermediate link vanished mid-walk: it was confirmed a
+						// symlink by the lstat below on the prior hop, then removed
+						// before this readlink. Land on the deepest hop we resolved
+						// rather than collapsing to the chain head, which would let the
+						// atomic rename replace the first user-managed symlink.
+						return current === filePath ? path.resolve(filePath) : current;
+					}
+					// Resolve the target one physical segment at a time so an
+					// intermediate directory symlink is followed by the filesystem
+					// BEFORE a later `..` pops its PHYSICAL parent. Both absolute and
+					// relative targets take the same walk: normalizing the whole
+					// string up front (path.resolve) collapses `alias/..` lexically
+					// to the anchor, but the kernel follows `alias` first and then
+					// pops its real parent, so the two disagree whenever an alias
+					// precedes a `..` — the lexical result can escape to an unrelated
+					// sibling and let the write clobber a foreign file. An absolute
+					// target seeds the accumulator at its filesystem anchor; a
+					// relative one seeds at the link's REAL parent dir.
+					let acc: string;
+					if (path.isAbsolute(target)) {
+						acc = path.parse(target).root;
+					} else {
+						const lexicalDir = path.dirname(current);
+						acc = lexicalDir;
+						try {
+							acc = await fs.promises.realpath(lexicalDir);
+						} catch (error) {
+							if (!isEnoent(error)) throw error;
+						}
+					}
+					// realpath() on the deepest existing prefix keeps `acc` canonical so
+					// each `..` pops the real parent. Once a NAMED component does not
+					// exist on disk the walk is FROZEN: the remainder is joined
+					// lexically, but nothing past the miss was physically traversable,
+					// so any construct that requires ENTERING the frozen component — a
+					// `..`, or a trailing `/` or `/.` that demands it be a directory —
+					// cannot be satisfied by the filesystem and must surface ENOTDIR
+					// rather than lexically landing a regular file at a mislocated path.
+					let frozen = false;
+					for (const segment of physicalTargetSegments(target)) {
+						if (segment === "" || segment === ".") {
+							if (frozen) {
+								// A trailing `/` (empty segment) or `/.` demands the
+								// preceding component be a traversable directory. Before the
+								// freeze that component was confirmed on disk, so the
+								// requirement holds and the segment is inert. After the
+								// freeze the component is a nonexistent/dangling name that
+								// can never be a directory (`config.yml -> missing/`):
+								// dropping the segment and writing a regular file there
+								// mislocates and falsely reports success while the logical
+								// config path stays unusable with ENOTDIR. Surface it.
+								const notDir = new Error(
+									`ENOTDIR: symlink target requires an unresolved component to be a directory for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							// The walk is not frozen, so `acc` was resolved by realpath()
+							// and exists on disk — but existence is not enough. A trailing
+							// `/` or `/.` demands `acc` be a directory, and a concurrent
+							// process can win a TOCTOU race: the initial realpath(filePath)
+							// saw the target missing, then the target was created as a
+							// REGULAR FILE before this segment walk reached it, so
+							// realpath(candidate) succeeded and left `frozen` false. The
+							// preceding component is now a regular file, not a directory,
+							// and dropping the segment would land the atomic rename on top
+							// of it while the logical config path is really ENOTDIR. Verify
+							// the requirement holds instead of assuming it.
+							let accStat: fs.Stats;
+							try {
+								accStat = await fs.promises.stat(acc);
+							} catch (error) {
+								// `acc` was resolved by realpath() moments ago, but a
+								// concurrent process can remove the component between that
+								// realpath and this stat (`config.yml -> dir/../final.yml`
+								// while `dir` is deleted). The trailing `/` or `/.` still
+								// requires `acc` to be a traversable directory, and that
+								// requirement provably cannot hold once the component is
+								// gone. Surface ENOTDIR here instead of letting the ENOENT
+								// reach the outer catch, which would swallow it and return
+								// the chain head — clobbering config.yml itself.
+								if (!isEnoent(error)) throw error;
+								const notDir = new Error(
+									`ENOTDIR: symlink target requires a directory but ${acc} is gone for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							if (!accStat.isDirectory()) {
+								const notDir = new Error(
+									`ENOTDIR: symlink target requires a directory but ${acc} is not one for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							continue;
+						}
+						if (segment === "..") {
+							if (frozen) {
+								// `..` after a component that could not be physically
+								// traversed — a missing name or a dangling symlink — whether
+								// the `..` follows it immediately (`link/..`) or after further
+								// lexical names (`missing/child/..`). The kernel cannot take
+								// the parent of a path it never entered: `missing/child/..`
+								// fails because `missing` was never a directory to descend,
+								// so the lexically appended `child` is not a real component to
+								// pop. Popping and continuing would leave `acc` on a
+								// mislocated path and land a regular file there while
+								// reporting success. Surface the ENOTDIR the filesystem
+								// raises instead.
+								const notDir = new Error(
+									`ENOTDIR: cannot resolve '..' past an unresolved component in symlink target for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							// `acc` was resolved by realpath() and exists on disk, but a
+							// `..` demands it be a traversable directory to pop its parent.
+							// A concurrent process can win a TOCTOU race: the initial
+							// realpath(filePath) saw the component missing, then it was
+							// created as a REGULAR FILE before realpath(candidate) reached
+							// it, so that call succeeded and left `frozen` false. The
+							// kernel cannot take the parent of `regularfile/..` — it fails
+							// with ENOTDIR — so lexically popping and continuing would let
+							// the atomic rename land on a mislocated sibling
+							// (`config.yml -> racetarget/../victim.yml`) while the logical
+							// config path is really ENOTDIR. Verify before popping.
+							let accStat: fs.Stats;
+							try {
+								accStat = await fs.promises.stat(acc);
+							} catch (error) {
+								// `acc` was resolved by realpath() moments ago, but a
+								// concurrent process can remove the component between that
+								// realpath and this stat. The `..` still requires `acc` to
+								// be a traversable directory to pop its parent, and that
+								// requirement provably cannot hold once the component is
+								// gone. Surface ENOTDIR here instead of letting the ENOENT
+								// reach the outer catch, which would swallow it and return
+								// the chain head — clobbering config.yml itself.
+								if (!isEnoent(error)) throw error;
+								const notDir = new Error(
+									`ENOTDIR: symlink target requires a directory but ${acc} is gone for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							if (!accStat.isDirectory()) {
+								const notDir = new Error(
+									`ENOTDIR: symlink target requires a directory but ${acc} is not one for ${filePath}`,
+								) as Error & { code?: string };
+								notDir.code = "ENOTDIR";
+								throw notDir;
+							}
+							acc = path.dirname(acc);
+							continue;
+						}
+						if (frozen) {
+							acc = path.join(acc, segment);
+							continue;
+						}
+						const candidate = path.join(acc, segment);
+						try {
+							acc = await fs.promises.realpath(candidate);
+						} catch (error) {
+							if (!isEnoent(error)) throw error;
+							acc = candidate;
+							frozen = true;
+						}
+					}
+					const resolved = acc;
+					let nextIsSymlink = false;
+					try {
+						nextIsSymlink = (await fs.promises.lstat(resolved)).isSymbolicLink();
+					} catch (error) {
+						if (!isEnoent(error)) throw error;
+					}
+					if (!nextIsSymlink) return resolved;
+					current = resolved;
+				}
 			}
 		} catch (error) {
 			if (!isEnoent(error)) throw error;
@@ -1646,6 +1937,12 @@ export class Settings {
 			raw.steeringMode = raw.queueMode;
 			delete raw.queueMode;
 		}
+		// doubleEscapeAction: legacy "branch" -> "rewind". The old branch backtrack
+		// was superseded by the in-transcript rewind selector; "tree" survives as a
+		// current action (opens the session tree) beside "rewind" and "none".
+		if (raw.doubleEscapeAction === "branch") {
+			raw.doubleEscapeAction = "rewind";
+		}
 
 		// lastChangelogVersion moved out of config.yml into the
 		// <agentDir>/last-changelog-version marker file so version bumps no
@@ -1703,49 +2000,27 @@ export class Settings {
 			}
 		}
 
-		// inspect_image.enabled (boolean) -> inspect_image.mode (enum). Explicit
-		// user choices are preserved: true -> "on", false -> "off". Configs with
-		// no legacy key get the new "auto" default, which hides the tool for
-		// models with native image input. Handles nested and quoted-dotted
-		// ("inspect_image.enabled") sources; the target is always the nested
-		// form, which is the only shape the resolver reads.
+		// Remove the retired image-tool mode settings and preserve its request
+		// timeout under the read image-question setting. Nested values win over
+		// quoted-dotted legacy values; an existing new setting wins over both.
 		const inspectImageObj = isRecord(raw.inspect_image) ? (raw.inspect_image as Record<string, unknown>) : undefined;
-		const legacyEnabled =
-			typeof inspectImageObj?.enabled === "boolean"
-				? inspectImageObj.enabled
-				: typeof raw["inspect_image.enabled"] === "boolean"
-					? (raw["inspect_image.enabled"] as boolean)
+		const legacyQuestionTimeoutMs =
+			typeof inspectImageObj?.timeoutMs === "number"
+				? inspectImageObj.timeoutMs
+				: typeof raw["inspect_image.timeoutMs"] === "number"
+					? (raw["inspect_image.timeoutMs"] as number)
 					: undefined;
-		if (legacyEnabled !== undefined) {
-			if (!inspectImageObj) {
-				raw.inspect_image = {};
-			}
-			const target = raw.inspect_image as Record<string, unknown>;
-			const flatMode = raw["inspect_image.mode"];
-			if (target.mode === undefined) {
-				// A quoted-dotted explicit mode wins over the legacy boolean but
-				// must be normalized into the nested form the resolver reads.
-				target.mode =
-					typeof flatMode === "string" && (INSPECT_IMAGE_MODES as readonly string[]).includes(flatMode)
-						? flatMode
-						: legacyEnabled
-							? "on"
-							: "off";
-			}
-			delete target.enabled;
-			delete raw["inspect_image.enabled"];
-			delete raw["inspect_image.mode"];
+		const imagesObj = isRecord(raw.images) ? (raw.images as Record<string, unknown>) : undefined;
+		if (legacyQuestionTimeoutMs !== undefined && imagesObj?.questionTimeoutMs === undefined) {
+			raw.images = { ...imagesObj, questionTimeoutMs: legacyQuestionTimeoutMs };
 		}
+		delete raw.inspect_image;
+		delete raw["inspect_image.enabled"];
+		delete raw["inspect_image.mode"];
+		delete raw["inspect_image.timeoutMs"];
 
-		// task.isolation.enabled (boolean) -> task.isolation.mode (enum)
 		const taskObj = raw.task as Record<string, unknown> | undefined;
 		const isolationObj = taskObj?.isolation as Record<string, unknown> | undefined;
-		if (isolationObj && "enabled" in isolationObj) {
-			if (typeof isolationObj.enabled === "boolean") {
-				isolationObj.mode = isolationObj.enabled ? "auto" : "none";
-			}
-			delete isolationObj.enabled;
-		}
 
 		// task.simple: removed — the task tool no longer accepts a per-call
 		// schema (workflows drive structured output via eval agent()) and the
@@ -1768,7 +2043,7 @@ export class Settings {
 		// `true` reproduced the previous small-model-classified behavior, which is
 		// now "smart"; `false` maps to "none" so explicitly disabled configs remain
 		// off rather than inheriting the new "mechanical" default.
-		// Handles nested and quoted-dotted sources, like inspect_image above.
+		// Handles nested and quoted-dotted sources, like the legacy image settings above.
 		const featuresObj = isRecord(raw.features) ? (raw.features as Record<string, unknown>) : undefined;
 		const legacyUnexpectedStop =
 			typeof featuresObj?.unexpectedStopDetection === "boolean"
@@ -1788,22 +2063,56 @@ export class Settings {
 			}
 			delete raw["features.unexpectedStopDetection"];
 		}
-		// task.isolation.mode: legacy values from before the pi-iso PAL refactor.
-		// `worktree` was git worktree → now lives under `rcopy`. `fuse-overlay`
-		// and `fuse-projfs` are now the platform-named `overlayfs` / `projfs`
-		// kinds; the PAL falls back internally when the chosen one isn't
-		// available, so we don't need the old TS-side platform guards.
-		if (isolationObj && typeof isolationObj.mode === "string") {
-			const legacy: Record<string, string> = {
-				worktree: "rcopy",
-				"fuse-overlay": "overlayfs",
-				"fuse-projfs": "projfs",
-			};
-			const mapped = legacy[isolationObj.mode as string];
-			if (mapped !== undefined) {
-				isolationObj.mode = mapped;
-			}
+		// Split the legacy combined isolation setting into enablement and backend.
+		// Handle both nested YAML and quoted dotted keys. Explicit enabled and
+		// backend values win; legacy backend names are normalized everywhere.
+		const legacyIsolationBackends: Record<string, string> = {
+			worktree: "rcopy",
+			"fuse-overlay": "overlayfs",
+			"fuse-projfs": "projfs",
+		};
+		const legacyIsolationModePath = ["task", "isolation", "mode"].join(".");
+		const legacyIsolationMode =
+			typeof isolationObj?.mode === "string"
+				? isolationObj.mode
+				: typeof raw[legacyIsolationModePath] === "string"
+					? (raw[legacyIsolationModePath] as string)
+					: undefined;
+		const flatIsolationEnabled = raw["task.isolation.enabled"];
+		const explicitIsolationEnabled =
+			typeof isolationObj?.enabled === "boolean"
+				? isolationObj.enabled
+				: typeof flatIsolationEnabled === "boolean"
+					? flatIsolationEnabled
+					: undefined;
+		if (legacyIsolationMode !== undefined || explicitIsolationEnabled !== undefined) {
+			if (!isRecord(raw.task)) raw.task = {};
+			const targetTask = raw.task as Record<string, unknown>;
+			if (!isRecord(targetTask.isolation)) targetTask.isolation = {};
+			const targetIsolation = targetTask.isolation as Record<string, unknown>;
+			targetIsolation.enabled = explicitIsolationEnabled ?? legacyIsolationMode !== "none";
+			delete targetIsolation.mode;
 		}
+		delete raw[legacyIsolationModePath];
+		delete raw["task.isolation.enabled"];
+
+		const rootIsolation = isRecord(raw.isolation) ? (raw.isolation as Record<string, unknown>) : undefined;
+		const configuredBackend =
+			typeof rootIsolation?.backend === "string"
+				? rootIsolation.backend
+				: typeof raw["isolation.backend"] === "string"
+					? (raw["isolation.backend"] as string)
+					: undefined;
+		const derivedBackend =
+			legacyIsolationMode === undefined || legacyIsolationMode === "none"
+				? undefined
+				: (legacyIsolationBackends[legacyIsolationMode] ?? legacyIsolationMode);
+		const backend = configuredBackend ?? derivedBackend;
+		if (backend !== undefined) {
+			if (!rootIsolation) raw.isolation = {};
+			(raw.isolation as Record<string, unknown>).backend = legacyIsolationBackends[backend] ?? backend;
+		}
+		delete raw["isolation.backend"];
 
 		// edit.mode: removed "atom" and "vim" variants map back to "hashline"
 		const editObj = raw.edit as Record<string, unknown> | undefined;
@@ -2724,7 +3033,7 @@ class SettingSignal<A extends unknown[] = []> {
 	 * rest.
 	 */
 	fire(...args: A): void {
-		for (const cb of [...this.#listeners]) {
+		for (const cb of Array.from(this.#listeners)) {
 			try {
 				cb(...args);
 			} catch (err) {
@@ -2759,6 +3068,11 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 			});
 		}
 	},
+	// A project-scoped reload (`/move`, cross-project resume, rollback) can change
+	// the effective value; reapply so pi-tui renderers gating on the shared flag
+	// track it the same instant path/resource links do. Runtime `/settings` edits
+	// also go through the selector controller to invalidate and repaint live views.
+	"tui.hyperlinks": value => applyHyperlinkSetting(value),
 	"provider.appendOnlyContext": value => {
 		if (typeof value === "string") {
 			appendOnlyModeSignal.fire(value);
@@ -2825,8 +3139,9 @@ const extendedContextSignal = new SettingSignal("extendedContext");
 
 /**
  * Subscribe to extended-context setting changes. Sessions re-derive their
- * model's effective context window (the registry clamps premium long-context
- * models to the standard-pricing threshold while the setting is off).
+ * model's effective context window (the registry restores default windows
+ * and caps premium long-context models at the standard-pricing threshold
+ * while the setting is off).
  * Returns an unsubscribe function.
  */
 export const onExtendedContextChanged = (cb: () => void) => extendedContextSignal.on(cb);
@@ -2866,6 +3181,20 @@ export const onHindsightScopeChanged = (cb: () => void) => hindsightScopeSignal.
  */
 const liveSettingsInstances = new Set<WeakRef<Settings>>();
 
+const activeSettingsScope = new AsyncLocalStorage<Settings>();
+
+/**
+ * Run extension-owned work with the settings instance of its active session.
+ *
+ * Legacy Pi extensions synchronously call `SettingsManager.create(ctx.cwd)`;
+ * `cwd` alone cannot distinguish concurrent sessions that use different
+ * settings for the same project. The async scope supplies that missing session
+ * identity without process-global mutation.
+ */
+export function withActiveSettings<T>(instance: Settings | undefined, fn: () => T): T {
+	return instance ? activeSettingsScope.run(instance, fn) : fn();
+}
+
 let globalInstance: Settings | null = null;
 let globalInstancePromise: Promise<Settings> | null = null;
 let boundSettingsInstance: Settings | null = null;
@@ -2878,6 +3207,36 @@ function clearBoundSettingsMethods(): void {
 
 export function isSettingsInitialized(): boolean {
 	return globalInstance !== null;
+}
+
+/**
+ * Resolve the settings visible to a legacy Pi `SettingsManager.create()` call.
+ *
+ * An active extension session is authoritative because `cwd`/`agentDir` cannot
+ * uniquely identify concurrent SDK sessions with per-session overrides. Outside
+ * extension execution, the most recently constructed matching instance is the
+ * best available scope; an unscoped lookup falls back to the global singleton.
+ */
+export function findScopedSettings(cwd?: string, agentDir?: string): Settings | undefined {
+	const active = activeSettingsScope.getStore();
+	if (active) return active;
+
+	const wantCwd = cwd === undefined ? undefined : path.normalize(cwd);
+	const wantAgentDir = agentDir === undefined ? undefined : path.normalize(agentDir);
+	if (wantCwd === undefined && wantAgentDir === undefined) return globalInstance ?? undefined;
+
+	let found: Settings | undefined;
+	for (const ref of liveSettingsInstances) {
+		const instance = ref.deref();
+		if (
+			instance &&
+			(wantCwd === undefined || instance.getCwd() === wantCwd) &&
+			(wantAgentDir === undefined || instance.getAgentDir() === wantAgentDir)
+		) {
+			found = instance;
+		}
+	}
+	return found;
 }
 
 /**
@@ -2899,6 +3258,15 @@ export function resetSettingsForTest(): void {
 	configureProviderMaxInFlightRequests(undefined);
 	configureCredentialRedaction(false);
 }
+
+/**
+ * Exposes the dangling-symlink target segment splitter for platform-specific
+ * tests: the root-double-count and POSIX-backslash bugs only reproduce with an
+ * explicit `path.win32` / `path.posix` engine, which cannot be forced from the
+ * host OS otherwise.
+ * @internal
+ */
+export const __physicalTargetSegmentsForTesting = physicalTargetSegments;
 
 /**
  * The global settings singleton.

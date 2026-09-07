@@ -25,6 +25,8 @@ import { shellFixtures } from "./shell";
 import { statusLineFixtures } from "./status-line";
 import { webFixtures } from "./web";
 
+export * from "./composer";
+export * from "./segments";
 export * from "./types";
 
 export const galleryFixtures = {

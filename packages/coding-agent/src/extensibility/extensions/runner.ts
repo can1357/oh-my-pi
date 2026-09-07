@@ -13,7 +13,7 @@ import type { CredentialDisabledEvent, ImageContent, Model, ProviderResponseMeta
 import type { KeyId } from "@oh-my-pi/pi-tui";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../../config/model-registry";
-import type { Settings } from "../../config/settings";
+import { type Settings, withActiveSettings } from "../../config/settings";
 import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
@@ -682,6 +682,8 @@ export class ExtensionRunner {
 		this.#abortFn = contextActions.abort;
 		this.#hasPendingMessagesFn = contextActions.hasPendingMessages;
 		this.#shutdownHandler = contextActions.shutdown;
+		this.#getContextUsageFn = contextActions.getContextUsage;
+		this.#compactFn = contextActions.compact;
 		this.#getSystemPromptFn = contextActions.getSystemPrompt;
 
 		// Command context actions (optional, only for interactive mode)
@@ -1133,6 +1135,17 @@ export class ExtensionRunner {
 	}
 
 	/**
+	 * Run an extension-owned callback within this session's settings scope, so a
+	 * synchronous `SettingsManager.create(ctx.cwd)` inside it resolves THIS
+	 * session's manager rather than a same-cwd sibling's. Event handlers get this
+	 * scope via {@link #runHandlerWithTimeout}; slash commands and shortcuts are
+	 * invoked directly by their controllers and route through here instead.
+	 */
+	runScoped<T>(fn: () => T): T {
+		return withActiveSettings(this.settings, fn);
+	}
+
+	/**
 	 * Creates an extension context, optionally scoped to a provider request model.
 	 *
 	 * `delegation` wires the same-tool `ctx.invokeTool` for a re-registered built-in: when `toolName`
@@ -1246,15 +1259,15 @@ export class ExtensionRunner {
 	#isSessionShutdownEvent(event: RunnerEmitEvent): event is Extract<RunnerEmitEvent, { type: "session_shutdown" }> {
 		return event.type === "session_shutdown";
 	}
-	async #runHandlerWithTimeout<TEvent extends { type: string }, TResult>(
-		handler: (event: TEvent, ctx: ExtensionContext) => Promise<TResult | undefined> | TResult | undefined,
+	async #runHandlerWithTimeout<TEvent extends { type: string }, R>(
+		handler: (event: TEvent, ctx: ExtensionContext) => Promise<R | undefined> | R | undefined,
 		event: TEvent,
 		ctx: ExtensionContext,
 		ext: Extension,
 		timeoutMs: number,
-		onFailure?: (kind: "timeout" | "error", message: string) => TResult,
+		onFailure?: (kind: "timeout" | "error", message: string) => R,
 		outerSignal?: AbortSignal,
-	): Promise<TResult | undefined> {
+	): Promise<R | undefined> {
 		// `session_stop` carries its own signal on the event; `tool_call` receives
 		// the outer dispatch signal (loop request or wrapper execute) so an abort
 		// while a handler awaits a human dialog cancels the dialog and settles the
@@ -1267,34 +1280,36 @@ export class ExtensionRunner {
 		const signal = signals.length === 0 ? undefined : signals.length === 1 ? signals[0] : AbortSignal.any(signals);
 		if (signal?.aborted) return undefined;
 		const registrationScope: ToolRegistrationScope = { pending: new Set(), closed: false };
-		let handlerResult: TResult | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
+		let handlerResult: R | typeof EXTENSION_HANDLER_TIMEOUT | typeof EXTENSION_HANDLER_ABORTED | undefined;
 		let handlerFailure: { error: unknown } | undefined;
 		try {
-			handlerResult = await raceHandlerWithTimeout(
-				async (handlerSignal, budget) => {
-					registrationScope.signal = handlerSignal;
-					let result: TResult | undefined;
-					try {
-						result = await this.#toolRegistrationScope.run(registrationScope, () =>
-							handler(
-								event,
-								createHandlerContext(ctx, handlerSignal, event.type === "tool_call" ? budget : undefined),
-							),
-						);
-					} catch (error) {
-						handlerFailure = { error };
-					} finally {
-						registrationScope.closed = true;
-					}
-					try {
-						await this.#flushToolRegistrations(registrationScope.pending);
-					} catch (error) {
-						handlerFailure ??= { error };
-					}
-					return result;
-				},
-				timeoutMs,
-				signal,
+			handlerResult = await withActiveSettings(this.settings, () =>
+				raceHandlerWithTimeout(
+					async (handlerSignal, budget) => {
+						registrationScope.signal = handlerSignal;
+						let result: R | undefined;
+						try {
+							result = await this.#toolRegistrationScope.run(registrationScope, () =>
+								handler(
+									event,
+									createHandlerContext(ctx, handlerSignal, event.type === "tool_call" ? budget : undefined),
+								),
+							);
+						} catch (error) {
+							handlerFailure = { error };
+						} finally {
+							registrationScope.closed = true;
+						}
+						try {
+							await this.#flushToolRegistrations(registrationScope.pending);
+						} catch (error) {
+							handlerFailure ??= { error };
+						}
+						return result;
+					},
+					timeoutMs,
+					signal,
+				),
 			);
 		} catch (error) {
 			handlerFailure = { error };
@@ -1328,7 +1343,7 @@ export class ExtensionRunner {
 			});
 			return onFailure?.("error", message);
 		}
-		return handlerResult as TResult | undefined;
+		return handlerResult as R | undefined;
 	}
 
 	async emit<TEvent extends RunnerEmitEvent>(event: TEvent): Promise<RunnerEmitResult<TEvent>> {

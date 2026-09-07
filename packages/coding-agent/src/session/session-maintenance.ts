@@ -5,6 +5,7 @@ import {
 	type Agent,
 	type AgentMessage,
 	type AgentTurnEndContext,
+	type MessageCountOptions,
 	resolveTelemetry,
 	type StreamFn,
 	type ThinkingLevel,
@@ -77,7 +78,7 @@ import {
 	resolveMethodSettings,
 	resolveSpeculationMethod,
 } from "./compaction-methods";
-import { convertToLlm, stripImagesFromMessage } from "./messages";
+import { assistantTurnProducedOutput, convertToLlm, stripImagesFromMessage } from "./messages";
 import { isTerminalTextAssistantAnswer } from "./queued-messages";
 import {
 	resolveCompactionConfiguredTarget,
@@ -116,6 +117,17 @@ const COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION: CompactionCheckResult = {
 	continuationScheduled: false,
 	automaticContinuationBlocked: true,
 };
+
+/**
+ * Consecutive `response.incomplete` (length-stop) recoveries that produce no
+ * actionable output before recovery gives up. A model that keeps returning an
+ * empty `length` turn (seen with `zai/glm-4.5-flash`, #10594) would otherwise
+ * re-trigger compaction + `shake-retry` forever, persisting an empty assistant
+ * turn on every attempt. Mirrors the empty-stop / unexpected-stop retry caps in
+ * {@link TurnRecovery}; any turn that produces actionable output resets the
+ * counter, so legitimate multi-step recoveries are never cut short.
+ */
+export const INCOMPLETE_RECOVERY_MAX_RETRIES = 3;
 
 /** Whether a configured preference list contains at least one automatic method. */
 function hasConfiguredCompactionMethod(settings: ConfiguredCompactionSettings): boolean {
@@ -228,7 +240,7 @@ function mergeLlmCompactionPreserveData(
 	hookPreserveData: Record<string, unknown> | undefined,
 	resultPreserveData: Record<string, unknown> | undefined,
 ): Record<string, unknown> | undefined {
-	const preserveData = { ...(hookPreserveData ?? {}), ...(resultPreserveData ?? {}) };
+	const preserveData = { ...hookPreserveData, ...resultPreserveData };
 	return snapcompact.stripPreservedArchive(Object.keys(preserveData).length > 0 ? preserveData : undefined);
 }
 
@@ -373,6 +385,13 @@ export class SessionMaintenance {
 	 * it is a setting, not the model.
 	 */
 	#extendedContextCapExplained = false;
+	/**
+	 * Consecutive no-progress `response.incomplete` (length-stop) recoveries in
+	 * the current continuation loop. Bounded by {@link INCOMPLETE_RECOVERY_MAX_RETRIES};
+	 * reset by any turn that produces actionable output and on every new user
+	 * prompt ({@link resetForNewPrompt}).
+	 */
+	#incompleteRecoveryAttempts = 0;
 	readonly #host: SessionMaintenanceHost;
 
 	get #model(): Model | undefined {
@@ -389,6 +408,11 @@ export class SessionMaintenance {
 
 	constructor(host: SessionMaintenanceHost) {
 		this.#host = host;
+	}
+
+	/** Clears per-prompt recovery counters when a new user prompt starts. */
+	resetForNewPrompt(): void {
+		this.#incompleteRecoveryAttempts = 0;
 	}
 
 	/** Whether manual or automatic context maintenance is active. */
@@ -456,7 +480,9 @@ export class SessionMaintenance {
 				// Cache-stable boundary: never re-write the warm, already-sent prefix
 				// (deep stale/age victims) or summarized-away entries every turn.
 				keepBoundaryId,
-				cacheWarmSuffixTokens: PRUNE_CACHE_WARM_SUFFIX_TOKENS,
+				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
+				cacheWarmSuffixTokens:
+					this.#host.model()?.thinking?.prefixBinding === true ? 0 : PRUNE_CACHE_WARM_SUFFIX_TOKENS,
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -501,6 +527,8 @@ export class SessionMaintenance {
 				// region once the cache is genuinely cold (idle exceeds the 1h TTL).
 				keepBoundaryId,
 				idleFlushMs: PRUNE_IDLE_FLUSH_MS,
+				// Prefix-bound thinking cannot survive rewrites inside a warm provider prefix.
+				suffixTokenLimit: this.#host.model()?.thinking?.prefixBinding === true ? 0 : undefined,
 			}),
 		);
 		if (result.prunedCount === 0) {
@@ -954,11 +982,20 @@ export class SessionMaintenance {
 							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 							: Number.POSITIVE_INFINITY;
 					const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+					// No-reduction decision runs in the encrypted-reasoning-excluded domain
+					// on both sides: opaque replay signatures (thinkingSignature /
+					// redactedThinking) have no trustworthy local token price, so counting
+					// them in the archived region's baseline while the imaged projection
+					// drops them lets an inflating result pass the guard (#10716). The
+					// window-fit check below keeps the conservative `projected`.
+					const projectedForReduction = this.#projectSnapcompactContextTokens(preparation, snapcompactResult, {
+						excludeEncryptedReasoning: true,
+					});
 					const reductionBaseline = this.#projectPreSnapcompactContextTokens(preparation);
-					if (projected >= reductionBaseline) {
+					if (projectedForReduction >= reductionBaseline) {
 						logger.warn("Snapcompact projection would not reduce context", {
 							model: this.#model?.id,
-							projected,
+							projected: projectedForReduction,
 							reductionBaseline,
 						});
 						this.#host.emitNotice("warning", "snapcompact would not reduce context.", "compaction");
@@ -991,7 +1028,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
+				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
 			} else {
 				codexCompaction = createCodexCompactionContext({
 					trigger: "manual",
@@ -1017,7 +1054,7 @@ export class SessionMaintenance {
 						{
 							promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 							extraContext: compactionPrep.hookContext,
-							remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+							remoteSystemPrompt: this.#host.baseSystemPrompt(),
 							convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),
 							codexCompaction,
 						},
@@ -1378,7 +1415,7 @@ export class SessionMaintenance {
 				{
 					promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 					extraContext: compactionPrep.hookContext,
-					remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+					remoteSystemPrompt: this.#host.baseSystemPrompt(),
 					codexCompaction,
 					// Isolate from the live turn: remote compaction transports key
 					// sticky provider sessions by sessionId, and a speculation
@@ -1573,12 +1610,20 @@ export class SessionMaintenance {
 	 * `preparation.tokensBefore`, which carries only provider usage (zero for
 	 * imported sessions with no usage metadata, or a deflated figure behind a
 	 * payload-shrinking hook) and would falsely reject reducing archives (#10023).
+	 *
+	 * Opaque provider-replay payloads (`thinkingSignature` / `redactedThinking`)
+	 * are excluded from every region: their local byte size is not a trustworthy
+	 * token price (#2628), and counting them in the archived region — which the
+	 * imaged projection drops — inflated this baseline enough to accept an
+	 * inflating result (#10716). The caller's reduction-side projection excludes
+	 * them symmetrically so the comparison stays in one local token domain.
 	 */
 	#projectPreSnapcompactContextTokens(preparation: CompactionPreparation): number {
+		const opts = { excludeEncryptedReasoning: true } as const;
 		let tokens = computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer);
-		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize);
-		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages);
-		tokens += this.#tokenizer.countMessages(preparation.recentMessages);
+		tokens += this.#tokenizer.countMessages(preparation.messagesToSummarize, opts);
+		tokens += this.#tokenizer.countMessages(preparation.turnPrefixMessages, opts);
+		tokens += this.#tokenizer.countMessages(preparation.recentMessages, opts);
 		return tokens;
 	}
 
@@ -1842,6 +1887,10 @@ export class SessionMaintenance {
 		if (skipAbortedCheck && assistantMessage.stopReason === "aborted") return COMPACTION_CHECK_NONE;
 		const contextWindow = this.#model?.contextWindow ?? 0;
 		const generation = this.#host.promptGeneration();
+		// A turn that produced actionable output means the incomplete-recovery loop
+		// broke through: clear the counter so a later isolated `length` stop starts
+		// fresh rather than inheriting a stale count from an earlier loop.
+		if (assistantTurnProducedOutput(assistantMessage)) this.#incompleteRecoveryAttempts = 0;
 		// Skip overflow check if the message came from a different model.
 		// This handles the case where user switched from a smaller-context model (e.g. opus)
 		// to a larger-context model (e.g. codex) - the overflow error from the old model
@@ -1986,6 +2035,7 @@ export class SessionMaintenance {
 			const promoted = await this.#tryContextPromotion(assistantMessage);
 			if (promoted) {
 				await this.#host.dropPersistedAssistantTurn(assistantMessage);
+				this.#incompleteRecoveryAttempts = 0;
 				logger.debug("Context promotion triggered by response.incomplete (length stop)", {
 					from: `${assistantMessage.provider}/${assistantMessage.model}`,
 				});
@@ -1999,9 +2049,36 @@ export class SessionMaintenance {
 
 			const incompleteCompactionSettings = this.#host.settings.getGroup("compaction");
 			if (incompleteCompactionSettings.enabled && hasConfiguredCompactionMethod(incompleteCompactionSettings)) {
+				// Bound the loop: a model that keeps returning an empty `length` turn
+				// (zero usage, no content) re-triggers compaction + shake-retry forever
+				// otherwise, persisting an empty assistant turn each pass (#10594). Count
+				// no-progress incomplete recoveries; past the cap, drop the dead turn,
+				// surface an actionable error, and stop scheduling continuations. Any
+				// turn that produced actionable output already reset the counter at the
+				// top of checkCompaction, so a genuinely truncated turn that resumes
+				// after compaction is never cut short.
+				if (this.#incompleteRecoveryAttempts >= INCOMPLETE_RECOVERY_MAX_RETRIES) {
+					const attempts = this.#incompleteRecoveryAttempts;
+					this.#incompleteRecoveryAttempts = 0;
+					const droppedEntryId = await this.#host.dropPersistedAssistantTurn(assistantMessage);
+					// Reparenting the live branch is insufficient when this terminal path
+					// appends no successor: on restart, the loader selects the last physical
+					// journal entry and revives the discarded length turn. Persist the branch
+					// marker/rewrite before blocking further continuation.
+					if (droppedEntryId) await this.#host.sessionManager.discardEntryDurably(droppedEntryId);
+					const finalError = `Compaction recovery gave up after ${attempts} consecutive empty \`length\` responses from ${assistantMessage.provider}/${assistantMessage.model}; the model produced no output. Try switching models or raising the model's max output tokens.`;
+					logger.warn("response.incomplete recovery cap reached; halting retries", {
+						model: `${assistantMessage.provider}/${assistantMessage.model}`,
+						attempts,
+					});
+					this.#host.emitNotice("error", finalError, "compaction");
+					return COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION;
+				}
+				this.#incompleteRecoveryAttempts++;
 				logger.debug("Compaction triggered by response.incomplete (length stop, no promotion target)", {
 					model: `${assistantMessage.provider}/${assistantMessage.model}`,
 					methods: resolveCompactionMethodOrder(incompleteCompactionSettings.methodOrder),
+					attempt: this.#incompleteRecoveryAttempts,
 				});
 				return await this.#host.runRecoveryCompactionWithRollback("incomplete", assistantMessage, allowDefer, {
 					autoContinue,
@@ -2474,7 +2551,11 @@ export class SessionMaintenance {
 	 * lets the caller decide whether snapcompact brought the context under the
 	 * window or should fall back to an LLM summary.
 	 */
-	#projectSnapcompactContextTokens(preparation: CompactionPreparation, result: snapcompact.CompactionResult): number {
+	#projectSnapcompactContextTokens(
+		preparation: CompactionPreparation,
+		result: snapcompact.CompactionResult,
+		options?: MessageCountOptions,
+	): number {
 		const archive = snapcompact.getPreservedArchive(result.preserveData);
 		const blocks = archive
 			? snapcompact.historyBlocks(archive, { maxFrameDataBytes: snapcompact.FRAME_DATA_BYTES_BUDGET })
@@ -2491,7 +2572,7 @@ export class SessionMaintenance {
 		let tokens =
 			computeNonMessageTokens(this.#host.nonMessageTokenSource(), this.#tokenizer) +
 			this.#tokenizer.countMessage(summaryMessage);
-		tokens += this.#tokenizer.countMessages(preparation.recentMessages);
+		tokens += this.#tokenizer.countMessages(preparation.recentMessages, options);
 		return tokens;
 	}
 
@@ -3420,6 +3501,17 @@ export class SessionMaintenance {
 									? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
 									: Number.POSITIVE_INFINITY;
 							const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
+							// Reduction check in the encrypted-reasoning-excluded domain so opaque
+							// replay signatures cannot inflate the removable baseline (#10716);
+							// `triggerContextTokens` is already an encrypted-excluded stored
+							// estimate, and `#projectPreSnapcompactContextTokens` now matches it.
+							const projectedForReduction = this.#projectSnapcompactContextTokens(
+								preparation,
+								snapcompactResult,
+								{
+									excludeEncryptedReasoning: true,
+								},
+							);
 							const reductionBaseline =
 								options.triggerContextTokens !== undefined
 									? Math.max(0, options.triggerContextTokens - (options.pendingContextTokens ?? 0))
@@ -3429,10 +3521,10 @@ export class SessionMaintenance {
 									? reductionBaseline
 									: Math.max(0, reductionBaseline - options.preparedContextTokens) +
 										this.#projectPreSnapcompactContextTokens(preparation);
-							if (projected >= preparedReductionBaseline) {
+							if (projectedForReduction >= preparedReductionBaseline) {
 								logger.warn("Snapcompact projection would not reduce context", {
 									model: this.#model?.id,
-									projected,
+									projected: projectedForReduction,
 									reductionBaseline: preparedReductionBaseline,
 								});
 								snapcompactBlocker =
@@ -3492,7 +3584,7 @@ export class SessionMaintenance {
 				firstKeptEntryId = snapcompactResult.firstKeptEntryId;
 				tokensBefore = snapcompactResult.tokensBefore;
 				details = snapcompactResult.details;
-				preserveData = { ...(compactionPrep.preserveData ?? {}), ...(snapcompactResult.preserveData ?? {}) };
+				preserveData = { ...compactionPrep.preserveData, ...snapcompactResult.preserveData };
 			} else {
 				const candidates = this.#getCompactionModelCandidates(
 					availableModels,
@@ -3540,7 +3632,7 @@ export class SessionMaintenance {
 								{
 									promptOverride: this.#host.obfuscateTextForProvider(compactionPrep.hookPrompt),
 									extraContext: compactionPrep.hookContext,
-									remoteInstructions: this.#host.baseSystemPrompt().join("\n\n"),
+									remoteSystemPrompt: this.#host.baseSystemPrompt(),
 									metadata: this.#host.agent.metadataForProvider(candidate.provider),
 									initiatorOverride: "agent",
 									convertToLlm: messages => this.#host.convertToLlmForSideRequest(messages),

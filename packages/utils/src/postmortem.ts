@@ -222,7 +222,7 @@ export function isInternalSocketClosedError(err: unknown): boolean {
 	const internal = frames.every(frame => {
 		const trimmed = frame.trim();
 		if (trimmed === "" || trimmed === "at unknown" || trimmed === "at native") return true;
-		if (!/\(node:[^)]*\)$/.test(trimmed) && !/^at node:/.test(trimmed)) return false;
+		if (!/\(node:[^)]*\)$/.test(trimmed) && !trimmed.startsWith("at node:")) return false;
 		hasNetFrame ||= trimmed.includes("node:net:");
 		return true;
 	});
@@ -395,21 +395,38 @@ function formatFatalError(label: string, err: Error): string {
 	return `\n[${label}] ${name}: ${message}${formattedStack}\n`;
 }
 
-async function exitAfterFatal(label: string, logMessage: string, err: Error, reason: Reason): Promise<void> {
+async function exitAfterFatal(output: string, logMessage: string, err: Error, reason: Reason): Promise<never> {
 	const forcedExit = setTimeout(() => exitProcess(1), CLEANUP_DEADLINE_MS);
 	try {
+		// Cleanup callbacks are invoked synchronously before runCleanup returns its
+		// completion promise. TUI owners therefore hand the cursor back before the
+		// fatal report is written, while slower resource cleanup continues afterward.
+		const cleanup = runCleanup(reason);
 		restoreTerminalStderr();
 		// A revoked terminal can make stream writes raise another fatal error. Use
 		// the descriptor directly so failure stays synchronous and contained.
 		try {
-			fs.writeSync(2, `${formatFatalError(label, err)}${formatFatalRecoveryHints()}`);
+			fs.writeSync(2, output);
 		} catch {}
 		logger.error(logMessage, { err });
-		await runCleanup(reason);
+		await cleanup;
 	} finally {
 		clearTimeout(forcedExit);
 		exitProcess(1);
 	}
+}
+
+/**
+ * Reports a caught top-level failure after terminal owners restore their display, then exits.
+ */
+export async function fatal(error: unknown): Promise<never> {
+	const err = error instanceof Error ? error : new Error(String(error));
+	const output = `${Bun.inspect(error, { colors: process.stderr.isTTY === true })}\n${formatFatalRecoveryHints()}`;
+	if (!isMainThread) {
+		process.stderr.write(output);
+		process.exit(1);
+	}
+	return exitAfterFatal(output, "Fatal error", err, Reason.UNHANDLED_REJECTION);
 }
 
 if (isMainThread) {
@@ -461,7 +478,12 @@ if (isMainThread) {
 				});
 				return;
 			}
-			await exitAfterFatal("Uncaught Exception", "Uncaught exception", err, Reason.UNCAUGHT_EXCEPTION);
+			await exitAfterFatal(
+				`${formatFatalError("Uncaught Exception", err)}${formatFatalRecoveryHints()}`,
+				"Uncaught exception",
+				err,
+				Reason.UNCAUGHT_EXCEPTION,
+			);
 		})
 		.on("unhandledRejection", async reason => {
 			const err = reason instanceof Error ? reason : new Error(String(reason));
@@ -497,7 +519,12 @@ if (isMainThread) {
 					});
 				}
 			}
-			await exitAfterFatal("Unhandled Rejection", "Unhandled rejection", err, Reason.UNHANDLED_REJECTION);
+			await exitAfterFatal(
+				`${formatFatalError("Unhandled Rejection", err)}${formatFatalRecoveryHints()}`,
+				"Unhandled rejection",
+				err,
+				Reason.UNHANDLED_REJECTION,
+			);
 		})
 		.on("exit", async () => {
 			void runCleanup(Reason.EXIT); // fire and forget (exit imminent)

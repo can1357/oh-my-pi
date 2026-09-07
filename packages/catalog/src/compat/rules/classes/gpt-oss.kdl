@@ -1,0 +1,16 @@
+// Model-lineage compat for "gpt-oss"; regenerated from the frozen census using class taxonomy selectors.
+
+class "gpt-oss" {
+	// The Harmony reasoning format accepts exactly low/medium/high on
+	// OpenAI-compatible chat hosts; Baseten's router serves high/max.
+	thinking-efforts "low" "medium" "high"
+	on "baseten" {
+		thinking-efforts "high" "max"
+	}
+	on "amazon-bedrock" "google-antigravity" "ollama-cloud" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	on "venice" "vercel-ai-gateway" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

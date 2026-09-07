@@ -37,7 +37,6 @@ interface PrimitiveMap {
 	Key: PropertyKey;
 	Date: Date;
 	Array: unknown[];
-	// biome-ignore lint/complexity/noBannedTypes: built-in Function keyword
 	Function: Function;
 	RegExp: RegExp;
 	File: File;
@@ -214,35 +213,43 @@ type UnwrapProperty<def> = def extends readonly [infer value, "?" | "=", ...unkn
 type Simplify<t> = { [key in keyof t]: t[key] };
 
 type OutputRequired<def extends object> = {
-	-readonly [key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
-		? HasDefault<def[key]> extends true
-			? PropName<key>
-			: never
-		: PropName<key>]-?: InferDef<UnwrapProperty<def[key]>>;
+	-readonly [
+		key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
+			? HasDefault<def[key]> extends true
+				? PropName<key>
+				: never
+			: PropName<key>
+	]-?: InferDef<UnwrapProperty<def[key]>>;
 };
 
 type OutputOptional<def extends object> = {
-	-readonly [key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
-		? HasDefault<def[key]> extends true
-			? never
-			: PropName<key>
-		: never]?: InferDef<UnwrapProperty<def[key]>>;
+	-readonly [
+		key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
+			? HasDefault<def[key]> extends true
+				? never
+				: PropName<key>
+			: never
+	]?: InferDef<UnwrapProperty<def[key]>>;
 };
 
 type InputRequired<def extends object> = {
-	-readonly [key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
-		? never
-		: HasDefault<def[key]> extends true
+	-readonly [
+		key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
 			? never
-			: PropName<key>]-?: InferDefIn<UnwrapProperty<def[key]>>;
+			: HasDefault<def[key]> extends true
+				? never
+				: PropName<key>
+	]-?: InferDefIn<UnwrapProperty<def[key]>>;
 };
 
 type InputOptional<def extends object> = {
-	-readonly [key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
-		? PropName<key>
-		: HasDefault<def[key]> extends true
+	-readonly [
+		key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
 			? PropName<key>
-			: never]?: InferDefIn<UnwrapProperty<def[key]>>;
+			: HasDefault<def[key]> extends true
+				? PropName<key>
+				: never
+	]?: InferDefIn<UnwrapProperty<def[key]>>;
 };
 
 /**
@@ -302,35 +309,43 @@ type InferLiteralDefIn<def> = def extends { readonly inferIn: infer input }
 			: unknown;
 
 type LiteralRequired<def extends object> = {
-	-readonly [key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
-		? HasDefault<def[key]> extends true
-			? PropName<key>
-			: never
-		: PropName<key>]-?: InferLiteralDef<UnwrapProperty<def[key]>>;
+	-readonly [
+		key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
+			? HasDefault<def[key]> extends true
+				? PropName<key>
+				: never
+			: PropName<key>
+	]-?: InferLiteralDef<UnwrapProperty<def[key]>>;
 };
 
 type LiteralOptional<def extends object> = {
-	-readonly [key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
-		? HasDefault<def[key]> extends true
-			? never
-			: PropName<key>
-		: never]?: InferLiteralDef<UnwrapProperty<def[key]>>;
+	-readonly [
+		key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
+			? HasDefault<def[key]> extends true
+				? never
+				: PropName<key>
+			: never
+	]?: InferLiteralDef<UnwrapProperty<def[key]>>;
 };
 
 type LiteralRequiredIn<def extends object> = {
-	-readonly [key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
-		? never
-		: HasDefault<def[key]> extends true
+	-readonly [
+		key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
 			? never
-			: PropName<key>]-?: InferLiteralDefIn<UnwrapProperty<def[key]>>;
+			: HasDefault<def[key]> extends true
+				? never
+				: PropName<key>
+	]-?: InferLiteralDefIn<UnwrapProperty<def[key]>>;
 };
 
 type LiteralOptionalIn<def extends object> = {
-	-readonly [key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
-		? PropName<key>
-		: HasDefault<def[key]> extends true
+	-readonly [
+		key in DefinitionKeys<def> as IsOptionalProp<key, def[key]> extends true
 			? PropName<key>
-			: never]?: InferLiteralDefIn<UnwrapProperty<def[key]>>;
+			: HasDefault<def[key]> extends true
+				? PropName<key>
+				: never
+	]?: InferLiteralDefIn<UnwrapProperty<def[key]>>;
 };
 
 /** Object-literal inference that unwraps embedded schema values one level deep. */

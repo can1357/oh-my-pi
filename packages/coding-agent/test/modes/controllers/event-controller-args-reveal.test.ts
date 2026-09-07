@@ -10,13 +10,13 @@ import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { kStreamingPartialJson } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { EDIT_MODE_STRATEGIES } from "@oh-my-pi/pi-coding-agent/edit";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { STREAMING_REVEAL_FRAME_MS } from "@oh-my-pi/pi-coding-agent/modes/controllers/streaming-reveal";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(async () => {
 	await initTheme();
@@ -53,24 +53,12 @@ function createFixture(streamingMessage: AssistantMessage, tool?: AgentTool) {
 			};
 		},
 	};
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-		settings,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		streamingComponent: { updateContent: vi.fn(), markTranscriptBlockFinalized: vi.fn() },
+	const ctx = createInteractiveModeContext({
+		streamingComponent: new AssistantMessageComponent(),
 		streamingMessage,
-		transcriptMessageComponents: new WeakMap(),
 		pendingTools,
-		noteDisplayableThinkingContent: vi.fn(() => false),
-		chatContainer: { addChild: vi.fn() },
-		toolOutputExpanded: false,
-		session: { getToolByName: () => tool, hasBuiltInTool: () => true, extensionRunner },
-		viewSession: { getToolByName: () => tool, hasBuiltInTool: () => true },
-		sessionManager: { getCwd: () => process.cwd() },
-	} as unknown as InteractiveModeContext;
+		session: { getToolByName: () => tool, extensionRunner },
+	});
 
 	return {
 		controller: new EventController(ctx),
@@ -230,19 +218,8 @@ describe("EventController paces streamed tool args", () => {
 		vi.advanceTimersByTime(STREAMING_REVEAL_FRAME_MS * 5);
 		expect(Bun.stripANSI(component.render(80).join("\n"))).toContain("/tmp/exec.ts");
 	});
-	it("holds approval until the final edit preview is ready", async () => {
+	it("holds approval until the native final edit preview is ready", async () => {
 		await Settings.init({ inMemory: true, cwd: process.cwd() });
-		const compute = Promise.withResolvers<void>();
-		vi.spyOn(EDIT_MODE_STRATEGIES.replace, "computeDiffPreview").mockImplementation(async () => {
-			await compute.promise;
-			return [
-				{
-					path: "/tmp/approval.ts",
-					diff: "@@ -1 +1 @@\n-old\n+ISSUE_7957_PROPOSED_EDIT",
-					firstChangedLine: 1,
-				},
-			];
-		});
 		const args = {
 			path: "/tmp/approval.ts",
 			old_string: "old",
@@ -251,6 +228,23 @@ describe("EventController paces streamed tool args", () => {
 		const streaming = makeStreamingMessage([{ type: "toolCall", id: "tc-approval", name: "edit", arguments: args }]);
 		const tool = { mode: "replace" } as unknown as AgentTool;
 		const { controller, pendingTools, getApprovalWaiter } = createFixture(streaming, tool);
+
+		await controller.handleEvent({
+			type: "tool_stream_update",
+			toolCallId: "tc-approval",
+			toolName: "edit",
+			update: {
+				generation: 1,
+				streaming: true,
+				files: [
+					{
+						path: "/tmp/approval.ts",
+						diff: "@@ -1 +1 @@\n-old\n+ISSUE_7957_PROPOSED_EDIT",
+						firstChangedLine: 1,
+					},
+				],
+			},
+		});
 		await dispatch(controller, streaming);
 
 		const waiter = getApprovalWaiter();
@@ -267,7 +261,22 @@ describe("EventController paces streamed tool args", () => {
 		await Promise.resolve();
 		expect(approvalReady).toBe(false);
 
-		compute.resolve();
+		await controller.handleEvent({
+			type: "tool_stream_update",
+			toolCallId: "tc-approval",
+			toolName: "edit",
+			update: {
+				generation: 2,
+				streaming: false,
+				files: [
+					{
+						path: "/tmp/approval.ts",
+						diff: "@@ -1 +1 @@\n-old\n+ISSUE_7957_PROPOSED_EDIT",
+						firstChangedLine: 1,
+					},
+				],
+			},
+		});
 		await waiting;
 		const rendered = pendingTools.get("tc-approval")?.render(100).join("\n") ?? "";
 		expect(Bun.stripANSI(rendered)).toContain("ISSUE_7957_PROPOSED_EDIT");

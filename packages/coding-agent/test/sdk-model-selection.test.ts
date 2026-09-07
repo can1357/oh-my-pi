@@ -247,6 +247,61 @@ describe("createAgentSession deferred model pattern resolution", () => {
 		}
 	});
 
+	test("preserves an explicit model when a reused registry already finished discovery", async () => {
+		const authStorage = createInMemoryAuthStorage();
+		authStoragesToClose.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
+		modelRegistry.refreshInBackground("offline");
+		await modelRegistry.awaitInitialBackgroundRefresh();
+
+		const catalogModel = modelRegistry.find("anthropic", "claude-sonnet-4-5");
+		if (!catalogModel) throw new Error("missing bundled registry model");
+		const explicitModel = buildModel({
+			id: catalogModel.id,
+			name: "Explicit Claude endpoint",
+			api: catalogModel.api,
+			provider: catalogModel.provider,
+			baseUrl: "https://explicit-sdk-endpoint.example/v1",
+			reasoning: catalogModel.reasoning,
+			input: [...catalogModel.input],
+			cost: catalogModel.cost,
+			contextWindow: 321_000,
+			maxTokens: 12_345,
+		});
+
+		const { session } = await createAgentSession({
+			cwd: tempDir,
+			agentDir: tempDir,
+			authStorage,
+			modelRegistry,
+			model: explicitModel,
+			sessionManager: SessionManager.inMemory(),
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
+			toolNames: ["read"],
+		});
+
+		try {
+			// Flush a reconciler armed against the already-settled refresh; an
+			// incorrect explicit-model opt-in would replace the model here.
+			await Promise.resolve();
+			expect(session.model?.baseUrl).toBe("https://explicit-sdk-endpoint.example/v1");
+			expect(session.model?.contextWindow).toBe(321_000);
+			expect(session.model?.maxTokens).toBe(12_345);
+		} finally {
+			await session.dispose();
+		}
+	});
+
 	test("hydrates credential-scoped model caches before fallback validation", async () => {
 		const authStorage = createInMemoryAuthStorage();
 		authStoragesToClose.push(authStorage);

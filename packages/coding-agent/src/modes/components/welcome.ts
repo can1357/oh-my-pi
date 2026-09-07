@@ -142,7 +142,12 @@ export class WelcomeComponent implements Component {
 	#animStart: number | null = null;
 	#animTimer: Timer | null = null;
 	#requestRender: (() => void) | null = null;
-	#selectedTip: string | undefined;
+	// Tip randomness is latched once so the tip is stable across renders, but
+	// the nerdfont-nag gate re-reads the live preset: the startup prepaint can
+	// run under the default "unicode" preset before settings resolve the real
+	// one, and a memoized nag would survive the switch to "nerd".
+	#nagRoll: number | undefined;
+	#tipRoll: number | undefined;
 	// Render cache: the welcome box is the first transcript-area component, so
 	// returning a stable array reference keeps the whole frame prefix stable.
 	// Bypassed while the intro animation runs (every frame differs).
@@ -157,14 +162,12 @@ export class WelcomeComponent implements Component {
 		private lspServers: LspServerInfo[] = [],
 	) {}
 	get tip(): string | undefined {
-		if (this.#selectedTip === undefined) {
-			if (theme.getSymbolPreset() === "unicode" && Math.random() < 0.1) {
-				this.#selectedTip = "Please use nerdfont 😭.";
-			} else {
-				this.#selectedTip = pickWeightedTip(TIPS, Math.random());
-			}
+		this.#nagRoll ??= Math.random();
+		this.#tipRoll ??= Math.random();
+		if (theme.getSymbolPreset() === "unicode" && this.#nagRoll < 0.1) {
+			return "Please use nerdfont 😭.";
 		}
-		return this.#selectedTip || undefined;
+		return pickWeightedTip(TIPS, this.#tipRoll) || undefined;
 	}
 
 	invalidate(): void {

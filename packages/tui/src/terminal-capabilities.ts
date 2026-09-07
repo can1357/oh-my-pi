@@ -1,5 +1,5 @@
 import { encodeSixel } from "@oh-my-pi/pi-natives";
-import { $env, isBunTestRuntime, isTerminalHeadless } from "@oh-my-pi/pi-utils";
+import { $env, isBunTestRuntime, isTerminalHeadless, isWsl } from "@oh-my-pi/pi-utils";
 import { sendDesktopNotification, shouldDeliverDesktopNotification } from "./desktop-notify";
 import {
 	detectKittyUnicodePlaceholdersSupport,
@@ -9,9 +9,11 @@ import {
 	renderKittyPlaceholderLines,
 	setKittyGraphics,
 } from "./kitty-graphics";
+import { isInsideHerdr, isInsideTerminalMultiplexer } from "./terminal-multiplexer";
 import { isInsideTmux, wrapTmuxPassthrough, wrapTmuxPassthroughIfNeeded } from "./tmux";
 import type { HangulCompatibilityJamoWidth } from "./utils";
 
+export * from "./terminal-multiplexer";
 export { isInsideTmux, wrapTmuxPassthrough } from "./tmux";
 
 export enum ImageProtocol {
@@ -41,6 +43,12 @@ export type TerminalId =
 const CMUX_NOTIFICATION_TITLE = "Oh My Pi";
 const CMUX_SURFACE_ID_PATTERN = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/iu;
 
+/** Title and body for an out-of-band multiplexer notification (cmux, Herdr). */
+function notificationTitleAndBody(message: string | TerminalNotification): { title: string; body: string } {
+	if (typeof message === "string") return { title: CMUX_NOTIFICATION_TITLE, body: message };
+	return { title: message.title?.trim() || CMUX_NOTIFICATION_TITLE, body: message.body ?? "" };
+}
+
 /**
  * Route a notification through cmux when the process belongs to a concrete
  * surface. Workspace/socket state alone is not enough: only the injected
@@ -52,9 +60,7 @@ function sendCmuxNotification(message: string | TerminalNotification, env: NodeJ
 	const surfaceId = env.CMUX_SURFACE_ID?.trim();
 	if (!surfaceId || !CMUX_SURFACE_ID_PATTERN.test(surfaceId)) return false;
 
-	const title =
-		typeof message === "string" ? CMUX_NOTIFICATION_TITLE : message.title?.trim() || CMUX_NOTIFICATION_TITLE;
-	const body = typeof message === "string" ? message : (message.body ?? "");
+	const { title, body } = notificationTitleAndBody(message);
 	try {
 		const child = Bun.spawn({
 			cmd: ["cmux", "notify", "--surface", surfaceId, "--title", title, "--body", body],
@@ -65,6 +71,56 @@ function sendCmuxNotification(message: string | TerminalNotification, env: NodeJ
 		child.unref();
 	} catch {
 		// A missing cmux binary leaves delivery to the existing terminal fallback.
+		return false;
+	}
+	return true;
+}
+
+const HERDR_PANE_ID_PATTERN = /^[0-9A-Za-z:_-]{1,64}$/u;
+/**
+ * `herdr notification show` takes the title as its first positional and reads
+ * exactly these three values there as a help request; it has no `--`
+ * terminator. Any other text, including one starting with `-`, is a title.
+ */
+const HERDR_USAGE_TOKENS = new Set(["help", "--help", "-h"]);
+
+/**
+ * Route a notification through Herdr when the process runs inside one of its
+ * panes. Herdr multiplexes panes like tmux but swallows bare OSC 9 / OSC 99 and
+ * has no DCS passthrough envelope, and its bell relay does not flag a
+ * backgrounded tab — so without this branch a backgrounded pane gets no signal
+ * at all that the agent finished or is waiting for input.
+ *
+ * `sound` maps the notification kind onto what Herdr offers: a question waiting
+ * on the user and a turn that stopped with an error both need the human and
+ * ring `request`, a settled turn rings `done`, anything else stays
+ * silent. Returns whether Herdr owns delivery, so every existing terminal
+ * fallback is preserved when the pane id is absent or the binary is missing.
+ */
+function sendHerdrNotification(message: string | TerminalNotification, env: NodeJS.ProcessEnv = Bun.env): boolean {
+	// Pane-only detection, like `isInsideHerdr`: an env-sanitizing launcher can
+	// drop HERDR_ENV and keep the pane identity, and that pane can still be
+	// backgrounded. The pane id itself is what the CLI needs, so it stays required.
+	if (!isInsideHerdr(env)) return false;
+	const paneId = env.HERDR_PANE_ID?.trim();
+	if (!paneId || !HERDR_PANE_ID_PATTERN.test(paneId)) return false;
+
+	const parsed = notificationTitleAndBody(message);
+	const title = HERDR_USAGE_TOKENS.has(parsed.title) ? CMUX_NOTIFICATION_TITLE : parsed.title;
+	const body = parsed.body;
+	const kinds = typeof message === "string" ? [] : [message.type ?? []].flat();
+	const sound =
+		kinds.includes("ask") || kinds.includes("error") ? "request" : kinds.includes("completion") ? "done" : "none";
+	try {
+		const child = Bun.spawn({
+			cmd: ["herdr", "notification", "show", title, "--body", body, "--sound", sound],
+			stdin: "ignore",
+			stdout: "ignore",
+			stderr: "ignore",
+		});
+		child.unref();
+	} catch {
+		// A missing herdr binary leaves delivery to the existing terminal fallback.
 		return false;
 	}
 	return true;
@@ -157,6 +213,11 @@ export class TerminalInfo {
 
 	sendNotification(message: string | TerminalNotification): void {
 		if (isNotificationSuppressed() || isTerminalHeadless()) return;
+		// Innermost surface first. A Herdr pane launched inside a cmux surface
+		// inherits both `HERDR_PANE_ID` and the outer `CMUX_SURFACE_ID`; routing to
+		// cmux there would flag the containing surface and leave the backgrounded
+		// Herdr pane — the one actually waiting — without a sound or a marker.
+		if (sendHerdrNotification(message)) return;
 		if (sendCmuxNotification(message)) return;
 		const formatted = this.formatNotification(message);
 		// Under tmux, terminals whose notify protocol is OSC 9 / OSC 99 would
@@ -190,19 +251,6 @@ export class TerminalInfo {
 			sendDesktopNotification(message);
 		}
 	}
-}
-
-/** Detect terminal multiplexers where scrollback clearing and height-change redraws are hostile. */
-export function isInsideTerminalMultiplexer(env: NodeJS.ProcessEnv = Bun.env): boolean {
-	// TMUX/STY/ZELLIJ, Herdr, and CMUX workspace/surface/remote-transport
-	// markers are authoritative session signals. TERM can also survive when those are
-	// stripped (`sudo` without -E, `su`, env-sanitizing launchers/ssh). Do not
-	// use CMUX_SOCKET_PATH here: it is a CLI socket override and can be set
-	// outside a CMUX terminal.
-	if (env.TMUX || env.STY || env.ZELLIJ || env.HERDR_ENV === "1") return true;
-	if (env.CMUX_WORKSPACE_ID || env.CMUX_SURFACE_ID || env.CMUX_REMOTE_TRANSPORT) return true;
-	const term = env.TERM?.toLowerCase() ?? "";
-	return term.startsWith("tmux") || term.startsWith("screen");
 }
 
 /**
@@ -300,9 +348,15 @@ function advertisesSynchronizedOutput(termFeatures: string | undefined): boolean
  *   2. Positive `TERM_FEATURES` advertisement (`Sy`) — survives SSH/mux wrapping.
  *   3. Windows Terminal (1.24+) via `WT_SESSION`, on native win32 and the
  *      WSL/SSH-fronted host alike.
- *   4. Known direct terminals with confirmed support. SSH does *not* disable —
+ *   4. Herdr panes. Herdr is otherwise treated as a multiplexer so leaked
+ *      kitty/ghostty identities cannot enable placeholder graphics, but its
+ *      pane VTE is libghostty and already suppresses compositing while DEC 2026
+ *      is set. Leaving sync off lets CUP-diff paints and split write(2) chunks
+ *      composite as dirty-row patches — the live viewport tears, with the top
+ *      frozen while only the bottom refreshes.
+ *   5. Known direct terminals with confirmed support. SSH does *not* disable —
  *      DEC 2026 passes through SSH when the outer terminal honors it.
- *   5. Everything else starts off, including risky multiplexers; the runtime
+ *   6. Everything else starts off, including risky multiplexers; the runtime
  *      DECRQM probe upgrades any of them when the terminal actually reports
  *      `?2026` supported (current zellij, tmux master, foot, contour, mintty…).
  */
@@ -315,6 +369,7 @@ export function shouldEnableSynchronizedOutputByDefault(
 
 	if (advertisesSynchronizedOutput(env.TERM_FEATURES)) return true;
 	if (env.WT_SESSION) return true;
+	if (isInsideHerdr(env)) return true;
 
 	// Risky multiplexers start off even when an inner terminal id leaks through:
 	// older tmux/screen synchronized-output handling is flaky and a mux may not
@@ -469,8 +524,7 @@ export function resolveWarpImageProtocol(
 	platform: NodeJS.Platform = process.platform,
 	env: NodeJS.ProcessEnv = Bun.env,
 ): ImageProtocol | null {
-	const windowsHost =
-		platform === "win32" || (platform === "linux" && Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP));
+	const windowsHost = platform === "win32" || isWsl(platform, env);
 	return windowsHost ? null : ImageProtocol.Kitty;
 }
 
@@ -489,9 +543,9 @@ export function isPaseoEmbedder(env: NodeJS.ProcessEnv = Bun.env): boolean {
 /**
  * Resolve the image protocol for a non-forced runtime: static per-terminal
  * support (with Warp's platform carve-out), then the multiplexer fallback,
- * then the Paseo embedder carve-out. `isTTY` is injectable because the
- * fallback only fires on a real TTY — a piped subprocess cannot exercise
- * that path, so regression tests call this directly.
+ * then host carve-outs. `isTTY` is injectable because the fallback only fires
+ * on a real TTY — a piped subprocess cannot exercise that path, so regression
+ * tests call this directly.
  */
 export function resolveImageProtocol(
 	terminalId: TerminalId,
@@ -514,6 +568,12 @@ export function resolveImageProtocol(
 	// pane cannot restore Kitty via getFallbackImageProtocol
 	// (getpaseo/paseo#3850).
 	if (imageProtocol !== null && isPaseoEmbedder(env)) {
+		return null;
+	}
+	// Herdr owns the pane grid but does not expose whether the attached client
+	// enabled its experimental Kitty renderer. Outer-terminal identity variables
+	// can leak into the pane, so only the explicit protocol override is safe.
+	if (imageProtocol !== null && isInsideHerdr(env)) {
 		return null;
 	}
 	return imageProtocol;
@@ -674,6 +734,18 @@ export function setTerminalScreenToScrollback(enabled: boolean): void {
  */
 export function setTerminalTextSizing(enabled: boolean): void {
 	TERMINAL.textSizing = enabled;
+}
+
+/**
+ * Override OSC 8 hyperlink capability at runtime. The coding-agent calls this
+ * from the `tui.hyperlinks` setting so its resolved policy (`off`/`auto`/`always`)
+ * drives every renderer that gates on {@link TERMINAL}`.hyperlinks` — notably the
+ * Markdown component's `[text](url)`/bare-URL links — consistently with the
+ * path/resource links that already consult the setting directly. Tests flip it
+ * to exercise the OSC 8 and plain-text paths deterministically.
+ */
+export function setTerminalHyperlinks(enabled: boolean): void {
+	TERMINAL.hyperlinks = enabled;
 }
 
 export function getTerminalInfo(

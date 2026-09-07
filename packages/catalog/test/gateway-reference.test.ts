@@ -10,6 +10,18 @@ describe("Portkey gateway model references", () => {
 		expect(resolveModelReference("@modal/GLM-5-2-FP8", index)).toBeUndefined();
 	});
 
+	test("strips compiled discovery and collapse markers for proxy recovery", () => {
+		const index = getBundledModelReferenceIndex();
+		for (const id of [
+			"claude-opus-4-6-fp8",
+			"claude-opus-4-6-search",
+			"claude-opus-4-6-thinking",
+			"claude-opus-4-6-free",
+		]) {
+			expect(resolveModelReference(id, index)?.id).toBe("claude-opus-4-6");
+		}
+	});
+
 	test("cross-provider references do not inherit wire routing thinking", () => {
 		const index = getBundledModelReferenceIndex();
 		const kiloGigaPotato = resolveModelReference("giga-potato", index);

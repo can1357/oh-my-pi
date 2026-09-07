@@ -4,12 +4,11 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { type FetchImpl, getEnvApiKey, type ImageContent, type TextContent } from "@oh-my-pi/pi-ai";
-import { htmlToMarkdown } from "@oh-my-pi/pi-natives";
+import { htmlToMarkdown, notebookToEditableText } from "@oh-my-pi/pi-natives";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
 import { $which, ptree, truncate } from "@oh-my-pi/pi-utils";
 import { type ArchiveFormat, listArchiveRoot, sniffArchiveFormat } from "@oh-my-pi/pi-utils/ar";
 import type { Settings } from "../config/settings";
-import { readEditableNotebookText } from "../edit/notebook";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import { type Theme, theme } from "../modes/theme/theme";
 import type { ToolSession } from "../sdk";
@@ -21,6 +20,7 @@ import { webpExclusionForModel } from "../utils/image-loading";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS } from "../utils/markit";
 import { ensureTool } from "../utils/tools-manager";
+import { findFirecrawlApiKey, scrapeWithFirecrawl } from "../web/firecrawl";
 import { extractWithParallel, findParallelApiKey, getParallelExtractContent } from "../web/parallel";
 import type { RenderResult, SpecialHandler } from "../web/scrapers/types";
 import { finalizeOutput, loadPage, looksLikeHtml, MAX_BYTES, MAX_OUTPUT_CHARS } from "../web/scrapers/types";
@@ -28,7 +28,8 @@ import { convertWithMarkit, fetchBinary } from "../web/scrapers/utils";
 import { findCredential } from "../web/search/providers/utils";
 import { applyListLimit } from "./list-limit";
 import { formatStyledArtifactReference, type OutputMeta } from "./output-meta";
-import { isReadableUrlPath, type LineRange, parseLineRanges } from "./path-utils";
+import { isReadableUrlPath, type LineRange, parseLineRanges, parseTailCount } from "./path-utils";
+import type { ParsedSelector } from "./read-selector";
 import { formatBytes, formatExpandHint, getDomain, replaceTabs } from "./render-utils";
 import { listTables, looksLikeSqlite, openSqliteReadConnection, renderTableList } from "./sqlite-reader";
 import { ToolAbortError, ToolError } from "./tool-errors";
@@ -142,25 +143,22 @@ function normalizeUrl(url: string): string {
 	return url;
 }
 
-// URL line selectors mirror the file form: `:50`, `:50-100`, `:50+150`, `:5-10,20-30`, `:raw`,
-// or `:raw:N-M` / `:N-M:raw` to combine raw mode with a range. If a URL would otherwise look
-// like `host:port`, add a trailing slash before the selector (e.g. `https://example.com/:80`
+// URL line selectors mirror the file form: `:50`, `:50-100`, `:50+150`, `:5-10,20-30`, `:-60`,
+// `:raw`, or `:raw:N-M` / `:N-M:raw` to combine raw mode with a range. If a URL would otherwise
+// look like `host:port`, add a trailing slash before the selector (e.g. `https://example.com/:80`
 // to read line 80 of the document at `https://example.com/`).
 
+/** A readable external URL split from its trailing read selector. */
 export interface ParsedReadUrlTarget {
 	path: string;
-	raw: boolean;
-	offset?: number;
-	limit?: number;
-	/** Populated only when the selector carries 2+ ranges. Single-range stays on offset/limit. */
-	ranges?: readonly LineRange[];
+	sel: ParsedSelector;
 }
 
-/** Recognize a single selector token (`raw` or one/many line ranges). */
+/** Recognize a single selector token (`raw`, a tail, or one/many line ranges). */
 function isUrlSelectorToken(token: string): boolean {
 	if (token.toLowerCase() === "raw") return true;
 	try {
-		return parseLineRanges(token) !== null;
+		return parseLineRanges(token) !== null || parseTailCount(token) !== null;
 	} catch {
 		// `parseLineRanges` throws `ToolError` for malformed ranges (e.g. `5+0`). Only treat the
 		// token as a selector when it parses cleanly so URL ports like `:80` keep flowing
@@ -178,37 +176,37 @@ export function parseReadUrlTarget(readPath: string): ParsedReadUrlTarget | null
 	}
 
 	let raw = false;
-	let ranges: readonly LineRange[] | undefined;
-	for (const sel of embedded?.sels ?? []) {
-		if (sel.toLowerCase() === "raw") {
+	let ranges: [LineRange, ...LineRange[]] | undefined;
+	let tail: number | undefined;
+	for (const token of embedded?.sels ?? []) {
+		if (token.toLowerCase() === "raw") {
 			raw = true;
 			continue;
 		}
-		if (ranges !== undefined) {
+		if (ranges !== undefined || tail !== undefined) {
 			// Two range groups on the same URL (`…:5-10:20-30`) — combine with commas instead.
 			throw new ToolError(
 				`URL selector has multiple range groups; combine them with commas (e.g. \`:5-10,20-30\`).`,
 			);
 		}
-		const parsed = parseLineRanges(sel);
-		if (parsed === null) {
+		ranges = parseLineRanges(token) ?? undefined;
+		if (ranges !== undefined) continue;
+		const count = parseTailCount(token);
+		if (count === null) {
 			// Shouldn't happen — isUrlSelectorToken vetted it. Belt-and-suspenders.
-			throw new ToolError(`Invalid URL line selector: ${sel}`);
+			throw new ToolError(`Invalid URL line selector: ${token}`);
 		}
-		ranges = parsed;
+		tail = count;
 	}
 
-	if (!ranges || ranges.length === 0) return { path: urlPath, raw };
-	if (ranges.length === 1) {
-		const r = ranges[0];
-		return {
-			path: urlPath,
-			raw,
-			offset: r.startLine,
-			limit: r.endLine !== undefined ? r.endLine - r.startLine + 1 : undefined,
-		};
-	}
-	return { path: urlPath, raw, ranges };
+	const sel: ParsedSelector = ranges
+		? { kind: "lines", ranges, raw }
+		: tail !== undefined
+			? { kind: "tail", count: tail, raw }
+			: raw
+				? { kind: "raw" }
+				: { kind: "none" };
+	return { path: urlPath, sel };
 }
 
 /**
@@ -572,9 +570,9 @@ async function parseFeedToMarkdown(content: string, maxItems = 10): Promise<stri
 }
 
 /**
- * Cap on any single remote reader-mode request (Parallel, Jina) so a stalled
- * remote endpoint cannot consume the whole reader-mode budget and starve the
- * local fallback renderers (trafilatura, lynx, native). See #1449.
+ * Cap on any single remote reader-mode request (Parallel, Firecrawl, Jina) so a
+ * stalled remote endpoint cannot consume the whole reader-mode budget and starve
+ * the local fallback renderers (trafilatura, lynx, native). See #1449.
  */
 const REMOTE_READER_MAX_MS = 10_000;
 const JINA_MARKDOWN_MARKER = "Markdown Content:";
@@ -592,23 +590,30 @@ function parseJinaReaderContent(responseBody: string): string | null {
 }
 
 /** Reader backends for {@link renderHtmlToText}, in default priority order. */
-export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "jina";
+export type FetchProvider = "native" | "trafilatura" | "lynx" | "parallel" | "firecrawl" | "jina";
 
-const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = ["native", "trafilatura", "lynx", "parallel", "jina"];
+const FETCH_PROVIDER_ORDER: readonly FetchProvider[] = [
+	"native",
+	"trafilatura",
+	"lynx",
+	"parallel",
+	"firecrawl",
+	"jina",
+];
 
 /**
  * Render HTML to markdown by trying reader backends in priority order: native
- * (in-process), trafilatura, lynx, Parallel, then Jina. The `providers.fetch`
- * setting picks the order — `auto` uses the default above; any specific backend
- * is tried first, then the remaining backends as fallbacks. Every backend's
- * output must clear the same quality gate (>100 non-whitespace chars and not
- * {@link isLowQualityOutput}) before it is accepted, otherwise the next backend
- * is tried.
+ * (in-process), trafilatura, lynx, Parallel, Firecrawl, then Jina. The
+ * `providers.fetch` setting picks the order — `auto` uses the default above; any
+ * specific backend is tried first, then the remaining backends as fallbacks.
+ * Every backend's output must clear the same quality gate (>100 non-whitespace
+ * chars and not {@link isLowQualityOutput}) before it is accepted, otherwise the
+ * next backend is tried.
  *
  * The overall `timeout` budget bounds the whole call; remote backends (Parallel,
- * Jina) are additionally capped at `REMOTE_READER_MAX_MS` so a hung endpoint
- * cannot starve later renderers — especially the purely-local native converter,
- * which always works on already-loaded HTML. Only a real `userSignal`
+ * Firecrawl, Jina) are additionally capped at `REMOTE_READER_MAX_MS` so a hung
+ * endpoint cannot starve later renderers — especially the purely-local native
+ * converter, which always works on already-loaded HTML. Only a real `userSignal`
  * cancellation aborts the chain (#1449).
  */
 export async function renderHtmlToText(
@@ -664,6 +669,10 @@ export async function renderHtmlToText(
 			);
 			const firstDocument = parallelResult.results[0];
 			return firstDocument ? getParallelExtractContent(firstDocument) : null;
+		},
+		firecrawl: async () => {
+			if (!findFirecrawlApiKey(storage)) return null;
+			return scrapeWithFirecrawl(url, { signal: remoteSignal(), fetch: fetchImpl }, storage);
 		},
 		jina: async () => {
 			const apiKey = findCredential(storage, getEnvApiKey("jina"), "jina");
@@ -881,8 +890,8 @@ async function withTempBinaryFile<T>(
 }
 
 async function renderNotebookPayload(bytes: Uint8Array, displayUrl: string): Promise<string> {
-	return withTempBinaryFile("omp-url-notebook-", ".ipynb", bytes, tempPath =>
-		readEditableNotebookText(tempPath, displayUrl),
+	return withTempBinaryFile("omp-url-notebook-", ".ipynb", bytes, async tempPath =>
+		notebookToEditableText(await Bun.file(tempPath).text(), displayUrl),
 	);
 }
 
@@ -1437,7 +1446,8 @@ async function renderUrl(
 			throw new ToolAbortError();
 		}
 
-		// 5E: Render HTML via the reader-backend chain (native/trafilatura/lynx/parallel/jina)
+		// 5E: Render HTML via the reader-backend chain
+		// (native/trafilatura/lynx/parallel/firecrawl/jina)
 		const htmlResult = await renderHtmlToText(
 			finalUrl,
 			rawContent,

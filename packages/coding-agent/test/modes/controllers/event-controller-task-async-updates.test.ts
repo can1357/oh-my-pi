@@ -16,12 +16,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { BashToolDetails } from "@oh-my-pi/pi-coding-agent/tools/bash";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 function taskResult(asyncState: "running" | "completed" | "failed" | undefined, text: string) {
 	const details: TaskToolDetails = {
@@ -56,28 +55,13 @@ describe("EventController async update finalization", () => {
 	});
 
 	function createFixture() {
-		const chatContainer = new TranscriptContainer();
 		const pendingTools = new Map<string, ToolExecutionComponent>();
-		const ctx = {
-			isInitialized: true,
-			init: vi.fn(async () => {}),
-			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-			statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
-			updateEditorTopBorder: vi.fn(),
-			toolOutputExpanded: false,
-			transcriptMessageComponents: new WeakMap(),
+		const ctx = createInteractiveModeContext({
 			pendingTools,
-			chatContainer,
-			session: { getToolByName: () => undefined, hasBuiltInTool: () => true, isStreaming: true },
-			showWarning: vi.fn(),
-			viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => true, isStreaming: false },
-			sessionManager: { getCwd: () => process.cwd() },
-			setTodos: vi.fn(),
-			clearPinnedError: vi.fn(),
-			statusContainer: { disposeChildren: vi.fn() },
-			ensureLoadingAnimation: vi.fn(),
-		} as unknown as InteractiveModeContext;
-		return { controller: new EventController(ctx), pendingTools, chatContainer, ctx };
+			session: { isStreaming: true },
+			viewSession: { isStreaming: false },
+		});
+		return { controller: new EventController(ctx), pendingTools, chatContainer: ctx.chatContainer, ctx };
 	}
 
 	async function startTask(controller: EventController, pendingTools: Map<string, ToolExecutionComponent>) {

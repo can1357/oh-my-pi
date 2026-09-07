@@ -45,6 +45,16 @@ describe("composer shape preview", () => {
 		expect(joined).toContain("Ask anything");
 	});
 
+	it("resolves transparent composer preview text away from the terminal default", async () => {
+		// The built-in `light` theme leaves `text` empty; a transparent shape must
+		// still emit an explicit contrast foreground instead of ESC[39m, matching
+		// the live editor so the preview stays readable on a light terminal.
+		await setTheme("light");
+		const box = renderComposerShapePreview("box", 80).join("\n");
+		expect(box).not.toContain("\x1b[39mAsk anything");
+		expect(box).toMatch(/\x1b\[38[;0-9]*mAsk anything/);
+	});
+
 	it("updates preview when setValue is called on ComposerShapePreview component", async () => {
 		await setTheme("dark");
 		let renderRequested = false;

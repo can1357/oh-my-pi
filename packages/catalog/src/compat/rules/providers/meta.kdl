@@ -1,0 +1,11 @@
+// Provider-wire compat for "meta"; regenerated from the frozen census using deployment contract selectors.
+
+provider "meta" {
+	include-encrypted-reasoning #true
+	supports-reasoning-effort #true
+	clamp-output-to-model-max #true
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "effort"
+	}
+}

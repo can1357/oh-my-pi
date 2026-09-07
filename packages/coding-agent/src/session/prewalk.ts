@@ -66,11 +66,9 @@ export interface PrewalkCoordinatorHost {
 		options?: { ephemeral?: boolean },
 	): Promise<void>;
 	setActiveToolsByName(names: string[]): Promise<void>;
-	setActiveToolPresentation(toolNames: string[], mountedToolNames: string[]): Promise<void>;
-	runToolRegistryMutation<T>(mutation: () => Promise<T>): Promise<T>;
+	restoreNonMCPToolPresentation(nonMCPToolNames: string[], nonMCPMountedToolNames: string[]): Promise<void>;
 	getActiveToolNames(): string[];
 	getEnabledToolNames(): string[];
-	getSelectedMCPToolNames(): string[];
 	getMountedXdevToolNames(): string[];
 	hasBuiltInTool(name: string): boolean;
 	getPlanModeState(): PlanModeState | undefined;
@@ -107,6 +105,12 @@ export class PrewalkCoordinator {
 	/** Current prewalk target, if the one-way switch remains armed. */
 	get state(): Prewalk | undefined {
 		return this.#prewalk;
+	}
+
+	/** Whether the armed prewalk would perform a model or thinking-level handoff. */
+	get willHandoff(): boolean {
+		const prewalk = this.#prewalk;
+		return prewalk !== undefined && !this.#isNoop(prewalk);
 	}
 
 	#isNoop(prewalk: Prewalk): boolean {
@@ -310,14 +314,7 @@ export class PrewalkCoordinator {
 		const previousPresentation = this.#planYoloPreviousNonMCPPresentation;
 		try {
 			if (previousPresentation) {
-				await this.#host.runToolRegistryMutation(async () => {
-					const liveMCP = this.#host.getSelectedMCPToolNames();
-					const liveMountedMCP = this.#host.getMountedXdevToolNames().filter(isMCPToolName);
-					await this.#host.setActiveToolPresentation(
-						[...new Set([...previousPresentation.enabled, ...liveMCP])],
-						[...new Set([...previousPresentation.mounted, ...liveMountedMCP])],
-					);
-				});
+				await this.#host.restoreNonMCPToolPresentation(previousPresentation.enabled, previousPresentation.mounted);
 			}
 		} catch (error) {
 			this.#host.setPlanModeState(state);

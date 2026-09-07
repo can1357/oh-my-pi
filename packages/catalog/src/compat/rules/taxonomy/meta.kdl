@@ -1,0 +1,10 @@
+class "meta" {
+	bounded "muse-spark"
+	bounded "llama"
+	namespace "meta-llama"
+
+	family "llama" glob="*llama*"
+	family "muse-spark" glob="*muse-spark*"
+
+	revision prefix="muse-spark-"
+}
