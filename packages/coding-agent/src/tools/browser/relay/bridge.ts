@@ -76,6 +76,8 @@ interface PreservedPreloadScript {
 	clientIdentifier: string;
 	/** Current root-side identifier, remapped after recovery replay. */
 	rootIdentifier: string;
+	/** Companion registration that removes the private recovery marker. */
+	cleanupRootIdentifier?: string;
 	params?: Record<string, unknown>;
 	/** Main-frame document that already received an immediate invocation. */
 	loaderId?: string;
@@ -115,23 +117,9 @@ function markPreloadApplication(source: unknown, marker: string): string {
 	return `${source.slice(0, offset)}${markerStatement}\n${source.slice(offset)}`;
 }
 
-function suppressMarkedPreloadApplication(source: unknown, marker: string): string {
-	if (typeof source !== "string") throw new Error("preload source must be a string");
-	const offset = preloadDirectiveEnd(source);
+function clearPreloadApplicationMarker(marker: string): string {
 	const markerAccess = `this[${JSON.stringify(marker)}]`;
-	// Abort only the document already covered by the marker-bearing registration.
-	// Unlike wrapping the source in an `else` block, an early throw leaves the
-	// client's top-level lexical declarations in the global lexical environment
-	// for every later document. Throw the marker string directly so client
-	// declarations cannot shadow anything the guard needs before they initialize.
-	return `${source.slice(0, offset)}if (${markerAccess} === true) { delete ${markerAccess}; throw ${JSON.stringify(marker)}; }\n${source.slice(offset)}`;
-}
-
-function runtimeExceptionValue(params: Record<string, unknown> | undefined): unknown {
-	const details = params?.exceptionDetails;
-	if (!details || typeof details !== "object" || !("exception" in details)) return undefined;
-	const exception = details.exception;
-	return exception && typeof exception === "object" && "value" in exception ? exception.value : undefined;
+	return `delete ${markerAccess};`;
 }
 
 function subscriptionKey(method: string): string {
@@ -402,8 +390,6 @@ class TabState {
 	readonly realSessions = new Set<string>();
 	/** Live execution contexts from the shared root debugger session. */
 	readonly runtimeContexts = new Map<number, Record<string, unknown>>();
-	/** Private preload handoff sentinels whose synthetic exceptions stay relay-internal. */
-	readonly suppressedPreloadExceptions = new Set<string>();
 	/** Whether the shared root Runtime domain has been enabled by the bridge. */
 	rootRuntimeEnabled = false;
 	/** Root Runtime was enabled before a detach and must be restored for default sessions. */
@@ -1089,6 +1075,23 @@ export class RelayBridge {
 		const script = clientIdentifier ? this.#preloadScript(tab, sessionId, clientIdentifier) : undefined;
 		const params = script && clientIdentifier ? { ...msg.params, identifier: script.rootIdentifier } : msg.params;
 		try {
+			if (script?.cleanupRootIdentifier) {
+				try {
+					await this.#rpc({
+						op: "send",
+						tabId: ref.tabId,
+						method: msg.method,
+						params: { ...msg.params, identifier: script.cleanupRootIdentifier },
+					});
+				} catch (err) {
+					if (isExtensionTransportInterrupted(err)) throw err;
+					this.#log("preload marker cleanup removal failed", {
+						tabId: ref.tabId,
+						identifier: script.cleanupRootIdentifier,
+						error: err instanceof Error ? err.message : String(err),
+					});
+				}
+			}
 			await this.#rpc({
 				op: "send",
 				tabId: ref.tabId,
@@ -1720,6 +1723,7 @@ export class RelayBridge {
 		rootIdentifier: string,
 		params: Record<string, unknown> | undefined,
 		loaderId?: string,
+		cleanupRootIdentifier?: string,
 	): void {
 		let scripts = tab.preloadScripts.get(ownerSessionId);
 		if (!scripts) {
@@ -1730,6 +1734,7 @@ export class RelayBridge {
 			ownerSessionId,
 			clientIdentifier,
 			rootIdentifier,
+			cleanupRootIdentifier,
 			params,
 			loaderId,
 			sequence: ++this.#subscriptionSeq,
@@ -1756,7 +1761,13 @@ export class RelayBridge {
 
 	#enqueuePreloadScriptCleanup(tab: TabState, scripts: PreservedPreloadScript[]): void {
 		if (scripts.length === 0) return;
-		tab.pendingPreloadScriptCleanup.push(...scripts);
+		tab.pendingPreloadScriptCleanup.push(
+			...scripts.flatMap(script =>
+				script.cleanupRootIdentifier
+					? [script, { ...script, rootIdentifier: script.cleanupRootIdentifier, cleanupRootIdentifier: undefined }]
+					: [script],
+			),
+		);
 		this.#scheduleLivePreloadScriptCleanup(tab);
 	}
 
@@ -2639,10 +2650,6 @@ export class RelayBridge {
 	): void {
 		const tab = this.#tabs.get(tabId);
 		if (!tab) return;
-		if (method === "Runtime.exceptionThrown") {
-			const value = runtimeExceptionValue(params);
-			if (typeof value === "string" && tab.suppressedPreloadExceptions.has(value)) return;
-		}
 		// Track real child sessions so downstream commands can route back.
 		if (method === "Target.attachedToTarget") {
 			const child = params?.sessionId;
@@ -3135,7 +3142,6 @@ export class RelayBridge {
 		const [, currentLoaderId] = await Promise.all([enablePageEvents, currentLoaderPromise]);
 		for (const script of preloadScripts) {
 			this.#assertExtensionCurrent(expectedExt);
-			const navigationGenerationBeforeRegistration = tab.mainFrameNavigationGeneration;
 			const runImmediately =
 				script.params?.runImmediately === true &&
 				(recoveryLoaderId !== undefined && currentLoaderId !== undefined
@@ -3147,7 +3153,6 @@ export class RelayBridge {
 				script.params?.runImmediately === true && !runImmediately && typeof script.params.source === "string"
 					? `__ompRelayPreload${tab.tabId}_${++this.#sessionSeq}`
 					: undefined;
-			if (applicationMarker !== undefined) tab.suppressedPreloadExceptions.add(applicationMarker);
 			const replayParams =
 				script.params && typeof script.params === "object" && "runImmediately" in script.params
 					? {
@@ -3185,6 +3190,7 @@ export class RelayBridge {
 				throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 			}
 			let rootIdentifier = identifier;
+			let cleanupRootIdentifier: string | undefined;
 			let appliedToCurrentDocument = false;
 			let navigationDuringRegistration = false;
 			if (script.params?.runImmediately === true && !runImmediately) {
@@ -3254,40 +3260,27 @@ export class RelayBridge {
 				const originalParams = script.params;
 				if (!originalParams) throw new Error("preload replay parameters are missing");
 				try {
-					// Probe before swapping registrations. The marker-bearing registration
-					// remains installed until the clean replacement is acknowledged, so a
-					// navigation cannot cross an uncovered remove/add gap.
-					const appliedBeforeReplacement = await this.#preloadApplicationMarker(
-						tab.tabId,
-						applicationMarker,
-						originalParams.worldName,
-					);
-					appliedToCurrentDocument = appliedToCurrentDocument || appliedBeforeReplacement;
-					const navigationNeedsInvocation =
-						navigationDuringRegistration ||
-						tab.mainFrameNavigationGeneration !== navigationGenerationBeforeRegistration;
-					const guarded = (await this.#rpc({
+					// Keep the marker-bearing client source as the only registration that
+					// contains caller code. A companion registration runs after it on each
+					// document and removes the private marker without duplicating any top-level
+					// lexical declaration. This avoids both an uncovered handoff gap and the
+					// SyntaxError Chrome raises when two scripts declare the same let/const/class.
+					const cleanup = (await this.#rpc({
 						op: "send",
 						tabId: tab.tabId,
 						method: "Page.addScriptToEvaluateOnNewDocument",
 						params: {
 							...originalParams,
-							source: suppressMarkedPreloadApplication(originalParams.source, applicationMarker),
-							runImmediately: navigationNeedsInvocation && !appliedToCurrentDocument,
+							source: clearPreloadApplicationMarker(applicationMarker),
+							runImmediately: false,
 						},
 					})) as Record<string, unknown> | undefined;
-					if (typeof guarded?.identifier !== "string") {
+					if (typeof cleanup?.identifier !== "string") {
 						throw new Error("Page.addScriptToEvaluateOnNewDocument replay did not return an identifier");
 					}
-					rootIdentifier = guarded.identifier;
-					await this.#rpc({
-						op: "send",
-						tabId: tab.tabId,
-						method: "Page.removeScriptToEvaluateOnNewDocument",
-						params: { identifier },
-					});
-					// A navigation during the overlap can leave the temporary marker in
-					// its new document. Delete it after the marker registration is gone.
+					cleanupRootIdentifier = cleanup.identifier;
+					// Clear the marker in the current document. Future navigations clear it
+					// through the companion registration above.
 					await this.#preloadApplicationMarker(tab.tabId, applicationMarker, originalParams.worldName);
 				} catch (err) {
 					if (isExtensionTransportInterrupted(err)) tab.forceFreshRootBeforeReplay = true;
@@ -3296,10 +3289,11 @@ export class RelayBridge {
 			}
 			const current = this.#preloadScript(tab, script.ownerSessionId, script.clientIdentifier);
 			if (!current) {
-				this.#enqueuePreloadScriptCleanup(tab, [{ ...script, rootIdentifier }]);
+				this.#enqueuePreloadScriptCleanup(tab, [{ ...script, rootIdentifier, cleanupRootIdentifier }]);
 				continue;
 			}
 			current.rootIdentifier = rootIdentifier;
+			current.cleanupRootIdentifier = cleanupRootIdentifier;
 			if (currentLoaderId !== undefined) current.loaderId = currentLoaderId;
 		}
 		if (temporarilyObserveNavigations) {
