@@ -5,6 +5,8 @@
 ### Fixed
 
 - Fixed Windows `vault://` CLI operations failing with exit code 255 by selecting Obsidian's console launcher and normalizing its executable path for Bun.
+- Fixed first-time IRC replies stalling behind tool discovery: inbound messages now activate the `irc` tool on the recipient through the normal discovery path (profiles, ceilings, and schema budget still apply) before the aside or wake turn runs.
+- `search_tool_bm25` results now include each match's compact param signature (optionality plus inline enums like `op(send|wait|inbox|list|complete)`) so a just-activated tool can be called without guessing its call shape.
 
 ## [16.4.17] - 2026-09-07
 

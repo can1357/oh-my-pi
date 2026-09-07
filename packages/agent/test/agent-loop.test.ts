@@ -2334,3 +2334,74 @@ describe("agentLoop streaming snapshots", () => {
 		expect(update.message).not.toBe(livePartial);
 	});
 });
+
+describe("tool-not-found suggestions", () => {
+	function makeTool(name: string): AgentTool {
+		return {
+			name,
+			label: name,
+			description: `${name} description`,
+			parameters: type({ value: "string?" }),
+			strict: true,
+			async execute() {
+				return { content: [{ type: "text", text: `${name} ran` }] };
+			},
+		} as unknown as AgentTool;
+	}
+
+	async function runWithUnknownToolCall(
+		tools: AgentTool[],
+		unknownName: string,
+	): Promise<ToolResultMessage | undefined> {
+		const context: AgentContext = {
+			systemPrompt: ["You are helpful."],
+			messages: [],
+			tools,
+		};
+		const config: AgentLoopConfig = { model: createMockModel().model, convertToLlm: identityConverter };
+		const toolCall = { type: "toolCall" as const, id: "tc-miss", name: unknownName, arguments: {} };
+		let turn = 0;
+		const streamFn = () => {
+			const stream = new AssistantMessageEventStream();
+			if (turn++ === 0) {
+				const partial = createAssistantMessage([toolCall], "toolUse");
+				stream.push({ type: "start", partial });
+				stream.push({ type: "toolcall_start", contentIndex: 0, partial });
+				stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial });
+				stream.push({ type: "done", reason: "toolUse", message: partial });
+			} else {
+				const partial = createAssistantMessage([{ type: "text", text: "done" }], "stop");
+				stream.push({ type: "start", partial });
+				stream.push({ type: "done", reason: "stop", message: partial });
+			}
+			return stream;
+		};
+		const messages = await (async () => {
+			const stream = agentLoop([createUserMessage("call it")], context, config, undefined, streamFn);
+			for await (const _ of stream) {
+				// drain
+			}
+			return await stream.result();
+		})();
+		return messages.find((m): m is ToolResultMessage => m.role === "toolResult");
+	}
+
+	it("suggests the real tool for a namespaced near-miss call (irc.send → irc)", async () => {
+		const result = await runWithUnknownToolCall([makeTool("irc"), makeTool("read")], "irc.send");
+		expect(result?.isError).toBe(true);
+		const text = result?.content.find(part => part.type === "text");
+		expect((text as { text?: string } | undefined)?.text).toBe('Tool irc.send not found. Did you mean "irc"?');
+	});
+
+	it("suggests a case-insensitive match", async () => {
+		const result = await runWithUnknownToolCall([makeTool("edit")], "Edit");
+		const text = result?.content.find(part => part.type === "text");
+		expect((text as { text?: string } | undefined)?.text).toBe('Tool Edit not found. Did you mean "edit"?');
+	});
+
+	it("keeps the bare error when nothing is close", async () => {
+		const result = await runWithUnknownToolCall([makeTool("irc")], "banana.split");
+		const text = result?.content.find(part => part.type === "text");
+		expect((text as { text?: string } | undefined)?.text).toBe("Tool banana.split not found.");
+	});
+});

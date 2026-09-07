@@ -12897,6 +12897,20 @@ export class AgentSession {
 		if (!this.isStreaming && !this.#allowsIrcWake(msg.from)) {
 			throw new Error("IRC wake denied by recipient collaboration policy.");
 		}
+		// The injected message tells the recipient to answer via the `irc` tool;
+		// make sure that tool is actually in their active catalog before the
+		// aside/wake turn runs, so a first reply never depends on the recipient
+		// discovering it through search_tool_bm25 first. Goes through the normal
+		// discovery activation path so tool profiles, ceilings, and the schema
+		// token budget still apply; failures degrade to the pre-existing
+		// behavior (message delivered, tool left as-is).
+		if (!this.getActiveToolNames().includes("irc")) {
+			try {
+				await this.activateDiscoveredTools(["irc"]);
+			} catch (error) {
+				logger.warn("IRC reply tool activation failed", { error: String(error) });
+			}
+		}
 		const record: CustomMessage = {
 			role: "custom",
 			customType: "irc:incoming",

@@ -125,6 +125,19 @@ describe("getDiscoverableTool", () => {
 		const result = getDiscoverableTool(tool);
 		expect(result!.schemaKeys).toEqual(["alpha", "beta", "gamma"]);
 	});
+
+	it("extracts param signatures with optionality and inline string enums", () => {
+		const tool = makeAgentTool("irc", {
+			parameters: type({
+				op: "'send' | 'wait' | 'inbox' | 'list' | 'complete'",
+				"to?": "string",
+				message: "string",
+			}),
+		});
+		const result = getDiscoverableTool(tool);
+		expect(result!.signature).toEqual(["message", "op(complete|inbox|list|send|wait)", "to?"]);
+		expect(result!.schemaKeys).toEqual(["message", "op", "to"]);
+	});
 });
 
 // ─── collectDiscoverableTools ─────────────────────────────────────────────────

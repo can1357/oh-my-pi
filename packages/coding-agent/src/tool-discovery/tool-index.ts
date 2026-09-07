@@ -17,6 +17,9 @@ export interface DiscoverableTool {
 	/** MCP only */
 	mcpToolName?: string;
 	schemaKeys: string[];
+	/** Compact parameter signatures: `key?` plus inline string enums, e.g.
+	 * `op(send|wait|inbox|list|complete)`. Optional — populated for builtins. */
+	signature?: string[];
 }
 
 export interface DiscoverableToolServerSummary {
@@ -66,17 +69,55 @@ export function isMCPToolName(name: string): boolean {
 	return name.startsWith("mcp__");
 }
 
-function getSchemaPropertyKeys(tool: Pick<AiTool, "name" | "description" | "parameters">): string[] {
+function resolveWireSchema(
+	tool: Pick<AiTool, "name" | "description" | "parameters">,
+): { properties: Record<string, unknown>; required: ReadonlySet<string> } | undefined {
 	let parameters: unknown = tool.parameters;
 	try {
 		parameters = toolWireSchema(tool as AiTool);
 	} catch {
 		// Schema may contain functions or cycles; fall back to the raw shape.
 	}
-	if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) return [];
-	const properties = (parameters as { properties?: unknown }).properties;
-	if (!properties || typeof properties !== "object" || Array.isArray(properties)) return [];
-	return Object.keys(properties as Record<string, unknown>).sort();
+	if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) return undefined;
+	const schema = parameters as { properties?: unknown; required?: unknown };
+	if (!schema.properties || typeof schema.properties !== "object" || Array.isArray(schema.properties)) {
+		return undefined;
+	}
+	const required = Array.isArray(schema.required)
+		? new Set(schema.required.filter((key): key is string => typeof key === "string"))
+		: new Set<string>();
+	return { properties: schema.properties as Record<string, unknown>, required };
+}
+
+function getSchemaPropertyKeys(tool: Pick<AiTool, "name" | "description" | "parameters">): string[] {
+	return Object.keys(resolveWireSchema(tool)?.properties ?? {}).sort();
+}
+
+const SIGNATURE_ENUM_VALUE_CAP = 8;
+
+/** Parameter signatures for discovery results: optionality marker plus inline
+ * string-enum values (`op(send|wait)`), so a match carries its call shape. */
+function getSchemaPropertySignatures(tool: Pick<AiTool, "name" | "description" | "parameters">): string[] {
+	const resolved = resolveWireSchema(tool);
+	if (!resolved) return [];
+	const signatures: string[] = [];
+	for (const key of Object.keys(resolved.properties).sort()) {
+		const property = resolved.properties[key];
+		const enumValues =
+			property && typeof property === "object" && !Array.isArray(property)
+				? (property as { enum?: unknown }).enum
+				: undefined;
+		let signature = key + (resolved.required.has(key) ? "" : "?");
+		if (Array.isArray(enumValues)) {
+			const values = enumValues.filter((value): value is string => typeof value === "string");
+			if (values.length > 0) {
+				const shown = values.slice(0, SIGNATURE_ENUM_VALUE_CAP);
+				signature += `(${shown.join("|")}${values.length > shown.length ? "|…" : ""})`;
+			}
+		}
+		signatures.push(signature);
+	}
+	return signatures;
 }
 
 function tokenize(value: string): string[] {
@@ -159,6 +200,14 @@ export function getDiscoverableTool(
 			toolRecord.parameters === undefined
 				? []
 				: getSchemaPropertyKeys({
+						name: tool.name,
+						description: rawDescription,
+						parameters: toolRecord.parameters as AiTool["parameters"],
+					}),
+		signature:
+			toolRecord.parameters === undefined
+				? []
+				: getSchemaPropertySignatures({
 						name: tool.name,
 						description: rawDescription,
 						parameters: toolRecord.parameters as AiTool["parameters"],

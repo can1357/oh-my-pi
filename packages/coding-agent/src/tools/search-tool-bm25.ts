@@ -48,6 +48,7 @@ interface SearchToolBm25Match {
 	server_name?: string;
 	mcp_tool_name?: string;
 	schema_keys: string[];
+	signature?: string[];
 	score: number;
 }
 
@@ -68,16 +69,24 @@ function formatMatch(tool: DiscoverableTool, score: number): SearchToolBm25Match
 		server_name: tool.serverName,
 		mcp_tool_name: tool.mcpToolName,
 		schema_keys: tool.schemaKeys,
+		signature: tool.signature,
 		score: Number(score.toFixed(6)),
 	};
 }
 
 function buildSearchToolBm25Content(details: SearchToolBm25Details): string {
+	// Matches carry a compact signature (params + inline enums) so the model
+	// can call a just-activated tool without guessing its call shape.
 	return JSON.stringify({
 		query: details.query,
 		activated_tools: details.activated_tools,
 		match_count: details.tools.length,
 		total_tools: details.total_tools,
+		tools: details.tools.map(tool => ({
+			name: tool.name,
+			description: tool.description,
+			params: tool.signature ?? tool.schema_keys,
+		})),
 	});
 }
 

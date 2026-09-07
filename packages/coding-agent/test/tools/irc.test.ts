@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { Agent } from "@pk-nerdsaver-ai/pi-agent-core";
+import { Agent, type AgentTool } from "@pk-nerdsaver-ai/pi-agent-core";
 import { Settings } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings";
 import type { SettingPath } from "@pk-nerdsaver-ai/pi-coding-agent/config/settings-schema";
 import { IrcBus, type IrcMessage } from "@pk-nerdsaver-ai/pi-coding-agent/irc/bus";
@@ -81,6 +81,7 @@ function makeToolSession(registry: AgentRegistry, agentId: string): ToolSession 
 function createRealSession(
 	overrides: Partial<Record<SettingPath, unknown>> = {},
 	collaborationPolicy?: CollaborationPolicy,
+	toolRegistry?: Map<string, AgentTool>,
 ): {
 	session: AgentSession;
 	sessionManager: SessionManager;
@@ -98,6 +99,7 @@ function createRealSession(
 		settings: Settings.isolated({ "compaction.enabled": false, ...overrides }),
 		modelRegistry: {} as never,
 		collaborationPolicy,
+		toolRegistry,
 	});
 	return { session, sessionManager };
 }
@@ -763,6 +765,89 @@ describe("IRC", () => {
 			});
 			expect(outcome).toBe("injected");
 			expect(promptSpy).not.toHaveBeenCalled();
+		});
+
+		it("activates the irc tool on an idle recipient before the wake turn runs", async () => {
+			const toolRegistry = new Map<string, AgentTool>([
+				["irc", new IrcTool(makeToolSession(registry, "0-Me")) as unknown as AgentTool],
+			]);
+			const { session } = createRealSession({}, undefined, toolRegistry);
+			sessions.push(session);
+			let activeToolsAtWake: string[] | undefined;
+			vi.spyOn(session.agent, "prompt").mockImplementation(async () => {
+				activeToolsAtWake = session.getActiveToolNames();
+			});
+			expect(session.getActiveToolNames()).not.toContain("irc");
+
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-act-wake",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "answer via irc",
+				ts: Date.now(),
+			});
+
+			expect(outcome).toBe("woken");
+			// The incoming footer says to reply with the `irc` tool; the wake turn's
+			// tool list must already contain it — no discovery round required.
+			expect(activeToolsAtWake).toContain("irc");
+		});
+
+		it("activates the irc tool for a mid-turn recipient alongside the queued aside", async () => {
+			const toolRegistry = new Map<string, AgentTool>([
+				["irc", new IrcTool(makeToolSession(registry, "0-Me")) as unknown as AgentTool],
+			]);
+			const { session } = createRealSession({}, undefined, toolRegistry);
+			sessions.push(session);
+			Object.defineProperty(session, "isStreaming", { value: true, configurable: true });
+			const promptSpy = vi.spyOn(session.agent, "prompt").mockResolvedValue(undefined);
+			expect(session.getActiveToolNames()).not.toContain("irc");
+
+			const outcome = await session.deliverIrcMessage({
+				id: "msg-act-aside",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "aside note",
+				ts: Date.now(),
+			});
+
+			expect(outcome).toBe("injected");
+			expect(promptSpy).not.toHaveBeenCalled();
+			expect(session.getActiveToolNames()).toContain("irc");
+		});
+
+		it("skips activation when irc is already active and still delivers when activation fails", async () => {
+			const toolRegistry = new Map<string, AgentTool>([
+				["irc", new IrcTool(makeToolSession(registry, "0-Me")) as unknown as AgentTool],
+			]);
+			const active = createRealSession({}, undefined, toolRegistry);
+			sessions.push(active.session);
+			vi.spyOn(active.session.agent, "prompt").mockResolvedValue(undefined);
+			await active.session.activateDiscoveredTools(["irc"]);
+			const activateSpy = vi.spyOn(active.session, "activateDiscoveredTools");
+			const activeOutcome = await active.session.deliverIrcMessage({
+				id: "msg-act-skip",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "first",
+				ts: Date.now(),
+			});
+			expect(activeOutcome).toBe("woken");
+			expect(activateSpy).not.toHaveBeenCalled();
+
+			const failing = createRealSession({}, undefined, toolRegistry);
+			sessions.push(failing.session);
+			vi.spyOn(failing.session.agent, "prompt").mockResolvedValue(undefined);
+			vi.spyOn(failing.session, "activateDiscoveredTools").mockRejectedValue(new Error("budget blown"));
+			const failingOutcome = await failing.session.deliverIrcMessage({
+				id: "msg-act-fail",
+				from: "0-Peer",
+				to: "0-Me",
+				body: "second",
+				ts: Date.now(),
+			});
+			// Activation failure degrades to normal delivery — never blocks the message.
+			expect(failingOutcome).toBe("woken");
 		});
 
 		it("auto-replies via an ephemeral side turn when the sender awaits and async execution is disabled", async () => {

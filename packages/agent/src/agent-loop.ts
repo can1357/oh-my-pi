@@ -1609,6 +1609,41 @@ function emitAbortedAssistantMessage(
 }
 
 /**
+ * Resolve near-miss tool names for an unknown tool call: the exact name with
+ * different casing, a namespaced call whose prefix is a real tool
+ * (`irc.send` → `irc`), or a bare op name that exists as a dotted tool's
+ * suffix (`send` → `irc.send`). Keeps the "tool not found" error
+ * self-correcting instead of reading as a broken capability.
+ */
+function suggestToolNames(requested: string, tools: AgentTool[]): string[] {
+	if (!requested || tools.length === 0) return [];
+	const names = tools.map(tool => tool.name);
+	const suggestions: string[] = [];
+	const add = (name: string | undefined): void => {
+		if (name && name !== requested && !suggestions.includes(name)) suggestions.push(name);
+	};
+	add(names.find(name => name.toLowerCase() === requested.toLowerCase()));
+	const lastDot = requested.lastIndexOf(".");
+	if (lastDot > 0) {
+		// Namespaced guess (`irc.send`): prefer the prefix as a real tool.
+		const prefix = requested.slice(0, lastDot);
+		add(names.find(name => name === prefix));
+		add(names.find(name => name.toLowerCase() === prefix.toLowerCase()));
+		// Dropped namespace (`mcp__srv__tool` mis-called as bare `tool`).
+		add(names.find(name => name.endsWith(`.${requested.slice(lastDot + 1)}`)));
+	} else {
+		add(names.find(name => name.endsWith(`.${requested}`)));
+	}
+	return suggestions.slice(0, 3);
+}
+
+function toolNotFoundMessage(requested: string, tools: AgentTool[]): string {
+	const suggestions = suggestToolNames(requested, tools);
+	const hint = suggestions.length > 0 ? ` Did you mean ${suggestions.map(name => `"${name}"`).join(" or ")}?` : "";
+	return `Tool ${requested} not found.${hint}`;
+}
+
+/**
  * Execute tool calls from an assistant message.
  */
 async function executeToolCalls(
@@ -1760,7 +1795,7 @@ async function executeToolCalls(
 		}
 		let effectiveArgs: Record<string, unknown>;
 		try {
-			if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
+			if (!tool) throw new Error(toolNotFoundMessage(toolCall.name, tools ?? []));
 			effectiveArgs = validateToolArguments(tool, { ...toolCall, arguments: argsForExecution });
 		} catch (validationError) {
 			if (tool?.lenientArgValidation) {
@@ -1833,7 +1868,7 @@ async function executeToolCalls(
 
 		await runInActiveSpan(toolSpan, async () => {
 			try {
-				if (!tool) throw new Error(`Tool ${toolCall.name} not found`);
+				if (!tool) throw new Error(toolNotFoundMessage(toolCall.name, tools ?? []));
 				if (toolSignal.aborted) {
 					result = createToolSignalAbortedResult(toolSignal);
 					isError = true;

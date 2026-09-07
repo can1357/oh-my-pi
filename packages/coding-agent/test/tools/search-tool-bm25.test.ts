@@ -126,6 +126,21 @@ describe("SearchToolBm25Tool", () => {
 					activated_tools: ["mcp__github_create_issue", "mcp__github_list_pull_requests"],
 					match_count: 2,
 					total_tools: 3,
+					// Each match carries a compact signature so the model can call a
+					// just-activated tool without guessing its call shape. These MCP
+					// fixtures have no signature — params falls back to schema keys.
+					tools: [
+						{
+							name: "mcp__github_create_issue",
+							description: "Create a GitHub issue in the selected repository",
+							params: ["owner", "repo", "title", "body"],
+						},
+						{
+							name: "mcp__github_list_pull_requests",
+							description: "List pull requests for a repository",
+							params: ["owner", "repo", "state"],
+						},
+					],
 				}),
 			},
 		]);
@@ -210,6 +225,27 @@ describe("SearchToolBm25Tool", () => {
 		const result = await tool.execute("call-builtin", { query: "find files" });
 		const names = result.details?.tools.map(t => t.name) ?? [];
 		expect(names).toContain("find");
+	});
+
+	it("reports param signatures (optionality + op enums) in the result content", async () => {
+		const irc: DiscoverableTool = {
+			...builtinTool("irc", "Send and receive messages between agents"),
+			signature: ["await?", "from?", "message?", "op(send|wait|inbox|list|complete)", "peek?", "to?"],
+		};
+		const session = createSession([irc], {
+			settings: Settings.isolated({ "tools.discoveryMode": "all" }),
+			getDiscoverableTools: () => [irc],
+		});
+		const tool = new SearchToolBm25Tool(session);
+
+		const result = await tool.execute("call-signature", { query: "irc send message agents" });
+		const text = result.content.find(part => part.type === "text");
+		const parsed = JSON.parse((text as { text: string } | undefined)?.text ?? "{}") as {
+			tools: Array<{ name: string; params: string[] }>;
+		};
+		expect(parsed.tools[0]?.name).toBe("irc");
+		expect(parsed.tools[0]?.params).toContain("op(send|wait|inbox|list|complete)");
+		expect(parsed.tools[0]?.params).toContain("to?");
 	});
 });
 
