@@ -867,11 +867,20 @@ describe("/mcp auth commands", () => {
 		});
 
 		const { controller, ctx, showError, showStatus, editor, oauthManualInput } = createController(authStorage);
+		// Event-gate the claim instead of polling to a wall-clock deadline: on a
+		// loaded runner the old 1s budget could expire before the flow claimed the
+		// manual-input slot, and the assertion below then read `undefined` from a
+		// slot that was merely late. Resolving off `tryClaimInput` itself makes the
+		// wait bounded by the event it is actually waiting for.
+		const claimed = Promise.withResolvers<void>();
+		const tryClaimInput = oauthManualInput.tryClaimInput.bind(oauthManualInput);
+		vi.spyOn(oauthManualInput, "tryClaimInput").mockImplementation(providerId => {
+			const result = tryClaimInput(providerId);
+			if (result) claimed.resolve();
+			return result;
+		});
 		const firstReauth = controller.handle("/mcp reauth envserver");
-		const claimDeadline = Date.now() + 1_000;
-		while (!oauthManualInput.hasPending() && Date.now() < claimDeadline) {
-			await Bun.sleep(10);
-		}
+		await claimed.promise;
 		expect(oauthManualInput.pendingProviderId).toBe("mcp");
 
 		const replacementReauth = new MCPCommandController(ctx).handle("/mcp reauth envserver");
