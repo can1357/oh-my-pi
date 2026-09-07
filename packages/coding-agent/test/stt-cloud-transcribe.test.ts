@@ -66,6 +66,7 @@ describe("cloud STT stream", () => {
 
 	it("sends the selected cloud model and falls back for local tier keys", async () => {
 		expect(resolveCloudSttModel("gpt-4o-mini-transcribe")).toBe("gpt-4o-mini-transcribe");
+		expect(resolveCloudSttModel("gpt-transcribe")).toBe("gpt-transcribe");
 		expect(resolveCloudSttModel("whisper-1")).toBe("whisper-1");
 		expect(resolveCloudSttModel("parakeet")).toBe(DEFAULT_CLOUD_STT_MODEL);
 		expect(resolveCloudSttModel(undefined)).toBe(DEFAULT_CLOUD_STT_MODEL);
