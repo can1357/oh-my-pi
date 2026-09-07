@@ -168,15 +168,21 @@ export function filterChildShellEnv(
 }
 
 /**
- * Parse one dotenv line with Bun-compatible semantics: an optional `export`
- * prefix, full-line `#` comments, inline `#` comments after whitespace on
- * unquoted values, and single/double/backtick quoting (a `#` inside quotes
- * stays literal). Double-quoted values decode Bun's `\n` / `\r` escapes;
- * `\\` is a literal pair, so `\\n` stays two slashes plus `n`. Returns
- * undefined for blank lines, comments, and malformed names.
+ * Parse a dotenv assignment starting at `lines[start]` with Bun-compatible
+ * semantics: an optional `export` prefix, full-line `#` comments, inline `#`
+ * comments after whitespace on unquoted values, and single/double/backtick
+ * quoting. Quoted values may span literal newlines until an unescaped closer;
+ * leftover text after that closer (other than a `#` comment) rejects the
+ * quoted span so the first line is parsed unquoted, matching Bun. Double-quoted
+ * values decode Bun's `\n` / `\r` escapes; `\\` is a literal pair, so `\\n`
+ * stays two slashes plus `n`. Returns undefined for blank lines, comments, and
+ * malformed names.
  */
-function parseEnvLine(line: string): { key: string; value: string } | undefined {
-	const trimmed = line.trim();
+function parseEnvAssignment(
+	lines: string[],
+	start: number,
+): { key: string; value: string; nextIndex: number } | undefined {
+	const trimmed = lines[start].trim();
 	if (!trimmed || trimmed.startsWith("#")) return undefined;
 	const eqIndex = trimmed.indexOf("=");
 	if (eqIndex === -1) return undefined;
@@ -187,13 +193,48 @@ function parseEnvLine(line: string): { key: string; value: string } | undefined 
 	const raw = trimmed.slice(eqIndex + 1).replace(/^[ \t]+/, "");
 	const quote = raw[0];
 	if (quote === '"' || quote === "'" || quote === "`") {
-		let close = raw.indexOf(quote, 1);
-		while (close !== -1 && raw[close - 1] === "\\") close = raw.indexOf(quote, close + 1);
-		const value = close === -1 ? raw.slice(1) : raw.slice(1, close);
-		return { key, value: quote === '"' ? decodeBunDoubleQuotedDotenvValue(value) : value };
+		const spanned = collectQuotedDotenvValue(raw, quote, lines, start);
+		if (spanned) {
+			return {
+				key,
+				value: quote === '"' ? decodeBunDoubleQuotedDotenvValue(spanned.value) : spanned.value,
+				nextIndex: spanned.nextIndex,
+			};
+		}
 	}
 	const commentIndex = raw.search(/[ \t]#/);
-	return { key, value: (commentIndex === -1 ? raw : raw.slice(0, commentIndex)).trimEnd() };
+	return { key, value: (commentIndex === -1 ? raw : raw.slice(0, commentIndex)).trimEnd(), nextIndex: start + 1 };
+}
+
+function findUnescapedQuote(segment: string, quote: string): number {
+	let close = segment.indexOf(quote);
+	while (close > 0 && segment[close - 1] === "\\") close = segment.indexOf(quote, close + 1);
+	return close;
+}
+
+/**
+ * Collect a Bun-quoted dotenv value that may include literal newlines.
+ * Returns undefined when the quote is unclosed or followed by leftover text,
+ * so the caller can parse the first line unquoted the way Bun does.
+ */
+function collectQuotedDotenvValue(
+	raw: string,
+	quote: string,
+	lines: string[],
+	start: number,
+): { value: string; nextIndex: number } | undefined {
+	let value = "";
+	for (let i = start; i < lines.length; i++) {
+		const segment = i === start ? raw.slice(1) : lines[i];
+		const close = findUnescapedQuote(segment, quote);
+		if (close !== -1) {
+			const rest = segment.slice(close + 1);
+			if (rest.trim() !== "" && !rest.trimStart().startsWith("#")) return undefined;
+			return { value: value + segment.slice(0, close), nextIndex: i + 1 };
+		}
+		value += `${segment}\n`;
+	}
+	return undefined;
 }
 
 /**
@@ -232,16 +273,22 @@ function decodeBunDoubleQuotedDotenvValue(value: string): string {
 
 /**
  * Parses a .env file synchronously into key-value string pairs using
- * {@link parseEnvLine} for Bun-compatible line semantics, then mirrors valid
- * `OMP_` variables to their `PI_` aliases.
+ * {@link parseEnvAssignment} for Bun-compatible line and quoted-span
+ * semantics, then mirrors valid `OMP_` variables to their `PI_` aliases.
  */
 export function parseEnvFile(filePath: string): Record<string, string> {
 	const result: Record<string, string> = {};
 	try {
-		const content = fs.readFileSync(filePath, "utf-8");
-		for (const line of content.split("\n")) {
-			const parsed = parseEnvLine(line);
-			if (parsed && isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
+		const content = fs.readFileSync(filePath, "utf-8").replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+		const lines = content.split("\n");
+		for (let i = 0; i < lines.length;) {
+			const parsed = parseEnvAssignment(lines, i);
+			if (parsed) {
+				if (isSafeEnvValue(parsed.value)) result[parsed.key] = parsed.value;
+				i = parsed.nextIndex;
+			} else {
+				i++;
+			}
 		}
 	} catch {
 		// File doesn't exist or can't be read - return empty result
@@ -397,7 +444,8 @@ function envLookup(
  * is still project-owned. Mode files follow Bun's pre-dotenv `NODE_ENV`
  * selection, including a `.env.development` fallback when dotenv itself
  * mutates `NODE_ENV`. Value matching reproduces Bun `$NAME` / `${NAME}` /
- * `${NAME:-default}` expansion; unrecognized `$` syntax fails closed.
+ * `${NAME:-default}` expansion and quoted values that span literal newlines;
+ * unrecognized `$` syntax fails closed.
  */
 export function isEnvOwnedByProjectDotenv(name: string): boolean {
 	if (envKeysInclude(projectEnvNamesLoadedByOmp, name)) return true;

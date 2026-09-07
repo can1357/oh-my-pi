@@ -17,6 +17,7 @@
 - Matched project-dotenv ownership case-insensitively on Windows so a differently-cased dotenv key cannot masquerade as a trusted launcher variable.
 - Decoded Bun double-quoted dotenv `\n` and `\r` escapes when matching project-owned environment values.
 - Expanded Bun `${VAR:-fallback}` when matching project-owned dotenv values and treated unrecognized `$` syntax as project-owned.
+- Treated Bun-quoted dotenv values that span literal newlines as project-owned instead of trusted global configuration.
 
 ## [18.1.13] - 2026-09-07
 

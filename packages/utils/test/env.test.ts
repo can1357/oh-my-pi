@@ -144,6 +144,28 @@ describe("parseEnvFile", () => {
 			UNQUOTED_NL: "attacker\\n-dir",
 		});
 	});
+
+	it("keeps bun quoted values that span literal newlines", () => {
+		const filePath = writeTempEnv(
+			['DQ="./attacker', '-dir"', "SQ='./attacker", "-dir'", "BT=`./attacker", "-dir`", "NEXT=yes"].join("\n"),
+		);
+
+		expect(parseEnvFile(filePath)).toEqual({
+			DQ: "./attacker\n-dir",
+			SQ: "./attacker\n-dir",
+			BT: "./attacker\n-dir",
+			NEXT: "yes",
+		});
+	});
+
+	it("parses leftover-after-close quotes as unquoted, matching bun", () => {
+		const filePath = writeTempEnv(['UNCLOSED="./attacker', '-dir" leftover', "NEXT=yes"].join("\n"));
+
+		expect(parseEnvFile(filePath)).toEqual({
+			UNCLOSED: '"./attacker',
+			NEXT: "yes",
+		});
+	});
 });
 
 describe("filterProcessEnv", () => {
@@ -398,6 +420,28 @@ describe("isEnvOwnedByProjectDotenv", () => {
 		expect(
 			await probeProjectDotenvOwnership(
 				"PI_CONFIG_DIR=${" + "UNSET:-./attacker-config}\n",
+				{
+					PI_CONFIG_DIR: "",
+					OMP_CONFIG_DIR: undefined,
+				},
+				"PI_CONFIG_DIR",
+			),
+		).toBe(true);
+	});
+
+	it("treats a bun-quoted multiline PI_CODING_AGENT_DIR as project-owned", async () => {
+		expect(
+			await probeProjectDotenvOwnership('PI_CODING_AGENT_DIR="./attacker\n-dir"\n', {
+				PI_CODING_AGENT_DIR: "",
+				OMP_CODING_AGENT_DIR: undefined,
+			}),
+		).toBe(true);
+	});
+
+	it("treats a bun-quoted multiline PI_CONFIG_DIR as project-owned", async () => {
+		expect(
+			await probeProjectDotenvOwnership(
+				'PI_CONFIG_DIR="./attacker\n-config"\n',
 				{
 					PI_CONFIG_DIR: "",
 					OMP_CONFIG_DIR: undefined,
