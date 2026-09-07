@@ -93,6 +93,8 @@ function isExpandable(obj: unknown): obj is Expandable {
 /** Minimal contract for any component that can receive a paste payload directly. */
 interface PasteTarget {
 	pasteText(text: string): void;
+	/** Reserve delivery before an async clipboard read; undefined releases it without text. */
+	beginPaste?(): (text: string | undefined) => boolean;
 }
 
 function hasPasteText(value: unknown): value is PasteTarget {
@@ -1776,6 +1778,7 @@ export class InputController {
 	}
 
 	async handleImagePaste(): Promise<boolean> {
+		let finishPaste: ((text: string | undefined) => boolean) | undefined;
 		try {
 			// When a modal paste-capable prompt (login/API-key Input) owns focus,
 			// only clipboard text may land there. Image payloads must not mutate
@@ -1784,6 +1787,7 @@ export class InputController {
 			const focusedNow = this.ctx.ui.getFocused();
 			const promptTarget =
 				focusedNow && focusedNow !== this.ctx.editor && hasPasteText(focusedNow) ? focusedNow : null;
+			finishPaste = promptTarget?.beginPaste?.();
 			// #8769: On macOS, Finder `Cmd+C` on an image file puts BOTH a
 			// `public.file-url` representation and a generated 1024x1024
 			// file-icon bitmap on the pasteboard. `arboard::get_image()`
@@ -1852,15 +1856,23 @@ export class InputController {
 				await this.handleImagePathPaste(imagePath);
 				return true;
 			}
-			// Route to the focused component when it accepts pastes (modal
-			// Input prompts), matching the enhanced-paste text path (#2127).
-			const target = promptTarget ?? this.ctx.editor;
-			target.pasteText(text);
+			// Keep the initiating prompt as the only possible modal destination.
+			if (promptTarget && this.ctx.ui.getFocused() !== promptTarget) return false;
+			if (finishPaste) {
+				const accepted = finishPaste(text);
+				finishPaste = undefined;
+				if (!accepted) return false;
+			} else {
+				const target = promptTarget ?? this.ctx.editor;
+				target.pasteText(text);
+			}
 			this.ctx.ui.requestRender();
 			return true;
 		} catch {
 			this.ctx.showStatus("Failed to read clipboard");
 			return false;
+		} finally {
+			finishPaste?.(undefined);
 		}
 	}
 
