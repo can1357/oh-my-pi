@@ -395,12 +395,11 @@ function enotDir(message: string): Error & { code?: string } {
  * is per-writer unique (pid + random, in the target's own directory so the
  * rename cannot EXDEV across mounts) and is fsync'd before the rename — the
  * durability the YAML settings flush always had, now shared by every config
- * writer. Its mode takes only the OWNER read/write bits of the referent's
- * current mode — credential-bearing configs drop group/world bits exactly
- * like an unconditional 0o600 did, execute bits never carry over (these are
- * data files), while stricter-than-600 owner modes (e.g. a read-only 0o400
- * dotfiles checkout) survive, and a new file, or a referent with no owner
- * bits at all, falls back to owner-only — and is chmod'd
+ * writer. Its mode takes only the OWNER bits of the referent's current mode —
+ * credential-bearing configs drop group/world bits exactly like an
+ * unconditional 0o600 did, while stricter-than-600 owner modes (e.g. a
+ * read-only 0o400 dotfiles checkout) survive, and a new file, or a referent
+ * with no owner bits at all, falls back to owner-only — and is chmod'd
  * explicitly because creation modes pass through umask. The rename itself goes
  * through {@link replaceFileAtomically}, so Windows `EPERM`/`EEXIST`
  * replacement failures recover instead of failing the write.
@@ -411,9 +410,7 @@ export async function publishSerializedConfig(writePath: string, content: string
 
 	let mode = 0o600;
 	try {
-		// Owner read/write bits only: execute is dropped — these are data
-		// files, and preserving a 0755 referent's x bit would be noise.
-		const referentMode = (await fs.promises.stat(writePath)).mode & 0o600;
+		const referentMode = (await fs.promises.stat(writePath)).mode & 0o700;
 		// A referent whose access comes only from group/world bits or an ACL
 		// masks to 0 — publishing mode 0 would leave the replacement config
 		// unreadable even by its owner, where these writers previously

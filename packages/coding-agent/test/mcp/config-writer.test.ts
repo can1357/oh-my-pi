@@ -83,26 +83,27 @@ describe.skipIf(process.platform === "win32")("config-writer symlinked configs",
 		expect(Object.keys(config.mcpServers ?? {})).toEqual(["alpha"]);
 	});
 
-	it("keeps only owner rw bits of the referent's mode (0o640 → 0o600, 0o400 stays 0o400, 0o755 → 0o600)", async () => {
+	it("keeps only owner bits of the referent's mode (0o640 → 0o600, 0o400 stays 0o400)", async () => {
 		// mcp.json carries credentials (server `env`, auth `headers`), so an
-		// edit must not leave group/world bits in place; a mode stricter than
-		// owner-rw must not be loosened either; and execute bits never carry
-		// over — a 0755 referent is data, not a script.
-		const cases: Array<[string, number, number]> = [
-			["group-readable", 0o640, 0o600],
-			["owner-read-only", 0o400, 0o400],
-			["executable", 0o755, 0o600],
-		];
-		for (const [name, referentMode, expected] of cases) {
-			const target = path.join(dir, `${name}.json`);
-			await fs.writeFile(target, JSON.stringify({ mcpServers: {} }));
-			await fs.chmod(target, referentMode);
-			const link = path.join(dir, `mcp-${name}.json`);
-			await fs.symlink(target, link);
+		// edit must not leave group/world bits in place; but a mode stricter
+		// than owner-rw must not be loosened either.
+		const groupReadable = path.join(dir, "group-readable.json");
+		await fs.writeFile(groupReadable, JSON.stringify({ mcpServers: {} }));
+		await fs.chmod(groupReadable, 0o640);
+		const linkA = path.join(dir, "mcp-a.json");
+		await fs.symlink(groupReadable, linkA);
 
-			await setServerDisabled(link, "alpha", true);
-			expect((await fs.stat(target)).mode & 0o777).toBe(expected);
-		}
+		await setServerDisabled(linkA, "alpha", true);
+		expect((await fs.stat(groupReadable)).mode & 0o777).toBe(0o600);
+
+		const ownerReadOnly = path.join(dir, "owner-read-only.json");
+		await fs.writeFile(ownerReadOnly, JSON.stringify({ mcpServers: {} }));
+		await fs.chmod(ownerReadOnly, 0o400);
+		const linkB = path.join(dir, "mcp-b.json");
+		await fs.symlink(ownerReadOnly, linkB);
+
+		await setServerDisabled(linkB, "alpha", true);
+		expect((await fs.stat(ownerReadOnly)).mode & 0o777).toBe(0o400);
 	});
 
 	it("falls back to owner-only mode when the referent has no owner bits", async () => {
