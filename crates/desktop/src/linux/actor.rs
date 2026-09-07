@@ -1,4 +1,7 @@
-use std::sync::{LazyLock, mpsc};
+use std::{
+	sync::{LazyLock, mpsc},
+	thread,
+};
 
 use atspi::ObjectRefOwned;
 use flume::{Receiver, Sender};
