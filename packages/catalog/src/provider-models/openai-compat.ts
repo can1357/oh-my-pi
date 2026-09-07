@@ -6118,41 +6118,54 @@ export function exllamav3ModelManagerOptions(
 					fetch: config?.fetch,
 					timeoutMs: DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
 				});
-			const probe = await fetchExllamav3ModelCardProbe(baseUrl, apiKey, fetchImpl);
+			const cardAt = () => fetchExllamav3ModelCardProbe(baseUrl, apiKey, fetchImpl);
+			const probe = await cardAt();
 			if (probe.noModelLoaded) {
-				// TabbyAPI answered 503 "No models are currently loaded". An admin
-				// key still enumerates directories and dummy ids on /v1/models, but
-				// none of them are servable — publish an authoritative empty catalog
-				// instead of ids inference would immediately fail on.
+				// TabbyAPI answered its documented 503 "No models are currently
+				// loaded". An admin key still enumerates directories and dummy ids on
+				// /v1/models, but none of them are servable — publish an authoritative
+				// empty catalog instead of ids inference would immediately fail on.
 				return [];
 			}
-			const loadedCard = probe.card;
-			const models = await discover(loadedCard);
-			if (!loadedCard || models === null || models.length > 0) {
+			const models = await discover(probe.card);
+			if (models === null) {
+				return null;
+			}
+			if (probe.card === null) {
+				// Card endpoint unavailable: raw-list fallback for older forks.
 				return models;
 			}
-			// TabbyAPI can reload models between the card request and the list
-			// request, leaving the card naming a model the list no longer contains.
-			// This manager is authoritative, so returning the emptied result would
-			// prune the catalog even though the newly loaded model is servable —
-			// revalidate both requests once before giving up on enrichment.
-			const revalidationProbe = await fetchExllamav3ModelCardProbe(baseUrl, apiKey, fetchImpl);
-			if (revalidationProbe.noModelLoaded) {
-				return [];
+			if (models.length > 0) {
+				// Bracket the list request with a second card read. With an admin key
+				// the list also enumerates on-disk directories, so a reload between
+				// the card and the list can leave the reloaded-away model passing the
+				// filter — only a stable card across the list proves the entry fresh.
+				const second = await cardAt();
+				if (second.noModelLoaded) return [];
+				if (second.card?.id === probe.card.id) {
+					return models;
+				}
+				// The card changed mid-flight: redo once with the newer card, again
+				// bracketed, and give up on anything less than a clean match.
+				const redo = await discover(second.card);
+				const third = await cardAt();
+				if (third.noModelLoaded) return [];
+				return second.card !== null && third.card?.id === second.card.id && redo !== null && redo.length > 0
+					? redo
+					: null;
 			}
-			// Only a revalidated card that matches the fresh list is conclusive. The
-			// first round proved a card is available and filtering required, so a
-			// failed re-probe (timeout/401/404) must NOT fall back to the raw list —
-			// with an admin key that publishes unservable directory/dummy ids.
-			const revalidated = await discover(revalidationProbe.card);
-			if (revalidationProbe.card && revalidated !== null && revalidated.length > 0) {
-				return revalidated;
+			// Empty filtered result: the card names a model the list lacks — either a
+			// reload between the two requests (recoverable) or persistent
+			// disagreement (report failure and keep the cached catalog).
+			const second = await cardAt();
+			if (second.noModelLoaded) return [];
+			if (second.card === null || second.card.id === probe.card.id) {
+				// Failed re-probe after a valid card, or the same card still missing
+				// from a fresh list: not conclusive, never fall back to the raw list.
+				return null;
 			}
-			// Persistent mismatch (reload storm, admin-key directory churn): report
-			// failed discovery. The manager keeps the last cached catalog; mapping
-			// the admin-key list here would publish unservable directory/dummy ids
-			// as an authoritative catalog.
-			return null;
+			const redo = await discover(second.card);
+			return redo !== null && redo.length > 0 ? redo : null;
 		},
 	};
 }

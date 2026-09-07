@@ -138,6 +138,34 @@ describe("ExLlamaV3 (TabbyAPI) provider discovery", () => {
 		expect(models).toBeNull();
 	});
 
+	test("drops a stale admin-listed entry when the loaded model changes mid-discovery", async () => {
+		// Admin key: /v1/models enumerates every directory, so after a reload
+		// A → B the stale A entry still passes the card filter (non-empty
+		// result). Only the bracketing card re-read catches it — the published
+		// catalog must be the freshly loaded B, not the stale A that would
+		// silently execute on B.
+		let modelCardCalls = 0;
+		const fetchMock: FetchImpl = (async (input: string | URL | Request) => {
+			const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+			if (url.endsWith("/models")) {
+				return jsonResponse({
+					data: [
+						{ id: "Qwen3.8-Flash-Next-exl3", object: "model", parameters: null },
+						{ id: "GLM-5.2-exl3", object: "model", parameters: null },
+					],
+				});
+			}
+			modelCardCalls++;
+			const loaded = modelCardCalls === 1 ? "Qwen3.8-Flash-Next-exl3" : "GLM-5.2-exl3";
+			return jsonResponse({ id: loaded, parameters: { max_seq_len: 131_072, use_vision: false } });
+		}) as FetchImpl;
+
+		const models = await exllamav3ModelManagerOptions({ baseUrl: BASE_URL, fetch: fetchMock }).fetchDynamicModels?.();
+
+		expect(modelCardCalls).toBe(3);
+		expect(models?.map(model => model.id)).toEqual(["GLM-5.2-exl3"]);
+	});
+
 	test("publishes an empty catalog only for TabbyAPI's own no-models 503, not unrelated 503s", async () => {
 		// TabbyAPI's check_model_container raises 503 with detail "No models
 		// currently loaded."; an unrelated 503 (transient failure, reverse
