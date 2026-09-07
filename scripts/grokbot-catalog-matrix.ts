@@ -12,9 +12,9 @@
  *   bun scripts/grokbot-catalog-matrix.ts --slice all --concurrency 3 --json /tmp/grokbot-matrix.json
  *   bun scripts/grokbot-catalog-matrix.ts --allow-missing-creds   # CI / no secrets
  *
- * Exit: 0 all non-skipped tools pass (or missing creds + --allow-missing-creds)
- *       1 a non-skipped id failed tools
- *       2 credentials missing
+ * Exit: 0 all non-skipped tools/text pass (or missing creds + --allow-missing-creds)
+ *       1 a probed id failed text/tools, unknown --ids, or --omp smoke failed
+ *       2 credentials missing or AvailableModels failed with creds present
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -35,6 +35,7 @@ import {
 	classifyError,
 	idSafe,
 	isSoftPassToolFollowup,
+	evaluateToolFollowupText,
 	matchesToolSmokeCall,
 	matrixRowFlag,
 	parseArgs,
@@ -285,15 +286,20 @@ async function runOneTool(
 		};
 	}
 	const body = textOf(turn2);
-	const pass = body.includes(ping) || body.includes("tools-pong");
-	if (!pass) {
-		// Gemini flash often empty-stops after Write; turn 1 already invoked
-		// the tool. Count the round-trip as pass.
+	const followup = evaluateToolFollowupText({
+		kind,
+		body,
+		ping,
+		stopReason: turn2.stopReason,
+	});
+	if (!followup.pass) {
 		return {
-			pass: true,
+			pass: false,
 			routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
 			httpStatus: status2,
+			errorClass: "missing-ping",
 			toolNames: names,
+			detail: followup.detail,
 		};
 	}
 	return {
@@ -301,6 +307,7 @@ async function runOneTool(
 		routedModel: turn2.upstreamModel ?? turn1.upstreamModel,
 		httpStatus: status2,
 		toolNames: names,
+		detail: followup.detail,
 	};
 }
 
@@ -430,8 +437,10 @@ async function main() {
 
 	const specs = await fetchGrokbotAvailableModels({ timeoutMs: 30_000 });
 	if (!specs) {
+		// Creds already verified above — discovery failure is a real gate fail.
+		// `--allow-missing-creds` only covers the no-secrets path earlier.
 		console.error("AvailableModels fetch failed");
-		process.exitCode = args.allowMissingCreds ? 0 : 2;
+		process.exitCode = 2;
 		return;
 	}
 
@@ -519,6 +528,7 @@ async function main() {
 
 	for (const row of rows) printRow(row, args.mode);
 
+	const ompFails: string[] = [];
 	if (args.omp) {
 		console.log("=== OMP -p SLICE ===");
 		const ompIds = selected.slice(0, Math.min(selected.length, 12));
@@ -526,14 +536,20 @@ async function main() {
 			if (args.mode !== "tools") {
 				const r = runOmp(id, { tools: false });
 				console.log(`${r.pass ? "PASS" : "FAIL"}  omp-text   ${id}  exit=${r.status}`);
-				if (!r.pass) console.log(r.out);
+				if (!r.pass) {
+					ompFails.push(`omp-text:${id}`);
+					console.log(r.out);
+				}
 			}
 			const spec = byId.get(id);
 			const skip = spec ? grokbotToolsSkipReason(buildModel(spec)) : undefined;
 			if (args.mode !== "text" && !skip) {
 				const r = runOmp(id, { tools: true });
 				console.log(`${r.pass ? "PASS" : "FAIL"}  omp-tools  ${id}  exit=${r.status}`);
-				if (!r.pass) console.log(r.out);
+				if (!r.pass) {
+					ompFails.push(`omp-tools:${id}`);
+					console.log(r.out);
+				}
 			}
 		}
 	}
@@ -544,11 +560,12 @@ async function main() {
 	const toolsPass = rows.filter(r => r.toolsPass === true);
 	const textPass = rows.filter(r => r.textPass === true);
 	console.log(
-		`SUMMARY live=${specs.length} selected=${rows.length} text_pass=${textPass.length} text_fail=${textFail.length} tools_pass=${toolsPass.length} tools_fail=${toolsFail.length} skip=${skipped.length}`,
+		`SUMMARY live=${specs.length} selected=${rows.length} text_pass=${textPass.length} text_fail=${textFail.length} tools_pass=${toolsPass.length} tools_fail=${toolsFail.length} skip=${skipped.length} omp_fail=${ompFails.length}`,
 	);
 	if (textFail.length) console.log("TEXT_FAIL", textFail.map(r => r.id).join(","));
 	if (toolsFail.length) console.log("TOOLS_FAIL", toolsFail.map(r => r.id).join(","));
 	if (skipped.length) console.log("SKIP", skipped.map(r => `${r.id} (${r.skip})`).join("; "));
+	if (ompFails.length) console.log("OMP_FAIL", ompFails.join(","));
 
 	if (args.json) {
 		const payload = {
@@ -561,7 +578,9 @@ async function main() {
 				toolsPass: toolsPass.length,
 				toolsFail: toolsFail.length,
 				skip: skipped.length,
+				ompFail: ompFails.length,
 			},
+			ompFails,
 			rows,
 		};
 		await fs.writeFile(args.json, `${JSON.stringify(payload, null, 2)}\n`);
@@ -573,6 +592,10 @@ async function main() {
 		return;
 	}
 	if (args.mode !== "text" && toolsFail.length) {
+		process.exitCode = 1;
+		return;
+	}
+	if (ompFails.length) {
 		process.exitCode = 1;
 		return;
 	}

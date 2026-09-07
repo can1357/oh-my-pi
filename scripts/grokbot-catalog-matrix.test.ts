@@ -3,6 +3,7 @@ import {
 	classifyError,
 	expectedReadPath,
 	expectedWritePath,
+	evaluateToolFollowupText,
 	idSafe,
 	isSoftPassToolFollowup,
 	matchesToolSmokeCall,
@@ -62,6 +63,35 @@ describe("matrixRowFlag", () => {
 		expect(matrixRowFlag({ skip: "catalog supports-tools=false", textPass: true, toolsPass: undefined }, "all")).toBe(
 			"SKIP",
 		);
+	});
+});
+
+describe("evaluateToolFollowupText", () => {
+	test("fails when the follow-up omits the unique ping outside Write empty-stop", () => {
+		expect(
+			evaluateToolFollowupText({
+				kind: "bash",
+				body: "ok, done.",
+				ping: "tools-pong-bash-x",
+				stopReason: "stop",
+			}).pass,
+		).toBe(false);
+		expect(
+			evaluateToolFollowupText({
+				kind: "write",
+				body: "",
+				ping: "tools-pong-write-x",
+				stopReason: "stop",
+			}),
+		).toEqual({ pass: true, detail: "empty-followup-after-write" });
+		expect(
+			evaluateToolFollowupText({
+				kind: "bash",
+				body: "tools-pong-bash-x",
+				ping: "tools-pong-bash-x",
+				stopReason: "stop",
+			}).pass,
+		).toBe(true);
 	});
 });
 

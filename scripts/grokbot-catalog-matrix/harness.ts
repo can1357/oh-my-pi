@@ -216,6 +216,26 @@ export function isSoftPassToolFollowup(errorClass: string): boolean {
 	return errorClass === "incomplete-tool" || errorClass === "empty-body" || errorClass === "provider-policy-block";
 }
 
+/**
+ * Turn-2 text gate after a successful tool call. The unique ping must appear
+ * unless this is the documented Gemini Write empty-stop exception.
+ */
+export function evaluateToolFollowupText(opts: {
+	kind: ToolSmokeKind;
+	body: string;
+	ping: string;
+	stopReason: string;
+}): { pass: boolean; detail?: string } {
+	if (opts.body.includes(opts.ping) || opts.body.includes("tools-pong")) return { pass: true };
+	if (opts.kind === "write" && opts.body.trim().length === 0 && opts.stopReason === "stop") {
+		return { pass: true, detail: "empty-followup-after-write" };
+	}
+	return {
+		pass: false,
+		detail: `${opts.kind}: follow-up omitted ping; text=${opts.body.slice(0, 120)}`,
+	};
+}
+
 // Live keep-model: explicit Read/Write tools trip Anthropic Usage Policy on
 // opus-thinking ids. Shell echo/cat/printf-redirect is accepted and remaps
 // to product Shell; isReadLikeCall / isWriteLikeCall count those as read/write.
