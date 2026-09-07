@@ -936,4 +936,203 @@ describe("PlanReviewOverlay", () => {
 		expect(hoverRow(overlay, "Approve and keep context")).toBe(true);
 		expect(optionLineRaw(overlay, "Approve and keep context")).not.toContain(selectedBg);
 	});
+
+	describe("auto-select countdown", () => {
+		const TUI_STUB = { requestRender: () => {} } as never;
+		const promptLine = (overlay: PlanReviewOverlay): string =>
+			render(overlay)
+				.split("\n")
+				.find(line => line.includes("Plan mode - next step")) ?? "";
+
+		beforeEach(() => {
+			vi.useFakeTimers();
+		});
+
+		afterEach(() => {
+			vi.useRealTimers();
+		});
+
+		it("counts down on the prompt line and auto-picks the timeout target", () => {
+			const onPick = vi.fn();
+			const onTimeoutSelect = vi.fn();
+			const overlay = new PlanReviewOverlay(
+				"plan body",
+				{
+					promptTitle: "Plan mode - next step",
+					options: APPROVAL_OPTIONS,
+					timeoutMs: 20_000,
+					timeoutIndex: 0,
+					tui: TUI_STUB,
+				},
+				{ onPick, onCancel: vi.fn(), onTimeoutSelect },
+			);
+
+			expect(promptLine(overlay)).toContain("Plan mode - next step (20s)");
+			vi.advanceTimersByTime(15_000);
+			expect(promptLine(overlay)).toContain("Plan mode - next step (5s)");
+			expect(onPick).not.toHaveBeenCalled();
+
+			vi.advanceTimersByTime(5_000);
+			expect(onTimeoutSelect).toHaveBeenCalledWith("Approve and execute");
+			expect(onPick.mock.calls).toEqual([["Approve and execute"]]);
+		});
+
+		it("restarts the full window on any keypress", () => {
+			const onPick = vi.fn();
+			const overlay = new PlanReviewOverlay(
+				"plan body",
+				{
+					promptTitle: "Plan mode - next step",
+					options: APPROVAL_OPTIONS,
+					timeoutMs: 20_000,
+					timeoutIndex: 0,
+					tui: TUI_STUB,
+				},
+				{ onPick, onCancel: vi.fn() },
+			);
+
+			vi.advanceTimersByTime(15_000);
+			overlay.handleInput(DOWN);
+			expect(promptLine(overlay)).toContain("Plan mode - next step (20s)");
+
+			// Past the original deadline, still inside the restarted window.
+			vi.advanceTimersByTime(15_000);
+			expect(onPick).not.toHaveBeenCalled();
+
+			// The target is pinned to `timeoutIndex` at construction; unlike
+			// HookSelector it does not follow the cursor, so navigating away does
+			// not change which option an absent operator ends up approving.
+			vi.advanceTimersByTime(5_000);
+			expect(onPick.mock.calls).toEqual([["Approve and execute"]]);
+		});
+
+		it("never auto-picks a disabled option and shows no countdown for one", () => {
+			const onPick = vi.fn();
+			const overlay = new PlanReviewOverlay(
+				"plan body",
+				{
+					promptTitle: "Plan mode - next step",
+					options: APPROVAL_OPTIONS,
+					disabledIndices: [2],
+					timeoutMs: 20_000,
+					timeoutIndex: 2,
+					tui: TUI_STUB,
+				},
+				{ onPick, onCancel: vi.fn() },
+			);
+
+			expect(promptLine(overlay)).not.toMatch(/\(\d+s\)/);
+			vi.advanceTimersByTime(60_000);
+			expect(onPick).not.toHaveBeenCalled();
+		});
+
+		it("stops the timer on dispose, cancel, and manual confirmation", () => {
+			const timed = {
+				promptTitle: "Plan mode - next step",
+				options: APPROVAL_OPTIONS,
+				timeoutMs: 20_000,
+				timeoutIndex: 0,
+				tui: TUI_STUB,
+			};
+
+			const onPickDisposed = vi.fn();
+			new PlanReviewOverlay("plan body", timed, { onPick: onPickDisposed, onCancel: vi.fn() }).dispose();
+			vi.advanceTimersByTime(60_000);
+			expect(onPickDisposed).not.toHaveBeenCalled();
+
+			const onPickCancelled = vi.fn();
+			const onCancel = vi.fn();
+			new PlanReviewOverlay("plan body", timed, { onPick: onPickCancelled, onCancel }).handleInput(CANCEL);
+			vi.advanceTimersByTime(60_000);
+			expect(onCancel).toHaveBeenCalledTimes(1);
+			expect(onPickCancelled).not.toHaveBeenCalled();
+
+			const onPickManual = vi.fn();
+			new PlanReviewOverlay("plan body", timed, { onPick: onPickManual, onCancel: vi.fn() }).handleInput(ENTER);
+			vi.advanceTimersByTime(60_000);
+			expect(onPickManual.mock.calls).toEqual([["Approve and execute"]]);
+		});
+
+		it("waits indefinitely when no timeout is configured", () => {
+			const onPick = vi.fn();
+			const overlay = new PlanReviewOverlay(
+				"plan body",
+				{ promptTitle: "Plan mode - next step", options: APPROVAL_OPTIONS },
+				{ onPick, onCancel: vi.fn() },
+			);
+
+			expect(promptLine(overlay)).not.toMatch(/\(\d+s\)/);
+			vi.advanceTimersByTime(600_000);
+			expect(onPick).not.toHaveBeenCalled();
+		});
+
+		it("does not expire while suspended for an external editor", () => {
+			const onPick = vi.fn();
+			const overlay = new PlanReviewOverlay(
+				"plan body",
+				{
+					promptTitle: "Plan mode - next step",
+					options: APPROVAL_OPTIONS,
+					timeoutMs: 20_000,
+					timeoutIndex: 0,
+					tui: TUI_STUB,
+				},
+				{ onPick, onCancel: vi.fn() },
+			);
+
+			overlay.suspendCountdown();
+			// An editor session far longer than the window: the TUI is stopped, so no
+			// keypress can reach handleInput to reset the timer.
+			vi.advanceTimersByTime(10 * 60_000);
+			expect(onPick).not.toHaveBeenCalled();
+			expect(promptLine(overlay)).not.toMatch(/\(\d+s\)/);
+
+			overlay.resumeCountdown();
+			expect(promptLine(overlay)).toContain("Plan mode - next step (20s)");
+			vi.advanceTimersByTime(19_000);
+			expect(onPick).not.toHaveBeenCalled();
+
+			vi.advanceTimersByTime(1_000);
+			expect(onPick.mock.calls).toEqual([["Approve and execute"]]);
+		});
+
+		it("keeps suspend/resume inert when no timeout is configured", () => {
+			const onPick = vi.fn();
+			const overlay = new PlanReviewOverlay(
+				"plan body",
+				{ promptTitle: "Plan mode - next step", options: APPROVAL_OPTIONS },
+				{ onPick, onCancel: vi.fn() },
+			);
+
+			overlay.suspendCountdown();
+			overlay.resumeCountdown();
+
+			expect(promptLine(overlay)).not.toMatch(/\(\d+s\)/);
+			vi.advanceTimersByTime(600_000);
+			expect(onPick).not.toHaveBeenCalled();
+		});
+
+		it("does not revive the countdown when resumed after disposal", () => {
+			const onPick = vi.fn();
+			const overlay = new PlanReviewOverlay(
+				"plan body",
+				{
+					promptTitle: "Plan mode - next step",
+					options: APPROVAL_OPTIONS,
+					timeoutMs: 20_000,
+					timeoutIndex: 0,
+					tui: TUI_STUB,
+				},
+				{ onPick, onCancel: vi.fn() },
+			);
+
+			// Editor open when the overlay is torn down (Esc, session switch).
+			overlay.suspendCountdown();
+			overlay.dispose();
+			overlay.resumeCountdown();
+
+			vi.advanceTimersByTime(600_000);
+			expect(onPick).not.toHaveBeenCalled();
+		});
+	});
 });

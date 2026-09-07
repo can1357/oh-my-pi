@@ -19,19 +19,58 @@ async function drainMicrotasks(): Promise<void> {
 	await Promise.resolve();
 }
 
-function createAskTool(): AskTool {
+function createAskTool(overrides: { planMode?: boolean; timeoutInPlanMode?: boolean } = {}): AskTool {
 	return new AskTool({
 		hasUI: true,
 		settings: {
 			get(key: string): unknown {
 				if (key === "ask.timeout") return 0.01;
+				if (key === "ask.timeoutInPlanMode") return overrides.timeoutInPlanMode ?? false;
 				if (key === "ask.notify") return "off";
 				if (key === "speech.enabled") return false;
 				return undefined;
 			},
 		},
-		getPlanModeState: () => ({ enabled: false }),
+		getPlanModeState: () => ({ enabled: overrides.planMode ?? false }),
 	} as unknown as ToolSession);
+}
+
+/** Runs one single-question ask against a selector that never settles, so the
+ *  only thing that can resolve it is the fallback timeout. */
+async function runNeverSettlingAsk(tool: AskTool): Promise<AskExecutionResult | undefined> {
+	const select = vi.fn<AskSelect>(() => Promise.withResolvers<string | undefined>().promise);
+	const context = {
+		hasUI: true,
+		ui: { select, editor: vi.fn() },
+		abort: vi.fn(),
+	} as unknown as AgentToolContext;
+	let result: AskExecutionResult | undefined;
+
+	void tool
+		.execute(
+			"ask-plan-mode",
+			{
+				questions: [
+					{
+						id: "db",
+						question: "Which database?",
+						options: [{ label: "SQLite" }, { label: "Postgres" }],
+						recommended: 1,
+					},
+				],
+			},
+			undefined,
+			undefined,
+			context,
+		)
+		.then(value => {
+			result = value;
+		});
+
+	await drainMicrotasks();
+	vi.advanceTimersByTime(10);
+	await drainMicrotasks();
+	return result;
 }
 
 describe("AskTool timeout", () => {
@@ -311,5 +350,18 @@ describe("AskTool timeout", () => {
 		expect(onTimeoutStart).toHaveBeenCalledTimes(1);
 		expect(onTimeoutReset).toHaveBeenCalledTimes(1);
 		selector.dispose();
+	});
+
+	it("blocks the timeout in plan mode unless ask.timeoutInPlanMode is set", async () => {
+		vi.useFakeTimers();
+		expect(await runNeverSettlingAsk(createAskTool({ planMode: true }))).toBeUndefined();
+	});
+
+	it("applies the timeout in plan mode when ask.timeoutInPlanMode is set", async () => {
+		vi.useFakeTimers();
+		const result = await runNeverSettlingAsk(createAskTool({ planMode: true, timeoutInPlanMode: true }));
+
+		expect(result?.details?.selectedOptions).toEqual(["Postgres"]);
+		expect(result?.details?.timedOut).toBe(true);
 	});
 });

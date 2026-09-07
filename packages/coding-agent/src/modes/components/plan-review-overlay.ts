@@ -27,6 +27,7 @@ import {
 	routeSgrMouseInput,
 	ScrollView,
 	truncateToWidth,
+	type TUI,
 	visibleWidth,
 } from "@oh-my-pi/pi-tui";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
@@ -38,6 +39,7 @@ import {
 	matchesSelectDown,
 	matchesSelectUp,
 } from "../utils/keybinding-matchers";
+import { CountdownTimer } from "./countdown-timer";
 import type { HookSelectorSlider } from "./hook-selector";
 import {
 	bottomBorder,
@@ -120,6 +122,8 @@ interface UndoEntry {
 export interface PlanReviewOverlayCallbacks {
 	/** Invoked with the chosen option label (never a disabled one). */
 	onPick: (label: string) => void;
+	/** Invoked just before `onPick` when the countdown expired instead of a keypress. */
+	onTimeoutSelect?: (label: string) => void;
 	/** Invoked on Esc / cancel. */
 	onCancel: () => void;
 	/** Invoked with the current full plan text when the copy hotkey is pressed. */
@@ -152,6 +156,12 @@ export interface PlanReviewOverlayOptions {
 	externalEditorLabel?: string;
 	/** Serializable annotations restored into this overlay instance. */
 	annotationState?: PlanReviewAnnotationState;
+	/** Auto-select `timeoutIndex` after this many milliseconds; omitted/0 disables. */
+	timeoutMs?: number;
+	/** Option index auto-selected when the countdown expires. */
+	timeoutIndex?: number;
+	/** TUI handle used to schedule repaints while the countdown ticks. */
+	tui?: TUI;
 }
 
 /** Default trailing footer hint when the caller supplies none. */
@@ -209,6 +219,14 @@ export class PlanReviewOverlay implements Component {
 	#annotating = false;
 	#input: Input;
 	#annotationTarget: BodyRowAnchor | { sectionIndex: number; row: null; context: null } | undefined;
+	/** Live auto-select countdown, present only while a timeout is configured. */
+	#countdown: CountdownTimer | undefined;
+	/** Seconds left on `#countdown`, rendered next to the prompt title. */
+	#countdownSeconds: number | undefined;
+	/** Retained so the timer can be re-armed after a suspend. */
+	#countdownConfig: { timeoutMs: number; tui: TUI; label: string } | undefined;
+	/** True between `suspendCountdown` and `resumeCountdown`. */
+	#countdownSuspended = false;
 
 	constructor(
 		planContent: string,
@@ -245,6 +263,74 @@ export class PlanReviewOverlay implements Component {
 		if (Array.isArray(options.annotationState?.annotations) && options.annotationState.annotations.length > 0) {
 			this.#recomputeFeedback();
 		}
+		this.#startCountdown(options);
+	}
+
+	/** Arm the auto-select countdown, mirroring `HookSelector`'s timeout wiring.
+	 *  A disabled or out-of-range target leaves the overlay blocking forever —
+	 *  auto-picking a dimmed row would drive an approval path the caller refuses. */
+	#startCountdown(options: PlanReviewOverlayOptions): void {
+		const timeoutMs = options.timeoutMs ?? 0;
+		if (timeoutMs <= 0 || !options.tui) return;
+		const target = options.timeoutIndex ?? 0;
+		if (target < 0 || target >= this.#options.length || this.#disabled.has(target)) return;
+		this.#countdownConfig = { timeoutMs, tui: options.tui, label: this.#options[target]! };
+		this.#armCountdown();
+	}
+
+	/** (Re)start the timer from a full window using the stored config. */
+	#armCountdown(): void {
+		const config = this.#countdownConfig;
+		if (!config || this.#committed) return;
+		this.#countdown = new CountdownTimer(
+			config.timeoutMs,
+			config.tui,
+			seconds => {
+				this.#countdownSeconds = seconds;
+			},
+			() => {
+				this.#countdown = undefined;
+				this.#countdownSeconds = undefined;
+				if (this.#committed) return;
+				// Latch before dispatching so a keypress racing the expiry cannot
+				// double-fire: `handleInput` returns early once `#committed` is set.
+				this.#committed = true;
+				this.#committedLabel = config.label;
+				this.callbacks.onTimeoutSelect?.(config.label);
+				this.callbacks.onPick(config.label);
+			},
+		);
+	}
+
+	/** Pause the countdown while a modal, out-of-band interaction owns the
+	 *  terminal — notably an external editor, which stops the TUI and awaits a
+	 *  child process, so no `handleInput` can arrive to reset the timer. Without
+	 *  this the window expires mid-edit and approves the pre-edit plan.
+	 *  Idempotent; safe when no countdown is configured. */
+	suspendCountdown(): void {
+		if (!this.#countdownConfig) return;
+		this.#countdown?.dispose();
+		this.#countdown = undefined;
+		this.#countdownSeconds = undefined;
+		this.#countdownSuspended = true;
+	}
+
+	/** Resume after `suspendCountdown`, restarting a full window: the operator
+	 *  was demonstrably present, so they get the whole budget back. No-op unless
+	 *  actually suspended, and never revives a committed overlay. */
+	resumeCountdown(): void {
+		if (!this.#countdownSuspended) return;
+		this.#countdownSuspended = false;
+		this.#armCountdown();
+	}
+
+	/** Stop the auto-select countdown for good. Idempotent; safe after expiry. */
+	dispose(): void {
+		this.#countdown?.dispose();
+		this.#countdown = undefined;
+		this.#countdownSeconds = undefined;
+		this.#countdownSuspended = false;
+		this.#countdownConfig = undefined;
 	}
 
 	invalidate(): void {
@@ -481,6 +567,7 @@ export class PlanReviewOverlay implements Component {
 	#confirmSelection(): void {
 		const index = this.#selectedIndex;
 		if (index >= 0 && index < this.#options.length && !this.#disabled.has(index)) {
+			this.dispose();
 			this.#committed = true;
 			this.#committedLabel = this.#options[index]!;
 			this.callbacks.onPick(this.#options[index]!);
@@ -489,6 +576,9 @@ export class PlanReviewOverlay implements Component {
 
 	handleInput(keyData: string): void {
 		if (this.#committed) return;
+		// Any keystroke — including inside the annotation sub-mode — proves an
+		// operator is present, so the full auto-select window restarts.
+		this.#countdown?.reset();
 		if (keyData.startsWith("\x1b[<") && this.#handleMouse(keyData)) return;
 		if (this.#annotating) {
 			if (this.callbacks.onAnnotationExternalEditor && matchesAppExternalEditor(keyData)) {
@@ -501,6 +591,7 @@ export class PlanReviewOverlay implements Component {
 			return;
 		}
 		if (matchesSelectCancel(keyData)) {
+			this.dispose();
 			this.#committed = true;
 			this.callbacks.onCancel();
 			return;
@@ -1170,7 +1261,11 @@ export class PlanReviewOverlay implements Component {
 		const sliderLines = committed ? [] : this.#renderSliderLines();
 		const submittingLabel = this.#committedLabel ? `${this.#committedLabel} — submitting…` : "Submitting…";
 		const optionLines = committed ? [theme.bold(theme.fg("accent", submittingLabel))] : this.#renderOptionLines();
-		const promptLines = this.#promptTitle ? [theme.bold(theme.fg("accent", this.#promptTitle))] : [];
+		const promptTitle =
+			this.#promptTitle !== undefined && this.#countdownSeconds !== undefined
+				? `${this.#promptTitle} (${this.#countdownSeconds}s)`
+				: this.#promptTitle;
+		const promptLines = promptTitle ? [theme.bold(theme.fg("accent", promptTitle))] : [];
 		const footerLines = committed
 			? [theme.fg("dim", "Applying your selection — this can take a moment while context is prepared.")]
 			: this.#renderFooterLines(innerWidth);

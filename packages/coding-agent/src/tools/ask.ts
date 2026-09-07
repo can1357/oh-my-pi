@@ -873,7 +873,11 @@ export class AskTool implements AgentTool<typeof askSchema, AskToolDetails> {
 		// Settings.get("ask.timeout") returns seconds (0 = disabled), convert to ms
 		const timeoutSeconds = this.session.settings.get("ask.timeout");
 		const settingsTimeout = timeoutSeconds === 0 ? null : timeoutSeconds * 1000;
-		const timeout = planModeEnabled ? null : settingsTimeout;
+		// Plan mode blocks the timeout by default so an unattended planning session
+		// never auto-answers; `ask.timeoutInPlanMode` opts into the same countdown
+		// that already runs outside plan mode.
+		const allowTimeoutInPlanMode = this.session.settings.get("ask.timeoutInPlanMode");
+		const timeout = planModeEnabled && !allowTimeoutInPlanMode ? null : settingsTimeout;
 
 		// Send notification if waiting and not suppressed
 		this.#sendAskNotification();

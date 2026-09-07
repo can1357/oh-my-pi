@@ -3,6 +3,9 @@
  */
 import type { TUI } from "@oh-my-pi/pi-tui";
 
+/** Largest delay a 32-bit signed timer accepts; longer values are clamped to 1ms. */
+const MAX_TIMEOUT_MS = 2_147_483_647;
+
 export class CountdownTimer {
 	#intervalId: NodeJS.Timeout | undefined;
 	#expireTimeoutId: NodeJS.Timeout | undefined;
@@ -32,13 +35,24 @@ export class CountdownTimer {
 		this.#remainingSeconds = this.#calculateRemainingSeconds(now);
 		this.onTick(this.#remainingSeconds);
 		this.tui?.requestRender();
+		this.#scheduleExpiry();
+		this.#startInterval();
+	}
 
+	/** Arm the expiry timer, re-arming across `MAX_TIMEOUT_MS` chunks when the
+	 *  deadline is further out than a 32-bit timer can express. A raw
+	 *  `setTimeout(ms)` above that limit is clamped to 1ms by the runtime, which
+	 *  would fire a deliberately long window almost immediately. */
+	#scheduleExpiry(): void {
+		const remainingMs = Math.max(0, this.#deadlineMs - Date.now());
+		if (remainingMs > MAX_TIMEOUT_MS) {
+			this.#expireTimeoutId = setTimeout(() => this.#scheduleExpiry(), MAX_TIMEOUT_MS);
+			return;
+		}
 		this.#expireTimeoutId = setTimeout(() => {
 			this.dispose();
 			this.onExpire();
-		}, this.#initialMs);
-
-		this.#startInterval();
+		}, remainingMs);
 	}
 
 	#startInterval(): void {

@@ -3536,6 +3536,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			annotationState?: PlanReviewAnnotationState;
 			onAnnotationStateChange?: (state: PlanReviewAnnotationState) => void;
 			initialIndex?: number;
+			timeoutMs?: number;
+			timeoutIndex?: number;
+			onTimeoutSelect?: (label: string) => void;
 		},
 		extra?: { slider?: HookSelectorSlider },
 	): Promise<string | undefined> {
@@ -3559,9 +3562,13 @@ export class InteractiveMode implements InteractiveModeContext {
 				slider: extra?.slider,
 				externalEditorLabel: this.keybindings.getDisplayString("app.editor.external") || undefined,
 				annotationState: dialogOptions?.annotationState,
+				timeoutMs: dialogOptions?.timeoutMs,
+				timeoutIndex: dialogOptions?.timeoutIndex,
+				tui: this.ui,
 			},
 			{
 				onPick: choice => finish(choice),
+				onTimeoutSelect: dialogOptions?.onTimeoutSelect,
 				onCancel: () => finish(undefined),
 				onCopyPlan: content => void this.#copyPlanToClipboard(content),
 				onExternalEditor: dialogOptions?.onExternalEditor,
@@ -3585,6 +3592,10 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	#hidePlanReview(): void {
+		// Dispose before dropping the handle: Esc, #dismissPlanReview, and the
+		// post-approval closePlanReview() all route through here, and a live
+		// countdown interval would keep ticking against a hidden overlay.
+		this.#planReviewOverlay?.dispose();
 		this.#planReviewCancel = undefined;
 		this.#planReviewOverlayHandle?.hide();
 		this.#planReviewOverlayHandle = undefined;
@@ -3707,7 +3718,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
-	async #openPlanInExternalEditor(planFilePath: string): Promise<void> {
+	async #openPlanInExternalEditor(planFilePath: string, onEditorResult?: (content: string) => void): Promise<void> {
 		const editorCmd = getEditorCommand();
 		if (!editorCmd) {
 			this.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
@@ -3727,6 +3738,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		// The editor stops the TUI and awaits a child process, so no keypress can
+		// reach `handleInput` to reset the approval countdown. Left running it
+		// would expire mid-edit and approve the pre-edit plan, and the editor's
+		// write would then land on an already-executing session.
+		this.#planReviewOverlay?.suspendCountdown();
 		try {
 			this.ui.stop();
 			const result = await openInEditor(editorCmd, currentText, {
@@ -3736,12 +3752,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			if (result !== null) {
 				await Bun.write(resolvedPath, result);
 				this.#planReviewOverlay?.setPlanContent(result);
+				// The editor is now the newest authority on the plan. Without this the
+				// caller's `editedContent` keeps a pre-editor in-overlay snapshot and
+				// the approval branch would write that stale text back over the file.
+				onEditorResult?.(result);
 				this.showStatus("Plan updated in external editor.");
 			}
 		} catch (error) {
 			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
 			this.ui.start();
+			this.#planReviewOverlay?.resumeCountdown();
 			this.ui.requestRender(true);
 		}
 	}
@@ -3753,6 +3774,9 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		// Same suspend as the plan editor: the annotation editor also stops the TUI
+		// and blocks on a child process, so the countdown must not run meanwhile.
+		this.#planReviewOverlay?.suspendCountdown();
 		try {
 			this.ui.stop();
 			const result = await openInEditor(editorCmd, draft, { extension: ".md" });
@@ -3763,6 +3787,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.showWarning(`Failed to open external editor: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
 			this.ui.start();
+			this.#planReviewOverlay?.resumeCountdown();
 			this.ui.requestRender(true);
 		}
 	}
@@ -3796,6 +3821,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			preserveContext?: boolean;
 			compactBeforeExecute?: boolean;
 			executionModel?: ResolvedRoleModel;
+			/** Seconds of the expired approval timeout, when nobody picked this. */
+			autoApprovedAfterSeconds?: number;
 		},
 	): Promise<boolean> {
 		const previousPresentation = this.#planModePreviousToolPresentation ?? {
@@ -3920,6 +3947,11 @@ export class InteractiveMode implements InteractiveModeContext {
 		const planModePrompt = prompt.render(planModeApprovedPrompt, {
 			planFilePath: options.planFilePath,
 			contextPreserved: options.preserveContext === true,
+			// Durable disclosure: `showWarning` is a UI component that the
+			// `preserveContext: false` clear wipes, so the record of "nobody
+			// reviewed this" has to ride the synthetic prompt into the new session.
+			autoApproved: options.autoApprovedAfterSeconds !== undefined,
+			autoApprovalSeconds: options.autoApprovedAfterSeconds,
 		});
 		// Close the review overlay only now — after the async title write and plan
 		// prompt are prepared, immediately before the execution turn is queued. The
@@ -4567,6 +4599,23 @@ export class InteractiveMode implements InteractiveModeContext {
 		let feedback = "";
 		const annotationStateKey = this.#resolvePlanFilePath(planFilePath);
 
+		// Timed auto-accept: when `plan.approvalTimeout` is set, an unattended
+		// overlay commits `plan.approvalDefault` instead of blocking forever.
+		// "Refine plan" and "Save and quit" are never auto-select targets —
+		// expiry means no operator is present, so looping the model or quitting
+		// the session would both be wrong. Keep-context falls back to index 0
+		// when the context is too full for that option: a fresh-context execute
+		// is always available, and skipping the auto-select would reintroduce
+		// the indefinite wait the timeout exists to remove.
+		const approvalTimeoutSeconds = this.session.settings.get("plan.approvalTimeout");
+		const approvalDefault = this.session.settings.get("plan.approvalDefault");
+		const preferredIndex =
+			approvalDefault === "compact" ? 1 : approvalDefault === "keep-context" ? PLAN_KEEP_CONTEXT_OPTION_INDEX : 0;
+		const timeoutIndex =
+			keepContextDisabled && preferredIndex === PLAN_KEEP_CONTEXT_OPTION_INDEX ? 0 : preferredIndex;
+		const timeoutMs = approvalTimeoutSeconds > 0 ? approvalTimeoutSeconds * 1000 : undefined;
+		let autoSelected = false;
+
 		const choice = await this.showPlanReview(
 			planContent,
 			"Plan mode - next step",
@@ -4579,7 +4628,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			],
 			{
 				helpText,
-				onExternalEditor: () => void this.#openPlanInExternalEditor(planFilePath),
+				onExternalEditor: () =>
+					void this.#openPlanInExternalEditor(planFilePath, content => {
+						editedContent = content;
+					}),
 				onPlanEdited: content => {
 					editedContent = content;
 					void Bun.write(this.#resolvePlanFilePath(planFilePath), content);
@@ -4593,6 +4645,11 @@ export class InteractiveMode implements InteractiveModeContext {
 					else this.#planReviewAnnotationState.delete(annotationStateKey);
 				},
 				disabledIndices: keepContextDisabled ? [PLAN_KEEP_CONTEXT_OPTION_INDEX] : undefined,
+				timeoutMs,
+				timeoutIndex,
+				onTimeoutSelect: () => {
+					autoSelected = true;
+				},
 			},
 			{ slider },
 		);
@@ -4617,6 +4674,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 
 		if (choice === "Approve and execute" || choice === "Approve and compact context" || choice === keepContextLabel) {
+			// The durable disclosure rides the synthetic approved-plan prompt (see
+			// `#approvePlan`); an on-screen notice is emitted *after* dispatch so it
+			// survives the `preserveContext: false` clear, which resets the transcript.
 			try {
 				// Prefer in-overlay edits (already in memory) over a disk re-read. The
 				// overlay mirrors edits as they happen, and approval awaits one final
@@ -4664,7 +4724,11 @@ export class InteractiveMode implements InteractiveModeContext {
 					preserveContext: choice !== "Approve and execute",
 					compactBeforeExecute: choice === "Approve and compact context",
 					executionModel,
+					autoApprovedAfterSeconds: autoSelected ? approvalTimeoutSeconds : undefined,
 				});
+				if (autoSelected) {
+					this.showWarning(`Plan auto-approved after ${approvalTimeoutSeconds}s with "${choice}".`);
+				}
 				if (executionDispatched) this.#planReviewAnnotationState.delete(annotationStateKey);
 			} catch (error) {
 				this.showError(

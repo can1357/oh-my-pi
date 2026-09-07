@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Timed auto-accept for plan approval: `plan.approvalTimeout` counts down on the plan-review overlay and auto-selects `plan.approvalDefault` (`execute`/`compact`/`keep-context`) when nobody is at the keyboard, so plan → implement can run unattended. Any keypress restarts the window, an open external editor suspends it, a disabled keep-context option falls back to execute, and the approved-plan prompt records that the approval was automatic. Defaults to off ([#11166](https://github.com/can1357/oh-my-pi/pull/11166) by [@billpku](https://github.com/billpku)).
+- `ask.timeoutInPlanMode` applies `ask.timeout` during plan mode, which previously always waited indefinitely. Defaults to off ([#11166](https://github.com/can1357/oh-my-pi/pull/11166) by [@billpku](https://github.com/billpku)).
+
+### Fixed
+
+- Fixed dialog countdowns longer than ~24.8 days (`ask.timeout`, `plan.approvalTimeout`) firing almost immediately: `CountdownTimer` now re-arms across bounded chunks instead of handing an overflowing delay to `setTimeout`, which the runtime clamps to 1ms ([#11166](https://github.com/can1357/oh-my-pi/pull/11166) by [@billpku](https://github.com/billpku)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

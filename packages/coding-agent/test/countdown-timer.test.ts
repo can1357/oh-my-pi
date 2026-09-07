@@ -35,4 +35,21 @@ describe("CountdownTimer", () => {
 		vi.advanceTimersByTime(1);
 		expect(onExpire).toHaveBeenCalledTimes(1);
 	});
+
+	it("does not fire early for windows past the 32-bit timer limit", () => {
+		// A raw setTimeout above 2^31-1 ms is clamped to 1ms by the runtime, which
+		// would fire a deliberately long window almost immediately.
+		const onExpire = vi.fn();
+		const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000; // ~2.59e9 > 2_147_483_647
+		new CountdownTimer(thirtyDaysMs, undefined, () => {}, onExpire);
+
+		vi.advanceTimersByTime(2_147_483_647);
+		expect(onExpire).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(thirtyDaysMs - 2_147_483_647 - 1);
+		expect(onExpire).not.toHaveBeenCalled();
+
+		vi.advanceTimersByTime(1);
+		expect(onExpire).toHaveBeenCalledTimes(1);
+	});
 });

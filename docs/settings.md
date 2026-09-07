@@ -719,7 +719,10 @@ For a custom status line, set `statusLine.preset: custom` and configure `statusL
 | `autoResume`           | boolean | `false`         | Auto-resume the most recent session in the cwd.                                                         |
 | `plan.enabled`         | boolean | `true`          | Enable plan mode.                                                                                       |
 | `plan.defaultOnStartup` | boolean | `false`         | Start each fresh interactive session in plan mode when plan mode is enabled. Print/JSON (`--print`) mode ignores this and prints a note; use `--plan-yolo` for a headless plan flow. |
+| `plan.approvalTimeout` | number  | `0`             | Seconds before the plan-approval overlay auto-selects `plan.approvalDefault`; `0` = wait indefinitely. The countdown restarts on any keypress. |
+| `plan.approvalDefault` | enum    | `execute`       | `execute`, `compact`, `keep-context`. Option chosen when `plan.approvalTimeout` expires. Falls back to `execute` when keep-context is disabled by context pressure. |
 | `ask.timeout`          | number  | `0`             | Seconds before an `ask` prompt times out; `0` = no timeout. (Legacy ms values are migrated to seconds.) |
+| `ask.timeoutInPlanMode` | boolean | `false`        | Apply `ask.timeout` during plan mode. Off by default, so plan-mode asks wait indefinitely. |
 | `ask.notify`           | enum    | `on`            | `on`, `off`.                                                                                            |
 
 ### Providers and services

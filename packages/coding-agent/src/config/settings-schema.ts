@@ -2330,6 +2330,17 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"ask.timeoutInPlanMode": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "interaction",
+			group: "Notifications",
+			label: "Ask Timeout In Plan Mode",
+			description: "Apply the ask timeout during plan mode instead of waiting indefinitely",
+		},
+	},
+
 	"ask.notify": {
 		type: "enum",
 		values: ["on", "off"] as const,
@@ -4800,6 +4811,38 @@ export const SETTINGS_SCHEMA = {
 			group: "Modes",
 			label: "Start in Plan Mode",
 			description: "Automatically enter plan mode at the start of every new session",
+			condition: "planModeEnabled",
+		},
+	},
+
+	"plan.approvalTimeout": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Plan Approval Timeout",
+			description: "Auto-select the default plan-approval option after this many seconds (0 disables)",
+			condition: "planModeEnabled",
+			options: [
+				{ value: "0", label: "Disabled" },
+				{ value: "60", label: "1 minute" },
+				{ value: "300", label: "5 minutes" },
+				{ value: "600", label: "10 minutes" },
+				{ value: "1800", label: "30 minutes" },
+			],
+		},
+	},
+
+	"plan.approvalDefault": {
+		type: "enum",
+		values: ["execute", "compact", "keep-context"] as const,
+		default: "execute",
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Plan Approval Default",
+			description: "Option chosen when the plan-approval timeout expires",
 			condition: "planModeEnabled",
 		},
 	},

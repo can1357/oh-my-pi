@@ -1,4 +1,7 @@
 Plan approved.
+{{#if autoApproved}}
+- Auto-approved: the {{autoApprovalSeconds}}s approval timeout expired with no operator input; nobody reviewed this plan.
+{{/if}}
 {{#if contextPreserved}}
 - History usable; the plan below authoritative if it conflicts with earlier exploration.
 {{/if}}
