@@ -2,6 +2,13 @@ import { AudioCapture } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
+import {
+	type CloudSttStreamOptions,
+	DEFAULT_STT_BACKEND,
+	isSttBackend,
+	startCloudSttStream,
+	type SttBackend,
+} from "./cloud-transcribe-client";
 import { downloadSttModel, isSttModelCached } from "./downloader";
 import { resolveSttModelSpec } from "./models";
 import { evaluateSubmitTrigger } from "./submit-trigger";
@@ -29,10 +36,20 @@ interface Editor {
 interface CaptureHandle {
 	stop(): void;
 }
-
 type CaptureFactory = (onAudio: (error: Error | null, samples: Float32Array) => void) => CaptureHandle;
 
-/** Coordinates native microphone capture with incremental local transcription. */
+/** Test seam: resolves the OpenAI key for the cloud backend. Defaults to env. */
+export interface SttControllerDeps {
+	resolveCloudKey?: () => Promise<string | undefined>;
+	createCloudFetch?: CloudSttStreamOptions["fetchImpl"];
+}
+
+async function defaultCloudKeyResolver(): Promise<string | undefined> {
+	const env = (typeof Bun !== "undefined" ? Bun.env : process.env) as Record<string, string | undefined>;
+	return env["OPENAI_API_KEY"] ?? process.env["OPENAI_API_KEY"];
+}
+
+/** Coordinates microphone capture with local or cloud streaming transcription. */
 export class STTController {
 	#state: SttState = "idle";
 	#resolvedModelKey: string | null = null;
@@ -40,6 +57,9 @@ export class STTController {
 	#stopAfterStart = false;
 	#disposed = false;
 	readonly #createCapture: CaptureFactory;
+	readonly #resolveCloudKey: () => Promise<string | undefined>;
+	readonly #createCloudFetch: CloudSttStreamOptions["fetchImpl"];
+	#cloudApiKey: string | null = null;
 
 	// Live streaming capture.
 	#stream: SttStreamHandle | null = null;
@@ -50,8 +70,13 @@ export class STTController {
 	#streamUtterance = "";
 
 	/** Creates a controller; tests may replace the hardware capture boundary. */
-	constructor(createCapture: CaptureFactory = onAudio => new AudioCapture(16_000, onAudio)) {
+	constructor(
+		createCapture: CaptureFactory = onAudio => new AudioCapture(16_000, onAudio),
+		deps: SttControllerDeps = {},
+	) {
 		this.#createCapture = createCapture;
+		this.#resolveCloudKey = deps.resolveCloudKey ?? defaultCloudKeyResolver;
+		this.#createCloudFetch = deps.createCloudFetch;
 	}
 
 	get state(): SttState {
@@ -92,7 +117,37 @@ export class STTController {
 		}
 	}
 
+	#backend(): SttBackend {
+		const raw = settings.get("stt.backend") as string | undefined;
+		return raw !== undefined && isSttBackend(raw) ? raw : DEFAULT_STT_BACKEND;
+	}
+
+	async #ensureCloudKey(options: ToggleOptions): Promise<string | null> {
+		if (this.#cloudApiKey) return this.#cloudApiKey;
+		try {
+			const key = await this.#resolveCloudKey();
+			if (key) {
+				this.#cloudApiKey = key;
+				return key;
+			}
+		} catch (err) {
+			logger.error("STT cloud key resolution failed", {
+				error: err instanceof Error ? err.message : String(err),
+			});
+		}
+		options.showWarning(
+			"No OpenAI credentials for cloud speech-to-text. Set OPENAI_API_KEY — falling back to the local model.",
+		);
+		return null;
+	}
+
 	async #ensureDeps(options: ToggleOptions): Promise<boolean> {
+		if (this.#backend() === "cloud") {
+			// Cloud path needs no local weights; a missing key falls back to local
+			// rather than refusing to record.
+			const key = await this.#ensureCloudKey(options);
+			if (key) return true;
+		}
 		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
 		// Keyed on the model rather than a one-shot flag: switching stt.modelName
 		// mid-session must re-run preflight so an uncached new tier downloads here
@@ -167,31 +222,48 @@ export class STTController {
 	async #startStreaming(editor: Editor, options: ToggleOptions): Promise<void> {
 		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
 		const language = settings.get("stt.language") as string | undefined;
+		const keywords = String(settings.get("stt.keywords") ?? "")
+			.split(",")
+			.map(s => s.trim())
+			.filter(Boolean);
 		this.#streamEditor = editor;
 		this.#streamCommitted = false;
 		this.#streamUtterance = "";
 		this.#streamAbort = new AbortController();
-		const stream = sttClient.startStream(modelKey, {
-			language: language || undefined,
-			signal: this.#streamAbort.signal,
-			onPartial: text => {
-				if (this.#disposed || this.#state !== "recording") return;
-				this.#streamEditor?.setVolatileText(this.#prefixed(text));
-				options.requestRender?.();
-			},
-			onSegment: text => {
-				if (this.#disposed) return;
-				const prefixed = this.#prefixed(text);
-				if (prefixed) {
-					this.#streamEditor?.commitVolatileText(prefixed);
-					this.#streamCommitted = true;
-					this.#streamUtterance += prefixed;
-				} else {
-					this.#streamEditor?.clearVolatileText();
-				}
-				options.requestRender?.();
-			},
-		});
+		const onPartial = (text: string): void => {
+			if (this.#disposed || this.#state !== "recording") return;
+			this.#streamEditor?.setVolatileText(this.#prefixed(text));
+			options.requestRender?.();
+		};
+		const onSegment = (text: string): void => {
+			if (this.#disposed) return;
+			const prefixed = this.#prefixed(text);
+			if (prefixed) {
+				this.#streamEditor?.commitVolatileText(prefixed);
+				this.#streamCommitted = true;
+				this.#streamUtterance += prefixed;
+			} else {
+				this.#streamEditor?.clearVolatileText();
+			}
+			options.requestRender?.();
+		};
+		const useCloud = this.#backend() === "cloud" && this.#cloudApiKey !== null;
+		const stream = useCloud
+			? startCloudSttStream({
+					apiKey: this.#cloudApiKey as string,
+					language: language || undefined,
+					keywords: keywords.length ? keywords : undefined,
+					signal: this.#streamAbort.signal,
+					fetchImpl: this.#createCloudFetch,
+					onPartial,
+					onSegment,
+				})
+			: sttClient.startStream(modelKey, {
+					language: language || undefined,
+					signal: this.#streamAbort.signal,
+					onPartial,
+					onSegment,
+				});
 		this.#stream = stream;
 		let recorder: CaptureHandle;
 		try {
@@ -316,5 +388,6 @@ export class STTController {
 		this.#cleanupStream();
 		this.#state = "idle";
 		this.#resolvedModelKey = null;
+		this.#cloudApiKey = null;
 	}
 }

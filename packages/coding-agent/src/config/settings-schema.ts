@@ -14,6 +14,7 @@ import {
 	type CompactionMethod,
 	DEFAULT_COMPACTION_METHOD_ORDER,
 } from "../session/compaction-methods";
+import { DEFAULT_STT_BACKEND, STT_BACKEND_VALUES } from "../stt/cloud-transcribe-client";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
 import { STT_SUBMIT_TRIGGER_OPTIONS, STT_SUBMIT_TRIGGER_VALUES } from "../stt/submit-trigger";
 import { AUTO_THINKING, getConfiguredThinkingLevelMetadata, getThinkingLevelMetadata } from "../thinking";
@@ -2575,10 +2576,27 @@ export const SETTINGS_SCHEMA = {
 			description: "Enable speech-to-text input via microphone",
 		},
 	},
-
 	"stt.language": {
 		type: "string",
 		default: "en",
+	},
+
+	"stt.backend": {
+		type: "enum",
+		values: STT_BACKEND_VALUES,
+		default: DEFAULT_STT_BACKEND,
+		ui: {
+			tab: "interaction",
+			group: "Speech",
+			label: "Speech Backend",
+			description:
+				"Local runs on-device Whisper/Parakeet with no network. cloud records mic audio and transcribes it with OpenAI gpt-4o-transcribe on release (needs OPENAI_API_KEY, no live preview) and falls back to local without credentials.",
+		},
+	},
+
+	"stt.keywords": {
+		type: "string",
+		default: "",
 	},
 
 	"stt.modelName": {
