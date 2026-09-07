@@ -203,34 +203,246 @@ An intervening paragraph closes the list.
 		expect(selection.categoryCounts.Other).toBe(1);
 	});
 
-	test("unreleased section has no bullet the startup notice would misread", async () => {
-		const changelog = await Bun.file(shippedChangelogPath).text();
-		const unreleasedStart = changelog.indexOf("## [Unreleased]");
-		expect(unreleasedStart).toBeGreaterThanOrEqual(0);
-		const rest = changelog.slice(unreleasedStart + "## [Unreleased]".length);
-		const nextRelease = rest.indexOf("\n## ");
-		const unreleased = nextRelease === -1 ? rest : rest.slice(0, nextRelease);
+	test("does not count a thematic break as a change", () => {
+		const selection = summarize(`
+### Fixed
 
-		const misread: string[] = [];
-		let sawHeading = false;
-		let sawTopLevelBullet = false;
-		for (const line of unreleased.split("\n")) {
-			if (/^###\s/.test(line)) {
-				sawHeading = true;
-				sawTopLevelBullet = false;
-				continue;
-			}
-			if (/^[-+*][ \t]+\S/.test(line)) {
-				if (!sawHeading) misread.push(`above any heading: ${line.slice(0, 60)}`);
-				sawTopLevelBullet = true;
-				continue;
-			}
-			// An indented bullet with no shallower bullet above it renders as a code block, not a change.
-			if (/^[ \t]+[-+*][ \t]+\S/.test(line) && !sawTopLevelBullet) {
-				misread.push(`indented into a code block: ${line.trim().slice(0, 60)}`);
-			}
-		}
+- First fix.
 
-		expect(misread).toEqual([]);
+* * *
+
+- Second fix.
+`);
+
+		expect(selection.changeCount).toBe(2);
+		expect(selection.categoryCounts).toEqual({ Fixed: 2 });
+	});
+
+	test("counts a separator run that continues the open list", () => {
+		// The renderer lexes `- - -` with the open list's own marker as an item, not `hr`.
+		const selection = summarize(`
+### Fixed
+
+- First fix.
+- - -
+- Second fix.
+`);
+
+		expect(selection.changeCount).toBe(3);
+		expect(selection.categoryCounts).toEqual({ Fixed: 3 });
+	});
+
+	test("restarts the list after an indented thematic break", () => {
+		// The renderer lexes the `* * *` run as `hr`, closing the open list, so the
+		// deeper bullet below it opens a new top-level list instead of nesting.
+		const selection = summarize(`
+### Fixed
+
+ - First fix.
+ * * *
+  - Second fix.
+`);
+
+		expect(selection.changeCount).toBe(2);
+		expect(selection.categoryCounts).toEqual({ Fixed: 2 });
+	});
+
+	test("keeps the list open across a deeper thematic break", () => {
+		// Indented past the open item, the break run is absorbed into the item above,
+		// so the bullet below it stays nested rather than starting a new list.
+		const selection = summarize(`
+### Fixed
+
+- First fix.
+   * * *
+  - nested detail
+`);
+
+		expect(selection.changeCount).toBe(1);
+		expect(selection.categoryCounts).toEqual({ Fixed: 1 });
+	});
+
+	test("refreshes the tracked marker when the list changes delimiters", () => {
+		// The renderer starts a new `*` list at the second line, so the run below it
+		// is an item of that list — not `hr` against the stale `-` marker.
+		const selection = summarize(`
+### Fixed
+
+- First fix.
+* Second fix.
+* * *
+`);
+
+		expect(selection.changeCount).toBe(3);
+		expect(selection.categoryCounts).toEqual({ Fixed: 3 });
+	});
+
+	test("treats a break with a stale marker as a separator", () => {
+		// The second line opens a `*` list, so the `- - -` run below renders as `hr`.
+		const selection = summarize(`
+### Fixed
+
+- First fix.
+* Second fix.
+- - -
+`);
+
+		expect(selection.changeCount).toBe(2);
+		expect(selection.categoryCounts).toEqual({ Fixed: 2 });
+	});
+
+	test("adopts the new list indent on delimiter change", () => {
+		const selection = summarize(`
+### Fixed
+
+  - First fix.
+  * Second fix.
+ - Third fix.
+`);
+
+		expect(selection.changeCount).toBe(3);
+		expect(selection.categoryCounts).toEqual({ Fixed: 3 });
+	});
+
+	test("restarts the list after an underscore thematic break", () => {
+		// `_ _ _` never parses as a list bullet, but the renderer still lexes it as `hr`
+		// and closes the list — the deeper bullet below opens a new top-level list.
+		const selection = summarize(`
+### Fixed
+
+ - First fix.
+ _ _ _
+  - Second fix.
+`);
+
+		expect(selection.changeCount).toBe(2);
+		expect(selection.categoryCounts).toEqual({ Fixed: 2 });
+	});
+
+	test("restarts the list after a spaceless thematic break", () => {
+		// `***` carries no list marker either, yet still renders as `hr`.
+		const selection = summarize(`
+### Fixed
+
+ - First fix.
+ ***
+  - Second fix.
+`);
+
+		expect(selection.changeCount).toBe(2);
+		expect(selection.categoryCounts).toEqual({ Fixed: 2 });
+	});
+
+	test("keeps the list open across a deeper underscore break", () => {
+		// Past the open indent the break is absorbed into the item above, so the
+		// bullet below it stays nested rather than starting a new list.
+		const selection = summarize(`
+### Fixed
+
+- First fix.
+   _ _ _
+  - nested detail
+`);
+
+		expect(selection.changeCount).toBe(1);
+		expect(selection.categoryCounts).toEqual({ Fixed: 1 });
+	});
+
+	test("restarts the list after a blank-separated indented paragraph", () => {
+		// The blank lookahead detaches the paragraph from the open item, so the deeper
+		// bullet below it opens a new top-level list instead of nesting under the old one.
+		const selection = summarize(`
+### Fixed
+
+  - First fix.
+ * Second fix.
+
+ Paragraph.
+
+  * Third fix.
+`);
+
+		expect(selection.changeCount).toBe(3);
+		expect(selection.categoryCounts).toEqual({ Fixed: 3 });
+	});
+
+	test("keeps the list open across a blank-separated deep continuation", () => {
+		// Past the open indent the continuation stays absorbed, so the bullet below it
+		// is still nested — resetting on any blank-separated line would overcount here.
+		const selection = summarize(`
+### Fixed
+
+- First fix.
+
+  Continued description.
+  - nested detail
+
+- Second fix.
+`);
+
+		expect(selection.changeCount).toBe(2);
+		expect(selection.categoryCounts).toEqual({ Fixed: 2 });
+	});
+
+	test("restarts the list after an indented blockquote", () => {
+		// The blockquote closes the open list, so the deeper bullet below it opens a new
+		// top-level list instead of nesting under the old one.
+		const selection = summarize(`
+### Fixed
+
+  - First fix.
+ + Second fix.
+ > Quote.
+  - Third fix.
+`);
+
+		expect(selection.changeCount).toBe(3);
+		expect(selection.categoryCounts).toEqual({ Fixed: 3 });
+	});
+
+	test("does not count bullets inside a fenced code block", () => {
+		const selection = summarize(`
+### Fixed
+
+- First fix.
+
+\`\`\`
+- not a change
+\`\`\`
+
+- Second fix.
+`);
+
+		expect(selection.changeCount).toBe(2);
+		expect(selection.categoryCounts).toEqual({ Fixed: 2 });
+	});
+
+	test("counts ordered list items like unordered ones", () => {
+		// The renderer shows them as list items, so the announced count includes them.
+		const selection = summarize(`
+### Fixed
+
+1. First fix.
+2. Second fix.
+`);
+
+		expect(selection.changeCount).toBe(2);
+		expect(selection.categoryCounts).toEqual({ Fixed: 2 });
+	});
+
+	test("announces unreleased-shaped notes truthfully", () => {
+		const selection = summarize(`
+- Uncategorized note.
+
+### Fixed
+
+   - Indented fix.
+- Ordinary fix.
+`);
+
+		const breakdown = Object.values(selection.categoryCounts).reduce((total, count) => total + count, 0);
+		expect(selection.changeCount).toBe(breakdown);
+		expect(selection.changeCount).toBe(3);
+		expect(selection.categoryCounts).toEqual({ Other: 1, Fixed: 2 });
 	});
 });

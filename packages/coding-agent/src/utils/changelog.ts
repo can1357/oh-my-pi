@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { Lexer } from "@oh-my-pi/pi-utils/marked";
 import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
 import type { SettingValue } from "../config/settings";
@@ -62,24 +63,6 @@ function emptyStartupSelection(persistCurrentVersion: boolean): StartupChangelog
 /** Bucket for release bullets written above any `###` category heading, so the breakdown never loses them. */
 const UNCATEGORIZED_CHANGELOG_CATEGORY = "Other";
 
-/** Leading indent columns of a line. Tabs advance to the next 4-column stop. */
-function changelogLineIndent(line: string): number {
-	let indent = 0;
-	for (const char of line) {
-		if (char === " ") indent += 1;
-		else if (char === "\t") indent += 4 - (indent % 4);
-		else break;
-	}
-	return indent;
-}
-
-/** Indent columns of a Markdown list bullet, or undefined when the line opens no list item. Tabs advance to the next 4-column stop. */
-function changelogBulletIndent(line: string): number | undefined {
-	const match = line.match(/^([ \t]*)[-+*][ \t]+\S/);
-	if (!match) return undefined;
-	return changelogLineIndent(match[1] ?? "");
-}
-
 function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	changeCount: number;
 	categoryCounts: Record<string, number>;
@@ -89,34 +72,21 @@ function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 
 	for (const entry of entries) {
 		let category = UNCATEGORIZED_CHANGELOG_CATEGORY;
-		// Indent of the first item of the open list block. The renderer absorbs every
-		// whitespace-indented line into the open item, so only an unindented line
-		// (paragraph, heading, fence, ...) closes the block. Blank lines never do.
-		let listIndent: number | undefined;
-		for (const line of entry.content.split("\n")) {
-			const heading = line.match(/^###\s+(.+?)\s*$/);
-			if (heading) {
-				category = heading[1] ?? UNCATEGORIZED_CHANGELOG_CATEGORY;
-				listIndent = undefined;
+		// Count what the renderer shows: top-level list items per `###` section, straight
+		// from the shared lexer. There is no parallel list grammar left here to drift.
+		for (const token of Lexer.lex(entry.content)) {
+			if (token.type === "heading" && token.depth === 3) {
+				const name = token.text.trim();
+				category = name === "" ? UNCATEGORIZED_CHANGELOG_CATEGORY : name;
 				continue;
 			}
-			const indent = changelogBulletIndent(line);
-			if (indent === undefined) {
-				// An unindented block boundary ends the open item, so a later indented
-				// bullet opens a new top-level list instead of nesting under the old one.
-				if (!/^\s*$/.test(line) && changelogLineIndent(line) === 0) listIndent = undefined;
-				continue;
+			if (token.type !== "list") continue;
+			for (const item of token.items) {
+				// A bare marker renders an empty item; it announces no change.
+				if (!item.task && item.text.trim() === "") continue;
+				categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
+				changeCount++;
 			}
-			if (listIndent === undefined) {
-				// With no list open, four columns of indent is an indented code block, not a list item.
-				if (indent >= 4) continue;
-				listIndent = indent;
-			} else if (indent > listIndent) {
-				// Deeper than the block's first item: absorbed into the item above, not a separate change.
-				continue;
-			}
-			categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
-			changeCount++;
 		}
 	}
 
