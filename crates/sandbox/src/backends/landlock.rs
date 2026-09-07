@@ -978,10 +978,18 @@ impl Policy {
 fn read_paths(bytes: &[u8], cursor: &mut usize) -> io::Result<Vec<PathBuf>> {
 	use std::os::unix::ffi::OsStringExt as _;
 
-	let count = u32::from_le_bytes(take(bytes, cursor, 4)?.try_into().unwrap()) as usize;
+	let count = u32::from_le_bytes(
+		take(bytes, cursor, 4)?
+			.try_into()
+			.expect("take returns exactly four bytes"),
+	) as usize;
 	let mut paths = Vec::with_capacity(count);
 	for _ in 0..count {
-		let length = u32::from_le_bytes(take(bytes, cursor, 4)?.try_into().unwrap()) as usize;
+		let length = u32::from_le_bytes(
+			take(bytes, cursor, 4)?
+				.try_into()
+				.expect("take returns exactly four bytes"),
+		) as usize;
 		let path = OsString::from_vec(take(bytes, cursor, length)?.to_vec());
 		paths.push(PathBuf::from(path));
 	}
