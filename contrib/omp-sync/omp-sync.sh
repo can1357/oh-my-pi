@@ -31,6 +31,7 @@ PASS_THROUGH=""
 LOCK_KIND=""
 LOCK_DIR=""
 LOCK_FILE=""
+CHILD_PID=""
 
 usage() {
 	cat <<'EOF'
@@ -167,6 +168,17 @@ release_lock() {
 
 exit_on_signal() {
 	_num=$1
+	# Kill the in-flight updater/smoke child so `exit` is not deferred until
+	# that foreground-equivalent wait finishes, and so the lock is not
+	# released while `omp update` is still running.
+	if [ -n "${CHILD_PID:-}" ]; then
+		kill -TERM "$CHILD_PID" 2>/dev/null || true
+		kill -KILL "$CHILD_PID" 2>/dev/null || true
+		set +e
+		wait "$CHILD_PID" 2>/dev/null
+		set -e
+		CHILD_PID=""
+	fi
 	release_lock
 	trap - EXIT INT TERM HUP
 	exit $((128 + _num))
@@ -435,8 +447,11 @@ run_omp_update() {
 	shift
 	_log=$(sync_root)/last-run.log
 	set +e
-	"$_omp" update "$@" >"$_log" 2>&1
+	"$_omp" update "$@" >"$_log" 2>&1 &
+	CHILD_PID=$!
+	wait "$CHILD_PID"
 	LAST_UPDATE_RC=$?
+	CHILD_PID=""
 	set -e
 	cat "$_log" || true
 }
@@ -488,7 +503,7 @@ relink_extensions() {
 					log "omp-sync: skip relink, cannot expand ~ without HOME: $_path"
 					continue
 				fi
-				_path="${HOME}/${_path#~/}"
+				_path="${HOME}/${_path#"~/"}"
 				;;
 		esac
 		if [ ! -e "$_path" ]; then
@@ -508,8 +523,15 @@ run_smoke() {
 	fi
 	log "omp-sync: running smoke command"
 	# Intentionally a shell command so callers can compose checks.
+	set +e
 	# shellcheck disable=SC2086
-	sh -c "$OMP_SYNC_SMOKE_CMD"
+	sh -c "$OMP_SYNC_SMOKE_CMD" &
+	CHILD_PID=$!
+	wait "$CHILD_PID"
+	_smoke_rc=$?
+	CHILD_PID=""
+	set -e
+	return "$_smoke_rc"
 }
 
 restore_and_fail() {

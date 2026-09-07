@@ -275,7 +275,7 @@ rc=$(
 	printf '%s\n' $?
 )
 assert_eq "apply with ~/ relink exits 0" "$rc" "0"
-relinked=$(cat "$(dirname "$FAKE_OMP")/state/relinked")
+relinked=$(cat "$(dirname "$FAKE_OMP")/state/relinked" 2>/dev/null || true)
 assert_eq "relink expands literal tilde prefix" "$relinked" "$TEST_HOME/plugin"
 
 # prune keeps last N
@@ -453,6 +453,14 @@ if [ ! -f "$(dirname "$FAKE_OMP")/state/hanging" ]; then
 	kill -KILL "$hang_pid" 2>/dev/null || true
 else
 	kill -TERM "$hang_pid" 2>/dev/null || true
+	j=0
+	while [ "$j" -lt 50 ]; do
+		if ! kill -0 "$hang_pid" 2>/dev/null; then
+			break
+		fi
+		sleep 0.1
+		j=$((j + 1))
+	done
 	set +e
 	wait "$hang_pid"
 	hang_rc=$?
@@ -467,6 +475,12 @@ else
 		kill -KILL "$hang_pid" 2>/dev/null || true
 	fi
 	assert_eq "SIGTERM apply does not stay running" "$still" "0"
+	if [ "$j" -ge 50 ]; then
+		printf 'not ok  SIGTERM apply returns promptly: still waited 5s\n'
+		FAILED=$((FAILED + 1))
+	else
+		printf 'ok  SIGTERM apply returns promptly\n'
+	fi
 	if [ "$hang_rc" -eq 0 ]; then
 		printf 'not ok  SIGTERM apply exits non-zero: got 0\n'
 		FAILED=$((FAILED + 1))
