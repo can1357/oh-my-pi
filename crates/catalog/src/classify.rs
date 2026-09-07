@@ -122,7 +122,7 @@ pub fn classify(input: ClassificationInput<'_>) -> ModelClassification {
 		// the checked-in bundled taxonomy: a repository invariant failure
 		// that artifact compilation rejects before the catalog ships.
 		Err(error) => {
-			unreachable!("bundled taxonomy tie is a repository invariant failure: {error}")
+			unreachable!("DiscoveryNormalizer degrades ties and the compiler path returns errors, so a bundled taxonomy tie is unreachable: {error}")
 		},
 	}
 }
