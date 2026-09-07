@@ -261375,7 +261375,7 @@
 				"api": "openai-codex-responses",
 				"v2StreamingEnabled": true
 			},
-			"contextWindow": 1050000,
+			"contextWindow": 272000,
 			"maxTokens": 128000,
 			"preferWebsockets": true,
 			"useResponsesLite": true,

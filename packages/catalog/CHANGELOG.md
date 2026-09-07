@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed Codex Astra using its larger window without opt-in; its default is 272K and Extended Context enables at least the documented 1.05M window ([#11094](https://github.com/can1357/oh-my-pi/pull/11094) by [@camjac251](https://github.com/camjac251)).
+
 ## [18.1.12] - 2026-09-06
 
 ### Added
