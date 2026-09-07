@@ -1372,6 +1372,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"tui.mouse": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "appearance",
+			group: "Display",
+			label: "Terminal Mouse Reporting",
+			description:
+				"Enable terminal mouse reporting for Option-click cursor positioning and pointer interaction in dialogs",
+		},
+	},
+
 	// ────────────────────────────────────────────────────────────────────────
 	// Model
 	// ────────────────────────────────────────────────────────────────────────

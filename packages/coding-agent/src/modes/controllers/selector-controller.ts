@@ -665,6 +665,9 @@ export class SelectorController {
 			case "tui.resizeScrollback":
 				this.ctx.ui.setResizeScrollback(value as ResizeScrollbackMode);
 				break;
+			case "tui.mouse":
+				this.ctx.ui.setMouseTracking(Boolean(value));
+				break;
 
 			case "tui.renderMermaid":
 				setMarkdownMermaidRendering(value as boolean);

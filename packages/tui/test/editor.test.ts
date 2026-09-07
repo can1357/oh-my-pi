@@ -2982,4 +2982,146 @@ describe("Editor component", () => {
 			}
 		});
 	});
+
+	describe("option-click cursor positioning", () => {
+		it("moves cursor to clicked column on Option-click without emitting onChange", () => {
+			const editor = new Editor(defaultEditorTheme);
+			const onChange = vi.fn();
+			editor.setText("Hello world");
+			editor.onChange = onChange;
+			editor.render(80);
+			editor.setRenderedScreenRow(10);
+
+			// Option-click at screen row 11 (line 0, after top border), col 9 (chrome 3 + text 6 -> "w")
+			// button 8 = Alt/Option + Left Click (0 + 8)
+			editor.handleInput("\x1b[<8;10;12M"); // 1-based col 10 (col 9), row 12 (row 11)
+			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+			expect(onChange).not.toHaveBeenCalled();
+		});
+
+		it("moves cursor to correct line in multi-line text", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("First line\nSecond line\nThird line");
+			editor.render(80);
+			editor.setRenderedScreenRow(5);
+
+			// Top border is row 5. Line 0 is row 6, Line 1 is row 7, Line 2 is row 8.
+			// Click on line 1 ("Second line") at col 3 + 7 = 10 ("l" in "line")
+			editor.handleInput("\x1b[<8;11;8M"); // 1-based col 11 (col 10), row 8 (row 7)
+			expect(editor.getCursor()).toEqual({ line: 1, col: 7 });
+		});
+
+		it("moves cursor to end of line when clicking past the text", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("Short");
+			editor.render(80);
+			editor.setRenderedScreenRow(0);
+
+			// Click far to the right
+			editor.handleInput("\x1b[<8;50;2M"); // row 2 = line 0
+			expect(editor.getCursor()).toEqual({ line: 0, col: 5 });
+		});
+
+		it("moves cursor to start of line when clicking on gutter or border", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("Hello");
+			editor.render(80);
+			editor.setRenderedScreenRow(0);
+
+			// Start cursor at end
+			editor.moveToLineEnd();
+			expect(editor.getCursor().col).toBe(5);
+
+			// Click on left border (col 1)
+			editor.handleInput("\x1b[<8;1;2M");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+		});
+
+		it("ignores clicks without Option (normal clicks)", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("Hello world");
+			editor.render(80);
+			editor.setRenderedScreenRow(10);
+			editor.moveToLineStart();
+
+			// Normal left click: button 0 (no Alt modifier)
+			editor.handleInput("\x1b[<0;10;12M");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 0 });
+		});
+
+		it("ignores release events without modifying text", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("Hello");
+			editor.render(80);
+			editor.setRenderedScreenRow(0);
+
+			editor.handleInput("\x1b[<8;10;2m"); // lowercase m = release
+			expect(editor.getText()).toBe("Hello");
+		});
+
+		it("ignores clicks outside the editor text area", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("Hello");
+			editor.render(80);
+			editor.setRenderedScreenRow(10);
+
+			// Click on top border (row 10)
+			editor.handleInput("\x1b[<8;10;11M"); // row 10
+			expect(editor.getCursor()).toEqual({ line: 0, col: 5 });
+
+			// Click way above editor (row 2)
+			editor.handleInput("\x1b[<8;10;3M");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 5 });
+		});
+
+		it("snaps to atomic token boundary when clicking inside token", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.atomicTokenPattern = /\[Image #\d+\]/g;
+			editor.setText("See [Image #1] here");
+			editor.render(80);
+			editor.setRenderedScreenRow(0);
+
+			// "[Image #1]" spans cols 4 to 15.
+			// Click at col 4 + 2 = 6 (inside "[Image #1]", closer to start)
+			// Chrome width is 3, so screen col is 3 + 6 = 9 -> 1-based 10
+			editor.handleInput("\x1b[<8;10;2M");
+			expect(editor.getCursor().col).toBe(4); // snapped to start of token
+		});
+
+		it("supports routeMouse directly with frame-local coordinates", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("Hello world");
+			editor.render(80);
+
+			// Local line 1 (first content row after top border), local col 3 + 6 = 9
+			editor.routeMouse(
+				{
+					button: 8,
+					col: 9,
+					row: 1,
+					release: false,
+					wheel: null,
+					motion: false,
+					leftClick: true,
+					alt: true,
+				},
+				1,
+				9,
+			);
+			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+		});
+
+		it("uses tui.hardwareCursorRow fallback when renderedScreenRow is not set", () => {
+			const editor = new Editor(defaultEditorTheme);
+			editor.setText("Hello world");
+			editor.render(80);
+
+			// Simulate TUI having hardwareCursorRow at 11 (row 10 was top border, row 11 is line 0 with cursor)
+			editor.tui = { hardwareCursorRow: 11 } as never;
+
+			// Option-click at screen row 11, col 9 -> "w" (col 6)
+			editor.handleInput("\x1b[<8;10;12M");
+			expect(editor.getCursor()).toEqual({ line: 0, col: 6 });
+		});
+	});
 });

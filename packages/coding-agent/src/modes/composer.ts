@@ -35,6 +35,7 @@ export interface ComposerPreferences {
 	readonly spellingTypoDetection: boolean;
 	readonly spellingAutocomplete: boolean;
 	readonly spellingAutocorrect: boolean;
+	readonly mouse?: boolean;
 }
 
 /** Settings-schema-compatible defaults used when constructing a dependency-free composer. */
@@ -49,6 +50,7 @@ export const COMPOSER_DEFAULTS: ComposerPreferences = {
 	spellingTypoDetection: true,
 	spellingAutocomplete: true,
 	spellingAutocorrect: false,
+	mouse: true,
 };
 
 /** Welcome data that can be supplied initially or patched as startup resolves it. */
@@ -91,6 +93,23 @@ export interface ComposerOptions {
 	readonly status?: ComposerStatusSnapshot;
 	readonly exit?: (code: number) => void;
 	readonly now?: () => number;
+}
+
+function containsComponent(root: Component, target: Component): boolean {
+	if (root === target) return true;
+	if (root instanceof Container) {
+		return root.children.some(child => containsComponent(child, target));
+	}
+	return false;
+}
+
+function offsetOfComponent(roots: readonly Component[], target: Component, width: number): number | undefined {
+	let offset = 0;
+	for (const root of roots) {
+		if (containsComponent(root, target)) return offset;
+		offset += root.render(width).length;
+	}
+	return undefined;
 }
 
 /** Controls the first terminal paint for a composer that does not already own the terminal. */
@@ -178,6 +197,7 @@ export class Composer implements TerminalFrameProvider {
 					  };
 		  }
 		| undefined;
+	#lastEditorViewportRow: number | undefined;
 	#historyReplayRequested = false;
 	#headerReplayPending = false;
 	#historyFlush = false;
@@ -207,16 +227,13 @@ export class Composer implements TerminalFrameProvider {
 		this.#statusSnapshot = options.status;
 		this.#applyWelcomeUpdate(options.welcome ?? {});
 
-		this.ui = new TUI(
-			options.terminal ?? new ProcessTerminal(),
-			this.#preferences.showHardwareCursor,
-			options.tuiOptions,
-		);
-		this.ui.setFrameProvider(this);
-		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
-		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
+		this.ui = new TUI(options.terminal ?? new ProcessTerminal(), this.#preferences.showHardwareCursor, {
+			...options.tuiOptions,
+			mouseTracking: this.#preferences.mouse !== false,
+		});
 
 		this.#editor = new CustomEditor(getEditorTheme());
+		this.#editor.tui = this.ui;
 		this.editor.disableSubmit = true;
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.editor.setImeSafeCursorLayout(this.#preferences.imeSafeCursor);
@@ -238,6 +255,10 @@ export class Composer implements TerminalFrameProvider {
 		this.editor.onClear = () => this.#handleInterrupt();
 		this.editor.onExit = () => this.#requestExit(0);
 		this.editor.setShimmerRepaintHandler(() => this.ui.requestComponentRender(this.editor));
+
+		this.ui.setFrameProvider(this);
+		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
+		this.ui.setResizeScrollback(this.#preferences.resizeScrollback);
 
 		if (!this.#preferences.quiet) this.#ensureWelcome();
 		this.#rebuildHeader();
@@ -262,7 +283,21 @@ export class Composer implements TerminalFrameProvider {
 			: [this.#header, this.#bootstrapInputGap, this.editor, this.#statusHost];
 		const transcriptIndex = roots.findIndex(root => root instanceof TranscriptContainer);
 		if (transcriptIndex < 0) {
-			return { viewport: this.#renderRoots(roots, width).slice(-rows) };
+			const rendered = this.#renderRoots(roots, width);
+			const editorOffset = offsetOfComponent(roots, this.editor, width);
+			if (editorOffset !== undefined) {
+				const vpOffset = Math.max(0, rendered.length - rows);
+				const editorVpRow = editorOffset - vpOffset;
+				this.#lastEditorViewportRow = editorVpRow;
+				const destructiveReset = this.ui.clearScrollbackOnNextRender;
+				const startTop = destructiveReset ? 0 : Math.min(this.ui.providerViewportTop, Math.max(0, rows - 1));
+				const newTop = Math.max(0, Math.min(startTop, rows - rendered.length));
+				this.editor.setRenderedScreenRow(newTop + editorVpRow);
+			} else {
+				this.#lastEditorViewportRow = undefined;
+				this.editor.setRenderedScreenRow(undefined);
+			}
+			return { viewport: rendered.slice(-rows) };
 		}
 		const transcript = roots[transcriptIndex] as TranscriptContainer;
 		const preRoots = this.#renderRoots(roots.slice(0, transcriptIndex), width);
@@ -282,6 +317,22 @@ export class Composer implements TerminalFrameProvider {
 		if (history !== undefined && this.#offeredHistory?.source === "header") {
 			const visibleHeaderRows = Math.max(0, rows - composed.length);
 			this.#retiredHeaderStart = Math.max(0, history.rows.length - visibleHeaderRows);
+		}
+		const offsetInAfter = offsetOfComponent(roots.slice(transcriptIndex + 1), this.editor, width);
+		if (offsetInAfter !== undefined) {
+			const editorRowInComposed = before.length + active.length + offsetInAfter;
+			const vpOffset = Math.max(0, composed.length - rows);
+			const editorVpRow = editorRowInComposed - vpOffset;
+			this.#lastEditorViewportRow = editorVpRow;
+			const destructiveReset = this.ui.clearScrollbackOnNextRender;
+			const startTop = destructiveReset ? 0 : Math.min(this.ui.providerViewportTop, Math.max(0, rows - 1));
+			const historyCount = history?.rows.length ?? 0;
+			const viewportLen = Math.min(rows, composed.length);
+			const newTop = Math.max(0, Math.min(startTop + historyCount, rows - viewportLen));
+			this.editor.setRenderedScreenRow(newTop + editorVpRow);
+		} else {
+			this.#lastEditorViewportRow = undefined;
+			this.editor.setRenderedScreenRow(undefined);
 		}
 		return {
 			history,
@@ -309,9 +360,19 @@ export class Composer implements TerminalFrameProvider {
 		if (this.#historyReplayRequested) this.#startHistoryReplay();
 	}
 
+	/** Sync the editor screen position once the frame has been physically emitted. */
+	onFrameEmitted(viewportTop: number): void {
+		if (this.#lastEditorViewportRow !== undefined) {
+			this.#editor?.setRenderedScreenRow(viewportTop + this.#lastEditorViewportRow);
+		} else {
+			this.#editor?.setRenderedScreenRow(undefined);
+		}
+	}
+
 	/** Render the semantic transcript tail while the terminal borrows its resize buffer. */
 	renderResizeFrame(viewport: ViewportSize): readonly string[] {
 		if (!this.#started || this.#stopped) return [];
+		this.#editor?.setRenderedScreenRow(undefined);
 		const width = Math.max(1, viewport.columns);
 		const rows = Math.max(0, viewport.rows);
 		const tail = this.#runtimeMounted
@@ -551,6 +612,7 @@ export class Composer implements TerminalFrameProvider {
 		this.ui.setShowHardwareCursor(this.#preferences.showHardwareCursor);
 		this.editor.setUseTerminalCursor(this.ui.getShowHardwareCursor());
 		this.ui.setMaxInlineImages(this.#preferences.maxInlineImages);
+		if (update.mouse !== undefined) this.ui.setMouseTracking(update.mouse);
 		if (update.resizeScrollback !== undefined) this.ui.setResizeScrollback(update.resizeScrollback);
 		this.editor.setImeSafeCursorLayout(this.#preferences.imeSafeCursor);
 		this.editor.setAutocompleteMaxVisible(this.#preferences.autocompleteMaxVisible);
@@ -601,6 +663,7 @@ export class Composer implements TerminalFrameProvider {
 	/** Update the canonical editor reference after InteractiveMode remounts a custom editor. */
 	setEditor(editor: CustomEditor): void {
 		this.#editor = editor;
+		editor.tui = this.ui;
 	}
 
 	/**

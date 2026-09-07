@@ -432,7 +432,7 @@ export class CustomEditor extends Editor {
 	 * interactive-mode wiring instead). Plugins that call `this.tui.requestRender()`
 	 * in their overrides read it here (issue #4766).
 	 */
-	tui?: TUI;
+	declare tui?: TUI;
 
 	/**
 	 * Accept both the omp constructor convention — `new CustomEditor(theme)` —
