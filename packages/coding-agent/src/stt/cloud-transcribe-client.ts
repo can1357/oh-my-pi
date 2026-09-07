@@ -11,7 +11,12 @@ import type { SttStreamHandle, SttStreamOptions } from "./asr-client";
 export const DEFAULT_CLOUD_STT_MODEL = "gpt-4o-transcribe";
 
 /** Transcription models selectable via `stt.modelName` when `stt.backend` is `cloud`. */
-export const CLOUD_STT_MODEL_VALUES = ["gpt-4o-transcribe", "gpt-4o-mini-transcribe", "whisper-1"] as const;
+export const CLOUD_STT_MODEL_VALUES = [
+	"gpt-4o-transcribe",
+	"gpt-4o-mini-transcribe",
+	"gpt-transcribe",
+	"whisper-1",
+] as const;
 export type CloudSttModel = (typeof CLOUD_STT_MODEL_VALUES)[number];
 
 export const CLOUD_STT_MODEL_OPTIONS = [
@@ -20,6 +25,11 @@ export const CLOUD_STT_MODEL_OPTIONS = [
 		value: "gpt-4o-mini-transcribe",
 		label: "GPT-4o Mini Transcribe",
 		description: "Cheaper and faster, slightly lower accuracy.",
+	},
+	{
+		value: "gpt-transcribe",
+		label: "GPT Transcribe",
+		description: "Newest transcription model; reports detected languages.",
 	},
 	{ value: "whisper-1", label: "Whisper v1", description: "Legacy general-purpose transcription." },
 ] as const satisfies ReadonlyArray<{ value: CloudSttModel; label: string; description: string }>;
@@ -49,6 +59,11 @@ export const DEFAULT_STT_BACKEND: SttBackend = "local";
 export function isSttBackend(value: string): value is SttBackend {
 	return (STT_BACKEND_VALUES as readonly string[]).includes(value);
 }
+
+export const STT_BACKEND_OPTIONS = [
+	{ value: "local", label: "Local", description: "On-device Whisper/Parakeet. Private, no network." },
+	{ value: "cloud", label: "Cloud", description: "OpenAI transcription on release. Needs OPENAI_API_KEY." },
+] as const satisfies ReadonlyArray<{ value: SttBackend; label: string; description: string }>;
 
 export interface CloudSttStreamOptions extends SttStreamOptions {
 	apiKey: string;

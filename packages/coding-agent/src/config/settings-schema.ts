@@ -18,6 +18,7 @@ import {
 	CLOUD_STT_MODEL_OPTIONS,
 	CLOUD_STT_MODEL_VALUES,
 	DEFAULT_STT_BACKEND,
+	STT_BACKEND_OPTIONS,
 	STT_BACKEND_VALUES,
 } from "../stt/cloud-transcribe-client";
 import { DEFAULT_STT_MODEL_KEY, STT_MODEL_OPTIONS, STT_MODEL_VALUES } from "../stt/models";
@@ -2595,7 +2596,8 @@ export const SETTINGS_SCHEMA = {
 			group: "Speech",
 			label: "Speech Backend",
 			description:
-				"Local runs on-device Whisper/Parakeet with no network. cloud records mic audio and transcribes it with OpenAI gpt-4o-transcribe on release (needs OPENAI_API_KEY, no live preview) and falls back to local without credentials.",
+				"Local runs on-device Whisper/Parakeet with no network. cloud records mic audio and transcribes it with OpenAI on release (needs OPENAI_API_KEY, no live preview) and falls back to local without credentials.",
+			options: STT_BACKEND_OPTIONS,
 		},
 	},
 
@@ -2613,7 +2615,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Speech",
 			label: "Speech Model",
 			description:
-				"Local tiers (fast/balanced/turbo/parakeet) apply when stt.backend is local; transcription ids (gpt-4o-transcribe, gpt-4o-mini-transcribe, whisper-1) apply when it is cloud. Parakeet is the local default.",
+				"Local tiers (fast/balanced/turbo/parakeet) apply when stt.backend is local; transcription ids (gpt-4o-transcribe, gpt-4o-mini-transcribe, gpt-transcribe, whisper-1) apply when it is cloud. Parakeet is the local default.",
 			options: [...STT_MODEL_OPTIONS, ...CLOUD_STT_MODEL_OPTIONS],
 		},
 	},
