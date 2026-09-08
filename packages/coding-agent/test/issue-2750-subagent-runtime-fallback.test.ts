@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import type { Api, Model } from "@oh-my-pi/pi-ai";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import type { Api, AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as sdkModule from "@oh-my-pi/pi-coding-agent/sdk";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { ServingModel } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
+import { TurnRecovery, type TurnRecoveryHost } from "@oh-my-pi/pi-coding-agent/session/turn-recovery";
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition, AgentProgress } from "@oh-my-pi/pi-coding-agent/task/types";
+import { createSessionDefaults } from "./helpers/session-defaults";
 
 function model(provider: string, id: string): Model<Api> {
 	return buildModel({
@@ -36,9 +39,13 @@ function model(provider: string, id: string): Model<Api> {
  * - `"served"` settles a real turn on it, which moves attribution.
  * - `"unproven"` errors on its first request, producing none of the run's work.
  */
-function createYieldingSession(fallback: "served" | "unproven" = "served"): AgentSession {
+function createYieldingSession(
+	fallback: "served" | "unproven" | "none" = "served",
+	beforeYield?: () => Promise<void>,
+): AgentSession {
 	const listeners: Array<(event: { type: string; [key: string]: unknown }) => void> = [];
 	const session = {
+		...createSessionDefaults(),
 		agent: { state: { systemPrompt: ["test"] } },
 		state: { messages: [] },
 		model: model("primary", "bad-runtime-model"),
@@ -47,9 +54,6 @@ function createYieldingSession(fallback: "served" | "unproven" = "served"): Agen
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["yield"],
 		getEnabledToolNames: () => ["yield"],
-		setActiveToolsByName: async () => {},
-		setIrcWakeTurnObserver: () => {},
-		subscribeRunState: () => () => {},
 		subscribe: (listener: (event: { type: string; [key: string]: unknown }) => void) => {
 			listeners.push(listener);
 			return () => {};
@@ -60,16 +64,19 @@ function createYieldingSession(fallback: "served" | "unproven" = "served"): Agen
 			const emit = (event: { type: string; [key: string]: unknown }): void => {
 				for (const listener of listeners) listener(event);
 			};
-			session.model = model("fallback", "working-model");
-			emit({
-				type: "retry_fallback_applied",
-				from: "primary/bad-runtime-model",
-				to: "fallback/working-model",
-				role: "subagent:issue-2750",
-			});
-			if (fallback === "served") {
-				session.servingModel = { selector: "fallback/working-model", isFallback: true };
-				emit({ type: "retry_fallback_succeeded", model: "fallback/working-model", role: "subagent:issue-2750" });
+			await beforeYield?.();
+			if (fallback !== "none") {
+				session.model = model("fallback", "working-model");
+				emit({
+					type: "retry_fallback_applied",
+					from: "primary/bad-runtime-model",
+					to: "fallback/working-model",
+					role: "subagent:issue-2750",
+				});
+				if (fallback === "served") {
+					session.servingModel = { selector: "fallback/working-model", isFallback: true };
+					emit({ type: "retry_fallback_succeeded", model: "fallback/working-model", role: "subagent:issue-2750" });
+				}
 			}
 			emit({
 				type: "tool_execution_end",
@@ -79,12 +86,6 @@ function createYieldingSession(fallback: "served" | "unproven" = "served"): Agen
 				isError: false,
 			});
 		},
-		waitForIdle: async () => {},
-		prepareForHeadlessAdvisorDrain: () => {},
-		waitForAdvisorCatchup: async () => true,
-		getLastAssistantMessage: () => undefined,
-		abort: async () => {},
-		dispose: async () => {},
 	};
 	return session as unknown as AgentSession;
 }
@@ -93,6 +94,74 @@ describe("subagent runtime model resolution", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
 	});
+
+	for (const { level, collide } of [
+		{ level: undefined, collide: false },
+		{ level: ThinkingLevel.High, collide: false },
+		{ level: undefined, collide: true },
+	]) {
+		it(`keeps literal suffix attribution distinct from thinking (${collide ? "colliding selector" : (level ?? "unset")})`, async () => {
+			const literal = model("custom", "coding-router:max");
+			const snapshots: AgentProgress[] = [];
+			vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+				if (!options?.model) throw new Error("Expected resolved model");
+				let activeModel = options.model;
+				let activeLevel: ThinkingLevel | undefined = level;
+				const recovery = new TurnRecovery({
+					model: () => activeModel,
+					thinkingLevel: () => activeLevel,
+					sessionManager: { getSessionId: () => "literal-model" },
+					settings: Settings.isolated({}),
+					modelRegistry: {},
+					configWarnings: [],
+				} as unknown as TurnRecoveryHost);
+				const session = createYieldingSession("none", async () => {
+					if (collide) {
+						// Same concatenated selector, different identity and reasoning.
+						activeModel = model("custom", "coding-router");
+						activeLevel = ThinkingLevel.Max;
+					}
+					await recovery.onAssistantSettledSuccessfully({
+						role: "assistant",
+						content: [{ type: "text", text: "literal model produced this answer" }],
+						stopReason: "stop",
+					} as AssistantMessage);
+					// A newly armed model must not steal the settled answer's identity.
+					activeModel = model("custom", "unserved-candidate");
+				});
+				Object.defineProperty(session, "servingModel", { get: () => recovery.servingModel });
+				expect(recovery.servingModel?.modelIdentity).toBe("custom/coding-router:max");
+				expect(recovery.servingModel?.thinkingLevel).toBe(level);
+				return { session, extensionsResult: {}, setToolUIContext: () => {} } as never;
+			});
+			const settings = Settings.isolated({});
+			settings.setModelRole("default", "custom/coding-router:max");
+			const result = await runSubprocess({
+				cwd: "/tmp",
+				agent: { name: "task", description: "test", systemPrompt: "test", source: "bundled" },
+				task: "work",
+				index: 0,
+				id: "literal-model",
+				modelOverride: level ? `custom/coding-router:max:${level}` : "custom/coding-router:max",
+				settings,
+				modelRegistry: {
+					refresh: async () => {},
+					getAvailable: () => [literal],
+					getApiKey: async () => "test-key",
+				} as never,
+				onProgress: progress => snapshots.push({ ...progress }),
+				enableLsp: false,
+			});
+			const expectedSelector = level ? `custom/coding-router:max:${level}` : "custom/coding-router:max";
+			const latest = snapshots.findLast(progress => progress.resolvedModel !== undefined);
+			expect(latest?.resolvedModelIdentity).toBe(collide ? "custom/coding-router" : "custom/coding-router:max");
+			expect(latest?.resolvedThinkingLevel).toBe(collide ? ThinkingLevel.Max : level);
+			expect(result.resolvedModel).toBe(expectedSelector);
+			expect(result.resolvedModelIdentity).toBe(collide ? "custom/coding-router" : "custom/coding-router:max");
+			expect(result.resolvedThinkingLevel).toBe(collide ? ThinkingLevel.Max : level);
+			expect(result.resolvedModelIsFallback).toBeFalsy();
+		});
+	}
 
 	it("passes ordered subagent candidates as a child retry fallback chain", async () => {
 		const primary = model("primary", "bad-runtime-model");

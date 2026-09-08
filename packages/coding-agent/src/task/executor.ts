@@ -1769,6 +1769,15 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		scheduleProgress(flushProgress);
 	};
 
+	const publishAdvisorState = (session: AgentSession | null): void => {
+		// A runtime can attach after startup when model discovery finishes.
+		// Retain this run's advised state through teardown for settled badges.
+		if (!progress.advisor && session?.isAdvisorActive() === true) {
+			progress.advisor = true;
+			scheduleProgress(true);
+		}
+	};
+
 	const attach = (session: AgentSession): (() => void) => {
 		// The session owns attribution: it knows which model produced its output
 		// and withholds an armed-but-unproven fallback. Re-deriving that here from
@@ -1781,16 +1790,21 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 			const isFallback = serving.isFallback;
 			if (
 				serving.selector === progress.resolvedModel &&
+				serving.modelIdentity === progress.resolvedModelIdentity &&
+				serving.thinkingLevel === progress.resolvedThinkingLevel &&
 				(progress.resolvedModelIsFallback ?? false) === isFallback
 			) {
 				return;
 			}
 			progress.resolvedModel = serving.selector;
+			progress.resolvedModelIdentity = serving.modelIdentity;
+			progress.resolvedThinkingLevel = serving.thinkingLevel;
 			progress.resolvedModelIsFallback = isFallback;
 			scheduleProgress(true);
 		};
 		return session.subscribe(event => {
 			emitSubagentEvent(event);
+			publishAdvisorState(session);
 			publishServingModel();
 			if (event.type === "auto_retry_start") {
 				progress.retryState = {
@@ -1906,6 +1920,7 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		resolveAbortReasonText,
 		setActiveSession: session => {
 			activeSession = session;
+			publishAdvisorState(session);
 		},
 		takeActiveSession: () => {
 			const session = activeSession;
@@ -2414,7 +2429,10 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		modelOverride,
 		modelRole,
 		resolvedModel: progress.resolvedModel,
+		resolvedModelIdentity: progress.resolvedModelIdentity,
+		resolvedThinkingLevel: progress.resolvedThinkingLevel,
 		resolvedModelIsFallback: progress.resolvedModelIsFallback,
+		advisor: progress.advisor,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -3220,10 +3238,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					: undefined;
 			if (model) {
 				const displayLevel = effortLevel ?? (explicitThinkingLevel ? resolvedThinkingLevel : undefined);
+				progress.resolvedModelIdentity = formatModelStringWithRouting(model);
+				progress.resolvedThinkingLevel = displayLevel;
 				progress.resolvedModel =
 					displayLevel !== undefined
-						? formatModelSelectorValue(formatModelStringWithRouting(model), displayLevel)
-						: formatModelStringWithRouting(model);
+						? formatModelSelectorValue(progress.resolvedModelIdentity, displayLevel)
+						: progress.resolvedModelIdentity;
 			}
 			// Precedence: caller `effort` > explicit `:level` suffix on the resolved
 			// model pattern > agent-definition default (e.g. task's `auto`) >
