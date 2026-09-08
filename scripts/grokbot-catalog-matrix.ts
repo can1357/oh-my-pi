@@ -476,6 +476,7 @@ async function main() {
 		const model = buildModel(spec);
 		const policy = resolveGrokbotSandToolPolicy({
 			modelId: model.id,
+			requestModelId: model.requestModelId,
 			toolCount: OMP_TOOLS.length,
 			sandToolsWire: model.sandToolsWire,
 			supportsTools: model.supportsTools,

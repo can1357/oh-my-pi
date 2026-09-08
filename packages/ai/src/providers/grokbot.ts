@@ -770,7 +770,13 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			);
 			let jwtRemintUsed = false;
 			const messages = toInferenceMessages(context, model);
-			const identity = classifyModel("grokbot", model.id, { lenient: true });
+			// Variant/legacy selectors keep model.id as the user-facing row; family
+			// tool policy classifies the canonical AvailableModels name instead.
+			const policyModelId =
+				typeof model.requestModelId === "string" && model.requestModelId.trim()
+					? model.requestModelId.trim()
+					: model.id;
+			const identity = classifyModel("grokbot", policyModelId, { lenient: true });
 			const tools = toInferenceTools(context.tools, identity);
 			const grammarTools = buildGrammarToolIndex(context.tools);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
@@ -781,7 +787,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			let anthropicWire: AnthropicSandToolWireResult = {
 				requestedModel: { modelId: model.id },
 				tools,
-				modelId: model.id,
+				modelId: policyModelId,
 			};
 			let body: Record<string, unknown> = {};
 			let routedResponseModel = "";
@@ -1011,13 +1017,13 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				const resolvedWire = resolveAnthropicSandToolsWire(
 					typeof process !== "undefined" ? process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE : undefined,
 					options?.anthropicToolsWire,
-					{ modelId: model.id, toolCount: tools.length, sandToolsWire: retrySandWire },
+					{ modelId: policyModelId, toolCount: tools.length, sandToolsWire: retrySandWire },
 				);
 				anthropicWire = applyAnthropicSandToolWire(
 					{
 						requestedModel: reqModel,
 						tools,
-						modelId: model.id,
+						modelId: policyModelId,
 						ompTools: context.tools,
 						sandToolsWire: retrySandWire,
 						sandWireModelId: model.sandWireModelId,

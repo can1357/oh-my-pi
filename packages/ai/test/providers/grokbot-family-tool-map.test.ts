@@ -234,6 +234,25 @@ describe("grokbot family tool mapping", () => {
 		expect(wired.wireMode).toBeUndefined();
 	});
 
+	test("classifies opaque variant selectors via requestModelId for tool wire", () => {
+		// Opaque legacy/variant ids alone look unknown; the canonical name owns family wire.
+		const opaque = resolveGrokbotSandToolPolicy({
+			modelId: "opaque-legacy-slug",
+			toolCount: OMP_CORE.length,
+		});
+		expect(opaque.kind).toBe("native");
+		expect(opaque.identity.class).not.toBe("anthropic");
+
+		const viaCanonical = resolveGrokbotSandToolPolicy({
+			modelId: "opaque-legacy-slug",
+			requestModelId: "claude-opus-5",
+			toolCount: OMP_CORE.length,
+		});
+		expect(viaCanonical.kind).toBe("product");
+		expect(viaCanonical.wire).toBe("keep-model");
+		expect(viaCanonical.identity.class).toBe("anthropic");
+	});
+
 	test("representative slice picks live ids by classifyModel identity buckets plus routers", () => {
 		const live = [
 			{ id: "claude-opus-5" },
