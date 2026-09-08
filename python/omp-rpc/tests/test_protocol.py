@@ -15,9 +15,34 @@ from omp_rpc import (
     parse_notification,
     parse_session_state,
 )
+from omp_rpc.protocol import parse_clear_queue_result
 
 
 class ProtocolParsingTests(unittest.TestCase):
+    def test_parse_clear_queue_result_requires_non_negative_integer_counts(
+        self,
+    ) -> None:
+        self.assertEqual(
+            parse_clear_queue_result({"steering": 2, "followUp": 0}).steering,
+            2,
+        )
+        invalid_payloads = [
+            {"followUp": 0},
+            {"steering": 0},
+            {"steering": True, "followUp": 0},
+            {"steering": 0, "followUp": False},
+            {"steering": 1.5, "followUp": 0},
+            {"steering": 0, "followUp": -1},
+        ]
+        for payload in invalid_payloads:
+            with (
+                self.subTest(payload=payload),
+                self.assertRaisesRegex(
+                    ValueError, "non-negative integer|must be an integer"
+                ),
+            ):
+                parse_clear_queue_result(payload)
+
     def test_parse_message_update_preserves_assistant_event_type(self) -> None:
         assistant = {"role": "assistant"}
         common = {"contentIndex": 0, "partial": assistant}

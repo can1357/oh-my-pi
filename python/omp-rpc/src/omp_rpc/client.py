@@ -526,6 +526,7 @@ class RpcClient:
         self._scheduled_agent_runs = 0
         self._completed_agent_runs = 0
         self._agent_run_request_ids: list[tuple[str, str]] = []
+        self._unreserved_agent_run_request_ids: list[tuple[str, str]] = []
         self._sent_agent_run_request_ids: set[str] = set()
         self._awaited_prompt_result_ids: set[str] = set()
         self._completed_prompt_result_ids: set[str] = set()
@@ -613,6 +614,7 @@ class RpcClient:
         self._scheduled_agent_runs = 0
         self._completed_agent_runs = 0
         self._agent_run_request_ids = []
+        self._unreserved_agent_run_request_ids = []
         self._sent_agent_run_request_ids = set()
         self._awaited_prompt_result_ids = set()
         self._completed_prompt_result_ids = set()
@@ -1172,7 +1174,12 @@ class RpcClient:
     ) -> None:
         self._request(
             "prompt",
-            _agent_run_reservation="if_idle",
+            _agent_run_reservation=(
+                "always" if streaming_behavior == "followUp" else "if_idle"
+            ),
+            _agent_run_command_type=(
+                "follow_up" if streaming_behavior == "followUp" else None
+            ),
             _request_id_out=_request_id_out,
             message=message,
             images=list(images) if images is not None else None,
@@ -1234,10 +1241,16 @@ class RpcClient:
                 forInterrupt=True if for_interrupt else None,
             )
         )
+        sent_request_ids = set(sent_before_clear)
         self._cancel_pending_agent_runs(
             result.steering,
             command_types={"steer"},
-            request_ids=set(sent_before_clear),
+            request_ids=sent_request_ids,
+        )
+        self._cancel_pending_agent_runs(
+            result.follow_up,
+            command_types={"follow_up"},
+            request_ids=sent_request_ids,
         )
         return result
 
@@ -1374,14 +1387,25 @@ class RpcClient:
         only_if_idle: bool = False,
     ) -> bool:
         with self._event_condition:
+            entry = (
+                (request_id, command_type)
+                if request_id is not None and command_type is not None
+                else None
+            )
             if (
                 only_if_idle
                 and self._scheduled_agent_runs != self._completed_agent_runs
             ):
+                # A command submitted behind a not-yet-started reservation may
+                # still become the command that starts the turn if the earlier
+                # prompt resolves as local-only. Keep it correlated until that
+                # reservation either starts or is released.
+                if entry is not None and self._agent_run_request_ids:
+                    self._unreserved_agent_run_request_ids.append(entry)
                 return False
             self._scheduled_agent_runs += 1
-            if request_id is not None and command_type is not None:
-                self._agent_run_request_ids.append((request_id, command_type))
+            if entry is not None:
+                self._agent_run_request_ids.append(entry)
             self._last_schedule_async_error_index = self._async_errors.current_index()
             return True
 
@@ -1390,6 +1414,19 @@ class RpcClient:
             if self._agent_run_request_ids:
                 request_id, _ = self._agent_run_request_ids.pop(0)
                 self._sent_agent_run_request_ids.discard(request_id)
+                # Commands submitted behind this reservation share the run that
+                # just started; they no longer need to inherit its reservation.
+                attached = {
+                    queued_request_id
+                    for queued_request_id, _ in self._unreserved_agent_run_request_ids
+                    if queued_request_id in self._sent_agent_run_request_ids
+                }
+                self._sent_agent_run_request_ids.difference_update(attached)
+                self._unreserved_agent_run_request_ids = [
+                    entry
+                    for entry in self._unreserved_agent_run_request_ids
+                    if entry[0] not in attached
+                ]
             elif self._scheduled_agent_runs == self._completed_agent_runs:
                 self._scheduled_agent_runs += 1
                 self._last_schedule_async_error_index = (
@@ -1407,11 +1444,34 @@ class RpcClient:
                     ),
                     None,
                 )
-                if matching is None:
+                if matching is not None:
+                    self._agent_run_request_ids.remove(matching)
+                    self._sent_agent_run_request_ids.discard(request_id)
+                    if self._unreserved_agent_run_request_ids:
+                        self._agent_run_request_ids.append(
+                            self._unreserved_agent_run_request_ids.pop(0)
+                        )
+                    else:
+                        self._completed_agent_runs += 1
+                    self._event_condition.notify_all()
+                    return True
+
+                queued = next(
+                    (
+                        entry
+                        for entry in self._unreserved_agent_run_request_ids
+                        if entry[0] == request_id
+                    ),
+                    None,
+                )
+                if queued is None:
                     return False
-                self._agent_run_request_ids.remove(matching)
+                self._unreserved_agent_run_request_ids.remove(queued)
                 self._sent_agent_run_request_ids.discard(request_id)
-            elif self._completed_agent_runs >= self._scheduled_agent_runs:
+                self._event_condition.notify_all()
+                return True
+
+            if self._completed_agent_runs >= self._scheduled_agent_runs:
                 return False
             self._completed_agent_runs += 1
             self._event_condition.notify_all()
@@ -1435,11 +1495,12 @@ class RpcClient:
         if limit == 0:
             return
         with self._event_condition:
+            pending = (
+                self._agent_run_request_ids + self._unreserved_agent_run_request_ids
+            )
             eligible = [
                 index
-                for index, (request_id, command_type) in enumerate(
-                    self._agent_run_request_ids
-                )
+                for index, (request_id, command_type) in enumerate(pending)
                 if (command_types is None or command_type in command_types)
                 and (request_ids is None or request_id in request_ids)
             ]
@@ -1447,17 +1508,31 @@ class RpcClient:
                 eligible = eligible[-limit:]
             if not eligible:
                 return
-            cancelled = set(eligible)
-            for index in eligible:
-                self._sent_agent_run_request_ids.discard(
-                    self._agent_run_request_ids[index][0]
-                )
+
+            cancelled_ids = {pending[index][0] for index in eligible}
+            reserved_cancelled = sum(
+                request_id in cancelled_ids
+                for request_id, _ in self._agent_run_request_ids
+            )
             self._agent_run_request_ids = [
                 entry
-                for index, entry in enumerate(self._agent_run_request_ids)
-                if index not in cancelled
+                for entry in self._agent_run_request_ids
+                if entry[0] not in cancelled_ids
             ]
-            self._scheduled_agent_runs -= len(cancelled)
+            self._unreserved_agent_run_request_ids = [
+                entry
+                for entry in self._unreserved_agent_run_request_ids
+                if entry[0] not in cancelled_ids
+            ]
+            self._sent_agent_run_request_ids.difference_update(cancelled_ids)
+
+            for _ in range(reserved_cancelled):
+                if self._unreserved_agent_run_request_ids:
+                    self._agent_run_request_ids.append(
+                        self._unreserved_agent_run_request_ids.pop(0)
+                    )
+                else:
+                    self._scheduled_agent_runs -= 1
             self._event_condition.notify_all()
 
     def _is_agent_idle(self) -> bool:
@@ -1596,6 +1671,7 @@ class RpcClient:
         command_type: str,
         *,
         _agent_run_reservation: Literal["if_idle", "always"] | None = None,
+        _agent_run_command_type: str | None = None,
         _request_id_out: list[str] | None = None,
         _sent_agent_run_ids_before_write: list[str] | None = None,
         **payload: JsonValue,
@@ -1604,14 +1680,15 @@ class RpcClient:
         request_id = self._next_request_id()
         if _request_id_out is not None:
             _request_id_out.append(request_id)
-            with self._event_condition:
-                self._awaited_prompt_result_ids.add(request_id)
+            if command_type == "prompt":
+                with self._event_condition:
+                    self._awaited_prompt_result_ids.add(request_id)
         envelope: JsonObject = {"id": request_id, "type": command_type}
         for key, value in payload.items():
             if value is not None:
                 envelope[key] = value
 
-        reserved_agent_run = False
+        tracked_agent_run = False
         submission_guard = (
             self._agent_run_submission_lock
             if _agent_run_reservation is not None
@@ -1624,17 +1701,26 @@ class RpcClient:
                     with self._event_condition:
                         _sent_agent_run_ids_before_write.extend(
                             request_id
-                            for request_id, _ in self._agent_run_request_ids
+                            for request_id, _ in (
+                                self._agent_run_request_ids
+                                + self._unreserved_agent_run_request_ids
+                            )
                             if request_id in self._sent_agent_run_request_ids
                         )
-                reserved_agent_run = (
-                    _agent_run_reservation is not None
-                    and self._mark_agent_run_scheduled(
+                if _agent_run_reservation is not None:
+                    self._mark_agent_run_scheduled(
                         request_id,
-                        command_type,
+                        _agent_run_command_type or command_type,
                         only_if_idle=_agent_run_reservation == "if_idle",
                     )
-                )
+                    with self._event_condition:
+                        tracked_agent_run = any(
+                            pending_request_id == request_id
+                            for pending_request_id, _ in (
+                                self._agent_run_request_ids
+                                + self._unreserved_agent_run_request_ids
+                            )
+                        )
                 response_queue: queue.Queue[JsonObject | BaseException] = queue.Queue(
                     maxsize=1
                 )
@@ -1644,10 +1730,15 @@ class RpcClient:
                     )
 
                 try:
-                    if reserved_agent_run:
+                    if tracked_agent_run:
+                        # Hold lifecycle accounting across the write boundary so
+                        # agent_start cannot consume a reservation the server has
+                        # not observed yet.
                         with self._event_condition:
+                            self._write_json(process, envelope)
                             self._sent_agent_run_request_ids.add(request_id)
-                    self._write_json(process, envelope)
+                    else:
+                        self._write_json(process, envelope)
                 except BaseException:
                     with self._state_lock:
                         self._pending.pop(request_id, None)
@@ -1674,12 +1765,9 @@ class RpcClient:
                 )
 
             data = response.get("data")
-            result = {} if data is None else _clone_json_object(data)
-            if result.get("agentInvoked") is False:
-                self._mark_prompt_completed_without_agent(request_id)
-            return result
+            return {} if data is None else _clone_json_object(data)
         except BaseException:
-            if reserved_agent_run:
+            if tracked_agent_run:
                 self._mark_agent_run_completed(request_id)
             with self._event_condition:
                 self._awaited_prompt_result_ids.discard(request_id)
@@ -2311,6 +2399,29 @@ class RpcClient:
             with self._state_lock:
                 pending = self._pending.pop(request_id, None)
             if pending is not None:
+                if bool(payload.get("success", False)):
+                    data = payload.get("data")
+                    response_data = data if isinstance(data, dict) else {}
+                    if (
+                        pending.command == "prompt"
+                        and response_data.get("agentInvoked") is False
+                    ):
+                        self._mark_prompt_completed_without_agent(request_id)
+                    elif (
+                        pending.command == "steer"
+                        and self.server_features.active_turn_steering == 1
+                    ):
+                        accepted = response_data.get("accepted")
+                        if not isinstance(accepted, bool):
+                            self._mark_agent_run_completed(request_id)
+                            pending.response_queue.put(
+                                RpcError(
+                                    "steer response omitted a boolean data.accepted"
+                                )
+                            )
+                            return
+                        if not accepted:
+                            self._mark_agent_run_completed(request_id)
                 pending.response_queue.put(payload)
                 return
 

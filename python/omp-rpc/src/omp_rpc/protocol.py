@@ -264,6 +264,13 @@ def _optional_int(payload: JsonObject, field: str) -> int | None:
     return value
 
 
+def _require_non_negative_int(payload: JsonObject, field: str) -> int:
+    value = _optional_int(payload, field)
+    if value is None or value < 0:
+        raise ValueError(f"{field} must be a non-negative integer")
+    return value
+
+
 def _optional_float(payload: JsonObject, field: str) -> float | None:
     value = payload.get(field)
     if value is None:
@@ -1496,8 +1503,8 @@ def parse_fast_mode_result(payload: JsonObject) -> FastModeResult:
 
 def parse_clear_queue_result(payload: JsonObject) -> ClearQueueResult:
     return ClearQueueResult(
-        steering=int(payload.get("steering", 0)),
-        follow_up=int(payload.get("followUp", 0)),
+        steering=_require_non_negative_int(payload, "steering"),
+        follow_up=_require_non_negative_int(payload, "followUp"),
     )
 
 
