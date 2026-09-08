@@ -1,8 +1,10 @@
+import type { OAuthAccess } from "@oh-my-pi/pi-ai";
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
 import { settings } from "../config/settings";
 import { type SttStreamHandle, sttClient } from "./asr-client";
 import {
+	type CloudSttCredential,
 	type CloudSttStreamOptions,
 	DEFAULT_STT_BACKEND,
 	isSttBackend,
@@ -38,37 +40,57 @@ interface CaptureHandle {
 }
 type CaptureFactory = (onAudio: (error: Error | null, samples: Float32Array) => void) => CaptureHandle;
 
-/** Minimal registry surface for cloud credential resolution (real ModelRegistry satisfies this). */
-export interface SttKeyRegistry {
+/** Minimal registry surface for cloud credential and route resolution. */
+export interface SttCredentialRegistry {
+	authStorage?: {
+		getOAuthAccess(
+			provider: string,
+			sessionId?: string,
+			options?: { signal?: AbortSignal },
+		): Promise<OAuthAccess | undefined>;
+	};
 	getApiKeyForProvider(provider: string, sessionId?: string): Promise<string | undefined>;
+	getProviderBaseUrl?(provider: string): string | undefined;
+	getProviderHeaders?(provider: string): Record<string, string> | undefined;
 }
 
 /**
- * Resolve the cloud STT credential: ChatGPT subscription first (no metered
- * spend), then the `openai` chain (OPENAI_API_KEY, stored keys, models.yml,
- * broker). A failed source must not prevent the next source from being tried.
+ * Resolve cloud STT credentials without erasing their provenance. ChatGPT
+ * OAuth is routed through the Codex transport; OpenAI API keys retain custom
+ * provider endpoints and headers.
  */
-export async function resolveSttCloudKey(registry: SttKeyRegistry, sessionId?: string): Promise<string | undefined> {
+export async function resolveSttCloudCredential(
+	registry: SttCredentialRegistry,
+	sessionId?: string,
+): Promise<CloudSttCredential | undefined> {
 	try {
-		const codexKey = await registry.getApiKeyForProvider("openai-codex", sessionId);
-		if (codexKey) return codexKey;
+		const access = await registry.authStorage?.getOAuthAccess("openai-codex", sessionId);
+		if (access?.accessToken) return { kind: "codex", access };
 	} catch {}
 	try {
-		return await registry.getApiKeyForProvider("openai", sessionId);
+		const apiKey = await registry.getApiKeyForProvider("openai", sessionId);
+		if (!apiKey) return undefined;
+		return {
+			kind: "openai",
+			apiKey,
+			baseUrl: registry.getProviderBaseUrl?.("openai"),
+			headers: registry.getProviderHeaders?.("openai"),
+		};
 	} catch {
 		return undefined;
 	}
 }
 
-/** Test seam: resolves the OpenAI key for the cloud backend. Defaults to env. */
+/** Test seam for cloud backend dependencies. */
 export interface SttControllerDeps {
-	resolveCloudKey?: () => Promise<string | undefined>;
+	resolveCloudCredential?: () => Promise<CloudSttCredential | undefined>;
 	createCloudFetch?: CloudSttStreamOptions["fetchImpl"];
 }
 
-async function defaultCloudKeyResolver(): Promise<string | undefined> {
+async function defaultCloudCredentialResolver(): Promise<CloudSttCredential | undefined> {
 	const env = (typeof Bun !== "undefined" ? Bun.env : process.env) as Record<string, string | undefined>;
-	return env["OPENAI_API_KEY"] ?? process.env["OPENAI_API_KEY"];
+	const apiKey = env["OPENAI_API_KEY"] ?? process.env["OPENAI_API_KEY"];
+	return apiKey ? { kind: "openai", apiKey } : undefined;
 }
 
 /** Coordinates microphone capture with local or cloud streaming transcription. */
@@ -79,10 +101,10 @@ export class STTController {
 	#stopAfterStart = false;
 	#disposed = false;
 	readonly #createCapture: CaptureFactory;
-	readonly #resolveCloudKey: () => Promise<string | undefined>;
+	readonly #resolveCloudCredential: () => Promise<CloudSttCredential | undefined>;
 	readonly #createCloudFetch: CloudSttStreamOptions["fetchImpl"];
-	#didWarnMissingCloudKey = false;
-	#cloudApiKey: string | null = null;
+	#didWarnMissingCloudCredential = false;
+	#cloudCredential: CloudSttCredential | null = null;
 	// Live streaming capture.
 	#stream: SttStreamHandle | null = null;
 	#streamRecorder: CaptureHandle | null = null;
@@ -97,7 +119,7 @@ export class STTController {
 		deps: SttControllerDeps = {},
 	) {
 		this.#createCapture = createCapture;
-		this.#resolveCloudKey = deps.resolveCloudKey ?? defaultCloudKeyResolver;
+		this.#resolveCloudCredential = deps.resolveCloudCredential ?? defaultCloudCredentialResolver;
 		this.#createCloudFetch = deps.createCloudFetch;
 	}
 
@@ -143,21 +165,20 @@ export class STTController {
 		const raw = settings.get("stt.backend") as string | undefined;
 		return raw !== undefined && isSttBackend(raw) ? raw : DEFAULT_STT_BACKEND;
 	}
-
-	async #ensureCloudKey(options: ToggleOptions): Promise<string | null> {
+	async #ensureCloudCredential(options: ToggleOptions): Promise<CloudSttCredential | null> {
 		try {
-			const key = await this.#resolveCloudKey();
-			if (key) {
-				this.#cloudApiKey = key;
-				return key;
+			const credential = await this.#resolveCloudCredential();
+			if (credential) {
+				this.#cloudCredential = credential;
+				return credential;
 			}
 		} catch (err) {
-			logger.error("STT cloud key resolution failed", {
+			logger.error("STT cloud credential resolution failed", {
 				error: err instanceof Error ? err.message : String(err),
 			});
 		}
-		if (!this.#didWarnMissingCloudKey) {
-			this.#didWarnMissingCloudKey = true;
+		if (!this.#didWarnMissingCloudCredential) {
+			this.#didWarnMissingCloudCredential = true;
 			options.showWarning(
 				"No OpenAI credentials for cloud speech-to-text (API key or ChatGPT subscription) — falling back to the local model.",
 			);
@@ -169,8 +190,8 @@ export class STTController {
 		if (this.#backend() === "cloud") {
 			// Cloud path needs no local weights; a missing key falls back to local
 			// rather than refusing to record.
-			const key = await this.#ensureCloudKey(options);
-			if (key) return true;
+			const credential = await this.#ensureCloudCredential(options);
+			if (credential) return true;
 		}
 		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
 		// Keyed on the model rather than a one-shot flag: switching stt.modelName
@@ -271,10 +292,10 @@ export class STTController {
 			}
 			options.requestRender?.();
 		};
-		const useCloud = this.#backend() === "cloud" && this.#cloudApiKey !== null;
+		const useCloud = this.#backend() === "cloud" && this.#cloudCredential !== null;
 		const stream = useCloud
 			? startCloudSttStream({
-					apiKey: this.#cloudApiKey as string,
+					credential: this.#cloudCredential as CloudSttCredential,
 					model: settings.get("stt.modelName") as string | undefined,
 					language: language || undefined,
 					keywords: keywords.length ? keywords : undefined,
@@ -289,7 +310,7 @@ export class STTController {
 					onPartial,
 					onSegment,
 				});
-		this.#cloudApiKey = null;
+		this.#cloudCredential = null;
 		this.#stream = stream;
 		let recorder: CaptureHandle;
 		try {
@@ -414,6 +435,6 @@ export class STTController {
 		this.#cleanupStream();
 		this.#state = "idle";
 		this.#resolvedModelKey = null;
-		this.#cloudApiKey = null;
+		this.#cloudCredential = null;
 	}
 }
