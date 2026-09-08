@@ -22,6 +22,7 @@ export function normalizeFrontmatterKeys<T>(obj: T): T {
 	if (obj === null || typeof obj !== "object") return obj;
 	if (Array.isArray(obj)) {
 		let changed = false;
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const out: unknown[] = new Array(obj.length);
 		for (let i = 0; i < obj.length; i++) {
 			const v = obj[i];

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
-import { stripImagesFromMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
+import { convertToLlm, stripImagesFromMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 
 const png = (data: string = "iVBORw0KGgo"): ImageContent => ({ type: "image", data, mimeType: "image/png" });
 const text = (value: string): TextContent => ({ type: "text", text: value });
@@ -74,6 +74,28 @@ describe("stripImagesFromMessage", () => {
 		const details = message.details as { images: ImageContent[]; imageCount: number };
 		expect(details.images).toEqual([]);
 		expect(details.imageCount).toBe(2); // unrelated detail fields stay intact
+	});
+
+	it("preserves manual Bash images in model context and strips them when requested", () => {
+		const message: AgentMessage = {
+			role: "bashExecution",
+			command: "remote-image-command",
+			output: "done",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			images: [png("bash-image")],
+			timestamp: Date.now(),
+		};
+
+		const converted = convertToLlm([message]);
+		expect(converted[0]?.content).toEqual([
+			expect.objectContaining({ type: "text", text: expect.stringContaining("remote-image-command") }),
+			png("bash-image"),
+		]);
+
+		expect(stripImagesFromMessage(message)).toBe(1);
+		expect(message.images).toBeUndefined();
 	});
 
 	it("clears fileMention image attachments without dropping other file fields", () => {

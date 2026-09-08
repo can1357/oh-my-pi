@@ -130,41 +130,25 @@ Behavior in interactive mode (`extension-ui-controller.ts`):
 - On `done(result)`: calls `component.dispose?.()`, hides the overlay if present, restores editor + text for non-overlay flows, focuses editor, resolves promise.
   So `done(...)` is mandatory for completion.
 
-## 2) Hook/custom-tool UI context (runtime/type mismatch)
+## 2) Hook/custom-tool UI context (`HookUIContext`)
 
-`HookUIContext.custom` is still typed as `(tui, theme, done)`, but the
-interactive controller invokes the factory as
-`(tui, theme, keybindings, done)`. The third runtime argument is therefore a
-`KeybindingsManager`, **not** the completion callback. A three-argument factory
-that calls its third parameter will fail at runtime and leave the custom UI
-unresolved.
-
-Until the hook/custom-tool type is aligned with the controller, do not copy the
-legacy three-argument examples from the type declaration. Runtime-safe
-interactive code must obtain the completion callback from the fourth positional
-argument, for example with a rest-argument adapter, and should guard the flow
-with `pi.hasUI`:
+Current signature (`extensibility/hooks/types.ts`) matches the interactive
+controller and `ExtensionUIContext.custom`:
 
 ```ts
-const picked = await pi.ui.custom<string | undefined>(
-  (...runtimeArgs: unknown[]) => {
-    const done = runtimeArgs[3];
-    if (typeof done !== "function") {
-      throw new Error(
-        "Interactive custom UI completion callback is unavailable",
-      );
-    }
-    return new MyPickerComponent(
-      done as (value: string | undefined) => void,
-      signal,
-    );
-  },
-);
+custom<T>(
+  factory: (
+    tui: TUI,
+    theme: Theme,
+    keybindings: KeybindingsManager,
+    done: (result: T) => void,
+  ) => (Component & { dispose?(): void }) | Promise<Component & { dispose?(): void }>,
+): Promise<T>
 ```
 
-This is a compatibility workaround for the current implementation, not a
-stable four-argument hook type. `ExtensionUIContext.custom`, described above,
-has the supported four-argument contract.
+Use the fourth argument as `done`. The third argument is a `KeybindingsManager`
+(interactive mode uses an in-memory instance with the default bindings). Guard
+terminal-only UI with `pi.hasUI` when the hook may also run headless.
 
 ## 3) Custom tool call/result renderers
 

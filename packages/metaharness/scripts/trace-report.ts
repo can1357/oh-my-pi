@@ -202,6 +202,7 @@ function turnPrompt(turn: Extract<LogItem, { kind: "turn" }>): string {
 
 /** Map `items` through `worker` with at most `limit` in flight, order preserved. */
 async function mapPool<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const results = new Array<R>(items.length);
 	let next = 0;
 	const lanes = Array.from({ length: Math.min(limit, items.length) }, async () => {

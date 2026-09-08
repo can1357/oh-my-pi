@@ -1,10 +1,10 @@
 import { SYMBOL_PRESETS } from "./theme/symbols";
 import { theme } from "./theme/theme";
 
-/** Attachment chip kinds staged in the composer: pasted images and large text pastes. */
-export type ChipKind = "image" | "paste";
+/** Attachment chip kinds staged in the composer: images, video previews, and large text pastes. */
+export type ChipKind = "image" | "video" | "paste";
 
-const CHIP_ICON_KEY = { image: "chip.image", paste: "chip.paste" } as const;
+const CHIP_ICON_KEY = { image: "chip.image", video: "chip.video", paste: "chip.paste" } as const;
 
 /** Compact atomic composer token for attachment `n` in the active symbol preset. */
 export function chipLabel(kind: ChipKind, n: number): string {
@@ -16,16 +16,19 @@ export function chipLabel(kind: ChipKind, n: number): string {
 /** Every glyph a chip token may start with, across all symbol presets. */
 const CHIP_ICONS: Record<ChipKind, readonly string[]> = {
 	image: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.image]))],
+	video: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.video]))],
 	paste: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.paste]))],
 };
 
-const CHIP_TOKEN_SOURCE = `(?:${[...CHIP_ICONS.image, ...CHIP_ICONS.paste]
+const CHIP_TOKEN_SOURCE = `(?:${[...CHIP_ICONS.image, ...CHIP_ICONS.video, ...CHIP_ICONS.paste]
 	.map(icon => (/^[a-z]+$/i.test(icon) ? `(?<![A-Za-z])${RegExp.escape(icon)}` : RegExp.escape(icon)))
 	.join("|")}) #[1-9]\\d*`;
 
 /** Infers an attachment kind from a chip label emitted by any configured symbol preset. */
 export function chipLabelKind(label: string): ChipKind {
-	return CHIP_ICONS.image.some(icon => label.startsWith(icon)) ? "image" : "paste";
+	if (CHIP_ICONS.image.some(icon => label.startsWith(icon))) return "image";
+	if (CHIP_ICONS.video.some(icon => label.startsWith(icon))) return "video";
+	return "paste";
 }
 
 const ATTACHMENT_PALETTE: readonly [number, number, number][] = [
@@ -37,9 +40,14 @@ const ATTACHMENT_PALETTE: readonly [number, number, number][] = [
 	[240, 223, 120],
 ];
 
-/** Stable RGB color assigned to attachment `n`; image and paste sequences use different offsets. */
+/** Stable RGB color assigned to attachment `n`; each attachment type uses a distinct palette offset. */
 export function attachmentRgb(kind: ChipKind, n: number): readonly [number, number, number] {
-	const index = kind === "image" ? (n - 1) % ATTACHMENT_PALETTE.length : (n + 2) % ATTACHMENT_PALETTE.length;
+	const index =
+		kind === "image"
+			? (n - 1) % ATTACHMENT_PALETTE.length
+			: kind === "video"
+				? (n + 1) % ATTACHMENT_PALETTE.length
+				: (n + 2) % ATTACHMENT_PALETTE.length;
 	return ATTACHMENT_PALETTE[index];
 }
 
@@ -49,20 +57,23 @@ export function attachmentSgr(kind: ChipKind, n: number): string {
 	return `\x1b[38;2;${r};${g};${b}m`;
 }
 
-/** Matches expanded image and paste markers, including optional marker metadata. */
-export const PLACEHOLDER_REGEX = /\[(Image|Paste) #([1-9]\d*)(?:,[^\]\n]*)?\]/g;
+/** Matches expanded image, video, and paste markers, including optional marker metadata. */
+export const PLACEHOLDER_REGEX = /\[(Image|Video|Paste) #([1-9]\d*)(?:,[^\]\n]*)?\]/g;
 /** Matches either an expanded attachment marker or a compact composer chip token. */
 export const COMPOSER_TOKEN_REGEX = new RegExp(`${PLACEHOLDER_REGEX.source}|${CHIP_TOKEN_SOURCE}`, "gu");
 
-const IMAGE_MARKER_REGEX = /\[Image #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\1))?/g;
+const VISION_MARKER_REGEX = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\2))?/g;
 
 /** Offsets image marker indices, including matching `attachment://` references. */
 export function shiftImageMarkers(text: string, offset: number): string {
 	if (offset === 0) return text;
-	return text.replace(IMAGE_MARKER_REGEX, (_match, idx: string, tail: string, attachmentIdx: string | undefined) => {
-		const marker = `[Image #${Number(idx) + offset}${tail}]`;
-		return attachmentIdx === undefined ? marker : `${marker} attachment://${Number(attachmentIdx) + offset}`;
-	});
+	return text.replace(
+		VISION_MARKER_REGEX,
+		(_match, kind: string, idx: string, tail: string, attachmentIdx: string | undefined) => {
+			const marker = `[${kind} #${Number(idx) + offset}${tail}]`;
+			return attachmentIdx === undefined ? marker : `${marker} attachment://${Number(attachmentIdx) + offset}`;
+		},
+	);
 }
 
 /**
@@ -75,38 +86,39 @@ export function collapseImageMarkers(
 	register: (label: string, expansion: string) => void,
 ): string {
 	if (imageCount === 0) return text;
-	return text.replace(IMAGE_MARKER_REGEX, (match, idx: string, tail: string) => {
+	return text.replace(VISION_MARKER_REGEX, (match, kind: string, idx: string, tail: string) => {
 		const n = Number(idx);
 		if (n > imageCount) return match;
-		const label = chipLabel("image", n);
-		register(label, `[Image #${n}${tail}]`);
+		const chipKind = kind === "Video" ? "video" : "image";
+		const label = chipLabel(chipKind, n);
+		register(label, `[${kind} #${n}${tail}]`);
 		return label;
 	});
 }
 
 /**
- * Drops unreferenced images from a submission and densely remaps retained image
- * markers. Returns `null` when no compaction is needed.
+ * Drops unreferenced vision attachments from a submission and densely remaps
+ * retained image/video markers. Returns `null` when no compaction is needed.
  */
 export function compactImageMarkers(text: string, imageCount: number): { text: string; keep: number[] } | null {
 	if (imageCount === 0) return null;
 	const referenced = new Set<number>();
-	const scanner = new RegExp(IMAGE_MARKER_REGEX.source, "g");
+	const scanner = new RegExp(VISION_MARKER_REGEX.source, "g");
 	for (;;) {
 		const match = scanner.exec(text);
 		if (match === null) break;
-		const n = Number(match[1]);
+		const n = Number(match[2]);
 		if (n <= imageCount) referenced.add(n);
 	}
 	if (referenced.size === imageCount) return null;
 	const keep = [...referenced].sort((a, b) => a - b);
 	const remap = new Map<number, number>(keep.map((n, i) => [n, i + 1]));
 	const rewritten = text.replace(
-		IMAGE_MARKER_REGEX,
-		(match, idx: string, tail: string, attachmentIdx: string | undefined) => {
+		VISION_MARKER_REGEX,
+		(match, kind: string, idx: string, tail: string, attachmentIdx: string | undefined) => {
 			const mapped = remap.get(Number(idx));
 			if (mapped === undefined) return match;
-			const marker = `[Image #${mapped}${tail}]`;
+			const marker = `[${kind} #${mapped}${tail}]`;
 			return attachmentIdx === undefined ? marker : `${marker} attachment://${mapped}`;
 		},
 	);
@@ -114,7 +126,7 @@ export function compactImageMarkers(text: string, imageCount: number): { text: s
 }
 
 /** Attachment kinds understood by placeholder renderers. */
-export type PlaceholderKind = "image" | "paste";
+export type PlaceholderKind = "image" | "video" | "paste";
 
 /** Rendering callbacks for plain text and parsed attachment references. */
 export interface PlaceholderRenderers {
@@ -138,7 +150,7 @@ export function renderPlaceholders(text: string, renderers: PlaceholderRenderers
 		if (match.index > last) result += renderers.renderText(text.slice(last, match.index));
 		const label = match[0];
 		if (label.startsWith("[")) {
-			const kind: PlaceholderKind = match[1] === "Paste" ? "paste" : "image";
+			const kind: PlaceholderKind = match[1] === "Paste" ? "paste" : match[1] === "Video" ? "video" : "image";
 			result += renderers.renderReference(label, kind, Number(match[2]), "marker");
 		} else {
 			const index = Number(label.slice(label.lastIndexOf("#") + 1));

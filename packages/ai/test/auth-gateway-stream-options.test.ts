@@ -4,6 +4,7 @@ import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { parseRequest } from "@oh-my-pi/pi-ai/providers/openai-responses-server";
 import type { SimpleStreamOptions } from "@oh-my-pi/pi-ai/types";
+import type { OpenAIResponsesOptions } from "@oh-my-pi/pi-ai/providers/openai-responses";
 
 function responsesModel() {
 	return buildModel({
@@ -29,13 +30,13 @@ describe("gateway Responses option wire contract", () => {
 			parallel_tool_calls: false,
 			user: "acct_1",
 		});
-		const opts: SimpleStreamOptions = {};
+		const opts: SimpleStreamOptions & OpenAIResponsesOptions = {};
 		applyParsedGatewayOptions(opts, parsed.options);
 		expect(opts.previousResponseId).toBe("resp_client_123");
 		expect(opts.parallelToolCalls).toBe(false);
 		expect(opts.user).toBe("acct_1");
 
-		const { params } = buildParams(responsesModel(), parsed.context, opts);
+		const { params } = buildParams(responsesModel(), parsed.context, opts, undefined);
 		// buildParams owns parallel_tool_calls / user; previous_response_id is applied
 		// by the stream path from options.previousResponseId (same value we just asserted).
 		expect(params.parallel_tool_calls).toBe(false);
@@ -52,11 +53,11 @@ describe("gateway Responses option wire contract", () => {
 			model: "gpt-5",
 			input: "hi",
 		});
-		const opts: SimpleStreamOptions = { temperature: 0.2 };
+		const opts: SimpleStreamOptions & OpenAIResponsesOptions = { temperature: 0.2 };
 		applyParsedGatewayOptions(opts, parsed.options);
 		expect(opts.previousResponseId).toBeUndefined();
 		expect(opts.parallelToolCalls).toBeUndefined();
-		const { params } = buildParams(responsesModel(), parsed.context, opts);
+		const { params } = buildParams(responsesModel(), parsed.context, opts, undefined);
 		expect(params.previous_response_id).toBeUndefined();
 		expect(params.parallel_tool_calls).toBeUndefined();
 	});
