@@ -346,8 +346,8 @@ export class ChildProcess<In extends InMask = InMask> {
 			// adopted descendants, so snapshot and hard-kill the live tree first.
 			const root = Process.fromPid(this.proc.pid);
 			if (root) {
-				root.killTree(9);
-				this.#terminating = Promise.resolve();
+				this.#terminating = Promise.try(() => root.killTreeAndWait());
+				void this.#terminating.catch(() => {});
 				return;
 			}
 		}
@@ -360,17 +360,16 @@ export class ChildProcess<In extends InMask = InMask> {
 			// Bun detached children are POSIX session/process-group leaders. If
 			// the leader has exited, the native Process handle cannot rediscover
 			// its PGID, but a pipe-holding descendant keeps that exact group alive.
-			try {
-				process.kill(-this.proc.pid, "SIGKILL");
-			} catch {}
-			this.#terminating = Promise.resolve();
+			this.#terminating = Promise.try(() => Process.killGroupAndWait(this.proc.pid));
+			void this.#terminating.catch(() => {});
 			return;
 		}
 		if (this.proc.exitCode !== null && this.#windowsRootProcess && this.#openPipeReaders > 0) {
 			// The retained handle keeps the dead root PID reserved, making the
 			// Windows Toolhelp descendant walk identity-safe after root exit.
-			this.#windowsRootProcess.killTree();
-			this.#terminating = Promise.resolve();
+			const root = this.#windowsRootProcess;
+			this.#terminating = Promise.try(() => root.killTreeAndWait());
+			void this.#terminating.catch(() => {});
 			return;
 		}
 		if (!this.proc.killed) {

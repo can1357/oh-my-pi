@@ -7,6 +7,9 @@
 ### Fixed
 
 - Fixed C++ language inference excluding CUDA header (`.cuh`) files ([#10782](https://github.com/can1357/oh-my-pi/pull/10782) by [@alphastorm](https://github.com/alphastorm)).
+### Added
+
+- Added `Process.killTreeAndWait()` and `Process.killGroupAndWait()` to await hard termination of descendants, including after the root exits.
 
 ## [18.1.9] - 2026-09-04
 
