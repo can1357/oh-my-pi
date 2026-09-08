@@ -359,6 +359,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 			advisor?.name === "default" &&
 			!advisor.model?.trim() &&
 			advisor.tools === undefined &&
+			advisor.agents === undefined &&
 			!advisor.instructions?.trim() &&
 			advisor.enabled !== false &&
 			advisor.maxNotesPerUpdate === undefined

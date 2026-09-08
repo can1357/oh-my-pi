@@ -184,6 +184,8 @@ interface AdvisorRuntimeDescriptor {
 /** Inputs that configure the advisor roster owned by a session. */
 export interface SessionAdvisorsOptions {
 	enabled: boolean;
+	/** Session agent identity; direct construction defaults to `main`. */
+	agentName?: string;
 	tools?: AgentTool[];
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
@@ -306,6 +308,7 @@ export interface AdvisorStatusOverviewEntry {
 /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
+	readonly #agentName: string;
 	#advisorEnabled: boolean;
 	#advisorTools: AgentTool[] | undefined;
 	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
@@ -344,6 +347,7 @@ export class SessionAdvisors {
 
 	constructor(host: SessionAdvisorsHost, options: SessionAdvisorsOptions) {
 		this.#host = host;
+		this.#agentName = (options.agentName ?? "main").trim().toLowerCase();
 		this.#advisorEnabled = options.enabled;
 		this.#advisorTools = options.tools;
 		this.#advisorCreateGrepTool = options.createGrepTool;
@@ -726,6 +730,12 @@ export class SessionAdvisors {
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
 		const usedSlugs = new Set<string>();
 		for (const config of roster) {
+			if (
+				config.agents !== undefined &&
+				!config.agents.some(name => name.trim().toLowerCase() === this.#agentName)
+			) {
+				continue;
+			}
 			let slug = legacy ? "" : slugifyAdvisorName(config.name);
 			if (slug) {
 				let candidate = slug;
@@ -1870,6 +1880,7 @@ export class SessionAdvisors {
 		this.#advisorSharedInstructions = sharedInstructions;
 		this.#advisorSharedMaxNotesPerUpdate = sharedMaxNotesPerUpdate;
 		this.#stopAdvisorRuntime();
+		this.#advisorStatuses.clear();
 		this.#buildAdvisorRuntime(true);
 		return this.#advisors.length;
 	}

@@ -266,6 +266,7 @@ instructions: |
 advisors:
   - name: Architecture
     enabled: true
+    agents: [main]
     model: anthropic/claude-sonnet-4-5:medium
     tools: [read, grep, glob]
     instructions: |
@@ -284,6 +285,7 @@ Fields:
 - `instructions` (top level): shared prompt prepended to every advisor's system prompt alongside `WATCHDOG.md`. Concatenated across all discovered `WATCHDOG.yml` files.
 - `advisors[].name`: human label; slugified for the session id and its `__advisor.<slug>.jsonl` filename. Duplicate slugs across files are resolved by the same specificity rule as `WATCHDOG.md` discovery (project leaf > project ancestor > user).
 - `advisors[].enabled`: optional per-advisor switch, default `true`. `false` leaves the advisor visible as paused in status/configuration.
+- `advisors[].agents`: optional list of exact agent definition names. Omitted → all sessions; `[]` → no sessions. Names are trimmed and matched case-insensitively, without wildcards. `main` selects the primary session. Use definition names such as `task`, not generated worker IDs or model-role names.
 - `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
 - `advisors[].tools`: optional list of built-in tool names to grant. Omitted → the default `read`/`grep`/`glob` subset; explicit `[]` → no investigative tools. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools. Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning; if that leaves a nonempty input with no valid names, the implementation currently treats the result as omitted and uses the default subset.
 - `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
@@ -302,6 +304,35 @@ Subagents run unadvised by default; advisors are opted in **per agent** instead 
 The legacy `advisor.subagents: true` setting migrates to `task.agentAdvisor: { task: "on" }` — the bundled generic `task` agent keeps its advisor, other agents start unadvised.
 
 An advised subagent session builds its own advisor subsystem with the same settings/model-role resolution (an explicit pattern lands on the spawned session's `modelRoles.advisor`), then reruns both `WATCHDOG.md` and `WATCHDOG.yml` discovery for that subagent session's `cwd` and agent directory. Subagent advisors remain isolated from the subagent's primary tool session in the same way the main advisor is isolated from the main agent.
+
+### Select watchdogs per agent
+
+Enrollment and roster selection are separate. Enable advisors for the agent with
+`task.agentAdvisor` or its frontmatter, then target roster entries:
+
+```yaml
+advisors:
+  - name: Task Execution
+    agents: [task]
+    tools: [read, grep, glob]
+    instructions: |
+      Check the delegated scope and evidence for the task handoff.
+  - name: Delivery
+    agents: [main]
+    tools: [read, grep, glob]
+    instructions: |
+      Check overall completion and authorized publication.
+```
+
+Unscoped entries still apply to every enrolled session. A discovered roster with
+no entries matching the session creates no advisors; it does not substitute the
+legacy default advisor. A missing or empty roster retains the default behavior.
+Selection happens before model resolution and runtime creation. Changing the
+session model does not change its agent identity.
+
+The advisor configuration editor preserves `agents` when saving. Edit the YAML
+to change selectors. Entries excluded from a session do not appear in its advisor
+status.
 
 ## Cost and context behavior
 

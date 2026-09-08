@@ -22,6 +22,8 @@ export interface AdvisorConfig {
 	name: string;
 	model?: string;
 	tools?: string[];
+	/** Exact session agent names (case-insensitive, trimmed). Omitted matches all; [] matches none. */
+	agents?: string[];
 	instructions?: string;
 	/** Per-advisor on/off toggle (default `true`). When `false`, the advisor
 	 *  stays in the roster but its runtime is never built — it shows `○` in
@@ -60,6 +62,7 @@ const advisorEntrySchema = type({
 	name: "string",
 	"model?": "string",
 	"tools?": "string[]",
+	"agents?": "string[]",
 	"instructions?": "string",
 	"enabled?": "boolean",
 	"maxNotesPerUpdate?": "number",
@@ -188,6 +191,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 				name: entry.name,
 				model: entry.model?.trim() || undefined,
 				tools: filterAdvisorTools(entry.tools, item.path),
+				agents: entry.agents,
 				instructions,
 				enabled: entry.enabled,
 				maxNotesPerUpdate:
@@ -282,6 +286,7 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 		const advisor: AdvisorConfig = { name: a.name };
 		if (a.model?.trim()) advisor.model = a.model;
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
+		if (a.agents !== undefined) advisor.agents = [...a.agents];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
 		if (typeof a.maxNotesPerUpdate === "number" && Number.isFinite(a.maxNotesPerUpdate) && a.maxNotesPerUpdate >= 1) {
@@ -345,6 +350,16 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 		for (const advisor of doc.advisors) {
 			lines.push(`  - name: ${YAML.stringify(advisor.name)}`);
 			if (advisor.model?.trim()) lines.push(`    model: ${YAML.stringify(advisor.model)}`);
+			if (advisor.agents !== undefined) {
+				if (advisor.agents.length === 0) {
+					lines.push("    agents: []");
+				} else {
+					lines.push("    agents:");
+					for (const agent of advisor.agents) {
+						lines.push(`      - ${YAML.stringify(agent)}`);
+					}
+				}
+			}
 			if (advisor.tools !== undefined) {
 				if (advisor.tools.length === 0) {
 					lines.push("    tools: []");

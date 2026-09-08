@@ -78,6 +78,26 @@ describe("discoverAdvisorConfigs", () => {
 		expect(invalidOnly?.tools).toBeUndefined();
 	});
 
+	it("keeps project slug overrides authoritative regardless of agent targeting", async () => {
+		await saveWatchdogConfigFile(path.join(agentDir, "WATCHDOG.yml"), {
+			advisors: [{ name: "Task Execution", agents: ["main"], instructions: "User baseline" }],
+		});
+		await saveWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"), {
+			advisors: [{ name: "task-execution", agents: ["orc-implementer"], instructions: "Project override" }],
+		});
+		const { advisors } = await discoverAdvisorConfigs(tmp, agentDir);
+		expect(advisors).toMatchObject([
+			{ name: "task-execution", agents: ["orc-implementer"], instructions: "Project override" },
+		]);
+	});
+
+	it("rejects non-list agent selectors at the file boundary", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		await Bun.write(file, "advisors:\n  - name: Scoped\n    agents: main\n");
+		expect((await discoverAdvisorConfigs(tmp, agentDir)).advisors).toEqual([]);
+		expect(await loadWatchdogConfigFile(file)).toEqual({ advisors: [] });
+	});
+
 	it("ignores a malformed YAML file without throwing", async () => {
 		await Bun.write(path.join(tmp, "WATCHDOG.yml"), "advisors: [unclosed bracket");
 		const result = await discoverAdvisorConfigs(tmp, agentDir);
@@ -219,6 +239,24 @@ describe("WATCHDOG.yml file round-trip", () => {
 		await saveWatchdogConfigFile(file, doc);
 		const loaded = await loadWatchdogConfigFile(file);
 		expect(loaded).toEqual(doc);
+	});
+
+	it("preserves agent selectors through unrelated file edits and discovery", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		const scopedDoc: WatchdogConfigDoc = {
+			advisors: [
+				{ name: "Primary", agents: [" MAIN ", "operator:#1"] },
+				{ name: "Nobody", agents: [] },
+				{ name: "Everyone" },
+			],
+		};
+		await saveWatchdogConfigFile(file, scopedDoc);
+		const edited = await loadWatchdogConfigFile(file);
+		edited.advisors[0].instructions = "Updated instructions";
+		await saveWatchdogConfigFile(file, edited);
+		const expected = [[" MAIN ", "operator:#1"], [], undefined];
+		expect((await loadWatchdogConfigFile(file)).advisors.map(advisor => advisor.agents)).toEqual(expected);
+		expect((await discoverAdvisorConfigs(tmp, tmp)).advisors.map(advisor => advisor.agents)).toEqual(expected);
 	});
 
 	it("serializes block-style YAML that the discovery path also parses", async () => {

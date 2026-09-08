@@ -6393,6 +6393,30 @@ describe("advisor", () => {
 			expect(savedDoc?.advisors).toEqual([{ name: "default", instructions: "custom" }]);
 		});
 
+		it.each([{ agents: ["main"] }, { agents: [] }])(
+			"preserves an explicitly scoped default advisor on save: %j",
+			async ({ agents }) => {
+				let savedDoc: WatchdogConfigDoc | undefined;
+				const overlay = new AdvisorConfigOverlayComponent(
+					{} as unknown as TUI,
+					{ ...deps },
+					"project",
+					{ advisors: [{ name: "default", agents: [...agents] }] },
+					{
+						...callbacks,
+						save: async (_scope, doc) => {
+							savedDoc = doc;
+						},
+					},
+				);
+				overlay.render(200);
+				for (let index = 0; index < 4; index++) overlay.handleInput("\x1b[B");
+				overlay.handleInput("\r");
+				await Promise.resolve();
+				expect(savedDoc?.advisors).toEqual([{ name: "default", agents: [...agents] }]);
+			},
+		);
+
 		it("preserves top-level instructions while stripping the synthetic default advisor on save", async () => {
 			let savedDoc: WatchdogConfigDoc | undefined;
 			const overlay = new AdvisorConfigOverlayComponent(
