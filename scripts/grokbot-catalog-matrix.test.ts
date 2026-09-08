@@ -209,6 +209,39 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(false);
+		const readPath = expectedReadPath(idSafe(id));
+		const writePath = expectedWritePath(idSafe(id));
+		expect(
+			matchesToolSmokeCall("read", { name: "Read", arguments: { path: readPath } }, "tools-pong-read-x", id),
+		).toBe(true);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Read", arguments: { path: `/tmp/${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(true);
+		// Suffix-only paths must fail — `wrongnotes/...` ends with `notes/...`.
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Read", arguments: { path: `wrong${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Write", arguments: { path: `backup-${writePath}`, content: ping } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall("write", { name: "Write", arguments: { path: writePath, content: ping } }, ping, id),
+		).toBe(true);
 	});
 });
 

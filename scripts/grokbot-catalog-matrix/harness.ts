@@ -207,7 +207,9 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 		const path = expectedReadPath(safe);
 		if (/^(read|Read)$/i.test(name)) {
 			const filePath = filePathOf(call);
-			return filePath === path || filePath.endsWith(`/${path}`) || filePath.endsWith(path);
+			// Exact relative path or absolute path ending in /${path} — never a bare
+			// endsWith(path) (wrongnotes/... would otherwise match notes/...).
+			return filePath === path || filePath.endsWith(`/${path}`);
 		}
 		if (/^(bash|Shell|shell)$/i.test(name)) {
 			const cmd = shellCommandOf(call);
@@ -219,7 +221,7 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 	if (/^(write|Write)$/i.test(name)) {
 		const filePath = filePathOf(call);
 		const content = fileContentOf(call);
-		const pathOk = filePath === path || filePath.endsWith(`/${path}`) || filePath.endsWith(path);
+		const pathOk = filePath === path || filePath.endsWith(`/${path}`);
 		return pathOk && content.includes(ping);
 	}
 	if (/^(bash|Shell|shell)$/i.test(name)) {

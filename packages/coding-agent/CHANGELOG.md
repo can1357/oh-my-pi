@@ -11,6 +11,7 @@
 
 ### Fixed
 
+- Grok Bot catalog matrix tool smoke requires a path-segment boundary (rejects `wrongnotes/...` suffix matches).
 - Grok Bot catalog matrix `--slice representative` builds catalog models before router selection so KDL `sand-tools-wire` is visible.
 - Fixed worker subprocesses failing to declare themselves as worker hosts before dispatching selectors, which prevented nested thread worker spawns during `/usage` stats sync on multi-core systems.
 - Fixed `/usage` displaying a misleading generic database read failure when activity loading fails; the error detail is now sanitized, collapsed to a single line with shortened paths, and surfaced in the dashboard.
