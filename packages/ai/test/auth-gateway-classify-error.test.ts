@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { classifyGatewayError, isRetryableGatewayDisposition } from "@oh-my-pi/pi-ai/error";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 
 describe("auth-gateway classifyGatewayError", () => {
 	it("honours an explicit numeric `status` property on the error", () => {
@@ -259,5 +260,53 @@ describe("classifyGatewayError authoritative-status precedence", () => {
 		const c = classifyGatewayError(new Error("API error (400): prompt is too long: context length exceeded"));
 		expect(c.owner).toBe("request");
 		expect(c.disposition).toBe("context_overflow");
+	});
+
+	it("keeps structurally flagged content blocks terminal even without policy wording", () => {
+		const err = AIError.attach(
+			new Error("upstream rejected the generation"),
+			AIError.create(AIError.Flag.ContentBlocked),
+		);
+		const c = classifyGatewayError(err);
+		expect(c.owner).toBe("policy");
+		expect(c.disposition).toBe("policy_terminal");
+		expect(isRetryableGatewayDisposition(c.disposition)).toBe(false);
+	});
+
+	it("treats ProviderResponseError content-blocked kind as policy_terminal", () => {
+		const err = new AIError.ProviderResponseError("safety", {
+			provider: "test",
+			kind: "content-blocked",
+		});
+		const c = classifyGatewayError(err);
+		expect(c.owner).toBe("policy");
+		expect(c.disposition).toBe("policy_terminal");
+	});
+
+	it("does not rebrand an authoritative 5xx as gateway_terminal from body wording alone", () => {
+		const c = classifyGatewayError(
+			Object.assign(new Error("HTTP 503: internal invariant reported by upstream"), { status: 503 }),
+		);
+		expect(c.status).toBe(503);
+		expect(c.owner).toBe("provider");
+		expect(c.disposition).toBe("provider_unavailable");
+		expect(c.disposition).not.toBe("gateway_terminal");
+	});
+
+	it("keeps ordinary 429 throttles in the provider lane", () => {
+		const c = classifyGatewayError(Object.assign(new Error("Too many requests"), { status: 429 }));
+		expect(c.owner).toBe("provider");
+		expect(c.disposition).toBe("provider_transient");
+		expect(c.disposition).not.toBe("credential_transient");
+		expect(c.disposition).not.toBe("credential_quota");
+	});
+
+	it("does not assign credential_quota for informative non-billing 402 bodies", () => {
+		const c = classifyGatewayError(
+			Object.assign(new Error("A subscription is required for this endpoint"), { status: 402 }),
+		);
+		expect(c.disposition).not.toBe("credential_quota");
+		expect(c.owner).toBe("provider");
+		expect(c.disposition).toBe("provider_transient");
 	});
 });

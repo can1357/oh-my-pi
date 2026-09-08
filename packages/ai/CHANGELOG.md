@@ -187,6 +187,9 @@
 - Fixed Z.AI (GLM Coding Plan) browser sign-in by using the registered CLI callback address.
 - Fixed OpenAI Codex/Responses tool results being lost when composite call identifiers could not be paired with the corresponding assistant call.
 - Fixed native OpenAI Responses history replay becoming stuck on malformed or truncated function-call arguments; invalid history items are now discarded so the session can recover.
+- Devin parallel tool calls follow `compat.supportsParallelToolCalls` instead of being disabled unconditionally, so natively discovered configs that support parallelism can use it ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, structurally flagged content blocks stay non-retryable, and context-overflow detection reuses the central classifier.
+- Gateway disposition mapping now keeps ordinary RPM/`Too many requests` 429s in the provider lane, requires structural evidence for `gateway_terminal`, and only treats opaque or billing-worded 402s as `credential_quota`.
 
 ## [18.0.11] - 2026-08-29
 

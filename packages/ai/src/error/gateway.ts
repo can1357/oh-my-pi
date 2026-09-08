@@ -1,4 +1,5 @@
-import { isUsageLimit, matchesOverflowText } from "./flags";
+import { Flag, is, isUsageLimit, matchesOverflowText } from "./flags";
+import { is402BillingCapBody, parseRateLimitReason } from "./rate-limit";
 
 /** Who owns a classified gateway failure. */
 export type GatewayErrorOwner =
@@ -178,19 +179,41 @@ function classifyOwnerDisposition(
 		return { owner: "cancelled", disposition: "cancelled" };
 	}
 
-	// Internal invariant — never a retryable provider failure, regardless of HTTP mapping.
+	// Internal invariant — never a retryable provider failure. Require structural
+	// evidence (`owner` / error name): provider 5xx bodies that happen to contain
+	// "internal invariant" must not suppress failover.
 	let ownerProp: string | undefined;
 	if (typeof err === "object" && err !== null && "owner" in err && typeof err.owner === "string") {
 		ownerProp = err.owner;
 	}
 	const errName = err instanceof Error ? err.name : "";
-	if (
-		ownerProp === "gateway" ||
-		errName === "gateway_terminal" ||
-		GATEWAY_INVARIANT_PATTERN.test(message) ||
-		GATEWAY_INVARIANT_PATTERN.test(errName)
-	) {
+	if (ownerProp === "gateway" || errName === "gateway_terminal" || GATEWAY_INVARIANT_PATTERN.test(errName)) {
 		return { owner: "gateway", disposition: "gateway_terminal" };
+	}
+
+	// Structural content/policy flags are terminal even when the HTTP mapping
+	// is a synthetic 502 (message lacked POLICY_PATTERN). Retrying against a
+	// sibling provider would replay a safety rejection.
+	let errorId: number | undefined;
+	if (typeof err === "object" && err !== null && "errorId" in err && typeof err.errorId === "number") {
+		errorId = err.errorId;
+	}
+	let kind: string | undefined;
+	if (typeof err === "object" && err !== null && "kind" in err && typeof err.kind === "string") {
+		kind = err.kind;
+	}
+	if (is(errorId, Flag.Abort)) {
+		return { owner: "cancelled", disposition: "cancelled" };
+	}
+	if (is(errorId, Flag.ContextOverflow)) {
+		return { owner: "request", disposition: "context_overflow" };
+	}
+	if (
+		is(errorId, Flag.ContentBlocked) ||
+		is(errorId, Flag.AccountPolicy) ||
+		kind === "content-blocked"
+	) {
+		return { owner: "policy", disposition: "policy_terminal" };
 	}
 
 	// Authoritative HTTP buckets first: message heuristics never rebrand a
@@ -205,14 +228,30 @@ function classifyOwnerDisposition(
 		if (isUsageLimit(err) || isUsageLimit(message)) {
 			return { owner: "quota", disposition: "credential_quota" };
 		}
-		if (PROVIDER_WIDE_PATTERN.test(message)) {
+		// Ordinary RPM / "Too many requests" throttles are provider-wide, not
+		// credential-scoped. Reuse the central rate-limit reason parser so they
+		// stay in the provider lane instead of burning sibling credentials.
+		const reason = parseRateLimitReason(message);
+		if (
+			PROVIDER_WIDE_PATTERN.test(message) ||
+			reason === "RATE_LIMIT_EXCEEDED" ||
+			reason === "MODEL_CAPACITY_EXHAUSTED" ||
+			reason === "CONCURRENT_LIMIT" ||
+			reason === "SERVER_ERROR"
+		) {
 			return { owner: "provider", disposition: "provider_transient" };
 		}
 		return { owner: "credential", disposition: "credential_transient" };
 	}
 
 	if (status === 402) {
-		return { owner: "quota", disposition: "credential_quota" };
+		// Only opaque / billing-worded 402s are rotatable quota; informative
+		// bodies like "A subscription is required for this endpoint" stay out
+		// of the credential-quota lane (mirrors isUsageLimitOutcome).
+		if (is402BillingCapBody(message)) {
+			return { owner: "quota", disposition: "credential_quota" };
+		}
+		return { owner: "provider", disposition: "provider_transient" };
 	}
 
 	// Policy denials must win over the generic 401/403 auth bucket.
