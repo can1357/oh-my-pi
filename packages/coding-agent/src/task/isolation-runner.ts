@@ -10,7 +10,7 @@
  * Shape:
  *   1. {@link prepareIsolationContext} — resolve git root + capture baseline.
  *   2. {@link runIsolatedSubprocess}    — start worktree, run, capture
- *                                        branch/patch, tear worktree down.
+ *                                        changes, and transfer cleanup ownership.
  *   3. {@link mergeIsolatedChanges}     — apply captured changes back to the
  *                                        parent repo (skip when the caller
  *                                        opted out).
@@ -21,6 +21,7 @@
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
 import { AgentRegistry } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
@@ -192,13 +193,47 @@ async function writeIsolationPatch(
  * the caller can still surface the subagent's output; only isolation setup
  * itself routes through {@link IsolatedRunOptions.buildFailureResult}.
  *
- * The isolation handle is always torn down in `finally`.
+ * On release it captures the final patch and transfers commits to a parent-repo
+ * task branch before cleanup. One-shot and failed startup paths clean up in `finally`.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
+	const taskBaseline = structuredClone(opts.context.baseline);
 	let handle: IsolationHandle | undefined;
 	let deferredCleanup: Promise<void> | undefined;
+	let baseReleasePromise: Promise<void> | undefined;
+	let cleanupPromise: Promise<void> | undefined;
+	let releasePromise: Promise<void> | undefined;
+	const releaseBase = (): Promise<void> => {
+		baseReleasePromise ??= opts.baseOptions.onRelease?.() ?? Promise.resolve();
+		return baseReleasePromise;
+	};
+	const cleanupHandle = (): Promise<void> => {
+		cleanupPromise ??= (async () => {
+			await releaseBase();
+			if (handle) await cleanupIsolation(handle);
+		})();
+		return cleanupPromise;
+	};
+	const releaseIsolation = (): Promise<void> => {
+		releasePromise ??= (async () => {
+			if (!handle) return;
+			const patchResult = await writeIsolationPatch(handle.mergedDir, taskBaseline, opts.artifactsDir, opts.agentId);
+			const commitResult = await commitToBranch(
+				handle.mergedDir,
+				taskBaseline,
+				opts.agentId,
+				opts.description,
+				undefined,
+			);
+			AgentRegistry.global().setHistory(opts.agentId, {
+				patchPath: patchResult.patchPath,
+				branchName: commitResult?.branchName,
+			});
+			await cleanupHandle();
+		})();
+		return releasePromise;
+	};
 	try {
-		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
 		const isolationDir = handle.mergedDir;
 		const result = await runSubprocess({
@@ -211,6 +246,12 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				deferredCleanup = completion;
 				opts.baseOptions.onCleanupDeferred?.(completion);
 			},
+			// One-shot runs get `releaseBase` (never touches the worktree): their
+			// `finalizeSubagentLifecycle` calls `onRelease` before this function's
+			// post-run capture, so the handle must survive until the `finally`
+			// below cleans it up. Only kept-alive runs hand full capture+cleanup
+			// (`releaseIsolation`) to the agent lifecycle.
+			onRelease: opts.baseOptions.keepAlive === false ? releaseBase : releaseIsolation,
 		});
 		opts.onSubprocessResult?.(result);
 		// A successful result cannot be captured while deferred owner jobs or
@@ -291,18 +332,18 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	} catch (err) {
 		return rememberAgentArtifacts(opts.buildFailureResult(err));
 	} finally {
-		if (handle) {
-			const isolationHandle = handle;
+		if (
+			handle &&
+			!releasePromise &&
+			!(opts.baseOptions.keepAlive !== false && AgentLifecycleManager.global().has(opts.agentId))
+		) {
 			if (deferredCleanup) {
-				trackLateCleanup(
-					deferredCleanup.then(() => cleanupIsolation(isolationHandle)),
-					{
-						agentId: opts.agentId,
-						resource: "isolation",
-					},
-				);
+				trackLateCleanup(deferredCleanup.then(cleanupHandle), {
+					agentId: opts.agentId,
+					resource: "isolation",
+				});
 			} else {
-				await cleanupIsolation(isolationHandle);
+				await cleanupHandle();
 			}
 		}
 	}

@@ -57,14 +57,17 @@ export type PersistedSubagentReviverFactory = (ref: AgentRef) => Promise<AgentRe
 export interface AdoptOptions {
 	/** TTL before an idle agent is parked. <= 0 disables parking. */
 	idleTtlMs: number;
-	/** Recreates a live AgentSession from the ref's sessionFile. Absent => not resumable after park (e.g. isolated runs). */
+	/** Recreates a live AgentSession from the ref's sessionFile after parking. */
 	revive?: AgentReviver;
+	/** Releases resources that must survive parking but end with the agent lifecycle. */
+	onRelease?: () => Promise<void>;
 }
 
 interface AdoptedAgent {
 	ref: AgentRef;
 	idleTtlMs: number;
 	revive?: AgentReviver;
+	onRelease?: () => Promise<void>;
 	timer?: NodeJS.Timeout;
 }
 
@@ -161,7 +164,12 @@ export class AgentLifecycleManager {
 		}
 		const existing = this.#adopted.get(id);
 		clearTimeout(existing?.timer);
-		const adopted: AdoptedAgent = { ref, idleTtlMs: opts.idleTtlMs, revive: opts.revive };
+		const adopted: AdoptedAgent = {
+			ref,
+			idleTtlMs: opts.idleTtlMs,
+			revive: opts.revive,
+			onRelease: opts.onRelease,
+		};
 		this.#adopted.set(id, adopted);
 		this.#armTimer(id, adopted);
 	}
@@ -422,6 +430,7 @@ export class AgentLifecycleManager {
 		const adoptedMatches =
 			adopted && (expected === undefined || adopted.ref === expected || adopted.ref.session === expected);
 		const ref = currentMatches ? current : adoptedMatches ? adopted.ref : undefined;
+		const onRelease = adopted && adopted.ref === ref ? adopted.onRelease : undefined;
 		if (!ref) return false;
 		if (adopted?.ref === ref) {
 			clearTimeout(adopted.timer);
@@ -464,6 +473,14 @@ export class AgentLifecycleManager {
 				} catch (error) {
 					logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
 				}
+			}
+			try {
+				await onRelease?.();
+			} catch (error) {
+				logger.warn("AgentLifecycleManager.release: owned resource cleanup failed", {
+					id,
+					error: String(error),
+				});
 			}
 		}
 		if (!options?.tombstone) this.#registry.unregister(id, ref);

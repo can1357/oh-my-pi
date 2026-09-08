@@ -395,6 +395,25 @@ describe("AgentLifecycleManager", () => {
 		expect(registry.get("6-Sub")).toBeUndefined();
 	});
 
+	it("keeps owned resources through parking and releases them with the agent", async () => {
+		vi.useFakeTimers();
+		const stub = makeSessionStub();
+		const releaseResource = vi.fn(async () => {});
+		registerIdleSub("Owned-Sub", stub.session);
+		lifecycle.adopt("Owned-Sub", { idleTtlMs: TTL, onRelease: releaseResource });
+
+		vi.advanceTimersByTime(TTL);
+		await flushAsync();
+
+		expect(registry.get("Owned-Sub")?.status).toBe("parked");
+		expect(stub.disposeCalls()).toBe(1);
+		expect(releaseResource).not.toHaveBeenCalled();
+
+		await lifecycle.release("Owned-Sub");
+
+		expect(releaseResource).toHaveBeenCalledTimes(1);
+	});
+
 	it("does not let one stuck adopted agent block sibling disposal", async () => {
 		const gate = deferred();
 		const stuck = makeSessionStub(() => gate.promise);
