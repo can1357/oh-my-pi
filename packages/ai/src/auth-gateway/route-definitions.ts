@@ -46,6 +46,46 @@ function parseNode(input: unknown): RouteNode {
 		const children = input.children.map(parseNode);
 		return { type: "fallback", on, children };
 	}
+	if (type === "balance") {
+		if (input.strategy !== "rr" && input.strategy !== "weighted") {
+			throw new AIError.ValidationError(`Unknown balance strategy: ${String(input.strategy)}`);
+		}
+		if (!Array.isArray(input.children)) {
+			throw new AIError.ValidationError("Balance node missing children");
+		}
+		return { type: "balance", strategy: input.strategy, children: input.children.map(parseNode) };
+	}
+	if (type === "conditional") {
+		if (!isRecord(input.when)) {
+			throw new AIError.ValidationError("Conditional node missing when object");
+		}
+		const when: { vision?: boolean } = {};
+		if ("vision" in input.when) {
+			if (typeof input.when.vision !== "boolean") {
+				throw new AIError.ValidationError("Conditional when.vision must be a boolean");
+			}
+			when.vision = input.when.vision;
+		}
+		if (!Array.isArray(input.children)) {
+			throw new AIError.ValidationError("Conditional node missing children");
+		}
+		return { type: "conditional", when, children: input.children.map(parseNode) };
+	}
+	if (type === "domain") {
+		if (typeof input.name !== "string" || input.name.length === 0) {
+			throw new AIError.ValidationError("Domain node missing name");
+		}
+		if (!Array.isArray(input.children)) {
+			throw new AIError.ValidationError("Domain node missing children");
+		}
+		return { type: "domain", name: input.name, children: input.children.map(parseNode) };
+	}
+	if (type === "route-ref") {
+		if (typeof input.route !== "string" || input.route.length === 0) {
+			throw new AIError.ValidationError("Route-ref node missing route");
+		}
+		return { type: "route-ref", route: input.route };
+	}
 	throw new AIError.ValidationError(`Unknown route node type: ${String(type)}`);
 }
 

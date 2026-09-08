@@ -90,4 +90,58 @@ describe("RouteDecisionTraceLog", () => {
 			}),
 		).toThrow(/reason/);
 	});
+
+	it("isolates traces for two request ids", () => {
+		const log = new RouteDecisionTraceLog();
+		const now = 1_700_000_000_000;
+		log.record(
+			{
+				requestId: "req-a",
+				routeId: "m-a",
+				generation: 1,
+				selectedTarget: "m-a",
+				disposition: "dispatched",
+			},
+			now,
+		);
+		log.record(
+			{
+				requestId: "req-b",
+				routeId: "m-b",
+				generation: 2,
+				selectedTarget: "m-b",
+				disposition: "skipped",
+				reason: "quota_cutoff",
+			},
+			now,
+		);
+		log.record(
+			{
+				requestId: "req-a",
+				routeId: "m-a-fallback",
+				generation: 1,
+				selectedTarget: "m-a-fallback",
+				disposition: "not_reached",
+			},
+			now,
+		);
+		const a = log.get("req-a", now);
+		const b = log.get("req-b", now);
+		expect(a.map(t => t.routeId)).toEqual(["m-a", "m-a-fallback"]);
+		expect(b.map(t => t.routeId)).toEqual(["m-b"]);
+		expect(a.every(t => t.requestId === "req-a")).toBe(true);
+		expect(b.every(t => t.requestId === "req-b")).toBe(true);
+	});
+
+	it("returns an empty array for an unknown requestId", () => {
+		const log = new RouteDecisionTraceLog();
+		log.record({
+			requestId: "req-a",
+			routeId: "m",
+			generation: 1,
+			selectedTarget: "m",
+			disposition: "dispatched",
+		});
+		expect(log.get("missing")).toEqual([]);
+	});
 });

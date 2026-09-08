@@ -78,6 +78,11 @@ export class RouteDecisionTraceLog {
 		return this.#traces;
 	}
 
+	get(requestId: string, nowMs: number = Date.now()): readonly RouteDecisionTrace[] {
+		this.#evict(nowMs);
+		return this.#traces.filter(trace => trace.requestId === requestId);
+	}
+
 	#evict(nowMs: number): void {
 		const cutoff = nowMs - TRACE_TTL_MS;
 		let keepFrom = 0;

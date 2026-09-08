@@ -256,4 +256,130 @@ describe("auth-gateway conductor wiring", () => {
 			await fs.rm(dir, { recursive: true, force: true });
 		}
 	});
+
+	it("retries the same target once on credential_quota then falls back", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-quota-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const primary = createMockModel({
+			provider: "openrouter",
+			id: "primary-id",
+			handler: () => {
+				throw new Error("You have hit your ChatGPT usage limit (pro plan). Try again in ~158 min.");
+			},
+		});
+		const backup = createMockModel({
+			provider: "openrouter",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["credential_quota"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(200);
+			expect(primary.calls.length).toBe(2);
+			expect(backup.calls.length).toBe(1);
+			const body = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> };
+			expect(body.choices?.[0]?.message?.content).toBe("ok");
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
+	it("does not use a provider_unavailable backup for credential_quota after sibling retry (negative)", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-conductor-wire-quota-neg-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const primary = createMockModel({
+			provider: "openrouter",
+			id: "primary-id",
+			handler: () => {
+				throw new Error("You have hit your ChatGPT usage limit (pro plan). Try again in ~158 min.");
+			},
+		});
+		const backup = createMockModel({
+			provider: "openrouter",
+			id: "backup-id",
+			handler: { content: ["ok"] },
+		});
+		const resolveModel = (id: string) => {
+			if (id === "primary-id") return primary.model;
+			if (id === "backup-id") return backup.model;
+			return undefined;
+		};
+		const registry = new RouteRegistry(resolveModel);
+		registry.register({
+			id: "virtual-impl",
+			root: {
+				type: "fallback",
+				on: ["provider_unavailable"],
+				children: [
+					{ type: "target", model: "primary-id" },
+					{ type: "target", model: "backup-id" },
+				],
+			},
+		});
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel,
+			routeRegistry: registry,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "virtual-impl",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).not.toBe(200);
+			expect(primary.calls.length).toBe(2);
+			expect(backup.calls.length).toBe(0);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
 });

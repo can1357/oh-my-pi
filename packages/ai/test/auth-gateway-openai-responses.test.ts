@@ -729,6 +729,38 @@ describe("openai-responses parseRequest", () => {
 			}),
 		).toThrow(/computer_call|call_id|valid bridged Responses input item/);
 	});
+
+	it("parses seed, response_format, parallel_tool_calls, previous_response_id, and user onto options", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.4",
+			input: "hi",
+			seed: 7,
+			response_format: { type: "json_object" },
+			parallel_tool_calls: false,
+			previous_response_id: "resp_prev",
+			user: "user-1",
+			logit_bias: { "42": -1 },
+		});
+		expect(parsed.options.seed).toBe(7);
+		expect(parsed.options.responseFormat).toEqual({ type: "json_object" });
+		expect(parsed.options.parallelToolCalls).toBe(false);
+		expect(parsed.options.previousResponseId).toBe("resp_prev");
+		expect(parsed.options.user).toBe("user-1");
+		expect(parsed.options.logitBias).toEqual({ "42": -1 });
+	});
+
+	it("leaves omitted seed, response_format, parallel_tool_calls, previous_response_id, and user undefined (negative)", () => {
+		const parsed = parseRequest({
+			model: "gpt-5.4",
+			input: "hi",
+		});
+		expect(parsed.options.seed).toBeUndefined();
+		expect(parsed.options.responseFormat).toBeUndefined();
+		expect(parsed.options.parallelToolCalls).toBeUndefined();
+		expect(parsed.options.previousResponseId).toBeUndefined();
+		expect(parsed.options.user).toBeUndefined();
+		expect(parsed.options.logitBias).toBeUndefined();
+	});
 });
 
 describe("openai-responses encodeResponse", () => {

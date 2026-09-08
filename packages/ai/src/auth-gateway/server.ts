@@ -2,11 +2,11 @@
  * omp auth-gateway HTTP server.
  *
  * Accepts any provider-format request (OpenAI chat-completions, Anthropic
- * messages, OpenAI Responses) and dispatches through pi-ai's `streamSimple()`
- * — which handles credential injection, anthropic-beta headers, codex
- * websocket transport, and all the per-provider intricacies. The gateway is
- * pure protocol translation: foreign wire → omp Context → pi-ai stream() →
- * omp events → foreign wire.
+ * messages, OpenAI Responses, Gemini v1beta) and dispatches through pi-ai's
+ * `streamSimple()` — which handles credential injection, anthropic-beta
+ * headers, codex websocket transport, and all the per-provider intricacies.
+ * The gateway is pure protocol translation: foreign wire → omp Context →
+ * pi-ai stream() → omp events → foreign wire.
  *
  * Endpoints:
  *   GET  /healthz                          → unauth; ok + version
@@ -17,9 +17,20 @@
  *   GET  /v1/routes/:id                    → one registered virtual route
  *   PUT  /v1/routes/:id                    → register or replace a virtual route
  *   DELETE /v1/routes/:id                    → unregister a virtual route
+ *   GET  /v1/executions/:id                → redacted decision traces for one execution
+ *   GET  /v1/health/routes                 → virtual route ids, generations, and targets (no credentials)
+ *   GET  /v1/credentials                   → stored credential ids, providers, and types (no secrets)
+ *   POST /v1/credentials/:id/disable       → disable a stored credential
+ *   POST /v1/credentials/:id/pin           → pin a session to an OAuth credential
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
+ *   POST /v1/grok/chat/completions         → OpenAI chat-completions (xAI alias)
  *   POST /v1/messages                      → Anthropic messages in/out
+ *   POST /v1/messages/count_tokens         → Anthropic Messages count_tokens
  *   POST /v1/responses                     → OpenAI Responses in/out
+ *   POST /backend-api/codex/responses      → OpenAI Responses (Codex alias)
+ *   POST /backend-api/responses            → OpenAI Responses (Codex alias)
+ *   POST /v1beta/models/generateContent    → Gemini v1beta generateContent
+ *   POST /v1beta/models/streamGenerateContent → Gemini v1beta streamGenerateContent
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
@@ -29,7 +40,9 @@ import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
+import { handleCountTokens } from "../providers/anthropic-count-tokens-server";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
+import * as geminiV1beta from "../providers/gemini-v1beta-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
@@ -38,7 +51,8 @@ import type { Api, AssistantMessage, AssistantMessageEventStream, Context, Model
 import type { ClientUsageIdentity } from "../usage";
 import { deterministicUuid } from "../utils/deterministic-id";
 import { parseBind } from "../utils/parse-bind";
-import { RouteDecisionTraceLog, redactedDecisionSummary } from "./decision-trace";
+import { type RouteDecisionTrace, RouteDecisionTraceLog, redactedDecisionSummary } from "./decision-trace";
+import { type GatewayHooks, runHook } from "./hooks";
 import {
 	captureRequestHeaders,
 	corsHeaders,
@@ -95,15 +109,22 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	routes?: readonly RouteDefinition[];
 	/** Bounded redacted decision log. Constructed by {@link startAuthGateway} when omitted. */
 	decisionTraces?: RouteDecisionTraceLog;
+	/** Optional request lifecycle hooks. Missing hooks are a no-op. */
+	hooks?: GatewayHooks;
 }
 
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
 
-const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
+export const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/chat/completions": { module: openaiChat, label: "openai-chat" },
+	"/v1/grok/chat/completions": { module: openaiChat, label: "openai-chat" },
 	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages" },
 	"/v1/responses": { module: openaiResponses, label: "openai-responses" },
+	"/backend-api/codex/responses": { module: openaiResponses, label: "openai-responses" },
+	"/backend-api/responses": { module: openaiResponses, label: "openai-responses" },
+	"/v1beta/models/generateContent": { module: geminiV1beta, label: "gemini-v1beta" },
+	"/v1beta/models/streamGenerateContent": { module: geminiV1beta, label: "gemini-v1beta" },
 };
 
 // (passthrough fast-path removed — it bypassed pi-ai provider logic, in
@@ -372,19 +393,23 @@ function unknownModelResponse(formatError: FormatErrorFn, modelId: string): Resp
 function conductorExecutionState(
 	compiled: CompiledRoute,
 	attemptedTargets: ReadonlySet<string>,
+	attemptedCredentials: ReadonlySet<number>,
 	retryCount: number,
 	fallbackCount: number,
 	currentTarget: string,
+	siblingsExhausted: boolean,
 	commitState: StreamCommitState,
 ): ExecutionState {
 	return {
 		routeId: compiled.id,
 		generation: compiled.generation,
 		attemptedTargets,
+		attemptedCredentials,
 		retryCount,
 		fallbackCount,
 		committed: commitState !== "probing",
 		currentTarget,
+		siblingsExhausted,
 	};
 }
 
@@ -395,16 +420,6 @@ function dispatchTargetId(
 ): string | undefined {
 	const action = decideAttempt({ route: compiled, state, commitState });
 	return action.type === "dispatch" ? action.targetModelId : undefined;
-}
-
-function fallbackTargetId(
-	compiled: CompiledRoute,
-	state: ExecutionState,
-	classification: GatewayErrorClassification,
-	commitState: StreamCommitState,
-): string | undefined {
-	const action = decideAttempt({ route: compiled, state, classification, commitState });
-	return action.type === "fallback_target" ? action.targetModelId : undefined;
 }
 
 /**
@@ -728,6 +743,11 @@ async function handleFormatEndpoint(
 		const message = error instanceof Error ? error.message : String(error);
 		return route.module.formatError(400, "invalid_request_error", message);
 	}
+	await runHook(bootOpts.hooks?.beforeRequest, {
+		requestId,
+		routeId: compiled.id,
+		generation: compiled.generation,
+	});
 	// Merge gateway-captured passthrough headers under the parser's own
 	// captures. Parsers that set `options.headers` themselves win (they may
 	// have stripped or normalized values); the gateway's allow-list fills in
@@ -757,14 +777,26 @@ async function handleFormatEndpoint(
 	const commitGate = new StreamCommitGate();
 	const formatError = route.module.formatError;
 	const attemptedTargets = new Set<string>();
+	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
 	let fallbackCount = 0;
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
-	const attemptCap = compiled.targets.length + 1;
+	let siblingsExhausted = false;
+	// One dispatch + one sibling-credential retry per target, plus a spare iteration.
+	const attemptCap = compiled.targets.length * 2 + 1;
 
 	const stateNow = (): ExecutionState =>
-		conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, commitGate.state);
+		conductorExecutionState(
+			compiled,
+			attemptedTargets,
+			attemptedCredentials,
+			retryCount,
+			fallbackCount,
+			currentTarget,
+			siblingsExhausted,
+			commitGate.state,
+		);
 
 	const classifiedError = (classified: GatewayErrorClassification): Response =>
 		formatError(classified.status, classified.type, classified.message);
@@ -772,17 +804,36 @@ async function handleFormatEndpoint(
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
 		if (commitGate.state === "committed") return false;
-		const next = fallbackTargetId(
-			compiled,
-			conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, "probing"),
-			classified,
-			"probing",
-		);
-		if (next === undefined) return false;
-		pendingFallback = next;
-		fallbackCount += 1;
-		retryCount += 1;
-		return true;
+		const action = decideAttempt({
+			route: compiled,
+			state: conductorExecutionState(
+				compiled,
+				attemptedTargets,
+				attemptedCredentials,
+				retryCount,
+				fallbackCount,
+				currentTarget,
+				siblingsExhausted,
+				"probing",
+			),
+			classification: classified,
+			commitState: "probing",
+		});
+		if (action.type === "sibling_credential") {
+			siblingsExhausted = true;
+			pendingFallback = currentTarget;
+			retryCount += 1;
+			return true;
+		}
+		if (action.type === "fallback_target") {
+			// New target gets a fresh sibling-credential budget.
+			siblingsExhausted = false;
+			pendingFallback = action.targetModelId;
+			fallbackCount += 1;
+			retryCount += 1;
+			return true;
+		}
+		return false;
 	};
 
 	const bindCurrentTarget = (targetId: string): Response | undefined => {
@@ -854,6 +905,10 @@ async function handleFormatEndpoint(
 				),
 			};
 		}
+		const activeCredentialId = bootOpts.storage
+			.listOAuthAccounts(model.provider, sessionId)
+			.find(account => account.active)?.credentialId;
+		if (activeCredentialId !== undefined) attemptedCredentials.add(activeCredentialId);
 		const dispatched = traces.record({
 			requestId,
 			routeId: compiled.id,
@@ -937,6 +992,12 @@ async function handleFormatEndpoint(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
+					await runHook(bootOpts.hooks?.afterRequest, {
+						requestId,
+						routeId: compiled.id,
+						generation: compiled.generation,
+						ok: true,
+					});
 					return json(
 						200,
 						route.module.encodeResponse(message, parsed.modelId),
@@ -1054,6 +1115,12 @@ async function handleFormatEndpoint(
 			return clientClosedResponse(route);
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
+		await runHook(bootOpts.hooks?.afterRequest, {
+			requestId,
+			routeId: compiled.id,
+			generation: compiled.generation,
+			ok: true,
+		});
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -1139,14 +1206,26 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const commitGate = new StreamCommitGate();
 	const formatError = piNative.formatError;
 	const attemptedTargets = new Set<string>();
+	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
 	let fallbackCount = 0;
 	let pendingFallback: string | undefined;
 	let lastClassified: GatewayErrorClassification | undefined;
-	const attemptCap = compiled.targets.length + 1;
+	let siblingsExhausted = false;
+	// One dispatch + one sibling-credential retry per target, plus a spare iteration.
+	const attemptCap = compiled.targets.length * 2 + 1;
 
 	const stateNow = (): ExecutionState =>
-		conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, commitGate.state);
+		conductorExecutionState(
+			compiled,
+			attemptedTargets,
+			attemptedCredentials,
+			retryCount,
+			fallbackCount,
+			currentTarget,
+			siblingsExhausted,
+			commitGate.state,
+		);
 
 	const classifiedError = (classified: GatewayErrorClassification): Response =>
 		formatError(classified.status, classified.type, classified.message);
@@ -1154,17 +1233,36 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
 		if (commitGate.state === "committed") return false;
-		const next = fallbackTargetId(
-			compiled,
-			conductorExecutionState(compiled, attemptedTargets, retryCount, fallbackCount, currentTarget, "probing"),
-			classified,
-			"probing",
-		);
-		if (next === undefined) return false;
-		pendingFallback = next;
-		fallbackCount += 1;
-		retryCount += 1;
-		return true;
+		const action = decideAttempt({
+			route: compiled,
+			state: conductorExecutionState(
+				compiled,
+				attemptedTargets,
+				attemptedCredentials,
+				retryCount,
+				fallbackCount,
+				currentTarget,
+				siblingsExhausted,
+				"probing",
+			),
+			classification: classified,
+			commitState: "probing",
+		});
+		if (action.type === "sibling_credential") {
+			siblingsExhausted = true;
+			pendingFallback = currentTarget;
+			retryCount += 1;
+			return true;
+		}
+		if (action.type === "fallback_target") {
+			// New target gets a fresh sibling-credential budget.
+			siblingsExhausted = false;
+			pendingFallback = action.targetModelId;
+			fallbackCount += 1;
+			retryCount += 1;
+			return true;
+		}
+		return false;
 	};
 
 	const bindCurrentTarget = (targetId: string): Response | undefined => {
@@ -1236,6 +1334,10 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				),
 			};
 		}
+		const activeCredentialId = bootOpts.storage
+			.listOAuthAccounts(model.provider, sessionId)
+			.find(account => account.active)?.credentialId;
+		if (activeCredentialId !== undefined) attemptedCredentials.add(activeCredentialId);
 		const dispatched = traces.record({
 			requestId,
 			routeId: compiled.id,
@@ -1604,13 +1706,97 @@ function handleRouteDelete(registry: RouteRegistry, id: string): Response {
 	return new Response(null, { status: 204 });
 }
 
+function handleExecutionTraces(traces: RouteDecisionTraceLog, id: string): Response {
+	const recorded = traces.get(id);
+	if (recorded.length === 0) {
+		return json(404, { error: `Unknown execution: ${id}` });
+	}
+	const data: RouteDecisionTrace[] = [];
+	for (const trace of recorded) {
+		const row: RouteDecisionTrace = {
+			requestId: trace.requestId,
+			routeId: trace.routeId,
+			generation: trace.generation,
+			selectedTarget: trace.selectedTarget,
+			disposition: trace.disposition,
+			recordedAtMs: trace.recordedAtMs,
+		};
+		if (trace.reason !== undefined) row.reason = trace.reason;
+		data.push(row);
+	}
+	return json(200, { object: "list", data });
+}
+
+interface HealthRouteRow {
+	id: string;
+	generation: number;
+	targets: readonly string[];
+}
+
+function handleHealthRoutes(registry: RouteRegistry): Response {
+	const data: HealthRouteRow[] = [];
+	for (const route of registry.list()) {
+		data.push({
+			id: route.id,
+			generation: route.generation,
+			targets: route.targets,
+		});
+	}
+	return json(200, { object: "list", generation: registry.generation, data });
+}
+
+interface CredentialListRow {
+	id: number;
+	provider: string;
+	type: "api_key" | "oauth";
+}
+
+function handleCredentialsList(storage: AuthStorage): Response {
+	const data: CredentialListRow[] = [];
+	for (const entry of storage.exportSnapshot().credentials) {
+		data.push({
+			id: entry.id,
+			provider: entry.provider,
+			type: entry.credential.type,
+		});
+	}
+	return json(200, { object: "list", data });
+}
+
+function handleCredentialDisable(storage: AuthStorage, id: string): Response {
+	if (!storage.disableCredentialById(Number(id), "gateway")) {
+		return json(404, { error: `No credential with id=${id}` });
+	}
+	return json(200, { ok: true });
+}
+
+async function handleCredentialPin(storage: AuthStorage, id: string, req: Request): Promise<Response> {
+	let body: unknown;
+	try {
+		body = await req.json();
+	} catch (error) {
+		return json(400, { error: `Invalid JSON body: ${String(error)}` });
+	}
+	if (!isRecord(body) || typeof body.provider !== "string" || typeof body.sessionId !== "string") {
+		return json(400, { error: "provider and sessionId are required" });
+	}
+	if (body.provider.length === 0 || body.sessionId.length === 0) {
+		return json(400, { error: "provider and sessionId are required" });
+	}
+	if (!storage.pinSessionOAuthAccount(body.provider, body.sessionId, Number(id))) {
+		return json(404, { error: `No credential with id=${id}` });
+	}
+	return json(200, { ok: true });
+}
+
 export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServerHandle {
 	const registry = opts.routeRegistry ?? new RouteRegistry(opts.resolveModel);
 	for (const def of opts.routes ?? []) registry.register(def);
+	const traces = opts.decisionTraces ?? new RouteDecisionTraceLog();
 	const boot: AuthGatewayBootOptions = {
 		...opts,
 		routeRegistry: registry,
-		decisionTraces: opts.decisionTraces ?? new RouteDecisionTraceLog(),
+		decisionTraces: traces,
 	};
 	const bind = parseBind(boot.bind ?? DEFAULT_AUTH_GATEWAY_BIND);
 	const tokens = new Set<string>(boot.bearerTokens);
@@ -1651,7 +1837,21 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				if (req.method === "GET" && pathname === "/v1/credentials/check") {
 					return withCors(await handleCredentialsCheck(boot.storage, req.signal), req);
 				}
+				if (req.method === "GET" && pathname === "/v1/credentials") {
+					return withCors(handleCredentialsList(boot.storage), req);
+				}
+				const credentialAction = /^\/v1\/credentials\/([^/]+)\/(disable|pin)$/.exec(pathname);
+				if (req.method === "POST" && credentialAction) {
+					const credentialId = credentialAction[1]!;
+					if (credentialAction[2] === "disable") {
+						return withCors(handleCredentialDisable(boot.storage, credentialId), req);
+					}
+					return withCors(await handleCredentialPin(boot.storage, credentialId, req), req);
+				}
 
+				if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
+					return withCors(await handleCountTokens(req, boot.resolveModel), req);
+				}
 				// Provider-format dispatch.
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {
@@ -1693,6 +1893,16 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 						return withCors(json(404, { error: `No route: DELETE ${pathname}` }), req);
 					}
 					return withCors(handleRouteDelete(registry, id), req);
+				}
+				if (req.method === "GET" && pathname === "/v1/health/routes") {
+					return withCors(handleHealthRoutes(registry), req);
+				}
+				if (req.method === "GET" && pathname.startsWith("/v1/executions/")) {
+					const id = pathname.slice("/v1/executions/".length);
+					if (id.length === 0) {
+						return withCors(json(404, { error: `No route: GET ${pathname}` }), req);
+					}
+					return withCors(handleExecutionTraces(traces, id), req);
 				}
 
 				// Route-table miss: no format module to defer to, so we emit a
