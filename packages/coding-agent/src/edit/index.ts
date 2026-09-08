@@ -343,6 +343,7 @@ export class EditTool implements AgentTool<TInput> {
 	readonly #editMode?: EditMode;
 	readonly #deferredDiagnostics: DeferredDiagnostics;
 	readonly #sessions = new Map<string, EditSession>();
+	readonly #streamedArgs = new Map<string, string>();
 	readonly #approvalRevisions = new Map<string, ToolApprovalRevision[]>();
 
 	constructor(
@@ -454,15 +455,35 @@ export class EditTool implements AgentTool<TInput> {
 			if (oldestId === undefined) break;
 			this.#sessions.get(oldestId)?.close();
 			this.#sessions.delete(oldestId);
+			this.#streamedArgs.delete(oldestId);
 		}
 		return {
 			push: delta => editSession.push(delta),
-			end: () => editSession.finish(),
+			end: args => {
+				if (args !== undefined) this.#streamedArgs.set(init.toolCallId, JSON.stringify(args));
+				editSession.finish();
+			},
 			cancel: () => {
 				editSession.close();
+				this.#streamedArgs.delete(init.toolCallId);
 				if (this.#sessions.get(init.toolCallId) === editSession) this.#sessions.delete(init.toolCallId);
 			},
 		};
+	}
+
+	// A streamed session is reusable only while the params still match what
+	// the stream finished with: a `tool_call` handler can revise the input
+	// after the stream ends, and reusing the buffered payload would propose
+	// and execute the original args instead of the revised ones.
+	#reusableStreamedSession(toolCallId: string, params: EditParams): EditSession | undefined {
+		const streamed = this.#sessions.get(toolCallId);
+		if (!streamed) return undefined;
+		const streamedArgs = this.#streamedArgs.get(toolCallId);
+		if (streamedArgs === undefined || streamedArgs === JSON.stringify(params)) return streamed;
+		streamed.close();
+		this.#sessions.delete(toolCallId);
+		this.#streamedArgs.delete(toolCallId);
+		return undefined;
 	}
 
 	async prepareApproval(toolCallId: string, params: EditParams, signal?: AbortSignal): Promise<ToolApprovalReview> {
@@ -470,12 +491,13 @@ export class EditTool implements AgentTool<TInput> {
 		// A streamed call already finished its own session: re-encoding the
 		// parsed args as JSON would corrupt a raw apply_patch payload, which
 		// must stay the verbatim patch text its policy parses.
-		const streamed = this.#sessions.get(toolCallId);
+		const streamed = this.#reusableStreamedSession(toolCallId, params);
 		const editSession = streamed ?? new EditSession(getEditStore(this.session), this.#policy(false));
 		this.#sessions.set(toolCallId, editSession);
 		const dispose = () => {
 			editSession.close();
 			this.#approvalRevisions.delete(toolCallId);
+			this.#streamedArgs.delete(toolCallId);
 			if (this.#sessions.get(toolCallId) === editSession) this.#sessions.delete(toolCallId);
 		};
 		try {
@@ -519,7 +541,7 @@ export class EditTool implements AgentTool<TInput> {
 		_onUpdate?: AgentToolUpdateCallback<EditToolDetails, TInput>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
-		let editSession = this.#sessions.get(toolCallId);
+		let editSession = this.#reusableStreamedSession(toolCallId, params);
 		if (!editSession) {
 			// No deltas were streamed (non-streaming provider, inline recovery,
 			// Cursor batch frames): the parsed args are the whole payload.
@@ -542,8 +564,9 @@ export class EditTool implements AgentTool<TInput> {
 			if (batch?.flush) await flushLspWritethroughBatch(batch.id, this.session.cwd, signal);
 			throw error;
 		} finally {
-			editSession.close();
 			this.#approvalRevisions.delete(toolCallId);
+			this.#streamedArgs.delete(toolCallId);
+			editSession.close();
 			if (this.#sessions.get(toolCallId) === editSession) this.#sessions.delete(toolCallId);
 		}
 

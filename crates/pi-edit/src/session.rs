@@ -113,8 +113,14 @@ pub struct EditRevision {
 
 #[derive(Debug, Clone)]
 struct StagedPlan {
-	staged: Vec<StagedFile>,
-	reads:  HashMap<PathBuf, Arc<FileRead>>,
+	staged:      Vec<StagedFile>,
+	/// FileRead per reviewed existing file, for persisting revised content
+	/// with the original encoding.
+	reads:       HashMap<PathBuf, Arc<FileRead>>,
+	/// Exact on-disk bytes at review time for drift detection. Bytes, not
+	/// the lossy FileRead text, because a file with invalid UTF-8 would
+	/// otherwise never compare equal to its untouched on-disk self.
+	drift_bytes: HashMap<PathBuf, Vec<u8>>,
 }
 
 /// Per-file apply outcome.
@@ -274,6 +280,7 @@ impl Session {
 
 		let mut eligible_files = Vec::new();
 		let mut reads = HashMap::new();
+		let mut drift_bytes = HashMap::new();
 
 		for file in &staged {
 			if file.existed {
@@ -281,8 +288,10 @@ impl Session {
 				if let Some(read) = self.files.try_read(&resolved)? {
 					reads.insert(file.absolute.clone(), read);
 				}
+				let bytes = std::fs::read(&file.absolute)
+					.map_err(|err| EditError::Io { path: file.absolute.clone(), source: err })?;
+				drift_bytes.insert(file.absolute.clone(), bytes);
 			}
-
 			let is_eligible = (file.op == FileOp::Create || file.op == FileOp::Update)
 				&& file.move_to.is_none()
 				&& file.after != file.before;
@@ -302,7 +311,7 @@ impl Session {
 			}
 		}
 
-		self.staged_plan = Some(StagedPlan { staged, reads });
+		self.staged_plan = Some(StagedPlan { staged, reads, drift_bytes });
 		Ok(eligible_files)
 	}
 
@@ -316,7 +325,7 @@ impl Session {
 	) -> EditResult<ApplyOutcome> {
 		let revisions_slice = revisions.unwrap_or(&[]);
 		let staged = if let Some(plan) = self.staged_plan.take() {
-			let StagedPlan { staged: original_staged, reads: staged_reads } = plan;
+			let StagedPlan { staged: original_staged, reads: staged_reads, drift_bytes } = plan;
 
 			// Validate that every target file on disk matches what was reviewed
 			for file in &original_staged {
@@ -328,14 +337,14 @@ impl Session {
 					)));
 				}
 				if file.existed {
-					if let Some(staged_read) = staged_reads.get(&file.absolute) {
+					if let Some(reviewed_bytes) = drift_bytes.get(&file.absolute) {
 						let current_bytes = match std::fs::read(&file.absolute) {
 							Ok(bytes) => bytes,
 							Err(err) => {
 								return Err(EditError::Io { path: file.absolute.clone(), source: err });
 							},
 						};
-						if current_bytes.as_slice() != staged_read.raw.as_bytes() {
+						if current_bytes.as_slice() != reviewed_bytes.as_slice() {
 							return Err(EditError::apply(format!(
 								"File {} content changed on disk during review",
 								file.display

@@ -327,7 +327,21 @@ export interface WriteToolDetails {
 interface WriteApprovalState {
 	absolutePath: string;
 	before: string | null;
+	/** Exact bytes captured at proposal time; drift compares bytes, not lossy text. */
+	beforeBytes: Uint8Array | null;
 	content?: string;
+}
+
+// Drift must compare exact bytes: lossy UTF-8 decoding maps distinct malformed
+// sequences to the same U+FFFD, so a byte flipped during approval would look
+// unchanged through a decoded string comparison.
+function approvalBytesMatch(current: Uint8Array | null, reviewed: Uint8Array | null): boolean {
+	if (current === null || reviewed === null) return current === reviewed;
+	if (current.byteLength !== reviewed.byteLength) return false;
+	for (let index = 0; index < current.byteLength; index++) {
+		if (current[index] !== reviewed[index]) return false;
+	}
+	return true;
 }
 
 /**
@@ -1116,9 +1130,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		};
 	}
 
-	async #readApprovalContent(absolutePath: string): Promise<string | null> {
+	async #readApprovalBytes(absolutePath: string): Promise<Uint8Array | null> {
 		try {
-			return await Bun.file(absolutePath).text();
+			return new Uint8Array(await Bun.file(absolutePath).arrayBuffer());
 		} catch (error) {
 			if (isEnoent(error)) return null;
 			throw error;
@@ -1143,10 +1157,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		await assertNotReadSelectorMisfire(target, after, this.session.cwd);
 		enforcePlanModeWrite(this.session, target, { op: "create" });
 		const absolutePath = resolvePlanPath(this.session, target);
-		const before = await this.#readApprovalContent(absolutePath);
+		const beforeBytes = await this.#readApprovalBytes(absolutePath);
+		const before = beforeBytes === null ? null : new TextDecoder().decode(beforeBytes);
 		signal?.throwIfAborted();
 		const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
-		const state: WriteApprovalState = { absolutePath, before };
+		const state: WriteApprovalState = { absolutePath, before, beforeBytes };
 		this.#approvalWrites.set(toolCallId, state);
 		return {
 			files: before === after ? [] : [{ path: displayPath, before, after }],
@@ -1358,7 +1373,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			if (
 				approval &&
 				(approval.absolutePath !== absolutePath ||
-					approval.before !== (await this.#readApprovalContent(absolutePath)))
+					!approvalBytesMatch(await this.#readApprovalBytes(absolutePath), approval.beforeBytes))
 			) {
 				throw new ToolError("The write target changed during approval; request a new proposal");
 			}

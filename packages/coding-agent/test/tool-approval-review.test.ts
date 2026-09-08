@@ -281,6 +281,44 @@ describe("tool approval content review", () => {
 		expect(resultText(result)).toContain(`[revert.ts#${headTag}]`);
 	});
 
+	test.skipIf(!supportsNativeReview)(
+		"a tool_call revision after the stream reseeds the session from the revised params",
+		async () => {
+			const absolute = await fixture("revised.ts");
+			const tool = new EditTool(session, "replace");
+			const streamed = { path: "revised.ts", old_string: "\treturn 1;", new_string: "\treturn 2;" };
+			const revised = { path: "revised.ts", old_string: "\treturn 1;", new_string: "\treturn 7;" };
+			const argStream = tool.openArgStream({ toolCallId: "revised", toolName: "edit", emit: () => {} });
+			argStream.push(JSON.stringify(streamed));
+			argStream.end(streamed);
+
+			const review = await tool.prepareApproval("revised", revised);
+			const expectedAfter = "export function value(): number {\n\treturn 7;\n}\n";
+			expect(review.files).toEqual([{ path: "revised.ts", before: SOURCE, after: expectedAfter }]);
+			const result = await tool.execute("revised", revised);
+			expect(result.isError).not.toBe(true);
+			expect(await Bun.file(absolute).text()).toBe(expectedAfter);
+		},
+	);
+
+	test.skipIf(!supportsNativeReview)("an existing file with invalid UTF-8 is not reported as drifted", async () => {
+		const absolute = path.join(tmpDir, "binary-ish.ts");
+		await Bun.write(absolute, new Uint8Array([0xff, 0x0a, ...new TextEncoder().encode(SOURCE)]));
+		const tool = new EditTool(session, "replace");
+		const params = { path: absolute, old_string: "\treturn 1;", new_string: "\treturn 2;" };
+
+		const review = await tool.prepareApproval("utf8", params);
+		expect(review.files.length).toBe(1);
+		review.apply([]);
+		const result = await tool.execute("utf8", params);
+		expect(result.isError).not.toBe(true);
+		const after = new Uint8Array(await Bun.file(absolute).arrayBuffer());
+		// The edit rewrites the file from its lossy decode (native behavior),
+		// so the invalid byte itself does not survive — the contract under
+		// test is that drift does not falsely reject the untouched file.
+		expect(new TextDecoder().decode(after)).toContain("\treturn 2;");
+	});
+
 	describe("write tool review", () => {
 		test("proposes a created file, substitutes human content, and forces a fresh tag header", async () => {
 			session.settings.set("edit.mode", "replace");
@@ -301,6 +339,21 @@ describe("tool approval content review", () => {
 			const headTag = store.headHash(target);
 			expect(headTag).toBeTruthy();
 			expect(store.byHashText(target, headTag!)).toBe("human content\n");
+		});
+
+		test("write drift detects a changed malformed byte that lossy text hides", async () => {
+			const target = path.join(tmpDir, "malformed.bin");
+			await Bun.write(target, new Uint8Array([0x80, 0x01]));
+			const tool = new WriteTool(session);
+			const params = { path: target, content: "replacement\n" };
+
+			const review = await tool.prepareApproval("malformed", params);
+			if (!review) throw new Error("expected a review for a filesystem write");
+			await Bun.write(target, new Uint8Array([0x81, 0x01]));
+
+			review.apply([]);
+			await expect(tool.execute("malformed", params)).rejects.toThrow(/changed during approval/);
+			expect(await Bun.file(target).arrayBuffer()).toEqual(new Uint8Array([0x81, 0x01]).buffer);
 		});
 
 		test("proposes no tab when the write would not change the file", async () => {
