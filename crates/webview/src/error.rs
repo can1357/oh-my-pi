@@ -1,3 +1,5 @@
+#![expect(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
+
 //! Error taxonomy shared by every engine backend.
 
 use std::{io, path::PathBuf, result};
@@ -7,7 +9,7 @@ use omp_core::Str;
 use png::DecodingError;
 use tokio::time::error::Elapsed;
 use tokio_tungstenite::tungstenite;
-
+use strum::IntoStaticStr;
 use crate::SurfaceKind;
 
 /// Crate-wide result alias.
@@ -81,7 +83,8 @@ pub enum CdpDiscoveryError {
 }
 
 /// Everything that can go wrong while creating or driving a web surface.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, thiserror::Error, IntoStaticStr)]
+#[strum(serialize_all = "snake_case", const_into_str)]
 #[non_exhaustive]
 pub enum Error {
 	/// No installed browser satisfies the requested engine/surface combination.
@@ -143,6 +146,7 @@ pub enum Error {
 	MalformedMessage(#[from] serde_json::Error),
 
 	/// Websocket transport failure while talking to a remote engine.
+	#[strum(to_string = "websocket")]
 	#[error("websocket error: {0}")]
 	WebSocket(#[from] tungstenite::Error),
 
@@ -169,24 +173,6 @@ pub enum Error {
 }
 impl Error {
 	pub(crate) const fn kind(&self) -> &'static str {
-		match self {
-			Self::NoEngine(_) => "no_engine",
-			Self::Launch { .. } => "launch",
-			Self::Closed => "closed",
-			Self::CdpDiscovery(_) => "cdp_discovery",
-			Self::Protocol(_) => "protocol",
-			Self::ScreencastFrameBase64 { .. } => "screencast_frame_base64",
-			Self::ScreenshotBase64 { .. } => "screenshot_base64",
-			Self::Jpeg(_) => "jpeg",
-			Self::Png(_) => "png",
-			Self::PngEncode(_) => "png_encode",
-			Self::MalformedMessage(_) => "malformed_message",
-			Self::WebSocket(_) => "websocket",
-			Self::Unsupported(_) => "unsupported",
-			Self::Timeout(_) => "timeout",
-			Self::MainThread => "main_thread",
-			Self::WindowHandle => "window_handle",
-			Self::Io(_) => "io",
-		}
+		self.into_str()
 	}
 }

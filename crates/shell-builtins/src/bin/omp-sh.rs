@@ -9,9 +9,12 @@ use omp_shell::{
 };
 use omp_shell_builtins::{process_builtins, utility_builtins};
 use tracing::Instrument as _;
+use strum::IntoStaticStr;
 
 const USAGE: &str = "usage: omp-sh [-c command [name [argument ...]]] [script [argument ...]]";
 
+#[derive(IntoStaticStr)]
+#[strum(serialize_all = "lowercase", const_into_str)]
 enum Invocation {
 	Command { command: String, name: String, args: Vec<String> },
 	Script { path: String, args: Vec<String> },
@@ -20,11 +23,7 @@ enum Invocation {
 
 impl Invocation {
 	const fn kind(&self) -> &'static str {
-		match self {
-			Self::Command { .. } => "command",
-			Self::Script { .. } => "script",
-			Self::Stdin => "stdin",
-		}
+		self.into_str()
 	}
 
 	fn parse() -> Result<Self, &'static str> {

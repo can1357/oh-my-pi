@@ -17,6 +17,7 @@ use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
 	support::{line_ending::LineEnding, quote::Quotable},
 };
+use strum::IntoStaticStr;
 
 mod options {
 	pub const COLUMN_1: &str = "1";
@@ -31,18 +32,18 @@ mod options {
 	pub const NO_CHECK_ORDER: &str = "nocheck-order";
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, IntoStaticStr)]
+#[strum(const_into_str)]
 enum FileNumber {
+	#[strum(to_string = "1")]
 	One,
+	#[strum(to_string = "2")]
 	Two,
 }
 
 impl FileNumber {
 	fn as_str(self) -> &'static str {
-		match self {
-			Self::One => "1",
-			Self::Two => "2",
-		}
+		self.into_str()
 	}
 }
 

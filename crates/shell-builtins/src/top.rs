@@ -14,6 +14,7 @@ use omp_core::Str;
 use omp_shell::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
 use tokio::time::sleep;
 
+use strum::IntoStaticStr;
 use crate::proc_snapshot::{ProcInfo, sanitize_process_command};
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -29,26 +30,33 @@ enum TopSortKey {
 }
 
 /// Column keys accepted by macOS-style `-stats` (comma-separated).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, clap::ValueEnum, IntoStaticStr)]
+#[strum(serialize_all = "UPPERCASE", const_into_str)]
 enum TopStat {
 	Pid,
 	#[value(alias = "uid")]
 	User,
 	#[value(name = "pstate", alias = "state")]
+	#[strum(to_string = "S")]
 	State,
 	#[value(name = "nice", alias = "ni")]
+	#[strum(to_string = "NI")]
 	Nice,
 	#[value(name = "th", alias = "threads")]
+	#[strum(to_string = "TH")]
 	Threads,
 	#[value(name = "vsize", alias = "virt")]
 	Virt,
 	#[value(name = "mem", alias = "rsize", alias = "res")]
 	Res,
 	#[value(alias = "time+")]
+	#[strum(to_string = "TIME+")]
 	Time,
 	#[value(alias = "%cpu")]
+	#[strum(to_string = "%CPU")]
 	Cpu,
 	#[value(name = "%mem", alias = "pmem")]
+	#[strum(to_string = "%MEM")]
 	PctMem,
 	#[value(alias = "comm")]
 	Command,
@@ -70,19 +78,7 @@ const DEFAULT_TOP_STATS: &[TopStat] = &[
 
 impl TopStat {
 	fn header(self) -> &'static str {
-		match self {
-			Self::Pid => "PID",
-			Self::User => "USER",
-			Self::State => "S",
-			Self::Nice => "NI",
-			Self::Threads => "TH",
-			Self::Virt => "VIRT",
-			Self::Res => "RES",
-			Self::Time => "TIME+",
-			Self::Cpu => "%CPU",
-			Self::PctMem => "%MEM",
-			Self::Command => "COMMAND",
-		}
+		self.into_str()
 	}
 
 	fn width(self) -> usize {
