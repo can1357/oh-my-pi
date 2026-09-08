@@ -1,6 +1,6 @@
 import { applyBackgroundToLine, type Component, Container, Markdown, padding, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatBytes } from "@oh-my-pi/pi-utils";
-import { getMarkdownTheme, theme } from "../../modes/theme/theme";
+import { ensureThemeSync, getMarkdownTheme, theme } from "../../modes/theme/theme";
 import { attachmentSgr, collapseImageMarkers, renderPlaceholders } from "../composer-attachments";
 import { imageReferenceHyperlink } from "../image-references";
 import { highlightMagicKeywords } from "../magic-keywords";
@@ -44,6 +44,7 @@ export class UserMessageComponent extends Container implements ReactionTarget {
 
 	constructor(text: string, synthetic = false, imageLinks?: readonly (string | undefined)[]) {
 		super();
+		ensureThemeSync();
 		// Display-only collapse: the stored/wire text carries bracketed `[Image #N, WxH]` markers,
 		// but the transcript shows the same compact `<icon> #N` chip the composer used. Runs before
 		// Markdown layout so wrapping and bubble padding are computed on the visible text.

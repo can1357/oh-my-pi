@@ -16,7 +16,7 @@ import {
 import { getProjectDir, isRecord, logger, sanitizeText } from "@oh-my-pi/pi-utils";
 import { type PerFileDiffPreview, renderStreamingFallback } from "../../edit/renderer";
 import type { Theme } from "../../modes/theme/theme";
-import { getThemeEpoch, theme } from "../../modes/theme/theme";
+import { ensureThemeSync, getThemeEpoch, theme } from "../../modes/theme/theme";
 import { BASH_DEFAULT_PREVIEW_LINES } from "../../tools/bash";
 import { formatDefaultToolExecution } from "../../tools/default-renderer";
 import { EVAL_DEFAULT_PREVIEW_LINES } from "../../tools/eval";
@@ -365,6 +365,7 @@ export class ToolExecutionComponent extends Container {
 		_toolCallId?: string,
 	) {
 		super();
+		ensureThemeSync();
 		this.#toolName = toolName;
 		this.#toolLabel = tool?.label ?? toolName;
 		this.#renderer = options.useBuiltInRenderer === false ? undefined : toolRenderers[toolName];
