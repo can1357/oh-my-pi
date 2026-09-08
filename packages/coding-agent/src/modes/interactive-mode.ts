@@ -127,7 +127,16 @@ import { tinyTitleClient } from "../tiny/title-client";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import {
+	FEED_MODEL_BADGE_WIDTH,
+	formatFeedModelBadge,
+	formatMoreItems,
+	isFeedModelBadgeEnabled,
+	replaceTabs,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
@@ -514,35 +523,55 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	const dot = theme.styledSymbol("status.done", "accent");
 	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
 	const hiddenCount = running.length - visible.length;
+	const showModelBadge = isFeedModelBadgeEnabled();
+	const outerIndent = " ";
 	const rows = renderTreeList(
 		{
 			items: visible,
 			expanded: true,
-			renderItem: session => {
-				const displayId = formatTaskId(session.id);
+			renderItem: (session, context) => {
+				const rowWidth = Math.max(0, columns - visibleWidth(outerIndent) - (context.prefixWidth ?? 0));
 				const role = session.agent ?? session.progress?.agent;
-				const badge = agentTypeBadge(role, theme);
-				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
+				const displayId = truncateToWidth(
+					formatTaskId(session.id),
+					Math.max(0, rowWidth - visibleWidth(`${dot} `)),
+				);
+				const badge = truncateToWidth(
+					agentTypeBadge(role, theme),
+					Math.max(0, rowWidth - visibleWidth(`${dot} ${displayId}`)),
+				);
+				const titleBudget = Math.max(0, rowWidth - visibleWidth(`${dot} ${displayId}${badge}`));
+				const modelBadge = showModelBadge
+					? formatFeedModelBadge(
+							session.progress?.resolvedModelIdentity ?? session.progress?.resolvedModel,
+							session.progress?.resolvedThinkingLevel,
+							session.progress?.advisor,
+							theme,
+							Math.min(FEED_MODEL_BADGE_WIDTH, Math.max(0, titleBudget - 1)),
+						)
+					: "";
+				const modelLead = modelBadge ? `${modelBadge} ` : "";
+				let line = `${dot} ${modelLead}${theme.fg("accent", theme.bold(displayId))}${badge}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
 				const distinctDescription =
 					description && !labelEchoesHandle(session.id, description) ? description : undefined;
 				if (distinctDescription) {
-					const budget = Math.max(
-						TRUNCATE_LENGTHS.SHORT,
-						columns - visibleWidth(displayId) - visibleWidth(Bun.stripANSI(badge)) - 10,
-					);
+					const budget = Math.max(0, rowWidth - visibleWidth(line) - visibleWidth(": "));
 					const formatted = replaceTabs(distinctDescription).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
+					if (budget > 0) {
+						line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
+					}
 				} else {
 					// No spawn description: fall back to a muted task preview, same as
 					// the inline task rows when a row has no label.
 					const taskPreview = session.progress?.task?.trim();
 					if (taskPreview && !labelEchoesHandle(session.id, taskPreview)) {
 						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-						line += ` ${theme.fg("muted", truncateToWidth(formatted, TRUNCATE_LENGTHS.SHORT))}`;
+						const budget = Math.min(TRUNCATE_LENGTHS.SHORT, Math.max(0, rowWidth - visibleWidth(line) - 1));
+						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
 					}
 				}
-				return line;
+				return truncateToWidth(line, rowWidth, "");
 			},
 		},
 		theme,
@@ -550,7 +579,11 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	if (hiddenCount > 0) {
 		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
 	}
-	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+	return [
+		"",
+		truncateToWidth(theme.bold(theme.fg("accent", "Subagents")), columns),
+		...rows.map(line => truncateToWidth(`${outerIndent}${line}`, columns, "")),
+	];
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
