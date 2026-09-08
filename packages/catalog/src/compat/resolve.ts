@@ -798,6 +798,7 @@ function resolveOpenAIResponsesPolicy(
 			PROXY_OPENAI_COMPAT_PROVIDERS[backendProvider] !== true &&
 			(LOCAL_OPENAI_COMPAT_PROVIDERS[backendProvider] === true || hasLocalLoopbackBaseUrl(baseUrl)),
 		supportsObfuscationOptOut: isOpenAIUrl || provider === "openai",
+		warmNativeHistoryReplay: false,
 		officialEndpoint: isOfficialOpenAIEndpoint(provider, baseUrl),
 		harmonyLeakMitigation: false,
 		rejectRootObjectUnion: false,
@@ -859,6 +860,7 @@ function pickResponsesOnly(compat: ResolvedOpenAIResponsesCompat): ResponsesOnly
 		strictResponsesPairing: compat.strictResponsesPairing,
 		supportsImageDetailOriginal: compat.supportsImageDetailOriginal,
 		supportsObfuscationOptOut: compat.supportsObfuscationOptOut,
+		warmNativeHistoryReplay: compat.warmNativeHistoryReplay,
 		supportsAllTurnsReasoningContext: compat.supportsAllTurnsReasoningContext,
 		supportsConfigurationUpdate: compat.supportsConfigurationUpdate,
 		supportsSteering: compat.supportsSteering,

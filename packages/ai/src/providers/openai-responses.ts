@@ -227,13 +227,24 @@ interface OpenAIResponsesChainState {
 	disabled: boolean;
 }
 
-function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSessionState {
+/**
+ * Marker left in the provider-session map once a state for `key` has been closed
+ * (stale-replay reset, model switch). A state created after that stays cold even
+ * when `compat.warmNativeHistoryReplay` is set, so the rebuilt-history fallback
+ * behind `StaleResponsesItem` retries keeps working exactly as without the flag.
+ */
+const closedColdMarker: ProviderSessionState = { close: () => {} };
+
+function createOpenAIResponsesProviderSessionState(
+	warmed: boolean,
+	onClose?: () => void,
+): OpenAIResponsesProviderSessionState {
 	const strictToolsState = createOpenAIStrictToolsState();
 	const reasoningEffortFallbackState = createOpenAIReasoningEffortFallbackState();
 	const state: OpenAIResponsesProviderSessionState = {
 		...strictToolsState,
 		...reasoningEffortFallbackState,
-		nativeHistoryReplayWarmed: false,
+		nativeHistoryReplayWarmed: warmed,
 		chains: new Map(),
 		effortControls: new Map(),
 		close: () => {
@@ -242,6 +253,7 @@ function createOpenAIResponsesProviderSessionState(): OpenAIResponsesProviderSes
 			state.effortControls.clear();
 			clearOpenAIStrictToolsState(state);
 			clearOpenAIReasoningEffortFallbackState(state);
+			onClose?.();
 		},
 	};
 	return state;
@@ -255,7 +267,17 @@ function getOpenAIResponsesProviderSessionState(
 	const key = `${OPENAI_RESPONSES_PROVIDER_SESSION_STATE_PREFIX}${model.provider}`;
 	const existing = providerSessionState.get(key) as OpenAIResponsesProviderSessionState | undefined;
 	if (existing) return existing;
-	const created = createOpenAIResponsesProviderSessionState();
+	// Cold by default: a fresh process rebuilds prior assistant turns from generic content until
+	// the first response proves native replay is accepted. `compat.warmNativeHistoryReplay` opts a
+	// provider into replaying native history from the first request of a resumed session, which
+	// keeps the prompt prefix identical to what the previous process sent (prompt-cache hit on
+	// providers that keep prior-turn thinking in context). Once a state for this key has been
+	// closed, later states stay cold so stale-replay recovery still degrades to rebuilt history.
+	const closedKey = `${key}:closed`;
+	const warmed = model.compat.warmNativeHistoryReplay === true && !providerSessionState.has(closedKey);
+	const created = createOpenAIResponsesProviderSessionState(warmed, () =>
+		providerSessionState.set(closedKey, closedColdMarker),
+	);
 	providerSessionState.set(key, created);
 	return created;
 }

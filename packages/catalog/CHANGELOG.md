@@ -89,6 +89,7 @@
 
 ### Added
 
+- Added the `warmNativeHistoryReplay` Responses compat flag (`warm-native-history-replay` rule axis), default `false` ([#11266](https://github.com/can1357/oh-my-pi/issues/11266), [#11269](https://github.com/can1357/oh-my-pi/pull/11269) by [@mttzzz](https://github.com/mttzzz))
 - Added `compat.bedrockMessagesApi` for `anthropic-messages` models: detected from a Bedrock `/anthropic` base URL under any provider id, it drops tool `strict`, fits `metadata.user_id` to Bedrock's pattern, and enables on-demand compaction; set it in `models.yml` to opt a proxy or an `ANTHROPIC_BASE_URL` reroute in, or `false` to opt out ([#13311](https://github.com/can1357/oh-my-pi/pull/13311)).
 - Added GPT-6.1 Sol pricing for `openai-codex` (`gpt-6.1-sol`, `gpt-6.1-sol-wm`: $2 input, $10 output, $0.10 cached input), so Codex usage shows cost instead of $0 ([#13782](https://github.com/can1357/oh-my-pi/pull/13782) by [@H4vC](https://github.com/H4vC)).
 - Added `Model.serviceTiers`, the service tiers a provider advertises for a model; Codex discovery fills it from `service_tiers` (e.g. `priority`, `ultrafast`) ([#13782](https://github.com/can1357/oh-my-pi/pull/13782) by [@H4vC](https://github.com/H4vC)).
