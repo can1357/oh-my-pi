@@ -151,6 +151,14 @@ export type ServiceTierFamily = "openai" | "anthropic" | "google";
 export type ServiceTierByFamily = Partial<Record<ServiceTierFamily, ServiceTier>>;
 
 type ServiceTierModel = Pick<Model, "provider" | "api" | "identity">;
+// The service-tier matrix below intentionally stays in TypeScript rather than
+// the KDL compat tree: `shouldSendServiceTier` accepts bare provider strings
+// (agent telemetry, google-shared header placement) and the stats parser
+// rebuilds slim `{ provider, api, identity }` models from historical session
+// JSONL — neither path holds a resolved compat record, so a KDL axis would
+// merely duplicate this table as its own fallback. The functions branch on
+// structured `classifyModel` facts, api, and a short provider list, which is
+// the sanctioned mechanism layer.
 
 function isOpenAIServiceTierApi(api: Api | undefined): boolean {
 	return api === "openai-completions" || api === "openai-responses" || api === "openai-codex-responses";
@@ -418,6 +426,11 @@ export interface StreamOptions {
 	 * Side-channel and advisor requests must leave it unset.
 	 */
 	anthropicCacheRefresh?: boolean;
+	/**
+	 * Anthropic preserved-thinking behavior when a signed block no longer matches
+	 * its conversation prefix. Binding-capable models default to `"drop_block"`.
+	 */
+	anthropicPrefixMismatchBehavior?: "drop_block" | "error";
 	/** @internal Marks a replay-only Anthropic request that must use non-streaming `max_tokens: 0`. */
 	anthropicCacheRefreshRequest?: boolean;
 	/**
@@ -633,6 +646,8 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	 * A rejecting transformer is swallowed and the reserved payload stands in.
 	 */
 	cursorOnToolResult?: CursorToolResultHandler;
+	/** Cursor hands unhandled MCP calls to an external executor instead of reporting them as missing. */
+	cursorExternalToolExecutor?: boolean;
 	/**
 	 * Amazon Bedrock Guardrail settings forwarded through transports that do not
 	 * dispatch directly to the Bedrock provider. Model-level values take
@@ -641,6 +656,13 @@ export interface SimpleStreamOptions extends Omit<StreamOptions, "apiKey"> {
 	guardrailIdentifier?: string;
 	guardrailVersion?: string;
 	guardrailTrace?: "enabled" | "disabled" | "enabled_full";
+	/**
+	 * Bedrock invocation-log tags forwarded through transports that do not dispatch
+	 * directly to the Bedrock provider. Unlike the guardrail fields above, these
+	 * MERGE per key with the model's own `requestMetadata` (these win) rather than
+	 * replacing it wholesale — they are independent attribution tags, not one value.
+	 */
+	requestMetadata?: Record<string, string>;
 	/** Optional tool choice override for compatible providers */
 	toolChoice?: ToolChoice;
 	/** OpenAI service tier for processing priority/cost control. Ignored by non-OpenAI providers. */
@@ -856,7 +878,23 @@ export interface OpenAIResponsesHistoryPayload {
 	items: Array<Record<string, unknown>>;
 }
 
-export type ProviderPayload = OpenAIResponsesHistoryPayload;
+/** Anthropic-only controls attached to a mid-conversation system message. */
+export interface AnthropicMessagePayload {
+	type: "anthropicMessage";
+	clearAt?: "never" | "next_user_message";
+	effort?: "low" | "medium" | "high" | "xhigh" | "max";
+	toolChanges?: Array<{ type: "tool_addition" | "tool_removal"; name: string }>;
+}
+
+export type ProviderPayload = OpenAIResponsesHistoryPayload | AnthropicMessagePayload;
+
+/** Provider-reported rewrite applied to request content before inference. */
+export interface ProviderInputTransformation {
+	type: string;
+	path?: string;
+	reason?: string;
+	[key: string]: unknown;
+}
 
 export interface UserMessage {
 	role: "user";
@@ -865,6 +903,8 @@ export interface UserMessage {
 	synthetic?: boolean;
 	/** True when injected mid-turn as a steer; consumed by the agent's pre-LLM transform to wrap it for emphasis. Never rendered. */
 	steering?: boolean;
+	/** Timestamp of a client-side history rewrite represented by this message. */
+	historyRewriteAt?: number;
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
@@ -975,6 +1015,8 @@ export interface AssistantMessage {
 	 * server's actual state.
 	 */
 	disabledFeatures?: string[];
+	/** Provider-reported input rewrites such as dropped bound-thinking blocks. */
+	inputTransformations?: ProviderInputTransformation[];
 	/** Provider-specific opaque payload used to reconstruct transport-native history. */
 	providerPayload?: ProviderPayload;
 	timestamp: number; // Unix timestamp in milliseconds
@@ -1250,6 +1292,8 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	parameters: TParameters;
 	/** If true, tool is strictly typed and validated against the parameters schema before execution */
 	strict?: boolean;
+	/** Withhold this Anthropic tool until a `tool_addition` message references it. */
+	deferLoading?: boolean;
 	/**
 	 * Optional grammar constraint for OpenAI custom-tool emission.
 	 * When set, providers that support grammar-constrained tools (currently only

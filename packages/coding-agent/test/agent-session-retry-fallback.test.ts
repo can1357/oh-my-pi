@@ -7,6 +7,7 @@ import {
 	type Api,
 	type AssistantMessage,
 	Effort,
+	type Message,
 	type Model,
 	type ModelUsageHealth,
 	type ProviderSessionState,
@@ -31,6 +32,7 @@ import {
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -5375,6 +5377,88 @@ describe("AgentSession retry fallback", () => {
 		await registry.awaitInitialBackgroundRefresh();
 	});
 
+	it("rebinds the active model to its post-discovery same-selector window (#10488)", async () => {
+		// A discovery-backed provider whose live catalog caps a selector below the
+		// window the pre-discovery snapshot carried at startup — the same class as
+		// the GitHub Copilot gpt-5.6-sol split, where the bundled base ships the
+		// full long-context window and discovery caps it to the default tier.
+		authStorage.setRuntimeApiKey("ollama-cloud", "ollama-cloud-test-key");
+		const buildTieredModel = (contextWindow: number, input: Model<"ollama-chat">["input"]): Model<"ollama-chat"> =>
+			buildModel({
+				id: "deepseek-v4-tiered",
+				name: "DeepSeek V4 Tiered",
+				api: "ollama-chat",
+				provider: "ollama-cloud",
+				baseUrl: "https://ollama.com",
+				reasoning: true,
+				input,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow,
+				maxTokens: 32_000,
+			});
+		// Post-discovery catalog: the capped entry the registry resolves for the
+		// selector once background discovery settles.
+		writeModelCache(
+			"ollama-cloud",
+			Date.now(),
+			[buildTieredModel(400_000, ["text"])],
+			true,
+			"",
+			path.join(tempDir.path(), "models.db"),
+		);
+		const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.json"));
+
+		// The startup-bound model is the pre-discovery snapshot for the SAME
+		// selector with the full long-context window — what buildSessionOptions
+		// pins as options.model before discovery runs.
+		const staleModel = buildTieredModel(1_050_000, ["text", "image"]);
+		const settings = Settings.isolated({ "compaction.enabled": false });
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: staleModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: () => {
+				throw new Error("Not exercised");
+			},
+		});
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry: registry,
+			rebindModelAfterDiscovery: true,
+		});
+
+		// Stale until discovery settles: the active model and its context-usage
+		// derivation both carry the 1.05M window that contradicts the catalog.
+		expect(session.model?.contextWindow).toBe(1_050_000);
+		expect(session.getContextUsage()?.contextWindow).toBe(1_050_000);
+
+		const { promise: modelChanged, resolve: resolveModelChanged } = Promise.withResolvers<void>();
+		const unsubscribe = session.subscribe(event => {
+			if (event.type === "model_changed") {
+				unsubscribe();
+				resolveModelChanged();
+			}
+		});
+
+		// The CLI starts discovery only after the session is built; the rebind
+		// waiter armed in the constructor resolves once this settles.
+		registry.refreshInBackground("offline");
+		await Promise.race([
+			modelChanged,
+			scheduler.wait(5_000).then(() => {
+				throw new Error("model_changed was not emitted after discovery settled");
+			}),
+		]);
+
+		// Rebound to the same selector's refreshed 400K window without a manual
+		// re-selection; get_state / contextUsage now agree with the catalog.
+		expect(session.model?.id).toBe("deepseek-v4-tiered");
+		expect(session.model?.contextWindow).toBe(400_000);
+		expect(session.getContextUsage()?.contextWindow).toBe(400_000);
+	});
+
 	it("warns on unknown or malformed model-selector chain keys at startup", () => {
 		const primaryModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel) {
@@ -5524,6 +5608,75 @@ describe("AgentSession retry fallback", () => {
 			throw new Error(`Expected text content block, got ${contentBlock.type}`);
 		}
 		expect(contentBlock.text).toBe("Recovered after Gemini malformed function call");
+	});
+
+	it("continues a Gemini MALFORMED_FUNCTION_CALL transcribed as text with a corrective reminder", async () => {
+		const model = getBundledModel("google", "gemini-1.5-flash");
+		if (!model) {
+			throw new Error("Expected bundled Google test model to exist");
+		}
+
+		const malformedError = "Generation failed with finish reason: MALFORMED_FUNCTION_CALL";
+		const transcribedCall = "```call:default_api:read{i:Read call_frame.rs,path:src/call_frame.rs:215-320}```";
+		const requestContexts: Message[][] = [];
+		const mock = createMockModel({
+			responses: [
+				{ content: [transcribedCall], stopReason: "error", errorMessage: malformedError },
+				{ content: ["Recovered after transcribed function call"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			// agent-core's default converter drops developer messages; the CLI wires
+			// the coding-agent converter, which is what carries the reminder.
+			convertToLlm,
+			streamFn: (requestedModel, context, options) => {
+				requestContexts.push([...context.messages]);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const { retryStartEvents } = trackRetryEvents(session);
+
+		await session.prompt("recover from a transcribed function call");
+		await session.waitForIdle();
+
+		// The committed text vetoes the replay retry; the preserved-turn continuation
+		// must carry the failed turn plus the corrective reminder to the provider.
+		expect(retryStartEvents).toHaveLength(0);
+		expect(requestContexts).toHaveLength(2);
+		const secondRequest = requestContexts[1];
+		expect(secondRequest.map(message => message.role)).toEqual(["user", "assistant", "developer"]);
+		const failedTurn = secondRequest[1];
+		if (failedTurn.role !== "assistant") throw new Error(`Expected assistant, got ${failedTurn.role}`);
+		expect(failedTurn.content).toEqual([{ type: "text", text: transcribedCall }]);
+		const reminder = secondRequest[2];
+		if (reminder.role !== "developer") throw new Error(`Expected developer, got ${reminder.role}`);
+		const reminderText =
+			typeof reminder.content === "string"
+				? reminder.content
+				: reminder.content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(reminderText).toContain("malformed");
+
+		const messages = session.agent.state.messages;
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant", "developer", "assistant"]);
+		const recovered = messages[3];
+		if (recovered.role !== "assistant") throw new Error(`Expected assistant, got ${recovered.role}`);
+		expect(recovered.content).toEqual([{ type: "text", text: "Recovered after transcribed function call" }]);
 	});
 
 	it("auto-retries provider finish_reason errors after partial text", async () => {

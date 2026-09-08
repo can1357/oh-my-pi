@@ -194,12 +194,12 @@ export const streamDevin: StreamFunction<"devin-agent"> = (
 					// the token in Metadata.apiKey alone, but including the header
 					// matches the real client more closely.
 					authorization: `Basic ${sessionToken}-${sessionToken}`,
-					// Suppress Bun's default User-Agent to avoid leaking runtime identity.
-					"user-agent": "",
-					// Override Bun's default Accept-Encoding to avoid advertising
-					// compression support the CLI doesn't send.
+					// CLI 3000.6.2 wire (upstream alignment): connect-go UA with
+					// connect-level gzip; HTTP accept-encoding stays identity.
 					"accept-encoding": "identity",
-					...(options?.headers ?? {}),
+					"user-agent": "connect-go/1.18.1 (go1.26.3)",
+					"connect-accept-encoding": "gzip",
+					...options?.headers,
 				},
 				body: frame,
 				signal: options?.signal,

@@ -435,20 +435,35 @@ export class AgentLifecycleManager {
 			await park.promise;
 		}
 
-		if (options?.tombstone) {
-			// Persist the terminal decision before detaching the session. The
-			// sidecar prevents a later discovery pass from reviving this transcript
-			// as a fresh parked ref.
-			if (ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
-			this.#registry.setStatus(id, "aborted", ref);
-		}
 		const live = this.#registry.get(id) === ref ? ref.session : null;
-		if (options?.tombstone) this.#registry.detachSession(id, ref);
-		if (live) {
-			try {
-				await live.dispose();
-			} catch (error) {
-				logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
+		if (options?.tombstone) {
+			// Apply the terminal transition synchronously, before any await. The
+			// dying session's own dispose path calls unregisterUnlessParked
+			// (sdk.ts), which spares a ref only when it is already `aborted` AND
+			// already detached; awaiting persistAgentTombstone before this
+			// transition left a window in which that unregister deleted the ref
+			// (issue #10531). Persisting the sidecar afterward is safe: within the
+			// process the still-registered `aborted` row already blocks re-adoption
+			// via the `if (!registry.get(id))` discovery guard, and the sidecar
+			// only needs to exist before a later cross-restart discovery pass —
+			// release awaits the write below before returning.
+			// Detach before publishing `aborted`: setStatus emits synchronously, so
+			// every subscriber must observe a terminal ref with session === null.
+			if (!this.#registry.detachSession(id, ref) || !this.#registry.setStatus(id, "aborted", ref)) {
+				logger.warn("AgentLifecycleManager.release: terminal transition rejected", { id });
+			}
+		}
+		try {
+			if (options?.tombstone && ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
+		} finally {
+			// Detaching removes the registry's only route to the live session. Always
+			// dispose the captured session, even when tombstone persistence fails.
+			if (live) {
+				try {
+					await live.dispose();
+				} catch (error) {
+					logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
+				}
 			}
 		}
 		if (!options?.tombstone) this.#registry.unregister(id, ref);

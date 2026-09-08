@@ -12,7 +12,13 @@ import {
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { isOpenAIResponsesProgressEvent } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import { configureCredentialRedaction } from "@oh-my-pi/pi-ai/providers/transform-messages";
-import type { CodexCompactionRequestContext, Context, FetchImpl, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
+import type {
+	CodexCompactionRequestContext,
+	Context,
+	FetchImpl,
+	ModelSpec,
+	ProviderSessionState,
+} from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { createCodexModel } from "./helpers";
@@ -164,6 +170,22 @@ describe("openai-codex optional response controls", () => {
 		expect(suppressed.reasoning).toEqual({ effort: "medium" });
 		expect("summary" in (suppressed.reasoning ?? {})).toBe(false);
 		expect("stream_options" in suppressed).toBe(false);
+	});
+
+	it("removes inherited reasoning summaries when model compatibility disables them", async () => {
+		const base = createCodexModel("gpt-5.5");
+		const model = buildModel({
+			...base,
+			compat: { ...base.compatConfig, supportsReasoningSummary: false },
+		} as ModelSpec<"openai-codex-responses">);
+
+		const body = await transformRequestBody({ model: model.id, reasoning: { summary: "auto" } }, model, {
+			reasoningEffort: "medium",
+			reasoningSummary: "detailed",
+		});
+
+		expect(body.reasoning).toEqual({ effort: "medium" });
+		expect("stream_options" in body).toBe(false);
 	});
 
 	it("disables native reasoning with effort none when an external scratchpad replaces it", async () => {
@@ -378,21 +400,20 @@ describe("openai-codex Responses Lite input shaping", () => {
 		});
 	});
 
-	it("resolves Lite from explicit options, the environment, then the model default", async () => {
+	it("defaults normal inference to full Responses and keeps explicit options above the environment", async () => {
 		const previous = Bun.env.PI_CODEX_RESPONSES_LITE;
 		const model = createCodexModel("gpt-5.6-terra", { useResponsesLite: true });
 		try {
 			delete Bun.env.PI_CODEX_RESPONSES_LITE;
-			const modelDefault = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
-			expect(modelDefault.instructions).toBeUndefined();
-			expect(modelDefault.input?.[0]?.type).toBe("additional_tools");
-
-			Bun.env.PI_CODEX_RESPONSES_LITE = "false";
-			const envOptOut = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
-			expect(envOptOut.instructions).toBe("sys");
-			expect(envOptOut.input?.some(item => item.type === "additional_tools")).toBe(false);
+			const defaultRequest = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
+			expect(defaultRequest.instructions).toBe("sys");
+			expect(defaultRequest.input?.some(item => item.type === "additional_tools")).toBe(false);
 
 			Bun.env.PI_CODEX_RESPONSES_LITE = "true";
+			const envOptIn = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {});
+			expect(envOptIn.instructions).toBeUndefined();
+			expect(envOptIn.input?.[0]?.type).toBe("additional_tools");
+
 			const explicitOptOut = await transformRequestBody({ model: model.id, instructions: "sys" }, model, {
 				responsesLite: false,
 			});
@@ -680,11 +701,12 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
 			apiKey: createCodexTestToken(),
 			fetch: fetchMock,
+			responsesLite: true,
 		}).result();
 
 		expect(result.stopReason).toBe("stop");
 		expect(captured!.headers.get("x-openai-internal-codex-responses-lite")).toBe("true");
-		expect(captured!.headers.get("version")).toBe("0.144.1");
+		expect(captured!.headers.get("version")).toBe("0.153.0");
 		const body = captured!.body;
 		expect(body.reasoning).toEqual({ context: "all_turns" });
 		expect(body.instructions).toBeUndefined();
@@ -692,8 +714,8 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 		expect((body.input as Array<Record<string, unknown>>)[0]?.type).toBe("additional_tools");
 	});
 
-	it("omits the lite marker while retaining canonical client_metadata", async () => {
-		const model = createCodexModel("gpt-5.1-codex");
+	it("uses full Responses for normal inference when the model advertises Lite", async () => {
+		const model = createCodexModel("gpt-5.6-terra", { useResponsesLite: true });
 		let captured: CapturedCodexRequest | undefined;
 		const fetchMock = createCodexFetchMock(createCodexSse(COMPLETED_CODEX_EVENTS), request => {
 			captured = request;
@@ -706,6 +728,8 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 
 		expect(result.stopReason).toBe("stop");
 		expect(captured?.headers.get("x-openai-internal-codex-responses-lite")).toBeNull();
+		expect(captured?.body.instructions).toBe("You are a helpful assistant.");
+		expect(captured?.body.parallel_tool_calls).toBeUndefined();
 		expect(captured?.body.client_metadata).toBeDefined();
 	});
 });

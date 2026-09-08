@@ -359,6 +359,8 @@ export interface UsageProvider {
 	validatesCredentials?: boolean;
 	/** Whether a failed refresh may serve the previous successful report. Defaults to true. */
 	retainLastGoodOnFailure?: boolean;
+	/** Provider-specific cool-down after a failed refresh. Defaults to the shared short backoff. */
+	failureBackoffMs?: number;
 }
 
 /** Request context used when ranking usage for a specific model. */
@@ -409,6 +411,15 @@ export interface CredentialRankingStrategy {
 	 * block written under one scope is invisible to requests and to healing.
 	 */
 	blockScopes?(context?: CredentialRankingContext): string[];
+	/**
+	 * Backoff scopes a fresh usage report can vouch for, each with the limits
+	 * gating it. {@link AuthStorage} clears a stale block under a returned scope
+	 * once every listed limit is below exhaustion, so a 429 whose retry-after
+	 * overstated the real reset does not sideline a recovered account until the
+	 * clock runs out. Scopes not returned expire by clock only. Codex heals
+	 * through its meter metadata instead and omits this.
+	 */
+	healableBlockScopes?(report: UsageReport): { blockScope: string; limits: UsageLimit[] }[];
 	/** Fallback window durations (ms) when limits don't specify durationMs. */
 	windowDefaults: {
 		primaryMs: number;

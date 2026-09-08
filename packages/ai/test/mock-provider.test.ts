@@ -5,7 +5,6 @@ import {
 	isMockModel,
 	MOCK_API,
 	type MockHandler,
-	type MockModel,
 	registerMockApi,
 	streamMock,
 } from "@oh-my-pi/pi-ai/providers/mock";
@@ -298,7 +297,6 @@ describe("mock provider — async-iterable response sources", () => {
 
 	test("generator can react to call state via the shared handle", async () => {
 		// Each yield reads `mock.calls` to react to what just happened.
-		let handle!: MockModel;
 		const gen = async function* () {
 			yield { content: ["turn 0"] };
 			// At this point mock.calls.length === 1.
@@ -306,7 +304,7 @@ describe("mock provider — async-iterable response sources", () => {
 			const msgs = last.context.messages.length;
 			yield { content: [`saw ${msgs} message(s)`] };
 		};
-		handle = createMockModel({ responses: gen() });
+		const handle = createMockModel({ responses: gen() });
 
 		const r1 = await handle.stream(handle.model, emptyContext()).result();
 		expect(r1.content).toEqual([{ type: "text", text: "turn 0" }]);

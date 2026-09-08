@@ -6,5 +6,7 @@
 // low/medium/high) wins equal-rank ties instead of erroring.
 
 provider "ollama" priority=-1 {
+	// Replaces both Ollama empty-length finish baselines.
+	empty-length-finish-is-context-error #true
 	thinking-efforts "low" "medium" "high" "max"
 }

@@ -176,6 +176,14 @@ export function isExcludedModel(provider: string, model: string): boolean {
 	return behavior.excludeModels.some(rule => rule.provider === provider && matchesList(rule.match, lower, lower));
 }
 
+/**
+ * Whether a provider is retired: its entire roster is excluded from the
+ * generated bundle and must never be resurrected from the previous snapshot.
+ */
+export function isRetiredProvider(provider: string): boolean {
+	return behavior.retiredProviders.includes(provider);
+}
+
 /** The declared subscription tier required to use a provider model id, if any. */
 export function planRequirementFor(provider: string, model: string): string | undefined {
 	const rule = behavior.planRequirements.find(candidate => candidate.provider === provider);

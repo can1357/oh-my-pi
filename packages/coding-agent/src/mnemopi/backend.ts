@@ -90,6 +90,9 @@ async function installMnemopiState(session: AgentSession, config: MnemopiBackend
 	await previous?.dispose();
 	try {
 		state.attachSessionListeners();
+		// Promote age-eligible working memory to episodic before the session's
+		// first write can TTL-trim unconsolidated retain/learn rows (#10770).
+		state.promoteEligibleWorkingMemory();
 		return state;
 	} catch (error) {
 		setMnemopiSessionState(session, undefined);
@@ -184,7 +187,7 @@ export const mnemopiBackend: MemoryBackend = {
 				await Promise.all([loadMnemopi(), loadMnemopiCore()]);
 				state = await installMnemopiState(session, config);
 			}
-			await state?.consolidate({ full: true });
+			await state?.consolidate({ full: true, retain: true });
 		} catch (error) {
 			logger.warn("Mnemopi: enqueue failed.", { error: String(error) });
 		}
@@ -585,6 +588,7 @@ async function resolveMnemopiProviderOptions(
 						},
 						{
 							apiKey: modelRegistry.resolver(model, sessionId),
+							sessionId,
 							maxTokens: opts?.maxTokens,
 							temperature: opts?.temperature,
 						},

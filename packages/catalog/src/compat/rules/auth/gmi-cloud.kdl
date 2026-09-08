@@ -1,0 +1,9 @@
+auth "gmi-cloud" {
+	name "GMI Cloud"
+	login "api-key" {
+		auth-url "https://console.gmicloud.ai"
+		instructions "Create or copy your GMI Cloud API key"
+		prompt "Paste your GMI Cloud API key" placeholder="eyJ..."
+		validate "models-endpoint" label="GMI Cloud" url="https://api.gmi-serving.com/v1/models"
+	}
+}

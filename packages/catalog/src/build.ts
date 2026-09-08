@@ -32,7 +32,8 @@ function isInputModalities(value: unknown): value is ("text" | "image")[] {
  * Applies resolved catalog-data axes onto the model: reviewed metadata
  * corrections (`cost-patch`, `limits-patch`, `long-context-cost`,
  * `context-window-floor`) overwrite upstream values; selection metadata
- * (`priority`, `apply-patch-tool-type`, `service-tier-cost`) is rule-owned;
+ * (`priority`, `apply-patch-tool-type`, `service-tier-cost`,
+ * `requires-cursor-tool-schema-projection`) is rule-owned;
  * `context-promotion-target` fills only when the spec left it unset.
  */
 function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: Record<string, unknown>): void {
@@ -50,6 +51,16 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	const applyPatchToolType = catalog.applyPatchToolType;
 	if (applyPatchToolType === "freeform" || applyPatchToolType === "function") {
 		model.applyPatchToolType = applyPatchToolType;
+	}
+	const editPromptVariant = catalog.editPromptVariant;
+	if (editPromptVariant === "full" || editPromptVariant === "compact") {
+		model.editPromptVariant = editPromptVariant;
+	}
+	const requiresCursorToolSchemaProjection = catalog.requiresCursorToolSchemaProjection;
+	if (requiresCursorToolSchemaProjection === true) {
+		model.requiresCursorToolSchemaProjection = true;
+	} else {
+		delete model.requiresCursorToolSchemaProjection;
 	}
 	const contextPromotionTarget = catalog.contextPromotionTarget;
 	if (typeof contextPromotionTarget === "string" && model.contextPromotionTarget === undefined) {
@@ -110,16 +121,16 @@ export function applyCatalogCorrections(
 		if (input !== undefined) model.cost.input = input;
 		const output = numberField(patch, "output");
 		if (output !== undefined) model.cost.output = output;
-		const cacheRead = numberField(patch, "cache-read");
+		const cacheRead = numberField(patch, "cacheRead");
 		if (cacheRead !== undefined) model.cost.cacheRead = cacheRead;
-		const cacheWrite = numberField(patch, "cache-write");
+		const cacheWrite = numberField(patch, "cacheWrite");
 		if (cacheWrite !== undefined) model.cost.cacheWrite = cacheWrite;
 	}
 	const limitsPatch = objectPayload(catalog.limitsPatch);
 	if (limitsPatch !== undefined) {
-		const contextWindow = numberField(limitsPatch, "context-window");
+		const contextWindow = numberField(limitsPatch, "contextWindow");
 		if (contextWindow !== undefined) model.contextWindow = contextWindow;
-		const maxTokens = numberField(limitsPatch, "max-tokens");
+		const maxTokens = numberField(limitsPatch, "maxTokens");
 		if (maxTokens !== undefined) model.maxTokens = maxTokens;
 	}
 	const contextWindowFloor = catalog.contextWindowFloor;

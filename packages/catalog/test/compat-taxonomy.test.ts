@@ -19,6 +19,17 @@ describe("classifyModel", () => {
 		});
 	});
 
+	test("class namespace does not compete with the product family", () => {
+		expect(classifyModel("litellm", "mistral.mixtral-8x7b-instruct-v0:1")).toEqual({
+			class: "mistral",
+			family: "mixtral",
+		});
+		expect(classifyModel("litellm", "mistral.mistral-large-2402-v1:0")).toEqual({
+			class: "mistral",
+			family: "mistral",
+		});
+	});
+
 	test("bare o-series names carry no revision", () => {
 		expect(classifyModel("openai", "o3")).toEqual({ class: "openai", family: "o-series" });
 		expect(classifyModel("openai", "o3-mini")).toEqual({
@@ -35,6 +46,13 @@ describe("classifyModel", () => {
 
 	test("gpt-oss outranks the gpt- prefix", () => {
 		expect(classifyModel("openai", "gpt-oss-120b").class).toBe("gpt-oss");
+	});
+	test("zai- vendor-prefixed bare ids classify as glm", () => {
+		// Bounded matchers are prefix-anchored, so `bounded "glm"` never sees
+		// `zai-glm-*`; losing the class drops the glm tokenizer and <think>
+		// replay dialect on hosts like mistral (regression: pre-KDL parity sweep).
+		expect(classifyModel("mistral", "zai-glm-5-2")).toEqual({ class: "glm", revision: "5.2.0" });
+		expect(classifyModel("cerebras", "zai-glm-4.7")).toEqual({ class: "glm", revision: "4.7.0" });
 	});
 
 	test("-thinking suffix collapses to the logical id", () => {

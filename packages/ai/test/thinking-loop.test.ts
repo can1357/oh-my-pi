@@ -817,7 +817,7 @@ describe("GeminiHeaderRunDetector", () => {
 	test("does not trip on a legitimate 10-header debugging block (regression)", () => {
 		// A real, productive debugging stretch emitted 10 distinct progressing headers; never interrupt that.
 		expect(feedHeaders(distinctPlanningRunaway(10))).toBe(false);
-		expect(feedHeaders(distinctPlanningRunaway(24))).toBe(true);
+		expect(feedHeaders(distinctPlanningRunaway(GEMINI_HEADER_RUNAWAY_THRESHOLD))).toBe(true);
 	});
 
 	test("counts headers across intervening paragraphs (one summary = one header)", () => {
@@ -863,10 +863,12 @@ describe("thinking-loop retry budget (result path)", () => {
 		try {
 			const mock = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" });
 			for (let i = 0; i < 4; i++) mock.push(loopResponse());
+			const attempts: AssistantMessage[] = [];
 
-			const result = await completeSimple(mock.model, context());
+			const result = await completeSimple(mock.model, context(), { onAttempt: message => attempts.push(message) });
 
 			expect(mock.calls).toHaveLength(3);
+			expect(attempts).toHaveLength(3);
 			expect(result.stopReason).toBe("error");
 			expect(result.content).toEqual([]);
 			expect(result.errorMessage).toContain(THINKING_LOOP_ERROR_MARKER);

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
+import { resolveFirecrawlUrl } from "@oh-my-pi/pi-coding-agent/web/firecrawl";
 import { FirecrawlProvider, searchFirecrawl } from "@oh-my-pi/pi-coding-agent/web/search/providers/firecrawl";
 import { SearchProviderError } from "@oh-my-pi/pi-coding-agent/web/search/types";
 
@@ -334,6 +335,68 @@ describe("Firecrawl web search provider", () => {
 			],
 			requestId: "keyless-request-456",
 			authMode: "keyless",
+		});
+	});
+});
+
+describe("resolveFirecrawlUrl", () => {
+	const withBaseUrl = (baseUrl: string | undefined, run: () => void): void => {
+		const originalBaseUrl = process.env.FIRECRAWL_BASE_URL;
+		const originalApiUrl = process.env.FIRECRAWL_API_URL;
+		delete process.env.FIRECRAWL_API_URL;
+		if (baseUrl === undefined) delete process.env.FIRECRAWL_BASE_URL;
+		else process.env.FIRECRAWL_BASE_URL = baseUrl;
+		try {
+			run();
+		} finally {
+			if (originalBaseUrl === undefined) delete process.env.FIRECRAWL_BASE_URL;
+			else process.env.FIRECRAWL_BASE_URL = originalBaseUrl;
+			if (originalApiUrl === undefined) delete process.env.FIRECRAWL_API_URL;
+			else process.env.FIRECRAWL_API_URL = originalApiUrl;
+		}
+	};
+
+	it("defaults to the hosted v2 API when no base URL is configured", () => {
+		withBaseUrl(undefined, () => {
+			expect(resolveFirecrawlUrl("/search")).toBe("https://api.firecrawl.dev/v2/search");
+			expect(resolveFirecrawlUrl("/scrape")).toBe("https://api.firecrawl.dev/v2/scrape");
+		});
+	});
+
+	it("appends /v2 without doubling the slash for a bare self-hosted origin", () => {
+		withBaseUrl("http://localhost:3002", () => {
+			expect(resolveFirecrawlUrl("/search")).toBe("http://localhost:3002/v2/search");
+			expect(resolveFirecrawlUrl("/scrape")).toBe("http://localhost:3002/v2/scrape");
+		});
+	});
+
+	it("appends /v2 without doubling the slash for a bare origin with a trailing slash", () => {
+		withBaseUrl("http://localhost:3002/", () => {
+			expect(resolveFirecrawlUrl("/search")).toBe("http://localhost:3002/v2/search");
+			expect(resolveFirecrawlUrl("/scrape")).toBe("http://localhost:3002/v2/scrape");
+		});
+	});
+
+	it("preserves an explicitly configured API version", () => {
+		withBaseUrl("http://localhost:3002/v1/", () => {
+			expect(resolveFirecrawlUrl("/search")).toBe("http://localhost:3002/v1/search");
+			expect(resolveFirecrawlUrl("/scrape")).toBe("http://localhost:3002/v1/scrape");
+		});
+	});
+
+	it("keeps a path prefix and appends /v2 under it", () => {
+		withBaseUrl("http://localhost:3002/firecrawl/", () => {
+			expect(resolveFirecrawlUrl("/search")).toBe("http://localhost:3002/firecrawl/v2/search");
+			expect(resolveFirecrawlUrl("/scrape")).toBe("http://localhost:3002/firecrawl/v2/scrape");
+		});
+	});
+
+	it("rejects a non-HTTP base URL or one carrying credentials", () => {
+		withBaseUrl("ftp://localhost:3002", () => {
+			expect(() => resolveFirecrawlUrl("/scrape")).toThrow("expected an HTTP or HTTPS URL");
+		});
+		withBaseUrl("http://user:pass@localhost:3002", () => {
+			expect(() => resolveFirecrawlUrl("/scrape")).toThrow("URL credentials are not allowed");
 		});
 	});
 });

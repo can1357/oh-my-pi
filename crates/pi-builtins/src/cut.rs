@@ -35,11 +35,13 @@ impl Utility for Cut {
 	}
 
 	fn run(self, host: &mut Host) -> i32 {
-		if let Err(error) = cut_main(&self.matches, host) {
-			host.error(error, 1);
-			return 1;
+		match cut_main(&self.matches, host) {
+			Ok(code) => code,
+			Err(error) => {
+				host.error(error, 1);
+				1
+			},
 		}
-		host.exit_code()
 	}
 }
 
@@ -724,7 +726,9 @@ fn cut_fields<R: Read, W: Write>(
 	}
 }
 
-fn cut_files<'a, I>(host: &mut Host, filenames: I, mode: &Mode)
+/// Cuts every operand in order. A broken stdout pipe aborts the remaining
+/// operands; [`crate::host::Sigpipe`] supplies the process-level semantics.
+fn cut_files<'a, I>(host: &mut Host, filenames: I, mode: &Mode) -> i32
 where
 	I: IntoIterator<Item = &'a OsString>,
 {
@@ -760,20 +764,33 @@ where
 				Mode::Fields(ranges, opts) => cut_fields(&mut host.stdin, &mut out, ranges, opts),
 			}
 		};
-		if let Err(error) = result {
-			let _ = writeln!(host.stderr, "cut: {error}");
-			failed = true;
+		match result {
+			Ok(()) => {},
+			Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+				return crate::host::SIGPIPE_EXIT_CODE;
+			},
+			Err(error) => {
+				let _ = writeln!(host.stderr, "cut: {error}");
+				failed = true;
+			},
 		}
 	}
 
-	if let Err(error) = out.flush() {
-		let _ = writeln!(host.stderr, "cut: write error: {error}");
-		failed = true;
+	match out.flush() {
+		Ok(()) => {},
+		Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+			return crate::host::SIGPIPE_EXIT_CODE;
+		},
+		Err(error) => {
+			let _ = writeln!(host.stderr, "cut: write error: {error}");
+			failed = true;
+		},
 	}
 	drop(out);
 	if failed {
 		host.fail(1);
 	}
+	host.exit_code()
 }
 
 /// Gets input and output delimiters, accepting non-UTF-8 bytes like GNU `cut`.
@@ -832,7 +849,7 @@ mod options {
 	pub const NOTHING: &str = "nothing";
 }
 
-fn cut_main(matches: &ArgMatches, host: &mut Host) -> Result<(), String> {
+fn cut_main(matches: &ArgMatches, host: &mut Host) -> Result<i32, String> {
 	let complement = matches.get_flag(options::COMPLEMENT);
 	let only_delimited = matches.get_flag(options::ONLY_DELIMITED);
 	let (delimiter, out_delimiter) = get_delimiters(matches)?;
@@ -902,8 +919,7 @@ fn cut_main(matches: &ArgMatches, host: &mut Host) -> Result<(), String> {
 	let files = matches
 		.get_many::<OsString>(options::FILE)
 		.expect("clap provides '-' by default");
-	cut_files(host, files, &mode);
-	Ok(())
+	Ok(cut_files(host, files, &mode))
 }
 
 fn app() -> Command {

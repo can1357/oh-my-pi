@@ -210,11 +210,25 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 	}
 
 	async execute(code: string, options?: TExecuteOptions): Promise<KernelExecuteResult> {
+		const msgId = options?.id ?? Snowflake.next();
+		return await this.#submit(msgId, this.#options.buildPayload(code, msgId, options), options, true);
+	}
+
+	/** Submit a raw runner request without sending SIGINT when its caller cancels. */
+	async submitRequest(msgId: string, payload: string, options?: TExecuteOptions): Promise<KernelExecuteResult> {
+		return await this.#submit(msgId, payload, options, false);
+	}
+
+	async #submit(
+		msgId: string,
+		payload: string,
+		options: TExecuteOptions | undefined,
+		interruptOnCancel: boolean,
+	): Promise<KernelExecuteResult> {
 		if (!this.isAlive()) {
 			throw new Error(`${this.#options.languageName} kernel is not running`);
 		}
 
-		const msgId = options?.id ?? Snowflake.next();
 		const { promise, resolve } = Promise.withResolvers<KernelExecuteResult>();
 		const pending: PendingExecution = {
 			resolve,
@@ -247,7 +261,7 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		let requestWritten = false;
 		const requestCancel = () => {
 			if (pending.settled || pending.escalationTimer) return;
-			if (!requestWritten) {
+			if (!requestWritten || !interruptOnCancel) {
 				finalize();
 				return;
 			}
@@ -298,8 +312,6 @@ export abstract class BaseKernel<TExecuteOptions extends KernelExecuteOptions = 
 		}
 
 		pending.finalize = finalize;
-
-		const payload = this.#options.buildPayload(code, msgId, options);
 
 		if (pending.settled) {
 			return promise;
