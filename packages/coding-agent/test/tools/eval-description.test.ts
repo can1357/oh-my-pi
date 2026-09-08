@@ -59,11 +59,13 @@ describe("eval tool description", () => {
 		expect(text).toContain("agent(prompt");
 	});
 
-	it("omits agent() when the session forbids spawning", () => {
+	it("omits spawning helpers but keeps wait() when the session forbids spawning", () => {
 		// Subagents with spawns: undefined (resolved to "") cannot launch tasks.
-		// The prelude doc must not promise a helper that always throws.
+		// wait() remains usable with completion() handles.
 		const text = getEvalToolDescription({ py: true, js: true, spawns: false });
 		expect(text).not.toContain("agent(prompt");
+		expect(text).not.toContain("workpool(");
+		expect(text).toContain("wait(handles");
 	});
 
 	it("EvalTool description reflects spawn policy from the session", () => {
@@ -73,14 +75,17 @@ describe("eval tool description", () => {
 		expect(denied).not.toContain("agent(prompt");
 	});
 
-	it("omits agent() when recursion depth is exhausted", () => {
+	it("omits spawning helpers but keeps wait() when recursion depth is exhausted", () => {
 		const belowCap = new EvalTool(makeSession({ taskDepth: 1, maxRecursionDepth: 2 })).description;
 		const atCap = new EvalTool(makeSession({ taskDepth: 2, maxRecursionDepth: 2 })).description;
 		const spawningDisabled = new EvalTool(makeSession({ taskDepth: 0, maxRecursionDepth: 0 })).description;
 
 		expect(belowCap).toContain("agent(prompt");
-		expect(atCap).not.toContain("agent(prompt");
-		expect(spawningDisabled).not.toContain("agent(prompt");
+		for (const description of [atCap, spawningDisabled]) {
+			expect(description).not.toContain("agent(prompt");
+			expect(description).not.toContain("workpool(");
+			expect(description).toContain("wait(handles");
+		}
 	});
 
 	it("hides eval-defined tool guidance when eval.tools.enabled is off", () => {
