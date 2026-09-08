@@ -111,6 +111,17 @@ describe("discoverAgents", () => {
 		await fs.mkdir(userAgentsDir, { recursive: true });
 		await fs.writeFile(path.join(projectAgentsDir, "healthy.md"), OMP_AGENT_MD);
 		await fs.writeFile(
+			path.join(projectAgentsDir, "empty.md"),
+			[
+				"---",
+				"name: empty-watchdog",
+				"description: Explicitly disables watchdogs.",
+				"watchdogs: []",
+				"---",
+				"Empty watchdog selection.",
+			].join("\n"),
+		);
+		await fs.writeFile(
 			path.join(projectAgentsDir, "Reviewer.md"),
 			[
 				"---",
@@ -125,16 +136,7 @@ describe("discoverAgents", () => {
 		);
 		await fs.writeFile(
 			path.join(userAgentsDir, "reviewer.md"),
-			[
-				"---",
-				"name: reviewer",
-				"description: User reviewer.",
-				"watchdogs:",
-				"  - id: review",
-				"    model: test/model",
-				"---",
-				"User reviewer.",
-			].join("\n"),
+			["---", "name: reviewer", "description: User reviewer.", "watchdogs: []", "---", "User reviewer."].join("\n"),
 		);
 
 		const warning = spyOn(logger, "warn").mockImplementation(() => {});
@@ -146,6 +148,9 @@ describe("discoverAgents", () => {
 			);
 
 			expect(names).toContain("omp-test-agent");
+			const emptyWatchdogAgent = agents.find(agent => agent.name === "empty-watchdog");
+			expect(emptyWatchdogAgent).toBeDefined();
+			expect(emptyWatchdogAgent?.watchdogs).toEqual([]);
 			expect(names).not.toEqual(expect.arrayContaining(["Reviewer", "reviewer"]));
 			expect(collisionWarning?.[1]).toMatchObject({
 				namespace: "reviewer",
