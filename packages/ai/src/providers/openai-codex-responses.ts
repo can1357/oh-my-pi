@@ -181,6 +181,8 @@ export interface OpenAICodexCompactionBody extends CodexLiteShapedBody {
 /** Transport controls for a provider-native Codex V2 compaction stream. */
 export interface OpenAICodexCompactionStreamOptions extends OpenAICodexResponsesOptions {
 	apiKey: string;
+	/** Bound the WebSocket attempt without consuming the SSE fallback deadline. */
+	websocketTimeoutMs?: number;
 }
 
 /** Inputs for synthesizing Codex request identity outside the normal stream path. */
@@ -1619,6 +1621,7 @@ async function openInitialCodexEventStream(
 	options: OpenAICodexResponsesOptions | undefined,
 	requestSetup: CodexRequestSetup,
 	requestContext: CodexRequestContext,
+	websocketRequestSetup = requestSetup,
 ): Promise<{
 	eventStream: AsyncGenerator<Record<string, unknown>>;
 	requestBodyForState: RequestBody;
@@ -1634,13 +1637,17 @@ async function openInitialCodexEventStream(
 					model,
 					options,
 					requestContext,
-					requestSetup,
+					websocketRequestSetup,
 					websocketState,
 					websocketRetries,
 					options ? event => options.onSseEvent?.(event, model) : undefined,
 				);
 			} catch (error) {
-				if (!(error instanceof CodexWebSocketTransportError)) throw error;
+				if (requestSetup.requestSignal.aborted || !(error instanceof CodexWebSocketTransportError)) throw error;
+				if (websocketRequestSetup.requestSignal.aborted) {
+					recordCodexWebSocketFailure(websocketState, true);
+					break;
+				}
 				const fatalWebSocketMessage = error.message.toLowerCase();
 				const isFatal = CODEX_WEBSOCKET_FATAL_PATTERNS.some(pattern =>
 					fatalWebSocketMessage.includes(pattern.toLowerCase()),
@@ -1697,7 +1704,21 @@ export async function openCodexCompactionEventStream(
 		requestContext = createCodexRequestContext(model, toCodexRequestBody(body), options, {
 			isolateCompactionTransport: false,
 		});
-		initial = await openInitialCodexEventStream(model, options, requestSetup, requestContext);
+		// The regular WebSocket watchdog can exceed the entire compaction deadline.
+		// Keep its attempt signal separate so SSE can replay without reviving cancellation.
+		const websocketRequestSetup =
+			options.websocketTimeoutMs !== undefined &&
+			options.websocketTimeoutMs > 0 &&
+			shouldUseCodexWebSocket(model, requestContext.websocketState, options.preferWebsockets)
+				? {
+						...requestSetup,
+						requestSignal: AbortSignal.any([
+							requestSetup.requestSignal,
+							AbortSignal.timeout(options.websocketTimeoutMs),
+						]),
+					}
+				: requestSetup;
+		initial = await openInitialCodexEventStream(model, options, requestSetup, requestContext, websocketRequestSetup);
 	} catch (error) {
 		requestSetup.requestAbortController.abort();
 		throw error;

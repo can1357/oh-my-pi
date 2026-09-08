@@ -1,5 +1,11 @@
 import { describe, expect, it } from "bun:test";
-import { generateSummary } from "@oh-my-pi/pi-agent-core/compaction";
+import {
+	compact,
+	type CompactionPreparation,
+	createFileOps,
+	DEFAULT_COMPACTION_SETTINGS,
+	generateSummary,
+} from "@oh-my-pi/pi-agent-core/compaction";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core/types";
 import type { AssistantMessage, Model, Usage } from "@oh-my-pi/pi-ai/types";
 
@@ -97,6 +103,30 @@ describe("SummaryOptions.oneshotRetry", () => {
 
 		// The failure must surface for the outer loop to classify and retry.
 		await expect(attempt).rejects.toThrow();
+		expect(calls).toBe(1);
+	});
+
+	it("preserves the outer retry budget through a complete soft-compaction attempt", async () => {
+		const preparation: CompactionPreparation = {
+			firstKeptEntryId: "kept",
+			messagesToSummarize: messages,
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100_000,
+			fileOps: createFileOps(),
+			settings: { ...DEFAULT_COMPACTION_SETTINGS, remoteEnabled: false },
+		};
+		let calls = 0;
+		await expect(
+			compact(preparation, model, apiKey, undefined, undefined, {
+				oneshotRetry: false,
+				completeImpl: async () => {
+					calls++;
+					return overloaded();
+				},
+			}),
+		).rejects.toThrow();
 		expect(calls).toBe(1);
 	});
 });

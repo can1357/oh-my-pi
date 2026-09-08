@@ -36,9 +36,9 @@ import { buildResponsesInput, resolveOpenAICompatPolicy } from "@oh-my-pi/pi-ai/
 import { stripOpenAIResponsesOutputOnlyStatusesForReplay } from "@oh-my-pi/pi-ai/utils";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
-import { isRecord, logger, prompt } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
-import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
+import { type AgentTelemetry, type InstrumentedChatSpanOptions, instrumentedCompleteSimple } from "../telemetry";
 import { ThinkingLevel } from "../thinking";
 import { Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
@@ -58,6 +58,7 @@ import {
 	buildOpenAiNativeHistory,
 	getPreservedOpenAiRemoteCompactionData,
 	requestOpenAiRemoteCompaction,
+	REMOTE_COMPACTION_TIMEOUT_MS,
 	requestRemoteCompaction,
 	shouldUseOpenAiRemoteCompaction,
 	trimRemoteCompactionInputToContextWindow,
@@ -701,6 +702,8 @@ export interface SummaryOptions {
 	tools?: Tool[];
 	/** Optional fetch implementation threaded into remote compaction calls. */
 	fetch?: FetchImpl;
+	/** Deadline per local summarization request, including retries; defaults to 3 minutes. Zero disables it. */
+	timeoutMs?: number;
 	/**
 	 * Optional completion transport override for host-level request wrappers
 	 * (e.g. the coding-agent provider-concurrency limiter). When provided,
@@ -739,6 +742,34 @@ function summaryOneshotRetry(options: SummaryOptions | undefined): OneshotRetryO
 	const configured = options?.oneshotRetry;
 	if (configured === false) return undefined;
 	return configured ?? {};
+}
+
+/** Bound all local summary phases, including providers that fail to settle on abort. */
+async function completeSummary(
+	model: Model,
+	context: Context,
+	requestOptions: SimpleStreamOptions,
+	span: InstrumentedChatSpanOptions,
+	options: SummaryOptions | undefined,
+): Promise<AssistantMessage> {
+	const timeoutMs = options?.timeoutMs ?? REMOTE_COMPACTION_TIMEOUT_MS;
+	const timeoutSignal = timeoutMs > 0 ? AbortSignal.timeout(timeoutMs) : undefined;
+	const signal =
+		requestOptions.signal && timeoutSignal
+			? AbortSignal.any([requestOptions.signal, timeoutSignal])
+			: (requestOptions.signal ?? timeoutSignal);
+	try {
+		const response = await untilAborted(signal, () =>
+			instrumentedCompleteSimple(model, context, { ...requestOptions, signal }, span),
+		);
+		signal?.throwIfAborted();
+		return response;
+	} catch (error) {
+		// Keep TimeoutError distinct from operator cancellation so the caller can
+		// advance to another model rather than accepting a partial summary.
+		signal?.throwIfAborted();
+		throw error;
+	}
 }
 
 function localCodexCompaction(options: SummaryOptions | undefined) {
@@ -986,7 +1017,7 @@ async function summarizeConversationWindow(
 		return remote.summary;
 	}
 
-	const response = await instrumentedCompleteSimple(
+	const response = await completeSummary(
 		model,
 		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
 		{
@@ -1008,6 +1039,7 @@ async function summarizeConversationWindow(
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
 		},
+		options,
 	);
 
 	if (response.stopReason === "error") {
@@ -1197,7 +1229,7 @@ async function generateShortSummary(
 		return remote.summary;
 	}
 
-	const response = await instrumentedCompleteSimple(
+	const response = await completeSummary(
 		model,
 		{
 			systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT],
@@ -1222,6 +1254,7 @@ async function generateShortSummary(
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
 		},
+		options,
 	);
 
 	if (response.stopReason === "error") {
@@ -1585,6 +1618,8 @@ export async function compact(
 		tools: options?.tools,
 		fetch: options?.fetch,
 		completeImpl: options?.completeImpl,
+		oneshotRetry: options?.oneshotRetry,
+		timeoutMs: options?.timeoutMs,
 	};
 
 	const previousSnapcompactArchive = snapcompact.getPreservedArchive(previousPreserveData);
@@ -1897,7 +1932,7 @@ async function generateTurnPrefixSummary(
 		},
 	];
 
-	const response = await instrumentedCompleteSimple(
+	const response = await completeSummary(
 		model,
 		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
 		{
@@ -1919,6 +1954,7 @@ async function generateTurnPrefixSummary(
 			completeImpl: options?.completeImpl,
 			retry: summaryOneshotRetry(options),
 		},
+		options,
 	);
 
 	if (response.stopReason === "error") {

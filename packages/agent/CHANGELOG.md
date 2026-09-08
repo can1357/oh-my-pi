@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed native Codex V2 compaction omitting its feature-gate header on the provider transport and exhausting the request deadline before a stalled WebSocket could replay over SSE.
+- Fixed V2 deadline exhaustion restarting the full timeout twice before advancing to fallback; transient failures within the deadline remain retryable.
+- Bounded local compaction summary requests to three minutes, including retries, so stalled providers release maintenance and cannot commit partial summaries after cancellation. SDK callers can override the per-request deadline with `SummaryOptions.timeoutMs`; zero disables it.
+- Fixed automatic soft compaction multiplying the caller's retry budget by dropping `oneshotRetry: false`.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

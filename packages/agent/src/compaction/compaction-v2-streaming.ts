@@ -291,19 +291,24 @@ export async function requestCompactionV2Streaming(
 				})
 			: undefined;
 	let lastError: Error | undefined;
+	const timeoutMs = options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS;
 
 	for (let attempt = 0; attempt <= V2_COMPACTION_MAX_RETRIES; attempt++) {
-		const timeoutSignal = withRequestTimeout(signal, options?.timeoutMs ?? V2_COMPACTION_TIMEOUT_MS);
+		const timeoutSignal = withRequestTimeout(signal, timeoutMs);
 		try {
 			return await attemptCompactionV2Streaming(endpoint, apiKey, model, request, fetchImpl, timeoutSignal, {
 				codexMetadata,
 				providerSessionState: options?.providerSessionState,
 				codexCompaction: options?.codexCompaction,
 				preferWebsockets: options?.preferWebsockets,
+				websocketTimeoutMs: timeoutMs > 0 ? Math.max(1, Math.floor(timeoutMs / 3)) : undefined,
 			});
 		} catch (err) {
 			const error = err instanceof Error ? err : new Error(String(err));
 			if (signal?.aborted) throw error;
+			// A full request budget already includes WebSocket-to-SSE recovery.
+			// Replaying it on timeout only postpones the next compaction method.
+			timeoutSignal?.throwIfAborted();
 
 			if (isRetryableCompactionError(error) && attempt < V2_COMPACTION_MAX_RETRIES) {
 				lastError = error;
@@ -336,6 +341,7 @@ async function attemptCompactionV2Streaming(
 		providerSessionState?: Map<string, ProviderSessionState>;
 		codexCompaction?: CodexCompactionContext;
 		preferWebsockets?: boolean;
+		websocketTimeoutMs?: number;
 	},
 ): Promise<CompactionV2Response> {
 	// Faithful to Codex: append the compaction trigger as the final input item
@@ -359,6 +365,8 @@ async function attemptCompactionV2Streaming(
 			sessionId: request.sessionId,
 			providerSessionState: options.providerSessionState,
 			preferWebsockets: options.preferWebsockets,
+			websocketTimeoutMs: options.websocketTimeoutMs,
+			headers: { [OPENAI_HEADERS.CODEX_BETA_FEATURES]: OPENAI_HEADER_VALUES.REMOTE_COMPACTION_V2 },
 			responsesLite: model.useResponsesLite,
 			codexCompaction: createOpenAICodexCompactionRequestContext({
 				context: options.codexCompaction,

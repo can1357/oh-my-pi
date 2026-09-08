@@ -1002,6 +1002,35 @@ describe("requestCompactionV2Streaming", () => {
 		expect(attempts).toBe(2);
 	});
 
+	test("an exhausted V2 deadline advances fallback instead of restarting the full timeout", async () => {
+		const model = makeOpenAiModel({
+			remoteCompaction: {
+				enabled: true,
+				v2StreamingEnabled: true,
+				v2Endpoint: "https://compact.example/v1/responses",
+			},
+		});
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "preserve the hold" }] }],
+			"instructions",
+		);
+		let attempts = 0;
+		await expect(
+			requestCompactionV2Streaming(model, "test-key", request, undefined, {
+				timeoutMs: 20,
+				retryWait: async () => {},
+				fetch: async (_input, init) => {
+					attempts++;
+					const { promise, reject } = Promise.withResolvers<Response>();
+					init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+					return promise;
+				},
+			}),
+		).rejects.toMatchObject({ name: "TimeoutError" });
+		expect(attempts).toBe(1);
+	});
+
 	test("does not retry and preserves auth_unavailable from V2 HTTP failures", async () => {
 		const model = makeOpenAiModel({
 			remoteCompaction: {
@@ -1353,6 +1382,69 @@ describe("Responses Lite remote compaction", () => {
 		} finally {
 			for (const state of providerSessionState.values()) state.close();
 			providerSessionState.clear();
+			webSocket.restore();
+		}
+	});
+
+	test("V2 provider transport sends the compaction feature gate over SSE", async () => {
+		const model = makeCodexLiteModel({ preferWebsockets: false });
+		const request = buildCompactionV2Request(
+			model,
+			[{ type: "message", role: "user", content: [{ type: "input_text", text: "remember the deployment hold" }] }],
+			"Keep deployment holds",
+		);
+		const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+			preferWebsockets: false,
+			fetch: async (_input, init) => {
+				if (new Headers(init?.headers).get("x-codex-beta-features") !== "remote_compaction_v2") {
+					return new Response("Compaction feature not enabled", { status: 400 });
+				}
+				return sseResponse(compactionV2Events("enc-feature-enabled"));
+			},
+		});
+		expect(result.compactionItem.encrypted_content).toBe("enc-feature-enabled");
+	});
+
+	test("V2 replays a stalled partial WebSocket over SSE before the request deadline", async () => {
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const webSocket = installCodexCompactionWebSocket({
+			respond: socket => {
+				socket.emit({
+					type: "response.output_item.done",
+					output_index: 0,
+					item: { type: "compaction", encrypted_content: "incomplete" },
+				});
+			},
+		});
+		try {
+			const model = makeCodexLiteModel({ preferWebsockets: true });
+			const request = buildCompactionV2Request(
+				model,
+				[
+					{
+						type: "message",
+						role: "user",
+						content: [{ type: "input_text", text: "remember the deployment hold" }],
+					},
+				],
+				"Keep deployment holds",
+				{ sessionId: "stalled-compaction-budget" },
+			);
+			const fetchMock = vi.fn(async () => sseResponse(compactionV2Events("enc-recovered")));
+			const result = await requestCompactionV2Streaming(model, "test-key", request, undefined, {
+				timeoutMs: 90,
+				retryWait: async () => {
+					throw new Error("The WebSocket exhausted the outer request deadline");
+				},
+				preferWebsockets: true,
+				providerSessionState,
+				fetch: fetchMock,
+			});
+			expect(webSocket.sockets[0]?.sent).toHaveLength(1);
+			expect(fetchMock).toHaveBeenCalledTimes(1);
+			expect(result.compactionItem.encrypted_content).toBe("enc-recovered");
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
 			webSocket.restore();
 		}
 	});

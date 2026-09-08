@@ -4075,6 +4075,14 @@ export class SessionMaintenance {
 									providerSessionState: this.#host.providerSessionState,
 									preferWebsockets: this.#host.preferWebsockets,
 									codexCompaction,
+									completeImpl: async (requestModel, requestContext, requestOptions) => {
+										const stream = await this.#host.sideStreamFn(
+											requestModel,
+											requestContext,
+											requestOptions,
+										);
+										return stream.result();
+									},
 									// This loop already retries the whole compaction attempt on
 									// transient errors, so the summarization oneshots must not
 									// retry too — the budgets would multiply and each outer

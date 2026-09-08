@@ -3,6 +3,9 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import * as ai from "@oh-my-pi/pi-ai";
+import type { StreamFn } from "@oh-my-pi/pi-agent-core";
+import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -88,6 +91,7 @@ describe("issue #986 compaction auth fallback", () => {
 	async function createAutoNativeFallbackSession(options?: {
 		sameProviderNativeEnabled?: boolean;
 		includeSoftFallback?: boolean;
+		sideStreamFn?: StreamFn;
 	}) {
 		const currentModel = getBundledModel("openai", "gpt-5");
 		const sameProviderBase = getBundledModel("openai", "gpt-5-mini");
@@ -121,6 +125,7 @@ describe("issue #986 compaction auth fallback", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			modelRegistry,
+			sideStreamFn: options?.sideStreamFn,
 		});
 		session.subscribe(() => {});
 		for (const [userText, assistantText] of [
@@ -384,6 +389,32 @@ describe("issue #986 compaction auth fallback", () => {
 			`${sameProviderModel.provider}/${sameProviderModel.id}`,
 			`${crossProviderModel.provider}/${crossProviderModel.id}`,
 		]);
+	});
+
+	it("recovers native failure through the configured side transport during automatic soft fallback", async () => {
+		const originalCompact = compactionModule.compact;
+		vi.spyOn(ai, "completeSimple").mockRejectedValue(new Error("Direct transport is unavailable"));
+		const { triggerAutoCompaction } = await createAutoNativeFallbackSession({
+			includeSoftFallback: true,
+			sideStreamFn: async () => {
+				const stream = new AssistantMessageEventStream();
+				const message = assistantMsg("Deployment remains on hold pending approval.");
+				stream.push({ type: "done", reason: "stop", message });
+				stream.end(message);
+				return stream;
+			},
+		});
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, ...args) => {
+			if (preparation.settings.remoteEnabled) {
+				throw new compactionModule.NativeCompactionError(new Error("native transport timeout"));
+			}
+			return originalCompact(preparation, ...args);
+		});
+		await triggerAutoCompaction();
+		const compacted = session.sessionManager.getBranch().findLast(entry => entry.type === "compaction");
+		expect(compacted?.type === "compaction" ? compacted.summary : undefined).toContain(
+			"Deployment remains on hold pending approval.",
+		);
 	});
 
 	it("tries same-provider native candidates during manual compaction before crossing providers", async () => {
