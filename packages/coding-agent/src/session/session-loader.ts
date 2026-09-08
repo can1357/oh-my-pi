@@ -103,12 +103,11 @@ export async function visitEntriesFromFileStream(
 	const yieldEveryBytes = Math.max(0, options.yieldEveryBytes ?? STREAM_YIELD_BYTES);
 	const yieldEveryEntries = Math.max(0, options.yieldEveryEntries ?? STREAM_YIELD_ENTRIES);
 	const maxBytes = Math.max(0, options.maxBytes ?? Number.POSITIVE_INFINITY);
-	// Byte buffer (NOT a decoded string): multibyte UTF-8 sequences that straddle
-	// a stream-chunk boundary stay intact, and Bun.JSONL.parseChunk accepts typed
-	// arrays directly. Only the unconsumed remainder is held (≤ one record + a
-	// chunk), so the ≥8MiB memory guard is preserved (the file is never fully
-	// loaded into memory).
+	// Keep unfinished records as bytes until a newline arrives: copying or
+	// parsing the growing prefix per chunk is quadratic for large records.
 	let buffer: Uint8Array = new Uint8Array();
+	let pending: Uint8Array[] = [];
+	let pendingBytes = 0;
 	const decoder = new TextDecoder();
 
 	const yieldToMacrotask = async (): Promise<void> => {
@@ -198,7 +197,23 @@ export async function visitEntriesFromFileStream(
 		for await (const chunk of source.stream()) {
 			if (stopped) break;
 			bytesSinceYield += chunk.byteLength;
-			buffer = buffer.length === 0 ? chunk : Buffer.concat([buffer, chunk]);
+			const lastNewline = chunk.lastIndexOf(0x0a);
+			if (lastNewline === -1) {
+				pending.push(chunk);
+				pendingBytes += chunk.byteLength;
+				await yieldToMacrotask();
+				continue;
+			}
+			const complete = chunk.subarray(0, lastNewline + 1);
+			if (pending.length === 0) {
+				buffer = complete;
+			} else {
+				pending.push(complete);
+				buffer = Buffer.concat(pending, pendingBytes + complete.byteLength);
+			}
+			pending = [];
+			pendingBytes = chunk.byteLength - complete.byteLength;
+			if (pendingBytes > 0) pending.push(chunk.subarray(complete.byteLength));
 			// The optional fixed-width title slot is a physical first line that is
 			// NOT JSON; peel it before the parser would (correctly) reject it. The
 			// first line ends at a '\n' byte, so it is a complete UTF-8 sequence and
@@ -219,12 +234,20 @@ export async function visitEntriesFromFileStream(
 				}
 			}
 			await drain();
+			// parseChunk can leave a value unfinished even after a newline.
+			if (buffer.length > 0 && !stopped) {
+				pending.unshift(buffer);
+				pendingBytes += buffer.byteLength;
+				buffer = new Uint8Array();
+			}
 			await yieldToMacrotask();
 		}
 		// A trailing record without a final newline: terminate it so the parser
 		// can complete it (readline yielded it; parseChunk needs the delimiter).
-		if (!stopped && buffer.length > 0 && buffer[buffer.length - 1] !== 0x0a) {
-			buffer = Buffer.concat([buffer, new Uint8Array([0x0a])]);
+		if (!stopped && pendingBytes > 0) {
+			pending.push(new Uint8Array([0x0a]));
+			buffer = Buffer.concat(pending, pendingBytes + 1);
+			pending = [];
 			await drain();
 		}
 	} catch (err) {

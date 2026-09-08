@@ -246,6 +246,70 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 		}
 	});
 
+	it("preserves a large multibyte record and its signature around malformed records", async () => {
+		const text = "✓🚀こんにちは".repeat(256 * 1024);
+		const signature = "signed-provider-payload";
+		const largeMessage: FileEntry = {
+			type: "message",
+			id: "large",
+			parentId: "s1",
+			timestamp: ISO,
+			message: {
+				role: "user",
+				content: [{ type: "text", text, textSignature: signature }],
+				timestamp: 0,
+			},
+		};
+		const content = [
+			JSON.stringify(HEADER),
+			JSON.stringify(largeMessage),
+			`{ malformed ${"x".repeat(256 * 1024)}`,
+			JSON.stringify(msg("tail", "large", "after large record")),
+		].join("\n");
+		const file = await writeTemp(content);
+		const loaded = await sessionLoader.loadEntriesFromFileStream(file);
+
+		expect(entryIds(loaded.entries)).toEqual(["s1", "large", "tail"]);
+		expect(messageTexts(loaded.entries)).toEqual([text, "after large record"]);
+		expect(loaded.entries[1]).toEqual(largeMessage);
+		expect(loaded.malformedRecords).toBe(1);
+	});
+
+	it("counts an incomplete large record at the byte limit without visiting the file tail", async () => {
+		const prefix = `${JSON.stringify(HEADER)}\n`;
+		const content = `${prefix}${JSON.stringify(msg("large", "s1", "🚀".repeat(256 * 1024)))}\n${JSON.stringify(msg("tail", "large", "outside byte limit"))}`;
+		const file = await writeTemp(content);
+		const visited: FileEntry[] = [];
+		let malformedRecords = 0;
+		await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), {
+			maxBytes: Buffer.byteLength(prefix) + 256 * 1024 + 1,
+			onMalformedRecord: () => {
+				malformedRecords++;
+			},
+		});
+
+		expect(entryIds(visited)).toEqual(["s1"]);
+		expect(malformedRecords).toBe(1);
+	});
+
+	it("retains an unfinished value across embedded newlines before the trailing fragment", async () => {
+		const content = `${JSON.stringify(HEADER)}\n{\n"type":"message","id":"multiline","parentId":"s1","timestamp":"${ISO}","message":{"role":"user","content":"continued","timestamp":0}}`;
+		const file = await writeTemp(content);
+		const loaded = await sessionLoader.loadEntriesFromFileStream(file);
+
+		expect(entryIds(loaded.entries)).toEqual(["s1", "multiline"]);
+		expect(loaded.malformedRecords).toBe(0);
+	});
+
+	it("counts an unfinished malformed record across chunks before a valid trailing record", async () => {
+		const content = `${JSON.stringify(HEADER)}\n{${" ".repeat(128 * 1024)}\n${JSON.stringify(msg("tail", "s1", "x".repeat(128 * 1024)))}\n`;
+		const file = await writeTemp(content);
+		const loaded = await sessionLoader.loadEntriesFromFileStream(file);
+
+		expect(entryIds(loaded.entries)).toEqual(["s1", "tail"]);
+		expect(loaded.malformedRecords).toBe(1);
+	});
+
 	it("returns empty for a missing file (ENOENT)", async () => {
 		const missing = path.join(os.tmpdir(), `does-not-exist-${Date.now()}.jsonl`);
 		const stream = await sessionLoader.loadEntriesFromFileStream(missing);
