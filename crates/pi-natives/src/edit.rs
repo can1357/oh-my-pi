@@ -33,8 +33,8 @@ use pi_edit::{
 	modes::{hashline, sloppy},
 	path_policy::canonical_key,
 	session::{
-		ApplyRequest, EditRevision as CoreEditRevision,
-		EditWriter, PreviewBatch, SessionConfig, WriteRequest, WriteResponse,
+		ApplyRequest, EditRevision as CoreEditRevision, EditWriter, PreviewBatch, SessionConfig,
+		WriteRequest, WriteResponse,
 	},
 	store,
 	stream_json::snapshot_from_text,
@@ -486,7 +486,8 @@ impl EditSession {
 		self.shared.enqueue(ArgOp::Finish);
 	}
 
-	/// Prepare a canonical staged plan and return content-eligible files for review.
+	/// Prepare a canonical staged plan and return content-eligible files for
+	/// review.
 	#[napi]
 	pub async fn review(&self) -> Result<Vec<EditReviewFile>> {
 		let shared = Arc::clone(&self.shared);

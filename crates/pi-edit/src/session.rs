@@ -151,7 +151,7 @@ fn validate_reviewed_file(
 			)));
 		}
 	}
-	let current_exists = std::fs::metadata(&file.absolute).is_ok();
+	let current_exists = std::fs::symlink_metadata(&file.absolute).is_ok();
 	if file.existed != current_exists {
 		return Err(EditError::apply(format!(
 			"File {} state changed on disk during review",
@@ -177,7 +177,7 @@ fn validate_reviewed_file(
 				destination.display
 			)));
 		}
-		if std::fs::metadata(&destination.absolute).is_ok() {
+		if std::fs::symlink_metadata(&destination.absolute).is_ok() {
 			return Err(EditError::apply(format!(
 				"Destination {} was created on disk during review",
 				destination.display

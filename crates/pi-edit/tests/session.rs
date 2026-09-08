@@ -248,3 +248,79 @@ async fn reviewed_apply_rejects_create_under_retargeted_symlink() {
 	assert!(!target_a.join("new.txt").exists());
 	assert!(!target_b.join("new.txt").exists());
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reviewed_apply_rejects_create_and_rename_under_dangling_symlink() {
+	let ws = Workspace::new(EditMode::Patch);
+	let root = ws.cwd();
+	let external_nonexistent = root.join("external_target_never_created.txt");
+	let new_file = root.join("new_file.txt");
+
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({
+			"path": "new_file.txt",
+			"edits": [{ "op": "create", "diff": "secret content\n" }]
+		})
+		.to_string(),
+	);
+	session.finish();
+
+	let reviewed = session.review().expect("review staged plan");
+	assert_eq!(reviewed.len(), 1);
+
+	// Plant a dangling symlink at new_file pointing to external_nonexistent during
+	// review
+	std::os::unix::fs::symlink(&external_nonexistent, &new_file).expect("create dangling symlink");
+
+	let writer = DiskWriter::default();
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("apply must refuse write to dangling symlink");
+
+	assert!(
+		err.to_string()
+			.contains("state changed on disk during review"),
+		"expected state changed error, got: {err}"
+	);
+	assert_eq!(writer.requests.lock().len(), 0);
+	assert!(!external_nonexistent.exists());
+
+	// Also test rename destination with dangling symlink during review
+	ws.write("src.txt", "rename me\n");
+	let dest_external = root.join("dest_external_never_created.txt");
+	let dest_file = root.join("dest.txt");
+
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({
+			"path": "src.txt",
+			"edits": [{ "op": "update", "diff": "rename me\n", "rename": "dest.txt" }]
+		})
+		.to_string(),
+	);
+	session.finish();
+
+	let reviewed = session.review().expect("review staged rename");
+	assert_eq!(reviewed.len(), 0); // renames without content change are not eligible review files
+
+	// Plant a dangling symlink at dest_file pointing to dest_external during review
+	std::os::unix::fs::symlink(&dest_external, &dest_file).expect("create dangling dest symlink");
+
+	let writer = DiskWriter::default();
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("apply must refuse rename onto dangling symlink");
+
+	assert!(
+		err.to_string()
+			.contains("was created on disk during review"),
+		"expected destination created error, got: {err}"
+	);
+	assert_eq!(writer.requests.lock().len(), 0);
+	assert!(!dest_external.exists());
+	assert_eq!(ws.read("src.txt").unwrap(), "rename me\n");
+}
