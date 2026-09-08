@@ -3,6 +3,11 @@
 
 mod common;
 
+use std::sync::{
+	Arc,
+	atomic::{AtomicBool, Ordering},
+};
+
 use common::{DiskWriter, Workspace};
 use pi_edit::{ApplyRequest, EditMode, session::PreviewBatch};
 
@@ -77,6 +82,41 @@ async fn multi_file_failure_stages_nothing() {
 	assert!(message.ends_with("No files were modified — sections apply atomically."), "{message}");
 	assert_eq!(writer.requests.lock().len(), 0);
 	assert_eq!(ws.read("a.rs").unwrap(), SOURCE);
+}
+
+#[tokio::test]
+async fn reviewed_multi_file_apply_revalidates_each_target_before_its_write() {
+	let ws = Workspace::new(EditMode::Sloppy);
+	ws.write("a.rs", SOURCE);
+	let b_path = ws.write("b.rs", SOURCE);
+	let input = format!("{}{}", sloppy_payload("a.rs"), sloppy_payload("b.rs"));
+	let mut session = ws.session();
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	session.finish();
+	assert_eq!(session.review().expect("review").len(), 2);
+
+	let first_write = Arc::new(AtomicBool::new(true));
+	let writer_first = Arc::clone(&first_write);
+	let writer = DiskWriter {
+		rewrite: Some(Box::new(move |request| {
+			if writer_first.swap(false, Ordering::SeqCst) {
+				std::fs::write(&b_path, "external save\n").expect("external save");
+			}
+			request.content.clone().unwrap_or_default()
+		})),
+		..Default::default()
+	};
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("second target drift");
+	assert!(
+		err.to_string()
+			.contains("b.rs content changed on disk during review")
+	);
+	assert_eq!(writer.requests.lock().len(), 1);
+	assert_eq!(ws.read("a.rs").unwrap(), SOURCE.replace("let x = 1;", "let x = 2;"));
+	assert_eq!(ws.read("b.rs").as_deref(), Some("external save\n"));
 }
 
 #[tokio::test]

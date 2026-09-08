@@ -123,6 +123,49 @@ struct StagedPlan {
 	drift_bytes: HashMap<PathBuf, Vec<u8>>,
 }
 
+fn reviewed_content_changed(
+	file: &StagedFile,
+	drift_bytes: &HashMap<PathBuf, Vec<u8>>,
+) -> EditResult<bool> {
+	let Some(reviewed_bytes) = drift_bytes.get(&file.absolute) else {
+		return Ok(false);
+	};
+	let current_bytes = std::fs::read(&file.absolute)
+		.map_err(|source| EditError::Io { path: file.absolute.clone(), source })?;
+	Ok(current_bytes.as_slice() != reviewed_bytes.as_slice())
+}
+
+fn validate_reviewed_file(
+	file: &StagedFile,
+	drift_bytes: &HashMap<PathBuf, Vec<u8>>,
+) -> EditResult<()> {
+	let current_exists = std::fs::metadata(&file.absolute).is_ok();
+	if file.existed != current_exists {
+		return Err(EditError::apply(format!(
+			"File {} state changed on disk during review",
+			file.display
+		)));
+	}
+	if reviewed_content_changed(file, drift_bytes)? {
+		return Err(EditError::apply(format!(
+			"File {} content changed on disk during review",
+			file.display
+		)));
+	}
+	// validate_rename guarantees every rename destination was absent at review
+	// time; one appearing since means the approved plan would overwrite a file
+	// the human never saw.
+	if let Some(destination) = &file.move_to
+		&& std::fs::metadata(&destination.absolute).is_ok()
+	{
+		return Err(EditError::apply(format!(
+			"Destination {} was created on disk during review",
+			destination.display
+		)));
+	}
+	Ok(())
+}
+
 /// Per-file apply outcome.
 #[derive(Debug, Clone)]
 pub struct FileOutcome {
@@ -326,45 +369,13 @@ impl Session {
 		writer: &dyn EditWriter,
 	) -> EditResult<ApplyOutcome> {
 		let revisions_slice = revisions.unwrap_or(&[]);
-		let staged = if let Some(plan) = self.staged_plan.take() {
+		let (staged, reviewed_drift_bytes) = if let Some(plan) = self.staged_plan.take() {
 			let StagedPlan { staged: original_staged, reads: staged_reads, drift_bytes } = plan;
 
-			// Validate that every target file on disk matches what was reviewed
+			// Reject drift that already existed before any write, preserving the
+			// reviewed plan's all-or-nothing preflight behavior.
 			for file in &original_staged {
-				let current_exists = std::fs::metadata(&file.absolute).is_ok();
-				if file.existed != current_exists {
-					return Err(EditError::apply(format!(
-						"File {} state changed on disk during review",
-						file.display
-					)));
-				}
-				if file.existed {
-					if let Some(reviewed_bytes) = drift_bytes.get(&file.absolute) {
-						let current_bytes = match std::fs::read(&file.absolute) {
-							Ok(bytes) => bytes,
-							Err(err) => {
-								return Err(EditError::Io { path: file.absolute.clone(), source: err });
-							},
-						};
-						if current_bytes.as_slice() != reviewed_bytes.as_slice() {
-							return Err(EditError::apply(format!(
-								"File {} content changed on disk during review",
-								file.display
-							)));
-						}
-					}
-				}
-				// validate_rename guarantees every rename destination was absent
-				// at review time; one appearing since means the approved plan
-				// would overwrite a file the human never saw.
-				if let Some(destination) = &file.move_to
-					&& std::fs::metadata(&destination.absolute).is_ok()
-				{
-					return Err(EditError::apply(format!(
-						"Destination {} was created on disk during review",
-						destination.display
-					)));
-				}
+				validate_reviewed_file(file, &drift_bytes)?;
 			}
 
 			if !revisions_slice.is_empty() {
@@ -479,9 +490,9 @@ impl Session {
 						file.record_snapshot = true;
 					}
 				}
-				revised_staged
+				(revised_staged, Some(drift_bytes))
 			} else {
-				original_staged
+				(original_staged, Some(drift_bytes))
 			}
 		} else {
 			if !revisions_slice.is_empty() {
@@ -500,12 +511,18 @@ impl Session {
 					file.move_to.as_ref().map(|m| m.display.as_str()),
 				)?;
 			}
-			staged
+			(staged, None)
 		};
 
 		let last_write = staged.iter().rposition(|file| file.op != FileOp::Noop);
 		let mut files = Vec::with_capacity(staged.len());
 		for (index, mut file) in staged.into_iter().enumerate() {
+			// Earlier writes may trigger an editor/LSP save of a later target.
+			// Revalidate this file immediately before its own write so a target
+			// cannot drift after passing the up-front preflight.
+			if let Some(drift_bytes) = &reviewed_drift_bytes {
+				validate_reviewed_file(&file, drift_bytes)?;
+			}
 			let canonical = canonical_key(&file.absolute);
 			let response = if file.op == FileOp::Noop {
 				WriteResponse::default()
