@@ -297,14 +297,11 @@ Fields:
 
 ### Discovery locations
 
-OMP searches the active agent directory and project ancestors for `WATCHDOG.yml` and `WATCHDOG.yaml`.
-Project searches include files at the directory root and under `.omp/`.
-The search stops at the repository root, or the home directory outside a repository.
-A project definition overrides an ancestor or user definition with the same ID.
+`WATCHDOG.yml`/`WATCHDOG.yaml` share the same user + project search path as `WATCHDOG.md`: the user-level `<active agent dir>/WATCHDOG.yml` plus every `WATCHDOG.yml`/`.omp/WATCHDOG.yml` encountered while walking from `cwd` up to the repository root (or the home directory when no repo root is found). All discovered files are loaded together; a more-specific file (project leaf > project ancestor > user) replaces an earlier entry with the same watchdog ID.
 
 ## Subagents
 
-Subagents run unadvised unless their definition or user settings enable advisors:
+Subagents run unadvised by default; advisors are opted in **per agent** instead of via a blanket toggle:
 
 - Agent definition frontmatter `advisor`: `true` advises spawned sessions of that agent with the model resolved for the `advisor` role; a string (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern with an optional `:level` thinking suffix.
 - The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / model pattern) overrides the frontmatter, and is configured per agent from the `/agents` hub: Enter on an agent opens its property strip; the advisor strip offers on/off, a model-browser pick, or a raw pattern.
