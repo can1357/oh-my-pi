@@ -1,0 +1,50 @@
+{
+	"source": "packages/coding-agent/test/edit/seen-line-guard.test.ts",
+	"cases": [
+		{
+			"name": "records the displayed range as seen and excludes far lines"
+		},
+		{
+			"name": "rejects an edit on a line the partial read never displayed"
+		},
+		{
+			"name": "applies an edit on a displayed line"
+		},
+		{
+			"name": "records raw single-range reads as seen without emitting a hashline header"
+		},
+		{
+			"name": "records every raw multi-range line and rejects anchors outside those ranges"
+		},
+		{
+			"name": "does not mark a raw multi-range line as seen when the byte cap prevents full output"
+		},
+		{
+			"name": "merges displayed lines from ACP bridge range reads into existing provenance"
+		},
+		{
+			"name": "marks raw ACP bridge blank-line reads as seen without hashline output"
+		},
+		{
+			"name": "merges displayed lines from ACP bridge multi-range reads into existing provenance"
+		},
+		{
+			"name": "reveals the actual line content in the rejection and unblocks a same-tag retry"
+		},
+		{
+			"name": "keeps the re-read fallback when the anchor set exceeds the inline reveal cap"
+		},
+		{
+			"name": "marks column-clipped read lines as seen (clipped-line check removed)"
+		},
+		{
+			"name": "records matched lines as seen and rejects an edit on an unsearched line"
+		},
+		{
+			"name": "rejects editing an unsearched line under a search-minted tag"
+		},
+		{
+			"name": "applies an edit on an unseen line when edit.enforceSeenLines is off (default)"
+		}
+	]
+}

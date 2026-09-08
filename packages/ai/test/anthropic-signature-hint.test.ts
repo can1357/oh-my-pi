@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
 	isInvalidThinkingSignatureError,
+	isThinkingPrefixBindingError,
 	maybeAddReplayUnsignedThinkingHint,
 } from "@oh-my-pi/pi-ai/providers/anthropic";
 import type { Model, ModelSpec } from "@oh-my-pi/pi-ai/types";
@@ -30,6 +31,13 @@ function buildAnthropicMessagesModel(
 
 const SIGNATURE_400 =
 	'400 {"message":"messages.1.content.0: Invalid `signature` in `thinking` block","type":"invalid_request_error"}';
+const PREFIX_BINDING_400 =
+	'400 {"message":"messages.1.content.0: Invalid `signature` in `thinking` block. The block is bound to a different conversation. Remove the block, or set `thinking.block_binding.prefix_mismatch_behavior` to \\"drop_block\\".","type":"invalid_request_error"}';
+
+// Bedrock-backed proxies fail `signature: ""` in schema validation, before the
+// signature check, so the same replay comes back as a missing required field.
+const BEDROCK_SIGNATURE_400 =
+	'400 {"type":"error","error":{"type":"ValidationException","message":"The model returned the following errors: messages.369.content.0.thinking.signature: Field required"}}';
 
 describe("#4297 anthropic-messages replay-unsigned-thinking hint", () => {
 	it("recognises the Anthropic 400 invalid-thinking-signature body", () => {
@@ -42,9 +50,24 @@ describe("#4297 anthropic-messages replay-unsigned-thinking hint", () => {
 		expect(isInvalidThinkingSignatureError("messages.1.content.0: Invalid signature in thinking")).toBe(true);
 	});
 
+	it("separates conversation binding failures from malformed signatures", () => {
+		expect(isThinkingPrefixBindingError(PREFIX_BINDING_400)).toBe(true);
+		expect(isThinkingPrefixBindingError(SIGNATURE_400)).toBe(false);
+		const model = buildAnthropicMessagesModel();
+		expect(maybeAddReplayUnsignedThinkingHint(model, PREFIX_BINDING_400)).toBe(PREFIX_BINDING_400);
+	});
+
+	it("recognises the Bedrock ValidationException missing-signature body", () => {
+		expect(isInvalidThinkingSignatureError(BEDROCK_SIGNATURE_400)).toBe(true);
+		expect(isInvalidThinkingSignatureError("messages.0.content.0.thinking.signature: Field required")).toBe(true);
+		expect(isInvalidThinkingSignatureError("content.2.thinking.signature is required")).toBe(true);
+	});
+
 	it("does not fire on unrelated errors", () => {
 		expect(isInvalidThinkingSignatureError("400 rate_limit_error")).toBe(false);
 		expect(isInvalidThinkingSignatureError("Bad Request: missing 'model'")).toBe(false);
+		// Names a different required field on a thinking block, not its signature.
+		expect(isInvalidThinkingSignatureError("messages.1.content.0.thinking.thinking: Field required")).toBe(false);
 	});
 
 	it("prepends a provider-scoped remediation on unmarked custom signing proxies", () => {
@@ -55,6 +78,12 @@ describe("#4297 anthropic-messages replay-unsigned-thinking hint", () => {
 		expect(surfaced).toContain("compat.replayUnsignedThinking: false");
 		expect(surfaced).toContain("providers.cf-anthropic");
 		expect(surfaced).toContain(SIGNATURE_400);
+	});
+
+	it("prepends the same remediation on the Bedrock wording", () => {
+		const surfaced = maybeAddReplayUnsignedThinkingHint(buildAnthropicMessagesModel(), BEDROCK_SIGNATURE_400);
+		expect(surfaced).toContain("compat.replayUnsignedThinking: false");
+		expect(surfaced).toContain(BEDROCK_SIGNATURE_400);
 	});
 
 	it("passes through when the user already set `compat.replayUnsignedThinking`", () => {

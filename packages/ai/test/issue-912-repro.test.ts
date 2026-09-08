@@ -2,6 +2,7 @@ import { describe, expect, it } from "bun:test";
 import { stream } from "@oh-my-pi/pi-ai/stream";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { COPILOT_API_HEADERS } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 
 function makeCopilotResponsesModel(baseUrl: string): Model<"openai-responses"> {
 	return buildModel({
@@ -15,7 +16,7 @@ function makeCopilotResponsesModel(baseUrl: string): Model<"openai-responses"> {
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 		contextWindow: 128000,
 		maxTokens: 64000,
-		headers: { "User-Agent": "opencode/1.3.15" },
+		headers: { ...COPILOT_API_HEADERS },
 	});
 }
 

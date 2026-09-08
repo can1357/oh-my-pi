@@ -78,6 +78,36 @@ describe("auth-gateway diagnostic response headers", () => {
 		}
 	});
 
+	it("marks client-declared tools for execution outside the gateway", async () => {
+		const gw = await bootGateway();
+		try {
+			gw.mock.push({ content: ["ok"] });
+			const res = await fetch(`${gw.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "mock/header-model",
+					messages: [{ role: "user", content: "send this" }],
+					tools: [
+						{
+							type: "function",
+							function: {
+								name: "send_message",
+								description: "Send a message",
+								parameters: { type: "object", properties: { text: { type: "string" } } },
+							},
+						},
+					],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(200);
+			expect(gw.mock.calls[0]?.options?.cursorExternalToolExecutor).toBe(true);
+		} finally {
+			await gw.close();
+		}
+	});
+
 	it("streaming responses carry the model and request ids but no cost (unknown at header time)", async () => {
 		const gw = await bootGateway();
 		try {

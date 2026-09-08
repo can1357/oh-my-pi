@@ -12,6 +12,7 @@
  * test/task/task-schema.test.ts.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
 import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -146,6 +147,152 @@ describe("task spawn routing", () => {
 		expect(job!.resultText).toContain("history://Spawnling");
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
+	});
+
+	it("retains the temporary artifacts directory for a completed async spawn (in-memory session)", async () => {
+		// Regression: with no session file (in-memory session), leaseArtifacts()
+		// allocates a temporary directory that runStructuredSubagent() deletes
+		// on completion unless retainArtifacts is requested. Detached (async)
+		// spawns advertise `agent://<id>` handles in the eventual async-result
+		// delivery, so the directory must survive past this call returning
+		// (PR #10625 review).
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		let capturedArtifactsDir: string | undefined;
+		const runSpy = vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			capturedArtifactsDir = options.artifactsDir;
+			return makeResult(options.id ?? "?");
+		});
+
+		const manager = createManager();
+		const tool = await TaskTool.create(createSession({ manager }));
+
+		const result = await tool.execute("tc-retain", {
+			agent: "task",
+			name: "Retainling",
+			task: "Do the thing.",
+		} as TaskParams);
+
+		const jobId = result.details?.async?.jobId;
+		const job = manager.getJob(jobId!);
+		await job!.promise;
+
+		expect(job!.status).toBe("completed");
+		expect(runSpy).toHaveBeenCalledTimes(1);
+		expect(capturedArtifactsDir).toBeTruthy();
+		await expect(fs.stat(capturedArtifactsDir!)).resolves.toBeDefined();
+		await fs.rm(capturedArtifactsDir!, { recursive: true, force: true });
+	});
+
+	it("cleans up the retained artifacts directory once the job is evicted", async () => {
+		// Regression: retainArtifacts kept the temp directory alive past
+		// completion, but nothing ever deleted it afterward — a long-running
+		// SDK process accumulated every detached task's transcript forever.
+		// Cleanup must run once the job actually leaves the manager (eviction
+		// or disposal), not never (PR #10625 review).
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		let capturedArtifactsDir: string | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			capturedArtifactsDir = options.artifactsDir;
+			return makeResult(options.id ?? "?");
+		});
+
+		// Cleanup runs fire-and-forget off the job's own settle chain; spy on
+		// the real `fs.rm` call to await its actual completion instead of
+		// guessing a wait duration.
+		const rmCalled = deferred();
+		const realRm = fs.rm.bind(fs);
+		vi.spyOn(fs, "rm").mockImplementation(async (target, opts) => {
+			const outcome = await realRm(target as Parameters<typeof fs.rm>[0], opts as Parameters<typeof fs.rm>[1]);
+			if (capturedArtifactsDir && target === capturedArtifactsDir) rmCalled.resolve();
+			return outcome;
+		});
+
+		// retentionMs: 0 evicts synchronously once the job settles so the
+		// test does not have to wait out the real 5-minute default
+		// retention window.
+		const manager = new AsyncJobManager({
+			onJobComplete: () => {},
+			retentionMs: 0,
+			retainedArtifactsCleanupGraceMs: 0,
+		});
+		managers.push(manager);
+		const tool = await TaskTool.create(createSession({ manager }));
+
+		const result = await tool.execute("tc-evict", {
+			agent: "task",
+			name: "Evictling",
+			task: "Do the thing.",
+		} as TaskParams);
+
+		const jobId = result.details?.async?.jobId;
+		const job = manager.getJob(jobId!);
+		await job!.promise;
+
+		expect(capturedArtifactsDir).toBeTruthy();
+		expect(manager.getJob(jobId!)).toBeUndefined();
+		await rmCalled.promise;
+		await expect(fs.stat(capturedArtifactsDir!)).rejects.toThrow();
+	});
+
+	it("attaches retained-artifacts cleanup to the collision-suffixed job, not the pre-existing row", async () => {
+		// Regression: `AsyncJobManager.register()` suffixes the requested job
+		// id when it collides with another live job (e.g. a task id reusing a
+		// vibe turn's job id). The cleanup wiring looked the job back up by
+		// the *requested* id, which — after a collision — resolves to the
+		// unrelated pre-existing row instead of the newly registered task, so
+		// cleanup attached to (and could later delete artifacts alongside)
+		// the wrong job (PR #10625 review).
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+			agents: [taskAgent],
+			projectAgentsDir: null,
+		});
+		let capturedArtifactsDir: string | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			capturedArtifactsDir = options.artifactsDir;
+			return makeResult(options.id ?? "?");
+		});
+
+		const manager = createManager();
+		// Placeholder job occupying "Foo", the id the fresh task would
+		// otherwise be allocated — its own agent output id is unique per
+		// AgentOutputManager, independent of the job manager's id map, so
+		// this simulates the collision without needing a second spawn.
+		const placeholderGate = deferred();
+		manager.register(
+			"bash",
+			"placeholder",
+			async () => {
+				await placeholderGate.promise;
+				return "placeholder done";
+			},
+			{ id: "Foo" },
+		);
+
+		const tool = await TaskTool.create(createSession({ manager }));
+		const result = await tool.execute("tc-collide", {
+			agent: "task",
+			name: "Foo",
+			task: "Do the thing.",
+		} as TaskParams);
+
+		const jobId = result.details?.async?.jobId;
+		expect(jobId).toBe("Foo-2");
+		const job = manager.getJob(jobId!);
+		await job!.promise;
+
+		expect(job!.status).toBe("completed");
+		expect(job!.retainedArtifactsCleanup).toBeDefined();
+		const placeholder = manager.getJob("Foo");
+		expect(placeholder!.retainedArtifactsCleanup).toBeUndefined();
+
+		placeholderGate.resolve();
+		if (capturedArtifactsDir) await fs.rm(capturedArtifactsDir, { recursive: true, force: true });
 	});
 
 	it("bounds concurrent job bodies with the session spawn semaphore", async () => {

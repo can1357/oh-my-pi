@@ -476,7 +476,7 @@ export class BlobRegistry {
 		const expiredOnly = request.expiredOnly === true || (!request.all && request.before === undefined);
 		let purgedBlobs = 0;
 		let reclaimedBytes = 0;
-		for (const entry of [...this.#entries.values()]) {
+		for (const entry of Array.from(this.#entries.values())) {
 			if (expiredOnly && !this.#expired(entry)) continue;
 			if (request.before !== undefined && entry.touchedAt >= request.before) continue;
 			if (entry.publication) publications.push(entry.publication);
