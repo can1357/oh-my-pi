@@ -51,6 +51,8 @@ const CLOUD_STT_TIMEOUT_MS = 60_000;
 
 /** omp records at 16 kHz mono; the endpoint accepts 16-bit PCM WAV as-is. */
 const MIC_SAMPLE_RATE = 16_000;
+/** Keep the generated WAV below the transcription endpoint's 25 MiB upload limit. */
+const MAX_AUDIO_SAMPLES = Math.floor((24 * 1024 * 1024 - 44) / 2);
 
 export const STT_BACKEND_VALUES = ["local", "cloud"] as const;
 export type SttBackend = (typeof STT_BACKEND_VALUES)[number];
@@ -87,8 +89,10 @@ export interface CloudSttStreamOptions extends SttStreamOptions {
  */
 export function startCloudSttStream(options: CloudSttStreamOptions): SttStreamHandle {
 	const fetchImpl = options.fetchImpl ?? fetch;
+	const requestAbort = new AbortController();
 	const chunks: Float32Array[] = [];
 	let queuedBytes = 0;
+	let limitExceeded = false;
 	let settled = false;
 	let stopped = false;
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
@@ -100,23 +104,37 @@ export function startCloudSttStream(options: CloudSttStreamOptions): SttStreamHa
 		apply();
 	};
 
-	const abort = (): void => finish(() => resolve(""));
+	const abort = (): void => {
+		requestAbort.abort();
+		finish(() => resolve(""));
+	};
 	if (options.signal?.aborted) abort();
 	else options.signal?.addEventListener("abort", abort, { once: true });
 
 	return {
 		pushAudio(audio: Float32Array): void {
-			if (settled || stopped) return;
+			if (settled || stopped || limitExceeded || audio.length === 0) return;
+			if (queuedBytes + audio.length > MAX_AUDIO_SAMPLES) {
+				limitExceeded = true;
+				chunks.length = 0;
+				queuedBytes = 0;
+				return;
+			}
 			chunks.push(audio.slice());
 			queuedBytes += audio.length;
 		},
 		stop: () => {
 			if (!settled && !stopped) {
 				stopped = true;
-				if (queuedBytes === 0) {
+				if (limitExceeded) {
+					finish(() => reject(new Error("Cloud speech recording exceeds the 24 MiB upload limit.")));
+				} else if (queuedBytes === 0) {
 					finish(() => resolve(""));
 				} else {
-					void transcribeBuffer(fetchImpl, options, concat(chunks, queuedBytes)).then(
+					const signal = options.signal
+						? AbortSignal.any([options.signal, requestAbort.signal])
+						: requestAbort.signal;
+					void transcribeBuffer(fetchImpl, { ...options, signal }, concat(chunks, queuedBytes)).then(
 						text => finish(() => resolve(text)),
 						err => {
 							const msg = err instanceof Error ? err.message : String(err);
@@ -128,7 +146,7 @@ export function startCloudSttStream(options: CloudSttStreamOptions): SttStreamHa
 			}
 			return promise;
 		},
-		cancel: () => finish(() => resolve("")),
+		cancel: abort,
 	};
 }
 
