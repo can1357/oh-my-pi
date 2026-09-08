@@ -356,6 +356,16 @@ describe("tool approval content review", () => {
 			expect(await Bun.file(target).arrayBuffer()).toEqual(new Uint8Array([0x81, 0x01]).buffer);
 		});
 
+		test("a BOM-only byte difference still proposes the write", async () => {
+			const target = path.join(tmpDir, "bom.txt");
+			await Bun.write(target, new Uint8Array([0xef, 0xbb, 0xbf, ...new TextEncoder().encode("same\n")]));
+			const tool = new WriteTool(session);
+
+			const review = await tool.prepareApproval("write-bom", { path: target, content: "same\n" });
+			if (!review) throw new Error("expected a review for a filesystem write");
+			expect(review.files).toEqual([{ path: "bom.txt", before: "same\n", after: "same\n" }]);
+		});
+
 		test("proposes no tab when the write would not change the file", async () => {
 			await fixture("same.txt", "identical\n");
 			const tool = new WriteTool(session);

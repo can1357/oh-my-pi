@@ -1161,16 +1161,20 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		const before = beforeBytes === null ? null : new TextDecoder().decode(beforeBytes);
 		signal?.throwIfAborted();
 		const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+		// The no-op decision must compare bytes: decoding strips a leading
+		// BOM and replaces malformed sequences, so equal text can still mean
+		// executing the write would change the on-disk bytes.
+		const unchanged = beforeBytes !== null && approvalBytesMatch(new TextEncoder().encode(after), beforeBytes);
 		const state: WriteApprovalState = { absolutePath, before, beforeBytes };
 		this.#approvalWrites.set(toolCallId, state);
 		return {
-			files: before === after ? [] : [{ path: displayPath, before, after }],
+			files: unchanged ? [] : [{ path: displayPath, before, after }],
 			apply: revisions => {
 				if (revisions.length > 1) throw new ToolError("A write approval can revise only its proposed file");
 				const revision = revisions[0];
 				if (!revision) return;
 				writeSchema.assert(revision);
-				if (revision.path !== displayPath || before === after) {
+				if (revision.path !== displayPath || unchanged) {
 					throw new ToolError(`Invalid approval revision for ${revision.path}`);
 				}
 				state.content = revision.content;
