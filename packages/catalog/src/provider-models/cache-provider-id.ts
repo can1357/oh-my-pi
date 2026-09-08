@@ -98,9 +98,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// so they refetch instead of serving the poisoned rows. Listing ids
 			// cannot cover this class — any enterprise-only sibling can carry
 			// another provider's routing — so version the namespace instead.
+			// v3: unioned models must not retain the first account's Enterprise
+			// endpoint, which misroutes sibling credentials during inference.
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `github-copilot:models-v2:${Bun.hash(scope).toString(36)}`;
+			return `github-copilot:models-v3:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

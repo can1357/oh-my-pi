@@ -6457,6 +6457,10 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 			}
 			for (const model of result) {
 				if (!byId.has(model.id)) {
+					// Account-derived hosts belong to credentials, not shared models.
+					// Retain only the configured endpoint so inference can route using
+					// the selected credential (while respecting explicit proxy URLs).
+					model.baseUrl = configuredBaseUrl;
 					byId.set(model.id, model);
 				}
 			}

@@ -586,8 +586,6 @@ describe("ModelRegistry runtime discovery", () => {
 			"Bearer copilot-personal https://api.githubcopilot.com/models",
 			"token copilot-personal https://api.github.com/copilot_internal/user",
 		]);
-		expect(registry.find("github-copilot", "business-model")?.baseUrl).toBe("https://api.business.githubcopilot.com");
-		expect(registry.find("github-copilot", "enterprise-model")?.baseUrl).toBe("https://copilot-api.ghe.example.com");
 	});
 
 	test("github-copilot discovery honors a runtime key instead of stored OAuth accounts", async () => {
