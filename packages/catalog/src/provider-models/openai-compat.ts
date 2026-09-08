@@ -6454,7 +6454,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 		}[],
 	): ModelSpec<Api>[] | null => {
 		const byId = new Map<string, ModelSpec<Api>>();
-		const hasCredentialIds = results.every(account => account.credentialId !== undefined);
+		const hasAnyCredentialIds = results.some(account => account.credentialId !== undefined);
 		for (const { accountId, credentialId, result } of results) {
 			if (result === null) {
 				logger.warn("Copilot model discovery aborted: an account failed to fetch", { accountId });
@@ -6467,11 +6467,16 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					// Retain only the configured endpoint so inference can route using
 					// the selected credential (while respecting explicit proxy URLs).
 					model.baseUrl = configuredBaseUrl;
-					if (hasCredentialIds) model.oauthCredentialIds = [credentialId!];
+					if (hasAnyCredentialIds) {
+						model.oauthCredentialIds = credentialId !== undefined ? [credentialId] : [];
+					}
 					byId.set(model.id, model);
 				} else {
-					if (hasCredentialIds && !existing.oauthCredentialIds!.includes(credentialId!)) {
-						existing.oauthCredentialIds!.push(credentialId!);
+					if (hasAnyCredentialIds && credentialId !== undefined) {
+						existing.oauthCredentialIds ??= [];
+						if (!existing.oauthCredentialIds.includes(credentialId)) {
+							existing.oauthCredentialIds.push(credentialId);
+						}
 					}
 					// Reconcile capabilities conservatively so routing to either account
 					// respects the lowest common limits and input modalities.

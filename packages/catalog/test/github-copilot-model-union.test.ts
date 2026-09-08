@@ -127,4 +127,42 @@ describe("github-copilot multi-account discovery failures", () => {
 		await options.fetchDynamicModels?.();
 		expect(options.cacheProviderId).not.toBe(initialCacheId);
 	});
+
+	it("preserves OAuth grants in a mixed union with non-OAuth accounts", async () => {
+		const options = githubCopilotModelManagerOptions({
+			baseUrl: BASE_URL,
+			resolveAccounts: async () => [
+				{ apiKey: "oauth-account", accountId: "acc-oauth", credentialId: 101 },
+				{ apiKey: "env-account", accountId: "acc-env" }, // no credentialId
+			],
+			fetch: async (_input, init) => {
+				const auth = new Headers(init?.headers).get("Authorization");
+				if (auth === "Bearer oauth-account") {
+					return Response.json({
+						data: [
+							{ id: "shared-model", capabilities: { type: "chat" } },
+							{ id: "oauth-only-model", capabilities: { type: "chat" } },
+						],
+					});
+				}
+				return Response.json({
+					data: [
+						{ id: "shared-model", capabilities: { type: "chat" } },
+						{ id: "env-only-model", capabilities: { type: "chat" } },
+					],
+				});
+			},
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models).toBeDefined();
+		const byId = new Map(models!.map(m => [m.id, m]));
+
+		// Shared model has credentialId from the OAuth account
+		expect(byId.get("shared-model")?.oauthCredentialIds).toEqual([101]);
+		// OAuth-only model has credentialId from the OAuth account
+		expect(byId.get("oauth-only-model")?.oauthCredentialIds).toEqual([101]);
+		// Env-only model has empty array (not undefined), signaling no OAuth account grants it
+		expect(byId.get("env-only-model")?.oauthCredentialIds).toEqual([]);
+	});
 });

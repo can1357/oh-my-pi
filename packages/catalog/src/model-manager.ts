@@ -208,13 +208,8 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		? passModelList<TApi>(options.staticModels)
 		: (getBundledModels(options.providerId as GeneratedProvider) as Model<TApi>[]);
 	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
-	// Additive semantics keep bundled static models visible when a shared
-	// models.dev catalog supplements them. Skip this for authoritative
-	// providers: their cached result (even if empty) IS the truth — the
-	// cold-start fast path below must not re-inject static models that the
-	// authoritative dynamic fetch intentionally pruned.
 	const additiveStaticModelIds =
-		options.modelsDev?.additiveOnly && staticModels.length > 0 && !dynamicModelsAuthoritative
+		options.modelsDev?.additiveOnly && staticModels.length > 0
 			? new Set(staticModels.map(model => model.id))
 			: undefined;
 	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
@@ -267,13 +262,17 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		cacheFingerprintMatches &&
 		!cacheHasUnresolvedHeaders
 	) {
-		const cacheContribution = additiveStaticModelIds
-			? restoredCache.models.filter(model => !additiveStaticModelIds.has(model.id))
-			: restoredCache.models;
-		const cachedModels = additiveStaticModelIds
-			? mergeCatalogMetrics(mergeDynamicModels(staticModels, cacheContribution), restoredCache.models)
-			: restoredCache.models;
-		const source: ModelResolutionSource = cacheContribution.length > 0 ? "cache" : "bundled";
+		const isAuthoritativeDynamic = dynamicModelsAuthoritative && (cache?.authoritative ?? false);
+		const cacheContribution =
+			additiveStaticModelIds && !isAuthoritativeDynamic
+				? restoredCache.models.filter(model => !additiveStaticModelIds.has(model.id))
+				: restoredCache.models;
+		const cachedModels =
+			additiveStaticModelIds && !isAuthoritativeDynamic
+				? mergeCatalogMetrics(mergeDynamicModels(staticModels, cacheContribution), restoredCache.models)
+				: restoredCache.models;
+		const source: ModelResolutionSource =
+			cacheContribution.length > 0 || isAuthoritativeDynamic ? "cache" : "bundled";
 		return {
 			models: collapseBuiltVariants(cachedModels),
 			stale: false,
@@ -310,9 +309,13 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			);
 	// Additive shared-catalog rows may only introduce IDs. Apply that boundary
 	// to cache fallback too, including snapshots written by an older binary.
-	const cacheModels = additiveStaticModelIds
-		? preparedCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
-		: preparedCacheModels;
+	// Skip this when the cache is authoritative for a dynamic provider, where
+	// cached rows are the authoritative catalog rather than additive supplements.
+	const isAuthoritativeCached = dynamicModelsAuthoritative && (cache?.authoritative ?? false);
+	const cacheModels =
+		additiveStaticModelIds && !isAuthoritativeCached
+			? preparedCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
+			: preparedCacheModels;
 	const dynamicModels = fetchedDynamicModels ?? [];
 	// A successful empty endpoint result stays authoritative for THIS cycle (so an
 	// intentional catalog emptying still prunes removed models downstream), but
@@ -379,11 +382,12 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				cacheFingerprintMatches,
 				options.dropCachedModelIdsOnStaticMismatch,
 			);
-			const latestCacheModels = additiveStaticModelIds
-				? preparedLatestCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
-				: preparedLatestCacheModels;
 			const isAuthoritativePreserved =
 				dynamicModelsAuthoritative && (latestCache?.authoritative ?? cache?.authoritative ?? false);
+			const latestCacheModels =
+				additiveStaticModelIds && !isAuthoritativePreserved
+					? preparedLatestCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
+					: preparedLatestCacheModels;
 			const fallbackSnapshotModels = collapseBuiltVariants(
 				isAuthoritativePreserved
 					? latestCacheModels

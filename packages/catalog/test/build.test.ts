@@ -1322,6 +1322,54 @@ describe("model cache spec round trip", () => {
 		}
 	});
 
+	it("honors modelsDev.additiveOnly on authoritative managers when provider fetch fails", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-additive-authoritative-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const staticA = completionsSpec({
+			id: "model-a",
+			name: "Bundled Static A",
+			provider: "auth-test",
+			contextWindow: 128_000,
+		});
+		const options = {
+			providerId: "auth-test",
+			staticModels: [staticA],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			fetchDynamicModels: async () => null,
+			modelsDev: {
+				additiveOnly: true,
+				fetch: async () => [
+					completionsSpec({
+						id: "model-a",
+						name: "Overwritten by models.dev",
+						provider: "auth-test",
+						contextWindow: 64_000,
+					}),
+					completionsSpec({
+						id: "new-model",
+						name: "New from models.dev",
+						provider: "auth-test",
+					}),
+				],
+				map: (payload: unknown) => payload as ModelSpec<"openai-completions">[],
+			},
+		};
+		try {
+			const resolved = await resolveProviderModels(options, "online");
+			const byId = new Map(resolved.models.map(m => [m.id, m]));
+
+			// Same-id model-a must retain bundled metadata because additiveOnly forbids overwriting it
+			expect(byId.get("model-a")?.name).toBe("Bundled Static A");
+			expect(byId.get("model-a")?.contextWindow).toBe(128_000);
+
+			// New model from models.dev is introduced
+			expect(byId.has("new-model")).toBe(true);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("restores static model headers on fresh cache reads", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-static-headers-"));
 		const dbPath = path.join(tempDir, "models.db");
