@@ -602,7 +602,7 @@ export function toolWireSchema(tool: Tool): Record<string, unknown> {
 	const params: TSchema = tool.parameters;
 	if (isArkSchema(params)) return arkToWireSchema(params);
 	return stamp(params as Record<string, unknown>, kJsonWireSchema, p => {
-		const raw = isArkJsonAst(p) ? arkJsonAstToWire(p) : p;
+		const raw = isArkJsonAst(p) ? arkJsonAstToWire(p) : structuredClone(p);
 		const upgraded = upgradeJsonSchemaTo202012(raw) as Record<string, unknown>;
 		return postProcessJsonSchema(upgraded);
 	});

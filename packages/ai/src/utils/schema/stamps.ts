@@ -9,22 +9,43 @@
  *
  * Caveats: the stamp lives as long as the host object, even after callers
  * release their references to the cached value — only use this for caches
- * whose lifetime should match the host. Frozen hosts cannot be stamped;
- * `define` silently skips them, so memoization/visit-tracking degrades to
- * best-effort (recompute on every call, no cycle protection) instead of
- * throwing.
+ * whose lifetime should match the host. Nonextensible hosts use a weak
+ * side table. Mutable cells keep traversal state writable when a host is
+ * frozen after its first traversal.
  */
-function define<T extends object>(target: T, key: symbol, value: unknown): void {
-	if (Object.isFrozen(target)) return;
-	Object.defineProperty(target, key, { value, writable: true, configurable: true });
+interface Cell<V> {
+	value: V | undefined;
+}
+
+const fallback = new WeakMap<object, Map<symbol, Cell<unknown>>>();
+
+function cell<V>(target: object, key: symbol): Cell<V> {
+	const existing = Object.hasOwn(target, key) ? (target as Record<symbol, Cell<V>>)[key] : undefined;
+	if (existing) return existing;
+	if (Object.isExtensible(target)) {
+		const created: Cell<V> = { value: undefined };
+		Object.defineProperty(target, key, { value: created });
+		return created;
+	}
+	let slots = fallback.get(target);
+	if (!slots) {
+		slots = new Map();
+		fallback.set(target, slots);
+	}
+	let stored = slots.get(key);
+	if (!stored) {
+		stored = { value: undefined };
+		slots.set(key, stored);
+	}
+	return stored as Cell<V>;
 }
 
 export function stamp<T extends object, V>(target: T, key: symbol, compute: (target: T) => V): V {
-	const slot = target as Record<symbol, V | undefined>;
-	const existing = slot[key];
+	const slot = cell<V>(target, key);
+	const existing = slot.value;
 	if (existing !== undefined) return existing;
 	const value = compute(target);
-	define(target, key, value);
+	slot.value = value;
 	return value;
 }
 
@@ -53,11 +74,10 @@ export function epochNext(): number {
  * subsequent call within the same epoch.
  */
 export function once<T extends object>(target: T, epoch: number): boolean {
-	const slot = target as Record<symbol, number | undefined>;
-	const cur = slot[kEpoch];
+	const slot = cell<number>(target, kEpoch);
+	const cur = slot.value;
 	if (cur !== undefined && cur >= epoch) return false;
-	if (cur === undefined) define(target, kEpoch, epoch);
-	else slot[kEpoch] = epoch;
+	slot.value = epoch;
 	return true;
 }
 
@@ -89,21 +109,16 @@ const kDepth = Symbol("pi.schema.depth");
  * make every later top-level walk of the same object misreport a cycle.
  */
 export function enter<T extends object>(target: T): boolean {
-	const slot = target as Record<symbol, number | undefined>;
-	const cur = slot[kDepth];
-	if (cur === undefined) {
-		define(target, kDepth, 1);
-		return true;
-	}
-	if (cur !== 0) return false;
-	slot[kDepth] = 1;
+	const slot = cell<number>(target, kDepth);
+	const cur = slot.value;
+	if (cur !== undefined && cur !== 0) return false;
+	slot.value = 1;
 	return true;
 }
 
 export function exit<T extends object>(target: T): void {
-	const slot = target as Record<symbol, number | undefined>;
-	const cur = slot[kDepth];
-	// Frozen targets never received the kDepth stamp in `enter` — nothing to unwind.
+	const slot = cell<number>(target, kDepth);
+	const cur = slot.value;
 	if (cur === undefined) return;
-	slot[kDepth] = cur - 1;
+	slot.value = cur - 1;
 }
