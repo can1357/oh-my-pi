@@ -1353,6 +1353,9 @@ async function runLoopBody(
 							status: message.stopReason === "aborted" ? "aborted" : "error",
 						});
 					}
+					// This turn is terminal even while turn-end hooks are still running.
+					// Reject active-only steering before the first suspension point.
+					config.setSteeringAdmission?.(false);
 					await emitTurnEnd(stream, currentContext, message, toolResults, config, signal, { willContinue: false });
 					turnOpen = false;
 

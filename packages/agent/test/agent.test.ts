@@ -638,6 +638,30 @@ describe("Agent", () => {
 		expect(JSON.stringify(replayedMessages)).not.toContain("I can't assist");
 	});
 
+	it("closes steering admission before provider-error terminal events", async () => {
+		const mock = createMockModel({
+			responses: [
+				{
+					content: ["provider failed"],
+					stopReason: "error",
+					errorMessage: "provider failed",
+				},
+			],
+		});
+		const agent = new Agent({
+			initialState: { model: mock.model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: mock.stream,
+		});
+		const admissionAtTurnEnd: boolean[] = [];
+		agent.subscribe(event => {
+			if (event.type === "turn_end") admissionAtTurnEnd.push(agent.acceptsSteering);
+		});
+
+		await agent.prompt("trigger provider error");
+
+		expect(admissionAtTurnEnd).toEqual([false]);
+	});
+
 	it("prompt() emits assistant error lifecycle for Anthropic output-blocked stream errors before assistant start", async () => {
 		const mock = createMockModel({ responses: [] });
 		const errorText = "Output blocked by content filtering policy";
