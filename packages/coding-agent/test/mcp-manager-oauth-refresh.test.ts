@@ -47,9 +47,8 @@ function installControlledBunSleep(): ControlledSleep[] {
 	const calls: ControlledSleep[] = [];
 	vi.spyOn(Bun, "sleep").mockImplementation((ms: number | Date) => {
 		const { promise, resolve } = Promise.withResolvers<void>();
-		let call: ControlledSleep;
 		const delayMs = typeof ms === "number" ? ms : Math.max(0, ms.getTime() - Date.now());
-		call = {
+		const call = {
 			ms: delayMs,
 			resolved: false,
 			resolve: () => {

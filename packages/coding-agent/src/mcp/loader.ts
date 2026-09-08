@@ -33,7 +33,7 @@ export interface MCPToolsLoadOptions {
 	enableProjectConfig?: boolean;
 	/** Whether to filter out Exa MCP servers (default: true) */
 	filterExa?: boolean;
-	/** Whether to filter out browser MCP servers when builtin browser tool is enabled (default: false) */
+	/** Whether to filter out browser MCP servers when the built-in browser capability is enabled (default: false) */
 	filterBrowser?: boolean;
 	/** SQLite storage for MCP tool cache (null disables cache) */
 	cacheStorage?: AgentStorage | null;

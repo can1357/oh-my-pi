@@ -222,7 +222,7 @@ export function parseHtmlFragment(html: string): TurndownNode {
 	const stack: HtmlNode[] = [root];
 	for (const token of htmlTokens(html)) {
 		const parent = stack[stack.length - 1] ?? root;
-		if (token.startsWith("<!--") || /^<!/i.test(token)) continue;
+		if (token.startsWith("<!--") || token.startsWith("<!")) continue;
 		if (!token.startsWith("<")) {
 			parent.append(new HtmlText(decodeEntities(token)));
 			continue;

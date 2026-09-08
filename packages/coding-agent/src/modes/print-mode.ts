@@ -57,6 +57,8 @@ function stripProviderPayload<T extends AgentMessage>(message: T): T {
  */
 export function printableEvent(event: AgentSessionEvent): unknown {
 	switch (event.type) {
+		case "tool_stream_update":
+			return { type: event.type, toolCallId: event.toolCallId, toolName: event.toolName };
 		case "message_update": {
 			const streamEvent = event.assistantMessageEvent;
 			if (streamEvent.type === "done" || streamEvent.type === "error") {

@@ -239,6 +239,7 @@ function freezeFallbacksByTarget(
 	}
 	const out: Partial<Record<string, Readonly<Partial<Record<GatewayErrorDisposition, readonly string[]>>>>> = {};
 	for (const [from, dispMap] of Object.entries(byTarget)) {
+		if (!dispMap) continue;
 		const frozen: Partial<Record<GatewayErrorDisposition, readonly string[]>> = {};
 		for (const disposition of Object.keys(dispMap) as GatewayErrorDisposition[]) {
 			const list = dispMap[disposition];

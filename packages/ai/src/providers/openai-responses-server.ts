@@ -621,8 +621,8 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	// applyParsedGatewayOptions / providers see the schema.
 	if (isObj(data.text) && "format" in data.text && data.text.format !== undefined) {
 		options.responseFormat = data.text.format;
-	} else if (data.response_format !== undefined) {
-		options.responseFormat = data.response_format;
+	} else if (isObj(body) && body.response_format !== undefined) {
+		options.responseFormat = body.response_format;
 	}
 	if (data.store === true) options.store = true;
 	// `store: false`/absent stays the default; only an explicit true is forwarded.

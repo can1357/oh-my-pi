@@ -243,6 +243,32 @@ describe("RouteRegistry", () => {
 		expect(route?.fallbackByTarget?.A?.context_overflow ?? []).not.toContain("D");
 	});
 
+	it("keeps parent order for nested same-disposition fallbacks without duplication", () => {
+		const registry = new RouteRegistry(() => undefined);
+		registry.register({
+			id: "nested-same",
+			root: {
+				type: "fallback",
+				on: ["credential_quota"],
+				children: [
+					{ type: "target", model: "A" },
+					{
+						type: "fallback",
+						on: ["credential_quota"],
+						children: [
+							{ type: "target", model: "B" },
+							{ type: "target", model: "C" },
+						],
+					},
+				],
+			},
+		});
+		const route = registry.resolve("nested-same");
+		expect(route?.fallbacks.credential_quota).toEqual(["B", "C"]);
+		expect(route?.fallbackByTarget?.A?.credential_quota).toEqual(["B"]);
+		expect(route?.fallbackByTarget?.B?.credential_quota).toEqual(["C"]);
+	});
+
 	it("preserves provider-qualified model ids as the compiled target", () => {
 		const registry = new RouteRegistry(id => {
 			const bare = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;

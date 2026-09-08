@@ -1,0 +1,21 @@
+// Provider-wire compat for "deepseek"; regenerated from the frozen census using deployment contract selectors.
+
+provider "deepseek" {
+	extra-body {
+		thinking {
+			type "enabled"
+		}
+	}
+	supports-reasoning-effort #true
+	class "deepseek" {
+		thinking-mode "effort"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek-v4-flash" {
+		max-tokens-field "max_tokens"
+		reasoning-content-field "reasoning_content"
+		requires-assistant-content-for-tool-calls #true
+		requires-reasoning-content-for-tool-calls #true
+		supports-tool-choice #false
+	}
+}

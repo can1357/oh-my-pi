@@ -1,5 +1,8 @@
 import { describe, expect, it } from "bun:test";
-import { loginExa } from "@oh-my-pi/pi-ai/registry/exa";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+
+const loginExa = getProviderDefinition("exa")?.login;
+if (!loginExa) throw new Error("Exa login is not registered");
 
 describe("exa login", () => {
 	it("opens Exa API-key settings and returns a trimmed key without validation requests", async () => {

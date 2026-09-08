@@ -1,0 +1,27 @@
+// Device authorization and token refresh adapted from NousResearch/hermes-agent (MIT).
+auth "xai-oauth" {
+    name "xAI Grok OAuth (SuperGrok or X Premium+)"
+    login "device-code" {
+        client-id "b1a00492-073a-47ea-816f-4c329264a828"
+        scopes "openid" "profile" "email" "offline_access" "grok-cli:access" "api:access"
+        device url="https://auth.x.ai/oauth2/device/code" {
+            headers {
+                Accept "application/json"
+            }
+        }
+        token url-hook="xai-token-endpoint" {
+            headers {
+                Accept "application/json"
+            }
+        }
+        response user-code="user_code" device-code="device_code" verification-uri="verification_uri" verification-uri-complete="verification_uri_complete" interval="interval" expires-in="expires_in"
+        instructions "Enter code: {user_code}"
+        credential {
+            account-id claim="sub"
+        }
+        userinfo url="https://auth.x.ai/oauth2/userinfo" email="email" account-id="sub"
+    }
+    refresh {
+        userinfo url="https://auth.x.ai/oauth2/userinfo" email="email" account-id="sub"
+    }
+}
