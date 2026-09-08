@@ -1,3 +1,4 @@
+import { classifyModel } from "./compat/taxonomy";
 import MODELS from "./models.json" with { type: "json" };
 import type { Api, KnownProvider, Model, ModelCost, TokenCost, Usage } from "./types";
 
@@ -22,7 +23,11 @@ function getProviderModels(provider: string): Map<string, Model<Api>> | undefine
 	for (const id in rawModels) {
 		// models.json rows are complete Models emitted by generate-models.ts;
 		// consuming them verbatim keeps startup allocation-free.
-		providerModels.set(id, rawModels[id as keyof typeof rawModels] as unknown as Model<Api>);
+		const row = rawModels[id as keyof typeof rawModels] as unknown as Model<Api>;
+		// Rows baked before the compat engine (and stale cache snapshots) lack
+		// `identity`; classify lazily so consumers can rely on the field.
+		row.identity ??= classifyModel(provider, id, { lenient: true });
+		providerModels.set(id, row);
 	}
 	modelRegistry.set(provider, providerModels);
 	return providerModels;

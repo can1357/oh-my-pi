@@ -229,6 +229,103 @@ export function sortModelItems(items: ModelBrowserItem[], options: SortModelItem
 	});
 }
 
+interface RoleProviderStats {
+	count: number;
+	firstRole: number;
+}
+
+/** User affinity used to order search matches within one relevance tier. */
+interface SearchAffinity {
+	/** `provider/id` (lowercased) → rank; configured-role models first, then MRU. */
+	models: Map<string, number>;
+	/** provider (lowercased) → rank; explicit order, then role providers, then MRU providers. */
+	providers: Map<string, number>;
+}
+
+/**
+ * Build model and provider affinity from explicit configuration, configured
+ * role assignments, and recent model use. Auto-selected roles are catalog
+ * policy, not evidence of user preference.
+ */
+function buildSearchAffinity(
+	providerOrder: ReadonlyArray<string>,
+	roles: RoleAssignments,
+	mruOrder: ReadonlyArray<string>,
+): SearchAffinity {
+	const models: string[] = [];
+	const seenModels = new Set<string>();
+	const addModel = (selector: string) => {
+		const key = selector.toLowerCase();
+		if (seenModels.has(key)) return;
+		seenModels.add(key);
+		models.push(key);
+	};
+
+	const providers: string[] = [];
+	const seenProviders = new Set<string>();
+	const addProvider = (provider: string) => {
+		const key = provider.trim().toLowerCase();
+		if (!key || seenProviders.has(key)) return;
+		seenProviders.add(key);
+		providers.push(key);
+	};
+
+	for (const provider of providerOrder) addProvider(provider);
+
+	const roleStats = new Map<string, RoleProviderStats>();
+	const seenRoles = new Set<string>();
+	let roleIndex = 0;
+	const recordRole = (role: string) => {
+		if (seenRoles.has(role)) return;
+		seenRoles.add(role);
+		const assignment = roles[role];
+		if (assignment && !assignment.autoSelected) {
+			addModel(`${assignment.model.provider}/${assignment.model.id}`);
+			const provider = assignment.model.provider.toLowerCase();
+			const current = roleStats.get(provider);
+			if (current) {
+				current.count++;
+			} else {
+				roleStats.set(provider, { count: 1, firstRole: roleIndex });
+			}
+		}
+		roleIndex++;
+	};
+	for (const role of MODEL_ROLE_IDS) recordRole(role);
+	for (const role in roles) recordRole(role);
+	for (const selector of mruOrder) addModel(selector);
+
+	const preferredByRole = [...roleStats.entries()].sort(
+		([, a], [, b]) => b.count - a.count || a.firstRole - b.firstRole,
+	);
+	for (const [provider] of preferredByRole) addProvider(provider);
+
+	for (const selector of mruOrder) {
+		const slash = selector.indexOf("/");
+		if (slash > 0) addProvider(selector.slice(0, slash));
+	}
+
+	return {
+		models: new Map(models.map((selector, index) => [selector, index])),
+		providers: new Map(providers.map((provider, index) => [provider, index])),
+	};
+}
+
+/** Collapse punctuation so exact and contiguous model-name matches form stable relevance tiers. */
+function compactModelSearchText(value: string): string {
+	return value.toLowerCase().replace(/[^\p{Letter}\p{Mark}\p{Number}]+/gu, "");
+}
+
+/** Exact id/selector → contiguous literal → fuzzy-only. */
+function modelSearchTier(query: string, item: ModelBrowserItem): number {
+	if (!query) return 2;
+	const id = compactModelSearchText(item.id);
+	const selector = compactModelSearchText(item.selector);
+	if (query === id || query === selector) return 0;
+	if (id.includes(query) || selector.includes(query)) return 1;
+	return 2;
+}
+
 /** Compact glyph for a configured thinking level; empty for `inherit` (nothing to show). */
 export function thinkingLevelGlyph(level: ConfiguredThinkingLevel): string {
 	const glyphOf = (symbol: string) => symbol.split(" ")[0] ?? symbol;
@@ -314,6 +411,12 @@ function formatTps(tps: number): string {
 	return `${value}t/s`;
 }
 
+/** Brain-icon intelligence score delivered with the model catalog. */
+function formatIntelligence(model: Model): string {
+	if (model.int == null || !Number.isFinite(model.int)) return "";
+	return `${theme.symbol("icon.intelligence")} ${Math.round(model.int)}`;
+}
+
 /** `0.9s` average time-to-first-token; whole seconds from 10s up. */
 function formatTtft(ms: number): string {
 	const seconds = ms / 1000;
@@ -361,6 +464,7 @@ export class ModelBrowser implements Component {
 	#visibleItems: ModelBrowserItem[] = [];
 	#roles: RoleAssignments = {};
 	#mruOrder: ReadonlyArray<string> = [];
+	#affinity: SearchAffinity = { models: new Map(), providers: new Map() };
 	#perf: ReadonlyMap<string, ModelPerfStats> = new Map();
 	#selectedIndex = 0;
 	#hoveredIndex: number | null = null;
@@ -393,6 +497,7 @@ export class ModelBrowser implements Component {
 		this.#currentContextTokens = Number.isFinite(tokens) && tokens > 0 ? Math.floor(tokens) : 0;
 		this.#markOverContext = options.markOverContext ?? false;
 		this.#emptyText = options.emptyText;
+		this.#syncAffinity();
 	}
 
 	/** Mark `selector` as the session's active model (undefined clears the mark). */
@@ -412,10 +517,16 @@ export class ModelBrowser implements Component {
 
 	setRoles(roles: RoleAssignments): void {
 		this.#roles = roles;
+		this.#syncAffinity();
 	}
 
 	setMruOrder(order: ReadonlyArray<string>): void {
 		this.#mruOrder = order;
+		this.#syncAffinity();
+	}
+
+	#syncAffinity(): void {
+		this.#affinity = buildSearchAffinity(this.#settings.get("modelProviderOrder"), this.#roles, this.#mruOrder);
 	}
 
 	/** Measured TPS/TTFT averages keyed by `provider/id` selector (see AgentStorage.getModelPerf). */
@@ -456,7 +567,7 @@ export class ModelBrowser implements Component {
 
 	setQuery(query: string): void {
 		this.#searchInput.setValue(query);
-		this.#applyQuery();
+		this.#applyQuery("reset-changed-prefix");
 	}
 
 	getSelected(): ModelBrowserItem | undefined {
@@ -584,7 +695,30 @@ export class ModelBrowser implements Component {
 		return filtered;
 	}
 
-	#applyQuery(): void {
+	/** Whether the new result list keeps every selectable choice through the previous selection unchanged. */
+	#hasStableChoicePrefix(previousItems: ReadonlyArray<ModelBrowserItem>, previousSelectedIndex: number): boolean {
+		let currentIndex = 0;
+		for (let previousIndex = 0; previousIndex <= previousSelectedIndex; previousIndex++) {
+			const previous = previousItems[previousIndex];
+			if (!previous || this.#isDisabled(previous)) continue;
+
+			let current: ModelBrowserItem | undefined;
+			while (currentIndex < this.#visibleItems.length) {
+				const candidate = this.#visibleItems[currentIndex++];
+				if (candidate && !this.#isDisabled(candidate)) {
+					current = candidate;
+					break;
+				}
+			}
+			if (current?.selector !== previous.selector) return false;
+		}
+		return true;
+	}
+
+	#applyQuery(selection: "clamp" | "reset-changed-prefix" = "clamp"): void {
+		const previousItems = this.#visibleItems;
+		const previousSelectedIndex = this.#selectedIndex;
+		const previousSelected = previousItems[previousSelectedIndex];
 		const query = this.#searchInput.getValue();
 		let items: ModelBrowserItem[];
 		if (query.trim()) {
@@ -596,23 +730,62 @@ export class ModelBrowser implements Component {
 			if (this.#preserveQueryOrder) {
 				items = matches;
 			} else {
-				// Match quality is the primary key while searching: an exact
-				// "gpt-5.5" must beat the MRU (or role-assigned) "gpt-5.6", so
-				// role rank is skipped and MRU only breaks ties. Scores are
-				// bucketed so sub-point position noise (provider-name length)
-				// can't split equally good matches; within a bucket the stable
-				// sort keeps sortModelItems' MRU/version order.
+				// Exact and contiguous text matches remain ahead of fuzzy-only
+				// candidates. Within each relevance tier: models the user
+				// assigned to a role or used recently, then providers the user
+				// configured, assigned, or used recently, then fuzzy quality,
+				// then the normal MRU/version ordering.
 				sortModelItems(matches, { roles: this.#roles, mruOrder: this.#mruOrder, skipRoleRank: true });
-				const buckets = new Map<ModelBrowserItem, number>();
-				for (const result of ranked) buckets.set(result.item, Math.round(result.score / 10));
-				matches.sort((a, b) => (buckets.get(a) ?? 0) - (buckets.get(b) ?? 0));
+				const fallbackRanks = new Map(matches.map((item, index) => [item, index]));
+				const queryKey = compactModelSearchText(query);
+				const searchRanks = new Map<ModelBrowserItem, { tier: number; bucket: number }>();
+				for (const result of ranked) {
+					searchRanks.set(result.item, {
+						tier: modelSearchTier(queryKey, result.item),
+						bucket: Math.round(result.score / 10),
+					});
+				}
+				matches.sort((a, b) => {
+					const aSearch = searchRanks.get(a);
+					const bSearch = searchRanks.get(b);
+					const tierCmp = (aSearch?.tier ?? Number.MAX_SAFE_INTEGER) - (bSearch?.tier ?? Number.MAX_SAFE_INTEGER);
+					if (tierCmp !== 0) return tierCmp;
+
+					const modelCmp =
+						(this.#affinity.models.get(a.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
+						(this.#affinity.models.get(b.selector.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
+					if (modelCmp !== 0) return modelCmp;
+
+					const providerCmp =
+						(this.#affinity.providers.get(a.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER) -
+						(this.#affinity.providers.get(b.provider.toLowerCase()) ?? Number.MAX_SAFE_INTEGER);
+					if (providerCmp !== 0) return providerCmp;
+
+					const bucketCmp =
+						(aSearch?.bucket ?? Number.MAX_SAFE_INTEGER) - (bSearch?.bucket ?? Number.MAX_SAFE_INTEGER);
+					if (bucketCmp !== 0) return bucketCmp;
+					return (
+						(fallbackRanks.get(a) ?? Number.MAX_SAFE_INTEGER) - (fallbackRanks.get(b) ?? Number.MAX_SAFE_INTEGER)
+					);
+				});
 				items = matches;
 			}
 		} else {
 			items = this.#baseItems;
 		}
 		this.#visibleItems = this.#insertSeparator(items);
-		this.#selectedIndex = this.#coerceSelectedIndex(Math.min(this.#selectedIndex, this.#visibleItems.length - 1));
+		if (
+			selection === "reset-changed-prefix" &&
+			previousSelected &&
+			this.#hasStableChoicePrefix(previousItems, previousSelectedIndex)
+		) {
+			const selectedIndex = this.#visibleItems.findIndex(item => item.selector === previousSelected.selector);
+			this.#selectedIndex = this.#coerceSelectedIndex(selectedIndex);
+		} else if (selection === "reset-changed-prefix") {
+			this.#selectedIndex = this.#coerceSelectedIndex(0);
+		} else {
+			this.#selectedIndex = this.#coerceSelectedIndex(Math.min(this.#selectedIndex, this.#visibleItems.length - 1));
+		}
 		this.#ensureSelectedVisible();
 		this.onSelectionChange?.(this.getSelected());
 	}
@@ -658,7 +831,7 @@ export class ModelBrowser implements Component {
 		this.#searchInput.handleInput(data);
 		const after = this.#searchInput.getValue();
 		if (after !== before) {
-			this.#applyQuery();
+			this.#applyQuery("reset-changed-prefix");
 			this.onQueryChange?.(after);
 		}
 	}
@@ -714,14 +887,17 @@ export class ModelBrowser implements Component {
 		return index;
 	}
 
-	/** `0.9s 118t/s` measured-perf cell for the row's meta block; empty when unmeasured or the column is off. */
+	/** Measured TPS/TTFT, falling back to the catalog TPS as an estimated `~118t/s`. */
 	#perfCell(item: ModelBrowserItem, mode: PerfMode): string {
 		if (mode === "off") return "";
 		const perf = this.#perf.get(item.selector);
-		if (!perf) return "";
-		const tps = formatTps(perf.tps);
-		if (mode === "full" && perf.ttftMs !== null) return `${formatTtft(perf.ttftMs)} ${tps}`;
-		return tps;
+		if (perf) {
+			const tps = formatTps(perf.tps);
+			if (mode === "full" && perf.ttftMs !== null) return `${formatTtft(perf.ttftMs)} ${tps}`;
+			return tps;
+		}
+		const tps = item.model.tps;
+		return tps != null && Number.isFinite(tps) && tps > 0 ? `~${formatTps(tps)}` : "";
 	}
 
 	#renderRow(
@@ -731,6 +907,7 @@ export class ModelBrowser implements Component {
 		hovered: boolean,
 		ctxWidth: number,
 		costWidth: number,
+		intelligenceWidth: number,
 		perfWidth: number,
 		perfMode: PerfMode,
 	): string {
@@ -754,11 +931,20 @@ export class ModelBrowser implements Component {
 			: "";
 		let left = `${prefix}${providerPrefix}${name}${currentMark}${overLimit}`;
 
-		// Perf column collapses entirely when no visible row has measurements.
+		// Metric columns collapse independently when no visible row has data.
+		const intelligenceCol =
+			intelligenceWidth > 0
+				? `${theme.fg("dim", padLeftVisible(formatIntelligence(item.model), intelligenceWidth))}  `
+				: "";
 		const perfCol =
 			perfWidth > 0 ? `${theme.fg("dim", padLeftVisible(this.#perfCell(item, perfMode), perfWidth))}  ` : "";
-		const meta = `${perfCol}${theme.fg("dim", padLeftVisible(formatContext(item.model), ctxWidth))}  ${theme.fg("dim", padLeftVisible(formatCostPair(item.model), costWidth))}`;
-		const metaWidth = ctxWidth + costWidth + 2 + (perfWidth > 0 ? perfWidth + 2 : 0);
+		const meta = `${intelligenceCol}${perfCol}${theme.fg("dim", padLeftVisible(formatContext(item.model), ctxWidth))}  ${theme.fg("dim", padLeftVisible(formatCostPair(item.model), costWidth))}`;
+		const metaWidth =
+			ctxWidth +
+			costWidth +
+			2 +
+			(intelligenceWidth > 0 ? intelligenceWidth + 2 : 0) +
+			(perfWidth > 0 ? perfWidth + 2 : 0);
 		const available = Math.max(1, width - metaWidth - 1);
 		left = truncateToWidth(left, available);
 		const gap = Math.max(0, available - visibleWidth(left));
@@ -794,10 +980,14 @@ export class ModelBrowser implements Component {
 		facts.push(`${formatCostPair(model)} per M`);
 		if (model.reasoning) facts.push("reasoning");
 		if (model.input.includes("image")) facts.push("vision");
+		const intelligence = formatIntelligence(model);
+		if (intelligence) facts.push(intelligence);
 		const perf = this.#perf.get(selected.selector);
 		if (perf) {
 			facts.push(`~${formatTps(perf.tps)}`);
 			if (perf.ttftMs !== null) facts.push(`${formatTtft(perf.ttftMs)} ttft`);
+		} else if (model.tps != null && Number.isFinite(model.tps) && model.tps > 0) {
+			facts.push(`~${formatTps(model.tps)}`);
 		}
 		if (model.description) {
 			const description = formatDescription(model.description);
@@ -857,12 +1047,16 @@ export class ModelBrowser implements Component {
 			let ctxWidth = 0;
 			let costWidth = 0;
 			const perfMode: PerfMode = width >= PERF_FULL_MIN_WIDTH ? "full" : width >= PERF_TPS_MIN_WIDTH ? "tps" : "off";
+			let intelligenceWidth = 0;
 			let perfWidth = 0;
 			for (let i = startIndex; i < endIndex; i++) {
 				const item = this.#visibleItems[i];
 				if (!item) continue;
 				ctxWidth = Math.max(ctxWidth, visibleWidth(formatContext(item.model)));
 				costWidth = Math.max(costWidth, visibleWidth(formatCostPair(item.model)));
+				if (perfMode !== "off") {
+					intelligenceWidth = Math.max(intelligenceWidth, visibleWidth(formatIntelligence(item.model)));
+				}
 				perfWidth = Math.max(perfWidth, visibleWidth(this.#perfCell(item, perfMode)));
 			}
 
@@ -878,6 +1072,7 @@ export class ModelBrowser implements Component {
 						i === this.#hoveredIndex,
 						ctxWidth,
 						costWidth,
+						intelligenceWidth,
 						perfWidth,
 						perfMode,
 					),

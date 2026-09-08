@@ -685,6 +685,28 @@ describe("xd:// and top-level calls share the canonical tool map", () => {
 			await removeWithRetries(tempDir);
 		}
 	});
+
+	it("resolves bare and case-insensitive xd:// direct device names (#10342)", () => {
+		const githubDevice = {
+			name: "github",
+			label: "GitHub",
+			description: "fixture",
+			parameters: type({ op: "string" }),
+			async execute() {
+				return { content: [{ type: "text" as const, text: "ok" }] };
+			},
+		};
+		const xdev = createTestXdevState([githubDevice]);
+
+		// Direct calls accept the same case-insensitive xd scheme as read/write
+		// URL dispatch while preserving the canonical device name.
+		expect(resolveMountedXdevTool(xdev, "github")).toBe(githubDevice);
+		expect(resolveMountedXdevTool(xdev, "xd://github")).toBe(githubDevice);
+		expect(resolveMountedXdevTool(xdev, "XD://github")).toBe(githubDevice);
+		expect(resolveMountedXdevTool(xdev, "Xd://github")).toBe(githubDevice);
+		// A genuinely unmounted name still misses, prefixed or not.
+		expect(resolveMountedXdevTool(xdev, "xd://no_such_tool")).toBeUndefined();
+	});
 });
 
 describe("device-only write transport for explicit lists omitting write", () => {

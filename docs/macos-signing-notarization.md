@@ -5,7 +5,7 @@ The compiled macOS `omp` binaries shipped on GitHub Releases can be signed with 
 them Gatekeeper-acceptable and is the prerequisite for an official Homebrew
 submission (see [#776](https://github.com/can1357/oh-my-pi/issues/776)).
 
-Signing happens in CI in the `release_binary_darwin` matrix legs
+Signing happens in CI in the Darwin legs of the `release_binary_hosted` matrix
 (`.github/workflows/ci.yml`), via `scripts/ci-macos-sign.sh`. The workflow step
 **auto-skips** unless all five `APPLE_*` repository secrets below are configured,
 so releases remain ad-hoc signed when credentials are absent. The script itself

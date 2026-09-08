@@ -1,0 +1,3 @@
+auth "groq" {
+	name "Groq"
+}

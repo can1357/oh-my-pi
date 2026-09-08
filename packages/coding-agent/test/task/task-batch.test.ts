@@ -188,7 +188,7 @@ describe("task.batch schema gating", () => {
 		mockDiscovery();
 
 		const tool = await TaskTool.create(
-			createSession({ settings: { "task.batch": true, "task.isolation.mode": "auto" } }),
+			createSession({ settings: { "task.batch": true, "task.isolation.enabled": true } }),
 		);
 		const properties = getSchemaProperties(tool);
 		expect(properties.isolated).toBeUndefined();
@@ -206,7 +206,7 @@ describe("task.batch schema gating", () => {
 		const tool = await TaskTool.create(
 			createSession({
 				planMode: true,
-				settings: { "task.batch": true, "task.isolation.mode": "auto" },
+				settings: { "task.batch": true, "task.isolation.enabled": true },
 			}),
 		);
 		const itemProperties = getBatchItemProperties(tool);
