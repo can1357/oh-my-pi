@@ -350,3 +350,47 @@ describe("per-advisor enabled field", () => {
 		expect(text.match(/enabled:/g)).toHaveLength(2);
 	});
 });
+
+describe("maxNotesPerUpdate configuration", () => {
+	it("discovers shared and per-advisor maxNotesPerUpdate from WATCHDOG.yml", async () => {
+		const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-advisor-max-notes-"));
+		await fsp.mkdir(path.join(tmp, ".git"));
+		try {
+			const yaml = [
+				"maxNotesPerUpdate: 4",
+				"advisors:",
+				"  - name: High Throughput",
+				"    maxNotesPerUpdate: 5",
+				"  - name: Default Budget",
+			].join("\n");
+			await Bun.write(path.join(tmp, "WATCHDOG.yml"), yaml);
+
+			const { advisors, sharedMaxNotesPerUpdate } = await discoverAdvisorConfigs(tmp, tmp);
+			expect(sharedMaxNotesPerUpdate).toBe(4);
+			expect(advisors).toHaveLength(2);
+			expect(advisors.find(a => a.name === "High Throughput")?.maxNotesPerUpdate).toBe(5);
+			expect(advisors.find(a => a.name === "Default Budget")?.maxNotesPerUpdate).toBeUndefined();
+		} finally {
+			await fsp.rm(tmp, { recursive: true, force: true });
+		}
+	});
+
+	it("round-trips maxNotesPerUpdate through save and load", async () => {
+		const tmp = await fsp.mkdtemp(path.join(os.tmpdir(), "omp-advisor-max-notes-roundtrip-"));
+		try {
+			const doc: WatchdogConfigDoc = {
+				maxNotesPerUpdate: 3,
+				advisors: [{ name: "High", maxNotesPerUpdate: 5 }, { name: "Default" }],
+			};
+			const file = path.join(tmp, "WATCHDOG.yml");
+			await saveWatchdogConfigFile(file, doc);
+
+			const loaded = await loadWatchdogConfigFile(file);
+			expect(loaded.maxNotesPerUpdate).toBe(3);
+			expect(loaded.advisors[0]?.maxNotesPerUpdate).toBe(5);
+			expect(loaded.advisors[1]?.maxNotesPerUpdate).toBeUndefined();
+		} finally {
+			await fsp.rm(tmp, { recursive: true, force: true });
+		}
+	});
+});

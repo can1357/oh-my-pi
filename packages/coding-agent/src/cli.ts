@@ -457,6 +457,18 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
+	// Declare this module as the worker-host entry now that the active profile
+	// is resolved. The worker-host module is side-effect-free; importing
+	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
+	// Gated on `isProcessEntry`: only the real CLI process entry is a valid
+	// worker host. Worker-thread re-entry has `!Bun.isMainThread` (isProcessEntry === false),
+	// and importers (`runCli` in profile-CLI tests, SDK embedding) have `import.meta.main === false`
+	// — declaring there would poison `workerHostEntry()` for the whole test process, forcing eval/stats/
+	// browser workers onto the same-realm inline fallback.
+	// This must run before worker selector dispatch so that worker subprocesses
+	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
+	if (isProcessEntry) declareWorkerHostEntry();
+
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the
 	// synchronous prefix of `runWorkerEntrypoint`, and Bun flushes the
@@ -470,17 +482,6 @@ export async function runCli(argv: string[]): Promise<void> {
 		}
 		return;
 	}
-
-	// Declare this module as the worker-host entry now that the active profile
-	// is resolved. The worker-host module is side-effect-free; importing
-	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
-	// Gated on `isProcessEntry`: only the real CLI process entry is a valid
-	// worker host. Worker-thread re-entry already returned above at the
-	// `__omp_worker_` dispatch, and importers (`runCli` in profile-CLI tests,
-	// SDK embedding) have `import.meta.main === false` — declaring there would
-	// poison `workerHostEntry()` for the whole test process, forcing eval/stats/
-	// browser workers onto the same-realm inline fallback.
-	if (isProcessEntry) declareWorkerHostEntry();
 
 	// `PI_PROXY` must reach the bare global `fetch` before any provider call:
 	// OAuth refresh/login and usage probes never pass through
