@@ -2131,7 +2131,7 @@ export class AcpAgent implements Agent {
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		await refreshAgentDiscovery(cwd, record.session.effectiveExtensionRoots);
 		resetCapabilities();
-		await record.session.refreshSkills();
+		await record.session.refreshSkills(true);
 		const fileCommands = await loadSlashCommands({
 			cwd,
 			extensionRoots: record.session.effectiveExtensionRoots,

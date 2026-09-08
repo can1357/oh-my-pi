@@ -5225,9 +5225,9 @@ export class AgentSession {
 	}
 
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */
-	async refreshSkills(): Promise<void> {
+	async refreshSkills(refreshAgents = false): Promise<void> {
 		await this.#tools.refreshSkills();
-		await this.refreshAdvisorConfigs();
+		await this.refreshAdvisorConfigs(refreshAgents);
 	}
 
 	/**

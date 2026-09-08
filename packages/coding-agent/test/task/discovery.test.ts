@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -9,7 +9,7 @@ import {
 	injectOmpExtensionCliRoots,
 } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const OMP_AGENT_MD = [
 	"---",
@@ -102,6 +102,69 @@ describe("discoverAgents", () => {
 		const { agents } = await discoverAgents(projectDir, tempHome);
 		expect(agents.find(agent => agent.name === "omp-test-agent")?.systemPrompt).toContain("OMP task agent");
 		expect(agents.some(agent => agent.name === "broken")).toBe(false);
+	});
+
+	test("isolates normalized watchdog namespace collisions by source", async () => {
+		const projectAgentsDir = path.join(projectDir, ".omp", "agents");
+		const userAgentsDir = path.join(tempHome, ".omp", "agents");
+		await fs.mkdir(projectAgentsDir, { recursive: true });
+		await fs.mkdir(userAgentsDir, { recursive: true });
+		await fs.writeFile(path.join(projectAgentsDir, "healthy.md"), OMP_AGENT_MD);
+		await fs.writeFile(
+			path.join(projectAgentsDir, "Reviewer.md"),
+			[
+				"---",
+				"name: Reviewer",
+				"description: Project reviewer.",
+				"watchdogs:",
+				"  - id: review",
+				"    model: test/model",
+				"---",
+				"Project reviewer.",
+			].join("\n"),
+		);
+		await fs.writeFile(
+			path.join(userAgentsDir, "reviewer.md"),
+			[
+				"---",
+				"name: reviewer",
+				"description: User reviewer.",
+				"watchdogs:",
+				"  - id: review",
+				"    model: test/model",
+				"---",
+				"User reviewer.",
+			].join("\n"),
+		);
+
+		const warning = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const { agents } = await discoverAgents(projectDir, tempHome, undefined, path.join(tempHome, ".omp"));
+			const names = agents.map(agent => agent.name);
+			const collisionWarning = warning.mock.calls.find(
+				([message]) => message === "Skipping agents with colliding watchdog namespace",
+			);
+
+			expect(names).toContain("omp-test-agent");
+			expect(names).not.toEqual(expect.arrayContaining(["Reviewer", "reviewer"]));
+			expect(collisionWarning?.[1]).toMatchObject({
+				namespace: "reviewer",
+				agents: [
+					{
+						name: "Reviewer",
+						source: "project",
+						filePath: path.join(projectAgentsDir, "Reviewer.md"),
+					},
+					{
+						name: "reviewer",
+						source: "user",
+						filePath: path.join(userAgentsDir, "reviewer.md"),
+					},
+				],
+			});
+		} finally {
+			warning.mockRestore();
+		}
 	});
 
 	test("isolates reserved watchdog namespaces from healthy agents", async () => {

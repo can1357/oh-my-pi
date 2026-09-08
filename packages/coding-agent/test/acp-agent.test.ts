@@ -142,7 +142,7 @@ class FakeAgentSession {
 	skillsSettings = { enableSkillCommands: true };
 	skills: Array<{ name: string; description: string; filePath: string; baseDir: string; source: string }> = [];
 	refreshSkillsCalls = 0;
-	async refreshSkills(): Promise<void> {
+	async refreshSkills(_refreshAgents?: boolean): Promise<void> {
 		this.refreshSkillsCalls++;
 	}
 	planModeState: PlanModeState | undefined;

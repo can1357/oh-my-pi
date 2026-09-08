@@ -869,6 +869,52 @@ describe("AgentSession advisor toggle", () => {
 			await result.session.dispose();
 		}
 	});
+	it("restores name-derived advisor spend from the legacy transcript filename", async () => {
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const agentDir = path.join(tempDir.path(), "agents");
+		await fs.mkdir(agentDir, { recursive: true });
+		await writeAdvisorTranscript(sessionFile, "__advisor.architecture.jsonl", [0.5]);
+		await advisorModule.saveWatchdogConfigFile(path.join(tempDir.path(), "WATCHDOG.yml"), {
+			advisors: [{ name: "Architecture" }],
+		});
+		const discovered = await advisorModule.discoverAdvisorConfigs(tempDir.path(), agentDir);
+		session.applyAdvisorConfigs(
+			discovered.advisors,
+			discovered.sharedInstructions,
+			discovered.sharedMaxNotesPerUpdate,
+			discovered.explicitSelection || discovered.hasConfiguredRoster,
+		);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.beginInitialAdvisorCostRestore();
+		await session.advisorCostRestore;
+		const advisor = session.getAdvisorStats().advisors.find(entry => entry.name === "Architecture");
+		expect(advisor?.cost).toBeCloseTo(0.5, 8);
+	});
+
+	it("keeps explicitly identified advisor spend on the encoded transcript filename", async () => {
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const agentDir = path.join(tempDir.path(), "agents");
+		await fs.mkdir(agentDir, { recursive: true });
+		await writeAdvisorTranscript(sessionFile, "__advisor.global%2Farchitecture.jsonl", [0.5]);
+		await advisorModule.saveWatchdogConfigFile(path.join(tempDir.path(), "WATCHDOG.yml"), {
+			advisors: [{ id: "architecture", name: "Architecture" }],
+		});
+		const discovered = await advisorModule.discoverAdvisorConfigs(tempDir.path(), agentDir);
+		session.applyAdvisorConfigs(
+			discovered.advisors,
+			discovered.sharedInstructions,
+			discovered.sharedMaxNotesPerUpdate,
+			discovered.explicitSelection || discovered.hasConfiguredRoster,
+		);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.beginInitialAdvisorCostRestore();
+		await session.advisorCostRestore;
+		const advisor = session.getAdvisorStats().advisors.find(entry => entry.name === "Architecture");
+		expect(advisor?.cost).toBeCloseTo(0.5, 8);
+	});
+
 	it("seeds persisted advisor spend when no turn has been billed yet", () => {
 		enableAdvisor();
 		session.restoreInitialAdvisorCosts(new Map([["", 0.5]]));

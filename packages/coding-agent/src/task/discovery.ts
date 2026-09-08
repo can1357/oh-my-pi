@@ -24,7 +24,7 @@ import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs } from "../config";
-import { listClaudePluginRoots } from "../discovery/helpers";
+import { listClaudePluginRoots, normalizeAgentWatchdogNamespace } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentDefinition, AgentSource } from "./types";
@@ -57,6 +57,37 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 		});
 
 	return (await Promise.all(files)).filter(Boolean) as AgentDefinition[];
+}
+
+/**
+ * Exclude all agents that would share a watchdog registry namespace after
+ * watchdog normalization. Exact-name precedence is resolved before this pass.
+ */
+function isolateWatchdogNamespaceCollisions(agents: AgentDefinition[]): AgentDefinition[] {
+	const byNamespace = new Map<string, AgentDefinition[]>();
+	for (const agent of agents) {
+		if (!agent.watchdogs?.length) continue;
+		const namespace = normalizeAgentWatchdogNamespace(agent.name);
+		const definitions = byNamespace.get(namespace);
+		if (definitions) definitions.push(agent);
+		else byNamespace.set(namespace, [agent]);
+	}
+
+	const ambiguous = new Set<AgentDefinition>();
+	for (const [namespace, definitions] of byNamespace) {
+		if (definitions.length < 2) continue;
+		for (const agent of definitions) ambiguous.add(agent);
+		logger.warn("Skipping agents with colliding watchdog namespace", {
+			namespace,
+			agents: definitions.map(agent => ({
+				name: agent.name,
+				source: agent.source,
+				filePath: agent.filePath,
+			})),
+		});
+	}
+
+	return agents.filter(agent => !ambiguous.has(agent));
 }
 
 /**
@@ -130,8 +161,9 @@ export async function discoverAgents(
 	});
 
 	const projectAgentsDir = projectDirs.length > 0 ? projectDirs[0].path : null;
+	const agents = isolateWatchdogNamespaceCollisions([...loadedAgents, ...bundledAgents]);
 
-	return { agents: [...loadedAgents, ...bundledAgents], projectAgentsDir };
+	return { agents, projectAgentsDir };
 }
 
 /**

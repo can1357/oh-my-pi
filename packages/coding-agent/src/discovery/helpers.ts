@@ -303,6 +303,11 @@ export interface ParsedAgentFields {
 	watchdogs?: AgentWatchdog[];
 }
 
+/** Canonical namespace used for watchdog definitions declared by an agent. */
+export function normalizeAgentWatchdogNamespace(name: string): string {
+	return name.trim().toLowerCase();
+}
+
 /**
  * Parse agent fields from frontmatter.
  * Returns null if required fields (name, description) are missing.

@@ -7,6 +7,9 @@ import { expandAtImports } from "../discovery/at-imports";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import { collectConfigCandidates } from "./watchdog";
 
+/** @internal Name-derived transcript identity retained for roster entries without an authored ID. */
+export const kAdvisorLegacyTranscriptSlug = Symbol("advisor.legacyTranscriptSlug");
+
 /**
  * One advisor declared in a `WATCHDOG.yml` file. `model` is a model selector
  * with an optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`),
@@ -18,9 +21,12 @@ import { collectConfigCandidates } from "./watchdog";
  * tools. `instructions` is the advisor's specialization, appended to the shared
  * baseline.
  */
+
 export interface AdvisorConfig {
 	/** Canonical namespace/id after discovery; a local ID in an editable YAML definition. */
 	id?: string;
+	/** @internal Present only when discovery synthesized {@link id} from {@link name}. */
+	[kAdvisorLegacyTranscriptSlug]?: string;
 	ref?: never;
 	name: string;
 	model?: string;
@@ -250,6 +256,7 @@ export async function discoverAdvisorConfigs(
 	const materialize = async (entry: AdvisorConfig, id: string, source: string): Promise<AdvisorConfig> => ({
 		...entry,
 		id,
+		...(entry.id === undefined ? { [kAdvisorLegacyTranscriptSlug]: slugifyAdvisorName(entry.name) } : {}),
 		model: entry.model?.trim() || undefined,
 		tools: filterAdvisorTools(entry.tools, source),
 		instructions: entry.instructions?.trim()

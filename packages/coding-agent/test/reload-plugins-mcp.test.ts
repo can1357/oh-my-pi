@@ -8,13 +8,19 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
-import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
-import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { TuiSlashCommandRuntime } from "@oh-my-pi/pi-coding-agent/slash-commands/types";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 const originalProjectDir = getProjectDir();
 const TEST_EXTENSION_ROOTS: EffectiveExtensionRoots = {
@@ -120,5 +126,72 @@ describe("/reload-plugins runtime refresh", () => {
 
 		expect(taskTool.description).toContain("VERSION_TWO");
 		expect(taskTool.description).not.toContain("VERSION_ONE");
+	});
+
+	test("refreshes custom-agent-dir watchdogs through interactive /reload-plugins", async () => {
+		const agentDir = path.join(projectDir, "custom-agent");
+		const agentFile = path.join(agentDir, "agents", "worker.md");
+		await fs.mkdir(path.dirname(agentFile), { recursive: true });
+		const definition = (name: string) =>
+			`---\nname: sdk-watchdog-worker\ndescription: Custom directory worker\nwatchdogs:\n  - id: review\n    name: ${name}\n    instructions: Review the assigned work.\n---\nPerform the assigned work.\n`;
+		await fs.writeFile(agentFile, definition("VERSION_ONE"));
+
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!model) throw new Error("Expected bundled test model");
+		const authStorage = createInMemoryAuthStorage();
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		let session: AgentSession | undefined;
+		try {
+			const settings = Settings.isolated({
+				"async.enabled": false,
+				"compaction.enabled": false,
+			});
+			settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+			const result = await createAgentSession({
+				cwd: projectDir,
+				agentDir,
+				agentName: "sdk-watchdog-worker",
+				sessionManager: SessionManager.inMemory(projectDir),
+				authStorage,
+				modelRegistry: new ModelRegistry(authStorage),
+				settings,
+				model,
+				disableExtensionDiscovery: true,
+				skills: [],
+				contextFiles: [],
+				workspaceTree: {
+					rootPath: projectDir,
+					rendered: "",
+					truncated: false,
+					totalLines: 0,
+					agentsMdFiles: [],
+				},
+				promptTemplates: [],
+				slashCommands: [],
+				enableMCP: false,
+				enableLsp: false,
+			});
+			session = result.session;
+			expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["VERSION_ONE"]);
+
+			await fs.writeFile(agentFile, definition("VERSION_TWO"));
+			const ctx = {
+				mcpManager: undefined,
+				session,
+				sessionManager: session.sessionManager,
+				settings,
+				refreshSkillState: (refreshAgents?: boolean) => session!.refreshSkills(refreshAgents),
+				refreshSlashCommandState: async () => {},
+				showStatus: () => {},
+				editor: { setText: () => {} },
+			} as unknown as InteractiveModeContext;
+
+			await executeBuiltinSlashCommand("/reload-plugins", { ctx });
+
+			expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["VERSION_TWO"]);
+		} finally {
+			await session?.dispose();
+			authStorage.close();
+		}
 	});
 });

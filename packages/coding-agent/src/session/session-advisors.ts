@@ -59,6 +59,7 @@ import {
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
 	isInterruptingSeverity,
+	kAdvisorLegacyTranscriptSlug,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
 	slugifyAdvisorName,
@@ -732,6 +733,7 @@ export class SessionAdvisors {
 		const legacy = !this.#advisorExplicitSelection && !this.#advisorConfigs?.length;
 		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : (this.#advisorConfigs ?? []);
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
+		const usedIds = new Set<string>();
 		const usedSlugs = new Set<string>();
 		for (const config of roster) {
 			if (
@@ -741,9 +743,13 @@ export class SessionAdvisors {
 			) {
 				continue;
 			}
-			let slug = legacy ? "" : config.id ? encodeURIComponent(config.id) : slugifyAdvisorName(config.name);
+			if (config.id && usedIds.has(config.id)) continue;
+			const legacyTranscriptSlug = config[kAdvisorLegacyTranscriptSlug];
+			let slug = legacy
+				? ""
+				: (legacyTranscriptSlug ?? (config.id ? encodeURIComponent(config.id) : slugifyAdvisorName(config.name)));
+			if (config.id) usedIds.add(config.id);
 			if (slug) {
-				if (config.id && usedSlugs.has(slug)) continue;
 				let candidate = slug;
 				let n = 2;
 				while (usedSlugs.has(candidate)) candidate = `${slug}-${n++}`;
