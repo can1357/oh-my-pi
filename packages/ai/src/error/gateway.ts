@@ -36,7 +36,7 @@ export type GatewayErrorDisposition =
 /** True for structured model-availability codes (`model_not_available`, Copilot's `model_not_available_for_integrator`). */
 function modelUnavailableCode(err: unknown): boolean {
 	if (typeof err !== "object" || err === null || !("code" in err) || typeof err.code !== "string") return false;
-	return /\bmodel_not_available\b|\bmodel_not_supported\b/i.test(err.code);
+	return /\bmodel_not_available(?:_\w+)?\b|\bmodel_not_supported\b/i.test(err.code);
 }
 
 /** A gateway-facing classification of an arbitrary upstream/internal error. */
@@ -74,7 +74,7 @@ const PROVIDER_WIDE_PATTERN =
 const TIMEOUT_OR_CONNECTION_PATTERN =
 	/\b(?:operation\s+)?timed?\s*out\b|\btimeout\b|\bconnection(?:\s+error|\s+refused)?\b|\bsocket hang up\b|\bfetch failed\b/i;
 const POLICY_PATTERN = /\bcyber_policy\b|trusted access for cyber/i;
-const MODEL_UNAVAILABLE_PATTERN = /\bmodel[_ ]?(?:not[_ ]found|unavailable|not[_ ]supported)\b/i;
+const MODEL_UNAVAILABLE_PATTERN = /\bmodel[_ ]?(?:not[_ ]found|unavailable|not[_ ]supported)(?:[_ ]\w+)*\b|\bthe model does not exist\b/i;
 const INVALID_REQUEST_PATTERN =
 	/\b(?:unsupported|invalid_request|invalid request|bad request|malformed|GenerateContentRequest)\b/i;
 const GATEWAY_INVARIANT_PATTERN = /\bgateway_terminal\b|\binternal invariant\b/i;
@@ -98,13 +98,7 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	if (err instanceof Error && err.name === "AbortError") {
 		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
 	}
-	if (/\baborted\b|\babort signal\b/i.test(message)) {
-		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
-	}
-
-	// Honour an explicit numeric `status` property on the thrown error. This
-	// sits below the abort checks on purpose: acting on a stale transport
-	// status after the client cancelled could trigger post-abort failover.
+	// Honour an explicit numeric `status` property on the thrown error.
 	let statusProp: number | undefined;
 	if (typeof err === "object" && err !== null && "status" in err && typeof err.status === "number") {
 		statusProp = err.status | 0;
@@ -118,6 +112,14 @@ export function classifyGatewayError(err: unknown): GatewayErrorClassification {
 	// don't trip on incidental three-digit numbers ("took 200ms").
 	const embedded = extractEmbeddedStatus(message);
 	if (embedded !== undefined) return withOwnerDisposition(err, bucketStatus(embedded, message));
+
+	// Free-text abort wording sits below authoritative statuses on purpose: a
+	// provider-reported `HTTP 503: upstream request aborted` is a retryable
+	// outage, not a client cancellation. Genuine cancels arrive as AbortError
+	// (handled above) or structural Flag.Abort / status 499.
+	if (/\baborted\b|\babort signal\b/i.test(message)) {
+		return withOwnerDisposition(err, { status: 499, type: "request_aborted", message });
+	}
 
 	if (
 		// Match rate-limit phrasings before auth wording: some providers
@@ -195,6 +197,11 @@ function classifyOwnerDisposition(
 	if (ownerProp === "gateway" || errName === "gateway_terminal" || GATEWAY_INVARIANT_PATTERN.test(errName)) {
 		return { owner: "gateway", disposition: "gateway_terminal" };
 	}
+	// Local configuration failures are deterministic: retrying or failing over
+	// a missing base URL / unhandled API cannot succeed.
+	if (errName === "ConfigurationError") {
+		return { owner: "request", disposition: "request_terminal" };
+	}
 
 	// Structural content/policy flags are terminal even when the HTTP mapping
 	// is a synthetic 502 (message lacked POLICY_PATTERN). Retrying against a
@@ -213,13 +220,17 @@ function classifyOwnerDisposition(
 	if (is(errorId, Flag.ContextOverflow)) {
 		return { owner: "request", disposition: "context_overflow" };
 	}
-	if (is(errorId, Flag.ContentBlocked) || kind === "content-blocked") {
-		return { owner: "policy", disposition: "policy_terminal" };
-	}
+	// AccountPolicy first: the central classifier attaches ContentBlocked
+	// alongside AccountPolicy for account-scoped denials, so testing the
+	// generic block first would make rotation unreachable. Explicit
+	// `kind === "content-blocked"` keeps its terminal behavior below.
 	if (is(errorId, Flag.AccountPolicy)) {
 		// Account-scoped policy denial: a sibling credential may hold the
 		// entitlement, so rotate instead of terminating the request.
 		return { owner: "credential", disposition: "credential_transient" };
+	}
+	if (is(errorId, Flag.ContentBlocked) || kind === "content-blocked") {
+		return { owner: "policy", disposition: "policy_terminal" };
 	}
 
 	// Authoritative HTTP buckets first: message heuristics never rebrand a
