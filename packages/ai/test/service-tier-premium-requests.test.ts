@@ -8,11 +8,13 @@ import {
 	serviceTierFamily,
 	shouldSendServiceTier,
 } from "@oh-my-pi/pi-ai/types";
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 
-const m = (provider: string, api: Api, id: string): { provider: string; api: Api; id: string } => ({
+const m = (provider: string, api: Api, id: string) => ({
 	provider,
 	api,
 	id,
+	identity: classifyModel(provider, id),
 });
 
 const openai = m("openai", "openai-responses", "gpt-5");

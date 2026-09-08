@@ -582,10 +582,10 @@ impl Utility for FdCli {
 					0
 				}
 			},
-			// A closed downstream reader (`fd … | head`) surfaces as BrokenPipe on
-			// stdout writes. Real fd dies silently from SIGPIPE; mirror that with
-			// exit 141 (128+SIGPIPE) and no diagnostic.
-			Err(err) if err.kind() == io::ErrorKind::BrokenPipe => 141,
+			// Abort the walk; the host maps the BrokenPipe status.
+			Err(err) if err.kind() == io::ErrorKind::BrokenPipe => {
+				crate::host::SIGPIPE_EXIT_CODE
+			},
 			Err(err) => {
 				let _ = writeln!(host.stderr, "fd: {err}");
 				2
@@ -1573,12 +1573,10 @@ mod tests {
 		sync::atomic::AtomicBool,
 	};
 
-	use brush_core::openfiles::OpenFile;
-	use clap::Parser;
 	use tempfile::{Builder, TempDir};
 
 	use super::{FdCli, cancel_heartbeat};
-	use crate::host::{Host, Utility, run_util};
+	use crate::host::run_util;
 
 	/// Build a fresh temp directory containing a single matchable file plus a
 	/// filler file, so the walker has more than one entry to iterate. Both the
@@ -1681,25 +1679,5 @@ mod tests {
 			capture.stdout()
 		);
 		assert!(capture.err().is_empty(), "stderr should stay clean: {:?}", capture.stderr());
-	}
-
-	#[test]
-	fn broken_pipe_on_stdout_is_silent_and_exits_141() {
-		// Regression: `fd … | head` printed "fd: Broken pipe (os error 32)"
-		// when the downstream builtin closed the read end early. Real fd dies
-		// silently from SIGPIPE; the builtin must map BrokenPipe to exit 141
-		// with no stderr diagnostic.
-		let tree = seeded_tree("epipe");
-		let path = tree.path().to_str().expect("utf8 path");
-		let cli = FdCli::try_parse_from(["fd", "haystack", path]).expect("argv");
-		let (mut host, capture) = Host::for_test("fd", "", tree.path());
-		let (reader, writer) = std::io::pipe().expect("pipe");
-		drop(reader); // downstream reader (e.g. `head`) already exited
-		host.stdout = OpenFile::from(writer);
-
-		let code = cli.run(&mut host);
-
-		assert_eq!(code, 141, "BrokenPipe must map to 128+SIGPIPE");
-		assert!(capture.err().is_empty(), "stderr must stay clean on a broken pipe");
 	}
 }

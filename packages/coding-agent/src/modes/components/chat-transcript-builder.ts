@@ -13,7 +13,7 @@
  */
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { Usage } from "@oh-my-pi/pi-ai";
-import type { TUI } from "@oh-my-pi/pi-tui";
+import type { Component, TUI } from "@oh-my-pi/pi-tui";
 import type { AdvisorMessageDetails } from "../../advisor";
 import { COLLAB_PROMPT_MESSAGE_TYPE, type CollabPromptDetails } from "../../collab/protocol";
 import { settings } from "../../config/settings";
@@ -70,6 +70,8 @@ export interface ChatTranscriptBuilderDeps {
 	cwd: string;
 	hideThinkingBlock?: () => boolean;
 	proseOnlyThinking?: () => boolean;
+	/** Session-scoped resolved destinations for model-authored Markdown links. */
+	linkTargets?: ReadonlyMap<string, string>;
 	requestRender: () => void;
 }
 
@@ -99,6 +101,7 @@ export class ChatTranscriptBuilder {
 	#todoSnapshot: ToolExecutionComponent | null = null;
 	#expandables: Array<{ setExpanded(expanded: boolean): void }> = [];
 	#expanded = false;
+	#entryComponents = new Map<string, Component[]>();
 
 	constructor(private readonly deps: ChatTranscriptBuilderDeps) {
 		this.container.setToolActivityVisible(!settings.get("display.hideToolActivity"));
@@ -112,7 +115,7 @@ export class ChatTranscriptBuilder {
 	/** Discard all components and rebuild the whole transcript from `entries`. */
 	rebuild(entries: SessionMessageEntry[]): void {
 		this.reset();
-		for (const entry of entries) this.#appendChatMessage(entry.message);
+		for (const entry of entries) this.#appendEntry(entry);
 		// Flush the trailing turn's usage row only once its tools are materialized
 		// (a read whose result has not arrived stays pending); otherwise the row
 		// would sit above its tools. The drain happens here at the end of the pass.
@@ -121,7 +124,7 @@ export class ChatTranscriptBuilder {
 
 	/** Append newly persisted entries without rebuilding already rendered rows. */
 	append(entries: SessionMessageEntry[]): void {
-		for (const entry of entries) this.#appendChatMessage(entry.message);
+		for (const entry of entries) this.#appendEntry(entry);
 		if (this.#readArgs.size === 0 && this.#pendingTools.size === 0) this.#flushPendingUsage();
 	}
 
@@ -133,6 +136,15 @@ export class ChatTranscriptBuilder {
 
 	get expanded(): boolean {
 		return this.#expanded;
+	}
+
+	/** Rendered row where a persisted entry begins, after the container has painted once. */
+	rowForEntry(entryId: string): number | undefined {
+		for (const component of this.#entryComponents.get(entryId) ?? []) {
+			const row = this.container.getChildStartRow(component);
+			if (row !== undefined) return row;
+		}
+		return undefined;
 	}
 
 	/** Tear down components (sealing pending spinners) and clear build state. */
@@ -152,12 +164,20 @@ export class ChatTranscriptBuilder {
 		this.#waitingPoll = null;
 		this.#todoSnapshot = null;
 		this.#expandables = [];
+		this.#entryComponents.clear();
 		this.container.dispose();
 		this.container.clear();
 	}
 
 	dispose(): void {
 		this.reset();
+	}
+
+	#appendEntry(entry: SessionMessageEntry): void {
+		const before = this.container.children.length;
+		this.#appendChatMessage(entry.message);
+		const components = this.container.children.slice(before);
+		if (components.length > 0) this.#entryComponents.set(entry.id, components);
 	}
 
 	#trackExpandable(component: { setExpanded(expanded: boolean): void }): void {
@@ -299,7 +319,11 @@ export class ChatTranscriptBuilder {
 			case "bashExecution": {
 				const component = new BashExecutionComponent(message.command, this.deps.ui, message.excludeFromContext);
 				if (message.output) component.appendOutput(message.output);
-				component.setComplete(message.exitCode, message.cancelled, { truncation: message.meta?.truncation });
+				component.setComplete(message.exitCode, message.cancelled, {
+					truncation: message.meta?.truncation,
+					images: message.images,
+					showImages: settings.get("terminal.showImages"),
+				});
 				this.container.addChild(component);
 				break;
 			}
@@ -360,10 +384,12 @@ export class ChatTranscriptBuilder {
 			this.deps.getMessageRenderer ? undefined : [], // placeholder for thinkingRenderers
 			this.deps.ui.imageBudget,
 			proseOnlyThinking,
+			this.deps.linkTargets,
 		);
 		assistantComponent.setImagesVisible(settings.get("terminal.showImages"));
 		assistantComponent.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
 		this.#trackExpandable(assistantComponent);
+		assistantComponent.pickReactionTarget(this.container.children);
 		this.container.addChild(assistantComponent);
 
 		if (settings.get("display.cacheMissMarker")) {
@@ -393,6 +419,7 @@ export class ChatTranscriptBuilder {
 				this.deps.getMessageRenderer ? undefined : [],
 				undefined,
 				proseOnlyThinking,
+				this.deps.linkTargets,
 			);
 			component.setImagesVisible(settings.get("terminal.showImages"));
 			component.setToolResultImagesVisible(!settings.get("display.hideToolActivity"));
@@ -436,8 +463,6 @@ export class ChatTranscriptBuilder {
 					// Stable ids and Kitty placeholder cells keep images anchored
 					// while the transcript viewport scrolls and reflows.
 					showImages: settings.get("terminal.showImages"),
-					editFuzzyThreshold: settings.get("edit.fuzzyThreshold"),
-					editAllowFuzzy: settings.get("edit.fuzzyMatch"),
 				},
 				this.deps.getTool?.(content.name),
 				this.deps.ui,
@@ -529,7 +554,8 @@ export class ChatTranscriptBuilder {
 		if (
 			message.customType === "irc:incoming" ||
 			message.customType === "irc:autoreply" ||
-			message.customType === "irc:relay"
+			message.customType === "irc:relay" ||
+			message.customType === "irc:workpool"
 		) {
 			this.container.addChild(buildIrcMessageCard(message, () => this.#expanded));
 			return;

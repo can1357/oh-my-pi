@@ -14,13 +14,13 @@ import {
 } from "@oh-my-pi/pi-ai";
 import type { SearchResponse, SearchSource } from "../../../web/search/types";
 import { SearchProviderError } from "../../../web/search/types";
+import { resolveFirecrawlUrl } from "../../firecrawl";
 import { formatQuery, GOOGLE_QUERY_SYNTAX, parseSearchQuery, type StructuredQuery } from "../query";
 import { clampNumResults } from "../utils";
 import type { SearchParams } from "./base";
 import { SearchProvider } from "./base";
 import { classifyProviderHttpError, withHardTimeout } from "./utils";
 
-const FIRECRAWL_DEFAULT_BASE_URL = "https://api.firecrawl.dev/v2";
 const DEFAULT_NUM_RESULTS = 10;
 const MAX_NUM_RESULTS = 100;
 
@@ -30,28 +30,6 @@ const RECENCY_TBS: Record<NonNullable<SearchParams["recency"]>, string> = {
 	month: "qdr:m",
 	year: "qdr:y",
 };
-function resolveSearchUrl(): string {
-	const configured = process.env.FIRECRAWL_BASE_URL ?? process.env.FIRECRAWL_API_URL;
-	if (!configured?.trim()) return `${FIRECRAWL_DEFAULT_BASE_URL}/search`;
-	let url: URL;
-	try {
-		url = new URL(configured.trim());
-	} catch {
-		throw new Error("Invalid Firecrawl base URL: expected an HTTP or HTTPS URL");
-	}
-	if (url.protocol !== "http:" && url.protocol !== "https:") {
-		throw new Error("Invalid Firecrawl base URL: expected an HTTP or HTTPS URL");
-	}
-	if (url.username || url.password) {
-		throw new Error("Invalid Firecrawl base URL: URL credentials are not allowed");
-	}
-	url.search = "";
-	url.hash = "";
-	url.pathname = url.pathname.replace(/\/+$/, "");
-	if (!/\/v[12]$/i.test(url.pathname)) url.pathname += "/v2";
-	url.pathname += "/search";
-	return url.toString();
-}
 
 export interface FirecrawlSearchParams {
 	query: string;
@@ -119,7 +97,7 @@ async function callFirecrawlSearch(
 	if (apiKey) {
 		headers.Authorization = `Bearer ${apiKey}`;
 	}
-	const response = await (params.fetch ?? fetch)(resolveSearchUrl(), {
+	const response = await (params.fetch ?? fetch)(resolveFirecrawlUrl("/search"), {
 		method: "POST",
 		headers,
 		body: JSON.stringify(buildRequestBody(params)),

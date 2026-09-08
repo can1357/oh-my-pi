@@ -14,11 +14,10 @@ CMAKE_POLICY_VERSION_MINIMUM = "3.5"
 # reading a jobserver pipe whose write end doesn't survive `cmake -E env`
 # (observed in omp with whisper-rs-sys; audiopus_sys uses the same crate).
 # Ninja schedules itself and ignores make's jobserver protocol entirely.
-# CI needs no setup: the only cargo invocations there (cargo-deny/fetch) never
-# build cmake crates, workspace Rust compiles via Bazel (which ignores this
-# file, opus pinned in MODULE.bazel), and nix builds already carry ninja in
-# nativeBuildInputs. Dev hosts need ninja (nix dev-shell provides it; macOS:
-# `brew install ninja`).
+# The GitHub-hosted Windows ARM64 release runner and nix builds already carry
+# ninja. Other CI workspace Rust compiles via Bazel (which ignores this file,
+# opus pinned in MODULE.bazel). Dev hosts need ninja (nix dev-shell provides
+# it; macOS: `brew install ninja`).
 CMAKE_GENERATOR = "Ninja"
 # Store each crate's metadata only in its .rmeta instead of duplicating it into
 # every rlib. Measured on a reqwest-sized graph: 196 MB -> 130 MB target dir at

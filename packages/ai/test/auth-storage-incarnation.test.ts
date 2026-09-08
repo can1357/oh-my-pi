@@ -87,6 +87,22 @@ describe("AuthStorage credential incarnation and workspace fan-out", () => {
 		expect(storage.getCredentialIncarnation(id)).toBe(1);
 	});
 
+	it("does not bump incarnation when a reload merely drops an identity field", async () => {
+		if (!storage || !store) throw new Error("setup failed");
+		await storage.set(PROVIDER, [
+			oauth({ suffix: "a", accountId: "acc-same", email: "same@example.com", orgId: "org-old" }),
+		]);
+		const id = storage.listStoredCredentials(PROVIDER)[0]?.id;
+		if (id === undefined) throw new Error("missing credential");
+		await storage.markUsageLimitReached(PROVIDER, undefined, { credentialId: id });
+		expect(storage.listCredentialBlocks([id]).length).toBeGreaterThan(0);
+		// Same account, orgId temporarily absent: inconclusive, not a switch.
+		store.updateAuthCredential(id, oauth({ suffix: "a", accountId: "acc-same", email: "same@example.com" }));
+		await storage.reload();
+		expect(storage.getCredentialIncarnation(id)).toBe(1);
+		expect(storage.listCredentialBlocks([id]).length).toBeGreaterThan(0);
+	});
+
 	it("does not fan out a plain 402 payment_required without deactivated_workspace (negative)", async () => {
 		if (!storage) throw new Error("setup failed");
 		await storage.set(PROVIDER, [
