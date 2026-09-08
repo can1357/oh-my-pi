@@ -44,7 +44,9 @@ import {
 	resolvePeer,
 	withCors,
 } from "./http";
+import { commitGateObservesDownstreamSse, observeSseCommit, StreamCommitGate } from "./stream-commit-gate";
 import type {
+	AuthGatewayParsedRequestOptions,
 	AuthGatewayServerHandle,
 	AuthGatewayServerOptions,
 	AuthGatewayFormatModule as FormatModule,
@@ -186,30 +188,22 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		};
 		opts.reasoning ??= effort;
 	}
-	// Fields that don't yet have a matching pi-ai `SimpleStreamOptions` slot.
-	// Surfaced once in debug logs so they show up when wiring a new provider,
-	// but NEVER widened into `options.extra` — every consumer would have to
-	// re-implement the typed parse to read them back out.
-	// TODO(pi-ai): land first-class fields and replace these blocks.
-	if (
-		options.parallelToolCalls !== undefined ||
-		options.previousResponseId !== undefined ||
-		options.seed !== undefined ||
-		options.logitBias !== undefined ||
-		options.user !== undefined ||
-		options.responseFormat !== undefined
-	) {
-		logger.debug("auth-gateway dropped unsupported typed options", {
-			api,
-			parallelToolCalls: options.parallelToolCalls,
-			previousResponseId: options.previousResponseId,
-			seed: options.seed,
-			hasLogitBias: options.logitBias !== undefined,
-			user: options.user,
-			hasResponseFormat: options.responseFormat !== undefined,
-		});
-	}
+	applyParsedGatewayOptions(opts, options);
 	return opts;
+}
+
+/**
+ * Copy first-class parsed gateway fields onto {@link SimpleStreamOptions}.
+ * Previously these were debug-logged and dropped; providers that honour them
+ * (Responses continuation, parallel tool calls, …) must be able to read them.
+ */
+export function applyParsedGatewayOptions(opts: SimpleStreamOptions, options: AuthGatewayParsedRequestOptions): void {
+	if (options.parallelToolCalls !== undefined) opts.parallelToolCalls = options.parallelToolCalls;
+	if (options.previousResponseId !== undefined) opts.previousResponseId = options.previousResponseId;
+	if (options.seed !== undefined) opts.seed = options.seed;
+	if (options.logitBias !== undefined) opts.logitBias = options.logitBias;
+	if (options.user !== undefined) opts.user = options.user;
+	if (options.responseFormat !== undefined) opts.responseFormat = options.responseFormat;
 }
 
 /**
@@ -499,6 +493,28 @@ async function handleFormatEndpoint(
 		route.label,
 		peer,
 	);
+	const commitGate = new StreamCommitGate();
+	// openai-responses wraps the downstream body in observeSseCommit. Feeding
+	// onSseEvent as well double-counts prelude bytes and trips the 4 MiB cap at ~2 MiB.
+	if (!commitGateObservesDownstreamSse(route.label)) {
+		const previousSse = streamOpts.onSseEvent;
+		streamOpts.onSseEvent = (event, sseModel) => {
+			const raw = event.raw;
+			let bytes = 0;
+			for (const line of raw) bytes += line.length + 1;
+			commitGate.classifyAndObserve(event.event ?? "", bytes);
+			// Consume the observation: a terminal event that ended the stream
+			// before commit is the pre-commit-failure signal later parts route
+			// failover on; surface it instead of discarding the gate state.
+			if (commitGate.state === "terminated") {
+				logger.debug("auth-gateway stream terminated pre-commit", {
+					route: route.label,
+					event: event.event ?? "",
+				});
+			}
+			previousSse?.(event, sseModel);
+		};
+	}
 
 	logger.info("auth-gateway request", {
 		requestId,
@@ -563,7 +579,7 @@ async function handleFormatEndpoint(
 		.then(message => recordGatewayUsage(bootOpts.storage, model, client, message))
 		.catch(() => {});
 
-	const sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
+	let sseStream = route.module.encodeStream(events, parsed.modelId, parsed.options, {
 		signal: controller.signal,
 		onCancel: reason => {
 			if (!controller.signal.aborted) {
@@ -571,6 +587,9 @@ async function handleFormatEndpoint(
 			}
 		},
 	});
+	if (route.label === "openai-responses") {
+		sseStream = observeSseCommit(sseStream, commitGate);
+	}
 	return new Response(sseStream, {
 		status: 200,
 		headers: {
