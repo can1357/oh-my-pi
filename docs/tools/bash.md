@@ -35,7 +35,7 @@ When async execution is enabled, the Bash tool description recommends `async: "a
 
 A command that finishes within `bash.asyncAuto.inlineGraceMs` returns one ordinary Bash result. It does not emit separate progress or completion notifications. If the command outlives the grace, the same process is promoted without a restart. Settings-driven auto-backgrounding of an unmarked call can still deliver completion, but it does not enable progress; progress requires explicit `async: "auto"` or `async: true`.
 
-`wake` is a harness push, not a reason to hold the current turn open. Agents should not poll (`hub logs`/`ps`, short `wait` loops), follow logs, or block to receive progress; they end the turn and the push starts the next one. A `hub wait` with `name` plus `pattern`/`for`/`timeout` remains a legitimate readiness or exit wait. If output arrives while the model is busy, the harness buffers every rate-limit-permitted event and places them together in the next follow-up turn. Progress is a lossy preview selected by timing; use the artifact to determine whether omitted output contained an error or state transition. A one-job wake message rendered for the model has this form:
+`wake` is a harness push, not a reason to hold the current turn open. Agents should not poll (`hub logs`/`ps`), follow logs, or `hub wait` on a wake-monitored job to receive progress; they end the turn and the push starts the next one. The system prompt states that ending a turn this way is not a yield under the delivery contract, so a strictly sequential pipeline (build, then install, then test) is still driven turn by turn rather than by a blocking wait. A `hub wait` with `name` plus `pattern`/`for`/`timeout` remains a legitimate readiness or exit wait. If output arrives while the model is busy, the harness buffers every rate-limit-permitted event and places them together in the next follow-up turn. Progress is a lossy preview selected by timing; use the artifact to determine whether omitted output contained an error or state transition. A one-job wake message rendered for the model has this form:
 
 ```xml
 <system-notice>
@@ -61,7 +61,7 @@ Chatty progress: lower source verbosity (quiet or warning-only) or filter to act
 Hub: retune a chatty process without stopping it — `op: "monitor"` with `progress: "ambient"` or `"off"`.
 Bash: a job's `progress` is fixed at launch; retry unsafe → let it finish.
 Suppression reports repeat this guidance a few times with increasing spacing, then stop.
-Progress is pushed while you are idle. NEVER hold the turn open to receive it — no polling (`logs`, `ps`, short `wait` loops), no tailing files; end the turn.
+Progress is pushed while you are idle. NEVER hold the turn open to receive it — no polling (`logs`, `ps`, any `wait` on a wake-monitored job), no tailing files; end the turn. Ending a turn to await a wake is NOT a yield.
 </async-progress>
 ```
 
