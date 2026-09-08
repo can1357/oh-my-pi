@@ -115,16 +115,21 @@ export function runningAgentsOutsideJobs(session: ToolSession): AgentActivitySna
 		}
 	}
 	const now = Date.now();
+	// Accepted runs that never terminalized: reported as actionable state
+	// instead of a generic stale-registration hint (#11079).
+	const staleAccepted = new Set(registry.staleAcceptedRuns().map(ref => ref.id));
 	const out: AgentActivitySnapshot[] = [];
 	for (const ref of registry.list()) {
 		if (ref.kind !== "sub" || ref.status !== "running") continue;
 		if (ref.id === selfId || covered.has(ref.id)) continue;
+		const acceptedAt = staleAccepted.has(ref.id) ? ref.lifecycle?.acceptedAt : undefined;
 		out.push({
 			id: ref.id,
 			...(ref.parentId ? { parentId: ref.parentId } : {}),
 			...(ref.activity ? { activity: ref.activity } : {}),
 			ageMs: Math.max(0, now - ref.createdAt),
 			live: registry.isRunning(ref),
+			...(acceptedAt !== undefined ? { acceptedAt } : {}),
 		});
 	}
 	return out;
@@ -136,7 +141,14 @@ function describeAgents(agents: AgentActivitySnapshot[]): string[] {
 	for (const agent of agents) {
 		const parent = agent.parentId ? ` (spawned by \`${agent.parentId}\`)` : "";
 		const activity = agent.activity ? ` — ${agent.activity}` : "";
-		const stale = agent.live ? "" : " — no turn in flight (stale registration?)";
+		// An accepted final result with no turn in flight is the #11079 leak:
+		// the run is over but the ref never terminalized, so say so actionably
+		// instead of the generic stale-registration hint.
+		const stale = agent.live
+			? ""
+			: agent.acceptedAt !== undefined
+				? ` — final result accepted ${formatDuration(Math.max(0, Date.now() - agent.acceptedAt))} ago but still running; clear it with \`hub\` cancel`
+				: " — no turn in flight (stale registration?)";
 		lines.push(`- \`${agent.id}\`${parent} — up ${formatDuration(agent.ageMs)}${activity}${stale}`);
 	}
 	lines.push("", "These agents have no job entry; message them via `hub` send, transcripts at `history://<id>`.");
