@@ -19,7 +19,7 @@ import { isPosixShell } from "@oh-my-pi/pi-utils/procmgr";
 import {
 	type AsyncJobProgressDelivery,
 	DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
-	formatBackgroundNotice,
+	formatJobLabel,
 	raceJobSettlement,
 	resolveAutoBackgroundWaitMs,
 } from "../async";
@@ -379,6 +379,8 @@ type ManagedBashJobPromotion =
 
 interface ManagedBashJobHandle {
 	jobId: string;
+	/** One-line label the job was registered under; echoed in notices and headers. */
+	label: string;
 	completion: Promise<ManagedBashJobCompletion>;
 	getLatestText: () => string;
 	stopUpdates: () => void;
@@ -455,6 +457,7 @@ function formatTimeoutClampNotice(
 		: `allowed range ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}s`;
 	return `Timeout clamped to ${effectiveTimeoutSec}s (requested ${requestedTimeoutSec}s; ${limit}).`;
 }
+
 
 /**
  * Bash tool implementation.
@@ -743,11 +746,12 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 	}
 
 	#buildBackgroundStartResult(
-		jobId: string,
+		job: Pick<ManagedBashJobHandle, "jobId" | "label">,
 		previewText: string,
 		timeoutSec: number | undefined,
 		options: { requestedTimeoutSec?: number; notices?: readonly string[] } = {},
 	): AgentToolResult<BashToolDetails> {
+		const { jobId, label } = job;
 		const details: BashToolDetails = {
 			async: { state: "running", jobId, type: "bash" },
 		};
@@ -767,7 +771,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		if (options.notices?.length) {
 			lines.push(...options.notices, "");
 		}
-		lines.push(formatBackgroundNotice(jobId));
+		lines.push(formatBackgroundNotice(jobId, label));
 		return {
 			content: [{ type: "text", text: lines.join("\n") }],
 			details,
@@ -798,7 +802,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			throw new ToolError("Background job manager unavailable for this session.");
 		}
 
-		const label = options.command.length > 120 ? `${options.command.slice(0, 117)}...` : options.command;
+		const label = formatJobLabel(options.command);
 		let latestText = "";
 		let latestProgressDetails: BashProgressDetails | undefined;
 		let progressSampler: ProgressLines | undefined;
@@ -953,6 +957,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 		return {
 			jobId,
+			label,
 			completion: completion.promise,
 			getLatestText: () => latestText,
 			stopUpdates: () => {
@@ -1167,7 +1172,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				forwardUpdates: false,
 				progressDelivery: progress,
 			});
-			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
+			return this.#buildBackgroundStartResult(job, "", timeoutSec, {
 				requestedTimeoutSec,
 				notices: pendingNotices,
 			});
@@ -1224,7 +1229,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				deferredProgressDelivery: startBackgrounded ? undefined : progress,
 			});
 			if (startBackgrounded) {
-				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
+				return this.#buildBackgroundStartResult(job, "", timeoutSec, {
 					requestedTimeoutSec,
 					notices: pendingNotices,
 				});
@@ -1270,7 +1275,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				waitResult.kind === "steer"
 					? [...pendingNotices, "Backgrounded early to handle an incoming message; the command keeps running."]
 					: pendingNotices;
-			return this.#buildBackgroundStartResult(job.jobId, promotion.foregroundPreview, timeoutSec, {
+			return this.#buildBackgroundStartResult(job, promotion.foregroundPreview, timeoutSec, {
 				requestedTimeoutSec,
 				notices,
 			});

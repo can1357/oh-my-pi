@@ -7,6 +7,18 @@
 
 /** Default foreground-wait threshold before a tool call auto-backgrounds. */
 export const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
+/** Longest label a job carries into notices, headers, and `hub jobs` rows. */
+const JOB_LABEL_MAX_CHARS = 120;
+
+/**
+ * One-line job label from a command or cell title: whitespace runs (including
+ * newlines) collapse to a space so the label never breaks a notice line, and
+ * anything past {@link JOB_LABEL_MAX_CHARS} is elided.
+ */
+export function formatJobLabel(raw: string): string {
+	const flat = raw.replace(/\s+/g, " ").trim();
+	return flat.length > JOB_LABEL_MAX_CHARS ? `${flat.slice(0, JOB_LABEL_MAX_CHARS - 3)}...` : flat;
+}
 
 /**
  * Slack between the foreground-wait threshold and a call's own timeout: the

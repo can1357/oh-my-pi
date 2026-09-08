@@ -22,9 +22,31 @@ import type { RenderResultOptions, ToolRenderer } from "./renderer";
 /** Default collapsed shell output preview height. */
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
-/** LLM-facing footer appended when a tool call becomes a background job. */
-export function formatBackgroundNotice(jobId: string): string {
-	return `Backgrounded as job ${jobId}; result will be delivered automatically.`;
+const BACKGROUND_NOTICE_SUFFIX = "; result will be delivered automatically.";
+
+/**
+ * LLM-facing footer appended when a tool call is converted into a background
+ * job. Carries the job label so a batch of parallel calls stays attributable
+ * even when results come back in completion order (the model otherwise pairs
+ * `bg_N` positionally against its own calls and swaps them).
+ */
+export function formatBackgroundNotice(jobId: string, label: string): string {
+	return `Backgrounded as job ${jobId} (${label})${BACKGROUND_NOTICE_SUFFIX}`;
+}
+
+/**
+ * The exact notice line {@link formatBackgroundNotice} appended for `jobId`,
+ * if `text` still carries it — lets a renderer strip it without knowing the
+ * label the tool used. Anchored on the id prefix and the fixed suffix so a
+ * coincidental in-output token never matches.
+ */
+export function findBackgroundNotice(text: string, jobId: string): string | undefined {
+	const prefix = `Backgrounded as job ${jobId} (`;
+	const start = text.lastIndexOf(prefix);
+	if (start === -1) return undefined;
+	const lineEnd = text.indexOf("\n", start);
+	const line = text.slice(start, lineEnd === -1 ? text.length : lineEnd);
+	return line.endsWith(BACKGROUND_NOTICE_SUFFIX) ? line : undefined;
 }
 
 /** Shell execution metadata used by transcript rendering. */
@@ -181,7 +203,8 @@ function stripExitCodeNotice(text: string, exitCode: number | undefined): string
 
 function stripBackgroundNotice(text: string, async: BashToolDetails["async"] | undefined): string {
 	if (async?.state !== "running") return text;
-	return stripTrailingNotice(text, formatBackgroundNotice(async.jobId));
+	const notice = findBackgroundNotice(text, async.jobId);
+	return notice === undefined ? text : stripTrailingNotice(text, notice);
 }
 
 /** Shell arguments used to build a command preview. */
