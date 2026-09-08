@@ -66,7 +66,7 @@ describe("findStrictToolSchemaViolation (#2652)", () => {
 
 	test("flags a leftover xAI root anyOf only when the xAI option is on", () => {
 		expect(findStrictToolSchemaViolation(leftoverRootUnion)).toBeNull();
-		expect(findStrictToolSchemaViolation(leftoverRootUnion, "#", { rejectXaiRootObjectUnion: true })).toBe("#/anyOf");
+		expect(findStrictToolSchemaViolation(leftoverRootUnion, "#", { rejectRootObjectUnion: true })).toBe("#/anyOf");
 	});
 
 	test("accepts a root anyOf of typed object branches even for xAI", () => {
@@ -79,7 +79,7 @@ describe("findStrictToolSchemaViolation (#2652)", () => {
 					],
 				},
 				"#",
-				{ rejectXaiRootObjectUnion: true },
+				{ rejectRootObjectUnion: true },
 			),
 		).toBeNull();
 	});

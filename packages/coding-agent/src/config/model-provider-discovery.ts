@@ -29,8 +29,8 @@ for (const providerId of [
 export const STARTUP_MODEL_CACHE_PROVIDER_IDS: readonly string[] = Object.keys(STARTUP_MODEL_CACHE_PROVIDER_IDS_RECORD);
 
 // Sentinels for local-only OAuth tokens — declared inline to avoid loading
-// provider modules at startup. Must match packages/ai/src/registry/llama-cpp.ts,
-// packages/ai/src/registry/lm-studio.ts, and packages/ai/src/registry/vllm.ts.
+// provider modules at startup. Must match the llama-cpp, lm-studio, and vllm
+// auth rules in packages/catalog/src/compat/rules/auth/.
 const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(["llama-cpp-local", "lm-studio-local", "vllm-local"]);
 
 /**

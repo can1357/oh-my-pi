@@ -1,6 +1,5 @@
-import { Patch } from "@oh-my-pi/hashline";
+import { editInspect } from "@oh-my-pi/pi-natives";
 import { isRecord, stringProperty } from "@oh-my-pi/pi-utils";
-import { expandApplyPatchToEntries } from "../edit";
 import { resolveToCwd } from "../tools/path-utils";
 import type { ClientBridgePermissionOption } from "./client-bridge";
 
@@ -26,42 +25,19 @@ export const PERMISSION_OPTIONS_BY_ID = new Map(PERMISSION_OPTIONS.map(option =>
 function getEditDestructiveIntent(args: unknown): { kind: "delete" | "move"; paths: string[] } | undefined {
 	if (!isRecord(args)) return undefined;
 
-	const edits = Array.isArray(args.edits) ? args.edits : undefined;
-	if (edits) {
-		const filePath = stringProperty(args, "path");
-		if (filePath) {
-			for (const edit of edits) {
-				if (!isRecord(edit)) continue;
-				if (stringProperty(edit, "op") === "delete") return { kind: "delete", paths: [filePath] };
-			}
-		}
-		for (const edit of edits) {
-			if (!isRecord(edit)) continue;
-			const op = stringProperty(edit, "op");
-			const rename = stringProperty(edit, "rename");
-			if (op !== "create" && rename) return { kind: "move", paths: filePath ? [filePath, rename] : [rename] };
-		}
-	}
-
-	const input = stringProperty(args, "input");
-	if (input) {
+	const argsJson = JSON.stringify(args);
+	const modes = Array.isArray(args.edits) ? ["patch"] : ["hashline", "apply_patch"];
+	for (const mode of modes) {
 		try {
-			const patch = Patch.parse(input);
-			for (const section of patch.sections) {
-				if (section.fileOp?.kind === "rem") return { kind: "delete", paths: [section.path] };
-				if (section.fileOp?.kind === "move") return { kind: "move", paths: [section.path, section.fileOp.dest] };
-			}
+			const fileOps = editInspect(mode, argsJson).fileOps;
+			const op =
+				fileOps.find(candidate => candidate.kind === "delete") ??
+				fileOps.find(candidate => candidate.kind === "move");
+			if (!op || (op.kind !== "delete" && op.kind !== "move")) continue;
+			const paths = op.kind === "move" && op.to ? [op.path, op.to] : [op.path];
+			return { kind: op.kind, paths };
 		} catch {
-			// Not a hashline patch — fall through to apply_patch parsing.
-		}
-		try {
-			const entries = expandApplyPatchToEntries({ input });
-			const deleteEntry = entries.find(entry => entry.op === "delete");
-			if (deleteEntry) return { kind: "delete", paths: [deleteEntry.path] };
-			const moveEntry = entries.find(entry => entry.rename);
-			if (moveEntry?.rename) return { kind: "move", paths: [moveEntry.path, moveEntry.rename] };
-		} catch {
-			// If the edit input is not an apply-patch envelope, it is not a delete/move operation.
+			// The payload does not use this edit mode's syntax.
 		}
 	}
 

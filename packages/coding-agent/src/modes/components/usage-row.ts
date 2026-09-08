@@ -71,6 +71,14 @@ export function formatUsageRow(
 	return parts.join("  ");
 }
 
+/** Blocks minted by {@link createUsageRowBlock}, so transcript walkers can attribute them to the turn above. */
+const usageRowBlocks = new WeakSet<Container>();
+
+/** Whether `component` is a per-turn usage/metrics row from {@link createUsageRowBlock}. */
+export function isUsageRowBlock(component: object): boolean {
+	return usageRowBlocks.has(component as Container);
+}
+
 // `timestamp` and `turnElapsedMs` are optional and trail the throughput args to
 // preserve the existing (usage, durationMs, ttftMs) call contract — this
 // function is part of the package's public export surface (./modes/components/*).
@@ -84,5 +92,6 @@ export function createUsageRowBlock(
 	const block = new Container();
 	block.addChild(new Spacer(1));
 	block.addChild(new Text(theme.fg("dim", formatUsageRow(usage, durationMs, ttftMs, timestamp, turnElapsedMs)), 1, 0));
+	usageRowBlocks.add(block);
 	return block;
 }

@@ -181,8 +181,9 @@ Each provider search transport receives a hard timeout from `providers.webSearch
     - Output: `answer`, `sources`, `requestId`, `authMode: "api_key"`.
   - **Firecrawl** — `packages/coding-agent/src/web/search/providers/firecrawl.ts`
     - Availability: credentials admit it to the automatic chain; explicit/configured selection is always available and uses keyless mode when no credential resolves.
-    - Querying: POST `https://api.firecrawl.dev/v2/search` with `sources: [{ type: "web" }]`. Google-style operators are formatted into the query; `recency` and parsed absolute dates map to `tbs`.
+    - Querying: POST `https://api.firecrawl.dev/v2/search` with `sources: [{ type: "web" }]`. The endpoint is built by the shared resolver in `packages/coding-agent/src/web/firecrawl.ts`, which applies the `FIRECRAWL_BASE_URL` (alias `FIRECRAWL_API_URL`) self-hosting override. Google-style operators are formatted into the query; `recency` and parsed absolute dates map to `tbs`.
     - `limit` / `num_search_results`: collapsed and clamped to `1..100`, default `10`; output `sources`, `requestId`, and `authMode: "api_key" | "keyless"`.
+    - The same module exposes Firecrawl `/scrape` as a `providers.fetch` reader backend for the fetch/read URL tool (requires `FIRECRAWL_API_KEY`). API reference: [docs.firecrawl.dev](https://docs.firecrawl.dev).
   - **Brave** — `packages/coding-agent/src/web/search/providers/brave.ts`
     - Availability: `BRAVE_API_KEY` only.
     - Querying: GET `https://api.search.brave.com/res/v1/web/search` with `count`, `extra_snippets=true`, and `freshness=pd|pw|pm|py` for `recency`.

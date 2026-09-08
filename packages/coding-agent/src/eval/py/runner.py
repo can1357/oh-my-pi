@@ -6,6 +6,8 @@ wrapper writes typed frames back.
 Host -> wrapper:
   {"id": str, "code": str, "silent": bool?, "storeHistory": bool?}
   {"id": str, "code": str, "silent": bool?, "storeHistory": bool?, "cwd": str?, "env": dict?}
+  {"type": "tool", "id": str, "op": "describe", "names": [str]}
+  {"type": "tool", "id": str, "op": "call", "name": str, "args": dict}
   {"type": "exit"}                                # graceful shutdown
 
 Wrapper -> host:
@@ -1234,6 +1236,62 @@ def _start_parent_watchdog() -> None:
 # ---------------------------------------------------------------------------
 
 
+def _jsonable(value: Any) -> Any:
+    """Convert a tool result into a JSON-safe value without failing the request."""
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_jsonable(item) for item in value]
+    return repr(value)
+
+
+def _handle_tool_request(req: dict) -> None:
+    """Describe or invoke a kernel-defined tool on a dedicated runner thread."""
+    rid = str(req.get("id"))
+    token = _CURRENT_RID.set(rid)
+    status = "ok"
+    _emit({"type": "started", "id": rid})
+    try:
+        tools = _STATE.user_ns.get("__omp_tools__") or {}
+        op = req.get("op")
+        if op == "describe":
+            requested = req.get("names") or list(tools)
+            envelope = {
+                "ok": True,
+                "tools": [tools[name].describe() for name in requested if name in tools],
+                "missing": [name for name in requested if name not in tools],
+            }
+        elif op == "call":
+            name = str(req.get("name") or "")
+            spec = tools.get(name)
+            if spec is None:
+                raise KeyError(f"tool {name!r} is not defined")
+            result = spec.fn(**(req.get("args") or {}))
+            if inspect.isawaitable(result):
+                result = asyncio.run(result)
+            envelope = {"ok": True, "value": _jsonable(result)}
+        else:
+            raise ValueError(f"unknown tool operation {op!r}")
+        _emit_display({"application/json": envelope})
+    except BaseException as exc:  # noqa: BLE001 - protocol errors must settle the request
+        status = "error"
+        _emit_error(rid, exc)
+    finally:
+        _flush_stream_proxies(rid)
+        _emit(
+            {
+                "type": "done",
+                "id": rid,
+                "status": status,
+                "executionCount": _STATE.execution_count,
+                "cancelled": False,
+            }
+        )
+        _CURRENT_RID.reset(token)
+
+
 async def _handle_request_async(req: dict) -> None:
     rid = str(req.get("id"))
     token = _CURRENT_RID.set(rid)
@@ -1381,6 +1439,14 @@ def _read_stdin(loop: asyncio.AbstractEventLoop, queue: asyncio.Queue, stdin) ->
         req = _parse_request(line)
         if req is None:
             continue
+        if req.get("type") == "tool":
+            threading.Thread(
+                target=_handle_tool_request,
+                args=(req,),
+                name=f"omp-tool-{req.get('id')}",
+                daemon=True,
+            ).start()
+            continue
         loop.call_soon_threadsafe(queue.put_nowait, req)
     loop.call_soon_threadsafe(queue.put_nowait, {"type": "exit"})
 
@@ -1432,7 +1498,7 @@ async def _serve_posix(loop: asyncio.AbstractEventLoop, stdin) -> None:
 
 
 async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
-    """Dispatch requests serially, reading each control line on demand.
+    """Dispatch requests serially, serving tool requests between cells.
 
     A thread perpetually parked in a blocking ``sys.stdin`` read deadlocks
     native-extension imports (NumPy in particular) under a pipe-backed
@@ -1457,6 +1523,14 @@ async def _serve_windows(loop: asyncio.AbstractEventLoop, stdin) -> None:
             continue
         if req.get("type") == "exit":
             break
+        if req.get("type") == "tool":
+            threading.Thread(
+                target=_handle_tool_request,
+                args=(req,),
+                name=f"omp-tool-{req.get('id')}",
+                daemon=True,
+            ).start()
+            continue
         try:
             await _handle_request_async(req)
         except asyncio.CancelledError:
