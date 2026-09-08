@@ -35,6 +35,9 @@
 - Grok Bot catalog matrix text probes require the exact expected token (no loose `pong` match).
 - Grok Bot catalog matrix bash smoke requires an echo/printf of the ping (comment-only mentions fail).
 - Grok Bot keep-model probes load `secrets/grokbot.env` through the shared dotenv parser (export/quotes/comments match the CLI).
+### Fixed
+
+- Session rewrites preserve open-reader snapshots and replacement identity when a rename needs an EPERM fallback.
 
 ## [18.1.14] - 2026-09-07
 
