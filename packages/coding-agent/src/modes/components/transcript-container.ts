@@ -361,6 +361,10 @@ export class TranscriptContainer extends Container {
 	peekReplayBatch(width: number): HistoryBatch | undefined {
 		this.#syncEntries();
 		this.#settleFinalized();
+		return this.#peekReplayBatch(width);
+	}
+
+	#peekReplayBatch(width: number): HistoryBatch | undefined {
 		if (this.#offered !== undefined) {
 			return this.#offered.kind === "replay" ? this.#offered.batch : undefined;
 		}
@@ -402,7 +406,7 @@ export class TranscriptContainer extends Container {
 		this.#syncEntries();
 		this.#settleFinalized();
 		if (this.#offered !== undefined) return this.#offered.batch;
-		const replay = this.peekReplayBatch(width);
+		const replay = this.#peekReplayBatch(width);
 		if (replay !== undefined) return replay;
 
 		this.#completeFullyEmittedHeads(width);
@@ -744,7 +748,8 @@ export class TranscriptContainer extends Container {
 	}
 
 	#settleFinalized(): void {
-		for (const entry of this.#entries) {
+		for (let index = this.#frontier; index < this.#entries.length; index++) {
+			const entry = this.#entries[index]!;
 			if (entry.state === "active" && isFinalized(entry.component)) entry.state = "settled";
 		}
 	}
