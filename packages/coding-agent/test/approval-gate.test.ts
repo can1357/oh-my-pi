@@ -66,6 +66,7 @@ describe("interactive approval gate", () => {
 		uiSignal(): AbortSignal | undefined;
 		approveInDialog(): void;
 		denyInDialog(): void;
+		failDialog(error: unknown): void;
 		gate: Promise<void>;
 		controller: AbortController;
 	}
@@ -76,11 +77,13 @@ describe("interactive approval gate", () => {
 		const controller = new AbortController();
 		let dialogSignal: AbortSignal | undefined;
 		let settleDialog: ((choice: string) => void) | undefined;
+		let rejectDialog: ((error: unknown) => void) | undefined;
 		const uiContext = {
 			select: (_prompt: string, _choices: string[], options?: { signal?: AbortSignal }): Promise<string> => {
 				dialogSignal = options?.signal;
 				const dialog = Promise.withResolvers<string>();
 				settleDialog = dialog.resolve;
+				rejectDialog = dialog.reject;
 				return dialog.promise;
 			},
 		};
@@ -113,6 +116,7 @@ describe("interactive approval gate", () => {
 			uiSignal: () => dialogSignal,
 			approveInDialog: () => settleDialog?.("Approve"),
 			denyInDialog: () => settleDialog?.("Deny"),
+			failDialog: error => rejectDialog?.(error),
 			gate,
 			controller,
 		};
@@ -191,6 +195,19 @@ describe("interactive approval gate", () => {
 		await until(() => h.resolved.length > 0);
 		expect(h.resolved).toHaveLength(1);
 		expect(h.resolved[0]).toMatchObject({ approved: false, source: "abort" });
+	});
+
+	test("a UI selection failure keeps its original error and reports an abort", async () => {
+		const h = await start();
+		const failure = new Error("approval UI crashed");
+		h.failDialog(failure);
+		await expect(h.gate).rejects.toBe(failure);
+		await until(() => h.resolved.length > 0);
+		expect(h.resolved[0]).toMatchObject({
+			approved: false,
+			source: "abort",
+			reason: "Error: approval UI crashed",
+		});
 	});
 
 	test("resolved is delivered after requested even when an extension responds mid-delivery", async () => {

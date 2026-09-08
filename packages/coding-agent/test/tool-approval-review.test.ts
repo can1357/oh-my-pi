@@ -1,4 +1,5 @@
 import { beforeAll, afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -364,6 +365,28 @@ describe("tool approval content review", () => {
 			const review = await tool.prepareApproval("write-bom", { path: target, content: "same\n" });
 			if (!review) throw new Error("expected a review for a filesystem write");
 			expect(review.files).toEqual([{ path: "bom.txt", before: "same\n", after: "same\n" }]);
+		});
+
+		test("refuses a filesystem proposal that becomes a SQLite row route during approval", async () => {
+			const dbPath = path.join(tmpDir, "data.db");
+			await Bun.write(dbPath, "not sqlite");
+			const tool = new WriteTool(session);
+			const params = { path: "data.db:items:1", content: '{"value":"changed"}' };
+
+			const review = await tool.prepareApproval("write-route", params);
+			if (!review) throw new Error("expected a regular filesystem review");
+			await fs.rm(dbPath);
+			const database = new Database(dbPath);
+			database.exec(
+				"CREATE TABLE items (id INTEGER PRIMARY KEY, value TEXT); INSERT INTO items VALUES (1, 'original')",
+			);
+			database.close();
+
+			review.apply([]);
+			await expect(tool.execute("write-route", params)).rejects.toThrow(/routing changed during approval/);
+			const check = new Database(dbPath, { readonly: true });
+			expect(check.query("SELECT value FROM items WHERE id = 1").get()).toEqual({ value: "original" });
+			check.close();
 		});
 
 		test("proposes no tab when the write would not change the file", async () => {

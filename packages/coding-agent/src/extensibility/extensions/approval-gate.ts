@@ -43,6 +43,8 @@ export async function runInteractiveApprovalGate<TParameters extends TSchema>(
 	// request and open tabs that never receive a close event.
 	const requestedDelivery = Promise.withResolvers<void>();
 	let requestedStarted = false;
+	let selectionFailed = false;
+	let selectionError: unknown;
 	let settled = false;
 
 	const notify = (event: ToolApprovalRequestedEvent | ToolApprovalResolvedEvent): Promise<void> =>
@@ -98,7 +100,11 @@ export async function runInteractiveApprovalGate<TParameters extends TSchema>(
 			.select(options.safetyPrompt, ["Approve", "Deny"], { signal: dialog.signal })
 			.then(
 				choice => settle(choice === "Approve", "user"),
-				(error: unknown) => settle(false, "user", String(error)),
+				(error: unknown) => {
+					selectionFailed = true;
+					selectionError = error;
+					settle(false, "abort", String(error));
+				},
 			);
 		requestedStarted = true;
 		void notify({
@@ -111,6 +117,7 @@ export async function runInteractiveApprovalGate<TParameters extends TSchema>(
 		}).then(() => requestedDelivery.resolve());
 		const approved = await gate.promise;
 		signal?.throwIfAborted();
+		if (selectionFailed) throw selectionError;
 		if (!approved) throw new Error(`Tool call denied by user: ${tool.name}`);
 	} catch (error) {
 		settle(false, "abort", String(error));

@@ -1327,6 +1327,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				return result;
 			}
 			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
+			if (approval && resolvedArchivePath) {
+				throw new ToolError("The write target routing changed during approval; request a new proposal");
+			}
 			if (resolvedArchivePath) {
 				enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {
 					op: resolvedArchivePath.exists ? "update" : "create",
@@ -1354,6 +1357,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 
 			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path);
+			if (approval && resolvedSqlitePath) {
+				throw new ToolError("The write target routing changed during approval; request a new proposal");
+			}
 			if (resolvedSqlitePath) {
 				enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
 
