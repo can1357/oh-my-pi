@@ -5,6 +5,7 @@
 ### Fixed
 
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
+- LSP shutdown and disconnected-session cleanup use bounded waits for stalled servers, and shutdown reports incomplete process termination instead of returning success.
 ### Added
 
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
@@ -34,9 +35,6 @@
 - Python cells are no longer replayed automatically after a kernel crash, preventing duplicate side effects; the next call starts a fresh kernel.
 - Session rewrites preserve open-reader snapshots and replacement identity when a rename needs an EPERM fallback.
 - Fixed WorkPool children retaining a stale Gemini-formatted `yield` declaration when pooled items were installed or cleared.
-### Fixed
-
-- LSP shutdown and disconnected-session cleanup use bounded waits for stalled servers, and shutdown reports incomplete process termination instead of returning success.
 
 ## [18.1.14] - 2026-09-07
 

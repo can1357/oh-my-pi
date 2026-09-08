@@ -3,6 +3,58 @@ import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { spawn } from "@oh-my-pi/pi-utils/ptree";
 
 describe("ptree.ChildProcess.killAndWait()", () => {
+	it.skipIf(process.platform === "win32")(
+		"terminates a dead root's descendant that holds only raw stdout open",
+		async () => {
+			const child = spawn(["/bin/sh", "-c", "sleep 30 2>/dev/null & echo $!"], { detached: true, stderr: "full" });
+			let reader = child.stdout.getReader();
+			let descendant: Process | null = null;
+			try {
+				const output = await reader.read();
+				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
+				if (!descendant) throw new Error("Descendant exited before termination");
+				await child.proc.exited;
+				await Bun.readableStreamToText(child.stderr!);
+				await Bun.sleep(0);
+				expect(descendant.status()).toBe(ProcessStatus.Running);
+				reader.releaseLock();
+				reader = child.stdout.getReader();
+				await child.killAndWait(undefined, -1);
+				expect(descendant.status()).toBe(ProcessStatus.Exited);
+				expect((await reader.read()).done).toBe(true);
+			} finally {
+				descendant?.killTree(9);
+				await reader.cancel();
+				child.kill(undefined, -1);
+			}
+		},
+	);
+
+	for (const finish of ["eof", "cancel"] as const) {
+		it.skipIf(process.platform === "win32")(`drops raw stdout ownership after ${finish}`, async () => {
+			const script = finish === "eof" ? "sleep 30 >/dev/null 2>&1 & echo $!" : "sleep 30 2>/dev/null & echo $!";
+			const child = spawn(["/bin/sh", "-c", script], { detached: true, stderr: "full" });
+			const reader = child.stdout.getReader();
+			let descendant: Process | null = null;
+			try {
+				const output = await reader.read();
+				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
+				if (!descendant) throw new Error("Descendant exited before termination");
+				await child.proc.exited;
+				await Bun.readableStreamToText(child.stderr!);
+				if (finish === "eof") expect((await reader.read()).done).toBe(true);
+				else await reader.cancel();
+				await Bun.sleep(0);
+				await child.killAndWait(undefined, -1);
+				expect(descendant.status()).toBe(ProcessStatus.Running);
+			} finally {
+				descendant?.killTree(9);
+				await reader.cancel();
+				child.kill(undefined, -1);
+			}
+		});
+	}
+
 	it("waits for a pipe-holding descendant after its root exits", async () => {
 		const command =
 			process.platform === "win32"

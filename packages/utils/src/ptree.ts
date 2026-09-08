@@ -187,6 +187,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	#resolveDrainCutoff: () => void;
 	#timeoutTimer?: NodeJS.Timeout;
 	#stderrStream?: ReadableStream<Uint8Array>;
+	#stdoutStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
 	#terminateGroup: boolean;
@@ -307,7 +308,37 @@ export class ChildProcess<In extends InMask = InMask> {
 
 	/** Raw stdout stream. Must be consumed to prevent pipe deadlock. */
 	get stdout() {
-		return this.proc.stdout;
+		if (!this.#stdoutStream) {
+			const reader = this.proc.stdout.getReader();
+			this.#stdoutStream = new ReadableStream<Uint8Array>({
+				pull: async controller => {
+					// Buffered output can outlive the process group; only pending reads imply an open pipe.
+					this.#openPipeReaders++;
+					try {
+						const chunk = await reader.read();
+						if (chunk.done) {
+							controller.close();
+							reader.releaseLock();
+						} else {
+							controller.enqueue(chunk.value);
+						}
+					} catch (error) {
+						controller.error(error);
+						reader.releaseLock();
+					} finally {
+						this.#openPipeReaders--;
+					}
+				},
+				cancel: async reason => {
+					try {
+						await reader.cancel(reason);
+					} finally {
+						reader.releaseLock();
+					}
+				},
+			});
+		}
+		return this.#stdoutStream;
 	}
 
 	/** Optional stderr stream (only when requested in spawn options). */
@@ -400,7 +431,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	}
 
 	async text(): Promise<string> {
-		const p = this.#readStream(this.proc.stdout);
+		const p = this.#readStream(this.stdout);
 		if (this.#nothrow) return p;
 		const [text] = await Promise.all([p, this.exitedCleanly]);
 		await this.#throwIfAborted();
@@ -411,7 +442,6 @@ export class ChildProcess<In extends InMask = InMask> {
 	 * Read a pipe fully, stopping early only at an explicit command deadline.
 	 */
 	async #readStream(stream: ReadableStream<Uint8Array>): Promise<string> {
-		this.#openPipeReaders++;
 		const reader = stream.getReader();
 		const dec = new TextDecoder();
 		let out = "";
@@ -431,13 +461,11 @@ export class ChildProcess<In extends InMask = InMask> {
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		}
-		this.#openPipeReaders--;
 		return out + dec.decode();
 	}
 
 	async #readBytes(): Promise<Uint8Array> {
-		const reader = this.proc.stdout.getReader();
-		this.#openPipeReaders++;
+		const reader = this.stdout.getReader();
 		const chunks: Uint8Array[] = [];
 		let length = 0;
 		try {
@@ -457,7 +485,6 @@ export class ChildProcess<In extends InMask = InMask> {
 		} catch {
 			// A cancelled or failed read keeps whatever was already collected.
 		} finally {
-			this.#openPipeReaders--;
 			reader.releaseLock();
 		}
 
@@ -503,7 +530,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			throw new Error('Full stderr capture must be requested when spawning the process (pass stderr: "full")');
 		}
 
-		const stdoutP = this.#readStream(this.proc.stdout);
+		const stdoutP = this.#readStream(this.stdout);
 		const stderrP =
 			stderrMode === "full" && stderrChunks
 				? this.#stderrDone.then(() => new TextDecoder().decode(Buffer.concat(stderrChunks)))
