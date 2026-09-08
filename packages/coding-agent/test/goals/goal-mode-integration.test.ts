@@ -417,6 +417,31 @@ describe("InteractiveMode goal mode integration", () => {
 		expect(content.match(/<\/todo_context>/g)).toHaveLength(1);
 	});
 
+	it("reports dropped todos as not-done in the goal todo context", async () => {
+		// Settle coherence: abandoned items are a visible handoff, never done.
+		await harness.session.setActiveToolsByName(["read", "todo"]);
+		await harness.mode.handleGoalModeCommand("Ship the release");
+		const phases: TodoPhase[] = [
+			{
+				name: "Planning",
+				tasks: [
+					{ content: "Identify gaps", status: "completed" },
+					{ content: "Choose slice", status: "abandoned" },
+					{ content: "Run focused checks", status: "pending" },
+				],
+			},
+		];
+		harness.session.setTodoPhases(phases);
+		const sendCustomMessage = vi.spyOn(harness.session, "sendCustomMessage").mockResolvedValue(false);
+
+		await harness.session.sendGoalModeContext({ deliverAs: "steer" });
+
+		const message = normalizeCustomMessagePayload(sendCustomMessage.mock.calls[0]?.[0]);
+		const content = typeof message.content === "string" ? message.content : "";
+		expect(content).toContain("Overall: 1/3 done, 1 dropped, 1 open.");
+		expect(content).toContain("- [abandoned] Choose slice");
+	});
+
 	it("renders todo context text without raw line/control characters", async () => {
 		await harness.session.setActiveToolsByName(["read", "todo"]);
 		await harness.mode.handleGoalModeCommand("Ship the release");
