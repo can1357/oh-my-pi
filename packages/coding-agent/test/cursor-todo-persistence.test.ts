@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentEvent } from "@oh-my-pi/pi-agent-core";
-import type { AssistantMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, CursorTodoSnapshot } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CursorExecHandlers } from "@oh-my-pi/pi-coding-agent/cursor";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -118,6 +118,8 @@ describe("cursor todo persistence", () => {
 			},
 		]);
 		h.handlers.todoSync(
+			// "blocked" is outside CursorTodoSnapshotItem["status"] but the impl
+			// casts to TodoStatus and preserves blockers; probe that path.
 			{
 				merged: false,
 				todos: [
@@ -125,7 +127,7 @@ describe("cursor todo persistence", () => {
 					{ content: "waiting", status: "blocked" },
 					{ content: "model drop", status: "abandoned" },
 				],
-			},
+			} as unknown as CursorTodoSnapshot,
 			"call-1",
 		);
 		expect(h.current()).toEqual([

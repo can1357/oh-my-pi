@@ -105,9 +105,9 @@ function isAnthropicImageBlock(value: unknown): value is AnthropicImageBlock {
 	const source = block.source;
 	return Boolean(
 		source &&
-			typeof source === "object" &&
-			(source as Record<string, unknown>).type === "base64" &&
-			typeof (source as Record<string, unknown>).data === "string",
+		typeof source === "object" &&
+		(source as Record<string, unknown>).type === "base64" &&
+		typeof (source as Record<string, unknown>).data === "string",
 	);
 }
 

@@ -87,7 +87,7 @@ describe("InteractiveMode tiny-title prewarm", () => {
 	});
 
 	it("prewarms the configured local worker on startup for an unnamed session", async () => {
-		session.settings.set("providers.tinyModel", "lfm2-350m");
+		session.settings.set("providers.tinyModel", "lfm2.5-230m");
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 
 		await mode.init();
@@ -100,11 +100,11 @@ describe("InteractiveMode tiny-title prewarm", () => {
 		setImmediate(immediateFlushed.resolve);
 		await immediateFlushed.promise;
 
-		expect(prewarm).toHaveBeenCalledWith("lfm2-350m");
+		expect(prewarm).toHaveBeenCalledWith("lfm2.5-230m");
 	});
 
 	it("does not prewarm when the session is already named", async () => {
-		session.settings.set("providers.tinyModel", "lfm2-350m");
+		session.settings.set("providers.tinyModel", "lfm2.5-230m");
 		vi.spyOn(mode.sessionManager, "getSessionName").mockReturnValue("resumed-session");
 		const prewarm = vi.spyOn(tinyTitleClient, "prewarm").mockImplementation(() => {});
 

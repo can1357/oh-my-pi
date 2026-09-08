@@ -1,6 +1,7 @@
 // Provider-wire compat for "umans"; regenerated from the frozen census using deployment contract selectors.
 
 provider "umans" {
+	// Replaces resolve.ts's Umans provider baseline for Anthropic built-in tool names.
 	escape-builtin-tool-names #true
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "umans-coder" "umans-kimi-k2.7" {

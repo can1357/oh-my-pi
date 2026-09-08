@@ -7,7 +7,7 @@ function dbThrowing(code: string, message = code): Database {
 		run() {
 			throw Object.assign(new Error(message), { code });
 		},
-	} as Database;
+	} as unknown as Database;
 }
 
 describe("checkpointWal", () => {

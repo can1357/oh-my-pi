@@ -136,6 +136,7 @@ const agentEventTypes = new Set<AgentEvent["type"]>([
 	"message_end",
 	"tool_execution_start",
 	"tool_execution_update",
+	"tool_stream_update",
 	"tool_execution_end",
 ]);
 

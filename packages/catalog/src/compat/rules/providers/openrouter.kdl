@@ -1,8 +1,18 @@
 // Provider-wire compat for "openrouter"; regenerated from the frozen census using deployment contract selectors.
 
 provider "openrouter" {
+	// Replaces the OpenRouter provider wire-model-id dispatch branch.
+	wire-model-id-mode "openrouter"
+	// Replaces the strict-mode provider whitelist entry.
+	supports-strict-mode #true
 	thinking-format "openrouter"
 	thinking-mode "effort"
+	class "anthropic" {
+		// OpenRouter's Anthropic upstream rejects oversized compiled strict-tool
+		// grammars; retry the turn without strict tools. Replaces the
+		// isOpenRouterAnthropicModel checks in the OpenAI request builders.
+		retry-without-strict-on-grammar-error #true
+	}
 	class "minimax" {
 		family "m3" {
 			thinking-efforts "minimal" "low" "medium" "high"

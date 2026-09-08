@@ -15,7 +15,7 @@ import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { createModelManager } from "@oh-my-pi/pi-catalog/model-manager";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
-/** `/models` entry shaped like Copilot under `X-GitHub-Api-Version: 2026-06-01`. */
+/** `/models` entry shaped like Copilot under `X-GitHub-Api-Version: 2026-08-01`. */
 function tieredEntry(id: string, name: string) {
 	return {
 		id,
@@ -87,9 +87,9 @@ describe("#6664 github-copilot reference-less Claude model", () => {
 			const opus5_1m = offline.models.find(m => m.id === "claude-opus-5-1m");
 			expect(opus5).toBeDefined();
 			expect(opus5?.reasoning).toBe(true);
-			expect(opus5?.headers?.["X-GitHub-Api-Version"]).toBe("2026-06-01");
+			expect(opus5?.headers?.["X-GitHub-Api-Version"]).toBe("2026-08-01");
 			expect(opus5_1m).toBeDefined();
-			expect(opus5_1m?.headers?.["X-GitHub-Api-Version"]).toBe("2026-06-01");
+			expect(opus5_1m?.headers?.["X-GitHub-Api-Version"]).toBe("2026-08-01");
 		} finally {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}

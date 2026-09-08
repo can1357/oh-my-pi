@@ -521,9 +521,7 @@ describe("TodoTool operations", () => {
 	});
 
 	it("preserves model-drop provenance when a phase is renamed in /todo edit", () => {
-		const prior: TodoPhase[] = [
-			{ name: "Old phase", tasks: [{ content: "model dropped", status: "abandoned" }] },
-		];
+		const prior: TodoPhase[] = [{ name: "Old phase", tasks: [{ content: "model dropped", status: "abandoned" }] }];
 		const { phases: parsed, errors } = markdownToPhases("# New phase\n- [-] model dropped\n");
 		expect(errors).toEqual([]);
 		const merged = applyUserMarkdownPhases(prior, parsed);
@@ -628,6 +626,8 @@ describe("TodoTool operations", () => {
 
 	it("stamps RPC abandoned provenance without stripping host wire fields", () => {
 		const prior: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "model drop", status: "abandoned" }] }];
+		// Host wire fields (id/notes/details) sit outside TodoItem's type but
+		// must survive the spread passthrough; cast to express the wire shape.
 		const incoming = [
 			{
 				name: "Ship",
@@ -654,7 +654,7 @@ describe("TodoTool operations", () => {
 					},
 				],
 			},
-		] as TodoPhase[];
+		] as unknown as TodoPhase[];
 		const next = applyRpcTodoProvenance(prior, incoming);
 		expect(next).toEqual([
 			{
@@ -683,7 +683,7 @@ describe("TodoTool operations", () => {
 					},
 				],
 			},
-		]);
+		] as unknown as TodoPhase[]);
 	});
 
 	it("stamps droppedBy for slash userAuthored drops but not for model tool drops", () => {
@@ -1084,7 +1084,12 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 	}
 	function innerLines(component: Component): string[] {
 		const lines = Bun.stripANSI(component.render(100).join("\n")).split("\n");
-		return lines.slice(1, -1).map(line => line.replace(/^│/, "").replace(/│\s*$/, "").trim());
+		return lines.slice(1, -1).map(line =>
+			line
+				.replace(/^│/, "")
+				.replace(/│\s*$/, "")
+				.trim(),
+		);
 	}
 	it("collapses untouched phases to a one-line summary while expanding the active phase", async () => {
 		const result = await buildThreePhaseAfterDone();

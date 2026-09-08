@@ -35,6 +35,7 @@
   --accent-cyan: var(--link);
   --bg-hover: var(--surface-2);
   --bg-elevated: var(--surface-2);
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
 
   --radius-sm: 3px;
   --radius-md: 6px;
@@ -60,6 +61,7 @@
     --link: oklch(0.58 0.13 230);
     --success: oklch(0.55 0.13 150);
     --danger: oklch(0.55 0.19 25);
+    --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23555' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
     --warning: oklch(0.6 0.13 85);
   }
 }
@@ -81,6 +83,7 @@
   --link: oklch(0.58 0.13 230);
   --success: oklch(0.55 0.13 150);
   --danger: oklch(0.55 0.19 25);
+  --select-chevron: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23555' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
   --warning: oklch(0.6 0.13 85);
 }
 
@@ -462,6 +465,62 @@
   color: var(--text);
   background: var(--surface);
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.18);
+}
+
+/* Select (native <select>, themed to match RangeControl/Buttons) */
+.stats-select {
+  appearance: none;
+  padding: 6px 28px 6px 12px;
+  font-size: 13px;
+  font-weight: 500;
+  font-family: inherit;
+  color: var(--text);
+  background-color: var(--surface-2);
+  /* Chevron follows theme: light stroke on dark, dark stroke on light. */
+  background-image: var(--select-chevron);
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: border-color 0.15s ease, background-color 0.15s ease;
+  max-width: 100%;
+  text-overflow: ellipsis;
+}
+
+.stats-select:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background-color: var(--bg-hover);
+}
+
+.stats-select:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 1px;
+}
+
+.stats-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Prevent iOS from zooming the viewport when a select receives focus. */
+@media (pointer: coarse) {
+  .stats-select {
+    font-size: 16px;
+  }
+}
+
+/* Dropdown list itself follows the page theme via color-scheme. */
+.stats-select option {
+  background-color: var(--surface);
+  color: var(--text);
+}
+/* Forced-colors (Windows High Contrast) suppresses background images, so the
+   custom chevron vanishes; restore the native indicator instead. */
+@media (forced-colors: active) {
+  .stats-select {
+    appearance: auto;
+  }
 }
 
 /* Sync Button & Container */
@@ -1326,6 +1385,322 @@
 
 @media (prefers-reduced-motion: reduce) {
   .stats-theme-toggle {
+    transition: none;
+  }
+}
+
+/* ==========================================================================
+   Traces (session flamegraph)
+   ========================================================================== */
+.stats-trace-view {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.stats-trace-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.stats-trace-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 12px;
+  color: var(--muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  transition: color 0.14s ease, border-color 0.14s ease;
+}
+
+.stats-trace-back:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.stats-trace-back:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 2px;
+}
+
+.stats-trace-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text);
+  margin: 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats-trace-cwd {
+  font-size: 11px;
+  color: var(--dim);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 3px 10px;
+  max-width: 280px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Summary strip: one bordered card, hairline-divided stat columns. */
+.stats-trace-summary {
+  display: flex;
+  flex-wrap: wrap;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  overflow: hidden;
+}
+
+.stats-trace-summary-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 16px;
+  border-right: 1px solid var(--border);
+  min-width: 76px;
+}
+
+.stats-trace-summary-cell:last-child {
+  border-right: none;
+}
+
+.stats-trace-summary-label {
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.07em;
+  color: var(--dim);
+}
+
+.stats-trace-summary-value {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Toolbar row above the timeline. */
+.stats-trace-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+}
+
+.stats-trace-toolbar-hint {
+  font-size: 10px;
+  color: var(--dim);
+  margin-left: auto;
+}
+
+.stats-trace-input {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--text);
+  font-size: 12px;
+  padding: 6px 10px;
+}
+
+.stats-trace-input:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 1px;
+}
+
+.stats-trace-input::placeholder {
+  color: var(--dim);
+}
+
+.stats-trace-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+  cursor: pointer;
+  user-select: none;
+}
+
+.stats-trace-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  color: var(--muted);
+  cursor: pointer;
+  transition: color 0.14s ease, border-color 0.14s ease;
+}
+
+.stats-trace-icon-btn:hover:not(:disabled) {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+
+.stats-trace-icon-btn:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 2px;
+}
+
+.stats-trace-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: default;
+}
+
+/* Timeline card: minimap + canvas share one bordered surface. */
+.stats-trace-timeline-card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.stats-trace-timeline {
+  position: relative;
+  display: flex;
+  max-height: 560px;
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.stats-trace-canvas {
+  cursor: grab;
+  outline: none;
+  touch-action: none;
+  border-radius: var(--radius-sm);
+}
+
+.stats-trace-canvas:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: 2px;
+}
+
+.stats-trace-canvas:active {
+  cursor: grabbing;
+}
+
+.stats-trace-chevron {
+  display: inline-flex;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  color: var(--muted);
+}
+
+.stats-trace-chevron:hover {
+  color: var(--text);
+}
+
+.stats-trace-gutter-track {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--text);
+}
+
+.stats-trace-gutter-model {
+  font-size: 9px;
+  color: var(--dim);
+}
+
+.stats-trace-gutter-lane {
+  position: absolute;
+  font-size: 8px;
+  color: var(--dim);
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+/* Transcript list under the timeline. */
+.stats-trace-list {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  height: 340px;
+  overflow-y: auto;
+}
+
+.stats-trace-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 28px;
+  width: 100%;
+  padding: 0 12px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  cursor: pointer;
+  transition: background 0.1s ease;
+}
+
+.stats-trace-row:hover {
+  background: var(--bg-hover);
+}
+
+.stats-trace-row:focus-visible {
+  outline: 2px solid var(--link);
+  outline-offset: -2px;
+}
+
+.stats-trace-row[data-selected="true"] {
+  background: var(--accent-muted);
+}
+
+.stats-trace-row-static {
+  cursor: default;
+}
+
+.stats-trace-row-static:hover {
+  background: transparent;
+}
+
+.stats-trace-kind {
+  flex-shrink: 0;
+  width: 58px;
+  font-size: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  border-radius: 3px;
+  padding: 2px 0;
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stats-trace-row-meta {
+  flex-shrink: 0;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--dim);
+  font-variant-numeric: tabular-nums;
+  display: flex;
+  gap: 10px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stats-trace-back,
+  .stats-trace-icon-btn,
+  .stats-trace-row {
     transition: none;
   }
 }

@@ -360,6 +360,7 @@ function resolveBedrockInferenceProfileModelId(
 		...(template.guardrailIdentifier !== undefined ? { guardrailIdentifier: template.guardrailIdentifier } : {}),
 		...(template.guardrailVersion !== undefined ? { guardrailVersion: template.guardrailVersion } : {}),
 		...(template.guardrailTrace !== undefined ? { guardrailTrace: template.guardrailTrace } : {}),
+		...(template.requestMetadata !== undefined ? { requestMetadata: template.requestMetadata } : {}),
 	});
 }
 
@@ -412,24 +413,54 @@ function applyUpstreamRouting(model: Model<Api>, upstream: string): Model<Api> {
 }
 
 const kProviderModelIndex = Symbol("model-resolver.providerIndex");
+const kProviderSpellingIndex = Symbol("model-resolver.providerSpellingIndex");
 type ModelsWithProviderIndex = readonly Model<Api>[] & {
 	[kProviderModelIndex]?: Map<string, Model<Api> | null>;
+	[kProviderSpellingIndex]?: Map<string, Model<Api> | null>;
 };
 
-function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
-	const tagged = availableModels as ModelsWithProviderIndex;
-	const cached = tagged[kProviderModelIndex];
-	if (cached) return cached;
+/**
+ * Collapse the dotted revision spelling aggregators use (`claude-fable-5.1`,
+ * `gpt-4.1`) onto the dashed spelling first-party ids use (`claude-fable-5-1`,
+ * `gpt-4-1`). Only digit-bounded dots are separators; anything else stays
+ * verbatim so unrelated punctuation never coalesces.
+ */
+function revisionSpellingKey(id: string): string {
+	return id.toLowerCase().replace(/(?<=\d)\.(?=\d)/g, "-");
+}
+
+function buildProviderIndex(
+	availableModels: readonly Model<Api>[],
+	idKey: (id: string) => string,
+): Map<string, Model<Api> | null> {
 	const index = new Map<string, Model<Api> | null>();
 	for (const m of availableModels) {
-		const key = `${m.provider.toLowerCase()}\u0000${m.id.toLowerCase()}`;
+		const key = `${m.provider.toLowerCase()}\u0000${idKey(m.id)}`;
 		if (index.has(key)) {
 			index.set(key, null); // ambiguous sentinel; do not overwrite back
 		} else {
 			index.set(key, m);
 		}
 	}
+	return index;
+}
+
+function getProviderModelIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+	const tagged = availableModels as ModelsWithProviderIndex;
+	const cached = tagged[kProviderModelIndex];
+	if (cached) return cached;
+	const index = buildProviderIndex(availableModels, id => id.toLowerCase());
 	tagged[kProviderModelIndex] = index;
+	return index;
+}
+
+/** `provider\0revisionSpellingKey(id)` → model; the dot/dash-tolerant twin of {@link getProviderModelIndex}. */
+function getProviderSpellingIndex(availableModels: readonly Model<Api>[]): Map<string, Model<Api> | null> {
+	const tagged = availableModels as ModelsWithProviderIndex;
+	const cached = tagged[kProviderSpellingIndex];
+	if (cached) return cached;
+	const index = buildProviderIndex(availableModels, revisionSpellingKey);
+	tagged[kProviderSpellingIndex] = index;
 	return index;
 }
 
@@ -517,6 +548,18 @@ export function resolveProviderModelReference(
 	const bedrockInferenceProfile = resolveBedrockInferenceProfileReference(provider, modelId, availableModels);
 	if (bedrockInferenceProfile) {
 		return bedrockInferenceProfile;
+	}
+
+	// Dotted vs dashed revision spelling (`anthropic/claude-fable-5.1` for the
+	// first-party `claude-fable-5-1`). Resolving it here, inside the named
+	// provider, keeps the selector from falling through to the exact-bare-id
+	// phase, where the dotted form is verbatim an aggregator id (OpenRouter's
+	// `anthropic/claude-fable-5.1`) and would silently re-bind the request.
+	const spelled = getProviderSpellingIndex(availableModels).get(
+		`${normalizedProvider}\u0000${revisionSpellingKey(normalizedModelId)}`,
+	);
+	if (spelled) {
+		return spelled;
 	}
 
 	if (normalizedProvider !== "openrouter") {
@@ -700,14 +743,16 @@ function isProviderLockedCrossMatch(pattern: string, matchedModel: Model<Api>): 
 		return false;
 	}
 	const provider = pattern.slice(0, slashIdx).toLowerCase();
-	const modelId = pattern.slice(slashIdx + 1).toLowerCase();
+	const modelId = revisionSpellingKey(pattern.slice(slashIdx + 1));
 	if (matchedModel.provider.toLowerCase() === provider) {
 		return false;
 	}
-	// Case-insensitive on both halves: the surrounding matcher lowercases the
-	// selector before comparing ids, so the lock must not evaporate on case
-	// variance (catalog provider keys are lowercase; model ids may not be).
-	return getBundledModels(provider as GeneratedProvider).some(m => m.id.toLowerCase() === modelId);
+	// Case- and revision-spelling-insensitive on both halves: the surrounding
+	// matcher lowercases the selector before comparing ids, and
+	// resolveProviderModelReference accepts `5.1` for `5-1`, so the lock must
+	// not evaporate on either variance (catalog provider keys are lowercase;
+	// model ids may not be).
+	return getBundledModels(provider as GeneratedProvider).some(m => revisionSpellingKey(m.id) === modelId);
 }
 
 /**
@@ -1088,7 +1133,7 @@ function isSessionInheritedAgentPattern(value: string): boolean {
 }
 
 function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
-	return role === "smol" || role === "slow" || role === "designer";
+	return role === "smol" || role === "slow";
 }
 
 /**
@@ -1602,7 +1647,7 @@ export function resolveRoleSelection(
 	roles: readonly string[],
 	settings: Settings,
 	availableModels: Model<Api>[],
-): { model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
+): { role: string; model: Model<Api>; thinkingLevel?: ConfiguredThinkingLevel } | undefined {
 	const matchPreferences = getModelMatchPreferences(settings);
 	for (const role of roles) {
 		const resolved = resolveModelRoleValue(settings.getModelRole(role), availableModels, {
@@ -1610,7 +1655,7 @@ export function resolveRoleSelection(
 			matchPreferences,
 		});
 		if (resolved.model) {
-			return { model: resolved.model, thinkingLevel: resolved.thinkingLevel };
+			return { role, model: resolved.model, thinkingLevel: resolved.thinkingLevel };
 		}
 	}
 	return undefined;

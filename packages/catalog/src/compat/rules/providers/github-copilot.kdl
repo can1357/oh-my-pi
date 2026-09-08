@@ -1,6 +1,12 @@
 // Provider-wire compat for "github-copilot"; regenerated from the frozen census using deployment contract selectors.
 
 provider "github-copilot" {
+	// Replaces the strict-mode provider whitelist entry.
+	supports-strict-mode #true
+	// Replaces Anthropic request-builder provider checks: Copilot rejects strict
+	// tool schemas and does not support the context-management beta or field.
+	disable-strict-tools #true
+	supports-context-management #false
 	class "anthropic" {
 		revision ">=4 <4.6" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"

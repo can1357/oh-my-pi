@@ -24,11 +24,6 @@ collapse {
 	effort-family "cursor" "gpt-5.6-luna"
 	effort-family "cursor" "gpt-5.6-sol"
 	effort-family "cursor" "gpt-5.6-terra"
-	// Cloud Code Assist advertises `-tiered` aliases beside effort-suffixed
-	// Gemini Flash siblings. Fold each alias into the canonical routed family;
-	// its minimal/off tier is served by the `-low` SKU.
-	effort-family "google-antigravity" "gemini-3.6-flash" "gemini-3.6-flash-tiered"
-	effort-family "google-antigravity" "gemini-3.7-flash" "gemini-3.7-flash-tiered"
 	// `-fast` is a parallel SKU lane. It stays in the logical identifier while
 	// the effort token immediately before it selects the wire sibling.
 	effort-lane-suffix "-fast" "cursor"
@@ -36,22 +31,17 @@ collapse {
 	// Reviewed per-provider variant families: logical models served as
 	// per-effort/thinking sibling wire ids, with explicit routing, ladders,
 	// budgets, and wire facts. Ported verbatim from the legacy hand tables.
-	variant-family "google-antigravity" "gemini-3.6-flash" name="Gemini 3.6 Flash" {
-		members "gemini-3.6-flash-low" "gemini-3.6-flash-medium" "gemini-3.6-flash-high" "gemini-3.6-flash-tiered"
-		route "minimal" "gemini-3.6-flash-low"
-		route "low" "gemini-3.6-flash-low"
-		route "medium" "gemini-3.6-flash-medium"
-		route "high" "gemini-3.6-flash-high"
-		mode "google-level"
-		efforts "minimal" "low" "medium" "high"
-		requires-effort #true
-	}
-	variant-family "google-antigravity" "gemini-3.7-flash" name="Gemini 3.7 Flash" {
-		members "gemini-3.7-flash-low" "gemini-3.7-flash-medium" "gemini-3.7-flash-high" "gemini-3.7-flash-tiered"
-		route "minimal" "gemini-3.7-flash-low"
-		route "low" "gemini-3.7-flash-low"
-		route "medium" "gemini-3.7-flash-medium"
-		route "high" "gemini-3.7-flash-high"
+	//
+	// Cloud Code Assist serves every Gemini Flash generation from 3.6 on as
+	// `-low`/`-medium`/`-high` thinking-level SKUs plus a `-tiered` alias. One
+	// template per provider covers each revision discovery advertises; the
+	// minimal tier is served by the `-low` SKU (Gemini 3.7+ rejects MINIMAL).
+	variant-family "google-antigravity" "gemini-{rev}-flash" name="Gemini {rev} Flash" revision=">=3.6" {
+		members "gemini-{rev}-flash-low" "gemini-{rev}-flash-medium" "gemini-{rev}-flash-high" "gemini-{rev}-flash-tiered"
+		route "minimal" "gemini-{rev}-flash-low"
+		route "low" "gemini-{rev}-flash-low"
+		route "medium" "gemini-{rev}-flash-medium"
+		route "high" "gemini-{rev}-flash-high"
 		mode "google-level"
 		efforts "minimal" "low" "medium" "high"
 		requires-effort #true
@@ -143,22 +133,12 @@ collapse {
 		efforts "minimal" "low" "medium" "high"
 		preserve-absent-effort-routes #true
 	}
-	variant-family "google-gemini-cli" "gemini-3.6-flash" name="Gemini 3.6 Flash" {
-		members "gemini-3.6-flash-low" "gemini-3.6-flash-medium" "gemini-3.6-flash-high" "gemini-3.6-flash-tiered"
-		route "minimal" "gemini-3.6-flash-low"
-		route "low" "gemini-3.6-flash-low"
-		route "medium" "gemini-3.6-flash-medium"
-		route "high" "gemini-3.6-flash-high"
-		mode "google-level"
-		efforts "minimal" "low" "medium" "high"
-		requires-effort #true
-	}
-	variant-family "google-gemini-cli" "gemini-3.7-flash" name="Gemini 3.7 Flash" {
-		members "gemini-3.7-flash-low" "gemini-3.7-flash-medium" "gemini-3.7-flash-high" "gemini-3.7-flash-tiered"
-		route "minimal" "gemini-3.7-flash-low"
-		route "low" "gemini-3.7-flash-low"
-		route "medium" "gemini-3.7-flash-medium"
-		route "high" "gemini-3.7-flash-high"
+	variant-family "google-gemini-cli" "gemini-{rev}-flash" name="Gemini {rev} Flash" revision=">=3.6" {
+		members "gemini-{rev}-flash-low" "gemini-{rev}-flash-medium" "gemini-{rev}-flash-high" "gemini-{rev}-flash-tiered"
+		route "minimal" "gemini-{rev}-flash-low"
+		route "low" "gemini-{rev}-flash-low"
+		route "medium" "gemini-{rev}-flash-medium"
+		route "high" "gemini-{rev}-flash-high"
 		mode "google-level"
 		efforts "minimal" "low" "medium" "high"
 		requires-effort #true

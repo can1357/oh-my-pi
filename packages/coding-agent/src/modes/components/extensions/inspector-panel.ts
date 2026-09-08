@@ -329,8 +329,9 @@ export class InspectorPanel implements Component {
 		if (data.condition) this.#pushLabeledList(surface, "condition", data.condition, width);
 		if (data.astCondition) this.#pushLabeledList(surface, "ast", data.astCondition, width);
 		if (data.scope) this.#pushLabeledList(surface, "scope", data.scope, width);
+		if (data.agents) this.#pushLabeledList(surface, "agents", data.agents, width);
 		if (data.interruptMode) this.#pushLabeled(surface, "interrupt", data.interruptMode, width, "dim");
-		if (!data.alwaysApply && !data.globs && !data.condition && !data.astCondition) {
+		if (!data.alwaysApply && !data.globs && !data.condition && !data.astCondition && !data.agents) {
 			surface.push(theme.fg("dim", "  (no apply conditions)"));
 		}
 		surface.push("");
@@ -588,7 +589,7 @@ export class InspectorPanel implements Component {
 
 	#highlightMarkdown(line: string): string {
 		if (/^#{1,6}\s/.test(line)) return theme.bold(theme.fg("accent", line));
-		if (/^```/.test(line)) return theme.fg("dim", line);
+		if (line.startsWith("```")) return theme.fg("dim", line);
 		if (/^[\s]*[-*+]\s/.test(line)) return line.replace(/^([\s]*[-*+]\s)/, theme.fg("accent", "$1"));
 		if (/^[\s]*\d+\.\s/.test(line)) return line.replace(/^([\s]*\d+\.\s)/, theme.fg("accent", "$1"));
 		return line;
