@@ -26,6 +26,29 @@ describe("worker selector dispatch", () => {
 		expect(process.exitCode).toBe(1);
 		expect(stderr).toHaveBeenCalledWith("Error: unknown worker selector: __omp_worker_does_not_exist\n");
 	});
+	it("declares workerHostEntry in process entry before dispatching worker selector", async () => {
+		const repoRoot = path.resolve(__dirname, "../../..");
+		const proc = Bun.spawn({
+			cmd: [
+				process.execPath,
+				"-e",
+				`
+				import { workerHostEntry } from "./packages/utils/src/worker-host.ts";
+				await import("./packages/coding-agent/src/cli.ts");
+				process.stdout.write("ENTRY=" + (workerHostEntry() ?? "null"));
+				process.exit(0);
+				`,
+				"__omp_worker_does_not_exist",
+			],
+			cwd: repoRoot,
+			env: { ...process.env, PI_COMPILED: "true" },
+			stdout: "pipe",
+			stderr: "ignore",
+		});
+		const stdout = await new Response(proc.stdout).text();
+		expect(stdout).toContain("ENTRY=");
+		expect(stdout).not.toBe("ENTRY=null");
+	});
 
 	it("leaves normal root flags untouched", async () => {
 		const stdout = vi.spyOn(process.stdout, "write").mockImplementation(() => true);
