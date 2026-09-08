@@ -1,4 +1,5 @@
 import { describe, expect, it } from "bun:test";
+import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 
 const BASE_URL = "https://copilot.example.com";
@@ -113,6 +114,54 @@ describe("github-copilot multi-account discovery failures", () => {
 		expect(model.oauthCredentialIds).toEqual([101, 102]);
 	});
 
+	it("preserves known numeric limits when a sibling omits them", async () => {
+		const options = githubCopilotModelManagerOptions({
+			baseUrl: BASE_URL,
+			resolveAccounts: async () => [
+				{ apiKey: "account-1", accountId: "acc-1", credentialId: 101 },
+				{ apiKey: "account-2", accountId: "acc-2", credentialId: 102 },
+			],
+			fetch: async (_input, init) => {
+				const auth = new Headers(init?.headers).get("Authorization");
+				if (auth === "Bearer account-1") {
+					return Response.json({
+						data: [
+							{
+								id: "reference-less-model",
+								capabilities: {
+									type: "chat",
+									limits: {
+										max_context_window_tokens: 32_000,
+										max_output_tokens: 4_000,
+									},
+								},
+							},
+						],
+					});
+				}
+				return Response.json({
+					data: [
+						{
+							id: "reference-less-model",
+							capabilities: {
+								type: "chat",
+								// limits omitted by sibling
+							},
+						},
+					],
+				});
+			},
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models).toHaveLength(1);
+		const model = models![0];
+		expect(model.id).toBe("reference-less-model");
+		expect(model.contextWindow).toBe(32_000);
+		expect(model.maxTokens).toBe(4_000);
+		expect(model.oauthCredentialIds).toEqual([101, 102]);
+	});
+
 	it("updates cacheProviderId to match the refreshed primary account key after account resolution", async () => {
 		const oldKey = JSON.stringify({ token: "old-token" });
 		const refreshedKey = JSON.stringify({ token: "refreshed-token" });
@@ -126,6 +175,28 @@ describe("github-copilot multi-account discovery failures", () => {
 		const initialCacheId = options.cacheProviderId;
 		await options.fetchDynamicModels?.();
 		expect(options.cacheProviderId).not.toBe(initialCacheId);
+	});
+
+	it("scopes cacheProviderId to the complete account set during discovery", async () => {
+		const options = githubCopilotModelManagerOptions({
+			baseUrl: BASE_URL,
+			accountIdentities: ["acc-1"],
+			resolveAccounts: async () => [
+				{ apiKey: "acc-1-key", accountId: "acc-1", credentialId: 101 },
+				{ apiKey: "acc-2-key", accountId: "acc-2", credentialId: 102 },
+			],
+			fetch: async () => Response.json({ data: [] }),
+		});
+
+		const initialCacheId = options.cacheProviderId;
+		await options.fetchDynamicModels?.();
+		expect(options.cacheProviderId).not.toBe(initialCacheId);
+		expect(options.cacheProviderId).toBe(
+			resolveModelCacheProviderId("github-copilot", {
+				baseUrl: BASE_URL,
+				accountIdentities: ["acc-1", "acc-2"],
+			}),
+		);
 	});
 
 	it("preserves OAuth grants in a mixed union with non-OAuth accounts", async () => {
@@ -162,7 +233,7 @@ describe("github-copilot multi-account discovery failures", () => {
 		expect(byId.get("shared-model")?.oauthCredentialIds).toEqual([101]);
 		// OAuth-only model has credentialId from the OAuth account
 		expect(byId.get("oauth-only-model")?.oauthCredentialIds).toEqual([101]);
-		// Env-only model has empty array (not undefined), signaling no OAuth account grants it
-		expect(byId.get("env-only-model")?.oauthCredentialIds).toEqual([]);
+		// Env-only model cannot subsequently resolve credentials in an OAuth-enabled environment and is omitted
+		expect(byId.get("env-only-model")).toBeUndefined();
 	});
 });

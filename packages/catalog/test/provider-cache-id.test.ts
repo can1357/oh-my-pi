@@ -64,4 +64,15 @@ test("GitHub Copilot cache scope uses accountId when present and falls back to t
 	expect(resolveModelCacheProviderId("github-copilot", { apiKey: anonymous1 })).not.toBe(
 		resolveModelCacheProviderId("github-copilot", { apiKey: anonymous2 }),
 	);
+
+	const singleAccount = resolveModelCacheProviderId("github-copilot", { accountIdentities: ["user-42"] });
+	expect(singleAccount).toBe(resolveModelCacheProviderId("github-copilot", { apiKey: key1 }));
+
+	const multiAccount = resolveModelCacheProviderId("github-copilot", { accountIdentities: ["user-42", "user-99"] });
+	expect(multiAccount).not.toBe(singleAccount);
+
+	const multiAccountReordered = resolveModelCacheProviderId("github-copilot", {
+		accountIdentities: ["user-99", "user-42"],
+	});
+	expect(multiAccountReordered).toBe(multiAccount);
 });

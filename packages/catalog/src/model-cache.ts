@@ -42,7 +42,7 @@ interface TableInfoRow {
 	name: string;
 }
 
-interface CacheEntry<TApi extends Api = Api> {
+export interface CacheEntry<TApi extends Api = Api> {
 	models: ModelSpec<TApi>[];
 	fresh: boolean;
 	authoritative: boolean;

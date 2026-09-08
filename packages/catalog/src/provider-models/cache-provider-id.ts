@@ -7,6 +7,7 @@ import {
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
 	baseUrl?: string;
+	accountIdentities?: readonly string[];
 }
 
 const CREDENTIAL_SCOPED_MODEL_CACHE_PROVIDERS: Readonly<Record<string, true>> = {
@@ -107,7 +108,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// v4: refetch catalogs without per-model OAuth grants before allowing
 			// account rotation to use them.
 			const parsed = options.apiKey ? parseGitHubCopilotApiKey(options.apiKey) : undefined;
-			const identity = parsed?.accountId || parsed?.accessToken || options.apiKey || "";
+			const defaultIdentity = parsed?.accountId || parsed?.accessToken || options.apiKey || "";
+			const identity =
+				options.accountIdentities && options.accountIdentities.length > 0
+					? Array.from(new Set(options.accountIdentities)).sort().join(",")
+					: defaultIdentity;
 			const baseUrl =
 				options.baseUrl ??
 				(parsed?.apiEndpoint ||

@@ -6070,6 +6070,7 @@ export interface GithubCopilotModelManagerConfig {
 	apiKey?: string;
 	baseUrl?: string;
 	fetch?: FetchImpl;
+	accountIdentities?: readonly string[];
 	/**
 	 * Resolve every configured Copilot OAuth account for discovery. Copilot
 	 * inference round-robins across sibling accounts, so the authoritative
@@ -6467,28 +6468,30 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					// Retain only the configured endpoint so inference can route using
 					// the selected credential (while respecting explicit proxy URLs).
 					model.baseUrl = configuredBaseUrl;
-					if (hasAnyCredentialIds) {
-						model.oauthCredentialIds = credentialId !== undefined ? [credentialId] : [];
+					if (credentialId !== undefined) {
+						model.oauthCredentialIds = [credentialId];
 					}
 					byId.set(model.id, model);
 				} else {
-					if (hasAnyCredentialIds && credentialId !== undefined) {
+					if (credentialId !== undefined) {
 						existing.oauthCredentialIds ??= [];
 						if (!existing.oauthCredentialIds.includes(credentialId)) {
 							existing.oauthCredentialIds.push(credentialId);
 						}
 					}
 					// Reconcile capabilities conservatively so routing to either account
-					// respects the lowest common limits and input modalities.
+					// respects the lowest common limits and input modalities. Keep
+					// the minimum of reported numeric limits rather than letting an
+					// omitted value (null) erase a concrete constraint.
 					if (typeof existing.contextWindow === "number" && typeof model.contextWindow === "number") {
 						existing.contextWindow = Math.min(existing.contextWindow, model.contextWindow);
-					} else if (model.contextWindow === null) {
-						existing.contextWindow = null;
+					} else if (typeof model.contextWindow === "number") {
+						existing.contextWindow = model.contextWindow;
 					}
 					if (typeof existing.maxTokens === "number" && typeof model.maxTokens === "number") {
 						existing.maxTokens = Math.min(existing.maxTokens, model.maxTokens);
-					} else if (model.maxTokens === null) {
-						existing.maxTokens = null;
+					} else if (typeof model.maxTokens === "number") {
+						existing.maxTokens = model.maxTokens;
 					}
 					if (Array.isArray(existing.input) && Array.isArray(model.input)) {
 						const otherInput = new Set(model.input);
@@ -6497,12 +6500,23 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 				}
 			}
 		}
+		if (hasAnyCredentialIds) {
+			for (const [id, model] of byId) {
+				if (!model.oauthCredentialIds || model.oauthCredentialIds.length === 0) {
+					byId.delete(id);
+				}
+			}
+		}
 		return [...byId.values()];
 	};
 
 	const managerOptions: ModelManagerOptions<Api> = {
 		providerId: "github-copilot",
-		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
+		cacheProviderId: resolveModelCacheProviderId("github-copilot", {
+			apiKey: rawApiKey,
+			baseUrl,
+			accountIdentities: config?.accountIdentities,
+		}),
 		dropCachedModelIdsOnStaticMismatch: COPILOT_CACHE_INVALIDATED_MODEL_IDS,
 		// The discovered set is already filtered to each account's granted models
 		// (see isCopilotModelAvailableForAccount), so treat it as the complete
@@ -6525,12 +6539,15 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 							if (!accounts || accounts.length === 0) {
 								return null;
 							}
-							if (accounts[0]?.apiKey) {
-								managerOptions.cacheProviderId = resolveModelCacheProviderId("github-copilot", {
-									apiKey: accounts[0].apiKey,
-									baseUrl,
-								});
-							}
+							const accountIdentities = accounts.map(account => {
+								if (account.accountId) return account.accountId;
+								const parsed = parseGitHubCopilotApiKey(account.apiKey);
+								return parsed.accountId || parsed.accessToken || account.apiKey;
+							});
+							managerOptions.cacheProviderId = resolveModelCacheProviderId("github-copilot", {
+								baseUrl,
+								accountIdentities,
+							});
 							const results = await Promise.all(
 								accounts.map(async account => ({
 									accountId: account.accountId,

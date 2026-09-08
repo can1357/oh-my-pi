@@ -19,6 +19,11 @@ export type ModelManagerConfig = {
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;
 	/**
+	 * Account identities contributing to discovery for credential-scoped providers
+	 * with multi-account support (e.g. github-copilot).
+	 */
+	accountIdentities?: readonly string[];
+	/**
 	 * github-copilot: resolve every configured Copilot OAuth account so
 	 * discovery can union each account's granted models before the authoritative
 	 * prune. Copilot inference round-robins across sibling accounts, so the

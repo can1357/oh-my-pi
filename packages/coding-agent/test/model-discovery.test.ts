@@ -6,7 +6,7 @@ import * as path from "node:path";
 import { type Api, Effort, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
+import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { resolveModelCacheProviderId, resolveOllamaModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import type { ModelSpec, OpenAICompat } from "@oh-my-pi/pi-catalog/types";
@@ -18,6 +18,7 @@ import {
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resolveGitHubCopilotDiscoveryAccounts } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -746,7 +747,7 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(networkRequests).toBe(0);
 	});
 
-	test("github-copilot retains the previous authoritative catalog when a subsequent refresh fails", async () => {
+	test("github-copilot retains the previous authoritative catalog when a subsequent refresh fails and does not renew cache TTL", async () => {
 		await authStorage.set("github-copilot", [
 			{
 				type: "oauth",
@@ -780,7 +781,17 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(initialModels.map(m => m.id)).toEqual(["claude-sonnet-4.6"]);
 		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
 
-		// Now fail subsequent refresh
+		const initialCache = readModelCache(
+			resolveModelCacheProviderId("github-copilot", { accountIdentities: ["account-user"] }),
+			24 * 60 * 60 * 1000,
+			Date.now,
+			cacheDbPath,
+		);
+		expect(initialCache).not.toBeNull();
+		const initialUpdatedAt = initialCache!.updatedAt;
+
+		// Now sleep briefly and fail subsequent refresh
+		await Bun.sleep(10);
 		failFetch = true;
 		await registry.refreshProvider("github-copilot", "online");
 
@@ -788,6 +799,236 @@ describe("ModelRegistry runtime discovery", () => {
 		const modelsAfterFailure = getModelsForProvider(registry, "github-copilot");
 		expect(modelsAfterFailure.map(m => m.id)).toEqual(["claude-sonnet-4.6"]);
 		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+
+		// Cache must preserve prior updatedAt and NOT renew with current time
+		const cacheAfterFailure = readModelCache(
+			resolveModelCacheProviderId("github-copilot", { accountIdentities: ["account-user"] }),
+			24 * 60 * 60 * 1000,
+			Date.now,
+			cacheDbPath,
+		);
+		expect(cacheAfterFailure).not.toBeNull();
+		expect(cacheAfterFailure!.updatedAt).toBe(initialUpdatedAt);
+	});
+
+	test("github-copilot preserves authoritative cache when /models fails but models.dev succeeds", async () => {
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "account-token",
+				refresh: "account-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "account-user",
+			},
+		]);
+
+		let failCopilotFetch = false;
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async (input, _init) => {
+				const url = String(input);
+				if (url === "https://api.github.com/copilot_internal/user") {
+					return Response.json({ endpoints: { api: "https://api.githubcopilot.com" } });
+				}
+				if (url.includes("models.dev")) {
+					return Response.json([
+						{
+							id: "models-dev-supplementary-model",
+							name: "Models Dev Model",
+						},
+					]);
+				}
+				if (url.endsWith("/models")) {
+					if (failCopilotFetch) {
+						return new Response(null, { status: 503 });
+					}
+					return Response.json({
+						data: [
+							{
+								id: "claude-sonnet-4.6",
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 128_000, max_output_tokens: 16_000 },
+								},
+							},
+						],
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			},
+		});
+
+		await registry.refreshProvider("github-copilot", "online");
+		const initialModels = getModelsForProvider(registry, "github-copilot");
+		expect(initialModels.map(m => m.id)).toEqual(["claude-sonnet-4.6"]);
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+
+		const initialCache = readModelCache(
+			resolveModelCacheProviderId("github-copilot", { accountIdentities: ["account-user"] }),
+			24 * 60 * 60 * 1000,
+			Date.now,
+			cacheDbPath,
+		);
+		expect(initialCache).not.toBeNull();
+		const initialUpdatedAt = initialCache!.updatedAt;
+
+		// Sleep briefly and fail subsequent /models fetch, while models.dev still succeeds
+		await Bun.sleep(10);
+		failCopilotFetch = true;
+		await registry.refreshProvider("github-copilot", "online");
+
+		// Must retain previous authoritative models instead of overwriting cache with non-authoritative models.dev merge
+		const modelsAfterFailure = getModelsForProvider(registry, "github-copilot");
+		expect(modelsAfterFailure.map(m => m.id)).toEqual(["claude-sonnet-4.6"]);
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+
+		// Cache must preserve prior updatedAt
+		const cacheAfterFailure = readModelCache(
+			resolveModelCacheProviderId("github-copilot", { accountIdentities: ["account-user"] }),
+			24 * 60 * 60 * 1000,
+			Date.now,
+			cacheDbPath,
+		);
+		expect(cacheAfterFailure).not.toBeNull();
+		expect(cacheAfterFailure!.updatedAt).toBe(initialUpdatedAt);
+	});
+
+	test("resolveGitHubCopilotDiscoveryAccounts does not combine fallback key with refreshed OAuth accounts", async () => {
+		authStorage.close();
+		authStorage = await AuthStorage.create(":memory:", {
+			refreshOAuthCredential: async (_provider, _credentialId, credential): Promise<OAuthCredentials> => {
+				return {
+					...credential,
+					access: "refreshed-oauth-token",
+					expires: Date.now() + 3_600_000,
+				};
+			},
+		});
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "expired-oauth-token",
+				refresh: "valid-oauth-refresh",
+				expires: Date.now() - 60_000,
+				accountId: "oauth-user",
+			},
+		]);
+
+		const accounts = await resolveGitHubCopilotDiscoveryAccounts(authStorage, "env-copilot-token");
+		expect(accounts).not.toBeNull();
+		// Should only contain the refreshed OAuth account, NOT combining the fallback key
+		expect(accounts).toHaveLength(1);
+		expect(accounts![0].accountId).toBe("oauth-user");
+		expect(JSON.parse(accounts![0].apiKey).token).toBe("refreshed-oauth-token");
+	});
+
+	test("github-copilot online-if-uncached invalidates cache when an account is added or removed", async () => {
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "account-1-token",
+				refresh: "account-1-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "user-1",
+			},
+		]);
+
+		let modelFetchCalls = 0;
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async (input, init) => {
+				const url = String(input);
+				if (url === "https://api.github.com/copilot_internal/user") {
+					return Response.json({ endpoints: { api: "https://api.githubcopilot.com" } });
+				}
+				if (url.includes("models.dev")) {
+					return Response.json([]);
+				}
+				if (url.endsWith("/models")) {
+					modelFetchCalls++;
+					const auth = new Headers(init?.headers).get("Authorization");
+					if (auth === "Bearer account-2-token") {
+						return Response.json({
+							data: [{ id: "model-account-2", capabilities: { type: "chat" } }],
+						});
+					}
+					return Response.json({
+						data: [{ id: "model-account-1", capabilities: { type: "chat" } }],
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			},
+		});
+
+		// Initial discovery with only account 1
+		await registry.refreshProvider("github-copilot", "online-if-uncached");
+		expect(modelFetchCalls).toBe(1);
+		expect(getModelsForProvider(registry, "github-copilot").map(m => m.id)).toEqual(["model-account-1"]);
+
+		// Second refresh with unchanged accounts uses fresh cache
+		await registry.refreshProvider("github-copilot", "online-if-uncached");
+		expect(modelFetchCalls).toBe(1);
+
+		// Add account 2 (account 1 remains first)
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "account-1-token",
+				refresh: "account-1-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "user-1",
+			},
+			{
+				type: "oauth",
+				access: "account-2-token",
+				refresh: "account-2-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "user-2",
+			},
+		]);
+
+		// online-if-uncached must NOT reuse the fresh cache for account 1 alone
+		await registry.refreshProvider("github-copilot", "online-if-uncached");
+		expect(modelFetchCalls).toBe(3); // +2 for querying both accounts
+		const unionedIds = getModelsForProvider(registry, "github-copilot")
+			.map(m => m.id)
+			.sort();
+		expect(unionedIds).toEqual(["model-account-1", "model-account-2"]);
+
+		// Now remove account 2: the prior [user-1, user-2] cache cannot be reused
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "account-1-token",
+				refresh: "account-1-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "user-1",
+			},
+		]);
+
+		// online-if-uncached scopes to [user-1] and prunes model-account-2 immediately
+		await registry.refreshProvider("github-copilot", "online-if-uncached");
+		expect(getModelsForProvider(registry, "github-copilot").map(m => m.id)).toEqual(["model-account-1"]);
+
+		// Add a previously unseen account 3 while account 1 remains first
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "account-1-token",
+				refresh: "account-1-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "user-1",
+			},
+			{
+				type: "oauth",
+				access: "account-3-token",
+				refresh: "account-3-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "user-3",
+			},
+		]);
+
+		// Uncached namespace [user-1, user-3] forces endpoint fetch
+		await registry.refreshProvider("github-copilot", "online-if-uncached");
+		expect(modelFetchCalls).toBe(5); // +2 for querying account 1 and account 3
 	});
 
 	test("github-copilot discovery honors a runtime key instead of stored OAuth accounts", async () => {

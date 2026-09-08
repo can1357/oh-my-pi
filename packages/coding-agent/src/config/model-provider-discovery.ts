@@ -208,11 +208,39 @@ export async function resolveGitHubCopilotDiscoveryAccounts(
 			credentialId: access.credentialId,
 		});
 	}
-	if (
-		accounts.length === 0 ||
-		(!matchingCredential && !accesses.some(access => access.ok && access.accessToken === resolvedToken))
-	) {
+	if (accounts.length === 0) {
 		accounts.push({ apiKey: resolvedApiKey, accountId: matchingCredential?.accountId });
 	}
 	return accounts;
+}
+
+/**
+ * Resolve stable account identities for every configured GitHub Copilot OAuth
+ * account and fallback API key. Used to scope the Copilot cache namespace so
+ * adding or removing accounts invalidates the cache instead of reusing a
+ * stale single-account snapshot.
+ */
+export function resolveGitHubCopilotAccountIdentities(authStorage: AuthStorage, resolvedApiKey?: string): string[] {
+	const providerEntry = authStorage.getAll()["github-copilot"];
+	const entries = providerEntry ? (Array.isArray(providerEntry) ? providerEntry : [providerEntry]) : [];
+	const identities = new Set<string>();
+
+	for (const entry of entries) {
+		if (entry.type === "oauth") {
+			const id = entry.accountId || entry.access;
+			if (id) identities.add(id);
+		} else if (entry.type === "api_key") {
+			const parsed = parseGitHubCopilotApiKey(entry.key);
+			const id = parsed.accountId || parsed.accessToken || entry.key;
+			if (id) identities.add(id);
+		}
+	}
+
+	if (resolvedApiKey) {
+		const parsed = parseGitHubCopilotApiKey(resolvedApiKey);
+		const id = parsed.accountId || parsed.accessToken || resolvedApiKey;
+		if (id) identities.add(id);
+	}
+
+	return Array.from(identities).sort();
 }

@@ -108,6 +108,7 @@ import {
 	type ProviderDiscoveryState,
 	RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS,
 	resolveCodexDiscoveryAccounts,
+	resolveGitHubCopilotAccountIdentities,
 	resolveGitHubCopilotDiscoveryAccounts,
 	SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
 	STARTUP_MODEL_CACHE_PROVIDER_IDS,
@@ -972,7 +973,9 @@ export class ModelRegistry {
 			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
 			this.#providerOverrides.get(providerId)?.baseUrl ??
 			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined);
-		return resolveModelCacheProviderId(providerId, { baseUrl });
+		const accountIdentities =
+			providerId === "github-copilot" ? resolveGitHubCopilotAccountIdentities(this.authStorage) : undefined;
+		return resolveModelCacheProviderId(providerId, { baseUrl, accountIdentities });
 	}
 
 	#loadCachedStandardProviderModels(providerIds: readonly string[]): {
@@ -1900,6 +1903,7 @@ export class ModelRegistry {
 					// just the peeked one (see resolveGitHubCopilotDiscoveryAccounts).
 					...(descriptor.providerId === "github-copilot"
 						? {
+								accountIdentities: resolveGitHubCopilotAccountIdentities(this.authStorage, apiKey),
 								resolveAccounts: () =>
 									resolveGitHubCopilotDiscoveryAccounts(
 										this.authStorage,

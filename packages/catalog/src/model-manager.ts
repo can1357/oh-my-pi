@@ -335,7 +335,10 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		: mergedWithModelsDev;
 	const mergedModels = mergeDynamicModels(mergedWithCatalogMetrics, dynamicModels);
 	const retainAuthoritativeCache =
-		dynamicModelsAuthoritative && (cache?.authoritative ?? false) && !anyRemoteFetchSucceeded;
+		dynamicModelsAuthoritative &&
+		cacheFingerprintMatches &&
+		(cache?.authoritative ?? false) &&
+		!dynamicFetchSucceeded;
 	const models = collapseBuiltVariants(
 		authoritativeDynamicFetchSucceeded
 			? retainModelIds(mergedModels, dynamicModels)
@@ -347,7 +350,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
 	if (shouldFetchFromNetwork) {
 		const writeCacheProviderId = options.cacheProviderId ?? cacheProviderId;
-		if (anyRemoteFetchSucceeded) {
+		if (anyRemoteFetchSucceeded && !retainAuthoritativeCache) {
 			writeModelCache(
 				writeCacheProviderId,
 				remoteUpdatedAt!,
@@ -383,7 +386,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 				options.dropCachedModelIdsOnStaticMismatch,
 			);
 			const isAuthoritativePreserved =
-				dynamicModelsAuthoritative && (latestCache?.authoritative ?? cache?.authoritative ?? false);
+				dynamicModelsAuthoritative &&
+				cacheFingerprintMatches &&
+				(latestCache?.authoritative ?? cache?.authoritative ?? false);
 			const latestCacheModels =
 				additiveStaticModelIds && !isAuthoritativePreserved
 					? preparedLatestCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
@@ -393,16 +398,19 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 					? latestCacheModels
 					: mergeDynamicModels(mergeDynamicModels(staticModels, latestCacheModels), modelsDevModels),
 			);
-			writeModelCache(
-				writeCacheProviderId,
-				now(),
-				fallbackSnapshotModels,
-				isAuthoritativePreserved,
-				staticFingerprint,
-				dbPath,
-				staticModels,
-				restorableHeaderFallback,
-			);
+			const priorUpdatedAt = latestCache?.updatedAt ?? cache?.updatedAt;
+			if (!isAuthoritativePreserved || writeCacheProviderId !== cacheProviderId || !latestCache?.authoritative) {
+				writeModelCache(
+					writeCacheProviderId,
+					isAuthoritativePreserved && priorUpdatedAt !== undefined ? priorUpdatedAt : now(),
+					fallbackSnapshotModels,
+					isAuthoritativePreserved,
+					staticFingerprint,
+					dbPath,
+					staticModels,
+					restorableHeaderFallback,
+				);
+			}
 		}
 	}
 	const cacheContributed = cacheModels.length > 0;
@@ -418,9 +426,9 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		stale: !resolutionAuthoritative,
 		source,
 		authoritative: resolutionAuthoritative || retainAuthoritativeCache,
-		...(remoteUpdatedAt !== undefined
+		...(remoteUpdatedAt !== undefined && !retainAuthoritativeCache
 			? { updatedAt: remoteUpdatedAt }
-			: cacheContributed && cache
+			: (retainAuthoritativeCache || cacheContributed) && cache
 				? { updatedAt: cache.updatedAt }
 				: {}),
 	};
