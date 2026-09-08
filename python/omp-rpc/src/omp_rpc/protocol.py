@@ -966,9 +966,13 @@ class ServerFeatures:
     `active_turn_steering == 1`: `steer` honors `active_turn_only` and answers
     with `accepted`; `abort` accepts `clear_queue=True`; and `clear_queue` is
     available with `for_interrupt`.
+
+    `prompt_result_verdict == 1`: asynchronously scheduled prompts emit a
+    correlated `prompt_result` with their final `agentInvoked` verdict.
     """
 
     active_turn_steering: Literal[1] | None = None
+    prompt_result_verdict: Literal[1] | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -1694,8 +1698,19 @@ def parse_notification(payload: JsonObject) -> RpcNotification:
             and not isinstance(raw_steering, bool)
             and raw_steering == 1
         )
+        raw_prompt_verdict = (
+            raw_features.get("promptResultVerdict")
+            if isinstance(raw_features, dict)
+            else None
+        )
+        advertises_prompt_result_verdict = (
+            isinstance(raw_prompt_verdict, int)
+            and not isinstance(raw_prompt_verdict, bool)
+            and raw_prompt_verdict == 1
+        )
         features = ServerFeatures(
-            active_turn_steering=1 if advertises_active_turn_steering else None
+            active_turn_steering=1 if advertises_active_turn_steering else None,
+            prompt_result_verdict=1 if advertises_prompt_result_verdict else None,
         )
         return ReadyEvent(
             protocol_version=_optional_int(payload, "protocolVersion"),

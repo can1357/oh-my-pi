@@ -528,6 +528,9 @@ class RpcClient:
         self._agent_run_request_ids: list[tuple[str, str]] = []
         self._unreserved_agent_run_request_ids: list[tuple[str, str]] = []
         self._sent_agent_run_request_ids: set[str] = set()
+        self._agent_invoked_request_ids: set[str] = set()
+        self._active_agent_run_request_id: str | None = None
+        self._agent_run_active = False
         self._agent_start_pending = threading.Event()
         self._awaited_prompt_result_ids: set[str] = set()
         self._completed_prompt_result_ids: set[str] = set()
@@ -617,6 +620,9 @@ class RpcClient:
         self._agent_run_request_ids = []
         self._unreserved_agent_run_request_ids = []
         self._sent_agent_run_request_ids = set()
+        self._agent_invoked_request_ids = set()
+        self._active_agent_run_request_id = None
+        self._agent_run_active = False
         self._agent_start_pending.clear()
         self._awaited_prompt_result_ids = set()
         self._completed_prompt_result_ids = set()
@@ -1413,7 +1419,10 @@ class RpcClient:
                 # still become the command that starts the turn if the earlier
                 # prompt resolves as local-only. Keep it correlated until that
                 # reservation either starts or is released.
-                if entry is not None and self._agent_run_request_ids:
+                if entry is not None and (
+                    self.server_features.prompt_result_verdict == 1
+                    or self._agent_run_request_ids
+                ):
                     self._unreserved_agent_run_request_ids.append(entry)
                 return False
             self._scheduled_agent_runs += 1
@@ -1425,17 +1434,32 @@ class RpcClient:
     def _mark_agent_run_started(self) -> None:
         try:
             with self._event_condition:
+                self._agent_run_active = True
                 if self._agent_run_request_ids:
                     request_id, _ = self._agent_run_request_ids.pop(0)
                     self._sent_agent_run_request_ids.discard(request_id)
-                    # Commands submitted behind this reservation share the run that
-                    # just started; they no longer need to inherit its reservation.
+                    self._active_agent_run_request_id = (
+                        None
+                        if request_id in self._agent_invoked_request_ids
+                        else request_id
+                    )
+                    self._agent_invoked_request_ids.discard(request_id)
+                    # Capability-aware servers report exactly when an accepted
+                    # prompt finishes preprocessing and joins an active run.
+                    # Legacy servers lack that signal, so retain their original
+                    # write-before-start heuristic.
+                    attachable_ids = (
+                        self._agent_invoked_request_ids
+                        if self.server_features.prompt_result_verdict == 1
+                        else self._sent_agent_run_request_ids
+                    )
                     attached = {
                         queued_request_id
                         for queued_request_id, _ in self._unreserved_agent_run_request_ids
-                        if queued_request_id in self._sent_agent_run_request_ids
+                        if queued_request_id in attachable_ids
                     }
                     self._sent_agent_run_request_ids.difference_update(attached)
+                    self._agent_invoked_request_ids.difference_update(attached)
                     self._unreserved_agent_run_request_ids = [
                         entry
                         for entry in self._unreserved_agent_run_request_ids
@@ -1452,6 +1476,20 @@ class RpcClient:
     def _mark_agent_run_completed(self, request_id: str | None = None) -> bool:
         with self._event_condition:
             if request_id is not None:
+                if request_id == self._active_agent_run_request_id:
+                    self._active_agent_run_request_id = None
+                    self._sent_agent_run_request_ids.discard(request_id)
+                    self._agent_invoked_request_ids.discard(request_id)
+                    if self._unreserved_agent_run_request_ids:
+                        next_request_id, _ = self._unreserved_agent_run_request_ids.pop(
+                            0
+                        )
+                        self._active_agent_run_request_id = next_request_id
+                        self._sent_agent_run_request_ids.discard(next_request_id)
+                        self._agent_invoked_request_ids.discard(next_request_id)
+                    self._event_condition.notify_all()
+                    return True
+
                 matching = next(
                     (
                         entry
@@ -1463,6 +1501,7 @@ class RpcClient:
                 if matching is not None:
                     self._agent_run_request_ids.remove(matching)
                     self._sent_agent_run_request_ids.discard(request_id)
+                    self._agent_invoked_request_ids.discard(request_id)
                     if self._unreserved_agent_run_request_ids:
                         self._agent_run_request_ids.append(
                             self._unreserved_agent_run_request_ids.pop(0)
@@ -1484,14 +1523,54 @@ class RpcClient:
                     return False
                 self._unreserved_agent_run_request_ids.remove(queued)
                 self._sent_agent_run_request_ids.discard(request_id)
+                self._agent_invoked_request_ids.discard(request_id)
                 self._event_condition.notify_all()
                 return True
 
+            self._agent_run_active = False
+            self._active_agent_run_request_id = None
             if self._completed_agent_runs >= self._scheduled_agent_runs:
                 return False
             self._completed_agent_runs += 1
+            if (
+                not self._agent_run_request_ids
+                and self._unreserved_agent_run_request_ids
+            ):
+                self._scheduled_agent_runs += 1
+                self._agent_run_request_ids.append(
+                    self._unreserved_agent_run_request_ids.pop(0)
+                )
+                self._last_schedule_async_error_index = (
+                    self._async_errors.current_index()
+                )
             self._event_condition.notify_all()
             return True
+
+    def _mark_prompt_agent_invoked(self, request_id: str) -> None:
+        with self._event_condition:
+            if request_id == self._active_agent_run_request_id:
+                self._active_agent_run_request_id = None
+                self._sent_agent_run_request_ids.discard(request_id)
+                self._agent_invoked_request_ids.discard(request_id)
+                return
+            queued = next(
+                (
+                    entry
+                    for entry in self._unreserved_agent_run_request_ids
+                    if entry[0] == request_id
+                ),
+                None,
+            )
+            if queued is not None and self._agent_run_active:
+                self._unreserved_agent_run_request_ids.remove(queued)
+                self._sent_agent_run_request_ids.discard(request_id)
+                self._event_condition.notify_all()
+                return
+            if queued is not None or any(
+                pending_request_id == request_id
+                for pending_request_id, _ in self._agent_run_request_ids
+            ):
+                self._agent_invoked_request_ids.add(request_id)
 
     def _mark_prompt_completed_without_agent(self, request_id: str) -> None:
         self._mark_agent_run_completed(request_id)
@@ -1541,6 +1620,7 @@ class RpcClient:
                 if entry[0] not in cancelled_ids
             ]
             self._sent_agent_run_request_ids.difference_update(cancelled_ids)
+            self._agent_invoked_request_ids.difference_update(cancelled_ids)
 
             for _ in range(reserved_cancelled):
                 if self._unreserved_agent_run_request_ids:
@@ -2273,13 +2353,16 @@ class RpcClient:
                     continue
 
                 payload_type = payload.get("type")
-                if (
-                    payload_type == "prompt_result"
-                    and payload.get("agentInvoked") is False
+                if payload_type == "prompt_result" and isinstance(
+                    payload.get("agentInvoked"), bool
                 ):
                     request_id = payload.get("id")
                     if isinstance(request_id, str):
-                        self._mark_prompt_completed_without_agent(request_id)
+                        if payload["agentInvoked"]:
+                            if self.server_features.prompt_result_verdict == 1:
+                                self._mark_prompt_agent_invoked(request_id)
+                        else:
+                            self._mark_prompt_completed_without_agent(request_id)
                 if payload_type in ("tool_execution_update", "tool_execution_end"):
                     self._normalize_host_tool_event(payload)
                 try:
@@ -2423,11 +2506,13 @@ class RpcClient:
                 if bool(payload.get("success", False)):
                     data = payload.get("data")
                     response_data = data if isinstance(data, dict) else {}
-                    if (
-                        pending.command == "prompt"
-                        and response_data.get("agentInvoked") is False
+                    if pending.command == "prompt" and isinstance(
+                        response_data.get("agentInvoked"), bool
                     ):
-                        self._mark_prompt_completed_without_agent(request_id)
+                        if response_data["agentInvoked"]:
+                            self._mark_prompt_agent_invoked(request_id)
+                        else:
+                            self._mark_prompt_completed_without_agent(request_id)
                     elif (
                         pending.command == "steer"
                         and self.server_features.active_turn_steering == 1

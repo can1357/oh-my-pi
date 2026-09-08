@@ -385,8 +385,12 @@ export class RpcClient {
 					// Exact-value gating: a server that bumps a capability to 2 has changed
 					// its semantics and must not read as 1 here. Unknown keys are dropped.
 					const features = line.features;
-					this.#serverFeatures =
-						isRecord(features) && features.activeTurnSteering === 1 ? { activeTurnSteering: 1 } : {};
+					const serverFeatures: RpcServerFeatures = {};
+					if (isRecord(features)) {
+						if (features.activeTurnSteering === 1) serverFeatures.activeTurnSteering = 1;
+						if (features.promptResultVerdict === 1) serverFeatures.promptResultVerdict = 1;
+					}
+					this.#serverFeatures = serverFeatures;
 					readySettled = true;
 					readyResolve();
 					continue;

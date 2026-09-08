@@ -151,9 +151,12 @@ export interface RpcPromptResultFrame {
  *
  *  - `activeTurnSteering: 1` — `steer` honors `activeTurnOnly` and answers with
  *    `data.accepted`; `abort` accepts `clearQueue: true`; and `clear_queue` is
- *    available with `forInterrupt`. */
+ *    available with `forInterrupt`.
+ *  - `promptResultVerdict: 1` — asynchronously scheduled prompts emit a
+ *    correlated `prompt_result` with their final `agentInvoked` verdict. */
 export interface RpcServerFeatures {
 	activeTurnSteering?: 1;
+	promptResultVerdict?: 1;
 }
 
 export interface RpcReadyFrame {

@@ -238,11 +238,11 @@ export function reportLocalOnlyPromptResult(input: {
 }): void {
 	void input.prompt
 		.then(async agentInvoked => {
-			if (agentInvoked) return;
-			await input.waitForExtensionAgentMessageTasks?.();
-			if (!input.hasExtensionAgentMessageTask?.()) {
-				input.output({ type: "prompt_result", id: input.id, agentInvoked: false });
+			if (!agentInvoked) {
+				await input.waitForExtensionAgentMessageTasks?.();
+				agentInvoked = input.hasExtensionAgentMessageTask?.() === true;
 			}
+			input.output({ type: "prompt_result", id: input.id, agentInvoked });
 		})
 		.catch(error => {
 			input.onError(error instanceof Error ? error : new Error(String(error)));
@@ -822,7 +822,7 @@ export async function runRpcMode(
 		maxReassembledFrameBytes: MAX_RPC_REASSEMBLED_BYTES,
 		// Capability values are exact integers, not booleans: bumping one is how a
 		// semantic change to an already-shipped capability is announced.
-		features: { activeTurnSteering: 1 },
+		features: { activeTurnSteering: 1, promptResultVerdict: 1 },
 	};
 	writeFrames(frameEncoder.encodeFrames(readyFrame));
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {

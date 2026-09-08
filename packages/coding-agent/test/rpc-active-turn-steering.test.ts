@@ -129,7 +129,7 @@ describe("RPC active-turn steering (real server)", () => {
 		using client = createClient();
 		await client.start();
 
-		expect(client.serverFeatures).toEqual({ activeTurnSteering: 1 });
+		expect(client.serverFeatures).toEqual({ activeTurnSteering: 1, promptResultVerdict: 1 });
 
 		// No turn is running, so the host's "interrupt the current run" is refused
 		// rather than turned into a new run.

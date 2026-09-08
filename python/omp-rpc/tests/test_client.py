@@ -1112,9 +1112,20 @@ QUEUED_PROMPT_RESERVATION_SERVER = textwrap.dedent(
 PENDING_REPLACEMENT_SERVER = textwrap.dedent(
     """
     import json
+    import os
     import sys
 
-    print(json.dumps({"type": "ready", "protocolVersion": 1}), flush=True)
+    print(
+        json.dumps(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "features": {"promptResultVerdict": 1},
+            }
+        ),
+        flush=True,
+    )
+    start_before_false = os.environ.get("PI_START_BEFORE_FALSE") == "1"
     first_prompt_id = None
     for raw_line in sys.stdin:
         command = json.loads(raw_line)
@@ -1133,6 +1144,8 @@ PENDING_REPLACEMENT_SERVER = textwrap.dedent(
         if command_type == "prompt":
             first_prompt_id = command.get("id")
         elif command_type == "abort_and_prompt":
+            if start_before_false:
+                print(json.dumps({"type": "agent_start"}), flush=True)
             print(
                 json.dumps(
                     {
@@ -1143,7 +1156,8 @@ PENDING_REPLACEMENT_SERVER = textwrap.dedent(
                 ),
                 flush=True,
             )
-            print(json.dumps({"type": "agent_start"}), flush=True)
+            if not start_before_false:
+                print(json.dumps({"type": "agent_start"}), flush=True)
             print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
     """
 )
@@ -1155,28 +1169,48 @@ LIFECYCLE_ACCOUNTING_SERVER = textwrap.dedent(
     import sys
     import time
 
-    print(json.dumps({"type": "ready", "protocolVersion": 1}), flush=True)
+    print(
+        json.dumps(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "features": {
+                    "activeTurnSteering": 1,
+                    "promptResultVerdict": 1,
+                },
+            }
+        ),
+        flush=True,
+    )
     prompt_count = 0
     pending_steer = False
     for raw_line in sys.stdin:
         command = json.loads(raw_line)
         command_type = command["type"]
-        print(
-            json.dumps(
-                {
-                    "id": command.get("id"),
-                    "type": "response",
-                    "command": command_type,
-                    "success": True,
-                }
-            ),
-            flush=True,
-        )
+        response = {
+            "id": command.get("id"),
+            "type": "response",
+            "command": command_type,
+            "success": True,
+        }
+        if command_type == "steer":
+            response["data"] = {"accepted": True}
+        print(json.dumps(response), flush=True)
         if command_type == "prompt":
             prompt_count += 1
             if prompt_count == 1:
                 print(json.dumps({"type": "agent_start"}), flush=True)
-            else:
+            print(
+                json.dumps(
+                    {
+                        "id": command.get("id"),
+                        "type": "prompt_result",
+                        "agentInvoked": True,
+                    }
+                ),
+                flush=True,
+            )
+            if prompt_count > 1:
                 # An active follow-up is consumed by the current physical run.
                 print(
                     json.dumps({"type": "agent_end", "messages": []}),
@@ -1196,6 +1230,112 @@ LIFECYCLE_ACCOUNTING_SERVER = textwrap.dedent(
             print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
     """
 )
+
+LEGACY_LIFECYCLE_ACCOUNTING_SERVER = LIFECYCLE_ACCOUNTING_SERVER.replace(
+    '            "features": {\n'
+    '                "activeTurnSteering": 1,\n'
+    '                "promptResultVerdict": 1,\n'
+    "            },\n",
+    "",
+)
+
+
+LEGACY_ACTIVE_FOLLOW_UP_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    print(
+        json.dumps(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "features": {"activeTurnSteering": 1},
+            }
+        ),
+        flush=True,
+    )
+    prompt_count = 0
+    for raw_line in sys.stdin:
+        command = json.loads(raw_line)
+        if command["type"] != "prompt":
+            continue
+        prompt_count += 1
+        print(
+            json.dumps(
+                {
+                    "id": command.get("id"),
+                    "type": "response",
+                    "command": "prompt",
+                    "success": True,
+                }
+            ),
+            flush=True,
+        )
+        if prompt_count == 1:
+            print(json.dumps({"type": "agent_start"}), flush=True)
+        else:
+            print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
+    """
+)
+
+
+DELAYED_FOLLOW_UP_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+    import time
+
+    print(
+        json.dumps(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "features": {
+                    "activeTurnSteering": 1,
+                    "promptResultVerdict": 1,
+                },
+            }
+        ),
+        flush=True,
+    )
+    prompt_count = 0
+    for raw_line in sys.stdin:
+        command = json.loads(raw_line)
+        if command["type"] != "prompt":
+            continue
+        prompt_count += 1
+        print(
+            json.dumps(
+                {
+                    "id": command.get("id"),
+                    "type": "response",
+                    "command": "prompt",
+                    "success": True,
+                }
+            ),
+            flush=True,
+        )
+        if prompt_count == 1:
+            print(json.dumps({"type": "agent_start"}), flush=True)
+            continue
+        print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
+        time.sleep(0.2)
+        print(json.dumps({"type": "agent_start"}), flush=True)
+        print(
+            json.dumps(
+                {
+                    "id": command.get("id"),
+                    "type": "prompt_result",
+                    "agentInvoked": True,
+                }
+            ),
+            flush=True,
+        )
+        print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
+    """
+)
+
 
 # Predates the capability: no `features`, and `steer` answers with no `data`.
 LEGACY_STEER_SERVER = textwrap.dedent(
@@ -1935,7 +2075,7 @@ class RpcClientTests(unittest.TestCase):
         self.assertIn("Frame: 'not-json'", str(ctx.exception))
 
     def test_idle_legacy_active_only_steer_reserves_its_auto_started_run(self) -> None:
-        with self.make_client(server=LIFECYCLE_ACCOUNTING_SERVER) as client:
+        with self.make_client(server=LEGACY_LIFECYCLE_ACCOUNTING_SERVER) as client:
             self.assertTrue(client.steer("wake", active_turn_only=True))
             self.assertEqual(client._scheduled_agent_runs, 1)
             self.assertEqual(client._completed_agent_runs, 0)
@@ -1974,6 +2114,19 @@ class RpcClientTests(unittest.TestCase):
             elapsed = time.monotonic() - started
 
             self.assertGreaterEqual(elapsed, 0.1)
+            self.assertEqual(client._scheduled_agent_runs, 1)
+            self.assertEqual(client._completed_agent_runs, 1)
+
+    def test_active_turn_capability_without_prompt_verdict_uses_legacy_follow_up_accounting(
+        self,
+    ) -> None:
+        with self.make_client(server=LEGACY_ACTIVE_FOLLOW_UP_SERVER) as client:
+            client.prompt("first")
+            client.prompt("second", streaming_behavior="followUp")
+            client.wait_for_idle(timeout=0.5)
+
+            self.assertEqual(client.server_features.active_turn_steering, 1)
+            self.assertIsNone(client.server_features.prompt_result_verdict)
             self.assertEqual(client._scheduled_agent_runs, 1)
             self.assertEqual(client._completed_agent_runs, 1)
 
@@ -2024,6 +2177,59 @@ class RpcClientTests(unittest.TestCase):
 
             self.assertEqual(client._scheduled_agent_runs, 1)
             self.assertEqual(client._completed_agent_runs, 1)
+
+    def test_follow_up_after_emitted_start_keeps_its_future_run_reserved(self) -> None:
+        with self.make_client(server=DELAYED_FOLLOW_UP_SERVER) as client:
+            first_start_received = threading.Event()
+            release_first_start = threading.Event()
+            follow_up_written = threading.Event()
+            errors: list[BaseException] = []
+            original_start = client._mark_agent_run_started
+            original_write = client._write_json
+
+            def delay_first_start() -> None:
+                if not first_start_received.is_set():
+                    first_start_received.set()
+                    release_first_start.wait(0.5)
+                original_start()
+
+            def observe_write(
+                process: subprocess.Popen[str], payload: dict[str, object]
+            ) -> None:
+                original_write(process, payload)
+                if payload.get("message") == "second":
+                    follow_up_written.set()
+
+            def submit_follow_up() -> None:
+                try:
+                    client.prompt("second", streaming_behavior="followUp")
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with (
+                patch.object(
+                    client, "_mark_agent_run_started", side_effect=delay_first_start
+                ),
+                patch.object(client, "_write_json", side_effect=observe_write),
+            ):
+                client.prompt("first")
+                self.assertTrue(first_start_received.wait(0.5))
+
+                worker = threading.Thread(target=submit_follow_up, daemon=True)
+                worker.start()
+                self.assertTrue(follow_up_written.wait(0.5))
+                release_first_start.set()
+                worker.join(timeout=0.5)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+
+                started = time.monotonic()
+                client.wait_for_idle(timeout=0.5)
+                elapsed = time.monotonic() - started
+
+            self.assertGreaterEqual(elapsed, 0.1)
+            self.assertEqual(client._scheduled_agent_runs, 2)
+            self.assertEqual(client._completed_agent_runs, 2)
 
     def test_active_abort_and_prompt_reserves_the_replacement_run(self) -> None:
         with self.make_client(server=LIFECYCLE_ACCOUNTING_SERVER) as client:
@@ -2086,6 +2292,22 @@ class RpcClientTests(unittest.TestCase):
 
             self.assertEqual(client._scheduled_agent_runs, 1)
             self.assertEqual(client._completed_agent_runs, 1)
+
+    def test_replacement_start_before_old_prompt_false_transfers_active_owner(
+        self,
+    ) -> None:
+        with self.make_client(
+            server=PENDING_REPLACEMENT_SERVER,
+            env={"PI_START_BEFORE_FALSE": "1"},
+        ) as client:
+            client.prompt("pending")
+            client.abort_and_prompt("replacement")
+            client.wait_for_idle(timeout=0.5)
+
+            self.assertEqual(client._scheduled_agent_runs, 1)
+            self.assertEqual(client._completed_agent_runs, 1)
+            self.assertIsNone(client._active_agent_run_request_id)
+            self.assertEqual(client._unreserved_agent_run_request_ids, [])
 
     def test_idle_steer_reserves_its_auto_started_run(self) -> None:
         with self.make_client(server=LIFECYCLE_ACCOUNTING_SERVER) as client:
@@ -2256,6 +2478,10 @@ class RpcClientTests(unittest.TestCase):
             {"activeTurnSteering": {"version": 1}},
             {"activeTurnSteering": [1]},
             {"activeTurnSteering": None},
+            {"promptResultVerdict": 2},
+            {"promptResultVerdict": True},
+            {"promptResultVerdict": "1"},
+            {"promptResultVerdict": None},
             {},
             "not-an-object",
         ]:
@@ -2268,6 +2494,7 @@ class RpcClientTests(unittest.TestCase):
             ):
                 self.assertEqual(client.server_features, ServerFeatures())
                 self.assertIsNone(client.server_features.active_turn_steering)
+                self.assertIsNone(client.server_features.prompt_result_verdict)
 
 
 HANGING_SERVER = textwrap.dedent(

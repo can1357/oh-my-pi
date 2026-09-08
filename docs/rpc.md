@@ -42,17 +42,18 @@ The initial ready frame uses protocol v1 and advertises the opt-in lossless tran
 	"supportedProtocolVersions": [1, 2],
 	"maxFrameBytes": 1048576,
 	"maxReassembledFrameBytes": 67108864,
-	"features": { "activeTurnSteering": 1 }
+	"features": { "activeTurnSteering": 1, "promptResultVerdict": 1 }
 }
 ```
 
-`features` is absent on servers that predate capability advertisement. When present, its values are exact integers, not booleans: gate on `features.activeTurnSteering === 1`, because a server that bumps a capability has changed its semantics. Because the ready frame is always v1, capabilities are readable without negotiating v2.
+`features` is absent on servers that predate capability advertisement. When present, its values are exact integers, not booleans: gate on the exact capability key and version, because a server that bumps a capability has changed its semantics. Because the ready frame is always v1, capabilities are readable without negotiating v2.
 
 Parse `features` leniently. Unknown keys, a bumped version, a non-integer value, and a `features` field that is not an object all mean "capability absent" — never a connection failure. A client that rejects the ready frame over an unrecognized capability cannot start against a server it would otherwise interoperate with. Currently advertised:
 
-| Capability              | Meaning                                                                                                                                |
-| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| `activeTurnSteering: 1` | `steer` honors `activeTurnOnly` and answers `data.accepted`; `abort` accepts `clearQueue: true`; `clear_queue` accepts `forInterrupt`. |
+| Capability               | Meaning                                                                                                                                    |
+| ------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------ |
+| `activeTurnSteering: 1`  | `steer` honors `activeTurnOnly` and answers `data.accepted`; `abort` accepts `clearQueue: true`; and `clear_queue` accepts `forInterrupt`. |
+| `promptResultVerdict: 1` | Asynchronously scheduled prompts emit a correlated `prompt_result` with their final `agentInvoked` verdict.                                |
 
 Clients that support protocol v2 SHOULD immediately send:
 
@@ -87,7 +88,7 @@ Legacy clients may ignore the added ready fields and remain on v1. V1 retains it
 6. Host URI requests/cancellations (`host_uri_request`, `host_uri_cancel`)
 7. Extension errors (`{ type: "extension_error", extensionPath, event, error }`)
 8. Available-commands updates (`{ type: "available_commands_update", commands }`), emitted at startup and whenever command metadata changes
-9. Prompt lifecycle hints (`{ type: "prompt_result", id?, agentInvoked }`) for scheduled prompts that later resolve without invoking the agent
+9. Prompt lifecycle results (`{ type: "prompt_result", id?, agentInvoked }`) for asynchronously scheduled prompts
 10.   Subagent frames (`subagent_lifecycle`, `subagent_progress`, `subagent_event`), gated by `set_subagent_subscription`
 11.   Builtin slash-command side channels (`command_output`, `session_info_update`, `config_update`)
 
@@ -232,13 +233,15 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 
 `data.agentInvoked: false` is a completion signal for local-only prompts, including slash commands that produce output without starting an agent turn. `data.agentInvoked: true` means the prompt produced agent lifecycle events; those events can be emitted before or after the prompt response depending on the command path. Older runtimes may omit `data`; hosts should then rely on `agent_end`, custom message completion, or `prompt_result`.
 
-`prompt_result` is emitted when a prompt was accepted immediately but later resolves as local-only:
+On servers advertising `features.promptResultVerdict: 1`, `prompt_result` is emitted when an immediately accepted prompt finishes asynchronous preprocessing. Its exact request id and boolean verdict let hosts distinguish a prompt that joined an agent lifecycle from one that remained local-only:
 
 ```json
-{ "type": "prompt_result", "id": "req_1", "agentInvoked": false }
+{ "type": "prompt_result", "id": "req_1", "agentInvoked": true }
 ```
 
-Local-only slash commands may emit `command_output` frames before completing via `data.agentInvoked: false` or a later `prompt_result`. They do not emit `agent_end`.
+When the prompt joins the currently active lifecycle, its `prompt_result` is emitted before that lifecycle's terminal `agent_end`. A client can therefore bind an unresolved prompt to the open lifecycle when it observes `agentInvoked: true`; a prompt whose true verdict arrives after a terminal event belongs to a later lifecycle.
+
+Local-only slash commands may emit `command_output` frames before completing via `data.agentInvoked: false` or a later `prompt_result` with `agentInvoked: false`. They do not emit `agent_end`.
 
 ### `get_state` payload
 
@@ -562,7 +565,7 @@ That means:
 
 - command acceptance != run completion
 - agent turns complete only on `agent_end` frames where `isTerminal !== false`
-- local-only prompts complete via `data.agentInvoked: false` on the response or via a later `prompt_result`
+- asynchronously scheduled prompts resolve via a correlated `prompt_result`; `agentInvoked: false` completes local-only work, while `true` associates the request with agent lifecycle events
 
 ### While streaming
 
