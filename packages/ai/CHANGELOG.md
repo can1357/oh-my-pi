@@ -12,6 +12,7 @@
 - Grok Bot probe mint failures report HTTP status only (never response bodies that may echo the renewer).
 - Grok Bot keep-model Anthropic probe validates and replays returned Shell arguments (no fabricated echo).
 - Grok Bot automation probe classifies the routed model via `classifyModel` (no `grok` substring match).
+- Grok Bot `register-builtins` loads `./grokbot` via the same lazy dynamic import as other providers (no eager protobuf/TUI graph on startup).
 - Grok Bot protobuf codec is fully typed (removed file-wide `@ts-nocheck`).
 - Grok Bot legacy matrix derives sand parameter ids and effort from live catalog + buildModel policy instead of hard-coded per-model tables.
 - Block Grok Bot JWT remint/replay after no-tool events were already published live
