@@ -549,6 +549,17 @@ describe("grokbot requested model mapping", () => {
 			{ id: "effort", value: "high" },
 			{ id: "fast", value: "false" },
 		]);
+		// Advertised thinking with no discovered default and no effort must omit
+		// the parameter — inventing thinking=false silently disables the server default.
+		expect(
+			resolveGrokbotRequestedModel("claude-opus-5", {
+				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { context: "300k" },
+			}).parameters,
+		).toEqual([
+			{ id: "context", value: "300k" },
+			{ id: "fast", value: "false" },
+		]);
 	});
 });
 

@@ -30,7 +30,8 @@ export type GrokbotRequestedModelOptions = {
 	/**
 	 * sand `thinking` boolean; only sent when the model lists `thinking`.
 	 * Default: explicit `thinking`, then `sandParameterDefaults.thinking`, then
-	 * `true` when an effort/reasoning value is being sent, else `false`.
+	 * `true` when an effort/reasoning value is being sent. When discovery left no
+	 * default and no effort is sent, the parameter is omitted (do not invent `false`).
 	 */
 	thinking?: boolean;
 	/**
@@ -119,15 +120,20 @@ export function resolveGrokbotRequestedModel(
 		// Anthropic variants are defined as complete combinations.
 		if (allowed.has("thinking")) {
 			const discoveredThinking = defaults?.thinking?.trim();
-			const thinking =
-				options?.thinking !== undefined
-					? options.thinking
-					: discoveredThinking === "true"
-						? true
-						: discoveredThinking === "false"
-							? false
-							: Boolean(effortValue);
-			parameters.push({ id: "thinking", value: thinking ? "true" : "false" });
+			let thinking: boolean | undefined;
+			if (options?.thinking !== undefined) {
+				thinking = options.thinking;
+			} else if (discoveredThinking === "true") {
+				thinking = true;
+			} else if (discoveredThinking === "false") {
+				thinking = false;
+			} else if (effortValue) {
+				// Effort on the wire implies thinking on; otherwise leave the server default.
+				thinking = true;
+			}
+			if (thinking !== undefined) {
+				parameters.push({ id: "thinking", value: thinking ? "true" : "false" });
+			}
 		}
 		if (allowed.has("context")) {
 			const discoveredDefault = options?.sandParameterDefaults?.context?.trim();

@@ -127,8 +127,9 @@ export async function mintGrokbotAccessToken(cfg, fetchImpl = fetch) {
 		body: JSON.stringify({ credential: cfg.renewal }),
 	});
 	if (!response.ok) {
-		const body = await response.text().catch(() => "");
-		throw new Error(`Grok Bot token renew failed (HTTP ${response.status}): ${body.slice(0, 200)}`);
+		// Drain body without echoing it — reverse proxies may reflect the renewer.
+		await response.text().catch(() => "");
+		throw new Error(`Grok Bot token renew failed (HTTP ${response.status})`);
 	}
 	const parsed = await response.json();
 	const accessToken = typeof parsed.accessToken === "string" ? parsed.accessToken : "";
