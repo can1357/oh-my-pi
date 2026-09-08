@@ -6,28 +6,36 @@ export type ChipKind = "image" | "video" | "paste";
 
 const CHIP_ICON_KEY = { image: "chip.image", video: "chip.video", paste: "chip.paste" } as const;
 
-/** Compact atomic composer token for attachment `n` in the active symbol preset. */
-export function chipLabel(kind: ChipKind, n: number): string {
-	const icon =
-		typeof theme === "undefined" ? SYMBOL_PRESETS.unicode[CHIP_ICON_KEY[kind]] : theme.symbol(CHIP_ICON_KEY[kind]);
-	return `${icon} #${n}`;
+/** Live chip glyph the active theme emits for `kind`; the unicode preset stands in before a theme loads. */
+function liveChipIcon(kind: ChipKind): string {
+	return typeof theme === "undefined"
+		? SYMBOL_PRESETS.unicode[CHIP_ICON_KEY[kind]]
+		: theme.symbol(CHIP_ICON_KEY[kind]);
 }
 
-/** Every glyph a chip token may start with, across all symbol presets. */
-const CHIP_ICONS: Record<ChipKind, readonly string[]> = {
+/** Compact atomic composer token for attachment `n` in the active theme. */
+export function chipLabel(kind: ChipKind, n: number): string {
+	return `${liveChipIcon(kind)} #${n}`;
+}
+
+/** Built-in chip glyphs per kind across every symbol preset. */
+const PRESET_CHIP_ICONS: Record<ChipKind, readonly string[]> = {
 	image: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.image]))],
 	video: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.video]))],
 	paste: [...new Set(Object.values(SYMBOL_PRESETS).map(m => m[CHIP_ICON_KEY.paste]))],
 };
 
-const CHIP_TOKEN_SOURCE = `(?:${[...CHIP_ICONS.image, ...CHIP_ICONS.video, ...CHIP_ICONS.paste]
-	.map(icon => (/^[a-z]+$/i.test(icon) ? `(?<![A-Za-z])${RegExp.escape(icon)}` : RegExp.escape(icon)))
-	.join("|")}) #[1-9]\\d*`;
+/** Every glyph a chip token of `kind` may start with: the built-in presets plus the active theme's override. */
+function chipIcons(kind: ChipKind): readonly string[] {
+	const live = liveChipIcon(kind);
+	const preset = PRESET_CHIP_ICONS[kind];
+	return preset.includes(live) ? preset : [...preset, live];
+}
 
-/** Infers an attachment kind from a chip label emitted by any configured symbol preset. */
+/** Infers an attachment kind from a chip label emitted by any preset or the active theme. */
 export function chipLabelKind(label: string): ChipKind {
-	if (CHIP_ICONS.image.some(icon => label.startsWith(icon))) return "image";
-	if (CHIP_ICONS.video.some(icon => label.startsWith(icon))) return "video";
+	if (chipIcons("image").some(icon => label.startsWith(icon))) return "image";
+	if (chipIcons("video").some(icon => label.startsWith(icon))) return "video";
 	return "paste";
 }
 
@@ -59,8 +67,27 @@ export function attachmentSgr(kind: ChipKind, n: number): string {
 
 /** Matches expanded image, video, and paste markers, including optional marker metadata. */
 export const PLACEHOLDER_REGEX = /\[(Image|Video|Paste) #([1-9]\d*)(?:,[^\]\n]*)?\]/g;
-/** Matches either an expanded attachment marker or a compact composer chip token. */
-export const COMPOSER_TOKEN_REGEX = new RegExp(`${PLACEHOLDER_REGEX.source}|${CHIP_TOKEN_SOURCE}`, "gu");
+
+let cachedChipKey: string | undefined;
+let cachedTokenRegex: RegExp | undefined;
+
+/**
+ * Regex matching an expanded attachment marker or a compact chip token. Rebuilt
+ * whenever the active theme's chip glyphs change so custom `chip.*` overrides are
+ * recognized alongside the built-in presets. Global + unicode; callers reset
+ * `lastIndex` before scanning.
+ */
+export function composerTokenRegex(): RegExp {
+	const key = `${liveChipIcon("image")}\x00${liveChipIcon("video")}\x00${liveChipIcon("paste")}`;
+	if (cachedTokenRegex === undefined || key !== cachedChipKey) {
+		const source = [...chipIcons("image"), ...chipIcons("video"), ...chipIcons("paste")]
+			.map(icon => (/^[a-z]+$/i.test(icon) ? `(?<![A-Za-z])${RegExp.escape(icon)}` : RegExp.escape(icon)))
+			.join("|");
+		cachedTokenRegex = new RegExp(`${PLACEHOLDER_REGEX.source}|(?:${source}) #[1-9]\\d*`, "gu");
+		cachedChipKey = key;
+	}
+	return cachedTokenRegex;
+}
 
 const VISION_MARKER_REGEX = /\[(Image|Video) #([1-9]\d*)((?:,[^\]\n]*)?)\](?: attachment:\/\/(\2))?/g;
 
@@ -138,13 +165,14 @@ export interface PlaceholderRenderers {
 
 /** Renders text while treating expanded markers and compact chips as distinct references. */
 export function renderPlaceholders(text: string, renderers: PlaceholderRenderers): string {
-	COMPOSER_TOKEN_REGEX.lastIndex = 0;
+	const regex = composerTokenRegex();
+	regex.lastIndex = 0;
 	let result = "";
 	let last = 0;
 	let matched = false;
 
 	for (;;) {
-		const match = COMPOSER_TOKEN_REGEX.exec(text);
+		const match = regex.exec(text);
 		if (match === null) break;
 		matched = true;
 		if (match.index > last) result += renderers.renderText(text.slice(last, match.index));
@@ -162,4 +190,27 @@ export function renderPlaceholders(text: string, renderers: PlaceholderRenderers
 	if (!matched) return renderers.renderText(text);
 	if (last < text.length) result += renderers.renderText(text.slice(last));
 	return result;
+}
+
+/**
+ * Collects the attachment indices referenced in `text`, grouped by kind, using
+ * {@link composerTokenRegex} so the number matches `#[1-9]\d*` in full (`#1`
+ * never matches inside `#11`) and active-theme `chip.*` overrides are recognized.
+ */
+export function referencedAttachments(text: string): Record<ChipKind, Set<number>> {
+	const refs: Record<ChipKind, Set<number>> = { image: new Set(), video: new Set(), paste: new Set() };
+	const regex = composerTokenRegex();
+	regex.lastIndex = 0;
+	for (;;) {
+		const match = regex.exec(text);
+		if (match === null) break;
+		const label = match[0];
+		if (label.startsWith("[")) {
+			const kind: ChipKind = match[1] === "Paste" ? "paste" : match[1] === "Video" ? "video" : "image";
+			refs[kind].add(Number(match[2]));
+		} else {
+			refs[chipLabelKind(label)].add(Number(label.slice(label.lastIndexOf("#") + 1)));
+		}
+	}
+	return refs;
 }

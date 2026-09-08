@@ -17,9 +17,10 @@ import type { AppKeybinding } from "../../config/keybindings";
 import { isVideoPath, videoPreviewSource } from "../../utils/video";
 import {
 	attachmentSgr,
-	COMPOSER_TOKEN_REGEX,
 	chipLabel,
 	collapseImageMarkers,
+	composerTokenRegex,
+	referencedAttachments,
 	renderPlaceholders,
 } from "../composer-attachments";
 import { MacOSSpellingProvider, type SpellingFeatures } from "../macos-spelling";
@@ -523,14 +524,12 @@ export class CustomEditor extends Editor {
 	/** Attachments whose chip token (or legacy bracketed marker) is still present in the buffer —
 	 *  deleting the inline token hides the chip and drops the attachment from the submission. */
 	composerChips(): ComposerChipDescriptor[] {
-		const text = this.getText();
+		const refs = referencedAttachments(this.getText());
 		const chips: ComposerChipDescriptor[] = [];
 		for (let i = 0; i < this.pendingImages.length; i++) {
 			const n = i + 1;
-			const video =
-				text.includes(chipLabel("video", n)) || text.includes(`[Video #${n}]`) || text.includes(`[Video #${n},`);
-			const image =
-				text.includes(chipLabel("image", n)) || text.includes(`[Image #${n}]`) || text.includes(`[Image #${n},`);
+			const video = refs.video.has(n);
+			const image = refs.image.has(n);
 			if (!video && !image) continue;
 			chips.push({
 				kind: video ? "video" : "image",
@@ -540,7 +539,7 @@ export class CustomEditor extends Editor {
 			});
 		}
 		for (const entry of this.pendingTexts) {
-			if (!text.includes(entry.label)) continue;
+			if (!refs.paste.has(entry.n)) continue;
 			chips.push({ kind: "paste", n: entry.n, text: entry });
 		}
 		return chips;
@@ -560,8 +559,9 @@ export class CustomEditor extends Editor {
 	}
 
 	/** Treat image/paste references — compact chip tokens and bracketed markers alike — as
-	 *  indivisible: a stray backspace deletes the whole token instead of corrupting it. */
-	override atomicTokenPattern = COMPOSER_TOKEN_REGEX;
+	 *  indivisible: a stray backspace deletes the whole token instead of corrupting it. Refreshed
+	 *  in {@link decorateText} so a theme switch that changes the chip glyphs stays effective. */
+	override atomicTokenPattern = composerTokenRegex();
 
 	/** Magic-keyword shimmer cadence — drives one editor repaint every 70 ms while
 	 *  a keyword is on screen and the prompt is focused. ~14 frames/s is smooth
@@ -588,6 +588,8 @@ export class CustomEditor extends Editor {
 	 *  item markers use the accent color so separate follow-ups remain visible while composing. */
 	override decorateText = (text: string, context: EditorTextDecorationContext): string => {
 		const editorText = this.getText();
+		// Keep atomic-token deletion aligned with the active theme's chip glyphs.
+		this.atomicTokenPattern = composerTokenRegex();
 		const animated = this.focused && this.#shimmerEnabled() && hasMagicKeyword(editorText);
 		const phase = animated ? (Date.now() % CustomEditor.SHIMMER_PERIOD_MS) / CustomEditor.SHIMMER_PERIOD_MS : 0;
 		if (animated) this.#scheduleShimmerFrame();
