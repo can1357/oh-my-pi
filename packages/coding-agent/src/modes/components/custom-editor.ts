@@ -1156,12 +1156,26 @@ export class CustomEditor extends Editor {
 				return;
 			}
 
-			// Intercept configured exit shortcut. Always consume the shortcut so it
-			// never reaches the parent handler; firing onExit is the controller's
-			// chance to snapshot the current text as a draft before shutting down.
+			// Intercept configured exit shortcut. When the key doubles as
+			// forward-delete (readline ^D: the default app.exit binding overlaps
+			// tui.editor.deleteCharForward) and the buffer is non-empty, fall
+			// through to the parent handler so it deletes the character at the
+			// cursor instead of quitting. Only an empty buffer exits; firing
+			// onExit is the controller's chance to snapshot the current text as
+			// a draft before shutting down. Exit keys with no forward-delete
+			// role always exit. Draft presence is read off the buffer alone:
+			// attachments live as inline chip tokens, while `pendingImages` /
+			// `pendingTexts` intentionally retain deleted records so numbering
+			// isn't recycled (see composerChips) — trusting them would make
+			// Ctrl+D a permanent no-op after the last chip is deleted.
 			if (this.#matchesAction(canonical, "app.exit")) {
-				this.onExit?.();
-				return;
+				const doublesAsForwardDelete =
+					canonical !== undefined && getKeybindings().matchesCanonical(canonical, "tui.editor.deleteCharForward");
+				const hasDraft = !this.textEquals("");
+				if (!(doublesAsForwardDelete && hasDraft)) {
+					this.onExit?.();
+					return;
+				}
 			}
 
 			// Intercept configured dequeue shortcut (restore queued message to editor)

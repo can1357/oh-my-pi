@@ -73,6 +73,49 @@ describe("CustomEditor keybindings", () => {
 		expect(onDisplayReset).toHaveBeenCalledTimes(1);
 		expect(onLiveToggle).toHaveBeenCalledTimes(1);
 	});
+	it("exits on ctrl+d with an empty draft", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onExit = vi.fn();
+		editor.onExit = onExit;
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(onExit).toHaveBeenCalledTimes(1);
+	});
+
+	it("forward-deletes instead of exiting on ctrl+d with draft text", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onExit = vi.fn();
+		editor.onExit = onExit;
+		editor.setText("ab");
+		editor.moveToLineStart();
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(onExit).not.toHaveBeenCalled();
+		expect(editor.getText()).toBe("b");
+	});
+
+	it("exits on ctrl+d after the last attachment chip is deleted", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		const onExit = vi.fn();
+		editor.onExit = onExit;
+		editor.insertTextAttachment("a long pasted blob");
+		expect(editor.composerChips()).toHaveLength(1);
+		// Deleting the chip token empties the buffer; `pendingTexts` keeps the
+		// record so attachment numbering isn't recycled.
+		editor.setText("");
+		expect(editor.composerChips()).toHaveLength(0);
+		editor.handleInput("\x04"); // Ctrl+D
+		expect(onExit).toHaveBeenCalledTimes(1);
+	});
+
+	it("still exits on a remapped exit key with no forward-delete role, even with text", () => {
+		const editor = new CustomEditor(getEditorTheme());
+		editor.setActionKeys("app.exit", ["ctrl+q"]);
+		const onExit = vi.fn();
+		editor.onExit = onExit;
+		editor.setText("ab");
+		editor.handleInput("\x11"); // Ctrl+Q
+		expect(onExit).toHaveBeenCalledTimes(1);
+		expect(editor.getText()).toBe("ab");
+	});
 });
 
 describe("shipped dequeue defaults", () => {
