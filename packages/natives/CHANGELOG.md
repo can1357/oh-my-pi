@@ -7,6 +7,9 @@
 ### Fixed
 
 - Fixed C++ language inference excluding CUDA header (`.cuh`) files ([#10782](https://github.com/can1357/oh-my-pi/pull/10782) by [@alphastorm](https://github.com/alphastorm)).
+### Fixed
+
+- Bounded filesystem scan cache memory and prevented stale scans from repopulating the cache after file changes.
 
 ## [18.1.9] - 2026-09-04
 
