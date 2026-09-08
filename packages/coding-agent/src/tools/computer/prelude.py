@@ -41,6 +41,8 @@ def _make_computer():
                 "action": action,
             },
         )
+        if isinstance(response, str):
+            return {}
         if not isinstance(response, dict):
             raise RuntimeError("computer returned an invalid response")
         text = response.get("text")

@@ -10,6 +10,7 @@ import {
 } from "../eval/py/executor";
 import { defaultEvalSessionId } from "../eval/session-id";
 import type { ExtensionRunner } from "../extensibility/extensions";
+import type { ToolSession } from "../tools";
 import { outputMeta } from "../tools/output-meta";
 import type { PythonExecutionMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
@@ -20,6 +21,7 @@ export interface EvalRunnerHost {
 	sessionManager: SessionManager;
 	settings: Settings;
 	extensionRunner(): ExtensionRunner | undefined;
+	evalToolSession?: ToolSession;
 	isStreaming(): boolean;
 	appendSessionMessage(message: PythonExecutionMessage): void;
 }
@@ -79,6 +81,7 @@ export class EvalRunner {
 				interpreter: this.#host.settings.get("python.interpreter")?.trim() || undefined,
 				onChunk,
 				signal: abortController.signal,
+				toolSession: this.#host.evalToolSession,
 			});
 			this.recordPythonResult(code, result, options);
 			return result;
