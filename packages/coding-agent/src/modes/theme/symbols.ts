@@ -789,9 +789,9 @@ const NERD_SYMBOLS: SymbolMap = {
 	// pick:  (nf-cod-git_pull_request) | alt:  (nf-oct-git_pull_request)
 	"icon.pr": "\uea64",
 	// pick:  (nf-cod-arrow_up) | alt:  (nf-fa-arrow_up)
-	"icon.ahead": "\uea5b",
+	"icon.ahead": "\ueaa1",
 	// pick:  (nf-cod-arrow_down) | alt:  (nf-fa-arrow_down)
-	"icon.behind": "\uea5a",
+	"icon.behind": "\uea9a",
 	// pick:  (nf-fa-thumb_tack) | alt:  󰐃
 	"icon.pin": "\uf08d",
 	// pick:  | alt: ⊛ ◍ 

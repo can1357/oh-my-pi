@@ -471,21 +471,52 @@ impl GitRepo {
 
 	/// Resolve the full ref name of `branch`'s configured upstream, from
 	/// `branch.<name>.remote` + `branch.<name>.merge`. A `.` remote tracks a
-	/// local branch; anything else maps to its remote-tracking ref.
+	/// local branch; anything else maps through the remote's fetch refspecs,
+	/// so custom destinations (e.g. `+refs/heads/*:refs/custom/origin/*`)
+	/// resolve to the remote-tracking ref that actually exists.
 	fn upstream_ref(&self, branch: &str) -> Result<Option<String>> {
-		let Some(remote) = self.config_get(&format!("branch.{branch}.remote"))? else {
+		if self.is_reftable() {
+			// One spawn: `%(upstream)` applies the fetch refspecs (and `.`
+			// remotes) natively, replacing two `config --get` round-trips.
+			return cli_try(self.root(), &[
+				"for-each-ref",
+				"--format=%(upstream)",
+				&format!("refs/heads/{branch}"),
+			]);
+		}
+		// One fresh open per call (previously two `config_get` round-trips):
+		// branch/remote tracking config must observe out-of-band mutations,
+		// which the cached handle's open-time config snapshot cannot see.
+		let repo = self.gix_fresh()?;
+		let config = repo.config_snapshot();
+		let get = |key: &str| {
+			config
+				.string(key)
+				.and_then(|v| nonempty(v.to_str_lossy().trim()))
+		};
+		let Some(remote) = get(&format!("branch.{branch}.remote")) else {
 			return Ok(None);
 		};
-		let Some(merge) = self.config_get(&format!("branch.{branch}.merge"))? else {
+		let Some(merge) = get(&format!("branch.{branch}.merge")) else {
 			return Ok(None);
 		};
 		let Some(short) = merge.strip_prefix("refs/heads/") else {
 			return Ok(None);
 		};
+		// A `.` remote tracks a local branch directly, without fetch refspecs.
 		if remote == "." {
 			return Ok(Some(format!("refs/heads/{short}")));
 		}
-		Ok(Some(format!("refs/remotes/{remote}/{short}")))
+		let full = format!("refs/heads/{branch}");
+		let Ok(name) = <&gix::refs::FullNameRef>::try_from(&full) else {
+			return Ok(None);
+		};
+		match repo.branch_remote_tracking_ref_name(name, gix::remote::Direction::Fetch) {
+			Some(Ok(tracked)) => Ok(Some(tracked.to_string())),
+			Some(Err(err)) => Err(Error::backend("git config", err)),
+			// No fetch refspecs configured: git's default mapping applies.
+			None => Ok(Some(format!("refs/remotes/{remote}/{short}"))),
+		}
 	}
 
 	/// Read a scalar git config value.
@@ -1489,6 +1520,42 @@ mod tests {
 		assert_eq!(repo.ahead_behind()?, None);
 		git(root, &["checkout", "--detach", "HEAD"])?;
 		assert_eq!(repo.ahead_behind()?, None);
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_resolves_custom_fetch_refspec() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+
+		let remote = tempfile::tempdir()?;
+		git(remote.path(), &["init", "--bare", "-b", "main"])?;
+		git(root, &["remote", "add", "origin", remote.path().to_str().unwrap()])?;
+		// Custom destination: tracking refs live outside refs/remotes/origin/*,
+		// where the old hard-coded mapping looked and found nothing.
+		git(root, &["config", "remote.origin.fetch", "+refs/heads/*:refs/custom/origin/*"])?;
+		git(root, &["push", "-u", "origin", "main"])?;
+		git(root, &["fetch", "origin"])?;
+		assert_eq!(repo.ahead_behind()?, Some((0, 0)));
+
+		commit(root, "a1", "a1\n", "a1")?;
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
+		Ok(())
+	}
+
+	#[test]
+	fn upstream_divergence_tracks_local_branch_via_dot_remote() -> TestResult {
+		let (dir, repo) = repo()?;
+		let root = dir.path();
+		commit(root, "base", "base\n", "base")?;
+
+		git(root, &["checkout", "-b", "tracking-local"])?;
+		git(root, &["config", "branch.tracking-local.remote", "."])?;
+		git(root, &["config", "branch.tracking-local.merge", "refs/heads/main"])?;
+		commit(root, "a1", "a1\n", "a1")?;
+		// One commit past the local main it tracks.
+		assert_eq!(repo.ahead_behind()?, Some((1, 0)));
 		Ok(())
 	}
 
