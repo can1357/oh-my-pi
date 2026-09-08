@@ -78,6 +78,7 @@ function shrinkWalk(value: unknown, stringCap: number, arrayLimit: number): unkn
 	if (Array.isArray(value)) {
 		const keep = Math.min(value.length, arrayLimit);
 		const elided = value.length - keep;
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const out: unknown[] = new Array(elided > 0 ? keep + 1 : keep);
 		for (let i = 0; i < keep; i++) out[i] = shrinkWalk(value[i], stringCap, arrayLimit);
 		if (elided > 0) out[keep] = `…[${elided} items elided for collab session]`;

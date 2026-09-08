@@ -976,6 +976,7 @@ export class PlanReviewOverlay implements Component {
 	#buildBody(bodyContentWidth: number): string[] {
 		const lines: string[] = [];
 		const anchors: BodyRowAnchor[] = [];
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const offsets: number[] = new Array(this.#sections.length);
 		for (let sectionIndex = 0; sectionIndex < this.#sections.length; sectionIndex++) {
 			const section = this.#sections[sectionIndex]!;

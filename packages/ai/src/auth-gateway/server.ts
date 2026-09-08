@@ -78,7 +78,7 @@ import { PromptCacheAffinityStore } from "./prompt-cache-store";
 import { ProviderHealthBook } from "./provider-health";
 import { decideAttempt, type ExecutionState } from "./route-conductor";
 import { parseRouteDefinition } from "./route-definitions";
-import { type CompiledRoute, type RouteDefinition, RouteRegistry } from "./route-graph";
+import { type CompiledRoute, type RouteDefinition, RouteRegistry, pickInitialRouteTarget } from "./route-graph";
 import {
 	commitGateObservesDownstreamSse,
 	observeSseCommit,
@@ -212,7 +212,7 @@ function deriveSessionId(modelId: string, context: Context): string {
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
-	const opts: SimpleStreamOptions = { signal };
+	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
 	// Codex backend rejects every sampling control with
 	// `Unsupported parameter: …` (#3117). Strip the full set for that one
@@ -229,7 +229,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
-	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
+	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
 			typeof options.toolChoice !== "object"
@@ -242,6 +242,9 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
 	if (options.hideThinkingSummary !== undefined) opts.hideThinkingSummary = options.hideThinkingSummary;
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
+	if (options.anthropicPrefixMismatchBehavior !== undefined) {
+		opts.anthropicPrefixMismatchBehavior = options.anthropicPrefixMismatchBehavior;
+	}
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
 	if (options.include !== undefined) opts.include = options.include;
@@ -252,7 +255,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
-		opts.thinkingBudgets = { ...(opts.thinkingBudgets ?? {}), ...options.thinkingBudgets };
+		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
@@ -261,7 +264,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		// surface the budget.
 		const effort = options.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
-			...(opts.thinkingBudgets ?? {}),
+			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
 		};
 		opts.reasoning ??= effort;
@@ -327,6 +330,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		const retryAfterMs = extractRetryHint(undefined, message);
 		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs,
+			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			apiKey: oldKey,
@@ -418,6 +422,23 @@ function clientClosedResponse(route: { module: FormatModule }): Response {
 type FormatErrorFn = (status: number, type: string, message: string) => Response;
 
 type AttemptPrep = { type: "key"; apiKey: string } | { type: "retry" } | { type: "respond"; response: Response };
+
+function hashString(value: string): number {
+	let h = 0;
+	for (let i = 0; i < value.length; i++) h = (h * 31 + value.charCodeAt(i)) | 0;
+	return h;
+}
+
+/**
+ * Order route targets for initial selection: the balance strategy's pick
+ * first, then the remaining targets in compiled order so a catalog-absent
+ * primary falls through to viable siblings instead of 404ing the route.
+ */
+function orderedInitialTargets(compiled: CompiledRoute, salt: number): string[] {
+	const first = pickInitialRouteTarget(compiled, salt);
+	if (first === undefined) return [...compiled.targets];
+	return [first, ...compiled.targets.filter(target => target !== first)];
+}
 
 function unknownModelResponse(formatError: FormatErrorFn, modelId: string): Response {
 	return formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
@@ -699,6 +720,8 @@ function recordProviderHealthFailure(
 ): void {
 	if (classified.owner === "provider") {
 		health.recordFailure(model.provider, model.id, "provider");
+	} else if (classified.owner === "model") {
+		health.recordFailure(model.provider, model.id, "model");
 	}
 }
 
@@ -755,18 +778,22 @@ async function handleFormatEndpoint(
 	if (!compiled) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
-	let currentTarget: string | undefined;
-	let model: Model<Api> | undefined;
-	for (const candidate of compiled.targets) {
-		const resolved = bootOpts.resolveModel(candidate);
-		if (resolved) {
-			currentTarget = candidate;
-			model = resolved;
-			break;
+	let currentTarget: string;
+	let model: Model<Api>;
+	{
+		let found: { target: string; model: Model<Api> } | undefined;
+		for (const candidate of orderedInitialTargets(compiled, hashString(requestId))) {
+			const resolved = bootOpts.resolveModel(candidate);
+			if (resolved) {
+				found = { target: candidate, model: resolved };
+				break;
+			}
 		}
-	}
-	if (currentTarget === undefined || model === undefined) {
-		return unknownModelResponse(route.module.formatError, compiled.targets[0] ?? modelId);
+		if (found === undefined) {
+			return unknownModelResponse(route.module.formatError, compiled.targets[0] ?? modelId);
+		}
+		currentTarget = found.target;
+		model = found.model;
 	}
 	const client = resolveClientIdentity(req.headers);
 
@@ -815,7 +842,7 @@ async function handleFormatEndpoint(
 	// anything they didn't touch.
 	{
 		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...(parsed.options.headers ?? {}) };
+		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
@@ -878,6 +905,13 @@ async function handleFormatEndpoint(
 	const classifiedError = (classified: GatewayErrorClassification): Response =>
 		formatError(classified.status, classified.type, classified.message);
 
+	const attemptHookCtx = () => ({
+		requestId,
+		routeId: compiled.id,
+		target: currentTarget,
+		generation: compiled.generation,
+	});
+
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
 		recordProviderHealthFailure(health, model, classified);
@@ -913,6 +947,11 @@ async function handleFormatEndpoint(
 	};
 
 	const bindCurrentTarget = (targetId: string): Response | undefined | "skipped" => {
+		if (targetId !== currentTarget) {
+			// Sibling-credential exhaustion is per-target: a fresh target gets
+			// its own credential siblings before the conductor moves on.
+			siblingsExhausted = false;
+		}
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
@@ -1081,10 +1120,18 @@ async function handleFormatEndpoint(
 				if (picked) return picked;
 				const cred = await resolveCredential();
 				if (cred.type === "retry") {
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					bootOpts.storage.releaseTurnReservation(requestId);
 					continue;
 				}
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				if (cred.type === "respond") return cred.response;
+				try {
+					await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+				} catch (error) {
+					bootOpts.storage.releaseTurnReservation(requestId);
+					throw error;
+				}
 				const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 				logger.info("auth-gateway request", {
 					requestId,
@@ -1109,17 +1156,24 @@ async function handleFormatEndpoint(
 							peer,
 						});
 						if (message.stopReason === "aborted") {
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-						recordProviderHealthFailure(health, model, classified);
+						// Health is recorded exactly once per failure: here for
+						// billable failures (which return), inside considerFallback
+						// otherwise.
 						if (messageHasBillableUsage(message)) {
+							recordProviderHealthFailure(health, model, classified);
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							return formatError(classified.status, classified.type, errorMessage);
 						}
 						if (considerFallback(classified)) {
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							bootOpts.storage.releaseTurnReservation(requestId);
 							continue;
 						}
+						await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
@@ -1145,9 +1199,11 @@ async function handleFormatEndpoint(
 						peer,
 					});
 					if (considerFallback(classified)) {
+						await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 						bootOpts.storage.releaseTurnReservation(requestId);
 						continue;
 					}
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					return classifiedError(classified);
 				}
 			}
@@ -1171,12 +1227,20 @@ async function handleFormatEndpoint(
 		}
 		const cred = await resolveCredential();
 		if (cred.type === "retry") {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			continue;
 		}
 		if (cred.type === "respond") {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return cred.response;
+		}
+		try {
+			await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+		} catch (error) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			throw error;
 		}
 		const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 		logger.info("auth-gateway request", {
@@ -1195,10 +1259,12 @@ async function handleFormatEndpoint(
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway streamSimple threw", { format: route.label, error: classified.message, peer });
 			if (considerFallback(classified)) {
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				continue;
 			}
 			bootOpts.storage.releaseTurnReservation(requestId);
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			return classifiedError(classified);
 		}
 		const settled = events.result();
@@ -1222,10 +1288,12 @@ async function handleFormatEndpoint(
 					(held.message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
 				if (held.message.stopReason === "aborted") {
 					bootOpts.storage.releaseTurnReservation(requestId);
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					return formatError(499, "request_aborted", errorMessage);
 				}
 				const classified = classifyGatewayError(held.message.errorClassificationMessage ?? errorMessage);
 				recordProviderHealthFailure(health, model, classified);
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				return formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1238,13 +1306,16 @@ async function handleFormatEndpoint(
 				peer,
 			});
 			if (considerFallback(classified)) {
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				continue;
 			}
 			bootOpts.storage.releaseTurnReservation(requestId);
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			return classifiedError(classified);
 		}
 		if (controller.signal.aborted) {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
 		}
@@ -1333,18 +1404,22 @@ async function handlePiNative(
 	if (!compiled) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
-	let currentTarget: string | undefined;
-	let model: Model<Api> | undefined;
-	for (const candidate of compiled.targets) {
-		const resolved = bootOpts.resolveModel(candidate);
-		if (resolved) {
-			currentTarget = candidate;
-			model = resolved;
-			break;
+	let currentTarget: string;
+	let model: Model<Api>;
+	{
+		let found: { target: string; model: Model<Api> } | undefined;
+		for (const candidate of orderedInitialTargets(compiled, hashString(requestId))) {
+			const resolved = bootOpts.resolveModel(candidate);
+			if (resolved) {
+				found = { target: candidate, model: resolved };
+				break;
+			}
 		}
-	}
-	if (currentTarget === undefined || model === undefined) {
-		return unknownModelResponse(piNative.formatError, compiled.targets[0] ?? parsed.modelId);
+		if (found === undefined) {
+			return unknownModelResponse(piNative.formatError, compiled.targets[0] ?? parsed.modelId);
+		}
+		currentTarget = found.target;
+		model = found.model;
 	}
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
@@ -1385,6 +1460,13 @@ async function handlePiNative(
 	const classifiedError = (classified: GatewayErrorClassification): Response =>
 		formatError(classified.status, classified.type, classified.message);
 
+	const attemptHookCtx = () => ({
+		requestId,
+		routeId: compiled.id,
+		target: currentTarget,
+		generation: compiled.generation,
+	});
+
 	const considerFallback = (classified: GatewayErrorClassification): boolean => {
 		lastClassified = classified;
 		recordProviderHealthFailure(health, model, classified);
@@ -1420,6 +1502,11 @@ async function handlePiNative(
 	};
 
 	const bindCurrentTarget = (targetId: string): Response | undefined | "skipped" => {
+		if (targetId !== currentTarget) {
+			// Sibling-credential exhaustion is per-target: a fresh target gets
+			// its own credential siblings before the conductor moves on.
+			siblingsExhausted = false;
+		}
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
@@ -1604,10 +1691,18 @@ async function handlePiNative(
 				if (picked) return picked;
 				const cred = await resolveCredential();
 				if (cred.type === "retry") {
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					bootOpts.storage.releaseTurnReservation(requestId);
 					continue;
 				}
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				if (cred.type === "respond") return cred.response;
+				try {
+					await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+				} catch (error) {
+					bootOpts.storage.releaseTurnReservation(requestId);
+					throw error;
+				}
 				const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 				logger.info("auth-gateway request", {
 					requestId,
@@ -1632,17 +1727,24 @@ async function handlePiNative(
 							peer,
 						});
 						if (message.stopReason === "aborted") {
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-						recordProviderHealthFailure(health, model, classified);
+						// Health is recorded exactly once per failure: here for
+						// billable failures (which return), inside considerFallback
+						// otherwise.
 						if (messageHasBillableUsage(message)) {
+							recordProviderHealthFailure(health, model, classified);
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							return formatError(classified.status, classified.type, errorMessage);
 						}
 						if (considerFallback(classified)) {
+							await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 							bootOpts.storage.releaseTurnReservation(requestId);
 							continue;
 						}
+						await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
@@ -1658,9 +1760,11 @@ async function handlePiNative(
 						peer,
 					});
 					if (considerFallback(classified)) {
+						await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 						bootOpts.storage.releaseTurnReservation(requestId);
 						continue;
 					}
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					return classifiedError(classified);
 				}
 			}
@@ -1684,12 +1788,20 @@ async function handlePiNative(
 		}
 		const cred = await resolveCredential();
 		if (cred.type === "retry") {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			continue;
 		}
 		if (cred.type === "respond") {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return cred.response;
+		}
+		try {
+			await runHook(bootOpts.hooks?.beforeAttempt, attemptHookCtx());
+		} catch (error) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			throw error;
 		}
 		const streamOpts = buildAttemptStreamOpts(cred.apiKey);
 		logger.info("auth-gateway request", {
@@ -1708,10 +1820,12 @@ async function handlePiNative(
 			const classified = classifyGatewayError(error);
 			logger.warn("auth-gateway streamSimple threw", { format: "pi-native", error: classified.message, peer });
 			if (considerFallback(classified)) {
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				continue;
 			}
 			bootOpts.storage.releaseTurnReservation(requestId);
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			return classifiedError(classified);
 		}
 		const settled = events.result();
@@ -1732,10 +1846,12 @@ async function handlePiNative(
 					(held.message.stopReason === "aborted" ? "Request was aborted" : "Upstream request failed");
 				if (held.message.stopReason === "aborted") {
 					bootOpts.storage.releaseTurnReservation(requestId);
+					await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 					return formatError(499, "request_aborted", errorMessage);
 				}
 				const classified = classifyGatewayError(held.message.errorClassificationMessage ?? errorMessage);
 				recordProviderHealthFailure(health, model, classified);
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				return formatError(classified.status, classified.type, errorMessage);
 			}
@@ -1748,13 +1864,16 @@ async function handlePiNative(
 				peer,
 			});
 			if (considerFallback(classified)) {
+				await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 				bootOpts.storage.releaseTurnReservation(requestId);
 				continue;
 			}
 			bootOpts.storage.releaseTurnReservation(requestId);
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			return classifiedError(classified);
 		}
 		if (controller.signal.aborted) {
+			await runHook(bootOpts.hooks?.afterAttempt, { ...attemptHookCtx(), ok: false });
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();
 		}
@@ -2074,7 +2193,12 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 
 				if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
 					return withCors(
-						await handleCountTokens(req, id => registry.resolve(id) ?? boot.resolveModel(id)),
+						await handleCountTokens(req, modelId => {
+						const compiled = registry.resolve(modelId);
+						if (!compiled) return undefined;
+						const target = compiled.targets[0];
+						return target ? boot.resolveModel(target) : undefined;
+					}),
 						req,
 					);
 				}

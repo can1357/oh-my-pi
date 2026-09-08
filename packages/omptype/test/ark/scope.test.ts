@@ -264,9 +264,8 @@ describe("cyclic", () => {
 		data.contributors[0].email = "ssalbdivad";
 		// ideally would only include one error, see:
 		// https://github.com/arktypeio/arktype/issues/924
-		expect(
-			types.package(data).toString(),
-		).toBe(`dependencies[1].contributors[0].email must be an email address (was "ssalbdivad")
+		expect(types.package(data).toString())
+			.toBe(`dependencies[1].contributors[0].email must be an email address (was "ssalbdivad")
 contributors[0].email must be an email address (was "ssalbdivad")`);
 	});
 

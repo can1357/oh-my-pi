@@ -119,7 +119,7 @@ const REFUSAL_MAX_ATTEMPTS = 8;
 const REFUSAL_BACKOFF_MS = [0, 5_000, 15_000, 30_000, 60_000, 90_000, 120_000, 180_000];
 
 function isCyberRefusal(error: string | undefined): boolean {
-	return error !== undefined && /^Refusal \(/.test(error);
+	return error !== undefined && error.startsWith("Refusal (");
 }
 
 function assistantText(message: AssistantMessage): string {
@@ -138,6 +138,7 @@ function errorText(error: unknown): string {
 export async function runIfBench(options: IfBenchRunOptions): Promise<IfBenchSummary> {
 	const reports: IfBenchModelReport[] = [];
 	const queue = options.targets.map((target, index) => ({ target, index }));
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const ordered: IfBenchModelReport[] = new Array(options.targets.length);
 
 	const worker = async (): Promise<void> => {

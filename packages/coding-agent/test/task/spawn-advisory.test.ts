@@ -72,7 +72,7 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 			cwd: "/tmp",
 			hasUI: false,
 			suppressSpawnAdvisory: suppress,
-			settings: Settings.isolated({ "task.isolation.mode": "none", "task.batch": true }),
+			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": true }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 		} as unknown as ToolSession;
@@ -85,7 +85,7 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 			// `task.disabledAgents` is what the task tool reads to drop scout from
 			// the rendered description and the appended specialization advisory.
 			settings: Settings.isolated({
-				"task.isolation.mode": "none",
+				"task.isolation.enabled": false,
 				"task.batch": true,
 				"task.disabledAgents": ["scout"],
 			}),
@@ -96,23 +96,21 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 
 	async function spawnTextFor(s: ToolSession): Promise<string> {
 		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [agent], projectAgentsDir: null });
-		vi.spyOn(executorModule, "runSubprocess").mockImplementation(
-			async (options): Promise<SingleResult> => ({
-				index: options.index ?? 0,
-				id: options.id ?? "X",
-				agent: "task",
-				agentSource: "bundled",
-				task: "t",
-				assignment: "do the thing",
-				exitCode: 0,
-				output: "done",
-				stderr: "",
-				truncated: false,
-				durationMs: 1,
-				tokens: 0,
-				requests: 1,
-			}),
-		);
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async (options): Promise<SingleResult> => ({
+			index: options.index ?? 0,
+			id: options.id ?? "X",
+			agent: "task",
+			agentSource: "bundled",
+			task: "t",
+			assignment: "do the thing",
+			exitCode: 0,
+			output: "done",
+			stderr: "",
+			truncated: false,
+			durationMs: 1,
+			tokens: 0,
+			requests: 1,
+		}));
 		const tool = await TaskTool.create(s);
 		const result = await tool.execute("tc", {
 			context: "shared fan-out background",

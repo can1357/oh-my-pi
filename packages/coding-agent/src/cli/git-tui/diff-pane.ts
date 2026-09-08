@@ -398,6 +398,7 @@ export function buildDiffDocument(
 
 	const fileLines = newPlain.map(line => ({ text: line, width: visibleWidth(line) }));
 	const gutterWidth = Math.max(3, String(Math.max(oldLines.length, newLines.length)).length);
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const rowIndexByNewLine: number[] = new Array(newLines.length + 1).fill(-1);
 	rows.forEach((row, index) => {
 		if (row.newNum !== undefined && rowIndexByNewLine[row.newNum] === -1) rowIndexByNewLine[row.newNum] = index;
@@ -667,7 +668,9 @@ export class DiffPane {
 		if (!oldStream && !newStream) return;
 
 		const highlights: SyntaxHighlights = {
+			// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 			old: new Array(doc.oldDisplayLines.length),
+			// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 			new: new Array(doc.newDisplayLines.length),
 		};
 		this.#highlights = highlights;
@@ -1028,6 +1031,7 @@ export class DiffPane {
 	render(width: number, height: number): string[] {
 		this.#lastWidth = width;
 		this.#lastHeight = height;
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		this.#hits = new Array(height);
 		const doc = this.#doc;
 		if (this.state === "streaming" && this.#streaming) return this.#renderStreaming(width, height);

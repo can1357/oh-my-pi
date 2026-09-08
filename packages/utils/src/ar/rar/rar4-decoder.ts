@@ -45,7 +45,7 @@ class Bits {
 	read(count: number): number {
 		if (count === 0) return 0;
 		let value = 0;
-		for (let left = count; left > 0; ) {
+		for (let left = count; left > 0;) {
 			if (this.pos >= this.bytes.byteLength - 4) corrupt("truncated compressed data");
 			const take = Math.min(left, 8 - this.bit);
 			value = value * 2 ** take + ((this.bytes[this.pos]! >>> (8 - this.bit - take)) & (2 ** take - 1));
@@ -340,7 +340,7 @@ class VmBits {
 
 	read(count: number): number {
 		let value = 0;
-		for (let left = count; left > 0; ) {
+		for (let left = count; left > 0;) {
 			const bytePosition = this.#position >>> 3;
 			if (bytePosition >= this.#bytes.byteLength) corrupt("truncated RarVM code");
 			const bitPosition = this.#position & 7;
@@ -393,7 +393,7 @@ function applyFilters(output: Uint8Array, filters: PendingFilter[]): void {
 			continue;
 		}
 		const compareOpcode = filter.type === 2 ? 0xe9 : 0xe8;
-		for (let position = 0; position + 4 < data.byteLength; ) {
+		for (let position = 0; position + 4 < data.byteLength;) {
 			const opcode = data[position++]!;
 			if (opcode !== 0xe8 && opcode !== compareOpcode) continue;
 			const offset = position + (filter.fileOffset >>> 0);
@@ -437,7 +437,7 @@ function readLengthTable(bits: Bits, previous: Uint8Array, size: number): Uint8A
 	const preTable = new Huffman(20);
 	preTable.build(preLengths, 0, 20);
 	const lengths = new Uint8Array(size);
-	for (let position = 0; position < size; ) {
+	for (let position = 0; position < size;) {
 		const symbol = preTable.decode(bits);
 		if (symbol < 16) {
 			lengths[position] = (symbol + previous[position]!) & 15;
