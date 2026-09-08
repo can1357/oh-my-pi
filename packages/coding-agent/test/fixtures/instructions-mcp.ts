@@ -31,9 +31,11 @@ export const TOOL_NAME = "do`thing";
 export const TOOL_RESULT = "MCP_DEFERRED_SMOKE_OK_5c92";
 export const BOUNDED_GUIDANCE_MODE = "--bounded-guidance";
 export const CONTEXT_MODE_NO_INSTRUCTIONS_MODE = "--context-mode-no-instructions";
+export const RESOURCE_GUIDANCE_MODE = "--resource-guidance";
 const CONTEXT_MODE_TOOL_NAME = "ctx_execute";
 /** One more tool than the 64-row prompt budget, forcing the static fallback. */
 export const BOUNDED_GUIDANCE_TOOL_COUNT = 65;
+let balance = 0;
 
 type JsonRpcRequest = {
 	jsonrpc: "2.0";
@@ -42,16 +44,16 @@ type JsonRpcRequest = {
 	params?: Record<string, unknown>;
 };
 
-function buildResult(method: string): Record<string, unknown> {
+function buildResult(method: string, params?: Record<string, unknown>): Record<string, unknown> {
 	const contextModeWithoutInstructions = process.argv.includes(CONTEXT_MODE_NO_INSTRUCTIONS_MODE);
 	switch (method) {
 		case "initialize":
 			return {
 				protocolVersion: "2025-03-26",
 				serverInfo: { name: "instr-fixture", version: "1.0.0" },
-				// Declare only the tools capability so the client never probes
-				// resources/list or prompts/list — keeps the fixture minimal.
-				capabilities: { tools: {} },
+				// Resource capability coverage keeps instructions eager even when every
+				// tool is mounted, because resource reads have no tool-schema lookup.
+				capabilities: { tools: {}, ...(process.argv.includes(RESOURCE_GUIDANCE_MODE) ? { resources: {} } : {}) },
 				...(contextModeWithoutInstructions ? {} : { instructions: SERVER_INSTRUCTIONS }),
 			};
 		case "tools/list": {
@@ -61,7 +63,12 @@ function buildResult(method: string): Record<string, unknown> {
 						return {
 							name: `row_${suffix}`,
 							description: `Bounded guidance fixture tool ${suffix}.`,
-							inputSchema: { type: "object", properties: {}, additionalProperties: false },
+							inputSchema: {
+								type: "object",
+								properties: { delta: { type: "number" } },
+								required: ["delta"],
+								additionalProperties: false,
+							},
 						};
 					})
 				: [
@@ -75,8 +82,29 @@ function buildResult(method: string): Record<string, unknown> {
 					];
 			return { tools };
 		}
-		case "tools/call":
-			return { content: [{ type: "text", text: TOOL_RESULT }], isError: false };
+		case "tools/call": {
+			if (!process.argv.includes(BOUNDED_GUIDANCE_MODE)) {
+				return { content: [{ type: "text", text: TOOL_RESULT }], isError: false };
+			}
+			const name = typeof params?.name === "string" ? params.name : "";
+			const args = params?.arguments;
+			const delta = args && typeof args === "object" && "delta" in args ? args.delta : undefined;
+			const rank = (name.charCodeAt(4) - 97) * 26 + name.charCodeAt(5) - 96;
+			if (
+				!/^row_[a-z]{2}$/.test(name) ||
+				rank < 1 ||
+				rank > BOUNDED_GUIDANCE_TOOL_COUNT ||
+				typeof delta !== "number"
+			) {
+				return { content: [{ type: "text", text: "Invalid archive adjustment" }], isError: true };
+			}
+			balance += rank * delta;
+			return { content: [{ type: "text", text: `balance=${balance}` }], isError: false };
+		}
+		case "resources/list":
+			return { resources: [] };
+		case "resources/templates/list":
+			return { resourceTemplates: [] };
 		default:
 			// `ping` and any other request: a benign empty result keeps the
 			// transport happy without modelling methods the test never exercises.
@@ -97,7 +125,7 @@ function startServer(): void {
 		}
 		// Notifications (no `id`) get no response.
 		if (msg.id === undefined || msg.id === null) return;
-		const response = { jsonrpc: "2.0" as const, id: msg.id, result: buildResult(msg.method) };
+		const response = { jsonrpc: "2.0" as const, id: msg.id, result: buildResult(msg.method, msg.params) };
 		process.stdout.write(`${JSON.stringify(response)}\n`);
 	});
 	rl.on("close", () => process.exit(0));

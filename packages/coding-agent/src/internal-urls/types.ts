@@ -80,6 +80,15 @@ export interface InternalUrl extends URL {
 	rawHref?: string;
 }
 
+/** Validated read-only lookup over a session's enabled tool inventory. */
+export interface XdCatalogQuery {
+	family?: string;
+	q?: string;
+	offset: number;
+	limit: number;
+	snapshot?: string;
+}
+
 /**
  * Caller-supplied context that the router threads into protocol handlers.
  *
@@ -138,6 +147,7 @@ export interface ResolveContext {
 	/** Session-bound `xd://` documentation resolver. */
 	xd?: {
 		read(name: string | null): Promise<string>;
+		catalog?(query: XdCatalogQuery): Promise<string>;
 	};
 	/**
 	 * When set, handlers that would otherwise materialize an expensive directory

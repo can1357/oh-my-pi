@@ -665,6 +665,8 @@ export interface BuildSystemPromptOptions {
 	xdevTools?: Array<{ name: string; summary: string; dynamic?: boolean }>;
 	/** Full docs + JSON schema for every `xd://`-mounted tool, inlined into the protocol section so no discovery `read` is needed. */
 	xdevDocs?: string;
+	/** Family-only disclosure, emitted once for both default and custom templates. */
+	xdevIndex?: string;
 	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
 	autoQaEnabled?: boolean;
 	/** Whether active `write` is restricted to xd:// dispatch and the plan artifact sandbox. */
@@ -677,8 +679,8 @@ export interface BuildSystemPromptResult {
 	systemPrompt: string[];
 	/**
 	 * Names of `xd://` devices whose catalog/protocol section this prompt renders.
-	 * Empty/undefined when no catalog was emitted (no mounted devices, or a custom
-	 * prompt template that omits the section). Lets the session fold these devices
+	 * Empty/undefined for a family-only index or when no catalog was emitted
+	 * (no mounted devices, or a custom prompt that omits it). Lets the session fold these devices
 	 * into its announced-mount baseline so a same-turn mount notice does not re-list
 	 * a catalog the prompt already carries (issue #7139).
 	 */
@@ -730,6 +732,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		reactions = false,
 		xdevTools = [],
 		xdevDocs = "",
+		xdevIndex,
 		autoQaEnabled = false,
 		writeTransportOnly = false,
 		activeRepoContext: providedActiveRepoContext,
@@ -1027,11 +1030,13 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevTools,
 		hasDynamicXdevTools: xdevTools.some(mounted => mounted.dynamic === true),
 		xdevDocs,
+		xdevIndex,
 		autoQaEnabled,
 		writeTransportOnly,
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
 	const systemPrompt = [rendered];
+	if (xdevIndex) systemPrompt.push(xdevIndex);
 	if (computerEnabled) {
 		systemPrompt.push(computerSafetyPrompt.trim());
 	}
@@ -1050,6 +1055,6 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 	// The xd:// protocol section (with its device catalog) is only rendered by the
 	// default template; a resolved custom prompt uses a template that omits it.
 	const xdevCatalogNames =
-		!resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
+		!xdevIndex && !resolvedCustomPrompt && xdevTools.length > 0 ? xdevTools.map(mounted => mounted.name) : undefined;
 	return { systemPrompt, xdevCatalogNames };
 }

@@ -212,7 +212,7 @@ Literal filesystem paths take precedence over selector interpretation, so an exi
 ### Internal URLs
 - `read` delegates internal and MCP-advertised schemes to `InternalUrlRouter`; the built-in registry currently includes `agent://`, `artifact://`, `history://`, `issue://`, `local://`, `mcp://`, `memory://`, `omp://`, `pr://`, `rule://`, `security://`, `skill://`, `ssh://`, `vault://`, and `xd://`.
   - `security://` is reserved for the OMP-owned, producer-neutral, read-only security-analysis store.
-  - `xd://` lists mounted tool devices; `xd://<name>` returns that device's input documentation. Writing JSON to the same URI dispatches the device through `write`.
+  - `xd://` lists mounted tool devices; `xd://<name>` returns current input documentation, including applicable on-demand server guidance. Writing JSON to the exact device URI dispatches through `write`. Read selectors such as `:raw` do not change the device name.
   - `ssh://host/<path>` reads a remote UTF-8 file or directory; bare `ssh://` lists configured hosts. Remote paths are limited to 1 MiB and require a POSIX remote shell. Percent-encode literal `:`, `?`, or `#` in the path.
 - `#handleInternalUrl()` behavior:
   - parses the URL with `parseInternalUrl()` so colons inside the host segment are legal
@@ -252,6 +252,17 @@ Notes: ...
 
 - `method` records the winning path (`json`, `feed`, `text`, `alternate-markdown`, `md-suffix`, `content-negotiation`, `image`, `markit`, `llms.txt`, `raw`, `raw-html`, etc.).
 - URL reads may return an inline image block when the fetched resource is a supported image and survives resizing.
+
+### Indexed device discovery
+
+With `tools.xdevDocs: index`, the prompt carries a compact family index while tools remain registered. `read xd://?` searches the canonical active-or-mounted inventory; bare `read xd://` remains the exhaustive mounted listing.
+
+Root queries accept only `family`, `q`, `offset`, `limit`, and `snapshot`:
+- `family` is an exact family name (`builtin`, `mcp:<server>`, or `external`); encode query values normally.
+- `q` matches case-insensitive terms against canonical names and complete sanitized summaries, not only the bounded display text.
+- `limit` is 1–200, default 50; `offset` is nonnegative. Follow the returned `next` URL, which carries the inventory snapshot. Stale continuations are rejected rather than silently skipping tools.
+
+Responses are JSON with `snapshot`, `inventoryTotal`, matched `total`, `offset`, `limit`, family counts, tool names/schema paths, and `next`. Known MCP connection status is included; an unknown name is not assigned invented connectivity. Queries are read-only and cannot execute a tool. Read a selected exact schema path before invocation; applicable server instructions accompany that schema. Index presentation does not replace dispatch or approval checks.
 
 ## Side Effects
 - Filesystem

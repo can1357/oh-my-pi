@@ -14,7 +14,12 @@ import {
 	collectMountedMCPToolRoutes,
 	projectMountedMCPXdevGuidance,
 } from "@oh-my-pi/pi-coding-agent/session/session-tools";
-import { listXdevTools, XDEV_EXTERNAL_DESCRIPTION_CAP, type XdevState } from "@oh-my-pi/pi-coding-agent/tools/xdev";
+import {
+	listXdevTools,
+	XDEV_EXTERNAL_DESCRIPTION_CAP,
+	type XdevState,
+	xdevDocsAll,
+} from "@oh-my-pi/pi-coding-agent/tools/xdev";
 import { logger } from "@oh-my-pi/pi-utils";
 
 // Cache-stability invariant: when MCP servers reconnect with byte-identical tool
@@ -945,6 +950,39 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 		expect(allNotices[1]).toContain("Unmounted; writes fail:");
 		expect(allNotices[1]).toContain("xd://mcp__nucleus_fetch");
 		expect(allNotices[1]).not.toContain("Available tools.");
+	});
+
+	it("keeps late index notices bounded and refreshes family counts beyond the route cap", async () => {
+		const xdev = createTestXdevState();
+		const { session, contexts } = newSession(async () => xdevDocsAll(xdev, "index"), {
+			xdev,
+			responses: [{ content: ["first answer"] }, { content: ["second answer"] }],
+		});
+		session.settings.set("tools.xdevDocs", "index");
+		const tools = Array.from({ length: 66 }, (_, index) =>
+			createMcpCustomTool(
+				`mcp__nucleus_row_${String(index).padStart(3, "0")}`,
+				"nucleus",
+				`row_${index}`,
+				`Search category ${index}`,
+			),
+		);
+		await session.refreshMCPTools(tools.slice(0, 65));
+		expect(session.systemPrompt.join("\n")).toContain("`mcp:nucleus`: 65 tools");
+		await session.refreshMCPTools(tools);
+		expect(session.systemPrompt.join("\n")).toContain("`mcp:nucleus`: 66 tools");
+		expect(contexts).toHaveLength(0);
+		await session.prompt("inspect the registry");
+		const notices = mountNoticesIn(contexts[0]);
+		expect(notices).toHaveLength(1);
+		expect(Buffer.byteLength(notices[0]!)).toBeLessThan(2000);
+		expect(notices[0]).toContain("xd://?family=mcp%3Anucleus");
+		for (const tool of tools) expect(notices[0]).not.toContain(tool.name);
+		await session.refreshMCPTools(tools);
+		await session.prompt("inspect again");
+		// Only the first persisted notice is replayed; reconnecting an identical
+		// catalog must not append another family-index reminder.
+		expect(mountNoticesIn(contexts[1])).toHaveLength(1);
 	});
 
 	it("caps dynamic xd:// mount-notice summaries", async () => {

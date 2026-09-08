@@ -333,6 +333,10 @@ disabledProviders:
 
 The default is an empty array (nothing disabled). For the two subsystems' provider ids and ordering, see [Providers](./providers.md) and [Context files](./context-files.md).
 
+## Tool discovery
+
+`tools.xdevDocs` selects prompt presentation: `inline`, `builtins`, `catalog`, or `index`. `index` lists mounted families instead of every tool summary; it does not disable tools or change permissions. Native read-only catalog queries discover the enabled inventory and return current schema paths. See [indexed device discovery](./tools/read.md#indexed-device-discovery) for query fields, pagination, and server guidance.
+
 ## Settings catalog
 
 The catalog below highlights common settings; it is not the complete schema. `omp config list` is the authoritative reference for every key, current value, type, and description. Defaults and enum values shown here come from the schema. Settings that accept an env or flag override are noted; those overrides are process-local and not persisted.

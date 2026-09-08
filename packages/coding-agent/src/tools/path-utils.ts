@@ -62,6 +62,7 @@ const INTERNAL_SCHEMES_WITH_SELECTORS: Record<string, true> = {
 	skill: true,
 	ssh: true,
 	vault: true,
+	xd: true,
 };
 // Schemes whose resource URIs are server-defined and may legitimately end
 // with selector-shaped tails (e.g. `:raw`, `:conflicts`, `:1-50`, `/:raw`).
@@ -482,6 +483,9 @@ export function splitInternalUrlSel(rawPath: string): { path: string; sel?: stri
 	if (!INTERNAL_SCHEMES_WITH_SELECTORS[scheme]) return { path: rawPath };
 
 	const schemeEnd = schemeMatch[0].length;
+	// Device catalog queries own pagination; colons in query values (or an
+	// invalid fragment) belong to the URL, never to the read selector grammar.
+	if (scheme === "xd" && /[?#]/.test(rawPath)) return { path: rawPath };
 	// ssh:// authority carries an optional `:port`; with no `/path` after the
 	// authority, a trailing `:NNNN` is the port, not a read selector
 	// (e.g. ssh://host:2222). Other schemes' authority-trailing selectors
@@ -515,6 +519,9 @@ export function splitInternalUrlSel(rawPath: string): { path: string; sel?: stri
  * URLs without a selector pass through unchanged.
  */
 export function peelWriteUrlSelector(rawPath: string): string {
+	// Device writes are exact tool dispatch, not file writes. Never reinterpret
+	// a canonical name (or catalog query) as another device plus a display mode.
+	if (/^xd:\/\//i.test(rawPath)) return rawPath;
 	const { path, sel } = splitInternalUrlSel(rawPath);
 	if (sel === undefined) return rawPath;
 	// Case-insensitive to match read's selector grammar (parseSel + the /i regexes above).

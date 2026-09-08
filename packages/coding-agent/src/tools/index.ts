@@ -749,6 +749,7 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 			mountedNames,
 			builtInNames,
 			isActive: name => session.isToolActive?.(name) === true,
+			getDocsMode: () => session.settings.get("tools.xdevDocs"),
 		};
 		tools = kept;
 	}

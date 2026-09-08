@@ -138,6 +138,27 @@ describe("splitInternalUrlSel", () => {
 	it("still peels authority-trailing selectors for non-ssh schemes (artifact://5:1-50)", () => {
 		expect(splitInternalUrlSel("artifact://5:1-50")).toEqual({ path: "artifact://5", sel: "1-50" });
 	});
+
+	it("routes device raw and compound selectors through the shared read grammar", () => {
+		expect(splitInternalUrlSel("xd://catalog_tool:raw")).toEqual({ path: "xd://catalog_tool", sel: "raw" });
+		expect(splitInternalUrlSel("XD://catalog_tool:raw:1-5")).toEqual({ path: "XD://catalog_tool", sel: "raw:1-5" });
+		expect(splitInternalUrlSel("xd://catalog_tool%3Araw:1-5")).toEqual({
+			path: "xd://catalog_tool%3Araw",
+			sel: "1-5",
+		});
+	});
+
+	it("does not reinterpret device query values, fragments, or encoded colons as selectors", () => {
+		for (const target of [
+			"xd://?q=retention:raw",
+			"xd://?family=mcp:raw",
+			"xd://?limit=1:raw",
+			"xd://?q=retention#fragment:raw",
+			"xd://catalog_tool%3Araw",
+		]) {
+			expect(splitInternalUrlSel(target)).toEqual({ path: target });
+		}
+	});
 });
 
 describe("peelWriteUrlSelector (write/read selector parity)", () => {
@@ -171,6 +192,12 @@ describe("peelWriteUrlSelector (write/read selector parity)", () => {
 		expect(() => peelWriteUrlSelector("ssh://h/f:-10")).toThrow(/whole file/);
 		expect(() => peelWriteUrlSelector("ssh://h/f:raw:1-20")).toThrow(/whole file/);
 		expect(() => peelWriteUrlSelector("ssh://h/f:conflicts:1-20")).toThrow(/whole file/);
+	});
+
+	it("does not redirect exact device writes when a name looks like a read selector", () => {
+		expect(peelWriteUrlSelector("xd://catalog_tool:raw")).toBe("xd://catalog_tool:raw");
+		expect(peelWriteUrlSelector("XD://catalog_tool:1-5")).toBe("XD://catalog_tool:1-5");
+		expect(peelWriteUrlSelector("xd://?limit=1:raw")).toBe("xd://?limit=1:raw");
 	});
 });
 

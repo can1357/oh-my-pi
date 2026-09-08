@@ -4746,14 +4746,14 @@ export const SETTINGS_SCHEMA = {
 
 	"tools.xdevDocs": {
 		type: "enum",
-		values: ["inline", "builtins", "catalog"] as const,
+		values: ["inline", "builtins", "catalog", "index"] as const,
 		default: "builtins",
 		ui: {
 			tab: "tools",
 			group: "Discovery & MCP",
 			label: "xd:// Prompt Docs",
 			description:
-				"Choose which mounted-device docs and schemas are inlined in the system prompt. Built-ins keeps core tools inline while MCP and extension tools stay on-demand.",
+				"Choose which mounted-device docs and schemas are inlined in the system prompt. Built-ins keeps core tools inline; Family Index lists only family counts and discovers every enabled tool on demand.",
 			options: [
 				{ value: "inline", label: "All Devices", description: "Inline docs and schemas for every mounted device." },
 				{
@@ -4762,6 +4762,11 @@ export const SETTINGS_SCHEMA = {
 					description: "Inline built-in docs; fetch MCP and extension docs on demand.",
 				},
 				{ value: "catalog", label: "Catalog Only", description: "List every device; fetch all docs on demand." },
+				{
+					value: "index",
+					label: "Family Index",
+					description: "List mounted families and counts; search tools and fetch schemas on demand.",
+				},
 			],
 		},
 	},
@@ -4774,7 +4779,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Discovery & MCP",
 			label: "xd:// Inline Devices",
 			description:
-				"When xd:// Prompt Docs is Built-ins Only, inline dynamic devices whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only ignores this setting.",
+				"When xd:// Prompt Docs is Built-ins Only, inline dynamic devices whose names match these glob patterns (for example mcp__context_mode_*). Catalog Only and Family Index ignore this setting.",
 		},
 	},
 
