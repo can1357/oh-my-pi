@@ -415,6 +415,17 @@ describe("grokbot backend URL join", () => {
 		);
 	});
 
+	test("appends onto pathname while preserving query strings", () => {
+		// Raw `${base}${path}` would yield `?api_key=secret/sand-box/...` and miss the endpoint.
+		expect(joinGrokbotBackendUrl("https://proxy.example/grokbot?api_key=secret", GROKBOT_RENEWAL_PATH).href).toBe(
+			"https://proxy.example/grokbot/sand-box/inference-credential?api_key=secret",
+		);
+		expect(
+			joinGrokbotBackendUrl("https://proxy.example/grokbot?api_key=secret", "/aiserver.v1.AiService/AvailableModels")
+				.href,
+		).toBe("https://proxy.example/grokbot/aiserver.v1.AiService/AvailableModels?api_key=secret");
+	});
+
 	test("mintGrokbotAccessToken posts to the path-preserving renewal URL", async () => {
 		const seen: string[] = [];
 		const fetchImpl = Object.assign(

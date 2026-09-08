@@ -36,6 +36,7 @@ import {
 	idSafe,
 	evaluateToolFollowupText,
 	matchesToolSmokeCall,
+	matrixProbeEffort,
 	matrixRowFlag,
 	ompToolsExecutionEvidence,
 	parseArgs,
@@ -137,10 +138,11 @@ async function streamOnce(
 	opts?: { maxTokens?: number },
 ): Promise<AssistantMessage> {
 	let last: AssistantMessage | undefined;
+	const effort = matrixProbeEffort(model);
 	for (let attempt = 0; attempt <= GATEWAY_RETRIES; attempt++) {
 		const result = await streamGrokBot(model as Model<"grokbot-sand">, context, {
 			maxTokens: opts?.maxTokens ?? 512,
-			effort: "low",
+			...(effort !== undefined ? { effort } : {}),
 			acceptEmptyResponse: false,
 		}).result();
 		last = result;
@@ -280,7 +282,12 @@ async function runOneTool(
 		body,
 		ping,
 		stopReason: turn2.stopReason,
-		modelId: model.id,
+		// Variant/legacy display selectors classify as unknown; production streaming
+		// uses the canonical request id for Gemini empty-Write acceptance.
+		modelId:
+			typeof model.requestModelId === "string" && model.requestModelId.trim()
+				? model.requestModelId.trim()
+				: model.id,
 	});
 	if (!followup.pass) {
 		return {

@@ -16,13 +16,17 @@ export const GROKBOT_CLIENT_TYPE = "sand";
 
 /**
  * Join a sand API path onto a configured backend while preserving any reverse-proxy
- * path prefix (e.g. `https://proxy.example/grokbot`). `new URL("/sand-box/…", base)`
- * resets the pathname; concatenating onto the trailing-slash-trimmed base keeps it.
+ * path prefix (e.g. `https://proxy.example/grokbot`) and query string
+ * (e.g. `?api_key=secret`). `new URL("/sand-box/…", base)` resets the pathname;
+ * appending onto `pathname` keeps path + search intact.
  */
-export function joinGrokbotBackendUrl(baseUrl: string, path: string): URL {
+export function joinGrokbotBackendUrl(baseUrl: string, apiPath: string): URL {
 	const normalized = (baseUrl.trim() || GROKBOT_BACKEND).replace(/\/+$/, "") || GROKBOT_BACKEND;
-	const suffix = path.startsWith("/") ? path : `/${path}`;
-	return new URL(`${normalized}${suffix}`);
+	const suffix = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
+	const url = new URL(normalized);
+	const basePath = url.pathname.replace(/\/+$/, "");
+	url.pathname = `${basePath}${suffix}`;
+	return url;
 }
 /**
  * Stamped sand client app version (matches current sand-host client stamp).

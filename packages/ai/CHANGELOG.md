@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Catalog matrix derives probe effort from each built model's thinking ladder / sand defaults (no hard-coded `low`).
+- Catalog matrix Gemini Write empty-follow-up classifies via `requestModelId` for variant/legacy selectors.
 - Grok Bot protobuf codec is fully typed (removed file-wide `@ts-nocheck`).
 - Grok Bot legacy matrix derives sand parameter ids and effort from live catalog + buildModel policy instead of hard-coded per-model tables.
 - Block Grok Bot JWT remint/replay after no-tool events were already published live

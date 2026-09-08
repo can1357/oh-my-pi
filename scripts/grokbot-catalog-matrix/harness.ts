@@ -2,6 +2,9 @@
  * Pure catalog-matrix harness helpers (no grokbot/natives imports).
  */
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import toolBashUserPrompt from "./tool-bash-user.md" with { type: "text" };
 import toolReadUserPrompt from "./tool-read-user.md" with { type: "text" };
@@ -11,6 +14,22 @@ export type Mode = "text" | "tools" | "all";
 export type Slice = "representative" | "all";
 export type ToolsSet = "bash" | "core";
 export type ToolSmokeKind = "bash" | "read" | "write";
+
+/**
+ * Probe effort for a matrix row: prefer the built model's thinking default /
+ * supported ladder, then discovered sand defaults. Omit when nothing is known
+ * so adaptive-only / max-only / non-reasoning rows do not send an invented `low`.
+ */
+export function matrixProbeEffort(model: Model<Api>): Effort | string | undefined {
+	const levels = getSupportedEfforts(model);
+	const preferred = model.thinking?.defaultLevel;
+	if (preferred && levels.includes(preferred)) return preferred;
+	if (levels.includes(Effort.Low)) return Effort.Low;
+	if (levels[0]) return levels[0];
+	const defaults = model.sandParameterDefaults;
+	const fromDefaults = defaults?.effort?.trim() || defaults?.reasoning?.trim();
+	return fromDefaults || undefined;
+}
 
 export type MatrixArgs = {
 	mode: Mode;
@@ -287,7 +306,11 @@ export function evaluateToolFollowupText(opts: {
 	body: string;
 	ping: string;
 	stopReason: string;
-	/** Catalog model id — empty Write acceptance is Gemini-class only. */
+	/**
+	 * Canonical request model id (prefer `model.requestModelId` over display
+	 * `model.id`). Empty Write acceptance is Gemini-class only; opaque
+	 * variant/legacy selectors classify as unknown and would false-fail.
+	 */
 	modelId: string;
 }): { pass: boolean; detail?: string } {
 	const isGemini = classifyModel("grokbot", opts.modelId, { lenient: true }).class === "gemini";

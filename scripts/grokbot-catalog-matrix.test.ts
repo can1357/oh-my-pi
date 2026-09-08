@@ -1,4 +1,6 @@
 import { describe, expect, test } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import {
 	classifyError,
 	echoLikeShellCommand,
@@ -7,6 +9,7 @@ import {
 	evaluateToolFollowupText,
 	idSafe,
 	matchesToolSmokeCall,
+	matrixProbeEffort,
 	matrixRowFlag,
 	ompToolsExecutionEvidence,
 	parseArgs,
@@ -16,6 +19,21 @@ import {
 	toolSmokePrompt,
 	writeLikeShellCommand,
 } from "./grokbot-catalog-matrix/harness";
+
+function probeModel(partial: Partial<Model<Api>> & Pick<Model<Api>, "id">): Model<Api> {
+	return {
+		provider: "grokbot",
+		api: "grokbot-sand",
+		name: partial.id,
+		baseUrl: "https://api2.cursor.sh",
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 8192,
+		reasoning: false,
+		...partial,
+	} as Model<Api>;
+}
 
 describe("splitMatrixIds", () => {
 	test("keeps commas inside bracket params as one id", () => {
@@ -126,6 +144,69 @@ describe("evaluateToolFollowupText", () => {
 				modelId: "grok-4.6",
 			}).pass,
 		).toBe(false);
+	});
+
+	test("Gemini empty Write uses the canonical request model, not an opaque selector", () => {
+		// Opaque legacy/variant display ids classify as unknown; callers must pass requestModelId.
+		expect(
+			evaluateToolFollowupText({
+				kind: "write",
+				body: "",
+				ping: "tools-pong-write-x",
+				stopReason: "stop",
+				modelId: "opaque-legacy-gemini-selector",
+			}).pass,
+		).toBe(false);
+		expect(
+			evaluateToolFollowupText({
+				kind: "write",
+				body: "",
+				ping: "tools-pong-write-x",
+				stopReason: "stop",
+				modelId: "gemini-3-flash",
+			}),
+		).toEqual({ pass: true, detail: "empty-followup-after-write" });
+	});
+});
+
+describe("matrixProbeEffort", () => {
+	test("prefers supported low, then defaultLevel, then max-only, then sand defaults; omits when unknown", () => {
+		expect(
+			matrixProbeEffort(
+				probeModel({
+					id: "with-low",
+					reasoning: true,
+					thinking: { efforts: [Effort.Low, Effort.High] },
+				}),
+			),
+		).toBe(Effort.Low);
+		expect(
+			matrixProbeEffort(
+				probeModel({
+					id: "default-high",
+					reasoning: true,
+					thinking: { efforts: [Effort.Medium, Effort.High], defaultLevel: Effort.High },
+				}),
+			),
+		).toBe(Effort.High);
+		expect(
+			matrixProbeEffort(
+				probeModel({
+					id: "max-only",
+					reasoning: true,
+					thinking: { efforts: [Effort.Max] },
+				}),
+			),
+		).toBe(Effort.Max);
+		expect(
+			matrixProbeEffort(
+				probeModel({
+					id: "adaptive-default",
+					sandParameterDefaults: { effort: "adaptive" },
+				}),
+			),
+		).toBe("adaptive");
+		expect(matrixProbeEffort(probeModel({ id: "no-effort" }))).toBeUndefined();
 	});
 });
 

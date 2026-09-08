@@ -13,6 +13,7 @@ import {
 	clearGrokbotTokenCache,
 	createGrokbotChecksum,
 	grokbotClientHeaders,
+	joinGrokbotBackendUrl,
 	loadGrokbotConfig,
 	mergeGrokbotHeaders,
 	mintGrokbotAccessToken,
@@ -56,8 +57,8 @@ export async function fetchGrokbotAvailableModels(
 	options: GrokbotModelDiscoveryOptions = {},
 ): Promise<ModelSpec<"grokbot-sand">[] | null> {
 	const timeoutMs = options.timeoutMs ?? 8_000;
-	const resolvedBaseUrl = (options.baseUrl ?? GROKBOT_BACKEND).replace(/\/+$/, "");
-	const requestUrl = `${resolvedBaseUrl}${GROKBOT_AVAILABLE_MODELS_PATH}`;
+	const resolvedBaseUrl = (options.baseUrl ?? GROKBOT_BACKEND).replace(/\/+$/, "") || GROKBOT_BACKEND;
+	const requestUrl = joinGrokbotBackendUrl(resolvedBaseUrl, GROKBOT_AVAILABLE_MODELS_PATH).href;
 
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
