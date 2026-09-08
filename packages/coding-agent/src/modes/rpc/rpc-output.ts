@@ -1,12 +1,13 @@
 import * as fs from "node:fs";
 import type { Writable } from "node:stream";
 import { logger, TempDir } from "@oh-my-pi/pi-utils";
+import type { BunFile } from "bun";
 
 const READ_BYTES = 64 * 1024;
 
 interface Spool {
 	dir: TempDir;
-	file: string;
+	file: BunFile;
 	fd: number;
 	read: number;
 	written: number;
@@ -71,7 +72,8 @@ export class RpcOutputWriter {
 			const dir = TempDir.createSync("@omp-rpc-output-");
 			try {
 				const file = dir.join("output");
-				this.#spool = { dir, file, fd: fs.openSync(file, "wx+", 0o600), read: 0, written: 0 };
+				const handle = Bun.file(file);
+				this.#spool = { dir, file: handle, fd: fs.openSync(file, "wx+", 0o600), read: 0, written: 0 };
 			} catch (error) {
 				dir.removeSync();
 				throw error;
@@ -111,7 +113,7 @@ export class RpcOutputWriter {
 			while (this.#spool && !this.#blocked && !this.#failure) {
 				const spool = this.#spool;
 				const end = Math.min(spool.written, spool.read + READ_BYTES);
-				const bytes = await Bun.file(spool.file).slice(spool.read, end).bytes();
+				const bytes = await spool.file.slice(spool.read, end).bytes();
 				if (this.#failure) break;
 				if (bytes.length !== end - spool.read) throw new Error("RPC output spool ended before delivery completed");
 				spool.read = end;
