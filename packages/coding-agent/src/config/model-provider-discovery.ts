@@ -1,3 +1,4 @@
+import { getEnvApiKey } from "@oh-my-pi/pi-ai";
 import type { Api, Model } from "@oh-my-pi/pi-ai/types";
 import type { ModelResolutionSource } from "@oh-my-pi/pi-catalog/model-manager";
 import {
@@ -224,6 +225,10 @@ export async function resolveGitHubCopilotDiscoveryAccounts(
  * When OAuth accounts exist, non-OAuth API keys are excluded from the cache
  * identity because discovery intentionally queries only OAuth accounts; adding
  * ignored keys would mismatch cache keys across startup hydration and discovery.
+ *
+ * When no OAuth accounts exist, the identity is derived from the same effective
+ * credential precedence used by discovery (runtime override → config override →
+ * login API key → environment variable → stored static API key).
  */
 export function resolveGitHubCopilotAccountIdentities(authStorage: AuthStorage, resolvedApiKey?: string): string[] {
 	const oauthAccounts = authStorage.listOAuthAccounts("github-copilot");
@@ -235,9 +240,13 @@ export function resolveGitHubCopilotAccountIdentities(authStorage: AuthStorage, 
 		return Array.from(identities).sort();
 	}
 
-	if (resolvedApiKey) {
-		const parsed = parseGitHubCopilotApiKey(resolvedApiKey);
-		const id = parsed.accountId || parsed.accessToken || resolvedApiKey;
+	const effectiveApiKey =
+		resolvedApiKey ??
+		(typeof authStorage.peekApiKeySync === "function" ? authStorage.peekApiKeySync("github-copilot") : undefined) ??
+		getEnvApiKey("github-copilot");
+	if (effectiveApiKey) {
+		const parsed = parseGitHubCopilotApiKey(effectiveApiKey);
+		const id = parsed.accountId || parsed.accessToken || effectiveApiKey;
 		return id ? [id] : [];
 	}
 

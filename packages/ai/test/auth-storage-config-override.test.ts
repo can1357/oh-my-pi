@@ -52,6 +52,7 @@ describe("AuthStorage config-override apiKey", () => {
 
 			expect(await authStorage.getApiKey("anthropic")).toBe("gateway-bearer");
 			expect(await authStorage.peekApiKey("anthropic")).toBe("gateway-bearer");
+			expect(authStorage.peekApiKeySync("anthropic")).toBe("gateway-bearer");
 		});
 	});
 

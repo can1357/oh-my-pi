@@ -5896,6 +5896,60 @@ export class AuthStorage {
 	}
 
 	/**
+	 * Synchronously peek at API key for a provider without refreshing OAuth tokens
+	 * or awaiting external config resolvers. Follows the same credential precedence
+	 * as peekApiKey: runtime override → config override → unexpired OAuth →
+	 * login-persisted API key → environment variable → stored static API key → fallback resolver.
+	 */
+	peekApiKeySync(provider: string): string | undefined {
+		const runtimeKey = this.#runtimeOverrides.get(provider);
+		if (runtimeKey) {
+			return runtimeKey;
+		}
+
+		const configKey = this.#configOverrides.get(provider);
+		if (configKey) {
+			return configKey;
+		}
+
+		const oauthSelection = this.#selectCredentialByType(provider, "oauth");
+		if (oauthSelection) {
+			const expiresAt = oauthSelection.credential.expires;
+			if (Number.isFinite(expiresAt) && expiresAt > Date.now()) {
+				if (provider === "github-copilot") {
+					return JSON.stringify({
+						token: oauthSelection.credential.access,
+						enterpriseUrl: oauthSelection.credential.enterpriseUrl,
+						apiEndpoint: oauthSelection.credential.apiEndpoint,
+						accountId: oauthSelection.credential.accountId,
+					});
+				}
+				return oauthSelection.credential.access;
+			}
+		}
+
+		const loginApiKeySelection = this.#selectCredentialByType(
+			provider,
+			"api_key",
+			undefined,
+			credential => credential.type === "api_key" && credential.source === "login",
+		);
+		if (loginApiKeySelection) {
+			return $envExact(loginApiKeySelection.credential.key) || loginApiKeySelection.credential.key;
+		}
+
+		const envKey = getEnvApiKey(provider);
+		if (envKey) return envKey;
+
+		const apiKeySelection = this.#selectCredentialByType(provider, "api_key");
+		if (apiKeySelection) {
+			return $envExact(apiKeySelection.credential.key) || apiKeySelection.credential.key;
+		}
+
+		return this.#fallbackResolver?.(provider) ?? undefined;
+	}
+
+	/**
 	 * Peek at API key for a provider without refreshing OAuth tokens.
 	 * Used for model discovery where we only need to know if credentials exist
 	 * and get a best-effort token. For GitHub Copilot we preserve enterprise

@@ -1199,6 +1199,80 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(networkCalls).toBe(0);
 	});
 
+	test("github-copilot derives startup cache scope from COPILOT_GITHUB_TOKEN and hits cache on offline restart", async () => {
+		const originalCopilotToken = Bun.env.COPILOT_GITHUB_TOKEN;
+		try {
+			Bun.env.COPILOT_GITHUB_TOKEN = "env-copilot-token";
+			const authPath = path.join(tempDir, "auth-env-copilot.db");
+			authStorage.close();
+			authStorage = await AuthStorage.create(authPath, { usageProviderResolver: () => undefined });
+			// Save a lower-priority stored API key that should be superseded by the environment variable
+			await authStorage.set("github-copilot", {
+				type: "api_key",
+				key: "stale-stored-key",
+			});
+
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: async (input, init) => {
+					const url = String(input);
+					if (url.includes("models.dev")) {
+						return Response.json([]);
+					}
+					if (url.endsWith("/models")) {
+						expect(new Headers(init?.headers).get("Authorization")).toBe("Bearer env-copilot-token");
+						return Response.json({
+							data: [
+								{
+									id: "env-token-model",
+									capabilities: {
+										type: "chat",
+										limits: { max_context_window_tokens: 128_000, max_output_tokens: 16_000 },
+									},
+								},
+							],
+						});
+					}
+					throw new Error(`Unexpected URL: ${url}`);
+				},
+			});
+
+			// Discover models: authoritative discovery uses the higher-priority env token
+			await registry.refreshProvider("github-copilot", "online");
+			expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+			expect(registry.find("github-copilot", "env-token-model")).toBeDefined();
+
+			// Startup cache scope without resolvedApiKey must match discovery's env-token scope, not the stale stored key
+			const startupIdentities = resolveGitHubCopilotAccountIdentities(authStorage);
+			expect(startupIdentities).toEqual(["env-copilot-token"]);
+
+			// Now simulate restart: reload authStorage and open new ModelRegistry with offline hydration
+			authStorage.close();
+			authStorage = await AuthStorage.create(authPath, { usageProviderResolver: () => undefined });
+			await authStorage.reload();
+
+			let networkCalls = 0;
+			const restarted = new ModelRegistry(authStorage, modelsJsonPath, {
+				fetch: async () => {
+					networkCalls++;
+					throw new Error("Offline cache hydration must not fetch");
+				},
+			});
+			await restarted.hydrateCredentialScopedModelCaches();
+
+			// Hydration must hit the cache written during discovery:
+			// remains authoritative, retains env-token-model, and does not restore bundled models
+			expect(restarted.isAuthoritativeProvider("github-copilot")).toBe(true);
+			expect(restarted.find("github-copilot", "env-token-model")).toBeDefined();
+			expect(networkCalls).toBe(0);
+		} finally {
+			if (originalCopilotToken === undefined) {
+				delete Bun.env.COPILOT_GITHUB_TOKEN;
+			} else {
+				Bun.env.COPILOT_GITHUB_TOKEN = originalCopilotToken;
+			}
+		}
+	});
+
 	test("github-copilot discovery honors a runtime key instead of stored OAuth accounts", async () => {
 		await authStorage.set("github-copilot", {
 			type: "oauth",
