@@ -202,3 +202,49 @@ async fn result_text_uses_compact_preview_and_header() {
 	assert_eq!(outcome.files[0].old_text.as_deref(), Some("one\ntwo\nthree\n"));
 	assert_eq!(outcome.files[0].new_text.as_deref(), Some("one\nTWO\nthree\n"));
 }
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reviewed_apply_rejects_create_under_retargeted_symlink() {
+	let ws = Workspace::new(EditMode::Patch);
+	let root = ws.cwd();
+	let target_a = root.join("target_a");
+	let target_b = root.join("target_b");
+	std::fs::create_dir(&target_a).expect("create target_a");
+	std::fs::create_dir(&target_b).expect("create target_b");
+
+	let link_dir = root.join("link_dir");
+	std::os::unix::fs::symlink(&target_a, &link_dir).expect("create symlink to target_a");
+
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({
+			"path": "link_dir/new.txt",
+			"edits": [{ "op": "create", "diff": "hello world\n" }]
+		})
+		.to_string(),
+	);
+	session.finish();
+
+	let reviewed = session.review().expect("review staged plan");
+	assert_eq!(reviewed.len(), 1);
+
+	// Retarget symlink to target_b during review window
+	std::fs::remove_file(&link_dir).expect("unlink symlink");
+	std::os::unix::fs::symlink(&target_b, &link_dir).expect("retarget symlink to target_b");
+
+	let writer = DiskWriter::default();
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("retargeted symlink must be rejected");
+
+	assert!(
+		err.to_string()
+			.contains("target path changed on disk during review"),
+		"expected target path changed error, got: {err}"
+	);
+	assert_eq!(writer.requests.lock().len(), 0);
+	assert!(!target_a.join("new.txt").exists());
+	assert!(!target_b.join("new.txt").exists());
+}

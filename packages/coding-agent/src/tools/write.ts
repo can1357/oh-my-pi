@@ -57,6 +57,7 @@ import {
 	peelWriteUrlSelector,
 	probeLiteralPathExists,
 	resolveFileWriteApprovalTier,
+	resolveSyscallTarget,
 	splitPathAndSel,
 } from "./path-utils";
 import {
@@ -330,6 +331,8 @@ interface WriteApprovalState {
 	/** Exact bytes captured at proposal time; drift compares bytes, not lossy text. */
 	beforeBytes: Uint8Array | null;
 	content?: string;
+	/** Real filesystem target resolved at proposal time to detect symlink retargeting. */
+	syscallTarget: string | null;
 }
 
 // Drift must compare exact bytes: lossy UTF-8 decoding maps distinct malformed
@@ -1157,6 +1160,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		await assertNotReadSelectorMisfire(target, after, this.session.cwd);
 		enforcePlanModeWrite(this.session, target, { op: "create" });
 		const absolutePath = resolvePlanPath(this.session, target);
+		const syscallTarget = await resolveSyscallTarget(absolutePath, true);
 		const beforeBytes = await this.#readApprovalBytes(absolutePath);
 		const before = beforeBytes === null ? null : new TextDecoder().decode(beforeBytes);
 		signal?.throwIfAborted();
@@ -1165,7 +1169,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		// BOM and replaces malformed sequences, so equal text can still mean
 		// executing the write would change the on-disk bytes.
 		const unchanged = beforeBytes !== null && approvalBytesMatch(new TextEncoder().encode(after), beforeBytes);
-		const state: WriteApprovalState = { absolutePath, before, beforeBytes };
+		const state: WriteApprovalState = { absolutePath, before, beforeBytes, syscallTarget };
 		this.#approvalWrites.set(toolCallId, state);
 		return {
 			files: unchanged ? [] : [{ path: displayPath, before, after }],
@@ -1380,9 +1384,12 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			await assertNotReadSelectorMisfire(path, cleanContent, this.session.cwd);
 			enforcePlanModeWrite(this.session, path, { op: "create" });
 			const absolutePath = resolvePlanPath(this.session, path);
+			const currentSyscallTarget = approval ? await resolveSyscallTarget(absolutePath, true) : null;
 			if (
 				approval &&
 				(approval.absolutePath !== absolutePath ||
+					approval.syscallTarget === null ||
+					approval.syscallTarget !== currentSyscallTarget ||
 					!approvalBytesMatch(await this.#readApprovalBytes(absolutePath), approval.beforeBytes))
 			) {
 				throw new ToolError("The write target changed during approval; request a new proposal");

@@ -113,14 +113,16 @@ pub struct EditRevision {
 
 #[derive(Debug, Clone)]
 struct StagedPlan {
-	staged:      Vec<StagedFile>,
+	staged:          Vec<StagedFile>,
 	/// FileRead per reviewed existing file, for persisting revised content
 	/// with the original encoding.
-	reads:       HashMap<PathBuf, Arc<FileRead>>,
+	reads:           HashMap<PathBuf, Arc<FileRead>>,
 	/// Exact on-disk bytes at review time for drift detection. Bytes, not
 	/// the lossy FileRead text, because a file with invalid UTF-8 would
 	/// otherwise never compare equal to its untouched on-disk self.
-	drift_bytes: HashMap<PathBuf, Vec<u8>>,
+	drift_bytes:     HashMap<PathBuf, Vec<u8>>,
+	/// Expected canonical paths at review time to detect symlink retargeting.
+	canonical_paths: HashMap<PathBuf, PathBuf>,
 }
 
 fn reviewed_content_changed(
@@ -138,7 +140,17 @@ fn reviewed_content_changed(
 fn validate_reviewed_file(
 	file: &StagedFile,
 	drift_bytes: &HashMap<PathBuf, Vec<u8>>,
+	canonical_paths: &HashMap<PathBuf, PathBuf>,
 ) -> EditResult<()> {
+	if let Some(expected_canonical) = canonical_paths.get(&file.absolute) {
+		let current_canonical = canonical_key(&file.absolute);
+		if &current_canonical != expected_canonical {
+			return Err(EditError::apply(format!(
+				"File {} target path changed on disk during review",
+				file.display
+			)));
+		}
+	}
 	let current_exists = std::fs::metadata(&file.absolute).is_ok();
 	if file.existed != current_exists {
 		return Err(EditError::apply(format!(
@@ -155,13 +167,22 @@ fn validate_reviewed_file(
 	// validate_rename guarantees every rename destination was absent at review
 	// time; one appearing since means the approved plan would overwrite a file
 	// the human never saw.
-	if let Some(destination) = &file.move_to
-		&& std::fs::metadata(&destination.absolute).is_ok()
-	{
-		return Err(EditError::apply(format!(
-			"Destination {} was created on disk during review",
-			destination.display
-		)));
+	if let Some(destination) = &file.move_to {
+		let dest_changed = canonical_paths
+			.get(&destination.absolute)
+			.is_some_and(|expected| &canonical_key(&destination.absolute) != expected);
+		if dest_changed {
+			return Err(EditError::apply(format!(
+				"Destination {} target path changed on disk during review",
+				destination.display
+			)));
+		}
+		if std::fs::metadata(&destination.absolute).is_ok() {
+			return Err(EditError::apply(format!(
+				"Destination {} was created on disk during review",
+				destination.display
+			)));
+		}
 	}
 	Ok(())
 }
@@ -324,7 +345,13 @@ impl Session {
 		let mut eligible_files = Vec::new();
 		let mut reads = HashMap::new();
 		let mut drift_bytes = HashMap::new();
+		let mut canonical_paths = HashMap::new();
 		for file in &staged {
+			canonical_paths.insert(file.absolute.clone(), canonical_key(&file.absolute));
+			if let Some(destination) = &file.move_to {
+				canonical_paths
+					.insert(destination.absolute.clone(), canonical_key(&destination.absolute));
+			}
 			if file.existed {
 				let resolved = self.files.resolve(&file.display, true)?;
 				if let Some(read) = self.files.try_read(&resolved)? {
@@ -356,7 +383,7 @@ impl Session {
 			}
 		}
 
-		self.staged_plan = Some(StagedPlan { staged, reads, drift_bytes });
+		self.staged_plan = Some(StagedPlan { staged, reads, drift_bytes, canonical_paths });
 		Ok(eligible_files)
 	}
 
@@ -369,13 +396,18 @@ impl Session {
 		writer: &dyn EditWriter,
 	) -> EditResult<ApplyOutcome> {
 		let revisions_slice = revisions.unwrap_or(&[]);
-		let (staged, reviewed_drift_bytes) = if let Some(plan) = self.staged_plan.take() {
-			let StagedPlan { staged: original_staged, reads: staged_reads, drift_bytes } = plan;
+		let (staged, reviewed_plan) = if let Some(plan) = self.staged_plan.take() {
+			let StagedPlan {
+				staged: original_staged,
+				reads: staged_reads,
+				drift_bytes,
+				canonical_paths,
+			} = plan;
 
 			// Reject drift that already existed before any write, preserving the
 			// reviewed plan's all-or-nothing preflight behavior.
 			for file in &original_staged {
-				validate_reviewed_file(file, &drift_bytes)?;
+				validate_reviewed_file(file, &drift_bytes, &canonical_paths)?;
 			}
 
 			if !revisions_slice.is_empty() {
@@ -490,9 +522,9 @@ impl Session {
 						file.record_snapshot = true;
 					}
 				}
-				(revised_staged, Some(drift_bytes))
+				(revised_staged, Some((drift_bytes, canonical_paths)))
 			} else {
-				(original_staged, Some(drift_bytes))
+				(original_staged, Some((drift_bytes, canonical_paths)))
 			}
 		} else {
 			if !revisions_slice.is_empty() {
@@ -520,8 +552,8 @@ impl Session {
 			// Earlier writes may trigger an editor/LSP save of a later target.
 			// Revalidate this file immediately before its own write so a target
 			// cannot drift after passing the up-front preflight.
-			if let Some(drift_bytes) = &reviewed_drift_bytes {
-				validate_reviewed_file(&file, drift_bytes)?;
+			if let Some((drift_bytes, canonical_paths)) = &reviewed_plan {
+				validate_reviewed_file(&file, drift_bytes, canonical_paths)?;
 			}
 			let canonical = canonical_key(&file.absolute);
 			let response = if file.op == FileOp::Noop {

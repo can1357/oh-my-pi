@@ -409,5 +409,28 @@ describe("tool approval content review", () => {
 				/changed during approval/,
 			);
 		});
+
+		test.skipIf(process.platform === "win32")(
+			"refuses to execute when a symlink target was retargeted during approval even with identical bytes",
+			async () => {
+				const targetA = path.join(tmpDir, "target-a.txt");
+				const targetB = path.join(tmpDir, "target-b.txt");
+				const linkPath = path.join(tmpDir, "link.txt");
+				await Bun.write(targetA, "same bytes\n");
+				await Bun.write(targetB, "same bytes\n");
+				await fs.symlink(targetA, linkPath);
+				const tool = new WriteTool(session);
+				const review = await tool.prepareApproval("write-symlink", { path: "link.txt", content: "new content\n" });
+				if (!review) throw new Error("expected a review for a filesystem write");
+				review.apply([]);
+				await fs.unlink(linkPath);
+				await fs.symlink(targetB, linkPath);
+				await expect(tool.execute("write-symlink", { path: "link.txt", content: "new content\n" })).rejects.toThrow(
+					/changed during approval/,
+				);
+				expect(await Bun.file(targetA).text()).toBe("same bytes\n");
+				expect(await Bun.file(targetB).text()).toBe("same bytes\n");
+			},
+		);
 	});
 });
