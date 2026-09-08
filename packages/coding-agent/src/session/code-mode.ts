@@ -28,7 +28,10 @@ export const CODE_MODE_KEEP_TOOLS: Record<string, true> = {
 	__agent__: true,
 	__budget__: true,
 	__completion__: true,
-	__concurrency__: true,
+	__wait__: true,
+	__status__: true,
+	__cancel__: true,
+	__workpool__: true,
 };
 
 export interface CodeModeResolution {

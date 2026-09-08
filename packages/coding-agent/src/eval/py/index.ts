@@ -12,6 +12,7 @@ import {
 	toExecutorBackendResult,
 } from "../backend-helpers";
 import type { BackendProbeOptions } from "../probe";
+import { defaultEvalSessionId } from "../session-id";
 import { executePython, type PythonExecutorOptions } from "./executor";
 import { checkPythonKernelAvailability } from "./kernel";
 
@@ -24,6 +25,22 @@ export function namespaceSessionId(sessionId: string): string {
 function readInterpreterSetting(session: ToolSession): string | undefined {
 	return sharedReadInterpreterSetting(session, "python.interpreter");
 }
+
+/** Resolve the retained Python kernel identity owned by a tool session. */
+export function resolvePythonKernelIdentity(session: ToolSession): {
+	cwd: string;
+	sessionId: string;
+	interpreter: string | undefined;
+	kernelOwnerId: string | undefined;
+} {
+	return {
+		cwd: session.cwd,
+		sessionId: namespaceSessionId(session.getEvalSessionId?.() ?? defaultEvalSessionId(session)),
+		interpreter: readInterpreterSetting(session),
+		kernelOwnerId: session.getEvalKernelOwnerId?.() ?? undefined,
+	};
+}
+
 export default {
 	id: "python",
 	label: "Python",
@@ -36,17 +53,18 @@ export default {
 
 	async execute(code: string, opts: ExecutorBackendExecOptions): Promise<ExecutorBackendResult> {
 		const kernelMode = readSetting<PythonExecutorOptions["kernelMode"]>(opts.session, "python.kernelMode");
+		const identity = resolvePythonKernelIdentity(opts.session);
 		const executorOptions: PythonExecutorOptions = {
-			cwd: opts.cwd,
+			cwd: identity.cwd,
 			idleTimeoutMs: opts.idleTimeoutMs,
 			signal: opts.signal,
-			sessionId: namespaceSessionId(opts.sessionId),
+			sessionId: identity.sessionId,
 			kernelMode,
-			interpreter: readInterpreterSetting(opts.session),
+			interpreter: identity.interpreter,
 			sessionFile: opts.sessionFile,
 			artifactsDir: opts.session.getArtifactsDir?.() ?? undefined,
 			localRoots: resolveEvalUrlRoots(opts.session),
-			kernelOwnerId: opts.kernelOwnerId,
+			kernelOwnerId: identity.kernelOwnerId,
 			reset: opts.reset,
 			onChunk: opts.onChunk,
 			onStatus: opts.onStatus,

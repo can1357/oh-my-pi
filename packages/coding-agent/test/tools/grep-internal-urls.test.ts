@@ -312,8 +312,9 @@ describe("GrepTool internal URL resolution", () => {
 		const session = createSession();
 		const read = new ReadTool(session);
 		// read.ts rejects a peeled internal-URL selector whose parseSel kind is "none"
-		// before resolving the resource, so artifact 5 need not exist.
-		await expect(read.execute("read-bad-neg", { path: "artifact://5:-10" })).rejects.toThrow(/invalid selector/i);
+		// before resolving the resource, so artifact 5 need not exist. (`:-10` alone is
+		// a valid read tail; search rejects it because it cannot filter by tail.)
+		await expect(read.execute("read-bad-neg", { path: "artifact://5:-10-3" })).rejects.toThrow(/invalid selector/i);
 		await expect(read.execute("read-bad-multi", { path: "artifact://5:1-1:1-2" })).rejects.toThrow(
 			/invalid selector/i,
 		);

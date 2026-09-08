@@ -2,9 +2,13 @@
  * Component for displaying bash command execution with streaming output.
  */
 
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import {
 	Container,
 	Ellipsis,
+	getImageDimensions,
+	Image,
+	imageFallback,
 	ImageProtocol,
 	type Loader,
 	TERMINAL,
@@ -18,6 +22,7 @@ import type { Terminal as XtermTerminalType } from "@oh-my-pi/pi-utils/vterm";
 import { theme } from "../../modes/theme/theme";
 import { loadXtermTerminal } from "../../tools/bash-interactive";
 import type { TruncationMeta } from "../../tools/output-meta";
+import { resolveImageOptions } from "../../tools/render-utils";
 import { readTerminalRows, styleTerminalRow } from "../../tools/terminal-output";
 import { getSixelLineMask, isSixelPassthroughEnabled, sanitizeWithOptionalSixelPassthrough } from "../../utils/sixel";
 import {
@@ -40,6 +45,7 @@ const CHUNK_THROTTLE_MS = 50;
 const PTY_SCROLLBACK_ROWS = 4096;
 // Caps the unwritten PTY chunk backlog while xterm.write drains.
 const MAX_PTY_QUEUE_CHUNKS = 512;
+let nextBashExecutionId = 0;
 
 /** PTY size for `!` commands: the execution frame's inner content area. */
 export function bashPtyViewport(ui: TUI): { cols: number; rows: number } {
@@ -75,6 +81,9 @@ export class BashExecutionComponent extends Container {
 	#ptyQueue: string[] = [];
 	#ptyWriting = false;
 	#ptyRefreshQueued = false;
+	#images: readonly ImageContent[] = [];
+	#showImages = true;
+	readonly #instanceId = nextBashExecutionId++;
 
 	constructor(
 		private readonly command: string,
@@ -243,11 +252,18 @@ export class BashExecutionComponent extends Container {
 	setComplete(
 		exitCode: number | undefined,
 		cancelled: boolean,
-		options?: { output?: string; truncation?: TruncationMeta },
+		options?: {
+			output?: string;
+			truncation?: TruncationMeta;
+			images?: readonly ImageContent[];
+			showImages?: boolean;
+		},
 	): void {
 		this.#exitCode = exitCode;
 		this.#status = resolveExecutionStatus(exitCode, cancelled);
 		this.#truncation = options?.truncation;
+		this.#images = options?.images ?? [];
+		this.#showImages = options?.showImages ?? true;
 		if (options?.output !== undefined && !this.#ptyMode) {
 			this.#setOutput(options.output);
 		}
@@ -303,6 +319,29 @@ export class BashExecutionComponent extends Container {
 				// Use shared visual truncation utility, recomputed per render width
 				const styledOutput = previewLogicalLines.map(line => this.#styleDisplayLine(line)).join("\n");
 				this.#contentContainer.addChild(createCollapsedPreview(`\n${styledOutput}`, PREVIEW_LINES));
+			}
+		}
+
+		for (let index = 0; index < this.#images.length; index++) {
+			const image = this.#images[index]!;
+			if (TERMINAL.imageProtocol && this.#showImages) {
+				this.#contentContainer.addChild(
+					new Image(
+						image.data,
+						image.mimeType,
+						{ fallbackColor: text => theme.fg("muted", text) },
+						{
+							...resolveImageOptions(),
+							budget: this.#ui.imageBudget,
+							imageKey: `be${this.#instanceId}:${index}`,
+						},
+					),
+				);
+			} else {
+				const dimensions = getImageDimensions(image.data, image.mimeType) ?? undefined;
+				this.#contentContainer.addChild(
+					new Text(theme.fg("muted", imageFallback(image.mimeType, dimensions)), 1, 0),
+				);
 			}
 		}
 

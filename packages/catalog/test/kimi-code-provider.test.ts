@@ -64,7 +64,8 @@ describe("Kimi Code provider catalog", () => {
 
 		expect(anthropic?.compat.kimiApiFormat).toBe("anthropic");
 		expect(legacy?.compat).toMatchObject({ thinkingFormat: "zai" });
-		expect(legacy?.compat.kimiApiFormat).toBeUndefined();
+		// Unreported protocol resolves the provider-root KDL default (kimi-api-format "anthropic").
+		expect(legacy?.compat.kimiApiFormat).toBe("anthropic");
 		expect(legacy?.thinking?.efforts).toEqual([Effort.Minimal, Effort.Low, Effort.Medium, Effort.High]);
 	});
 

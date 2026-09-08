@@ -1,0 +1,9 @@
+class "gemini" {
+	bounded "gemini"
+
+	family "lite" glob="*flash-lite*" priority=10
+	family "flash" glob="*flash*"
+	family "pro" glob="*pro*"
+
+	revision prefix="gemini-"
+}
