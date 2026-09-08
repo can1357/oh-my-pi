@@ -1,43 +1,28 @@
-import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
-import { complete, completeSimple } from "@oh-my-pi/pi-ai/stream";
-import type { AssistantMessageEvent } from "@oh-my-pi/pi-ai/types";
-import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
-
-afterEach(() => {
-	clearCustomApis();
-});
+import { describe, expect, test } from "bun:test";
+import * as path from "node:path";
 
 describe("completion event retention", () => {
-	for (const completion of [complete, completeSimple]) {
-		test(`${completion.name} releases streamed events while preserving the final response`, async () => {
-			registerMockApi();
-			const mock = createMockModel({ responses: [{ content: ["first", "second", "third"] }] });
-			const streams = new Set<AssistantMessageEventStream>();
-			const push = AssistantMessageEventStream.prototype.push;
-			const observer = spyOn(AssistantMessageEventStream.prototype, "push").mockImplementation(function (
-				this: AssistantMessageEventStream,
-				event: AssistantMessageEvent,
-			) {
-				streams.add(this);
-				push.call(this, event);
-			});
-			try {
-				const message = await completion(mock.model, {
-					systemPrompt: [],
-					messages: [{ role: "user", content: "go", timestamp: 0 }],
-				});
-				expect(message.content).toEqual([
-					{ type: "text", text: "first" },
-					{ type: "text", text: "second" },
-					{ type: "text", text: "third" },
-				]);
-				expect(message.stopReason).toBe("stop");
-				expect([...streams].flatMap(stream => stream.queue)).toEqual([]);
-			} finally {
-				observer.mockRestore();
-			}
-		});
+	for (const completion of ["complete", "completeSimple"]) {
+		for (const outcome of ["success", "failure"]) {
+			test(`${completion} releases events before ${outcome} settles the response`, async () => {
+				const child = Bun.spawn(
+					[process.execPath, path.join(import.meta.dir, "fixtures/completion-retention.ts"), completion, outcome],
+					{ stdout: "pipe", stderr: "pipe" },
+				);
+				const timeout = setTimeout(() => child.kill(), 10_000);
+				try {
+					const [stdout, stderr, exitCode] = await Promise.all([
+						new Response(child.stdout).text(),
+						new Response(child.stderr).text(),
+						child.exited,
+					]);
+					expect({ exitCode, stderr, stdout }).toEqual({ exitCode: 0, stderr: "", stdout: "verified\n" });
+				} finally {
+					clearTimeout(timeout);
+					child.kill();
+					await child.exited;
+				}
+			}, 15_000);
+		}
 	}
 });
