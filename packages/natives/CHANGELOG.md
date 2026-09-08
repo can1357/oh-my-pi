@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Workspace startup scans skip excluded build directories and retain a bounded set of entries and directory rules.
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed
