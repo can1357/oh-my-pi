@@ -9,7 +9,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings, settings } from "../config/settings";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { theme } from "../modes/theme/theme";
-import { resolveCloudSttModel } from "../stt/cloud-transcribe-client";
+import { CLOUD_STT_MODEL_OPTIONS, isCloudSttModel, resolveCloudSttModel } from "../stt/cloud-transcribe-client";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
 import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODEL_OPTIONS } from "../tts";
@@ -173,13 +173,15 @@ function buildSpeechComponents(): SpeechComponent[] {
 				return (await isSttModelCached(key)) ? key : `${key} — not downloaded`;
 			},
 			pick: async () => {
+				const cloud = settings.get("stt.backend") === "cloud";
+				const options = cloud ? CLOUD_STT_MODEL_OPTIONS : STT_MODEL_OPTIONS;
 				const chosen = await selectSetupModel(
 					"Speech-to-Text model",
-					[...STT_MODEL_OPTIONS],
-					settings.get("stt.modelName"),
+					[...options],
+					cloud ? resolveCloudSttModel(settings.get("stt.modelName")) : settings.get("stt.modelName"),
 				);
 				if (chosen === null) return false;
-				if (isSttModelKey(chosen)) {
+				if ((cloud && isCloudSttModel(chosen)) || (!cloud && isSttModelKey(chosen))) {
 					settings.set("stt.modelName", chosen);
 					await settings.flush();
 				}

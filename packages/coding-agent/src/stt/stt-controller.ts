@@ -45,14 +45,19 @@ export interface SttKeyRegistry {
 
 /**
  * Resolve the cloud STT credential: ChatGPT subscription first (no metered
- * spend — the token is accepted on the transcription endpoint), then the
- * `openai` chain (OPENAI_API_KEY, stored keys, models.yml, broker).
+ * spend), then the `openai` chain (OPENAI_API_KEY, stored keys, models.yml,
+ * broker). A failed source must not prevent the next source from being tried.
  */
 export async function resolveSttCloudKey(registry: SttKeyRegistry, sessionId?: string): Promise<string | undefined> {
-	return (
-		(await registry.getApiKeyForProvider("openai-codex", sessionId)) ??
-		(await registry.getApiKeyForProvider("openai", sessionId))
-	);
+	try {
+		const codexKey = await registry.getApiKeyForProvider("openai-codex", sessionId);
+		if (codexKey) return codexKey;
+	} catch {}
+	try {
+		return await registry.getApiKeyForProvider("openai", sessionId);
+	} catch {
+		return undefined;
+	}
 }
 
 /** Test seam: resolves the OpenAI key for the cloud backend. Defaults to env. */
@@ -76,8 +81,8 @@ export class STTController {
 	readonly #createCapture: CaptureFactory;
 	readonly #resolveCloudKey: () => Promise<string | undefined>;
 	readonly #createCloudFetch: CloudSttStreamOptions["fetchImpl"];
+	#didWarnMissingCloudKey = false;
 	#cloudApiKey: string | null = null;
-
 	// Live streaming capture.
 	#stream: SttStreamHandle | null = null;
 	#streamRecorder: CaptureHandle | null = null;
@@ -140,7 +145,6 @@ export class STTController {
 	}
 
 	async #ensureCloudKey(options: ToggleOptions): Promise<string | null> {
-		if (this.#cloudApiKey) return this.#cloudApiKey;
 		try {
 			const key = await this.#resolveCloudKey();
 			if (key) {
@@ -152,9 +156,12 @@ export class STTController {
 				error: err instanceof Error ? err.message : String(err),
 			});
 		}
-		options.showWarning(
-			"No OpenAI credentials for cloud speech-to-text (API key or ChatGPT subscription) — falling back to the local model.",
-		);
+		if (!this.#didWarnMissingCloudKey) {
+			this.#didWarnMissingCloudKey = true;
+			options.showWarning(
+				"No OpenAI credentials for cloud speech-to-text (API key or ChatGPT subscription) — falling back to the local model.",
+			);
+		}
 		return null;
 	}
 
@@ -282,6 +289,7 @@ export class STTController {
 					onPartial,
 					onSegment,
 				});
+		this.#cloudApiKey = null;
 		this.#stream = stream;
 		let recorder: CaptureHandle;
 		try {
