@@ -6,6 +6,7 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	ToolApprovalReview,
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
@@ -23,6 +24,7 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { withFileMutationSession } from "../../tools/file-write-fallback";
 import { normalizeToolEventInput, resolveToolEventInput } from "../tool-event-input";
 import { applyToolProxy } from "../tool-proxy";
+import { runInteractiveApprovalGate } from "./approval-gate";
 import type { ExtensionRunner } from "./runner";
 import type { RegisteredTool, ToolCallEventResult } from "./types";
 
@@ -267,6 +269,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			required: pendingSafetyChecks.length > 0 || (resolved.policy === "prompt" && (explicitPrompt || !xdevBypass)),
 			reason: resolved.reason,
 		};
+		let activeReview: ToolApprovalReview | undefined;
 
 		if (approvalCheck.required) {
 			const scheduledCall = context?.toolCall?.toolCalls[context.toolCall.index];
@@ -280,69 +283,104 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			const hasApprovalHandlers =
 				this.runner.hasHandlers("tool_approval_requested") || this.runner.hasHandlers("tool_approval_resolved");
 			const sessionId = context?.sessionManager?.getSessionId() ?? "";
-			if (hasApprovalHandlers) {
-				await this.runner.emit({
-					type: "tool_approval_requested",
-					sessionId,
-					toolName: this.tool.name,
-					toolCallId,
-					...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
-					approvalMode,
-				});
+
+			const isEligibleForReviewGate =
+				(this.tool.name === "edit" || this.tool.name === "write") &&
+				approvalMode !== "yolo" &&
+				pendingSafetyChecks.length === 0 &&
+				this.runner.hasUI() &&
+				this.runner.hasHandlers("tool_approval_requested") &&
+				this.tool.prepareApproval !== undefined;
+
+			if (isEligibleForReviewGate) {
+				const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
+				const review = await untilAborted(signal, () =>
+					this.tool.prepareApproval!(toolCallId, effectiveParams, signal, context),
+				);
+
+				if (review) {
+					activeReview = review;
+					await runInteractiveApprovalGate({
+						tool: this.tool,
+						toolCallId,
+						effectiveParams,
+						approvalMode,
+						userPolicies,
+						approvalReason: approvalCheck.reason,
+						safetyPrompt: basePrompt,
+						signal,
+						context,
+						runner: this.runner,
+						review,
+					});
+				}
 			}
 
-			const emitApprovalResolved = async (approved: boolean, reason?: string) => {
-				if (!hasApprovalHandlers) return;
-				await this.runner.emit({
-					type: "tool_approval_resolved",
-					sessionId,
-					toolName: this.tool.name,
-					toolCallId,
-					approved,
-					...(reason ? { reason } : {}),
-				});
-			};
+			if (!activeReview) {
+				if (hasApprovalHandlers) {
+					await this.runner.emit({
+						type: "tool_approval_requested",
+						sessionId,
+						toolName: this.tool.name,
+						toolCallId,
+						...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
+						approvalMode,
+					});
+				}
 
-			// Provider safety checks fail closed without an interactive prompt. Unlike
-			// ordinary tier approval, no setting or yolo mode may bypass this gate.
-			if (!this.runner.hasUI()) {
-				const reason = "no interactive UI available";
-				await emitApprovalResolved(false, reason);
-				if (pendingSafetyChecks.length > 0) {
+				const emitApprovalResolved = async (approved: boolean, reason?: string) => {
+					if (!hasApprovalHandlers) return;
+					await this.runner.emit({
+						type: "tool_approval_resolved",
+						sessionId,
+						toolName: this.tool.name,
+						toolCallId,
+						approved,
+						...(reason ? { reason } : {}),
+					});
+				};
+
+				// Provider safety checks fail closed without an interactive prompt. Unlike
+				// ordinary tier approval, no setting or yolo mode may bypass this gate.
+				if (!this.runner.hasUI()) {
+					const reason = "no interactive UI available";
+					await emitApprovalResolved(false, reason);
+					if (pendingSafetyChecks.length > 0) {
+						throw new Error(
+							`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
+						);
+					}
 					throw new Error(
-						`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
+						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
+							`Options:\n` +
+							`  1. Set tools.approvalMode: yolo in /settings\n` +
+							`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
+							`  3. Use an interactive UI to approve the tool call`,
 					);
 				}
-				throw new Error(
-					`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
-						`Options:\n` +
-						`  1. Set tools.approvalMode: yolo in /settings\n` +
-						`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
-						`  3. Use an interactive UI to approve the tool call`,
-				);
-			}
 
-			const uiContext = this.runner.getUIContext();
-			const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
-			const safetyPrompt =
-				pendingSafetyChecks.length > 0
-					? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
-					: basePrompt;
-			let choice: string | undefined;
-			try {
-				choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
-			} catch (err) {
-				await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
-				throw err;
-			}
-			const approved = choice === "Approve";
-			await emitApprovalResolved(approved, approved ? undefined : "denied by user");
-			if (!approved) {
-				throw new Error(`Tool call denied by user: ${this.tool.name}`);
-			}
-			if (pendingSafetyChecks.length > 0) {
-				if (!context) throw new Error("Provider safety approval context is unavailable");
-				context.providerSafetyApproved = true;
+				const uiContext = this.runner.getUIContext();
+				const basePrompt = formatApprovalPrompt(this.tool, resolvedArgs, approvalCheck.reason);
+				const safetyPrompt =
+					pendingSafetyChecks.length > 0
+						? `${basePrompt}\nProvider safety checks:\n${safetyCheckLines(pendingSafetyChecks).join("\n")}`
+						: basePrompt;
+				let choice: string | undefined;
+				try {
+					choice = await uiContext.select(safetyPrompt, ["Approve", "Deny"]);
+				} catch (err) {
+					await emitApprovalResolved(false, err instanceof Error ? err.message : "approval aborted");
+					throw err;
+				}
+				const approved = choice === "Approve";
+				await emitApprovalResolved(approved, approved ? undefined : "denied by user");
+				if (!approved) {
+					throw new Error(`Tool call denied by user: ${this.tool.name}`);
+				}
+				if (pendingSafetyChecks.length > 0) {
+					if (!context) throw new Error("Provider safety approval context is unavailable");
+					context.providerSafetyApproved = true;
+				}
 			}
 		}
 
@@ -366,6 +404,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				content: [{ type: "text", text: executionError.message }],
 				details: undefined as TDetails,
 			};
+		} finally {
+			activeReview?.dispose();
 		}
 
 		// Emit tool_result event - extensions can modify the result and error status

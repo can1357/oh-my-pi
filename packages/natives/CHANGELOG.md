@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `EditSession.review()` exposes the full before/after contents a prepared edit would write (content-modified files only), and `EditSession.apply()` accepts `revisions` to substitute human-edited contents while preserving every other staged operation.
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

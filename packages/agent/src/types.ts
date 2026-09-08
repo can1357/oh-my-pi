@@ -779,6 +779,28 @@ export interface AgentToolArgStreamInit {
 	emit(update: unknown): void;
 }
 
+/** Content-only file proposal, with paths in the tool's working-directory namespace. */
+export interface ToolApprovalFile {
+	path: string;
+	before: string | null;
+	after: string;
+}
+
+/** Only files whose proposed content the human changed are returned. */
+export interface ToolApprovalRevision {
+	path: string;
+	content: string;
+}
+
+/** Prepared by a tool only at an interactive approval gate. */
+export interface ToolApprovalReview {
+	files: readonly ToolApprovalFile[];
+	/** Validate and retain substitutions synchronously, without writing files. */
+	apply(revisions: readonly ToolApprovalRevision[]): void;
+	/** Release preparation after denial, abort, or execution. */
+	dispose(): void;
+}
+
 // AgentTool extends Tool but adds the execute function
 export interface AgentTool<
 	TParameters extends TSchema = TSchema,
@@ -791,6 +813,13 @@ export interface AgentTool<
 	 * Called at `toolcall_start`, before any argument delta. Return `undefined` to opt out.
 	 */
 	openArgStream?: (init: AgentToolArgStreamInit) => AgentToolArgStream | undefined;
+	/** Expose content proposals without requiring approval consumers to parse tool arguments. */
+	prepareApproval?: (
+		toolCallId: string,
+		params: Static<TParameters>,
+		signal?: AbortSignal,
+		context?: AgentToolContext,
+	) => Promise<ToolApprovalReview | undefined>;
 	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
 	hidden?: boolean;
 	/** If true, tool can stage a pending action that requires explicit resolution via the resolve tool. */

@@ -8,6 +8,8 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	ToolApprovalReview,
+	ToolApprovalRevision,
 } from "@oh-my-pi/pi-agent-core";
 import type { Model, ToolExample } from "@oh-my-pi/pi-ai";
 import {
@@ -21,7 +23,7 @@ import {
 	type EditWriteRequest,
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { isEnoent, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { resolveLocalRoot } from "../internal-urls";
 import { cachedVaultRoots, isVaultEnabled } from "../internal-urls/vault-protocol";
 import {
@@ -37,6 +39,7 @@ import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { truncateForPrompt } from "../tools/approval";
+import { toolApprovalRevisionSchema } from "../tools/approval-review";
 import {
 	deleteFileWithFallback,
 	hasFileWriteFallback,
@@ -49,7 +52,7 @@ import {
 	invalidateFsScanAfterWrite,
 } from "../tools/fs-cache-invalidation";
 import { outputMeta } from "../tools/output-meta";
-import { resolveFileWriteApprovalTier } from "../tools/path-utils";
+import { formatPathRelativeToCwd, resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { planLocalProtocolOptions } from "../tools/plan-mode-guard";
 import { ToolError } from "../tools/tool-errors";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
@@ -340,6 +343,7 @@ export class EditTool implements AgentTool<TInput> {
 	readonly #editMode?: EditMode;
 	readonly #deferredDiagnostics: DeferredDiagnostics;
 	readonly #sessions = new Map<string, EditSession>();
+	readonly #approvalRevisions = new Map<string, ToolApprovalRevision[]>();
 
 	constructor(
 		private readonly session: ToolSession,
@@ -461,6 +465,48 @@ export class EditTool implements AgentTool<TInput> {
 		};
 	}
 
+	async prepareApproval(toolCallId: string, params: EditParams, signal?: AbortSignal): Promise<ToolApprovalReview> {
+		this.parameters.assert(params);
+		const editSession =
+			this.#sessions.get(toolCallId) ?? new EditSession(getEditStore(this.session), this.#policy(false));
+		this.#sessions.set(toolCallId, editSession);
+		const dispose = () => {
+			editSession.close();
+			this.#approvalRevisions.delete(toolCallId);
+			if (this.#sessions.get(toolCallId) === editSession) this.#sessions.delete(toolCallId);
+		};
+		try {
+			editSession.setArgsJson(JSON.stringify(params));
+			editSession.finish();
+			const proposals = await untilAborted(signal, () => editSession.review());
+			const paths = new Map(
+				proposals.map(file => [formatPathRelativeToCwd(file.path, this.session.cwd), file.path]),
+			);
+			return {
+				files: proposals.map(file => ({
+					path: formatPathRelativeToCwd(file.path, this.session.cwd),
+					before: file.before ?? null,
+					after: file.after,
+				})),
+				apply: revisions => {
+					const accepted = revisions.map(revision => {
+						toolApprovalRevisionSchema.assert(revision);
+						const absolutePath = paths.get(revision.path);
+						if (!absolutePath) {
+							throw new ToolError(`Invalid approval revision for ${revision.path}`);
+						}
+						return { path: absolutePath, content: revision.content };
+					});
+					this.#approvalRevisions.set(toolCallId, accepted);
+				},
+				dispose,
+			};
+		} catch (error) {
+			dispose();
+			throw error;
+		}
+	}
+
 	async execute(
 		toolCallId: string,
 		params: EditParams,
@@ -477,10 +523,11 @@ export class EditTool implements AgentTool<TInput> {
 			editSession.finish();
 		}
 		const batch = getLspBatchRequest(context?.toolCall);
+		const revisions = this.#approvalRevisions.get(toolCallId);
 		let outcome;
 		try {
 			outcome = await editSession.apply(
-				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false },
+				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false, revisions },
 				(_error, request) => this.#write(request, signal),
 			);
 			if (outcome.isError && batch?.flush) {
@@ -491,6 +538,7 @@ export class EditTool implements AgentTool<TInput> {
 			throw error;
 		} finally {
 			editSession.close();
+			this.#approvalRevisions.delete(toolCallId);
 			if (this.#sessions.get(toolCallId) === editSession) this.#sessions.delete(toolCallId);
 		}
 
@@ -518,6 +566,12 @@ export class EditTool implements AgentTool<TInput> {
 				// Blackbox recording is diagnostic only.
 			}
 			const display = path.relative(this.session.cwd, snapshot.path) || snapshot.path;
+			if (revisions?.some(revision => revision.path === file.path)) {
+				notes.push(
+					`Warning: ${display} no longer parses. The human-approved content was kept without automatic repair.`,
+				);
+				continue;
+			}
 			let repaired: EditAutoRepairOutcome | undefined;
 			try {
 				repaired = await attemptEditAutoRepair({

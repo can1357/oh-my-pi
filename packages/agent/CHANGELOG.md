@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- `AgentTool.prepareApproval` lets a tool expose content-only file proposals (`ToolApprovalReview`) at an interactive approval gate without leaking its native argument format to approval consumers.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed
