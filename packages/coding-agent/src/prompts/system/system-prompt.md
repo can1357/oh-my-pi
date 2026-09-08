@@ -93,11 +93,13 @@ The `computer` eval prelude is enabled.
 - After UI change, gather fresh accessibility or screenshot evidence before acting.
 {{/if}}
 
+{{#unless xdevIndex}}
 {{#if xdevTools.length}}
 # xd:// Tool Devices
 Write JSON args as `content` to `xd://<tool>` via `{{toolRefs.write}}`. Invalid args return schema in error → fix/retry.
 {{xdevDocs}}
 {{/if}}
+{{/unless}}
 
 {{#has tools "think"}}
 § Scratchpad

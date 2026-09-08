@@ -26,6 +26,7 @@ import { InternalUrlRouter, resolveLocalUrlToFile, resolveLocalUrlToPath } from 
 import { type ResolvedArtifactFile, resolveArtifactFile } from "../internal-urls/artifact-protocol";
 import { parseInternalUrl } from "../internal-urls/parse";
 import type { InternalUrl } from "../internal-urls/types";
+import { parseXdUrl } from "../internal-urls/xd-protocol";
 import readDescription from "../prompts/tools/read.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
 import {
@@ -139,7 +140,7 @@ import { REPORT_ISSUE_DEVICE_NAME, reportIssueDeviceUsage } from "./report-tool-
 import { isResolutionDeviceName, resolutionDeviceUsage } from "./resolve";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
 import { toolResult } from "./tool-result";
-import { xdevDocs, xdevListing } from "./xdev";
+import { xdevCatalog, xdevDocs, xdevListing } from "./xdev";
 
 export { readToolRenderer } from "./read-renderer";
 
@@ -1333,7 +1334,12 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 		// Peel malformed selectors through the internal-URL-aware parser before routing.
 		let promotedSelector: string | undefined;
 		if (internalRouter.canResolve(readPath)) {
-			const internalTarget = splitInternalUrlSel(readPath);
+			const deviceName = parseXdUrl(readPath)?.name;
+			// As with literal filesystem paths, an exact registered device wins over
+			// a selector-shaped suffix. Disabled exact names must not fall through
+			// to a differently named enabled device either.
+			const internalTarget =
+				deviceName && this.session.xdev?.tools.has(deviceName) ? { path: readPath } : splitInternalUrlSel(readPath);
 			const parsed = parseSel(internalTarget.sel);
 			if (internalTarget.sel !== undefined && parsed.kind === "none") {
 				throw new ToolError(
@@ -2406,7 +2412,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 	): Promise<AgentToolResult<ReadToolDetails>> {
 		const internalRouter = InternalUrlRouter.instance();
 
-		// Check if URL has query extraction (agent:// only).
+		// Agent extraction and xd catalog queries own their result pagination.
 		// Use parseInternalUrl which handles colons in host (namespaced skills).
 		let urlMeta: InternalUrl;
 		try {
@@ -2415,7 +2421,8 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			throw new ToolError(e instanceof Error ? e.message : String(e));
 		}
 		const scheme = urlMeta.protocol.replace(/:$/, "").toLowerCase();
-		let hasExtraction = false;
+		let hasExtraction =
+			scheme === "xd" && (urlMeta.rawHref ?? urlMeta.href).trim().toLowerCase().startsWith("xd://?");
 		if (scheme === "agent") {
 			const hasPathExtraction = urlMeta.pathname && urlMeta.pathname !== "/" && urlMeta.pathname !== "";
 			const queryParam = urlMeta.searchParams.get("q");
@@ -2461,6 +2468,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					const xdev = this.session.xdev;
 					if (!xdev) throw new ToolError("xd:// is not mounted in this session.");
 					return name === null ? xdevListing(xdev) : xdevDocs(xdev, name);
+				},
+				catalog: async query => {
+					const xdev = this.session.xdev;
+					if (!xdev) throw new ToolError("xd:// is not mounted in this session.");
+					return xdevCatalog(xdev, query);
 				},
 			},
 		});

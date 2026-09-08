@@ -25,7 +25,14 @@ import { wrapToolWithMetaNotice } from "../tools/output-meta";
 import { isFilesystemSourcePath } from "../tools/path-utils";
 import { supportsExternalThinking } from "../tools/think";
 import { ToolAbortError, ToolError } from "../tools/tool-errors";
-import { isMountableUnderXdev, listXdevTools, type XdevState, xdevDocsFor, xdevEntries } from "../tools/xdev";
+import {
+	isMountableUnderXdev,
+	listXdevTools,
+	type XdevState,
+	xdevDocsAll,
+	xdevDocsFor,
+	xdevEntries,
+} from "../tools/xdev";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import {
 	extractPermissionLocations,
@@ -290,7 +297,11 @@ export class SessionTools {
 		if (this.#xdev && this.#xdev.tools !== this.#toolRegistry) {
 			throw new Error("xd:// state must reference the canonical session tool map");
 		}
-		if (this.#xdev) this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
+		if (this.#xdev) {
+			this.#xdev.decorateExecution = tool => this.#wrapToolForAcpPermission(tool);
+			this.#xdev.getDocsMode ??= () => this.#host.settings.get("tools.xdevDocs");
+			this.#xdev.getMcpServerInstructions ??= name => this.#getMcpServerInstructions?.()?.get(name);
+		}
 		this.#setActiveToolNames = options.setActiveToolNames;
 		this.#baseSystemPrompt = options.baseSystemPrompt;
 		this.#skills = options.skills ?? [];
@@ -1239,23 +1250,28 @@ export class SessionTools {
 		const addedNames = [...pending.added].filter(name => !this.#announcedMounts.has(name));
 		const removedNames = [...pending.removed].filter(name => this.#announcedMounts.has(name));
 		if (addedNames.length === 0 && removedNames.length === 0) return undefined;
-		const summaries = new Map(this.#xdev ? xdevEntries(this.#xdev).map(entry => [entry.name, entry.summary]) : []);
+		const indexMode = this.#host.settings.get("tools.xdevDocs") === "index";
+		const summaries = new Map(
+			!indexMode && this.#xdev ? xdevEntries(this.#xdev).map(entry => [entry.name, entry.summary]) : [],
+		);
 		const added = addedNames.map(name => ({ name, summary: summaries.get(name) ?? "" }));
 		const removed = removedNames.map(name => ({ name }));
 		const docs = this.#xdev
-			? xdevDocsFor(
-					this.#xdev,
-					new Set(addedNames),
-					this.#host.settings.get("tools.xdevDocs"),
-					this.#host.settings.get("tools.xdevInlineDevices"),
-				)
+			? indexMode
+				? xdevDocsAll(this.#xdev, "index")
+				: xdevDocsFor(
+						this.#xdev,
+						new Set(addedNames),
+						this.#host.settings.get("tools.xdevDocs"),
+						this.#host.settings.get("tools.xdevInlineDevices"),
+					)
 			: "";
 		for (const name of addedNames) this.#announcedMounts.add(name);
 		for (const name of removedNames) this.#announcedMounts.delete(name);
 		return {
 			role: "custom",
 			customType: XDEV_MOUNT_NOTICE_MESSAGE_TYPE,
-			content: prompt.render(xdevMountNoticePrompt, { added, removed, docs }),
+			content: prompt.render(xdevMountNoticePrompt, { added, removed, docs, indexMode }),
 			details: { added: addedNames, removed: removedNames },
 			attribution: "agent",
 			display: false,
@@ -1537,10 +1553,9 @@ export class SessionTools {
 	 *      `tool.customWireName` and overrides the internal name on the model wire
 	 *      (e.g. `edit` exposes itself as `apply_patch` to GPT-5 in apply_patch mode);
 	 *      a stale wire name would desync prompt guidance from actual tool routing.
-	 *   3. The bounded mounted-MCP projection: escaped original-name labels,
-	 *      actual `xd://` paths, and the omission flag in catalog order. These are
-	 *      the exact values rendered by the global transport guidance; catalog
-	 *      churn wholly behind the fallback does not change the prompt.
+	 *   3. The bounded mounted-MCP projection, or mounted-family index in index
+	 *      mode. Family counts change even when a new tool is past the legacy
+	 *      mapping cap; the small index must not keep stale inventory counts.
 	 *   4. MCP server instructions text (per server), since `rebuildSystemPrompt`
 	 *      embeds these in the appended prompt under "## MCP Server Instructions".
 	 *      A server upgrade can change instructions while keeping tools identical.
@@ -1571,14 +1586,18 @@ export class SessionTools {
 		const describeTool = (tool: AgentTool): string =>
 			`${tool.name}=${tool.label ?? ""}|${tool.description ?? ""}|${tool.customWireName ?? ""}`;
 		const descriptionSegment = tools.map(describeTool).join("\u0002");
-		const mountedMCPProjection = projectMountedMCPXdevGuidance(
-			collectMountedMCPToolRoutes(this.#xdev ? listXdevTools(this.#xdev) : []),
-		);
-		const mountedMCPRouteSegment =
-			JSON.stringify({
+		let mountedMCPRouteSegment: string;
+		if (this.#xdev?.isActive("read") === true && this.#host.settings.get("tools.xdevDocs") === "index") {
+			mountedMCPRouteSegment = xdevDocsAll(this.#xdev, "index");
+		} else {
+			const mountedMCPProjection = projectMountedMCPXdevGuidance(
+				collectMountedMCPToolRoutes(this.#xdev ? listXdevTools(this.#xdev) : []),
+			);
+			mountedMCPRouteSegment = JSON.stringify({
 				mappings: mountedMCPProjection.mappings.map(mapping => [mapping.label, mapping.path] as const),
 				hasOmittedMappings: mountedMCPProjection.hasOmittedMappings,
-			}) ?? "{}";
+			});
+		}
 		const serverInstructions = this.#getMcpServerInstructions?.();
 		let instructionsSegment = "";
 		if (serverInstructions && serverInstructions.size > 0) {
@@ -1590,12 +1609,9 @@ export class SessionTools {
 			entries.sort();
 			instructionsSegment = entries.join("\u0006");
 		}
-		// The non-MCP remainder of the xd:// inventory is deliberately NOT part
-		// of the signature: its mount/unmount announces itself through
-		// `#notifyXdevMountDelta` rather than rewriting the system prompt, keeping
-		// the provider cache prefix byte-stable. Mounted MCP routes are the narrow
-		// exception above, bounded to the exact projection rendered in the global
-		// route guidance so churn wholly behind its fallback does not rebuild.
+		// Outside index mode, non-MCP mounts announce themselves through
+		// #notifyXdevMountDelta rather than invalidating the base prompt. The
+		// legacy MCP projection remains bounded to exactly its rendered mappings.
 		// Direct Code Mode names render the restricted tool inventory, so a
 		// `codeModeDirectTools` change must rebuild even when the enabled set is
 		// unchanged.

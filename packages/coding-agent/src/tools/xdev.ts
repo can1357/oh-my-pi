@@ -6,13 +6,14 @@
  * tools the model already has:
  *
  *   read  xd://          → mounted tool listing (discovery)
+ *   read  xd://?...     → paged lookup over all enabled tools
  *   read  xd://<tool>    → tool docs + JSON parameter schema
  *   write xd://<tool>    → execute: `content` is the JSON args object
  *
  * Direct and device dispatch share one canonical tool map. The mounted-name
  * set controls presentation only; dispatch accepts the enabled union of
- * top-level active and mounted names. Listing and prompt docs stay
- * mounted-only because top-level tools already ship their schemas.
+ * top-level active and mounted names. The bare-root listing and prompt docs
+ * stay mounted-only; root queries search the complete enabled union.
  *
  * Args go through the same machinery as native tool calls: validated with
  * pi-ai's `validateToolArguments` (the schema is returned on mismatch, so a
@@ -32,12 +33,16 @@
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
-import { parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { parseStreamingJson, prompt } from "@oh-my-pi/pi-utils";
 import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import type { XdCatalogQuery } from "../internal-urls/types";
 import { stripXdUrlPrefix, XD_URL_PREFIX } from "../internal-urls/xd-protocol";
-import { parseMCPToolName } from "../mcp/tool-bridge";
+import { type MCPToolOriginSource, parseMCPToolName } from "../mcp/tool-bridge";
 import type { Theme } from "../modes/theme/theme";
+import mcpServerInstructionsTemplate from "../prompts/system/mcp-server-instructions.md" with { type: "text" };
+import xdevIndexTemplate from "../prompts/system/xdev-index.md" with { type: "text" };
+import xdevToolDiscoveryTemplate from "../prompts/system/xdev-tool-discovery.md" with { type: "text" };
 import { truncateHeadBytes } from "../session/streaming-output";
 import { resolveToolTier, type ToolTier } from "./approval";
 import { renderDefaultToolExecution } from "./default-renderer";
@@ -72,7 +77,7 @@ export const XDEV_KEEP_TOP_LEVEL: Record<string, true> = {
 export const XDEV_TRANSPORT_TOOLS: Record<string, true> = { read: true, write: true };
 
 /** Controls which mounted-device docs are inlined into the system prompt. */
-export type XdevDocsMode = "inline" | "builtins" | "catalog";
+export type XdevDocsMode = "inline" | "builtins" | "catalog" | "index";
 
 /**
  * Whether an enabled tool is presented under `xd://` (rather than top-level)
@@ -237,6 +242,9 @@ function decodeInnerArgs(raw: unknown): Record<string, unknown> {
 /** Device-write content that requests docs instead of executing: empty, `?`, or `help`. */
 const HELP_CONTENT_RE = /^\s*(\?|help)?\s*$/i;
 
+/** Current MCP connection state, independent of the tool's enabled state. */
+export type XdevMcpConnectionStatus = "connected" | "connecting" | "disconnected";
+
 /** Shared tool state consumed by the `xd://` presentation layer. */
 export interface XdevState {
 	/** Canonical session tool map; direct and device dispatch read the same instances. */
@@ -249,6 +257,10 @@ export interface XdevState {
 	readonly isActive: (name: string) => boolean;
 	/** Optional execution-only decorator, such as the ACP permission gate. */
 	decorateExecution?(tool: Tool): Tool;
+	/** Live presentation policy and connection guidance; never copied into another registry. */
+	getDocsMode?(): XdevDocsMode;
+	getMcpServerInstructions?(serverName: string): string | undefined;
+	getMcpServerStatus?(serverName: string): XdevMcpConnectionStatus | undefined;
 }
 
 /** Full-doc character budget for system-prompt mounted-device sections. */
@@ -316,9 +328,124 @@ export function xdevListing(state: XdevState): string {
 	].join("\n");
 }
 
+interface XdevCatalogEntry {
+	name: string;
+	family: string;
+	summary: string;
+	path: string;
+	mcpStatus?: XdevMcpConnectionStatus;
+}
+
+function xdevFamily(state: XdevState, name: string): string {
+	if (state.builtInNames.has(name)) return "builtin";
+	const mcp = parseMCPToolName(name);
+	return mcp ? `mcp:${mcp.serverName}` : "external";
+}
+
+function xdevFamilyCounts(
+	state: XdevState,
+	names: Iterable<string>,
+): Array<{ name: string; count: number; path: string }> {
+	const counts = new Map<string, number>();
+	for (const name of names) {
+		const family = xdevFamily(state, name);
+		counts.set(family, (counts.get(family) ?? 0) + 1);
+	}
+	return [...counts.keys()].sort().map(name => ({
+		name,
+		count: counts.get(name)!,
+		path: `${XD_URL_PREFIX}?family=${encodeURIComponent(name)}`,
+	}));
+}
+
+/** Read-only, deterministic catalog over exactly the tools dispatch can resolve. */
+export function xdevCatalog(state: XdevState, query: XdCatalogQuery): string {
+	const names = [...state.tools.keys()].filter(name => state.mountedNames.has(name) || state.isActive(name)).sort();
+	const inventory: XdevCatalogEntry[] = names.map(name => {
+		const tool = state.tools.get(name)!;
+		const origin: MCPToolOriginSource = tool;
+		return {
+			name,
+			family: xdevFamily(state, name),
+			summary: sanitizeCatalogSummary(toolSummary(tool)) || name,
+			path: `${XD_URL_PREFIX}${name}`,
+			mcpStatus:
+				typeof origin.mcpServerName === "string" ? state.getMcpServerStatus?.(origin.mcpServerName) : undefined,
+		};
+	});
+	const snapshot = new Bun.CryptoHasher("sha256").update(JSON.stringify(inventory)).digest("hex");
+	if (query.snapshot !== undefined && query.snapshot !== snapshot) {
+		throw new ToolError(
+			"xd:// catalog snapshot is stale: the enabled tool inventory changed. Restart at offset=0 without a snapshot.",
+		);
+	}
+	const terms = query.q?.toLowerCase().split(/\s+/).filter(Boolean) ?? [];
+	const matches = inventory.filter(entry => {
+		if (query.family !== undefined && entry.family !== query.family) return false;
+		if (terms.length === 0) return true;
+		const text = `${entry.name}\n${entry.summary}`.toLowerCase();
+		return terms.every(term => text.includes(term));
+	});
+	const tools: XdevCatalogEntry[] = matches.slice(query.offset, query.offset + query.limit).map(entry => ({
+		...entry,
+		summary: sanitizeCatalogSummary(entry.summary, XDEV_EXTERNAL_DESCRIPTION_CAP),
+	}));
+	const nextOffset = query.offset + tools.length;
+	let next: string | null = null;
+	if (nextOffset < matches.length) {
+		const parameters = new URLSearchParams();
+		if (query.family !== undefined) parameters.set("family", query.family);
+		if (query.q !== undefined) parameters.set("q", query.q);
+		parameters.set("offset", String(nextOffset));
+		parameters.set("limit", String(query.limit));
+		parameters.set("snapshot", snapshot);
+		next = `${XD_URL_PREFIX}?${parameters}`;
+	}
+	return JSON.stringify(
+		{
+			snapshot,
+			inventoryTotal: inventory.length,
+			total: matches.length,
+			offset: query.offset,
+			limit: query.limit,
+			families: xdevFamilyCounts(state, names),
+			tools,
+			next,
+		},
+		null,
+		2,
+	);
+}
+
+/** Compact mounted-family projection; search and exhaustive reads stay complete. */
+function xdevIndex(state: XdevState): string {
+	const names = [...state.mountedNames].filter(name => state.tools.has(name));
+	return prompt.render(xdevIndexTemplate, { total: names.length, families: xdevFamilyCounts(state, names) }).trim();
+}
+
 /** Docs + schema for any enabled tool. */
 export function xdevDocs(state: XdevState, name: string): string {
-	return renderDocs(resolveRequiredXdevTool(state, name));
+	const tool = resolveRequiredXdevTool(state, name);
+	const docs = renderDocs(tool);
+	const origin: MCPToolOriginSource = tool;
+	const serverName = origin.mcpServerName;
+	if (state.getDocsMode?.() !== "index" || typeof serverName !== "string") return docs;
+	const instructions = state.getMcpServerInstructions?.(serverName);
+	const guidance = instructions
+		? prompt
+				.render(mcpServerInstructionsTemplate, {
+					servers: [{ name: serverName, instructions }],
+				})
+				.trim()
+		: undefined;
+	return prompt
+		.render(xdevToolDiscoveryTemplate, {
+			docs,
+			serverName,
+			status: state.getMcpServerStatus?.(serverName) ?? "unknown",
+			guidance,
+		})
+		.trim();
 }
 
 /** Docs + schema for mounted devices under the configured prompt-doc policy. */
@@ -327,6 +454,7 @@ export function xdevDocsAll(
 	mode: XdevDocsMode = "inline",
 	inlinePatterns: readonly string[] = [],
 ): string {
+	if (mode === "index") return xdevIndex(state);
 	const sections: string[] = [];
 	const overflow: Tool[] = [];
 	const inlineGlobs = compileInlineGlobs(inlinePatterns);
@@ -368,6 +496,7 @@ export function xdevDocsFor(
 	mode: XdevDocsMode,
 	inlinePatterns: readonly string[] = [],
 ): string {
+	if (mode === "index") return "";
 	const sections: string[] = [];
 	const inlineGlobs = compileInlineGlobs(inlinePatterns);
 	let used = 0;
@@ -398,6 +527,7 @@ function shouldInlineXdevTool(
 function resolveRequiredXdevTool(state: XdevState, name: string): Tool {
 	const inst = resolveXdevTool(state, name);
 	if (!inst) {
+		if (state.tools.has(name)) throw new ToolError(`Tool is not enabled in this session: ${XD_URL_PREFIX}${name}.`);
 		throw new ToolError(
 			`No such tool: ${XD_URL_PREFIX}${name}. Mounted devices: ${[...state.mountedNames].join(", ")}. Active top-level tools are also dispatchable via ${XD_URL_PREFIX}<tool>.`,
 		);
@@ -421,12 +551,12 @@ export async function dispatchXdevTool(
 
 		if (HELP_CONTENT_RE.test(content)) {
 			return {
-				result: { content: [{ type: "text", text: renderDocs(canonical) }] },
+				result: { content: [{ type: "text", text: xdevDocs(state, name) }] },
 				xdev: { tool: name, mode: "help" },
 			};
 		}
 
-		const validated = parseDeviceArgs(canonical as AiTool, content, toolCallId, () => renderDocs(canonical));
+		const validated = parseDeviceArgs(canonical as AiTool, content, toolCallId, () => xdevDocs(state, name));
 		// Record the wrapped tool's approval tier so the prewalk coordinator can
 		// tell a read-only device call (e.g. `lsp` navigation) from a real
 		// workspace mutation without re-decoding the payload. Best-effort: a

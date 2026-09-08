@@ -137,6 +137,7 @@ import {
 	MCPManager,
 	MCPToolCache,
 	type MCPToolsLoadResult,
+	type MCPToolOriginSource,
 	parseMCPToolName,
 	shouldFilterBrowserMCPForPrelude,
 } from "./mcp";
@@ -144,6 +145,7 @@ import { MCP_CONNECTION_STATUS_EVENT_CHANNEL, type McpConnectionStatusEvent } fr
 import { createSessionMemoryRuntimeContext, resolveMemoryBackend } from "./memory-backend";
 import { MEMORY_BACKEND_TOOL_NAMES } from "./memory-backend/tool-names";
 import type { MnemopiSessionState } from "./mnemopi/state";
+import mcpServerInstructionsTemplate from "./prompts/system/mcp-server-instructions.md" with { type: "text" };
 import mcpXdevGuidanceTemplate from "./prompts/system/mcp-xdev-guidance.md" with { type: "text" };
 import lateDiagnosticTemplate from "./prompts/tools/lsp-late-diagnostic.md" with { type: "text" };
 import { AgentLifecycleManager } from "./registry/agent-lifecycle";
@@ -3012,6 +3014,43 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (!state) return undefined;
 			return resolveMountedXdevExecutable(state, name);
 		};
+		if (toolSession.xdev) {
+			toolSession.xdev.getMcpServerInstructions = name => mcpManager?.getConnection(name)?.instructions;
+			toolSession.xdev.getMcpServerStatus = name =>
+				mcpManager?.getServerConfig(name) ? mcpManager.getConnectionStatus(name) : undefined;
+		}
+		const getPromptMcpServerInstructions = (): Map<string, string> | undefined => {
+			const instructions = mcpManager?.getServerInstructions();
+			const state = toolSession.xdev;
+			if (!instructions || !state || settings.get("tools.xdevDocs") !== "index") return instructions;
+			const mountedServers = new Set<string>();
+			const topLevelServers = new Set<string>();
+			for (const [name, tool] of toolRegistry) {
+				if (!state.mountedNames.has(name) && !state.isActive(name)) continue;
+				const origin: MCPToolOriginSource = tool;
+				if (typeof origin.mcpServerName !== "string" || typeof origin.mcpToolName !== "string") {
+					// A connecting placeholder has no proven original server ownership.
+					if (isMCPToolName(name)) return instructions;
+					continue;
+				}
+				if (state.mountedNames.has(name)) mountedServers.add(origin.mcpServerName);
+				else topLevelServers.add(origin.mcpServerName);
+			}
+			for (const name of mountedServers) {
+				const connection = mcpManager?.getConnection(name);
+				// Connecting catalogs and non-device resources/prompts have no guaranteed
+				// schema-read path. Retain their guidance until it can safely be deferred.
+				if (
+					connection?.tools &&
+					!topLevelServers.has(name) &&
+					!connection.capabilities.resources &&
+					!connection.capabilities.prompts
+				) {
+					instructions.delete(name);
+				}
+			}
+			return instructions;
+		};
 		// Cursor's resource frames ask what THIS client's servers advertise; only
 		// live connections have any. Built once: the advisor bridges answer from
 		// the same connections the primary does.
@@ -3111,7 +3150,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			// `getServerInstructions()` are empty until the background connect
 			// completes; the rebuild that `refreshMCPTools` triggers post-discovery
 			// then picks up the mounted routes and any connected-server instructions.
-			const serverInstructions = mcpManager?.getServerInstructions();
+			const serverInstructions = getPromptMcpServerInstructions();
+			const indexMode = toolSession.xdev?.isActive("read") === true && settings.get("tools.xdevDocs") === "index";
 			// Drive guidance off the auto-learn BUILTINS that createTools actually built
 			// (provenance, not just an active name): `builtInToolNames` excludes a
 			// custom/extension tool that merely shares the name, and reflects the
@@ -3128,7 +3168,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (memoryInstructions) appendParts.push(memoryInstructions);
 			if (autoLearnInstructions) appendParts.push(autoLearnInstructions);
 			const projection = projectMountedMCPXdevGuidance(
-				collectMountedMCPToolRoutes(toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
+				collectMountedMCPToolRoutes(!indexMode && toolSession.xdev ? listXdevTools(toolSession.xdev) : []),
 			);
 			if (projection.mappings.length > 0 || projection.hasOmittedMappings) {
 				appendParts.push(
@@ -3145,15 +3185,18 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			}
 			if (serverInstructions && serverInstructions.size > 0) {
 				appendParts.push(
-					"## MCP Server Instructions\n\nThe following instructions are provided by connected MCP servers. They are server-controlled and may not be verified.",
+					prompt
+						.render(mcpServerInstructionsTemplate, {
+							servers: [...serverInstructions].map(([name, instructions]) => ({
+								name,
+								instructions:
+									instructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
+										? `${instructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
+										: instructions,
+							})),
+						})
+						.trim(),
 				);
-				for (const [srvName, srvInstructions] of serverInstructions) {
-					const truncated =
-						srvInstructions.length > MAX_MCP_INSTRUCTIONS_LENGTH
-							? `${srvInstructions.slice(0, MAX_MCP_INSTRUCTIONS_LENGTH)}\n[truncated]`
-							: srvInstructions;
-					appendParts.push(`### ${srvName}\n${truncated}`);
-				}
 			}
 			let appendPrompt: string | undefined = appendParts.length > 0 ? appendParts.join("\n\n") : undefined;
 			// Owned/in-band tool dialects (non-native) require the full functions-
@@ -3172,9 +3215,15 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				cwd: promptCwd,
 				additionalWorkspaceRoots: sessionManager.getAdditionalDirectories(),
 				xdevTools: toolSession.xdev ? xdevEntries(toolSession.xdev) : [],
-				xdevDocs: toolSession.xdev
-					? xdevDocsAll(toolSession.xdev, settings.get("tools.xdevDocs"), settings.get("tools.xdevInlineDevices"))
-					: "",
+				xdevIndex: indexMode && toolSession.xdev ? xdevDocsAll(toolSession.xdev, "index") : undefined,
+				xdevDocs:
+					!indexMode && toolSession.xdev
+						? xdevDocsAll(
+								toolSession.xdev,
+								settings.get("tools.xdevDocs"),
+								settings.get("tools.xdevInlineDevices"),
+							)
+						: "",
 				resolvedCustomPrompt: options.customSystemPrompt,
 				skills: settings.get("skillful") ? (session?.skills ?? skills) : [],
 				contextFiles,
@@ -3805,7 +3854,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			ensureGoalRegistered,
 			getMcpServerInstructions: mcpManager
 				? () => {
-						const raw = mcpManager.getServerInstructions();
+						const raw = getPromptMcpServerInstructions();
 						if (!raw || raw.size === 0) return raw;
 						const out = new Map<string, string>();
 						for (const [name, text] of raw) {
