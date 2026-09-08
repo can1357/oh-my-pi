@@ -92,9 +92,11 @@ const gitControls = {
 	defaultBranch: vi.fn(async (_signal?: AbortSignal): Promise<string | null> => null),
 	head: vi.fn(async (_signal?: AbortSignal): Promise<VcsHeadState | null> => fakeRefHead),
 	headSync: vi.fn((): VcsHeadState | null => fakeRefHead),
-	statusSummary: vi.fn(
-		async (_signal?: AbortSignal): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
-	),
+	statusSummary: vi.fn(async (_signal?: AbortSignal): Promise<GitStatus | null> => ({
+		staged: 0,
+		unstaged: 0,
+		untracked: 0,
+	})),
 };
 
 const fakeRepository = {
@@ -106,9 +108,11 @@ const fakeRepository = {
 } as unknown as VcsGitRepo;
 
 const jjControls = {
-	statusSummary: vi.fn(
-		async (_signal?: AbortSignal): Promise<GitStatus | null> => ({ staged: 0, unstaged: 0, untracked: 0 }),
-	),
+	statusSummary: vi.fn(async (_signal?: AbortSignal): Promise<GitStatus | null> => ({
+		staged: 0,
+		unstaged: 0,
+		untracked: 0,
+	})),
 	label: vi.fn(async (_signal?: AbortSignal): Promise<string | null> => null),
 };
 
@@ -464,6 +468,19 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 });
 
 describe("StatusLineComponent VCS watcher and jj request lifecycle", () => {
+	it("reuses one repository handle across repeated paints", () => {
+		const repoSpy = vi.spyOn(vcs, "repo");
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+
+		component.getTopBorder(80);
+		component.getTopBorder(80);
+		component.getTopBorder(80);
+
+		expect(repoSpy).toHaveBeenCalledTimes(1);
+		component.dispose();
+	});
+
 	it("discovers a repository created after setup with bounded single-flight polling", async () => {
 		let now = 1_000_000;
 		const repositoryCreatedAt = now + 5_000;

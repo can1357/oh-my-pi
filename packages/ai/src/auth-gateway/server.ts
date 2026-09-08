@@ -154,7 +154,7 @@ function deriveSessionId(modelId: string, context: Context): string {
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
-	const opts: SimpleStreamOptions = { signal };
+	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
 	// Codex backend rejects every sampling control with
 	// `Unsupported parameter: …` (#3117). Strip the full set for that one
@@ -171,7 +171,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
-	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
+	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
 			typeof options.toolChoice !== "object"
@@ -184,6 +184,9 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
 	if (options.hideThinkingSummary !== undefined) opts.hideThinkingSummary = options.hideThinkingSummary;
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
+	if (options.anthropicPrefixMismatchBehavior !== undefined) {
+		opts.anthropicPrefixMismatchBehavior = options.anthropicPrefixMismatchBehavior;
+	}
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
 	if (options.include !== undefined) opts.include = options.include;
@@ -194,7 +197,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
-		opts.thinkingBudgets = { ...(opts.thinkingBudgets ?? {}), ...options.thinkingBudgets };
+		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
@@ -203,7 +206,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		// surface the budget.
 		const effort = options.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
-			...(opts.thinkingBudgets ?? {}),
+			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
 		};
 		opts.reasoning ??= effort;
@@ -266,6 +269,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		const retryAfterMs = extractRetryHint(undefined, message);
 		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs,
+			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			apiKey: oldKey,
@@ -378,6 +382,7 @@ function conductorExecutionState(
 		fallbackCount,
 		committed: commitState !== "probing",
 		currentTarget,
+		siblingsExhausted: false,
 	};
 }
 
@@ -617,6 +622,26 @@ function releaseTurnOnStreamEnd(
 	});
 }
 
+function targetRejectsOpenAIImageFileReferences(
+	routeLabel: string,
+	model: Model<Api>,
+	messages: Context["messages"],
+): boolean {
+	if (routeLabel !== "openai-responses") return false;
+	const supports =
+		model.api === "openai-responses" ||
+		model.api === "azure-openai-responses" ||
+		model.api === "openai-codex-responses";
+	if (supports) return false;
+	return messages.some(
+		message =>
+			message.role === "toolResult" &&
+			message.content.some(
+				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
+			),
+	);
+}
+
 async function handleFormatEndpoint(
 	route: { module: FormatModule; label: string },
 	bootOpts: AuthGatewayBootOptions,
@@ -683,29 +708,10 @@ async function handleFormatEndpoint(
 	// anything they didn't touch.
 	{
 		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...(parsed.options.headers ?? {}) };
+		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
-function targetRejectsOpenAIImageFileReferences(
-	routeLabel: string,
-	model: Model<Api>,
-	messages: Context["messages"],
-): boolean {
-	if (routeLabel !== "openai-responses") return false;
-	const supports =
-		model.api === "openai-responses" ||
-		model.api === "azure-openai-responses" ||
-		model.api === "openai-codex-responses";
-	if (supports) return false;
-	return messages.some(
-		message =>
-			message.role === "toolResult" &&
-			message.content.some(
-				block => block.type === "image" && block.providerFile?.provider === "openai" && block.providerFile.id,
-			),
-	);
-}
 
 
 	const supportsOpenAIImageFileReferences =
@@ -1160,7 +1166,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		model = resolved;
-		if (targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages)) {
+		if (targetRejectsOpenAIImageFileReferences("pi-native", model, parsed.context.messages)) {
 			return formatError(
 				400,
 				"invalid_request_error",
@@ -1622,9 +1628,18 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 					return withCors(handleRoutesList(registry), req);
 				}
 				if (req.method === "GET" && pathname.startsWith("/v1/routes/")) {
-					const id = pathname.slice("/v1/routes/".length);
-					if (id.length === 0) {
+					const rawId = pathname.slice("/v1/routes/".length);
+					if (rawId.length === 0) {
 						return withCors(handleRoutesList(registry), req);
+					}
+					// Route ids may carry reserved characters; clients send
+					// them escaped (`virtual%2Fprimary`). Malformed escapes
+					// are a client error, not a missing route.
+					let id: string;
+					try {
+						id = decodeURIComponent(rawId);
+					} catch {
+						return withCors(json(400, { error: "invalid route id encoding" }), req);
 					}
 					return withCors(handleRouteGet(registry, id), req);
 				}

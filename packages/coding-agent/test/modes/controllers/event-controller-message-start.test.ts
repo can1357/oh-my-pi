@@ -1,12 +1,11 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
-import type { TextContent, UserMessage } from "@oh-my-pi/pi-ai";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import type { UserMessage } from "@oh-my-pi/pi-ai";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(() => {
 	initTheme();
@@ -34,43 +33,35 @@ function createContext(options: {
 		setText,
 		getText: () => currentEditorText,
 	};
-	const addMessageToChat = vi.fn();
-	const updatePendingMessagesDisplay = vi.fn();
+	const ctx = createInteractiveModeContext({
+		editor,
+		getUserMessageText: message =>
+			typeof message.content === "string"
+				? message.content
+				: message.content
+						.map(content =>
+							content.type === "text" && "text" in content && typeof content.text === "string"
+								? content.text
+								: "",
+						)
+						.join(""),
+		optimisticUserMessageSignature: options.optimisticSignature,
+		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
+	});
 	const clearOptimisticUserMessage = vi.fn(() => {
 		ctx.optimisticUserMessageSignature = undefined;
 	});
 	const replaceOptimisticUserMessage = vi.fn(() => {
 		ctx.optimisticUserMessageSignature = undefined;
 	});
-	const ctx = {
-		isInitialized: true,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender: vi.fn() },
-		editor,
-		addMessageToChat,
-		updatePendingMessagesDisplay,
-		getUserMessageText: (message: UserMessage) =>
-			typeof message.content === "string"
-				? message.content
-				: message.content
-						.filter((c): c is TextContent => c.type === "text")
-						.map(c => c.text)
-						.join(""),
-		optimisticUserMessageSignature: options.optimisticSignature,
-		locallySubmittedUserSignatures: new Set<string>(options.locallySubmittedSignatures ?? []),
-		clearOptimisticUserMessage,
-		replaceOptimisticUserMessage,
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
-		viewSession: { isStreaming: false },
-	} as unknown as InteractiveModeContext;
+	ctx.clearOptimisticUserMessage = clearOptimisticUserMessage;
+	ctx.replaceOptimisticUserMessage = replaceOptimisticUserMessage;
 	return {
 		ctx,
 		editor,
 		setText,
-		addMessageToChat,
-		updatePendingMessagesDisplay,
+		addMessageToChat: ctx.addMessageToChat,
+		updatePendingMessagesDisplay: ctx.updatePendingMessagesDisplay,
 		clearOptimisticUserMessage,
 		replaceOptimisticUserMessage,
 	};
@@ -181,7 +172,8 @@ function createIrcMessage(timestamp: number): CustomMessage<{ from: string; mess
 }
 
 function createIrcContext(options: { liveBlockAbove?: boolean } = {}) {
-	const chatContainer = new TranscriptContainer();
+	const ctx = createInteractiveModeContext();
+	const { chatContainer } = ctx;
 	if (options.liveBlockAbove) {
 		// A still-running tool above the cards: they sit in the live region,
 		// where their rows cannot have committed to native scrollback.
@@ -191,21 +183,14 @@ function createIrcContext(options: { liveBlockAbove?: boolean } = {}) {
 			isTranscriptBlockFinalized: () => false,
 		} as Component);
 	}
-	const requestRender = vi.fn();
-	const ctx = {
-		isInitialized: true,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		ui: { requestRender },
-		chatContainer,
-		session: {},
-	} as unknown as InteractiveModeContext;
 	const helpers = new UiHelpers(ctx);
-	const addMessageToChat: InteractiveModeContext["addMessageToChat"] = vi.fn((message, options) =>
-		helpers.addMessageToChat(message, options),
-	);
-	ctx.addMessageToChat = addMessageToChat;
-	return { ctx, chatContainer, requestRender, addMessageToChat };
+	ctx.addMessageToChat = vi.fn((message, options) => helpers.addMessageToChat(message, options));
+	return {
+		ctx,
+		chatContainer,
+		requestRender: ctx.ui.requestRender,
+		addMessageToChat: ctx.addMessageToChat,
+	};
 }
 
 describe("EventController IRC expiry", () => {

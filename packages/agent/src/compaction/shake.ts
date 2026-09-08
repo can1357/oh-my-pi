@@ -318,6 +318,7 @@ export function collectShakeRegions(entries: SessionEntry[], tokenizer: Tokenize
 	if (n === 0) return [];
 
 	// Tokens of all entries strictly more recent than index i.
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const accumulatedAfter = new Array<number>(n);
 	let acc = 0;
 	for (let i = n - 1; i >= 0; i--) {

@@ -1,7 +1,6 @@
 import * as path from "node:path";
 import { getLogsDir, isBunTestRuntime } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error/flags";
-import { isCopilotTransientModelError } from "./retry.js";
 import { formatErrorMessageWithRetryAfter } from "./retry-after.js";
 
 export type RawHttpRequestDump = {
@@ -95,13 +94,12 @@ export async function finalizeErrorMessage(
  * Rewrite error message for GitHub Copilot request failures.
  * Must run AFTER finalizeErrorMessage since it replaces the message entirely.
  *
- * 400 `model_not_supported` = Copilot fleet skew. A model that `/models`
- *        advertises can flap between 200 and 400 because only part of
- *        Copilot's fleet has it in the integrator allowlist. After the
- *        in-request retry exhausts, surface guidance rather than the raw error.
  * 401 = token invalid/expired → credential removal is safe, prompt re-login.
  * 403 = token valid but access denied (plan, model policy, org restriction) →
  *       do NOT reuse the auth-failed string (which triggers credential removal).
+ * 400 is left verbatim: GitHub's body names the cause (`model_not_supported`,
+ *       `model_not_available_for_integrator` with its `Available models` list)
+ *       and a rewrite only hides it.
  */
 export function rewriteCopilotError(errorMessage: string, error: unknown, provider: string): string {
 	if (provider !== "github-copilot") return errorMessage;
@@ -111,9 +109,6 @@ export function rewriteCopilotError(errorMessage: string, error: unknown, provid
 	}
 	if (status === 403) {
 		return `GitHub Copilot access denied (HTTP 403). Your account may not have access to this model or feature. Check your Copilot plan or model policy settings.`;
-	}
-	if (isCopilotTransientModelError(error)) {
-		return `GitHub Copilot rejected this model (HTTP 400) after retries: only part of its fleet currently serves this model id, even though /models advertises it. Try again in a few seconds or switch to a model Copilot serves fleet-wide (claude-opus-4.7, claude-sonnet-4.5, gpt-4.1).`;
 	}
 	return errorMessage;
 }

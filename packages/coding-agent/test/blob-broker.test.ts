@@ -298,7 +298,7 @@ describe("ImageUrlService", () => {
 		expect(served.status).toBe(200);
 		const bytes = new Uint8Array(await served.arrayBuffer());
 		expect(bytes.byteLength).toBeGreaterThan(8);
-		expect([...bytes.slice(1, 4)]).toEqual([0x50, 0x4e, 0x47]); // "PNG"
+		expect(Array.from(bytes.slice(1, 4))).toEqual([0x50, 0x4e, 0x47]); // "PNG"
 
 		// Inline retry: placeholder frames gain data and lose their urls.
 		const context: Context = {

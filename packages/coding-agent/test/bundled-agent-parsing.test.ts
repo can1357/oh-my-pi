@@ -73,7 +73,6 @@ describe("bundled agent parsing", () => {
 				task: "anthropic/sonnet",
 				smol: "fast/hy3",
 				slow: "codex/sol",
-				designer: "anthropic/opus",
 			},
 		});
 
@@ -82,7 +81,6 @@ describe("bundled agent parsing", () => {
 			["sonic", "smol", "fast/hy3"],
 			["scout", "smol", "fast/hy3"],
 			["reviewer", "slow", "codex/sol"],
-			["designer", "designer", "anthropic/opus"],
 		] as const) {
 			const agent = getBundledAgent(name);
 			expect(resolveAgentModelSelection({ agentModel: agent?.model, settings })).toEqual({

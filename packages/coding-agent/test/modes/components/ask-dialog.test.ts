@@ -595,28 +595,63 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].note).toBeUndefined();
 	});
 
-	it("shows selected multi-select options together with custom input on Submit", async () => {
-		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("custom detail"));
+	it("saves multi-select choices and custom input, then advances exactly one question", async () => {
+		const onPrompt = vi.fn().mockResolvedValue("custom detail");
 		const onSubmit = vi.fn();
-		const questions: ExtensionAskDialogQuestion[] = [
-			{
-				id: "q1",
-				question: "Choose multiple?",
-				options: [{ label: "Option A" }, { label: "Option B" }],
-				multi: true,
-			},
-			{
-				id: "q2",
-				question: "Second question?",
-				options: [{ label: "Option C" }],
-			},
-		];
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose multiple?",
+					options: [{ label: "Option A" }, { label: "Option B" }],
+					multi: true,
+				},
+				{
+					id: "q2",
+					question: "Second question?",
+					options: [{ label: "Option C" }, { label: "Option D" }],
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
 
-		const component = new AskDialogComponent(questions, {
-			onSubmit,
-			onCancel: vi.fn(),
-			onPrompt,
-		});
+		component.handleInput(SPACE);
+		component.handleInput(DOWN);
+		component.handleInput(SPACE);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(render(component)).toContain("Second question?");
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		expect(onSubmit).not.toHaveBeenCalled();
+		component.handleInput(ENTER);
+
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results).toMatchObject([
+			{ id: "q1", selectedOptions: ["Option A", "Option B"], customInput: "custom detail" },
+			{ id: "q2", selectedOptions: ["Option D"] },
+		]);
+	});
+
+	it("reviews a single multi-select custom answer and lets the user go back to edit it", async () => {
+		const onPrompt = vi.fn().mockResolvedValueOnce("first draft").mockResolvedValueOnce("revised answer");
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose multiple?",
+					options: [{ label: "Option A" }, { label: "Option B" }],
+					multi: true,
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
 
 		component.handleInput(SPACE);
 		component.handleInput(DOWN);
@@ -624,20 +659,23 @@ describe("AskDialogComponent", () => {
 		component.handleInput(ENTER);
 		await Promise.resolve();
 		await Promise.resolve();
+		expect(onSubmit).not.toHaveBeenCalled();
 
-		// Multi questions do not auto-advance after the Other prompt: still on
-		// q1, so Tab twice (q2, then Submit) to reach the review.
-		component.handleInput(TAB);
-		component.handleInput(TAB);
-		const review = render(component);
-		expect(review).toContain("Option A");
-		expect(review).toContain("custom detail");
-
+		component.handleInput(SHIFT_TAB);
+		component.handleInput(UP);
+		component.handleInput(SPACE);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(onSubmit).not.toHaveBeenCalled();
 		component.handleInput(ENTER);
 
+		expect(onPrompt).toHaveBeenCalledTimes(2);
 		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
-		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBe("custom detail");
+		expect(onSubmit.mock.calls[0][0].results).toMatchObject([
+			{ id: "q1", selectedOptions: ["Option A", "Option B"], customInput: "revised answer" },
+		]);
 	});
 
 	it("multi-question, multi-select: Enter on a plain option advances, does not submit", () => {
@@ -1560,13 +1598,13 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 		expect(render(component)).toContain("my custom answer");
 
-		// Reopen Other (prefilled with the current answer) and submit an
-		// empty value: the custom answer is unselected.
+		// Return from review to edit the saved custom answer.
+		component.handleInput(SHIFT_TAB);
 		onPrompt.mockReturnValueOnce(Promise.resolve(""));
 		component.handleInput(ENTER);
 		await Promise.resolve();
 		await Promise.resolve();
-		expect(onPrompt).toHaveBeenNthCalledWith(2, expect.any(String), "my custom answer");
+		expect(onSubmit).not.toHaveBeenCalled();
 		expect(render(component)).not.toContain("my custom answer");
 
 		// Submitting confirms nothing was kept.

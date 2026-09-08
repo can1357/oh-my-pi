@@ -245,8 +245,10 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
 	 *
-	 * Called after each tool execution (unless interruptMode is "wait") to decide
-	 * whether to skip the remaining tool calls in the batch. The queue keeps
+	 * Polled while a tool batch runs (unless interruptMode is "wait") to decide
+	 * whether to abort in-flight and skip not-yet-started *interruptible* waits;
+	 * every other already-emitted call still executes and the message injects
+	 * at the batch boundary. The queue keeps
 	 * owning its messages until the loop reaches the next injection boundary and
 	 * dequeues via {@link getSteeringMessages} — so callers can still cancel or
 	 * restore queued messages while in-flight tools settle, and an external
@@ -758,11 +760,37 @@ export type AgentToolExecFn<TParameters extends TSchema = TSchema, TDetails = an
 	context?: AgentToolContext,
 ) => Promise<AgentToolResult<TDetails, TParameters>>;
 
+/** Live receiver for a tool call's streamed arguments (see AgentTool.openArgStream). */
+export interface AgentToolArgStream {
+	/** Raw wire fragment of the arguments (JSON text, or verbatim payload for custom-format tools). */
+	push(delta: string): void;
+	/** Arguments are complete; `args` is the final parsed object the loop will pass to `execute`. */
+	end(args: unknown): void;
+	/** The call will never execute (stream error, abort, blocked). Release resources. */
+	cancel(): void;
+}
+
+export interface AgentToolArgStreamInit {
+	toolCallId: string;
+	toolName: string;
+	/** Wire-level name for custom-format tools; undefined for JSON function tools. */
+	customWireName?: string;
+	/** Push a serializable projection of the in-flight call (e.g. diff previews); surfaces as `tool_stream_update`. */
+	emit(update: unknown): void;
+}
+
 // AgentTool extends Tool but adds the execute function
-export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any, TTheme = unknown>
-	extends Tool<TParameters> {
+export interface AgentTool<
+	TParameters extends TSchema = TSchema,
+	TDetails = any,
+	TTheme = unknown,
+> extends Tool<TParameters> {
 	// A human-readable label for the tool to be displayed in UI
 	label: string;
+	/**
+	 * Called at `toolcall_start`, before any argument delta. Return `undefined` to opt out.
+	 */
+	openArgStream?: (init: AgentToolArgStreamInit) => AgentToolArgStream | undefined;
 	/** If true, tool is excluded unless explicitly listed in --tools or agent's tools field */
 	hidden?: boolean;
 	/** If true, tool can stage a pending action that requires explicit resolution via the resolve tool. */
@@ -781,14 +809,15 @@ export interface AgentTool<TParameters extends TSchema = TSchema, TDetails = any
 	/** If true, argument validation errors are non-fatal: raw args are passed to execute() instead of returning an error to the LLM. */
 	lenientArgValidation?: boolean;
 	/**
-	 * Whether the agent loop may abort this tool mid-execution to deliver a
-	 * queued steering message. A function resolves this per call from the raw,
-	 * pre-validation arguments.
+	 * Whether the agent loop may abort this tool mid-execution — or skip it
+	 * before it starts — to deliver a queued steering message. A function
+	 * resolves this per call from the raw, pre-validation arguments.
 	 *
 	 * Enable only for calls that purely *wait* and observe their abort signal
 	 * cleanly (e.g. `job` poll), so the abort surfaces the tool's current
-	 * snapshot rather than corrupting a side effect. Honored only when
-	 * `interruptMode` is "immediate".
+	 * snapshot rather than corrupting a side effect. Every other call runs to
+	 * completion even when steering is queued; the message lands at the next
+	 * batch boundary. Honored only when `interruptMode` is "immediate".
 	 */
 	interruptible?: boolean | ((args: Partial<Static<TParameters>>) => boolean);
 	/**
@@ -882,4 +911,5 @@ export type AgentEvent =
 	// Tool execution lifecycle
 	| { type: "tool_execution_start"; toolCallId: string; toolName: string; args: any; intent?: string }
 	| { type: "tool_execution_update"; toolCallId: string; toolName: string; args: any; partialResult: any }
+	| { type: "tool_stream_update"; toolCallId: string; toolName: string; update: unknown }
 	| { type: "tool_execution_end"; toolCallId: string; toolName: string; result: any; isError?: boolean };
