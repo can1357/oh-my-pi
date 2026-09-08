@@ -1,5 +1,5 @@
 /**
- * Contracts: final async `task` snapshots vs. the tool call's own lifecycle.
+ * Contracts: async tool snapshots and foreground execution lifecycle.
  *
  * A `task` call with background jobs streams `tool_execution_update` frames
  * whose `details.async.state` can settle ("completed"/"failed") at any time
@@ -12,12 +12,16 @@
  *    real result never rendered — the "disappearing task call").
  * 2. A final async frame arriving AFTER an end that parked the block as
  *    background ("running") finalizes and untracks it.
+ * 3. An execution that crosses `agent_start` stays live until its own end, so
+ *    subsequent progress and the terminal result continue repainting the card.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { CoordinationDetails } from "@oh-my-pi/pi-coding-agent/tools/hub/types";
 import type { TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { BashToolDetails } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
@@ -37,6 +41,16 @@ function bashResult(text: string) {
 		async: { state: "running", jobId: "bash-1", type: "bash" },
 	};
 	return { content: [{ type: "text" as const, text }], details };
+}
+
+function hubResult(status: "running" | "completed", durationMs: number): AgentToolResult<CoordinationDetails> {
+	return {
+		content: [{ type: "text", text: `${status} hub wait` }],
+		details: {
+			op: "wait",
+			jobs: [{ id: "Job1", type: "task", status, label: "Long task", durationMs }],
+		},
+	};
 }
 
 describe("EventController async update finalization", () => {
@@ -100,6 +114,50 @@ describe("EventController async update finalization", () => {
 			isError: false,
 		});
 		expect(pendingTools.has("tc-task")).toBe(false);
+		expect(component.isTranscriptBlockFinalized()).toBe(true);
+	});
+
+	it("keeps an executing foreground card live across the next agent turn", async () => {
+		const { controller, pendingTools } = createFixture();
+		await controller.handleEvent({
+			type: "tool_execution_start",
+			toolCallId: "tc-hub",
+			toolName: "hub",
+			args: { op: "wait" },
+		});
+		const component = pendingTools.get("tc-hub");
+		if (!component) throw new Error("expected pending Hub card");
+		sealed.push(component);
+
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-hub",
+			toolName: "hub",
+			args: { op: "wait" },
+			partialResult: hubResult("running", 757_000),
+		});
+		expect(Bun.stripANSI(component.render(100).join("\n"))).toContain("12m37s");
+
+		await controller.handleEvent({ type: "agent_start" });
+		expect(pendingTools.get("tc-hub")).toBe(component);
+
+		await controller.handleEvent({
+			type: "tool_execution_update",
+			toolCallId: "tc-hub",
+			toolName: "hub",
+			args: { op: "wait" },
+			partialResult: hubResult("running", 900_000),
+		});
+		expect(Bun.stripANSI(component.render(100).join("\n"))).toContain("15m");
+
+		await controller.handleEvent({
+			type: "tool_execution_end",
+			toolCallId: "tc-hub",
+			toolName: "hub",
+			result: hubResult("completed", 901_000),
+			isError: false,
+		});
+		expect(pendingTools.has("tc-hub")).toBe(false);
 		expect(component.isTranscriptBlockFinalized()).toBe(true);
 	});
 

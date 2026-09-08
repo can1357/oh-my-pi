@@ -352,28 +352,44 @@ export class EventController {
 		this.#lastReadGroup = undefined;
 	}
 	/** Freeze foreground tool cards once no live agent turn can complete them. */
-	#sealAbandonedForegroundTools(): void {
-		const background = new Set<ToolExecutionHandle>();
+	#sealAbandonedForegroundTools({ preserveInFlight = false }: { preserveInFlight?: boolean } = {}): void {
+		const retained = new Set<ToolExecutionHandle>();
 		for (const toolCallId of this.#backgroundTaskCallIds) {
 			const component = this.ctx.pendingTools.get(toolCallId);
-			if (component) background.add(component);
+			if (component) retained.add(component);
+		}
+		if (preserveInFlight) {
+			for (const toolCallId of this.#executionStartedCallIds) {
+				const component = this.ctx.pendingTools.get(toolCallId);
+				if (component) retained.add(component);
+			}
 		}
 		for (const component of this.#toolTimelineComponents.values()) {
 			if (
 				(component instanceof ToolExecutionComponent || component instanceof ReadToolGroupComponent) &&
-				!background.has(component)
+				!retained.has(component)
 			) {
 				component.seal();
 			}
 		}
 		for (const [toolCallId, component] of this.ctx.pendingTools) {
-			if (this.#backgroundTaskCallIds.has(toolCallId)) continue;
+			if (
+				this.#backgroundTaskCallIds.has(toolCallId) ||
+				(preserveInFlight && this.#executionStartedCallIds.has(toolCallId))
+			) {
+				continue;
+			}
 			component.seal();
 			this.ctx.pendingTools.delete(toolCallId);
 		}
 		this.#backgroundTaskCallIds = new Set(
 			Array.from(this.#backgroundTaskCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
 		);
+		if (preserveInFlight) {
+			this.#executionStartedCallIds = new Set(
+				Array.from(this.#executionStartedCallIds).filter(toolCallId => this.ctx.pendingTools.has(toolCallId)),
+			);
+		}
 		this.#finalizeAbandonedPostToolSegments();
 	}
 	/**
@@ -836,16 +852,14 @@ export class EventController {
 			this.#turnStartedAt = undefined;
 		}
 		this.#clearApprovalPreviewGates();
-		// A new turn cannot inherit a foreground tool execution. A dropped
-		// agent_end (for example after a renderer exception) otherwise leaves a
-		// live-only tool card without a persisted result; ordered transcript
-		// retirement then remains pinned behind that invisible stale card.
-		this.#sealAbandonedForegroundTools();
+		// Seal stale previews from the prior turn, but keep executions live until
+		// their tool_execution_end. Session events can cross a turn boundary, and
+		// dropping an executing card here would swallow its later updates and result.
+		this.#sealAbandonedForegroundTools({ preserveInFlight: true });
 		this.#toolTimelineComponents.clear();
 		this.#streamedToolCallIdByIndex.clear();
 		this.#pendingStreamPreviews.clear();
 		this.#retractedToolCallIds.clear();
-		this.#executionStartedCallIds.clear();
 		this.#syntheticFailureCards.clear();
 		this.#orphanedToolCompletions.clear();
 		this.#postToolAssistantComponents.clear();
