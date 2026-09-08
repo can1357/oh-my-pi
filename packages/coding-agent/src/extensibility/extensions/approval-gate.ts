@@ -38,18 +38,24 @@ export async function runInteractiveApprovalGate<TParameters extends TSchema>(
 	};
 	const gate = Promise.withResolvers<boolean>();
 	const dialog = new AbortController();
+	// Resolved notifications must never overtake the requested delivery: an
+	// extension registered later would observe the settlement before the
+	// request and open tabs that never receive a close event.
+	const requestedDelivery = Promise.withResolvers<void>();
+	let requestedStarted = false;
 	let settled = false;
 
-	const notify = (event: ToolApprovalRequestedEvent | ToolApprovalResolvedEvent): void => {
-		void runner.emit(event).catch((error: unknown) => {
+	const notify = (event: ToolApprovalRequestedEvent | ToolApprovalResolvedEvent): Promise<void> =>
+		runner.emit(event).catch((error: unknown) => {
 			logger.warn("Tool approval notification failed", { type: event.type, error: String(error) });
 		});
-	};
 	const settle = (approved: boolean, source: "user" | "extension" | "abort", reason?: string): boolean => {
 		if (settled) return false;
 		settled = true;
 		dialog.abort();
-		notify({ type: "tool_approval_resolved", ...eventIdentity, approved, source, reason });
+		void requestedDelivery.promise.then(() => {
+			void notify({ type: "tool_approval_resolved", ...eventIdentity, approved, source, reason });
+		});
 		gate.resolve(approved);
 		return true;
 	};
@@ -94,14 +100,15 @@ export async function runInteractiveApprovalGate<TParameters extends TSchema>(
 				choice => settle(choice === "Approve", "user"),
 				(error: unknown) => settle(false, "user", String(error)),
 			);
-		notify({
+		requestedStarted = true;
+		void notify({
 			type: "tool_approval_requested",
 			...eventIdentity,
 			approvalMode,
 			reason: options.approvalReason,
 			files,
 			respond,
-		});
+		}).then(() => requestedDelivery.resolve());
 		const approved = await gate.promise;
 		signal?.throwIfAborted();
 		if (!approved) throw new Error(`Tool call denied by user: ${tool.name}`);
@@ -112,5 +119,10 @@ export async function runInteractiveApprovalGate<TParameters extends TSchema>(
 	} finally {
 		signal?.removeEventListener("abort", abort);
 		dialog.abort();
+		// Release the latch only when the request was never emitted: the gate
+		// itself can finish before the requested delivery does (an extension
+		// responds mid-delivery), and resolving early would let the settlement
+		// overtake the still-running delivery.
+		if (!requestedStarted) requestedDelivery.resolve();
 	}
 }

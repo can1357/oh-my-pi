@@ -115,6 +115,16 @@ function computerSafetyChecks(context: AgentToolContext | undefined): ComputerSa
 	return metadata?.type === "computer" ? metadata.pendingSafetyChecks : [];
 }
 
+/** Mark provider safety checks as approved once the user approved the prompt. */
+function approveProviderSafetyChecks(
+	pendingSafetyChecks: readonly ComputerSafetyCheck[],
+	context: AgentToolContext | undefined,
+): void {
+	if (pendingSafetyChecks.length === 0) return;
+	if (!context) throw new Error("Provider safety approval context is unavailable");
+	context.providerSafetyApproved = true;
+}
+
 function approvalArgs(params: unknown, context: AgentToolContext | undefined): unknown {
 	const metadata = context?.toolCall?.providerMetadata;
 	return metadata?.type === "computer" ? { actions: metadata.actions } : params;
@@ -317,7 +327,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 			}
 
 			if (!activeReview) {
-				if (hasApprovalHandlers) {
+				const emitApprovalRequested = async (): Promise<void> => {
+					if (!hasApprovalHandlers) return;
 					await this.runner.emit({
 						type: "tool_approval_requested",
 						sessionId,
@@ -326,7 +337,8 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 						...(approvalCheck.reason ? { reason: approvalCheck.reason } : {}),
 						approvalMode,
 					});
-				}
+				};
+				await emitApprovalRequested();
 
 				const emitApprovalResolved = async (approved: boolean, reason?: string) => {
 					if (!hasApprovalHandlers) return;
@@ -345,18 +357,19 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				if (!this.runner.hasUI()) {
 					const reason = "no interactive UI available";
 					await emitApprovalResolved(false, reason);
-					if (pendingSafetyChecks.length > 0) {
-						throw new Error(
-							`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
-						);
-					}
-					throw new Error(
-						`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
-							`Options:\n` +
-							`  1. Set tools.approvalMode: yolo in /settings\n` +
-							`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
-							`  3. Use an interactive UI to approve the tool call`,
-					);
+					const noUiError = (): Error =>
+						pendingSafetyChecks.length > 0
+							? new Error(
+									`Tool "${this.tool.name}" has pending provider safety checks but no interactive UI is available.`,
+								)
+							: new Error(
+									`Tool "${this.tool.name}" requires approval but no interactive UI available.\n` +
+										`Options:\n` +
+										`  1. Set tools.approvalMode: yolo in /settings\n` +
+										`  2. Add tools.approval.${this.tool.name}: allow to config\n` +
+										`  3. Use an interactive UI to approve the tool call`,
+								);
+					throw noUiError();
 				}
 
 				const uiContext = this.runner.getUIContext();
@@ -377,10 +390,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 				if (!approved) {
 					throw new Error(`Tool call denied by user: ${this.tool.name}`);
 				}
-				if (pendingSafetyChecks.length > 0) {
-					if (!context) throw new Error("Provider safety approval context is unavailable");
-					context.providerSafetyApproved = true;
-				}
+				approveProviderSafetyChecks(pendingSafetyChecks, context);
 			}
 		}
 

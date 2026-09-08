@@ -24,9 +24,7 @@ use crate::{
 	path_policy::{PathPolicy, canonical_key},
 	store::{EditStore, file_hash},
 	stream_json::ArgStream,
-	text::{
-		normalize_to_lf, strip_bom, utf16_len,
-	},
+	text::{normalize_to_lf, strip_bom, utf16_len},
 };
 /// Everything the host configures per tool call.
 #[derive(Debug, Clone)]
@@ -397,6 +395,10 @@ impl Session {
 
 					let file = &mut revised_staged[target_index];
 					file.record_snapshot = true;
+					// A revised file carries a fresh tag even when the human
+					// restored the exact original content: the result must not
+					// depend on whether the revision changed anything.
+					file.header = HeaderKind::HashlineTag;
 					let (_, body) = strip_bom(&revision.content);
 					let normalized_rev = normalize_to_lf(body).into_owned();
 					let is_noop = file.existed && normalized_rev == file.before;
@@ -453,7 +455,6 @@ impl Session {
 							},
 						}
 						file.record_snapshot = true;
-						file.header = HeaderKind::HashlineTag;
 					}
 				}
 				revised_staged

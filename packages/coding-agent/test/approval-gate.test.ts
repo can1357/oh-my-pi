@@ -79,9 +79,9 @@ describe("interactive approval gate", () => {
 		const uiContext = {
 			select: (_prompt: string, _choices: string[], options?: { signal?: AbortSignal }): Promise<string> => {
 				dialogSignal = options?.signal;
-				return new Promise<string>(resolve => {
-					settleDialog = resolve;
-				});
+				const dialog = Promise.withResolvers<string>();
+				settleDialog = dialog.resolve;
+				return dialog.promise;
 			},
 		};
 		const runner = {
@@ -191,5 +191,45 @@ describe("interactive approval gate", () => {
 		await until(() => h.resolved.length > 0);
 		expect(h.resolved).toHaveLength(1);
 		expect(h.resolved[0]).toMatchObject({ approved: false, source: "abort" });
+	});
+
+	test("resolved is delivered after requested even when an extension responds mid-delivery", async () => {
+		const deliveries: string[] = [];
+		const uiContext = {
+			select: (): Promise<string> => Promise.withResolvers<string>().promise,
+		};
+		const runner = {
+			emit: async (event: ToolApprovalRequestedEvent | ToolApprovalResolvedEvent): Promise<unknown> => {
+				if (event.type === "tool_approval_requested") {
+					// The first handler answers instantly, mid-delivery; a
+					// second extension must still receive the request first.
+					await event.respond?.({ approved: true });
+					await Bun.sleep(0);
+					deliveries.push("requested");
+				}
+				if (event.type === "tool_approval_resolved") {
+					deliveries.push("resolved");
+				}
+				return undefined;
+			},
+			getUIContext: () => uiContext,
+		} as unknown as ExtensionRunner;
+		const review = await tool.prepareApproval("ordering", { path: "f.txt", content: PROPOSED });
+		if (!review) throw new Error("expected a review for a filesystem write");
+		const gatedTool = tool as unknown as AgentTool<typeof writeParamsSchema>;
+		await runInteractiveApprovalGate<typeof writeParamsSchema>({
+			tool: gatedTool,
+			toolCallId: "ordering",
+			effectiveParams: { path: "f.txt", content: PROPOSED },
+			approvalMode: "always-ask",
+			userPolicies: {},
+			safetyPrompt: "Approve the write?",
+			runner,
+			review,
+		});
+		await until(() => deliveries.includes("resolved"));
+		expect(deliveries).toEqual(["requested", "resolved"]);
+		await tool.execute("ordering", { path: "f.txt", content: PROPOSED });
+		expect(await Bun.file(target).text()).toBe(PROPOSED);
 	});
 });

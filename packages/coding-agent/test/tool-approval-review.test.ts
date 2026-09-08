@@ -12,6 +12,7 @@ import {
 	type ReplaceParams,
 	type SloppyParams,
 } from "@oh-my-pi/pi-coding-agent/edit";
+import { EditSession } from "@oh-my-pi/pi-natives";
 import { formatHashlineHeader } from "@oh-my-pi/pi-coding-agent/tools/hashline-format";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
@@ -19,6 +20,11 @@ import type { EditMode } from "@oh-my-pi/pi-coding-agent/utils/edit-mode";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const SOURCE = "export function value(): number {\n\treturn 1;\n}\n";
+// PR CI runs TS tests against the latest released npm addon, which predates
+// EditSession.review()/revisions: gate the native-dependent contract tests so
+// they run wherever the rebuilt addon is present and skip on release addons.
+const supportsNativeReview = typeof EditSession.prototype.review === "function";
+
 const AFTER = "export function value(): number {\n\treturn 2;\n}\n";
 const HUMAN = "export function value(): number {\n\treturn 42; // human revision\n}\n";
 const HEADER_TAG = /\[([^\]]+)#([0-9A-F]{4})\]/;
@@ -69,7 +75,7 @@ describe("tool approval content review", () => {
 		return absolute;
 	}
 
-	describe("edit exposes mode-independent before/after in every edit mode", () => {
+	describe.skipIf(!supportsNativeReview)("edit exposes mode-independent before/after in every edit mode", () => {
 		const cases: Array<{ mode: EditMode; file: string; make: () => Promise<ModeParams> }> = [
 			{
 				mode: "replace",
@@ -139,57 +145,114 @@ describe("tool approval content review", () => {
 		});
 	});
 
-	test("mixed hashline request: only the content edit is proposed; delete and rename still execute", async () => {
-		const aAbs = await fixture("mix-a.ts");
-		const bAbs = await fixture("mix-b.ts");
-		const cAbs = await fixture("mix-c.ts");
-		const store = getEditStore(session);
-		const tagA = store.recordSnapshot(aAbs, SOURCE, undefined);
-		const tagB = store.recordSnapshot(bAbs, SOURCE, undefined);
-		const tagC = store.recordSnapshot(cAbs, SOURCE, undefined);
-		const input = [
-			formatHashlineHeader("mix-a.ts", tagA),
-			"PUT 2-2:",
-			"+\treturn 2;",
-			formatHashlineHeader("mix-b.ts", tagB),
-			"REM",
-			formatHashlineHeader("mix-c.ts", tagC),
-			"PUT 2-2:",
-			"+\treturn 3;",
-			"MV mix-c-renamed.ts",
-		].join("\n");
-		const tool = new EditTool(session, "hashline");
+	test.skipIf(!supportsNativeReview)(
+		"mixed hashline request: only the content edit is proposed; delete and rename still execute",
+		async () => {
+			const aAbs = await fixture("mix-a.ts");
+			const bAbs = await fixture("mix-b.ts");
+			const cAbs = await fixture("mix-c.ts");
+			const store = getEditStore(session);
+			const tagA = store.recordSnapshot(aAbs, SOURCE, undefined);
+			const tagB = store.recordSnapshot(bAbs, SOURCE, undefined);
+			const tagC = store.recordSnapshot(cAbs, SOURCE, undefined);
+			const input = [
+				formatHashlineHeader("mix-a.ts", tagA),
+				"PUT 2-2:",
+				"+\treturn 2;",
+				formatHashlineHeader("mix-b.ts", tagB),
+				"REM",
+				formatHashlineHeader("mix-c.ts", tagC),
+				"PUT 2-2:",
+				"+\treturn 3;",
+				"MV mix-c-renamed.ts",
+			].join("\n");
+			const tool = new EditTool(session, "hashline");
 
-		const review = await tool.prepareApproval("mixed", { input });
-		expect(review.files.map(file => file.path)).toEqual(["mix-a.ts"]);
+			const review = await tool.prepareApproval("mixed", { input });
+			expect(review.files.map(file => file.path)).toEqual(["mix-a.ts"]);
 
-		review.apply([{ path: "mix-a.ts", content: HUMAN }]);
-		const result = await tool.execute("mixed", { input });
+			review.apply([{ path: "mix-a.ts", content: HUMAN }]);
+			const result = await tool.execute("mixed", { input });
+			expect(result.isError).not.toBe(true);
+			expect(await Bun.file(aAbs).text()).toBe(HUMAN);
+			expect(await fs.exists(bAbs)).toBe(false);
+			expect(await Bun.file(path.join(tmpDir, "mix-c-renamed.ts")).text()).toBe(
+				"export function value(): number {\n\treturn 3;\n}\n",
+			);
+			expect(await fs.exists(cAbs)).toBe(false);
+		},
+	);
+
+	test.skipIf(!supportsNativeReview)(
+		"revised edit result carries a fresh snapshot tag for the human content",
+		async () => {
+			const aAbs = await fixture("tag.ts");
+			const tag = getEditStore(session).recordSnapshot(aAbs, SOURCE, undefined);
+			const input = `${formatHashlineHeader("tag.ts", tag)}\nPUT 2-2:\n+\treturn 2;`;
+			const tool = new EditTool(session, "hashline");
+
+			const review = await tool.prepareApproval("fresh-tag", { input });
+			review.apply([{ path: "tag.ts", content: HUMAN }]);
+			const result = await tool.execute("fresh-tag", { input });
+			expect(result.isError).not.toBe(true);
+
+			const store = getEditStore(session);
+			const headTag = store.headHash(aAbs);
+			expect(headTag).toBeTruthy();
+			expect(store.byHashText(aAbs, headTag!)).toBe(HUMAN);
+			expect(resultText(result)).toContain(`[tag.ts#${headTag}]`);
+		},
+	);
+
+	test.skipIf(!supportsNativeReview)(
+		"reviews and executes the verbatim apply_patch payload streamed over the custom wire",
+		async () => {
+			const absolute = await fixture("streamed.ts");
+			const tool = new EditTool(session, "apply_patch");
+			const input = [
+				"*** Begin Patch",
+				"*** Update File: streamed.ts",
+				"@@",
+				"-\treturn 1;",
+				"+\treturn 2;",
+				"*** End Patch",
+				"",
+			].join("\n");
+			const stream = tool.openArgStream({
+				toolCallId: "streamed",
+				toolName: "apply_patch",
+				customWireName: "apply_patch",
+				emit: () => {},
+			});
+			for (let offset = 0; offset < input.length; offset += 9) {
+				stream.push(input.slice(offset, offset + 9));
+			}
+			stream.end({ input });
+
+			const review = await tool.prepareApproval("streamed", { input });
+			expect(review.files).toEqual([{ path: "streamed.ts", before: SOURCE, after: AFTER }]);
+
+			review.apply([{ path: "streamed.ts", content: HUMAN }]);
+			const result = await tool.execute("streamed", { input });
+			expect(result.isError).not.toBe(true);
+			expect(await Bun.file(absolute).text()).toBe(HUMAN);
+		},
+	);
+
+	test.skipIf(!supportsNativeReview)("a revision identical to the original still mints a fresh tag", async () => {
+		const absolute = await fixture("revert.ts");
+		const tool = new EditTool(session, "replace");
+		const params = { path: "revert.ts", old_string: "\treturn 1;", new_string: "\treturn 2;" };
+
+		const review = await tool.prepareApproval("revert", params);
+		review.apply([{ path: "revert.ts", content: SOURCE }]);
+		const result = await tool.execute("revert", params);
 		expect(result.isError).not.toBe(true);
-		expect(await Bun.file(aAbs).text()).toBe(HUMAN);
-		expect(await fs.exists(bAbs)).toBe(false);
-		expect(await Bun.file(path.join(tmpDir, "mix-c-renamed.ts")).text()).toBe(
-			"export function value(): number {\n\treturn 3;\n}\n",
-		);
-		expect(await fs.exists(cAbs)).toBe(false);
-	});
+		expect(await Bun.file(absolute).text()).toBe(SOURCE);
 
-	test("revised edit result carries a fresh snapshot tag for the human content", async () => {
-		const aAbs = await fixture("tag.ts");
-		const tag = getEditStore(session).recordSnapshot(aAbs, SOURCE, undefined);
-		const input = `${formatHashlineHeader("tag.ts", tag)}\nPUT 2-2:\n+\treturn 2;`;
-		const tool = new EditTool(session, "hashline");
-
-		const review = await tool.prepareApproval("fresh-tag", { input });
-		review.apply([{ path: "tag.ts", content: HUMAN }]);
-		const result = await tool.execute("fresh-tag", { input });
-		expect(result.isError).not.toBe(true);
-
-		const store = getEditStore(session);
-		const headTag = store.headHash(aAbs);
+		const headTag = getEditStore(session).headHash(absolute);
 		expect(headTag).toBeTruthy();
-		expect(store.byHashText(aAbs, headTag!)).toBe(HUMAN);
-		expect(resultText(result)).toContain(`[tag.ts#${headTag}]`);
+		expect(resultText(result)).toContain(`[revert.ts#${headTag}]`);
 	});
 
 	describe("write tool review", () => {

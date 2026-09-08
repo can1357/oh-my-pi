@@ -467,8 +467,11 @@ export class EditTool implements AgentTool<TInput> {
 
 	async prepareApproval(toolCallId: string, params: EditParams, signal?: AbortSignal): Promise<ToolApprovalReview> {
 		this.parameters.assert(params);
-		const editSession =
-			this.#sessions.get(toolCallId) ?? new EditSession(getEditStore(this.session), this.#policy(false));
+		// A streamed call already finished its own session: re-encoding the
+		// parsed args as JSON would corrupt a raw apply_patch payload, which
+		// must stay the verbatim patch text its policy parses.
+		const streamed = this.#sessions.get(toolCallId);
+		const editSession = streamed ?? new EditSession(getEditStore(this.session), this.#policy(false));
 		this.#sessions.set(toolCallId, editSession);
 		const dispose = () => {
 			editSession.close();
@@ -476,8 +479,10 @@ export class EditTool implements AgentTool<TInput> {
 			if (this.#sessions.get(toolCallId) === editSession) this.#sessions.delete(toolCallId);
 		};
 		try {
-			editSession.setArgsJson(JSON.stringify(params));
-			editSession.finish();
+			if (!streamed) {
+				editSession.setArgsJson(JSON.stringify(params));
+				editSession.finish();
+			}
 			const proposals = await untilAborted(signal, () => editSession.review());
 			const paths = new Map(
 				proposals.map(file => [formatPathRelativeToCwd(file.path, this.session.cwd), file.path]),
