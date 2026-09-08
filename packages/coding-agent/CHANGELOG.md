@@ -39,6 +39,7 @@
 
 ### Fixed
 
+- Python cells are no longer replayed automatically after a kernel crash, preventing duplicate side effects; the next call starts a fresh kernel.
 - Session rewrites preserve open-reader snapshots and replacement identity when a rename needs an EPERM fallback.
 
 ## [18.1.14] - 2026-09-07
