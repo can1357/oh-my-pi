@@ -37,7 +37,7 @@
  */
 
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { extractHttpStatusFromError, extractRetryHint, isRecord, logger } from "@oh-my-pi/pi-utils";
+import { $env, extractHttpStatusFromError, extractRetryHint, isRecord, logger } from "@oh-my-pi/pi-utils";
 import type { ApiKeyResolver } from "../auth-retry";
 import type { AuthStorage } from "../auth-storage";
 import * as AIError from "../error";
@@ -97,6 +97,15 @@ import { DEFAULT_AUTH_GATEWAY_BIND } from "./types";
 // ParsedFormatRequest / ParsedFormatOptions / FormatModule come from ./types.
 
 export type ModelResolver = (modelId: string) => Model<Api> | undefined;
+
+/**
+ * Default cooldown for Cursor credentials that fail with a non-usage-limit
+ * auth error in the gateway path. Cursor 401s are often temporary token
+ * expiries; a short cooldown lets the OAuth refresh fix the token while a
+ * sibling credential handles traffic. Overridable via
+ * `CURSOR_GATEWAY_COOLDOWN_MS` env var.
+ */
+const CURSOR_GATEWAY_DEFAULT_COOLDOWN_MS = 60_000;
 
 export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 	/** Source of credentials. Caller wires this to a broker-backed AuthStorage. */
@@ -248,6 +257,21 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
 	if (options.include !== undefined) opts.include = options.include;
+	// Cursor-specific gateway options
+	if (options.cursorAutoMode !== undefined) opts.cursorAutoMode = options.cursorAutoMode;
+	if (options.cursorToolPassthrough !== undefined) opts.cursorToolPassthrough = options.cursorToolPassthrough;
+	// Cursor control headers without a first-class `SimpleStreamOptions` slot
+	// are threaded through `opts.headers` so Cursor's backend receives them
+	// (cursor.ts spreads caller headers into the upstream request).
+	if (options.cursorExcludeTools !== undefined) {
+		opts.headers = { ...(opts.headers ?? {}), "x-cursor-agent-exclude-tools": options.cursorExcludeTools };
+	}
+	if (options.cursorLocalCliMode) {
+		opts.headers = { ...(opts.headers ?? {}), "local-cli-mode": "true" };
+	}
+	if (options.cursorDevExperimentOverrides !== undefined) {
+		opts.headers = { ...(opts.headers ?? {}), "x-dev-experiment-overrides": options.cursorDevExperimentOverrides };
+	}
 	// Client-supplied `prompt_cache_key` wins; otherwise derive a stable
 	// key from the model + system + tools so prefix caching engages on
 	// Codex-class backends across turns of the same logical conversation.
@@ -348,6 +372,40 @@ async function refreshGatewayApiKeyAfterAuthError(
 		});
 		if (!switched) return undefined;
 		return storage.getApiKey(provider, sessionId, { modelId: model.id, signal, requestId });
+	}
+	// Cursor auth failures are often temporary token expiries rather than
+	// permanently bad credentials. Apply a short cooldown (default 60s) via
+	// `markUsageLimitReached` so the OAuth refresh has a chance to fix the
+	// token and a sibling credential is used in the meantime. Only fall
+	// through to permanent invalidation when no sibling is available.
+	if (provider === "cursor") {
+		const rawCooldown = $env.CURSOR_GATEWAY_COOLDOWN_MS;
+		const parsedCooldown = rawCooldown !== undefined && rawCooldown !== "" ? Number(rawCooldown) : undefined;
+		const cooldownMs =
+			parsedCooldown !== undefined && Number.isFinite(parsedCooldown) && parsedCooldown >= 0
+				? parsedCooldown
+				: CURSOR_GATEWAY_DEFAULT_COOLDOWN_MS;
+		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
+			retryAfterMs: cooldownMs,
+			baseUrl: model.baseUrl,
+			modelId: model.id,
+			apiKey: oldKey,
+			signal,
+		});
+		logger.debug("auth-gateway retrying cursor credential after cooldown block", {
+			format,
+			provider,
+			peer,
+			switched,
+			cooldownMs,
+			retryAtMs,
+			error: message,
+		});
+		if (switched) {
+			return storage.getApiKey(provider, sessionId, { modelId: model.id, signal });
+		}
+		// No sibling available — fall through to invalidation so the next
+		// request re-resolves from scratch after the cooldown expires.
 	}
 	await storage.invalidateCredentialMatching(provider, oldKey, { sessionId, signal });
 	logger.debug("auth-gateway retrying provider request after credential invalidation", {
@@ -915,7 +973,24 @@ async function handleFormatEndpoint(
 	// anything they didn't touch.
 	{
 		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...parsed.options.headers };
+		parsed.options.headers = { ...captured, ...(parsed.options.headers ?? {}) };
+		// Cursor-specific control headers: parse into typed options so they
+		// flow through `buildStreamOptions` into `SimpleStreamOptions`.
+		if (captured["x-cursor-auto-mode"] === "true") {
+			parsed.options.cursorAutoMode = true;
+		}
+		if (captured["x-cursor-tool-passthrough"] === "true") {
+			parsed.options.cursorToolPassthrough = true;
+		}
+		if (captured["x-cursor-agent-exclude-tools"]) {
+			parsed.options.cursorExcludeTools = captured["x-cursor-agent-exclude-tools"];
+		}
+		if (captured["local-cli-mode"] === "true") {
+			parsed.options.cursorLocalCliMode = true;
+		}
+		if (captured["x-dev-experiment-overrides"]) {
+			parsed.options.cursorDevExperimentOverrides = captured["x-dev-experiment-overrides"];
+		}
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 

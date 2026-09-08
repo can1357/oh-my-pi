@@ -24,6 +24,9 @@
 ### Fixed
 
 - Fixed preservation of Claude thinking/reasoning context when conversations are compacted or tool results are pruned.
+### Fixed
+
+- Agent loop forwards `routed_model` stream events to `onAssistantMessageEvent` / `message_update` subscribers.
 
 ## [18.0.11] - 2026-08-29
 

@@ -2014,6 +2014,14 @@ function mapOptionsForApi<TApi extends Api>(
 		acceptEmptyResponse: options?.acceptEmptyResponse,
 		anthropicCacheRefreshRequest: options?.anthropicCacheRefreshRequest,
 		anthropicPrefixMismatchBehavior: options?.anthropicPrefixMismatchBehavior,
+		cursorExcludeTools: options?.cursorExcludeTools,
+		cursorLocalCliMode: options?.cursorLocalCliMode,
+		cursorDevExperimentOverrides: options?.cursorDevExperimentOverrides,
+		cursorClientSupportsInlineImages: options?.cursorClientSupportsInlineImages,
+		cursorClientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate,
+		cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
+		cursorRunId: options?.cursorRunId,
+		cursorAgentSessionId: options?.cursorAgentSessionId,
 		...simpleProviderOptions,
 	};
 
@@ -2433,7 +2441,24 @@ function mapOptionsForApi<TApi extends Api>(
 				execHandlers,
 				onToolResult,
 				externalToolExecutor: options?.cursorExternalToolExecutor,
-				wireModelId: resolveWireModelId(cursorModel, effort),
+				toolChoice: options?.toolChoice,
+				cursorToolPassthrough: options?.cursorToolPassthrough,
+				cursorExcludeTools: options?.cursorExcludeTools,
+				cursorLocalCliMode: options?.cursorLocalCliMode,
+				cursorDevExperimentOverrides: options?.cursorDevExperimentOverrides,
+				cursorClientSupportsInlineImages: options?.cursorClientSupportsInlineImages,
+				cursorClientSupportsRoutedModelUpdate: options?.cursorClientSupportsRoutedModelUpdate,
+				cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
+				cursorRunId: options?.cursorRunId,
+				cursorAgentSessionId: options?.cursorAgentSessionId,
+				// Auto mode sends the "default" wire id; otherwise the provider
+				// resolves the wire id from the model's own requestModelId.
+				// Also pin synthetic catalog `auto` so streamSimple without the
+				// gateway header still hits the Cursor router contract.
+				wireModelId:
+					options?.cursorAutoMode || model.id === "auto" || model.requestModelId === "auto"
+						? "default"
+						: resolveWireModelId(cursorModel, effort),
 			});
 		}
 
