@@ -34,8 +34,8 @@ export type RpcCommand =
 	| { id?: string; type: "steer"; message: string; images?: ImageContent[]; activeTurnOnly?: true }
 	| { id?: string; type: "follow_up"; message: string; images?: ImageContent[] }
 	| { id?: string; type: "clear_queue"; forInterrupt?: boolean }
-	| { id?: string; type: "abort"; clearQueue?: true }
-	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[] }
+	| { id?: string; type: "abort"; clearQueue?: true; reason?: string }
+	| { id?: string; type: "abort_and_prompt"; message: string; images?: ImageContent[]; reason?: string }
 	| { id?: string; type: "new_session"; parentSession?: string }
 
 	// State

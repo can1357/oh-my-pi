@@ -673,19 +673,29 @@ export class RpcClient {
 	 * `options.clearQueue` atomically drops all interrupt queues both before abort
 	 * starts and after awaited cleanup, immediately before queued work can drain.
 	 * Requires `serverFeatures.activeTurnSteering === 1`.
+	 *
+	 * `options.reason` is persisted verbatim on the aborted assistant message.
+	 * Omit it to preserve the legacy `Interrupted by user` attribution.
 	 */
-	async abort(options?: { clearQueue?: boolean }): Promise<void> {
+	async abort(options?: { clearQueue?: boolean; reason?: string }): Promise<void> {
 		if (options?.clearQueue && this.#serverFeatures.activeTurnSteering !== 1) {
 			throw new Error("RPC abort with clearQueue requires activeTurnSteering capability version 1");
 		}
-		await this.#send({ type: "abort", ...(options?.clearQueue ? { clearQueue: true } : {}) });
+		await this.#send({
+			type: "abort",
+			...(options?.clearQueue ? { clearQueue: true } : {}),
+			...(options?.reason !== undefined ? { reason: options.reason } : {}),
+		});
 	}
 
-	/**
-	 * Abort current operation and immediately start a new turn with the given message.
-	 */
-	async abortAndPrompt(message: string, images?: ImageContent[]): Promise<void> {
-		await this.#send({ type: "abort_and_prompt", message, images });
+	/** Abort the current operation and immediately start a new turn. */
+	async abortAndPrompt(message: string, images?: ImageContent[], options?: { reason?: string }): Promise<void> {
+		await this.#send({
+			type: "abort_and_prompt",
+			message,
+			images,
+			...(options?.reason !== undefined ? { reason: options.reason } : {}),
+		});
 	}
 
 	/**

@@ -1240,23 +1240,28 @@ class RpcClient:
             images=list(images) if images is not None else None,
         )
 
-    def abort(self, *, clear_queue: bool = False) -> None:
+    def abort(self, *, clear_queue: bool = False, reason: str | None = None) -> None:
         if clear_queue and self.server_features.active_turn_steering != 1:
             raise RpcError(
                 "abort(clear_queue=True) requires activeTurnSteering capability version 1"
             )
-        self._request("abort", clearQueue=True if clear_queue else None)
+        self._request("abort", clearQueue=True if clear_queue else None, reason=reason)
         if clear_queue:
             self._cancel_pending_agent_runs()
 
     def abort_and_prompt(
-        self, message: str, *, images: Sequence[ImageContent] | None = None
+        self,
+        message: str,
+        *,
+        images: Sequence[ImageContent] | None = None,
+        reason: str | None = None,
     ) -> None:
         self._request(
             "abort_and_prompt",
             _agent_run_reservation="if_idle",
             message=message,
             images=list(images) if images is not None else None,
+            reason=reason,
         )
 
     def prompt_and_wait(

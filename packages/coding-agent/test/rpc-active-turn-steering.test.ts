@@ -150,37 +150,41 @@ describe("RPC active-turn steering (real server)", () => {
 });
 
 describe("RPC atomic abort handler", () => {
-	test("passes queue ownership into abort before control can enqueue", async () => {
+	test("passes queue ownership and host attribution into abort before control can enqueue", async () => {
 		const releaseAbort = Promise.withResolvers<void>();
 		const operations: string[] = [];
 		const session = {
 			abort: async options => {
-				operations.push(`abort:start:${options?.clearQueue === true}`);
+				operations.push(`abort:start:${options?.clearQueue === true}:${options?.reason}`);
 				await releaseAbort.promise;
 				operations.push("abort:end");
 			},
 		} satisfies RpcAbortSession;
 
-		const aborting = handleRpcAbort(session, true);
+		const aborting = handleRpcAbort(session, true, "Interrupted by host (Paseo)");
 		operations.push("caller:enqueue-opportunity");
 
-		expect(operations).toEqual(["abort:start:true", "caller:enqueue-opportunity"]);
+		expect(operations).toEqual(["abort:start:true:Interrupted by host (Paseo)", "caller:enqueue-opportunity"]);
 
 		releaseAbort.resolve();
 		await aborting;
-		expect(operations).toEqual(["abort:start:true", "caller:enqueue-opportunity", "abort:end"]);
+		expect(operations).toEqual([
+			"abort:start:true:Interrupted by host (Paseo)",
+			"caller:enqueue-opportunity",
+			"abort:end",
+		]);
 	});
 
-	test("preserves plain abort without requesting queue clearing", async () => {
-		let clearQueue: boolean | undefined;
+	test("preserves the user attribution and queue behavior for legacy abort commands", async () => {
+		let options: Parameters<RpcAbortSession["abort"]>[0];
 		const session = {
-			abort: async options => {
-				clearQueue = options?.clearQueue;
+			abort: async received => {
+				options = received;
 			},
 		} satisfies RpcAbortSession;
 
 		await handleRpcAbort(session, false);
-		expect(clearQueue).toBeUndefined();
+		expect(options).toEqual({ reason: "Interrupted by user" });
 	});
 });
 
@@ -300,15 +304,23 @@ describe("RPC active-turn steering (client mirror)", () => {
 		expect(server.received).toEqual([]);
 	});
 
-	test("sends queue clearing in the abort command only when requested", async () => {
+	test("sends queue clearing and host attribution only when requested", async () => {
 		const server = createFakeRpcServer({ ...READY_V1, features: { activeTurnSteering: 1 } }, command => ok(command));
 		using client = new RpcClient({ spawn: () => server.process });
 		await client.start();
 
 		await client.abort();
-		await client.abort({ clearQueue: true });
+		await client.abort({ reason: "Interrupted by host (Paseo)" });
+		await client.abort({ clearQueue: true, reason: "Replaced by host" });
+		await client.abortAndPrompt("replacement", undefined, { reason: "Replaced by host" });
 
-		expect(server.received.map(command => command.clearQueue)).toEqual([undefined, true]);
-		expect(server.received.map(command => command.type)).toEqual(["abort", "abort"]);
+		expect(server.received.map(command => command.type)).toEqual(["abort", "abort", "abort", "abort_and_prompt"]);
+		expect(server.received.map(command => command.clearQueue)).toEqual([undefined, undefined, true, undefined]);
+		expect(server.received.map(command => command.reason)).toEqual([
+			undefined,
+			"Interrupted by host (Paseo)",
+			"Replaced by host",
+			"Replaced by host",
+		]);
 	});
 });

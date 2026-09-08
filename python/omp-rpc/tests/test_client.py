@@ -877,7 +877,7 @@ FORWARD_COMPAT_SERVER = textwrap.dedent(
 
 
 # Answers steering/queue commands from their optional fields and validates the
-# two abort wire shapes so client assertions pin the exact envelopes.
+# legacy and attributed abort wire shapes.
 ACTIVE_TURN_SERVER = textwrap.dedent(
     """
     import json
@@ -909,11 +909,15 @@ ACTIVE_TURN_SERVER = textwrap.dedent(
             data = {"steering": 1 if command.get("forInterrupt") else 0, "followUp": 0}
         elif command_type == "abort":
             abort_count += 1
-            success = (
-                "clearQueue" not in command
-                if abort_count == 1
-                else command.get("clearQueue") is True
-            )
+            if abort_count == 1:
+                success = "clearQueue" not in command and "reason" not in command
+            elif abort_count == 2:
+                success = command.get("reason") == "Interrupted by host (Paseo)" and "clearQueue" not in command
+            else:
+                success = command.get("clearQueue") is True and command.get("reason") == "Replaced by host"
+            data = {}
+        elif command_type == "abort_and_prompt":
+            success = command.get("message") == "replacement" and command.get("reason") == "Replaced by host"
             data = {}
         else:
             data = {}
@@ -1823,9 +1827,12 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(client._scheduled_agent_runs, 0)
             self.assertEqual(client._completed_agent_runs, 0)
 
-            # Plain abort remains fieldless; the atomic form sends literal true.
+            # Omitted reasons preserve the legacy wire shape. Hosts can identify
+            # their own plain, queue-clearing, and replacement interrupts.
             client.abort()
-            client.abort(clear_queue=True)
+            client.abort(reason="Interrupted by host (Paseo)")
+            client.abort(clear_queue=True, reason="Replaced by host")
+            client.abort_and_prompt("replacement", reason="Replaced by host")
 
     def test_pre_capability_server_reports_no_features_and_accepts_steers(self) -> None:
         with self.make_client(server=LEGACY_STEER_SERVER) as client:

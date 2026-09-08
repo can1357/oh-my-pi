@@ -123,8 +123,8 @@ Important edge behavior from runtime:
 - `{ id?, type: "steer", message: string, images?: ImageContent[], activeTurnOnly?: true }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
 - `{ id?, type: "clear_queue", forInterrupt?: boolean }`
-- `{ id?, type: "abort", clearQueue?: true }`
-- `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
+- `{ id?, type: "abort", clearQueue?: true, reason?: string }`
+- `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[], reason?: string }`
 - `{ id?, type: "new_session", parentSession?: string }`
 
 ### Protocol
@@ -636,6 +636,11 @@ messages submitted while abort is suspended are rejected or dropped. IRC
 delivery is rejected during that window, and already-pending IRC records are
 dropped. Advisor cards remain preserved as visible advice.
 Plain `{ "type": "abort" }` keeps the legacy stranded-queue behavior.
+
+Both `abort` and `abort_and_prompt` accept an optional `reason`. The server
+persists that text verbatim on the aborted assistant message. Omit it to keep
+the legacy `Interrupted by user` attribution; orchestration hosts should send a
+host-specific reason so transcripts do not attribute host actions to the user.
 
 `clear_queue` remains available for queue inspection and editor restore. Its
 response reports how many user-authored messages were dropped:

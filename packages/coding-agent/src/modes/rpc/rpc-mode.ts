@@ -122,9 +122,13 @@ export type RpcSessionChangeSession = Pick<AgentSession, "newSession" | "switchS
 export type RpcAbortSession = Pick<AgentSession, "abort">;
 
 /** Delegate queue ownership to abort so late enqueues are cleared before its final drain. */
-export async function handleRpcAbort(session: RpcAbortSession, clearQueue: boolean): Promise<void> {
+export async function handleRpcAbort(
+	session: RpcAbortSession,
+	clearQueue: boolean,
+	reason: string | undefined = undefined,
+): Promise<void> {
 	await session.abort({
-		reason: USER_INTERRUPT_LABEL,
+		reason: reason ?? USER_INTERRUPT_LABEL,
 		...(clearQueue ? { clearQueue: true } : {}),
 	});
 }
@@ -1197,12 +1201,12 @@ export async function runRpcMode(
 			}
 
 			case "abort": {
-				await handleRpcAbort(session, command.clearQueue === true);
+				await handleRpcAbort(session, command.clearQueue === true, command.reason);
 				return success(id, "abort");
 			}
 
 			case "abort_and_prompt": {
-				await session.abort({ reason: USER_INTERRUPT_LABEL });
+				await handleRpcAbort(session, false, command.reason);
 				session
 					.prompt(command.message, { images: command.images })
 					.catch(e => output(error(id, "abort_and_prompt", e.message)));
