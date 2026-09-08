@@ -151,6 +151,7 @@ interface AdvisorRetryFallbackState {
 
 interface ActiveAdvisor {
 	name: string;
+	id?: string;
 	slug: string;
 	agent: Agent;
 	runtime: AdvisorRuntime;
@@ -224,6 +225,7 @@ export interface SessionAdvisorsOptions {
 	/** Active memory backend's developer instructions, wrapped for advisors. */
 	memoryPrompt?: string;
 	configs?: AdvisorConfig[];
+	explicitSelection?: boolean;
 	streamFn?: StreamFn;
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 }
@@ -324,6 +326,7 @@ export class SessionAdvisors {
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
+	#advisorExplicitSelection: boolean;
 	#advisorStatuses = new Map<string, { name: string; status: AdvisorRuntimeStatus }>();
 	#advisorProviderSessionIds = new Map<string, string>();
 	#advisorCosts = new Map<string, number>();
@@ -360,6 +363,7 @@ export class SessionAdvisors {
 		this.#advisorContextPrompt = options.contextPrompt;
 		this.#advisorMemoryPrompt = options.memoryPrompt;
 		this.#advisorConfigs = options.configs;
+		this.#advisorExplicitSelection = options.explicitSelection ?? false;
 		this.#advisorStreamFn = options.streamFn;
 		this.#transformProviderContext = options.transformProviderContext;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
@@ -725,19 +729,21 @@ export class SessionAdvisors {
 	}
 
 	#resolveAdvisorRuntimeDescriptors(emitWarnings: boolean): AdvisorRuntimeDescriptor[] {
-		const legacy = !this.#advisorConfigs?.length;
+		const legacy = !this.#advisorExplicitSelection && !this.#advisorConfigs?.length;
 		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
 		const usedSlugs = new Set<string>();
 		for (const config of roster) {
 			if (
+				!this.#advisorExplicitSelection &&
 				config.agents !== undefined &&
 				!config.agents.some(name => name.trim().toLowerCase() === this.#agentName)
 			) {
 				continue;
 			}
-			let slug = legacy ? "" : slugifyAdvisorName(config.name);
+			let slug = legacy ? "" : config.id ? encodeURIComponent(config.id) : slugifyAdvisorName(config.name);
 			if (slug) {
+				if (config.id && usedSlugs.has(slug)) continue;
 				let candidate = slug;
 				let n = 2;
 				while (usedSlugs.has(candidate)) candidate = `${slug}-${n++}`;
@@ -1172,6 +1178,7 @@ export class SessionAdvisors {
 
 			const advisorRef: ActiveAdvisor = {
 				name: advisorName,
+				id: config.id,
 				slug,
 				agent: advisorAgent,
 				runtime,
@@ -1252,7 +1259,7 @@ export class SessionAdvisors {
 	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
-		const source = advisor.slug ? advisor.name : undefined;
+		const source = advisor.slug ? (advisor.id ?? advisor.name) : undefined;
 		const interrupting = isInterruptingSeverity(severity);
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,
@@ -1875,8 +1882,10 @@ export class SessionAdvisors {
 		advisors: AdvisorConfig[],
 		sharedInstructions: string | undefined,
 		sharedMaxNotesPerUpdate?: number,
+		explicitSelection = false,
 	): number {
 		this.#advisorConfigs = advisors;
+		this.#advisorExplicitSelection = explicitSelection;
 		this.#advisorSharedInstructions = sharedInstructions;
 		this.#advisorSharedMaxNotesPerUpdate = sharedMaxNotesPerUpdate;
 		this.#stopAdvisorRuntime();

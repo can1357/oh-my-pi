@@ -7,7 +7,7 @@ import type {
 	TextContent,
 	Usage,
 } from "@oh-my-pi/pi-ai";
-import type { StructuredSubagentSchemaMode } from "../task/types";
+import type { AgentDefinition, StructuredSubagentSchemaMode } from "../task/types";
 import type { CompactionMethod } from "./compaction-methods";
 
 export const CURRENT_SESSION_VERSION = 3;
@@ -257,6 +257,7 @@ export interface SessionInitEntry extends SessionEntryBase {
 	readSummarize?: boolean;
 	/** Effective advisor for this subagent: `"on"` = advisor-role model, else an explicit model pattern; absent = unadvised. */
 	advisor?: string;
+	agentWatchdogDefinition?: Pick<AgentDefinition, "name" | "filePath" | "watchdogs">;
 }
 
 /** Mode change entry - tracks agent mode transitions (e.g. plan mode). */

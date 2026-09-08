@@ -76,6 +76,7 @@ import {
 	resolveCliModel,
 	resolveConfiguredModelPatterns,
 	resolveModelRoleValue,
+	resolveAgentAdvisorSelection,
 } from "./config/model-resolver";
 import { loadPromptTemplates as loadPromptTemplatesInternal, type PromptTemplate } from "./config/prompt-templates";
 import { applyProviderGlobalsFromSettings } from "./config/provider-globals";
@@ -191,11 +192,12 @@ import {
 	loadProjectContextFiles as loadContextFilesInternal,
 	projectSystemPromptToolMetadata,
 } from "./system-prompt";
+import { discoverAgentsForCreate, refreshAgentDiscovery } from "./task";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
 import { sessionDelegationBias } from "./task/prompt-policy";
 import { isScoutSpawnable } from "./task/spawn-policy";
-import type { StructuredSubagentSchemaMode } from "./task/types";
+import type { AgentDefinition, StructuredSubagentSchemaMode } from "./task/types";
 import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
@@ -583,6 +585,8 @@ export interface CreateAgentSessionOptions {
 	 * "main" for a top-level session / "sub" for a subagent.
 	 */
 	agentName?: string;
+	/** Agent watchdog metadata pinned by task spawn or persisted revival. */
+	agentWatchdogDefinition?: Pick<AgentDefinition, "name" | "filePath" | "watchdogs">;
 	/** Optional shared agent registry for IRC routing. Default: AgentRegistry.global(). */
 	agentRegistry?: AgentRegistry;
 	/**
@@ -1403,7 +1407,40 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	activeRepoContextPromise.catch(() => {});
 	const watchdogFilesPromise = logger.time("discoverWatchdogFiles", () => discoverWatchdogFiles(cwd, agentDir));
 	watchdogFilesPromise.catch(() => {});
-	const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () => discoverAdvisorConfigs(cwd, agentDir));
+	// Provider, never a stored value: inherited child policy remains linked to
+	// the owning session, while top-level sessions materialize their own live
+	// settings on every discovery call.
+	const buildSessionExtensionRoots =
+		options.extensionRoots ??
+		((): EffectiveExtensionRoots => ({
+			explicit: options.additionalExtensionPaths ?? [],
+			mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
+			configured: settings.get("extensions") ?? [],
+			configuredLevel: settings.extensionsSourceLevel(),
+		}));
+	let sessionWatchdogDefinition = options.agentWatchdogDefinition;
+	let initialAdvisorDiscovery = true;
+	const resolveSessionAdvisors = async (sessionCwd: string, refreshAgents = false) => {
+		if (refreshAgents) await refreshAgentDiscovery(sessionCwd, buildSessionExtensionRoots());
+		const { agents } = await discoverAgentsForCreate(sessionCwd, buildSessionExtensionRoots());
+		if (!initialAdvisorDiscovery && sessionWatchdogDefinition?.filePath) {
+			const updated = agents.find(
+				agent =>
+					agent.name === sessionWatchdogDefinition!.name && agent.filePath === sessionWatchdogDefinition!.filePath,
+			);
+			if (updated) sessionWatchdogDefinition = updated;
+		}
+		initialAdvisorDiscovery = false;
+		const pinned = sessionWatchdogDefinition;
+		const agentDefinitions = pinned ? [...agents.filter(agent => agent.name !== pinned.name), pinned] : agents;
+		return discoverAdvisorConfigs(sessionCwd, agentDir, {
+			agentName:
+				options.agentName ??
+				((options.taskDepth ?? 0) > 0 || options.parentTaskPrefix ? SUB_AGENT_RULE_NAME : MAIN_AGENT_RULE_NAME),
+			agentDefinitions,
+		});
+	};
+	const advisorConfigsPromise = logger.time("discoverAdvisorConfigs", () => resolveSessionAdvisors(cwd));
 	advisorConfigsPromise.catch(() => {});
 	const promptTemplatesPromise = options.promptTemplates
 		? Promise.resolve(options.promptTemplates)
@@ -1713,6 +1750,23 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			activeRepoContextPromise,
 			advisorConfigsPromise,
 		]);
+	if (!options.agentWatchdogDefinition && options.agentName) {
+		const { agents } = await discoverAgentsForCreate(cwd, buildSessionExtensionRoots());
+		const definition = agents.find(candidate => candidate.name.trim().toLowerCase() === resolvedAgentName);
+		const settingsOverride = settings.get("task.agentAdvisor")[definition?.name ?? resolvedAgentName];
+		if (definition?.advisor !== undefined || definition?.watchdogs?.length || settingsOverride) {
+			const selection = resolveAgentAdvisorSelection({
+				settingsOverride,
+				agentAdvisor: definition?.advisor,
+				hasWatchdogs:
+					Boolean(definition?.watchdogs?.length) &&
+					!(settings.isConfigured("advisor.enabled") && !settings.get("advisor.enabled")),
+			});
+			settings.override("advisor.enabled", Boolean(selection));
+			if (selection?.model)
+				settings.override("modelRoles", { ...settings.getModelRoles(), advisor: selection.model });
+		}
+	}
 	let contextFiles = initialContextFiles;
 
 	let agent: Agent;
@@ -1993,17 +2047,6 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			if (event.type === "connecting" && event.serverNames.length === 0) return;
 			eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
 		};
-		// Provider, never a stored value: inherited child policy remains linked to
-		// the owning session, while top-level sessions materialize their own live
-		// settings on every discovery call.
-		const buildSessionExtensionRoots =
-			options.extensionRoots ??
-			((): EffectiveExtensionRoots => ({
-				explicit: options.additionalExtensionPaths ?? [],
-				mode: options.disableExtensionDiscovery ? "explicit-only" : "merge",
-				configured: settings.get("extensions") ?? [],
-				configuredLevel: settings.extensionsSourceLevel(),
-			}));
 		const mcpDiscoverOptions = {
 			onStatus: onMCPStatus,
 			enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
@@ -3079,12 +3122,17 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// constructed) and refreshed on every later rebuild via
 		// `setAdvisorMemoryPrompt`.
 		let advisorMemoryPrompt: string | undefined;
+		let advisorCwd = cwd;
 		const rebuildSystemPrompt = async (
 			toolNames: string[],
 			tools: Map<string, AgentTool>,
 			rebuildOptions?: { directToolNames?: readonly string[] },
 		): Promise<BuildSystemPromptResult> => {
 			const promptCwd = sessionManager.getCwd();
+			if (hasSession && advisorCwd !== promptCwd) {
+				await session.refreshAdvisorConfigs();
+				advisorCwd = promptCwd;
+			}
 			const activeRepoContext = hasSession
 				? await logger.time("resolveActiveRepoContext", resolveRepoContext, promptCwd)
 				: initialActiveRepoContext;
@@ -3721,6 +3769,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorSharedInstructions: discoveredAdvisors.sharedInstructions,
 			advisorSharedMaxNotesPerUpdate: discoveredAdvisors.sharedMaxNotesPerUpdate,
 			advisorConfigs: discoveredAdvisors.advisors,
+			advisorExplicitSelection: discoveredAdvisors.explicitSelection || discoveredAdvisors.hasConfiguredRoster,
+			discoverAdvisorConfigs: resolveSessionAdvisors,
 			agentName: resolvedAgentName,
 			agent,
 			pruneToolDescriptions: inlineToolDescriptors,

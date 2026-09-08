@@ -456,7 +456,10 @@ function discoveryCacheKey(cwd: string, extensionRoots?: EffectiveExtensionRoots
 	return `${path.resolve(cwd)}\0${JSON.stringify(extensionRoots ?? null)}`;
 }
 
-function discoverAgentsForCreate(cwd: string, extensionRoots?: EffectiveExtensionRoots): Promise<DiscoveryResult> {
+export function discoverAgentsForCreate(
+	cwd: string,
+	extensionRoots?: EffectiveExtensionRoots,
+): Promise<DiscoveryResult> {
 	const fn = discoverAgents;
 	if (discoveryMemoFn !== fn) {
 		discoveryMemoFn = fn;

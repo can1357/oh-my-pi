@@ -21,6 +21,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
+import { AgentWatchdogConfigError } from "../advisor/config";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
@@ -51,6 +52,9 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 				.readFile(filePath, "utf-8")
 				.then(content => parseAgent(filePath, content, source, "warn"))
 				.catch(error => {
+					if (error instanceof AgentWatchdogConfigError) {
+						throw new AgentWatchdogConfigError(`${filePath}: ${error.message}`, { cause: error });
+					}
 					logger.warn("Failed to read agent file", { filePath, error });
 					return null;
 				});

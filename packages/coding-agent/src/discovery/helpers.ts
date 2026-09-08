@@ -11,6 +11,7 @@ import {
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import { type AgentWatchdog, parseAgentWatchdogs } from "../advisor/config";
 import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
@@ -299,6 +300,7 @@ export interface ParsedAgentFields {
 	prewalk?: boolean | string;
 	/** `true` = advise with the default advisor-role model; string = advise with that model pattern. */
 	advisor?: boolean | string;
+	watchdogs?: AgentWatchdog[];
 }
 
 /**
@@ -392,6 +394,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		readSummarize,
 		prewalk,
 		advisor,
+		watchdogs: parseAgentWatchdogs(frontmatter.watchdogs),
 	};
 }
 

@@ -225,6 +225,37 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["default"]);
 	});
 
+	it("keeps an explicit empty watchdog selection empty through enable and context rebuilds", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		session.applyAdvisorConfigs([], undefined, undefined, true);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		session.setAdvisorContextPrompt("Updated project instructions");
+		session.setAdvisorEnabled(false);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		expect(session.getAdvisorStats().advisors).toEqual([]);
+	});
+
+	it("keeps same-name watchdog identities distinct and deduplicates canonical IDs", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		session.applyAdvisorConfigs(
+			[
+				{ id: "agent-a/b", name: "Review" },
+				{ id: "agent/a-b", name: "Review" },
+				{ id: "agent-a/b", name: "Duplicate" },
+			],
+			undefined,
+			undefined,
+			true,
+		);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisors = session.getAdvisorStats().advisors;
+		expect(advisors.map(advisor => advisor.name)).toEqual(["Review", "Review"]);
+		expect(new Set(advisors.map(advisor => advisor.sessionId)).size).toBe(2);
+		session.setAdvisorEnabled(false);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Review", "Review"]);
+	});
+
 	it("uses the SDK agent definition identity for scoped workers", async () => {
 		await advisorModule.saveWatchdogConfigFile(path.join(tempDir.path(), "WATCHDOG.yml"), {
 			advisors: [

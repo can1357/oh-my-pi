@@ -427,6 +427,7 @@ export class AgentsHubComponent implements Component {
 		const selection = resolveAgentAdvisorSelection({
 			settingsOverride: agent.advisorOverride,
 			agentAdvisor: agent.advisor,
+			hasWatchdogs: Boolean(agent.watchdogs?.length),
 		});
 		return selection ? (selection.model ?? "@advisor") : undefined;
 	}

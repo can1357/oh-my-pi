@@ -7,6 +7,7 @@ import {
 	discoverAdvisorConfigs,
 	getOrCreateAdvisorProviderSessionId,
 	loadWatchdogConfigFile,
+	parseAgentWatchdogs,
 	resolveAdvisorConfigEditPath,
 	saveWatchdogConfigFile,
 	serializeWatchdogConfig,
@@ -28,6 +29,105 @@ describe("discoverAdvisorConfigs", () => {
 	afterEach(async () => {
 		await fsp.rm(tmp, { recursive: true, force: true });
 		await fsp.rm(agentDir, { recursive: true, force: true });
+	});
+
+	it("keeps equal display names and local IDs distinct across agent namespaces", async () => {
+		const result = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "one",
+			agentDefinitions: [
+				{ name: "one", watchdogs: [{ id: "check", name: "Review" }, { ref: "two/check" }] },
+				{ name: "two", watchdogs: [{ id: "check", name: "Review" }] },
+			],
+		});
+		expect(result.advisors.map(a => [a.id, a.name])).toEqual([
+			["one/check", "Review"],
+			["two/check", "Review"],
+		]);
+	});
+
+	it("resolves explicit shared IDs through project precedence and deduplicates references", async () => {
+		await saveWatchdogConfigFile(path.join(agentDir, "WATCHDOG.yml"), {
+			advisors: [{ id: "check", name: "User name", instructions: "User" }],
+		});
+		await saveWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"), {
+			instructions: "Shared",
+			advisors: [{ id: "check", name: "Project name", instructions: "Project", agents: [] }, { name: "Unselected" }],
+		});
+		const result = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "worker",
+			agentDefinitions: [{ name: "worker", watchdogs: [{ ref: " GLOBAL/CHECK " }, { ref: "global/check" }] }],
+		});
+		expect(result.advisors.map(a => [a.id, a.name, a.instructions, a.agents])).toEqual([
+			["global/check", "Project name", "Project", undefined],
+		]);
+		expect(result.sharedInstructions).toBe("Shared");
+	});
+
+	it("rejects missing selected references without activating ordinary assignments", async () => {
+		await saveWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"), { advisors: [{ name: "Ordinary" }] });
+		await expect(
+			discoverAdvisorConfigs(tmp, agentDir, {
+				agentName: "worker",
+				agentDefinitions: [{ name: "worker", watchdogs: [{ ref: "global/missing" }] }],
+			}),
+		).rejects.toThrow("global/missing");
+	});
+
+	it("does not resolve unrelated agent references or unselected roster assignments", async () => {
+		await saveWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"), {
+			advisors: [{ ref: "global/missing", agents: ["other"] }, { name: "Ordinary" }],
+		});
+		const result = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "main",
+			agentDefinitions: [{ name: "other", watchdogs: [{ ref: "global/also-missing" }] }],
+		});
+		expect(result.advisors.map(a => a.id)).toEqual(["global/ordinary"]);
+	});
+
+	it("retains explicit empty selection and shared baseline", async () => {
+		await saveWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"), {
+			instructions: "Shared",
+			advisors: [{ name: "Ordinary" }],
+		});
+		const result = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "worker",
+			agentDefinitions: [{ name: "worker", watchdogs: [] }],
+		});
+		expect(result.advisors).toEqual([]);
+		expect(result.explicitSelection).toBe(true);
+		expect(result.sharedInstructions).toBe("Shared");
+	});
+
+	it("resolves inline imports relative to the defining agent rather than the selected agent", async () => {
+		const sourceDir = path.join(tmp, "definitions");
+		await fsp.mkdir(sourceDir);
+		await Bun.write(path.join(sourceDir, "review.md"), "Source-relative review");
+		const result = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "consumer",
+			agentDefinitions: [
+				{ name: "consumer", watchdogs: [{ ref: "owner/check" }] },
+				{
+					name: "owner",
+					filePath: path.join(sourceDir, "owner.md"),
+					watchdogs: [{ id: "check", instructions: "@review.md" }],
+				},
+			],
+		});
+		expect(result.advisors[0].instructions).toContain("Source-relative review");
+	});
+
+	it("rejects normalized duplicate IDs and mixed reference definitions", () => {
+		expect(() => parseAgentWatchdogs([{ id: " CHECK " }, { id: "check" }])).toThrow("Duplicate");
+		expect(() => parseAgentWatchdogs([{ ref: "global/check", model: "override" }])).toThrow("cannot contain");
+		expect(() => parseAgentWatchdogs([{ ref: "../check" }])).toThrow("Invalid watchdog ID");
+	});
+
+	it("rejects duplicate shared IDs within one file", async () => {
+		await Bun.write(
+			path.join(tmp, "WATCHDOG.yml"),
+			"advisors:\n  - id: check\n    name: First\n  - id: CHECK\n    name: Second\n",
+		);
+		await expect(discoverAdvisorConfigs(tmp, agentDir)).rejects.toThrow("duplicate watchdog ID");
 	});
 
 	it("parses advisors, the model thinking suffix, tool filtering, and shared instructions", async () => {
@@ -220,6 +320,22 @@ describe("WATCHDOG.yml file round-trip", () => {
 	});
 	afterEach(async () => {
 		await fsp.rm(tmp, { recursive: true, force: true });
+	});
+
+	it("preserves definition IDs and reference assignments without materializing referenced definitions", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		const original: WatchdogConfigDoc = {
+			advisors: [
+				{ id: "stable-id", name: "Editable display", instructions: "@local.md" },
+				{ ref: "worker/check", agents: ["main"], enabled: false },
+				{ ref: "global/stable-id", agents: [] },
+			],
+		};
+		await saveWatchdogConfigFile(file, original);
+		const edited = await loadWatchdogConfigFile(file);
+		edited.instructions = "Updated baseline";
+		await saveWatchdogConfigFile(file, edited);
+		expect(await loadWatchdogConfigFile(file)).toEqual({ ...original, instructions: "Updated baseline" });
 	});
 
 	const doc: WatchdogConfigDoc = {

@@ -19,7 +19,7 @@ import type {
 	ToolChoice,
 } from "@oh-my-pi/pi-ai";
 import type { postmortem } from "@oh-my-pi/pi-utils";
-import type { AdvisorConfig } from "../advisor";
+import type { AdvisorConfig, DiscoveredAdvisors } from "../advisor";
 import type { AsyncJob, AsyncJobDeliveryState, AsyncJobManager } from "../async";
 import type { EffectiveExtensionRoots } from "../capability/types";
 import type { ModelRegistry } from "../config/model-registry";
@@ -321,6 +321,8 @@ export interface AgentSessionConfig {
 	advisorMemoryPrompt?: string;
 	/** Advisors discovered from WATCHDOG.yml. */
 	advisorConfigs?: AdvisorConfig[];
+	advisorExplicitSelection?: boolean;
+	discoverAdvisorConfigs?: (cwd: string, refreshAgents?: boolean) => Promise<DiscoveredAdvisors>;
 	/** Strip tool descriptions from provider-bound side-request tool specs. */
 	pruneToolDescriptions?: boolean;
 	/** Disconnect the MCP manager owned by this session during disposal. */
