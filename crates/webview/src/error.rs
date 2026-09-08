@@ -7,9 +7,10 @@ use std::{io, path::PathBuf, result};
 use hyper_util::client::legacy;
 use omp_core::Str;
 use png::DecodingError;
+use strum::IntoStaticStr;
 use tokio::time::error::Elapsed;
 use tokio_tungstenite::tungstenite;
-use strum::IntoStaticStr;
+
 use crate::SurfaceKind;
 
 /// Crate-wide result alias.

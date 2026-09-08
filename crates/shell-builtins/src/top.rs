@@ -12,9 +12,9 @@ use std::{
 use clap::Parser;
 use omp_core::Str;
 use omp_shell::{ExecutionContext, ExecutionExitCode, ExecutionResult, builtins};
+use strum::IntoStaticStr;
 use tokio::time::sleep;
 
-use strum::IntoStaticStr;
 use crate::proc_snapshot::{ProcInfo, sanitize_process_command};
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]

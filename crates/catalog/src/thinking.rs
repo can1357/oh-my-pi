@@ -150,7 +150,6 @@ pub enum ThinkingMode {
 	AnthropicBudgetEffort,
 }
 
-
 /// Additional serving path selected independently of effort.
 #[derive(
 	Clone,

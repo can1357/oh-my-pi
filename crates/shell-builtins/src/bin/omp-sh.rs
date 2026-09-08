@@ -8,8 +8,8 @@ use omp_shell::{
 	SourceInfo, builtins,
 };
 use omp_shell_builtins::{process_builtins, utility_builtins};
-use tracing::Instrument as _;
 use strum::IntoStaticStr;
+use tracing::Instrument as _;
 
 const USAGE: &str = "usage: omp-sh [-c command [name [argument ...]]] [script [argument ...]]";
 

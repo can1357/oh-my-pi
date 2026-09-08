@@ -12,12 +12,12 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use omp_shell::{ShellExtensions, builtins::Registration};
+use strum::IntoStaticStr;
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
 	support::{line_ending::LineEnding, quote::Quotable},
 };
-use strum::IntoStaticStr;
 
 mod options {
 	pub const COLUMN_1: &str = "1";
