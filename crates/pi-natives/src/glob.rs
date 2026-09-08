@@ -14,7 +14,7 @@
 //! // JS: await native.glob({ pattern: "*.rs", path: "." })
 //! ```
 
-use std::{cmp::Ordering, path::Path};
+use std::{cmp::Ordering, collections::BinaryHeap, path::Path};
 
 use napi::{
 	bindgen_prelude::*,
@@ -90,6 +90,78 @@ fn compare_matches_by_rank(a: &GlobMatch, b: &GlobMatch) -> Ordering {
 		.then_with(|| a.path.cmp(&b.path))
 }
 
+/// Heap entry whose greatest element is the least desirable retained match.
+///
+/// `compare_matches_by_rank` orders the best match first, while `BinaryHeap`
+/// keeps the greatest element at its head. Keeping that comparison means the
+/// heap head is the current worst match and can be evicted when a better match
+/// arrives.
+struct RankedGlobMatch(GlobMatch);
+
+impl PartialEq for RankedGlobMatch {
+	fn eq(&self, other: &Self) -> bool {
+		compare_matches_by_rank(&self.0, &other.0) == Ordering::Equal
+	}
+}
+
+impl Eq for RankedGlobMatch {}
+
+impl PartialOrd for RankedGlobMatch {
+	fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+		Some(self.cmp(other))
+	}
+}
+
+impl Ord for RankedGlobMatch {
+	fn cmp(&self, other: &Self) -> Ordering {
+		compare_matches_by_rank(&self.0, &other.0)
+	}
+}
+
+struct BoundedRankedGlobMatches {
+	limit: usize,
+	retained: BinaryHeap<RankedGlobMatch>,
+}
+
+impl BoundedRankedGlobMatches {
+	fn new(limit: usize) -> Self {
+		Self { limit, retained: BinaryHeap::new() }
+	}
+
+	fn push(&mut self, matched: GlobMatch) {
+		if self.limit == 0 {
+			return;
+		}
+		self.retained.push(RankedGlobMatch(matched));
+		if self.retained.len() > self.limit {
+			self.retained.pop();
+		}
+	}
+
+	fn finish(self) -> Vec<GlobMatch> {
+		let mut matches = self.retained.into_iter().map(|entry| entry.0).collect::<Vec<_>>();
+		matches.sort_by(compare_matches_by_rank);
+		matches
+	}
+}
+
+impl pi_walker::EntryVisitor for BoundedRankedGlobMatches {
+	type Error = String;
+
+	fn visit(
+		&mut self,
+		entry: pi_walker::Entry<'_>,
+	) -> std::result::Result<pi_walker::WalkControl, Self::Error> {
+		self.push(GlobMatch {
+			path:      entry.relative.to_string(),
+			file_type: iofs::from_walker_file_type(entry.file_type),
+			mtime:     entry.mtime,
+			size:      entry.size,
+		});
+		Ok(pi_walker::WalkControl::Continue)
+	}
+}
+
 fn resolve_symlink_target_type(root: &Path, relative_path: &str) -> Option<FileType> {
 	let target_path = root.join(relative_path);
 	let metadata = std::fs::metadata(target_path).ok()?;
@@ -130,6 +202,21 @@ fn collect_ranked_matches(
 	config: &GlobConfig,
 	ct: &task::CancelToken,
 ) -> Result<Vec<GlobMatch>> {
+	// The uncached path can stream entries directly from the walker, so retain
+	// only the top-N candidates. Cached scans still use the existing collection
+	// path because the cache stores complete scan results.
+	if !config.cache && config.max_results != usize::MAX {
+		let mut visitor = BoundedRankedGlobMatches::new(config.max_results);
+		request
+			.clone()
+			.cache(false)
+			.no_limit()
+			.detail(pi_walker::WalkDetail::Full)
+			.stream_with_heartbeat(&mut visitor, || ct.heartbeat().map_err(|err| err.to_string()))
+			.map_err(iofs::map_walker_error)?;
+		return Ok(visitor.finish());
+	}
+
 	let outcome = request
 		.collect_ranked_with_heartbeat(
 			pi_walker::WalkRank::MtimeDescPathAsc,
@@ -340,6 +427,26 @@ mod tests {
 			.iter()
 			.map(|entry| entry.path.as_str())
 			.collect()
+	}
+
+	#[test]
+	fn bounded_ranked_matches_keep_newest_entries_and_path_ties() {
+		let mut retained = super::BoundedRankedGlobMatches::new(2);
+		for (path, mtime) in [("z.txt", 100.0), ("a.txt", 100.0), ("old.txt", 10.0)] {
+			retained.push(super::GlobMatch {
+				path: path.to_string(),
+				file_type: super::FileType::File,
+				mtime: Some(mtime),
+				size: None,
+			});
+		}
+
+		let paths = retained
+			.finish()
+			.into_iter()
+			.map(|entry| entry.path)
+			.collect::<Vec<_>>();
+		assert_eq!(paths, ["a.txt", "z.txt"]);
 	}
 
 	#[test]
