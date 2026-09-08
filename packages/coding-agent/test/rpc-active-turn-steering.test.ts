@@ -155,7 +155,9 @@ describe("RPC atomic abort handler", () => {
 		const operations: string[] = [];
 		const session = {
 			abort: async options => {
-				operations.push(`abort:start:${options?.clearQueue === true}:${options?.reason}`);
+				operations.push(
+					`abort:start:${options?.clearQueue === true}:${options?.suppressAdvisorAutoResume === true}:${options?.reason}`,
+				);
 				await releaseAbort.promise;
 				operations.push("abort:end");
 			},
@@ -164,12 +166,12 @@ describe("RPC atomic abort handler", () => {
 		const aborting = handleRpcAbort(session, true, "Interrupted by host (Paseo)");
 		operations.push("caller:enqueue-opportunity");
 
-		expect(operations).toEqual(["abort:start:true:Interrupted by host (Paseo)", "caller:enqueue-opportunity"]);
+		expect(operations).toEqual(["abort:start:true:true:Interrupted by host (Paseo)", "caller:enqueue-opportunity"]);
 
 		releaseAbort.resolve();
 		await aborting;
 		expect(operations).toEqual([
-			"abort:start:true:Interrupted by host (Paseo)",
+			"abort:start:true:true:Interrupted by host (Paseo)",
 			"caller:enqueue-opportunity",
 			"abort:end",
 		]);
@@ -184,7 +186,7 @@ describe("RPC atomic abort handler", () => {
 		} satisfies RpcAbortSession;
 
 		await handleRpcAbort(session, false);
-		expect(options).toEqual({ reason: "Interrupted by user" });
+		expect(options).toEqual({ reason: "Interrupted by user", suppressAdvisorAutoResume: true });
 	});
 });
 

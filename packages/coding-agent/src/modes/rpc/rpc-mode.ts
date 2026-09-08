@@ -129,6 +129,7 @@ export async function handleRpcAbort(
 ): Promise<void> {
 	await session.abort({
 		reason: reason ?? USER_INTERRUPT_LABEL,
+		suppressAdvisorAutoResume: true,
 		...(clearQueue ? { clearQueue: true } : {}),
 	});
 }

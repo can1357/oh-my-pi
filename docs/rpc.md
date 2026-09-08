@@ -638,8 +638,9 @@ dropped. Advisor cards remain preserved as visible advice.
 Plain `{ "type": "abort" }` keeps the legacy stranded-queue behavior.
 
 Both `abort` and `abort_and_prompt` accept an optional `reason`. The server
-persists that text verbatim on the aborted assistant message. Omit it to keep
-the legacy `Interrupted by user` attribution; orchestration hosts should send a
+persists that text verbatim on the aborted assistant message while retaining
+the same external-interrupt queue and advisor suppression. Omit it to keep the
+legacy `Interrupted by user` attribution; orchestration hosts should send a
 host-specific reason so transcripts do not attribute host actions to the user.
 
 `clear_queue` remains available for queue inspection and editor restore. Its

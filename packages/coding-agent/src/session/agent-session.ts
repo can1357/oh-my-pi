@@ -7621,19 +7621,23 @@ export class AgentSession {
 	 * `reason` (e.g. `USER_INTERRUPT_LABEL`) rides the agent's `AbortController`
 	 * and surfaces verbatim on the aborted assistant message's `errorMessage`, so
 	 * the transcript can distinguish a deliberate user interrupt from an opaque
-	 * abort. Omit it for internal/lifecycle aborts.
+	 * abort. Omit it for internal/lifecycle aborts. External hosts can preserve
+	 * interrupt suppression with `suppressAdvisorAutoResume` without falsely
+	 * attributing their action to the user.
 	 */
 	async abort(options?: {
 		goalReason?: "interrupted" | "internal";
 		reason?: string;
+		suppressAdvisorAutoResume?: boolean;
 		/** Drop queued work at both non-suspending boundaries of the abort lifecycle. */
 		clearQueue?: boolean;
 		/** Internal `/compact` startup keeps the manual-compaction marker alive while aborting the active turn. */
 		preserveCompaction?: boolean;
 	}): Promise<void> {
 		const userInterrupt = options?.reason === USER_INTERRUPT_LABEL;
+		const suppressAdvisorAutoResume = userInterrupt || options?.suppressAdvisorAutoResume === true;
 		this.#pendingAbortErrorId = userInterrupt ? AIError.create(AIError.Flag.UserInterrupt) : undefined;
-		if (userInterrupt) this.#advisors.autoResumeSuppressed = true;
+		if (suppressAdvisorAutoResume) this.#advisors.autoResumeSuppressed = true;
 		// Suppress all settle drains before touching queues. No await may occur between
 		// either clear and the corresponding abort boundary.
 		this.#abortInProgress++;
@@ -7644,7 +7648,8 @@ export class AgentSession {
 		// Pull advisor concerns out of the steer/follow-up queues before clearing so
 		// they can be re-recorded as visible advice once the agent settles. Every other
 		// queued message is dropped when this abort owns queue clearing.
-		const strandedAdvisorCards = userInterrupt || options?.clearQueue ? this.#extractQueuedAdvisorCards() : [];
+		const strandedAdvisorCards =
+			suppressAdvisorAutoResume || options?.clearQueue ? this.#extractQueuedAdvisorCards() : [];
 		if (options?.clearQueue) this.clearQueue({ forInterrupt: true });
 		try {
 			this.#abortAutolearnCapture();

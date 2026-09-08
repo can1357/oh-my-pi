@@ -485,6 +485,26 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		await running.catch(() => {});
 	});
 
+	it("preserves advisor suppression for a host-attributed interrupt", async () => {
+		const { session, sessionManager, mock, streamStarted } = await createParkedSession();
+		const persisted = capturePersistedAdvice(sessionManager);
+		const running = session.prompt("do the thing");
+		await streamStarted;
+
+		await session.sendCustomMessage(advisorCard("breaks the build"), { deliverAs: "steer", triggerTurn: true });
+		await session.abort({
+			reason: "Interrupted by host (Paseo)",
+			suppressAdvisorAutoResume: true,
+		});
+		await session.waitForIdle();
+
+		expect(session.agent.peekSteeringQueue()).toEqual([]);
+		expect(session.agent.state.messages.filter(isAdvisorCard)).toHaveLength(1);
+		expect(persisted).toEqual(["breaks the build"]);
+		expect(mock.calls.length).toBe(1);
+		await running.catch(() => {});
+	});
+
 	it("reclaims an advisor concern parked during abort cleanup so it is not lost", async () => {
 		const { session, sessionManager, mock, streamStarted } = await createParkedSession();
 		const persisted = capturePersistedAdvice(sessionManager);
