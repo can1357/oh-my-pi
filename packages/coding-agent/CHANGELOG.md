@@ -34,6 +34,10 @@
 - `--provider` with `--models` (no `--model`) no longer early-binds `--api-key` to that provider (session options ignore provider in that form).
 - Grok Bot catalog matrix text probes require the exact expected token (no loose `pong` match).
 - Grok Bot catalog matrix bash smoke requires an echo/printf of the ping (comment-only mentions fail).
+### Fixed
+
+- Python cells are no longer replayed automatically after a kernel crash, preventing duplicate side effects; the next call starts a fresh kernel.
+- Session rewrites preserve open-reader snapshots and replacement identity when a rename needs an EPERM fallback.
 
 ## [18.1.14] - 2026-09-07
 
