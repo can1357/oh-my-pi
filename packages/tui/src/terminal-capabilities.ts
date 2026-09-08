@@ -425,6 +425,45 @@ export function detectRectangularSgrSupport(terminalId: TerminalId, env: NodeJS.
 	return true;
 }
 /**
+ * Whether the terminal implements colon-subparameter SGR styled underlines —
+ * `CSI 4 : 3 m` (curly) plus `CSI 58` / `CSI 59` underline color — as opposed to
+ * only the legacy `CSI 4 m` / `CSI 24 m` on/off underline.
+ *
+ * This is an underline-style capability, not a color depth, so it is keyed on
+ * the detected terminal, never on `TERM`/`COLORTERM`. kitty, Ghostty, WezTerm,
+ * and iTerm2 (>= 3.5) implement the full pair. Apple Terminal does NOT: it
+ * renders `CSI 4 : 0 m` (the reset half) as a solid black background that
+ * persists to end of line, and ignores SGR 58/59 — so it, along with every
+ * other unproven terminal, gets the flat underline instead. Disabled under any
+ * multiplexer: GNU screen and older tmux drop colon-form SGR, and the outer
+ * terminal's id leaks into the session env, so a proven id is not proof the
+ * bytes survive — the same reason DECCARA and synchronized output gate on it.
+ */
+export function detectStyledUnderlineSupport(terminalId: TerminalId, env: NodeJS.ProcessEnv = Bun.env): boolean {
+	// A multiplexer in the path (GNU screen, older tmux) does not forward the
+	// colon-form underline, yet the outer terminal's id leaks through the session
+	// env, so the switch below would otherwise trust an unreachable capability.
+	if (isInsideTerminalMultiplexer(env)) return false;
+	switch (terminalId) {
+		case "kitty":
+		case "ghostty":
+		case "wezterm":
+			return true;
+		case "iterm2": {
+			// The full curly-and-colored pair did not ship together until iTerm2 3.5
+			// (curly first targeted 3.3.12; SGR 58/59 underline color was beta,
+			// expected for 3.5), so 3.0–3.4 would receive the colon reset they cannot
+			// render. Enable only on a confirmed major.minor >= 3.5; an absent or
+			// unparseable version keeps the flat fallback so only proven terminals
+			// get the colon form.
+			const version = parseMajorMinorVersion(env.TERM_PROGRAM_VERSION);
+			return version !== null && (version.major > 3 || (version.major === 3 && version.minor >= 5));
+		}
+		default:
+			return false;
+	}
+}
+/**
  * Resolve an explicit user override for OSC 8 hyperlinks. Returns `false` for
  * an opt-out, `true` for a force-on, or `null` when the user has expressed no
  * preference. Opt-out beats force-on so a kill switch is unambiguous, mirroring
@@ -671,6 +710,8 @@ export interface RuntimeTerminal extends TerminalInfo {
 	supportsScreenToScrollback: boolean;
 	/** Whether OSC 66 text sizing is currently enabled. */
 	textSizing: boolean;
+	/** Whether the terminal implements colon-subparameter styled underlines (curly + colored). */
+	styledUnderlines: boolean;
 }
 
 export const TERMINAL: RuntimeTerminal = (() => {
@@ -697,6 +738,11 @@ export const TERMINAL: RuntimeTerminal = (() => {
 	// ignores DECCARA) exercises the padded-string fallback. Integration tests opt
 	// in explicitly through setTerminalDeccara.
 	resolved.deccara = detectRectangularSgrSupport(resolved.id, Bun.env) && !isBunTestRuntime();
+	// Styled-underline capability: colon-form curly underline + SGR 58/59 color.
+	// Keyed on the detected terminal (an underline-style capability, not a color
+	// depth), so Apple Terminal and other unproven hosts fall back to the flat
+	// CSI 4 m / CSI 24 m underline the typo renderer needs to avoid black bars.
+	resolved.styledUnderlines = detectStyledUnderlineSupport(resolved.id, Bun.env);
 	return resolved;
 })();
 

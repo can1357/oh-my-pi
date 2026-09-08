@@ -26,7 +26,7 @@ describe("macOS spelling feature gates", () => {
 		const checkSpelling = mock((text: string) =>
 			text === "recieved" ? Promise.resolve([{ start: 0, length: 8 }]) : secondCheck.promise,
 		);
-		const provider = new MacOSSpellingProvider(backend({ checkSpelling }));
+		const provider = new MacOSSpellingProvider(backend({ checkSpelling }), true);
 		provider.setFeatures({ typoDetection: true, autocomplete: false, autocorrect: false });
 		const updated = Promise.withResolvers<void>();
 		provider.onUpdate = updated.resolve;
@@ -54,6 +54,7 @@ describe("macOS spelling feature gates", () => {
 					return result.promise;
 				},
 			}),
+			true,
 		);
 		provider.setFeatures({ typoDetection: true, autocomplete: false, autocorrect: false });
 		let updated = Promise.withResolvers<void>();
@@ -113,6 +114,7 @@ describe("macOS spelling feature gates", () => {
 				autocorrectWord,
 				spellingGuesses,
 			}),
+			true,
 		);
 		provider.setFeatures({ typoDetection: true, autocomplete: false, autocorrect: false });
 		const updated = Promise.withResolvers<void>();
@@ -216,6 +218,7 @@ describe("macOS spelling feature gates", () => {
 				autocorrectWord: async () => "received",
 				spellingGuesses: async () => ["received"],
 			}),
+			true,
 		);
 		provider.setFeatures({ typoDetection: true, autocomplete: true, autocorrect: true });
 		const fencedText = "outside\n```text\nrecieved\n```";
@@ -321,5 +324,37 @@ describe("macOS spelling feature gates", () => {
 		expect(await provider.getWordReplacements(["recieved"], 0, 4)).toBeNull();
 		expect(checkSpelling).toHaveBeenCalledTimes(1);
 		expect(completeWord).not.toHaveBeenCalled();
+	});
+});
+
+describe("typo underline capability selection", () => {
+	async function renderFlaggedWord(styledUnderlines: boolean): Promise<string> {
+		const provider = new MacOSSpellingProvider(
+			backend({ checkSpelling: async () => [{ start: 0, length: 3 }] }),
+			styledUnderlines,
+		);
+		provider.setFeatures({ typoDetection: true, autocomplete: false, autocorrect: false });
+		const updated = Promise.withResolvers<void>();
+		provider.onUpdate = updated.resolve;
+		provider.decorateTypos("teh", decorationContext("teh"));
+		await updated.promise;
+		return provider.decorateTypos("teh", decorationContext("teh"));
+	}
+
+	it("emits a flat CSI 4 m / CSI 24 m underline with no colon SGR when styled underlines are unsupported", async () => {
+		const rendered = await renderFlaggedWord(false);
+		expect(rendered).toContain("\x1b[4m");
+		expect(rendered).toContain("\x1b[24m");
+		for (const forbidden of ["4:3", "4:0", "58:", "59"]) {
+			expect(rendered).not.toContain(forbidden);
+		}
+	});
+
+	it("emits the red curly colon-form underline when styled underlines are supported", async () => {
+		const rendered = await renderFlaggedWord(true);
+		expect(rendered).toContain("\x1b[4:3m");
+		expect(rendered).toContain("\x1b[58:2::255:95:95m");
+		expect(rendered).toContain("\x1b[4:0m");
+		expect(rendered).toContain("\x1b[59m");
 	});
 });
