@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity quota summaries now identify Claude/GPT routing copies as one shared upstream pool while preserving model-specific quota selection ([#11268](https://github.com/can1357/oh-my-pi/issues/11268)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

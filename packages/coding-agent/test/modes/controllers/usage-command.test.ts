@@ -95,4 +95,46 @@ describe("renderUsageReports content", () => {
 		expect(output).toContain(`(${futureIso.slice(0, 10)})`);
 		expect(output).toContain(`expired (${expiredIso.slice(0, 10)})`);
 	});
+
+	it("renders each marked Antigravity shared quota once in expanded details", () => {
+		const quota = (
+			counter: "google" | "anthropic" | "openai",
+			windowId: "5h" | "weekly",
+		): UsageReport["limits"][number] => {
+			const sharedGroup = counter === "google" ? undefined : `3p-${windowId}`;
+			return {
+				id: `google-antigravity:${counter}:default:${counter === "google" ? "gemini" : "3p"}-${windowId}`,
+				label: counter === "google" ? "Gemini" : "Claude & GPT (shared)",
+				scope: {
+					provider: "google-antigravity",
+					accountId: "account",
+					windowId,
+					...(sharedGroup !== undefined ? { shared: true, sharedGroup } : {}),
+				},
+				window: { id: windowId, label: windowId === "5h" ? "5 Hour" : "Weekly" },
+				amount: { unit: "percent", usedFraction: 0.25 },
+				status: "ok",
+			};
+		};
+		const reports: UsageReport[] = [
+			{
+				provider: "google-antigravity",
+				fetchedAt: Date.now(),
+				limits: [
+					quota("google", "5h"),
+					quota("google", "weekly"),
+					quota("anthropic", "5h"),
+					quota("openai", "5h"),
+					quota("anthropic", "weekly"),
+					quota("openai", "weekly"),
+				],
+				metadata: { email: "user@example.test" },
+			},
+		];
+
+		const output = stripVTControlCharacters(renderUsageReports(reports, theme, Date.now(), 120));
+
+		expect(output.match(/Claude & GPT \(shared\)/g)).toHaveLength(2);
+		expect(output.match(/Gemini/g)).toHaveLength(2);
+	});
 });

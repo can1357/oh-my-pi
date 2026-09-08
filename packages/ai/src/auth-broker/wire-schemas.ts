@@ -220,6 +220,7 @@ const usageScopeSchema = type({
 	"tier?": "string",
 	"windowId?": "string",
 	"shared?": "boolean",
+	"sharedGroup?": "string",
 });
 
 const usageLimitSchema = type({

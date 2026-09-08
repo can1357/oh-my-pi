@@ -114,6 +114,36 @@ describe("buildProviderCards", () => {
 		const unlimited = cards.find(card => card.provider === "ollama-cloud");
 		expect(unlimited?.unlimited).toBe(true);
 	});
+
+	it("shows each marked shared quota once without merging independent buckets", () => {
+		const sharedLimit = (counter: "anthropic" | "openai", windowId: "5h" | "7d") => {
+			const value = limit("google-antigravity", "account", windowId, "Claude & GPT (shared)", 0.25, "ok");
+			return {
+				...value,
+				id: `google-antigravity:${counter}:default:3p-${windowId}`,
+				scope: { ...value.scope, shared: true, sharedGroup: `3p-${windowId}` },
+			};
+		};
+		const reports = [
+			report("google-antigravity", "user@example.test", [
+				limit("google-antigravity", "account", "5h", "Gemini", 0.25, "ok"),
+				limit("google-antigravity", "account", "7d", "Gemini", 0.25, "ok"),
+				sharedLimit("anthropic", "5h"),
+				sharedLimit("openai", "5h"),
+				sharedLimit("anthropic", "7d"),
+				sharedLimit("openai", "7d"),
+			]),
+		];
+
+		const windows = buildProviderCards(reports, now)[0].windows;
+
+		expect(windows.map(window => `${window.label} — ${window.windowTag}`).sort()).toEqual([
+			"Claude & GPT (shared) — 5h",
+			"Claude & GPT (shared) — 7d",
+			"Gemini — 5h",
+			"Gemini — 7d",
+		]);
+	});
 });
 describe("UsageDashboardComponent", () => {
 	beforeAll(async () => {

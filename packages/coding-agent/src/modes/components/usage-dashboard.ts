@@ -18,6 +18,7 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { colorLuma, formatDuration, hexToRgb, rgbToHex, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatProviderName } from "../../slash-commands/helpers/format";
+import { collapseSharedUsageReports } from "../../utils/usage-display";
 import { colorToAnsi } from "../theme/color";
 import { theme } from "../theme/theme";
 import {
@@ -142,8 +143,9 @@ function aggregateRowStatus(windows: CardWindowRow[]): UsageLimit["status"] {
  * what's burning is on top-left; fully idle providers collapse into a tick.
  */
 export function buildProviderCards(reports: UsageReport[], nowMs: number): ProviderCard[] {
+	const displayReports = collapseSharedUsageReports(reports);
 	const grouped = new Map<string, UsageReport[]>();
-	for (const report of reports) {
+	for (const report of displayReports) {
 		const list = grouped.get(report.provider) ?? [];
 		list.push(report);
 		grouped.set(report.provider, list);

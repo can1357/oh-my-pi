@@ -147,12 +147,18 @@ describe("antigravity usage provider", () => {
 		expect(fiveHour?.window?.label).toBe("5 Hour");
 		expect(fiveHour?.window?.durationMs).toBe(5 * 60 * 60 * 1000);
 
+		expect(googleLimits.every(limit => limit.label === "Gemini")).toBeTrue();
 		const claudeLimits = scopeAntigravityLimitsForModel(report!, { modelId: "claude-sonnet-4-6" });
 		const gptLimits = scopeAntigravityLimitsForModel(report!, { modelId: "gpt-oss-120b" });
 		expect(claudeLimits).toHaveLength(2);
 		expect(gptLimits).toHaveLength(2);
 		expect(claudeLimits.every(limit => limit.scope.shared === true)).toBeTrue();
 		expect(gptLimits.every(limit => limit.scope.shared === true)).toBeTrue();
+		expect(claudeLimits.every(limit => limit.label === "Claude & GPT (shared)")).toBeTrue();
+		expect(gptLimits.every(limit => limit.label === "Claude & GPT (shared)")).toBeTrue();
+		expect(claudeLimits.map(limit => limit.scope.sharedGroup).sort()).toEqual(
+			gptLimits.map(limit => limit.scope.sharedGroup).sort(),
+		);
 	});
 
 	it("merges two models with same tier into one limit", async () => {
