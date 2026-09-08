@@ -2657,6 +2657,9 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.remoteEndpoint": { type: "string", default: undefined },
 
+	// V2 request timeout per attempt; unset preserves the engine's 180-second default.
+	"compaction.remoteTimeoutMs": { type: "number", default: undefined },
+
 	"compaction.v2RetainedMessageBudget": { type: "number", default: 64000 },
 
 	// Idle compaction
@@ -6172,6 +6175,7 @@ export interface CompactionSettings {
 	autoContinue: boolean;
 	remoteEndpoint: string | undefined;
 	remoteStreamingV2Enabled: boolean;
+	remoteTimeoutMs?: number;
 	v2RetainedMessageBudget: number;
 	idleEnabled: boolean;
 	idleThresholdTokens: number;
