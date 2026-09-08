@@ -284,4 +284,85 @@ describe("classifyGatewayError authoritative-status precedence", () => {
 		expect(c.owner).toBe("provider");
 		expect(c.disposition).toBe("provider_transient");
 	});
+
+	it("keeps an authoritative 503 retryable when the body mentions aborted", () => {
+		const c = classifyGatewayError(Object.assign(new Error("HTTP 503: upstream request aborted"), { status: 503 }));
+		expect(c.status).toBe(503);
+		expect(c.owner).toBe("provider");
+		expect(isRetryableGatewayDisposition(c.disposition)).toBe(true);
+	});
+
+	it("routes a 403 account cap to credential_quota instead of transient", () => {
+		const c = classifyGatewayError(
+			Object.assign(
+				new Error(
+					"Devin stream error permission_denied: Reached overall message rate limit. Please try again later. Your limit will reset in 13 minutes.",
+				),
+				{ status: 403 },
+			),
+		);
+		expect(c.owner).toBe("quota");
+		expect(c.disposition).toBe("credential_quota");
+	});
+
+	it("rotates cyber_policy wording instead of terminating", () => {
+		const c = classifyGatewayError(
+			Object.assign(
+				new Error(
+					"This content was flagged for possible cybersecurity risk. Join Trusted Access for Cyber. (code=cyber_policy)",
+				),
+				{ status: 403 },
+			),
+		);
+		expect(c.owner).toBe("credential");
+		expect(c.disposition).toBe("credential_transient");
+		expect(isRetryableGatewayDisposition(c.disposition)).toBe(true);
+	});
+
+	it("rotates structured cyber_policy codes without policy wording", () => {
+		const c = classifyGatewayError(Object.assign(new Error("request denied"), { status: 403, code: "cyber_policy" }));
+		expect(c.owner).toBe("credential");
+		expect(c.disposition).toBe("credential_transient");
+	});
+
+	it("maps a 400 model-missing message to model_unavailable", () => {
+		const c = classifyGatewayError(Object.assign(new Error("The model does not exist"), { status: 400 }));
+		expect(c.owner).toBe("model");
+		expect(c.disposition).toBe("model_unavailable");
+	});
+
+	it("maps structured model_not_available codes to model_unavailable", () => {
+		const c = classifyGatewayError(
+			Object.assign(new Error("request failed"), { status: 400, code: "model_not_available_for_integrator" }),
+		);
+		expect(c.owner).toBe("model");
+		expect(c.disposition).toBe("model_unavailable");
+	});
+
+	it("treats invalid_token 401 as a permanent credential failure", () => {
+		const c = classifyGatewayError(Object.assign(new Error("Unauthorized (401): invalid_token"), { status: 401 }));
+		expect(c.owner).toBe("credential");
+		expect(c.disposition).toBe("credential_permanent");
+	});
+
+	it("keeps dead credentials failover-eligible against a sibling", () => {
+		const c = classifyGatewayError(Object.assign(new Error("Unauthorized (401): invalid_token"), { status: 401 }));
+		expect(c.disposition).toBe("credential_permanent");
+		expect(isRetryableGatewayDisposition(c.disposition)).toBe(true);
+	});
+
+	it("maps bare overflow wording to context_overflow instead of a retryable 502", () => {
+		const c = classifyGatewayError(new Error("prompt is too long"));
+		expect(c.owner).toBe("request");
+		expect(c.disposition).toBe("context_overflow");
+		expect(isRetryableGatewayDisposition(c.disposition)).toBe(false);
+	});
+
+	it("keeps concurrency-cap 429s in the provider backoff lane", () => {
+		const c = classifyGatewayError(
+			Object.assign(new Error("Online prediction concurrent requests quota exceeded"), { status: 429 }),
+		);
+		expect(c.owner).toBe("provider");
+		expect(c.disposition).toBe("provider_transient");
+	});
 });
