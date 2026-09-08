@@ -63,7 +63,7 @@ describe("handleRpcCustomCommand", () => {
 		expect(session.calls[0]?.options).toEqual({ deliverAs: "nextTurn", triggerTurn: true });
 	});
 
-	test("rejects missing customType", async () => {
+	test("rejects whitespace-only customType", async () => {
 		const session = makeSession();
 
 		const result = await handleRpcCustomCommand(session, {
@@ -71,6 +71,18 @@ describe("handleRpcCustomCommand", () => {
 			customType: "   ",
 			content: "note",
 		});
+
+		expect(result).toEqual({ error: "customType must be a non-empty string" });
+		expect(session.calls).toHaveLength(0);
+	});
+
+	test("rejects missing customType", async () => {
+		const session = makeSession();
+
+		const result = await handleRpcCustomCommand(session, {
+			type: "custom",
+			content: "note",
+		} as Parameters<typeof handleRpcCustomCommand>[1]);
 
 		expect(result).toEqual({ error: "customType must be a non-empty string" });
 		expect(session.calls).toHaveLength(0);
@@ -100,6 +112,34 @@ describe("handleRpcCustomCommand", () => {
 		});
 
 		expect(result).toEqual({ error: "Invalid deliverAs: now" });
+		expect(session.calls).toHaveLength(0);
+	});
+
+	test("rejects non-boolean display", async () => {
+		const session = makeSession();
+
+		const result = await handleRpcCustomCommand(session, {
+			type: "custom",
+			customType: "host-context",
+			content: "note",
+			display: "yes" as unknown as boolean,
+		});
+
+		expect(result).toEqual({ error: "display must be a boolean" });
+		expect(session.calls).toHaveLength(0);
+	});
+
+	test("rejects non-boolean triggerTurn", async () => {
+		const session = makeSession();
+
+		const result = await handleRpcCustomCommand(session, {
+			type: "custom",
+			customType: "host-context",
+			content: "note",
+			triggerTurn: 1 as unknown as boolean,
+		});
+
+		expect(result).toEqual({ error: "triggerTurn must be a boolean" });
 		expect(session.calls).toHaveLength(0);
 	});
 });

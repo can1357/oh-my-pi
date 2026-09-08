@@ -113,7 +113,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
 - `{ id?, type: "steer", message: string, images?: ImageContent[] }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
-- `{ id?, type: "custom", customType: string, content: string, display?: boolean, deliverAs?: "steer" | "followUp" | "nextTurn" | "aside", triggerTurn?: boolean }`
+- `{ id?, type: "custom", customType: string, content: string, display?: boolean, deliverAs?: "steer" | "followUp" | "nextTurn" | "aside", triggerTurn?: boolean }` — `display` is optional and defaults to `false` when omitted
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "new_session", parentSession?: string }`
