@@ -326,6 +326,7 @@ description: Implement an approved design.
 watchdogs:
   - id: design-match
     name: Design Match
+    model: "@smol:low"
     tools: [read, grep, glob]
     instructions: |
       Check the implementation against the approved design.
@@ -349,8 +350,22 @@ advisors:
 
 The implementer selects `implementer/design-match` and `global/scope`.
 Its explicit reference selects Scope despite that shared entry's `agents: [main]` assignment.
-Without a watchdog model, OMP uses the agent session's advisor-role model.
-An explicit watchdog model takes precedence over that default.
+The inline `model` selects the watchdog's model, not the implementer's model.
+In this example, `@smol` resolves the configured `smol` role and `:low` sets its thinking level.
+Quote role selectors in YAML.
+
+| Watchdog `model` | Resolution |
+| --- | --- |
+| Omitted | Use the agent session's default advisor model. |
+| `"@advisor"` | Resolve the session's `advisor` role. |
+| `"@smol:low"` | Resolve the `smol` role with low thinking. |
+| `"anthropic/claude-sonnet-4-5:high"` | Select that provider/model with high thinking. |
+
+Agent-level `advisor: "<selector>"` sets the default for watchdogs that omit `model`.
+A model selector in `task.agentAdvisor[agentName]` overrides that agent-level default.
+An explicit watchdog `model` overrides both defaults.
+References use the referenced definition's model and cannot specify a separate `model`.
+See [model selectors](./models.md#runtime-model-resolution) for supported selector forms.
 
 Inline definitions accept `id`, `name`, `enabled`, `model`, `tools`, `instructions`, and `maxNotesPerUpdate`.
 The name defaults to the local ID.
