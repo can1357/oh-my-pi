@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `ChildProcess.killAndWait()` to await process-tree termination and report termination failures.
+
 ## [18.1.13] - 2026-09-07
 
 ### Fixed

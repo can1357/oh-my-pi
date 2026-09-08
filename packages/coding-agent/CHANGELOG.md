@@ -36,7 +36,7 @@
 - Fixed WorkPool children retaining a stale Gemini-formatted `yield` declaration when pooled items were installed or cleared.
 ### Fixed
 
-- LSP shutdown and disconnected-session cleanup no longer hang when a language server stops reading requests.
+- LSP shutdown and disconnected-session cleanup use bounded waits for stalled servers, and shutdown reports incomplete process termination instead of returning success.
 
 ## [18.1.14] - 2026-09-07
 
