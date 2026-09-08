@@ -271,6 +271,19 @@ export class AssistantMessageComponent extends Container {
 		this.#textColorTransform = transform;
 	}
 
+	/**
+	 * Color transform for assistant paragraph prose. An explicitly installed
+	 * transform (live-command output) always wins; otherwise the optional
+	 * `assistantMessageText` theme token paints prose. Returns undefined when the
+	 * token is unset or empty so the terminal default foreground is used
+	 * byte-for-byte, exactly as before the token existed.
+	 */
+	#getProseColorTransform(): ((text: string) => string) | undefined {
+		if (this.#textColorTransform) return this.#textColorTransform;
+		if (typeof theme === "undefined" || !theme.hasColor("assistantMessageText")) return undefined;
+		return (text: string) => theme.fg("assistantMessageText", text);
+	}
+
 	#getProseTheme(): MarkdownTheme {
 		if (this.#markdownTheme) return this.#markdownTheme;
 		const base = getMarkdownTheme();
@@ -1038,7 +1051,8 @@ export class AssistantMessageComponent extends Container {
 			if (content.type === "text" && canonicalizeMessage(content.text)) {
 				// Set paddingY=0 to avoid extra spacing before tool executions
 				const trimmed = content.text.trim();
-				const mdOptions = this.#textColorTransform ? { color: this.#textColorTransform } : undefined;
+				const proseColor = this.#getProseColorTransform();
+				const mdOptions = proseColor ? { color: proseColor } : undefined;
 				const md = new Markdown(trimmed, 1, 0, this.#getProseTheme(), mdOptions, 0);
 				this.#contentContainer.addChild(md);
 				this.#emergencyText = md;
