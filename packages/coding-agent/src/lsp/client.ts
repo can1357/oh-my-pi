@@ -19,12 +19,14 @@ import type {
 	WorkspaceEdit,
 } from "./types";
 import { detectLanguageId, EquivalentUriMap, fileToUri, uriToFile } from "./utils";
+import { WATCHED_FILES_METHOD, WatchedFiles } from "./watched-files";
 
 // =============================================================================
 // Client State
 // =============================================================================
 
 const clients = new Map<string, LspClient>();
+const clientWatchers = new WeakMap<LspClient, WatchedFiles>();
 interface PendingClient {
 	promise: Promise<LspClient>;
 	cwd: string;
@@ -251,6 +253,10 @@ const CLIENT_CAPABILITIES = {
 		},
 		configuration: true,
 		workspaceFolders: true,
+		didChangeWatchedFiles: {
+			dynamicRegistration: true,
+			relativePatternSupport: true,
+		},
 		symbol: {
 			dynamicRegistration: false,
 			symbolKind: {
@@ -350,6 +356,7 @@ async function writeMessage(
  */
 function teardownWedgedClient(client: LspClient): void {
 	if (clients.get(client.name) === client) clients.delete(client.name);
+	void clientWatchers.get(client)?.close();
 	try {
 		client.proc.kill();
 	} catch {
@@ -493,6 +500,7 @@ async function startMessageReader(client: LspClient): Promise<void> {
 		client.messageBuffer = framer.remainder();
 		reader.releaseLock();
 		client.isReading = false;
+		await clientWatchers.get(client)?.close();
 		if (!readerFailed && client.proc.exitCode === null) {
 			await waitForExit(client, READER_EXIT_GRACE_MS);
 		}
@@ -745,9 +753,26 @@ async function handleServerRequest(client: LspClient, message: LspJsonRpcRequest
 		return;
 	}
 	if (message.method === "client/registerCapability" || message.method === "client/unregisterCapability") {
-		updateDynamicCapabilities(client, message);
-		// Some servers block semantic requests until dynamic registration succeeds.
-		await sendResponse(client, message.id, null, message.method);
+		try {
+			const params = message.params as DynamicCapabilityParams | undefined;
+			const watchers = clientWatchers.get(client);
+			if (message.method === "client/registerCapability") {
+				await watchers?.register(params?.registrations ?? []);
+			} else {
+				const unregistrations = params?.unregisterations ?? params?.unregistrations ?? [];
+				await watchers?.unregister(
+					unregistrations.flatMap(registration => (typeof registration.id === "string" ? [registration.id] : [])),
+				);
+			}
+			updateDynamicCapabilities(client, message);
+			// Some servers block semantic requests until dynamic registration succeeds.
+			await sendResponse(client, message.id, null, message.method);
+		} catch (error) {
+			await sendResponse(client, message.id, null, message.method, {
+				code: -32603,
+				message: `Capability registration failed: ${error instanceof Error ? error.message : String(error)}`,
+			});
+		}
 		return;
 	}
 	if (message.method === "window/showMessageRequest") {
@@ -1103,9 +1128,24 @@ export async function getOrCreateClient(
 			projectLoaded,
 			resolveProjectLoaded,
 		};
+		if (!proc.sharedMux) {
+			clientWatchers.set(
+				client,
+				new WatchedFiles(cwd, async changes => {
+					for (const change of changes) client.diagnostics.delete(change.uri);
+					await sendNotification(
+						client,
+						WATCHED_FILES_METHOD,
+						{ changes },
+						AbortSignal.timeout(WATCHED_FILES_NOTIFY_TIMEOUT_MS),
+					);
+				}),
+			);
+		}
 
 		// Register crash recovery - remove client on process exit
 		proc.exited.then(() => {
+			void clientWatchers.get(client)?.close();
 			if (clients.get(key) === client) clients.delete(key);
 			maybeStopIdleChecker();
 			if (clientLocks.get(key)?.token === lockToken) clientLocks.delete(key);
@@ -1181,6 +1221,7 @@ export async function getOrCreateClient(
 		} catch (err) {
 			// Clean up on initialization failure
 			client.status = "error";
+			await clientWatchers.get(client)?.close();
 			if (clients.get(key) === client) clients.delete(key);
 			proc.kill();
 			const message = err instanceof Error ? err.message : String(err);
@@ -1549,6 +1590,7 @@ async function waitForExit(client: LspClient, timeoutMs: number): Promise<boolea
 export async function shutdownClientInstance(client: LspClient): Promise<boolean> {
 	if (clients.get(client.name) === client) clients.delete(client.name);
 	maybeStopIdleChecker();
+	await clientWatchers.get(client)?.close();
 
 	const err = new Error("LSP client shutdown");
 	for (const pending of Array.from(client.pendingRequests.values())) {

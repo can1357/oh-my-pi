@@ -17,6 +17,23 @@ When no config file contributes a server override, OMP auto-detects built-in ser
 
 Root-marker detection at startup is cwd-only; it does not search parent directories. Wildcard markers such as `*.cabal` match entries directly inside the cwd and do not recurse. No configuration is required for common setups; see [`defaults.json`](../packages/coding-agent/src/lsp/defaults.json) for the full built-in set.
 
+## External file changes
+
+OMP supports dynamic `workspace/didChangeWatchedFiles` registration, including
+string globs, relative patterns, and create/change/delete event masks. Registered
+watches notify the server about external edits to unopened dependencies; they are
+not limited to writes made by OMP tools.
+
+Nested `.git`, `node_modules`, and `.worktrees` directories are excluded before
+watcher traversal, and symbolic links are not followed. Generated source directories
+such as `.svelte-kit/types` remain eligible. These exclusions prevent recursive
+server requests from exhausting filesystem watches on nested checkouts.
+
+The private client owns watches for a private language server. For broker-managed
+servers, the broker owns them for the server's lifetime, including its disconnected
+retention period; attaching clients do not create duplicate watchers. Unregistration
+releases unused roots, and server shutdown or exit closes its watches.
+
 ## Config file locations
 
 OMP merges LSP config from multiple sources, lowest to highest precedence:

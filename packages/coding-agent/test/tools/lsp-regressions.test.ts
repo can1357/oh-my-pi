@@ -1008,6 +1008,79 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("refreshes semantic results after an external dependency edit and stops after unregister", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-external-watch-");
+		const dependency = path.join(tempDir.path(), "dependency.ts");
+		await Bun.write(dependency, "before");
+		let importedValue = "before";
+		try {
+			const server = installFakeLsp(async (message, srv) => {
+				if (message.method === "initialize") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { capabilities: { hoverProvider: true } } });
+				} else if (message.method === "initialized") {
+					srv.send({
+						jsonrpc: "2.0",
+						id: "watch-register",
+						method: "client/registerCapability",
+						params: {
+							registrations: [
+								{
+									id: "dependencies",
+									method: "workspace/didChangeWatchedFiles",
+									registerOptions: { watchers: [{ globPattern: "**/*.ts" }] },
+								},
+							],
+						},
+					});
+				} else if (message.method === "workspace/didChangeWatchedFiles") {
+					const params = message.params as { changes: Array<{ uri: string }> };
+					if (params.changes.some(change => change.uri === fileToUri(dependency))) {
+						importedValue = await Bun.file(dependency).text();
+					}
+				} else if (message.method === "textDocument/hover") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: { contents: importedValue } });
+				} else if (message.method === "shutdown") {
+					srv.send({ jsonrpc: "2.0", id: message.id, result: null });
+				} else if (message.method === "exit") {
+					srv.exit(0);
+				}
+			});
+			const client = await lspClient.getOrCreateClient(
+				{ command: "fake-lsp", fileTypes: ["ts"], rootMarkers: [] },
+				tempDir.path(),
+				1_000,
+			);
+			await server.waitFor(message => message.id === "watch-register" && message.method === undefined);
+			await Bun.write(dependency, "after external edit");
+			await server.waitFor(message => message.method === "workspace/didChangeWatchedFiles");
+			expect(await lspClient.sendRequest(client, "textDocument/hover", {})).toEqual({
+				contents: "after external edit",
+			});
+			const initialize = server.received.find(message => message.method === "initialize");
+			const params = initialize?.params as {
+				capabilities: { workspace: { didChangeWatchedFiles?: { dynamicRegistration?: boolean } } };
+			};
+			expect(params.capabilities.workspace.didChangeWatchedFiles?.dynamicRegistration).toBe(true);
+
+			server.send({
+				jsonrpc: "2.0",
+				id: "watch-unregister",
+				method: "client/unregisterCapability",
+				params: { unregisterations: [{ id: "dependencies", method: "workspace/didChangeWatchedFiles" }] },
+			});
+			await server.waitFor(message => message.id === "watch-unregister" && message.method === undefined);
+			await Bun.write(dependency, "unregistered edit");
+			// Negative assertion against real OS watchers: fake timers cannot drain kernel events.
+			await Bun.sleep(150);
+			expect(await lspClient.sendRequest(client, "textDocument/hover", {})).toEqual({
+				contents: "after external edit",
+			});
+		} finally {
+			await lspClient.shutdownAll();
+			tempDir.removeSync();
+		}
+	});
+
 	it("accepts dynamic capability registration before semantic requests", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-dynamic-registration-");
 		try {

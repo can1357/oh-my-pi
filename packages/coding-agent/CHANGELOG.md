@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed Svelte language-server startup exhausting filesystem watches in monorepos with nested worktrees. OMP now implements dynamic watched-file registrations with traversal exclusions and external dependency-change notifications for private and broker-managed servers.
 - Fixed worker subprocesses failing to declare themselves as worker hosts before dispatching selectors, which prevented nested thread worker spawns during `/usage` stats sync on multi-core systems.
 - Fixed `/usage` displaying a misleading generic database read failure when activity loading fails; the error detail is now sanitized, collapsed to a single line with shortened paths, and surfaced in the dashboard.
 
