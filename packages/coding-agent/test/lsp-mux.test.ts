@@ -175,8 +175,8 @@ async function state(client: MuxTestClient): Promise<FakeState> {
 	return client.request<FakeState>("test/state");
 }
 
-async function pollUntil(check: () => Promise<boolean>, description: string): Promise<void> {
-	const deadline = Date.now() + 5_000;
+async function pollUntil(check: () => Promise<boolean>, description: string, timeoutMs = 5_000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
 	while (Date.now() < deadline) {
 		if (await check()) return;
 		await Bun.sleep(25);
@@ -210,6 +210,71 @@ describe("LspMuxServer", () => {
 		clients.push(client);
 		const connected = await client.request<MuxConnectResult>(MUX_CONNECT_METHOD, connectParams);
 		return { client, connected };
+	}
+
+	it.skipIf(process.platform === "win32")("lets healthy language servers finish the shutdown handshake", async () => {
+		const shutdownFile = path.join(tmpDir, "shutdown.json");
+		connectParams.env = { TEST_LSP_SHUTDOWN_FILE: shutdownFile };
+		const { client } = await link();
+		await initialize(client);
+		await server.shutdown();
+		expect(await Bun.file(shutdownFile).json()).toEqual({ shutdownReceived: true, exitReceived: true });
+	});
+
+	it.skipIf(process.platform === "win32")("bounds shutdown when a language server ignores exit", async () => {
+		connectParams.env = { TEST_LSP_IGNORE_EXIT: "1" };
+		const { client } = await link();
+		await initialize(client);
+		await withTimeout(server.shutdown(), "server ignoring exit", 4_000);
+		expect(server.serverKeys).toEqual([]);
+		expect(server.sessionCount).toBe(0);
+	});
+
+	for (const disconnectFirst of [false, true]) {
+		it.skipIf(process.platform === "win32")(
+			disconnectFirst
+				? "terminates a nonreading server when disconnected-session cleanup stalls"
+				: "bounds mux shutdown when a language server stops reading stdin",
+			async () => {
+				const { client, connected } = await link();
+				const pid = connected.pid;
+				if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+				try {
+					await initialize(client);
+					client.notify("textDocument/didOpen", {
+						textDocument: { uri: "file:///blocked.ts", version: 1, text: "x" },
+					});
+					await client.request("test/stopReading");
+					client.notify("test/fillPipe", { text: "x".repeat(8 * 1024 * 1024) });
+					await client.request(MUX_PING_METHOD);
+					if (disconnectFirst) {
+						client.destroy();
+						await pollUntil(
+							() => Promise.resolve(server.serverKeys.length === 0),
+							"disconnected-session cleanup",
+							4_000,
+						);
+					} else {
+						await withTimeout(server.shutdown(), "blocked mux shutdown", 4_000);
+					}
+					expect(server.sessionCount).toBe(0);
+					expect(server.serverKeys).toEqual([]);
+					await pollUntil(() => {
+						try {
+							process.kill(pid, 0);
+							return Promise.resolve(false);
+						} catch (error) {
+							return Promise.resolve((error as NodeJS.ErrnoException).code === "ESRCH");
+						}
+					}, "blocked process exit");
+				} finally {
+					try {
+						process.kill(pid, "SIGKILL");
+					} catch {}
+				}
+			},
+			10_000,
+		);
 	}
 
 	it.skipIf(process.platform === "win32")(

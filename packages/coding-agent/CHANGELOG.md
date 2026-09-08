@@ -45,6 +45,9 @@
 - Python cells are no longer replayed automatically after a kernel crash, preventing duplicate side effects; the next call starts a fresh kernel.
 - Session rewrites preserve open-reader snapshots and replacement identity when a rename needs an EPERM fallback.
 - Fixed WorkPool children retaining a stale Gemini-formatted `yield` declaration when pooled items were installed or cleared.
+### Fixed
+
+- LSP shutdown and disconnected-session cleanup no longer hang when a language server stops reading requests.
 
 ## [18.1.14] - 2026-09-07
 
