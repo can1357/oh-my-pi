@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- `@` file completions now preserve a typed line-selector suffix (`@path:1-10`) when accepting a stale suggestion, while trailing filename characters no longer override the selected completion ([#10623](https://github.com/can1357/oh-my-pi/pull/10623) by [@kml93](https://github.com/kml93)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
