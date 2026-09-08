@@ -8,7 +8,7 @@
 - Key collaborators:
   - `packages/coding-agent/src/tools/index.ts` — registers tool, exposes session hooks, gates availability.
   - `packages/coding-agent/src/modes/controllers/event-controller.ts` — updates the visible todo UI on tool completion.
-  - `packages/coding-agent/src/session/agent-session.ts` — stores cached phases, strips done/dropped tasks on session resume, emits failure reminders.
+  - `packages/coding-agent/src/session/agent-session.ts` and `todo-tracker.ts` — own canonical phases, journal replay, accepted completion, and bounded model-context restoration.
   - `packages/coding-agent/src/modes/controllers/todo-command-controller.ts` — `/todo` command path, custom-entry persistence, transcript reminder injection.
   - `packages/coding-agent/src/tools/render-utils.ts` — collapsed-preview cap for renderer trees.
 
@@ -115,7 +115,7 @@ The same file also exposes non-tool helpers used by `/todo`:
 - Session state (transcript, memory, jobs, checkpoints, registries)
   - Mutates the session todo cache through `setTodoPhases`.
   - `storage` reports whether the session has a backing session file, but the tool does not append a custom session entry itself.
-  - Successful tool-result messages carry `details.phases`; `getLatestTodoPhasesFromEntries(...)` can reconstruct state later from those transcript entries.
+  - Successful native results and `write xd://todo` execution details carry canonical phases. `getLatestTodoPhasesFromEntries(...)` reconstructs the latest successful snapshot from the active journal branch; errors and unrelated device details do not replace it.
   - Failed `todo` results cause `agent-session` to enqueue a hidden next-turn reminder (`customType: "todo-error-reminder"`).
 - User-visible prompts / interactive UI
   - Transcript block is rendered by `todoToolRenderer` and merged with the call line.
@@ -161,9 +161,9 @@ The same file also exposes non-tool helpers used by `/todo`:
 - `findTaskByContent(...)` returns the first matching task across phases. Duplicate task contents make later targeted ops ambiguous.
 - `normalizeInProgressTask(...)` runs once after the op, not mid-op. A single op (e.g. `init`) can build an intermediate invalid state and rely on final normalization.
 - `storage: "session"` means the session has a session-file backing; it does not mean this tool wrote a durable custom entry.
-- Reload persistence differs by path:
-  - plain `todo` calls survive in transcript tool-result details;
-  - `/todo` command edits additionally append `customType: "user_todo_edit"` entries and inject a visible-to-model `<system-reminder>` developer message describing the manual edit.
-- On session resume, `AgentSession.#syncTodoPhasesFromBranch()` strips `completed` and `abandoned` tasks before restoring the cached list. The `/todo` command works around that by reading the latest transcript/custom-entry state so historical done/dropped tasks still appear to the user.
+- Native/device tool results persist through their normal result entry. Manual `/todo` edits, RPC `set_todos`, and accepted out-of-band completion use the existing `user_todo_edit` snapshot path. Ordinary tool operations do not gain duplicate custom snapshots.
+- Replay retains completed, abandoned, and blocked work, including blocker notes. Unqualified `rm` clears tasks while retaining phase headings; an explicit empty snapshot remains authoritative. An explicit context clear must not resurrect earlier context or stale child bindings.
+- Automatic acceptance requires an exact, unique actionable task bound to an observed owning child and current parent-call provenance. Changed plans, stale/failed children, and blocked/abandoned work require explicit parent handling; fuzzy display associations are not durable acceptance.
+- Context restoration adds at most one bounded `<todo-state>` projection when canonical state is missing from the model context. It includes current/pending/blocked work, blocker notes, separate terminal counts, omission notices, and `todo view` for the complete list. The projection does not create another store or change compaction method order. It protects checklist availability, not the semantic fidelity of a generated narrative summary.
 - Tool availability is gated by `todo.enabled`, and the registry excludes it when `includeYield` is enabled unless the session is prewalk-armed (`packages/coding-agent/src/tools/index.ts`).
 - Subagents do not inherit `todo`; `packages/coding-agent/src/task/executor.ts` also filters it from the active set as a parent-owned tool. Exception (both layers): prewalk-armed subagents keep it — the prewalk plan nudge and todo gate require the child to commit its own todo list before the hand-off.

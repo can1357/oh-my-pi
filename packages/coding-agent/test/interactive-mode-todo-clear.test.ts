@@ -10,9 +10,15 @@ import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
-import type { TodoItem, TodoPhase } from "@oh-my-pi/pi-coding-agent/tools/todo";
+import {
+	getLatestTodoPhasesFromEntries,
+	type TodoItem,
+	type TodoPhase,
+	USER_TODO_EDIT_CUSTOM_TYPE,
+} from "@oh-my-pi/pi-coding-agent/tools/todo";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createAssistantMessage } from "./helpers/agent-session-setup";
 
 function renderTodos(mode: InteractiveMode): string {
 	return Bun.stripANSI(mode.todoContainer.render(120).join("\n"));
@@ -25,6 +31,22 @@ describe("InteractiveMode todo HUD persistence", () => {
 	let mode: InteractiveMode;
 	let eventBus: EventBus;
 	let modelRegistry: ModelRegistry;
+
+	function startChild(owner: AgentSession, id: string, description: string, parentToolCallId = `${id}-call`): void {
+		const message = createAssistantMessage("");
+		message.content = [{ type: "toolCall", id: parentToolCallId, name: "task", arguments: { description } }];
+		message.stopReason = "toolUse";
+		owner.sessionManager.appendMessage(message);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id,
+			index: 0,
+			agent: "task",
+			description,
+			parentToolCallId,
+			status: "started",
+			detached: true,
+		});
+	}
 
 	async function replaceMode(): Promise<void> {
 		if (mode) {
@@ -203,30 +225,156 @@ describe("InteractiveMode todo HUD persistence", () => {
 		expect(renderTodos(mode)).not.toContain("done task");
 	});
 
-	it("marks todos complete when subagent reconciliation reports a finished agent", async () => {
+	it("journals accepted child completion once and replays blocked and abandoned work unchanged", async () => {
 		await replaceMode();
 		setTodoClearDelay(-1);
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-		session.setTodoPhases([
-			{ name: "Implementation", tasks: [{ content: "Fix review comments", status: "pending" }] },
-		]);
+		const phases: TodoPhase[] = [
+			{
+				name: "Implementation",
+				tasks: [
+					{ content: "Fix review comments", status: "pending" },
+					{ content: "Release approval", status: "blocked", blocker: "waiting for release sign-off" },
+					{ content: "Superseded implementation", status: "abandoned" },
+				],
+			},
+		];
+		session.setTodoPhases(phases);
+		session.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
 		mode.setTodos(session.getTodoPhases());
-
 		await mode.init();
-		// Subagent lifecycle changes coalesce behind a 100ms observer UI sync
-		// timer before todo reconciliation runs; flush it deterministically.
 		vi.useFakeTimers();
-		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+		startChild(session, "ReviewFixer", "Fix review comments");
+		const completed = {
 			id: "ReviewFixer",
 			index: 0,
 			agent: "task",
 			description: "Fix review comments",
+			parentToolCallId: "ReviewFixer-call",
 			status: "completed",
 			detached: true,
-		});
+		};
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, completed);
 		vi.advanceTimersByTime(100);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...completed });
+		vi.advanceTimersByTime(100);
+		const accepted: TodoPhase[] = [
+			{
+				...phases[0],
+				tasks: [{ content: "Fix review comments", status: "completed" }, ...phases[0].tasks.slice(1)],
+			},
+		];
+		expect(session.getTodoPhases()).toEqual(accepted);
+		expect(
+			session.sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE),
+		).toHaveLength(2);
+		vi.useRealTimers();
+		await session.sessionManager.flush();
+		const sessionFile = session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a temporary session journal");
+		const replayManager = await SessionManager.open(sessionFile, tempDir.path());
+		const replay = new AgentSession({
+			agent: new Agent({
+				initialState: {
+					model: session.model,
+					systemPrompt: ["Test"],
+					tools: [],
+					messages: replayManager.buildSessionContext().messages,
+				},
+			}),
+			sessionManager: replayManager,
+			settings: Settings.isolated(),
+			modelRegistry,
+		});
+		try {
+			expect(replay.getTodoPhases()).toEqual(accepted);
+		} finally {
+			await replay.dispose();
+		}
+	});
 
-		expect(session.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
+	it("keeps failed work open when the same child restarts before observer rendering", async () => {
+		await replaceMode();
+		setTodoClearDelay(-1);
+		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		const phases: TodoPhase[] = [
+			{
+				name: "Implementation",
+				tasks: [
+					{ content: "Attempt task A", status: "pending" },
+					{ content: "Attempt task B", status: "pending" },
+				],
+			},
+		];
+		session.setTodoPhases(phases);
+		session.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases });
+		mode.setTodos(session.getTodoPhases());
+		await mode.init();
+		vi.useFakeTimers();
+		startChild(session, "ReusedWorker", "Attempt task A", "ReusedWorker-A-call");
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "ReusedWorker",
+			index: 0,
+			agent: "task",
+			description: "Attempt task A",
+			parentToolCallId: "ReusedWorker-A-call",
+			status: "failed",
+			detached: true,
+		});
+		startChild(session, "ReusedWorker", "Attempt task B", "ReusedWorker-B-call");
+		// A's terminal event and B's start both precede the first observer flush.
+		vi.advanceTimersByTime(100);
+		expect(session.getTodoPhases()).toEqual(phases);
+		expect(
+			session.sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE),
+		).toHaveLength(1);
+
+		const completed = {
+			id: "ReusedWorker",
+			index: 0,
+			agent: "task",
+			description: "Attempt task B",
+			parentToolCallId: "ReusedWorker-B-call",
+			status: "completed",
+			detached: true,
+		};
+		const accepted: TodoPhase[] = [
+			{
+				...phases[0],
+				tasks: [phases[0].tasks[0], { content: "Attempt task B", status: "completed" }],
+			},
+		];
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, completed);
+		// Acceptance and journaling cannot wait for a mutable observer snapshot.
+		expect(session.getTodoPhases()).toEqual(accepted);
+		expect(getLatestTodoPhasesFromEntries(session.sessionManager.getBranch())).toEqual(accepted);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, completed);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...completed });
+		vi.advanceTimersByTime(100);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, { ...completed });
+		vi.advanceTimersByTime(100);
+		expect(session.getTodoPhases()).toEqual(accepted);
+		expect(renderTodos(mode)).toContain("1/2");
+		expect(
+			session.sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE),
+		).toHaveLength(2);
+		vi.useRealTimers();
+		await session.sessionManager.flush();
+		const sessionFile = session.sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a temporary session journal");
+		const reopened = await SessionManager.open(sessionFile, tempDir.path());
+		expect(getLatestTodoPhasesFromEntries(reopened.getBranch())).toEqual(accepted);
+		expect(
+			reopened
+				.getBranch()
+				.filter(entry => entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE),
+		).toHaveLength(2);
 	});
 
 	it("reconciles focused worker todos without overwriting the main session", async () => {
@@ -275,6 +423,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			expect(renderTodos(mode)).toContain("apply nested review fixes");
 
 			vi.useFakeTimers();
+			startChild(focusedSession, `${agentId}/NestedFixer`, "apply nested review fixes");
 			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 				id: `${agentId}/NestedFixer`,
 				index: 0,
@@ -286,6 +435,9 @@ describe("InteractiveMode todo HUD persistence", () => {
 			vi.advanceTimersByTime(100);
 
 			expect(focusedSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
+			expect(getLatestTodoPhasesFromEntries(focusedSession.sessionManager.getBranch())).toEqual(
+				focusedSession.getTodoPhases(),
+			);
 			expect(session.getTodoPhases()).toEqual(mainPhases);
 			expect(renderTodos(mode)).toContain("1/2");
 
@@ -336,6 +488,7 @@ describe("InteractiveMode todo HUD persistence", () => {
 			expect(renderTodos(mode)).toContain("run the delegated fix");
 
 			vi.useFakeTimers();
+			startChild(workerSession, "DelegatedFixer", "run the delegated fix");
 			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
 				id: "DelegatedFixer",
 				index: 0,
@@ -347,6 +500,9 @@ describe("InteractiveMode todo HUD persistence", () => {
 			vi.advanceTimersByTime(100);
 
 			expect(workerSession.getTodoPhases()[0]?.tasks[0]?.status).toBe("completed");
+			expect(getLatestTodoPhasesFromEntries(workerSession.sessionManager.getBranch())).toEqual(
+				workerSession.getTodoPhases(),
+			);
 			expect(session.getTodoPhases()).toEqual(mainPhases);
 			expect(renderTodos(mode)).toContain("1/1");
 		} finally {
@@ -356,37 +512,110 @@ describe("InteractiveMode todo HUD persistence", () => {
 		}
 	});
 
-	it("completes a blocked todo when the detached subagent it waits on finishes", async () => {
+	it("does not turn a matching child's success into acceptance of blocked or abandoned parent work", async () => {
 		await replaceMode();
 		setTodoClearDelay(-1);
 		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
-		// A todo blocked while waiting on a detached subagent. Blocked todos are
-		// excluded from the stop reminder, so if reconciliation skipped them this
-		// would strand silently after the subagent completes.
-		session.setTodoPhases([
+		const phases: TodoPhase[] = [
 			{
 				name: "Implementation",
-				tasks: [{ content: "Fix review comments", status: "blocked", blocker: "waiting on ReviewFixer" }],
+				tasks: [
+					{ content: "Fix review comments", status: "blocked", blocker: "waiting on independent sign-off" },
+					{ content: "Old approach", status: "abandoned" },
+				],
 			},
-		]);
+		];
+		session.setTodoPhases(phases);
 		mode.setTodos(session.getTodoPhases());
-
 		await mode.init();
 		vi.useFakeTimers();
+		startChild(session, "ReviewFixer", "Fix review comments");
+		startChild(session, "OldWorker", "Old approach");
+		for (const [id, description] of [
+			["ReviewFixer", "Fix review comments"],
+			["OldWorker", "Old approach"],
+		]) {
+			eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id,
+				index: 0,
+				agent: "task",
+				description,
+				status: "completed",
+				detached: true,
+			});
+		}
+		vi.advanceTimersByTime(100);
+		expect(session.getTodoPhases()).toEqual(phases);
+		expect(
+			session.sessionManager
+				.getBranch()
+				.filter(entry => entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE),
+		).toEqual([]);
+	});
+
+	it("keeps fuzzy and stale completed children from closing a replacement plan", async () => {
+		await replaceMode();
+		setTodoClearDelay(-1);
+		vi.spyOn(mode.statusLine, "watchBranch").mockImplementation(() => {});
+		const phases: TodoPhase[] = [
+			{ name: "Review", tasks: [{ content: "Review database migration", status: "pending" }] },
+		];
+		session.setTodoPhases(phases);
+		mode.setTodos(session.getTodoPhases());
+		await mode.init();
+		vi.useFakeTimers();
+		startChild(session, "FuzzyReviewer", "database migration");
 		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
-			id: "ReviewFixer",
+			id: "FuzzyReviewer",
 			index: 0,
 			agent: "task",
-			description: "Fix review comments",
+			description: "database migration",
 			status: "completed",
-			detached: true,
 		});
 		vi.advanceTimersByTime(100);
-
-		const task = session.getTodoPhases()[0]?.tasks[0];
-		expect(task?.status).toBe("completed");
-		// The blocker note is dropped with the blocked status — the wait is over.
-		expect(task?.blocker).toBeUndefined();
+		expect(session.getTodoPhases()).toEqual(phases);
+		startChild(session, "OldReviewer", "Review database migration");
+		session.setTodoPhases([]);
+		session.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: [] });
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "OldReviewer",
+			index: 0,
+			agent: "task",
+			description: "Review database migration",
+			status: "completed",
+		});
+		vi.advanceTimersByTime(100);
+		expect(session.getTodoPhases()).toEqual([]);
+		expect(getLatestTodoPhasesFromEntries(session.sessionManager.getBranch())).toEqual([]);
+		session.setTodoPhases(phases);
+		mode.setTodos(phases);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "OldReviewer",
+			index: 0,
+			agent: "task",
+			description: "Review database migration",
+			status: "completed",
+		});
+		vi.advanceTimersByTime(100);
+		expect(session.getTodoPhases()).toEqual(phases);
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "LateReviewer",
+			index: 0,
+			agent: "task",
+			description: "Review database migration",
+			parentToolCallId: "OldReviewer-call",
+			status: "started",
+		});
+		eventBus.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+			id: "LateReviewer",
+			index: 0,
+			agent: "task",
+			description: "Review database migration",
+			parentToolCallId: "OldReviewer-call",
+			status: "completed",
+		});
+		vi.advanceTimersByTime(100);
+		expect(session.getTodoPhases()).toEqual(phases);
 	});
 });
 

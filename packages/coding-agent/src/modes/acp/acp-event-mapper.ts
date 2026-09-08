@@ -10,7 +10,7 @@ import type {
 import { parseXdUrl } from "../../internal-urls/xd-protocol";
 import type { AgentSessionEvent } from "../../session/agent-session";
 import { resolveToCwd, splitPathAndSelPreferringLiteralSync } from "../../tools/path-utils";
-import type { TodoStatus } from "../../tools/todo";
+import { readTodoResultDetails, type TodoStatus } from "../../tools/todo";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 
 interface MessageProgress {
@@ -418,68 +418,22 @@ function mapTodoStatus(status: TodoStatus): "pending" | "in_progress" | "complet
 function mapTodoResultToPlanUpdate(
 	event: Extract<AgentSessionEvent, { type: "tool_execution_end" }>,
 ): SessionUpdate | undefined {
-	if (event.toolName !== "todo" || event.isError) {
-		return undefined;
-	}
-	const phases = extractTodoPhases(event.result);
-	if (!Array.isArray(phases)) {
-		return undefined;
-	}
+	if (event.isError || event.result.isError) return undefined;
+	const details = readTodoResultDetails(event.toolName, event.result);
+	if (!details) return undefined;
 	return {
 		sessionUpdate: "plan",
-		entries: extractTodoEntries(phases).map(todo => ({
-			content: todo.content,
-			priority: "medium" as const,
-			status: mapTodoStatus(todo.status),
-		})),
+		entries: details.phases
+			.flatMap(phase => phase.tasks)
+			.filter(todo => todo.content.length > 0)
+			.map(todo => ({
+				content: todo.content,
+				priority: "medium" as const,
+				status: mapTodoStatus(todo.status),
+			})),
 	};
 }
 
-function extractTodoPhases(result: unknown): unknown {
-	if (typeof result !== "object" || result === null || !("details" in result)) {
-		return undefined;
-	}
-	const details = (result as { details?: unknown }).details;
-	if (typeof details !== "object" || details === null || !("phases" in details)) {
-		return undefined;
-	}
-	return (details as { phases?: unknown }).phases;
-}
-
-function extractTodoEntries(phases: unknown[]): Array<{ content: string; status: TodoStatus }> {
-	const entries: Array<{ content: string; status: TodoStatus }> = [];
-	for (const phase of phases) {
-		if (typeof phase !== "object" || phase === null || !("tasks" in phase)) {
-			continue;
-		}
-		const tasks = (phase as { tasks?: unknown }).tasks;
-		if (!Array.isArray(tasks)) {
-			continue;
-		}
-		for (const task of tasks) {
-			if (typeof task !== "object" || task === null || !("content" in task)) {
-				continue;
-			}
-			const content = (task as { content?: unknown }).content;
-			if (typeof content !== "string" || content.length === 0) {
-				continue;
-			}
-			const status = (task as { status?: TodoStatus }).status;
-			entries.push({ content, status: isTodoStatus(status) ? status : "pending" });
-		}
-	}
-	return entries;
-}
-
-function isTodoStatus(status: unknown): status is TodoStatus {
-	return (
-		status === "pending" ||
-		status === "in_progress" ||
-		status === "completed" ||
-		status === "abandoned" ||
-		status === "blocked"
-	);
-}
 export function buildToolCallStartUpdate(input: {
 	toolCallId: string;
 	toolName: string;

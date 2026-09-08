@@ -221,7 +221,7 @@ import {
 	writeDeviceDispatch,
 } from "../tools/resolve";
 import { supportsExternalThinking } from "../tools/think";
-import type { TodoPhase } from "../tools/todo";
+import { readTodoResultDetails, type TodoPhase } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import type { WorkPoolYieldItem } from "../task/workpool-yield";
 import { parseCommandArgs } from "../utils/command-args";
@@ -627,6 +627,7 @@ export class AgentSession {
 	#planModeReminderCount = 0;
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
+	#todoContextRestorePending = false;
 	#workPoolYieldItems: readonly WorkPoolYieldItem[] = [];
 	#replanTitleRefreshInFlight: Promise<void> | undefined = undefined;
 	/** Resolved TITLE_SYSTEM.md override applied to every automatic session-title
@@ -1426,6 +1427,17 @@ export class AgentSession {
 			await this.#prewalk.advanceAtTurnEnd(messages, context);
 			await this.#advisors.onPrimaryTurnEnd(messages, context?.willContinue, signal);
 			await this.#maintenance.maintainContextMidRun(messages, signal, context);
+			// Model replacement can occur inside prewalk or a tool-loop turn. The
+			// loop owns a separate message array, so synchronize only when that
+			// lifecycle actually restored missing todo context.
+			if (this.#todoContextRestorePending) {
+				this.#todoContextRestorePending = false;
+				const restored = this.#todo.withRestoredContext(messages);
+				if (restored !== messages) {
+					messages.splice(0, messages.length, ...restored);
+					this.agent.replaceMessages(messages);
+				}
+			}
 		});
 		this.yieldQueue = new YieldQueue({
 			isStreaming: () => this.isStreaming,
@@ -1615,6 +1627,7 @@ export class AgentSession {
 		this.agent.providerSessionState = this.#providerSessionState;
 		this.#syncAgentSessionId();
 		this.#todo.syncFromBranch();
+		this.#restoreTodoContext();
 		this.#goalRuntime = new GoalRuntime({
 			getState: () => this.#goalModeState,
 			setState: state => {
@@ -2831,7 +2844,10 @@ export class AgentSession {
 		// and only successful mutating tools tick — read-only exploration is
 		// not progress an agent could mark done.
 		if (event.type === "message_end" && event.message.role === "toolResult") {
-			this.#todo.onToolResult(event.message.toolName, event.message.isError);
+			const toolName = readTodoResultDetails(event.message.toolName, event.message)
+				? "todo"
+				: event.message.toolName;
+			this.#todo.onToolResult(toolName, event.message.isError);
 		}
 		// Track the settled assistant turn synchronously as well: agent_end
 		// maintenance reads `#lastAssistantMessage`, and when a turn's events all
@@ -3113,13 +3129,13 @@ export class AgentSession {
 			}
 			if (event.message.role === "toolResult") {
 				const { toolName, toolCallId, isError, content } = event.message;
-				const details = isRecord(event.message.details) ? event.message.details : undefined;
+				const todoDetails = readTodoResultDetails(toolName, event.message);
 				const semanticResult = semanticToolResult(toolName, event.message);
 				const semanticDetails = isRecord(semanticResult?.details) ? semanticResult.details : undefined;
-				if (toolName === "todo" && !isError && details && this.#todo.onTodoResultDetails(details, toolCallId)) {
+				if (!isError && todoDetails && this.#todo.onTodoResultDetails(todoDetails, toolCallId)) {
 					this.#scheduleReplanTitleRefresh();
 				}
-				if (toolName === "todo" && isError) {
+				if ((toolName === "todo" || todoDetails) && isError) {
 					const errorText = content.find(part => part.type === "text")?.text;
 					const reminderText = [
 						"<system-reminder>",
@@ -4755,6 +4771,7 @@ export class AgentSession {
 		this.#syncAgentSessionId();
 		this.#memory.rekeyForCurrentSessionId();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
+		this.#restoreTodoContext();
 		return {
 			previousSessionId,
 			sessionId: this.sessionId,
@@ -4852,6 +4869,7 @@ export class AgentSession {
 		// on-disk record and the plain `transcript:true` export path keep the full
 		// pre-reset history.
 		this.sessionManager.appendResetBoundary();
+		this.#todo.invalidateCompletions();
 
 		resetCapabilities();
 		await this.refreshBaseSystemPrompt();
@@ -5381,7 +5399,9 @@ export class AgentSession {
 	}
 
 	buildDisplaySessionContext(): SessionContext {
-		return this.#providerBoundary.buildDisplaySessionContext();
+		const context = this.#providerBoundary.buildDisplaySessionContext();
+		context.messages = this.#todo.withRestoredContext(context.messages);
+		return context;
 	}
 
 	/**
@@ -7377,6 +7397,18 @@ export class AgentSession {
 		this.#todo.setPhases(phases);
 	}
 
+	/** Capture a guarded, journaled completion for a child owned by this branch. */
+	captureTodoCompletion(content: string, parentToolCallId: string): (() => boolean) | undefined {
+		return this.#todo.captureCompletion(content, parentToolCallId);
+	}
+
+	#restoreTodoContext(): void {
+		const messages = this.#todo.withRestoredContext(this.agent.state.messages);
+		if (messages === this.agent.state.messages) return;
+		this.agent.replaceMessages(messages);
+		this.#todoContextRestorePending ||= this.agent.state.isStreaming;
+	}
+
 	/** Active item labels accepted by this pooled turn's incremental yield tool. */
 	getWorkPoolYieldItems(): readonly WorkPoolYieldItem[] {
 		return this.#workPoolYieldItems;
@@ -8309,6 +8341,7 @@ export class AgentSession {
 		// add an extension-delivery await inside every model switch — including
 		// retry-fallback on the error path.
 		if (isChanging) {
+			this.#restoreTodoContext();
 			this.#emit({ type: "model_changed" });
 		}
 
@@ -8355,6 +8388,7 @@ export class AgentSession {
 		}
 
 		this.#closeProviderSessionsForModelSwitch(currentModel, currentModel);
+		this.#restoreTodoContext();
 		this.agent.appendOnlyContext?.invalidateForModelChange();
 		logger.debug("Reset Responses provider session after stale replay error", {
 			provider: currentModel.provider,
@@ -9681,7 +9715,7 @@ export class AgentSession {
 		// Update agent state — build display context to populate agent messages.
 		const stateContext = this.sessionManager.buildSessionContext();
 		const displayContext = deobfuscateSessionContext(stateContext, this.#obfuscator);
-		this.agent.replaceMessages(displayContext.messages);
+		this.agent.replaceMessages(this.#todo.withRestoredContext(displayContext.messages));
 		this.#rehydrateCheckpointRewindState();
 		this.#advisors.resetSessionState({ preserveCost: true });
 		this.#todo.syncFromBranch();

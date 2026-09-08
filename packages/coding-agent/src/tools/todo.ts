@@ -6,6 +6,7 @@ import { Text } from "@oh-my-pi/pi-tui";
 import { isRecord, prompt, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
+import { stripXdUrlPrefix } from "../internal-urls/xd-protocol";
 import type { Theme } from "../modes/theme/theme";
 import todoDescription from "../prompts/tools/todo.md" with { type: "text" };
 import type { ToolSession } from "../sdk";
@@ -13,6 +14,7 @@ import type { SessionEntry } from "../session/session-entries";
 import { framedBlock, renderStatusLine, renderTreeList } from "../tui";
 import { normalizePathLikeInput, resolveToCwd } from "./path-utils";
 import { formatErrorDetail, formatMoreItems, PREVIEW_LIMITS, pluralize, replaceTabs } from "./render-utils";
+import { writeDeviceDispatch } from "./resolve";
 
 // =============================================================================
 // Types
@@ -41,6 +43,7 @@ export function isTodoPhase(value: unknown): value is TodoPhase {
 		task =>
 			isRecord(task) &&
 			typeof task.content === "string" &&
+			(task.blocker === undefined || typeof task.blocker === "string") &&
 			(task.status === "pending" ||
 				task.status === "in_progress" ||
 				task.status === "completed" ||
@@ -174,27 +177,50 @@ export function nextActionableTask(phases: readonly TodoPhase[]): TodoItem | und
 
 export const USER_TODO_EDIT_CUSTOM_TYPE = "user_todo_edit";
 
-export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
+/** Read canonical todo details from either a native result or an xd:// dispatch. */
+export function readTodoResultDetails(
+	toolName: string,
+	result: unknown,
+): (Record<string, unknown> & { phases: TodoPhase[] }) | undefined {
+	let details: unknown;
+	if (stripXdUrlPrefix(toolName) === "todo") {
+		details = isRecord(result) ? result.details : undefined;
+	} else {
+		const dispatch = writeDeviceDispatch(toolName, result);
+		if (dispatch?.mode !== "execute" || dispatch.tool !== "todo") return undefined;
+		details = dispatch.inner;
+	}
+	if (!isRecord(details) || !Array.isArray(details.phases) || !details.phases.every(isTodoPhase)) return undefined;
+	return details as Record<string, unknown> & { phases: TodoPhase[] };
+}
+
+/** Latest accepted journal snapshot, including an intentional empty list. */
+export function getLatestTodoSnapshotFromEntries(
+	entries: SessionEntry[],
+): { entry: SessionEntry; phases: TodoPhase[] } | undefined {
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];
+		let phases: TodoPhase[];
 		if (entry.type === "custom" && entry.customType === USER_TODO_EDIT_CUSTOM_TYPE) {
-			const data = entry.data as { phases?: unknown } | undefined;
-			if (data && Array.isArray(data.phases)) {
-				return clonePhases(data.phases as TodoPhase[]);
-			}
+			const data = entry.data;
+			if (!isRecord(data) || !Array.isArray(data.phases) || !data.phases.every(isTodoPhase)) continue;
+			phases = data.phases;
+		} else if (entry.type === "message") {
+			const message = entry.message;
+			if (message.role !== "toolResult" || message.isError) continue;
+			const details = readTodoResultDetails(message.toolName, message);
+			if (!details) continue;
+			phases = details.phases;
+		} else {
 			continue;
 		}
-		if (entry.type !== "message") continue;
-		const message = entry.message as { role?: string; toolName?: string; details?: unknown; isError?: boolean };
-		if (message.role !== "toolResult" || message.toolName !== "todo" || message.isError) continue;
-
-		const details = message.details as { phases?: unknown } | undefined;
-		if (!details || !Array.isArray(details.phases)) continue;
-
-		return clonePhases(details.phases as TodoPhase[]);
+		return { entry, phases: clonePhases(phases) };
 	}
+	return undefined;
+}
 
-	return [];
+export function getLatestTodoPhasesFromEntries(entries: SessionEntry[]): TodoPhase[] {
+	return getLatestTodoSnapshotFromEntries(entries)?.phases ?? [];
 }
 
 /** Minimum overlap (after normalization) required for a substring match.
@@ -717,7 +743,7 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 	return { phases, errors };
 }
 
-function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false): string {
+export function formatTodoSummary(phases: TodoPhase[], errors: string[], readOnly = false): string {
 	const tasks = phases.flatMap(phase => phase.tasks);
 	if (tasks.length === 0) {
 		if (errors.length > 0) return `Errors: ${errors.join("; ")}`;
@@ -892,7 +918,7 @@ export class TodoTool implements AgentTool<typeof todoSchema, TodoToolDetails> {
 		if (completedTasks.length > 0) details.completedTasks = completedTasks;
 
 		return {
-			content: [{ type: "text", text: formatSummary(effective, errors, readOnly) }],
+			content: [{ type: "text", text: formatTodoSummary(effective, errors, readOnly) }],
 			details,
 			isError: errors.length > 0 ? true : undefined,
 		};

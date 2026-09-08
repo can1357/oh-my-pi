@@ -4,6 +4,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { TodoCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/todo-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { type TodoPhase, USER_TODO_EDIT_CUSTOM_TYPE } from "@oh-my-pi/pi-coding-agent/tools";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -18,7 +19,7 @@ function createContext(cwd: string, phases: TodoPhase[]): InteractiveModeContext
 		},
 		sessionManager: {
 			appendCustomEntry: vi.fn(),
-			appendMessage: vi.fn(),
+			appendCustomMessageEntry: vi.fn(),
 			getBranch: () => [],
 			getCwd: () => cwd,
 		},
@@ -35,17 +36,6 @@ describe("TodoCommandController", () => {
 	afterEach(async () => {
 		if (tempRoot) await removeWithRetries(tempRoot);
 		tempRoot = "";
-	});
-
-	it("advertises optional default todo import and export paths", async () => {
-		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-help-"));
-		const ctx = createContext(tempRoot, []);
-		const controller = new TodoCommandController(ctx);
-
-		await controller.handleTodoCommand("help");
-
-		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("/todo export [<path>]"));
-		expect(ctx.showStatus).toHaveBeenCalledWith(expect.stringContaining("/todo import [<path>]"));
 	});
 
 	it("exports the default TODO.md under the active session cwd", async () => {
@@ -91,8 +81,6 @@ describe("TodoCommandController", () => {
 		expect(ctx.sessionManager.appendCustomEntry).toHaveBeenCalledWith(USER_TODO_EDIT_CUSTOM_TYPE, {
 			phases: expected,
 		});
-		expect(ctx.agent.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
-		expect(ctx.sessionManager.appendMessage).toHaveBeenCalledWith(expect.objectContaining({ role: "developer" }));
 		expect(ctx.showStatus).toHaveBeenCalledWith(`Imported 1 phase(s), 1 task(s) from ${target}.`);
 		expect(ctx.showError).not.toHaveBeenCalled();
 	});
@@ -153,10 +141,24 @@ describe("TodoCommandController", () => {
 		expect(ctx.showError).toHaveBeenCalledWith(expect.stringContaining("internal scheme"));
 	});
 
+	it("appends only new work when the journal intentionally cleared a stale in-memory list", async () => {
+		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-clear-precedence-"));
+		const ctx = createContext(tempRoot, [
+			{ name: "Old phase", tasks: [{ content: "Removed task", status: "pending" }] },
+		]);
+		const manager = SessionManager.inMemory(tempRoot);
+		manager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: [] });
+		vi.spyOn(ctx.sessionManager, "getBranch").mockImplementation(() => manager.getBranch());
+		const controller = new TodoCommandController(ctx);
+		await controller.handleTodoCommand('append "Fresh task"');
+		const set = ctx.session.setTodoPhases as Mock<(phases: TodoPhase[]) => void>;
+		expect(set.mock.calls[0][0].flatMap(phase => phase.tasks.map(task => task.content))).toEqual(["Fresh task"]);
+	});
+
 	function reminderTextFrom(ctx: InteractiveModeContext): string {
 		const appendMessage = ctx.agent.appendMessage as unknown as Mock<(message: unknown) => void>;
-		const message = appendMessage.mock.calls[0][0] as { content: Array<{ text: string }> };
-		return message.content[0].text;
+		const message = appendMessage.mock.calls[0][0] as { content: string };
+		return message.content;
 	}
 
 	it("tells the model not to recreate the list after /todo rm (all)", async () => {
