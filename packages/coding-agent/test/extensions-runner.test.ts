@@ -7,7 +7,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { Type } from "@oh-my-pi/omptype/typebox";
 import type { AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
-import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import type { EncryptedContent, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -30,6 +30,7 @@ import type {
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import { ExtensionToolWrapper } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/wrapper";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { markJournaled, sessionEntryIdOf } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { getProjectAgentDir, logger, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -455,6 +456,115 @@ describe("ExtensionRunner", () => {
 			const command = runner.getCommand("deploy");
 			expect(command?.description).toBe("Explicit deploy");
 		});
+	});
+
+	it("keeps journal ids on the messages a read-only context handler observes", async () => {
+		await Bun.write(
+			path.join(extensionsDir, "read-only-context.ts"),
+			`
+			export default function(pi) {
+				pi.on("context", () => undefined);
+			}
+		`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const journaled: AgentMessage = markJournaled(
+			{ role: "user", content: "Checkpoint this request", timestamp: 0 },
+			"entry-1",
+		);
+
+		const transformed = await runner.emitContext([journaled]);
+
+		expect(sessionEntryIdOf(transformed[0])).toBe("entry-1");
+		expect(JSON.stringify(transformed[0])).not.toContain("entry-1");
+	});
+
+	it("context hooks see public exchanges while Codex replay retains private calls and results", async () => {
+		const observedPath = tempDir.join("context.json");
+		await Bun.write(
+			path.join(extensionsDir, "context.ts"),
+			`
+			export default function(pi) {
+				pi.on("context", async event => {
+					await Bun.write(${JSON.stringify(observedPath)}, JSON.stringify(event.messages));
+					return { messages: event.messages.map(message =>
+						message.role === "user" ? { ...message, content: "Transformed public prompt" } : message
+					) };
+				});
+			}
+		`,
+		);
+		const result = await loadTestExtensions();
+		const runner = new ExtensionRunner(
+			result.extensions,
+			result.runtime,
+			tempDir.path(),
+			sessionManager,
+			modelRegistry,
+		);
+		const messages: AgentMessage[] = [
+			{ role: "user", content: "Public prompt", timestamp: 0 },
+			{
+				role: "assistant",
+				content: [
+					{ type: "text", text: "Saving a checkpoint" },
+					{
+						type: "toolCall",
+						id: "private",
+						name: "notes.read_file",
+						arguments: { path: "checkpoint", text: "private-argument" },
+						modelOnly: true,
+					},
+				],
+				api: "openai-responses",
+				provider: "openai-codex",
+				model: "fixture",
+				usage: {
+					input: 1,
+					output: 1,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 2,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				stopReason: "toolUse",
+				providerPayload: {
+					type: "openaiResponsesHistory",
+					items: [{ type: "function_call", arguments: '{"text":"private-payload"}' }],
+				},
+				timestamp: 1,
+			},
+			{
+				role: "toolResult",
+				toolCallId: "private",
+				toolName: "notes.read_file",
+				content: [{ type: "encrypted", encryptedContent: "private-ciphertext" }],
+				details: { secret: "private-details" },
+				modelOnly: true,
+				isError: false,
+				timestamp: 2,
+			},
+		];
+		const transformed = await runner.emitContext(messages);
+		const observed = await Bun.file(observedPath).text();
+		expect(observed).not.toContain("private-ciphertext");
+		expect(observed).not.toContain("private-details");
+		expect(observed).not.toContain("private-argument");
+		expect(observed).not.toContain("private-payload");
+		expect(observed).toContain("[private model-only result]");
+		expect(observed).toContain("[private model-only call]");
+		expect(observed).toContain("Saving a checkpoint");
+		expect(transformed[0]).toMatchObject({ content: "Transformed public prompt" });
+		expect(transformed[1]).toEqual(messages[1]);
+		expect(transformed[2]).toEqual(messages[2]);
+		expect(messages[0]).toMatchObject({ content: "Public prompt" });
 	});
 
 	describe("error handling", () => {
@@ -1327,7 +1437,9 @@ describe("ExtensionRunner", () => {
 			execute: async () => ({ content: [{ type: "text" as const, text: "success" }] }),
 		};
 
-		const firstText = (result: { content: readonly (TextContent | ImageContent)[] }): string | undefined => {
+		const firstText = (result: {
+			content: readonly (TextContent | ImageContent | EncryptedContent)[];
+		}): string | undefined => {
 			const block = result.content[0];
 			return block?.type === "text" ? block.text : undefined;
 		};
@@ -1337,6 +1449,29 @@ describe("ExtensionRunner", () => {
 			const result = await loadTestExtensions();
 			return new ExtensionRunner(result.extensions, result.runtime, tempDir.path(), sessionManager, modelRegistry);
 		};
+
+		it("keeps encrypted replay output when a result hook echoes its public projection", async () => {
+			const runner = await runnerFor(`
+				export default function(pi) {
+					pi.on("tool_result", event => ({
+						content: [...event.content, { type: "text", text: "public annotation" }],
+						details: { replaced: true },
+					}));
+				}
+			`);
+			const tool: AgentTool = {
+				...okTool,
+				modelOnly: true,
+				execute: async () => ({
+					content: [{ type: "encrypted", encryptedContent: "replay-ciphertext" }],
+					details: { original: true },
+				}),
+			};
+			const wrapper = new ExtensionToolWrapper(tool, runner);
+			const result = await wrapper.execute("private-call", {}, undefined, undefined, undefined);
+			expect(result.content).toEqual([{ type: "encrypted", encryptedContent: "replay-ciphertext" }]);
+			expect(result.details).toEqual({ original: true });
+		});
 
 		it("surfaces replacement content while keeping the call an error", async () => {
 			const runner = await runnerFor(`

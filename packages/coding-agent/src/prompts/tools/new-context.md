@@ -1,0 +1,1 @@
+Start a new context window. Does not clear, reset, or otherwise affect environment state.

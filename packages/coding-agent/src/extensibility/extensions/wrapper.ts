@@ -8,7 +8,8 @@ import type {
 	AgentToolUpdateCallback,
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
-import type { ComputerSafetyCheck, ImageContent, Static, TextContent, TSchema } from "@oh-my-pi/pi-ai";
+import type { ComputerSafetyCheck, Static, TSchema } from "@oh-my-pi/pi-ai";
+import { publicToolProjection } from "@oh-my-pi/pi-ai/utils/private-content";
 import { sanitizeText, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../../config/settings";
 import type { Theme } from "../../modes/theme/theme";
@@ -370,6 +371,7 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 
 		// Emit tool_result event - extensions can modify the result and error status
 		if (this.runner.hasHandlers("tool_result")) {
+			const { content, isPrivate } = publicToolProjection(result.content, this.tool.modelOnly);
 			const resultResult = await this.runner.emitToolResult({
 				type: "tool_result",
 				toolName: this.tool.name,
@@ -378,13 +380,13 @@ export class ExtensionToolWrapper<TParameters extends TSchema = TSchema, TDetail
 					this.tool.name,
 					resolveToolEventInput(this.tool, toolEventArgs(effectiveParams, context)),
 				),
-				content: result.content,
-				details: result.details,
+				content,
+				details: isPrivate ? undefined : result.details,
 				isError: !!executionError,
 			});
 
-			if (resultResult) {
-				const modifiedContent: (TextContent | ImageContent)[] = resultResult.content ?? result.content;
+			if (resultResult && !isPrivate) {
+				const modifiedContent: AgentToolResult["content"] = resultResult.content ?? result.content;
 				const modifiedDetails = (resultResult.details ?? result.details) as TDetails;
 
 				// Effective error state: an explicit handler override wins; otherwise the

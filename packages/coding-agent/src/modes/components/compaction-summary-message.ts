@@ -114,6 +114,10 @@ export class CompactionSummaryMessageComponent implements Component {
 	}
 
 	#label(): string {
+		if (this.message.method === "window")
+			return this.message.windowNumber === undefined
+				? "Started a new context window"
+				: `Started context window ${this.message.windowNumber}`;
 		const name = (this.message.method && COMPACTION_METHOD_LABELS[this.message.method]) || "compacted";
 		let label = `${theme.icon.camera} ${name}`;
 		const amount = compactionAmount(this.message);
@@ -135,6 +139,7 @@ export class CompactionSummaryMessageComponent implements Component {
 	}
 
 	#detailMarkdown(): string {
+		if (this.message.method === "window") return this.#label();
 		const tokenLine =
 			this.message.tokensBefore > 0
 				? this.message.tokensAfter !== undefined

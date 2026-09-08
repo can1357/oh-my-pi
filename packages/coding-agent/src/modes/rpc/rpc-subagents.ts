@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import { isEnoent } from "@oh-my-pi/pi-utils";
+import { publicAgentMessage, publicSessionEntries } from "../../session/private-content";
 import type { FileEntry, SessionMessageEntry } from "../../session/session-entries";
 import { parseSessionEntries } from "../../session/session-loader";
 import {
@@ -91,7 +92,7 @@ export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 
 	const text = startByte >= size ? "" : await file.slice(startByte).text();
 	const lastNewline = text.lastIndexOf("\n");
 	const completeText = lastNewline >= 0 ? text.slice(0, lastNewline + 1) : "";
-	const entries = completeText.length > 0 ? parseSessionEntries(completeText) : [];
+	const entries = completeText.length > 0 ? publicSessionEntries(parseSessionEntries(completeText)) : [];
 	const nextByte = startByte + Buffer.byteLength(completeText, "utf8");
 
 	return {
@@ -100,7 +101,7 @@ export async function readRpcSubagentTranscript(sessionFile: string, fromByte = 
 		nextByte,
 		reset,
 		entries,
-		messages: entries.filter(isSessionMessageEntry).map(entry => entry.message),
+		messages: entries.filter(isSessionMessageEntry).map(entry => publicAgentMessage(entry.message)),
 	};
 }
 

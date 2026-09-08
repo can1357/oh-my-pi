@@ -601,10 +601,13 @@ export function arkToWireSchema(schema: Type): Record<string, unknown> {
 export function toolWireSchema(tool: Tool): Record<string, unknown> {
 	const params: TSchema = tool.parameters;
 	if (isArkSchema(params)) return arkToWireSchema(params);
+	// Private namespaces carry server-reserved schemas that must reach the provider verbatim.
+	if (tool.modelOnly && tool.namespace) return params as Record<string, unknown>;
 	return stamp(params as Record<string, unknown>, kJsonWireSchema, p => {
 		const raw = isArkJsonAst(p) ? arkJsonAstToWire(p) : p;
-		const upgraded = upgradeJsonSchemaTo202012(raw) as Record<string, unknown>;
-		return postProcessJsonSchema(upgraded);
+		const upgraded = upgradeJsonSchemaTo202012(raw);
+		const owned = upgraded === raw ? structuredClone(raw) : upgraded;
+		return postProcessJsonSchema(owned as Record<string, unknown>);
 	});
 }
 

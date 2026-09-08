@@ -11,6 +11,7 @@ import {
 	SUPPORTED_IMAGE_MIME_TYPES,
 } from "@oh-my-pi/pi-utils";
 import { LRUCache } from "@oh-my-pi/pi-utils/lru";
+import { cloneJournaled } from "../session/messages";
 import { resolveReadPath } from "../tools/path-utils";
 import { formatDimensionNote, type ImageResizeOptions, resizeImage } from "./image-resize";
 
@@ -418,7 +419,7 @@ export async function normalizeModelContextMessages(messages: Message[], model: 
 		}
 		if (!content && !providerPayloadChanged) continue;
 		output ??= messages.slice();
-		const normalizedMessage = { ...message, ...(content ? { content } : {}) } as Message;
+		const normalizedMessage = cloneJournaled(message, (content ? { content } : {}) as Partial<Message>);
 		if (normalizedMessage.role === "user" || normalizedMessage.role === "developer") {
 			if (providerPayloadChanged) {
 				normalizedMessage.providerPayload = normalizedProviderPayload;

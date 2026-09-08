@@ -697,6 +697,7 @@ function resolveOpenAIResponsesPolicy(
 	const isDeepseekFamily = facts.is("deepseek");
 
 	const compat: ResolvedOpenAIResponsesCompat = {
+		contextWindows: spec.compat?.contextWindows,
 		supportsDeveloperRole: isAzure || isOpenAIUrl || hostMatchesUrl(baseUrl, "githubCopilot"),
 		supportsStrictMode:
 			isAzure ||

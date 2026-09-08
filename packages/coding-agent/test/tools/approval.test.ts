@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { AgentTool, ToolApproval } from "@oh-my-pi/pi-agent-core";
+import { CodexHistoryNotesBackend } from "@oh-my-pi/pi-ai/providers/openai-codex/history-notes";
+import { createCodexHistoryNotesTools } from "../../src/tools/codex-history-notes";
 import { LSP_READONLY_ACTIONS } from "@oh-my-pi/pi-coding-agent/lsp";
 import {
 	type ApprovalMode,
@@ -55,6 +57,23 @@ function bashApproval(command: string, settingsOverrides: Record<string, unknown
 	if (typeof approval !== "function") throw new Error("Bash approval must be dynamic");
 	return approval({ command });
 }
+
+it("allows private history reads in read mode and checkpoint mutations in write mode", () => {
+	const backend = new CodexHistoryNotesBackend(async () => {
+		throw new Error("Approval must not call the backend");
+	});
+	const tools = createCodexHistoryNotesTools(backend, () => ({
+		sessionId: "approval-test",
+		agentName: "/root",
+		truncation: { mode: "bytes", limit: 1000 },
+	}));
+	for (const subject of tools) {
+		const writes = subject.name === "notes.write_file" || subject.name === "notes.append_to_file";
+		expect(requiresApproval(subject, {}, "always-ask").required).toBe(writes);
+		expect(requiresApproval(subject, {}, "write").required).toBe(false);
+		expect(resolveApproval(subject, {}, "write", { [subject.name]: "deny" }).policy).toBe("deny");
+	}
+});
 
 describe("resolveApproval tier matrix", () => {
 	const cases: Array<[ApprovalMode, "read" | "write" | "exec", "allow" | "prompt"]> = [

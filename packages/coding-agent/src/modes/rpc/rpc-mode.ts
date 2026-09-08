@@ -14,6 +14,7 @@ import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
+import { publicAgentMessage } from "../../session/private-content";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -1463,13 +1464,13 @@ export async function runRpcMode(
 			// =================================================================
 
 			case "get_messages": {
-				return success(id, "get_messages", { messages: session.messages });
+				return success(id, "get_messages", { messages: session.messages.map(publicAgentMessage) });
 			}
 
 			case "get_messages_page": {
 				if (session.isStreaming || session.isCompacting)
 					return error(id, "get_messages_page", RPC_MESSAGES_PAGE_BUSY_ERROR, "session_busy");
-				const messages = session.messages;
+				const messages = session.messages.map(publicAgentMessage);
 				try {
 					return success(
 						id,

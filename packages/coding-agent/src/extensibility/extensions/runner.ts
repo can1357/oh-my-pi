@@ -18,6 +18,8 @@ import type { LocalProtocolOptions } from "../../internal-urls/local-protocol";
 import type { MemoryRuntimeContext } from "../../memory-backend";
 import { type Theme, theme } from "../../modes/theme/theme";
 import type { AsyncJobSnapshot } from "../../session/agent-session";
+import { privateExchangeKey, publicAgentMessage } from "../../session/private-content";
+import { markJournaled, sessionEntryIdOf } from "../../session/session-entries";
 import type { SessionManager } from "../../session/session-manager";
 import { addFileDeleteFallback, addFileWriteFallback } from "../../tools/file-write-fallback";
 import type { BranchHandler, NavigateTreeHandler, NewSessionHandler } from "../session-handler-types";
@@ -1628,14 +1630,27 @@ export class ExtensionRunner {
 		}
 		if (!hasContextHandlers) return messages;
 
+		let privateOriginals: Map<string, AgentMessage> | undefined;
+		const publicMessages = messages.map(message => {
+			const projected = publicAgentMessage(message);
+			const key = projected === message ? undefined : privateExchangeKey(message);
+			if (key) (privateOriginals ??= new Map()).set(key, message);
+			return projected;
+		});
+
 		let currentMessages: AgentMessage[];
 		try {
-			currentMessages = structuredClone(messages);
+			currentMessages = structuredClone(publicMessages);
+			// structuredClone drops the non-enumerable journal id.
+			for (let index = 0; index < currentMessages.length; index++) {
+				const entryId = sessionEntryIdOf(messages[index]);
+				if (entryId) markJournaled(currentMessages[index], entryId);
+			}
 		} catch {
 			// Messages may contain non-cloneable objects (e.g. in ToolResultMessage.details
 			// or ProviderPayload). Fall back to a shallow array clone — extensions should
 			// return new message arrays rather than mutating in place.
-			currentMessages = [...messages];
+			currentMessages = publicMessages;
 		}
 
 		for (const ext of this.extensions) {
@@ -1658,7 +1673,12 @@ export class ExtensionRunner {
 			}
 		}
 
-		return currentMessages;
+		return !privateOriginals
+			? currentMessages
+			: currentMessages.map(message => {
+					const key = privateExchangeKey(message);
+					return key ? (privateOriginals?.get(key) ?? message) : message;
+				});
 	}
 
 	/** Runs request payload hooks with the model used for that provider request. */

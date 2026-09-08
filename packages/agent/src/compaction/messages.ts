@@ -25,6 +25,7 @@ export interface CustomMessage<T = unknown> {
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	timestamp: number;
+	sessionEntryId?: string;
 }
 
 /** Legacy hook message type (pre-extensions). Kept for session migration. */
@@ -37,6 +38,7 @@ export interface HookMessage<T = unknown> {
 	/** Who initiated this message for billing/attribution semantics. */
 	attribution?: MessageAttribution;
 	timestamp: number;
+	sessionEntryId?: string;
 }
 
 export interface BranchSummaryMessage {
@@ -55,6 +57,7 @@ export interface CompactionSummaryMessage {
 	tokensAfter?: number;
 	/** Harness compaction method that produced this summary (display metadata). */
 	method?: string;
+	windowNumber?: number;
 	providerPayload?: ProviderPayload;
 	/** Runtime-only ordered archive blocks for snapcompact: old text region,
 	 *  imaged middle, then new text region. When present, `summary` is already
@@ -79,7 +82,7 @@ declare module "../types" {
 }
 export type ConvertToLlm = (messages: AgentMessage[]) => Message[];
 
-function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | ImageContent)[] {
+function getPrunedToolResultContent(message: ToolResultMessage): ToolResultMessage["content"] {
 	if (message.prunedAt === undefined) {
 		return message.content;
 	}
@@ -88,7 +91,7 @@ function getPrunedToolResultContent(message: ToolResultMessage): (TextContent | 
 	const firstTextIndex = message.content.findIndex(content => content.type === "text");
 	if (firstTextIndex < 0) return [{ type: "text", text }, ...message.content];
 
-	const content: (TextContent | ImageContent)[] = [];
+	const content: ToolResultMessage["content"] = [];
 	for (let index = 0; index < message.content.length; index++) {
 		const block = message.content[index];
 		if (block.type !== "text") content.push(block);
@@ -133,6 +136,7 @@ export interface CompactionSummaryMessageOptions {
 	warning?: string;
 	/** Harness compaction method that produced this summary (e.g. "remote", "soft", "handoff"). */
 	method?: string;
+	windowNumber?: number;
 	/** Estimated context tokens after the rewrite, for display alongside `tokensBefore`. */
 	tokensAfter?: number;
 }
@@ -154,6 +158,7 @@ export function createCompactionSummaryMessage(
 		tokensBefore,
 		tokensAfter,
 		method,
+		windowNumber: options.windowNumber,
 		providerPayload,
 		blocks: blocks && blocks.length > 0 ? blocks : undefined,
 		images: imageBlocks && imageBlocks.length > 0 ? imageBlocks : undefined,
@@ -230,6 +235,7 @@ export function convertMessageToLlm(message: AgentMessage): Message | undefined 
 					timestamp: message.timestamp,
 				};
 			case "compactionSummary":
+				if (message.method === "window") return undefined;
 				return {
 					role: "user",
 					content:

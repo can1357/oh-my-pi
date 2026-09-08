@@ -21,6 +21,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import type { AgentMessage, AgentState } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+import { publicToolContent } from "@oh-my-pi/pi-ai/utils/private-content";
 import { $which, logger } from "@oh-my-pi/pi-utils";
 import { DEFAULT_SHARE_URL } from "@oh-my-pi/pi-wire";
 import { $ } from "bun";
@@ -401,7 +402,11 @@ function redactShareMessage(
 			return {
 				...message,
 				details: undefined,
-				content: redactShareContent(o, message.content, sharedRegexSecretValues) as (TextContent | ImageContent)[],
+				content: redactShareContent(
+					o,
+					publicToolContent(message.content, message.modelOnly),
+					sharedRegexSecretValues,
+				) as (TextContent | ImageContent)[],
 			};
 		case "assistant":
 			// Drop opaque provider-replay state (encrypted reasoning / native history) the viewer

@@ -1,3 +1,4 @@
+import { publicToolContent } from "../utils/private-content";
 import { fetchWithRetry, parseStreamingJson, readJsonl } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
@@ -204,7 +205,7 @@ function convertMessage(
 		return { role: developerRole, ...converted };
 	}
 	if (message.role === "toolResult") {
-		const converted = toPlainContent(message.content, supportsImages);
+		const converted = toPlainContent(publicToolContent(message.content), supportsImages);
 		return {
 			role: "tool",
 			tool_name: message.toolName,

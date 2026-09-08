@@ -15,6 +15,8 @@ import { askToolRenderer } from "./ask";
 import { astEditToolRenderer } from "./ast-edit";
 import { astGrepToolRenderer } from "./ast-grep";
 import { bashToolRenderer } from "./bash";
+import { codexContextWindowToolRenderers } from "./codex-context-window";
+import { codexHistoryNotesToolRenderers } from "./codex-history-notes";
 import { debugToolRenderer } from "./debug";
 import { evalToolRenderer } from "./eval-render";
 import { githubToolRenderer } from "./gh-renderer";
@@ -138,6 +140,8 @@ export const toolRenderers: Record<string, ToolRenderer> = {
 	vibe_kill: createVibeToolRenderer("kill") as ToolRenderer,
 	vibe_list: createVibeToolRenderer("list") as ToolRenderer,
 	write: writeToolRenderer as ToolRenderer,
+	...(codexHistoryNotesToolRenderers as Record<string, ToolRenderer>),
+	...(codexContextWindowToolRenderers as Record<string, ToolRenderer>),
 };
 
 // Wire the xd:// render delegation. Injected (instead of the xdev module

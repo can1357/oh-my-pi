@@ -17,7 +17,13 @@ import {
 	PREWALK_PLAN_MESSAGE_TYPE,
 	VIBE_MODE_CONTEXT_MESSAGE_TYPE,
 } from "./messages";
-import { type CompactionEntry, EPHEMERAL_MODEL_CHANGE_ROLE, type SessionEntry } from "./session-entries";
+import {
+	attachSessionEntryId,
+	type CompactionEntry,
+	EPHEMERAL_MODEL_CHANGE_ROLE,
+	markJournaled,
+	type SessionEntry,
+} from "./session-entries";
 
 // #4470 crash artifacts had legacy frames (no shape metadata) with 17 frames,
 // ~306k archive chars, and ~1.5M truncated chars. Current snapcompact frames
@@ -347,6 +353,7 @@ export function buildSessionContext(
 			) {
 				return;
 			}
+			attachSessionEntryId(entry);
 			pushMessage(entry.message);
 		} else if (entry.type === "custom_message") {
 			if (
@@ -359,17 +366,20 @@ export function buildSessionContext(
 			const normalized = normalizeCustomMessagePayload(entry);
 			const attribution = entry.attribution === undefined ? undefined : normalized.attribution;
 			pushMessage(
-				createCustomMessage(
-					normalized.customType,
-					normalized.content,
-					normalized.display,
-					normalized.details,
-					entry.timestamp,
-					attribution,
+				markJournaled(
+					createCustomMessage(
+						normalized.customType,
+						normalized.content,
+						normalized.display,
+						normalized.details,
+						entry.timestamp,
+						attribution,
+					),
+					entry.id,
 				),
 			);
 		} else if (entry.type === "branch_summary" && entry.summary) {
-			pushMessage(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp));
+			pushMessage(markJournaled(createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp), entry.id));
 		}
 	};
 
@@ -382,6 +392,7 @@ export function buildSessionContext(
 			handleEntryResetTracking(entry);
 			if (entry.type === "compaction") {
 				const active = entry.id === compaction?.id;
+				const window = entry.preserveData?.codexContextWindow;
 				const snapcompactArchive = active ? snapcompact.getPreservedArchive(entry.preserveData) : undefined;
 				pushMessage(
 					createCompactionSummaryMessage(
@@ -393,6 +404,8 @@ export function buildSessionContext(
 							blocks: snapcompactHistoryBlocksForContext(snapcompactArchive, options),
 							warning: entry.warning,
 							method: entry.method,
+							windowNumber:
+								isRecord(window) && typeof window.windowNumber === "number" ? window.windowNumber : undefined,
 							tokensAfter: entry.tokensAfter,
 						},
 					),
@@ -421,6 +434,20 @@ export function buildSessionContext(
 		for (let i = resetBoundaryIdx + 1; i < path.length; i++) {
 			appendMessage(path[i]);
 		}
+	} else if (compaction?.method === "window") {
+		if (options?.transcript) {
+			const window = compaction.preserveData?.codexContextWindow;
+			pushMessage(
+				createCompactionSummaryMessage("", compaction.tokensBefore, compaction.timestamp, {
+					method: "window",
+					windowNumber:
+						isRecord(window) && typeof window.windowNumber === "number" ? window.windowNumber : undefined,
+					tokensAfter: compaction.tokensAfter,
+				}),
+			);
+		}
+		const index = path.findIndex(entry => entry.id === compaction.id);
+		for (let i = index + 1; i < path.length; i++) appendMessage(path[i]);
 	} else if (compaction) {
 		const providerPayload = getOpenAiRemoteCompactionPayload(compaction);
 		const remoteReplacementHistory = providerPayload?.items;
@@ -428,7 +455,7 @@ export function buildSessionContext(
 		// Re-attach any archived snapcompact frames so the model can keep
 		// reading the archived history after every context rebuild.
 		const snapcompactArchive = snapcompact.getPreservedArchive(compaction.preserveData);
-		const compactionSummaryMsg = createCompactionSummaryMessage(
+		const compactionSummaryMsg: AgentMessage = createCompactionSummaryMessage(
 			compaction.summary,
 			compaction.tokensBefore,
 			compaction.timestamp,
@@ -441,6 +468,7 @@ export function buildSessionContext(
 				tokensAfter: compaction.tokensAfter,
 			},
 		);
+		markJournaled(compactionSummaryMsg, compaction.id);
 		// Agent context (non-transcript): summary first so the LLM sees the
 		// compacted context before recent messages.
 		if (!options?.transcript) {

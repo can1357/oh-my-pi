@@ -36,6 +36,7 @@ import {
 } from "./acp-permission-gate";
 import type { ClientBridge, ClientBridgePermissionOutcome } from "./client-bridge";
 import { buildToolNamespacesInfo, resolveCodeMode, type ToolNamespacesInfo } from "./code-mode";
+import { WINDOW_RESET_CONTROL_TOOLS } from "./codex-context-window";
 import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
@@ -64,6 +65,8 @@ export interface SessionToolsHost {
 	localProtocolOptions(): LocalProtocolOptions;
 	/** Publishes the current Codex Code Mode tool exposure snapshot for turn metadata; undefined clears it. */
 	setCodeModeNamespacesInfo?(info: unknown): void;
+	contextWindowTools?(): Promise<AgentTool[]>;
+	disableContextWindowMode?(reason: string): void;
 }
 
 interface SessionToolsOptions {
@@ -192,6 +195,7 @@ export class SessionTools {
 	#toolRegistry: Map<string, AgentTool>;
 	#createVibeTools: (() => AgentTool[]) | undefined;
 	#createThinkTool: SessionToolsOptions["createThinkTool"];
+	#contextWindowToolNames = new Set<string>();
 	#installedVibeToolNames = new Set<string>();
 	#builtInToolNames: Set<string>;
 	#rpcHostToolNames = new Set<string>();
@@ -606,6 +610,44 @@ export class SessionTools {
 		this.#installedVibeToolNames.clear();
 	}
 
+	async #syncContextWindowTools(signal?: AbortSignal): Promise<string[]> {
+		const first = await this.#reconcileContextWindowTools(signal);
+		if (!first.shadowed) return first.desired;
+		// The shadow just disabled window mode, so the host now offers a smaller
+		// set: resolve once more or the disabled window's own tools stay live.
+		return (await this.#reconcileContextWindowTools(signal)).desired;
+	}
+
+	async #reconcileContextWindowTools(signal?: AbortSignal): Promise<{ desired: string[]; shadowed: boolean }> {
+		const tools = this.#host.contextWindowTools ? await untilAborted(signal, this.#host.contextWindowTools()) : [];
+		const desired = new Set(tools.map(tool => tool.name));
+		let shadowed = false;
+		for (const name of this.#contextWindowToolNames) {
+			if (desired.has(name)) continue;
+			this.#toolRegistry.delete(name);
+			this.#builtInToolNames.delete(name);
+			this.#contextWindowToolNames.delete(name);
+		}
+		for (const tool of tools) {
+			if (this.#contextWindowToolNames.has(tool.name)) continue;
+			if (this.#toolRegistry.has(tool.name)) {
+				desired.delete(tool.name);
+				// A foreign `new_context` cannot commit a reset, and a foreign notes
+				// write satisfies the checkpoint by name while storing nothing the
+				// backend can replay — either one makes the protocol unusable.
+				if (WINDOW_RESET_CONTROL_TOOLS.has(tool.name)) {
+					shadowed = true;
+					this.#host.disableContextWindowMode?.(`tool "${tool.name}" is shadowed`);
+				}
+				continue;
+			}
+			this.#toolRegistry.set(tool.name, this.#wrapRuntimeTool(tool));
+			this.#builtInToolNames.add(tool.name);
+			this.#contextWindowToolNames.add(tool.name);
+		}
+		return { desired: [...desired], shadowed };
+	}
+
 	#getEditModeSession() {
 		return {
 			settings: this.#host.settings,
@@ -630,6 +672,7 @@ export class SessionTools {
 
 	/** Rebuilds model-dependent tool prompts after a model change. */
 	async syncAfterModelChange(previousEditMode: EditMode): Promise<void> {
+		await this.reconcileContextWindowTools();
 		const currentEditMode = this.resolveActiveEditMode();
 		const editModeChanged = previousEditMode !== currentEditMode && this.getActiveToolNames().includes("edit");
 		// The system prompt selects model-specific policy even when it does not display the model id.
@@ -637,6 +680,21 @@ export class SessionTools {
 		if (editModeChanged || modelChanged) {
 			await this.refreshBaseSystemPrompt();
 		}
+	}
+
+	/**
+	 * Reapplies the enabled set only when the model's or settings' context-window
+	 * tools actually changed. An unconditional apply would re-commit the live
+	 * slate (dropping registrations still in flight) and rebuild the system
+	 * prompt on every model switch.
+	 */
+	async reconcileContextWindowTools(): Promise<void> {
+		const changed = await this.runToolRegistryMutation(async () => {
+			const before = [...this.#contextWindowToolNames].sort().join(",");
+			await this.#syncContextWindowTools();
+			return before !== [...this.#contextWindowToolNames].sort().join(",");
+		});
+		if (changed) await this.reconcileCodeMode();
 	}
 
 	/** Whether a model transition crosses a Code Mode presentation boundary. */
@@ -649,7 +707,10 @@ export class SessionTools {
 				provider: model?.provider ?? "",
 				toolMode: model?.toolMode,
 				setting,
-				extraDirectTools,
+				extraDirectTools: [
+					...extraDirectTools,
+					...enabledToolNames.filter(name => this.#toolRegistry.get(name)?.modelOnly),
+				],
 				enabledToolNames,
 				evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 			});
@@ -823,12 +884,15 @@ export class SessionTools {
 
 	async #applyActiveToolsByName(toolNames: string[], forcePromptRefresh = false, signal?: AbortSignal): Promise<void> {
 		signal?.throwIfAborted();
-		toolNames = normalizeToolNames(toolNames);
+		toolNames = normalizeToolNames([...toolNames, ...(await this.#syncContextWindowTools(signal))]);
 		const codeMode = resolveCodeMode({
 			provider: this.#host.model()?.provider ?? "",
 			toolMode: this.#host.model()?.toolMode,
 			setting: this.#host.settings.get("providers.openai-codex.codeMode"),
-			extraDirectTools: this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
+			extraDirectTools: [
+				...this.#host.settings.get("providers.openai-codex.codeModeDirectTools"),
+				...toolNames.filter(name => this.#toolRegistry.get(name)?.modelOnly),
+			],
 			enabledToolNames: toolNames,
 			evalTransportAvailable: this.#hasCodeModeEvalTransport(),
 		});
@@ -929,6 +993,8 @@ export class SessionTools {
 						{
 							name,
 							customWireName: tool.customWireName,
+							namespace: tool.namespace,
+							modelOnly: tool.modelOnly,
 							loadMode: "loadMode" in tool && typeof tool.loadMode === "string" ? tool.loadMode : undefined,
 							mcpServerName:
 								"mcpServerName" in tool && typeof tool.mcpServerName === "string"

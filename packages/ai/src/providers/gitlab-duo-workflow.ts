@@ -1,3 +1,4 @@
+import { publicToolContent } from "../utils/private-content";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -2214,7 +2215,9 @@ function buildGitLabDuoWorkflowActionResponse(
 }
 
 function gitLabToolResultToText(toolResult: ToolResultMessage): string {
-	return toolResult.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
+	return publicToolContent(toolResult.content)
+		.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`))
+		.join("\n");
 }
 
 function buildGitLabMcpToolDefinition(tool: Tool): GitLabMcpToolDefinition {
@@ -2736,7 +2739,9 @@ function gitLabDuoWorkflowMessageContentToText(message: Message): string {
 
 function gitLabDuoWorkflowUserContentToText(message: Exclude<Message, AssistantMessage>): string {
 	if (typeof message.content === "string") return message.content;
-	return message.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
+	return publicToolContent(message.content)
+		.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`))
+		.join("\n");
 }
 
 export function describeGitLabDuoWorkflowSocketEvent(event: unknown): string {

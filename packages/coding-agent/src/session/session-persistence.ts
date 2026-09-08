@@ -152,7 +152,10 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 		// `encrypted_content`, server-validated on replay — atomic like signed blocks.
 		const encryptedReasoning =
 			obj.type === "reasoning" && "encrypted_content" in obj && isNonEmptyString(obj.encrypted_content);
-		if (signed || redacted || encryptedReasoning) return obj;
+		// Codex ciphertext (results and model-only arguments) is undecryptable if truncated.
+		const encryptedResult = obj.type === "encrypted" && "encryptedContent" in obj;
+		const modelOnlyCall = obj.type === "toolCall" && "modelOnly" in obj && obj.modelOnly === true;
+		if (signed || redacted || encryptedReasoning || encryptedResult || modelOnlyCall) return obj;
 	}
 
 	if (typeof obj === "string") {
@@ -164,7 +167,13 @@ function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string
 			// verbatim, but if one is reached here (unknown carrier shape), preserve it —
 			// truncation produces an invalid signature the API rejects, and clearing
 			// drops reasoning context the provider needs on replay.
-			if (key === "thinkingSignature" || key === "thoughtSignature" || key === "textSignature") {
+			if (
+				key === "thinkingSignature" ||
+				key === "thoughtSignature" ||
+				key === "textSignature" ||
+				key === "encryptedContent" ||
+				key === "encrypted_content"
+			) {
 				return obj;
 			}
 			const limit = Math.max(0, MAX_PERSIST_CHARS - TRUNCATION_NOTICE.length);

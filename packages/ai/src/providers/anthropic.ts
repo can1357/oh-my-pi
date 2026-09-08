@@ -1,3 +1,4 @@
+import { publicToolContent } from "../utils/private-content";
 import * as nodeCrypto from "node:crypto";
 import * as fs from "node:fs";
 import { scheduler } from "node:timers/promises";
@@ -1044,7 +1045,7 @@ async function resizeAnthropicManyImageMessage(
 		return content === message.content ? message : { ...message, content };
 	}
 	if (message.role === "toolResult") {
-		const content = await resizeAnthropicManyImageContent(message.content, state, limit);
+		const content = await resizeAnthropicManyImageContent(publicToolContent(message.content), state, limit);
 		return content === message.content ? message : { ...message, content };
 	}
 	return message;
@@ -4166,7 +4167,7 @@ function buildToolResultBlock(
 	msg: ToolResultMessage,
 	hoistedImages: ContentBlockParam[],
 ): ContentBlockParam {
-	let content = convertContentBlocks(msg.content, model.input.includes("image"));
+	let content = convertContentBlocks(publicToolContent(msg.content), model.input.includes("image"));
 	// Anthropic rejects images inside error tool results ("all content must be
 	// type `text` if `is_error` is true") — keep the text in the block and
 	// hoist the images after the message's tool_result run.

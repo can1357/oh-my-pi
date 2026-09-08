@@ -1,3 +1,4 @@
+import { publicToolContent } from "../../utils/private-content";
 /**
  * Proto builders for the modern Cursor CLI exec frames (`ExecServerMessage`
  * 27-31, 36-38, 40-55).
@@ -90,7 +91,9 @@ export {
 
 /** Flatten a tool result's content into the single `output` string the Pi frames carry. */
 export function piOutputText(toolResult: ToolResultMessage): string {
-	return toolResult.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
+	return publicToolContent(toolResult.content)
+		.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`))
+		.join("\n");
 }
 
 /**

@@ -497,6 +497,25 @@ describe("structured subagent primitive", () => {
 		for (const run of settled) await fs.rm(run.artifactsDir, { recursive: true, force: true });
 	});
 
+	it("hands subagents the root Codex backend session id only while notes are live", async () => {
+		mockDiscovery();
+		const codexSession = session();
+		Object.assign(codexSession, { getCodexBackendSessionId: () => "root-backend-session" });
+		const plainSession = session();
+		Object.assign(plainSession, { getCodexBackendSessionId: () => null });
+		const options = [] as executorModule.ExecutorOptions[];
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async executorOptions => {
+			options.push(executorOptions);
+			return result();
+		});
+
+		await runStructuredSubagent(request({ session: codexSession, retainArtifacts: true }));
+		await runStructuredSubagent(request({ session: plainSession, retainArtifacts: true }));
+
+		expect(options[0]?.parentCodexSessionId).toBe("root-backend-session");
+		expect(options[1]?.parentCodexSessionId).toBeUndefined();
+	});
+
 	it("suppresses plan capability sources while preserving non-plan propagation", async () => {
 		mockDiscovery();
 		const mcpManager = {} as NonNullable<ToolSession["mcpManager"]>;

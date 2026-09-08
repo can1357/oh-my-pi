@@ -1,3 +1,4 @@
+import { publicToolContent } from "../utils/private-content";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
@@ -2766,7 +2767,9 @@ async function applyToolResultHandler(
 }
 
 function toolResultToText(toolResult: ToolResultMessage): string {
-	return toolResult.content.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`)).join("\n");
+	return publicToolContent(toolResult.content)
+		.map(item => (item.type === "text" ? item.text : `[${item.mimeType} image]`))
+		.join("\n");
 }
 
 /**
@@ -3988,7 +3991,7 @@ function buildMcpResultFromToolResult(_mcpCall: CursorMcpCall, toolResult: ToolR
 	if (toolResult.isError) {
 		return buildMcpErrorResult(toolResultToText(toolResult) || "MCP tool failed");
 	}
-	const content = toolResult.content.map(item => {
+	const content = publicToolContent(toolResult.content).map(item => {
 		if (item.type === "image") {
 			return create(McpToolResultContentItemSchema, {
 				content: {
@@ -5014,7 +5017,7 @@ function createCursorMcpResult(result: ToolResultMessage) {
 		result: {
 			case: "success",
 			value: create(McpSuccessSchema, {
-				content: result.content.map(item =>
+				content: publicToolContent(result.content).map(item =>
 					item.type === "text"
 						? create(McpToolResultContentItemSchema, {
 								content: { case: "text", value: create(McpTextContentSchema, { text: item.text }) },

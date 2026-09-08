@@ -223,6 +223,7 @@ export interface TurnEndEvent {
 /** Fired when auto-compaction starts */
 export interface AutoCompactionStartEvent {
 	type: "auto_compaction_start";
+	method?: "window";
 	reason: "threshold" | "overflow" | "idle" | "incomplete";
 	action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
 }
@@ -230,6 +231,7 @@ export interface AutoCompactionStartEvent {
 /** Fired when auto-compaction ends */
 export interface AutoCompactionEndEvent {
 	type: "auto_compaction_end";
+	method?: "window";
 	action: "context-full" | "remote" | "handoff" | "shake" | "snapcompact";
 	result: CompactionResult | undefined;
 	aborted: boolean;

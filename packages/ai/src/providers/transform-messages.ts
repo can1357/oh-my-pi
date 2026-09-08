@@ -1,3 +1,4 @@
+import { logger } from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import type {
 	Api,
@@ -10,6 +11,7 @@ import type {
 	UserMessage,
 } from "../types";
 import { isDemotedThinking, kDemotedThinking } from "../utils/block-symbols";
+import { dropModelOnlyToolExchanges } from "../utils/private-content";
 
 const enum ToolCallStatus {
 	/** A tool result has already been emitted for this tool call; later duplicates must be skipped. */
@@ -593,6 +595,11 @@ export function transformMessages<TApi extends Api>(
 	duplicateToolCallIdSuffixPrefix = "_dup",
 	targetCompat: Model<TApi>["compat"] = model.compat,
 ): Message[] {
+	if (model.api !== "openai-codex-responses") {
+		const stripped = dropModelOnlyToolExchanges(messages);
+		if (stripped !== messages) logger.warn("Removed private Codex tool exchanges from a non-Codex request");
+		messages = stripped;
+	}
 	// Redact sensitive credential-like patterns from all outbound messages when
 	// the host opted in via `configureCredentialRedaction` — prevents security
 	// block errors from LLM providers (e.g. invalid_prompt).

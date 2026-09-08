@@ -11,6 +11,7 @@ import { assertEditableFile } from "../tools/auto-generated-guard";
 import { isInternalUrlPath, normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { ToolError } from "../tools/tool-errors";
 import type { CustomMessage } from "./messages";
+import { markJournaled } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import {
 	renderToolCallLoopRedirect,
@@ -231,12 +232,15 @@ export class LoopGuards {
 		};
 		messages.push(redirectMessage);
 		if (this.#host.agent.state.messages !== messages) this.#host.agent.appendMessage(redirectMessage);
-		this.#host.sessionManager.appendCustomMessageEntry(
-			TOOL_CALL_LOOP_REDIRECT_TYPE,
-			content,
-			false,
-			details,
-			"agent",
+		markJournaled(
+			redirectMessage,
+			this.#host.sessionManager.appendCustomMessageEntry(
+				TOOL_CALL_LOOP_REDIRECT_TYPE,
+				content,
+				false,
+				details,
+				"agent",
+			),
 		);
 	}
 
@@ -276,7 +280,7 @@ export class LoopGuards {
 			if (aborted) this.#host.discardAssistantTurn(aborted);
 			const content = prompt.render(geminiToolReminderTemplate, { count: headerCount });
 			const details = { headers: headerCount };
-			this.#host.agent.appendMessage({
+			const reminder: AgentMessage = {
 				role: "custom",
 				customType: GEMINI_TOOL_REMINDER_TYPE,
 				content,
@@ -284,14 +288,18 @@ export class LoopGuards {
 				details,
 				attribution: "agent",
 				timestamp: Date.now(),
-			});
-			this.#host.sessionManager.appendCustomMessageEntry(
-				GEMINI_TOOL_REMINDER_TYPE,
-				content,
-				false,
-				details,
-				"agent",
+			};
+			markJournaled(
+				reminder,
+				this.#host.sessionManager.appendCustomMessageEntry(
+					GEMINI_TOOL_REMINDER_TYPE,
+					content,
+					false,
+					details,
+					"agent",
+				),
 			);
+			this.#host.agent.appendMessage(reminder);
 			try {
 				await this.#host.agent.continue();
 			} catch (error) {

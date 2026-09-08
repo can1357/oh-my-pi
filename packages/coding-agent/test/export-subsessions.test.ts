@@ -3,7 +3,9 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
-import { collectSubSessions, exportFromFile } from "../src/export/html";
+import { collectSubSessions, exportFromFile, exportSessionToHtml } from "../src/export/html";
+import { SessionManager } from "../src/session/session-manager";
+import { PRIVATE_MODEL_RESULT } from "@oh-my-pi/pi-ai/utils/private-content";
 
 /**
  * Contract: a session at `<dir>/<name>.jsonl` embeds subagent transcripts from
@@ -87,6 +89,48 @@ describe("collectSubSessions", () => {
 		expect(data.subSessions.Alpha.header.previousSessionFiles).toBeUndefined();
 		expect(html).not.toContain(mainPreviousPath);
 		expect(html).not.toContain(subPreviousPath);
+	});
+
+	test("both HTML export entrypoints redact private results without changing stored history", async () => {
+		await Bun.write(
+			mainFile,
+			sessionJsonl("main", []) +
+				JSON.stringify({
+					type: "message",
+					id: "private-result",
+					parentId: null,
+					timestamp: "2026-06-12T00:00:01.000Z",
+					message: {
+						role: "toolResult",
+						toolCallId: "call-notes",
+						toolName: "notes.read_file",
+						modelOnly: true,
+						content: [{ type: "encrypted", encryptedContent: "opaque-private-payload" }],
+						details: { privateValue: "private-details" },
+						isError: false,
+						timestamp: 1,
+					},
+				}) +
+				"\n",
+		);
+		const sm = await SessionManager.open(mainFile);
+		try {
+			const livePath = await exportSessionToHtml(sm, undefined, { outputPath: path.join(root, "live.html") });
+			const savedPath = await exportFromFile(mainFile, { outputPath: path.join(root, "saved.html") });
+			for (const outputPath of [livePath, savedPath]) {
+				const html = await Bun.file(outputPath).text();
+				const encoded = html.match(/<script id="session-data" type="application\/json">([^<]+)<\/script>/)?.[1];
+				if (!encoded) throw new Error("Missing exported session data");
+				const data = Buffer.from(encoded, "base64").toString("utf8");
+				expect(data).toContain(PRIVATE_MODEL_RESULT);
+				expect(data).not.toContain("opaque-private-payload");
+				expect(data).not.toContain("private-details");
+			}
+			expect(JSON.stringify(sm.getEntries())).toContain("opaque-private-payload");
+			expect(await Bun.file(mainFile).text()).toContain("opaque-private-payload");
+		} finally {
+			sm.close();
+		}
 	});
 
 	test("skips corrupt, empty, backup, and non-jsonl files", async () => {

@@ -5,6 +5,7 @@
  * and after compaction the session is reloaded.
  */
 
+import type { CodexContextWindowIdentity } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import {
 	type Api,
 	type ApiKey,
@@ -156,6 +157,8 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 /** Result from compact() - SessionManager adds uuid/parentUuid when saving */
 export interface CompactionResult<T = unknown> {
 	summary: string;
+	method?: "window";
+	replacementMessages?: AgentMessage[];
 	/** Short PR-style summary for display purposes. */
 	shortSummary?: string;
 	firstKeptEntryId: string;
@@ -172,7 +175,7 @@ export interface CompactionResult<T = unknown> {
 
 export interface CompactionSettings {
 	enabled: boolean;
-	strategy?: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	strategy?: "context-full" | "context-window" | "handoff" | "shake" | "snapcompact" | "off";
 	thresholdPercent?: number;
 	thresholdTokens?: number;
 	midTurnEnabled?: boolean;
@@ -663,6 +666,11 @@ function shouldRetryHandoffWithAutoToolChoice(response: AssistantMessage): boole
  * If previousSummary is provided, uses the update prompt to merge.
  */
 export interface SummaryOptions {
+	/** Host-owned initial context and identity rotation for a local window reset. */
+	contextWindow?: {
+		initialContext: AgentMessage[];
+		startNewWindow: () => CodexContextWindowIdentity | Promise<CodexContextWindowIdentity>;
+	};
 	promptOverride?: string;
 	extraContext?: string[];
 	remoteEndpoint?: string;
@@ -1547,6 +1555,22 @@ export async function compact(
 	signal?: AbortSignal,
 	options?: SummaryOptions,
 ): Promise<CompactionResult> {
+	if (preparation.settings.strategy === "context-window") {
+		signal?.throwIfAborted();
+		if (!options?.contextWindow) throw new Error("Context-window compaction requires a provider window hook");
+		const identity = await options.contextWindow.startNewWindow();
+		return {
+			summary: "",
+			method: "window",
+			firstKeptEntryId: preparation.firstKeptEntryId,
+			tokensBefore: preparation.tokensBefore,
+			replacementMessages: options.contextWindow.initialContext,
+			preserveData: {
+				codexContextWindow: identity,
+				contextWindowInitialContext: options.contextWindow.initialContext,
+			},
+		};
+	}
 	const {
 		firstKeptEntryId,
 		messagesToSummarize,

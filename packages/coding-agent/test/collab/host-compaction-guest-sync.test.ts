@@ -174,6 +174,43 @@ afterEach(async () => {
 });
 
 describe("collab host compaction → guest sync (#9781)", () => {
+	it.each(["snapshot", "live"] as const)(
+		"redacts private results from %s replication without changing host replay",
+		async delivery => {
+			const hostManager = SessionManager.inMemory();
+			const appendPrivate = () =>
+				hostManager.appendMessage({
+					role: "toolResult",
+					toolCallId: "private-call",
+					toolName: "notes.read_file",
+					modelOnly: true,
+					content: [{ type: "encrypted", encryptedContent: "host-only-ciphertext" }],
+					details: { secret: "host-only-details" },
+					isError: false,
+					timestamp: Date.now(),
+				});
+			if (delivery === "snapshot") appendPrivate();
+			const host = new CollabHost(makeHostContext(hostManager));
+			await host.start("ws://localhost:8788");
+			cleanups.push(() => host.stop("test done"));
+			const harness = makeGuestHarness(model, modelRegistry);
+			cleanups.push(harness.dispose);
+			await harness.guest.join(host.link);
+			if (delivery === "live") appendPrivate();
+			await settleFrames(() =>
+				harness.session.messages.some(
+					message => message.role === "toolResult" && message.toolCallId === "private-call",
+				),
+			);
+			const replica = JSON.stringify(harness.session.sessionManager.getEntries());
+			expect(replica).toContain("[private model-only result]");
+			expect(replica).not.toContain("host-only-ciphertext");
+			expect(replica).not.toContain("host-only-details");
+			expect(JSON.stringify(hostManager.getEntries())).toContain("host-only-ciphertext");
+			expect(JSON.stringify(hostManager.getEntries())).toContain("host-only-details");
+		},
+	);
+
 	it("collapses the guest's model context behind the summary after the host compacts", async () => {
 		const hostManager = SessionManager.inMemory();
 		hostManager.appendMessage({ role: "user", content: "first", timestamp: Date.now() });
