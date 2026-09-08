@@ -13,7 +13,7 @@ from collections.abc import Callable, Mapping, Sequence
 from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Generic, Literal, TypeVar, cast
+from typing import Any, Generic, Literal, Self, TypeVar, cast
 
 from .host_tools import HostTool, HostToolContext
 from .host_uris import HostUri, HostUriContext, normalize_read_result
@@ -565,7 +565,7 @@ class RpcClient:
         self._protocol_error_listeners: list[ProtocolErrorListener] = []
         self._listener_error_listeners: list[ListenerErrorListener] = []
 
-    def __enter__(self) -> RpcClient:
+    def __enter__(self) -> Self:
         return self.start()
 
     def __exit__(self, _exc_type: object, _exc: object, _tb: object) -> None:
@@ -893,7 +893,7 @@ class RpcClient:
             if on_request is not None:
                 try:
                     on_request(request)
-                except Exception as exc:
+                except Exception as exc:  # noqa: BLE001 - isolate host callbacks
                     self._record_listener_error(
                         ListenerErrorEvent(
                             listener_kind="headless_ui_request",
@@ -2043,7 +2043,7 @@ class RpcClient:
                         "result": self._normalize_host_tool_result(result),
                     }
                 )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - serialize tool failures
                 if pending_call.cancel_event.is_set():
                     return
                 self._send_notification(
@@ -2155,7 +2155,7 @@ class RpcClient:
                     self._send_notification(
                         {"type": "host_uri_result", "id": request_id}
                     )
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - serialize URI handler failures
                 if pending.cancel_event.is_set():
                     return
                 self._send_host_uri_error(request_id, str(exc))
@@ -2505,7 +2505,7 @@ class RpcClient:
                     self._typed_event_listeners.get(event.type, []),
                     event,
                 )
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - close on reader failure
             self._mark_closed(exc)
         else:
             if not self._stopping:
@@ -2534,7 +2534,7 @@ class RpcClient:
             for chunk in process.stderr:
                 with self._state_lock:
                     self._stderr_chunks.append(chunk)
-        except Exception as exc:
+        except Exception as exc:  # noqa: BLE001 - close on reader failure
             if not self._stopping:
                 self._mark_closed(RpcError(f"Failed to read RPC stderr: {exc}"))
 
@@ -2685,7 +2685,7 @@ class RpcClient:
         for listener in list(self._listener_error_listeners):
             try:
                 listener(event)
-            except Exception:
+            except Exception:  # noqa: BLE001, S112 - error listeners must not recurse
                 continue
 
     def _dispatch_listeners(
@@ -2698,7 +2698,7 @@ class RpcClient:
         for listener in list(listeners):
             try:
                 listener(payload)
-            except Exception as exc:
+            except Exception as exc:  # noqa: BLE001 - isolate user listeners
                 self._record_listener_error(
                     ListenerErrorEvent(
                         listener_kind=listener_kind,

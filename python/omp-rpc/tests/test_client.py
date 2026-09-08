@@ -2031,7 +2031,7 @@ class RpcClientTests(unittest.TestCase):
 
     def test_prompt_lifecycle_collectors_are_single_flight(self) -> None:
         results: list[str] = []
-        errors: list[BaseException] = []
+        errors: list[Exception] = []
 
         with self.make_client() as client:
 
@@ -2042,9 +2042,7 @@ class RpcClientTests(unittest.TestCase):
                             "slow", timeout=2.0
                         ).require_assistant_text()
                     )
-                except (
-                    BaseException
-                ) as exc:  # pragma: no cover - defensive thread capture
+                except Exception as exc:  # noqa: BLE001 - capture worker failures
                     errors.append(exc)
 
             thread = threading.Thread(target=run_prompt)
@@ -2083,9 +2081,11 @@ class RpcClientTests(unittest.TestCase):
         self.assertEqual(messages[0]["content"][0]["text"], "pong")
 
     def test_id_less_error_responses_are_correlated(self) -> None:
-        with self.make_client(server=IDLESS_ERROR_SERVER) as client:
-            with self.assertRaises(RpcCommandError) as ctx:
-                client.request_raw("unknown")
+        with (
+            self.make_client(server=IDLESS_ERROR_SERVER) as client,
+            self.assertRaises(RpcCommandError) as ctx,
+        ):
+            client.request_raw("unknown")
 
         self.assertEqual(ctx.exception.command, "unknown")
         self.assertEqual(ctx.exception.error, "unsupported: unknown")
@@ -2232,7 +2232,7 @@ class RpcClientTests(unittest.TestCase):
             first_start_observed = threading.Event()
             release_first_start = threading.Event()
             follow_up_written = threading.Event()
-            errors: list[BaseException] = []
+            errors: list[Exception] = []
             original_write = client._write_json
 
             def delay_first_start(notification: object) -> None:
@@ -2255,7 +2255,7 @@ class RpcClientTests(unittest.TestCase):
             def submit_follow_up() -> None:
                 try:
                     client.prompt("second", streaming_behavior="followUp")
-                except BaseException as exc:
+                except Exception as exc:  # noqa: BLE001 - capture worker failures
                     errors.append(exc)
 
             with patch.object(client, "_write_json", side_effect=observe_write):
@@ -2280,7 +2280,7 @@ class RpcClientTests(unittest.TestCase):
             first_start_received = threading.Event()
             release_first_start = threading.Event()
             follow_up_written = threading.Event()
-            errors: list[BaseException] = []
+            errors: list[Exception] = []
             original_start = client._mark_agent_run_started
             original_write = client._write_json
 
@@ -2300,7 +2300,7 @@ class RpcClientTests(unittest.TestCase):
             def submit_follow_up() -> None:
                 try:
                     client.prompt("second", streaming_behavior="followUp")
-                except BaseException as exc:
+                except Exception as exc:  # noqa: BLE001 - capture worker failures
                     errors.append(exc)
 
             with (
@@ -2353,7 +2353,7 @@ class RpcClientTests(unittest.TestCase):
             first_start_observed = threading.Event()
             release_first_start = threading.Event()
             replacement_written = threading.Event()
-            errors: list[BaseException] = []
+            errors: list[Exception] = []
             original_write = client._write_json
 
             def delay_first_start(notification: object) -> None:
@@ -2376,7 +2376,7 @@ class RpcClientTests(unittest.TestCase):
             def replace_active_run() -> None:
                 try:
                     client.abort_and_prompt("replacement")
-                except BaseException as exc:
+                except Exception as exc:  # noqa: BLE001 - capture worker failures
                     errors.append(exc)
 
             with patch.object(client, "_write_json", side_effect=observe_write):
@@ -2461,9 +2461,11 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(client._scheduled_agent_runs, client._completed_agent_runs)
 
     def test_event_history_limit_reports_overflow(self) -> None:
-        with self.make_client(max_event_history=2) as client:
-            with self.assertRaises(RpcError) as ctx:
-                client.prompt_and_wait("say hello", timeout=2.0)
+        with (
+            self.make_client(max_event_history=2) as client,
+            self.assertRaises(RpcError) as ctx,
+        ):
+            client.prompt_and_wait("say hello", timeout=2.0)
 
         self.assertIn("max_event_history", str(ctx.exception))
 
@@ -2527,7 +2529,7 @@ class RpcClientTests(unittest.TestCase):
             release_prompt = threading.Event()
             abort_finished = threading.Event()
             writes: list[str] = []
-            errors: list[BaseException] = []
+            errors: list[Exception] = []
             original_write = client._write_json
 
             def gated_write(
@@ -2543,13 +2545,13 @@ class RpcClientTests(unittest.TestCase):
             def send_prompt() -> None:
                 try:
                     client.prompt("delayed prompt")
-                except BaseException as exc:  # pragma: no cover - diagnostic capture
+                except Exception as exc:  # noqa: BLE001 - capture worker failures
                     errors.append(exc)
 
             def clear_and_abort() -> None:
                 try:
                     client.abort(clear_queue=True, reason="queue-race")
-                except BaseException as exc:  # pragma: no cover - diagnostic capture
+                except Exception as exc:  # noqa: BLE001 - capture worker failures
                     errors.append(exc)
                 finally:
                     abort_finished.set()
@@ -2689,14 +2691,14 @@ class StopUnblocksPromptAndWaitTests(unittest.TestCase):
         )
         client.start()
         try:
-            errors: list[BaseException] = []
+            errors: list[Exception] = []
 
             def run_prompt() -> None:
                 try:
                     # 30s is more than enough to let stop() race in; if the
                     # bug regresses, the worker hangs the full 30s.
                     client.prompt_and_wait("hang", timeout=30.0)
-                except BaseException as exc:
+                except Exception as exc:  # noqa: BLE001 - capture worker failures
                     errors.append(exc)
 
             thread = threading.Thread(target=run_prompt)
