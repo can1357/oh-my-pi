@@ -6,8 +6,15 @@ import { type } from "@oh-my-pi/omptype";
 import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { runInteractiveApprovalGate } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/approval-gate";
-import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
+import {
+	EXTENSION_HANDLER_TIMEOUT_MS,
+	ExtensionRunner,
+	testSetExtensionHandlerTimeoutMs,
+} from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type {
+	Extension,
+	ExtensionRuntime,
+	ExtensionUIContext,
 	ToolApprovalRequestedEvent,
 	ToolApprovalResolvedEvent,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
@@ -57,6 +64,7 @@ describe("interactive approval gate", () => {
 	});
 
 	afterEach(async () => {
+		testSetExtensionHandlerTimeoutMs(EXTENSION_HANDLER_TIMEOUT_MS);
 		await removeWithRetries(tmpDir);
 	});
 
@@ -313,5 +321,108 @@ describe("interactive approval gate", () => {
 		).rejects.toThrow(/UI crashed synchronously/);
 		await Bun.sleep(10);
 		expect(events).toEqual([]);
+	});
+
+	test("handler capturing respond cannot approve after timing out", async () => {
+		testSetExtensionHandlerTimeoutMs(10);
+		let capturedRespond: NonNullable<ToolApprovalRequestedEvent["respond"]> | undefined;
+		const handlerStarted = Promise.withResolvers<void>();
+		const extension: Extension = {
+			path: "/test/timeout-extension.ts",
+			resolvedPath: "/test/timeout-extension.ts",
+			handlers: new Map([
+				[
+					"tool_approval_requested",
+					[
+						async (event: unknown) => {
+							const approvalEvent = event as ToolApprovalRequestedEvent;
+							capturedRespond = approvalEvent.respond;
+							handlerStarted.resolve();
+							await Promise.withResolvers<void>().promise;
+						},
+					],
+				],
+			]),
+			tools: new Map(),
+			assistantThinkingRenderers: [],
+			fileWriteFallbackHandlers: [],
+			fileDeleteFallbackHandlers: [],
+			messageRenderers: new Map(),
+			composerShapes: new Map(),
+			commands: new Map(),
+			flags: new Map(),
+			shortcuts: new Map(),
+		};
+		let dialogResolve: ((choice: string) => void) | undefined;
+		const runner = new ExtensionRunner(
+			[extension],
+			{ flagValues: new Map(), pendingProviderRegistrations: [] } as unknown as ExtensionRuntime,
+			tmpDir,
+			{ getCwd: () => tmpDir } as never,
+			{} as never,
+		);
+		runner.initialize(
+			{
+				sendMessage: () => {},
+				sendUserMessage: () => {},
+				appendEntry: () => {},
+				setLabel: () => {},
+				getActiveTools: () => [],
+				getAllTools: () => [],
+				setActiveTools: async () => {},
+				getCommands: () => [],
+				setModel: async () => false,
+				getThinkingLevel: () => undefined,
+				setThinkingLevel: () => {},
+				getSessionName: () => undefined,
+				setSessionName: async () => {},
+			},
+			{
+				getModel: () => undefined,
+				isIdle: () => true,
+				abort: () => {},
+				hasPendingMessages: () => false,
+				shutdown: () => {},
+				getContextUsage: () => undefined,
+				compact: async () => {},
+				getSystemPrompt: () => [],
+			},
+			undefined,
+			{
+				select: () => {
+					const dialog = Promise.withResolvers<string>();
+					dialogResolve = dialog.resolve;
+					return dialog.promise;
+				},
+				confirm: async () => false,
+				input: async () => undefined,
+				notify: () => {},
+				onTerminalInput: () => () => {},
+				setFooter: () => {},
+			} as unknown as ExtensionUIContext,
+		);
+		const review = await tool.prepareApproval("timeout-call", { path: "f.txt", content: PROPOSED });
+		if (!review) throw new Error("expected a review for a filesystem write");
+		const gatedTool = tool as unknown as AgentTool<typeof writeParamsSchema>;
+		const gate = runInteractiveApprovalGate<typeof writeParamsSchema>({
+			tool: gatedTool,
+			toolCallId: "timeout-call",
+			effectiveParams: { path: "f.txt", content: PROPOSED },
+			approvalMode: "always-ask",
+			userPolicies: {},
+			safetyPrompt: "Approve the write?",
+			runner,
+			review,
+		});
+		await handlerStarted.promise;
+		await until(() => capturedRespond !== undefined);
+		await Bun.sleep(25);
+		if (!capturedRespond) throw new Error("respond was not captured");
+		const lateResult = await capturedRespond({ approved: true });
+		expect(lateResult).toBe(false);
+		dialogResolve?.("Approve");
+		await gate;
+		await tool.execute("timeout-call", { path: "f.txt", content: PROPOSED });
+		expect(await Bun.file(target).text()).toBe(PROPOSED);
 	});
 });
