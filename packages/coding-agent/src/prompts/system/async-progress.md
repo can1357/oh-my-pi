@@ -13,5 +13,5 @@ Waiting on a condition? One sleeping async `until` loop; AVOID repeated tool pol
 {{/if}}
 Progress: 200 ms batches, 10-event burst, then 1 permit/2 s; suppressed events stay in the full artifact. Truncated batches show bounded `<head>`/`<tail>` and link `artifact://<id>`.
 {{chattyGuidance}}
-Progress is pushed while you are idle. NEVER hold the turn open to receive it — no polling{{#if hub}} (`logs`, `ps`, short `wait` loops){{/if}}, no tailing files; end the turn.
+Progress is pushed while you are idle. NEVER hold the turn open to receive it — no polling{{#if hub}} (`logs`, `ps`, any `wait` on a wake-monitored job){{/if}}, no tailing files; end the turn. Ending a turn to await a wake is NOT a yield.
 </async-progress>
