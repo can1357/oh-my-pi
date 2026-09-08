@@ -35,6 +35,7 @@ import {
 	encodeInferenceStreamRequest,
 	frameConnectProto,
 } from "../packages/ai/src/providers/grokbot/proto.ts";
+import { classifyModel } from "../packages/catalog/src/compat/taxonomy.ts";
 import * as prompt from "../packages/utils/src/prompt.ts";
 import automationShellUserPrompt from "./grokbot-probes/automation-shell-user.md" with { type: "text" };
 import automationSystemPrompt from "./grokbot-probes/automation-system.md" with { type: "text" };
@@ -337,11 +338,21 @@ async function testAutomationStillGrok(token, cfg) {
 		`  live: http=${res.status} ok=${parsed.ok} tools=${parsed.toolCalls.map(t => t.name).join(",") || "none"}` +
 			` model=${parsed.responseModel || "?"} err=${parsed.message || "-"}`,
 	);
-	const routedGrok = /grok/i.test(parsed.responseModel || "");
+	const routedGrok = isGrokRoutedModel(parsed.responseModel);
 	console.log(`  routed model: ${parsed.responseModel} → ${routedGrok ? "grok family ✓" : "NOT grok ✗"}`);
 	const pass = wireOk && res.ok && parsed.ok && routedGrok;
 	console.log(`  ${pass ? "PASS" : "FAIL"} automation-still-grok`);
 	return { pass, routedModel: parsed.responseModel, wireOk };
+}
+
+/** Structural Grok identity — never match display text that merely contains "grok". */
+function isGrokRoutedModel(model) {
+	const raw = typeof model === "string" ? model.trim() : "";
+	if (!raw) return false;
+	const slash = raw.indexOf("/");
+	const bare = slash >= 0 ? raw.slice(slash + 1) : raw;
+	const identity = classifyModel("grokbot", bare, { lenient: true });
+	return identity.class === "xai" || identity.family === "grok";
 }
 
 async function testKeepModelNoopOnGrok() {

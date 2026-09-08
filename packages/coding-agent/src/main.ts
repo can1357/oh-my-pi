@@ -846,6 +846,35 @@ export async function resolveScopedModels(
 }
 
 /**
+ * When `--api-key` scopes a discoverable provider and `--model` is missing from
+ * the cold/startup catalog (fresh profile, no credential-scoped cache), refresh
+ * that provider before {@link buildSessionOptions} exits on miss. `--models`
+ * scopes already refresh via {@link resolveScopedModels}; provider+model does not.
+ */
+export async function refreshCredentialScopedModelIfMissing(
+	parsed: Pick<Args, "apiKey" | "model">,
+	modelRegistry: Pick<ModelRegistry, "getAvailable" | "hasProvider" | "refreshProvider">,
+	providerId: string | undefined,
+): Promise<boolean> {
+	if (!parsed.apiKey || !parsed.model || !providerId) return false;
+	if (!modelRegistry.hasProvider(providerId)) return false;
+	const raw = parsed.model.trim();
+	const withoutThinking = raw.includes(":") ? raw.slice(0, raw.indexOf(":")) : raw;
+	const slash = withoutThinking.indexOf("/");
+	const bare = slash >= 0 ? withoutThinking.slice(slash + 1) : withoutThinking;
+	const present = modelRegistry
+		.getAvailable()
+		.some(
+			model =>
+				model.provider === providerId &&
+				(model.id === bare || model.id === withoutThinking || `${model.provider}/${model.id}` === withoutThinking),
+		);
+	if (present) return false;
+	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
+	return true;
+}
+
+/**
  * Map resolver scope entries to the session's Ctrl+P cycle shape, filling in the
  * configured default thinking level for entries without an explicit `:level`
  * suffix. `auto` is session-level only, so it is coerced to a concrete default here.
@@ -1555,6 +1584,18 @@ export async function runRootCommand(
 			"modelRegistry:init",
 			() => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }),
 		);
+		// Credential-scoped live catalogs (e.g. grokbot AvailableModels) are absent
+		// on a fresh profile until discovery runs. Refresh before --provider/--model
+		// resolve so buildSessionOptions does not exit on a cold miss.
+		if (cliApiKeyProvider) {
+			await logger.time(
+				"refreshCredentialScopedModel",
+				refreshCredentialScopedModelIfMissing,
+				parsedArgs,
+				modelRegistry,
+				cliApiKeyProvider,
+			);
+		}
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 			Bun.env.PI_NO_PTY = "1";
 		}

@@ -232,15 +232,23 @@ function supportsOpenAIGAComputerUse(
  */
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
 	const policy = resolveModelPolicy(spec);
+	// Variant/legacy selectors keep `id` for lookup but derive class membership
+	// (glyph tokenization, computer-use wire identity, …) from the canonical
+	// `requestModelId` when present — opaque aliases otherwise classify unknown.
+	const requestModelId = spec.requestModelId?.trim();
+	const identity =
+		requestModelId && requestModelId !== spec.id
+			? resolveModelPolicy({ ...spec, id: requestModelId }).identity
+			: policy.identity;
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
 		name: cleanModelName(spec.name),
-		identity: policy.identity,
-		requiresGlyphTokenization: policy.identity.class === "anthropic",
+		identity,
+		requiresGlyphTokenization: identity.class === "anthropic",
 		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id),
 		thinking: policy.thinking,
-		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
+		supportsComputerUse: supportsOpenAIGAComputerUse(spec, identity, supportsComputerUseConfig),
 		supportsComputerUseConfig,
 		compat: policy.compat,
 		compatConfig: spec.compat,

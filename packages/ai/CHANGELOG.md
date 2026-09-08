@@ -8,6 +8,8 @@
 - Catalog matrix Gemini Write empty-follow-up classifies via `requestModelId` for variant/legacy selectors.
 - Grok Bot omits `thinking` when the parameter is advertised but discovery left no default and no effort is sent (does not invent `false`).
 - Grok Bot probe mint failures report HTTP status only (never response bodies that may echo the renewer).
+- Grok Bot keep-model Anthropic probe validates and replays returned Shell arguments (no fabricated echo).
+- Grok Bot automation probe classifies the routed model via `classifyModel` (no `grok` substring match).
 - Grok Bot protobuf codec is fully typed (removed file-wide `@ts-nocheck`).
 - Grok Bot legacy matrix derives sand parameter ids and effort from live catalog + buildModel policy instead of hard-coded per-model tables.
 - Block Grok Bot JWT remint/replay after no-tool events were already published live

@@ -94,10 +94,20 @@ function parseFrames(buf) {
 		try {
 			const msg = decodeInferenceStreamResponse(bytes);
 			if (msg.toolCallPart?.toolName) {
-				toolCalls.push({
-					name: String(msg.toolCallPart.toolName),
-					id: String(msg.toolCallPart.toolCallId || ""),
-				});
+				const id = String(msg.toolCallPart.toolCallId || "");
+				const chunk = msg.toolCallPart.args == null ? "" : String(msg.toolCallPart.args);
+				const existing = toolCalls.find(t => t.id === id && t.name === String(msg.toolCallPart.toolName));
+				if (existing) {
+					existing.args = `${existing.args || ""}${chunk}`;
+					if (msg.toolCallPart.isComplete) existing.complete = true;
+				} else {
+					toolCalls.push({
+						name: String(msg.toolCallPart.toolName),
+						id,
+						args: chunk,
+						complete: Boolean(msg.toolCallPart.isComplete),
+					});
+				}
 			}
 			if (msg.responseInfo?.model) responseModel = String(msg.responseInfo.model);
 			if (msg.textPart?.text) textParts.push(String(msg.textPart.text));
@@ -204,6 +214,31 @@ function isAnthropicRouted(model) {
 	return isAnthropicSandModelId(model);
 }
 
+/** Decode Shell args and require an echo/printf of the probe token (no fabricated command). */
+function parseValidatedShellArgs(call, token) {
+	const raw = typeof call?.args === "string" ? call.args.trim() : "";
+	if (!raw) return { ok: false, reason: "empty-shell-args" };
+	let parsed;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return { ok: false, reason: "shell-args-not-json" };
+	}
+	const command = typeof parsed?.command === "string" ? parsed.command : "";
+	if (!command) return { ok: false, reason: "shell-args-missing-command" };
+	// Reject redirects that discard stdout; require the token as an echo/printf argv.
+	if (/(?:^|[\s;|&])(?:tee\b|>|>>)/.test(command.replace(/\$\(.*?\)/g, ""))) {
+		return { ok: false, reason: "shell-redirect-or-tee" };
+	}
+	const echoesToken =
+		new RegExp(String.raw`(?:^|[\s;|&])(?:echo|printf)\b(?:\s+(?:-[nEe]+))*\s+(?:(['"])${token}\1|${token})(?:\s|$|[;&|])`).test(
+			command,
+		) ||
+		new RegExp(String.raw`(?:^|[\s;|&])(?:echo|printf)\b[^\n#]*\b${token}\b`).test(command);
+	if (!echoesToken) return { ok: false, reason: "shell-command-missing-token" };
+	return { ok: true, args: { command }, result: `${token}\n` };
+}
+
 async function testModel(token, cfg, modelId, tools, label) {
 	const requestedModel = resolveGrokbotRequestedModel(modelId, {
 		sandParameterIds: ["thinking", "context", "effort", "fast"],
@@ -266,8 +301,20 @@ async function testModel(token, cfg, modelId, tools, label) {
 		};
 	}
 
-	// Turn 2: feed tool result back using encodeCoreMessage fields (toolCalls / toolContent).
-	const shellArgs = { command: "echo probe-ok" };
+	const validated = parseValidatedShellArgs(shellCall, "probe-ok");
+	if (!validated.ok) {
+		return {
+			modelId,
+			pass: false,
+			reason: validated.reason,
+			wire: describeWire(wired),
+			routed: parsed1.responseModel,
+			detail: (shellCall.args || "").slice(0, 160),
+		};
+	}
+
+	// Turn 2: replay the model's exact Shell args + a result matching that command.
+	const shellArgs = validated.args;
 	const body2 = {
 		messages: [
 			{ role: 4, text: systemText },
@@ -286,7 +333,7 @@ async function testModel(token, cfg, modelId, tools, label) {
 			{
 				role: 3,
 				toolContent: {
-					parts: [{ toolCallId: shellCall.id, toolName: "Shell", result: "probe-ok" }],
+					parts: [{ toolCallId: shellCall.id, toolName: "Shell", result: validated.result }],
 				},
 			},
 		],
@@ -302,8 +349,8 @@ async function testModel(token, cfg, modelId, tools, label) {
 
 	const routedModel = parsed2.responseModel || parsed1.responseModel;
 	const routedAnthropic = isAnthropicRouted(routedModel);
-	// History replay is only proven if turn 2 emits a final answer instead of another tool call.
-	const finalResponse = parsed2.toolCalls.length === 0;
+	// History replay is only proven if turn 2 emits a final answer with the probe token.
+	const finalResponse = parsed2.toolCalls.length === 0 && (parsed2.text || "").includes("probe-ok");
 
 	const pass = res2.ok && parsed2.ok && routedAnthropic && finalResponse;
 	return {
@@ -312,7 +359,9 @@ async function testModel(token, cfg, modelId, tools, label) {
 		reason: pass
 			? "ok"
 			: !finalResponse
-				? `turn2-retried-tools(${parsed2.toolCalls.map(t => t.name).join(",")})`
+				? parsed2.toolCalls.length > 0
+					? `turn2-retried-tools(${parsed2.toolCalls.map(t => t.name).join(",")})`
+					: "turn2-missing-token"
 				: `turn2-http-${res2.status}-${routedModel}`,
 		wire: describeWire(wired),
 		routed: routedModel,
