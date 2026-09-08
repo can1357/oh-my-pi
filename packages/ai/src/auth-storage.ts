@@ -4745,11 +4745,18 @@ export class AuthStorage {
 					blockedUntil)
 				: blockedUntil;
 
-		const remainingCredentials = this.#getCredentialsForProvider(provider)
-			.map((credential, index) => ({ credential, index }))
+		const allowedIds =
+			credentialType === "oauth"
+				? this.#modelOAuthCredentialIds(provider, routing.rankingContext.modelId)
+				: undefined;
+		const stored = this.#getStoredCredentials(provider);
+		const remainingCredentials = stored
+			.map((entry, index) => ({ credential: entry.credential, index, id: entry.id }))
 			.filter(
-				(entry): entry is { credential: AuthCredential; index: number } =>
-					entry.credential.type === credentialType && entry.index !== targetIndex,
+				(entry): entry is { credential: AuthCredential; index: number; id: number } =>
+					entry.credential.type === credentialType &&
+					entry.index !== targetIndex &&
+					(allowedIds === undefined || allowedIds.includes(entry.id)),
 			);
 
 		let retryAtMs: number | undefined;
@@ -6943,10 +6950,14 @@ export class AuthStorage {
 		const providerKey = this.#getProviderTypeKey(provider, sessionCredential.type);
 		// Snapshot sibling availability before mutating so a soft-deleting
 		// suspect hook can't reindex the answer out from under us.
-		const hasSibling = this.#getCredentialsForProvider(provider).some(
-			(credential, index) =>
-				credential.type === sessionCredential.type &&
+		const allowedIds =
+			sessionCredential.type === "oauth" ? this.#modelOAuthCredentialIds(provider, options?.modelId) : undefined;
+		const stored = this.#getStoredCredentials(provider);
+		const hasSibling = stored.some(
+			(entry, index) =>
+				entry.credential.type === sessionCredential.type &&
 				index !== sessionCredential.index &&
+				(allowedIds === undefined || allowedIds.includes(entry.id)) &&
 				!this.#isCredentialBlocked(provider, providerKey, index),
 		);
 		const target = this.#getStoredCredentials(provider)[sessionCredential.index];

@@ -1237,6 +1237,46 @@ describe("model cache spec round trip", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+	it("persists a successful empty discovery result as authoritative when emptyDynamicModelsAuthoritative is enabled", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-empty-authoritative-"));
+		const dbPath = path.join(tempDir, "models.db");
+		let fetches = 0;
+		let currentTime = 1_000_000;
+		const options = {
+			providerId: "empty-authoritative-test",
+			staticModels: [],
+			dynamicModelsAuthoritative: true,
+			emptyDynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			now: () => currentTime,
+			fetchDynamicModels: async () => {
+				fetches++;
+				return [];
+			},
+		};
+		try {
+			const empty = await resolveProviderModels(options, "online");
+			expect(empty.models).toEqual([]);
+			expect(empty.stale).toBe(false);
+			expect(fetches).toBe(1);
+
+			const db = new Database(dbPath, { readonly: true });
+			const row = db
+				.query<{ authoritative: number }, [string]>("SELECT authoritative FROM model_cache WHERE provider_id = ?")
+				.get(options.providerId);
+			db.close();
+			expect(row?.authoritative).toBe(1);
+
+			// A subsequent online-if-uncached reuse uses the authoritative cache without refetching even past the short retry interval
+			currentTime += 10 * 60 * 1_000;
+			const cached = await resolveProviderModels(options, "online-if-uncached");
+			expect(cached.models).toEqual([]);
+			expect(cached.stale).toBe(false);
+			expect(fetches).toBe(1);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 	it("restores static model headers on fresh cache reads", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-static-headers-"));
 		const dbPath = path.join(tempDir, "models.db");

@@ -42,6 +42,13 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/**
+	 * When true, a successful dynamic fetch that returns zero models is still
+	 * marked authoritative in the cache. Used by providers like github-copilot
+	 * where an empty catalog represents a complete, verified absence of granted
+	 * models across all accounts rather than a transient discovery failure.
+	 */
+	emptyDynamicModelsAuthoritative?: boolean;
 	/** Cached model ids whose presence forces refresh when the static or migration-policy fingerprint changes. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	/**
@@ -199,8 +206,14 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const staticModels = options.staticModels
 		? passModelList<TApi>(options.staticModels)
 		: (getBundledModels(options.providerId as GeneratedProvider) as Model<TApi>[]);
+	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
+	// Additive semantics keep bundled static models visible when a shared
+	// models.dev catalog supplements them. Skip this for authoritative
+	// providers: their cached result (even if empty) IS the truth — the
+	// cold-start fast path below must not re-inject static models that the
+	// authoritative dynamic fetch intentionally pruned.
 	const additiveStaticModelIds =
-		options.modelsDev?.additiveOnly && staticModels.length > 0
+		options.modelsDev?.additiveOnly && staticModels.length > 0 && !dynamicModelsAuthoritative
 			? new Set(staticModels.map(model => model.id))
 			: undefined;
 	const cache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
@@ -214,7 +227,6 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	);
 	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
 	const cacheHasUnresolvedHeaders = restoredCache.unresolvedModelIds.size > 0;
-	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
 	const cacheDropIds = options.dropCachedModelIdsOnStaticMismatch;
 	const staticCatalogFingerprint = fingerprintStaticModels(staticModels, dynamicModelsAuthoritative);
 	// Endpoint-migration policy is cache identity: adding an id must invalidate
@@ -308,7 +320,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	// models.dev snapshots may be empty for one provider and remain authoritative.
 	const cacheAuthoritative = hasDynamicFetcher
 		? dynamicFetchSucceeded &&
-			dynamicModels.length > 0 &&
+			(dynamicModels.length > 0 || (options.emptyDynamicModelsAuthoritative ?? false)) &&
 			(dynamicModelsAuthoritative || !hasModelsDevFetcher || modelsDevFetchSucceeded)
 		: modelsDevFetchSucceeded;
 	const mergedWithCache = mergeDynamicModels(staticModels, cacheModels);

@@ -53,6 +53,8 @@ export interface ProviderDescriptor {
 	allowUnauthenticated?: boolean;
 	/** When true, successful runtime discovery replaces bundled provider models instead of merging fallback-only IDs. */
 	dynamicModelsAuthoritative?: boolean;
+	/** When true, a successful dynamic fetch that returns zero models is still cached as authoritative. */
+	emptyDynamicModelsAuthoritative?: boolean;
 	/** Catalog discovery configuration. Only providers with this field participate in generate-models.ts. */
 	catalogDiscovery?: CatalogDiscoveryConfig;
 }
@@ -93,6 +95,8 @@ export interface ProviderCatalogEntry {
 	readonly allowUnauthenticated?: boolean;
 	/** When true, successful runtime discovery replaces bundled provider models. */
 	readonly dynamicModelsAuthoritative?: boolean;
+	/** When true, a successful dynamic fetch that returns zero models is still cached as authoritative. */
+	readonly emptyDynamicModelsAuthoritative?: boolean;
 	/** Catalog discovery configuration for generate-models.ts. */
 	readonly catalogDiscovery?: CatalogDiscoveryConfig;
 	/**

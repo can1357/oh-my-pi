@@ -213,6 +213,7 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["COPILOT_GITHUB_TOKEN"],
 		createModelManagerOptions: (config: ModelManagerConfig) => githubCopilotModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
+		emptyDynamicModelsAuthoritative: true,
 	},
 	{
 		id: "gitlab-duo",
@@ -612,6 +613,7 @@ export const PROVIDER_DESCRIPTORS: readonly ProviderDescriptor[] = CATALOG_ENTRY
 			createModelManagerOptions: provider.createModelManagerOptions,
 			allowUnauthenticated: provider.allowUnauthenticated,
 			dynamicModelsAuthoritative: provider.dynamicModelsAuthoritative,
+			emptyDynamicModelsAuthoritative: provider.emptyDynamicModelsAuthoritative,
 			catalogDiscovery: provider.catalogDiscovery
 				? { ...provider.catalogDiscovery, envVars: provider.catalogDiscovery.envVars ?? provider.envVars ?? [] }
 				: undefined,

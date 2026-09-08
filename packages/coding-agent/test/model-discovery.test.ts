@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Effort, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
+import { type Api, Effort, type FetchImpl, type Model } from "@oh-my-pi/pi-ai";
 import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
@@ -658,6 +658,92 @@ describe("ModelRegistry runtime discovery", () => {
 		// Removing the sole granting account must not leak to a sibling or static key.
 		await authStorage.removeCredential("github-copilot", accountB.id);
 		expect(await restored.getApiKey(cachedBeta, "restored")).toBeUndefined();
+	});
+
+	test("github-copilot denies models absent from an authoritative catalog", async () => {
+		await authStorage.set("github-copilot", [
+			{ type: "oauth", access: "token-a", refresh: "refresh-a", expires: Date.now() + 3_600_000 },
+		]);
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () =>
+				Response.json({
+					data: [
+						{
+							id: "only-granted-model",
+							policy: { state: "enabled" },
+							capabilities: {
+								type: "chat",
+								limits: { max_context_window_tokens: 128_000, max_output_tokens: 16_000 },
+							},
+						},
+					],
+				}),
+		});
+
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(false);
+
+		await registry.refreshProvider("github-copilot", "online");
+
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+		expect(registry.find("github-copilot", "only-granted-model")).toBeDefined();
+		expect(registry.find("github-copilot", "disabled-or-missing-model")).toBeUndefined();
+
+		// Attempting to resolve an API key for the missing model must return undefined (denying all accounts)
+		const missingModel = { provider: "github-copilot", id: "disabled-or-missing-model" } as Model<Api>;
+		expect(await registry.getApiKey(missingModel, "session-1")).toBeUndefined();
+
+		// Whereas the granted model resolves successfully
+		const grantedModel = registry.find("github-copilot", "only-granted-model")!;
+		expect(await registry.getApiKey(grantedModel, "session-1")).toBeDefined();
+	});
+
+	test("github-copilot persists an empty granted catalog as authoritative across cache hydration", async () => {
+		const authPath = path.join(tempDir, "auth-empty.db");
+		authStorage.close();
+		authStorage = await AuthStorage.create(authPath, { usageProviderResolver: () => undefined });
+		await authStorage.set("github-copilot", [
+			{ type: "oauth", access: "token-a", refresh: "refresh-a", expires: Date.now() + 3_600_000 },
+		]);
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () =>
+				Response.json({
+					data: [
+						{
+							id: "model-disabled",
+							policy: { state: "disabled" },
+							capabilities: {
+								type: "chat",
+								limits: { max_context_window_tokens: 128_000, max_output_tokens: 16_000 },
+							},
+						},
+					],
+				}),
+		});
+
+		await registry.refreshProvider("github-copilot", "online");
+
+		// All models are pruned
+		expect(getModelsForProvider(registry, "github-copilot")).toHaveLength(0);
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+
+		// Now simulate restart: open fresh auth storage and new ModelRegistry with the same cache
+		authStorage.close();
+		authStorage = await AuthStorage.create(authPath, { usageProviderResolver: () => undefined });
+		await authStorage.reload();
+
+		let networkRequests = 0;
+		const restarted = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => {
+				networkRequests++;
+				throw new Error("Offline cache restore must not fetch");
+			},
+		});
+		await restarted.hydrateCredentialScopedModelCaches();
+
+		// The empty catalog must stay authoritative and NOT restore bundled Copilot models
+		expect(getModelsForProvider(restarted, "github-copilot")).toHaveLength(0);
+		expect(restarted.isAuthoritativeProvider("github-copilot")).toBe(true);
+		expect(networkRequests).toBe(0);
 	});
 
 	test("github-copilot discovery honors a runtime key instead of stored OAuth accounts", async () => {

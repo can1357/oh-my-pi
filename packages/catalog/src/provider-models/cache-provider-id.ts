@@ -1,4 +1,8 @@
-import { PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
+import {
+	getGitHubCopilotBaseUrl,
+	parseGitHubCopilotApiKey,
+	PERSONAL_GITHUB_COPILOT_BASE_URL,
+} from "../wire/github-copilot";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
@@ -102,8 +106,15 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// endpoint, which misroutes sibling credentials during inference.
 			// v4: refetch catalogs without per-model OAuth grants before allowing
 			// account rotation to use them.
-			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
-			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
+			const parsed = options.apiKey ? parseGitHubCopilotApiKey(options.apiKey) : undefined;
+			const token = parsed?.accessToken ?? options.apiKey ?? "";
+			const baseUrl =
+				options.baseUrl ??
+				(parsed?.apiEndpoint ||
+					(parsed?.enterpriseUrl
+						? getGitHubCopilotBaseUrl(parsed.enterpriseUrl)
+						: PERSONAL_GITHUB_COPILOT_BASE_URL));
+			const scope = `${token}\u0000${baseUrl}`;
 			return `github-copilot:models-v4:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":

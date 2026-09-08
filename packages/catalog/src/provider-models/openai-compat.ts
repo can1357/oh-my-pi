@@ -6485,6 +6485,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 		// (see isCopilotModelAvailableForAccount), so treat it as the complete
 		// catalog and prune bundled models no account is granted.
 		dynamicModelsAuthoritative: true,
+		emptyDynamicModelsAuthoritative: true,
 		// COPILOT_API_HEADERS are compile-time wire identity constants, not
 		// credentials. The cache omits all request headers for
 		// safety and can only restore them from a bundled static entry — so a

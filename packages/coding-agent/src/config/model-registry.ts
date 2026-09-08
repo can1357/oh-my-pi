@@ -150,6 +150,7 @@ const ADDITIVE_MODELS_DEV_CATALOG_PROVIDER_ID_LOOKUP: Readonly<Record<string, tr
 		).map(providerId => [providerId, true as const]),
 	),
 );
+const EMPTY_CREDENTIAL_IDS: readonly number[] = Object.freeze([]);
 
 /**
  * Bedrock provider-scoped fields to spread onto a model spec, dropping keys
@@ -391,9 +392,12 @@ export class ModelRegistry {
 			if (!keyConfig) return undefined;
 			return resolveConfigValue(keyConfig);
 		});
-		this.authStorage.setOAuthModelCredentialResolver(
-			(provider, modelId) => this.find(provider, modelId)?.oauthCredentialIds,
-		);
+		this.authStorage.setOAuthModelCredentialResolver((provider, modelId) => {
+			const model = this.find(provider, modelId);
+			if (model) return model.oauthCredentialIds;
+			if (this.isAuthoritativeProvider(provider)) return EMPTY_CREDENTIAL_IDS;
+			return undefined;
+		});
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
 	}
@@ -2416,6 +2420,14 @@ export class ModelRegistry {
 	 */
 	isProviderDiscoveryPending(provider: string): boolean {
 		return this.#providerDiscoveryStates.get(provider)?.status === "idle";
+	}
+
+	/**
+	 * Returns whether the provider has a successfully resolved authoritative catalog
+	 * (either fresh from cache or completed runtime discovery).
+	 */
+	isAuthoritativeProvider(provider: string): boolean {
+		return this.#runtimeAuthoritativeProviders.has(provider) || this.#cachedAuthoritativeProviders.has(provider);
 	}
 
 	/**
