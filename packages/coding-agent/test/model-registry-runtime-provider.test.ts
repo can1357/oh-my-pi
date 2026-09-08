@@ -230,7 +230,7 @@ describe("ModelRegistry runtime provider registration", () => {
 		modelHeaders["X-Model-Turn-ID"] = "model-turn-2";
 
 		const model = registry.find("runtime-provider", "runtime-model");
-		expect({ ...(model?.headers ?? {}) }).toEqual({
+		expect({ ...model?.headers }).toEqual({
 			"X-Request-ID": "request-2",
 			"X-Turn-ID": "turn-2",
 			"X-Message-ID": "message-2",

@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, test, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
@@ -16,6 +17,12 @@ import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { getProjectDir, removeWithRetries, setProjectDir } from "@oh-my-pi/pi-utils";
 
 const originalProjectDir = getProjectDir();
+const TEST_EXTENSION_ROOTS: EffectiveExtensionRoots = {
+	explicit: [],
+	mode: "merge",
+	configured: [],
+	configuredLevel: "user",
+};
 
 function agentDefinition(description: string): string {
 	return `---\nname: reload-agent\ndescription: ${description}\n---\nReload agent.\n`;
@@ -26,6 +33,7 @@ function createTaskSession(cwd: string): ToolSession {
 		cwd,
 		hasUI: false,
 		settings: Settings.isolated({}),
+		effectiveExtensionRoots: () => TEST_EXTENSION_ROOTS,
 		getSessionFile: () => null,
 		getSessionSpawns: () => "*",
 	} as unknown as ToolSession;
@@ -39,6 +47,8 @@ function createFakeCtx(cwd: string, settingsValues: Record<string, unknown> = {}
 		getTools: vi.fn(() => mcpTools),
 	};
 	const session = {
+		effectiveExtensionRoots: TEST_EXTENSION_ROOTS,
+		getEvalPreludes: () => [],
 		refreshMCPTools: vi.fn(async (_tools: unknown) => {}),
 		setMCPPromptCommands: vi.fn((_commands: unknown) => {}),
 	};

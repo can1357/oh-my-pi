@@ -54,6 +54,7 @@ export const LEAF_TARGETS: readonly LeafTarget[] = [
 	{ tag: "darwin-x64", os: "darwin", cpu: "x64" },
 	{ tag: "darwin-arm64", os: "darwin", cpu: "arm64" },
 	{ tag: "win32-x64", os: "win32", cpu: "x64" },
+	{ tag: "win32-arm64", os: "win32", cpu: "arm64" },
 ];
 
 const packageDirDefault = path.join(import.meta.dir, "..");
