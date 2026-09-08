@@ -202,7 +202,13 @@ import { shutdownTinyTitleClient } from "../tiny/title-client";
 import type { ImageAttachmentEntry } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
-import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
+import {
+	armIdleCloseForOwner,
+	cancelIdleCloseForOwner,
+	freezeTabsForOwner,
+	releaseIdleTabsForOwner,
+	releaseTabsForOwner,
+} from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
@@ -579,6 +585,7 @@ export class AgentSession {
 	#unsubscribeExtendedContext?: () => void;
 	#unsubscribeCodeMode?: () => void;
 	#unsubscribeEvalPreludeSettings?: () => void;
+	#unsubscribeIdleCloseSetting?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -1836,6 +1843,18 @@ export class AgentSession {
 				});
 			});
 		});
+		this.#unsubscribeIdleCloseSetting = this.settings.onEffectiveChange((path, value) => {
+			if (path !== "browser.idleCloseSec") return;
+			const ownerId = this.sessionManager.getSessionId() ?? "";
+			// Any change invalidates the armed deadline: cancel first (its
+			// sequence bump stops an in-flight sweep re-arming the old
+			// value), then re-arm under the new one. A non-positive value
+			// arms nothing, which is the disable path.
+			cancelIdleCloseForOwner(ownerId);
+			if (typeof value === "number" && value > 0) {
+				armIdleCloseForOwner(ownerId, value * 1000);
+			}
+		});
 		this.#unsubscribeCodeMode = onCodeModeChanged(() => {
 			void this.#tools.reconcileCodeMode().catch(error => {
 				logger.warn("Code Mode reconcile after setting change failed", { error: String(error) });
@@ -2975,6 +2994,14 @@ export class AgentSession {
 			} else {
 				this.#toolChoiceQueue.resolve();
 			}
+		}
+		// Settle owned headless browser tabs: close tabs idle past the
+		// timeout, then freeze the survivors so animated content stops
+		// burning CPU/GPU while idle (issue #8246). Detached — tool results
+		// for this turn are already paired, and teardown must never block
+		// the event flow.
+		if (event.type === "turn_end") {
+			void this.#settleOwnedBrowserTabs();
 		}
 		if (event.type === "tool_execution_end") {
 			if (event.toolName === "goal") {
@@ -4449,6 +4476,49 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Turn-settle checkpoint for owned headless browser tabs (issue #8246).
+	 * Close tabs idle past `browser.idleCloseSec` as the memory backstop,
+	 * then freeze the survivors so idle animated pages stop burning CPU/GPU
+	 * while keeping their state for millisecond resume. Scoped to OMP-owned
+	 * headless tabs of this session only — relay/CDP/spawned tabs, other
+	 * sessions' tabs, and `persist` tabs are never touched. Best-effort:
+	 * never throws, so teardown cannot break the event flow.
+	 */
+	async #settleOwnedBrowserTabs(): Promise<void> {
+		const ownerId = this.sessionManager.getSessionId();
+		if (!ownerId) return;
+		try {
+			const idleSec = this.settings.get("browser.idleCloseSec");
+			if (idleSec > 0) {
+				const closed = await withTimeout(
+					releaseIdleTabsForOwner(ownerId, { idleMs: idleSec * 1000 }),
+					3_000,
+					"Timed out closing idle browser tabs at turn settle",
+				);
+				if (closed > 0) {
+					logger.debug("Closed idle owned browser tabs at turn settle", { ownerId, closed });
+				}
+			} else {
+				// Idle close disabled at runtime: drop any deadline armed
+				// under a previous positive value so it cannot fire stale.
+				cancelIdleCloseForOwner(ownerId);
+			}
+			if (this.settings.get("browser.freezeOnTurnEnd")) {
+				const frozen = await withTimeout(
+					freezeTabsForOwner(ownerId),
+					3_000,
+					"Timed out freezing owned browser tabs at turn settle",
+				);
+				if (frozen > 0) {
+					logger.debug("Froze owned browser tabs at turn settle", { ownerId, frozen });
+				}
+			}
+		} catch (error) {
+			logger.warn("Failed to settle owned browser tabs at turn end", { error: String(error) });
+		}
+	}
+
 	async #releaseOwnedComputerSessions(ownerId: string | undefined): Promise<void> {
 		if (!ownerId) return;
 		try {
@@ -4576,6 +4646,10 @@ export class AgentSession {
 		if (this.#unsubscribeEvalPreludeSettings) {
 			this.#unsubscribeEvalPreludeSettings();
 			this.#unsubscribeEvalPreludeSettings = undefined;
+		}
+		if (this.#unsubscribeIdleCloseSetting) {
+			this.#unsubscribeIdleCloseSetting();
+			this.#unsubscribeIdleCloseSetting = undefined;
 		}
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
