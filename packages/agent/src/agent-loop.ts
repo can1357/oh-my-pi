@@ -2016,7 +2016,12 @@ async function streamAssistantResponse(
 								if (event.type === "toolcall_end") {
 									const source = partialMessage.content[event.contentIndex];
 									const snapshot = messageSnapshot.content[event.contentIndex];
-									if (source?.type === "toolCall" && snapshot?.type === "toolCall") {
+									if (
+										source?.type === "toolCall" &&
+										snapshot?.type === "toolCall" &&
+										typeof source.arguments === "object" &&
+										source.arguments !== null
+									) {
 										// Only streaming consumers share this clone. Final dispatch hooks
 										// receive a fresh message so argument rewrites cannot change previews.
 										completedToolArguments.set(source.arguments, snapshot.arguments);

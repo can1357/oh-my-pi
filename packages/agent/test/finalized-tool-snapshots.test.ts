@@ -11,6 +11,48 @@ function convertToLlm(messages: AgentMessage[]): Message[] {
 	return messages.filter(m => m.role === "user" || m.role === "assistant" || m.role === "toolResult") as Message[];
 }
 
+it("streams past raw JSON tool arguments and lets the final transform normalize them", async () => {
+	const mock = createMockModel({
+		responses: [
+			{ content: [{ type: "toolCall", id: "raw", name: "noop", arguments: '{"value":1}' }, "later"] },
+			{ content: ["finished"] },
+		],
+	});
+	const config: AgentLoopConfig = {
+		model: mock.model,
+		convertToLlm,
+		transformAssistantMessage(message) {
+			for (const block of message.content) {
+				if (block.type === "toolCall" && typeof block.arguments === "string") {
+					block.arguments = JSON.parse(block.arguments);
+				}
+			}
+		},
+	};
+	let laterText = "";
+	let finalArguments: Record<string, unknown> | undefined;
+	let ended = false;
+	for await (const event of agentLoop(
+		[createUserMessage("run")],
+		{ systemPrompt: [], messages: [], tools: [] },
+		config,
+		undefined,
+		mock.stream,
+	)) {
+		if (event.type === "message_update" && event.assistantMessageEvent.type === "text_delta") {
+			laterText += event.assistantMessageEvent.delta;
+		}
+		if (event.type === "message_end" && event.message.role === "assistant") {
+			const block = event.message.content.find(block => block.type === "toolCall");
+			if (block?.type === "toolCall") finalArguments = block.arguments;
+		}
+		if (event.type === "agent_end") ended = true;
+	}
+	expect(laterText).toContain("later");
+	expect(finalArguments).toEqual({ value: 1 });
+	expect(ended).toBe(true);
+});
+
 it("retains one finalized argument snapshot with a read-only interceptor without exposing final rewrites", async () => {
 	const mock = createMockModel({ responses: [{ content: ["finished"] }] });
 	const args = { entries: Array.from({ length: 1000 }, (_, value) => ({ value })) };
