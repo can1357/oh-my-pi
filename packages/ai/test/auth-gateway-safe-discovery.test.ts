@@ -82,6 +82,15 @@ describe("safeDiscoverModels", () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
+	it("rejects IPv6 ULA and link-local discovery hosts (negative)", async () => {
+		const fetchSpy = forbidFetch();
+		const hosts = ["[fd00::1]", "[fe80::1]", "[fc00::1]"];
+		for (const host of hosts) {
+			await expect(safeDiscoverModels(`https://${host}/models`)).rejects.toBeInstanceOf(SafeDiscoveryError);
+		}
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
 	it("rejects non-2xx responses even when the body looks like a model list (negative)", async () => {
 		const fetchSpy = vi.spyOn(globalThis, "fetch").mockImplementation(
 			Object.assign(
