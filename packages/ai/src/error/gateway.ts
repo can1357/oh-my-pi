@@ -278,6 +278,11 @@ function classifyOwnerDisposition(
 		return { owner: "policy", disposition: "policy_terminal" };
 	}
 
+	// Policy denials must win over the generic 401/403 auth bucket.
+	if (hasPolicySignal(err, message) && (status === 0 || status < 500)) {
+		return { owner: "policy", disposition: "policy_terminal" };
+	}
+
 	if (status === 401 || status === 403 || type === "authentication_error") {
 		if (isClinePassSurfaceGateMessage(message)) {
 			return { owner: "policy", disposition: "policy_terminal" };

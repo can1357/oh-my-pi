@@ -200,6 +200,16 @@ describe("RouteRegistry", () => {
 		expect(route?.fallbacks.context_overflow ?? []).not.toContain("quota-backup");
 	});
 
+	it("preserves provider-qualified model ids as the compiled target", () => {
+		const registry = new RouteRegistry(id => {
+			const bare = id.includes("/") ? id.slice(id.indexOf("/") + 1) : id;
+			return bare === "gpt-5" ? fakeModel("gpt-5") : undefined;
+		});
+		const compiled = registry.resolve("openai/gpt-5");
+		expect(compiled?.root).toEqual({ type: "target", model: "openai/gpt-5" });
+		expect(compiled?.id).toBe("openai/gpt-5");
+	});
+
 	it("get returns registered virtual routes and ignores catalog models (negative)", () => {
 		const registry = new RouteRegistry(id => (id === "gpt-5" ? fakeModel("gpt-5") : undefined));
 		registry.register({
