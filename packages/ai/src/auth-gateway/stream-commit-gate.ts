@@ -16,6 +16,9 @@ const METADATA_EVENTS: Record<string, true> = {
 	"response.queued": true,
 	heartbeat: true,
 	ping: true,
+	// Anthropic envelope events share the hold wrapper: message_start carries
+	// no content and must not commit the stream.
+	message_start: true,
 };
 
 /**
@@ -131,6 +134,9 @@ export function classifyCommitEvent(eventType: string): CommitClass {
 	if (eventType === "response.failed") return "terminal-retryable";
 	if (eventType === "response.incomplete") return "terminal-success";
 	if (eventType === "response.error") return "terminal-failure";
+	// Anthropic in-band overloads arrive as `error` frames: retryable
+	// pre-commit failures, not output.
+	if (eventType === "error") return "terminal-retryable";
 	return "output";
 }
 

@@ -1,0 +1,21 @@
+// Model-lineage compat for "meta"; regenerated from the frozen census using class taxonomy selectors.
+
+class "meta" {
+	// Exact ids on purpose: only an exact selector upgrades hosts whose
+	// discovery misreports a Muse Spark revision as non-reasoning.
+	// muse-spark-1.3 exposes the max effort tier; older/contributor revisions
+	// keep the 5-tier ladder.
+	models "muse-spark-1.3" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh" "max"
+		thinking-mode "effort"
+	}
+	models "muse-spark-1.1" "muse-spark-1.2" "muse-spark-1.2-contributor" "muse-spark-1.3-contributor" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "effort"
+	}
+	on "kilo" "nvidia" {
+		family "llama" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+}

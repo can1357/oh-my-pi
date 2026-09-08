@@ -20,6 +20,7 @@ const HAS_ANTIGRAVITY_AUTH = false; // OAuth not available in test environment
 const HAS_ANTHROPIC_AUTH = !!e2eApiKey("ANTHROPIC_API_KEY");
 
 describe.skipIf(!HAS_ANTIGRAVITY_AUTH)("Compaction with thinking models (Antigravity)", () => {
+	// oxlint-disable-next-line no-unassigned-vars -- e2e placeholder; assigned when the gated tests run
 	let session: { dispose: () => Promise<void> } | undefined;
 	let tempDir: string;
 	let authStorage: { close: () => void } | undefined;
@@ -45,6 +46,7 @@ describe.skipIf(!HAS_ANTIGRAVITY_AUTH)("Compaction with thinking models (Antigra
 // ============================================================================
 
 describe.skipIf(!HAS_ANTHROPIC_AUTH)("Compaction with thinking models (Anthropic)", () => {
+	// oxlint-disable-next-line no-unassigned-vars -- e2e placeholder; assigned when the gated tests run
 	let session: { dispose: () => Promise<void> } | undefined;
 	let tempDir: string;
 	let authStorage: { close: () => void } | undefined;

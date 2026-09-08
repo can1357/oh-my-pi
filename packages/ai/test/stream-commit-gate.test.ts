@@ -44,6 +44,12 @@ describe("StreamCommitGate", () => {
 		expect(gate.state).toBe("terminated");
 	});
 
+	it("keeps Anthropic message_start as metadata and error as retryable terminal", () => {
+		const gate = new StreamCommitGate();
+		expect(gate.classifyAndObserve("message_start", 16)).toBe("probing");
+		expect(gate.classifyAndObserve("error", 8)).toBe("terminated");
+	});
+
 	it("classifies response.incomplete as a terminal, never as output", () => {
 		const gate = new StreamCommitGate();
 		expect(gate.classifyAndObserve("response.created", 20)).toBe("probing");
