@@ -528,6 +528,7 @@ class RpcClient:
         self._agent_run_request_ids: list[tuple[str, str]] = []
         self._unreserved_agent_run_request_ids: list[tuple[str, str]] = []
         self._sent_agent_run_request_ids: set[str] = set()
+        self._agent_start_pending = threading.Event()
         self._awaited_prompt_result_ids: set[str] = set()
         self._completed_prompt_result_ids: set[str] = set()
         self._last_schedule_async_error_index = 0
@@ -616,6 +617,7 @@ class RpcClient:
         self._agent_run_request_ids = []
         self._unreserved_agent_run_request_ids = []
         self._sent_agent_run_request_ids = set()
+        self._agent_start_pending.clear()
         self._awaited_prompt_result_ids = set()
         self._completed_prompt_result_ids = set()
         self._last_schedule_async_error_index = 0
@@ -1174,9 +1176,7 @@ class RpcClient:
     ) -> None:
         self._request(
             "prompt",
-            _agent_run_reservation=(
-                "always" if streaming_behavior == "followUp" else "if_idle"
-            ),
+            _agent_run_reservation="if_idle",
             _agent_run_command_type=(
                 "follow_up" if streaming_behavior == "followUp" else None
             ),
@@ -1287,7 +1287,7 @@ class RpcClient:
     ) -> None:
         self._request(
             "abort_and_prompt",
-            _agent_run_reservation="if_idle",
+            _agent_run_reservation="replacement",
             message=message,
             images=list(images) if images is not None else None,
             reason=reason,
@@ -1385,6 +1385,7 @@ class RpcClient:
         command_type: str | None = None,
         *,
         only_if_idle: bool = False,
+        replace_active: bool = False,
     ) -> bool:
         with self._event_condition:
             entry = (
@@ -1392,10 +1393,22 @@ class RpcClient:
                 if request_id is not None and command_type is not None
                 else None
             )
-            if (
-                only_if_idle
-                and self._scheduled_agent_runs != self._completed_agent_runs
-            ):
+            pending_run = self._scheduled_agent_runs != self._completed_agent_runs
+            if replace_active:
+                # A replacement sent after agent_start owns a distinct future run.
+                # If the start frame reaches the reader while a command write holds
+                # the lifecycle lock, the pending marker exposes that active run
+                # until its accounting can acquire the lock. Before any start is
+                # observed, coalesce with the not-yet-started reservation that the
+                # abort supersedes.
+                if (
+                    not self._agent_start_pending.is_set()
+                    and self._agent_run_request_ids
+                ):
+                    if entry is not None:
+                        self._unreserved_agent_run_request_ids.append(entry)
+                    return False
+            elif only_if_idle and pending_run:
                 # A command submitted behind a not-yet-started reservation may
                 # still become the command that starts the turn if the earlier
                 # prompt resolves as local-only. Keep it correlated until that
@@ -1410,28 +1423,31 @@ class RpcClient:
             return True
 
     def _mark_agent_run_started(self) -> None:
-        with self._event_condition:
-            if self._agent_run_request_ids:
-                request_id, _ = self._agent_run_request_ids.pop(0)
-                self._sent_agent_run_request_ids.discard(request_id)
-                # Commands submitted behind this reservation share the run that
-                # just started; they no longer need to inherit its reservation.
-                attached = {
-                    queued_request_id
-                    for queued_request_id, _ in self._unreserved_agent_run_request_ids
-                    if queued_request_id in self._sent_agent_run_request_ids
-                }
-                self._sent_agent_run_request_ids.difference_update(attached)
-                self._unreserved_agent_run_request_ids = [
-                    entry
-                    for entry in self._unreserved_agent_run_request_ids
-                    if entry[0] not in attached
-                ]
-            elif self._scheduled_agent_runs == self._completed_agent_runs:
-                self._scheduled_agent_runs += 1
-                self._last_schedule_async_error_index = (
-                    self._async_errors.current_index()
-                )
+        try:
+            with self._event_condition:
+                if self._agent_run_request_ids:
+                    request_id, _ = self._agent_run_request_ids.pop(0)
+                    self._sent_agent_run_request_ids.discard(request_id)
+                    # Commands submitted behind this reservation share the run that
+                    # just started; they no longer need to inherit its reservation.
+                    attached = {
+                        queued_request_id
+                        for queued_request_id, _ in self._unreserved_agent_run_request_ids
+                        if queued_request_id in self._sent_agent_run_request_ids
+                    }
+                    self._sent_agent_run_request_ids.difference_update(attached)
+                    self._unreserved_agent_run_request_ids = [
+                        entry
+                        for entry in self._unreserved_agent_run_request_ids
+                        if entry[0] not in attached
+                    ]
+                elif self._scheduled_agent_runs == self._completed_agent_runs:
+                    self._scheduled_agent_runs += 1
+                    self._last_schedule_async_error_index = (
+                        self._async_errors.current_index()
+                    )
+        finally:
+            self._agent_start_pending.clear()
 
     def _mark_agent_run_completed(self, request_id: str | None = None) -> bool:
         with self._event_condition:
@@ -1670,7 +1686,7 @@ class RpcClient:
         self,
         command_type: str,
         *,
-        _agent_run_reservation: Literal["if_idle", "always"] | None = None,
+        _agent_run_reservation: Literal["if_idle", "replacement"] | None = None,
         _agent_run_command_type: str | None = None,
         _request_id_out: list[str] | None = None,
         _sent_agent_run_ids_before_write: list[str] | None = None,
@@ -1712,6 +1728,7 @@ class RpcClient:
                         request_id,
                         _agent_run_command_type or command_type,
                         only_if_idle=_agent_run_reservation == "if_idle",
+                        replace_active=_agent_run_reservation == "replacement",
                     )
                     with self._event_condition:
                         tracked_agent_run = any(
@@ -2282,6 +2299,12 @@ class RpcClient:
                             RpcError(f"Failed to parse terminal agent_end: {exc}")
                         )
                         self._mark_agent_run_completed()
+                if isinstance(notification, AgentStartEvent):
+                    # Publish and apply lifecycle state before listener callbacks can
+                    # block the reader. Concurrent commands must observe this run as
+                    # active even while an event consumer is still handling its start.
+                    self._agent_start_pending.set()
+                    self._mark_agent_run_started()
                 self._dispatch_listeners(
                     "notification",
                     notification.type,
@@ -2330,8 +2353,6 @@ class RpcClient:
                     continue
 
                 event = cast(RpcAgentEvent, notification)
-                if isinstance(event, AgentStartEvent):
-                    self._mark_agent_run_started()
                 self._append_event(payload)
                 if isinstance(event, AgentEndEvent) and event.is_terminal is not False:
                     self._mark_agent_run_completed()

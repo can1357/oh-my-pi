@@ -1109,6 +1109,46 @@ QUEUED_PROMPT_RESERVATION_SERVER = textwrap.dedent(
 )
 
 
+PENDING_REPLACEMENT_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    print(json.dumps({"type": "ready", "protocolVersion": 1}), flush=True)
+    first_prompt_id = None
+    for raw_line in sys.stdin:
+        command = json.loads(raw_line)
+        command_type = command["type"]
+        print(
+            json.dumps(
+                {
+                    "id": command.get("id"),
+                    "type": "response",
+                    "command": command_type,
+                    "success": True,
+                }
+            ),
+            flush=True,
+        )
+        if command_type == "prompt":
+            first_prompt_id = command.get("id")
+        elif command_type == "abort_and_prompt":
+            print(
+                json.dumps(
+                    {
+                        "id": first_prompt_id,
+                        "type": "prompt_result",
+                        "agentInvoked": False,
+                    }
+                ),
+                flush=True,
+            )
+            print(json.dumps({"type": "agent_start"}), flush=True)
+            print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
+    """
+)
+
+
 LIFECYCLE_ACCOUNTING_SERVER = textwrap.dedent(
     """
     import json
@@ -1137,17 +1177,17 @@ LIFECYCLE_ACCOUNTING_SERVER = textwrap.dedent(
             if prompt_count == 1:
                 print(json.dumps({"type": "agent_start"}), flush=True)
             else:
+                # An active follow-up is consumed by the current physical run.
                 print(
                     json.dumps({"type": "agent_end", "messages": []}),
                     flush=True,
                 )
-                if command.get("streamingBehavior") == "followUp":
-                    time.sleep(0.15)
-                    print(json.dumps({"type": "agent_start"}), flush=True)
-                    print(
-                        json.dumps({"type": "agent_end", "messages": []}),
-                        flush=True,
-                    )
+        elif command_type == "abort_and_prompt":
+            # The active run ends before the detached replacement starts.
+            print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
+            time.sleep(0.15)
+            print(json.dumps({"type": "agent_start"}), flush=True)
+            print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
         elif command_type == "steer":
             pending_steer = True
         elif command_type == "set_interrupt_mode" and pending_steer:
@@ -1937,7 +1977,7 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(client._scheduled_agent_runs, 1)
             self.assertEqual(client._completed_agent_runs, 1)
 
-    def test_follow_up_prompt_retains_its_own_run_reservation(self) -> None:
+    def test_follow_up_prompt_shares_the_active_run_reservation(self) -> None:
         with self.make_client(server=LIFECYCLE_ACCOUNTING_SERVER) as client:
             first_start_observed = threading.Event()
             release_first_start = threading.Event()
@@ -1975,8 +2015,56 @@ class RpcClientTests(unittest.TestCase):
                 worker = threading.Thread(target=submit_follow_up, daemon=True)
                 worker.start()
                 self.assertTrue(follow_up_written.wait(0.5))
+                release_first_start.set()
+                worker.join(timeout=0.5)
+                self.assertFalse(worker.is_alive())
+                self.assertEqual(errors, [])
+
+                client.wait_for_idle(timeout=0.5)
+
+            self.assertEqual(client._scheduled_agent_runs, 1)
+            self.assertEqual(client._completed_agent_runs, 1)
+
+    def test_active_abort_and_prompt_reserves_the_replacement_run(self) -> None:
+        with self.make_client(server=LIFECYCLE_ACCOUNTING_SERVER) as client:
+            first_start_observed = threading.Event()
+            release_first_start = threading.Event()
+            replacement_written = threading.Event()
+            errors: list[BaseException] = []
+            original_write = client._write_json
+
+            def delay_first_start(notification: object) -> None:
+                if (
+                    getattr(notification, "type", None) == "agent_start"
+                    and not first_start_observed.is_set()
+                ):
+                    first_start_observed.set()
+                    release_first_start.wait(0.5)
+
+            def observe_write(
+                process: subprocess.Popen[str], payload: dict[str, object]
+            ) -> None:
+                original_write(process, payload)
+                if payload.get("type") == "abort_and_prompt":
+                    replacement_written.set()
+
+            client.on_notification(delay_first_start)
+
+            def replace_active_run() -> None:
+                try:
+                    client.abort_and_prompt("replacement")
+                except BaseException as exc:
+                    errors.append(exc)
+
+            with patch.object(client, "_write_json", side_effect=observe_write):
+                client.prompt("first")
+                self.assertTrue(first_start_observed.wait(0.5))
+
+                worker = threading.Thread(target=replace_active_run, daemon=True)
+                worker.start()
+                self.assertTrue(replacement_written.wait(0.5))
                 with client._event_condition:
-                    self.assertEqual(len(client._sent_agent_run_request_ids), 2)
+                    self.assertEqual(client._scheduled_agent_runs, 2)
                 release_first_start.set()
                 worker.join(timeout=0.5)
                 self.assertFalse(worker.is_alive())
@@ -1989,6 +2077,15 @@ class RpcClientTests(unittest.TestCase):
             self.assertGreaterEqual(elapsed, 0.1)
             self.assertEqual(client._scheduled_agent_runs, 2)
             self.assertEqual(client._completed_agent_runs, 2)
+
+    def test_abort_and_prompt_coalesces_with_pending_preprocessing(self) -> None:
+        with self.make_client(server=PENDING_REPLACEMENT_SERVER) as client:
+            client.prompt("pending")
+            client.abort_and_prompt("replacement")
+            client.wait_for_idle(timeout=0.5)
+
+            self.assertEqual(client._scheduled_agent_runs, 1)
+            self.assertEqual(client._completed_agent_runs, 1)
 
     def test_idle_steer_reserves_its_auto_started_run(self) -> None:
         with self.make_client(server=LIFECYCLE_ACCOUNTING_SERVER) as client:
