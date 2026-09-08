@@ -14,8 +14,16 @@ const METADATA_EVENTS: Record<string, true> = {
 	"response.created": true,
 	"response.in_progress": true,
 	"response.queued": true,
+	"response.output_item.added": true,
+	"response.content_part.added": true,
+	message_start: true,
 	heartbeat: true,
 	ping: true,
+	// Pi-native encoder emits a synthetic `start` before any assistant content.
+	start: true,
+	text_start: true,
+	thinking_start: true,
+	toolcall_start: true,
 };
 
 /**

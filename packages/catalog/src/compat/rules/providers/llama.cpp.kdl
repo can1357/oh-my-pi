@@ -1,0 +1,6 @@
+// Provider-wire compat for "llama.cpp".
+
+provider "llama.cpp" {
+	// Replaces the string-only named-tool-choice provider table.
+	supports-named-tool-choice #false
+}

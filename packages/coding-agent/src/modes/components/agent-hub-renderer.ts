@@ -1,5 +1,5 @@
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
-import { Ellipsis, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Ellipsis, padding, visibleWidth } from "@oh-my-pi/pi-tui";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import { getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
@@ -145,6 +145,21 @@ export function formatMetrics(metrics: AgentMetrics): string {
 	].join(theme.sep.dot);
 }
 
+/** Row-grid variant of {@link formatMetrics}: fixed-width cells so every agent's metadata
+ * line shares one column layout instead of flowing after wrapped text. Cost is left-aligned
+ * so the line starts flush; the numeric cells are right-aligned so units line up. */
+export function formatMetricColumns(metrics: AgentMetrics, age: string): string {
+	const cost = formatCost(metrics.cost);
+	return [
+		cost + padding(8 - visibleWidth(cost)),
+		alignRightCell(formatMetricDuration(metrics) ?? "—", 13),
+		alignRightCell(`${formatNumber(metrics.requests)} req`, 8),
+		alignRightCell(`${formatNumber(metrics.tools)} tools`, 9),
+		alignRightCell(`${formatNumber(metrics.tokens)} tok`, 8),
+		alignRightCell(age, 8),
+	].join(" ");
+}
+
 export function contextGauge(tokens: number, window: number): string {
 	const ratio = Math.max(0, Math.min(1, tokens / window));
 	const filled = Math.round(ratio * 10);
@@ -171,8 +186,41 @@ export function formatChildIds(children: readonly AgentRef[], width: number): st
 	}
 	return text;
 }
+const TREE_SEGMENT_WIDTH = 4;
+const TREE_DETAIL_BASE_INDENT = 4;
 
-/** Bash `tree`-style ancestry prefix, clipped from the left on pathological depth. */
+/** Build one bash `tree`-style ancestry prefix. Continuation rows replace the
+ * node's own branch with a rail only when a later sibling still needs it. */
+function treePrefix(
+	ref: AgentRef,
+	maxWidth: number,
+	depthById: ReadonlyMap<string, number>,
+	parentById: ReadonlyMap<string, string>,
+	lastSiblingById: ReadonlyMap<string, boolean>,
+	continuation: boolean,
+): string {
+	if ((depthById.get(ref.id) ?? 0) === 0) return "";
+	const lastSibling = lastSiblingById.get(ref.id);
+	const segments: string[] = [continuation ? (lastSibling ? "    " : "│   ") : lastSibling ? "└── " : "├── "];
+	const ancestry = new Set<string>();
+	let parent = parentById.get(ref.id);
+	while (parent && parent !== MAIN_AGENT_ID && !ancestry.has(parent)) {
+		const grandparent = parentById.get(parent);
+		// A bare top-level parent (drawn without a connector, just its dot) has no
+		// rail column — its children's connectors sit directly under that dot.
+		if (!grandparent || grandparent === MAIN_AGENT_ID) break;
+		ancestry.add(parent);
+		segments.push(lastSiblingById.get(parent) ? "    " : "│   ");
+		parent = grandparent;
+	}
+	const maxSegments = Math.max(1, Math.floor(Math.max(TREE_SEGMENT_WIDTH, maxWidth - 2) / TREE_SEGMENT_WIDTH));
+	const omitted = Math.max(0, segments.length - maxSegments);
+	const prefix = segments.slice(0, maxSegments).reverse().join("");
+	const omittedPrefix = omitted > 0 ? (continuation ? "  " : "… ") : "";
+	return theme.fg("dim", `${omittedPrefix}${prefix}`);
+}
+
+/** Bash `tree`-style branch for an agent's identity row. */
 export function treeBranch(
 	ref: AgentRef,
 	maxWidth: number,
@@ -180,17 +228,60 @@ export function treeBranch(
 	parentById: ReadonlyMap<string, string>,
 	lastSiblingById: ReadonlyMap<string, boolean>,
 ): string {
-	if ((depthById.get(ref.id) ?? 0) === 0) return "";
-	const segments: string[] = [lastSiblingById.get(ref.id) ? "└── " : "├── "];
-	const ancestry = new Set<string>();
-	let parent = parentById.get(ref.id);
-	while (parent && parentById.get(parent) !== MAIN_AGENT_ID && !ancestry.has(parent)) {
-		ancestry.add(parent);
-		segments.push(lastSiblingById.get(parent) ? "    " : "│   ");
-		parent = parentById.get(parent);
+	return treePrefix(ref, maxWidth, depthById, parentById, lastSiblingById, false);
+}
+
+/** Ancestry rails for the task and metrics rows beneath an agent identity. */
+export function treeContinuation(
+	ref: AgentRef,
+	maxWidth: number,
+	depthById: ReadonlyMap<string, number>,
+	parentById: ReadonlyMap<string, string>,
+	lastSiblingById: ReadonlyMap<string, boolean>,
+): string {
+	return treePrefix(ref, maxWidth, depthById, parentById, lastSiblingById, true);
+}
+/** One roster-wide origin for metric columns, independent of tree depth. */
+export function treeMetadataIndent(maxWidth: number, maxDepth: number): number {
+	return Math.min(Math.max(0, maxWidth - 1), TREE_DETAIL_BASE_INDENT + Math.max(0, maxDepth) * TREE_SEGMENT_WIDTH);
+}
+
+/** Higher is better: exact > prefix > substring > scattered subsequence. */
+export function fuzzyAgentScore(query: string, target: string): number {
+	if (query.length === 0) return 1;
+	if (target === query) return 100;
+	if (target.startsWith(query)) return 80;
+	if (target.includes(query)) return 60;
+	let q = 0;
+	let gaps = 0;
+	let last = -1;
+	for (let t = 0; t < target.length && q < query.length; t += 1) {
+		if (query[q] === target[t]) {
+			if (last >= 0 && t - last > 1) gaps += 1;
+			last = t;
+			q += 1;
+		}
 	}
-	const maxSegments = Math.max(1, Math.floor(Math.max(4, maxWidth - 2) / 4));
-	const omitted = Math.max(0, segments.length - maxSegments);
-	const prefix = segments.slice(0, maxSegments).reverse().join("");
-	return theme.fg("dim", `${omitted > 0 ? "… " : ""}${prefix}`);
+	if (q !== query.length) return 0;
+	return Math.max(1, 40 - gaps * 5);
+}
+
+/** Case-insensitive scattered-subsequence match used by the agent filter. */
+export function fuzzyAgentMatch(query: string, target: string): boolean {
+	const q = query.toLowerCase();
+	const t = target.toLowerCase();
+	if (q.length === 0) return true;
+	if (q.length > t.length) return false;
+	let i = 0;
+	for (let j = 0; j < t.length && i < q.length; j += 1) {
+		if (q[i] === t[j]) i += 1;
+	}
+	return i === q.length;
+}
+
+/** Right-align `text` inside a fixed-width cell, truncating overflow. */
+export function alignRightCell(text: string, width: number): string {
+	const visible = visibleWidth(text);
+	if (visible > width) return truncateToWidth(text, width);
+	return `${" ".repeat(width - visible)}${text}`;
 }

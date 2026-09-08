@@ -65,6 +65,7 @@ const SUPPORTED_NATIVE_TAGS: ReadonlySet<string> = new Set([
 	"darwin-x64",
 	"darwin-arm64",
 	"win32-x64",
+	"win32-arm64",
 ]);
 
 function currentNativeTag(): string {

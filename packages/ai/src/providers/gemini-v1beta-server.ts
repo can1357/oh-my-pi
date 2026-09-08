@@ -20,9 +20,11 @@ import type {
 	AssistantMessageEventStream,
 	Context,
 	Message,
+	ImageContent,
 	ServiceTier,
 	StopReason,
 	TextContent,
+	ToolCall,
 } from "../types";
 
 export type { ParsedRequest };
@@ -49,14 +51,69 @@ function readStringArray(value: unknown): string[] | undefined {
 }
 
 function textFromGeminiParts(parts: unknown): string {
-	if (!Array.isArray(parts)) return "";
-	let text = "";
+	return blocksFromGeminiParts(parts).text;
+}
+
+interface GeminiPartBlocks {
+	text: string;
+	images: ImageContent[];
+	toolCalls: ToolCall[];
+	toolResponses: Array<{ name: string; text: string }>;
+}
+
+/** Split native Gemini parts into text, images, tool calls, and tool responses. */
+function blocksFromGeminiParts(parts: unknown): GeminiPartBlocks {
+	const out: GeminiPartBlocks = { text: "", images: [], toolCalls: [], toolResponses: [] };
+	if (!Array.isArray(parts)) return out;
 	for (const part of parts) {
 		if (!isRecord(part)) continue;
 		if (part.thought === true) continue;
-		if (typeof part.text === "string") text += part.text;
+		if (typeof part.text === "string") {
+			out.text += part.text;
+			continue;
+		}
+		if (isRecord(part.inlineData)) {
+			const data = part.inlineData.data;
+			const mimeType = part.inlineData.mimeType;
+			if (typeof data === "string" && data.length > 0 && typeof mimeType === "string" && mimeType.length > 0) {
+				out.images.push({ type: "image", data, mimeType });
+			}
+			continue;
+		}
+		if (isRecord(part.fileData)) {
+			const fileUri = part.fileData.fileUri;
+			if (typeof fileUri === "string" && fileUri.length > 0) {
+				const mimeType =
+					typeof part.fileData.mimeType === "string" && part.fileData.mimeType.length > 0
+						? part.fileData.mimeType
+						: "image/png";
+				out.images.push({ type: "image", data: "", mimeType, url: fileUri });
+			}
+			continue;
+		}
+		if (isRecord(part.functionCall)) {
+			const name = part.functionCall.name;
+			if (typeof name === "string" && name.length > 0) {
+				const args = part.functionCall.args;
+				out.toolCalls.push({
+					type: "toolCall",
+					id: `gemini-fc-${out.toolCalls.length}`,
+					name,
+					arguments: isRecord(args) ? args : {},
+				});
+			}
+			continue;
+		}
+		if (isRecord(part.functionResponse)) {
+			const name = part.functionResponse.name;
+			const response = part.functionResponse.response;
+			out.toolResponses.push({
+				name: typeof name === "string" ? name : "",
+				text: typeof response === "string" ? response : JSON.stringify(response ?? null),
+			});
+		}
 	}
-	return text;
+	return out;
 }
 
 function textFromOpenAiContent(content: unknown): string {
@@ -127,17 +184,24 @@ function pushTurn(
 	messages: Message[],
 	systemParts: string[],
 	role: "user" | "assistant" | "system",
-	text: string,
+	text: string | GeminiPartBlocks,
+	ids: string[] = [],
+	usedCalls: Set<string> = new Set(),
 	modelId: string,
 	timestamp: number,
 ): void {
 	if (role === "system") {
-		if (text.length > 0) systemParts.push(text);
+		const systemText = typeof text === "string" ? text : text.text;
+		if (systemText.length > 0) systemParts.push(systemText);
 		return;
 	}
-	if (text.length === 0) return;
-	if (role === "user") messages.push({ role: "user", content: text, timestamp });
-	else messages.push(makeAssistantMessage(text, modelId, timestamp));
+	if (typeof text === "string") {
+		if (text.length === 0) return;
+		if (role === "user") messages.push({ role: "user", content: text, timestamp });
+		else messages.push(makeAssistantMessage(text, modelId, timestamp));
+		return;
+	}
+	pushTurnBlocks(messages, role, text, ids, usedCalls, modelId, timestamp);
 }
 
 function walkContents(
@@ -147,17 +211,95 @@ function walkContents(
 	modelId: string,
 	timestamp: number,
 ): void {
-	for (const item of contents) {
-		if (!isRecord(item)) continue;
+	// Deterministic tool-call ids (`gemini-fc-{turn}-{index}`) so a
+	// functionResponse can pair with its call by name within one request.
+	const callIds: string[][] = contents.map((item, turn) => {
+		if (!isRecord(item)) return [];
+		return blocksFromGeminiParts(item.parts).toolCalls.map((_, index) => `gemini-fc-${turn}-${index}`);
+	});
+	const usedCalls = new Set<string>();
+	contents.forEach((item, turn) => {
+		if (!isRecord(item)) return;
 		pushTurn(
 			messages,
 			systemParts,
 			classifyRole(item.role) ?? "user",
-			textFromGeminiParts(item.parts),
+			blocksFromGeminiParts(item.parts),
+			callIds[turn] ?? [],
+			usedCalls,
 			modelId,
 			timestamp,
 		);
+	});
+}
+
+function pushTurnBlocks(
+	messages: Message[],
+	role: "user" | "assistant",
+	blocks: GeminiPartBlocks,
+	ids: string[],
+	usedCalls: Set<string>,
+	modelId: string,
+	timestamp: number,
+): void {
+	if (role === "user") {
+		if (blocks.text.length > 0 || blocks.images.length > 0) {
+			const content: Array<TextContent | ImageContent> = [];
+			if (blocks.text.length > 0) content.push({ type: "text", text: blocks.text });
+			content.push(...blocks.images);
+			messages.push({ role: "user", content, timestamp });
+		}
+	} else if (blocks.text.length > 0 || blocks.images.length > 0 || blocks.toolCalls.length > 0) {
+		const calls = blocks.toolCalls.map((call, index) => ({ ...call, id: ids[index] ?? call.id }));
+		const content: AssistantMessage["content"] = [];
+		if (blocks.text.length > 0) content.push({ type: "text", text: blocks.text });
+		content.push(...blocks.images);
+		content.push(...calls);
+		messages.push({
+			role: "assistant",
+			content,
+			stopReason: "stop",
+			api: GEMINI_API,
+			provider: GEMINI_PROVIDER,
+			model: modelId,
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp,
+		});
 	}
+	for (const response of blocks.toolResponses) {
+		const match = findCallId(messages, response.name, usedCalls);
+		messages.push({
+			role: "toolResult",
+			toolCallId: match ?? `gemini-unpaired-${response.name}`,
+			toolName: response.name,
+			content: [{ type: "text", text: response.text }],
+			isError: false,
+			timestamp,
+		});
+	}
+}
+
+/** Pair a function response with the most recent unmatched same-name call. */
+function findCallId(messages: Message[], name: string, usedCalls: Set<string>): string | undefined {
+	for (let i = messages.length - 1; i >= 0; i--) {
+		const message = messages[i];
+		if (message.role !== "assistant") continue;
+		for (const block of message.content) {
+			if (block.type !== "toolCall") continue;
+			if (name !== "" && block.name !== name) continue;
+			if (usedCalls.has(block.id)) continue;
+			usedCalls.add(block.id);
+			return block.id;
+		}
+	}
+	return undefined;
 }
 
 function walkMessages(
@@ -171,7 +313,7 @@ function walkMessages(
 		if (!isRecord(item)) continue;
 		const role = classifyRole(item.role);
 		if (role === undefined) continue;
-		pushTurn(messages, systemParts, role, textFromOpenAiContent(item.content), modelId, timestamp);
+		pushTurn(messages, systemParts, role, textFromOpenAiContent(item.content), [], new Set(), modelId, timestamp);
 	}
 }
 

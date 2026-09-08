@@ -16,8 +16,10 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { convertToLlm, VIBE_MODE_CONTEXT_MESSAGE_TYPE } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { FileSessionStorage, type WriteTextAtomicOptions } from "@oh-my-pi/pi-coding-agent/session/session-storage";
 import { VIBE_TOOL_NAMES } from "@oh-my-pi/pi-coding-agent/tools/vibe";
@@ -115,6 +117,7 @@ describe("InteractiveMode vibe mode toggle", () => {
 					tools: [],
 					messages: [],
 				},
+				convertToLlm,
 				streamFn: (...args) => {
 					if (!streamFn) throw new Error("No test stream configured");
 					return streamFn(...args);
@@ -164,6 +167,76 @@ describe("InteractiveMode vibe mode toggle", () => {
 		expect(mode.vibeModeEnabled).toBe(false);
 		expect(session.getActiveToolNames()).toEqual([]);
 		expect(session.getAllToolNames().toSorted()).toEqual(["read", "todo"]);
+	});
+
+	it("removes the Vibe directive from provider context on exit", async () => {
+		const vibeDirectivePerCall: boolean[] = [];
+		streamFn = (_model, context) => {
+			vibeDirectivePerCall.push(JSON.stringify(context).includes("<vibe-mode>"));
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
+			});
+			return stream;
+		};
+
+		await mode.handleVibeModeCommand();
+		await session.prompt("Delegate this");
+		await mode.handleVibeModeCommand();
+		await session.prompt("Use the restored tools");
+
+		expect(vibeDirectivePerCall).toEqual([true, false]);
+	});
+
+	it("removes a queued Vibe directive when exiting during a model turn", async () => {
+		const vibeDirectivePerCall: boolean[] = [];
+		const firstStarted = Promise.withResolvers<void>();
+		streamFn = (_model, context, options) => {
+			vibeDirectivePerCall.push(JSON.stringify(context).includes("<vibe-mode>"));
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				stream.push({ type: "start", partial: createAssistantMessage("") });
+				if (vibeDirectivePerCall.length === 1) {
+					options?.signal?.addEventListener(
+						"abort",
+						() => stream.push({ type: "error", reason: "aborted", error: createAssistantMessage("Aborted") }),
+						{ once: true },
+					);
+					firstStarted.resolve();
+				} else {
+					stream.push({ type: "done", reason: "stop", message: createAssistantMessage("Done") });
+				}
+			});
+			return stream;
+		};
+
+		const prompt = session.prompt("Start normally");
+		await firstStarted.promise;
+		await mode.handleVibeModeCommand();
+		expect(
+			session.agent
+				.peekSteeringQueue()
+				.some(message => message.role === "custom" && message.customType === VIBE_MODE_CONTEXT_MESSAGE_TYPE),
+		).toBe(true);
+
+		await mode.handleVibeModeCommand();
+		await prompt;
+		await session.waitForIdle();
+		await session.prompt("Use the restored tools");
+
+		expect(vibeDirectivePerCall).toEqual([false, false]);
+	});
+
+	it("omits persisted Vibe directives from restored model context", () => {
+		session.sessionManager.appendCustomMessageEntry(
+			VIBE_MODE_CONTEXT_MESSAGE_TYPE,
+			"<vibe-mode>stale</vibe-mode>",
+			false,
+		);
+
+		const restoredMessages = convertToLlm(session.sessionManager.buildSessionContext().messages);
+
+		expect(JSON.stringify(restoredMessages)).not.toContain("<vibe-mode>");
 	});
 
 	it("cancels an in-flight model turn before removing Vibe tools", async () => {
@@ -653,5 +726,66 @@ describe("InteractiveMode vibe mode toggle", () => {
 
 		await mode.handleVibeModeCommand();
 		expect(mode.vibeModeEnabled).toBe(false);
+	});
+
+	it("exits vibe mode after a tree branch re-anchors the owner scope (issue #10468)", async () => {
+		// Status-line worktree discovery hits the native VCS addon during init,
+		// which is irrelevant here; short-circuit it to the no-repository case.
+		vi.spyOn(vcs, "git").mockReturnValue(null);
+		vi.spyOn(vcs, "repo").mockReturnValue(null);
+		await mode.init({ suppressWelcomeIntro: true });
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(true);
+
+		// A user turn taken while in vibe mode, so branching from it carries the
+		// vibe mode_change entry and the branch reopens in vibe mode.
+		const entryId = session.sessionManager.appendMessage({
+			role: "user",
+			content: "keep going",
+			timestamp: Date.now(),
+		});
+		await session.sessionManager.ensureOnDisk();
+		const originalSessionId = session.sessionManager.getSessionId();
+
+		const result = await session.branch(entryId);
+		expect(result.cancelled).toBe(false);
+		expect(session.sessionManager.getSessionId()).not.toBe(originalSessionId);
+		// Reconciliation re-anchored the vibe owner scope to the branched session.
+		expect(mode.vibeModeEnabled).toBe(true);
+
+		// Before the fix this threw "Vibe parent session changed before mode exit
+		// could be persisted." because the owner scope stayed on the pre-branch
+		// session; the toggle must now disable vibe mode cleanly.
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getVibeModeState()).toBeUndefined();
+	});
+
+	it("exits vibe mode after a /btw branch re-anchors the owner scope (issue #10468)", async () => {
+		vi.spyOn(vcs, "git").mockReturnValue(null);
+		vi.spyOn(vcs, "repo").mockReturnValue(null);
+		await mode.init({ suppressWelcomeIntro: true });
+		session.sessionManager.appendMessage({ role: "user", content: "seed", timestamp: Date.now() - 2 });
+		session.sessionManager.appendMessage(createAssistantMessage("seed response"));
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(true);
+		await session.sessionManager.ensureOnDisk();
+		const originalSessionId = session.sessionManager.getSessionId();
+		const leafId = session.sessionManager.getLeafId();
+		if (!leafId) throw new Error("Expected session leaf");
+
+		const result = await session.branchFromBtw(
+			"why did that happen?",
+			createAssistantMessage("because reasons"),
+			leafId,
+			originalSessionId,
+		);
+		expect(result.cancelled).toBe(false);
+		expect(session.sessionManager.getSessionId()).not.toBe(originalSessionId);
+		expect(mode.vibeModeEnabled).toBe(true);
+
+		await mode.handleVibeModeCommand();
+		expect(mode.vibeModeEnabled).toBe(false);
+		expect(session.getVibeModeState()).toBeUndefined();
 	});
 });

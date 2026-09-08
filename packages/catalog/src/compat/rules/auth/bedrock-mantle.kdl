@@ -1,0 +1,5 @@
+auth "bedrock-mantle" {
+	name "Amazon Bedrock Mantle"
+	env hook="aws-bedrock-mantle"
+	allows-missing-api-key #true
+}

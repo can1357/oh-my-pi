@@ -1,5 +1,10 @@
 import { describe, expect, test } from "bun:test";
-import { BUN2NIX_NPM_SPEC, normalizeLockfileVersion, resolveNixBunDepsGenerator } from "./gen-nix-bun";
+import {
+	BUN2NIX_NPM_SPEC,
+	normalizeGeneratedNix,
+	normalizeLockfileVersion,
+	resolveNixBunDepsGenerator,
+} from "./gen-nix-bun";
 
 describe("resolveNixBunDepsGenerator", () => {
 	test("prefers bun2nix from the active development shell", () => {
@@ -43,5 +48,13 @@ describe("normalizeLockfileVersion", () => {
 
 	test("rejects a lockfile without a version stamp", () => {
 		expect(() => normalizeLockfileVersion("{}\n")).toThrow(/missing a lockfileVersion/);
+	});
+});
+
+describe("normalizeGeneratedNix", () => {
+	test("writes exactly one trailing LF for every generator output shape", () => {
+		expect(normalizeGeneratedNix("}")).toBe("}\n");
+		expect(normalizeGeneratedNix("}\n")).toBe("}\n");
+		expect(normalizeGeneratedNix("}\r\n\r\n")).toBe("}\n");
 	});
 });

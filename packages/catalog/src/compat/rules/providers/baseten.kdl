@@ -1,0 +1,19 @@
+// Provider-wire compat for "baseten"; regenerated from the frozen census using deployment contract selectors.
+
+provider "baseten" {
+	thinking-mode "effort"
+	// Exact reviewed correction: discovery advertises K3 reasoning effort even when the frozen
+	// source row still reports reasoning=false.
+	models "moonshotai/Kimi-K3" {
+		thinking-efforts "low" "high" "max"
+		thinking-default-level "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "nvidia/NVIDIA-Nemotron-3-Ultra-550B-A55B" "zai-org/GLM-4.7" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "zai-org/GLM-5*" "openai/gpt-oss-120b" {
+		thinking-efforts "high" "max"
+	}
+}

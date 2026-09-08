@@ -78,7 +78,7 @@ import { PromptCacheAffinityStore } from "./prompt-cache-store";
 import { ProviderHealthBook } from "./provider-health";
 import { decideAttempt, type ExecutionState } from "./route-conductor";
 import { parseRouteDefinition } from "./route-definitions";
-import { type CompiledRoute, type RouteDefinition, RouteRegistry } from "./route-graph";
+import { type CompiledRoute, type RouteDefinition, RouteRegistry, pickInitialRouteTarget } from "./route-graph";
 import {
 	commitGateObservesDownstreamSse,
 	observeSseCommit,
@@ -128,6 +128,9 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
+
+/** Native Gemini paths carry the model in the URL (`/v1beta/models/{model}:generateContent`). */
+const GEMINI_MODEL_PATH = /^\/v1beta\/models\/([^/]+):(stream)?generateContent$/;
 
 export const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/chat/completions": { module: openaiChat, label: "openai-chat" },
@@ -191,7 +194,7 @@ function deriveSessionId(modelId: string, context: Context): string {
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
-	const opts: SimpleStreamOptions = { signal };
+	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
 	// Codex backend rejects every sampling control with
 	// `Unsupported parameter: …` (#3117). Strip the full set for that one
@@ -208,7 +211,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
-	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
+	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
 			typeof options.toolChoice !== "object"
@@ -221,6 +224,9 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
 	if (options.hideThinkingSummary !== undefined) opts.hideThinkingSummary = options.hideThinkingSummary;
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
+	if (options.anthropicPrefixMismatchBehavior !== undefined) {
+		opts.anthropicPrefixMismatchBehavior = options.anthropicPrefixMismatchBehavior;
+	}
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
 	if (options.include !== undefined) opts.include = options.include;
@@ -231,7 +237,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
-		opts.thinkingBudgets = { ...(opts.thinkingBudgets ?? {}), ...options.thinkingBudgets };
+		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
@@ -240,7 +246,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		// surface the budget.
 		const effort = options.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
-			...(opts.thinkingBudgets ?? {}),
+			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
 		};
 		opts.reasoning ??= effort;
@@ -303,6 +309,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		const retryAfterMs = extractRetryHint(undefined, message);
 		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs,
+			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			apiKey: oldKey,
@@ -394,6 +401,48 @@ function clientClosedResponse(route: { module: FormatModule }): Response {
 type FormatErrorFn = (status: number, type: string, message: string) => Response;
 
 type AttemptPrep = { type: "key"; apiKey: string } | { type: "retry" } | { type: "respond"; response: Response };
+
+function hashString(value: string): number {
+	let h = 0;
+	for (let i = 0; i < value.length; i++) h = (h * 31 + value.charCodeAt(i)) | 0;
+	return h;
+}
+
+/**
+ * Resolve the first viable dispatch target for a compiled route. A primary
+ * that is absent from the catalog (stale route, credential-scoped model
+ * change) is marked attempted and the conductor advances to the next sibling
+ * instead of 404ing a route with usable fallbacks.
+ */
+function resolveFirstAvailableTarget(
+	compiled: CompiledRoute,
+	resolveModel: (id: string) => Model<Api> | undefined,
+	firstTarget: string,
+	attemptedTargets: Set<string>,
+): { target: string; model: Model<Api> | undefined } {
+	let current = firstTarget;
+	for (;;) {
+		const model = resolveModel(current);
+		if (model !== undefined) return { target: current, model };
+		attemptedTargets.add(current);
+		const next = decideAttempt({
+			route: compiled,
+			state: conductorExecutionState(
+				compiled,
+				attemptedTargets,
+				new Set<number>(),
+				0,
+				0,
+				current,
+				false,
+				"probing",
+			),
+			commitState: "probing",
+		});
+		if (next.type !== "dispatch") return { target: current, model: undefined };
+		current = next.targetModelId;
+	}
+}
 
 function unknownModelResponse(formatError: FormatErrorFn, modelId: string): Response {
 	return formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
@@ -676,19 +725,25 @@ function recordProviderHealthFailure(
 ): void {
 	if (classified.owner === "provider") {
 		health.recordFailure(model.provider, model.id, "provider");
+	} else if (classified.owner === "model") {
+		health.recordFailure(model.provider, model.id, "model");
 	}
 }
 
 function rememberPromptCacheHit(
 	cacheStore: PromptCacheAffinityStore,
 	body: unknown,
+	headers: Headers,
 	requestId: string,
+	target: string,
 	model: Model<Api>,
 	sessionId: string,
 ): void {
-	cacheStore.remember(resolvePromptCacheKey(body) ?? requestId, {
+	cacheStore.remember(resolvePromptCacheKey(body, headers) ?? requestId, {
 		provider: model.provider,
-		model: model.id,
+		// Route-scoped id (not the bare model id): the preference lookup
+		// feeds decideAttempt, which only accepts ids in route.targets.
+		model: target,
 		accountId: sessionId,
 	});
 }
@@ -729,16 +784,17 @@ async function handleFormatEndpoint(
 	if (!compiled) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
-	const firstTarget = compiled.targets[0];
+	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
 	if (firstTarget === undefined) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
-	let currentTarget = firstTarget;
-	const initialModel = bootOpts.resolveModel(currentTarget);
-	if (!initialModel) {
+	const attemptedTargets = new Set<string>();
+	const initial = resolveFirstAvailableTarget(compiled, id => bootOpts.resolveModel(id), firstTarget, attemptedTargets);
+	let currentTarget = initial.target;
+	if (initial.model === undefined) {
 		return unknownModelResponse(route.module.formatError, currentTarget);
 	}
-	let model: Model<Api> = initialModel;
+	let model: Model<Api> = initial.model;
 	const client = resolveClientIdentity(req.headers);
 
 	// Parse the wire-format request BEFORE resolving the credential so we
@@ -766,7 +822,7 @@ async function handleFormatEndpoint(
 	// anything they didn't touch.
 	{
 		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...(parsed.options.headers ?? {}) };
+		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
@@ -803,7 +859,6 @@ async function handleFormatEndpoint(
 	const commitGate = new StreamCommitGate();
 	const formatError = route.module.formatError;
 	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? requestId;
-	const attemptedTargets = new Set<string>();
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
 	let fallbackCount = 0;
@@ -958,6 +1013,27 @@ async function handleFormatEndpoint(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			// A credential-less primary must not end the route when a later
+			// target has a usable credential: fail over through the conductor,
+			// falling back to 401 only when no target remains.
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
+			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			const next = decideAttempt({
+				route: compiled,
+				state: stateNow(),
+				commitState: commitGate.state,
+			});
+			if (next.type === "dispatch") {
+				pendingFallback = next.targetModelId;
+				retryCount += 1;
+				return { type: "retry" };
+			}
 			return {
 				type: "respond",
 				response: formatError(
@@ -1042,8 +1118,11 @@ async function handleFormatEndpoint(
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-						recordProviderHealthFailure(health, model, classified);
+						// Health is recorded exactly once per failure: here for
+						// billable failures (which return), inside considerFallback
+						// otherwise.
 						if (messageHasBillableUsage(message)) {
+							recordProviderHealthFailure(health, model, classified);
 							return formatError(classified.status, classified.type, errorMessage);
 						}
 						if (considerFallback(classified)) {
@@ -1053,7 +1132,8 @@ async function handleFormatEndpoint(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
-					rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
+					health.recordSuccess(model.provider, model.id);
+					rememberPromptCacheHit(cacheStore, body, req.headers, requestId, currentTarget, model, sessionId);
 					await runHook(bootOpts.hooks?.afterRequest, {
 						requestId,
 						routeId: compiled.id,
@@ -1178,7 +1258,17 @@ async function handleFormatEndpoint(
 			return clientClosedResponse(route);
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
+		health.recordSuccess(model.provider, model.id);
+		// Remember affinity only once the settled message proves the stream
+		// completed: a commit followed by an upstream error must not make the
+		// failing model preferred on the next matching request.
+		void settled
+			.then(message => {
+				if (message.stopReason === "error" || message.stopReason === "aborted") return;
+				if (message.errorClassificationMessage ?? message.errorMessage) return;
+				rememberPromptCacheHit(cacheStore, body, req.headers, requestId, currentTarget, model, sessionId);
+			})
+			.catch(() => {});
 		await runHook(bootOpts.hooks?.afterRequest, {
 			requestId,
 			routeId: compiled.id,
@@ -1253,16 +1343,17 @@ async function handlePiNative(
 	if (!compiled) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
-	const firstTarget = compiled.targets[0];
+	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
 	if (firstTarget === undefined) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
-	let currentTarget = firstTarget;
-	const initialModel = bootOpts.resolveModel(currentTarget);
-	if (!initialModel) {
+	const attemptedTargets = new Set<string>();
+	const initial = resolveFirstAvailableTarget(compiled, id => bootOpts.resolveModel(id), firstTarget, attemptedTargets);
+	let currentTarget = initial.target;
+	if (initial.model === undefined) {
 		return unknownModelResponse(piNative.formatError, currentTarget);
 	}
-	let model: Model<Api> = initialModel;
+	let model: Model<Api> = initial.model;
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines
@@ -1276,7 +1367,6 @@ async function handlePiNative(
 	const commitGate = new StreamCommitGate();
 	const formatError = piNative.formatError;
 	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? requestId;
-	const attemptedTargets = new Set<string>();
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
 	let fallbackCount = 0;
@@ -1431,6 +1521,27 @@ async function handlePiNative(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			// A credential-less primary must not end the route when a later
+			// target has a usable credential: fail over through the conductor,
+			// falling back to 401 only when no target remains.
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
+			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			const next = decideAttempt({
+				route: compiled,
+				state: stateNow(),
+				commitState: commitGate.state,
+			});
+			if (next.type === "dispatch") {
+				pendingFallback = next.targetModelId;
+				retryCount += 1;
+				return { type: "retry" };
+			}
 			return {
 				type: "respond",
 				response: formatError(
@@ -1532,8 +1643,11 @@ async function handlePiNative(
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-						recordProviderHealthFailure(health, model, classified);
+						// Health is recorded exactly once per failure: here for
+						// billable failures (which return), inside considerFallback
+						// otherwise.
 						if (messageHasBillableUsage(message)) {
+							recordProviderHealthFailure(health, model, classified);
 							return formatError(classified.status, classified.type, errorMessage);
 						}
 						if (considerFallback(classified)) {
@@ -1543,7 +1657,8 @@ async function handlePiNative(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
-					rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
+					health.recordSuccess(model.provider, model.id);
+					rememberPromptCacheHit(cacheStore, body, req.headers, requestId, currentTarget, model, sessionId);
 					return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 				} catch (error) {
 					if (controller.signal.aborted) return aborted();
@@ -1655,7 +1770,17 @@ async function handlePiNative(
 			return aborted();
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
-		rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
+		health.recordSuccess(model.provider, model.id);
+		// Remember affinity only once the settled message proves the stream
+		// completed: a commit followed by an upstream error must not make the
+		// failing model preferred on the next matching request.
+		void settled
+			.then(message => {
+				if (message.stopReason === "error" || message.stopReason === "aborted") return;
+				if (message.errorClassificationMessage ?? message.errorMessage) return;
+				rememberPromptCacheHit(cacheStore, body, req.headers, requestId, currentTarget, model, sessionId);
+			})
+			.catch(() => {});
 		return new Response(sseStream, {
 			status: 200,
 			headers: {
@@ -1972,6 +2097,35 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {
 					return withCors(await handleFormatEndpoint(formatRoute, boot, req, peer, health, cacheStore), req);
+				}
+
+				// Native Gemini paths carry the model in the URL. Inject it (and
+				// the endpoint's streaming mode) so the module sees a complete body.
+				if (req.method === "POST") {
+					const geminiPath = GEMINI_MODEL_PATH.exec(pathname);
+					if (geminiPath) {
+						let pathModel: string;
+						try {
+							pathModel = decodeURIComponent(geminiPath[1]!);
+						} catch {
+							return withCors(json(400, { error: "invalid model path encoding" }), req);
+						}
+						const streaming = geminiPath[2] !== undefined;
+						const module = {
+							...geminiV1beta,
+							parseRequest: (body: unknown, headers?: Headers) => {
+								if (!isRecord(body)) return geminiV1beta.parseRequest(body, headers);
+								let injected = body;
+								if (typeof injected.model !== "string") injected = { ...injected, model: pathModel };
+								if (typeof injected.stream !== "boolean") injected = { ...injected, stream: streaming };
+								return geminiV1beta.parseRequest(injected, headers);
+							},
+						};
+						return withCors(
+							await handleFormatEndpoint({ module, label: "gemini-v1beta" }, boot, req, peer, health, cacheStore),
+							req,
+						);
+					}
 				}
 
 				// Pi-native fast path. Same auth + provider plumbing as the
