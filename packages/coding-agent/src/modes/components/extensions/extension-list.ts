@@ -6,7 +6,7 @@
  * master switch is off.
  */
 import { type Component, matchesKey, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { isProviderEnabled } from "../../../discovery";
+import { isForeignUserProvider, isProviderEnabled, isUserSourceEnabled } from "../../../discovery";
 import { theme } from "../../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../utils/keybinding-matchers";
 import { clampSelection, contentRowWidth, renderScrollableList, searchableChar } from "../selector-helpers";
@@ -33,6 +33,7 @@ export interface ExtensionListCallbacks {
 	onSelectionChange?: (extension: Extension | null) => void;
 	onToggle?: (extensionId: string, enabled: boolean) => void;
 	onMasterToggle?: (providerId: string) => void;
+	onUserSourceToggle?: (providerId: string) => void;
 	masterSwitchProvider?: string | null;
 	mcpSource?: MCPRuntimeSource;
 	toolSource?: ToolRuntimeSource;
@@ -43,6 +44,7 @@ const DEFAULT_MAX_VISIBLE = 15;
 /** Flattened list item for rendering */
 type ListItem =
 	| { type: "master"; providerId: string; providerName: string; enabled: boolean }
+	| { type: "user-source"; providerId: string; providerName: string; enabled: boolean }
 	| { type: "kind-header"; kind: ExtensionKind; label: string; icon: string; count: number }
 	| { type: "extension"; item: Extension };
 
@@ -173,6 +175,8 @@ export class ExtensionList implements Component {
 			let rowStr: string;
 			if (listItem.type === "master") {
 				rowStr = this.#renderMasterSwitch(listItem, isSelected, rowWidth);
+			} else if (listItem.type === "user-source") {
+				rowStr = this.#renderUserSourceSwitch(listItem, isSelected, masterDisabled, rowWidth);
 			} else if (listItem.type === "kind-header") {
 				rowStr = this.#renderKindHeader(listItem, isSelected, rowWidth);
 			} else {
@@ -192,6 +196,30 @@ export class ExtensionList implements Component {
 		);
 
 		return lines;
+	}
+
+	#renderUserSourceSwitch(
+		item: ListItem & { type: "user-source" },
+		isSelected: boolean,
+		masterDisabled: boolean,
+		width: number,
+	): string {
+		const checkbox = item.enabled
+			? theme.fg("success", theme.checkbox.checked)
+			: theme.fg("dim", theme.checkbox.unchecked);
+		const label = `Load ~/ ${item.providerName} config`;
+		const badge = theme.fg("muted", "(opt-in; project config always loads)");
+
+		let line = `${checkbox} ${theme.icon.folder} ${label}  ${badge}`;
+
+		if (isSelected) {
+			line = theme.bold(theme.fg("accent", line));
+			line = theme.bg("selectedBg", line);
+		} else if (!item.enabled || masterDisabled) {
+			line = theme.fg("dim", line);
+		}
+
+		return truncateToWidth(line, width);
 	}
 
 	#renderMasterSwitch(item: ListItem & { type: "master" }, isSelected: boolean, width: number): string {
@@ -377,6 +405,14 @@ export class ExtensionList implements Component {
 				providerName,
 				enabled,
 			});
+			if (isForeignUserProvider(this.#masterSwitchProvider)) {
+				this.#listItems.push({
+					type: "user-source",
+					providerId: this.#masterSwitchProvider,
+					providerName,
+					enabled: isUserSourceEnabled(this.#masterSwitchProvider),
+				});
+			}
 
 			for (const ext of filtered) {
 				this.#listItems.push({ type: "extension", item: ext });
@@ -461,6 +497,8 @@ export class ExtensionList implements Component {
 		const item = this.#listItems[this.#selectedIndex];
 		if (item?.type === "master") {
 			this.callbacks.onMasterToggle?.(item.providerId);
+		} else if (item?.type === "user-source") {
+			if (isProviderEnabled(item.providerId)) this.callbacks.onUserSourceToggle?.(item.providerId);
 		} else if (item?.type === "extension") {
 			// Shadowed same-name rows share the winner's id (`mcp:github`).
 			// Toggling them would mutate whichever config `find(id)` hits first.

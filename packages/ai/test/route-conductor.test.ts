@@ -196,6 +196,7 @@ describe("decideAttempt", () => {
 			},
 			targets: ["a", "b"],
 			fallbacks: {},
+			fallbackByTarget: {},
 		} as CompiledRoute;
 		const first = decideAttempt({
 			route: balanceRoute,
@@ -225,6 +226,7 @@ describe("decideAttempt", () => {
 			},
 			targets: ["low", "high"],
 			fallbacks: {},
+			fallbackByTarget: {},
 		} as CompiledRoute;
 		const action = decideAttempt({
 			route: balanceRoute,

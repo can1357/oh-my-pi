@@ -1,0 +1,9 @@
+auth "ollama" {
+	name "Ollama (Local OpenAI-compatible)"
+	login "api-key" {
+		auth-url "https://github.com/ollama/ollama/blob/main/docs/api.md"
+		instructions "Optional: paste an Ollama API key/token for authenticated hosts. Leave empty for local no-auth mode."
+		prompt "Paste your Ollama API key/token (optional)" placeholder="ollama-local"
+		empty-fallback ""
+	}
+}

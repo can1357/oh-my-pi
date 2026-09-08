@@ -94,7 +94,6 @@ describe("AuthStorage quota probe leases", () => {
 		// Sole credential: allowBlocked would previously skip the block check and dispatch.
 		const key = await storage.getApiKey(soloProvider, undefined, {
 			requestId: "req-allow-blocked-retry-after",
-			checkUsage: true,
 		});
 		expect(key).toBeUndefined();
 	});

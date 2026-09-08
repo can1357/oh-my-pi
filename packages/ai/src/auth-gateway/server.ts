@@ -35,6 +35,8 @@ import * as AIError from "../error";
 import { classifyGatewayError, type GatewayErrorClassification } from "../error/gateway";
 import { isUsageLimitOutcome } from "../error/rate-limit";
 import * as anthropicMessages from "../providers/anthropic-messages-server";
+import { handleCountTokens } from "../providers/anthropic-count-tokens-server";
+import * as geminiV1beta from "../providers/gemini-v1beta-server";
 import * as openaiChat from "../providers/openai-chat-server";
 import * as openaiResponses from "../providers/openai-responses-server";
 import * as piNative from "../providers/pi-native-server";
@@ -105,6 +107,9 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
 
+/** Native Gemini paths carry the model in the URL (`/v1beta/models/{model}:generateContent`). */
+const GEMINI_MODEL_PATH = /^\/v1beta\/models\/([^/]+):(stream)?generateContent$/;
+
 const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/chat/completions": { module: openaiChat, label: "openai-chat" },
 	"/v1/messages": { module: anthropicMessages, label: "anthropic-messages" },
@@ -162,7 +167,7 @@ function deriveSessionId(modelId: string, context: Context): string {
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
-	const opts: SimpleStreamOptions = { signal };
+	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
 	// Codex backend rejects every sampling control with
 	// `Unsupported parameter: …` (#3117). Strip the full set for that one
@@ -179,7 +184,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
-	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
+	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
 			typeof options.toolChoice !== "object"
@@ -192,6 +197,9 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
 	if (options.hideThinkingSummary !== undefined) opts.hideThinkingSummary = options.hideThinkingSummary;
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
+	if (options.anthropicPrefixMismatchBehavior !== undefined) {
+		opts.anthropicPrefixMismatchBehavior = options.anthropicPrefixMismatchBehavior;
+	}
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
 	if (options.include !== undefined) opts.include = options.include;
@@ -202,7 +210,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
-		opts.thinkingBudgets = { ...(opts.thinkingBudgets ?? {}), ...options.thinkingBudgets };
+		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
@@ -211,7 +219,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		// surface the budget.
 		const effort = options.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
-			...(opts.thinkingBudgets ?? {}),
+			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
 		};
 		opts.reasoning ??= effort;
@@ -274,6 +282,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		const retryAfterMs = extractRetryHint(undefined, message);
 		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs,
+			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			apiKey: oldKey,
@@ -697,17 +706,14 @@ async function handleFormatEndpoint(
 	// anything they didn't touch.
 	{
 		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...(parsed.options.headers ?? {}) };
+		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
 	const requestHasOpenAIImageFileReferences = parsed.context.messages.some(message => {
-		const blocks =
-			message.role === "toolResult"
-				? message.content
-				: message.role === "user" || message.role === "assistant"
-					? message.content
-					: [];
+		if (message.role !== "toolResult" && message.role !== "user" && message.role !== "assistant") return false;
+		const blocks = message.content;
+		if (typeof blocks === "string") return false;
 		return blocks.some(
 			block =>
 				typeof block === "object" &&
@@ -1984,6 +1990,47 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 						return withCors(handleCredentialDisable(boot.storage, credentialId), req);
 					}
 					return withCors(await handleCredentialPin(boot.storage, credentialId, req), req);
+				}
+
+				// Anthropic token counting is an action on a model, not a format
+				// route: resolve the model id directly instead of translating.
+				if (req.method === "POST" && pathname === "/v1/messages/count_tokens") {
+					return withCors(
+						await handleCountTokens(req, (id: string) => {
+							const m = boot.resolveModel(id);
+							return m ? { contextWindow: m.contextWindow ?? undefined } : undefined;
+					}),
+						req,
+					);
+				}
+
+				// Native Gemini paths carry the model in the URL. Inject it (and
+				// the endpoint's streaming mode) so the module sees a complete body.
+				if (req.method === "POST") {
+					const geminiPath = GEMINI_MODEL_PATH.exec(pathname);
+					if (geminiPath) {
+						let pathModel: string;
+						try {
+							pathModel = decodeURIComponent(geminiPath[1]!);
+						} catch {
+							return withCors(json(400, { error: "invalid model path encoding" }), req);
+						}
+						const streaming = geminiPath[2] !== undefined;
+						const module = {
+							...geminiV1beta,
+						parseRequest: (body: unknown, headers?: Headers) => {
+								if (!isRecord(body)) return geminiV1beta.parseRequest(body, headers);
+								let injected = body;
+								if (typeof injected.model !== "string") injected = { ...injected, model: pathModel };
+								if (typeof injected.stream !== "boolean") injected = { ...injected, stream: streaming };
+								return geminiV1beta.parseRequest(injected, headers);
+							},
+						};
+						return withCors(
+							await handleFormatEndpoint({ module, label: "gemini-v1beta" }, boot, req, peer),
+							req,
+						);
+					}
 				}
 
 				// Provider-format dispatch.

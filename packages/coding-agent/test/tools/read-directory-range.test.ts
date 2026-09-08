@@ -78,6 +78,14 @@ describe("read tool directory listings honor line selectors (regression: was sil
 		expect(output).not.toContain("Use :");
 	});
 
+	it("returns the last N listing lines for `:-N`", async () => {
+		const full = getTextOutput(await tool.execute("call-full", { path: testDir })).split("\n");
+		const output = getTextOutput(await tool.execute("call-tail", { path: `${testDir}:-5` }));
+
+		expect(output.split("\n")).toEqual(full.slice(-5));
+		expect(output).not.toContain("Use :");
+	});
+
 	it("emits a clear `beyond end` notice instead of returning an empty body", async () => {
 		const result = await tool.execute("call-beyond", { path: `${testDir}:9999` });
 		const output = getTextOutput(result);
