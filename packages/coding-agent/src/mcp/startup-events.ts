@@ -1,5 +1,4 @@
-import { sanitizeText } from "@oh-my-pi/pi-utils";
-import { replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import { sanitizeStatusText, shortenPath, TRUNCATE_LENGTHS } from "../tools/render-utils";
 
 export const MCP_CONNECTION_STATUS_EVENT_CHANNEL = "mcp:connection-status";
 
@@ -21,41 +20,12 @@ export type McpConnectionStatusSnapshot = {
 	failedServers: readonly McpConnectionFailure[];
 };
 
-function sanitizeMcpStatusText(value: string, maxWidth: number): string {
-	const text = shortenEmbeddedPaths(
-		replaceTabs(sanitizeText(value))
-			.replace(/[\r\n]+/g, " ")
-			.trim(),
-	);
-	return truncateToWidth(text.length > 0 ? text : "(unnamed)", maxWidth);
-}
-
-function sanitizeMcpServerName(serverName: string): string {
-	return sanitizeMcpStatusText(serverName, TRUNCATE_LENGTHS.SHORT);
-}
-
 function formatServerList(serverNames: readonly string[]): string {
-	return serverNames.map(sanitizeMcpServerName).join(", ");
+	return serverNames.map(serverName => sanitizeStatusText(serverName, TRUNCATE_LENGTHS.SHORT)).join(", ");
 }
 
 function formatServerCount(count: number): string {
 	return count === 1 ? "server" : "servers";
-}
-function sanitizeMcpStatusError(error: string): string {
-	return sanitizeMcpStatusText(error, TRUNCATE_LENGTHS.CONTENT);
-}
-
-function shortenEmbeddedPaths(text: string): string {
-	return text
-		.split(" ")
-		.map(segment => {
-			const leading = segment.match(/^[("'`[]*/)?.[0] ?? "";
-			const trailing = segment.match(/[)"'`,.;:\]]*$/)?.[0] ?? "";
-			const end = segment.length - trailing.length;
-			if (leading.length >= end) return segment;
-			return `${leading}${shortenPath(segment.slice(leading.length, end))}${trailing}`;
-		})
-		.join(" ");
 }
 
 export function formatMCPConnectingMessage(serverNames: readonly string[]): string {
@@ -64,9 +34,9 @@ export function formatMCPConnectingMessage(serverNames: readonly string[]): stri
 
 function formatFailedServer({ serverName, error, sourcePath }: McpConnectionFailure): string {
 	const source = sourcePath
-		? ` [config: ${sanitizeMcpStatusText(shortenPath(sourcePath), TRUNCATE_LENGTHS.CONTENT)}]`
+		? ` [config: ${sanitizeStatusText(shortenPath(sourcePath), TRUNCATE_LENGTHS.CONTENT)}]`
 		: "";
-	return `${sanitizeMcpServerName(serverName)}${source}: ${sanitizeMcpStatusError(error)}`;
+	return `${sanitizeStatusText(serverName, TRUNCATE_LENGTHS.SHORT)}${source}: ${sanitizeStatusText(error, TRUNCATE_LENGTHS.CONTENT)}`;
 }
 
 export function formatMCPConnectionStatusMessage(snapshot: McpConnectionStatusSnapshot): string {

@@ -421,7 +421,7 @@ export async function runCli(argv: string[]): Promise<void> {
 		const extracted = extractProfileFlags(resolvedArgv);
 		resolvedArgv = extracted.argv;
 		if (extracted.profile !== undefined) {
-			setProfile(extracted.profile);
+			setProfile(extracted.profile, { fromArgv: true });
 		} else {
 			// No explicit --profile: activate any OMP_PROFILE/PI_PROFILE inherited
 			// from the environment. Module-load resolution deliberately swallows an

@@ -36,6 +36,92 @@ describe("createSessionTeardown", () => {
 		expect(saved).toEqual(["unsent draft"]);
 	});
 
+	it("stops collab hosting before saving the draft and disposing", async () => {
+		const order: string[] = [];
+
+		const teardown = createSessionTeardown({
+			getDraftText: () => "draft",
+			beginDispose: () => {
+				order.push("beginDispose");
+			},
+			saveDraft: async () => {
+				order.push("saveDraft");
+			},
+			stopCollab: async () => {
+				order.push("stopCollab");
+			},
+			disposeSession: async () => {
+				order.push("disposeSession");
+			},
+		});
+
+		await teardown();
+
+		expect(order).toEqual(["beginDispose", "stopCollab", "saveDraft", "disposeSession"]);
+	});
+
+	it("still disposes when stopCollab rejects — never leaves session_shutdown unemitted", async () => {
+		let disposed = false;
+
+		const teardown = createSessionTeardown({
+			getDraftText: () => "draft",
+			beginDispose: () => {},
+			saveDraft: async () => {},
+			stopCollab: async () => {
+				throw new Error("relay hung");
+			},
+			disposeSession: async () => {
+				disposed = true;
+			},
+		});
+
+		await teardown();
+
+		expect(disposed).toBe(true);
+	});
+
+	it("stops collab hosting before awaiting a hanging draft persist", async () => {
+		const order: string[] = [];
+		const release = Promise.withResolvers<void>();
+
+		const teardown = createSessionTeardown({
+			getDraftText: () => {
+				order.push("snapshot");
+				return "draft";
+			},
+			beginDispose: () => {
+				order.push("beginDispose");
+			},
+			saveDraft: async () => {
+				order.push("saveDraft:start");
+				await release.promise;
+				order.push("saveDraft:done");
+			},
+			stopCollab: async () => {
+				order.push("stopCollab");
+			},
+			disposeSession: async () => {
+				order.push("disposeSession");
+			},
+		});
+
+		const running = teardown();
+		expect(order).toEqual(["snapshot", "beginDispose", "stopCollab"]);
+		await Promise.resolve();
+		expect(order).toEqual(["snapshot", "beginDispose", "stopCollab", "saveDraft:start"]);
+		release.resolve();
+		await running;
+
+		expect(order).toEqual([
+			"snapshot",
+			"beginDispose",
+			"stopCollab",
+			"saveDraft:start",
+			"saveDraft:done",
+			"disposeSession",
+		]);
+	});
+
 	it("marks the session disposing before awaiting draft persistence", async () => {
 		const order: string[] = [];
 		const release = Promise.withResolvers<void>();

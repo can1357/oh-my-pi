@@ -1,4 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import { KeybindingsManager, setKeyHintPlatform } from "@oh-my-pi/pi-coding-agent/config/keybindings";
@@ -12,6 +12,7 @@ import {
 	formatExpandHint,
 	formatParseErrors,
 	formatScreenshot,
+	sanitizeStatusText,
 	shortenPath,
 	truncateDiffByHunk,
 } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
@@ -119,6 +120,39 @@ describe("formatScreenshot", () => {
 		const home = String.raw`C:\Users\me`;
 		const sibling = String.raw`C:\Users\me2\projects\demo`;
 		expect(shortenPath(sibling, home)).toBe(sibling);
+	});
+
+	it("collapses layout characters, shortens home paths, and truncates status text", () => {
+		const homePath = `${os.homedir()}/.omp/mcp.log`;
+		const message = sanitizeStatusText(`failed at\t${homePath}\n${"x".repeat(120)}`, 80);
+
+		expect(message).not.toContain(os.homedir());
+		expect(message).not.toContain("\n");
+		expect(message).not.toContain("\t");
+		expect(message).toContain("~/.omp/mcp.log");
+		expect(message.endsWith("…")).toBe(true);
+	});
+
+	it("shortens embedded home paths that contain spaces", () => {
+		const posixHome = spyOn(os, "homedir").mockReturnValue("/home/Alice Smith");
+		try {
+			const leaked = "/home/Alice Smith/.omp/mcp.log";
+			const message = sanitizeStatusText(`failed at ${leaked}`, 80);
+			expect(message).not.toContain("/home/Alice Smith");
+			expect(message).toContain("~/.omp/mcp.log");
+		} finally {
+			posixHome.mockRestore();
+		}
+
+		const windowsHome = spyOn(os, "homedir").mockReturnValue(String.raw`C:\Users\Alice Smith`);
+		try {
+			const leaked = String.raw`C:\Users\Alice Smith\secret`;
+			const message = sanitizeStatusText(`failed at ${leaked}`, 80);
+			expect(message).not.toContain("Alice Smith");
+			expect(message).toContain("~/secret");
+		} finally {
+			windowsHome.mockRestore();
+		}
 	});
 
 	it("formats non-home path without tilde", () => {

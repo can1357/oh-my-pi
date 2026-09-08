@@ -1,4 +1,4 @@
-import { afterAll, describe, expect, test } from "bun:test";
+import { afterAll, describe, expect, spyOn, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -118,4 +118,41 @@ describe("native file-lock ownership", () => {
 		const final = JSON.parse(text) as { counter: number };
 		expect(final.counter).toBe(N);
 	}, 30_000);
+
+	test("withFileLock rejects an already-aborted signal without retrying", async () => {
+		const root = await mkRoot();
+		const target = path.join(root, "aborted.json");
+		const controller = new AbortController();
+		controller.abort();
+		await expect(
+			withFileLock(target, async () => "acquired", { retries: 50, retryDelayMs: 100, signal: controller.signal }),
+		).rejects.toMatchObject({ name: "AbortError" });
+	});
+
+	test("withFileLock aborts a contended acquisition without waiting out retries", async () => {
+		const root = await mkRoot();
+		const target = path.join(root, "contended.json");
+		const holder = tryAcquireLock(getLockPath(target));
+		if (!holder) throw new Error("failed to hold lock");
+		const waiting = Promise.withResolvers<void>();
+		const sleep = spyOn(Bun, "sleep").mockImplementation(async () => {
+			waiting.resolve();
+			return await Promise.withResolvers<void>().promise;
+		});
+		try {
+			const controller = new AbortController();
+			const pending = withFileLock(target, async () => "acquired", {
+				retries: 50,
+				retryDelayMs: 100,
+				signal: controller.signal,
+			});
+			pending.catch(() => {});
+			await waiting.promise;
+			controller.abort();
+			await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+		} finally {
+			sleep.mockRestore();
+			holder.release();
+		}
+	});
 });

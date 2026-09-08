@@ -13,6 +13,7 @@ import {
 	getPythonGatewayDir,
 	getSessionsDir,
 	getStatsDbPath,
+	isProfileSelectedFromArgv,
 	normalizeProfileName,
 	resolveProfileEnv,
 	setAgentDir,
@@ -129,6 +130,20 @@ describe("profile directories", () => {
 		expect(getAgentDbPath()).toBe(path.join(agent, "agent.db"));
 		expect(getSessionsDir()).toBe(path.join(agent, "sessions"));
 		expect(getStatsDbPath()).toBe(path.join(root, "stats.db"));
+	});
+
+	it("records whether the active profile came from --profile", () => {
+		setProfile("work", { fromArgv: true });
+		expect(isProfileSelectedFromArgv()).toBe(true);
+
+		setProfile("office");
+		expect(isProfileSelectedFromArgv()).toBe(false);
+
+		setProfile("default");
+		expect(isProfileSelectedFromArgv()).toBe(false);
+
+		setProfile("default", { fromArgv: true });
+		expect(isProfileSelectedFromArgv()).toBe(true);
 	});
 
 	it("treats the default profile as regular mode", () => {

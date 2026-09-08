@@ -164,6 +164,11 @@ export class CollabHost {
 		return this.#webViewLink;
 	}
 
+	/** True after a terminal stop or fatal relay close. */
+	get isStopped(): boolean {
+		return this.#stopped;
+	}
+
 	get participants(): CollabParticipant[] {
 		const list: CollabParticipant[] = [{ name: collabDisplayName(this.#ctx), role: "host" }];
 		for (const peer of this.#peers.values()) {
@@ -209,7 +214,17 @@ export class CollabHost {
 		}
 	}
 
-	async start(relayUrl: string, webUrl = ""): Promise<void> {
+	async start(relayUrl: string, webUrl = "", signal?: AbortSignal): Promise<void> {
+		if (signal?.aborted) throw new Error("Collab host start cancelled");
+		const { promise: cancelled, reject: rejectCancelled } = Promise.withResolvers<never>();
+		if (signal) {
+			const onAbort = (): void => rejectCancelled(new Error("Collab host start cancelled"));
+			if (signal.aborted) {
+				onAbort();
+			} else {
+				signal.addEventListener("abort", onAbort, { once: true });
+			}
+		}
 		const rawKey = generateRoomKey();
 		const writeToken = generateWriteToken();
 		const roomId = generateRoomId();
@@ -220,7 +235,8 @@ export class CollabHost {
 		this.#webViewLink = formatCollabWebLink(relayUrl, roomId, rawKey, undefined, webUrl);
 		const parsed = parseCollabLink(this.#link);
 		if ("error" in parsed) throw new Error(parsed.error);
-		const key = await importRoomKey(rawKey);
+		const key = await Promise.race([importRoomKey(rawKey), cancelled]);
+		if (signal?.aborted) throw new Error("Collab host start cancelled");
 
 		const socket = new CollabSocket({ wsUrl: parsed.wsUrl, role: "host", key });
 		this.#socket = socket;
@@ -258,7 +274,7 @@ export class CollabHost {
 			CONNECT_TIMEOUT_MS,
 		);
 		try {
-			await firstOpen.promise;
+			await Promise.race([firstOpen.promise, cancelled]);
 		} catch (err) {
 			this.#stopped = true;
 			socket.close();
@@ -266,6 +282,15 @@ export class CollabHost {
 			throw err;
 		} finally {
 			clearTimeout(timeout);
+		}
+		if (signal?.aborted) {
+			await this.#teardown();
+			throw new Error("Collab host start cancelled");
+		}
+		await Promise.resolve();
+		if (this.#stopped) {
+			await this.#teardown();
+			throw new Error("Collab host start cancelled");
 		}
 
 		this.#unsubscribe = this.#ctx.session.subscribe(event => {
@@ -292,6 +317,11 @@ export class CollabHost {
 			this.#scheduleStateBroadcast();
 		};
 		this.#updateStatusSegment();
+		await Promise.resolve();
+		if (this.#stopped || signal?.aborted) {
+			await this.#teardown();
+			throw new Error("Collab host start cancelled");
+		}
 	}
 
 	/** Broadcast a goodbye, detach all taps, and close the socket. */
