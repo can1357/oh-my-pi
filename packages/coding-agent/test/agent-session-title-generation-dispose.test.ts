@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as ai from "@oh-my-pi/pi-ai";
@@ -6,7 +7,7 @@ import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
+import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createAssistantMessage } from "./helpers/agent-session-setup";
 
@@ -33,9 +34,25 @@ afterEach(async () => {
 });
 
 describe("AgentSession title generation disposal", () => {
-	it("uses the active provider session and aborts an in-flight title request during disposal", async () => {
-		authStorage = await AuthStorage.create(":memory:");
-		authStorage.setRuntimeApiKey("anthropic", "test-key");
+	it("isolates the title provider session without changing credentials and aborts it during disposal", async () => {
+		const store = new SqliteAuthCredentialStore(new Database(":memory:"));
+		store.saveOAuth("anthropic", {
+			access: "account-a-token",
+			refresh: "account-a-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "account-a",
+		});
+		store.saveOAuth("anthropic", {
+			access: "account-b-token",
+			refresh: "account-b-refresh",
+			expires: Date.now() + 60_000,
+			accountId: "account-b",
+		});
+		const storage = new AuthStorage(store);
+		authStorage = storage;
+		const modelRegistry = new ModelRegistry(storage);
+		await storage.reload();
+		storage.clearConfigApiKeys();
 		const model = getBundledModel("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 model to exist");
 		const providerSessionId = "provider-session";
@@ -50,8 +67,18 @@ describe("AgentSession title generation disposal", () => {
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
 			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
 		});
-		const modelRegistry = new ModelRegistry(authStorage);
-		const getApiKey = vi.spyOn(modelRegistry, "getApiKey");
+		const pinnedAccount = storage.listOAuthAccounts("anthropic").find(account => account.accountId === "account-b");
+		if (!pinnedAccount) throw new Error("Expected account-b credential");
+		expect(storage.pinSessionOAuthAccount("anthropic", providerSessionId, pinnedAccount.credentialId)).toBe(true);
+		let titleProvider: string | undefined;
+		let titleCredentialId: number | undefined;
+		const getApiKey = vi.spyOn(modelRegistry, "getApiKey").mockImplementation(async (requestModel, sessionId) => {
+			titleProvider = requestModel.provider;
+			titleCredentialId = storage
+				.listOAuthAccounts(requestModel.provider, sessionId)
+				.find(account => account.active)?.credentialId;
+			return "test-key";
+		});
 		const resolver = vi.spyOn(modelRegistry, "resolver");
 		session = new AgentSession({
 			agent,
@@ -60,6 +87,9 @@ describe("AgentSession title generation disposal", () => {
 			modelRegistry,
 			providerSessionId,
 		});
+		expect(
+			storage.listOAuthAccounts("anthropic", providerSessionId).find(account => account.active)?.credentialId,
+		).toBe(pinnedAccount.credentialId);
 		const started = Promise.withResolvers<void>();
 		const response = Promise.withResolvers<ai.AssistantMessage>();
 		let requestSignal: AbortSignal | undefined;
@@ -72,8 +102,12 @@ describe("AgentSession title generation disposal", () => {
 
 		const generation = session.generateTitle("Investigate shutdown");
 		await started.promise;
-		expect(getApiKey.mock.calls[0]?.[1]).toBe(providerSessionId);
-		expect(resolver.mock.calls[0]?.[1]).toBe(providerSessionId);
+		const titleSessionId = getApiKey.mock.calls[0]?.[1];
+		expect(titleSessionId).toBeTruthy();
+		expect(titleSessionId).not.toBe(providerSessionId);
+		expect(resolver.mock.calls[0]?.[1]).toBe(titleSessionId);
+		expect(titleProvider).toBe("anthropic");
+		expect(titleCredentialId).toBe(pinnedAccount.credentialId);
 		session.beginDispose();
 
 		expect(requestSignal?.aborted).toBe(true);

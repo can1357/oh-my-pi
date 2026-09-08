@@ -15,6 +15,7 @@ describe("QwenCloud Token Plan provider", () => {
 		expect(ALIBABA_TOKEN_PLAN_STATIC_MODELS.map(model => model.id)).toEqual([
 			"qwen3.8-max-preview",
 			"qwen3.8-max",
+			"qwen3.8-flash",
 			"qwen3.7-max",
 			"qwen3.7-plus",
 			"qwen3.6-flash",
@@ -80,6 +81,7 @@ describe("QwenCloud Token Plan provider", () => {
 						{ id: "MiniMax-M2.5", owned_by: "qwencloud" },
 						{ id: "qwen3.6-plus", owned_by: "qwencloud" },
 						{ id: "qwen3.8-max", owned_by: "qwencloud" },
+						{ id: "qwen3.8-flash", owned_by: "qwencloud" },
 						{ id: "deepseek-v3.2", owned_by: "qwencloud" },
 						{ id: "glm-5.1", owned_by: "qwencloud" },
 						{ id: "glm-5", owned_by: "qwencloud" },
@@ -117,11 +119,13 @@ describe("QwenCloud Token Plan provider", () => {
 			"MiniMax-M2.5",
 			"qwen3.6-plus",
 			"qwen3.7-plus",
+			"qwen3.8-flash",
 			"qwen3.8-max",
 		]);
 		const expectedLimits = [
 			["qwen3.6-plus", 1_000_000, 65_536],
 			["qwen3.8-max", 1_000_000, 131_072],
+			["qwen3.8-flash", 1_000_000, 131_072],
 			["deepseek-v4-flash", 1_000_000, 384_000],
 			["deepseek-v4-flash-0731", 1_000_000, 384_000],
 			["deepseek-v4-pro-0813", 1_000_000, 384_000],
@@ -176,6 +180,14 @@ describe("QwenCloud Token Plan provider", () => {
 					extraBody: { enable_thinking: true },
 				},
 			},
+		});
+		expect(models?.find(model => model.id === "qwen3.8-flash")).toMatchObject({
+			id: "qwen3.8-flash",
+			provider: "alibaba-token-plan",
+			reasoning: true,
+			input: ["text", "image"],
+			contextWindow: 1_000_000,
+			maxTokens: 131_072,
 		});
 		expect(options.dynamicModelsAuthoritative).toBe(true);
 	});

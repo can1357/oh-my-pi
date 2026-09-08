@@ -247,9 +247,11 @@ it("discriminate bounded array and tuple", () => {
 
 	expect(T.allows(false)).toBe(true);
 	expect(T.allows([null, null, null])).toBe(true);
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	expect(T.allows(new Array(10).fill(null))).toBe(true);
 	expect(T.allows([undefined])).toBe(true);
 	expect(T.allows([null, null])).toBe(false);
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	expect(T.allows(new Array(11).fill(null))).toBe(false);
 });
 

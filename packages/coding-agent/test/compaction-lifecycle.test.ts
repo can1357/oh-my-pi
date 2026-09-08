@@ -105,9 +105,11 @@ describe("executeCompaction UI lifecycle", () => {
 	});
 
 	it("drains the loader after a successful compaction resolves", async () => {
-		const compact = vi.fn(
-			async (): Promise<CompactionResult<unknown>> => ({ summary: "", firstKeptEntryId: "", tokensBefore: 0 }),
-		);
+		const compact = vi.fn(async (): Promise<CompactionResult<unknown>> => ({
+			summary: "",
+			firstKeptEntryId: "",
+			tokensBefore: 0,
+		}));
 		const { ctx, statusContainer, rebuildChatFromMessages, statusAtRebuild } = buildCtx(compact);
 
 		const controller = new CommandController(ctx);

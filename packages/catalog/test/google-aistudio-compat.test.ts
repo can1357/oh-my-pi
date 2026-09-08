@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { buildOpenAICompat } from "@oh-my-pi/pi-catalog/compat/openai";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
 /**
@@ -33,7 +33,7 @@ function aistudioByBaseUrl(provider: string): ModelSpec<"openai-completions"> {
 
 describe("openai-completions compat — Google AI Studio openai-compat shim", () => {
 	it("disables `store` for the generativelanguage openai-compat host", () => {
-		const compat = buildOpenAICompat(aistudioByBaseUrl("gemini"));
+		const compat = resolveModelPolicy(aistudioByBaseUrl("gemini")).compat;
 
 		// `isGoogleAistudioOpenAI` participates in the non-standard set, so `store` is off.
 		expect(compat.supportsStore).toBe(false);
@@ -42,17 +42,17 @@ describe("openai-completions compat — Google AI Studio openai-compat shim", ()
 	it("matches regardless of the custom provider id", () => {
 		// users wire the host under arbitrary provider ids (models.yml `gemini`,
 		// `google-aistudio`, …); detection is URL-based, not provider-based.
-		const compat = buildOpenAICompat(aistudioByBaseUrl("my-custom-gemini"));
+		const compat = resolveModelPolicy(aistudioByBaseUrl("my-custom-gemini")).compat;
 
 		expect(compat.supportsStore).toBe(false);
 	});
 
 	it("leaves `store` enabled for standard OpenAI hosts", () => {
-		const compat = buildOpenAICompat({
+		const compat = resolveModelPolicy({
 			...baseModel,
 			provider: "openai",
 			baseUrl: "https://api.openai.com/v1",
-		});
+		}).compat;
 
 		expect(compat.supportsStore).toBe(true);
 	});

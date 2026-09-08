@@ -1,0 +1,27 @@
+[package]
+name = "pi-edit"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+parking_lot.workspace = true
+pi-ast.workspace = true
+pi-diff.workspace = true
+pi-walker.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+xutf.workspace = true
+xxhash-rust.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio.workspace = true
