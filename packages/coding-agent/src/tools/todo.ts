@@ -52,7 +52,8 @@ export function isTodoPhase(value: unknown): value is TodoPhase {
 				task.status === "in_progress" ||
 				task.status === "completed" ||
 				task.status === "abandoned" ||
-				task.status === "blocked"),
+				task.status === "blocked") &&
+			(task.droppedBy === undefined || task.droppedBy === "user"),
 	);
 }
 

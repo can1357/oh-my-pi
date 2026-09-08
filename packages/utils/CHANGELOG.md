@@ -67,6 +67,7 @@
 ### Fixed
 
 - `checkpointWal` ignores already-closed databases and `SQLITE_IOERR_VNODE` (temp-dir unlink races) instead of throwing during shutdown; other `SQLITE_IOERR_*` failures still surface.
+- `checkpointWal` ignores already-closed databases and benign temp-unlink I/O codes (`SQLITE_IOERR_VNODE` / `DELETE*`), while still propagating real durability failures such as `SQLITE_IOERR_WRITE` / `ACCESS`.
 
 ## [18.0.10] - 2026-08-28
 

@@ -81,6 +81,7 @@ import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
 import { type EditStore, PowerAssertion, type PowerAssertionOptions } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	$env,
 	escapeXmlText,
@@ -360,9 +361,13 @@ import { buildSessionMetadata } from "./session-metadata";
 import { SessionProviderBoundary, type SessionProviderBoundaryHost } from "./session-provider-boundary";
 import { SessionStatsTracker, type SessionStatsTrackerHost } from "./session-stats";
 import { SessionTools, type SessionToolsHost } from "./session-tools";
+import { UnverifiedMergeLatch } from "./settle-gates";
 import type { ShakeMode, ShakeResult } from "./shake-types";
 import { skillPromptTitleInput } from "./skill-title-input";
+import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
+import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
 import { ToolChoiceQueue } from "./tool-choice-queue";
+import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 import { planTurnPersistence, sameMessageContent, sessionMessagePersistenceKey } from "./turn-persistence";
 import { TurnRecovery, type TurnRecoveryHost } from "./turn-recovery";
 import { YieldQueue } from "./yield-queue";
@@ -372,10 +377,6 @@ export * from "./agent-session-types";
 export type { AdvisorStats, AdvisorStatusOverviewEntry, PerAdvisorStat } from "./session-advisors";
 
 const SESSION_STOP_CONTINUATION_CAP = 8;
-
-import { LoopGuards, type StreamGuardsHost, StreamingEditGuard } from "./stream-guards";
-import { TodoTracker, type TodoTrackerHost } from "./todo-tracker";
-import { TtsrCoordinator, type TtsrCoordinatorHost } from "./ttsr-coordinator";
 
 const PLAN_MODE_REMINDER_MAX = 3;
 const POST_PROMPT_DRAIN_TIMEOUT_MS = 5_000;
@@ -621,6 +622,7 @@ export class AgentSession {
 	#planModeReminderAwaitingProgress = false;
 	readonly #todo: TodoTracker;
 	#workPoolYieldItems: readonly WorkPoolYieldItem[] = [];
+	readonly #unverifiedMergeLatch = new UnverifiedMergeLatch();
 	#replanTitleRefreshInFlight: Promise<void> | undefined = undefined;
 	/** Resolved TITLE_SYSTEM.md override applied to every automatic session-title
 	 *  generation path. Refresh via {@link AgentSession.setTitleSystemPrompt} when
@@ -1231,6 +1233,8 @@ export class AgentSession {
 			settings: this.settings,
 			model: () => this.model,
 			agentKind: () => this.#agentKind,
+			cwd: () => this.sessionManager.getCwd(),
+			repoRoot: () => vcs.git(this.sessionManager.getCwd())?.info().repoRoot,
 			emitSessionEvent: event => this.#emitSessionEvent(event),
 			scheduleAgentContinue: options => this.#scheduleAgentContinue(options),
 			promptGeneration: () => this.#promptGeneration,
@@ -1241,6 +1245,10 @@ export class AgentSession {
 			planModeEnabled: () => this.#planModeState?.enabled === true,
 			prewalkWillHandoff: () => this.#prewalk.willHandoff,
 			consumeLastServedToolChoiceLabel: () => this.#toolChoiceQueue.consumeLastServedLabel(),
+			hasUnverifiedMerge: () => this.#unverifiedMergeLatch.latched,
+			unverifiedMergeGeneration: () => this.#unverifiedMergeLatch.generation,
+			clearUnverifiedMergeIfGeneration: (generationAtStart: number) =>
+				this.#unverifiedMergeLatch.clearIfGeneration(generationAtStart),
 		};
 		this.#todo = new TodoTracker(todoHost);
 		this.#ownedAsyncJobManager = config.ownedAsyncJobManager;
@@ -1868,6 +1876,18 @@ export class AgentSession {
 		return this.#agentId;
 	}
 
+	markUnverifiedMerge(): void {
+		this.#unverifiedMergeLatch.mark();
+	}
+
+	observeAsyncJobTerminal(
+		jobId: string,
+		jobType: string | undefined,
+		status: "running" | "completed" | "failed" | "cancelled" | undefined,
+	): void {
+		this.#todo.onAsyncJobTerminal(jobId, jobType, status);
+	}
+
 	/** Dequeue the next HARD forced tool choice for the upcoming LLM call, dropping
 	 *  (and rejecting) one whose named tool is no longer active. */
 	#nextHardToolChoice(): ToolChoice | undefined {
@@ -2168,6 +2188,10 @@ export class AgentSession {
 	 */
 	async #deliverAsyncJobResult(manager: AsyncJobManager, jobId: string, text: string, job?: AsyncJob): Promise<void> {
 		if (this.#isDisposed) return;
+		// Observe terminal status before delivery gates: hub `consumeJobResults`
+		// suppresses auto-delivery, but a successful bash/eval verify must still
+		// clear the unverified-merge latch.
+		this.#todo.onAsyncJobTerminal(jobId, job?.type, job?.status);
 		if (manager.isDeliverySuppressed(jobId)) return;
 		// Snapshot the generation before the async format step: a `/new` during it
 		// bumps the epoch, so this delivery belongs to the replaced session and
@@ -2813,7 +2837,8 @@ export class AgentSession {
 		// and only successful mutating tools tick — read-only exploration is
 		// not progress an agent could mark done.
 		if (event.type === "message_end" && event.message.role === "toolResult") {
-			this.#todo.onToolResult(event.message.toolName, event.message.isError);
+			const details = isRecord(event.message.details) ? event.message.details : undefined;
+			this.#todo.onToolResult(event.message.toolName, event.message.isError, details, event.message.toolCallId);
 		}
 		// Track the settled assistant turn synchronously as well: agent_end
 		// maintenance reads `#lastAssistantMessage`, and when a turn's events all
@@ -2938,6 +2963,7 @@ export class AgentSession {
 
 		if (event.type === "tool_execution_start") {
 			this.#recordToolExecutionStart(event);
+			this.#todo.onToolExecutionStart(event.toolName, event.toolCallId, event.args);
 		}
 
 		if (event.type !== "agent_end") {
@@ -4149,6 +4175,7 @@ export class AgentSession {
 				todos: event.todos,
 				attempt: event.attempt,
 				maxAttempts: event.maxAttempts,
+				...(event.unverifiedMerge ? { unverifiedMerge: true } : {}),
 			});
 		} else if (event.type === "goal_updated") {
 			await this.#extensionRunner.emit({
@@ -5506,6 +5533,11 @@ export class AgentSession {
 		// still-cached background-task snapshot from the old conversation must not
 		// survive to be replayed by a focus rebuild in the reset session (#10447).
 		this.#activeToolExecutionUpdates.clear();
+		// Isolated merges arm this latch against the current workspace/session; a
+		// switch or new session must not inherit an unverified merge from another
+		// cwd/transcript.
+		this.#unverifiedMergeLatch.clear();
+		this.#todo.resetVerifyState();
 	}
 
 	/**

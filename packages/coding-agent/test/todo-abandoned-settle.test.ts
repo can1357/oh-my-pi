@@ -41,6 +41,7 @@ function host(overrides: Partial<TodoTrackerHost> = {}): {
 		settings: Settings.isolated({ "todo.enabled": true, "todo.reminders": true, "todo.remindersMax": 3 }),
 		model: (): Model | undefined => undefined,
 		agentKind: () => "main",
+		cwd: () => "/tmp",
 		emitSessionEvent: async () => {},
 		scheduleAgentContinue: () => {
 			continuations.count++;

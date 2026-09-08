@@ -334,6 +334,7 @@ export class TodoCommandController {
 
 	#mutateStatus(rest: string, target: "completed" | "abandoned"): void {
 		const op = target === "completed" ? "done" : "drop";
+		const dropOpts = op === "drop" ? { userDrop: true as const } : undefined;
 		const current = this.#currentPhases();
 		const trimmed = rest.trim();
 		const userAuthored = target === "abandoned";
