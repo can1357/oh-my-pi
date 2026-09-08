@@ -11,6 +11,7 @@ import { prompt } from "@oh-my-pi/pi-utils";
 import {
 	DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS,
 	formatBackgroundNotice,
+	formatJobLabel,
 	raceJobSettlement,
 	resolveAutoBackgroundWaitMs,
 } from "../async";
@@ -557,8 +558,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		const autoBackgroundWaitMs = resolveAutoBackgroundWaitMs(thresholdMs, clampedCellTimeoutMs, "runtime");
 		const startBackgrounded = autoBackgroundWaitMs === 0;
 
-		const rawLabel = params.title?.trim() || params.code.trim().split("\n", 1)[0] || "eval cell";
-		const label = rawLabel.length > 120 ? `${rawLabel.slice(0, 117)}...` : rawLabel;
+		const label = formatJobLabel(params.title?.trim() || params.code.trim().split("\n", 1)[0] || "eval cell");
 
 		let latestText = "";
 		let latestDetails: EvalToolDetails | undefined;
@@ -610,7 +610,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		);
 
 		if (startBackgrounded) {
-			return this.#buildBackgroundStartResult(jobId, cells, languages, notice, latestText, latestDetails);
+			return this.#buildBackgroundStartResult(jobId, label, cells, languages, notice, latestText, latestDetails);
 		}
 		// Suppress the completion delivery up front so a job finishing while we
 		// foreground-wait cannot also be injected by the delivery loop. Lifted
@@ -640,7 +640,16 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 			waitResult.kind === "steer"
 				? "Backgrounded early to handle an incoming message; the cell keeps running."
 				: undefined;
-		return this.#buildBackgroundStartResult(jobId, cells, languages, notice, latestText, latestDetails, steerNotice);
+		return this.#buildBackgroundStartResult(
+			jobId,
+			label,
+			cells,
+			languages,
+			notice,
+			latestText,
+			latestDetails,
+			steerNotice,
+		);
 	}
 
 	/**
@@ -650,6 +659,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 	 */
 	#buildBackgroundStartResult(
 		jobId: string,
+		label: string,
 		cells: ResolvedEvalCell[],
 		languages: EvalLanguage[],
 		notice: string | undefined,
@@ -681,7 +691,7 @@ export class EvalTool implements AgentTool<typeof evalSchema> {
 		if (extraNotice) {
 			lines.push(extraNotice, "");
 		}
-		lines.push(formatBackgroundNotice(jobId));
+		lines.push(formatBackgroundNotice(jobId, label));
 		return { content: [{ type: "text", text: lines.join("\n") }], details };
 	}
 
