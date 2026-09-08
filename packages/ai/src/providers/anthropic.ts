@@ -1286,6 +1286,9 @@ function foundryTlsOptionsCacheKey(): string {
 }
 
 function resolveAnthropicBaseUrl(model: Model<"anthropic-messages">, apiKey?: string): string | undefined {
+	// The wire router owns the gateway destination; provider env overrides must
+	// not change the official URL produced by this codec.
+	if (model.transport === "provider-wire") return normalizeAnthropicBaseUrl(model.baseUrl);
 	if (model.provider === "github-copilot") {
 		return normalizeAnthropicBaseUrl(resolveGitHubCopilotBaseUrl(model.baseUrl, apiKey) ?? model.baseUrl);
 	}
@@ -2924,6 +2927,9 @@ const streamAnthropicOnce = (
 					break;
 				} catch (streamError) {
 					const streamFailure = activeAbortTracker.getLocalAbortReason() ?? streamError;
+					// Only the wire router may replay a pre-execution refusal. A codec
+					// fallback, parse failure, or transport loss cannot prove non-execution.
+					if (model.transport === "provider-wire") throw streamFailure;
 					if (
 						!disableStrictTools &&
 						firstTokenTime === undefined &&
@@ -3128,9 +3134,11 @@ const streamAnthropicOnce = (
  * loop. The inner attempt owns Anthropic provider-failure retries.
  */
 export const streamAnthropic: StreamFunction<"anthropic-messages"> = (model, context, options) =>
-	withReplaySafeStreamRetry(model, context, options, streamAnthropicOnce, {
-		retryEmptyCompletion: true,
-	});
+	model.transport === "provider-wire"
+		? streamAnthropicOnce(model, context, options)
+		: withReplaySafeStreamRetry(model, context, options, streamAnthropicOnce, {
+				retryEmptyCompletion: true,
+			});
 
 export type AnthropicSystemBlock = {
 	type: "text";
