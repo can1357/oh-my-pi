@@ -688,11 +688,24 @@ mod tests {
 		};
 		let mut first = super::collect_entries(root.path(), options, ok_heartbeat).unwrap();
 		first.entries[0].path = "changed-by-caller".to_owned();
+		std::thread::sleep(Duration::from_millis(2));
 		let second = super::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		assert!(second.cache_age_ms > 0, "second collection must use the cached snapshot");
 		assert_eq!(second.entries[0].path, "real.txt");
 		let cancelled = super::collect_entries(root.path(), options, || Err("cancelled"));
 		assert!(
 			matches!(cancelled, Err(crate::WalkError::Interrupted(error)) if error == "cancelled")
+		);
+		let heartbeat_calls = AtomicU64::new(0);
+		let cancelled_after_copy = super::collect_entries(root.path(), options, || {
+			if heartbeat_calls.fetch_add(1, Ordering::Relaxed) == 0 {
+				Ok(())
+			} else {
+				Err("cancelled after copy")
+			}
+		});
+		assert!(
+			matches!(cancelled_after_copy, Err(crate::WalkError::Interrupted(error)) if error == "cancelled after copy")
 		);
 		super::invalidate_path(root.path());
 	}
