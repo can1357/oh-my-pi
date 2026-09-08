@@ -99,6 +99,9 @@
 - Fixed auth-gateway nested fallback compilation leaking rules from unreached sibling branches onto earlier targets.
 - Fixed gateway classification treating OpenAI-style `model does not exist` 404s as `request_terminal` instead of `model_unavailable`.
 - Fixed auth-gateway inference error responses omitting `x-request-id` / `request-id` so callers could not look up the matching decision trace.
+- Fixed auth-gateway SSE streams leaking turn reservations when `reader.read()` rejects.
+- Fixed `/v1/messages/count_tokens` resolving only concrete catalog models; virtual routes are registry-aware.
+- Fixed Anthropic count-tokens accepting missing/non-array `messages` and ignoring `system`/`tools` in the estimate.
 
 ### Added
 
@@ -346,6 +349,9 @@
 - Auth gateway `POST /backend-api/codex/responses` and `POST /backend-api/responses` alias Codex clients onto OpenAI Responses.
 - Auth gateway `POST /v1/grok/chat/completions` aliases xAI clients onto OpenAI chat completions.
 - Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
+- Auth gateway `POST /v1/realtime` and `POST /v1/audio/speech` return 501 after auth.
+- Auth gateway skips targets whose provider health circuit is open.
+- Auth gateway remembers prompt-cache affinity after a successful non-error stream.
 
 ## [18.0.8] - 2026-08-27
 
