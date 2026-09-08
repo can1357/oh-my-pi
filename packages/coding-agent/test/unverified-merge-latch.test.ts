@@ -66,6 +66,7 @@ function host(
 		hasUnverifiedMerge: () => latch.latched,
 		unverifiedMergeGeneration: () => latch.generation,
 		clearUnverifiedMergeIfGeneration: (generationAtStart: number) => latch.clearIfGeneration(generationAtStart),
+		prewalkWillHandoff: () => false,
 	};
 	return { host: built, messages, events, continuations };
 }

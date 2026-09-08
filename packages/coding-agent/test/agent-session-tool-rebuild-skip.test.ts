@@ -800,7 +800,7 @@ describe("AgentSession refreshMCPTools rebuild skipping", () => {
 	it("rebuilds when a tool's getter-based description reflects new settings state", async () => {
 		// Built-in tools whose prompt-rendered metadata depends on settings expose
 		// `description` via getters that re-evaluate on every access (TaskTool reads
-		// task.disabledAgents/maxConcurrency/isolation.mode/simple/async.enabled, and
+		// task.disabledAgents/maxConcurrency/isolation.enabled/simple/async.enabled, and
 		// EditTool resolves through the current edit-mode definition). The signature
 		// reads `tool.description` live each call, so a settings flip that mutates the
 		// rendered string must change the signature on the next

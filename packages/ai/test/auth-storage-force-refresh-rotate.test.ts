@@ -363,9 +363,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		authStorage.close();
 		const concurrentStore = await SqliteAuthCredentialStore.open(path.join(tempDir, "agent.db"));
 		store = concurrentStore;
-		let targetCredentialId: number | undefined;
 		let targetRemoved = false;
-		let concurrentStorage: AuthStorage;
 		const usageProvider: UsageProvider = {
 			id: PROVIDER,
 			async fetchUsage() {
@@ -382,7 +380,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 			findWindowLimits: () => ({}),
 			windowDefaults: { primaryMs: 60_000, secondaryMs: 60_000 },
 		};
-		concurrentStorage = new AuthStorage(concurrentStore, {
+		const concurrentStorage = new AuthStorage(concurrentStore, {
 			usageProviderResolver: provider => (provider === PROVIDER ? usageProvider : undefined),
 			rankingStrategyResolver: provider => (provider === PROVIDER ? rankingStrategy : undefined),
 		});
@@ -397,7 +395,7 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		const rows = concurrentStore.listAuthCredentials(PROVIDER);
 		const target = rows[0];
 		if (!target) throw new Error("expected target credential");
-		targetCredentialId = target.id;
+		const targetCredentialId = target.id;
 		const siblings = rows.slice(1);
 
 		const marked = await concurrentStorage.markUsageLimitReached(PROVIDER, undefined, {
@@ -863,7 +861,35 @@ describe("AuthStorage forceRefresh + rotateSessionCredential", () => {
 		]);
 
 		await authStorage.getApiKey(PROVIDER, "sess");
+		const blockedBefore = Date.now();
 		const outcome = await authStorage.markUsageLimitReached(PROVIDER, "sess", { retryAfterMs: 3_600_000 });
-		expect(outcome).toEqual({ switched: false, retryAtMs: undefined });
+		const blockedAfter = Date.now();
+		expect(outcome.switched).toBe(false);
+		expect(outcome.retryAtMs).toBeUndefined();
+		expect(outcome.blockedUntilMs).toBeDefined();
+		expect(outcome.blockedUntilMs!).toBeGreaterThanOrEqual(blockedBefore + 3_600_000);
+		expect(outcome.blockedUntilMs!).toBeLessThanOrEqual(blockedAfter + 3_600_000);
+	});
+
+	test("markUsageLimitReached reports the merged block deadline on out-of-order responses", async () => {
+		// Two sessions share one credential; the longer block lands first and
+		// a shorter hint arrives later. The reported deadline must stay at
+		// the longer stored block — waiting on the shorter value would retry
+		// before the credential is actually usable.
+		if (!authStorage) throw new Error("test setup failed");
+		registerProvider();
+		await authStorage.set(PROVIDER, [
+			{ type: "oauth", access: "only-access", refresh: "only-refresh", expires: farExpiry() },
+		]);
+
+		await authStorage.getApiKey(PROVIDER, "sess-a");
+		await authStorage.getApiKey(PROVIDER, "sess-b");
+		const longWindow = await authStorage.markUsageLimitReached(PROVIDER, "sess-a", { retryAfterMs: 7_200_000 });
+		expect(longWindow.switched).toBe(false);
+		const shortWindow = await authStorage.markUsageLimitReached(PROVIDER, "sess-b", { retryAfterMs: 60_000 });
+		expect(shortWindow.switched).toBe(false);
+		expect(shortWindow.blockedUntilMs).toBeDefined();
+		expect(shortWindow.blockedUntilMs!).toBeGreaterThan(Date.now() + 7_100_000);
+		expect(shortWindow.blockedUntilMs!).toBeLessThanOrEqual(Date.now() + 7_200_000);
 	});
 });

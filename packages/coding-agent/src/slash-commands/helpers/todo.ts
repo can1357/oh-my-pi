@@ -211,7 +211,7 @@ async function handleTodoMutationCommand(
 			await runtime.output("Cleared all todos.");
 			return commandConsumed();
 		}
-		const dropOpts = verb === "drop" || verb === "rm" ? { userDrop: true as const } : undefined;
+		const dropOpts = verb === "drop" ? { userDrop: true as const } : undefined;
 		const { phases } = applyOpsToPhases(current, [{ op: verb }], dropOpts);
 		commitTodos(runtime, phases);
 		await runtime.output(verb === "done" ? "Marked all tasks completed." : "Marked all tasks abandoned.");
