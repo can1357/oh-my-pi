@@ -1,0 +1,9 @@
+auth "abliteration" {
+	name "Abliteration"
+	login "api-key" {
+		auth-url "https://abliteration.ai/console"
+		instructions "Copy your API key from the Abliteration console"
+		prompt "Paste your Abliteration API key" placeholder="ak_..."
+		validate "models-endpoint" url="https://api.abliteration.ai/v1/models"
+	}
+}

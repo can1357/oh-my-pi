@@ -1,0 +1,6 @@
+// Provider-wire compat for "minimax".
+
+provider "minimax" priority=1 {
+	// Replaces the provider-id regex in both OpenAI baselines.
+	reasoning-deltas-may-be-cumulative #true
+}
