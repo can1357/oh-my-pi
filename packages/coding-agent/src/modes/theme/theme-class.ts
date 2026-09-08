@@ -5,7 +5,13 @@ import * as logger from "@oh-my-pi/pi-utils/logger";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import type { SessionAccentTheme } from "../../utils/session-color";
 import { bgAnsi, colorToAnsi, fgAnsi, resolveToHex } from "./color";
-import { type ColorMode, isValidThemeColor, type ThemeBg, type ThemeColor } from "./schema";
+import {
+	type ColorMode,
+	isValidThemeColor,
+	OPTIONAL_THEME_COLOR_RECORD,
+	type ThemeBg,
+	type ThemeColor,
+} from "./schema";
 import {
 	type SlashCommandIconName,
 	SPINNER_FRAMES,
@@ -174,6 +180,14 @@ export class Theme {
 			this.#fgColors[key] = fgAnsi(value, mode);
 			this.#hexFgColors[key] = hex;
 		}
+		// A theme may omit an optional token, but callers can still name it (a
+		// `modelTags.<role>.color` reference is validated against the theme color
+		// list). Resolve those to the terminal default so `fg()` stays total while
+		// `hasColor()` reports them as unset.
+		for (const key of Object.keys(OPTIONAL_THEME_COLOR_RECORD) as ThemeColor[]) {
+			this.#fgColors[key] ??= "\x1b[39m";
+			this.#hexFgColors[key] ??= "";
+		}
 		this.#bgColors = {} as Record<ThemeBg, string>;
 		this.#hexBgColors = {} as Record<ThemeBg, string>;
 		for (const [key, value] of Object.entries(bgColors) as [ThemeBg, string | number][]) {
@@ -289,6 +303,17 @@ export class Theme {
 			colorHexes: this.getMajorThemeColorHexes(),
 			surfaceLuminance: this.accentSurfaceLuminance,
 		};
+	}
+
+	/**
+	 * True when the theme paints `color` with a real foreground — i.e. the token
+	 * exists and is not the empty string (terminal default, `\x1b[39m`). Optional
+	 * tokens absent from the theme JSON are also false. Callers use this to keep
+	 * terminal-default behavior byte-for-byte when an optional token is unset.
+	 */
+	hasColor(color: ThemeColor): boolean {
+		const ansi = this.#fgColors[color];
+		return ansi !== undefined && ansi !== "\x1b[39m";
 	}
 
 	fg(color: ThemeColor, text: string): string {
