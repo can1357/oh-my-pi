@@ -1339,6 +1339,14 @@ chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 
 chrome.tabs.onRemoved.addListener((tabId) => {
 	void forgetRecoverable(tabId);
+	// A same-socket refreshHello() may have already snapshotted
+	// chrome.tabs.query() before this removal landed, so its in-flight hello can
+	// still advertise the closed tab as present/attached. Delivered after this
+	// `tabRemoved`, that stale hello would make RelayBridge.#onHello() re-add the
+	// removed target with no later tab event to correct it. Mark the refresh dirty
+	// so the stale send is suppressed and the rebuild re-queries the live tab set,
+	// mirroring the invalidation attachment changes already perform.
+	invalidateHelloRefresh();
 	post({ t: "tabRemoved", tabId });
 });
 

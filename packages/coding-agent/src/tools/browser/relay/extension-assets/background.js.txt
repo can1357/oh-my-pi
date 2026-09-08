@@ -1043,6 +1043,7 @@ chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 });
 chrome.tabs.onRemoved.addListener((tabId) => {
   forgetRecoverable(tabId);
+  invalidateHelloRefresh();
   post({ t: "tabRemoved", tabId });
 });
 chrome.alarms.create(KEEPALIVE_ALARM, { periodInMinutes: 0.5 });
