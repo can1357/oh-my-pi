@@ -6556,7 +6556,7 @@ export interface ThinkingBudgetsSettings {
 export interface SttSettings {
 	backend: "local" | "cloud";
 	enabled: boolean;
-	keywords: string[];
+	keywords: string;
 	language: string | undefined;
 	modelName: string;
 	streaming: boolean;
