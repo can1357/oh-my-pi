@@ -809,13 +809,35 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			): event is Extract<AssistantMessageEvent, { type: "toolcall_start" | "toolcall_delta" | "toolcall_end" }> =>
 				event.type === "toolcall_start" || event.type === "toolcall_delta" || event.type === "toolcall_end";
 			const flushAttemptEvents = () => {
-				for (const event of attemptEventBuffer) pushConsumerEvent(event);
+				// Publish in content-index order: completed tools and buffered
+				// text/thinking can arrive interleaved while a sibling is incomplete,
+				// so dumping attemptEventBuffer before pending tools would expose
+				// later indexes first (e.g. text@1 before toolcall_start@0).
+				const prefix: AssistantMessageEvent[] = [];
+				const nonToolByIndex = new Map<number, AssistantMessageEvent[]>();
+				for (const event of attemptEventBuffer) {
+					const index =
+						"contentIndex" in event && typeof event.contentIndex === "number" ? event.contentIndex : undefined;
+					if (index === undefined) {
+						prefix.push(event);
+						continue;
+					}
+					const list = nonToolByIndex.get(index) ?? [];
+					list.push(event);
+					nonToolByIndex.set(index, list);
+				}
 				attemptEventBuffer = [];
-				// Publish completed tool buffers in index order; leave incomplete siblings pending.
-				for (const index of [...pendingToolEventBuffers.keys()].sort((a, b) => a - b)) {
-					const buffered = pendingToolEventBuffers.get(index);
-					if (buffered?.some(event => event.type === "toolcall_end")) {
+				for (const event of prefix) pushConsumerEvent(event);
+
+				const indexes = new Set<number>([...nonToolByIndex.keys(), ...pendingToolEventBuffers.keys()]);
+				for (const index of [...indexes].sort((a, b) => a - b)) {
+					const toolBuffered = pendingToolEventBuffers.get(index);
+					if (toolBuffered?.some(event => event.type === "toolcall_end")) {
 						flushToolEventBuffer(index);
+					}
+					const nonTool = nonToolByIndex.get(index);
+					if (nonTool) {
+						for (const event of nonTool) pushConsumerEvent(event);
 					}
 				}
 				attemptStreamingLive = true;
