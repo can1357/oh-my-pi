@@ -522,7 +522,9 @@ export async function executeWithKernelBase<
 			const timedOut = result.timedOut || abortShield.timedOut;
 			const annotation = timedOut
 				? formatKernelTimeoutAnnotation(executionTimeoutMs ?? options?.idleTimeoutMs, result.kernelKilled ?? false)
-				: undefined;
+				: result.kernelKilled && !abortShield.abortRequested
+					? "Kernel died during execution; completion is uncertain. The cell was not replayed; check for partial side effects before retrying."
+					: undefined;
 			const dumped = await sink.dump(annotation);
 			return {
 				exitCode: undefined,
