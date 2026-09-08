@@ -113,6 +113,8 @@ export interface OpenAIResponsesOptions extends StreamOptions {
 	serviceTier?: ServiceTier;
 	textVerbosity?: "low" | "medium" | "high";
 	toolChoice?: ToolChoice;
+	/** Persist the response for later previous_response_id continuation. */
+	store?: boolean;
 	openrouterVariant?: string;
 	maxTokensExplicit?: boolean;
 	disableReasoning?: boolean;
@@ -511,6 +513,9 @@ const streamOpenAIResponsesOnce = (
 				// Platform `previous_response_id` chaining only resolves stored responses.
 				params.store = true;
 			}
+			// A caller-supplied store:true (e.g. starting a client-driven chain)
+			// must persist the response even with no internal chain state.
+			if (options?.store === true) params.store = true;
 			applyReasoningEffortFallbackForRequest(params);
 			// A caller-supplied `previous_response_id` names the client's own stored
 			// response; internal chain deltas are computed against a DIFFERENT
