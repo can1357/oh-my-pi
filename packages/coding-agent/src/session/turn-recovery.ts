@@ -261,6 +261,7 @@ export class TurnRecovery {
 	readonly #host: TurnRecoveryHost;
 	#retryAbortController: AbortController | undefined;
 	#retryAttempt = 0;
+	#hardErrorSameModelRetryCount = 0;
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -398,6 +399,7 @@ export class TurnRecovery {
 
 	/** Resets per-prompt recovery counters and terminal-stop acceptance. */
 	resetForNewPrompt(): void {
+		this.#hardErrorSameModelRetryCount = 0;
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
@@ -418,6 +420,7 @@ export class TurnRecovery {
 		if (!assistantTurnProducedOutput(message)) {
 			return;
 		}
+		this.#hardErrorSameModelRetryCount = 0;
 		const model = this.#host.model();
 		if (model) {
 			this.#lastServed = {
@@ -705,7 +708,7 @@ export class TurnRecovery {
 	async #recordPendingRetryError(
 		message: AssistantMessage,
 		id: number,
-		options: { switchedCredential: boolean; switchedModel: boolean; delayMs: number },
+		options: { switchedCredential: boolean; switchedModel: boolean; delayMs: number; attempt?: number },
 	): Promise<void> {
 		await this.persistTerminalEmptyErrorTurn(message);
 		const persistenceKey = sessionMessagePersistenceKey(message);
@@ -729,7 +732,7 @@ export class TurnRecovery {
 			entryId: branchEntry.id,
 			persistenceKey,
 			recovery,
-			attempt: this.#retryAttempt,
+			attempt: options.attempt ?? this.#retryAttempt,
 			note,
 		});
 	}
@@ -1827,6 +1830,7 @@ export class TurnRecovery {
 			if (this.#activeRetryFallback) this.#activeRetryFallback.served = servedBeforeSwap;
 			return false;
 		}
+		this.#hardErrorSameModelRetryCount = 0;
 		this.#host.sessionManager.appendModelChange(candidateSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(candidateSelector);
 		this.#host.setThinkingLevel(nextThinkingLevel);
@@ -1949,9 +1953,8 @@ export class TurnRecovery {
 
 	/**
 	 * True when a turn failed with a hard (non-retryable) provider error but a
-	 * configured `retry.fallbackChains` entry covers the active model: the same
-	 * model is not worth retrying, yet a DIFFERENT model is a fresh chance, so
-	 * the chain is consulted before the error becomes final. Skips failures a
+	 * configured retry.fallbackChains entry covers the active model. Configured
+	 * same-model attempts run before the chain is consulted. Skips failures a
 	 * model switch cannot fix or must not replay: cancellations (abort-flavored
 	 * errors are not model faults), context overflow (compaction's job),
 	 * classifier refusals (chain consult is handled on the retryable path with
@@ -2005,6 +2008,7 @@ export class TurnRecovery {
 		// chain: the base model must not be reported as the configured primary.
 		this.#markFallbackRouted();
 		await this.#host.setModelWithProviderSessionReset(baseModel);
+		this.#hardErrorSameModelRetryCount = 0;
 		this.#host.sessionManager.appendModelChange(baseSelector, EPHEMERAL_MODEL_CHANGE_ROLE, true);
 		this.#host.settings.getStorage()?.recordModelUsage(baseSelector);
 		await this.#host.emitSessionEvent({
@@ -2069,6 +2073,7 @@ export class TurnRecovery {
 		// as fallback-served.
 		this.clearActiveRetryFallback();
 		await this.#host.setModelWithProviderSessionReset(primaryModel);
+		this.#hardErrorSameModelRetryCount = 0;
 		this.#host.sessionManager.appendModelChange(primarySelector, EPHEMERAL_MODEL_CHANGE_ROLE);
 		this.#host.settings.getStorage()?.recordModelUsage(primarySelector);
 		this.#host.setThinkingLevel(thinkingToApply);
@@ -2085,10 +2090,9 @@ export class TurnRecovery {
 
 	/**
 	 * Handle retryable errors with exponential backoff, credential rotation, and
-	 * model-fallback chains. Also entered for NON-retryable errors when a switch
-	 * is the recovery (`fireworksFastFallback`, `hardErrorFallback`): then a
-	 * successful model switch retries immediately, and a failed switch surfaces
-	 * the error without a same-model backoff retry.
+	 * model-fallback chains. Hard errors can first retry the same model with
+	 * backoff; after that configured budget, a model switch retries immediately.
+	 * Fireworks Fast fallback still surfaces the error if its switch fails.
 	 * @returns true if retry was initiated, false if max retries exceeded or disabled
 	 */
 	async #handleRetryableError(
@@ -2109,6 +2113,11 @@ export class TurnRecovery {
 
 		const generation = this.#host.promptGeneration();
 		this.#retryAttempt++;
+		const hardErrorSameModelRetry =
+			options?.hardErrorFallback === true &&
+			this.#hardErrorSameModelRetryCount < retrySettings.hardErrorSameModelRetries;
+		if (hardErrorSameModelRetry) this.#hardErrorSameModelRetryCount++;
+		let recoveryAttempt = hardErrorSameModelRetry ? this.#hardErrorSameModelRetryCount : this.#retryAttempt;
 
 		// Create retry promise on first attempt so waitForRetry() can await it
 		// Ensure only one promise exists (avoid orphaned promises from concurrent calls)
@@ -2142,7 +2151,7 @@ export class TurnRecovery {
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
-			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, this.#retryAttempt);
+			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, recoveryAttempt);
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
 		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
@@ -2294,6 +2303,7 @@ export class TurnRecovery {
 			// A refusal chain stops at the retry budget: the exhausted-attempt
 			// last resort is for provider failures, not classifier decisions.
 			if (
+				!hardErrorSameModelRetry &&
 				allowModelFallback &&
 				retrySettings.modelFallback &&
 				!thinkingLoop &&
@@ -2324,7 +2334,7 @@ export class TurnRecovery {
 			}
 		}
 
-		if (retryBudgetExhausted) {
+		if (retryBudgetExhausted && !hardErrorSameModelRetry) {
 			if (!switchedModel && !switchedCredential) {
 				const attempt = this.#retryAttempt - 1;
 				message.errorMessage = `Retry budget exhausted after ${attempt} ${attempt === 1 ? "retry" : "retries"}: ${errorMessage}`;
@@ -2345,7 +2355,10 @@ export class TurnRecovery {
 			// A fallback model gets a fresh retry budget. Credential rotation
 			// instead keeps the cumulative attempt count while bypassing the
 			// same-route budget: every distinct account must be tried first.
-			if (switchedModel) this.#retryAttempt = 1;
+			if (switchedModel) {
+				this.#retryAttempt = 1;
+				recoveryAttempt = 1;
+			}
 		}
 		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
 			// A prior attempt in this saga already announced `auto_retry_start`
@@ -2376,6 +2389,7 @@ export class TurnRecovery {
 		// surface it instead.
 		if (
 			(options?.fireworksFastFallback || options?.hardErrorFallback) &&
+			!hardErrorSameModelRetry &&
 			!switchedModel &&
 			!this.isRetryableError(message)
 		) {
@@ -2435,12 +2449,17 @@ export class TurnRecovery {
 			return false;
 		}
 
-		await this.#recordPendingRetryError(message, id, { switchedCredential, switchedModel, delayMs });
+		await this.#recordPendingRetryError(message, id, {
+			switchedCredential,
+			switchedModel,
+			delayMs,
+			attempt: recoveryAttempt,
+		});
 
 		await this.#host.emitSessionEvent({
 			type: "auto_retry_start",
-			attempt: this.#retryAttempt,
-			maxAttempts: maxRetries,
+			attempt: recoveryAttempt,
+			maxAttempts: hardErrorSameModelRetry ? retrySettings.hardErrorSameModelRetries : maxRetries,
 			delayMs,
 			errorMessage,
 			errorId: message.errorId,
