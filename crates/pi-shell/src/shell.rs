@@ -607,7 +607,7 @@ fn copy_env_into_shell(
 			continue;
 		};
 		let normalized_key = normalize_env_key(key);
-		if should_skip_env_var(normalized_key) {
+		if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 			continue;
 		}
 		if normalized_key == "PATH" {
@@ -705,7 +705,7 @@ async fn create_session_for_run(
 	if let Some(env) = config.session_env.as_ref() {
 		for (key, value) in env {
 			let normalized_key = normalize_env_key(key);
-			if should_skip_env_var(normalized_key) {
+			if should_skip_env_var(normalized_key) || is_git_repo_location_var(normalized_key) {
 				continue;
 			}
 			let mut var = ShellVariable::new(ShellValue::String(value.clone()));
@@ -1523,6 +1523,35 @@ fn is_macos_malloc_stack_logging_var(key: &str) -> bool {
 	matches!(key, "MallocStackLogging" | "MallocStackLoggingNoCompact")
 }
 
+/// Git variables that pin a repository location to the launch checkout.
+///
+/// Forwarding them into a shell makes `git` ignore the command's working
+/// directory and mutate the wrong worktree or index, so the shell rediscovers
+/// the repository from `cwd` instead. Mirrors the `env_remove` list in
+/// `crates/pi-vcs/src/git/cli.rs`.
+pub const GIT_REPO_LOCATION_ENV_VARS: [&str; 6] = [
+	"GIT_DIR",
+	"GIT_COMMON_DIR",
+	"GIT_WORK_TREE",
+	"GIT_INDEX_FILE",
+	"GIT_OBJECT_DIRECTORY",
+	"GIT_ALTERNATE_OBJECT_DIRECTORIES",
+];
+
+/// Windows environment lookups are case-insensitive, so `git_dir` binds there
+/// exactly like `GIT_DIR`; POSIX names are case-sensitive.
+#[cfg(windows)]
+fn is_git_repo_location_var(key: &str) -> bool {
+	GIT_REPO_LOCATION_ENV_VARS
+		.iter()
+		.any(|name| key.eq_ignore_ascii_case(name))
+}
+
+#[cfg(not(windows))]
+fn is_git_repo_location_var(key: &str) -> bool {
+	GIT_REPO_LOCATION_ENV_VARS.contains(&key)
+}
+
 fn should_skip_env_var(key: &str) -> bool {
 	if key.starts_with("BASH_FUNC_") && key.ends_with("%%") {
 		return true;
@@ -2045,6 +2074,86 @@ mod tests {
 		assert_eq!(value("HOME").as_deref(), Some("/home/tester"), "valid entry copied");
 		assert!(value("GHOSTTY_BIN_DIR").is_none(), "non-UTF-8 value must be skipped");
 		assert!(value("BAD").is_none(), "non-UTF-8 key must be skipped");
+	}
+
+	/// The strip must stay narrowly scoped: unrelated `GIT_*` names are part of
+	/// the shell contract (`GIT_EDITOR`, author identity) and must survive.
+	#[test]
+	fn git_repo_location_vars_exclude_unrelated_git_names() {
+		assert!(!is_git_repo_location_var("GIT_EDITOR"));
+		assert!(!is_git_repo_location_var("GIT_AUTHOR_NAME"));
+	}
+
+	/// Regression for issue #11082: the embedded shell copies the host
+	/// environment, and repo-location overrides in it (git hooks, `git
+	/// --git-dir` wrappers) must not reach child commands — `git` would ignore
+	/// the command's `cwd` and mutate the worktree the agent was launched from.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn copy_env_skips_git_repo_location_overrides() {
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.builtins(default_builtins(BuiltinSet::BashMode))
+			.build()
+			.await
+			.expect("build shell");
+
+		let entries = vec![
+			(std::ffi::OsString::from("GIT_DIR"), std::ffi::OsString::from("/primary/.git")),
+			(std::ffi::OsString::from("GIT_WORK_TREE"), std::ffi::OsString::from("/primary")),
+			(
+				std::ffi::OsString::from("GIT_INDEX_FILE"),
+				std::ffi::OsString::from("/primary/.git/index"),
+			),
+			(std::ffi::OsString::from("GIT_EDITOR"), std::ffi::OsString::from("true")),
+		];
+		copy_env_into_shell(&mut shell, entries.into_iter()).expect("copy host env");
+
+		let value = |name: &str| {
+			shell
+				.env()
+				.get(name)
+				.and_then(|(_, var)| match var.value() {
+					ShellValue::String(value) => Some(value.clone()),
+					_ => None,
+				})
+		};
+		assert!(value("GIT_DIR").is_none(), "GIT_DIR must not reach child commands");
+		assert!(value("GIT_WORK_TREE").is_none(), "GIT_WORK_TREE must not reach child commands");
+		assert!(value("GIT_INDEX_FILE").is_none(), "GIT_INDEX_FILE must not reach child commands");
+		assert_eq!(value("GIT_EDITOR").as_deref(), Some("true"), "unrelated git vars are kept");
+	}
+
+	/// The per-session env overlay is built from the same host environment, so
+	/// it must not reintroduce the repo-location overrides.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn session_env_does_not_export_git_repo_location_overrides() {
+		let dir = tempfile::tempdir().expect("probe directory");
+		let out = dir.path().join("probe");
+		let mut env = HashMap::new();
+		env.insert("GIT_DIR".to_string(), "/primary/.git".to_string());
+		env.insert("OMP_GIT_ENV_PROBE".to_string(), "kept".to_string());
+		let config =
+			ShellConfig { session_env: Some(env), snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null stdin"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null stdout"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null stderr"));
+
+		let command = format!(
+			"printf '%s|%s' \"${{GIT_DIR-unset}}\" \"$OMP_GIT_ENV_PROBE\" > {}",
+			quote_arg(out.to_str().expect("utf8 probe path"))
+		);
+		session
+			.shell
+			.run_string(command, &SourceInfo::from("pi-natives:test"), &params)
+			.await
+			.expect("run_string");
+
+		assert_eq!(fs::read_to_string(&out).expect("probe output"), "unset|kept");
 	}
 
 	#[cfg(unix)]

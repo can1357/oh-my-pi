@@ -1,7 +1,26 @@
 import { describe, expect, it } from "bun:test";
-import { nativeLibraryPathOverlay } from "@oh-my-pi/pi-coding-agent/subprocess/worker-client";
+import { nativeLibraryPathOverlay, workerEnvFromParent } from "@oh-my-pi/pi-coding-agent/subprocess/worker-client";
 import { tinyWorkerEnvOverlay } from "@oh-my-pi/pi-coding-agent/tiny/title-client";
 import { tinyWorkerEndpoint, tinyWorkerLogPath } from "@oh-my-pi/pi-coding-agent/tiny/title-protocol";
+
+describe("workerEnvFromParent", () => {
+	it("drops inherited git repo-location overrides but keeps an explicit overlay", () => {
+		// Managed PTY daemons are spawned from this snapshot; inheriting the
+		// agent's own GIT_DIR would make their shells target the wrong worktree
+		// (issue #11082). An explicit per-command value still wins.
+		const previous = process.env.GIT_DIR;
+		process.env.GIT_DIR = "/primary/.git";
+		try {
+			const env = workerEnvFromParent({ GIT_WORK_TREE: "/secondary", OMP_WORKER_ENV_PROBE: "kept" });
+			expect(env.GIT_DIR).toBeUndefined();
+			expect(env.GIT_WORK_TREE).toBe("/secondary");
+			expect(env.OMP_WORKER_ENV_PROBE).toBe("kept");
+		} finally {
+			if (previous === undefined) delete process.env.GIT_DIR;
+			else process.env.GIT_DIR = previous;
+		}
+	});
+});
 
 describe("tinyWorkerEnvOverlay", () => {
 	it("maps non-default settings onto the worker env vars when neither is already set", () => {

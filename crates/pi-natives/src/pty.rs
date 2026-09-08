@@ -356,6 +356,13 @@ fn run_pty_sync(
 	if let Some(cwd) = config.cwd.as_ref() {
 		cmd.cwd(cwd);
 	}
+	// `CommandBuilder` starts from this process's environment, so drop
+	// repo-location overrides before the explicit env below is applied: the
+	// terminal's `git` rediscovers the repository from `cwd`, while a
+	// caller-supplied value still wins.
+	for name in pi_shell::shell::GIT_REPO_LOCATION_ENV_VARS {
+		cmd.env_remove(name);
+	}
 	if let Some(env) = config.env.as_ref() {
 		for (key, value) in env {
 			cmd.env(key, value);
