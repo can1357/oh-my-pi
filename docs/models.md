@@ -548,7 +548,8 @@ Request shaping:
 
 Reasoning / thinking:
 
-Custom model entries may define `thinking: { mode, efforts, defaultLevel, requiresEffort }`.
+Custom model entries may define `thinking: { mode, efforts, defaultLevel, effortRouting, requiresEffort }`.
+`effortRouting` is an optional map from `off|minimal|low|medium|high|xhigh|max` to an opaque upstream wire model id, so one effort level can use a sibling id (for example `max: muse-spark-1.3` on a contributor-pinned entry). Unmapped efforts fall back to the configured id. Routing selects the outbound request model id without switching provider, endpoint, limits, compatibility, output identity, or cost, which stay on the configured model, so set its cost to match or conservatively cover routed ids. (On `google-gemini-cli` with `google-level` mode, mapping `minimal` and `low` to the same id additionally sends thinking level `LOW` for `minimal`, per existing catalog behavior.) Honored by `openai-completions`, `openai-responses`, `anthropic-messages`, and `google-gemini-cli`; other APIs ignore it.
 `requiresEffort` defaults to auto-detection; set it to `false` only when the
 configured backend has been verified to accept an explicit reasoning-off
 request. This keeps the `:off` selector from being clamped to the lowest effort.

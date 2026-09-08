@@ -7,6 +7,7 @@ import { Effort, type FetchImpl, type Model, type OpenAICompat, type ThinkingCon
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { fingerprintStaticModels } from "@oh-my-pi/pi-catalog/model-manager";
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -1220,10 +1221,12 @@ describe("ModelRegistry", () => {
 		const customThinking: ThinkingConfig = {
 			mode: "anthropic-adaptive",
 			efforts: [Effort.Minimal, Effort.High],
+			effortRouting: { off: "claude-custom-standard", high: "claude-custom-max" },
 		};
 		let thinkingCustom: ModelRegistry;
 		let thinkingOverride: ModelRegistry;
 		let deepseekOverride: ModelRegistry;
+		let emptyRouting: ModelRegistry;
 		beforeAll(() => {
 			thinkingCustom = readonlyRegistry({
 				providers: {
@@ -1237,7 +1240,14 @@ describe("ModelRegistry", () => {
 					openrouter: {
 						modelOverrides: {
 							"anthropic/claude-sonnet-4": {
-								thinking: { mode: "budget", efforts: [Effort.Low, Effort.Medium] },
+								thinking: {
+									mode: "budget",
+									efforts: [Effort.Low, Effort.Medium],
+									effortRouting: {
+										off: "anthropic/claude-sonnet-4-standard",
+										medium: "anthropic/claude-sonnet-4-max",
+									},
+								},
 							},
 						},
 					},
@@ -1258,23 +1268,47 @@ describe("ModelRegistry", () => {
 					},
 				},
 			});
+			emptyRouting = readonlyRegistry({
+				providers: {
+					anthropic: providerConfig("https://my-proxy.example.com/v1", [
+						{
+							id: "claude-empty-routing",
+							reasoning: true,
+							thinking: { mode: "effort", efforts: [Effort.Low], effortRouting: {} },
+						},
+					]),
+				},
+			});
 		});
 
-		test("custom models preserve explicit thinking verbatim", () => {
+		test("custom models resolve configured effort routes and preserve fallback", () => {
 			const model = getModelsForProvider(thinkingCustom, "anthropic").find(m => m.id === "claude-custom");
-			// Adaptive effort ladders are wire-exact — explicit thinking passes
-			// through without a backfilled effortMap.
 			expect(model?.thinking).toEqual(customThinking);
+			expect(resolveWireModelId(model!, Effort.High)).toBe("claude-custom-max");
+			expect(resolveWireModelId(model!, undefined)).toBe("claude-custom-standard");
+			expect(resolveWireModelId(model!, Effort.Minimal)).toBe("claude-custom");
 		});
 
-		test("model overrides can replace canonical thinking metadata", () => {
+		test("model overrides resolve configured effort routes and preserve fallback", () => {
 			const model = getModelsForProvider(thinkingOverride, "openrouter").find(
 				m => m.id === "anthropic/claude-sonnet-4",
 			);
 			expect(model?.thinking).toEqual({
 				mode: "budget",
 				efforts: [Effort.Low, Effort.Medium],
+				effortRouting: {
+					off: "anthropic/claude-sonnet-4-standard",
+					medium: "anthropic/claude-sonnet-4-max",
+				},
 			});
+			expect(resolveWireModelId(model!, Effort.Medium)).toBe("anthropic/claude-sonnet-4-max");
+			expect(resolveWireModelId(model!, undefined)).toBe("anthropic/claude-sonnet-4-standard");
+			expect(resolveWireModelId(model!, Effort.Low)).toBe("anthropic/claude-sonnet-4");
+		});
+
+		test("empty effort routing preserves normal wire model resolution", () => {
+			const model = getModelsForProvider(emptyRouting, "anthropic").find(m => m.id === "claude-empty-routing");
+			expect(resolveWireModelId(model!, Effort.Low)).toBe("claude-empty-routing");
 		});
 
 		test("model overrides preserve explicit OpenRouter DeepSeek thinking metadata", () => {
@@ -1485,6 +1519,28 @@ describe("ModelRegistry", () => {
 			expect(error?.message).toContain("providers.myprovider.compat.thinkingFormat");
 			expect(error?.message).toContain("deepseek");
 			expect(invalid.find("myprovider", "my-model")).toBeUndefined();
+		});
+
+		test("invalid effort routing entries expose schema errors", () => {
+			for (const [key, effortRouting] of [
+				["ultra", { ultra: "my-model-ultra" }],
+				["high", { high: "" }],
+				["high", { high: 42 }],
+			] as const) {
+				const provider = providerConfig("http://localhost:8000/v1", [{ id: "my-model", reasoning: true }]);
+				(provider.models[0] as Record<string, unknown>).thinking = {
+					mode: "effort",
+					efforts: [Effort.High],
+					effortRouting,
+				};
+				writeRawModelsJson({ myprovider: provider });
+
+				const invalid = new ModelRegistry(authStorage, modelsJsonPath);
+				expect(invalid.getError()?.message).toContain(
+					"providers.myprovider.models.0.thinking.effortRouting." + key,
+				);
+				expect(invalid.find("myprovider", "my-model")).toBeUndefined();
+			}
 		});
 
 		test("model override can change cost fields partially without dropping long-context pricing", () => {

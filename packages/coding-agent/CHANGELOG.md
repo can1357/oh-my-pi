@@ -5,6 +5,7 @@
 ### Added
 
 - Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
+- Added `effortRouting` to custom model `thinking` blocks in `models.yml`: one effort level (for example `max`) can route to a sibling upstream wire model id on supported transports (`openai-completions`, `openai-responses`, `anthropic-messages`, `google-gemini-cli`). Routing changes only the request model id; cost and identity stay on the configured model ([#11278](https://github.com/can1357/oh-my-pi/issues/11278)).
 - Headless browser tabs now freeze when a turn settles so idle animated/WebGL pages stop burning CPU/GPU, resuming automatically on next use; tabs idle past `browser.idleCloseSec` (default 30 minutes) are closed. `persist: true` on `browser.open` opts a tab out of both ([#8246](https://github.com/can1357/oh-my-pi/issues/8246) by [@H4vC](https://github.com/H4vC)).
 
 ### Fixed

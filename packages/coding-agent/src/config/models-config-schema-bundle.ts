@@ -89,6 +89,17 @@ export const getModelsConfigSchemaBundle = once(() => {
 
 	const EffortSchema = type('"minimal" | "low" | "medium" | "high" | "xhigh" | "max"');
 
+	const EffortRoutingSchema = type({
+		"+": "reject",
+		"off?": "string > 0",
+		"minimal?": "string > 0",
+		"low?": "string > 0",
+		"medium?": "string > 0",
+		"high?": "string > 0",
+		"xhigh?": "string > 0",
+		"max?": "string > 0",
+	});
+
 	const ThinkingControlModeSchema = type(
 		'"effort" | "budget" | "google-level" | "anthropic-adaptive" | "anthropic-budget-effort"',
 	);
@@ -106,6 +117,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 		"efforts?": EffortSchema.array(),
 		"defaultLevel?": EffortSchema,
 		"effortMap?": ReasoningEffortMapSchema,
+		"effortRouting?": EffortRoutingSchema,
 		"supportsDisplay?": "boolean",
 		"requiresEffort?": "boolean",
 		// Legacy range vocabulary (pre-efforts configs).
@@ -132,6 +144,7 @@ export const getModelsConfigSchemaBundle = once(() => {
 				efforts: resolved,
 				...(value.defaultLevel !== undefined && { defaultLevel: value.defaultLevel }),
 				...(value.effortMap !== undefined && { effortMap: value.effortMap }),
+				...(value.effortRouting !== undefined && { effortRouting: value.effortRouting }),
 				...(value.supportsDisplay !== undefined && { supportsDisplay: value.supportsDisplay }),
 				...(value.requiresEffort !== undefined && { requiresEffort: value.requiresEffort }),
 			};
