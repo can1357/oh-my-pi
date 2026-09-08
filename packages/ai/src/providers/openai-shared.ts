@@ -1238,12 +1238,13 @@ export function resolveOpenAICompletionsOutputClamp(
 /**
  * Provider-specific Responses API output clamp.
  *
- * Meta documents a 131,072-token output limit for Muse Spark 1.1, so native
- * Meta requests may use the model's full advertised cap instead of the
- * conservative 64k OpenAI-compatible default.
+ * Models whose compiled provider policy opts in may use their full advertised
+ * output cap instead of the conservative 64k OpenAI-compatible default.
  */
-export function resolveOpenAIResponsesOutputClamp(model: Pick<Model, "provider" | "maxTokens">): number | undefined {
-	if (model.provider === "meta") {
+export function resolveOpenAIResponsesOutputClamp(
+	model: Pick<Model, "maxTokens"> & { compat: Pick<ResolvedOpenAISharedCompat, "clampOutputToModelMax"> },
+): number | undefined {
+	if (model.compat.clampOutputToModelMax) {
 		return model.maxTokens ?? OPENAI_MAX_OUTPUT_TOKENS;
 	}
 	return undefined;
@@ -2111,6 +2112,19 @@ function parseResponseReasoningReplayItem(signature: string | undefined): Respon
 	}
 }
 
+/**
+ * Non-empty `reasoning_text` shipped for a synthesized reasoning item when no
+ * thinking text survived history reconstruction. DeepSeek-family Responses
+ * targets (e.g. opencode-go) reject BOTH a missing reasoning item and one whose
+ * `reasoning_text` is empty — "The reasoning_text in the thinking mode must be
+ * passed back to the API" (#8248 covered the missing case, #10690 the empty
+ * one). The item's presence plus a non-empty payload is what satisfies the
+ * contract; the exact text is immaterial once the source turn's reasoning is
+ * gone. Kept out of `reasoning_content="."`-territory since DeepSeek rejects the
+ * bare-dot synthetic placeholder on the chat-completions path.
+ */
+export const SYNTHETIC_REASONING_REPLAY_PLACEHOLDER = "reasoning unavailable";
+
 export function convertResponsesAssistantMessage<TApi extends Api>(
 	assistantMsg: AssistantMessage,
 	model: Model<TApi>,
@@ -2268,12 +2282,15 @@ export function convertResponsesAssistantMessage<TApi extends Api>(
 	if (requiresReasoningItem && !reasoningItemEmitted && outputItems.length > 0) {
 		// Replay the demoted reasoning (already present in `content` as visible
 		// text) as a structured reasoning item so the thinking-mode continuation
-		// carries the `reasoning_text` the provider requires. The text may be empty
-		// when the source turn was minted by another model and its reasoning is
-		// already folded into the message text; the item's presence is what
-		// satisfies the provider contract, mirroring the empty `reasoning_content`
-		// placeholder used on the chat-completions path.
-		const reasoningText = carriedReasoningTexts.join("\n");
+		// carries the `reasoning_text` the provider requires. When no thinking
+		// text survived reconstruction (source turn minted by another model, or
+		// reasoning dropped by compaction/archive budget) the carried text is
+		// empty — and DeepSeek-family targets reject an empty `reasoning_text`
+		// exactly like a missing item (#10690), so substitute a non-empty
+		// placeholder. The `id` still prefers a surviving upstream item id.
+		const carriedReasoningText = carriedReasoningTexts.join("\n");
+		const reasoningText =
+			carriedReasoningText.length > 0 ? carriedReasoningText : SYNTHETIC_REASONING_REPLAY_PLACEHOLDER;
 		const reasoningId =
 			synthesizedReasoningItemId ?? `rs_${Bun.hash(`${model.id}:${msgIndex}:${reasoningText}`).toString(36)}`;
 		const reasoningItem: ResponseReasoningItem = {
@@ -3557,7 +3574,10 @@ export function applyCommonResponsesSamplingParams<P extends CommonResponsesPara
 	params: P,
 	options: CommonSamplingOptions | undefined,
 	model: Pick<Model, "provider" | "api" | "id" | "omitMaxOutputTokens" | "maxTokens" | "identity"> & {
-		compat: Pick<ResolvedOpenAISharedCompat, "supportsSamplingParams" | "supportsPenaltyAndStopParams">;
+		compat: Pick<
+			ResolvedOpenAISharedCompat,
+			"supportsSamplingParams" | "supportsPenaltyAndStopParams" | "clampOutputToModelMax"
+		>;
 	},
 ): void {
 	if (options?.maxTokens && !model.omitMaxOutputTokens) {

@@ -16,8 +16,8 @@ const WILL_RESET_IN_PATTERN = /(?:will\s+)?reset in\s+~?\s*([0-9.]+)\s*(ms|sec|s
 const WILL_RESET_AT_PATTERN =
 	/(?:will\s+)?reset at\s+([0-9]{4}-[0-9]{2}-[0-9]{2}[ T][0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?(?:Z|[+-][0-9]{2}:?[0-9]{2})?)/i;
 const CN_RESET_AT_PATTERN = /将在\s*([0-9]{4}-[0-9]{2}-[0-9]{2}\s+[0-9]{2}:[0-9]{2}:[0-9]{2})\s*重置/;
-// "retry-after-ms=98497000"
-const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms=([0-9]+)\b/i;
+// "retry-after-ms=98497000" / "retry-after-ms: 7200000" / "retry-after-ms = 7200000"
+const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms\s*[:=]\s*([0-9]+)\b/i;
 
 /**
  * Server-suggested retry delay extraction. Merges the patterns historically used
@@ -35,10 +35,12 @@ const RETRY_AFTER_MS_BODY_PATTERN = /\bretry-after-ms=([0-9]+)\b/i;
  *  - `Please retry in 250ms` / `Please retry in 12s`
  *  - `"retryDelay": "34.074824224s"` (JSON error detail field)
  *  - `try again in 250ms` / `try again in 12s` / `try again in 5 min` / `try again in ~158 min`
- *  - `retry-after-ms=98497000`
+ *  - `retry-after-ms=98497000` / `retry-after-ms: 7200000` / `retry-after-ms = 7200000`
  *  - `Your limit will reset at 2026-09-01 09:44:51` / `将在 2026-09-01 09:44:51 重置`
  *
- * Returns `undefined` if no signal is found.
+ * Returns `undefined` if no signal is found, or `0` when the provider
+ * explicitly asks for an immediate retry (`retry-after…=0`, or an absolute
+ * reset timestamp that has already elapsed).
  */
 export function extractRetryHint(source: Response | Headers | null | undefined, body?: string): number | undefined {
 	const headers = source instanceof Headers ? source : (source?.headers ?? undefined);
@@ -83,6 +85,28 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 
 	if (!body) return undefined;
 
+	// A body can carry several timing signals at once: the account-reset
+	// window plus header timing folded into the message text (already the
+	// max across response headers — see getRetryAfterMsFromHeaders in
+	// pi-ai). Honor the longest: retrying before either window clears
+	// re-hits a still-blocked credential and burns the retry budget.
+	let longestMs: number | undefined;
+	// A parsed-but-non-positive signal is a provider "retry now": an explicit
+	// `retry-after…=0` or an absolute reset that already elapsed. It must
+	// survive as 0 rather than collapse into "no hint found" — consumers
+	// substitute a heuristic wait (30-minute quota guess, default backoff)
+	// when the parse returns undefined, which would sleep a session the
+	// provider told to retry immediately.
+	let retryNow = false;
+	const consider = (ms: number | undefined): void => {
+		if (ms !== undefined && ms > 0 && (longestMs === undefined || ms > longestMs)) longestMs = ms;
+	};
+	const considerClamped = (ms: number | undefined): void => {
+		if (ms === undefined) return;
+		if (ms > 0) consider(ms);
+		else retryNow = true;
+	};
+
 	const quotaMatch = QUOTA_RESET_PATTERN.exec(body);
 	if (quotaMatch) {
 		const hours = quotaMatch[1] ? Number.parseInt(quotaMatch[1], 10) : 0;
@@ -90,7 +114,7 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 		const seconds = Number.parseFloat(quotaMatch[3]!);
 		if (!Number.isNaN(seconds)) {
 			const totalMs = ((hours * 60 + minutes) * 60 + seconds) * 1000;
-			if (totalMs > 0) return totalMs;
+			consider(totalMs > 0 ? totalMs : undefined);
 		}
 	}
 	for (const pattern of [WILL_RESET_AT_PATTERN, CN_RESET_AT_PATTERN]) {
@@ -101,27 +125,23 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 			const hasOffset = /(?:Z|[+-][0-9]{2}:?[0-9]{2})$/i.test(normalized);
 			const parsed = Date.parse(hasOffset ? normalized : `${normalized}Z`);
 			if (!Number.isNaN(parsed) && parsed > Date.now()) {
-				return parsed - Date.now();
+				consider(parsed - Date.now());
 			}
 		}
 	}
-	// Account-reset hints ("will reset in …") take precedence over short
-	// retry hints ("please retry in 5s"): a body carrying both must honour the
-	// longer account window, not the shorter generic one. QUOTA_RESET_PATTERN
-	// ("reset after …") above already runs first and stays first.
 	const accountResetMatch = WILL_RESET_IN_PATTERN.exec(body);
 	if (accountResetMatch?.[1]) {
 		const value = Number.parseFloat(accountResetMatch[1]);
 		if (Number.isFinite(value) && value > 0) {
 			const unitMs = unitToMs(accountResetMatch[2]!);
-			if (unitMs !== undefined) return value * unitMs;
+			if (unitMs !== undefined) consider(value * unitMs);
 		}
 	}
 
 	const retryAfterMsMatch = RETRY_AFTER_MS_BODY_PATTERN.exec(body);
 	if (retryAfterMsMatch?.[1]) {
 		const ms = Number(retryAfterMsMatch[1]);
-		if (Number.isFinite(ms) && ms > 0) return ms;
+		if (Number.isFinite(ms)) considerClamped(ms);
 	}
 
 	for (const pattern of [PLEASE_RETRY_PATTERN, RETRY_DELAY_FIELD_PATTERN, TRY_AGAIN_PATTERN]) {
@@ -130,11 +150,45 @@ export function extractRetryHint(source: Response | Headers | null | undefined, 
 			const value = Number.parseFloat(match[1]);
 			if (Number.isFinite(value) && value > 0) {
 				const unitMs = unitToMs(match[2]!);
-				if (unitMs !== undefined) return value * unitMs;
+				if (unitMs !== undefined) consider(value * unitMs);
 			}
 		}
 	}
-	return undefined;
+
+	// Legacy text forms (also honored by older local parsers): a plain
+	// `retry-after` delta in seconds or as an HTTP date, and
+	// `x-ratelimit-reset[-ms]` counters. They compete in the same maximum —
+	// a longer legacy hint must not lose to a shorter reset phrase. Their
+	// non-positive readings (explicit zero, elapsed epoch/date) are the
+	// clamped retry-now signals above.
+	const retryAfterMatch = /retry-after\s*[:=]\s*([^\s,;]+)/i.exec(body);
+	if (retryAfterMatch) {
+		const value = retryAfterMatch[1]!;
+		const seconds = Number(value);
+		if (Number.isFinite(seconds)) {
+			considerClamped(seconds * 1000);
+		} else {
+			const dateMs = Date.parse(value);
+			if (!Number.isNaN(dateMs)) considerClamped(dateMs - Date.now());
+		}
+	}
+
+	const resetMsMatch = /x-ratelimit-reset-ms\s*[:=]\s*(\d+)/i.exec(body);
+	if (resetMsMatch) {
+		const resetMs = Number(resetMsMatch[1]);
+		if (!Number.isNaN(resetMs)) {
+			considerClamped(resetMs > 1_000_000_000_000 ? resetMs - Date.now() : resetMs);
+		}
+	}
+
+	const resetMatch = /x-ratelimit-reset\s*[:=]\s*(\d+)/i.exec(body);
+	if (resetMatch) {
+		const resetSeconds = Number(resetMatch[1]);
+		if (!Number.isNaN(resetSeconds)) {
+			considerClamped(resetSeconds > 1_000_000_000 ? resetSeconds * 1000 - Date.now() : resetSeconds * 1000);
+		}
+	}
+	return longestMs ?? (retryNow ? 0 : undefined);
 }
 
 function unitToMs(unit: string): number | undefined {
@@ -391,7 +445,10 @@ export function isRetryableStatus(status: number): boolean {
  * proxies surface these for any HTTP/2 stream reset.
  */
 export function isUnexpectedSocketCloseMessage(message: string): boolean {
-	return /\b(?:the\s+)?socket connection (?:was )?closed unexpectedly\b/i.test(message);
+	return (
+		/\b(?:the\s+)?socket connection (?:was )?closed unexpectedly\b/i.test(message) ||
+		/^(?:error:\s*)?socket is closed\.?$/i.test(message.trim())
+	);
 }
 
 const TRANSIENT_MESSAGE_PATTERN =

@@ -2,9 +2,29 @@
 
 ## [Unreleased]
 
+- Added an XDG-aware speech-to-text cache directory helper for recorded audio ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
+
+## [18.1.13] - 2026-09-07
+
+### Fixed
+
+- Fixed `filterChildShellEnv` applying the omp process's own launch-environment provenance (the pre-dotenv `NODE_ENV` and launcher-owned names read from `/proc/self/environ`) to caller-supplied environment objects; launch provenance now only applies when filtering the live `process.env`/`Bun.env`, and an explicit env resolves its dotenv mode from its own `NODE_ENV`.
+
+## [18.1.11] - 2026-09-05
+
+### Fixed
+
+- Fixed `extractRetryHint` dropping the longer timing signal when an error body carries both an account reset and an appended retry hint: competing signals now merge by longest window instead of first match, so retries honor the provider's full backoff.
+
+## [18.1.7] - 2026-09-03
+
 ### Added
 
-- Added an XDG-aware speech-to-text cache directory helper for recorded audio ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
+- Added the public `getTinyWorkerRuntimeDir()` utility, which returns the standard `~/.omp/run/tiny` directory for tiny-worker runtime data.
+
+### Fixed
+
+- Fixed retry classification for Bun's bare `Socket is closed` transport error.
 
 ## [18.1.6] - 2026-09-03
 

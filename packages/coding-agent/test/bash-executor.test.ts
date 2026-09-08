@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, type ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	applyDirenvPreflight,
@@ -12,6 +13,7 @@ import {
 import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
+import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
@@ -148,6 +150,56 @@ describe("executeBash", () => {
 	it("honors cwd", async () => {
 		const result = await executeBash("pwd", { cwd: tempDir, timeout: 5000 });
 		expect(result.output.trim()).toBe(tempDir);
+	});
+
+	it("extracts terminal graphics before sanitization on failed and truncated output", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const frame = await encodeTerminalImage(image);
+		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; printf '%060000d\n' 0; printf tail; exit 7`, {
+			cwd: tempDir,
+			timeout: 5000,
+		});
+
+		expect(result.exitCode).toBe(7);
+		expect(result.images).toHaveLength(1);
+		expect(result.images?.[0]).toMatchObject({ type: "image", mimeType: "image/png" });
+		expect(result.output).toContain("tail");
+		expect(result.output).not.toContain("\x1b_G");
+		expect(result.output).not.toContain(image.data);
+	});
+
+	it("extracts Sixel emitted by an arbitrary subprocess", async () => {
+		const sixel = '\x1bP1;1q"1;1;3;6#1;2;100;0;0#1!3~\x1b\\';
+		const result = await executeBash(`printf '%s' ${shellQuote(`before${sixel}after`)}`, {
+			cwd: tempDir,
+			timeout: 5000,
+		});
+
+		expect(result.output).toBe("beforeafter");
+		expect(result.images).toHaveLength(1);
+		expect(result.images?.[0]).toMatchObject({ type: "image", mimeType: "image/png" });
+		expect(result.output).not.toContain("\x1bP");
+	});
+
+	it("keeps images emitted before a timeout", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const frame = await encodeTerminalImage(image);
+		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; sleep 3`, {
+			cwd: tempDir,
+			timeout: 20,
+		});
+
+		expect(result.timedOut).toBe(true);
+		expect(result.images).toHaveLength(1);
+		expect(result.output).not.toContain("\x1b_G");
 	});
 
 	it("passes the full direnv-load budget when the command deadline is disabled (timeout: 0)", async () => {

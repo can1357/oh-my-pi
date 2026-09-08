@@ -15,7 +15,7 @@ import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { createPersistedSubagentReviverFactory } from "@oh-my-pi/pi-coding-agent/task/persisted-revive";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
-import { IrcBus } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const tempDirs: TempDir[] = [];
@@ -617,6 +617,44 @@ describe("persisted subagent revival", () => {
 			await handle.trackedReplies[0];
 
 			expect(await duplicate).toBeNull();
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
+			IrcBus.resetGlobalForTests();
+		});
+		it("never relays a wake turn woken by another relay", async () => {
+			// Two idle subagents exchanging one message used to ping-pong forever:
+			// each relay woke the peer, whose stop-text was relayed straight back.
+			// Relay messages are answers, not wake sources, so the echo stops here.
+			const cwd = makeTempDir("@pi-revive-relay-echo-");
+			const { handle } = await reviveWithWaker(cwd);
+			const observer = handle.observer();
+			expect(observer).toBeDefined();
+
+			// A live peer captures whatever the turn relays instead of a null
+			// `bus.wait`: fully deterministic, no timer dependence.
+			const delivered: IrcMessage[] = [];
+			AgentRegistry.global().register({
+				id: "Peer",
+				displayName: "Peer",
+				kind: "sub",
+				status: "idle",
+				session: {
+					deliverIrcMessage: async (msg: IrcMessage) => {
+						delivered.push(msg);
+						return "injected" as const;
+					},
+				} as unknown as AgentSession,
+			});
+			const relayRecord: CustomMessage = {
+				...wakeRecord("Peer"),
+				details: { id: "irc-43", from: "Peer", message: "You hang up", wakeRelay: true },
+			};
+			const finish = observer?.([relayRecord]);
+			handle.setLastAssistantText("No YOU hang up");
+			await finish?.();
+			await handle.trackedReplies[0];
+
+			expect(delivered).toHaveLength(0);
 			AgentLifecycleManager.resetGlobalForTests();
 			AgentRegistry.resetGlobalForTests();
 			IrcBus.resetGlobalForTests();

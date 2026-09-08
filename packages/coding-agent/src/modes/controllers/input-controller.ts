@@ -93,6 +93,8 @@ function isExpandable(obj: unknown): obj is Expandable {
 /** Minimal contract for any component that can receive a paste payload directly. */
 interface PasteTarget {
 	pasteText(text: string): void;
+	/** Reserve delivery before an async clipboard read; undefined releases it without text. */
+	beginPaste?(): (text: string | undefined) => boolean;
 }
 
 function hasPasteText(value: unknown): value is PasteTarget {
@@ -907,18 +909,19 @@ export class InputController {
 				}
 			}
 
-			// While loop mode is on, every user-typed prompt becomes the new loop
-			// prompt that auto-resubmits after each yield.
-			if (this.ctx.loopModeEnabled) {
-				this.ctx.setLoopPrompt(text);
-			}
-
 			// Queue input during compaction
 			if (this.ctx.session.isCompacting) {
 				const images = inputImages && inputImages.length > 0 ? [...inputImages] : undefined;
 				this.ctx.queueCompactionMessage(text, "steer", images);
+				// An inline `/loop` body queued here arms the loop only when it is
+				// an actual model prompt. Skill/bash/python bodies never reach this
+				// branch, but an extension-command body would otherwise be retained
+				// as loopPrompt while the drain executes it locally — and idle
+				// submissions never arm commands.
+				if (submittedMode === "loop" && !this.#isLocalExtensionCommand(text)) this.ctx.setLoopPrompt(text);
 				return;
 			}
+
 			// Extension commands are local actions. Execute them before the normal
 			// submission path creates an optimistic user message; otherwise a
 			// consumed command remains rendered like a prompt sent to the model.
@@ -954,11 +957,17 @@ export class InputController {
 				// typed since queuing intact. Same protection as #783, applied to
 				// the streaming/queue path.
 				try {
-					await this.ctx.withLocalSubmission(
+					const forwarded = await this.ctx.withLocalSubmission(
 						text,
 						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
 						{ imageCount: images?.length ?? 0 },
 					);
+					// An inline `/loop` body arms the loop only after dispatch
+					// confirms it was forwarded: arming before the await would
+					// retain a body whose dispatch rejects, resubmitting a failed
+					// prompt after every yield. A rejection leaves prior loop
+					// state untouched, so the previous body (if any) survives.
+					if (submittedMode === "loop" && forwarded) this.ctx.setLoopPrompt(text);
 				} catch (error) {
 					// Don't lose the queued steer draft: restore images then the collapsed
 					// text so chip tokens (and band cards) survive the retry.
@@ -976,8 +985,16 @@ export class InputController {
 				this.ctx.ui.requestRender();
 				return;
 			}
-
 			// Normal message submission
+			// While loop mode is on, an idle user-typed prompt becomes the new loop
+			// prompt that auto-resubmits after each yield. This arms synchronously,
+			// before any await: arming after a turn-length dispatch would race the
+			// reschedule timer and strand the waiter. Non-forward outcomes (local
+			// consume, rejection) park the loop at their own dispatch sites, so a
+			// failed body degrades to idle instead of looping errors.
+			if (this.ctx.loopModeEnabled) {
+				this.ctx.setLoopPrompt(text);
+			}
 			// First, move any pending bash components to chat
 			this.ctx.flushPendingBashComponents();
 
@@ -1019,13 +1036,17 @@ export class InputController {
 				this.ctx.editor.pendingImageLinks = [];
 				this.#maybeStartTitleGeneration(text);
 				try {
-					await this.ctx.withLocalSubmission(
+					const forwarded = await this.ctx.withLocalSubmission(
 						text,
 						() => this.ctx.session.prompt(text, { streamingBehavior: "steer", images }),
 						{
 							imageCount: images?.length ?? 0,
 						},
 					);
+					// The idle block above already armed this body synchronously.
+					// A locally-consumed dispatch starts no turn: park the armed
+					// loop instead of resubmitting a local action on next idle.
+					if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
 				} catch (error) {
 					// Don't lose the message: hand images then collapsed text back to the
 					// editor so the user can retry (e.g. prompt dispatch rejecting an
@@ -1039,6 +1060,9 @@ export class InputController {
 					}
 					this.ctx.editor.setCollapsedText(text);
 					this.ctx.showError(error instanceof Error ? error.message : String(error));
+					// Dispatch rejected after the body was armed: park it so the
+					// failed prompt is not resubmitted on next idle.
+					if (this.ctx.loopPrompt === text) this.ctx.pauseLoop();
 				}
 				this.ctx.updatePendingMessagesDisplay();
 				this.ctx.ui.requestRender();
@@ -1776,6 +1800,7 @@ export class InputController {
 	}
 
 	async handleImagePaste(): Promise<boolean> {
+		let finishPaste: ((text: string | undefined) => boolean) | undefined;
 		try {
 			// When a modal paste-capable prompt (login/API-key Input) owns focus,
 			// only clipboard text may land there. Image payloads must not mutate
@@ -1784,6 +1809,7 @@ export class InputController {
 			const focusedNow = this.ctx.ui.getFocused();
 			const promptTarget =
 				focusedNow && focusedNow !== this.ctx.editor && hasPasteText(focusedNow) ? focusedNow : null;
+			finishPaste = promptTarget?.beginPaste?.();
 			// #8769: On macOS, Finder `Cmd+C` on an image file puts BOTH a
 			// `public.file-url` representation and a generated 1024x1024
 			// file-icon bitmap on the pasteboard. `arboard::get_image()`
@@ -1852,15 +1878,23 @@ export class InputController {
 				await this.handleImagePathPaste(imagePath);
 				return true;
 			}
-			// Route to the focused component when it accepts pastes (modal
-			// Input prompts), matching the enhanced-paste text path (#2127).
-			const target = promptTarget ?? this.ctx.editor;
-			target.pasteText(text);
+			// Keep the initiating prompt as the only possible modal destination.
+			if (promptTarget && this.ctx.ui.getFocused() !== promptTarget) return false;
+			if (finishPaste) {
+				const accepted = finishPaste(text);
+				finishPaste = undefined;
+				if (!accepted) return false;
+			} else {
+				const target = promptTarget ?? this.ctx.editor;
+				target.pasteText(text);
+			}
 			this.ctx.ui.requestRender();
 			return true;
 		} catch {
 			this.ctx.showStatus("Failed to read clipboard");
 			return false;
+		} finally {
+			finishPaste?.(undefined);
 		}
 	}
 
@@ -2008,6 +2042,15 @@ export class InputController {
 			commands,
 			basePath,
 			commandUsage: getSlashCommandUsage,
+			// This TUI host uses the default registry; the receiving session can change with focus.
+			internalUrlCaller: () => {
+				const manager = this.ctx.viewSession.sessionManager;
+				return {
+					cwd: manager.getCwd(),
+					sessionId: manager.getSessionId(),
+					sessionFile: manager.getSessionFile(),
+				};
+			},
 			keybindings: this.ctx.keybindings,
 			copyCurrentLine: () => this.handleCopyCurrentLine(),
 			copyPrompt: () => this.handleCopyPrompt(),

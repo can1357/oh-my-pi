@@ -11,21 +11,20 @@
  * focus blackout is authoritative in the rebuilt transcript; a later event is
  * delivered through the newly installed subscription.
  */
-import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ToolResultMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { SessionFocusController } from "@oh-my-pi/pi-coding-agent/modes/controllers/session-focus-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry, MAIN_AGENT_ID } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import type { SessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { AgentProgress, TaskToolDetails } from "@oh-my-pi/pi-coding-agent/task/types";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 const usage = {
 	input: 1,
@@ -271,56 +270,27 @@ function createFixture(main = makeSession([danglingHubWait], true)) {
 		status: "running",
 	});
 	const lifecycle = new AgentLifecycleManager(registry);
-	const pendingMessagesContainer = new TranscriptContainer();
-	const pendingTools = new Map();
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
+	const ctx = createInteractiveModeContext({
 		session: main.session,
-		get viewSession() {
-			return focus?.target ?? main.session;
-		},
-		chatContainer: new TranscriptContainer(),
-		pendingMessagesContainer,
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools,
-		pendingBashComponents: [],
-		pendingPythonComponents: [],
 		initialChatRendered: false,
-		hideToolActivity: false,
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), setSession: vi.fn() },
-		updateEditorBorderColor: vi.fn(),
-		settings: { get: () => false },
-		addMessageToChat: (message: AgentMessage) => helpers.addMessageToChat(message),
-		renderSessionContext: (context: SessionContext, options?: unknown) =>
-			helpers.renderSessionContext(context, options as never),
-		renderSessionContextIncrementally: (context: SessionContext, options: unknown, renderChunk?: () => void) =>
-			helpers.renderSessionContextIncrementally(context, options as never, renderChunk),
-		reloadTodos: vi.fn(async () => {}),
-		toolOutputExpanded: false,
-		hideThinkingBlock: false,
-		lastAssistantUsage: undefined,
-		loadingAnimation: undefined,
-		autoCompactionLoader: undefined,
-		retryLoader: undefined,
-		setTodos: vi.fn(),
-		showStatus: vi.fn(),
-		showWarning: vi.fn(),
-		clearPinnedError: vi.fn(),
-		clearTransientSessionUi: () => {
-			pendingMessagesContainer.disposeChildren();
-			pendingTools.clear();
-		},
-		updateEditorTopBorder: vi.fn(),
-		ensureLoadingAnimation: vi.fn(),
-	} as unknown as InteractiveModeContext;
+	});
+	ctx.clearTransientSessionUi = () => {
+		ctx.pendingMessagesContainer.disposeChildren();
+		ctx.pendingTools.clear();
+	};
 
 	const helpers = new UiHelpers(ctx);
+	ctx.addMessageToChat = helpers.addMessageToChat.bind(helpers);
+	ctx.renderSessionContext = helpers.renderSessionContext.bind(helpers);
+	ctx.renderSessionContextIncrementally = helpers.renderSessionContextIncrementally.bind(helpers);
+	ctx.renderInitialMessages = helpers.renderInitialMessages.bind(helpers);
 	const eventController = new EventController(ctx);
 	ctx.eventController = eventController;
-	ctx.renderInitialMessages = options => helpers.renderInitialMessages(options);
 	const focus = new SessionFocusController(ctx, registry, () => lifecycle);
+	Object.defineProperty(ctx, "viewSession", {
+		configurable: true,
+		get: () => focus.target ?? main.session,
+	});
 	ctx.unsubscribe = main.session.subscribe(event => eventController.handleEvent(event));
 	return { ctx, focus, main };
 }

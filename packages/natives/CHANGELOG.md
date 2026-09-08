@@ -2,6 +2,23 @@
 
 ## [Unreleased]
 
+## [18.1.9] - 2026-09-04
+
+### Added
+
+- Added native Sixel-to-PNG decoding for terminal graphics returned by shell commands.
+- Added transactional native OAuth callback registration with one-shot callback delivery on macOS, Linux desktops, and Windows.
+
+### Fixed
+
+- Fixed native version-control cleanup to respect ignore rules and path boundaries while safely handling symlinks, nested repositories, and submodules.
+
+## [18.1.7] - 2026-09-03
+
+### Added
+
+- Added Windows ARM64 native addon support, including platform-specific npm packages.
+
 ## [18.1.6] - 2026-09-03
 
 ### Breaking Changes

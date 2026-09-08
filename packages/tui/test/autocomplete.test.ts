@@ -655,6 +655,62 @@ describe("CombinedAutocompleteProvider", () => {
 			expect(result.lines[0]).toBe("/model claude-sonnet");
 			expect(result.cursorCol).toBe("/model claude-sonnet".length);
 		});
+
+		it("does not add a trailing space when completing a directory with @", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const result = provider.applyCompletion(
+				["see @pack"],
+				0,
+				9,
+				{ value: "@packages/", label: "packages/" },
+				"@pack",
+			);
+
+			expect(result.lines[0]).toBe("see @packages/");
+			expect(result.cursorCol).toBe("see @packages/".length);
+		});
+
+		it("does not add a trailing space when completing a quoted directory with @", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const line = 'see @"my fold';
+			const result = provider.applyCompletion(
+				[line],
+				0,
+				line.length,
+				{ value: '@"my folder/', label: "my folder/" },
+				'@"my fold',
+			);
+			expect(result.lines[0]).toBe('see @"my folder/');
+			expect(result.cursorCol).toBe('see @"my folder/'.length);
+		});
+
+		it("does not add a trailing space when completing a directory with a Windows backslash", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const line = "see @packages\\";
+			const result = provider.applyCompletion(
+				[line],
+				0,
+				line.length,
+				{ value: "@packages\\", label: "packages\\" },
+				"@packages\\",
+			);
+			expect(result.lines[0]).toBe("see @packages\\");
+			expect(result.cursorCol).toBe("see @packages\\".length);
+		});
+
+		it("adds a trailing space when completing a file with @", () => {
+			const provider = new CombinedAutocompleteProvider([], "/tmp");
+			const result = provider.applyCompletion(
+				["see @inde"],
+				0,
+				9,
+				{ value: "@index.ts", label: "index.ts" },
+				"@inde",
+			);
+
+			expect(result.lines[0]).toBe("see @index.ts ");
+			expect(result.cursorCol).toBe("see @index.ts ".length);
+		});
 	});
 
 	describe("hidden paths", () => {

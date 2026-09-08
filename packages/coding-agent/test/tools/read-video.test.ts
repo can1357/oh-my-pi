@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { ReadTool } from "@oh-my-pi/pi-coding-agent/tools/read";
@@ -14,15 +15,17 @@ import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const hasFfmpeg = Boolean($which("ffmpeg") && $which("ffprobe"));
 
-function makeSession(testDir: string, inspectImageActive = false): ToolSession {
+function makeSession(testDir: string, textOnlyModel = false): ToolSession {
 	const sessionFile = path.join(testDir, "session.jsonl");
+	const model = createMockModel({ id: textOnlyModel ? "text-only" : "vision" });
+	if (!textOnlyModel) model.input.push("image");
 	return {
 		cwd: testDir,
 		hasUI: false,
 		getSessionFile: () => sessionFile,
 		getArtifactsDir: () => sessionFile.slice(0, -6),
 		getSessionSpawns: () => null,
-		isToolActive: (name: string) => inspectImageActive && name === "inspect_image",
+		getActiveModel: () => model,
 		settings: Settings.isolated({ "images.autoResize": false }),
 	} as unknown as ToolSession;
 }
@@ -165,12 +168,20 @@ describe.skipIf(!hasFfmpeg)("read video", () => {
 		expect(String(error?.message ?? error)).toContain(":<frame>");
 	});
 
-	it("returns metadata without pixels when inspect_image is active", async () => {
+	it("returns metadata without pixels for text-only models", async () => {
 		const tool = new ReadTool(makeSession(testDir, true));
 
 		const result = await tool.execute("call", { path: clipPath });
 
 		expect(textOf(result)).toContain("320x240");
 		expect(result.content.find(c => c.type === "image")).toBeUndefined();
+	});
+
+	it("rejects image questions for videos", async () => {
+		const tool = new ReadTool(makeSession(testDir));
+
+		await expect(tool.execute("call", { path: `${clipPath}?q=Describe this video` })).rejects.toThrow(
+			"The ?q= selector only supports images",
+		);
 	});
 });

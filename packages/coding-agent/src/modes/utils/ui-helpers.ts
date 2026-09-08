@@ -57,7 +57,11 @@ import {
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
 import { replaceTabs } from "../../tools/render-utils";
 import { buildSkillCommandPrompt, invokeSkillCommandFromText, isKnownSkillCommand } from "../skill-command";
-import { createAssistantMessageComponent } from "./interactive-context-helpers";
+import {
+	createAssistantMessageComponent,
+	getAssistantMessageLinkTargets,
+	refreshAssistantMessageLinkTargets,
+} from "./interactive-context-helpers";
 import {
 	assistantHasVisibleContent,
 	assistantUsageIsBilled,
@@ -169,6 +173,8 @@ export class UiHelpers {
 				}
 				component.setComplete(message.exitCode, message.cancelled, {
 					truncation: message.meta?.truncation,
+					images: message.images,
+					showImages: settings.get("terminal.showImages"),
 				});
 				this.ctx.chatContainer.addChild(component);
 				break;
@@ -221,7 +227,8 @@ export class UiHelpers {
 					if (
 						message.customType === "irc:incoming" ||
 						message.customType === "irc:autoreply" ||
-						message.customType === "irc:relay"
+						message.customType === "irc:relay" ||
+						message.customType === "irc:workpool"
 					) {
 						const card = buildIrcMessageCard(message, () => this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(card);
@@ -304,7 +311,11 @@ export class UiHelpers {
 				const assistantComponent =
 					cached instanceof AssistantMessageComponent
 						? cached
-						: createAssistantMessageComponent(this.ctx, splitAssistantMessageToolTimeline(message).beforeTools);
+						: createAssistantMessageComponent(
+								this.ctx,
+								splitAssistantMessageToolTimeline(message).beforeTools,
+								getAssistantMessageLinkTargets(this.ctx),
+							);
 				if (cached !== assistantComponent) {
 					this.ctx.transcriptMessageComponents.set(message, assistantComponent);
 				}
@@ -508,7 +519,11 @@ export class UiHelpers {
 				const errorMessage = hasErrorStop ? errorPresentation.text : null;
 				const appendAssistantSegment = (segment: AssistantMessage | undefined) => {
 					if (!segment || !assistantHasVisibleContent(segment)) return;
-					const component = createAssistantMessageComponent(this.ctx, segment);
+					const component = createAssistantMessageComponent(
+						this.ctx,
+						segment,
+						getAssistantMessageLinkTargets(this.ctx),
+					);
 					this.ctx.chatContainer.addChild(component);
 				};
 
@@ -887,6 +902,13 @@ export class UiHelpers {
 	}
 
 	async renderInitialMessages(options: RenderInitialMessagesOptions = {}): Promise<void> {
+		// Collapsed replay keeps in-flight calls so pending tools remain routable during mid-turn rebuilds.
+		let context = this.ctx.viewSession.buildTranscriptSessionContext({
+			collapseCompactedHistory: settings.get("display.collapseCompacted"),
+			keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
+		});
+		let replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
+
 		// Build against a detached container. Incremental construction still yields
 		// to terminal input, while paints keep using the complete visible transcript
 		// until the replacement is ready to swap in.
@@ -900,25 +922,6 @@ export class UiHelpers {
 		const previousPendingPythonComponents = this.ctx.pendingPythonComponents;
 		const previousLastAssistantUsage = this.ctx.lastAssistantUsage;
 		const chatWasAlreadyRendered = this.ctx.initialChatRendered;
-
-		this.ctx.chatContainer = stagedChatContainer;
-		this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
-		this.ctx.pendingTools = new Map<string, ToolExecutionHandle>();
-		this.ctx.pendingMessagesContainer.disposeChildren();
-		this.ctx.pendingBashComponents = [];
-		this.ctx.pendingPythonComponents = [];
-
-		// Live display collapses to the compacted transcript tail unless the
-		// user opted into the full inline history; export/resume callers can
-		// still request either mode. Mid-turn rebuilds
-		// (focus attach/unfocus while a tool executes) keep dangling toolCalls so
-		// the in-flight call re-renders as pending instead of vanishing;
-		// renderSessionContext then keeps it in `pendingTools` for live routing.
-		let context = this.ctx.viewSession.buildTranscriptSessionContext({
-			collapseCompactedHistory: settings.get("display.collapseCompacted"),
-			keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
-		});
-		let replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
 		const renderOptions = {
 			updateFooter: true,
 		};
@@ -926,6 +929,18 @@ export class UiHelpers {
 		let replayAttempts = 0;
 		this.ctx.initialChatRendered = false;
 		try {
+			// Resolve before replacing live component maps: streaming events may arrive during filesystem I/O.
+			await refreshAssistantMessageLinkTargets(
+				this.ctx,
+				context.messages.filter((message): message is AssistantMessage => message.role === "assistant"),
+			);
+
+			this.ctx.chatContainer = stagedChatContainer;
+			this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
+			this.ctx.pendingTools = new Map<string, ToolExecutionHandle>();
+			this.ctx.pendingMessagesContainer.disposeChildren();
+			this.ctx.pendingBashComponents = [];
+			this.ctx.pendingPythonComponents = [];
 			while (true) {
 				if (this.ctx.viewSession.isStreaming) {
 					// Live events mutate the same component maps; keep their replay atomic so
@@ -953,16 +968,20 @@ export class UiHelpers {
 				// yielded. The display callback stayed gated by initialChatRendered;
 				// discard the stale partial tree and replay the current session once
 				// more instead of letting a reentrant synchronous rebuild interleave.
-				stagedChatContainer.disposeChildren();
-				this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
-				this.ctx.pendingTools.clear();
-				this.ctx.pendingBashComponents = [];
-				this.ctx.pendingPythonComponents = [];
 				context = this.ctx.viewSession.buildTranscriptSessionContext({
 					collapseCompactedHistory: settings.get("display.collapseCompacted"),
 					keepDanglingToolCalls: this.ctx.viewSession.isStreaming,
 				});
 				replayEntryCount = this.ctx.viewSession.sessionManager.getEntries().length;
+				await refreshAssistantMessageLinkTargets(
+					this.ctx,
+					context.messages.filter((message): message is AssistantMessage => message.role === "assistant"),
+				);
+				stagedChatContainer.disposeChildren();
+				this.ctx.transcriptMessageComponents = new WeakMap<AgentMessage, Component>();
+				this.ctx.pendingTools.clear();
+				this.ctx.pendingBashComponents = [];
+				this.ctx.pendingPythonComponents = [];
 			}
 
 			const replayedChatChildren = [...stagedChatContainer.children];
@@ -1092,6 +1111,15 @@ export class UiHelpers {
 		);
 	}
 
+	/**
+	 * Park the loop when drain dispatch consumes the armed body locally (void
+	 * custom command) instead of starting a turn. The drain otherwise discards
+	 * prompt()'s result, and the next idle tick would resubmit a local action.
+	 */
+	#parkLoopOnLocalConsume(text: string, forwarded: boolean): void {
+		if (!forwarded && this.ctx.loopPrompt === text) this.ctx.pauseLoop();
+	}
+
 	async #deliverQueuedMessage(message: CompactionQueuedMessage): Promise<void> {
 		if (
 			await invokeSkillCommandFromText(this.ctx, message.text, message.mode, {
@@ -1103,7 +1131,8 @@ export class UiHelpers {
 			return;
 		}
 		if (this.ctx.isKnownSlashCommand(message.text)) {
-			await this.ctx.session.prompt(message.text);
+			const forwarded = await this.ctx.session.prompt(message.text);
+			this.#parkLoopOnLocalConsume(message.text, forwarded);
 			return;
 		}
 		await this.ctx.withLocalSubmission(
@@ -1173,7 +1202,8 @@ export class UiHelpers {
 			}
 			if (firstPromptIndex === -1) {
 				for (const message of queuedMessages) {
-					await this.ctx.session.prompt(message.text);
+					const forwarded = await this.ctx.session.prompt(message.text);
+					this.#parkLoopOnLocalConsume(message.text, forwarded);
 				}
 				return;
 			}

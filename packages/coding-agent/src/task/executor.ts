@@ -4,6 +4,7 @@
  * Runs each subagent on the main thread and forwards AgentEvents for progress tracking.
  */
 
+import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
@@ -72,6 +73,7 @@ import { resolveAgentPrewalkDefault } from "./prewalk";
 import { isReadOnlyAgent } from "./read-only-policy";
 import { formatTaskResultSummary } from "./result-summary";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
+import type { WorkPoolYieldItem } from "./workpool-yield";
 import {
 	type AgentDefinition,
 	type AgentProgress,
@@ -454,6 +456,10 @@ export interface ExecutorOptions {
 	 * process-global MCP manager. Defaults to `true`.
 	 */
 	enableMCP?: boolean;
+	/** Kernel-defined tools explicitly exposed by the parent eval session. */
+	customTools?: CustomTool[];
+	/** Workpool items accepted by the child yield tool during this turn. */
+	workPoolYieldItems?: WorkPoolYieldItem[];
 	/**
 	 * Limit the child to its explicit host tool names and the required yield
 	 * tool, suppressing discovered and always-included capabilities.
@@ -683,6 +689,23 @@ export function finalizeSubprocessOutput(args: FinalizeSubprocessOutputArgs): Fi
 			const assembled = assembleYieldResult(yieldItems, lastAssistantText, arrayValuedLabels(outputSchema));
 			if (!assembled || assembled.missingData) {
 				rawOutput = rawOutput ? `${SUBAGENT_WARNING_NULL_YIELD}\n\n${rawOutput}` : SUBAGENT_WARNING_NULL_YIELD;
+				if (includeStructuredOutput) {
+					structuredOutput = { source, mode, status: "invalid", error: SUBAGENT_WARNING_NULL_YIELD };
+				}
+				// Strict mode promises a schema violation fails the run, not a
+				// warning-decorated success (exitCode 0); build the same
+				// non-zero-exit outcome the validated-data path uses below so
+				// async job delivery marks the job failed instead of completed.
+				if (mode === "strict" && includeStructuredOutput) {
+					const { validator } = buildOutputValidator(outputSchema);
+					const outcome = buildSchemaViolationOutcome(
+						{ message: SUBAGENT_WARNING_NULL_YIELD, missingRequired: [...(validator?.requiredFields ?? [])] },
+						undefined,
+					);
+					rawOutput = outcome.rawOutput;
+					stderr = outcome.stderr;
+					exitCode = outcome.exitCode;
+				}
 			} else {
 				const { validator, error: schemaError, normalized } = buildOutputValidator(outputSchema);
 				const completeData = assembled.rawText ? assembled.data : parseStringifiedJson(assembled.data ?? null);
@@ -1440,9 +1463,11 @@ function createSubagentRunMonitor(args: RunMonitorArgs): SubagentRunMonitor {
 		existing.push(data);
 		progress.extractedToolData[toolName] = existing;
 		if (toolName === "yield") {
-			yieldCalled = true;
+			const item = isRecord(data) ? data : undefined;
+			const incremental = Array.isArray(item?.type) && item.type.length > 0;
+			yieldCalled = !incremental || item?.complete === true || item?.status === "aborted";
 			yieldCallPending = false;
-			yieldInvalidatedByAsync = false;
+			if (yieldCalled) yieldInvalidatedByAsync = false;
 		}
 	};
 
@@ -2281,6 +2306,51 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+		const structured = finalized.structuredOutput;
+		const sidecarPath = path.join(args.artifactsDir, `${id}.json`);
+		if (outputPath && structured && Object.hasOwn(structured, "data")) {
+			try {
+				const serialized = JSON.stringify(structured.data, null, 2);
+				// `structured.data === undefined` (an own "data" key holding
+				// `undefined`) makes JSON.stringify return `undefined` too —
+				// neither a write nor a removal, which would leave a stale
+				// sidecar from an earlier turn answering agent://<id>/<field>
+				// with superseded data (PR #10625 review).
+				if (serialized !== undefined) await writeArtifact(sidecarPath, `${serialized}\n`);
+				else await fs.rm(sidecarPath, { force: true });
+			} catch (error) {
+				logger.warn("Failed to persist subagent structured output sidecar", {
+					agentId: id,
+					path: sidecarPath,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				// A stale sidecar from an earlier turn must not outlive this
+				// turn's <id>.md just because the replacement write failed —
+				// agent://<id>/<field> would keep answering with superseded data.
+				try {
+					await fs.rm(sidecarPath, { force: true });
+				} catch (rmError) {
+					logger.warn("Failed to drop stale subagent structured output sidecar", {
+						agentId: id,
+						path: sidecarPath,
+						error: rmError instanceof Error ? rmError.message : String(rmError),
+					});
+				}
+			}
+		} else if (outputPath) {
+			// This turn republished <id>.md; a stale sidecar from an earlier
+			// turn would keep answering agent://<id>/<field> with the
+			// superseded payload, so it must not outlive its <id>.md.
+			try {
+				await fs.rm(sidecarPath, { force: true });
+			} catch (error) {
+				logger.warn("Failed to drop stale subagent structured output sidecar", {
+					agentId: id,
+					path: sidecarPath,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
 	}
 
 	// Update final progress. A wall-clock timeout always wins: if the runtime
@@ -2391,6 +2461,9 @@ function wakeSources(records: AgentMessage[], selfId: string): WakeSource[] {
 		const details = record.details && typeof record.details === "object" ? record.details : undefined;
 		const from = details ? Reflect.get(details, "from") : undefined;
 		if (typeof from !== "string" || from === selfId || sources.some(source => source.from === from)) continue;
+		// Automated wake-turn relays are answers, not wake sources: relaying one
+		// back would ping-pong two idle peers forever.
+		if (details && Reflect.get(details, "wakeRelay") === true) continue;
 		const messageId = details ? Reflect.get(details, "id") : undefined;
 		sources.push({ from, messageId: typeof messageId === "string" ? messageId : undefined });
 	}
@@ -2425,7 +2498,13 @@ async function relayWakeTurnOutput(args: {
 			: args.turnText.trim();
 	if (!body) return;
 	for (const source of pending) {
-		const receipt = await bus.send({ from: args.id, to: source.from, body, replyTo: source.messageId });
+		const receipt = await bus.send({
+			from: args.id,
+			to: source.from,
+			body,
+			replyTo: source.messageId,
+			wakeRelay: true,
+		});
 		if (receipt.outcome === "failed") {
 			logger.warn("IRC wake-turn relay failed", { from: args.id, to: source.from, error: receipt.error });
 		}
@@ -2728,6 +2807,8 @@ export interface FollowUpTurnOptions {
 	artifactsDir?: string;
 	/** Wall-clock cap in ms for this turn; 0 disables. */
 	maxRuntimeMs?: number;
+	/** Workpool items accepted by the child yield tool during this turn. */
+	workPoolYieldItems?: WorkPoolYieldItem[];
 }
 
 /**
@@ -2746,6 +2827,7 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const index = options.index ?? 0;
 	const startTime = Date.now();
 	const session = await AgentLifecycleManager.global().ensureLive(id);
+	session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
@@ -2942,7 +3024,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	if (toolNames?.includes("exec")) {
 		const backends = resolveEvalBackends({ settings } as ToolSession);
 		const expanded = toolNames.filter(name => name !== "exec");
-		if (backends.python || backends.js || backends.ruby || backends.julia) expanded.push("eval");
+		if (backends.python || backends.js) expanded.push("eval");
 		expanded.push("bash");
 		toolNames = Array.from(new Set(expanded));
 	}
@@ -3197,6 +3279,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const enableMCP = !restrictToolNames && (options.enableMCP ?? true);
 			const mcpManager = enableMCP ? options.mcpManager : undefined;
 			const mcpProxyTools = mcpManager ? createMCPProxyTools(mcpManager) : [];
+			const sessionCustomTools = [...mcpProxyTools, ...(options.customTools ?? [])];
 
 			// Derive subagent-scoped telemetry from the parent's config so the
 			// child loop's spans nest under the parent's active execute_tool span
@@ -3287,6 +3370,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+						workPoolYieldItems: options.workPoolYieldItems ?? [],
 						ircPeers: ircRoster?.peers ?? [],
 						ircParkedCount: ircRoster?.parkedCount ?? 0,
 						ircOmittedCount: ircRoster?.omittedCount ?? 0,
@@ -3318,7 +3402,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				skipPythonPreflight,
 				enableMCP,
 				mcpManager,
-				customTools: mcpProxyTools.length > 0 ? mcpProxyTools : undefined,
+				customTools: sessionCustomTools.length > 0 ? sessionCustomTools : undefined,
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
@@ -3422,6 +3506,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
 			}
+			if (options.workPoolYieldItems) session.setWorkPoolYieldItems(options.workPoolYieldItems);
 			const enabledSubagentTools = session.getEnabledToolNames();
 			// The enabled set includes the synthetic write transport injected for
 			// explicit tool lists that omitted write. `session_init.tools` is later

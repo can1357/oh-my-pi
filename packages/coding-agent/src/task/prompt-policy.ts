@@ -1,13 +1,11 @@
-import { bareModelId, classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
+import { type DelegationBias, resolveDelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
+import type { ToolSession } from "..";
 
-/** Whether task guidance should follow Codex's GPT-5.6-specific delegation policy. */
-export function usesCodexTaskPrompt(modelId: string | undefined): boolean {
-	if (!modelId) return false;
-	// Callers pass raw ids and `provider/id` strings alike; classify the bare
-	// model segment so a provider prefix cannot hijack class membership.
-	const identity = classifyModel("", bareModelId(modelId), { lenient: true });
-	if (identity.class !== "openai" || identity.revision === undefined) return false;
-	const revision = parseRevision(identity.revision);
-	const target = parseRevision("5.6");
-	return revision !== undefined && target !== undefined && compareRevision(revision, target) === 0;
+/**
+ * Delegation bias of the session's active model, for tool descriptions that
+ * nudge toward subagents; `eager` before a model is bound.
+ */
+export function sessionDelegationBias(session: ToolSession): DelegationBias {
+	const model = session.getActiveModel?.();
+	return model ? resolveDelegationBias(model) : "eager";
 }
