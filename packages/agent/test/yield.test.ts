@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { ExponentialYield, YieldGate } from "@oh-my-pi/pi-agent-core/utils/yield";
+import { YieldGate } from "@oh-my-pi/pi-agent-core/utils/yield";
 
 const YIELD_INTERVAL_MS = 50;
 
@@ -65,33 +65,34 @@ describe("YieldGate.yieldIfDue", () => {
 });
 
 describe("ExponentialYield.race", () => {
-	it("returns the racer's value as soon as it settles", async () => {
-		const ey = new ExponentialYield({ minMs: 5_000, maxMs: 10_000 });
-		const racer = Bun.sleep(10).then(() => "done");
-		const start = performance.now();
-		const out = await ey.race([racer]);
-		const elapsed = performance.now() - start;
-		expect(out).toBe("done");
-		// The 5s yield must not have delayed us: settle within a comfy margin.
-		expect(elapsed).toBeLessThan(500);
-	});
-
 	it("cancels the losing sleep so it does not keep the loop alive", async () => {
-		// If the losing Bun.sleep weren't cancelled, this test would block for
-		// the full minMs after the racer wins, since the prior implementation
-		// kept fresh timers ticking. We pick a minMs far larger than the racer
-		// delay and assert we return well before it.
-		const ey = new ExponentialYield({ minMs: 2_000, maxMs: 2_000 });
-		const racer = Bun.sleep(20).then(() => 42);
-		const start = performance.now();
-		const out = await ey.race([racer]);
-		const elapsed = performance.now() - start;
-		expect(out).toBe(42);
-		expect(elapsed).toBeLessThan(500);
-
-		// After race resolves, ensure the AbortController-driven cancel really
-		// unblocked the underlying timer: a short follow-up sleep should not
-		// be perturbed by residual pending timers. (Sanity: this returns.)
-		await Bun.sleep(30);
-	});
+		// A child process makes event-loop liveness observable without measuring
+		// how quickly a loaded CI worker schedules a short racer. If race() leaves
+		// its losing timer behind, the child cannot exit before the watchdog.
+		const child = Bun.spawn(
+			[
+				process.execPath,
+				"-e",
+				`
+					import { ExponentialYield } from "./src/utils/yield.ts";
+					const ey = new ExponentialYield({ minMs: 60_000, maxMs: 60_000 });
+					const out = await ey.race([Promise.resolve(42)]);
+					if (out !== 42) process.exit(1);
+				`,
+			],
+			{
+				cwd: import.meta.dir + "/..",
+				stdin: "ignore",
+				stdout: "ignore",
+				stderr: "inherit",
+			},
+		);
+		const watchdog = setTimeout(() => child.kill(), 10_000);
+		try {
+			expect(await child.exited).toBe(0);
+		} finally {
+			clearTimeout(watchdog);
+			child.kill();
+		}
+	}, 15_000);
 });

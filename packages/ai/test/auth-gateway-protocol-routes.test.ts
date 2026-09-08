@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { clearCustomApis } from "@oh-my-pi/pi-ai/api-registry";
-import { FORMAT_ROUTES, type GatewayHooks, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
+import { type GatewayHooks, startAuthGateway } from "@oh-my-pi/pi-ai/auth-gateway";
 import { AuthStorage } from "@oh-my-pi/pi-ai/auth-storage";
 import { createMockModel, registerMockApi } from "@oh-my-pi/pi-ai/providers/mock";
 
@@ -12,14 +12,6 @@ afterEach(() => {
 });
 
 type ErrorBody = { error?: string };
-
-const NEW_FORMAT_PATHS = [
-	"/v1beta/models/generateContent",
-	"/v1beta/models/streamGenerateContent",
-	"/backend-api/codex/responses",
-	"/backend-api/responses",
-	"/v1/grok/chat/completions",
-] as const;
 
 async function withProtocolGateway(
 	run: (ctx: { url: string }) => Promise<void>,
@@ -52,30 +44,64 @@ async function withProtocolGateway(
 	}
 }
 
-describe("auth-gateway protocol FORMAT_ROUTES", () => {
-	it("includes Gemini, Codex, and xAI alias paths", () => {
-		const keys = Object.keys(FORMAT_ROUTES);
-		for (const pathName of NEW_FORMAT_PATHS) {
-			expect(keys).toContain(pathName);
-		}
-		expect(keys).toContain("/v1/chat/completions");
-		expect(keys).toContain("/v1/messages");
-		expect(keys).toContain("/v1/responses");
+describe("auth-gateway protocol routes over HTTP", () => {
+	it("routes canonical parameterized Gemini paths with per-endpoint response mode", async () => {
+		await withProtocolGateway(async ({ url }) => {
+			const json = await fetch(`${url}/v1beta/models/known-model:generateContent`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({}),
+			});
+			expect(json.status).toBe(200);
+			expect(json.headers.get("content-type")).toContain("application/json");
+
+			const stream = await fetch(`${url}/v1beta/models/known-model:streamGenerateContent`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({}),
+			});
+			expect(stream.status).toBe(200);
+			expect(stream.headers.get("content-type")).toContain("text/event-stream");
+			await stream.body?.cancel();
+		});
 	});
 
-	it("does not register count_tokens as a format module (negative)", () => {
-		expect(FORMAT_ROUTES["/v1/messages/count_tokens"]).toBeUndefined();
+	it("dispatches alias paths onto working format modules", async () => {
+		await withProtocolGateway(async ({ url }) => {
+			const chatBody = JSON.stringify({
+				model: "known-model",
+				messages: [{ role: "user", content: "hi" }],
+				stream: false,
+			});
+			for (const pathName of ["/v1/grok/chat/completions"]) {
+				const res = await fetch(`${url}${pathName}`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+					body: chatBody,
+				});
+				expect(res.status).toBe(200);
+			}
+			const responsesBody = JSON.stringify({ model: "known-model", input: "hi" });
+			for (const pathName of ["/v1/responses", "/backend-api/codex/responses", "/backend-api/responses"]) {
+				const res = await fetch(`${url}${pathName}`, {
+					method: "POST",
+					headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+					body: responsesBody,
+				});
+				expect(res.status).toBe(200);
+			}
+		});
 	});
 
-	it("aliases Codex and xAI paths onto the existing format modules", () => {
-		expect(FORMAT_ROUTES["/v1/grok/chat/completions"]?.module).toBe(FORMAT_ROUTES["/v1/chat/completions"]?.module);
-		expect(FORMAT_ROUTES["/v1/grok/chat/completions"]?.label).toBe("openai-chat");
-		expect(FORMAT_ROUTES["/backend-api/codex/responses"]?.module).toBe(FORMAT_ROUTES["/v1/responses"]?.module);
-		expect(FORMAT_ROUTES["/backend-api/responses"]?.module).toBe(FORMAT_ROUTES["/v1/responses"]?.module);
-		expect(FORMAT_ROUTES["/v1beta/models/generateContent"]?.module).toBe(
-			FORMAT_ROUTES["/v1beta/models/streamGenerateContent"]?.module,
-		);
-		expect(FORMAT_ROUTES["/v1beta/models/generateContent"]?.label).toBe("gemini-v1beta");
+	it("returns 404 for unknown paths (negative)", async () => {
+		await withProtocolGateway(async ({ url }) => {
+			const res = await fetch(`${url}/v1/no-such-route`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({}),
+			});
+			expect(res.status).toBe(404);
+		});
 	});
 });
 

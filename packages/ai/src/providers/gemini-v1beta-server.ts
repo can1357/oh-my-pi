@@ -451,7 +451,17 @@ export function encodeStream(
 						case "toolcall_start":
 						case "toolcall_delta":
 						case "toolcall_end": {
-							const call = event.toolCall;
+							// Only toolcall_end carries the complete call; derive
+							// in-progress calls from the partial message like the
+							// OpenAI chat streamer does.
+							const call =
+								event.type === "toolcall_end"
+									? event.toolCall
+									: (() => {
+											const partial = event.partial.content[event.contentIndex];
+											return partial && partial.type === "toolCall" ? partial : undefined;
+										})();
+							if (call === undefined) break;
 							writeSse(
 								controller,
 								{
