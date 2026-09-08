@@ -292,6 +292,16 @@ export declare class Process {
    */
   killTree(signal?: number | undefined | null): number
   /**
+   * Hard-kill the captured tree and wait up to 5000ms for every process to
+   * exit.
+   */
+  killTreeAndWait(options?: ProcessWaitOptions | undefined | null): Promise<boolean>
+  /**
+   * Hard-kill a caller-owned group and wait up to 5000ms for its captured
+   * members.
+   */
+  static killGroupAndWait(pgid: number, options?: ProcessWaitOptions | undefined | null): Promise<boolean>
+  /**
    * Gracefully terminate this process and its descendants.
    *
    * By default this waits 1000ms after polite termination before

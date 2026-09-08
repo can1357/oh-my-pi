@@ -117,6 +117,47 @@ impl Process {
 		self.inner.kill_tree(signal)
 	}
 
+	/// Hard-kill the captured tree and wait up to 5000ms for every process to
+	/// exit.
+	#[napi]
+	pub fn kill_tree_and_wait<'env>(
+		&self,
+		env: &'env Env,
+		options: Option<ProcessWaitOptions<'env>>,
+	) -> Result<PromiseRaw<'env, bool>> {
+		let options = options.unwrap_or_default();
+		let timeout = Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(5000)));
+		let ct = task::CancelToken::new(None, options.signal);
+		let waiter = self.inner.hard_kill_tree();
+		task::future(env, "process.kill_tree_and_wait", async move {
+			waiter
+				.wait(timeout, ct.into_core())
+				.await
+				.map_err(|err| napi::Error::from_reason(err.to_string()))
+		})
+	}
+
+	/// Hard-kill a caller-owned group and wait up to 5000ms for its captured
+	/// members.
+	#[napi]
+	pub fn kill_group_and_wait<'env>(
+		env: &'env Env,
+		pgid: i32,
+		options: Option<ProcessWaitOptions<'env>>,
+	) -> Result<PromiseRaw<'env, bool>> {
+		let options = options.unwrap_or_default();
+		let timeout = Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(5000)));
+		let ct = task::CancelToken::new(None, options.signal);
+		let waiter = core_process::Process::hard_kill_group(pgid)
+			.map_err(|err| napi::Error::from_reason(err.to_string()))?;
+		task::future(env, "process.kill_group_and_wait", async move {
+			waiter
+				.wait(timeout, ct.into_core())
+				.await
+				.map_err(|err| napi::Error::from_reason(err.to_string()))
+		})
+	}
+
 	/// Gracefully terminate this process and its descendants.
 	///
 	/// By default this waits 1000ms after polite termination before

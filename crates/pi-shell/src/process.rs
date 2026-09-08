@@ -459,10 +459,9 @@ mod platform {
 		}
 
 		pub fn status(&self) -> ProcessStatus {
-			if self.live_bsdinfo().is_some() {
-				ProcessStatus::Running
-			} else {
-				ProcessStatus::Exited
+			match self.live_bsdinfo() {
+				Some(info) if info.pbi_status != libc::SZOMB => ProcessStatus::Running,
+				_ => ProcessStatus::Exited,
 			}
 		}
 
@@ -1276,6 +1275,19 @@ pub struct Process {
 	inner: platform::Process,
 }
 
+/// Stable references retained across a hard-kill wave.
+pub struct ProcessExitWait {
+	processes: Vec<Process>,
+}
+
+impl ProcessExitWait {
+	/// Wait for every captured process, including processes reparented after the
+	/// kill.
+	pub async fn wait(self, timeout: Duration, ct: CancelToken) -> Result<bool> {
+		wait_for_processes(&self.processes, Some(timeout), ct).await
+	}
+}
+
 impl Process {
 	/// Open a stable process reference from a PID.
 	pub fn from_pid(pid: i32) -> Option<Self> {
@@ -1317,6 +1329,81 @@ impl Process {
 	#[must_use]
 	pub fn kill_tree(&self, signal: Option<i32>) -> u32 {
 		self.signal_tree(signal.unwrap_or(KILL_SIGNAL))
+	}
+
+	/// Snapshot and hard-kill the tree before returning its exit waiter.
+	pub fn hard_kill_tree(&self) -> ProcessExitWait {
+		let protected = host_protected_pids();
+		let mut processes = self.signalable_descendants(&protected);
+		if let Some(pgid) = self.group_id()
+			&& pgid == self.pid()
+		{
+			processes.extend(Self::group_members(pgid));
+			let _ = kill_process_group(pgid, KILL_SIGNAL);
+		}
+		if !protected.contains(&self.pid()) {
+			processes.push(self.clone());
+		}
+		Self::hard_kill_processes(processes, &protected)
+	}
+
+	/// Snapshot and hard-kill a caller-owned process group, even after its
+	/// leader exits.
+	pub fn hard_kill_group(pgid: i32) -> Result<ProcessExitWait> {
+		anyhow::ensure!(
+			pgid > 0 && !is_self_process_group(pgid),
+			"refusing to kill process group {pgid}"
+		);
+		#[cfg(target_os = "windows")]
+		anyhow::bail!("process groups are unsupported on Windows");
+		#[cfg(not(target_os = "windows"))]
+		{
+			let processes = Self::group_members(pgid);
+			anyhow::ensure!(
+				!processes.is_empty() || !process_group_alive(pgid),
+				"cannot observe members of process group {pgid}"
+			);
+			if !processes.is_empty() {
+				let _ = kill_process_group(pgid, KILL_SIGNAL);
+			}
+			Ok(Self::hard_kill_processes(processes, &host_protected_pids()))
+		}
+	}
+
+	fn group_members(pgid: i32) -> Vec<Self> {
+		pi_builtins::ProcInfo::all()
+			.into_iter()
+			.filter(|process| process.group_id() == Some(pgid))
+			.filter_map(|process| Self::from_pid(process.pid()))
+			.filter(|process| {
+				process.status() == ProcessStatus::Exited || process.group_id() == Some(pgid)
+			})
+			.collect()
+	}
+
+	fn hard_kill_processes(processes: Vec<Self>, protected: &HashSet<i32>) -> ProcessExitWait {
+		let captured: HashSet<i32> = processes.iter().map(Self::pid).collect();
+		let parents = processes
+			.iter()
+			.filter_map(|process| {
+				process
+					.ppid()
+					.filter(|parent| captured.contains(parent))
+					.map(|parent| (process.pid(), parent))
+			})
+			.collect();
+		let mut visited = HashSet::new();
+		let processes: Vec<Self> = processes
+			.into_iter()
+			.filter(|process| {
+				visited.insert(process.pid())
+					&& !pid_in_protected_subtree(process.pid(), protected, &parents)
+			})
+			.collect();
+		for process in &processes {
+			let _ = process.inner.kill(KILL_SIGNAL);
+		}
+		ProcessExitWait { processes }
 	}
 
 	/// Process group id for this process, when supported by the platform.
@@ -1556,11 +1643,21 @@ async fn wait_for_exit(
 	timeout: Option<Duration>,
 	ct: CancelToken,
 ) -> Result<bool> {
+	let mut processes = Vec::with_capacity(descendants.len() + 1);
+	processes.push(root.clone());
+	processes.extend_from_slice(descendants);
+	wait_for_processes(&processes, timeout, ct).await
+}
+
+async fn wait_for_processes(
+	processes: &[Process],
+	timeout: Option<Duration>,
+	ct: CancelToken,
+) -> Result<bool> {
 	ct.heartbeat()?;
-	if root.status() != ProcessStatus::Running
-		&& descendants
-			.iter()
-			.all(|process| process.status() != ProcessStatus::Running)
+	if processes
+		.iter()
+		.all(|process| process.status() != ProcessStatus::Running)
 	{
 		return Ok(true);
 	}
@@ -1577,10 +1674,9 @@ async fn wait_for_exit(
 		tokio::time::sleep(sleep_for).await;
 		elapsed += sleep_for;
 
-		if root.status() != ProcessStatus::Running
-			&& descendants
-				.iter()
-				.all(|process| process.status() != ProcessStatus::Running)
+		if processes
+			.iter()
+			.all(|process| process.status() != ProcessStatus::Running)
 		{
 			return Ok(true);
 		}
@@ -1902,6 +1998,30 @@ const fn platform_process_group_alive(_pgid: i32) -> bool {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn exit_waiter_times_out_for_live_targets_and_accepts_unreaped_exit() {
+		let mut child = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn sleep");
+		let root =
+			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child");
+		let pending = ProcessExitWait { processes: vec![root.clone()] }
+			.wait(Duration::ZERO, CancelToken::default())
+			.await;
+		let finished = root
+			.hard_kill_tree()
+			.wait(Duration::from_secs(5), CancelToken::default())
+			.await;
+		let status = root.status();
+		let _ = child.kill();
+		let _ = child.wait();
+		assert!(!pending.expect("wait for live child"), "a live process must exhaust the deadline");
+		assert!(finished.expect("wait after hard kill"), "an unreaped child has already exited");
+		assert_eq!(status, ProcessStatus::Exited);
+	}
 
 	/// The harness pid must be the only protected pid. Including its recorded
 	/// parent would be unsafe on Windows: that stale numeric pid can have been
