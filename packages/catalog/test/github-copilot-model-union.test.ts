@@ -194,7 +194,13 @@ describe("github-copilot multi-account discovery failures", () => {
 		expect(options.cacheProviderId).toBe(
 			resolveModelCacheProviderId("github-copilot", {
 				baseUrl: BASE_URL,
-				accountIdentities: ["acc-1", "acc-2"],
+				accountIdentities: ["acc-1:101", "acc-2:102"],
+			}),
+		);
+		expect(options.cacheProviderId).not.toBe(
+			resolveModelCacheProviderId("github-copilot", {
+				baseUrl: BASE_URL,
+				accountIdentities: ["acc-1:999", "acc-2:102"],
 			}),
 		);
 	});

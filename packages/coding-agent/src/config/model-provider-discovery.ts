@@ -217,21 +217,26 @@ export async function resolveGitHubCopilotDiscoveryAccounts(
 /**
  * Resolve stable account identities for every configured GitHub Copilot OAuth
  * account and fallback API key. Used to scope the Copilot cache namespace so
- * adding or removing accounts invalidates the cache instead of reusing a
- * stale single-account snapshot.
+ * adding or removing accounts—or re-adding an account with a new durable
+ * credential ID—invalidates the cache instead of reusing a stale snapshot with
+ * obsolete model grants.
  */
 export function resolveGitHubCopilotAccountIdentities(authStorage: AuthStorage, resolvedApiKey?: string): string[] {
-	const providerEntry = authStorage.getAll()["github-copilot"];
-	const entries = providerEntry ? (Array.isArray(providerEntry) ? providerEntry : [providerEntry]) : [];
-	const identities = new Set<string>();
+	const oauthAccounts = authStorage.listOAuthAccounts("github-copilot");
+	if (oauthAccounts.length > 0) {
+		const identities = new Set<string>();
+		for (const account of oauthAccounts) {
+			identities.add(`${account.accountId ?? "oauth"}:${account.credentialId}`);
+		}
+		return Array.from(identities).sort();
+	}
 
-	for (const entry of entries) {
-		if (entry.type === "oauth") {
-			const id = entry.accountId || entry.access;
-			if (id) identities.add(id);
-		} else if (entry.type === "api_key") {
-			const parsed = parseGitHubCopilotApiKey(entry.key);
-			const id = parsed.accountId || parsed.accessToken || entry.key;
+	const stored = authStorage.listStoredCredentials("github-copilot");
+	const identities = new Set<string>();
+	for (const entry of stored) {
+		if (entry.credential.type === "api_key") {
+			const parsed = parseGitHubCopilotApiKey(entry.credential.key);
+			const id = parsed.accountId || parsed.accessToken || entry.credential.key;
 			if (id) identities.add(id);
 		}
 	}

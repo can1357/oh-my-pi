@@ -6540,6 +6540,9 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 								return null;
 							}
 							const accountIdentities = accounts.map(account => {
+								if (account.credentialId !== undefined) {
+									return `${account.accountId ?? "oauth"}:${account.credentialId}`;
+								}
 								if (account.accountId) return account.accountId;
 								const parsed = parseGitHubCopilotApiKey(account.apiKey);
 								return parsed.accountId || parsed.accessToken || account.apiKey;

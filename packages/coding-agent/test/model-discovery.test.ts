@@ -18,7 +18,10 @@ import {
 import { kNoAuth, ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { ProviderDiscoverySchema } from "@oh-my-pi/pi-coding-agent/config/models-config-schema";
 import { resetSettingsForTest } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { resolveGitHubCopilotDiscoveryAccounts } from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
+import {
+	resolveGitHubCopilotAccountIdentities,
+	resolveGitHubCopilotDiscoveryAccounts,
+} from "@oh-my-pi/pi-coding-agent/config/model-provider-discovery";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 
@@ -782,7 +785,9 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
 
 		const initialCache = readModelCache(
-			resolveModelCacheProviderId("github-copilot", { accountIdentities: ["account-user"] }),
+			resolveModelCacheProviderId("github-copilot", {
+				accountIdentities: resolveGitHubCopilotAccountIdentities(authStorage),
+			}),
 			24 * 60 * 60 * 1000,
 			Date.now,
 			cacheDbPath,
@@ -802,7 +807,9 @@ describe("ModelRegistry runtime discovery", () => {
 
 		// Cache must preserve prior updatedAt and NOT renew with current time
 		const cacheAfterFailure = readModelCache(
-			resolveModelCacheProviderId("github-copilot", { accountIdentities: ["account-user"] }),
+			resolveModelCacheProviderId("github-copilot", {
+				accountIdentities: resolveGitHubCopilotAccountIdentities(authStorage),
+			}),
 			24 * 60 * 60 * 1000,
 			Date.now,
 			cacheDbPath,
@@ -863,7 +870,9 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
 
 		const initialCache = readModelCache(
-			resolveModelCacheProviderId("github-copilot", { accountIdentities: ["account-user"] }),
+			resolveModelCacheProviderId("github-copilot", {
+				accountIdentities: resolveGitHubCopilotAccountIdentities(authStorage),
+			}),
 			24 * 60 * 60 * 1000,
 			Date.now,
 			cacheDbPath,
@@ -883,7 +892,9 @@ describe("ModelRegistry runtime discovery", () => {
 
 		// Cache must preserve prior updatedAt
 		const cacheAfterFailure = readModelCache(
-			resolveModelCacheProviderId("github-copilot", { accountIdentities: ["account-user"] }),
+			resolveModelCacheProviderId("github-copilot", {
+				accountIdentities: resolveGitHubCopilotAccountIdentities(authStorage),
+			}),
 			24 * 60 * 60 * 1000,
 			Date.now,
 			cacheDbPath,
@@ -1029,6 +1040,91 @@ describe("ModelRegistry runtime discovery", () => {
 		// Uncached namespace [user-1, user-3] forces endpoint fetch
 		await registry.refreshProvider("github-copilot", "online-if-uncached");
 		expect(modelFetchCalls).toBe(5); // +2 for querying account 1 and account 3
+	});
+
+	test("github-copilot invalidates cached grants when credential row IDs change", async () => {
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "account-token-1",
+				refresh: "account-refresh-1",
+				expires: Date.now() + 3_600_000,
+				accountId: "user-42",
+			},
+		]);
+
+		const [initialRow] = authStorage
+			.listStoredCredentials("github-copilot")
+			.filter(r => r.credential.type === "oauth");
+
+		let failFetch = false;
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async (input, _init) => {
+				const url = String(input);
+				if (url === "https://api.github.com/copilot_internal/user") {
+					return Response.json({ endpoints: { api: "https://api.githubcopilot.com" } });
+				}
+				if (url.includes("models.dev")) {
+					return Response.json([]);
+				}
+				if (url.endsWith("/models")) {
+					if (failFetch) return new Response(null, { status: 503 });
+					return Response.json({
+						data: [
+							{
+								id: "copilot-model",
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 128_000, max_output_tokens: 16_000 },
+								},
+							},
+						],
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			},
+		});
+
+		// Initial discovery populates cache with initialRow.id in oauthCredentialIds
+		await registry.refreshProvider("github-copilot", "online");
+		const initialModel = registry.find("github-copilot", "copilot-model")!;
+		expect(initialModel.oauthCredentialIds).toEqual([initialRow.id]);
+		expect(JSON.parse((await registry.getApiKey(initialModel, "session-1"))!).token).toBe("account-token-1");
+
+		// Account is removed and re-added with the same accountId but a new credentialId
+		await authStorage.removeCredential("github-copilot", initialRow.id);
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "account-token-2",
+				refresh: "account-refresh-2",
+				expires: Date.now() + 3_600_000,
+				accountId: "user-42",
+			},
+		]);
+
+		const [readdedRow] = authStorage
+			.listStoredCredentials("github-copilot")
+			.filter(r => r.credential.type === "oauth");
+		expect(readdedRow.id).not.toBe(initialRow.id);
+
+		// Subsequent discovery fetch fails (e.g. transient 503)
+		failFetch = true;
+		await registry.refreshProvider("github-copilot", "online");
+
+		// The stale authoritative cache scoped to initialRow.id must NOT be reused.
+		// If it were reused, copilot-model would still carry oauthCredentialIds: [initialRow.id],
+		// which would reject readdedRow and fail API key resolution.
+		// Instead, falling back to static/non-authoritative models removes the obsolete grant.
+		const modelAfterFailedFetch = registry.find("github-copilot", "copilot-model");
+		expect(modelAfterFailedFetch?.oauthCredentialIds).toBeUndefined();
+
+		// When discovery recovers, fresh grants match readdedRow.id
+		failFetch = false;
+		await registry.refreshProvider("github-copilot", "online");
+		const recoveredModel = registry.find("github-copilot", "copilot-model")!;
+		expect(recoveredModel.oauthCredentialIds).toEqual([readdedRow.id]);
+		expect(JSON.parse((await registry.getApiKey(recoveredModel, "session-1"))!).token).toBe("account-token-2");
 	});
 
 	test("github-copilot discovery honors a runtime key instead of stored OAuth accounts", async () => {
