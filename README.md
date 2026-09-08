@@ -493,7 +493,7 @@ Inside `pi-natives`, the per-module breakdown (glue and tests omitted):
 
 ## Four entry points: _interactive_, _one-shot_, RPC, and ACP.
 
-Same engine, four wrappers. `omp` runs the TUI. `omp -p` answers a single prompt and exits. The Node SDK embeds the session in your process. `omp --mode rpc` and `omp acp` hand the wheel to another program over stdio.
+Same engine, four wrappers. `omp` runs the TUI. `omp -p` answers a single prompt and exits. The Bun SDK embeds the session in your process. `omp --mode rpc` and `omp acp` hand the wheel to another program over stdio.
 
 ### Interactive — when in doubt, the agent asks
 
@@ -503,11 +503,11 @@ The same prompt cards surface over ACP, so editors get the picker without writin
 
 ![omp TUI showing a multi-select question from the ask tool.](assets/ask.webp)
 
-### SDK — embed in Node
+### SDK — embed in Bun
 
 `@oh-my-pi/pi-coding-agent`
 
-Node and TypeScript hosts pull the engine in directly. The package exposes `ModelRegistry`, `SessionManager`, `createAgentSession`, and `discoverAuthStorage`; the session emits typed events you subscribe to.
+Your Bun process can import the engine directly from JavaScript or TypeScript. The package exposes `ModelRegistry`, `SessionManager`, `createAgentSession`, and `discoverAuthStorage`; the session emits typed events you subscribe to. Requires Bun 1.3.14 or newer.
 
 ```ts
 import {
@@ -533,7 +533,7 @@ await session.prompt("list .ts files");
 
 `omp --mode rpc`
 
-For non-Node embedders, or when you want process isolation. NDJSON commands in, response and event frames out. `--mode rpc-ui` adds tool cards, selectors, and dialogs as `extension_ui_request` frames the host must answer.
+Use RPC from other runtimes, including Node, or when you want process isolation. NDJSON commands in, response and event frames out. `--mode rpc-ui` adds tool cards, selectors, and dialogs as `extension_ui_request` frames the host must answer.
 
 ```
 $ omp --mode rpc --no-session
