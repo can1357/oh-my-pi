@@ -905,6 +905,25 @@ describe("resolveModelRoleValue", () => {
 		expect(result.warning).toBeUndefined();
 	});
 
+	test("resolves a custom role that references another custom role (#10853)", () => {
+		// modelRoles.fast_worker = "@task" must expand through the referenced
+		// role to its concrete model at the pure resolution layer, without
+		// relying on the retry model-fallback path (which retry.modelFallback:
+		// false disables).
+		const roles: Record<string, string> = {
+			task: "openrouter/qwen/qwen3-coder:exacto",
+			fast_worker: "@task",
+		};
+		const settings = {
+			getModelRole: (role: string) => roles[role],
+		} as NonNullable<Parameters<typeof resolveModelRoleValue>[2]>["settings"];
+
+		const result = resolveModelRoleValue("@fast_worker", allModels, { settings });
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+	});
+
 	test("splits direct comma fallback chains before parsing thinking selectors", () => {
 		const result = resolveModelRoleValue("anthropic/claude-sonnet-4-5:off,openai/gpt-4o:off", allModels);
 
