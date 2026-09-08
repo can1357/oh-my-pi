@@ -1,4 +1,4 @@
-import { Flag, is, isUsageLimit, matchesOverflowText } from "./flags";
+import { Flag, is, isClinePassSurfaceGateMessage, isUsageLimit, matchesOverflowText } from "./flags";
 import { is402BillingCapBody, parseRateLimitReason } from "./rate-limit";
 
 /** Who owns a classified gateway failure. */
@@ -260,6 +260,9 @@ function classifyOwnerDisposition(
 	}
 
 	if (status === 401 || status === 403 || type === "authentication_error") {
+		if (isClinePassSurfaceGateMessage(message)) {
+			return { owner: "policy", disposition: "policy_terminal" };
+		}
 		if (REVOKED_PATTERN.test(message)) {
 			return { owner: "credential", disposition: "credential_permanent" };
 		}

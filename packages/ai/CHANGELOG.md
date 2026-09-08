@@ -53,6 +53,9 @@
 - Added GPT-6 Astra support for preserving prompt caching when changing the thinking level during a conversation across the OpenAI and OpenAI Codex providers.
 
 ### Changed
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
+- Gateway requests now forward `previous_response_id`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema to the flat `text.format` shape and never send Chat-Completions-only `seed`.
+- Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
 
 - Provider request builders now read resolved model policy (`model.compat`, `model.identity`, `model.thinking`, behavior rules) for every model-conditional decision — Harmony escaping, vision stripping, thinking transports and ladders, Claude Code instruction injection, Google beta headers and thought-signature handling, Cloudflare gateway routing, Codex service-tier pricing, and quota metering — instead of matching model names.
 - Updated Devin auth, assignment, chat, and usage requests to the current released CLI identity, version `3000.6.2` ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
@@ -191,6 +194,11 @@
 - Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, structurally flagged content blocks stay non-retryable, and context-overflow detection reuses the central classifier.
 - Gateway disposition mapping now keeps ordinary RPM/`Too many requests` 429s in the provider lane, requires structural evidence for `gateway_terminal`, and only treats opaque or billing-worded 402s as `credential_quota`.
 
+### Fixed
+
+- Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
+
+
 ## [18.0.11] - 2026-08-29
 
 ### Fixed
@@ -206,8 +214,11 @@
 ### Fixed
 
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
-- Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
 - Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
+
+### Fixed
+
+- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
 
 ## [18.0.8] - 2026-08-27
 
