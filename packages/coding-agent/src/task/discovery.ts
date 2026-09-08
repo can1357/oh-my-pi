@@ -60,15 +60,13 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 }
 
 /**
- * Exclude explicitly configured agents that share a watchdog namespace after
- * watchdog normalization. Empty watchdog selections still claim that namespace
- * during case-insensitive agent selection. Exact-name precedence is resolved
- * before this pass.
+ * Exclude agents that share a normalized watchdog namespace. Exact-name
+ * precedence is resolved before this pass; shared/global watchdog config can
+ * target agents that do not declare a local watchdog list.
  */
 function isolateWatchdogNamespaceCollisions(agents: AgentDefinition[]): AgentDefinition[] {
 	const byNamespace = new Map<string, AgentDefinition[]>();
 	for (const agent of agents) {
-		if (agent.watchdogs === undefined) continue;
 		const namespace = normalizeAgentWatchdogNamespace(agent.name);
 		const definitions = byNamespace.get(namespace);
 		if (definitions) definitions.push(agent);

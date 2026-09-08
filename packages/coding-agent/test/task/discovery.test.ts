@@ -8,6 +8,7 @@ import {
 	clearOmpExtensionCliRoots,
 	injectOmpExtensionCliRoots,
 } from "@oh-my-pi/pi-coding-agent/discovery/omp-extension-roots";
+import { discoverAdvisorConfigs } from "@oh-my-pi/pi-coding-agent/advisor/config";
 import { discoverAgents } from "@oh-my-pi/pi-coding-agent/task/discovery";
 import { logger, removeWithRetries } from "@oh-my-pi/pi-utils";
 
@@ -167,6 +168,82 @@ describe("discoverAgents", () => {
 					},
 				],
 			});
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
+	test("isolates normalized watchdog collision when only one peer configures watchdogs", async () => {
+		const projectAgentsDir = path.join(projectDir, ".omp", "agents");
+		const userAgentsDir = path.join(tempHome, ".omp", "agents");
+		await fs.mkdir(projectAgentsDir, { recursive: true });
+		await fs.mkdir(userAgentsDir, { recursive: true });
+		await fs.writeFile(path.join(projectAgentsDir, "healthy.md"), OMP_AGENT_MD);
+		await fs.writeFile(
+			path.join(projectAgentsDir, "Reviewer.md"),
+			["---", "name: Reviewer", "description: Project reviewer without watchdogs.", "---", "Project reviewer."].join(
+				"\n",
+			),
+		);
+		await fs.writeFile(
+			path.join(userAgentsDir, "reviewer.md"),
+			[
+				"---",
+				"name: reviewer",
+				"description: User reviewer with watchdogs.",
+				"watchdogs:",
+				"  - id: review",
+				"    model: test/model",
+				"---",
+				"User reviewer.",
+			].join("\n"),
+		);
+
+		const warning = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const { agents } = await discoverAgents(projectDir, tempHome, undefined, path.join(tempHome, ".omp"));
+			const names = agents.map(agent => agent.name);
+			const advisorResult = await discoverAdvisorConfigs(projectDir, path.join(tempHome, ".omp"), {
+				agentName: "Reviewer",
+				agentDefinitions: agents,
+			});
+
+			expect(names).toContain("omp-test-agent");
+			expect(names).not.toEqual(expect.arrayContaining(["Reviewer", "reviewer"]));
+			expect(advisorResult.advisors).toEqual([]);
+			expect(
+				warning.mock.calls.some(([message]) => message === "Skipping agents with colliding watchdog namespace"),
+			).toBe(true);
+		} finally {
+			warning.mockRestore();
+		}
+	});
+
+	test("isolates normalized collision when neither peer declares watchdogs", async () => {
+		const projectAgentsDir = path.join(projectDir, ".omp", "agents");
+		const userAgentsDir = path.join(tempHome, ".omp", "agents");
+		await fs.mkdir(projectAgentsDir, { recursive: true });
+		await fs.mkdir(userAgentsDir, { recursive: true });
+		await fs.writeFile(path.join(projectAgentsDir, "healthy.md"), OMP_AGENT_MD);
+		await fs.writeFile(
+			path.join(projectAgentsDir, "Reviewer.md"),
+			["---", "name: Reviewer", "description: Project reviewer.", "---", "Project reviewer."].join("\n"),
+		);
+		await fs.writeFile(
+			path.join(userAgentsDir, "reviewer.md"),
+			["---", "name: reviewer", "description: User reviewer.", "---", "User reviewer."].join("\n"),
+		);
+
+		const warning = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			const { agents } = await discoverAgents(projectDir, tempHome, undefined, path.join(tempHome, ".omp"));
+			const names = agents.map(agent => agent.name);
+
+			expect(names).toContain("omp-test-agent");
+			expect(names).not.toEqual(expect.arrayContaining(["Reviewer", "reviewer"]));
+			expect(
+				warning.mock.calls.some(([message]) => message === "Skipping agents with colliding watchdog namespace"),
+			).toBe(true);
 		} finally {
 			warning.mockRestore();
 		}
