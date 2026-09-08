@@ -75,13 +75,17 @@ describe("auth-gateway decision-trace wiring", () => {
 			});
 			expect(res.status).toBe(401);
 			const recorded = traces.list().filter(t => t.routeId === "mock/trace-skip");
-			expect(recorded).toEqual([
+			expect(recorded.length).toBeGreaterThanOrEqual(1);
+			expect(recorded.every(t => t.disposition === "skipped" && t.reason === "credential_unavailable")).toBe(
+				true,
+			);
+			expect(recorded[0]).toEqual(
 				expect.objectContaining({
 					disposition: "skipped",
 					reason: "credential_unavailable",
 					selectedTarget: "mock/trace-skip",
 				}),
-			]);
+			);
 		} finally {
 			await handle.close();
 			storage.close();

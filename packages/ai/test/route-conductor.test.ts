@@ -85,6 +85,36 @@ describe("decideAttempt", () => {
 		expect(action).not.toEqual({ type: "dispatch", targetModelId: "other" });
 	});
 
+	it("falls back to an unused earlier compiled fallback after a preferred later target fails", () => {
+		const action = decideAttempt({
+			route: route({
+				targets: ["primary", "backup", "tertiary"],
+				fallbacks: { provider_unavailable: ["backup", "tertiary"] },
+			}),
+			state: state({ attemptedTargets: new Set(["tertiary"]), currentTarget: "tertiary" }),
+			classification: classification("provider_unavailable"),
+			commitState: "probing",
+			preferredTargetId: "tertiary",
+		});
+		expect(action).toEqual({ type: "fallback_target", targetModelId: "backup" });
+		expect(action).not.toEqual({ type: "terminal" });
+	});
+
+	it("does not retry unused leaves outside disposition-compiled fallbacks (negative)", () => {
+		const action = decideAttempt({
+			route: route({
+				targets: ["small", "large"],
+				fallbacks: { context_overflow: ["large"] },
+			}),
+			state: state({ attemptedTargets: new Set(["large"]), currentTarget: "large" }),
+			classification: classification("context_overflow"),
+			commitState: "probing",
+			preferredTargetId: "large",
+		});
+		expect(action).toEqual({ type: "terminal" });
+		expect(action).not.toEqual({ type: "fallback_target", targetModelId: "small" });
+	});
+
 	it("returns terminal after commit even when fallbacks remain (negative)", () => {
 		const fallbacks = { provider_unavailable: ["backup"] as const };
 		const probingCommitted = decideAttempt({

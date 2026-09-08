@@ -147,6 +147,8 @@
 - Fixed Gemini `generateContent` defaulting to SSE; streaming now follows `streamGenerateContent` (or an explicit `stream` body field).
 - Fixed Gemini requests silently dropping non-text parts; `inlineData`, `functionCall`, and `functionResponse` are preserved and `fileData` is rejected.
 - Canonical Gemini SDK paths (`/v1beta/models/{model}:generateContent`) are routed; structured-output controls and Anthropic `message_start` metadata stay failover-eligible.
+- Quota probes require a requestId; balance routes pick the initial target via rr/weighted strategy.
+- Fixed auth-gateway credential disable returning success before a remote broker disable completed; the handler now awaits the remote path when present.
 
 ### Added
 
@@ -357,6 +359,36 @@
 - Auth gateway `GET /v1/routes/:id` returns a registered virtual route.
 - Auth gateway `PUT /v1/routes/:id` registers or replaces a virtual route.
 
+
+### Fixed
+
+- Fixed `mapOptionsForApi` dropping OpenAI Responses/Completions continuation fields (`previousResponseId`, `parallelToolCalls`, `seed`, `logitBias`, `user`, `responseFormat`) so gateway-parsed options reach provider `buildParams()`.
+- Fixed auth-gateway target health ignoring `owner: "model"` failures and double-counting non-streaming provider failures before fallback, so circuits open at the intended three-failure threshold.
+- Fixed auth-gateway `siblingsExhausted` sticking across `fallback_target` moves (and raised the attempt cap) so each fallback target gets its own sibling-credential retry.
+- Fixed committed SSE streams leaking turn reservations when `reader.read()` rejects.
+- Fixed gateway classification treating Codex `cyber_policy` / Trusted Access HTTP 403 denials (including structured `code: "cyber_policy"`) as retryable credential failures; they are now `policy_terminal`.
+- Fixed auth-gateway preferred-later failover so retries stay inside the disposition's compiled fallback list instead of any unused route target (e.g. no small-model retry on `context_overflow`).
+- Fixed auth gateway missing-credential handling to skip a useless same-target sibling retry and fail over immediately via compiled `credential_transient` fallbacks when other targets exist.
+- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
+- Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
+- Auth gateway virtual routes now fail over to a backup model when the primary is unavailable, as long as the response stream has not been committed.
+- Auth gateway can load virtual routes from a JSON/JSON5 file.
+- Auth gateway `GET /v1/routes` lists registered virtual routes.
+- Auth gateway `GET /v1/routes/:id` returns a registered virtual route.
+- Auth gateway `PUT /v1/routes/:id` registers or replaces a virtual route.
+- Auth gateway `DELETE /v1/routes/:id` unregisters a virtual route.
+- Auth gateway retries a sibling credential on quota errors before falling over to another model.
+- Auth gateway `GET /v1/executions/:id` returns redacted decision traces for an execution.
+- Auth gateway `GET /v1/health/routes` lists virtual route ids, generations, and targets without credentials.
+- Auth gateway `GET /v1/credentials` lists credential ids without tokens; `POST /v1/credentials/:id/disable` and `POST /v1/credentials/:id/pin` manage stored accounts.
+- Auth gateway `POST /v1beta/models/generateContent` and `POST /v1beta/models/streamGenerateContent` accept Gemini v1beta generateContent requests.
+- Auth gateway `POST /v1/messages/count_tokens` estimates Anthropic input tokens.
+- Auth gateway `POST /backend-api/codex/responses` and `POST /backend-api/responses` alias Codex clients onto OpenAI Responses.
+- Auth gateway `POST /v1/grok/chat/completions` aliases xAI clients onto OpenAI chat completions.
+- Auth gateway `POST /v1/realtime` and `POST /v1/audio/speech` return 501 after auth.
+- Auth gateway skips targets whose provider health circuit is open.
+- Auth gateway remembers prompt-cache affinity after a successful non-error stream.
+- Auth gateway prefers the remembered prompt-cache model on the first dispatch of a matching request.
 
 ## [18.0.11] - 2026-08-29
 

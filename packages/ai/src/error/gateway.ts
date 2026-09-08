@@ -288,6 +288,14 @@ function classifyOwnerDisposition(
 		return { owner: "policy", disposition: "policy_terminal" };
 	}
 
+	// Policy denials (Codex cyber_policy / Trusted Access) must win over the
+	// generic 401/403 → credential_transient auth bucket, including structured
+	// `{ code: "cyber_policy" }` with a bland message. Otherwise sibling-retry
+	// treats an account policy block as a rotatable credential failure.
+	if (hasPolicySignal(err, message) && (status === 0 || status < 500)) {
+		return { owner: "policy", disposition: "policy_terminal" };
+	}
+
 	if (status === 401 || status === 403 || type === "authentication_error") {
 		if (isClinePassSurfaceGateMessage(message)) {
 			return { owner: "policy", disposition: "policy_terminal" };
@@ -302,10 +310,9 @@ function classifyOwnerDisposition(
 		return { owner: "model", disposition: "model_unavailable" };
 	}
 
-	// Policy denials and context overflows are provider decisions delivered on
-	// 4xx statuses; on 5xx they are usually quoted upstream detail, not the
-	// provider's own verdict. Definitive OAuth failures also surface as
-	// 400 `invalid_grant`.
+	// Context overflows and definitive OAuth failures are provider decisions
+	// delivered on 4xx statuses; on 5xx they are usually quoted upstream detail,
+	// not the provider's own verdict.
 	if (status > 0 && status < 500) {
 		if (matchesOverflowText(message)) {
 			return { owner: "request", disposition: "context_overflow" };

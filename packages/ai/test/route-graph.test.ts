@@ -35,6 +35,23 @@ describe("RouteRegistry", () => {
 		});
 	});
 
+	it("preserves provider-qualified model ids on concrete wraps", () => {
+		const registry = new RouteRegistry(id => {
+			if (id === "openai/gpt-5" || id === "gpt-5") {
+				return fakeModel("gpt-5");
+			}
+			return undefined;
+		});
+		const route = registry.resolve("openai/gpt-5");
+		expect(route).toEqual({
+			generation: 1,
+			id: "openai/gpt-5",
+			root: { type: "target", model: "openai/gpt-5" },
+			targets: ["openai/gpt-5"],
+			fallbacks: {},
+		});
+	});
+
 	it("keeps generation stable across resolves", () => {
 		const registry = new RouteRegistry(id => (id === "a" || id === "b" ? fakeModel(id) : undefined));
 		const first = registry.resolve("a");

@@ -527,7 +527,6 @@ function geminiCandidate(parts: Record<string, unknown>[], finishReason: string 
 	if (finishReason !== undefined) candidate.finishReason = finishReason;
 	return { candidates: [candidate] };
 }
-
 export function encodeResponse(message: AssistantMessage, requestedModelId: string): Record<string, unknown> {
 	if (message.stopReason === "error" || message.stopReason === "aborted") {
 		throw new AIError.ProviderResponseError(message.errorMessage ?? `gemini-v1beta: upstream ${message.stopReason}`, {

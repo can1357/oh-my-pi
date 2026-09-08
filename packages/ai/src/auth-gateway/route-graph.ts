@@ -127,6 +127,8 @@ export class RouteRegistry {
 		if (virtual) return virtual;
 		const model = this.#resolveModel(modelId);
 		if (!model) return undefined;
+		// Preserve provider-qualified ids (`openai/gpt-5`) so affinity / fallback
+		// targets match the caller's route key, not the catalog's bare `model.id`.
 		const id = modelId.includes("/") ? modelId : model.id;
 		return {
 			generation: this.#generation,
@@ -192,7 +194,9 @@ function resolveRouteRefs(node: RouteNode, lookup: (id: string) => RouteNode | u
 			return copyNode(resolved);
 		}
 		case "target":
-			return { type: "target", model: node.model };
+			return node.weight === undefined
+				? { type: "target", model: node.model }
+				: { type: "target", model: node.model, weight: node.weight };
 		case "fallback":
 			return {
 				type: "fallback",
@@ -285,7 +289,9 @@ function compileFlatten(children: readonly RouteNode[], seenOnPath: ReadonlySet<
 function copyNode(node: RouteNode): RouteNode {
 	switch (node.type) {
 		case "target":
-			return { type: "target", model: node.model };
+			return node.weight === undefined
+				? { type: "target", model: node.model }
+				: { type: "target", model: node.model, weight: node.weight };
 		case "fallback":
 			return {
 				type: "fallback",
@@ -338,3 +344,4 @@ function freezeFallbacks(
 	}
 	return Object.freeze(out);
 }
+
