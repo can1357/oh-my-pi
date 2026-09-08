@@ -202,7 +202,13 @@ import { shutdownTinyTitleClient } from "../tiny/title-client";
 import type { ImageAttachmentEntry } from "../tools";
 import { resolveApproval } from "../tools/approval";
 import { type AskToolDetails, type AskToolInput, recoverAskQuestions } from "../tools/ask";
-import { releaseTabsForOwner } from "../tools/browser/tab-supervisor";
+import {
+	armIdleCloseForOwner,
+	cancelIdleCloseForOwner,
+	freezeTabsForOwner,
+	releaseIdleTabsForOwner,
+	releaseTabsForOwner,
+} from "../tools/browser/tab-supervisor";
 import type { CheckpointState, CompletedRewindState } from "../tools/checkpoint";
 import { releaseComputerSessionsForOwner } from "../tools/computer/supervisor";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
@@ -579,6 +585,7 @@ export class AgentSession {
 	#unsubscribeExtendedContext?: () => void;
 	#unsubscribeCodeMode?: () => void;
 	#unsubscribeEvalPreludeSettings?: () => void;
+	#unsubscribeIdleCloseSetting?: () => void;
 	/** Last (enable, providerId) tuple resolved by `#syncAppendOnlyContext` — used to skip no-op invalidations. */
 	#lastAppendOnlyResolution?: { enable: boolean; providerId: string | undefined };
 	#eventListeners: AgentSessionEventListener[] = [];
@@ -1711,6 +1718,7 @@ export class AgentSession {
 			mcpResources: config.advisorMcpResources,
 			watchdogPrompt: config.advisorWatchdogPrompt,
 			sharedInstructions: config.advisorSharedInstructions,
+			sharedMaxNotesPerUpdate: config.advisorSharedMaxNotesPerUpdate,
 			contextPrompt: config.advisorContextPrompt,
 			memoryPrompt: config.advisorMemoryPrompt,
 			configs: config.advisorConfigs,
@@ -1834,6 +1842,18 @@ export class AgentSession {
 					error: String(error),
 				});
 			});
+		});
+		this.#unsubscribeIdleCloseSetting = this.settings.onEffectiveChange((path, value) => {
+			if (path !== "browser.idleCloseSec") return;
+			const ownerId = this.sessionManager.getSessionId() ?? "";
+			// Any change invalidates the armed deadline: cancel first (its
+			// sequence bump stops an in-flight sweep re-arming the old
+			// value), then re-arm under the new one. A non-positive value
+			// arms nothing, which is the disable path.
+			cancelIdleCloseForOwner(ownerId);
+			if (typeof value === "number" && value > 0) {
+				armIdleCloseForOwner(ownerId, value * 1000);
+			}
 		});
 		this.#unsubscribeCodeMode = onCodeModeChanged(() => {
 			void this.#tools.reconcileCodeMode().catch(error => {
@@ -2975,6 +2995,14 @@ export class AgentSession {
 				this.#toolChoiceQueue.resolve();
 			}
 		}
+		// Settle owned headless browser tabs: close tabs idle past the
+		// timeout, then freeze the survivors so animated content stops
+		// burning CPU/GPU while idle (issue #8246). Detached — tool results
+		// for this turn are already paired, and teardown must never block
+		// the event flow.
+		if (event.type === "turn_end") {
+			void this.#settleOwnedBrowserTabs();
+		}
 		if (event.type === "tool_execution_end") {
 			if (event.toolName === "goal") {
 				await this.#goalRuntime.onGoalToolCompleted();
@@ -3215,14 +3243,17 @@ export class AgentSession {
 			// expired/revoked token) so stale tokens aren't reused on the next request.
 			// Account usage caps and concurrency caps leave the credential valid: the
 			// former rotates until its reset window, while the latter is retried after
-			// a short backoff without touching the credential pool.
+			// a short backoff without touching the credential pool. Model-policy 403s
+			// (plan, model policy, org restriction) also preserve the credential: the
+			// token is valid, and wiping it hides the provider from `/model` (#11275).
 			if (msg.stopReason === "error" && msg.provider === "github-copilot") {
 				const errorId = AIError.classifyMessage(msg);
 				const isConcurrencyCap = AIError.parseRateLimitReason(msg.errorMessage ?? "") === "CONCURRENT_LIMIT";
 				if (
 					AIError.is(errorId, AIError.Flag.AuthFailed) &&
 					!AIError.is(errorId, AIError.Flag.UsageLimit) &&
-					!isConcurrencyCap
+					!isConcurrencyCap &&
+					!AIError.isGitHubCopilotPolicyDenial(msg.provider, msg.errorStatus, msg.errorMessage)
 				) {
 					await this.#modelRegistry.authStorage.remove("github-copilot");
 				}
@@ -4448,6 +4479,49 @@ export class AgentSession {
 		}
 	}
 
+	/**
+	 * Turn-settle checkpoint for owned headless browser tabs (issue #8246).
+	 * Close tabs idle past `browser.idleCloseSec` as the memory backstop,
+	 * then freeze the survivors so idle animated pages stop burning CPU/GPU
+	 * while keeping their state for millisecond resume. Scoped to OMP-owned
+	 * headless tabs of this session only — relay/CDP/spawned tabs, other
+	 * sessions' tabs, and `persist` tabs are never touched. Best-effort:
+	 * never throws, so teardown cannot break the event flow.
+	 */
+	async #settleOwnedBrowserTabs(): Promise<void> {
+		const ownerId = this.sessionManager.getSessionId();
+		if (!ownerId) return;
+		try {
+			const idleSec = this.settings.get("browser.idleCloseSec");
+			if (idleSec > 0) {
+				const closed = await withTimeout(
+					releaseIdleTabsForOwner(ownerId, { idleMs: idleSec * 1000 }),
+					3_000,
+					"Timed out closing idle browser tabs at turn settle",
+				);
+				if (closed > 0) {
+					logger.debug("Closed idle owned browser tabs at turn settle", { ownerId, closed });
+				}
+			} else {
+				// Idle close disabled at runtime: drop any deadline armed
+				// under a previous positive value so it cannot fire stale.
+				cancelIdleCloseForOwner(ownerId);
+			}
+			if (this.settings.get("browser.freezeOnTurnEnd")) {
+				const frozen = await withTimeout(
+					freezeTabsForOwner(ownerId),
+					3_000,
+					"Timed out freezing owned browser tabs at turn settle",
+				);
+				if (frozen > 0) {
+					logger.debug("Froze owned browser tabs at turn settle", { ownerId, frozen });
+				}
+			}
+		} catch (error) {
+			logger.warn("Failed to settle owned browser tabs at turn end", { error: String(error) });
+		}
+	}
+
 	async #releaseOwnedComputerSessions(ownerId: string | undefined): Promise<void> {
 		if (!ownerId) return;
 		try {
@@ -4575,6 +4649,10 @@ export class AgentSession {
 		if (this.#unsubscribeEvalPreludeSettings) {
 			this.#unsubscribeEvalPreludeSettings();
 			this.#unsubscribeEvalPreludeSettings = undefined;
+		}
+		if (this.#unsubscribeIdleCloseSetting) {
+			this.#unsubscribeIdleCloseSetting();
+			this.#unsubscribeIdleCloseSetting = undefined;
 		}
 		this.#eventListeners = [];
 		this.#runStateListeners.clear();
@@ -5253,6 +5331,14 @@ export class AgentSession {
 
 	/** Trigger idle compaction through the automatic maintenance flow. */
 	async runIdleCompaction(): Promise<void> {
+		// A pending async wake means the session is waiting, not idle: a
+		// background job (bash/task) owned by this agent re-wakes the loop when it
+		// completes, and the async-result delivery continues the run. Idle
+		// compaction is a stop-time pass like the todo reminder and session_stop
+		// hook — defer it until the session is fully idle so the resumed turn
+		// keeps its context (the async settle, or the threshold path, compacts if
+		// still needed).
+		if (this.#hasPendingAsyncWake()) return;
 		await this.#maintenance.runIdleCompaction();
 	}
 
@@ -10429,8 +10515,12 @@ export class AgentSession {
 	 *
 	 * @returns the number of advisors active after the rebuild.
 	 */
-	applyAdvisorConfigs(advisors: AdvisorConfig[], sharedInstructions: string | undefined): number {
-		return this.#advisors.applyAdvisorConfigs(advisors, sharedInstructions);
+	applyAdvisorConfigs(
+		advisors: AdvisorConfig[],
+		sharedInstructions: string | undefined,
+		sharedMaxNotesPerUpdate?: number,
+	): number {
+		return this.#advisors.applyAdvisorConfigs(advisors, sharedInstructions, sharedMaxNotesPerUpdate);
 	}
 
 	/**

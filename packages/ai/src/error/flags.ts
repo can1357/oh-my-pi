@@ -694,6 +694,26 @@ export function isClinePassSurfaceGateMessage(errorMessage: string | undefined):
 	return errorMessage !== undefined && CLINE_PASS_SURFACE_GATE_PATTERN.test(errorMessage);
 }
 
+const GITHUB_COPILOT_POLICY_DENIAL_PATTERN = /GitHub Copilot access denied \(HTTP 403\)/;
+
+/**
+ * GitHub Copilot 403s are plan/model-policy/org denials against a valid token —
+ * never a revoked credential (those arrive as 401). Wiping stored credentials
+ * on them hides the whole provider from `/model` and forces a pointless
+ * re-login, so credential-lifetime decisions must exempt them even though
+ * they still classify as `Flag.AuthFailed` (issue #11275). Mirrors the 403
+ * contract in `rewriteCopilotError` (`utils/http-inspector.ts`).
+ */
+export function isGitHubCopilotPolicyDenial(
+	provider: string | undefined,
+	status: number | undefined,
+	errorMessage: string | undefined,
+): boolean {
+	if (provider !== "github-copilot") return false;
+	if (status === 403) return true;
+	return errorMessage !== undefined && GITHUB_COPILOT_POLICY_DENIAL_PATTERN.test(errorMessage);
+}
+
 export function classifyMessage(message: {
 	api?: Api;
 	provider?: string;

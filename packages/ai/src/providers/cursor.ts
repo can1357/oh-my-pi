@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
 import http2 from "node:http2";
-import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { classifyModel, collapseVariantId } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import type {
 	ConversationStep,
 	CursorRule,
@@ -5236,8 +5236,11 @@ function extractImages(content: (TextContent | ImageContent)[]) {
  * The Run endpoint rejects a sibling slug as the wire `model_id` with
  * `resource_exhausted` (errorId 528384); the official `cursor-agent` splits the
  * slug into its base model id plus a `reasoning` effort parameter. Mirror that
- * for OpenAI-family ids: strip a trailing effort tier and emit
- * `{ id: "reasoning", value: <effort> }`.
+ * for OpenAI-family ids: split the tier with the compiled catalog policy
+ * (`collapseVariantId`, KDL suffix/lane rules) and emit
+ * `{ id: "reasoning", value: <effort> }`. The off tier (`-none`) is a sibling
+ * slug too, so it normalizes to the bare (lane-preserving) base with no
+ * reasoning parameter instead of going out raw.
  *
  * Non-OpenAI ids pass through unchanged — Cursor-native ids (`composer-*`,
  * `cursor-grok-*`, `default`) carry no effort suffix, and Claude/other siblings
@@ -5255,21 +5258,23 @@ function resolveCursorWireModel(
 } {
 	const wireModelId = requestModelId ?? model.requestModelId ?? model.id;
 	if (wireMode === "discovered") return { modelId: wireModelId, parameters: [] };
-	// Cursor's fast lane follows the effort token (`-high-fast`), while the
-	// standard lane ends at it (`-high`). Preserve the lane in the base id.
-	const match = /^(.*)-(minimal|low|medium|high|xhigh|max)(-fast)?$/.exec(wireModelId);
-	const base = match?.[1];
-	const effort = match?.[2];
-	if (
-		base &&
-		effort &&
-		(THINKING_EFFORTS as readonly string[]).includes(effort) &&
-		classifyModel("cursor", base).class === "openai"
-	) {
-		return {
-			modelId: `${base}${match[3] ?? ""}`,
-			parameters: [create(RequestedModel_ModelParameterbytesSchema, { id: "reasoning", value: effort })],
-		};
+	// `collapseVariantId` keeps the lane in the logical id (`-high-fast` →
+	// base `-fast`) and decodes the KDL effort (`-none` → `off`).
+	const collapsed = collapseVariantId("cursor", wireModelId);
+	const effort = collapsed.effort;
+	const base = effort !== undefined ? collapsed.logicalId : undefined;
+	if (effort !== undefined && base && classifyModel("cursor", base).class === "openai") {
+		if (effort === "off") {
+			return { modelId: base, parameters: [] };
+		}
+		if ((THINKING_EFFORTS as readonly string[]).includes(effort)) {
+			return {
+				modelId: base,
+				parameters: [
+					create(RequestedModel_ModelParameterbytesSchema, { id: "reasoning", value: collapsed.effort }),
+				],
+			};
+		}
 	}
 	// A bare `composer-2.5` id resolves to the Fast variant server-side
 	// (can1357/oh-my-pi#9012). Pin the Standard tier explicitly; `-fast`
