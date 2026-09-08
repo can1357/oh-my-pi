@@ -118,6 +118,7 @@
 - Grok Bot remaps retained SendToUser event indices when promoting thinking JSON to a tool call, and holds flush while promotable thinking remains.
 - Grok Bot catalog matrix rejects unknown `--ids` and counts text failures on tool-gated (supportsTools=false) rows.
 - Grok Bot catalog matrix fails tool probes that omit the follow-up ping (Write empty-stop excepted), fails authenticated AvailableModels errors, and includes `--omp` smoke failures in the exit status.
+- Fixed custom `google-generative-ai` providers failing mid-turn model fallback when Gemini 3 tool calls are replayed without their original thought signature ([#11270](https://github.com/can1357/oh-my-pi/issues/11270)).
 
 ## [18.1.14] - 2026-09-07
 
