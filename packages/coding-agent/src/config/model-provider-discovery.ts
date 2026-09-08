@@ -220,6 +220,10 @@ export async function resolveGitHubCopilotDiscoveryAccounts(
  * adding or removing accounts—or re-adding an account with a new durable
  * credential ID—invalidates the cache instead of reusing a stale snapshot with
  * obsolete model grants.
+ *
+ * When OAuth accounts exist, non-OAuth API keys are excluded from the cache
+ * identity because discovery intentionally queries only OAuth accounts; adding
+ * ignored keys would mismatch cache keys across startup hydration and discovery.
  */
 export function resolveGitHubCopilotAccountIdentities(authStorage: AuthStorage, resolvedApiKey?: string): string[] {
 	const oauthAccounts = authStorage.listOAuthAccounts("github-copilot");
@@ -231,21 +235,20 @@ export function resolveGitHubCopilotAccountIdentities(authStorage: AuthStorage, 
 		return Array.from(identities).sort();
 	}
 
+	if (resolvedApiKey) {
+		const parsed = parseGitHubCopilotApiKey(resolvedApiKey);
+		const id = parsed.accountId || parsed.accessToken || resolvedApiKey;
+		return id ? [id] : [];
+	}
+
 	const stored = authStorage.listStoredCredentials("github-copilot");
-	const identities = new Set<string>();
 	for (const entry of stored) {
 		if (entry.credential.type === "api_key") {
 			const parsed = parseGitHubCopilotApiKey(entry.credential.key);
 			const id = parsed.accountId || parsed.accessToken || entry.credential.key;
-			if (id) identities.add(id);
+			if (id) return [id];
 		}
 	}
 
-	if (resolvedApiKey) {
-		const parsed = parseGitHubCopilotApiKey(resolvedApiKey);
-		const id = parsed.accountId || parsed.accessToken || resolvedApiKey;
-		if (id) identities.add(id);
-	}
-
-	return Array.from(identities).sort();
+	return [];
 }

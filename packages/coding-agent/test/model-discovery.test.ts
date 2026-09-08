@@ -1127,6 +1127,78 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(JSON.parse((await registry.getApiKey(recoveredModel, "session-1"))!).token).toBe("account-token-2");
 	});
 
+	test("github-copilot excludes ignored API keys from cache identity when coexisting with OAuth accounts", async () => {
+		const authPath = path.join(tempDir, "auth-coexist.db");
+		authStorage.close();
+		authStorage = await AuthStorage.create(authPath, { usageProviderResolver: () => undefined });
+		await authStorage.set("github-copilot", [
+			{ type: "api_key", key: "coexisting-ignored-static-key" },
+			{
+				type: "oauth",
+				access: "oauth-token",
+				refresh: "oauth-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "oauth-user",
+			},
+		]);
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async (input, _init) => {
+				const url = String(input);
+				if (url === "https://api.github.com/copilot_internal/user") {
+					return Response.json({ endpoints: { api: "https://api.githubcopilot.com" } });
+				}
+				if (url.includes("models.dev")) {
+					return Response.json([]);
+				}
+				if (url.endsWith("/models")) {
+					return Response.json({
+						data: [
+							{
+								id: "only-oauth-model",
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 128_000, max_output_tokens: 16_000 },
+								},
+							},
+						],
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			},
+		});
+
+		// Discover models: authoritative discovery only uses OAuth accounts
+		await registry.refreshProvider("github-copilot", "online");
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+		expect(registry.find("github-copilot", "only-oauth-model")).toBeDefined();
+
+		// Startup cache scope must match the discovery cache scope (excluding the stored API key)
+		const startupIdentities = resolveGitHubCopilotAccountIdentities(authStorage);
+		const [oauthRow] = authStorage.listStoredCredentials("github-copilot").filter(r => r.credential.type === "oauth");
+		expect(startupIdentities).toEqual([`oauth-user:${oauthRow.id}`]);
+
+		// Now simulate restart: reload authStorage and open new ModelRegistry with offline hydration
+		authStorage.close();
+		authStorage = await AuthStorage.create(authPath, { usageProviderResolver: () => undefined });
+		await authStorage.reload();
+
+		let networkCalls = 0;
+		const restarted = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => {
+				networkCalls++;
+				throw new Error("Offline cache hydration must not fetch");
+			},
+		});
+		await restarted.hydrateCredentialScopedModelCaches();
+
+		// Hydration must hit the cache written during discovery:
+		// remains authoritative, retains only-oauth-model, and does not restore bundled models
+		expect(restarted.isAuthoritativeProvider("github-copilot")).toBe(true);
+		expect(restarted.find("github-copilot", "only-oauth-model")).toBeDefined();
+		expect(networkCalls).toBe(0);
+	});
+
 	test("github-copilot discovery honors a runtime key instead of stored OAuth accounts", async () => {
 		await authStorage.set("github-copilot", {
 			type: "oauth",
