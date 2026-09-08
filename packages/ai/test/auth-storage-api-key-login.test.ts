@@ -5,9 +5,6 @@ import * as os from "node:os";
 import * as path from "node:path";
 
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai/auth-storage";
-import * as deepseekModule from "@oh-my-pi/pi-ai/registry/deepseek";
-import * as kagiModule from "@oh-my-pi/pi-ai/registry/kagi";
-import * as ollamaCloudModule from "@oh-my-pi/pi-ai/registry/ollama-cloud";
 import * as aiStream from "@oh-my-pi/pi-ai/stream";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
 import { removeWithRetries } from "../../utils/src/temp";
@@ -47,9 +44,6 @@ describe("AuthStorage api-key login upsert", () => {
 	let dbPath = "";
 	let store: SqliteAuthCredentialStore | null = null;
 	let authStorage: AuthStorage | null = null;
-	let loginDeepSeekSpy: Mock<typeof deepseekModule.loginDeepSeek>;
-	let loginKagiSpy: Mock<typeof kagiModule.loginKagi>;
-	let loginOllamaCloudSpy: Mock<typeof ollamaCloudModule.loginOllamaCloud>;
 	let getEnvApiKeySpy: Mock<typeof aiStream.getEnvApiKey>;
 
 	beforeEach(async () => {
@@ -58,9 +52,6 @@ describe("AuthStorage api-key login upsert", () => {
 		dbPath = path.join(tempDir, "agent.db");
 		store = await SqliteAuthCredentialStore.open(dbPath);
 		authStorage = new AuthStorage(store);
-		loginDeepSeekSpy = vi.spyOn(deepseekModule, "loginDeepSeek");
-		loginKagiSpy = vi.spyOn(kagiModule, "loginKagi");
-		loginOllamaCloudSpy = vi.spyOn(ollamaCloudModule, "loginOllamaCloud");
 	});
 
 	afterEach(async () => {
@@ -78,11 +69,9 @@ describe("AuthStorage api-key login upsert", () => {
 	it("reuses the stored api-key row when re-login returns the same key", async () => {
 		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
 
-		loginKagiSpy.mockResolvedValueOnce("same-kagi-key").mockResolvedValueOnce("same-kagi-key");
-
 		const controller = {
 			onAuth: () => {},
-			onPrompt: async () => "",
+			onPrompt: async () => "same-kagi-key",
 		};
 
 		await authStorage.login("kagi", controller);
@@ -104,11 +93,10 @@ describe("AuthStorage api-key login upsert", () => {
 	it("appends a different api-key row when re-login returns a new key", async () => {
 		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
 
-		loginKagiSpy.mockResolvedValueOnce("first-kagi-key").mockResolvedValueOnce("second-kagi-key");
-
+		const keys = ["first-kagi-key", "second-kagi-key"];
 		const controller = {
 			onAuth: () => {},
-			onPrompt: async () => "",
+			onPrompt: async () => keys.shift() ?? "",
 		};
 
 		await authStorage.login("kagi", controller);
@@ -191,11 +179,9 @@ describe("AuthStorage api-key login upsert", () => {
 	it("reuses the stored api-key row when ollama-cloud re-login returns the same key", async () => {
 		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
 
-		loginOllamaCloudSpy.mockResolvedValueOnce("same-ollama-cloud-key").mockResolvedValueOnce("same-ollama-cloud-key");
-
 		const controller = {
 			onAuth: () => {},
-			onPrompt: async () => "",
+			onPrompt: async () => "same-ollama-cloud-key",
 		};
 
 		await authStorage.login("ollama-cloud", controller);
@@ -217,11 +203,10 @@ describe("AuthStorage api-key login upsert", () => {
 	it("stores DeepSeek login credentials as a reusable api-key credential", async () => {
 		if (!store || !authStorage || !dbPath) throw new Error("test setup failed");
 
-		loginDeepSeekSpy.mockResolvedValueOnce("same-deepseek-key").mockResolvedValueOnce("same-deepseek-key");
-
 		const controller = {
 			onAuth: () => {},
-			onPrompt: async () => "",
+			onPrompt: async () => "same-deepseek-key",
+			fetch: async () => Response.json({ object: "list", data: [] }),
 		};
 
 		await authStorage.login("deepseek", controller);

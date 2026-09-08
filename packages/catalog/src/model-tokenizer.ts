@@ -1,56 +1,49 @@
-import { bareModelId, parseAnthropicModel, parseGlmModel, semverGte } from "./identity/classify";
+import { compareRevision, parseRevision } from "./compat/revision";
+import { classifyModel } from "./compat/taxonomy";
+import type { ModelIdentity } from "./compat/types";
+import { bareModelId } from "./identity/id";
 import type { ModelTokenizer } from "./types";
-
-const DEEPSEEK_V3_ALIASES: Record<string, true> = {
-	"deepseek-chat": true,
-	"deepseek-reasoner": true,
-};
-const KIMI_K2_ALIASES: Record<string, true> = {
-	"kimi-for-coding": true,
-	"kimi-for-coding-highspeed": true,
-};
 
 // Resolution is pure and catalog ids recur across providers and aliases.
 const MAX_TOKENIZER_CACHE_ENTRIES = 2_048;
 const modelTokenizerCache = new Map<string, ModelTokenizer | null>();
 
-function claudeTokenizer(modelId: string): ModelTokenizer | undefined {
-	const parsed = parseAnthropicModel(modelId);
-	if (parsed) {
-		if (parsed.kind === "opus") {
-			if (semverGte(parsed.version, "5")) return "claude-v5";
-			if (semverGte(parsed.version, "4.7")) return "claude-v47";
-			return "claude-v3";
-		}
-		return semverGte(parsed.version, "5") ? "claude-v5-sonnet" : "claude-v3";
+function revisionAtLeast(revision: string | undefined, floor: string): boolean {
+	if (revision === undefined) return false;
+	const parsedRevision = parseRevision(revision);
+	const parsedFloor = parseRevision(floor);
+	return (
+		parsedRevision !== undefined && parsedFloor !== undefined && compareRevision(parsedRevision, parsedFloor) >= 0
+	);
+}
+
+function claudeTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	if (identity.class !== "anthropic") return undefined;
+	if (identity.family === "opus") {
+		if (revisionAtLeast(identity.revision, "5")) return "claude-v5";
+		if (revisionAtLeast(identity.revision, "4.7")) return "claude-v47";
+		return "claude-v3";
 	}
-	return /(^|[-/.:])claude([-.:]|$)/i.test(modelId) ? "claude-v3" : undefined;
+	if (identity.family === "sonnet" || identity.family === "fable" || identity.family === "mythos") {
+		return revisionAtLeast(identity.revision, "5") ? "claude-v5-sonnet" : "claude-v3";
+	}
+	return "claude-v3";
 }
 
-function qwenTokenizer(modelId: string): ModelTokenizer | undefined {
-	const version = /qwen[-_ ]?(\d+)\.(\d+)(?![\dbB])/i.exec(modelId);
-	if (!version) return undefined;
-	const major = Number.parseInt(version[1], 10);
-	const minor = Number.parseInt(version[2], 10);
-	return major > 3 || (major === 3 && minor >= 5) ? "qwen3" : undefined;
+function qwenTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	return identity.class === "qwen" && revisionAtLeast(identity.revision, "3.5") ? "qwen3" : undefined;
 }
 
-function deepSeekTokenizer(modelId: string): ModelTokenizer | undefined {
-	const lower = modelId.toLowerCase();
-	if (lower.includes("distill")) return undefined;
-	if (DEEPSEEK_V3_ALIASES[lower]) return "deepseek-v3";
-	return /(?:^|[-_.:])(?:v?[34]|r1)(?:[-_.:]|$)/.test(lower) && lower.includes("deepseek") ? "deepseek-v3" : undefined;
+function deepSeekTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	return identity.class === "deepseek" ? "deepseek-v3" : undefined;
 }
 
-function kimiTokenizer(modelId: string): ModelTokenizer | undefined {
-	const lower = modelId.toLowerCase();
-	if (KIMI_K2_ALIASES[lower]) return "kimi-k2";
-	return /(?:^|[-_.:])kimi[-_.:]?k?[23](?:[-_.:]|$)/.test(lower) ? "kimi-k2" : undefined;
+function kimiTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	return identity.class === "kimi" ? "kimi-k2" : undefined;
 }
 
-function glmTokenizer(modelId: string): ModelTokenizer | undefined {
-	const glm = parseGlmModel(modelId);
-	return glm && semverGte(glm.version, "5") ? "glm5" : undefined;
+function glmTokenizer(identity: ModelIdentity): ModelTokenizer | undefined {
+	return identity.class === "glm" && revisionAtLeast(identity.revision, "5") ? "glm5" : undefined;
 }
 
 /**
@@ -62,13 +55,13 @@ function glmTokenizer(modelId: string): ModelTokenizer | undefined {
 export function resolveModelTokenizer(modelId: string): ModelTokenizer | undefined {
 	const cached = modelTokenizerCache.get(modelId);
 	if (cached !== undefined) return cached ?? undefined;
-	const bare = bareModelId(modelId);
+	const identity = classifyModel("", bareModelId(modelId), { lenient: true });
 	const tokenizer =
-		claudeTokenizer(bare) ??
-		qwenTokenizer(bare) ??
-		deepSeekTokenizer(bare) ??
-		kimiTokenizer(bare) ??
-		glmTokenizer(bare);
+		claudeTokenizer(identity) ??
+		qwenTokenizer(identity) ??
+		deepSeekTokenizer(identity) ??
+		kimiTokenizer(identity) ??
+		glmTokenizer(identity);
 	if (modelTokenizerCache.size === MAX_TOKENIZER_CACHE_ENTRIES) modelTokenizerCache.clear();
 	modelTokenizerCache.set(modelId, tokenizer ?? null);
 	return tokenizer;

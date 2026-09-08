@@ -1,0 +1,9 @@
+class "minimax" {
+    namespace "minimax"
+    bounded "minimax"
+    bounded "hailuo"
+
+    family "m1" glob="*minimax-m1*"
+    family "m2" glob="*minimax-m2*"
+    family "m3" glob="*minimax-m3*"
+}

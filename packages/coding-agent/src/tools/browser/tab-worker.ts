@@ -250,10 +250,7 @@ interface TabApi {
 	scroll(deltaX: number, deltaY: number): Promise<void>;
 	drag(from: DragTarget, to: DragTarget): Promise<void>;
 	waitFor(selector: string, opts?: { timeout?: number }): Promise<ActionableHandle>;
-	evaluate<TResult, TArgs extends unknown[]>(
-		fn: string | ((...args: TArgs) => TResult | Promise<TResult>),
-		...args: TArgs
-	): Promise<TResult>;
+	evaluate<R, TArgs extends unknown[]>(fn: string | ((...args: TArgs) => R | Promise<R>), ...args: TArgs): Promise<R>;
 	scrollIntoView(selector: string): Promise<void>;
 	select(selector: string, ...values: string[]): Promise<string[]>;
 	uploadFile(selector: string, ...filePaths: string[]): Promise<void>;

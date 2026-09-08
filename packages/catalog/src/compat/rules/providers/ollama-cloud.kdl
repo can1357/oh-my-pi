@@ -1,0 +1,20 @@
+// Provider-wire compat for "ollama-cloud"; regenerated from the frozen census using deployment contract selectors.
+
+provider "ollama-cloud" {
+	thinking-mode "effort"
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek-v4-pro:preview" {
+		thinking-efforts "low" "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-4*" "glm-5" "glm-5.1" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "glm-5.2" {
+		thinking-efforts "high" "max"
+	}
+}

@@ -109,14 +109,24 @@ export function buildLaunchCompletionBlock(message: CustomOrHookMessage): ToolAc
  */
 export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: () => boolean): Component {
 	const details = (
-		message as CustomMessage<{ from?: string; to?: string; message?: string; body?: string; replyTo?: string }>
+		message as CustomMessage<{
+			from?: string;
+			to?: string;
+			message?: string;
+			body?: string;
+			replyTo?: string;
+			pool?: string;
+			mode?: string;
+		}>
 	).details;
 	const kind =
 		message.customType === "irc:incoming"
 			? ("incoming" as const)
 			: message.customType === "irc:autoreply"
 				? ("autoreply" as const)
-				: ("relay" as const);
+				: message.customType === "irc:workpool"
+					? ("workpool" as const)
+					: ("relay" as const);
 	return createIrcMessageCard(
 		{
 			kind,
@@ -125,6 +135,8 @@ export function buildIrcMessageCard(message: CustomOrHookMessage, getExpanded: (
 			body: kind === "incoming" ? details?.message : details?.body,
 			replyTo: details?.replyTo,
 			timestamp: message.timestamp,
+			pool: details?.pool,
+			mode: details?.mode,
 		},
 		getExpanded,
 		theme,

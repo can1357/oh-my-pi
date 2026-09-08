@@ -8,7 +8,7 @@ import * as url from "node:url";
 import { getProjectDir, logger, withTimeout } from "@oh-my-pi/pi-utils";
 import { describeMCPTimeout, isMCPTimeoutEnabled, resolveMCPTimeoutMs } from "./timeout";
 import { createHttpTransport } from "./transports/http";
-import { createSseTransport } from "./transports/sse";
+import { LegacySseConnectionTimeoutError, createSseTransport } from "./transports/sse";
 import { createStdioTransport } from "./transports/stdio";
 import type {
 	MCPGetPromptParams,
@@ -129,6 +129,19 @@ async function initializeConnection(
 	return result;
 }
 
+/** Identifies an MCP server whose initial handshake exceeded its configured timeout. */
+export class MCPConnectionTimeoutError extends Error {
+	readonly serverName: string;
+	readonly timeoutMs: number;
+
+	constructor(serverName: string, timeoutMs: number) {
+		super(`Connection to MCP server "${serverName}" timed out after ${describeMCPTimeout(timeoutMs)}`);
+		this.name = "MCPConnectionTimeoutError";
+		this.serverName = serverName;
+		this.timeoutMs = timeoutMs;
+	}
+}
+
 /**
  * Connect to an MCP server.
  * Has a 30 second timeout by default to prevent blocking startup.
@@ -144,6 +157,7 @@ export async function connectToServer(
 	},
 ): Promise<MCPServerConnection> {
 	const timeoutMs = resolveMCPTimeoutMs(config.timeout);
+	const timeoutError = new MCPConnectionTimeoutError(name, timeoutMs);
 	let transport: MCPTransport | undefined;
 
 	const connect = async (): Promise<MCPServerConnection> => {
@@ -187,19 +201,14 @@ export async function connectToServer(
 		if (!isMCPTimeoutEnabled(timeoutMs)) {
 			return await connect();
 		}
-		return await withTimeout(
-			connect(),
-			timeoutMs,
-			`Connection to MCP server "${name}" timed out after ${describeMCPTimeout(timeoutMs)}`,
-			options?.signal,
-		);
+		return await withTimeout(connect(), timeoutMs, timeoutError, options?.signal);
 	} catch (error) {
 		// If withTimeout rejected (timeout/abort) while connect() was still pending,
 		// the transport may be alive with an open SSE listener. Close it.
 		if (transport) {
 			void transport.close().catch(() => {});
 		}
-		throw error;
+		throw error instanceof LegacySseConnectionTimeoutError ? timeoutError : error;
 	}
 }
 
