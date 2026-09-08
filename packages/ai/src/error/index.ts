@@ -7,6 +7,7 @@ export * from "./finalize";
 export * from "./flags";
 export * from "./format";
 export * from "./gateway";
+export * from "./gateway-action";
 export * from "./oauth";
 export * from "./provider";
 export * from "./rate-limit";

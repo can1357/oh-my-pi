@@ -2,6 +2,49 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Block private discovery hosts across RFC1918, CGNAT, link-local, and IPv6 ULA ranges when `allowPrivate` is unset.
+- Reset StreamCommitGate before each pre-commit retry so terminated gates do not hold fallback SSE.
+- Continue routing to backup targets when a virtual-route primary has no credential.
+- Resolve `/v1/messages/count_tokens` models through the route registry so virtual route ids work.
+
+- Remember prompt-cache affinity under the derived session fingerprint when clients omit an explicit cache key.
+- Settle quota probes only after a successful stream result, not on post-commit failure or client cancel.
+- Preserve the SSE chunk that crosses the StreamCommitGate prelude byte cap instead of dropping it on commit.
+
+- Correlate Gemini functionResponse tool ids with the preceding same-name functionCall when wire ids are omitted.
+- Clear provider health after a successful gateway attempt so prior failures do not keep the circuit open.
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
+- Gateway requests now forward `previous_response_id`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema to the flat `text.format` shape and never send Chat-Completions-only `seed`.
+- Fixed OpenAI Responses continuation pairing a caller-supplied `previous_response_id` with an internally computed delta from a different stored response, and restricted stale-baseline recovery to internally owned chain ids so a stale caller id can no longer silently drop prior context.
+- Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
+- Auth gateway virtual routes now fail over to a backup model when the primary is unavailable, as long as the response stream has not been committed.
+- Auth gateway can load virtual routes from a JSON/JSON5 file.
+- Auth gateway `GET /v1/routes` lists registered virtual routes.
+- Auth gateway `GET /v1/routes/:id` returns a registered virtual route.
+- Auth gateway `PUT /v1/routes/:id` registers or replaces a virtual route.
+- Auth gateway `DELETE /v1/routes/:id` unregisters a virtual route.
+- Auth gateway retries a sibling credential on quota errors before falling over to another model.
+- Auth gateway `GET /v1/executions/:id` returns redacted decision traces for an execution.
+- Auth gateway `GET /v1/health/routes` lists virtual route ids, generations, and targets without credentials.
+- Auth gateway `GET /v1/credentials` lists credential ids without tokens; `POST /v1/credentials/:id/disable` and `POST /v1/credentials/:id/pin` manage stored accounts.
+- Auth gateway `POST /v1beta/models/generateContent` and `POST /v1beta/models/streamGenerateContent` accept Gemini v1beta generateContent requests.
+- Auth gateway `POST /v1/messages/count_tokens` estimates Anthropic input tokens.
+- Auth gateway `POST /backend-api/codex/responses` and `POST /backend-api/responses` alias Codex clients onto OpenAI Responses.
+- Auth gateway `POST /v1/grok/chat/completions` aliases xAI clients onto OpenAI chat completions.
+- Auth gateway `POST /v1/realtime` and `POST /v1/audio/speech` return 501 after auth.
+- Auth gateway skips targets whose provider health circuit is open.
+- Auth gateway remembers prompt-cache affinity after a successful non-error stream.
+- Auth gateway prefers the remembered prompt-cache model on the first dispatch of a matching request.
+
+- Prompt-cache affinity stores the route target id; default-route tests register/dispatch instead of static-echo.
+- Quota probe leases are not acquired without a `requestId` that can settle or release them.
+- Fixed Gemini responses dropping `toolCall` blocks (now encoded as `functionCall` parts).
+- Fixed OAuth quota probing acquiring an immortal lease when `getApiKey` is called without `requestId`.
+- Fixed Gemini `generateContent` defaulting to SSE; streaming now follows `streamGenerateContent` (or an explicit `stream` body field).
+- Fixed Gemini requests silently dropping non-text parts; `inlineData`, `functionCall`, and `functionResponse` are preserved and `fileData` is rejected.
+- Canonical Gemini SDK paths (`/v1beta/models/{model}:generateContent`) are routed; structured-output controls and Anthropic `message_start` metadata stay failover-eligible.
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
@@ -165,6 +208,7 @@
 - Improved OAuth sign-in flows, including a fallback message when the browser cannot automatically close the OAuth success tab.
 - Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
 - Fixed Codex OAuth quota handling so chat and Spark usage remain independent, legacy shared quota limits continue to work, and incomplete usage reports are not incorrectly treated as unlimited.
+
 
 ## [18.0.8] - 2026-08-27
 

@@ -59,6 +59,13 @@
 
 ### Added
 
+- `omp auth-gateway serve --routes=<path>` loads virtual route definitions from a JSON/JSON5 file.
+- `omp auth-gateway serve` loads virtual routes from `auth.gateway.routesFile` in config.yml when `--routes` is omitted.
+
+- Added provider-reported credits and concrete routed-model counts to `/session` statistics ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added `CLINE_API_KEY` to the CLI environment help for native ClinePass subscription inference ([#7863](https://github.com/can1357/oh-my-pi/pull/7863) by [@will-bogusz](https://github.com/will-bogusz)).
+- Devin model selectors now accept the native CLI's short aliases (`devin/opus`, `devin/swe`), dotted upstream spellings (`devin/gemini-3.7-flash`), and raw effort-route wire uids for dynamically collapsed families ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
+- Added provider-supplied model metadata to the `/models` detail line: `new`, `beta`, and `recommended` badges beside the model name, and the upstream description after the context, cost, and perf facts ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added opt-in `bash.allowCompoundCommands` approval for conservative literal `&&` chains, with ordered per-segment rules and normal bash policy fallback for unmatched segments. The opt-in requires a positively classified POSIX-quoting shell; incompatible and unknown shells retain legacy approval. Whole-chain denies take precedence over earlier prompts.
 
@@ -373,6 +380,11 @@
 ### Added
 
 - Added gallery previews for composer and status-line components, with CLI filters for browsing by surface, composer, or segment.
+- Git and Jujutsu operations now run in-process (gitoxide/jj-lib) instead of spawning `git`/`jj` subprocesses — faster status lines, diffs, staging, and worktree operations. The git binary is only used for credential-bound network transfers (push/fetch/clone) and reftable repositories.
+- Status lines, footers, reviews, project identity, cleanse, and autoresearch reads now work in pure Jujutsu workspaces as well as Git checkouts.
+- Include token usage statistics in inspect_image tool output
+- Pressing the session model shortcut (alt+p) again inside the picker toggles a red Task mode that switches the Task subagent's model for this session instead.
+- Git TUI: an AI staging wand next to "Stage All" asks "What should we stage?" and stages only the matching changes — the tiny/smol model picks the matching files from the whole change list, then filters their hunks in parallel; file-scoped requests ("git stuff") stage the picked files whole, content-scoped ones ("all comment changes") stage only the matching hunks.
 
 ### Changed
 
