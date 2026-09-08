@@ -6,6 +6,7 @@
 
 - Fixed Copilot discovery across multiple accounts, preserving Business and Enterprise endpoints and avoiding duplicate requests when a token refreshes.
 - Copilot requests now select only accounts that grant the chosen model, including when model discovery is restored from cache.
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 
 ### Added
 
