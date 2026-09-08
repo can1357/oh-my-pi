@@ -326,6 +326,59 @@ describe("AgentSession advisor toggle", () => {
 		}
 	});
 
+	it("isolates bundled watchdog discovery and reloads by SDK agent directory", async () => {
+		const sessions: AgentSession[] = [];
+		const definition =
+			"---\nname: sdk-watchdog-worker\ndescription: Custom directory worker\nwatchdogs:\n  - id: review\n    name: WATCHDOG_NAME\n    instructions: Review the assigned work.\n---\nPerform the assigned work.\n";
+		try {
+			for (const name of ["First", "Second"]) {
+				const agentDir = path.join(tempDir.path(), name);
+				await fs.mkdir(path.join(agentDir, "agents"), { recursive: true });
+				await Bun.write(path.join(agentDir, "agents", "worker.md"), definition.replace("WATCHDOG_NAME", name));
+				const settings = Settings.isolated({
+					"async.enabled": false,
+					"compaction.enabled": false,
+				});
+				settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+				const result = await createAgentSession({
+					cwd: tempDir.path(),
+					agentDir,
+					agentName: "sdk-watchdog-worker",
+					sessionManager: SessionManager.inMemory(tempDir.path()),
+					authStorage,
+					modelRegistry,
+					settings,
+					model,
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					workspaceTree: {
+						rootPath: tempDir.path(),
+						rendered: "",
+						truncated: false,
+						totalLines: 0,
+						agentsMdFiles: [],
+					},
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+				});
+				sessions.push(result.session);
+				expect(result.session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual([name]);
+			}
+			await Bun.write(
+				path.join(tempDir.path(), "First", "agents", "worker.md"),
+				definition.replace("WATCHDOG_NAME", "Updated"),
+			);
+			await sessions[0].refreshAdvisorConfigs(true);
+			expect(sessions[0].getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Updated"]);
+			expect(sessions[1].getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Second"]);
+		} finally {
+			for (const target of sessions) await target.dispose();
+		}
+	});
+
 	it("explicit enable rebuilds the runtime when the advisor role changes", () => {
 		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 		expect(session.setAdvisorEnabled(true)).toBe(true);

@@ -1421,8 +1421,8 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	let sessionWatchdogDefinition = options.agentWatchdogDefinition;
 	let initialAdvisorDiscovery = true;
 	const resolveSessionAdvisors = async (sessionCwd: string, refreshAgents = false) => {
-		if (refreshAgents) await refreshAgentDiscovery(sessionCwd, buildSessionExtensionRoots());
-		const { agents } = await discoverAgentsForCreate(sessionCwd, buildSessionExtensionRoots());
+		if (refreshAgents) await refreshAgentDiscovery(sessionCwd, buildSessionExtensionRoots(), agentDir);
+		const { agents } = await discoverAgentsForCreate(sessionCwd, buildSessionExtensionRoots(), agentDir);
 		if (!initialAdvisorDiscovery && sessionWatchdogDefinition?.filePath) {
 			const updated = agents.find(
 				agent =>
@@ -1751,7 +1751,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			advisorConfigsPromise,
 		]);
 	if (!options.agentWatchdogDefinition && options.agentName) {
-		const { agents } = await discoverAgentsForCreate(cwd, buildSessionExtensionRoots());
+		const { agents } = await discoverAgentsForCreate(cwd, buildSessionExtensionRoots(), agentDir);
 		const definition = agents.find(candidate => candidate.name.trim().toLowerCase() === resolvedAgentName);
 		const settingsOverride = settings.get("task.agentAdvisor")[definition?.name ?? resolvedAgentName];
 		if (definition?.advisor !== undefined || definition?.watchdogs?.length || settingsOverride) {
