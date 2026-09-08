@@ -1,7 +1,14 @@
-import { describe, expect, it } from "bun:test";
+import * as os from "node:os";
+import { beforeAll, describe, expect, it } from "bun:test";
 import type { DailyActivityPoint } from "@oh-my-pi/omp-stats/shared-types";
 import type { UsageReport } from "@oh-my-pi/pi-ai";
-import { buildHeatmapLayout, buildProviderCards } from "@oh-my-pi/pi-coding-agent/modes/components/usage-dashboard";
+import {
+	buildHeatmapLayout,
+	buildProviderCards,
+	formatActivityErrorDetail,
+	UsageDashboardComponent,
+} from "@oh-my-pi/pi-coding-agent/modes/components/usage-dashboard";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 
 function day(day: string, cost: number, requests = 1): DailyActivityPoint {
 	return { day, cost, requests, totalTokens: 0 };
@@ -106,5 +113,63 @@ describe("buildProviderCards", () => {
 		expect(idle.sort()).toEqual(["cursor", "ollama-cloud"]);
 		const unlimited = cards.find(card => card.provider === "ollama-cloud");
 		expect(unlimited?.unlimited).toBe(true);
+	});
+});
+describe("UsageDashboardComponent", () => {
+	beforeAll(async () => {
+		await initTheme(false);
+	});
+	it("renders specific error reason when activity loading fails instead of generic DB read error", async () => {
+		const { promise: rendered, resolve: markRendered } = Promise.withResolvers<void>();
+		const component = new UsageDashboardComponent({
+			reports: [],
+			renderDetail: () => "",
+			loadActivity: () => Promise.reject(new Error("worker spawn failed")),
+			requestRender: () => markRendered(),
+			onClose: () => {},
+		});
+
+		await rendered;
+		const lines = component.render(80).join("\n");
+		expect(lines).toContain("Usage history unavailable (worker spawn failed).");
+		expect(lines).not.toContain("stats database could not be read");
+	});
+	it("sanitizes control sequences, collapses multiline errors, and shortens paths", async () => {
+		const home = os.homedir();
+		const rawError = `subprocess crashed at ${home}/.omp/stats.db:\n\tfailed to open\x1b[2J\r\nline 2\x1b[31m...`;
+		const { promise: rendered, resolve: markRendered } = Promise.withResolvers<void>();
+		const component = new UsageDashboardComponent({
+			reports: [],
+			renderDetail: () => "",
+			loadActivity: () => Promise.reject(new Error(rawError)),
+			requestRender: () => markRendered(),
+			onClose: () => {},
+		});
+
+		await rendered;
+		const renderedLines = component.render(140);
+		const contentLine = renderedLines.find(l => l.includes("Usage history unavailable"));
+		expect(contentLine).toBeDefined();
+		expect(contentLine).not.toContain("\x1b[2J");
+		expect(contentLine).not.toContain("\n");
+		expect(contentLine).not.toContain("\t");
+		expect(contentLine).not.toContain(home);
+		expect(contentLine).toContain("~/.omp/stats.db");
+		expect(contentLine).toContain(
+			"Usage history unavailable (subprocess crashed at ~/.omp/stats.db: failed to open line 2).",
+		);
+	});
+});
+
+describe("formatActivityErrorDetail", () => {
+	it("strips ANSI control sequences and collapses multiline error text to single line", () => {
+		const input = "worker spawn failed\ntrace\x1b[2J\r\n\tsecond line";
+		expect(formatActivityErrorDetail(input)).toBe("worker spawn failed trace second line");
+	});
+
+	it("shortens home directory paths to tilde and removes trailing dots", () => {
+		const home = "/Users/testuser";
+		const input = `Error: failed to open ${home}/.omp/stats.db...`;
+		expect(formatActivityErrorDetail(input, home)).toBe("Error: failed to open ~/.omp/stats.db");
 	});
 });
