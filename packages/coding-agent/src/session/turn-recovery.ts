@@ -2115,6 +2115,7 @@ export class TurnRecovery {
 		this.#retryAttempt++;
 		const hardErrorSameModelRetry =
 			options?.hardErrorFallback === true &&
+			!AIError.isPayloadRejection(message) &&
 			this.#hardErrorSameModelRetryCount < retrySettings.hardErrorSameModelRetries;
 		if (hardErrorSameModelRetry) this.#hardErrorSameModelRetryCount++;
 		let recoveryAttempt = hardErrorSameModelRetry ? this.#hardErrorSameModelRetryCount : this.#retryAttempt;
@@ -2352,13 +2353,13 @@ export class TurnRecovery {
 				this.resolveRetry(); // Resolve so waitForRetry() completes
 				return false;
 			}
-			// A fallback model gets a fresh retry budget. Credential rotation
-			// instead keeps the cumulative attempt count while bypassing the
-			// same-route budget: every distinct account must be tried first.
-			if (switchedModel) {
-				this.#retryAttempt = 1;
-				recoveryAttempt = 1;
-			}
+		}
+		// Every fallback model gets a fresh retry budget, including switches
+		// before the previous model exhausts maxRetries. Credential rotation
+		// keeps the cumulative attempt count because every account gets a try.
+		if (switchedModel) {
+			this.#retryAttempt = 1;
+			recoveryAttempt = 1;
 		}
 		if ((classifierRefusal || accountPolicyDenial) && !switchedCredential && !switchedModel) {
 			// A prior attempt in this saga already announced `auto_retry_start`

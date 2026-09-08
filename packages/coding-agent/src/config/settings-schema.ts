@@ -1853,7 +1853,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Retry & Fallback",
 			label: "Hard-Error Same-Model Retries",
 			description:
-				"Retry the same model with backoff before the fallback chain is consulted on hard provider errors. 0 preserves the current behavior and consults the chain immediately.",
+				"Retry eligible hard provider errors on the same model N times with backoff before fallback; requires retry.modelFallback and a retry.fallbackChains entry that covers the active model. Payload rejections skip same-model retries, and 0 preserves immediate fallback.",
 			options: [
 				{ value: "0", label: "No retries" },
 				{ value: "1", label: "1 retry" },
