@@ -1,7 +1,9 @@
 import * as fs from "node:fs/promises";
+import { prompt } from "@oh-my-pi/pi-utils";
+import todoUserEditPrompt from "../../prompts/system/todo-user-edit.md" with { type: "text" };
 import {
 	applyOpsToPhases,
-	getLatestTodoPhasesFromEntries,
+	getLatestTodoSnapshotFromEntries,
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
@@ -119,17 +121,12 @@ function findTaskFuzzy(phases: TodoPhase[], query: string): { task: TodoItem; ph
 // =============================================================================
 
 function buildSystemReminder(action: string, phases: TodoPhase[], removed = false): string {
-	const md = phases.length === 0 ? "(empty)" : phasesToMarkdown(phases).trimEnd();
-	const lines = ["<system-reminder>", `The user manually modified the todo list (${action}).`];
-	if (removed) {
-		lines.push(
-			phases.length === 0
-				? "The user intentionally cleared the todo list. Do NOT recreate or re-populate it unless the user explicitly asks; continue the current request without a todo list."
-				: "The user intentionally removed the entries no longer shown below. Do NOT re-add them unless the user explicitly asks.",
-		);
-	}
-	lines.push("Current todo list:", "", md, "</system-reminder>");
-	return lines.join("\n");
+	return prompt.render(todoUserEditPrompt, {
+		action,
+		removed,
+		empty: phases.length === 0,
+		markdown: phases.length === 0 ? "(empty)" : phasesToMarkdown(phases).trimEnd(),
+	});
 }
 
 export class TodoCommandController {
@@ -140,9 +137,10 @@ export class TodoCommandController {
 	 * entries or falls back to the active session state.
 	 */
 	#currentPhases(): TodoPhase[] {
-		const fromEntries = getLatestTodoPhasesFromEntries(this.ctx.sessionManager.getBranch());
-		if (fromEntries.length > 0) return fromEntries;
-		return this.ctx.session.getTodoPhases();
+		return (
+			getLatestTodoSnapshotFromEntries(this.ctx.sessionManager.getBranch())?.phases ??
+			this.ctx.session.getTodoPhases()
+		);
 	}
 
 	async handleTodoCommand(args: string): Promise<void> {
@@ -449,20 +447,32 @@ export class TodoCommandController {
 		this.ctx.setTodos(nextPhases);
 
 		// 2. Persist for reload survival via custom session entry.
-		this.ctx.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: nextPhases });
+		const todoSnapshotId = this.ctx.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, {
+			phases: nextPhases,
+		});
 
 		// 3. Inject system reminder so the agent learns about the change next turn.
 		//    Removals carry explicit intent so the agent does not rebuild the
 		//    cleared/removed items on its next turn (issue #5258).
 		const reminderText = buildSystemReminder(action, nextPhases, opts?.removed ?? false);
 		const message = {
-			role: "developer" as const,
-			content: [{ type: "text" as const, text: reminderText }],
+			role: "custom" as const,
+			customType: USER_TODO_EDIT_CUSTOM_TYPE,
+			content: reminderText,
+			details: { todoSnapshotId },
+			display: false,
 			attribution: "user" as const,
 			timestamp: Date.now(),
 		};
 		this.ctx.agent.appendMessage(message);
-		this.ctx.sessionManager.appendMessage(message);
+		this.ctx.sessionManager.appendCustomMessageEntry(
+			message.customType,
+			message.content,
+			message.display,
+			message.details,
+			message.attribution,
+			message.timestamp,
+		);
 	}
 }
 

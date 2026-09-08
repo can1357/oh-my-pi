@@ -159,6 +159,60 @@ describe("AgentSession prewalk", () => {
 		expect(session.model?.id).toBe(target.id);
 	});
 
+	it("opens the todo gate through read-tier xd execution without handing off until a real write", async () => {
+		const primary = modelOrThrow("claude-sonnet-4-5");
+		const target = modelOrThrow("claude-sonnet-4-6");
+		let writes = 0;
+		const deviceWrite: AgentTool = {
+			name: "write",
+			label: "Write",
+			description: "Synthetic write and todo device",
+			parameters: writeToolSchema,
+			execute: async () => {
+				writes++;
+				return writes === 1
+					? {
+							content: [{ type: "text", text: "listed" }],
+							details: {
+								xdev: {
+									tool: "todo",
+									mode: "execute",
+									tier: "read",
+									inner: {
+										phases: [{ name: "Work", tasks: [{ content: "Apply the plan", status: "pending" }] }],
+									},
+								},
+							},
+						}
+					: { content: [{ type: "text", text: "wrote" }] };
+			},
+		};
+		const scripted = createMockModel({
+			responses: [toolCall("device-todo", "write"), toolCall("real-write", "write"), { content: ["done"] }],
+		});
+		const calls: string[] = [];
+		const tools = [todoTool as AgentTool, deviceWrite];
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model: primary, systemPrompt: ["Test"], tools, messages: [], thinkingLevel: Effort.Medium },
+			convertToLlm,
+			streamFn: (model, context, options) => {
+				calls.push(model.id);
+				return scripted.stream(model, context, options);
+			},
+		});
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			settings: Settings.isolated({ "compaction.enabled": false, "title.refreshOnReplan": false }),
+			modelRegistry,
+			toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
+			prewalk: { target },
+		});
+		await session.prompt("Carry out the plan using the todo device");
+		expect(calls).toEqual([primary.id, primary.id, target.id]);
+	});
+
 	it("an edit before any todo call does not switch while a todo tool exists; the next edit after todo does", async () => {
 		const primary = modelOrThrow("claude-sonnet-4-5");
 		const target = modelOrThrow("claude-sonnet-4-6");

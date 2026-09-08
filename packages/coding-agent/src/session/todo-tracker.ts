@@ -1,13 +1,26 @@
 import type { Agent, AgentMessage, AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, Message, Model, TextContent, ToolChoice } from "@oh-my-pi/pi-ai";
-import { isRecord, logger, prompt, stringProperty } from "@oh-my-pi/pi-utils";
+import { isRecord, logger, prompt, stringProperty, truncate } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import eagerTaskPrompt from "../prompts/system/eager-task.md" with { type: "text" };
 import eagerTodoPrompt from "../prompts/system/eager-todo.md" with { type: "text" };
 import midRunTodoNudgePrompt from "../prompts/system/mid-run-todo-nudge.md" with { type: "text" };
-import { getLatestTodoPhasesFromEntries, isTodoPhase, type TodoItem, type TodoPhase } from "../tools/todo";
+import todoStatePrompt from "../prompts/system/todo-state.md" with { type: "text" };
+import {
+	formatTodoSummary,
+	getLatestTodoPhasesFromEntries,
+	getLatestTodoSnapshotFromEntries,
+	isTodoPhase,
+	phasesToMarkdown,
+	readTodoResultDetails,
+	type TodoItem,
+	type TodoPhase,
+	type TodoStatus,
+	USER_TODO_EDIT_CUSTOM_TYPE,
+} from "../tools/todo";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { AgentSessionEvent } from "./agent-session-events";
+import type { CustomMessage } from "./messages";
 import type { SessionManager } from "./session-manager";
 
 const MID_RUN_NUDGE_MUTATION_THRESHOLD = 12;
@@ -20,6 +33,11 @@ const MUTATING_TOOLS: Record<string, true> = {
 	ast_edit: true,
 };
 const MID_RUN_NUDGE_MESSAGE_TYPE = "mid-run-todo-nudge";
+const TODO_STATE_MESSAGE_TYPE = "todo-state";
+const TODO_STATE_MAX_PHASES = 12;
+const TODO_STATE_MAX_TASKS = 24;
+const TODO_STATE_MAX_LABEL_CHARS = 240;
+const TODO_STATE_OPEN_STATUSES = ["in_progress", "blocked", "pending"] as const;
 const MARKDOWN_PROMPT_PREFIX_RE = /^(?:>\s*)?(?:(?:[-*+]|\d+[.)])\s+)*/;
 const PROMPT_LABEL_RE = /^(?:q(?:uestion)?|ask)\s*\d*\s*[:.)-]\s*/i;
 const QUESTION_PROMPT_RE =
@@ -66,6 +84,8 @@ export interface TodoTrackerHost {
 export class TodoTracker {
 	readonly #host: TodoTrackerHost;
 	#phases: TodoPhase[] = [];
+	#revision = 0;
+	#completionBoundaryId: string | null = null;
 	#reminderCount = 0;
 	#reminderAwaitingProgress = false;
 	#mutationsSinceLastTouch = 0;
@@ -83,16 +103,234 @@ export class TodoTracker {
 	/** Replaces todo phases with a defensive clone. */
 	setPhases(phases: TodoPhase[]): void {
 		this.#phases = this.#clonePhases(phases);
+		this.invalidateCompletions();
 	}
 
 	/** Rehydrates todo phases from the current transcript branch. */
 	syncFromBranch(): void {
-		this.setPhases(getLatestTodoPhasesFromEntries(this.#host.sessionManager.getBranch()));
+		this.#phases = getLatestTodoPhasesFromEntries(this.#host.sessionManager.getBranch());
+		this.invalidateCompletions();
+	}
+
+	/** Invalidate child acceptance across a context clear without changing todo state. */
+	invalidateCompletions(): void {
+		this.#revision++;
+		this.#completionBoundaryId = this.#host.sessionManager.getLeafId();
 	}
 
 	/** Returns a defensive clone suitable for snapshots and branch state. */
 	clonePhases(phases: TodoPhase[]): TodoPhase[] {
 		return this.#clonePhases(phases);
+	}
+
+	/**
+	 * Bind one exact, unambiguous open task to an observed child run. Any external
+	 * todo edit or branch restore invalidates the binding; a later child success
+	 * must never overwrite a newer plan, an intentional clear, or a blocker.
+	 */
+	captureCompletion(content: string, parentToolCallId: string): (() => boolean) | undefined {
+		const entries = this.#host.sessionManager.getBranch();
+		let ownsCall = false;
+		for (let index = entries.length - 1; index >= 0; index--) {
+			const entry = entries[index];
+			// A delayed start notification from before the latest edit/restore
+			// cannot bind to an identically named item in a replacement plan.
+			if (entry.id === this.#completionBoundaryId || entry.type === "reset_boundary") break;
+			if (
+				entry.type === "message" &&
+				entry.message.role === "assistant" &&
+				entry.message.content.some(block => block.type === "toolCall" && block.id === parentToolCallId)
+			) {
+				ownsCall = true;
+				break;
+			}
+		}
+		if (!ownsCall) return undefined;
+		let target: { phase: number; task: number } | undefined;
+		for (let phase = 0; phase < this.#phases.length; phase++) {
+			for (let task = 0; task < this.#phases[phase].tasks.length; task++) {
+				if (this.#phases[phase].tasks[task].content !== content) continue;
+				if (target) return undefined;
+				target = { phase, task };
+			}
+		}
+		if (!target) return undefined;
+		const task = this.#phases[target.phase].tasks[target.task];
+		if (task.status !== "pending" && task.status !== "in_progress") return undefined;
+		const revision = this.#revision;
+		const sessionId = this.#host.sessionManager.getSessionId();
+		const { phase: phaseIndex, task: taskIndex } = target;
+		let consumed = false;
+		return () => {
+			if (consumed) return false;
+			consumed = true;
+			if (this.#revision !== revision || this.#host.sessionManager.getSessionId() !== sessionId) return false;
+			const current = this.#phases[phaseIndex]?.tasks[taskIndex];
+			if (!current || (current.status !== "pending" && current.status !== "in_progress")) return false;
+			const next = this.phases;
+			next[phaseIndex].tasks[taskIndex] = { content: current.content, status: "completed" };
+			// Tool executions already journal their successful result. Only this
+			// out-of-band mutation needs the existing explicit snapshot mechanism.
+			this.#host.sessionManager.appendCustomEntry(USER_TODO_EDIT_CUSTOM_TYPE, { phases: next });
+			this.#phases = next;
+			return true;
+		};
+	}
+
+	/**
+	 * Project at most one bounded canonical snapshot into a restored context.
+	 * Never journal this derived prompt or reconstruct state from summary text.
+	 */
+	withRestoredContext(messages: AgentMessage[]): AgentMessage[] {
+		const entries = this.#host.sessionManager.getBranch();
+		const snapshot = getLatestTodoSnapshotFromEntries(entries);
+		const priorReminders = messages.filter(
+			message => message.role === "custom" && message.customType === TODO_STATE_MESSAGE_TYPE,
+		);
+		const withoutReminders =
+			priorReminders.length > 0
+				? messages.filter(message => message.role !== "custom" || message.customType !== TODO_STATE_MESSAGE_TYPE)
+				: messages;
+		// /clear deliberately removes all model context. Do not cross that boundary
+		// to reintroduce old work; a later explicit todo update can establish state.
+		if (
+			!this.#host.settings.get("todo.enabled") ||
+			!snapshot ||
+			entries.findLastIndex(entry => entry.type === "reset_boundary") > entries.indexOf(snapshot.entry)
+		) {
+			return withoutReminders;
+		}
+		let summary: string | undefined;
+		let markdown: string | undefined;
+		const timestamp = Date.parse(snapshot.entry.timestamp);
+		const source =
+			snapshot.entry.type === "message" && snapshot.entry.message.role === "toolResult"
+				? snapshot.entry.message
+				: undefined;
+		const nextEntry = entries[entries.indexOf(snapshot.entry) + 1];
+		const legacyReminder =
+			snapshot.entry.type === "custom" && nextEntry?.type === "message" && nextEntry.message.role === "developer"
+				? nextEntry.message
+				: undefined;
+		for (const message of withoutReminders) {
+			if (
+				source &&
+				message.role === "toolResult" &&
+				message.toolCallId === source.toolCallId &&
+				!message.isError &&
+				!message.prunedAt &&
+				readTodoResultDetails(message.toolName, message)
+			) {
+				summary ??= formatTodoSummary(snapshot.phases, []);
+				if (
+					message.content.some(
+						block =>
+							block.type === "text" &&
+							(block.text === summary ||
+								(snapshot.phases.length === 0 && block.text === formatTodoSummary([], [], true))),
+					)
+				) {
+					return withoutReminders;
+				}
+			}
+			// Retained /todo edit reminders already contain the complete checklist.
+			// Do not infer state from prose or from a lossy compaction summary.
+			if (
+				(message.role === "custom" &&
+					message.customType === USER_TODO_EDIT_CUSTOM_TYPE &&
+					isRecord(message.details) &&
+					message.details.todoSnapshotId === snapshot.entry.id) ||
+				(message.role === "developer" && message === legacyReminder)
+			) {
+				markdown ??= snapshot.phases.length > 0 ? phasesToMarkdown(snapshot.phases).trimEnd() : "(empty)";
+				const checklist = markdown;
+				if (
+					typeof message.content === "string"
+						? message.content.includes(checklist)
+						: message.content.some(block => block.type === "text" && block.text.includes(checklist))
+				)
+					return withoutReminders;
+			}
+		}
+		const reminder = this.#buildStateReminder(snapshot.phases, snapshot.entry.id, timestamp);
+		const previous = priorReminders.length === 1 ? priorReminders[0] : undefined;
+		if (
+			previous?.role === "custom" &&
+			previous.content === reminder.content &&
+			isRecord(previous.details) &&
+			previous.details.todoSnapshotId === snapshot.entry.id
+		) {
+			return messages;
+		}
+		return [...withoutReminders, reminder];
+	}
+
+	#buildStateReminder(phases: TodoPhase[], entryId: string, timestamp: number): CustomMessage {
+		const counts: Record<TodoStatus, number> = { pending: 0, in_progress: 0, blocked: 0, completed: 0, abandoned: 0 };
+		const phaseSummaries = phases.map((phase, index) => {
+			const phaseCounts: Record<TodoStatus, number> = {
+				pending: 0,
+				in_progress: 0,
+				blocked: 0,
+				completed: 0,
+				abandoned: 0,
+			};
+			for (const task of phase.tasks) {
+				counts[task.status]++;
+				phaseCounts[task.status]++;
+			}
+			return {
+				index,
+				name: truncate(phase.name, TODO_STATE_MAX_LABEL_CHARS),
+				inProgress: phaseCounts.in_progress,
+				pending: phaseCounts.pending,
+				blocked: phaseCounts.blocked,
+				completed: phaseCounts.completed,
+				abandoned: phaseCounts.abandoned,
+				rank: phaseCounts.in_progress > 0 ? 0 : phaseCounts.blocked > 0 ? 1 : phaseCounts.pending > 0 ? 2 : 3,
+				tasks: [] as TodoItem[],
+				omitted: phaseCounts.in_progress + phaseCounts.pending + phaseCounts.blocked,
+			};
+		});
+		// Prefer current and blocked work over old closed phases, but present the
+		// selected phases in canonical order so the reminder never renumbers work.
+		const selected = phaseSummaries
+			.sort((a, b) => a.rank - b.rank || a.index - b.index)
+			.slice(0, TODO_STATE_MAX_PHASES)
+			.sort((a, b) => a.index - b.index);
+		let remaining = TODO_STATE_MAX_TASKS;
+		for (const status of TODO_STATE_OPEN_STATUSES) {
+			for (const phase of selected) {
+				for (const task of phases[phase.index].tasks) {
+					if (remaining === 0) break;
+					if (task.status !== status) continue;
+					phase.tasks.push({
+						content: truncate(task.content, TODO_STATE_MAX_LABEL_CHARS),
+						status,
+						...(status === "blocked" && task.blocker !== undefined
+							? { blocker: truncate(task.blocker, TODO_STATE_MAX_LABEL_CHARS) }
+							: {}),
+					});
+					phase.omitted--;
+					remaining--;
+				}
+			}
+		}
+		return {
+			role: "custom",
+			customType: TODO_STATE_MESSAGE_TYPE,
+			content: prompt.render(todoStatePrompt, {
+				counts,
+				phases: selected,
+				empty: phases.every(phase => phase.tasks.length === 0),
+				omittedPhases: phases.length - selected.length,
+				toolRefs: this.#buildEagerPreludeContext().toolRefs,
+			}),
+			details: { todoSnapshotId: entryId },
+			display: false,
+			attribution: "agent",
+			timestamp,
+		};
 	}
 
 	/** Resets per-prompt reminder and mutation budgets. */
@@ -136,6 +374,8 @@ export class TodoTracker {
 		const mode = this.#host.settings.get("todo.eager");
 		if (mode === "default" || !this.#host.settings.get("todo.enabled")) return undefined;
 		if (this.#host.planModeEnabled() || this.#phases.length > 0) return undefined;
+		// A cleared list is still an accepted snapshot, not permission to recreate it.
+		if (getLatestTodoSnapshotFromEntries(this.#host.sessionManager.getBranch())) return undefined;
 		// An actionable prewalk drives todo creation in a plan-first-then-todo order;
 		// the forced eager prelude's "call todo first this turn" contradicts it (#10510).
 		if (this.#host.prewalkWillHandoff()) return undefined;

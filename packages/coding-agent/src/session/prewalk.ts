@@ -13,6 +13,7 @@ import prewalkPlanPrompt from "../prompts/system/prewalk-plan.md" with { type: "
 import { type ConfiguredThinkingLevel, prewalkWouldBeNoop } from "../thinking";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { PlanProposalHandler } from "../tools/resolve";
+import { readTodoResultDetails } from "../tools/todo";
 import { ToolError } from "../tools/tool-errors";
 import type { PlanYolo, Prewalk } from "./agent-session-types";
 import { PREWALK_PLAN_MESSAGE_TYPE } from "./messages";
@@ -147,7 +148,12 @@ export class PrewalkCoordinator {
 			this.#disarmNoop(prewalk);
 			return;
 		}
-		if (context.toolResults.some(result => result.toolName === "todo" && !result.isError)) this.#todoSeen = true;
+		if (
+			context.toolResults.some(
+				result => !result.isError && (result.toolName === "todo" || readTodoResultDetails(result.toolName, result)),
+			)
+		)
+			this.#todoSeen = true;
 
 		const hasToolResults = context.toolResults.length > 0;
 		if (this.#planInjected && hasToolResults) {

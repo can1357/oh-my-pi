@@ -56,6 +56,60 @@ function expectAcpNotifications(updates: SessionNotification[]): void {
 	}
 }
 
+it("projects successful todo device results into ACP plans without reopening abandoned work", () => {
+	const result = {
+		content: [{ type: "text" as const, text: "Updated todos" }],
+		details: {
+			xdev: {
+				tool: "todo",
+				mode: "execute",
+				inner: {
+					phases: [
+						{
+							name: "Work",
+							tasks: [
+								{ content: "Accept release", status: "blocked", blocker: "owner approval" },
+								{ content: "Old implementation", status: "abandoned" },
+							],
+						},
+					],
+				},
+			},
+		},
+	};
+	const event: Extract<AgentSessionEvent, { type: "tool_execution_end" }> = {
+		type: "tool_execution_end",
+		toolCallId: "device-todo",
+		toolName: "write",
+		result,
+		isError: false,
+	};
+	const updates = mapAgentSessionEventToAcpSessionUpdates(event, "todo-session");
+	expect(updates.map(update => update.update)).toContainEqual({
+		sessionUpdate: "plan",
+		entries: [
+			{ content: "Accept release", priority: "medium", status: "pending" },
+			{ content: "Old implementation", priority: "medium", status: "completed" },
+		],
+	});
+	const failed = mapAgentSessionEventToAcpSessionUpdates(
+		{ ...event, result: { ...result, isError: true } },
+		"todo-session",
+	);
+	expect(failed.some(update => update.update.sessionUpdate === "plan")).toBe(false);
+	const other = mapAgentSessionEventToAcpSessionUpdates(
+		{
+			...event,
+			result: {
+				...result,
+				details: { xdev: { tool: "some-other-tool", mode: "execute", inner: result.details.xdev.inner } },
+			},
+		},
+		"todo-session",
+	);
+	expect(other.some(update => update.update.sessionUpdate === "plan")).toBe(false);
+});
+
 const TEST_MODEL: Model = buildModel({
 	id: "claude-sonnet-4-20250514",
 	name: "Claude Sonnet",

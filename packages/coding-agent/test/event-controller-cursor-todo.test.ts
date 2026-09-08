@@ -104,6 +104,33 @@ function todoFailure(text: string): Extract<AgentSessionEvent, { type: "tool_exe
 }
 
 describe("EventController + Cursor todo bridge", () => {
+	it("updates the canonical HUD from write xd://todo and ignores failed device clears", async () => {
+		const f = createFixture();
+		const phases = [
+			{
+				name: "Release",
+				tasks: [
+					{ content: "Get approval", status: "blocked", blocker: "owner sign-off" },
+					{ content: "Old approach", status: "abandoned" },
+				],
+			},
+		];
+		const event = todoEnd("device-todo", phases);
+		event.toolName = "write";
+		event.result.details = { xdev: { tool: "todo", mode: "execute", inner: { phases } } };
+		await f.controller.handleEvent(event);
+		expect(f.ctx.setTodos).toHaveBeenCalledWith(phases);
+		await f.controller.handleEvent({
+			...event,
+			toolCallId: "failed-device-todo",
+			result: {
+				content: [{ type: "text", text: "rejected" }],
+				isError: true,
+				details: { xdev: { tool: "todo", mode: "execute", inner: { phases: [] } } },
+			},
+		});
+		expect(f.ctx.setTodos).toHaveBeenCalledTimes(1);
+	});
 	it("sanitizes provider error text before it reaches the status line", async () => {
 		// The bridge forwards the server's error string verbatim, so this text is
 		// untrusted terminal input. Raw tabs punch holes in the single-line status
