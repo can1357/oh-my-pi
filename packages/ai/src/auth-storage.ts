@@ -6069,6 +6069,7 @@ export class AuthStorage {
 					email: selection.credential.email,
 					projectId: selection.credential.projectId,
 					enterpriseUrl: selection.credential.enterpriseUrl,
+					apiEndpoint: selection.credential.apiEndpoint,
 					orgId: selection.credential.orgId,
 					orgName: selection.credential.orgName,
 					error: "OAuth access unavailable",
@@ -6083,6 +6084,7 @@ export class AuthStorage {
 				email: credential.email,
 				projectId: credential.projectId,
 				enterpriseUrl: credential.enterpriseUrl,
+				apiEndpoint: credential.apiEndpoint,
 				orgId: credential.orgId,
 				orgName: credential.orgName,
 			};
@@ -6094,6 +6096,7 @@ export class AuthStorage {
 				email: selection.credential.email,
 				projectId: selection.credential.projectId,
 				enterpriseUrl: selection.credential.enterpriseUrl,
+				apiEndpoint: selection.credential.apiEndpoint,
 				orgId: selection.credential.orgId,
 				orgName: selection.credential.orgName,
 				error: error instanceof Error ? error.message : String(error),

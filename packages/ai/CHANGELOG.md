@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed per-account OAuth resolution losing Copilot API endpoints after credential refresh.
+
 ## [18.1.12] - 2026-09-06
 
 ### Added

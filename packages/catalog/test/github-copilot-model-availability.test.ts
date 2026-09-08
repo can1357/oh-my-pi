@@ -15,9 +15,7 @@ function entry(id: string, patch?: { policy?: Record<string, unknown>; modelPick
 		name: id,
 		capabilities: { type: "chat" },
 		...(patch?.policy ? { policy: patch.policy } : {}),
-		...(patch?.modelPickerEnabled !== undefined
-			? { model_picker_enabled: patch.modelPickerEnabled }
-			: {}),
+		...(patch?.modelPickerEnabled !== undefined ? { model_picker_enabled: patch.modelPickerEnabled } : {}),
 	};
 }
 
@@ -25,10 +23,10 @@ describe("github-copilot /models availability prune contract", () => {
 	it("keeps a model with no grant gate (backward compat for minimal payloads)", async () => {
 		const fetch = vi.fn(
 			async () =>
-				new Response(
-					JSON.stringify({ data: [entry("claude-opus-5"), entry("gpt-5.3-codex")] }),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				),
+				new Response(JSON.stringify({ data: [entry("claude-opus-5"), entry("gpt-5.3-codex")] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
 		);
 		const options = githubCopilotModelManagerOptions({ apiKey: "copilot-test-key", fetch });
 		const specs = (await options.fetchDynamicModels?.()) ?? [];
@@ -39,7 +37,9 @@ describe("github-copilot /models availability prune contract", () => {
 		const fetch = vi.fn(
 			async () =>
 				new Response(
-					JSON.stringify({ data: [entry("gpt-4.1", { policy: { state: "enabled" }, modelPickerEnabled: false })] }),
+					JSON.stringify({
+						data: [entry("gpt-4.1", { policy: { state: "enabled" }, modelPickerEnabled: false })],
+					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				),
 		);
@@ -51,10 +51,10 @@ describe("github-copilot /models availability prune contract", () => {
 	it("drops a model whose `policy` is explicitly disabled", async () => {
 		const fetch = vi.fn(
 			async () =>
-				new Response(
-					JSON.stringify({ data: [entry("legacy-x", { policy: { state: "disabled" } })] }),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				),
+				new Response(JSON.stringify({ data: [entry("legacy-x", { policy: { state: "disabled" } })] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
 		);
 		const options = githubCopilotModelManagerOptions({ apiKey: "copilot-test-key", fetch });
 		const specs = (await options.fetchDynamicModels?.()) ?? [];
@@ -64,10 +64,10 @@ describe("github-copilot /models availability prune contract", () => {
 	it("drops a policy-less model explicitly excluded from the picker", async () => {
 		const fetch = vi.fn(
 			async () =>
-				new Response(
-					JSON.stringify({ data: [entry("gpt-4o", { modelPickerEnabled: false })] }),
-					{ status: 200, headers: { "Content-Type": "application/json" } },
-				),
+				new Response(JSON.stringify({ data: [entry("gpt-4o", { modelPickerEnabled: false })] }), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				}),
 		);
 		const options = githubCopilotModelManagerOptions({ apiKey: "copilot-test-key", fetch });
 		const specs = (await options.fetchDynamicModels?.()) ?? [];

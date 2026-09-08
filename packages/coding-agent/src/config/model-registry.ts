@@ -104,6 +104,7 @@ import {
 	type ProviderDiscoveryState,
 	RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS,
 	resolveCodexDiscoveryAccounts,
+	resolveGitHubCopilotDiscoveryAccounts,
 	SPECIAL_MODEL_MANAGER_PROVIDER_IDS,
 	STARTUP_MODEL_CACHE_PROVIDER_IDS,
 	withModelDiscoveryTimeout,
@@ -1881,6 +1882,21 @@ export class ModelRegistry {
 					apiKey: isDiscoveryBearerApiKey(apiKey) ? apiKey : undefined,
 					baseUrl: this.#descriptorBaseUrl(descriptor.providerId),
 					fetch: this.#fetch,
+					// github-copilot inference round-robins across sibling accounts, so
+					// the authoritative catalog must union every account's grants, not
+					// just the peeked one (see resolveGitHubCopilotDiscoveryAccounts).
+					...(descriptor.providerId === "github-copilot"
+						? {
+								resolveAccounts: () =>
+									resolveGitHubCopilotDiscoveryAccounts(
+										this.authStorage,
+										// github-copilot is dynamicModelsAuthoritative with no
+										// allowUnauthenticated arm, so this branch only runs
+										// for an authenticated (resolved) apiKey.
+										apiKey!,
+									),
+							}
+						: {}),
 				};
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??

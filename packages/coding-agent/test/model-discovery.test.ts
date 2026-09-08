@@ -517,6 +517,109 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("github-copilot", "gpt-5.4-nano")).toBeUndefined();
 	});
 
+	test("github-copilot unions grants once per account using refreshed account-specific endpoints", async () => {
+		authStorage.close();
+		const refreshCalls: string[] = [];
+		authStorage = await AuthStorage.create(":memory:", {
+			refreshOAuthCredential: async (_provider, _credentialId, credential): Promise<OAuthCredentials> => {
+				refreshCalls.push(credential.access);
+				return {
+					...credential,
+					access: "copilot-business",
+					apiEndpoint: "https://api.business.githubcopilot.com",
+					expires: Date.now() + 3_600_000,
+				};
+			},
+		});
+		await authStorage.set("github-copilot", [
+			// peekApiKey accepts this token, but the access resolver refreshes within its 60s skew.
+			{ type: "oauth", access: "expiring-business", refresh: "refresh-b", expires: Date.now() + 30_000 },
+			{ type: "oauth", access: "copilot-personal", refresh: "refresh-a", expires: Date.now() + 3_600_000 },
+			{
+				type: "oauth",
+				access: "copilot-enterprise",
+				refresh: "refresh-c",
+				expires: Date.now() + 3_600_000,
+				enterpriseUrl: "ghe.example.com",
+			},
+		]);
+		const requests: string[] = [];
+		const fetchMock: FetchImpl = async (input, init) => {
+			const url = String(input);
+			const authorization = new Headers(init?.headers).get("Authorization");
+			if (authorization) requests.push(`${authorization} ${url}`);
+			if (url === "https://api.github.com/copilot_internal/user" && authorization === "token copilot-personal") {
+				return Response.json({ endpoints: { api: "https://api.githubcopilot.com" } });
+			}
+			const id =
+				url === "https://api.githubcopilot.com/models" && authorization === "Bearer copilot-personal"
+					? "personal-model"
+					: url === "https://api.business.githubcopilot.com/models" && authorization === "Bearer copilot-business"
+						? "business-model"
+						: url === "https://copilot-api.ghe.example.com/models" &&
+							  authorization === "Bearer copilot-enterprise"
+							? "enterprise-model"
+							: undefined;
+			if (!id) throw new Error(`Unexpected account endpoint: ${authorization} ${url}`);
+			return Response.json({
+				data: [
+					{ id },
+					{ id: "shared-model" },
+					{ id: "business-model", policy: { state: "disabled" } },
+					{ id: "gpt-5.4-nano", policy: { state: "disabled" } },
+				],
+			});
+		};
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+
+		await registry.refreshProvider("github-copilot", "online");
+
+		expect(
+			getModelsForProvider(registry, "github-copilot")
+				.map(model => model.id)
+				.sort(),
+		).toEqual(["business-model", "enterprise-model", "personal-model", "shared-model"]);
+		expect(refreshCalls).toEqual(["expiring-business"]);
+		expect(requests.sort()).toEqual([
+			"Bearer copilot-business https://api.business.githubcopilot.com/models",
+			"Bearer copilot-enterprise https://copilot-api.ghe.example.com/models",
+			"Bearer copilot-personal https://api.githubcopilot.com/models",
+			"token copilot-personal https://api.github.com/copilot_internal/user",
+		]);
+		expect(registry.find("github-copilot", "business-model")?.baseUrl).toBe("https://api.business.githubcopilot.com");
+		expect(registry.find("github-copilot", "enterprise-model")?.baseUrl).toBe("https://copilot-api.ghe.example.com");
+	});
+
+	test("github-copilot discovery honors a runtime key instead of stored OAuth accounts", async () => {
+		await authStorage.set("github-copilot", {
+			type: "oauth",
+			access: "unused-account",
+			refresh: "unused-refresh",
+			expires: Date.now() - 60_000,
+		});
+		authStorage.setRuntimeApiKey(
+			"github-copilot",
+			JSON.stringify({
+				token: "runtime-copilot",
+				apiEndpoint: "https://api.business.githubcopilot.com",
+			}),
+		);
+		const requests: string[] = [];
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async (input, init) => {
+				const url = String(input);
+				if (url !== "https://api.business.githubcopilot.com/models") throw new Error(`Unexpected URL: ${url}`);
+				requests.push(new Headers(init?.headers).get("Authorization") ?? "");
+				return Response.json({ data: [{ id: "runtime-model" }] });
+			},
+		});
+
+		await registry.refreshProvider("github-copilot", "online");
+
+		expect(requests).toEqual(["Bearer runtime-copilot"]);
+		expect(getModelsForProvider(registry, "github-copilot").map(model => model.id)).toEqual(["runtime-model"]);
+	});
+
 	test("Codex discovery falls back to a resolved non-OAuth token when no OAuth accounts exist", async () => {
 		authStorage.setRuntimeApiKey("openai-codex", "runtime-openai-codex");
 		let modelListCalls = 0;
@@ -547,40 +650,50 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(registry.find("openai-codex", "runtime-codex-model")).toBeDefined();
 	});
 
-	test("Codex discovery aborts (keeps bundled models) when any account credential fails to refresh", async () => {
-		// Two configured Codex accounts: the fresh one resolves, the expired one's
-		// refresh throws so getOAuthAccesses reports ok:false. A partial union would
-		// be cached as the authoritative catalog and hide the failed account's
-		// models, so discovery must abort and keep bundled models.
-		authStorage.close();
-		authStorage = await AuthStorage.create(":memory:", {
-			refreshOAuthCredential: async (_provider, _credentialId, credential): Promise<OAuthCredentials> => {
-				if (credential.access.includes("expired")) {
-					throw new Error("simulated transient refresh failure");
+	test.each(["openai-codex", "github-copilot"])(
+		"%s keeps bundled models when an account fails to refresh",
+		async provider => {
+			// A failed sibling refresh must not turn a partial union into the authoritative catalog.
+			authStorage.close();
+			authStorage = await AuthStorage.create(":memory:", {
+				refreshOAuthCredential: async (_provider, _credentialId, credential): Promise<OAuthCredentials> => {
+					if (credential.access.includes("expired")) {
+						throw new Error("simulated transient refresh failure");
+					}
+					return { ...credential, expires: Date.now() + 3_600_000 };
+				},
+			});
+			await authStorage.set(provider, [
+				{ type: "oauth", access: "fresh-account", refresh: "refresh-fresh", expires: Date.now() + 3_600_000 },
+				{ type: "oauth", access: "expired-account", refresh: "refresh-expired", expires: Date.now() - 60_000 },
+			]);
+			let modelListCalls = 0;
+			const fetchMock: FetchImpl = async input => {
+				const url = String(input);
+				if (
+					url.endsWith("/models") ||
+					(url.startsWith("https://chatgpt.com/backend-api") && url.includes("/models"))
+				) {
+					modelListCalls++;
+					return Response.json({ models: [] });
 				}
-				return { ...credential, expires: Date.now() + 3_600_000 };
-			},
-		});
-		await authStorage.set("openai-codex", [
-			{ type: "oauth", access: "fresh-codex", refresh: "refresh-fresh", expires: Date.now() + 3_600_000 },
-			{ type: "oauth", access: "expired-codex", refresh: "refresh-expired", expires: Date.now() - 60_000 },
-		]);
-		let modelListCalls = 0;
-		const fetchMock: FetchImpl = async input => {
-			const url = String(input);
-			if (url.startsWith("https://chatgpt.com/backend-api") && url.includes("/models")) {
-				modelListCalls++;
-				return Response.json({ models: [] });
-			}
-			throw new Error(`Unexpected URL: ${url}`);
-		};
-		const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+				throw new Error(`Unexpected URL: ${url}`);
+			};
+			const registry = new ModelRegistry(authStorage, modelsJsonPath, { fetch: fetchMock });
+			const previousIds = getModelsForProvider(registry, provider)
+				.map(model => model.id)
+				.sort();
 
-		await registry.refreshProvider("openai-codex", "online");
+			await registry.refreshProvider(provider, "online");
 
-		expect(modelListCalls).toBe(0);
-		expect(getModelsForProvider(registry, "openai-codex").length).toBeGreaterThan(0);
-	});
+			expect(modelListCalls).toBe(0);
+			expect(
+				getModelsForProvider(registry, provider)
+					.map(model => model.id)
+					.sort(),
+			).toEqual(previousIds);
+		},
+	);
 
 	test("Gemini CLI discovery forwards a stored OAuth project id to the quota fallback", async () => {
 		await authStorage.set("google-gemini-cli", {
