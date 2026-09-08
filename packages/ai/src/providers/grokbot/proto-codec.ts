@@ -220,7 +220,9 @@ function encodeToolCall(tc) {
 		encodeString(2, tc.toolName || tc.tool_name || ""),
 	];
 	if (tc.args && typeof tc.args === "object") {
-		chunks.push(encodeMessage(3, encodeStruct(tc.args)));
+		// Preserve empty Struct args (`{}`) so the protobuf args/raw oneof
+		// discriminator survives history replay — same contract as empty-string raw.
+		chunks.push(encodeMessage(3, encodeStruct(tc.args), { omitEmpty: false }));
 	}
 	const raw = Object.hasOwn(tc, "rawToolCallArgs")
 		? tc.rawToolCallArgs

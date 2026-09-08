@@ -869,6 +869,38 @@ describe("grokbot sand-host client parity", () => {
 		]);
 	});
 
+	test("preserves empty structured args on the wire", () => {
+		// No-argument tools complete with `{}`; dropping field 3 loses the args
+		// oneof discriminator on history replay (omitEmpty would erase encodeStruct({})).
+		const encoded = encodeInferenceStreamRequest({
+			messages: [
+				{
+					role: 2,
+					toolCalls: [
+						{
+							toolCallId: "c-empty-args",
+							toolName: "list_resources",
+							args: {},
+						},
+					],
+				},
+			],
+			requestedModel: { modelId: "grok-4.5" },
+		});
+		const decoded = decodeInferenceStreamRequest(encoded) as unknown as {
+			messages: Array<{
+				toolCalls?: Array<{ toolCallId: string; toolName: string; args?: unknown; rawToolCallArgs?: string }>;
+			}>;
+		};
+		expect(decoded.messages[0]?.toolCalls).toEqual([
+			{
+				toolCallId: "c-empty-args",
+				toolName: "list_resources",
+				args: {},
+			},
+		]);
+	});
+
 	test("replays grammar tool results with wire name from context.tools", () => {
 		const messages = toInferenceMessages(
 			{

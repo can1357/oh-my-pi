@@ -12,6 +12,7 @@
 - Grok Bot flushes buffered stream events in content-index order (completed tools before later text)
 - Grok Bot resets SendToUser reconstruction state when each synthetic call completes
 - Grok Bot product-wire history rewrite keeps hashline `edit` when `write` owns the shared Write slot
+- Grok Bot preserves empty structured tool `args` (`{}`) on history replay so the protobuf args oneof discriminator is not dropped
 - Grok Bot omits `thinking` from streamSimple/completeSimple when effort is unset so discovered `sandParameterDefaults` apply
 - Buffer unlabeled markdown JSON fences until end-of-stream promotion
 - Remint and replay once after a rejected Grok Bot JWT (HTTP 401 / Connect unauthenticated)
