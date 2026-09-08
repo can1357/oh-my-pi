@@ -1998,7 +1998,7 @@ export class ModelRegistry {
 				});
 			}
 			const authoritativeProviders = new Set<string>();
-			if (options.dynamicModelsAuthoritative && !result.stale) {
+			if (options.dynamicModelsAuthoritative && (result.authoritative ?? !result.stale)) {
 				authoritativeProviders.add(options.providerId);
 			}
 			return { models, authoritativeProviders };

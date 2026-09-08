@@ -5923,6 +5923,7 @@ export class AuthStorage {
 						token: oauthSelection.credential.access,
 						enterpriseUrl: oauthSelection.credential.enterpriseUrl,
 						apiEndpoint: oauthSelection.credential.apiEndpoint,
+						accountId: oauthSelection.credential.accountId,
 					});
 				}
 				return oauthSelection.credential.access;

@@ -76,12 +76,14 @@ type GitHubCopilotApiKeyPayload = {
 	token?: unknown;
 	enterpriseUrl?: unknown;
 	apiEndpoint?: unknown;
+	accountId?: unknown;
 };
 
 export type ParsedGitHubCopilotApiKey = {
 	accessToken: string;
 	enterpriseUrl?: string;
 	apiEndpoint?: string;
+	accountId?: string;
 };
 
 const PUBLIC_GITHUB_HOSTS = new Set(["api.github.com", "github.com", "www.github.com"]);
@@ -161,6 +163,7 @@ export function parseGitHubCopilotApiKey(apiKeyRaw: string): ParsedGitHubCopilot
 					typeof parsed.apiEndpoint === "string"
 						? normalizeGitHubCopilotApiEndpoint(parsed.apiEndpoint)
 						: undefined,
+				accountId: typeof parsed.accountId === "string" ? parsed.accountId : undefined,
 			};
 		}
 	} catch {}

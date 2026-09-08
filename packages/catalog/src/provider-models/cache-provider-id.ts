@@ -107,14 +107,14 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// v4: refetch catalogs without per-model OAuth grants before allowing
 			// account rotation to use them.
 			const parsed = options.apiKey ? parseGitHubCopilotApiKey(options.apiKey) : undefined;
-			const token = parsed?.accessToken ?? options.apiKey ?? "";
+			const identity = parsed?.accountId || parsed?.accessToken || options.apiKey || "";
 			const baseUrl =
 				options.baseUrl ??
 				(parsed?.apiEndpoint ||
 					(parsed?.enterpriseUrl
 						? getGitHubCopilotBaseUrl(parsed.enterpriseUrl)
 						: PERSONAL_GITHUB_COPILOT_BASE_URL));
-			const scope = `${token}\u0000${baseUrl}`;
+			const scope = `${identity}\u0000${baseUrl}`;
 			return `github-copilot:models-v4:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":

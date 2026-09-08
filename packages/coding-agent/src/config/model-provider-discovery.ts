@@ -202,6 +202,7 @@ export async function resolveGitHubCopilotDiscoveryAccounts(
 				token: access.accessToken,
 				enterpriseUrl: access.enterpriseUrl,
 				apiEndpoint: access.apiEndpoint,
+				accountId: access.accountId,
 			}),
 			accountId: access.accountId,
 			credentialId: access.credentialId,

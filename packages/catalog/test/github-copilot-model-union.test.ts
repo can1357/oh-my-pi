@@ -58,4 +58,73 @@ describe("github-copilot multi-account discovery failures", () => {
 		expect(await options.fetchDynamicModels?.()).toBeNull();
 		expect(requests).toBe(0);
 	});
+
+	it("reconciles capabilities conservatively when two accounts report different limits or modalities", async () => {
+		const options = githubCopilotModelManagerOptions({
+			baseUrl: BASE_URL,
+			resolveAccounts: async () => [
+				{ apiKey: "account-1", accountId: "acc-1", credentialId: 101 },
+				{ apiKey: "account-2", accountId: "acc-2", credentialId: 102 },
+			],
+			fetch: async (_input, init) => {
+				const auth = new Headers(init?.headers).get("Authorization");
+				if (auth === "Bearer account-1") {
+					return Response.json({
+						data: [
+							{
+								id: "shared-model",
+								capabilities: {
+									type: "chat",
+									limits: {
+										max_context_window_tokens: 128_000,
+										max_output_tokens: 16_000,
+									},
+									supports: { vision: true },
+								},
+							},
+						],
+					});
+				}
+				return Response.json({
+					data: [
+						{
+							id: "shared-model",
+							capabilities: {
+								type: "chat",
+								limits: {
+									max_context_window_tokens: 64_000,
+									max_output_tokens: 8_000,
+								},
+								supports: { vision: false },
+							},
+						},
+					],
+				});
+			},
+		});
+
+		const models = await options.fetchDynamicModels?.();
+		expect(models).toHaveLength(1);
+		const model = models![0];
+		expect(model.id).toBe("shared-model");
+		expect(model.contextWindow).toBe(64_000);
+		expect(model.maxTokens).toBe(8_000);
+		expect(model.input).toEqual(["text"]);
+		expect(model.oauthCredentialIds).toEqual([101, 102]);
+	});
+
+	it("updates cacheProviderId to match the refreshed primary account key after account resolution", async () => {
+		const oldKey = JSON.stringify({ token: "old-token" });
+		const refreshedKey = JSON.stringify({ token: "refreshed-token" });
+		const options = githubCopilotModelManagerOptions({
+			apiKey: oldKey,
+			baseUrl: BASE_URL,
+			resolveAccounts: async () => [{ apiKey: refreshedKey, accountId: "acc-refreshed", credentialId: 1 }],
+			fetch: async () => Response.json({ data: [] }),
+		});
+
+		const initialCacheId = options.cacheProviderId;
+		await options.fetchDynamicModels?.();
+		expect(options.cacheProviderId).not.toBe(initialCacheId);
+	});
 });

@@ -746,6 +746,50 @@ describe("ModelRegistry runtime discovery", () => {
 		expect(networkRequests).toBe(0);
 	});
 
+	test("github-copilot retains the previous authoritative catalog when a subsequent refresh fails", async () => {
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "account-token",
+				refresh: "account-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "account-user",
+			},
+		]);
+
+		let failFetch = false;
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => {
+				if (failFetch) throw new Error("network down");
+				return Response.json({
+					data: [
+						{
+							id: "claude-sonnet-4.6",
+							capabilities: {
+								type: "chat",
+								limits: { max_context_window_tokens: 128_000, max_output_tokens: 16_000 },
+							},
+						},
+					],
+				});
+			},
+		});
+
+		await registry.refreshProvider("github-copilot", "online");
+		const initialModels = getModelsForProvider(registry, "github-copilot");
+		expect(initialModels.map(m => m.id)).toEqual(["claude-sonnet-4.6"]);
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+
+		// Now fail subsequent refresh
+		failFetch = true;
+		await registry.refreshProvider("github-copilot", "online");
+
+		// Must retain the previous authoritative models and NOT re-inject disabled/bundled models
+		const modelsAfterFailure = getModelsForProvider(registry, "github-copilot");
+		expect(modelsAfterFailure.map(m => m.id)).toEqual(["claude-sonnet-4.6"]);
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+	});
+
 	test("github-copilot discovery honors a runtime key instead of stored OAuth accounts", async () => {
 		await authStorage.set("github-copilot", {
 			type: "oauth",

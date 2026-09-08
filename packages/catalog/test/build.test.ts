@@ -1277,6 +1277,51 @@ describe("model cache spec round trip", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it("preserves the previous authoritative cache when an online refresh fails on an authoritative provider", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-preserve-authoritative-"));
+		const dbPath = path.join(tempDir, "models.db");
+		let failFetch = false;
+		const staticA = completionsSpec({ id: "model-a", name: "Model A", provider: "auth-test" });
+		const staticB = completionsSpec({ id: "model-b", name: "Model B", provider: "auth-test" });
+		const options = {
+			providerId: "auth-test",
+			staticModels: [staticA, staticB],
+			dynamicModelsAuthoritative: true,
+			cacheDbPath: dbPath,
+			fetchDynamicModels: async () => {
+				if (failFetch) return null;
+				return [completionsSpec({ id: "model-a", name: "Model A Granted", provider: "auth-test" })];
+			},
+		};
+		try {
+			// First fetch: authoritative discovery returns only model-a, pruning static model-b
+			const initial = await resolveProviderModels(options, "online");
+			expect(initial.models.map(m => m.id)).toEqual(["model-a"]);
+			expect(initial.authoritative).toBe(true);
+
+			const db = new Database(dbPath, { readonly: true });
+			const rowInitial = db
+				.query<{ authoritative: number }, [string]>("SELECT authoritative FROM model_cache WHERE provider_id = ?")
+				.get(options.providerId);
+			expect(rowInitial?.authoritative).toBe(1);
+
+			// Online refresh fails: must retain model-a and NOT re-inject static model-b
+			failFetch = true;
+			const failedRefresh = await resolveProviderModels(options, "online");
+			expect(failedRefresh.models.map(m => m.id)).toEqual(["model-a"]);
+			expect(failedRefresh.authoritative).toBe(true);
+
+			const rowAfterFailure = db
+				.query<{ authoritative: number }, [string]>("SELECT authoritative FROM model_cache WHERE provider_id = ?")
+				.get(options.providerId);
+			db.close();
+			expect(rowAfterFailure?.authoritative).toBe(1);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	it("restores static model headers on fresh cache reads", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-static-headers-"));
 		const dbPath = path.join(tempDir, "models.db");

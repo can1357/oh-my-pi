@@ -6469,15 +6469,33 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					model.baseUrl = configuredBaseUrl;
 					if (hasCredentialIds) model.oauthCredentialIds = [credentialId!];
 					byId.set(model.id, model);
-				} else if (hasCredentialIds && !existing.oauthCredentialIds!.includes(credentialId!)) {
-					existing.oauthCredentialIds!.push(credentialId!);
+				} else {
+					if (hasCredentialIds && !existing.oauthCredentialIds!.includes(credentialId!)) {
+						existing.oauthCredentialIds!.push(credentialId!);
+					}
+					// Reconcile capabilities conservatively so routing to either account
+					// respects the lowest common limits and input modalities.
+					if (typeof existing.contextWindow === "number" && typeof model.contextWindow === "number") {
+						existing.contextWindow = Math.min(existing.contextWindow, model.contextWindow);
+					} else if (model.contextWindow === null) {
+						existing.contextWindow = null;
+					}
+					if (typeof existing.maxTokens === "number" && typeof model.maxTokens === "number") {
+						existing.maxTokens = Math.min(existing.maxTokens, model.maxTokens);
+					} else if (model.maxTokens === null) {
+						existing.maxTokens = null;
+					}
+					if (Array.isArray(existing.input) && Array.isArray(model.input)) {
+						const otherInput = new Set(model.input);
+						existing.input = existing.input.filter(modality => otherInput.has(modality));
+					}
 				}
 			}
 		}
 		return [...byId.values()];
 	};
 
-	return {
+	const managerOptions: ModelManagerOptions<Api> = {
 		providerId: "github-copilot",
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", { apiKey: rawApiKey, baseUrl }),
 		dropCachedModelIdsOnStaticMismatch: COPILOT_CACHE_INVALIDATED_MODEL_IDS,
@@ -6502,6 +6520,12 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 							if (!accounts || accounts.length === 0) {
 								return null;
 							}
+							if (accounts[0]?.apiKey) {
+								managerOptions.cacheProviderId = resolveModelCacheProviderId("github-copilot", {
+									apiKey: accounts[0].apiKey,
+									baseUrl,
+								});
+							}
 							const results = await Promise.all(
 								accounts.map(async account => ({
 									accountId: account.accountId,
@@ -6519,6 +6543,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 				}
 			: {}),
 	};
+	return managerOptions;
 }
 
 // ---------------------------------------------------------------------------

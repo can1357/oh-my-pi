@@ -87,6 +87,7 @@ export interface ModelResolutionResult<TApi extends Api = Api> {
 	stale: boolean;
 	source: ModelResolutionSource;
 	updatedAt?: number;
+	authoritative?: boolean;
 }
 
 /**
@@ -330,15 +331,22 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		? mergeCatalogMetrics(mergedWithModelsDev, catalogMetricsSource)
 		: mergedWithModelsDev;
 	const mergedModels = mergeDynamicModels(mergedWithCatalogMetrics, dynamicModels);
+	const retainAuthoritativeCache =
+		dynamicModelsAuthoritative && (cache?.authoritative ?? false) && !anyRemoteFetchSucceeded;
 	const models = collapseBuiltVariants(
-		authoritativeDynamicFetchSucceeded ? retainModelIds(mergedModels, dynamicModels) : mergedModels,
+		authoritativeDynamicFetchSucceeded
+			? retainModelIds(mergedModels, dynamicModels)
+			: retainAuthoritativeCache
+				? cacheModels
+				: mergedModels,
 	);
 	const resolutionAuthoritative = !hasRemoteFetcher || remoteResolutionComplete || shouldUseFreshCacheAsAuthoritative;
 	const remoteUpdatedAt = anyRemoteFetchSucceeded ? now() : undefined;
 	if (shouldFetchFromNetwork) {
+		const writeCacheProviderId = options.cacheProviderId ?? cacheProviderId;
 		if (anyRemoteFetchSucceeded) {
 			writeModelCache(
-				cacheProviderId,
+				writeCacheProviderId,
 				remoteUpdatedAt!,
 				models,
 				cacheAuthoritative,
@@ -349,8 +357,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			);
 		} else {
 			// Remote fetch failed — update cache with a non-authoritative snapshot so
-			// stale state remains visible while retry backoff still applies.
-			const latestCache = readModelCache<TApi>(cacheProviderId, ttlMs, now, dbPath);
+			// stale state remains visible while retry backoff still applies, unless
+			// the provider is authoritative and has an existing authoritative cache,
+			// in which case the authoritative cache must be preserved so disabled models
+			// are not re-injected.
+			const latestCache = readModelCache<TApi>(writeCacheProviderId, ttlMs, now, dbPath);
 			const latestRestoredCache = restoreCachedModelHeaders(
 				latestCache?.models ?? cache?.models ?? [],
 				staticModels,
@@ -371,14 +382,18 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 			const latestCacheModels = additiveStaticModelIds
 				? preparedLatestCacheModels.filter(model => !additiveStaticModelIds.has(model.id))
 				: preparedLatestCacheModels;
+			const isAuthoritativePreserved =
+				dynamicModelsAuthoritative && (latestCache?.authoritative ?? cache?.authoritative ?? false);
 			const fallbackSnapshotModels = collapseBuiltVariants(
-				mergeDynamicModels(mergeDynamicModels(staticModels, latestCacheModels), modelsDevModels),
+				isAuthoritativePreserved
+					? latestCacheModels
+					: mergeDynamicModels(mergeDynamicModels(staticModels, latestCacheModels), modelsDevModels),
 			);
 			writeModelCache(
-				cacheProviderId,
+				writeCacheProviderId,
 				now(),
 				fallbackSnapshotModels,
-				false,
+				isAuthoritativePreserved,
 				staticFingerprint,
 				dbPath,
 				staticModels,
@@ -398,6 +413,7 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		models,
 		stale: !resolutionAuthoritative,
 		source,
+		authoritative: resolutionAuthoritative || retainAuthoritativeCache,
 		...(remoteUpdatedAt !== undefined
 			? { updatedAt: remoteUpdatedAt }
 			: cacheContributed && cache
