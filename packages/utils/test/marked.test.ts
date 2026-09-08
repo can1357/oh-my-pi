@@ -174,4 +174,28 @@ describe("marked compatibility", () => {
 		]);
 		expect(marked.parse("before $x_i$\n\n$$\ny^2\n$$\n")).toBe("<p>before <i>x_i</i></p>\n<math>y^2</math>\n");
 	});
+
+	// Reference labels are user-controlled and index the ref-def map. An
+	// `Object.prototype` member (`constructor`, `__proto__`, `toString`, …) must
+	// not resolve to a fake definition: the link falls back to literal text and
+	// never yields a `href: undefined` token that crashes downstream renderers
+	// (issue #10283).
+	for (const label of ["constructor", "__proto__", "toString", "valueOf", "hasOwnProperty"]) {
+		test(`treats reference label ${label} as literal text, not an inherited definition`, () => {
+			const tokens = [...Lexer.lex(`[text][${label}]`)];
+			const links: unknown[] = [];
+			const walk = (list: readonly { type: string; tokens?: unknown[] }[]) => {
+				for (const token of list) {
+					if (token.type === "link") links.push(token);
+					if (Array.isArray(token.tokens)) {
+						walk(token.tokens as { type: string; tokens?: unknown[] }[]);
+					}
+				}
+			};
+			walk(tokens as { type: string; tokens?: unknown[] }[]);
+			expect(links).toEqual([]);
+			// No anchor element is produced: the label is not a reference definition.
+			expect(new Marked().parse(`[text][${label}]`)).not.toContain("<a ");
+		});
+	}
 });

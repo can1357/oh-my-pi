@@ -2,6 +2,12 @@ import type { JsDisplayOutput } from "./shared/types";
 
 export type { JsDisplayOutput } from "./shared/types";
 
+export interface EvalPreludeSource {
+	name: string;
+	exports: string[];
+	source: string;
+}
+
 export interface SessionSnapshot {
 	cwd: string;
 	sessionId: string;
@@ -11,6 +17,8 @@ export interface SessionSnapshot {
 	 * accept `local://…` paths instead of writing a literal `local:/` directory.
 	 */
 	localRoots?: Record<string, string>;
+	/** Enabled host-capability snippets projected for this JavaScript cell. */
+	preludes?: EvalPreludeSource[];
 }
 
 export interface RunErrorPayload {
@@ -23,9 +31,15 @@ export interface RunErrorPayload {
 
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
+/** Request to inspect or invoke the retained JavaScript tool registry. */
+export type JsToolRequest =
+	| { op: "describe"; names: string[] }
+	| { op: "call"; name: string; args: Record<string, unknown> };
+
 export type WorkerInbound =
 	| { type: "init"; snapshot: SessionSnapshot }
 	| { type: "run"; runId: string; code: string; filename: string; snapshot: SessionSnapshot }
+	| ({ type: "tool"; runId: string } & JsToolRequest)
 	| { type: "tool-reply"; id: string; reply: ToolReply }
 	| { type: "close" };
 

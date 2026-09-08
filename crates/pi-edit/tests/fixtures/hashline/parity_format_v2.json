@@ -1,0 +1,575 @@
+{
+	"source": "packages/hashline/test/format-v2.test.ts",
+	"cases": [
+		{
+			"name": "replaces a concrete range with literal body rows in textual order",
+			"parse": [
+				{
+					"input": "PUT 2.=2:\n+before\n+after",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc",
+					"input": "PUT 2.=2:\n+before\n+after",
+					"expect": {
+						"text": "a\nbefore\nafter\nc",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "deletes a single source line",
+			"parse": [
+				{
+					"input": "CUT 2.=2",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc",
+					"input": "CUT 2.=2",
+					"expect": {
+						"text": "a\nc",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "deletes a concrete range",
+			"parse": [
+				{
+					"input": "CUT 2.=3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd",
+					"input": "CUT 2.=3",
+					"expect": {
+						"text": "a\nd",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "leniently accepts common range separator variants",
+			"parse": [
+				{
+					"input": "CUT 2-3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2-3:\n+middle",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2.3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2.3:\n+middle",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2=3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2=3:\n+middle",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2..3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2..3:\n+middle",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2…3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2…3:\n+middle",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "CUT 2 3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT 2 3:\n+middle",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd",
+					"input": "CUT 2-3",
+					"expect": {
+						"text": "a\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "PUT 2-3:\n+middle",
+					"expect": {
+						"text": "a\nmiddle\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "CUT 2.3",
+					"expect": {
+						"text": "a\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "PUT 2.3:\n+middle",
+					"expect": {
+						"text": "a\nmiddle\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "CUT 2=3",
+					"expect": {
+						"text": "a\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "PUT 2=3:\n+middle",
+					"expect": {
+						"text": "a\nmiddle\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "CUT 2..3",
+					"expect": {
+						"text": "a\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "PUT 2..3:\n+middle",
+					"expect": {
+						"text": "a\nmiddle\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "CUT 2…3",
+					"expect": {
+						"text": "a\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "PUT 2…3:\n+middle",
+					"expect": {
+						"text": "a\nmiddle\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "CUT 2 3",
+					"expect": {
+						"text": "a\nd",
+						"firstChangedLine": 2
+					}
+				},
+				{
+					"text": "a\nb\nc\nd",
+					"input": "PUT 2 3:\n+middle",
+					"expect": {
+						"text": "a\nmiddle\nd",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "inserts before and after concrete anchors",
+			"parse": [
+				{
+					"input": "PUT <2:\n+before\nPUT >2:\n+after",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc",
+					"input": "PUT <2:\n+before\nPUT >2:\n+after",
+					"expect": {
+						"text": "a\nbefore\nb\nafter\nc",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "inserts at head and tail",
+			"parse": [
+				{
+					"input": "PUT <1:\n+HEAD",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				},
+				{
+					"input": "PUT >$:\n+TAIL",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb",
+					"input": "PUT <1:\n+HEAD",
+					"expect": {
+						"text": "HEAD\na\nb",
+						"firstChangedLine": 1
+					}
+				},
+				{
+					"text": "a\nb",
+					"input": "PUT >$:\n+TAIL",
+					"expect": {
+						"text": "a\nb\nTAIL",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "treats an empty replace as deletion while still rejecting an empty insert",
+			"parse": [
+				{
+					"input": "PUT 2-3:",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Interpreted an empty `PUT` body as deletion. Use `CUT N.=M` or `CUT N*` for bodyless deletes."
+						]
+					}
+				},
+				{
+					"input": "PUT <1:",
+					"error": "Error: line 1: `PUT <N:` / `PUT >N:` promises body rows and got none. Write `+TEXT` rows, or drop the `:` to paste a register (`PUT >N` = anonymous, `PUT >N @name` = named)."
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc\nd",
+					"input": "PUT 2-3:",
+					"expect": {
+						"text": "a\nd",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "rejects body rows under cut",
+			"parse": [
+				{
+					"input": "CUT 2\n+replacement",
+					"error": "Error: line 2: `CUT` deletes (and captures) the named lines and takes no body rows. To write new content, use `PUT N.=M:` with `+TEXT` rows."
+				}
+			]
+		},
+		{
+			"name": "does not recognize removed DEL or COPY headers",
+			"parse": [
+				{
+					"input": "DEL 2",
+					"error": "Error: line 1: payload line has no preceding hunk header. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` above the body. Got \"DEL 2\"."
+				},
+				{
+					"input": "DEL.BLK 2",
+					"error": "Error: line 1: payload line has no preceding hunk header. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` above the body. Got \"DEL.BLK 2\"."
+				},
+				{
+					"input": "COPY 2",
+					"error": "Error: line 1: payload line has no preceding hunk header. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` above the body. Got \"COPY 2\"."
+				},
+				{
+					"input": "COPY.BLK 2",
+					"error": "Error: line 1: payload line has no preceding hunk header. Use `PUT N.=M:`, `CUT N.=M`, or `PUT <N:`/`PUT >N:` above the body. Got \"COPY.BLK 2\"."
+				}
+			]
+		},
+		{
+			"name": "auto-pipes bare body rows as literal text",
+			"parse": [
+				{
+					"input": "PUT 2-2:\nraw",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				},
+				{
+					"input": "PUT 2-2:\nraw",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc",
+					"input": "PUT 2-2:\nraw",
+					"expect": {
+						"text": "a\nraw\nc",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "strips read-output line number prefix from auto-piped bare body rows",
+			"parse": [
+				{
+					"input": "PUT 2-2:\n3:replaced",
+					"expect": {
+						"editCount": 2,
+						"warnings": [
+							"Auto-prefixed bare body row(s) with `+`. Body rows must be `+TEXT` literal lines."
+						]
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\nc",
+					"input": "PUT 2-2:\n3:replaced",
+					"expect": {
+						"text": "a\nreplaced\nc",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "validates insert anchors against file bounds",
+			"parse": [
+				{
+					"input": "PUT <4:\n+x",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb",
+					"input": "PUT <4:\n+x",
+					"error": "Error: Line 4 does not exist (file has 2 lines)"
+				}
+			]
+		},
+		{
+			"name": "rejects safe-integer ranges above the expansion limit",
+			"parse": [
+				{
+					"input": "PUT 1-100001:\n+x",
+					"error": "Error: line 1: replace range spans 100001 lines; the maximum is 100000. Split it into smaller hunks."
+				}
+			]
+		},
+		{
+			"name": "ignores cutting the trailing blank sentinel of a newline-terminated file",
+			"parse": [
+				{
+					"input": "CUT 3",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\n",
+					"input": "CUT 3",
+					"expect": {
+						"text": "a\nb\n"
+					}
+				}
+			]
+		},
+		{
+			"name": "treats a cut range ending at the trailing sentinel as ending at the last real line",
+			"parse": [
+				{
+					"input": "CUT 2-3",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\n",
+					"input": "CUT 2-3",
+					"expect": {
+						"text": "a\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "treats a replace range ending at the trailing sentinel as ending at the last real line",
+			"parse": [
+				{
+					"input": "PUT 2-3:\n+B",
+					"expect": {
+						"editCount": 3,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\n",
+					"input": "PUT 2-3:\n+B",
+					"expect": {
+						"text": "a\nB\n",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		},
+		{
+			"name": "still allows inserts anchored on the trailing blank sentinel",
+			"parse": [
+				{
+					"input": "PUT >3:\n+tail",
+					"expect": {
+						"editCount": 1,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb\n",
+					"input": "PUT >3:\n+tail",
+					"expect": {
+						"text": "a\nb\n\ntail",
+						"firstChangedLine": 3
+					}
+				}
+			]
+		},
+		{
+			"name": "still cuts a genuine last line of a non-newline-terminated file",
+			"parse": [
+				{
+					"input": "CUT 2",
+					"expect": {
+						"editCount": 2,
+						"warnings": []
+					}
+				}
+			],
+			"apply": [
+				{
+					"text": "a\nb",
+					"input": "CUT 2",
+					"expect": {
+						"text": "a",
+						"firstChangedLine": 2
+					}
+				}
+			]
+		}
+	],
+	"skipped": [
+		{
+			"name": "rejects unsafe line numbers before expanding ranges",
+			"reason": "The Rust engine represents source line anchors as u32; JavaScript's Number.MAX_SAFE_INTEGER success-only parser probe cannot be represented. The unsafe-number rejection half is covered."
+		}
+	]
+}

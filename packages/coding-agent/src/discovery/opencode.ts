@@ -37,6 +37,7 @@ import {
 	getProjectPath,
 	getUserPath,
 	loadFilesFromDir,
+	resolveUserPath,
 	scanSkillsFromDir,
 } from "./helpers";
 
@@ -406,17 +407,20 @@ async function loadExtensionModules(ctx: LoadContext): Promise<LoadResult<Extens
 function readOpencodeCommandToggles(): { enableUser: boolean; enableProject: boolean } {
 	try {
 		return {
-			enableUser: settings.get("commands.enableOpencodeUser") ?? true,
+			enableUser: settings.get("commands.enableOpencodeUser") === true,
 			enableProject: settings.get("commands.enableOpencodeProject") ?? true,
 		};
 	} catch {
-		return { enableUser: true, enableProject: true };
+		return { enableUser: false, enableProject: true };
 	}
 }
 
 async function loadSlashCommands(ctx: LoadContext): Promise<LoadResult<SlashCommand>> {
 	const { enableUser, enableProject } = readOpencodeCommandToggles();
-	const userCommandsDir = enableUser ? getUserPath(ctx, "opencode", "commands") : null;
+	// The legacy commands toggle is a commands-only opt-in for ~/.config/opencode.
+	const userCommandsDir = enableUser
+		? resolveUserPath(ctx, "opencode", "commands")
+		: getUserPath(ctx, "opencode", "commands");
 	const projectCommandsDir = enableProject ? getProjectPath(ctx, "opencode", "commands") : null;
 
 	const transformCommand =
