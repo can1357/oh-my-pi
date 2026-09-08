@@ -96,6 +96,19 @@ describe("task progress rendering", () => {
 		expect(rawRow0).toBe(rawRow1);
 	});
 
+	it("does not render the async manager job id", async () => {
+		const theme = (await getThemeByName("dark"))!;
+		const options: RenderResultOptions = { expanded: false, isPartial: true, spinnerFrame: 0 };
+		const legacy = runningProgress({ id: "Foo", description: "Build it" });
+		const bound = { ...legacy, jobId: "Foo-2" };
+		const render = (progress: AgentProgress): readonly string[] =>
+			taskToolRenderer
+				.renderResult({ content: [{ type: "text", text: "" }], details: detailsFor(progress) }, options, theme)
+				.render(120);
+
+		expect(render(bound)).toEqual(render(legacy));
+	});
+
 	// Regression: the ⟨agent⟩ type badge must survive past the streaming call
 	// preview — it stays on live progress rows and on finished result rows, and
 	// the generic `task` worker stays bare.
