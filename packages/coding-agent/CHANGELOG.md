@@ -25,6 +25,7 @@
 - `/move` now checks BTW migration availability before confirming or creating a missing target directory, preventing leftover directories after a refused move.
 - BTW errors now shorten embedded home paths and sanitize control characters and oversized text before display, while retaining original diagnostic errors.
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
+- Fixed `/export` argument parsing rejecting quoted output paths that contain spaces ([#10785](https://github.com/can1357/oh-my-pi/pull/10785) by [@oleg494](https://github.com/oleg494)).
 ### Added
 
 - Added session-local `/btw` history with persistent answers and follow-ups; bare `/btw` reopens history, Escape cancels running answers before closing, and new questions no longer replace an in-progress answer.
@@ -196,7 +197,6 @@
 - Fixed frame skips while streaming long markdown Write previews ([#10955](https://github.com/can1357/oh-my-pi/issues/10955)).
 - LiteLLM discovery no longer caches an empty catalog after a timed-out run: a rich-metadata timeout now falls back to `/v1/models`, and a discovery failure with no prior catalog leaves the cache untouched so the next launch retries immediately instead of hiding discovery-only models ([#10964](https://github.com/can1357/oh-my-pi/issues/10964)).
 - Searching `free` in the model picker now finds every zero-cost model, not just the ones with `free` in their id.
-- Fixed `/export` argument parsing rejecting quoted output paths that contain spaces ([#10785](https://github.com/can1357/oh-my-pi/pull/10785)).
 
 ## [18.1.11] - 2026-09-05
 
