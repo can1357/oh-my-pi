@@ -162,4 +162,23 @@ describe("AuthStorage in-flight turn reservations", () => {
 		expect(second).toBeDefined();
 		expect(first).not.toBe(second);
 	});
+
+	it("releases api_key reservation when configValueResolver fails", async () => {
+		if (!store) throw new Error("setup failed");
+		const apiProvider = `${PROVIDER}-api-key-fail`;
+		const failing = new AuthStorage(store, {
+			configValueResolver: async () => undefined,
+		});
+		await failing.set(apiProvider, [{ type: "api_key", key: "!command:missing", source: "login" }]);
+		const id = failing.listStoredCredentials(apiProvider)[0]?.id;
+		if (id === undefined) throw new Error("missing credential");
+		const missing = await failing.getApiKey(apiProvider, "s-fail", { requestId: "fail-req" });
+		expect(missing).toBeUndefined();
+		const reacquire = failing.tryAcquireTurnReservation({
+			credentialId: id,
+			incarnation: failing.getCredentialIncarnation(id),
+			requestId: "after-fail",
+		});
+		expect(reacquire.ok).toBe(true);
+	});
 });
