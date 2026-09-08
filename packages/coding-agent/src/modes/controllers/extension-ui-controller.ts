@@ -673,6 +673,7 @@ export class ExtensionUiController {
 			const finishPrompt = (value: string | undefined): void => {
 				const resolvePrompt = promptResolve;
 				promptResolve = undefined;
+				promptEditor?.dispose();
 				promptEditor = undefined;
 				restoreAskDialog();
 				resolvePrompt?.(value);
@@ -720,6 +721,7 @@ export class ExtensionUiController {
 			return () => {
 				closed = true;
 				askDialog?.dispose();
+				promptEditor?.dispose();
 				promptResolve?.(undefined);
 				promptResolve = undefined;
 				promptEditor = undefined;
@@ -1035,6 +1037,7 @@ export class ExtensionUiController {
 	 * Hide the hook editor.
 	 */
 	hideHookEditor(): void {
+		this.ctx.hookEditor?.dispose();
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(this.ctx.editor);
 		this.ctx.hookEditor = undefined;

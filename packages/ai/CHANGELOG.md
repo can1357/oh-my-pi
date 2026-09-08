@@ -2,11 +2,22 @@
 
 ## [Unreleased]
 
+## [18.1.14] - 2026-09-07
+
+### Fixed
+
+- Fixed reasoning-off requests (e.g. GitHub Copilot `gpt-6-astra`) surfacing `400 Unsupported value: 'none' … Supported values are: …` instead of retrying at the lowest allowed effort: the reasoning-effort fallback now recognizes `Supported values` phrasing ([#11128](https://github.com/can1357/oh-my-pi/pull/11128) by [@H4vC](https://github.com/H4vC)).
+- Fixed Cursor GPT off-tier requests sending raw `-none` sibling ids (e.g. `gpt-5.6-sol-none-fast`), which the Run endpoint rejects; they now normalize to the base model id with no reasoning parameter, matching every other effort tier ([#11128](https://github.com/can1357/oh-my-pi/pull/11128) by [@H4vC](https://github.com/H4vC)).
+
 ## [18.1.12] - 2026-09-06
 
 ### Added
 
 - Added Muse Code subscription sign-in, credential refresh, inference, and quota reporting in `/usage`, with durable rate-limit backoff so quota refresh recovers instead of repeatedly retrying.
+
+### Fixed
+
+- Fixed Codex compaction timeouts triggering prolonged retries instead of advancing to the next compaction method.
 
 ## [18.1.11] - 2026-09-05
 

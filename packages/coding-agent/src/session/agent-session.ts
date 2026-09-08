@@ -5253,6 +5253,14 @@ export class AgentSession {
 
 	/** Trigger idle compaction through the automatic maintenance flow. */
 	async runIdleCompaction(): Promise<void> {
+		// A pending async wake means the session is waiting, not idle: a
+		// background job (bash/task) owned by this agent re-wakes the loop when it
+		// completes, and the async-result delivery continues the run. Idle
+		// compaction is a stop-time pass like the todo reminder and session_stop
+		// hook — defer it until the session is fully idle so the resumed turn
+		// keeps its context (the async settle, or the threshold path, compacts if
+		// still needed).
+		if (this.#hasPendingAsyncWake()) return;
 		await this.#maintenance.runIdleCompaction();
 	}
 

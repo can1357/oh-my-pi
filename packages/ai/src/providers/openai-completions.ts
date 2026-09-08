@@ -816,10 +816,15 @@ const streamOpenAICompletionsOnce = (
 				openaiStream = await createCompletionsStream();
 			} catch (error) {
 				const capturedErrorResponse = error instanceof OpenAIHttpError ? error.captured : undefined;
+				// A caller disable with a retained effort preference is still an
+				// explicit disable: without this, a fieldless rejection of the
+				// resulting `none` resolves to a delete-effort retry that gets
+				// cached and strips later enabled turns.
+				const isExplicitDisable = options?.disableReasoning === true;
 				const reasoningEffortFallback =
 					activeReasoningEffortFallbackKey && activeRequestParams && !requestSignal.aborted
 						? resolveOpenAIReasoningEffortFallback(error, capturedErrorResponse, activeRequestParams, {
-								explicitDisable: options?.disableReasoning === true && options.reasoning === undefined,
+								explicitDisable: isExplicitDisable,
 							})
 						: undefined;
 				if (reasoningEffortFallback !== undefined && activeReasoningEffortFallbackKey) {
@@ -828,11 +833,16 @@ const streamOpenAICompletionsOnce = (
 					attemptedReasoningEffortFallbacks.add(retryMarker);
 					requestReasoningEffortFallbacks.set(activeReasoningEffortFallbackKey, reasoningEffortFallback);
 					openaiStream = await createCompletionsStream();
-					rememberOpenAIReasoningEffortFallback(
-						providerSessionState,
-						activeReasoningEffortFallbackKey,
-						reasoningEffortFallback,
-					);
+					// Explicit-disable fallbacks stay per-request so a reasoning-off
+					// side request cannot downgrade later normal turns sharing
+					// the session state.
+					if (!isExplicitDisable) {
+						rememberOpenAIReasoningEffortFallback(
+							providerSessionState,
+							activeReasoningEffortFallbackKey,
+							reasoningEffortFallback,
+						);
+					}
 				} else if (
 					model.compat.retryWithoutStrictOnGrammarError &&
 					!disableStrictTools &&
