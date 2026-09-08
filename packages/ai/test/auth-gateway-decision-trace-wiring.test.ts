@@ -49,6 +49,53 @@ describe("auth-gateway decision-trace wiring", () => {
 		}
 	});
 
+	it("serves a recorded trace over GET /v1/executions/:id", async () => {
+		registerMockApi();
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-trace-exec-"));
+		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		storage.setRuntimeApiKey("openrouter", "test-key");
+		const mock = createMockModel({ provider: "openrouter", id: "mock/trace-exec" });
+		mock.push({ content: ["ok"] });
+		const traces = new RouteDecisionTraceLog();
+		const handle = startAuthGateway({
+			bind: "127.0.0.1:0",
+			bearerTokens: ["t"],
+			storage,
+			resolveModel: () => mock.model,
+			decisionTraces: traces,
+			version: "test",
+		});
+		try {
+			const res = await fetch(`${handle.url}/v1/chat/completions`, {
+				method: "POST",
+				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
+				body: JSON.stringify({
+					model: "mock/trace-exec",
+					messages: [{ role: "user", content: "hi" }],
+					stream: false,
+				}),
+			});
+			expect(res.status).toBe(200);
+			await res.text();
+			const recorded = traces.list().filter(tr => tr.routeId === "mock/trace-exec");
+			expect(recorded.length).toBeGreaterThan(0);
+			const id = recorded[0]!.requestId;
+			const got = await fetch(`${handle.url}/v1/executions/${id}`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(got.status).toBe(200);
+			expect(await got.json()).toEqual(expect.objectContaining({ requestId: id, routeId: "mock/trace-exec" }));
+			const missing = await fetch(`${handle.url}/v1/executions/does-not-exist`, {
+				headers: { Authorization: "Bearer t" },
+			});
+			expect(missing.status).toBe(404);
+		} finally {
+			await handle.close();
+			storage.close();
+			await fs.rm(dir, { recursive: true, force: true });
+		}
+	});
+
 	it("records skipped credential_unavailable when no key exists (negative)", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-trace-skip-"));

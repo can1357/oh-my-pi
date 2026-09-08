@@ -13,6 +13,7 @@
  *   GET  /v1/usage                         → aggregated provider usage (5-min per-credential cache via AuthStorage)
  *   GET  /v1/credentials/check             → per-credential auth probe (diagnose 401s in a multi-account pool)
  *   GET  /v1/models                        → list known models from the registry
+ *   GET  /v1/executions/:id               → redacted route decision trace for a request
  *   POST /v1/chat/completions              → OpenAI chat-completions in/out
  *   POST /v1/messages                      → Anthropic messages in/out
  *   POST /v1/responses                     → OpenAI Responses in/out
@@ -990,6 +991,15 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				// Model catalog.
 				if (req.method === "GET" && pathname === "/v1/models") {
 					return withCors(handleModelsList(boot), req);
+				}
+
+				// Redacted route-decision trace for a past request, looked up
+				// by the request id the gateway assigns per dispatch.
+				if (req.method === "GET" && pathname.startsWith("/v1/executions/")) {
+					const id = pathname.slice("/v1/executions/".length);
+					const trace = boot.decisionTraces?.list().find(entry => entry.requestId === id);
+					if (trace === undefined) return withCors(json(404, { error: "unknown execution" }), req);
+					return withCors(json(200, trace), req);
 				}
 
 				// Route-table miss: no format module to defer to, so we emit a
