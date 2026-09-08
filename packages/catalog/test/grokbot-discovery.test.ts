@@ -495,6 +495,8 @@ describe("grokbot AvailableModels normalize", () => {
 				provider: "grokbot",
 				baseUrl: "https://api2.cursor.sh",
 				reasoning: false,
+				// Empty ladder = authored non-reasoning (same as AvailableModels).
+				thinking: { mode: "effort", efforts: [] },
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow: null,

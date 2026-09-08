@@ -169,14 +169,21 @@ function commandMentionsPath(segment: string, filePath: string): boolean {
 }
 
 /**
- * Bash smoke must actually echo/printf the ping in the same statement — not
- * merely mention it elsewhere (`echo wrong; true tools-pong-…`) or in a comment.
+ * Bash smoke must actually echo/printf the ping as an argument — not in a
+ * sibling statement, comment, or redirect filename (`echo wrong > ping`).
  */
 export function echoLikeShellCommand(command: string, ping: string): boolean {
 	if (!ping) return false;
 	const cmd = command.trim();
 	if (!cmd) return false;
-	return shellStatementSegments(cmd).some(segment => /^(?:echo|printf)\b/.test(segment) && segment.includes(ping));
+	return shellStatementSegments(cmd).some(segment => {
+		if (!/^(?:echo|printf)\b/.test(segment)) return false;
+		// Strip redirects / tee so the ping only counts as stdout payload.
+		const withoutRedirects = segment
+			.replace(/(?:>>?|<<?)\s*(?:'[^']*'|"[^"]*"|\S+)/g, " ")
+			.replace(/\|\s*tee\b[\s\S]*$/i, " ");
+		return withoutRedirects.includes(ping);
+	});
 }
 
 /** Read smoke: path must appear in the same cat/head/sed statement. */

@@ -247,5 +247,15 @@ export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi>
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
+	// Discovery can mark non-reasoning / unrecognized-only vocabularies with an
+	// explicit empty thinking ladder. Catalog `reasoning` must not OR-upgrade
+	// that surface after resolveThinkingPolicy already preserved the absence.
+	if (
+		policy.catalog.preserveAuthoredThinking === true &&
+		spec.thinking !== undefined &&
+		spec.thinking.efforts.length === 0
+	) {
+		model.reasoning = Boolean(spec.reasoning);
+	}
 	return model;
 }

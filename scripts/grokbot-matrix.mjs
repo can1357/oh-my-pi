@@ -10,6 +10,8 @@
  */
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
+import { buildModel } from "../packages/catalog/src/build.ts";
+import { fetchGrokbotAvailableModels } from "../packages/catalog/src/discovery/grokbot.ts";
 import {
 	GROKBOT_BACKEND,
 	createGrokbotChecksum,
@@ -18,6 +20,7 @@ import {
 	loadGrokbotConfig,
 	mintGrokbotAccessToken,
 } from "../packages/catalog/src/discovery/grokbot-auth.ts";
+import { GROKBOT_API } from "../packages/catalog/src/provider-models/grokbot.ts";
 import { applyAnthropicSandToolWire } from "../packages/ai/src/providers/grokbot/anthropic-sand-wire.ts";
 import { resolveGrokbotRequestedModel } from "../packages/ai/src/providers/grokbot/model-request.ts";
 import {
@@ -42,25 +45,63 @@ const OPUS_SYSTEM = prompt.render(matrixOpusSystemPrompt).trim();
 const OPUS_SHELL_USER = prompt.render(matrixOpusShellUserPrompt, { token: "opus-tools-matrix" }).trim();
 const BASH_THEN_TOKEN_USER = prompt.render(matrixBashThenTokenUserPrompt, { token: TOKEN }).trim();
 
-/** Models exercised for tool-capable agent use (non-Anthropic sand paths). */
-const TOOL_MODELS = [
-	{ id: "grok-4.6", sandParameterIds: ["effort", "fast"], effort: "low" },
-	{ id: "composer-2.5", sandParameterIds: ["fast"] },
-	{ id: "gemini-3.7-flash", sandParameterIds: ["effort"], effort: "low" },
-	{ id: "gpt-5.6-sol", sandParameterIds: ["reasoning", "context", "fast"], effort: "low" },
-	{ id: "kimi-k3", sandParameterIds: ["reasoning"], effort: "low" },
-	{ id: "glm-5.2", sandParameterIds: ["reasoning"], effort: "high" },
+/** Probe id sets — wire params/effort come from live catalog + buildModel policy. */
+const TOOL_MODEL_IDS = [
+	"grok-4.6",
+	"composer-2.5",
+	"gemini-3.7-flash",
+	"gpt-5.6-sol",
+	"kimi-k3",
+	"glm-5.2",
 ];
+const CLAUDE_TEXT_MODEL_IDS = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"];
+const GROK45_ID = "grok-4.5";
 
-/** grok-4.5 text works; tools return sand HTTP 422 (upstream). */
-const GROK45_INFO = { id: "grok-4.5", sandParameterIds: ["effort", "fast"], effort: "low" };
+/**
+ * Build a matrix probe row from discovered/built catalog metadata.
+ * Falls back to a neutral spec + buildModel so offline KDL still supplies
+ * sand-parameter-ids / effort when AvailableModels omits the id.
+ */
+function matrixRowFromCatalog(id, byId) {
+	const built =
+		byId.get(id) ??
+		buildModel({
+			id,
+			name: id,
+			api: GROKBOT_API,
+			provider: "grokbot",
+			baseUrl: GROKBOT_BACKEND,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		});
+	const sandParameterIds = built.sandParameterIds ? [...built.sandParameterIds] : [];
+	const efforts = built.thinking?.efforts ?? [];
+	const defaultEffort = built.sandParameterDefaults?.effort ?? built.sandParameterDefaults?.reasoning;
+	const effort =
+		typeof defaultEffort === "string" && efforts.includes(defaultEffort)
+			? defaultEffort
+			: efforts.includes("low")
+				? "low"
+				: efforts[0];
+	return {
+		id,
+		sandParameterIds,
+		...(effort ? { effort } : {}),
+	};
+}
 
-/** Anthropic family — text-only is expected to pass; tools currently 400 upstream. */
-const CLAUDE_TEXT_MODELS = [
-	{ id: "claude-opus-5", sandParameterIds: ["thinking", "context", "effort", "fast"], effort: "low" },
-	{ id: "claude-sonnet-5", sandParameterIds: ["thinking", "context", "effort"], effort: "low" },
-	{ id: "claude-haiku-4-5", sandParameterIds: ["thinking"] },
-];
+async function loadMatrixCatalogRows() {
+	const specs = await fetchGrokbotAvailableModels({ timeoutMs: 30_000 });
+	const byId = new Map((specs ?? []).map(spec => [spec.id, buildModel(spec)]));
+	return {
+		TOOL_MODELS: TOOL_MODEL_IDS.map(id => matrixRowFromCatalog(id, byId)),
+		CLAUDE_TEXT_MODELS: CLAUDE_TEXT_MODEL_IDS.map(id => matrixRowFromCatalog(id, byId)),
+		GROK45_INFO: matrixRowFromCatalog(GROK45_ID, byId),
+	};
+}
 
 const mode = (() => {
 	const i = process.argv.indexOf("--mode");
@@ -215,8 +256,9 @@ function printRow(row) {
 	console.log(`${flag}  ${row.tools ? "tools" : "text "}  ${row.id.padEnd(28)} ${extra}`);
 }
 
-async function runText() {
+async function runText(catalog) {
 	console.log("=== TEXT MATRIX ===");
+	const { TOOL_MODELS, CLAUDE_TEXT_MODELS, GROK45_INFO } = catalog;
 	const rows = [];
 	for (const m of [...TOOL_MODELS, ...CLAUDE_TEXT_MODELS, GROK45_INFO]) {
 		const row = await sandProbe({ ...m, tools: false });
@@ -232,8 +274,9 @@ async function runText() {
 	console.log("MATRIX_TEXT_PASS");
 }
 
-async function runTools() {
+async function runTools(catalog) {
 	console.log("=== TOOLS MATRIX (non-Anthropic) ===");
+	const { TOOL_MODELS, CLAUDE_TEXT_MODELS, GROK45_INFO } = catalog;
 	const rows = [];
 	for (const m of TOOL_MODELS) {
 		const row = await sandProbe({ ...m, tools: true });
@@ -285,7 +328,7 @@ const AUTOMATION_OMP_TOOLS = [
 	},
 ];
 
-async function sandAutomationProbe() {
+async function sandAutomationProbe(catalog) {
 	const cfg = await loadGrokbotConfig();
 	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
 	const headers = {
@@ -298,9 +341,10 @@ async function sandAutomationProbe() {
 		"connect-protocol-version": "1",
 		"x-request-id": crypto.randomUUID(),
 	};
+	const opus = catalog.CLAUDE_TEXT_MODELS.find(m => m.id === "claude-opus-5") ?? matrixRowFromCatalog("claude-opus-5", new Map());
 	const requestedModel = resolveGrokbotRequestedModel("claude-opus-5", {
-		effort: "low",
-		sandParameterIds: ["thinking", "context", "effort", "fast"],
+		effort: opus.effort,
+		sandParameterIds: opus.sandParameterIds,
 		sandMaxMode: false,
 	});
 	const wired = applyAnthropicSandToolWire(
@@ -343,9 +387,9 @@ async function sandAutomationProbe() {
 	};
 }
 
-async function runOpusTools() {
+async function runOpusTools(catalog) {
 	console.log("=== OPUS AUTOMATION TOOLS (G5 sand probe) ===");
-	const row = await sandAutomationProbe();
+	const row = await sandAutomationProbe(catalog);
 	printRow({
 		...row,
 		id: row.id,
@@ -448,8 +492,10 @@ function runOmpaIntegration() {
 	console.log("OMPA_INTEGRATION_PASS");
 }
 
-if (mode === "text" || mode === "all") await runText();
-if (mode === "tools" || mode === "all") await runTools();
-if (mode === "opus-tools" || mode === "all") await runOpusTools();
+const needsCatalog = mode === "text" || mode === "tools" || mode === "opus-tools" || mode === "all";
+const catalog = needsCatalog ? await loadMatrixCatalogRows() : null;
+if (mode === "text" || mode === "all") await runText(catalog);
+if (mode === "tools" || mode === "all") await runTools(catalog);
+if (mode === "opus-tools" || mode === "all") await runOpusTools(catalog);
 if (mode === "ompa-smoke" || mode === "all") runOmpaSmoke();
 if (mode === "ompa-integration" || mode === "all") runOmpaIntegration();

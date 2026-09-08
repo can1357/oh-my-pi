@@ -2,6 +2,14 @@ import type { Args } from "./args";
 import { parseModelString } from "../config/model-resolver";
 
 /**
+ * AuthStorage keys runtime overrides by exact provider id (catalog spelling).
+ * CLI selectors are case-insensitive for lookup, so normalize before install.
+ */
+function normalizeCliProviderId(provider: string): string {
+	return provider.trim().toLowerCase();
+}
+
+/**
  * Provider to bind for a CLI `--api-key` before ModelRegistry construction.
  * Credential-scoped catalogs (e.g. grokbot) hash the renewer into the startup
  * cache id; installing the override after model resolution leaves only offline
@@ -22,11 +30,11 @@ export function resolveCliRuntimeApiKeyProvider(
 ): string | undefined {
 	if (parsed.provider?.trim()) {
 		if (!parsed.model?.trim()) return undefined;
-		return parsed.provider.trim();
+		return normalizeCliProviderId(parsed.provider);
 	}
 	if (parsed.model?.trim()) {
 		const parsedModel = parseModelString(parsed.model.trim());
-		if (parsedModel?.provider) return parsedModel.provider;
+		if (parsedModel?.provider) return normalizeCliProviderId(parsedModel.provider);
 		// Bare --model takes precedence over --models; do not consult models.
 		return undefined;
 	}
@@ -37,7 +45,7 @@ export function resolveCliRuntimeApiKeyProvider(
 		const parsedModel = parseModelString(trimmed);
 		// Bare selectors (no provider/) make early key ownership indeterminate.
 		if (!parsedModel?.provider) return undefined;
-		providers.add(parsedModel.provider);
+		providers.add(normalizeCliProviderId(parsedModel.provider));
 	}
 	if (providers.size === 1) {
 		const [only] = providers;

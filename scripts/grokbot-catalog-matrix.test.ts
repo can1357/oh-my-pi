@@ -163,6 +163,9 @@ describe("toolSmokePrompt", () => {
 		// Token in a sibling statement does not count — must be an echo/printf arg.
 		expect(echoLikeShellCommand(`echo wrong; true ${ping}`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`echo wrong && true ${ping}`, ping)).toBe(false);
+		// Redirect filename must not count as echoed output.
+		expect(echoLikeShellCommand(`echo wrong > ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`printf '%s\\n' ${ping} > /tmp/out.txt`, ping)).toBe(true);
 	});
 
 	test("binds read/write shell smoke evidence to the operation statement", () => {

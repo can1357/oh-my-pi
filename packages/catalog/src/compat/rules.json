@@ -8961,14 +8961,14 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:50",
+				"source": "providers/grokbot.kdl:49",
 				"providers": [
 					"grokbot"
 				],
 				"models": [
 					{
-						"kind": "glob",
-						"value": "grok-4.6*"
+						"kind": "exact",
+						"value": "grok-4.6"
 					}
 				],
 				"thinking": {
@@ -8981,6 +8981,7 @@
 					]
 				},
 				"catalog": {
+					"reasoning": true,
 					"contextWindowFloor": 200000,
 					"sandParameterIds": [
 						"effort",

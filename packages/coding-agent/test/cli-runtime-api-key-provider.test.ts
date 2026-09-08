@@ -35,6 +35,16 @@ describe("resolveCliRuntimeApiKeyProvider", () => {
 
 	test("parses provider from --model provider/id", () => {
 		expect(resolveCliRuntimeApiKeyProvider({ model: "grokbot/composer-2.5" })).toBe("grokbot");
+		expect(resolveCliRuntimeApiKeyProvider({ model: "GrokBot/composer-2.5" })).toBe("grokbot");
+	});
+
+	test("normalizes --provider casing for AuthStorage keys", () => {
+		expect(
+			resolveCliRuntimeApiKeyProvider({
+				provider: "GrokBot",
+				model: "sand-default",
+			}),
+		).toBe("grokbot");
 	});
 
 	test("binds --models only when every selector is qualified and shares one provider", () => {

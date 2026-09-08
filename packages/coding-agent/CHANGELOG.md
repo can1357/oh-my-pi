@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- CLI `--api-key` normalizes provider ids to lowercase before AuthStorage install so mixed-case selectors (e.g. `GrokBot/...`) still warm credential-scoped catalogs.
+- Grok Bot catalog matrix bash smoke rejects redirect filenames that only mention the ping token.
 - Grok Bot catalog matrix tool smoke requires a path-segment boundary (rejects `wrongnotes/...` suffix matches).
 - Grok Bot catalog matrix shell smoke binds echo/read/write evidence to the same statement as the operation.
 - Grok Bot catalog matrix `--slice representative` builds catalog models before router selection so KDL `sand-tools-wire` is visible.

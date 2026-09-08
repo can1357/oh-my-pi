@@ -1065,7 +1065,9 @@ function resolveThinkingPolicy<TApi extends Api>(
 	axes: ResolvedAxes,
 	compat: CompatOf<TApi>,
 ): ThinkingConfig | undefined {
-	if (!spec.reasoning) return undefined;
+	// Spec reasoning OR reviewed catalog `reasoning` (neutral seeds/routers).
+	// Authored empty ladders still short-circuit below via preserve-authored-thinking.
+	if (!spec.reasoning && axes.catalog.reasoning !== true) return undefined;
 	if (
 		spec.provider === "cline-pass" &&
 		compat !== undefined &&

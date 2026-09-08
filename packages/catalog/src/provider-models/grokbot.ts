@@ -34,10 +34,11 @@ export const GROKBOT_MODEL_SEEDS: readonly GrokbotModelSeed[] = [
 	{ id: "sand-automation", name: "sand-automation (routed)", reasoning: false },
 	{ id: "default", name: "Auto", reasoning: false },
 	{ id: "auto", name: "auto", reasoning: false },
-	// Offline-only: live AvailableModels owns reasoning for this id. Seed must
-	// stay true so KDL thinking-efforts resolve; putting reasoning in KDL would
-	// overwrite live reasoning:false via applyCatalogCorrections.
-	{ id: "grok-4.6", name: "Grok 4.6 (sand)", reasoning: true },
+	// Offline-only: live AvailableModels owns reasoning for this id. Seed stays
+	// neutral; KDL `reasoning` + `thinking-efforts` fill via buildModel.
+	// Discovery marks authoritative non-reasoning with an empty thinking ladder
+	// so preserve-authored-thinking blocks the KDL upgrade on live rows.
+	{ id: "grok-4.6", name: "Grok 4.6 (sand)", reasoning: false },
 ];
 
 export function buildGrokbotStaticSeed(baseUrl = GROKBOT_BACKEND): ModelSpec<"grokbot-sand">[] {
