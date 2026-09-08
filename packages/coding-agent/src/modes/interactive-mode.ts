@@ -124,7 +124,7 @@ import type { ShakeMode } from "../session/shake-types";
 import { BUILTIN_SLASH_COMMAND_RESERVED_NAMES, buildTuiBuiltinSlashCommands } from "../slash-commands/builtin-registry";
 import { buildStaticInlineHint } from "../slash-commands/builtin-completions";
 import { formatDuration } from "../slash-commands/helpers/format";
-import { resolveSttCloudKey, STTController, type SttState } from "../stt";
+import { resolveSttCloudCredential, STTController, type SttState } from "../stt";
 import { resolveCliEntryCmd } from "../subprocess/worker-client";
 import { discoverTitleSystemPromptFile, resolvePromptInput } from "../system-prompt";
 import { labelEchoesHandle } from "../task/label";
@@ -6238,7 +6238,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		if (!this.#sttController) {
 			this.#sttController = new STTController(undefined, {
-				resolveCloudKey: () => resolveSttCloudKey(this.session.modelRegistry, this.sessionManager.getSessionId()),
+				resolveCloudCredential: () =>
+					resolveSttCloudCredential(this.session.modelRegistry, this.sessionManager.getSessionId()),
 			});
 		}
 		await this.#sttController.toggle(this.editor, {

@@ -1,3 +1,14 @@
+import type { OAuthAccess } from "@oh-my-pi/pi-ai";
+import { getCodexAttestationHeader } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import {
+	applyCodexResidencyHeader,
+	CODEX_BASE_URL,
+	CODEX_CLIENT_VERSION,
+	getCodexAccountId,
+	OPENAI_HEADER_VALUES,
+	OPENAI_HEADERS,
+	URL_PATHS,
+} from "@oh-my-pi/pi-catalog/wire/codex";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { SttStreamHandle, SttStreamOptions } from "./asr-client";
 
@@ -46,7 +57,7 @@ export function resolveCloudSttModel(name: string | undefined): CloudSttModel {
 	return name !== undefined && isCloudSttModel(name) ? name : DEFAULT_CLOUD_STT_MODEL;
 }
 
-const CLOUD_STT_URL = "https://api.openai.com/v1/audio/transcriptions";
+const CODEX_STT_URL = `${CODEX_BASE_URL}${URL_PATHS.TRANSCRIBE}`;
 const CLOUD_STT_TIMEOUT_MS = 60_000;
 
 /** omp records at 16 kHz mono; the endpoint accepts 16-bit PCM WAV as-is. */
@@ -70,9 +81,11 @@ export const STT_BACKEND_OPTIONS = [
 		description: "OpenAI transcription on release. Subscription first, else API key.",
 	},
 ] as const satisfies ReadonlyArray<{ value: SttBackend; label: string; description: string }>;
-
+export type CloudSttCredential =
+	| { kind: "codex"; access: OAuthAccess }
+	| { kind: "openai"; apiKey: string; baseUrl?: string; headers?: Record<string, string> };
 export interface CloudSttStreamOptions extends SttStreamOptions {
-	apiKey: string;
+	credential: CloudSttCredential;
 	/** Transcription model id; resolved with {@link resolveCloudSttModel}. */
 	model?: string;
 	/** Domain hints; forwarded as the endpoint `prompt` when set. */
@@ -166,15 +179,37 @@ async function transcribeBuffer(
 	audio: Float32Array,
 ): Promise<string> {
 	const form = new FormData();
-	form.append("model", resolveCloudSttModel(options.model));
-	if (options.language) form.append("language", options.language);
-	if (options.keywords?.length) form.append("prompt", options.keywords.join(", "));
-	form.append("response_format", "json");
+	const credential = options.credential;
+	let url: string;
+	let headers: Record<string, string>;
+	if (credential.kind === "codex") {
+		const accountId = credential.access.accountId ?? getCodexAccountId(credential.access.accessToken);
+		if (!accountId) throw new Error("OpenAI Codex authentication is missing an account id.");
+		url = CODEX_STT_URL;
+		headers = {
+			Authorization: `Bearer ${credential.access.accessToken}`,
+			[OPENAI_HEADERS.ACCOUNT_ID]: accountId,
+			[OPENAI_HEADERS.ORIGINATOR]: OPENAI_HEADER_VALUES.ORIGINATOR_CODEX,
+			[OPENAI_HEADERS.VERSION]: CODEX_CLIENT_VERSION,
+			"User-Agent": `Codex Desktop/${CODEX_CLIENT_VERSION}`,
+		};
+		applyCodexResidencyHeader(headers, credential.access.accessToken);
+		const attestation = await getCodexAttestationHeader(accountId);
+		if (attestation) headers[OPENAI_HEADERS.ATTESTATION] = attestation;
+	} else {
+		const baseUrl = credential.baseUrl?.replace(/\/$/, "") ?? "https://api.openai.com/v1";
+		url = `${baseUrl}/audio/transcriptions`;
+		headers = { ...credential.headers, Authorization: `Bearer ${credential.apiKey}` };
+		form.append("model", resolveCloudSttModel(options.model));
+		if (options.language) form.append("language", options.language);
+		if (options.keywords?.length) form.append("prompt", options.keywords.join(", "));
+		form.append("response_format", "json");
+	}
 	form.append("file", new Blob([encodeWav16k(audio)], { type: "audio/wav" }), "dictation.wav");
 	const timeout = AbortSignal.timeout(CLOUD_STT_TIMEOUT_MS);
-	const response = await fetchImpl(CLOUD_STT_URL, {
+	const response = await fetchImpl(url, {
 		method: "POST",
-		headers: { Authorization: `Bearer ${options.apiKey}` },
+		headers,
 		body: form,
 		signal: options.signal ? AbortSignal.any([options.signal, timeout]) : timeout,
 	});

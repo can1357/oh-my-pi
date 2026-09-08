@@ -6,7 +6,7 @@ import {
 	resolveCloudSttModel,
 	startCloudSttStream,
 } from "@oh-my-pi/pi-coding-agent/stt/cloud-transcribe-client";
-import { resolveSttCloudKey, STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
+import { resolveSttCloudCredential, STTController, type SttState } from "@oh-my-pi/pi-coding-agent/stt/stt-controller";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
 function sine16kHz(length = 1600): Float32Array {
@@ -40,7 +40,7 @@ describe("cloud STT stream", () => {
 	it("posts buffered audio as wav and resolves the trimmed transcript", async () => {
 		const stub = stubFetch("  hello world  ");
 		const handle = startCloudSttStream({
-			apiKey: "sk-test",
+			credential: { kind: "openai", apiKey: "sk-test" },
 			language: "en",
 			keywords: ["AC-42"],
 			fetchImpl: stub.impl,
@@ -71,20 +71,62 @@ describe("cloud STT stream", () => {
 		expect(resolveCloudSttModel("parakeet")).toBe(DEFAULT_CLOUD_STT_MODEL);
 		expect(resolveCloudSttModel(undefined)).toBe(DEFAULT_CLOUD_STT_MODEL);
 		const stub = stubFetch("ok");
-		const handle = startCloudSttStream({ apiKey: "sk-test", model: "whisper-1", fetchImpl: stub.impl });
+		const handle = startCloudSttStream({
+			credential: { kind: "openai", apiKey: "sk-test" },
+			model: "whisper-1",
+			fetchImpl: stub.impl,
+		});
 		handle.pushAudio(sine16kHz(160));
 		await expect(handle.stop()).resolves.toBe("ok");
 		expect((stub.calls[0]!.init.body as FormData).get("model")).toBe("whisper-1");
 	});
+
+	it("routes credentials to their own endpoint and preserves provider headers", async () => {
+		const apiStub = stubFetch("api");
+		const api = startCloudSttStream({
+			credential: {
+				kind: "openai",
+				apiKey: "proxy-key",
+				baseUrl: "https://proxy.example/v1/",
+				headers: { "X-Workspace": "workspace-1" },
+			},
+			fetchImpl: apiStub.impl,
+		});
+		api.pushAudio(sine16kHz(160));
+		await expect(api.stop()).resolves.toBe("api");
+		expect(apiStub.calls[0]!.url).toBe("https://proxy.example/v1/audio/transcriptions");
+		expect(apiStub.calls[0]!.init.headers).toEqual({
+			"X-Workspace": "workspace-1",
+			Authorization: "Bearer proxy-key",
+		});
+
+		const codexStub = stubFetch("subscription");
+		const codex = startCloudSttStream({
+			credential: {
+				kind: "codex",
+				access: { accessToken: "subscription-token", accountId: "account-1" },
+			},
+			fetchImpl: codexStub.impl,
+		});
+		codex.pushAudio(sine16kHz(160));
+		await expect(codex.stop()).resolves.toBe("subscription");
+		expect(codexStub.calls[0]!.url).toBe("https://chatgpt.com/backend-api/codex/transcribe");
+		expect(codexStub.calls[0]!.init.headers).toMatchObject({
+			Authorization: "Bearer subscription-token",
+			"chatgpt-account-id": "account-1",
+			originator: "omp",
+		});
+		expect((codexStub.calls[0]!.init.body as FormData).has("model")).toBe(false);
+	});
 	it("resolves empty text without a request when nothing was recorded", async () => {
 		const stub = stubFetch();
-		const handle = startCloudSttStream({ apiKey: "sk-test", fetchImpl: stub.impl });
+		const handle = startCloudSttStream({ credential: { kind: "openai", apiKey: "sk-test" }, fetchImpl: stub.impl });
 		await expect(handle.stop()).resolves.toBe("");
 		expect(stub.calls).toHaveLength(0);
 	});
 	it("cancel() discards the late transcript and resolves empty text", async () => {
 		const stub = stubFetch();
-		const handle = startCloudSttStream({ apiKey: "sk-test", fetchImpl: stub.impl });
+		const handle = startCloudSttStream({ credential: { kind: "openai", apiKey: "sk-test" }, fetchImpl: stub.impl });
 		handle.pushAudio(sine16kHz());
 		const stopped = handle.stop();
 		handle.cancel();
@@ -94,7 +136,7 @@ describe("cloud STT stream", () => {
 
 	it("rejects stop() on an HTTP error", async () => {
 		const stub = stubFetch("nope", 401);
-		const handle = startCloudSttStream({ apiKey: "sk-test", fetchImpl: stub.impl });
+		const handle = startCloudSttStream({ credential: { kind: "openai", apiKey: "sk-test" }, fetchImpl: stub.impl });
 		handle.pushAudio(sine16kHz());
 		await expect(handle.stop()).rejects.toThrow("401");
 	});
@@ -163,9 +205,9 @@ describe("cloud backend in STTController", () => {
 				return { stop(): void {} };
 			},
 			{
-				resolveCloudKey: () => {
+				resolveCloudCredential: () => {
 					credentialResolutions++;
-					return Promise.resolve("sk-test");
+					return Promise.resolve({ kind: "openai", apiKey: "sk-test" });
 				},
 				createCloudFetch: stub.impl,
 			},
@@ -190,34 +232,53 @@ describe("cloud backend in STTController", () => {
 	});
 });
 
-describe("resolveSttCloudKey", () => {
+describe("resolveSttCloudCredential", () => {
 	function registry(codex: string | undefined, openai: string | undefined) {
 		return {
-			async getApiKeyForProvider(provider: string): Promise<string | undefined> {
-				return provider === "openai-codex" ? codex : openai;
+			authStorage: {
+				async getOAuthAccess(): Promise<{ accessToken: string; accountId: string } | undefined> {
+					return codex ? { accessToken: codex, accountId: "account-1" } : undefined;
+				},
+			},
+			async getApiKeyForProvider(): Promise<string | undefined> {
+				return openai;
 			},
 		};
 	}
 
-	it("prefers the ChatGPT subscription over the API key", async () => {
-		await expect(resolveSttCloudKey(registry("sub-token", "sk-key"), "s1")).resolves.toBe("sub-token");
+	it("preserves ChatGPT subscription provenance", async () => {
+		await expect(resolveSttCloudCredential(registry("sub-token", "sk-key"), "s1")).resolves.toEqual({
+			kind: "codex",
+			access: { accessToken: "sub-token", accountId: "account-1" },
+		});
 	});
 
-	it("falls back to the API key without a subscription", async () => {
-		await expect(resolveSttCloudKey(registry(undefined, "sk-key"), "s1")).resolves.toBe("sk-key");
+	it("preserves the OpenAI API endpoint and headers", async () => {
+		const source = {
+			...registry(undefined, "sk-key"),
+			getProviderBaseUrl: () => "https://proxy.example/v1",
+			getProviderHeaders: () => ({ "X-Workspace": "workspace-1" }),
+		};
+		await expect(resolveSttCloudCredential(source, "s1")).resolves.toEqual({
+			kind: "openai",
+			apiKey: "sk-key",
+			baseUrl: "https://proxy.example/v1",
+			headers: { "X-Workspace": "workspace-1" },
+		});
 	});
 
 	it("falls back to the API key when subscription lookup rejects", async () => {
-		const rejectingRegistry = {
-			async getApiKeyForProvider(provider: string): Promise<string | undefined> {
-				if (provider === "openai-codex") throw new Error("OAuth refresh failed");
-				return "sk-key";
-			},
+		const source = registry(undefined, "sk-key");
+		source.authStorage.getOAuthAccess = async () => {
+			throw new Error("OAuth refresh failed");
 		};
-		await expect(resolveSttCloudKey(rejectingRegistry, "s1")).resolves.toBe("sk-key");
+		await expect(resolveSttCloudCredential(source, "s1")).resolves.toEqual({
+			kind: "openai",
+			apiKey: "sk-key",
+		});
 	});
 
 	it("resolves nothing without any credential", async () => {
-		await expect(resolveSttCloudKey(registry(undefined, undefined), "s1")).resolves.toBeUndefined();
+		await expect(resolveSttCloudCredential(registry(undefined, undefined), "s1")).resolves.toBeUndefined();
 	});
 });
