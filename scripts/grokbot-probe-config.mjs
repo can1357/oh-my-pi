@@ -3,11 +3,12 @@
  *
  * Agent-dir resolution uses the same `getAgentDir()` leaf helper as the CLI
  * (profile / XDG aware). Env credentials still work when the secrets file is
- * absent.
+ * absent. Secrets-file parsing uses the shared dotenv loader so `export`,
+ * quotes, and inline comments match CLI/catalog minting.
  */
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { getAgentDir } from "../packages/utils/src/dirs.ts";
+import { parseEnvFile } from "../packages/utils/src/env.ts";
 
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
 export const GROKBOT_RENEWAL_PATH = "/sand-box/inference-credential";
@@ -35,20 +36,6 @@ export function resolveGrokbotClientVersion(namespace, stamped, explicitOverride
 		default:
 			return base;
 	}
-}
-
-export function parseEnvFile(filePath) {
-	if (!fs.existsSync(filePath)) return {};
-	const text = fs.readFileSync(filePath, "utf8");
-	const out = {};
-	for (const line of text.split("\n")) {
-		const trimmed = line.trim();
-		if (!trimmed || trimmed.startsWith("#")) continue;
-		const eq = trimmed.indexOf("=");
-		if (eq < 0) continue;
-		out[trimmed.slice(0, eq).trim()] = trimmed.slice(eq + 1).trim();
-	}
-	return out;
 }
 
 /** Profile/XDG-aware agent dir — same resolver the CLI uses. */
