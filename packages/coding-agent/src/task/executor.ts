@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentMessage, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
-import { EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
+import { AgentBusyError, EventLoopKeepalive, recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, AsyncJobManager } from "../async";
@@ -1967,6 +1967,10 @@ async function driveSessionToYield(
 	session: AgentSession,
 	monitor: SubagentRunMonitor,
 	task: string,
+	// Invoked when the initial prompt loses a prompt race (AgentBusyError) before
+	// retrying. Lets the caller restore a safe contract and detach its monitor
+	// while backing off. Absent, the busy error keeps the old path.
+	onPromptBusy?: () => Promise<void>,
 ): Promise<DriveOutcome> {
 	using _keepalive = new EventLoopKeepalive();
 	const abortSignal = monitor.abortSignal;
@@ -2004,7 +2008,21 @@ async function driveSessionToYield(
 
 	try {
 		try {
-			await awaitAbortable(session.prompt(task, { attribution: "agent" }));
+			// An IRC wake may own the session when this turn dispatches. Its prompt
+			// wins the race and this prompt throws AgentBusyError; back off through
+			// the caller hook and retry. Bounded so a wedged worker still resolves
+			// instead of hanging the batch.
+			let promptAttempts = 0;
+			for (;;) {
+				try {
+					await awaitAbortable(session.prompt(task, { attribution: "agent" }));
+					break;
+				} catch (error) {
+					promptAttempts++;
+					if (!(error instanceof AgentBusyError) || promptAttempts >= 3 || !onPromptBusy) throw error;
+					await onPromptBusy();
+				}
+			}
 			await awaitAbortable(session.waitForIdle());
 		} catch (err) {
 			// A budget stop or a yield turn-stop (terminal yield parked behind
@@ -2844,8 +2862,49 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	const { id, agent, message, signal } = options;
 	const index = options.index ?? 0;
 	const startTime = Date.now();
-	const session = await AgentLifecycleManager.global().ensureLive(id);
-	session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+	let session = await AgentLifecycleManager.global().ensureLive(id);
+	// Acquire turn ownership before mutating the shared yield contract: installing
+	// pooled items under a running ordinary wake would reject its in-flight tool
+	// calls. The check-to-install section below has no await, so once idle is
+	// observed no wake dispatch can interleave before the synchronous mutation.
+	// Bounded: a worker that never settles fails its batch instead of installing
+	// under the active turn or hanging the pool.
+	let ownershipWaits = 0;
+	const acquireOwnership = async (): Promise<void> => {
+		while (session.isStreaming && ownershipWaits < 3) {
+			ownershipWaits++;
+			if (signal) {
+				await untilAborted(signal, () => session.waitForIdle());
+			} else {
+				await session.waitForIdle();
+			}
+		}
+		if (session.isStreaming) {
+			throw new Error(
+				`Subagent ${id} stayed busy through 3 ownership waits; refusing to install the pooled yield contract under an active turn`,
+			);
+		}
+	};
+	await acquireOwnership();
+	// Revalidate until the worker survives an install round-trip unchanged: the
+	// waits/rebuild above can outlast the idle TTL, letting park() detach this
+	// instance mid-install. Each observed replacement means another full park
+	// cycle, so reinstall on the fresh session (revivals start empty) and check
+	// again; genuine churn fails fast instead of driving a stale instance, and
+	// a released worker throws instead of driving a corpse. A replacement may
+	// already be streaming a wake, so ownership is reacquired every round.
+	for (let acquireAttempts = 0; ; acquireAttempts++) {
+		await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+		const live = await AgentLifecycleManager.global().ensureLive(id);
+		if (live === session) break;
+		if (acquireAttempts >= 2) {
+			throw new Error(
+				`Subagent ${id} was replaced during every install attempt; refusing to drive a stale worker session`,
+			);
+		}
+		session = live;
+		await acquireOwnership();
+	}
 	const ref = AgentRegistry.global().get(id);
 	const sessionFile = ref?.sessionFile ?? undefined;
 
@@ -2882,17 +2941,37 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 	emitSubagentFrame(options.eventBus, options.subagentEventBus, TASK_SUBAGENT_LIFECYCLE_CHANNEL, startedPayload);
 
 	monitor.setActiveSession(session);
-	const unsubscribe = monitor.attach(session);
+	// The batch monitor attaches per attempt; the hook below detaches before each
+	// backoff and reattaches for the retry, so the teardown always releases the
+	// current attempt — including when the drive rejects and no winning attempt
+	// was ever assigned.
 	let outcome: DriveOutcome;
+	// An IRC wake may own the session when this turn dispatches. drive retries the
+	// initial prompt through this hook: detach first so the wake turn's `yield`
+	// neither marks this batch yielded nor leaks into its result, restore the
+	// ordinary contract so the wake cannot consume pooled items, wait it out,
+	// then reinstall and reattach for the retry.
+	let attemptUnsubscribe = monitor.attach(session);
 	try {
-		outcome = await driveSessionToYield(session, monitor, message);
+		outcome = await driveSessionToYield(session, monitor, message, async () => {
+			attemptUnsubscribe();
+			logger.debug("Subagent follow-up lost the prompt race to an IRC wake; backing off", { id });
+			await session.setWorkPoolYieldItems([]);
+			if (signal) {
+				await untilAborted(signal, () => session.waitForIdle());
+			} else {
+				await session.waitForIdle();
+			}
+			await session.setWorkPoolYieldItems(options.workPoolYieldItems ?? []);
+			attemptUnsubscribe = monitor.attach(session);
+		});
 	} finally {
 		try {
 			await untilAborted(AbortSignal.timeout(5000), () => monitor.waitForActiveSessionAbort());
 		} catch {
 			// Ignore abort cleanup timeouts; the session stays adopted either way.
 		}
-		unsubscribe();
+		attemptUnsubscribe();
 		const active = monitor.takeActiveSession();
 		if (active) monitor.captureSalvage(active);
 		monitor.finish();
@@ -3347,6 +3426,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			const buildSubagentSessionOptions = (
 				sessionManagerForRun: SessionManager,
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
+				// Parked workers always revive with an empty runtime yield set; a
+				// pooled follow-up reinstalls its items explicitly before turning.
+				// Without this, the registry lookup below misses (session === null
+				// while the replacement builds) and the revived prompt resurrects
+				// the launch-time pooled instructions against an ordinary runtime.
+				forRevive = false,
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
@@ -3390,7 +3475,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						worktree: worktree ?? "",
 						outputSchema: normalizedOutputSchema,
 						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						workPoolYieldItems: options.workPoolYieldItems ?? [],
+						// Read the live item set through the registry instead of capturing
+						// the session: this callback outlives the turn via the lifecycle
+						// reviver, and a captured session would pin its whole graph past
+						// TTL park disposal. Parked revivals build while the registry
+						// session is null, so render the cleared set rather than
+						// resurrecting the launch-time pooled instructions.
+						workPoolYieldItems:
+							AgentRegistry.global().get(id)?.session?.getWorkPoolYieldItems?.() ??
+							(forRevive ? [] : (options.workPoolYieldItems ?? [])),
 						ircPeers: ircRoster?.peers ?? [],
 						ircParkedCount: ircRoster?.parkedCount ?? 0,
 						ircOmittedCount: ircRoster?.omittedCount ?? 0,
@@ -3485,7 +3578,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						);
 					}
 					const { session: revived } = await createAgentSession(
-						buildSubagentSessionOptions(reopened, expectedAgentRef),
+						buildSubagentSessionOptions(reopened, expectedAgentRef, true),
 					);
 					// Re-run the executor's extension wiring on the rebuilt session.
 					// Skipping it leaves the runner pre-init, so a `tool_call` handler
@@ -3526,7 +3619,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			if (filteredSubagentTools.length !== subagentToolNames.length) {
 				await awaitAbortable(session.setActiveToolsByName(filteredSubagentTools));
 			}
-			if (options.workPoolYieldItems) session.setWorkPoolYieldItems(options.workPoolYieldItems);
+			if (options.workPoolYieldItems) {
+				await awaitAbortable(session.setWorkPoolYieldItems(options.workPoolYieldItems));
+			}
 			const enabledSubagentTools = session.getEnabledToolNames();
 			// The enabled set includes the synthetic write transport injected for
 			// explicit tool lists that omitted write. `session_init.tools` is later

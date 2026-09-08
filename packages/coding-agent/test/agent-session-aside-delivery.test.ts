@@ -808,6 +808,83 @@ describe("AgentSession aside delivery", () => {
 		expect(drained[0]).toBe(original);
 		expect(drained[1]).toBe(duringRollback);
 	});
+	it("IrcBridge boundary snapshots carry deferred wakes with the other queues", () => {
+		// A parked wake must not survive a session switch while ordinary asides
+		// are discarded: the later contract clear would otherwise wake the new
+		// transcript with a peer message belonging to the previous session.
+		// Rollback restores the same ordering guarantee as the other queues.
+		const host: IrcBridgeHost = {
+			agent: {} as Agent,
+			sessionManager: {} as SessionManager,
+			settings: {} as Settings,
+			isDisposed: () => false,
+			isStreaming: () => false,
+			planModeEnabled: () => false,
+			emitSessionEvent: async () => {},
+			wakeForIrc: () => {},
+			runEphemeralTurn: async () => ({ replyText: "" }),
+		};
+		const irc = new IrcBridge(host);
+		const wake: AgentMessage = {
+			role: "custom",
+			customType: "irc:incoming",
+			content: "peer ping",
+			display: true,
+			details: { id: "w1", from: "peer", message: "peer ping" },
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		irc.queueDeferredWake([wake]);
+		const snapshot = irc.clearPending();
+		expect(irc.hasPending()).toBe(false);
+		expect(irc.drainDeferredWakes()).toEqual([]);
+		irc.restorePending(snapshot);
+		expect(irc.drainDeferredWakes()).toEqual([wake]);
+		expect(irc.hasPending()).toBe(false);
+	});
+	it("IrcBridge parks deferred wakes where turn injection cannot flush them", () => {
+		// A wake deferred while pooled must survive the next pooled turn's
+		// pre-dispatch flush and loop aside poll: with no observer attached,
+		// flushing it as an ordinary aside would answer the sender never.
+		const emitted: AgentMessage[] = [];
+		const host: IrcBridgeHost = {
+			agent: {
+				emitExternalEvent: (event: { message: AgentMessage }) => emitted.push(event.message),
+			} as unknown as Agent,
+			sessionManager: {} as SessionManager,
+			settings: {} as Settings,
+			isDisposed: () => false,
+			isStreaming: () => false,
+			planModeEnabled: () => false,
+			emitSessionEvent: async () => {},
+			wakeForIrc: () => {},
+			runEphemeralTurn: async () => ({ replyText: "" }),
+		};
+		const irc = new IrcBridge(host);
+		const wake: AgentMessage = {
+			role: "custom",
+			customType: "irc:incoming",
+			content: "peer ping",
+			display: true,
+			details: { id: "w1", from: "peer", message: "peer ping" },
+			attribution: "agent",
+			timestamp: Date.now(),
+		};
+		const aside: AgentMessage = {
+			role: "user",
+			content: [{ type: "text", text: "NOTE" }],
+			attribution: "user",
+			timestamp: Date.now(),
+		};
+		irc.queueDeferredWake([wake]);
+		irc.queueAside([aside]);
+		expect(irc.hasPending()).toBe(true);
+		irc.flushPending();
+		expect(emitted).toEqual([aside, aside]);
+		expect(irc.drainPending()).toEqual([]);
+		expect(irc.drainDeferredWakes()).toEqual([wake]);
+		expect(irc.hasPending()).toBe(false);
+	});
 
 	it("drops a queued aside whose normalization outlives a concurrent newSession()", async () => {
 		// Regression: #queueUserMessage's aside branch used to enqueue into IrcBridge

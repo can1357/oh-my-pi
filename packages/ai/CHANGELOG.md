@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.15] - 2026-09-08
+
 ### Fixed
 
 - Catalog matrix derives probe effort from each built model's thinking ladder / sand defaults (no hard-coded `low`).
