@@ -27,6 +27,11 @@ export interface AdvisorConfig {
 	 *  stays in the roster but its runtime is never built — it shows `○` in
 	 *  the status line and `/advisor status` rather than disappearing. */
 	enabled?: boolean;
+	/**
+	 * Per-advisor maximum non-blocker advice notes accepted per advisor prompt
+	 * update (default `4`). Blockers are exempt from the budget.
+	 */
+	maxNotesPerUpdate?: number;
 }
 
 /**
@@ -48,6 +53,7 @@ export type AdvisorRuntimeStatus = "running" | "paused" | "quota_exhausted" | "e
 export interface DiscoveredAdvisors {
 	advisors: AdvisorConfig[];
 	sharedInstructions: string | undefined;
+	sharedMaxNotesPerUpdate?: number;
 }
 
 const advisorEntrySchema = type({
@@ -56,10 +62,12 @@ const advisorEntrySchema = type({
 	"tools?": "string[]",
 	"instructions?": "string",
 	"enabled?": "boolean",
+	"maxNotesPerUpdate?": "number",
 });
 
 const watchdogYamlSchema = type({
 	"instructions?": "string",
+	"maxNotesPerUpdate?": "number",
 	"advisors?": advisorEntrySchema.array(),
 });
 
@@ -139,7 +147,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 	const items = await collectConfigCandidates(cwd, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"]);
 	const advisors = new Map<string, AdvisorConfig>();
 	const sharedParts: string[] = [];
-
+	let sharedMaxNotesPerUpdate: number | undefined;
 	for (const item of items) {
 		let parsed: unknown;
 		try {
@@ -163,6 +171,14 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 			if (expanded) sharedParts.push(expanded);
 		}
 
+		if (
+			typeof result.maxNotesPerUpdate === "number" &&
+			Number.isFinite(result.maxNotesPerUpdate) &&
+			result.maxNotesPerUpdate >= 1
+		) {
+			sharedMaxNotesPerUpdate = Math.trunc(result.maxNotesPerUpdate);
+		}
+
 		for (const entry of result.advisors ?? []) {
 			const slug = slugifyAdvisorName(entry.name);
 			const instructions = entry.instructions?.trim()
@@ -174,6 +190,12 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 				tools: filterAdvisorTools(entry.tools, item.path),
 				instructions,
 				enabled: entry.enabled,
+				maxNotesPerUpdate:
+					typeof entry.maxNotesPerUpdate === "number" &&
+					Number.isFinite(entry.maxNotesPerUpdate) &&
+					entry.maxNotesPerUpdate >= 1
+						? Math.trunc(entry.maxNotesPerUpdate)
+						: undefined,
 			});
 		}
 	}
@@ -181,6 +203,7 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 	return {
 		advisors: [...advisors.values()],
 		sharedInstructions: sharedParts.length > 0 ? sharedParts.join("\n\n") : undefined,
+		sharedMaxNotesPerUpdate,
 	};
 }
 
@@ -195,6 +218,7 @@ export type AdvisorConfigScope = "project" | "user";
  */
 export interface WatchdogConfigDoc {
 	instructions?: string;
+	maxNotesPerUpdate?: number;
 	advisors: AdvisorConfig[];
 }
 
@@ -260,10 +284,20 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
+		if (typeof a.maxNotesPerUpdate === "number" && Number.isFinite(a.maxNotesPerUpdate) && a.maxNotesPerUpdate >= 1) {
+			advisor.maxNotesPerUpdate = Math.trunc(a.maxNotesPerUpdate);
+		}
 		return advisor;
 	});
 	const doc: WatchdogConfigDoc = { advisors };
 	if (result.instructions?.trim()) doc.instructions = result.instructions;
+	if (
+		typeof result.maxNotesPerUpdate === "number" &&
+		Number.isFinite(result.maxNotesPerUpdate) &&
+		result.maxNotesPerUpdate >= 1
+	) {
+		doc.maxNotesPerUpdate = Math.trunc(result.maxNotesPerUpdate);
+	}
 	return doc;
 }
 
@@ -299,6 +333,13 @@ function appendYamlString(lines: string[], indent: string, key: string, value: s
 export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 	const lines: string[] = [];
 	if (doc.instructions?.trim()) appendYamlString(lines, "", "instructions", doc.instructions);
+	if (
+		typeof doc.maxNotesPerUpdate === "number" &&
+		Number.isFinite(doc.maxNotesPerUpdate) &&
+		doc.maxNotesPerUpdate >= 1
+	) {
+		lines.push(`maxNotesPerUpdate: ${Math.trunc(doc.maxNotesPerUpdate)}`);
+	}
 	if (doc.advisors.length > 0) {
 		lines.push("advisors:");
 		for (const advisor of doc.advisors) {
@@ -318,6 +359,13 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 				appendYamlString(lines, "    ", "instructions", advisor.instructions);
 			}
 			if (advisor.enabled !== undefined) lines.push(`    enabled: ${advisor.enabled}`);
+			if (
+				typeof advisor.maxNotesPerUpdate === "number" &&
+				Number.isFinite(advisor.maxNotesPerUpdate) &&
+				advisor.maxNotesPerUpdate >= 1
+			) {
+				lines.push(`    maxNotesPerUpdate: ${Math.trunc(advisor.maxNotesPerUpdate)}`);
+			}
 		}
 	}
 	return lines.length === 0 ? "" : `${lines.join("\n")}\n`;
