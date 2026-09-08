@@ -204,6 +204,7 @@ export async function resolveGitHubCopilotDiscoveryAccounts(
 				apiEndpoint: access.apiEndpoint,
 			}),
 			accountId: access.accountId,
+			credentialId: access.credentialId,
 		});
 	}
 	if (

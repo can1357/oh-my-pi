@@ -1390,6 +1390,7 @@ export class AuthStorage {
 	#usageRequestTimeoutMs: number;
 	#usageLogger?: UsageLogger;
 	#fallbackResolver?: (provider: string) => string | undefined;
+	#oauthModelCredentialResolver?: (provider: string, modelId: string) => readonly number[] | undefined;
 	#store: AuthCredentialStore;
 	#configValueResolver: (config: string) => Promise<string | undefined>;
 	#refreshOAuthCredentialOverride?: AuthStorageOptions["refreshOAuthCredential"];
@@ -1620,6 +1621,17 @@ export class AuthStorage {
 	 */
 	setFallbackResolver(resolver: (provider: string) => string | undefined): void {
 		this.#fallbackResolver = resolver;
+	}
+
+	/** Resolve authoritative model grants. Undefined preserves normal account selection. */
+	setOAuthModelCredentialResolver(
+		resolver: (provider: string, modelId: string) => readonly number[] | undefined,
+	): void {
+		this.#oauthModelCredentialResolver = resolver;
+	}
+
+	#modelOAuthCredentialIds(provider: string, modelId: string | undefined): readonly number[] | undefined {
+		return modelId === undefined ? undefined : this.#oauthModelCredentialResolver?.(provider, modelId);
 	}
 
 	/**
@@ -5134,9 +5146,15 @@ export class AuthStorage {
 		sessionId?: string,
 		options?: AuthApiKeyOptions,
 	): Promise<OAuthResolutionResult | undefined> {
-		const credentials = this.#getCredentialsForProvider(provider)
-			.map((credential, index) => ({ credential, index }))
-			.filter((entry): entry is { credential: OAuthCredential; index: number } => entry.credential.type === "oauth");
+		const allowedIds = this.#modelOAuthCredentialIds(provider, options?.modelId);
+		const stored = this.#getStoredCredentials(provider);
+		const credentials = stored
+			.map((entry, index) => ({ credential: entry.credential, index }))
+			.filter(
+				(entry): entry is OAuthSelection =>
+					entry.credential.type === "oauth" &&
+					(allowedIds === undefined || allowedIds.includes(stored[entry.index].id)),
+			);
 
 		if (credentials.length === 0) return undefined;
 
@@ -5959,6 +5977,9 @@ export class AuthStorage {
 		if (oauthResolved) {
 			return oauthResolved.apiKey;
 		}
+		// An authoritative grant list is a hard boundary, not a ranking hint:
+		// never escape it through env keys or unrelated stored API-key fallbacks.
+		if (this.#modelOAuthCredentialIds(provider, options?.modelId) !== undefined) return undefined;
 		const loginApiKeySelection = await this.#selectApiKeyCredential(
 			provider,
 			sessionId,

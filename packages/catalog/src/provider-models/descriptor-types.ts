@@ -7,6 +7,8 @@ export interface GithubCopilotDiscoveryAccount {
 	apiKey: string;
 	/** Stable account identity, used only for diagnostics. */
 	accountId?: string;
+	/** Durable auth-store row ID used to retain model eligibility through refresh. */
+	credentialId?: number;
 }
 
 /** Config passed to a provider's runtime model-manager factory. */

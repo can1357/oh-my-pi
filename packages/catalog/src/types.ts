@@ -1089,6 +1089,12 @@ export interface Model<TApi extends Api = Api> {
 	api: TApi;
 	provider: Provider;
 	baseUrl: string;
+	/**
+	 * Durable OAuth credential row IDs that granted this discovered model.
+	 * Undefined means eligibility is unknown; an empty list permits no OAuth account.
+	 * Local discovery metadata only; never serialized into provider requests.
+	 */
+	oauthCredentialIds?: number[];
 	reasoning: boolean;
 	/**
 	 * Exact local tokenizer family resolved from the model identity or supplied

@@ -100,9 +100,11 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 			// another provider's routing — so version the namespace instead.
 			// v3: unioned models must not retain the first account's Enterprise
 			// endpoint, which misroutes sibling credentials during inference.
+			// v4: refetch catalogs without per-model OAuth grants before allowing
+			// account rotation to use them.
 			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${options.apiKey ?? ""}\u0000${baseUrl}`;
-			return `github-copilot:models-v3:${Bun.hash(scope).toString(36)}`;
+			return `github-copilot:models-v4:${Bun.hash(scope).toString(36)}`;
 		}
 		case "openrouter":
 			return "openrouter:pseudo-api";

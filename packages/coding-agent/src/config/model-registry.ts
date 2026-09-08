@@ -391,6 +391,9 @@ export class ModelRegistry {
 			if (!keyConfig) return undefined;
 			return resolveConfigValue(keyConfig);
 		});
+		this.authStorage.setOAuthModelCredentialResolver(
+			(provider, modelId) => this.find(provider, modelId)?.oauthCredentialIds,
+		);
 		// Load config and cache-backed layers synchronously in the constructor.
 		this.#loadModels();
 	}

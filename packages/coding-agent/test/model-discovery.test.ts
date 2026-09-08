@@ -588,6 +588,78 @@ describe("ModelRegistry runtime discovery", () => {
 		]);
 	});
 
+	test("github-copilot routes live and cached union models only through granting OAuth accounts", async () => {
+		const authPath = path.join(tempDir, "auth.db");
+		authStorage.close();
+		authStorage = await AuthStorage.create(authPath, { usageProviderResolver: () => undefined });
+		await authStorage.set("github-copilot", [
+			{ type: "api_key", key: "ungranted-static-key" },
+			{ type: "oauth", access: "grant-a", refresh: "refresh-a", expires: Date.now() + 3_600_000 },
+			{ type: "oauth", access: "grant-b", refresh: "refresh-b", expires: Date.now() + 3_600_000 },
+		]);
+		const oauthRows = authStorage
+			.listStoredCredentials("github-copilot")
+			.filter(row => row.credential.type === "oauth");
+		const [accountA, accountB] = oauthRows;
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async (input, init) => {
+				const url = String(input);
+				if (url === "https://api.github.com/copilot_internal/user") {
+					return Response.json({ endpoints: { api: "https://api.githubcopilot.com" } });
+				}
+				if (url !== "https://api.githubcopilot.com/models") throw new Error(`Unexpected URL: ${url}`);
+				const isA = new Headers(init?.headers).get("Authorization") === "Bearer grant-a";
+				return Response.json({
+					data: [
+						{ id: isA ? "alpha" : "beta" },
+						{ id: "shared-model" },
+						...(isA ? [{ id: "beta", policy: { state: "disabled" } }] : []),
+					].map(entry => ({
+						...entry,
+						capabilities: {
+							type: "chat",
+							limits: { max_context_window_tokens: 128_000, max_output_tokens: 16_000 },
+						},
+					})),
+				});
+			},
+		});
+		await registry.refreshProvider("github-copilot", "online");
+		const beta = registry.find("github-copilot", "beta")!;
+		const shared = registry.find("github-copilot", "shared-model")!;
+
+		// A warm pin to a non-granting account must not override model eligibility.
+		authStorage.pinSessionOAuthAccount("github-copilot", "sticky", accountA.id);
+		expect(JSON.parse((await registry.getApiKey(beta, "sticky"))!).token).toBe("grant-b");
+		// Shared models remain eligible on both accounts, preserving healthy pins.
+		expect(JSON.parse((await registry.getApiKey(shared, "sticky"))!).token).toBe("grant-b");
+		authStorage.pinSessionOAuthAccount("github-copilot", "sticky", accountA.id);
+		expect(JSON.parse((await registry.getApiKey(shared, "sticky"))!).token).toBe("grant-a");
+		// Hash-selected sessions must obey the same grants as explicitly pinned sessions.
+		expect(JSON.parse((await registry.getApiKey(beta, "new-session"))!).token).toBe("grant-b");
+
+		authStorage.close();
+		authStorage = await AuthStorage.create(authPath, { usageProviderResolver: () => undefined });
+		await authStorage.reload();
+		let networkRequests = 0;
+		const restored = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => {
+				networkRequests++;
+				throw new Error("Offline cache restore must not fetch");
+			},
+		});
+		await restored.hydrateCredentialScopedModelCaches();
+		const cachedBeta = restored.find("github-copilot", "beta")!;
+		expect(cachedBeta).toBeDefined();
+		authStorage.pinSessionOAuthAccount("github-copilot", "restored", accountA.id);
+		expect(JSON.parse((await restored.getApiKey(cachedBeta, "restored"))!).token).toBe("grant-b");
+		expect(networkRequests).toBe(0);
+
+		// Removing the sole granting account must not leak to a sibling or static key.
+		await authStorage.removeCredential("github-copilot", accountB.id);
+		expect(await restored.getApiKey(cachedBeta, "restored")).toBeUndefined();
+	});
+
 	test("github-copilot discovery honors a runtime key instead of stored OAuth accounts", async () => {
 		await authStorage.set("github-copilot", {
 			type: "oauth",

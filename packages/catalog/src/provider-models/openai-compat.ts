@@ -6447,21 +6447,30 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 	// Abort on any account failure: a partial union must not replace the
 	// previous or bundled authoritative catalog.
 	const unionCopilotModels = (
-		results: readonly { accountId: string | undefined; result: ModelSpec<Api>[] | null }[],
+		results: readonly {
+			accountId: string | undefined;
+			credentialId: number | undefined;
+			result: ModelSpec<Api>[] | null;
+		}[],
 	): ModelSpec<Api>[] | null => {
 		const byId = new Map<string, ModelSpec<Api>>();
-		for (const { accountId, result } of results) {
+		const hasCredentialIds = results.every(account => account.credentialId !== undefined);
+		for (const { accountId, credentialId, result } of results) {
 			if (result === null) {
 				logger.warn("Copilot model discovery aborted: an account failed to fetch", { accountId });
 				return null;
 			}
 			for (const model of result) {
-				if (!byId.has(model.id)) {
+				const existing = byId.get(model.id);
+				if (!existing) {
 					// Account-derived hosts belong to credentials, not shared models.
 					// Retain only the configured endpoint so inference can route using
 					// the selected credential (while respecting explicit proxy URLs).
 					model.baseUrl = configuredBaseUrl;
+					if (hasCredentialIds) model.oauthCredentialIds = [credentialId!];
 					byId.set(model.id, model);
+				} else if (hasCredentialIds && !existing.oauthCredentialIds!.includes(credentialId!)) {
+					existing.oauthCredentialIds!.push(credentialId!);
 				}
 			}
 		}
@@ -6495,6 +6504,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 							const results = await Promise.all(
 								accounts.map(async account => ({
 									accountId: account.accountId,
+									credentialId: account.credentialId,
 									result: await fetchCopilotAccountModels(account.apiKey, fetchImpl),
 								})),
 							);
