@@ -1215,7 +1215,13 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							emitAttemptEvent({ type: "text_delta", contentIndex: idx, delta, partial: output });
 						}
 					}
-					if (part.isComplete ?? part.is_complete) closeOpen();
+					if (part.isComplete ?? part.is_complete) {
+						closeOpen();
+						// Next SendToUser call must rebuild independently — do not
+						// suffix/dedupe against the previous message's content.
+						sendToUserArgsText = "";
+						sendToUserLastContent = "";
+					}
 				};
 
 				const upsertTool = (part: Record<string, unknown>) => {

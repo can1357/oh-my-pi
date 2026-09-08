@@ -885,6 +885,77 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "hello-visible" })]);
 	});
 
+	test("sequential SendToUser calls each emit full text independently", async () => {
+		// Response-wide accumulators must reset on isComplete — otherwise a second
+		// identical message is dropped and a prefixed message only emits its suffix.
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const parent = buildModel({
+			id: "sand-default",
+			name: "sand-default",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandToolsWire: "parent-chat",
+			sandParameterIds: [],
+		});
+		const first = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu1",
+					toolName: "SendToUser",
+					args: '{"type":"text","content":"same-message"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const secondSame = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu2",
+					toolName: "SendToUser",
+					args: '{"type":"text","content":"same-message"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const thirdPrefixed = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu3",
+					toolName: "SendToUser",
+					args: '{"type":"text","content":"same-message and more"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(first, secondSame, thirdPrefixed, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(parent as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		const texts = result.content.filter(b => b.type === "text").map(b => (b.type === "text" ? b.text : ""));
+		expect(texts.join("")).toBe("same-messagesame-messagesame-message and more");
+	});
+
 	test("SendToUser text that looks like a tool JSON stays visible text", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
