@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `retry.hardErrorSameModelRetries` setting (default `0`): retry the same model with backoff up to N times before the fallback chain is consulted on hard provider errors; `0` preserves the immediate chain consult ([#11277](https://github.com/can1357/oh-my-pi/issues/11277)).
 - Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
 - Headless browser tabs now freeze when a turn settles so idle animated/WebGL pages stop burning CPU/GPU, resuming automatically on next use; tabs idle past `browser.idleCloseSec` (default 30 minutes) are closed. `persist: true` on `browser.open` opts a tab out of both ([#8246](https://github.com/can1357/oh-my-pi/issues/8246) by [@H4vC](https://github.com/H4vC)).
 
