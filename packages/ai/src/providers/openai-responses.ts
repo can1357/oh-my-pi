@@ -527,7 +527,7 @@ const streamOpenAIResponsesOnce = (
 			let chainedInternal = false;
 			let chained: OpenAIResponsesChainedParams = hasClientPreviousResponseId
 				? {
-						params: { ...params, previous_response_id: clientPreviousResponseId },
+						params: { ...params, previous_response_id: clientPreviousResponseId, store: true },
 						previousResponseId: clientPreviousResponseId,
 					}
 				: chainState && !chainState.disabled

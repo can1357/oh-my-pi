@@ -370,3 +370,27 @@ describe("classifyGatewayError review follow-ups", () => {
 		expect(c.disposition).not.toBe("provider_unavailable");
 	});
 });
+
+describe("classifyGatewayError review follow-ups", () => {
+	it("does not let abort wording override an authoritative provider status", () => {
+		const c = classifyGatewayError(Object.assign(new Error("HTTP 503: upstream request aborted"), { status: 503 }));
+		expect(c.status).toBe(503);
+		expect(c.owner).toBe("provider");
+		expect(c.disposition).not.toBe("cancelled");
+	});
+
+	it("keeps no-status overflow evidence terminal instead of provider_unavailable", () => {
+		const c = classifyGatewayError(new Error("prompt is too long: context length exceeded"));
+		expect(c.disposition).toBe("context_overflow");
+		expect(c.disposition).not.toBe("provider_unavailable");
+	});
+});
+
+describe("classifyGatewayError model availability", () => {
+	it("maps OpenAI-style model-does-not-exist 404 to model_unavailable", () => {
+		const classified = classifyGatewayError(
+			Object.assign(new Error("The model `gpt-nope` does not exist or you do not have access to it"), { status: 404 }),
+		);
+		expect(classified.disposition).toBe("model_unavailable");
+	});
+});
