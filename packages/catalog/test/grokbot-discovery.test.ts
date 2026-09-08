@@ -470,12 +470,11 @@ describe("grokbot AvailableModels normalize", () => {
 		// Without a model-specific thinking-efforts rule, buildModel must not invent.
 		expect(buildModel(emptyValues!).thinking).toBeUndefined();
 		// Reviewed KDL still fills the offline grok-4.6 seed ladder.
-		expect(buildModel(buildGrokbotStaticSeed().find(m => m.id === "grok-4.6")!).thinking?.efforts).toEqual([
-			"low",
-			"medium",
-			"high",
-			"xhigh",
-		]);
+		expect([
+			...((buildModel(buildGrokbotStaticSeed().find(m => m.id === "grok-4.6")!).thinking?.efforts as
+				| readonly string[]
+				| undefined) ?? []),
+		]).toEqual(["low", "medium", "high", "xhigh"]);
 	});
 
 	test("rejects envelopes without a models array; empty models is valid", () => {
