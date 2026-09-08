@@ -47,6 +47,8 @@ export type WorkerInitPayload =
 			mode: "headless";
 			browserWSEndpoint: string;
 			safeDir: string;
+			/** Keep the page tied to an OMP-owned worker without pinning a visible window's layout viewport. */
+			emulateViewport?: boolean;
 			viewport?: { width: number; height: number; deviceScaleFactor?: number };
 			dialogs?: "accept" | "dismiss";
 			url?: string;
@@ -75,6 +77,7 @@ export type WorkerInitPayload =
 			activateForScreenshot?: boolean;
 	  };
 
+/** Result of one host tool requested by browser-run JavaScript. */
 export type ToolReply = { ok: true; value: unknown } | { ok: false; error: RunErrorPayload };
 
 export type WorkerInbound =

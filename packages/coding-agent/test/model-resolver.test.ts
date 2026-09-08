@@ -21,6 +21,7 @@ import {
 	resolveModelOverride,
 	resolveModelRoleValue,
 	resolveModelScope,
+	resolveProviderModelReference,
 } from "@oh-my-pi/pi-coding-agent/config/model-resolver";
 import { DEFAULT_MODEL_ROLE_ALIAS, LEGACY_MODEL_ROLE_ALIAS_PREFIX } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -788,6 +789,37 @@ describe("parseModelPattern", () => {
 			expect(result.model?.provider).toBe("openrouter");
 			expect(result.model?.id).toBe("openai/gpt-4o:extended");
 		});
+
+		describe("dotted revision spelling", () => {
+			// First-party ids spell revisions with dashes (`claude-fable-5-1`);
+			// aggregators use dots, and their flat id is verbatim the dotted
+			// provider-qualified selector (`anthropic/claude-fable-5.1`).
+			const anthropicFable = createOpusModel("anthropic", "claude-fable-5-1", "Claude Fable 5.1");
+			const openRouterFable = createOpusModel("openrouter", "anthropic/claude-fable-5.1", "Claude Fable 5.1 (OR)");
+
+			test("anthropic/claude-fable-5.1:high resolves to anthropic, not the OpenRouter flat id", () => {
+				const result = parseModelPattern("anthropic/claude-fable-5.1:high", [openRouterFable, anthropicFable]);
+				expect(result.model?.provider).toBe("anthropic");
+				expect(result.model?.id).toBe("claude-fable-5-1");
+				expect(result.thinkingLevel).toBe(Effort.High);
+			});
+
+			test("anthropic/claude-fable-5.1 fails closed when anthropic is unavailable", () => {
+				// Bundled anthropic carries claude-fable-5-1: the dotted spelling is
+				// still provider-locked and must not re-bind to OpenRouter.
+				const result = parseModelPattern("anthropic/claude-fable-5.1", [openRouterFable]);
+				expect(result.model).toBeUndefined();
+			});
+
+			test("openrouter/anthropic/claude-fable-5-1 resolves the dotted OpenRouter id", () => {
+				const result = parseModelPattern("openrouter/anthropic/claude-fable-5-1", [
+					anthropicFable,
+					openRouterFable,
+				]);
+				expect(result.model?.provider).toBe("openrouter");
+				expect(result.model?.id).toBe("anthropic/claude-fable-5.1");
+			});
+		});
 	});
 
 	describe("edge cases", () => {
@@ -1086,14 +1118,13 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["anthropic/claude-sonnet-4-6", "zai/glm-5.2:high"]);
 	});
 
-	test("uses default for unconfigured smol, slow, and designer agent roles before priority defaults", () => {
+	test("uses default for unconfigured smol and slow agent roles before priority defaults", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "local/llama" },
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["local/llama"]);
 		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["local/llama"]);
-		expect(resolveAgentModelPatterns({ agentModel: "@designer", settings })).toEqual(["local/llama"]);
 	});
 
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
@@ -1102,22 +1133,6 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
-	});
-
-	test("prefers configured designer role override over priority defaults", () => {
-		const settings = Settings.isolated({
-			modelRoles: {
-				default: "anthropic/claude-sonnet-4-5",
-				designer: "openai/gpt-4o",
-			},
-		});
-
-		const result = resolveAgentModelPatterns({
-			agentModel: "@designer",
-			settings,
-		});
-
-		expect(result).toEqual(["openai/gpt-4o"]);
 	});
 
 	test("slow priority falls forward to Opus 4.8 before older Opus aliases", () => {
@@ -2316,5 +2331,105 @@ describe("effort-tier variant aliases", () => {
 	test("consumed X-thinking twins resolve via the grammar fallback", () => {
 		expect(parseModelPattern("venice/kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
 		expect(parseModelPattern("kimi-k2-thinking", variantModels).model?.id).toBe("kimi-k2");
+	});
+});
+
+describe("Devin selector parity", () => {
+	const devinModel = (id: string, overrides: Partial<Model<"devin-agent">> = {}): Model<Api> =>
+		buildModel({
+			id,
+			name: id,
+			api: "devin-agent",
+			provider: "devin",
+			baseUrl: "https://server.codeium.com",
+			reasoning: true,
+			input: ["text", "image"],
+			supportsTools: true,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			...overrides,
+		});
+
+	const devinModels: Model<Api>[] = [
+		devinModel("claude-opus-5", {
+			requestModelId: "claude-opus-5-low",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh, Effort.Max],
+				effortRouting: {
+					[Effort.Low]: "claude-opus-5-low",
+					[Effort.XHigh]: "claude-opus-5-xhigh",
+				},
+				requiresEffort: true,
+			},
+		}),
+		// Fuzzy-match decoy: `opus` must not land here.
+		devinModel("claude-opus-4-6"),
+		devinModel("swe-1-7-lightning", {
+			requestModelId: "swe-1-7-lightning-medium",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Medium, Effort.Max],
+				effortRouting: {
+					[Effort.Medium]: "swe-1-7-lightning-medium",
+					[Effort.Max]: "swe-1-7-lightning",
+				},
+				defaultLevel: Effort.Medium,
+				requiresEffort: true,
+			},
+		}),
+		devinModel("gemini-3-7-flash", {
+			requestModelId: "gemini-3-7-flash-medium",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Minimal, Effort.Low, Effort.Medium, Effort.High],
+				effortRouting: {
+					[Effort.Medium]: "gemini-3-7-flash-medium",
+					[Effort.High]: "gemini-3-7-flash-high",
+				},
+				defaultLevel: Effort.Medium,
+				requiresEffort: true,
+			},
+		}),
+		// A family that only exists in the live catalog: collapsed at discovery
+		// time, so no hand-table alias covers its wire ids.
+		devinModel("claude-mythos-9", {
+			requestModelId: "claude-mythos-9-medium",
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Medium, Effort.High],
+				effortRouting: {
+					[Effort.Medium]: "claude-mythos-9-medium",
+					[Effort.High]: "claude-mythos-9-high",
+				},
+				requiresEffort: true,
+			},
+		}),
+	];
+
+	test("provider-scoped native aliases beat fuzzy id matches", () => {
+		expect(parseModelPattern("devin/opus", devinModels).model?.id).toBe("claude-opus-5");
+		expect(parseModelPattern("devin/swe", devinModels).model?.id).toBe("swe-1-7-lightning");
+		expect(parseModelPattern("devin/gemini", devinModels).model?.id).toBe("gemini-3-7-flash");
+		const withLevel = parseModelPattern("devin/opus:high", devinModels);
+		expect(withLevel.model?.id).toBe("claude-opus-5");
+		expect(withLevel.thinkingLevel).toBe(Effort.High);
+	});
+
+	test("dotted native spellings resolve to the hyphenated logical id", () => {
+		expect(parseModelPattern("devin/gemini-3.7-flash", devinModels).model?.id).toBe("gemini-3-7-flash");
+		expect(parseModelPattern("devin/swe-1.7-lightning", devinModels).model?.id).toBe("swe-1-7-lightning");
+	});
+
+	test("raw effort-route wire ids resolve to their collapsed model, provider-scoped", () => {
+		expect(resolveProviderModelReference("devin", "claude-mythos-9-high", devinModels)?.id).toBe("claude-mythos-9");
+		expect(resolveProviderModelReference("devin", "gemini-3-7-flash-high", devinModels)?.id).toBe("gemini-3-7-flash");
+		expect(resolveProviderModelReference("openai", "claude-mythos-9-high", devinModels)).toBeUndefined();
+	});
+
+	test("a live raw model still wins over the collapsed carrier routing to it", () => {
+		const withRaw = [...devinModels, devinModel("claude-mythos-9-high")];
+		expect(resolveProviderModelReference("devin", "claude-mythos-9-high", withRaw)?.id).toBe("claude-mythos-9-high");
 	});
 });

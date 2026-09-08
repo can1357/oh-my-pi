@@ -296,6 +296,14 @@ export class Theme {
 		return `${ansi}${text}\x1b[39m`; // Reset only foreground color
 	}
 
+	/** Apply a foreground, replacing terminal-default tokens with the theme's contrast-safe fallback. */
+	fgResolved(color: ThemeColor, text: string): string {
+		const ansi = this.#fgColors[color];
+		if (!ansi) throw new Error(`Unknown theme color: ${color}`);
+		const resolved = ansi === "\x1b[39m" ? colorToAnsi(this.getColorHex(color), this.mode) : ansi;
+		return `${resolved}${text.replace(FOREGROUND_RESET_PATTERN, `$&${resolved}`)}\x1b[39m`;
+	}
+
 	bg(color: ThemeBg, text: string): string {
 		const ansi = this.#bgColors[color];
 		if (!ansi) throw new Error(`Unknown theme background color: ${color}`);
@@ -515,6 +523,17 @@ export class Theme {
 		};
 	}
 
+	/**
+	 * Dotted rules/verticals for transient selection outlines. Corners come from
+	 * {@link boxRound} — Unicode has no rounded dotted corner glyphs.
+	 */
+	get boxDotted() {
+		return {
+			horizontal: this.#symbols["boxDotted.horizontal"],
+			vertical: this.#symbols["boxDotted.vertical"],
+		};
+	}
+
 	get boxSharp() {
 		return {
 			topLeft: this.#symbols["boxSharp.topLeft"],
@@ -571,6 +590,7 @@ export class Theme {
 			cost: this.#symbols["icon.cost"],
 			subscription: this.#symbols["icon.subscription"],
 			advisor: this.#symbols["icon.advisor"],
+			advisorClosed: this.#symbols["icon.advisorClosed"],
 			time: this.#symbols["icon.time"],
 			omp: this.#symbols["icon.omp"],
 			esc: this.#symbols["icon.esc"],

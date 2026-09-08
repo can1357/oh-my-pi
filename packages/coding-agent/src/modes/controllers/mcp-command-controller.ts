@@ -751,6 +751,7 @@ export class MCPCommandController {
 									redirectUri: finalConfig.oauth?.redirectUri,
 									prompt: finalConfig.oauth?.prompt,
 									registrationUrl: oauth.registrationUrl,
+									issuerUrl: oauth.issuerUrl,
 									serverUrl: finalConfig.url,
 									resource: oauthResource,
 									stripSameOriginResource: oauthResourceIsFallback,
@@ -833,6 +834,7 @@ export class MCPCommandController {
 			prompt?: string;
 			serverUrl?: string;
 			registrationUrl?: string;
+			issuerUrl?: string;
 			resource?: string;
 			stripSameOriginResource?: boolean;
 			/**
@@ -852,7 +854,7 @@ export class MCPCommandController {
 		try {
 			parsedAuthUrl = new URL(authUrl);
 			new URL(tokenUrl);
-		} catch (_error) {
+		} catch {
 			throw new Error(
 				`Invalid OAuth URLs. Please check:\n  Authorization URL: ${authUrl}\n  Token URL: ${tokenUrl}`,
 			);
@@ -898,6 +900,7 @@ export class MCPCommandController {
 					authorizationUrl: authUrl,
 					tokenUrl: tokenUrl,
 					registrationUrl: opts?.registrationUrl,
+					issuerUrl: opts?.issuerUrl,
 					clientId: resolvedClientId,
 					clientSecret: resolvedClientSecret,
 					scopes: scopes || undefined,
@@ -950,7 +953,7 @@ export class MCPCommandController {
 					onProgress: (message: string) => {
 						this.ctx.present([new Spacer(1), new Text(theme.fg("muted", message), 1, 0)]);
 					},
-					onManualCodeInput: () => {
+					onManualCodeInput: signal => {
 						if (manualInputClaim) return manualInputClaim.promise;
 						const pendingInput = manualInput.tryClaimInput(MCP_MANUAL_INPUT_PROVIDER_ID);
 						if (!pendingInput) {
@@ -959,8 +962,18 @@ export class MCPCommandController {
 								`OAuth login already in progress for ${pendingProvider}. Complete or cancel it before starting MCP OAuth.`,
 							);
 						}
-						manualInputClaim = pendingInput;
-						return pendingInput.promise;
+						const onAbort = () => pendingInput.clear("Manual MCP OAuth input cancelled");
+						if (signal?.aborted) onAbort();
+						else signal?.addEventListener("abort", onAbort, { once: true });
+						const claim = {
+							clear: pendingInput.clear,
+							promise: pendingInput.promise.finally(() => {
+								signal?.removeEventListener("abort", onAbort);
+								if (manualInputClaim === claim) manualInputClaim = undefined;
+							}),
+						};
+						manualInputClaim = claim;
+						return claim.promise;
 					},
 					signal: oauthTimeout.signal,
 				},
@@ -2014,6 +2027,7 @@ export class MCPCommandController {
 					redirectUri: found.config.oauth?.redirectUri,
 					prompt: found.config.oauth?.prompt,
 					registrationUrl: oauth.registrationUrl,
+					issuerUrl: oauth.issuerUrl,
 					serverUrl,
 					resource: oauthResource,
 					stripSameOriginResource: oauthResourceIsFallback,
@@ -2203,7 +2217,7 @@ export class MCPCommandController {
 		const result = await this.ctx.mcpManager.discoverAndConnect({
 			enableProjectConfig: this.ctx.settings.get("mcp.enableProjectConfig") ?? true,
 			filterExa: true,
-			filterBrowser: this.ctx.settings.get("browser.enabled") ?? false,
+			filterBrowser: this.ctx.session.getEvalPreludes().some(definition => definition.name === "browser"),
 			extensionRoots: this.ctx.session.effectiveExtensionRoots,
 		});
 		await this.ctx.session.refreshMCPTools(this.ctx.mcpManager.getTools());

@@ -1,9 +1,14 @@
 /**
  * Wrap a promise with a timeout and optional abort signal.
- * Rejects with the given message if the timeout fires first.
- * Cleans up all listeners on settlement.
+ * Rejects with the given error or a new error containing the given message if
+ * the timeout fires first. Cleans up all listeners on settlement.
  */
-export function withTimeout<T>(promise: Promise<T>, ms: number, message: string, signal?: AbortSignal): Promise<T> {
+export function withTimeout<T>(
+	promise: Promise<T>,
+	ms: number,
+	timeout: string | Error,
+	signal?: AbortSignal,
+): Promise<T> {
 	if (signal?.aborted) {
 		const reason = signal.reason instanceof Error ? signal.reason : new Error("Aborted");
 		return Promise.reject(reason);
@@ -15,7 +20,7 @@ export function withTimeout<T>(promise: Promise<T>, ms: number, message: string,
 		if (settled) return;
 		settled = true;
 		if (signal) signal.removeEventListener("abort", onAbort);
-		reject(new Error(message));
+		reject(typeof timeout === "string" ? new Error(timeout) : timeout);
 	}, ms);
 
 	const onAbort = () => {
@@ -101,5 +106,21 @@ export class AsyncDrain<T> {
 	flush(): Promise<void> {
 		this.#flush?.();
 		return this.#promise;
+	}
+}
+
+/**
+ * Runs async operations one at a time in call order. Each `run` starts after
+ * the previous operation settles (success or failure) and returns that
+ * operation's own promise, so a rejected step never poisons the queue. Used by
+ * stateful cursors whose concurrent pulls must not interleave.
+ */
+export class Serial {
+	#tail: Promise<unknown> = Promise.resolve();
+
+	run<T>(op: () => Promise<T>): Promise<T> {
+		const result = this.#tail.then(op, op);
+		this.#tail = result.catch(() => {});
+		return result;
 	}
 }

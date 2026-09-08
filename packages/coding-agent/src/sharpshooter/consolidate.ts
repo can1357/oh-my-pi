@@ -83,6 +83,7 @@ export async function runSharpshooterConsolidation(options: {
 	cwd: string;
 	settings: Settings;
 	modelRegistry: ModelRegistry;
+	sessionId: string;
 	force?: boolean;
 }): Promise<SharpshooterConsolidationResult> {
 	const bankDir = sharpshooterBankDir(options.agentDir, options.cwd);
@@ -114,6 +115,7 @@ async function consolidateLocked(
 		cwd: string;
 		settings: Settings;
 		modelRegistry: ModelRegistry;
+		sessionId: string;
 		force?: boolean;
 	},
 	bankDir: string,
@@ -160,7 +162,8 @@ async function consolidateLocked(
 					tools: [replaceMemoryFilesTool],
 				},
 				{
-					apiKey: options.modelRegistry.resolver(model),
+					apiKey: options.modelRegistry.resolver(model, options.sessionId),
+					sessionId: options.sessionId,
 					maxTokens: 8192,
 					reasoning: clampThinkingLevelForModel(model, Effort.Medium),
 					toolChoice: "required",
@@ -171,7 +174,7 @@ async function consolidateLocked(
 			throw new Error(response.errorMessage || "sharpshooter consolidation model error");
 		}
 
-		const files = parseReplacementFiles(response.content);
+		const files = parseReplacementFiles(response.content, currentFiles);
 		await applyReplacementFiles(bankDir, files);
 
 		const consumedFiles = groups.flatMap(group => group.deltas.map(item => item.file));
@@ -223,7 +226,10 @@ async function readProjectDocs(cwd: string): Promise<string> {
 	return truncateApproxTokens(blocks.join("\n\n"), PROJECT_DOC_TOKEN_LIMIT);
 }
 
-function parseReplacementFiles(content: readonly unknown[]): ReplacementFile[] {
+function parseReplacementFiles(
+	content: readonly unknown[],
+	currentFiles: Readonly<Record<SharpshooterMemoryFile, string>>,
+): ReplacementFile[] {
 	const toolCalls = content.filter(
 		(block): block is { type: "toolCall"; name: string; arguments: unknown } =>
 			typeof block === "object" && block !== null && "type" in block && block.type === "toolCall",
@@ -259,6 +265,10 @@ function parseReplacementFiles(content: readonly unknown[]): ReplacementFile[] {
 			throw new Error(`${name} exceeds the ${SHARPSHOOTER_MAX_FILE_LINES}-line limit`);
 		}
 		files.push({ name, content: redacted });
+	}
+	const totalChars = files.reduce((sum, file) => sum + file.content.trim().length, 0);
+	if (totalChars === 0 && SHARPSHOOTER_MEMORY_FILES.some(name => currentFiles[name].trim().length > 0)) {
+		throw new Error("replace_memory_files returned all-empty content; refusing to wipe memory files");
 	}
 	return files;
 }

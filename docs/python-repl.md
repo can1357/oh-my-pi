@@ -31,7 +31,7 @@ Current tool input:
 }
 ```
 
-The session-scoped wire schema advertises only enabled runtimes. The static implementation also supports `"js"`, `"rb"`, and `"jl"`; Python and JavaScript default on, while Ruby and Julia are opt-in. The tool is `concurrency = "exclusive"` for a session, so calls do not overlap. State persists across separate calls to the same language runtime.
+The session-scoped wire schema advertises only enabled runtimes ("py" and "js"). Python and JavaScript default on. The tool is `concurrency = "exclusive"` for a session, so calls do not overlap. State persists across separate calls to the same language runtime.
 
 ## Kernel lifecycle
 
@@ -92,7 +92,7 @@ The runner's source transformer rewrites IPython-style magics to plain Python ca
 | `%reset`                          | Clear user globals and re-inject prelude.                                                                                                                   |
 | `%load <path>`                    | Read a file into a fresh cell and execute.                                                                                                                  |
 | `%run <path>`                     | `runpy.run_path` and merge globals back.                                                                                                                    |
-| `%%bash` / `%%sh`                 | Run the cell body via `bash`/`sh`.                                                                                                                          |
+| `%%bash`                          | Run the cell body via `bash`. The only registered shell cell magic — `%%sh` does not exist, and unregistered names raise `Cell magic function '%%<name>' not found`. |
 | `%%capture [name]`                | Run body with stdout/stderr captured into `name`.                                                                                                           |
 | `%%timeit`                        | Time the cell body.                                                                                                                                         |
 | `%%writefile <path>`              | Write body to file.                                                                                                                                         |
@@ -142,17 +142,19 @@ The runner additionally receives `PYTHONUNBUFFERED=1` and `PYTHONIOENCODING=utf-
 
 ## Tool availability and mode selection
 
-The backend settings `eval.py` / `eval.js` default to `true`; `eval.rb` / `eval.jl` default to `false`. Optional boolean environment flags `PI_PY`, `PI_JS`, `PI_RB`, and `PI_JL` override their corresponding setting independently.
+The backend settings `eval.py` / `eval.js` default to `true`. Optional boolean environment flags `PI_PY` and `PI_JS` override their corresponding setting independently. `eval.tools.enabled` also defaults to `true`; turning it off removes the `tools` spawn fields and kernel-defined-tool guidance.
 
 The tool's session-scoped schema lists only enabled runtimes. If Python preflight fails while another runtime is enabled, `eval` remains available for that runtime and a `py` call reports a Python-backend availability error with enabled alternatives.
 
-Python prelude helpers include `agent(prompt, *, agent="task", label=None, schema=None, schema_mode=None, isolated=None, apply=None, merge=None, handle=False)`. It synchronously calls the host bridge and returns final text, or parsed data when `schema` is supplied. `schema_mode` selects permissive or strict structured-output handling; the isolation/apply/merge flags control task worktree behavior. With `handle=True`, it returns a DAG node dict (`{"text", "output", "handle", "id", "agent"}`) whose handle is the recoverable `agent://<id>` URI; parsed output is also stored under `"data"` when available.
+Python prelude helpers include `agent(prompt, *, agent=None, label=None, schema=None, schema_mode=None, isolated=None, apply=None, merge=None, tools=None)`, which registers a background subagent job and returns an `AgentHandle` (`.id`, `.handle` = `agent://<id>`, `.status`, `.done()`, `.wait(timeout=None)`, `.send()`, `.cancel()`, `.output()`, awaitable). `completion(...)` likewise returns a `CompletionHandle`. `wait(handles, timeout=None, raise_errors=True)` barriers over handles in input order. `workpool(...)` returns a `WorkPool` (`push`, `status`, `peek`, `close`); its name is the aggregate async-job id used with `hub wait`. `tool.<name>(args)` is a coroutine (`await tool.read({...})`); `@tool` registers a kernel-local function as a tool for subagents (schema inferred from type hints) when `eval.tools.enabled` is on.
+
+The runner accepts a `{"type": "tool", "id", "op": "describe"|"call", ...}` request alongside cell requests. It is served on a dedicated daemon thread (POSIX; between cells on Windows) against the kernel's `__omp_tools__` registry, replies with an `application/json` display bundle (`{ok, tools, missing}` or `{ok, value}`), and reports a raising tool as an `error` frame without touching the running cell. See `docs/tools/eval.md` for the caller-facing contract.
 
 ## Execution flow and cancellation/timeout
 
 ### Cell timeout
 
-`timeout` is in seconds and defaults to 30. `0` disables the cell timeout; nonzero values are clamped to `1..3600` seconds and by a positive `tools.maxTimeout` ceiling before being passed to `IdleTimeout`. The timeout is suspended while a host-side `agent()` / `parallel()` / `completion()` bridge call is in flight: those calls emit reference-counted pause/resume events through `withBridgeTimeoutPause`, and a fresh timeout window begins when control returns.
+`timeout` is in seconds and defaults to 30. `0` disables the cell timeout; nonzero values are clamped to `1..3600` seconds and by a positive `tools.maxTimeout` ceiling before being passed to `IdleTimeout`. The timeout is suspended while a host-side `wait()` on `agent()` / `completion()` handles is in flight: those calls emit reference-counted pause/resume events through `withBridgeTimeoutPause`, and a fresh timeout window begins when control returns.
 
 The pause/resume events are the sole mechanism that suspends the budget. Compute, `stdout`/`stderr`, `log()`/`phase()`, and ordinary tool calls count against it. The tool combines caller, session, and watchdog abort signals with `AbortSignal.any(...)`; the backend does not arm a competing deadline.
 
@@ -224,7 +226,7 @@ Output is streamed through `OutputSink` and may be persisted to artifact storage
 
 ## Relevant environment variables
 
-- `PI_PY` / `PI_JS` / `PI_RB` / `PI_JL` — per-backend exposure overrides
+- `PI_PY` / `PI_JS` — per-backend exposure overrides
 - `PI_PYTHON_SKIP_CHECK=1` — bypass Python preflight/warm checks
 - `PI_PYTHON_INTEGRATION=1` — enable gated integration tests that spawn a real Python
 - `PI_PYTHON_IPC_TRACE=1` — log NDJSON frames exchanged with the runner subprocess

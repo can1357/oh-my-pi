@@ -1,0 +1,53 @@
+{
+ "cases": [
+  {
+   "name": "exact match",
+   "files": { "a.txt": "alpha\nbeta\ngamma\n" },
+   "args": { "path": "a.txt", "old_string": "beta", "new_string": "BETA" },
+   "policy": { "allowFuzzy": false },
+   "expect": { "files": { "a.txt": "alpha\nBETA\ngamma\n" } }
+  },
+  {
+   "name": "fuzzy indentation match with adjust_indentation",
+   "files": { "indent.ts": "function run() {\n    if (ready) {\n      oldCall();\n    }\n}\n" },
+   "args": { "path": "indent.ts", "old_string": "if (ready) {\n  oldCall();\n}", "new_string": "if (ready) {\n  newCall();\n}" },
+   "policy": { "allowFuzzy": true },
+   "expect": { "files": { "indent.ts": "function run() {\n    if (ready) {\n      newCall();\n    }\n}\n" } }
+  },
+  {
+   "name": "multiple occurrences error",
+   "files": { "many.txt": "same\nmiddle\nsame\n" },
+   "args": { "path": "many.txt", "old_string": "same", "new_string": "changed" },
+   "policy": { "allowFuzzy": false },
+   "expect": { "error": "Found 2 occurrences in many.txt", "writes": 0 }
+  },
+  {
+   "name": "replace_all",
+   "files": { "all.txt": "same\nmiddle\nsame\n" },
+   "args": { "path": "all.txt", "old_string": "same", "new_string": "changed", "replace_all": true },
+   "policy": { "allowFuzzy": false },
+   "expect": { "files": { "all.txt": "changed\nmiddle\nchanged\n" } }
+  },
+  {
+   "name": "no-change error",
+   "files": { "noop.txt": "alpha\n" },
+   "args": { "path": "noop.txt", "old_string": "alpha", "new_string": "alpha" },
+   "policy": { "allowFuzzy": false },
+   "expect": { "error": "Edits to noop.txt resulted in no changes being made.", "writes": 0 }
+  },
+  {
+   "name": "CRLF + BOM round trip",
+   "files": { "windows.txt": "﻿alpha\r\nbeta\r\n" },
+   "args": { "path": "windows.txt", "old_string": "beta", "new_string": "BETA" },
+   "policy": { "allowFuzzy": false },
+   "expect": { "files": { "windows.txt": "﻿alpha\r\nBETA\r\n" } }
+  },
+  {
+   "name": "notebook .ipynb target",
+   "files": { "book.ipynb": "{\"cells\":[{\"cell_type\":\"code\",\"metadata\":{},\"source\":[\"alpha\\n\"],\"outputs\":[],\"execution_count\":null}],\"metadata\":{},\"nbformat\":4,\"nbformat_minor\":5}" },
+   "args": { "path": "book.ipynb", "old_string": "alpha", "new_string": "beta" },
+   "policy": { "allowFuzzy": false },
+   "expect": { "files": { "book.ipynb": "{\n \"cells\": [\n  {\n   \"cell_type\": \"code\",\n   \"metadata\": {},\n   \"source\": [\n    \"beta\\n\"\n   ],\n   \"outputs\": [],\n   \"execution_count\": null\n  }\n ],\n \"metadata\": {},\n \"nbformat\": 4,\n \"nbformat_minor\": 5\n}" } }
+  }
+ ]
+}

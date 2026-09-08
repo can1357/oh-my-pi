@@ -1,0 +1,10 @@
+auth "deepseek" {
+	name "DeepSeek"
+	login "api-key" {
+		auth-url "https://platform.deepseek.com/api_keys"
+		instructions "Create or copy your API key from the DeepSeek dashboard"
+		prompt "Paste your DeepSeek API key" placeholder="sk-..."
+		normalize "strip-bearer"
+		validate "models-endpoint" label="deepseek" url="https://api.deepseek.com/v1/models"
+	}
+}

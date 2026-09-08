@@ -12,6 +12,7 @@ import {
 	isLightTheme,
 	setThemeInstance,
 } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { Editor } from "@oh-my-pi/pi-tui";
 import { getAgentDir, getCustomThemesDir, removeWithRetries, setAgentDir } from "@oh-my-pi/pi-utils";
 
 function createBaseThemes() {
@@ -92,6 +93,38 @@ describe("empty foreground contrast", () => {
 			if (!surfaceColor) throw new Error("Editor surface color is unavailable");
 
 			expect(surfaceColor("typed")).toContain("\x1b[48;2;232;232;232m\x1b[38;2;0;0;0mtyped");
+		} finally {
+			setThemeInstance(dark);
+		}
+	});
+
+	it("uses the normal text token for transparent composer text", () => {
+		const { dark } = createBaseThemes();
+		const poimandresJson = getBuiltinThemes()["light-poimandres"];
+		if (!poimandresJson) throw new Error("Light Poimandres theme is unavailable");
+		try {
+			// poimandres `text` is #506477 → rgb(80,100,119); a transparent composer
+			// must paint typed text with it, never the `userMessageText` (#ffffff)
+			// reserved for the painted message background.
+			setThemeInstance(createTheme(poimandresJson, { mode: "truecolor" }));
+			const editor = new Editor(getEditorTheme());
+			editor.setText("typed");
+
+			expect(editor.render(40).join("\n")).toContain("\x1b[38;2;80;100;119mtyped");
+		} finally {
+			setThemeInstance(dark);
+		}
+	});
+
+	it("keeps filled composer text contrasted against its painted surface", () => {
+		const { dark } = createBaseThemes();
+		try {
+			setThemeInstance(createTheme(defaultThemes.porcelain, { mode: "truecolor" }));
+			const editor = new Editor(getEditorTheme());
+			editor.setBorderStyle("field");
+			editor.setText("typed");
+
+			expect(editor.render(40).join("\n")).toContain("\x1b[48;2;80;112;160m\x1b[38;2;229;229;231m typed");
 		} finally {
 			setThemeInstance(dark);
 		}

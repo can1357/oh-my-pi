@@ -14,7 +14,17 @@ The package has no `packages/natives/src/<module>` wrapper layer. Its entrypoint
 
 - eager root: `native/index.js` with generated `native/index.d.ts`;
 - lazy desktop wrapper: `native/desktop.js` / `desktop.d.ts`;
-- lazy clipboard wrapper: `native/clipboard.js` / `clipboard.d.ts`.
+- lazy clipboard wrapper: `native/clipboard.js` / `clipboard.d.ts`;
+- lazy vcs wrapper: `native/vcs.js` / `vcs.d.ts` (`@oh-my-pi/pi-natives/vcs`).
+
+The vcs subpath exposes the backend-neutral `Vcs*` repository API (added in
+18.0.9, with `VcsGitRepo.mergeBase()` following in 18.0.10): discovery and
+Git/Jujutsu operations through `git()` / `repo()` / `require()` / `requireGit()`
+returning `VcsGitRepo` / `VcsRepo` / `VcsJjWorkspace` handles (refs and status,
+diffs, staging, commits, branches, worktrees, patch application, stash,
+cherry-pick, CLI-backed push/fetch/clone, all cancellation-aware), plus the
+JS-side error helpers (`isVcsError`) and the `watch(repo, onChange)` head-change
+watcher built on `VcsRepo.watchTarget()`.
 
 Two commands serve different purposes:
 

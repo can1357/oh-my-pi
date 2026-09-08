@@ -98,9 +98,7 @@ import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import guidedGoalInterviewPrompt from "../prompts/goals/guided-goal-interview.md" with { type: "text" };
 import planFilenamePrompt from "../prompts/system/plan-filename.md" with { type: "text" };
 import planModeApprovedPrompt from "../prompts/system/plan-mode-approved.md" with { type: "text" };
-import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with {
-	type: "text",
-};
+import planModeCompactInstructionsPrompt from "../prompts/system/plan-mode-compact-instructions.md" with { type: "text" };
 import { type AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import {
 	type AgentSession,
@@ -126,6 +124,7 @@ import { labelEchoesHandle } from "../task/label";
 import { agentTypeBadge, formatTaskId } from "../task/render";
 import type { ConfiguredThinkingLevel } from "../thinking";
 import { tinyTitleClient } from "../tiny/title-client";
+import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
 import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
@@ -139,6 +138,7 @@ import {
 	todoMatchesAnyDescription,
 } from "../tools/todo";
 import { vocalizer } from "../tts/vocalizer";
+import { applyHyperlinkSetting } from "../tui/hyperlink";
 import { renderTreeList } from "../tui/tree-list";
 import { formatStartupChangelogSummary, type StartupChangelogSelection } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
@@ -175,12 +175,13 @@ import type { HookInputComponent } from "./components/hook-input";
 import type { HookSelectorComponent, HookSelectorSlider } from "./components/hook-selector";
 import { type PlanReviewAnnotationState, PlanReviewOverlay } from "./components/plan-review-overlay";
 import { PlanSaveOverlay, type PlanSaveOverlayResult } from "./components/plan-save-overlay";
+import { SessionInfoOverlay } from "./components/session-info-overlay";
 import { StatusLineComponent } from "./components/status-line";
 import { stopSharedSpinnerTicker, type ToolExecutionHandle } from "./components/tool-execution";
 import { TranscriptContainer } from "./components/transcript-container";
 import type { LspServerInfo as WelcomeLspServerInfo } from "./components/welcome";
-import { Composer } from "./composer";
-import { writeComposerWelcomeCache } from "./composer-cache";
+import { Composer, type ComposerStatusSnapshot } from "./composer";
+import { writeComposerStatusCache, writeComposerWelcomeCache } from "./composer-cache";
 import { BtwController } from "./controllers/btw-controller";
 import { CleanseCommandController } from "./controllers/cleanse-command-controller";
 import { CommandController } from "./controllers/command-controller";
@@ -230,6 +231,7 @@ import {
 } from "./theme/theme";
 import { getSlashCommandTypeIcon } from "./theme/tui-adapters";
 import type {
+	AgentHubOpenOptions,
 	CompactionQueuedMessage,
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
@@ -555,7 +557,6 @@ const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
 
 export class InteractiveMode implements InteractiveModeContext {
 	#ownsStartedUi: boolean;
-	#startupSubmitGated: boolean;
 	session: AgentSession;
 	sessionManager: SessionManager;
 	settings: Settings;
@@ -725,7 +726,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	#signalTeardown?: SessionTeardown;
 	readonly #version: string;
 	readonly #startupChangelog: StartupChangelogSelection | undefined;
-	#planModePreviousTools: string[] | undefined;
+	/** Header components below the config warnings + welcome, retained so a live config-warning change can rebuild the header (#10048). */
+	#headerAfter: readonly Component[] = [];
+	#planModePreviousToolPresentation: { enabled: string[]; mounted: string[] } | undefined;
 	#goalModePreviousTools: string[] | undefined;
 	#vibeModePreviousTools: string[] | undefined;
 	#vibeModeOwnerScope: VibeOwnerScope | undefined;
@@ -741,6 +744,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	#planModeHasEntered = false;
 	#planReviewOverlay: PlanReviewOverlay | undefined;
 	#planReviewOverlayHandle: OverlayHandle | undefined;
+	#sessionInfoOverlayHandle: OverlayHandle | undefined;
 	#planReviewCancel: (() => void) | undefined;
 	/** Serializable review annotations keyed by the resolved plan file path. */
 	#planReviewAnnotationState = new Map<string, PlanReviewAnnotationState>();
@@ -788,6 +792,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#focusController.unfocus();
 	}
 	clearTransientSessionUi(): void {
+		this.#hideSessionInfo();
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
@@ -888,7 +893,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.editor.magicKeywordsEnabled = () => this.settings.get("magicKeywords.enabled");
 		this.editor.imageReferenceHyperlink = imageReferenceHyperlink;
 		this.#ownsStartedUi = wasStarted;
-		this.#startupSubmitGated = true;
 		this.keybindings = KeybindingsManager.inMemory();
 		this.agent = session.agent;
 		this.#version = version;
@@ -929,6 +933,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		// capability (`TERMINAL.supportsTextSizing` defaults on for Kitty) so it stays off
 		// unless the user opts in, and never emits raw escapes on other terminals.
 		setTerminalTextSizing(settings.get("tui.textSizing") && TERMINAL.supportsTextSizing);
+		// Keep generic pi-tui renderers aligned with the coding-agent setting.
+		applyHyperlinkSetting();
 		this.chatContainer = new TranscriptContainer();
 		this.pendingMessagesContainer = new AnchoredLiveContainer();
 		this.statusContainer = new StatusHudContainer(this);
@@ -1054,6 +1060,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				this.#trackMcpStatusServer(serverName);
 				this.#mcpPendingServers.add(serverName);
 			}
+		} else if (event.type === "reconnecting") {
+			this.#trackMcpStatusServer(event.serverName);
+			this.#mcpConnectedServers.delete(event.serverName);
+			this.#mcpFailedServers.delete(event.serverName);
+			this.#mcpPendingServers.add(event.serverName);
 		} else if (event.type === "connected") {
 			this.#trackMcpStatusServer(event.serverName);
 			this.#mcpPendingServers.delete(event.serverName);
@@ -1165,10 +1176,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			lspServers: this.#getWelcomeLspServers(),
 		});
 		this.#persistComposerWelcome(modelName, providerName);
-		const headerBefore: Component[] = [];
-		for (const warning of this.session.configWarnings) {
-			headerBefore.push(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0), new Spacer(1));
-		}
+		const headerBefore = this.#buildConfigWarningComponents();
 		const headerAfter: Component[] = [];
 		if (!startupQuiet && this.#startupChangelog && settings.get("startup.changelogMode") !== "hidden") {
 			headerAfter.push(
@@ -1187,8 +1195,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			}
 			headerAfter.push(new Spacer(1), new DynamicBorder());
 		}
+		this.#headerAfter = headerAfter;
 		this.composer.setHeaderExtras(headerBefore, headerAfter);
 		this.statusLine.watchBranch(() => {
+			this.#persistComposerStatus();
 			this.ui.requestRender();
 		});
 		this.composer.setStatusComponent(this.statusLine);
@@ -1342,6 +1352,9 @@ export class InteractiveMode implements InteractiveModeContext {
 				if (event.type === "model_changed") {
 					this.#updateWelcomeModel();
 				}
+				if (event.type === "config_warnings_changed") {
+					this.#syncConfigWarningHeader();
+				}
 				void this.#handleGoalSessionEvent(event);
 			}),
 			onStatusLineSessionAccentChanged(() => {
@@ -1354,6 +1367,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		// can change the model before this subscription exists, so the
 		// model_changed events they emit are never observed by the handler above.
 		this.#updateWelcomeModel();
+		// Config warnings can change during the same pre-subscription window; the
+		// event is not replayed, so rebuild from the live array once here too.
+		this.#syncConfigWarningHeader();
 		this.#eventBusUnsubscribers.push(
 			onModelRolesChanged(() => {
 				void this.#reapplyPlanModeModelOnRoleChange();
@@ -1422,6 +1438,17 @@ export class InteractiveMode implements InteractiveModeContext {
 			// replay with the newly detected palette.
 			onTerminalAppearanceChange(mode, appearanceRefreshWasRequested ? {} : undefined);
 		});
+
+		// Everything is wired: subscriptions observe agent events, the session
+		// mode is reconciled, and the submit handler is installed. Lift the
+		// composer's bootstrap submit gate (`disableSubmit = true` since
+		// construction, so an Enter typed before the pipeline existed could not
+		// clear the draft into nowhere, and a turn started mid-init could not run
+		// unobserved). From here Enter dispatches safely in every state — the
+		// initial CLI prompt and a user submission both flow with
+		// `streamingBehavior: "steer"`, so whichever lands second queues into the
+		// other's turn instead of dying.
+		this.editor.disableSubmit = false;
 	}
 
 	/** Reload the title-generation system prompt override for the provided working
@@ -1637,11 +1664,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.onInputCallback = undefined;
 			resolve(input);
 		};
-		if (this.#startupSubmitGated) {
-			this.#startupSubmitGated = false;
-			this.editor.disableSubmit = false;
-			this.ui.requestRender();
-		}
 		this.#scheduleLoopAutoSubmit();
 		this.#scheduleGoalContinuation();
 
@@ -2143,7 +2165,55 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		this.statusLine.setComposerStyle(style);
 		this.updateEditorBorderColor();
+		this.#persistComposerStatus();
 		this.ui.requestRender();
+	}
+
+	/**
+	 * Cache placeholder-only status chrome so the next launch paints the row
+	 * immediately without presenting values from the previous session.
+	 */
+	#persistComposerStatus(): void {
+		if (!this.sessionManager.getSessionFile()) return;
+		const shape = settings.get("composer.shape") ?? "band";
+		const style = getComposerStyle(shape);
+		const terminalWidth = this.ui.terminal.columns;
+		const availableWidth = this.editor.getTopBorderAvailableWidth(terminalWidth);
+		const topContent =
+			style.statusAttachment === "top-border"
+				? this.statusLine.renderStartupPlaceholder(availableWidth, "box")
+				: style.statusAttachment === "top-band"
+					? this.statusLine.renderStartupPlaceholder(availableWidth, "band")
+					: style.statusAttachment === "top-rule-chip"
+						? this.statusLine.renderStartupPlaceholder(availableWidth, "plain-right")
+						: undefined;
+		const bottomLines: string[] = [];
+		if (style.bottomBar !== "none") {
+			const content = this.statusLine.renderStartupPlaceholder(
+				terminalWidth,
+				style.bottomBar === "left" ? "plain-left" : "plain-full",
+			);
+			if (content) {
+				if (style.bottomBarGap) bottomLines.push("");
+				bottomLines.push(content);
+			}
+		}
+		// Recover the border's ANSI wrapper by coloring a sentinel and splitting around it.
+		const marker = "\0";
+		const colored = this.editor.borderColor(marker);
+		const markerIndex = colored.indexOf(marker);
+		const snapshot: ComposerStatusSnapshot = {
+			shape,
+			borderColor:
+				markerIndex < 0
+					? undefined
+					: { prefix: colored.slice(0, markerIndex), suffix: colored.slice(markerIndex + marker.length) },
+			topBorder: topContent ? { content: topContent, width: visibleWidth(topContent) } : undefined,
+			bottomLines,
+		};
+		void writeComposerStatusCache(this.sessionManager.getCwd(), snapshot).catch(error => {
+			logger.debug("composer status cache write failed", { error });
+		});
 	}
 
 	#handleSessionAccentInputsChanged(): void {
@@ -2985,15 +3055,19 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.planModeEnabled || this.planModePaused) {
 			this.session.setPlanModeState(undefined);
 			try {
-				if (this.#planModePreviousTools !== undefined) {
-					await this.session.setActiveToolsByName(this.#planModePreviousTools);
+				const previousPresentation = this.#planModePreviousToolPresentation;
+				if (previousPresentation) {
+					await this.session.restoreNonMCPToolPresentation(
+						previousPresentation.enabled,
+						previousPresentation.mounted,
+					);
 				}
 			} finally {
 				this.session.setPlanProposalHandler?.(null);
 				this.planModeEnabled = false;
 				this.planModePaused = false;
 				this.planModePlanFilePath = undefined;
-				this.#planModePreviousTools = undefined;
+				this.#planModePreviousToolPresentation = undefined;
 				this.#planModePreviousModelState = undefined;
 				this.#pendingModelSwitch = undefined;
 				this.#pendingPlanModelSwitch = false;
@@ -3142,6 +3216,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		const planFilePath = options?.planFilePath ?? (await this.#getPlanFilePath());
 		const previousTools = this.session.getEnabledToolNames();
+		const previousMountedTools = this.session.getMountedXdevToolNames();
 		// `plan-mode-active.md` instructs the agent to draft the plan file with
 		// `write` and refine it with `edit`, and plan approval itself is a `write`
 		// to `xd://propose`. Both must be in the active set or the agent falls
@@ -3158,7 +3233,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 		const uniquePlanTools = [...new Set([...previousTools, ...planAugmentations])];
 
-		this.#planModePreviousTools = previousTools;
+		this.#planModePreviousToolPresentation = {
+			enabled: previousTools.filter(name => !isMCPToolName(name)),
+			mounted: previousMountedTools.filter(name => !isMCPToolName(name)),
+		};
 		this.planModePlanFilePath = planFilePath;
 		this.planModeEnabled = true;
 		// Suppress cache-miss marker on the next turn: plan mode changes the system
@@ -3268,8 +3346,12 @@ export class InteractiveMode implements InteractiveModeContext {
 			: undefined;
 		this.session.setPlanModeState(undefined);
 		try {
-			if (this.#planModePreviousTools !== undefined) {
-				await this.session.setActiveToolsByName(this.#planModePreviousTools);
+			const previousPresentation = this.#planModePreviousToolPresentation;
+			if (previousPresentation) {
+				await this.session.restoreNonMCPToolPresentation(
+					previousPresentation.enabled,
+					previousPresentation.mounted,
+				);
 			}
 			if (this.#planModePreviousModelState && !options?.deferModelRestore) {
 				await this.#restorePlanPreviousModel(this.#planModePreviousModelState);
@@ -3318,7 +3400,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.lastAssistantUsage = undefined;
 		this.planModePaused = options?.paused ?? false;
 		this.planModePlanFilePath = undefined;
-		this.#planModePreviousTools = undefined;
+		this.#planModePreviousToolPresentation = undefined;
 		if (!options?.deferModelRestore) this.#planModePreviousModelState = undefined;
 		this.#updatePlanModeStatus();
 		const paused = options?.paused ?? false;
@@ -3496,7 +3578,6 @@ export class InteractiveMode implements InteractiveModeContext {
 			maxHeight: "100%",
 			margin: 0,
 			fullscreen: true,
-			mouseTracking: false,
 		});
 		this.ui.setFocus(overlay);
 		this.ui.requestRender();
@@ -3717,7 +3798,10 @@ export class InteractiveMode implements InteractiveModeContext {
 			executionModel?: ResolvedRoleModel;
 		},
 	): Promise<boolean> {
-		const previousTools = this.#planModePreviousTools ?? this.session.getEnabledToolNames();
+		const previousPresentation = this.#planModePreviousToolPresentation ?? {
+			enabled: this.session.getEnabledToolNames().filter(name => !isMCPToolName(name)),
+			mounted: this.session.getMountedXdevToolNames().filter(name => !isMCPToolName(name)),
+		};
 
 		// Mark the pending abort caused by the plan-mode → compaction transition as
 		// silent BEFORE #exitPlanMode raises it. The `finally` below clears the
@@ -3787,8 +3871,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 		// Restore the execution tool set, but force-enable `read`: approved-plan
 		// prompts now require loading the durable local:// plan file before work.
-		const executionTools = previousTools.includes("read") ? previousTools : [...previousTools, "read"];
-		await this.session.setActiveToolsByName(executionTools);
+		const executionTools = previousPresentation.enabled.includes("read")
+			? previousPresentation.enabled
+			: [...previousPresentation.enabled, "read"];
+		await this.session.restoreNonMCPToolPresentation(executionTools, previousPresentation.mounted);
 		this.session.setPlanReferencePath(options.planFilePath);
 
 		// Resolve the deferred plan-approval model transition. On the compact path
@@ -4671,6 +4757,8 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	stop(): void {
 		this.#appearanceRefreshRequest = undefined;
+		// Last chance to refresh the startup status placeholder for the next launch.
+		this.#persistComposerStatus();
 		if (this.loadingAnimation) {
 			this.#stopLoadingAnimation(false);
 		}
@@ -4713,6 +4801,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		// Clear the process-global consent handler so it doesn't outlive this
 		// InteractiveMode instance (e.g. test harnesses, headless re-init).
 		setAutoQaConsentHandler(null, null);
+		this.#hideSessionInfo();
 		if (this.#ownsStartedUi) {
 			this.ui.stop();
 			this.#ownsStartedUi = false;
@@ -4935,6 +5024,30 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#renderDeferredCommandNotice();
 		this.ui.requestRender();
 	}
+	showSessionInfo(info: string): void {
+		this.#hideSessionInfo();
+		const overlay = new SessionInfoOverlay(this.ui, info, () => this.#hideSessionInfo());
+		this.#sessionInfoOverlayHandle = this.ui.showOverlay(overlay, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ui.setFocus(overlay);
+		this.ui.requestRender();
+	}
+
+	#hideSessionInfo(): void {
+		const handle = this.#sessionInfoOverlayHandle;
+		this.#sessionInfoOverlayHandle = undefined;
+		if (!handle) return;
+		handle.hide();
+		// Focus the visible editor-slot owner, not this.editor: an extension ask
+		// or hook may have swapped into editorContainer while the panel was open,
+		// and keys must reach the visible prompt (same stale-focus class as #3349).
+		this.#selectorController.focusActiveEditorArea();
+		this.ui.requestRender();
+	}
 
 	/**
 	 * Preview the queued panels above the editor so a command answers straight
@@ -5051,6 +5164,20 @@ export class InteractiveMode implements InteractiveModeContext {
 		const providerName = this.session.model?.provider ?? "Unknown";
 		this.composer.updateWelcome({ modelName, providerName });
 		this.#persistComposerWelcome(modelName, providerName);
+		this.#persistComposerStatus();
+	}
+
+	#syncConfigWarningHeader(): void {
+		this.composer.setHeaderExtras(this.#buildConfigWarningComponents(), this.#headerAfter);
+	}
+
+	/** Header rows for the current config warnings, rebuilt when they change (#10048). */
+	#buildConfigWarningComponents(): Component[] {
+		const components: Component[] = [];
+		for (const warning of this.session.configWarnings) {
+			components.push(new Text(theme.fg("warning", `Warning: ${warning}`), 1, 0), new Spacer(1));
+		}
+		return components;
 	}
 
 	#persistComposerWelcome(modelName: string, providerName: string): void {
@@ -5300,6 +5427,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	handleExportCommand(text: string): Promise<void> {
 		return this.#commandController.handleExportCommand(text);
 	}
+	handleTraceCommand(): Promise<void> {
+		return this.#commandController.handleTraceCommand();
+	}
 
 	async handleDumpCommand(): Promise<void> {
 		return this.#commandController.handleDumpCommand();
@@ -5399,6 +5529,11 @@ export class InteractiveMode implements InteractiveModeContext {
 	async handleMoveCommand(targetPath?: string): Promise<void> {
 		if (this.#vibeSessionTransitionBlocked()) return;
 		await this.#commandController.handleMoveCommand(targetPath);
+	}
+
+	async handleWorktreeCommand(branch?: string): Promise<void> {
+		if (this.#vibeSessionTransitionBlocked()) return;
+		await this.#commandController.handleWorktreeCommand(branch);
 	}
 
 	handleRenameCommand(title: string): Promise<void> {
@@ -5507,7 +5642,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		await this.#selectorController.showDebugSelector();
 	}
 
-	showAgentHub(options?: { requireContent?: boolean; armCloseTap?: boolean }): void {
+	showAgentHub(options?: AgentHubOpenOptions): void {
 		this.#selectorController.showAgentHub(this.#observerRegistry, options);
 	}
 
@@ -5567,6 +5702,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#selectorController.showSettingsSelector();
 	}
 
+	showUsageDashboard(reports: UsageReport[]): void {
+		this.#selectorController.showUsageDashboard(reports);
+	}
+
 	showAdvisorConfigure(): void {
 		this.#selectorController.showAdvisorConfigure();
 	}
@@ -5588,6 +5727,10 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
+	}
+
+	switchSessionModel(model: Model, thinkingLevel?: ConfiguredThinkingLevel): Promise<void> {
+		return this.#selectorController.switchSessionModel(model, thinkingLevel);
 	}
 
 	showPluginSelector(mode?: "install" | "uninstall"): void {

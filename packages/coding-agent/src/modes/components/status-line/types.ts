@@ -59,17 +59,25 @@ export type RGB = readonly [number, number, number];
 
 export interface SegmentContext {
 	session: AgentSession;
+	/** Deterministic wall clock for previews/tests; production omits it. */
+	now?: Date;
+	/** Deterministic host label for previews/tests; production omits it. */
+	hostname?: string;
 	/** Focused subagent id while the view is proxied at its session, undefined otherwise. */
 	focusedAgentId?: string | undefined;
 	/** Effective `statusLine.sessionAccent`; `false` disables hash-derived accent colors, while `true` or omission enables them. */
 	sessionAccent?: boolean;
 	/** Stand-in session title for previews; `session_name` renders it when the session is unnamed. */
 	previewTitle?: string;
+	/** Replace dynamic values with ellipses while preserving each segment's icon, color, and static text. */
+	startupPlaceholder?: boolean;
 	activeRepo: ActiveRepoContext | null;
 	width: number;
 	options: StatusLineSegmentOptions;
 	/** Render the model segment's thinking level as a compact leading glyph. */
 	compactThinkingLevel: boolean;
+	/** Key-sorted extension/hook status values. Segment renderers sanitize before display. */
+	hookStatuses?: readonly string[];
 	planMode: {
 		enabled: boolean;
 		paused: boolean;

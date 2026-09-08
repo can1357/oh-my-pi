@@ -105,11 +105,11 @@ No match throws `Session "..." not found.`.
 Handled after initial session-manager construction:
 
 1. list current-folder sessions with `SessionManager.list(cwd, parsed.sessionDir)`
-2. if empty, probe `SessionManager.listAll()` only to distinguish globally empty state and preload the Tab scope; the picker still opens in current-folder scope
+2. if empty, probe `SessionManager.listAll()` only to distinguish globally empty state and preload the Tab scope; the picker itself never auto-switches into all-projects scope (issue #3099)
 3. if both lists are empty, print `No sessions found` and exit
 4. open the fullscreen TUI picker (`selectSession`)
 5. if canceled, print `No session selected` and exit
-6. on selection, switch process/project-scoped state to the session's cwd, then `SessionManager.open(selected.path)`
+6. on selection, `SessionManager.open(selected.path)`, then switch process/project-scoped state to the session's cwd (`switchToResumedProject`: `setProjectDir`, plugin-cache resets, settings reload) and re-resolve scoped models
 
 ### `--continue`
 
@@ -134,11 +134,11 @@ Uses `SessionManager.continueRecent(...)` directly (breadcrumb-first behavior ab
 Flow:
 
 1. fetch current-folder sessions via `SessionManager.list(currentCwd, currentSessionDir)`; the all-projects list remains lazy even when folder scope is empty
-2. mount `SessionSelectorComponent` in the editor area with lazy all-project loading and a `history.db` prompt matcher
+2. present `SessionSelectorComponent` as a fullscreen alternate-screen overlay via `ctx.ui.showOverlay` (anchored top-left at full size; the transcript underneath is untouched), wired with lazy all-project loading (`loadAllSessions`), a `history.db` prompt matcher, deletion, and pinned-session markers
 3. callbacks:
-   - select -> lock picker input and call `handleResumeSession(sessionPath)`; a recoverable pre-switch failure unlocks the picker
-   - cancel -> restore editor and rerender
-   - exit -> `ctx.shutdown()`
+   - select -> lock picker input and call `handleResumeSession(sessionPath)`; on success hide the overlay and restore editor focus, a recoverable pre-switch failure unlocks the picker and keeps it open
+   - cancel -> hide overlay, restore editor focus, rerender
+   - exit -> hide overlay, then `ctx.shutdown()`
 
 `/resume <id-prefix>` resolves local then global matches and switches directly. `/resume @claude` and `/resume @codex` instead open read-only-source import pickers: the selected foreign transcript is persisted as an OMP session, then switched to; deletion, history augmentation, and all-project scope are not offered in those pickers.
 

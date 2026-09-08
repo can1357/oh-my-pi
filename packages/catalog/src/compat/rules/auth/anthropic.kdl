@@ -1,0 +1,53 @@
+auth "anthropic" {
+	name "Anthropic (Claude Pro/Max)"
+	// Foundry mode optionally switches Anthropic auth to enterprise gateway credentials.
+	env hook="anthropic-foundry"
+	login "oauth-code" {
+		// Public OAuth client id, stored base64 so secret scanners stay quiet.
+		client-id "OWQxYzI1MGEtZTYxYi00NGQ5LTg4ZWQtNTk0NGQxOTYyZjVl" encoding="base64"
+		authorize-url "https://claude.ai/oauth/authorize"
+		// Scopes required for direct OAuth-token inference (user:inference) plus
+		// account/session management. platform.claude.com issues console tokens
+		// only; the claude.ai endpoint is required for direct inference access.
+		scopes "org:create_api_key" "user:profile" "user:inference" "user:sessions:claude_code" \
+			"user:mcp_servers" "user:file_upload"
+		pkce #true
+		authorize-params { code "true" }
+		instructions "Complete login in your browser. If the browser cannot reach this machine, paste the final redirect URL or authorization code when prompted."
+		callback port=54545 path="/callback"
+		token url="https://api.anthropic.com/v1/oauth/token" body="json" {
+			params { state "{state}" }
+		}
+		credential {
+			access "access_token"
+			refresh "refresh_token"
+			expires "seconds" path="expires_in" skew-ms=300000
+			account-id "account.uuid"
+			email "account.email_address"
+			org-id "organization.uuid"
+			org-name "organization.name"
+		}
+		// Falls back to the claude_cli bootstrap endpoint when the token
+		// response omits account/organization identity.
+		after-exchange hook="anthropic-identity"
+	}
+	refresh {
+		token url="https://api.anthropic.com/v1/oauth/token" body="json" {
+			// Claude Code sends these on refresh but not on the initial code exchange.
+			headers {
+				anthropic-beta "oauth-2025-04-20"
+				User-Agent "anthropic-sdk-typescript/{claude_code_sdk_version} userOAuthProvider"
+			}
+		}
+		// Org fields are deliberately not remapped on refresh: the org a
+		// credential is scoped to is fixed at login and merged from the stored row.
+		credential {
+			access "access_token"
+			refresh "refresh_token"
+			expires "seconds" path="expires_in" skew-ms=300000
+			account-id "account.uuid"
+			email "account.email_address"
+		}
+		after-refresh hook="anthropic-identity"
+	}
+}

@@ -11,6 +11,7 @@ import type { OAuthController, OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/ty
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { getActiveProfile } from "@oh-my-pi/pi-utils/dirs";
 import type { OAuthCredential } from "../session/auth-storage";
+import { buildWellKnownUrls } from "./oauth-discovery";
 
 /** Credential-id prefix for OMP-managed MCP OAuth credentials keyed by profile and server URL. */
 const MCP_OAUTH_URL_CREDENTIAL_PREFIX = "mcp_oauth:";
@@ -298,6 +299,8 @@ export interface MCPOAuthConfig {
 	authorizationUrl: string;
 	/** Token endpoint URL */
 	tokenUrl: string;
+	/** Authorization-server issuer URL used for metadata discovery. */
+	issuerUrl?: string;
 	/** Dynamic client registration endpoint advertised by the authorization server. */
 	registrationUrl?: string;
 	/** Client ID (optional when already embedded in authorization URL) */
@@ -437,12 +440,13 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 			params.set("prompt", prompt);
 		}
 		const existingResource = params.get("resource")?.trim();
-		if (existingResource) {
-			// A resource already embedded in the provider's authorization URL is
-			// provider-authored, not OMP's server-URL fallback. Preserve same-host
-			// values here even when the caller marked its separate
-			// `config.resource` as fallback; gateway-hosted MCP servers can use
-			// origin-only or path-scoped values as the token audience.
+		if (this.#resource && !this.config.stripSameOriginResource) {
+			// Protected-resource or authorization-server metadata identifies the
+			// requested audience; a query carried by the endpoint URL does not.
+			params.set("resource", this.#resource);
+		} else if (existingResource) {
+			// An embedded resource outranks OMP's server-URL fallback. Gateway-
+			// hosted MCP servers can use origin-only or path-scoped audiences.
 			const filtered = filterResourceIndicator(resolveResourceUri(existingResource), this.config.authorizationUrl);
 			if (filtered) {
 				this.#resource = filtered;
@@ -664,35 +668,16 @@ export class MCPOAuthFlow extends OAuthCallbackFlow {
 	}
 
 	async #resolveRegistrationEndpoint(): Promise<string | null> {
-		const authorizationUrl = new URL(this.config.authorizationUrl);
-
-		// origin-root well-known; most servers serve metadata here.
-		const rootUrl = new URL("/.well-known/oauth-authorization-server", authorizationUrl.origin).toString();
-		const endpoint = await this.#tryWellKnownForRegistration(rootUrl);
-		if (endpoint) return endpoint;
-
-		// path-prefixed well-known for gateways (e.g. https://gateway.example.com/my-service/).
-		const normalizedPath = authorizationUrl.pathname.replace(/\/$/, "");
-		const lastSlash = normalizedPath.lastIndexOf("/");
-		// Bare-origin authorization URL — nothing further to try.
-		if (lastSlash < 0) return null;
-
-		// Single-segment paths are the gateway prefix itself; multi-segment paths
-		// drop the trailing segment (typically a service endpoint).
-		const prefixPath = lastSlash === 0 ? normalizedPath : normalizedPath.slice(0, lastSlash);
-		const prefixedUrl = new URL(
-			".well-known/oauth-authorization-server",
-			`${authorizationUrl.origin}${prefixPath}/`,
-		).toString();
-		const prefixedEndpoint = await this.#tryWellKnownForRegistration(prefixedUrl);
-		if (prefixedEndpoint) return prefixedEndpoint;
-
-		// RFC 8414 §3.1 path-ful issuer form: /.well-known/oauth-authorization-server/<path>.
-		const pathfulUrl = new URL(
-			`/.well-known/oauth-authorization-server${normalizedPath}`,
-			authorizationUrl.origin,
-		).toString();
-		return await this.#tryWellKnownForRegistration(pathfulUrl);
+		const candidates = buildWellKnownUrls(
+			"/.well-known/oauth-authorization-server",
+			this.config.issuerUrl ?? this.config.authorizationUrl,
+			this.config.issuerUrl !== undefined,
+		);
+		for (const url of candidates) {
+			const endpoint = await this.#tryWellKnownForRegistration(url.toString());
+			if (endpoint) return endpoint;
+		}
+		return null;
 	}
 
 	async #tryWellKnownForRegistration(wellKnownUrl: string): Promise<string | null> {

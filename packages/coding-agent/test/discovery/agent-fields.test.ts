@@ -5,6 +5,13 @@ import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
 
 describe("parseAgentFields", () => {
+	test("rejects the reserved `main` and `sub` agent definition names", () => {
+		expect(parseAgentFields({ name: "main", description: "desc" })).toBeNull();
+		expect(parseAgentFields({ name: " Main ", description: "desc" })).toBeNull();
+		expect(parseAgentFields({ name: "sub", description: "desc" })).toBeNull();
+		expect(parseAgentFields({ name: " Sub ", description: "desc" })).toBeNull();
+	});
+
 	test("parses blocking from boolean frontmatter", () => {
 		const fields = parseAgentFields({
 			name: "reviewer",

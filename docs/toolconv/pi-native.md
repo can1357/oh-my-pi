@@ -13,6 +13,18 @@ routes translate and can lose pi-specific fields; pi-native sends the
 canonical types directly, preserving service tier, cache markers, thinking
 budgets, tool-choice variants, images, and tool-call IDs.
 
+### Removed omp tool-call dialect
+
+Historically, "pi-native" named an in-band tool-call serialization: an XML
+dialect of `<call:NAME …>` blocks, replaced by a sigil-delimited format
+(v16.0.10, `f743ddc`, 2026-06-19), then deleted outright (v16.2.2,
+`053da98`, 2026-06-27) along with its selection knobs (`tools.format: "pi"`,
+`PI_DIALECT=pi`). Nothing in `packages/ai` emits or parses either spelling.
+Old references to `<call:…>` blocks or `§` headers as "the omp tool-call
+format" describe a format that no longer exists; the in-band dialects that
+remain serve third-party model families (the live list is the registry in
+`packages/ai/src/dialect/factory.ts`).
+
 ## Configuration and dispatch
 
 A model opts in with:
