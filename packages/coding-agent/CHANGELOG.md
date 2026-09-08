@@ -32,6 +32,7 @@
 ### Added
 
 - Added `/grokbot` to show Grok Bot provider status (credentials/client; no secrets). Distinct from Cursor (`/login cursor`) and xAI / Grok CLI (`xai`, `xai-oauth`), with independent usage allowances. `/login grokbot` surfaces the host-install prompt for the Grok Bot system. Model lookup resolves Grok Bot `idAliases` (e.g. `grokbot/composer` → live `composer-2.5`) without separate catalog rows.
+- Documented Grok Bot one-shot text and tools probes from this checkout (`docs/grokbot.md`). Published `omp` 18.0.1 does not include this provider.
 - Documented Grok Bot one-shot text and tools probes, per-family tool wire, and the live AvailableModels matrix (`docs/grokbot.md`, `scripts/grokbot-catalog-matrix.ts`).
 - Grok Bot catalog matrix now smokes bash + read + write and retries HTTP 502/504 gateway flakes.
 
