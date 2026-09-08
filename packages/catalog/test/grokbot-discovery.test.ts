@@ -305,6 +305,38 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(variantString?.sandParameterDefaults).toEqual({ effort: "high" });
 	});
 
+	test("emits both legacySlug and variantStringRepresentation when both are advertised", () => {
+		const rows = decodeGrokbotAvailableModelsResponse({
+			models: [
+				{
+					name: "dual-selector-model",
+					clientDisplayName: "Dual Selector",
+					supportsThinking: true,
+					parameterDefinitions: [{ id: "effort" }],
+					variants: [
+						{
+							legacySlug: "dual-selector-legacy",
+							variantStringRepresentation: "dual-selector-model::high",
+							displayName: "High dual",
+							parameterValues: [{ id: "effort", value: "high" }],
+						},
+					],
+				},
+			],
+		});
+		expect(rows).not.toBeNull();
+		const models = normalizeGrokbotAvailableModels(rows!);
+		const legacy = models.find(m => m.id === "dual-selector-legacy");
+		const variant = models.find(m => m.id === "dual-selector-model::high");
+		expect(legacy?.requestModelId).toBe("dual-selector-model");
+		expect(legacy?.sandVariantStringRepresentation).toBeFalsy();
+		expect(legacy?.sandParameterDefaults).toEqual({ effort: "high" });
+		expect(variant?.requestModelId).toBe("dual-selector-model");
+		expect(variant?.sandVariantStringRepresentation).toBe(true);
+		expect(variant?.sandParameterDefaults).toEqual({ effort: "high" });
+		expect(variant?.name).toBe("High dual");
+	});
+
 	test("trims whitespace from AvailableModels model ids", () => {
 		const rows = decodeGrokbotAvailableModelsResponse({
 			models: [

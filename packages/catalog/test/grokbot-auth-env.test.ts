@@ -148,6 +148,7 @@ describe("grokbot secrets dotenv parsing", () => {
 		const previousAgentDir = getAgentDir();
 		const previousNamespace = process.env.GROKBOT_NAMESPACE;
 		const previousClientVersion = process.env.GROKBOT_CLIENT_VERSION;
+		const previousMachine = process.env.GROKBOT_MACHINE_ID;
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-grokbot-pass-"));
 		dirs.push(agentDir);
 		await fs.mkdir(path.join(agentDir, "secrets"), { recursive: true });
@@ -193,12 +194,48 @@ describe("grokbot secrets dotenv parsing", () => {
 				clientVersion: "0.30.0",
 			});
 			expect(options.cacheProviderId).toBe(withPassThrough);
+
+			// Discovery must use the same identity as cache scoping — not ambient
+			// secrets/env that may differ after construction.
+			process.env.GROKBOT_MACHINE_ID = "machine";
+			process.env.GROKBOT_NAMESPACE = "lab";
+			process.env.GROKBOT_CLIENT_VERSION = "0.30.0-lab";
+			const seen: Array<Record<string, string>> = [];
+			const fetchImpl = Object.assign(
+				async (_url: string | URL | Request, init?: RequestInit) => {
+					seen.push((init?.headers ?? {}) as Record<string, string>);
+					if (String(_url).includes("inference-credential")) {
+						return new Response(JSON.stringify({ accessToken: "tok", expiresAtMs: Date.now() + 600_000 }), {
+							status: 200,
+							headers: { "content-type": "application/json" },
+						});
+					}
+					return new Response(JSON.stringify({ models: [] }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				},
+				{ preconnect: fetch.preconnect },
+			) as typeof fetch;
+			const manager = grokbotModelManagerOptions({
+				apiKey: "renewer",
+				namespace: "prod",
+				clientVersion: "0.30.0",
+				fetch: fetchImpl,
+			});
+			expect(await manager.fetchDynamicModels?.()).not.toBeNull();
+			expect(seen.length).toBeGreaterThanOrEqual(2);
+			expect(seen.every(h => h["x-sand-box-namespace"] === "prod")).toBe(true);
+			expect(seen.every(h => h["x-cursor-client-version"] === "0.30.0")).toBe(true);
+			expect(seen.some(h => h["x-sand-box-namespace"] === "lab")).toBe(false);
 		} finally {
 			setAgentDir(previousAgentDir);
 			if (previousNamespace === undefined) delete process.env.GROKBOT_NAMESPACE;
 			else process.env.GROKBOT_NAMESPACE = previousNamespace;
 			if (previousClientVersion === undefined) delete process.env.GROKBOT_CLIENT_VERSION;
 			else process.env.GROKBOT_CLIENT_VERSION = previousClientVersion;
+			if (previousMachine === undefined) delete process.env.GROKBOT_MACHINE_ID;
+			else process.env.GROKBOT_MACHINE_ID = previousMachine;
 		}
 	});
 	test("file-only renewal advertises auth via authenticated sentinel, not the secret", async () => {

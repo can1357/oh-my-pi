@@ -450,8 +450,13 @@ async function main() {
 		}
 		selected = resolved.selected;
 	} else {
+		// KDL owns sand-tools-wire — raw discovery specs leave it unset.
+		// buildModel() before router selection so parent-chat/automation gate.
 		selected = selectGrokbotMatrixIds(
-			specs.map(s => ({ id: s.id, sandToolsWire: s.sandToolsWire })),
+			specs.map(s => {
+				const model = buildModel(s);
+				return { id: model.id, sandToolsWire: model.sandToolsWire };
+			}),
 			args.slice,
 		);
 	}

@@ -159,7 +159,7 @@ async function sandProbe({ id, sandParameterIds, effort, tools }) {
 		body: frameConnectProto(encodeInferenceStreamRequest(body)),
 	});
 	const result = parseFrames(Buffer.from(await res.arrayBuffer()));
-	const hasToken = result.texts.includes(TOKEN) || result.texts.toLowerCase().includes("pong");
+	const hasToken = result.texts.includes(TOKEN);
 	return { id, tools: Boolean(tools), ...result, hasToken, pass: result.ok && hasToken };
 }
 

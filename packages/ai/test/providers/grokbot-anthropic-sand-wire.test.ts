@@ -556,6 +556,50 @@ describe("product wire helpers", () => {
 			},
 		});
 	});
+
+	test("keeps historical edit when write owns the Write sand slot", () => {
+		const tools = [
+			{ name: "edit", description: "patch", parameters: { type: "object", properties: {} } },
+			{ name: "write", description: "create", parameters: { type: "object", properties: {} } },
+		];
+		const rewritten = rewriteInferenceMessagesForProductWire(
+			[
+				{
+					role: 2,
+					toolCalls: [
+						{ toolCallId: "c1", toolName: "edit", args: { path: "c.ts" } },
+						{ toolCallId: "c2", toolName: "write", args: { path: "b.ts", content: "x" } },
+					],
+				},
+				{
+					role: 3,
+					toolContent: {
+						parts: [
+							{ toolCallId: "c1", toolName: "edit", result: "patched" },
+							{ toolCallId: "c2", toolName: "write", result: "wrote" },
+						],
+					},
+				},
+			],
+			tools as never,
+		);
+		expect(rewritten[0]).toEqual({
+			role: 2,
+			toolCalls: [
+				{ toolCallId: "c1", toolName: "edit", args: { path: "c.ts" } },
+				{ toolCallId: "c2", toolName: "Write", args: { path: "b.ts", content: "x" } },
+			],
+		});
+		expect(rewritten[1]).toEqual({
+			role: 3,
+			toolContent: {
+				parts: [
+					{ toolCallId: "c1", toolName: "edit", result: "patched" },
+					{ toolCallId: "c2", toolName: "Write", result: "wrote" },
+				],
+			},
+		});
+	});
 });
 
 describe("grokbot proto harness fields", () => {

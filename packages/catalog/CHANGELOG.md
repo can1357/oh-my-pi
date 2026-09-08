@@ -13,6 +13,9 @@
 
 ### Fixed
 
+- Grok Bot token renew failure logs only the HTTP status (never the response body, which may echo the renewer credential).
+- Grok Bot AvailableModels emits both `legacySlug` and `variantStringRepresentation` selectors when a variant advertises both.
+- Grok Bot model-manager discovery uses the same namespace/client-version identity as model-cache scoping.
 - Grok Bot AvailableModels remints and retries once after HTTP 401 instead of failing the current refresh on a revoked cached JWT.
 - Fixed Grok Bot `sand-default` reasoning capability to be owned by catalog KDL instead of discovery id compares, and excluded host-secret file credentials from env-only auth-broker migration.
 - Grok Bot AvailableModels discovery emits separate catalog rows for variant **`legacySlug`** values with `requestModelId` pointing at the canonical model and variant `sandParameterIds`.

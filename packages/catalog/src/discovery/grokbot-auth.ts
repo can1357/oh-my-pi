@@ -340,8 +340,10 @@ export async function mintGrokbotAccessToken(
 		signal,
 	});
 	if (!response.ok) {
-		const body = await response.text().catch(() => "");
-		logger.warn("Grok Bot token renew failed", { status: response.status, body: body.slice(0, 200) });
+		// Do not log the response body — reverse proxies may echo the mint
+		// request `{ credential }` and persist the long-lived renewer.
+		await response.text().catch(() => "");
+		logger.warn("Grok Bot token renew failed", { status: response.status });
 		throw new Error(`Grok Bot token renew failed (HTTP ${response.status})`);
 	}
 	const parsed = (await response.json()) as { accessToken?: unknown; expiresAtMs?: unknown };

@@ -39,6 +39,10 @@ export interface GrokbotModelDiscoveryOptions {
 	fetch?: FetchImpl;
 	/** Caller/model headers (e.g. reverse-proxy API key) for mint + AvailableModels. */
 	headers?: Record<string, string>;
+	/** Override `x-sand-box-namespace` (must match model-cache identity when set). */
+	namespace?: string;
+	/** Override `x-cursor-client-version` (must match model-cache identity when set). */
+	clientVersion?: string;
 }
 
 /**
@@ -60,7 +64,16 @@ export async function fetchGrokbotAvailableModels(
 	const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
 
 	try {
-		const cfg = await loadGrokbotConfig(options.apiKey);
+		const loaded = await loadGrokbotConfig(options.apiKey);
+		const overrideNs = options.namespace?.trim();
+		const overrideVer = options.clientVersion?.trim();
+		// Prefer the same resolved identity used for model-cache scoping so a
+		// catalog fetched under one namespace/version is never stored under another.
+		const cfg = {
+			...loaded,
+			...(overrideNs ? { namespace: overrideNs } : {}),
+			...(overrideVer ? { clientVersion: overrideVer } : {}),
+		};
 		const machineId = cfg.machineId;
 		if (!cfg.renewal || !machineId) {
 			return null;
@@ -201,29 +214,36 @@ function toGrokbotModelSpecs(row: GrokbotAvailableModel, baseUrl: string, id: st
 	for (const variant of row.variants ?? []) {
 		const legacySlug = variant.legacySlug?.trim();
 		const variantString = variant.variantStringRepresentation?.trim();
-		const selector =
-			legacySlug && legacySlug !== id
-				? legacySlug
-				: variantString && variantString !== id
-					? variantString
-					: undefined;
-		if (!selector) continue;
+		// Emit every distinct advertised selector — preferring legacy alone used
+		// to drop variantStringRepresentation when both were present.
+		const selectors: { id: string; isVariantString: boolean }[] = [];
+		if (legacySlug && legacySlug !== id) {
+			selectors.push({ id: legacySlug, isVariantString: false });
+		}
+		if (variantString && variantString !== id && variantString !== legacySlug) {
+			selectors.push({ id: variantString, isVariantString: true });
+		}
+		if (selectors.length === 0) continue;
 		const variantParams = collectVariantParameterIds(variant);
 		const parameterIds = variantParams.length > 0 ? variantParams : base.sandParameterIds;
 		const sandMaxMode =
 			variant.isDefaultMaxConfig === true ? true : variant.isDefaultNonMaxConfig === true ? false : base.sandMaxMode;
-		out.push({
-			...base,
-			id: selector,
-			name: variant.displayName?.trim() || selector,
-			requestModelId: id,
-			sandParameterIds: parameterIds,
-			sandParameterDefaults: collectVariantSandParameterDefaults(variant) ?? base.sandParameterDefaults,
-			sandMaxMode,
-			sandVariantStringRepresentation: !legacySlug && Boolean(variantString),
-			contextWindow: resolveGrokbotContextWindow(row, sandMaxMode === true),
-			aliases: undefined,
-		});
+		const sandParameterDefaults = collectVariantSandParameterDefaults(variant) ?? base.sandParameterDefaults;
+		const contextWindow = resolveGrokbotContextWindow(row, sandMaxMode === true);
+		for (const selector of selectors) {
+			out.push({
+				...base,
+				id: selector.id,
+				name: variant.displayName?.trim() || selector.id,
+				requestModelId: id,
+				sandParameterIds: parameterIds,
+				sandParameterDefaults,
+				sandMaxMode,
+				sandVariantStringRepresentation: selector.isVariantString,
+				contextWindow,
+				aliases: undefined,
+			});
+		}
 	}
 	return out;
 }

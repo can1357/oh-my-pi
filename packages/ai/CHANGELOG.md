@@ -9,6 +9,9 @@
 - Empty/incomplete tool retries clear effort defaults when forcing thinking off
 - `/grokbot` Host status redacts URL userinfo and credential-shaped query params
 - Grok Bot history conversion applies the same outbound credential redaction as other providers (`transformMessages` / `normalizeSystemPrompts`)
+- Grok Bot flushes buffered stream events in content-index order (completed tools before later text)
+- Grok Bot resets SendToUser reconstruction state when each synthetic call completes
+- Grok Bot product-wire history rewrite keeps hashline `edit` when `write` owns the shared Write slot
 - Grok Bot omits `thinking` from streamSimple/completeSimple when effort is unset so discovered `sandParameterDefaults` apply
 - Buffer unlabeled markdown JSON fences until end-of-stream promotion
 - Remint and replay once after a rejected Grok Bot JWT (HTTP 401 / Connect unauthenticated)

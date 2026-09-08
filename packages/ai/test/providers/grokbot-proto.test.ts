@@ -1618,6 +1618,69 @@ describe("grokbot incomplete tool calls", () => {
 		expect(result.content).toEqual([expect.objectContaining({ type: "toolCall", id: "c1", name: "Read" })]);
 	});
 
+	test("flushes completed tools before later buffered text by contentIndex", async () => {
+		// Incomplete tool@0 + text@1 + tool completion must publish toolcall_*@0
+		// before text_*@1 — otherwise ACP sees a sparse/out-of-order partial.
+		mockAuth();
+		const open = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c1", toolName: "Read", args: '{"path":', isComplete: false },
+			}),
+		);
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "later", isFinal: true } }));
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "Read",
+					args: '{"path":"/tmp/x"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(open, text, complete, trailer)) as FetchImpl;
+		const toolsContext: Context = {
+			messages: [{ role: "user", content: "call", timestamp: 1 }],
+			tools: [
+				{
+					name: "Read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" } },
+						required: ["path"],
+					},
+				},
+			],
+		};
+
+		const stream = streamGrokBot(model, toolsContext, { apiKey: "renew", fetch: fetchImpl });
+		const ordered: Array<{ type: string; contentIndex?: number }> = [];
+		for await (const event of stream) {
+			if (
+				event.type === "toolcall_start" ||
+				event.type === "toolcall_end" ||
+				event.type === "text_start" ||
+				event.type === "text_delta" ||
+				event.type === "text_end"
+			) {
+				ordered.push({
+					type: event.type,
+					contentIndex: "contentIndex" in event ? event.contentIndex : undefined,
+				});
+			}
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("toolUse");
+		const firstTool = ordered.findIndex(e => e.type === "toolcall_start");
+		const firstText = ordered.findIndex(e => e.type.startsWith("text_"));
+		expect(firstTool).toBeGreaterThanOrEqual(0);
+		expect(firstText).toBeGreaterThan(firstTool);
+		expect(ordered[firstTool]?.contentIndex).toBe(0);
+		expect(ordered[firstText]?.contentIndex).toBe(1);
+	});
+
 	test("finalizes complete tool calls as toolUse", async () => {
 		mockAuth();
 		const complete = frameConnectProto(
