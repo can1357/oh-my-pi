@@ -64,9 +64,18 @@ describe("safeDiscoverModels", () => {
 		expect(fetchSpy).not.toHaveBeenCalled();
 	});
 
-	it("rejects 10/8, 192.168/16, 169.254/16, 0.0.0.0, localhost, and ::1 (negative)", async () => {
+	it("rejects 10/8, 172.16/12, 192.168/16, 169.254/16, 0.0.0.0, localhost, and ::1 (negative)", async () => {
 		const fetchSpy = forbidFetch();
-		const hosts = ["10.1.2.3", "192.168.0.1", "169.254.1.1", "0.0.0.0", "localhost", "[::1]"];
+		const hosts = ["10.1.2.3", "172.20.0.1", "192.168.0.1", "169.254.1.1", "100.64.0.1", "0.0.0.0", "localhost", "[::1]"];
+		for (const host of hosts) {
+			await expect(safeDiscoverModels(`https://${host}/models`)).rejects.toBeInstanceOf(SafeDiscoveryError);
+		}
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
+	it("rejects IPv6 ULA and link-local discovery hosts (negative)", async () => {
+		const fetchSpy = forbidFetch();
+		const hosts = ["[fd00::1]", "[fe80::1]", "[fc00::1]"];
 		for (const host of hosts) {
 			await expect(safeDiscoverModels(`https://${host}/models`)).rejects.toBeInstanceOf(SafeDiscoveryError);
 		}

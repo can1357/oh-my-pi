@@ -83,6 +83,22 @@
 - Fixed auth-gateway model discovery treating non-2xx responses with array/`data` bodies as successful catalogs.
 - Fixed auth-gateway SSE streams leaking turn reservations when `reader.read()` rejects after the response is returned.
 - Fixed OpenAI Responses file-id compatibility being checked only against the initial route target; fallback targets are revalidated before dispatch.
+- Honour balance rr/weighted strategies on first dispatch, and resolve replaceAll route-refs against the complete incoming definition set.
+- Renew in-flight turn reservations for the lifetime of the SSE stream, defer OpenAI file_id compat until a catalog target binds, and route temporary credential unavailability through the conductor before 401.
+- Reject shared 100.64/10 discovery hosts, gate previous_response_id fallbacks by Responses-compatible APIs, and detect OpenAI file refs in user/assistant messages.
+- Reject RFC1918 172.16/12 discovery hosts, preserve stateful ownership when the primary is missing, recheck OpenAI file_id compat per target, require requestId for probe leases, and reset sibling exhaustion per fallback target.
+- Reject private IPv6 discovery hosts, keep incompatible previous_response_id fallbacks disposition-scoped, and flush metadata-only SSE preludes at EOF.
+- Honor Retry-After blocks on the allow-blocked credential pass by still requiring a probe lease.
+- Let DRR deficit outrank weight in both directions so fair-share debt can repay.
+- Reject ambiguous cross-branch reuse of the same model id so fallback edges stay distinct.
+- Continue past unresolved catalog targets, gate previous_response_id cross-provider fallbacks, and reject non-OK discovery responses.
+
+- Fallback children chain to later siblings; successful terminal SSE settles probes; prelude cap keeps the crossing chunk.
+- Fixed auth-gateway resetting StreamCommitGate between pre-commit attempts, releasing reservations when SSE reads reject, and only settling quota probes on committed streams.
+
+- Fixed auth-gateway nested fallback compilation leaking rules from unreached sibling branches onto earlier targets.
+- Fixed gateway classification treating OpenAI-style `model does not exist` 404s as `request_terminal` instead of `model_unavailable`.
+- Fixed auth-gateway inference error responses omitting `x-request-id` / `request-id` so callers could not look up the matching decision trace.
 
 ### Added
 

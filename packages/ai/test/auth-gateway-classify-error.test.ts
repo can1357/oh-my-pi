@@ -394,3 +394,12 @@ describe("classifyGatewayError model availability", () => {
 		expect(classified.disposition).toBe("model_unavailable");
 	});
 });
+
+	it("classifies OpenAI missing-model 404 wording as model_unavailable", () => {
+		const classified = classifyGatewayError(
+			Object.assign(new Error("The model does not exist or you do not have access to it"), { status: 404 }),
+		);
+		expect(classified.disposition).toBe("model_unavailable");
+		expect(classified.owner).toBe("model");
+	});
+

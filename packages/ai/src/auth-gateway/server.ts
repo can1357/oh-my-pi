@@ -65,7 +65,7 @@ import {
 } from "./http";
 import { decideAttempt, type ExecutionState } from "./route-conductor";
 import { parseRouteDefinition } from "./route-definitions";
-import { type CompiledRoute, type RouteDefinition, RouteRegistry } from "./route-graph";
+import { type CompiledRoute, type RouteDefinition, RouteRegistry, pickInitialRouteTarget } from "./route-graph";
 import {
 	commitGateObservesDownstreamSse,
 	observeSseCommit,
@@ -387,6 +387,12 @@ type FormatErrorFn = (status: number, type: string, message: string) => Response
 
 type AttemptPrep = { type: "key"; apiKey: string } | { type: "retry" } | { type: "respond"; response: Response };
 
+function hashString(value: string): number {
+	let h = 0;
+	for (let i = 0; i < value.length; i++) h = (h * 31 + value.charCodeAt(i)) | 0;
+	return h;
+}
+
 function unknownModelResponse(formatError: FormatErrorFn, modelId: string): Response {
 	return formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
 }
@@ -636,6 +642,8 @@ export function releaseTurnOnStreamEnd(
 				(commitGate.state === "terminated" && commitGate.sawSuccessfulTerminal))
 		) {
 			storage.settleQuotaProbeSuccess(requestId);
+		} else {
+			storage.clearQuotaProbe(requestId);
 		}
 		storage.releaseTurnReservation(requestId);
 	};
@@ -743,16 +751,20 @@ async function handleFormatEndpoint(
 	if (!compiled) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
-	const firstTarget = compiled.targets[0];
+	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
 	if (firstTarget === undefined) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
 	let currentTarget = firstTarget;
-	const initialModel = bootOpts.resolveModel(currentTarget);
-	if (!initialModel) {
-		return unknownModelResponse(route.module.formatError, currentTarget);
+	let model!: Model<Api>;
+	let providerOrigin: string | undefined;
+	{
+		const initial = bootOpts.resolveModel(currentTarget);
+		if (initial) {
+			model = initial;
+			providerOrigin = initial.provider;
+		}
 	}
-	let model: Model<Api> = initialModel;
 	const client = resolveClientIdentity(req.headers);
 
 	// Parse the wire-format request BEFORE resolving the credential so we
@@ -800,8 +812,14 @@ async function handleFormatEndpoint(
 	parsed.options.promptCacheKey ??= sessionId;
 
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
+	const formatError = (status: number, type: string, message: string): Response => {
+		const response = route.module.formatError(status, type, message);
+		const headers = new Headers(response.headers);
+		headers.set("x-request-id", requestId);
+		headers.set("request-id", requestId);
+		return new Response(response.body, { status: response.status, headers });
+	};
 	const commitGate = new StreamCommitGate();
-	const formatError = route.module.formatError;
 	const attemptedTargets = new Set<string>();
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
@@ -862,13 +880,45 @@ async function handleFormatEndpoint(
 		return false;
 	};
 
-	const bindCurrentTarget = (targetId: string): Response | undefined => {
+	const bindCurrentTarget = (targetId: string): Response | undefined | "skipped" => {
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
-			return lastClassified
-				? classifiedError(lastClassified)
-				: formatError(502, "upstream_error", "Upstream request failed");
+			attemptedTargets.add(currentTarget);
+			const classified = classifyGatewayError(
+				Object.assign(new Error(`Model not found: ${currentTarget}`), { status: 404 }),
+			);
+			lastClassified = classified;
+			// Stateful continuations must not cross providers when the original target's
+			// provider cannot be established (unresolved primary leaves providerOrigin unset).
+			if (parsed.options.previousResponseId && providerOrigin === undefined) {
+				return classifiedError(classified);
+			}
+			if (considerFallback(classified)) return "skipped";
+			return classifiedError(classified);
+		}
+		if (parsed.options.previousResponseId) {
+			const originOk =
+				providerOrigin === undefined
+					? false
+					: resolved.provider === providerOrigin;
+			const apiOk =
+				resolved.api === "openai-responses" ||
+				resolved.api === "azure-openai-responses" ||
+				resolved.api === "openai-codex-responses";
+			if (!originOk || !apiOk) {
+				attemptedTargets.add(currentTarget);
+				const skipped = traces.record({
+					requestId,
+					routeId: compiled.id,
+					generation: compiled.generation,
+					selectedTarget: currentTarget,
+					disposition: "skipped",
+					reason: "state_incompatible",
+				});
+				logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+				return "skipped";
+			}
 		}
 		model = resolved;
 		if (targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages, { providerPayload: body })) {
@@ -883,17 +933,51 @@ async function handleFormatEndpoint(
 	};
 
 	const pickTarget = (): Response | undefined => {
-		if (pendingFallback !== undefined) {
-			const targetId = pendingFallback;
-			pendingFallback = undefined;
-			return bindCurrentTarget(targetId);
+		for (;;) {
+			let targetId: string | undefined;
+			if (pendingFallback !== undefined) {
+				targetId = pendingFallback;
+				pendingFallback = undefined;
+			} else {
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+			}
+			if (targetId === undefined) {
+				if (lastClassified) return classifiedError(lastClassified);
+				if (attemptedTargets.size > 0) {
+					return formatError(502, "upstream_error", "Upstream request failed");
+				}
+				return unknownModelResponse(formatError, modelId);
+			}
+			const bound = bindCurrentTarget(targetId);
+			if (bound === "skipped") {
+				// Keep incompatible fallback edges scoped: ask the disposition tree for
+				// the next reachable fallback instead of classification-free global redispatch.
+				if (lastClassified) {
+					const action = decideAttempt({
+						route: compiled,
+						state: conductorExecutionState(
+							compiled,
+							attemptedTargets,
+							attemptedCredentials,
+							retryCount,
+							fallbackCount,
+							currentTarget,
+							siblingsExhausted,
+							"probing",
+						),
+						classification: lastClassified,
+						commitState: "probing",
+					});
+					if (action.type === "fallback_target") {
+						pendingFallback = action.targetModelId;
+						fallbackCount += 1;
+						retryCount += 1;
+					}
+				}
+				continue;
+			}
+			return bound;
 		}
-		const targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
-		if (targetId === undefined) {
-			if (lastClassified) return classifiedError(lastClassified);
-			return unknownModelResponse(formatError, modelId);
-		}
-		return bindCurrentTarget(targetId);
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
@@ -922,6 +1006,25 @@ async function handleFormatEndpoint(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
+			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			// Balance / multi-target routes may have unused siblings without fallback edges.
+			const next = decideAttempt({
+				route: compiled,
+				state: stateNow(),
+				commitState: commitGate.state,
+			});
+			if (next.type === "dispatch") {
+				pendingFallback = next.targetModelId;
+				retryCount += 1;
+				return { type: "retry" };
+			}
 			return {
 				type: "respond",
 				response: formatError(
@@ -1061,6 +1164,12 @@ async function handleFormatEndpoint(
 		if (picked) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return picked;
+		}
+		if (!model) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			return lastClassified
+				? classifiedError(lastClassified)
+				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		const cred = await resolveCredential();
 		if (cred.type === "retry") {
@@ -1209,16 +1318,20 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!compiled) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
-	const firstTarget = compiled.targets[0];
+	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
 	if (firstTarget === undefined) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
 	let currentTarget = firstTarget;
-	const initialModel = bootOpts.resolveModel(currentTarget);
-	if (!initialModel) {
-		return unknownModelResponse(piNative.formatError, currentTarget);
+	let model!: Model<Api>;
+	let providerOrigin: string | undefined;
+	{
+		const initial = bootOpts.resolveModel(currentTarget);
+		if (initial) {
+			model = initial;
+			providerOrigin = initial.provider;
+		}
 	}
-	let model: Model<Api> = initialModel;
 	const client = resolveClientIdentity(req.headers);
 	// Pi-native already parsed `streamOpts.sessionId` (when set by the
 	// client); fall back to the derived key so credential-stickiness lines
@@ -1230,7 +1343,13 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 
 	const traces = bootOpts.decisionTraces ?? new RouteDecisionTraceLog();
 	const commitGate = new StreamCommitGate();
-	const formatError = piNative.formatError;
+	const formatError = (status: number, type: string, message: string): Response => {
+		const response = piNative.formatError(status, type, message);
+		const headers = new Headers(response.headers);
+		headers.set("x-request-id", requestId);
+		headers.set("request-id", requestId);
+		return new Response(response.body, { status: response.status, headers });
+	};
 	const attemptedTargets = new Set<string>();
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
@@ -1291,13 +1410,45 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		return false;
 	};
 
-	const bindCurrentTarget = (targetId: string): Response | undefined => {
+	const bindCurrentTarget = (targetId: string): Response | undefined | "skipped" => {
 		currentTarget = targetId;
 		const resolved = bootOpts.resolveModel(currentTarget);
 		if (!resolved) {
-			return lastClassified
-				? classifiedError(lastClassified)
-				: formatError(502, "upstream_error", "Upstream request failed");
+			attemptedTargets.add(currentTarget);
+			const classified = classifyGatewayError(
+				Object.assign(new Error(`Model not found: ${currentTarget}`), { status: 404 }),
+			);
+			lastClassified = classified;
+			// Stateful continuations must not cross providers when the original target's
+			// provider cannot be established (unresolved primary leaves providerOrigin unset).
+			if (parsed.options.previousResponseId && providerOrigin === undefined) {
+				return classifiedError(classified);
+			}
+			if (considerFallback(classified)) return "skipped";
+			return classifiedError(classified);
+		}
+		if (parsed.options.previousResponseId) {
+			const originOk =
+				providerOrigin === undefined
+					? false
+					: resolved.provider === providerOrigin;
+			const apiOk =
+				resolved.api === "openai-responses" ||
+				resolved.api === "azure-openai-responses" ||
+				resolved.api === "openai-codex-responses";
+			if (!originOk || !apiOk) {
+				attemptedTargets.add(currentTarget);
+				const skipped = traces.record({
+					requestId,
+					routeId: compiled.id,
+					generation: compiled.generation,
+					selectedTarget: currentTarget,
+					disposition: "skipped",
+					reason: "state_incompatible",
+				});
+				logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+				return "skipped";
+			}
 		}
 		model = resolved;
 		if (targetRejectsOpenAIImageFileReferences("pi-native", model, parsed.context.messages)) {
@@ -1312,17 +1463,51 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	};
 
 	const pickTarget = (): Response | undefined => {
-		if (pendingFallback !== undefined) {
-			const targetId = pendingFallback;
-			pendingFallback = undefined;
-			return bindCurrentTarget(targetId);
+		for (;;) {
+			let targetId: string | undefined;
+			if (pendingFallback !== undefined) {
+				targetId = pendingFallback;
+				pendingFallback = undefined;
+			} else {
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+			}
+			if (targetId === undefined) {
+				if (lastClassified) return classifiedError(lastClassified);
+				if (attemptedTargets.size > 0) {
+					return formatError(502, "upstream_error", "Upstream request failed");
+				}
+				return unknownModelResponse(formatError, parsed.modelId);
+			}
+			const bound = bindCurrentTarget(targetId);
+			if (bound === "skipped") {
+				// Keep incompatible fallback edges scoped: ask the disposition tree for
+				// the next reachable fallback instead of classification-free global redispatch.
+				if (lastClassified) {
+					const action = decideAttempt({
+						route: compiled,
+						state: conductorExecutionState(
+							compiled,
+							attemptedTargets,
+							attemptedCredentials,
+							retryCount,
+							fallbackCount,
+							currentTarget,
+							siblingsExhausted,
+							"probing",
+						),
+						classification: lastClassified,
+						commitState: "probing",
+					});
+					if (action.type === "fallback_target") {
+						pendingFallback = action.targetModelId;
+						fallbackCount += 1;
+						retryCount += 1;
+					}
+				}
+				continue;
+			}
+			return bound;
 		}
-		const targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
-		if (targetId === undefined) {
-			if (lastClassified) return classifiedError(lastClassified);
-			return unknownModelResponse(formatError, parsed.modelId);
-		}
-		return bindCurrentTarget(targetId);
 	};
 
 	const resolveCredential = async (): Promise<AttemptPrep> => {
@@ -1351,6 +1536,24 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
+			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			const next = decideAttempt({
+				route: compiled,
+				state: stateNow(),
+				commitState: commitGate.state,
+			});
+			if (next.type === "dispatch") {
+				pendingFallback = next.targetModelId;
+				retryCount += 1;
+				return { type: "retry" };
+			}
 			return {
 				type: "respond",
 				response: formatError(
@@ -1495,6 +1698,12 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 		if (picked) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return picked;
+		}
+		if (!model) {
+			bootOpts.storage.releaseTurnReservation(requestId);
+			return lastClassified
+				? classifiedError(lastClassified)
+				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		const cred = await resolveCredential();
 		if (cred.type === "retry") {

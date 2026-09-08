@@ -80,6 +80,7 @@ export class StreamCommitGate {
 			// whose failure must surface to the client instead of re-dispatching.
 			if (kind === "terminal-success" || kind === "terminal-retryable" || kind === "terminal-failure") {
 				this.#state = "terminated";
+				if (kind === "terminal-success") this.#sawSuccessfulTerminal = true;
 			}
 			return this.#state;
 		}
@@ -90,6 +91,7 @@ export class StreamCommitGate {
 		}
 		if (kind === "terminal-success" || kind === "terminal-retryable" || kind === "terminal-failure") {
 			this.#state = "terminated";
+			if (kind === "terminal-success") this.#sawSuccessfulTerminal = true;
 			return this.#state;
 		}
 		return this.#state;

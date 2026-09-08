@@ -2,7 +2,7 @@ import * as AIError from "../error";
 import type { GatewayErrorDisposition } from "../error/gateway";
 import type { Api, Model } from "../types";
 
-export type TargetNode = { type: "target"; model: string };
+export type TargetNode = { type: "target"; model: string; weight?: number };
 
 export type FallbackNode = {
 	type: "fallback";
@@ -131,6 +131,32 @@ export class RouteRegistry {
 			fallbacks: {},
 		};
 	}
+}
+
+/**
+ * Choose the first dispatch target, honouring a root balance strategy when present.
+ * `salt` rotates `rr` across concurrent requests; `weighted` prefers the highest
+ * child weight (default 1). Conditional `when` / domain grouping remain on `root`
+ * for runtime policy; targets stay the DFS union for failover listing.
+ */
+export function pickInitialRouteTarget(compiled: CompiledRoute, salt = 0): string | undefined {
+	if (compiled.targets.length === 0) return undefined;
+	if (compiled.root.type !== "balance") return compiled.targets[0];
+	if (compiled.root.strategy === "weighted") {
+		let best: string | undefined;
+		let bestWeight = Number.NEGATIVE_INFINITY;
+		for (const child of compiled.root.children) {
+			if (child.type !== "target") continue;
+			const weight = child.weight ?? 1;
+			if (weight > bestWeight) {
+				bestWeight = weight;
+				best = child.model;
+			}
+		}
+		return best ?? compiled.targets[0];
+	}
+	const idx = Math.abs(salt) % compiled.targets.length;
+	return compiled.targets[idx];
 }
 
 function compileDefinition(
