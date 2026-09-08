@@ -203,13 +203,53 @@ const serverSideFallbackBeta = "server-side-fallback-2026-06-01";
 function resolveAnthropicControlBetas(
 	model: Model<"anthropic-messages">,
 	prefixMismatchBehavior: "drop_block" | "error" | undefined,
+	toolsChangedThisTurn: boolean,
 ): string[] {
 	const betas: string[] = [];
 	if (prefixMismatchBehavior) betas.push(THINKING_BINDING_CONTROLS_BETA);
 	if (model.compat.supportsTurnScopedSystem) betas.push(midConversationSystemClearAtBeta);
-	if (model.compat.supportsMidConversationToolChanges) betas.push(midConversationToolChangesBeta);
+	// Advertised only on turns whose tool set differs from the previous turn on
+	// this (baseUrl, modelId) session. The beta declares that tools[] may change
+	// mid-conversation, and the server honors that declaration by treating the
+	// tools block as non-cacheable: it is excluded from the prompt-cache prefix
+	// for the whole request. A session that declares it on every turn therefore
+	// re-uploads its entire tool schema each turn at the cache-write rate rather
+	// than reading it back at the cache-read rate -- an order-of-magnitude
+	// per-token price difference applied to the largest stable region of the
+	// prefix. Gating on real change keeps the capability available on the turns
+	// that need it while leaving the tools block cacheable on the turns that do
+	// not, which for an agent session with a fixed toolset is nearly all of them.
+	// A caller that keeps no session state cannot be diffed against a previous
+	// turn, so it always advertises the beta and keeps full mid-conversation
+	// freedom.
+	if (model.compat.supportsMidConversationToolChanges && toolsChangedThisTurn) {
+		betas.push(midConversationToolChangesBeta);
+	}
 	if (model.compat.supportsPerMessageEffort) betas.push(midConversationOutputConfigBeta);
 	return betas;
+}
+
+/**
+ * Stable JSON signature of the caller-supplied tools[] for comparison across
+ * turns. Captures the identity fields (name + description + parameters) the
+ * wire serializer eventually emits, so semantically-equal tool sets across
+ * turns produce byte-identical signatures. Any tool that isn't JSON-safe
+ * falls back to a per-call unique marker, which reads as a changed tool set and
+ * keeps the beta advertised for that turn.
+ */
+function computeAnthropicToolsSignature(tools: Context["tools"] | undefined): string {
+	if (!tools || tools.length === 0) return "";
+	try {
+		return JSON.stringify(
+			tools.map(t => ({
+				name: t.name,
+				description: t.description ?? "",
+				parameters: t.parameters,
+			})),
+		);
+	} catch {
+		return `__anthropic_toolsig_fallback_${Math.random()}`;
+	}
 }
 
 function buildClaudeCodeBetas({
@@ -444,6 +484,15 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	prefixDroppedThinkingBlocks: Set<string>;
 	/** Conversation-scoped control baselines, isolated from side requests and advisors. */
 	controlStates: Map<string, AnthropicControlState>;
+	/**
+	 * Signature of the `tools[]` schema block observed on the most recent turn
+	 * of this session (JSON-stringified). Used to gate the
+	 * `mid-conversation-tool-changes-*` beta so it is advertised only on turns
+	 * where tools actually differ from the prior turn, preserving Anthropic's
+	 * server-side prompt-cache reuse of the tools block on the common case
+	 * where a coding-agent session's tool set never changes.
+	 */
+	priorToolsSignature: string | undefined;
 };
 
 function createAnthropicControlState(): AnthropicControlState {
@@ -466,12 +515,14 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		replayUnsignedThinkingDisabled: false,
 		prefixDroppedThinkingBlocks: new Set(),
 		controlStates: new Map(),
+		priorToolsSignature: undefined,
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
 			state.prefixDroppedThinkingBlocks.clear();
 			state.controlStates.clear();
+			state.priorToolsSignature = undefined;
 		},
 	};
 	return state;
@@ -2049,7 +2100,19 @@ const streamAnthropicOnce = (
 				model.thinking?.prefixBinding && model.compat.supportsThinkingBindingControls
 					? (options?.anthropicPrefixMismatchBehavior ?? "drop_block")
 					: undefined;
-			const controlBetas = resolveAnthropicControlBetas(model, prefixMismatchBehavior);
+			// Diff the caller's tool set against the previous turn on this
+			// (baseUrl, modelId) session. Recorded before the betas resolve, and
+			// consumed both here and on the Vertex rawPredict path in buildParams.
+			// resolveAnthropicControlBetas explains what the result gates.
+			const currentToolsSignature = computeAnthropicToolsSignature(context.tools);
+			const toolsChangedThisTurn =
+				!providerSessionState ||
+				providerSessionState.priorToolsSignature === undefined ||
+				providerSessionState.priorToolsSignature !== currentToolsSignature;
+			if (providerSessionState) {
+				providerSessionState.priorToolsSignature = currentToolsSignature;
+			}
+			const controlBetas = resolveAnthropicControlBetas(model, prefixMismatchBehavior, toolsChangedThisTurn);
 			const mergedCallerHeaders = mergeHeaders(model.headers, options?.headers);
 			const umansGatewayWebSearchHeader = getUmansWebSearchHeader(model, mergedCallerHeaders);
 			// Keep fallback payloads aligned with the top-level Vertex effort gate:
@@ -2195,6 +2258,7 @@ const streamAnthropicOnce = (
 					dropAllThinking,
 					droppedThinkingBlocks: providerSessionState?.prefixDroppedThinkingBlocks,
 					providerSessionState,
+					toolsChangedThisTurn,
 					fallbacks,
 				});
 				if (disableStrictTools) {
@@ -3879,6 +3943,15 @@ type AnthropicParamBuildOptions = {
 	dropAllThinking: boolean;
 	droppedThinkingBlocks?: ReadonlySet<string>;
 	providerSessionState?: AnthropicProviderSessionState;
+	/**
+	 * Whether the caller's tool set differs from the prior turn on this
+	 * (baseUrl, modelId) session. Gates the
+	 * `mid-conversation-tool-changes-*` beta on the Vertex rawPredict path,
+	 * which places the beta in the request body's `anthropic_beta` field
+	 * instead of the `anthropic-beta` HTTP header.
+	 * Computed once per turn at the upstream call site and threaded here.
+	 */
+	toolsChangedThisTurn: boolean;
 	/** Sanitized server-side fallback entries; defaults to `options?.fallbacks` when omitted. */
 	fallbacks?: AnthropicOptions["fallbacks"];
 };
@@ -3899,6 +3972,7 @@ function buildParams(
 		dropAllThinking,
 		droppedThinkingBlocks,
 		providerSessionState,
+		toolsChangedThisTurn,
 		fallbacks = options?.fallbacks,
 	} = buildOptions;
 	// A session-scoped auto-demote (learned from a live signing 400) clones the
@@ -4059,7 +4133,7 @@ function buildParams(
 	const maxOutputTokens = isOAuthToken ? Math.min(CLAUDE_CODE_MAX_OUTPUT_TOKENS, modelMaxTokens) : modelMaxTokens;
 
 	const vertexControlBetas = isVertexRawPredictUrl(model.baseUrl)
-		? resolveAnthropicControlBetas(model, prefixMismatchBehavior)
+		? resolveAnthropicControlBetas(model, prefixMismatchBehavior, toolsChangedThisTurn)
 		: [];
 
 	// Build params in the canonical field order: model → messages → system → tools →

@@ -440,3 +440,128 @@ describe("MiniMax Anthropic adaptive thinking", () => {
 		expect(payload.output_config?.effort).toBeUndefined();
 	});
 });
+
+/**
+ * The Vertex rawPredict endpoint carries betas in the request body
+ * (`anthropic_beta`) rather than the `anthropic-beta` HTTP header, so it is
+ * the one transport where `capturePayload` can observe the beta list directly.
+ */
+function makeVertexRawPredictModel(id: string): Model<"anthropic-messages"> {
+	return buildModel({
+		id,
+		name: id,
+		api: "anthropic-messages",
+		provider: "google-vertex",
+		baseUrl: `https://aiplatform.googleapis.com/v1/projects/p/locations/global/publishers/anthropic/models/${id}:streamRawPredict`,
+		reasoning: true,
+		input: ["text", "image"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 128_000,
+	});
+}
+
+const MID_CONVERSATION_TOOL_CHANGES_BETA = "mid-conversation-tool-changes-2026-07-01";
+
+describe("mid-conversation tool-changes beta gating", () => {
+	const readTool = { name: "read", description: "Read a file.", parameters: { type: "object", properties: {} } };
+	const grepTool = { name: "grep", description: "Search files.", parameters: { type: "object", properties: {} } };
+
+	function turn(text: string, timestamp: number): Context["messages"] {
+		return [{ role: "user", content: text, timestamp }];
+	}
+
+	it("advertises the beta on the first turn of a session", async () => {
+		const model = makeVertexRawPredictModel("claude-opus-5");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+
+		const payload = await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState },
+			{ ...CONTEXT, messages: turn("start", 1), tools: [readTool] },
+		);
+
+		expect(payload.anthropic_beta).toContain(MID_CONVERSATION_TOOL_CHANGES_BETA);
+	});
+
+	it("drops the beta on a later turn whose tool set is unchanged", async () => {
+		const model = makeVertexRawPredictModel("claude-opus-5");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+
+		await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState },
+			{ ...CONTEXT, messages: turn("start", 1), tools: [readTool] },
+		);
+		const payload = await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState },
+			{ ...CONTEXT, messages: turn("continue", 2), tools: [readTool] },
+		);
+
+		expect(payload.anthropic_beta ?? []).not.toContain(MID_CONVERSATION_TOOL_CHANGES_BETA);
+	});
+
+	it("re-advertises the beta on the turn the tool set actually changes", async () => {
+		const model = makeVertexRawPredictModel("claude-opus-5");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+
+		await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState },
+			{ ...CONTEXT, messages: turn("start", 1), tools: [readTool] },
+		);
+		const payload = await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState },
+			{ ...CONTEXT, messages: turn("continue", 2), tools: [readTool, grepTool] },
+		);
+
+		expect(payload.anthropic_beta).toContain(MID_CONVERSATION_TOOL_CHANGES_BETA);
+	});
+
+	it("keeps every other control beta on an unchanged-tools turn", async () => {
+		const model = makeVertexRawPredictModel("claude-opus-5");
+		const providerSessionState = new Map<string, ProviderSessionState>();
+
+		const first = await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState },
+			{ ...CONTEXT, messages: turn("start", 1), tools: [readTool] },
+		);
+		const second = await capturePayload(
+			model,
+			{ thinkingEnabled: true, providerSessionState },
+			{ ...CONTEXT, messages: turn("continue", 2), tools: [readTool] },
+		);
+
+		const dropped = (first.anthropic_beta ?? []).filter(beta => !(second.anthropic_beta ?? []).includes(beta));
+		expect(dropped).toEqual([MID_CONVERSATION_TOOL_CHANGES_BETA]);
+	});
+
+	it("advertises the beta on every turn when the caller keeps no session state", async () => {
+		const model = makeVertexRawPredictModel("claude-opus-5");
+
+		const first = await capturePayload(
+			model,
+			{ thinkingEnabled: true },
+			{
+				...CONTEXT,
+				messages: turn("start", 1),
+				tools: [readTool],
+			},
+		);
+		const second = await capturePayload(
+			model,
+			{ thinkingEnabled: true },
+			{
+				...CONTEXT,
+				messages: turn("continue", 2),
+				tools: [readTool],
+			},
+		);
+
+		expect(first.anthropic_beta).toContain(MID_CONVERSATION_TOOL_CHANGES_BETA);
+		expect(second.anthropic_beta).toContain(MID_CONVERSATION_TOOL_CHANGES_BETA);
+	});
+});
