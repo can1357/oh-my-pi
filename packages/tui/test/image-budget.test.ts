@@ -695,6 +695,76 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
+	for (const fullscreen of [false, true]) {
+		it(`bounds resident graphics across ${fullscreen ? "fullscreen overlay" : "retired provider"} frames and replays evicted images`, async () => {
+			const term = new VirtualTerminal(40, 12);
+			const resident = new Set<number>();
+			let peak = 0;
+			const realWrite = term.write.bind(term);
+			vi.spyOn(term, "write").mockImplementation(data => {
+				for (const match of data.matchAll(/\x1b_G([^;\x1b]+)(?:;[^\x1b]*)?\x1b\\/g)) {
+					const fields = new Map(match[1]!.split(",").map(field => field.split("=") as [string, string]));
+					const id = Number(fields.get("i"));
+					if (fields.get("a") === "t") resident.add(id);
+					if (fields.get("a") === "d" && fields.get("d") === "I") resident.delete(id);
+					if (fields.get("a") === "d" && fields.get("d") === "A") resident.clear();
+					peak = Math.max(peak, resident.size);
+				}
+				realWrite(data);
+			});
+			const tui = new TUI(term);
+			tui.setMaxInlineImages(2);
+			const images = Array.from({ length: 5 }, (_, i) => makeImage(tui.imageBudget, `retired-${i}`));
+			const ids = images.map((_, i) => tui.imageBudget.acquireId(`retired-${i}`));
+			let current = 0;
+			tui.setFrameProvider({
+				renderFrame: size => ({ viewport: images[current]!.render(size.columns) }),
+				acknowledgeHistory: () => {},
+			});
+			const overlay = fullscreen
+				? tui.showOverlay(
+						{ render: width => images[current]!.render(width), invalidate: () => {} },
+						{ fullscreen: true },
+					)
+				: undefined;
+			try {
+				tui.start();
+				await settle(term);
+				for (current = 1; current < images.length; current++) {
+					tui.requestRender();
+					await settle(term);
+					if (current === 1) {
+						expect([...resident]).toEqual(ids.slice(0, 2));
+						tui.resetDisplay();
+						await settle(term);
+						expect([...resident]).toEqual([ids[1]!]);
+					}
+				}
+				expect([...resident]).toEqual(ids.slice(-2));
+				expect(peak).toBe(2);
+				current = 0;
+				tui.requestRender();
+				await settle(term);
+				expect(resident.has(ids[0]!)).toBe(true);
+				expect(resident.size).toBe(2);
+				tui.setMaxInlineImages(1);
+				await settle(term);
+				expect([...resident]).toEqual([ids[0]!]);
+				tui.resetDisplay();
+				await settle(term);
+				expect([...resident]).toEqual([ids[0]!]);
+				if (overlay) {
+					overlay.hide();
+					await settle(term);
+					expect([...resident]).toEqual([ids[0]!]);
+				}
+			} finally {
+				current = 0;
+				tui.stop();
+			}
+		});
+	}
+
 	it("applies the image budget before emitting the first frame", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];

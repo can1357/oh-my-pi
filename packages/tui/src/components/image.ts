@@ -76,6 +76,9 @@ function nextImageIdSeed(): number {
  * rewritten) plus an explicit graphics purge of the demoted ids. {@link Image}
  * reports display order via {@link observe}; when that reveals a stricter split,
  * the TUI repeats the pass before emitting its terminal frame.
+ * Retired frames no longer observe their images, so the resident store is also
+ * bounded across passes. Evicting retired graphics removes their scrollback
+ * placements; a later replay can render or demote those images again.
  *
  * `cap <= 0` disables budgeting: every image stays a live graphic.
  */
@@ -155,7 +158,7 @@ export class ImageBudget {
 		const next = normalizeCap(cap);
 		if (next === this.#cap) return;
 		this.#cap = next;
-		this.#reconcile(this.#lastTotal);
+		if (!this.#reconcile(this.#lastTotal)) this.#requestRender();
 	}
 
 	/**
@@ -244,7 +247,21 @@ export class ImageBudget {
 		// passes replay this per id (see #stablePass) instead of re-deriving it
 		// from a reversed, tail-only walk.
 		this.#suppressedIds = new Set(this.#passIds.slice(0, this.#onTerminal));
+		if (!retry) this.#limitResidentImages();
 		return retry;
+	}
+
+	#limitResidentImages(): void {
+		if (this.#cap <= 0 || this.#transmitted.size <= this.#cap) return;
+		const liveIds = new Set(this.#passIds.filter(id => !this.#passSuppression.get(id)));
+		for (const id of this.#transmitted) {
+			if (this.#transmitted.size <= this.#cap) break;
+			if (liveIds.has(id)) continue;
+			if (!this.#pendingTransmits.delete(id)) this.#purgeIds.push(id);
+			this.#transmitted.delete(id);
+			this.#deletePlacementState(id);
+			this.#forgetKeyForId(id);
+		}
 	}
 
 	/** Image ids to delete from the terminal this frame; clears the pending set. */
@@ -439,6 +456,9 @@ export class ImageBudget {
 	 */
 	forgetTransmitted(): void {
 		if (this.#transmitted.size === 0 && this.#pendingTransmits.size === 0) return;
+		for (const id of this.#transmitted) {
+			if (!this.#pendingTransmits.has(id)) this.#purgeIds.push(id);
+		}
 		this.#transmitted.clear();
 		this.#pendingTransmits.clear();
 	}

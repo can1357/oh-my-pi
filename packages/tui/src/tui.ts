@@ -2610,12 +2610,12 @@ export class TUI extends Container {
 			buffer += encodeKittyDeleteAllImages();
 			this.#imageBudget.resetPlacementEpochs();
 		}
-		for (const sequence of this.#imageBudget.takeTransmits()) buffer += sequence;
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
 			for (const id of this.#imageBudget.takePurgeIds()) buffer += encodeKittyDeleteImage(id);
 		} else {
 			this.#imageBudget.takePurgeIds();
 		}
+		for (const sequence of this.#imageBudget.takeTransmits()) buffer += sequence;
 		// ED2 MUST precede ED3: tmux implements ED2 by scrolling the live screen
 		// into pane history (so cleared content stays reachable), so erasing
 		// history first would let ED2 refill it with a copy of the old screen —
@@ -2792,6 +2792,7 @@ export class TUI extends Container {
 			// repaint so no stale frame can become visible between writes.
 			if (this.#clearScrollbackOnNextRender) {
 				this.#pendingAltExit = exitSequence;
+				if (TERMINAL.imageProtocol === ImageProtocol.Kitty) this.#imageBudget.forgetTransmitted();
 			} else {
 				this.#noteAltBufferToggle();
 				this.terminal.write(exitSequence);
@@ -3139,7 +3140,11 @@ export class TUI extends Container {
 	#renderAltFrame(width: number, height: number): void {
 		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const base: string[] = new Array(Math.max(0, height)).fill("");
-		let lines = this.#compositeOverlaysIntoWindow(base, width, height);
+		let lines: string[];
+		do {
+			this.#imageBudget.beginPass();
+			lines = this.#compositeOverlaysIntoWindow(base, width, height);
+		} while (this.#imageBudget.endPass());
 		this.#extractCursorMarkers(lines);
 		lines = this.#prepareLinesArray(lines, width);
 		this.#emitAltFrame(lines, width, height);
@@ -3160,6 +3165,10 @@ export class TUI extends Container {
 		// ahead of its paint; without this, an image first shown inside a
 		// fullscreen overlay (e.g. the settings shape preview) would render as
 		// blank placeholder cells until the overlay closed.
+		const purgeIds = this.#imageBudget.takePurgeIds();
+		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
+			for (const id of purgeIds) this.terminal.write(encodeKittyDeleteImage(id));
+		}
 		const imageTransmits = this.#imageBudget.takeTransmits();
 		if (imageTransmits.length > 0) {
 			let transmitBuffer = "";
