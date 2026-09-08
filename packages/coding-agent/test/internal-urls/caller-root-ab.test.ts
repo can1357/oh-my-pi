@@ -274,4 +274,20 @@ describe("internal URL tools resolve against the caller root (A/B same ids)", ()
 		const agent = await tool.execute("grep-agent-c", { pattern: "B OUTPUT", path: "agent://Worker" });
 		expect(getResultText(agent)).toContain("B OUTPUT");
 	});
+
+	it("agent://Worker/<field> pairs the sidecar with the SAME root as the matched Worker.md", async () => {
+		const registry = AgentRegistry.global();
+		await installGlobalMainB(registry, rootB);
+
+		// Root A has no sidecar; root B has one with a different payload. A's
+		// caller must never answer with B's sidecar.
+		await fsp.writeFile(path.join(dir, "a", "main", "Worker.md"), JSON.stringify({ count: 1 }));
+		await fsp.writeFile(path.join(dir, "b", "main", "Worker.md"), JSON.stringify({ count: 2 }));
+		await fsp.writeFile(path.join(dir, "b", "main", "Worker.json"), JSON.stringify({ count: 2 }));
+
+		const router = InternalUrlRouter.instance();
+		const resource = await router.resolve("agent://Worker/count", { sessionFile: rootA });
+		expect(JSON.parse(resource.content)).toBe(1);
+		expect(resource.sourcePath?.endsWith(path.join("a", "main", "Worker.md"))).toBe(true);
+	});
 });

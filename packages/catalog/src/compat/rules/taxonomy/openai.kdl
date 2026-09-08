@@ -1,0 +1,43 @@
+class "openai" {
+	namespace "openai"
+	namespace "openai" bounded=#true
+	prefix "gpt-"
+	prefix "chatgpt-"
+	prefix "codex-"
+	exact "o1"
+	prefix "o1-"
+	prefix "o1."
+	exact "o3"
+	prefix "o3-"
+	prefix "o3."
+	exact "o4"
+	prefix "o4-"
+	prefix "o4."
+
+	family "gpt" glob="gpt-*"
+	family "chatgpt" glob="chatgpt-*"
+	family "o-series" glob="o1"
+	family "o-series" glob="o1-*"
+	family "o-series" glob="o1.*"
+	family "o-series" glob="o3"
+	family "o-series" glob="o3-*"
+	family "o-series" glob="o3.*"
+	family "o-series" glob="o4"
+	family "o-series" glob="o4-*"
+	family "o-series" glob="o4.*"
+	// Codex is a distinct product line even when its identifier is nested under GPT.
+	family "codex" glob="*codex*" priority=10
+	// Spark is its own Codex lane (independent meter, own context budget).
+	family "codex-spark" glob="*codex-spark*" priority=20
+
+	revision prefix="chatgpt-"
+	revision prefix="gpt-" anywhere=#true
+	revision prefix="o"
+	// Bare o-series names denote product lines, not numeric revisions.
+	revision skip-bare "o1" "o3" "o4"
+
+	override id="openai-daybreak-blue-2026-08" model="daybreak-blue-latest" logical="daybreak-blue-latest" class="unknown" revision="5.6.0" expires-at-ms=1799712000000 rationale="OpenAI rolling alias pins only the documented generation; its opaque product name supplies no family evidence" provenance="catalog-oracle:identity/daybreak-aliases"
+	override id="openai-daybreak-red-2026-08" model="daybreak-red-latest" logical="daybreak-red-latest" class="unknown" revision="5.6.0" expires-at-ms=1799712000000 rationale="OpenAI rolling alias pins only the documented generation; its opaque product name supplies no family evidence" provenance="catalog-oracle:identity/daybreak-aliases"
+	override id="openai-gpt-daybreak-blue-2026-08" model="gpt-daybreak-blue-latest" logical="gpt-daybreak-blue-latest" class="openai" revision="5.6.0" expires-at-ms=1799712000000 rationale="OpenAI rolling alias pinned to the generation declared by the source snapshot" provenance="catalog-oracle:identity/daybreak-aliases"
+	override id="openai-gpt-daybreak-red-2026-08" model="gpt-daybreak-red-latest" logical="gpt-daybreak-red-latest" class="openai" revision="5.6.0" expires-at-ms=1799712000000 rationale="OpenAI rolling alias pinned to the generation declared by the source snapshot" provenance="catalog-oracle:identity/daybreak-aliases"
+}

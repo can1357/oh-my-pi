@@ -254,7 +254,7 @@ function classifySourceBraces(source: string): boolean[] {
 	let previousWord = "";
 	let regexAllowed = true;
 
-	for (let index = 0; index < source.length; ) {
+	for (let index = 0; index < source.length;) {
 		const char = source[index];
 		const next = source[index + 1];
 		if (/\s/.test(char)) {
@@ -375,7 +375,7 @@ function collectDisplayBraceNodes(text: string, objectFlags: readonly boolean[])
 	const stack: DisplayBraceNode[] = [];
 	let openingIndex = 0;
 
-	for (let index = 0; index < text.length; ) {
+	for (let index = 0; index < text.length;) {
 		const char = text[index];
 		const next = text[index + 1];
 		if (char === "/" && next === "/") {
@@ -422,7 +422,7 @@ function collectDisplayBraceNodes(text: string, objectFlags: readonly boolean[])
 function collapseDisplayWhitespace(text: string): string | undefined {
 	const output: string[] = [];
 	let pendingSpace = false;
-	for (let index = 0; index < text.length; ) {
+	for (let index = 0; index < text.length;) {
 		const char = text[index];
 		const next = text[index + 1];
 		if (char === "\n" || char === "\r" || /\s/.test(char)) {

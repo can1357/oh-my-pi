@@ -89,6 +89,7 @@ export interface NonMessageTokenSource {
 		};
 	};
 	readonly skills?: readonly Skill[];
+	readonly settings?: { get(key: "skillful"): boolean };
 }
 
 const EMPTY_STRING_PARTS: string[] = [];
@@ -243,7 +244,10 @@ export function computeNonMessageBreakdown(
 	const entry = nonMessageTokenCacheEntry(session, tokenizer);
 	if (entry.breakdown) return entry.breakdown;
 	const tools = session.agent?.state?.tools ?? EMPTY_TOOLS;
-	const skillsTokens = estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools), tokenizer);
+	const skillsTokens =
+		session.settings?.get("skillful") === false
+			? 0
+			: estimateSkillsTokens(renderedSkills(session.skills ?? EMPTY_SKILLS, tools), tokenizer);
 	const toolsTokens = estimateToolSchemaTokens(tools, tokenizer);
 	const systemPromptParts = session.systemPrompt ?? EMPTY_STRING_PARTS;
 	const systemContextTokens = tokenizer.countTokens(Array.from(systemPromptParts.slice(1), part => part ?? ""));

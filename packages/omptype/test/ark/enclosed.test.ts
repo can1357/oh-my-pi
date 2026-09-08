@@ -56,7 +56,6 @@ it("invalid regex", () => {
 
 it("regex exec literal", () => {
 	const T = type("x/^a(b)c$/");
-	// biome-ignore lint/complexity/noBannedTypes: RegexExecArray type parameter
 	const _type: Eq<typeof T, Type<(In: "abc") => Out<RegexExecArray<["abc", "b"], {}, "">>>> = true;
 	expect(_type).toBe(true);
 	expect(T("abc")).toEqual(["abc", "b"]);

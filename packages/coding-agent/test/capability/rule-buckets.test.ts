@@ -18,6 +18,7 @@ function makeRule(partial: Partial<Rule>): Rule {
 		condition: partial.condition,
 		astCondition: partial.astCondition,
 		scope: partial.scope,
+		agents: partial.agents,
 		interruptMode: partial.interruptMode,
 		_source: partial._source ?? source("native"),
 	};
@@ -127,5 +128,95 @@ describe("bucketRules", () => {
 		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" })).toEqual([]);
 		expect(alwaysApplyRules.map(r => r.name)).toEqual([]);
 		expect(rulebookRules.map(r => r.name)).toEqual(["no-foo"]);
+	});
+});
+
+describe("bucketRules agent scoping", () => {
+	it("scopes a scout-only TTSR rule to scout and leaves it inert for main", () => {
+		const rule = makeRule({
+			name: "scout-only",
+			condition: ["FORBIDDEN"],
+			description: "blocks foo",
+			agents: ["scout"],
+		});
+
+		const scoutMgr = new TtsrManager();
+		const { rulebookRules: scoutRulebook, alwaysApplyRules: scoutAlways } = bucketRules([rule], scoutMgr, {
+			agentName: "scout",
+		});
+		expect(scoutMgr.checkDelta("contains FORBIDDEN token", { source: "text" }).map(r => r.name)).toEqual([
+			"scout-only",
+		]);
+		expect(scoutRulebook).toHaveLength(0);
+		expect(scoutAlways).toHaveLength(0);
+
+		const mainMgr = new TtsrManager();
+		const { rulebookRules: mainRulebook, alwaysApplyRules: mainAlways } = bucketRules([rule], mainMgr, {
+			agentName: "main",
+		});
+		expect(mainMgr.hasRules()).toBe(false);
+		expect(mainRulebook).toHaveLength(0);
+		expect(mainAlways).toHaveLength(0);
+	});
+
+	it("`main` in the agents list includes the top-level session", () => {
+		const rule = makeRule({ name: "main-only", condition: ["FORBIDDEN"], agents: ["main"] });
+		const mgr = new TtsrManager();
+		bucketRules([rule], mgr, { agentName: "main" });
+		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" }).map(r => r.name)).toEqual(["main-only"]);
+	});
+
+	it("matches a glob pattern against the agent name", () => {
+		const rule = makeRule({ name: "foreman-only", condition: ["FORBIDDEN"], agents: ["foreman-*"] });
+
+		const alphaMgr = new TtsrManager();
+		bucketRules([rule], alphaMgr, { agentName: "foreman-alpha" });
+		expect(alphaMgr.checkDelta("contains FORBIDDEN token", { source: "text" }).map(r => r.name)).toEqual([
+			"foreman-only",
+		]);
+
+		const foremanMgr = new TtsrManager();
+		bucketRules([rule], foremanMgr, { agentName: "foreman" });
+		expect(foremanMgr.hasRules()).toBe(false);
+	});
+
+	it("a rule with no `agents` field applies to every agent", () => {
+		const rule = makeRule({ name: "everyone", condition: ["FORBIDDEN"] });
+
+		const mainMgr = new TtsrManager();
+		bucketRules([rule], mainMgr, { agentName: "main" });
+		expect(mainMgr.hasRules()).toBe(true);
+
+		const scoutMgr = new TtsrManager();
+		bucketRules([rule], scoutMgr, { agentName: "scout" });
+		expect(scoutMgr.hasRules()).toBe(true);
+	});
+
+	it("gates the always-apply bucket too", () => {
+		const rule = makeRule({ name: "scout-always", alwaysApply: true, agents: ["scout"] });
+
+		const scoutMgr = new TtsrManager();
+		const { alwaysApplyRules: scoutAlways } = bucketRules([rule], scoutMgr, { agentName: "scout" });
+		expect(scoutAlways.map(r => r.name)).toEqual(["scout-always"]);
+
+		const mainMgr = new TtsrManager();
+		const { alwaysApplyRules: mainAlways } = bucketRules([rule], mainMgr, { agentName: "main" });
+		expect(mainAlways).toHaveLength(0);
+	});
+
+	it("bucketRules with no agentName keeps a scoped rule (list/scan contract)", () => {
+		const rule = makeRule({ name: "scout-only", condition: ["FORBIDDEN"], agents: ["scout"] });
+		const mgr = new TtsrManager();
+		const { rulebookRules, alwaysApplyRules } = bucketRules([rule], mgr);
+		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" }).map(r => r.name)).toEqual(["scout-only"]);
+		expect(rulebookRules).toHaveLength(0);
+		expect(alwaysApplyRules).toHaveLength(0);
+	});
+
+	it("trims and lowercases agentName before matching a glob pattern", () => {
+		const rule = makeRule({ name: "scout-only", condition: ["FORBIDDEN"], agents: ["scout"] });
+		const mgr = new TtsrManager();
+		bucketRules([rule], mgr, { agentName: " Scout " });
+		expect(mgr.checkDelta("contains FORBIDDEN token", { source: "text" }).map(r => r.name)).toEqual(["scout-only"]);
 	});
 });

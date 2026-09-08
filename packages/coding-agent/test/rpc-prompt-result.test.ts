@@ -121,6 +121,7 @@ describe("reportLocalOnlyPromptResult", () => {
 			},
 			sendCustomMessage: async (_message: unknown, options?: { triggerTurn?: boolean }) => {
 				sentOptions = options;
+				return true;
 			},
 		} as unknown as AgentSession;
 
@@ -145,9 +146,117 @@ describe("reportLocalOnlyPromptResult", () => {
 			},
 			{ triggerTurn: true },
 		);
+		// markAgentInvokingMessage now fires off the tracked send's resolution (gated on the
+		// boolean result) rather than synchronously, so let it settle.
+		await Promise.resolve();
+		await Promise.resolve();
 
 		expect(markCount).toBe(1);
 		expect(sentOptions).toEqual({ triggerTurn: true });
+	});
+
+	test("does not suppress prompt_result when an aside sendMessage starts no turn (e.g. idle plan-mode fold)", async () => {
+		let extensionActions: ExtensionActions | undefined;
+		const output: object[] = [];
+		const extensionUserMessages = new RpcExtensionUserMessageTracker();
+		const session = {
+			extensionRunner: {
+				initialize: (actions: ExtensionActions) => {
+					extensionActions = actions;
+				},
+				onError: () => {},
+				emit: async () => {},
+			},
+			// Mirrors AgentSession.sendCustomMessage's aside contract: `false` iff no turn started.
+			sendCustomMessage: async () => false,
+		} as unknown as AgentSession;
+
+		await initializeExtensions(session, {
+			reportSendError: (_action, error) => {
+				throw error;
+			},
+			reportRuntimeError: error => {
+				throw error.error;
+			},
+			trackAgentInvokingMessage: task => {
+				extensionUserMessages.trackAgentMessageTask(task);
+			},
+		});
+
+		const trackedPrompt = extensionUserMessages.watchPrompt(() => {
+			if (!extensionActions) throw new Error("extensions not initialized");
+			extensionActions.sendMessage(
+				{ customType: "test", content: "context", display: true, details: "context", attribution: "agent" },
+				{ deliverAs: "aside" },
+			);
+			return Promise.resolve(false);
+		});
+		reportLocalOnlyPromptResult({
+			id: "req_aside_no_turn",
+			prompt: trackedPrompt.prompt,
+			output: frame => output.push(frame),
+			onError: error => {
+				throw error;
+			},
+			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
+			waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
+		});
+		await waitForTrackedPromptHandlers(trackedPrompt);
+
+		// A `false` result means sendCustomMessage provably started no turn — the RPC host must
+		// still get its completion signal instead of waiting forever on agent events that never
+		// arrive.
+		expect(output).toEqual([{ type: "prompt_result", id: "req_aside_no_turn", agentInvoked: false }]);
+	});
+
+	test("suppresses prompt_result when an aside sendMessage starts a turn", async () => {
+		let extensionActions: ExtensionActions | undefined;
+		const output: object[] = [];
+		const extensionUserMessages = new RpcExtensionUserMessageTracker();
+		const session = {
+			extensionRunner: {
+				initialize: (actions: ExtensionActions) => {
+					extensionActions = actions;
+				},
+				onError: () => {},
+				emit: async () => {},
+			},
+			sendCustomMessage: async () => true,
+		} as unknown as AgentSession;
+
+		await initializeExtensions(session, {
+			reportSendError: (_action, error) => {
+				throw error;
+			},
+			reportRuntimeError: error => {
+				throw error.error;
+			},
+			trackAgentInvokingMessage: task => {
+				extensionUserMessages.trackAgentMessageTask(task);
+			},
+		});
+
+		const trackedPrompt = extensionUserMessages.watchPrompt(() => {
+			if (!extensionActions) throw new Error("extensions not initialized");
+			extensionActions.sendMessage(
+				{ customType: "test", content: "context", display: true, details: "context", attribution: "agent" },
+				{ deliverAs: "aside" },
+			);
+			return Promise.resolve(false);
+		});
+		reportLocalOnlyPromptResult({
+			id: "req_aside_turn",
+			prompt: trackedPrompt.prompt,
+			output: frame => output.push(frame),
+			onError: error => {
+				throw error;
+			},
+			hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
+			waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
+		});
+		await waitForTrackedPromptHandlers(trackedPrompt);
+
+		expect(output).toEqual([]);
 	});
 
 	test("suppresses prompt_result when extension sendUserMessage succeeds", async () => {

@@ -26,11 +26,20 @@ export const WORKFLOW_NOTICE: string = renderWorkflowNotice({ taskBatch: true })
 export function renderWorkflowNotice({
 	taskBatch,
 	scoutAvailable,
+	evalTools,
 }: {
 	taskBatch: boolean;
 	scoutAvailable?: boolean;
+	/** Advertise `@tool`-defined tools for subagents (`eval.tools.enabled`). */
+	evalTools?: boolean;
 }): string {
-	return prompt.render(workflowNoticeTemplate, { taskBatch, scoutAvailable: scoutAvailable ?? true }).trim();
+	return prompt
+		.render(workflowNoticeTemplate, {
+			taskBatch,
+			scoutAvailable: scoutAvailable ?? true,
+			evalTools: evalTools ?? true,
+		})
+		.trim();
 }
 
 /**

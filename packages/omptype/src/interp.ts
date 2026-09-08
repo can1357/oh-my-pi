@@ -293,6 +293,7 @@ function visitNode(ir: IR, v: unknown, path: PropertyKey[]): unknown {
 			if (ir.min !== undefined && v.length < ir.min) return fail(path, `at least length ${ir.min}`, v.length);
 			if (ir.max !== undefined && v.length > ir.max) return fail(path, `at most length ${ir.max}`, v.length);
 			const morph = hasMorph(ir.el);
+			// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 			const out = morph ? new Array<unknown>(v.length) : v;
 			let errors: OmpErrors | undefined;
 			for (let index = 0; index < v.length; index++) {

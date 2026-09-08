@@ -440,6 +440,7 @@ describe("auth-gateway openai-chat: encodeStream", () => {
 		const aborted: unknown[] = [];
 		async function* neverEndingEvents() {
 			await new Promise(() => {});
+			yield undefined as never;
 		}
 		const events = neverEndingEvents() as unknown as AssistantMessageEventStream;
 		(events as { result(): Promise<AssistantMessage> }).result = async () => emptyAssistant();
