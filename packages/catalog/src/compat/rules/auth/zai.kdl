@@ -1,0 +1,9 @@
+auth "zai" {
+	name "Z.AI (GLM Coding Plan)"
+	login "api-key" {
+		auth-url "https://z.ai/manage-apikey/apikey-list"
+		instructions "Copy your API key from the dashboard"
+		prompt "Paste your Z.AI API key" placeholder="sk-..."
+		validate "chat-completions" label="Z.AI" base-url="https://api.z.ai/api/coding/paas/v4" model="glm-5.2"
+	}
+}

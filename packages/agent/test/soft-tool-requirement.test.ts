@@ -10,6 +10,8 @@ import type {
 } from "@oh-my-pi/pi-agent-core/types";
 import type { Message, ToolChoice } from "@oh-my-pi/pi-ai";
 import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { createUserMessage } from "./helpers";
 
 function identityConverter(messages: AgentMessage[]): Message[] {
@@ -249,7 +251,7 @@ describe("agentLoop soft tool requirement", () => {
 			responses: [{ content: [leak] }, { content: ["clean retry"] }],
 		});
 		const config: AgentLoopConfig = {
-			model: mock.model,
+			model: buildModel({ ...getBundledModel("openai-codex", "gpt-5.4") }),
 			convertToLlm: identityConverter,
 			getToolChoice: () => queue.shift(),
 		};

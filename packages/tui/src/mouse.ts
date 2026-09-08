@@ -18,7 +18,12 @@ export interface SgrMouseEvent {
 	row: number;
 	/** True for a release report (`m` suffix). */
 	release: boolean;
-	/** Wheel direction: -1 up, 1 down, null when not a wheel event. */
+	/**
+	 * Vertical wheel direction: -1 up, 1 down, null when not a vertical wheel
+	 * event. Horizontal wheel reports (buttons 66/67, the sideways drift of a
+	 * two-finger trackpad scroll) are not a direction: treating them as one
+	 * scrolled the selectors up and back down at the end of a gesture.
+	 */
 	wheel: -1 | 1 | null;
 	/** True when the pointer moved (hover or drag) rather than clicked. */
 	motion: boolean;
@@ -38,7 +43,7 @@ export function parseSgrMouse(data: string): SgrMouseEvent | null {
 	const col = Number(match[2]) - 1;
 	const row = Number(match[3]) - 1;
 	const release = match[4] === "m";
-	const wheel = button & 64 ? ((button & 1 ? 1 : -1) as 1 | -1) : null;
+	const wheel = button & 64 && !(button & 2) ? ((button & 1 ? 1 : -1) as 1 | -1) : null;
 	const motion = (button & 32) !== 0 && wheel === null;
 	const leftClick = !release && wheel === null && !motion && (button & 3) === 0;
 	return { button, col, row, release, wheel, motion, leftClick };

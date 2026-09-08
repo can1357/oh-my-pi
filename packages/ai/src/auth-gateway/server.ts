@@ -138,7 +138,7 @@ function deriveSessionId(modelId: string, context: Context): string {
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
-	const opts: SimpleStreamOptions = { signal };
+	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
 	// Codex backend rejects every sampling control with
 	// `Unsupported parameter: …` (#3117). Strip the full set for that one
@@ -155,7 +155,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
-	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
+	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
 			typeof options.toolChoice !== "object"
@@ -168,12 +168,20 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
 	if (options.hideThinkingSummary !== undefined) opts.hideThinkingSummary = options.hideThinkingSummary;
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
+	if (options.anthropicPrefixMismatchBehavior !== undefined) {
+		opts.anthropicPrefixMismatchBehavior = options.anthropicPrefixMismatchBehavior;
+	}
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
 	if (options.include !== undefined) opts.include = options.include;
 	// Cursor-specific gateway options
 	if (options.cursorAutoMode !== undefined) opts.cursorAutoMode = options.cursorAutoMode;
 	if (options.cursorToolPassthrough !== undefined) opts.cursorToolPassthrough = options.cursorToolPassthrough;
+	// Upstream renamed the provider-side flag; bridge the gateway spelling so
+	// the passthrough header keeps working end to end.
+	if (options.cursorToolPassthrough !== undefined && opts.cursorExternalToolExecutor === undefined) {
+		opts.cursorExternalToolExecutor = options.cursorToolPassthrough;
+	}
 	// Cursor control headers without a first-class `SimpleStreamOptions` slot
 	// are threaded through `opts.headers` so Cursor's backend receives them
 	// (cursor.ts spreads caller headers into the upstream request).
@@ -193,7 +201,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
-		opts.thinkingBudgets = { ...(opts.thinkingBudgets ?? {}), ...options.thinkingBudgets };
+		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
@@ -202,7 +210,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		// surface the budget.
 		const effort = options.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
-			...(opts.thinkingBudgets ?? {}),
+			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
 		};
 		opts.reasoning ??= effort;
@@ -272,6 +280,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		const retryAfterMs = extractRetryHint(undefined, message);
 		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs,
+			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			apiKey: oldKey,
@@ -485,7 +494,7 @@ async function handleFormatEndpoint(
 	// anything they didn't touch.
 	{
 		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...(parsed.options.headers ?? {}) };
+		parsed.options.headers = { ...captured, ...parsed.options.headers };
 		// Cursor-specific control headers: parse into typed options so they
 		// flow through `buildStreamOptions` into `SimpleStreamOptions`.
 		if (captured["x-cursor-auto-mode"] === "true") {
@@ -503,6 +512,7 @@ async function handleFormatEndpoint(
 		if (captured["x-dev-experiment-overrides"]) {
 			parsed.options.cursorDevExperimentOverrides = captured["x-dev-experiment-overrides"];
 		}
+
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
@@ -734,7 +744,12 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	// trust the client's options (already allow-listed by `parseRequest`) and
 	// only inject server-controlled fields. The codex sampling strip mirrors
 	// `buildStreamOptions` — Codex rejects every one with a 400 (#3117).
-	const streamOpts: SimpleStreamOptions = { ...parsed.options, apiKey, signal: controller.signal };
+	const streamOpts: SimpleStreamOptions = {
+		...parsed.options,
+		apiKey,
+		signal: controller.signal,
+		cursorExternalToolExecutor: true,
+	};
 	streamOpts.apiKey = buildGatewayApiKeyResolver(
 		bootOpts.storage,
 		model,
@@ -757,7 +772,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	// Merge gateway-captured passthrough headers under the client's own
 	// headers — the client's values win when they collide.
 	const captured = captureRequestHeaders(req.headers);
-	streamOpts.headers = { ...captured, ...(streamOpts.headers ?? {}) };
+	streamOpts.headers = { ...captured, ...streamOpts.headers };
 	streamOpts.sessionId ??= sessionId;
 
 	logger.info("auth-gateway request", {

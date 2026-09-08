@@ -1,0 +1,8 @@
+// Provider-wire compat for "abliteration" (api.abliteration.ai): an
+// OpenAI-compatible Responses gateway that never returns encrypted reasoning
+// items and streams long reasoning turns without keepalives.
+
+provider "abliteration" {
+	include-encrypted-reasoning #false
+	stream-idle-timeout-ms 0
+}

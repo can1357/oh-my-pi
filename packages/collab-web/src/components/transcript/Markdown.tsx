@@ -9,7 +9,7 @@ function unescapeHtml(raw: string): string {
 		if (Number.isFinite(value) && value >= 0 && value <= 0x10ffff) {
 			try {
 				return String.fromCodePoint(value);
-			} catch (_) {}
+			} catch {}
 		}
 		return "";
 	};

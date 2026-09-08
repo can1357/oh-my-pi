@@ -11,10 +11,13 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { ToolExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tool-execution";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 beforeAll(async () => {
 	await initTheme();
@@ -42,36 +45,20 @@ function makeStreamingMessage(content: AssistantMessage["content"]): AssistantMe
 
 // Components the controller mounts during a dispatch (pending tool previews).
 // Sealed in afterEach so their spinner intervals never outlive the test file.
-const mountedComponents: { seal?(): void }[] = [];
+const mountedComponents: Component[] = [];
 
 function createFixture(streamingMessage: AssistantMessage) {
-	const markTranscriptBlockFinalized = vi.fn();
-	const streamingComponent = {
-		updateContent: vi.fn(),
-		markTranscriptBlockFinalized,
-	};
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		streamingComponent,
-		streamingMessage,
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
-		noteDisplayableThinkingContent: vi.fn(() => false),
-		chatContainer: { addChild: vi.fn((child: { seal?(): void }) => mountedComponents.push(child)) },
-		toolOutputExpanded: false,
-		settings,
-		session: { getToolByName: () => undefined, hasBuiltInTool: () => true },
-		viewSession: { getToolByName: () => undefined, hasBuiltInTool: () => true },
-		clearTransientSessionUi: () => {},
-		sessionManager: { getCwd: () => process.cwd() },
-	} as unknown as InteractiveModeContext;
+	const streamingComponent = new AssistantMessageComponent();
+	const markTranscriptBlockFinalized = vi.spyOn(streamingComponent, "markTranscriptBlockFinalized");
+	const ctx = createInteractiveModeContext({ streamingComponent, streamingMessage });
+	const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
+	vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(child => {
+		mountedComponents.push(child);
+		addChild(child);
+	});
 
 	const controller = new EventController(ctx);
-	return { controller, markTranscriptBlockFinalized };
+	return { controller, markTranscriptBlockFinalized, ctx };
 }
 
 async function dispatchUpdate(message: AssistantMessage) {
@@ -89,7 +76,9 @@ async function dispatchUpdate(message: AssistantMessage) {
 
 describe("EventController finalizes assistant block when tool-call args stream", () => {
 	afterEach(() => {
-		for (const component of mountedComponents.splice(0)) component.seal?.();
+		for (const component of mountedComponents.splice(0)) {
+			if (component instanceof ToolExecutionComponent) component.seal();
+		}
 		resetSettingsForTest();
 		vi.restoreAllMocks();
 	});
@@ -147,5 +136,43 @@ describe("EventController finalizes assistant block when tool-call args stream",
 		const row = mountedComponents.at(-1) as unknown as { render(width: number): string[] } | undefined;
 		expect(row).toBeDefined();
 		expect(row?.render(120).join("\n")).toContain("2026-01-02 03:04:05");
+	});
+});
+describe("EventController finalizes orphaned post-tool assistant segments", () => {
+	afterEach(() => {
+		for (const component of mountedComponents.splice(0)) {
+			if (component instanceof ToolExecutionComponent) component.seal();
+		}
+		resetSettingsForTest();
+		vi.restoreAllMocks();
+	});
+
+	// Regression: post-tool assistant segments are created unfinalized at
+	// message_update and finalized only at message_end. A dropped message_end
+	// (mid-stream throw, superseded attempt) used to leave the segment active
+	// forever — one unfinalized block at the transcript frontier blocks history
+	// retirement, so every later block degraded to its one-line live allocation.
+	it("finalizes a segment whose message_end never fired at the next message_start", async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		const message = makeStreamingMessage([
+			{ type: "toolCall", id: "tc-seg", name: "write", arguments: { file_path: "/tmp/c.ts", content: "z" } },
+			{ type: "text", text: "post-tool commentary" },
+		]);
+		const { controller, ctx } = createFixture(message);
+		await controller.handleEvent({
+			type: "message_update",
+			message,
+			assistantMessageEvent: undefined as never,
+		} as Extract<AgentSessionEvent, { type: "message_update" }>);
+		const segment = ctx.chatContainer.children.find(child => child instanceof AssistantMessageComponent);
+		expect(segment).toBeInstanceOf(AssistantMessageComponent);
+		expect((segment as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(false);
+
+		await controller.handleEvent({
+			type: "message_start",
+			message: makeStreamingMessage([]),
+		} as Extract<AgentSessionEvent, { type: "message_start" }>);
+		expect((segment as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(true);
+		controller.dispose();
 	});
 });

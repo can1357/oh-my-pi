@@ -33,7 +33,7 @@ const ONESHOT_KIND = "image_attachment_describe";
 
 const NO_VISION_MODEL_NOTE =
 	"[No vision-capable model is configured, so this image could not be described automatically. " +
-	"The image was saved; configure a vision model role (modelRoles.vision) and use the inspect_image tool to analyze it.]";
+	"The image was saved; configure a vision model role (modelRoles.vision) and read the saved image with ?q=<question> to analyze it.]";
 
 const DESCRIPTION_UNAVAILABLE_NOTE =
 	"[Image description unavailable: the vision model returned no usable text. The image was saved for further analysis.]";
@@ -96,7 +96,7 @@ function formatImageBlock(localUrl: string, description: string): string {
 }
 
 /**
- * Resolve a vision-capable model, mirroring the inspect_image priority
+ * Resolve a vision-capable model, mirroring image-question priority
  * (`@vision` → `@default` → active → first image-capable available), but
  * never returning a text-only model.
  */

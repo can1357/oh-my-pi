@@ -209,7 +209,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 			{},
 			{
 				context: { ...context, tools: passthroughTools },
-				options: { cursorToolPassthrough: true },
+				options: { externalToolExecutor: true },
 			},
 		);
 		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
@@ -220,7 +220,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 			{},
 			{
 				context: { ...context, tools: passthroughTools },
-				options: { cursorToolPassthrough: true, toolChoice: "none" },
+				options: { externalToolExecutor: true, toolChoice: "none" },
 			},
 		);
 		expect(sent["x-cursor-agent-allowed-tools"]).toBe("__none__");
@@ -231,7 +231,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 			{},
 			{
 				context: { ...context, tools: passthroughTools },
-				options: { cursorToolPassthrough: true, toolChoice: { type: "tool", name: "read" } },
+				options: { externalToolExecutor: true, toolChoice: { type: "tool", name: "read" } },
 			},
 		);
 		expect(sent["x-cursor-agent-allowed-tools"]).toBe("read");
@@ -243,7 +243,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 			{
 				context: { ...context, tools: passthroughTools },
 				options: {
-					cursorToolPassthrough: true,
+					externalToolExecutor: true,
 					toolChoice: { type: "function", name: "report_delivery" },
 				},
 			},
@@ -258,7 +258,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 			{ ...context, tools: passthroughTools },
 			{
 				apiKey: "test-token",
-				cursorToolPassthrough: true,
+				externalToolExecutor: true,
 				toolChoice: "required",
 			},
 		);
@@ -277,7 +277,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 			{},
 			{
 				context: { ...context, tools: [] },
-				options: { cursorToolPassthrough: true },
+				options: { externalToolExecutor: true },
 			},
 		);
 		expect(sent["x-cursor-agent-allowed-tools"]).toBe("__none__");
@@ -294,7 +294,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 						{ name: "connect_scm", description: "scm", parameters: { type: "object" as const } },
 					],
 				},
-				options: { cursorToolPassthrough: true },
+				options: { externalToolExecutor: true },
 			},
 		);
 		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");
@@ -313,7 +313,7 @@ describe("Cursor passthrough allowed-tools header", () => {
 						{ name: "read_todos", description: "read", parameters: { type: "object" as const } },
 					],
 				},
-				options: { cursorToolPassthrough: true },
+				options: { externalToolExecutor: true },
 			},
 		);
 		expect(sent["x-cursor-agent-allowed-tools"]).toBe("bash,read");

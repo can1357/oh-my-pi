@@ -4,6 +4,7 @@ import * as http2 from "node:http2";
 import type * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
+import { buildModel } from "../src/build";
 // Import from source, not the package specifier: the workspace `node_modules`
 // copy resolves to the primary checkout, not this worktree.
 import { fetchCursorUsableModels } from "../src/discovery/cursor";
@@ -11,7 +12,7 @@ import {
 	GetDefaultModelForCliResponseSchema,
 	GetUsableModelsResponseSchema,
 	ModelDetailsSchema,
-} from "../src/discovery/cursor-gen/agent_pb";
+} from "../src/discovery/cursor-proto";
 import { create, toBinary } from "../src/discovery/protobuf";
 import { resolveProviderModels } from "../src/model-manager";
 import { cursorModelManagerOptions } from "../src/provider-models/special";
@@ -303,7 +304,10 @@ describe("fetchCursorUsableModels", () => {
 
 		const models = await fetchCursorUsableModels({ apiKey: "test-token", baseUrl: nativeBaseUrl, timeoutMs: 1_000 });
 
-		expect(models).toEqual([
+		// The bare-`k3` spellings are rule-owned (`providers/cursor.kdl`
+		// context-window-floor) and reach 1M once the spec is built.
+		const built = models?.map(model => buildModel(model));
+		expect(built).toEqual([
 			expect.objectContaining({ id: "glm-5.10-high", contextWindow: 1_000_000 }),
 			expect.objectContaining({ id: "glm-5.2-max", contextWindow: 1_000_000 }),
 			expect.objectContaining({ id: "glm-6-max", contextWindow: 1_000_000 }),

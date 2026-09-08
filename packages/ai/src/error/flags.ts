@@ -157,7 +157,7 @@ const TRANSIENT_ENVELOPE_PATTERN = /anthropic stream envelope error:/i;
 const TRANSIENT_ENVELOPE_TRUNCATION_PATTERN = /before message_(?:start|stop)/i;
 export const STREAM_READ_ERROR_PATTERN = /stream[_ -]?read[_ -]?error/i;
 export const TRANSIENT_TRANSPORT_PATTERN =
-	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
+	/\b(?:no[_ -]?capacity|(?:high|peak)[ _-]?demand|(?:at|over|insufficient)[ _-]?capacity|capacity[ _-]?(?:exceeded|exhausted)|peak[ _-]?load)\b|overloaded|provider.?returned.?error|rate.?limit|too many requests|auth-gateway\s+5\d{2}(?=[:\s]|$)|\b(?:429|500|502|503|504)\b|service.?unavailable|server.?error|internal.?error|retry your request|network.?error|connection.?error|connection.?refused|unable.?to.?connect\.\s*is the computer able to access the url\?|other side closed|fetch failed|upstream.?connect|upstream.?request.?failed|reset before headers|socket hang up|timed? out|timeout|terminated|retry delay|stream stall|no error details in response|HTTP2(?:StreamReset|RefusedStream|EnhanceYourCalm)|nghttp2_(?:internal_error|refused_stream)|stream closed with error code nghttp2_(?:internal_error|refused_stream)|malformed.?function.?call/i;
 const AUTH_FAILURE_PATTERN =
 	/\b(?:401|403|unauthorized|forbidden|authentication|auth[_ ]?unavailable|no auth available|(?:invalid|no)[_ ]?api[_ ]?key)\b/i;
 const MALFORMED_FUNCTION_CALL_PATTERN = /\bmalformed.?function.?call\b/i;
@@ -212,15 +212,6 @@ const STALE_RESPONSE_ITEM_DETAIL_PATTERN = /not[ _]?found|invalid|expired|stale|
 export const LLAMA_CPP_TOOL_CALL_PARSE_PATTERN =
 	/failed to parse tool call arguments as json|\[json\.exception\.parse_error\.101\]/i;
 
-// Copilot fleet skew: HTTP 400 `model_not_supported` can reject a model that
-// `/models` advertised on the same host when the request lands on a stale
-// replica. `model_not_available_for_integrator` is deliberately excluded:
-// GitHub also uses it for stable per-integrator entitlement denials and includes
-// that integrator's actionable `Available models` list in the response.
-const COPILOT_TRANSIENT_MODEL_CODES: Record<string, true> = {
-	model_not_supported: true,
-};
-const COPILOT_TRANSIENT_MODEL_PATTERN = /model_not_supported/i;
 // Fireworks (and other OpenAI-compat backends) can abort mid-generation with an
 // HTTP 400 `invalid_request_error` whose body reports a model-side numerical
 // fault: "Floating point NaN (not-a-number) is detected in generation". Despite
@@ -501,8 +492,6 @@ function classifyText(
 			kinds |= Flag.StaleResponsesItem;
 		}
 
-		// Copilot's `model_not_supported` fleet-skew rejection is transient.
-		if (statusClean === 400 && COPILOT_TRANSIENT_MODEL_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
 		// Fireworks mid-generation NaN 400 is a model-side decode fault, not a bad
 		// request; a byte-identical replay succeeds, so treat it as transient.
 		if (statusClean === 400 && GENERATION_NAN_PATTERN.test(cleanMessage)) kinds |= Flag.Transient;
@@ -693,24 +682,6 @@ export function isFastModeUnsupported(error: unknown): boolean {
 	return is(classify(error), Flag.FastModeUnsupported);
 }
 
-/**
- * Depth-bounded search for a provider error `code`. SDK error objects keep the
- * parsed response body on `.error`, and Copilot's body is itself
- * `{ error: { code } }`, so the code sits up to two envelopes below the thrown
- * error depending on which SDK produced it.
- */
-function providerErrorCode(error: object): string | undefined {
-	let node: object = error;
-	for (let depth = 0; depth < 3; depth++) {
-		if ("code" in node && typeof node.code === "string") return node.code;
-		if (!("error" in node)) return undefined;
-		const nested: unknown = node.error;
-		if (!nested || typeof nested !== "object") return undefined;
-		node = nested;
-	}
-	return undefined;
-}
-
 const CLINE_PASS_SURFACE_GATE_PATTERN = /only available via cline product surfaces/i;
 
 /**
@@ -721,22 +692,6 @@ const CLINE_PASS_SURFACE_GATE_PATTERN = /only available via cline product surfac
  */
 export function isClinePassSurfaceGateMessage(errorMessage: string | undefined): boolean {
 	return errorMessage !== undefined && CLINE_PASS_SURFACE_GATE_PATTERN.test(errorMessage);
-}
-
-/**
- * GitHub Copilot 400 `model_not_supported` response for a model advertised by
- * `/models` — transient fleet skew, not a malformed request. Reads the
- * structural `code` through the SDK/body envelopes, then falls back to the
- * stringified body both SDK families put in `message`.
- */
-export function isCopilotTransientModelError(error: unknown): boolean {
-	if (!error || typeof error !== "object" || status(error) !== 400) return false;
-	const code = providerErrorCode(error);
-	// `Object.hasOwn`, not a bare index: `code` is provider-controlled, and a
-	// prototype key (`__proto__`, `toString`, …) would otherwise read truthy.
-	if (code !== undefined && Object.hasOwn(COPILOT_TRANSIENT_MODEL_CODES, code)) return true;
-	const message: unknown = "message" in error ? error.message : undefined;
-	return typeof message === "string" && COPILOT_TRANSIENT_MODEL_PATTERN.test(message);
 }
 
 export function classifyMessage(message: {

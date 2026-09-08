@@ -8,6 +8,7 @@
  */
 import type { AutocompleteItem } from "@oh-my-pi/pi-tui";
 import { InternalUrlRouter } from "../internal-urls/router";
+import type { ResolveContext } from "../internal-urls/types";
 
 /** Upper bound on candidates surfaced in the dropdown. */
 const MAX_URL_SUGGESTIONS = 25;
@@ -86,14 +87,20 @@ export function extractInternalUrlContext(textBeforeCursor: string): InternalUrl
 	return { scheme, query: parts[2] ?? "", token };
 }
 
+/** Caller binding shared by tool execution and prompt completion. */
+export type InternalUrlCallerContext = Pick<ResolveContext, "cwd" | "sessionFile" | "sessionId" | "agentRegistry">;
+
 /**
  * Suggestions for the internal-url token ending at the cursor, or `null` when
  * the text is not such a token or no candidate matches the typed query.
+ * The optional lazy caller binding overrides cwd and is read only after
+ * recognizing an internal-URL token.
  */
 export async function getInternalUrlSuggestions(
 	textBeforeCursor: string,
 	cwd?: string,
 	signal?: AbortSignal,
+	getCaller?: () => InternalUrlCallerContext,
 ): Promise<{ items: AutocompleteItem[]; prefix: string } | null> {
 	if (signal?.aborted) return null;
 	const ctx = extractInternalUrlContext(textBeforeCursor);
@@ -101,6 +108,7 @@ export async function getInternalUrlSuggestions(
 
 	const candidates = await InternalUrlRouter.instance().complete(ctx.scheme, ctx.query, {
 		...(cwd === undefined ? {} : { cwd }),
+		...getCaller?.(),
 		...(signal ? { signal } : {}),
 	});
 	if (!candidates || candidates.length === 0) return null;
