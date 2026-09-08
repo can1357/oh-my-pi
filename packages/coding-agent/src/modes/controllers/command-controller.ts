@@ -241,6 +241,12 @@ export class CommandController {
 	}
 
 	async handleShareCommand(): Promise<void> {
+		const confirmed = await this.ctx.showHookConfirm(
+			"Share this session?",
+			"This uploads a copy of the current session. Anyone with the resulting link can read it.",
+		);
+		if (!confirmed) return;
+
 		let customShare: LoadedCustomShare | null;
 		try {
 			customShare = await loadCustomShare();
