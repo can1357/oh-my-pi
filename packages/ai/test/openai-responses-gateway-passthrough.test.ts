@@ -1,5 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import { buildParams } from "@oh-my-pi/pi-ai/providers/openai-responses";
+import { parseRequest } from "@oh-my-pi/pi-ai/providers/openai-responses-server";
 import type { Context } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 
@@ -39,6 +40,20 @@ describe("openai-responses gateway passthrough fields", () => {
 		// Responses API has no `seed` field; Chat Completions seed must be omitted.
 		expect("seed" in params).toBe(false);
 		expect("logit_bias" in params).toBe(false);
+	});
+
+	it("parses native text.format into options.responseFormat", () => {
+		const parsed = parseRequest({
+			model: "gpt-test",
+			input: "hi",
+			text: { format: { type: "json_schema", name: "answer", schema: { type: "object" }, strict: true } },
+		});
+		expect(parsed.options.responseFormat).toEqual({
+			type: "json_schema",
+			name: "answer",
+			schema: { type: "object" },
+			strict: true,
+		});
 	});
 
 	it("does not invent logit_bias on the Responses wire (negative)", () => {
