@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added provider-aware prompt-cache expiry reporting for cache-cold session maintenance.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

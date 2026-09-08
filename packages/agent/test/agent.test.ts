@@ -318,6 +318,30 @@ describe("Agent", () => {
 		expect(calls).toBe(1);
 	});
 
+	it("uses history rewritten by a dequeue hook for an active-loop follow-up", async () => {
+		const mock = createMockModel({ responses: [{ content: ["first"] }, { content: ["second"] }] });
+		const agent = new Agent({ streamFn: mock.stream });
+		agent.replaceMessages([
+			{ role: "user", content: "stale cached prefix", timestamp: Date.now() - 2 },
+			createAssistantMessage([{ type: "text", text: "stale response" }]),
+		]);
+		agent.addBeforeQueuedMessageDequeueHook((_signal, queue) => {
+			if (queue !== "followUp") return;
+			agent.replaceMessages(agent.state.messages.slice(2));
+		});
+		agent.followUp({ role: "user", content: "queued follow-up", timestamp: Date.now() });
+
+		await agent.prompt("active turn");
+
+		expect(mock.calls).toHaveLength(2);
+		expect(mock.calls[1]?.context.messages).not.toContainEqual(
+			expect.objectContaining({ role: "user", content: "stale cached prefix" }),
+		);
+		expect(mock.calls[1]?.context.messages).toContainEqual(
+			expect.objectContaining({ role: "user", content: "queued follow-up" }),
+		);
+	});
+
 	it("continue() leaves queued messages owned when its signal is already aborted", async () => {
 		const agent = new Agent();
 		agent.replaceMessages([createAssistantMessage([{ type: "text", text: "ready" }])]);

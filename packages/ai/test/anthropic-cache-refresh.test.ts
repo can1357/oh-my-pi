@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { streamSimple } from "@oh-my-pi/pi-ai";
+import { getPromptCacheColdAtMs, getPromptCacheExpiryMs, streamSimple } from "@oh-my-pi/pi-ai";
 import type { CacheControlEphemeral, MessageCreateParams } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
 import type { CacheRetention, Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -235,6 +235,33 @@ describe("Anthropic prompt-cache refresh", () => {
 		}
 	});
 
+	it("advances cache expiry only after each keep-alive refresh succeeds", async () => {
+		vi.useFakeTimers();
+		const capture: FetchCapture = { bodies: [], thinkingRefreshAborted: false };
+		const fetch = createFetch(["ordinary-write", "refresh-read", "refresh-read", "refresh-read"], capture);
+		const states = createProviderSessionState();
+
+		await finishRequest(fetch, states);
+		let expiry = getPromptCacheColdAtMs(states);
+		if (expiry === undefined) throw new Error("Expected an armed cache refresh window");
+		expect(expiry).toBe(Date.now() + 5 * 60_000);
+		expect(
+			getPromptCacheExpiryMs({
+				model,
+				cacheTouchedAtMs: Date.now(),
+				cacheRetention: "short",
+				providerSessionState: states,
+			}),
+		).toBe(expiry);
+
+		// A scheduled refresh does not extend the lifetime speculatively. Each
+		// successful refresh moves expiry forward by the actual refresh interval.
+		for (let requestCount = 2; requestCount <= 4; requestCount++) {
+			await advanceToRefresh(capture, requestCount);
+			expiry += CACHE_REFRESH_DELAY_MS;
+			expect(getPromptCacheColdAtMs(states)).toBe(expiry);
+		}
+	});
 	it("resets the idle gap when another normal request starts", async () => {
 		vi.useFakeTimers();
 		const capture: FetchCapture = { bodies: [], thinkingRefreshAborted: false };

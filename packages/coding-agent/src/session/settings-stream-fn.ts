@@ -11,7 +11,7 @@
  * and OpenRouter response-cache hits across advisor calls.
  */
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
-import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
+import { type CacheRetention, type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
 import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
 
@@ -19,6 +19,12 @@ function timeoutSecondsToMs(value: number): number | undefined {
 	if (!Number.isFinite(value) || value < 0) return undefined;
 	if (value === 0) return 0;
 	return Math.max(1, Math.trunc(value * 1000));
+}
+
+/** Effective cache-retention option the settings wrapper sends to the provider. */
+export function resolveConfiguredCacheRetention(settings: Settings): CacheRetention | undefined {
+	const configured = settings.get("providers.cacheRetention");
+	return configured === "auto" ? undefined : configured;
 }
 
 /**
@@ -45,8 +51,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		// PI_CACHE_RETENTION env override keep working; anything else is an
 		// explicit per-request retention (long restores 1h Anthropic TTLs and
 		// implicitly disables the short-entry keep-alive refresh loop).
-		const cacheRetentionSetting = settings.get("providers.cacheRetention");
-		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
+		const cacheRetention = resolveConfiguredCacheRetention(settings);
 		const streamFirstEventTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds"));
 		const streamIdleTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds"));
 		// Server-side fallback (opt-in): when the user enables it AND the

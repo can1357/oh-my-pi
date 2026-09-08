@@ -3,10 +3,12 @@ import * as path from "node:path";
 import { scheduler } from "node:timers/promises";
 import { Agent, type AgentMessage, RESCUE_SHAKE_CONFIG, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Model, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { createMockModel } from "@oh-my-pi/pi-ai/providers/mock";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { COLLAB_PROMPT_MESSAGE_TYPE } from "@oh-my-pi/pi-wire";
 import { AgentSession, type AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
@@ -42,7 +44,10 @@ describe("AgentSession shake", () => {
 		if (!model) throw new Error("Expected built-in anthropic model to exist");
 		apiInfo = { api: model.api, provider: model.provider, model: model.id };
 
-		const agent = new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } });
+		const agent = new Agent({
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: createMockModel({ responses: [{ content: ["Done"] }] }).stream,
+		});
 		session = new AgentSession({
 			agent,
 			sessionManager,
@@ -476,6 +481,133 @@ describe("AgentSession shake", () => {
 			const texts = branchToolResults().map(m => (m.content[0] as { text: string }).text);
 			expect(texts.some(t => t.startsWith("B"))).toBe(false);
 			expect(texts.some(t => t.startsWith("R"))).toBe(true);
+		});
+	});
+
+	describe("cache-expired pre-prompt shake", () => {
+		async function seedConversation(ageMs: number, selectedModel?: Model): Promise<ToolResultMessage> {
+			const model = selectedModel ?? getBundledModel("openai-codex", "gpt-5.6-sol");
+			if (!model) throw new Error("Expected test model to exist");
+			authStorage.setRuntimeApiKey(model.provider, "test-key");
+			apiInfo = { api: model.api, provider: model.provider, model: model.id };
+
+			const completedAt = Date.now() - ageMs;
+			const toolCallId = "call_cold_cache";
+			sessionManager.appendMessage({
+				role: "user",
+				content: [{ type: "text", text: "inspect the large output" }],
+				timestamp: completedAt - 3,
+			});
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "toolCall", id: toolCallId, name: "bash", arguments: { command: "build" } }],
+				...apiInfo,
+				stopReason: "toolUse",
+				usage,
+				timestamp: completedAt - 2,
+			});
+			const result: ToolResultMessage = {
+				role: "toolResult",
+				toolCallId,
+				toolName: "bash",
+				content: [{ type: "text", text: "cold output ".repeat(12_000) }],
+				isError: false,
+				timestamp: completedAt - 1,
+			};
+			sessionManager.appendMessage(result);
+			sessionManager.appendMessage({
+				role: "assistant",
+				content: [{ type: "text", text: `finished\n${"tail ".repeat(20_000)}` }],
+				...apiInfo,
+				stopReason: "stop",
+				usage,
+				timestamp: completedAt,
+			});
+			await sessionManager.rewriteEntries();
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected a persisted session");
+			await session.dispose();
+			sessionManager = await SessionManager.open(sessionFile, tempDir.path());
+			const resumedAgent = new Agent({
+				initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+				streamFn: createMockModel({ responses: [{ content: ["Done"] }, { content: ["Done again"] }] }).stream,
+			});
+			session = new AgentSession({
+				agent: resumedAgent,
+				sessionManager,
+				settings: Settings.isolated({
+					"compaction.enabled": false,
+					"compaction.idleEnabled": true,
+				}),
+				modelRegistry,
+			});
+			session.subscribe(event => events.push(event));
+			session.agent.replaceMessages(session.buildDisplaySessionContext().messages);
+			const resumedResult = session.messages.find(
+				message => message.role === "toolResult" && message.toolCallId === result.toolCallId,
+			);
+			if (resumedResult?.role !== "toolResult") throw new Error("Expected resumed tool result");
+			return resumedResult;
+		}
+
+		it("preserves a warm ChatGPT prefix when the user returns after five minutes", async () => {
+			const result = await seedConversation(5 * 60_000);
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("continue");
+
+			expect(shakeSpy).not.toHaveBeenCalled();
+			expect(result.prunedAt).toBeUndefined();
+		});
+
+		it("shakes an expired ChatGPT prefix before the first resumed user turn", async () => {
+			const result = await seedConversation(60 * 60_000 + 1);
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("continue after reopening");
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(result.prunedAt).toBeGreaterThan(0);
+			const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("");
+			expect(text).toContain("shaken");
+		});
+
+		it("shakes an expired prefix for a model without a provider-specific cache policy", async () => {
+			const result = await seedConversation(5 * 60_000 + 1, createMockModel());
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.prompt("continue on a generic model");
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(result.prunedAt).toBeGreaterThan(0);
+		});
+
+		it("shakes before an expired queued user follow-up resumes", async () => {
+			const result = await seedConversation(60 * 60_000 + 1);
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.followUp("queued after the cache expired");
+			await Bun.sleep(0);
+			await session.waitForIdle();
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(result.prunedAt).toBeGreaterThan(0);
+		});
+
+		it("treats a writable collaboration prompt as a user turn", async () => {
+			const result = await seedConversation(60 * 60_000 + 1);
+			const shakeSpy = vi.spyOn(session, "shake");
+
+			await session.promptCustomMessage({
+				customType: COLLAB_PROMPT_MESSAGE_TYPE,
+				content: "continue from a collaborator",
+				display: true,
+				details: { from: "reviewer" },
+				attribution: "user",
+			});
+
+			expect(shakeSpy).toHaveBeenCalledWith("elide", expect.objectContaining({ config: expect.anything() }));
+			expect(result.prunedAt).toBeGreaterThan(0);
 		});
 	});
 

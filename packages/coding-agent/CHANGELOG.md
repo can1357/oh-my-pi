@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Auto-shake now runs before the first user message after the active model's prompt cache expires, including after reopening a session.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

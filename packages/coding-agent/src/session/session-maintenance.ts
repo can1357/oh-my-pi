@@ -49,7 +49,14 @@ import {
 	readToolSupersedeKey,
 } from "@oh-my-pi/pi-agent-core/compaction/pruning";
 import type { ProtectedToolMatcher } from "@oh-my-pi/pi-agent-core/compaction/tool-protection";
-import type { AssistantMessage, CodexCompactionContext, Message, Model, ProviderSessionState } from "@oh-my-pi/pi-ai";
+import {
+	type AssistantMessage,
+	type CodexCompactionContext,
+	getPromptCacheExpiryMs,
+	type Message,
+	type Model,
+	type ProviderSessionState,
+} from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { modelsAreEqual } from "@oh-my-pi/pi-catalog/models";
@@ -90,6 +97,7 @@ import { getLatestCompactionEntry, getOpenAiRemoteCompactionPayload } from "./se
 import type { CompactionEntry, SessionEntry } from "./session-entries";
 import type { SessionManager } from "./session-manager";
 import type { ShakeMode, ShakeResult } from "./shake-types";
+import { resolveConfiguredCacheRetention } from "./settings-stream-fn";
 import { resolveSpeculationLeadTokens, SPECULATION_LEAD_MIN_TOKENS } from "./speculation-lead";
 
 export type CompactionCheckResult = Readonly<{
@@ -377,6 +385,7 @@ export class SessionMaintenance {
 	/** In-flight or armed background speculative compaction, if any. */
 	#speculation: SpeculationRun | undefined;
 	#skipPostTurnMaintenanceAssistantTimestamp: number | undefined;
+	#lastCacheExpiryShakeKey: string | undefined;
 	/**
 	 * Consecutive no-progress `response.incomplete` (length-stop) recoveries in
 	 * the current continuation loop. Bounded by {@link INCOMPLETE_RECOVERY_MAX_RETRIES};
@@ -1201,6 +1210,45 @@ export class SessionMaintenance {
 	async runIdleCompaction(): Promise<void> {
 		if (this.#host.isStreaming() || this.isCompacting) return;
 		await this.runAutoCompaction("idle", false, true);
+	}
+
+	/**
+	 * Epoch at which the active model's reusable prompt cache goes cold. Live
+	 * provider state wins while this process remains open; otherwise the last
+	 * durable assistant timestamp makes the decision survive session resume.
+	 */
+	promptCacheColdAtMs(): number | undefined {
+		const lastAssistant = this.#host.findLastAssistantMessage();
+		const model = this.#model;
+		if (!lastAssistant || !model || !Number.isFinite(lastAssistant.timestamp)) return undefined;
+		if (
+			lastAssistant.api !== model.api ||
+			lastAssistant.provider !== model.provider ||
+			lastAssistant.model !== model.id
+		) {
+			return lastAssistant.timestamp;
+		}
+
+		return getPromptCacheExpiryMs({
+			model,
+			cacheTouchedAtMs: lastAssistant.timestamp,
+			cacheRetention: resolveConfiguredCacheRetention(this.#host.settings),
+			providerSessionState: this.#host.providerSessionState,
+		});
+	}
+
+	/** Shake a cold reusable prefix immediately before its next user-authored turn. */
+	async runCacheExpiredPrePromptShakeIfNeeded(): Promise<void> {
+		if (!this.#host.settings.get("compaction.idleEnabled")) return;
+		const lastAssistant = this.#host.findLastAssistantMessage();
+		const model = this.#model;
+		if (!lastAssistant || !model) return;
+		const shakeKey = `${lastAssistant.timestamp}:${model.api}:${model.provider}:${model.id}`;
+		if (this.#lastCacheExpiryShakeKey === shakeKey) return;
+		const coldAtMs = this.promptCacheColdAtMs();
+		if (coldAtMs === undefined || Date.now() < coldAtMs) return;
+		this.#lastCacheExpiryShakeKey = shakeKey;
+		await this.#runAutoShake("idle", false, this.#host.promptGeneration(), false, false, undefined, true);
 	}
 
 	/**

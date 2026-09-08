@@ -428,7 +428,9 @@ export class Agent {
 	#asideMessageProvider?: () => AsideMessage[] | Promise<AsideMessage[]>;
 	#telemetry?: AgentLoopConfig["telemetry"];
 	#appendOnlyContext?: AppendOnlyContextManager;
-	#beforeQueuedMessageDequeueHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
+	#beforeQueuedMessageDequeueHooks = new Set<
+		(signal: AbortSignal | undefined, queue: "steering" | "followUp") => Promise<void> | void
+	>();
 	#beforeModelCallHooks = new Set<(signal?: AbortSignal) => Promise<void> | void>();
 
 	/** Buffered Cursor tool results with text length at time of call (for correct ordering) */
@@ -808,8 +810,10 @@ export class Agent {
 	}
 
 	/** Register an independently removable hook that runs before queued messages are consumed. */
-	addBeforeQueuedMessageDequeueHook(hook: (signal?: AbortSignal) => Promise<void> | void): () => void {
-		const registration = (signal?: AbortSignal) => hook(signal);
+	addBeforeQueuedMessageDequeueHook(
+		hook: (signal: AbortSignal | undefined, queue: "steering" | "followUp") => Promise<void> | void,
+	): () => void {
+		const registration = (signal: AbortSignal | undefined, queue: "steering" | "followUp") => hook(signal, queue);
 		this.#beforeQueuedMessageDequeueHooks.add(registration);
 		return () => this.#beforeQueuedMessageDequeueHooks.delete(registration);
 	}
@@ -825,19 +829,19 @@ export class Agent {
 		for (const hook of this.#beforeModelCallHooks) await hook(signal);
 	}
 
-	async #runBeforeQueuedMessageDequeueHooks(signal?: AbortSignal): Promise<void> {
-		for (const hook of this.#beforeQueuedMessageDequeueHooks) await hook(signal);
+	async #runBeforeQueuedMessageDequeueHooks(queue: "steering" | "followUp", signal?: AbortSignal): Promise<void> {
+		for (const hook of this.#beforeQueuedMessageDequeueHooks) await hook(signal, queue);
 	}
 
 	async #dequeueSteeringMessagesAfterHooks(signal?: AbortSignal): Promise<AgentMessage[]> {
 		if (signal?.aborted || this.#steeringQueue.length === 0) return [];
-		await this.#runBeforeQueuedMessageDequeueHooks(signal);
+		await this.#runBeforeQueuedMessageDequeueHooks("steering", signal);
 		return signal?.aborted ? [] : this.#dequeueSteeringMessages();
 	}
 
 	async #dequeueFollowUpMessagesAfterHooks(signal?: AbortSignal): Promise<AgentMessage[]> {
 		if (signal?.aborted || this.#followUpQueue.length === 0) return [];
-		await this.#runBeforeQueuedMessageDequeueHooks(signal);
+		await this.#runBeforeQueuedMessageDequeueHooks("followUp", signal);
 		return signal?.aborted ? [] : this.#dequeueFollowUpMessages();
 	}
 
@@ -1484,12 +1488,20 @@ export class Agent {
 			getReasoning: () => this.#state.thinkingLevel,
 			getDisableReasoning: () => this.#state.disableReasoning,
 			getServiceTier: this.#serviceTierResolver,
+			beforeQueuedMessageDequeue: async (contextMessages, queue, signal) => {
+				if (queue === "steering" && skipInitialSteeringPoll) return;
+				const hasQueuedMessages =
+					queue === "steering" ? this.#steeringQueue.length > 0 : this.#followUpQueue.length > 0;
+				if (!hasQueuedMessages) return;
+				await this.#runBeforeQueuedMessageDequeueHooks(queue, signal);
+				contextMessages.splice(0, contextMessages.length, ...this.#state.messages);
+			},
 			getSteeringMessages: async signal => {
 				if (skipInitialSteeringPoll) {
 					skipInitialSteeringPoll = false;
 					return [];
 				}
-				return this.#dequeueSteeringMessagesAfterHooks(signal);
+				return signal?.aborted ? [] : this.#dequeueSteeringMessages();
 			},
 			hasSteeringMessages: () => {
 				if (this.#steeringQueue.length === 0) {
@@ -1514,7 +1526,7 @@ export class Agent {
 			},
 			waitForSteeringMessages: signal => this.#waitForSteeringMessages(signal),
 			hasIrcInterrupts: this.hasIrcInterrupts,
-			getFollowUpMessages: signal => this.#dequeueFollowUpMessagesAfterHooks(signal),
+			getFollowUpMessages: async signal => (signal?.aborted ? [] : this.#dequeueFollowUpMessages()),
 			getAsideMessages: async () => (await this.#asideMessageProvider?.()) ?? [],
 			onBeforeYield: () => this.#onBeforeYield?.(),
 			telemetry: this.#telemetry,

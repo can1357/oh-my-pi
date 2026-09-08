@@ -242,6 +242,13 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 */
 	getSteeringMessages?: (signal?: AbortSignal) => Promise<AgentMessage[]>;
 
+	/** Lets a host rewrite the active context immediately before a queued batch is consumed. */
+	beforeQueuedMessageDequeue?: (
+		contextMessages: AgentMessage[],
+		queue: "steering" | "followUp",
+		signal?: AbortSignal,
+	) => Promise<void> | void;
+
 	/**
 	 * Peeks whether steering messages are queued, without consuming them.
 	 *
