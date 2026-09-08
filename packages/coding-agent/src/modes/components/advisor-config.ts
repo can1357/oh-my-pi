@@ -22,6 +22,7 @@ import {
 	type Component,
 	Input,
 	type MouseRoutable,
+	replaceTabs,
 	routeSgrMouseInput,
 	type SelectItem,
 	SelectList,
@@ -292,7 +293,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 	#advisorPreview(advisor: WatchdogRosterEntry, bodyWidth: number): string[] {
 		if (advisor.ref !== undefined) {
 			return [
-				theme.bold(advisor.ref),
+				theme.bold(replaceTabs(advisor.ref)),
 				"",
 				`Enabled: ${advisor.enabled === undefined ? "definition default" : advisor.enabled ? "on" : "off"}`,
 				"Definition is managed at its source; this entry only assigns it.",
@@ -377,7 +378,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 	}
 
 	#advisorSummary(advisor: WatchdogRosterEntry): string {
-		if (advisor.ref !== undefined) return `Reference: ${advisor.ref}`;
+		if (advisor.ref !== undefined) return `Reference: ${replaceTabs(advisor.ref)}`;
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
 		return `${model} · ${tools}`;
@@ -387,7 +388,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#ensureRosterVisible();
 		const items: SelectItem[] = this.#doc.advisors.map((advisor, index) => ({
 			value: `advisor:${index}`,
-			label: `${advisor.ref !== undefined && advisor.enabled === undefined ? "?" : advisor.enabled === false ? "○" : "●"} ${advisor.ref ?? advisor.name ?? "(unnamed)"}`,
+			label: `${advisor.ref !== undefined && advisor.enabled === undefined ? "?" : advisor.enabled === false ? "○" : "●"} ${replaceTabs(advisor.ref ?? advisor.name ?? "(unnamed)")}`,
 			description: this.#advisorSummary(advisor),
 		}));
 		items.push({ value: "add", label: "+ Add advisor" });
@@ -467,7 +468,11 @@ export class AdvisorConfigOverlayComponent implements Component {
 			const list = new SelectList(items, items.length, getSelectListTheme());
 			list.onSelect = item => this.#onDetailSelect(index, item.value);
 			list.onCancel = () => this.#showList();
-			this.#setScreen("detail", list, `Reference "${advisor.ref}" · definition edited at source · Esc back`);
+			this.#setScreen(
+				"detail",
+				list,
+				`Reference "${replaceTabs(advisor.ref)}" · definition edited at source · Esc back`,
+			);
 			return;
 		}
 		const modelDescription = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";

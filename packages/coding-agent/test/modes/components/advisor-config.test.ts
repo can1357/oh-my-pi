@@ -49,3 +49,48 @@ it("enables a reference whose shared definition is disabled", async () => {
 		await fs.rm(root, { recursive: true, force: true });
 	}
 });
+
+it("expands reference tabs for display without changing the saved identity", async () => {
+	const auth = new AuthStorage(new SqliteAuthCredentialStore(new Database(":memory:")));
+	try {
+		initTheme();
+		const ref = "qa\tteam/check";
+		const doc: WatchdogConfigDoc = { advisors: [{ ref }] };
+		const saved = Promise.withResolvers<WatchdogConfigDoc>();
+		const editor = new AdvisorConfigOverlayComponent(
+			new TUI(new ProcessTerminal()),
+			{
+				modelRegistry: new ModelRegistry(auth),
+				settings: Settings.isolated(),
+				scopedModels: [],
+				availableToolNames: [],
+			},
+			"project",
+			doc,
+			{
+				loadDoc: async () => doc,
+				save: async (_scope, updated) => saved.resolve(updated),
+				close: () => {},
+				requestRender: () => {},
+				notify: message => {
+					throw new Error(message);
+				},
+			},
+		);
+		const list = editor.render(160).join("\n");
+		expect(list).not.toContain("\t");
+		expect(list).toMatch(/qa +team\/check/);
+		editor.handleInput("\r");
+		const detail = editor.render(160).join("\n");
+		expect(detail).not.toContain("\t");
+		expect(detail).toMatch(/qa +team\/check/);
+		editor.handleInput("\r");
+		editor.handleInput("\x1b");
+		for (let index = 0; index < 4; index++) editor.handleInput("\x1b[B");
+		editor.handleInput("\r");
+		const result = await saved.promise;
+		expect(result.advisors).toEqual([{ ref, enabled: true }]);
+	} finally {
+		auth.close();
+	}
+});
