@@ -1,15 +1,29 @@
 /**
  * Typed accessors over the compiled runtime-behavior vocabulary
  * (`rules/runtime/behavior.kdl`): provider/model heuristics that run before
- * or outside exact bundled-model lookup — responses routing, API routing,
- * quota tiers, plan requirements, model limits, roster exclusions, hosted
- * defaults, and pricing peers.
+ * or outside exact bundled-model lookup — responses and API routing, image
+ * budgets, quota tiers, plan requirements, model limits, roster exclusions,
+ * hosted defaults, and pricing peers.
  */
 import { globMatch } from "./cascade";
 import rules from "./rules.json";
-import type { CompiledMatchList } from "./types";
+import { classifyModel } from "./taxonomy";
+import type { CompiledImageBudgets, CompiledMatchList } from "./types";
 
 const behavior = rules.behavior;
+
+export const imageBudgetPolicy: Readonly<CompiledImageBudgets> | undefined = behavior.imageBudgets;
+
+/** Resolve the stricter declared gateway and model-class image budgets. */
+export function imageBudgetFor(provider: string | undefined, model: string | undefined): number | undefined {
+	const policy = imageBudgetPolicy;
+	if (!policy) return undefined;
+	const gatewayBudget = provider === undefined ? undefined : policy.gateways[provider];
+	const modelClass = model === undefined ? undefined : classifyModel(provider ?? "", model, { lenient: true }).class;
+	const classBudget = modelClass === undefined ? undefined : policy.classes[modelClass];
+	if (gatewayBudget !== undefined && classBudget !== undefined) return Math.min(gatewayBudget, classBudget);
+	return gatewayBudget ?? classBudget ?? policy.fallback;
+}
 
 function matchesList(match: CompiledMatchList, model: string, modelLower: string): boolean {
 	if (match.exact?.some(candidate => candidate === model)) return true;

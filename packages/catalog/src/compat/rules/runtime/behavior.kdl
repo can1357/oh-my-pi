@@ -20,6 +20,24 @@ behavior {
 	// `opencode` provider in the picker.
 	retired-providers "wafer-pass" "wandb" "opencode"
 
+	// Image counts are constrained independently by the serving gateway and the
+	// model class; the stricter declared budget wins.
+	image-budgets fallback=5 {
+		gateway "anthropic" 90
+		gateway "amazon-bedrock" 90
+		gateway "openai" 200
+		gateway "openai-codex" 200
+		gateway "google" 200
+		gateway "google-vertex" 200
+		gateway "google-gemini-cli" 200
+		gateway "openrouter" 90
+		gateway "umans" 10
+		gateway "groq" 5
+		class "anthropic" 90
+		class "openai" 200
+		class "gemini" 200
+	}
+
 	// Discovered Responses/Codex models receive these additional operations.
 	model-operations provider="openai" {
 		exact "o3"

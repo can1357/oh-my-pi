@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Image pruning, inline imaging, and Snapcompact frame sizing now apply model-class image limits to unknown gateways such as Ramp while preserving stricter named-gateway ceilings ([#9064](https://github.com/can1357/oh-my-pi/pull/9064) by [@Thytu](https://github.com/Thytu)).
+
 ## [18.1.15] - 2026-09-08
 
 ### Added

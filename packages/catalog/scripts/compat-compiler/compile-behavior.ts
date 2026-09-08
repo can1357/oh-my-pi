@@ -3,14 +3,15 @@
  *
  * Ports the o2 runtime-behavior grammar (openai-responses-heuristic,
  * model-operations, cursor-effort, cursor-model-parameter, quota-tiers,
- * hosted-default) and adds the pi-only nodes: api-routes, model-limits,
- * exclude-models, plan-requirement, pricing-peer. Every node kind is
- * optional; per-node shapes are strict.
+ * hosted-default) and adds the pi-only nodes: image-budgets, api-routes,
+ * model-limits, exclude-models, plan-requirement, pricing-peer. Every node
+ * kind is optional; per-node shapes are strict.
  */
 import type {
 	CompiledApiRoutes,
 	CompiledBehavior,
 	CompiledExcludeModels,
+	CompiledImageBudgets,
 	CompiledMatchList,
 	CompiledModelLimits,
 	CompiledModelOperations,
@@ -266,6 +267,33 @@ function parsePricingPeer(node: KdlNodeView): CompiledPricingPeer {
 	return rule;
 }
 
+function parseImageBudgets(node: KdlNodeView): CompiledImageBudgets {
+	const children = ensureContainer(node, ["fallback"]);
+	const fallback = propInt(node, "fallback");
+	if (fallback === undefined || fallback <= 0) malformed(node);
+	const budgets: CompiledImageBudgets = { fallback, gateways: {}, classes: {} };
+	for (const child of children) {
+		ensureLeaf(child, []);
+		const [id, budget] = child.args;
+		if (
+			(child.name !== "gateway" && child.name !== "class") ||
+			child.args.length !== 2 ||
+			typeof id !== "string" ||
+			id.length === 0 ||
+			typeof budget !== "number" ||
+			!Number.isSafeInteger(budget) ||
+			budget <= 0
+		) {
+			malformed(child);
+		}
+		const target = child.name === "gateway" ? budgets.gateways : budgets.classes;
+		if (Object.hasOwn(target, id)) malformed(child);
+		target[id] = budget;
+	}
+	if (Object.keys(budgets.gateways).length === 0 || Object.keys(budgets.classes).length === 0) malformed(node);
+	return budgets;
+}
+
 /** Compiles the runtime behavior source (may be absent → empty vocabulary). */
 export function compileBehavior(source: { file: string; text: string } | undefined): CompiledBehavior {
 	const behavior: CompiledBehavior = {
@@ -292,6 +320,10 @@ export function compileBehavior(source: { file: string; text: string } | undefin
 			case "openai-responses-heuristic":
 				if (behavior.openaiResponsesHeuristic) malformed(node);
 				behavior.openaiResponsesHeuristic = parseResponsesHeuristic(node);
+				break;
+			case "image-budgets":
+				if (behavior.imageBudgets) malformed(node);
+				behavior.imageBudgets = parseImageBudgets(node);
 				break;
 			case "model-operations":
 				behavior.modelOperations.push(parseModelOperations(node));

@@ -7,7 +7,7 @@ There are three ownership strata:
 - `taxonomy/*.kdl` defines identity: class membership, product families, revision extraction, reviewed exact corrections, and suffix collapse.
 - `classes/*.kdl` defines model-lineage truths: behavior inherent to a model line, optionally scoped to the providers or request adapters where the census established it.
 - `providers/*.kdl` defines deployment contracts: behavior imposed by a host, plus documented per-model residue that taxonomy cannot express exactly.
-- `runtime/behavior.kdl` defines heuristics used before or outside exact model lookup: responses routing, API routes, quota tiers, plan requirements, model limits, roster exclusions, hosted defaults, pricing peers.
+- `runtime/behavior.kdl` defines heuristics used before or outside exact model lookup: responses routing, API routes, image budgets, quota tiers, plan requirements, model limits, roster exclusions, hosted defaults, pricing peers.
 - `auth/<provider>.kdl` defines the provider's auth contract: display name, env-var fallback, credential storage/format, and the declarative login / refresh flow that `@oh-my-pi/pi-ai`'s registry engines interpret (see [Auth grammar](#auth-grammar)).
 
 Do not move a statistically common provider behavior into a class file, or a lineage truth into a provider file. Absence is not evidence that a capability is stripped. Preserve comments that record census provenance, reviewed exceptions, and why a `models` residue remains.
@@ -238,6 +238,10 @@ behavior {
         exclude-prefix "whisper-"
         exclude-substring "embedding"
     }
+	image-budgets fallback=5 {
+		gateway "groq" 5
+		class "openai" 200
+	}
     model-operations provider="openai" { exact "o3"; prefix "gpt-"; operation "generate_image" }
     cursor-effort family-marker="gpt-" { tier "minimal" "low" "medium" "high" "xhigh" "max" }
     cursor-model-parameter model="composer-2.5" id="fast" value="false"
@@ -260,6 +264,8 @@ behavior {
 ```
 
 Matcher properties on `route` / `exclude-models` / `tier` nodes are `exact=` / `prefix=` / `substring=` / `glob=`, repeatable. `strip-prefix=#true` on a prefix route strips the matched prefix off the wire id. Values are copied verbatim from the TS constants they replaced; runtime accessors live in `src/compat/behavior.ts`.
+
+`image-budgets` declares the positive-integer fallback plus named `gateway` and classified `class` budgets. Runtime resolution applies the smaller budget when both match; an unlisted gateway can therefore inherit a recognized model class without bypassing a stricter host ceiling.
 
 ## Auth grammar
 

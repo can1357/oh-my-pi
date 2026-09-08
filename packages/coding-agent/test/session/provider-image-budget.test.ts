@@ -16,6 +16,19 @@ const UMANS_MODEL = buildModel({
 	maxTokens: 4096,
 });
 
+const RAMP_FABLE_MODEL = buildModel({
+	id: "claude-fable-5-1",
+	name: "claude-fable-5-1",
+	api: "anthropic-messages",
+	provider: "ramp",
+	baseUrl: "https://example.com",
+	reasoning: true,
+	input: ["text", "image"],
+	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+	contextWindow: 1_000_000,
+	maxTokens: 128_000,
+});
+
 function image(data: string): ImageContent {
 	return { type: "image", data, mimeType: "image/png" };
 }
@@ -135,6 +148,23 @@ describe("provider context image budgets", () => {
 		expect(originalUser.providerPayload).toBe(userPayload);
 		expect(originalDeveloper.providerPayload).toBe(developerPayload);
 		expect(imageData(clamped)).toEqual(Array.from({ length: 10 }, (_, index) => `kept-image-${index}`));
+	});
+
+	it("does not clamp a known model family to an unknown gateway's five-image floor", () => {
+		const context: Context = {
+			systemPrompt: [],
+			tools: [],
+			messages: [
+				{
+					role: "user",
+					content: Array.from({ length: 11 }, (_, index) => image(`image-${index}`)),
+					timestamp: 1,
+				},
+			],
+		};
+
+		const clamped = clampProviderContextImages(context, RAMP_FABLE_MODEL);
+		expect(imageData(clamped)).toEqual(Array.from({ length: 11 }, (_, index) => `image-${index}`));
 	});
 
 	it("preserves context identity when the provider cap is not exceeded", () => {

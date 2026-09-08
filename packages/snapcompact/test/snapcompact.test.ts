@@ -1206,12 +1206,12 @@ describe("archive helpers", () => {
 		expect((blocks[2] as { text: string }).text).toContain("tail text");
 	});
 
-	it("provider image budgets stay permissive while unknown providers keep the safe floor", () => {
+	it("uses model-family image budgets for gateways without a named policy", () => {
 		expect(snapcompact.providerImageBudget("openrouter")).toBe(90);
 		expect(snapcompact.providerImageBudget("umans")).toBe(10);
-		// Unknown providers fall to the safe floor.
 		expect(snapcompact.providerImageBudget(undefined)).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerImageBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		// Unknown providers fall to the safe floor.
 		expect(snapcompact.providerImageBudget("openai-codex")).toBe(200);
 		expect(snapcompact.providerFrameBudget("some-new-router")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
 		expect(snapcompact.providerFrameBudget("umans")).toBe(10);
@@ -1221,6 +1221,13 @@ describe("archive helpers", () => {
 		// providerFrameBudget so their lower image floors cannot archive frames
 		// the send path will drop.
 		expect(snapcompact.MAX_FRAMES_DEFAULT).toBeLessThanOrEqual(snapcompact.providerImageBudget("anthropic"));
+		expect(snapcompact.providerImageBudget("ramp", "claude-fable-5-1")).toBe(90);
+		expect(snapcompact.providerImageBudget("ramp", "gpt-6-astra")).toBe(200);
+		expect(snapcompact.providerImageBudget("ramp", "gemini-3.1-pro")).toBe(200);
+		expect(snapcompact.providerImageBudget("ramp", "unknown-model")).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		expect(snapcompact.providerImageBudget("groq", "gpt-6-astra")).toBe(5);
+		expect(snapcompact.providerFrameBudget("ramp", "gpt-6-astra")).toBe(snapcompact.MAX_FRAMES_DEFAULT);
+		expect(snapcompact.providerFrameBudget("umans", "claude-fable-5-1")).toBe(10);
 	});
 });
 

@@ -72,7 +72,7 @@ function clampToolResultMessage(message: ToolResultMessage, state: { remainingDr
 /** Drops oldest transient image blocks so outgoing vision requests fit the active provider's image cap. */
 export function clampProviderContextImages(context: Context, model: Model): Context {
 	if (!model.input.includes("image")) return context;
-	const limit = providerImageBudget(model.provider);
+	const limit = providerImageBudget(model.provider, model.id);
 	const totalImages = countImages(context);
 	if (totalImages <= limit) return context;
 

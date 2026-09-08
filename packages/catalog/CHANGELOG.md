@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added declarative gateway and model-class image budgets for consumers that operate outside exact bundled-model lookup ([#9064](https://github.com/can1357/oh-my-pi/pull/9064) by [@Thytu](https://github.com/Thytu)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

@@ -47,6 +47,7 @@
 
 import type { Api, ImageContent, Message, TextContent } from "@oh-my-pi/pi-ai";
 import { classifyModel, compareRevision, parseRevision } from "@oh-my-pi/pi-catalog/identity";
+import { imageBudgetFor, imageBudgetPolicy } from "@oh-my-pi/pi-catalog/compat/behavior";
 import { renderSnapcompactPng, snapcompactSupportedChars } from "@oh-my-pi/pi-natives";
 import { formatGroupedPaths, prompt } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
@@ -497,36 +498,20 @@ export function frameDataBytes(frames: readonly Pick<Frame, "data">[]): number {
 	return frames.reduce((sum, frame) => sum + frame.data.length, 0);
 }
 
-/**
- * Per-request image-count budgets by provider id. These cap how many images an
- * entire request may carry (archive/system-prompt/tool-result imaging combined).
- * The values are conservative policy caps under the vendor hard limits
- * (Anthropic 100, OpenAI 500, Gemini ~2500); unknown providers fall to a safe
- * floor rather than sending unbounded attachments.
- */
-export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = {
-	anthropic: 90,
-	"amazon-bedrock": 90,
-	openai: 200,
-	"openai-codex": 200,
-	google: 200,
-	"google-vertex": 200,
-	"google-gemini-cli": 200,
-	openrouter: 90,
-	umans: 10,
-};
+/** Named gateway budgets retained as a public Snapcompact policy surface. */
+export const PROVIDER_IMAGE_BUDGETS: Record<string, number> = { ...imageBudgetPolicy?.gateways };
 
-/** Safe floor for unknown providers (strictest mainstream measured: Groq ~5). */
-export const DEFAULT_PROVIDER_IMAGE_BUDGET = 5;
+/** Safe floor when neither the gateway nor model class has a declared budget. */
+export const DEFAULT_PROVIDER_IMAGE_BUDGET = imageBudgetPolicy?.fallback ?? 5;
 
-/** Per-request image budget for `provider`; unknown providers get the floor. */
-export function providerImageBudget(provider: string | undefined): number {
-	return (provider !== undefined ? PROVIDER_IMAGE_BUDGETS[provider] : undefined) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
+/** Named gateway ceiling, then model-class limit, then the safe floor. */
+export function providerImageBudget(provider: string | undefined, modelId?: string): number {
+	return imageBudgetFor(provider, modelId) ?? DEFAULT_PROVIDER_IMAGE_BUDGET;
 }
 
-/** Archive frame cap for `provider`: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
-export function providerFrameBudget(provider: string | undefined): number {
-	return Math.min(providerImageBudget(provider), MAX_FRAMES_DEFAULT);
+/** Archive frame cap: image budget, never above {@link MAX_FRAMES_DEFAULT}. */
+export function providerFrameBudget(provider: string | undefined, modelId?: string): number {
+	return Math.min(providerImageBudget(provider, modelId), MAX_FRAMES_DEFAULT);
 }
 
 /** Key under `CompactionEntry.preserveData` holding the frame archive. */

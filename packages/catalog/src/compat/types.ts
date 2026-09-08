@@ -306,9 +306,17 @@ export interface CompiledPricingPeer {
 	aliases: { model: string; peerId: string }[];
 }
 
+/** Image-count budgets for named gateways and recognized model classes. */
+export interface CompiledImageBudgets {
+	fallback: number;
+	gateways: Record<string, number>;
+	classes: Record<string, number>;
+}
+
 /** Compiled runtime behavior vocabulary (`runtime/behavior.kdl`). */
 export interface CompiledBehavior {
 	openaiResponsesHeuristic?: CompiledResponsesHeuristic;
+	imageBudgets?: CompiledImageBudgets;
 	modelOperations: CompiledModelOperations[];
 	cursorEffort?: CompiledCursorEffort;
 	cursorParameters: CompiledCursorParameter[];

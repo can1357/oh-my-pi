@@ -262,7 +262,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget());
 	});
 
-	it("caps maxFrames at the provider image budget so unknown gateways do not archive frames the send path will drop", async () => {
+	it("uses the model-family frame budget for an unknown gateway", async () => {
 		const model = session.model;
 		if (!model) throw new Error("Expected model");
 		session.agent.setModel({ ...model, provider: "ramp", contextWindow: 500_000 });
@@ -284,7 +284,7 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		await session.compact(undefined, { mode: "snapcompact" });
 
 		expect(compactSpy).toHaveBeenCalledTimes(1);
-		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.DEFAULT_PROVIDER_IMAGE_BUDGET);
+		expect(compactSpy.mock.calls[0]?.[1]?.maxFrames).toBe(snapcompact.maxFramesForDataBudget());
 	});
 
 	it("keeps the frame archive out of the RPC result after persisting it", async () => {

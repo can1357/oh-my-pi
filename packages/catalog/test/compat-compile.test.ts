@@ -81,6 +81,26 @@ describe("compat compiler grammar", () => {
 		).toThrow(/malformed value/);
 	});
 
+	test("image budgets compile gateway and model-class limits", () => {
+		const compiled = compileBehavior({
+			file: "runtime/behavior.kdl",
+			text: [
+				"behavior {",
+				"\timage-budgets fallback=5 {",
+				'\t\tgateway "groq" 5',
+				'\t\tclass "openai" 200',
+				"\t}",
+				"}",
+			].join("\n"),
+		});
+
+		expect(compiled.imageBudgets).toEqual({
+			fallback: 5,
+			gateways: { groq: 5 },
+			classes: { openai: 200 },
+		});
+	});
+
 	test("duplicate axis in one block is rejected", () => {
 		expect(() =>
 			compileCascade([

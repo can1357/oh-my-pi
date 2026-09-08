@@ -15041,6 +15041,26 @@
 				"embedding"
 			]
 		},
+		"imageBudgets": {
+			"fallback": 5,
+			"gateways": {
+				"anthropic": 90,
+				"amazon-bedrock": 90,
+				"openai": 200,
+				"openai-codex": 200,
+				"google": 200,
+				"google-vertex": 200,
+				"google-gemini-cli": 200,
+				"openrouter": 90,
+				"umans": 10,
+				"groq": 5
+			},
+			"classes": {
+				"anthropic": 90,
+				"openai": 200,
+				"gemini": 200
+			}
+		},
 		"cursorEffort": {
 			"familyMarker": "gpt-",
 			"tiers": [

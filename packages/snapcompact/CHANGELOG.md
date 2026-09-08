@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Unknown gateways such as Ramp now use the recognized model class's image limit, while named gateway limits remain hard ceilings, preventing known Claude, GPT, and Gemini models from falling back to five Snapcompact frames ([#9064](https://github.com/can1357/oh-my-pi/pull/9064) by [@Thytu](https://github.com/Thytu)).
+
 ## [18.1.0] - 2026-09-01
 
 ### Added
