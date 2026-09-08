@@ -52,6 +52,7 @@ function host(overrides: Partial<TodoTrackerHost> = {}): {
 		toolRegistry: () => new Map<string, AgentTool>(),
 		planModeEnabled: () => false,
 		consumeLastServedToolChoiceLabel: () => undefined,
+		prewalkWillHandoff: () => false,
 		...overrides,
 	};
 	return { host: built, messages, continuations };

@@ -7,7 +7,7 @@ import {
 import { type OpenAIResponsesOptions, streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import { buildResponsesInput } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { Context, Model, ModelSpec, ProviderSessionState, Tool } from "@oh-my-pi/pi-ai/types";
-import { createOpenAIResponsesHistoryPayload, truncateResponseItemId } from "@oh-my-pi/pi-ai/utils";
+import { createOpenAIResponsesHistoryPayload } from "@oh-my-pi/pi-ai/utils";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { type GeneratedProvider, getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import * as piUtils from "@oh-my-pi/pi-utils";
@@ -1182,12 +1182,57 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
-	it("strips output-only replay metadata while preserving paired call_id values", async () => {
+	it.each([
+		{ callSuffix: "|fc_call", resultSuffix: "" },
+		{ callSuffix: "", resultSuffix: "|fc_result" },
+	])("preserves real output for mixed Responses ids ($callSuffix, $resultSuffix)", ({ callSuffix, resultSuffix }) => {
+		const callId = `googleai-ts1:${"opaque/signature+token=".repeat(12)}`;
+		const context: Context = {
+			messages: [
+				{ role: "user", content: "weather?", timestamp: 0 },
+				{
+					...makeAssistantMessage([]),
+					content: [
+						{
+							type: "toolCall",
+							id: `${callId}${callSuffix}`,
+							name: "get_weather",
+							arguments: { city: "Paris" },
+						},
+					],
+					providerPayload: undefined,
+					stopReason: "toolUse",
+					timestamp: 0,
+				},
+				{
+					role: "toolResult",
+					toolCallId: `${callId}${resultSuffix}`,
+					toolName: "get_weather",
+					content: [{ type: "text", text: "15C" }],
+					isError: false,
+					timestamp: 0,
+				},
+			],
+		};
+		const input = buildResponsesInput({
+			model: getOpenAIReasoningModel("openai", "gpt-5-mini"),
+			context,
+			strictResponsesPairing: true,
+			supportsImageDetailOriginal: true,
+		});
+
+		expect(findResponsesInputItem(input, "function_call")?.call_id).toBe(callId);
+		expect(input.filter(item => item.type === "function_call_output")).toEqual([
+			{ type: "function_call_output", call_id: callId, output: "15C" },
+		]);
+	});
+
+	it("strips output-only replay metadata while echoing opaque call_id values verbatim", async () => {
 		const opaqueReasoningId = `item_${"copilot/reasoning+token=".repeat(8)}`;
 		const opaqueMessageId = `item_${"copilot/message+opaque=".repeat(8)}`;
-		const opaqueCallId = `call_${"copilot/tool-call+opaque/=".repeat(8)}`;
+		const opaqueCallId = `googleai-ts1:${"function-signature.".repeat(12)}`;
 		const opaqueFunctionItemId = `item_${"copilot/function-item+opaque/=".repeat(8)}`;
-		const opaqueCustomCallId = `call_${"copilot/custom-call+opaque/=".repeat(8)}`;
+		const opaqueCustomCallId = `googleai-ts1:${"custom-signature.".repeat(12)}`;
 		const opaqueCustomItemId = `item_${"copilot/custom-item+opaque/=".repeat(8)}`;
 		const replayHistoryItems: Array<Record<string, unknown>> = [
 			{ type: "reasoning", id: opaqueReasoningId, encrypted_content: "enc_opaque", status: "completed" },
@@ -1220,6 +1265,16 @@ describe("OpenAI responses history payload", () => {
 				call_id: opaqueCustomCallId,
 				output: "patch applied",
 			},
+			{
+				type: "compaction",
+				encrypted_content: "encrypted-compaction",
+				status: "completed",
+			},
+			{
+				type: "compaction_summary",
+				summary: "compacted context",
+				status: "completed",
+			},
 			{ type: "item_reference", id: opaqueMessageId },
 		];
 		const context: Context = {
@@ -1237,7 +1292,8 @@ describe("OpenAI responses history payload", () => {
 		const functionCallOutputItem = findResponsesInputItem(payload.input, "function_call_output");
 		const customToolCallItem = findResponsesInputItem(payload.input, "custom_tool_call");
 		const itemReference = findResponsesInputItem(payload.input, "item_reference");
-		const expectedCallId = truncateResponseItemId(opaqueCallId, "call");
+		const compactionItem = findResponsesInputItem(payload.input, "compaction");
+		const compactionSummaryItem = findResponsesInputItem(payload.input, "compaction_summary");
 
 		expect(reasoningItem).toBeDefined();
 		expect(messageItem).toBeDefined();
@@ -1253,17 +1309,20 @@ describe("OpenAI responses history payload", () => {
 		expect(messageItem).not.toHaveProperty("status");
 		expect(functionCallItem).not.toHaveProperty("status");
 		expect(customToolCallItem).not.toHaveProperty("status");
+		expect(compactionItem).not.toHaveProperty("status");
+		expect(compactionSummaryItem).not.toHaveProperty("status");
 		expect(
 			(payload.input ?? []).some(
 				item => item && typeof item === "object" && "id" in (item as Record<string, unknown>),
 			),
 		).toBe(false);
 		expect(reasoningItem?.encrypted_content).toBe("enc_opaque");
+		expect(compactionItem?.encrypted_content).toBe("encrypted-compaction");
+		expect(compactionSummaryItem?.summary).toBe("compacted context");
 		expect(functionCallItem).toBeDefined();
-		expect(functionCallItem!.call_id).toBe(expectedCallId);
-		expect(functionCallOutputItem?.call_id).toBe(expectedCallId);
-		expect(customToolCallItem?.call_id).toBe(truncateResponseItemId(opaqueCustomCallId, "call"));
-		expect((functionCallItem!.call_id as string).length).toBeLessThanOrEqual(64);
+		expect(functionCallItem!.call_id).toBe(opaqueCallId);
+		expect(functionCallOutputItem?.call_id).toBe(opaqueCallId);
+		expect(customToolCallItem?.call_id).toBe(opaqueCustomCallId);
 		expect(containsAssistantOutputText(payload.input, "Sanitized assistant answer")).toBe(true);
 		expect(replayHistoryItems[0]?.id).toBe(opaqueReasoningId);
 		expect(replayHistoryItems[1]?.id).toBe(opaqueMessageId);
@@ -1274,7 +1333,9 @@ describe("OpenAI responses history payload", () => {
 		expect(replayHistoryItems[3]?.id).toBe("fco_should_be_removed");
 		expect(replayHistoryItems[3]?.call_id).toBe(opaqueCallId);
 		expect(replayHistoryItems[4]?.status).toBe("completed");
-		expect(replayHistoryItems[6]?.id).toBe(opaqueMessageId);
+		expect(replayHistoryItems[6]?.status).toBe("completed");
+		expect(replayHistoryItems[7]?.status).toBe("completed");
+		expect(replayHistoryItems[8]?.id).toBe(opaqueMessageId);
 	});
 
 	it("preserves the reasoning ID linked to a native computer call in the next request", async () => {

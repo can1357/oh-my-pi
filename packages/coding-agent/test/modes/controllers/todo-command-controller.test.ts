@@ -52,14 +52,14 @@ describe("TodoCommandController", () => {
 		tempRoot = await fs.mkdtemp(path.join(os.tmpdir(), "pi-tui-todo-empty-live-"));
 		const stale: TodoPhase[] = [{ name: "Stale", tasks: [{ content: "Resurrect me", status: "pending" }] }];
 		const ctx = createContext(tempRoot, []);
-		(ctx.sessionManager.getBranch as Mock).mockReturnValue([
+		(ctx.sessionManager.getBranch as unknown as Mock<(...a: never[]) => unknown>).mockReturnValue([
 			{ type: "custom", customType: USER_TODO_EDIT_CUSTOM_TYPE, data: { phases: stale } },
 		]);
 		const controller = new TodoCommandController(ctx);
 
 		await controller.handleTodoCommand("append Ship");
 
-		const committed = (ctx.session.setTodoPhases as Mock).mock.calls[0]?.[0] as TodoPhase[];
+		const committed = (ctx.session.setTodoPhases as unknown as Mock<(...a: never[]) => unknown>).mock.calls[0]?.[0] as TodoPhase[];
 		expect(committed).toHaveLength(1);
 		expect(committed[0]?.name).toBe("Todos");
 		expect(committed[0]?.tasks.map(task => task.content)).toEqual(["Ship"]);

@@ -1,3 +1,4 @@
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 import { hexToOklch, oklchCusp, oklchToHex, relativeLuminance } from "@oh-my-pi/pi-utils";
 
 /**
@@ -242,10 +243,11 @@ export function getSessionAccentHex(name: string, theme: SessionAccentTheme): st
 }
 
 /**
- * Convert a hex accent color to an ANSI-16m foreground escape sequence.
+ * Convert a hex accent color to an ANSI foreground escape sequence matching
+ * the detected terminal color depth.
  * Returns `undefined` if `hex` is nullish or Bun.color conversion fails.
  */
 export function getSessionAccentAnsi(hex: string | undefined): string | undefined {
 	if (!hex) return undefined;
-	return Bun.color(hex, "ansi-16m") ?? undefined;
+	return Bun.color(hex, TERMINAL.trueColor ? "ansi-16m" : "ansi-256") ?? undefined;
 }

@@ -1,0 +1,11 @@
+class "gpt-oss" {
+    namespace "gpt-oss" bounded=#true
+    bounded "gpt-oss"
+
+    family "120b" glob="*gpt-oss-120b*"
+    family "20b" glob="*gpt-oss-20b*"
+
+    override id="venice-e2ee-gpt-oss-120b-family" provider="venice" model="e2ee-gpt-oss-120b-p" logical="e2ee-gpt-oss-120b-p" class="gpt-oss" rationale="The opaque Venice E2EE deployment is backed by the reviewed GPT OSS family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="venice-e2ee-gpt-oss-20b-family" provider="venice" model="e2ee-gpt-oss-20b-p" logical="e2ee-gpt-oss-20b-p" class="gpt-oss" rationale="The opaque Venice E2EE deployment is backed by the reviewed GPT OSS family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+    override id="venice-openai-gpt-oss-family" provider="venice" model="openai-gpt-oss-120b" logical="openai-gpt-oss-120b" class="gpt-oss" rationale="The reviewed Venice deployment belongs to the GPT OSS family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+}

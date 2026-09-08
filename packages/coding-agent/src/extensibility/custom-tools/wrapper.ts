@@ -8,9 +8,11 @@ import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import { applyToolProxy } from "../tool-proxy";
 import type { CustomTool, CustomToolContext } from "./types";
 
-export class CustomToolAdapter<TParams extends TSchema = TSchema, TDetails = any, TTheme extends Theme = Theme>
-	implements AgentTool<TParams, TDetails, TTheme>
-{
+export class CustomToolAdapter<
+	TParams extends TSchema = TSchema,
+	TDetails = any,
+	TTheme extends Theme = Theme,
+> implements AgentTool<TParams, TDetails, TTheme> {
 	declare name: string;
 	declare label: string;
 	declare description: string;

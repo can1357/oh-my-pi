@@ -628,34 +628,30 @@ describe("TodoTool operations", () => {
 
 	it("stamps RPC abandoned provenance without stripping host wire fields", () => {
 		const prior: TodoPhase[] = [{ name: "Ship", tasks: [{ content: "model drop", status: "abandoned" }] }];
-		const incoming = [
+		const incoming: TodoPhase[] = [
 			{
 				name: "Ship",
-				id: "phase-1",
+				...{ id: "phase-1" },
 				tasks: [
 					{
 						content: "host cancel",
-						status: "abandoned" as const,
-						id: "task-1",
-						notes: "host note",
-						details: "host details",
+						status: "abandoned",
+						...{ id: "task-1", notes: "host note", details: "host details" },
 					},
 					{
 						content: "model drop",
-						status: "abandoned" as const,
-						id: "task-2",
-						notes: "still model",
+						status: "abandoned",
+						...{ id: "task-2", notes: "still model" },
 					},
 					{
 						content: "open work",
-						status: "pending" as const,
-						id: "task-3",
-						details: "keep going",
+						status: "pending",
+						...{ id: "task-3", details: "keep going" },
 					},
 				],
 			},
-		] as TodoPhase[];
-		const next = applyRpcTodoProvenance(prior, incoming);
+		];
+		const next = applyRpcTodoProvenance(prior, incoming) as unknown as Array<Record<string, unknown>>;
 		expect(next).toEqual([
 			{
 				name: "Ship",
@@ -1084,7 +1080,12 @@ describe("todoToolRenderer.renderResult phase collapsing", () => {
 	}
 	function innerLines(component: Component): string[] {
 		const lines = Bun.stripANSI(component.render(100).join("\n")).split("\n");
-		return lines.slice(1, -1).map(line => line.replace(/^│/, "").replace(/│\s*$/, "").trim());
+		return lines.slice(1, -1).map(line =>
+			line
+				.replace(/^│/, "")
+				.replace(/│\s*$/, "")
+				.trim(),
+		);
 	}
 	it("collapses untouched phases to a one-line summary while expanding the active phase", async () => {
 		const result = await buildThreePhaseAfterDone();

@@ -234,6 +234,7 @@ function PeakHoursPanel({ hourly, providers }: { hourly: ProviderHourlyPoint[]; 
 	const chartTheme = CHART_THEMES[theme];
 
 	const { tokensByHour, peakHour } = useMemo(() => {
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		const tokens = new Array<number>(24).fill(0);
 		for (const point of hourly) {
 			if (provider !== ALL_PROVIDERS && point.provider !== provider) continue;

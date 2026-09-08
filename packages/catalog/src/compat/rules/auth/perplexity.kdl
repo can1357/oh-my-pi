@@ -1,0 +1,7 @@
+auth "perplexity" {
+    name "Perplexity (Pro/Max)"
+    env "PERPLEXITY_API_KEY"
+    login "custom" hook="perplexity"
+    expiry "jwt-or-never"
+    refresh "none"
+}

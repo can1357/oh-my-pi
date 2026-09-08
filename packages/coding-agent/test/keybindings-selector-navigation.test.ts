@@ -1,17 +1,18 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { ExtensionList } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/extension-list";
 import type { Extension } from "@oh-my-pi/pi-coding-agent/modes/components/extensions/types";
 import { HistorySearchComponent } from "@oh-my-pi/pi-coding-agent/modes/components/history-search";
+import { RewindSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/rewind-selector";
 import { SessionSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/session-selector";
 import { TreeSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/tree-selector";
-import { UserMessageSelectorComponent } from "@oh-my-pi/pi-coding-agent/modes/components/user-message-selector";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { HistoryStorage } from "@oh-my-pi/pi-coding-agent/session/history-storage";
-import type { SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
+import type { SessionMessageEntry, SessionTreeNode } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import type { SessionInfo } from "@oh-my-pi/pi-coding-agent/session/session-listing";
-import { setKeybindings } from "@oh-my-pi/pi-tui";
+import { setKeybindings, type TUI } from "@oh-my-pi/pi-tui";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
 const CTRL_N = "\x0e";
@@ -305,23 +306,34 @@ describe("selector navigation keybindings", () => {
 		expect(selected).toEqual(["node-20", "node-0"]);
 	});
 
-	it("uses tui.select.up in the user message selector", () => {
-		setKeybindings(TEST_KEYBINDINGS);
-		const selected: string[] = [];
-		const selector = new UserMessageSelectorComponent(
-			[
-				{ id: "first", text: "First" },
-				{ id: "second", text: "Second" },
-				{ id: "third", text: "Third" },
-			],
-			id => selected.push(id),
-			() => {},
-		);
+	it("uses tui.select.up in the esc-esc rewind selector", async () => {
+		await Settings.init({ inMemory: true, cwd: process.cwd() });
+		try {
+			setKeybindings(TEST_KEYBINDINGS);
+			const selected: string[] = [];
+			const ids = ["first", "second", "third"];
+			const entries: SessionMessageEntry[] = ids.map((id, index) => ({
+				type: "message",
+				id,
+				parentId: index === 0 ? null : ids[index - 1]!,
+				timestamp: "2024-01-01T00:00:00Z",
+				message: { role: "user", content: `${id} prompt`, timestamp: 1 },
+			}));
+			const selector = new RewindSelectorComponent(entries, {
+				ui: { requestRender: () => {}, requestComponentRender: () => {} } as unknown as TUI,
+				cwd: "/tmp",
+				requestRender: () => {},
+				onSelect: id => selected.push(id),
+				onCancel: () => {},
+			});
 
-		selector.getMessageList().handleInput(CTRL_P);
-		selector.getMessageList().handleInput("\n");
+			selector.handleInput(CTRL_P);
+			selector.handleInput("\n");
 
-		expect(selected).toEqual(["second"]);
+			expect(selected).toEqual(["second"]);
+		} finally {
+			resetSettingsForTest();
+		}
 	});
 
 	it("uses tui.select.down in the extension list", () => {
