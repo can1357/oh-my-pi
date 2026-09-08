@@ -109,4 +109,69 @@ describe("AuthStorage quota probe leases", () => {
 		expect(storage.tryAcquireQuotaProbeLease(idA, "")).toBeNull();
 		expect(storage.listStoredCredentials(PROVIDER).some(row => row.id === idA)).toBe(true);
 	});
+
+	it("clearQuotaProbe is a no-op for unknown request ids and frees nothing incorrectly", async () => {
+		if (!storage) throw new Error("setup failed");
+		const { idA } = await seed();
+		await storage.markUsageLimitReached(PROVIDER, undefined, { credentialId: idA });
+		const lease = storage.tryAcquireQuotaProbeLease(idA, "");
+		expect(typeof lease).toBe("string");
+		storage.clearQuotaProbe("never-acquired");
+		// Lease still held (clear only touches request-keyed inflight entries).
+		expect(storage.tryAcquireQuotaProbeLease(idA, "")).toBeNull();
+		expect(storage.settleQuotaProbeSuccess("never-acquired")).toBe(false);
+		expect(storage.recordQuotaProbeSuccess(idA, "", lease)).toBe(true);
+	});
+
+	it("reuses the request-owned probe lease on auth retry", async () => {
+		if (!storage) throw new Error("setup failed");
+		await storage.set(PROVIDER, [oauth("solo")]);
+		const id = storage.listStoredCredentials(PROVIDER)[0]?.id;
+		if (id === undefined) throw new Error("missing credential");
+		await storage.markUsageLimitReached(PROVIDER, undefined, { credentialId: id });
+		const first = await storage.getApiKey(PROVIDER, "solo-session", { requestId: "probe-retry" });
+		expect(first).toBe("access-solo");
+		// Same request still holds the single-flight lease — a bare acquire must fail,
+		// but re-entering getApiKey with the same requestId must reuse it.
+		expect(storage.tryAcquireQuotaProbeLease(id, "")).toBeNull();
+		const second = await storage.getApiKey(PROVIDER, "solo-session", { requestId: "probe-retry" });
+		expect(second).toBe("access-solo");
+	});
+
+	it("prefers a healthy API-key sibling before leasing a blocked probe", async () => {
+		if (!storage) throw new Error("setup failed");
+		const apiProvider = `${PROVIDER}-api-keys`;
+		await storage.set(apiProvider, [
+			{ type: "api_key", key: "blocked-key" },
+			{ type: "api_key", key: "healthy-key" },
+		]);
+		const rows = storage.listStoredCredentials(apiProvider);
+		const blockedId = rows[0]?.id;
+		if (blockedId === undefined) throw new Error("missing blocked credential");
+		await storage.markUsageLimitReached(apiProvider, undefined, { credentialId: blockedId });
+		const key = await storage.getApiKey(apiProvider, "sibling-session", { requestId: "prefer-healthy" });
+		expect(key).toBe("healthy-key");
+		// Healthy path must not consume a probe lease on the blocked sibling.
+		expect(storage.tryAcquireQuotaProbeLease(blockedId, "")).toBeTypeOf("string");
+	});
+
+	it("leases an API-key probe under the ranking block scope", async () => {
+		if (!storage) throw new Error("setup failed");
+		const apiProvider = "openai-codex";
+		await storage.set(apiProvider, [{ type: "api_key", key: "codex-key" }]);
+		const id = storage.listStoredCredentials(apiProvider)[0]?.id;
+		if (id === undefined) throw new Error("missing credential");
+		await storage.markUsageLimitReached(apiProvider, undefined, {
+			credentialId: id,
+			modelId: "gpt-5.3-codex",
+		});
+		const key = await storage.getApiKey(apiProvider, "scoped-session", {
+			requestId: "scoped-probe",
+			modelId: "gpt-5.3-codex",
+		});
+		expect(key).toBe("codex-key");
+		// Live lease is chat-scoped; a second chat acquire is denied while global stays free.
+		expect(storage.tryAcquireQuotaProbeLease(id, "chat")).toBeNull();
+		expect(storage.tryAcquireQuotaProbeLease(id, "")).toBeTypeOf("string");
+	});
 });

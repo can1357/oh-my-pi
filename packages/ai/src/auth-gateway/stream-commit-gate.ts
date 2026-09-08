@@ -37,6 +37,7 @@ export class StreamCommitGate {
 	#maxPreludeBytes: number;
 	#prelude: Uint8Array[] = [];
 	#preludeBytes = 0;
+	#sawSuccessfulTerminal = false;
 
 	constructor(maxPreludeBytes: number = DEFAULT_MAX_PRELUDE_BYTES) {
 		this.#maxPreludeBytes = maxPreludeBytes;
@@ -46,12 +47,17 @@ export class StreamCommitGate {
 		return this.#state;
 	}
 
+	get sawSuccessfulTerminal(): boolean {
+		return this.#sawSuccessfulTerminal;
+	}
+
 	/** Reset to probing for the next fallback attempt (clears prelude). */
 	reset(): void {
 		this.#state = "probing";
 		this.#bytes = 0;
 		this.#prelude = [];
 		this.#preludeBytes = 0;
+		this.#sawSuccessfulTerminal = false;
 	}
 
 	classifyAndObserve(eventType: string, byteLength: number): StreamCommitState {
@@ -66,6 +72,7 @@ export class StreamCommitGate {
 		}
 
 		const kind = classifyCommitEvent(eventType);
+		if (kind === "terminal-success") this.#sawSuccessfulTerminal = true;
 		if (this.#state === "committed") {
 			// Post-commit, every terminal event ends the stream's failover
 			// eligibility — including `response.failed` (retryable elsewhere),
@@ -198,6 +205,15 @@ export function holdSseUntilCommit(
 		new TransformStream<Uint8Array, Uint8Array>({
 			transform(chunk, controller) {
 				if (committed) {
+					// Keep observing terminals after commit so committed→terminated
+					// transitions still happen; forward bytes unchanged.
+					pending += decoder.decode(chunk, { stream: true });
+					let next = nextSseFrame(pending);
+					while (next) {
+						gate.classifyAndObserve(eventTypeFromFrame(next.frame), next.frame.length);
+						pending = next.rest;
+						next = nextSseFrame(pending);
+					}
 					controller.enqueue(chunk);
 					return;
 				}
