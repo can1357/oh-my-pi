@@ -566,6 +566,31 @@ export const SETTINGS_SCHEMA = {
 			condition: "advisorEnabled",
 		},
 	},
+	"advisor.interruptMode": {
+		type: "enum",
+		values: ["immediate", "wait"] as const,
+		default: "immediate",
+		ui: {
+			tab: "model",
+			group: "Advisor",
+			label: "Advisor Interrupt Mode",
+			description:
+				"Choose whether concern/blocker advice interrupts a running tool batch or waits until the batch completes. Idle delivery and terminal blockers are unchanged.",
+			options: [
+				{
+					value: "immediate",
+					label: "Immediate",
+					description: "Interrupt the active tool batch and skip sibling calls that have not started.",
+				},
+				{
+					value: "wait",
+					label: "Wait for Tool Batch",
+					description: "Let the active tool batch finish, then deliver advice before the next model step.",
+				},
+			],
+			condition: "advisorEnabled",
+		},
+	},
 	"advisor.immuneTurns": {
 		type: "number",
 		default: 3,

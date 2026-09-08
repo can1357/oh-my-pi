@@ -133,6 +133,11 @@ Two session/client constraints can still preserve a note whose normal delivery p
 
 So the advisor can steer and resume a run the agent ended on its own **while it is running or yielded mid-work and the current mode/client permits steering**. When steering is blocked instead, the note is either preserved as a card (the terminal-answer, plan-mode, and deferred-ACP cases above) or downgraded to a non-interrupting aside (the `advisor.immuneTurns` cooldown below); either way it waits for the next step boundary or resume rather than waking the agent.
 
+`advisor.interruptMode` controls live `concern`/`blocker` delivery without changing their severity:
+
+- `immediate` (default) uses steering. During a tool batch this may signal the running tool and skip sibling calls that have not started.
+- `wait` queues the note as a non-interrupting aside while the primary loop is streaming. The current tool batch finishes, then the advice is injected before the next model step. Idle delivery, terminal-answer handling, deliberate-interrupt preservation, and plan/ACP constraints keep their existing behavior.
+
 `advisor.immuneTurns` limits interruption frequency. After the advisor successfully delivers a `concern` or `blocker` through the steering channel, later concerns/blockers are routed as non-interrupting asides until the configured number of primary turns has completed. The default is `3`. `nit` notes are unchanged, and advice raised while user-interrupt auto-resume suppression is active is still preserved instead of restarting a stopped run.
 
 While an advisor update is reviewing work still in progress, `AdviseTool` withholds `nit` and `concern` calls; only a `blocker` may interrupt partial work. The tool also suppresses the same whitespace-normalized note at an equal or lower severity while allowing a real escalation (`nit` → `concern` → `blocker`).

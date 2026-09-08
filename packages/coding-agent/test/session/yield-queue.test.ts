@@ -108,6 +108,54 @@ describe("YieldQueue", () => {
 		expect(harness.idleBatches[0]?.map(messageText)).toEqual(["done"]);
 		expect(harness.queue.has("advisor")).toBe(true);
 	});
+
+	test("drainKind extracts skip-idle-flush entries for explicit preservation", () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("advisor", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+			skipIdleFlush: true,
+		});
+		harness.queue.enqueue("advisor", { id: "concern" });
+
+		const message = harness.queue.drainKind("advisor");
+
+		expect(message && messageText(message)).toBe("concern");
+		expect(harness.queue.has("advisor")).toBe(false);
+	});
+
+	test("drainKind retains entries rejected by its filter", () => {
+		const harness = createHarness(true);
+		harness.queue.register<Entry>("advisor", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+			skipIdleFlush: true,
+		});
+		harness.queue.enqueue("advisor", { id: "nit" });
+		harness.queue.enqueue("advisor", { id: "deferred" });
+
+		const message = harness.queue.drainKind("advisor", entry => (entry as Entry).id === "deferred");
+
+		expect(message && messageText(message)).toBe("deferred");
+		expect(harness.queue.has("advisor")).toBe(true);
+		expect(messageText(harness.queue.drainKind("advisor")!)).toBe("nit");
+	});
+
+	test("drainKind extracts deferred interrupts while retaining ordinary advisor asides", () => {
+		const harness = createHarness(true);
+		type Advice = { id: string; deferredInterrupt?: boolean };
+		harness.queue.register<Advice>("advisor", {
+			build: entries => userMessage(entries.map(entry => entry.id).join(",")),
+			skipIdleFlush: true,
+		});
+		harness.queue.enqueue("advisor", { id: "nit" });
+		harness.queue.enqueue("advisor", { id: "blocker", deferredInterrupt: true });
+
+		const message = harness.queue.drainKind("advisor", entry => (entry as Advice).deferredInterrupt === true);
+
+		expect(message && messageText(message)).toBe("blocker");
+		expect(harness.queue.has("advisor")).toBe(true);
+		expect(messageText(harness.queue.drainKind("advisor")!)).toBe("nit");
+	});
+
 	test("enqueue while idle schedules one debounced idle flush", async () => {
 		const harness = createHarness(false);
 		harness.queue.register<Entry>("items", {
