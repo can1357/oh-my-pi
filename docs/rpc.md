@@ -113,6 +113,7 @@ Important edge behavior from runtime:
 - `{ id?, type: "prompt", message: string, images?: ImageContent[], streamingBehavior?: "steer" | "followUp" }`
 - `{ id?, type: "steer", message: string, images?: ImageContent[] }`
 - `{ id?, type: "follow_up", message: string, images?: ImageContent[] }`
+- `{ id?, type: "custom", customType: string, content: string, display?: boolean, deliverAs?: "steer" | "followUp" | "nextTurn" | "aside", triggerTurn?: boolean }`
 - `{ id?, type: "abort" }`
 - `{ id?, type: "abort_and_prompt", message: string, images?: ImageContent[] }`
 - `{ id?, type: "new_session", parentSession?: string }`
@@ -229,6 +230,22 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 ```
 
 Local-only slash commands may emit `command_output` frames before completing via `data.agentInvoked: false` or a later `prompt_result`. They do not emit `agent_end`.
+
+### `custom` payload
+
+`custom` injects a hidden or visible custom message through `AgentSession.sendCustomMessage`. The response includes whether the message synchronously started a new turn:
+
+```json
+{
+  "id": "req_1",
+  "type": "response",
+  "command": "custom",
+  "success": true,
+  "data": { "delivered": false }
+}
+```
+
+`data.delivered` mirrors the boolean return value of `sendCustomMessage`.
 
 ### `get_state` payload
 

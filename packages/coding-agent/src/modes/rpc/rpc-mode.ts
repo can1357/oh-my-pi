@@ -614,6 +614,48 @@ function isSubagentSubscriptionLevel(value: unknown): value is RpcSubagentSubscr
 	return value === "off" || value === "progress" || value === "events";
 }
 
+function isRpcCustomDeliverAs(value: unknown): value is "steer" | "followUp" | "nextTurn" | "aside" {
+	return value === "steer" || value === "followUp" || value === "nextTurn" || value === "aside";
+}
+
+export type RpcCustomCommandSession = Pick<AgentSession, "sendCustomMessage">;
+
+export type RpcCustomCommand = Extract<RpcCommand, { type: "custom" }>;
+
+export type RpcCustomCommandResult = { delivered: boolean } | { error: string };
+
+export async function handleRpcCustomCommand(
+	session: RpcCustomCommandSession,
+	command: RpcCustomCommand,
+): Promise<RpcCustomCommandResult> {
+	const customType = typeof command.customType === "string" ? command.customType.trim() : "";
+	if (!customType) {
+		return { error: "customType must be a non-empty string" };
+	}
+	if (typeof command.content !== "string") {
+		return { error: "content must be a string" };
+	}
+	if (command.display !== undefined && typeof command.display !== "boolean") {
+		return { error: "display must be a boolean" };
+	}
+	if (command.deliverAs !== undefined && !isRpcCustomDeliverAs(command.deliverAs)) {
+		return { error: `Invalid deliverAs: ${String(command.deliverAs)}` };
+	}
+	if (command.triggerTurn !== undefined && typeof command.triggerTurn !== "boolean") {
+		return { error: "triggerTurn must be a boolean" };
+	}
+
+	const display = command.display ?? false;
+	const delivered = await session.sendCustomMessage(
+		{ customType, content: command.content, display, details: undefined, attribution: undefined },
+		{
+			...(command.deliverAs !== undefined ? { deliverAs: command.deliverAs } : {}),
+			...(command.triggerTurn !== undefined ? { triggerTurn: command.triggerTurn } : {}),
+		},
+	);
+	return { delivered };
+}
+
 /** Sends an RPC select request while retaining aligned option descriptions. */
 export function requestRpcSelect(
 	pendingRequests: Map<string, PendingExtensionRequest>,
@@ -1162,6 +1204,14 @@ export async function runRpcMode(
 			case "follow_up": {
 				await session.followUp(command.message, command.images);
 				return success(id, "follow_up");
+			}
+
+			case "custom": {
+				const result = await handleRpcCustomCommand(session, command);
+				if ("error" in result) {
+					return error(id, "custom", result.error);
+				}
+				return success(id, "custom", { delivered: result.delivered });
 			}
 
 			case "abort": {
