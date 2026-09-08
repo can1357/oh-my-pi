@@ -113,6 +113,9 @@
 - Added Amazon Bedrock `requestMetadata` support for cost and usage attribution in AWS invocation logs.
 
 ### Changed
+- Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, and context-overflow detection reuses the central classifier.
+- Gateway requests now forward `previous_response_id`, `parallel_tool_calls`, `logit_bias`, `user`, and `response_format` to providers instead of dropping them; Responses requests map `response_format` JSON-schema to the flat `text.format` shape and never send Chat-Completions-only `seed`.
+- Auth gateway observes Responses SSE through a StreamCommitGate: metadata-only preludes stay failover-eligible, the first output event or 4 MiB cap commits, and post-commit terminals (`response.completed`/`response.failed`/`response.incomplete`/`response.error`) end failover eligibility instead of being misread as output.
 
 - Codex GPT-5.6 requests now use full Responses by default, enabling independent tool calls to run in parallel; provider-native compaction continues to use catalog-selected Responses Lite.
 - Inference requests now identify as omp by default while preserving explicit provider and OAuth User-Agent fingerprints. Amazon Bedrock requests use an `omp/<version>` User-Agent by default and honor configured `User-Agent` overrides.
@@ -197,6 +200,11 @@
 - Devin parallel tool calls follow `compat.supportsParallelToolCalls` instead of being disabled unconditionally, so natively discovered configs that support parallelism can use it ([#8590](https://github.com/can1357/oh-my-pi/pull/8590) by [@will-bogusz](https://github.com/will-bogusz)).
 - Gateway error classifications now carry a failure owner and retry/failover disposition (`credential_permanent`, `provider_transient`, `policy_terminal`, …); provider status codes stay authoritative over message wording, structurally flagged content blocks stay non-retryable, and context-overflow detection reuses the central classifier.
 - Gateway disposition mapping now keeps ordinary RPM/`Too many requests` 429s in the provider lane, requires structural evidence for `gateway_terminal`, and only treats opaque or billing-worded 402s as `credential_quota`.
+
+### Fixed
+
+- Fixed Cloudflare AI Gateway onboarding and routing so gateway account and endpoint configuration is preserved correctly while gateway credentials are not sent as upstream OpenAI authorization headers.
+
 
 ### Fixed
 
