@@ -164,6 +164,9 @@
 - Session rewrites preserve open-reader snapshots and replacement identity when a rename needs an EPERM fallback.
 - Fixed WorkPool children retaining a stale Gemini-formatted `yield` declaration when pooled items were installed or cleared.
 - Preserve effective context and output limits when model overrides change unrelated settings, such as thinking effort levels.
+### Added
+
+- Added OpenAI cloud speech-to-text for push-to-talk dictation, with ChatGPT subscription and API-key authentication ([#11216](https://github.com/can1357/oh-my-pi/pull/11216) by [@rxaviers](https://github.com/rxaviers)).
 
 ## [18.1.14] - 2026-09-07
 

@@ -89,6 +89,7 @@ describe("cloud STT stream", () => {
 		const stopped = handle.stop();
 		handle.cancel();
 		await expect(stopped).resolves.toBe("");
+		expect((stub.calls[0]!.init.signal as AbortSignal).aborted).toBe(true);
 	});
 
 	it("rejects stop() on an HTTP error", async () => {
@@ -130,6 +131,7 @@ describe("cloud backend in STTController", () => {
 
 	it("dictates through the cloud backend and commits the transcript on release", async () => {
 		const stub = stubFetch("hello world");
+		let credentialResolutions = 0;
 		let onAudio!: (error: Error | null, samples: Float32Array) => void;
 		const editor = {
 			volatile: "",
@@ -161,7 +163,10 @@ describe("cloud backend in STTController", () => {
 				return { stop(): void {} };
 			},
 			{
-				resolveCloudKey: () => Promise.resolve("sk-test"),
+				resolveCloudKey: () => {
+					credentialResolutions++;
+					return Promise.resolve("sk-test");
+				},
 				createCloudFetch: stub.impl,
 			},
 		);
@@ -174,6 +179,11 @@ describe("cloud backend in STTController", () => {
 			expect(editor.committed).toContain("hello world");
 			expect(stub.calls).toHaveLength(1);
 			expect((stub.calls[0]!.init.body as FormData).get("model")).toBe("gpt-4o-mini-transcribe");
+			await controller.toggle(editor, options);
+			onAudio(null, sine16kHz());
+			await controller.toggle(editor, options);
+			expect(stub.calls).toHaveLength(2);
+			expect(credentialResolutions).toBe(2);
 		} finally {
 			controller.dispose();
 		}
@@ -195,6 +205,16 @@ describe("resolveSttCloudKey", () => {
 
 	it("falls back to the API key without a subscription", async () => {
 		await expect(resolveSttCloudKey(registry(undefined, "sk-key"), "s1")).resolves.toBe("sk-key");
+	});
+
+	it("falls back to the API key when subscription lookup rejects", async () => {
+		const rejectingRegistry = {
+			async getApiKeyForProvider(provider: string): Promise<string | undefined> {
+				if (provider === "openai-codex") throw new Error("OAuth refresh failed");
+				return "sk-key";
+			},
+		};
+		await expect(resolveSttCloudKey(rejectingRegistry, "s1")).resolves.toBe("sk-key");
 	});
 
 	it("resolves nothing without any credential", async () => {
