@@ -1511,8 +1511,8 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/** Reload session skills and the `/skill:<name>` command list. */
-	async refreshSkillState(): Promise<void> {
-		await this.session.refreshSkills();
+	async refreshSkillState(refreshAgents = false): Promise<void> {
+		await this.session.refreshSkills(refreshAgents);
 		const retainedCommands = this.#pendingSlashCommands.filter(command => !command.name.startsWith("skill:"));
 		const skillCommands = this.#rebuildSkillCommandsFromSession();
 		this.#pendingSlashCommands = [...retainedCommands, ...skillCommands];

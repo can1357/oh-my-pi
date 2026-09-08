@@ -164,6 +164,221 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.formatAdvisorStatus()).toContain("Advisor is enabled (anthropic/claude-sonnet-4-5)");
 	});
 
+	it("targets the primary roster before resolving models and retains unscoped advisors", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const primary = Array.from({ length: 8 }, (_, index) => ({
+			name: `Primary ${index + 1}`,
+			agents: [" MAIN "],
+		}));
+		session.applyAdvisorConfigs(
+			[...primary, { name: "Task Execution", agents: ["orc-implementer"], model: "missing/model" }],
+			undefined,
+		);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(
+			primary.map(advisor => advisor.name),
+		);
+		expect(session.applyAdvisorConfigs([{ name: "Everyone" }, { name: "Nobody", agents: [] }], undefined)).toBe(1);
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Everyone"]);
+	});
+
+	it("never falls back or resolves models for a nonmatching roster across live replacement and re-enable", async () => {
+		await session.dispose();
+		sessionManager = SessionManager.inMemory(tempDir.path());
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			agentName: " Operator ",
+			advisorTools: [],
+			advisorConfigs: [
+				{ name: "Primary", agents: ["main"], enabled: false },
+				{ name: "Nobody", agents: [] },
+				{ name: "Not a glob", agents: ["oper*"], model: "missing/model" },
+			],
+		});
+		const available = vi.spyOn(modelRegistry, "getAvailable");
+		try {
+			expect(session.setAdvisorEnabled(true)).toBe(false);
+			expect(session.getAdvisorStats().advisors).toEqual([]);
+			expect(session.getAdvisorAgent()).toBeUndefined();
+			expect(available).not.toHaveBeenCalled();
+			expect(session.applyAdvisorConfigs([{ name: "Task Execution", agents: ["orc-implementer"] }], undefined)).toBe(
+				0,
+			);
+			session.setAdvisorEnabled(false);
+			expect(session.setAdvisorEnabled(true)).toBe(false);
+			expect(session.getAdvisorStats().advisors).toEqual([]);
+			expect(available).not.toHaveBeenCalled();
+		} finally {
+			available.mockRestore();
+		}
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.applyAdvisorConfigs([{ name: "Operator", agents: ["operator"] }], undefined)).toBe(1);
+		session.setAdvisorEnabled(false);
+		session.applyAdvisorConfigs([{ name: "Primary", agents: ["main"] }], undefined);
+		expect(session.getAdvisorStats().advisors).toEqual([]);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		expect(session.getAdvisorStats().advisors).toEqual([]);
+		expect(session.applyAdvisorConfigs([], undefined)).toBe(1);
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["default"]);
+	});
+
+	it("keeps an explicit empty watchdog selection empty through enable and context rebuilds", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		session.applyAdvisorConfigs([], undefined, undefined, true);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		session.setAdvisorContextPrompt("Updated project instructions");
+		session.setAdvisorEnabled(false);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		expect(session.getAdvisorStats().advisors).toEqual([]);
+	});
+
+	it("treats an explicit selection without a configs array as empty", async () => {
+		await session.dispose();
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			advisorExplicitSelection: true,
+			advisorTools: [],
+		});
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		expect(session.getAdvisorStats().advisors).toEqual([]);
+	});
+
+	it("labels delivered advice with the display name rather than its canonical ID", async () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		session.applyAdvisorConfigs([{ id: "global/design-match", name: "Design Match" }], undefined);
+		session.setAdvisorEnabled(true);
+		const advisor = session.getAdvisorAgent();
+		const tool = advisor?.state.tools.find(candidate => candidate.name === "advise");
+		if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
+		tool.beginUpdate(false);
+		await tool.execute("display-name", { note: "The update changes an unrelated API contract.", severity: "nit" });
+		const messages = session.yieldQueue.drainLazy().map(delivery => delivery());
+		expect(JSON.stringify(messages)).toContain('advisor=\\"Design Match\\"');
+		expect(JSON.stringify(messages)).not.toContain("global/design-match");
+	});
+
+	it("keeps same-name watchdog identities distinct and deduplicates canonical IDs", () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		session.applyAdvisorConfigs(
+			[
+				{ id: "agent-a/b", name: "Review" },
+				{ id: "agent/a-b", name: "Review" },
+				{ id: "agent-a/b", name: "Duplicate" },
+			],
+			undefined,
+			undefined,
+			true,
+		);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		const advisors = session.getAdvisorStats().advisors;
+		expect(advisors.map(advisor => advisor.name)).toEqual(["Review", "Review"]);
+		expect(new Set(advisors.map(advisor => advisor.sessionId)).size).toBe(2);
+		session.setAdvisorEnabled(false);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		expect(session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Review", "Review"]);
+	});
+
+	it("uses the SDK agent definition identity for scoped workers", async () => {
+		await advisorModule.saveWatchdogConfigFile(path.join(tempDir.path(), "WATCHDOG.yml"), {
+			advisors: [
+				{ name: "Primary", agents: ["main"] },
+				{ name: "Task Execution", agents: ["orc-implementer"] },
+			],
+		});
+		const settings = Settings.isolated({
+			"async.enabled": false,
+			"advisor.enabled": true,
+			"compaction.enabled": false,
+		});
+		settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		const result = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			agentName: " Orc-Implementer ",
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings,
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			workspaceTree: { rootPath: tempDir.path(), rendered: "", truncated: false, totalLines: 0, agentsMdFiles: [] },
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+		});
+		try {
+			expect(result.session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Task Execution"]);
+			result.session.setAdvisorEnabled(false);
+			expect(result.session.setAdvisorEnabled(true)).toBe(true);
+			expect(result.session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Task Execution"]);
+		} finally {
+			await result.session.dispose();
+		}
+	});
+
+	it("isolates bundled watchdog discovery and reloads by SDK agent directory", async () => {
+		const sessions: AgentSession[] = [];
+		const definition =
+			"---\nname: sdk-watchdog-worker\ndescription: Custom directory worker\nwatchdogs:\n  - id: review\n    name: WATCHDOG_NAME\n    instructions: Review the assigned work.\n---\nPerform the assigned work.\n";
+		try {
+			for (const name of ["First", "Second"]) {
+				const agentDir = path.join(tempDir.path(), name);
+				await fs.mkdir(path.join(agentDir, "agents"), { recursive: true });
+				await Bun.write(path.join(agentDir, "agents", "worker.md"), definition.replace("WATCHDOG_NAME", name));
+				const settings = Settings.isolated({
+					"async.enabled": false,
+					"compaction.enabled": false,
+				});
+				settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+				const result = await createAgentSession({
+					cwd: tempDir.path(),
+					agentDir,
+					agentName: "sdk-watchdog-worker",
+					sessionManager: SessionManager.inMemory(tempDir.path()),
+					authStorage,
+					modelRegistry,
+					settings,
+					model,
+					disableExtensionDiscovery: true,
+					skills: [],
+					contextFiles: [],
+					workspaceTree: {
+						rootPath: tempDir.path(),
+						rendered: "",
+						truncated: false,
+						totalLines: 0,
+						agentsMdFiles: [],
+					},
+					promptTemplates: [],
+					slashCommands: [],
+					enableMCP: false,
+					enableLsp: false,
+				});
+				sessions.push(result.session);
+				expect(result.session.getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual([name]);
+			}
+			await Bun.write(
+				path.join(tempDir.path(), "First", "agents", "worker.md"),
+				definition.replace("WATCHDOG_NAME", "Updated"),
+			);
+			await sessions[0].refreshAdvisorConfigs(true);
+			expect(sessions[0].getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Updated"]);
+			expect(sessions[1].getAdvisorStats().advisors.map(advisor => advisor.name)).toEqual(["Second"]);
+		} finally {
+			for (const target of sessions) await target.dispose();
+		}
+	});
+
 	it("explicit enable rebuilds the runtime when the advisor role changes", () => {
 		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 		expect(session.setAdvisorEnabled(true)).toBe(true);
@@ -654,6 +869,52 @@ describe("AgentSession advisor toggle", () => {
 			await result.session.dispose();
 		}
 	});
+	it("restores name-derived advisor spend from the legacy transcript filename", async () => {
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const agentDir = path.join(tempDir.path(), "agents");
+		await fs.mkdir(agentDir, { recursive: true });
+		await writeAdvisorTranscript(sessionFile, "__advisor.architecture.jsonl", [0.5]);
+		await advisorModule.saveWatchdogConfigFile(path.join(tempDir.path(), "WATCHDOG.yml"), {
+			advisors: [{ name: "Architecture" }],
+		});
+		const discovered = await advisorModule.discoverAdvisorConfigs(tempDir.path(), agentDir);
+		session.applyAdvisorConfigs(
+			discovered.advisors,
+			discovered.sharedInstructions,
+			discovered.sharedMaxNotesPerUpdate,
+			discovered.explicitSelection || discovered.hasConfiguredRoster,
+		);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.beginInitialAdvisorCostRestore();
+		await session.advisorCostRestore;
+		const advisor = session.getAdvisorStats().advisors.find(entry => entry.name === "Architecture");
+		expect(advisor?.cost).toBeCloseTo(0.5, 8);
+	});
+
+	it("keeps explicitly identified advisor spend on the encoded transcript filename", async () => {
+		const sessionFile = sessionManager.getSessionFile();
+		if (!sessionFile) throw new Error("Expected a persisted session file");
+		const agentDir = path.join(tempDir.path(), "agents");
+		await fs.mkdir(agentDir, { recursive: true });
+		await writeAdvisorTranscript(sessionFile, "__advisor.global%2Farchitecture.jsonl", [0.5]);
+		await advisorModule.saveWatchdogConfigFile(path.join(tempDir.path(), "WATCHDOG.yml"), {
+			advisors: [{ id: "architecture", name: "Architecture" }],
+		});
+		const discovered = await advisorModule.discoverAdvisorConfigs(tempDir.path(), agentDir);
+		session.applyAdvisorConfigs(
+			discovered.advisors,
+			discovered.sharedInstructions,
+			discovered.sharedMaxNotesPerUpdate,
+			discovered.explicitSelection || discovered.hasConfiguredRoster,
+		);
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		session.beginInitialAdvisorCostRestore();
+		await session.advisorCostRestore;
+		const advisor = session.getAdvisorStats().advisors.find(entry => entry.name === "Architecture");
+		expect(advisor?.cost).toBeCloseTo(0.5, 8);
+	});
+
 	it("seeds persisted advisor spend when no turn has been billed yet", () => {
 		enableAdvisor();
 		session.restoreInitialAdvisorCosts(new Map([["", 0.5]]));

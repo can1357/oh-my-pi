@@ -59,6 +59,7 @@ import {
 	getOrCreateAdvisorProviderSessionId,
 	isAdvisorInterruptImmuneTurnActive,
 	isInterruptingSeverity,
+	kAdvisorLegacyTranscriptSlug,
 	quarantineAdvisorUnsafeOutput,
 	resolveAdvisorDeliveryChannel,
 	slugifyAdvisorName,
@@ -151,6 +152,7 @@ interface AdvisorRetryFallbackState {
 
 interface ActiveAdvisor {
 	name: string;
+	id?: string;
 	slug: string;
 	agent: Agent;
 	runtime: AdvisorRuntime;
@@ -184,6 +186,8 @@ interface AdvisorRuntimeDescriptor {
 /** Inputs that configure the advisor roster owned by a session. */
 export interface SessionAdvisorsOptions {
 	enabled: boolean;
+	/** Session agent identity; direct construction defaults to `main`. */
+	agentName?: string;
 	tools?: AgentTool[];
 	/**
 	 * Build a `grep` honoring a Cursor `pi_grep` frame's own context width and
@@ -222,6 +226,7 @@ export interface SessionAdvisorsOptions {
 	/** Active memory backend's developer instructions, wrapped for advisors. */
 	memoryPrompt?: string;
 	configs?: AdvisorConfig[];
+	explicitSelection?: boolean;
 	streamFn?: StreamFn;
 	transformProviderContext?: (context: Context, model: Model) => Context | Promise<Context>;
 }
@@ -306,6 +311,7 @@ export interface AdvisorStatusOverviewEntry {
 /** Owns advisor runtimes, delivery policy, context maintenance, and status reporting. */
 export class SessionAdvisors {
 	readonly #host: SessionAdvisorsHost;
+	readonly #agentName: string;
 	#advisorEnabled: boolean;
 	#advisorTools: AgentTool[] | undefined;
 	#advisorCreateGrepTool: SessionAdvisorsOptions["createGrepTool"];
@@ -321,6 +327,7 @@ export class SessionAdvisors {
 	#transformProviderContext: ((context: Context, model: Model) => Context | Promise<Context>) | undefined;
 	#advisors: ActiveAdvisor[] = [];
 	#advisorConfigs: AdvisorConfig[] | undefined;
+	#advisorExplicitSelection: boolean;
 	#advisorStatuses = new Map<string, { name: string; status: AdvisorRuntimeStatus }>();
 	#advisorProviderSessionIds = new Map<string, string>();
 	#advisorCosts = new Map<string, number>();
@@ -344,6 +351,7 @@ export class SessionAdvisors {
 
 	constructor(host: SessionAdvisorsHost, options: SessionAdvisorsOptions) {
 		this.#host = host;
+		this.#agentName = (options.agentName ?? "main").trim().toLowerCase();
 		this.#advisorEnabled = options.enabled;
 		this.#advisorTools = options.tools;
 		this.#advisorCreateGrepTool = options.createGrepTool;
@@ -356,6 +364,7 @@ export class SessionAdvisors {
 		this.#advisorContextPrompt = options.contextPrompt;
 		this.#advisorMemoryPrompt = options.memoryPrompt;
 		this.#advisorConfigs = options.configs;
+		this.#advisorExplicitSelection = options.explicitSelection ?? false;
 		this.#advisorStreamFn = options.streamFn;
 		this.#transformProviderContext = options.transformProviderContext;
 		if (this.#advisorEnabled) this.#buildAdvisorRuntime();
@@ -721,12 +730,25 @@ export class SessionAdvisors {
 	}
 
 	#resolveAdvisorRuntimeDescriptors(emitWarnings: boolean): AdvisorRuntimeDescriptor[] {
-		const legacy = !this.#advisorConfigs?.length;
-		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
+		const legacy = !this.#advisorExplicitSelection && !this.#advisorConfigs?.length;
+		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : (this.#advisorConfigs ?? []);
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
+		const usedIds = new Set<string>();
 		const usedSlugs = new Set<string>();
 		for (const config of roster) {
-			let slug = legacy ? "" : slugifyAdvisorName(config.name);
+			if (
+				!this.#advisorExplicitSelection &&
+				config.agents !== undefined &&
+				!config.agents.some(name => name.trim().toLowerCase() === this.#agentName)
+			) {
+				continue;
+			}
+			if (config.id && usedIds.has(config.id)) continue;
+			const legacyTranscriptSlug = config[kAdvisorLegacyTranscriptSlug];
+			let slug = legacy
+				? ""
+				: (legacyTranscriptSlug ?? (config.id ? encodeURIComponent(config.id) : slugifyAdvisorName(config.name)));
+			if (config.id) usedIds.add(config.id);
 			if (slug) {
 				let candidate = slug;
 				let n = 2;
@@ -1162,6 +1184,7 @@ export class SessionAdvisors {
 
 			const advisorRef: ActiveAdvisor = {
 				name: advisorName,
+				id: config.id,
 				slug,
 				agent: advisorAgent,
 				runtime,
@@ -1242,7 +1265,7 @@ export class SessionAdvisors {
 	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
-		const source = advisor.slug ? advisor.name : undefined;
+		const source = advisor.slug ? (advisor.name ?? advisor.id) : undefined;
 		const interrupting = isInterruptingSeverity(severity);
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,
@@ -1865,11 +1888,14 @@ export class SessionAdvisors {
 		advisors: AdvisorConfig[],
 		sharedInstructions: string | undefined,
 		sharedMaxNotesPerUpdate?: number,
+		explicitSelection = false,
 	): number {
 		this.#advisorConfigs = advisors;
+		this.#advisorExplicitSelection = explicitSelection;
 		this.#advisorSharedInstructions = sharedInstructions;
 		this.#advisorSharedMaxNotesPerUpdate = sharedMaxNotesPerUpdate;
 		this.#stopAdvisorRuntime();
+		this.#advisorStatuses.clear();
 		this.#buildAdvisorRuntime(true);
 		return this.#advisors.length;
 	}

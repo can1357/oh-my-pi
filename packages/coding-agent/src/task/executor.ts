@@ -388,6 +388,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Options for subagent execution */
 export interface ExecutorOptions {
 	cwd: string;
+	agentDir?: string;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
 	additionalDirectories?: string[];
 	/** Exact provider credential resolver inherited from the parent session. */
@@ -3067,6 +3068,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const advisorSelection = resolveAgentAdvisorSelection({
 		settingsOverride: settings.get("task.agentAdvisor")[agent.name],
 		agentAdvisor: agent.advisor,
+		hasWatchdogs: Boolean(agent.watchdogs?.length),
 	});
 	const subagentSettings = createSubagentSettings(
 		settings,
@@ -3434,6 +3436,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				forRevive = false,
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
+				agentDir: options.agentDir,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 				authStorage,
 				modelRegistry,
@@ -3509,6 +3512,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				agentId: id,
 				agentDisplayName: agent.name,
 				agentName: agent.name,
+				agentWatchdogDefinition: { name: agent.name, filePath: agent.filePath, watchdogs: agent.watchdogs },
 				expectedAgentRef,
 				enableLsp: lspEnabled,
 				enableIrc: options.enableIrc,
@@ -3643,6 +3647,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				spawns: spawnsEnv,
 				readSummarize: agent.readSummarize,
 				advisor: advisorSelection ? (advisorSelection.model ?? "on") : undefined,
+				agentWatchdogDefinition: { name: agent.name, filePath: agent.filePath, watchdogs: agent.watchdogs },
 				outputSchema,
 				outputSchemaMode: options.outputSchemaMode,
 				restrictToolNames: restrictToolNames || undefined,

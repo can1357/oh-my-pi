@@ -20,11 +20,11 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import { isProviderEnabled, isUserSourceEnabled } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
-import { findAllNearestProjectConfigDirs, getConfigDirs } from "../config";
-import { listClaudePluginRoots } from "../discovery/helpers";
+import { findAllNearestProjectConfigDirs } from "../config";
+import { listClaudePluginRoots, normalizeAgentWatchdogNamespace } from "../discovery/helpers";
 import { listOmpExtensionRoots } from "../discovery/omp-extension-roots";
 import { loadBundledAgents, parseAgent } from "./agents";
 import type { AgentDefinition, AgentSource } from "./types";
@@ -60,6 +60,37 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
 }
 
 /**
+ * Exclude agents that share a normalized watchdog namespace. Exact-name
+ * precedence is resolved before this pass; shared/global watchdog config can
+ * target agents that do not declare a local watchdog list.
+ */
+function isolateWatchdogNamespaceCollisions(agents: AgentDefinition[]): AgentDefinition[] {
+	const byNamespace = new Map<string, AgentDefinition[]>();
+	for (const agent of agents) {
+		const namespace = normalizeAgentWatchdogNamespace(agent.name);
+		const definitions = byNamespace.get(namespace);
+		if (definitions) definitions.push(agent);
+		else byNamespace.set(namespace, [agent]);
+	}
+
+	const ambiguous = new Set<AgentDefinition>();
+	for (const [namespace, definitions] of byNamespace) {
+		if (definitions.length < 2) continue;
+		for (const agent of definitions) ambiguous.add(agent);
+		logger.warn("Skipping agents with colliding watchdog namespace", {
+			namespace,
+			agents: definitions.map(agent => ({
+				name: agent.name,
+				source: agent.source,
+				filePath: agent.filePath,
+			})),
+		});
+	}
+
+	return agents.filter(agent => !ambiguous.has(agent));
+}
+
+/**
  * Discover agents from filesystem and merge with bundled agents.
  * Precedence (highest wins): project `.omp/agents`, user `.omp/agents`,
  * OMP extension-package agents from the effective `extensions` setting,
@@ -68,20 +99,15 @@ async function loadAgentsFromDir(dir: string, source: AgentSource): Promise<Agen
  * @param cwd - Current working directory for project agent discovery
  * @param home - Home directory for user and marketplace discovery
  * @param extensionRoots - Session-local extension roots (explicit + mode + configured)
+ * @param agentDir - Session user-agent directory; defaults to the active profile
  */
 export async function discoverAgents(
 	cwd: string,
 	home: string = os.homedir(),
 	extensionRoots?: EffectiveExtensionRoots,
+	agentDir: string = getAgentDir(),
 ): Promise<DiscoveryResult> {
 	const resolvedCwd = path.resolve(cwd);
-
-	const userDirs = getConfigDirs("agents", { project: false })
-		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
-		.map(entry => ({
-			...entry,
-			path: path.resolve(entry.path),
-		}));
 
 	const projectDirs = findAllNearestProjectConfigDirs("agents", resolvedCwd)
 		.filter(entry => entry.source === TASK_AGENT_CONFIG_SOURCE)
@@ -93,8 +119,7 @@ export async function discoverAgents(
 	const orderedDirs: Array<{ dir: string; source: AgentSource }> = [];
 	const project = projectDirs[0];
 	if (project) orderedDirs.push({ dir: project.path, source: "project" });
-	const user = userDirs[0];
-	if (user) orderedDirs.push({ dir: user.path, source: "user" });
+	orderedDirs.push({ dir: path.resolve(agentDir, "agents"), source: "user" });
 
 	// Extension-package agents use the same effective root set as sibling
 	// skills/hooks/tools, threaded whole so explicit roots and mode survive.
@@ -136,8 +161,9 @@ export async function discoverAgents(
 	});
 
 	const projectAgentsDir = projectDirs.length > 0 ? projectDirs[0].path : null;
+	const agents = isolateWatchdogNamespaceCollisions([...loadedAgents, ...bundledAgents]);
 
-	return { agents: [...loadedAgents, ...bundledAgents], projectAgentsDir };
+	return { agents, projectAgentsDir };
 }
 
 /**

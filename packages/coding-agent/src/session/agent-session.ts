@@ -96,7 +96,7 @@ import {
 	stringProperty,
 	withTimeout,
 } from "@oh-my-pi/pi-utils";
-import { type AdvisorConfig, loadAdvisorTranscriptCosts } from "../advisor";
+import { type AdvisorConfig, type DiscoveredAdvisors, loadAdvisorTranscriptCosts } from "../advisor";
 import { ASYNC_JOB_MANAGER_SHUTDOWN_REASON, type AsyncJob, AsyncJobManager } from "../async";
 import { reset as resetCapabilities } from "../capability";
 import type { EffectiveExtensionRoots } from "../capability/types";
@@ -541,6 +541,24 @@ export class AgentSession {
 	 */
 	get effectiveExtensionRoots(): EffectiveExtensionRoots {
 		return this.#extensionRoots();
+	}
+
+	#discoverAdvisorConfigs: AgentSessionConfig["discoverAdvisorConfigs"];
+
+	async discoverAdvisorConfigs(): Promise<DiscoveredAdvisors> {
+		if (!this.#discoverAdvisorConfigs) throw new Error("Advisor discovery is unavailable for this session");
+		return this.#discoverAdvisorConfigs(this.sessionManager.getCwd());
+	}
+
+	async refreshAdvisorConfigs(refreshAgents = false): Promise<void> {
+		if (!this.#discoverAdvisorConfigs) return;
+		const discovered = await this.#discoverAdvisorConfigs(this.sessionManager.getCwd(), refreshAgents);
+		this.applyAdvisorConfigs(
+			discovered.advisors,
+			discovered.sharedInstructions,
+			discovered.sharedMaxNotesPerUpdate,
+			discovered.explicitSelection || discovered.hasConfiguredRoster,
+		);
 	}
 
 	/** Parent-imported extension factories, forwarded to session forks (`/tan`) to rebind runtime providers. */
@@ -1214,6 +1232,7 @@ export class AgentSession {
 
 	constructor(config: AgentSessionConfig) {
 		this.agent = config.agent;
+		this.#discoverAdvisorConfigs = config.discoverAdvisorConfigs;
 		this.#codeModeState = config.codeModeState ?? {};
 		this.sessionManager = config.sessionManager;
 		this.settings = config.settings;
@@ -1769,6 +1788,7 @@ export class AgentSession {
 		};
 		this.#advisors = new SessionAdvisors(advisorsHost, {
 			enabled: this.settings.get("advisor.enabled"),
+			agentName: config.agentName,
 			tools: config.advisorTools,
 			createGrepTool: config.advisorCreateGrepTool,
 			createEditTool: config.advisorCreateEditTool,
@@ -1780,6 +1800,7 @@ export class AgentSession {
 			contextPrompt: config.advisorContextPrompt,
 			memoryPrompt: config.advisorMemoryPrompt,
 			configs: config.advisorConfigs,
+			explicitSelection: config.advisorExplicitSelection,
 			streamFn: config.advisorStreamFn,
 			transformProviderContext: config.transformProviderContext,
 		});
@@ -5262,8 +5283,9 @@ export class AgentSession {
 	}
 
 	/** Rediscovers reloadable skills and refreshes prompt metadata. */
-	refreshSkills(): Promise<void> {
-		return this.#tools.refreshSkills();
+	async refreshSkills(refreshAgents = false): Promise<void> {
+		await this.#tools.refreshSkills();
+		await this.refreshAdvisorConfigs(refreshAgents);
 	}
 
 	/**
@@ -8898,6 +8920,7 @@ export class AgentSession {
 		if (!sessionFile) return;
 		const switched = await this.switchSession(sessionFile);
 		if (!switched) throw new Error("Session reload cancelled");
+		await this.refreshAdvisorConfigs(true);
 	}
 	/**
 	 * Switch to a different session file.
@@ -10635,8 +10658,14 @@ export class AgentSession {
 		advisors: AdvisorConfig[],
 		sharedInstructions: string | undefined,
 		sharedMaxNotesPerUpdate?: number,
+		explicitSelection = false,
 	): number {
-		return this.#advisors.applyAdvisorConfigs(advisors, sharedInstructions, sharedMaxNotesPerUpdate);
+		return this.#advisors.applyAdvisorConfigs(
+			advisors,
+			sharedInstructions,
+			sharedMaxNotesPerUpdate,
+			explicitSelection,
+		);
 	}
 
 	/**

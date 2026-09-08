@@ -255,7 +255,10 @@ Later project files sit closer to the end of the advisor prompt, so narrower dir
 
 ## WATCHDOG.yml
 
-`WATCHDOG.yml` (or `WATCHDOG.yaml`) is the advisor roster. Where `WATCHDOG.md` supplies review priorities, `WATCHDOG.yml` declares the advisors themselves — one entry per name, each with its own enable flag, model, tool grant, and specialization prompt. The interactive `/advisor configure` overlay edits this file in place. Files that fail to parse or fail schema validation are logged and skipped so one bad project config cannot kill the session.
+`WATCHDOG.yml` (or `WATCHDOG.yaml`) defines shared watchdogs and roster assignments.
+Agent frontmatter can also bundle watchdog definitions and select watchdogs by ID.
+`WATCHDOG.md` supplies the shared review instructions.
+The `/advisor configure` overlay edits roster definitions; edit references and agent watchdogs in their source files.
 
 Example:
 
@@ -266,6 +269,7 @@ instructions: |
 advisors:
   - name: Architecture
     enabled: true
+    agents: [main]
     model: anthropic/claude-sonnet-4-5:medium
     tools: [read, grep, glob]
     instructions: |
@@ -282,15 +286,18 @@ advisors:
 Fields:
 
 - `instructions` (top level): shared prompt prepended to every advisor's system prompt alongside `WATCHDOG.md`. Concatenated across all discovered `WATCHDOG.yml` files.
-- `advisors[].name`: human label; slugified for the session id and its `__advisor.<slug>.jsonl` filename. Duplicate slugs across files are resolved by the same specificity rule as `WATCHDOG.md` discovery (project leaf > project ancestor > user).
+- `advisors[].id`: optional stable ID. Shared definitions use the qualified ID `global/<id>`. Without an ID, OMP uses the name's slug.
+- `advisors[].name`: display label. A more-specific file replaces an earlier definition with the same ID.
+- `advisors[].ref`: qualified ID of a shared or agent-bundled definition. A reference accepts `agents` and `enabled`, but cannot also contain definition fields.
 - `advisors[].enabled`: optional per-advisor switch, default `true`. `false` leaves the advisor visible as paused in status/configuration.
+- `advisors[].agents`: optional list of exact agent definition names. Omitted → all sessions; `[]` → no sessions. Names are trimmed and matched case-insensitively, without wildcards. `main` selects the primary session. Use definition names such as `task`, not generated worker IDs or model-role names.
 - `advisors[].model`: optional model selector with optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`). Omitted → the advisor uses `modelRoles.advisor`.
 - `advisors[].tools`: optional list of built-in tool names to grant. Omitted → the default `read`/`grep`/`glob` subset; explicit `[]` → no investigative tools. Any name in [`BUILTIN_TOOL_NAMES`](../packages/coding-agent/src/tools/builtin-names.ts) is accepted, including mutating tools. Legacy aliases (`search`→`grep`, `find`→`glob`) are normalized. Unknown names are dropped with a warning; if that leaves a nonempty input with no valid names, the implementation currently treats the result as omitted and uses the default subset.
 - `advisors[].instructions`: this advisor's specialization, appended after the shared baseline. Both instruction fields expand `@path` imports like `WATCHDOG.md`.
 
 ### Discovery locations
 
-`WATCHDOG.yml`/`WATCHDOG.yaml` share the same user + project search path as `WATCHDOG.md`: the user-level `<active agent dir>/WATCHDOG.yml` plus every `WATCHDOG.yml`/`.omp/WATCHDOG.yml` encountered while walking from `cwd` up to the repository root (or the home directory when no repo root is found). All discovered files are loaded together; a more-specific file (project leaf > project ancestor > user) replaces an earlier entry with the same advisor slug.
+`WATCHDOG.yml`/`WATCHDOG.yaml` share the same user + project search path as `WATCHDOG.md`: the user-level `<active agent dir>/WATCHDOG.yml` plus every `WATCHDOG.yml`/`.omp/WATCHDOG.yml` encountered while walking from `cwd` up to the repository root (or the home directory when no repo root is found). All discovered files are loaded together; a more-specific file (project leaf > project ancestor > user) replaces an earlier entry with the same watchdog ID.
 
 ## Subagents
 
@@ -298,10 +305,106 @@ Subagents run unadvised by default; advisors are opted in **per agent** instead 
 
 - Agent definition frontmatter `advisor`: `true` advises spawned sessions of that agent with the model resolved for the `advisor` role; a string (e.g. `advisor: "deepseek/deepseek-v4-flash"` or `advisor: "@smol:high"`) sets an explicit advisor model pattern with an optional `:level` thinking suffix.
 - The `task.agentAdvisor` settings record (agent name → `"on"` / `"off"` / model pattern) overrides the frontmatter, and is configured per agent from the `/agents` hub: Enter on an agent opens its property strip; the advisor strip offers on/off, a model-browser pick, or a raw pattern.
+- A nonempty frontmatter `watchdogs` list enables advisors when `advisor` is absent. Explicit `advisor: false` disables this implicit enrollment.
+- `task.agentAdvisor` remains authoritative, including `"off"` for an agent with bundled watchdogs.
 
 The legacy `advisor.subagents: true` setting migrates to `task.agentAdvisor: { task: "on" }` — the bundled generic `task` agent keeps its advisor, other agents start unadvised.
 
 An advised subagent session builds its own advisor subsystem with the same settings/model-role resolution (an explicit pattern lands on the spawned session's `modelRoles.advisor`), then reruns both `WATCHDOG.md` and `WATCHDOG.yml` discovery for that subagent session's `cwd` and agent directory. Subagent advisors remain isolated from the subagent's primary tool session in the same way the main advisor is isolated from the main agent.
+
+### Bundle watchdogs with an agent
+
+An agent's `watchdogs` list accepts complete definitions and references:
+
+```yaml
+---
+name: implementer
+description: Implement an approved design.
+watchdogs:
+  - id: design-match
+    name: Design Match
+    model: "@smol:low"
+    tools: [read, grep, glob]
+    instructions: |
+      Check the implementation against the approved design.
+      Report mismatches with file and line evidence.
+  - ref: global/scope
+---
+Implement the assigned design and report verification evidence.
+```
+
+Define the shared watchdog in a project or user `WATCHDOG.yml`:
+
+```yaml
+advisors:
+  - id: scope
+    name: Scope
+    agents: [main]
+    tools: [read, grep, glob]
+    instructions: |
+      Check changes against the user's authorized scope.
+```
+
+The implementer selects `implementer/design-match` and `global/scope`.
+Its explicit reference selects Scope despite that shared entry's `agents: [main]` assignment.
+The inline `model` selects the watchdog's model, not the implementer's model.
+In this example, `@smol` resolves the configured `smol` role and `:low` sets its thinking level.
+Quote role selectors in YAML.
+
+| Watchdog `model` | Resolution |
+| --- | --- |
+| Omitted | Use the agent session's default advisor model. |
+| `"@advisor"` | Resolve the session's `advisor` role. |
+| `"@smol:low"` | Resolve the `smol` role with low thinking. |
+| `"anthropic/claude-sonnet-4-5:high"` | Select that provider/model with high thinking. |
+
+Agent-level `advisor: "<selector>"` sets the default for watchdogs that omit `model`.
+A model selector in `task.agentAdvisor[agentName]` overrides that agent-level default.
+An explicit watchdog `model` overrides both defaults.
+References use the referenced definition's model and cannot specify a separate `model`.
+See [model selectors](./models.md#runtime-model-resolution) for supported selector forms.
+
+Inline definitions accept `id`, `name`, `enabled`, `model`, `tools`, `instructions`, and `maxNotesPerUpdate`.
+The name defaults to the local ID.
+Relative `@path` instruction imports resolve beside the defining agent file.
+Shared definitions resolve imports beside their YAML file.
+
+### Select watchdogs by ID
+
+Inline IDs are qualified with the owning agent's name: `implementer/design-match`.
+Shared IDs use `global/`, including project-level definitions.
+IDs are case-insensitive; local IDs use letters, digits, and separating hyphens.
+References use the full qualified ID.
+
+A roster can reuse a bundled watchdog without starting its owning agent:
+
+```yaml
+advisors:
+  - ref: implementer/design-match
+    agents: [builder]
+```
+
+The owning agent must be discoverable.
+References resolve definitions, not other references.
+OMP reports invalid or missing references instead of substituting a default watchdog.
+Duplicate selections of the same ID create one runtime.
+Different IDs remain distinct even when their display names match.
+
+| Agent configuration | Selection |
+| --- | --- |
+| Nonempty `watchdogs` list | Use exactly that list, not additional roster assignments. |
+| `watchdogs: []` | Select none, including when advisors are enabled manually. |
+| No `watchdogs` field | Use roster entries whose `agents` match the session. |
+
+For roster assignments, omitted `agents` matches every enrolled session; `agents: []` matches none.
+Use `main` for the primary session and agent definition names for workers.
+Names are case-insensitive; wildcards and generated worker IDs are not selectors.
+A nonempty roster with no matching assignments creates no advisors.
+A missing or empty roster retains the legacy default when the agent has no explicit selection.
+
+OMP selects watchdogs before resolving models and creating runtimes.
+Changing the session model does not change its agent identity.
+The configuration editor preserves IDs, references, and selectors when saving.
 
 ## Cost and context behavior
 

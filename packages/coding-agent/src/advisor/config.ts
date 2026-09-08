@@ -7,6 +7,9 @@ import { expandAtImports } from "../discovery/at-imports";
 import { BUILTIN_TOOL_NAMES, normalizeToolNames } from "../tools/builtin-names";
 import { collectConfigCandidates } from "./watchdog";
 
+/** @internal Name-derived transcript identity retained for roster entries without an authored ID. */
+export const kAdvisorLegacyTranscriptSlug = Symbol("advisor.legacyTranscriptSlug");
+
 /**
  * One advisor declared in a `WATCHDOG.yml` file. `model` is a model selector
  * with an optional `:level` thinking suffix (e.g. `x-ai/grok-code-fast:high`),
@@ -18,10 +21,18 @@ import { collectConfigCandidates } from "./watchdog";
  * tools. `instructions` is the advisor's specialization, appended to the shared
  * baseline.
  */
+
 export interface AdvisorConfig {
+	/** Canonical namespace/id after discovery; a local ID in an editable YAML definition. */
+	id?: string;
+	/** @internal Present only when discovery synthesized {@link id} from {@link name}. */
+	[kAdvisorLegacyTranscriptSlug]?: string;
+	ref?: never;
 	name: string;
 	model?: string;
 	tools?: string[];
+	/** Exact session agent names (case-insensitive, trimmed). Omitted matches all; [] matches none. */
+	agents?: string[];
 	instructions?: string;
 	/** Per-advisor on/off toggle (default `true`). When `false`, the advisor
 	 *  stays in the roster but its runtime is never built — it shows `○` in
@@ -32,6 +43,92 @@ export interface AdvisorConfig {
 	 * update (default `4`). Blockers are exempt from the budget.
 	 */
 	maxNotesPerUpdate?: number;
+}
+
+export type AgentWatchdog = (Omit<AdvisorConfig, "name" | "agents"> & { id: string; name?: string }) | { ref: string };
+
+export interface WatchdogReference {
+	ref: string;
+	agents?: string[];
+	enabled?: boolean;
+	id?: never;
+	name?: never;
+	model?: never;
+	tools?: never;
+	instructions?: never;
+	maxNotesPerUpdate?: never;
+}
+
+export type WatchdogRosterEntry = AdvisorConfig | WatchdogReference;
+
+function normalizeWatchdogId(value: string): string {
+	const id = value.trim().toLowerCase();
+	if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(id)) {
+		throw new Error(`Invalid watchdog ID "${value}": expected a safe hyphenated slug`);
+	}
+	return id;
+}
+
+function normalizeWatchdogRef(value: string): string {
+	const reference = value.trim();
+	const separator = reference.lastIndexOf("/");
+	if (separator < 1) throw new Error(`Invalid watchdog reference "${value}": expected namespace/id`);
+	const namespace = reference.slice(0, separator).trim().toLowerCase();
+	if (!namespace) throw new Error(`Invalid watchdog reference "${value}": expected namespace/id`);
+	return `${namespace}/${normalizeWatchdogId(reference.slice(separator + 1))}`;
+}
+
+function validateReference(value: Record<string, unknown>, allowed: readonly string[]): void {
+	if (typeof value.ref !== "string") throw new Error("Watchdog reference must be a string");
+	normalizeWatchdogRef(value.ref);
+	for (const key of Object.keys(value)) {
+		if (!allowed.includes(key)) throw new Error(`Watchdog reference "${value.ref}" cannot contain "${key}"`);
+	}
+}
+
+export class AgentWatchdogConfigError extends Error {
+	override name = "AgentWatchdogConfigError";
+}
+
+/** Parse agent frontmatter without losing the distinction between absent and explicitly empty. */
+export function parseAgentWatchdogs(value: unknown): AgentWatchdog[] | undefined {
+	try {
+		return parseAgentWatchdogEntries(value);
+	} catch (error) {
+		throw new AgentWatchdogConfigError(error instanceof Error ? error.message : String(error), { cause: error });
+	}
+}
+
+function parseAgentWatchdogEntries(value: unknown): AgentWatchdog[] | undefined {
+	if (value === undefined) return undefined;
+	if (!Array.isArray(value)) throw new Error("Agent watchdogs must be an array");
+	const ids = new Set<string>();
+	return value.map((entry, index) => {
+		if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+			throw new Error(`Agent watchdogs[${index}] must be a definition or reference`);
+		}
+		if ("ref" in entry) {
+			validateReference(entry, ["ref"]);
+			return { ref: normalizeWatchdogRef(entry.ref) };
+		}
+		if (typeof entry.id !== "string") throw new Error(`Agent watchdogs[${index}] requires an id`);
+		const id = normalizeWatchdogId(entry.id);
+		if (ids.has(id)) throw new Error(`Duplicate agent watchdog ID "${id}"`);
+		ids.add(id);
+		for (const key of Object.keys(entry)) {
+			if (!["id", "name", "model", "tools", "instructions", "enabled", "maxNotesPerUpdate"].includes(key)) {
+				throw new Error(`Agent watchdog "${id}" has unsupported field "${key}"`);
+			}
+		}
+		const result = advisorEntrySchema({ ...entry, id, name: entry.name ?? id });
+		if (result instanceof type.errors) throw new Error(`Agent watchdog "${id}": ${result.summary}`);
+		return { ...result, id };
+	});
+}
+
+export interface AdvisorDiscoveryOptions {
+	agentName?: string;
+	agentDefinitions?: readonly { name: string; filePath?: string; watchdogs?: AgentWatchdog[] }[];
 }
 
 /**
@@ -54,21 +151,31 @@ export interface DiscoveredAdvisors {
 	advisors: AdvisorConfig[];
 	sharedInstructions: string | undefined;
 	sharedMaxNotesPerUpdate?: number;
+	explicitSelection?: boolean;
+	hasConfiguredRoster?: boolean;
 }
 
 const advisorEntrySchema = type({
 	name: "string",
+	"id?": "string",
 	"model?": "string",
 	"tools?": "string[]",
+	"agents?": "string[]",
 	"instructions?": "string",
 	"enabled?": "boolean",
 	"maxNotesPerUpdate?": "number",
 });
 
+const watchdogReferenceSchema = type({
+	ref: "string",
+	"agents?": "string[]",
+	"enabled?": "boolean",
+});
+
 const watchdogYamlSchema = type({
 	"instructions?": "string",
 	"maxNotesPerUpdate?": "number",
-	"advisors?": advisorEntrySchema.array(),
+	"advisors?": advisorEntrySchema.or(watchdogReferenceSchema).array(),
 });
 
 /**
@@ -135,19 +242,33 @@ function filterAdvisorTools(tools: string[] | undefined, sourcePath: string): st
 	return filtered.length > 0 ? filtered : undefined;
 }
 
-/**
- * Discover advisor configs from `WATCHDOG.yml`/`WATCHDOG.yaml` files on the same
- * user + project search path as `WATCHDOG.md`. Advisors are keyed by slug; a
- * more-specific file (project leaf > project ancestor > user) replaces an earlier
- * entry with the same slug. Top-level `instructions` across all files concatenate
- * into the shared baseline. A malformed file is logged and skipped — never
- * thrown — so a bad project config can't kill the session.
- */
-export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Promise<DiscoveredAdvisors> {
+/** Resolve definitions first, then assignments, so references never depend on declaration order. */
+export async function discoverAdvisorConfigs(
+	cwd: string,
+	agentDir?: string,
+	options: AdvisorDiscoveryOptions = {},
+): Promise<DiscoveredAdvisors> {
 	const items = await collectConfigCandidates(cwd, agentDir, ["WATCHDOG.yml", "WATCHDOG.yaml"]);
-	const advisors = new Map<string, AdvisorConfig>();
+	const definitions = new Map<string, { entry: AdvisorConfig; source: string }>();
+	const assignments = new Map<string, { entry: WatchdogRosterEntry; source: string }>();
 	const sharedParts: string[] = [];
 	let sharedMaxNotesPerUpdate: number | undefined;
+	const materialize = async (entry: AdvisorConfig, id: string, source: string): Promise<AdvisorConfig> => ({
+		...entry,
+		id,
+		...(entry.id === undefined ? { [kAdvisorLegacyTranscriptSlug]: slugifyAdvisorName(entry.name) } : {}),
+		model: entry.model?.trim() || undefined,
+		tools: filterAdvisorTools(entry.tools, source),
+		instructions: entry.instructions?.trim()
+			? (await expandAtImports(entry.instructions, source)).trim() || undefined
+			: undefined,
+		maxNotesPerUpdate:
+			typeof entry.maxNotesPerUpdate === "number" &&
+			Number.isFinite(entry.maxNotesPerUpdate) &&
+			entry.maxNotesPerUpdate >= 1
+				? Math.trunc(entry.maxNotesPerUpdate)
+				: undefined,
+	});
 	for (const item of items) {
 		let parsed: unknown;
 		try {
@@ -156,21 +277,16 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 			logger.warn("Advisor config: failed to parse YAML", { path: item.path, error: String(err) });
 			continue;
 		}
-		if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-			logger.warn("Advisor config: expected a YAML mapping", { path: item.path });
-			continue;
-		}
+		validateRosterReferences(parsed, item.path);
 		const result = watchdogYamlSchema(parsed);
 		if (result instanceof type.errors) {
 			logger.warn("Advisor config: invalid schema", { path: item.path, error: result.summary });
 			continue;
 		}
-
 		if (result.instructions?.trim()) {
 			const expanded = (await expandAtImports(result.instructions, item.path)).trim();
 			if (expanded) sharedParts.push(expanded);
 		}
-
 		if (
 			typeof result.maxNotesPerUpdate === "number" &&
 			Number.isFinite(result.maxNotesPerUpdate) &&
@@ -178,33 +294,101 @@ export async function discoverAdvisorConfigs(cwd: string, agentDir?: string): Pr
 		) {
 			sharedMaxNotesPerUpdate = Math.trunc(result.maxNotesPerUpdate);
 		}
-
+		const localIds = new Set<string>();
 		for (const entry of result.advisors ?? []) {
-			const slug = slugifyAdvisorName(entry.name);
-			const instructions = entry.instructions?.trim()
-				? (await expandAtImports(entry.instructions, item.path)).trim() || undefined
-				: undefined;
-			advisors.set(slug, {
-				name: entry.name,
-				model: entry.model?.trim() || undefined,
-				tools: filterAdvisorTools(entry.tools, item.path),
-				instructions,
-				enabled: entry.enabled,
-				maxNotesPerUpdate:
-					typeof entry.maxNotesPerUpdate === "number" &&
-					Number.isFinite(entry.maxNotesPerUpdate) &&
-					entry.maxNotesPerUpdate >= 1
-						? Math.trunc(entry.maxNotesPerUpdate)
-						: undefined,
+			if ("ref" in entry) {
+				assignments.set(normalizeWatchdogRef(entry.ref), { entry, source: item.path });
+				continue;
+			}
+			const id = `global/${entry.id === undefined ? slugifyAdvisorName(entry.name) : normalizeWatchdogId(entry.id)}`;
+			if (localIds.has(id)) throw new Error(`${item.path}: duplicate watchdog ID "${id}"`);
+			localIds.add(id);
+			definitions.set(id, { entry, source: item.path });
+			assignments.set(id, { entry: { ref: id, agents: entry.agents, enabled: entry.enabled }, source: item.path });
+		}
+	}
+	let selected: AgentWatchdog[] | undefined;
+	let selectedNamespace: string | undefined;
+	let selectedSource = "Agent watchdogs";
+	for (const agent of options.agentDefinitions ?? []) {
+		const watchdogs = parseAgentWatchdogs(agent.watchdogs);
+		if (watchdogs === undefined) continue;
+		const namespace = agent.name.trim().toLowerCase();
+		if (namespace === "global") throw new Error('Agent watchdog namespace "global" is reserved');
+		if (agent.name.trim().toLowerCase() === options.agentName?.trim().toLowerCase()) {
+			selected = watchdogs;
+			selectedNamespace = namespace;
+			selectedSource = agent.filePath ?? `Agent "${agent.name}"`;
+		}
+		for (const entry of watchdogs) {
+			if (entry.ref !== undefined) continue;
+			const id = `${namespace}/${entry.id}`;
+			if (definitions.has(id)) throw new Error(`Duplicate watchdog ID "${id}"`);
+			definitions.set(id, {
+				entry: { ...entry, name: entry.name ?? entry.id },
+				source: agent.filePath ?? path.join(cwd, "AGENT.md"),
 			});
 		}
 	}
-
+	const resolved = new Map<string, AdvisorConfig>();
+	const resolve = async (id: string, source: string): Promise<AdvisorConfig> => {
+		const cached = resolved.get(id);
+		if (cached) return cached;
+		const definition = definitions.get(id);
+		if (!definition) throw new Error(`${source}: Unknown watchdog reference "${id}"`);
+		return materialize(definition.entry, id, definition.source);
+	};
+	if (selected !== undefined) {
+		for (const entry of selected) {
+			const id = entry.ref !== undefined ? entry.ref : `${selectedNamespace}/${entry.id}`;
+			if (resolved.has(id)) continue;
+			// Explicit selection replaces global assignments and their agent selectors.
+			resolved.set(id, { ...(await resolve(id, selectedSource)), agents: undefined });
+		}
+	} else {
+		const agentName = options.agentName?.trim().toLowerCase();
+		for (const [id, { entry: assignment, source }] of assignments) {
+			if (
+				agentName !== undefined &&
+				assignment.agents !== undefined &&
+				!assignment.agents.some(name => name.trim().toLowerCase() === agentName)
+			)
+				continue;
+			if (assignment.enabled === false && !definitions.has(id)) continue;
+			const definition = await resolve(id, source);
+			resolved.set(id, {
+				...definition,
+				agents: assignment.agents,
+				enabled: assignment.enabled ?? definition.enabled,
+			});
+		}
+	}
 	return {
-		advisors: [...advisors.values()],
+		advisors: [...resolved.values()],
 		sharedInstructions: sharedParts.length > 0 ? sharedParts.join("\n\n") : undefined,
 		sharedMaxNotesPerUpdate,
+		explicitSelection: selected !== undefined,
+		hasConfiguredRoster: assignments.size > 0,
 	};
+}
+
+function validateRosterReferences(value: unknown, source: string): void {
+	if (!value || typeof value !== "object" || !("advisors" in value) || !Array.isArray(value.advisors)) return;
+	for (const entry of value.advisors) {
+		if (!entry || typeof entry !== "object") continue;
+		try {
+			if ("ref" in entry) {
+				validateReference(entry, ["ref", "agents", "enabled"]);
+				const result = watchdogReferenceSchema(entry);
+				if (result instanceof type.errors) throw new Error(result.summary);
+			} else if ("id" in entry) {
+				if (typeof entry.id !== "string") throw new Error("Watchdog ID must be a string");
+				normalizeWatchdogId(entry.id);
+			}
+		} catch (err) {
+			throw new Error(`${source}: ${err instanceof Error ? err.message : String(err)}`);
+		}
+	}
 }
 
 /** Which level a `WATCHDOG.yml` lives at: the project root or the user agent dir. */
@@ -219,7 +403,7 @@ export type AdvisorConfigScope = "project" | "user";
 export interface WatchdogConfigDoc {
 	instructions?: string;
 	maxNotesPerUpdate?: number;
-	advisors: AdvisorConfig[];
+	advisors: WatchdogRosterEntry[];
 }
 
 /**
@@ -253,8 +437,8 @@ export async function resolveAdvisorConfigEditPath(
 
 /**
  * Load one `WATCHDOG.yml` file for editing — raw, un-merged, un-expanded. Missing,
- * unparseable, or schema-invalid files yield an empty doc (never throws) so the
- * editor opens cleanly on a fresh or broken file.
+ * unparseable, or legacy schema-invalid files yield an empty doc. Invalid IDs and
+ * reference declarations throw so editing cannot silently erase those selections.
  */
 export async function loadWatchdogConfigFile(filePath: string): Promise<WatchdogConfigDoc> {
 	let text: string;
@@ -273,15 +457,20 @@ export async function loadWatchdogConfigFile(filePath: string): Promise<Watchdog
 		return { advisors: [] };
 	}
 	if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return { advisors: [] };
+	validateRosterReferences(parsed, filePath);
 	const result = watchdogYamlSchema(parsed);
 	if (result instanceof type.errors) {
 		logger.warn("Advisor config: invalid schema for edit", { path: filePath, error: result.summary });
 		return { advisors: [] };
 	}
-	const advisors = (result.advisors ?? []).map(a => {
+	const advisors = (result.advisors ?? []).map((a): WatchdogRosterEntry => {
+		if ("ref" in a) return { ...a };
+		if (a.id !== undefined) normalizeWatchdogId(a.id);
 		const advisor: AdvisorConfig = { name: a.name };
+		if (a.id !== undefined) advisor.id = a.id;
 		if (a.model?.trim()) advisor.model = a.model;
 		if (a.tools !== undefined) advisor.tools = [...a.tools];
+		if (a.agents !== undefined) advisor.agents = [...a.agents];
 		if (a.instructions?.trim()) advisor.instructions = a.instructions;
 		if (a.enabled !== undefined) advisor.enabled = a.enabled;
 		if (typeof a.maxNotesPerUpdate === "number" && Number.isFinite(a.maxNotesPerUpdate) && a.maxNotesPerUpdate >= 1) {
@@ -343,8 +532,27 @@ export function serializeWatchdogConfig(doc: WatchdogConfigDoc): string {
 	if (doc.advisors.length > 0) {
 		lines.push("advisors:");
 		for (const advisor of doc.advisors) {
-			lines.push(`  - name: ${YAML.stringify(advisor.name)}`);
+			if (advisor.ref !== undefined) {
+				validateReference(advisor as unknown as Record<string, unknown>, ["ref", "agents", "enabled"]);
+				lines.push(`  - ref: ${YAML.stringify(advisor.ref)}`);
+			} else {
+				lines.push(`  - name: ${YAML.stringify(advisor.name)}`);
+				if (advisor.id !== undefined) {
+					normalizeWatchdogId(advisor.id);
+					lines.push(`    id: ${YAML.stringify(advisor.id)}`);
+				}
+			}
 			if (advisor.model?.trim()) lines.push(`    model: ${YAML.stringify(advisor.model)}`);
+			if (advisor.agents !== undefined) {
+				if (advisor.agents.length === 0) {
+					lines.push("    agents: []");
+				} else {
+					lines.push("    agents:");
+					for (const agent of advisor.agents) {
+						lines.push(`      - ${YAML.stringify(agent)}`);
+					}
+				}
+			}
 			if (advisor.tools !== undefined) {
 				if (advisor.tools.length === 0) {
 					lines.push("    tools: []");

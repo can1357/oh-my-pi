@@ -9,7 +9,6 @@ import { Loader, Spacer, setTuiTight, Text } from "@oh-my-pi/pi-tui";
 import { getAgentDbPath, getAgentDir, getProjectDir, normalizePathForComparison } from "@oh-my-pi/pi-utils";
 import {
 	type AdvisorConfigScope,
-	discoverAdvisorConfigs,
 	loadWatchdogConfigFile,
 	resolveAdvisorConfigEditPath,
 	saveWatchdogConfigFile,
@@ -355,11 +354,12 @@ export class SelectorController {
 					await saveWatchdogConfigFile(await resolveAdvisorConfigEditPath(scope, dirs), doc);
 					// Re-discover the merged roster (project + user) so the live advisors
 					// reflect cross-level precedence, not just the edited file.
-					const discovered = await discoverAdvisorConfigs(cwd, agentDir);
+					const discovered = await this.ctx.session.discoverAdvisorConfigs();
 					const count = this.ctx.session.applyAdvisorConfigs(
 						discovered.advisors,
 						discovered.sharedInstructions,
 						discovered.sharedMaxNotesPerUpdate,
+						discovered.explicitSelection || discovered.hasConfiguredRoster,
 					);
 					this.ctx.statusLine.invalidate();
 					this.ctx.showStatus(

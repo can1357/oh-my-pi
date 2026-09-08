@@ -11,6 +11,7 @@ import {
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
+import { type AgentWatchdog, parseAgentWatchdogs } from "../advisor/config";
 import { isUserSourceEnabled } from "../capability";
 import type { ContextFile } from "../capability/context-file";
 import type { ExtensionModule } from "../capability/extension-module";
@@ -299,6 +300,12 @@ export interface ParsedAgentFields {
 	prewalk?: boolean | string;
 	/** `true` = advise with the default advisor-role model; string = advise with that model pattern. */
 	advisor?: boolean | string;
+	watchdogs?: AgentWatchdog[];
+}
+
+/** Canonical namespace used for watchdog definitions declared by an agent. */
+export function normalizeAgentWatchdogNamespace(name: string): string {
+	return name.trim().toLowerCase();
 }
 
 /**
@@ -320,6 +327,9 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	// `agents: [sub]` that are documented to target only that session kind.
 	const normalizedName = name.trim().toLowerCase();
 	if (normalizedName === MAIN_AGENT_RULE_NAME || normalizedName === SUB_AGENT_RULE_NAME) {
+		return null;
+	}
+	if (normalizedName === "global" && frontmatter.watchdogs !== undefined) {
 		return null;
 	}
 
@@ -392,6 +402,7 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 		readSummarize,
 		prewalk,
 		advisor,
+		watchdogs: parseAgentWatchdogs(frontmatter.watchdogs),
 	};
 }
 

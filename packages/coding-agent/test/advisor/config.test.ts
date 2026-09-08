@@ -7,6 +7,7 @@ import {
 	discoverAdvisorConfigs,
 	getOrCreateAdvisorProviderSessionId,
 	loadWatchdogConfigFile,
+	parseAgentWatchdogs,
 	resolveAdvisorConfigEditPath,
 	saveWatchdogConfigFile,
 	serializeWatchdogConfig,
@@ -28,6 +29,136 @@ describe("discoverAdvisorConfigs", () => {
 	afterEach(async () => {
 		await fsp.rm(tmp, { recursive: true, force: true });
 		await fsp.rm(agentDir, { recursive: true, force: true });
+	});
+
+	it("keeps equal display names and local IDs distinct across agent namespaces", async () => {
+		const result = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "one",
+			agentDefinitions: [
+				{ name: "one", watchdogs: [{ id: "check", name: "Review" }, { ref: "two/check" }] },
+				{ name: "two", watchdogs: [{ id: "check", name: "Review" }] },
+			],
+		});
+		expect(result.advisors.map(a => [a.id, a.name])).toEqual([
+			["one/check", "Review"],
+			["two/check", "Review"],
+		]);
+	});
+
+	it("preserves valid agent names without lossy namespace collisions", async () => {
+		const names = ["Code Reviewer", "code_reviewer", "code-reviewer", "team/reviewer"];
+		const agentDefinitions = names.map(name => ({
+			name,
+			watchdogs: [{ id: "check", instructions: name }],
+		}));
+		const unrelated = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "main",
+			agentDefinitions,
+		});
+		expect(unrelated.advisors).toEqual([]);
+		const inline = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "Code Reviewer",
+			agentDefinitions,
+		});
+		expect(inline.advisors.map(advisor => advisor.instructions)).toEqual(["Code Reviewer"]);
+		const consumer = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "consumer",
+			agentDefinitions: [
+				...agentDefinitions,
+				{
+					name: "consumer",
+					watchdogs: names.map(name => ({ ref: `${name}/check` })),
+				},
+			],
+		});
+		expect(consumer.advisors.map(advisor => [advisor.id, advisor.instructions])).toEqual(
+			names.map(name => [`${name.toLowerCase()}/check`, name]),
+		);
+	});
+
+	it("resolves explicit shared IDs through project precedence and deduplicates references", async () => {
+		await saveWatchdogConfigFile(path.join(agentDir, "WATCHDOG.yml"), {
+			advisors: [{ id: "check", name: "User name", instructions: "User" }],
+		});
+		await saveWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"), {
+			instructions: "Shared",
+			advisors: [{ id: "check", name: "Project name", instructions: "Project", agents: [] }, { name: "Unselected" }],
+		});
+		const result = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "worker",
+			agentDefinitions: [{ name: "worker", watchdogs: [{ ref: " GLOBAL/CHECK " }, { ref: "global/check" }] }],
+		});
+		expect(result.advisors.map(a => [a.id, a.name, a.instructions, a.agents])).toEqual([
+			["global/check", "Project name", "Project", undefined],
+		]);
+		expect(result.sharedInstructions).toBe("Shared");
+	});
+
+	it("rejects missing selected references without activating ordinary assignments", async () => {
+		await saveWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"), { advisors: [{ name: "Ordinary" }] });
+		await expect(
+			discoverAdvisorConfigs(tmp, agentDir, {
+				agentName: "worker",
+				agentDefinitions: [{ name: "worker", watchdogs: [{ ref: "global/missing" }] }],
+			}),
+		).rejects.toThrow("global/missing");
+	});
+
+	it("does not resolve unrelated agent references or unselected roster assignments", async () => {
+		await saveWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"), {
+			advisors: [{ ref: "global/missing", agents: ["other"] }, { name: "Ordinary" }],
+		});
+		const result = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "main",
+			agentDefinitions: [{ name: "other", watchdogs: [{ ref: "global/also-missing" }] }],
+		});
+		expect(result.advisors.map(a => a.id)).toEqual(["global/ordinary"]);
+	});
+
+	it("retains explicit empty selection and shared baseline", async () => {
+		await saveWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"), {
+			instructions: "Shared",
+			advisors: [{ name: "Ordinary" }],
+		});
+		const result = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "worker",
+			agentDefinitions: [{ name: "worker", watchdogs: [] }],
+		});
+		expect(result.advisors).toEqual([]);
+		expect(result.explicitSelection).toBe(true);
+		expect(result.sharedInstructions).toBe("Shared");
+	});
+
+	it("resolves inline imports relative to the defining agent rather than the selected agent", async () => {
+		const sourceDir = path.join(tmp, "definitions");
+		await fsp.mkdir(sourceDir);
+		await Bun.write(path.join(sourceDir, "review.md"), "Source-relative review");
+		const result = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "consumer",
+			agentDefinitions: [
+				{ name: "consumer", watchdogs: [{ ref: "owner/check" }] },
+				{
+					name: "owner",
+					filePath: path.join(sourceDir, "owner.md"),
+					watchdogs: [{ id: "check", instructions: "@review.md" }],
+				},
+			],
+		});
+		expect(result.advisors[0].instructions).toContain("Source-relative review");
+	});
+
+	it("rejects normalized duplicate IDs and mixed reference definitions", () => {
+		expect(() => parseAgentWatchdogs([{ id: " CHECK " }, { id: "check" }])).toThrow("Duplicate");
+		expect(() => parseAgentWatchdogs([{ ref: "global/check", model: "override" }])).toThrow("cannot contain");
+		expect(() => parseAgentWatchdogs([{ ref: "owner/" }])).toThrow("Invalid watchdog ID");
+	});
+
+	it("rejects duplicate shared IDs within one file", async () => {
+		await Bun.write(
+			path.join(tmp, "WATCHDOG.yml"),
+			"advisors:\n  - id: check\n    name: First\n  - id: CHECK\n    name: Second\n",
+		);
+		await expect(discoverAdvisorConfigs(tmp, agentDir)).rejects.toThrow("duplicate watchdog ID");
 	});
 
 	it("parses advisors, the model thinking suffix, tool filtering, and shared instructions", async () => {
@@ -76,6 +207,26 @@ describe("discoverAdvisorConfigs", () => {
 		expect(noTools?.tools).toEqual([]);
 		expect(defaultTools?.tools).toBeUndefined();
 		expect(invalidOnly?.tools).toBeUndefined();
+	});
+
+	it("keeps project slug overrides authoritative regardless of agent targeting", async () => {
+		await saveWatchdogConfigFile(path.join(agentDir, "WATCHDOG.yml"), {
+			advisors: [{ name: "Task Execution", agents: ["main"], instructions: "User baseline" }],
+		});
+		await saveWatchdogConfigFile(path.join(tmp, "WATCHDOG.yml"), {
+			advisors: [{ name: "task-execution", agents: ["orc-implementer"], instructions: "Project override" }],
+		});
+		const { advisors } = await discoverAdvisorConfigs(tmp, agentDir);
+		expect(advisors).toMatchObject([
+			{ name: "task-execution", agents: ["orc-implementer"], instructions: "Project override" },
+		]);
+	});
+
+	it("rejects non-list agent selectors at the file boundary", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		await Bun.write(file, "advisors:\n  - name: Scoped\n    agents: main\n");
+		expect((await discoverAdvisorConfigs(tmp, agentDir)).advisors).toEqual([]);
+		expect(await loadWatchdogConfigFile(file)).toEqual({ advisors: [] });
 	});
 
 	it("ignores a malformed YAML file without throwing", async () => {
@@ -202,6 +353,22 @@ describe("WATCHDOG.yml file round-trip", () => {
 		await fsp.rm(tmp, { recursive: true, force: true });
 	});
 
+	it("preserves definition IDs and reference assignments without materializing referenced definitions", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		const original: WatchdogConfigDoc = {
+			advisors: [
+				{ id: "stable-id", name: "Editable display", instructions: "@local.md" },
+				{ ref: "worker/check", agents: ["main"], enabled: false },
+				{ ref: "global/stable-id", agents: [] },
+			],
+		};
+		await saveWatchdogConfigFile(file, original);
+		const edited = await loadWatchdogConfigFile(file);
+		edited.instructions = "Updated baseline";
+		await saveWatchdogConfigFile(file, edited);
+		expect(await loadWatchdogConfigFile(file)).toEqual({ ...original, instructions: "Updated baseline" });
+	});
+
 	const doc: WatchdogConfigDoc = {
 		instructions: 'Shared baseline.\n\nSecond line with: a colon and "quotes".',
 		advisors: [
@@ -219,6 +386,24 @@ describe("WATCHDOG.yml file round-trip", () => {
 		await saveWatchdogConfigFile(file, doc);
 		const loaded = await loadWatchdogConfigFile(file);
 		expect(loaded).toEqual(doc);
+	});
+
+	it("preserves agent selectors through unrelated file edits and discovery", async () => {
+		const file = path.join(tmp, "WATCHDOG.yml");
+		const scopedDoc: WatchdogConfigDoc = {
+			advisors: [
+				{ name: "Primary", agents: [" MAIN ", "operator:#1"] },
+				{ name: "Nobody", agents: [] },
+				{ name: "Everyone" },
+			],
+		};
+		await saveWatchdogConfigFile(file, scopedDoc);
+		const edited = await loadWatchdogConfigFile(file);
+		edited.advisors[0].instructions = "Updated instructions";
+		await saveWatchdogConfigFile(file, edited);
+		const expected = [[" MAIN ", "operator:#1"], [], undefined];
+		expect((await loadWatchdogConfigFile(file)).advisors.map(advisor => advisor.agents)).toEqual(expected);
+		expect((await discoverAdvisorConfigs(tmp, tmp)).advisors.map(advisor => advisor.agents)).toEqual(expected);
 	});
 
 	it("serializes block-style YAML that the discovery path also parses", async () => {

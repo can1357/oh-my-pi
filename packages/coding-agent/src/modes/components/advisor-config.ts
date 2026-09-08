@@ -22,6 +22,7 @@ import {
 	type Component,
 	Input,
 	type MouseRoutable,
+	replaceTabs,
 	routeSgrMouseInput,
 	type SelectItem,
 	SelectList,
@@ -31,9 +32,9 @@ import {
 } from "@oh-my-pi/pi-tui";
 import {
 	ADVISOR_DEFAULT_TOOL_NAMES,
-	type AdvisorConfig,
 	type AdvisorConfigScope,
 	type WatchdogConfigDoc,
+	type WatchdogRosterEntry,
 } from "../../advisor";
 import type { ModelRegistry } from "../../config/model-registry";
 import { formatModelSelectorValue } from "../../config/model-resolver";
@@ -289,7 +290,15 @@ export class AdvisorConfigOverlayComponent implements Component {
 		return wrap(help, bodyWidth).map(line => truncateToWidth(theme.fg("muted", line), bodyWidth));
 	}
 
-	#advisorPreview(advisor: AdvisorConfig, bodyWidth: number): string[] {
+	#advisorPreview(advisor: WatchdogRosterEntry, bodyWidth: number): string[] {
+		if (advisor.ref !== undefined) {
+			return [
+				theme.bold(replaceTabs(advisor.ref)),
+				"",
+				`Enabled: ${advisor.enabled === undefined ? "definition default" : advisor.enabled ? "on" : "off"}`,
+				"Definition is managed at its source; this entry only assigns it.",
+			].flatMap(line => wrap(line, bodyWidth));
+		}
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
 		const lines = [
@@ -357,15 +366,19 @@ export class AdvisorConfigOverlayComponent implements Component {
 		const advisor = doc.advisors[0];
 		return (
 			advisor?.name === "default" &&
+			advisor.id === undefined &&
+			advisor.ref === undefined &&
 			!advisor.model?.trim() &&
 			advisor.tools === undefined &&
+			advisor.agents === undefined &&
 			!advisor.instructions?.trim() &&
 			advisor.enabled !== false &&
 			advisor.maxNotesPerUpdate === undefined
 		);
 	}
 
-	#advisorSummary(advisor: AdvisorConfig): string {
+	#advisorSummary(advisor: WatchdogRosterEntry): string {
+		if (advisor.ref !== undefined) return `Reference: ${replaceTabs(advisor.ref)}`;
 		const model = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const tools = formatAdvisorTools(advisor.tools, "no tools");
 		return `${model} · ${tools}`;
@@ -375,7 +388,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 		this.#ensureRosterVisible();
 		const items: SelectItem[] = this.#doc.advisors.map((advisor, index) => ({
 			value: `advisor:${index}`,
-			label: `${advisor.enabled === false ? "○" : "●"} ${advisor.name || "(unnamed)"}`,
+			label: `${advisor.ref !== undefined && advisor.enabled === undefined ? "?" : advisor.enabled === false ? "○" : "●"} ${replaceTabs(advisor.ref ?? advisor.name ?? "(unnamed)")}`,
 			description: this.#advisorSummary(advisor),
 		}));
 		items.push({ value: "add", label: "+ Add advisor" });
@@ -442,6 +455,26 @@ export class AdvisorConfigOverlayComponent implements Component {
 			this.#showList();
 			return;
 		}
+		if (advisor.ref !== undefined) {
+			const items: SelectItem[] = [
+				{
+					value: "toggleEnabled",
+					label: "Enabled",
+					description: advisor.enabled === undefined ? "definition default" : advisor.enabled ? "on" : "off",
+				},
+				{ value: "delete", label: "Delete this assignment" },
+				{ value: "back", label: "Back" },
+			];
+			const list = new SelectList(items, items.length, getSelectListTheme());
+			list.onSelect = item => this.#onDetailSelect(index, item.value);
+			list.onCancel = () => this.#showList();
+			this.#setScreen(
+				"detail",
+				list,
+				`Reference "${replaceTabs(advisor.ref)}" · definition edited at source · Esc back`,
+			);
+			return;
+		}
 		const modelDescription = advisor.model?.trim() || this.#defaultModelLabel || "advisor role default";
 		const toolsDescription = formatAdvisorTools(advisor.tools, "no tools");
 		const items: SelectItem[] = [
@@ -472,7 +505,16 @@ export class AdvisorConfigOverlayComponent implements Component {
 		switch (field) {
 			case "toggleEnabled": {
 				const a = this.#doc.advisors[index];
-				a.enabled = a.enabled === false ? undefined : false;
+				a.enabled =
+					a.ref !== undefined
+						? a.enabled === undefined
+							? true
+							: a.enabled
+								? false
+								: undefined
+						: a.enabled === false
+							? undefined
+							: false;
 				this.#dirty = true;
 				this.#showDetail(index);
 				return;
@@ -510,7 +552,7 @@ export class AdvisorConfigOverlayComponent implements Component {
 
 	#showNameEditor(index: number): void {
 		const input = new Input();
-		input.setValue(this.#doc.advisors[index].name);
+		input.setValue(this.#doc.advisors[index].name ?? "");
 		input.onSubmit = value => {
 			const name = value.trim();
 			if (name) {

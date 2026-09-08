@@ -429,7 +429,7 @@ export interface InteractiveModeContext {
 	openInBrowser(urlOrPath: string): void;
 	refreshSlashCommandState(cwd?: string): Promise<void>;
 	/** Reload session skills and derived `/skill:<name>` commands. */
-	refreshSkillState(): Promise<void>;
+	refreshSkillState(refreshAgents?: boolean): Promise<void>;
 	applyCwdChange(newCwd: string): Promise<boolean>;
 
 	// Selector handling

@@ -1326,6 +1326,7 @@ export class VibeSessionRegistry {
 		};
 		return {
 			cwd: session.cwd,
+			agentDir: session.agentDir,
 			agent: record.agent,
 			task: message,
 			assignment: message,

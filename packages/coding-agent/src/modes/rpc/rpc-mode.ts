@@ -1056,8 +1056,9 @@ export async function runRpcMode(
 	const reloadPluginState = async () => {
 		const cwd = session.sessionManager.getCwd();
 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
-		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 		resetCapabilities();
+		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
+		await session.refreshAdvisorConfigs(true);
 		await session.refreshSkills();
 		session.setSlashCommands(
 			await loadSlashCommands({

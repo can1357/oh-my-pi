@@ -1011,6 +1011,19 @@ describe("resolveAgentAdvisorSelection", () => {
 		expect(resolveAgentAdvisorSelection({})).toBeUndefined();
 	});
 
+	test("watchdogs opt in only when per-agent policy permits", () => {
+		expect(resolveAgentAdvisorSelection({ hasWatchdogs: true })).toEqual({});
+		expect(resolveAgentAdvisorSelection({ hasWatchdogs: false })).toBeUndefined();
+		expect(resolveAgentAdvisorSelection({ hasWatchdogs: true, agentAdvisor: false })).toBeUndefined();
+		expect(resolveAgentAdvisorSelection({ hasWatchdogs: true, settingsOverride: "off" })).toBeUndefined();
+		expect(resolveAgentAdvisorSelection({ hasWatchdogs: true, agentAdvisor: "custom/model" })).toEqual({
+			model: "custom/model",
+		});
+		expect(resolveAgentAdvisorSelection({ hasWatchdogs: true, agentAdvisor: false, settingsOverride: "on" })).toEqual(
+			{},
+		);
+	});
+
 	test("settings override wins over the agent definition", () => {
 		expect(resolveAgentAdvisorSelection({ settingsOverride: "off", agentAdvisor: true })).toBeUndefined();
 		expect(resolveAgentAdvisorSelection({ settingsOverride: "off", agentAdvisor: "moonshot/k3" })).toBeUndefined();

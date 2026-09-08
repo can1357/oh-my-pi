@@ -1366,6 +1366,7 @@ export interface AgentAdvisorResolutionOptions {
 	settingsOverride?: string;
 	/** Agent definition `advisor` frontmatter: `true` = default advisor-role model, string = custom model pattern. */
 	agentAdvisor?: boolean | string;
+	hasWatchdogs?: boolean;
 }
 
 /** Effective advisor for one spawned agent: absent `model` resolves through the `advisor` role. */
@@ -1393,6 +1394,8 @@ export function resolveAgentAdvisorSelection(
 		if (lowered === "on" || lowered === "true") return { model: agentPattern };
 		return { model: override };
 	}
+	if (options.agentAdvisor === false) return undefined;
+	if (options.agentAdvisor === undefined && options.hasWatchdogs) return {};
 	if (options.agentAdvisor === true) return {};
 	return agentPattern ? { model: agentPattern } : undefined;
 }

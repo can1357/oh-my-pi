@@ -31,7 +31,7 @@ export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise
 	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
 	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
 	await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots);
-	await ctx.refreshSkillState();
+	await ctx.refreshSkillState(true);
 	await ctx.refreshSlashCommandState();
 	resetCapabilities();
 	if (ctx.mcpManager) {
