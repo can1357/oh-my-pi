@@ -2799,6 +2799,24 @@ export const GetBlobResultSchema: MessageCodec<GetBlobResult> = pb<GetBlobResult
 	{ no: 1, name: "blobData", kind: "bytes", optional: true },
 ]);
 
+/** Cursor agent message agent.v1.GetDefaultModelForCliRequest. */
+export interface GetDefaultModelForCliRequest extends ProtoMessage {
+}
+
+export const GetDefaultModelForCliRequestSchema: MessageCodec<GetDefaultModelForCliRequest> = pb<GetDefaultModelForCliRequest>("agent.v1.GetDefaultModelForCliRequest", [
+]);
+
+/** Cursor agent message agent.v1.GetDefaultModelForCliResponse. */
+export interface GetDefaultModelForCliResponse extends ProtoMessage {
+	modelId: string;
+	displayName: string;
+}
+
+export const GetDefaultModelForCliResponseSchema: MessageCodec<GetDefaultModelForCliResponse> = pb<GetDefaultModelForCliResponse>("agent.v1.GetDefaultModelForCliResponse", [
+	{ no: 1, name: "modelId", kind: "string" },
+	{ no: 2, name: "displayName", kind: "string" },
+]);
+
 /** Cursor agent message agent.v1.GetDiffRequest. */
 export interface GetDiffRequest extends ProtoMessage {
 	cwd: string;

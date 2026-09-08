@@ -87,6 +87,41 @@ export interface AuthGatewayParsedRequestOptions {
 	/** OpenAI / abuse-tracking `user` field. */
 	user?: string;
 
+	// ── Cursor-specific ───────────────────────────────────────────────────
+	/**
+	 * Cursor auto mode: when true, passes `"auto"` as the model id to Cursor's
+	 * backend so Cursor selects the model per-turn. Only meaningful for
+	 * cursor-agent models; ignored by other providers.
+	 */
+	cursorAutoMode?: boolean;
+	/**
+	 * Cursor tool passthrough: when true, tool calls from Cursor's backend are
+	 * surfaced as OpenAI `tool_calls` without local execution, and Cursor's
+	 * native tools are hidden via `x-cursor-agent-allowed-tools`. The caller
+	 * executes tools and replays results as `role: "tool"` messages.
+	 */
+	cursorToolPassthrough?: boolean;
+	/**
+	 * Comma-separated tool names to exclude from the model's tool set, the
+	 * complement to `x-cursor-agent-allowed-tools` applied by
+	 * {@link cursorToolPassthrough}. Forwarded as the
+	 * `x-cursor-agent-exclude-tools` header to Cursor's backend. Only
+	 * meaningful for cursor-agent models; ignored by other providers.
+	 */
+	cursorExcludeTools?: string;
+	/**
+	 * Signals local CLI mode to Cursor's backend via the `local-cli-mode`
+	 * header. Only meaningful for cursor-agent models; ignored by other
+	 * providers.
+	 */
+	cursorLocalCliMode?: boolean;
+	/**
+	 * Statsig experiment overrides for feature-flag testing, forwarded as the
+	 * `x-dev-experiment-overrides` header to Cursor's backend. Only meaningful
+	 * for cursor-agent models; ignored by other providers.
+	 */
+	cursorDevExperimentOverrides?: string;
+
 	// ── Passthrough ───────────────────────────────────────────────────────
 	/**
 	 * Provider-specific metadata. Anthropic uses `metadata.user_id`; OpenRouter
@@ -121,9 +156,28 @@ export interface AuthGatewayStreamControl {
 	onCancel?: (reason?: unknown) => void;
 }
 
+/**
+ * Wire `model` for gateway responses. Only Cursor auto routing may rewrite
+ * the echoed id to `message.model`; otherwise retain the client's request id
+ * (including provider-qualified forms like `cursor/gpt-5`).
+ */
+export function resolveAuthGatewayWireModelId(
+	message: AssistantMessage,
+	requestedModelId: string,
+	options?: Pick<AuthGatewayParsedRequestOptions, "cursorAutoMode">,
+): string {
+	const allowRewrite =
+		options?.cursorAutoMode === true || requestedModelId === "default" || requestedModelId === "auto";
+	return allowRewrite && message.model ? message.model : requestedModelId;
+}
+
 export interface AuthGatewayFormatModule {
 	parseRequest(body: unknown, headers?: Headers): AuthGatewayParsedRequest;
-	encodeResponse(message: AssistantMessage, requestedModelId: string): Record<string, unknown>;
+	encodeResponse(
+		message: AssistantMessage,
+		requestedModelId: string,
+		options?: AuthGatewayParsedRequestOptions,
+	): Record<string, unknown>;
 	encodeStream(
 		events: AssistantMessageEventStream,
 		requestedModelId: string,
