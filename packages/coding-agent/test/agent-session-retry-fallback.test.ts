@@ -511,11 +511,11 @@ describe("AgentSession retry fallback", () => {
 				mock.push(
 					selector === primarySelector
 						? {
-							throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
-								provider: "devin",
-								kind: "empty-body",
-							}),
-						}
+								throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
+									provider: "devin",
+									kind: "empty-body",
+								}),
+							}
 						: { content: ["Recovered after hard-error retries"] },
 				);
 				return mock.stream(model, context, options);
@@ -559,11 +559,11 @@ describe("AgentSession retry fallback", () => {
 				mock.push(
 					selector === primarySelector && primaryAttempt !== 2
 						? {
-							throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
-								provider: "devin",
-								kind: "empty-body",
-							}),
-						}
+								throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
+									provider: "devin",
+									kind: "empty-body",
+								}),
+							}
 						: { content: [`ok:${selector}`] },
 				);
 				return mock.stream(model, context, options);
@@ -624,11 +624,11 @@ describe("AgentSession retry fallback", () => {
 					selector === secondFallbackSelector
 						? { content: ["Recovered after both hard-error budgets"] }
 						: {
-							throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
-								provider: "devin",
-								kind: "empty-body",
-							}),
-						},
+								throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
+									provider: "devin",
+									kind: "empty-body",
+								}),
+							},
 				);
 				return mock.stream(model, context, options);
 			},
