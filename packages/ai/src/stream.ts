@@ -1049,6 +1049,7 @@ const THINKING_LOOP_RETRY_MAX_DELAY_MS = 8_000;
 function isRetryableThinkingLoop(message: AssistantMessage): boolean {
 	return (
 		message.stopReason === "error" &&
+		!AIError.is(message.errorId, AIError.Flag.NoRetry) &&
 		message.content.length === 0 &&
 		AIError.is(message.errorId, AIError.Flag.ThinkingLoop)
 	);

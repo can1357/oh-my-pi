@@ -1,7 +1,16 @@
 import { randomUUID } from "node:crypto";
 import { CODEX_BASE_URL, OPENAI_HEADERS } from "@oh-my-pi/pi-catalog/wire/codex";
 import { resolveApiKeyOnce, type ApiKey } from "../auth-retry";
-import { AuthGatewayError, ConfigurationError, OpenAIHttpError } from "../error";
+import {
+	attach,
+	AuthGatewayError,
+	classify,
+	classifyMessage,
+	ConfigurationError,
+	create,
+	Flag,
+	OpenAIHttpError,
+} from "../error";
 import type { Api, Context, FetchImpl, Model, OptionsForApi, StreamOptions } from "../types";
 import { getHeaderCaseInsensitive } from "../utils";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -69,6 +78,7 @@ export class ProviderWireError extends AuthGatewayError {
 		super(detail ?? `auth-gateway ${captured.status}`, captured.status, captured.headers, code);
 		this.name = "ProviderWireError";
 		this.captured = captured;
+		attach(this, create(classify(this), Flag.NoRetry));
 	}
 }
 
@@ -78,6 +88,14 @@ function safeHeaders(source: RequestInit["headers"]): Headers {
 		if (SAFE_HEADERS[name] === true) safe.set(name, value);
 	}
 	return safe;
+}
+
+function forbidReplay(error: unknown): unknown {
+	const target =
+		error !== null && typeof error === "object" && Object.isExtensible(error)
+			? error
+			: new Error(error instanceof Error ? error.message : String(error), { cause: error });
+	return attach(target, create(classify(error), Flag.NoRetry));
 }
 
 /**
@@ -260,9 +278,12 @@ export function streamProviderWire<TApi extends Api>(
 				// Preserve the gateway's complete error (including arbitrary fields)
 				// and original fetch/abort error instead, as pi-native does.
 				if (event.type === "error") {
+					// No decoded output does not prove non-execution. The transport
+					// already owns its bounded known-refusal retries.
+					event.error.errorId = create(classifyMessage(event.error), Flag.NoRetry);
 					options?.signal?.throwIfAborted();
 					if (requestFailure !== undefined) {
-						outer.fail(requestFailure);
+						outer.fail(forbidReplay(requestFailure));
 						return;
 					}
 				}
@@ -270,7 +291,7 @@ export function streamProviderWire<TApi extends Api>(
 			}
 			if (!outer.done) outer.end(await inner.result());
 		} catch (error) {
-			outer.fail(error);
+			outer.fail(forbidReplay(error));
 		}
 	})();
 	return outer;

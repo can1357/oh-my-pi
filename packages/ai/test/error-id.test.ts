@@ -24,6 +24,17 @@ function message(overrides: Partial<AssistantMessage> = {}): AssistantMessage {
 }
 
 describe("error-id classification", () => {
+	it("preserves a no-retry decision through error causes and persisted diagnostics", () => {
+		const failure = AIError.attach(
+			new Error("stream ended before message_start"),
+			AIError.create(AIError.Flag.NoRetry),
+		);
+		const id = AIError.classify(new Error("503 upstream failure", { cause: failure }));
+		const restored = message({ errorId: id, errorStatus: 503, errorMessage: "timeout" });
+		expect(AIError.retriable(AIError.classifyMessage(restored))).toBe(false);
+		expect(AIError.is(restored.errorId, AIError.Flag.Timeout)).toBe(true);
+	});
+
 	it("composes timeout with transient", () => {
 		const id = AIError.classify(new Error("provider stream stall timeout"), "anthropic-messages");
 		expect(AIError.is(id, AIError.Flag.Transient)).toBe(true);

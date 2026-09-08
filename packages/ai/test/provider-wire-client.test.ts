@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
-import { ConfigurationError } from "@oh-my-pi/pi-ai/error";
+import { classify, ConfigurationError, retriable } from "@oh-my-pi/pi-ai/error";
 import { applyClaudeToolPrefix } from "@oh-my-pi/pi-ai/providers/anthropic";
 import { setCodexAttestationProvider } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { createProviderWireFetch, ProviderWireError } from "@oh-my-pi/pi-ai/providers/provider-wire-client";
@@ -464,6 +464,7 @@ describe("provider-wire native codecs", () => {
 				}).result(),
 			).rejects.toBe(lost);
 			expect(transportAttempts).toBe(1);
+			expect(retriable(classify(lost))).toBe(false);
 			let truncatedAttempts = 0;
 			const truncated = await streamSimple(wireModel(model, endpoint.baseUrl), context, {
 				apiKey: GATEWAY_BEARER,
@@ -473,6 +474,7 @@ describe("provider-wire native codecs", () => {
 				},
 			}).result();
 			expect(truncated.stopReason).toBe("error");
+			expect(retriable(truncated.errorId)).toBe(false);
 			expect(truncatedAttempts).toBe(1);
 			let streamErrorAttempts = 0;
 			const failed = await streamSimple(wireModel(model, endpoint.baseUrl), context, {
@@ -487,6 +489,7 @@ describe("provider-wire native codecs", () => {
 				},
 			}).result();
 			expect(failed.stopReason).toBe("error");
+			expect(retriable(failed.errorId)).toBe(false);
 			expect(streamErrorAttempts).toBe(1);
 		});
 	}
