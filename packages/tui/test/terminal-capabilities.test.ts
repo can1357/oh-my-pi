@@ -92,12 +92,20 @@ describe("shouldEnableSynchronizedOutputByDefault", () => {
 		}
 	});
 
-	it("enables sync in Windows Terminal / WSL via WT_SESSION regardless of terminal id", () => {
+	it("enables sync only when WT_SESSION does not contradict the terminal identity", () => {
 		expect(shouldEnableSynchronizedOutputByDefault({ WT_SESSION: "abc" }, "trueColor")).toBe(true);
-		// WSL shape: Linux + WT_SESSION + COLORTERM=truecolor collapses to trueColor id.
-		expect(shouldEnableSynchronizedOutputByDefault({ WT_SESSION: "abc", COLORTERM: "truecolor" }, "trueColor")).toBe(
-			true,
-		);
+		expect(
+			shouldEnableSynchronizedOutputByDefault(
+				{ WT_SESSION: "abc", TERM_PROGRAM: "Windows_Terminal", COLORTERM: "truecolor" },
+				"trueColor",
+			),
+		).toBe(true);
+		expect(
+			shouldEnableSynchronizedOutputByDefault(
+				{ WT_SESSION: "0", TERM_PROGRAM: "Tabby", COLORTERM: "truecolor" },
+				"trueColor",
+			),
+		).toBe(false);
 	});
 
 	it("enables sync when TERM_FEATURES advertises the Sy capability, even through SSH/mux", () => {
