@@ -343,6 +343,17 @@ impl Session {
 						}
 					}
 				}
+				// validate_rename guarantees every rename destination was absent
+				// at review time; one appearing since means the approved plan
+				// would overwrite a file the human never saw.
+				if let Some(destination) = &file.move_to
+					&& std::fs::metadata(&destination.absolute).is_ok()
+				{
+					return Err(EditError::apply(format!(
+						"Destination {} was created on disk during review",
+						destination.display
+					)));
+				}
 			}
 
 			if !revisions_slice.is_empty() {

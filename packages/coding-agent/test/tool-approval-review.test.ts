@@ -184,6 +184,32 @@ describe("tool approval content review", () => {
 	);
 
 	test.skipIf(!supportsNativeReview)(
+		"refuses to rename onto a destination created while the review was open",
+		async () => {
+			const aAbs = await fixture("race.ts");
+			const store = getEditStore(session);
+			const tag = store.recordSnapshot(aAbs, SOURCE, undefined);
+			const input = [formatHashlineHeader("race.ts", tag), "PUT 2-2:", "+\treturn 9;", "MV race-moved.ts"].join(
+				"\n",
+			);
+			const tool = new EditTool(session, "hashline");
+
+			const review = await tool.prepareApproval("race", { input });
+			expect(review.files).toEqual([]);
+			// The destination appears on disk while the approval dialog is open.
+			await Bun.write(path.join(tmpDir, "race-moved.ts"), "intruder\n");
+
+			review.apply([]);
+			const result = await tool.execute("race", { input });
+			expect(result.isError).toBe(true);
+			expect(resultText(result)).toMatch(/created on disk during review/);
+			// Neither the intruder nor the source was touched.
+			expect(await Bun.file(path.join(tmpDir, "race-moved.ts")).text()).toBe("intruder\n");
+			expect(await Bun.file(aAbs).text()).toBe(SOURCE);
+		},
+	);
+
+	test.skipIf(!supportsNativeReview)(
 		"revised edit result carries a fresh snapshot tag for the human content",
 		async () => {
 			const aAbs = await fixture("tag.ts");
