@@ -93,7 +93,7 @@ export interface GrokbotOptions extends StreamOptions {
 	fast?: boolean;
 	/** Sand `thinking` boolean; when omitted, defaults to true iff effort is sent. */
 	thinking?: boolean;
-	/** Sand `context` tier (`300k` / `1m`); when omitted, follows sandMaxMode. */
+	/** Sand `context` tier; when omitted, uses discovered `sandParameterDefaults.context` only. */
 	context?: string;
 	/**
 	 * Anthropic + tools sand wire. Default `auto` resolves to `keep-model`
@@ -1398,7 +1398,13 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 									{ provider: model.provider, kind: "output" },
 								);
 							}
-							if (e.message || e.code) throw new Error(String(e.message || e.code));
+							const diagnostic =
+								(typeof e.message === "string" && e.message) ||
+								(typeof e.code === "string" && e.code) ||
+								(e.errorType != null ? `errorType=${e.errorType}` : undefined) ||
+								(e.error_type != null ? `errorType=${e.error_type}` : undefined) ||
+								"unknown";
+							throw new Error(`Grok Bot stream error: ${diagnostic}`);
 						}
 						if (typeof errObj === "string" && errObj) throw new Error(errObj);
 
@@ -1714,8 +1720,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				break;
 			}
 			const hasToolCall = output.content.some(b => b.type === "toolCall");
-			if (output.stopReason !== "length") {
-				output.stopReason = hasToolCall ? "toolUse" : "stop";
+			// Completed tool calls already passed validation — prefer toolUse even when
+			// an output-token-limit frame also arrived (agent loop ignores length+tools).
+			if (hasToolCall) {
+				output.stopReason = "toolUse";
+			} else if (output.stopReason !== "length") {
+				output.stopReason = "stop";
 			}
 			output.duration = Math.round(performance.now() - startTime);
 			if (firstTokenTime !== undefined) output.ttft = firstTokenTime - startTime;

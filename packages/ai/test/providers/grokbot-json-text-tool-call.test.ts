@@ -837,6 +837,74 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.errorMessage).toBeUndefined();
 	});
 
+	test("prefers toolUse when a completed tool call survives an output-token limit", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const tool = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "bash",
+					args: '{"command":"echo hi"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const limit = frameConnectProto(
+			encodeInferenceStreamResponse({
+				error: { isOutputTokenLimitError: true },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(tool, limit, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content.some(b => b.type === "toolCall")).toBe(true);
+		expect(result.errorMessage).toBeUndefined();
+	});
+
+	test("throws when a stream error frame has only errorType", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const text = frameConnectProto(
+			encodeInferenceStreamResponse({
+				textPart: { text: "partial", isFinal: true },
+			}),
+		);
+		const err = frameConnectProto(
+			encodeInferenceStreamResponse({
+				error: { errorType: 7 },
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(text, err, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [],
+		};
+
+		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/errorType=7/);
+	});
+
 	test("synthetic parent-chat SendToUser becomes assistant text", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",

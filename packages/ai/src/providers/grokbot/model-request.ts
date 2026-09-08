@@ -35,8 +35,8 @@ export type GrokbotRequestedModelOptions = {
 	thinking?: boolean;
 	/**
 	 * sand `context` tier (e.g. `300k` / `1m` / `272k`); only sent when the model lists `context`.
-	 * Default: explicit `context`, then `sandParameterDefaults.context`, then
-	 * `1m` when `sandMaxMode`, otherwise `300k` when discovery left no default.
+	 * Default: explicit `context`, then `sandParameterDefaults.context`. When discovery
+	 * left no default, the parameter is omitted (do not invent `300k` / `1m`).
 	 */
 	context?: string;
 	/**
@@ -136,10 +136,9 @@ export function resolveGrokbotRequestedModel(
 					? options.context.trim()
 					: discoveredDefault && discoveredDefault.length > 0
 						? discoveredDefault
-						: options?.sandMaxMode === true
-							? "1m"
-							: "300k";
-			parameters.push({ id: "context", value: context });
+						: undefined;
+			// Never invent 300k/1m — unadvertised tiers can 400 or pin the wrong window.
+			if (context) parameters.push({ id: "context", value: context });
 		}
 		if (effortValue) {
 			if (allowed.has("effort")) {

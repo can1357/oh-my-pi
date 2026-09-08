@@ -443,6 +443,21 @@ describe("grokbot requested model mapping", () => {
 		).toEqual([{ id: "context", value: "512k" }]);
 	});
 
+	test("omits context when discovery left no default (does not invent 300k/1m)", () => {
+		expect(
+			resolveGrokbotRequestedModel("gpt-5.6-sol", {
+				sandParameterIds: ["context", "reasoning", "fast"],
+				sandMaxMode: false,
+			}).parameters,
+		).toEqual([{ id: "fast", value: "true" }]);
+		expect(
+			resolveGrokbotRequestedModel("gpt-5.6-sol", {
+				sandParameterIds: ["context"],
+				sandMaxMode: true,
+			}).parameters,
+		).toBeUndefined();
+	});
+
 	test("empty sandParameterIds omit parameters even when effort/fast are set", () => {
 		// Catalog fact: routers/Auto advertise no parameter ids ⇒ bare wire.
 		expect(
@@ -483,6 +498,7 @@ describe("grokbot requested model mapping", () => {
 			resolveGrokbotRequestedModel("claude-opus-5", {
 				effort: "max",
 				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { context: "300k" },
 			}),
 		).toEqual({
 			modelId: "claude-opus-5",
@@ -499,6 +515,7 @@ describe("grokbot requested model mapping", () => {
 				fast: true,
 				sandMaxMode: true,
 				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { context: "1m" },
 			}).parameters,
 		).toEqual([
 			{ id: "thinking", value: "true" },
@@ -511,6 +528,7 @@ describe("grokbot requested model mapping", () => {
 				thinking: false,
 				effort: "low",
 				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { context: "300k" },
 			}).parameters,
 		).toEqual([
 			{ id: "thinking", value: "false" },
