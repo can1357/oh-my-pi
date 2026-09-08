@@ -505,7 +505,16 @@ export class AdvisorConfigOverlayComponent implements Component {
 		switch (field) {
 			case "toggleEnabled": {
 				const a = this.#doc.advisors[index];
-				a.enabled = a.ref !== undefined ? a.enabled !== true : a.enabled === false ? undefined : false;
+				a.enabled =
+					a.ref !== undefined
+						? a.enabled === undefined
+							? true
+							: a.enabled
+								? false
+								: undefined
+						: a.enabled === false
+							? undefined
+							: false;
 				this.#dirty = true;
 				this.#showDetail(index);
 				return;
