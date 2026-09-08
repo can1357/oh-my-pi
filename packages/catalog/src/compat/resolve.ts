@@ -577,6 +577,11 @@ const DSML_HEALING_PROVIDERS: Record<string, true> = {
 	nanogpt: true,
 	"opencode-go": true,
 	openrouter: true,
+	// Transparent gateways / user-configured hosts forward the upstream model's
+	// native chat template unchanged, so a deepseek-classed model behind them
+	// still emits DSML tool-call envelopes and needs the DSML healer.
+	litellm: true,
+	nous: true,
 };
 
 /**

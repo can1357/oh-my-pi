@@ -655,6 +655,28 @@ describe("openai-completions wire-quirk compat detection", () => {
 				completionsSpec({ provider: "moonshot", id: "kimi-k2", baseUrl: "https://api.moonshot.ai/v1" }),
 			).compat.streamMarkupHealingPattern,
 		).toBe("kimi");
+		// Transparent gateways / user-configured hosts forward the upstream chat
+		// template unchanged: a deepseek-classed model behind a LiteLLM proxy or
+		// the NousResearch inference API still emits DSML envelopes and needs the
+		// DSML grammar, not the generic thinking healer.
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					provider: "litellm",
+					id: "deepseek/deepseek-chat",
+					baseUrl: "http://127.0.0.1:4000/v1",
+				}),
+			).compat.streamMarkupHealingPattern,
+		).toBe("dsml");
+		expect(
+			resolveModelPolicy(
+				completionsSpec({
+					provider: "nous",
+					id: "deepseek/deepseek-v4-flash-0731",
+					baseUrl: "https://inference-api.nousresearch.com/v1",
+				}),
+			).compat.streamMarkupHealingPattern,
+		).toBe("dsml");
 	});
 
 	it("derives Responses obfuscation opt-out and wire mode per surface", () => {
