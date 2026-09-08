@@ -111,6 +111,8 @@ export declare class EditSession {
   setArgsJson(argsJson: string): void
   /** Arguments are complete; triggers the final untrimmed preview. */
   finish(): void
+  /** Prepare a canonical staged plan and return content-eligible files for review. */
+  review(): Promise<Array<EditReviewFile>>
   /**
    * Stage and apply the finished edit through `writer`. Never rejects for
    * engine failures: those come back as `isError` outcomes carrying the
@@ -1235,6 +1237,13 @@ export interface EditApplyOutcome {
 export interface EditApplyRequest {
   lspBatchId?: string
   lspFlush: boolean
+  revisions?: Array<EditApprovalRevision>
+}
+
+/** Human revision substituting proposed file content in approval reviews. */
+export interface EditApprovalRevision {
+  path: string
+  content: string
 }
 
 /**
@@ -1351,6 +1360,14 @@ export interface EditPreviewBatch {
   /** False for the final untrimmed pass after `finish()`. */
   streaming: boolean
   files: Array<EditFilePreview>
+}
+
+/** One content-eligible file presented for review before approval. */
+export interface EditReviewFile {
+  path: string
+  displayPath: string
+  before?: string
+  after: string
 }
 
 /** A cached `vault://` root. */

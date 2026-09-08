@@ -393,6 +393,7 @@ pub fn stage_patch(
 			StagedFile::new(section.path.clone(), read.resolved.absolute.clone(), engine_op);
 		item.move_to = move_to;
 		item.before_raw = Some(read.raw.clone());
+		item.before_bytes = Some(read.raw_bytes.clone());
 		item.before.clone_from(&read.text);
 		item.after = apply.text;
 		item.persisted = persisted;

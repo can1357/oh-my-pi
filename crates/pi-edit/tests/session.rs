@@ -3,6 +3,11 @@
 
 mod common;
 
+use std::sync::{
+	Arc,
+	atomic::{AtomicBool, Ordering},
+};
+
 use common::{DiskWriter, Workspace};
 use pi_edit::{ApplyRequest, EditMode, session::PreviewBatch};
 
@@ -77,6 +82,41 @@ async fn multi_file_failure_stages_nothing() {
 	assert!(message.ends_with("No files were modified — sections apply atomically."), "{message}");
 	assert_eq!(writer.requests.lock().len(), 0);
 	assert_eq!(ws.read("a.rs").unwrap(), SOURCE);
+}
+
+#[tokio::test]
+async fn reviewed_multi_file_apply_revalidates_each_target_before_its_write() {
+	let ws = Workspace::new(EditMode::Sloppy);
+	ws.write("a.rs", SOURCE);
+	let b_path = ws.write("b.rs", SOURCE);
+	let input = format!("{}{}", sloppy_payload("a.rs"), sloppy_payload("b.rs"));
+	let mut session = ws.session();
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	session.finish();
+	assert_eq!(session.review().expect("review").len(), 2);
+
+	let first_write = Arc::new(AtomicBool::new(true));
+	let writer_first = Arc::clone(&first_write);
+	let writer = DiskWriter {
+		rewrite: Some(Box::new(move |request| {
+			if writer_first.swap(false, Ordering::SeqCst) {
+				std::fs::write(&b_path, "external save\n").expect("external save");
+			}
+			request.content.clone().unwrap_or_default()
+		})),
+		..Default::default()
+	};
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("second target drift");
+	assert!(
+		err.to_string()
+			.contains("b.rs content changed on disk during review")
+	);
+	assert_eq!(writer.requests.lock().len(), 1);
+	assert_eq!(ws.read("a.rs").unwrap(), SOURCE.replace("let x = 1;", "let x = 2;"));
+	assert_eq!(ws.read("b.rs").as_deref(), Some("external save\n"));
 }
 
 #[tokio::test]
@@ -161,4 +201,126 @@ async fn result_text_uses_compact_preview_and_header() {
 	assert!(outcome.files[0].diff.contains("+2|TWO"), "{}", outcome.files[0].diff);
 	assert_eq!(outcome.files[0].old_text.as_deref(), Some("one\ntwo\nthree\n"));
 	assert_eq!(outcome.files[0].new_text.as_deref(), Some("one\nTWO\nthree\n"));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reviewed_apply_rejects_create_under_retargeted_symlink() {
+	let ws = Workspace::new(EditMode::Patch);
+	let root = ws.cwd();
+	let target_a = root.join("target_a");
+	let target_b = root.join("target_b");
+	std::fs::create_dir(&target_a).expect("create target_a");
+	std::fs::create_dir(&target_b).expect("create target_b");
+
+	let link_dir = root.join("link_dir");
+	std::os::unix::fs::symlink(&target_a, &link_dir).expect("create symlink to target_a");
+
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({
+			"path": "link_dir/new.txt",
+			"edits": [{ "op": "create", "diff": "hello world\n" }]
+		})
+		.to_string(),
+	);
+	session.finish();
+
+	let reviewed = session.review().expect("review staged plan");
+	assert_eq!(reviewed.len(), 1);
+
+	// Retarget symlink to target_b during review window
+	std::fs::remove_file(&link_dir).expect("unlink symlink");
+	std::os::unix::fs::symlink(&target_b, &link_dir).expect("retarget symlink to target_b");
+
+	let writer = DiskWriter::default();
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("retargeted symlink must be rejected");
+
+	assert!(
+		err.to_string()
+			.contains("target path changed on disk during review"),
+		"expected target path changed error, got: {err}"
+	);
+	assert_eq!(writer.requests.lock().len(), 0);
+	assert!(!target_a.join("new.txt").exists());
+	assert!(!target_b.join("new.txt").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn reviewed_apply_rejects_create_and_rename_under_dangling_symlink() {
+	let ws = Workspace::new(EditMode::Patch);
+	let root = ws.cwd();
+	let external_nonexistent = root.join("external_target_never_created.txt");
+	let new_file = root.join("new_file.txt");
+
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({
+			"path": "new_file.txt",
+			"edits": [{ "op": "create", "diff": "secret content\n" }]
+		})
+		.to_string(),
+	);
+	session.finish();
+
+	let reviewed = session.review().expect("review staged plan");
+	assert_eq!(reviewed.len(), 1);
+
+	// Plant a dangling symlink at new_file pointing to external_nonexistent during
+	// review
+	std::os::unix::fs::symlink(&external_nonexistent, &new_file).expect("create dangling symlink");
+
+	let writer = DiskWriter::default();
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("apply must refuse write to dangling symlink");
+
+	assert!(
+		err.to_string()
+			.contains("state changed on disk during review"),
+		"expected state changed error, got: {err}"
+	);
+	assert_eq!(writer.requests.lock().len(), 0);
+	assert!(!external_nonexistent.exists());
+
+	// Also test rename destination with dangling symlink during review
+	ws.write("src.txt", "rename me\n");
+	let dest_external = root.join("dest_external_never_created.txt");
+	let dest_file = root.join("dest.txt");
+
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({
+			"path": "src.txt",
+			"edits": [{ "op": "update", "diff": "rename me\n", "rename": "dest.txt" }]
+		})
+		.to_string(),
+	);
+	session.finish();
+
+	let reviewed = session.review().expect("review staged rename");
+	assert_eq!(reviewed.len(), 0); // renames without content change are not eligible review files
+
+	// Plant a dangling symlink at dest_file pointing to dest_external during review
+	std::os::unix::fs::symlink(&dest_external, &dest_file).expect("create dangling dest symlink");
+
+	let writer = DiskWriter::default();
+	let err = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect_err("apply must refuse rename onto dangling symlink");
+
+	assert!(
+		err.to_string()
+			.contains("was created on disk during review"),
+		"expected destination created error, got: {err}"
+	);
+	assert_eq!(writer.requests.lock().len(), 0);
+	assert!(!dest_external.exists());
+	assert_eq!(ws.read("src.txt").unwrap(), "rename me\n");
 }

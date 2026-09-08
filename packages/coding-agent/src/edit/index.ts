@@ -8,6 +8,8 @@ import type {
 	AgentToolContext,
 	AgentToolResult,
 	AgentToolUpdateCallback,
+	ToolApprovalReview,
+	ToolApprovalRevision,
 } from "@oh-my-pi/pi-agent-core";
 import type { Model, ToolExample } from "@oh-my-pi/pi-ai";
 import {
@@ -21,7 +23,7 @@ import {
 	type EditWriteRequest,
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
+import { bytesEqual, isEnoent, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { resolveLocalRoot } from "../internal-urls";
 import { cachedVaultRoots, isVaultEnabled } from "../internal-urls/vault-protocol";
 import {
@@ -37,6 +39,7 @@ import { getDiagnosticsLedger } from "../lsp/diagnostics-ledger";
 import type { ToolSession } from "../tools";
 import { routeWriteThroughBridge } from "../tools/acp-bridge";
 import { truncateForPrompt } from "../tools/approval";
+import { toolApprovalRevisionSchema } from "../tools/approval-review";
 import {
 	deleteFileWithFallback,
 	hasFileWriteFallback,
@@ -49,7 +52,7 @@ import {
 	invalidateFsScanAfterWrite,
 } from "../tools/fs-cache-invalidation";
 import { outputMeta } from "../tools/output-meta";
-import { resolveFileWriteApprovalTier } from "../tools/path-utils";
+import { formatPathRelativeToCwd, resolveFileWriteApprovalTier } from "../tools/path-utils";
 import { planLocalProtocolOptions } from "../tools/plan-mode-guard";
 import { ToolError } from "../tools/tool-errors";
 import { type EditMode, normalizeEditMode, resolveEditMode } from "../utils/edit-mode";
@@ -319,14 +322,6 @@ async function mkdirAllowingFallback(directory: string): Promise<void> {
 	}
 }
 
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.byteLength !== right.byteLength) return false;
-	for (let index = 0; index < left.byteLength; index++) {
-		if (left[index] !== right[index]) return false;
-	}
-	return true;
-}
-
 export class EditTool implements AgentTool<TInput> {
 	readonly name = "edit";
 	readonly label = "Edit";
@@ -340,6 +335,8 @@ export class EditTool implements AgentTool<TInput> {
 	readonly #editMode?: EditMode;
 	readonly #deferredDiagnostics: DeferredDiagnostics;
 	readonly #sessions = new Map<string, EditSession>();
+	readonly #streamedArgs = new Map<string, string>();
+	readonly #approvalRevisions = new Map<string, ToolApprovalRevision[]>();
 
 	constructor(
 		private readonly session: ToolSession,
@@ -450,15 +447,83 @@ export class EditTool implements AgentTool<TInput> {
 			if (oldestId === undefined) break;
 			this.#sessions.get(oldestId)?.close();
 			this.#sessions.delete(oldestId);
+			this.#streamedArgs.delete(oldestId);
 		}
 		return {
 			push: delta => editSession.push(delta),
-			end: () => editSession.finish(),
+			end: args => {
+				if (args !== undefined) this.#streamedArgs.set(init.toolCallId, JSON.stringify(args));
+				editSession.finish();
+			},
 			cancel: () => {
 				editSession.close();
+				this.#streamedArgs.delete(init.toolCallId);
 				if (this.#sessions.get(init.toolCallId) === editSession) this.#sessions.delete(init.toolCallId);
 			},
 		};
+	}
+
+	// A streamed session is reusable only while the params still match what
+	// the stream finished with: a `tool_call` handler can revise the input
+	// after the stream ends, and reusing the buffered payload would propose
+	// and execute the original args instead of the revised ones.
+	#reusableStreamedSession(toolCallId: string, params: EditParams): EditSession | undefined {
+		const streamed = this.#sessions.get(toolCallId);
+		if (!streamed) return undefined;
+		const streamedArgs = this.#streamedArgs.get(toolCallId);
+		if (streamedArgs === undefined || streamedArgs === JSON.stringify(params)) return streamed;
+		streamed.close();
+		this.#sessions.delete(toolCallId);
+		this.#streamedArgs.delete(toolCallId);
+		return undefined;
+	}
+
+	async prepareApproval(toolCallId: string, params: EditParams, signal?: AbortSignal): Promise<ToolApprovalReview> {
+		this.parameters.assert(params);
+		// A streamed call already finished its own session: re-encoding the
+		// parsed args as JSON would corrupt a raw apply_patch payload, which
+		// must stay the verbatim patch text its policy parses.
+		const streamed = this.#reusableStreamedSession(toolCallId, params);
+		const editSession = streamed ?? new EditSession(getEditStore(this.session), this.#policy(false));
+		this.#sessions.set(toolCallId, editSession);
+		const dispose = () => {
+			editSession.close();
+			this.#approvalRevisions.delete(toolCallId);
+			this.#streamedArgs.delete(toolCallId);
+			if (this.#sessions.get(toolCallId) === editSession) this.#sessions.delete(toolCallId);
+		};
+		try {
+			if (!streamed) {
+				editSession.setArgsJson(JSON.stringify(params));
+				editSession.finish();
+			}
+			const proposals = await untilAborted(signal, () => editSession.review());
+			const paths = new Map(
+				proposals.map(file => [formatPathRelativeToCwd(file.path, this.session.cwd), file.path]),
+			);
+			return {
+				files: proposals.map(file => ({
+					path: formatPathRelativeToCwd(file.path, this.session.cwd),
+					before: file.before ?? null,
+					after: file.after,
+				})),
+				apply: revisions => {
+					const accepted = revisions.map(revision => {
+						toolApprovalRevisionSchema.assert(revision);
+						const absolutePath = paths.get(revision.path);
+						if (!absolutePath) {
+							throw new ToolError(`Invalid approval revision for ${revision.path}`);
+						}
+						return { path: absolutePath, content: revision.content };
+					});
+					this.#approvalRevisions.set(toolCallId, accepted);
+				},
+				dispose,
+			};
+		} catch (error) {
+			dispose();
+			throw error;
+		}
 	}
 
 	async execute(
@@ -468,7 +533,7 @@ export class EditTool implements AgentTool<TInput> {
 		_onUpdate?: AgentToolUpdateCallback<EditToolDetails, TInput>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<EditToolDetails, TInput>> {
-		let editSession = this.#sessions.get(toolCallId);
+		let editSession = this.#reusableStreamedSession(toolCallId, params);
 		if (!editSession) {
 			// No deltas were streamed (non-streaming provider, inline recovery,
 			// Cursor batch frames): the parsed args are the whole payload.
@@ -477,10 +542,11 @@ export class EditTool implements AgentTool<TInput> {
 			editSession.finish();
 		}
 		const batch = getLspBatchRequest(context?.toolCall);
+		const revisions = this.#approvalRevisions.get(toolCallId);
 		let outcome;
 		try {
 			outcome = await editSession.apply(
-				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false },
+				{ lspBatchId: batch?.id, lspFlush: batch?.flush ?? false, revisions },
 				(_error, request) => this.#write(request, signal),
 			);
 			if (outcome.isError && batch?.flush) {
@@ -490,6 +556,8 @@ export class EditTool implements AgentTool<TInput> {
 			if (batch?.flush) await flushLspWritethroughBatch(batch.id, this.session.cwd, signal);
 			throw error;
 		} finally {
+			this.#approvalRevisions.delete(toolCallId);
+			this.#streamedArgs.delete(toolCallId);
 			editSession.close();
 			if (this.#sessions.get(toolCallId) === editSession) this.#sessions.delete(toolCallId);
 		}
@@ -518,6 +586,12 @@ export class EditTool implements AgentTool<TInput> {
 				// Blackbox recording is diagnostic only.
 			}
 			const display = path.relative(this.session.cwd, snapshot.path) || snapshot.path;
+			if (revisions?.some(revision => revision.path === file.path)) {
+				notes.push(
+					`Warning: ${display} no longer parses. The human-approved content was kept without automatic repair.`,
+				);
+				continue;
+			}
 			let repaired: EditAutoRepairOutcome | undefined;
 			try {
 				repaired = await attemptEditAutoRepair({

@@ -39,8 +39,8 @@ pub use engine::{
 pub use error::{EditError, EditResult};
 pub use path_policy::PathPolicy;
 pub use session::{
-	ApplyOutcome, ApplyRequest, EditWriter, FileOutcome, PreviewBatch, Session, WriteRequest,
-	WriteResponse,
+	ApplyOutcome, ApplyRequest, EditReviewFile, EditRevision, EditWriter, FileOutcome, PreviewBatch,
+	Session, WriteRequest, WriteResponse,
 };
 pub use store::EditStore;
 pub use stream_json::{ArgSnapshot, ArgStream, EditEntry};

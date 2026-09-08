@@ -1385,6 +1385,7 @@ fn stage_from_parts(
 	staged.move_to = move_to;
 	staged.existed = read.is_some();
 	staged.before_raw = read.as_ref().map(|value| value.raw.clone());
+	staged.before_bytes = read.as_ref().map(|value| value.raw_bytes.clone());
 	staged.before = before;
 	staged.after = after.unwrap_or_else(|| staged.before.clone());
 	staged.persisted = persisted;

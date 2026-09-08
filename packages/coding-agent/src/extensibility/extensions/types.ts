@@ -17,6 +17,8 @@ import type {
 	AgentToolUpdateCallback,
 	ThinkingLevel,
 	ToolApproval,
+	ToolApprovalFile,
+	ToolApprovalRevision,
 	ToolLoadMode,
 } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
@@ -909,6 +911,11 @@ export interface InputEvent {
 // Tool Events
 // ============================================================================
 
+export interface ToolApprovalResponse {
+	approved: boolean;
+	files?: ToolApprovalRevision[];
+}
+
 export interface ToolApprovalRequestedEvent {
 	type: "tool_approval_requested";
 	sessionId: string;
@@ -916,6 +923,8 @@ export interface ToolApprovalRequestedEvent {
 	toolName: string;
 	reason?: string;
 	approvalMode: ApprovalMode;
+	files?: readonly ToolApprovalFile[];
+	respond?(response: ToolApprovalResponse): Promise<boolean>;
 }
 
 export interface ToolApprovalResolvedEvent {
@@ -925,6 +934,7 @@ export interface ToolApprovalResolvedEvent {
 	toolName: string;
 	approved: boolean;
 	reason?: string;
+	source?: "user" | "extension" | "abort";
 }
 
 interface ToolCallEventBase {

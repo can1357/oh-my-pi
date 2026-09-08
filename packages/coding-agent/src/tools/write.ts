@@ -9,9 +9,10 @@ import type {
 	AgentToolResult,
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
+	ToolApprovalReview,
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { bytesEqual, isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveMemberContent,
 	archiveFormatFromPath,
@@ -56,6 +57,7 @@ import {
 	peelWriteUrlSelector,
 	probeLiteralPathExists,
 	resolveFileWriteApprovalTier,
+	resolveSyscallTarget,
 	splitPathAndSel,
 } from "./path-utils";
 import {
@@ -323,6 +325,24 @@ export interface WriteToolDetails {
 	xdev?: XdevDispatch;
 }
 
+interface WriteApprovalState {
+	absolutePath: string;
+	before: string | null;
+	/** Exact bytes captured at proposal time; drift compares bytes, not lossy text. */
+	beforeBytes: Uint8Array | null;
+	content?: string;
+	/** Real filesystem target resolved at proposal time to detect symlink retargeting. */
+	syscallTarget: string | null;
+}
+
+// Drift must compare exact bytes: lossy UTF-8 decoding maps distinct malformed
+// sequences to the same U+FFFD, so a byte flipped during approval would look
+// unchanged through a decoded string comparison.
+function approvalBytesMatch(current: Uint8Array | null, reviewed: Uint8Array | null): boolean {
+	if (current === null || reviewed === null) return current === reviewed;
+	return bytesEqual(current, reviewed);
+}
+
 /**
  * Strip hashline display prefixes from write content.
  *
@@ -366,8 +386,8 @@ function stripWriteContent(session: ToolSession, content: string): { text: strin
 /**
  * Record a snapshot of the freshly-written `content` for `absolutePath`
  * so subsequent hashline edits address the new file with a current tag,
- * and return the matching `[displayPath#TAG]` header. Returns `undefined`
- * when the session is not in hashline mode so callers can no-op cheaply.
+ * and return the matching `[displayPath#TAG]` header. Human revisions force
+ * a fresh header even when the session is not in hashline mode.
  *
  * Mirrors the post-commit snapshot recording the hashline patcher performs
  * after a successful edit — the model gets a tag without an extra `read` —
@@ -376,8 +396,13 @@ function stripWriteContent(session: ToolSession, content: string): { text: strin
  * patcher rejects them with an inline reveal). Authoring content is not
  * knowing its line numbers.
  */
-function maybeWriteSnapshotHeader(session: ToolSession, absolutePath: string, content: string): string | undefined {
-	if (!resolveFileDisplayMode(session).hashLines) return undefined;
+function maybeWriteSnapshotHeader(
+	session: ToolSession,
+	absolutePath: string,
+	content: string,
+	revised = false,
+): string | undefined {
+	if (!revised && !resolveFileDisplayMode(session).hashLines) return undefined;
 	const normalized = normalizeToLF(content);
 	const tag = getEditStore(session).recordSnapshot(absolutePath, normalized, []);
 	return formatHashlineHeader(formatPathRelativeToCwd(absolutePath, session.cwd), tag);
@@ -513,6 +538,7 @@ function parseSqliteWriteTarget(subPath: string, queryString: string): { table: 
  * Creates or overwrites files with optional LSP formatting and diagnostics.
  */
 export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails> {
+	readonly #approvalWrites = new Map<string, WriteApprovalState>();
 	readonly name = "write";
 	readonly approval = (args: unknown): ToolApprovalDecision => {
 		const rawPath = (args as Partial<WriteParams>).path;
@@ -1103,6 +1129,62 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		};
 	}
 
+	async #readApprovalBytes(absolutePath: string): Promise<Uint8Array | null> {
+		try {
+			return new Uint8Array(await Bun.file(absolutePath).arrayBuffer());
+		} catch (error) {
+			if (isEnoent(error)) return null;
+			throw error;
+		}
+	}
+
+	async prepareApproval(
+		toolCallId: string,
+		params: WriteParams,
+		signal?: AbortSignal,
+	): Promise<ToolApprovalReview | undefined> {
+		writeSchema.assert(params);
+		const target = peelWriteUrlSelector(unwrapHashlineHeaderPath(params.path));
+		const router = InternalUrlRouter.instance();
+		assertWriteTargetAddressable(target, router);
+		// Device, database, archive and conflict operations are not whole-file text writes.
+		if (pathTargetsSsh(target) || parseConflictUri(target)) return undefined;
+		if (router.canHandle(target) && parseInternalUrl(target).protocol !== "local:") return undefined;
+		if (await this.#resolveArchiveWritePath(target)) return undefined;
+		if (await this.#resolveSqliteWritePath(target)) return undefined;
+		const { text: after } = stripWriteContent(this.session, params.content);
+		await assertNotReadSelectorMisfire(target, after, this.session.cwd);
+		enforcePlanModeWrite(this.session, target, { op: "create" });
+		const absolutePath = resolvePlanPath(this.session, target);
+		const syscallTarget = await resolveSyscallTarget(absolutePath, true);
+		const beforeBytes = await this.#readApprovalBytes(absolutePath);
+		const before = beforeBytes === null ? null : new TextDecoder().decode(beforeBytes);
+		signal?.throwIfAborted();
+		const displayPath = formatPathRelativeToCwd(absolutePath, this.session.cwd);
+		// The no-op decision must compare bytes: decoding strips a leading
+		// BOM and replaces malformed sequences, so equal text can still mean
+		// executing the write would change the on-disk bytes.
+		const unchanged = beforeBytes !== null && approvalBytesMatch(new TextEncoder().encode(after), beforeBytes);
+		const state: WriteApprovalState = { absolutePath, before, beforeBytes, syscallTarget };
+		this.#approvalWrites.set(toolCallId, state);
+		return {
+			files: unchanged ? [] : [{ path: displayPath, before, after }],
+			apply: revisions => {
+				if (revisions.length > 1) throw new ToolError("A write approval can revise only its proposed file");
+				const revision = revisions[0];
+				if (!revision) return;
+				writeSchema.assert(revision);
+				if (revision.path !== displayPath || unchanged) {
+					throw new ToolError(`Invalid approval revision for ${revision.path}`);
+				}
+				state.content = revision.content;
+			},
+			dispose: () => {
+				if (this.#approvalWrites.get(toolCallId) === state) this.#approvalWrites.delete(toolCallId);
+			},
+		};
+	}
+
 	async execute(
 		_toolCallId: string,
 		{ path: rawPath, content }: WriteParams,
@@ -1110,6 +1192,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		onUpdate?: AgentToolUpdateCallback<WriteToolDetails>,
 		context?: AgentToolContext,
 	): Promise<AgentToolResult<WriteToolDetails>> {
+		const approval = this.#approvalWrites.get(_toolCallId);
+		this.#approvalWrites.delete(_toolCallId);
+		const revised = approval?.content !== undefined;
 		// Strip a hashline `[path#TAG]` wrapper up front so every downstream
 		// decision (scheme routing, internal-URL handler dispatch, plan-mode
 		// guard, plan path resolution, ACP bridge routing) sees the same
@@ -1137,7 +1222,11 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 		}
 		return untilAborted(signal, async () => {
 			// Strip hashline display prefixes ([PATH#HASH] + LINE:) if the model copied them from read output
-			const { text: cleanContent, stripped } = stripWriteContent(this.session, content);
+			let { text: cleanContent, stripped } = stripWriteContent(this.session, content);
+			if (approval?.content !== undefined) {
+				cleanContent = approval.content;
+				stripped = false;
+			}
 			const internalRouter = InternalUrlRouter.instance();
 			assertWriteTargetAddressable(path, internalRouter);
 			if (internalRouter.canHandle(path)) {
@@ -1238,6 +1327,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				return result;
 			}
 			const resolvedArchivePath = await this.#resolveArchiveWritePath(path);
+			if (approval && resolvedArchivePath) {
+				throw new ToolError("The write target routing changed during approval; request a new proposal");
+			}
 			if (resolvedArchivePath) {
 				enforcePlanModeWrite(this.session, resolvedArchivePath.archivePath, {
 					op: resolvedArchivePath.exists ? "update" : "create",
@@ -1265,6 +1357,9 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			}
 
 			const resolvedSqlitePath = await this.#resolveSqliteWritePath(path);
+			if (approval && resolvedSqlitePath) {
+				throw new ToolError("The write target routing changed during approval; request a new proposal");
+			}
 			if (resolvedSqlitePath) {
 				enforcePlanModeWrite(this.session, resolvedSqlitePath.sqlitePath, { op: "update" });
 
@@ -1285,6 +1380,16 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			await assertNotReadSelectorMisfire(path, cleanContent, this.session.cwd);
 			enforcePlanModeWrite(this.session, path, { op: "create" });
 			const absolutePath = resolvePlanPath(this.session, path);
+			const currentSyscallTarget = approval ? await resolveSyscallTarget(absolutePath, true) : null;
+			if (
+				approval &&
+				(approval.absolutePath !== absolutePath ||
+					approval.syscallTarget === null ||
+					approval.syscallTarget !== currentSyscallTarget ||
+					!approvalBytesMatch(await this.#readApprovalBytes(absolutePath), approval.beforeBytes))
+			) {
+				throw new ToolError("The write target changed during approval; request a new proposal");
+			}
 			const batchRequest = getLspBatchRequest(context?.toolCall);
 
 			// Check if file exists and is auto-generated before overwriting
@@ -1305,7 +1410,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 				// use it so a drifted write (e.g. client format-on-save) still
 				// hands back a tag that matches what's actually on disk.
 				const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, bridgeWrite.text);
-				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text);
+				const header = maybeWriteSnapshotHeader(this.session, absolutePath, bridgeWrite.text, revised);
 				const writeLine = `Successfully wrote ${cleanContent.length} bytes to ${displayPath}`;
 				let resultText = header ? `${header}\n${writeLine}` : writeLine;
 				if (stripped) {
@@ -1335,7 +1440,7 @@ export class WriteTool implements AgentTool<typeof writeSchema, WriteToolDetails
 			const finalContent = diagnostics.finalContent;
 			const madeExecutable = await maybeMarkExecutableForShebang(absolutePath, finalContent);
 
-			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent);
+			const header = maybeWriteSnapshotHeader(this.session, absolutePath, finalContent, revised);
 			const writeLine = `Successfully wrote ${finalContent.length} bytes to ${displayPath}`;
 			let resultText = header ? `${header}\n${writeLine}` : writeLine;
 			if (stripped) {

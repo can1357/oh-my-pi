@@ -64,6 +64,7 @@ import type {
 	SessionCompactingResult,
 	SessionStopEvent,
 	SessionStopEventResult,
+	ToolApprovalRequestedEvent,
 	ToolCallEvent,
 	ToolCallEventResult,
 	ToolRegistrationListener,
@@ -225,6 +226,20 @@ function createHandlerContext(
 		configurable: true,
 	});
 	return scoped;
+}
+
+function bindHandlerEvent<TEvent extends { type: string }>(event: TEvent, handlerSignal: AbortSignal): TEvent {
+	if (event.type !== "tool_approval_requested") return event;
+	const approvalEvent = event as unknown as ToolApprovalRequestedEvent;
+	const originalRespond = approvalEvent.respond;
+	if (!originalRespond) return event;
+	return {
+		...approvalEvent,
+		respond: async (response: Parameters<NonNullable<ToolApprovalRequestedEvent["respond"]>>[0]) => {
+			if (handlerSignal.aborted) return false;
+			return await originalRespond(response);
+		},
+	} as unknown as TEvent;
 }
 
 /**
@@ -1291,7 +1306,7 @@ export class ExtensionRunner {
 						try {
 							result = await this.#toolRegistrationScope.run(registrationScope, () =>
 								handler(
-									event,
+									bindHandlerEvent(event, handlerSignal),
 									createHandlerContext(ctx, handlerSignal, event.type === "tool_call" ? budget : undefined),
 								),
 							);

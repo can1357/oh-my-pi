@@ -4,6 +4,7 @@
 
 ### Added
 
+- Interactive `edit`/`write` approvals can now be answered from an extension: `tool_approval_requested` carries the proposed file contents (`{ path, before, after }`, structural delete/rename operations excluded) and a `respond({ approved, files? })` API — the first valid answer between the TUI dialog and the extension wins, human-edited contents are validated and substituted into the original request, and `tool_approval_resolved` reports the settlement source so an IDE can close its tabs.
 - Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
 
 ### Fixed

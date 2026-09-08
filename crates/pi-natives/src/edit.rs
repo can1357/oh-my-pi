@@ -32,7 +32,10 @@ use pi_edit::{
 	diff_string::{BlockContextSource, generate_diff_string},
 	modes::{hashline, sloppy},
 	path_policy::canonical_key,
-	session::{ApplyRequest, EditWriter, PreviewBatch, SessionConfig, WriteRequest, WriteResponse},
+	session::{
+		ApplyRequest, EditRevision as CoreEditRevision, EditWriter, PreviewBatch, SessionConfig,
+		WriteRequest, WriteResponse,
+	},
 	store,
 	stream_json::snapshot_from_text,
 	text::normalize_to_lf,
@@ -181,8 +184,24 @@ pub struct EditWriteResponse {
 pub struct EditApplyRequest {
 	pub lsp_batch_id: Option<String>,
 	pub lsp_flush:    bool,
+	pub revisions:    Option<Vec<EditApprovalRevision>>,
 }
 
+/// Human revision substituting proposed file content in approval reviews.
+#[napi(object)]
+pub struct EditApprovalRevision {
+	pub path:    String,
+	pub content: String,
+}
+
+/// One content-eligible file presented for review before approval.
+#[napi(object)]
+pub struct EditReviewFile {
+	pub path:         String,
+	pub display_path: String,
+	pub before:       Option<String>,
+	pub after:        String,
+}
 /// One file's apply outcome.
 #[napi(object)]
 pub struct EditFileOutcome {
@@ -352,6 +371,7 @@ enum ArgOp {
 	Push(String),
 	SetArgs(String),
 	Finish,
+	Close,
 }
 
 struct Shared {
@@ -375,6 +395,7 @@ impl Shared {
 				ArgOp::Push(delta) => session.push(&delta),
 				ArgOp::SetArgs(json) => session.set_args_json(&json),
 				ArgOp::Finish => session.finish(),
+				ArgOp::Close => session.close(),
 			}
 		}
 	}
@@ -465,6 +486,25 @@ impl EditSession {
 		self.shared.enqueue(ArgOp::Finish);
 	}
 
+	/// Prepare a canonical staged plan and return content-eligible files for
+	/// review.
+	#[napi]
+	pub async fn review(&self) -> Result<Vec<EditReviewFile>> {
+		let shared = Arc::clone(&self.shared);
+		let mut session = shared.session.lock().await;
+		shared.drain_into(&mut session);
+		let files = session.review().map_err(reason)?;
+		Ok(files
+			.into_iter()
+			.map(|file| EditReviewFile {
+				path:         file.path,
+				display_path: file.display_path,
+				before:       file.before,
+				after:        file.after,
+			})
+			.collect())
+	}
+
 	/// Stage and apply the finished edit through `writer`. Never rejects for
 	/// engine failures: those come back as `isError` outcomes carrying the
 	/// model-facing message.
@@ -482,9 +522,16 @@ impl EditSession {
 		let mut session = shared.session.lock().await;
 		shared.drain_into(&mut session);
 		let writer = TsfnWriter { tsfn: writer };
+		let revisions = request.revisions.map(|revs| {
+			revs
+				.into_iter()
+				.map(|r| CoreEditRevision { path: r.path, content: r.content })
+				.collect::<Vec<_>>()
+		});
 		let outcome = session
-			.apply(
+			.apply_with_revisions(
 				ApplyRequest { lsp_batch_id: request.lsp_batch_id, lsp_flush: request.lsp_flush },
+				revisions.as_deref(),
 				&writer,
 			)
 			.await;
@@ -522,7 +569,11 @@ impl EditSession {
 	#[napi]
 	pub fn close(&self) {
 		self.shared.closed.store(true, Ordering::Release);
+		self.shared.enqueue(ArgOp::Close);
 		let _ = self.shared.wake.try_send(());
+		if let Ok(mut session) = self.shared.session.try_lock() {
+			self.shared.drain_into(&mut session);
+		}
 	}
 }
 

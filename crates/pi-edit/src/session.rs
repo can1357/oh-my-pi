@@ -4,22 +4,28 @@
 //! Threading and callbacks live in the napi layer; this type is single
 //! threaded and pure apart from file reads and the writer trait.
 
-use std::path::PathBuf;
+use std::{
+	collections::{HashMap, HashSet},
+	path::PathBuf,
+	sync::Arc,
+};
 
 use async_trait::async_trait;
 
 use crate::{
-	diff_string::{CompactDiffOptions, build_compact_diff_preview},
+	diff_string::{
+		BlockContextSource, CompactDiffOptions, build_compact_diff_preview, generate_diff_string,
+		generate_unified_diff_string,
+	},
 	engine::{EditMode, FileOp, HeaderKind, ModeEngine, PreviewFile, StagedFile},
 	error::{EditError, EditResult},
-	files::{FileCache, FileSource},
+	files::{FileCache, FileRead, FileSource, persist_new},
 	notebook,
 	path_policy::{PathPolicy, canonical_key},
 	store::{EditStore, file_hash},
 	stream_json::ArgStream,
 	text::{normalize_to_lf, strip_bom, utf16_len},
 };
-
 /// Everything the host configures per tool call.
 #[derive(Debug, Clone)]
 pub struct SessionConfig {
@@ -81,6 +87,106 @@ pub struct ApplyRequest {
 	pub lsp_flush:    bool,
 }
 
+/// One file in an interactive edit review. Only content-modifying or
+/// content-creating files are eligible (deletions, renames, and no-ops
+/// are excluded from content tabs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditReviewFile {
+	/// Absolute path on disk.
+	pub path:         String,
+	/// Authored display path.
+	pub display_path: String,
+	/// Original content (None for newly created files).
+	pub before:       Option<String>,
+	/// Proposed content.
+	pub after:        String,
+}
+
+/// Human revision substituting proposed file content.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EditRevision {
+	/// Target file path (absolute or matching canonical key).
+	pub path:    String,
+	/// Substituted human content.
+	pub content: String,
+}
+
+#[derive(Debug, Clone)]
+struct StagedPlan {
+	staged:          Vec<StagedFile>,
+	/// FileRead per reviewed existing file, for persisting revised content
+	/// with the original encoding.
+	reads:           HashMap<PathBuf, Arc<FileRead>>,
+	/// Exact on-disk bytes at review time for drift detection. Bytes, not
+	/// the lossy FileRead text, because a file with invalid UTF-8 would
+	/// otherwise never compare equal to its untouched on-disk self.
+	drift_bytes:     HashMap<PathBuf, Vec<u8>>,
+	/// Expected canonical paths at review time to detect symlink retargeting.
+	canonical_paths: HashMap<PathBuf, PathBuf>,
+}
+
+fn reviewed_content_changed(
+	file: &StagedFile,
+	drift_bytes: &HashMap<PathBuf, Vec<u8>>,
+) -> EditResult<bool> {
+	let Some(reviewed_bytes) = drift_bytes.get(&file.absolute) else {
+		return Ok(false);
+	};
+	let current_bytes = std::fs::read(&file.absolute)
+		.map_err(|source| EditError::Io { path: file.absolute.clone(), source })?;
+	Ok(current_bytes.as_slice() != reviewed_bytes.as_slice())
+}
+
+fn validate_reviewed_file(
+	file: &StagedFile,
+	drift_bytes: &HashMap<PathBuf, Vec<u8>>,
+	canonical_paths: &HashMap<PathBuf, PathBuf>,
+) -> EditResult<()> {
+	if let Some(expected_canonical) = canonical_paths.get(&file.absolute) {
+		let current_canonical = canonical_key(&file.absolute);
+		if &current_canonical != expected_canonical {
+			return Err(EditError::apply(format!(
+				"File {} target path changed on disk during review",
+				file.display
+			)));
+		}
+	}
+	let current_exists = std::fs::symlink_metadata(&file.absolute).is_ok();
+	if file.existed != current_exists {
+		return Err(EditError::apply(format!(
+			"File {} state changed on disk during review",
+			file.display
+		)));
+	}
+	if reviewed_content_changed(file, drift_bytes)? {
+		return Err(EditError::apply(format!(
+			"File {} content changed on disk during review",
+			file.display
+		)));
+	}
+	// validate_rename guarantees every rename destination was absent at review
+	// time; one appearing since means the approved plan would overwrite a file
+	// the human never saw.
+	if let Some(destination) = &file.move_to {
+		let dest_changed = canonical_paths
+			.get(&destination.absolute)
+			.is_some_and(|expected| &canonical_key(&destination.absolute) != expected);
+		if dest_changed {
+			return Err(EditError::apply(format!(
+				"Destination {} target path changed on disk during review",
+				destination.display
+			)));
+		}
+		if std::fs::symlink_metadata(&destination.absolute).is_ok() {
+			return Err(EditError::apply(format!(
+				"Destination {} was created on disk during review",
+				destination.display
+			)));
+		}
+	}
+	Ok(())
+}
+
 /// Per-file apply outcome.
 #[derive(Debug, Clone)]
 pub struct FileOutcome {
@@ -130,6 +236,7 @@ pub struct Session {
 	/// Generation the last preview was computed for.
 	previewed:       u32,
 	final_pass_done: bool,
+	staged_plan:     Option<StagedPlan>,
 }
 
 impl Session {
@@ -150,6 +257,7 @@ impl Session {
 			generation: 0,
 			previewed: 0,
 			final_pass_done: false,
+			staged_plan: None,
 		}
 	}
 
@@ -169,12 +277,14 @@ impl Session {
 	pub fn push(&mut self, delta: &str) {
 		self.args.push(delta);
 		self.generation += 1;
+		self.staged_plan = None;
 	}
 
 	/// Replace the buffer with the complete argument JSON (no-delta path).
 	pub fn set_args_json(&mut self, json: &str) {
 		self.args.replace(json);
 		self.generation += 1;
+		self.staged_plan = None;
 	}
 
 	/// Arguments are complete; the next preview is the final untrimmed pass.
@@ -214,18 +324,10 @@ impl Session {
 		PreviewBatch { generation, streaming, files }
 	}
 
-	/// Stage and apply the finished arguments through `writer`.
-	///
-	/// Order: reread every target fresh, stage all files in memory (any
-	/// failure aborts before the first write), enforce the plan-mode guard
-	/// for every file, then write in payload order. A writer failure aborts
-	/// the loop; files already written stay written and the error is
-	/// returned verbatim.
-	pub async fn apply(
-		&mut self,
-		request: ApplyRequest,
-		writer: &dyn EditWriter,
-	) -> EditResult<ApplyOutcome> {
+	/// Prepare a canonical staged plan and return content-eligible files for
+	/// review. Only FileOp::Create and FileOp::Update are eligible; deletions,
+	/// renames, and no-ops are excluded from the returned review files.
+	pub fn review(&mut self) -> EditResult<Vec<EditReviewFile>> {
 		self.files.clear();
 		let snapshot = self.args.snapshot();
 		if !snapshot.complete {
@@ -240,9 +342,219 @@ impl Session {
 			)?;
 		}
 
+		let mut eligible_files = Vec::new();
+		let mut reads = HashMap::new();
+		let mut drift_bytes = HashMap::new();
+		let mut canonical_paths = HashMap::new();
+		for file in &staged {
+			canonical_paths.insert(file.absolute.clone(), canonical_key(&file.absolute));
+			if let Some(destination) = &file.move_to {
+				canonical_paths
+					.insert(destination.absolute.clone(), canonical_key(&destination.absolute));
+			}
+			if file.existed {
+				let resolved = self.files.resolve(&file.display, true)?;
+				if let Some(read) = self.files.try_read(&resolved)? {
+					reads.insert(file.absolute.clone(), read);
+				}
+				// Baseline the drift check on the exact bytes the staging
+				// itself read: an independent re-read here could observe a
+				// concurrent save the proposal was never computed from.
+				if let Some(bytes) = &file.before_bytes {
+					drift_bytes.insert(file.absolute.clone(), bytes.clone());
+				}
+			}
+			let is_eligible = (file.op == FileOp::Create || file.op == FileOp::Update)
+				&& file.move_to.is_none()
+				&& file.after != file.before;
+
+			if is_eligible {
+				let before = if file.existed {
+					Some(file.before.clone())
+				} else {
+					None
+				};
+				eligible_files.push(EditReviewFile {
+					path: file.absolute.to_string_lossy().into_owned(),
+					display_path: file.display.clone(),
+					before,
+					after: file.after.clone(),
+				});
+			}
+		}
+
+		self.staged_plan = Some(StagedPlan { staged, reads, drift_bytes, canonical_paths });
+		Ok(eligible_files)
+	}
+
+	/// Apply the finished arguments through `writer`, optionally applying human
+	/// revisions.
+	pub async fn apply_with_revisions(
+		&mut self,
+		request: ApplyRequest,
+		revisions: Option<&[EditRevision]>,
+		writer: &dyn EditWriter,
+	) -> EditResult<ApplyOutcome> {
+		let revisions_slice = revisions.unwrap_or(&[]);
+		let (staged, reviewed_plan) = if let Some(plan) = self.staged_plan.take() {
+			let StagedPlan {
+				staged: original_staged,
+				reads: staged_reads,
+				drift_bytes,
+				canonical_paths,
+			} = plan;
+
+			// Reject drift that already existed before any write, preserving the
+			// reviewed plan's all-or-nothing preflight behavior.
+			for file in &original_staged {
+				validate_reviewed_file(file, &drift_bytes, &canonical_paths)?;
+			}
+
+			if !revisions_slice.is_empty() {
+				// Index eligible content-modifying files in original_staged
+				let mut eligible_by_path: HashMap<PathBuf, usize> = HashMap::new();
+				let mut eligible_by_canonical: HashMap<PathBuf, usize> = HashMap::new();
+				for (index, file) in original_staged.iter().enumerate() {
+					let is_eligible = (file.op == FileOp::Create || file.op == FileOp::Update)
+						&& file.move_to.is_none()
+						&& file.after != file.before;
+					if is_eligible {
+						eligible_by_path.insert(file.absolute.clone(), index);
+						eligible_by_canonical.insert(canonical_key(&file.absolute), index);
+					}
+				}
+
+				// Enforce unknown, duplicate, or ineligible revisions all before write
+				let mut seen_targets: HashSet<usize> = HashSet::new();
+				for revision in revisions_slice {
+					let rev_path = PathBuf::from(&revision.path);
+					let rev_canonical = canonical_key(&rev_path);
+					let matched_index = eligible_by_path
+						.get(&rev_path)
+						.or_else(|| eligible_by_canonical.get(&rev_canonical))
+						.copied();
+
+					let Some(target_index) = matched_index else {
+						return Err(EditError::apply(format!(
+							"Revision targets unknown or ineligible file: {}",
+							revision.path
+						)));
+					};
+
+					if !seen_targets.insert(target_index) {
+						return Err(EditError::apply(format!(
+							"Duplicate revision for file: {}",
+							revision.path
+						)));
+					}
+				}
+
+				let mut revised_staged = original_staged;
+				for revision in revisions_slice {
+					let rev_path = PathBuf::from(&revision.path);
+					let rev_canonical = canonical_key(&rev_path);
+					let target_index = *eligible_by_path
+						.get(&rev_path)
+						.or_else(|| eligible_by_canonical.get(&rev_canonical))
+						.expect("already validated");
+
+					let file = &mut revised_staged[target_index];
+					file.record_snapshot = true;
+					// A revised file carries a fresh tag even when the human
+					// restored the exact original content: the result must not
+					// depend on whether the revision changed anything.
+					file.header = HeaderKind::HashlineTag;
+					let (_, body) = strip_bom(&revision.content);
+					let normalized_rev = normalize_to_lf(body).into_owned();
+					let is_noop = file.existed && normalized_rev == file.before;
+
+					if is_noop {
+						file.op = FileOp::Noop;
+						file.after = file.before.clone();
+						file.persisted = None;
+						file.diff = String::new();
+						file.preview_diff = None;
+						file.first_changed_line = None;
+						file.text_override = None;
+						file.before_preview.clear();
+						file.after_preview.clear();
+					} else {
+						file.text_override = None;
+						file.before_preview.clear();
+						file.after_preview.clear();
+						file.after = normalized_rev;
+						let staged_read = staged_reads.get(&file.absolute);
+						let persisted = match staged_read {
+							Some(read) => read.persist(&file.after)?,
+							None => {
+								let resolved = crate::engine::Resolved {
+									absolute: file.absolute.clone(),
+									display:  file.display.clone(),
+								};
+								persist_new(&resolved, &file.after)?
+							},
+						};
+						file.persisted = Some(persisted);
+
+						let context_source = BlockContextSource { path: Some(&file.display), lang: None };
+						match self.config.mode {
+							EditMode::Patch | EditMode::ApplyPatch => {
+								let unified = generate_unified_diff_string(
+									&file.before,
+									&file.after,
+									None,
+									&context_source,
+								);
+								let preview =
+									generate_diff_string(&file.before, &file.after, None, &context_source);
+								file.diff = unified.diff;
+								file.preview_diff = Some(preview.diff);
+								file.first_changed_line = unified.first_changed_line;
+							},
+							EditMode::Replace | EditMode::Hashline | EditMode::Sloppy => {
+								let diff_out =
+									generate_diff_string(&file.before, &file.after, None, &context_source);
+								file.diff = diff_out.diff;
+								file.preview_diff = None;
+								file.first_changed_line = diff_out.first_changed_line;
+							},
+						}
+						file.record_snapshot = true;
+					}
+				}
+				(revised_staged, Some((drift_bytes, canonical_paths)))
+			} else {
+				(original_staged, Some((drift_bytes, canonical_paths)))
+			}
+		} else {
+			if !revisions_slice.is_empty() {
+				return Err(EditError::apply("Revisions provided without a reviewed plan"));
+			}
+			self.files.clear();
+			let snapshot = self.args.snapshot();
+			if !snapshot.complete {
+				return Err(EditError::parse("Edit arguments were incomplete"));
+			}
+			let staged = self.engine.stage(&snapshot, &mut self.files, &self.store)?;
+			for file in &staged {
+				self.config.policy.enforce_write(
+					&file.display,
+					file.op,
+					file.move_to.as_ref().map(|m| m.display.as_str()),
+				)?;
+			}
+			(staged, None)
+		};
+
 		let last_write = staged.iter().rposition(|file| file.op != FileOp::Noop);
 		let mut files = Vec::with_capacity(staged.len());
 		for (index, mut file) in staged.into_iter().enumerate() {
+			// Earlier writes may trigger an editor/LSP save of a later target.
+			// Revalidate this file immediately before its own write so a target
+			// cannot drift after passing the up-front preflight.
+			if let Some((drift_bytes, canonical_paths)) = &reviewed_plan {
+				validate_reviewed_file(&file, drift_bytes, canonical_paths)?;
+			}
 			let canonical = canonical_key(&file.absolute);
 			let response = if file.op == FileOp::Noop {
 				WriteResponse::default()
@@ -279,7 +591,12 @@ impl Session {
 							file.warnings.push(write_drift_warning(&file.display));
 						}
 						let key = dest_canonical.as_deref().unwrap_or(&canonical);
-						tag = Some(self.store.record(key, &recorded, None));
+						let seen = if file.header == HeaderKind::HashlineTag {
+							Some((1..=file.after.lines().count().max(1) as u32).collect::<Vec<_>>())
+						} else {
+							None
+						};
+						tag = Some(self.store.record(key, &recorded, seen.as_deref()));
 					}
 					self.store.reset_noop(&canonical);
 				},
@@ -342,6 +659,27 @@ impl Session {
 			.collect::<Vec<_>>()
 			.join(EDIT_RESULT_SEPARATOR);
 		Ok(ApplyOutcome { text, files })
+	}
+
+	/// Stage and apply the finished arguments through `writer`.
+	///
+	/// Order: reread every target fresh, stage all files in memory (any
+	/// failure aborts before the first write), enforce the plan-mode guard
+	/// for every file, then write in payload order. A writer failure aborts
+	/// the loop; files already written stay written and the error is
+	/// returned verbatim.
+	pub async fn apply(
+		&mut self,
+		request: ApplyRequest,
+		writer: &dyn EditWriter,
+	) -> EditResult<ApplyOutcome> {
+		self.apply_with_revisions(request, None, writer).await
+	}
+
+	/// Release any staged review plan and reset buffers.
+	pub fn close(&mut self) {
+		self.staged_plan = None;
+		self.files.clear();
 	}
 }
 
