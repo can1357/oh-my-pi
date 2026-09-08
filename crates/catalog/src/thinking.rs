@@ -136,7 +136,7 @@ pub enum ThinkingEffortSelector {
 	Deserialize,
 )]
 #[serde(rename_all = "kebab-case")]
-#[strum(serialize_all = "kebab-case", ascii_case_insensitive)]
+#[strum(serialize_all = "kebab-case", ascii_case_insensitive, const_into_str)]
 pub enum ThinkingMode {
 	/// Send a named effort.
 	Effort,
@@ -150,18 +150,6 @@ pub enum ThinkingMode {
 	AnthropicBudgetEffort,
 }
 
-impl ThinkingMode {
-	/// Returns the canonical static spelling for this control mode.
-	pub const fn into_str(&self) -> &'static str {
-		match self {
-			Self::Effort => "effort",
-			Self::Budget => "budget",
-			Self::GoogleLevel => "google-level",
-			Self::AnthropicAdaptive => "anthropic-adaptive",
-			Self::AnthropicBudgetEffort => "anthropic-budget-effort",
-		}
-	}
-}
 
 /// Additional serving path selected independently of effort.
 #[derive(
