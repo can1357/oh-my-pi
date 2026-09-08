@@ -11,7 +11,7 @@ import type {
 	Usage,
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
-import { isRecord } from "@oh-my-pi/pi-utils";
+import { isRecord, parseJsonlLenient } from "@oh-my-pi/pi-utils";
 import { resolveClaudePaths } from "../config/claude-paths";
 import { collectForeignJsonRecords, type ForeignJsonRecord, readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
@@ -119,6 +119,24 @@ function projectCwd(encoded: string, registered: readonly string[]): string {
 	if (exact) return exact;
 	if (!encoded.startsWith("-")) return encoded;
 	return encoded.replaceAll("-", path.sep);
+}
+
+const CLAUDE_CWD_PREFIX_BYTES = 64 * 1024;
+
+/**
+ * The working directory Claude recorded for a session, taken from the
+ * transcript itself. Claude writes it on the first user record, so listing only
+ * reads a bounded prefix and falls back to the encoded project directory when
+ * that prefix has no cwd.
+ */
+async function recordedCwd(file: string): Promise<string | undefined> {
+	const prefix = await Bun.file(file).slice(0, CLAUDE_CWD_PREFIX_BYTES).text();
+	for (const value of parseJsonlLenient<unknown>(prefix)) {
+		if (!isRecord(value)) continue;
+		const cwd = stringField(value, "cwd");
+		if (cwd) return cwd;
+	}
+	return undefined;
 }
 
 async function projectFiles(root: string): Promise<Array<{ file: string; cwd: string }>> {
@@ -329,7 +347,7 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 					source: this.source,
 					id,
 					path: item.file,
-					cwd: indexed?.cwd ?? item.cwd,
+					cwd: indexed?.cwd ?? (await recordedCwd(item.file)) ?? item.cwd,
 					created: new Date(createdMs),
 					modified: new Date(modifiedMs),
 					firstMessage: indexed?.firstMessage,
