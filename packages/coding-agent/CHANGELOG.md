@@ -13,6 +13,7 @@
 ### Fixed
 
 - Grok Bot catalog matrix tool smoke requires a path-segment boundary (rejects `wrongnotes/...` suffix matches).
+- Grok Bot catalog matrix shell smoke binds echo/read/write evidence to the same statement as the operation.
 - Grok Bot catalog matrix `--slice representative` builds catalog models before router selection so KDL `sand-tools-wire` is visible.
 - Bash results no longer replace a failing command's output with the shell minimizer's lossy summary when the original capture cannot be persisted as an artifact; the raw diagnostics are kept so a failure stays actionable ([#11081](https://github.com/can1357/oh-my-pi/issues/11081)).
 - Fixed worker subprocesses failing to declare themselves as worker hosts before dispatching selectors, which prevented nested thread worker spawns during `/usage` stats sync on multi-core systems.

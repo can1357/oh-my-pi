@@ -1115,10 +1115,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						clearGrokbotTokenCache();
 					}
 					output.errorStatus = response.status;
-					const errText = await response.text().catch(() => "");
-					throw new Error(
-						`Grok Bot stream failed (HTTP ${response.status})${errText ? `: ${errText.slice(0, 200)}` : ""}`,
-					);
+					// Drain the body but do not attach it — reverse proxies may echo
+					// Authorization / payload into error pages (mint path is status-only too).
+					await response.text().catch(() => "");
+					throw new Error(`Grok Bot stream failed (HTTP ${response.status})`);
 				}
 
 				if (!started) {

@@ -14,6 +14,7 @@
 - Grok Bot product-wire history rewrite keeps hashline `edit` when `write` owns the shared Write slot
 - Grok Bot preserves empty structured tool `args` (`{}`) on history replay so the protobuf args oneof discriminator is not dropped
 - Grok Bot classifies variant/legacy selectors via `requestModelId` for Anthropic tool-wire policy
+- Grok Bot stream HTTP error throws omit response bodies (status only) so reverse-proxy echoes are not logged
 - Grok Bot omits `thinking` from streamSimple/completeSimple when effort is unset so discovered `sandParameterDefaults` apply
 - Buffer unlabeled markdown JSON fences until end-of-stream promotion
 - Remint and replay once after a rejected Grok Bot JWT (HTTP 401 / Connect unauthenticated)

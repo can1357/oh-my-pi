@@ -142,21 +142,61 @@ export function readLikeShellCommand(command: string): boolean {
 	return /(?:^|[;&|\n]\s*)(?:cat|head|sed)\b/.test(cmd);
 }
 
+/** Strip `#` comments, then split into statements (`\n`, `;`, `&&`, `&`). Pipes stay together. */
+function shellStatementSegments(command: string): string[] {
+	const withoutComments = command
+		.split("\n")
+		.map(line => line.replace(/(^|[\t ;&|])#[^\n]*/g, "$1"))
+		.join("\n");
+	return withoutComments
+		.split(/\n|&&|&|;/)
+		.map(s => s.trim())
+		.filter(Boolean);
+}
+
+/** True when `filePath` appears as a path segment (not a suffix of `wrongnotes/...`). */
+function commandMentionsPath(segment: string, filePath: string): boolean {
+	let from = 0;
+	while (from <= segment.length) {
+		const idx = segment.indexOf(filePath, from);
+		if (idx < 0) return false;
+		if (idx === 0) return true;
+		const before = segment[idx - 1]!;
+		if (before === "/" || /\s/.test(before) || before === "'" || before === '"' || before === "`") return true;
+		from = idx + 1;
+	}
+	return false;
+}
+
 /**
- * Bash smoke must actually echo/printf the ping — not merely mention it in a
- * comment (`true # tools-pong-…`) that `runOneTool` would then echo back.
+ * Bash smoke must actually echo/printf the ping in the same statement — not
+ * merely mention it elsewhere (`echo wrong; true tools-pong-…`) or in a comment.
  */
 export function echoLikeShellCommand(command: string, ping: string): boolean {
 	if (!ping) return false;
 	const cmd = command.trim();
 	if (!cmd) return false;
-	const withoutComments = cmd
-		.split("\n")
-		.map(line => line.replace(/(^|[\t ;&|])#[^\n]*/g, "$1"))
-		.join("\n")
-		.trim();
-	if (!withoutComments.includes(ping)) return false;
-	return /(?:^|[;&|\n]\s*)(?:echo|printf)\b/.test(withoutComments);
+	return shellStatementSegments(cmd).some(segment => /^(?:echo|printf)\b/.test(segment) && segment.includes(ping));
+}
+
+/** Read smoke: path must appear in the same cat/head/sed statement. */
+export function readPathInShellCommand(command: string, filePath: string): boolean {
+	if (!filePath) return false;
+	const cmd = command.trim();
+	if (!cmd || writeLikeShellCommand(cmd)) return false;
+	return shellStatementSegments(cmd).some(
+		segment => /^(?:cat|head|sed)\b/.test(segment) && commandMentionsPath(segment, filePath),
+	);
+}
+
+/** Write smoke: path + ping must appear in the same write statement (incl. pipes). */
+export function writePathPingInShellCommand(command: string, filePath: string, ping: string): boolean {
+	if (!filePath || !ping) return false;
+	const cmd = command.trim();
+	if (!cmd) return false;
+	return shellStatementSegments(cmd).some(
+		segment => writeLikeShellCommand(segment) && commandMentionsPath(segment, filePath) && segment.includes(ping),
+	);
 }
 
 export function expectedReadPath(safeId: string): string {
@@ -213,7 +253,7 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 		}
 		if (/^(bash|Shell|shell)$/i.test(name)) {
 			const cmd = shellCommandOf(call);
-			return readLikeShellCommand(cmd) && cmd.includes(path);
+			return readPathInShellCommand(cmd, path);
 		}
 		return false;
 	}
@@ -226,7 +266,7 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 	}
 	if (/^(bash|Shell|shell)$/i.test(name)) {
 		const cmd = shellCommandOf(call);
-		return writeLikeShellCommand(cmd) && cmd.includes(path) && cmd.includes(ping);
+		return writePathPingInShellCommand(cmd, path, ping);
 	}
 	return false;
 }

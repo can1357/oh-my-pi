@@ -160,6 +160,48 @@ describe("toolSmokePrompt", () => {
 		expect(echoLikeShellCommand(`printf '%s\\n' ${ping}`, ping)).toBe(true);
 		expect(echoLikeShellCommand(`true # ${ping}`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`echo unrelated`, ping)).toBe(false);
+		// Token in a sibling statement does not count — must be an echo/printf arg.
+		expect(echoLikeShellCommand(`echo wrong; true ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo wrong && true ${ping}`, ping)).toBe(false);
+	});
+
+	test("binds read/write shell smoke evidence to the operation statement", () => {
+		const id = "claude-opus-5";
+		const readPath = expectedReadPath(idSafe(id));
+		const writePath = expectedWritePath(idSafe(id));
+		const ping = "tools-pong-write-x";
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat /dev/null; echo ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(true);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `echo ${ping}; true > ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `printf '%s\\n' ${ping} > ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(true);
 	});
 
 	test("rejects tool calls that only match by name", () => {
