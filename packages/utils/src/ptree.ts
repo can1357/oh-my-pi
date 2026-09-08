@@ -380,10 +380,15 @@ export class ChildProcess<In extends InMask = InMask> {
 						? { group: true }
 						: undefined
 					: { gracefulMs, group: this.#terminateGroup };
-			this.#terminating = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))
-				?.terminate(options)
-				?.catch(e => void e);
+			this.#terminating = (this.#windowsRootProcess ?? Process.fromPid(this.proc.pid))?.terminate(options);
+			void this.#terminating?.catch(() => {});
 		}
+	}
+
+	async killAndWait(reason?: Exception, gracefulMs?: number): Promise<void> {
+		this.kill(reason, gracefulMs);
+		if ((await this.#terminating) === false) throw new Error(`Process tree termination timed out: ${this.pid}`);
+		await this.proc.exited;
 	}
 
 	// ── Output helpers ───────────────────────────────────────────────────
@@ -391,7 +396,7 @@ export class ChildProcess<In extends InMask = InMask> {
 	async #throwIfAborted(): Promise<void> {
 		const exitReason = this.exitReason;
 		if (!exitReason?.aborted) return;
-		if (this.#terminating) await this.#terminating;
+		if (this.#terminating) await this.#terminating.catch(() => {});
 		throw exitReason;
 	}
 
@@ -523,7 +528,7 @@ export class ChildProcess<In extends InMask = InMask> {
 		// On abort/timeout, hold the result until the tree is actually gone: the
 		// native terminate() is graceful-first, and reporting before it finishes
 		// would leave timed-out descendants alive past the caller's budget.
-		if (exitError?.aborted && this.#terminating) await this.#terminating;
+		if (exitError?.aborted && this.#terminating) await this.#terminating.catch(() => {});
 
 		const exitCode = this.exitCode ?? (exitError && !exitError.aborted ? exitError.exitCode : null);
 		const ok = exitCode === 0;
