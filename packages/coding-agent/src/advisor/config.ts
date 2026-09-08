@@ -64,9 +64,12 @@ function normalizeWatchdogId(value: string): string {
 }
 
 function normalizeWatchdogRef(value: string): string {
-	const parts = value.trim().split("/");
-	if (parts.length !== 2) throw new Error(`Invalid watchdog reference "${value}": expected namespace/id`);
-	return parts.map(normalizeWatchdogId).join("/");
+	const reference = value.trim();
+	const separator = reference.lastIndexOf("/");
+	if (separator < 1) throw new Error(`Invalid watchdog reference "${value}": expected namespace/id`);
+	const namespace = reference.slice(0, separator).trim().toLowerCase();
+	if (!namespace) throw new Error(`Invalid watchdog reference "${value}": expected namespace/id`);
+	return `${namespace}/${normalizeWatchdogId(reference.slice(separator + 1))}`;
 }
 
 function validateReference(value: Record<string, unknown>, allowed: readonly string[]): void {
@@ -303,7 +306,7 @@ export async function discoverAdvisorConfigs(
 	for (const agent of options.agentDefinitions ?? []) {
 		const watchdogs = parseAgentWatchdogs(agent.watchdogs);
 		if (watchdogs === undefined) continue;
-		const namespace = normalizeWatchdogId(agent.name);
+		const namespace = agent.name.trim().toLowerCase();
 		if (namespace === "global") throw new Error('Agent watchdog namespace "global" is reserved');
 		if (agent.name.trim().toLowerCase() === options.agentName?.trim().toLowerCase()) {
 			selected = watchdogs;

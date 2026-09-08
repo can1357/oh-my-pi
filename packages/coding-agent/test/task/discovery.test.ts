@@ -91,6 +91,19 @@ describe("discoverAgents", () => {
 		expect(projectAgentsDir).toBe(path.join(projectDir, ".omp", "agents"));
 	});
 
+	test("isolates malformed watchdogs from healthy agent discovery", async () => {
+		const agentsDir = path.join(projectDir, ".omp", "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(path.join(agentsDir, "healthy.md"), OMP_AGENT_MD);
+		await fs.writeFile(
+			path.join(agentsDir, "broken.md"),
+			"---\nname: broken\ndescription: Invalid watchdog configuration.\nwatchdogs: invalid\n---\nReview.\n",
+		);
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		expect(agents.find(agent => agent.name === "omp-test-agent")?.systemPrompt).toContain("OMP task agent");
+		expect(agents.some(agent => agent.name === "broken")).toBe(false);
+	});
+
 	test("loads agents from OMP npm plugins under <home>/.omp/plugins/node_modules", async () => {
 		await writeOmpPluginAgent(tempHome);
 

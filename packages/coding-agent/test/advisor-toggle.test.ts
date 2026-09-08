@@ -235,6 +235,35 @@ describe("AgentSession advisor toggle", () => {
 		expect(session.getAdvisorStats().advisors).toEqual([]);
 	});
 
+	it("treats an explicit selection without a configs array as empty", async () => {
+		await session.dispose();
+		session = new AgentSession({
+			agent: new Agent({ initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] } }),
+			sessionManager,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			modelRegistry,
+			advisorExplicitSelection: true,
+			advisorTools: [],
+		});
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		expect(session.setAdvisorEnabled(true)).toBe(false);
+		expect(session.getAdvisorStats().advisors).toEqual([]);
+	});
+
+	it("labels delivered advice with the display name rather than its canonical ID", async () => {
+		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
+		session.applyAdvisorConfigs([{ id: "global/design-match", name: "Design Match" }], undefined);
+		session.setAdvisorEnabled(true);
+		const advisor = session.getAdvisorAgent();
+		const tool = advisor?.state.tools.find(candidate => candidate.name === "advise");
+		if (!(tool instanceof advisorModule.AdviseTool)) throw new Error("Expected advise tool");
+		tool.beginUpdate(false);
+		await tool.execute("display-name", { note: "The update changes an unrelated API contract.", severity: "nit" });
+		const messages = session.yieldQueue.drainLazy().map(delivery => delivery());
+		expect(JSON.stringify(messages)).toContain('advisor=\\"Design Match\\"');
+		expect(JSON.stringify(messages)).not.toContain("global/design-match");
+	});
+
 	it("keeps same-name watchdog identities distinct and deduplicates canonical IDs", () => {
 		session.settings.setModelRole("advisor", `${model.provider}/${model.id}`);
 		session.applyAdvisorConfigs(

@@ -730,7 +730,7 @@ export class SessionAdvisors {
 
 	#resolveAdvisorRuntimeDescriptors(emitWarnings: boolean): AdvisorRuntimeDescriptor[] {
 		const legacy = !this.#advisorExplicitSelection && !this.#advisorConfigs?.length;
-		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : this.#advisorConfigs!;
+		const roster: AdvisorConfig[] = legacy ? [{ name: "default" }] : (this.#advisorConfigs ?? []);
 		const descriptors: AdvisorRuntimeDescriptor[] = [];
 		const usedSlugs = new Set<string>();
 		for (const config of roster) {
@@ -1259,7 +1259,7 @@ export class SessionAdvisors {
 	#routeAdvice(advisor: ActiveAdvisor, note: string, severity?: AdvisorSeverity): void {
 		// The implicit single ("default") advisor stamps no source name, so its
 		// agent-facing `<advisory>` bytes stay identical to the pre-multi-advisor path.
-		const source = advisor.slug ? (advisor.id ?? advisor.name) : undefined;
+		const source = advisor.slug ? (advisor.name ?? advisor.id) : undefined;
 		const interrupting = isInterruptingSeverity(severity);
 		const channel = resolveAdvisorDeliveryChannel({
 			severity,

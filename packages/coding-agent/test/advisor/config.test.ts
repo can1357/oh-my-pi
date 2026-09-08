@@ -45,6 +45,37 @@ describe("discoverAdvisorConfigs", () => {
 		]);
 	});
 
+	it("preserves valid agent names without lossy namespace collisions", async () => {
+		const names = ["Code Reviewer", "code_reviewer", "code-reviewer", "team/reviewer"];
+		const agentDefinitions = names.map(name => ({
+			name,
+			watchdogs: [{ id: "check", instructions: name }],
+		}));
+		const unrelated = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "main",
+			agentDefinitions,
+		});
+		expect(unrelated.advisors).toEqual([]);
+		const inline = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "Code Reviewer",
+			agentDefinitions,
+		});
+		expect(inline.advisors.map(advisor => advisor.instructions)).toEqual(["Code Reviewer"]);
+		const consumer = await discoverAdvisorConfigs(tmp, agentDir, {
+			agentName: "consumer",
+			agentDefinitions: [
+				...agentDefinitions,
+				{
+					name: "consumer",
+					watchdogs: names.map(name => ({ ref: `${name}/check` })),
+				},
+			],
+		});
+		expect(consumer.advisors.map(advisor => [advisor.id, advisor.instructions])).toEqual(
+			names.map(name => [`${name.toLowerCase()}/check`, name]),
+		);
+	});
+
 	it("resolves explicit shared IDs through project precedence and deduplicates references", async () => {
 		await saveWatchdogConfigFile(path.join(agentDir, "WATCHDOG.yml"), {
 			advisors: [{ id: "check", name: "User name", instructions: "User" }],
@@ -119,7 +150,7 @@ describe("discoverAdvisorConfigs", () => {
 	it("rejects normalized duplicate IDs and mixed reference definitions", () => {
 		expect(() => parseAgentWatchdogs([{ id: " CHECK " }, { id: "check" }])).toThrow("Duplicate");
 		expect(() => parseAgentWatchdogs([{ ref: "global/check", model: "override" }])).toThrow("cannot contain");
-		expect(() => parseAgentWatchdogs([{ ref: "../check" }])).toThrow("Invalid watchdog ID");
+		expect(() => parseAgentWatchdogs([{ ref: "owner/" }])).toThrow("Invalid watchdog ID");
 	});
 
 	it("rejects duplicate shared IDs within one file", async () => {
