@@ -2,11 +2,14 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added three opt-in status-line formatting features for custom presets: a `profile` segment that shows the active named profile as `p:<name>` and hides for the default profile, `segmentOptions.token_total.breakdown` to render labeled traffic totals like `in:25K out:5`, and `segmentOptions.context_pct.compact` to render percentage-only context labels such as `ctx:9.1%` ([#9096](https://github.com/can1357/oh-my-pi/issues/9096))
+
 ## [18.1.15] - 2026-09-08
 
 ### Added
 
-- Added three opt-in status-line formatting features for custom presets: a `profile` segment that shows the active named profile as `p:<name>` and hides for the default profile, `segmentOptions.token_total.breakdown` to render labeled traffic totals like `in:25K out:5`, and `segmentOptions.context_pct.compact` to render percentage-only context labels such as `ctx:9.1%` ([#9096](https://github.com/can1357/oh-my-pi/issues/9096))
 - Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
 - Headless browser tabs now freeze when a turn settles so idle animated/WebGL pages stop burning CPU/GPU, resuming automatically on next use; tabs idle past `browser.idleCloseSec` (default 30 minutes) are closed. `persist: true` on `browser.open` opts a tab out of both ([#8246](https://github.com/can1357/oh-my-pi/issues/8246) by [@H4vC](https://github.com/H4vC)).
 
