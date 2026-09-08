@@ -5,8 +5,8 @@ import json
 import os
 import shutil
 import signal
-import sys
 import subprocess
+import sys
 import tempfile
 import textwrap
 import threading
@@ -1328,11 +1328,108 @@ DELAYED_FOLLOW_UP_SERVER = textwrap.dedent(
                     "id": command.get("id"),
                     "type": "prompt_result",
                     "agentInvoked": True,
+                    "agentRun": "future",
                 }
             ),
             flush=True,
         )
         print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
+    """
+)
+
+
+ACTIVE_DIRECT_STEER_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    print(
+        json.dumps(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "features": {
+                    "activeTurnSteering": 1,
+                    "promptResultVerdict": 1,
+                },
+            }
+        ),
+        flush=True,
+    )
+    for raw_line in sys.stdin:
+        command = json.loads(raw_line)
+        command_type = command["type"]
+        response = {
+            "id": command.get("id"),
+            "type": "response",
+            "command": command_type,
+            "success": True,
+        }
+        if command_type == "steer":
+            response["data"] = {"accepted": True, "agentRun": "current"}
+        print(json.dumps(response), flush=True)
+        if command_type == "prompt":
+            print(json.dumps({"type": "agent_start"}), flush=True)
+            print(
+                json.dumps(
+                    {
+                        "type": "prompt_result",
+                        "id": command.get("id"),
+                        "agentInvoked": True,
+                    }
+                ),
+                flush=True,
+            )
+        elif command_type == "steer":
+            print(json.dumps({"type": "agent_end", "messages": []}), flush=True)
+    """
+)
+
+
+CLEARED_STEER_PROMPT_SERVER = textwrap.dedent(
+    """
+    import json
+    import sys
+
+    print(
+        json.dumps(
+            {
+                "type": "ready",
+                "protocolVersion": 1,
+                "features": {
+                    "activeTurnSteering": 1,
+                    "promptResultVerdict": 1,
+                },
+            }
+        ),
+        flush=True,
+    )
+    first_prompt_id = None
+    for raw_line in sys.stdin:
+        command = json.loads(raw_line)
+        command_type = command["type"]
+        response = {
+            "id": command.get("id"),
+            "type": "response",
+            "command": command_type,
+            "success": True,
+        }
+        if command_type == "clear_queue":
+            response["data"] = {"steering": 1, "followUp": 0}
+        print(json.dumps(response), flush=True)
+        if command_type == "prompt" and first_prompt_id is None:
+            first_prompt_id = command.get("id")
+        elif command_type == "clear_queue":
+            print(
+                json.dumps(
+                    {
+                        "type": "prompt_result",
+                        "id": first_prompt_id,
+                        "agentInvoked": False,
+                    }
+                ),
+                flush=True,
+            )
     """
 )
 
@@ -2231,6 +2328,26 @@ class RpcClientTests(unittest.TestCase):
             self.assertEqual(client._scheduled_agent_runs, 2)
             self.assertEqual(client._completed_agent_runs, 2)
 
+    def test_future_follow_up_prompt_and_wait_ignores_active_terminal(self) -> None:
+        with self.make_client(server=DELAYED_FOLLOW_UP_SERVER) as client:
+            client.prompt("first")
+            deadline = time.monotonic() + 0.5
+            while not client._agent_run_active and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            started = time.monotonic()
+            turn = client.prompt_and_wait(
+                "second", streaming_behavior="followUp", timeout=0.6
+            )
+            elapsed = time.monotonic() - started
+
+            self.assertGreaterEqual(elapsed, 0.15)
+            self.assertEqual(
+                sum(isinstance(event, AgentEndEvent) for event in turn.events), 2
+            )
+            self.assertEqual(client._scheduled_agent_runs, 2)
+            self.assertEqual(client._completed_agent_runs, 2)
+
     def test_active_abort_and_prompt_reserves_the_replacement_run(self) -> None:
         with self.make_client(server=LIFECYCLE_ACCOUNTING_SERVER) as client:
             first_start_observed = threading.Event()
@@ -2316,6 +2433,32 @@ class RpcClientTests(unittest.TestCase):
             client.wait_for_idle(timeout=0.5)
             self.assertEqual(client._scheduled_agent_runs, 1)
             self.assertEqual(client._completed_agent_runs, 1)
+
+    def test_active_direct_steer_shares_the_current_run(self) -> None:
+        with self.make_client(server=ACTIVE_DIRECT_STEER_SERVER) as client:
+            client.prompt("first")
+            deadline = time.monotonic() + 0.5
+            while not client._agent_run_active and time.monotonic() < deadline:
+                time.sleep(0.01)
+
+            self.assertTrue(client.steer("active steer"))
+            client.wait_for_idle(timeout=0.5)
+
+            self.assertEqual(client._scheduled_agent_runs, 1)
+            self.assertEqual(client._completed_agent_runs, 1)
+
+    def test_clear_queue_releases_steer_mode_prompt_reservation(self) -> None:
+        with self.make_client(server=CLEARED_STEER_PROMPT_SERVER) as client:
+            client.prompt("pending")
+            client.prompt("queued steer", streaming_behavior="steer")
+
+            self.assertEqual(
+                client.clear_queue(),
+                ClearQueueResult(steering=1, follow_up=0),
+            )
+            client.wait_for_idle(timeout=0.5)
+
+            self.assertEqual(client._scheduled_agent_runs, client._completed_agent_runs)
 
     def test_event_history_limit_reports_overflow(self) -> None:
         with self.make_client(max_event_history=2) as client:

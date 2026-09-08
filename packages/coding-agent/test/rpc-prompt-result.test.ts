@@ -479,7 +479,10 @@ describe("watchAndReportLocalOnlyPromptResult", () => {
 		const prompt = Promise.resolve(true);
 		watchAndReportLocalOnlyPromptResult({
 			id: "req_1",
-			startPrompt: () => prompt,
+			startPrompt: onAgentRun => {
+				onAgentRun("future");
+				return prompt;
+			},
 			output: frame => output.push(frame),
 			onError: error => {
 				throw error;
@@ -487,7 +490,6 @@ describe("watchAndReportLocalOnlyPromptResult", () => {
 			extensionUserMessageTracker: extensionUserMessages,
 		});
 		await waitForPromptHandlers(prompt);
-
-		expect(output).toEqual([{ type: "prompt_result", id: "req_1", agentInvoked: true }]);
+		expect(output).toEqual([{ type: "prompt_result", id: "req_1", agentInvoked: true, agentRun: "future" }]);
 	});
 });

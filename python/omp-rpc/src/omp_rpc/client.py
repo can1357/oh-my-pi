@@ -9,8 +9,8 @@ import signal
 import subprocess
 import threading
 import time
-from contextlib import nullcontext
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import nullcontext
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Generic, Literal, TypeVar, cast
@@ -534,6 +534,9 @@ class RpcClient:
         self._agent_start_pending = threading.Event()
         self._awaited_prompt_result_ids: set[str] = set()
         self._completed_prompt_result_ids: set[str] = set()
+        self._prompt_result_agent_runs: dict[
+            str, Literal["current", "future"] | None
+        ] = {}
         self._last_schedule_async_error_index = 0
         self._ui_requests: queue.Queue[ExtensionUiRequest] = queue.Queue()
         self._stderr_chunks = _BoundedHistory[str](self._max_stderr_chunks)
@@ -626,6 +629,7 @@ class RpcClient:
         self._agent_start_pending.clear()
         self._awaited_prompt_result_ids = set()
         self._completed_prompt_result_ids = set()
+        self._prompt_result_agent_runs = {}
         self._last_schedule_async_error_index = 0
         self._ui_requests = queue.Queue()
         with self._state_lock:
@@ -1184,7 +1188,11 @@ class RpcClient:
             "prompt",
             _agent_run_reservation="if_idle",
             _agent_run_command_type=(
-                "follow_up" if streaming_behavior == "followUp" else None
+                "steer"
+                if streaming_behavior == "steer"
+                else "follow_up"
+                if streaming_behavior == "followUp"
+                else None
             ),
             _request_id_out=_request_id_out,
             message=message,
@@ -1331,6 +1339,7 @@ class RpcClient:
                 with self._event_condition:
                     self._awaited_prompt_result_ids.discard(request_ids[0])
                     self._completed_prompt_result_ids.discard(request_ids[0])
+                    self._prompt_result_agent_runs.pop(request_ids[0], None)
             self._prompt_lifecycle.release(operation)
 
     def wait_for_idle(self, timeout: float | None = None) -> None:
@@ -1546,8 +1555,15 @@ class RpcClient:
             self._event_condition.notify_all()
             return True
 
-    def _mark_prompt_agent_invoked(self, request_id: str) -> None:
+    def _mark_prompt_agent_invoked(
+        self,
+        request_id: str,
+        agent_run: Literal["current", "future"] | None = None,
+    ) -> None:
         with self._event_condition:
+            if request_id in self._awaited_prompt_result_ids:
+                self._prompt_result_agent_runs[request_id] = agent_run
+                self._event_condition.notify_all()
             if request_id == self._active_agent_run_request_id:
                 self._active_agent_run_request_id = None
                 self._sent_agent_run_request_ids.discard(request_id)
@@ -1561,10 +1577,22 @@ class RpcClient:
                 ),
                 None,
             )
-            if queued is not None and self._agent_run_active:
+            if agent_run == "current":
+                if queued is not None:
+                    self._unreserved_agent_run_request_ids.remove(queued)
+                    self._sent_agent_run_request_ids.discard(request_id)
+                    self._agent_invoked_request_ids.discard(request_id)
+                    return
+                if any(
+                    pending_request_id == request_id
+                    for pending_request_id, _ in self._agent_run_request_ids
+                ):
+                    self._mark_agent_run_completed(request_id)
+                    return
+            if queued is not None and self._agent_run_active and agent_run != "future":
                 self._unreserved_agent_run_request_ids.remove(queued)
                 self._sent_agent_run_request_ids.discard(request_id)
-                self._event_condition.notify_all()
+                self._agent_invoked_request_ids.discard(request_id)
                 return
             if queued is not None or any(
                 pending_request_id == request_id
@@ -1578,6 +1606,7 @@ class RpcClient:
             if request_id not in self._awaited_prompt_result_ids:
                 return
             self._completed_prompt_result_ids.add(request_id)
+            self._prompt_result_agent_runs.pop(request_id, None)
             self._event_condition.notify_all()
 
     def _cancel_pending_agent_runs(
@@ -1736,10 +1765,33 @@ class RpcClient:
                     raise async_errors[0]
 
                 event_payloads = self._events.snapshot_from(start_index)
-                if any(
+                if prompt_request_id in self._completed_prompt_result_ids:
+                    self._awaited_prompt_result_ids.discard(prompt_request_id)
+                    self._completed_prompt_result_ids.remove(prompt_request_id)
+                    self._prompt_result_agent_runs.pop(prompt_request_id, None)
+                    return ()
+
+                terminal_event_count = sum(
                     payload.get("type") == "agent_end"
                     and payload.get("isTerminal") is not False
                     for payload in event_payloads
+                )
+                prompt_result_pending = (
+                    prompt_request_id is not None
+                    and self.server_features.prompt_result_verdict == 1
+                    and prompt_request_id in self._awaited_prompt_result_ids
+                    and prompt_request_id not in self._prompt_result_agent_runs
+                )
+                required_terminal_events = (
+                    2
+                    if prompt_request_id is not None
+                    and self._prompt_result_agent_runs.get(prompt_request_id)
+                    == "future"
+                    else 1
+                )
+                if (
+                    not prompt_result_pending
+                    and terminal_event_count >= required_terminal_events
                 ):
                     events = tuple(
                         cast(RpcAgentEvent, parse_notification(payload))
@@ -1748,12 +1800,8 @@ class RpcClient:
                     if prompt_request_id is not None:
                         self._awaited_prompt_result_ids.discard(prompt_request_id)
                         self._completed_prompt_result_ids.discard(prompt_request_id)
+                        self._prompt_result_agent_runs.pop(prompt_request_id, None)
                     return events
-
-                if prompt_request_id in self._completed_prompt_result_ids:
-                    self._awaited_prompt_result_ids.discard(prompt_request_id)
-                    self._completed_prompt_result_ids.remove(prompt_request_id)
-                    return ()
 
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
@@ -1869,6 +1917,7 @@ class RpcClient:
             with self._event_condition:
                 self._awaited_prompt_result_ids.discard(request_id)
                 self._completed_prompt_result_ids.discard(request_id)
+                self._prompt_result_agent_runs.pop(request_id, None)
             raise
 
     def _send_notification(self, payload: JsonObject) -> None:
@@ -2360,7 +2409,15 @@ class RpcClient:
                     if isinstance(request_id, str):
                         if payload["agentInvoked"]:
                             if self.server_features.prompt_result_verdict == 1:
-                                self._mark_prompt_agent_invoked(request_id)
+                                raw_agent_run = payload.get("agentRun")
+                                agent_run = (
+                                    raw_agent_run
+                                    if raw_agent_run in ("current", "future")
+                                    else None
+                                )
+                                self._mark_prompt_agent_invoked(
+                                    request_id, cast(Any, agent_run)
+                                )
                         else:
                             self._mark_prompt_completed_without_agent(request_id)
                 if payload_type in ("tool_execution_update", "tool_execution_end"):
@@ -2510,7 +2567,15 @@ class RpcClient:
                         response_data.get("agentInvoked"), bool
                     ):
                         if response_data["agentInvoked"]:
-                            self._mark_prompt_agent_invoked(request_id)
+                            raw_agent_run = response_data.get("agentRun")
+                            agent_run = (
+                                raw_agent_run
+                                if raw_agent_run in ("current", "future")
+                                else None
+                            )
+                            self._mark_prompt_agent_invoked(
+                                request_id, cast(Any, agent_run)
+                            )
                         else:
                             self._mark_prompt_completed_without_agent(request_id)
                     elif (
@@ -2526,7 +2591,17 @@ class RpcClient:
                                 )
                             )
                             return
-                        if not accepted:
+                        if accepted:
+                            raw_agent_run = response_data.get("agentRun")
+                            agent_run = (
+                                raw_agent_run
+                                if raw_agent_run in ("current", "future")
+                                else None
+                            )
+                            self._mark_prompt_agent_invoked(
+                                request_id, cast(Any, agent_run)
+                            )
+                        else:
                             self._mark_agent_run_completed(request_id)
                 pending.response_queue.put(payload)
                 return

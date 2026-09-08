@@ -6085,7 +6085,9 @@ export class AgentSession {
 				if (!(await this.#queueCustomMessage(notice, streamingBehavior))) return false;
 				if (queueClearGeneration !== this.#queueClearGeneration) return false;
 			}
-			return await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt);
+			return await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, undefined, {
+				onAgentRun: options?.onAgentRun,
+			});
 		}
 
 		// Skip eager preludes when the user has already queued a directive
@@ -6135,10 +6137,17 @@ export class AgentSession {
 				if (!(await this.#queueCustomMessage(notice, streamingBehavior))) return false;
 				if (queueClearGeneration !== this.#queueClearGeneration) return false;
 			}
-			return await this.#queueUserMessage(expandedText, options?.images, streamingBehavior, submittedAt, {
-				images: normalizedImages,
-				descriptionNotice: imageDescriptionNotice,
-			});
+			return await this.#queueUserMessage(
+				expandedText,
+				options?.images,
+				streamingBehavior,
+				submittedAt,
+				{
+					images: normalizedImages,
+					descriptionNotice: imageDescriptionNotice,
+				},
+				{ onAgentRun: options?.onAgentRun },
+			);
 		}
 
 		const promptAttribution = options?.attribution ?? (options?.synthetic ? "agent" : "user");
@@ -6214,7 +6223,7 @@ export class AgentSession {
 	 */
 	async promptCustomMessage<T = unknown>(
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
-		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice"> & {
+		options?: Pick<PromptOptions, "streamingBehavior" | "toolChoice" | "onAgentRun"> & {
 			queueChipText?: string;
 			queueOnly?: boolean;
 		},
@@ -6256,7 +6265,7 @@ export class AgentSession {
 				if (!(await this.#queueCustomMessage(notice, streamingBehavior))) return false;
 				if (queueClearGeneration !== this.#queueClearGeneration) return false;
 			}
-			return await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText);
+			return await this.#queueCustomMessage(message, streamingBehavior, options.queueChipText, options.onAgentRun);
 		}
 		if (this.isStreaming) {
 			const streamingBehavior = options?.streamingBehavior;
@@ -6266,7 +6275,7 @@ export class AgentSession {
 				if (!(await this.#queueCustomMessage(notice, streamingBehavior))) return false;
 				if (queueClearGeneration !== this.#queueClearGeneration) return false;
 			}
-			return await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText);
+			return await this.#queueCustomMessage(message, streamingBehavior, options?.queueChipText, options?.onAgentRun);
 		}
 
 		const customMessage: CustomMessage<T> = {
@@ -6700,7 +6709,11 @@ export class AgentSession {
 	 * {@link isStreaming} — the latter stays true while a finished prompt unwinds.
 	 * Without the option the call always enqueues and returns `true`.
 	 */
-	async steer(text: string, images?: ImageContent[], options?: { activeTurnOnly?: boolean }): Promise<boolean> {
+	async steer(
+		text: string,
+		images?: ImageContent[],
+		options?: { activeTurnOnly?: boolean; onAgentRun?: (run: "current" | "future") => void },
+	): Promise<boolean> {
 		if (text.startsWith("/")) {
 			this.#throwIfExtensionCommand(text);
 		}
@@ -6711,6 +6724,7 @@ export class AgentSession {
 		const submittedAt = Date.now();
 		return this.#queueUserMessage(expandedText, images, "steer", submittedAt, undefined, {
 			requireActiveTurn: options?.activeTurnOnly === true,
+			onAgentRun: options?.onAgentRun,
 		});
 	}
 
@@ -6797,7 +6811,7 @@ export class AgentSession {
 		mode: "steer" | "followUp" | "aside",
 		timestamp?: number,
 		preprocessed?: { images: ImageContent[] | undefined; descriptionNotice: CustomMessage | undefined },
-		options?: { requireActiveTurn?: boolean },
+		options?: { requireActiveTurn?: boolean; onAgentRun?: (run: "current" | "future") => void },
 	): Promise<boolean> {
 		const requireActiveTurn = options?.requireActiveTurn === true;
 		const queueClearGeneration = this.#queueClearGeneration;
@@ -6848,6 +6862,7 @@ export class AgentSession {
 		// this call is in flight. Bail before touching either queue when it can no
 		// longer consume new steering.
 		if (requireActiveTurn && !this.agent.acceptsSteering) return false;
+		const agentRun = this.agent.acceptsSteering ? "current" : "future";
 		// An accepted user message is a deliberate resume.
 		this.#advisors.autoResumeSuppressed = false;
 		this.#allowQueuedMessageDrainRetry();
@@ -6871,6 +6886,7 @@ export class AgentSession {
 				timestamp: timestamp ?? Date.now(),
 			});
 		}
+		options?.onAgentRun?.(agentRun);
 		this.#scheduleIdleQueueDrain();
 		return true;
 	}
@@ -7073,6 +7089,7 @@ export class AgentSession {
 		message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details" | "attribution">,
 		deliverAs: "steer" | "followUp" | "aside",
 		queueChipText?: string,
+		onAgentRun?: (run: "current" | "future") => void,
 	): Promise<boolean> {
 		// Captured before the normalization await below.
 		const sessionGeneration = this.#sessionGeneration;
@@ -7111,6 +7128,7 @@ export class AgentSession {
 			this.#resumeStrandedIrcAsides();
 			return true;
 		}
+		const agentRun = this.agent.acceptsSteering ? "current" : "future";
 		this.#allowQueuedMessageDrainRetry();
 		if (deliverAs === "followUp") {
 			this.agent.followUp(normalizedAppMessage);
@@ -7118,6 +7136,7 @@ export class AgentSession {
 			this.agent.steer(normalizedAppMessage);
 		}
 		this.#scheduleIdleQueueDrain();
+		onAgentRun?.(agentRun);
 		return true;
 	}
 

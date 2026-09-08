@@ -233,13 +233,13 @@ Data payloads are command-specific and defined in `rpc-types.ts`.
 
 `data.agentInvoked: false` is a completion signal for local-only prompts, including slash commands that produce output without starting an agent turn. `data.agentInvoked: true` means the prompt produced agent lifecycle events; those events can be emitted before or after the prompt response depending on the command path. Older runtimes may omit `data`; hosts should then rely on `agent_end`, custom message completion, or `prompt_result`.
 
-On servers advertising `features.promptResultVerdict: 1`, `prompt_result` is emitted when an immediately accepted prompt finishes asynchronous preprocessing. Its exact request id and boolean verdict let hosts distinguish a prompt that joined an agent lifecycle from one that remained local-only:
+On servers advertising `features.promptResultVerdict: 1`, `prompt_result` is emitted when an immediately accepted prompt finishes asynchronous preprocessing. Its exact request id and boolean verdict let hosts distinguish a prompt that joined an agent lifecycle from one that remained local-only. An invoked prompt queued while a lifecycle is active also reports whether it joined that lifecycle or requires a later queued-message drain:
 
 ```json
-{ "type": "prompt_result", "id": "req_1", "agentInvoked": true }
+{ "type": "prompt_result", "id": "req_1", "agentInvoked": true, "agentRun": "future" }
 ```
 
-When the prompt joins the currently active lifecycle, its `prompt_result` is emitted before that lifecycle's terminal `agent_end`. A client can therefore bind an unresolved prompt to the open lifecycle when it observes `agentInvoked: true`; a prompt whose true verdict arrives after a terminal event belongs to a later lifecycle.
+`agentRun: "current"` is emitted before the joined lifecycle's terminal `agent_end`. `agentRun: "future"` tells the host to keep the request reserved across the current terminal event and wait for the following lifecycle. Prompts submitted while idle omit `agentRun` because their reservation already owns the lifecycle they start. Successful `steer` responses may report the same field in `data.agentRun`.
 
 Local-only slash commands may emit `command_output` frames before completing via `data.agentInvoked: false` or a later `prompt_result` with `agentInvoked: false`. They do not emit `agent_end`.
 

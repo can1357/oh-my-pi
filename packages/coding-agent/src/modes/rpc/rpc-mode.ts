@@ -168,6 +168,7 @@ export async function runRpcSkillCommand(
 	invocation: RpcSkillInvocation,
 	streamingBehavior: "steer" | "followUp" = "steer",
 	prebuilt?: BuiltSkillPromptMessage,
+	onAgentRun?: (run: "current" | "future") => void,
 ): Promise<boolean> {
 	const built = prebuilt ?? (await buildSkillPromptMessage(invocation.skill, invocation.args, "user"));
 	return session.promptCustomMessage(
@@ -178,7 +179,7 @@ export async function runRpcSkillCommand(
 			details: built.details,
 			attribution: "user",
 		},
-		{ streamingBehavior },
+		{ streamingBehavior, onAgentRun },
 	);
 }
 
@@ -209,7 +210,8 @@ export async function dispatchRpcSkillPrompt(input: {
 	const built = await buildSkillPromptMessage(invocation.skill, invocation.args, "user");
 	watchAndReportLocalOnlyPromptResult({
 		id: input.id,
-		startPrompt: () => runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built),
+		startPrompt: onAgentRun =>
+			runRpcSkillCommand(input.session, invocation, input.streamingBehavior ?? "steer", built, onAgentRun),
 		output: input.output,
 		onError: input.onError,
 		extensionUserMessageTracker: input.extensionUserMessageTracker,
@@ -235,6 +237,7 @@ export function reportLocalOnlyPromptResult(input: {
 	onError: (error: Error) => void;
 	hasExtensionAgentMessageTask?: () => boolean;
 	waitForExtensionAgentMessageTasks?: () => Promise<void>;
+	getAgentRun?: () => "current" | "future" | undefined;
 }): void {
 	void input.prompt
 		.then(async agentInvoked => {
@@ -242,7 +245,13 @@ export function reportLocalOnlyPromptResult(input: {
 				await input.waitForExtensionAgentMessageTasks?.();
 				agentInvoked = input.hasExtensionAgentMessageTask?.() === true;
 			}
-			input.output({ type: "prompt_result", id: input.id, agentInvoked });
+			const agentRun = agentInvoked ? input.getAgentRun?.() : undefined;
+			input.output({
+				type: "prompt_result",
+				id: input.id,
+				agentInvoked,
+				...(agentRun ? { agentRun } : {}),
+			});
 		})
 		.catch(error => {
 			input.onError(error instanceof Error ? error : new Error(String(error)));
@@ -323,12 +332,17 @@ export class RpcExtensionUserMessageTracker {
 
 export function watchAndReportLocalOnlyPromptResult(input: {
 	id: string | undefined;
-	startPrompt: () => Promise<boolean>;
+	startPrompt: (onAgentRun: (run: "current" | "future") => void) => Promise<boolean>;
 	output: (obj: object) => void;
 	onError: (error: Error) => void;
 	extensionUserMessageTracker: RpcExtensionUserMessageTracker;
 }): void {
-	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(input.startPrompt);
+	let agentRun: "current" | "future" | undefined;
+	const trackedPrompt = input.extensionUserMessageTracker.watchPrompt(() =>
+		input.startPrompt(run => {
+			agentRun = run;
+		}),
+	);
 	reportLocalOnlyPromptResult({
 		id: input.id,
 		prompt: trackedPrompt.prompt,
@@ -336,6 +350,7 @@ export function watchAndReportLocalOnlyPromptResult(input: {
 		onError: input.onError,
 		hasExtensionAgentMessageTask: trackedPrompt.hasAgentMessageTask,
 		waitForExtensionAgentMessageTasks: trackedPrompt.waitForAgentMessageTasks,
+		getAgentRun: () => agentRun,
 	});
 }
 
@@ -1142,7 +1157,8 @@ export async function runRpcMode(
 					if ("prompt" in builtinResult) {
 						watchAndReportLocalOnlyPromptResult({
 							id,
-							startPrompt: () => session.prompt(builtinResult.prompt, { images: command.images }),
+							startPrompt: onAgentRun =>
+								session.prompt(builtinResult.prompt, { images: command.images, onAgentRun }),
 							output,
 							onError: promptError => output(error(id, "prompt", promptError.message)),
 							extensionUserMessageTracker,
@@ -1161,10 +1177,11 @@ export async function runRpcMode(
 				// If streaming and streamingBehavior specified, queues via steer/followUp
 				watchAndReportLocalOnlyPromptResult({
 					id,
-					startPrompt: () =>
+					startPrompt: onAgentRun =>
 						session.prompt(command.message, {
 							images: command.images,
 							streamingBehavior: command.streamingBehavior,
+							onAgentRun,
 						}),
 					output,
 					onError: promptError => output(error(id, "prompt", promptError.message)),
@@ -1179,10 +1196,14 @@ export async function runRpcMode(
 			// undo. With it the session rejects, leaving both queues untouched, and
 			// the host decides whether to send a normal prompt instead.
 			case "steer": {
+				let agentRun: "current" | "future" | undefined;
 				const accepted = await session.steer(command.message, command.images, {
 					activeTurnOnly: command.activeTurnOnly === true,
+					onAgentRun: run => {
+						agentRun = run;
+					},
 				});
-				return success(id, "steer", { accepted });
+				return success(id, "steer", { accepted, ...(agentRun ? { agentRun } : {}) });
 			}
 
 			case "follow_up": {
