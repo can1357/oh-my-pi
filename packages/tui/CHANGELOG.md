@@ -24,6 +24,10 @@
 - Avoid inserting a trailing space when auto-completing directory paths with `@`, and keep autocomplete open when accepting a directory with Tab or Enter.
 - Horizontal wheel reports (the sideways drift of a two-finger trackpad scroll) no longer decode as a vertical wheel direction, so fullscreen selectors such as `/copy` and the rewind picker stop jumping up and back down at the end of a scroll gesture.
 
+### Fixed
+
+- Fixed interactive sessions treating an uncaught terminal/stdio `EPIPE` write as a fatal crash instead of a graceful disconnect ([#10930](https://github.com/can1357/oh-my-pi/issues/10930)).
+
 ## [18.1.9] - 2026-09-04
 
 ### Added

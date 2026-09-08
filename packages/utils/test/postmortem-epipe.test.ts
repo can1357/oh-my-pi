@@ -5,9 +5,11 @@ import { postmortem } from "@oh-my-pi/pi-utils";
 const childFlag = "--stdio-epipe-child";
 const raceChildFlag = "--stdio-epipe-race-child";
 const uncaughtIpcChildFlag = "--uncaught-ipc-epipe-child";
+const uncaughtStdioChildFlag = "--uncaught-stdio-epipe-child";
 const unrelatedUncaughtChildFlag = "--unrelated-uncaught-child";
 const unrelatedUncaughtChildFlagIndex = process.argv.indexOf(unrelatedUncaughtChildFlag);
 const uncaughtIpcChildFlagIndex = process.argv.indexOf(uncaughtIpcChildFlag);
+const uncaughtStdioChildFlagIndex = process.argv.indexOf(uncaughtStdioChildFlag);
 const socketClosedChildFlag = "--socket-closed-child";
 const childFlagIndex = process.argv.indexOf(childFlag);
 if (unrelatedUncaughtChildFlagIndex >= 0) {
@@ -25,6 +27,12 @@ if (unrelatedUncaughtChildFlagIndex >= 0) {
 	await Bun.sleep(100);
 	await Bun.write(marker, "survived uncaught worker IPC EPIPE");
 	process.exit(0);
+} else if (uncaughtStdioChildFlagIndex >= 0) {
+	postmortem.registerStdioDisconnectHandling();
+	setImmediate(() => {
+		throw Object.assign(new Error("broken pipe"), { code: "EPIPE", syscall: "write", errno: -32 });
+	});
+	await new Promise<void>(() => {});
 } else if (childFlagIndex >= 0) {
 	const marker = process.argv[childFlagIndex + 1];
 	if (!marker) throw new Error("Missing cleanup marker path");
@@ -108,6 +116,23 @@ if (!process.argv.includes(socketClosedChildFlag)) {
 					.delete()
 					.catch(() => {});
 			}
+		});
+
+		it("exits successfully when Bun surfaces a registered stdio EPIPE as an uncaught exception", async () => {
+			const child = Bun.spawn([process.execPath, "run", import.meta.path, uncaughtStdioChildFlag], {
+				stdin: "ignore",
+				stdout: "pipe",
+				stderr: "pipe",
+			});
+			const [exitCode, stdout, stderr] = await Promise.all([
+				child.exited,
+				new Response(child.stdout).text(),
+				new Response(child.stderr).text(),
+			]);
+
+			expect(exitCode, stderr).toBe(0);
+			expect(stdout).toBe("");
+			expect(stderr).toBe("");
 		});
 
 		it("keeps unrelated uncaught exceptions fatal", async () => {

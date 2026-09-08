@@ -290,10 +290,11 @@ function faultWorkerIpcChannels(err: Error): void {
 }
 
 /**
- * Treat unhandled stdout EPIPE rejections as a graceful peer disconnect.
+ * Treat EPIPE from a registered stdio owner as a graceful peer disconnect,
+ * regardless of which process error event Bun uses for the failed write.
  *
- * Stdio protocol servers call this for their process lifetime so a closed
- * client pipe runs registered cleanup callbacks instead of the fatal path.
+ * Stdio protocol servers and interactive terminals register for their active
+ * lifetime so a closed peer runs cleanup without entering the fatal path.
  * The returned callback removes the registration.
  */
 export function registerStdioDisconnectHandling(): () => void {
@@ -416,6 +417,18 @@ async function exitAfterFatal(output: string, logMessage: string, err: Error, re
 	}
 }
 
+async function handleBrokenPipe(err: Error): Promise<boolean> {
+	if (isIpcSendEpipe(err)) {
+		logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
+		return true;
+	}
+	if (classifyBrokenPipe(err) !== "stdio-write" || stdioDisconnectRegistrations === 0) return false;
+
+	logger.warn("Stdio peer disconnected; shutting down gracefully", { err });
+	await runQuit(0, "native", { drainStdout: false });
+	return true;
+}
+
 /**
  * Reports a caught top-level failure after terminal owners restore their display, then exits.
  */
@@ -443,21 +456,16 @@ if (isMainThread) {
 			process.stderr.write(`Inspector opened: ${url}\n`);
 		})
 		.on("uncaughtException", async thrown => {
-			// Only explicitly marked exceptions are safe here. Structural
-			// AbortError/socket classification is limited to promise rejections:
-			// a synchronously thrown error may indicate an application bug.
+			// Expected cleanup is safe globally. Broken-pipe recovery below also
+			// requires an active stdio owner; unrelated synchronous errors stay fatal.
 			if (hasExpectedCleanupMarker(thrown)) {
 				logger.warn("Ignoring expected cleanup exception", { err: thrown });
 				return;
 			}
 			const err = thrown instanceof Error ? thrown : new Error(String(thrown));
-			// Bun can surface a worker IPC send race through uncaughtException
-			// instead of unhandledRejection. Apply the same optional-worker
-			// containment in either global error channel.
-			if (isIpcSendEpipe(err)) {
-				logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
-				return;
-			}
+			// Bun routes pipe failures through either process event depending on
+			// which internal stream phase observes the closed peer.
+			if (await handleBrokenPipe(err)) return;
 			// A malformed advanced-serialization frame from a worker subprocess
 			// surfaces here as a process-level uncaughtException (oven-sh/bun#37287)
 			// rather than in the channel's ipc() callback, and Bun gives no way to
@@ -466,7 +474,7 @@ if (isMainThread) {
 			// worker so its owning client rejects in-flight requests and recycles
 			// the subprocess — a worker that sent a bad frame but stays alive would
 			// otherwise never fire onExit and leave callers awaiting forever.
-			// Mirrors the ipc-send EPIPE containment below (#9158, #2997).
+			// See the analogous worker IPC containment in handleBrokenPipe (#9158, #2997).
 			if (isWorkerIpcDeserializeError(err)) {
 				logger.warn("Malformed worker IPC frame; faulting active worker subsystems", { err });
 				faultWorkerIpcChannels(err);
@@ -487,25 +495,7 @@ if (isMainThread) {
 		})
 		.on("unhandledRejection", async reason => {
 			const err = reason instanceof Error ? reason : new Error(String(reason));
-			const brokenPipeSource = classifyBrokenPipe(err);
-			// EPIPE from an IPC `send()` (`syscall: "send"`) originates from a
-			// worker subprocess whose pipe broke between the exit being observed
-			// and the next `proc.send()` — a race window that Bun surfaces as an
-			// async rejection rather than the synchronous "cannot be used after
-			// the process has exited" guard. Every `send()` target is an optional
-			// worker subsystem (TTS, STT, tiny-title, MCP servers), so a broken
-			// send pipe must never take down the whole session. Log and continue
-			// instead of exiting; the owning client detects the dead worker via
-			// its own `onExit`/error path and respawns or disables it. See #2997.
-			if (brokenPipeSource === "ipc-send") {
-				logger.warn("Ignoring EPIPE from worker IPC send; optional subsystem will self-recover", { err });
-				return;
-			}
-			if (brokenPipeSource === "stdio-write" && stdioDisconnectRegistrations > 0) {
-				logger.warn("Stdio peer disconnected; shutting down gracefully", { err });
-				await runQuit(0, "native");
-				return;
-			}
+			if (await handleBrokenPipe(err)) return;
 			if (isExpectedCleanupError(reason)) {
 				logger.warn("Ignoring expected cleanup rejection", { err });
 				return;

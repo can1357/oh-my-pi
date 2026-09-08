@@ -693,6 +693,7 @@ export class ProcessTerminal implements Terminal {
 	readonly #conpty: boolean;
 	#writeLogPath = $env.PI_TUI_WRITE_LOG || "";
 	#stdoutErrorCleanup?: () => void;
+	#stdioDisconnectCleanup?: () => void;
 	#stdoutErrorHandler = (err: Error) => {
 		this.#markTerminalDisconnected("stdout failed", err);
 	};
@@ -846,6 +847,7 @@ export class ProcessTerminal implements Terminal {
 		this.#headless = isTerminalHeadless();
 		if (this.#headless) return;
 		registerPostmortemTerminalRestore();
+		this.#stdioDisconnectCleanup ??= postmortem.registerStdioDisconnectHandling();
 
 		// Register for emergency cleanup
 		activeTerminal = this;
@@ -1837,15 +1839,20 @@ export class ProcessTerminal implements Terminal {
 		// live terminal the failure still surfaces - swallowing it would silently
 		// leave stdin in raw mode.
 		try {
-			process.stdin.setRawMode?.(this.#wasRaw);
-		} catch (err) {
-			if (!this.#dead) throw err;
+			try {
+				process.stdin.setRawMode?.(this.#wasRaw);
+			} catch (err) {
+				if (!this.#dead) throw err;
+			}
+		} finally {
+			this.#stdoutErrorCleanup?.();
+			this.#stdoutErrorCleanup = undefined;
+			this.#stdioDisconnectCleanup?.();
+			this.#stdioDisconnectCleanup = undefined;
+			// After stop() the terminal is shared with other writers; visibility
+			// tracking is only meaningful while this instance owns the TTY.
+			this.#cursorVisible = undefined;
 		}
-		this.#stdoutErrorCleanup?.();
-		this.#stdoutErrorCleanup = undefined;
-		// After stop() the terminal is shared with other writers; visibility
-		// tracking is only meaningful while this instance owns the TTY.
-		this.#cursorVisible = undefined;
 	}
 
 	#ensureStdoutErrorHandler(): void {
