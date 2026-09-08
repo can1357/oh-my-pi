@@ -1842,6 +1842,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			get cwd() {
 				return sessionManager.getCwd();
 			},
+			agentDir,
 			isToolActive: name => activeToolNames.has(name),
 			setActiveToolNames,
 			toolRegistry,

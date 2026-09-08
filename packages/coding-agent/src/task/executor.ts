@@ -388,6 +388,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /** Options for subagent execution */
 export interface ExecutorOptions {
 	cwd: string;
+	agentDir?: string;
 	/** Additional workspace directories to seed on the subagent session (multi-root). */
 	additionalDirectories?: string[];
 	/** Exact provider credential resolver inherited from the parent session. */
@@ -3350,6 +3351,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				expectedAgentRef: CreateAgentSessionOptions["expectedAgentRef"],
 			): CreateAgentSessionOptions => ({
 				cwd: worktree ?? cwd,
+				agentDir: options.agentDir,
 				additionalDirectories: worktree !== undefined ? undefined : options.additionalDirectories,
 				authStorage,
 				modelRegistry,

@@ -35,7 +35,6 @@ import type { AgentSession } from "../../session/agent-session";
 import { SKILL_PROMPT_MESSAGE_TYPE, USER_INTERRUPT_LABEL } from "../../session/messages";
 import { executeAcpBuiltinSlashCommand } from "../../slash-commands/acp-builtins";
 import { buildAvailableSlashCommands } from "../../slash-commands/available-commands";
-import { refreshAgentDiscovery } from "../../task";
 import { defaultLoadModeForToolName } from "../../tools/essential-tools";
 import type { EventBus } from "../../utils/event-bus";
 import { calculateTokensPerSecond } from "../../utils/token-rate";
@@ -1059,7 +1058,7 @@ export async function runRpcMode(
 		const projectPath = await resolveActiveProjectRegistryPath(cwd);
 		resetCapabilities();
 		clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-		await refreshAgentDiscovery(cwd, session.effectiveExtensionRoots);
+		await session.refreshAdvisorConfigs(true);
 		await session.refreshSkills();
 		session.setSlashCommands(
 			await loadSlashCommands({

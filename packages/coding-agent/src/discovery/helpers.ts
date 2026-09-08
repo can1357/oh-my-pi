@@ -324,6 +324,9 @@ export function parseAgentFields(frontmatter: Record<string, unknown>): ParsedAg
 	if (normalizedName === MAIN_AGENT_RULE_NAME || normalizedName === SUB_AGENT_RULE_NAME) {
 		return null;
 	}
+	if (normalizedName === "global" && frontmatter.watchdogs !== undefined) {
+		return null;
+	}
 
 	let tools =
 		Array.isArray(frontmatter.tools) && frontmatter.tools.length === 0 ? [] : parseArrayOrCSV(frontmatter.tools);

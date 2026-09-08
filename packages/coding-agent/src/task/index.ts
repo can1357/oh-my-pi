@@ -616,8 +616,9 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		const isolationEnabled = this.session.settings.get("task.isolation.enabled");
 		return renderDescription({
 			agents:
-				discoverySnapshots.get(discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.())) ??
-				this.#discoveredAgents,
+				discoverySnapshots.get(
+					discoveryCacheKey(this.session.cwd, this.session.effectiveExtensionRoots?.(), this.session.agentDir),
+				) ?? this.#discoveredAgents,
 			isolationEnabled: !planMode && isolationEnabled,
 			applyIsolatedChanges: this.session.settings.get("task.isolation.apply"),
 			disabledAgents,
@@ -683,7 +684,11 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	 * Create a TaskTool instance with async agent discovery.
 	 */
 	static async create(session: ToolSession): Promise<TaskTool> {
-		const { agents } = await discoverAgentsForCreate(session.cwd, session.effectiveExtensionRoots?.());
+		const { agents } = await discoverAgentsForCreate(
+			session.cwd,
+			session.effectiveExtensionRoots?.(),
+			session.agentDir,
+		);
 		return new TaskTool(session, agents);
 	}
 

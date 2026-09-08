@@ -104,6 +104,19 @@ describe("discoverAgents", () => {
 		expect(agents.some(agent => agent.name === "broken")).toBe(false);
 	});
 
+	test("isolates reserved watchdog namespaces from healthy agents", async () => {
+		const agentsDir = path.join(projectDir, ".omp", "agents");
+		await fs.mkdir(agentsDir, { recursive: true });
+		await fs.writeFile(path.join(agentsDir, "healthy.md"), OMP_AGENT_MD);
+		await fs.writeFile(
+			path.join(agentsDir, "reserved.md"),
+			'---\nname: " Global "\ndescription: Reserved watchdog namespace.\nwatchdogs: []\n---\nReview.\n',
+		);
+		const { agents } = await discoverAgents(projectDir, tempHome);
+		expect(agents.find(agent => agent.name === "omp-test-agent")?.systemPrompt).toContain("OMP task agent");
+		expect(agents.some(agent => agent.name.trim().toLowerCase() === "global")).toBe(false);
+	});
+
 	test("loads agents from OMP npm plugins under <home>/.omp/plugins/node_modules", async () => {
 		await writeOmpPluginAgent(tempHome);
 

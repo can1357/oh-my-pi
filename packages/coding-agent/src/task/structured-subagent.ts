@@ -269,7 +269,12 @@ export async function resolveEffectiveSubagentPolicy(
 	assertPlanControlsAllowed(request, planMode);
 	assertDepthAndSpawnAllowed(request, agentName);
 
-	const discovery = await discoverAgents(request.session.cwd, undefined, request.session.effectiveExtensionRoots?.());
+	const discovery = await discoverAgents(
+		request.session.cwd,
+		undefined,
+		request.session.effectiveExtensionRoots?.(),
+		request.session.agentDir,
+	);
 	const agent = getAgent(discovery.agents, agentName);
 	if (!agent) {
 		const available = discovery.agents.map(candidate => candidate.name).join(", ") || "none";
@@ -404,6 +409,7 @@ function buildExecutorOptions(
 	const enableMCP = !restrictToolNames && (session.enableMCP ?? true);
 	return {
 		cwd: session.cwd,
+		agentDir: session.agentDir,
 		additionalDirectories: session.additionalDirectories,
 		getApiKey: session.getApiKey,
 		agent: policy.effectiveAgent,
