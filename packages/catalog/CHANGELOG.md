@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added the `warmNativeHistoryReplay` Responses compat flag (`warm-native-history-replay` rule axis), default `false` ([#11266](https://github.com/can1357/oh-my-pi/issues/11266)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

@@ -152,6 +152,7 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	"supports-multiple-system-messages": wire("supportsMultipleSystemMessages", ["openai"]),
 	"supports-named-tool-choice": wire("supportsNamedToolChoice", OAI),
 	"supports-obfuscation-opt-out": wire("supportsObfuscationOptOut", ["openai-responses"]),
+	"warm-native-history-replay": wire("warmNativeHistoryReplay", ["openai-responses"]),
 	"harmony-leak-mitigation": wire("harmonyLeakMitigation", ["openai-responses"]),
 	"supports-penalty-and-stop-params": wire("supportsPenaltyAndStopParams", OAI),
 	"supports-prompt-cache-breakpoints": wire("supportsPromptCacheBreakpoints", OAI),
