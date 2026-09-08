@@ -339,12 +339,39 @@ export function augmentToolIndexForProductWire(
 
 /**
  * Rewrite historical inference tool call/result names to product field-2 aliases
- * (bash→Shell, read→Read, write/edit→Write) so replayed history matches the
- * advertised product-wire schema. Does not mutate the input array.
+ * (bash→Shell, read→Read, write→Write) so replayed history matches the
+ * advertised product-wire schema. Shared sand slots (edit+write → Write) only
+ * rewrite the omp name that currently owns the slot — a hashline `edit` call
+ * must not be relabeled Write when `write` owns the advertised schema.
+ * Does not mutate the input array.
  */
 export function rewriteInferenceMessagesForProductWire(
 	messages: readonly Record<string, unknown>[],
+	tools?: Context["tools"],
 ): Record<string, unknown>[] {
+	const sandOwner = new Map<string, string>();
+	if (Array.isArray(tools)) {
+		for (const tool of tools) {
+			const ompName = typeof tool?.name === "string" ? tool.name : "";
+			if (!ompName) continue;
+			const sandName = toSandField2Name(ompName);
+			if (sandName === ompName) continue;
+			const previous = sandOwner.get(sandName);
+			if (!shouldClaimSandWireName(sandName, ompName, previous)) continue;
+			sandOwner.set(sandName, ompName);
+		}
+	}
+
+	const rewriteToolName = (name: string): string => {
+		const sandName = toSandField2Name(name);
+		if (sandName === name) return name;
+		const owner = sandOwner.get(sandName);
+		// When tools are known and another omp owns this sand slot, keep the
+		// historical identity (e.g. edit stays edit while write owns Write).
+		if (owner !== undefined && owner !== name) return name;
+		return sandName;
+	};
+
 	return messages.map(msg => {
 		if (!msg || typeof msg !== "object") return msg;
 		const toolCalls = Reflect.get(msg, "toolCalls");
@@ -356,7 +383,7 @@ export function rewriteInferenceMessagesForProductWire(
 					const tc = entry as Record<string, unknown>;
 					const name = typeof tc.toolName === "string" ? tc.toolName : "";
 					if (!name) return tc;
-					const sandName = toSandField2Name(name);
+					const sandName = rewriteToolName(name);
 					return sandName === name ? tc : { ...tc, toolName: sandName };
 				}),
 			};
@@ -374,7 +401,7 @@ export function rewriteInferenceMessagesForProductWire(
 							const p = part as Record<string, unknown>;
 							const name = typeof p.toolName === "string" ? p.toolName : "";
 							if (!name) return p;
-							const sandName = toSandField2Name(name);
+							const sandName = rewriteToolName(name);
 							return sandName === name ? p : { ...p, toolName: sandName };
 						}),
 					},

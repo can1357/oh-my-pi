@@ -1042,6 +1042,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						// Shell/Read/Write — rewrite replayed call/result names to match.
 						body.messages = rewriteInferenceMessagesForProductWire(
 							(body.messages as Record<string, unknown>[]) ?? [],
+							context.tools,
 						);
 						logger.info("grokbot: product sand tool wire", {
 							wireMode: anthropicWire.wireMode,

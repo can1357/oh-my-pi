@@ -67,7 +67,11 @@ function parseFrames(buf) {
 		const bytes = buf.subarray(o, o + len);
 		o += len;
 		if (flags & CONNECT_END_STREAM_FLAG) {
-			try { end = JSON.parse(bytes.toString("utf8")); } catch { end = { parseError: true }; }
+			try {
+				end = JSON.parse(bytes.toString("utf8"));
+			} catch {
+				end = { parseError: true };
+			}
 			continue;
 		}
 		try {
@@ -80,7 +84,9 @@ function parseFrames(buf) {
 			}
 			if (msg.responseInfo?.model) responseModel = String(msg.responseInfo.model);
 			if (msg.textPart?.text) textParts.push(String(msg.textPart.text));
-		} catch { /* partial frame */ }
+		} catch {
+			/* partial frame */
+		}
 	}
 	return { ok: !end?.error, toolCalls, responseModel, text: textParts.join(""), message: end?.error?.message, end };
 }
@@ -107,23 +113,55 @@ async function sendStream(token, cfg, body) {
 // ─── Tool set ───
 
 const ompTools = [
-	{ name: "bash", description: "Run a shell command.", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
-	{ name: "read", description: "Read a file.", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
-	{ name: "write", description: "Write a file.", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
-	{ name: "edit", description: "Patch a file.", parameters: { type: "object", properties: { path: { type: "string" }, old: { type: "string" }, new: { type: "string" } }, required: ["path", "old", "new"] } },
-	{ name: "grep", description: "Search files.", parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] } },
-	{ name: "glob", description: "Find files.", parameters: { type: "object", properties: { glob: { type: "string" } }, required: ["glob"] } },
+	{
+		name: "bash",
+		description: "Run a shell command.",
+		parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+	},
+	{
+		name: "read",
+		description: "Read a file.",
+		parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+	},
+	{
+		name: "write",
+		description: "Write a file.",
+		parameters: {
+			type: "object",
+			properties: { path: { type: "string" }, content: { type: "string" } },
+			required: ["path", "content"],
+		},
+	},
+	{
+		name: "edit",
+		description: "Patch a file.",
+		parameters: {
+			type: "object",
+			properties: { path: { type: "string" }, old: { type: "string" }, new: { type: "string" } },
+			required: ["path", "old", "new"],
+		},
+	},
+	{
+		name: "grep",
+		description: "Search files.",
+		parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
+	},
+	{
+		name: "glob",
+		description: "Find files.",
+		parameters: { type: "object", properties: { glob: { type: "string" } }, required: ["glob"] },
+	},
 ];
 
 // ─── Tests ───
 
 function describeWire(wired, label) {
-	const toolNames = (wired.tools || []).map((t) => t.name);
-	const hasJsonSchema = (wired.tools || []).some((t) => t.parameters && t.parameters.jsonSchema);
+	const toolNames = (wired.tools || []).map(t => t.name);
+	const hasJsonSchema = (wired.tools || []).some(t => t.parameters && t.parameters.jsonSchema);
 	console.log(
 		`  wire[${label}]: model=${wired.requestedModel?.modelId} tools=[${toolNames.join(",")}]` +
-		` jsonSchema=${hasJsonSchema} subagent=${wired.subagentType || "-"}` +
-		` automation=${wired.automationId || "-"} field9=${wired.acceptedUnadvertisedToolNames?.length || 0}`,
+			` jsonSchema=${hasJsonSchema} subagent=${wired.subagentType || "-"}` +
+			` automation=${wired.automationId || "-"} field9=${wired.acceptedUnadvertisedToolNames?.length || 0}`,
 	);
 }
 
@@ -133,21 +171,18 @@ async function testKeepModelRoundTrip(token, cfg, modelId) {
 		sandParameterIds: ["thinking", "context", "effort", "fast"],
 		effort: "low",
 	});
-	const wired = applyAnthropicSandToolWire(
-		{ requestedModel, tools: ompTools, modelId, ompTools },
-		"keep-model",
-	);
+	const wired = applyAnthropicSandToolWire({ requestedModel, tools: ompTools, modelId, ompTools }, "keep-model");
 	describeWire(wired, "keep-model");
 
-	const toolNames = wired.tools.map((t) => t.name);
+	const toolNames = wired.tools.map(t => t.name);
 	const asserts = [
 		["requestedModel unchanged", wired.requestedModel.modelId === modelId],
 		["no subagentType", wired.subagentType === undefined],
 		["no automationId", wired.automationId === undefined],
 		["field-9 present", (wired.acceptedUnadvertisedToolNames?.length ?? 0) > 20],
-		["unique Write (edit+write deduped)", toolNames.filter((n) => n === "Write").length === 1],
+		["unique Write (edit+write deduped)", toolNames.filter(n => n === "Write").length === 1],
 		["5 product tools", toolNames.length === 5],
-		["jsonSchema envelope", wired.tools.every((t) => t.parameters?.jsonSchema)],
+		["jsonSchema envelope", wired.tools.every(t => t.parameters?.jsonSchema)],
 	];
 	for (const [name, ok] of asserts) console.log(`  assert ${ok ? "✓" : "✗"} ${name}`);
 	const wireOk = asserts.every(([, ok]) => ok);
@@ -172,8 +207,8 @@ async function testKeepModelRoundTrip(token, cfg, modelId) {
 
 	const { res: res1, parsed: parsed1 } = await sendStream(token, cfg, body1);
 	console.log(
-		`  turn1: http=${res1.status} ok=${parsed1.ok} tools=${parsed1.toolCalls.map((t) => t.name).join(",") || "none"}` +
-		` model=${parsed1.responseModel || "?"} err=${parsed1.message || "-"}`,
+		`  turn1: http=${res1.status} ok=${parsed1.ok} tools=${parsed1.toolCalls.map(t => t.name).join(",") || "none"}` +
+			` model=${parsed1.responseModel || "?"} err=${parsed1.message || "-"}`,
 	);
 
 	if (!res1.ok || !parsed1.ok || parsed1.toolCalls.length === 0) {
@@ -181,9 +216,9 @@ async function testKeepModelRoundTrip(token, cfg, modelId) {
 		return { modelId, pass: false, reason: "turn1-no-toolcall", wireOk };
 	}
 
-	const shellCall = parsed1.toolCalls.find((t) => t.name === "Shell");
+	const shellCall = parsed1.toolCalls.find(t => t.name === "Shell");
 	if (!shellCall) {
-		console.log(`  FAIL: no Shell tool call in turn1 (got: ${parsed1.toolCalls.map((t) => t.name).join(",")})`);
+		console.log(`  FAIL: no Shell tool call in turn1 (got: ${parsed1.toolCalls.map(t => t.name).join(",")})`);
 		return { modelId, pass: false, reason: "no-shell-call", wireOk };
 	}
 	console.log(`  turn1: Shell toolCall id=${shellCall.id}`);
@@ -229,25 +264,18 @@ async function testKeepModelRoundTrip(token, cfg, modelId) {
 	const { res: res2, parsed: parsed2 } = await sendStream(token, cfg, body2);
 	console.log(
 		`  turn2: http=${res2.status} ok=${parsed2.ok} model=${parsed2.responseModel || "?"}` +
-		` tools=${parsed2.toolCalls.map((t) => t.name).join(",") || "none"}` +
-		` text="${parsed2.text.slice(0, 120)}" err=${parsed2.message || "-"}`,
+			` tools=${parsed2.toolCalls.map(t => t.name).join(",") || "none"}` +
+			` text="${parsed2.text.slice(0, 120)}" err=${parsed2.message || "-"}`,
 	);
 
 	const routedModel = parsed2.responseModel || parsed1.responseModel;
-	const routedIsAnthropic = isAnthropicSandModelId(routedModel) || /claude|fable|opus|sonnet|haiku/i.test(routedModel);
+	const routedIsAnthropic = isAnthropicSandModelId(routedModel);
 	console.log(`  routed model: ${routedModel} → ${routedIsAnthropic ? "Anthropic family ✓" : "NOT Anthropic ✗"}`);
 	// History replay is only proven if turn 2 emits a final answer instead of another tool call.
 	const finalResponse = parsed2.toolCalls.length === 0;
 
 	const pass =
-		wireOk &&
-		res1.ok &&
-		parsed1.ok &&
-		shellCall &&
-		res2.ok &&
-		parsed2.ok &&
-		routedIsAnthropic &&
-		finalResponse;
+		wireOk && res1.ok && parsed1.ok && shellCall && res2.ok && parsed2.ok && routedIsAnthropic && finalResponse;
 	console.log(`  ${pass ? "PASS" : "FAIL"} keep-model ${modelId}`);
 	return { modelId, pass, routedModel, wireOk, shellCallId: shellCall.id, finalResponse };
 }
@@ -306,8 +334,8 @@ async function testAutomationStillGrok(token, cfg) {
 	};
 	const { res, parsed } = await sendStream(token, cfg, body);
 	console.log(
-		`  live: http=${res.status} ok=${parsed.ok} tools=${parsed.toolCalls.map((t) => t.name).join(",") || "none"}` +
-		` model=${parsed.responseModel || "?"} err=${parsed.message || "-"}`,
+		`  live: http=${res.status} ok=${parsed.ok} tools=${parsed.toolCalls.map(t => t.name).join(",") || "none"}` +
+			` model=${parsed.responseModel || "?"} err=${parsed.message || "-"}`,
 	);
 	const routedGrok = /grok/i.test(parsed.responseModel || "");
 	console.log(`  routed model: ${parsed.responseModel} → ${routedGrok ? "grok family ✓" : "NOT grok ✗"}`);
@@ -331,7 +359,9 @@ async function testKeepModelNoopOnGrok() {
 
 async function main() {
 	const cfg = loadGrokbotConfig();
-	console.log(`config: machineId=${cfg.machineId.slice(0, 8)}… namespace=${cfg.namespace} client=${cfg.clientVersion}`);
+	console.log(
+		`config: machineId=${cfg.machineId.slice(0, 8)}… namespace=${cfg.namespace} client=${cfg.clientVersion}`,
+	);
 	const token = await mintGrokbotAccessToken(cfg);
 	console.log(`token minted ✓`);
 
