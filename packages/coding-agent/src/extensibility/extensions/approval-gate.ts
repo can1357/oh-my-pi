@@ -55,9 +55,11 @@ export async function runInteractiveApprovalGate<TParameters extends TSchema>(
 		if (settled) return false;
 		settled = true;
 		dialog.abort();
-		void requestedDelivery.promise.then(() => {
-			void notify({ type: "tool_approval_resolved", ...eventIdentity, approved, source, reason });
-		});
+		if (requestedStarted) {
+			void requestedDelivery.promise.then(() => {
+				void notify({ type: "tool_approval_resolved", ...eventIdentity, approved, source, reason });
+			});
+		}
 		gate.resolve(approved);
 		return true;
 	};
@@ -126,10 +128,5 @@ export async function runInteractiveApprovalGate<TParameters extends TSchema>(
 	} finally {
 		signal?.removeEventListener("abort", abort);
 		dialog.abort();
-		// Release the latch only when the request was never emitted: the gate
-		// itself can finish before the requested delivery does (an extension
-		// responds mid-delivery), and resolving early would let the settlement
-		// overtake the still-running delivery.
-		if (!requestedStarted) requestedDelivery.resolve();
 	}
 }

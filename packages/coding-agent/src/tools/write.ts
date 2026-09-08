@@ -12,7 +12,7 @@ import type {
 	ToolApprovalReview,
 } from "@oh-my-pi/pi-agent-core";
 import { type Component, Text } from "@oh-my-pi/pi-tui";
-import { isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { bytesEqual, isEnoent, isRecord, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import {
 	type ArchiveMemberContent,
 	archiveFormatFromPath,
@@ -340,11 +340,7 @@ interface WriteApprovalState {
 // unchanged through a decoded string comparison.
 function approvalBytesMatch(current: Uint8Array | null, reviewed: Uint8Array | null): boolean {
 	if (current === null || reviewed === null) return current === reviewed;
-	if (current.byteLength !== reviewed.byteLength) return false;
-	for (let index = 0; index < current.byteLength; index++) {
-		if (current[index] !== reviewed[index]) return false;
-	}
-	return true;
+	return bytesEqual(current, reviewed);
 }
 
 /**

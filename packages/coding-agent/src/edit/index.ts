@@ -23,7 +23,7 @@ import {
 	type EditWriteRequest,
 	type EditWriteResponse,
 } from "@oh-my-pi/pi-natives";
-import { isEnoent, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
+import { bytesEqual, isEnoent, logger, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import { resolveLocalRoot } from "../internal-urls";
 import { cachedVaultRoots, isVaultEnabled } from "../internal-urls/vault-protocol";
 import {
@@ -320,14 +320,6 @@ async function mkdirAllowingFallback(directory: string): Promise<void> {
 	} catch (error) {
 		if (!hasFileWriteFallback() || !isPermissionDeniedError(error)) throw error;
 	}
-}
-
-function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
-	if (left.byteLength !== right.byteLength) return false;
-	for (let index = 0; index < left.byteLength; index++) {
-		if (left[index] !== right[index]) return false;
-	}
-	return true;
 }
 
 export class EditTool implements AgentTool<TInput> {

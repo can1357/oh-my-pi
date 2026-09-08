@@ -2,7 +2,7 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { isProbablyBinary, isProbablyBinaryHeader, isProbablyBinarySync } from "@oh-my-pi/pi-utils/binary";
+import { bytesEqual, isProbablyBinary, isProbablyBinaryHeader, isProbablyBinarySync } from "@oh-my-pi/pi-utils/binary";
 
 describe("isProbablyBinaryHeader", () => {
 	it("treats empty input as text", () => {
@@ -57,5 +57,20 @@ describe("isProbablyBinary / isProbablyBinarySync", () => {
 		const filePath = writeFile("notes.md", "# Title\n\nbody text\n");
 		expect(await isProbablyBinary(filePath)).toBe(false);
 		expect(isProbablyBinarySync(filePath)).toBe(false);
+	});
+});
+
+describe("bytesEqual", () => {
+	it("returns true for identical byte arrays", () => {
+		expect(bytesEqual(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 3]))).toBe(true);
+		expect(bytesEqual(new Uint8Array([]), new Uint8Array([]))).toBe(true);
+	});
+
+	it("returns false for different lengths", () => {
+		expect(bytesEqual(new Uint8Array([1, 2]), new Uint8Array([1, 2, 3]))).toBe(false);
+	});
+
+	it("returns false for same length with different content", () => {
+		expect(bytesEqual(new Uint8Array([1, 2, 3]), new Uint8Array([1, 2, 4]))).toBe(false);
 	});
 });

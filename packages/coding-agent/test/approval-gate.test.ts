@@ -249,4 +249,69 @@ describe("interactive approval gate", () => {
 		await tool.execute("ordering", { path: "f.txt", content: PROPOSED });
 		expect(await Bun.file(target).text()).toBe(PROPOSED);
 	});
+
+	test("pre-aborted signal never emits orphan tool_approval_resolved", async () => {
+		const events: string[] = [];
+		const runner = {
+			emit: async (event: ToolApprovalRequestedEvent | ToolApprovalResolvedEvent): Promise<unknown> => {
+				events.push(event.type);
+				return undefined;
+			},
+			getUIContext: () => ({
+				select: (): Promise<string> => Promise.withResolvers<string>().promise,
+			}),
+		} as unknown as ExtensionRunner;
+		const review = await tool.prepareApproval("pre-aborted", { path: "f.txt", content: PROPOSED });
+		if (!review) throw new Error("expected a review for a filesystem write");
+		const gatedTool = tool as unknown as AgentTool<typeof writeParamsSchema>;
+		const controller = new AbortController();
+		controller.abort();
+		await expect(
+			runInteractiveApprovalGate<typeof writeParamsSchema>({
+				tool: gatedTool,
+				toolCallId: "pre-aborted",
+				effectiveParams: { path: "f.txt", content: PROPOSED },
+				approvalMode: "always-ask",
+				userPolicies: {},
+				safetyPrompt: "Approve the write?",
+				signal: controller.signal,
+				runner,
+				review,
+			}),
+		).rejects.toThrow();
+		await Bun.sleep(10);
+		expect(events).toEqual([]);
+	});
+
+	test("synchronous UI failure before requested emit never emits orphan tool_approval_resolved", async () => {
+		const events: string[] = [];
+		const runner = {
+			emit: async (event: ToolApprovalRequestedEvent | ToolApprovalResolvedEvent): Promise<unknown> => {
+				events.push(event.type);
+				return undefined;
+			},
+			getUIContext: () => ({
+				select: (): Promise<string> => {
+					throw new Error("UI crashed synchronously");
+				},
+			}),
+		} as unknown as ExtensionRunner;
+		const review = await tool.prepareApproval("sync-ui-fail", { path: "f.txt", content: PROPOSED });
+		if (!review) throw new Error("expected a review for a filesystem write");
+		const gatedTool = tool as unknown as AgentTool<typeof writeParamsSchema>;
+		await expect(
+			runInteractiveApprovalGate<typeof writeParamsSchema>({
+				tool: gatedTool,
+				toolCallId: "sync-ui-fail",
+				effectiveParams: { path: "f.txt", content: PROPOSED },
+				approvalMode: "always-ask",
+				userPolicies: {},
+				safetyPrompt: "Approve the write?",
+				runner,
+				review,
+			}),
+		).rejects.toThrow(/UI crashed synchronously/);
+		await Bun.sleep(10);
+		expect(events).toEqual([]);
+	});
 });

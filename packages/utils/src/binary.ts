@@ -52,3 +52,12 @@ export function isProbablyBinary(filePath: string, maxBytes = BINARY_SNIFF_BYTES
 export function isProbablyBinarySync(filePath: string, maxBytes = BINARY_SNIFF_BYTES): boolean {
 	return peekFileSync(filePath, maxBytes, isProbablyBinaryHeader);
 }
+
+/** Fast equality check for byte buffers. */
+export function bytesEqual(left: Uint8Array, right: Uint8Array): boolean {
+	if (left.byteLength !== right.byteLength) return false;
+	for (let index = 0; index < left.byteLength; index++) {
+		if (left[index] !== right[index]) return false;
+	}
+	return true;
+}
