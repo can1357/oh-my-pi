@@ -54,7 +54,7 @@ function writeTarOctal(bytes: Uint8Array, offset: number, length: number, value:
 }
 
 function normalizeTarMetadata(bytes: Uint8Array): void {
-	for (let offset = 0; offset + TAR_BLOCK_SIZE <= bytes.length; ) {
+	for (let offset = 0; offset + TAR_BLOCK_SIZE <= bytes.length;) {
 		const header = bytes.subarray(offset, offset + TAR_BLOCK_SIZE);
 		if (header.every(byte => byte === 0)) return;
 

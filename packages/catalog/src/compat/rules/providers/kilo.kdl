@@ -1,0 +1,51 @@
+// Provider-wire compat for "kilo"; regenerated from the frozen census using deployment contract selectors.
+
+provider "kilo" {
+	// Replaces the reasoning-gated K2.6 stream-idle baseline.
+	models "moonshotai/kimi-k2.6" {
+		stream-idle-timeout-ms 300000
+	}
+	thinking-mode "effort"
+	class "glm" {
+		family "turbo" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*thinking-2507" "arcee-ai/trinity-large-thinking" \
+		"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" {
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek/deepseek-chat-v3.1" {
+		requires-reasoning-content-for-all-assistant-turns #true
+		thinking-efforts "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek/deepseek-r1" "deepseek/deepseek-r1-0528" "deepseek/deepseek-v3.1-terminus" \
+		"deepseek/deepseek-v3.2" "deepseek/deepseek-v3.2-exp" "deepseek/deepseek-v4-flash" \
+		"deepseek/deepseek-v4-flash-0731" "deepseek/deepseek-v4-flash:discounted" \
+		"~deepseek/deepseek-v4-flash-latest" {
+		requires-reasoning-content-for-all-assistant-turns #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex" "openai/gpt-5.1-codex-max" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex-mini" {
+		thinking-efforts "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "z-ai/glm-4.5*" "z-ai/glm-4.7*" "~google*" "~openai*" "z-ai/glm-4.6" "z-ai/glm-4.6v" \
+		"z-ai/glm-5" "z-ai/glm-5.1" "~moonshotai/kimi-latest" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "z-ai/glm-5.2" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+}

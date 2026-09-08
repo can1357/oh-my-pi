@@ -419,6 +419,7 @@ export class MacOSSpellingProvider implements EditorTextAssistProvider {
 		if (this.#sourceText === context.editorText) return;
 		this.#sourceText = context.editorText;
 		this.#sourceMask = maskNonProse(context.editorText);
+		// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 		this.#sourceLineOffsets = new Array<number>(context.lines.length);
 		let offset = 0;
 		for (let line = 0; line < context.lines.length; line++) {

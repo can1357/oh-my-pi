@@ -97,6 +97,12 @@ function isPrivateHostname(hostname: string): boolean {
 	if (host === "localhost" || host === "::1" || host === "0.0.0.0") {
 		return true;
 	}
+	const low = host.toLowerCase();
+	// IPv6 unique-local (fc00::/7) and link-local (fe80::/10); zone ids
+	// (`fe80::1%eth0`) trail the address and must not bypass the check.
+	const bare = low.split("%")[0] ?? low;
+	if (bare.startsWith("fc") || bare.startsWith("fd")) return true;
+	if (bare.startsWith("fe80") || bare.startsWith("fe90") || bare.startsWith("fea0") || bare.startsWith("feb0")) return true;
 	const v4 = parseIPv4(host);
 	if (v4 === undefined) {
 		return false;
@@ -105,6 +111,7 @@ function isPrivateHostname(hostname: string): boolean {
 	const b = v4[1];
 	if (a === 127) return true;
 	if (a === 10) return true;
+	if (a === 172 && b >= 16 && b <= 31) return true;
 	if (a === 192 && b === 168) return true;
 	if (a === 169 && b === 254) return true;
 	return false;

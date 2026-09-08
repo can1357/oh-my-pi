@@ -2,10 +2,16 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { COMPOSER_DEFAULTS, Composer } from "@oh-my-pi/pi-coding-agent/modes/composer";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import { type Component, type RenderScheduler, visibleWidth } from "@oh-my-pi/pi-tui";
+import { type Component, Container, type RenderScheduler, visibleWidth } from "@oh-my-pi/pi-tui";
+import { Image } from "@oh-my-pi/pi-tui/components/image";
+import { getKittyGraphics, setKittyGraphics } from "@oh-my-pi/pi-tui/kitty-graphics";
+import { getCellDimensions, ImageProtocol, setCellDimensions, TERMINAL } from "@oh-my-pi/pi-tui/terminal-capabilities";
 import { VirtualRenderScheduler } from "../../tui/test/virtual-render-scheduler";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 import { withoutTerminalMultiplexer } from "./helpers/terminal-multiplexer";
+
+const BASE64_ONE_PIXEL_PNG =
+	"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAAAAAA6fptVAAAACklEQVR4nGNgAAAAAgABSK+kcQAAAABJRU5ErkJggg==";
 
 withoutTerminalMultiplexer();
 
@@ -307,6 +313,53 @@ describe("composer welcome native-history resize", () => {
 		expect(resized).toContain("block-0@30");
 		expect(resized).toContain("block-3@30");
 		composer.ui.stop();
+	});
+
+	it("recomposes a cached history batch when the image budget retries", () => {
+		const originalProtocol = TERMINAL.imageProtocol;
+		const originalTerminalId = TERMINAL.id;
+		const originalCellDimensions = { ...getCellDimensions() };
+		const originalGraphics = { ...getKittyGraphics() };
+		Reflect.set(TERMINAL, "imageProtocol", ImageProtocol.Kitty);
+		Reflect.set(TERMINAL, "id", "xterm");
+		setCellDimensions({ widthPx: 10, heightPx: 10 });
+		setKittyGraphics({ unicodePlaceholders: false });
+
+		const terminal = new TrackingTerminal(40, 4);
+		const composer = new Composer({
+			terminal,
+			tuiOptions: { renderScheduler: new ResizeScheduler() },
+			preferences: { ...COMPOSER_DEFAULTS, quiet: true },
+		});
+		composer.ui.setMaxInlineImages(1);
+		const transcript = new TranscriptContainer();
+		const block = new Container();
+		for (const key of ["first", "second", "third"]) {
+			block.addChild(
+				new Image(
+					BASE64_ONE_PIXEL_PNG,
+					"image/png",
+					{ fallbackColor: text => text },
+					{ maxWidthCells: 1, maxHeightCells: 1, budget: composer.ui.imageBudget, imageKey: key },
+					{ widthPx: 10, heightPx: 10 },
+				),
+			);
+		}
+		transcript.addChild(block);
+		composer.setRuntimeChildren([transcript, new MutableComposerTail()]);
+
+		try {
+			composer.start({ playWelcomeIntro: false });
+			const output = terminal.writes.join("");
+			expect(output.match(/\x1b_Ga=t/g)).toHaveLength(1);
+			expect(plainBuffer(terminal).filter(row => row.includes("[Image:"))).toHaveLength(2);
+		} finally {
+			composer.ui.stop();
+			Reflect.set(TERMINAL, "imageProtocol", originalProtocol);
+			Reflect.set(TERMINAL, "id", originalTerminalId);
+			setCellDimensions(originalCellDimensions);
+			setKittyGraphics(originalGraphics);
+		}
 	});
 
 	it("flushes a roomy finalized transcript before composer shutdown", async () => {

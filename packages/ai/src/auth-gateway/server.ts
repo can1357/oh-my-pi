@@ -157,7 +157,7 @@ function deriveSessionId(modelId: string, context: Context): string {
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
-	const opts: SimpleStreamOptions = { signal };
+	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
 	// Codex backend rejects every sampling control with
 	// `Unsupported parameter: …` (#3117). Strip the full set for that one
@@ -174,7 +174,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
-	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
+	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
 			typeof options.toolChoice !== "object"
@@ -187,6 +187,9 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
 	if (options.hideThinkingSummary !== undefined) opts.hideThinkingSummary = options.hideThinkingSummary;
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
+	if (options.anthropicPrefixMismatchBehavior !== undefined) {
+		opts.anthropicPrefixMismatchBehavior = options.anthropicPrefixMismatchBehavior;
+	}
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
 	if (options.include !== undefined) opts.include = options.include;
@@ -197,7 +200,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
-		opts.thinkingBudgets = { ...(opts.thinkingBudgets ?? {}), ...options.thinkingBudgets };
+		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
@@ -206,7 +209,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		// surface the budget.
 		const effort = options.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
-			...(opts.thinkingBudgets ?? {}),
+			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
 		};
 		opts.reasoning ??= effort;
@@ -269,6 +272,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		const retryAfterMs = extractRetryHint(undefined, message);
 		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs,
+			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			apiKey: oldKey,
@@ -677,7 +681,7 @@ async function handleFormatEndpoint(
 	// anything they didn't touch.
 	{
 		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...(parsed.options.headers ?? {}) };
+		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
@@ -765,6 +769,8 @@ async function handleFormatEndpoint(
 			return true;
 		}
 		if (action.type === "fallback_target") {
+			// New target gets a fresh sibling-credential budget.
+			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;
 			retryCount += 1;
@@ -875,6 +881,7 @@ async function handleFormatEndpoint(
 	if (!parsed.stream) {
 		try {
 			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (attempt > 0) commitGate.reset();
 				if (controller.signal.aborted) return clientClosedResponse(route);
 				const picked = pickTarget();
 				if (picked) return picked;
@@ -949,6 +956,7 @@ async function handleFormatEndpoint(
 	}
 
 	for (let attempt = 0; attempt < attemptCap; attempt++) {
+		if (attempt > 0) commitGate.reset();
 		if (controller.signal.aborted) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return clientClosedResponse(route);
@@ -1170,6 +1178,8 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 			return true;
 		}
 		if (action.type === "fallback_target") {
+			// New target gets a fresh sibling-credential budget.
+			siblingsExhausted = false;
 			pendingFallback = action.targetModelId;
 			fallbackCount += 1;
 			retryCount += 1;
@@ -1295,6 +1305,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	if (!parsed.stream) {
 		try {
 			for (let attempt = 0; attempt < attemptCap; attempt++) {
+				if (attempt > 0) commitGate.reset();
 				if (controller.signal.aborted) return aborted();
 				const picked = pickTarget();
 				if (picked) return picked;
@@ -1365,6 +1376,7 @@ async function handlePiNative(bootOpts: AuthGatewayBootOptions, req: Request, pe
 	}
 
 	for (let attempt = 0; attempt < attemptCap; attempt++) {
+		if (attempt > 0) commitGate.reset();
 		if (controller.signal.aborted) {
 			bootOpts.storage.releaseTurnReservation(requestId);
 			return aborted();

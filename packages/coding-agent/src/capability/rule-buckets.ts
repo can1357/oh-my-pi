@@ -5,13 +5,16 @@
  * session. It applies the user's disable levers, registers TTSR rules with the
  * manager, and splits the rest into the always-apply and rulebook buckets.
  *
- * Bucket precedence (matches docs/rulebook-matching-pipeline.md §5):
- *   1. TTSR     — non-empty `condition`/`astCondition` that `TtsrManager.addRule` accepts
- *   2. always   — `alwaysApply === true`
- *   3. rulebook — has a `description`
+ * Precedence (matches docs/rulebook-matching-pipeline.md §5):
+ *   1. disabledRules  — dropped before any bucket assignment
+ *   2. builtin drop   — `builtinRules === false` drops `builtin-defaults` rules
+ *   3. agents scope   — rules whose `agents` globs do not match `options.agentName` are dropped
+ *   4. TTSR           — non-empty `condition`/`astCondition` that `TtsrManager.addRule` accepts
+ *   5. always         — `alwaysApply === true`
+ *   6. rulebook       — has a `description`
  */
 import type { TtsrManager } from "../export/ttsr";
-import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule } from "./rule";
+import { BUILTIN_DEFAULTS_PROVIDER_ID, type Rule, ruleAppliesToAgent } from "./rule";
 
 export interface RuleBuckets {
 	rulebookRules: Rule[];
@@ -23,6 +26,12 @@ export interface BucketRulesOptions {
 	disabledRules?: readonly string[];
 	/** When false, drop every rule from the bundled `builtin-defaults` provider. */
 	builtinRules?: boolean;
+	/**
+	 * Agent this session runs as: `"main"` for a top-level session, otherwise the
+	 * agent definition name. Rules whose `agents` globs do not match are dropped
+	 * from every bucket. Omit to disable agent scoping (CLI inventory listings).
+	 */
+	agentName?: string;
 }
 
 /**
@@ -48,6 +57,7 @@ export function bucketRules(
 	for (const rule of rules) {
 		if (disabled.has(rule.name)) continue;
 		if (!includeBuiltin && rule._source?.provider === BUILTIN_DEFAULTS_PROVIDER_ID) continue;
+		if (!ruleAppliesToAgent(rule, options.agentName)) continue;
 
 		const hasTtsrCondition =
 			(rule.condition && rule.condition.length > 0) || (rule.astCondition && rule.astCondition.length > 0);
