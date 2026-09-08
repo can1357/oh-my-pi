@@ -12,19 +12,20 @@ afterEach(() => {
 });
 
 describe("auth-gateway RouteRegistry wiring", () => {
-	it("resolves the client model id through RouteRegistry before dispatch", async () => {
+	it("dispatches the compiled route target instead of re-resolving the requested id", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-route-wire-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
 		storage.setRuntimeApiKey("openrouter", "test-key");
-		const mock = createMockModel({ provider: "openrouter", id: "mock/route-wire" });
+		// The catalog resolves the bare id to a provider-qualified model;
+		// dispatch must serve the compiled target end to end.
+		const mock = createMockModel({ provider: "openrouter", id: "mock/concrete-target" });
 		mock.push({ content: ["ok"] });
-		const resolve = spyOn(RouteRegistry.prototype, "resolve");
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["t"],
 			storage,
-			resolveModel: () => mock.model,
+			resolveModel: id => (id === "concrete-target" || id === "mock/concrete-target" ? mock.model : undefined),
 			version: "test",
 		});
 		try {
@@ -32,15 +33,18 @@ describe("auth-gateway RouteRegistry wiring", () => {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
 				body: JSON.stringify({
-					model: "mock/route-wire",
+					model: "concrete-target",
 					messages: [{ role: "user", content: "hi" }],
 					stream: false,
 				}),
 			});
 			expect(res.status).toBe(200);
-			expect(resolve.mock.calls.some(call => call[0] === "mock/route-wire")).toBe(true);
+			const body = (await res.json()) as {
+				choices?: Array<{ message?: { content?: string } }>;
+			};
+			expect(body.choices?.[0]?.message?.content).toContain("ok");
+			expect(mock.calls.length).toBe(1);
 		} finally {
-			resolve.mockRestore();
 			await handle.close();
 			storage.close();
 			await fs.rm(dir, { recursive: true, force: true });
