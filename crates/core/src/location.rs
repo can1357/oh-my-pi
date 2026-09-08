@@ -1,49 +1,37 @@
 //! Compact, namespace-safe location value types.
 
-use std::{
-	error,
-	fmt::{self, Display},
-};
+use std::fmt::{self, Display};
 
 use crate::Str;
 
 const NO_OFFSET: u16 = u16::MAX;
 
 /// An error parsing a typed location.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum LocationError {
 	/// The location is empty.
+	#[error("location must not be empty")]
 	Empty,
 	/// A filesystem-namespace path contains a forbidden character.
+	#[error("path contains a NUL character")]
 	InvalidPath,
 	/// A tool path does not match its component grammar.
+	#[error("invalid tool path")]
 	InvalidToolPath,
 	/// An artifact address is neither a canonical ordinal nor a BLAKE3 digest.
+	#[error("invalid artifact address")]
 	InvalidArtifactAddress,
 	/// A URL carries a scheme other than the one required by its type.
+	#[error("URL must use the {expected} scheme")]
 	WrongScheme {
 		/// The scheme required by the destination type.
 		expected: &'static str,
 	},
 	/// A URI has no scheme or resource component, or contains forbidden
 	/// characters.
+	#[error("invalid URI")]
 	InvalidUri,
 }
-
-impl Display for LocationError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Empty => formatter.write_str("location must not be empty"),
-			Self::InvalidPath => formatter.write_str("path contains a NUL character"),
-			Self::InvalidToolPath => formatter.write_str("invalid tool path"),
-			Self::WrongScheme { expected } => write!(formatter, "URL must use the {expected} scheme"),
-			Self::InvalidArtifactAddress => formatter.write_str("invalid artifact address"),
-			Self::InvalidUri => formatter.write_str("invalid URI"),
-		}
-	}
-}
-
-impl error::Error for LocationError {}
 
 macro_rules! path_type {
 	($name:ident, $doc:literal) => {
