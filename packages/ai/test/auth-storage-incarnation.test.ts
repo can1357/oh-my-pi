@@ -109,6 +109,38 @@ describe("AuthStorage credential incarnation and workspace fan-out", () => {
 		expect(again.ok).toBe(true);
 	});
 
+	it("bumps incarnation when an API-key row is replaced in place", async () => {
+		if (!storage || !store) throw new Error("setup failed");
+		await storage.set(PROVIDER, [{ type: "api_key", key: "sk-old" }]);
+		const id = storage.listStoredCredentials(PROVIDER)[0]?.id;
+		if (id === undefined) throw new Error("missing credential");
+		const held = storage.tryAcquireTurnReservation({
+			credentialId: id,
+			incarnation: 1,
+			requestId: "api-key-held",
+		});
+		expect(held.ok).toBe(true);
+		store.updateAuthCredential(id, { type: "api_key", key: "sk-new" });
+		await storage.reload();
+		expect(storage.getCredentialIncarnation(id)).toBe(2);
+		const again = storage.tryAcquireTurnReservation({
+			credentialId: id,
+			incarnation: 2,
+			requestId: "api-key-after",
+		});
+		expect(again.ok).toBe(true);
+	});
+
+	it("bumps incarnation when a row switches from OAuth to API-key", async () => {
+		if (!storage || !store) throw new Error("setup failed");
+		await storage.set(PROVIDER, [oauth({ suffix: "a", accountId: "acc-old", email: "old@example.com" })]);
+		const id = storage.listStoredCredentials(PROVIDER)[0]?.id;
+		if (id === undefined) throw new Error("missing credential");
+		store.updateAuthCredential(id, { type: "api_key", key: "sk-replacement" });
+		await storage.reload();
+		expect(storage.getCredentialIncarnation(id)).toBe(2);
+	});
+
 	it("does not fan out a plain 402 payment_required without deactivated_workspace (negative)", async () => {
 		if (!storage) throw new Error("setup failed");
 		await storage.set(PROVIDER, [

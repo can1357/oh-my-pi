@@ -58,15 +58,18 @@ describe("auth-gateway RouteRegistry wiring", () => {
 		}
 	});
 
-	it("does not resolve when the model field is missing (negative)", async () => {
+	it("404s when the virtual route id is not registered (negative)", async () => {
 		registerMockApi();
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "gw-route-wire-miss-"));
 		const storage = await AuthStorage.create(path.join(dir, "auth.db"));
+		const resolveModel = () => undefined;
+		const registry = new RouteRegistry(resolveModel);
 		const handle = startAuthGateway({
 			bind: "127.0.0.1:0",
 			bearerTokens: ["t"],
 			storage,
-			resolveModel: () => undefined,
+			resolveModel,
+			routeRegistry: registry,
 			version: "test",
 		});
 		try {
@@ -74,6 +77,7 @@ describe("auth-gateway RouteRegistry wiring", () => {
 				method: "POST",
 				headers: { "Content-Type": "application/json", Authorization: "Bearer t" },
 				body: JSON.stringify({
+					model: "virtual/missing",
 					messages: [{ role: "user", content: "hi" }],
 				}),
 			});
