@@ -281,16 +281,18 @@ impl Session {
 		let mut eligible_files = Vec::new();
 		let mut reads = HashMap::new();
 		let mut drift_bytes = HashMap::new();
-
 		for file in &staged {
 			if file.existed {
 				let resolved = self.files.resolve(&file.display, true)?;
 				if let Some(read) = self.files.try_read(&resolved)? {
 					reads.insert(file.absolute.clone(), read);
 				}
-				let bytes = std::fs::read(&file.absolute)
-					.map_err(|err| EditError::Io { path: file.absolute.clone(), source: err })?;
-				drift_bytes.insert(file.absolute.clone(), bytes);
+				// Baseline the drift check on the exact bytes the staging
+				// itself read: an independent re-read here could observe a
+				// concurrent save the proposal was never computed from.
+				if let Some(bytes) = &file.before_bytes {
+					drift_bytes.insert(file.absolute.clone(), bytes.clone());
+				}
 			}
 			let is_eligible = (file.op == FileOp::Create || file.op == FileOp::Update)
 				&& file.move_to.is_none()

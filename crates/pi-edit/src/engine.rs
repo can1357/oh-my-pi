@@ -103,6 +103,9 @@ pub struct StagedFile {
 	/// Raw pre-edit bytes as text (BOM and line endings intact; notebook
 	/// JSON). `None` for creates.
 	pub before_raw:         Option<String>,
+	/// Exact pre-edit on-disk bytes backing `before_raw`, captured from the
+	/// same read the staging used; the review drift baseline.
+	pub before_bytes:       Option<Vec<u8>>,
 	/// LF-normalized, BOM-stripped pre-edit text (editable notebook text).
 	pub before:             String,
 	/// LF-normalized post-edit text. Equals `before` for `Noop`/`Delete`.
@@ -145,6 +148,7 @@ impl StagedFile {
 			move_to: None,
 			existed: true,
 			before_raw: None,
+			before_bytes: None,
 			before: String::new(),
 			after: String::new(),
 			persisted: None,

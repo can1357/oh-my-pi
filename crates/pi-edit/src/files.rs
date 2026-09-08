@@ -30,6 +30,8 @@ pub struct FileRead {
 	pub canonical:   PathBuf,
 	/// Bytes as read (notebook JSON for `.ipynb`).
 	pub raw:         String,
+	/// Exact on-disk bytes as read, before any lossy UTF-8 decoding.
+	pub raw_bytes:   Vec<u8>,
 	pub bom:         &'static str,
 	pub ending:      LineEnding,
 	/// LF-normalized, BOM-stripped editable text (notebook cell projection).
@@ -152,6 +154,7 @@ impl FileCache {
 			canonical: canonical_key(&resolved.absolute),
 			resolved: resolved.clone(),
 			raw,
+			raw_bytes: bytes.clone(),
 			bom,
 			ending,
 			text,

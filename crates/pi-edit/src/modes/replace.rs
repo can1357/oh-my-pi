@@ -223,6 +223,7 @@ impl ModeEngine for ReplaceEngine {
 		});
 		let mut staged = StagedFile::new(display, read.resolved.absolute.clone(), FileOp::Update);
 		staged.before_raw = Some(read.raw.clone());
+		staged.before_bytes = Some(read.raw_bytes.clone());
 		staged.before = before;
 		staged.after = after;
 		staged.persisted = Some(persisted);

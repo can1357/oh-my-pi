@@ -181,6 +181,7 @@ impl ModeEngine for SloppyEngine {
 				FileOp::Update,
 			);
 			file.before_raw = Some(read.raw.clone());
+			file.before_bytes = Some(read.raw_bytes.clone());
 			file.before.clone_from(&read.text);
 			file.after = after;
 			file.persisted = Some(persisted);
