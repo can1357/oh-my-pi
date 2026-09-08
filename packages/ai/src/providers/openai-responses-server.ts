@@ -616,8 +616,9 @@ export function parseRequest(body: unknown, headers?: Headers): ParsedRequest {
 	if (data.previous_response_id !== undefined) options.previousResponseId = data.previous_response_id;
 	if (data.user !== undefined) options.user = data.user;
 	if (isObj(data.metadata)) options.metadata = data.metadata;
-	// `store` is a stateful-storage hint that omp's gateway doesn't honour;
-	// silently accepted by the schema. No typed slot — drop.
+	// Explicit store:true must reach the provider so the creating turn persists
+	// for later previous_response_id continuations.
+	if (data.store === true) options.store = true;
 
 	return {
 		modelId: data.model,
