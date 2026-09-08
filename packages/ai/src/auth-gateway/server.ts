@@ -607,7 +607,8 @@ function mirrorRequestAbort(req: Request): AbortController {
 
 // (handlePassthrough removed — see note above.)
 
-function releaseTurnOnStreamEnd(
+/** Wrap an SSE body so turn reservations (and settled probes) release on close, cancel, or read failure. */
+export function releaseTurnOnStreamEnd(
 	stream: ReadableStream<Uint8Array>,
 	storage: AuthStorage,
 	requestId: string,
@@ -789,7 +790,7 @@ async function handleFormatEndpoint(
 			"invalid_request_error",
 			"OpenAI image file IDs require a Responses-compatible upstream model",
 		);
-	}
+	};
 
 	// Sticky credential id: honour the client's `prompt_cache_key` when
 	// supplied (so external session ids align), otherwise derive from
@@ -870,7 +871,7 @@ async function handleFormatEndpoint(
 				: formatError(502, "upstream_error", "Upstream request failed");
 		}
 		model = resolved;
-		if (targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages)) {
+		if (targetRejectsOpenAIImageFileReferences(route.label, model, parsed.context.messages, { providerPayload: body })) {
 			return formatError(
 				400,
 				"invalid_request_error",

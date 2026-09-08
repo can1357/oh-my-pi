@@ -80,6 +80,9 @@
 
 - Fixed Retry-After provenance hydration from persisted blocks, releasing turn reservations on fallback, and OpenAI model-does-not-exist 404 classification.
 - Fixed clearing quota probes before fallback/sibling retries, per-target sibling-credential attempt budget, and stream-commit contract coverage for pre-commit failures.
+- Fixed auth-gateway model discovery treating non-2xx responses with array/`data` bodies as successful catalogs.
+- Fixed auth-gateway SSE streams leaking turn reservations when `reader.read()` rejects after the response is returned.
+- Fixed OpenAI Responses file-id compatibility being checked only against the initial route target; fallback targets are revalidated before dispatch.
 
 ### Added
 
