@@ -511,6 +511,11 @@ const streamOpenAIResponsesOnce = (
 				// Platform `previous_response_id` chaining only resolves stored responses.
 				params.store = true;
 			}
+			if (options?.previousResponseId || options?.store === true) {
+				// Continuations and explicit store requests need persisted responses.
+				// store must be true on the *creating* turn as well as the follow-up.
+				params.store = true;
+			}
 			applyReasoningEffortFallbackForRequest(params);
 			// A caller-supplied `previous_response_id` names the client's own stored
 			// response; internal chain deltas are computed against a DIFFERENT
@@ -672,7 +677,15 @@ const streamOpenAIResponsesOnce = (
 								chainState?.canAppend ? chainState.lastParams?.input : undefined,
 							);
 							const fallbackParams = fallbackBuilt.params;
-							if (chainState && !chainState.disabled) fallbackParams.store = true;
+							// Rebuild starts from store:false; reapply explicit client store /
+							// continuation and internal chain requirements onto the retry.
+							if (
+								(chainState && !chainState.disabled) ||
+								options?.previousResponseId ||
+								options?.store === true
+							) {
+								fallbackParams.store = true;
+							}
 							const fallbackClientPreviousResponseId = options?.previousResponseId;
 							const hasFallbackClientPreviousResponseId = fallbackClientPreviousResponseId !== undefined;
 							let fallbackChained: OpenAIResponsesChainedParams = hasFallbackClientPreviousResponseId

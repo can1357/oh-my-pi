@@ -154,6 +154,20 @@ describe("holdSseUntilCommit (prelude replay buffer)", () => {
 	});
 
 
+	it("records sawSuccessfulTerminal only for completed/incomplete terminals", () => {
+		const ok = new StreamCommitGate();
+		ok.classifyAndObserve("response.created", 10);
+		ok.classifyAndObserve("response.completed", 10);
+		expect(ok.state).toBe("terminated");
+		expect(ok.sawSuccessfulTerminal).toBe(true);
+
+		const fail = new StreamCommitGate();
+		fail.classifyAndObserve("response.created", 10);
+		fail.classifyAndObserve("response.failed", 10);
+		expect(fail.state).toBe("terminated");
+		expect(fail.sawSuccessfulTerminal).toBe(false);
+	});
+
 	it("forwards successful terminal-only streams instead of aborting", async () => {
 		const gate = new StreamCommitGate();
 		const held = holdSseUntilCommit(
@@ -211,5 +225,13 @@ describe("holdSseUntilCommit (prelude replay buffer)", () => {
 		// the holding consumer drains at flush time, releasing the buffer
 		expect(gate.takePrelude()?.length).toBe(1);
 		expect(gate.preludeByteLength).toBe(0);
+	});
+
+	it("flushes metadata-only preludes at EOF instead of dropping them", async () => {
+		const gate = new StreamCommitGate();
+		const held = holdSseUntilCommit(sse(["event: response.created\ndata: {}\n\n"]), gate);
+		const out = await collect(held);
+		expect(out).toContain("response.created");
+		expect(gate.state).toBe("committed");
 	});
 });

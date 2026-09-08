@@ -247,6 +247,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 export function applyParsedGatewayOptions(opts: SimpleStreamOptions, options: AuthGatewayParsedRequestOptions): void {
 	if (options.parallelToolCalls !== undefined) opts.parallelToolCalls = options.parallelToolCalls;
 	if (options.previousResponseId !== undefined) opts.previousResponseId = options.previousResponseId;
+	if (options.store !== undefined) opts.store = options.store;
 	if (options.seed !== undefined) opts.seed = options.seed;
 	if (options.logitBias !== undefined) opts.logitBias = options.logitBias;
 	if (options.user !== undefined) opts.user = options.user;
@@ -611,30 +612,54 @@ function releaseTurnOnStreamEnd(
 	storage: AuthStorage,
 	requestId: string,
 	commitGate?: StreamCommitGate,
+	settled?: Promise<unknown>,
 ): ReadableStream<Uint8Array> {
 	const reader = stream.getReader();
 	let released = false;
-	const release = (): void => {
+	const release = async (settleProbe: boolean): Promise<void> => {
 		if (released) return;
 		released = true;
-		if (commitGate && (commitGate.state === "committed" || commitGate.state === "terminated")) {
+		// Wait for the canonical assistant result so probing/committed gates reflect
+		// error/abort outcomes before EOF can settle a quota probe.
+		if (settled) await settled.catch(() => {});
+		// Settle only on successful completion evidence:
+		// - committed streams (output observed or foreign commit)
+		// - successful terminals (empty completed responses)
+		// - still-probing gates that never saw SSE (foreign formats without onSseEvent)
+		// Never settle undefined gates (callers must attach a gate) or failed terminals.
+		if (
+			settleProbe &&
+			commitGate !== undefined &&
+			(commitGate.state === "committed" ||
+				commitGate.state === "probing" ||
+				(commitGate.state === "terminated" && commitGate.sawSuccessfulTerminal))
+		) {
 			storage.settleQuotaProbeSuccess(requestId);
 		}
 		storage.releaseTurnReservation(requestId);
 	};
 	return new ReadableStream({
 		async pull(controller) {
-			const { done, value } = await reader.read();
-			if (done) {
-				release();
-				controller.close();
-				return;
+			try {
+				const { done, value } = await reader.read();
+				if (done) {
+					await release(true);
+					controller.close();
+					return;
+				}
+				storage.renewTurnReservation(requestId);
+				controller.enqueue(value);
+			} catch (error) {
+				await release(false);
+				controller.error(error);
 			}
-			controller.enqueue(value);
 		},
-		cancel(reason) {
-			release();
-			return reader.cancel(reason);
+		async cancel(reason) {
+			// Cancel upstream first so the encoder's onCancel can settle events.result()
+			// before we await settlement — otherwise release holds the turn reservation
+			// while the model finishes after the client already disconnected.
+			await reader.cancel(reason).catch(() => {});
+			await release(false);
 		},
 	});
 }

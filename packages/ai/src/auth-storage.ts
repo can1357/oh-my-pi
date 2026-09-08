@@ -2532,7 +2532,6 @@ export class AuthStorage {
 
 		const providerKey = this.#getProviderTypeKey(provider, "api_key");
 		const order = this.#getCredentialOrder(providerKey, sessionId, credentials.length);
-		const fallback = credentials[order[0]];
 		const strategy = this.#rankingStrategyResolver?.(provider);
 		if (!strategy) {
 			for (const idx of order) {
@@ -2561,11 +2560,45 @@ export class AuthStorage {
 			blockScopes,
 		});
 		for (const ranked of candidates) {
+			// Recheck quota/usage blocks before reserving: ranking still returns blocked
+			// rows after healthy ones, and reservation conflicts must not promote them.
+			if (
+				this.#isCredentialBlocked(
+					provider,
+					providerKey,
+					ranked.selection.index,
+					blockScopes,
+					options?.requestId,
+				)
+			) {
+				continue;
+			}
 			if (this.#tryReserveApiKeySelection(provider, ranked.selection, options?.requestId)) {
 				return ranked.selection;
 			}
 		}
 		return undefined;
+	}
+
+	/** Resolve a reserved API-key selection; release the turn hold if the helper yields no secret. */
+	async #resolveReservedApiKey(
+		provider: string,
+		sessionId: string | undefined,
+		selection: ApiKeySelection,
+		requestId: string | undefined,
+	): Promise<string | undefined> {
+		try {
+			const resolved = await this.#configValueResolver(selection.credential.key);
+			if (resolved === undefined || resolved === "") {
+				if (requestId) this.releaseTurnReservation(requestId);
+				return undefined;
+			}
+			this.#recordSessionCredential(provider, sessionId, "api_key", selection.index);
+			return resolved;
+		} catch (error) {
+			if (requestId) this.releaseTurnReservation(requestId);
+			throw error;
+		}
 	}
 
 	/** Acquire an exclusive turn reservation for a stored API-key row when requestId is set. */
@@ -5095,6 +5128,55 @@ export class AuthStorage {
 		return blockScope;
 	}
 
+
+	/**
+	 * Prefer the block scope that is actually active for this credential (global
+	 * `""` and Retry-After provenance win over a derived chat/spark request scope).
+	 */
+	#resolveBlockingProbeScope(
+		provider: string,
+		providerKey: string,
+		credentialIndex: number,
+		credentialId: number,
+		blockScope: string | undefined,
+		blockScopes: readonly string[] | undefined,
+		requestId: string | undefined,
+	): string {
+		const candidates: string[] = [""];
+		if (blockScope) candidates.push(blockScope);
+		for (const scope of blockScopes ?? []) {
+			if (scope && !candidates.includes(scope)) candidates.push(scope);
+		}
+		for (const scope of candidates) {
+			if (
+				this.#probeLeases.isRetryAfterSourced(credentialId, scope) &&
+				this.#getCredentialBlockedUntil(
+					provider,
+					providerKey,
+					credentialIndex,
+					scope || undefined,
+					requestId,
+				) !== undefined
+			) {
+				return scope;
+			}
+		}
+		for (const scope of candidates) {
+			if (
+				this.#getCredentialBlockedUntil(
+					provider,
+					providerKey,
+					credentialIndex,
+					scope || undefined,
+					requestId,
+				) !== undefined
+			) {
+				return scope;
+			}
+		}
+		return blockScope ?? "";
+	}
+
 	tryAcquireQuotaProbeLease(credentialId: number, blockScope: string): string | null {
 		return this.#probeLeases.tryAcquire(credentialId, blockScope);
 	}
@@ -5188,6 +5270,16 @@ export class AuthStorage {
 		}
 		// Abandon any inflight probe for this request without treating it as success.
 		this.clearQuotaProbe(requestId);
+	}
+
+	/** Extend every live reservation held by `requestId` so long streams outlive the idle TTL. */
+	renewTurnReservation(requestId: string, ttlMs: number = DEFAULT_TURN_RESERVATION_TTL_MS): void {
+		const expiresAtMs = Date.now() + ttlMs;
+		for (const [key, held] of this.#turnReservations) {
+			if (held.requestId === requestId) {
+				this.#turnReservations.set(key, { ...held, expiresAtMs });
+			}
+		}
 	}
 
 	/**
@@ -6069,10 +6161,6 @@ export class AuthStorage {
 			const entries = this.#getStoredCredentials(provider);
 			const blockedId = entries[selection.index]?.id;
 			if (blockedId === undefined) return undefined;
-			// A live block must never hijack rotation: while any same-type sibling
-			// is still usable, fall through so the caller rotates to it. Probing a
-			// cooled-down credential is a last resort for requests that have no
-			// unblocked sibling at all (one lease per cooldown generation).
 			const hasUsableSibling = entries.some(
 				(entry, index) =>
 					index !== selection.index &&
@@ -6082,7 +6170,15 @@ export class AuthStorage {
 			if (hasUsableSibling) return undefined;
 			const held = this.#activeTurnReservation(blockedId, this.getCredentialIncarnation(blockedId));
 			if (held && held.requestId !== options?.requestId) return undefined;
-			const probeScope = blockScope ?? "";
+			const probeScope = this.#resolveBlockingProbeScope(
+				provider,
+				providerKey,
+				selection.index,
+				blockedId,
+				blockScope,
+				blockScopes,
+				options?.requestId,
+			);
 			const lease = this.tryAcquireQuotaProbeLease(blockedId, probeScope);
 			if (!lease) return undefined;
 			credentialId = blockedId;
@@ -6119,6 +6215,22 @@ export class AuthStorage {
 			// usage/refresh awaits below can shift positional indices, so every later
 			// refresh / persist / CAS-disable addresses the row by this stable id.
 			credentialId = this.#getStoredCredentials(provider)[selection.index]?.id;
+			// prepare/broker refresh may bump incarnation and purge the prior reservation;
+			// reacquire against the post-prepare incarnation before vending the bearer.
+			if (options?.requestId && credentialId !== undefined) {
+				const held = this.#activeTurnReservation(credentialId, this.getCredentialIncarnation(credentialId));
+				if (!held || held.requestId !== options.requestId) {
+					const acquired = this.tryAcquireTurnReservation({
+						credentialId,
+						incarnation: this.getCredentialIncarnation(credentialId),
+						requestId: options.requestId,
+					});
+					if (!acquired.ok) {
+						this.clearQuotaProbe(options.requestId);
+						return undefined;
+					}
+				}
+			}
 
 			const planRequirement =
 				providedPlanRequirement ?? resolveOpenAICodexPlanRequirement(provider, options?.modelId);
@@ -6430,8 +6542,13 @@ export class AuthStorage {
 			credential => credential.source === "login",
 		);
 		if (loginApiKeySelection) {
-			this.#recordSessionCredential(provider, sessionId, "api_key", loginApiKeySelection.index);
-			return this.#configValueResolver(loginApiKeySelection.credential.key);
+			const resolved = await this.#resolveReservedApiKey(
+				provider,
+				sessionId,
+				loginApiKeySelection,
+				options?.requestId,
+			);
+			if (resolved !== undefined) return resolved;
 		}
 
 		// Past OAuth: the session sticky (if any) is stale — the request authenticates via
@@ -6448,8 +6565,13 @@ export class AuthStorage {
 			credential => credential.source !== "login",
 		);
 		if (apiKeySelection) {
-			this.#recordSessionCredential(provider, sessionId, "api_key", apiKeySelection.index);
-			return this.#configValueResolver(apiKeySelection.credential.key);
+			const resolved = await this.#resolveReservedApiKey(
+				provider,
+				sessionId,
+				apiKeySelection,
+				options?.requestId,
+			);
+			if (resolved !== undefined) return resolved;
 		}
 
 		// Fall back to custom resolver (e.g., models.json custom providers)

@@ -148,4 +148,18 @@ describe("AuthStorage in-flight turn reservations", () => {
 		const key = await storage.getApiKey(PROVIDER, "holder-session", { requestId: "holder" });
 		expect(key).toBe("access-a");
 	});
+
+	it("reserves stored api_key rows before returning them", async () => {
+		if (!storage) throw new Error("setup failed");
+		const apiProvider = `${PROVIDER}-api-keys`;
+		await storage.set(apiProvider, [
+			{ type: "api_key", key: "key-a", source: "login" },
+			{ type: "api_key", key: "key-b", source: "login" },
+		]);
+		const first = await storage.getApiKey(apiProvider, "s-a", { requestId: "api-req-a" });
+		const second = await storage.getApiKey(apiProvider, "s-b", { requestId: "api-req-b" });
+		expect(first).toBeDefined();
+		expect(second).toBeDefined();
+		expect(first).not.toBe(second);
+	});
 });
