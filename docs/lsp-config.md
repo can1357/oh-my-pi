@@ -15,7 +15,11 @@ When no config file contributes a server override, OMP auto-detects built-in ser
 1. The current working directory contains at least one of the server's `rootMarkers`.
 2. The server binary is available — checked in supported project-local bin directories first (for example `node_modules/.bin/`, Python virtual environments, Ruby binstubs, and project `bin/` for Go), then `$PATH`.
 
-Root-marker detection at startup is cwd-only; it does not search parent directories. Wildcard markers such as `*.cabal` match entries directly inside the cwd and do not recurse. No configuration is required for common setups; see [`defaults.json`](../packages/coding-agent/src/lsp/defaults.json) for the full built-in set.
+Root-marker detection at startup is cwd-only; it does not search parent or child directories. Wildcard markers such as `*.cabal` match entries directly inside the cwd and do not recurse. No configuration is required for common setups; see [`defaults.json`](../packages/coding-agent/src/lsp/defaults.json) for the full built-in set.
+
+Concrete file operations (hover, definition, diagnostics on a path, edit/write LSP hooks, and other file-scoped actions) additionally walk ancestors of the target file, bounded by the session workspace directories. The nearest directory containing that server's `rootMarkers` becomes the language-server root. Project-local executables under that nested root are eligible. Nested projects are not recursively scanned or warmed at startup; they appear after a relevant file operation discovers them.
+
+Given `repo/python/src/foo.py` with `repo/python/pyproject.toml`, starting omp at `repo/` still reports no Python server at startup. A hover or diagnostics call on `foo.py` roots `basedpyright` at `repo/python` and may use `repo/python/.venv/bin/basedpyright-langserver`. Sibling projects (`repo/services/a` and `repo/services/b`) get separate clients. A nested `packages/foo/pyproject.toml` wins over a parent `repo/pyproject.toml` for files under `packages/foo/`.
 
 ## Config file locations
 

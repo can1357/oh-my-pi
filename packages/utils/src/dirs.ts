@@ -155,7 +155,20 @@ export function resolveEquivalentPath(inputPath: string): string {
 	try {
 		return fs.realpathSync(resolvedPath);
 	} catch {
-		return resolvedPath;
+		// Candidate may not exist yet (write/create). Realpath the deepest
+		// existing ancestor so symlink workspace roots still compare equal.
+	}
+	const missing: string[] = [];
+	let current = resolvedPath;
+	while (true) {
+		const parent = path.dirname(current);
+		if (parent === current) return resolvedPath;
+		missing.unshift(path.basename(current));
+		try {
+			return path.join(fs.realpathSync(parent), ...missing);
+		} catch {
+			current = parent;
+		}
 	}
 }
 

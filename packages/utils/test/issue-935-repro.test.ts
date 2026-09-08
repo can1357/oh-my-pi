@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import { resolveEquivalentPath } from "@oh-my-pi/pi-utils/dirs";
 
@@ -18,5 +19,18 @@ describe("issue #935 path equivalence", () => {
 
 		expect(resolveEquivalentPath(inputPath)).toBe(inputPath);
 		expect(realpathSpy).toHaveBeenCalledWith(inputPath);
+	});
+
+	it("canonicalizes a missing candidate through its existing symlink ancestor", () => {
+		const realRoot = fs.mkdtempSync(path.join(os.tmpdir(), "omp-path-equiv-"));
+		const linkRoot = `${realRoot}-link`;
+		fs.symlinkSync(realRoot, linkRoot);
+		try {
+			const missing = path.join(linkRoot, "src", "new.ts");
+			expect(resolveEquivalentPath(missing)).toBe(path.join(fs.realpathSync(realRoot), "src", "new.ts"));
+		} finally {
+			fs.rmSync(linkRoot, { force: true });
+			fs.rmSync(realRoot, { recursive: true, force: true });
+		}
 	});
 });

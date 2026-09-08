@@ -5,6 +5,7 @@ import {
 	getActiveOrPendingClient,
 	getOrCreateClient,
 	isRustAnalyzerClient,
+	type LspClientOwner,
 	type LspServerStatus,
 	notifySaved,
 	sendNotification,
@@ -13,7 +14,7 @@ import {
 	syncContent,
 	WARMUP_TIMEOUT_MS,
 } from "./client";
-import { getServersForFile, type LspConfig, loadConfig } from "./config";
+import { getConfig, getServersForFile, type LspConfig, loadConfig } from "./config";
 import { MUX_RESTART_METHOD } from "./mux/protocol";
 import type { LspClient, ServerConfig } from "./types";
 
@@ -72,8 +73,12 @@ export function discoverStartupLspServers(
  * @param options - Optional callbacks for progress reporting
  * @returns Status of each server that was started
  */
-export async function warmupLspServers(cwd: string, options?: LspWarmupOptions): Promise<LspWarmupResult> {
-	const config = loadConfig(cwd);
+export async function warmupLspServers(
+	cwd: string,
+	options?: LspWarmupOptions,
+	owner?: LspClientOwner,
+): Promise<LspWarmupResult> {
+	const config = getConfig(cwd);
 	const servers: LspWarmupResult["servers"] = [];
 	const lspServers = getLspServers(config);
 
@@ -86,7 +91,13 @@ export async function warmupLspServers(cwd: string, options?: LspWarmupOptions):
 	// Servers that don't respond quickly will be initialized lazily on first use
 	const results = await Promise.allSettled(
 		lspServers.map(async ([name, serverConfig]) => {
-			const client = await getOrCreateClient(serverConfig, cwd, serverConfig.warmupTimeoutMs ?? WARMUP_TIMEOUT_MS);
+			const client = await getOrCreateClient(
+				serverConfig,
+				cwd,
+				serverConfig.warmupTimeoutMs ?? WARMUP_TIMEOUT_MS,
+				undefined,
+				owner,
+			);
 			return { name, client, fileTypes: serverConfig.fileTypes };
 		}),
 	);
@@ -138,6 +149,7 @@ export async function syncFileContent(
 	servers: Array<[string, ServerConfig]>,
 	signal?: AbortSignal,
 	createMissing = true,
+	owner?: LspClientOwner,
 ): Promise<void> {
 	throwIfAborted(signal);
 	await Promise.allSettled(
@@ -147,8 +159,8 @@ export async function syncFileContent(
 				return;
 			}
 			const client = createMissing
-				? await getOrCreateClient(serverConfig, cwd, undefined, signal)
-				: await getActiveOrPendingClient(serverConfig, cwd, signal);
+				? await getOrCreateClient(serverConfig, cwd, undefined, signal, owner)
+				: await getActiveOrPendingClient(serverConfig, cwd, signal, owner);
 			if (!client) return;
 			throwIfAborted(signal);
 			await syncContent(client, absolutePath, content, signal);
@@ -171,6 +183,7 @@ export async function notifyFileSaved(
 	servers: Array<[string, ServerConfig]>,
 	signal?: AbortSignal,
 	createMissing = true,
+	owner?: LspClientOwner,
 ): Promise<void> {
 	throwIfAborted(signal);
 	await Promise.allSettled(
@@ -180,8 +193,8 @@ export async function notifyFileSaved(
 				return;
 			}
 			const client = createMissing
-				? await getOrCreateClient(serverConfig, cwd, undefined, signal)
-				: await getActiveOrPendingClient(serverConfig, cwd, signal);
+				? await getOrCreateClient(serverConfig, cwd, undefined, signal, owner)
+				: await getActiveOrPendingClient(serverConfig, cwd, signal, owner);
 			if (!client) return;
 			await notifySaved(client, absolutePath, signal);
 		}),
@@ -210,17 +223,27 @@ export function splitServers(servers: Array<[string, ServerConfig]>): {
 }
 
 export function getLspServers(config: LspConfig): Array<[string, ServerConfig]> {
-	return (Object.entries(config.servers) as Array<[string, ServerConfig]>).filter(
+	return (Object.entries(config.servers) as Array<[string, ServerConfig]>)
+		.filter(([, serverConfig]) => !isCustomLinter(serverConfig))
+		.map(([name, serverConfig]) => [name, { ...serverConfig }]);
+}
+
+export function getLspServersForFile(
+	config: LspConfig,
+	filePath: string,
+	workspaceRoots?: readonly string[],
+): Array<[string, ServerConfig]> {
+	return getServersForFile(config, filePath, workspaceRoots).filter(
 		([, serverConfig]) => !isCustomLinter(serverConfig),
 	);
 }
 
-export function getLspServersForFile(config: LspConfig, filePath: string): Array<[string, ServerConfig]> {
-	return getServersForFile(config, filePath).filter(([, serverConfig]) => !isCustomLinter(serverConfig));
-}
-
-export function getLspServerForFile(config: LspConfig, filePath: string): [string, ServerConfig] | null {
-	const servers = getLspServersForFile(config, filePath);
+export function getLspServerForFile(
+	config: LspConfig,
+	filePath: string,
+	workspaceRoots?: readonly string[],
+): [string, ServerConfig] | null {
+	const servers = getLspServersForFile(config, filePath, workspaceRoots);
 	return servers.length > 0 ? servers[0] : null;
 }
 

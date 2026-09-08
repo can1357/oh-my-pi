@@ -364,6 +364,13 @@ export interface ServerConfig {
 	/** Resolved absolute path to the command binary (set during config loading) */
 	resolvedCommand?: string;
 	/**
+	 * Project directory this client should be rooted at (set during file routing).
+	 * Nested language projects use the directory that contains the matching root marker,
+	 * not the session cwd.
+	 */
+	resolvedRoot?: string;
+
+	/**
 	 * Custom linter client factory. If provided, creates a custom client instead of using LSP.
 	 * The client handles format/lint operations. Useful for tools with buggy LSP implementations.
 	 */

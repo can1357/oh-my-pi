@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createLspWritethrough, type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-coding-agent/lsp";
@@ -48,7 +49,7 @@ function createClient(cwd: string, config: ServerConfig): LspClient {
 		config,
 		proc: {} as ptree.ChildProcess<"pipe">,
 		requestId: 0,
-		diagnostics: new EquivalentUriMap(),
+		diagnostics: new EquivalentUriMap(cwd),
 		diagnosticsVersion: 0,
 		openFiles: new Map(),
 		pendingRequests: new Map(),
@@ -144,7 +145,7 @@ describe("LSP diagnostics freshness", () => {
 		expect(result.finalContent).toBe(".section {}\n");
 		expect(await Bun.file(filePath).text()).toBe(".section {}\n");
 		expect(notify).toHaveBeenCalledWith(
-			tempDir.path(),
+			[tempDir.path()],
 			[{ filePath, type: lspClient.FileChangeType.Created }],
 			undefined,
 		);
@@ -168,7 +169,7 @@ describe("LSP diagnostics freshness", () => {
 		expect(result.finalContent).toBe("export const value = 1;\n");
 		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
 		expect(notify).toHaveBeenCalledWith(
-			tempDir.path(),
+			[tempDir.path()],
 			[{ filePath, type: lspClient.FileChangeType.Created }],
 			undefined,
 		);
@@ -303,8 +304,20 @@ describe("LSP diagnostics freshness", () => {
 		await resultPromise;
 
 		expect(getOrCreate).not.toHaveBeenCalled();
-		expect(getActiveOrPending).toHaveBeenNthCalledWith(1, TEST_SERVER, tempDir.path(), expect.any(AbortSignal));
-		expect(getActiveOrPending).toHaveBeenNthCalledWith(2, TEST_SERVER, tempDir.path(), expect.any(AbortSignal));
+		expect(getActiveOrPending).toHaveBeenNthCalledWith(
+			1,
+			TEST_SERVER,
+			tempDir.path(),
+			expect.any(AbortSignal),
+			undefined,
+		);
+		expect(getActiveOrPending).toHaveBeenNthCalledWith(
+			2,
+			TEST_SERVER,
+			tempDir.path(),
+			expect.any(AbortSignal),
+			undefined,
+		);
 		expect(sync).toHaveBeenCalledWith(client, filePath, "export const value = 1;\n", expect.any(AbortSignal));
 		expect(notifySaved).toHaveBeenCalledWith(client, filePath, expect.any(AbortSignal));
 	});
@@ -510,6 +523,91 @@ describe("LSP diagnostics freshness", () => {
 
 		expect(result?.diagnostics?.errored).toBe(true);
 		expect(result?.diagnostics?.messages?.some(message => message.includes("renormalized URI error"))).toBe(true);
+	});
+
+	it("matches diagnostics published through a directory symlink's real URI", async () => {
+		const shared = TempDir.createSync("@omp-lsp-dir-symlink-diag-real-uri-shared-");
+		try {
+			const sharedSrc = path.join(shared.path(), "src");
+			fs.mkdirSync(sharedSrc, { recursive: true });
+			const sharedFile = path.join(sharedSrc, "linked.ts");
+			fs.writeFileSync(sharedFile, "export const value = missing;\n");
+			const aliasDir = path.join(tempDir.path(), "src");
+			fs.symlinkSync(sharedSrc, aliasDir);
+			const alias = path.join(aliasDir, "linked.ts");
+			const aliasUri = fileToUri(alias, tempDir.path());
+			const realUri = Bun.pathToFileURL(sharedFile).href;
+			expect(aliasUri).not.toBe(realUri);
+
+			const client = createClient(tempDir.path(), TEST_SERVER);
+			const clock = new VirtualClock(Date.now());
+			installVirtualTime(clock);
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
+				mockClient.openFiles.set(aliasUri, { version: 1, languageId: "typescript" });
+			});
+			vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
+				clock.in(10, () => {
+					publishDiagnostics(mockClient, realUri, [createDiagnostic("canonical symlink URI error")], 1);
+				});
+			});
+
+			const writethrough = createLspWritethrough(tempDir.path(), {
+				enableFormat: false,
+				enableDiagnostics: true,
+			});
+			const result = await writethrough(alias, "export const value = missing;\n");
+
+			expect(result?.diagnostics?.errored).toBe(true);
+			expect(result?.diagnostics?.messages?.some(message => message.includes("canonical symlink URI error"))).toBe(
+				true,
+			);
+		} finally {
+			shared.removeSync();
+		}
+	});
+
+	it("matches diagnostics published through a leaf symlink's real URI", async () => {
+		const shared = TempDir.createSync("@omp-lsp-leaf-symlink-diag-real-uri-shared-");
+		try {
+			const sharedFile = path.join(shared.path(), "shared.ts");
+			fs.writeFileSync(sharedFile, "export const value = missing;\n");
+			const alias = path.join(tempDir.path(), "alias.ts");
+			fs.symlinkSync(sharedFile, alias);
+			const aliasUri = fileToUri(alias, tempDir.path());
+			const realUri = Bun.pathToFileURL(sharedFile).href;
+			expect(aliasUri).not.toBe(realUri);
+
+			const client = createClient(tempDir.path(), TEST_SERVER);
+			const clock = new VirtualClock(Date.now());
+			installVirtualTime(clock);
+
+			vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+			vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["test-lsp", TEST_SERVER]]);
+			vi.spyOn(lspClient, "getOrCreateClient").mockResolvedValue(client);
+			vi.spyOn(lspClient, "syncContent").mockImplementation(async mockClient => {
+				mockClient.openFiles.set(aliasUri, { version: 1, languageId: "typescript" });
+			});
+			vi.spyOn(lspClient, "notifySaved").mockImplementation(async mockClient => {
+				clock.in(10, () => {
+					publishDiagnostics(mockClient, realUri, [createDiagnostic("leaf symlink URI error")], 1);
+				});
+			});
+
+			const writethrough = createLspWritethrough(tempDir.path(), {
+				enableFormat: false,
+				enableDiagnostics: true,
+			});
+			const result = await writethrough(alias, "export const value = missing;\n");
+
+			expect(result?.diagnostics?.errored).toBe(true);
+			expect(result?.diagnostics?.messages?.some(message => message.includes("leaf symlink URI error"))).toBe(true);
+		} finally {
+			shared.removeSync();
+		}
 	});
 
 	it("matches Windows drive-letter case and percent-encoding differences", () => {

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import { type SettingPath, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { createTools, HIDDEN_TOOLS, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { BUILTIN_TOOLS, createTools, HIDDEN_TOOLS, LspTool, type ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 
 Bun.env.PI_PYTHON_SKIP_CHECK = "1";
 
@@ -138,6 +138,11 @@ describe("createTools", () => {
 		const names = tools.map(t => t.name);
 
 		expect(names).not.toContain("lsp");
+	});
+
+	it("returns null from the public lsp factory when the session disables LSP", async () => {
+		expect(await BUILTIN_TOOLS.lsp(createTestSession({ enableLsp: false }))).toBeNull();
+		expect(await BUILTIN_TOOLS.lsp(createTestSession())).toBeInstanceOf(LspTool);
 	});
 
 	it("respects requested tool subset", async () => {
