@@ -102,6 +102,10 @@
 - Fixed auth-gateway SSE streams leaking turn reservations when `reader.read()` rejects.
 - Fixed `/v1/messages/count_tokens` resolving only concrete catalog models; virtual routes are registry-aware.
 - Fixed Anthropic count-tokens accepting missing/non-array `messages` and ignoring `system`/`tools` in the estimate.
+- Fixed auth-gateway streaming retries leaving StreamCommitGate terminated; the gate resets between attempts.
+- Fixed bare `balance` routes always dispatching the first child; initial pick now rotates across children.
+- Fixed Anthropic count-tokens ignoring `system`/`tools` and accepting non-array `messages`.
+- Fixed quota-share DRR picking by weight when the first finalist already holds higher deficit than the second.
 
 ### Added
 
@@ -352,6 +356,7 @@
 - Auth gateway `POST /v1/realtime` and `POST /v1/audio/speech` return 501 after auth.
 - Auth gateway skips targets whose provider health circuit is open.
 - Auth gateway remembers prompt-cache affinity after a successful non-error stream.
+- Auth gateway prefers the remembered prompt-cache model on the first dispatch of a matching request.
 
 ## [18.0.8] - 2026-08-27
 

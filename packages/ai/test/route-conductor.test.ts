@@ -53,6 +53,38 @@ describe("decideAttempt", () => {
 		expect(action).toEqual({ type: "dispatch", targetModelId: "backup" });
 	});
 
+	it("dispatches preferred unused target over list order", () => {
+		const action = decideAttempt({
+			route: route({ targets: ["primary", "backup"] }),
+			state: state(),
+			commitState: "probing",
+			preferredTargetId: "backup",
+		});
+		expect(action).toEqual({ type: "dispatch", targetModelId: "backup" });
+	});
+
+	it("uses firstUnused when preferred was already attempted (negative)", () => {
+		const action = decideAttempt({
+			route: route({ targets: ["primary", "backup"] }),
+			state: state({ attemptedTargets: new Set(["backup"]) }),
+			commitState: "probing",
+			preferredTargetId: "backup",
+		});
+		expect(action).toEqual({ type: "dispatch", targetModelId: "primary" });
+		expect(action).not.toEqual({ type: "dispatch", targetModelId: "backup" });
+	});
+
+	it("ignores preferred that is not a route target (negative)", () => {
+		const action = decideAttempt({
+			route: route({ targets: ["primary", "backup"] }),
+			state: state(),
+			commitState: "probing",
+			preferredTargetId: "other",
+		});
+		expect(action).toEqual({ type: "dispatch", targetModelId: "primary" });
+		expect(action).not.toEqual({ type: "dispatch", targetModelId: "other" });
+	});
+
 	it("returns terminal after commit even when fallbacks remain (negative)", () => {
 		const fallbacks = { provider_unavailable: ["backup"] as const };
 		const probingCommitted = decideAttempt({
@@ -243,4 +275,33 @@ describe("decideAttempt", () => {
 		});
 		expect(action).toEqual({ type: "dispatch", targetModelId: "high" });
 	});
+});
+
+it("rotates initial dispatch across balance children", () => {
+	const balanceRoute = {
+		generation: 1,
+		id: "bal",
+		root: {
+			type: "balance" as const,
+			strategy: "rr" as const,
+			children: [
+				{ type: "target" as const, model: "a" },
+				{ type: "target" as const, model: "b" },
+			],
+		},
+		targets: ["a", "b"],
+		fallbacks: {},
+	} satisfies CompiledRoute;
+	const first = decideAttempt({
+		route: balanceRoute,
+		state: state({ currentTarget: "a", attemptedTargets: new Set() }),
+		commitState: "probing",
+	});
+	const second = decideAttempt({
+		route: balanceRoute,
+		state: state({ currentTarget: "a", attemptedTargets: new Set() }),
+		commitState: "probing",
+	});
+	expect(first).toEqual({ type: "dispatch", targetModelId: "a" });
+	expect(second).toEqual({ type: "dispatch", targetModelId: "b" });
 });

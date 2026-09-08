@@ -52,7 +52,7 @@ function pickBalanceTarget(route: ConductorRoute, attempted: ReadonlySet<string>
 		}
 		return best ?? unused[0];
 	}
-	const key = `${route.id}:${route.generation}`;
+	const key = `${route.id}:${route.generation}:${route.root.strategy}`;
 	const cursor = balanceRrCursor.get(key) ?? 0;
 	const pick = unused[cursor % unused.length]!;
 	balanceRrCursor.set(key, cursor + 1);
@@ -88,8 +88,9 @@ export function decideAttempt(args: {
 	state: ExecutionState;
 	classification?: GatewayErrorClassification;
 	commitState: StreamCommitState;
+	preferredTargetId?: string;
 }): ConductorAction {
-	const { state, classification, commitState } = args;
+	const { state, classification, commitState, preferredTargetId } = args;
 	const route = args.route as ConductorRoute;
 
 	if (commitState !== "probing" || state.committed) {
@@ -97,8 +98,16 @@ export function decideAttempt(args: {
 	}
 
 	if (!classification) {
+		const preferred =
+			preferredTargetId !== undefined &&
+			route.targets.includes(preferredTargetId) &&
+			!state.attemptedTargets.has(preferredTargetId)
+				? preferredTargetId
+				: undefined;
 		const next =
-			pickBalanceTarget(route, state.attemptedTargets) ?? firstUnused(route.targets, state.attemptedTargets);
+			preferred ??
+			pickBalanceTarget(route, state.attemptedTargets) ??
+			firstUnused(route.targets, state.attemptedTargets);
 		return next === undefined ? { type: "terminal" } : { type: "dispatch", targetModelId: next };
 	}
 

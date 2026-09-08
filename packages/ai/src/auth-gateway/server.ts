@@ -437,8 +437,16 @@ function dispatchTargetId(
 	compiled: CompiledRoute,
 	state: ExecutionState,
 	commitState: StreamCommitState,
+	cacheStore: PromptCacheAffinityStore,
+	fingerprint: string,
 ): string | undefined {
-	const action = decideAttempt({ route: compiled, state, commitState });
+	const hit = cacheStore.lookup(fingerprint);
+	const action = decideAttempt({
+		route: compiled,
+		state,
+		commitState,
+		preferredTargetId: hit?.model,
+	});
 	return action.type === "dispatch" ? action.targetModelId : undefined;
 }
 
@@ -881,6 +889,7 @@ async function handleFormatEndpoint(
 		return new Response(response.body, { status: response.status, headers });
 	};
 	const commitGate = new StreamCommitGate();
+	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? requestId;
 	const attemptedTargets = new Set<string>();
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
@@ -1015,7 +1024,7 @@ async function handleFormatEndpoint(
 				targetId = pendingFallback;
 				pendingFallback = undefined;
 			} else {
-				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, cacheStore, fingerprint);
 			}
 			if (targetId === undefined) {
 				if (lastClassified) return classifiedError(lastClassified);
@@ -1436,6 +1445,7 @@ async function handlePiNative(
 		headers.set("request-id", requestId);
 		return new Response(response.body, { status: response.status, headers });
 	};
+	const fingerprint = resolvePromptCacheKey(body, req.headers) ?? requestId;
 	const attemptedTargets = new Set<string>();
 	const attemptedCredentials = new Set<number>();
 	let retryCount = 0;
@@ -1570,7 +1580,7 @@ async function handlePiNative(
 				targetId = pendingFallback;
 				pendingFallback = undefined;
 			} else {
-				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state);
+				targetId = dispatchTargetId(compiled, stateNow(), commitGate.state, cacheStore, fingerprint);
 			}
 			if (targetId === undefined) {
 				if (lastClassified) return classifiedError(lastClassified);
