@@ -6175,7 +6175,7 @@ export interface CompactionSettings {
 	autoContinue: boolean;
 	remoteEndpoint: string | undefined;
 	remoteStreamingV2Enabled: boolean;
-	remoteTimeoutMs?: number;
+	remoteTimeoutMs: number | undefined;
 	v2RetainedMessageBudget: number;
 	idleEnabled: boolean;
 	idleThresholdTokens: number;
