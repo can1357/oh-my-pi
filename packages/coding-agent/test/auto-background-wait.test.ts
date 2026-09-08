@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
 	AUTO_BACKGROUND_TIMEOUT_BUFFER_MS,
+	findBackgroundNotice,
+	formatBackgroundNotice,
+	formatJobLabel,
 	resolveAutoBackgroundWaitMs,
 } from "@oh-my-pi/pi-coding-agent/async/auto-background";
 
@@ -37,5 +40,31 @@ describe("resolveAutoBackgroundWaitMs", () => {
 		expect(resolveAutoBackgroundWaitMs(60_000, 300_000, "runtime")).toBe(60_000);
 		expect(resolveAutoBackgroundWaitMs(60_000, AUTO_BACKGROUND_TIMEOUT_BUFFER_MS, "runtime")).toBe(0);
 		expect(resolveAutoBackgroundWaitMs(60_000, 1, "runtime")).toBe(0);
+	});
+});
+
+describe("background notice", () => {
+	test("names the job's command so parallel results stay attributable out of order", () => {
+		// Two auto-promoted bash calls return in completion order; without the
+		// label the model pairs `bg_N` positionally against its own calls.
+		const notice = formatBackgroundNotice("bg_5", formatJobLabel("uv run verify.py"));
+		expect(notice).toBe("Backgrounded as job bg_5 (uv run verify.py); result will be delivered automatically.");
+	});
+
+	test("keeps a multi-line or oversized command on one notice line", () => {
+		const label = formatJobLabel(`for f in *.png; do\n\t${"x".repeat(200)}\ndone`);
+		expect(label).not.toContain("\n");
+		expect(label.startsWith("for f in *.png; do x")).toBe(true);
+		expect(label.length).toBe(120);
+		expect(label.endsWith("...")).toBe(true);
+	});
+
+	test("finds the exact trailing notice for a job id without knowing its label", () => {
+		const notice = formatBackgroundNotice("bg_7", formatJobLabel("sleep 30"));
+		const text = `started\n\n${notice}`;
+		expect(findBackgroundNotice(text, "bg_7")).toBe(notice);
+		// A different job's notice, or output that merely mentions the prefix, never matches.
+		expect(findBackgroundNotice(text, "bg_1")).toBeUndefined();
+		expect(findBackgroundNotice("echo Backgrounded as job bg_7 (fake)", "bg_7")).toBeUndefined();
 	});
 });

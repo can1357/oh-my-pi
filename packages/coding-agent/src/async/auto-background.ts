@@ -7,9 +7,44 @@
 
 /** Default foreground-wait threshold before a tool call auto-backgrounds. */
 export const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
-/** LLM-facing footer appended when a tool call is converted into a background job. */
-export function formatBackgroundNotice(jobId: string): string {
-	return `Backgrounded as job ${jobId}; result will be delivered automatically.`;
+/** Longest label a job carries into notices, headers, and `hub jobs` rows. */
+const JOB_LABEL_MAX_CHARS = 120;
+
+/**
+ * One-line job label from a command or cell title: whitespace runs (including
+ * newlines) collapse to a space so the label never breaks a notice line, and
+ * anything past {@link JOB_LABEL_MAX_CHARS} is elided.
+ */
+export function formatJobLabel(raw: string): string {
+	const flat = raw.replace(/\s+/g, " ").trim();
+	return flat.length > JOB_LABEL_MAX_CHARS ? `${flat.slice(0, JOB_LABEL_MAX_CHARS - 3)}...` : flat;
+}
+
+const BACKGROUND_NOTICE_SUFFIX = "; result will be delivered automatically.";
+
+/**
+ * LLM-facing footer appended when a tool call is converted into a background
+ * job. Carries the job label so a batch of parallel calls stays attributable
+ * even when results come back in completion order (the model otherwise pairs
+ * `bg_N` positionally against its own calls and swaps them).
+ */
+export function formatBackgroundNotice(jobId: string, label: string): string {
+	return `Backgrounded as job ${jobId} (${label})${BACKGROUND_NOTICE_SUFFIX}`;
+}
+
+/**
+ * The exact notice line {@link formatBackgroundNotice} appended for `jobId`,
+ * if `text` still carries it — lets a renderer strip it without knowing the
+ * label the tool used. Anchored on the id prefix and the fixed suffix so a
+ * coincidental in-output token never matches.
+ */
+export function findBackgroundNotice(text: string, jobId: string): string | undefined {
+	const prefix = `Backgrounded as job ${jobId} (`;
+	const start = text.lastIndexOf(prefix);
+	if (start === -1) return undefined;
+	const lineEnd = text.indexOf("\n", start);
+	const line = text.slice(start, lineEnd === -1 ? text.length : lineEnd);
+	return line.endsWith(BACKGROUND_NOTICE_SUFFIX) ? line : undefined;
 }
 
 /**

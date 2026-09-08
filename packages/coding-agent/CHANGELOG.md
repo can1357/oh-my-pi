@@ -205,6 +205,7 @@
 - Fixed supervised image tunnels rejecting a published URL when the child exited between the startup poll's log read and exit check, and gave each tunnel child a private temporary log directory so concurrent tunnels cannot share a log path.
 - Fixed a failed progress preview delivery leaving a mirrored output artifact unfinalized (open descriptor, missing capped tail).
 - Added Bash async: "auto": potentially slow finite commands run inline for a grace window and promote to a background job without restarting. At the background-job cap auto runs inline to completion with a notice (explicit `async: true` still errors), a command whose timeout cannot outlive the grace never promotes, and promotion waits at most one second for stalled output deliveries.
+- Backgrounded Bash and Eval results now name the command or cell in the notice (`Backgrounded as job bg_5 (uv run verify.py); …`), so parallel calls whose results return out of call order stay attributable to the right job instead of being paired positionally.
 
 ## [18.1.12] - 2026-09-06
 

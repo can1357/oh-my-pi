@@ -43,7 +43,7 @@ The tool returns a single `text` content block plus optional `details`.
   - `details.meta.truncation`: present when output was truncated in memory; includes `artifactId` when full output spilled to an artifact.
   - non-zero exits and local/PTY timeouts return a tool result marked `isError`; definite non-zero output ends with `Command exited with code <n>`.
 - Success, background start (`async: true`, promoted `async: "auto"`, or settings-driven auto-background):
-  - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id>; result will be delivered automatically.`
+  - `content[0].text`: optional preview tail and notices, followed by `Backgrounded as job <id> (<command label>); result will be delivered automatically.` The label is the command collapsed to one line (max 120 chars) — the same label completion notices and `hub jobs` show — so a batch of parallel calls whose results return out of call order stays attributable.
   - `details.async`: `{ state: "running", jobId, type: "bash" }`.
 - Background progress / completion:
   - delivered through `onUpdate` / async job manager, not the initial return.
