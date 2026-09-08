@@ -4596,6 +4596,57 @@ describe("agentLoopContinue with AgentMessage", () => {
 		).toBe(false);
 	});
 
+	it("closes steering admission before a resumed terminal-yield hook", async () => {
+		const toolSchema = type({ value: "string" });
+		const controller = new AbortController();
+		const tool: AgentTool<typeof toolSchema, { value: string }> = {
+			name: "yield",
+			label: "Yield",
+			description: "Yield tool",
+			parameters: toolSchema,
+			async execute(_toolCallId, params) {
+				return { content: [{ type: "text", text: params.value }], details: { value: params.value } };
+			},
+		};
+		const context: AgentContext = {
+			systemPrompt: [""],
+			messages: [
+				createUserMessage("go"),
+				createAssistantMessage(
+					[{ type: "toolCall", id: "yield-resume", name: "yield", arguments: { value: "final" } }],
+					"toolUse",
+				),
+			],
+			tools: [tool],
+		};
+		const mock = createMockModel({ responses: [{ content: ["must not be reached"] }] });
+		let admissionOpen = true;
+		const admissionAtTurnEnd: boolean[] = [];
+		const admissionTransitions: boolean[] = [];
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			afterToolCall: async () => {
+				controller.abort(TERMINAL_TOOL_RESULT_ABORT_REASON);
+			},
+			onTurnEnd: () => {
+				admissionAtTurnEnd.push(admissionOpen);
+			},
+			setSteeringAdmission: open => {
+				admissionOpen = open;
+				admissionTransitions.push(open);
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoopContinue(context, config, controller.signal, mock.stream);
+		for await (const event of stream) events.push(event);
+
+		expect(mock.calls).toHaveLength(0);
+		expect(admissionAtTurnEnd).toEqual([false]);
+		expect(admissionTransitions).not.toContain(true);
+	});
+
 	it("runs onTurnEnd for a terminal-yield turn without a spent abort signal", async () => {
 		const toolSchema = type({ value: "string" });
 		const controller = new AbortController();
@@ -4636,6 +4687,36 @@ describe("agentLoopContinue with AgentMessage", () => {
 		// and with no aborted signal so downstream waits behave like a plain turn.
 		expect(mock.calls).toHaveLength(1);
 		expect(turnEndCalls).toEqual([{ willContinue: false, signalAborted: false }]);
+	});
+
+	it("does not reopen steering admission when abort lands after the final steer poll", async () => {
+		const controller = new AbortController();
+		const context: AgentContext = { systemPrompt: [""], messages: [], tools: [] };
+		const mock = createMockModel({ responses: [{ content: ["done"] }] });
+		let steeringPolls = 0;
+		const admissionTransitions: boolean[] = [];
+		const config: AgentLoopConfig = {
+			model: mock.model,
+			convertToLlm: identityConverter,
+			getSteeringMessages: async () => {
+				steeringPolls++;
+				return steeringPolls === 3 ? [createUserMessage("late steer")] : [];
+			},
+			getAsideMessages: async () => {
+				controller.abort("interrupt during final polls");
+				return [];
+			},
+			setSteeringAdmission: open => {
+				admissionTransitions.push(open);
+			},
+		};
+
+		const events: AgentEvent[] = [];
+		const stream = agentLoop([createUserMessage("go")], context, config, controller.signal, mock.stream);
+		for await (const event of stream) events.push(event);
+
+		expect(steeringPolls).toBe(3);
+		expect(admissionTransitions).not.toContain(true);
 	});
 
 	it("preserves an external abort boundary when a completed tool ignores cancellation", async () => {

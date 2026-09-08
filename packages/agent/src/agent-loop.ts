@@ -1116,13 +1116,17 @@ async function runLoopBody(
 				currentContext.messages.push(result);
 				newMessages.push(result);
 			}
+			const terminalYield = signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON;
+			if (terminalYield) {
+				config.setSteeringAdmission?.(false);
+			}
 			await emitTurnEnd(stream, currentContext, resumeTail, executionResult.toolResults, config, signal, {
 				willContinue: !isDeadlineExceeded(config.deadline),
 			});
 			turnOpen = false;
 			// A tool hook may mark its completed result as terminal (e.g. subagent
 			// yield) — same stop-before-next-model-call rule as the main loop.
-			if (signal?.reason === TERMINAL_TOOL_RESULT_ABORT_REASON) {
+			if (terminalYield) {
 				endAgentStream(stream, newMessages, telemetry, stepCounter.count, config.setSteeringAdmission);
 				return;
 			}
@@ -1551,7 +1555,9 @@ async function runLoopBody(
 			const asideMessages = signal?.aborted ? [] : resolveAsides(await config.getAsideMessages?.());
 			const followUpMessages = signal?.aborted ? [] : (await config.getFollowUpMessages?.(signal)) || [];
 			if (lateSteering.length > 0 || asideMessages.length > 0 || followUpMessages.length > 0) {
-				config.setSteeringAdmission?.(true);
+				if (!signal?.aborted) {
+					config.setSteeringAdmission?.(true);
+				}
 				// Set as pending so the inner loop processes them before stopping.
 				pendingMessages = [...lateSteering, ...asideMessages, ...followUpMessages];
 				continue;
