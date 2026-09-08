@@ -2462,8 +2462,7 @@ threat model belongs in `docs/py/06-policy.md`; the observability gap belongs he
 
 `PromptFingerprint` requires the prompt assembler to hash per slot. Given slots already render into
 owned strings (`docs/py/08-context.md`), this is one SHA-256 per slot plus one over the concatenation
-— SHA-256 runs at gigabytes per second, so a 100 KB prompt with thirty slots costs well under 100 µs,
-once per request, on a path that already spent milliseconds assembling the text.
+— sub-millisecond even without SHA extensions, once per request, on a path that already spent milliseconds assembling the text.
 
 `changed` is a digest comparison against the previous request's map: thirty `Str` comparisons, no
 allocation if the map is a `SparseMap` reused across requests. `prefix_stable_bytes` is a single

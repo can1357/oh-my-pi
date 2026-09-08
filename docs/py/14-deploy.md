@@ -1566,8 +1566,7 @@ serialization of everything the manifest asks for, with a fixed normalization:
 - `capability_digest` hashes only the effective base-plus-selected set. Enabling a feature
   changes this consent digest; disabling one removes its authority. Install/upgrade prompts
   only for newly effective capabilities.
-- The digest is `SHA-256` over that byte string, matching `omp_journal::BlobRef`'s hash
-  (`crates/journal/src/blob.rs:48`) so one hash function covers the whole system.
+- The consent `capability_digest` is SHA-256 over that byte string, rendered with the `b3:` prefix like every other extension digest; `manifest_capability_digest` is blake3 (`crates/ext/src/config.rs:1894`).
 
 Effect: `2.3.0 → 2.3.1` with no capability change reprompts **never**. `2.3.1 → 2.4.0`
 that adds `net` reprompts **always**. This is the property that makes consent survivable,
@@ -2939,7 +2938,7 @@ resolution, integrity, trust, CLI — is missing. Verified before writing this s
 | Bounded framing | `DEFAULT_MAX_FRAME_BYTES = 64 MiB` (`worker.rs:53`), `WorkerError::FrameTooLarge` (`:308-315`) | **exists** |
 | Declaration verification at handshake | `WorkerProcess::spawn` collects `registrations: Vec<ToolDecl>`; `ToolWorkerSupervisor::registrations()` (`worker.rs:254-258`) | **exists** |
 | Supervisor mailboxes | `flume::unbounded()` (`worker.rs:248`), RAII cancel on `WorkerInvocation::drop` (`worker.rs:220-229`) | **exists** |
-| Content-addressed store | `omp_journal::BlobStore` — SHA-256 `BlobRef { hash: [u8;32], size }` (`crates/journal/src/blob.rs:36-41`), `put_reader` streaming at 64 KiB (`:179`), `has`, `verify`, `path` | **exists** |
+| Content-addressed store | `omp_journal::BlobStore` — SHA-256 `BlobRef { hash: [u8;32], size }` (`crates/journal/src/blob.rs:47-52`), `put_reader` streaming at 64 KiB (`:179`), `has`, `verify`, `path` | **exists** |
 | Blob transport | `crates/proto/proto/omp/blob/v1` — `Blob` service with `Stat`/`Get`(stream)/`Put`(stream)/`Delete` | **exists** |
 | Registry identity digests | `crates/tool/src/registry.rs` — `slot_hash()` `:2623` (model-visible slots), `device_hash()` `:2654` (device availability), `projection_hash()` `:2690` (registered revisions + projection code), all SHA-256 | **exists**; §6.0.2 records the notification gap |
 | Rev stamping | `crates/tool/src/lib.rs:46` `TOOL_REV_PROP = "omp/tool-rev"` | **exists** |
