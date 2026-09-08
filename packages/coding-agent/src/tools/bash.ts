@@ -359,6 +359,8 @@ export interface BashToolDetails {
 	timedOut?: boolean;
 	/** Live ACP update only; completed results refer to released terminals. */
 	terminalId?: string;
+	/** Absolute working directory the command ran in. */
+	cwd?: string;
 	async?: {
 		state: "running" | "completed" | "failed";
 		jobId: string;
@@ -773,6 +775,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			requestedTimeoutSec?: number;
 			notices?: readonly string[];
 			wallTimeMs?: number;
+			cwd?: string;
 		} = {},
 	): Promise<AgentToolResult<BashToolDetails>> {
 		const exitCode = result.exitCode;
@@ -800,6 +803,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		const isTimeout = result.timedOut === true;
 
 		const details: BashToolDetails = {};
+		if (options.cwd !== undefined) {
+			details.cwd = options.cwd;
+		}
 		if (timeoutSec === undefined) {
 			details.timeoutDisabled = true;
 		} else {
@@ -861,11 +867,14 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		jobId: string,
 		previewText: string,
 		timeoutSec: number | undefined,
-		options: { requestedTimeoutSec?: number; notices?: readonly string[] } = {},
+		options: { requestedTimeoutSec?: number; notices?: readonly string[]; cwd?: string } = {},
 	): AgentToolResult<BashToolDetails> {
 		const details: BashToolDetails = {
 			async: { state: "running", jobId, type: "bash" },
 		};
+		if (options.cwd !== undefined) {
+			details.cwd = options.cwd;
+		}
 		if (timeoutSec === undefined) {
 			details.timeoutDisabled = true;
 		} else {
@@ -944,6 +953,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						requestedTimeoutSec: options.requestedTimeoutSec,
 						notices: options.notices ?? [],
 						wallTimeMs,
+						cwd: options.commandCwd,
 					});
 					const finalText = this.#extractTextResult(finalResult);
 					latestText = finalText;
@@ -1019,11 +1029,12 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		let command = rawCommand;
 		const env = normalizeBashEnv(rawEnv);
 
-		// Extract a leading `cd <path> && ...` into cwd when the model ignores the
-		// cwd parameter. The scanner captures only a single path token and defers
-		// to the shell for anything else (redirects, extra args, shell expansion),
-		// so it never absorbs shell syntax like `cd /tmp 2>/dev/null && ...` into
-		// the structured cwd. Constrained to a top-level `&&` on the first line.
+		// Extract a leading `cd <path> && ...` / `cd <path>; ...` into cwd when the
+		// model ignores the cwd parameter. The scanner captures only a single path
+		// token and defers to the shell for anything else (redirects, extra args,
+		// shell expansion), so it never absorbs shell syntax like
+		// `cd /tmp 2>/dev/null && ...` into the structured cwd. Constrained to a
+		// top-level `&&` or `;` on the first line.
 		if (!cwd) {
 			const cd = extractLeadingCdTarget(command);
 			if (cd) {
@@ -1140,6 +1151,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 				requestedTimeoutSec,
 				notices: pendingNotices,
+				cwd: commandCwd,
 			});
 		}
 
@@ -1179,6 +1191,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 					requestedTimeoutSec,
 					notices: pendingNotices,
+					cwd: commandCwd,
 				});
 			}
 			// Suppress the completion delivery up front so a job finishing while we
@@ -1212,6 +1225,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			return this.#buildBackgroundStartResult(job.jobId, job.getLatestText(), timeoutSec, {
 				requestedTimeoutSec,
 				notices,
+				cwd: commandCwd,
 			});
 		}
 
@@ -1482,6 +1496,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 					requestedTimeoutSec,
 					notices: bridgeNotices,
 					wallTimeMs: performance.now() - bridgeWallTimeStart,
+					cwd: commandCwd,
 				});
 			} finally {
 				clearTimeout(timeoutTimer);
@@ -1566,6 +1581,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			requestedTimeoutSec,
 			notices: pendingNotices,
 			wallTimeMs,
+			cwd: commandCwd,
 		});
 	}
 }

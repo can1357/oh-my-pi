@@ -341,7 +341,9 @@ export async function captureDeltaPatch(isolationDir: string, baseline: Worktree
  * see, not a thrown failure.
  *
  * Returns the collected stash-restore warnings (empty when every nested repo
- * was restored cleanly). Throws when the patch apply itself fails.
+ * was restored cleanly) and whether any nested patch modified or committed a
+ * repository. Throws when the patch apply itself fails; the error may carry
+ * `nestedPatchesApplied: true` when an earlier nested repo already succeeded.
  *
  * @param commitMessage Optional async function to generate a commit message from the combined diff.
  *                      If omitted or returns null, falls back to a generic message.
@@ -350,8 +352,9 @@ export async function applyNestedPatches(
 	repoRoot: string,
 	patches: NestedRepoPatch[],
 	commitMessage?: (diff: string) => Promise<string | null>,
-): Promise<string[]> {
+): Promise<{ warnings: string[]; applied: boolean }> {
 	const warnings: string[] = [];
+	let applied = false;
 	// Group patches by target repo to apply all at once and commit
 	const byRepo = new Map<string, NestedRepoPatch[]>();
 	for (const p of patches) {
@@ -379,16 +382,26 @@ export async function applyNestedPatches(
 			? await repository.stashPush(`omp-isolation-${Snowflake.next()}`)
 			: false;
 		try {
-			for (const { patch } of repoPatches) {
-				await repository.applyPatch(patch, {});
-			}
-			if (await repository.isDirty()) {
-				if (touchedFiles.length === 0) {
-					throw new Error(`Nested repo patch for ${relativePath} did not include stageable file paths.`);
+			try {
+				for (const { patch } of repoPatches) {
+					await repository.applyPatch(patch, {});
+					applied = true;
 				}
-				const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
-				await repository.stageFiles(touchedFiles);
-				await repository.commitCreate(msg, {});
+				if (await repository.isDirty()) {
+					if (touchedFiles.length === 0) {
+						throw new Error(`Nested repo patch for ${relativePath} did not include stageable file paths.`);
+					}
+					const msg = (await commitMessage?.(combinedDiff)) ?? "changes from isolated task(s)";
+					await repository.stageFiles(touchedFiles);
+					await repository.commitCreate(msg, {});
+				}
+			} catch (err) {
+				if (applied) {
+					throw Object.assign(err instanceof Error ? err : new Error(String(err)), {
+						nestedPatchesApplied: true,
+					});
+				}
+				throw err;
 			}
 		} finally {
 			if (stashed) {
@@ -404,7 +417,7 @@ export async function applyNestedPatches(
 			}
 		}
 	}
-	return warnings;
+	return { warnings, applied };
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -919,10 +932,18 @@ export async function commitToBranch(
 
 export interface MergeBranchResult {
 	merged: string[];
+	/** Branches whose revision loop finished (includes all-empty cherry-picks). */
+	processed: string[];
 	failed: string[];
 	conflict?: string;
 	/** Set when cherry-picks landed on HEAD but restoring the stashed working tree failed. */
 	stashConflict?: string;
+	/**
+	 * True when at least one cherry-pick revision landed on HEAD before a later
+	 * conflict aborted the range — parent tree is dirty even though the branch
+	 * is reported in {@link failed}.
+	 */
+	partialCommitsLanded?: boolean;
 }
 
 /**
@@ -944,6 +965,7 @@ export async function mergeTaskBranches(
 	return withRepoLock(repoRoot, async () => {
 		const repo = vcs.requireGit(repoRoot);
 		const merged: string[] = [];
+		const processed: string[] = [];
 		const failed: string[] = [];
 
 		// Stash dirty working tree so cherry-pick can operate on a clean HEAD.
@@ -954,11 +976,13 @@ export async function mergeTaskBranches(
 
 		try {
 			for (const { branchName, baseSha } of branches) {
+				let revisionsLanded = 0;
 				try {
 					const revisions = baseSha ? await repo.revListRange(baseSha, branchName) : [branchName];
 					for (const revision of revisions) {
 						try {
 							await repo.cherryPick(revision);
+							revisionsLanded++;
 						} catch (error) {
 							if (!vcs.isEmptyCherryPick(error)) throw error;
 							await repo.cherryPickSkip();
@@ -978,13 +1002,18 @@ export async function mergeTaskBranches(
 					failed.push(branchName);
 					conflictResult = {
 						merged,
+						processed,
 						failed: [...failed, ...branches.slice(merged.length + failed.length).map(b => b.branchName)],
 						conflict: `${branchName}: ${stderr}`,
+						partialCommitsLanded: revisionsLanded > 0,
 					};
 					break;
 				}
 
-				merged.push(branchName);
+				// Empty cherry-picks must not latch verify, but the branch was still
+				// fully processed — nested patches remain eligible.
+				processed.push(branchName);
+				if (revisionsLanded > 0) merged.push(branchName);
 			}
 		} finally {
 			if (didStash) {
@@ -1003,13 +1032,13 @@ export async function mergeTaskBranches(
 					if (conflictResult) {
 						conflictResult.stashConflict = stashConflict;
 					} else {
-						conflictResult = { merged, failed: [], stashConflict };
+						conflictResult = { merged, processed, failed: [], stashConflict };
 					}
 				}
 			}
 		}
 
-		return conflictResult ?? { merged, failed };
+		return conflictResult ?? { merged, processed, failed };
 	});
 }
 

@@ -6,6 +6,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import {
+	applyOpsToPhases,
 	markdownToPhases,
 	nextActionableTask,
 	phasesToMarkdown,
@@ -57,6 +58,68 @@ describe("resolveTodoMarkdownPath", () => {
 		const cwd = path.resolve("tmp", "todo-workspace");
 
 		expect(() => resolveTodoMarkdownPath("artifact://todo", cwd)).toThrow("internal scheme");
+	});
+});
+
+describe("applyOpsToPhases userDrop provenance", () => {
+	it("stamps droppedBy user only when userDrop is set", () => {
+		const current: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "Keep shipping", status: "pending" },
+					{ content: "Cancel me", status: "in_progress" },
+				],
+			},
+		];
+
+		const modelDrop = applyOpsToPhases(current, [{ op: "drop", task: "Cancel me" }]);
+		expect(modelDrop.errors).toEqual([]);
+		expect(modelDrop.phases[0]?.tasks.find(t => t.content === "Cancel me")).toEqual({
+			content: "Cancel me",
+			status: "abandoned",
+		});
+
+		const userDrop = applyOpsToPhases(current, [{ op: "drop", task: "Cancel me" }], { userDrop: true });
+		expect(userDrop.errors).toEqual([]);
+		expect(userDrop.phases[0]?.tasks.find(t => t.content === "Cancel me")).toEqual({
+			content: "Cancel me",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		// Dropping the in-progress task auto-promotes the remaining pending sibling.
+		expect(userDrop.phases[0]?.tasks.find(t => t.content === "Keep shipping")?.status).toBe("in_progress");
+	});
+
+	it("clears stale user droppedBy when a task is restarted then model-dropped", () => {
+		const userDropped: TodoPhase[] = [
+			{ name: "Work", tasks: [{ content: "Retry me", status: "abandoned", droppedBy: "user" }] },
+		];
+		const started = applyOpsToPhases(userDropped, [{ op: "start", task: "Retry me" }]);
+		expect(started.phases[0]?.tasks[0]).toEqual({ content: "Retry me", status: "in_progress" });
+
+		const modelDrop = applyOpsToPhases(started.phases, [{ op: "drop", task: "Retry me" }]);
+		expect(modelDrop.phases[0]?.tasks[0]).toEqual({ content: "Retry me", status: "abandoned" });
+	});
+
+	it("preserves sibling user droppedBy across clone when starting another task", () => {
+		const current: TodoPhase[] = [
+			{
+				name: "Work",
+				tasks: [
+					{ content: "User cancelled", status: "abandoned", droppedBy: "user" },
+					{ content: "Still open", status: "pending" },
+				],
+			},
+		];
+		const started = applyOpsToPhases(current, [{ op: "start", task: "Still open" }]);
+		expect(started.errors).toEqual([]);
+		expect(started.phases[0]?.tasks.find(t => t.content === "User cancelled")).toEqual({
+			content: "User cancelled",
+			status: "abandoned",
+			droppedBy: "user",
+		});
+		expect(started.phases[0]?.tasks.find(t => t.content === "Still open")?.status).toBe("in_progress");
 	});
 });
 
@@ -382,7 +445,7 @@ describe("TodoTool operations", () => {
 		expect(allTasks.map(task => task.status)).toEqual(["completed", "completed", "in_progress"]);
 	});
 
-	it("removes all tasks when rm omits task and phase", async () => {
+	it("abandons open tasks when model rm omits task and phase", async () => {
 		const tool = new TodoTool(createSession());
 		await tool.execute("call-1", {
 			op: "init",
@@ -390,10 +453,21 @@ describe("TodoTool operations", () => {
 		});
 
 		const result = await tool.execute("call-2", { op: "rm" });
-		expect(result.details?.phases[0]?.tasks).toEqual([]);
+		const tasks = result.details?.phases[0]?.tasks ?? [];
+		expect(tasks.map(task => task.status)).toEqual(["abandoned", "abandoned"]);
+		expect(tasks.every(task => task.droppedBy === undefined)).toBe(true);
 		const summary = result.content.find(part => part.type === "text");
 		if (summary?.type !== "text") throw new Error("Expected text summary");
-		expect(summary.text).toContain("Todo list cleared.");
+		expect(summary.text).toContain("Remaining items");
+	});
+
+	it("physically deletes when user-authored rm is applied", () => {
+		const { phases } = applyOpsToPhases(
+			[{ name: "Work", tasks: [{ content: "First", status: "pending" }] }],
+			[{ op: "rm", task: "First" }],
+			{ userDrop: true },
+		);
+		expect(phases[0]?.tasks).toEqual([]);
 	});
 
 	it("drops all tasks in a phase", async () => {

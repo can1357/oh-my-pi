@@ -28,6 +28,12 @@ export interface LspToolDetails {
 	action: string;
 	success: boolean;
 	request?: LspParams;
+	/** Diagnostics target path, or `*` for workspace-wide diagnostics. */
+	file?: string;
+	/** Error-severity diagnostics counted for `action: "diagnostics"`. */
+	diagnosticErrorCount?: number;
+	/** Language servers (or workspace checkers) that failed during diagnostics. */
+	failedServerCount?: number;
 }
 
 // =============================================================================

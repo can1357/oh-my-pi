@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
-import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, logger, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import { resolveAgentModelSelection } from "../config/model-resolver";
 import type { CustomTool } from "../extensibility/custom-tools/types";
 import type { LocalProtocolOptions } from "../internal-urls";
@@ -17,6 +17,7 @@ import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
 import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { isolatedApplyShouldLatch } from "../session/settle-gates";
 import type { TaskEffort } from "../thinking";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
@@ -155,6 +156,8 @@ export interface StructuredSubagentResult {
 	policy: EffectiveSubagentPolicy;
 	mergeSummary: string;
 	changesApplied: boolean | null;
+	/** True iff the isolated apply actually merged/applied child work into the parent tree. */
+	hadAnyChanges: boolean;
 	artifactsDir: string;
 	temporaryArtifacts: boolean;
 }
@@ -576,6 +579,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	const policy = await resolveEffectiveSubagentPolicy(request);
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
+	let hadAnyChanges = false;
 	let mergeSummary = "";
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
@@ -648,8 +652,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			});
 			mergeSummary = outcome.summary;
 			changesApplied = outcome.changesApplied;
+			hadAnyChanges = outcome.hadAnyChanges;
 			if (outcome.changesApplied !== false) {
-				const nestedPatchSummary = await applyEligibleNestedPatches({
+				const nested = await applyEligibleNestedPatches({
 					result,
 					repoRoot: isolationContext.repoRoot,
 					mergeMode: policy.mergeMode,
@@ -657,9 +662,11 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					mergedBranchForNestedPatches: outcome.mergedBranchForNestedPatches,
 					commitMessage: makeIsolationCommitMessage(request.session)(),
 				});
-				mergeSummary += nestedPatchSummary;
+				const nestedSummary = nested.summary ?? "";
+				mergeSummary += nestedSummary;
+				if (nested.applied) hadAnyChanges = true;
 				requiresRecoveryArtifacts ||=
-					nestedPatchSummary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
+					nestedSummary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
 			}
 		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
 			if (result.branchName)
@@ -672,11 +679,24 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		}
 
 		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;
+		// Arm before artifact cleanup so a cleanup failure cannot leave parent
+		// settle without an unverified-merge latch for applied child work.
+		if (
+			isolatedApplyShouldLatch({
+				isolated: policy.isIsolated,
+				applyChanges: policy.applyChanges,
+				hadAnyChanges,
+				exitCode: result.exitCode,
+			})
+		) {
+			request.session.noteUnverifiedMerge?.();
+		}
 		return {
 			result,
 			policy,
 			mergeSummary,
 			changesApplied,
+			hadAnyChanges,
 			artifactsDir: lease.artifactsDir,
 			temporaryArtifacts: lease.temporary,
 		};
@@ -694,8 +714,15 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
 		const cleanupArtifacts = async (): Promise<void> => {
-			await fs.rm(lease.artifactsDir, { recursive: true, force: true });
-			lease.unregister?.();
+			try {
+				await fs.rm(lease.artifactsDir, { recursive: true, force: true });
+				lease.unregister?.();
+			} catch (error) {
+				logger.warn("Failed to clean up temporary subagent artifacts", {
+					artifactsDir: lease.artifactsDir,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
 		};
 		if (shouldCleanup) {
 			if (deferredCleanup) {

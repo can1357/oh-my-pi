@@ -27,6 +27,13 @@ export interface TodoItem {
 	status: TodoStatus;
 	/** When `status === "blocked"`, an optional note on what the task is waiting for. */
 	blocker?: string;
+	/**
+	 * Set when the user abandoned this task via `/todo drop` (or equivalent).
+	 * Settle treats model-authored `abandoned` as incomplete; a user-authored
+	 * drop is an explicit cancel. Kept here so #10053 provenance survives when
+	 * this branch's settle path runs against the same TodoItem shape.
+	 */
+	droppedBy?: "user";
 }
 
 export interface TodoPhase {
@@ -45,7 +52,8 @@ export function isTodoPhase(value: unknown): value is TodoPhase {
 				task.status === "in_progress" ||
 				task.status === "completed" ||
 				task.status === "abandoned" ||
-				task.status === "blocked"),
+				task.status === "blocked") &&
+			(task.droppedBy === undefined || task.droppedBy === "user"),
 	);
 }
 
@@ -109,9 +117,10 @@ function findPhaseByName(phases: TodoPhase[], name: string): TodoPhase | undefin
 }
 
 function cloneTask(task: TodoItem): TodoItem {
-	return task.blocker !== undefined
-		? { content: task.content, status: task.status, blocker: task.blocker }
-		: { content: task.content, status: task.status };
+	const cloned: TodoItem = { content: task.content, status: task.status };
+	if (task.blocker !== undefined) cloned.blocker = task.blocker;
+	if (task.droppedBy === "user") cloned.droppedBy = "user";
+	return cloned;
 }
 
 function clonePhases(phases: TodoPhase[]): TodoPhase[] {
@@ -482,7 +491,12 @@ function removeTasks(phases: TodoPhase[], entry: TodoOpEntryValue, errors: strin
 	return phases;
 }
 
-function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string[]): TodoPhase[] {
+function applyEntry(
+	phases: TodoPhase[],
+	entry: TodoOpEntryValue,
+	errors: string[],
+	options?: { userDrop?: boolean },
+): TodoPhase[] {
 	switch (entry.op) {
 		case "init":
 			return initPhases(entry, errors);
@@ -493,21 +507,28 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 				for (const candidate of phase.tasks) {
 					if (candidate.status === "in_progress" && candidate !== hit.task) {
 						candidate.status = "pending";
+						delete candidate.droppedBy;
 					}
 				}
 			}
 			hit.task.status = "in_progress";
+			delete hit.task.droppedBy;
 			return phases;
 		}
 		case "done": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
 				task.status = "completed";
+				delete task.droppedBy;
 			}
 			return phases;
 		}
 		case "drop": {
 			for (const task of getTaskTargets(phases, entry, errors)) {
 				task.status = "abandoned";
+				// Slash-command `/todo drop` stamps user provenance so settle treats
+				// the cancel as complete; model `todo` drop ops clear any stale stamp.
+				if (options?.userDrop) task.droppedBy = "user";
+				else delete task.droppedBy;
 			}
 			return phases;
 		}
@@ -547,7 +568,17 @@ function applyEntry(phases: TodoPhase[], entry: TodoOpEntryValue, errors: string
 			return phases;
 		}
 		case "rm":
-			return removeTasks(phases, entry, errors);
+			if (options?.userDrop) return removeTasks(phases, entry, errors);
+			// Model `rm` is a settle cheat: abandon in place like `drop`.
+			// Leave completed/blocked alone, and keep existing abandoned (incl. user
+			// droppedBy) so rm cannot rewrite terminals into unprovenanced drops.
+			for (const task of getTaskTargets(phases, entry, errors)) {
+				if (task.status === "completed" || task.status === "blocked") continue;
+				if (task.status === "abandoned") continue;
+				task.status = "abandoned";
+				delete task.droppedBy;
+			}
+			return phases;
 		case "append":
 			return appendItems(phases, entry, errors);
 		case "view":
@@ -605,11 +636,12 @@ function applyParams(phases: TodoPhase[], params: TodoOpEntryValue): { phases: T
 export function applyOpsToPhases(
 	currentPhases: TodoPhase[],
 	ops: TodoOpEntryValue[],
+	options?: { userDrop?: boolean },
 ): { phases: TodoPhase[]; errors: string[] } {
 	const errors: string[] = [];
 	let next = clonePhases(currentPhases);
 	for (const op of ops) {
-		next = applyEntry(next, op, errors);
+		next = applyEntry(next, op, errors, options);
 	}
 	normalizeInProgressTask(next);
 	return { phases: next, errors };
@@ -715,6 +747,20 @@ export function markdownToPhases(md: string): { phases: TodoPhase[]; errors: str
 
 	normalizeInProgressTask(phases);
 	return { phases, errors };
+}
+
+/**
+ * Stamp abandoned checklist rows from user-authored Markdown (`/todo edit` /
+ * `/todo import`) as `droppedBy: "user"`. Without this, `[-]`/`[~]` parses as
+ * model-abandoned work and keeps settle reminders armed.
+ */
+export function stampUserMarkdownAbandoned(phases: TodoPhase[]): TodoPhase[] {
+	return phases.map(phase => ({
+		name: phase.name,
+		tasks: phase.tasks.map(task =>
+			task.status === "abandoned" ? { ...task, droppedBy: "user" as const } : task,
+		),
+	}));
 }
 
 function formatSummary(phases: TodoPhase[], errors: string[], readOnly = false): string {

@@ -5,6 +5,7 @@ import {
 	markdownToPhases,
 	phasesToMarkdown,
 	resolveTodoMarkdownPath,
+	stampUserMarkdownAbandoned,
 	type TodoItem,
 	type TodoPhase,
 	USER_TODO_EDIT_CUSTOM_TYPE,
@@ -256,7 +257,7 @@ export class TodoCommandController {
 			this.ctx.showError(`Could not parse ${source}:\n  ${errors.join("\n  ")}`);
 			return;
 		}
-		this.#commit(phases, `/todo import ${source}`);
+		this.#commit(stampUserMarkdownAbandoned(phases), `/todo import ${source}`);
 		const taskCount = phases.reduce((sum, p) => sum + p.tasks.length, 0);
 		this.ctx.showStatus(`Imported ${phases.length} phase(s), ${taskCount} task(s) from ${source}.`);
 	}
@@ -331,11 +332,12 @@ export class TodoCommandController {
 
 	#mutateStatus(rest: string, target: "completed" | "abandoned"): void {
 		const op = target === "completed" ? "done" : "drop";
+		const dropOpts = op === "drop" ? { userDrop: true as const } : undefined;
 		const current = this.#currentPhases();
 		const trimmed = rest.trim();
 		if (!trimmed) {
 			// no-arg: apply to all
-			const { phases, errors } = applyOpsToPhases(current, [{ op }]);
+			const { phases, errors } = applyOpsToPhases(current, [{ op }], dropOpts);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -347,7 +349,7 @@ export class TodoCommandController {
 
 		const taskHit = findTaskFuzzy(current, trimmed);
 		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }]);
+			const { phases, errors } = applyOpsToPhases(current, [{ op, task: taskHit.task.content }], dropOpts);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -359,7 +361,7 @@ export class TodoCommandController {
 
 		const phaseHit = findPhaseFuzzy(current, trimmed);
 		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }]);
+			const { phases, errors } = applyOpsToPhases(current, [{ op, phase: phaseHit.name }], dropOpts);
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -382,7 +384,9 @@ export class TodoCommandController {
 		}
 		const taskHit = findTaskFuzzy(current, trimmed);
 		if (taskHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }]);
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", task: taskHit.task.content }], {
+				userDrop: true,
+			});
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -393,7 +397,9 @@ export class TodoCommandController {
 		}
 		const phaseHit = findPhaseFuzzy(current, trimmed);
 		if (phaseHit) {
-			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }]);
+			const { phases, errors } = applyOpsToPhases(current, [{ op: "rm", phase: phaseHit.name }], {
+				userDrop: true,
+			});
 			if (errors.length > 0) {
 				this.ctx.showError(errors.join("; "));
 				return;
@@ -430,7 +436,7 @@ export class TodoCommandController {
 				this.ctx.showError(`Could not parse Markdown:\n  ${errors.join("\n  ")}`);
 				return;
 			}
-			this.#commit(parsed, "/todo edit");
+			this.#commit(stampUserMarkdownAbandoned(parsed), "/todo edit");
 			const taskCount = parsed.reduce((sum, p) => sum + p.tasks.length, 0);
 			this.ctx.showStatus(`Todos updated from editor: ${parsed.length} phase(s), ${taskCount} task(s).`);
 		} catch (error) {

@@ -202,6 +202,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 		if (!manager) {
 			throw new ToolError("agent() needs the session's async job manager; unavailable here");
 		}
+
 		const id = await reserveStructuredSubagentId(options.session, { label: parsed.label });
 		const ownerId = options.session.getAgentId?.() ?? MAIN_AGENT_ID;
 		manager.register(
@@ -240,6 +241,7 @@ export async function runEvalAgent(args: unknown, options: EvalAgentBridgeOption
 					if (error instanceof StructuredSubagentError) throw new ToolError(error.message);
 					throw error;
 				}
+
 			},
 			{ id, agentId: id, ownerId },
 		);
