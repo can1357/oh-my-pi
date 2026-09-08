@@ -88,9 +88,11 @@ class "gemini" {
 		// Replaces the Gemini 3+ mandatory-reasoning fallback.
 		thinking-requires-effort #true
 	}
-	// Public Gemini requires the bypass sentinel on every unsigned call. The
-	// Cloud Code Assist first-call variant is a host contract in providers/.
-	on "google" "opencode-zen" {
+	// Public Gemini requires the bypass sentinel on every unsigned call and
+	// supports function-part ids. Scope by adapter so custom providers using
+	// the same wire protocol inherit both contracts. The Cloud Code Assist
+	// first-call variant is a host contract in providers/.
+	on-api "google-generative-ai" {
 		revision ">=3" {
 			requires-skip-thought-signature #true
 			supports-function-part-id #true
