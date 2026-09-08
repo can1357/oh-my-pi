@@ -13,6 +13,7 @@
 
 ### Fixed
 
+- Grok Bot AvailableModels no longer invents a low/medium/high/xhigh effort ladder when a param is advertised without values; reviewed ladders stay KDL-owned.
 - Grok Bot offline `grok-4.6` reasoning capability is owned by catalog KDL (neutral seeds); live non-reasoning rows keep an empty thinking ladder so buildModel/merge does not OR-upgrade them.
 - Grok Bot token renew failure logs only the HTTP status (never the response body, which may echo the renewer credential).
 - Grok Bot AvailableModels emits both `legacySlug` and `variantStringRepresentation` selectors when a variant advertises both.

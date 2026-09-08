@@ -5,14 +5,25 @@
  * 9 accepted_unadvertised_tool_names (optional), 16 subagent_type (optional).
  * Fields 5/10–15 are decode-only (legacy model_id, automation, lineage).
  *
- * Typed exports live in `./proto.ts`. This file stays `@ts-nocheck` for the
- * hand-rolled field walkers; do not import it from outside this folder.
+ * Typed exports also re-exported from `./proto.ts`. Prefer importing via
+ * `./proto.ts` from outside this folder.
  */
-// @ts-nocheck
 
 export const CONNECT_END_STREAM_FLAG = 0b00000010;
 
-export function frameConnectProto(protoBytes, flags = 0) {
+type BytesLike = Buffer | Uint8Array;
+/** Loose protobuf JSON-shaped records used at the encode/decode boundary. */
+type ProtoRecord = Record<string, unknown>;
+type EncodeOpts = { force?: boolean };
+type MessageOpts = { omitEmpty?: boolean };
+type DecodedField = {
+	fieldNo: number;
+	wire: number;
+	value?: number | bigint;
+	bytes?: Buffer;
+};
+
+export function frameConnectProto(protoBytes: BytesLike, flags = 0): Buffer {
 	const payload = Buffer.isBuffer(protoBytes) ? protoBytes : Buffer.from(protoBytes);
 	const frame = Buffer.alloc(5 + payload.length);
 	frame[0] = flags;
@@ -26,11 +37,11 @@ const WIRE_64 = 1;
 const WIRE_LEN = 2;
 const WIRE_32 = 5;
 
-function concat(chunks) {
-	return Buffer.concat(chunks.filter(c => c?.length));
+function concat(chunks: Array<Buffer | undefined | null>): Buffer {
+	return Buffer.concat(chunks.filter((c): c is Buffer => Boolean(c?.length)));
 }
 
-function encodeVarint(value) {
+function encodeVarint(value: number | bigint): Buffer {
 	let n = typeof value === "bigint" ? value : BigInt(value >>> 0);
 	if (typeof value === "number" && value < 0) {
 		n = BigInt(value) & 0xffffffffn;
@@ -44,25 +55,25 @@ function encodeVarint(value) {
 	return Buffer.from(out);
 }
 
-function encodeTag(fieldNo, wire) {
+function encodeTag(fieldNo: number, wire: number): Buffer {
 	return encodeVarint((fieldNo << 3) | wire);
 }
 
-function encodeString(fieldNo, s, { force = false }: { force?: boolean } = {}) {
+function encodeString(fieldNo: number, s: unknown, { force = false }: EncodeOpts = {}): Buffer {
 	if (s == null) return Buffer.alloc(0);
 	if (!force && s === "") return Buffer.alloc(0);
 	const payload = Buffer.from(String(s), "utf8");
 	return concat([encodeTag(fieldNo, WIRE_LEN), encodeVarint(payload.length), payload]);
 }
 
-function encodeBool(fieldNo, v, { force = false }: { force?: boolean } = {}) {
+function encodeBool(fieldNo: number, v: unknown, { force = false }: EncodeOpts = {}): Buffer {
 	if (v == null) return Buffer.alloc(0);
 	if (!force && v === false) return Buffer.alloc(0);
 	return concat([encodeTag(fieldNo, WIRE_VARINT), encodeVarint(v ? 1 : 0)]);
 }
 
-function encodeInt32(fieldNo, n, { force = false }: { force?: boolean } = {}) {
-	if (n == null || !Number.isFinite(n)) return Buffer.alloc(0);
+function encodeInt32(fieldNo: number, n: unknown, { force = false }: EncodeOpts = {}): Buffer {
+	if (typeof n !== "number" || !Number.isFinite(n)) return Buffer.alloc(0);
 	const v = n | 0;
 	if (!force && v === 0) return Buffer.alloc(0);
 	if (v < 0) {
@@ -79,33 +90,37 @@ function encodeInt32(fieldNo, n, { force = false }: { force?: boolean } = {}) {
 	return concat([encodeTag(fieldNo, WIRE_VARINT), encodeVarint(v)]);
 }
 
-function encodeEnum(fieldNo, n, { force = false }: { force?: boolean } = {}) {
+function encodeEnum(fieldNo: number, n: unknown, { force = false }: EncodeOpts = {}): Buffer {
 	return encodeInt32(fieldNo, n, { force });
 }
 
-function encodeFloat(fieldNo, n) {
-	if (n == null || !Number.isFinite(n)) return Buffer.alloc(0);
+function encodeFloat(fieldNo: number, n: unknown): Buffer {
+	if (typeof n !== "number" || !Number.isFinite(n)) return Buffer.alloc(0);
 	const buf = Buffer.alloc(4);
 	buf.writeFloatLE(n, 0);
 	return concat([encodeTag(fieldNo, WIRE_32), buf]);
 }
 
-function encodeDouble(fieldNo, n, { force = false }: { force?: boolean } = {}) {
-	if (n == null || !Number.isFinite(n)) return Buffer.alloc(0);
+function encodeDouble(fieldNo: number, n: unknown, { force = false }: EncodeOpts = {}): Buffer {
+	if (typeof n !== "number" || !Number.isFinite(n)) return Buffer.alloc(0);
 	if (!force && n === 0) return Buffer.alloc(0);
 	const buf = Buffer.alloc(8);
 	buf.writeDoubleLE(n, 0);
 	return concat([encodeTag(fieldNo, WIRE_64), buf]);
 }
 
-function encodeMessage(fieldNo, bytes, { omitEmpty = true }: { omitEmpty?: boolean } = {}) {
+function encodeMessage(
+	fieldNo: number,
+	bytes: BytesLike | undefined | null,
+	{ omitEmpty = true }: MessageOpts = {},
+): Buffer {
 	if (!bytes) return Buffer.alloc(0);
 	const buf = Buffer.isBuffer(bytes) ? bytes : Buffer.from(bytes);
 	if (omitEmpty && buf.length === 0) return Buffer.alloc(0);
 	return concat([encodeTag(fieldNo, WIRE_LEN), encodeVarint(buf.length), buf]);
 }
 
-function encodeValue(js) {
+function encodeValue(js: unknown): Buffer {
 	if (js === null || js === undefined) {
 		return encodeEnum(1, 0, { force: true });
 	}
@@ -128,17 +143,17 @@ function encodeValue(js) {
 	return encodeString(3, String(js), { force: true });
 }
 
-function encodeListValue(arr) {
-	const chunks = [];
+function encodeListValue(arr: readonly unknown[]): Buffer {
+	const chunks: Buffer[] = [];
 	for (const item of arr) {
 		chunks.push(encodeMessage(1, encodeValue(item), { omitEmpty: false }));
 	}
 	return concat(chunks);
 }
 
-function encodeStruct(obj) {
+function encodeStruct(obj: unknown): Buffer {
 	if (!obj || typeof obj !== "object" || Array.isArray(obj)) return Buffer.alloc(0);
-	const chunks = [];
+	const chunks: Buffer[] = [];
 	for (const [key, val] of Object.entries(obj)) {
 		const entry = concat([
 			encodeString(1, key, { force: true }),
@@ -149,47 +164,55 @@ function encodeStruct(obj) {
 	return concat(chunks);
 }
 
-function encodeParameter(p) {
+function encodeParameter(p: ProtoRecord): Buffer {
 	return concat([encodeString(1, p.id || ""), encodeString(2, p.value == null ? "" : String(p.value))]);
 }
 
-function encodeRequestedModel(rm) {
+function encodeRequestedModel(rm: unknown): Buffer {
 	if (!rm || typeof rm !== "object") return Buffer.alloc(0);
-	const chunks = [encodeString(1, rm.modelId || rm.model_id || ""), encodeBool(2, Boolean(rm.maxMode ?? rm.max_mode))];
-	const params = rm.parameters || [];
-	for (const p of params) chunks.push(encodeMessage(3, encodeParameter(p)));
-	if (rm.builtInModel || rm.built_in_model) chunks.push(encodeBool(4, true));
-	if (rm.isVariantStringRepresentation || rm.is_variant_string_representation) {
+	const rec = rm as ProtoRecord;
+	const chunks = [
+		encodeString(1, rec.modelId || rec.model_id || ""),
+		encodeBool(2, Boolean(rec.maxMode ?? rec.max_mode)),
+	];
+	const params = Array.isArray(rec.parameters) ? rec.parameters : [];
+	for (const p of params) chunks.push(encodeMessage(3, encodeParameter(p as ProtoRecord)));
+	if (rec.builtInModel || rec.built_in_model) chunks.push(encodeBool(4, true));
+	if (rec.isVariantStringRepresentation || rec.is_variant_string_representation) {
 		chunks.push(encodeBool(5, true));
 	}
 	return concat(chunks);
 }
 
-function encodeModelConfig(cfg) {
+function encodeModelConfig(cfg: unknown): Buffer {
 	if (!cfg || typeof cfg !== "object") return Buffer.alloc(0);
-	const chunks = [];
-	if (typeof cfg.maxTokens === "number") chunks.push(encodeInt32(1, cfg.maxTokens, { force: true }));
-	else if (typeof cfg.max_tokens === "number") chunks.push(encodeInt32(1, cfg.max_tokens, { force: true }));
-	if (typeof cfg.temperature === "number") chunks.push(encodeFloat(2, cfg.temperature));
-	if (typeof cfg.topP === "number") chunks.push(encodeFloat(3, cfg.topP));
-	else if (typeof cfg.top_p === "number") chunks.push(encodeFloat(3, cfg.top_p));
-	const stops = cfg.stopSequences || cfg.stop_sequences || [];
-	for (const s of stops) {
-		if (typeof s === "string") chunks.push(encodeString(4, s));
+	const rec = cfg as ProtoRecord;
+	const chunks: Buffer[] = [];
+	if (typeof rec.maxTokens === "number") chunks.push(encodeInt32(1, rec.maxTokens, { force: true }));
+	else if (typeof rec.max_tokens === "number") chunks.push(encodeInt32(1, rec.max_tokens, { force: true }));
+	if (typeof rec.temperature === "number") chunks.push(encodeFloat(2, rec.temperature));
+	if (typeof rec.topP === "number") chunks.push(encodeFloat(3, rec.topP));
+	else if (typeof rec.top_p === "number") chunks.push(encodeFloat(3, rec.top_p));
+	const stops = rec.stopSequences || rec.stop_sequences || [];
+	if (Array.isArray(stops)) {
+		for (const s of stops) {
+			if (typeof s === "string") chunks.push(encodeString(4, s));
+		}
 	}
 	return concat(chunks);
 }
 
-function encodeCustomToolFormat(fmt) {
+function encodeCustomToolFormat(fmt: unknown): Buffer {
 	if (!fmt || typeof fmt !== "object") return Buffer.alloc(0);
+	const rec = fmt as ProtoRecord;
 	return concat([
-		encodeString(1, fmt.type || ""),
-		encodeString(2, fmt.definition || ""),
-		encodeString(3, fmt.syntax || ""),
+		encodeString(1, rec.type || ""),
+		encodeString(2, rec.definition || ""),
+		encodeString(3, rec.syntax || ""),
 	]);
 }
 
-function encodeTool(tool) {
+function encodeTool(tool: ProtoRecord): Buffer {
 	const chunks = [
 		encodeString(1, tool.name || ""),
 		encodeString(2, tool.description || ""),
@@ -201,7 +224,7 @@ function encodeTool(tool) {
 }
 
 /** InferenceNamedProviderDefinedTool — field 3 (distinct from field 2 agent tools). */
-function encodeNamedProviderDefinedTool(tool) {
+function encodeNamedProviderDefinedTool(tool: ProtoRecord): Buffer {
 	const chunks = [
 		encodeString(1, tool.name || "", { force: true }),
 		encodeString(2, tool.id || "", { force: true }),
@@ -214,7 +237,7 @@ function encodeNamedProviderDefinedTool(tool) {
 	return concat(chunks);
 }
 
-function encodeToolCall(tc) {
+function encodeToolCall(tc: ProtoRecord): Buffer {
 	const chunks = [
 		encodeString(1, tc.toolCallId || tc.tool_call_id || ""),
 		encodeString(2, tc.toolName || tc.tool_name || ""),
@@ -234,7 +257,7 @@ function encodeToolCall(tc) {
 	return concat(chunks);
 }
 
-function encodeReasoningPart(p) {
+function encodeReasoningPart(p: ProtoRecord): Buffer {
 	return concat([
 		encodeBool(1, Boolean(p.isRedacted || p.is_redacted)),
 		encodeString(2, p.text || ""),
@@ -246,35 +269,40 @@ function encodeReasoningPart(p) {
 	]);
 }
 
-function encodeTextContentPart(p) {
+function encodeTextContentPart(p: ProtoRecord): Buffer {
 	return encodeString(1, p.text || "", { force: true });
 }
 
-function encodeImageContentPart(p) {
+function encodeImageContentPart(p: ProtoRecord): Buffer {
 	return concat([
 		encodeString(1, p.data || "", { force: true }),
 		p.mimeType || p.mime_type ? encodeString(2, p.mimeType || p.mime_type) : Buffer.alloc(0),
 	]);
 }
 
-function encodeContentPart(p) {
+function encodeContentPart(p: unknown): Buffer {
 	if (!p || typeof p !== "object") return Buffer.alloc(0);
-	if (p.type === "image" || p.image) {
-		const image = p.image && typeof p.image === "object" ? p.image : p;
+	const rec = p as ProtoRecord;
+	if (rec.type === "image" || rec.image) {
+		const image = rec.image && typeof rec.image === "object" ? (rec.image as ProtoRecord) : rec;
 		return encodeMessage(2, encodeImageContentPart(image));
 	}
-	const text = p.text && typeof p.text === "object" ? p.text : p;
+	const text = rec.text && typeof rec.text === "object" ? (rec.text as ProtoRecord) : rec;
 	return encodeMessage(1, encodeTextContentPart(text));
 }
 
-function encodeContentParts(partsMsg) {
-	const parts = Array.isArray(partsMsg) ? partsMsg : partsMsg?.parts || [];
-	const chunks = [];
-	for (const p of parts) chunks.push(encodeMessage(1, encodeContentPart(p)));
+function encodeContentParts(partsMsg: unknown): Buffer {
+	const parts = Array.isArray(partsMsg)
+		? partsMsg
+		: partsMsg && typeof partsMsg === "object" && Array.isArray((partsMsg as ProtoRecord).parts)
+			? ((partsMsg as ProtoRecord).parts as unknown[])
+			: [];
+	const chunks: Buffer[] = [];
+	for (const p of parts) chunks.push(encodeMessage(1, encodeContentPart(p as ProtoRecord)));
 	return concat(chunks);
 }
 
-function encodeToolResultPart(p) {
+function encodeToolResultPart(p: ProtoRecord): Buffer {
 	const chunks = [
 		encodeString(1, p.toolCallId || p.tool_call_id || ""),
 		encodeString(2, p.toolName || p.tool_name || ""),
@@ -292,36 +320,50 @@ function encodeToolResultPart(p) {
 	return concat(chunks);
 }
 
-function encodeToolContent(tc) {
-	const parts = tc?.parts || [];
-	const chunks = [];
-	for (const p of parts) chunks.push(encodeMessage(1, encodeToolResultPart(p)));
+function encodeToolContent(tc: ProtoRecord | undefined | null): Buffer {
+	const parts = Array.isArray(tc?.parts) ? (tc.parts as unknown[]) : [];
+	const chunks: Buffer[] = [];
+	for (const p of parts) chunks.push(encodeMessage(1, encodeToolResultPart(p as ProtoRecord)));
 	return concat(chunks);
 }
 
-function encodeCoreMessage(msg) {
+function encodeCoreMessage(msg: ProtoRecord): Buffer {
 	const role = typeof msg.role === "number" ? msg.role : 0;
 	const chunks = [encodeEnum(1, role)];
 	if (msg.toolContent || msg.tool_content) {
-		chunks.push(encodeMessage(6, encodeToolContent(msg.toolContent || msg.tool_content), { omitEmpty: false }));
+		chunks.push(
+			encodeMessage(6, encodeToolContent((msg.toolContent || msg.tool_content) as ProtoRecord), {
+				omitEmpty: false,
+			}),
+		);
 	} else if (msg.parts) {
 		chunks.push(encodeMessage(3, encodeContentParts(msg.parts), { omitEmpty: false }));
 	} else if (typeof msg.text === "string") {
 		chunks.push(encodeString(2, msg.text, { force: true }));
 	}
-	const toolCalls = msg.toolCalls || msg.tool_calls || [];
-	for (const tc of toolCalls) chunks.push(encodeMessage(4, encodeToolCall(tc)));
-	const reasoning = msg.reasoningParts || msg.reasoning_parts || [];
-	for (const rp of reasoning) chunks.push(encodeMessage(7, encodeReasoningPart(rp)));
+	const toolCalls = Array.isArray(msg.toolCalls) ? msg.toolCalls : Array.isArray(msg.tool_calls) ? msg.tool_calls : [];
+	for (const tc of toolCalls) chunks.push(encodeMessage(4, encodeToolCall(tc as ProtoRecord)));
+	const reasoning = Array.isArray(msg.reasoningParts)
+		? msg.reasoningParts
+		: Array.isArray(msg.reasoning_parts)
+			? msg.reasoning_parts
+			: [];
+	for (const rp of reasoning) chunks.push(encodeMessage(7, encodeReasoningPart(rp as ProtoRecord)));
 	return concat(chunks);
 }
 
-export function encodeInferenceStreamRequest(req) {
-	const chunks = [];
-	for (const m of req.messages || []) chunks.push(encodeMessage(1, encodeCoreMessage(m)));
-	for (const t of req.tools || []) chunks.push(encodeMessage(2, encodeTool(t)));
-	const providerTools = req.providerDefinedTools || req.provider_defined_tools || [];
-	for (const t of providerTools) chunks.push(encodeMessage(3, encodeNamedProviderDefinedTool(t)));
+export function encodeInferenceStreamRequest(req: ProtoRecord): Buffer {
+	const chunks: Buffer[] = [];
+	const messages = Array.isArray(req.messages) ? req.messages : [];
+	for (const m of messages) chunks.push(encodeMessage(1, encodeCoreMessage(m as ProtoRecord)));
+	const tools = Array.isArray(req.tools) ? req.tools : [];
+	for (const t of tools) chunks.push(encodeMessage(2, encodeTool(t as ProtoRecord)));
+	const providerTools = Array.isArray(req.providerDefinedTools)
+		? req.providerDefinedTools
+		: Array.isArray(req.provider_defined_tools)
+			? req.provider_defined_tools
+			: [];
+	for (const t of providerTools) chunks.push(encodeMessage(3, encodeNamedProviderDefinedTool(t as ProtoRecord)));
 	const modelConfig = req.modelConfig || req.model_config;
 	if (modelConfig) chunks.push(encodeMessage(4, encodeModelConfig(modelConfig)));
 	const invocationId = req.invocationId || req.invocation_id;
@@ -367,7 +409,7 @@ export function encodeInferenceStreamRequest(req) {
 	return concat(chunks);
 }
 
-function decodeVarint(buf, pos) {
+function decodeVarint(buf: Buffer, pos: number): [number | bigint, number] {
 	let n = 0n;
 	let shift = 0n;
 	while (pos < buf.length) {
@@ -383,9 +425,9 @@ function decodeVarint(buf, pos) {
 	throw new Error("truncated varint");
 }
 
-function decodeFields(buf) {
+function decodeFields(buf: BytesLike | undefined | null): DecodedField[] {
 	const bytes = Buffer.isBuffer(buf) ? buf : Buffer.from(buf || []);
-	const fields = [];
+	const fields: DecodedField[] = [];
 	let pos = 0;
 	while (pos < bytes.length) {
 		const [tag, p1] = decodeVarint(bytes, pos);
@@ -422,31 +464,32 @@ function decodeFields(buf) {
 	return fields;
 }
 
-export function fieldNumbers(buf) {
+export function fieldNumbers(buf: BytesLike): number[] {
 	return decodeFields(buf).map(f => f.fieldNo);
 }
 
-function asString(f) {
+function asString(f: DecodedField | undefined): string {
 	return f?.bytes ? Buffer.from(f.bytes).toString("utf8") : "";
 }
 
-function asBool(f) {
+function asBool(f: DecodedField | undefined): boolean {
 	if (!f) return false;
 	if (f.wire === WIRE_VARINT) return Boolean(f.value);
 	return false;
 }
 
-function asInt(f) {
+function asInt(f: DecodedField | undefined): number {
 	if (!f) return 0;
 	if (f.wire === WIRE_VARINT) {
 		const v = f.value;
-		return typeof v === "bigint" ? Number(v) : v;
+		if (typeof v === "bigint") return Number(v);
+		return typeof v === "number" ? v : 0;
 	}
 	return 0;
 }
 
 /** Require a present field to be length-delimited string; missing → "". */
-function requireStringField(f, label) {
+function requireStringField(f: DecodedField | undefined, label: string): string {
 	if (!f) return "";
 	if (f.wire !== WIRE_LEN || !f.bytes) {
 		throw new Error(`protobuf ${label} must be length-delimited string`);
@@ -455,7 +498,7 @@ function requireStringField(f, label) {
 }
 
 /** Require a present field to be varint bool; missing → false. */
-function requireBoolField(f, label) {
+function requireBoolField(f: DecodedField | undefined, label: string): boolean {
 	if (!f) return false;
 	if (f.wire !== WIRE_VARINT) {
 		throw new Error(`protobuf ${label} must be varint`);
@@ -464,65 +507,71 @@ function requireBoolField(f, label) {
 }
 
 /** Require a present field to be varint int; missing → 0. */
-function requireIntField(f, label) {
+function requireIntField(f: DecodedField | undefined, label: string): number {
 	if (!f) return 0;
 	if (f.wire !== WIRE_VARINT) {
 		throw new Error(`protobuf ${label} must be varint`);
 	}
 	const v = f.value;
-	return typeof v === "bigint" ? Number(v) : v;
+	if (typeof v === "bigint") return Number(v);
+	return typeof v === "number" ? v : 0;
 }
 
-function asFloat(f) {
+function asFloat(f: DecodedField | undefined): number {
 	if (!f?.bytes || f.bytes.length < 4) return 0;
 	return Buffer.from(f.bytes).readFloatLE(0);
 }
 
-function asDouble(f) {
+function asDouble(f: DecodedField | undefined): number {
 	if (!f?.bytes || f.bytes.length < 8) return 0;
 	return Buffer.from(f.bytes).readDoubleLE(0);
 }
 
-function first(fields, n) {
+function first(fields: readonly DecodedField[], n: number): DecodedField | undefined {
 	return fields.find(f => f.fieldNo === n);
 }
 
-function all(fields, n) {
+function all(fields: readonly DecodedField[], n: number): DecodedField[] {
 	return fields.filter(f => f.fieldNo === n);
 }
 
-function decodeValue(buf) {
+function fieldBytes(f: DecodedField | undefined): Buffer {
+	if (!f?.bytes) throw new Error("protobuf length-delimited field missing bytes");
+	return f.bytes;
+}
+
+function decodeValue(buf: BytesLike | undefined): unknown {
 	const fields = decodeFields(buf);
 	for (const f of fields) {
 		if (f.fieldNo === 1) return null;
 		if (f.fieldNo === 2) return asDouble(f);
 		if (f.fieldNo === 3) return asString(f);
 		if (f.fieldNo === 4) return asBool(f);
-		if (f.fieldNo === 5) return decodeStruct(f.bytes);
-		if (f.fieldNo === 6) return decodeListValue(f.bytes);
+		if (f.fieldNo === 5) return decodeStruct(fieldBytes(f));
+		if (f.fieldNo === 6) return decodeListValue(fieldBytes(f));
 	}
 	return undefined;
 }
 
-function decodeListValue(buf) {
-	return all(decodeFields(buf), 1).map(f => decodeValue(f.bytes));
+function decodeListValue(buf: BytesLike | undefined): unknown[] {
+	return all(decodeFields(buf), 1).map(f => decodeValue(fieldBytes(f)));
 }
 
-function decodeStruct(buf) {
-	const out = {};
+function decodeStruct(buf: BytesLike | undefined): ProtoRecord {
+	const out: ProtoRecord = {};
 	for (const entry of all(decodeFields(buf), 1)) {
-		const ef = decodeFields(entry.bytes);
+		const ef = decodeFields(fieldBytes(entry));
 		const key = asString(first(ef, 1));
 		const valField = first(ef, 2);
-		out[key] = valField ? decodeValue(valField.bytes) : undefined;
+		out[key] = valField ? decodeValue(fieldBytes(valField)) : undefined;
 	}
 	return out;
 }
 
-function decodeRequestedModel(buf) {
+function decodeRequestedModel(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
 	const parameters = all(fields, 3).map(f => {
-		const pf = decodeFields(f.bytes);
+		const pf = decodeFields(fieldBytes(f));
 		return { id: asString(first(pf, 1)), value: asString(first(pf, 2)) };
 	});
 	return {
@@ -534,9 +583,9 @@ function decodeRequestedModel(buf) {
 	};
 }
 
-function decodeModelConfig(buf) {
+function decodeModelConfig(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {};
+	const out: ProtoRecord = {};
 	const max = first(fields, 1);
 	if (max) out.maxTokens = asInt(max);
 	const temp = first(fields, 2);
@@ -548,16 +597,16 @@ function decodeModelConfig(buf) {
 	return out;
 }
 
-function decodeTool(buf) {
+function decodeTool(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {
+	const out: ProtoRecord = {
 		name: asString(first(fields, 1)),
 		description: asString(first(fields, 2)),
-		parameters: first(fields, 3) ? decodeStruct(first(fields, 3).bytes) : {},
+		parameters: first(fields, 3) ? decodeStruct(fieldBytes(first(fields, 3))) : {},
 	};
 	const custom = first(fields, 4);
 	if (custom) {
-		const cf = decodeFields(custom.bytes);
+		const cf = decodeFields(fieldBytes(custom));
 		out.customToolFormat = {
 			type: asString(first(cf, 1)),
 			definition: asString(first(cf, 2)),
@@ -567,31 +616,31 @@ function decodeTool(buf) {
 	return out;
 }
 
-function decodeNamedProviderDefinedTool(buf) {
+function decodeNamedProviderDefinedTool(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {
+	const out: ProtoRecord = {
 		name: asString(first(fields, 1)),
 		id: asString(first(fields, 2)),
 		type: asString(first(fields, 3)),
 	};
-	if (first(fields, 4)) out.options = decodeStruct(first(fields, 4).bytes);
+	if (first(fields, 4)) out.options = decodeStruct(fieldBytes(first(fields, 4)));
 	return out;
 }
 
-function decodeToolCall(buf) {
+function decodeToolCall(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {
+	const out: ProtoRecord = {
 		toolCallId: asString(first(fields, 1)),
 		toolName: asString(first(fields, 2)),
 	};
-	if (first(fields, 3)) out.args = decodeStruct(first(fields, 3).bytes);
+	if (first(fields, 3)) out.args = decodeStruct(fieldBytes(first(fields, 3)));
 	if (first(fields, 4)) out.rawToolCallArgs = asString(first(fields, 4));
 	return out;
 }
 
-function decodeReasoningPart(buf) {
+function decodeReasoningPart(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {
+	const out: ProtoRecord = {
 		isRedacted: asBool(first(fields, 1)),
 		text: asString(first(fields, 2)),
 	};
@@ -601,76 +650,76 @@ function decodeReasoningPart(buf) {
 	return out;
 }
 
-function decodeContentPart(buf) {
+function decodeContentPart(buf: BytesLike): ProtoRecord | undefined {
 	const fields = decodeFields(buf);
 	const text = first(fields, 1);
 	if (text) {
-		const tf = decodeFields(text.bytes);
+		const tf = decodeFields(fieldBytes(text));
 		return { type: "text", text: asString(first(tf, 1)) };
 	}
 	const image = first(fields, 2);
 	if (image) {
-		const imgf = decodeFields(image.bytes);
-		const out = { type: "image", data: asString(first(imgf, 1)) };
+		const imgf = decodeFields(fieldBytes(image));
+		const out: ProtoRecord = { type: "image", data: asString(first(imgf, 1)) };
 		if (first(imgf, 2)) out.mimeType = asString(first(imgf, 2));
 		return out;
 	}
 	return undefined;
 }
 
-function decodeContentParts(buf) {
+function decodeContentParts(buf: BytesLike): { parts: ProtoRecord[] } {
 	return {
 		parts: all(decodeFields(buf), 1)
-			.map(f => decodeContentPart(f.bytes))
-			.filter(Boolean),
+			.map(f => decodeContentPart(fieldBytes(f)))
+			.filter((part): part is ProtoRecord => part !== undefined),
 	};
 }
 
-function decodeToolResultPart(buf) {
+function decodeToolResultPart(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {
+	const out: ProtoRecord = {
 		toolCallId: asString(first(fields, 1)),
 		toolName: asString(first(fields, 2)),
 	};
-	if (first(fields, 3)) out.result = decodeValue(first(fields, 3).bytes);
+	if (first(fields, 3)) out.result = decodeValue(fieldBytes(first(fields, 3)));
 	if (asBool(first(fields, 4))) out.isError = true;
 	const experimental = all(fields, 5)
-		.map(f => decodeContentPart(f.bytes))
-		.filter(Boolean);
+		.map(f => decodeContentPart(fieldBytes(f)))
+		.filter((part): part is ProtoRecord => part !== undefined);
 	if (experimental.length) out.experimentalContent = experimental;
 	return out;
 }
 
-function decodeToolContent(buf) {
-	return { parts: all(decodeFields(buf), 1).map(f => decodeToolResultPart(f.bytes)) };
+function decodeToolContent(buf: BytesLike): { parts: ProtoRecord[] } {
+	return { parts: all(decodeFields(buf), 1).map(f => decodeToolResultPart(fieldBytes(f))) };
 }
 
-function decodeCoreMessage(buf) {
+function decodeCoreMessage(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const msg = { role: asInt(first(fields, 1)) };
+	const msg: ProtoRecord = { role: asInt(first(fields, 1)) };
 	if (first(fields, 2)) msg.text = asString(first(fields, 2));
-	if (first(fields, 3)) msg.parts = decodeContentParts(first(fields, 3).bytes);
-	if (first(fields, 6)) msg.toolContent = decodeToolContent(first(fields, 6).bytes);
-	const tcs = all(fields, 4).map(f => decodeToolCall(f.bytes));
+	if (first(fields, 3)) msg.parts = decodeContentParts(fieldBytes(first(fields, 3)));
+	if (first(fields, 6)) msg.toolContent = decodeToolContent(fieldBytes(first(fields, 6)));
+	const tcs = all(fields, 4).map(f => decodeToolCall(fieldBytes(f)));
 	if (tcs.length) msg.toolCalls = tcs;
-	const rps = all(fields, 7).map(f => decodeReasoningPart(f.bytes));
+	const rps = all(fields, 7).map(f => decodeReasoningPart(fieldBytes(f)));
 	if (rps.length) msg.reasoningParts = rps;
 	return msg;
 }
 
-export function decodeInferenceStreamRequest(buf) {
+export function decodeInferenceStreamRequest(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {
-		messages: all(fields, 1).map(f => decodeCoreMessage(f.bytes)),
-		tools: all(fields, 2).map(f => decodeTool(f.bytes)),
+	const out: ProtoRecord = {
+		messages: all(fields, 1).map(f => decodeCoreMessage(fieldBytes(f))),
+		tools: all(fields, 2).map(f => decodeTool(fieldBytes(f))),
 		_fieldNumbers: fields.map(f => f.fieldNo),
 	};
-	const providerDefined = all(fields, 3).map(f => decodeNamedProviderDefinedTool(f.bytes));
+	const providerDefined = all(fields, 3).map(f => decodeNamedProviderDefinedTool(fieldBytes(f)));
 	if (providerDefined.length > 0) out.providerDefinedTools = providerDefined;
-	if (first(fields, 4)) out.modelConfig = decodeModelConfig(first(fields, 4).bytes);
+	if (first(fields, 4)) out.modelConfig = decodeModelConfig(fieldBytes(first(fields, 4)));
 	if (first(fields, 5)) out.modelId = asString(first(fields, 5));
 	if (first(fields, 6)) out.invocationId = asString(first(fields, 6));
-	if (first(fields, 7)) out.requestedModel = decodeRequestedModel(first(fields, 7).bytes);
+	if (first(fields, 7)) out.requestedModel = decodeRequestedModel(fieldBytes(first(fields, 7)));
 	if (first(fields, 8)) out.conversationId = asString(first(fields, 8));
 	if (first(fields, 9)) {
 		const names = all(fields, 9)
@@ -689,14 +738,14 @@ export function decodeInferenceStreamRequest(buf) {
 	return out;
 }
 
-function encodeTextStreamPart(p) {
+function encodeTextStreamPart(p: ProtoRecord): Buffer {
 	return concat([
 		encodeString(1, p.text || "", { force: Boolean(p.text === "") }),
 		encodeBool(2, Boolean(p.isFinal || p.is_final)),
 	]);
 }
 
-function encodeThinkingStreamPart(p) {
+function encodeThinkingStreamPart(p: ProtoRecord): Buffer {
 	return concat([
 		encodeString(1, p.text || ""),
 		p.signature ? encodeString(2, p.signature, { force: true }) : Buffer.alloc(0),
@@ -704,7 +753,7 @@ function encodeThinkingStreamPart(p) {
 	]);
 }
 
-function encodeToolCallStreamPart(p) {
+function encodeToolCallStreamPart(p: ProtoRecord): Buffer {
 	const chunks = [
 		encodeString(1, p.toolCallId || p.tool_call_id || ""),
 		encodeString(2, p.toolName || p.tool_name || ""),
@@ -716,7 +765,7 @@ function encodeToolCallStreamPart(p) {
 	return concat(chunks);
 }
 
-function encodeUsage(u) {
+function encodeUsage(u: ProtoRecord): Buffer {
 	return concat([
 		encodeInt32(1, u.promptTokens ?? u.prompt_tokens ?? 0),
 		encodeInt32(2, u.completionTokens ?? u.completion_tokens ?? 0),
@@ -726,7 +775,7 @@ function encodeUsage(u) {
 	]);
 }
 
-function encodeExtendedUsage(u) {
+function encodeExtendedUsage(u: ProtoRecord): Buffer {
 	return concat([
 		encodeInt32(1, u.inputTokens ?? u.input_tokens ?? 0),
 		encodeInt32(2, u.outputTokens ?? u.output_tokens ?? 0),
@@ -736,19 +785,24 @@ function encodeExtendedUsage(u) {
 	]);
 }
 
-function encodeResponseInfo(info) {
+function encodeResponseInfo(info: ProtoRecord): Buffer {
 	const chunks = [encodeString(1, info.id || ""), encodeString(2, info.model || "")];
 	const errMsg = info.errorMessage || info.error_message;
 	if (typeof errMsg === "string" && errMsg) chunks.push(encodeString(5, errMsg, { force: true }));
 	return concat(chunks);
 }
 
-function encodeInvocationIdInfo(info) {
-	const id = typeof info === "string" ? info : info.invocationId || info.invocation_id || "";
+function encodeInvocationIdInfo(info: unknown): Buffer {
+	const id =
+		typeof info === "string"
+			? info
+			: info && typeof info === "object"
+				? String((info as ProtoRecord).invocationId || (info as ProtoRecord).invocation_id || "")
+				: "";
 	return encodeString(1, id);
 }
 
-function encodeStreamError(err) {
+function encodeStreamError(err: ProtoRecord): Buffer {
 	return concat([
 		encodeString(1, err.message || ""),
 		encodeString(2, err.code || ""),
@@ -758,29 +812,31 @@ function encodeStreamError(err) {
 	]);
 }
 
-export function encodeInferenceStreamResponse(resp) {
-	if (resp.textPart || resp.text_part) return encodeMessage(1, encodeTextStreamPart(resp.textPart || resp.text_part));
-	if (resp.toolCallPart || resp.tool_call_part) {
-		return encodeMessage(2, encodeToolCallStreamPart(resp.toolCallPart || resp.tool_call_part));
+export function encodeInferenceStreamResponse(resp: ProtoRecord): Buffer {
+	if (resp.textPart || resp.text_part) {
+		return encodeMessage(1, encodeTextStreamPart((resp.textPart || resp.text_part) as ProtoRecord));
 	}
-	if (resp.usage) return encodeMessage(3, encodeUsage(resp.usage));
+	if (resp.toolCallPart || resp.tool_call_part) {
+		return encodeMessage(2, encodeToolCallStreamPart((resp.toolCallPart || resp.tool_call_part) as ProtoRecord));
+	}
+	if (resp.usage) return encodeMessage(3, encodeUsage(resp.usage as ProtoRecord));
 	if (resp.responseInfo || resp.response_info) {
-		return encodeMessage(4, encodeResponseInfo(resp.responseInfo || resp.response_info));
+		return encodeMessage(4, encodeResponseInfo((resp.responseInfo || resp.response_info) as ProtoRecord));
 	}
 	if (resp.extendedUsage || resp.extended_usage) {
-		return encodeMessage(5, encodeExtendedUsage(resp.extendedUsage || resp.extended_usage));
+		return encodeMessage(5, encodeExtendedUsage((resp.extendedUsage || resp.extended_usage) as ProtoRecord));
 	}
 	if (resp.invocationId || resp.invocation_id) {
 		return encodeMessage(7, encodeInvocationIdInfo(resp.invocationId || resp.invocation_id));
 	}
-	if (resp.error) return encodeMessage(8, encodeStreamError(resp.error));
+	if (resp.error) return encodeMessage(8, encodeStreamError(resp.error as ProtoRecord));
 	if (resp.thinkingPart || resp.thinking_part) {
-		return encodeMessage(9, encodeThinkingStreamPart(resp.thinkingPart || resp.thinking_part));
+		return encodeMessage(9, encodeThinkingStreamPart((resp.thinkingPart || resp.thinking_part) as ProtoRecord));
 	}
 	return Buffer.alloc(0);
 }
 
-function decodeTextPart(buf) {
+function decodeTextPart(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
 	return {
 		text: requireStringField(first(fields, 1), "textPart.text"),
@@ -788,9 +844,9 @@ function decodeTextPart(buf) {
 	};
 }
 
-function decodeThinkingPart(buf) {
+function decodeThinkingPart(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {
+	const out: ProtoRecord = {
 		text: requireStringField(first(fields, 1), "thinkingPart.text"),
 		isFinal: requireBoolField(first(fields, 3), "thinkingPart.isFinal"),
 	};
@@ -798,9 +854,9 @@ function decodeThinkingPart(buf) {
 	return out;
 }
 
-function decodeToolCallPart(buf) {
+function decodeToolCallPart(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {
+	const out: ProtoRecord = {
 		toolCallId: requireStringField(first(fields, 1), "toolCallPart.toolCallId"),
 		toolName: requireStringField(first(fields, 2), "toolCallPart.toolName"),
 		args: requireStringField(first(fields, 3), "toolCallPart.args"),
@@ -810,7 +866,7 @@ function decodeToolCallPart(buf) {
 	return out;
 }
 
-function decodeUsage(buf) {
+function decodeUsage(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
 	return {
 		promptTokens: requireIntField(first(fields, 1), "usage.promptTokens"),
@@ -819,7 +875,7 @@ function decodeUsage(buf) {
 	};
 }
 
-function decodeExtendedUsage(buf) {
+function decodeExtendedUsage(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
 	return {
 		inputTokens: requireIntField(first(fields, 1), "extendedUsage.inputTokens"),
@@ -830,9 +886,9 @@ function decodeExtendedUsage(buf) {
 	};
 }
 
-function decodeResponseInfo(buf) {
+function decodeResponseInfo(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {
+	const out: ProtoRecord = {
 		id: requireStringField(first(fields, 1), "responseInfo.id"),
 		model: requireStringField(first(fields, 2), "responseInfo.model"),
 	};
@@ -840,12 +896,12 @@ function decodeResponseInfo(buf) {
 	return out;
 }
 
-function decodeInvocationId(buf) {
+function decodeInvocationId(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
 	return { invocationId: requireStringField(first(fields, 1), "invocationId.invocationId") };
 }
 
-function decodeError(buf) {
+function decodeError(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
 	return {
 		message: requireStringField(first(fields, 1), "error.message"),
@@ -857,16 +913,16 @@ function decodeError(buf) {
 }
 
 /** Known InferenceStreamResponse oneofs are length-delimited messages. */
-function requireLenBytes(f, label) {
+function requireLenBytes(f: DecodedField, label: string): Buffer {
 	if (f.wire !== WIRE_LEN || !f.bytes) {
 		throw new Error(`protobuf field ${f.fieldNo} (${label}) must be length-delimited`);
 	}
 	return f.bytes;
 }
 
-export function decodeInferenceStreamResponse(buf) {
+export function decodeInferenceStreamResponse(buf: BytesLike): ProtoRecord {
 	const fields = decodeFields(buf);
-	const out = {};
+	const out: ProtoRecord = {};
 	for (const f of fields) {
 		if (f.fieldNo === 1) out.textPart = decodeTextPart(requireLenBytes(f, "textPart"));
 		else if (f.fieldNo === 2) out.toolCallPart = decodeToolCallPart(requireLenBytes(f, "toolCallPart"));
@@ -876,7 +932,7 @@ export function decodeInferenceStreamResponse(buf) {
 		else if (f.fieldNo === 6) {
 			const mf = decodeFields(requireLenBytes(f, "providerMetadata"));
 			const meta = first(mf, 1);
-			out.providerMetadata = { metadata: meta ? decodeStruct(meta.bytes) : {} };
+			out.providerMetadata = { metadata: meta ? decodeStruct(fieldBytes(meta)) : {} };
 		} else if (f.fieldNo === 7) out.invocationId = decodeInvocationId(requireLenBytes(f, "invocationId"));
 		else if (f.fieldNo === 8) out.error = decodeError(requireLenBytes(f, "error"));
 		else if (f.fieldNo === 9) out.thinkingPart = decodeThinkingPart(requireLenBytes(f, "thinkingPart"));

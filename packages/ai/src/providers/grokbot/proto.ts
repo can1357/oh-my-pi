@@ -1,6 +1,6 @@
 /**
  * Typed surface for Grok Bot InferenceService Stream protobuf helpers.
- * Codec internals live in `proto-codec.ts` under `@ts-nocheck` (hand-rolled wire).
+ * Codec internals live in `proto-codec.ts` (hand-rolled wire, fully typed).
  */
 import * as codec from "./proto-codec";
 

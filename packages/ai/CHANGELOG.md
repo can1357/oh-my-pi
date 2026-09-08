@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Grok Bot protobuf codec is fully typed (removed file-wide `@ts-nocheck`).
 - Grok Bot legacy matrix derives sand parameter ids and effort from live catalog + buildModel policy instead of hard-coded per-model tables.
 - Block Grok Bot JWT remint/replay after no-tool events were already published live
 - Remint after start-only Connect `unauthenticated` (no published content) while keeping a single start event

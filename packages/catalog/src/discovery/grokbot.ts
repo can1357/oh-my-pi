@@ -370,19 +370,11 @@ function collectEffortValues(
 	for (const level of THINKING_EFFORTS) {
 		if (values.has(level)) ordered.push(level);
 	}
-	// Common ladder only when the server advertised the param with no values at
-	// all. Nonempty unrecognized values (e.g. only `adaptive`) must not invent
-	// low/medium/high/xhigh the upstream never offered.
-	if (
-		ordered.length === 0 &&
-		values.size === 0 &&
-		(parameterIds.includes("effort") || parameterIds.includes("reasoning"))
-	) {
-		return {
-			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-			unrecognizedEffortOnly: false,
-		};
-	}
+	// Leave the ladder empty when the server advertised the param with no
+	// values — reviewed fallbacks belong in `providers/grokbot.kdl` via
+	// buildModel, not an invented low/medium/high/xhigh vocabulary here.
+	// Nonempty unrecognized values (e.g. only `adaptive`) stay empty too so
+	// preserve-authored-thinking can block KDL backfill.
 	return { efforts: ordered, unrecognizedEffortOnly: ordered.length === 0 && values.size > 0 };
 }
 

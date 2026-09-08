@@ -464,7 +464,13 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(adaptive?.thinking).toEqual({ mode: "effort", efforts: [] });
 		const emptyValues = models.find(m => m.id === "effort-param-no-values");
 		expect(emptyValues?.sandParameterIds).toEqual(["effort"]);
-		expect([...((emptyValues?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual([
+		// Param advertised with no values: leave ladder empty for KDL to fill.
+		expect(emptyValues?.thinking).toBeUndefined();
+		expect(emptyValues?.reasoning).toBe(true);
+		// Without a model-specific thinking-efforts rule, buildModel must not invent.
+		expect(buildModel(emptyValues!).thinking).toBeUndefined();
+		// Reviewed KDL still fills the offline grok-4.6 seed ladder.
+		expect(buildModel(buildGrokbotStaticSeed().find(m => m.id === "grok-4.6")!).thinking?.efforts).toEqual([
 			"low",
 			"medium",
 			"high",
