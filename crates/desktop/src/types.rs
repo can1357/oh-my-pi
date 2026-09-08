@@ -252,6 +252,7 @@ pub struct AxQuery {
 	/// Maximum results to return; defaults to 100 and is capped at 5,000.
 	pub limit: Option<u32>,
 }
+
 /// Capture or input destination within a desktop session.
 #[derive(Clone, Debug, Eq, IntoStaticStr, PartialEq)]
 #[strum(serialize_all = "lowercase", const_into_str)]

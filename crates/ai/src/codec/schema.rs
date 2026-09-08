@@ -12,6 +12,7 @@ pub enum SchemaDialect {
 	/// Responses function and response schemas.
 	OpenAiResponses,
 }
+
 /// Typed reason why requested strict enforcement was not emitted.
 #[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
 #[strum(const_into_str)]
