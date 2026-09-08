@@ -827,6 +827,32 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(notice).not.toContain("artifact://");
 	});
 
+	test("column-cap notice advertises the mirrored artifact when one exists", async () => {
+		// Regression for #10877: when the per-line cap drops bytes and the raw
+		// stream was mirrored into an output artifact, the notice must point at
+		// that artifact — matching the tail-truncation notice's recovery pointer.
+		const summary = {
+			output: "a\nb\nc\n" + "x".repeat(8) + "…\nd",
+			truncated: false,
+			totalLines: 5,
+			totalBytes: 100,
+			outputLines: 5,
+			outputBytes: 20,
+			columnTruncatedLines: 1,
+			columnDroppedBytes: 42,
+			columnMax: 8,
+			artifactId: "77",
+		};
+
+		const meta = outputMeta().truncationFromSummary(summary, { direction: "tail" }).get();
+		expect(meta?.truncation).toBeUndefined();
+		expect(meta?.limits?.columnTruncated).toEqual({ maxColumn: 8, artifactId: "77" });
+
+		const notice = formatOutputNotice(meta);
+		expect(notice).toContain("Some lines truncated to 8 chars");
+		expect(notice).toContain("Read artifact://77 for full output");
+	});
+
 	test("persists per-line state across chunk boundaries", async () => {
 		const sink = new OutputSink({ maxColumns: 4, spillThreshold: 1000 });
 		await sink.push("ab"); // 2 bytes into the current line
