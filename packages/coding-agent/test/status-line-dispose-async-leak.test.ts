@@ -21,8 +21,16 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
+import { __resetDirsFromEnvForTests } from "@oh-my-pi/pi-utils";
+import {
+	beginSettingsTest,
+	restoreEnvValue,
+	restoreSettingsTestState,
+	type SettingsTestState,
+} from "./helpers/settings-test-state";
 
+const originalOmpProfile = process.env.OMP_PROFILE;
+const originalPiProfile = process.env.PI_PROFILE;
 let settingsState: SettingsTestState | undefined;
 
 beforeEach(async () => {
@@ -55,6 +63,12 @@ beforeEach(async () => {
 afterEach(() => {
 	restoreSettingsTestState(settingsState);
 	settingsState = undefined;
+	// Profile is process-wide; restore the raw environment after settings-state
+	// cleanup so `setAgentDir()` inside the helper does not leave subsequent
+	// files running under the default profile (P1 review: restore active profile).
+	restoreEnvValue("OMP_PROFILE", originalOmpProfile);
+	restoreEnvValue("PI_PROFILE", originalPiProfile);
+	__resetDirsFromEnvForTests();
 });
 
 function makeSession() {
