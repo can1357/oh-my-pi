@@ -142,6 +142,23 @@ export function readLikeShellCommand(command: string): boolean {
 	return /(?:^|[;&|\n]\s*)(?:cat|head|sed)\b/.test(cmd);
 }
 
+/**
+ * Bash smoke must actually echo/printf the ping — not merely mention it in a
+ * comment (`true # tools-pong-…`) that `runOneTool` would then echo back.
+ */
+export function echoLikeShellCommand(command: string, ping: string): boolean {
+	if (!ping) return false;
+	const cmd = command.trim();
+	if (!cmd) return false;
+	const withoutComments = cmd
+		.split("\n")
+		.map(line => line.replace(/(^|[\t ;&|])#[^\n]*/g, "$1"))
+		.join("\n")
+		.trim();
+	if (!withoutComments.includes(ping)) return false;
+	return /(?:^|[;&|\n]\s*)(?:echo|printf)\b/.test(withoutComments);
+}
+
 export function expectedReadPath(safeId: string): string {
 	return `notes/grokbot-read-${safeId}.txt`;
 }
@@ -184,7 +201,7 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 	const name = call.name;
 	if (kind === "bash") {
 		if (!/^(bash|Shell|shell)$/i.test(name)) return false;
-		return shellCommandOf(call).includes(ping);
+		return echoLikeShellCommand(shellCommandOf(call), ping);
 	}
 	if (kind === "read") {
 		const path = expectedReadPath(safe);

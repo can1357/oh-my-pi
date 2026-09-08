@@ -14,11 +14,6 @@
 - Fixed worker subprocesses failing to declare themselves as worker hosts before dispatching selectors, which prevented nested thread worker spawns during `/usage` stats sync on multi-core systems.
 - Fixed `/usage` displaying a misleading generic database read failure when activity loading fails; the error detail is now sanitized, collapsed to a single line with shortened paths, and surfaced in the dashboard.
 - Advisor notes now report rate limiting accurately, blockers always interrupt even after a lower-severity note in the same update, and deferred notes flush when the primary run completes, including after advisor quota exhaustion ([#11062](https://github.com/can1357/oh-my-pi/issues/11062)).
-
-## [18.1.14] - 2026-09-07
-
-### Fixed
-
 - Bare `--model <alias>` selectors resolve through `Model.aliases` the same as `provider/<alias>` (e.g. Grok Bot legacy slugs).
 - Grok Bot discovery merges `models.yml` and runtime provider headers (a baseUrl-only runtime override no longer drops configured proxy/tenant headers).
 - `/grokbot` includes configured AuthStorage renewal credentials (`providers.grokbot.apiKey` / `--api-key`) when reporting Renewer status.
@@ -38,6 +33,7 @@
 - `--provider` alone no longer early-binds `--api-key` without `--model` / `--models` (keeps the missing-model CLI guard).
 - `--provider` with `--models` (no `--model`) no longer early-binds `--api-key` to that provider (session options ignore provider in that form).
 - Grok Bot catalog matrix text probes require the exact expected token (no loose `pong` match).
+- Grok Bot catalog matrix bash smoke requires an echo/printf of the ping (comment-only mentions fail).
 
 ## [18.1.14] - 2026-09-07
 

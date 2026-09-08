@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
 	classifyError,
+	echoLikeShellCommand,
 	expectedReadPath,
 	expectedWritePath,
 	evaluateToolFollowupText,
@@ -153,6 +154,14 @@ describe("toolSmokePrompt", () => {
 		expect(readLikeShellCommand("printf '%s\\n' x > notes/grokbot-write-x.txt")).toBe(false);
 	});
 
+	test("requires bash smoke commands to echo/printf the ping, not comment it", () => {
+		const ping = "tools-pong-bash-x";
+		expect(echoLikeShellCommand(`echo ${ping}`, ping)).toBe(true);
+		expect(echoLikeShellCommand(`printf '%s\\n' ${ping}`, ping)).toBe(true);
+		expect(echoLikeShellCommand(`true # ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo unrelated`, ping)).toBe(false);
+	});
+
 	test("rejects tool calls that only match by name", () => {
 		const id = "claude-opus-5-thinking-max";
 		const ping = "tools-pong-write-x";
@@ -180,6 +189,9 @@ describe("toolSmokePrompt", () => {
 		);
 		expect(matchesToolSmokeCall("bash", { name: "Shell", arguments: { command: `echo ${ping}` } }, ping, id)).toBe(
 			true,
+		);
+		expect(matchesToolSmokeCall("bash", { name: "Shell", arguments: { command: `true # ${ping}` } }, ping, id)).toBe(
+			false,
 		);
 		expect(
 			matchesToolSmokeCall(
