@@ -7,6 +7,10 @@
 - Task descriptions containing tabs no longer misalign or overflow task rows; tabs are expanded before measuring and rendering.
 - GitHub Copilot model-policy 403s (plan, model policy, org restriction) no longer delete stored credentials, so the provider stays listed in `/model` after a per-model access denial instead of disappearing until the next `/login` ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
 - `--provider`/`--model` with `--api-key` refreshes a cold credential-scoped catalog before model resolve so live-only ids are not missing on a fresh profile.
+### Added
+
+- Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
+
 ## [18.1.15] - 2026-09-08
 
 ### Added
@@ -14,6 +18,7 @@
 - Added `/grokbot` to show Grok Bot provider status (credentials/client; no secrets). Distinct from Cursor (`/login cursor`) and xAI / Grok CLI (`xai`, `xai-oauth`), with independent usage allowances. `/login grokbot` surfaces the host-install prompt for the Grok Bot system. Model lookup resolves Grok Bot `idAliases` (e.g. `grokbot/composer` → live `composer-2.5`) without separate catalog rows.
 - Documented Grok Bot one-shot text and tools probes, per-family tool wire, and the live AvailableModels matrix (`docs/grokbot.md`, `scripts/grokbot-catalog-matrix.ts`).
 - Grok Bot catalog matrix now smokes bash + read + write and retries HTTP 502/504 gateway flakes.
+- Added the `retry.waitForUsageReset` setting: when a provider reports usage-limit exhaustion with a reset time (5-hour or weekly quota windows on any provider), the session sleeps until the reset instead of failing fast past `retry.maxDelayMs`.
 - Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
 - Headless browser tabs now freeze when a turn settles so idle animated/WebGL pages stop burning CPU/GPU, resuming automatically on next use; tabs idle past `browser.idleCloseSec` (default 30 minutes) are closed. `persist: true` on `browser.open` opts a tab out of both ([#8246](https://github.com/can1357/oh-my-pi/issues/8246) by [@H4vC](https://github.com/H4vC)).
 
