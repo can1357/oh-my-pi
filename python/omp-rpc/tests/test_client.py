@@ -6,11 +6,13 @@ import os
 import shutil
 import signal
 import sys
+import subprocess
 import tempfile
 import textwrap
 import threading
 import time
 import unittest
+from unittest.mock import patch
 
 from omp_rpc import (
     AgentEndEvent,
@@ -908,13 +910,16 @@ ACTIVE_TURN_SERVER = textwrap.dedent(
         elif command_type == "clear_queue":
             data = {"steering": 1 if command.get("forInterrupt") else 0, "followUp": 0}
         elif command_type == "abort":
-            abort_count += 1
-            if abort_count == 1:
-                success = "clearQueue" not in command and "reason" not in command
-            elif abort_count == 2:
-                success = command.get("reason") == "Interrupted by host (Paseo)" and "clearQueue" not in command
+            if command.get("reason") == "queue-race":
+                success = command.get("clearQueue") is True
             else:
-                success = command.get("clearQueue") is True and command.get("reason") == "Replaced by host"
+                abort_count += 1
+                if abort_count == 1:
+                    success = "clearQueue" not in command and "reason" not in command
+                elif abort_count == 2:
+                    success = command.get("reason") == "Interrupted by host (Paseo)" and "clearQueue" not in command
+                else:
+                    success = command.get("clearQueue") is True and command.get("reason") == "Replaced by host"
             data = {}
         elif command_type == "abort_and_prompt":
             success = command.get("message") == "replacement" and command.get("reason") == "Replaced by host"
@@ -1833,6 +1838,59 @@ class RpcClientTests(unittest.TestCase):
             client.abort(reason="Interrupted by host (Paseo)")
             client.abort(clear_queue=True, reason="Replaced by host")
             client.abort_and_prompt("replacement", reason="Replaced by host")
+
+    def test_queue_clearing_abort_cannot_overtake_an_unsent_prompt(self) -> None:
+        with self.make_client(server=ACTIVE_TURN_SERVER) as client:
+            prompt_at_write = threading.Event()
+            release_prompt = threading.Event()
+            abort_finished = threading.Event()
+            writes: list[str] = []
+            errors: list[BaseException] = []
+            original_write = client._write_json
+
+            def gated_write(
+                process: subprocess.Popen[str], payload: dict[str, object]
+            ) -> None:
+                if payload.get("type") == "prompt":
+                    prompt_at_write.set()
+                    if not release_prompt.wait(timeout=2.0):
+                        raise AssertionError("prompt write gate timed out")
+                writes.append(str(payload.get("type")))
+                original_write(process, payload)
+
+            def send_prompt() -> None:
+                try:
+                    client.prompt("delayed prompt")
+                except BaseException as exc:  # pragma: no cover - diagnostic capture
+                    errors.append(exc)
+
+            def clear_and_abort() -> None:
+                try:
+                    client.abort(clear_queue=True, reason="queue-race")
+                except BaseException as exc:  # pragma: no cover - diagnostic capture
+                    errors.append(exc)
+                finally:
+                    abort_finished.set()
+
+            with patch.object(client, "_write_json", side_effect=gated_write):
+                prompt_thread = threading.Thread(target=send_prompt)
+                prompt_thread.start()
+                self.assertTrue(prompt_at_write.wait(timeout=2.0))
+
+                abort_thread = threading.Thread(target=clear_and_abort)
+                abort_thread.start()
+                time.sleep(0.05)
+                self.assertFalse(abort_finished.is_set())
+
+                release_prompt.set()
+                prompt_thread.join(timeout=2.0)
+                abort_thread.join(timeout=2.0)
+
+            self.assertFalse(prompt_thread.is_alive())
+            self.assertFalse(abort_thread.is_alive())
+            self.assertEqual(errors, [])
+            self.assertEqual(writes, ["prompt", "abort"])
+            client.wait_for_idle(timeout=0.5)
 
     def test_pre_capability_server_reports_no_features_and_accepts_steers(self) -> None:
         with self.make_client(server=LEGACY_STEER_SERVER) as client:

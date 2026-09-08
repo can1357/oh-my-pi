@@ -9,6 +9,7 @@ import signal
 import subprocess
 import threading
 import time
+from contextlib import nullcontext
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -510,6 +511,7 @@ class RpcClient:
         self._stderr_thread: threading.Thread | None = None
         self._ready = threading.Event()
         self._write_lock = threading.Lock()
+        self._agent_run_submission_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._event_condition = threading.Condition()
         self._pending: dict[str, _PendingRequest] = {}
@@ -524,6 +526,7 @@ class RpcClient:
         self._scheduled_agent_runs = 0
         self._completed_agent_runs = 0
         self._agent_run_request_ids: list[tuple[str, str]] = []
+        self._sent_agent_run_request_ids: set[str] = set()
         self._awaited_prompt_result_ids: set[str] = set()
         self._completed_prompt_result_ids: set[str] = set()
         self._last_schedule_async_error_index = 0
@@ -610,6 +613,7 @@ class RpcClient:
         self._scheduled_agent_runs = 0
         self._completed_agent_runs = 0
         self._agent_run_request_ids = []
+        self._sent_agent_run_request_ids = set()
         self._awaited_prompt_result_ids = set()
         self._completed_prompt_result_ids = set()
         self._last_schedule_async_error_index = 0
@@ -1222,13 +1226,19 @@ class RpcClient:
         `abort(clear_queue=True)` for a final interrupt; separate `clear_queue()`
         and `abort()` calls cannot suppress work enqueued while abort waits.
         """
+        sent_before_clear: list[str] = []
         result = parse_clear_queue_result(
             self._request(
                 "clear_queue",
+                _sent_agent_run_ids_before_write=sent_before_clear,
                 forInterrupt=True if for_interrupt else None,
             )
         )
-        self._cancel_pending_agent_runs(result.steering, command_types={"steer"})
+        self._cancel_pending_agent_runs(
+            result.steering,
+            command_types={"steer"},
+            request_ids=set(sent_before_clear),
+        )
         return result
 
     def follow_up(
@@ -1245,9 +1255,15 @@ class RpcClient:
             raise RpcError(
                 "abort(clear_queue=True) requires activeTurnSteering capability version 1"
             )
-        self._request("abort", clearQueue=True if clear_queue else None, reason=reason)
+        sent_before_abort: list[str] = []
+        self._request(
+            "abort",
+            _sent_agent_run_ids_before_write=sent_before_abort if clear_queue else None,
+            clearQueue=True if clear_queue else None,
+            reason=reason,
+        )
         if clear_queue:
-            self._cancel_pending_agent_runs()
+            self._cancel_pending_agent_runs(request_ids=set(sent_before_abort))
 
     def abort_and_prompt(
         self,
@@ -1372,7 +1388,8 @@ class RpcClient:
     def _mark_agent_run_started(self) -> None:
         with self._event_condition:
             if self._agent_run_request_ids:
-                self._agent_run_request_ids.pop(0)
+                request_id, _ = self._agent_run_request_ids.pop(0)
+                self._sent_agent_run_request_ids.discard(request_id)
             elif self._scheduled_agent_runs == self._completed_agent_runs:
                 self._scheduled_agent_runs += 1
                 self._last_schedule_async_error_index = (
@@ -1393,6 +1410,7 @@ class RpcClient:
                 if matching is None:
                     return False
                 self._agent_run_request_ids.remove(matching)
+                self._sent_agent_run_request_ids.discard(request_id)
             elif self._completed_agent_runs >= self._scheduled_agent_runs:
                 return False
             self._completed_agent_runs += 1
@@ -1408,21 +1426,32 @@ class RpcClient:
             self._event_condition.notify_all()
 
     def _cancel_pending_agent_runs(
-        self, limit: int | None = None, *, command_types: set[str] | None = None
+        self,
+        limit: int | None = None,
+        *,
+        command_types: set[str] | None = None,
+        request_ids: set[str] | None = None,
     ) -> None:
         if limit == 0:
             return
         with self._event_condition:
             eligible = [
                 index
-                for index, (_, command_type) in enumerate(self._agent_run_request_ids)
-                if command_types is None or command_type in command_types
+                for index, (request_id, command_type) in enumerate(
+                    self._agent_run_request_ids
+                )
+                if (command_types is None or command_type in command_types)
+                and (request_ids is None or request_id in request_ids)
             ]
             if limit is not None:
                 eligible = eligible[-limit:]
             if not eligible:
                 return
             cancelled = set(eligible)
+            for index in eligible:
+                self._sent_agent_run_request_ids.discard(
+                    self._agent_run_request_ids[index][0]
+                )
             self._agent_run_request_ids = [
                 entry
                 for index, entry in enumerate(self._agent_run_request_ids)
@@ -1568,6 +1597,7 @@ class RpcClient:
         *,
         _agent_run_reservation: Literal["if_idle", "always"] | None = None,
         _request_id_out: list[str] | None = None,
+        _sent_agent_run_ids_before_write: list[str] | None = None,
         **payload: JsonValue,
     ) -> JsonObject:
         process = self._require_process()
@@ -1581,29 +1611,47 @@ class RpcClient:
             if value is not None:
                 envelope[key] = value
 
-        reserved_agent_run = (
-            _agent_run_reservation is not None
-            and self._mark_agent_run_scheduled(
-                request_id,
-                command_type,
-                only_if_idle=_agent_run_reservation == "if_idle",
-            )
+        reserved_agent_run = False
+        submission_guard = (
+            self._agent_run_submission_lock
+            if _agent_run_reservation is not None
+            or _sent_agent_run_ids_before_write is not None
+            else nullcontext()
         )
         try:
-            response_queue: queue.Queue[JsonObject | BaseException] = queue.Queue(
-                maxsize=1
-            )
-            with self._state_lock:
-                self._pending[request_id] = _PendingRequest(
-                    command=command_type, response_queue=response_queue
+            with submission_guard:
+                if _sent_agent_run_ids_before_write is not None:
+                    with self._event_condition:
+                        _sent_agent_run_ids_before_write.extend(
+                            request_id
+                            for request_id, _ in self._agent_run_request_ids
+                            if request_id in self._sent_agent_run_request_ids
+                        )
+                reserved_agent_run = (
+                    _agent_run_reservation is not None
+                    and self._mark_agent_run_scheduled(
+                        request_id,
+                        command_type,
+                        only_if_idle=_agent_run_reservation == "if_idle",
+                    )
                 )
-
-            try:
-                self._write_json(process, envelope)
-            except BaseException:
+                response_queue: queue.Queue[JsonObject | BaseException] = queue.Queue(
+                    maxsize=1
+                )
                 with self._state_lock:
-                    self._pending.pop(request_id, None)
-                raise
+                    self._pending[request_id] = _PendingRequest(
+                        command=command_type, response_queue=response_queue
+                    )
+
+                try:
+                    if reserved_agent_run:
+                        with self._event_condition:
+                            self._sent_agent_run_request_ids.add(request_id)
+                    self._write_json(process, envelope)
+                except BaseException:
+                    with self._state_lock:
+                        self._pending.pop(request_id, None)
+                    raise
 
             try:
                 response = response_queue.get(timeout=self._request_timeout)
