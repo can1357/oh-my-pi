@@ -452,7 +452,15 @@ export function grokbotModelManagerOptions(
 		...(apiKey
 			? {
 					dynamicModelsAuthoritative: true,
-					fetchDynamicModels: async () => fetchGrokbotAvailableModels({ apiKey, baseUrl, fetch, headers }),
+					fetchDynamicModels: async () =>
+						fetchGrokbotAvailableModels({
+							apiKey,
+							baseUrl,
+							fetch,
+							headers,
+							namespace: identity.namespace,
+							clientVersion: identity.clientVersion,
+						}),
 				}
 			: undefined),
 	};

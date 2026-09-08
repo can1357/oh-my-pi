@@ -268,6 +268,24 @@ describe("grokbot family tool mapping", () => {
 		expect(picked).not.toContain("sand-not-a-router");
 		expect(selectGrokbotMatrixIds(live, "all")).toEqual(live.map(m => m.id));
 
+		// Without catalog sand-tools-wire, sand-automation is not a router and can
+		// be dropped from the unknown bucket — callers must buildModel() first.
+		expect(
+			selectGrokbotMatrixIds(
+				[{ id: "sand-automation" }, { id: "sand-default", sandToolsWire: "parent-chat" }, { id: "noise-aaa" }],
+				"representative",
+			),
+		).not.toContain("sand-automation");
+		expect(
+			selectGrokbotMatrixIds(
+				[
+					{ id: "sand-automation", sandToolsWire: "automation" },
+					{ id: "sand-default", sandToolsWire: "parent-chat" },
+				],
+				"representative",
+			),
+		).toEqual(expect.arrayContaining(["sand-automation", "sand-default"]));
+
 		// Same-revision openai peers collapse to one sample via preferMatrixId.
 		const sameRev = selectGrokbotMatrixIds(
 			[
