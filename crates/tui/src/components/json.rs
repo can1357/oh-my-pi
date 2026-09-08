@@ -451,18 +451,17 @@ impl ScalarKind {
 	}
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, strum::IntoStaticStr)]
 enum ContainerKind {
+	#[strum(serialize = " []")]
 	Array,
+	#[strum(serialize = " {}")]
 	Object,
 }
 
 impl ContainerKind {
-	const fn suffix(self) -> &'static str {
-		match self {
-			Self::Array => " []",
-			Self::Object => " {}",
-		}
+	fn suffix(self) -> &'static str {
+		self.into()
 	}
 }
 

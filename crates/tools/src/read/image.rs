@@ -113,27 +113,26 @@ static IMAGE_CACHE: LazyLock<Mutex<ImageCache>> =
 	LazyLock::new(|| Mutex::new(ImageCache::default()));
 
 /// Supported image encoding discovered from file bytes.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
 pub enum ImageKind {
 	/// Portable Network Graphics.
+	#[strum(serialize = "image/png")]
 	Png,
 	/// Joint Photographic Experts Group image.
+	#[strum(serialize = "image/jpeg")]
 	Jpeg,
 	/// Graphics Interchange Format image.
+	#[strum(serialize = "image/gif")]
 	Gif,
 	/// WebP image.
+	#[strum(serialize = "image/webp")]
 	WebP,
 }
 
 impl ImageKind {
 	/// Model-facing media type for this encoding.
-	pub const fn media_type(self) -> &'static str {
-		match self {
-			Self::Png => "image/png",
-			Self::Jpeg => "image/jpeg",
-			Self::Gif => "image/gif",
-			Self::WebP => "image/webp",
-		}
+	pub fn media_type(self) -> &'static str {
+		self.into()
 	}
 
 	const fn format(self) -> ImageFormat {
