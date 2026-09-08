@@ -67,8 +67,8 @@ describe("pickQuotaShare", () => {
 
 describe("pickQuotaShare DRR fairness", () => {
 	it("alternates equally healthy accounts instead of hammering the top-ranked", () => {
-		const a = { id: "a", weight: 1, inFlight: 0, saturated: false };
-		const b = { id: "b", weight: 1, inFlight: 0, saturated: false };
+		const a: QuotaShareInput = { id: "a", weight: 1, inFlight: 0, saturated: false };
+		const b: QuotaShareInput = { id: "b", weight: 1, inFlight: 0, saturated: false };
 		const first = pickQuotaShare([a, b])!;
 		expect(first.id).toBe("a");
 		// persist the returned accounting

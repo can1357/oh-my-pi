@@ -1,0 +1,7 @@
+class "mimo" {
+    bounded "mimo"
+
+    family "v2" glob="*mimo-v2*"
+
+    override id="venice-xiaomi-mimo-family" provider="venice" model="xiaomi-mimo-v2-5" logical="xiaomi-mimo-v2-5" class="mimo" rationale="The reviewed Venice deployment belongs to the Xiaomi MiMo family" provenance="fixtures/llm-oracle/catalog/models.normalized.json"
+}

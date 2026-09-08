@@ -639,7 +639,6 @@ export class ExtensionUiController {
 		dialogOptions?: ExtensionUIDialogOptions,
 	): Promise<ExtensionAskDialogResult | undefined> {
 		return this.#presentDialog<ExtensionAskDialogResult>(dialogOptions?.signal, settle => {
-			let askDialog: AskDialogComponent | undefined;
 			let promptEditor: HookEditorComponent | undefined;
 			let promptResolve: ((value: string | undefined) => void) | undefined;
 			let closed = false;
@@ -674,6 +673,7 @@ export class ExtensionUiController {
 			const finishPrompt = (value: string | undefined): void => {
 				const resolvePrompt = promptResolve;
 				promptResolve = undefined;
+				promptEditor?.dispose();
 				promptEditor = undefined;
 				restoreAskDialog();
 				resolvePrompt?.(value);
@@ -698,7 +698,7 @@ export class ExtensionUiController {
 				return promise;
 			};
 
-			askDialog = new AskDialogComponent(
+			const askDialog = new AskDialogComponent(
 				questions,
 				{
 					onSubmit: result => settle(result),
@@ -721,6 +721,7 @@ export class ExtensionUiController {
 			return () => {
 				closed = true;
 				askDialog?.dispose();
+				promptEditor?.dispose();
 				promptResolve?.(undefined);
 				promptResolve = undefined;
 				promptEditor = undefined;
@@ -1036,6 +1037,7 @@ export class ExtensionUiController {
 	 * Hide the hook editor.
 	 */
 	hideHookEditor(): void {
+		this.ctx.hookEditor?.dispose();
 		this.ctx.editorContainer.clear();
 		this.ctx.editorContainer.addChild(this.ctx.editor);
 		this.ctx.hookEditor = undefined;

@@ -13,11 +13,12 @@ import {
 	ProvidersRoute,
 	RequestsRoute,
 	ToolsRoute,
+	TracesRoute,
 } from "./routes";
 import { RequestDrawer } from "./ui/RequestDrawer";
 
 export default function App() {
-	const { section, setSection, range, setRange } = useHashRoute();
+	const { section, setSection, range, setRange, session, setSession } = useHashRoute();
 	const [refreshTrigger, setRefreshTrigger] = useState(0);
 	const [selectedRequestId, setSelectedRequestId] = useState<number | null>(null);
 	const [updatedAt, setUpdatedAt] = useState<number | null>(() => Date.now());
@@ -61,6 +62,15 @@ export default function App() {
 						range={range}
 						refreshTrigger={refreshTrigger}
 						onRequestClick={setSelectedRequestId}
+					/>
+				);
+			case "traces":
+				return (
+					<TracesRoute
+						active={isActive}
+						session={session}
+						onOpenSession={setSession}
+						refreshTrigger={refreshTrigger}
 					/>
 				);
 			case "errors":

@@ -5,7 +5,9 @@
  * providing access to agent outputs and server resources without exposing filesystem paths.
  */
 
+import type { Rule } from "../capability/rule";
 import type { Skill } from "../extensibility/skills";
+import type { AgentRegistry } from "../registry/agent-registry";
 import type { LocalProtocolOptions } from "./local-protocol";
 
 /**
@@ -98,6 +100,15 @@ export interface ResolveContext {
 	 * file: those handlers keep their existing in-memory behavior.
 	 */
 	sessionFile?: string;
+	/**
+	 * Calling session's stable session-manager id. Sessions that have no
+	 * session file yet (SDK, embedded, `-p`) are only addressable by this id,
+	 * so handlers that must bind a URL to its caller (`memory://`) accept it
+	 * as a second exact identity alongside {@link sessionFile}.
+	 */
+	sessionId?: string;
+	/** Registry that owns the calling session; defaults to the process-wide registry. */
+	agentRegistry?: AgentRegistry;
 	/** Settings of the calling session (used by `issue://`/`pr://` for cache TTLs). */
 	settings?: unknown;
 	/** Caller's abort signal. */
@@ -115,6 +126,15 @@ export interface ResolveContext {
 	localProtocolOptions?: LocalProtocolOptions;
 	/** Calling session's loaded skills. Prefer this over process-global skill state. */
 	skills?: readonly Skill[];
+	/**
+	 * Calling session's agent-scoped applicable rule set (rulebook + always-apply
+	 * + triggered TTSR rules, already bucketed by `agents` frontmatter). Prefer
+	 * this over the process-global snapshot — the global one reflects only the
+	 * top-level session, so a subagent-only rule is unresolvable through it
+	 * even though the subagent's own system prompt tells it to read
+	 * `rule://<name>`.
+	 */
+	rules?: readonly Rule[];
 	/** Session-bound `xd://` documentation resolver. */
 	xd?: {
 		read(name: string | null): Promise<string>;

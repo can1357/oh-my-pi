@@ -5,6 +5,7 @@ import {
 	getAntigravityCounterKeyForModel,
 	scopeAntigravityLimitsForModel,
 } from "@oh-my-pi/pi-ai/usage/google-antigravity";
+import type { VcsRepo } from "@oh-my-pi/pi-natives";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import {
 	type Component,
@@ -238,6 +239,8 @@ interface ActiveRepoCache {
 	projectDir: string;
 	activeRepo: ActiveRepoContext | null;
 	effectiveGitCwd: string;
+	repository: VcsRepo | null;
+	repositoryCheckedAt: number;
 	/** Project + worktree dir name when `projectDir` is a linked worktree, else null. */
 	worktree: WorktreeContext | null;
 }
@@ -352,6 +355,8 @@ function hasGitBackedSegment(segments: readonly StatusLineSegmentId[]): boolean 
 	return hasGitSegment(segments) || hasPrSegment(segments);
 }
 
+type StatusLineLayout = "box" | "band" | "plain-full" | "plain-left" | "plain-right";
+
 // ═══════════════════════════════════════════════════════════════════════════
 // StatusLineComponent
 // ═══════════════════════════════════════════════════════════════════════════
@@ -403,6 +408,7 @@ export class StatusLineComponent implements Component {
 	/** Frame timer driving repaints while the brand fade is unsettled. */
 	#brandFadeTimer: NodeJS.Timeout | undefined;
 	#hookStatuses: Map<string, string> = new Map();
+	#sortedHookStatuses: readonly string[] = [];
 	#subagentCount: number = 0;
 	#runningSubagentIds = new Set<string>();
 	/**
@@ -524,13 +530,31 @@ export class StatusLineComponent implements Component {
 			return this.#activeRepoCache;
 		}
 
-		const activeRepo = resolveActiveRepoContextSync(projectDir);
+		const projectRepository = vcs.repo(projectDir);
+		const activeRepo = projectRepository ? null : resolveActiveRepoContextSync(projectDir);
 		const effectiveGitCwd = activeRepo?.repoRoot ?? projectDir;
+		const repository = projectRepository ?? (activeRepo ? vcs.repo(effectiveGitCwd) : null);
 		// Only collapse the bare-cwd case: a single-direct-child-repo context
 		// (activeRepo set) renders `<parent> ↳ <child>`, which we leave intact.
 		const worktree = activeRepo ? null : resolveWorktreeContext(effectiveGitCwd);
-		this.#activeRepoCache = { projectDir, activeRepo, effectiveGitCwd, worktree };
+		this.#activeRepoCache = {
+			projectDir,
+			activeRepo,
+			effectiveGitCwd,
+			repository,
+			repositoryCheckedAt: Date.now(),
+			worktree,
+		};
 		return this.#activeRepoCache;
+	}
+
+	#resolveRepository(cache: ActiveRepoCache): VcsRepo | null {
+		if (cache.repository) return cache.repository;
+		const now = Date.now();
+		if (now - cache.repositoryCheckedAt < WATCHER_FAILURE_POLL_TTL_MS) return null;
+		cache.repository = vcs.repo(cache.effectiveGitCwd);
+		cache.repositoryCheckedAt = now;
+		return cache.repository;
 	}
 
 	/**
@@ -722,10 +746,14 @@ export class StatusLineComponent implements Component {
 
 	setHookStatus(key: string, text: string | undefined): void {
 		if (text === undefined) {
-			this.#hookStatuses.delete(key);
+			if (!this.#hookStatuses.delete(key)) return;
 		} else {
+			if (this.#hookStatuses.get(key) === text) return;
 			this.#hookStatuses.set(key, text);
 		}
+		this.#sortedHookStatuses = Array.from(this.#hookStatuses.entries())
+			.sort(([a], [b]) => a.localeCompare(b))
+			.map(([, status]) => status);
 	}
 
 	watchBranch(onBranchChange: () => void): void {
@@ -742,8 +770,8 @@ export class StatusLineComponent implements Component {
 			return;
 		}
 
-		const { effectiveGitCwd } = this.#resolveActiveRepoCache();
-		const repository = vcs.repo(effectiveGitCwd);
+		const activeRepoCache = this.#resolveActiveRepoCache();
+		const repository = this.#resolveRepository(activeRepoCache);
 		if (!repository) {
 			// There is no path to watch yet. Cache the negative result only for the
 			// fallback poll interval so a later `git init` becomes visible without
@@ -964,11 +992,11 @@ export class StatusLineComponent implements Component {
 		this.#jjStatusActive?.controller.abort();
 		this.#jjStatusActive = undefined;
 	}
-	#getBranchLabel(effectiveGitCwd?: string): string | null {
+	#getBranchLabel(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): string | null {
 		if (!this.#gitEnabled()) return null;
 
-		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		const repository = vcs.repo(gitCwd);
+		const gitCwd = activeRepoCache.effectiveGitCwd;
+		const repository = this.#resolveRepository(activeRepoCache);
 		if (!repository) return null;
 		const gitRepository = repository.asGit();
 		if (!gitRepository) {
@@ -1104,11 +1132,15 @@ export class StatusLineComponent implements Component {
 		return branch === this.#defaultBranch;
 	}
 
-	#getStatus(effectiveGitCwd?: string): { staged: number; unstaged: number; untracked: number } | null {
+	#getStatus(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): {
+		staged: number;
+		unstaged: number;
+		untracked: number;
+	} | null {
 		if (!this.#gitEnabled()) return null;
 
-		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		const repository = vcs.repo(gitCwd);
+		const gitCwd = activeRepoCache.effectiveGitCwd;
+		const repository = this.#resolveRepository(activeRepoCache);
 		if (!repository) return null;
 		if (repository.kind() === "jj") {
 			if (this.#jjStatusActive || Date.now() - this.#jjStatusLastFetch < JJ_REFRESH_TTL_MS) {
@@ -1172,12 +1204,15 @@ export class StatusLineComponent implements Component {
 		return this.#cachedGitStatusCwd === gitCwd ? this.#cachedGitStatus : null;
 	}
 
-	#lookupPr(effectiveGitCwd?: string): { number: number; url: string } | null {
+	#lookupPr(activeRepoCache: ActiveRepoCache = this.#resolveActiveRepoCache()): {
+		number: number;
+		url: string;
+	} | null {
 		if (!this.#gitEnabled()) return null;
 
-		const gitCwd = effectiveGitCwd ?? this.#resolveActiveRepoCache().effectiveGitCwd;
-		if (vcs.repo(gitCwd)?.kind() !== "git") return null;
-		const branch = this.#getBranchLabel(gitCwd);
+		const gitCwd = activeRepoCache.effectiveGitCwd;
+		if (this.#resolveRepository(activeRepoCache)?.kind() !== "git") return null;
+		const branch = this.#getBranchLabel(activeRepoCache);
 		const currentContext = branch ? createPrCacheContext(branch, this.#cachedBranchRepoId ?? null) : null;
 
 		if (canReuseCachedPr(this.#cachedPr, this.#cachedPrContext, currentContext)) {
@@ -1205,7 +1240,9 @@ export class StatusLineComponent implements Component {
 		(async () => {
 			// Helper: only write cache if branch/repo context hasn't changed since launch
 			const setCachedPr = (value: { number: number; url: string } | null) => {
-				const latestBranch = this.#getBranchLabel(lookupCwd);
+				const latestActiveRepoCache = this.#resolveActiveRepoCache();
+				if (latestActiveRepoCache.effectiveGitCwd !== lookupCwd) return;
+				const latestBranch = this.#getBranchLabel(latestActiveRepoCache);
 				const latestContext = latestBranch
 					? createPrCacheContext(latestBranch, this.#cachedBranchRepoId ?? null)
 					: undefined;
@@ -1795,10 +1832,17 @@ export class StatusLineComponent implements Component {
 		const projectDir = getProjectDir();
 		const activeRepoCache = shouldResolveActiveRepo
 			? this.#resolveActiveRepoCache()
-			: { projectDir, activeRepo: null, effectiveGitCwd: projectDir, worktree: null };
-		const gitBranch = includeGit || includePr ? this.#getBranchLabel(activeRepoCache.effectiveGitCwd) : null;
-		const gitStatus = includeGit ? this.#getStatus(activeRepoCache.effectiveGitCwd) : null;
-		const gitPr = includePr ? this.#lookupPr(activeRepoCache.effectiveGitCwd) : null;
+			: {
+					projectDir,
+					activeRepo: null,
+					effectiveGitCwd: projectDir,
+					repository: null,
+					repositoryCheckedAt: Date.now(),
+					worktree: null,
+				};
+		const gitBranch = includeGit || includePr ? this.#getBranchLabel(activeRepoCache) : null;
+		const gitStatus = includeGit ? this.#getStatus(activeRepoCache) : null;
+		const gitPr = includePr ? this.#lookupPr(activeRepoCache) : null;
 		const compactionSpeculation = this.session.compactionSpeculation ?? "idle";
 		this.#syncSpeculationBlink(compactionSpeculation);
 		const sessionAccentEnabled = this.#resolveSettings().sessionAccent !== false;
@@ -1812,6 +1856,7 @@ export class StatusLineComponent implements Component {
 			width,
 			options: segmentOptions ?? {},
 			compactThinkingLevel: this.#resolveSettings().compactThinkingLevel ?? false,
+			hookStatuses: this.#sortedHookStatuses,
 			planMode: this.#planModeStatus,
 			loopMode: this.#loopModeStatus,
 			prewalk:
@@ -1906,10 +1951,12 @@ export class StatusLineComponent implements Component {
 	 */
 	#buildStatusLine(
 		width: number,
-		layout: "box" | "band" | "plain-full" | "plain-left" | "plain-right" = "box",
+		layout: StatusLineLayout = "box",
 		previewTitle?: string,
+		options?: { readonly placeholders?: boolean },
 	): string {
 		const effectiveSettings = this.#resolveSettings();
+		const placeholders = options?.placeholders === true;
 		const plain = layout !== "box" && layout !== "band";
 		const includePath =
 			hasPathSegment(effectiveSettings.leftSegments) || hasPathSegment(effectiveSettings.rightSegments);
@@ -1919,7 +1966,7 @@ export class StatusLineComponent implements Component {
 			(hasGitSegment(effectiveSettings.leftSegments) || hasGitSegment(effectiveSettings.rightSegments));
 		const includePr =
 			gitEnabled && (hasPrSegment(effectiveSettings.leftSegments) || hasPrSegment(effectiveSettings.rightSegments));
-		const ctx = this.#buildSegmentContext(
+		const liveCtx = this.#buildSegmentContext(
 			width,
 			effectiveSettings.segmentOptions,
 			includePath,
@@ -1927,6 +1974,7 @@ export class StatusLineComponent implements Component {
 			includePr,
 			previewTitle,
 		);
+		const ctx: SegmentContext = placeholders ? { ...liveCtx, startupPlaceholder: true } : liveCtx;
 		const separatorDef = plain
 			? { left: "·", right: "·" }
 			: getSeparator(effectiveSettings.separator ?? "powerline-thin", theme);
@@ -1999,10 +2047,12 @@ export class StatusLineComponent implements Component {
 						job => job.type !== "task" || job.agentId === undefined || !this.#runningSubagentIds.has(job.agentId),
 					).length ?? 0;
 			if (runningBackgroundJobs > 0) {
-				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${runningBackgroundJobs}`));
+				const count = placeholders ? "…" : `${runningBackgroundJobs}`;
+				rightParts.unshift(theme.fg("statusLineSubagents", `${theme.icon.job} ${count}`));
 			}
 			if (subagentBadge) {
-				rightParts.unshift(subagentBadge);
+				const content = placeholders ? [theme.icon.agents, "…"].filter(Boolean).join(" ") : subagentBadge;
+				rightParts.unshift(placeholders ? theme.fg("statusLineSubagents", content) : content);
 			}
 		}
 		const topFillWidth = Math.max(0, width);
@@ -2035,7 +2085,9 @@ export class StatusLineComponent implements Component {
 		// this budget a long path/session title can leave a one-cell gap: the
 		// context segment is gone, and the gauge silently omits its labels too.
 		const embeddedContextWidth = embedContext
-			? embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow)
+			? ctx.startupPlaceholder
+				? "…%".length + "…".length + 4
+				: embeddedContextGaugeMinWidth(ctx.contextPercent ?? 0, ctx.contextWindow)
 			: 0;
 		const minimumGapWidth = (): number => {
 			if (!embeddedContextWidth) return left.length > 0 && right.length > 0 ? 1 : 0;
@@ -2204,9 +2256,12 @@ export class StatusLineComponent implements Component {
 		// past the window label — `──200K─120%` with the percent in error color.
 		const percentOverflow = pct > 100;
 		if (embedContext) {
-			const candidatePercent = formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
-			const candidateWindow = formatNumber(ctx.contextWindow);
-			if (gapWidth >= embeddedContextGaugeMinWidth(percentOverflow ? pct : clampedPct, ctx.contextWindow)) {
+			const candidatePercent = ctx.startupPlaceholder
+				? "…%"
+				: formatEmbeddedContextPercent(percentOverflow ? pct : clampedPct);
+			const candidateWindow = ctx.startupPlaceholder ? "…" : formatNumber(ctx.contextWindow);
+			const minimumLabelWidth = candidatePercent.length + candidateWindow.length + 4;
+			if (gapWidth >= minimumLabelWidth) {
 				percentLabel = candidatePercent;
 				windowLabel = candidateWindow;
 				if (percentOverflow) {
@@ -2311,6 +2366,11 @@ export class StatusLineComponent implements Component {
 		} catch {
 			return null;
 		}
+	}
+
+	/** Render startup ellipses inside each segment's normal icon, color, and static chrome. */
+	renderStartupPlaceholder(width: number, layout: StatusLineLayout): string {
+		return this.#buildStatusLine(width, layout, undefined, { placeholders: true });
 	}
 
 	getTopBorder(width: number, previewTitle?: string): { content: string; width: number; revision: number } {
@@ -2427,11 +2487,8 @@ export class StatusLineComponent implements Component {
 			}
 		}
 		const showHooks = this.#settings.showHookStatus ?? true;
-		if (showHooks && this.#hookStatuses.size > 0) {
-			const hookLines = Array.from(this.#hookStatuses.entries())
-				.sort(([a], [b]) => a.localeCompare(b))
-				.map(([, text]) => truncateToWidth(sanitizeStatusText(text), width));
-			lines.push(...hookLines);
+		if (showHooks && this.#sortedHookStatuses.length > 0) {
+			lines.push(...this.#sortedHookStatuses.map(text => truncateToWidth(sanitizeStatusText(text), width)));
 		}
 		return lines;
 	}

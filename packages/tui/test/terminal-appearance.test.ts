@@ -778,6 +778,19 @@ describe("ProcessTerminal DECRQM + in-band resize (DEC 2026/2048)", () => {
 		terminal.stop();
 	});
 
+	it("forwards DECRPM status so subscribers can distinguish unrecognized from permanently reset", () => {
+		const { terminal } = setup();
+		const statuses: Array<{ mode: number; status?: number }> = [];
+		terminal.onPrivateModeReport?.((mode, _supported, _confirmed, status) => {
+			statuses.push({ mode, status });
+		});
+		process.stdin.emit("data", "\x1b[?2026;0$y");
+		process.stdin.emit("data", "\x1b[?2048;4$y");
+		expect(statuses).toContainEqual({ mode: 2026, status: 0 });
+		expect(statuses).toContainEqual({ mode: 2048, status: 4 });
+		terminal.stop();
+	});
+
 	it("enables DEC 2048 only after DECRPM confirms support, and disables it on stop", () => {
 		const { terminal, writes, reports } = setup();
 		expect(writes).not.toContain("\x1b[?2048h");

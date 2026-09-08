@@ -38,9 +38,11 @@ export function isRpcHostToolUpdate(value: unknown): value is RpcHostToolUpdate 
 	return frame.type === "host_tool_update" && typeof frame.id === "string" && isAgentToolResult(frame.partialResult);
 }
 
-class RpcHostToolAdapter<TParams extends TSchema = TSchema, TTheme extends Theme = Theme>
-	implements AgentTool<TParams, unknown, TTheme>
-{
+class RpcHostToolAdapter<TParams extends TSchema = TSchema, TTheme extends Theme = Theme> implements AgentTool<
+	TParams,
+	unknown,
+	TTheme
+> {
 	declare name: string;
 	declare label: string;
 	declare description: string;

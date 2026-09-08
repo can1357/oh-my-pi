@@ -91,9 +91,12 @@ function isPrivateHostname(hostname: string): boolean {
 	while (host.endsWith(".")) {
 		host = host.slice(0, -1);
 	}
-	if (host === "localhost" || host === "::1" || host === "0.0.0.0") {
+	if (host === "localhost" || host === "::1" || host === "::" || host === "0.0.0.0") {
 		return true;
 	}
+	// IPv6 link-local (fe80::/10) and unique-local (fc00::/7, covers fd00::/8 ULA).
+	if (/^fe[89ab][0-9a-f]:/.test(host)) return true;
+	if (/^f[cd][0-9a-f]{2}:/.test(host)) return true;
 	const v4 = parseIPv4(host);
 	if (v4 === undefined) {
 		return false;
@@ -102,8 +105,11 @@ function isPrivateHostname(hostname: string): boolean {
 	const b = v4[1];
 	if (a === 127) return true;
 	if (a === 10) return true;
+	if (a === 172 && b >= 16 && b <= 31) return true;
 	if (a === 192 && b === 168) return true;
 	if (a === 169 && b === 254) return true;
+	// RFC6598 shared address space (100.64.0.0/10) — carrier/cloud CGNAT.
+	if (a === 100 && b >= 64 && b <= 127) return true;
 	return false;
 }
 

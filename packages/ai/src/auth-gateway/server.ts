@@ -78,7 +78,7 @@ import { PromptCacheAffinityStore } from "./prompt-cache-store";
 import { ProviderHealthBook } from "./provider-health";
 import { decideAttempt, type ExecutionState } from "./route-conductor";
 import { parseRouteDefinition } from "./route-definitions";
-import { type CompiledRoute, type RouteDefinition, RouteRegistry } from "./route-graph";
+import { type CompiledRoute, type RouteDefinition, RouteRegistry, pickInitialRouteTarget } from "./route-graph";
 import {
 	commitGateObservesDownstreamSse,
 	observeSseCommit,
@@ -128,6 +128,9 @@ export interface AuthGatewayBootOptions extends AuthGatewayServerOptions {
 
 // `parseBind` lives in ../utils/parse-bind so the gateway and broker can't
 // drift on accepted inputs (e.g. empty hostname, IPv6 brackets).
+
+/** Native Gemini paths carry the model in the URL (`/v1beta/models/{model}:generateContent`). */
+const GEMINI_MODEL_PATH = /^\/v1beta\/models\/([^/]+):(stream)?generateContent$/;
 
 export const FORMAT_ROUTES: Record<string, { module: FormatModule; label: string }> = {
 	"/v1/chat/completions": { module: openaiChat, label: "openai-chat" },
@@ -191,7 +194,7 @@ function deriveSessionId(modelId: string, context: Context): string {
 }
 
 function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: AbortSignal): SimpleStreamOptions {
-	const opts: SimpleStreamOptions = { signal };
+	const opts: SimpleStreamOptions = { signal, cursorExternalToolExecutor: true };
 	const { options } = parsed;
 	// Codex backend rejects every sampling control with
 	// `Unsupported parameter: …` (#3117). Strip the full set for that one
@@ -208,7 +211,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.frequencyPenalty !== undefined && !isCodex) opts.frequencyPenalty = options.frequencyPenalty;
 	if (options.repetitionPenalty !== undefined && !isCodex) opts.repetitionPenalty = options.repetitionPenalty;
 	if (options.metadata !== undefined) opts.metadata = options.metadata;
-	if (options.headers !== undefined) opts.headers = { ...(opts.headers ?? {}), ...options.headers };
+	if (options.headers !== undefined) opts.headers = { ...opts.headers, ...options.headers };
 	if (options.toolChoice !== undefined) {
 		opts.toolChoice =
 			typeof options.toolChoice !== "object"
@@ -221,6 +224,9 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	if (options.disableReasoning !== undefined) opts.disableReasoning = options.disableReasoning;
 	if (options.hideThinkingSummary !== undefined) opts.hideThinkingSummary = options.hideThinkingSummary;
 	if (options.taskBudget !== undefined) opts.taskBudget = options.taskBudget;
+	if (options.anthropicPrefixMismatchBehavior !== undefined) {
+		opts.anthropicPrefixMismatchBehavior = options.anthropicPrefixMismatchBehavior;
+	}
 	if (options.serviceTier !== undefined) opts.serviceTier = options.serviceTier;
 	if (options.cacheRetention !== undefined) opts.cacheRetention = options.cacheRetention;
 	if (options.include !== undefined) opts.include = options.include;
@@ -231,7 +237,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 	opts.promptCacheKey = promptCacheKey;
 	opts.sessionId = promptCacheKey;
 	if (options.thinkingBudgets) {
-		opts.thinkingBudgets = { ...(opts.thinkingBudgets ?? {}), ...options.thinkingBudgets };
+		opts.thinkingBudgets = { ...opts.thinkingBudgets, ...options.thinkingBudgets };
 	}
 	if (options.explicitThinkingBudgetTokens !== undefined) {
 		// Mirror Rust's `resolve_thinking_budget`: explicit budget pins onto
@@ -240,7 +246,7 @@ function buildStreamOptions(parsed: ParsedFormatRequest, api: Api, signal: Abort
 		// surface the budget.
 		const effort = options.reasoning ?? Effort.High;
 		opts.thinkingBudgets = {
-			...(opts.thinkingBudgets ?? {}),
+			...opts.thinkingBudgets,
 			[effort]: options.explicitThinkingBudgetTokens,
 		};
 		opts.reasoning ??= effort;
@@ -303,6 +309,7 @@ async function refreshGatewayApiKeyAfterAuthError(
 		const retryAfterMs = extractRetryHint(undefined, message);
 		const { switched, retryAtMs } = await storage.markUsageLimitReached(provider, sessionId, {
 			retryAfterMs,
+			providerTimed: retryAfterMs !== undefined,
 			baseUrl: model.baseUrl,
 			modelId: model.id,
 			apiKey: oldKey,
@@ -394,6 +401,12 @@ function clientClosedResponse(route: { module: FormatModule }): Response {
 type FormatErrorFn = (status: number, type: string, message: string) => Response;
 
 type AttemptPrep = { type: "key"; apiKey: string } | { type: "retry" } | { type: "respond"; response: Response };
+
+function hashString(value: string): number {
+	let h = 0;
+	for (let i = 0; i < value.length; i++) h = (h * 31 + value.charCodeAt(i)) | 0;
+	return h;
+}
 
 function unknownModelResponse(formatError: FormatErrorFn, modelId: string): Response {
 	return formatError(404, "invalid_request_error", `Unknown model: ${modelId}`);
@@ -651,15 +664,19 @@ function targetSkipReason(
 	targetId: string,
 	model: Model<Api>,
 ): RouteSkipReason | undefined {
-	if (
-		compiled.portability !== undefined &&
-		!candidateAllowed(
-			compiled.portability,
-			{ id: targetId, provider: model.provider },
-			compiled.affinity ?? "preferred",
-		)
-	) {
-		return "state_incompatible";
+	if (compiled.portability !== undefined) {
+		// Account/deployment scopes need the resolved credential identity,
+		// which is unknown pre-dispatch: defer those to the post-credential
+		// check below instead of rejecting every target here.
+		const needsIdentity =
+			(compiled.affinity ?? "preferred") === "required" &&
+			(compiled.portability.scope === "account" || compiled.portability.scope === "deployment");
+		if (
+			!needsIdentity &&
+			!candidateAllowed(compiled.portability, { id: targetId, provider: model.provider }, compiled.affinity ?? "preferred")
+		) {
+			return "state_incompatible";
+		}
 	}
 	if (health.state(model.provider, model.id) === "open") {
 		return "circuit_open";
@@ -674,6 +691,8 @@ function recordProviderHealthFailure(
 ): void {
 	if (classified.owner === "provider") {
 		health.recordFailure(model.provider, model.id, "provider");
+	} else if (classified.owner === "model") {
+		health.recordFailure(model.provider, model.id, "model");
 	}
 }
 
@@ -727,7 +746,7 @@ async function handleFormatEndpoint(
 	if (!compiled) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
-	const firstTarget = compiled.targets[0];
+	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
 	if (firstTarget === undefined) {
 		return unknownModelResponse(route.module.formatError, modelId);
 	}
@@ -764,7 +783,7 @@ async function handleFormatEndpoint(
 	// anything they didn't touch.
 	{
 		const captured = captureRequestHeaders(req.headers);
-		parsed.options.headers = { ...captured, ...(parsed.options.headers ?? {}) };
+		parsed.options.headers = { ...captured, ...parsed.options.headers };
 	}
 	if (controller.signal.aborted) return clientClosedResponse(route);
 
@@ -955,6 +974,27 @@ async function handleFormatEndpoint(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			// A credential-less primary must not end the route when a later
+			// target has a usable credential: fail over through the conductor,
+			// falling back to 401 only when no target remains.
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
+			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			const next = decideAttempt({
+				route: compiled,
+				state: stateNow(),
+				commitState: commitGate.state,
+			});
+			if (next.type === "dispatch") {
+				pendingFallback = next.targetModelId;
+				retryCount += 1;
+				return { type: "retry" };
+			}
 			return {
 				type: "respond",
 				response: formatError(
@@ -976,6 +1016,29 @@ async function handleFormatEndpoint(
 			disposition: "dispatched",
 		});
 		logger.debug("auth-gateway route decision", redactedDecisionSummary(dispatched));
+		// Identity-scoped portability (account/deployment) can only be verified
+		// now that the credential is known: skip targets from the wrong account
+		// instead of dispatching cross-account continuations.
+		const identity = bootOpts.storage.getOAuthAccountIdentity(model.provider, sessionId);
+		if (
+			!candidateAllowed(
+				compiled.portability,
+				{ id: currentTarget, provider: model.provider, accountId: identity?.accountId },
+				compiled.affinity ?? "preferred",
+			)
+		) {
+			attemptedTargets.add(currentTarget);
+			const skipped = traces.record({
+				requestId,
+				routeId: compiled.id,
+				generation: compiled.generation,
+				selectedTarget: currentTarget,
+				disposition: "skipped",
+				reason: "state_incompatible",
+			});
+			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			return { type: "retry" };
+		}
 		return { type: "key", apiKey };
 	};
 
@@ -1038,8 +1101,11 @@ async function handleFormatEndpoint(
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-						recordProviderHealthFailure(health, model, classified);
+						// Health is recorded exactly once per failure: here for
+						// billable failures (which return below), inside
+						// considerFallback otherwise.
 						if (messageHasBillableUsage(message)) {
+							recordProviderHealthFailure(health, model, classified);
 							return formatError(classified.status, classified.type, errorMessage);
 						}
 						if (considerFallback(classified)) {
@@ -1049,6 +1115,7 @@ async function handleFormatEndpoint(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
+					health.recordSuccess(model.provider, model.id);
 					rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
 					await runHook(bootOpts.hooks?.afterRequest, {
 						requestId,
@@ -1173,6 +1240,7 @@ async function handleFormatEndpoint(
 			return clientClosedResponse(route);
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
+		health.recordSuccess(model.provider, model.id);
 		rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
 		await runHook(bootOpts.hooks?.afterRequest, {
 			requestId,
@@ -1248,7 +1316,7 @@ async function handlePiNative(
 	if (!compiled) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
-	const firstTarget = compiled.targets[0];
+	const firstTarget = pickInitialRouteTarget(compiled, hashString(requestId));
 	if (firstTarget === undefined) {
 		return unknownModelResponse(piNative.formatError, parsed.modelId);
 	}
@@ -1425,6 +1493,27 @@ async function handlePiNative(
 				reason: "credential_unavailable",
 			});
 			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			// A credential-less primary must not end the route when a later
+			// target has a usable credential: fail over through the conductor,
+			// falling back to 401 only when no target remains.
+			const unavailable: GatewayErrorClassification = {
+				status: 401,
+				type: "authentication_error",
+				message: `No credential available for provider ${model.provider}`,
+				owner: "credential",
+				disposition: "provider_unavailable",
+			};
+			if (considerFallback(unavailable)) return { type: "retry" };
+			const next = decideAttempt({
+				route: compiled,
+				state: stateNow(),
+				commitState: commitGate.state,
+			});
+			if (next.type === "dispatch") {
+				pendingFallback = next.targetModelId;
+				retryCount += 1;
+				return { type: "retry" };
+			}
 			return {
 				type: "respond",
 				response: formatError(
@@ -1446,6 +1535,29 @@ async function handlePiNative(
 			disposition: "dispatched",
 		});
 		logger.debug("auth-gateway route decision", redactedDecisionSummary(dispatched));
+		// Identity-scoped portability (account/deployment) can only be verified
+		// now that the credential is known: skip targets from the wrong account
+		// instead of dispatching cross-account continuations.
+		const identity = bootOpts.storage.getOAuthAccountIdentity(model.provider, sessionId);
+		if (
+			!candidateAllowed(
+				compiled.portability,
+				{ id: currentTarget, provider: model.provider, accountId: identity?.accountId },
+				compiled.affinity ?? "preferred",
+			)
+		) {
+			attemptedTargets.add(currentTarget);
+			const skipped = traces.record({
+				requestId,
+				routeId: compiled.id,
+				generation: compiled.generation,
+				selectedTarget: currentTarget,
+				disposition: "skipped",
+				reason: "state_incompatible",
+			});
+			logger.debug("auth-gateway route decision", redactedDecisionSummary(skipped));
+			return { type: "retry" };
+		}
 		return { type: "key", apiKey };
 	};
 
@@ -1525,8 +1637,11 @@ async function handlePiNative(
 							return formatError(499, "request_aborted", errorMessage);
 						}
 						const classified = classifyGatewayError(message.errorClassificationMessage ?? errorMessage);
-						recordProviderHealthFailure(health, model, classified);
+						// Health is recorded exactly once per failure: here for
+						// billable failures (which return below), inside
+						// considerFallback otherwise.
 						if (messageHasBillableUsage(message)) {
+							recordProviderHealthFailure(health, model, classified);
 							return formatError(classified.status, classified.type, errorMessage);
 						}
 						if (considerFallback(classified)) {
@@ -1536,6 +1651,7 @@ async function handlePiNative(
 						return formatError(classified.status, classified.type, errorMessage);
 					}
 					bootOpts.storage.settleQuotaProbeSuccess(requestId);
+					health.recordSuccess(model.provider, model.id);
 					rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
 					return json(200, { message }, gatewayResponseHeaders(model, { requestId, message, startedAt }));
 				} catch (error) {
@@ -1647,6 +1763,7 @@ async function handlePiNative(
 			return aborted();
 		}
 		sseStream = releaseTurnOnStreamEnd(held.stream, bootOpts.storage, requestId, commitGate);
+		health.recordSuccess(model.provider, model.id);
 		rememberPromptCacheHit(cacheStore, body, requestId, model, sessionId);
 		return new Response(sseStream, {
 			status: 200,
@@ -1972,6 +2089,35 @@ export function startAuthGateway(opts: AuthGatewayBootOptions): AuthGatewayServe
 				const formatRoute = FORMAT_ROUTES[pathname];
 				if (formatRoute && req.method === "POST") {
 					return withCors(await handleFormatEndpoint(formatRoute, boot, req, peer, health, cacheStore), req);
+				}
+
+				// Native Gemini paths carry the model in the URL. Inject it (and
+				// the endpoint's streaming mode) so the module sees a complete body.
+				if (req.method === "POST") {
+					const geminiPath = GEMINI_MODEL_PATH.exec(pathname);
+					if (geminiPath) {
+						let pathModel: string;
+						try {
+							pathModel = decodeURIComponent(geminiPath[1]!);
+						} catch {
+							return withCors(json(400, { error: "invalid model path encoding" }), req);
+						}
+						const streaming = geminiPath[2] !== undefined;
+						const module = {
+							...geminiV1beta,
+							parseRequest: (body: unknown, headers?: Headers) => {
+								if (!isRecord(body)) return geminiV1beta.parseRequest(body, headers);
+								let injected = body;
+								if (typeof injected.model !== "string") injected = { ...injected, model: pathModel };
+								if (typeof injected.stream !== "boolean") injected = { ...injected, stream: streaming };
+								return geminiV1beta.parseRequest(injected, headers);
+							},
+						};
+						return withCors(
+							await handleFormatEndpoint({ module, label: "gemini-v1beta" }, boot, req, peer, health, cacheStore),
+							req,
+						);
+					}
 				}
 
 				// Pi-native fast path. Same auth + provider plumbing as the

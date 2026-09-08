@@ -1,0 +1,9 @@
+auth "umans" {
+	name "Umans AI Coding Plan"
+	login "api-key" {
+		auth-url "https://app.umans.ai/billing"
+		instructions "Create or copy your Umans API key from Dashboard → API Keys."
+		prompt "Paste your Umans API key" placeholder="sk-..."
+		validate "anthropic-messages" base-url="https://api.code.umans.ai" model="umans-coder"
+	}
+}

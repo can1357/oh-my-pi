@@ -1,0 +1,8 @@
+// Provider-wire compat for "cline-pass".
+
+provider "cline-pass" {
+	// Replaces the Cline Pass wire-model-id dispatch branch.
+	wire-model-id-mode "cline-pass"
+	// Replaces the Cline Pass thinking-format branch.
+	thinking-format "openai"
+}
