@@ -5,10 +5,13 @@
 ### Added
 
 - Interactive `edit`/`write` approvals can now be answered from an extension: `tool_approval_requested` carries the proposed file contents (`{ path, before, after }`, structural delete/rename operations excluded) and a `respond({ approved, files? })` API — the first valid answer between the TUI dialog and the extension wins, human-edited contents are validated and substituted into the original request, and `tool_approval_resolved` reports the settlement source so an IDE can close its tabs.
+- Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
+
 ### Fixed
 
 - Fixed worker subprocesses failing to declare themselves as worker hosts before dispatching selectors, which prevented nested thread worker spawns during `/usage` stats sync on multi-core systems.
 - Fixed `/usage` displaying a misleading generic database read failure when activity loading fails; the error detail is now sanitized, collapsed to a single line with shortened paths, and surfaced in the dashboard.
+- Advisor notes now report rate limiting accurately, blockers always interrupt even after a lower-severity note in the same update, and deferred notes flush when the primary run completes, including after advisor quota exhaustion ([#11062](https://github.com/can1357/oh-my-pi/issues/11062)).
 
 ## [18.1.14] - 2026-09-07
 
