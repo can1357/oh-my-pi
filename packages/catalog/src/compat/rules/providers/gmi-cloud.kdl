@@ -1,0 +1,8 @@
+// Provider-wire compat for "gmi-cloud"; regenerated from the frozen census using deployment contract selectors.
+
+provider "gmi-cloud" {
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek-ai/DeepSeek-V4-Flash" {
+		thinking-mode "effort"
+	}
+}

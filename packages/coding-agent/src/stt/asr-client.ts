@@ -367,7 +367,7 @@ export class SttClient {
 	}
 
 	#failStreams(error: Error): void {
-		for (const stream of [...this.#streams.values()]) {
+		for (const stream of Array.from(this.#streams.values())) {
 			this.#emitProgress({ modelKey: stream.modelKey, status: "error" });
 			stream.finish(() => stream.reject(error));
 		}
