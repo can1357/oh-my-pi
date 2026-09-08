@@ -394,6 +394,8 @@ export interface AgentLoopConfig extends SimpleStreamOptions {
 	 * Callers may abort synchronously to stop consuming buffered provider events.
 	 */
 	onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
+	/** Certifies that the interceptor never mutates message or event data, allowing immutable snapshot reuse. */
+	onAssistantMessageEventReadOnly?: boolean;
 
 	/**
 	 * Called when GPT-5 Harmony protocol leakage is detected and mitigated.

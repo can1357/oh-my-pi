@@ -187,6 +187,8 @@ export interface AgentOptions {
 	 * Use this when abort decisions must happen before buffered events continue flowing.
 	 */
 	onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
+	/** Certifies that the interceptor never mutates message or event data, allowing immutable snapshot reuse. */
+	onAssistantMessageEventReadOnly?: boolean;
 
 	/**
 	 * Called when GPT-5 Harmony protocol leakage is detected and mitigated.
@@ -420,6 +422,7 @@ export class Agent {
 	#onResponse?: SimpleStreamOptions["onResponse"];
 	#onSseEvent?: SimpleStreamOptions["onSseEvent"];
 	#onAssistantMessageEvent?: (message: AssistantMessage, event: AssistantMessageEvent) => void;
+	#onAssistantMessageEventReadOnly: boolean;
 	#onHarmonyLeak?: (event: HarmonyAuditEvent) => void | Promise<void>;
 	#onBeforeYield?: () => Promise<void> | void;
 	#onTurnEnd?: (messages: AgentMessage[], signal?: AbortSignal, context?: AgentTurnEndContext) => Promise<void> | void;
@@ -504,6 +507,7 @@ export class Agent {
 		this.#getToolChoice = opts.getToolChoice;
 		this.#onToolChoiceUnavailable = opts.onToolChoiceUnavailable;
 		this.#onAssistantMessageEvent = opts.onAssistantMessageEvent;
+		this.#onAssistantMessageEventReadOnly = opts.onAssistantMessageEventReadOnly ?? false;
 		this.#onHarmonyLeak = opts.onHarmonyLeak;
 		this.beforeToolCall = opts.beforeToolCall;
 		this.afterToolCall = opts.afterToolCall;
@@ -851,8 +855,10 @@ export class Agent {
 
 	setAssistantMessageEventInterceptor(
 		fn: ((message: AssistantMessage, event: AssistantMessageEvent) => void) | undefined,
+		options?: { readOnly?: boolean },
 	): void {
 		this.#onAssistantMessageEvent = fn;
+		this.#onAssistantMessageEventReadOnly = options?.readOnly ?? false;
 	}
 
 	setOnBeforeYield(fn: (() => Promise<void> | void) | undefined): void {
@@ -1473,6 +1479,7 @@ export class Agent {
 				? (message, signal) => this.transformAssistantMessage?.(message, signal)
 				: undefined,
 			onAssistantMessageEvent: this.#onAssistantMessageEvent,
+			onAssistantMessageEventReadOnly: this.#onAssistantMessageEventReadOnly,
 			onHarmonyLeak: this.#onHarmonyLeak,
 			onTurnEnd: (messages, signal, context) => this.#onTurnEnd?.(messages, signal, context),
 			getToolChoice,
