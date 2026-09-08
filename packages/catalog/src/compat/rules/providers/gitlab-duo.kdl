@@ -1,0 +1,24 @@
+// Provider-wire compat for "gitlab-duo"; regenerated from the frozen census using deployment contract selectors.
+
+provider "gitlab-duo" {
+	class "openai" {
+		revision ">=5 <5.2" {
+			thinking-mode "effort"
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*5" "*6" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-mode "budget"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "duo-chat-gpt*" {
+		thinking-efforts "minimal" "low" "medium" "high"
+		thinking-mode "effort"
+	}
+	// residue: the Duo GPT-5 fronts reject explicit sampling params like the
+	// upstream OpenAI serving path.
+	models "duo-chat-gpt-5*" {
+		supports-sampling-params #false
+	}
+}

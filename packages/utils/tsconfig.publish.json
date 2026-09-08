@@ -11,12 +11,6 @@
 		"outDir": "dist/types",
 		"noCheck": true
 	},
-	"include": [
-		"src"
-	],
-	"exclude": [
-		"dist",
-		"node_modules",
-		"test"
-	]
+	"include": ["src"],
+	"exclude": ["dist", "node_modules", "test"]
 }

@@ -275,14 +275,12 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 			speechVoiceSetting: "speech.voice",
 			defaultModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
 			defaultVoice: DEFAULT_TTS_VOICE,
-			models: TTS_LOCAL_MODELS.map(
-				({ key, label, description, voices: modelVoices }): AcpSpeechTtsModelOption => ({
-					value: key,
-					label,
-					description,
-					voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
-				}),
-			),
+			models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }): AcpSpeechTtsModelOption => ({
+				value: key,
+				label,
+				description,
+				voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
+			})),
 			voices,
 		},
 	};
@@ -1521,7 +1519,7 @@ export class AcpAgent implements Agent {
 	/**
 	 * Surface a turn-fatal provider error that never reached the client. A
 	 * request that fails before streaming any assistant events — e.g. GitHub
-	 * Copilot's `HTTP 400 model_not_supported` after retries — emits only
+	 * Copilot's `HTTP 400 model_not_supported` — emits only
 	 * `agent_end` with an empty assistant message carrying `errorMessage`
 	 * (`Agent#runLoop`'s catch), so no `message_update`/`message_end` ever maps
 	 * to a session update and the client sees the turn end silently. Errors

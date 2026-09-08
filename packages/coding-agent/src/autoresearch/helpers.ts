@@ -62,8 +62,8 @@ function parseAsiValue(raw: string): ASIValue {
 export function mergeAsi(base: ASIData | null, override: ASIData | undefined): ASIData | undefined {
 	if (!base && !override) return undefined;
 	return {
-		...(base ?? {}),
-		...(override ?? {}),
+		...base,
+		...override,
 	};
 }
 
