@@ -6,6 +6,7 @@
 
 - Fixed Copilot discovery across multiple accounts, preserving Business and Enterprise endpoints and avoiding duplicate requests when a token refreshes.
 - Copilot requests now select only accounts that grant the chosen model, including when model discovery is restored from cache.
+
 ### Added
 
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
