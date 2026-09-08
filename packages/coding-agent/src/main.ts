@@ -28,6 +28,7 @@ import { type Args, reportUnrecognizedFlags, validateToolNames } from "./cli/arg
 import { applyExtensionFlags, type ExtensionFlagSink } from "./cli/extension-flags";
 import { processFileArguments } from "./cli/file-processor";
 import { buildInitialMessage } from "./cli/initial-message";
+import { resolveCliRuntimeApiKeyProvider } from "./cli/runtime-api-key";
 import { selectSession } from "./cli/session-picker";
 import { applyStartupCwd } from "./cli/startup-cwd";
 import { getLatestRelease } from "./cli/update-cli";
@@ -1341,6 +1342,11 @@ export async function buildSessionOptions(
 
 	// Tools
 	if (parsed.noTools) {
+		// Empty whitelist keeps ambient tools off the provider wire via
+		// alwaysInclude skipping in sdk.ts and blocks createTools feature
+		// auto-includes (autolearn/memory/goal). Do not set restrictToolNames —
+		// that also disables extension discovery/commands and defaults LSP off
+		// (use --no-extensions / --no-lsp for those).
 		options.toolNames = parsed.tools && parsed.tools.length > 0 ? parsed.tools : [];
 	} else if (parsed.tools) {
 		options.toolNames = parsed.tools;
@@ -1533,6 +1539,13 @@ export async function runRootCommand(
 			applyRpcDefaultSettingOverrides(settingsInstance);
 		} else if (parsedArgs.mode === "acp") {
 			applyAcpDefaultSettingOverrides(settingsInstance);
+		}
+
+		// Install --api-key before ModelRegistry so credential-scoped startup cache
+		// ids (grokbot renewer hash, etc.) match discovery and warm live rows.
+		const cliApiKeyProvider = parsedArgs.apiKey ? resolveCliRuntimeApiKeyProvider(parsedArgs) : undefined;
+		if (parsedArgs.apiKey && cliApiKeyProvider) {
+			authStorage.setRuntimeApiKey(cliApiKeyProvider, parsedArgs.apiKey);
 		}
 
 		// The registry composes policy-dependent metadata synchronously, including
@@ -1852,9 +1865,11 @@ export async function runRootCommand(
 			sessionOptions.telemetry = createTelemetryExportConfig(sessionOptions.telemetry);
 		}
 
-		// Handle CLI --api-key as runtime override (not persisted)
+		// Handle CLI --api-key as runtime override (not persisted). Prefer the
+		// early install above when the provider was known from --provider/--model;
+		// this path covers deferred model resolution (extensions / discovery).
 		if (parsedArgs.apiKey) {
-			if (!sessionOptions.model && !sessionOptions.modelPattern) {
+			if (!sessionOptions.model && !sessionOptions.modelPattern && !cliApiKeyProvider) {
 				process.stderr.write(
 					`${chalk.red("--api-key requires a model to be specified via --model, --provider/--model, or --models")}\n`,
 				);

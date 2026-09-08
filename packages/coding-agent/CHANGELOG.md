@@ -29,9 +29,37 @@
 
 - Disabled `hashline` edit mode for Kimi, Mimo, DeepSeek Flash, and Stepfun models for stability
 ## [18.1.14] - 2026-09-07
+### Added
+
+- Added `/grokbot` to show Grok Bot provider status (credentials/client; no secrets). Distinct from Cursor (`/login cursor`) and xAI / Grok CLI (`xai`, `xai-oauth`), with independent usage allowances. `/login grokbot` surfaces the host-install prompt for the Grok Bot system. Model lookup resolves Grok Bot `idAliases` (e.g. `grokbot/composer` → live `composer-2.5`) without separate catalog rows.
+- Documented Grok Bot one-shot text and tools probes, per-family tool wire, and the live AvailableModels matrix (`docs/grokbot.md`, `scripts/grokbot-catalog-matrix.ts`).
+- Grok Bot catalog matrix now smokes bash + read + write and retries HTTP 502/504 gateway flakes.
 
 ### Fixed
 
+- Bare `--model <alias>` selectors resolve through `Model.aliases` the same as `provider/<alias>` (e.g. Grok Bot legacy slugs).
+- Grok Bot discovery merges `models.yml` and runtime provider headers (a baseUrl-only runtime override no longer drops configured proxy/tenant headers).
+- `/grokbot` includes configured AuthStorage renewal credentials (`providers.grokbot.apiKey` / `--api-key`) when reporting Renewer status.
+- Credential-scoped startup model caches prefer `providers.*.apiKey` / runtime `--api-key` over environment credentials (same order as AuthStorage.peekApiKey).
+- Credential-scoped startup model caches (including Grok Bot) warm from `providers.*.apiKey` in `models.yml`, not only from environment credentials.
+- Grok Bot warm-start cache load uses the renewer-scoped cache id (env/secrets credential + identity) so previously discovered models are visible before async refresh.
+- Model lookup keeps a canonical model id resolvable when another catalog row lists that id as an alias (aliases no longer null out exact matches).
+- Login success UI only claims credentials were saved to the agent DB when AuthStorage actually stored an identity (host-secret flows like Grok Bot no longer misreport the backup location).
+- CLI `--api-key` is installed before ModelRegistry construction when `--provider` / `provider/model` is known, so credential-scoped catalogs (Grok Bot) can warm live cache rows instead of failing with “Model not found” on offline seeds.
+- Grok Bot credential overrides (`--api-key` / `models.yml`) only warm the startup cache when a machine id is also present, matching env-pair validation.
+- Grok Bot catalog matrix reports `wire: native` for grok/gpt/gemini families (was the internal `error` sentinel). `sand-automation` JSON-as-text Shell dumps are promoted to real tool calls.
+- Grok Bot catalog matrix accepts tool smokes only when the call targets the expected path/token/payload (not tool name alone).
+- `--no-tools` keeps an empty provider tool whitelist without `restrictToolNames`, so extension commands and LSP remain available unless `--no-extensions` / `--no-lsp` are set.
+- `--no-tools` also blocks createTools feature auto-includes (autolearn/memory/goal/think/yield) so the empty whitelist stays empty on the wire.
+- `--api-key` early binding skips multi-provider `--models` scopes and any bare (unqualified) selector (single shared qualified provider only).
+- Bare `--model` no longer falls through to `--models` for early `--api-key` ownership (session options prefer `--model`).
+- `--provider` alone no longer early-binds `--api-key` without `--model` / `--models` (keeps the missing-model CLI guard).
+- `--provider` with `--models` (no `--model`) no longer early-binds `--api-key` to that provider (session options ignore provider in that form).
+- Grok Bot catalog matrix text probes require the exact expected token (no loose `pong` match).
+
+## [18.1.14] - 2026-09-07
+
+### Fixed
 - The startup update notice counts every change in a release: bullets written above a `###` heading now count under `Other`, and `+`/`*` markers and lightly indented bullets count like `-`.
 - Fixed Codex Astra retaining its larger window after disabling Extended Context, including cached models; explicit model overrides still take precedence.
 - Fixed explicit Codex context-window overrides widening past the server-honored maximum; they now clamp to the documented ceiling like upstream Codex ([#11157](https://github.com/can1357/oh-my-pi/pull/11157) by [@H4vC](https://github.com/H4vC)).

@@ -1,5 +1,5 @@
 import * as path from "node:path";
-import type { ApiKeyResolver, FetchImpl, UsageProvider } from "@oh-my-pi/pi-ai";
+import { type ApiKeyResolver, type FetchImpl, getEnvApiKey, type UsageProvider } from "@oh-my-pi/pi-ai";
 import { registerCustomApi, unregisterCustomApis } from "@oh-my-pi/pi-ai/api-registry";
 import { registerOAuthProvider, unregisterOAuthProvider, unregisterOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import type { OAuthCredentials, OAuthLoginCallbacks } from "@oh-my-pi/pi-ai/oauth/types";
@@ -22,6 +22,12 @@ import {
 	clampsContextOverride,
 	resolveMaxContextWindow,
 } from "@oh-my-pi/pi-catalog/compat/context-window";
+import {
+	resolveGrokbotCacheCredentialAsync,
+	resolveGrokbotDiscoveryIdentity,
+	resolveGrokbotDiscoveryIdentityAsync,
+	resolveGrokbotMachineId,
+} from "@oh-my-pi/pi-catalog/discovery/grokbot-auth";
 import { applyCatalogMetrics, CatalogMetricsIndex } from "@oh-my-pi/pi-catalog/identity/metrics";
 import { readModelCache, writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import {
@@ -746,10 +752,17 @@ export class ModelRegistry {
 		this.#addImplicitDiscoverableProviders(configuredProviders);
 		const configuredDiscoveryProviders = new Set(this.#discoverableProviders.map(provider => provider.provider));
 		this.#pendingStandardCacheProviders = new Set(
-			STARTUP_MODEL_CACHE_PROVIDER_IDS.filter(
-				providerId =>
-					!configuredDiscoveryProviders.has(providerId) && !isCredentialScopedModelCacheProvider(providerId),
-			),
+			STARTUP_MODEL_CACHE_PROVIDER_IDS.filter(providerId => {
+				if (configuredDiscoveryProviders.has(providerId)) return false;
+				// Credential-scoped providers (grokbot, copilot, …) can warm-start from
+				// cache when a sync-resolvable credential exists so the renewer-scoped
+				// cache id matches what discovery previously wrote. Include models.yml
+				// `providers.*.apiKey` (already installed into AuthStorage above).
+				if (isCredentialScopedModelCacheProvider(providerId)) {
+					return Boolean(this.#resolveCredentialScopedStartupApiKey(providerId));
+				}
+				return true;
+			}),
 		);
 		this.#cachedDiscoverableModels = logger.time("modelRegistry:loadDiscoverableModels", () =>
 			this.#applyHardcodedModelPolicies(this.#loadCachedDiscoverableModels()),
@@ -959,12 +972,43 @@ export class ModelRegistry {
 		);
 	}
 
+	#resolveCredentialScopedStartupApiKey(providerId: string): string | undefined {
+		// Match AuthStorage.peekApiKey: runtime/config overrides beat env so the
+		// startup cache row matches the credential discovery will hash later.
+		const override = this.authStorage.peekApiKeyOverrides(providerId)?.trim();
+		if (providerId === "grokbot") {
+			// Overrides bypass resolveGrokbotEnvApiKey — still require the machine
+			// id pair or streamGrokBot fails with “machine id missing”.
+			if (override) return resolveGrokbotMachineId() ? override : undefined;
+			return getEnvApiKey(providerId);
+		}
+		return override || getEnvApiKey(providerId);
+	}
+
 	#resolveStartupModelCacheProviderId(providerId: string): string {
 		const baseUrl =
 			this.#runtimeProviderOverrides.get(providerId)?.baseUrl ??
 			this.#providerOverrides.get(providerId)?.baseUrl ??
 			(this.#hasFullSnapshot ? this.getProviderBaseUrl(providerId) : undefined);
-		return resolveModelCacheProviderId(providerId, { baseUrl });
+		const apiKey = isCredentialScopedModelCacheProvider(providerId)
+			? this.#resolveCredentialScopedStartupApiKey(providerId)
+			: undefined;
+		if (providerId === "grokbot") {
+			const identity = resolveGrokbotDiscoveryIdentity();
+			return resolveModelCacheProviderId(providerId, {
+				baseUrl,
+				apiKey,
+				namespace: identity.namespace,
+				clientVersion: identity.clientVersion,
+				headers: this.getProviderHeaders("grokbot"),
+			});
+		}
+		return resolveModelCacheProviderId(providerId, { baseUrl, apiKey });
+	}
+
+	#resolveProviderOverrideHeaders(providerId: string): Record<string, string> | undefined {
+		// Merge models.yml + runtime override headers (same as getProviderHeaders).
+		return this.getProviderHeaders(providerId);
 	}
 
 	#loadCachedStandardProviderModels(providerIds: readonly string[]): {
@@ -1891,7 +1935,23 @@ export class ModelRegistry {
 				const preparedConfig =
 					getProviderDefinition(descriptor.providerId)?.prepareModelDiscovery?.(discoveryConfig) ??
 					discoveryConfig;
-				const managerOptions = descriptor.createModelManagerOptions(preparedConfig);
+				// Grok Bot cache scope needs secrets-file identity + renewer; load
+				// both async once here so createModelManagerOptions never sync-reads
+				// the file. Forward configured provider headers for reverse-proxy discovery.
+				const grokbotHeaders =
+					descriptor.providerId === "grokbot" ? this.#resolveProviderOverrideHeaders("grokbot") : undefined;
+				const managerConfig =
+					descriptor.providerId === "grokbot"
+						? {
+								...preparedConfig,
+								...(await resolveGrokbotDiscoveryIdentityAsync()),
+								cacheCredential: await resolveGrokbotCacheCredentialAsync(
+									typeof preparedConfig.apiKey === "string" ? preparedConfig.apiKey : undefined,
+								),
+								...(grokbotHeaders ? { headers: grokbotHeaders } : {}),
+							}
+						: preparedConfig;
+				const managerOptions = descriptor.createModelManagerOptions(managerConfig);
 				const modelsDev = managerOptions.modelsDev
 					? { ...managerOptions.modelsDev, additiveOnly: true }
 					: modelsDevCatalogFallback(descriptor.providerId, this.#fetch);
@@ -2412,6 +2472,15 @@ export class ModelRegistry {
 	getProviderBaseUrl(provider: string): string | undefined {
 		return this.#modelsForProviderLookup(provider).find(m => m.provider === provider && m.baseUrl)?.baseUrl;
 	}
+
+	/**
+	 * Effective provider base URL: runtime override, then models.yml, then bundled
+	 * catalog model default (same precedence discovery uses).
+	 */
+	getEffectiveProviderBaseUrl(provider: string): string | undefined {
+		return this.#descriptorBaseUrl(provider);
+	}
+
 	/**
 	 * Get provider-level headers without including per-model overrides.
 	 */

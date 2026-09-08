@@ -1,3 +1,6 @@
+import * as os from "node:os";
+import * as path from "node:path";
+
 const SEC = 1_000;
 const MIN = 60 * SEC;
 const HOUR = 60 * MIN;
@@ -110,4 +113,26 @@ export function pluralize(label: string, count: number): string {
  */
 export function formatPercent(ratio: number): string {
 	return `${(ratio * 100).toFixed(1)}%`;
+}
+
+/**
+ * Replace a leading home-directory prefix with `~` for safe TUI/status display.
+ * Windows home paths are matched case-insensitively; separators are normalized to `/`.
+ */
+export function shortenPath(filePath: unknown, homeDir?: string): string {
+	if (typeof filePath !== "string") {
+		return "";
+	}
+	const home = homeDir ?? os.homedir();
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
+	const hasHomePrefix = windowsStyle
+		? filePath.toLowerCase().startsWith(home.toLowerCase())
+		: filePath.startsWith(home);
+	if (home && hasHomePrefix) {
+		const suffix = filePath.slice(home.length);
+		if (suffix === "" || suffix.startsWith(path.posix.sep) || suffix.startsWith(path.win32.sep)) {
+			return `~${suffix.replaceAll(path.win32.sep, path.posix.sep)}`;
+		}
+	}
+	return filePath;
 }

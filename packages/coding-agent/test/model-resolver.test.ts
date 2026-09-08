@@ -2334,6 +2334,96 @@ describe("effort-tier variant aliases", () => {
 	});
 });
 
+describe("resolveProviderModelReference Model.aliases", () => {
+	test("resolves Grok Bot idAliases to the canonical live row", () => {
+		const models: Model<"grokbot-sand">[] = [
+			buildModel({
+				id: "composer-2.5",
+				name: "Composer 2.5",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+				aliases: ["composer", "composer-latest"],
+				sandParameterIds: ["fast"],
+			}),
+		];
+		expect(resolveProviderModelReference("grokbot", "composer", models)?.id).toBe("composer-2.5");
+		expect(resolveProviderModelReference("grokbot", "composer-latest", models)?.id).toBe("composer-2.5");
+		expect(resolveProviderModelReference("grokbot", "composer-2.5", models)?.id).toBe("composer-2.5");
+	});
+
+	test("keeps a canonical id resolvable when another row aliases the same id", () => {
+		const models: Model<"grokbot-sand">[] = [
+			buildModel({
+				id: "default",
+				name: "Auto",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+				aliases: ["auto"],
+			}),
+			buildModel({
+				id: "auto",
+				name: "auto",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 200_000,
+				maxTokens: 64_000,
+			}),
+		];
+		expect(resolveProviderModelReference("grokbot", "auto", models)?.id).toBe("auto");
+		expect(resolveProviderModelReference("grokbot", "default", models)?.id).toBe("default");
+	});
+});
+
+describe("bare Model.aliases selectors", () => {
+	const grokbot = (id: string, overrides: Partial<ModelSpec<"grokbot-sand">> = {}): Model<"grokbot-sand"> =>
+		buildModel({
+			id,
+			name: id,
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 200_000,
+			maxTokens: 64_000,
+			...overrides,
+		});
+
+	test("resolves an unqualified live alias the same as grokbot/<alias>", () => {
+		const models: Model<Api>[] = [
+			grokbot("composer-2.5", { aliases: ["composer-1.5", "composer"] }),
+			// Fuzzy decoy: bare "composer" must not land on a substring id.
+			grokbot("composer-2-fast"),
+		];
+		expect(parseModelPattern("composer-1.5", models).model?.id).toBe("composer-2.5");
+		expect(parseModelPattern("composer", models).model?.id).toBe("composer-2.5");
+		expect(parseModelPattern("grokbot/composer-1.5", models).model?.id).toBe("composer-2.5");
+	});
+
+	test("live canonical ids beat another row's alias for the same bare spelling", () => {
+		const models: Model<Api>[] = [grokbot("default", { aliases: ["auto"] }), grokbot("auto")];
+		expect(parseModelPattern("auto", models).model?.id).toBe("auto");
+		expect(parseModelPattern("default", models).model?.id).toBe("default");
+	});
+});
+
 describe("Devin selector parity", () => {
 	const devinModel = (id: string, overrides: Partial<Model<"devin-agent">> = {}): Model<Api> =>
 		buildModel({

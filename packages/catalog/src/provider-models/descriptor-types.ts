@@ -8,6 +8,12 @@ export type ModelManagerConfig = {
 	fetch?: FetchImpl;
 	/** The supplied fetch already applies provider-specific authentication. */
 	authenticated?: boolean;
+	/** Grok Bot: pre-resolved `x-sand-box-namespace` (from async identity prep). */
+	namespace?: string;
+	/** Grok Bot: pre-resolved `x-cursor-client-version` (from async identity prep). */
+	clientVersion?: string;
+	/** Caller/model headers (e.g. reverse-proxy API key) for discovery. */
+	headers?: Record<string, string>;
 };
 
 /** Catalog discovery configuration for providers that support endpoint-based model listing. */

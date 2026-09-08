@@ -1,0 +1,7 @@
+auth "grokbot" {
+	name "Grok Bot (not Cursor, not xAI)"
+	// Host secrets (renewal credential + machine id) written from inside the
+	// Grok Bot system — not Cursor OAuth and not xAI / Grok CLI login.
+	env hook="grokbot"
+	login "custom" hook="grokbot"
+}
