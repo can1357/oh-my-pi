@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+- Speech-to-text can now use a configured OpenAI Codex account by selecting OpenAI Codex as the speech transcriber ([#10374](https://github.com/can1357/oh-my-pi/pull/10374) by [@kml93](https://github.com/kml93)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

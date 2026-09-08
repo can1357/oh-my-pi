@@ -863,6 +863,12 @@ export function getTinyModelsCacheDir(agentDir?: string): string {
 export function getDocumentConversionCacheDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, path.join("cache", "document-conversions"), "cache");
 }
+
+/** Get the speech-to-text recording cache directory (~/.omp/agent/cache/speech-to-text; XDG default: $XDG_CACHE_HOME/omp/cache/speech-to-text). */
+export function getSpeechToTextCacheDir(agentDir?: string): string {
+	return dirs.agentSubdir(agentDir, path.join("cache", "speech-to-text"), "cache");
+}
+
 /** Get the per-project composer speculative cache directory (~/.omp/agent/cache/composer; XDG default: $XDG_CACHE_HOME/omp/cache/composer). */
 export function getComposerCacheDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, path.join("cache", "composer"), "cache");

@@ -1,16 +1,16 @@
 import { AudioCapture } from "@oh-my-pi/pi-natives";
 import { logger } from "@oh-my-pi/pi-utils";
+import type { ModelRegistry } from "../config/model-registry";
 import { settings } from "../config/settings";
-import { type SttStreamHandle, sttClient } from "./asr-client";
-import { downloadSttModel, isSttModelCached } from "./downloader";
-import { resolveSttModelSpec } from "./models";
+import type { SttTranscriber, SttTranscriptionSession } from "./contracts";
 import { evaluateSubmitTrigger } from "./submit-trigger";
+import { createSttTranscriber } from "./transcriber-registry";
 
 export type SttState = "idle" | "recording" | "transcribing";
 
 interface ToggleOptions {
-	showWarning(msg: string): void;
-	showStatus(msg: string): void;
+	showWarning(message: string): void;
+	showStatus(message: string): void;
 	onStateChange(state: SttState): void;
 	/** Force a redraw after async edits to the composer (live segment/preview inserts). */
 	requestRender?(): void;
@@ -32,26 +32,41 @@ interface CaptureHandle {
 
 type CaptureFactory = (onAudio: (error: Error | null, samples: Float32Array) => void) => CaptureHandle;
 
-/** Coordinates native microphone capture with incremental local transcription. */
+interface STTControllerOptions {
+	createCapture?: CaptureFactory;
+	modelRegistry?: ModelRegistry;
+	getSessionId?: () => string | undefined;
+	createTranscriber?: (id: string) => SttTranscriber;
+}
+
+/** Coordinates microphone capture, the selected transcriber, and editor updates. */
 export class STTController {
 	#state: SttState = "idle";
-	#resolvedModelKey: string | null = null;
 	#toggling = false;
 	#stopAfterStart = false;
 	#disposed = false;
 	readonly #createCapture: CaptureFactory;
+	readonly #modelRegistry: ModelRegistry | undefined;
+	readonly #getSessionId: () => string | undefined;
+	readonly #createTranscriber: (id: string) => SttTranscriber;
+	#transcriberId: string | null = null;
+	#transcriber: SttTranscriber | null = null;
+	#session: SttTranscriptionSession | null = null;
+	#recorder: CaptureHandle | null = null;
+	#editor: Editor | null = null;
+	#abort: AbortController | null = null;
+	#committed = false;
+	#utterance = "";
 
-	// Live streaming capture.
-	#stream: SttStreamHandle | null = null;
-	#streamRecorder: CaptureHandle | null = null;
-	#streamEditor: Editor | null = null;
-	#streamCommitted = false;
-	#streamAbort: AbortController | null = null;
-	#streamUtterance = "";
-
-	/** Creates a controller; tests may replace the hardware capture boundary. */
-	constructor(createCapture: CaptureFactory = onAudio => new AudioCapture(16_000, onAudio)) {
-		this.#createCapture = createCapture;
+	constructor(optionsOrCreateCapture: STTControllerOptions | CaptureFactory = {}) {
+		const options =
+			typeof optionsOrCreateCapture === "function"
+				? { createCapture: optionsOrCreateCapture }
+				: optionsOrCreateCapture;
+		this.#createCapture = options.createCapture ?? (onAudio => new AudioCapture(16_000, onAudio));
+		this.#modelRegistry = options.modelRegistry;
+		this.#getSessionId = options.getSessionId ?? (() => undefined);
+		this.#createTranscriber = options.createTranscriber ?? createSttTranscriber;
 	}
 
 	get state(): SttState {
@@ -84,237 +99,172 @@ export class STTController {
 			if (this.#stopAfterStart && this.#state === "recording") {
 				this.#stopAfterStart = false;
 				await this.#stop(options);
-			} else if (this.#state !== "recording") {
-				this.#stopAfterStart = false;
 			}
+			if (this.#state !== "recording") this.#stopAfterStart = false;
 		} finally {
 			this.#toggling = false;
 		}
 	}
 
-	async #ensureDeps(options: ToggleOptions): Promise<boolean> {
-		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
-		// Keyed on the model rather than a one-shot flag: switching stt.modelName
-		// mid-session must re-run preflight so an uncached new tier downloads here
-		// (with progress) instead of blocking silently at stop.
-		if (this.#resolvedModelKey === modelKey) return true;
-		try {
-			// Only clear the status line when preflight emitted progress; the
-			// cached-model fast path emits nothing.
-			let wroteStatus = false;
-			const status = (msg: string): void => {
-				wroteStatus = true;
-				options.showStatus(msg);
-			};
-			// Loading the multi-hundred-MB speech model into the worker is what made
-			// the old "Checking STT dependencies…" step slow. Don't pay it before
-			// recording: when the weights are already cached, start now and warm the
-			// model in the background — the stream/transcribe paths load it on demand
-			// (memoized in the worker) and it is hot by the time recording stops.
-			// Only a genuine first-use download blocks, with explicit progress, so we
-			// never record silently against missing weights.
-			if (await isSttModelCached(modelKey)) {
-				this.#warmModel(modelKey);
-			} else {
-				await downloadSttModel(modelKey, p => status(`Downloading speech model ${p.label} (${p.percent}%)`));
-			}
-			if (wroteStatus) options.showStatus("");
-			this.#resolvedModelKey = modelKey;
-			return true;
-		} catch (err) {
-			const msg = err instanceof Error ? err.message : "Failed to setup STT dependencies";
-			options.showWarning(msg);
-			logger.error("STT dependency setup failed", { error: msg });
-			return false;
-		}
-	}
-
-	/** Warm the speech model in the worker without blocking recording. The worker
-	 *  memoizes the load, so the stream/transcribe path reuses it and the model is
-	 *  hot by the time recording stops. Only called when the weights are already
-	 *  cached, so no network fetch happens. On load failure (corrupt cache, OOM,
-	 *  runtime install) invalidate the resolved key so the next toggle re-runs
-	 *  preflight and retries instead of skipping it forever. */
-	#warmModel(modelKey: string): void {
-		void downloadSttModel(modelKey).catch(err => {
-			// Guard against a concurrent model switch clobbering a newer resolution.
-			if (!this.#disposed && this.#resolvedModelKey === modelKey) this.#resolvedModelKey = null;
-			logger.debug("stt: background model warmup failed", {
-				error: err instanceof Error ? err.message : String(err),
-			});
-		});
-	}
-
 	async #start(editor: Editor, options: ToggleOptions): Promise<void> {
-		if (!(await this.#ensureDeps(options))) return;
-		await this.#startStreaming(editor, options);
+		const modelRegistry = this.#modelRegistry;
+		this.#editor = editor;
+		this.#committed = false;
+		this.#utterance = "";
+		this.#abort = new AbortController();
+		const transcriberId = settings.get("stt.transcriber");
+		if (this.#transcriberId !== transcriberId || !this.#transcriber) {
+			this.#transcriberId = transcriberId;
+			this.#transcriber = this.#createTranscriber(transcriberId);
+		}
+		const transcriber = this.#transcriber;
+		try {
+			const session = await transcriber.createSession(
+				{
+					authStorage: modelRegistry?.authStorage,
+					sessionId: this.#getSessionId(),
+					language: settings.get("stt.language") || undefined,
+					signal: this.#abort.signal,
+				},
+				{
+					onPartial: text => {
+						if (this.#disposed || this.#state !== "recording") return;
+						this.#editor?.setVolatileText(this.#prefixed(text));
+						options.requestRender?.();
+					},
+					onSegment: text => {
+						if (this.#disposed) return;
+						const prefixed = this.#prefixed(text);
+						if (prefixed) {
+							this.#editor?.commitVolatileText(prefixed);
+							this.#committed = true;
+							this.#utterance += prefixed;
+						}
+						if (!prefixed) this.#editor?.clearVolatileText();
+						options.requestRender?.();
+					},
+					onDurationWarning: options.showWarning,
+					onStatus: options.showStatus,
+					onError: error => {
+						void this.#failCapture(error, options);
+					},
+				},
+			);
+			this.#session = session;
+			this.#recorder = this.#createCapture((error, samples) => {
+				if (this.#disposed || this.#session !== session || this.#state !== "recording") return;
+				if (error) {
+					void this.#failCapture(error, options);
+					return;
+				}
+				session.pushAudio(samples);
+			});
+		} catch (error) {
+			await this.#cleanup();
+			const message = error instanceof Error ? error.message : "Failed to start speech transcription";
+			options.showWarning(message);
+			logger.error("STT failed to start", { error: message, transcriber: transcriber.id });
+			return;
+		}
+		this.#setState("recording", options);
+		logger.debug("STT recording started", { transcriber: transcriber.id });
 	}
 
 	async #stop(options: ToggleOptions): Promise<void> {
-		await this.#stopStreaming(options);
-	}
-
-	// ── Live streaming ──────────────────────────────────────────────
-
-	/** Segment text gets a leading space once a prior segment is committed, so
-	 *  phrases join naturally; the first phrase is inserted at the cursor as-is. */
-	#prefixed(text: string): string {
-		const normalized = text.replace(/\s+/g, " ").trim();
-		if (!normalized) return "";
-		return this.#streamCommitted ? ` ${normalized}` : normalized;
-	}
-
-	async #startStreaming(editor: Editor, options: ToggleOptions): Promise<void> {
-		const modelKey = resolveSttModelSpec(settings.get("stt.modelName") as string | undefined).key;
-		const language = settings.get("stt.language") as string | undefined;
-		this.#streamEditor = editor;
-		this.#streamCommitted = false;
-		this.#streamUtterance = "";
-		this.#streamAbort = new AbortController();
-		const stream = sttClient.startStream(modelKey, {
-			language: language || undefined,
-			signal: this.#streamAbort.signal,
-			onPartial: text => {
-				if (this.#disposed || this.#state !== "recording") return;
-				this.#streamEditor?.setVolatileText(this.#prefixed(text));
-				options.requestRender?.();
-			},
-			onSegment: text => {
-				if (this.#disposed) return;
-				const prefixed = this.#prefixed(text);
-				if (prefixed) {
-					this.#streamEditor?.commitVolatileText(prefixed);
-					this.#streamCommitted = true;
-					this.#streamUtterance += prefixed;
-				} else {
-					this.#streamEditor?.clearVolatileText();
-				}
-				options.requestRender?.();
-			},
-		});
-		this.#stream = stream;
-		let recorder: CaptureHandle;
-		try {
-			recorder = this.#createCapture((error, samples) => {
-				if (this.#disposed || this.#stream !== stream || this.#state !== "recording") return;
-				if (error) {
-					logger.error("Native microphone capture failed", { error: error.message });
-					const activeRecorder = this.#streamRecorder;
-					this.#streamRecorder = null;
-					try {
-						activeRecorder?.stop();
-					} catch (cause) {
-						logger.debug("stt: microphone cleanup failed", {
-							error: cause instanceof Error ? cause.message : String(cause),
-						});
-					}
-					this.#streamAbort?.abort(error);
-					stream.cancel();
-					this.#streamEditor?.clearVolatileText();
-					options.requestRender?.();
-					this.#cleanupStream();
-					this.#setState("idle", options);
-					options.showWarning(error.message);
-					return;
-				}
-				stream.pushAudio(samples);
-			});
-		} catch (err) {
-			stream.cancel();
-			this.#cleanupStream();
-			const msg = err instanceof Error ? err.message : "Failed to start microphone capture";
-			options.showWarning(msg);
-			logger.error("STT recording failed to start", { error: msg });
-			return;
-		}
-		this.#streamRecorder = recorder;
-		this.#setState("recording", options);
-		logger.debug("STT live recording started", { modelKey });
-	}
-
-	async #stopStreaming(options: ToggleOptions): Promise<void> {
-		const stream = this.#stream;
-		const recorder = this.#streamRecorder;
-		if (!stream) {
+		const session = this.#session;
+		if (!session) {
 			this.#setState("idle", options);
 			return;
 		}
 		this.#setState("transcribing", options);
-		// Stop the mic first so no further audio is fed, then flush the worker.
-		try {
-			recorder?.stop();
-		} catch (err) {
-			logger.debug("stt: streaming recorder stop failed", {
-				error: err instanceof Error ? err.message : String(err),
-			});
-		}
-		this.#streamRecorder = null;
-
+		this.#stopRecorder();
 		let failed = false;
 		let finalText = "";
 		try {
-			finalText = (await stream.stop()).trim();
-		} catch (err) {
+			finalText = (await session.stop()).trim();
+		} catch (error) {
 			failed = true;
 			if (!this.#disposed) {
-				const msg = err instanceof Error ? err.message : "Transcription failed";
-				options.showWarning(msg);
-				logger.error("STT live transcription failed", { error: msg });
+				const message = error instanceof Error ? error.message : "Transcription failed";
+				options.showWarning(message);
+				logger.error("STT transcription failed", { error: message, transcriber: this.#transcriber?.id });
 			}
 		}
 		if (this.#disposed) {
-			this.#cleanupStream();
+			await this.#cleanup();
 			return;
 		}
-		if (!this.#streamCommitted && finalText) {
+		if (!this.#committed && finalText) {
 			const prefixed = this.#prefixed(finalText);
-			this.#streamEditor?.commitVolatileText(prefixed);
-			this.#streamCommitted = true;
-			this.#streamUtterance = prefixed;
-		} else {
-			this.#streamEditor?.clearVolatileText();
+			this.#editor?.commitVolatileText(prefixed);
+			this.#committed = true;
+			this.#utterance = prefixed;
 		}
+		if (this.#committed || !finalText) this.#editor?.clearVolatileText();
 		options.requestRender?.();
-		if (!failed) options.showStatus(this.#streamCommitted ? "" : "No speech detected.");
-
-		if (this.#streamCommitted && !failed && this.#streamEditor) {
-			const trigger = settings.get("stt.submitTrigger");
-			const { submit, trimTrailing } = evaluateSubmitTrigger(this.#streamUtterance, trigger);
-			if (trimTrailing > 0) {
-				this.#streamEditor.deleteBeforeCursor(trimTrailing);
-			}
-			if (submit) {
-				this.#streamEditor.submit();
-			}
-		}
-
-		this.#cleanupStream();
+		if (!failed) options.showStatus(this.#committed ? "" : "No speech detected.");
+		if (this.#committed && !failed && this.#editor) this.#applySubmitTrigger(this.#editor);
+		await this.#cleanup();
 		this.#setState("idle", options);
 	}
 
-	#cleanupStream(): void {
-		this.#stream = null;
-		this.#streamRecorder = null;
-		this.#streamEditor = null;
-		this.#streamCommitted = false;
-		this.#streamAbort = null;
-		this.#streamUtterance = "";
+	async #failCapture(error: Error, options: ToggleOptions): Promise<void> {
+		this.#abort?.abort(error);
+		this.#stopRecorder();
+		this.#editor?.clearVolatileText();
+		options.requestRender?.();
+		this.#setState("idle", options);
+		options.showWarning(error.message);
+		logger.error("Speech capture failed", { error: error.message });
+		await this.#cleanup();
+	}
+
+	#prefixed(text: string): string {
+		const normalized = text.replace(/\s+/g, " ").trim();
+		if (!normalized) return "";
+		return this.#committed ? ` ${normalized}` : normalized;
+	}
+
+	#applySubmitTrigger(editor: Editor): void {
+		const { submit, trimTrailing } = evaluateSubmitTrigger(this.#utterance, settings.get("stt.submitTrigger"));
+		if (trimTrailing > 0) editor.deleteBeforeCursor(trimTrailing);
+		if (submit) editor.submit();
+	}
+
+	#stopRecorder(): void {
+		const recorder = this.#recorder;
+		this.#recorder = null;
+		try {
+			recorder?.stop();
+		} catch (error) {
+			logger.debug("stt: microphone cleanup failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	async #cleanup(): Promise<void> {
+		const session = this.#session;
+		this.#session = null;
+		this.#recorder = null;
+		this.#editor = null;
+		this.#committed = false;
+		this.#utterance = "";
+		this.#abort = null;
+		await session?.dispose().catch(error => {
+			logger.debug("stt: session cleanup failed", {
+				error: error instanceof Error ? error.message : String(error),
+			});
+		});
 	}
 
 	dispose(): void {
 		this.#disposed = true;
-		if (this.#streamAbort) {
-			this.#streamAbort.abort();
-			this.#streamAbort = null;
-		}
-		this.#stream?.cancel();
-		try {
-			this.#streamRecorder?.stop();
-		} catch {
-			// best effort cleanup
-		}
-		this.#cleanupStream();
+		this.#abort?.abort();
+		this.#stopRecorder();
+		void this.#cleanup();
+		this.#transcriber = null;
+		this.#transcriberId = null;
 		this.#state = "idle";
-		this.#resolvedModelKey = null;
 	}
 }

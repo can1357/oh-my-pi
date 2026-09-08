@@ -10,7 +10,8 @@ import { Settings, settings } from "../config/settings";
 import { checkPythonKernelAvailability } from "../eval/py/kernel";
 import { theme } from "../modes/theme/theme";
 import { downloadSttModel, isSttModelCached } from "../stt/downloader";
-import { isSttModelKey, STT_MODEL_OPTIONS } from "../stt/models";
+import { isSttModelKey } from "../stt/local/models";
+import { isSttTranscriberId, STT_TRANSCRIBER_OPTIONS } from "../stt/transcriber-registry";
 import { downloadTtsModel, isTtsLocalModelKey, isTtsModelCached, TTS_LOCAL_MODEL_OPTIONS } from "../tts";
 import { selectSetupModel } from "./setup-model-picker";
 
@@ -153,6 +154,9 @@ async function handlePythonSetup(flags: { json?: boolean; check?: boolean }): Pr
  */
 interface SpeechComponent {
 	name: string;
+	/** Whether this component needs locally downloaded artifacts; cloud-backed
+	 *  choices (e.g. the Codex transcriber) are excluded from dependency checks. */
+	requiresLocalDeps(): boolean;
 	isReady(): Promise<boolean>;
 	status(): Promise<string>;
 	pick?(): Promise<boolean>;
@@ -162,32 +166,42 @@ interface SpeechComponent {
 function buildSpeechComponents(): SpeechComponent[] {
 	return [
 		{
-			name: "Speech-to-Text model",
-			isReady: () => isSttModelCached(settings.get("stt.modelName")),
+			name: "Speech-to-Text transcriber",
+			requiresLocalDeps: () => isSttModelKey(settings.get("stt.transcriber")),
+			isReady: async () => {
+				const key = settings.get("stt.transcriber");
+				if (!isSttModelKey(key)) return true;
+				return isSttModelCached(key);
+			},
 			status: async () => {
-				const key = settings.get("stt.modelName");
+				const key = settings.get("stt.transcriber");
+				if (!isSttModelKey(key)) return `${key} — no local dependencies`;
 				return (await isSttModelCached(key)) ? key : `${key} — not downloaded`;
 			},
 			pick: async () => {
 				const chosen = await selectSetupModel(
-					"Speech-to-Text model",
-					[...STT_MODEL_OPTIONS],
-					settings.get("stt.modelName"),
+					"Speech Transcriber",
+					[...STT_TRANSCRIBER_OPTIONS],
+					settings.get("stt.transcriber"),
 				);
 				if (chosen === null) return false;
-				if (isSttModelKey(chosen)) {
-					settings.set("stt.modelName", chosen);
+				if (isSttTranscriberId(chosen)) {
+					settings.set("stt.transcriber", chosen);
 					await settings.flush();
 				}
 				return true;
 			},
-			ensure: onProgress =>
-				downloadSttModel(settings.get("stt.modelName"), progress =>
+			ensure: onProgress => {
+				const key = settings.get("stt.transcriber");
+				if (!isSttModelKey(key)) return Promise.resolve();
+				return downloadSttModel(key, progress =>
 					onProgress({ stage: `Downloading ${progress.label} model`, percent: progress.percent }),
-				),
+				);
+			},
 		},
 		{
 			name: "Text-to-Speech model",
+			requiresLocalDeps: () => true,
 			isReady: () => isTtsModelCached(settings.get("tts.localModel")),
 			status: async () => {
 				const key = settings.get("tts.localModel");
@@ -225,11 +239,12 @@ function buildSpeechComponents(): SpeechComponent[] {
 async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Promise<void> {
 	await Settings.init({ cwd: getProjectDir() });
 	const components = buildSpeechComponents();
+	const checkComponents = components.filter(component => component.requiresLocalDeps());
 
 	if (flags.json) {
 		const report: Record<string, { ready: boolean; status: string }> = {};
 		let allReady = true;
-		for (const component of components) {
+		for (const component of checkComponents) {
 			const ready = await component.isReady();
 			if (!ready) allReady = false;
 			report[component.name] = { ready, status: await component.status() };
@@ -242,7 +257,7 @@ async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Pr
 	if (flags.check) {
 		console.log(chalk.bold("Speech dependencies:"));
 		let allReady = true;
-		for (const component of components) {
+		for (const component of checkComponents) {
 			const ready = await component.isReady();
 			if (!ready) allReady = false;
 			const mark = ready ? chalk.green("[ok]") : chalk.yellow("[missing]");
@@ -255,7 +270,8 @@ async function handleSpeechSetup(flags: { json?: boolean; check?: boolean }): Pr
 	const interactive = Boolean(process.stdout.isTTY);
 	for (const component of components) {
 		if (interactive && component.pick) {
-			await component.pick();
+			const selected = await component.pick();
+			if (!selected) continue;
 		}
 		if (await component.isReady()) {
 			console.log(chalk.green(`${theme.status.success} ${component.name} ready`));
