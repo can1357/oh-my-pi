@@ -12,6 +12,7 @@
 
 ### Fixed
 
+- Grok Bot catalog matrix bash smoke rejects redirected or tee'd stdout (ping must reach the tool result).
 - CLI `--api-key` normalizes provider ids to lowercase before AuthStorage install so mixed-case selectors (e.g. `GrokBot/...`) still warm credential-scoped catalogs.
 - Grok Bot catalog matrix bash smoke rejects redirect filenames that only mention the ping token.
 - Grok Bot catalog matrix tool smoke requires a path-segment boundary (rejects `wrongnotes/...` suffix matches).

@@ -169,8 +169,9 @@ function commandMentionsPath(segment: string, filePath: string): boolean {
 }
 
 /**
- * Bash smoke must actually echo/printf the ping as an argument — not in a
- * sibling statement, comment, or redirect filename (`echo wrong > ping`).
+ * Bash smoke must actually echo/printf the ping to stdout — not in a sibling
+ * statement, comment, redirect filename (`echo wrong > ping`), or diverted
+ * stdout (`echo ping >/dev/null`, `echo ping | tee file`).
  */
 export function echoLikeShellCommand(command: string, ping: string): boolean {
 	if (!ping) return false;
@@ -178,11 +179,9 @@ export function echoLikeShellCommand(command: string, ping: string): boolean {
 	if (!cmd) return false;
 	return shellStatementSegments(cmd).some(segment => {
 		if (!/^(?:echo|printf)\b/.test(segment)) return false;
-		// Strip redirects / tee so the ping only counts as stdout payload.
-		const withoutRedirects = segment
-			.replace(/(?:>>?|<<?)\s*(?:'[^']*'|"[^"]*"|\S+)/g, " ")
-			.replace(/\|\s*tee\b[\s\S]*$/i, " ");
-		return withoutRedirects.includes(ping);
+		// Output redirects / tee mean the tool result never sees the ping.
+		if (/(?:>>?|\|\s*tee\b)/i.test(segment)) return false;
+		return segment.includes(ping);
 	});
 }
 
