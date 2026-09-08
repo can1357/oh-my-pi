@@ -95,6 +95,55 @@ describe("hub unified wait", () => {
 		expect(text).toContain("## Completed (1)");
 	});
 
+	test("a job the wait reports is not also auto-delivered to the owner sink", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
+
+		const delivered: string[] = [];
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		manager.registerDeliverySink(SELF_ID, jobId => {
+			delivered.push(jobId);
+		});
+		const job = registerHangingJob(manager, "quick job");
+		const tool = new HubTool(makeSession(manager));
+
+		const pending = tool.execute("call_ack", { op: "wait", ids: [job.id] });
+		job.finish("done output");
+		const result = await pending;
+
+		// Exactly one foreground result: the wait carries the body, the sink stays empty.
+		const details = result.details as CoordinationDetails;
+		expect(details.jobs?.[0]?.resultText).toBe("done output");
+		await manager.drainDeliveries({ timeoutMs: 200 });
+		expect(delivered).toEqual([]);
+	});
+
+	test("a job settling behind a message win still auto-delivers", async () => {
+		const registry = AgentRegistry.global();
+		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });
+		registry.register({ id: "Peer", displayName: "task", kind: "sub", parentId: SELF_ID, session: null });
+
+		const delivered: string[] = [];
+		const manager = new AsyncJobManager({ onJobComplete: () => {} });
+		manager.registerDeliverySink(SELF_ID, jobId => {
+			delivered.push(jobId);
+		});
+		const job = registerHangingJob(manager, "straggler");
+		const tool = new HubTool(makeSession(manager));
+
+		// The message wins the race; the job settles inside the same wait window
+		// and no foreground result reports it.
+		const pending = tool.execute("call_straggler", { op: "wait" });
+		job.finish("straggler output");
+		await IrcBus.global().send({ from: "Peer", to: SELF_ID, body: "shared file is yours" });
+
+		const details = (await pending).details as CoordinationDetails;
+		expect(details.waited?.from).toBe("Peer");
+
+		await manager.drainDeliveries({ timeoutMs: 200 });
+		expect(delivered).toEqual([job.id]);
+	});
+
 	test("bare wait with no jobs and no running peers returns immediately", async () => {
 		const registry = AgentRegistry.global();
 		registry.register({ id: SELF_ID, displayName: "main", kind: "main", session: null });

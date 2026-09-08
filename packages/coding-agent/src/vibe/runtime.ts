@@ -1018,9 +1018,10 @@ export class VibeSessionRegistry {
 		}
 
 		let waitEndedByTimeout = false;
+		const watchedJobIds: string[] = [];
 		if (runningJobs.length > 0 && collectSettled().length === 0) {
 			const timeoutMs = Math.max(1, Math.trunc(args.timeoutMs ?? DEFAULT_WAIT_TIMEOUT_MS));
-			const watchedJobIds = runningJobs.map(job => job.id);
+			watchedJobIds.push(...runningJobs.map(job => job.id));
 			manager.watchJobs(watchedJobIds);
 			const { promise: timeoutPromise, resolve: timeoutResolve } = Promise.withResolvers<"timeout">();
 			const timeoutHandle = setTimeout(() => timeoutResolve("timeout"), timeoutMs);
@@ -1043,6 +1044,9 @@ export class VibeSessionRegistry {
 			try {
 				waitEndedByTimeout = (await Promise.race(racePromises)) === "timeout";
 			} finally {
+				// Claim before unwatching: this wait reports settled results itself,
+				// so lifting the watch must not race an auto-delivery of the same one.
+				manager.acknowledgeDeliveries(watchedJobIds);
 				manager.unwatchJobs(watchedJobIds);
 				clearTimeout(timeoutHandle);
 				abortCleanup?.();
@@ -1050,7 +1054,11 @@ export class VibeSessionRegistry {
 		}
 
 		const settled = collectSettled();
-		manager.acknowledgeDeliveries(settled.map(entry => entry.jobId));
+		manager.consumeJobResults(settled.map(entry => entry.jobId));
+		// Release the claim on anything this wait did not report, so a job that
+		// settled too late to collect still auto-delivers.
+		const reported = new Set(settled.map(entry => entry.jobId));
+		manager.resumeDeliveries(watchedJobIds.filter(jobId => !reported.has(jobId)));
 		// Current in-flight state, independent of the snapshot: a session whose
 		// watched turn settled may already be mid queued follow-up.
 		const stillRunning = watched.filter(record => record.turn !== undefined).map(record => record.id);

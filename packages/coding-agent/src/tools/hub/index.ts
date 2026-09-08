@@ -494,6 +494,9 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 				await Promise.race(racePromises);
 			}
 		} finally {
+			// Claim before unwatching: this wait reports the watched jobs itself, so
+			// lifting the watch must not race an auto-delivery of the same result.
+			manager.acknowledgeDeliveries(watchedJobIds);
 			manager.unwatchJobs(watchedJobIds);
 			if (timeoutHandle) clearTimeout(timeoutHandle);
 			if (progressTimer) clearInterval(progressTimer);
@@ -511,7 +514,12 @@ export class HubTool implements AgentTool<typeof hubSchema, HubDetails> {
 		// dequeued message would otherwise be lost).
 		if (busLeg && messaging) {
 			const settled = await busLeg;
-			if (settled.message) return messageResult(messaging.senderId, settled.message);
+			if (settled.message) {
+				// A message result reports no job, so release the claim and let any
+				// job that settled during the wait auto-deliver.
+				manager.resumeDeliveries(watchedJobIds);
+				return messageResult(messaging.senderId, settled.message);
+			}
 		}
 
 		return buildJobResult(this.session, manager, "wait", jobsToWatch, []);

@@ -234,7 +234,7 @@ export class AsyncJobManager {
 	readonly #deliveries: AsyncJobDelivery[] = [];
 	readonly #inFlightDeliveries: AsyncJobDelivery[] = [];
 	readonly #suppressedDeliveries = new Set<string>();
-	readonly #watchedJobs = new Set<string>();
+	readonly #watchedJobs = new Map<string, number>();
 	readonly #consumedJobResults = new Set<string>();
 	readonly #evictionTimers = new Map<string, NodeJS.Timeout>();
 	readonly #pollEscalation = new Map<string | undefined, PollEscalationState>();
@@ -440,7 +440,7 @@ export class AsyncJobManager {
 	watchJobs(jobIds: string[]): number {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
 		for (const jobId of uniqueJobIds) {
-			this.#watchedJobs.add(jobId);
+			this.#watchedJobs.set(jobId, (this.#watchedJobs.get(jobId) ?? 0) + 1);
 		}
 		this.#notifyDeliveryQueueChanged();
 		return uniqueJobIds.length;
@@ -450,11 +450,33 @@ export class AsyncJobManager {
 		const uniqueJobIds = Array.from(new Set(jobIds.map(id => id.trim()).filter(id => id.length > 0)));
 		let removed = 0;
 		for (const jobId of uniqueJobIds) {
-			if (this.#watchedJobs.delete(jobId)) {
-				removed += 1;
+			const watchCount = this.#watchedJobs.get(jobId);
+			if (watchCount === undefined) continue;
+			if (watchCount > 1) {
+				this.#watchedJobs.set(jobId, watchCount - 1);
+			} else {
+				this.#watchedJobs.delete(jobId);
 			}
+			removed += 1;
+			this.#requeueSettledDelivery(jobId);
 		}
+		this.#notifyDeliveryQueueChanged();
 		return removed;
+	}
+
+	/**
+	 * Re-enqueue a job that settled while its delivery was suppressed, so lifting
+	 * the last suppression still delivers the result exactly once.
+	 */
+	#requeueSettledDelivery(jobId: string): void {
+		if (this.isDeliverySuppressed(jobId) || this.#consumedJobResults.has(jobId)) return;
+		const job = this.#jobs.get(jobId);
+		if (!job || (job.status !== "completed" && job.status !== "failed")) return;
+		const queued =
+			this.#deliveries.some(delivery => delivery.jobId === jobId) ||
+			this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId);
+		if (queued) return;
+		this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
 	}
 
 	/**
@@ -532,13 +554,7 @@ export class AsyncJobManager {
 			const jobId = rawId.trim();
 			if (!jobId) continue;
 			if (!this.#suppressedDeliveries.delete(jobId)) continue;
-			const job = this.#jobs.get(jobId);
-			if (!job || (job.status !== "completed" && job.status !== "failed")) continue;
-			const queued =
-				this.#deliveries.some(delivery => delivery.jobId === jobId) ||
-				this.#inFlightDeliveries.some(delivery => delivery.jobId === jobId);
-			if (queued) continue;
-			this.#enqueueDelivery(jobId, job.status === "completed" ? (job.resultText ?? "") : (job.errorText ?? ""));
+			this.#requeueSettledDelivery(jobId);
 		}
 	}
 
