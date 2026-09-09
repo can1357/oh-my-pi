@@ -10,6 +10,12 @@ provider "grokbot" {
 	// Live discovery owns limits/modality; gen:models must not backfill from
 	// canonical-family or stencil.so same-id references.
 	credential-scoped-catalog #true
+	// Anthropic-class sand rows with tools use product keep-model (Shell/Read/Write
+	// on the original Anthropic requestedModel). Reviewed in KDL so a row can
+	// override to native/error/parent-chat without a TypeScript class branch.
+	class "anthropic" {
+		sand-tools-wire "keep-model"
+	}
 	// Synthetic routers + offline seeds: reviewed budgeting floor when live
 	// AvailableModels omits contextTokenLimit (proto3 zero/absent).
 	// Synthetic sand-default router: reviewed reasoning capability (discovery/seeds stay neutral).

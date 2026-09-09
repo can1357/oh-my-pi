@@ -947,6 +947,35 @@ describe("Grok Bot generated thinking policy", () => {
 		expect(resolveModelPolicy(seed).catalog.credentialScopedCatalog).toBe(true);
 	});
 
+	it("assigns sand-tools-wire keep-model to Anthropic-class grokbot rows via provider KDL", () => {
+		const claude = buildModel({
+			id: "claude-opus-5",
+			name: "Claude Opus 5",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(claude.sandToolsWire).toBe("keep-model");
+		const grok = buildModel({
+			id: "grok-4.6",
+			name: "Grok 4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(grok.sandToolsWire).toBeUndefined();
+	});
+
 	it("assigns sand-empty-tools-retry-wire keep-model to gemini-* via provider KDL", () => {
 		const gemini = buildModel({
 			id: "gemini-3-flash",

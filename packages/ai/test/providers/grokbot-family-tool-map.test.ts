@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { applyAnthropicSandToolWire } from "../../src/providers/grokbot/anthropic-sand-wire";
 import { resolveGrokbotRequestedModel } from "../../src/providers/grokbot/model-request";
@@ -76,7 +77,20 @@ describe("grokbot family tool mapping", () => {
 	test("Anthropic class + auto advertises product Shell/Read/Write on the original requestedModel", () => {
 		for (const id of ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5", "claude-fable-5"]) {
 			expect(classifyModel("grokbot", id, { lenient: true }).class).toBe("anthropic");
-			const { policy, applied, names } = wireFor(id);
+			const built = buildModel({
+				id,
+				name: id,
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 100_000,
+				maxTokens: 8_000,
+			});
+			expect(built.sandToolsWire).toBe("keep-model");
+			const { policy, applied, names } = wireFor(id, { sandToolsWire: "keep-model" });
 			expect(policy.kind).toBe("product");
 			expect(policy.wire).toBe("keep-model");
 			expect(applied.requestedModel.modelId).toBe(id);
@@ -270,6 +284,7 @@ describe("grokbot family tool mapping", () => {
 			modelId: "opaque-legacy-slug",
 			requestModelId: "claude-opus-5",
 			toolCount: OMP_CORE.length,
+			sandToolsWire: "keep-model",
 		});
 		expect(viaCanonical.kind).toBe("product");
 		expect(viaCanonical.wire).toBe("keep-model");

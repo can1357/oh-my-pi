@@ -387,6 +387,18 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(false);
+		// Quoted semicolons / redirects must not invent a second executable write.
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{
+					name: "Shell",
+					arguments: { command: `echo 'noop; echo ${ping} > ${writePath}'` },
+				},
+				ping,
+				id,
+			),
+		).toBe(false);
 	});
 
 	test("rejects tool calls that only match by name", () => {

@@ -1132,13 +1132,13 @@ export interface Model<TApi extends Api = Api> {
 	 * Reviewed Grok Bot Anthropic+tools auto wire profile (KDL `sand-tools-wire`).
 	 * Synthetic routers declare `parent-chat` / `automation`; unset for ordinary models.
 	 */
-	sandToolsWire?: "parent-chat" | "automation" | "keep-model" | "error" | "sand-default-fallback";
+	sandToolsWire?: "parent-chat" | "automation" | "keep-model" | "error" | "native" | "sand-default-fallback";
 	/**
 	 * On an empty first tool turn, replay once with this wire (KDL
 	 * `sand-empty-tools-retry-wire`). Typically `keep-model` for Gemini-class
 	 * sand rows that otherwise burn the budget on thinking.
 	 */
-	sandEmptyToolsRetryWire?: "parent-chat" | "automation" | "keep-model" | "error" | "sand-default-fallback";
+	sandEmptyToolsRetryWire?: "parent-chat" | "automation" | "keep-model" | "error" | "native" | "sand-default-fallback";
 	/**
 	 * Reviewed Grok Bot `requestedModel.modelId` rewrite (KDL `sand-wire-model-id`).
 	 * Catalog id stays the AvailableModels slug; the stream sends this bare id.

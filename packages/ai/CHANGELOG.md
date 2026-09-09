@@ -6,7 +6,9 @@
 
 - Grok Bot promotes every advertised Gemini `tool_code` call in a fence (not only the first).
 - Catalog matrix shell smoke treats only the first arm of `&&` / `||` / `&` as reachable so conditional echoes/writes cannot pass fabricated gates.
+- Catalog matrix shell smoke splits on `;` / `&&` / `||` / `&` with quote awareness so quoted separators cannot invent executable write/echo segments.
 - Catalog matrix OMP tool descriptions load from static `.md` prompt assets.
+- Grok Bot Anthropic keep-model auto wire comes from catalog `sand-tools-wire` (KDL), so a reviewed row can opt into `native` / `error` without a TypeScript class branch.
 - Grok Bot parent-chat SendToUser ownership uses the advertised wire name (`customWireName` or name), so an internal `SendToUser` aliased to another wire still treats injected `SendToUser` as visible text.
 - Grok Bot history keeps collision-loser `customWireName` tools under their internal name when another tool owns the advertised slot (e.g. `extension_shell` vs `bash` → Shell).
 - Grok Bot honors `toolChoice: "none"` by advertising no tools (handoff keeps `context.tools` for prompt-cache reuse).

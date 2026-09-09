@@ -171,25 +171,97 @@ export function writeLikeShellCommand(command: string): boolean {
 export function readLikeShellCommand(command: string): boolean {
 	const cmd = command.trim();
 	if (!cmd || writeLikeShellCommand(cmd)) return false;
-	return /(?:^|[;&|\n]\s*)(?:cat|head|sed)\b/.test(cmd);
+	return shellStatementSegments(cmd).some(segment => /^(?:cat|head|sed)\b/.test(segment));
 }
 
 /** Strip `#` comments, then split into unconditionally reachable statements.
- * Sequential separators: `\n`, `;`. Within a unit, only the first conjunct of
- * `&&` / `||` / `&` counts — later arms are conditional, so `false && echo ping`
- * cannot pass a fabricated smoke gate via the unreachable echo. Pipes stay together.
+ * Sequential separators: `\n`, `;` (unquoted only). Within a unit, only the first
+ * conjunct of `&&` / `||` / `&` counts — later arms are conditional, so
+ * `false && echo ping` cannot pass a fabricated smoke gate via the unreachable
+ * echo. Quoted separators (`echo 'a; b > path'`) stay inside one segment.
+ * Pipes stay together.
  */
 function shellStatementSegments(command: string): string[] {
 	const withoutComments = command
 		.split("\n")
 		.map(line => line.replace(/(^|[\t ;&|])#[^\n]*/g, "$1"))
 		.join("\n");
+	const sequential: string[] = [];
+	let quote: "'" | '"' | "`" | null = null;
+	let escaped = false;
+	let start = 0;
+	for (let i = 0; i < withoutComments.length; i++) {
+		const ch = withoutComments[i]!;
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (quote) {
+			if (ch === "\\" && quote !== "'") {
+				escaped = true;
+				continue;
+			}
+			if (ch === quote) quote = null;
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			quote = ch;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (ch === "\n" || ch === ";") {
+			const part = withoutComments.slice(start, i).trim();
+			if (part) sequential.push(part);
+			start = i + 1;
+		}
+	}
+	const tail = withoutComments.slice(start).trim();
+	if (tail) sequential.push(tail);
+
 	const out: string[] = [];
-	for (const sequential of withoutComments.split(/\n|;/)) {
-		const first = sequential.split(/\s*(?:&&|\|\||&)\s*/)[0]?.trim();
+	for (const unit of sequential) {
+		const first = firstUnquotedConjunct(unit);
 		if (first) out.push(first);
 	}
 	return out;
+}
+
+/** First arm of an unquoted `&&` / `||` / `&` chain (quote-aware). */
+function firstUnquotedConjunct(unit: string): string {
+	let quote: "'" | '"' | "`" | null = null;
+	let escaped = false;
+	for (let i = 0; i < unit.length; i++) {
+		const ch = unit[i]!;
+		if (escaped) {
+			escaped = false;
+			continue;
+		}
+		if (quote) {
+			if (ch === "\\" && quote !== "'") {
+				escaped = true;
+				continue;
+			}
+			if (ch === quote) quote = null;
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			quote = ch;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (ch === "&") {
+			if (unit[i + 1] === "&") return unit.slice(0, i).trim();
+			return unit.slice(0, i).trim();
+		}
+		if (ch === "|" && unit[i + 1] === "|") return unit.slice(0, i).trim();
+	}
+	return unit.trim();
 }
 
 /** True when a statement would prevent later statements from running. */

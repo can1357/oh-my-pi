@@ -98,20 +98,44 @@ describe("anthropic sand tool wire", () => {
 			resolveAnthropicSandToolsWire(undefined, undefined, {
 				modelId: "claude-opus-5",
 				toolCount: 2,
+				sandToolsWire: "keep-model",
 			}),
 		).toBe("keep-model");
 		expect(
 			resolveAnthropicSandToolsWire(undefined, undefined, {
 				modelId: "claude-fable-5",
 				toolCount: 2,
+				sandToolsWire: "keep-model",
 			}),
 		).toBe("keep-model");
+		// Without catalog sand-tools-wire, auto does not invent Anthropic policy.
+		expect(
+			resolveAnthropicSandToolsWire(undefined, undefined, {
+				modelId: "claude-opus-5",
+				toolCount: 2,
+			}),
+		).toBe("native");
 		expect(
 			resolveAnthropicSandToolsWire(undefined, undefined, {
 				modelId: "grok-4.6",
 				toolCount: 2,
 			}),
 		).toBe("native");
+		// Catalog override wins over the Anthropic-class default (e.g. native).
+		expect(
+			resolveAnthropicSandToolsWire(undefined, undefined, {
+				modelId: "claude-opus-5",
+				toolCount: 2,
+				sandToolsWire: "native",
+			}),
+		).toBe("native");
+		expect(
+			resolveAnthropicSandToolsWire(undefined, undefined, {
+				modelId: "claude-opus-5",
+				toolCount: 2,
+				sandToolsWire: "error",
+			}),
+		).toBe("error");
 		// Router wire mode comes from catalog `sand-tools-wire`, not id compares.
 		expect(
 			resolveAnthropicSandToolsWire(undefined, undefined, {

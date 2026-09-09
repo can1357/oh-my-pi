@@ -78,6 +78,7 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 			sandToolsWire === "automation" ||
 			sandToolsWire === "keep-model" ||
 			sandToolsWire === "error" ||
+			sandToolsWire === "native" ||
 			sandToolsWire === "sand-default-fallback") &&
 		model.sandToolsWire === undefined
 	) {
@@ -89,6 +90,7 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 			sandEmptyToolsRetryWire === "automation" ||
 			sandEmptyToolsRetryWire === "keep-model" ||
 			sandEmptyToolsRetryWire === "error" ||
+			sandEmptyToolsRetryWire === "native" ||
 			sandEmptyToolsRetryWire === "sand-default-fallback") &&
 		model.sandEmptyToolsRetryWire === undefined
 	) {

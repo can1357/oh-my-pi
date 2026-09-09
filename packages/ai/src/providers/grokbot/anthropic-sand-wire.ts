@@ -60,9 +60,10 @@ export function resolveAnthropicSandToolsWire(
 	if (raw !== "auto") return "error";
 
 	const toolCount = context?.toolCount ?? 0;
-	const modelId = context?.modelId?.trim() ?? "";
 	if (toolCount === 0) return "error";
-	if (isAnthropicSandModelId(modelId)) return "keep-model";
+	// Catalog `sand-tools-wire` wins — including Anthropic-class keep-model from
+	// providers/grokbot.kdl and any reviewed native/error override. Do not force
+	// keep-model from taxonomy class in TypeScript.
 	const catalogWire = context?.sandToolsWire;
 	if (
 		catalogWire === "parent-chat" ||
