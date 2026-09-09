@@ -91,6 +91,13 @@ export class CollabSocket {
 	 * chain; {@link MAX_RETIRED_PEERS} then bounds the settled remainder.
 	 */
 	#retiredPeers = new Map<number, boolean>();
+	/**
+	 * Bumped when the relay recreates the room. Bookkeeping deferred from one room
+	 * may not be applied in the next: the ids are reissued and the records cleared,
+	 * so the same id is a different peer and a callback that acts on it by id alone
+	 * is acting on somebody else's record.
+	 */
+	#roomGeneration = 0;
 
 	constructor(opts: CollabSocketOptions) {
 		this.#opts = opts;
@@ -184,6 +191,7 @@ export class CollabSocket {
 	 * the drain tests pin.
 	 */
 	#resetForRecreatedRoom(): void {
+		this.#roomGeneration++;
 		this.#retiredPeers.clear();
 		const discarded = this.#discardWhere(pending => pending.targetPeer !== 0);
 		if (discarded > 0) logger.debug("collab: discarded targeted sends across a reconnect", { discarded });
@@ -421,11 +429,21 @@ export class CollabSocket {
 	#applyPeerLifecycle(msg: RelayControlMessage): void {
 		if (msg.t !== "peer-left") return;
 		const peer = msg.peer;
+		const generation = this.#roomGeneration;
 		this.#retiredPeers.set(peer, false);
 		this.dropPeer(peer);
 		// The obligation is discharged once everything received before this control
 		// message has been dispatched; nothing can arrive from the id afterwards.
+		//
+		// In this room only. The chain outlives a reconnect, so a settlement queued
+		// behind a held decryption can run after the room was recreated — and by
+		// then the id has been reissued and the records cleared, so marking "peer"
+		// settled marks the *new* occupant's record instead. That record is then
+		// evictable before the frames received ahead of its departure have been
+		// dispatched, and once it is gone the id reads as served again: a departed
+		// peer's frame reaches the owner with authority the relay already withdrew.
 		void this.#recvChain.then(() => {
+			if (generation !== this.#roomGeneration) return;
 			if (this.#retiredPeers.has(peer)) this.#retiredPeers.set(peer, true);
 			this.#trimRetired();
 		});

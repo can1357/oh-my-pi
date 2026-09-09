@@ -6,6 +6,8 @@ import { CollabSocket } from "../../src/collab/relay-client";
 const ORIGINAL_WEBSOCKET = globalThis.WebSocket;
 const HIGH_WATER_MARK = 64 * 1024;
 const DRAIN_RETRY_MS = 25;
+/** `MAX_RETIRED_PEERS` in relay-client.ts. */
+const RETIREMENT_CAP = 256;
 
 async function waitUntil(predicate: () => boolean, message: string): Promise<void> {
 	const deadline = Date.now() + 3_000;
@@ -219,6 +221,80 @@ describe("CollabSocket send backpressure", () => {
 			// record must stand, or the host would act on the hello as a live peer and
 			// register a ghost participant.
 			expect(socket.isServing(1)).toBe(false);
+		} finally {
+			gate.resolve();
+			socket.close();
+		}
+	}, 15_000);
+
+	it("does not let an old room's retirement settle a record in the new one", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const key = await importRoomKey(generateRoomKey());
+		const gate = Promise.withResolvers<void>();
+		let gated = false;
+		const realDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+		const decrypt = vi
+			.spyOn(crypto.subtle, "decrypt")
+			.mockImplementation(async (...args: Parameters<typeof crypto.subtle.decrypt>) => {
+				if (!gated) {
+					gated = true;
+					await gate.promise;
+				}
+				return realDecrypt(...args);
+			});
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/rooms", role: "host", key });
+		// What the owner would decide with: `CollabHost#handleFrame` rejects a frame
+		// whose sender the socket no longer serves, so this is the authority the
+		// dispatch carries.
+		const dispatched: { peer: number; served: boolean }[] = [];
+		socket.onFrame = (_frame, fromPeer) => dispatched.push({ peer: fromPeer, served: socket.isServing(fromPeer) });
+		try {
+			socket.connect();
+			const first = BackpressuredWebSocket.instances[0]!;
+			first.open();
+
+			// Old room: peer 1's frame is held mid-decryption, so the settlement its
+			// departure schedules is still queued behind it — and stays queued across
+			// everything that follows, because the receive chain is one chain.
+			const stale = await seal(key, { t: "hello", proto: 1, name: "old" } as CollabFrame);
+			first.onmessage?.({ data: packEnvelope(1, stale).buffer } as MessageEvent);
+			await waitUntil(() => decrypt.mock.calls.length > 0, "socket never began opening the old room's frame");
+			first.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer: 1 }) } as MessageEvent);
+
+			// The room is recreated and hands out ids from 1 again.
+			first.close();
+			await waitUntil(
+				() => BackpressuredWebSocket.instances.length > 1,
+				"socket never retried after the transient drop",
+			);
+			const second = BackpressuredWebSocket.instances[1]!;
+			second.open();
+
+			// New room, same id, different client: it sends a frame and leaves. Its
+			// record may not be settled until that frame has been dispatched, which is
+			// the whole obligation the record exists for.
+			const fresh = await seal(key, { t: "hello", proto: 1, name: "new" } as CollabFrame);
+			second.onmessage?.({ data: packEnvelope(1, fresh).buffer } as MessageEvent);
+			second.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer: 1 }) } as MessageEvent);
+			// Past the cap, so a record settled early is a record evicted early. None
+			// of these settle while the chain is held.
+			for (let peer = 2; peer <= RETIREMENT_CAP + 45; peer++) {
+				second.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer }) } as MessageEvent);
+			}
+
+			gate.resolve();
+			await waitUntil(() => dispatched.length > 0, "the new room's frame was never dispatched");
+			// The old room's settlement runs first. It must not touch this record: the
+			// new peer 1 has left, and a frame dispatched as though it had not is
+			// authority the relay already withdrew.
+			// Exactly one dispatch, and not served: the old room's frame is dropped at
+			// the reconnect, and the new room's arrives with its departure known.
+			// Nothing is claimed about the record past this point — once its own
+			// settlement runs the obligation is discharged and the cap may age it out,
+			// which is the backstop working rather than the hole reopening.
+			expect(dispatched).toEqual([{ peer: 1, served: false }]);
 		} finally {
 			gate.resolve();
 			socket.close();
