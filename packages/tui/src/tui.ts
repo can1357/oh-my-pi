@@ -1971,7 +1971,6 @@ export class TUI extends Container {
 	#prepareForcedRender(clearScrollback: boolean): void {
 		if (clearScrollback && !this.#clearScrollbackOnNextRender) {
 			this.#frameProvider?.beginHistoryReplay?.();
-			if (TERMINAL.imageProtocol === ImageProtocol.Kitty) this.#imageBudget.forgetTransmitted();
 		}
 		this.#clearScrollbackOnNextRender ||= clearScrollback;
 		this.#forceViewportRepaintOnNextRender = true;
@@ -2638,6 +2637,11 @@ export class TUI extends Container {
 			// explicitly destructive, so remove every placement—not only the ones
 			// this TUI tracked—then resend images composed for the clean replay.
 			buffer += encodeKittyDeleteAllImages();
+			// `d=A` spares virtual placements, and erasing the placeholder text it
+			// leaves behind does not remove the prototype either. The ids this
+			// reset forgot are named explicitly here — their tracking is gone, so
+			// nothing downstream could find them again.
+			for (const id of this.#imageBudget.takeResetPurgeIds()) buffer += encodeKittyDeleteImage(id);
 			this.#imageBudget.resetPlacementEpochs();
 		}
 		if (TERMINAL.imageProtocol === ImageProtocol.Kitty) {
@@ -2823,7 +2827,6 @@ export class TUI extends Container {
 			// repaint so no stale frame can become visible between writes.
 			if (this.#clearScrollbackOnNextRender) {
 				this.#pendingAltExit = exitSequence;
-				if (TERMINAL.imageProtocol === ImageProtocol.Kitty) this.#imageBudget.forgetTransmitted();
 			} else {
 				this.#noteAltBufferToggle();
 				this.terminal.write(exitSequence);
@@ -2853,12 +2856,35 @@ export class TUI extends Container {
 			this.#renderAltFrame(width, height);
 			return;
 		}
+		// #prepareResizeReplay can latch this frame's reset itself (a settled
+		// rebuild-mode resize does), so it runs before the gate; the gate then runs
+		// before either arm composes anything.
+		if (this.#frameProvider !== undefined) this.#prepareResizeReplay(width, height);
+		this.#forgetTransmittedForPendingReset();
 		if (this.#frameProvider !== undefined) {
-			this.#prepareResizeReplay(width, height);
 			this.#renderProviderFrame(width, height);
 			return;
 		}
 		this.#renderChildrenFrame(width, height);
+	}
+
+	/**
+	 * Drop transmit tracking when a destructive repaint is about to compose the
+	 * normal screen, so the pass re-sends every image's data alongside its
+	 * placement. That repaint opens with `d=A`, which is what removes the store —
+	 * queueing per-id deletes when the reset was merely *latched* lets them ride
+	 * out on an unrelated frame instead, and a frame painted on the alternate
+	 * buffer carries them off without the repaint that restores them. A latch that
+	 * never reaches a repaint — `stop()` drops it — then deletes nothing.
+	 *
+	 * Must run after everything that can latch the reset for this frame and before
+	 * anything composes it — one call on the normal-screen dispatch path, ahead of
+	 * the arm split, so a new arm cannot be added without it.
+	 */
+	#forgetTransmittedForPendingReset(): void {
+		if (!this.#clearScrollbackOnNextRender) return;
+		if (TERMINAL.imageProtocol !== ImageProtocol.Kitty) return;
+		this.#imageBudget.forgetTransmitted();
 	}
 
 	/**

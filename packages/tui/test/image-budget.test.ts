@@ -738,7 +738,13 @@ describe("TUI inline-image budget", () => {
 						expect([...resident]).toEqual(ids.slice(0, 2));
 						tui.resetDisplay();
 						await settle(term);
-						expect([...resident]).toEqual([ids[1]!]);
+						// A latched reset deletes nothing until its own repaint runs. In
+						// the fullscreen arm the overlay is installed before start(),
+						// so no normal frame is ever painted and that repaint never
+						// comes: both ids stay resident, still within the cap. The
+						// retired one here belongs to an earlier alternate frame — this
+						// fixture says nothing about normal-buffer placements.
+						expect([...resident]).toEqual(fullscreen ? ids.slice(0, 2) : [ids[1]!]);
 					}
 				}
 				expect([...resident]).toEqual(ids.slice(-2));
@@ -779,11 +785,13 @@ describe("TUI inline-image budget", () => {
 	function trackKittyGraphics(term: VirtualTerminal): {
 		resident: Set<number>;
 		placed: Set<number>;
+		virtual: Set<number>;
 		deleted: number[];
 		writes: string[];
 	} {
 		const resident = new Set<number>();
 		const placed = new Set<number>();
+		const virtual = new Set<number>();
 		const deleted: number[] = [];
 		const writes: string[] = [];
 		const realWrite = term.write.bind(term);
@@ -794,21 +802,33 @@ describe("TUI inline-image budget", () => {
 				const id = Number(fields.get("i"));
 				const action = fields.get("a");
 				if (action === "t") resident.add(id);
-				if (action === "p" && resident.has(id)) placed.add(id);
+				if (action === "p") {
+					if (fields.get("U") === "1") virtual.add(id);
+					if (resident.has(id)) placed.add(id);
+				}
 				if (action === "d" && fields.get("d") === "I") {
 					resident.delete(id);
 					placed.delete(id);
+					virtual.delete(id);
 					deleted.push(id);
 				}
 				if (action === "d" && fields.get("d") === "A") {
-					deleted.push(...resident);
-					resident.clear();
-					placed.clear();
+					// Kitty's `d=A` deletes images and their placements but spares
+					// *virtual* placements, so a placeholder image survives it. Model
+					// that: an oracle that clears everything here reports an id as
+					// gone when the terminal still holds it, and then a missing
+					// explicit delete looks like no leak at all.
+					for (const held of resident) {
+						if (virtual.has(held)) continue;
+						deleted.push(held);
+						resident.delete(held);
+						placed.delete(held);
+					}
 				}
 			}
 			realWrite(data);
 		});
-		return { resident, placed, deleted, writes };
+		return { resident, placed, virtual, deleted, writes };
 	}
 
 	it("keeps normal-buffer placements visible across a fullscreen overlay pass", async () => {
@@ -896,6 +916,198 @@ describe("TUI inline-image budget", () => {
 
 			expect(placed.has(sharedId)).toBe(true);
 			expect(resident.has(sharedId)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("spares a screen image whose suppression the reconcile undercut", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed, deleted } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(1);
+		const older = makeImage(tui.imageBudget, "older");
+		const kept = makeImage(tui.imageBudget, "kept");
+		const keptId = tui.imageBudget.acquireId("kept");
+		const modal = makeImage(tui.imageBudget, "modal");
+		const modalId = tui.imageBudget.acquireId("modal");
+		let transcript = [older, kept];
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: transcript.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(placed.has(keptId)).toBe(true);
+
+			const overlay = tui.showOverlay(
+				{ render: width => modal.render(width), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+
+			// Dropping the older image relaxes the threshold, but the pass already
+			// decided suppression under the old one. That stale text fallback lasts
+			// a frame; deleting the graphic behind it lasts forever.
+			overlay.hide();
+			transcript = [kept];
+			await settle(term);
+
+			expect(deleted).not.toContain(keptId);
+			expect(placed.has(keptId)).toBe(true);
+			expect(tui.imageBudget.acquireId("kept")).toBe(keptId);
+			// The modal's image really is retired, so the store still comes down.
+			expect(deleted).toContain(modalId);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("names forgotten placeholder images in a reset's own deletions", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { writes } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: true });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(3);
+		const gone = makeImage(tui.imageBudget, "gone");
+		const goneId = tui.imageBudget.acquireId("gone");
+		let showImage = true;
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: showImage ? [...gone.render(size.columns)] : ["transcript"] }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(writes.join("")).toContain(BASE64_ONE_PIXEL_PNG);
+
+			// Drop it from the frame, then reset. `d=A` spares virtual placements
+			// and erasing placeholder text leaves the prototype, so the reset has to
+			// name this id: forgetting drops it from tracking, and no later sweep
+			// can reach a placement it no longer knows about.
+			showImage = false;
+			writes.length = 0;
+			tui.resetDisplay();
+			await settle(term);
+
+			const output = writes.join("");
+			const deleteAll = output.indexOf("\x1b_Ga=d,d=A");
+			expect(deleteAll).toBeGreaterThanOrEqual(0);
+			expect(output).toContain(`\x1b_Ga=d,d=I,i=${goneId}`);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("holds a reset's deletions until the repaint that restores them", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed, deleted } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(3);
+		const transcript = makeImage(tui.imageBudget, "transcript");
+		const transcriptId = tui.imageBudget.acquireId("transcript");
+		tui.addChild(transcript);
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(placed.has(transcriptId)).toBe(true);
+
+			// The modal carries no images of its own, so nothing on the alternate
+			// buffer has any claim on the transcript's graphic.
+			tui.showOverlay(new Text("MODAL", 0, 0), { fullscreen: true });
+			await settle(term);
+			tui.resetDisplay();
+			await settle(term);
+			expect(deleted).not.toContain(transcriptId);
+
+			// stop() restores the normal screen and drops the reset latch, so no
+			// destructive repaint ever runs — a deletion issued at latch time would
+			// leave the transcript blank with nothing left to re-place it.
+			tui.stop();
+			await settle(term);
+			expect(deleted).not.toContain(transcriptId);
+			expect(placed.has(transcriptId)).toBe(true);
+		} finally {
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	/** Deterministic scheduler so a settled resize can be driven step by step. */
+	class StepScheduler {
+		#now = 0;
+		#pending = new Set<() => void>();
+
+		now(): number {
+			return this.#now;
+		}
+
+		scheduleImmediate(callback: () => void): void {
+			callback();
+		}
+
+		scheduleRender(callback: () => void, _delayMs: number) {
+			this.#pending.add(callback);
+			return { cancel: () => this.#pending.delete(callback) };
+		}
+
+		settle(): void {
+			this.#now += 120;
+			const pending = [...this.#pending];
+			this.#pending.clear();
+			for (const callback of pending) callback();
+		}
+	}
+
+	it("retransmits images through a rebuild-mode resize's destructive repaint", () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 8);
+		const { writes } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const scheduler = new StepScheduler();
+		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
+		tui.setMaxInlineImages(2);
+		const shown = makeImage(tui.imageBudget, "shown");
+		tui.setResizeScrollback("rebuild");
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: [...shown.render(size.columns)] }),
+			acknowledgeHistory: () => {},
+			beginHistoryReplay: () => {},
+		});
+
+		try {
+			tui.start();
+			expect(writes.join("")).toContain(BASE64_ONE_PIXEL_PNG);
+
+			writes.length = 0;
+			term.resize(30, 8);
+			scheduler.settle();
+			scheduler.settle();
+			scheduler.settle();
+
+			// A settled rebuild latches its own reset partway through the dispatch
+			// that paints it. The repaint opens with `d=A`, so unless transmit
+			// tracking is dropped after that latch the frame places an image whose
+			// data it just deleted.
+			const output = writes.join("");
+			const deleteAll = output.indexOf("\x1b_Ga=d,d=A");
+			expect(deleteAll).toBeGreaterThanOrEqual(0);
+			expect(output.indexOf(BASE64_ONE_PIXEL_PNG)).toBeGreaterThan(deleteAll);
 		} finally {
 			tui.stop();
 			setKittyGraphics(originalGraphics);
@@ -1125,6 +1337,9 @@ describe("TUI inline-image budget", () => {
 			expect(deleted.filter(id => behindIds.includes(id))).toEqual([]);
 			expect(behindIds.every(id => placed.has(id))).toBe(true);
 			expect(writes.join("")).not.toContain(BASE64_ONE_PIXEL_PNG);
+			// Nor may the modal's threshold flip one to its text fallback for a
+			// frame on the way: each surface reconciles against its own split.
+			expect(writes.join("")).not.toContain(imageFallback("image/png", { widthPx: 1, heightPx: 1 }));
 		} finally {
 			tui.stop();
 			setKittyGraphics(originalGraphics);

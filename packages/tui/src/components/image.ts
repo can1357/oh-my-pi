@@ -122,6 +122,13 @@ function nextImageIdSeed(): number {
  * bounded across passes. Evicting retired graphics removes their scrollback
  * placements; a later replay can render or demote those images again.
  *
+ * `cap` bounds one surface's live images, not the terminal's whole store. A
+ * fullscreen overlay's frame and the normal screen standing behind it are both
+ * on the terminal, and neither may delete the other's graphics — see
+ * {@link limitResidentImages} — so while a modal is up the store legitimately
+ * holds up to `cap` per surface. Read `cap` as "how many images one frame shows
+ * as graphics", not as a hard residency ceiling.
+ *
  * `cap <= 0` disables budgeting: every image stays a live graphic.
  */
 export class ImageBudget {
@@ -134,6 +141,12 @@ export class ImageBudget {
 	#passIds: number[] = [];
 	/** Per-id suppression decision from the first observation in this pass. */
 	#passSuppression = new Map<number, boolean>();
+	/**
+	 * Display index each observation was decided at, so {@link #passShowsLive}
+	 * can re-check it against a reconciled threshold without scanning
+	 * {@link #passIds} once per image.
+	 */
+	#passIndex = new Map<number, number>();
 	/** Live/text split of the normal screen. */
 	#screenSplit = newSurfaceSplit();
 	/** Live/text split of the alternate buffer (fullscreen overlay, resize borrow). */
@@ -146,6 +159,12 @@ export class ImageBudget {
 	 */
 	#applyingReset = false;
 	#purgeIds: number[] = [];
+	/**
+	 * Deletions that belong to a pending destructive reset, kept out of
+	 * {@link #purgeIds} so only that reset's own repaint can emit them. See
+	 * {@link forgetTransmitted}.
+	 */
+	#resetPurgeIds: number[] = [];
 	/** Image ids whose data is believed to be loaded in the terminal's store. */
 	#transmitted = new Set<number>();
 	/** Transmit sequences (full base64) to write once, before this frame's placements. */
@@ -257,6 +276,7 @@ export class ImageBudget {
 	beginPass(stable = false, altScreen = false): void {
 		this.#passIds.length = 0;
 		this.#passSuppression.clear();
+		this.#passIndex.clear();
 		this.#stablePass = stable;
 		this.#surface = altScreen ? "alt" : "screen";
 		this.#split = altScreen ? this.#altSplit : this.#screenSplit;
@@ -293,6 +313,7 @@ export class ImageBudget {
 		this.#passIds.push(imageId);
 		const suppressed = this.#cap > 0 && index < this.#split.planned;
 		this.#passSuppression.set(imageId, suppressed);
+		this.#passIndex.set(imageId, index);
 		if (suppressed) this.#forgetKeyForId(imageId);
 		return suppressed;
 	}
@@ -332,12 +353,34 @@ export class ImageBudget {
 	 * the next pass on the *other* surface knows what it may not destroy.
 	 */
 	limitResidentImages(): void {
-		this.#liveIds[this.#surface] = new Set(this.#passIds.filter(id => !this.#passSuppression.get(id)));
+		this.#liveIds[this.#surface] = new Set(this.#passIds.filter(id => this.#passShowsLive(id)));
 		if (this.#cap <= 0 || this.#transmitted.size <= this.#cap) return;
 		for (const id of this.#transmitted) {
 			if (this.#transmitted.size <= this.#cap) break;
 			this.#retire(id);
 		}
+	}
+
+	/**
+	 * Whether this pass leaves `imageId` on its surface as a live graphic.
+	 *
+	 * Not simply "was not suppressed". A pass decides suppression from the
+	 * threshold standing at {@link beginPass}, and {@link endPass} may then
+	 * reconcile that threshold *downwards* — the frame is emitted with a text
+	 * fallback the very next frame will replace with the graphic again. Reading
+	 * such a decision as retirement would delete an image the surface is about to
+	 * show, and `d=I` takes placements no repaint can restore. So a suppression
+	 * the reconcile has since undercut counts as live.
+	 */
+	#passShowsLive(imageId: number): boolean {
+		const suppressed = this.#passSuppression.get(imageId);
+		if (suppressed === undefined) return false;
+		if (!suppressed) return true;
+		// Absent (a `stable` pass replays the committed split rather than deriving
+		// an order) counts as live, so an unknown decision never authorises a
+		// delete.
+		const index = this.#passIndex.get(imageId);
+		return index === undefined || index >= this.#split.planned;
 	}
 
 	/**
@@ -352,7 +395,7 @@ export class ImageBudget {
 	 * surface this pass is not repainting does. Returns whether it was retired.
 	 */
 	#retire(imageId: number): boolean {
-		if (this.#passSuppression.get(imageId) === false) return false;
+		if (this.#passShowsLive(imageId)) return false;
 		for (const surface of SURFACES) {
 			if (surface !== this.#surface && this.#liveIds[surface].has(imageId)) return false;
 		}
@@ -363,6 +406,17 @@ export class ImageBudget {
 		this.#deletePlacementState(imageId);
 		this.#forgetKeyForId(imageId);
 		return true;
+	}
+
+	/**
+	 * Image ids a destructive reset must delete explicitly, alongside its `d=A`.
+	 * Emit only from that reset's repaint; clears the queue.
+	 */
+	takeResetPurgeIds(): readonly number[] {
+		if (this.#resetPurgeIds.length === 0) return EMPTY_IDS;
+		const ids = this.#resetPurgeIds;
+		this.#resetPurgeIds = [];
+		return ids;
 	}
 
 	/** Image ids to delete from the terminal this frame; clears the pending set. */
@@ -379,6 +433,7 @@ export class ImageBudget {
 		const ids = [...this.#transmitted];
 		this.#transmitted.clear();
 		this.#purgeIds = [];
+		this.#resetPurgeIds = [];
 		this.#pendingTransmits.clear();
 		this.#keyToId.clear();
 		this.#idToKey.clear();
@@ -558,8 +613,17 @@ export class ImageBudget {
 	forgetTransmitted(): void {
 		if (this.#transmitted.size === 0 && this.#pendingTransmits.size === 0) return;
 		for (const id of this.#transmitted) {
-			if (!this.#pendingTransmits.has(id)) this.#purgeIds.push(id);
+			if (!this.#pendingTransmits.has(id)) this.#resetPurgeIds.push(id);
 		}
+		// The ids go to #resetPurgeIds, drained only by the destructive repaint
+		// itself — never to #purgeIds, which any frame drains. That is how a
+		// deletion used to ride out on an alternate-buffer frame and leave the
+		// normal screen blank with no repaint left to restore it.
+		//
+		// `d=A` alone is not enough to skip these: Kitty excludes *virtual*
+		// placements from it, and erasing placeholder text does not remove the
+		// prototype either. Forgetting drops the id from tracking, so without an
+		// explicit `d=I` no later sweep can ever find that placement again.
 		this.#transmitted.clear();
 		this.#pendingTransmits.clear();
 	}
