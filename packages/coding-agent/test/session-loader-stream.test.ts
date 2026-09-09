@@ -315,7 +315,7 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 						bytesRead += chunk.byteLength;
 						yield chunk;
 					}
-				})() as unknown as ReturnType<typeof realStream>;
+				})() as unknown as ReadableStream<Uint8Array<ArrayBuffer>>;
 			return handle;
 		});
 
