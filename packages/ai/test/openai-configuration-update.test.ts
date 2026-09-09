@@ -7,6 +7,7 @@ import {
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, FetchImpl, Model, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { createCodexModel } from "./helpers";
 
@@ -204,6 +205,27 @@ describe("openai-codex configuration_update", () => {
 		expect(second.reasoning?.effort).toBe("high");
 		expect(second.input?.some(item => item.type === "configuration_update")).toBe(false);
 	});
+
+	it("sends the changed effort at the request level for a Codex-transport endpoint that opts out", async () => {
+		// A custom Codex-compatible proxy serving the gpt-6-astra id but rejecting
+		// the item type: the models.yml override must switch the update off.
+		const model = createCodexModel("gpt-6-astra", {
+			provider: "cc-switch",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			compat: { supportsConfigurationUpdate: false },
+		});
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const options = { apiKey: "token", sessionId: "cc-switch-session", providerSessionState };
+
+		await buildTransformedCodexRequestBody(model, turnContext([firstUser]), { ...options, reasoning: "low" });
+		const second = await buildTransformedCodexRequestBody(
+			model,
+			turnContext([firstUser, firstAssistant, secondUser]),
+			{ ...options, reasoning: "high" },
+		);
+		expect(second.reasoning?.effort).toBe("high");
+		expect(second.input?.some(item => item.type === "configuration_update")).toBe(false);
+	});
 });
 
 describe("openai-responses configuration_update", () => {
@@ -287,5 +309,125 @@ describe("openai-responses configuration_update", () => {
 		const updateIndex = input.findIndex(item => item.type === "configuration_update");
 		expect(input[updateIndex]).toEqual(update("high"));
 		expect(input[updateIndex + 1]?.role).toBe("user");
+	});
+
+	/** The gpt-6-astra id served by a custom Responses-compatible proxy — the shape a `models.yml` entry builds. */
+	function proxyModel(compat?: ModelSpec<"openai-responses">["compat"]): Model<"openai-responses"> {
+		return buildModel({
+			id: "gpt-6-astra",
+			name: "GPT-6 Astra (proxy)",
+			api: "openai-responses",
+			provider: "astra-proxy",
+			baseUrl: "https://proxy.example.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 272_000,
+			maxTokens: 128_000,
+			compat,
+		});
+	}
+
+	type RequestBody = Record<string, unknown>;
+
+	function inputItems(body: RequestBody | undefined): TestItem[] {
+		const input = body?.input;
+		if (!Array.isArray(input)) throw new Error("expected input array");
+		return input as TestItem[];
+	}
+
+	function requestEffort(body: RequestBody | undefined): string | undefined {
+		const reasoning = body?.reasoning as { effort?: string } | undefined;
+		return reasoning?.effort;
+	}
+
+	/**
+	 * Behaves like the reporter's proxy: records every request body and answers
+	 * any `configuration_update` input item with the 400 the issue captured.
+	 */
+	function strictProxy(bodies: RequestBody[]): FetchImpl {
+		return vi.fn(async (_input: string | URL | Request, init?: RequestInit) => {
+			const body: RequestBody = typeof init?.body === "string" ? (JSON.parse(init.body) as RequestBody) : {};
+			bodies.push(body);
+			const items = Array.isArray(body.input) ? (body.input as TestItem[]) : [];
+			const rejected = items.findIndex(item => item.type === "configuration_update");
+			if (rejected !== -1) {
+				return new Response(
+					JSON.stringify({
+						error: {
+							message:
+								"Invalid value: 'configuration_update'. Supported values are: 'message', 'function_call', 'function_call_output', 'reasoning'.",
+							type: "invalid_request_error",
+							param: `input[${rejected}].type`,
+							code: "invalid_value",
+						},
+					}),
+					{ status: 400, headers: { "content-type": "application/json" } },
+				);
+			}
+			return sse(`resp_${bodies.length}`);
+		});
+	}
+
+	/** Two user turns on one session: the first at `medium`, the second at `second`. */
+	async function effortChange(model: Model<"openai-responses">, second: "low" | "high" | "xhigh") {
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const bodies: RequestBody[] = [];
+		const fetchMock = strictProxy(bodies);
+		const run = (context: Context, reasoning: "medium" | "low" | "high" | "xhigh") =>
+			streamOpenAIResponses(model, context, {
+				apiKey: "test-key",
+				fetch: fetchMock,
+				providerSessionState,
+				sessionId: "astra-proxy-session",
+				reasoning,
+			}).result();
+
+		const firstUser = { role: "user" as const, content: "first", timestamp: 1 };
+		const firstResponse = await run({ systemPrompt: ["stable system"], messages: [firstUser] }, "medium");
+		const secondResponse = await run(
+			{
+				systemPrompt: ["stable system"],
+				messages: [firstUser, firstResponse, { role: "user", content: "second", timestamp: 2 }],
+			},
+			second,
+		);
+		return { bodies, secondResponse };
+	}
+
+	for (const target of ["low", "high", "xhigh"] as const) {
+		it(`sends a medium -> ${target} change at the request level and never emits configuration_update when compat.supportsConfigurationUpdate is false`, async () => {
+			const { bodies, secondResponse } = await effortChange(
+				proxyModel({ supportsConfigurationUpdate: false }),
+				target,
+			);
+
+			expect(bodies).toHaveLength(2);
+			expect(requestEffort(bodies[0])).toBe("medium");
+			expect(requestEffort(bodies[1])).toBe(target);
+			expect(inputItems(bodies[1]).some(item => item.type === "configuration_update")).toBe(false);
+			expect(secondResponse.stopReason).toBe("stop");
+		});
+	}
+
+	it("keeps emitting configuration_update on a custom endpoint when the override is unset or true", async () => {
+		// Default unchanged: the gpt-6-astra class rule still applies on any host,
+		// so the reporter's strict proxy still sees the item — and rejects it.
+		const emitting: Array<ModelSpec<"openai-responses">["compat"]> = [
+			undefined,
+			{ supportsConfigurationUpdate: true },
+		];
+		for (const compat of emitting) {
+			const { bodies, secondResponse } = await effortChange(proxyModel(compat), "low");
+
+			expect(bodies).toHaveLength(2);
+			expect(requestEffort(bodies[1])).toBe("medium");
+			const items = inputItems(bodies[1]);
+			const updateIndex = items.findIndex(item => item.type === "configuration_update");
+			expect(items[updateIndex]).toEqual(update("low"));
+			expect(items[updateIndex + 1]?.role).toBe("user");
+			expect(secondResponse.stopReason).toBe("error");
+			expect(secondResponse.errorMessage).toContain("configuration_update");
+		}
 	});
 });
