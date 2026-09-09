@@ -2128,6 +2128,52 @@ describe("provider routing selector (@upstream)", () => {
 		expect(result.selector).toBe("openrouter/z-ai/glm-4.7@cerebras");
 		expect(openRouterOnly(result.model)).toEqual(["cerebras"]);
 	});
+
+	test("resolveCliModel routes slashful OpenRouter ids whose vendor is also a native provider", () => {
+		const openRouterGemini = buildModel({
+			id: "google/gemini-3.8-flash",
+			name: "Gemini 3.8 Flash (OpenRouter)",
+			api: "openai-completions",
+			provider: "openrouter",
+			baseUrl: "https://openrouter.ai/api/v1",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.Medium, Effort.High],
+			},
+			input: ["text", "image"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1_000_000,
+			maxTokens: 65_536,
+		});
+		const catalog = [...allModels, openRouterGemini];
+		const registry = { getAll: () => catalog, getAvailable: () => catalog } as unknown as Parameters<
+			typeof resolveCliModel
+		>[0]["modelRegistry"];
+
+		const result = resolveCliModel({
+			cliModel: "openrouter/google/gemini-3.8-flash@google-ai-studio",
+			modelRegistry: registry,
+		});
+
+		expect(result.error).toBeUndefined();
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("google/gemini-3.8-flash");
+		expect(result.selector).toBe("openrouter/google/gemini-3.8-flash@google-ai-studio");
+		expect(openRouterOnly(result.model)).toEqual(["google-ai-studio"]);
+
+		const withThinking = resolveCliModel({
+			cliModel: "openrouter/google/gemini-3.8-flash@google-ai-studio:high",
+			modelRegistry: registry,
+		});
+
+		expect(withThinking.error).toBeUndefined();
+		expect(withThinking.model?.provider).toBe("openrouter");
+		expect(withThinking.model?.id).toBe("google/gemini-3.8-flash");
+		expect(withThinking.selector).toBe("openrouter/google/gemini-3.8-flash@google-ai-studio");
+		expect(withThinking.thinkingLevel).toBe(Effort.High);
+		expect(openRouterOnly(withThinking.model)).toEqual(["google-ai-studio"]);
+	});
 });
 
 describe("filterAvailableModelsByEnabledPatterns", () => {

@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Fixed explicit OpenRouter `@upstream` routing in `/switch` and `--model` for slashful model ids whose vendor prefix is also a native provider (for example `openrouter/google/gemini-3.8-flash@google-ai-studio`).
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Added
 

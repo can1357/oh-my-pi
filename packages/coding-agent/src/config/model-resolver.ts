@@ -2079,8 +2079,18 @@ export function resolveCliModel(options: {
 		}
 	}
 
-	const candidates = provider ? allModels.filter(model => model.provider === provider) : availableModels;
-	let parsed = parseModelPattern(pattern, candidates, preferences, {
+	const providerCandidates = provider ? allModels.filter(model => model.provider === provider) : undefined;
+	// Aggregator model ids can themselves be provider-shaped (for example OpenRouter's
+	// `google/gemini-3.8-flash`). Once an explicit outer provider is stripped,
+	// parsing `...@upstream` would let the inner `google/` hit the provider-lock
+	// guard before routing is applied. Preserve the outer provider for routed
+	// aggregator selectors so the parser resolves the aggregator model first.
+	const routedProviderPattern =
+		provider && providerCandidates?.some(supportsUpstreamRouting) && splitUpstreamRouting(pattern)
+			? `${provider}/${pattern}`
+			: undefined;
+	const candidates = routedProviderPattern ? allModels : (providerCandidates ?? availableModels);
+	let parsed = parseModelPattern(routedProviderPattern ?? pattern, candidates, preferences, {
 		allowInvalidThinkingSelectorFallback: false,
 	});
 	if (!parsed.model && !provider) {
