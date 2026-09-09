@@ -266,6 +266,7 @@ export class TurnRecovery {
 	#hardErrorSameModelRetryCount = 0;
 	#retryFallbackInitialRequestPending = false;
 	#retryFallbackVisitedSelectors = new Set<string>();
+	#retryFallbackRevisitedSelectors = new Set<string>();
 	#retryPromise: Promise<void> | undefined;
 	#retryResolve: (() => void) | undefined;
 	#activeRetryFallback: ActiveRetryFallbackState | undefined;
@@ -408,6 +409,7 @@ export class TurnRecovery {
 		this.#hardErrorSameModelRetryCount = 0;
 		this.#retryFallbackInitialRequestPending = false;
 		this.#retryFallbackVisitedSelectors.clear();
+		this.#retryFallbackRevisitedSelectors.clear();
 		this.#emptyStopRetryCount = 0;
 		this.#unexpectedStopRetryCount = 0;
 		this.#malformedFunctionCallRetryCount = 0;
@@ -660,6 +662,7 @@ export class TurnRecovery {
 	resolveRetry(): void {
 		this.#retryFallbackInitialRequestPending = false;
 		this.#retryFallbackVisitedSelectors.clear();
+		this.#retryFallbackRevisitedSelectors.clear();
 		if (this.#retryResolve) {
 			this.#retryResolve();
 			this.#retryResolve = undefined;
@@ -1892,13 +1895,16 @@ export class TurnRecovery {
 				const resolved = resolveModelOverride([selector.raw], this.#host.modelRegistry, this.#host.settings);
 				const candidate = resolved.model ?? this.#host.modelRegistry.find(selector.provider, selector.id);
 				if (!candidate) continue;
-				if (
+				const candidateSelector = formatModelStringWithRouting(candidate);
+				const visited =
 					this.#retryFallbackVisitedSelectors.has(selector.raw) ||
-					(selector.thinkingLevel === undefined &&
-						this.#retryFallbackVisitedSelectors.has(formatModelStringWithRouting(candidate)))
-				) {
-					continue;
-				}
+					(selector.thinkingLevel === undefined && this.#retryFallbackVisitedSelectors.has(candidateSelector));
+				const revisited =
+					this.#retryFallbackRevisitedSelectors.has(selector.raw) ||
+					(selector.thinkingLevel === undefined && this.#retryFallbackRevisitedSelectors.has(candidateSelector));
+				// Long usage-limit recovery may wrap the chain once. A second wrap
+				// would reset each model's retry budget forever.
+				if (visited && (!options?.wrapAround || revisited)) continue;
 				if (options?.excludeProvider === candidate.provider) continue;
 				// Anthropic signatures and redacted blocks are model-bound, while the
 				// latest assistant response must remain byte-identical. A same-provider
@@ -1929,7 +1935,12 @@ export class TurnRecovery {
 				}
 				const apiKey = await this.#host.modelRegistry.getApiKey(candidate, this.#host.sessionId());
 				if (!apiKey) continue;
-				return this.applyRetryFallbackCandidate(role, selector, currentSelector, options);
+				const applied = await this.applyRetryFallbackCandidate(role, selector, currentSelector, options);
+				if (applied && visited) {
+					this.#retryFallbackRevisitedSelectors.add(selector.raw);
+					this.#retryFallbackRevisitedSelectors.add(candidateSelector);
+				}
+				return applied;
 			}
 		}
 
@@ -2147,7 +2158,7 @@ export class TurnRecovery {
 			options?.hardErrorFallback === true &&
 			!AIError.isPayloadRejection(message) &&
 			this.#hardErrorSameModelRetryCount < retrySettings.hardErrorSameModelRetries &&
-			(retrySettings.maxDelayMs === 0 ||
+			(retrySettings.maxDelayMs <= 0 ||
 				parsedRetryAfterMs === undefined ||
 				parsedRetryAfterMs <= retrySettings.maxDelayMs);
 		if (hardErrorSameModelRetry) this.#hardErrorSameModelRetryCount++;

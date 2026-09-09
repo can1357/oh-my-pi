@@ -546,17 +546,17 @@ describe("AgentSession retry fallback", () => {
 		});
 		settings.setModelRole("default", primarySelector);
 		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
-		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { retryStartEvents } = trackRetryEvents(session);
 
 		await session.prompt("Fail instead of waiting without a fallback");
 		await session.waitForIdle();
 
 		expect(requestedModels).toEqual([primarySelector]);
-		expect(waitSpy).not.toHaveBeenCalled();
+		expect(retryStartEvents).toEqual([]);
 		expect(getLastAssistantMessage(session).errorMessage).toContain(`retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}`);
 	});
 
-	it("keeps same-model waiting unlimited when the delay cap is zero", async () => {
+	it.each([0, -1])("keeps same-model waiting unlimited when the delay cap is %i", async maxDelayMs => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
 		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
@@ -572,7 +572,7 @@ describe("AgentSession retry fallback", () => {
 		});
 		const settings = Settings.isolated({
 			"compaction.enabled": false,
-			"retry.maxDelayMs": 0,
+			"retry.maxDelayMs": maxDelayMs,
 			"retry.hardErrorSameModelRetries": 1,
 			"retry.fallbackChains": { default: [fallbackSelector] },
 		});
@@ -851,6 +851,78 @@ describe("AgentSession retry fallback", () => {
 
 		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
 		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+	});
+
+	it("allows one long-usage wraparound revisit and then stops the retry saga", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const firstOpenCodeModel = getBundledModel("opencode-go", "deepseek-v4-pro");
+		const secondOpenCodeModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		const thirdOpenCodeModel = getBundledModel("opencode-go", "muse-spark-1.2-contributor");
+		const fallbackModel = getBundledModel("openai", "gpt-5.5");
+		if (!primaryModel || !firstOpenCodeModel || !secondOpenCodeModel || !thirdOpenCodeModel || !fallbackModel) {
+			throw new Error("Expected bundled wraparound test models");
+		}
+		authStorage.setRuntimeApiKey("opencode-go", "opencode-go-test-key");
+		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+
+		const primarySelector = primaryModel.provider + "/" + primaryModel.id;
+		const firstOpenCodeSelector = firstOpenCodeModel.provider + "/" + firstOpenCodeModel.id;
+		const secondOpenCodeSelector = secondOpenCodeModel.provider + "/" + secondOpenCodeModel.id;
+		const thirdOpenCodeSelector = thirdOpenCodeModel.provider + "/" + thirdOpenCodeModel.id;
+		const fallbackSelector = fallbackModel.provider + "/" + fallbackModel.id;
+		const requestedModels: string[] = [];
+		const refusal = {
+			content: [{ type: "thinking" as const, thinking: "Classifier refusal." }],
+			errorMessage: "Refusal (cyber): Declined.",
+			stopDetails: { type: "refusal" as const, category: "cyber", explanation: "Declined." },
+			stopReason: "error" as const,
+		};
+		const longUsageLimit = {
+			throw: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
+		};
+		const mock = createMockModel({
+			responses: [
+				{ throw: "503 service unavailable: overloaded_error retry-after-ms=60000" },
+				longUsageLimit,
+				refusal,
+				longUsageLimit,
+				refusal,
+				longUsageLimit,
+				{ content: ["must not revisit a selector twice"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => model.provider + "-test-key",
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(model.provider + "/" + model.id);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 300_000,
+			"retry.maxRetries": 3,
+			"retry.fallbackChains": {
+				default: [firstOpenCodeSelector, fallbackSelector, secondOpenCodeSelector, thirdOpenCodeSelector],
+			},
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		await session.prompt("Bound repeated long-usage wraparound");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			primarySelector,
+			firstOpenCodeSelector,
+			fallbackSelector,
+			secondOpenCodeSelector,
+			fallbackSelector,
+			thirdOpenCodeSelector,
+		]);
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+		expect(getLastAssistantMessage(session).errorMessage).toContain("GoUsageLimitError");
 	});
 
 	it("stops an exhausted fallback after its initial request and ten retries", async () => {

@@ -10,7 +10,7 @@
 
 ### Fixed
 
-- Retry fallback chains now stop after each distinct selector is tried, even when a long provider wait outlasts selector cooldowns, and each fallback gets its initial request plus the full configured retry allowance.
+- Retry fallback chains now bound each selector to one normal visit plus at most one deliberate cross-provider wraparound revisit for long usage limits, and each fallback gets its initial request plus the full configured retry allowance.
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
 - `/loop` accepts `--until '<cmd>'` / `--while '<cmd>'` to gate each iteration on a shell command's exit status, so a loop can stop on real project state instead of only a count or duration. ([#10858](https://github.com/can1357/oh-my-pi/pull/10858) by [@andyhite](https://github.com/andyhite))
 
