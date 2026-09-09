@@ -2147,6 +2147,17 @@ class CodexStreamProcessor {
 					firstTokenTime = this.#handleStreamEvent(rawEvent, firstTokenTime);
 					if (this.runtime.sawTerminalEvent) break;
 				}
+				if (!this.runtime.sawTerminalEvent) {
+					CODEX_DEBUG &&
+						logger.debug("[codex] codex stream ended unexpectedly", {
+							transport: this.runtime.transport,
+							terminalEventSeen: false,
+							unexpectedStreamEnd: true,
+							sentTurnStateHeader: Boolean(this.requestContext.turnState.value),
+							sentModelsEtagHeader: Boolean(this.requestContext.websocketState?.modelsEtag),
+						});
+					throw new CodexProviderStreamError("Codex stream ended before terminal completion event", true);
+				}
 				return { firstTokenTime };
 			} catch (error) {
 				const recovered = await this.#recoverStreamError(error);
@@ -2951,21 +2962,6 @@ class CodexStreamProcessor {
 		const { output } = this;
 		if (this.options?.signal?.aborted) {
 			throw new AIError.AbortError();
-		}
-		if (!this.runtime.sawTerminalEvent) {
-			if (this.requestContext.websocketState) {
-				resetCodexWebSocketAppendState(this.requestContext.websocketState);
-				this.requestContext.websocketState.modelsEtag = undefined;
-			}
-			CODEX_DEBUG &&
-				logger.debug("[codex] codex stream ended unexpectedly", {
-					transport: this.runtime.transport,
-					terminalEventSeen: this.runtime.sawTerminalEvent,
-					unexpectedStreamEnd: true,
-					sentTurnStateHeader: Boolean(this.requestContext.turnState.value),
-					sentModelsEtagHeader: Boolean(this.requestContext.websocketState?.modelsEtag),
-				});
-			throw new CodexProviderStreamError("Codex stream ended before terminal completion event", false);
 		}
 		if (output.stopReason === "aborted" || output.stopReason === "error") {
 			throw new CodexProviderStreamError("Codex response failed", false);

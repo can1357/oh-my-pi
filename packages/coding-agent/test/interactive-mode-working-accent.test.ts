@@ -202,4 +202,21 @@ describe("InteractiveMode working activity", () => {
 			loader.stop();
 		}
 	});
+
+	it("restarts a working loader detached by transient status cleanup", async () => {
+		const { mode } = await createHarness("Detached loader session");
+		mode.ensureLoadingAnimation();
+		const loader = defined(mode.loadingAnimation);
+		expect(loader.debugState()).toMatchObject({ running: true });
+
+		mode.statusContainer.disposeChildren();
+		expect(loader.debugState()).toMatchObject({ running: false });
+
+		mode.ensureLoadingAnimation();
+
+		expect(mode.loadingAnimation).toBe(loader);
+		expect(mode.statusContainer.children).toContain(loader);
+		expect(loader.debugState()).toMatchObject({ running: true });
+		loader.stop();
+	});
 });
