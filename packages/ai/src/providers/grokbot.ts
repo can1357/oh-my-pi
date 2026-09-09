@@ -1581,8 +1581,13 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 								context.tools.some(tool => {
 									if (!tool || typeof tool !== "object") return false;
 									const name = typeof tool.name === "string" ? tool.name.trim() : "";
-									const custom = typeof tool.customWireName === "string" ? tool.customWireName.trim() : "";
-									return name === SEND_TO_USER_WIRE_NAME || custom === SEND_TO_USER_WIRE_NAME;
+									const custom =
+										typeof tool.customWireName === "string" ? tool.customWireName.trim() : "";
+									// Ownership follows the advertised wire name (custom alias
+									// wins). An internal `SendToUser` that maps to `Other` does
+									// not occupy the synthetic slot the parent-chat mapper injects.
+									const advertised = custom || name;
+									return advertised === SEND_TO_USER_WIRE_NAME;
 								});
 							const isSyntheticSendToUser =
 								!ompOwnsSendToUser &&

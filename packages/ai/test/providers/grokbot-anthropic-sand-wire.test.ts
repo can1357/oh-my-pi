@@ -475,6 +475,23 @@ describe("product wire helpers", () => {
 		expect(schema?.properties?.content?.description).toContain("user will see");
 	});
 
+	test("parent profile still injects SendToUser when an extension only aliases away from it", () => {
+		// Internal name SendToUser + customWireName Other occupies Other, not the
+		// synthetic SendToUser wire slot — parent-chat must still inject the helper.
+		const product = toProductField2Tools(
+			[
+				{
+					name: "SendToUser",
+					description: "extension other",
+					parameters: { type: "object", properties: {} },
+					customWireName: "Other",
+				},
+			] as never,
+			"parent-chat",
+		);
+		expect(product.map(t => t.name)).toEqual(["SendToUser", "Other"]);
+	});
+
 	test("prefers write over edit for the shared Write wire slot", () => {
 		const editSchema = {
 			type: "object",

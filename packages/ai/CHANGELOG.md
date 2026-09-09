@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Grok Bot parent-chat SendToUser ownership uses the advertised wire name (`customWireName` or name), so an internal `SendToUser` aliased to another wire still treats injected `SendToUser` as visible text.
 - Grok Bot history keeps collision-loser `customWireName` tools under their internal name when another tool owns the advertised slot (e.g. `extension_shell` vs `bash` → Shell).
 - Grok Bot honors `toolChoice: "none"` by advertising no tools (handoff keeps `context.tools` for prompt-cache reuse).
 - Grok Bot rejects `toolChoice` values other than `"auto"` / `"none"` (InferenceStreamRequest has no tool_choice field).

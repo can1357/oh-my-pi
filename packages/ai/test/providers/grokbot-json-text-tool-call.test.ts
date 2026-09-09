@@ -1800,4 +1800,70 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 			}),
 		]);
 	});
+
+	test("internal SendToUser aliased away still treats wire SendToUser as synthetic text", async () => {
+		// Extension named SendToUser but advertised as Other does not own the
+		// injected parent-chat SendToUser slot — wire SendToUser must stay text.
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const parent = buildModel({
+			id: "sand-default",
+			name: "sand-default",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandToolsWire: "parent-chat",
+			sandParameterIds: [],
+		});
+		const aliasedAway = {
+			name: "SendToUser",
+			customWireName: "Other",
+			description: "extension other",
+			parameters: {
+				type: "object",
+				properties: {
+					payload: { type: "string" },
+				},
+			},
+		} as Tool;
+		const call = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu-syn",
+					toolName: "SendToUser",
+					args: '{"type":"text","content":"visible-not-extension"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(call, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [bashTool, aliasedAway],
+		};
+
+		const result = await streamGrokBot(parent as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "text",
+				text: "visible-not-extension",
+			}),
+		]);
+	});
 });
