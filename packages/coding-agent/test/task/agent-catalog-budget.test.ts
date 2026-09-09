@@ -36,7 +36,7 @@ function makeSession(overrides: Partial<Record<SettingPath, unknown>> = {}): Too
 		settings: Settings.isolated({
 			"async.enabled": true,
 			"task.batch": true,
-			"task.isolation.mode": "none",
+			"task.isolation.enabled": false,
 			...overrides,
 		}),
 		getSessionFile: () => null,
