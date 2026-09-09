@@ -1,0 +1,25 @@
+[38;2;0;180;255m── think — Think ───────────────────────────────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+                                                                                                    
+ [38;2;156;163;176mThe retry loop re-reads the config after every failure, which explains the doubled latency.[39m        
+                                                                                                    
+
+[38;2;107;114;128m  · in progress[39m
+                                                                                                    
+ [38;2;156;163;176mThe retry loop re-reads the config after every failure, which explains the doubled latency. Cache  
+ [38;2;156;163;176mthe parsed config outside the loop, then re-check the invalidation path.[39m                           
+                                                                                                    
+
+[38;2;107;114;128m  · done[39m
+                                                                                                    
+ [38;2;156;163;176mThe retry loop re-reads the config after every failure, which explains the doubled latency. Cache  
+ [38;2;156;163;176mthe parsed config outside the loop, then re-check the invalidation path.[39m                           
+                                                                                                    
+
+[38;2;107;114;128m  · failed[39m
+                                                                                                    
+ [38;2;156;163;176mThe retry loop re-reads the config after every failure, which explains the doubled latency. Cache  
+ [38;2;156;163;176mthe parsed config outside the loop, then re-check the invalidation path.[39m                           
+                                                                                                    
+

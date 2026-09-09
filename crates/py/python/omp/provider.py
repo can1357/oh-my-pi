@@ -1988,24 +1988,38 @@ class AuthMethod(StrEnum):
     SESSION = "session"
 
 
-class LoginUi(Protocol):
+class LoginUi:
     """Provide reentrant user interaction during provider login."""
 
     async def prompt(self, text: str) -> str:
         """Prompt for a text value."""
-        ...
+        from . import ui
+
+        outcome = await ui.input(text)
+        if outcome.cancelled or outcome.value is None:
+            raise RuntimeError("provider login prompt was dismissed")
+        return outcome.value
 
     async def select(self, text: str, options: Sequence[str]) -> str:
         """Select one value from an ordered option list."""
-        ...
+        from . import ui
+
+        outcome = await ui.select(text, options)
+        if outcome.cancelled or outcome.value is None:
+            raise RuntimeError("provider login selection was dismissed")
+        return outcome.value
 
     async def open_url(self, url: str) -> None:
         """Open a login URL for the user."""
-        ...
+        from . import ui
+
+        ui.open_url(url)
 
     async def notify(self, text: str, level: str) -> None:
         """Show a login notification."""
-        ...
+        from . import ui
+
+        ui.notify(text, level=level)
 
 
 @dataclass(frozen=True, slots=True)
@@ -2107,6 +2121,222 @@ class Intent:
     on_unsupported: Fallback = Fallback.UNSPECIFIED
     priority: int = 0
     payload: object = None
+
+
+class _IntentConstructors:
+    """Build immutable provider intent declarations."""
+
+    __slots__ = ()
+
+    @staticmethod
+    def _make(
+        kind: IntentKind,
+        payload: object = None,
+        *,
+        on_unsupported: Fallback,
+        priority: int,
+    ) -> Intent:
+        if not isinstance(on_unsupported, Fallback):
+            raise SpecError("intent on_unsupported must be Fallback")
+        if (
+            isinstance(priority, bool)
+            or not isinstance(priority, int)
+            or not 0 <= priority <= 0xFFFFFFFF
+        ):
+            raise SpecError("intent priority must be an unsigned 32-bit integer")
+        return Intent(kind, on_unsupported, priority, payload)
+
+    def strict(
+        self, *, on_unsupported: Fallback = Fallback.EMULATE, priority: int = 0
+    ) -> Intent:
+        """Request server-side strict JSON-Schema enforcement."""
+        return self._make(
+            IntentKind.STRICT, on_unsupported=on_unsupported, priority=priority
+        )
+
+    def grammar(
+        self,
+        syntax: object,
+        definition: str,
+        *,
+        on_unsupported: Fallback = Fallback.EMULATE,
+        priority: int = 0,
+    ) -> Intent:
+        """Request provider-native constrained grammar decoding."""
+        if not isinstance(definition, str) or not definition:
+            raise SpecError("grammar intent definition must be a non-empty string")
+        return self._make(
+            IntentKind.GRAMMAR,
+            {"syntax": syntax, "definition": definition},
+            on_unsupported=on_unsupported,
+            priority=priority,
+        )
+
+    def force_call(
+        self,
+        name: str | None = None,
+        *,
+        retries: int = 2,
+        allow_costly_escalation: bool = True,
+        on_unsupported: Fallback = Fallback.EMULATE,
+        priority: int = 0,
+    ) -> Intent:
+        """Request the bounded forced-tool-call ladder."""
+        if name is not None and (not isinstance(name, str) or not name):
+            raise SpecError("forced call name must be a non-empty string or None")
+        if isinstance(retries, bool) or not isinstance(retries, int) or retries < 0:
+            raise SpecError("forced call retries must be a non-negative integer")
+        if not isinstance(allow_costly_escalation, bool):
+            raise SpecError("allow_costly_escalation must be bool")
+        return self._make(
+            IntentKind.FORCE_CALL,
+            {
+                "name": name,
+                "retries": retries,
+                "allow_costly_escalation": allow_costly_escalation,
+            },
+            on_unsupported=on_unsupported,
+            priority=priority,
+        )
+
+    def service_tier(
+        self,
+        name: str,
+        *,
+        on_unsupported: Fallback = Fallback.IGNORE,
+        priority: int = 0,
+    ) -> Intent:
+        """Select one provider-declared service tier."""
+        if not isinstance(name, str) or not name:
+            raise SpecError("service tier intent name must be a non-empty string")
+        return self._make(
+            IntentKind.SERVICE_TIER,
+            name,
+            on_unsupported=on_unsupported,
+            priority=priority,
+        )
+
+    def verbosity(
+        self,
+        level: object,
+        *,
+        on_unsupported: Fallback = Fallback.UNSPECIFIED,
+        priority: int = 0,
+    ) -> Intent:
+        """Select provider response verbosity."""
+        return self._make(
+            IntentKind.VERBOSITY,
+            level,
+            on_unsupported=on_unsupported,
+            priority=priority,
+        )
+
+    def cache_retention(
+        self,
+        retention: CacheRetention,
+        *,
+        on_unsupported: Fallback = Fallback.UNSPECIFIED,
+        priority: int = 0,
+    ) -> Intent:
+        """Select provider prompt-cache retention."""
+        if not isinstance(retention, CacheRetention):
+            raise SpecError("cache retention intent must be CacheRetention")
+        return self._make(
+            IntentKind.CACHE_RETENTION,
+            retention,
+            on_unsupported=on_unsupported,
+            priority=priority,
+        )
+
+    def reasoning(
+        self,
+        effort: Effort | None = None,
+        budget_tokens: int | None = None,
+        visibility: object = None,
+        preserve_signatures: bool = True,
+        *,
+        on_unsupported: Fallback = Fallback.UNSPECIFIED,
+        priority: int = 0,
+    ) -> Intent:
+        """Request provider reasoning controls."""
+        if effort is not None and not isinstance(effort, Effort):
+            raise SpecError("reasoning effort must be Effort or None")
+        if budget_tokens is not None and (
+            isinstance(budget_tokens, bool)
+            or not isinstance(budget_tokens, int)
+            or budget_tokens < 0
+        ):
+            raise SpecError("reasoning budget_tokens must be a non-negative integer or None")
+        if not isinstance(preserve_signatures, bool):
+            raise SpecError("preserve_signatures must be bool")
+        return self._make(
+            IntentKind.REASONING,
+            {
+                "effort": effort,
+                "budget_tokens": budget_tokens,
+                "visibility": visibility,
+                "preserve_signatures": preserve_signatures,
+            },
+            on_unsupported=on_unsupported,
+            priority=priority,
+        )
+
+    def safety(
+        self,
+        category: object,
+        threshold: object,
+        *,
+        on_unsupported: Fallback = Fallback.UNSPECIFIED,
+        priority: int = 0,
+    ) -> Intent:
+        """Request one provider safety threshold."""
+        return self._make(
+            IntentKind.SAFETY,
+            {"category": category, "threshold": threshold},
+            on_unsupported=on_unsupported,
+            priority=priority,
+        )
+
+    def determinism(
+        self,
+        seed: int | None = None,
+        deterministic: bool = False,
+        *,
+        on_unsupported: Fallback = Fallback.UNSPECIFIED,
+        priority: int = 0,
+    ) -> Intent:
+        """Request deterministic sampling or one explicit seed."""
+        if seed is not None and (isinstance(seed, bool) or not isinstance(seed, int)):
+            raise SpecError("determinism seed must be an integer or None")
+        if not isinstance(deterministic, bool):
+            raise SpecError("deterministic must be bool")
+        return self._make(
+            IntentKind.DETERMINISM,
+            {"seed": seed, "deterministic": deterministic},
+            on_unsupported=on_unsupported,
+            priority=priority,
+        )
+
+    def hosted_tool(
+        self,
+        tool: HostedTool,
+        *,
+        on_unsupported: Fallback = Fallback.UNSPECIFIED,
+        priority: int = 0,
+    ) -> Intent:
+        """Request one provider-hosted tool."""
+        if not isinstance(tool, HostedTool):
+            raise SpecError("hosted tool intent must be HostedTool")
+        return self._make(
+            IntentKind.HOSTED_TOOL,
+            tool,
+            on_unsupported=on_unsupported,
+            priority=priority,
+        )
+
+
+intent = _IntentConstructors()
+"""Provider intent constructor namespace."""
 
 
 class _Intents:
@@ -2377,7 +2607,7 @@ __all__ = (
     "ToolCaps", "ToolFeature", "ToolSchemaFlavor", "Transport", "TrustDomain",
     "UnknownCapabilityPolicy", "UsageQuery",
     "UsageReport", "UsageScope", "UsageUnit", "UsageWindow", "WatchModels", "models",
-    "intents", "provider", "watch_models",
+    "intents", "intent", "provider", "watch_models",
 )
 
 

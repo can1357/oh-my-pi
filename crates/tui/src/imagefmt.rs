@@ -15,6 +15,19 @@ pub enum ImageFormat {
 	Webp,
 }
 
+impl ImageFormat {
+	/// The container's IANA media type (`image/png`, …).
+	#[must_use]
+	pub const fn media_type(self) -> &'static str {
+		match self {
+			Self::Png => "image/png",
+			Self::Jpeg => "image/jpeg",
+			Self::Gif => "image/gif",
+			Self::Webp => "image/webp",
+		}
+	}
+}
+
 /// Identifies a supported image container from its magic bytes.
 pub fn format(bytes: &[u8]) -> Option<ImageFormat> {
 	if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {

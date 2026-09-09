@@ -1,11 +1,18 @@
 # Pi provider registry reconciliation. Model identities, pricing, and limits live in generated JSON.
 # Every table below corresponds to one entry in packages/ai/src/registry/registry.ts.
 
+[providers."abliteration"]
+transport = "open-ai-responses"
+base_url = "https://api.abliteration.ai/v1"
+auth = { type = "bearer", env = ["OMP_ABLITERATION_API_KEY", "ABLITERATION_API_KEY", "ABLIT_KEY"] }
+discovery = { kind = "open-ai-models", label = "Abliteration", authoritative = true }
+facets = ["chat"]
+
 [providers."azure"]
 transport = "open-ai-chat"
 base_url = "https://{region}.openai.azure.com/openai/deployments/{deployment}"
 api_version = "2024-10-21"
-auth = { type = "header", name = "api-key", env = ["OMP_AZURE_OPENAI_API_KEY"] }
+auth = { type = "header", name = "api-key", env = ["OMP_AZURE_OPENAI_API_KEY", "AZURE_OPENAI_API_KEY"] }
 facets = ["chat", "audio_speech", "audio_transcription"]
 pending_facets = ["image_generation"]
 pending_transport = "open-ai-images"
@@ -15,7 +22,7 @@ compat = { "reasoning_wire_format" = "open_ai", "audio_api_version" = "2025-04-0
 transport = "open-ai-codex"
 codex_transport = "websocket-preferred"
 base_url = "https://chatgpt.com/backend-api"
-auth = { type = "bearer", env = ["OMP_OPENAI_CODEX_OAUTH_TOKEN"] }
+auth = { type = "bearer", env = ["OMP_OPENAI_CODEX_OAUTH_TOKEN", "OPENAI_CODEX_OAUTH_TOKEN"] }
 oauth_flow = "openai-codex"
 discovery = { kind = "specialized", label = "ChatGPT Plus/Pro (Codex Subscription)", authoritative = false }
 facets = ["chat", "image_generation"]
@@ -25,19 +32,19 @@ usage = true
 [providers."anthropic"]
 transport = "anthropic-messages"
 base_url = "https://api.anthropic.com"
-auth = { type = "header", name = "x-api-key", env = ["OMP_ANTHROPIC_FOUNDRY_API_KEY", "OMP_ANTHROPIC_API_KEY"] }
+auth = { type = "header", name = "x-api-key", env = ["OMP_ANTHROPIC_API_KEY", "OMP_ANTHROPIC_FOUNDRY_API_KEY", "ANTHROPIC_API_KEY", "ANTHROPIC_FOUNDRY_API_KEY"] }
 oauth_flow = "anthropic"
-oauth_auth = { type = "bearer", env = ["OMP_ANTHROPIC_OAUTH_TOKEN"] }
+oauth_auth = { type = "bearer", env = ["OMP_ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"] }
 discovery = { kind = "open-ai-models", label = "Anthropic", authoritative = false }
 facets = ["chat"]
 headers = { "anthropic-version" = "2023-06-01" }
-compat = { "multiple_system_messages" = false, "max_tokens_field" = "max_tokens", "tool_strict_mode" = "none", "reasoning_wire_format" = "anthropic", "cache_control_format" = "anthropic", "image_encoding_format" = "anthropic_source", "tool_schema_flavor" = "anthropic", "stream_protocol" = "sse_events" }
+compat = { "multiple_system_messages" = false, "max_tokens_field" = "max_tokens", "tool_strict_mode" = "none", "forced_tool_choice_penalty" = "cache_invalidated", "reasoning_wire_format" = "anthropic", "cache_control_format" = "anthropic", "image_encoding_format" = "anthropic_source", "tool_schema_flavor" = "anthropic", "stream_protocol" = "sse_events" }
 usage = true
 
 [providers."zai"]
 transport = "anthropic-messages"
 base_url = "https://api.z.ai/api/anthropic"
-auth = { type = "bearer", env = ["OMP_ZAI_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_ZAI_API_KEY", "ZAI_API_KEY"] }
 oauth_flow = "zai"
 discovery = { kind = "open-ai-models", label = "zAI", authoritative = false }
 facets = ["chat"]
@@ -83,7 +90,7 @@ headers = { "X-Msh-Platform" = "kimi_cli" }
 transport = "open-ai-chat"
 base_url = "https://openrouter.ai/api/v1"
 headers = { "HTTP-Referer" = "https://omp.sh/", "X-OpenRouter-Title" = "omp", "X-OpenRouter-Categories" = "cli-agent", "X-OpenRouter-Cache" = "true", "X-OpenRouter-Cache-TTL" = "3600" }
-auth = { type = "bearer", env = ["OMP_OPENROUTER_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_OPENROUTER_API_KEY", "OPENROUTER_API_KEY"] }
 oauth_flow = "openrouter"
 discovery = { kind = "open-ai-models", label = "OpenRouter", authoritative = false }
 facets = ["chat", "image_generation"]
@@ -92,7 +99,7 @@ compat = { "reasoning_wire_format" = "open_router", "cache_control_format" = "an
 [providers."github-copilot"]
 transport = "open-ai-responses"
 base_url = "https://api.githubcopilot.com"
-auth = { type = "bearer", env = ["OMP_COPILOT_GITHUB_TOKEN"] }
+auth = { type = "bearer", env = ["OMP_COPILOT_GITHUB_TOKEN", "COPILOT_GITHUB_TOKEN"] }
 oauth_flow = "github-copilot"
 discovery = { kind = "open-ai-models", label = "GitHub Copilot", authoritative = false }
 facets = ["chat"]
@@ -103,7 +110,7 @@ usage = true
 [providers."cursor"]
 transport = "cursor"
 base_url = "https://api2.cursor.sh"
-auth = { type = "bearer", env = ["OMP_CURSOR_ACCESS_TOKEN"] }
+auth = { type = "bearer", env = ["OMP_CURSOR_ACCESS_TOKEN", "CURSOR_ACCESS_TOKEN"] }
 oauth_flow = "cursor"
 discovery = { kind = "specialized", label = "Cursor", authoritative = false }
 facets = ["chat"]
@@ -113,7 +120,7 @@ usage = true
 [providers."devin"]
 transport = "devin"
 base_url = "https://server.codeium.com"
-auth = { type = "bearer", env = ["OMP_DEVIN_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_DEVIN_API_KEY", "DEVIN_API_KEY"] }
 oauth_flow = "devin"
 discovery = { kind = "specialized", label = "Devin", authoritative = true }
 facets = ["chat"]
@@ -156,7 +163,7 @@ compat = { "max_tokens_field" = "max_output_tokens", "reasoning_wire_format" = "
 # Grok reasoning routes (pi 3fb57803f3, 86866b8bbf).
 transport = "open-ai-responses"
 base_url = "https://api.x.ai/v1"
-auth = { type = "bearer", env = ["OMP_XAI_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_XAI_API_KEY", "XAI_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "xAI API", authoritative = false }
 facets = ["chat", "image_generation"]
 compat = { "tool_strict_mode" = "none", "penalties" = false, "stop_sequences" = false }
@@ -164,7 +171,7 @@ compat = { "tool_strict_mode" = "none", "penalties" = false, "stop_sequences" = 
 [providers."xai-oauth"]
 transport = "open-ai-responses"
 base_url = "https://api.x.ai/v1"
-auth = { type = "bearer", env = ["OMP_XAI_OAUTH_TOKEN", "OMP_XAI_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_XAI_OAUTH_TOKEN", "OMP_XAI_API_KEY", "XAI_OAUTH_TOKEN", "XAI_API_KEY"] }
 oauth_flow = "xai"
 discovery = { kind = "open-ai-models", label = "xAI Grok OAuth (SuperGrok)", authoritative = false }
 facets = ["chat"]
@@ -174,14 +181,14 @@ compat = { "penalties" = false }
 [providers."gitlab-duo"]
 transport = "anthropic-messages"
 base_url = "https://cloud.gitlab.com/ai/v1/proxy/anthropic/"
-auth = { type = "bearer", env = ["OMP_GITLAB_TOKEN"] }
+auth = { type = "bearer", env = ["OMP_GITLAB_TOKEN", "GITLAB_TOKEN"] }
 oauth_flow = "gitlab-duo"
 facets = ["chat"]
 
 [providers."gitlab-duo-agent"]
 transport = "gitlab-duo-workflow"
 base_url = "https://gitlab.com"
-auth = { type = "bearer", env = ["OMP_GITLAB_TOKEN"] }
+auth = { type = "bearer", env = ["OMP_GITLAB_TOKEN", "GITLAB_TOKEN"] }
 oauth_flow = "gitlab-duo-workflow"
 discovery = { kind = "specialized", label = "GitLab Duo Agent", authoritative = true }
 facets = ["chat"]
@@ -189,14 +196,14 @@ facets = ["chat"]
 [providers."alibaba-coding-plan"]
 transport = "open-ai-chat"
 base_url = "https://coding-intl.dashscope.aliyuncs.com/v1"
-auth = { type = "bearer", env = ["OMP_ALIBABA_CODING_PLAN_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_ALIBABA_CODING_PLAN_API_KEY", "ALIBABA_CODING_PLAN_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Alibaba Coding Plan", authoritative = false }
 facets = ["chat"]
 
 [providers."alibaba-token-plan"]
 transport = "open-ai-chat"
 base_url = "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
-auth = { type = "bearer", env = ["OMP_ALIBABA_TOKEN_PLAN_API_KEY", "OMP_BAILIAN_TOKEN_PLAN_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_ALIBABA_TOKEN_PLAN_API_KEY", "OMP_BAILIAN_TOKEN_PLAN_API_KEY", "ALIBABA_TOKEN_PLAN_API_KEY", "BAILIAN_TOKEN_PLAN_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "QwenCloud Token Plan", authoritative = true }
 usage = true
 facets = ["chat"]
@@ -218,14 +225,14 @@ facets = ["chat"]
 [providers."aiand"]
 transport = "open-ai-chat"
 base_url = "https://api.aiand.com/v1"
-auth = { type = "bearer", env = ["OMP_AIAND_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_AIAND_API_KEY", "AIAND_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "ai&", authoritative = true }
 facets = ["chat"]
 
 [providers."aimlapi"]
 transport = "open-ai-chat"
 base_url = "https://api.aimlapi.com/v1"
-auth = { type = "bearer", env = ["OMP_AIMLAPI_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_AIMLAPI_API_KEY", "AIMLAPI_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "AIML API", authoritative = true }
 facets = ["chat"]
 
@@ -260,14 +267,14 @@ facets = ["chat"]
 [providers."zhipu-coding-plan"]
 transport = "open-ai-chat"
 base_url = "https://open.bigmodel.cn/api/coding/paas/v4"
-auth = { type = "bearer", env = ["OMP_ZHIPU_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_ZHIPU_API_KEY", "ZHIPU_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Zhipu Coding Plan", authoritative = true }
 facets = ["chat"]
 
 [providers."umans"]
 transport = "anthropic-messages"
 base_url = "https://api.code.umans.ai"
-auth = { type = "bearer", env = ["OMP_UMANS_AI_CODING_PLAN_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_UMANS_AI_CODING_PLAN_API_KEY", "UMANS_AI_CODING_PLAN_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Umans AI Coding Plan", authoritative = true }
 facets = ["chat"]
 usage = true
@@ -275,7 +282,7 @@ usage = true
 [providers."qwen-portal"]
 transport = "open-ai-chat"
 base_url = "https://portal.qwen.ai/v1"
-auth = { type = "bearer", env = ["OMP_QWEN_OAUTH_TOKEN", "OMP_QWEN_PORTAL_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_QWEN_OAUTH_TOKEN", "OMP_QWEN_PORTAL_API_KEY", "QWEN_OAUTH_TOKEN", "QWEN_PORTAL_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Qwen Portal", authoritative = false }
 facets = ["chat"]
 compat = { "reasoning_wire_format" = "qwen_enable_thinking" }
@@ -283,14 +290,14 @@ compat = { "reasoning_wire_format" = "qwen_enable_thinking" }
 [providers."sakana"]
 transport = "open-ai-responses"
 base_url = "https://api.sakana.ai/v1"
-auth = { type = "bearer", env = ["OMP_SAKANA_API_KEY", "OMP_FUGU_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_SAKANA_API_KEY", "OMP_FUGU_API_KEY", "SAKANA_API_KEY", "FUGU_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Sakana AI", authoritative = true }
 facets = ["chat"]
 
 [providers."minimax-code"]
 transport = "open-ai-chat"
 base_url = "https://api.minimax.io/v1"
-auth = { type = "bearer", env = ["OMP_MINIMAX_CODE_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_MINIMAX_CODE_API_KEY", "MINIMAX_CODE_API_KEY"] }
 oauth_flow = "minimax-code"
 facets = ["chat"]
 usage = true
@@ -298,7 +305,7 @@ usage = true
 [providers."minimax-code-cn"]
 transport = "open-ai-chat"
 base_url = "https://api.minimaxi.com/v1"
-auth = { type = "bearer", env = ["OMP_MINIMAX_CODE_CN_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_MINIMAX_CODE_CN_API_KEY", "MINIMAX_CODE_CN_API_KEY"] }
 oauth_flow = "minimax-code-cn"
 facets = ["chat"]
 usage = true
@@ -306,7 +313,7 @@ usage = true
 [providers."xiaomi"]
 transport = "open-ai-chat"
 base_url = "https://api.xiaomimimo.com/v1"
-auth = { type = "bearer", env = ["OMP_XIAOMI_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_XIAOMI_API_KEY", "XIAOMI_API_KEY"] }
 oauth_flow = "xiaomi"
 discovery = { kind = "open-ai-models", label = "Xiaomi", authoritative = false }
 facets = ["chat"]
@@ -314,35 +321,35 @@ facets = ["chat"]
 [providers."xiaomi-token-plan-sgp"]
 transport = "open-ai-chat"
 base_url = "https://token-plan-sgp.xiaomimimo.com/v1"
-auth = { type = "bearer", env = ["OMP_XIAOMI_TOKEN_PLAN_SGP_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_XIAOMI_TOKEN_PLAN_SGP_API_KEY", "XIAOMI_TOKEN_PLAN_SGP_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Xiaomi Token Plan (Singapore)", authoritative = false }
 facets = ["chat"]
 
 [providers."xiaomi-token-plan-ams"]
 transport = "open-ai-chat"
 base_url = "https://token-plan-ams.xiaomimimo.com/v1"
-auth = { type = "bearer", env = ["OMP_XIAOMI_TOKEN_PLAN_AMS_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_XIAOMI_TOKEN_PLAN_AMS_API_KEY", "XIAOMI_TOKEN_PLAN_AMS_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Xiaomi Token Plan (Europe)", authoritative = false }
 facets = ["chat"]
 
 [providers."xiaomi-token-plan-cn"]
 transport = "open-ai-chat"
 base_url = "https://token-plan-cn.xiaomimimo.com/v1"
-auth = { type = "bearer", env = ["OMP_XIAOMI_TOKEN_PLAN_CN_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_XIAOMI_TOKEN_PLAN_CN_API_KEY", "XIAOMI_TOKEN_PLAN_CN_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Xiaomi Token Plan (China)", authoritative = false }
 facets = ["chat"]
 
 [providers."firepass"]
 transport = "open-ai-chat"
 base_url = "https://api.fireworks.ai/inference/v1"
-auth = { type = "bearer", env = ["OMP_FIREPASS_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_FIREPASS_API_KEY", "FIREPASS_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Fire Pass (Fireworks Kimi K2.6 Turbo subscription)", authoritative = false }
 facets = ["chat"]
 
 [providers."deepseek"]
 transport = "open-ai-chat"
 base_url = "https://api.deepseek.com"
-auth = { type = "bearer", env = ["OMP_DEEPSEEK_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "DeepSeek", authoritative = false }
 facets = ["chat"]
 compat = { "max_tokens_field" = "max_tokens", "forced_tool_choice" = false, "thinking_tool_choice_conflict" = "drop_thinking_when_any", "leaked_thinking_healer" = "dsml" }
@@ -350,21 +357,21 @@ compat = { "max_tokens_field" = "max_tokens", "forced_tool_choice" = false, "thi
 [providers."meta"]
 transport = "open-ai-responses"
 base_url = "https://api.meta.ai/v1"
-auth = { type = "bearer", env = ["OMP_MODEL_API_KEY", "OMP_META_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_MODEL_API_KEY", "OMP_META_API_KEY", "MODEL_API_KEY", "META_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Meta Model API", authoritative = false }
 facets = ["chat"]
 
 [providers."moonshot"]
 transport = "open-ai-chat"
 base_url = "https://api.moonshot.ai/v1"
-auth = { type = "bearer", env = ["OMP_MOONSHOT_API_KEY", "OMP_KIMI_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_MOONSHOT_API_KEY", "OMP_KIMI_API_KEY", "MOONSHOT_API_KEY", "KIMI_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Moonshot", authoritative = false }
 facets = ["chat"]
 
 [providers."cerebras"]
 transport = "open-ai-chat"
 base_url = "https://api.cerebras.ai/v1"
-auth = { type = "bearer", env = ["OMP_CEREBRAS_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_CEREBRAS_API_KEY", "CEREBRAS_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Cerebras", authoritative = false }
 facets = ["chat"]
 compat = { "usage_in_streaming" = false, "penalties" = false, "tool_strict_mode" = "all_strict" }
@@ -372,14 +379,14 @@ compat = { "usage_in_streaming" = false, "penalties" = false, "tool_strict_mode"
 [providers."baseten"]
 transport = "open-ai-chat"
 base_url = "https://inference.baseten.co/v1"
-auth = { type = "bearer", env = ["OMP_BASETEN_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_BASETEN_API_KEY", "BASETEN_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Baseten", authoritative = true }
 facets = ["chat"]
 
 [providers."fireworks"]
 transport = "open-ai-chat"
 base_url = "https://api.fireworks.ai/inference/v1"
-auth = { type = "bearer", env = ["OMP_FIREWORKS_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_FIREWORKS_API_KEY", "FIREWORKS_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Fireworks", authoritative = false }
 facets = ["chat", "embeddings"]
 pending_facets = ["image_generation"]
@@ -389,7 +396,7 @@ compat = { "max_tokens_field" = "max_tokens", "thinking_tool_choice_conflict" = 
 [providers."together"]
 transport = "open-ai-chat"
 base_url = "https://api.together.xyz/v1"
-auth = { type = "bearer", env = ["OMP_TOGETHER_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_TOGETHER_API_KEY", "TOGETHER_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Together", authoritative = false }
 facets = ["chat", "embeddings"]
 pending_facets = ["image_generation"]
@@ -399,7 +406,7 @@ compat = { "leaked_thinking_healer" = "thinking" }
 [providers."nvidia"]
 transport = "open-ai-chat"
 base_url = "https://integrate.api.nvidia.com/v1"
-auth = { type = "bearer", env = ["OMP_NVIDIA_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_NVIDIA_API_KEY", "NVIDIA_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "NVIDIA", authoritative = false }
 facets = ["chat", "embeddings"]
 compat = { "reasoning_wire_format" = "nvidia_chat_template_kwargs" }
@@ -407,7 +414,7 @@ compat = { "reasoning_wire_format" = "nvidia_chat_template_kwargs" }
 [providers."novita"]
 transport = "open-ai-chat"
 base_url = "https://api.novita.ai/openai/v1"
-auth = { type = "bearer", env = ["OMP_NOVITA_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_NOVITA_API_KEY", "NOVITA_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Novita", authoritative = true }
 facets = ["chat"]
 
@@ -422,7 +429,7 @@ compat = { "max_tokens_field" = "max_tokens" }
 [providers."deepinfra"]
 transport = "open-ai-chat"
 base_url = "https://api.deepinfra.com/v1/openai"
-auth = { type = "bearer", env = ["OMP_DEEPINFRA_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_DEEPINFRA_API_KEY", "DEEPINFRA_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "DeepInfra", authoritative = true }
 facets = ["chat"]
 
@@ -451,7 +458,7 @@ compat = { "max_tokens_field" = "max_tokens" }
 [providers."huggingface"]
 transport = "open-ai-chat"
 base_url = "https://router.huggingface.co/v1"
-auth = { type = "bearer", env = ["OMP_HUGGINGFACE_HUB_TOKEN", "OMP_HF_TOKEN"] }
+auth = { type = "bearer", env = ["OMP_HUGGINGFACE_HUB_TOKEN", "OMP_HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HF_TOKEN"] }
 discovery = { kind = "open-ai-models", label = "Hugging Face", authoritative = false }
 facets = ["chat"]
 
@@ -611,35 +618,35 @@ facets = ["chat"]
 [providers."qianfan"]
 transport = "open-ai-chat"
 base_url = "https://qianfan.baidubce.com/v2"
-auth = { type = "bearer", env = ["OMP_QIANFAN_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_QIANFAN_API_KEY", "QIANFAN_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Qianfan", authoritative = false }
 facets = ["chat"]
 
 [providers."venice"]
 transport = "open-ai-chat"
 base_url = "https://api.venice.ai/api/v1"
-auth = { type = "bearer", env = ["OMP_VENICE_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_VENICE_API_KEY", "VENICE_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Venice", authoritative = false }
 facets = ["chat"]
 
 [providers."siliconflow"]
 transport = "open-ai-chat"
 base_url = "https://api.siliconflow.com/v1"
-auth = { type = "bearer", env = ["OMP_SILICONFLOW_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_SILICONFLOW_API_KEY", "SILICONFLOW_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "SiliconFlow", authoritative = true }
 facets = ["chat"]
 
 [providers."siliconflow-cn"]
 transport = "open-ai-chat"
 base_url = "https://api.siliconflow.cn/v1"
-auth = { type = "bearer", env = ["OMP_SILICONFLOW_CN_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_SILICONFLOW_CN_API_KEY", "SILICONFLOW_CN_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "SiliconFlow (China)", authoritative = true }
 facets = ["chat"]
 
 [providers."synthetic"]
 transport = "open-ai-chat"
 base_url = "https://api.synthetic.new/openai/v1"
-auth = { type = "bearer", env = ["OMP_SYNTHETIC_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_SYNTHETIC_API_KEY", "SYNTHETIC_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Synthetic", authoritative = true }
 facets = ["chat"]
 usage = true
@@ -655,14 +662,14 @@ facets = ["web_search"]
 [providers."nanogpt"]
 transport = "open-ai-chat"
 base_url = "https://nano-gpt.com/api/v1"
-auth = { type = "bearer", env = ["OMP_NANO_GPT_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_NANO_GPT_API_KEY", "NANO_GPT_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "NanoGPT", authoritative = false }
 facets = ["chat"]
 
 [providers."wafer-serverless"]
 transport = "open-ai-chat"
 base_url = "https://pass.wafer.ai/v1"
-auth = { type = "bearer", env = ["OMP_WAFER_SERVERLESS_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_WAFER_SERVERLESS_API_KEY", "WAFER_SERVERLESS_API_KEY"] }
 oauth_flow = "wafer"
 discovery = { kind = "open-ai-models", label = "Wafer Serverless", authoritative = false }
 facets = ["chat"]
@@ -670,7 +677,7 @@ facets = ["chat"]
 [providers."coreweave"]
 transport = "open-ai-chat"
 base_url = "https://api.inference.wandb.ai/v1"
-auth = { type = "bearer", env = ["OMP_COREWEAVE_API_KEY", "OMP_WANDB_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_COREWEAVE_API_KEY", "OMP_WANDB_API_KEY", "COREWEAVE_API_KEY", "WANDB_API_KEY"] }
 # CoreWeave (W&B Inference) is a reseller with a rotating model menu; runtime
 # /v1/models discovery replaces stale bundled rows instead of merging over them
 # (pi 309d5712af, PR #8923).
@@ -680,14 +687,21 @@ facets = ["chat"]
 [providers."vercel-ai-gateway"]
 transport = "anthropic-messages"
 base_url = "https://ai-gateway.vercel.sh"
-auth = { type = "bearer", env = ["OMP_AI_GATEWAY_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_AI_GATEWAY_API_KEY", "AI_GATEWAY_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Vercel AI Gateway", authoritative = false }
+facets = ["chat"]
+
+[providers."cline-pass"]
+transport = "open-ai-chat"
+base_url = "https://api.cline.bot/api/v1"
+auth = { type = "optional-bearer", env = ["OMP_CLINE_API_KEY", "CLINE_API_KEY"] }
+discovery = { kind = "open-ai-models", label = "ClinePass", authoritative = true }
 facets = ["chat"]
 
 [providers."cloudflare-ai-gateway"]
 transport = "anthropic-messages"
 base_url = "https://gateway.ai.cloudflare.com/v1/{account}/{gateway}/anthropic"
-auth = { type = "bearer", env = ["OMP_CLOUDFLARE_AI_GATEWAY_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_CLOUDFLARE_AI_GATEWAY_API_KEY", "CLOUDFLARE_AI_GATEWAY_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Cloudflare AI Gateway", authoritative = false }
 facets = ["chat"]
 
@@ -697,7 +711,7 @@ transport = "open-ai-chat"
 # inert until per-model discovery evidence selects it.
 additional_transports = ["open-ai-responses"]
 base_url = "http://127.0.0.1:4000/v1"
-auth = { type = "optional-bearer", env = ["OMP_LITELLM_API_KEY"] }
+auth = { type = "optional-bearer", env = ["OMP_LITELLM_API_KEY", "LITELLM_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "LiteLLM", authoritative = false }
 facets = ["chat", "embeddings", "audio_speech", "audio_transcription"]
 pending_facets = ["image_generation"]
@@ -707,21 +721,21 @@ compat = { "leaked_thinking_healer" = "thinking" }
 [providers."kilo"]
 transport = "open-ai-chat"
 base_url = "https://api.kilo.ai/api/gateway"
-auth = { type = "bearer", env = ["OMP_KILO_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_KILO_API_KEY", "KILO_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Kilo Gateway", authoritative = false }
 facets = ["chat"]
 
 [providers."zenmux"]
 transport = "anthropic-messages"
 base_url = "https://zenmux.ai/api/anthropic"
-auth = { type = "bearer", env = ["OMP_ZENMUX_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_ZENMUX_API_KEY", "ZENMUX_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "ZenMux", authoritative = false }
 facets = ["chat"]
 
 [providers."opencode-zen"]
 transport = "anthropic-messages"
 base_url = "https://opencode.ai/zen"
-auth = { type = "bearer", env = ["OMP_OPENCODE_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_OPENCODE_API_KEY", "OPENCODE_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "OpenCode Zen", authoritative = true }
 facets = ["chat"]
 
@@ -735,7 +749,7 @@ facets = ["chat"]
 [providers."opencode-go"]
 transport = "open-ai-responses"
 base_url = "https://opencode.ai/zen/go/v1"
-auth = { type = "bearer", env = ["OMP_OPENCODE_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_OPENCODE_API_KEY", "OPENCODE_API_KEY"] }
 oauth_flow = "opencode"
 discovery = { kind = "open-ai-models", label = "OpenCode Go", authoritative = true }
 facets = ["chat"]
@@ -795,7 +809,7 @@ facets = ["chat"]
 [providers."ollama"]
 transport = "open-ai-chat"
 base_url = "http://127.0.0.1:11434/v1"
-auth = { type = "optional-bearer", env = ["OMP_OLLAMA_API_KEY"] }
+auth = { type = "optional-bearer", env = ["OMP_OLLAMA_API_KEY", "OLLAMA_API_KEY"] }
 discovery = { kind = "ollama-tags", label = "Ollama (Local OpenAI-compatible)", authoritative = false }
 facets = ["chat", "embeddings"]
 compat = { "usage_in_streaming" = false, "multiple_system_messages" = false, "tool_strict_mode" = "none", "named_tool_choice" = false, "tool_schema_flavor" = "grammar", "leaked_thinking_healer" = "thinking" }
@@ -804,7 +818,7 @@ usage = true
 [providers."ollama-cloud"]
 transport = "ollama-chat"
 base_url = "https://ollama.com"
-auth = { type = "bearer", env = ["OMP_OLLAMA_CLOUD_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_OLLAMA_CLOUD_API_KEY", "OLLAMA_CLOUD_API_KEY"] }
 discovery = { kind = "specialized", label = "Ollama Cloud", authoritative = false }
 facets = ["chat"]
 compat = { "stream_protocol" = "ndjson", "tool_strict_mode" = "none", "named_tool_choice" = false }
@@ -813,7 +827,7 @@ usage = true
 [providers."lm-studio"]
 transport = "open-ai-chat"
 base_url = "http://127.0.0.1:1234/v1"
-auth = { type = "optional-bearer", env = ["OMP_LM_STUDIO_API_KEY"] }
+auth = { type = "optional-bearer", env = ["OMP_LM_STUDIO_API_KEY", "LM_STUDIO_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "LM Studio (Local OpenAI-compatible)", authoritative = false }
 facets = ["chat", "embeddings"]
 compat = { "multiple_system_messages" = false, "tool_strict_mode" = "none", "named_tool_choice" = false, "tool_schema_flavor" = "grammar", "leaked_thinking_healer" = "thinking" }
@@ -828,7 +842,7 @@ compat = { "multiple_system_messages" = false, "tool_strict_mode" = "none", "nam
 [providers."vllm"]
 transport = "open-ai-chat"
 base_url = "http://127.0.0.1:8000/v1"
-auth = { type = "optional-bearer", env = ["OMP_VLLM_API_KEY"] }
+auth = { type = "optional-bearer", env = ["OMP_VLLM_API_KEY", "VLLM_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "vLLM", authoritative = false }
 facets = ["chat", "embeddings"]
 compat = { "multiple_system_messages" = false, "tool_strict_mode" = "none", "named_tool_choice" = false, "tool_schema_flavor" = "grammar", "leaked_thinking_healer" = "thinking" }
@@ -836,7 +850,7 @@ compat = { "multiple_system_messages" = false, "tool_strict_mode" = "none", "nam
 [providers."openai"]
 transport = "open-ai-responses"
 base_url = "https://api.openai.com/v1"
-auth = { type = "bearer", env = ["OMP_OPENAI_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_OPENAI_API_KEY", "OPENAI_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "OpenAI", authoritative = false }
 facets = ["chat", "embeddings", "image_generation", "audio_speech", "audio_transcription", "video_generation"]
 compat = { "max_tokens_field" = "max_output_tokens", "reasoning_wire_format" = "open_ai_responses", "stateful_response_chaining" = true, "cache_control_format" = "open_ai", "stream_protocol" = "sse_events" }
@@ -844,7 +858,7 @@ compat = { "max_tokens_field" = "max_output_tokens", "reasoning_wire_format" = "
 [providers."google"]
 transport = "google-gen-ai"
 base_url = "https://generativelanguage.googleapis.com/v1beta"
-auth = { type = "query", param = "key", env = ["OMP_GEMINI_API_KEY", "OMP_GOOGLE_API_KEY"] }
+auth = { type = "query", param = "key", env = ["OMP_GEMINI_API_KEY", "OMP_GOOGLE_API_KEY", "GEMINI_API_KEY"] }
 discovery = { kind = "google-models", label = "Google Gemini", authoritative = false }
 facets = ["chat", "embeddings", "image_generation"]
 compat = { "multiple_system_messages" = false, "tool_strict_mode" = "none", "reasoning_wire_format" = "google", "cache_control_format" = "google", "image_encoding_format" = "google_inline_data", "tool_schema_flavor" = "google", "stream_protocol" = "sse_data" }
@@ -852,7 +866,7 @@ compat = { "multiple_system_messages" = false, "tool_strict_mode" = "none", "rea
 [providers."google-vertex"]
 transport = "google-vertex"
 base_url = "https://{location}-aiplatform.googleapis.com/v1"
-auth = { type = "google-adc", api_key_env = ["OMP_GOOGLE_CLOUD_API_KEY"], project_env = ["OMP_GOOGLE_CLOUD_PROJECT", "OMP_GCP_PROJECT", "OMP_GCLOUD_PROJECT"], location_env = ["OMP_GOOGLE_VERTEX_LOCATION", "OMP_GOOGLE_CLOUD_LOCATION", "OMP_VERTEX_LOCATION"] }
+auth = { type = "google-adc", api_key_env = ["OMP_GOOGLE_CLOUD_API_KEY", "GOOGLE_CLOUD_API_KEY"], project_env = ["OMP_GOOGLE_CLOUD_PROJECT", "OMP_GCP_PROJECT", "OMP_GCLOUD_PROJECT", "GOOGLE_CLOUD_PROJECT", "GCP_PROJECT", "GCLOUD_PROJECT"], location_env = ["OMP_GOOGLE_VERTEX_LOCATION", "OMP_GOOGLE_CLOUD_LOCATION", "OMP_VERTEX_LOCATION", "GOOGLE_VERTEX_LOCATION", "GOOGLE_CLOUD_LOCATION", "VERTEX_LOCATION"], credentials_env = ["OMP_GOOGLE_APPLICATION_CREDENTIALS", "GOOGLE_APPLICATION_CREDENTIALS"] }
 discovery = { kind = "open-ai-models", label = "Google Vertex AI", authoritative = false }
 facets = ["chat", "embeddings"]
 pending_facets = ["image_generation"]
@@ -862,14 +876,14 @@ compat = { "multiple_system_messages" = false, "tool_strict_mode" = "none", "rea
 [providers."groq"]
 transport = "open-ai-chat"
 base_url = "https://api.groq.com/openai/v1"
-auth = { type = "bearer", env = ["OMP_GROQ_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_GROQ_API_KEY", "GROQ_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Groq", authoritative = false }
 facets = ["chat", "audio_transcription"]
 
 [providers."mistral"]
 transport = "open-ai-chat"
 base_url = "https://api.mistral.ai/v1"
-auth = { type = "bearer", env = ["OMP_MISTRAL_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_MISTRAL_API_KEY", "MISTRAL_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "Mistral", authoritative = false }
 facets = ["chat", "embeddings"]
 compat = { "max_tokens_field" = "max_tokens", "tool_strict_mode" = "none", "tool_call_id_profile" = "mistral9_alnum" }
@@ -877,7 +891,7 @@ compat = { "max_tokens_field" = "max_tokens", "tool_strict_mode" = "none", "tool
 [providers."minimax"]
 transport = "anthropic-messages"
 base_url = "https://api.minimax.io/anthropic"
-auth = { type = "bearer", env = ["OMP_MINIMAX_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_MINIMAX_API_KEY", "MINIMAX_API_KEY"] }
 facets = ["chat"]
 
 [providers."minimax-cn"]
@@ -887,31 +901,38 @@ auth = { type = "bearer", env = ["OMP_MINIMAX_CN_API_KEY"] }
 facets = ["chat"]
 
 [providers."amazon-bedrock"]
+name = "Amazon Bedrock"
+default_model = "us.anthropic.claude-opus-4-8"
 transport = "bedrock-converse"
 base_url = "https://bedrock-runtime.{region}.amazonaws.com"
 auth = { type = "aws-sig-v4" }
+oauth_auth = { type = "bearer", env = ["OMP_AWS_BEARER_TOKEN_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK"] }
 discovery = { kind = "specialized", label = "Amazon Bedrock", authoritative = false }
 facets = ["chat"]
 compat = { "multiple_system_messages" = false, "max_tokens_field" = "max_tokens", "tool_strict_mode" = "none", "reasoning_wire_format" = "anthropic", "cache_control_format" = "anthropic", "image_encoding_format" = "anthropic_source", "tool_schema_flavor" = "anthropic", "stream_protocol" = "sse_events" }
 
 [providers."bedrock-mantle"]
+name = "Amazon Bedrock Mantle"
+default_model = "openai.gpt-5.6-terra"
 transport = "open-ai-responses"
+codec = "bedrock-mantle"
 base_url = "https://bedrock-mantle.{region}.api.aws/openai/v1"
-auth = { type = "bearer", env = ["OMP_AWS_BEARER_TOKEN_BEDROCK"] }
+auth = { type = "bearer", env = ["OMP_AWS_BEARER_TOKEN_BEDROCK", "AWS_BEARER_TOKEN_BEDROCK"] }
+oauth_auth = { type = "aws-sig-v4" }
 discovery = { kind = "open-ai-models", label = "Amazon Bedrock Mantle", authoritative = true }
 facets = ["chat"]
 
 [providers."gmi-cloud"]
 transport = "open-ai-chat"
 base_url = "https://api.gmi-serving.com/v1"
-auth = { type = "bearer", env = ["OMP_GMI_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_GMI_API_KEY", "GMI_API_KEY"] }
 discovery = { kind = "open-ai-models", label = "GMI Cloud", authoritative = true }
 facets = ["chat"]
 
 [providers."yolo-auto"]
 transport = "open-ai-chat"
 base_url = "https://yolo-auto.com/v1"
-auth = { type = "bearer", env = ["OMP_YOLO_AUTO_API_KEY"] }
+auth = { type = "bearer", env = ["OMP_YOLO_AUTO_API_KEY", "YOLO_AUTO_API_KEY"] }
 oauth_flow = "yolo-auto"
 discovery = { kind = "open-ai-models", label = "Yolo-Auto", authoritative = true }
 facets = ["chat"]

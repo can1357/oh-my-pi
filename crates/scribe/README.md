@@ -19,7 +19,9 @@ before hashing and journaling.
   double-render check stays the runtime enforcement.
 - **Values are cheap to layer.** [`Value`] collections and [`Props`] use
   persistent structures (`im`), so a subagent bag is `parent.overlay(&patch)`
-  — an O(1)-clone, child-wins, *shallow* merge.
+  — an O(1)-clone, child-wins, *shallow* merge. `Props::with_dom` additionally
+  creates a render-scoped borrowed view of the authoritative session tree;
+  it never snapshots or serializes the DOM.
 - **Markdown-first whitespace.** A line holding only a `{% %}` statement or
   `{# #}` comment disappears with its newline (mustache "standalone line"
   semantics), so control flow never leaves blank scars in prompt markdown.
@@ -65,7 +67,10 @@ render as compact JSON.
   `escape_xml`, `trim`, `indent(n, first=true)` (`first=false` skips the
   first line, for embedding after a label), `bullets(marker="- ")`.
 - Functions: `table(rows, headers?)` → GFM table (first row is the header
-  when `headers` is omitted).
+  when `headers` is omitted); with `Template::render_scoped`,
+  `select("todo item[status!=completed]")` returns iterable node values with
+  `handle`, `tag`, `content`, and `props`, while `count("<selector>")` and
+  `count(select("<selector>"))` count matches.
 - Blocks: `xml`, `codeblock`.
 
 ## Canonicalization

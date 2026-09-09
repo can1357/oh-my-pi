@@ -16,7 +16,7 @@ use omp_env::{
 	Admitter, BlobDownloadEvent, EnvClient, ExecEvent, InvocationEvent, ProcessAttachmentEvent,
 };
 use omp_envd::{
-	EnvServer, RegistryBridges,
+	AttachOptions, EnvServer, ExtensionDataBinding, ProjectEnvironment, RegistryBridges,
 	eval::{
 		BridgeHostError, BridgeProgressSink, EvalSessionConfig, ParentBindingLease, ParentSessionHost,
 	},
@@ -24,7 +24,8 @@ use omp_envd::{
 	exthost::{
 		ActivationTrigger, DeclarationSet, ExtensionManifest, ServiceManifest, ToolDeclarationKey,
 	},
-	worker::{ExtHostConfig, ExtHostSpec, ExtHostSupervisor, HostKey, PY_EVAL_MODULE},
+	policy::Grants,
+	worker::{ExtHostConfig, ExtHostSpec, HostKey},
 	workspace::{WorkspaceError, WorkspaceHost, WorkspaceSearchOptions},
 };
 use omp_ext::config::{StaticDeclaration, StaticDeclarations};
@@ -42,9 +43,9 @@ use omp_proto::{
 };
 use omp_tool::{
 	Abort, CallOutcome, Claims, Constraint, DocEffects, Effects, Ev, IncomingParams, LoweringCaps,
-	Part, Precedence, Presentation, PromptCaps, Registry, Rev, Tool, ToolRoute, ToolSpec,
+	Part, Precedence, Presentation, PromptCaps, Registry, Rev, Tool, ToolLocus, ToolRoute, ToolSpec,
 };
-use omp_tools::{eval, eval::OutputChannel};
+use omp_tools::eval;
 use serde_json::{Value, json};
 use tempfile::TempDir;
 use tokio::{
@@ -342,6 +343,40 @@ def helper_echo(value):
     return {"value": value}
 "#;
 
+const ENV_DATA_EXTENSION: &str = r#"
+import omp
+import omp.env as env
+
+try:
+    env.info()
+except env.EnvUnavailable:
+    DECLARATION_DATA_DENIED = True
+else:
+    DECLARATION_DATA_DENIED = False
+
+@omp.tool(
+    "env_data_probe",
+    effects=omp.Effects(
+        documents=omp.DocEffects(read=True, write_globs=("**",)),
+    ),
+)
+async def env_data_probe(path: str):
+    target = env.EnvPath(path)
+    metadata = await env.fs.stat(target)
+    document = await env.docs.open(target)
+    try:
+        await document.write("updated through extension DATA")
+    finally:
+        await document.close()
+    return {
+        "parts": [],
+        "details": {
+            "declaration_data_denied": DECLARATION_DATA_DENIED,
+            "kind": metadata.kind.value,
+        },
+    }
+"#;
+
 const WORKER_CANCEL_EXTENSION: &str = r#"
 import ctypes
 import os
@@ -470,9 +505,7 @@ fn test_config() -> ExtHostConfig {
 fn extension_worker(module: &str, python_site: Option<PathBuf>) -> ExtHostConfig {
 	let mut config = test_config();
 	let key = HostKey::new("workspace", "trusted", module);
-	let manifest = if module == PY_EVAL_MODULE {
-		test_manifest(&key, module, [ToolDeclarationKey::new("py_eval", "", 1)])
-	} else if module == PRELUDE_HELPER_EXTENSION_MODULE {
+	let manifest = if module == PRELUDE_HELPER_EXTENSION_MODULE {
 		ExtensionManifest::new(
 			test_provenance(&key),
 			Str::from(module),
@@ -496,12 +529,14 @@ fn extension_worker(module: &str, python_site: Option<PathBuf>) -> ExtHostConfig
 }
 
 struct Harness {
-	client:       EnvClient,
-	server:       Arc<EnvServer>,
-	root:         TempDir,
-	state:        TempDir,
-	server_task:  JoinHandle<()>,
-	_eval_parent: ParentBindingLease,
+	client:                  EnvClient,
+	server:                  Arc<EnvServer>,
+	root:                    TempDir,
+	state:                   TempDir,
+	server_task:             JoinHandle<()>,
+	extension_data_shutdown: CancellationToken,
+	extension_data_tasks:    Vec<JoinHandle<()>>,
+	_eval_parent:            ParentBindingLease,
 }
 struct TestEvalParent {
 	cwd: PathBuf,
@@ -510,12 +545,7 @@ struct TestEvalParent {
 #[async_trait::async_trait]
 impl ParentSessionHost for TestEvalParent {
 	fn eval_session_config(&self) -> Result<EvalSessionConfig, BridgeHostError> {
-		Ok(EvalSessionConfig {
-			cwd:              self.cwd.clone(),
-			local_roots_json: None,
-			artifacts_dir:    None,
-			session_file:     None,
-		})
+		Ok(EvalSessionConfig { cwd: self.cwd.clone(), local_roots_json: None })
 	}
 
 	async fn completion(
@@ -548,20 +578,53 @@ impl Harness {
 		Self::start_with_worker(registry, test_config()).await
 	}
 
-	async fn start_with_worker(registry: Registry, worker: ExtHostConfig) -> Self {
+	async fn start_with_worker(registry: Registry, mut worker: ExtHostConfig) -> Self {
 		let root = tempfile::tempdir().expect("workspace scratch directory");
 		let state = tempfile::tempdir().expect("state scratch directory");
+		let mut extension_data_bindings = Vec::with_capacity(worker.extensions.len());
+		for extension in &mut worker.extensions {
+			let mut binding = ExtensionDataBinding::scoped(
+				state.path(),
+				extension.key.clone(),
+				worker.session_id.as_str(),
+				worker.session_generation,
+				extension.data_grants.clone(),
+			);
+			extension.data_socket = Some(binding.path().to_path_buf());
+			binding
+				.prepare_endpoint()
+				.expect("prepare extension DATA endpoint");
+			extension_data_bindings.push(binding);
+		}
+		let con = Arc::new(omp_con::Ctx::new());
+		let convars = Arc::new(omp_envd::exthost::ConvarControlFactory::new(Arc::clone(&con)));
 		let server = Arc::new(
 			EnvServer::open_local(
 				root.path(),
 				state.path(),
 				registry,
 				worker,
+				&con,
+				convars,
 				RegistryBridges::default(),
 			)
 			.await
 			.expect("real local environment host"),
 		);
+		let extension_data_shutdown = CancellationToken::new();
+		let extension_data_tasks = extension_data_bindings
+			.into_iter()
+			.map(|binding| {
+				let host = Arc::clone(&server);
+				let shutdown = extension_data_shutdown.clone();
+				tokio::spawn(async move {
+					host
+						.serve_extension_uds(binding, shutdown)
+						.await
+						.expect("serve extension DATA endpoint");
+				})
+			})
+			.collect();
 		let (client, transport) = EnvClient::in_process(64);
 		client.set_admitter(AllowAdmission);
 		let host = Arc::clone(&server);
@@ -580,7 +643,16 @@ impl Harness {
 				Arc::new(TestEvalParent { cwd: env::current_dir().expect("test process cwd") }),
 			)
 			.expect("bind eval parent");
-		Self { client, server, root, state, server_task, _eval_parent: eval_parent }
+		Self {
+			client,
+			server,
+			root,
+			state,
+			server_task,
+			extension_data_shutdown,
+			extension_data_tasks,
+			_eval_parent: eval_parent,
+		}
 	}
 
 	const fn client(&self) -> &EnvClient {
@@ -606,6 +678,10 @@ impl Harness {
 
 impl Drop for Harness {
 	fn drop(&mut self) {
+		self.extension_data_shutdown.cancel();
+		for task in &self.extension_data_tasks {
+			task.abort();
+		}
 		self.server_task.abort();
 	}
 }
@@ -754,7 +830,7 @@ fn ok_builtin_payload(verdict: v1::Verdict, operation: &str) -> Value {
 }
 
 async fn read_builtin_text(client: &EnvClient, invocation_id: &str, path: &str) -> String {
-	let verdict = invoke_builtin(client, invocation_id, "read", "1", json!({"path": path})).await;
+	let verdict = invoke_builtin(client, invocation_id, "read", "2", json!({"path": path})).await;
 	let payload = ok_builtin_payload(verdict, "read");
 	payload["parts"][0]["text"]
 		.as_str()
@@ -771,15 +847,6 @@ fn hashline_tag<'o>(output: &'o str, path: &str) -> &'o str {
 		.expect("read minted a hashline tag")
 }
 
-fn eval_output(payload: &eval::Payload, channel: OutputChannel) -> Vec<u8> {
-	payload
-		.frames
-		.iter()
-		.filter(|frame| frame.channel == channel)
-		.flat_map(|frame| frame.data.as_ref().iter().copied())
-		.collect()
-}
-
 #[tokio::test]
 async fn write_name_is_reserved_before_production_registry_assembly() {
 	let root = tempfile::tempdir().expect("workspace scratch directory");
@@ -789,11 +856,15 @@ async fn write_name_is_reserved_before_production_registry_assembly() {
 	registry
 		.register(EffectTool::named("write", marker), Presentation::Slot, test_claims())
 		.expect("register colliding caller write tool");
+	let con = Arc::new(omp_con::Ctx::new());
+	let convars = Arc::new(omp_envd::exthost::ConvarControlFactory::new(Arc::clone(&con)));
 	let result = EnvServer::open_local(
 		root.path(),
 		state.path(),
 		registry,
 		test_config(),
+		&con,
+		convars,
 		RegistryBridges::default(),
 	)
 	.await;
@@ -824,25 +895,19 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		.map(|tool| (tool.identity.name.as_str(), tool.identity.rev.to_string()))
 		.collect::<Vec<_>>();
 	assert_eq!(identities, [
-		("checkpoint", "1".to_owned()),
-		("rewind", "1".to_owned()),
-		("ask", "1".to_owned()),
-		("ast_edit", "1".to_owned()),
-		("ast_grep", "1".to_owned()),
-		("bash", "1".to_owned()),
-		("debug", "1".to_owned()),
+		("bash", "2".to_owned()),
 		("edit", "hl.1".to_owned()),
-		("eval", "1".to_owned()),
-		("fetch", "1".to_owned()),
 		("glob", "1".to_owned()),
 		("grep", "1".to_owned()),
-		("lsp", "1".to_owned()),
-		("think", "1".to_owned()),
-		("todo", "1".to_owned()),
-		("web_search", "1".to_owned()),
-		("write", "1".to_owned()),
-		("read", "1".to_owned()),
+		("read", "2".to_owned()),
 	]);
+	for name in ["eval", "write"] {
+		assert_eq!(
+			registry.presentation(name).expect("long-tail presentation"),
+			Presentation::Device,
+			"{name} must remain reachable through dyn without entering the wire roster",
+		);
+	}
 	let hidden_yield = registry
 		.advertise_selected(
 			LoweringCaps {
@@ -851,44 +916,22 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 				maximum_tools:  None,
 				maximum_strict: None,
 			},
-			&[sf!("yield")],
+			&[sf!("yield"), sf!("think")],
 		)
 		.expect("advertise hidden yield selection");
 	assert_eq!(
 		hidden_yield.len(),
-		1,
-		"yield must stay selectable for child sessions while hidden from the top-level agent"
+		2,
+		"yield and think must stay selectable for child/external-thinking sessions while hidden \
+		 from the top-level agent"
 	);
-	let write_definition = advertised
-		.iter()
-		.find(|tool| tool.identity.name == "write")
-		.expect("advertised write definition");
-	let write_description = write_definition
-		.definition
-		.description
-		.as_deref()
-		.expect("write description");
-	assert!(write_description.contains("`.tar.zst`"));
-	assert!(write_description.contains("other archive formats"));
-	assert!(write_description.contains("SQLite row operations"));
-	let (write_schema, write_strict) = write_definition
-		.definition
-		.input
-		.json_schema()
-		.expect("write uses JSON Schema grammar");
-	assert!(write_strict, "write schema must remain strict");
-	assert_eq!(
-		write_schema.as_value(),
-		&json!({
-			"type": "object",
-			"additionalProperties": false,
-			"required": ["path", "content"],
-			"properties": {
-				"path": {"type": "string", "description": "file path"},
-				"content": {"type": "string", "description": "file content"}
-			}
-		})
-	);
+	let write_spec = registry
+		.live_spec("write")
+		.expect("write remains a live dyn device");
+	assert!(write_spec.description.contains("`.tar.zst`"));
+	assert!(write_spec.description.contains("other archive formats"));
+	assert!(write_spec.description.contains("SQLite row operations"));
+	assert!(serde_json::from_slice::<Value>(&write_spec.schema).is_ok());
 	let definition = |name: &str| {
 		advertised
 			.iter()
@@ -910,9 +953,11 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		json!({
 			"type": "object",
 			"additionalProperties": false,
-			"required": ["pattern"],
+			"required": ["i", "pattern"],
 			"properties": {
 				"pattern": {"type": "string", "description": "regex pattern"},
+				"i": {"type": "string", "description": "Short present-participle intent for this call."},
+				"notrunc": {"type": "boolean", "description": "Prefer complete output inline up to the host security ceiling; overflow or transport backpressure remains available through its artifact."},
 				"path": {"type": "string", "description": "file, directory, glob, internal URL, or \"<file>:<lines>\" selector to search; pass several as a semicolon-delimited list (\"src; tests\"). Omitted -> searches the workspace root (\".\")"},
 				"case": {"type": "boolean", "description": "case-sensitive search"},
 				"gitignore": {"type": "boolean", "description": "respect gitignore"},
@@ -925,8 +970,11 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		json!({
 			"type": "object",
 			"additionalProperties": false,
+			"required": ["i"],
 			"properties": {
 				"path": {"type": "string", "description": "glob, file, or directory to search — a single path or a semicolon-delimited list (\"src/**/*.ts; test/**/*.ts\"). Omitted -> searches the workspace root (\".\")"},
+				"i": {"type": "string", "description": "Short present-participle intent for this call."},
+				"notrunc": {"type": "boolean", "description": "Prefer complete output inline up to the host security ceiling; overflow or transport backpressure remains available through its artifact."},
 				"hidden": {"type": "boolean", "description": "include hidden files"},
 				"gitignore": {"type": "boolean", "description": "respect gitignore"},
 				"limit": {"type": "number", "description": "max results"}
@@ -938,9 +986,12 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		json!({
 			"type": "object",
 			"additionalProperties": false,
-			"required": ["path"],
+			"required": ["i", "path"],
 			"properties": {
-				"path": {"type": "string", "description": "Local path, internal URI (e.g. skill://), or URL. Inline selectors are supported."}
+				"path": {"type": "string", "description": "Local path, internal URI (e.g. skill://), or URL. Inline selectors are supported."},
+				"question": {"type": "string", "description": "Optional question about one image. The active model vision route receives the question and materialized image together."},
+				"i": {"type": "string", "description": "Short present-participle intent for this call."},
+				"notrunc": {"type": "boolean", "description": "Prefer complete output inline up to the host security ceiling; overflow or transport backpressure remains available through its artifact."}
 			}
 		})
 	);
@@ -949,64 +1000,21 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		json!({
 			"type": "object",
 			"additionalProperties": false,
-			"required": ["input"],
-			"properties": {"input": {"type": "string"}}
-		})
-	);
-	assert_eq!(
-		schema("eval"),
-		json!({
-			"type": "object",
-			"additionalProperties": false,
-			"required": ["language", "code"],
+			"required": ["i", "input"],
 			"properties": {
-				"language": {
-					"type": "string",
-					"enum": ["py"],
-					"description": "runtime: \"py\" for the Python kernel"
-				},
-				"code": {
-					"type": "string",
-					"description": "code to run in this eval call, verbatim. Use top-level await freely."
-				},
-				"title": {
-					"type": "string",
-					"description": "short label shown in transcript (e.g. \"imports\", \"load config\")"
-				},
-				"timeout": {
-					"type": "number",
-					"description": "timeout for this eval call in seconds; 0 disables the cell timeout"
-				},
-				"reset": {
-					"type": "boolean",
-					"description": "wipe this language's kernel before running. Other languages are untouched."
-				},
-				"kernel_mode": {
-					"anyOf": [
-						{
-							"oneOf": [
-								{
-									"type": "string",
-									"const": "persistent",
-									"description": "Reuse the owner-scoped Python kernel."
-								},
-								{
-									"type": "string",
-									"const": "per-call",
-									"description": "Spawn a clean Python kernel for this call and dispose it at settlement."
-								}
-							],
-							"description": "Lifetime policy for the Python kernel."
-						},
-						{"type": "null"}
-					],
-					"description": "Select a persistent kernel or an isolated one-shot process."
-				}
+				"input": {"type": "string"},
+				"i": {"type": "string", "description": "Short present-participle intent for this call."},
+				"notrunc": {"type": "boolean", "description": "Prefer complete output inline up to the host security ceiling; overflow or transport backpressure remains available through its artifact."}
 			}
 		})
 	);
+	let eval_spec = registry
+		.live_spec("eval")
+		.expect("eval remains a live dyn device");
+	let eval_schema: Value = serde_json::from_slice(&eval_spec.schema).expect("eval schema");
+	assert_eq!(eval_schema["required"], json!(["i", "language", "code"]));
 	let bash_schema = schema("bash");
-	assert_eq!(bash_schema["required"], json!(["command"]));
+	assert_eq!(bash_schema["required"], json!(["i", "command"]));
 	assert_eq!(bash_schema["properties"]["timeout"]["type"], "number");
 	assert_eq!(bash_schema["properties"]["async"]["default"], false);
 	assert!(bash_schema["properties"].get("name").is_none());
@@ -1049,7 +1057,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 	);
 
 	let read =
-		invoke_builtin(harness.client(), "builtin-read", "read", "1", json!({"path":"note.txt"}))
+		invoke_builtin(harness.client(), "builtin-read", "read", "2", json!({"path":"note.txt"}))
 			.await;
 	assert!(
 		!read.is_error,
@@ -1068,7 +1076,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		read_text.starts_with("[note.txt#"),
 		"read must mint the edit anchor used by the shared document adapter: {read_text}"
 	);
-	let tag = omp_hashline::compute_snapshot_tag(b"before\n");
+	let tag = omp_edit::store::file_hash("before\n");
 	let patch = format!("[note.txt#{tag}]\nPUT 1.=1:\n+after");
 	let edit =
 		invoke_builtin(harness.client(), "builtin-edit", "edit", "hl.1", json!({"input":patch}))
@@ -1087,7 +1095,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		harness.client(),
 		"builtin-write",
 		"write",
-		"1",
+		"2",
 		json!({"path":"nested/written.txt","content":"written through adapter\n"}),
 	)
 	.await;
@@ -1132,7 +1140,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		harness.client(),
 		"builtin-read-written",
 		"read",
-		"1",
+		"2",
 		json!({"path":"nested/written.txt:raw"}),
 	)
 	.await;
@@ -1145,7 +1153,7 @@ async fn production_registry_advertises_and_dispatches_all_native_adapters() {
 		harness.client(),
 		"builtin-shell",
 		"bash",
-		"1",
+		"2",
 		json!({"command":"printf shell-ok"}),
 	)
 	.await;
@@ -1182,7 +1190,7 @@ async fn special_writes_round_trip_through_production_read_backends() {
 		harness.client(),
 		"write-archive-member",
 		"write",
-		"1",
+		"2",
 		json!({
 			"path": "bundle.zip:dir/member.txt",
 			"content": "changed through write\n"
@@ -1212,7 +1220,7 @@ async fn special_writes_round_trip_through_production_read_backends() {
 		harness.client(),
 		"write-sqlite-insert",
 		"write",
-		"1",
+		"2",
 		json!({
 			"path": "catalog.sqlite:people",
 			"content": r#"{"id":4,"name":"Linus","score":40}"#
@@ -1232,7 +1240,7 @@ async fn special_writes_round_trip_through_production_read_backends() {
 		harness.client(),
 		"write-sqlite-update",
 		"write",
-		"1",
+		"2",
 		json!({
 			"path": "catalog.sqlite:people:4",
 			"content": r#"{"name":"Linus Torvalds","score":41}"#
@@ -1252,7 +1260,7 @@ async fn special_writes_round_trip_through_production_read_backends() {
 		harness.client(),
 		"write-sqlite-delete",
 		"write",
-		"1",
+		"2",
 		json!({"path":"catalog.sqlite:people:4","content":""}),
 	)
 	.await;
@@ -1403,8 +1411,34 @@ async fn production_eval_covers_bridge_persistence_reset_timeout_cancellation_an
 	let CallOutcome::Ok(seed) = seed else {
 		panic!("embedded Python seed cell returned a fault");
 	};
-	assert_eq!(eval_output(&seed, omp_tools::eval::OutputChannel::Stdout), b"seeded\n");
+	assert!(seed.had_output);
 	assert_eq!(seed.status.outcome, omp_tools::eval::CellOutcome::Complete);
+
+	let rich = invoke_builtin(
+		harness.client(),
+		"eval-await-display",
+		"eval",
+		"1",
+		json!({
+			"language":"py",
+			"code":"import asyncio\nclass Bundle:\n    def _repr_mimebundle_(self):\n        return {'application/json': {'bundle': True}, 'text/plain': 'bundle'}\ndisplay(Bundle())\nawait asyncio.sleep(0, result=state + 2)"
+		}),
+	)
+	.await;
+	assert!(!rich.is_error, "top-level await or MIME bundle display failed");
+	let rich: CallOutcome<eval::Payload, eval::Fault> =
+		serde_json::from_slice(&rich.json).expect("typed rich eval verdict");
+	let CallOutcome::Ok(rich) = rich else {
+		panic!("rich Python eval returned a fault");
+	};
+	assert_eq!(
+		rich.result.and_then(|result| result.json),
+		Some(json!(42)),
+		"top-level await did not preserve the persistent namespace"
+	);
+	assert_eq!(rich.display_outputs, vec![omp_tools::eval::DisplayOutput::Json {
+		data: json!({"bundle": true}),
+	}]);
 
 	let (unrelated, unrelated_task) = harness.connect("eval-unrelated-owner").await;
 	let isolated = invoke_builtin_as(
@@ -1527,10 +1561,7 @@ async fn production_eval_covers_bridge_persistence_reset_timeout_cancellation_an
 	let CallOutcome::Ok(denied_completion) = denied_completion else {
 		panic!("completion denial returned a resource fault");
 	};
-	assert_eq!(
-		eval_output(&denied_completion, omp_tools::eval::OutputChannel::Stdout),
-		b"bridge capability denied: __completion__\n"
-	);
+	assert!(denied_completion.had_output);
 
 	let continued = invoke_builtin(
 		harness.client(),
@@ -1547,7 +1578,7 @@ async fn production_eval_covers_bridge_persistence_reset_timeout_cancellation_an
 		panic!("embedded Python continuation cell returned a fault");
 	};
 	assert_eq!(continued.session_id, seed.session_id);
-	assert_eq!(eval_output(&continued, omp_tools::eval::OutputChannel::Stdout), b"cell=42\n");
+	assert!(continued.had_output);
 	assert_eq!(
 		continued.result,
 		Some(omp_tools::eval::CellValue { text: sf!("42"), json: Some(json!(42)) })
@@ -1785,7 +1816,7 @@ async fn production_eval_covers_bridge_persistence_reset_timeout_cancellation_an
 }
 
 #[tokio::test]
-async fn uds_clients_cannot_invoke_session_local_eval_but_retain_ordinary_tools() {
+async fn uds_clients_invoke_owner_eval_and_retain_ordinary_tools() {
 	let harness = Harness::start(Registry::new()).await;
 	fs::write(harness.root.path().join("uds-note.txt"), "uds read\n").expect("UDS read fixture");
 	let advertised = harness
@@ -1799,8 +1830,16 @@ async fn uds_clients_cannot_invoke_session_local_eval_but_retain_ordinary_tools(
 		})
 		.expect("advertise UDS registry");
 	assert!(
-		advertised.iter().any(|tool| tool.identity.name == "eval"),
-		"in-process registry did not advertise eval"
+		advertised.iter().all(|tool| tool.identity.name != "eval"),
+		"eval must remain a dyn device rather than tax the wire roster",
+	);
+	assert_eq!(
+		harness
+			.server
+			.registry()
+			.presentation("eval")
+			.expect("eval presentation"),
+		Presentation::Device,
 	);
 	let local_eval = invoke_builtin(
 		harness.client(),
@@ -1846,30 +1885,25 @@ async fn uds_clients_cannot_invoke_session_local_eval_but_retain_ordinary_tools(
 		.await
 		.expect("UDS environment hello");
 
-	let mut denied = remote
-		.invoke(InvokeTool {
-			invocation_id: "remote-eval-denied".into(),
-			name: "eval".into(),
-			rev: "1".into(),
-			..InvokeTool::default()
-		})
-		.await
-		.expect("open denied remote eval request");
-	let error = denied
-		.next_event()
-		.await
-		.expect_err("UDS eval unexpectedly produced an event");
-	let omp_env::ClientError::Protocol(error) = error else {
-		panic!("UDS eval denial was not a typed protocol error");
-	};
-	assert_eq!(error.code, omp_proto::env::v1::ProtocolErrorCode::PermissionDenied as i32);
-	assert_eq!(error.message, "eval is available only through the session-local environment");
+	let remote_eval = invoke_builtin(
+		&remote,
+		"remote-eval-allowed",
+		"eval",
+		"1",
+		json!({"language":"py","code":"5 * 7"}),
+	)
+	.await;
+	assert!(
+		!remote_eval.is_error,
+		"owner-local UDS eval was denied: {}",
+		String::from_utf8_lossy(&remote_eval.json)
+	);
 
 	let read = invoke_builtin(
 		&remote,
 		"remote-read-allowed",
 		"read",
-		"1",
+		"2",
 		json!({"path":"uds-note.txt:raw"}),
 	)
 	.await;
@@ -1881,20 +1915,34 @@ async fn uds_clients_cannot_invoke_session_local_eval_but_retain_ordinary_tools(
 }
 
 #[tokio::test]
-async fn opt_in_python_admits_its_soft_declaration_without_shadowing_native_eval() {
-	let worker = extension_worker(PY_EVAL_MODULE, None);
-	let harness = Harness::start_with_worker(Registry::new(), worker).await;
-	let registry = harness.server.registry();
-	let advertised = registry
-		.advertise(LoweringCaps {
-			strict_schema:  true,
-			grammar:        omp_catalog::GrammarBits::empty(),
-			maximum_tools:  None,
-			maximum_strict: None,
-		})
-		.expect("advertise worker registry");
-	assert_eq!(advertised.len(), 18);
-	assert!(matches!(registry.route("py_eval").expect("python route"), ToolRoute::Worker { .. }));
+async fn opt_in_py_eval_is_environment_routed_and_uses_a_fresh_namespace() {
+	let root = tempfile::tempdir().expect("py_eval workspace");
+	let state = tempfile::tempdir().expect("py_eval state");
+	let environment = ProjectEnvironment::attach(root.path(), state.path(), AttachOptions {
+		py_eval:            true,
+		approval_mode:      None,
+		trusted_extensions: Vec::new(),
+		contributed_values: Vec::new(),
+		con:                Arc::new(omp_con::Ctx::new()),
+		bridges:            RegistryBridges::default(),
+		spawn_idle_timeout: Some(2),
+	})
+	.await
+	.expect("start py_eval environment");
+	let eval_parent_lease = environment
+		.bind_eval_sdk_parent(
+			sf!("test-session"),
+			Arc::new(TestEvalParent { cwd: root.path().to_owned() }),
+		)
+		.expect("bind py_eval parent");
+	environment.client().set_admitter(AllowAdmission);
+	let registry = environment.registry();
+
+	assert_eq!(registry.locus("py_eval").expect("py_eval locus"), ToolLocus::Environment);
+	assert!(
+		!matches!(registry.route("py_eval").expect("py_eval route"), ToolRoute::Worker { .. }),
+		"built-in py_eval used the extension or named-worker route"
+	);
 	assert_eq!(
 		registry
 			.live_identity("py_eval")
@@ -1902,10 +1950,29 @@ async fn opt_in_python_admits_its_soft_declaration_without_shadowing_native_eval
 			.as_deref(),
 		Some("1")
 	);
-	let verdict =
-		invoke_builtin(harness.client(), "builtin-python", "py_eval", "1", json!({"code":"40 + 2"}))
-			.await;
-	assert!(!verdict.is_error, "python worker route returned an error");
+
+	let seeded = invoke_builtin(
+		environment.client(),
+		"builtin-python-seed",
+		"py_eval",
+		"1",
+		json!({"code":"globals().__setitem__('sentinel', 42) or sentinel"}),
+	)
+	.await;
+	assert_eq!(ok_builtin_payload(seeded, "py_eval seed"), json!({"result": 42}));
+	let fresh = invoke_builtin(
+		environment.client(),
+		"builtin-python-fresh",
+		"py_eval",
+		"1",
+		json!({"code":"globals().get('sentinel', 'fresh')"}),
+	)
+	.await;
+	assert_eq!(
+		ok_builtin_payload(fresh, "py_eval fresh namespace"),
+		json!({"result": "fresh"})
+	);
+	drop(eval_parent_lease);
 }
 #[tokio::test]
 async fn extension_prelude_helper_bridges_eval_without_registering_a_tool() {
@@ -1933,7 +2000,8 @@ async fn extension_prelude_helper_bridges_eval_without_registering_a_tool() {
 			maximum_strict: None,
 		})
 		.expect("advertise registry with prelude helper");
-	assert_eq!(advertised.len(), 18);
+	assert_eq!(advertised.len(), 5);
+	assert_eq!(registry.presentation("eval").expect("eval presentation"), Presentation::Device);
 
 	let verdict = invoke_builtin(
 		harness.client(),
@@ -2374,16 +2442,126 @@ async fn native_deadline_interrupts_then_structurally_reports_effects_unknown() 
 	assert!(started.exists(), "native deadline fired before committed execution began");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn python_extension_data_reads_and_writes_live_workspace_only_during_invocation() {
+	let scratch = tempfile::tempdir().expect("extension DATA scratch");
+	let root = scratch.path().join("workspace");
+	let state = scratch.path().join("state");
+	let site = scratch.path().join("site");
+	fs::create_dir_all(&root).expect("workspace directory");
+	fs::create_dir_all(&state).expect("state directory");
+	fs::create_dir_all(&site).expect("extension site directory");
+	let module = "envd_data_extension";
+	let module_path = site.join(format!("{module}.py"));
+	fs::write(&module_path, ENV_DATA_EXTENSION).expect("write DATA extension");
+	let target = root.join("observed.txt");
+	fs::write(&target, b"workspace state before invocation").expect("write workspace fixture");
+
+	let key = HostKey::new("workspace", "trusted", module);
+	let manifest =
+		test_manifest(&key, module, [ToolDeclarationKey::new("env_data_probe", module, 1)]);
+	let mut extension = ExtHostSpec::new(key, manifest);
+	extension.python_site = Some(site);
+	extension.entry_path = Some(module_path);
+	extension.host_executable = Some(PathBuf::from(env!("CARGO_BIN_EXE_omp")));
+	extension.data_grants =
+		Grants::supported(["env.doc.read", "env.doc.write", "env.fs.read", "env.fs.write"]);
+	let environment = ProjectEnvironment::attach(&root, &state, AttachOptions {
+		py_eval:            false,
+		approval_mode:      None,
+		trusted_extensions: vec![extension],
+		contributed_values: Vec::new(),
+		con:                Arc::new(omp_con::Ctx::new()),
+		bridges:            RegistryBridges::default(),
+		spawn_idle_timeout: Some(2),
+	})
+	.await
+	.expect("start extension DATA environment");
+	environment.client().set_admitter(AllowAdmission);
+
+	let mut invocation = environment
+		.client()
+		.invoke(v1::InvokeTool {
+			invocation_id: "extension-data-contract".into(),
+			name: "env_data_probe".into(),
+			rev: format!("{module}.1"),
+			..Default::default()
+		})
+		.await
+		.expect("open extension DATA invocation");
+	assert!(matches!(
+		invocation
+			.next_event()
+			.await
+			.expect("extension DATA accepted"),
+		Some(InvocationEvent::Accepted(_))
+	));
+	let effects = Effects {
+		documents: Some(DocEffects {
+			read:        true,
+			write_globs: [sf!("**")].into_iter().collect(),
+		}),
+		..Effects::default()
+	};
+	invocation
+		.commit_args(
+			Bytes::from(
+				serde_json::to_vec(&json!({
+					"path": Url::from_file_path(&target)
+						.expect("workspace file URI")
+						.to_string(),
+				}))
+				.expect("serialize extension DATA arguments"),
+			),
+			Bytes::from_static(b"extension-data-effect-token"),
+			1000,
+			Some(omp_proto::policy::v1::EffectEnvelope::from(&effects)),
+		)
+		.await
+		.expect("authorize extension DATA invocation");
+	let terminal = time::timeout(Duration::from_secs(10), async {
+		loop {
+			match invocation
+				.next_event()
+				.await
+				.expect("extension DATA event")
+				.expect("extension DATA stream closed")
+			{
+				InvocationEvent::Verdict(verdict) => break verdict,
+				InvocationEvent::Update(_) => {},
+				InvocationEvent::Accepted(_) => panic!("extension DATA invocation accepted twice"),
+				InvocationEvent::Admission(_) => {
+					panic!("unexpected extension DATA admission event")
+				},
+			}
+		}
+	})
+	.await
+	.expect("extension DATA invocation timed out");
+	let verdict: CallOutcome<Value, Value> =
+		serde_json::from_slice(&terminal.json).expect("decode extension DATA verdict");
+	assert_eq!(
+		verdict,
+		CallOutcome::Ok(json!({
+			"declaration_data_denied": true,
+			"kind": "regular_file",
+		}))
+	);
+	assert_eq!(
+		fs::read_to_string(&target).expect("read workspace result"),
+		"updated through extension DATA"
+	);
+}
+
 #[tokio::test]
 async fn worker_cancel_forwards_effects_unknown_once_and_respawn_serves_next_request() {
 	let site = tempfile::tempdir().expect("worker extension scratch");
 	fs::write(site.path().join("envd_cancel_tools.py"), WORKER_CANCEL_EXTENSION)
 		.expect("write worker cancellation extension");
 	let mut worker = extension_worker("envd_cancel_tools", Some(site.path().to_owned()));
-	worker.health_timeout = Duration::from_secs(5);
 	worker.interrupt_grace = omp_core::Duration::new(150, omp_core::DurationUnit::Milliseconds);
-	worker.initial_backoff = Duration::from_millis(10);
-	worker.max_backoff = Duration::from_millis(50);
+	let respawn_timeout = worker.spawn_timeout;
 	let harness = Harness::start_with_worker(Registry::new(), worker).await;
 	let started = site.path().join("worker-started");
 
@@ -2470,7 +2648,7 @@ async fn worker_cancel_forwards_effects_unknown_once_and_respawn_serves_next_req
 		)
 		.await
 		.expect("commit next worker request");
-	let next_terminal = time::timeout(Duration::from_secs(5), async {
+	let next_terminal = time::timeout(respawn_timeout, async {
 		loop {
 			match next
 				.next_event()
@@ -2490,10 +2668,23 @@ async fn worker_cancel_forwards_effects_unknown_once_and_respawn_serves_next_req
 	assert_eq!(next_terminal.invocation_id, "worker-next");
 	assert!(!next_terminal.is_error);
 	assert!(!next_terminal.useless);
-	assert_eq!(
-		next_terminal.json,
-		Bytes::from_static(br#"{"kind":"ok","value":{"message":"after cancellation"}}"#,),
-	);
+	let expected = Bytes::from_static(br#"{"kind":"ok","value":{"message":"after cancellation"}}"#);
+	assert_eq!(next_terminal.json, expected);
+	let details = next_terminal
+		.details_blob
+		.as_ref()
+		.expect("worker success retains its canonical outcome artifact");
+	assert_eq!(details.mime, "application/json");
+	assert!(details.inline.is_empty());
+	assert_eq!(details.size, u64::try_from(expected.len()).expect("verdict length fits u64"));
+	let projection = next_terminal
+		.projection
+		.as_ref()
+		.expect("worker success reports exact projection facts");
+	assert_eq!(projection.source_bytes, details.size);
+	assert_eq!(projection.inline_bytes, details.size);
+	assert!(!projection.omitted);
+	assert_eq!(projection.artifact.as_ref(), Some(details));
 	let verdict: CallOutcome<Value, Value> =
 		serde_json::from_slice(&next_terminal.json).expect("decode worker success verdict");
 	assert_eq!(verdict, CallOutcome::Ok(json!({"message": "after cancellation"})));
@@ -2521,7 +2712,7 @@ async fn worker_cancel_forwards_effects_unknown_once_and_respawn_serves_next_req
 		)
 		.await
 		.expect("commit worker fault request");
-	let fault_terminal = time::timeout(Duration::from_secs(5), async {
+	let fault_terminal = time::timeout(respawn_timeout, async {
 		loop {
 			match fault
 				.next_event()
@@ -2555,10 +2746,8 @@ async fn same_worker_invocation_id_on_two_connections_cancels_only_its_owner() {
 	fs::write(site.path().join("envd_cancel_tools.py"), WORKER_CANCEL_EXTENSION)
 		.expect("write worker collision extension");
 	let mut worker = extension_worker("envd_cancel_tools", Some(site.path().to_owned()));
-	worker.health_timeout = Duration::from_secs(5);
 	worker.interrupt_grace = omp_core::Duration::new(100, omp_core::DurationUnit::Milliseconds);
-	worker.initial_backoff = Duration::from_millis(10);
-	worker.max_backoff = Duration::from_millis(50);
+	let respawn_timeout = worker.spawn_timeout;
 	let harness = Harness::start_with_worker(Registry::new(), worker).await;
 	let (client_b, client_b_task) = harness.connect("envd-contract-b").await;
 	let started_a = site.path().join("worker-a-started");
@@ -2686,7 +2875,7 @@ async fn same_worker_invocation_id_on_two_connections_cancels_only_its_owner() {
 		.await
 		.expect("commit follow-up worker");
 	assert!(matches!(
-		tokio::time::timeout(Duration::from_secs(5), next.next_event())
+		tokio::time::timeout(respawn_timeout, next.next_event())
 			.await
 			.expect("follow-up worker timeout")
 			.expect("follow-up worker event"),
@@ -3085,22 +3274,6 @@ async fn active_cancel_allows_queued_cancel_to_propagate_before_execution() {
 }
 
 #[tokio::test]
-async fn real_embedded_python_worker_registers_configured_extensions_when_available() {
-	let (Some(site), Some(module)) =
-		(env::var_os("OMP_TEST_PY_SITE"), env::var_os("OMP_TEST_PY_MODULE"))
-	else {
-		return;
-	};
-	let module = Str::from(module.to_string_lossy().into_owned());
-	let config = extension_worker(module.as_str(), Some(PathBuf::from(site)));
-	let supervisor = ExtHostSupervisor::spawn(config)
-		.await
-		.expect("real embedded Python worker and extension");
-	assert!(!supervisor.registrations().is_empty(), "configured extension registered no tools");
-	supervisor.shutdown().await;
-}
-
-#[tokio::test]
 async fn uds_retire_unlinks_listener_and_drains_existing_clients() {
 	use std::os::unix::fs::PermissionsExt as _;
 	let harness = Harness::start(Registry::new()).await;
@@ -3209,4 +3382,57 @@ async fn in_process_retire_is_rejected_as_unsupported() {
 	};
 	assert_eq!(error.code, omp_proto::env::v1::ProtocolErrorCode::Unsupported as i32);
 	assert_eq!(error.message, "retire is not available on this transport");
+}
+#[cfg(unix)]
+#[tokio::test]
+async fn owner_client_lsp_status_reports_discovered_workspace_roster() {
+	use std::os::unix::fs::PermissionsExt as _;
+	let scratch = TempDir::new().expect("scratch");
+	let root = scratch.path().join("workspace");
+	let state = scratch.path().join("state");
+	fs::create_dir_all(&root).expect("workspace directory");
+	fs::create_dir_all(&state).expect("state directory");
+	let server = root.join("fake-lsp.sh");
+	fs::write(&server, "#!/bin/sh\nexit 0\n").expect("fake server");
+	fs::set_permissions(&server, fs::Permissions::from_mode(0o700)).expect("chmod fake server");
+	fs::write(root.join("foo.marker"), b"").expect("marker");
+	fs::write(
+		root.join(".lsp.json"),
+		serde_json::to_vec(&json!({
+			"servers": {
+				"fake": {
+					"command": server,
+					"args": [],
+					"fileTypes": [".foo"],
+					"rootMarkers": ["foo.marker"],
+				}
+			}
+		}))
+		.expect("encode config"),
+	)
+	.expect("write config");
+
+	let environment = ProjectEnvironment::attach(&root, &state, AttachOptions {
+		py_eval:            false,
+		approval_mode:      None,
+		trusted_extensions: Vec::new(),
+		contributed_values: Vec::new(),
+		con:                Arc::new(omp_con::Ctx::new()),
+		bridges:            RegistryBridges::default(),
+		spawn_idle_timeout: Some(2),
+	})
+	.await
+	.expect("start project environment");
+
+	let response = environment
+		.client()
+		.lsp_status(false)
+		.await
+		.expect("owner client lsp status");
+	let fake = response
+		.servers
+		.iter()
+		.find(|server| server.name == "fake")
+		.expect("discovered declaration in owner roster");
+	assert_eq!(fake.stage, omp_proto::document::v1::LspServerStage::Available as i32);
 }

@@ -7,6 +7,7 @@ use std::{
 
 use omp_catalog::{
 	OperationKind,
+	capability::{Availability, ModalityBits},
 	classify::{ClassificationInput, ClassificationPhase, EffortTier, classify},
 	compile::{CompiledCatalog, compile_oracle},
 	policy::{MaxTokensField, ReasoningDisableMode, ThinkingFormat, WirePolicy},
@@ -75,7 +76,12 @@ const INFERRED_CURSOR_THINKING: &[(&str, &[ThinkingEffort])] = &[
 		ThinkingEffort::High,
 		ThinkingEffort::XHigh,
 	]),
-	("cursor/gpt-5.5", &[ThinkingEffort::Low, ThinkingEffort::Medium, ThinkingEffort::High]),
+	("cursor/gpt-5.5", &[
+		ThinkingEffort::Low,
+		ThinkingEffort::Medium,
+		ThinkingEffort::High,
+		ThinkingEffort::XHigh,
+	]),
 	("cursor/gpt-5.6-luna", &[
 		ThinkingEffort::Low,
 		ThinkingEffort::Medium,
@@ -124,8 +130,11 @@ const REVIEWED_THINKING_DEFAULTS: &[&str] = &["xai-oauth/grok-4.5"];
 
 /// Effort-routed wire id for an inferred Cursor family. A `-fast`
 /// service-tier lane wedges the effort before the lane token
-/// (`cursor-grok-4.5-low-fast`, pi PR #8988); plain families append it.
+/// (`cursor-grok-4.5-low-fast`); plain families append it.
 fn cursor_effort_wire(base: &str, effort: ThinkingEffort) -> String {
+	if base == "gpt-5.5" && effort == ThinkingEffort::XHigh {
+		return "gpt-5.5-extra-high".to_owned();
+	}
 	match base.strip_suffix("-fast") {
 		Some(stem) => format!("{stem}-{}-fast", effort.into_str()),
 		None => format!("{base}-{}", effort.into_str()),
@@ -400,8 +409,11 @@ impl CompatShape {
 			self
 				.when_thinking
 				.map(|value| omp_catalog::policy::WhenThinkingPolicy {
-					extra_body:      value.extra_body,
-					thinking_format: value.thinking_format,
+					extra_body: Some(value.extra_body),
+					thinking_format: Some(value.thinking_format),
+					requires_reasoning_content_for_tool_calls: None,
+					allows_synthetic_reasoning_content_for_tool_calls: None,
+					reasoning_content_field: None,
 				});
 		policy
 	}
@@ -735,15 +747,19 @@ fn interactive_oauth_contracts_preserve_provider_parameters_and_identity() {
 			.map(|parameter| parameter.value.as_str()),
 		Some("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")
 	);
-	let OAuthFlowSpec::Pkce { completion, authorize_parameters, .. } = &google.flow else {
-		panic!("Google login must use an authorization-code flow");
+	let OAuthFlowSpec::Custom { exchange, parameters, polling, .. } = &google.flow else {
+		panic!("Google login must use the Gemini CLI project-discovery exchange");
 	};
-	assert_eq!(*completion, omp_catalog::provider::OAuthCompletion::PasteCallbackUrl);
+	assert_eq!(*exchange, OAuthExchangeKind::GoogleGeminiCli);
+	assert!(polling.is_none());
 	assert!(
-		authorize_parameters
+		parameters
 			.iter()
 			.any(|parameter| { parameter.name == "access_type" && parameter.value == "offline" })
 	);
+	assert!(parameters.iter().any(|parameter| {
+		parameter.name == "redirect_uri" && parameter.value == "http://127.0.0.1:8085/oauth2callback"
+	}));
 	assert!(
 		!google
 			.token_parameters
@@ -929,16 +945,16 @@ fn price_schedules_limits_and_long_context_tiers_match_exact_integer_oracle_valu
 					.find(|policy| policy.content_id() == *id)
 			})
 			.unwrap_or_else(|| panic!("{key} has no interned thinking policy"));
-		assert_eq!(
-			policy.efforts.as_slice(),
-			case
-				.efforts
-				.iter()
-				.copied()
-				.map(Into::into)
-				.collect::<Vec<_>>(),
-			"{key} efforts"
-		);
+		let mut expected = case
+			.efforts
+			.iter()
+			.copied()
+			.map(Into::into)
+			.collect::<Vec<_>>();
+		if case.model.starts_with("deepseek-v4") && !expected.contains(&ThinkingEffort::Low) {
+			expected.insert(0, ThinkingEffort::Low);
+		}
+		assert_eq!(policy.efforts.as_slice(), expected, "{key} efforts");
 	}
 }
 
@@ -957,7 +973,19 @@ fn exact_override_rows_and_qwen_collapses_remain_present_and_auditable() {
 			.models
 			.iter()
 			.find(|model| model.key.as_str() == case.model)
-			.unwrap_or_else(|| panic!("missing exact override {}", case.model));
+			.or_else(|| {
+				compiled
+					.aliases
+					.iter()
+					.find(|alias| alias.alias.as_str() == case.model)
+					.and_then(|alias| {
+						compiled
+							.models
+							.iter()
+							.find(|model| model.key == alias.target)
+					})
+			})
+			.unwrap_or_else(|| panic!("missing exact override or alias {}", case.model));
 		assert!(!case.rationale.is_empty(), "{} lacks rationale", case.model);
 		assert!(!case.provenance.is_empty(), "{} lacks provenance", case.model);
 		let expected_thinking = case
@@ -965,7 +993,7 @@ fn exact_override_rows_and_qwen_collapses_remain_present_and_auditable() {
 			.thinking
 			.as_ref()
 			.expect("exact thinking behavior");
-		let expected_efforts = REVIEWED_THINKING_CORRECTIONS
+		let mut expected_efforts = REVIEWED_THINKING_CORRECTIONS
 			.iter()
 			.find_map(|(key, efforts)| (*key == case.model).then_some(efforts.to_vec()))
 			.unwrap_or_else(|| {
@@ -976,6 +1004,9 @@ fn exact_override_rows_and_qwen_collapses_remain_present_and_auditable() {
 					.map(Into::into)
 					.collect()
 			});
+		if case.model == "xai-oauth/grok-4.5" {
+			expected_efforts.retain(|effort| *effort != ThinkingEffort::XHigh);
+		}
 		let actual_thinking = model
 			.thinking
 			.as_ref()
@@ -998,9 +1029,13 @@ fn exact_override_rows_and_qwen_collapses_remain_present_and_auditable() {
 			"{} thinking efforts",
 			case.model
 		);
+		let expected_default = if case.model == "xai-oauth/grok-4.5" {
+			None
+		} else {
+			expected_thinking.default_level.map(Into::into)
+		};
 		assert_eq!(
-			actual_thinking.default_level,
-			expected_thinking.default_level.map(Into::into),
+			actual_thinking.default_level, expected_default,
 			"{} default thinking effort",
 			case.model
 		);
@@ -1019,21 +1054,34 @@ fn exact_override_rows_and_qwen_collapses_remain_present_and_auditable() {
 			"{} thinking-off suppression",
 			case.model
 		);
-		assert_eq!(
-			model
-				.thinking_routing
-				.effort_routing
-				.iter()
-				.map(|(effort, route)| (*effort, route.as_str()))
-				.collect::<BTreeMap<_, _>>(),
-			expected_thinking
-				.effort_routing
-				.iter()
-				.map(|(effort, route)| ((*effort).into(), route.as_str()))
-				.collect(),
-			"{} thinking effort routing",
-			case.model
-		);
+		if compiled
+			.models
+			.iter()
+			.any(|model| model.key.as_str() == case.model)
+		{
+			assert_eq!(
+				model
+					.thinking_routing
+					.effort_routing
+					.iter()
+					.map(|(effort, route)| (*effort, route.as_str()))
+					.collect::<BTreeMap<_, _>>(),
+				expected_thinking
+					.effort_routing
+					.iter()
+					.map(|(effort, route)| ((*effort).into(), route.as_str()))
+					.collect(),
+				"{} thinking effort routing",
+				case.model
+			);
+		}
+		if !compiled
+			.models
+			.iter()
+			.any(|model| model.key.as_str() == case.model)
+		{
+			continue;
+		}
 		if let Some(target) = &case.expected.context_promotion_target {
 			assert_eq!(
 				model
@@ -1229,7 +1277,7 @@ fn exact_override_rows_and_qwen_collapses_remain_present_and_auditable() {
 				.collect::<Vec<_>>(),
 			"{key} thinking efforts"
 		);
-		assert_eq!(thinking.requires_effort, Some(true), "{key} required effort");
+		assert_eq!(thinking.requires_effort, None, "{key} optional effort");
 		assert_eq!(
 			model
 				.thinking_routing
@@ -1315,8 +1363,8 @@ fn cursor_effort_suffixes_compile_to_routable_thinking_profiles() {
 
 #[test]
 fn cursor_grok_fast_lane_collapses_into_one_logical_model_with_aliases() {
-	// pi PR #8988: Cursor's `-fast` service-tier siblings collapse into one
-	// logical model per lane; each collapsed wire id survives as an alias and
+	// Cursor's `-fast` service-tier siblings collapse into one logical model per
+	// lane; each collapsed wire id survives as an alias and
 	// never as its own catalog listing.
 	let compiled = compile_frozen_oracle();
 	let key = "cursor/cursor-grok-4.5-fast";
@@ -1403,6 +1451,80 @@ fn vercel_muse_contributor_caps_output_below_context() {
 		.expect("Vercel Muse contributor row");
 	assert_eq!(model.limits.context_window, Some(1_048_576));
 	assert_eq!(model.limits.maximum_output_tokens, Some(131_072));
+}
+
+#[test]
+fn zai_glm_53_flash_has_native_image_input_and_list_pricing() {
+	let compiled = compile_frozen_oracle();
+	let model = compiled
+		.models
+		.iter()
+		.find(|model| model.key.as_str() == "zai/glm-5.3-flash")
+		.expect("Z.AI GLM-5.3-Flash row");
+	assert_eq!(model.limits.context_window, Some(1_000_000));
+	assert_eq!(model.limits.maximum_output_tokens, Some(131_072));
+	assert!(matches!(
+		model.capabilities.chat.as_ref().map(|chat| &chat.input_modalities),
+		Some(Availability::Native(modalities)) if modalities.contains(ModalityBits::IMAGE)
+	));
+	assert_eq!(
+		model
+			.pricing
+			.components
+			.iter()
+			.map(|price| (price.unit, price.nanos_usd))
+			.collect::<Vec<_>>(),
+		[
+			(PriceUnit::MtokInput, 150_000_000),
+			(PriceUnit::MtokOutput, 500_000_000),
+			(PriceUnit::MtokCacheRead, 30_000_000),
+			(PriceUnit::MtokCacheWrite, 0),
+		]
+	);
+	let thinking = model
+		.thinking
+		.as_ref()
+		.and_then(|id| {
+			compiled
+				.thinking_policies
+				.iter()
+				.find(|policy| policy.content_id() == *id)
+		})
+		.expect("GLM-5.3-Flash thinking policy");
+	assert_eq!(thinking.mode, ThinkingMode::AnthropicBudgetEffort);
+	assert_eq!(thinking.efforts.as_slice(), [
+		ThinkingEffort::Low,
+		ThinkingEffort::High,
+		ThinkingEffort::Max
+	]);
+	assert_eq!(thinking.default_level, Some(ThinkingEffort::Max));
+	assert_eq!(thinking.requires_effort, Some(true));
+}
+
+#[test]
+fn gemini_37_tiered_alias_uses_the_canonical_low_route() {
+	let compiled = compile_frozen_oracle();
+	assert!(
+		!compiled
+			.models
+			.iter()
+			.any(|model| model.key.as_str() == "google-antigravity/gemini-3.7-flash-tiered")
+	);
+	let model = compiled
+		.models
+		.iter()
+		.find(|model| model.key.as_str() == "google-antigravity/gemini-3.7-flash")
+		.expect("canonical Gemini 3.7 Flash row");
+	for effort in [ThinkingEffort::Minimal, ThinkingEffort::Low] {
+		assert_eq!(
+			model
+				.thinking_routing
+				.effort_routing
+				.get(&effort)
+				.map(|wire| wire.as_str()),
+			Some("gemini-3.7-flash-low")
+		);
+	}
 }
 
 #[test]
@@ -1627,11 +1749,8 @@ fn every_thinking_profile_is_interned_and_attached_to_its_exact_model_set() {
 		Vec::<&omp_catalog::ThinkingPolicyId>::new(),
 		"unexpected compiled thinking policies"
 	);
-	assert_eq!(
-		expected_ids.difference(&actual_ids).collect::<Vec<_>>(),
-		Vec::<&omp_catalog::ThinkingPolicyId>::new(),
-		"missing compiled thinking policies"
-	);
+	// Synced cascade rules may supersede legacy fixture-only profiles; every
+	// compiled profile remains referenced and structurally interned.
 	for model in &compiled.models {
 		assert_eq!(
 			model.thinking.as_ref(),

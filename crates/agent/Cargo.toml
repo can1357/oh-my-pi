@@ -6,53 +6,43 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Durable, interruptible agent-loop foundations for OMP"
-readme = "README.md"
-
-[dependencies]
-bytes = { workspace = true }
-flume = { workspace = true }
-futures = { workspace = true }
-hyper-util = { workspace = true, features = ["tokio"] }
-hifijson = { workspace = true }
-jaq-core = { workspace = true }
-jaq-json = { workspace = true }
-jaq-std = { workspace = true }
-omp-core = { workspace = true, features = ["schemars"] }
-omp-ast = { workspace = true }
-# D2 world boundary: client API only. CI rejects docserver, shell-engine, and walker.
-omp-env = { workspace = true }
-omp-inference = { workspace = true }
-omp-memory = { workspace = true }
-omp-slopjson = { workspace = true }
-omp-secrets = { workspace = true }
-omp-snapcompact = { workspace = true }
-omp-proto = { workspace = true, features = ["tonic"] }
-omp-scribe = { workspace = true }
-# The sole sanctioned direct storage edge is the durable journal subscriber.
-omp-telemetry = { workspace = true }
-omp-storage = { workspace = true }
-omp-tool = { workspace = true }
-parking_lot = { workspace = true }
-schemars = { workspace = true }
-regex = { workspace = true }
-globset = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-serde_yaml = { workspace = true }
-smallvec = { workspace = true }
-strum = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tracing = { workspace = true }
-tokio-stream = { workspace = true }
-tonic = { workspace = true }
-tower = { workspace = true }
-[dev-dependencies]
-insta = { workspace = true }
-proptest = { workspace = true }
-tempfile = { workspace = true }
-tokio-util = { workspace = true }
+description = "Agent kernel: journal-first turn loop, tool dispatch, cancellation tree, and directors over the omp-session tree"
 
 [lints]
 workspace = true
+
+[dependencies]
+omp-core.workspace = true
+omp-catalog.workspace = true
+omp-journal.workspace = true
+omp-con.workspace = true
+omp-dom.workspace = true
+omp-vocab.workspace = true
+omp-session.workspace = true
+omp-ai.workspace = true
+omp-tool.workspace = true
+omp-proto.workspace = true
+omp-scribe.workspace = true
+thiserror.workspace = true
+strum.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+flume.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures.workspace = true
+jiff.workspace = true
+tracing.workspace = true
+smallvec.workspace = true
+bytes.workspace = true
+tower.workspace = true
+
+[dev-dependencies]
+async-stream.workspace = true
+insta.workspace = true
+tempfile.workspace = true
+
+[[test]]
+name = "directors"
+path = "tests/directors/main.rs"

@@ -32,15 +32,16 @@ use std::{
 	time::{Duration, Instant},
 };
 
+use omp_core::Str;
 use omp_tui::{
-	CellContent, Charset, DecorKind, Frame, Graphics, Key, Mouse, MouseButton, MouseReport, Size,
-	Style, UiContext,
-	paste::{self, Clipboard, ClipboardRead},
+	Appearance, CellContent, Charset, DecorKind, Frame, Graphics, Key, Keymap, Mouse, MouseButton,
+	MouseReport, Size, Style, UiContext,
+	paste::{self, ClipboardRead, ClipboardReadOutcome, ClipboardWriteOutcome},
 };
 use smallvec::SmallVec;
 use winit::{
 	application::ApplicationHandler,
-	dpi::{LogicalSize, PhysicalPosition},
+	dpi::{LogicalSize, PhysicalPosition, PhysicalSize},
 	event::{ElementState, Ime, KeyEvent, MouseScrollDelta, WindowEvent},
 	event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
 	keyboard::{KeyCode, ModifiersState, PhysicalKey},
@@ -81,6 +82,13 @@ const MULTI_CLICK_DELAY: Duration = Duration::from_millis(420);
 /// Maximum pointer drift between presses in one multi-click gesture.
 const MULTI_CLICK_DISTANCE: f32 = 6.0;
 
+const fn native_appearance(theme: window::Theme) -> Appearance {
+	match theme {
+		window::Theme::Light => Appearance::Light,
+		window::Theme::Dark => Appearance::Dark,
+	}
+}
+
 /// Window and text configuration for one host run.
 #[derive(Clone, Debug)]
 pub struct HostConfig {
@@ -97,6 +105,8 @@ pub struct HostConfig {
 	/// Permit tabs, splits, and additional windows that each require a fresh
 	/// scene.
 	pub multiplex:    bool,
+	/// Chord bindings shared with terminal input and generated hotkey help.
+	pub keymap:       Keymap,
 }
 
 impl Default for HostConfig {
@@ -112,6 +122,7 @@ impl Default for HostConfig {
 			native_decor: true,
 			size:         (1120.0, 720.0),
 			multiplex:    true,
+			keymap:       Keymap::default(),
 		}
 	}
 }
@@ -132,7 +143,9 @@ pub fn run<S: Scene>(config: HostConfig, build: impl Fn(&UiContext) -> S) {
 /// Host-spawned events riding the winit mailbox.
 enum UserEvent {
 	/// A background clipboard read completed for one window's pane.
-	Clipboard(WindowId, PaneId, Option<Clipboard>, ClipboardRead),
+	Clipboard(WindowId, PaneId, ClipboardReadOutcome, ClipboardRead),
+	/// A background clipboard write completed for one window's pane.
+	ClipboardWrite(WindowId, PaneId, ClipboardWriteOutcome),
 }
 
 /// One overlay band of the last paint, in viewport cells: `(x, y, w, rows)`.
@@ -427,6 +440,7 @@ struct WindowHost<S> {
 	compositor:        Compositor,
 	ctx:               UiContext,
 	theme:             GuiTheme,
+	opacity:           f32,
 	metrics:           CellMetrics,
 	/// Physical font px including the scale factor.
 	px:                f32,
@@ -442,10 +456,13 @@ struct WindowHost<S> {
 	strip_origin:      [f32; 2],
 	pointer:           [f32; 2],
 	mods:              ModifiersState,
+	keymap:            Keymap,
 	grab:              Grab,
 	/// Last cursor icon set, to skip redundant sets.
 	cursor:            CursorIcon,
 	last_select_press: Option<(Instant, [f32; 2])>,
+	window_focused:    bool,
+	ime_enabled:       bool,
 	started:           Instant,
 	blink_epoch:       Instant,
 	next_tick:         Instant,
@@ -509,6 +526,52 @@ fn pane_in_editor<S>(pane: &Pane<S>, metrics: &CellMetrics, pointer: [f32; 2]) -
 
 fn pane_max_scroll<S>(pane: &Pane<S>, metrics: &CellMetrics) -> f32 {
 	f32::from(pane.doc_rows.saturating_sub(pane.viewport.height)) * metrics.line_height
+}
+
+/// Resolves the focused scene's retained caret to a physical input-method
+/// candidate area. Active layers own the caret exactly as the compositor
+/// does; otherwise the document cursor is translated through native
+/// scrollback.
+fn ime_cursor_area(
+	scene: &SceneFrame<'_>,
+	origin: [f32; 2],
+	scroll: f32,
+	metrics: &CellMetrics,
+) -> Option<(PhysicalPosition<i32>, PhysicalSize<u32>)> {
+	let layer_cursor = scene
+		.layers
+		.iter()
+		.rev()
+		.filter(|layer| layer.active)
+		.find_map(|layer| {
+			let (col, row) = layer.frame.cursor()?;
+			let band = layer.band(scene.viewport);
+			(row >= band.src_top && row < band.src_top.saturating_add(band.rows))
+				.then_some((band.x.saturating_add(col), band.y.saturating_add(row - band.src_top)))
+		});
+	let (col, row) = match layer_cursor {
+		Some(cursor) => cursor,
+		None if scene.layers.iter().any(|layer| layer.active) => return None,
+		None => {
+			let (col, row) = scene.frame.cursor()?;
+			let document_rows = scene.frame.size().height;
+			let scroll_rows = scroll / metrics.line_height;
+			let end = (f32::from(document_rows) - scroll_rows).clamp(0.0, f32::from(document_rows));
+			let start = (end - f32::from(scene.viewport.height)).max(0.0);
+			let viewport_row = f32::from(row) - start;
+			if viewport_row < 0.0 || viewport_row >= f32::from(scene.viewport.height) {
+				return None;
+			}
+			(col, viewport_row.floor() as u16)
+		},
+	};
+	let position = PhysicalPosition::new(
+		f32::mul_add(f32::from(col), metrics.advance, origin[0]).round() as i32,
+		f32::mul_add(f32::from(row), metrics.line_height, origin[1]).round() as i32,
+	);
+	let size =
+		PhysicalSize::new(metrics.advance.ceil().max(1.0) as u32, metrics.line_height.ceil() as u32);
+	Some((position, size))
 }
 
 /// Arrow keycap → pane direction, for ⌘⌥/⌘⌃ chords.
@@ -650,7 +713,19 @@ impl<S: Scene> WindowHost<S> {
 		if index >= self.tabs.len() || index == self.active {
 			return;
 		}
+		let prior = self.focused();
+		if self.window_focused
+			&& let Some(pane) = self.pane_mut(prior)
+		{
+			let _ = pane.scene.focus(false);
+		}
 		self.active = index;
+		if self.window_focused {
+			let focused = self.focused();
+			if let Some(pane) = self.pane_mut(focused) {
+				let _ = pane.scene.focus(true);
+			}
+		}
 		if self.tabs[index].stale {
 			self.tabs[index].stale = false;
 			self.relayout(true);
@@ -707,8 +782,19 @@ impl<S: Scene> WindowHost<S> {
 	}
 
 	fn focus_pane(&mut self, id: PaneId) {
-		if self.tab().focused != id && self.pane(id).is_some() {
+		let prior = self.tab().focused;
+		if prior != id && self.pane(id).is_some() {
+			if self.window_focused
+				&& let Some(pane) = self.pane_mut(prior)
+			{
+				let _ = pane.scene.focus(false);
+			}
 			self.tab_mut().focused = id;
+			if self.window_focused
+				&& let Some(pane) = self.pane_mut(id)
+			{
+				let _ = pane.scene.focus(true);
+			}
 			self.blink_epoch = Instant::now();
 			self.window.request_redraw();
 		}
@@ -928,7 +1014,7 @@ impl<S: Scene> WindowHost<S> {
 			let frame = pane.scene.render().frame;
 			selection_text(frame, selection)
 		};
-		write_clipboard_detached(text);
+		write_clipboard_detached(text.into());
 	}
 
 	fn select_all(&mut self, id: PaneId) {
@@ -958,13 +1044,15 @@ impl<S: Scene> WindowHost<S> {
 		if size.width == 0 || size.height == 0 {
 			return;
 		}
+		let window = Arc::clone(&self.window);
+		let track_ime = self.window_focused && self.ime_enabled;
 		let metrics = self.metrics;
 		let theme = self.theme;
 		let px = self.px;
 		let hairline = self.px_scale().max(1.0);
 		let blink = (self.blink_epoch.elapsed().as_millis() / 530).is_multiple_of(2);
 		let now = self.started.elapsed();
-		let window = [size.width as f32, size.height as f32];
+		let viewport = [size.width as f32, size.height as f32];
 		let Self {
 			compositor,
 			fonts,
@@ -977,13 +1065,17 @@ impl<S: Scene> WindowHost<S> {
 			animating,
 			..
 		} = self;
-		compositor.begin(window, &theme);
+		compositor.begin(viewport, &theme);
 
 		let tab = &mut tabs[*active];
 		let focused = tab.focused;
 		let mut shimmer = false;
+		let mut ime_area = None;
 		for pane in &mut tab.panes {
 			let scene_frame = pane.scene.render();
+			if track_ime && pane.id == focused {
+				ime_area = ime_cursor_area(&scene_frame, pane.origin, pane.scroll, &metrics);
+			}
 			let doc_rows = scene_frame.frame.size().height;
 			let doc_width = scene_frame.frame.size().width;
 			let mut selection = pane.selection;
@@ -1028,7 +1120,7 @@ impl<S: Scene> WindowHost<S> {
 					.iter()
 					.any(|layer| shimmering(layer.frame));
 			let view = View {
-				window,
+				window: viewport,
 				origin: pane.origin,
 				scroll: pane.scroll,
 				selection: pane.selection,
@@ -1070,7 +1162,7 @@ impl<S: Scene> WindowHost<S> {
 				layers:      SmallVec::new(),
 			};
 			let view = View {
-				window,
+				window: viewport,
 				origin: *strip_origin,
 				scroll: 0.0,
 				selection: None,
@@ -1099,6 +1191,9 @@ impl<S: Scene> WindowHost<S> {
 			&instances.glyphs,
 		);
 		gpu.queue.present(target);
+		if let Some((position, size)) = ime_area {
+			window.set_ime_cursor_area(position, size);
+		}
 	}
 }
 
@@ -1109,6 +1204,12 @@ impl<S: Scene, F: Fn(&UiContext) -> S> Shell<S, F> {
 
 	/// Opens a window seeded with one tab holding one fresh pane. `size` is
 	/// the spawning window's logical size, or the config default.
+	#[tracing::instrument(
+		name = "window_initialize",
+		level = "debug",
+		skip_all,
+		fields(existing_windows = self.windows.len())
+	)]
 	fn spawn_window(&mut self, el: &ActiveEventLoop, size: Option<LogicalSize<f64>>) {
 		if !self.config.multiplex && !self.windows.is_empty() {
 			return;
@@ -1145,18 +1246,20 @@ impl<S: Scene, F: Fn(&UiContext) -> S> Shell<S, F> {
 		} else {
 			Charset::Unicode
 		};
-		let ctx = UiContext {
-			charset,
-			graphics: Graphics::KittyPlaceholders,
-			native_decor: self.config.native_decor,
-			..UiContext::default()
-		};
+		let mut ctx = UiContext::default();
+		ctx.charset = charset;
+		ctx.graphics = Graphics::KittyPlaceholders;
+		ctx.native_decor = self.config.native_decor;
+		if let Some(theme) = window.theme() {
+			ctx.apply_appearance(native_appearance(theme));
+		}
 		let mut theme = GuiTheme::from_ctx(&ctx, self.config.opacity);
 		theme.corner_radius = 12.0 * scale;
 
 		let scene = (self.build)(&ctx);
 		let seed = PaneId(0);
 		let now = Instant::now();
+		let window_focused = window.has_focus();
 		let mut host = WindowHost {
 			id: window.id(),
 			window,
@@ -1166,6 +1269,7 @@ impl<S: Scene, F: Fn(&UiContext) -> S> Shell<S, F> {
 			compositor: Compositor::default(),
 			ctx,
 			theme,
+			opacity: self.config.opacity,
 			metrics,
 			px,
 			font_size,
@@ -1183,9 +1287,12 @@ impl<S: Scene, F: Fn(&UiContext) -> S> Shell<S, F> {
 			strip_origin: [0.0, 0.0],
 			pointer: [0.0, 0.0],
 			mods: ModifiersState::default(),
+			keymap: self.config.keymap.clone(),
 			grab: Grab::None,
 			cursor: CursorIcon::Default,
 			last_select_press: None,
+			window_focused,
+			ime_enabled: false,
 			started: now,
 			blink_epoch: now,
 			next_tick: now,
@@ -1315,8 +1422,10 @@ impl<S: Scene, F: Fn(&UiContext) -> S> Shell<S, F> {
 		let proxy = self.proxy.clone();
 		thread::spawn(move || {
 			let receiver = paste::spawn_clipboard_read(scope);
-			let clipboard = receiver.blocking_recv().ok().flatten();
-			let _ = proxy.send_event(UserEvent::Clipboard(window, pane, clipboard, scope));
+			let outcome = receiver
+				.blocking_recv()
+				.unwrap_or(ClipboardReadOutcome::ReadFailure);
+			let _ = proxy.send_event(UserEvent::Clipboard(window, pane, outcome, scope));
 		});
 	}
 
@@ -1331,7 +1440,26 @@ impl<S: Scene, F: Fn(&UiContext) -> S> Shell<S, F> {
 			Effect::Ignored | Effect::Consumed => {},
 			Effect::Quit => self.close_pane(el, window, pane),
 			Effect::Clipboard(scope) => self.request_clipboard(window, pane, scope),
-			Effect::SetClipboard(text) => write_clipboard_detached(text.to_string()),
+			Effect::SetClipboard(text) => self.request_clipboard_write(window, pane, text),
+		}
+	}
+
+	fn request_clipboard_write(&self, window: WindowId, pane: PaneId, text: Str) {
+		let proxy = self.proxy.clone();
+		let worker_proxy = proxy.clone();
+		if thread::Builder::new()
+			.name("clipboard-write".into())
+			.spawn(move || {
+				let outcome = paste::write_clipboard_text(&text);
+				let _ = worker_proxy.send_event(UserEvent::ClipboardWrite(window, pane, outcome));
+			})
+			.is_err()
+		{
+			let _ = proxy.send_event(UserEvent::ClipboardWrite(
+				window,
+				pane,
+				ClipboardWriteOutcome::WriteFailure,
+			));
 		}
 	}
 
@@ -1679,7 +1807,12 @@ impl<S: Scene, F: Fn(&UiContext) -> S> ApplicationHandler<UserEvent> for Shell<S
 			return;
 		};
 		match event {
-			WindowEvent::CloseRequested => {
+			WindowEvent::CloseRequested | WindowEvent::Destroyed => {
+				for tab in &mut self.windows[widx].tabs {
+					for pane in &mut tab.panes {
+						let _ = pane.scene.focus(false);
+					}
+				}
 				self.windows.remove(widx);
 				if self.windows.is_empty() {
 					el.exit();
@@ -1701,6 +1834,49 @@ impl<S: Scene, F: Fn(&UiContext) -> S> ApplicationHandler<UserEvent> for Shell<S
 				win.refont(win.font_size, gpu);
 				win.window.request_redraw();
 			},
+			WindowEvent::Focused(focused) => {
+				let win = &mut self.windows[widx];
+				win.window_focused = focused;
+				win.window.set_ime_allowed(focused);
+				let pane_id = win.focused();
+				let effect = win
+					.pane_mut(pane_id)
+					.map_or(Effect::Ignored, |pane| pane.scene.focus(focused));
+				self.handle_effect(el, id, pane_id, effect);
+				if let Some(win) = self.windows.iter_mut().find(|win| win.id == id) {
+					if !focused {
+						win.ime_enabled = false;
+					}
+					win.blink_epoch = Instant::now();
+					win.window.request_redraw();
+				}
+			},
+			WindowEvent::ThemeChanged(theme) => {
+				let appearance = native_appearance(theme);
+				let win = &mut self.windows[widx];
+				if win.ctx.apply_appearance(appearance) {
+					win.theme = GuiTheme::from_ctx(&win.ctx, win.opacity);
+					win.theme.corner_radius = 12.0 * win.window.scale_factor() as f32;
+					for tab in &mut win.tabs {
+						for pane in &mut tab.panes {
+							let _ = pane.scene.appearance(appearance);
+						}
+					}
+					win.rebuild_strip();
+					win.window.request_redraw();
+				}
+			},
+			WindowEvent::DroppedFile(path) => {
+				let win = &mut self.windows[widx];
+				let pane_id = win.focused();
+				let effect = win
+					.pane_mut(pane_id)
+					.map_or(Effect::Ignored, |pane| pane.scene.drop_files(&[path.as_path()]));
+				self.handle_effect(el, id, pane_id, effect);
+				if let Some(win) = self.windows.iter().find(|win| win.id == id) {
+					win.window.request_redraw();
+				}
+			},
 			WindowEvent::ModifiersChanged(modifiers) => {
 				self.windows[widx].mods = modifiers.state();
 			},
@@ -1712,7 +1888,7 @@ impl<S: Scene, F: Fn(&UiContext) -> S> ApplicationHandler<UserEvent> for Shell<S
 					return;
 				}
 				let win = &mut self.windows[widx];
-				let Some(key) = input::map_key(&event, win.mods) else {
+				let Some(key) = input::map_key(&event, win.mods, &win.keymap) else {
 					return;
 				};
 				let focused = win.focused();
@@ -1737,22 +1913,45 @@ impl<S: Scene, F: Fn(&UiContext) -> S> ApplicationHandler<UserEvent> for Shell<S
 					win.window.request_redraw();
 				}
 			},
+			WindowEvent::Ime(Ime::Enabled) => {
+				let win = &mut self.windows[widx];
+				win.ime_enabled = true;
+				win.window.request_redraw();
+			},
+			WindowEvent::Ime(Ime::Preedit(text, selection)) => {
+				let win = &mut self.windows[widx];
+				win.blink_epoch = Instant::now();
+				let focused = win.focused();
+				let effect = win.pane_mut(focused).map_or(Effect::Ignored, |pane| {
+					pane
+						.scene
+						.ime_preedit(&text, selection.map(|(start, end)| start..end))
+				});
+				self.handle_effect(el, id, focused, effect);
+				if let Some(win) = self.windows.iter().find(|w| w.id == id) {
+					win.window.request_redraw();
+				}
+			},
 			WindowEvent::Ime(Ime::Commit(text)) => {
 				let win = &mut self.windows[widx];
 				win.blink_epoch = Instant::now();
 				let focused = win.focused();
-				for c in text.chars() {
-					let effect = {
-						let Some(win) = self.windows.iter_mut().find(|w| w.id == id) else {
-							return;
-						};
-						let Some(pane) = win.pane_mut(focused) else {
-							return;
-						};
-						pane.scene.key(Key::Char(c))
-					};
-					self.handle_effect(el, id, focused, effect);
+				let effect = win
+					.pane_mut(focused)
+					.map_or(Effect::Ignored, |pane| pane.scene.ime_commit(&text));
+				self.handle_effect(el, id, focused, effect);
+				if let Some(win) = self.windows.iter().find(|w| w.id == id) {
+					win.window.request_redraw();
 				}
+			},
+			WindowEvent::Ime(Ime::Disabled) => {
+				let win = &mut self.windows[widx];
+				win.ime_enabled = false;
+				let focused = win.focused();
+				let effect = win
+					.pane_mut(focused)
+					.map_or(Effect::Ignored, |pane| pane.scene.ime_preedit("", None));
+				self.handle_effect(el, id, focused, effect);
 				if let Some(win) = self.windows.iter().find(|w| w.id == id) {
 					win.window.request_redraw();
 				}
@@ -1881,26 +2080,45 @@ impl<S: Scene, F: Fn(&UiContext) -> S> ApplicationHandler<UserEvent> for Shell<S
 
 	fn user_event(&mut self, el: &ActiveEventLoop, event: UserEvent) {
 		match event {
-			UserEvent::Clipboard(window, pane, clipboard, scope) => {
+			UserEvent::Clipboard(window, pane, outcome, scope) => {
 				let Some(widx) = self.window_index(window) else {
 					return;
 				};
 				let raw = matches!(scope, ClipboardRead::Text);
-				if let Some(text) = clipboard.and_then(clipboard_text) {
-					let effect = {
-						let win = &mut self.windows[widx];
-						let Some(target) = win
-							.tabs
-							.iter_mut()
-							.flat_map(|tab| tab.panes.iter_mut())
-							.find(|p| p.id == pane)
-						else {
-							return;
-						};
-						target.scene.paste(&text, raw)
+				let effect = {
+					let win = &mut self.windows[widx];
+					let Some(target) = win
+						.tabs
+						.iter_mut()
+						.flat_map(|tab| tab.panes.iter_mut())
+						.find(|p| p.id == pane)
+					else {
+						return;
 					};
-					self.handle_effect(el, window, pane, effect);
+					target.scene.clipboard(outcome, raw)
+				};
+				self.handle_effect(el, window, pane, effect);
+				if let Some(win) = self.windows.iter().find(|w| w.id == window) {
+					win.window.request_redraw();
 				}
+			},
+			UserEvent::ClipboardWrite(window, pane, outcome) => {
+				let Some(widx) = self.window_index(window) else {
+					return;
+				};
+				let effect = {
+					let win = &mut self.windows[widx];
+					let Some(target) = win
+						.tabs
+						.iter_mut()
+						.flat_map(|tab| tab.panes.iter_mut())
+						.find(|p| p.id == pane)
+					else {
+						return;
+					};
+					target.scene.clipboard_write(outcome)
+				};
+				self.handle_effect(el, window, pane, effect);
 				if let Some(win) = self.windows.iter().find(|w| w.id == window) {
 					win.window.request_redraw();
 				}
@@ -1967,9 +2185,7 @@ impl<S: Scene, F: Fn(&UiContext) -> S> ApplicationHandler<UserEvent> for Shell<S
 	}
 }
 
-/// Writes clipboard text on a detached thread: the native backend's CLI
-/// bridges may block for seconds and must never stall the event loop.
-fn write_clipboard_detached(text: String) {
+fn write_clipboard_detached(text: Str) {
 	let _ = thread::Builder::new()
 		.name("clipboard-write".into())
 		.spawn(move || {
@@ -1977,33 +2193,34 @@ fn write_clipboard_detached(text: String) {
 		});
 }
 
-/// Flattens a clipboard read into paste text: images persist to a temp
-/// file whose path routes like a file drop, and copied file paths are
-/// quoted so spaces survive drop classification.
-fn clipboard_text(clipboard: Clipboard) -> Option<String> {
-	match clipboard {
-		Clipboard::Text(text) => Some(text),
-		Clipboard::Image(image) => Some(image.persist().ok()?.display().to_string()),
-		Clipboard::Paths(paths) => {
-			let mut joined = String::new();
-			for path in &paths {
-				if !joined.is_empty() {
-					joined.push(' ');
-				}
-				joined.push('"');
-				joined.push_str(path);
-				joined.push('"');
-			}
-			Some(joined)
-		},
-	}
-}
-
 #[cfg(test)]
 mod tests {
 	use omp_tui::{Frame, Size, Style};
+	use smallvec::SmallVec;
 
-	use super::{Selection, selection_text};
+	use super::{CellMetrics, SceneFrame, Selection, ime_cursor_area, selection_text};
+
+	#[test]
+	fn ime_candidate_area_tracks_the_visible_document_caret() {
+		let mut frame = Frame::new(Size::new(20, 10));
+		frame.set_cursor(3, 8);
+		let scene = SceneFrame {
+			frame:       &frame,
+			viewport:    Size::new(20, 4),
+			editor_rows: 2,
+			layers:      SmallVec::new(),
+		};
+		let metrics =
+			CellMetrics { advance: 8.0, ascent: 11.0, descent: 3.0, line_height: 16.0 };
+		let (position, size) =
+			ime_cursor_area(&scene, [10.0, 20.0], 0.0, &metrics).expect("visible caret");
+		assert_eq!((position.x, position.y), (34, 52));
+		assert_eq!((size.width, size.height), (8, 16));
+		assert!(
+			ime_cursor_area(&scene, [10.0, 20.0], 64.0, &metrics).is_none(),
+			"scrolling the retained caret out of the viewport hides the candidate area",
+		);
+	}
 
 	#[test]
 	fn selection_text_trims_hard_rows_and_inserts_newlines() {

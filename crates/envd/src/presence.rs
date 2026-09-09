@@ -54,8 +54,8 @@ pub enum PresenceError {
 		pid: u32,
 	},
 	/// An atomic client-presence update failed.
-	#[error(transparent)]
-	Persist(#[from] omp_settings::io::SettingsIoError),
+	#[error("failed to atomically persist daemon client presence")]
+	Persist(#[source] io::Error),
 	/// A released or stale client-presence record could not be removed.
 	#[error("failed to remove daemon client-presence record at {path}")]
 	Remove {
@@ -122,7 +122,7 @@ impl PresenceRegistry {
 			project_dir: self.state.project_dir.clone(),
 		};
 		let encoded = serde_json::to_string(&record).map_err(PresenceError::Encode)?;
-		omp_settings::io::atomic_replace(&path, &encoded)?;
+		crate::atomic_replace(&path, &encoded).map_err(PresenceError::Persist)?;
 		leases.insert(id.clone(), path);
 		Ok(PresenceLease { registry: self.clone(), id: Some(id) })
 	}
@@ -334,7 +334,7 @@ mod tests {
 			kind:        sf!("rpc"),
 			project_dir: project.path().to_path_buf(),
 		};
-		omp_settings::io::atomic_replace(
+		crate::atomic_replace(
 			&clients.join("stale.json"),
 			&serde_json::to_string(&stale).expect("encode stale record"),
 		)

@@ -4,8 +4,6 @@
 //! select — print them, signal them, or wait for them — so selection, argument
 //! parsing, and help rendering all live here, and each command is a thin front
 //! end over [`run`].
-//!
-//! Ported from `pi-shell`, which previously defined all three inline.
 
 #![allow(dead_code, reason = "shared matching paths are selected by separate process builtins")]
 
@@ -23,9 +21,9 @@ use std::{
 use std::{mem, os::fd, ptr};
 
 #[cfg(unix)]
-use omp_shell_engine::openfiles::OpenFiles;
-use omp_shell_engine::{
-	ExecutionContext, ExecutionExitCode, ExecutionResult, builtins::signal_number,
+use omp_shell::openfiles::OpenFiles;
+use omp_shell::{
+	ExecutionContext, ExecutionExitCode, ExecutionResult, ProcessScope, builtins::signal_number,
 };
 use regex::RegexBuilder;
 #[cfg(unix)]
@@ -84,11 +82,11 @@ struct ProcMatchOptions {
 /// `pgrep`, `pkill`, and `pidwait` each call this with their own mode; the
 /// invoked name still comes from the execution context, so diagnostics and help
 /// name the command the user actually typed.
-pub(crate) fn run<SE: omp_shell_engine::ShellExtensions>(
+pub(crate) fn run<SE: omp_shell::ShellExtensions>(
 	mode: ProcMatchMode,
 	argv: Vec<String>,
 	context: ExecutionContext<'_, SE>,
-) -> impl Future<Output = result::Result<ExecutionResult, omp_shell_engine::Error>> + Send {
+) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 	{
 		let command_name = context.command_name.clone();
 		let cwd = context.shell.working_dir().to_path_buf();
@@ -110,6 +108,11 @@ pub(crate) fn run<SE: omp_shell_engine::ShellExtensions>(
 					return Ok(ExecutionResult::success());
 				},
 				Err((code, message)) => {
+					tracing::warn!(
+						builtin = command_name.as_str(),
+						exit_code = code,
+						"builtin arguments rejected"
+					);
 					writeln!(context.stderr(), "{command_name}: {message}")?;
 					return Ok(ExecutionResult::new(code));
 				},
@@ -119,13 +122,15 @@ pub(crate) fn run<SE: omp_shell_engine::ShellExtensions>(
 				return Ok(ExecutionExitCode::Interrupted.into());
 			}
 
-			let (processes, host) = match select_processes(&mut options) {
-				Ok(selected) => selected,
-				Err(message) => {
-					writeln!(context.stderr(), "{command_name}: {message}")?;
-					return Ok(ExecutionResult::new(2));
-				},
-			};
+			let (processes, host) =
+				match select_processes(&mut options, context.params.process_scope()) {
+					Ok(selected) => selected,
+					Err(message) => {
+						tracing::warn!(builtin = command_name.as_str(), "process selection failed");
+						writeln!(context.stderr(), "{command_name}: {message}")?;
+						return Ok(ExecutionResult::new(2));
+					},
+				};
 			if processes.is_empty() {
 				if options.count && !options.quiet {
 					writeln!(context.stdout(), "0")?;
@@ -196,6 +201,11 @@ pub(crate) fn run<SE: omp_shell_engine::ShellExtensions>(
 						// tear down the session this shell runs in. Refuse late, at
 						// delivery, so only the destructive mode is affected.
 						if host.pids.contains(&process.pid()) {
+							tracing::warn!(
+								builtin = command_name.as_str(),
+								pid = process.pid(),
+								"process signal denied for shell process"
+							);
 							if !options.quiet {
 								writeln!(
 									context.stderr(),
@@ -206,7 +216,33 @@ pub(crate) fn run<SE: omp_shell_engine::ShellExtensions>(
 							}
 							continue;
 						}
+						if context
+							.params
+							.process_scope()
+							.is_some_and(|scope| !scope.may_signal(process.pid()))
+						{
+							tracing::warn!(
+								builtin = command_name.as_str(),
+								pid = process.pid(),
+								"process signal denied outside scope"
+							);
+							if !options.quiet {
+								writeln!(
+									context.stderr(),
+									"{command_name}: signalling pid {} is outside this shell's process \
+									 scope",
+									process.pid()
+								)?;
+							}
+							continue;
+						}
 						if !process.signal(options.signal, options.queue) {
+							tracing::warn!(
+								builtin = command_name.as_str(),
+								pid = process.pid(),
+								signal = options.signal,
+								"process signal delivery failed"
+							);
 							if !options.quiet {
 								writeln!(
 									context.stderr(),
@@ -638,8 +674,10 @@ fn has_proc_selectors(options: &ProcMatchOptions) -> bool {
 /// table again.
 fn select_processes(
 	options: &mut ProcMatchOptions,
+	scope: Option<&std::sync::Arc<dyn ProcessScope>>,
 ) -> result::Result<(Vec<proc_snapshot::ProcInfo>, proc_snapshot::HostProcesses), String> {
-	let all = proc_snapshot::ProcInfo::all();
+	let all =
+		proc_snapshot::ProcInfo::all_filtered(|pid| scope.is_none_or(|scope| scope.may_observe(pid)));
 	let host = proc_snapshot::HostProcesses::resolve_in(&all);
 	let host_pid = process::id() as i32;
 	let host_group = all
@@ -895,7 +933,7 @@ fn parse_states(value: &str, target: &mut HashSet<char>) -> result::Result<(), (
 }
 
 fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
-	use omp_shell_engine::sys::fs;
+	use omp_shell::sys::fs;
 
 	let normalized = fs::normalize_shell_path(Path::new(value));
 	if normalized.is_absolute() {

@@ -37,6 +37,22 @@ embed-metadata = false
 # Selective dependency hints in Cargo.toml defer codegen for broad APIs until
 # consumers actually call them. Requires the pinned nightly.
 profile-hint-mostly-unused = true
+# Enables the `codegen-backend` profile keys below (workspace members build
+# with cranelift; see [profile.dev]).
+codegen-backend = true
+# Freshness by content checksum instead of mtime: concurrent agent sessions,
+# git operations, and no-op formatter rewrites stop invalidating artifacts
+# whose sources did not actually change.
+checksum-freshness = true
+# Enables [resolver] feature-unification below.
+feature-unification = true
+
+# Resolve features as if the whole workspace were built at once, so
+# `cargo <cmd> -p <crate>` and `--workspace` invocations share one artifact
+# per dependency instead of compiling per-invocation feature variants of the
+# same crate into the shared target dir.
+[resolver]
+feature-unification = "workspace"
 # Config profiles outrank manifest profiles, so a user-global
 # ~/.cargo/config.toml [profile.dev] (e.g. line-tables-only + unpacked
 # split-debuginfo) would silently re-inflate the target dir with retained
@@ -45,7 +61,31 @@ profile-hint-mostly-unused = true
 [profile.dev]
 debug = false
 split-debuginfo = "off"
+# Cranelift backend for workspace members: several times faster codegen than
+# LLVM at opt-level 0 for the crates we actually iterate on. Dependencies stay
+# on LLVM (below): they rebuild rarely, and the inline-asm/SIMD crates live
+# there. Members must stay free of link-section registration magic
+# (inventory/ctor/linkme `__mod_init_func`/custom-section statics) — cranelift
+# rejects those loudly at compile time. Requires the
+# rustc-codegen-cranelift-preview component (rust-toolchain.toml).
+codegen-backend = "cranelift"
 
+[profile.dev.package."*"]
+codegen-backend = "llvm"
+# omp-ar monomorphizes xutf's AArch64 NEON transcoder; Cranelift replaces its
+# unsupported `vsli` intrinsic with a trap.
+[profile.dev.package.omp-ar]
+codegen-backend = "llvm"
+# omp-con declarations use linkme distributed slices so vars, commands, and
+# actions declared by downstream crates register without a central roster.
+[profile.dev.package.omp-con]
+codegen-backend = "llvm"
+# Telemetry hooks are fail-open across user callbacks and rely on
+# `catch_unwind`; cranelift does not emit the required landing pads.
+[profile.dev.package.omp-observability]
+codegen-backend = "llvm"
+[profile.dev.build-override]
+codegen-backend = "llvm"
 [profile.release]
 debug = false
 split-debuginfo = "off"

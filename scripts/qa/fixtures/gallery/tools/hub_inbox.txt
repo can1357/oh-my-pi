@@ -1,0 +1,27 @@
+── hub_inbox — Hub inbox ───────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+  IRC inbox                                                                                        
+                                                                                                    
+
+  · in progress
+                                                                                                    
+  IRC inbox peek                                                                                   
+                                                                                                    
+
+  · done
+                                                                                                    
+  IRC inbox 2 messages · peek                                                                      
+ ├─ AuthLoader 4m ago                                                                               
+ │  │ hub table reads unreadCount — ping me when the bus lands.                                     
+ └─ RateLimiter 1m ago ⟨reply⟩                                                                      
+    │ bus is in; receipts carry outcome.                                                            
+                                                                                                    
+
+  · failed
+                                                                                                    
+  IRC inbox peek                                                                                   
+   IRC inbox failed: message store unavailable.                                                     
+                                                                                                    
+

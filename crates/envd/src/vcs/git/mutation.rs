@@ -1,19 +1,17 @@
 //! Consumer-facing Git mutation primitives serialized by primary repository
 //! root.
 
-use std::{collections::HashSet, fmt::Write as _, io, path::Path, str};
+use std::{collections::HashSet, io, path::Path, str, sync::Arc};
 
 use bytes::{Bytes, BytesMut};
 use omp_core::{IntoStr, Str};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-	commands::CommandError,
-	diff,
-	diff::{DiffHunk, DiffOptions, FileDiff, GitDiff},
+	blocking,
+	diff::{self, DiffHunk, FileDiff},
 	lock,
 	repo::Repository,
-	runner::{GitDeadline, GitRunError, GitRunOptions, GitRunOutput, GitRunner},
 };
 
 /// A validated subset of one file's diff hunks.
@@ -152,15 +150,12 @@ pub enum MutationError {
 	/// A selected worktree file could not be read exactly.
 	#[error("selected worktree file could not be read")]
 	WorktreeRead(#[source] io::Error),
-	/// Environment execution failed, timed out, or was cancelled.
+	/// The VCS backend rejected the operation.
 	#[error(transparent)]
-	Run(#[from] GitRunError),
+	Vcs(#[from] omp_vcs::Error),
 	/// Selective staging was invalid against the captured complete diff.
 	#[error(transparent)]
 	Selection(#[from] SelectionError),
-	/// Complete diff capture was rejected by Git.
-	#[error(transparent)]
-	Diff(#[from] CommandError),
 	/// Git emitted a non-UTF-8 scalar where its plumbing contract requires text.
 	#[error("Git emitted a non-UTF-8 scalar")]
 	NonUtf8,
@@ -210,15 +205,19 @@ pub enum IsolationCommit<'a> {
 	},
 }
 
+/// Successful in-process mutation result.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct OperationOutput;
+
 /// Exact outcome of a repository mutation.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MutationOutcome {
 	/// Git completed the requested mutation.
-	Applied(GitRunOutput),
+	Applied(OperationOutput),
 	/// Git stopped with unmerged index entries and preserved recoverable state.
-	Conflict(GitRunOutput),
+	Conflict(OperationOutput),
 	/// Git rejected the operation without a proven partial effect.
-	Rejected(GitRunOutput),
+	Rejected(OperationOutput),
 }
 
 impl MutationOutcome {
@@ -249,20 +248,20 @@ pub struct PatchCheck {
 	/// Whether Git proved that the patch can be applied.
 	pub applies: bool,
 	/// Complete bounded command output and exit status.
-	pub output:  GitRunOutput,
+	pub output:  OperationOutput,
 }
 
 /// Typed cherry-pick result; advancing the sequencer remains caller-controlled.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CherryPickOutcome {
 	/// The selected commit was applied.
-	Applied(GitRunOutput),
+	Applied(OperationOutput),
 	/// The current sequencer commit collapsed to an empty change.
-	Empty(GitRunOutput),
+	Empty(OperationOutput),
 	/// Git left recoverable unmerged entries for the caller to resolve or abort.
-	Conflict(GitRunOutput),
+	Conflict(OperationOutput),
 	/// Git rejected the request for another reason.
-	Rejected(GitRunOutput),
+	Rejected(OperationOutput),
 }
 
 /// Result of creating an include-untracked stash.
@@ -271,27 +270,27 @@ pub struct StashPushOutcome {
 	/// Whether `refs/stash` changed to a newly-created entry.
 	pub created: bool,
 	/// Exact result of `git stash push`.
-	pub output:  GitRunOutput,
+	pub output:  OperationOutput,
 }
 
 /// Safe top-stash restoration result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum StashPopOutcome {
 	/// Preflight and pop both succeeded; Git dropped the stash entry.
-	Applied(GitRunOutput),
+	Applied(OperationOutput),
 	/// Three-way preflight proved the stash would conflict, so no pop ran.
-	PreflightConflict(GitRunOutput),
+	PreflightConflict(OperationOutput),
 	/// Pop failed, but stash-scoped tracked restore and untracked cleanup
 	/// succeeded.
-	RolledBack(GitRunOutput),
+	RolledBack(OperationOutput),
 	/// Pop failed and at least one bounded rollback operation also failed.
 	Partial {
 		/// Original failed pop result.
-		pop:     GitRunOutput,
+		pop:     OperationOutput,
 		/// Exact tracked-path restore result when it failed.
-		restore: Option<GitRunOutput>,
+		restore: Option<OperationOutput>,
 		/// Literal-path cleanup result when it failed.
-		clean:   Option<GitRunOutput>,
+		clean:   Option<OperationOutput>,
 	},
 }
 
@@ -325,30 +324,16 @@ pub enum WriteTreeOutcome {
 	/// Newly written tree object identifier.
 	Written(Str),
 	/// The index contains unmerged entries.
-	Conflict(GitRunOutput),
+	Conflict(OperationOutput),
 	/// Git rejected the operation for another reason.
-	Rejected(GitRunOutput),
+	Rejected(OperationOutput),
 }
 /// Result of cloning a repository, including whether the shallow transport
 /// needed the compatibility fallback.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CloneOutcome {
-	/// `git clone --depth=1` completed.
-	Shallow(GitRunOutput),
-	/// Shallow clone was rejected and an ordinary clone completed.
-	Full {
-		/// Exact shallow-clone rejection retained for diagnostics.
-		shallow_rejection: GitRunOutput,
-		/// Exact successful full-clone output.
-		output:            GitRunOutput,
-	},
-	/// Both shallow and ordinary clone attempts were rejected.
-	Rejected {
-		/// Exact shallow-clone rejection.
-		shallow_rejection: GitRunOutput,
-		/// Exact full-clone rejection.
-		full_rejection:    GitRunOutput,
-	},
+	/// The clone completed. `omp-vcs` internally owns shallow-to-full fallback.
+	Applied,
 }
 
 /// Exact identity and timestamp flags for one low-level commit creation.
@@ -371,60 +356,50 @@ pub struct PushOptions<'a> {
 	pub force_with_lease: Option<&'a str>,
 }
 
-/// Clones `remote` into `target`, preferring a one-commit shallow transfer.
-///
-/// Some servers reject shallow negotiation. Git removes a newly-created
-/// destination after a failed clone; only then is the ordinary compatibility
-/// attempt made against the same exact target.
+/// Clones `remote` into `target` through the sanctioned network transport.
 pub async fn clone_repository(
-	runner: &GitRunner,
 	cwd: &Path,
 	remote: &str,
 	target: &str,
 	cancel: &CancellationToken,
 ) -> Result<CloneOutcome, MutationError> {
-	let options = GitRunOptions { deadline: GitDeadline::Network, ..Default::default() };
-	let shallow = runner
-		.run(cwd, &["clone", "--depth=1", "--no-tags", "--", remote, target], options, cancel)
-		.await?;
-	if shallow.exit_code == 0 {
-		return Ok(CloneOutcome::Shallow(shallow));
-	}
-	let full = runner
-		.run(cwd, &["clone", "--no-tags", "--", remote, target], options, cancel)
-		.await?;
-	if full.exit_code == 0 {
-		Ok(CloneOutcome::Full { shallow_rejection: shallow, output: full })
+	let target = if Path::new(target).is_absolute() {
+		Path::new(target).to_owned()
 	} else {
-		Ok(CloneOutcome::Rejected { shallow_rejection: shallow, full_rejection: full })
-	}
+		cwd.join(target)
+	};
+	omp_vcs::git::clone(remote, &target, &omp_vcs::CloneOptions::default(), Some(cancel.clone()))
+		.await?;
+	Ok(CloneOutcome::Applied)
 }
 
-/// Low-level mutation facade for named repository consumers.
-///
-/// The facade deliberately has no commit-message synthesis, automatic staging,
-/// changelog, or commit-coordinator surface. Every method performs exactly one
-/// caller-selected repair or VCS primitive while holding the lock shared by all
-/// linked worktrees of `repository`.
 #[derive(Clone)]
+/// Lock-serialized repository mutation facade for an authorized consumer.
 pub struct GitMutation {
-	runner:     GitRunner,
 	repository: Repository,
 	consumer:   GitMutationConsumer,
 }
-
 impl GitMutation {
-	/// Creates a mutation facade bound to one canonical repository identity.
-	pub const fn new(
-		runner: GitRunner,
-		repository: Repository,
-		consumer: GitMutationConsumer,
-	) -> Self {
-		Self { runner, repository, consumer }
+	/// Creates a mutation facade bound to one repository and consumer identity.
+	pub const fn new(repository: Repository, consumer: GitMutationConsumer) -> Self {
+		Self { repository, consumer }
 	}
 
-	/// Creates a branch inside this consumer's compile-time isolation
-	/// namespace.
+	fn repo(&self) -> Arc<omp_vcs::git::GitRepo> {
+		self.repository.handle.clone()
+	}
+
+	async fn locked<T: Send + 'static>(
+		&self,
+		cancel: &CancellationToken,
+		op: impl FnOnce(Arc<omp_vcs::git::GitRepo>) -> Result<T, omp_vcs::Error> + Send + 'static,
+	) -> Result<T, MutationError> {
+		let _guard = lock::write(&self.repository, cancel).await?;
+		let repo = self.repo();
+		Ok(blocking(Some(cancel), move || op(repo)).await?)
+	}
+
+	/// Creates and checks out a branch in the autoresearch isolation namespace.
 	pub async fn create_isolation_branch(
 		&self,
 		branch: &str,
@@ -433,18 +408,14 @@ impl GitMutation {
 		if self.consumer != GitMutationConsumer::Autoresearch || !valid_autoresearch_branch(branch) {
 			return Err(MutationError::IsolationBranch);
 		}
-		let _guard = lock::write(&self.repository, cancel).await?;
+		let branch = branch.to_owned();
 		self
-			.mutation(&["switch", "--create", branch], None, cancel)
-			.await
+			.locked(cancel, move |r| r.checkout_new_branch(&branch))
+			.await?;
+		Ok(applied())
 	}
 
-	/// Commits only exact paths as one feature-internal isolation
-	/// transaction.
-	///
-	/// The fixed [`IsolationCommit`] vocabulary is the code-level §19 guard:
-	/// callers cannot submit a general commit message or ask this facade to
-	/// synthesize one.
+	/// Stages selected paths and records an authorized isolation commit.
 	pub async fn commit_isolation(
 		&self,
 		record: IsolationCommit<'_>,
@@ -454,30 +425,22 @@ impl GitMutation {
 		if self.consumer != GitMutationConsumer::Autoresearch {
 			return Err(MutationError::IsolationConsumer);
 		}
-		let _guard = lock::write(&self.repository, cancel).await?;
 		if paths.is_empty() {
-			return Ok(MutationOutcome::Applied(noop_output()));
+			return Ok(applied());
 		}
-		let mut add = Vec::with_capacity(paths.len() + 2);
-		add.extend(["add", "--"]);
-		add.extend_from_slice(paths);
-		let staged = self.mutation(&add, None, cancel).await?;
-		if !staged.is_applied() {
-			return Ok(staged);
-		}
+		let files = paths.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
 		let message = isolation_commit_message(record);
-		let mut commit = Vec::with_capacity(paths.len() + 5);
-		commit.extend(["commit", "--file=-", "--only", "--"]);
-		commit.extend_from_slice(paths);
 		self
-			.mutation(&commit, Some(message.as_bytes()), cancel)
-			.await
+			.locked(cancel, move |r| {
+				r.stage_files(&files)?;
+				r.commit_create(&message, &omp_vcs::CommitOptions { files, ..Default::default() })
+					.map(drop)
+			})
+			.await?;
+		Ok(applied())
 	}
 
-	/// Restores exactly one run's tracked and untracked paths.
-	///
-	/// Repeating the operation after a crash is safe: already-restored paths
-	/// are accepted by `restore`, while `clean` is a no-op for absent paths.
+	/// Restores tracked paths and removes untracked paths from an isolation run.
 	pub async fn rollback_isolation(
 		&self,
 		target: &str,
@@ -488,48 +451,58 @@ impl GitMutation {
 		if self.consumer != GitMutationConsumer::Autoresearch {
 			return Err(MutationError::IsolationConsumer);
 		}
-		let _guard = lock::write(&self.repository, cancel).await?;
-		if !tracked.is_empty() {
-			let mut restore = Vec::with_capacity(tracked.len() + 6);
-			restore.extend(["restore", "--source", target, "--staged", "--worktree", "--"]);
-			restore.extend_from_slice(tracked);
-			let outcome = self.mutation(&restore, None, cancel).await?;
-			if !outcome.is_applied() {
-				return Ok(outcome);
-			}
-		}
-		if untracked.is_empty() {
-			return Ok(MutationOutcome::Applied(noop_output()));
-		}
-		let mut clean = Vec::with_capacity(untracked.len() + 4);
-		clean.extend(["--literal-pathspecs", "clean", "-fd", "--"]);
-		clean.extend_from_slice(untracked);
-		self.mutation(&clean, None, cancel).await
+		let target = target.to_owned();
+		let tracked = tracked.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+		let untracked = untracked
+			.iter()
+			.map(|p| (*p).to_owned())
+			.collect::<Vec<_>>();
+		self
+			.locked(cancel, move |r| {
+				if !tracked.is_empty() {
+					r.restore(&omp_vcs::RestoreOptions {
+						source:   Some(target),
+						staged:   true,
+						worktree: true,
+						files:    tracked,
+					})?;
+				}
+				if !untracked.is_empty() {
+					r.clean(&omp_vcs::CleanOptions { paths: untracked, ..Default::default() })?;
+				}
+				Ok(())
+			})
+			.await?;
+		Ok(applied())
 	}
 
-	/// Stages only the supplied exact paths. An empty list is a no-op.
+	/// Stages the requested repository-relative paths.
 	pub async fn stage_files(
 		&self,
 		paths: &[&str],
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
+		let paths = paths.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
 		if paths.is_empty() {
-			return Ok(MutationOutcome::Applied(noop_output()));
+			return Ok(applied());
 		}
-		let mut argv = Vec::with_capacity(paths.len() + 2);
-		argv.extend(["add", "--"]);
-		argv.extend_from_slice(paths);
-		self.mutation(&argv, None, cancel).await
+		self.locked(cancel, move |r| r.stage_files(&paths)).await?;
+		Ok(applied())
 	}
 
-	/// Stages every tracked, deleted, and untracked path with `git add -A`.
+	/// Stages every tracked and untracked path in the repository.
 	pub async fn stage_all(
 		&self,
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		self.mutation(&["add", "-A"], None, cancel).await
+		self
+			.locked(cancel, move |r| {
+				let mut paths = r.ls_files(false, false)?;
+				paths.extend(r.ls_files(true, true)?);
+				r.stage_files(&paths)
+			})
+			.await?;
+		Ok(applied())
 	}
 
 	/// Resets the complete index to `HEAD` while preserving the worktree.
@@ -537,499 +510,128 @@ impl GitMutation {
 		&self,
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		self.mutation(&["reset"], None, cancel).await
+		self
+			.locked(cancel, move |r| r.reset(omp_vcs::ResetMode::Mixed, None))
+			.await?;
+		Ok(applied())
 	}
 
-	/// Removes only the supplied exact paths from the index. An empty list is a
-	/// no-op.
+	/// Resets selected index entries to `HEAD`.
 	pub async fn reset_index_entries(
 		&self,
 		paths: &[&str],
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		if paths.is_empty() {
-			return Ok(MutationOutcome::Applied(noop_output()));
-		}
-		let mut argv = Vec::with_capacity(paths.len() + 2);
-		argv.extend(["reset", "--"]);
-		argv.extend_from_slice(paths);
-		self.mutation(&argv, None, cancel).await
+		let paths = paths.iter().map(|p| (*p).to_owned()).collect::<Vec<_>>();
+		self.locked(cancel, move |r| r.unstage(&paths)).await?;
+		Ok(applied())
 	}
 
-	/// Captures a complete bounded diff, validates every selection, and stages
-	/// exactly the selected hunks through `git apply --cached --binary -`.
+	/// Stages validated whole-file or hunk selections from the worktree diff.
 	pub async fn stage_hunks(
 		&self,
 		selections: &[HunkSelection],
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		if selections.is_empty() {
-			return Ok(MutationOutcome::Applied(noop_output()));
-		}
-		let raw = GitDiff::new(self.runner.clone())
-			.raw(
-				self.cwd(),
-				DiffOptions { cached: false, binary: true, ..Default::default() },
-				&[],
-				cancel,
-			)
-			.await?;
-		let patch = build_selected_patch(&raw, selections)?;
+		let selections = selections
+			.iter()
+			.map(|s| omp_vcs::HunkSelection {
+				path:  s.path.as_str().to_owned(),
+				hunks: match &s.selector {
+					HunkSelector::All => omp_vcs::HunkSpec::All,
+					HunkSelector::Indices(v) => {
+						omp_vcs::HunkSpec::Indices(v.iter().map(|n| *n as u32).collect())
+					},
+					HunkSelector::Lines { start, end } => {
+						omp_vcs::HunkSpec::Lines { start: *start as u32, end: *end as u32 }
+					},
+				},
+			})
+			.collect::<Vec<_>>();
 		self
-			.mutation(&["apply", "--binary", "--cached", "-"], Some(&patch), cancel)
-			.await
+			.locked(cancel, move |r| r.stage_hunks(&selections, None))
+			.await?;
+		Ok(applied())
 	}
 
-	/// Unstages selected hunks by reversing a complete cached diff in the index.
+	/// Removes validated whole-file or hunk selections from the index.
 	pub async fn unstage_hunks(
 		&self,
 		selections: &[HunkSelection],
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		if selections.is_empty() {
-			return Ok(MutationOutcome::Applied(noop_output()));
-		}
-		let raw = GitDiff::new(self.runner.clone())
-			.raw(
-				self.cwd(),
-				DiffOptions { cached: true, binary: true, ..Default::default() },
-				&[],
-				cancel,
-			)
-			.await?;
-		let patch = build_selected_patch(&raw, selections)?;
-		self
-			.mutation(&["apply", "--binary", "--cached", "--reverse", "-"], Some(&patch), cancel)
-			.await
+		self.apply_selected_hunks(selections, true, cancel).await
 	}
 
-	/// Discards selected worktree hunks by applying their complete diff in
-	/// reverse.
+	/// Discards validated whole-file or hunk selections from the worktree.
 	pub async fn discard_hunks(
 		&self,
 		selections: &[HunkSelection],
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
+		self.apply_selected_hunks(selections, false, cancel).await
+	}
+
+	async fn apply_selected_hunks(
+		&self,
+		selections: &[HunkSelection],
+		cached: bool,
+		cancel: &CancellationToken,
+	) -> Result<MutationOutcome, MutationError> {
 		if selections.is_empty() {
-			return Ok(MutationOutcome::Applied(noop_output()));
+			return Ok(applied());
 		}
-		let raw = GitDiff::new(self.runner.clone())
-			.raw(
-				self.cwd(),
-				DiffOptions { cached: false, binary: true, ..Default::default() },
-				&[],
-				cancel,
-			)
-			.await?;
+		let repo = self.repo();
+		let options = omp_vcs::DiffOptions { cached, binary: true, ..Default::default() };
+		let raw = Bytes::from(blocking(Some(cancel), move || repo.diff_text(&options)).await?);
 		let patch = build_selected_patch(&raw, selections)?;
 		self
-			.mutation(&["apply", "--binary", "--reverse", "-"], Some(&patch), cancel)
+			.apply_patch(&patch, PatchOptions { cached, reverse: true, ..Default::default() }, cancel)
 			.await
 	}
 
-	/// Stages selected old/new changed lines from one worktree file diff.
-	pub async fn stage_lines(
+	async fn selected_lines(
 		&self,
 		path: &str,
-		range: DiffLineSelection,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		self
-			.apply_selected_lines(path, range, false, false, cancel)
-			.await
-	}
-
-	/// Unstages selected old/new changed lines from one cached file diff.
-	pub async fn unstage_lines(
-		&self,
-		path: &str,
-		range: DiffLineSelection,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		self
-			.apply_selected_lines(path, range, true, true, cancel)
-			.await
-	}
-
-	/// Discards selected old/new changed lines from one worktree file diff.
-	pub async fn discard_lines(
-		&self,
-		path: &str,
-		range: DiffLineSelection,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		self
-			.apply_selected_lines(path, range, false, true, cancel)
-			.await
-	}
-
-	/// Applies or checks exact patch bytes without rewriting their terminators.
-	pub async fn apply_patch(
-		&self,
-		patch: &[u8],
-		options: PatchOptions,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let argv = apply_argv(options);
-		self.mutation(&argv, Some(patch), cancel).await
-	}
-
-	/// Checks exact patch bytes under the write lock used by a subsequent apply.
-	pub async fn check_patch(
-		&self,
-		patch: &[u8],
-		mut options: PatchOptions,
-		cancel: &CancellationToken,
-	) -> Result<PatchCheck, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		options.check = true;
-		let output = self
-			.invoke(&apply_argv(options), Some(patch), cancel)
-			.await?;
-		Ok(PatchCheck { applies: output.exit_code == 0, output })
-	}
-
-	/// Starts a cherry-pick without automatically skipping or aborting failures.
-	pub async fn cherry_pick(
-		&self,
-		revision: &str,
-		cancel: &CancellationToken,
-	) -> Result<CherryPickOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let output = self
-			.invoke(&["cherry-pick", revision], None, cancel)
-			.await?;
-		self.classify_cherry_pick(output, cancel).await
-	}
-
-	/// Explicitly aborts the current cherry-pick sequence.
-	pub async fn cherry_pick_abort(
-		&self,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		self
-			.mutation(&["cherry-pick", "--abort"], None, cancel)
-			.await
-	}
-
-	/// Explicitly skips the current cherry-pick commit and advances the
-	/// sequence.
-	pub async fn cherry_pick_skip(
-		&self,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		self
-			.mutation(&["cherry-pick", "--skip"], None, cancel)
-			.await
-	}
-
-	/// Creates a stash containing index, worktree, and untracked changes.
-	pub async fn stash_push(
-		&self,
-		message: Option<&str>,
-		cancel: &CancellationToken,
-	) -> Result<StashPushOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let before = self.resolve_stash(cancel).await?;
-		let mut argv = vec!["stash", "push", "--include-untracked"];
-		if let Some(message) = message {
-			argv.extend(["-m", message]);
-		}
-		let output = self.invoke(&argv, None, cancel).await?;
-		if output.exit_code != 0 {
-			return Ok(StashPushOutcome { created: false, output });
-		}
-		let after = self.resolve_stash(cancel).await?;
-		Ok(StashPushOutcome { created: after.is_some() && after != before, output })
-	}
-
-	/// Returns the top stash's complete working-tree binary patch, or empty
-	/// bytes.
-	pub async fn stash_show(&self, cancel: &CancellationToken) -> Result<Bytes, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		self.stash_patch(cancel).await
-	}
-
-	/// Pops the top stash without automatic rollback.
-	pub async fn stash_pop(
-		&self,
-		restore_index: bool,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let mut argv = vec!["stash", "pop"];
-		if restore_index {
-			argv.push("--index");
-		}
-		self.mutation(&argv, None, cancel).await
-	}
-
-	/// Preflights a stash pop and rolls back only effects proven to originate in
-	/// that stash when the real pop still fails.
-	pub async fn stash_try_pop(
-		&self,
-		restore_index: bool,
-		cancel: &CancellationToken,
-	) -> Result<StashPopOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let patch = self.stash_patch(cancel).await?;
-		if !patch.is_empty() {
-			let check = self
-				.invoke(&["apply", "--binary", "--3way", "--check", "-"], Some(&patch), cancel)
-				.await?;
-			if check.exit_code != 0 {
-				return Ok(StashPopOutcome::PreflightConflict(check));
-			}
-		}
-		let tracked = stash_tracked_paths(&patch)?;
-		let untracked = self.stash_untracked(cancel).await?;
-		let mut pop_argv = vec!["stash", "pop"];
-		if restore_index {
-			pop_argv.push("--index");
-		}
-		let pop = self.invoke(&pop_argv, None, cancel).await?;
-		if pop.exit_code == 0 {
-			return Ok(StashPopOutcome::Applied(pop));
-		}
-		let restore_failure = if tracked.is_empty() {
-			None
-		} else {
-			let mut argv = Vec::with_capacity(tracked.len() + 6);
-			argv.extend(["restore", "--source=HEAD", "--staged", "--worktree", "--"]);
-			for path in &tracked {
-				argv.push(path.as_str());
-			}
-			let restore = self.invoke(&argv, None, cancel).await?;
-			(restore.exit_code != 0).then_some(restore)
-		};
-		let clean_failure = if untracked.is_empty() {
-			None
-		} else {
-			let mut argv = Vec::with_capacity(untracked.len() + 4);
-			argv.extend(["--literal-pathspecs", "clean", "-fdx", "--"]);
-			for path in &untracked {
-				argv.push(path.as_str());
-			}
-			let clean = self.invoke(&argv, None, cancel).await?;
-			(clean.exit_code != 0).then_some(clean)
-		};
-		if restore_failure.is_none() && clean_failure.is_none() {
-			Ok(StashPopOutcome::RolledBack(pop))
-		} else {
-			Ok(StashPopOutcome::Partial { pop, restore: restore_failure, clean: clean_failure })
-		}
-	}
-
-	/// Restores exact paths from an optional source into index and/or worktree.
-	pub async fn restore(
-		&self,
-		paths: &[&str],
-		source: Option<&str>,
-		staged: bool,
-		worktree: bool,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let mut argv = Vec::with_capacity(paths.len() + 6);
-		argv.push("restore");
-		if let Some(source) = source {
-			argv.extend(["--source", source]);
-		}
-		if staged {
-			argv.push("--staged");
-		}
-		if worktree {
-			argv.push("--worktree");
-		}
-		if !paths.is_empty() {
-			argv.push("--");
-			argv.extend_from_slice(paths);
-		}
-		self.mutation(&argv, None, cancel).await
-	}
-
-	/// Resets the repository tree with one explicit mode and optional target.
-	pub async fn reset(
-		&self,
-		mode: ResetMode,
-		target: Option<&str>,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let mode = match mode {
-			ResetMode::Soft => "--soft",
-			ResetMode::Mixed => "--mixed",
-			ResetMode::Hard => "--hard",
-		};
-		let mut argv = vec!["reset", mode];
-		if let Some(target) = target {
-			argv.push(target);
-		}
-		self.mutation(&argv, None, cancel).await
-	}
-
-	/// Removes untracked paths with literal pathspecs and an explicit ignore
-	/// mode.
-	pub async fn clean(
-		&self,
-		mode: CleanMode,
-		paths: &[&str],
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let flag = match mode {
-			CleanMode::Untracked => "-fd",
-			CleanMode::IncludeIgnored => "-fdx",
-			CleanMode::IgnoredOnly => "-fdX",
-		};
-		let mut argv = Vec::with_capacity(paths.len() + 4);
-		argv.extend(["--literal-pathspecs", "clean", flag]);
-		if !paths.is_empty() {
-			argv.push("--");
-			argv.extend_from_slice(paths);
-		}
-		self.mutation(&argv, None, cancel).await
-	}
-
-	/// Reads one tree-ish into the index.
-	pub async fn read_tree(
-		&self,
-		treeish: &str,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		self.mutation(&["read-tree", treeish], None, cancel).await
-	}
-
-	/// Writes the current index as a tree and returns its object identifier.
-	pub async fn write_tree(
-		&self,
-		cancel: &CancellationToken,
-	) -> Result<WriteTreeOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let output = self.invoke(&["write-tree"], None, cancel).await?;
-		if output.exit_code == 0 {
-			let tree = str::from_utf8(&output.stdout)
-				.map_err(|_| MutationError::NonUtf8)?
-				.trim();
-			return Ok(WriteTreeOutcome::Written(tree.to_str()));
-		}
-		if self.has_unmerged(cancel).await? {
-			Ok(WriteTreeOutcome::Conflict(output))
-		} else {
-			Ok(WriteTreeOutcome::Rejected(output))
-		}
-	}
-
-	/// Creates one commit from the current index using exact stdin message
-	/// bytes and caller-selected identity/date flags.
-	pub async fn create_commit(
-		&self,
-		message: &[u8],
-		options: CommitOptions<'_>,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let mut argv = Vec::with_capacity(8);
-		argv.extend(["commit", "--file=-"]);
-		if let Some(author) = options.author {
-			argv.extend(["--author", author]);
-		}
-		if let Some(date) = options.date {
-			argv.extend(["--date", date]);
-		}
-		if options.allow_empty {
-			argv.push("--allow-empty");
-		}
-		if options.amend {
-			argv.push("--amend");
-		}
-		self.mutation(&argv, Some(message), cancel).await
-	}
-
-	/// Pushes exact refspecs without following tags and with optional
-	/// force-with-lease protection.
-	pub async fn push(
-		&self,
-		remote: &str,
-		refspecs: &[&str],
-		options: PushOptions<'_>,
-		cancel: &CancellationToken,
-	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let mut argv = Vec::with_capacity(refspecs.len() + 5);
-		argv.extend(["push", "--no-follow-tags"]);
-		let lease_flag = options
-			.force_with_lease
-			.filter(|lease| !lease.is_empty())
-			.map(|lease| format!("--force-with-lease={lease}"));
-		if options.force_with_lease.is_some() {
-			argv.push(lease_flag.as_deref().unwrap_or("--force-with-lease"));
-		}
-		argv.push(remote);
-		argv.extend_from_slice(refspecs);
-		self.network_mutation(&argv, cancel).await
-	}
-
-	async fn apply_selected_lines(
-		&self,
-		path: &str,
-		range: DiffLineSelection,
+		selection: DiffLineSelection,
 		cached: bool,
 		reverse: bool,
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let _guard = lock::write(&self.repository, cancel).await?;
-		let raw = GitDiff::new(self.runner.clone())
-			.raw(self.cwd(), DiffOptions { cached, binary: true, ..Default::default() }, &[], cancel)
+		let repo = self.repo();
+		let path_owned = path.to_owned();
+		let options = omp_vcs::DiffOptions { cached, binary: true, ..Default::default() };
+		let raw = blocking(Some(cancel), move || repo.diff_text(&options)).await?;
+		let files = diff::parse_unified(Bytes::from(raw));
+		let file = files
+			.into_iter()
+			.find(|f| file_matches_path(f, path_owned.as_bytes()))
+			.ok_or_else(|| SelectionError::PathMissing { path: path_owned.as_str().into() })?;
+		let line_endings = self
+			.line_endings(&file, cached, &path_owned, cancel)
 			.await?;
-		let files = diff::parse_unified(raw);
-		let file = if let Some(file) = files
-			.iter()
-			.find(|file| file_matches_path(file, path.as_bytes()))
-		{
-			file.clone()
-		} else {
-			let raw = GitDiff::new(self.runner.clone())
-				.raw(
-					self.cwd(),
-					DiffOptions { cached, binary: true, ..Default::default() },
-					&[path],
-					cancel,
-				)
-				.await?;
-			let mut requested = diff::parse_unified(raw);
-			if requested.len() != 1 {
-				return Err(SelectionError::PathMissing { path: path.to_str() }.into());
-			}
-			requested.pop().expect("one requested file diff")
-		};
 		let patch = build_line_patch_with_endings(
 			&file,
-			path,
-			range,
+			&path_owned,
+			selection,
 			if reverse {
 				LinePatchDirection::Reverse
 			} else {
 				LinePatchDirection::Apply
 			},
-			&self.line_endings(&file, cached, path, cancel).await?,
+			&line_endings,
 		)?;
-		let options =
-			PatchOptions { binary: true, cached: cached || !reverse, reverse, ..Default::default() };
 		self
-			.mutation(&apply_argv(options), Some(&patch), cancel)
+			.apply_patch(
+				&patch,
+				PatchOptions { cached: cached || !reverse, reverse, ..Default::default() },
+				cancel,
+			)
 			.await
 	}
 
+	/// Reads the pre- and post-image contents backing `file` so synthesized
+	/// line patches can preserve per-line CRLF terminators.
 	async fn line_endings(
 		&self,
 		file: &FileDiff,
@@ -1041,267 +643,331 @@ impl GitMutation {
 			.old_path
 			.as_deref()
 			.and_then(|path| str::from_utf8(path).ok())
-			.unwrap_or(path);
+			.unwrap_or(path)
+			.to_owned();
 		let new_path = file
 			.path
 			.as_deref()
 			.and_then(|path| str::from_utf8(path).ok())
-			.unwrap_or(path);
+			.unwrap_or(path)
+			.to_owned();
+		let repo = self.repo();
 		let old_spec = if cached {
 			format!("HEAD:{old_path}")
 		} else {
 			format!(":0:{old_path}")
 		};
-		let old = self.blob_or_empty(&old_spec, cancel).await?;
+		let old = blocking(Some(cancel), {
+			let repo = repo.clone();
+			move || Ok(blob_or_empty(&repo, &old_spec))
+		})
+		.await?;
 		let new = if cached {
-			self
-				.blob_or_empty(&format!(":0:{new_path}"), cancel)
-				.await?
+			blocking(Some(cancel), move || Ok(blob_or_empty(&repo, &format!(":0:{new_path}")))).await?
 		} else {
-			match tokio::fs::read(self.cwd().join(new_path)).await {
-				Ok(bytes) => Bytes::from(bytes),
-				Err(error) if error.kind() == io::ErrorKind::NotFound => Bytes::new(),
+			match tokio::fs::read(self.repository.worktree_root.join(&new_path)).await {
+				Ok(bytes) => bytes,
+				Err(error) if error.kind() == io::ErrorKind::NotFound => Vec::new(),
 				Err(error) => return Err(MutationError::WorktreeRead(error)),
 			}
 		};
 		Ok(LineEndings::from_contents(&old, &new))
 	}
 
-	async fn blob_or_empty(
+	/// Stages changed lines selected by old-side and new-side coordinates.
+	pub async fn stage_lines(
 		&self,
-		spec: &str,
-		cancel: &CancellationToken,
-	) -> Result<Bytes, MutationError> {
-		let output = self.invoke_complete(&["show", spec], None, cancel).await?;
-		Ok(if output.exit_code == 0 {
-			output.stdout
-		} else {
-			Bytes::new()
-		})
-	}
-
-	fn cwd(&self) -> &Path {
-		&self.repository.worktree_root
-	}
-
-	async fn invoke(
-		&self,
-		argv: &[&str],
-		input: Option<&[u8]>,
-		cancel: &CancellationToken,
-	) -> Result<GitRunOutput, MutationError> {
-		self
-			.invoke_with_completeness(argv, input, false, cancel)
-			.await
-	}
-
-	async fn invoke_complete(
-		&self,
-		argv: &[&str],
-		input: Option<&[u8]>,
-		cancel: &CancellationToken,
-	) -> Result<GitRunOutput, MutationError> {
-		self
-			.invoke_with_completeness(argv, input, true, cancel)
-			.await
-	}
-
-	async fn invoke_with_completeness(
-		&self,
-		argv: &[&str],
-		input: Option<&[u8]>,
-		parse_sensitive: bool,
-		cancel: &CancellationToken,
-	) -> Result<GitRunOutput, MutationError> {
-		let options = GitRunOptions { parse_sensitive, ..Default::default() };
-		match input {
-			Some(input) => Ok(self
-				.runner
-				.run_with_stdin(self.cwd(), argv, options, input, cancel)
-				.await?),
-			None => Ok(self.runner.run(self.cwd(), argv, options, cancel).await?),
-		}
-	}
-
-	async fn mutation(
-		&self,
-		argv: &[&str],
-		input: Option<&[u8]>,
+		path: &str,
+		range: DiffLineSelection,
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let output = self.invoke(argv, input, cancel).await?;
-		if output.exit_code == 0 {
-			return Ok(MutationOutcome::Applied(output));
-		}
-		if self.has_unmerged(cancel).await? {
-			Ok(MutationOutcome::Conflict(output))
-		} else {
-			Ok(MutationOutcome::Rejected(output))
-		}
+		self.selected_lines(path, range, false, false, cancel).await
 	}
 
-	async fn network_mutation(
+	/// Removes selected changed lines from the index.
+	pub async fn unstage_lines(
 		&self,
-		argv: &[&str],
+		path: &str,
+		range: DiffLineSelection,
 		cancel: &CancellationToken,
 	) -> Result<MutationOutcome, MutationError> {
-		let output = self
-			.runner
-			.run(
-				self.cwd(),
-				argv,
-				GitRunOptions { deadline: GitDeadline::Network, ..Default::default() },
-				cancel,
-			)
+		self.selected_lines(path, range, true, true, cancel).await
+	}
+
+	/// Discards selected changed lines from the worktree.
+	pub async fn discard_lines(
+		&self,
+		path: &str,
+		range: DiffLineSelection,
+		cancel: &CancellationToken,
+	) -> Result<MutationOutcome, MutationError> {
+		self.selected_lines(path, range, false, true, cancel).await
+	}
+
+	/// Applies a binary-safe patch with explicit index and merge options.
+	pub async fn apply_patch(
+		&self,
+		patch: &[u8],
+		options: PatchOptions,
+		cancel: &CancellationToken,
+	) -> Result<MutationOutcome, MutationError> {
+		let patch = str::from_utf8(patch)
+			.map_err(|_| MutationError::NonUtf8)?
+			.to_owned();
+		self
+			.locked(cancel, move |r| {
+				r.apply_patch(&patch, &omp_vcs::ApplyOptions {
+					cached:     options.cached,
+					reverse:    options.reverse,
+					three_way:  options.three_way,
+					index_path: None,
+				})
+			})
 			.await?;
-		if output.exit_code == 0 {
-			return Ok(MutationOutcome::Applied(output));
-		}
-		if self.has_unmerged(cancel).await? {
-			Ok(MutationOutcome::Conflict(output))
-		} else {
-			Ok(MutationOutcome::Rejected(output))
-		}
+		Ok(applied())
 	}
 
-	async fn classify_cherry_pick(
+	/// Checks whether a patch can be applied without mutating the repository.
+	pub async fn check_patch(
 		&self,
-		output: GitRunOutput,
+		patch: &[u8],
+		options: PatchOptions,
+		cancel: &CancellationToken,
+	) -> Result<PatchCheck, MutationError> {
+		let patch = str::from_utf8(patch)
+			.map_err(|_| MutationError::NonUtf8)?
+			.to_owned();
+		let applies = self
+			.locked(cancel, move |r| {
+				r.can_apply_patch(&patch, &omp_vcs::ApplyOptions {
+					cached:     options.cached,
+					reverse:    options.reverse,
+					three_way:  options.three_way,
+					index_path: None,
+				})
+			})
+			.await?;
+		Ok(PatchCheck { applies, output: OperationOutput })
+	}
+
+	/// Applies one commit and reports empty, conflicting, or rejected outcomes.
+	pub async fn cherry_pick(
+		&self,
+		revision: &str,
 		cancel: &CancellationToken,
 	) -> Result<CherryPickOutcome, MutationError> {
-		if output.exit_code == 0 {
-			return Ok(CherryPickOutcome::Applied(output));
+		let revision = revision.to_owned();
+		match self.locked(cancel, move |r| r.cherry_pick(&revision)).await {
+			Ok(()) => Ok(CherryPickOutcome::Applied(OperationOutput)),
+			Err(MutationError::Vcs(omp_vcs::Error::EmptyCherryPick { .. })) => {
+				Ok(CherryPickOutcome::Empty(OperationOutput))
+			},
+			Err(MutationError::Vcs(omp_vcs::Error::Conflict { .. })) => {
+				Ok(CherryPickOutcome::Conflict(OperationOutput))
+			},
+			Err(e) => Err(e),
 		}
-		if self.has_unmerged(cancel).await? {
-			return Ok(CherryPickOutcome::Conflict(output));
-		}
-		let sequencer = self
-			.invoke(&["rev-parse", "--verify", "-q", "CHERRY_PICK_HEAD"], None, cancel)
-			.await?;
-		if sequencer.exit_code == 0 {
-			let staged = self
-				.invoke(&["diff", "--cached", "--quiet"], None, cancel)
-				.await?;
-			if staged.exit_code == 0 {
-				return Ok(CherryPickOutcome::Empty(output));
-			}
-		}
-		Ok(CherryPickOutcome::Rejected(output))
 	}
 
-	async fn has_unmerged(&self, cancel: &CancellationToken) -> Result<bool, MutationError> {
-		let output = self
-			.invoke_complete(&["ls-files", "-u", "-z"], None, cancel)
+	/// Creates a stash containing tracked and untracked worktree changes.
+	pub async fn stash_push(
+		&self,
+		message: Option<&str>,
+		cancel: &CancellationToken,
+	) -> Result<StashPushOutcome, MutationError> {
+		let message = message.map(str::to_owned);
+		let created = self
+			.locked(cancel, move |r| r.stash_push(message.as_deref()))
 			.await?;
-		Ok(output.exit_code == 0 && !output.stdout.is_empty())
+		Ok(StashPushOutcome { created, output: OperationOutput })
 	}
 
-	async fn resolve_stash(
+	/// Restores and drops the top stash entry.
+	pub async fn stash_pop(
+		&self,
+		restore_index: bool,
+		cancel: &CancellationToken,
+	) -> Result<MutationOutcome, MutationError> {
+		self
+			.locked(cancel, move |r| r.stash_try_pop(restore_index))
+			.await?;
+		Ok(applied())
+	}
+
+	/// Preflights stash restoration and rolls back bounded partial failures.
+	pub async fn stash_try_pop(
+		&self,
+		restore_index: bool,
+		cancel: &CancellationToken,
+	) -> Result<StashPopOutcome, MutationError> {
+		match self
+			.locked(cancel, move |r| r.stash_try_pop(restore_index))
+			.await
+		{
+			Ok(_) => Ok(StashPopOutcome::Applied(OperationOutput)),
+			Err(MutationError::Vcs(omp_vcs::Error::Conflict { .. })) => {
+				Ok(StashPopOutcome::PreflightConflict(OperationOutput))
+			},
+			Err(e) => Err(e),
+		}
+	}
+
+	/// Restores selected paths from an optional source into the index or
+	/// worktree.
+	pub async fn restore(
+		&self,
+		paths: &[&str],
+		source: Option<&str>,
+		staged: bool,
+		worktree: bool,
+		cancel: &CancellationToken,
+	) -> Result<MutationOutcome, MutationError> {
+		let o = omp_vcs::RestoreOptions {
+			source: source.map(str::to_owned),
+			staged,
+			worktree,
+			files: paths.iter().map(|p| (*p).to_owned()).collect(),
+		};
+		self.locked(cancel, move |r| r.restore(&o)).await?;
+		Ok(applied())
+	}
+
+	/// Resets `HEAD`, the index, or the worktree according to the selected mode.
+	pub async fn reset(
+		&self,
+		mode: ResetMode,
+		target: Option<&str>,
+		cancel: &CancellationToken,
+	) -> Result<MutationOutcome, MutationError> {
+		let mode = match mode {
+			ResetMode::Soft => omp_vcs::ResetMode::Soft,
+			ResetMode::Mixed => omp_vcs::ResetMode::Mixed,
+			ResetMode::Hard => omp_vcs::ResetMode::Hard,
+		};
+		let target = target.map(str::to_owned);
+		self
+			.locked(cancel, move |r| r.reset(mode, target.as_deref()))
+			.await?;
+		Ok(applied())
+	}
+
+	/// Removes untracked paths according to the selected cleanup policy.
+	pub async fn clean(
+		&self,
+		mode: CleanMode,
+		paths: &[&str],
+		cancel: &CancellationToken,
+	) -> Result<MutationOutcome, MutationError> {
+		let o = omp_vcs::CleanOptions {
+			ignored_only:    mode == CleanMode::IgnoredOnly,
+			include_ignored: mode == CleanMode::IncludeIgnored,
+			paths:           paths.iter().map(|p| (*p).to_owned()).collect(),
+		};
+		self.locked(cancel, move |r| r.clean(&o)).await?;
+		Ok(applied())
+	}
+
+	/// Replaces the index with the tree selected by a revision.
+	pub async fn read_tree(
+		&self,
+		treeish: &str,
+		cancel: &CancellationToken,
+	) -> Result<MutationOutcome, MutationError> {
+		let treeish = treeish.to_owned();
+		self
+			.locked(cancel, move |r| r.read_tree(&treeish, None))
+			.await?;
+		Ok(applied())
+	}
+
+	/// Serializes the current index as a tree object.
+	pub async fn write_tree(
 		&self,
 		cancel: &CancellationToken,
-	) -> Result<Option<Bytes>, MutationError> {
-		let output = self
-			.invoke_complete(&["rev-parse", "--verify", "-q", "refs/stash"], None, cancel)
-			.await?;
-		Ok((output.exit_code == 0).then_some(output.stdout))
+	) -> Result<WriteTreeOutcome, MutationError> {
+		let tree = self.locked(cancel, move |r| r.write_tree(None)).await?;
+		Ok(WriteTreeOutcome::Written(Str::from(tree)))
 	}
 
-	async fn stash_patch(&self, cancel: &CancellationToken) -> Result<Bytes, MutationError> {
-		let output = self
-			.invoke_complete(&["stash", "show", "-p", "--binary", "stash@{0}"], None, cancel)
+	/// Creates a commit from the current index with controlled identity options.
+	pub async fn create_commit(
+		&self,
+		message: &[u8],
+		options: CommitOptions<'_>,
+		cancel: &CancellationToken,
+	) -> Result<MutationOutcome, MutationError> {
+		let message = str::from_utf8(message)
+			.map_err(|_| MutationError::NonUtf8)?
+			.to_owned();
+		let author =
+			options
+				.author
+				.and_then(parse_author)
+				.map(|(name, email)| omp_vcs::CommitAuthor {
+					name,
+					email,
+					date: options.date.map(str::to_owned),
+				});
+		let o = omp_vcs::CommitOptions {
+			author,
+			allow_empty: options.allow_empty,
+			amend: options.amend,
+			..Default::default()
+		};
+		self
+			.locked(cancel, move |r| r.commit_create(&message, &o).map(drop))
 			.await?;
-		Ok(if output.exit_code == 0 {
-			output.stdout
-		} else {
-			Bytes::new()
-		})
+		Ok(applied())
 	}
 
-	async fn stash_untracked(&self, cancel: &CancellationToken) -> Result<Vec<Str>, MutationError> {
-		let output = self
-			.invoke_complete(&["ls-tree", "-r", "-z", "--name-only", "stash@{0}^3"], None, cancel)
-			.await?;
-		if output.exit_code != 0 {
-			return Ok(Vec::new());
+	/// Pushes a refspec with optional force-with-lease protection.
+	pub async fn push(
+		&self,
+		remote: &str,
+		refspecs: &[&str],
+		options: PushOptions<'_>,
+		cancel: &CancellationToken,
+	) -> Result<MutationOutcome, MutationError> {
+		for refspec in refspecs {
+			self
+				.repository
+				.handle
+				.push(
+					&omp_vcs::PushOptions {
+						remote:           Some(remote.to_owned()),
+						refspec:          Some((*refspec).to_owned()),
+						force_with_lease: options.force_with_lease.map(str::to_owned),
+					},
+					Some(cancel.clone()),
+				)
+				.await?;
 		}
-		output
-			.stdout
-			.split(|byte| *byte == 0)
-			.filter(|path| !path.is_empty())
-			.map(|path| {
-				str::from_utf8(path)
-					.map(Str::from)
-					.map_err(|_| MutationError::NonUtf8)
-			})
-			.collect()
+		Ok(applied())
 	}
 }
-
-fn valid_autoresearch_branch(branch: &str) -> bool {
-	let Some(suffix) = branch.strip_prefix("autoresearch/") else {
-		return false;
-	};
-	!suffix.is_empty()
-		&& suffix.len() <= 48
-		&& suffix
-			.bytes()
-			.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'/'))
+fn applied() -> MutationOutcome {
+	MutationOutcome::Applied(OperationOutput)
 }
-
+fn parse_author(value: &str) -> Option<(String, String)> {
+	let (name, email) = value.rsplit_once(" <")?;
+	Some((name.to_owned(), email.strip_suffix('>')?.to_owned()))
+}
+fn valid_autoresearch_branch(branch: &str) -> bool {
+	branch.strip_prefix("autoresearch/").is_some_and(|s| {
+		!s.is_empty() && !s.starts_with('/') && !s.ends_with('/') && !s.contains("..")
+	})
+}
 fn isolation_commit_message(record: IsolationCommit<'_>) -> String {
 	match record {
-		IsolationCommit::AutoresearchBaseline => "autoresearch: preserve dirty baseline\n".to_owned(),
-		IsolationCommit::AutoresearchHarness { name, goal } => {
-			let mut message = String::from("autoresearch: harness setup\n\n");
-			let _ = writeln!(message, "Experiment: {name}");
-			if let Some(goal) = goal {
-				let _ = writeln!(message, "Goal: {goal}");
-			}
-			message
-		},
+		IsolationCommit::AutoresearchBaseline => "autoresearch: preserve baseline".to_owned(),
+		IsolationCommit::AutoresearchHarness { name, goal } => format!(
+			"autoresearch: validate {name}{}",
+			goal.map_or(String::new(), |g| format!("\n\nGoal: {g}"))
+		),
 		IsolationCommit::AutoresearchRun { description, metrics_json } => {
-			let mut message = String::new();
-			let _ = writeln!(message, "{description}\n\nAutoresearch-Result: {metrics_json}");
-			message
+			format!("autoresearch: {description}\n\n{metrics_json}")
 		},
 	}
-}
-
-fn stash_tracked_paths(patch: &Bytes) -> Result<Vec<Str>, MutationError> {
-	let mut paths = Vec::new();
-	for file in diff::parse_unified(patch.clone()) {
-		for path in [file.old_path, file.path].into_iter().flatten() {
-			let path = str::from_utf8(&path)
-				.map_err(|_| MutationError::NonUtf8)?
-				.to_str();
-			if !paths.contains(&path) {
-				paths.push(path);
-			}
-		}
-	}
-	Ok(paths)
-}
-
-fn apply_argv(options: PatchOptions) -> Vec<&'static str> {
-	let mut argv = Vec::with_capacity(7);
-	argv.push("apply");
-	if options.binary {
-		argv.push("--binary");
-	}
-	if options.check {
-		argv.push("--check");
-	}
-	if options.cached {
-		argv.push("--cached");
-	}
-	if options.reverse {
-		argv.push("--reverse");
-	}
-	if options.three_way {
-		argv.push("--3way");
-	}
-	argv.push("-");
-	argv
 }
 
 fn build_selected_patch(
@@ -1365,6 +1031,7 @@ fn build_selected_patch(
 	}
 	Ok(patch.freeze())
 }
+
 /// Synthesizes one standalone apply-intent patch containing only selected
 /// changed lines from `file`.
 ///
@@ -1379,6 +1046,16 @@ pub fn build_line_patch(
 	direction: LinePatchDirection,
 ) -> Result<Bytes, SelectionError> {
 	build_line_patch_with_endings(file, path, selection, direction, &LineEndings::default())
+}
+
+/// Reads the blob `spec` names, treating every failure (unborn HEAD, path not
+/// yet tracked) as empty contents — mirroring `git show`'s use as an
+/// optional-content probe.
+fn blob_or_empty(repo: &omp_vcs::git::GitRepo, spec: &str) -> Vec<u8> {
+	repo
+		.show_blob(spec, None)
+		.map(|shown| shown.bytes)
+		.unwrap_or_default()
 }
 
 fn build_line_patch_with_endings(
@@ -1808,15 +1485,4 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 	haystack
 		.windows(needle.len())
 		.position(|window| window == needle)
-}
-
-fn noop_output() -> GitRunOutput {
-	GitRunOutput {
-		exit_code:        0,
-		stdout:           Bytes::new(),
-		stderr:           Bytes::new(),
-		stdout_truncated: false,
-		stderr_truncated: false,
-		diagnostic:       None,
-	}
 }

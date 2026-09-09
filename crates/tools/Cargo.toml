@@ -13,59 +13,59 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-anydoc = { workspace = true }
-async-stream = { workspace = true }
-async-trait = { workspace = true }
-bytecount = { workspace = true }
-bytes = { workspace = true }
-dashmap = { workspace = true }
-encoding_rs = { workspace = true }
-cfb = { workspace = true }
-flate2 = { workspace = true }
-flume = { workspace = true }
-futures = { workspace = true }
-hayro = { workspace = true }
-html-to-markdown-rs = { workspace = true }
-image = { workspace = true }
-libc = { workspace = true }
-omp-ast = { workspace = true }
-omp-ar = { workspace = true }
-omp-core = { workspace = true, features = ["schemars"] }
-omp-docserver = { workspace = true }
-omp-env = { workspace = true }
-omp-hashline = { workspace = true }
-omp-memory = { workspace = true }
-omp-proto = { workspace = true }
-omp-py = { workspace = true }
-omp-settings = { workspace = true }
-omp-shell-engine = { workspace = true }
-omp-tool = { workspace = true }
-omp-macros = { workspace = true }
-omp-slopjson = { workspace = true }
-omp-walker = { workspace = true }
-parking_lot = { workspace = true }
-pdf-inspector = { workspace = true }
-pyo3 = { workspace = true }
-quick-xml = { workspace = true }
-regex = { workspace = true }
-resvg = { workspace = true }
-rusqlite = { workspace = true, features = ["hooks", "serialize"] }
-rustc-demangle = { workspace = true }
-serde = { workspace = true }
-schemars = { workspace = true }
-serde_json = { workspace = true }
-similar = { workspace = true }
-smallvec = { workspace = true }
-strum = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-url = { workspace = true }
-xutf = { workspace = true }
+anydoc.workspace = true
+async-stream.workspace = true
+async-trait.workspace = true
+bytecount.workspace = true
+bytes.workspace = true
+dashmap.workspace = true
+encoding_rs.workspace = true
+cfb.workspace = true
+flate2.workspace = true
+flume.workspace = true
+futures.workspace = true
+hayro.workspace = true
+html-to-markdown-rs.workspace = true
+image.workspace = true
+libc.workspace = true
+omp-ast.workspace = true
+omp-ar.workspace = true
+omp-con.workspace = true
+omp-core.workspace = true
+omp-env.workspace = true
+omp-edit.workspace = true
+omp-memory.workspace = true
+omp-proto.workspace = true
+omp-py.workspace = true
+omp-shell-builtins.workspace = true
+omp-shell.workspace = true
+omp-tool.workspace = true
+omp-macros.workspace = true
+omp-walker.workspace = true
+parking_lot.workspace = true
+pdf-inspector.workspace = true
+pyo3.workspace = true
+quick-xml.workspace = true
+regex.workspace = true
+resvg.workspace = true
+rusqlite.workspace = true
+rustc-demangle.workspace = true
+serde.workspace = true
+schemars.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+smallvec.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+url.workspace = true
+xutf.workspace = true
 
 [build-dependencies]
-flate2 = { workspace = true }
+flate2.workspace = true
 
 [dev-dependencies]
-omp-inference = { workspace = true }
-tempfile = { workspace = true }
+omp-ai.workspace = true
+tempfile.workspace = true

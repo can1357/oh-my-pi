@@ -1,0 +1,28 @@
+[38;2;0;180;255m── grep — Grep ─────────────────────────────────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+                                                                                                    
+ [38;2;156;163;176m[39m [39mGrep[39m: [38;2;156;163;176museState[39m                                                                                   
+                                                                                                    
+
+[38;2;107;114;128m  · in progress[39m
+                                                                                                    
+ [38;2;156;163;176m[39m [39mGrep[39m: [38;2;156;163;176museState[39m [38;2;107;114;128min packages/tui/src[39m                                                               
+                                                                                                    
+
+[38;2;107;114;128m  · done[39m
+                                                                                                    
+ [39m[39m [39mGrep[39m: [38;2;156;163;176museState[39m [38;2;107;114;128m5 matches · 3 files · in ]8;id=81fce82e;file:///Users/dev/Projects/pi/packages/tui/src\packages/tui/src]8;;\[39m                                         
+ [38;2;107;114;128m├─[39m ]8;id=0eb61509;file:///Users/dev/Projects/pi/packages/tui/src/packages/tui/src/components\[38;2;0;180;255m# packages/tui/src/components/[39m]8;;\                                                                  
+ [38;2;107;114;128m│  [39m]8;id=3ab195c8;file:///Users/dev/Projects/pi/packages/tui/src/packages/tui/src/components/SearchBox.tsx\[38;2;107;114;128m## SearchBox.tsx[39m]8;;\                                                                                
+ [38;2;107;114;128m│  [39m]8;id=3eb81f59;file:///Users/dev/Projects/pi/packages/tui/src/packages/tui/src/components/SearchBox.tsx?line=18\[38;2;156;163;176m*18│  const [query, setQuery] = useState("");[39m]8;;\                                                   
+ [38;2;107;114;128m│  [39m]8;id=3eb81f5a;file:///Users/dev/Projects/pi/packages/tui/src/packages/tui/src/components/SearchBox.tsx?line=19\[38;2;156;163;176m*19│  const [results, setResults] = useState<Match[]>([]);[39m]8;;\                                      
+ [38;2;107;114;128m│  [39m]8;id=61f17e86;file:///Users/dev/Projects/pi/packages/tui/src/packages/tui/src/components/StatusBar.tsx\[38;2;107;114;128m## StatusBar.tsx[39m]8;;\                                                                                
+ [38;2;107;114;128m└─[39m [38;2;156;163;176m… 3 more matches[39m                                                                                
+                                                                                                    
+
+[38;2;107;114;128m  · failed[39m
+                                                                                                    
+ [38;2;255;71;87m[39m [38;2;255;71;87mError: Invalid regex pattern: unclosed group near index 8[39m                                        
+                                                                                                    
+

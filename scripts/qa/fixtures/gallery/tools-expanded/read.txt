@@ -1,0 +1,39 @@
+── read — Read ─────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Read: packages/coding-agent/src/tools/glob                                                        
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Read: packages/coding-agent/src/tools/glob.ts:437-448                                             
+                                                                                                    
+
+  · done
+                                                                                                    
+╭─── • Read packages/coding-agent/src/tools/glob.ts:437-448 ───────────────────────────────────────╮
+│ 437 export const globToolRenderer = {                                                            │
+│ 438    inline: true,                                                                             │
+│ 439    renderCall(args: GlobRenderArgs, _options: RenderResultOptions, uiTheme: Theme):          │
+│ Component {                                                                                      │
+│ 440       const meta: string[] = [];                                                             │
+│ 441       if (args.limit !== undefined) meta.push(`limit:${args.limit}`);                        │
+│ 442                                                                                              │
+│ 443       const text = renderStatusLine(                                                         │
+│ 444          { icon: "pending", title: "Glob", description: formatGlobRenderPaths(args.paths) || │
+│ "*", meta },                                                                                     │
+│ 445          uiTheme,                                                                            │
+│ 446       );                                                                                     │
+│ 447       return new Text(text, 0, 0);                                                           │
+│ 448    },                                                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  Read packages/coding-agent/src/tools/glob.ts:437-448 ───────────────────────────────────────╮
+│ ENOENT: no such file or directory, open 'packages/coding-agent/src/tools/glob.ts'                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

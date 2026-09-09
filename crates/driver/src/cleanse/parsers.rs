@@ -1,4 +1,4 @@
-//! Normalization for pi's 29 checker output formats.
+//! Normalization for the 29 checker output formats.
 
 use std::{path::Path, sync::LazyLock};
 
@@ -22,7 +22,7 @@ static CODE_PREFIX: LazyLock<Regex> = LazyLock::new(|| {
 	.expect("static severity regex")
 });
 
-/// Supported parser vocabulary; variants correspond one-to-one with pi.
+/// Supported checker-output parser vocabulary.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum ParserKind {

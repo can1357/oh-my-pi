@@ -32,6 +32,10 @@ pub enum Backend {
 	#[strum(serialize = "gvisor")]
 	#[serde(rename = "gvisor")]
 	Gvisor,
+	/// Linux Landlock filesystem and seccomp confinement.
+	#[strum(serialize = "landlock")]
+	#[serde(rename = "landlock")]
+	Landlock,
 	/// Disposable Docker storage with the default runtime.
 	#[strum(serialize = "docker-ephemeral")]
 	#[serde(rename = "docker-ephemeral")]
@@ -40,7 +44,7 @@ pub enum Backend {
 	#[strum(serialize = "docker-runsc-ephemeral")]
 	#[serde(rename = "docker-runsc-ephemeral")]
 	DockerRunscEphemeral,
-	/// Windows low-privilege AppContainer confinement.
+	/// Windows low-privilege `AppContainer` confinement.
 	#[strum(serialize = "appcontainer")]
 	#[serde(rename = "appcontainer")]
 	AppContainer,
@@ -80,7 +84,7 @@ pub enum Capability {
 	#[strum(serialize = "fs.read.scope")]
 	#[serde(rename = "fs.read.scope")]
 	FsReadScope,
-	/// Deny writes to the host filesystem.
+	/// Deny host writes globally or beneath explicit carve-out paths.
 	#[strum(serialize = "fs.write.deny")]
 	#[serde(rename = "fs.write.deny")]
 	FsWriteDeny,
@@ -159,7 +163,7 @@ const DESCRIPTIONS: [&str; 17] = [
 	"read broadly except denied sensitive paths",
 	"read the host filesystem broadly",
 	"restrict host/user filesystem reads to an allowlist plus backend runtime paths",
-	"deny all writes to the host filesystem",
+	"deny host writes globally or beneath explicit read-only carve-out paths",
 	"permit backend ephemeral writes; configured host inputs stay untouched",
 	"permit writes under listed paths plus opt-in temp roots; listed-path writes persist",
 	"no host local IPC endpoint reachable",
@@ -247,6 +251,10 @@ impl CapabilitySet {
 	pub(crate) const fn from_bits(bits: u32) -> Self {
 		Self(bits)
 	}
+
+	pub(crate) const fn bits(self) -> u32 {
+		self.0
+	}
 }
 
 impl FromIterator<Capability> for CapabilitySet {
@@ -332,7 +340,9 @@ const BUBBLEWRAP: CapabilitySet = set(&[
 	Capability::IpcRestrict,
 	Capability::NetDisable,
 	Capability::NetEnable,
+	Capability::NetOutbound,
 ]);
+const LANDLOCK: CapabilitySet = crate::backends::landlock::capabilities();
 const GVISOR: CapabilitySet = set(&[
 	Capability::NetDisable,
 	Capability::NetEnable,
@@ -390,6 +400,7 @@ impl Backend {
 			Self::Seatbelt => SEATBELT,
 			Self::Bubblewrap => BUBBLEWRAP,
 			Self::Gvisor => GVISOR,
+			Self::Landlock => LANDLOCK,
 			Self::DockerEphemeral => DOCKER,
 			Self::DockerRunscEphemeral => DOCKER_RUNSC,
 			Self::AppContainer => APP_CONTAINER,
@@ -404,6 +415,7 @@ impl Backend {
 			Self::DockerEphemeral,
 			Self::DockerRunscEphemeral,
 			Self::Gvisor,
+			Self::Landlock,
 			Self::Seatbelt,
 		]
 		.into_iter()

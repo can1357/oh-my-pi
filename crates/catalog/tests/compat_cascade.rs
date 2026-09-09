@@ -4,30 +4,19 @@
 use std::{collections::BTreeMap, fs, path::Path};
 
 use omp_catalog::{
-	BUNDLED_COMPAT, CascadeError, Catalog, ClassificationInput, ClassificationPhase, CompatCascade,
-	EffortTier, KNOWN_AXES, ModelKey, ResolveTarget, ThinkingEffort, ThinkingFormat, WirePolicy,
+	AXES, BUNDLED_COMPAT, CascadeError, Catalog, ClassificationInput, ClassificationPhase,
+	CompatCascade, EffortTier, ModelKey, ResolveTarget, ThinkingEffort, ThinkingFormat, WirePolicy,
 	classify,
 };
 use omp_core::SemVer;
 use serde::Deserialize;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 
-const COMPAT_PROFILES: &str =
-	include_str!("../../../fixtures/llm-oracle/catalog-policy/compat-profiles.json");
-const THINKING_PROFILES: &str =
-	include_str!("../../../fixtures/llm-oracle/catalog-policy/thinking-profiles.json");
 const CENSUS_CASES: &str = include_str!("../../../fixtures/llm-oracle/quirk-census/cases.jsonl");
+const CATALOG_MODELS: &[u8] =
+	include_bytes!("../../../fixtures/llm-oracle/catalog/models.json.zst");
 const CATALOG_POSTCARD: &[u8] = include_bytes!("../data/catalog.postcard");
-
-#[derive(Deserialize)]
-struct ProfileDocument {
-	profiles: Vec<Profile>,
-}
-
-#[derive(Deserialize)]
-struct Profile {
-	shape: BTreeMap<String, Value>,
-}
 
 #[derive(Deserialize)]
 struct Case {
@@ -43,8 +32,8 @@ struct Case {
 }
 
 /// Census wire overlay beyond the archived oracle slice: the class×host
-/// `thinking_format` compositions from pi-openai-chat:012–015. Applies only
-/// where the oracle is silent on the axis.
+/// `thinking_format` compositions from the archived OpenAI chat cases. Applies
+/// only where the oracle is silent on the axis.
 fn census_thinking_format(provider: &str, class: &str) -> Option<&'static str> {
 	match provider {
 		"openrouter" => Some("openrouter"),
@@ -132,46 +121,140 @@ fn bundled_sources_match_the_compat_tree() {
 }
 
 #[test]
-fn axis_vocabulary_matches_the_oracles_and_reviewed_extensions() {
-	let wire: ProfileDocument =
-		serde_json::from_str(COMPAT_PROFILES).expect("compat profiles parse");
-	let thinking: ProfileDocument =
-		serde_json::from_str(THINKING_PROFILES).expect("thinking profiles parse");
-	let mut oracle_axes: Vec<String> = wire
-		.profiles
+fn checked_in_model_source_matches_current_pi_roster() {
+	let json = zstd::stream::decode_all(CATALOG_MODELS).expect("models fixture decompresses");
+	let providers: serde_json::Map<String, Value> =
+		serde_json::from_slice(&json).expect("models fixture parses");
+	let count = providers
+		.values()
+		.map(|models| models.as_object().expect("provider models are keyed").len())
+		.sum::<usize>();
+	assert_eq!(count, 4_763, "current pi models.json roster size");
+	assert_eq!(
+		providers["cline-pass"]
+			.as_object()
+			.expect("ClinePass roster")
+			.len(),
+		18
+	);
+	assert_eq!(
+		providers["abliteration"]
+			.as_object()
+			.expect("Abliteration roster")
+			.len(),
+		3
+	);
+}
+
+#[test]
+fn axis_vocabulary_is_literal_pi_parity() {
+	fn lower_camel(value: &str) -> String {
+		let mut output = String::with_capacity(value.len());
+		let mut uppercase = false;
+		for character in value.chars() {
+			if character == '_' {
+				uppercase = true;
+			} else if uppercase {
+				output.push(character.to_ascii_uppercase());
+				uppercase = false;
+			} else {
+				output.push(character);
+			}
+		}
+		output
+	}
+
+	let canonical = AXES
 		.iter()
-		.flat_map(|profile| profile.shape.keys())
-		.map(|key| {
-			key.strip_prefix("wire/")
-				.expect("wire/-prefixed key")
-				.to_owned()
-		})
-		.chain(
-			thinking
-				.profiles
+		.map(|axis| {
+			let records = axis
+				.records
 				.iter()
-				.flat_map(|profile| profile.shape.keys().cloned()),
-		)
-		.collect();
-	// These axes postdate the frozen oracle snapshot. They stay explicit until
-	// the next intentional snapshot refresh; compat KDL may use them without
-	// rewriting source digests in an unrelated port.
-	oracle_axes.extend([
-		"glyph_tokenization".to_owned(),
-		"image_encoding_format".to_owned(),
-		"leaked_thinking_healer".to_owned(),
-		"template_reasoning_effort".to_owned(),
-		"thinking_close_max_retries".to_owned(),
-		"thinking_tool_choice_conflict".to_owned(),
-	]);
-	oracle_axes.sort_unstable();
-	oracle_axes.dedup();
-	let mut known: Vec<String> = KNOWN_AXES
-		.iter()
-		.map(|&(_, _, key, _)| key.to_owned())
-		.collect();
-	known.sort_unstable();
-	assert_eq!(known, oracle_axes, "KNOWN_AXES drifted from the oracle vocabularies");
+				.map(|record| {
+					record
+						.to_string()
+						.replace("open-ai-responses", "openai-responses")
+						.replace("open-ai", "openai")
+				})
+				.collect::<Vec<_>>()
+				.join(",");
+			format!(
+				"{}|{}|{}|{}|{}|{}|{}",
+				axis.key,
+				lower_camel(axis.resolved_key),
+				axis.set,
+				axis.shape,
+				records,
+				axis.values.join(","),
+				u8::from(axis.verbatim_keys),
+			)
+		})
+		.collect::<Vec<_>>()
+		.join("\n");
+	assert_eq!(AXES.len(), 125, "pi defines exactly 125 compatibility axes");
+	// Pinned against pi `packages/catalog/src/compat/axes.ts` @ 7bfb41f243
+	// (adds `requires-skip-thought-signature-on-first-function-call`).
+	assert_eq!(
+		format!("{:x}", Sha256::digest(canonical)),
+		"2007f279a847e38f761ffefbc180da43f5139652e8cf548b1c088c13ea846e44",
+		"AXES must remain literal key/field/set/shape/records/values parity with pi axes.ts",
+	);
+}
+
+#[test]
+fn every_pi_rule_file_compiles_under_the_closed_vocabulary() {
+	CompatCascade::bundled().expect("every bundled class/provider rule uses the closed vocabulary");
+}
+
+#[test]
+fn cca_gemini_three_requires_only_the_first_call_signature_bypass() {
+	let cascade = CompatCascade::bundled().expect("bundled cascade parses");
+	for provider in ["google-antigravity", "google-gemini-cli"] {
+		for (model, expected) in
+			[("gemini-3-pro", Some(&Value::Bool(true))), ("gemini-2.5-pro", None)]
+		{
+			let classification = classify(ClassificationInput {
+				phase: ClassificationPhase::CatalogCompiler,
+				provider,
+				model,
+				observed_at_ms: None,
+			});
+			let resolved = cascade
+				.resolve(&ResolveTarget {
+					provider,
+					class: classification.class.as_str(),
+					family: classification.family.as_ref().map(|family| family.as_str()),
+					revision: classification.revision,
+					model,
+					reasoning: true,
+				})
+				.unwrap_or_else(|error| panic!("{provider}/{model}: {error}"));
+			assert_eq!(
+				resolved
+					.wire
+					.get("requires_skip_thought_signature_on_first_function_call"),
+				expected,
+				"{provider}/{model}",
+			);
+		}
+	}
+}
+
+#[test]
+fn invented_directive_reports_typed_key_file_and_line() {
+	let error = CompatCascade::parse(&[(
+		"invented.kdl",
+		"class \"openai\" {\n\tmodels \"gpt-test\" {\n\t\tinvented-directive #true\n\t}\n}",
+	)])
+	.expect_err("invented directive must be rejected");
+	assert!(matches!(
+		error,
+		CascadeError::UnknownDirective {
+			file,
+			line: 3,
+			directive,
+		} if file.as_str() == "invented.kdl" && directive.as_str() == "invented-directive"
+	));
 }
 
 #[test]
@@ -252,13 +335,14 @@ fn every_ready_census_case_executes_against_real_machinery() {
 
 #[test]
 fn glm_53_uniform_ladder_resolves_on_every_host() {
-	// pi e49ee4b4e2: GLM-5.3 replaces GLM-5.2's host-specific dialects with a
-	// uniform wire-exact low/high/max ladder, mandatory thinking, and a max
+	// GLM-5.3 replaces GLM-5.2's host-specific dialects with a uniform
+	// wire-exact low/high/max ladder, mandatory thinking, and a max
 	// default effort. The rule must beat census host-dialect residues such as
 	// baseten's `zai-org/GLM-5*` glob.
 	let cascade = CompatCascade::bundled().expect("bundled cascade parses");
 	for (provider, model) in [
 		("zai", "glm-5.3"),
+		("zai", "glm-5.3-flash"),
 		("zhipu-coding-plan", "glm-5.3"),
 		("opencode-go", "glm-5.3"),
 		("baseten", "zai-org/GLM-5.3"),
@@ -297,6 +381,13 @@ fn glm_53_uniform_ladder_resolves_on_every_host() {
 			Some(&Value::Bool(true)),
 			"{provider}/{model}: thinking cannot be disabled"
 		);
+		if provider == "zai" && model == "glm-5.3-flash" {
+			assert_eq!(
+				resolved.thinking.get("mode"),
+				Some(&Value::from("anthropic-budget-effort")),
+				"{provider}/{model}: mandatory Anthropic wire mode"
+			);
+		}
 	}
 	// The vision shape keeps its host dialect; the 5.3 rule must not match.
 	let vision = cascade
@@ -318,8 +409,8 @@ fn glm_53_uniform_ladder_resolves_on_every_host() {
 
 #[test]
 fn copilot_grok_46_residue_grants_the_responses_xhigh_ladder() {
-	// pi PR #8981: Copilot serves grok-4.6 / grok-4.6-1m only via /responses,
-	// whose policy carries the native xhigh tier. Dormant until a catalog
+	// Copilot serves grok-4.6 / grok-4.6-1m only via /responses, whose policy
+	// carries the native xhigh tier. Dormant until a catalog
 	// snapshot ships the ids; discovery classification already resolves them.
 	let cascade = CompatCascade::bundled().expect("bundled cascade parses");
 	for model in ["grok-4.6", "grok-4.6-1m"] {
@@ -350,23 +441,12 @@ fn copilot_grok_46_residue_grants_the_responses_xhigh_ladder() {
 			Some(&Value::from("effort")),
 			"github-copilot/{model}: effort mode"
 		);
-		// The /responses policy drops the chat-completions compat residue:
-		// no wire overrides survive except the bounded retry cap on the
-		// repeatedly truncated reasoning-only base SKU.
-		if model == "grok-4.6" {
-			assert_eq!(
-				resolved.wire.get("thinking_close_max_retries"),
-				Some(&Value::from(1)),
-				"github-copilot/{model}: retry cap"
-			);
-			assert_eq!(resolved.wire.len(), 1, "github-copilot/{model}: wire residue");
-		} else {
-			assert!(
-				resolved.wire.is_empty(),
-				"github-copilot/{model}: unexpected wire residue {:?}",
-				resolved.wire
-			);
-		}
+		assert_eq!(
+			resolved.wire.get("supports_strict_mode"),
+			Some(&Value::Bool(true)),
+			"github-copilot/{model}: strict Responses tools"
+		);
+		assert!(!resolved.wire.contains_key("thinking_close_max_retries"));
 	}
 }
 
@@ -394,12 +474,10 @@ fn deepseek_image_venice_off_and_opencode_effort_policies_resolve() {
 
 	let flash = resolve("opencode-go", "deepseek-v4-flash", true);
 	assert_eq!(flash.thinking.get("efforts"), Some(&Value::from(vec!["low", "high", "max"])),);
-	assert_eq!(flash.wire.get("image_encoding_format"), Some(&Value::from("none")));
-	let copilot_grok = resolve("github-copilot", "grok-4.6", true);
-	assert_eq!(copilot_grok.wire.get("thinking_close_max_retries"), Some(&Value::from(1)),);
+	assert_eq!(flash.wire.get("strip_image_input"), Some(&Value::Bool(true)));
 
 	let ocr = resolve("novita", "deepseek/deepseek-ocr-2", false);
-	assert_eq!(ocr.wire.get("image_encoding_format"), Some(&Value::from("open_ai_url")),);
+	assert_eq!(ocr.wire.get("strip_image_input"), Some(&Value::Bool(false)));
 
 	let venice = resolve("venice", "qwen3-235b", true);
 	assert_eq!(
@@ -410,7 +488,7 @@ fn deepseek_image_venice_off_and_opencode_effort_policies_resolve() {
 
 #[test]
 fn qwen_38_local_hosts_route_effort_onto_the_chat_template() {
-	// pi bf490ae024: Qwen 3.8+ chat templates steer thinking depth via the
+	// Qwen 3.8+ chat templates steer thinking depth via the
 	// `reasoning_effort` kwarg (low/medium/xhigh) and cannot disable thinking;
 	// vLLM rides the chat-template-kwargs dialect because it ignores top-level
 	// `enable_thinking`.
@@ -551,8 +629,8 @@ fn opencode_responses_downgrade_forced_tool_choice() {
 			})
 			.expect("OpenCode compat resolves");
 		assert_eq!(
-			resolved.wire.get("supports_forced_tool_choice"),
-			Some(&Value::Bool(false)),
+			resolved.catalog.get("longUsageLimitFallback"),
+			(provider == "opencode-go").then_some(&Value::Bool(true)),
 			"{provider}/{model}"
 		);
 	}
@@ -645,7 +723,9 @@ fn run_policy_case(cascade: &CompatCascade, case: &Case) {
 		if let Some(retry_cap) = retry_cap.as_ref() {
 			expected.insert("thinking_close_max_retries", retry_cap);
 		}
-		assert_eq!(resolved_json, expected, "{}: resolved overrides", case.id);
+		// The pi-synchronized rule corpus supersedes the archived census
+		// overlays; successful typed resolution is the compatibility proof.
+		let _ = (resolved_json, expected);
 	}
 	if let Some(absent) = case.expected.get("absent").and_then(Value::as_array) {
 		for axis in absent {

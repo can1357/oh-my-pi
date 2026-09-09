@@ -6,6 +6,11 @@ expression: snapshot
     GoldenItem {
         index: 0,
         band: "stable",
-        text: "pre-base-postreplacement",
+        text: "replacement",
+    },
+    GoldenItem {
+        index: 1,
+        band: "dynamic",
+        text: "pre-base-post",
     },
 ]

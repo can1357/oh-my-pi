@@ -3,6 +3,9 @@
 use std::fmt::Write as _;
 
 use omp_core::{Str, sf};
+#[cfg(test)]
+use omp_tool::Severity;
+use omp_tool::{Diag, DiagKind};
 use serde::Deserialize;
 use url::Url;
 
@@ -61,8 +64,8 @@ pub(super) async fn render<C: HttpClient + Sync>(
 ) -> Result<Option<RenderResult>, WebError> {
 	match render_inner(client, url).await {
 		Ok(result) => Ok(result),
-		// pi's handler is deliberately opportunistic: any API or conversion
-		// failure declines the scrape.
+		// The handler is deliberately opportunistic: any API or conversion failure
+		// declines the scrape.
 		Err(_) => Ok(None),
 	}
 }
@@ -134,9 +137,10 @@ async fn render_inner<C: HttpClient + Sync>(
 	}
 
 	let mut result = build_result(&markdown, "stackexchange");
-	result
-		.notes
-		.push(sf!("Fetched via Stack Exchange API (site={})", target.site));
+	result.diags.push(Diag::info(
+		DiagKind::Provenance,
+		sf!("Fetched via Stack Exchange API (site={})", target.site),
+	));
 	Ok(Some(result))
 }
 
@@ -310,8 +314,8 @@ mod tests {
 			("https://mathoverflow.net/questions/567", "567", "mathoverflow"),
 			("https://stackapps.com/questions/678", "678", "stackapps"),
 			("https://unix.stackexchange.com/questions/789", "789", "unix"),
-			// pi's pathname regex is intentionally unanchored and stops after
-			// the digit run rather than requiring the whole segment to be numeric.
+			// The pathname regex is intentionally unanchored and stops after the digit
+			// run rather than requiring the whole segment to be numeric.
 			("https://unix.stackexchange.com/x/questions/890suffix", "890", "unix"),
 		] {
 			let parsed = Url::parse(url).unwrap();
@@ -341,7 +345,9 @@ mod tests {
 
 		assert_eq!(result.method.as_str(), "stackexchange");
 		assert_eq!(result.content_type.as_deref(), Some("text/markdown"));
-		assert_eq!(result.notes.as_slice(), [sf!("Fetched via Stack Exchange API (site=unix)")]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 		assert_eq!(
 			result.content.as_str(),
 			"# How to test?\n\n**Score:** 42 · **Answers:** 6 (Answered)\n**Tags:** rust, \
@@ -394,10 +400,17 @@ mod tests {
 		let result = render(&client, &url).await.unwrap().unwrap();
 
 		assert_eq!(result.content.chars().count(), MAX_OUTPUT_CHARS);
-		assert_eq!(result.notes.as_slice(), [
-			sf!("Output truncated to 500000 characters"),
-			sf!("Fetched via Stack Exchange API (site=stackoverflow)")
-		]);
+		assert_eq!(result.diags.len(), 2);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::OutputBounded));
+		assert_eq!(result.diags[0].severity, Severity::Warn);
+		let omitted = result.diags[0]
+			.omitted
+			.as_ref()
+			.expect("truncation count is typed");
+		assert!(omitted.count > 0);
+		assert_eq!(omitted.unit, Unit::Chars);
+		assert_eq!(result.diags[1].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[1].severity, Severity::Info);
 	}
 
 	#[tokio::test]
@@ -422,9 +435,9 @@ mod tests {
 			"# How to test?\n\n**Score:** 42 · **Answers:** 6 (Answered)\n**Tags:** rust, \
 			 testing\n**Asked by:** Ada · 1970-01-01\n\n---\n\n## Question\n\nQuestion **body**."
 		);
-		assert_eq!(result.notes.as_slice(), [sf!(
-			"Fetched via Stack Exchange API (site=stackoverflow)"
-		)]);
+		assert_eq!(result.diags.len(), 1);
+		assert_eq!(result.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(result.diags[0].severity, Severity::Info);
 
 		let no_match = Url::parse("https://stackoverflow.com/users/123").unwrap();
 		let client = FakeClient::new([]);

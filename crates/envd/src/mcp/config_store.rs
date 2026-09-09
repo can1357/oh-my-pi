@@ -53,10 +53,48 @@ impl McpConfigStore {
 		self.write_unlocked(file)
 	}
 
+	/// Atomically migrates a legacy configuration into this store without
+	/// overwriting an existing destination.
+	///
+	/// Returns `true` only when the validated legacy document was committed
+	/// and the legacy file was removed.
+	pub fn migrate_from(&self, legacy_path: &Path) -> Result<bool, ConfigStoreError> {
+		if legacy_path == self.path {
+			return Ok(false);
+		}
+		let _lock = DirectoryLock::acquire(&self.path)?;
+		if self
+			.path
+			.try_exists()
+			.map_err(|source| ConfigStoreError::Io { path: self.path.clone(), source })?
+		{
+			return Ok(false);
+		}
+		let metadata = match fs::symlink_metadata(legacy_path) {
+			Ok(metadata) => metadata,
+			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
+			Err(source) => {
+				return Err(ConfigStoreError::Io { path: legacy_path.to_path_buf(), source });
+			},
+		};
+		if !metadata.is_file() || metadata.file_type().is_symlink() {
+			return Ok(false);
+		}
+		let legacy = fs::read(legacy_path)
+			.map_err(|source| ConfigStoreError::Io { path: legacy_path.to_path_buf(), source })?;
+		let file: McpConfigFile = serde_json::from_slice(&legacy)
+			.map_err(|source| ConfigStoreError::Json { path: legacy_path.to_path_buf(), source })?;
+		validate_file(legacy_path, &file)?;
+		self.write_unlocked(&file)?;
+		fs::remove_file(legacy_path)
+			.map_err(|source| ConfigStoreError::Io { path: legacy_path.to_path_buf(), source })?;
+		Ok(true)
+	}
+
 	/// Adds a server and rejects duplicate names.
 	pub fn add(&self, name: &str, server: McpServerConfig) -> Result<(), ConfigStoreError> {
-		config::validate_server_name(name)?;
-		validate_server(name, &server)?;
+		validate_name(&self.path, name)?;
+		validate_server(&self.path, name, &server)?;
 		self.mutate(|file| {
 			if file.mcp_servers.contains_key(name) {
 				return Err(ConfigStoreError::AlreadyExists {
@@ -71,8 +109,8 @@ impl McpConfigStore {
 
 	/// Inserts or replaces a validated server.
 	pub fn update(&self, name: &str, server: McpServerConfig) -> Result<(), ConfigStoreError> {
-		config::validate_server_name(name)?;
-		validate_server(name, &server)?;
+		validate_name(&self.path, name)?;
+		validate_server(&self.path, name, &server)?;
 		self.mutate(|file| {
 			file.mcp_servers.insert(Str::from(name), server);
 			Ok(())
@@ -104,7 +142,7 @@ impl McpConfigStore {
 
 	/// Adds or removes a user-level denylist entry.
 	pub fn set_disabled(&self, name: &str, disabled: bool) -> Result<(), ConfigStoreError> {
-		config::validate_server_name(name)?;
+		validate_name(&self.path, name)?;
 		self.mutate(|file| {
 			if disabled {
 				file.disabled_servers.insert(Str::from(name));
@@ -117,7 +155,7 @@ impl McpConfigStore {
 
 	/// Adds or removes a user-level force-enable entry.
 	pub fn set_force_enabled(&self, name: &str, enabled: bool) -> Result<(), ConfigStoreError> {
-		config::validate_server_name(name)?;
+		validate_name(&self.path, name)?;
 		self.mutate(|file| {
 			if enabled {
 				file.enabled_servers.insert(Str::from(name));
@@ -134,7 +172,7 @@ impl McpConfigStore {
 		disabled: bool,
 		force_enabled: bool,
 	) -> Result<(), ConfigStoreError> {
-		config::validate_server_name(name)?;
+		validate_name(&self.path, name)?;
 		self.mutate(|file| {
 			if disabled {
 				file.disabled_servers.insert(Str::from(name));
@@ -161,10 +199,7 @@ impl McpConfigStore {
 	}
 
 	fn write_unlocked(&self, file: &McpConfigFile) -> Result<(), ConfigStoreError> {
-		let issues = config::validate_file(file);
-		if !issues.is_empty() {
-			return Err(ConfigStoreError::Validation(issues.into_boxed_slice()));
-		}
+		validate_file(&self.path, file)?;
 		write_atomic(&self.path, file, |_| Ok(()))?;
 		if let Some(invalidate) = &self.invalidate {
 			invalidate(&self.path);
@@ -175,23 +210,23 @@ impl McpConfigStore {
 
 /// Flips one server across writable sources while maintaining reciprocal user
 /// denylist/allowlist cleanup.
+///
+/// Native project, user, and root fallback documents are checked in the same
+/// order as [`config::resolve_sources`].
 pub fn set_server_enabled(
 	user: &McpConfigStore,
 	project: &McpConfigStore,
-	source: Option<(&McpConfigStore, bool)>,
+	root: Option<&McpConfigStore>,
 	name: &str,
 	enabled: bool,
 ) -> Result<(), ConfigStoreError> {
-	config::validate_server_name(name)?;
-	let mut updated = false;
-	if let Some((source, true)) = source {
-		updated = update_enabled_if_present(source, name, enabled)?;
-	}
-	if !updated {
-		updated = update_enabled_if_present(project, name, enabled)?;
-	}
+	validate_name(user.path(), name)?;
+	let mut updated = update_enabled_if_present(project, name, enabled)?;
 	if !updated {
 		updated = update_enabled_if_present(user, name, enabled)?;
+	}
+	if !updated && let Some(root) = root {
+		updated = update_enabled_if_present(root, name, enabled)?;
 	}
 
 	user.set_enable_overrides(name, !enabled && !updated, enabled && !updated)?;
@@ -213,12 +248,38 @@ fn update_enabled_if_present(
 	Ok(true)
 }
 
-fn validate_server(name: &str, server: &McpServerConfig) -> Result<(), ConfigStoreError> {
+fn validate_name(path: &Path, name: &str) -> Result<(), ConfigStoreError> {
+	config::validate_server_name(name).map_err(|issue| ConfigStoreError::Validation {
+		path:   path.to_path_buf(),
+		issues: Box::new([issue]),
+	})
+}
+
+fn validate_server(
+	path: &Path,
+	name: &str,
+	server: &McpServerConfig,
+) -> Result<(), ConfigStoreError> {
 	let issues = config::validate_server(name, server);
 	if issues.is_empty() {
 		Ok(())
 	} else {
-		Err(ConfigStoreError::Validation(issues.into_boxed_slice()))
+		Err(ConfigStoreError::Validation {
+			path:   path.to_path_buf(),
+			issues: issues.into_boxed_slice(),
+		})
+	}
+}
+
+fn validate_file(path: &Path, file: &McpConfigFile) -> Result<(), ConfigStoreError> {
+	let issues = config::validate_file(file);
+	if issues.is_empty() {
+		Ok(())
+	} else {
+		Err(ConfigStoreError::Validation {
+			path:   path.to_path_buf(),
+			issues: issues.into_boxed_slice(),
+		})
 	}
 }
 
@@ -230,12 +291,8 @@ fn read_file(path: &Path) -> Result<McpConfigFile, ConfigStoreError> {
 	};
 	let file: McpConfigFile = serde_json::from_slice(&bytes)
 		.map_err(|source| ConfigStoreError::Json { path: path.to_path_buf(), source })?;
-	let issues = config::validate_file(&file);
-	if issues.is_empty() {
-		Ok(file)
-	} else {
-		Err(ConfigStoreError::Validation(issues.into_boxed_slice()))
-	}
+	validate_file(path, &file)?;
+	Ok(file)
 }
 
 fn write_atomic(
@@ -383,7 +440,7 @@ pub enum ConfigStoreError {
 	/// JSON operation failed.
 	#[error("MCP configuration JSON operation failed for `{path}`")]
 	Json {
-		/// Production `~/.omp/mcp.json`, project `.omp/mcp.json`, or project-root
+		/// Production `~/.o2/mcp.json`, project `.omp/mcp.json`, or project-root
 		/// `.mcp.json` being decoded or encoded.
 		path:   PathBuf,
 		/// JSON parser or serializer error for the scoped configuration document.
@@ -391,8 +448,13 @@ pub enum ConfigStoreError {
 		source: serde_json::Error,
 	},
 	/// Schema validation failed.
-	#[error("MCP configuration failed schema validation")]
-	Validation(Box<[config::ConfigValidationError]>),
+	#[error("MCP configuration `{path}` failed schema validation")]
+	Validation {
+		/// Exact scoped configuration path containing invalid declarations.
+		path:   PathBuf,
+		/// Every independently actionable schema issue in the document.
+		issues: Box<[config::ConfigValidationError]>,
+	},
 	/// Path has no owning directory.
 	#[error("MCP configuration path `{path}` has no parent directory")]
 	NoParent {
@@ -412,7 +474,7 @@ pub enum ConfigStoreError {
 	AlreadyExists {
 		/// Server key already owned by the writable configuration document.
 		name: Str,
-		/// Exact `~/.omp/mcp.json`, project `.omp/mcp.json`, or project-root
+		/// Exact `~/.o2/mcp.json`, project `.omp/mcp.json`, or project-root
 		/// `.mcp.json` file that owns the key.
 		path: PathBuf,
 	},
@@ -422,13 +484,10 @@ pub enum ConfigStoreError {
 		/// Server key requested for removal from the writable configuration
 		/// document.
 		name: Str,
-		/// Exact `~/.omp/mcp.json`, project `.omp/mcp.json`, or project-root
+		/// Exact `~/.o2/mcp.json`, project `.omp/mcp.json`, or project-root
 		/// `.mcp.json` searched without resolving other scopes.
 		path: PathBuf,
 	},
-	/// Direct validation failure.
-	#[error(transparent)]
-	Config(#[from] config::ConfigValidationError),
 }
 
 #[cfg(test)]
@@ -449,6 +508,7 @@ mod tests {
 			args:              Vec::new(),
 			env:               BTreeMap::new(),
 			env_policy:        None,
+			env_literal_keys:  Default::default(),
 			cwd:               None,
 			url:               None,
 			headers:           BTreeMap::new(),
@@ -537,5 +597,93 @@ mod tests {
 		let file = user.read().expect("read");
 		assert!(!file.disabled_servers.contains("foreign"));
 		assert!(file.enabled_servers.contains("foreign"));
+	}
+
+	#[test]
+	fn enable_mutation_follows_project_user_root_precedence() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let user = McpConfigStore::new(scratch.path().join("user/mcp.json"));
+		let project = McpConfigStore::new(scratch.path().join("project/mcp.json"));
+		let root = McpConfigStore::new(scratch.path().join("root/mcp.json"));
+		user.add("shared", stdio("user")).expect("user");
+		project.add("shared", stdio("project")).expect("project");
+		root.add("shared", stdio("root")).expect("root");
+
+		set_server_enabled(&user, &project, Some(&root), "shared", false).expect("disable");
+		assert!(
+			!project
+				.get("shared")
+				.expect("project")
+				.expect("shared")
+				.enabled
+		);
+		assert!(user.get("shared").expect("user").expect("shared").enabled);
+		assert!(root.get("shared").expect("root").expect("shared").enabled);
+	}
+
+	#[test]
+	fn validation_errors_retain_the_scoped_config_path() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let path = scratch.path().join("project/.omp/mcp.json");
+		let mut invalid = stdio("fixture");
+		invalid.url = Some(Str::from("https://example.test/mcp"));
+		let error = McpConfigStore::new(path.clone())
+			.add("fixture", invalid)
+			.expect_err("invalid declaration");
+		assert!(matches!(
+			error,
+			ConfigStoreError::Validation { path: error_path, .. } if error_path == path
+		));
+	}
+
+	#[test]
+	fn migration_is_validated_atomic_and_never_overwrites() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let legacy = scratch.path().join(".omp/mcp.json");
+		let destination = scratch.path().join(".o2/mcp.json");
+		fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy parent");
+		fs::write(&legacy, br#"{"mcpServers":{"legacy":{"type":"stdio","command":"legacy"}}}"#)
+			.expect("legacy config");
+
+		let store = McpConfigStore::new(destination.clone());
+		assert!(store.migrate_from(&legacy).expect("migration"));
+		assert!(!legacy.exists());
+		assert_eq!(
+			store
+				.get("legacy")
+				.expect("destination")
+				.expect("legacy server")
+				.command
+				.as_deref(),
+			Some("legacy")
+		);
+
+		fs::create_dir_all(legacy.parent().expect("legacy parent")).expect("legacy parent");
+		fs::write(
+			&legacy,
+			br#"{"mcpServers":{"replacement":{"type":"stdio","command":"replacement"}}}"#,
+		)
+		.expect("replacement");
+		assert!(!store.migrate_from(&legacy).expect("preserve destination"));
+		assert!(legacy.exists());
+		assert!(store.get("replacement").expect("destination").is_none());
+
+		let invalid_legacy = scratch.path().join("invalid/mcp.json");
+		let invalid_destination = scratch.path().join("fresh/mcp.json");
+		fs::create_dir_all(invalid_legacy.parent().expect("invalid parent")).expect("invalid parent");
+		fs::write(
+			&invalid_legacy,
+			br#"{"mcpServers":{"broken":{"type":"stdio","url":"https://example.test"}}}"#,
+		)
+		.expect("invalid legacy config");
+		let error = McpConfigStore::new(invalid_destination.clone())
+			.migrate_from(&invalid_legacy)
+			.expect_err("invalid migration");
+		assert!(matches!(
+			error,
+			ConfigStoreError::Validation { path, .. } if path == invalid_legacy
+		));
+		assert!(invalid_legacy.exists());
+		assert!(!invalid_destination.exists());
 	}
 }

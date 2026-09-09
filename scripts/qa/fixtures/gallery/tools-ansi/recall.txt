@@ -1,0 +1,23 @@
+[38;2;0;180;255m── recall — Recall ─────────────────────────────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mRecall[39m: [38;2;156;163;176mbun vs node[39m                                                                               
+                                                                                                    
+
+[38;2;107;114;128m  · in progress[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mRecall[39m: [38;2;156;163;176mWhich runtime does the user prefer for scripts?[39m                                           
+                                                                                                    
+
+[38;2;107;114;128m  · done[39m
+                                                                                                    
+[38;2;0;180;255m[39m [38;2;0;180;255mRecall[39m: [38;2;156;163;176mWhich runtime does the user prefer for scripts?[39m [38;2;107;114;128m2 found[39m                                   
+  [38;2;107;114;128m⟨Ctrl+O: Expand⟩[39m                                                                                  
+                                                                                                    
+
+[38;2;107;114;128m  · failed[39m
+                                                                                                    
+[38;2;255;71;87m[39m [38;2;255;71;87mError: Recall failed: vector index unavailable.[39m                                                   
+                                                                                                    
+

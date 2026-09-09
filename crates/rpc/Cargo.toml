@@ -9,24 +9,24 @@ repository.workspace = true
 description = "gRPC transport, handshake, health, TLS, and Unix-socket plumbing for omp"
 
 [dependencies]
-bytes = { workspace = true }
-flume = { workspace = true }
-hyper-util = { workspace = true }
-omp-core = { workspace = true }
-omp-proto = { workspace = true, features = ["tonic"] }
-serde = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-stream = { workspace = true }
-tokio-util = { workspace = true }
-tonic = { workspace = true, features = ["tls-ring"] }
-tonic-health = { workspace = true }
-tower = { workspace = true }
-tracing = { workspace = true }
+bytes.workspace = true
+flume.workspace = true
+hyper-util.workspace = true
+omp-core.workspace = true
+omp-proto.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-stream.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tonic-health.workspace = true
+tower.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile.workspace = true
 
 [lints]
 workspace = true

@@ -16,4 +16,9 @@ provider "gitlab-duo" {
 		thinking-efforts "minimal" "low" "medium" "high"
 		thinking-mode "effort"
 	}
+	// residue: the Duo GPT-5 fronts reject explicit sampling params like the
+	// upstream OpenAI serving path.
+	models "duo-chat-gpt-5*" {
+		supports-sampling-params #false
+	}
 }

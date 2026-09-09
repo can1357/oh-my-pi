@@ -1,4 +1,4 @@
-//! Bounded, authority-backed support shared by every end-to-end proof.
+//! Bounded, authority-backed support shared by end-to-end proofs.
 
 mod builders;
 #[cfg(unix)]
@@ -15,10 +15,7 @@ mod scripted;
 mod storage;
 mod time;
 
-pub use builders::{
-	accepted_event, assistant_item, message_item, outcome_event, tool_call_item, tool_result_item,
-	turn_event, user_item,
-};
+pub use builders::{assert_all_entries_caused, journal_entries};
 #[cfg(unix)]
 pub use docserver::DocServerTask;
 #[cfg(unix)]
@@ -26,15 +23,13 @@ pub use envd::{
 	AllowAdmission, EnvHarness, FramedEnvConnection, ProcessEnvHarness, connect_env, read_blob,
 };
 #[cfg(unix)]
-pub use extension::{ExtensionHarness, recording_ui_factory};
+pub use extension::{ExtensionRegistrar, LiveComponent};
 #[cfg(unix)]
-pub use gateway::ScriptedGateway;
+pub use gateway::GatewayInference;
 pub use process::{OwnedProcess, install_omp_binary_env, omp_binary};
 #[cfg(unix)]
 pub use process::{process_group_alive, wait_process_group_dead};
 pub use scratch::Scratch;
-pub use scripted::{
-	CapturedTurn, ScriptedStep, ScriptedTurn, ScriptedTurnClient, ScriptedTurnSession,
-};
-pub use storage::{reopen_journal, reopen_transcript};
+pub use scripted::{CapturedRequests, ScriptedInference, scripted_stream};
+pub use storage::{create_session, reopen_session};
 pub use time::{DEFAULT_TIMEOUT, DeterministicBarrier, Gate, within};

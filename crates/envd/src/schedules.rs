@@ -15,14 +15,66 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use omp_agent::{
-	FiringOutcome, MissedRunPolicy, ScheduleBudget, ScheduleDelivery as AgentDelivery,
-	ScheduleScope, Trigger, UpgradePolicy,
-	scheduler::{
-		BudgetReservation, BudgetUsage, MAX_BACKFILL_RECOVERY, budget_allows, next_occurrence,
-	},
-};
 use omp_core::{Str, sf};
+
+pub use crate::schedule_plan::BudgetReservation;
+use crate::schedule_plan::{BudgetUsage, MAX_BACKFILL_RECOVERY, budget_allows, next_occurrence};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+enum MissedRunPolicy {
+	Skip,
+	Coalesce,
+	Backfill,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, strum::Display, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+enum UpgradePolicy {
+	#[default]
+	Pinned,
+	Auto,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+enum ScheduleScope {
+	Session,
+	Project,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) enum Trigger {
+	Cron { expr: Str, timezone: Str },
+	Every { interval: Duration, jitter: Duration, align: bool },
+	At { epoch_ms: u64 },
+	AfterIdle { idle: Duration },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum AgentDelivery {
+	Inject { prompt: Str },
+	Spawn { spec_id: Str },
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct ScheduleBudget {
+	pub(crate) max_usd_per_firing_micros: Option<u64>,
+	pub(crate) max_usd_per_window_micros: Option<u64>,
+	pub(crate) window:                    Duration,
+	pub(crate) max_requests_per_firing:   Option<u64>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::Display, strum::EnumString)]
+#[strum(serialize_all = "snake_case")]
+enum FiringOutcome {
+	Injected,
+	Spawned,
+	Skipped,
+	Failed,
+	Duplicate,
+	BudgetRefused,
+}
 use rusqlite::{Connection, OptionalExtension, params};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};

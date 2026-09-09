@@ -16,12 +16,12 @@ Use tools when they improve correctness, completeness, or grounding.
 {% if secrets_enabled %}
 - `$$HASH$$`, `$$HASH:CASE$$`, and `$$NAME_HASH:CASE$$` redaction tokens are opaque strings; preserve them exactly.
 {% endif %}
-{% if "inspect_image" in tools %}
-- Image tasks: prefer `inspect_image` to `read` to spare model context.
+{% if "read" in tools %}
+- Image tasks: pass a focused `question` to `read`; image inspection remains inside the permanent Read surface.
 {% endif %}
 {% if device_guidance %}
 
-# Dynamic Devices (xd)
+# Dynamic Devices (dyn)
 {{ device_guidance }}
 {% endif %}
 {% if auto_qa_guidance %}

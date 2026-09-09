@@ -71,12 +71,7 @@
 //! `<option>` accepts the same `<td>` cells and the hosting `<select>`
 //! owns cursor, filter, hover, and activation over aligned rows.
 
-use std::{
-	error,
-	fmt::{self, Display, Formatter},
-	num::ParseIntError,
-	str::FromStr,
-};
+use std::{num::ParseIntError, str::FromStr};
 
 use omp_core::{Str, StrMut};
 use strum::{EnumString, IntoStaticStr};
@@ -84,11 +79,11 @@ use strum::{EnumString, IntoStaticStr};
 use crate::{
 	component::{Cached, Component},
 	components::{
-		Boxed, Button, Callout, Checkbox, Choice, Col, CustomElement, DiffKind, DiffStat, DiffView,
-		EditorPane, Fact, Field, Files, Form, Hr, Icon, Img, Input, JsonPreview, Latex, Markdown,
-		NumberLeaf, Pre, Progress, Quote, Radio, Row, Scroll, Segment, Segmented, Select,
-		SelectOption, Spacer, Spinner, State, Status, Table, TableCell, TableRow, Tabs, TaskStatus,
-		TextLeaf, Time, Todo, TodoTask, Tree, TreeNode, Wizard,
+		Boxed, Button, Callout, Checkbox, Choice, Col, CustomElement, DiffStat, DiffView, EditorPane,
+		Fact, Field, Files, Form, Hr, Icon, Img, Input, JsonPreview, Latex, Markdown, NumberLeaf,
+		Pre, Progress, Pulse, Qr, Quote, Radio, Row, Scroll, Segment, Segmented, Select,
+		SelectOption, Spacer, Spinner, State, Status, Strike, Table, TableCell, TableRow, Tabs,
+		TaskStatus, TextLeaf, Time, Todo, TodoTask, Tree, TreeNode, Wizard,
 	},
 	context::{Charset, UiContext},
 	markdown,
@@ -204,21 +199,14 @@ pub enum VAlign {
 }
 
 /// Markup rejection with byte position context.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("markup error at byte {at}: {message}")]
 pub struct ParseError {
 	/// Human-readable failure description.
 	pub message: String,
 	/// Byte offset into the source.
 	pub at:      usize,
 }
-
-impl Display for ParseError {
-	fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
-		write!(f, "markup error at byte {}: {}", self.at, self.message)
-	}
-}
-
-impl error::Error for ParseError {}
 
 /// Origin of a TML document.
 ///
@@ -244,12 +232,27 @@ pub fn parse_with_origin(
 	ctx: &UiContext,
 	origin: MarkupOrigin,
 ) -> Result<Cached, ParseError> {
+	parse_component_with_origin(source, ctx, origin).map(Cached::new)
+}
+
+/// Parses runtime markup directly into a retained component.
+///
+/// This is the component-level counterpart of [`parse_with_origin`] for
+/// projection registries which need to embed extension TML inside a larger
+/// typed tree instead of creating a standalone [`crate::Ui`].
+///
+/// # Errors
+/// Returns [`ParseError`] for malformed markup.
+pub fn parse_component_with_origin(
+	source: &Str,
+	ctx: &UiContext,
+	origin: MarkupOrigin,
+) -> Result<Box<dyn Component>, ParseError> {
 	let mut parser = Parser { source, src: source, ctx, fragment: false, origin };
 	let (parts, _) = parser.parse_children(0, None, false, 0, "col", &Props::new())?;
 	let children = cached_children(parts, "col")?;
-	let root = build("col", Props::new(), children, &Str::default())
-		.expect("the root col is a catalog component");
-	Ok(Cached::new(root))
+	Ok(build("col", Props::new(), children, &Str::default())
+		.expect("the root col is a catalog component"))
 }
 
 pub fn parse_md_fragment_inheriting(
@@ -293,6 +296,7 @@ enum Parsed {
 	},
 	Tab {
 		title:    Str,
+		icon:     Str,
 		children: Vec<Cached>,
 		at:       usize,
 	},
@@ -518,10 +522,11 @@ impl Parser<'_> {
 		}
 		if matches!(
 			name,
-			"pre" | "latex" | "callout" | "diff" | "json" | "files" | "quote" | "choice"
+			"pre" | "latex" | "callout" | "diff" | "json" | "files" | "quote" | "choice" | "qr"
 		) {
 			let closer = match name {
 				"pre" => "</pre>",
+				"qr" => "</qr>",
 				"latex" => "</latex>",
 				"callout" => "</callout>",
 				"diff" => "</diff>",
@@ -1082,6 +1087,8 @@ fn is_catalog_tag(name: &str) -> bool {
 			| "segmented"
 			| "checkbox"
 			| "spinner"
+			| "pulse"
+			| "strike"
 			| "status"
 			| "segment"
 			| "input"
@@ -1115,6 +1122,7 @@ fn is_catalog_tag(name: &str) -> bool {
 			| "fact"
 			| "quote"
 			| "choice"
+			| "qr"
 	)
 }
 
@@ -1294,6 +1302,8 @@ fn build(tag: &str, props: Props, children: Vec<Cached>, body: &Str) -> Option<B
 		"radio" => configured!(Radio::new()),
 		"checkbox" => configured!(Checkbox::new()),
 		"spinner" => configured!(Spinner::new().label(body.clone())),
+		"strike" => configured!(Strike::new().text(body.clone())),
+		"pulse" => configured!(Pulse::new().label(body.clone())),
 		"time" => configured!(Time::new()),
 		"num" => configured!(NumberLeaf::new()),
 		"bytes" => configured!(NumberLeaf::bytes()),
@@ -1307,15 +1317,9 @@ fn build(tag: &str, props: Props, children: Vec<Cached>, body: &Str) -> Option<B
 		"todo" => configured!(Todo::new()),
 		"form" => configured!(Form::new()),
 		"progress" => configured!(Progress::new()),
+		"qr" => configured!(Qr::new().text(body.clone())),
 		"img" => configured!(Img::new()),
-		"diff" => {
-			let mut diff = DiffView::new();
-			for line in body.lines() {
-				let (kind, text) = unified_diff_line(line);
-				diff.push(kind, text);
-			}
-			configured!(diff)
-		},
+		"diff" => configured!(DiffView::new().text(body.clone())),
 		"callout" => configured!(Callout::new().text(body.clone())),
 		"editor" => configured!(EditorPane::new()),
 		"icon" => {
@@ -1332,24 +1336,6 @@ fn build(tag: &str, props: Props, children: Vec<Cached>, body: &Str) -> Option<B
 		},
 		_ => return None,
 	})
-}
-
-/// Classifies one unified-diff source line for the retained [`DiffView`].
-fn unified_diff_line(line: &str) -> (DiffKind, &str) {
-	match line.as_bytes().first() {
-		Some(b'+') if !line.starts_with("+++") => (DiffKind::Add, &line[1..]),
-		Some(b'-') if !line.starts_with("---") => (DiffKind::Remove, &line[1..]),
-		Some(b' ') => (DiffKind::Context, &line[1..]),
-		Some(b'!') => (DiffKind::Diagnostic, line[1..].strip_prefix(' ').unwrap_or(&line[1..])),
-		_ if line.starts_with("@@")
-			|| line.starts_with("diff ")
-			|| line.starts_with("+++")
-			|| line.starts_with("---") =>
-		{
-			(DiffKind::Header, line)
-		},
-		_ => (DiffKind::Context, line),
-	}
 }
 
 fn finish_element(
@@ -1423,8 +1409,9 @@ fn finish_element(
 		},
 		"tab" => {
 			let title = props.title().cloned().unwrap_or_else(|| Str::new("tab"));
+			let icon = props.str_of(Prop::Icon).cloned().unwrap_or_default();
 			let children = cached_children(parts, "tab")?;
-			Ok(Parsed::Tab { title, children, at })
+			Ok(Parsed::Tab { title, icon, children, at })
 		},
 		"node" => {
 			let body_label = take_label(&mut parts);
@@ -1592,7 +1579,9 @@ fn finish_element(
 			*tabs.props_mut() = props;
 			for part in parts {
 				match part {
-					Parsed::Tab { title, children, .. } => tabs = tabs.pane(title, children),
+					Parsed::Tab { title, icon, children, .. } => {
+						tabs = tabs.pane_icon(icon, title, children);
+					},
 					other => return Err(parent_error(other.name(), "tabs", at)),
 				}
 			}

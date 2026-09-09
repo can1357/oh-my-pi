@@ -15,7 +15,9 @@ use crate::{
 	Graphics, TerminalCaps, debug,
 	debug::ScreenSnapshot,
 	escape::esc,
-	frame::{Cell, CellContent, Color, Frame, LinkId, Size, Style, with_link_url},
+	frame::{
+		Cell, CellContent, Color, Frame, LinkId, RowMark, Size, Style, Underline, with_link_url,
+	},
 	imagereg,
 	iterm2::{Iterm2Image, Iterm2Viewport, iterm2_output},
 	kitty::{
@@ -24,6 +26,7 @@ use crate::{
 	},
 	overlay::Layer,
 	sixel::SixelImage,
+	slots::{Delivered, WritePlan},
 	terminal::{alt_screen_active, terminal_write_all},
 };
 
@@ -79,30 +82,6 @@ pub struct PaintStats {
 	pub runs:          usize,
 	/// Number of bytes written to the terminal.
 	pub bytes:         usize,
-}
-
-/// Measurements from one explicit retirement transaction.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub struct RetireStats {
-	/// Number of transaction rows appended to native history.
-	pub rows:  usize,
-	/// Number of bytes written to the terminal.
-	pub bytes: usize,
-}
-
-/// Native-history behavior for one buffered replay transaction.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum HistoryReplay {
-	/// Retain native history and append the replay remainder.
-	Append,
-	/// Clear the native-history epoch before writing the replay remainder.
-	Rebuild,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum HistoryReset {
-	Keep,
-	Rebuild,
 }
 
 /// A layer with its band already resolved, ready to composite.
@@ -308,14 +287,37 @@ impl RegisteredImage {
 	}
 }
 
-/// Paints one fixed-height terminal viewport and retires finalized rows
-/// explicitly.
+/// A terminal delivery failed after a known prefix of history rows.
+///
+/// The current row is not acknowledged when its terminal write fails. The
+/// renderer is fail-stop at that point because the terminal may contain a
+/// byte prefix whose row boundary cannot be recovered.
+#[derive(Debug, thiserror::Error)]
+#[error("terminal delivery failed after {delivered} complete history rows")]
+pub struct DeliveryError {
+	delivered: usize,
+	#[source]
+	source:    io::Error,
+}
+
+impl DeliveryError {
+	/// Prefix acknowledgement to pass to [`crate::slots::Slots::commit`].
+	pub const fn delivered(&self) -> Delivered {
+		Delivered::Partial(self.delivered)
+	}
+
+	/// Underlying terminal writer failure.
+	pub const fn source_error(&self) -> &io::Error {
+		&self.source
+	}
+}
+
+/// Paints one fixed-height terminal viewport and commits finalized slot rows.
 ///
 /// [`Renderer::present`] and [`Renderer::repaint`] are history-neutral: tall
 /// frames are bottom-clipped and no presentation path scrolls.
-/// [`Renderer::retire`] appends finalized rows. [`Renderer::replay`] performs
-/// the same streaming realization for a bottom-prepared logical-history
-/// snapshot; both serialize the complete transaction before one writer call.
+/// [`Renderer::present_plan`] is the sole transcript delivery seam and reports
+/// the exact completed-row prefix on failure.
 pub struct Renderer<W: Write> {
 	writer:            W,
 	previous:          Option<Frame>,
@@ -327,7 +329,7 @@ pub struct Renderer<W: Write> {
 	poisoned:          bool,
 	output_state:      OutputState,
 	backlog:           OutputBacklogGuard,
-	#[cfg(any(windows, target_os = "linux"))]
+	#[cfg(any(windows, target_os = "linux", test))]
 	conpty_hosted:     bool,
 	images:            BTreeMap<u32, RegisteredImage>,
 	alt_screen:        bool,
@@ -342,6 +344,16 @@ pub struct Renderer<W: Write> {
 impl<W: Write> Renderer<W> {
 	/// Creates a renderer with an empty viewport cache.
 	pub fn new(writer: W) -> Self {
+		Self::with_conpty_hosted(writer, is_conpty_hosted())
+	}
+
+	/// Creates a renderer with an injectable ConPTY-hosted decision.
+	///
+	/// Tests use this seam so ambient WSL variables cannot change large-write
+	/// chunking expectations.
+	pub fn with_conpty_hosted(writer: W, conpty_hosted: bool) -> Self {
+		#[cfg(not(any(windows, target_os = "linux", test)))]
+		let _ = conpty_hosted;
 		Self {
 			writer,
 			previous: None,
@@ -353,8 +365,8 @@ impl<W: Write> Renderer<W> {
 			poisoned: false,
 			output_state: OutputState::Connected,
 			backlog: OutputBacklogGuard::default(),
-			#[cfg(any(windows, target_os = "linux"))]
-			conpty_hosted: is_conpty_hosted(),
+			#[cfg(any(windows, target_os = "linux", test))]
+			conpty_hosted,
 			images: BTreeMap::new(),
 			alt_screen: alt_screen_active(),
 			graphics: Graphics::KittyPlaceholders,
@@ -468,6 +480,54 @@ impl<W: Write> Renderer<W> {
 		Ok(stats)
 	}
 
+	/// Presents one elastic-slots delivery transaction.
+	///
+	/// History rows are written one transaction at a time so a writer failure
+	/// has an exact completed-row prefix. A failure during the current row is
+	/// fail-stop; the returned [`DeliveryError`] acknowledges only earlier,
+	/// complete rows.
+	///
+	/// # Errors
+	///
+	/// Returns the terminal writer or geometry error together with the exact
+	/// completed history-row count.
+	pub fn present_plan(
+		&mut self,
+		plan: &WritePlan,
+		layers: &[Layer<'_>],
+	) -> Result<Delivered, DeliveryError> {
+		let viewport = plan.viewport();
+		let height = plan.viewport_rows();
+		if plan.rebuild() {
+			self
+				.reset_history()
+				.map_err(|source| DeliveryError { delivered: 0, source })?;
+		}
+		if plan.rows().is_empty() {
+			self
+				.present(viewport.clone(), height, layers)
+				.map_err(|source| DeliveryError { delivered: 0, source })?;
+			return Ok(Delivered::All);
+		}
+		if self.history_geometry_changed(viewport.size().width, height) {
+			self
+				.present(viewport.clone(), height, layers)
+				.map_err(|source| DeliveryError { delivered: 0, source })?;
+		}
+		for (delivered, row) in plan.rows().iter().enumerate() {
+			self
+				.append_history_rows(
+					std::slice::from_ref(row.frame()),
+					usize::from(row.frame().size().height),
+					viewport,
+					height,
+					layers,
+				)
+				.map_err(|source| DeliveryError { delivered, source })?;
+		}
+		Ok(Delivered::All)
+	}
+
 	/// Damage-hinted history-neutral paint of one viewport frame with overlay
 	/// layers.
 	///
@@ -568,126 +628,14 @@ impl<W: Write> Renderer<W> {
 		Ok(stats)
 	}
 
-	/// Explicitly appends finalized rows to native history and leaves `viewport`
-	/// visible.
-	///
-	/// It streams `finalized || viewport` through the shared retirement/replay
-	/// transaction, scrolls exactly
-	/// `finalized.size().height` times, and emits no trailing line feed.
-	///
-	/// # Errors
-	///
-	/// Rejects alternate-screen retirement, zero or mismatched geometry, or a
-	/// viewport whose height differs from `viewport_height`. Writer failure
-	/// poisons the renderer.
-	pub fn retire(
-		&mut self,
-		finalized: &Frame,
-		viewport: &Frame,
-		viewport_height: u16,
-		layers: &[Layer<'_>],
-	) -> io::Result<RetireStats> {
-		self.retire_transaction(
-			std::slice::from_ref(finalized),
-			usize::from(finalized.size().height),
-			viewport,
-			viewport_height,
-			layers,
-			HistoryReset::Keep,
-		)
-	}
-
-	/// Replays a complete logical history with a bottom-first split and one
-	/// synchronous writer call.
-	///
-	/// Stable history rows that fit into leading blank viewport rows are moved
-	/// into the final viewport first. Only the prefix remainder scrolls into
-	/// native history. [`HistoryReplay::Rebuild`] prefixes the same buffered
-	/// transaction with the destructive history reset.
-	///
-	/// # Errors
-	///
-	/// Rejects invalid or stale viewport geometry. Writer failure poisons the
-	/// renderer.
-	pub fn replay(
-		&mut self,
-		history: &Frame,
-		viewport: &Frame,
-		viewport_height: u16,
-		layers: &[Layer<'_>],
-		mode: HistoryReplay,
-	) -> io::Result<RetireStats> {
-		self.replay_frames(std::slice::from_ref(history), viewport, viewport_height, layers, mode)
-	}
-
-	/// Replays ordered logical-history frame segments with a bottom-first split
-	/// and one synchronous writer call.
-	///
-	/// Segments avoid a whole-history `Frame` and therefore permit histories
-	/// whose total rendered height exceeds `u16::MAX`.
-	///
-	/// # Errors
-	///
-	/// Rejects invalid, mixed-width, or stale viewport geometry. Writer failure
-	/// poisons the renderer.
-	pub fn replay_frames(
-		&mut self,
-		frames: &[Frame],
-		viewport: &Frame,
-		viewport_height: u16,
-		layers: &[Layer<'_>],
-		mode: HistoryReplay,
-	) -> io::Result<RetireStats> {
-		self.validate_frame(viewport, viewport_height)?;
-		if frames
-			.iter()
-			.any(|frame| frame.size().width != viewport.size().width)
-		{
-			return Err(io::Error::new(
-				io::ErrorKind::InvalidInput,
-				"history and viewport frames must have equal widths",
-			));
-		}
-		let total = frames
-			.iter()
-			.map(|frame| usize::from(frame.size().height))
-			.sum::<usize>();
-		let history = FrameSegments::new(frames, total);
-		let leading = (0..viewport.size().height)
-			.take_while(|&row| {
-				(0..viewport.size().width)
-					.all(|column| matches!(viewport.cell(column, row).content(), CellContent::Blank))
-			})
-			.count();
-		let moved = leading.min(total);
-		let remainder = total - moved;
-		let mut final_viewport = viewport.clone();
-		for target in 0..moved {
-			let (source, row) = history.locate(remainder + target);
-			final_viewport.blit(
-				source,
-				row,
-				1,
-				0,
-				u16::try_from(target).expect("moved rows fit viewport"),
-			);
-		}
-		let reset = match mode {
-			HistoryReplay::Append => HistoryReset::Keep,
-			HistoryReplay::Rebuild => HistoryReset::Rebuild,
-		};
-		self.retire_transaction(frames, remainder, &final_viewport, viewport_height, layers, reset)
-	}
-
-	fn retire_transaction(
+	fn append_history_rows(
 		&mut self,
 		finalized: &[Frame],
 		finalized_rows: usize,
 		viewport: &Frame,
 		viewport_height: u16,
 		layers: &[Layer<'_>],
-		reset: HistoryReset,
-	) -> io::Result<RetireStats> {
+	) -> io::Result<()> {
 		self.validate_frame(viewport, viewport_height)?;
 		if alt_screen_active() {
 			return Err(io::Error::new(
@@ -721,7 +669,7 @@ impl<W: Write> Renderer<W> {
 			));
 		}
 		let finalized = FrameSegments::new(finalized, finalized_rows);
-		if self.retire_requires_present(viewport.size().width, viewport_height) {
+		if self.history_geometry_changed(viewport.size().width, viewport_height) {
 			return Err(io::Error::new(
 				io::ErrorKind::InvalidInput,
 				"retirement geometry differs from the painted viewport",
@@ -729,16 +677,6 @@ impl<W: Write> Renderer<W> {
 		}
 
 		self.sync_screen_buffer();
-		let mut reset_prefix = String::new();
-		if reset == HistoryReset::Rebuild {
-			for (&id, image) in &mut self.images {
-				append_delete_image(&mut reset_prefix, id, self.tmux_passthrough);
-				image.uploaded = false;
-				image.placed.clear();
-				image.direct_visible = false;
-			}
-			reset_prefix.push_str(RESET_HISTORY);
-		}
 		let window = Window { top: 0, height: viewport_height };
 		let resolved = resolve_layers(layers, viewport.size());
 		let stored = store_layers(&resolved, window, viewport.size().width);
@@ -779,7 +717,6 @@ impl<W: Write> Renderer<W> {
 			output.push_str(SYNC_OUTPUT_BEGIN);
 		}
 		output.push_str(HIDE_CURSOR);
-		output.push_str(&reset_prefix);
 		append_fixed_screen_modes(&mut output, viewport_height);
 		output.push_str(&images);
 
@@ -793,7 +730,7 @@ impl<W: Write> Renderer<W> {
 			let joined =
 				index > 0 && retirement_joinable(&finalized, &viewport_view, index - 1, index);
 			if joined {
-				let _ = write!(output, "\x1b[{};1H", screen_row);
+				let _ = write!(output, "\x1b[{screen_row};1H");
 				output.push_str(esc!(autowrap));
 				arm_retirement_boundary(
 					&mut output,
@@ -828,7 +765,7 @@ impl<W: Write> Renderer<W> {
 		for index in
 			usize::from(viewport_height)..finalized_rows.saturating_add(usize::from(viewport_height))
 		{
-			let _ = write!(output, "\x1b[{};1H", viewport_height);
+			let _ = write!(output, "\x1b[{viewport_height};1H");
 			if retirement_joinable(&finalized, &viewport_view, index - 1, index) {
 				output.push_str(esc!(autowrap));
 				arm_retirement_boundary(
@@ -873,7 +810,6 @@ impl<W: Write> Renderer<W> {
 			output.push_str(SYNC_OUTPUT_END);
 		}
 
-		let bytes = output.len();
 		let result = self.write(&output);
 		self.output_scratch = output;
 		result?;
@@ -885,17 +821,10 @@ impl<W: Write> Renderer<W> {
 		self.viewport_height = viewport_height;
 		self.cursor = cursor;
 		self.publish_debug_screen();
-		Ok(RetireStats { rows: finalized_rows, bytes })
+		Ok(())
 	}
 
-	/// Whether the next [`Renderer::retire`] at this geometry must be preceded
-	/// by a history-neutral present.
-	///
-	/// Retirement scrolls relative to the previously painted viewport; after a
-	/// geometry change the caller presents once at the new size, then retires
-	/// on a following paint.
-	#[must_use]
-	pub fn retire_requires_present(&self, width: u16, viewport_height: u16) -> bool {
+	fn history_geometry_changed(&self, width: u16, viewport_height: u16) -> bool {
 		!self.alt_screen
 			&& self.previous.as_ref().is_some_and(|previous| {
 				previous.size().width != width || self.viewport_height != viewport_height
@@ -1370,7 +1299,7 @@ impl<W: Write> Renderer<W> {
 	}
 
 	fn write_output(&mut self, output: &[u8]) -> io::Result<()> {
-		#[cfg(any(windows, target_os = "linux"))]
+		#[cfg(any(windows, target_os = "linux", test))]
 		if self.conpty_hosted && output.len() > MAX_CONPTY_WRITE_CHUNK_BYTES {
 			for chunk in ConptyChunks::new(output, MAX_CONPTY_WRITE_CHUNK_BYTES) {
 				terminal_write_all(&mut self.writer, chunk)?;
@@ -1415,7 +1344,7 @@ fn emit_absolute_window(
 			&& row - 1 < frame.base.size().height
 			&& wrap_joinable(frame, row - 1);
 		if joined {
-			let _ = write!(output, "\x1b[{};1H", screen_row);
+			let _ = write!(output, "\x1b[{screen_row};1H");
 			output.push_str(esc!(autowrap));
 			arm_wrap_boundary(output, frame, row - 1, graphics, hyperlinks);
 			encode_frame_row(output, frame, row, graphics, hyperlinks);
@@ -1626,6 +1555,11 @@ const fn is_conpty_hosted() -> bool {
 #[cfg(target_os = "linux")]
 fn is_conpty_hosted() -> bool {
 	env::var_os("WSL_DISTRO_NAME").is_some() || env::var_os("WSL_INTEROP").is_some()
+}
+
+#[cfg(not(any(windows, target_os = "linux")))]
+const fn is_conpty_hosted() -> bool {
+	false
 }
 
 #[allow(clippy::too_many_arguments, reason = "rendering inputs are independent frame state")]
@@ -1990,6 +1924,32 @@ fn emit_window_diff_rows(
 		}
 		let previous_y = previous_window.top.saturating_add(screen_y);
 		let next_y = next_window.top.saturating_add(screen_y);
+		// A zone-marked row is re-emitted whole so its OSC 133 markers
+		// bracket the full row: when its cells changed, or when the mark
+		// itself arrived on cells that did not.
+		if row_zone_marked(next, next_y) {
+			let marks_changed = !previous.base.row_mark(previous_y, RowMark::PromptStart)
+				&& next.base.row_mark(next_y, RowMark::PromptStart)
+				|| !previous.base.row_mark(previous_y, RowMark::PromptEnd)
+					&& next.base.row_mark(next_y, RowMark::PromptEnd);
+			let cells_changed = (0..width).any(|x| {
+				!cells_equal(
+					previous.cell_or(previous_y, x, &blank),
+					next.cell_or(next_y, x, &blank),
+					hyperlinks,
+				)
+			});
+			if marks_changed || cells_changed {
+				move_cursor_row(output, &mut cursor_row, screen_top.saturating_add(screen_y));
+				output.push('\r');
+				encode_row(output, next, next_y, graphics, hyperlinks);
+				output.push_str(RESET_STYLE);
+				active_style = Style::default();
+				stats.runs += 1;
+				stats.changed_cells += usize::from(width);
+			}
+			continue;
+		}
 		let mut x = 0;
 		while x < width {
 			if cells_equal(
@@ -2199,6 +2159,24 @@ fn encode_frame_row(
 	}
 }
 
+/// OSC 133 shell integration around a prompt zone.
+///
+/// The zone is closed within the same paint: `133;B` latches a sticky
+/// `.input` cursor semantic in Ghostty (and cmux) that only a command
+/// marker clears, and a latched zone turns every left-click into
+/// synthesized arrow keys under `cursor-click-to-move`. `133;C` followed
+/// by `133;D;0` right after `133;B` clears it without grouping later
+/// output under the prompt.
+const OSC133_ZONE_START: &str = esc!(osc, "133;A", bel);
+const OSC133_ZONE_CLOSE: &str = esc!(osc, "133;B", bel, osc, "133;C", bel, osc, "133;D;0", bel);
+
+/// Whether document row `row` carries a zone mark. Like wrap joinability,
+/// a pure document property: overlay layers never move a zone.
+#[inline]
+fn row_zone_marked(frame: &ComposedFrame<'_>, row: u16) -> bool {
+	frame.base.row_mark(row, RowMark::PromptStart) || frame.base.row_mark(row, RowMark::PromptEnd)
+}
+
 fn encode_row(
 	output: &mut String,
 	frame: &ComposedFrame<'_>,
@@ -2207,6 +2185,9 @@ fn encode_row(
 	hyperlinks: bool,
 ) {
 	output.push_str(RESET_STYLE);
+	if frame.base.row_mark(row, RowMark::PromptStart) {
+		output.push_str(OSC133_ZONE_START);
+	}
 	let blank = Cell::blank(Style::default());
 	let mut active_style = Style::default();
 	let mut x = 0;
@@ -2241,6 +2222,9 @@ fn encode_row(
 		}
 	}
 	close_active_link(output, &mut active_style, hyperlinks);
+	if frame.base.row_mark(row, RowMark::PromptEnd) {
+		output.push_str(OSC133_ZONE_CLOSE);
+	}
 }
 
 #[allow(clippy::too_many_arguments, reason = "flat cell emission hot path")]
@@ -2272,7 +2256,12 @@ fn encode_blank_row(output: &mut String, width: u16) {
 	}
 }
 
-fn emit_cell_style(output: &mut String, style: Style, active_style: &mut Style, hyperlinks: bool) {
+pub fn emit_cell_style(
+	output: &mut String,
+	style: Style,
+	active_style: &mut Style,
+	hyperlinks: bool,
+) {
 	let link_changed = hyperlinks && active_style.link != style.link;
 	if link_changed && active_style.link.is_some() {
 		output.push_str(esc!(osc, "8;;", st));
@@ -2287,7 +2276,7 @@ fn emit_cell_style(output: &mut String, style: Style, active_style: &mut Style, 
 	*active_style = style;
 }
 
-fn close_active_link(output: &mut String, active_style: &mut Style, hyperlinks: bool) {
+pub fn close_active_link(output: &mut String, active_style: &mut Style, hyperlinks: bool) {
 	if hyperlinks && active_style.link.is_some() {
 		output.push_str(esc!(osc, "8;;", st));
 	}
@@ -2326,9 +2315,7 @@ pub fn file_link_target(path: &Path, line: Option<u32>, column: Option<u32>) -> 
 		env::current_dir().ok()?.join(path)
 	};
 	let raw = absolute.to_string_lossy();
-	if sanitize_link_target(&raw).is_none() {
-		return None;
-	}
+	sanitize_link_target(&raw)?;
 	let mut target = String::with_capacity(raw.len() + 32);
 	target.push_str("file://");
 	for byte in raw.bytes() {
@@ -2348,7 +2335,7 @@ pub fn file_link_target(path: &Path, line: Option<u32>, column: Option<u32>) -> 
 	Some(Str::from(target))
 }
 
-pub(crate) fn emit_style(output: &mut String, style: Style) {
+pub fn emit_style(output: &mut String, style: Style) {
 	let style = style.without_link();
 	output.push_str(RESET_STYLE);
 	if style == Style::default() {
@@ -2372,8 +2359,10 @@ pub fn push_style_parameters(output: &mut String, style: Style, first: &mut bool
 	if style.italic {
 		push_parameter(output, first, "3");
 	}
-	if style.underline {
-		push_parameter(output, first, "4");
+	match style.underline {
+		Underline::None => {},
+		Underline::Straight => push_parameter(output, first, "4"),
+		Underline::Curly => push_parameter(output, first, "4:3"),
 	}
 	match style.underline_color {
 		Color::Default => {},
@@ -2441,11 +2430,15 @@ mod tests {
 	};
 
 	use super::{
-		ConptyChunks, HistoryReplay, MAX_CONPTY_WRITE_CHUNK_BYTES, MAX_OUTPUT_BACKLOG_BYTES,
-		OutputBacklogGuard, RESET_HISTORY, Renderer, ResolvedLayer, SYNC_OUTPUT_BEGIN,
-		SYNC_OUTPUT_END,
+		ConptyChunks, MAX_CONPTY_WRITE_CHUNK_BYTES, MAX_OUTPUT_BACKLOG_BYTES, OutputBacklogGuard,
+		RESET_HISTORY, Renderer, ResolvedLayer, SYNC_OUTPUT_BEGIN, SYNC_OUTPUT_END,
 	};
-	use crate::{Color, Frame, Graphics, Size, Style, test_support::TerminalModel};
+	use crate::{
+		Color, Frame, Graphics, Prop, RowMark, Size, Style,
+		components::TextLeaf,
+		slots::{Mode, ResizePolicy, Slots},
+		test_support::TerminalModel,
+	};
 
 	fn frame(width: u16, lines: &[&str]) -> Frame {
 		let mut frame =
@@ -2465,13 +2458,15 @@ mod tests {
 
 	#[derive(Default)]
 	struct CountingWriter {
-		writes: usize,
-		bytes:  Vec<u8>,
+		writes:    usize,
+		requested: Vec<usize>,
+		bytes:     Vec<u8>,
 	}
 
 	impl Write for CountingWriter {
 		fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
 			self.writes += 1;
+			self.requested.push(bytes.len());
 			self.bytes.extend_from_slice(bytes);
 			Ok(bytes.len())
 		}
@@ -2482,63 +2477,6 @@ mod tests {
 	}
 
 	#[test]
-	fn replay_moves_the_history_suffix_into_leading_viewport_space() {
-		let mut renderer = Renderer::new(Vec::new());
-		let mut terminal = TerminalModel::new(16, 3);
-		let stats = renderer
-			.replay(
-				&frame(16, &["history-1", "history-2", "history-3"]),
-				&frame(16, &["", "", "live"]),
-				3,
-				&[],
-				HistoryReplay::Append,
-			)
-			.unwrap();
-		apply(&mut renderer, &mut terminal);
-
-		assert_eq!(stats.rows, 1);
-		assert_eq!(terminal.history, ["history-1"]);
-		assert_eq!(terminal.visible_rows(), ["history-2", "history-3", "live"]);
-	}
-
-	#[test]
-	fn segmented_replay_exceeds_u16_rows_in_one_writer_call() {
-		let segments = (0..257)
-			.map(|_| Frame::new(Size::new(1, 256)))
-			.collect::<Vec<_>>();
-		let mut renderer = Renderer::new(CountingWriter::default());
-		let stats = renderer
-			.replay_frames(&segments, &frame(1, &["x"]), 1, &[], HistoryReplay::Append)
-			.unwrap();
-
-		assert_eq!(stats.rows, 257 * 256);
-		assert_eq!(renderer.into_inner().writes, 1);
-	}
-
-	#[test]
-	fn replay_uses_exactly_one_writer_call() {
-		let mut renderer = Renderer::new(CountingWriter::default());
-		renderer
-			.replay(
-				&frame(8, &["history-1", "history-2"]),
-				&frame(8, &["", "live"]),
-				2,
-				&[],
-				HistoryReplay::Rebuild,
-			)
-			.unwrap();
-
-		let writer = renderer.into_inner();
-		assert_eq!(writer.writes, 1);
-		assert!(writer.bytes.starts_with(SYNC_OUTPUT_BEGIN.as_bytes()));
-		assert!(
-			writer
-				.bytes
-				.windows(RESET_HISTORY.len())
-				.any(|bytes| bytes == RESET_HISTORY.as_bytes())
-		);
-	}
-	#[test]
 	fn destructive_reset_emits_display_erase_before_scrollback_erase() {
 		let mut renderer = Renderer::new(Vec::new());
 		renderer.reset_history().unwrap();
@@ -2546,6 +2484,111 @@ mod tests {
 		let output = String::from_utf8(mem::take(renderer.writer_mut())).unwrap();
 		assert!(output.ends_with("\x1b[H\x1b[2J\x1b[3J"), "{output:?}");
 		assert!(!output.contains("\x1b[3J\x1b[2J"), "{output:?}");
+	}
+
+	#[test]
+	fn renderer_emits_osc133_around_marked_rows() {
+		const START: &str = "\x1b]133;A\x07";
+		const CLOSE: &str = "\x1b]133;B\x07\x1b]133;C\x07\x1b]133;D;0\x07";
+		fn zone_order(output: &str) -> Option<(usize, usize)> {
+			Some((output.find(START)?, output.find(CLOSE)?))
+		}
+
+		// Viewport paint: the zone opens before the first bubble row and
+		// closes right after the last one, within the same paint.
+		let mut renderer = Renderer::new(Vec::new());
+		let mut bubble = frame(8, &["before", "hello", "world", "after"]);
+		bubble.mark_row(1, RowMark::PromptStart);
+		bubble.mark_row(2, RowMark::PromptEnd);
+		renderer.present(bubble.clone(), 4, &[]).unwrap();
+		let output = String::from_utf8(mem::take(renderer.writer_mut())).unwrap();
+		let (start, close) = zone_order(&output).expect("zone markers present");
+		let hello = output.find("hello").expect("first bubble row painted");
+		let world = output.find("world").expect("last bubble row painted");
+		assert!(start < hello && hello < world && world < close, "{output:?}");
+		assert_eq!(output.matches(START).count(), 1, "{output:?}");
+		assert_eq!(output.matches(CLOSE).count(), 1, "{output:?}");
+		assert!(!output.contains("\x1b]133;B\x07\x1b]133;B"), "{output:?}");
+		let mut terminal = TerminalModel::new(8, 4);
+		terminal.apply(&output);
+		assert_eq!(terminal.visible_rows(), ["before", "hello", "world", "after"]);
+
+		// Damage diff: a mark arriving on unchanged cells still re-emits the
+		// row with its markers.
+		let mut marked_more = bubble.clone();
+		marked_more.mark_row(3, RowMark::PromptEnd);
+		renderer
+			.present_damaged(&marked_more, &[(3, 4)], 4, &[])
+			.unwrap();
+		let output = String::from_utf8(mem::take(renderer.writer_mut())).unwrap();
+		assert!(output.contains(CLOSE), "{output:?}");
+		assert!(output.find("after").unwrap() < output.find(CLOSE).unwrap(), "{output:?}");
+		assert!(!output.contains(START), "unmarked rows are not re-emitted: {output:?}");
+
+		// History retirement: single-row frames carry their marks into
+		// scrollback with the same ordering.
+		let mut renderer = Renderer::new(Vec::new());
+		let viewport = frame(8, &["view"]);
+		let mut first = frame(8, &["hello"]);
+		first.mark_row(0, RowMark::PromptStart);
+		let mut last = frame(8, &["world"]);
+		last.mark_row(0, RowMark::PromptEnd);
+		renderer
+			.append_history_rows(&[first, last], 2, &viewport, 1, &[])
+			.unwrap();
+		let output = String::from_utf8(mem::take(renderer.writer_mut())).unwrap();
+		let (start, close) = zone_order(&output).expect("zone markers in history append");
+		let hello = output.find("hello").unwrap();
+		let world = output.find("world").unwrap();
+		assert!(start < hello && hello < world && world < close, "{output:?}");
+	}
+
+	#[test]
+	fn committed_history_materializes_cached_style_and_link_once() {
+		let foreground = Color::Rgb(18, 52, 86);
+		let target = "https://example.test/history";
+		let mut slots = Slots::new(16, 2, ResizePolicy::Rebuild);
+		let id = slots.open(Mode::Mutable);
+		slots.set(
+			id,
+			TextLeaf::new()
+				.text("colored")
+				.with(Prop::Fg, foreground)
+				.with(Prop::Bold, true)
+				.with(Prop::Href, target),
+		);
+		slots.finalize(id);
+
+		let mut renderer = Renderer::new(Vec::new());
+		renderer.set_hyperlinks(true);
+		let plan = slots.plan();
+		let delivered = renderer.present_plan(&plan, &[]).expect("history delivery");
+		slots.commit(plan, delivered);
+		let output = String::from_utf8(mem::take(renderer.writer_mut())).expect("terminal UTF-8");
+		assert_eq!(
+			output.matches("38;2;18;52;86").count(),
+			1,
+			"foreground SGR is emitted only at final materialization: {output:?}",
+		);
+		assert_eq!(
+			output.matches(target).count(),
+			1,
+			"the cached semantic link is materialized once: {output:?}",
+		);
+		assert!(output.contains("\x1b[0m"), "history delivery restores the terminal style");
+		assert!(
+			output.ends_with(SYNC_OUTPUT_END),
+			"the reset is sealed inside the delivery transaction before control returns",
+		);
+
+		let paint_only = slots.plan();
+		assert!(paint_only.rows().is_empty());
+		renderer
+			.present_plan(&paint_only, &[])
+			.expect("history-neutral repaint");
+		let repeated = String::from_utf8(mem::take(renderer.writer_mut())).expect("terminal UTF-8");
+		assert!(!repeated.contains("38;2;18;52;86"));
+		assert!(!repeated.contains(target));
 	}
 
 	#[test]
@@ -2579,150 +2622,6 @@ mod tests {
 	}
 
 	#[test]
-	fn retire_puts_exact_finalized_rows_in_history_and_exact_viewport_visible() {
-		let mut renderer = Renderer::new(Vec::new());
-		let mut terminal = TerminalModel::new(8, 3);
-		renderer
-			.present(frame(8, &["live-a", "live-b", "live-c"]), 3, &[])
-			.unwrap();
-		apply(&mut renderer, &mut terminal);
-		let stats = renderer
-			.retire(
-				&frame(8, &["final-a", "final-b"]),
-				&frame(8, &["next-a", "next-b", "next-c"]),
-				3,
-				&[],
-			)
-			.unwrap();
-		apply(&mut renderer, &mut terminal);
-		assert_eq!(stats.rows, 2);
-		assert_eq!(terminal.history, ["final-a", "final-b"]);
-		assert_eq!(terminal.visible_rows(), ["next-a", "next-b", "next-c"]);
-	}
-
-	#[test]
-	fn multi_row_retirement_batch_has_no_blank_or_duplicate_rows() {
-		let mut renderer = Renderer::new(Vec::new());
-		let mut terminal = TerminalModel::new(8, 2);
-		renderer
-			.retire(
-				&frame(8, &["first", "second", "third"]),
-				&frame(8, &["queue-a", "queue-b"]),
-				2,
-				&[],
-			)
-			.unwrap();
-		apply(&mut renderer, &mut terminal);
-		assert_eq!(terminal.history, ["first", "second", "third"]);
-		assert_eq!(terminal.visible_rows(), ["queue-a", "queue-b"]);
-	}
-
-	#[test]
-	fn full_width_final_row_does_not_wrap_into_extra_history() {
-		let mut renderer = Renderer::new(Vec::new());
-		let mut terminal = TerminalModel::new(4, 2);
-		renderer
-			.retire(&frame(4, &["FULL"]), &frame(4, &["q1", "q2"]), 2, &[])
-			.unwrap();
-		let output = apply(&mut renderer, &mut terminal);
-		assert_eq!(terminal.history, ["FULL"]);
-		assert_eq!(terminal.visible_rows(), ["q1", "q2"]);
-		assert!(!output.ends_with('\n'));
-	}
-
-	#[test]
-	fn retirement_emits_no_trailing_line_feed_or_empty_history_row() {
-		let mut renderer = Renderer::new(Vec::new());
-		let mut terminal = TerminalModel::new(6, 2);
-		renderer
-			.retire(&frame(6, &["done"]), &frame(6, &["live", ""]), 2, &[])
-			.unwrap();
-		let output = apply(&mut renderer, &mut terminal);
-		assert_eq!(terminal.history, ["done"]);
-		assert_eq!(terminal.visible_rows(), ["live", ""]);
-		let last_newline = output.rfind('\n').expect("one controlled scroll");
-		assert!(!output[last_newline + 1..].contains('\n'));
-		assert!(!output.ends_with('\n'));
-	}
-
-	#[test]
-	fn height_one_retirement_scrolls_once_per_finalized_row() {
-		let mut renderer = Renderer::new(Vec::new());
-		let mut terminal = TerminalModel::new(5, 1);
-		let stats = renderer
-			.retire(&frame(5, &["one", "two"]), &frame(5, &["next"]), 1, &[])
-			.unwrap();
-		apply(&mut renderer, &mut terminal);
-		assert_eq!(stats.rows, 2);
-		assert_eq!(terminal.history, ["one", "two"]);
-		assert_eq!(terminal.visible_rows(), ["next"]);
-	}
-
-	#[test]
-	fn zero_height_finalized_repaints_without_scrolling() {
-		let mut renderer = Renderer::new(Vec::new());
-		let mut terminal = TerminalModel::new(5, 2);
-		terminal.history.push("before".to_owned());
-		let stats = renderer
-			.retire(&Frame::new(Size::new(5, 0)), &frame(5, &["q1", "q2"]), 2, &[])
-			.unwrap();
-		apply(&mut renderer, &mut terminal);
-		assert_eq!(stats.rows, 0);
-		assert_eq!(terminal.history, ["before"]);
-		assert_eq!(terminal.visible_rows(), ["q1", "q2"]);
-	}
-
-	#[test]
-	fn blank_final_lines_retire_deterministically() {
-		let mut renderer = Renderer::new(Vec::new());
-		let mut terminal = TerminalModel::new(5, 2);
-		renderer
-			.retire(&frame(5, &["", "done"]), &frame(5, &["", "live"]), 2, &[])
-			.unwrap();
-		apply(&mut renderer, &mut terminal);
-		assert_eq!(terminal.history, ["", "done"]);
-		assert_eq!(terminal.visible_rows(), ["", "live"]);
-	}
-	#[test]
-	fn soft_wrapped_final_rows_preserve_native_join_metadata() {
-		let mut finalized = frame(4, &["abcd", "ef"]);
-		finalized.set_soft_wrap(0);
-		let mut renderer = Renderer::new(Vec::new());
-		let mut terminal = TerminalModel::new(4, 2);
-		renderer
-			.retire(&finalized, &frame(4, &["q1", "q2"]), 2, &[])
-			.unwrap();
-		apply(&mut renderer, &mut terminal);
-		assert_eq!(terminal.history, ["abcdef"]);
-		assert_eq!(terminal.visible_rows(), ["q1", "q2"]);
-	}
-
-	#[test]
-	fn wide_styled_linked_retirement_is_deterministic() {
-		fn styled_frames() -> (Frame, Frame) {
-			let mut finalized = Frame::new(Size::new(8, 1));
-			finalized.put(0, 0, "界", Style::new().bold().fg(Color::Indexed(2)));
-			finalized.put(2, 0, " link", Style::new().underline().link("https://example.test"));
-			let mut viewport = Frame::new(Size::new(8, 2));
-			viewport.put(0, 0, "界 live", Style::new().italic());
-			viewport.put(0, 1, "next", Style::default());
-			(finalized, viewport)
-		}
-		let (finalized, viewport) = styled_frames();
-		let mut first = Renderer::new(Vec::new());
-		let mut second = Renderer::new(Vec::new());
-		first.set_hyperlinks(true);
-		second.set_hyperlinks(true);
-		first.retire(&finalized, &viewport, 2, &[]).unwrap();
-		second.retire(&finalized, &viewport, 2, &[]).unwrap();
-		assert_eq!(first.writer_mut(), second.writer_mut());
-		let mut terminal = TerminalModel::new(8, 2);
-		apply(&mut first, &mut terminal);
-		assert_eq!(terminal.history, ["界 link"]);
-		assert_eq!(terminal.visible_rows(), ["界 live", "next"]);
-	}
-
-	#[test]
 	fn reset_history_clears_graphics_and_forces_a_full_repaint() {
 		let painted = frame(8, &["same", "frame"]);
 		let mut renderer = Renderer::new(Vec::new());
@@ -2740,23 +2639,6 @@ mod tests {
 		let stats = renderer.present(painted, 2, &[]).unwrap();
 		assert!(stats.full_repaint);
 		assert!(stats.bytes > 0);
-	}
-
-	#[test]
-	fn presentation_after_retirement_diffs_without_scrolling() {
-		let mut renderer = Renderer::new(Vec::new());
-		let mut terminal = TerminalModel::new(8, 2);
-		renderer
-			.retire(&frame(8, &["done"]), &frame(8, &["live-a", "live-b"]), 2, &[])
-			.unwrap();
-		apply(&mut renderer, &mut terminal);
-		let stats = renderer
-			.present(frame(8, &["live-a", "changed"]), 2, &[])
-			.unwrap();
-		apply(&mut renderer, &mut terminal);
-		assert!(!stats.full_repaint);
-		assert_eq!(terminal.history, ["done"]);
-		assert_eq!(terminal.visible_rows(), ["live-a", "changed"]);
 	}
 
 	#[test]
@@ -2895,6 +2777,24 @@ mod tests {
 		let chunks = ConptyChunks::new(&payload, MAX_CONPTY_WRITE_CHUNK_BYTES).collect::<Vec<_>>();
 		assert_eq!(chunks.concat(), payload);
 		assert!(chunks.iter().all(|chunk| !chunk.ends_with(b"\x1b")));
+	}
+
+	#[test]
+	fn conpty_write_decision_is_injectable_on_every_test_platform() {
+		let mut payload = vec![b'x'; MAX_CONPTY_WRITE_CHUNK_BYTES + 1];
+		payload[MAX_CONPTY_WRITE_CHUNK_BYTES / 2] = b'\n';
+
+		let mut direct = Renderer::with_conpty_hosted(CountingWriter::default(), false);
+		direct.write_output(&payload).unwrap();
+		let direct = direct.into_inner();
+
+		let mut conpty = Renderer::with_conpty_hosted(CountingWriter::default(), true);
+		conpty.write_output(&payload).unwrap();
+		let conpty = conpty.into_inner();
+
+		assert_ne!(direct.requested, conpty.requested);
+		assert_eq!(direct.bytes, payload);
+		assert_eq!(conpty.bytes, payload);
 	}
 
 	#[test]

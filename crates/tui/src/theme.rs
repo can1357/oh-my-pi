@@ -1,6 +1,11 @@
 //! JSON theme loading with rich-slot lowering and appearance selection.
 
-use std::collections::BTreeMap;
+use std::{
+	collections::BTreeMap,
+	fs, io,
+	path::{Path, PathBuf},
+	sync::Arc,
+};
 
 use omp_core::{IntoStr, Str};
 use serde::Deserialize;
@@ -29,27 +34,26 @@ pub struct JsonTheme {
 }
 
 impl JsonTheme {
-	/// Parses either omp's compact semantic palette or pi's richer `colors`
-	/// palette. Rich component slots lower onto omp's semantic tokens once at
-	/// load time; code-fence borders that miss the contrast floor are blended
-	/// toward the theme's muted or foreground tier.
+	/// Parses either omp's compact semantic palette or the richer `colors`
+	/// palette. Status, diff, and code-border slots remain independent so
+	/// unrelated rich-theme roles never overwrite their presentation colors.
 	pub fn parse(source: &str) -> Result<Self, ThemeError> {
 		let file: ThemeFile = serde_json::from_str(source).map_err(ThemeError::Json)?;
 		let (dark, light) = if let Some(colors) = &file.colors {
-			(
-				apply_rich(
-					colors,
-					&file.vars,
-					file.export.as_ref(),
-					Theme::for_appearance(Appearance::Dark),
-				)?,
-				apply_rich(
-					colors,
-					&file.vars,
-					file.export.as_ref(),
-					Theme::for_appearance(Appearance::Light),
-				)?,
-			)
+			let page_background = file
+				.export
+				.as_ref()
+				.and_then(|export| export.page_bg.as_ref())
+				.map(|value| resolve_color("export.pageBg", value, &file.vars))
+				.transpose()?
+				.flatten();
+			let mut dark = apply_rich(colors, &file.vars, Theme::for_appearance(Appearance::Dark))?;
+			let mut light = apply_rich(colors, &file.vars, Theme::for_appearance(Appearance::Light))?;
+			if let Some(background) = page_background {
+				dark.code_border = fence_border_with_contrast(dark.code_border, background);
+				light.code_border = fence_border_with_contrast(light.code_border, background);
+			}
+			(dark, light)
 		} else {
 			let dark = file.dark.apply(Theme::for_appearance(Appearance::Dark))?;
 			let light = file
@@ -73,6 +77,176 @@ impl JsonTheme {
 	pub const fn for_appearance_256(&self, appearance: Appearance) -> Theme {
 		self.for_appearance(appearance).quantized_256()
 	}
+}
+
+/// One theme file loaded into a [`ThemeCatalog`].
+#[derive(Clone, Debug)]
+pub struct LoadedTheme {
+	/// Lookup name: the file stem of `<themes>/<name>.json`.
+	pub name:  Str,
+	/// Source file.
+	pub path:  PathBuf,
+	/// Parsed palette.
+	pub theme: Arc<JsonTheme>,
+}
+
+/// Non-fatal diagnostic from a discovered theme directory.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ThemeWarning {
+	/// Offending file or directory.
+	pub path:    PathBuf,
+	/// Human-readable reason.
+	pub message: Str,
+}
+
+/// Failure loading a theme path the operator named explicitly.
+#[derive(Debug, Error)]
+pub enum ThemeLoadError {
+	/// The path could not be read.
+	#[error("cannot read theme {}", path.display())]
+	Io {
+		/// Offending path.
+		path:   PathBuf,
+		/// Underlying error.
+		#[source]
+		source: io::Error,
+	},
+	/// The file is not a valid theme.
+	#[error("invalid theme {}", path.display())]
+	Theme {
+		/// Offending file.
+		path:   PathBuf,
+		/// Parse failure.
+		#[source]
+		source: ThemeError,
+	},
+}
+
+/// Named themes loaded from disk, in precedence order: paths named on the
+/// command line (`--theme <file|dir>`) first, then each discovered theme
+/// directory (`<config root>/agent/themes`, `<project>/.omp/themes`). Within
+/// a name the first source wins.
+#[derive(Clone, Debug, Default)]
+pub struct ThemeCatalog {
+	themes:       Vec<LoadedTheme>,
+	explicit:     usize,
+	/// Unreadable or malformed files inside discovered directories.
+	pub warnings: Vec<ThemeWarning>,
+}
+
+impl ThemeCatalog {
+	/// Loads `explicit` files or directories (every failure is an error: the
+	/// operator asked for them) and then scans `dirs` for `*.json` themes
+	/// (a missing directory is nothing; a broken file is a warning).
+	pub fn load(explicit: &[PathBuf], dirs: &[PathBuf]) -> Result<Self, ThemeLoadError> {
+		let mut catalog = Self::default();
+		for path in explicit {
+			let metadata = fs::metadata(path)
+				.map_err(|source| ThemeLoadError::Io { path: path.clone(), source })?;
+			if metadata.is_dir() {
+				for file in theme_files(path)
+					.map_err(|source| ThemeLoadError::Io { path: path.clone(), source })?
+				{
+					let theme = load_theme_file(&file)?;
+					catalog.push(file, theme);
+				}
+			} else {
+				let theme = load_theme_file(path)?;
+				catalog.push(path.clone(), theme);
+			}
+		}
+		catalog.explicit = catalog.themes.len();
+		for dir in dirs {
+			let files = match theme_files(dir) {
+				Ok(files) => files,
+				Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+				Err(error) => {
+					catalog.warnings.push(ThemeWarning {
+						path:    dir.clone(),
+						message: Str::new(format!("cannot read theme directory: {error}")),
+					});
+					continue;
+				},
+			};
+			for file in files {
+				match load_theme_file(&file) {
+					Ok(theme) => catalog.push(file, theme),
+					Err(error) => catalog
+						.warnings
+						.push(ThemeWarning { path: file, message: Str::new(error_chain(&error)) }),
+				}
+			}
+		}
+		Ok(catalog)
+	}
+
+	fn push(&mut self, path: PathBuf, theme: JsonTheme) {
+		let name = path
+			.file_stem()
+			.map_or_else(|| theme.name.clone(), |stem| Str::new(stem.to_string_lossy()));
+		if self.get(&name).is_some() {
+			return;
+		}
+		self
+			.themes
+			.push(LoadedTheme { name, path, theme: Arc::new(theme) });
+	}
+
+	/// The theme filed under `name` (its file stem), when loaded.
+	#[must_use]
+	pub fn get(&self, name: &str) -> Option<Arc<JsonTheme>> {
+		self
+			.themes
+			.iter()
+			.find(|loaded| loaded.name.as_str() == name)
+			.map(|loaded| Arc::clone(&loaded.theme))
+	}
+
+	/// The first theme named explicitly on the command line, if any.
+	#[must_use]
+	pub fn first_explicit(&self) -> Option<Arc<JsonTheme>> {
+		(self.explicit > 0).then(|| Arc::clone(&self.themes[0].theme))
+	}
+
+	/// Every loaded theme in precedence order.
+	#[must_use]
+	pub fn themes(&self) -> &[LoadedTheme] {
+		&self.themes
+	}
+}
+
+fn load_theme_file(path: &Path) -> Result<JsonTheme, ThemeLoadError> {
+	let source = fs::read_to_string(path)
+		.map_err(|source| ThemeLoadError::Io { path: path.to_path_buf(), source })?;
+	JsonTheme::parse(&source)
+		.map_err(|source| ThemeLoadError::Theme { path: path.to_path_buf(), source })
+}
+
+/// Sorted `*.json` files directly below `dir`.
+fn theme_files(dir: &Path) -> io::Result<Vec<PathBuf>> {
+	let mut files = fs::read_dir(dir)?
+		.filter_map(Result::ok)
+		.map(|entry| entry.path())
+		.filter(|path| {
+			path
+				.extension()
+				.is_some_and(|extension| extension.eq_ignore_ascii_case("json"))
+				&& path.is_file()
+		})
+		.collect::<Vec<_>>();
+	files.sort();
+	Ok(files)
+}
+
+fn error_chain(error: &dyn std::error::Error) -> String {
+	let mut text = error.to_string();
+	let mut source = error.source();
+	while let Some(cause) = source {
+		text.push_str(": ");
+		text.push_str(&cause.to_string());
+		source = cause.source();
+	}
+	text
 }
 
 /// Theme parsing failure with a stable diagnostic.
@@ -107,8 +281,15 @@ struct ThemeFile {
 	colors:  Option<BTreeMap<String, ColorValue>>,
 	dark:    ThemePatch,
 	light:   Option<ThemePatch>,
-	export:  Option<serde_json::Value>,
+	export:  Option<ThemeExport>,
 	symbols: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(default)]
+struct ThemeExport {
+	#[serde(rename = "pageBg")]
+	page_bg: Option<ColorValue>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -121,22 +302,45 @@ enum ColorValue {
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct ThemePatch {
-	fg:          Option<String>,
-	accent:      Option<String>,
-	info:        Option<String>,
-	ok:          Option<String>,
-	warn:        Option<String>,
-	err:         Option<String>,
-	muted:       Option<String>,
-	border:      Option<String>,
-	code_border: Option<String>,
-	surface:     Option<String>,
-	hover:       Option<String>,
-	selection:   Option<String>,
-	shadow:      Option<String>,
-	panel:       Option<String>,
-	secondary:   Option<String>,
-	contrast:    Option<String>,
+	fg:                Option<String>,
+	accent:            Option<String>,
+	info:              Option<String>,
+	ok:                Option<String>,
+	warn:              Option<String>,
+	err:               Option<String>,
+	muted:             Option<String>,
+	dim:               Option<String>,
+	output:            Option<String>,
+	border:            Option<String>,
+	code_border:       Option<String>,
+	tool_diff_added:   Option<String>,
+	tool_diff_removed: Option<String>,
+	tool_diff_context: Option<String>,
+	surface:           Option<String>,
+	hover:             Option<String>,
+	selection:         Option<String>,
+	shadow:            Option<String>,
+	panel:             Option<String>,
+	error_surface:     Option<String>,
+	secondary:         Option<String>,
+	python:            Option<String>,
+	status_rule:       Option<String>,
+	border_muted:      Option<String>,
+	status_bg:         Option<String>,
+	status_sep:        Option<String>,
+	status_model:      Option<String>,
+	status_path:       Option<String>,
+	status_git_clean:  Option<String>,
+	status_git_dirty:  Option<String>,
+	status_context:    Option<String>,
+	status_spend:      Option<String>,
+	status_staged:     Option<String>,
+	status_dirty:      Option<String>,
+	status_untracked:  Option<String>,
+	status_output:     Option<String>,
+	status_cost:       Option<String>,
+	status_subagents:  Option<String>,
+	contrast:          Option<String>,
 }
 
 impl ThemePatch {
@@ -158,14 +362,37 @@ impl ThemePatch {
 		apply!(warn);
 		apply!(err);
 		apply!(muted);
+		apply!(dim);
+		apply!(output);
 		apply!(border);
 		apply!(code_border);
+		apply!(tool_diff_added);
+		apply!(tool_diff_removed);
+		apply!(tool_diff_context);
 		apply!(surface);
 		apply!(hover);
 		apply!(selection);
 		apply!(shadow);
 		apply!(panel);
+		apply!(error_surface);
 		apply!(secondary);
+		apply!(python);
+		apply!(status_rule);
+		apply!(border_muted);
+		apply!(status_bg);
+		apply!(status_sep);
+		apply!(status_model);
+		apply!(status_path);
+		apply!(status_git_clean);
+		apply!(status_git_dirty);
+		apply!(status_context);
+		apply!(status_spend);
+		apply!(status_staged);
+		apply!(status_dirty);
+		apply!(status_untracked);
+		apply!(status_output);
+		apply!(status_cost);
+		apply!(status_subagents);
 		apply!(contrast);
 		Ok(theme)
 	}
@@ -174,54 +401,76 @@ impl ThemePatch {
 fn apply_rich(
 	colors: &BTreeMap<String, ColorValue>,
 	vars: &BTreeMap<String, ColorValue>,
-	export: Option<&serde_json::Value>,
 	mut theme: Theme,
 ) -> Result<Theme, ThemeError> {
 	for (slot, value) in colors {
-		let Some(color) = resolve_color(slot, value, vars)? else {
-			continue;
-		};
+		let color = resolve_color(slot, value, vars)?.unwrap_or(Color::Default);
 		match slot.as_str() {
 			"text" => theme.fg = color,
-			"accent" | "borderAccent" | "mdLink" | "statusLineModel" => theme.accent = color,
-			"mdCodeBlock" | "bashMode" | "statusLinePath" => theme.info = color,
-			"success" | "toolDiffAdded" | "statusLineGitClean" => theme.ok = color,
-			"warning" | "statusLineGitDirty" | "statusLineDirty" => theme.warn = color,
-			"error" | "toolDiffRemoved" | "toolErrorBg" => theme.err = color,
-			"muted" | "dim" | "thinkingText" | "toolOutput" | "toolDiffContext" | "statusLineSep" => {
-				theme.muted = color
-			},
+			"accent" => theme.accent = color,
+			"borderAccent" => theme.info = color,
+			"statusLineModel" => theme.status_model = color,
+			"mdCodeBlock" | "bashMode" => theme.info = color,
+			"statusLinePath" => theme.status_path = color,
+			"success" => theme.ok = color,
+			"toolDiffAdded" => theme.tool_diff_added = color,
+			"statusLineGitClean" => theme.status_git_clean = color,
+			"warning" => theme.warn = color,
+			"statusLineGitDirty" => theme.status_git_dirty = color,
+			"statusLineDirty" => theme.status_dirty = color,
+			"error" => theme.err = color,
+			"toolDiffRemoved" => theme.tool_diff_removed = color,
+			"toolErrorBg" => theme.error_surface = color,
+			"statusLineBg" => theme.status_bg = color,
+			"statusLineSep" => theme.status_sep = color,
+			"muted" => theme.muted = color,
+			"dim" => theme.dim = color,
+			"toolOutput" => theme.output = color,
+			"toolDiffContext" => theme.tool_diff_context = color,
 			"mdCodeBlockBorder" => theme.code_border = color,
-			"border" | "borderMuted" | "mdQuoteBorder" | "mdHr" => theme.border = color,
+			"border" => theme.border = color,
+			"borderMuted" => theme.border_muted = color,
 			"selectedBg" => theme.selection = color,
 			"toolPendingBg" => theme.surface = color,
-			"userMessageBg" | "customMessageBg" | "toolSuccessBg" | "statusLineBg" => {
-				theme.panel = color;
-			},
-			"customMessageLabel" | "pythonMode" | "statusLineSpend" | "statusLineCost" => {
-				theme.secondary = color;
-			},
+			"userMessageBg" | "customMessageBg" | "toolSuccessBg" => theme.panel = color,
+			"pythonMode" => theme.python = color,
+			"customMessageLabel" => theme.secondary = color,
+			"statusLineContext" => theme.status_context = color,
+			"statusLineSpend" => theme.status_spend = color,
+			"statusLineStaged" => theme.status_staged = color,
+			"statusLineUntracked" => theme.status_untracked = color,
+			"statusLineOutput" => theme.status_output = color,
+			"statusLineCost" => theme.status_cost = color,
+			"statusLineSubagents" => theme.status_subagents = color,
 			"userMessageText" | "customMessageText" => theme.contrast = color,
 			_ => {},
 		}
 	}
-	if let Some(background) = export
-		.and_then(|value| value.get("pageBg"))
-		.and_then(|value| match value {
-			serde_json::Value::String(source) => Some(ColorValue::Text(source.clone())),
-			serde_json::Value::Number(index) => index
-				.as_u64()
-				.and_then(|index| u16::try_from(index).ok())
-				.map(ColorValue::Index),
-			_ => None,
-		})
-		.as_ref()
-		.map(|value| resolve_color("pageBg", value, vars))
-		.transpose()?
-		.flatten()
+
+	// Rich themes name concrete presentation roles while omp components
+	// consume a smaller semantic palette. Preserve an explicitly authored
+	// semantic slot, otherwise use the closest concrete role as its fallback.
+	if !colors.contains_key("accent")
+		&& let Some(value) = colors.get("borderAccent")
 	{
-		theme.code_border =
-			legible_fence_border(theme.code_border, background, theme.muted, theme.fg);
+		theme.accent = resolve_color("borderAccent", value, vars)?.unwrap_or(Color::Default);
+	}
+	if !colors.contains_key("success")
+		&& let Some(value) = colors.get("toolDiffAdded")
+	{
+		theme.ok = resolve_color("toolDiffAdded", value, vars)?.unwrap_or(Color::Default);
+	}
+	if !colors.contains_key("error")
+		&& let Some(value) = colors.get("toolDiffRemoved")
+	{
+		theme.err = resolve_color("toolDiffRemoved", value, vars)?.unwrap_or(Color::Default);
+	}
+	if !colors.contains_key("userMessageBg")
+		&& !colors.contains_key("customMessageBg")
+		&& !colors.contains_key("toolSuccessBg")
+		&& let Some(value) = colors.get("statusLineBg")
+	{
+		theme.panel = resolve_color("statusLineBg", value, vars)?.unwrap_or(Color::Default);
 	}
 	Ok(theme)
 }
@@ -257,7 +506,47 @@ fn resolve_color(
 	Err(ThemeError::Color { token: Str::new(token), value: Str::new_static("variable cycle") })
 }
 
+/// Code-fence rails are intentionally subdued chrome, but below this ratio
+/// they disappear against the canvas used by the theme.
 const MIN_FENCE_CONTRAST: f64 = 2.4;
+
+fn fence_border_with_contrast(border: Color, background: Color) -> Color {
+	let Some(ratio) = color_contrast(border, background) else {
+		return border;
+	};
+	if ratio >= MIN_FENCE_CONTRAST {
+		return border;
+	}
+
+	let black = Color::Rgb(0, 0, 0);
+	let white = Color::Rgb(255, 255, 255);
+	let target = if color_contrast(black, background) >= color_contrast(white, background) {
+		black
+	} else {
+		white
+	};
+	let Some(target_ratio) = color_contrast(target, background) else {
+		return border;
+	};
+	if target_ratio < MIN_FENCE_CONTRAST {
+		return border;
+	}
+
+	// Find the smallest channel-space adjustment that restores legibility, so
+	// the authored hue and the intentionally quiet fence treatment survive.
+	let mut insufficient = 0.0_f32;
+	let mut sufficient = 1.0_f32;
+	for _ in 0..16 {
+		let amount = f32::midpoint(insufficient, sufficient);
+		let candidate = border.mix(target, amount);
+		if color_contrast(candidate, background).is_some_and(|ratio| ratio >= MIN_FENCE_CONTRAST) {
+			sufficient = amount;
+		} else {
+			insufficient = amount;
+		}
+	}
+	border.mix(target, sufficient)
+}
 
 fn color_contrast(left: Color, right: Color) -> Option<f64> {
 	let Color::Rgb(left_red, left_green, left_blue) = left else {
@@ -276,38 +565,7 @@ fn color_contrast(left: Color, right: Color) -> Option<f64> {
 	Some((lighter + 0.05) / (darker + 0.05))
 }
 
-fn legible_fence_border(
-	border: Color,
-	background: Color,
-	muted: Color,
-	foreground: Color,
-) -> Color {
-	if color_contrast(border, background).is_none_or(|ratio| ratio >= MIN_FENCE_CONTRAST) {
-		return border;
-	}
-	let target =
-		if color_contrast(muted, background).is_some_and(|ratio| ratio >= MIN_FENCE_CONTRAST) {
-			muted
-		} else {
-			foreground
-		};
-	let (Color::Rgb(red, green, blue), Color::Rgb(to_red, to_green, to_blue)) = (border, target)
-	else {
-		return target;
-	};
-	for step in 1_u16..=255 {
-		let blend = |from: u8, to: u8| {
-			((u16::from(from) * (255 - step) + u16::from(to) * step + 127) / 255) as u8
-		};
-		let candidate = Color::Rgb(blend(red, to_red), blend(green, to_green), blend(blue, to_blue));
-		if color_contrast(candidate, background).is_some_and(|ratio| ratio >= MIN_FENCE_CONTRAST) {
-			return candidate;
-		}
-	}
-	target
-}
-
-/// Derives a stable TrueColor accent from a session name and active theme.
+/// Derives a stable `TrueColor` accent from a session name and active theme.
 ///
 /// Dark surfaces use the warm 0–120° band. Supplying a light-surface
 /// luminance selects the cool 180–300° band and lowers lightness until WCAG
@@ -360,7 +618,7 @@ pub fn session_accent_color(
 			let mut low = 0.0;
 			let mut high = lightness;
 			for _ in 0..20 {
-				let middle = (low + high) / 2.0;
+				let middle = f64::midpoint(low, high);
 				if relative_luminance(hsl_rgb(f64::from(hue), 0.9, middle)) > cap {
 					high = middle;
 				} else {
@@ -400,7 +658,7 @@ fn hue_distance(left: f64, right: f64) -> f64 {
 }
 
 fn hsl_rgb(hue: f64, saturation: f64, lightness: f64) -> [u8; 3] {
-	let chroma = (1.0 - (2.0 * lightness - 1.0).abs()) * saturation;
+	let chroma = (1.0 - 2.0f64.mul_add(lightness, -1.0).abs()) * saturation;
 	let sector = hue / 60.0;
 	let secondary = chroma * (1.0 - (sector.rem_euclid(2.0) - 1.0).abs());
 	let (red, green, blue) = match sector as u8 {
@@ -428,7 +686,7 @@ fn relative_luminance([red, green, blue]: [u8; 3]) -> f64 {
 			((value + 0.055) / 1.055).powf(2.4)
 		}
 	};
-	0.2126 * linear(red) + 0.7152 * linear(green) + 0.0722 * linear(blue)
+	0.7152f64.mul_add(linear(green), 0.2126 * linear(red)) + 0.0722 * linear(blue)
 }
 
 #[cfg(test)]
@@ -512,6 +770,66 @@ mod tests {
 				assert!(ratio >= MIN_FENCE_CONTRAST, "{name} fence border contrast was {ratio:.3}:1");
 			}
 		}
+	}
+
+	#[test]
+	fn catalog_prefers_explicit_files_and_warns_on_broken_discovered_themes() {
+		let dir = tempfile::tempdir().unwrap();
+		let explicit = dir.path().join("ocean.json");
+		fs::write(&explicit, r##"{"name":"Ocean","dark":{"accent":"#0000ff"}}"##).unwrap();
+		let themes = dir.path().join("themes");
+		fs::create_dir_all(&themes).unwrap();
+		fs::write(themes.join("ocean.json"), r##"{"name":"Other","dark":{"accent":"#00ff00"}}"##)
+			.unwrap();
+		fs::write(themes.join("forest.json"), r##"{"name":"Forest","dark":{"accent":"#00aa00"}}"##)
+			.unwrap();
+		fs::write(themes.join("broken.json"), "{").unwrap();
+		fs::write(themes.join("notes.txt"), "ignored").unwrap();
+
+		let catalog = ThemeCatalog::load(std::slice::from_ref(&explicit), &[
+			themes.clone(),
+			dir.path().join("missing"),
+		])
+		.unwrap();
+		let names = catalog
+			.themes()
+			.iter()
+			.map(|loaded| loaded.name.as_str())
+			.collect::<Vec<_>>();
+		assert_eq!(names, ["ocean", "forest"], "explicit file shadows the discovered one");
+		assert_eq!(
+			catalog
+				.get("ocean")
+				.unwrap()
+				.for_appearance(Appearance::Dark)
+				.accent,
+			Color::Rgb(0, 0, 255)
+		);
+		assert_eq!(catalog.first_explicit().unwrap().name, "Ocean");
+		assert_eq!(catalog.warnings.len(), 1, "{:?}", catalog.warnings);
+		assert_eq!(catalog.warnings[0].path, themes.join("broken.json"));
+
+		let error = ThemeCatalog::load(&[dir.path().join("nope.json")], &[]).unwrap_err();
+		assert!(matches!(error, ThemeLoadError::Io { .. }), "{error}");
+		let error = ThemeCatalog::load(&[themes.join("broken.json")], &[]).unwrap_err();
+		assert!(matches!(error, ThemeLoadError::Theme { .. }), "{error}");
+	}
+
+	#[test]
+	fn named_palette_follows_appearance_changes() {
+		let theme = Arc::new(
+			JsonTheme::parse(
+				r##"{"name":"two","dark":{"accent":"#111111"},"light":{"accent":"#eeeeee"}}"##,
+			)
+			.unwrap(),
+		);
+		let mut ui = crate::UiContext::default().with_palette(Some(Arc::clone(&theme)));
+		assert_eq!(ui.appearance, Appearance::Dark);
+		assert_eq!(ui.theme.accent, Color::Rgb(0x11, 0x11, 0x11));
+		assert!(ui.apply_appearance(Appearance::Light));
+		assert_eq!(ui.theme.accent, Color::Rgb(0xee, 0xee, 0xee), "light variant selected");
+		assert!(ui.set_palette(None));
+		assert_eq!(ui.theme, Theme::for_appearance(Appearance::Light), "stock palette restored");
 	}
 
 	#[test]

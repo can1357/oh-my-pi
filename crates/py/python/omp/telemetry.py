@@ -192,6 +192,7 @@ class ModelRequest:
     latency_ms: int
     ttft_ms: int | None
     degraded: tuple[Degradation, ...]
+    kind: Kind = Kind.MODEL_REQUEST
     request_content: bytes | None = None
     response_content: bytes | None = None
 
@@ -380,6 +381,10 @@ async def _dispatch_subscription(
 ) -> None:
     """Deliver one host-filtered event or batch to its exact declared sink."""
 
+    if ctx is None:
+        from . import Context
+
+        ctx = Context.current()
     function = _subscription_handlers.get(qualified_name)
     if function is None:
         raise SubscriptionError(f"unknown telemetry subscription {qualified_name!r}")

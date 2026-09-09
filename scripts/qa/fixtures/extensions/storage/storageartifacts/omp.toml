@@ -1,0 +1,14 @@
+id = "storageartifacts"
+version = "0.1.0"
+omp_api = 1
+entry = "storageartifacts"
+capabilities = ["env.blob", "env.doc.read", "env.doc.write"]
+
+[[declarations]]
+id = "hello"
+kind = "hard"
+module = "storageartifacts"
+key = "hello@storageartifacts.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"

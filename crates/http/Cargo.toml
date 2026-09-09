@@ -15,3 +15,4 @@ workspace = true
 [dependencies]
 reqwest.workspace = true
 rustls.workspace = true
+tracing.workspace = true

@@ -2,18 +2,13 @@
 
 #[cfg(target_os = "macos")]
 use std::ffi::CString;
-#[cfg(unix)]
-use std::os::unix::ffi::OsStringExt as _;
 use std::{
 	collections::{BTreeMap, BTreeSet, HashMap},
-	ffi::OsString,
 	fs::{self, File},
 	io::{self, Cursor, Read, Write},
 	ops::ControlFlow,
 	path::{Component, Path, PathBuf},
-	process,
-	process::Command,
-	slice,
+	process, slice,
 	sync::{
 		Arc,
 		atomic::{AtomicU64, Ordering},
@@ -74,20 +69,9 @@ pub struct IsolationBaselineTooLargeError {
 /// Failure while sizing untracked content ahead of an isolation snapshot.
 #[derive(Debug, Error)]
 pub enum IsolationBaselinePreflightError {
-	/// Git could not be started.
-	#[error("could not enumerate untracked files with git")]
-	GitIo(#[source] io::Error),
-	/// Git rejected the untracked-file query.
-	#[error("git untracked-file query exited with {code:?}: {stderr}")]
-	GitExit {
-		/// Process exit code, absent when terminated by signal.
-		code:   Option<i32>,
-		/// Bounded command diagnostic.
-		stderr: Str,
-	},
-	/// Git emitted a path which cannot be represented on this platform.
-	#[error("git emitted an unrepresentable untracked path")]
-	UnrepresentablePath,
+	/// Version-control discovery or untracked-file enumeration failed.
+	#[error("could not enumerate untracked files")]
+	Vcs(#[from] omp_vcs::Error),
 	/// Link-preserving metadata failed for one untracked entry.
 	#[error("could not size untracked entry {path:?}")]
 	Metadata {
@@ -290,53 +274,15 @@ struct Manifest {
 }
 
 fn untracked_paths(root: &Path) -> Result<Vec<PathBuf>, IsolationBaselinePreflightError> {
-	if !root.join(".git").exists() {
+	let Some(repo) = omp_vcs::detect(root)? else {
 		return Ok(Vec::new());
-	}
-	let output = Command::new("git")
-		.args([
-			"--no-optional-locks",
-			"-c",
-			"core.fsmonitor=false",
-			"-c",
-			"core.untrackedCache=false",
-			"-C",
-		])
-		.arg(root)
-		.args(["ls-files", "--others", "--exclude-standard", "-z"])
-		.output()
-		.map_err(IsolationBaselinePreflightError::GitIo)?;
-	if !output.status.success() {
-		return Err(IsolationBaselinePreflightError::GitExit {
-			code:   output.status.code(),
-			stderr: bounded_command_stderr(&output.stderr),
-		});
-	}
-	output
-		.stdout
-		.split(|byte| *byte == 0)
-		.filter(|path| !path.is_empty())
-		.map(platform_path)
-		.collect()
-}
-
-fn bounded_command_stderr(bytes: &[u8]) -> Str {
-	const MAX_BYTES: usize = 4 * 1024;
-	let bytes = &bytes[..bytes.len().min(MAX_BYTES)];
-	Str::from(String::from_utf8_lossy(bytes).trim())
-}
-
-#[cfg(unix)]
-fn platform_path(bytes: &[u8]) -> Result<PathBuf, IsolationBaselinePreflightError> {
-	Ok(PathBuf::from(OsString::from_vec(bytes.to_vec())))
-}
-
-#[cfg(not(unix))]
-fn platform_path(bytes: &[u8]) -> Result<PathBuf, IsolationBaselinePreflightError> {
-	String::from_utf8(bytes.to_vec())
-		.map(OsString::from)
+	};
+	// jj snapshots every non-ignored path, so it has no distinct untracked set.
+	Ok(repo
+		.ls_files(true, true)?
+		.into_iter()
 		.map(PathBuf::from)
-		.map_err(|_| IsolationBaselinePreflightError::UnrepresentablePath)
+		.collect())
 }
 
 fn untracked_entry_bytes(path: &Path) -> Result<u64, IsolationBaselinePreflightError> {
@@ -548,16 +494,21 @@ impl WorkspaceOperations {
 				"document authority omitted an uncontested workspace lease",
 			)));
 		};
+		if cancel.is_cancelled() {
+			return Err(WorkspaceError::Cancelled.into());
+		}
+		// Once the workspace-wide lease is held, restoration is a foreground
+		// mutation: finish the authorized plan even if its caller disconnects.
+		// Stopping between per-document commits would expose a half-restored
+		// tree and violate the cancellation boundary.
+		let commit_cancel = CancellationToken::new();
 
 		let mut written = 0_u64;
 		let mut deleted = 0_u64;
 		for plan in plans {
-			if cancel.is_cancelled() {
-				return Err(WorkspaceError::Cancelled.into());
-			}
 			let path = plan.path().clone();
 			let delete = plan.is_delete();
-			match self.apply_restore_plan(plan, cancel).await {
+			match self.apply_restore_plan(plan, &commit_cancel).await {
 				Ok(()) if delete => deleted += 1,
 				Ok(()) => written += 1,
 				Err(failure) => {
@@ -574,7 +525,7 @@ impl WorkspaceOperations {
 		restored.deleted = deleted;
 		if restored.partial || restored.conflicts.is_empty() {
 			let current = self.publish_snapshot(
-				self.snapshot_at(self.inner.workspace.root(), &[], cancel)?,
+				self.snapshot_at(self.inner.workspace.root(), &[], &commit_cancel)?,
 				None,
 				reserved.generation,
 				false,

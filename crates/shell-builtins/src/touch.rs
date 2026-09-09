@@ -25,7 +25,7 @@ use clap::{
 use jiff::{Timestamp, ToSpan, Zoned, civil::Time, fmt::strtime, tz::TimeZone};
 #[cfg(unix)]
 use libc::O_NONBLOCK;
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 #[cfg(unix)]
 use rustix::fs::Timestamps;
 #[cfg(unix)]
@@ -604,7 +604,10 @@ fn touch_file(
 			return Ok(());
 		}
 
-		if let Err(error) = File::create(&resolved) {
+		let writable = host
+			.ensure_writable(path)
+			.map_err(|error| io_context(error, format!("cannot touch {}", filename.quote())))?;
+		if let Err(error) = File::create(&writable) {
 			// A trailing separator denotes a directory, but `File::create`
 			// cannot create one.
 			let is_directory = path
@@ -634,6 +637,11 @@ fn touch_file(
 		}
 	}
 
+	if !is_stdout {
+		host
+			.ensure_writable(path)
+			.map_err(|error| io_context(error, format!("setting times of {}", filename.quote())))?;
+	}
 	update_times(path, &resolved, is_stdout, opts, atime, mtime)
 }
 
@@ -994,7 +1002,7 @@ fn pathbuf_from_stdout() -> Result<PathBuf, TouchError> {
 	}
 	#[cfg(target_os = "android")]
 	{
-		Ok(PathBuf::from("/proc/self/fd/1"))
+		Ok(PathBuf::from("/dev/fd/1"))
 	}
 	#[cfg(windows)]
 	{

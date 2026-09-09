@@ -2,7 +2,6 @@ use std::{
 	collections::BTreeMap,
 	fs,
 	path::{Path, PathBuf},
-	process::Stdio,
 };
 
 use futures::StreamExt as _;
@@ -11,16 +10,16 @@ use omp_core::Str;
 use omp_ext::{
 	Layer as BackendLayer,
 	index::SignedIndex,
-	lock::{InstalledRecord, LockFile},
+	lock::InstalledRecord,
 	marketplace::{
 		MarketplaceCatalog, MarketplacePlugin, PluginSource, contained_plugin_path, parse_catalog,
 	},
 	resolver::compare_versions,
+	trust::{GrantsFile, grant_covers},
 };
 use serde::{Deserialize, Serialize};
-use tokio::process::Command;
 
-use super::{Scope, StatePaths};
+use super::{Scope, StatePaths, read_lock_or_empty};
 
 const MAX_INDEX_BYTES: usize = 16 * 1024 * 1024;
 
@@ -106,7 +105,7 @@ pub(crate) struct MarketplacePackage {
 }
 
 /// One installed native extension projected across user and project scopes.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize)]
 pub(crate) struct InstalledExtensionView {
 	pub(crate) id:          Str,
 	pub(crate) version:     Option<Str>,
@@ -114,6 +113,13 @@ pub(crate) struct InstalledExtensionView {
 	pub(crate) scope:       Scope,
 	pub(crate) marketplace: Option<Str>,
 	pub(crate) shadowed:    bool,
+	pub(crate) tier:        omp_ext::TrustTier,
+	pub(crate) source:      toml::Value,
+	pub(crate) features:    Vec<Str>,
+	pub(crate) publisher:   Option<Str>,
+	pub(crate) artifact:    Option<Str>,
+	pub(crate) capability:  Option<Str>,
+	pub(crate) admitted:    bool,
 }
 
 /// One committed extension upgrade.
@@ -324,12 +330,40 @@ impl ExtensionTransactions {
 	}
 
 	pub(crate) fn uninstall(&self, spec: &str) -> miette::Result<Str> {
-		let (id, marketplace) = package_spec(spec)?;
-		let plugin_id = format!("{id}@{marketplace}");
 		let registry_path = self.state.plugin_registry(self.scope);
 		let mut installed = read_installed_plugins(&registry_path)?;
+		let plugin_id = if installed.plugins.contains_key(spec) {
+			spec.to_owned()
+		} else {
+			let candidates = installed
+				.plugins
+				.keys()
+				.filter(|installed_id| {
+					installed_id
+						.rsplit_once('@')
+						.is_some_and(|(name, _)| name == spec)
+				})
+				.cloned()
+				.collect::<Vec<_>>();
+			match candidates.as_slice() {
+				[candidate] => candidate.clone(),
+				[] => {
+					return Err(miette!(
+						"nothing to remove: plugin {spec} is not installed in this scope"
+					));
+				},
+				_ => {
+					return Err(miette!(
+						"plugin {spec} is installed from {} marketplaces; qualify it as one of: {}",
+						candidates.len(),
+						candidates.join(", ")
+					));
+				},
+			}
+		};
+		let (id, _) = package_spec(&plugin_id)?;
 		if installed.plugins.remove(&plugin_id).is_none() {
-			return Err(miette!("plugin {plugin_id} is not installed in this scope"));
+			return Err(miette!("nothing to remove: plugin {spec} is not installed in this scope"));
 		}
 		unlink_plugin(&self.state.plugin_root(self.scope), id)?;
 		write_json(&registry_path, &installed)?;
@@ -413,82 +447,6 @@ impl ExtensionTransactions {
 		}
 		Ok(upgrades)
 	}
-}
-
-/// Refreshes stale marketplace catalogs and applies the configured startup
-/// update policy. `notify` returns semantic-version diagnostics without
-/// mutating installs; `auto` upgrades both user and project scopes.
-pub(crate) async fn refresh_stale_and_update(
-	data_dir: &Path,
-	project: &Path,
-	mode: &str,
-) -> miette::Result<Vec<Str>> {
-	if mode == "off" {
-		return Ok(Vec::new());
-	}
-	if !matches!(mode, "notify" | "auto") {
-		return Err(miette!("unknown marketplace auto-update mode {mode:?}"));
-	}
-	let transactions = ExtensionTransactions::new(data_dir, project, Scope::User);
-	let registry = read_marketplace_registry(&transactions.state)?;
-	for entry in &registry.marketplaces {
-		let stale = fs::metadata(&entry.catalog_path)
-			.and_then(|metadata| metadata.modified())
-			.and_then(|modified| modified.elapsed().map_err(std::io::Error::other))
-			.is_ok_and(|age| age.as_secs() >= 24 * 60 * 60);
-		if stale {
-			transactions.update_index(Some(entry.name.as_str())).await?;
-		}
-	}
-	let diagnostics = available_plugin_updates(&transactions.state)?;
-	if mode == "auto" {
-		for scope in [Scope::User, Scope::Project] {
-			ExtensionTransactions::new(data_dir, project, scope)
-				.upgrade(None)
-				.await?;
-		}
-	}
-	Ok(diagnostics)
-}
-
-fn available_plugin_updates(state: &StatePaths) -> miette::Result<Vec<Str>> {
-	let marketplaces = read_marketplace_registry(state)?;
-	let mut diagnostics = Vec::new();
-	for scope in [Scope::User, Scope::Project] {
-		let installed = read_installed_plugins(&state.plugin_registry(scope))?;
-		for (plugin_id, entries) in installed.plugins {
-			let Some(current) = entries.first() else {
-				continue;
-			};
-			let Ok((id, marketplace)) = package_spec(&plugin_id) else {
-				continue;
-			};
-			let Some(entry) = marketplaces
-				.marketplaces
-				.iter()
-				.find(|entry| entry.name == marketplace)
-			else {
-				continue;
-			};
-			let catalog = read_plugin_catalog(entry)?;
-			let Some(candidate) = catalog
-				.plugins
-				.iter()
-				.find(|plugin| plugin.name == id)
-				.and_then(|plugin| plugin.version.as_ref())
-			else {
-				continue;
-			};
-			let newer = compare_versions(candidate.as_str(), current.version.as_str())
-				.map(|ordering| ordering.is_gt())
-				.unwrap_or(candidate != &current.version);
-			if newer {
-				diagnostics.push(Str::new(format!("{plugin_id}: {} -> {candidate}", current.version)));
-			}
-		}
-	}
-	diagnostics.sort();
-	Ok(diagnostics)
 }
 
 struct FetchedMarketplace {
@@ -656,44 +614,30 @@ async fn clone_repo(
 	if let Some(parent) = destination.parent() {
 		fs::create_dir_all(parent).into_diagnostic()?;
 	}
-	let output = Command::new("git")
-		.args(["clone", "--quiet", "--no-tags", url])
-		.arg(destination)
-		.stdin(Stdio::null())
-		.output()
-		.await
-		.into_diagnostic()?;
-	if !output.status.success() {
-		return Err(miette!("git clone failed: {}", String::from_utf8_lossy(&output.stderr)));
-	}
-	if let Some(reference) = expected_sha.or(reference) {
-		let output = Command::new("git")
-			.arg("-C")
-			.arg(destination)
-			.args(["checkout", "--quiet", "--detach", reference])
-			.stdin(Stdio::null())
-			.output()
-			.await
-			.into_diagnostic()?;
-		if !output.status.success() {
-			return Err(miette!("git checkout failed: {}", String::from_utf8_lossy(&output.stderr)));
-		}
-	}
-	let output = Command::new("git")
-		.arg("-C")
-		.arg(destination)
-		.args(["rev-parse", "HEAD"])
-		.stdin(Stdio::null())
-		.output()
-		.await
-		.into_diagnostic()?;
-	if !output.status.success() {
-		return Err(miette!("git revision lookup failed"));
-	}
-	let sha = String::from_utf8(output.stdout)
-		.into_diagnostic()?
-		.trim()
-		.to_owned();
+	omp_vcs::git::clone(
+		url,
+		destination,
+		&omp_vcs::CloneOptions {
+			ref_name: reference.map(str::to_owned),
+			sha:      expected_sha.map(str::to_owned),
+			timeout:  None,
+		},
+		None,
+	)
+	.await
+	.into_diagnostic()?;
+	let destination = destination.to_owned();
+	let sha = tokio::task::spawn_blocking(move || {
+		let repo = omp_vcs::git::GitRepo::discover(&destination)
+			.into_diagnostic()?
+			.ok_or_else(|| miette!("git clone did not create a repository"))?;
+		repo
+			.head_sha()
+			.into_diagnostic()?
+			.ok_or_else(|| miette!("git revision lookup failed"))
+	})
+	.await
+	.into_diagnostic()??;
 	if expected_sha.is_some_and(|expected| {
 		!sha
 			.to_ascii_lowercase()
@@ -911,6 +855,13 @@ fn plugin_views(state: &StatePaths) -> miette::Result<Vec<InstalledExtensionView
 					scope,
 					marketplace: (!marketplace.is_empty()).then(|| Str::new(marketplace)),
 					shadowed: scope == Scope::User && project_enabled.contains(id.as_str()),
+					tier: omp_ext::TrustTier::Sandboxed,
+					source: toml::Value::String(entry.install_path.display().to_string()),
+					features: Vec::new(),
+					publisher: None,
+					artifact: None,
+					capability: None,
+					admitted: entry.enabled,
 				});
 			}
 		}
@@ -956,49 +907,115 @@ fn project_catalog(
 
 fn read_catalog(state: &StatePaths) -> miette::Result<SignedIndex> {
 	let key = fs::read_to_string(&state.index_key).into_diagnostic()?;
-	SignedIndex::read(&state.index_snapshot, key.trim()).map_err(|error| miette!("{error}"))
+	SignedIndex::read(&state.index_snapshot, key.trim()).map_err(super::extension_failure)
 }
 
-pub(super) fn installed_views(state: &StatePaths) -> miette::Result<Vec<InstalledExtensionView>> {
-	let client =
-		InstalledRecord::read(&state.client_installed).map_err(|error| miette!("{error}"))?;
+pub(crate) fn installed_views(state: &StatePaths) -> miette::Result<Vec<InstalledExtensionView>> {
+	let client = InstalledRecord::read(&state.client_installed).map_err(super::extension_failure)?;
 	let workspace =
-		InstalledRecord::read(&state.workspace_installed).map_err(|error| miette!("{error}"))?;
-	let client_versions = versions(&state.client_lock, BackendLayer::Client)?;
-	let workspace_versions = versions(&state.workspace_lock, BackendLayer::Workspace)?;
+		InstalledRecord::read(&state.workspace_installed).map_err(super::extension_failure)?;
+	let client_lock = read_lock_or_empty(&state.client_lock, BackendLayer::Client)?;
+	let workspace_lock = read_lock_or_empty(&state.workspace_lock, BackendLayer::Workspace)?;
+	let grants = GrantsFile::read(&state.grants).map_err(super::extension_failure)?;
 	let project_ids = workspace
 		.extensions
 		.iter()
-		.filter(|entry| entry.enabled)
+		.filter(|entry| {
+			entry.enabled
+				&& workspace_lock
+					.extensions
+					.iter()
+					.find(|locked| locked.id == entry.id)
+					.is_none_or(|locked| {
+						grant_covers(
+							&grants,
+							&locked.id,
+							&locked.publisher,
+							BackendLayer::Workspace,
+							Some(&state.workspace),
+							&locked.capability_digest,
+							locked.tier,
+							&locked.ship,
+						)
+					})
+		})
 		.map(|entry| entry.id.clone())
 		.collect::<std::collections::BTreeSet<_>>();
 	let mut entries = Vec::with_capacity(client.extensions.len() + workspace.extensions.len());
-	entries.extend(
-		client
+	entries.extend(client.extensions.into_iter().map(|entry| {
+		let locked = client_lock
 			.extensions
-			.into_iter()
-			.map(|entry| InstalledExtensionView {
-				version:     client_versions.get(&entry.id).cloned(),
-				marketplace: source_index(&entry.source),
-				shadowed:    project_ids.contains(&entry.id),
-				id:          entry.id,
-				enabled:     entry.enabled,
-				scope:       Scope::User,
-			}),
-	);
-	entries.extend(
-		workspace
+			.iter()
+			.find(|locked| locked.id == entry.id);
+		let version = locked
+			.map(|locked| locked.version.clone())
+			.or_else(|| source_version(&entry.source));
+		let admitted = !entry.enabled
+			|| locked.is_none_or(|locked| {
+				grant_covers(
+					&grants,
+					&locked.id,
+					&locked.publisher,
+					BackendLayer::Client,
+					None,
+					&locked.capability_digest,
+					locked.tier,
+					&locked.ship,
+				)
+			});
+		InstalledExtensionView {
+			version,
+			marketplace: source_index(&entry.source),
+			shadowed: project_ids.contains(&entry.id),
+			id: entry.id,
+			enabled: entry.enabled,
+			scope: Scope::User,
+			tier: entry.tier,
+			source: entry.source,
+			features: entry.features,
+			publisher: locked.map(|locked| locked.publisher.clone()),
+			artifact: locked.map(|locked| locked.wheel.blake3.clone()),
+			capability: locked.map(|locked| locked.capability_digest.clone()),
+			admitted,
+		}
+	}));
+	entries.extend(workspace.extensions.into_iter().map(|entry| {
+		let locked = workspace_lock
 			.extensions
-			.into_iter()
-			.map(|entry| InstalledExtensionView {
-				version:     workspace_versions.get(&entry.id).cloned(),
-				marketplace: source_index(&entry.source),
-				shadowed:    false,
-				id:          entry.id,
-				enabled:     entry.enabled,
-				scope:       Scope::Project,
-			}),
-	);
+			.iter()
+			.find(|locked| locked.id == entry.id);
+		let version = locked
+			.map(|locked| locked.version.clone())
+			.or_else(|| source_version(&entry.source));
+		let admitted = !entry.enabled
+			|| locked.is_none_or(|locked| {
+				grant_covers(
+					&grants,
+					&locked.id,
+					&locked.publisher,
+					BackendLayer::Workspace,
+					Some(&state.workspace),
+					&locked.capability_digest,
+					locked.tier,
+					&locked.ship,
+				)
+			});
+		InstalledExtensionView {
+			version,
+			marketplace: source_index(&entry.source),
+			shadowed: false,
+			id: entry.id,
+			enabled: entry.enabled,
+			scope: Scope::Project,
+			tier: entry.tier,
+			source: entry.source,
+			features: entry.features,
+			publisher: locked.map(|locked| locked.publisher.clone()),
+			artifact: locked.map(|locked| locked.wheel.blake3.clone()),
+			capability: locked.map(|locked| locked.capability_digest.clone()),
+			admitted,
+		}
+	}));
 	entries.sort_by(|left, right| {
 		left
 			.id
@@ -1024,16 +1041,16 @@ const fn scope_order(scope: Scope) -> u8 {
 	}
 }
 
-fn versions(path: &Path, layer: BackendLayer) -> miette::Result<BTreeMap<Str, Str>> {
-	if !path.exists() {
-		return Ok(BTreeMap::new());
-	}
-	let lock = LockFile::read(path, layer).map_err(|error| miette!("{error}"))?;
-	Ok(lock
-		.extensions
-		.into_iter()
-		.map(|entry| (entry.id, entry.version))
-		.collect())
+fn source_version(source: &toml::Value) -> Option<Str> {
+	let source = source.as_table()?;
+	let root = source
+		.get("root")
+		.or_else(|| source.get("path"))
+		.or_else(|| source.get("link"))?
+		.as_str()?;
+	let manifest = fs::read_to_string(Path::new(root).join("omp.toml")).ok()?;
+	let value: toml::Value = toml::from_str(&manifest).ok()?;
+	value.get("version")?.as_str().map(Str::new)
 }
 
 fn source_index(source: &toml::Value) -> Option<Str> {
@@ -1112,6 +1129,94 @@ mod tests {
 		let project_record = read_installed_plugins(&state.plugin_registry(Scope::Project)).unwrap();
 		assert!(!user.plugins["sample@index"][0].enabled);
 		assert!(project_record.plugins["sample@index"][0].enabled);
+	}
+
+	#[test]
+	fn uninstall_resolves_a_unique_bare_plugin_name() {
+		let temp = tempfile::tempdir().unwrap();
+		let data_dir = temp.path().join("data");
+		let project = temp.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+		let state = StatePaths::new(&data_dir, &project);
+		let mut installed = InstalledPluginsRegistry::default();
+		installed
+			.plugins
+			.insert("sample@index".to_owned(), vec![plugin_entry("user", true)]);
+		write_json(&state.plugin_registry(Scope::User), &installed).unwrap();
+
+		let removed = ExtensionTransactions::new(&data_dir, &project, Scope::User)
+			.uninstall("sample")
+			.unwrap();
+
+		assert_eq!(removed, "sample@index");
+		let installed = read_installed_plugins(&state.plugin_registry(Scope::User)).unwrap();
+		assert!(installed.plugins.is_empty());
+	}
+
+	#[test]
+	fn uninstall_rejects_an_ambiguous_bare_plugin_name_with_candidates() {
+		let temp = tempfile::tempdir().unwrap();
+		let data_dir = temp.path().join("data");
+		let project = temp.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+		let state = StatePaths::new(&data_dir, &project);
+		let mut installed = InstalledPluginsRegistry::default();
+		for id in ["sample@first", "sample@second"] {
+			installed
+				.plugins
+				.insert(id.to_owned(), vec![plugin_entry("user", true)]);
+		}
+		write_json(&state.plugin_registry(Scope::User), &installed).unwrap();
+
+		let error = ExtensionTransactions::new(&data_dir, &project, Scope::User)
+			.uninstall("sample")
+			.unwrap_err()
+			.to_string();
+
+		assert!(error.contains("sample@first, sample@second"), "{error}");
+		let installed = read_installed_plugins(&state.plugin_registry(Scope::User)).unwrap();
+		assert_eq!(installed.plugins.len(), 2);
+	}
+
+	#[test]
+	fn uninstall_reports_when_no_plugin_matches() {
+		let temp = tempfile::tempdir().unwrap();
+		let data_dir = temp.path().join("data");
+		let project = temp.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+
+		let error = ExtensionTransactions::new(&data_dir, &project, Scope::User)
+			.uninstall("missing")
+			.unwrap_err()
+			.to_string();
+
+		assert!(error.contains("nothing to remove"), "{error}");
+		assert!(error.contains("missing"), "{error}");
+	}
+
+	#[test]
+	fn uninstall_keeps_qualified_package_resolution_unchanged() {
+		let temp = tempfile::tempdir().unwrap();
+		let data_dir = temp.path().join("data");
+		let project = temp.path().join("project");
+		fs::create_dir_all(&project).unwrap();
+		let state = StatePaths::new(&data_dir, &project);
+		let mut installed = InstalledPluginsRegistry::default();
+		for id in ["sample@first", "sample@second"] {
+			installed
+				.plugins
+				.insert(id.to_owned(), vec![plugin_entry("user", true)]);
+		}
+		write_json(&state.plugin_registry(Scope::User), &installed).unwrap();
+
+		let removed = ExtensionTransactions::new(&data_dir, &project, Scope::User)
+			.uninstall("sample@second")
+			.unwrap();
+
+		assert_eq!(removed, "sample@second");
+		let installed = read_installed_plugins(&state.plugin_registry(Scope::User)).unwrap();
+		assert!(installed.plugins.contains_key("sample@first"));
+		assert!(!installed.plugins.contains_key("sample@second"));
 	}
 
 	#[test]

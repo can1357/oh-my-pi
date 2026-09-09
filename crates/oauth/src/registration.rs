@@ -1,4 +1,4 @@
-use std::{fmt, net};
+use std::{fmt, mem, net};
 
 use http::{HeaderMap, HeaderValue, Method, header::CONTENT_TYPE};
 use omp_core::{ExposeSecret as _, SecretString, Str};
@@ -25,7 +25,7 @@ pub struct ClientRegistrationRequest<'a> {
 
 impl<'a> ClientRegistrationRequest<'a> {
 	/// Constructs the native authorization-code PKCE declaration.
-	pub fn native(client_name: &'a str, redirect_uris: &'a [&'a str]) -> Self {
+	pub const fn native(client_name: &'a str, redirect_uris: &'a [&'a str]) -> Self {
 		Self {
 			redirect_uris,
 			client_name,
@@ -137,7 +137,7 @@ pub async fn register_client(
 	endpoint: &str,
 	request: &ClientRegistrationRequest<'_>,
 ) -> Result<ClientRegistration, ClientRegistrationError> {
-	let body = Zeroizing::new(
+	let mut body = Zeroizing::new(
 		serde_json::to_string(request).map_err(|_| ClientRegistrationError::Malformed)?,
 	);
 	let mut headers = HeaderMap::new();
@@ -147,7 +147,7 @@ pub async fn register_client(
 			Method::POST,
 			endpoint,
 			headers,
-			Some(SecretString::from(body.as_str().to_owned())),
+			Some(SecretString::from(mem::take(&mut *body))),
 		)?)
 		.await?;
 	if !(200..300).contains(&response.status) {
@@ -169,7 +169,7 @@ fn valid_native_redirect(value: &str) -> bool {
 	let Ok(url) = Url::parse(value) else {
 		return false;
 	};
-	if url.fragment().is_some() {
+	if url.fragment().is_some() || !url.username().is_empty() || url.password().is_some() {
 		return false;
 	}
 	match (url.scheme(), url.host_str()) {

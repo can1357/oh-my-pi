@@ -2,7 +2,7 @@
 
 use std::{cmp, fmt::Write};
 
-use omp_core::sf;
+use omp_tool::{Diag, DiagKind};
 use serde::{Deserialize, Deserializer, de};
 use serde_json::{Map, Value};
 use url::Url;
@@ -178,7 +178,9 @@ pub(super) async fn render<C: HttpClient + Sync>(
 	}
 
 	let mut result = RenderResult::markdown(&markdown, "github-gist");
-	result.notes.insert(0, sf!("Fetched via GitHub API"));
+	result
+		.diags
+		.insert(0, Diag::info(DiagKind::Provenance, "Fetched via GitHub API"));
 	Ok(Some(result))
 }
 

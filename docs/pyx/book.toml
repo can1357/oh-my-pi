@@ -1,0 +1,17 @@
+[book]
+title = "omp Python extension API"
+description = "Documentation for the frozen omp Python extension surface"
+authors = ["omp"]
+language = "en"
+src = "."
+
+[build]
+build-dir = "../../target/pyx-book"
+
+[output.html]
+default-theme = "rust"
+preferred-dark-theme = "ayu"
+fold = { enable = true, level = 1 }
+
+[output.html.search]
+limit-results = 20

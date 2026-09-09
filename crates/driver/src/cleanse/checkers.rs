@@ -25,7 +25,7 @@ pub trait BinaryResolver {
 	/// executable set.
 	fn resolve(&self, project_root: &Path, manifest_root: &Path, names: &[&str]) -> Option<PathBuf>;
 }
-/// Filesystem/PATH resolver matching pi's project-local precedence.
+/// Filesystem/PATH resolver using project-local precedence.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct FilesystemResolver;
 

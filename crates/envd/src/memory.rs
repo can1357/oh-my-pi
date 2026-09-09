@@ -110,7 +110,7 @@ impl RegisteredMemoryRuntime {
 
 impl Drop for RegisteredMemoryRuntime {
 	fn drop(&mut self) {
-		RuntimeRegistry::unregister(self.session_id.as_str());
+		RuntimeRegistry::unregister(self.session_id.as_str(), &self.runtime);
 	}
 }
 

@@ -10,7 +10,7 @@ use omp_core::Str;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{ExtensionCode, ExtensionError};
+use crate::{ExtensionCode, ExtensionError, config::StaticDeclaration};
 
 /// A validated Claude/OMP marketplace catalog.
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -74,6 +74,9 @@ pub struct MarketplacePlugin {
 	/// Declared semantic version when available.
 	#[serde(default)]
 	pub version:      Option<Str>,
+	/// File-backed agent definitions copied during installation.
+	#[serde(default)]
+	pub agents:       Option<Value>,
 	/// Inline or file-backed LSP metadata copied during installation.
 	#[serde(default)]
 	pub lsp_servers:  Option<Value>,
@@ -172,6 +175,59 @@ impl MarketplacePlugin {
 			_ => Err(catalog_error(format!("unknown plugin source variant {kind:?}"))),
 		}
 	}
+
+	/// Lowers marketplace discovery slots into signed static content rows.
+	pub fn static_declarations(&self) -> Result<Vec<StaticDeclaration>, ExtensionError> {
+		let mut rows = Vec::new();
+		for (kind, value) in [
+			("agents", self.agents.as_ref()),
+			("lsp-servers", self.lsp_servers.as_ref()),
+			("dap-adapters", self.dap_adapters.as_ref()),
+		] {
+			if let Some(value) = value {
+				lower_content_value(kind, value, &mut rows)?;
+			}
+		}
+		Ok(rows)
+	}
+}
+
+fn lower_content_value(
+	kind: &str,
+	value: &Value,
+	rows: &mut Vec<StaticDeclaration>,
+) -> Result<(), ExtensionError> {
+	if let Some(values) = value.as_array() {
+		for value in values {
+			lower_content_value(kind, value, rows)?;
+		}
+		return Ok(());
+	}
+	let (path, explicit_format) = if let Some(path) = value.as_str() {
+		(path, None)
+	} else {
+		let object = value.as_object().ok_or_else(|| {
+			catalog_error(format!("{kind} metadata must be a path, object, or array"))
+		})?;
+		let path = object.get("path").and_then(Value::as_str).ok_or_else(|| {
+			catalog_error(format!("inline {kind} metadata must be copied to a signed path"))
+		})?;
+		(path, object.get("format").and_then(Value::as_str))
+	};
+	let format = explicit_format.unwrap_or_else(|| match kind {
+		"agents" => "omp-agent-markdown",
+		_ if path.ends_with(".yaml") || path.ends_with(".yml") => "yaml",
+		_ => "json",
+	});
+	let mut metadata = BTreeMap::new();
+	metadata.insert(Str::new_static("format"), Value::String(format.to_owned()));
+	rows.push(StaticDeclaration {
+		kind: Str::new(kind),
+		path: Some(Str::new(path)),
+		metadata,
+		..StaticDeclaration::default()
+	});
+	Ok(())
 }
 
 /// Parses a catalog, rejecting invalid authority fields and dropping malformed
@@ -248,7 +304,7 @@ fn append_contained(target: &mut PathBuf, path: &Path) -> Result<(), ExtensionEr
 	Ok(())
 }
 
-/// Returns whether a marketplace or plugin name follows the pi/Claude contract.
+/// Returns whether a marketplace or plugin name follows the naming contract.
 pub fn valid_name(name: &str) -> bool {
 	name.len() <= 64
 		&& name
@@ -281,5 +337,22 @@ mod tests {
 		.unwrap();
 		assert_eq!(catalog.plugins.len(), 1);
 		assert_eq!(catalog.plugins[0].name, "good");
+	}
+
+	#[test]
+	fn catalog_slots_lower_to_static_manifest_rows() {
+		let catalog = parse_catalog(
+			br#"{"name":"official","owner":{"name":"OMP"},"plugins":[{"name":"good","source":"./good","agents":"agents/*.md","lspServers":{"path":"catalog/lsp.json"},"dapAdapters":"catalog/dap.yaml"}]}"#,
+			"memory",
+		)
+		.unwrap();
+		let rows = catalog.plugins[0].static_declarations().unwrap();
+		assert_eq!(rows.iter().map(|row| row.kind.as_str()).collect::<Vec<_>>(), vec![
+			"agents",
+			"lsp-servers",
+			"dap-adapters"
+		]);
+		assert_eq!(rows[0].metadata["format"], "omp-agent-markdown");
+		assert_eq!(rows[2].metadata["format"], "yaml");
 	}
 }

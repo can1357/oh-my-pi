@@ -1,0 +1,55 @@
+── ask — Ask ───────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+╭─── Ask 1 questions ──────────────────────────────────────────────────────────────────────────────╮
+├─── [db] · options:1 ─────────────────────────────────────────────────────────────────────────────┤
+│  Which database should the new service use?                                                      │
+│   Postgres                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · in progress
+                                                                                                    
+╭─── Ask 2 questions ──────────────────────────────────────────────────────────────────────────────╮
+├─── [db] · options:3 ─────────────────────────────────────────────────────────────────────────────┤
+│  Which database should the new service use?                                                      │
+│   Postgres                                                                                      │
+│    ↳ Relational, strong consistency, JSONB support                                               │
+│   SQLite                                                                                        │
+│    ↳ Embedded, zero-ops, great for single-node                                                   │
+│   MongoDB                                                                                       │
+│    ↳ Document store, flexible schema                                                             │
+├─── [features] · multi · options:4 ───────────────────────────────────────────────────────────────┤
+│  Which auth flows should ship in v1?                                                             │
+│   Email + password                                                                              │
+│   OAuth (Google, GitHub)                                                                        │
+│   Magic links                                                                                   │
+│   SAML SSO                                                                                      │
+│    ↳ Enterprise; can be deferred                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  Ask 2 questions ────────────────────────────────────────────────────────────────────────────╮
+├─── [db] ─────────────────────────────────────────────────────────────────────────────────────────┤
+│  Which database should the new service use?                                                      │
+│   Postgres                                                                                      │
+│   SQLite                                                                                        │
+│   MongoDB                                                                                       │
+├─── [features] ───────────────────────────────────────────────────────────────────────────────────┤
+│  Which auth flows should ship in v1?                                                             │
+│   Email + password                                                                              │
+│   OAuth (Google, GitHub)                                                                        │
+│   Magic links                                                                                   │
+│   SAML SSO                                                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+ Ask                                                                                               
+Prompt cancelled by user before any answer was given                                                
+                                                                                                    
+

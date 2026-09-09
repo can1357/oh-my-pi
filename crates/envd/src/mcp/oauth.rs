@@ -9,15 +9,16 @@ use std::{
 };
 
 use http::HeaderMap;
+use omp_ai::{auth::StoreError, id::PrincipalId};
 use omp_core::{ExposeSecret as _, SecretString, Str};
-use omp_inference::id::PrincipalId;
 use omp_oauth::{
 	AuthChallenge, AuthorizationRequest, CallbackBindError, CallbackError, ClientConfiguration,
-	ClientRegistrationError, CompleteAuthorizationError, LoopbackCallback, MetadataError,
-	OAuthHttpClient, SystemEntropy, TokenError, TokenGrant, TokenRequest, begin_authorization,
+	ClientRegistrationError, CompleteAuthorizationError, DeviceAuthorizationError,
+	DeviceAuthorizationRequest, LoopbackCallback, MetadataError, OAuthHttpClient, SystemEntropy,
+	TokenError, TokenGrant, TokenRequest, begin_authorization, begin_device_authorization,
 	complete_authorization, discover_authorization_server_metadata,
-	discover_protected_resource_metadata, generate_pkce, refresh_token, resolve_client,
-	validate_redirect_pair,
+	discover_protected_resource_metadata, generate_pkce, poll_device_token, refresh_token,
+	resolve_client, validate_redirect_pair,
 };
 use parking_lot::RwLock;
 use tokio::sync::Mutex;
@@ -64,10 +65,17 @@ impl RefreshableHeaders for AuthorityHeaders {
 		self.headers.read().clone()
 	}
 
-	fn refresh(&self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>> {
+	fn refresh<'a>(
+		&'a self,
+		cancel: &'a CancellationToken,
+	) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
 		Box::pin(async move {
-			let mut state = self.state.lock().await;
-			if let Err(error) = self.flow.refresh(&mut state).await {
+			let mut state = tokio::select! {
+				biased;
+				() = cancel.cancelled() => return false,
+				state = self.state.lock() => state,
+			};
+			if let Err(error) = self.flow.refresh(&mut state, cancel).await {
 				if error.class() == OAuthFailureClass::Definitive
 					|| matches!(error, OAuthFlowError::NotRefreshable)
 				{
@@ -168,10 +176,10 @@ impl fmt::Debug for OAuthCredentialState {
 			.field("affinity", &self.affinity)
 			.field("access_token", &"[REDACTED]")
 			.field("expires_at_ms", &self.expires_at_ms)
-			.field("token_endpoint", &self.token_endpoint)
+			.field("token_endpoint", &"[REDACTED]")
 			.field("client_id", &self.client_id)
 			.field("client_secret", &self.client_secret.as_ref().map(|_| "[REDACTED]"))
-			.field("resource", &self.resource)
+			.field("resource", &self.resource.as_ref().map(|_| "[REDACTED]"))
 			.field("refresh_token", &self.refresh_token.as_ref().map(|_| "[REDACTED]"))
 			.field("generation", &self.generation)
 			.finish()
@@ -182,9 +190,7 @@ impl fmt::Debug for OAuthCredentialState {
 pub struct OAuthAttempt<'a> {
 	/// OMP profile identity.
 	pub profile:      &'a str,
-	/// Stable MCP server identity.
-	pub server:       &'a str,
-	/// Configured server URL.
+	/// Configured server URL and durable credential affinity.
 	pub server_url:   &'a str,
 	/// Validated mount configuration.
 	pub config:       &'a McpServerConfig,
@@ -192,8 +198,29 @@ pub struct OAuthAttempt<'a> {
 	pub challenge:    &'a AuthChallenge,
 	/// Local HTTP listener URI behind any TLS terminator.
 	pub listener_uri: &'a str,
-	/// Cancellation for discovery, browser, callback, and token exchange.
+	/// Cancellation for discovery, browser, callback/device polling, and token
+	/// exchange.
 	pub cancel:       CancellationToken,
+}
+
+/// One browser or device authorization instruction safe to present to the
+/// local user.
+#[derive(Clone, Copy)]
+pub struct OAuthPresentation<'a> {
+	/// Validated HTTP(S) URL.
+	pub url:       &'a str,
+	/// One-time device code when the URL cannot carry it.
+	pub user_code: Option<&'a str>,
+}
+
+impl fmt::Debug for OAuthPresentation<'_> {
+	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+		formatter
+			.debug_struct("OAuthPresentation")
+			.field("url", &"[REDACTED]")
+			.field("user_code", &self.user_code.map(|_| "[REDACTED]"))
+			.finish()
+	}
 }
 
 /// Combined OAuth coordinator over the one encrypted credential authority.
@@ -219,20 +246,24 @@ impl McpOAuth {
 	pub async fn authority_headers(
 		self: &Arc<Self>,
 		profile: &str,
-		server: &str,
 		config: &McpServerConfig,
 	) -> Result<Arc<dyn RefreshableHeaders>, OAuthFlowError> {
-		let _auth = config
-			.auth
-			.as_ref()
+		let server_url = config
+			.url
+			.as_deref()
 			.ok_or(OAuthFlowError::MissingAuthorizationServer)?;
 		let affinity =
-			CombinedAuthAuthority::mcp_affinity(profile, server, PrincipalId::from(profile));
+			CombinedAuthAuthority::mcp_affinity(profile, server_url, PrincipalId::from(profile));
+		let state = self.load_state(affinity)?;
+		Ok(AuthorityHeaders::new(Arc::clone(self), state).await?)
+	}
+
+	fn load_state(&self, affinity: AuthAffinity) -> Result<OAuthCredentialState, OAuthFlowError> {
 		let persisted = self
 			.authority
 			.load_mcp_oauth(&affinity)?
 			.ok_or(OAuthFlowError::CredentialUnavailable)?;
-		let state = OAuthCredentialState {
+		Ok(OAuthCredentialState {
 			affinity,
 			access_token: persisted.access_token,
 			expires_at_ms: persisted.expires_at_ms,
@@ -242,8 +273,7 @@ impl McpOAuth {
 			resource: persisted.resource,
 			refresh_token: persisted.refresh_token,
 			generation: persisted.generation,
-		};
-		Ok(AuthorityHeaders::new(Arc::clone(self), state).await?)
+		})
 	}
 
 	/// Runs discovery, explicit-client/DCR selection, browser authorization,
@@ -260,34 +290,44 @@ impl McpOAuth {
 	pub async fn authorize_presented(
 		&self,
 		attempt: OAuthAttempt<'_>,
-		present: Option<&(dyn Fn(&str) + Send + Sync)>,
+		present: Option<&(dyn for<'a> Fn(OAuthPresentation<'a>) + Send + Sync)>,
 	) -> Result<OAuthCredentialState, OAuthFlowError> {
 		if attempt.challenge.kind != omp_oauth::ChallengeKind::OAuth {
 			return Err(OAuthFlowError::UnsupportedChallenge);
 		}
-		let protected = discover_protected_resource_metadata(
-			self.http.as_ref(),
-			attempt.server_url,
-			attempt.challenge.resource_metadata.as_deref(),
+		let protected = match cancellable(
+			&attempt.cancel,
+			discover_protected_resource_metadata(
+				self.http.as_ref(),
+				attempt.server_url,
+				attempt.challenge.resource_metadata.as_deref(),
+			),
 		)
 		.await
-		.ok();
-		let discovered = if attempt.challenge.authorization_endpoint.is_some()
+		{
+			Ok(metadata) => Some(metadata),
+			Err(OAuthFlowError::Cancelled) => return Err(OAuthFlowError::Cancelled),
+			Err(_) => None,
+		};
+		let issuer = attempt.challenge.auth_server.as_deref().or_else(|| {
+			protected
+				.as_ref()
+				.and_then(|metadata| metadata.authorization_servers.first().map(Str::as_str))
+		});
+		let discovered = if let Some(issuer) = issuer {
+			Some(
+				cancellable(
+					&attempt.cancel,
+					discover_authorization_server_metadata(self.http.as_ref(), issuer),
+				)
+				.await?,
+			)
+		} else if attempt.challenge.authorization_endpoint.is_some()
 			&& attempt.challenge.token_endpoint.is_some()
 		{
 			None
 		} else {
-			let issuer = attempt
-				.challenge
-				.auth_server
-				.as_deref()
-				.or_else(|| {
-					protected
-						.as_ref()
-						.and_then(|metadata| metadata.authorization_servers.first().map(Str::as_str))
-				})
-				.ok_or(OAuthFlowError::MissingAuthorizationServer)?;
-			Some(discover_authorization_server_metadata(self.http.as_ref(), issuer).await?)
+			return Err(OAuthFlowError::MissingAuthorizationServer);
 		};
 		let authorization_endpoint = attempt
 			.challenge
@@ -296,9 +336,8 @@ impl McpOAuth {
 			.or_else(|| {
 				discovered
 					.as_ref()
-					.map(|metadata| metadata.authorization_endpoint.clone())
-			})
-			.ok_or(OAuthFlowError::MissingAuthorizationServer)?;
+					.and_then(|metadata| metadata.authorization_endpoint.clone())
+			});
 		let token_endpoint = attempt
 			.challenge
 			.token_endpoint
@@ -309,6 +348,9 @@ impl McpOAuth {
 					.map(|metadata| metadata.token_endpoint.clone())
 			})
 			.ok_or(OAuthFlowError::MissingAuthorizationServer)?;
+		let device_endpoint = discovered
+			.as_ref()
+			.and_then(|metadata| metadata.device_authorization_endpoint.as_deref());
 		let registration_endpoint =
 			attempt
 				.challenge
@@ -331,13 +373,16 @@ impl McpOAuth {
 			.or_else(|| configured_auth.and_then(|auth| auth.client_id.as_deref()))
 			.or(attempt.challenge.client_id.as_deref());
 		let redirect_uris = [redirect_uri];
-		let client = resolve_client(self.http.as_ref(), ClientConfiguration {
-			client_id: explicit_client,
-			client_secret: None,
-			registration_endpoint,
-			redirect_uris: &redirect_uris,
-			client_name: "OMP MCP client",
-		})
+		let client = cancellable(
+			&attempt.cancel,
+			resolve_client(self.http.as_ref(), ClientConfiguration {
+				client_id: explicit_client,
+				client_secret: None,
+				registration_endpoint,
+				redirect_uris: &redirect_uris,
+				client_name: "OMP MCP client",
+			}),
+		)
 		.await?;
 		let scopes = preferred_authorization_scopes(
 			protected
@@ -351,6 +396,23 @@ impl McpOAuth {
 		let resource = configured_auth
 			.and_then(|auth| auth.resource.as_deref())
 			.or(attempt.challenge.resource.as_deref());
+		let Some(authorization_endpoint) = authorization_endpoint else {
+			let Some(device_endpoint) = device_endpoint else {
+				return Err(OAuthFlowError::MissingAuthorizationServer);
+			};
+			return self
+				.authorize_device(
+					&attempt,
+					device_endpoint,
+					token_endpoint,
+					client.client_id,
+					client.client_secret,
+					&scopes,
+					resource,
+					present,
+				)
+				.await;
+		};
 		let pkce = generate_pkce(|bytes| SystemEntropy.fill(bytes))?;
 		let pending = begin_authorization(
 			AuthorizationRequest {
@@ -363,25 +425,104 @@ impl McpOAuth {
 			},
 			pkce,
 		)?;
-		let callback = LoopbackCallback::bind(listener_uri.as_str(), pending.pkce.state()).await?;
-		if let Some(present) = present {
-			present(pending.browser_url.as_str());
-		}
-		self.browser.open(pending.browser_url.as_str()).await?;
-		let grant = callback.receive(&attempt.cancel).await?;
-		let grant = complete_authorization(
-			self.http.as_ref(),
-			token_endpoint.as_str(),
-			client.client_id.as_str(),
-			client.client_secret.as_ref(),
-			pending,
-			grant.code,
-			grant.state.as_str(),
+		let callback = cancellable(
+			&attempt.cancel,
+			LoopbackCallback::bind(listener_uri.as_str(), pending.pkce.state()),
 		)
-		.await?;
+		.await;
+		let grant = match callback {
+			Ok(callback) => {
+				if let Some(present) = present {
+					present(OAuthPresentation {
+						url:       pending.browser_url.as_str(),
+						user_code: None,
+					});
+				}
+				match cancellable(&attempt.cancel, self.browser.open(pending.browser_url.as_str()))
+					.await
+				{
+					Ok(()) => {},
+					Err(OAuthFlowError::Browser(_)) if present.is_some() => {
+						// The validated URL has already reached the actor; a missing
+						// platform opener does not invalidate a manual browser flow.
+					},
+					Err(error @ OAuthFlowError::Browser(_)) => {
+						let Some(device_endpoint) = device_endpoint else {
+							return Err(error);
+						};
+						return self
+							.authorize_device(
+								&attempt,
+								device_endpoint,
+								token_endpoint,
+								client.client_id,
+								client.client_secret,
+								&scopes,
+								resource,
+								present,
+							)
+							.await;
+					},
+					Err(error) => return Err(error),
+				}
+				let callback_grant = match callback.receive(&attempt.cancel).await {
+					Ok(grant) => grant,
+					Err(error @ CallbackError::TimedOut) => {
+						let Some(device_endpoint) = device_endpoint else {
+							return Err(error.into());
+						};
+						return self
+							.authorize_device(
+								&attempt,
+								device_endpoint,
+								token_endpoint,
+								client.client_id,
+								client.client_secret,
+								&scopes,
+								resource,
+								present,
+							)
+							.await;
+					},
+					Err(error) => return Err(error.into()),
+				};
+				cancellable(
+					&attempt.cancel,
+					complete_authorization(
+						self.http.as_ref(),
+						token_endpoint.as_str(),
+						client.client_id.as_str(),
+						client.client_secret.as_ref(),
+						&attempt.cancel,
+						pending,
+						callback_grant.code,
+						callback_grant.state.as_str(),
+					),
+				)
+				.await?
+			},
+			Err(error @ OAuthFlowError::CallbackBind(_)) => {
+				let Some(device_endpoint) = device_endpoint else {
+					return Err(error);
+				};
+				return self
+					.authorize_device(
+						&attempt,
+						device_endpoint,
+						token_endpoint,
+						client.client_id,
+						client.client_secret,
+						&scopes,
+						resource,
+						present,
+					)
+					.await;
+			},
+			Err(error) => return Err(error),
+		};
 		let affinity = CombinedAuthAuthority::mcp_affinity(
 			attempt.profile,
-			attempt.server,
+			attempt.server_url,
 			PrincipalId::from(attempt.profile),
 		);
 		self.persist_grant(
@@ -392,6 +533,74 @@ impl McpOAuth {
 			resource.map(Str::from),
 			grant,
 			None,
+		)
+	}
+
+	async fn authorize_device(
+		&self,
+		attempt: &OAuthAttempt<'_>,
+		device_endpoint: &str,
+		token_endpoint: Str,
+		client_id: Str,
+		client_secret: Option<SecretString>,
+		scopes: &[Str],
+		resource: Option<&str>,
+		present: Option<&(dyn for<'a> Fn(OAuthPresentation<'a>) + Send + Sync)>,
+	) -> Result<OAuthCredentialState, OAuthFlowError> {
+		let pending = begin_device_authorization(
+			self.http.as_ref(),
+			&DeviceAuthorizationRequest {
+				endpoint: device_endpoint,
+				client_id: client_id.as_str(),
+				client_secret: client_secret.as_ref(),
+				scopes,
+				resource,
+			},
+			&attempt.cancel,
+		)
+		.await?;
+		if present.is_none() && !pending.user_code_embedded() {
+			return Err(DeviceAuthorizationError::PresentationUnavailable.into());
+		}
+		if let Some(present) = present {
+			present(OAuthPresentation {
+				url:       pending.browser_url(),
+				user_code: Some(pending.user_code()),
+			});
+		}
+		match cancellable(&attempt.cancel, self.browser.open(pending.browser_url())).await {
+			Ok(()) => {},
+			Err(OAuthFlowError::Browser(_)) if present.is_some() => {
+				// The actor has both the URL and one-time code, so manual
+				// completion remains possible without a platform opener.
+			},
+			Err(error) => return Err(error),
+		}
+		let grant = poll_device_token(
+			self.http.as_ref(),
+			&TokenRequest {
+				endpoint: token_endpoint.as_str(),
+				client_id: Some(client_id.as_str()),
+				client_secret: client_secret.as_ref(),
+				resource,
+				cancellation: Some(&attempt.cancel),
+			},
+			pending,
+			&attempt.cancel,
+		)
+		.await?;
+		let affinity = CombinedAuthAuthority::mcp_affinity(
+			attempt.profile,
+			attempt.server_url,
+			PrincipalId::from(attempt.profile),
+		);
+		self.persist_grant(
+			affinity,
+			token_endpoint,
+			client_id,
+			client_secret,
+			resource.map(Str::from),
+			grant,
 			None,
 		)
 	}
@@ -399,34 +608,46 @@ impl McpOAuth {
 	/// Refreshes an access token, preserving the previous refresh token when the
 	/// token endpoint omits rotation, and updates the encrypted-store
 	/// generation.
-	pub async fn refresh(&self, state: &mut OAuthCredentialState) -> Result<(), OAuthFlowError> {
+	pub async fn refresh(
+		&self,
+		state: &mut OAuthCredentialState,
+		cancel: &CancellationToken,
+	) -> Result<(), OAuthFlowError> {
 		let refresh = state
 			.refresh_token
 			.as_ref()
 			.cloned()
 			.ok_or(OAuthFlowError::NotRefreshable)?;
-		let previous_refresh = refresh.clone();
-		let grant = refresh_token(
-			self.http.as_ref(),
-			&TokenRequest {
-				endpoint:      state.token_endpoint.as_str(),
-				client_id:     Some(state.client_id.as_str()),
-				client_secret: state.client_secret.as_ref(),
-				resource:      state.resource.as_deref(),
-			},
-			refresh,
+		let grant = cancellable(
+			cancel,
+			refresh_token(
+				self.http.as_ref(),
+				&TokenRequest {
+					endpoint:      state.token_endpoint.as_str(),
+					client_id:     Some(state.client_id.as_str()),
+					client_secret: state.client_secret.as_ref(),
+					resource:      state.resource.as_deref(),
+					cancellation:  Some(cancel),
+				},
+				refresh,
+			),
 		)
 		.await?;
-		let replacement = self.persist_grant(
+		let replacement = match self.persist_grant(
 			state.affinity.clone(),
 			state.token_endpoint.clone(),
 			state.client_id.clone(),
 			state.client_secret.clone(),
 			state.resource.clone(),
 			grant,
-			Some(previous_refresh),
 			Some(state.generation),
-		)?;
+		) {
+			Ok(replacement) => replacement,
+			Err(OAuthFlowError::Store(McpOAuthStoreError::Store(StoreError::GenerationConflict))) => {
+				self.load_state(state.affinity.clone())?
+			},
+			Err(error) => return Err(error),
+		};
 		*state = replacement;
 		Ok(())
 	}
@@ -439,12 +660,10 @@ impl McpOAuth {
 		client_secret: Option<SecretString>,
 		resource: Option<Str>,
 		grant: TokenGrant,
-		previous_refresh_token: Option<SecretString>,
 		expected_generation: Option<u64>,
 	) -> Result<OAuthCredentialState, OAuthFlowError> {
 		let expires_in = grant.expires_in();
 		let (access, refresh_token, token_type, _) = grant.into_parts();
-		let refresh_token = refresh_token.or(previous_refresh_token);
 		if !token_type.eq_ignore_ascii_case("bearer") {
 			return Err(OAuthFlowError::UnsupportedTokenType);
 		}
@@ -481,6 +700,21 @@ impl McpOAuth {
 			expected_generation,
 		)?;
 		Ok(state)
+	}
+}
+
+async fn cancellable<T, E>(
+	cancel: &CancellationToken,
+	operation: impl Future<Output = Result<T, E>>,
+) -> Result<T, OAuthFlowError>
+where
+	E: Into<OAuthFlowError>,
+{
+	tokio::pin!(operation);
+	tokio::select! {
+		biased;
+		() = cancel.cancelled() => Err(OAuthFlowError::Cancelled),
+		result = &mut operation => result.map_err(Into::into),
 	}
 }
 
@@ -537,6 +771,12 @@ pub enum OAuthFlowError {
 	/// No persisted renewable grant exists for this mount.
 	#[error("MCP OAuth credential is unavailable")]
 	CredentialUnavailable,
+	/// Caller cancelled discovery, presentation, or exchange.
+	#[error("MCP OAuth authorization was cancelled")]
+	Cancelled,
+	/// RFC 8628 device fallback failed.
+	#[error(transparent)]
+	Device(#[from] DeviceAuthorizationError),
 	/// Metadata discovery failed.
 	#[error(transparent)]
 	Metadata(#[from] MetadataError),
@@ -590,8 +830,13 @@ fn preferred_authorization_scopes(
 
 impl OAuthFlowError {
 	/// Classifies whether retained refresh material remains eligible for retry.
-	pub const fn class(&self) -> OAuthFailureClass {
+	pub fn class(&self) -> OAuthFailureClass {
 		match self {
+			Self::Token(error)
+			| Self::Complete(CompleteAuthorizationError::Token(error))
+			| Self::Device(DeviceAuthorizationError::Token(error)) => token_failure_class(error),
+			Self::Registration(ClientRegistrationError::Rejected { status })
+			| Self::Device(DeviceAuthorizationError::Rejected { status }) => http_rejection_class(*status),
 			Self::UnsupportedChallenge
 			| Self::InvalidCallbackConfig
 			| Self::MissingAuthorizationServer
@@ -599,34 +844,73 @@ impl OAuthFlowError {
 			| Self::UnsupportedTokenType
 			| Self::InvalidBearerToken
 			| Self::CredentialUnavailable
-			| Self::Registration(ClientRegistrationError::Rejected { .. })
+			| Self::Device(DeviceAuthorizationError::Malformed)
+			| Self::Device(DeviceAuthorizationError::InvalidVerificationUrl)
+			| Self::Device(DeviceAuthorizationError::Denied)
+			| Self::Device(DeviceAuthorizationError::Expired)
+			| Self::Device(DeviceAuthorizationError::Provider)
 			| Self::Registration(ClientRegistrationError::Malformed)
 			| Self::Registration(ClientRegistrationError::RegistrationUnavailable)
 			| Self::Registration(ClientRegistrationError::InvalidRedirect)
 			| Self::Authorization(_)
 			| Self::CallbackBind(_)
-			| Self::Complete(CompleteAuthorizationError::StateMismatch)
-			| Self::Complete(CompleteAuthorizationError::Token(TokenError::Rejected { .. }))
-			| Self::Complete(CompleteAuthorizationError::Token(TokenError::Provider { .. }))
-			| Self::Token(TokenError::Rejected { .. })
-			| Self::Token(TokenError::Provider { .. })
-			| Self::Token(TokenError::Malformed) => OAuthFailureClass::Definitive,
-			Self::Metadata(_)
+			| Self::Complete(CompleteAuthorizationError::StateMismatch) => OAuthFailureClass::Definitive,
+			Self::Cancelled
+			| Self::Metadata(_)
+			| Self::Device(DeviceAuthorizationError::Request(_))
+			| Self::Device(DeviceAuthorizationError::Transport(_))
+			| Self::Device(DeviceAuthorizationError::Cancelled)
+			| Self::Device(DeviceAuthorizationError::PresentationUnavailable)
+			| Self::Device(DeviceAuthorizationError::Unavailable)
 			| Self::Registration(_)
 			| Self::Entropy(_)
 			| Self::Callback(_)
-			| Self::Complete(_)
-			| Self::Token(_)
 			| Self::Browser(_)
 			| Self::Store(_) => OAuthFailureClass::Transient,
 		}
+	}
+}
+
+fn token_failure_class(error: &TokenError) -> OAuthFailureClass {
+	match error {
+		TokenError::Request(_) | TokenError::Transport(_) => OAuthFailureClass::Transient,
+		TokenError::Rejected { status } => http_rejection_class(*status),
+		TokenError::Provider { code }
+			if matches!(
+				code.as_str(),
+				"temporarily_unavailable" | "server_error" | "authorization_pending" | "slow_down"
+			) =>
+		{
+			OAuthFailureClass::Transient
+		},
+		TokenError::Provider { .. } | TokenError::Malformed => OAuthFailureClass::Definitive,
+	}
+}
+
+const fn http_rejection_class(status: u16) -> OAuthFailureClass {
+	if status == 408 || status == 429 || status >= 500 {
+		OAuthFailureClass::Transient
+	} else {
+		OAuthFailureClass::Definitive
 	}
 }
 #[cfg(test)]
 mod tests {
 	use omp_core::Str;
 
-	use super::preferred_authorization_scopes;
+	use super::{OAuthFailureClass, OAuthFlowError, TokenError, preferred_authorization_scopes};
+
+	#[test]
+	fn refresh_outages_retain_credentials_but_invalid_grants_do_not() {
+		assert_eq!(
+			OAuthFlowError::Token(TokenError::Rejected { status: 503 }).class(),
+			OAuthFailureClass::Transient
+		);
+		assert_eq!(
+			OAuthFlowError::Token(TokenError::Provider { code: Str::from("invalid_grant") }).class(),
+			OAuthFailureClass::Definitive
+		);
+	}
 
 	#[test]
 	fn protected_and_challenge_scopes_precede_authorization_server_catalogue() {

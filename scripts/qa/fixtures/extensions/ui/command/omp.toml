@@ -1,0 +1,24 @@
+id = "pyuicommand"
+version = "0.1.0"
+omp_api = 1
+entry = "pyuicommand"
+capabilities = ["ui.commands"]
+
+[[declarations]]
+id = "hello"
+kind = "hard"
+module = "pyuicommand"
+key = "hello@pyuicommand.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "qa_command"
+kind = "command"
+module = "pyuicommand"
+key = "qa-ui"
+trigger = "lazy"
+callback = "pyuicommand.qa_command"
+api = 1
+failure = "fail-open"

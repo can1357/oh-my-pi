@@ -1,0 +1,27 @@
+[38;2;0;180;255m── retain — Retain ─────────────────────────────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mRetain[39m                                                                                            
+  [38;2;156;163;176m[39m [38;2;156;163;176mUser prefers Bun over Node for all new scripts in this repo.[39m                                    
+                                                                                                    
+
+[38;2;107;114;128m  · in progress[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mRetain[39m                                                                                            
+  [38;2;156;163;176m[39m [38;2;156;163;176mUser prefers Bun over Node for all new scripts in this repo.[39m                                    
+  [38;2;156;163;176m[39m [38;2;156;163;176mThe TUI renderers live in packages/coding-agent/src/tools/*-render.ts.[39m                          
+                                                                                                    
+
+[38;2;107;114;128m  · done[39m
+                                                                                                    
+[38;2;0;180;255m[39m [38;2;0;180;255mRetain[39m [38;2;107;114;128m2 memories stored[39m                                                                          
+  [38;2;156;163;176m[39m [38;2;156;163;176mUser prefers Bun over Node for all new scripts in this repo.[39m                                    
+  [38;2;156;163;176m[39m [38;2;156;163;176mThe TUI renderers live in packages/coding-agent/src/tools/*-render.ts.[39m                          
+                                                                                                    
+
+[38;2;107;114;128m  · failed[39m
+                                                                                                    
+[38;2;255;71;87m[39m [38;2;255;71;87mError: Retain failed: memory store is not initialized.[39m                                            
+                                                                                                    
+

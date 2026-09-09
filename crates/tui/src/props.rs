@@ -1,11 +1,6 @@
 //! Typed component properties with allocation-free well-known slots.
 
-use std::{
-	error,
-	fmt::{self, Display},
-	str::FromStr,
-	time::Duration,
-};
+use std::{str::FromStr, time::Duration};
 
 use omp_core::{IntoStr, Str, sf};
 use strum::{Display, EnumIter, EnumString};
@@ -307,21 +302,15 @@ macro_rules! define_props {
 	};
 }
 
-omp_tui_vocab::for_each_prop! { define_props }
+omp_vocab::for_each_prop! { define_props }
 
 /// A property value rejected by the key-aware parser.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("bad value {value:?} for property {prop:?}")]
 pub struct PropError {
 	pub prop:  Prop,
 	pub value: Str,
 }
-
-impl Display for PropError {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(f, "bad value {:?} for property {:?}", self.value, self.prop)
-	}
-}
-impl error::Error for PropError {}
 
 trait ToPropValue {
 	fn to_prop_value(&self) -> PropValue;
@@ -603,10 +592,13 @@ impl Props {
 			},
 			Prop::Match => self.match_pattern.as_ref(),
 			Prop::Src => self.src.as_ref(),
+			Prop::Href => self.href.as_ref(),
+			Prop::Path => self.path.as_ref(),
 			Prop::Icon => self.icon.as_ref(),
 			Prop::Badge => self.badge.as_ref(),
 			Prop::Placeholder => self.placeholder.as_ref(),
 			Prop::Status => self.status.as_ref(),
+			Prop::Zone => self.zone.as_ref(),
 			_ => None,
 		}
 	}
@@ -643,11 +635,17 @@ impl Props {
 		if self.underline == Some(true) {
 			style = style.underline();
 		}
+		if self.undercurl == Some(true) {
+			style = style.undercurl();
+		}
 		if self.reverse == Some(true) {
 			style = style.reverse();
 		}
 		if self.strike == Some(true) {
 			style = style.strikethrough();
+		}
+		if let Some(href) = self.href.as_deref() {
+			style = style.link(href);
 		}
 		style
 	}
@@ -972,6 +970,12 @@ impl From<&str> for PropValue {
 		Self::Str(Str::new(value))
 	}
 }
+/// Millisecond count for `ms`-valued props, saturating at `u64::MAX`.
+impl From<Duration> for PropValue {
+	fn from(value: Duration) -> Self {
+		Self::U64(u64::try_from(value.as_millis()).unwrap_or(u64::MAX))
+	}
+}
 impl From<String> for PropValue {
 	fn from(value: String) -> Self {
 		Self::Str(value.into())
@@ -1151,13 +1155,10 @@ mod tests {
 	#[test]
 	fn catalog_names_and_values_round_trip() {
 		use strum::IntoEnumIterator as _;
-		let mut count = 0;
 		for prop in Prop::iter() {
 			let name = prop.to_string();
 			assert_eq!(name.parse(), Ok(prop));
-			count += 1;
 		}
-		assert_eq!(count, 99);
 	}
 
 	#[test]

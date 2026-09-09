@@ -1,27 +1,24 @@
-//! Pi-compatible workspace path matching with mtime-ranked grouped output.
+//! Workspace path matching with mtime-ranked grouped output.
 
-use std::{
-	collections::HashSet,
-	error,
-	fmt::{self, Display},
-	sync::Arc,
-};
+use std::{collections::HashSet, sync::Arc};
 
 use async_stream::stream;
-use futures::{FutureExt, Stream, pin_mut, select_biased};
+use futures::Stream;
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, BlobRef, CommitError, Constraint, DocEffects, Effects, Ev,
+	Abort, ArgIssue, ArgIssueKind, CommitError, Constraint, Diag, DiagKind, DocEffects, Effects, Ev,
 	IncomingParams, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool, ToolSpec,
-	ToolTerminal,
+	ToolTerminal, Unit,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
+use tracing::Instrument as _;
 
 use crate::{
 	grep::WorkspaceSearch,
-	read::ReadBlobs,
-	render::{TextProjection, paths::format_grouped_paths, truncate::spill_truncated_text},
+	path::tracing_path_metadata,
+	render::{TextProjection, paths::format_grouped_paths},
 };
 
 /// Default number of paths returned by `glob@1`.
@@ -130,16 +127,6 @@ pub struct Payload {
 	pub partial_match_count:  u64,
 	/// Deadline used by this invocation, retained for exact timeout rendering.
 	pub timeout_ms:           u64,
-	/// Exact bounded model-facing text prepared before prompt projection.
-	pub projected_text:       Str,
-	/// Durable complete output when `projected_text` was pre-truncated.
-	pub output_blob:          Option<BlobRef>,
-	/// Resolver-valid address of `output_blob`.
-	pub output_artifact_uri:  Option<Str>,
-	/// Complete lines retained in `projected_text` before its footer.
-	pub output_shown_lines:   u64,
-	/// Complete line count in the pre-truncation output.
-	pub output_total_lines:   u64,
 }
 
 /// Ephemeral progress from `glob@1`; traversal has no durable updates.
@@ -147,31 +134,38 @@ pub struct Payload {
 pub enum Update {}
 
 /// Durable typed `glob@1` failure.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, thiserror::Error)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Fault {
 	/// The caller supplied a non-positive or non-finite limit.
+	#[error("Limit must be a positive number")]
 	InvalidLimit,
 	/// The input contained no usable path target.
+	#[error("`path` must contain non-empty globs or paths")]
 	EmptyPath,
 	/// A traversal attempted to start at filesystem root.
+	#[error("Searching from root directory '/' is not allowed")]
 	RootSearch,
 	/// Every requested target, or the sole requested target, was missing.
+	#[error("Path not found: {}", join_strs(.paths))]
 	PathNotFound {
 		/// Missing target spellings in model input order.
 		paths: Vec<Str>,
 	},
 	/// A direct non-directory target could not be treated as a file.
+	#[error("Path is not a directory: {path}")]
 	PathNotDirectory {
 		/// Rejected target path.
 		path: Str,
 	},
 	/// A URI scheme has no local path-backed glob implementation yet.
+	#[error("{scheme}:// targets are not supported yet")]
 	UnsupportedScheme {
 		/// Lowercase URI scheme without punctuation.
 		scheme: Str,
 	},
 	/// A glob pattern could not be compiled by the workspace walker.
+	#[error("invalid glob pattern {pattern}: {message}")]
 	InvalidPattern {
 		/// Exact rejected pattern.
 		pattern: Str,
@@ -179,102 +173,72 @@ pub enum Fault {
 		message: Str,
 	},
 	/// The workspace owner rejected or failed the request.
+	#[error("{message}")]
 	Workspace {
 		/// Stable resource-owned explanation.
 		message: Str,
 	},
-	/// Durable blob storage failed while preserving complete output.
-	Blob {
-		/// Stable blob-owned explanation.
-		message: Str,
-	},
 	/// The resource observed cancellation without an invocation interrupt.
+	#[error("{reason}")]
 	Cancelled {
 		/// Stable resource-owned cancellation reason.
 		reason: Str,
 	},
 }
 
-impl Display for Fault {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::InvalidLimit => formatter.write_str("Limit must be a positive number"),
-			Self::EmptyPath => formatter.write_str("`path` must contain non-empty globs or paths"),
-			Self::RootSearch => {
-				formatter.write_str("Searching from root directory '/' is not allowed")
-			},
-			Self::PathNotFound { paths } => {
-				formatter.write_str("Path not found: ")?;
-				for (index, path) in paths.iter().enumerate() {
-					if index != 0 {
-						formatter.write_str(", ")?;
-					}
-					formatter.write_str(path)?;
-				}
-				Ok(())
-			},
-			Self::PathNotDirectory { path } => write!(formatter, "Path is not a directory: {path}"),
-			Self::UnsupportedScheme { scheme } => {
-				write!(formatter, "{scheme}:// targets are not supported yet")
-			},
-			Self::InvalidPattern { pattern, message } => {
-				write!(formatter, "invalid glob pattern {pattern}: {message}")
-			},
-			Self::Workspace { message } | Self::Blob { message } => formatter.write_str(message),
-			Self::Cancelled { reason } => formatter.write_str(reason),
-		}
-	}
+fn join_strs(values: &[Str]) -> String {
+	values
+		.iter()
+		.map(Str::as_str)
+		.collect::<Vec<_>>()
+		.join(", ")
 }
-
-impl error::Error for Fault {}
-
-/// Generic `glob@1` executor over environment-owned workspace and blob
-/// resources.
-pub struct Glob<W, B> {
+/// Generic `glob@1` executor over an environment-owned workspace resource.
+pub struct Glob<W> {
 	workspace: W,
-	blobs:     B,
 	spec:      ToolSpec,
 }
 
-/// Constructs `glob@1` over `workspace` and the shared durable blob namespace.
-pub fn tool<W: WorkspaceSearch, B: ReadBlobs>(workspace: W, blobs: B) -> Glob<W, B> {
-	Glob {
-		workspace,
-		blobs,
-		spec: ToolSpec {
-			name:            sf!("glob"),
-			rev:             Rev { family: Str::new(""), n: 1 },
-			description:     sf!(
-				"Globs files and directories with fast pattern matching.\n\n<instruction>\n- `path`: \
-				 glob, file, or directory; separate targets with `;` (`src/**/*.ts; \
-				 test/**/*.ts`).\n- `gitignore` defaults `true`. Set `false` for ignored files such \
-				 as `.env*`, logs, or build output.\n- `hidden` defaults `true`; pair it with \
-				 `gitignore: false` for ignored dotfiles.\n</instruction>\n\n<output>\nMatches are \
-				 newest-first and grouped by directory; directories end in `/`.\n</output>",
-			),
-			schema:          omp_tool::schema::<Params>(),
-			constraint:      Constraint::Schema {
-				priority:       100,
-				on_unsupported: omp_tool::Fallback::Unspecified,
-			},
-			effects:         Effects {
-				documents: Some(DocEffects { read: true, write_globs: Arc::default() }),
-				exec:      None,
-				inference: None,
-				desktop:   None,
-				subagents: 0,
-			},
-			projection_code: omp_tool::native_projection_code(
-				env!("CARGO_PKG_NAME"),
-				env!("CARGO_PKG_VERSION"),
-				include_bytes!("glob.rs"),
-			)
-			.into(),
+/// Returns the host-free `glob@1` specification.
+pub fn spec() -> ToolSpec {
+	ToolSpec {
+		name:            sf!("glob"),
+		rev:             Rev { family: Str::new(""), n: 1 },
+		description:     sf!(
+			"Globs files and directories with fast pattern matching.\n\n<instruction>\n- `path`: \
+			 glob, file, or directory; separate targets with `;` (`src/**/*.ts; test/**/*.ts`).\n- \
+			 `gitignore` defaults `true`. Set `false` for ignored files such as `.env*`, logs, or \
+			 build output.\n- `hidden` defaults `true`; pair it with `gitignore: false` for ignored \
+			 dotfiles.\n</instruction>\n\n<output>\nMatches are newest-first and grouped by \
+			 directory; directories end in `/`.\n</output>",
+		),
+		schema:          omp_tool::schema::<Params>(),
+		constraint:      Constraint::Schema {
+			priority:       100,
+			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
+		effects:         Effects {
+			documents: Some(DocEffects { read: true, write_globs: Arc::default() }),
+			exec:      None,
+			inference: None,
+			desktop:   None,
+			subagents: 0,
+		},
+		projection_code: omp_tool::native_projection_code(
+			env!("CARGO_PKG_NAME"),
+			env!("CARGO_PKG_VERSION"),
+			include_bytes!("glob.rs"),
+		)
+		.into(),
 	}
 }
 
-impl<W: WorkspaceSearch, B: ReadBlobs> Tool for Glob<W, B> {
+/// Constructs `glob@1` over `workspace`.
+pub fn tool<W: WorkspaceSearch>(workspace: W) -> Glob<W> {
+	Glob { workspace, spec: spec() }
+}
+
+impl<W: WorkspaceSearch> Tool for Glob<W> {
 	type Fault = Fault;
 	type Params = Params;
 	type Payload = Payload;
@@ -288,84 +252,94 @@ impl<W: WorkspaceSearch, B: ReadBlobs> Tool for Glob<W, B> {
 		&'c self,
 		mut params: IncomingParams<'c>,
 	) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+		let span = tracing::debug_span!("glob_execution", pattern = tracing::field::Empty);
 		stream! {
-					let arguments = match params.whole::<Params>().await {
-						Ok(arguments) => arguments,
-						Err(error) => {
-							yield param_event(error);
-							return;
-						},
-					};
-					match params.interruptable().committed().await {
-						Ok(_) => {},
-						Err(error) => {
-							yield commit_event(error);
-							return;
-						},
-					}
+			let arguments = match params.whole::<Params>().await {
+				Ok(arguments) => arguments,
+				Err(error) => {
+					yield param_event(error);
+					return;
+				},
+			};
+			match params.interruptable().committed().await {
+				Ok(_) => {},
+				Err(error) => {
+					yield commit_event(error);
+					return;
+				},
+			}
 
-					let limit = match effective_limit(arguments.limit) {
-						Ok(limit) => limit,
-						Err(fault) => {
-							yield done(Err(fault));
-							return;
+			let limit = match effective_limit(arguments.limit) {
+				Ok(limit) => limit,
+				Err(fault) => {
+					yield done(Err(fault));
+					return;
+				},
+			};
+			let path = arguments.path.unwrap_or_else(|| sf!("."));
+			span.record("pattern", tracing::field::display(tracing_path_metadata(&path)));
+			if path.trim().is_empty() {
+				yield done(Err(Fault::EmptyPath));
+				return;
+			}
+			if contains_root_target(&path) {
+				yield done(Err(Fault::RootSearch));
+				return;
+			}
+			let resource_scheme = unsupported_scheme(&path);
+			let request = walk_request(path, arguments.hidden, arguments.gitignore, limit);
+			let cancellation = CancellationToken::new();
+			let operation = async {
+				let result = if let Some(scheme) = resource_scheme {
+					match self.workspace.glob_resource(request, cancellation.clone()).await {
+						Some(result) => result,
+						None => Err(Fault::UnsupportedScheme { scheme }),
+					}
+				} else {
+					self.workspace.glob(request, cancellation.clone()).await
+				}?;
+				Ok(payload(result, limit, DEFAULT_TIMEOUT_MS))
+			}
+			.instrument(span.clone());
+			tokio::pin!(operation);
+			tokio::select! {
+				biased;
+				interrupt = params.next_interrupt() => {
+					cancellation.cancel();
+					let _ = operation.await;
+					yield interrupt_event(interrupt, "glob traversal owner disappeared");
+				},
+				result = &mut operation => {
+					match result {
+						Ok(payload) => {
+							for diag in payload_diags(&payload) {
+								yield Ev::Diag(diag);
+							}
+							yield done(Ok(payload));
 						},
-					};
-					let path = arguments.path.unwrap_or_else(|| sf!("."));
-					if path.trim().is_empty() {
-						yield done(Err(Fault::EmptyPath));
-						return;
+						Err(fault) => yield done(Err(fault)),
 					}
-					if contains_root_target(&path) {
-						yield done(Err(Fault::RootSearch));
-						return;
-					}
-					let resource_scheme = unsupported_scheme(&path);
-					let request = walk_request(path, arguments.hidden, arguments.gitignore, limit);
-					if let Some(scheme) = resource_scheme {
-						let resource = self.workspace.glob_resource(request.clone()).await;
-						match resource {
-							Some(Ok(result)) => {
-								yield done(prepare_payload(result, limit, DEFAULT_TIMEOUT_MS, &self.blobs).await);
-							},
-							Some(Err(fault)) => yield done(Err(fault)),
-							None => yield done(Err(Fault::UnsupportedScheme { scheme })),
-						}
-						return;
-					}
-		let operation = async {
-						let result = self.workspace.glob(request).await?;
-						prepare_payload(result, limit, DEFAULT_TIMEOUT_MS, &self.blobs).await
-					}.fuse();
-					let interruption = params.next_interrupt().fuse();
-					pin_mut!(operation, interruption);
-					select_biased! {
-						result = operation => {
-							yield done(result);
-						},
-						interrupt = interruption => {
-							yield interrupt_event(interrupt, "glob traversal owner disappeared");
-						},
-					}
-				}
+				},
+			}
+		}
 	}
 
 	fn prompt(&self, view: Result<&Self::Payload, &Self::Fault>, caps: &PromptCaps) -> Vec<Part> {
 		let Some(mut projection) = TextProjection::new(*caps) else {
 			return Vec::new();
 		};
-		let text = match view {
-			Ok(payload) => payload.projected_text.as_str(),
-			Err(fault) => {
-				let message = fault.to_string();
-				projection.push(&message);
-				return projection.finish();
+		match view {
+			Ok(payload) => {
+				let text = render_payload(payload);
+				for fragment in text.split_inclusive('\n') {
+					if !projection.push(fragment) {
+						break;
+					}
+				}
 			},
-		};
-		for fragment in text.split_inclusive('\n') {
-			if !projection.push(fragment) {
-				break;
-			}
+			Err(fault) => {
+				projection.push(&fault.to_string());
+			},
 		}
 		projection.finish()
 	}
@@ -458,30 +432,7 @@ fn payload(mut result: WalkResult, limit: u64, timeout_ms: u64) -> Payload {
 		result_limit_reached: (result.truncated || over_limit).then_some(limit),
 		partial_match_count,
 		timeout_ms,
-		projected_text: Str::new(""),
-		output_blob: None,
-		output_artifact_uri: None,
-		output_shown_lines: 0,
-		output_total_lines: 0,
 	}
-}
-
-async fn prepare_payload<B: ReadBlobs>(
-	result: WalkResult,
-	limit: u64,
-	timeout_ms: u64,
-	blobs: &B,
-) -> Result<Payload, Fault> {
-	let mut payload = payload(result, limit, timeout_ms);
-	let output = spill_truncated_text(render_payload(&payload), blobs)
-		.await
-		.map_err(|fault| Fault::Blob { message: fault.message().clone() })?;
-	payload.projected_text = output.content;
-	payload.output_blob = output.blob;
-	payload.output_artifact_uri = output.artifact_uri;
-	payload.output_shown_lines = output.shown_lines;
-	payload.output_total_lines = output.total_lines;
-	Ok(payload)
 }
 
 fn render_payload(payload: &Payload) -> String {
@@ -490,77 +441,46 @@ fn render_payload(payload: &Payload) -> String {
 		.iter()
 		.map(|entry| entry.path.as_ref())
 		.collect();
-	let missing_note = (!payload.missing_paths.is_empty()).then(|| {
-		format!(
-			"Skipped missing paths: {}",
-			payload
-				.missing_paths
-				.iter()
-				.map(AsRef::as_ref)
-				.collect::<Vec<&str>>()
-				.join(", ")
-		)
-	});
-	let timeout_note = payload.timed_out.then(|| timeout_notice(payload));
-	let result_limit_note = payload.result_limit_reached.map(|limit| {
-		format!("{limit} results limit reached. Use limit={} for more.", limit.saturating_mul(2))
-	});
-
 	if paths.is_empty() {
-		let mut parts = Vec::with_capacity(4);
-		if !payload.timed_out {
-			parts.push(String::from("No files found matching pattern"));
-		}
-		if let Some(note) = timeout_note {
-			parts.push(note);
-		}
-		if let Some(note) = missing_note {
-			parts.push(note);
-		}
-		if let Some(note) = result_limit_note {
-			parts.push(note);
-		}
-		return parts.join("\n");
+		return if payload.timed_out {
+			String::new()
+		} else {
+			String::from("No files found matching pattern")
+		};
 	}
-
-	let mut output = format_grouped_paths(&paths);
-	let mut notes = Vec::with_capacity(3);
-	if let Some(note) = timeout_note {
-		notes.push(note);
-	}
-	if let Some(note) = missing_note {
-		notes.push(note);
-	}
-	if let Some(note) = result_limit_note {
-		notes.push(note);
-	}
-	if !notes.is_empty() {
-		output.push_str("\n\n");
-		output.push_str(&notes.join("\n"));
-	}
-	output
+	format_grouped_paths(&paths)
 }
 
-fn timeout_notice(payload: &Payload) -> String {
-	let seconds = if payload.timeout_ms.is_multiple_of(1_000) {
-		(payload.timeout_ms / 1_000).to_string()
-	} else {
-		format!("{:.1}", payload.timeout_ms as f64 / 1_000.0)
-	};
-	if payload.partial_match_count > 0 {
-		format!(
-			"glob timed out after {seconds}s; returning {} partial matches — results are incomplete, \
-			 scope to a deeper directory instead of retrying blindly",
-			payload.partial_match_count
+fn payload_diags(payload: &Payload) -> impl Iterator<Item = Diag> {
+	let timeout = payload.timed_out.then(|| {
+		let elapsed = if payload.timeout_ms.is_multiple_of(1_000) {
+			sf!("{}s", payload.timeout_ms / 1_000)
+		} else {
+			sf!("{:.1}s", payload.timeout_ms as f64 / 1_000.0)
+		};
+		Diag::warn(
+			DiagKind::Timeout,
+			sf!(
+				"Glob reached its {elapsed} timeout after finding {} partial matches",
+				payload.partial_match_count
+			),
 		)
-	} else {
-		format!(
-			"Glob timed out after {seconds}s before finding any matches — the scan is incomplete, \
-			 NOT proof of absence. The walk is bounded by directory size, not pattern width; scope \
-			 the search to a deeper directory (e.g. `sub/dir/*.ext` instead of `*.ext` at a huge \
-			 root)."
-		)
-	}
+	});
+	let limit = payload.result_limit_reached.map(|limit| {
+		let diag = Diag::info(DiagKind::LimitReached, sf!("{limit} result limit reached"))
+			.continuation(sf!("limit={}", limit.saturating_mul(2)));
+		let omitted = payload
+			.partial_match_count
+			.saturating_sub(u64::try_from(payload.matches.len()).unwrap_or(u64::MAX));
+		if omitted == 0 {
+			diag
+		} else {
+			diag.omitted(omitted, Unit::Files)
+		}
+	});
+	let missing = (!payload.missing_paths.is_empty())
+		.then(|| Diag::warn(DiagKind::MissingPaths, Str::new(join_strs(&payload.missing_paths))));
+	[timeout, limit, missing].into_iter().flatten()
 }
 
 const fn done(result: Result<Payload, Fault>) -> Ev<Update, Payload, Fault> {
@@ -620,6 +540,23 @@ mod tests {
 
 	fn walk_match(path: &str, modified_ms: u64, is_dir: bool) -> WalkMatch {
 		WalkMatch { path: Str::new(path), modified_ms, is_dir }
+	}
+
+	#[test]
+	fn fault_messages_remain_stable_under_thiserror() {
+		assert_eq!(
+			Fault::PathNotFound { paths: vec![Str::new_static("a"), Str::new_static("b")] }
+				.to_string(),
+			"Path not found: a, b"
+		);
+		assert_eq!(
+			Fault::InvalidPattern {
+				pattern: Str::new_static("["),
+				message: Str::new_static("unclosed class"),
+			}
+			.to_string(),
+			"invalid glob pattern [: unclosed class"
+		);
 	}
 
 	#[test]
@@ -687,16 +624,13 @@ mod tests {
 		assert!(ranked.truncated);
 		assert_eq!(
 			render_payload(&ranked),
-			[
-				"# docs/generated/",
-				"# src/",
-				"new.rs",
-				"mid.rs",
-				"",
-				"3 results limit reached. Use limit=6 for more.",
-			]
-			.join("\n")
+			["# docs/generated/", "# src/", "new.rs", "mid.rs"].join("\n")
 		);
+		let diags = payload_diags(&ranked).collect::<Vec<_>>();
+		assert_eq!(diags.len(), 1);
+		assert_eq!(diags[0].native_kind(), Some(DiagKind::LimitReached));
+		assert_eq!(diags[0].continuation.as_deref(), Some("limit=6"));
+		assert_eq!(diags[0].omitted, Some(omp_tool::Omitted { count: 1, unit: Unit::Files }));
 	}
 
 	#[test]

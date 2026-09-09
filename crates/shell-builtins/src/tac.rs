@@ -13,7 +13,7 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use memchr::memmem;
 use memmap2::Mmap;
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use regex::bytes::RegexBuilder;
 use thiserror::Error;
 

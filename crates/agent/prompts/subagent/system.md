@@ -28,8 +28,16 @@ Return the terminal result through `yield` with complete data matching this effe
 You are {{ self_name }} ({{ self_role }}) on roster generation {{ roster_generation }}.
 Ordinary sends are fire-and-forget. Await a reply only when blocked; reply with the received message id. Delivery receipts describe routing, not task completion.
 {% for peer in peers %}
-- {{ peer.name }} ({{ peer.role }}, {{ peer.status }}{% if peer.name == self_name %}, self{% endif %}): {{ peer.activity or "idle" }}
-{% endfor %}
+- {{ peer.name }} ({{ peer.role }}, {{ peer.status }}): {{ peer.activity or "idle" }}
+{% endfor %}{% if omitted_count %}
+{{ omitted_count }} more live peer(s) omitted.
+{% endif %}{% if parked_count %}
+{{ parked_count }} parked peer(s) omitted.
+{% endif %}{% if not peers and not parked_count %}
+- (no other agents)
+{% elif not peers %}
+- (no live agents)
+{% endif %}
 {% endif %}{% if caps.codex_style %}
 For independent lookups, issue tool calls together; keep dependent mutations ordered and verify the resulting state.
 {% elif caps.parallel_tool_calls %}

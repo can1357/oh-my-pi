@@ -1,0 +1,32 @@
+[38;2;0;180;255m── read_group — Read Groups ────────────────────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+  [39mRead[39m[38;2;107;114;128m (2)[39m                                                                                         
+   [38;2;107;114;128m├─[39m [38;2;107;114;128m[39m [38;2;0;180;255mpackages/coding-agent/test/streaming-preview-height.test.ts[39m[38;2;0;180;255m:301-409[39m                         
+   [38;2;107;114;128m└─[39m [38;2;107;114;128m[39m [38;2;0;180;255mpackages/coding-agent/test/tool-live-region-scrollback.test.ts[39m[38;2;0;180;255m:143-[39m                         
+
+[38;2;107;114;128m  · in progress[39m
+  [39mRead[39m[38;2;107;114;128m (4)[39m                                                                                         
+   [38;2;107;114;128m├─[39m [38;2;107;114;128m[39m [38;2;0;180;255mpackages/coding-agent/test/streaming-preview-height.test.ts[39m[38;2;0;180;255m:301-409[39m                         
+   [38;2;107;114;128m├─[39m [38;2;107;114;128m[39m [38;2;0;180;255mpackages/coding-agent/test/tool-live-region-scrollback.test.ts[39m[38;2;0;180;255m:143-310[39m                      
+   [38;2;107;114;128m├─[39m [38;2;107;114;128m[39m [38;2;0;180;255mpackages/tui/test/streaming-scrollback-defer.test.ts[39m[38;2;0;180;255m:89-464[39m                                 
+   [38;2;107;114;128m└─[39m [38;2;107;114;128m[39m [38;2;0;180;255mpackages/coding-agent/src/task/render.ts:507-605,1070-1194,…,1270-1274[39m                      
+
+[38;2;107;114;128m  · done[39m
+  [39mRead[39m[38;2;107;114;128m (4)[39m                                                                                         
+   [38;2;107;114;128m├─[39m [38;2;0;180;255mpackages/coding-agent/test/streaming-preview-height.test.ts[39m[38;2;0;180;255m:301-409[39m                           
+   [38;2;107;114;128m├─[39m [38;2;0;180;255mpackages/coding-agent/test/tool-live-region-scrollback.test.ts[39m[38;2;0;180;255m:143-310[39m                        
+   [38;2;107;114;128m├─[39m [38;2;0;180;255mpackages/tui/test/streaming-scrollback-defer.test.ts[39m[38;2;0;180;255m:89-464[39m                                   
+[38;2;107;114;128m   │  2026-07-28 21:05:47   2.4K   113   103K   2.2s   21.3/s[39m                                  
+   [38;2;107;114;128m└─[39m [38;2;0;180;255mpackages/coding-agent/src/task/render.ts:507-605,1070-1194,…,1270-1274[39m                        
+[38;2;107;114;128m      2026-07-28 21:05:52   2.4K   113   103K   1.9s   24.0/s[39m                                  
+
+[38;2;107;114;128m  · failed[39m
+  [39mRead[39m[38;2;107;114;128m (4)[39m                                                                                         
+   [38;2;107;114;128m├─[39m [38;2;0;180;255mpackages/coding-agent/test/streaming-preview-height.test.ts[39m[38;2;0;180;255m:301-409[39m                           
+   [38;2;107;114;128m├─[39m [38;2;0;180;255mpackages/coding-agent/test/tool-live-region-scrollback.test.ts[39m[38;2;0;180;255m:143-310[39m                        
+   [38;2;107;114;128m├─[39m [38;2;0;180;255mpackages/tui/test/streaming-scrollback-defer.test.ts[39m[38;2;0;180;255m:89-464[39m                                   
+[38;2;107;114;128m   │  2026-07-28 21:05:47   2.4K   113   103K   2.2s   21.3/s[39m                                  
+   [38;2;107;114;128m└─[39m [38;2;255;71;87m[39m [38;2;0;180;255mpackages/coding-agent/src/task/render.ts:507-605,1070-1194,…,1270-1274[39m                      
+[38;2;107;114;128m      2026-07-28 21:05:52   2.4K   113   103K   1.9s   24.0/s[39m                                  
+

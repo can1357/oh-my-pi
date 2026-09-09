@@ -105,6 +105,91 @@ class Effects:
     subagents: int = 0
 
 
+class ConstraintKind(StrEnum):
+    """Select the provider-side argument constraint requested by a tool."""
+
+    SCHEMA = "schema"
+    GRAMMAR = "grammar"
+
+
+class ConstraintFallback(StrEnum):
+    """Select behavior when a route cannot honor a tool constraint."""
+
+    UNSPECIFIED = "unspecified"
+    ERROR = "error"
+    DROP = "drop"
+
+
+class GrammarSyntax(StrEnum):
+    """Identify the grammar syntax carried by a tool constraint."""
+
+    LARK = "lark"
+    REGEX = "regex"
+    EBNF = "ebnf"
+    GBNF = "gbnf"
+
+
+@dataclass(frozen=True, slots=True)
+class ToolConstraint:
+    """Request constrained argument sampling for one declared tool."""
+
+    kind: ConstraintKind = ConstraintKind.SCHEMA
+    priority: int = 100
+    syntax: GrammarSyntax | None = None
+    definition: str | None = None
+    on_unsupported: ConstraintFallback = ConstraintFallback.UNSPECIFIED
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.kind, ConstraintKind):
+            object.__setattr__(self, "kind", ConstraintKind(self.kind))
+        if not isinstance(self.priority, int) or isinstance(self.priority, bool):
+            raise TypeError("tool constraint priority must be int")
+        if not 0 <= self.priority <= 255:
+            raise ValueError("tool constraint priority must be between 0 and 255")
+        if not isinstance(self.on_unsupported, ConstraintFallback):
+            object.__setattr__(
+                self,
+                "on_unsupported",
+                ConstraintFallback(self.on_unsupported),
+            )
+        if self.kind is ConstraintKind.SCHEMA:
+            if self.syntax is not None or self.definition is not None:
+                raise ValueError("schema constraints do not accept grammar fields")
+            return
+        if self.syntax is None or not isinstance(self.definition, str) or not self.definition:
+            raise ValueError("grammar constraints require syntax and definition")
+        if not isinstance(self.syntax, GrammarSyntax):
+            object.__setattr__(self, "syntax", GrammarSyntax(self.syntax))
+
+    @classmethod
+    def schema(
+        cls,
+        *,
+        priority: int = 100,
+        on_unsupported: ConstraintFallback = ConstraintFallback.UNSPECIFIED,
+    ) -> ToolConstraint:
+        """Build a strict JSON-Schema sampling request."""
+        return cls(priority=priority, on_unsupported=on_unsupported)
+
+    @classmethod
+    def grammar(
+        cls,
+        syntax: GrammarSyntax,
+        definition: str,
+        *,
+        priority: int = 100,
+        on_unsupported: ConstraintFallback = ConstraintFallback.UNSPECIFIED,
+    ) -> ToolConstraint:
+        """Build a grammar-constrained sampling request."""
+        return cls(
+            kind=ConstraintKind.GRAMMAR,
+            priority=priority,
+            syntax=syntax,
+            definition=definition,
+            on_unsupported=on_unsupported,
+        )
+
+
 class DocsMode(StrEnum):
     """Select how much device documentation is inlined."""
 
@@ -449,24 +534,53 @@ async def _dispatch_device(
     if not isinstance(args, Mapping):
         raise SchemaError("dynamic device callback args must be a mapping")
     body = _dynamic_bodies.get(path)
+    legacy = False
     if body is None:
         candidates = tuple(
-            definition.body
+            definition
             for definition in registry.snapshot().device_definitions
             if definition.name == path
             and (family is None or definition.family == family)
             and (rev is None or definition.rev == rev)
         )
-        if len(candidates) != 1:
+        if len(candidates) == 1:
+            body = candidates[0].body
+        else:
+            legacy_candidates = tuple(
+                definition.handler
+                for definition in registry.worker_tool_definitions()
+                if definition.legacy
+                and definition.name == path
+                and (family is None or definition.family == family)
+                and (rev is None or definition.rev == rev)
+            )
+            if len(legacy_candidates) == 1:
+                body = legacy_candidates[0]
+                legacy = True
+        if body is None:
             raise DeviceUnavailable(
                 f"authoritative catalog selected unknown or ambiguous "
                 f"host device {path!r}"
             )
-        body = candidates[0]
-    result = body(**dict(args))
+    if hasattr(body, "__omp_tool_kind__"):
+        # Parity with the stdio worker path: ergonomic tools receive the
+        # ambient invocation context in their `ctx` parameter.
+        from . import Context
+        from ._registry import _bind_tool_arguments
+
+        try:
+            context = Context.current()
+        except LookupError:
+            context = None
+        positional, keywords = _bind_tool_arguments(body, dict(args), context)
+        result = body(*positional, **keywords)
+    else:
+        result = body(dict(args)) if legacy else body(**dict(args))
     if inspect.isawaitable(result):
-        return await result
-    return result
+        result = await result
+    from ._registry import _lower_worker_result
+
+    return _lower_worker_result(result)
 
 
 def _declared_rows() -> tuple[DeviceInfo, ...]:
@@ -695,6 +809,8 @@ class Device:
             tier=tier,
             deadline=parent.deadline,
             aliases=None,
+            constraint=parent.constraint,
+            serial=parent.serial,
             body=body,
         )
         registry.register_child_device(
@@ -971,6 +1087,8 @@ devices = Devices()
 __all__ = (
     "Availability",
     "AvailabilityDelta",
+    "ConstraintFallback",
+    "ConstraintKind",
     "Device",
     "DeviceError",
     "DeviceInfo",
@@ -986,6 +1104,7 @@ __all__ = (
     "Effects",
     "Example",
     "ExecEffects",
+    "GrammarSyntax",
     "InferenceEffects",
     "MountSpec",
     "PER_DEVICE_CAP",
@@ -994,6 +1113,7 @@ __all__ = (
     "Router",
     "SchemaError",
     "ToolPath",
+    "ToolConstraint",
     "router",
     "devices",
 )

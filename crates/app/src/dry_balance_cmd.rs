@@ -3,11 +3,9 @@
 use std::{collections::BTreeMap, sync, time::SystemTime};
 
 use miette::{IntoDiagnostic as _, miette};
+use omp_ai::account::{AccountPool, AccountSelectionRequest, AccountStateStore, RotationPolicy};
 use omp_catalog::{ModelKey, snapshot::Catalog};
 use omp_core::{Str, fast_hash64};
-use omp_inference::account::{
-	AccountPool, AccountSelectionRequest, AccountStateStore, RotationPolicy,
-};
 use serde_json::json;
 
 use crate::{
@@ -52,8 +50,8 @@ pub async fn run(args: DryBalanceArgs) -> miette::Result<()> {
 	let mut counts = BTreeMap::<String, u32>::new();
 	let mut receipts = Vec::with_capacity(args.count as usize);
 	for sample in 0..args.count {
-		// pi samples a fresh randomized session id for every attempt. Feed the
-		// same distribution into the canonical pool by making the hashed
+		// Sample a fresh randomized session id for every attempt. Feed the same
+		// distribution into the canonical pool by making the hashed
 		// session bucket the preferred preceding account.
 		let session_id = cli::turn_id();
 		let bucket = fast_hash64(session_id.as_bytes()) as usize % accounts.len();
@@ -68,6 +66,7 @@ pub async fn run(args: DryBalanceArgs) -> miette::Result<()> {
 				rotate:             false,
 				rotation:           RotationPolicy::default(),
 				now:                SystemTime::now(),
+				quota_scope:        None,
 			})
 			.map_err(|error| miette!(error.to_string()))?;
 		*counts

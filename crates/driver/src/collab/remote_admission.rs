@@ -52,7 +52,14 @@ pub fn enqueue_prompt(
 	let item = Item {
 		seq:           0,
 		created_at_ms: 0,
-		kind:          Some(item::Kind::Message(Message { role: Role::User as i32, parts })),
+		kind:          Some(item::Kind::Message(Message {
+			role:            Role::User as i32,
+			parts,
+			synthetic:       None,
+			user_initiated:  None,
+			completed_at_ms: None,
+			usage:           None,
+		})),
 		props:         Some(props),
 	};
 	mailbox

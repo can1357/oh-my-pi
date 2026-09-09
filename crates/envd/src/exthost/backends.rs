@@ -656,7 +656,7 @@ impl PolicyAuditSink for DurablePolicyAuditSink {
 		#[derive(Serialize)]
 		struct Decision<'a> {
 			approved:   bool,
-			scope:      &'a Str,
+			scope:      &'a str,
 			source:     &'static str,
 			decided_by: &'a Option<Str>,
 			reason:     &'a Option<Str>,
@@ -664,7 +664,7 @@ impl PolicyAuditSink for DurablePolicyAuditSink {
 		}
 		let decision = ticket.decision.as_ref().map(|decision| Decision {
 			approved:   decision.approved,
-			scope:      &decision.scope,
+			scope:      decision.scope.as_str(),
 			source:     decision.source.into(),
 			decided_by: &decision.decided_by,
 			reason:     &decision.reason,
@@ -955,7 +955,7 @@ pub struct EnvdHostOwnerBackends {
 impl EnvdHostOwnerBackends {
 	/// Constructs the production bundle with envd's canonical worker ceilings
 	/// and fail-closed detected sandbox facilities.
-	pub fn production(data_dir: &Path, approvals: Arc<omp_agent::ApprovalBook>) -> Self {
+	pub fn production(data_dir: &Path, approvals: omp_agent::ApprovalRoute) -> Self {
 		Self::new(
 			data_dir,
 			detected_sandbox_capabilities(),
@@ -969,7 +969,7 @@ impl EnvdHostOwnerBackends {
 	pub fn new(
 		data_dir: &Path,
 		capabilities: SandboxCapabilities,
-		approvals: Arc<omp_agent::ApprovalBook>,
+		approvals: omp_agent::ApprovalRoute,
 		worker_layer_ceiling: u64,
 		worker_spawn_ceiling: u64,
 	) -> Self {
@@ -1007,14 +1007,14 @@ impl EnvdHostOwnerBackends {
 /// Creates a generation-binding policy owner factory.
 pub fn policy_control_factory(
 	runtime: Arc<dyn SandboxPolicyRuntime>,
-	approvals: Arc<omp_agent::ApprovalBook>,
+	approvals: omp_agent::ApprovalRoute,
 	audit: Arc<dyn PolicyAuditSink>,
 ) -> Arc<dyn ControlAuthorityFactory> {
 	Arc::new(move |identity| {
 		Ok(Arc::new(PolicyControlOwner::new(
 			identity,
 			Arc::clone(&runtime),
-			Arc::clone(&approvals),
+			approvals.clone(),
 			Arc::clone(&audit),
 		)) as Arc<dyn ControlAuthority>)
 	})

@@ -13,7 +13,7 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use memchr::memchr2;
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use thiserror::Error;
 
 use crate::{

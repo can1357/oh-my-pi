@@ -2,8 +2,6 @@
 
 use std::{
 	collections::{BTreeMap, btree_map},
-	error,
-	fmt::{self, Display},
 	time::Duration,
 };
 
@@ -40,6 +38,99 @@ macro_rules! policy_enum {
 		}
 	};
 }
+
+macro_rules! kebab_policy_enum {
+	($(#[$meta:meta])* $name:ident {
+		$(#[$first_meta:meta])* $first:ident
+		$(, $(#[$variant_meta:meta])* $variant:ident)* $(,)?
+	}) => {
+		$(#[$meta])*
+		#[derive(Clone, Copy, Debug, Display, EnumString, Eq, Hash, IntoStaticStr, Ord, PartialEq, PartialOrd, Serialize, Deserialize)]
+		#[serde(rename_all = "kebab-case")]
+		#[strum(serialize_all = "kebab-case", ascii_case_insensitive)]
+		#[derive(Default)]
+		pub enum $name {
+			$(#[$first_meta])*
+			#[default]
+			$first,
+			$(
+				$(#[$variant_meta])*
+				$variant,
+			)*
+		}
+	};
+}
+
+kebab_policy_enum!(/// Kimi Code endpoint request format.
+	KimiApiFormat {
+		/// OpenAI-compatible requests.
+		#[serde(rename = "openai")]
+		#[strum(to_string = "openai", serialize = "openai")]
+		OpenAi,
+		/// Anthropic-compatible requests.
+		Anthropic,
+	}
+);
+kebab_policy_enum!(/// Header carrying a stable prompt-cache session identifier.
+	PromptCacheSessionHeader {
+		/// xAI/Grok conversation identifier header.
+		#[serde(rename = "x-grok-conv-id")]
+		#[strum(to_string = "x-grok-conv-id", serialize = "x-grok-conv-id")]
+		XGrokConversationId,
+	}
+);
+kebab_policy_enum!(/// Explicit prompt-cache breakpoint retention.
+	PromptCacheBreakpointTtl {
+		/// Thirty-minute cache retention.
+		#[serde(rename = "30m")]
+		#[strum(to_string = "30m", serialize = "30m")]
+		ThirtyMinutes,
+	}
+);
+kebab_policy_enum!(/// Catalog-selected streamed markup healer.
+	StreamMarkupHealingPattern {
+		/// Kimi markup.
+		Kimi,
+		/// DeepSeek markup language.
+		Dsml,
+		/// Qwen markup.
+		Qwen,
+		/// Generic thinking markup.
+		Thinking,
+		/// Harmony channel markup.
+		Harmony,
+	}
+);
+kebab_policy_enum!(/// Catalog-selected reasoning loop guard.
+	ThinkingLoopGuardProfile {
+		/// Gemini repetition behavior.
+		Gemini,
+		/// DeepSeek repetition behavior.
+		#[serde(rename = "deepseek")]
+		#[strum(to_string = "deepseek", serialize = "deepseek")]
+		DeepSeek,
+		/// xAI repetition behavior.
+		#[serde(rename = "xai")]
+		#[strum(to_string = "xai", serialize = "xai")]
+		Xai,
+	}
+);
+kebab_policy_enum!(/// Provider model-identifier transformation.
+	WireModelIdMode {
+		/// Preserve the resolved wire identifier.
+		Raw,
+		/// Cline Pass identifier convention.
+		ClinePass,
+		/// Firepass identifier convention.
+		Firepass,
+		/// Fireworks identifier convention.
+		Fireworks,
+		/// OpenRouter identifier convention.
+		#[serde(rename = "openrouter")]
+		#[strum(to_string = "openrouter", serialize = "openrouter")]
+		OpenRouter,
+	}
+);
 
 policy_enum!(/// API-version suffix for compatible audio endpoints.
 	AudioApiVersion {
@@ -223,11 +314,15 @@ policy_enum!(/// Provider-specific tool parameter schema normalization.
 		/// Google's function declaration schema subset.
 		Google,
 		/// Moonshot/Kimi MFJS normalization.
+		#[serde(rename = "moonshot-mfjs")]
+		#[strum(to_string = "moonshot-mfjs", serialize = "moonshot-mfjs")]
 		MoonshotMfjs,
 		/// Grammar-safe local-server schema.
 		Grammar,
 		/// Cloud Code Assist schema stripping.
 		Cca,
+		/// Do not send a tool parameter schema.
+		None,
 	}
 );
 policy_enum!(/// How tool-definition strictness is emitted.
@@ -283,14 +378,44 @@ policy_enum!(/// Additional provider-specific thinking text representation.
 
 policy_enum!(/// Wire operation used to explicitly disable reasoning.
 	ReasoningDisableMode {
+		/// Omit reasoning controls.
+		Omit,
+		/// Send the lowest supported effort.
+		#[serde(rename = "lowest-effort")]
+		#[strum(to_string = "lowest-effort", serialize = "lowest-effort")]
+		LowestEffort,
 		/// Send the `none` effort.
 		#[serde(rename = "none-effort")]
 		#[strum(to_string = "none-effort", serialize = "none-effort")]
 		NoneEffort,
+		/// Send OpenRouter's enabled=false shape.
+		#[serde(rename = "openrouter-enabled-false")]
+		#[strum(to_string = "openrouter-enabled-false", serialize = "openrouter-enabled-false")]
+		OpenRouterEnabledFalse,
+		/// Send Cline's enabled=false shape.
+		#[serde(rename = "cline-enabled-false")]
+		#[strum(to_string = "cline-enabled-false", serialize = "cline-enabled-false")]
+		ClineEnabledFalse,
 		/// Send `venice_parameters.disable_thinking = true`.
 		#[serde(rename = "venice-disable-thinking")]
 		#[strum(to_string = "venice-disable-thinking", serialize = "venice-disable-thinking")]
 		VeniceDisableThinking,
+		/// Send Z.AI's disabled-thinking shape.
+		#[serde(rename = "zai-thinking-disabled")]
+		#[strum(to_string = "zai-thinking-disabled", serialize = "zai-thinking-disabled")]
+		ZaiThinkingDisabled,
+		/// Send Qwen's enabled=false shape.
+		#[serde(rename = "qwen-enable-thinking-false")]
+		#[strum(to_string = "qwen-enable-thinking-false", serialize = "qwen-enable-thinking-false")]
+		QwenEnableThinkingFalse,
+		/// Send Qwen template false.
+		#[serde(rename = "qwen-template-false")]
+		#[strum(to_string = "qwen-template-false", serialize = "qwen-template-false")]
+		QwenTemplateFalse,
+		/// Send generic chat-template false.
+		#[serde(rename = "chat-template-thinking-false")]
+		#[strum(to_string = "chat-template-thinking-false", serialize = "chat-template-thinking-false")]
+		ChatTemplateThinkingFalse,
 	}
 );
 policy_enum!(/// Whether the output-token limit field is emitted.
@@ -371,46 +496,100 @@ pub struct RolePolicy {
 	pub multiple_system_messages:         Option<bool>,
 	/// Whether a system message may occur after conversation content.
 	pub supports_mid_conversation_system: Option<bool>,
+	/// Whether the Claude Code instruction must be injected.
+	pub inject_claude_code_instruction:   Option<bool>,
+	/// Whether system instructions may be scoped to one turn.
+	pub supports_turn_scoped_system:      Option<bool>,
 }
+
+policy_enum!(/// Declared cost of using a native forced-tool selector.
+	NativeToolChoicePenalty {
+		/// Existing prompt-cache identity is invalidated.
+		CacheInvalidated,
+		/// The selector can add billable usage.
+		Billable,
+		/// The selector can increase latency.
+		Latency,
+		/// A provider declares a cost that is not otherwise classified.
+		Unknown,
+	}
+);
 
 /// Tool definition, choice, and transcript projection policy.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct ToolPolicy {
 	/// Whether any tool-choice control is accepted.
-	pub supports_tool_choice:        Option<bool>,
+	pub supports_tool_choice: Option<bool>,
 	/// Whether object-form named tool choice is accepted.
-	pub named_choice:                Option<bool>,
+	pub named_choice: Option<bool>,
 	/// Whether a tool may be forced.
-	pub forced_choice:               Option<bool>,
+	pub forced_choice: Option<bool>,
+	/// Declared cost of sending the native forced-tool selector. Absence means
+	/// the route has affirmatively declared no penalty.
+	pub forced_choice_penalty: Option<NativeToolChoicePenalty>,
 	/// Strictness emission policy.
-	pub strict_mode:                 Option<ToolStrictMode>,
+	pub strict_mode: Option<ToolStrictMode>,
 	/// Tool parameter schema representation.
-	pub schema_flavor:               Option<ToolSchemaFlavor>,
+	pub schema_flavor: Option<ToolSchemaFlavor>,
 	/// Tool-call identifier projection.
-	pub id_profile:                  Option<ToolCallIdProfile>,
+	pub id_profile: Option<ToolCallIdProfile>,
 	/// Whether built-in tool names must be escaped.
-	pub escape_builtin_names:        Option<bool>,
+	pub escape_builtin_names: Option<bool>,
 	/// Whether tool results must repeat their tool-call identifier.
-	pub requires_result_id:          Option<bool>,
+	pub requires_result_id: Option<bool>,
 	/// Whether partial tool input may be surfaced eagerly.
-	pub eager_input_streaming:       Option<bool>,
+	pub eager_input_streaming: Option<bool>,
 	/// Whether assistant tool-call turns require non-empty content.
-	pub requires_assistant_content:  Option<bool>,
+	pub requires_assistant_content: Option<bool>,
 	/// Resolution when reasoning controls conflict with tool choice.
-	pub thinking_conflict:           Option<ThinkingToolChoiceConflict>,
+	pub thinking_conflict: Option<ThinkingToolChoiceConflict>,
 	/// Apply-patch tool wire representation.
-	pub apply_patch:                 Option<ApplyPatchWireKind>,
+	pub apply_patch: Option<ApplyPatchWireKind>,
 	/// Native computer-use request support.
-	pub computer_use:                Option<ComputerUseWireSupport>,
+	pub computer_use: Option<ComputerUseWireSupport>,
 	/// Computer-use configuration object support.
-	pub computer_use_config:         Option<ComputerUseConfigSupport>,
+	pub computer_use_config: Option<ComputerUseConfigSupport>,
 	/// Whether choosing a tool disables reasoning.
 	pub disable_reasoning_on_choice: Option<bool>,
+	/// Whether forcing a tool disables reasoning.
+	pub disable_reasoning_on_forced_choice: Option<bool>,
+	/// Whether Antigravity uses its Claude validated-tool mode.
+	pub antigravity_claude_mode: Option<bool>,
+	/// Whether Cloud Code Assist uses the legacy `parameters` schema.
+	pub cca_legacy_parameters_schema: Option<bool>,
+	/// Whether strict tool definitions must be disabled.
+	pub disable_strict_tools: Option<bool>,
+	/// Whether object-root unions must be rejected rather than transformed.
+	pub reject_root_object_union: Option<bool>,
+	/// Whether an assistant message is required after each tool result.
+	pub requires_assistant_after_result: Option<bool>,
+	/// Whether Mistral-compatible tool-call identifiers are required.
+	pub requires_mistral_ids: Option<bool>,
+	/// Whether a missing Google thought signature uses the skip sentinel.
+	pub requires_skip_thought_signature: Option<bool>,
+	/// Whether only the first unsigned Google call receives the skip sentinel.
+	pub requires_skip_thought_signature_on_first_function_call: Option<bool>,
+	/// Whether tool results must repeat the tool name.
+	pub requires_result_name: Option<bool>,
+	/// Whether a grammar-size error may retry without strict tools.
+	pub retry_without_strict_on_grammar_error: Option<bool>,
+	/// Whether Responses history requires strict item pairing.
+	pub strict_responses_pairing: Option<bool>,
+	/// Whether Google function parts may carry identifiers.
+	pub supports_function_part_id: Option<bool>,
+	/// Whether tool definitions may change mid-conversation.
+	pub supports_mid_conversation_changes: Option<bool>,
+	/// Whether parallel tool calls are accepted.
+	pub supports_parallel_calls: Option<bool>,
+	/// Whether the endpoint accepts strict tool mode.
+	pub supports_strict_mode: Option<bool>,
+	/// Whether `OpenAI`'s forty-character tool-call identifier limit applies.
+	pub uses_openai_id_limit: Option<bool>,
 	/// Whether object-root `anyOf`/`oneOf` tool-parameter unions must be
 	/// flattened when exclusive-required and withheld otherwise (xAI rejects
 	/// them).
-	pub flatten_root_unions:         Option<bool>,
+	pub flatten_root_unions: Option<bool>,
 }
 
 /// Structured-output lowering policy.
@@ -418,11 +597,13 @@ pub struct ToolPolicy {
 #[serde(deny_unknown_fields)]
 pub struct StructuredOutputPolicy {
 	/// Whether frequency and presence penalties are accepted.
-	pub penalties:       Option<bool>,
+	pub penalties:               Option<bool>,
 	/// Whether temperature and top-p are accepted.
-	pub sampling_params: Option<bool>,
+	pub sampling_params:         Option<bool>,
 	/// Whether stop sequences are accepted.
-	pub stop_sequences:  Option<bool>,
+	pub stop_sequences:          Option<bool>,
+	/// Whether both penalty and stop parameters are accepted.
+	pub penalty_and_stop_params: Option<bool>,
 }
 
 /// Typed `thinking: { type: ... }` request-body override.
@@ -457,13 +638,24 @@ pub struct VeniceParameters {
 }
 
 /// Additional body fields applied only while reasoning is enabled.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct WhenThinkingPolicy {
 	/// Fixed typed request-body additions.
-	pub extra_body:      ReasoningBodyOverride,
+	#[serde(default)]
+	pub extra_body: Option<ReasoningBodyOverride>,
 	/// Reasoning text format selected for the enabled request.
-	pub thinking_format: ThinkingFormat,
+	#[serde(default)]
+	pub thinking_format: Option<ThinkingFormat>,
+	/// Whether reasoning text is required on tool-call turns.
+	#[serde(default)]
+	pub requires_reasoning_content_for_tool_calls: Option<bool>,
+	/// Whether synthetic reasoning text may repair tool-call turns.
+	#[serde(default)]
+	pub allows_synthetic_reasoning_content_for_tool_calls: Option<bool>,
+	/// Provider field carrying reasoning text.
+	#[serde(default)]
+	pub reasoning_content_field: Option<Str>,
 }
 
 /// Reasoning request, transcript, and recovery policy.
@@ -519,6 +711,36 @@ pub struct ReasoningPolicy {
 	pub leaked_healer: Option<LeakedThinkingHealer>,
 	/// Whether repeated zero-progress reasoning is guarded.
 	pub loop_guard: Option<bool>,
+	/// Catalog-selected repeated-reasoning guard profile.
+	pub loop_guard_profile: Option<ThinkingLoopGuardProfile>,
+	/// Whether an effort field suppresses a conflicting thinking toggle.
+	pub drop_thinking_when_effort: Option<bool>,
+	/// Whether unsigned thinking blocks must be dropped.
+	pub drop_unsigned: Option<bool>,
+	/// Whether Kimi K3 uses its native reasoning representation.
+	pub native_kimi_k3: Option<bool>,
+	/// Whether Qwen thinking history must be preserved.
+	pub qwen_preserve_thinking: Option<bool>,
+	/// Whether reasoning content is replayed into the request.
+	pub replay_content: Option<bool>,
+	/// Whether reasoning-off needs an explicit zero-juice instruction.
+	pub requires_off_juice_instruction: Option<bool>,
+	/// Whether thinking must be projected as ordinary text.
+	pub requires_thinking_as_text: Option<bool>,
+	/// Whether reasoning context from every turn is accepted.
+	pub supports_all_turns_context: Option<bool>,
+	/// Whether Anthropic output-effort controls are accepted.
+	pub supports_output_effort: Option<bool>,
+	/// Whether effort may be set per message.
+	pub supports_per_message_effort: Option<bool>,
+	/// Whether native reasoning request parameters are accepted.
+	pub supports_params: Option<bool>,
+	/// Whether signed-thinking prefix binding controls are accepted.
+	pub supports_binding_controls: Option<bool>,
+	/// Whether Kimi thinking is retained in request history.
+	pub keep: Option<bool>,
+	/// Whether only explicitly marked thinking is trusted.
+	pub trust_explicit_only: Option<bool>,
 }
 
 /// Prompt cache policy.
@@ -535,6 +757,12 @@ pub struct CachePolicy {
 	pub minimum_tokens:          Option<u64>,
 	/// Maximum explicit checkpoints accepted by the route.
 	pub maximum_checkpoints:     Option<u8>,
+	/// Explicit prompt-cache breakpoint retention.
+	pub breakpoint_ttl:          Option<PromptCacheBreakpointTtl>,
+	/// Whether explicit prompt-cache breakpoints are accepted.
+	pub supports_breakpoints:    Option<bool>,
+	/// Whether a stable prompt-cache key is accepted.
+	pub supports_key:            Option<bool>,
 }
 
 /// Output limits, storage, and response continuation policy.
@@ -553,6 +781,12 @@ pub struct ContextPolicy {
 	pub extended_mode:              Option<ExtendedContextMode>,
 	/// Whether private-use glyphs require reversible ASCII wire tokenization.
 	pub glyph_tokenization:         Option<bool>,
+	/// Whether a token limit must be sent even when the caller omitted one.
+	pub always_send_max_tokens:     Option<bool>,
+	/// Whether output tokens are clamped to the catalog model maximum.
+	pub clamp_output_to_model_max:  Option<bool>,
+	/// Whether provider-side context management is accepted.
+	pub supports_management:        Option<bool>,
 }
 
 /// Streaming framing, timeout, and recovery policy.
@@ -560,11 +794,25 @@ pub struct ContextPolicy {
 #[serde(deny_unknown_fields)]
 pub struct StreamingPolicy {
 	/// Stream framing protocol.
-	pub protocol:                   Option<StreamProtocol>,
+	pub protocol: Option<StreamProtocol>,
 	/// Optional first-event and idle timeouts.
-	pub watchdog:                   Option<StreamWatchdog>,
+	pub watchdog: Option<StreamWatchdog>,
 	/// Maximum retries for a reasoning-only stream close.
 	pub thinking_close_max_retries: Option<u32>,
+	/// Whether an empty length finish is classified as context exhaustion.
+	pub empty_length_finish_is_context_error: Option<bool>,
+	/// Whether the Gemini Flash stream-leak workaround is enabled.
+	pub flash_leak_workaround: Option<bool>,
+	/// Whether Harmony leaked channels are mitigated.
+	pub harmony_leak_mitigation: Option<bool>,
+	/// Whether reasoning deltas may repeat their complete prefix.
+	pub reasoning_deltas_cumulative: Option<bool>,
+	/// Catalog-selected leaked-markup healing pattern.
+	pub markup_healing_pattern: Option<StreamMarkupHealingPattern>,
+	/// Whether `DeepSeek` special tokens are stripped from text.
+	pub strip_deepseek_special_tokens: Option<bool>,
+	/// Whether Responses stream obfuscation may be disabled.
+	pub supports_obfuscation_opt_out: Option<bool>,
 }
 
 /// Usage-report projection policy.
@@ -572,7 +820,9 @@ pub struct StreamingPolicy {
 #[serde(deny_unknown_fields)]
 pub struct UsagePolicy {
 	/// Whether usage may be requested and decoded while streaming.
-	pub in_streaming: Option<bool>,
+	pub in_streaming:      Option<bool>,
+	/// Antigravity request label indicating Claude usage.
+	pub antigravity_label: Option<Str>,
 }
 
 /// Image request and transcript projection policy.
@@ -580,9 +830,13 @@ pub struct UsagePolicy {
 #[serde(deny_unknown_fields)]
 pub struct ImagePolicy {
 	/// Image payload encoding.
-	pub encoding:                 Option<ImageEncodingFormat>,
+	pub encoding:                     Option<ImageEncodingFormat>,
 	/// Whether the `original` detail level is accepted.
-	pub supports_detail_original: Option<bool>,
+	pub supports_detail_original:     Option<bool>,
+	/// Whether function responses may contain multimodal payloads.
+	pub multimodal_function_response: Option<bool>,
+	/// Whether image input must be removed from requests.
+	pub strip_input:                  Option<bool>,
 }
 
 /// Audio endpoint projection policy.
@@ -591,6 +845,32 @@ pub struct ImagePolicy {
 pub struct AudioPolicy {
 	/// Required API-version suffix.
 	pub api_version: Option<AudioApiVersion>,
+}
+
+/// Safe request-header compatibility policy.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HeaderWirePolicy {
+	/// Whether caller headers may replace selected Anthropic defaults.
+	pub allow_anthropic_overrides: Option<bool>,
+	/// Whether Google Claude requests carry the thinking beta header.
+	pub claude_thinking_beta:      Option<bool>,
+	/// Header carrying the prompt-cache session identifier.
+	pub prompt_cache_session:      Option<PromptCacheSessionHeader>,
+}
+
+/// Host wire-dialect compatibility policy.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DialectPolicy {
+	/// Kimi Code API request format.
+	pub kimi_api_format:      Option<KimiApiFormat>,
+	/// Whether Devin resolves the model through its router.
+	pub model_router:         Option<bool>,
+	/// Model-identifier rewrite convention.
+	pub wire_model_id_mode:   Option<WireModelIdMode>,
+	/// Whether Z.AI uses its reasoning-effort dialect.
+	pub zai_reasoning_effort: Option<bool>,
 }
 
 /// Complete typed wire-lowering and stream-recovery policy.
@@ -622,6 +902,10 @@ pub struct WirePolicy {
 	pub image:      ImagePolicy,
 	/// Audio endpoint policy.
 	pub audio:      AudioPolicy,
+	/// Request-header compatibility policy.
+	pub headers:    HeaderWirePolicy,
+	/// Host wire-dialect compatibility policy.
+	pub dialect:    DialectPolicy,
 }
 
 impl WirePolicy {
@@ -635,29 +919,50 @@ impl WirePolicy {
 				supports_developer_role:          None,
 				multiple_system_messages:         None,
 				supports_mid_conversation_system: None,
+				inject_claude_code_instruction:   None,
+				supports_turn_scoped_system:      None,
 			},
 			tool:       ToolPolicy {
-				supports_tool_choice:        None,
-				named_choice:                None,
-				forced_choice:               None,
-				strict_mode:                 None,
-				schema_flavor:               None,
-				id_profile:                  None,
-				escape_builtin_names:        None,
-				requires_result_id:          None,
-				eager_input_streaming:       None,
-				requires_assistant_content:  None,
-				thinking_conflict:           None,
-				apply_patch:                 None,
-				computer_use:                None,
-				computer_use_config:         None,
+				supports_tool_choice: None,
+				named_choice: None,
+				forced_choice: None,
+				forced_choice_penalty: None,
+				strict_mode: None,
+				schema_flavor: None,
+				id_profile: None,
+				escape_builtin_names: None,
+				requires_result_id: None,
+				eager_input_streaming: None,
+				requires_assistant_content: None,
+				thinking_conflict: None,
+				apply_patch: None,
+				computer_use: None,
+				computer_use_config: None,
 				disable_reasoning_on_choice: None,
-				flatten_root_unions:         None,
+				disable_reasoning_on_forced_choice: None,
+				antigravity_claude_mode: None,
+				cca_legacy_parameters_schema: None,
+				disable_strict_tools: None,
+				reject_root_object_union: None,
+				requires_assistant_after_result: None,
+				requires_mistral_ids: None,
+				requires_skip_thought_signature: None,
+				requires_skip_thought_signature_on_first_function_call: None,
+				requires_result_name: None,
+				retry_without_strict_on_grammar_error: None,
+				strict_responses_pairing: None,
+				supports_function_part_id: None,
+				supports_mid_conversation_changes: None,
+				supports_parallel_calls: None,
+				supports_strict_mode: None,
+				uses_openai_id_limit: None,
+				flatten_root_unions: None,
 			},
 			structured: StructuredOutputPolicy {
-				penalties:       None,
-				sampling_params: None,
-				stop_sequences:  None,
+				penalties:               None,
+				sampling_params:         None,
+				stop_sequences:          None,
+				penalty_and_stop_params: None,
 			},
 			reasoning:  ReasoningPolicy {
 				wire_format: None,
@@ -684,6 +989,21 @@ impl WirePolicy {
 				when_thinking: None,
 				leaked_healer: None,
 				loop_guard: None,
+				loop_guard_profile: None,
+				drop_thinking_when_effort: None,
+				drop_unsigned: None,
+				native_kimi_k3: None,
+				qwen_preserve_thinking: None,
+				replay_content: None,
+				requires_off_juice_instruction: None,
+				requires_thinking_as_text: None,
+				supports_all_turns_context: None,
+				supports_output_effort: None,
+				supports_per_message_effort: None,
+				supports_params: None,
+				supports_binding_controls: None,
+				keep: None,
+				trust_explicit_only: None,
 			},
 			cache:      CachePolicy {
 				control_format:          None,
@@ -691,6 +1011,9 @@ impl WirePolicy {
 				prompt_cache_mode:       None,
 				minimum_tokens:          None,
 				maximum_checkpoints:     None,
+				breakpoint_ttl:          None,
+				supports_breakpoints:    None,
+				supports_key:            None,
 			},
 			context:    ContextPolicy {
 				max_tokens_field:           None,
@@ -699,15 +1022,41 @@ impl WirePolicy {
 				stateful_response_chaining: None,
 				extended_mode:              None,
 				glyph_tokenization:         None,
+				always_send_max_tokens:     None,
+				clamp_output_to_model_max:  None,
+				supports_management:        None,
 			},
 			streaming:  StreamingPolicy {
-				protocol:                   None,
-				watchdog:                   None,
+				protocol: None,
+				watchdog: None,
 				thinking_close_max_retries: None,
+				empty_length_finish_is_context_error: None,
+				flash_leak_workaround: None,
+				harmony_leak_mitigation: None,
+				reasoning_deltas_cumulative: None,
+				markup_healing_pattern: None,
+				strip_deepseek_special_tokens: None,
+				supports_obfuscation_opt_out: None,
 			},
-			usage:      UsagePolicy { in_streaming: None },
-			image:      ImagePolicy { encoding: None, supports_detail_original: None },
+			usage:      UsagePolicy { in_streaming: None, antigravity_label: None },
+			image:      ImagePolicy {
+				encoding:                     None,
+				supports_detail_original:     None,
+				multimodal_function_response: None,
+				strip_input:                  None,
+			},
 			audio:      AudioPolicy { api_version: None },
+			headers:    HeaderWirePolicy {
+				allow_anthropic_overrides: None,
+				claude_thinking_beta:      None,
+				prompt_cache_session:      None,
+			},
+			dialect:    DialectPolicy {
+				kimi_api_format:      None,
+				model_router:         None,
+				wire_model_id_mode:   None,
+				zai_reasoning_effort: None,
+			},
 		}
 	}
 
@@ -805,32 +1154,21 @@ impl<'table> IntoIterator for &'table WirePolicyTable {
 }
 
 /// Static-header profile validation failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum HeaderPolicyError {
 	/// A name is empty or is not an HTTP token.
+	#[error("invalid static header name `{0}`")]
 	InvalidName(Str),
 	/// A value contains forbidden HTTP control bytes.
+	#[error("invalid static header value for `{0}`")]
 	InvalidValue(Str),
 	/// A credential-bearing, routing, or framing header was supplied.
+	#[error("unsafe credential, routing, or framing header `{0}`")]
 	UnsafeName(Str),
 	/// The profile contains the same case-insensitive name more than once.
+	#[error("duplicate static header name `{0}`")]
 	DuplicateName(Str),
 }
-
-impl Display for HeaderPolicyError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::InvalidName(name) => write!(formatter, "invalid static header name `{name}`"),
-			Self::InvalidValue(name) => write!(formatter, "invalid static header value for `{name}`"),
-			Self::UnsafeName(name) => {
-				write!(formatter, "unsafe credential, routing, or framing header `{name}`")
-			},
-			Self::DuplicateName(name) => write!(formatter, "duplicate static header name `{name}`"),
-		}
-	}
-}
-
-impl error::Error for HeaderPolicyError {}
 
 impl HeaderProfile {
 	/// Validates, lowercases, canonically orders, and interns static headers.
@@ -1111,12 +1449,15 @@ mod tests {
 			policy.reasoning.signing_endpoint = shape.signing_endpoint;
 			policy.reasoning.extra_body = shape.extra_body;
 			policy.reasoning.when_thinking = shape.when_thinking.map(|when| WhenThinkingPolicy {
-				extra_body:      ReasoningBodyOverride {
+				extra_body: Some(ReasoningBodyOverride {
 					thinking:          None,
 					enable_thinking:   when.extra_body.enable_thinking,
 					venice_parameters: None,
-				},
-				thinking_format: when.thinking_format,
+				}),
+				thinking_format: Some(when.thinking_format),
+				requires_reasoning_content_for_tool_calls: None,
+				allows_synthetic_reasoning_content_for_tool_calls: None,
+				reasoning_content_field: None,
 			});
 			policy.cache.supports_long_retention = shape.supports_long_cache_retention;
 			policy.context.max_tokens_field = shape.max_tokens_field;

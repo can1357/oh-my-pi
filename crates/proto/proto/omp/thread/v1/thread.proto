@@ -62,6 +62,18 @@ enum Role {
 message Message {
   Role role = 1;
   repeated Part parts = 2;
+  // Run-initiating system/developer prompt. Absent on older journals and on
+  // same-turn continuation reminders.
+  optional bool synthetic = 3;
+  // Deliberate operator-issued synthetic prompt (for example a continue
+  // shortcut), whose Item.created_at_ms starts a user-visible turn.
+  optional bool user_initiated = 4;
+  // Local wall-clock completion time for assistant messages. Provider timing
+  // is deliberately not used for prompt-to-yield duration.
+  optional uint64 completed_at_ms = 5;
+  // Usage belongs to the assistant completion so journal-only replay can
+  // rebuild the same usage row without provider state.
+  omp.inference.v1.Usage usage = 6;
 }
 
 // Content part: visible text, replayable thinking, a blob reference, a model
@@ -112,7 +124,7 @@ message ServerTool {
 // resolves hashes against the daemon blob store, so media are never
 // re-uploaded turn after turn.
 message Blob {
-  // BLAKE3-256 of the content.
+  // SHA-256 of the content.
   bytes hash = 1;
   string mime = 2;
   uint64 size = 3;

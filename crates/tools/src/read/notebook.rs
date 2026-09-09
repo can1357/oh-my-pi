@@ -1,11 +1,6 @@
-//! Jupyter notebook conversion into pi's editable virtual text.
+//! Jupyter notebook conversion into editable virtual text.
 
-use std::{
-	borrow::Cow,
-	collections::HashSet,
-	error,
-	fmt::{self, Display},
-};
+use std::{borrow::Cow, collections::HashSet};
 
 use omp_core::{IntoStr, Str};
 use serde_json::Value;
@@ -62,8 +57,9 @@ pub struct RenderedNotebook {
 	pub cells: Vec<NotebookCellMapping>,
 }
 
-/// A malformed notebook error with pi-compatible model-facing text.
-#[derive(Clone, Debug, Eq, PartialEq)]
+/// A malformed notebook error with model-facing text.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{0}")]
 pub struct NotebookError(Str);
 
 impl NotebookError {
@@ -76,14 +72,6 @@ impl NotebookError {
 		self.0.as_ref()
 	}
 }
-
-impl Display for NotebookError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		formatter.write_str(self.message())
-	}
-}
-
-impl error::Error for NotebookError {}
 
 struct PreparedCell<'a> {
 	cell_type: NotebookCellType,

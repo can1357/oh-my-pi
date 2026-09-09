@@ -123,9 +123,13 @@ impl PromptsClient {
 		arguments: Map<String, Value>,
 		cancel: CancellationToken,
 	) -> Result<Vec<PromptMessage>, PromptError> {
+		let mut params = Map::from_iter([("name".to_owned(), Value::String(name.to_owned()))]);
+		if !arguments.is_empty() {
+			params.insert("arguments".to_owned(), Value::Object(arguments));
+		}
 		let response = self
 			.transport
-			.request("prompts/get", json!({ "name": name, "arguments": arguments }), cancel)
+			.request("prompts/get", Value::Object(params), cancel)
 			.await?;
 		let wire: PromptResponse =
 			serde_json::from_value(response.result).map_err(|_| PromptError::Malformed)?;

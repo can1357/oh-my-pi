@@ -736,6 +736,26 @@ async def _install_invocation_backend(
     )
 
 
+async def _invoke_with_environment(
+    authority: Mapping[str, Any],
+    callback: Any,
+    params: Any,
+    context: Any,
+    contextual: bool,
+) -> Any:
+    """Run one legacy toolhost callback inside its exact DATA scope."""
+
+    tokens = await _install_invocation_backend(authority)
+    try:
+        value = callback(params, context) if contextual else callback(params)
+        if inspect.isawaitable(value):
+            value = await value
+        return value
+    finally:
+        if tokens is not None:
+            _reset_backend(tokens)
+
+
 def _snapshot_backend() -> Any:
     binding = _binding.get()
     if binding is None:
@@ -1043,6 +1063,8 @@ class _Docs:
         """Open a document and return a server-owned lease."""
         path = _env_path(path)
         result = await _call("docs_open", path=path, language=language, create=create)
+        if isinstance(result, Mapping):
+            result = OpenedDoc(**result)
         if not isinstance(result, OpenedDoc):
             raise TypeError("document backend returned an invalid open receipt")
         return Doc(result.lease, path, result.revision)

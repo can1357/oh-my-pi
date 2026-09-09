@@ -1,6 +1,10 @@
 // Provider-wire compat for "nanogpt"; regenerated from the frozen census using deployment contract selectors.
 
 provider "nanogpt" {
+	// Replaces the reasoning-gated K2.6 stream-idle baseline.
+	models "moonshotai/kimi-k2.6:thinking" {
+		stream-idle-timeout-ms 300000
+	}
 	thinking-mode "effort"
 	class "anthropic" {
 		revision ">=4 <4.5" {
@@ -41,27 +45,12 @@ provider "nanogpt" {
 		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "MiniMax-M2" {
-		thinking-format "zai"
-	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "Qwen/Qwen3-235B-A22B-Thinking-2507" {
 		thinking-requires-effort #true
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "amazon/nova-lite-v1" "amazon/nova-micro-v1" "amazon/nova-pro-v1" {
-		supports-tool-choice #false
-	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "claw" "hermes" {
 		thinking-efforts "low" "medium" "high"
-	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "deepseek-ai/deepseek-v3.2-exp" {
-		allows-synthetic-reasoning-content-for-tool-calls #true
-		disable-reasoning-on-tool-choice #false
-		requires-reasoning-content-for-all-assistant-turns #true
-		requires-reasoning-content-for-tool-calls #false
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "deepseek/deepseek-latest" {
@@ -72,11 +61,6 @@ provider "nanogpt" {
 	models "deepseek/deepseek-v4-flash*" "deepseek-ai/DeepSeek-R1-0528" \
 		"deepseek/deepseek-v3.2:thinking" {
 		requires-reasoning-content-for-all-assistant-turns #true
-	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "gemini-2.5-pro" {
-		supports-reasoning-effort #false
-		supports-store #false
 	}
 	// Tiered provider aliases are one logical model despite lacking source behavior policy.
 	models "linkup-research" {
@@ -97,16 +81,20 @@ provider "nanogpt" {
 	models "openai/gpt-5.1-codex-mini" {
 		thinking-efforts "medium" "high"
 	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "openai/o3-mini" {
-		thinking-efforts "low" "high"
+	// residue: the reviewed Claude-distill lineage keeps its student serving
+	// dialect on NanoGPT's chat endpoint (qwen thinking format, no store).
+	models "Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-Derestricted" \
+		"Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-Derestricted-Lite" {
+		disable-reasoning-on-forced-tool-choice #false
+		supports-store #false
+		thinking-format "qwen"
 	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "venice-uncensored" {
-		supports-usage-in-streaming #false
+	models "Gemma-4-31B-Claude-4.6-Opus-Reasoning-Distilled" {
+		disable-reasoning-on-forced-tool-choice #false
+		thinking-requires-effort #true
 	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "xiaomi/mimo-v2-flash*" {
-		reasoning-effort-map {}
+	// residue: the abliterated R1 distill leaks DSML envelopes like its teacher.
+	models "*deepseek-r1-distill*" {
+		stream-markup-healing-pattern "dsml"
 	}
 }

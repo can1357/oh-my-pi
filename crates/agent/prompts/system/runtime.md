@@ -9,13 +9,21 @@ Matching skill → MUST read `skill://<name>` before acting.
 {% endfor %}
 </skills>
 {% endif %}
-{% if rules %}
+{% if always_apply_rules %}
 # Standing Rules
 <generic-rules>
-{% for rule in rules %}
-{{ rule.description }}
+{% for rule in always_apply_rules %}
+{{ rule.content }}
 {% endfor %}
 </generic-rules>
+{% endif %}
+{% if rules %}
+Rules are local constraints. MUST read `rule://<name>` when working in that domain.
+<domain-rules>
+{% for rule in rules %}
+- {{ rule.name }}{% if rule.globs %} ({{ rule.globs | join(", ") }}){% endif %}: {{ rule.description }}
+{% endfor %}
+</domain-rules>
 {% endif %}
 {% if schemes %}
 

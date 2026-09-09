@@ -19,7 +19,7 @@ ignore.workspace = true
 omp-core.workspace = true
 serde.workspace = true
 smallvec.workspace = true
-strum = { workspace = true }
+strum.workspace = true
 tree-sitter.workspace = true
 tree-sitter-astro.workspace = true
 tree-sitter-bash.workspace = true
@@ -77,4 +77,4 @@ tree-sitter-vue.workspace = true
 tree-sitter-xml.workspace = true
 tree-sitter-yaml.workspace = true
 tree-sitter-zig.workspace = true
-parking_lot = { workspace = true }
+parking_lot.workspace = true

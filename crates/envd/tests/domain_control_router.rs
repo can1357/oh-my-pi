@@ -6,14 +6,19 @@ use std::{
 };
 
 use async_trait::async_trait;
-use omp_core::{Principal, Str, sf};
-use omp_envd::exthost::control::{
-	ControlAuthority, ControlAuthorityFactory, ControlConnectionIdentity, ControlEffect,
-	ControlProtocolError, ControlRequestContext, EnvdControlAuthorities, ExternalControlAuthorities,
-	FixedControlAuthorityFactory, HostControlAuthorityFactory, PersistenceControlAuthorities,
-	PolicyControlAuthorities, PresentationControlAuthorities, ProviderControlAuthorities,
-	RegistryControlAuthorities,
+use omp_core::{ArtifactDigest, Principal, Provenance, Str, sf};
+use omp_envd::exthost::{
+	DeclarationSet, ExtensionManifest, ServiceManifest,
+	control::{
+		ControlAuthority, ControlAuthorityFactory, ControlConnectionIdentity, ControlEffect,
+		ControlProtocolError, ControlRequestContext, EnvdControlAuthorities,
+		ExternalControlAuthorities, FixedControlAuthorityFactory, HostControlAuthorityFactory,
+		PersistenceControlAuthorities, PolicyControlAuthorities, PresentationControlAuthorities,
+		ProviderControlAuthorities, RegistryControlAuthorities,
+	},
+	seal_registry_evidence,
 };
+use omp_ext::config::StaticDeclarations;
 use serde_json::{Value, json};
 
 struct Owner {
@@ -56,7 +61,6 @@ impl ControlAuthority for Owner {
 		effect: ControlEffect,
 	) -> Result<(), ControlProtocolError> {
 		let kind = match effect {
-			ControlEffect::Registry(_) => "registry",
 			ControlEffect::Ui(_) => "ui",
 			ControlEffect::Instrument(_) => "instrument",
 			ControlEffect::Intent(_) => "intent",
@@ -80,7 +84,7 @@ fn context(request_id: u64) -> ControlRequestContext {
 		connection: Arc::new(ControlConnectionIdentity {
 			extension:          sf!("router.test"),
 			principal:          Principal::new(sf!("test"), sf!("Test")),
-			artifact_digest:    sf!("sha256:test"),
+			artifact_digest:    Str::from(ArtifactDigest::new([3; 32]).to_string()),
 			layer:              sf!("project"),
 			tier:               sf!("trusted"),
 			trust:              sf!("trusted"),
@@ -97,15 +101,8 @@ fn context(request_id: u64) -> ControlRequestContext {
 async fn routes_requests_callbacks_and_effects_to_domain_owners() {
 	let calls = Arc::new(Mutex::new(Vec::new()));
 	let envd = EnvdControlAuthorities::new(
-		RegistryControlAuthorities::new(
-			owner("registry", &calls),
-			owner("devices", &calls),
-			owner("hooks", &calls),
-		),
+		RegistryControlAuthorities::new(owner("devices", &calls), owner("hooks", &calls)),
 		PersistenceControlAuthorities::new(
-			owner("context", &calls),
-			owner("journal", &calls),
-			owner("state", &calls),
 			owner("sessions", &calls),
 			owner("artifacts", &calls),
 			owner("credentials", &calls),
@@ -116,11 +113,7 @@ async fn routes_requests_callbacks_and_effects_to_domain_owners() {
 			owner("telemetry", &calls),
 			owner("verdicts", &calls),
 		),
-		ProviderControlAuthorities::new(
-			owner("provider", &calls),
-			owner("regimes", &calls),
-			owner("services", &calls),
-		),
+		ProviderControlAuthorities::new(owner("provider", &calls), owner("services", &calls)),
 		owner("auxiliary", &calls),
 		owner("effects", &calls),
 	);
@@ -131,13 +124,55 @@ async fn routes_requests_callbacks_and_effects_to_domain_owners() {
 	.bind(context(0).connection)
 	.expect("complete router");
 
+	assert!(!router.handles("omp.registry.freeze"));
+	let freeze_identity = context(1).connection;
+	let manifest = ExtensionManifest::new_with_static(
+		Provenance::new(
+			sf!("publisher"),
+			sf!("router.test"),
+			sf!("1.0.0"),
+			ArtifactDigest::new([3; 32]),
+			sf!("project"),
+			sf!("trusted"),
+			3,
+		),
+		"router.test",
+		[],
+		DeclarationSet::default(),
+		ServiceManifest::default(),
+		StaticDeclarations::default(),
+		[],
+		[],
+	);
+	let evidence = seal_registry_evidence(
+		freeze_identity,
+		sf!("session"),
+		&manifest,
+		json!({
+			"declaration_keys": [],
+			"tools": [],
+			"hooks": [],
+			"services": [],
+			"prompt_slots": [],
+			"commands": [],
+			"shortcuts": [],
+			"completions": [],
+			"message_renderers": [],
+			"markdown_transformers": [],
+			"verdict_renderers": [],
+			"providers": [],
+			"directors": [],
+			"components": [],
+		}),
+	)
+	.expect("sealed correlated FREEZE evidence");
+	assert!(evidence.tools.is_empty());
+	assert!(evidence.prompts.is_empty());
+	assert!(evidence.services.is_empty());
 	let requests = [
-		("omp.registry.freeze", "registry"),
 		("omp.devices.invoke", "devices"),
 		("omp.hooks.dispatch", "hooks"),
-		("omp.context.view", "context"),
-		("omp.journal.append", "journal"),
-		("omp.state.latest", "state"),
+		("omp.state_dir", "auxiliary"),
 		("omp.sessions.get", "sessions"),
 		("omp.artifacts.stat", "artifacts"),
 		("omp.creds.list", "credentials"),
@@ -147,10 +182,6 @@ async fn routes_requests_callbacks_and_effects_to_domain_owners() {
 		("omp.telemetry.query", "telemetry"),
 		("omp.jobs.register", "verdicts"),
 		("omp.provider.request", "provider"),
-		("omp.regimes.start", "regimes"),
-		("omp.regimes.active", "regimes"),
-		("omp.regimes.stop", "regimes"),
-		("omp.regimes.apply", "regimes"),
 		("omp.services.call", "services"),
 		("omp.params.pull", "auxiliary"),
 		("omp.workers.spawn", "auxiliary"),
@@ -165,9 +196,12 @@ async fn routes_requests_callbacks_and_effects_to_domain_owners() {
 			.expect("routed request/callback");
 		assert_eq!(result, Value::String(expected.to_owned()));
 	}
+	assert!(!router.handles("omp.context.view"));
+	assert!(!router.handles("omp.journal.append"));
+	assert!(!router.handles("omp.state.latest"));
+	assert!(!router.handles("omp.regimes.start"));
 
 	for (index, (effect, expected)) in [
-		(ControlEffect::Registry(json!({})), "registry:registry"),
 		(ControlEffect::Ui(json!({})), "ui:ui"),
 		(ControlEffect::Instrument(json!({})), "telemetry:instrument"),
 		(

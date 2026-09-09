@@ -1,0 +1,48 @@
+                                                                                                                                                                                        
+╭─── omp v18.0.11 ─────────────────────────────────────────────────────────────────────────────────╮                                                                                    
+│                          │ Tips                                                                  │                                                                                    
+│      Welcome back!       │ # for prompt actions                                                  │                                                                                    
+│                          │ / for commands                                                        │                                                                                    
+│       ████████████       │ ! to run bash                                                         │                                                                                    
+│          ██  ██          │ $ to run python                                                       │                                                                                    
+│          ██  ██          │ ───────────────────────────────────────────────────────────────────── │                                                                                    
+│          ▒▒  ██          │ LSP Servers                                                           │                                                                                    
+│              ██          │ No LSP servers                                                        │                                                                                    
+│                          │                                                                       │                                                                                    
+│      Claude Fable 5      │                                                                       │                                                                                    
+│        anthropic         │                                                                       │                                                                                    
+│                          │ ───────────────────────────────────────────────────────────────────── │                                                                                    
+│                          │ Recent sessions                                                       │                                                                                    
+│                          │ No recent sessions                                                    │                                                                                    
+│                          │                                                                       │                                                                                    
+│                          │                                                                       │                                                                                    
+│                          │                                                                       │                                                                                    
+│                          │                                                                       │                                                                                    
+╰──────────────────────────┴───────────────────────────────────────────────────────────────────────╯                                                                                    
+ Tip: Please use nerdfont 😭.                                                                                                                                                            
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+ π  > ◒ Fable 5 > 🗑 …omplete-184x48-parent-UsRS34/pi-capture > ⑂ main ▶───2%─────────────────────────────────────────────────────────────────────────────────────────┃───────────────1M─
+╰─ /set                                                                                                                                                                                 
+❯ 🎛  settings        Open settings menu                                                                                                                                                █
+  ⚙  setup           Open provider setup                                                                                                                                               │
+  🛡  security        Plan, run, inspect, import, and compare OMP-native security scans                                                                                                 │
+  ∿  vibe            Vibe: off                                                                                                                                                         │
+  🧭 guided-goal     Have the agent interview you in chat, then set up goal mode                                                                                                       │ 
+  ↻  fresh           Fresh: ready                                                                                                                                                      │
+  ↻  loop            Loop: off                                                                                                                                                         │
+  ⚡ fast            Fast: off                                                                                                                                                         │ 
+  🖥  computer        Computer: off                                                                                                                                                     │
+  📤 export          Export session to HTML file                                                                                                                                       │ 
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+                                                                                                                                                                                        
+                                                                                                                                                                                        

@@ -416,9 +416,310 @@ impl Reveal {
 	}
 }
 
+/// Normalized cyclic phase in `[0, 1)` of `now` over `period` — the shared
+/// clock arithmetic behind hue rotations and keyword shimmers: every
+/// consumer sampling the same `period` at the same instant lands on the
+/// same phase, so animations across components stay phase-locked.
+#[must_use]
+pub fn phase(now: Duration, period: Duration) -> f32 {
+	let period = period.as_millis().max(1);
+	(now.as_millis() % period) as f32 / period as f32
+}
+
+/// Wraps any real into `[0, 1)`, so negative and over-range phases stay
+/// well-defined.
+#[must_use]
+pub fn wrap_unit(t: f32) -> f32 {
+	let wrapped = t.rem_euclid(1.0);
+	if wrapped >= 1.0 { 0.0 } else { wrapped }
+}
+
+/// HSL → RGB (`hue` in degrees, `saturation`/`lightness` in `[0, 1]`), the
+/// color space used by the rainbow tag and gradient keyword highlighter.
+#[must_use]
+pub fn hsl(hue: f32, saturation: f32, lightness: f32) -> Color {
+	let hue = hue.rem_euclid(360.0);
+	let saturation = saturation.clamp(0.0, 1.0);
+	let lightness = lightness.clamp(0.0, 1.0);
+	let chroma = (1.0 - (2.0f32.mul_add(lightness, -1.0)).abs()) * saturation;
+	let sector = hue / 60.0;
+	let x = chroma * (1.0 - (sector.rem_euclid(2.0) - 1.0).abs());
+	let (r, g, b) = match sector as u8 {
+		0 => (chroma, x, 0.0),
+		1 => (x, chroma, 0.0),
+		2 => (0.0, chroma, x),
+		3 => (0.0, x, chroma),
+		4 => (x, 0.0, chroma),
+		_ => (chroma, 0.0, x),
+	};
+	let m = lightness - chroma / 2.0;
+	let channel = |value: f32| ((value + m) * 255.0).round().clamp(0.0, 255.0) as u8;
+	Color::Rgb(channel(r), channel(g), channel(b))
+}
+
+/// A soft white highlight band composited over a [`Gradient`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Shine {
+	/// Overall opacity of the highlight, in `[0, 1]`.
+	pub strength: f32,
+	/// Center of the band along the diagonal, in `[0, 1]`.
+	pub pos:      f32,
+}
+
+impl Shine {
+	/// Half-width of the band in gradient-`t` units.
+	pub const HALF_WIDTH: f32 = 0.18;
+
+	/// Lift toward white at `t`: `max(0, 1 - dist / HALF_WIDTH) * strength`.
+	#[must_use]
+	pub fn intensity(self, t: f32) -> f32 {
+		if self.strength <= 0.0 {
+			return 0.0;
+		}
+		let dist = (t - self.pos).abs();
+		(1.0 - dist / Self::HALF_WIDTH).max(0.0) * self.strength
+	}
+}
+
+/// Multi-stop diagonal brand gradient.
+///
+/// `t` runs along the top-left → bottom-right diagonal of a glyph grid:
+/// `(x / x_span + y / y_span) / 2`, so the top-right and bottom-left corners
+/// both land on the purple midpoint. `phase` slides `t` along the diagonal
+/// and wraps at 1, which is how the intro sweep spins the palette.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Gradient {
+	/// Diagonal offset in `[0, 1)`.
+	pub phase: f32,
+}
+
+impl Gradient {
+	/// 256-color ramp sampled when the terminal lacks truecolor.
+	pub const RAMP_256: [u8; 7] = [206, 170, 134, 99, 69, 74, 44];
+	/// RGB stops from magenta through violet to cyan.
+	pub const STOPS: [[u8; 3]; 3] = [[248, 79, 204], [147, 98, 244], [0, 219, 228]];
+
+	/// A gradient shifted by `phase` (wrapped into `[0, 1)`).
+	#[must_use]
+	pub fn shifted(phase: f32) -> Self {
+		Self { phase: wrap_unit(phase) }
+	}
+
+	/// Diagonal position of cell `(x, y)` in a `cols × rows` grid before the
+	/// phase shift.
+	#[must_use]
+	pub fn diagonal(x: u16, y: u16, cols: u16, rows: u16) -> f32 {
+		let x_span = f32::from(cols.saturating_sub(1).max(1));
+		let y_span = f32::from(rows.saturating_sub(1).max(1));
+		f32::midpoint(f32::from(x) / x_span, f32::from(y) / y_span)
+	}
+
+	/// Color at diagonal position `t`, shifted by [`phase`](Self::phase) and
+	/// lifted by `shine`. Truecolor terminals get the interpolated RGB;
+	/// others the nearest [`RAMP_256`](Self::RAMP_256) slot, promoted to the
+	/// brightest slot where the shine band peaks.
+	#[must_use]
+	pub fn color(self, t: f32, shine: Option<Shine>, truecolor: bool) -> Color {
+		let t = if self.phase == 0.0 {
+			t
+		} else {
+			wrap_unit(t + self.phase)
+		};
+		let intensity = shine.map_or(0.0, |shine| shine.intensity(t));
+		if truecolor {
+			let stops = &Self::STOPS;
+			let seg = t * (stops.len() - 1) as f32;
+			let index = (seg.floor() as usize).min(stops.len() - 2);
+			let f = seg - index as f32;
+			let a = stops[index];
+			let b = stops[index + 1];
+			let channel = |lane: usize| {
+				let base = (f32::from(b[lane]) - f32::from(a[lane])).mul_add(f, f32::from(a[lane]));
+				let lifted = if intensity > 0.0 {
+					(255.0 - base).mul_add(intensity, base)
+				} else {
+					base
+				};
+				lifted.round().clamp(0.0, 255.0) as u8
+			};
+			return Color::Rgb(channel(0), channel(1), channel(2));
+		}
+		let ramp = &Self::RAMP_256;
+		let last = ramp.len() - 1;
+		let mut index = (f32::mul_add(t, last as f32, 0.5).floor().max(0.0) as usize).min(last);
+		if intensity > 0.5 {
+			index = last;
+		}
+		Color::Indexed(ramp[index])
+	}
+}
+
+/// One-shot brand intro: the gradient sweeps backward through 2.5 rotations
+/// on an ease-out cubic while a shine
+/// band crosses the diagonal three times at a steady pace, fading with the
+/// same curve, so the two layers parallax and settle together on the
+/// resting frame.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Intro;
+
+impl Intro {
+	/// Total length of the intro.
+	pub const DURATION: Duration = Duration::from_millis(3000);
+	/// Shine crossings of the diagonal.
+	pub const SHINE_TRAVERSALS: f32 = 3.0;
+	/// Full gradient rotations before settling.
+	pub const SWEEPS: f32 = 2.5;
+
+	/// Whether `elapsed` is past the intro: the resting frame from here on.
+	#[must_use]
+	pub const fn done(elapsed: Duration) -> bool {
+		elapsed.as_millis() >= Self::DURATION.as_millis()
+	}
+
+	/// Gradient phase and shine for `elapsed` since the intro began; the
+	/// resting frame (phase 0, no shine) once the intro is done.
+	#[must_use]
+	pub fn frame(elapsed: Duration) -> (f32, Option<Shine>) {
+		if Self::done(elapsed) {
+			return (0.0, None);
+		}
+		let progress = elapsed.as_secs_f32() / Self::DURATION.as_secs_f32();
+		let eased = 1.0 - (1.0 - progress).powi(3);
+		let phase = wrap_unit((1.0 - eased) * Self::SWEEPS);
+		let pos = wrap_unit(progress * Self::SHINE_TRAVERSALS);
+		let strength = (1.0 - eased).powf(1.5);
+		(phase, Some(Shine { strength, pos }))
+	}
+}
+
+/// Per-glyph HSL rainbow: glyph `i` of `n` takes hue
+/// `round(((i / n + phase) mod 1) * 360)` at 95% saturation
+/// and 60% lightness, painted bold. `phase` advances one full rotation per
+/// [`PERIOD`](Self::PERIOD) on the shared clock.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Rainbow {
+	/// Hue offset in `[0, 1)`.
+	pub phase: f32,
+}
+
+impl Rainbow {
+	/// One full hue rotation.
+	pub const PERIOD: Duration = Duration::from_millis(1500);
+
+	/// The rainbow phase-locked to `now`.
+	#[must_use]
+	pub fn at(now: Duration) -> Self {
+		Self { phase: phase(now, Self::PERIOD) }
+	}
+
+	/// Hue in degrees for glyph `index` of `count`.
+	#[must_use]
+	pub fn hue(self, index: usize, count: usize) -> f32 {
+		let count = count.max(1) as f32;
+		(wrap_unit(index as f32 / count + wrap_unit(self.phase)) * 360.0).round()
+	}
+
+	/// Bold style for glyph `index` of `count`.
+	#[must_use]
+	pub fn style(self, index: usize, count: usize) -> Style {
+		Style::new()
+			.fg(hsl(self.hue(index, count), 0.95, 0.60))
+			.bold()
+	}
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn hsl_hits_the_primary_corners_and_wraps_hue() {
+		assert_eq!(hsl(0.0, 1.0, 0.5), Color::Rgb(255, 0, 0));
+		assert_eq!(hsl(120.0, 1.0, 0.5), Color::Rgb(0, 255, 0));
+		assert_eq!(hsl(240.0, 1.0, 0.5), Color::Rgb(0, 0, 255));
+		assert_eq!(hsl(360.0, 1.0, 0.5), hsl(0.0, 1.0, 0.5));
+		assert_eq!(hsl(-120.0, 1.0, 0.5), hsl(240.0, 1.0, 0.5));
+		assert_eq!(hsl(30.0, 0.0, 0.5), Color::Rgb(128, 128, 128));
+	}
+
+	#[test]
+	fn gradient_hits_pi_stops_and_lifts_under_the_shine() {
+		let gradient = Gradient::default();
+		assert_eq!(gradient.color(0.0, None, true), Color::Rgb(248, 79, 204));
+		assert_eq!(gradient.color(0.5, None, true), Color::Rgb(147, 98, 244));
+		assert_eq!(gradient.color(1.0, None, true), Color::Rgb(0, 219, 228));
+		// A full-strength shine centered on t lifts every channel to white.
+		let shine = Some(Shine { strength: 1.0, pos: 0.5 });
+		assert_eq!(gradient.color(0.5, shine, true), Color::Rgb(255, 255, 255));
+		// Outside the band the shine contributes nothing.
+		assert_eq!(gradient.color(0.0, shine, true), Color::Rgb(248, 79, 204));
+		// Phase slides t along the diagonal and wraps.
+		assert_eq!(Gradient::shifted(0.5).color(0.5, None, true), Color::Rgb(248, 79, 204));
+		assert_eq!(Gradient::shifted(1.5).phase, 0.5);
+	}
+
+	#[test]
+	fn gradient_ramp_fallback_picks_the_nearest_slot_and_promotes_under_shine() {
+		let gradient = Gradient::default();
+		assert_eq!(gradient.color(0.0, None, false), Color::Indexed(206));
+		assert_eq!(gradient.color(0.5, None, false), Color::Indexed(99));
+		assert_eq!(gradient.color(1.0, None, false), Color::Indexed(44));
+		assert_eq!(gradient.color(0.1, None, false), Color::Indexed(170));
+		let shine = Some(Shine { strength: 1.0, pos: 0.0 });
+		assert_eq!(gradient.color(0.0, shine, false), Color::Indexed(44));
+		// Intensity 0.5 exactly is not promoted.
+		let half = Some(Shine { strength: 0.5, pos: 0.0 });
+		assert_eq!(gradient.color(0.0, half, false), Color::Indexed(206));
+	}
+
+	#[test]
+	fn gradient_diagonal_projects_both_axes_equally() {
+		assert_eq!(Gradient::diagonal(0, 0, 12, 5), 0.0);
+		assert_eq!(Gradient::diagonal(11, 4, 12, 5), 1.0);
+		assert_eq!(Gradient::diagonal(11, 0, 12, 5), 0.5);
+		assert_eq!(Gradient::diagonal(0, 4, 12, 5), 0.5);
+	}
+
+	#[test]
+	fn intro_frames_follow_pi_ease_out_sweep() {
+		let close = |a: f32, b: f32| (a - b).abs() < 1e-4;
+		let (phase, shine) = Intro::frame(Duration::ZERO);
+		let shine = shine.expect("shine while animating");
+		assert!(close(phase, 0.5), "{phase}");
+		assert!(close(shine.strength, 1.0) && close(shine.pos, 0.0));
+
+		let (phase, shine) = Intro::frame(Duration::from_millis(1_500));
+		let shine = shine.expect("shine while animating");
+		// eased = 1 - 0.5^3 = 0.875; phase = wrap(0.125 * 2.5) = 0.3125.
+		assert!(close(phase, 0.3125), "{phase}");
+		assert!(close(shine.pos, 0.5), "{}", shine.pos);
+		assert!(close(shine.strength, 0.125f32.powf(1.5)), "{}", shine.strength);
+
+		assert_eq!(Intro::frame(Duration::from_millis(3_000)), (0.0, None));
+		assert!(Intro::done(Duration::from_millis(3_000)));
+		assert!(!Intro::done(Duration::from_millis(2_999)));
+	}
+
+	#[test]
+	fn rainbow_spreads_hues_evenly_at_phase_zero() {
+		let rainbow = Rainbow::default();
+		let hues: Vec<f32> = (0..4).map(|index| rainbow.hue(index, 4)).collect();
+		assert_eq!(hues, vec![0.0, 90.0, 180.0, 270.0]);
+		assert_eq!(rainbow.style(0, 4), Style::new().fg(hsl(0.0, 0.95, 0.60)).bold());
+		assert_eq!(Rainbow::at(Duration::from_millis(750)).phase, 0.5);
+		assert_eq!(Rainbow::at(Duration::from_millis(750)).hue(0, 4), 180.0);
+	}
+
+	#[test]
+	fn phase_is_cyclic_and_wrap_unit_is_half_open() {
+		let period = Duration::from_millis(1_500);
+		assert_eq!(phase(Duration::ZERO, period), 0.0);
+		assert_eq!(phase(Duration::from_millis(750), period), 0.5);
+		assert_eq!(phase(Duration::from_millis(1_500), period), 0.0);
+		assert_eq!(wrap_unit(1.0), 0.0);
+		assert_eq!(wrap_unit(-0.25), 0.75);
+		assert_eq!(wrap_unit(2.5), 0.5);
+	}
 
 	#[test]
 	fn easing_curves_hit_both_endpoints_and_stay_ordered() {

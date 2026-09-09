@@ -15,10 +15,10 @@ pub fn placeholder_key() -> &'static str {
 }
 
 fn resolve_key() -> String {
-	match omp_storage::secret_key::load_or_create() {
+	match omp_cache::secret_key::load_or_create() {
 		Ok(key) => key,
 		Err(error) => {
-			let path = omp_storage::secret_key::native_path()
+			let path = omp_cache::secret_key::native_path()
 				.map_or_else(|_| "<unresolved>".into(), |path| path.display().to_string());
 			tracing::warn!(
 				%error,

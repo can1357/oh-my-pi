@@ -3,9 +3,7 @@
 
 use std::{path::Path, sync::Arc, time::Duration};
 
-use omp_catalog::OperationKind;
-use omp_core::sf;
-use omp_inference::{
+use omp_ai::{
 	Client,
 	auth::{CredentialStore, HeadlessKeySource, KeyId},
 	call::{
@@ -16,6 +14,8 @@ use omp_inference::{
 	receipt::ExecutionBudget,
 	router::Router,
 };
+use omp_catalog::OperationKind;
+use omp_core::sf;
 
 fn credential_store(path: &Path) -> Arc<CredentialStore> {
 	omp_driver::registry::open_credential_store_with_key_source(
@@ -32,6 +32,8 @@ fn metadata(target: Target, id: &'static str) -> CallMeta {
 		deadline: None,
 		budget: ExecutionBudget::default(),
 		session: None,
+		debug_session: None,
+		response_hooks: Default::default(),
 	}
 }
 
@@ -58,6 +60,7 @@ fn chat_request() -> ChatRequest {
 		top_logprobs:      None,
 		safety:            Arc::from([]),
 		negotiation:       NegotiationPolicy::default(),
+		forced_call:       None,
 	}
 }
 

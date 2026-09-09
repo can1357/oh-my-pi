@@ -1,0 +1,26 @@
+── reflect — Reflect ───────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Reflect: what have we learned about the user's                                                    
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Reflect: What have we learned about the user's tooling preferences?                               
+                                                                                                    
+
+  · done
+                                                                                                    
+ Reflect: What have we learned about the user's tooling preferences?                               
+  The user consistently favors Bun as the runtime for scripts in this                               
+  repository, avoiding Node where possible. They also track the location                            
+  of TUI renderers under packages/coding-agent/src/tools, suggesting an                             
+  interest in keeping rendering logic discoverable and well-organized.                              
+                                                                                                    
+
+  · failed
+                                                                                                    
+ Error: Reflect failed: no memories matched the query.                                             
+                                                                                                    
+

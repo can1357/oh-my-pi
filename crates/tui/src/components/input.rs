@@ -1,5 +1,6 @@
 use std::{fmt::Write as _, iter};
 
+use omp_core::Str;
 use xutf::Text;
 
 use crate::{
@@ -16,6 +17,17 @@ use crate::{
 
 const INPUT_UNDO_CAP: usize = 100;
 const INPUT_KILL_CAP: usize = 60;
+
+/// What one routed key did to the input.
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum Edited {
+	/// The key was not an editing key.
+	None,
+	/// Only the caret or kill/yank bookkeeping moved.
+	Caret,
+	/// The text content changed.
+	Text,
+}
 
 #[derive(Clone, Copy, Default, Eq, PartialEq)]
 enum InputAction {
@@ -88,7 +100,7 @@ impl InputState {
 		self.undo.push((self.text.clone(), self.cursor));
 	}
 
-	fn break_sequence(&mut self) {
+	const fn break_sequence(&mut self) {
 		self.last_action = InputAction::Other;
 		self.last_yank = None;
 	}
@@ -188,7 +200,7 @@ impl Input {
 		}
 	}
 
-	fn edit(&mut self, key: Key) -> bool {
+	fn edit(&mut self, key: Key) -> Edited {
 		let changed = match key {
 			Key::Left | Key::Ctrl('b') => {
 				self.state.cursor = self.state.text[..self.state.cursor]
@@ -272,7 +284,7 @@ impl Input {
 			},
 			Key::Ctrl('-' | '_') => {
 				let Some((text, cursor)) = self.state.undo.pop() else {
-					return false;
+					return Edited::None;
 				};
 				self.state.text = text;
 				self.state.cursor = cursor;
@@ -307,14 +319,27 @@ impl Input {
 			},
 			Key::Ctrl('y') => self.yank(),
 			Key::Alt('y') => self.yank_pop(),
-			_ => return false,
+			_ => return Edited::None,
 		};
-		if changed {
-			self.state.refresh_mask();
-			let limit = self.limit();
-			self.state.refresh_counter(limit);
+		if !changed {
+			return Edited::None;
 		}
-		changed
+		if matches!(
+			key,
+			Key::Left
+				| Key::Right
+				| Key::Home
+				| Key::End
+				| Key::WordLeft
+				| Key::WordRight
+				| Key::Ctrl('b' | 'f' | 'a' | 'e')
+		) {
+			return Edited::Caret;
+		}
+		self.state.refresh_mask();
+		let limit = self.limit();
+		self.state.refresh_counter(limit);
+		Edited::Text
 	}
 
 	fn kill_range(&mut self, start: usize, end: usize) -> bool {
@@ -363,6 +388,17 @@ impl Input {
 		self.state.last_yank = Some((start, self.state.cursor));
 		self.state.last_action = InputAction::YankPop;
 		true
+	}
+
+	/// Surfaces the edited text as [`UiEvent::Changed`] when the input is
+	/// named, so hosts can react to every keystroke (live filtering).
+	fn changed_event(&self) -> Flow {
+		match self.props.id() {
+			Some(id) => {
+				Flow::Event(UiEvent::Changed { id: id.clone(), value: Str::new(&self.state.text) })
+			},
+			None => Flow::Consumed,
+		}
 	}
 }
 
@@ -488,11 +524,12 @@ impl Component for Input {
 
 	fn key(&mut self, _ec: &mut EventCtx<'_>, key: Key) -> Flow {
 		if key == Key::Enter && self.props.flag(Prop::Submit) {
-			Flow::Event(UiEvent::Submit)
-		} else if self.edit(key) {
-			Flow::Consumed
-		} else {
-			Flow::Skip
+			return Flow::Event(UiEvent::Submit);
+		}
+		match self.edit(key) {
+			Edited::Text => self.changed_event(),
+			Edited::Caret => Flow::Consumed,
+			Edited::None => Flow::Skip,
 		}
 	}
 
@@ -549,7 +586,7 @@ impl Component for Input {
 		self.state.refresh_mask();
 		let limit = self.limit();
 		self.state.refresh_counter(limit);
-		Flow::Consumed
+		self.changed_event()
 	}
 
 	fn value(&self, out: &mut serde_json::Map<String, serde_json::Value>) {
@@ -579,9 +616,18 @@ mod tests {
 	fn key_and_paste_edit_exported_text() {
 		let mut input = Input::new().with(Prop::Id, "name");
 		let ctx = UiContext::default();
-		assert_eq!(input.key(&mut event_ctx(&ctx), Key::Char('a')), Flow::Consumed);
-		assert_eq!(input.key(&mut event_ctx(&ctx), Key::Char('b')), Flow::Consumed);
-		assert_eq!(input.paste(&mut event_ctx(&ctx), " c\td"), Flow::Consumed);
+		assert_eq!(
+			input.key(&mut event_ctx(&ctx), Key::Char('a')),
+			Flow::Event(UiEvent::Changed { id: "name".into(), value: "a".into() })
+		);
+		assert_eq!(
+			input.key(&mut event_ctx(&ctx), Key::Char('b')),
+			Flow::Event(UiEvent::Changed { id: "name".into(), value: "ab".into() })
+		);
+		assert_eq!(
+			input.paste(&mut event_ctx(&ctx), " c\td"),
+			Flow::Event(UiEvent::Changed { id: "name".into(), value: "ab c   d".into() })
+		);
 		let mut values = serde_json::Map::new();
 		input.value(&mut values);
 		assert_eq!(values["name"], serde_json::json!("ab c   d"));
@@ -591,13 +637,13 @@ mod tests {
 	fn cursor_motion_stays_on_grapheme_boundaries() {
 		let mut input = Input::new().with(Prop::Value, "界a");
 		assert_eq!(input.state.cursor, "界a".len());
-		assert!(input.edit(Key::Left));
+		assert!(input.edit(Key::Left) == Edited::Caret);
 		assert_eq!(input.state.cursor, "界".len());
-		assert!(input.edit(Key::Left));
+		assert!(input.edit(Key::Left) == Edited::Caret);
 		assert_eq!(input.state.cursor, 0);
-		assert!(input.edit(Key::Right));
+		assert!(input.edit(Key::Right) == Edited::Caret);
 		assert_eq!(input.state.cursor, "界".len());
-		assert!(input.edit(Key::Backspace));
+		assert!(input.edit(Key::Backspace) == Edited::Text);
 		assert_eq!(input.state.text, "a");
 		assert_eq!(input.state.cursor, 0);
 	}
@@ -605,16 +651,16 @@ mod tests {
 	#[test]
 	fn undo_and_kill_ring_restore_single_line_edits() {
 		let mut input = Input::new().with(Prop::Value, "one two");
-		assert!(input.edit(Key::Ctrl('w')));
+		assert!(input.edit(Key::Ctrl('w')) == Edited::Text);
 		assert_eq!(input.state.text, "one ");
-		assert!(input.edit(Key::Char('x')));
-		assert!(input.edit(Key::Ctrl('u')));
+		assert!(input.edit(Key::Char('x')) == Edited::Text);
+		assert!(input.edit(Key::Ctrl('u')) == Edited::Text);
 		assert_eq!(input.state.text, "");
-		assert!(input.edit(Key::Ctrl('y')));
+		assert!(input.edit(Key::Ctrl('y')) == Edited::Text);
 		assert_eq!(input.state.text, "one x");
-		assert!(input.edit(Key::Alt('y')));
+		assert!(input.edit(Key::Alt('y')) == Edited::Text);
 		assert_eq!(input.state.text, "two");
-		assert!(input.edit(Key::Ctrl('-')));
+		assert!(input.edit(Key::Ctrl('-')) == Edited::Text);
 		assert_eq!(input.state.text, "one x");
 	}
 
@@ -624,7 +670,7 @@ mod tests {
 		let mut input = Input::new().with(Prop::Value, "a");
 		assert_eq!(input.paste(&mut event_ctx(&ctx), "\tb"), Flow::Consumed);
 		assert_eq!(input.state.text, "a   b");
-		assert!(input.edit(Key::Ctrl('-')));
+		assert!(input.edit(Key::Ctrl('-')) == Edited::Text);
 		assert_eq!(input.state.text, "a");
 	}
 

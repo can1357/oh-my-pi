@@ -3,9 +3,12 @@ use super::{
 	overflow_plan, paint_overflow_footer,
 };
 use crate::{
-	component::{Cached, Component, IntoChildren, PaintCtx, Slot, next_slot},
+	component::{
+		Cached, Component, EventCtx, Flow, HitTag, IntoChildren, PaintCtx, Slot, next_slot,
+	},
 	context::UiContext,
 	frame::Rect,
+	input::{Key, Mouse, UiEvent},
 	props::{Prop, PropValue, Props},
 };
 
@@ -123,6 +126,34 @@ impl Component for Col {
 		}
 		pc.clip = original_clip;
 		paint_overflow_footer(pc, rect, plan);
+	}
+
+	fn key(&mut self, _ec: &mut EventCtx<'_>, key: Key) -> Flow {
+		if key == Key::Enter
+			&& self.props.flag(Prop::Focus)
+			&& let Some(id) = self.props.id()
+		{
+			return Flow::Event(UiEvent::Pressed(id.clone()));
+		}
+		Flow::Skip
+	}
+
+	fn mouse(
+		&mut self,
+		_ec: &mut EventCtx<'_>,
+		tag: HitTag,
+		_at: (u16, u16),
+		_rect: Rect,
+		mouse: Mouse,
+	) -> Flow {
+		if tag == HitTag::Zone
+			&& mouse == Mouse::Click
+			&& self.props.flag(Prop::Focus)
+			&& let Some(id) = self.props.id()
+		{
+			return Flow::Event(UiEvent::Pressed(id.clone()));
+		}
+		Flow::Skip
 	}
 }
 

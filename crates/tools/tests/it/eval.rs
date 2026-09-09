@@ -18,7 +18,7 @@ use omp_tools::{
 	auto_background::DetachedJob,
 	eval::{
 		self, CellOutcome, CellStatus, CellValue, DisplayOutput, EvalExec, EvalRun, Fault, Language,
-		OutputChannel, OutputFrame, Payload, RunEvent, RunRequest, Session, kernel::EmbeddedPython,
+		Payload, RunEvent, RunRequest, Session, kernel::EmbeddedPython,
 	},
 };
 use serde_json::json;
@@ -141,7 +141,7 @@ async fn execute_params(
 			Ev::Done(ToolTerminal::Detached(_)) => panic!("eval unexpectedly detached"),
 			Ev::Args(issue) => panic!("eval rejected arguments: {issue:?}"),
 			Ev::Aborted(abort) => panic!("eval aborted: {abort:?}"),
-			Ev::Update(_) => {},
+			Ev::Update(_) | Ev::Diag(_) => {},
 		}
 	}
 	panic!("eval stream ended without a terminal payload")
@@ -168,19 +168,11 @@ fn payload() -> Payload {
 		title:           Some("cell".into()),
 		code:            "print('before')".into(),
 		reset:           false,
-		frames:          Vec::new(),
+		had_output:      false,
 		result:          None,
 		display_outputs: Vec::new(),
 		status:          status(CellOutcome::Complete),
-		truncated:       false,
-		spilled_output:  None,
-		total_lines:     0,
-		total_bytes:     0,
 	}
-}
-
-fn frame(channel: OutputChannel, text: &str, sequence: u64) -> OutputFrame {
-	OutputFrame { channel, data: text.as_bytes().to_vec().into(), sequence }
 }
 
 fn project(payload: &Payload, media: bool) -> Vec<Part> {
@@ -222,7 +214,7 @@ fn constructed_tool_spec_has_exact_python_only_schema() {
 		json!({
 			"type": "object",
 			"additionalProperties": false,
-			"required": ["language", "code"],
+			"required": ["i", "language", "code"],
 			"properties": {
 				"language": {
 					"type": "string",
@@ -266,6 +258,14 @@ fn constructed_tool_spec_has_exact_python_only_schema() {
 									{"type": "null"}
 								],
 								"description": "Select a persistent kernel or an isolated one-shot process."
+							},
+							"i": {
+								"type": "string",
+								"description": "Short present-participle intent for this call."
+							},
+							"notrunc": {
+								"type": "boolean",
+								"description": "Prefer complete output inline up to the host security ceiling; overflow or transport backpressure remains available through its artifact."
 							}}
 		})
 	);
@@ -356,19 +356,20 @@ async fn steering_detaches_eval_instead_of_cancelling_the_cell() {
 }
 
 #[test]
-fn stdout_stderr_result_and_display_json_projection_is_exact() {
+fn streamed_output_is_not_reprojected_with_terminal_values() {
 	let mut value = payload();
-	value.frames = vec![
-		frame(OutputChannel::Stdout, "before\n", 1),
-		frame(OutputChannel::Stderr, "warning\n", 2),
-	];
+	value.had_output = true;
 	value.result = Some(CellValue { text: "42".into(), json: Some(json!(42)) });
 	value.display_outputs =
 		vec![DisplayOutput::Json { data: json!({"exit_code": 0, "stdout": "hi"}) }];
 	assert_eq!(
 		text(&project(&value, false)),
-		"before\nwarning\n42\n\ndisplay[1]:\n{\n  \"exit_code\": 0,\n  \"stdout\": \"hi\"\n}"
+		"42\n\ndisplay[1]:\n{\n  \"exit_code\": 0,\n  \"stdout\": \"hi\"\n}"
 	);
+
+	value.result = None;
+	value.display_outputs.clear();
+	assert!(project(&value, false).is_empty());
 }
 
 #[test]
@@ -396,26 +397,14 @@ fn no_output_and_python_error_projection_are_exact() {
 }
 
 #[test]
-fn oversized_display_json_and_spilled_output_lookup_are_exact() {
+fn large_display_json_projection_is_complete() {
 	let mut value = payload();
-	value.display_outputs =
-		vec![DisplayOutput::Json { data: json!({"payload": "x".repeat(9_000)}) }];
-	value.truncated = true;
-	value.total_lines = 40;
-	value.total_bytes = 20_000;
-	value.spilled_output = Some(BlobRef {
-		hash:       sf!("sha256:full-eval-output"),
-		media_type: sf!("text/plain"),
-		byte_len:   20_000,
-	});
+	let expected = "x".repeat(9_000);
+	value.display_outputs = vec![DisplayOutput::Json { data: json!({"payload": expected}) }];
 	let rendered = text(&project(&value, false));
-	assert!(rendered.contains("[…"));
-	assert!(rendered.contains("ch elided…]"));
-	assert!(
-		rendered.ends_with(
-			"[truncated: 4 of 40 lines shown; full output in blob sha256:full-eval-output]"
-		)
-	);
+	assert!(rendered.contains(&expected));
+	assert!(!rendered.contains("elided"));
+	assert!(!rendered.contains("truncated"));
 }
 
 #[test]

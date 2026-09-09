@@ -65,7 +65,7 @@ pub mod matchers {
 		use std::fs;
 
 		#[cfg(windows)]
-		use omp_shell_engine::sys::fs::PathExt;
+		use omp_shell::sys::fs::PathExt;
 		#[cfg(unix)]
 		use rustix::fs::{Access, AtFlags, CWD, accessat};
 
@@ -156,6 +156,12 @@ pub mod matchers {
 					return true;
 				}
 
+				if let Err(error) = matcher_io.host().ensure_writable(path) {
+					matcher_io.set_exit_code(1);
+					writeln!(&mut matcher_io.host().stderr, "Failed to delete {path_str}: {error}")
+						.unwrap();
+					return false;
+				}
 				match self.delete(file_info) {
 					Ok(()) => true,
 					Err(e) => {
@@ -514,9 +520,7 @@ pub mod matchers {
 		// license that can be found in the LICENSE file or at
 		// https://opensource.org/licenses/MIT.
 
-		use std::{
-			cell::RefCell, error::Error, ffi::OsString, io::Write, path::Path, process::Command,
-		};
+		use std::{cell::RefCell, error::Error, ffi::OsString, io::Write, path::Path};
 
 		use super::{Matcher, MatcherIO, WalkEntry};
 
@@ -560,7 +564,7 @@ pub mod matchers {
 
 		impl Matcher for SingleExecMatcher {
 			fn matches(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO) -> bool {
-				let mut command = Command::new(&self.executable);
+				let mut command = matcher_io.host().command(&self.executable);
 				let path_to_file = if self.exec_in_parent_dir {
 					if let Some(f) = file_info.path().file_name() {
 						Path::new(".").join(f)
@@ -596,7 +600,6 @@ pub mod matchers {
 					// operand-relative `{}` against the shell cwd, not the host cwd.
 					command.current_dir(matcher_io.host().cwd());
 				}
-				command.env_clear().envs(matcher_io.host().env());
 				// The host process's stdio belongs to the embedding TUI; route the
 				// child's output through the scope streams instead of inheriting.
 				match matcher_io.host().run_captured(&mut command) {
@@ -659,12 +662,11 @@ pub mod matchers {
 				// so rebuild a std command from its accumulated state to attach the
 				// scope environment and context-captured stdio — the host process's
 				// stdio belongs to the embedding TUI and must never be inherited.
-				let mut std_command = Command::new(command.get_program());
+				let mut std_command = matcher_io.host().command(command.get_program());
 				std_command.args(command.get_args());
 				if let Some(dir) = command.get_current_dir() {
 					std_command.current_dir(dir);
 				}
-				std_command.env_clear().envs(matcher_io.host().env());
 				match matcher_io.host().run_captured(&mut std_command) {
 					Ok(status) => {
 						if !status.success() {
@@ -4063,7 +4065,7 @@ pub mod matchers {
 	/// Creates a file if it doesn't exist.
 	/// If it does exist, it will be overwritten.
 	fn get_or_create_file(path: &str, host: &Host) -> Result<File, Box<dyn Error>> {
-		let file = File::create(host.resolve(path))?;
+		let file = File::create(host.ensure_writable(path)?)?;
 		Ok(file)
 	}
 
@@ -4646,7 +4648,7 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::OsStringValueParser};
 use matchers::{Follow, Matcher, WalkEntry};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, matches_parser, util};
 
@@ -5054,7 +5056,7 @@ fn print_version(host: &mut Host) {
 	let _ = writeln!(host.stdout, "find (Rust) 0.8.0");
 }
 
-/// pi-uutils: BSD `find -E` compatibility (macOS muscle memory).
+/// BSD `find -E` compatibility (macOS muscle memory).
 ///
 /// BSD `-E` selects POSIX extended regular expressions before the path list;
 /// GNU find rejects it, but supports the equivalent `-regextype
@@ -5155,10 +5157,10 @@ pub(crate) fn find_builtin<SE: ShellExtensions>() -> Registration<SE> {
 
 #[cfg(test)]
 mod tests {
-	use std::{fs, path::PathBuf};
+	use std::{fs, path::PathBuf, sync::Arc};
 
 	use super::Find;
-	use crate::host::{Capture, run_util};
+	use crate::host::{Capture, ScopedPathPolicy, run_util, run_util_with_policy};
 
 	fn fixture() -> (tempfile::TempDir, PathBuf) {
 		let dir = tempfile::tempdir().unwrap();
@@ -5172,6 +5174,30 @@ mod tests {
 	fn run(root: &PathBuf, args: &[String]) -> (i32, Capture) {
 		let args: Vec<&str> = args.iter().map(String::as_str).collect();
 		run_util::<Find>(&args, "", root)
+	}
+
+	#[test]
+	fn delete_obeys_write_policy() {
+		let dir = tempfile::tempdir().unwrap();
+		let root = fs::canonicalize(dir.path()).unwrap();
+		let allowed = root.join("allowed");
+		fs::create_dir(&allowed).unwrap();
+		let denied = root.join("denied");
+		let permitted = allowed.join("permitted");
+		fs::write(&denied, b"keep").unwrap();
+		fs::write(&permitted, b"delete").unwrap();
+		let policy = Arc::new(ScopedPathPolicy::new(&allowed));
+
+		let (code, capture) =
+			run_util_with_policy::<Find>(&["denied", "-delete"], "", &root, policy.clone());
+		assert_eq!(code, 1);
+		assert!(capture.err().contains("sandbox denied write"));
+		assert_eq!(fs::read(&denied).unwrap(), b"keep");
+
+		let (code, capture) =
+			run_util_with_policy::<Find>(&["allowed/permitted", "-delete"], "", &root, policy);
+		assert_eq!((code, capture.err()), (0, String::new()));
+		assert!(!permitted.exists());
 	}
 
 	#[test]

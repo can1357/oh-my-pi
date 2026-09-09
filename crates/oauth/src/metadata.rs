@@ -22,15 +22,17 @@ pub struct ProtectedResourceMetadata {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct AuthorizationServerMetadata {
 	/// Validated issuer.
-	pub issuer:                 Str,
-	/// Authorization endpoint.
-	pub authorization_endpoint: Str,
+	pub issuer: Str,
+	/// Optional browser authorization endpoint. Device-only issuers may omit it.
+	pub authorization_endpoint: Option<Str>,
 	/// Token endpoint.
-	pub token_endpoint:         Str,
+	pub token_endpoint: Str,
 	/// Optional RFC 7591 registration endpoint.
-	pub registration_endpoint:  Option<Str>,
+	pub registration_endpoint: Option<Str>,
+	/// Optional RFC 8628 device authorization endpoint.
+	pub device_authorization_endpoint: Option<Str>,
 	/// Advertised scopes.
-	pub scopes_supported:       Box<[Str]>,
+	pub scopes_supported: Box<[Str]>,
 }
 
 /// OAuth metadata was malformed or did not describe the requested issuer.
@@ -57,7 +59,12 @@ pub fn protected_resource_candidates(resource: &str) -> Vec<Url> {
 	let Ok(base) = Url::parse(resource) else {
 		return Vec::new();
 	};
-	if !matches!(base.scheme(), "http" | "https") || base.host().is_none() {
+	if !matches!(base.scheme(), "http" | "https")
+		|| base.host().is_none()
+		|| !base.username().is_empty()
+		|| base.password().is_some()
+		|| base.fragment().is_some()
+	{
 		return Vec::new();
 	}
 	let path = base.path().trim_end_matches('/');
@@ -147,12 +154,13 @@ struct RawProtected {
 
 #[derive(Deserialize)]
 struct RawAuthorization {
-	issuer:                 String,
-	authorization_endpoint: String,
-	token_endpoint:         String,
-	registration_endpoint:  Option<String>,
+	issuer: String,
+	authorization_endpoint: Option<String>,
+	token_endpoint: String,
+	registration_endpoint: Option<String>,
+	device_authorization_endpoint: Option<String>,
 	#[serde(default)]
-	scopes_supported:       Vec<String>,
+	scopes_supported: Vec<String>,
 }
 
 /// Parses RFC 9728 protected-resource metadata with URL validation.
@@ -185,18 +193,28 @@ pub fn parse_authorization_server_metadata(
 	if normalize_issuer(&issuer) != normalize_issuer(&expected) {
 		return Err(MetadataError::IssuerMismatch);
 	}
-	let authorization_endpoint = valid_http_url(raw.authorization_endpoint)?;
+	let authorization_endpoint = raw
+		.authorization_endpoint
+		.map(valid_http_url)
+		.transpose()?
+		.map(Str::from);
 	let token_endpoint = valid_http_url(raw.token_endpoint)?;
 	let registration_endpoint = raw
 		.registration_endpoint
 		.map(valid_http_url)
 		.transpose()?
 		.map(Str::from);
+	let device_authorization_endpoint = raw
+		.device_authorization_endpoint
+		.map(valid_http_url)
+		.transpose()?
+		.map(Str::from);
 	Ok(AuthorizationServerMetadata {
 		issuer: Str::from(issuer),
-		authorization_endpoint: Str::from(authorization_endpoint),
+		authorization_endpoint,
 		token_endpoint: Str::from(token_endpoint),
 		registration_endpoint,
+		device_authorization_endpoint,
 		scopes_supported: normalized_scopes(raw.scopes_supported),
 	})
 }
@@ -207,7 +225,12 @@ pub fn metadata_candidates(issuer: &str) -> Vec<Url> {
 	let Ok(base) = Url::parse(issuer) else {
 		return Vec::new();
 	};
-	if !matches!(base.scheme(), "http" | "https") || base.host().is_none() {
+	if !matches!(base.scheme(), "http" | "https")
+		|| base.host().is_none()
+		|| !base.username().is_empty()
+		|| base.password().is_some()
+		|| base.fragment().is_some()
+	{
 		return Vec::new();
 	}
 	let path = base.path().trim_end_matches('/');
@@ -236,6 +259,8 @@ fn valid_http_url(value: String) -> Result<String, MetadataError> {
 	let parsed = Url::parse(&value).map_err(|_| MetadataError::InvalidEndpoint)?;
 	if !matches!(parsed.scheme(), "http" | "https")
 		|| parsed.host().is_none()
+		|| !parsed.username().is_empty()
+		|| parsed.password().is_some()
 		|| parsed.fragment().is_some()
 	{
 		return Err(MetadataError::InvalidEndpoint);
@@ -268,6 +293,23 @@ mod tests {
 		assert_eq!(
 			parse_authorization_server_metadata(body, "https://right.example"),
 			Err(MetadataError::IssuerMismatch)
+		);
+	}
+
+	#[test]
+	fn device_endpoint_is_discovered_and_credentials_are_rejected() {
+		let body = r#"{"issuer":"https://auth.example","authorization_endpoint":"https://auth.example/authorize","token_endpoint":"https://auth.example/token","device_authorization_endpoint":"https://auth.example/device"}"#;
+		let metadata =
+			parse_authorization_server_metadata(body, "https://auth.example").expect("valid metadata");
+		assert_eq!(
+			metadata.device_authorization_endpoint.as_deref(),
+			Some("https://auth.example/device")
+		);
+
+		let unsafe_body = r#"{"issuer":"https://auth.example","authorization_endpoint":"https://user:secret@auth.example/authorize","token_endpoint":"https://auth.example/token"}"#;
+		assert_eq!(
+			parse_authorization_server_metadata(unsafe_body, "https://auth.example"),
+			Err(MetadataError::InvalidEndpoint)
 		);
 	}
 

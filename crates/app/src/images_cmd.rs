@@ -1,4 +1,4 @@
-//! Image blob-store inspection, integrity probing, and reachability reclamation.
+//! Image blob-store inspection and integrity probing.
 
 use std::{
 	fs,
@@ -8,15 +8,10 @@ use std::{
 
 use miette::{IntoDiagnostic as _, miette};
 use omp_core::Hash32;
-use omp_storage::{
-	blob::{BlobRef, BlobStore},
-	gc,
-};
+use omp_journal::blob::{BlobRef, BlobStore};
 use serde_json::{Value, json};
 
 use crate::cli::{ImagesAction, ImagesArgs};
-
-const DEFAULT_PURGE_GRACE: Duration = Duration::from_secs(300);
 
 #[derive(Debug)]
 struct Inventory {
@@ -27,7 +22,8 @@ struct Inventory {
 	temporary_bytes: u64,
 }
 
-/// Runs one image blob-store operation against the profile's authoritative store.
+/// Runs one image blob-store operation against the profile's authoritative
+/// store.
 pub fn run(args: ImagesArgs) -> miette::Result<()> {
 	if args.timeout == Some(0) {
 		return Err(miette!("--timeout must be a positive integer"));
@@ -38,7 +34,6 @@ pub fn run(args: ImagesArgs) -> miette::Result<()> {
 		ImagesAction::Status => status(&store, args.json),
 		ImagesAction::Doctor => doctor(&store, args.json),
 		ImagesAction::Probe => probe(&store, args.timeout, args.json),
-		ImagesAction::Purge => purge(&store, args.apply, args.all, args.json),
 	}
 }
 
@@ -61,11 +56,7 @@ fn status(store: &BlobStore, json_output: bool) -> miette::Result<()> {
 		println!("Image backends: content-addressed");
 		println!("Enabled: yes");
 		println!("Image blob store: {}", store.root().display());
-		println!(
-			"Blobs: {} ({})",
-			inventory.blobs.len(),
-			format_bytes(inventory.bytes)
-		);
+		println!("Blobs: {} ({})", inventory.blobs.len(), format_bytes(inventory.bytes));
 		println!(
 			"Temporary files: {} ({})",
 			inventory.temporary_count,
@@ -130,7 +121,10 @@ fn doctor(store: &BlobStore, json_output: bool) -> miette::Result<()> {
 	if json_output {
 		print_json(&report)?;
 	} else {
-		for check in report["checks"].as_array().expect("doctor checks are an array") {
+		for check in report["checks"]
+			.as_array()
+			.expect("doctor checks are an array")
+		{
 			println!(
 				"[{}] {}: {}",
 				check["severity"]
@@ -144,13 +138,13 @@ fn doctor(store: &BlobStore, json_output: bool) -> miette::Result<()> {
 		for path in &inventory.malformed {
 			println!("Malformed: {}", path.display());
 		}
-		for hash in report["corruptBlobs"].as_array().expect("corrupt blobs are an array") {
+		for hash in report["corruptBlobs"]
+			.as_array()
+			.expect("corrupt blobs are an array")
+		{
 			println!("Corrupt: {}", hash.as_str().expect("corrupt hash is text"));
 		}
-		println!(
-			"Image diagnostics {}.",
-			if healthy { "passed" } else { "found errors" }
-		);
+		println!("Image diagnostics {}.", if healthy { "passed" } else { "found errors" });
 	}
 	if healthy {
 		Ok(())
@@ -175,7 +169,7 @@ fn probe(store: &BlobStore, timeout_seconds: Option<u64>, json_output: bool) -> 
 		let reference = store.put(payload.as_bytes())?;
 		let verified = store.verify(&reference)?;
 		let round_trip = store.get(&reference)? == payload.as_bytes();
-		Ok::<bool, omp_storage::blob::Error>(reference == expected && verified && round_trip)
+		Ok::<bool, omp_journal::blob::Error>(reference == expected && verified && round_trip)
 	})();
 	let cleanup = if existed {
 		Ok(())
@@ -185,7 +179,8 @@ fn probe(store: &BlobStore, timeout_seconds: Option<u64>, json_output: bool) -> 
 	let ok = result.into_diagnostic()?;
 	cleanup.into_diagnostic()?;
 	let elapsed = started.elapsed();
-	let within_timeout = timeout_seconds.is_none_or(|seconds| elapsed < Duration::from_secs(seconds));
+	let within_timeout =
+		timeout_seconds.is_none_or(|seconds| elapsed < Duration::from_secs(seconds));
 	let passed = ok && within_timeout;
 	let detail = if !ok {
 		"Blob write or verified read returned inconsistent data"
@@ -216,61 +211,6 @@ fn probe(store: &BlobStore, timeout_seconds: Option<u64>, json_output: bool) -> 
 	} else {
 		Err(miette!("image blob-store probe failed"))
 	}
-}
-
-fn purge(store: &BlobStore, apply: bool, all: bool, json_output: bool) -> miette::Result<()> {
-	if !apply {
-		let inventory = inventory(store)?;
-		let report = json!({
-			"action": "purge",
-			"applied": false,
-			"all": all,
-			"examinedBlobs": inventory.blobs.len(),
-			"examinedBytes": inventory.bytes,
-			"detail": "Reachability is evaluated atomically only when --apply is supplied",
-		});
-		if json_output {
-			print_json(&report)?;
-		} else {
-			println!("Image purge dry-run; pass --apply to reclaim unreachable blobs.");
-			println!(
-				"Stored blobs: {} ({})",
-				inventory.blobs.len(),
-				format_bytes(inventory.bytes)
-			);
-		}
-		return Ok(());
-	}
-	let roots = gc::SessionRoots::discover(store, &[]).into_diagnostic()?;
-	let grace = if all { Duration::ZERO } else { DEFAULT_PURGE_GRACE };
-	let sweep = gc::sweep(store, &roots, grace).into_diagnostic()?;
-	let report = json!({
-		"action": "purge",
-		"applied": true,
-		"all": all,
-		"examinedBlobs": sweep.examined_count,
-		"examinedBytes": sweep.examined_bytes,
-		"reachableBlobs": sweep.reachable_count,
-		"purgedBlobs": sweep.reclaimed_count,
-		"reclaimedBytes": sweep.reclaimed_bytes,
-		"corruptReferences": sweep.corrupt_references,
-	});
-	if json_output {
-		print_json(&report)?;
-	} else {
-		println!("Image purge applied.");
-		println!(
-			"Blobs: {} examined, {} reachable, {} purged ({})",
-			sweep.examined_count,
-			sweep.reachable_count,
-			sweep.reclaimed_count,
-			format_bytes(sweep.reclaimed_bytes)
-		);
-		if sweep.corrupt_references > 0 {
-			println!("Corrupt journal references: {}", sweep.corrupt_references);
-		}
-	}
-	Ok(())
 }
 
 fn inventory(store: &BlobStore) -> miette::Result<Inventory> {

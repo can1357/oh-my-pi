@@ -17,14 +17,16 @@ use omp_proto::inference::v1::{
 	InvokeInput,
 	invoke_input::{self, chunk},
 };
+use omp_shell_builtins::{ImagePassthrough, image_passthrough_ranges};
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, BlobRef, CommitError, Constraint, Effects, Ev, ExecEffects,
+	Abort, ArgIssue, ArgIssueKind, BlobRef, CommitError, Constraint, Diag, Effects, Ev,
 	IncomingParams, Interrupt, InterruptWaitError, ParamError, Part, PromptCaps, Rev, Tool,
 	ToolSpec, ToolTerminal,
 };
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+use tracing::Instrument as _;
 
 use crate::{
 	auto_background::{
@@ -40,13 +42,11 @@ use crate::{
 ///
 /// Each segment retains original spelling and identifies whether it consumes
 /// the preceding pipeline stage.
-pub fn command_segments(
-	command: &str,
-) -> Vec<omp_shell_engine::parser::FlatShellCommandSegment<'_>> {
-	omp_shell_engine::parser::flat_shell_segments(command)
+pub fn command_segments(command: &str) -> Vec<omp_shell::parser::FlatShellCommandSegment<'_>> {
+	omp_shell::parser::flat_shell_segments(command)
 }
 
-/// Complete arguments for `bash@1`.
+/// Complete arguments for `bash@2`.
 #[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
 #[schemars(description = "")]
 #[serde(deny_unknown_fields)]
@@ -65,13 +65,13 @@ pub struct Params {
 		               nonzero values do not extend the foreground auto-background threshold."
 	)]
 	pub timeout:      Option<f64>,
-	/// Environment additions scoped to this command.
+	/// Environment delta scoped to this command; null values unset variables.
 	#[serde(default)]
 	#[schemars(
-		with = "BTreeMap<String, String>",
-		description = "Environment additions scoped to this command."
+		with = "BTreeMap<String, Option<String>>",
+		description = "Environment additions and null-valued removals scoped to this command."
 	)]
-	pub env:          BTreeMap<Str, Str>,
+	pub env:          BTreeMap<Str, Option<Str>>,
 	/// Command working directory, relative to the workspace when not absolute.
 	#[schemars(
 		default,
@@ -168,6 +168,10 @@ pub struct ExecStatus {
 	pub aborted:            bool,
 	/// Whether the host cannot establish the final effect state.
 	pub effects_unknown:    bool,
+	/// Harness notices recorded by the environment host and projected as
+	/// diagnostic events before settlement.
+	#[serde(skip)]
+	pub diags:              Vec<Diag>,
 	/// Environment URI of the session working directory after this command.
 	#[serde(default)]
 	pub final_cwd_uri:      Option<Str>,
@@ -199,11 +203,15 @@ pub struct Payload {
 	pub exec_id:     Bytes,
 	/// Exact submitted script after a leading `cd &&` was extracted.
 	pub command:     Str,
-	/// Ordered output retained whole in the durable call outcome.
+	/// Host-bounded ordered output projected live for this call.
 	///
-	/// The central call-outcome spill gate moves a large serialized outcome to a
-	/// [`BlobRef`]; this executor never clips durable output.
+	/// When raw output exceeds the host transport bound, the complete bytes are
+	/// retained at [`ExecStatus::spilled_output`] and this transcript is its
+	/// bounded inline projection. The tool never applies another text bound.
 	pub transcript:  Vec<TranscriptFrame>,
+	/// Durable images extracted from terminal graphics passthrough.
+	#[serde(default)]
+	pub attachments: Vec<BlobRef>,
 	/// Execution adjustments retained as journal receipts.
 	pub adjustments: Vec<AdjustmentReceipt>,
 	/// Terminal host status, preserved without reinterpretation.
@@ -235,6 +243,23 @@ pub enum Fault {
 	},
 }
 
+impl Fault {
+	/// Renders the model-facing failure diagnostic at the presentation boundary.
+	pub fn message(&self) -> String {
+		match self {
+			Self::Resource { operation, message } => format!("shell {operation} failed: {message}"),
+			Self::PtyDenied => String::from("shell PTY allocation denied by invocation scope"),
+			Self::InvalidEnvironmentKey { key } => {
+				format!("invalid shell environment key {key:?}")
+			},
+			Self::CommandFailed { payload } => format!(
+				"bash command failed: status={:?}, exit={:?}, signal={:?}",
+				payload.status.outcome, payload.status.exit_code, payload.status.signal
+			),
+		}
+	}
+}
+
 /// Module-owned handle for one persistent environment session.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Session {
@@ -247,8 +272,8 @@ pub struct Session {
 pub struct SessionOptions {
 	/// Requested working directory.
 	pub cwd: Option<Str>,
-	/// Scoped environment additions.
-	pub env: BTreeMap<Str, Str>,
+	/// Scoped environment delta; absent values unset variables.
+	pub env: BTreeMap<Str, Option<Str>>,
 	/// Whether a pseudo-terminal is requested.
 	pub pty: bool,
 }
@@ -263,9 +288,11 @@ impl SessionOptions {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct RunRequest {
 	/// Exact script text.
-	pub command:    Str,
+	pub command:     Str,
+	/// Environment delta applied only while this command runs.
+	pub environment: BTreeMap<Str, Option<Str>>,
 	/// Optional server-enforced timeout in milliseconds.
-	pub timeout_ms: Option<u64>,
+	pub timeout_ms:  Option<u64>,
 }
 
 /// Request to create one persistent named process.
@@ -344,6 +371,14 @@ pub trait ShellExec: Clone + Send + Sync + 'static {
 		&self,
 		request: DetachRequest,
 	) -> impl Future<Output = Result<DetachedJob, Fault>> + Send + '_;
+
+	/// Stores one complete shell image attachment in the environment blob
+	/// namespace.
+	fn store_attachment(
+		&self,
+		bytes: Bytes,
+		media_type: Str,
+	) -> impl Future<Output = Result<BlobRef, Fault>> + Send + '_;
 }
 
 /// Bounds enforced by the execution placement for finite shell deadlines.
@@ -359,26 +394,22 @@ pub struct TimeoutBounds {
 
 impl Default for TimeoutBounds {
 	fn default() -> Self {
-		Self { default_ms: 300_000, floor_ms: 1_000, ceiling_ms: 1_800_000 }
+		Self { default_ms: 300_000, floor_ms: 1_000, ceiling_ms: 3_600_000 }
 	}
 }
 
-/// Immutable live-composition facts projected into the `bash@1` prompt.
+/// Immutable live-composition facts projected into the `bash@2` prompt.
 #[derive(Clone, Debug)]
 pub struct ShellPromptSnapshot {
 	/// Active sibling tools which can replace common shell intents.
 	pub sibling_tools:       Arc<[Str]>,
 	/// Environment operating-system platform.
 	pub platform:            Str,
-	/// Requested shell profile name.
-	pub profile:             Str,
 	/// Whether a command wrapper prefix is configured.
 	pub command_prefix:      bool,
-	/// Whether shell output minimization is configured.
-	pub minimizer_enabled:   bool,
 	/// Whether embedded shell builtins are enabled.
 	pub embedded_builtins:   bool,
-	/// Whether the `xd` dynamic-device builtin is installed.
+	/// Whether the `dyn` dynamic-device builtin is installed.
 	pub devices:             bool,
 	/// Whether shell-intent interception is enabled.
 	pub interceptor_enabled: bool,
@@ -398,8 +429,9 @@ impl ShellPromptSnapshot {
 		);
 		let _ = write!(
 			description,
-			" Environment platform: {}; shell profile: {}.",
-			self.platform, self.profile,
+			" Environment platform: {}; the shell is an in-process bash interpreter with builtin \
+			 coreutils.",
+			self.platform,
 		);
 		if self.sibling_tools.is_empty() {
 			description.push_str(" No dedicated sibling tools are active.");
@@ -415,17 +447,11 @@ impl ShellPromptSnapshot {
 		}
 		let _ = write!(
 			description,
-			" Command prefix: {}; minimizer: {}; embedded builtins: {}; intent interceptor: {}; ACP \
-			 routing: {}.",
+			" Command prefix: {}; embedded builtins: {}; intent interceptor: {}; ACP routing: {}.",
 			if self.command_prefix {
 				"configured"
 			} else {
 				"none"
-			},
-			if self.minimizer_enabled {
-				"enabled"
-			} else {
-				"disabled"
 			},
 			if self.embedded_builtins {
 				"enabled"
@@ -445,13 +471,41 @@ impl ShellPromptSnapshot {
 		);
 		if self.devices {
 			description
-				.push_str(" Dynamic devices: `xd` builtin (list `xd`; docs `xd <device> --help`).");
+				.push_str(" Dynamic devices: `dyn` builtin (list `dyn`; docs `dyn <device> --help`).");
 		}
 		Str::from(description)
 	}
 }
 
-/// Generic `bash@1` implementation retaining one lazy persistent session.
+/// Builds the host-free `bash@2` declaration from immutable prompt facts.
+pub fn spec(snapshot: &ShellPromptSnapshot) -> ToolSpec {
+	spec_described(snapshot.description())
+}
+
+fn spec_described(description: Str) -> ToolSpec {
+	ToolSpec {
+		name: sf!("bash"),
+		rev: Rev { family: Str::default(), n: 2 },
+		description,
+		schema: omp_tool::schema::<Params>(),
+		constraint: Constraint::Schema {
+			priority:       100,
+			on_unsupported: omp_tool::Fallback::Unspecified,
+		},
+		// The shell string is not an approval capability. The environment host
+		// admits exact filesystem, spawn, and network effects as interpretation
+		// reaches those boundaries.
+		effects: Effects::empty(),
+		projection_code: omp_tool::native_projection_code(
+			env!("CARGO_PKG_NAME"),
+			env!("CARGO_PKG_VERSION"),
+			include_bytes!("shell.rs"),
+		)
+		.into(),
+	}
+}
+
+/// Generic `bash@2` implementation retaining one lazy persistent session.
 pub struct ShellTool<E: ShellExec> {
 	exec: E,
 	session: Mutex<Option<Session>>,
@@ -466,8 +520,20 @@ pub struct ShellTool<E: ShellExec> {
 	spec: ToolSpec,
 }
 
-/// Constructs the native `bash@1` executor over an environment resource.
+/// Constructs the native `bash@2` executor over an environment resource.
 pub fn shell<E: ShellExec>(exec: E) -> ShellTool<E> {
+	shell_with_spec(
+		exec,
+		spec_described(sf!(
+			"Execute a shell script in a persistent session, or allocate an asynchronous managed \
+			 job. Eligible long-running calls may auto-background at the configured foreground \
+			 threshold and deliver later. `timeout: 0` disables the command deadline; otherwise \
+			 `timeout` is measured in seconds and does not extend foreground waiting.",
+		)),
+	)
+}
+
+fn shell_with_spec<E: ShellExec>(exec: E, spec: ToolSpec) -> ShellTool<E> {
 	ShellTool {
 		exec,
 		session: Mutex::new(None),
@@ -479,48 +545,17 @@ pub fn shell<E: ShellExec>(exec: E) -> ShellTool<E> {
 		interceptor_enabled: false,
 		interceptor_rules: Arc::default(),
 		sibling_tools: Arc::default(),
-		spec: ToolSpec {
-			name:            sf!("bash"),
-			rev:             Rev { family: Str::default(), n: 1 },
-			description:     sf!(
-				"Execute a shell script in a persistent session, or allocate an asynchronous managed \
-				 job. Eligible long-running calls may auto-background at the configured foreground \
-				 threshold and deliver later. `timeout: 0` disables the command deadline; otherwise \
-				 `timeout` is measured in seconds and does not extend foreground waiting.",
-			),
-			schema:          omp_tool::schema::<Params>(),
-			constraint:      Constraint::Schema {
-				priority:       100,
-				on_unsupported: omp_tool::Fallback::Unspecified,
-			},
-			effects:         Effects {
-				documents: None,
-				exec:      Some(ExecEffects {
-					commands: [sf!("*")].into_iter().collect(),
-					network:  true,
-				}),
-				inference: None,
-				desktop:   None,
-				subagents: 0,
-			},
-			projection_code: omp_tool::native_projection_code(
-				env!("CARGO_PKG_NAME"),
-				env!("CARGO_PKG_VERSION"),
-				include_bytes!("shell.rs"),
-			)
-			.into(),
-		},
+		spec,
 	}
 }
-/// Constructs `bash@1` from immutable live registry, capability, and settings
+/// Constructs `bash@2` from immutable live registry, capability, and settings
 /// facts.
 pub fn shell_with_snapshot_and_timeout_bounds<E: ShellExec>(
 	exec: E,
 	timeout_bounds: TimeoutBounds,
 	snapshot: &ShellPromptSnapshot,
 ) -> ShellTool<E> {
-	let mut tool = shell(exec).with_timeout_bounds(timeout_bounds);
-	tool.spec.description = snapshot.description();
+	let mut tool = shell_with_spec(exec, spec(snapshot)).with_timeout_bounds(timeout_bounds);
 	tool.interceptor_enabled = snapshot.interceptor_enabled;
 	tool.interceptor_rules =
 		shell_intercept::compile(&snapshot.interceptor_rules, &snapshot.sibling_tools).into();
@@ -611,6 +646,12 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 		&'c self,
 		mut params: IncomingParams<'c>,
 	) -> impl Stream<Item = Ev<Self::Update, Self::Payload, Self::Fault>> + Send + 'c {
+		let span = tracing::debug_span!(
+			"shell_execution",
+			cwd = tracing::field::Empty,
+			asynchronous = tracing::field::Empty,
+			pty = tracing::field::Empty,
+		);
 		stream! {
 			let args = match params.whole::<Params>().await {
 				Ok(args) => args,
@@ -626,6 +667,7 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 				)
 				.or_else(|| crate::shell_intercept::analyze(&args.command, &self.sibling_tools))
 			{
+				tracing::warn!(parent: &span, "shell command denied by tool interception");
 				yield Ev::Args(ArgIssue {
 					path: Vec::new(),
 					expected: guidance.message,
@@ -662,21 +704,25 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 			};
 			let cwd = args.cwd.or(extracted_cwd);
 			let terminal = args.pty;
-			let options = SessionOptions {
-				cwd: cwd,
-				env: args.env,
-				pty: terminal,
-			};
+			span.record("cwd", tracing::field::display(cwd.as_deref().unwrap_or(".")));
+			span.record("asynchronous", args.asynchronous);
+			span.record("pty", terminal);
+			let environment = args.env;
 			let (timeout_ms, adjustments) = self.timeout(args.timeout);
 
 			if args.asynchronous {
 				let name = next_background_name("bash", &self.next_background_name);
+				let options = SessionOptions {
+					cwd,
+					env: environment,
+					pty: terminal,
+				};
 				let work = self.exec.detach(DetachRequest {
 					name,
 					command,
 					timeout_ms,
 					options,
-				}).fuse();
+				}).instrument(span.clone()).fuse();
 				let interrupt = params.next_interrupt().fuse();
 				pin_mut!(work, interrupt);
 				match futures::future::select(interrupt, work).await {
@@ -698,15 +744,16 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 				return;
 			}
 
+			let options = SessionOptions { cwd, env: BTreeMap::new(), pty: terminal };
 			let persistent = options.is_default()
 				&& self
 					.persistent_run_active
 					.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
 					.is_ok();
 			let session = if persistent {
-				self.persistent_session().await
+				self.persistent_session().instrument(span.clone()).await
 			} else {
-				self.exec.open_session(options).await
+				self.exec.open_session(options).instrument(span.clone()).await
 			};
 			let session = match session {
 				Ok(session) => session,
@@ -721,8 +768,9 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 			let session_id = session.id.clone();
 			let mut run = match self.exec.run(&session, RunRequest {
 				command: command.clone(),
+				environment,
 				timeout_ms,
-			}).await {
+			}).instrument(span.clone()).await {
 				Ok(run) => run,
 				Err(fault) => {
 					self.finish_session(&session, persistent, true).await;
@@ -767,16 +815,16 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 							let name =
 								next_background_name("bash", &self.next_background_name);
 							if let Ok(job) = run.detach(name).await {
-											 self.finish_session(&session, persistent, true).await;
-											 yield Ev::Done(detached_terminal(
+								self.finish_session(&session, persistent, true).await;
+								yield Ev::Done(detached_terminal(
 									job,
 									"automatic foreground threshold elapsed",
 									&transcript,
 								));
 								return;
 							}
-											 auto_background = false;
-											 continue;
+							auto_background = false;
+							continue;
 						},
 						PendingRun::Event(event) => event,
 						PendingRun::Interrupt(interrupt) => {
@@ -803,6 +851,10 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 							}
 							let reason = interrupt.reason;
 							if run.cancel().await.is_err() {
+								tracing::warn!(
+									parent: &span,
+									"shell cancellation failed; effect state is unknown",
+								);
 								self.finish_session(&session, persistent, true).await;
 								yield Ev::Aborted(Abort::EffectsUnknown { reason });
 								return;
@@ -844,6 +896,9 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 							&& !status.effects_unknown
 							&& cancellation_reason.is_some() =>
 					{
+						for diag in status.diags.iter().cloned() {
+							yield Ev::Diag(diag);
+						}
 						self.finish_session(&session, persistent, true).await;
 						yield Ev::Aborted(Abort::Skipped {
 							reason: cancellation_reason.take().expect("guarded by is_some"),
@@ -851,6 +906,9 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 						return;
 					},
 					Ok(Some(RunEvent::Exit(status))) => {
+						for diag in status.diags.iter().cloned() {
+							yield Ev::Diag(diag);
+						}
 						let quarantine = status.aborted
 							|| matches!(status.outcome, ExecOutcome::Timeout | ExecOutcome::Cancelled)
 							|| status.effects_unknown;
@@ -870,11 +928,26 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 							&& status.signal.is_none()
 							&& !status.aborted
 							&& !status.effects_unknown;
+						let images = extract_transcript_images(&mut transcript);
+						let mut attachments = Vec::with_capacity(images.len());
+						for image in images {
+							match self.exec.store_attachment(image.bytes, image.mime).await {
+								Ok(blob) => attachments.push(blob),
+								Err(fault) => {
+									yield Ev::Done(ToolTerminal::Done {
+										result: Err(fault),
+										useless: false,
+									});
+									return;
+								},
+							}
+						}
 						let payload = Payload {
 							session_id,
 							exec_id,
 							command,
 							transcript,
+							attachments,
 							adjustments,
 							status,
 						};
@@ -889,6 +962,10 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 						return;
 					},
 					Ok(None) => {
+						tracing::warn!(
+							parent: &span,
+							"shell event stream ended before terminal status",
+						);
 						self.finish_session(&session, persistent, true).await;
 						yield Ev::Aborted(Abort::EffectsUnknown {
 							reason: cancellation_reason.unwrap_or_else(|| sf!("exec event stream ended before terminal status")),
@@ -896,8 +973,9 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 						return;
 					},
 					Err(fault) => {
+						tracing::warn!(parent: &span, "shell event stream failed");
 						self.finish_session(&session, persistent, true).await;
-						yield Ev::Aborted(Abort::EffectsUnknown { reason: Str::new(fault_reason(&fault)) });
+						yield Ev::Aborted(Abort::EffectsUnknown { reason: Str::new(fault.message()) });
 						return;
 					},
 				}
@@ -906,22 +984,22 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 	}
 
 	fn prompt(&self, view: Result<&Payload, &Fault>, caps: &PromptCaps) -> Vec<Part> {
+		let attachments = match view {
+			Ok(payload) => payload.attachments.as_slice(),
+			Err(Fault::CommandFailed { payload }) => payload.attachments.as_slice(),
+			Err(_) => &[],
+		};
 		let Some(mut projection) = TextProjection::new(*caps) else {
-			return Vec::new();
+			return attachment_parts(attachments, caps.media, usize::from(caps.maximum_parts));
 		};
 		match view {
 			Ok(payload) => {
 				let status = format!(
-					"[status={:?}; exit={:?}; signal={:?}; {}ms{}]\n",
+					"[status={:?}; exit={:?}; signal={:?}; {}ms]\n",
 					payload.status.outcome,
 					payload.status.exit_code,
 					payload.status.signal,
 					payload.status.wall_clock_ms,
-					if payload.status.spilled_output.is_some() {
-						"; output blob attached"
-					} else {
-						""
-					},
 				);
 				if projection.push(&status) {
 					for adjustment in &payload.adjustments {
@@ -932,23 +1010,36 @@ impl<E: ShellExec> Tool for ShellTool<E> {
 							break;
 						}
 					}
-					push_transcript_head_tail(&mut projection, &payload.transcript);
+					push_transcript(&mut projection, &payload.transcript);
+					push_spilled_output(&mut projection, payload.status.spilled_output.as_ref());
+					if !caps.media {
+						push_attachment_fallbacks(&mut projection, attachments);
+					}
 				}
 			},
 			Err(Fault::CommandFailed { payload }) => {
 				let status = format!(
 					"bash command failed: status={:?}, exit={:?}, signal={:?}\n",
-					payload.status.outcome, payload.status.exit_code, payload.status.signal
+					payload.status.outcome, payload.status.exit_code, payload.status.signal,
 				);
 				if projection.push(&status) {
-					push_transcript_head_tail(&mut projection, &payload.transcript);
+					push_transcript(&mut projection, &payload.transcript);
+					push_spilled_output(&mut projection, payload.status.spilled_output.as_ref());
+					if !caps.media {
+						push_attachment_fallbacks(&mut projection, attachments);
+					}
 				}
 			},
 			Err(fault) => {
-				projection.push(&fault_reason(fault));
+				projection.push(&fault.message());
 			},
 		}
-		projection.finish()
+		let mut parts = projection.finish();
+		if caps.media {
+			let remaining = usize::from(caps.maximum_parts).saturating_sub(parts.len());
+			parts.extend(attachment_parts(attachments, true, remaining));
+		}
+		parts
 	}
 
 	fn invoke_input(&self, update: &Update, invocation_id: &str) -> Option<InvokeInput> {
@@ -1003,18 +1094,6 @@ fn interrupt_reason(
 		Ok(interrupt) => interrupt.reason,
 		Err(InterruptWaitError::Closed) => Str::new(closed_reason),
 		Err(InterruptWaitError::Protocol(reason)) => reason,
-	}
-}
-
-fn fault_reason(fault: &Fault) -> String {
-	match fault {
-		Fault::Resource { operation, message } => format!("shell {operation} failed: {message}"),
-		Fault::PtyDenied => String::from("shell PTY allocation denied by invocation scope"),
-		Fault::InvalidEnvironmentKey { key } => format!("invalid shell environment key {key:?}"),
-		Fault::CommandFailed { payload } => format!(
-			"bash command failed: status={:?}, exit={:?}, signal={:?}",
-			payload.status.outcome, payload.status.exit_code, payload.status.signal
-		),
 	}
 }
 
@@ -1094,65 +1173,92 @@ fn shell_word(bytes: &[u8], start: usize) -> Option<(String, usize)> {
 	(cursor != start).then(|| (String::from_utf8_lossy(&bytes[start..cursor]).into_owned(), cursor))
 }
 
-fn push_transcript_head_tail(projection: &mut TextProjection, transcript: &[TranscriptFrame]) {
-	const FRAMES: usize = 8;
-	let bytes = transcript
-		.iter()
-		.flat_map(|frame| frame.data.as_ref().iter().copied())
-		.collect::<Vec<_>>();
-	let split_frame = transcript.len().min(FRAMES);
-	let mut head_end = transcript[..split_frame]
-		.iter()
-		.map(|frame| frame.data.len())
-		.sum::<usize>();
-	let tail_frame = transcript.len().saturating_sub(FRAMES).max(split_frame);
-	let mut tail_start = transcript[..tail_frame]
-		.iter()
-		.map(|frame| frame.data.len())
-		.sum::<usize>();
-	if transcript.len() > FRAMES * 2 {
-		(head_end, tail_start) = sixel_safe_gap(&bytes, head_end, tail_start);
+fn extract_transcript_images(transcript: &mut [TranscriptFrame]) -> Vec<ImagePassthrough> {
+	let mut images = Vec::new();
+	for channel in [OutputChannel::Stdout, OutputChannel::Stderr, OutputChannel::Pty] {
+		let byte_len = transcript
+			.iter()
+			.filter(|frame| frame.channel == channel)
+			.map(|frame| frame.data.len())
+			.sum();
+		let mut joined = Vec::with_capacity(byte_len);
+		for frame in transcript.iter().filter(|frame| frame.channel == channel) {
+			joined.extend_from_slice(frame.data.as_ref());
+		}
+		let (found, ranges) = image_passthrough_ranges(&joined);
+		if ranges.is_empty() {
+			continue;
+		}
+		images.extend(found);
+		let mut channel_offset = 0;
+		for frame in transcript
+			.iter_mut()
+			.filter(|frame| frame.channel == channel)
+		{
+			let frame_start = channel_offset;
+			let frame_end = frame_start + frame.data.len();
+			channel_offset = frame_end;
+			let mut cleaned = Vec::with_capacity(frame.data.len());
+			let mut retained_from = frame_start;
+			for range in &ranges {
+				let removed_start = range.start.max(frame_start).min(frame_end);
+				let removed_end = range.end.max(frame_start).min(frame_end);
+				if removed_start < removed_end {
+					cleaned.extend_from_slice(&joined[retained_from..removed_start]);
+					retained_from = removed_end;
+				}
+			}
+			cleaned.extend_from_slice(&joined[retained_from..frame_end]);
+			frame.data = CowBytes::owned(Bytes::from(cleaned));
+		}
 	}
-	if !projection.push(&String::from_utf8_lossy(&bytes[..head_end])) {
-		return;
+	images
+}
+
+fn attachment_parts(attachments: &[BlobRef], media: bool, limit: usize) -> Vec<Part> {
+	if !media {
+		return Vec::new();
 	}
-	if tail_start > head_end && !projection.push("\n[output middle omitted from projection]\n") {
-		return;
-	}
-	if tail_start < bytes.len() {
-		projection.push(&String::from_utf8_lossy(&bytes[tail_start..]));
+	attachments
+		.iter()
+		.take(limit)
+		.map(|blob| Part::Blob {
+			blob: blob.clone(),
+			alt:  Some(sf!(
+				"Image attachment from shell output ({}, {} bytes).",
+				blob.media_type,
+				blob.byte_len
+			)),
+		})
+		.collect()
+}
+
+fn push_attachment_fallbacks(projection: &mut TextProjection, attachments: &[BlobRef]) {
+	for blob in attachments {
+		if !projection.push(&format!(
+			"[image attachment: {}, {} bytes, artifact://sha256/{}]\n",
+			blob.media_type, blob.byte_len, blob.hash
+		)) {
+			break;
+		}
 	}
 }
 
-fn sixel_safe_gap(bytes: &[u8], mut head_end: usize, mut tail_start: usize) -> (usize, usize) {
-	let mut cursor = 0;
-	while cursor + 2 < bytes.len() {
-		let Some(relative) = bytes[cursor..]
-			.windows(2)
-			.position(|window| window == b"\x1bP")
-		else {
-			break;
-		};
-		let start = cursor + relative;
-		let Some(end_relative) = bytes[start + 2..]
-			.windows(2)
-			.position(|window| window == b"\x1b\\")
-		else {
-			if start < head_end {
-				head_end = start;
-			}
-			break;
-		};
-		let end = start + 2 + end_relative + 2;
-		if start < head_end && head_end < end {
-			head_end = start;
-		}
-		if start < tail_start && tail_start < end {
-			tail_start = end;
-		}
-		cursor = end;
+fn push_spilled_output(projection: &mut TextProjection, spilled: Option<&BlobRef>) {
+	if let Some(spilled) = spilled {
+		let _ = projection.push(&format!(
+			"[full output: artifact://sha256/{}; {} bytes]\n",
+			spilled.hash, spilled.byte_len
+		));
 	}
-	(head_end, tail_start.max(head_end))
+}
+
+fn push_transcript(projection: &mut TextProjection, transcript: &[TranscriptFrame]) {
+	for frame in transcript {
+		if !projection.push(&String::from_utf8_lossy(frame.data.as_ref())) {
+			break;
+		}
+	}
 }
 
 fn param_event<U, P>(error: ParamError) -> Ev<U, P, Fault> {
@@ -1178,7 +1284,7 @@ fn commit_event<U, P>(error: CommitError) -> Ev<U, P, Fault> {
 fn protocol_issue(reason: Str) -> ArgIssue {
 	ArgIssue {
 		path:     Vec::new(),
-		expected: sf!("one complete bash@1 argument object"),
+		expected: sf!("one complete bash@2 argument object"),
 		kind:     ArgIssueKind::Protocol,
 		example:  Some(sf!(r#"{{"command":"printf hello"}}"#)),
 		found:    Some(reason),
@@ -1210,9 +1316,7 @@ mod tests {
 		ShellPromptSnapshot {
 			sibling_tools: Arc::default(),
 			platform: Str::new("linux"),
-			profile: Str::new("brush"),
 			command_prefix: false,
-			minimizer_enabled: false,
 			embedded_builtins: true,
 			devices,
 			interceptor_enabled: false,
@@ -1239,21 +1343,34 @@ mod tests {
 	}
 
 	#[test]
-	fn shell_description_mentions_xd_only_when_devices_are_installed() {
+	fn shell_description_mentions_dyn_only_when_devices_are_installed() {
 		let enabled = prompt_snapshot(true).description();
 		assert!(
 			enabled
-				.ends_with(" Dynamic devices: `xd` builtin (list `xd`; docs `xd <device> --help`).")
+				.ends_with(" Dynamic devices: `dyn` builtin (list `dyn`; docs `dyn <device> --help`).")
 		);
-		assert!(!enabled.contains("`dyn`"));
+		assert!(enabled.contains("`dyn`"));
 
 		let disabled = prompt_snapshot(false).description();
-		assert!(!disabled.contains("`xd`"));
 		assert!(!disabled.contains("`dyn`"));
 	}
+
+	#[test]
+	fn bash_declares_no_whole_script_capability() {
+		assert!(spec(&prompt_snapshot(false)).effects.is_empty());
+	}
+
+	#[test]
+	fn default_timeout_bounds_cover_one_through_3600_seconds() {
+		let bounds = TimeoutBounds::default();
+		assert_eq!(bounds.default_ms, 300_000);
+		assert_eq!(bounds.floor_ms, 1_000);
+		assert_eq!(bounds.ceiling_ms, 3_600_000);
+	}
+
 	#[test]
 	fn params_schema_stays_strict_and_allocates_async_jobs_internally() {
-		use omp_inference::recovery::tools::{
+		use omp_ai::recovery::tools::{
 			ToolAssemblyLimits, schema_within_strict_subset, validate_schema,
 		};
 		let schema_bytes = omp_tool::schema::<Params>();
@@ -1268,10 +1385,10 @@ mod tests {
 		);
 		let limits = ToolAssemblyLimits::default();
 		let valid = [
-			serde_json::json!({"command": "echo hi"}),
-			serde_json::json!({"command": "echo hi", "async": false}),
-			serde_json::json!({"command": "sleep 5", "async": true}),
-			serde_json::json!({"command": "make", "timeout": 0}),
+			serde_json::json!({"i": "Running shell command", "command": "echo hi"}),
+			serde_json::json!({"i": "Running shell command", "command": "echo hi", "async": false}),
+			serde_json::json!({"i": "Starting background process", "command": "sleep 5", "async": true}),
+			serde_json::json!({"i": "Running build", "command": "make", "timeout": 0}),
 		];
 		for arguments in valid {
 			assert!(
@@ -1282,7 +1399,7 @@ mod tests {
 		assert!(
 			validate_schema(
 				&schema,
-				&serde_json::json!({"command": "sleep 5", "async": true, "name": "caller-owned"}),
+				&serde_json::json!({"i": "Starting background process", "command": "sleep 5", "async": true, "name": "caller-owned"}),
 				true,
 				limits,
 			)

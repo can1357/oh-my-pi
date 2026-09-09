@@ -19,7 +19,7 @@ pub const MAX_VECTOR_DIMENSIONS: usize = 4096;
 /// Maximum vectors emitted in one outbound streaming frame.
 pub const VECTOR_FRAME_ROWS: usize = 32;
 
-/// FastEmbed model selected in the parent.
+/// `FastEmbed` model selected in the parent.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ModelId(pub Str);
@@ -53,7 +53,7 @@ pub enum InboundFrame {
 		cache_dir:  Option<PathBuf>,
 		/// Input texts in result order.
 		texts:      Vec<String>,
-		/// Optional FastEmbed batch size.
+		/// Optional `FastEmbed` batch size.
 		batch_size: Option<usize>,
 	},
 }
@@ -174,8 +174,8 @@ impl OutboundFrame {
 		if id.is_some_and(|id| !valid_id(id)) {
 			return Err(Error::InvalidIdentifier);
 		}
-		if let Self::Vectors { start, total, vectors, done, .. } = self {
-			if *total > MAX_TEXTS
+		if let Self::Vectors { start, total, vectors, done, .. } = self
+			&& (*total > MAX_TEXTS
 				|| vectors.len() > VECTOR_FRAME_ROWS
 				|| start
 					.checked_add(vectors.len())
@@ -185,9 +185,8 @@ impl OutboundFrame {
 					vector.is_empty()
 						|| vector.len() > MAX_VECTOR_DIMENSIONS
 						|| vector.iter().any(|value| !value.is_finite())
-				}) {
-				return Err(Error::InputTooLarge);
-			}
+				})) {
+			return Err(Error::InputTooLarge);
 		}
 		if serde_json::to_vec(self)?.len() > MAX_FRAME_BYTES {
 			return Err(Error::InputTooLarge);

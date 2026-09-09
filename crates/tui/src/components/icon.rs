@@ -75,7 +75,15 @@ impl Component for Icon {
 			return;
 		}
 		let glyph = self.glyph(pc.ctx);
-		let style = self.props.style(&pc.ctx.theme);
+		let mut style = self.props.style(&pc.ctx.theme);
+		if !self.props.contains(Prop::Fg) {
+			style = style.fg(match self.name.as_str() {
+				"error" => pc.ctx.theme.err,
+				"done" | "success" => pc.ctx.theme.ok,
+				"pending" => pc.ctx.theme.output,
+				_ => pc.ctx.theme.accent,
+			});
+		}
 		let room = rect.width;
 		if cell_width(glyph) <= room {
 			pc.frame.put(rect.x, rect.y, glyph, style);

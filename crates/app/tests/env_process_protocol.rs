@@ -85,6 +85,15 @@ async fn process_info_and_restart_are_revision_and_generation_fenced() {
 		})
 		.expect("exact generation info");
 	assert_eq!(info.endpoint, started.endpoint);
+	assert_eq!(
+		info
+			.spec
+			.as_ref()
+			.and_then(|spec| spec.source.as_ref())
+			.map(|source| source.text.as_str()),
+		Some("while :; do sleep 1; done")
+	);
+	assert_eq!(info.ready.len(), 1);
 
 	assert!(matches!(
 		host.get_process(&GetProcess {

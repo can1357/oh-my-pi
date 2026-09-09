@@ -1,0 +1,23 @@
+[38;2;0;180;255m── ast_grep — AST Grep ─────────────────────────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mAST Grep[39m: [38;2;156;163;176museState([39m                                                                               
+                                                                                                    
+
+[38;2;107;114;128m  · in progress[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mAST Grep[39m: [38;2;156;163;176museState($A)[39m [38;2;107;114;128min packages/tui/src/components[39m                                             
+                                                                                                    
+
+[38;2;107;114;128m  · done[39m
+                                                                                                    
+[38;2;0;180;255m[39m [38;2;0;180;255mAST Grep[39m: [38;2;156;163;176museState($A)[39m [38;2;107;114;128m2 matches · 2 files · in packages/tui/src/components · searched 14[39m         
+[38;2;107;114;128m└─[39m [38;2;156;163;176m… 1 more match[39m                                                                                   
+                                                                                                    
+
+[38;2;107;114;128m  · failed[39m
+                                                                                                    
+[38;2;255;71;87m[39m [38;2;255;71;87mError: Pattern parse error: incomplete node `useState(` — expected a closing `)`[39m                  
+                                                                                                    
+

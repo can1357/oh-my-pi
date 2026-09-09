@@ -11,7 +11,7 @@ use tempfile::Builder;
 use crate::{
 	Backend, SandboxError, SandboxOperation, SandboxSpec,
 	backends::gvisor_oci::OciMount,
-	paths::temp_roots,
+	paths::{path_under_any, temp_roots},
 	runtime::gvisor::{GvisorPrepared, GvisorResource},
 };
 
@@ -137,6 +137,13 @@ fn build_view(spec: &SandboxSpec) -> LinuxView {
 	}
 	for socket in &spec.unix_sockets {
 		paths.insert(socket.clone(), MountMode::ReadWrite);
+	}
+	for path in spec
+		.write_deny
+		.iter()
+		.filter(|path| path.exists() && path_under_any(path, &spec.writable))
+	{
+		paths.insert(path.clone(), MountMode::ReadOnly);
 	}
 	let mounts = paths
 		.into_iter()
@@ -282,6 +289,25 @@ mod tests {
 			.find(|mount| mount.source == directory.path())
 			.expect("mount");
 		assert_eq!(mount.mode, MountMode::ReadWrite);
+	}
+
+	#[test]
+	fn write_deny_mount_overrides_writable_parent() {
+		let directory = tempdir().expect("scope");
+		let denied = directory.path().join("denied");
+		fs::create_dir(&denied).expect("denied directory");
+		let mut spec = SandboxSpec::new("/bin/echo");
+		spec.set_write(WriteMode::Scoped);
+		spec.allow_write(directory.path()).expect("write scope");
+		spec.deny_write(&denied).expect("write deny");
+		let view = build_view(&spec);
+		let denied = fs::canonicalize(denied).expect("canonical denied");
+		let mount = view
+			.mounts
+			.iter()
+			.find(|mount| mount.source == denied)
+			.expect("denied mount");
+		assert_eq!(mount.mode, MountMode::ReadOnly);
 	}
 
 	#[test]

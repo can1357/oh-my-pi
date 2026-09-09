@@ -8,13 +8,13 @@ use std::{
 
 use crate::SandboxError;
 
-pub(crate) fn canonicalize_existing(path: &Path) -> Result<PathBuf, SandboxError> {
+pub fn canonicalize_existing(path: &Path) -> Result<PathBuf, SandboxError> {
 	fs::canonicalize(path)
-		.map(|path| normalize_firmlink(path))
+		.map(normalize_firmlink)
 		.map_err(|source| SandboxError::Canonicalize { path: path.to_path_buf(), source })
 }
 
-pub(crate) fn canonicalize_deny(path: &Path) -> Result<PathBuf, SandboxError> {
+pub fn canonicalize_deny(path: &Path) -> Result<PathBuf, SandboxError> {
 	if let Ok(path) = fs::canonicalize(path) {
 		return Ok(normalize_firmlink(path));
 	}
@@ -40,7 +40,7 @@ pub(crate) fn canonicalize_deny(path: &Path) -> Result<PathBuf, SandboxError> {
 	}
 }
 
-fn absolute_lexical(path: &Path) -> Result<PathBuf, SandboxError> {
+pub fn absolute_lexical(path: &Path) -> Result<PathBuf, SandboxError> {
 	let absolute = if path.is_absolute() {
 		path.to_path_buf()
 	} else {
@@ -62,7 +62,7 @@ fn absolute_lexical(path: &Path) -> Result<PathBuf, SandboxError> {
 			Component::Normal(name) => normalized.push(name),
 		}
 	}
-	Ok(normalized)
+	Ok(normalize_firmlink(normalized))
 }
 
 #[cfg(target_os = "macos")]
@@ -85,22 +85,22 @@ const fn normalize_firmlink(path: PathBuf) -> PathBuf {
 	path
 }
 
-pub(crate) fn insert_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
+pub fn insert_path(paths: &mut Vec<PathBuf>, path: PathBuf) {
 	match paths.binary_search(&path) {
 		Ok(_) => {},
 		Err(index) => paths.insert(index, path),
 	}
 }
 
-pub(crate) fn path_under_scope(path: &Path, scope: &Path) -> bool {
+pub fn path_under_scope(path: &Path, scope: &Path) -> bool {
 	path == scope || path.starts_with(scope)
 }
 
-pub(crate) fn path_under_any(path: &Path, scopes: &[PathBuf]) -> bool {
+pub fn path_under_any(path: &Path, scopes: &[PathBuf]) -> bool {
 	scopes.iter().any(|scope| path_under_scope(path, scope))
 }
 
-pub(crate) fn resolve_program(program: &OsStr) -> Result<PathBuf, SandboxError> {
+pub fn resolve_program(program: &OsStr) -> Result<PathBuf, SandboxError> {
 	let path = Path::new(program);
 	if has_path_syntax(program) {
 		return match fs::canonicalize(path) {
@@ -183,29 +183,23 @@ fn is_executable(path: &Path) -> bool {
 	path.is_file()
 }
 
-pub(crate) fn temp_roots() -> Vec<PathBuf> {
+pub fn temp_roots() -> Vec<PathBuf> {
 	let mut roots = Vec::new();
-	#[cfg(target_os = "macos")]
-	{
-		insert_path(&mut roots, PathBuf::from("/private/tmp"));
-		insert_path(&mut roots, PathBuf::from("/private/var/folders"));
-	}
-	if let Some(path) = std::env::var_os("TMPDIR") {
-		if let Ok(path) = canonicalize_existing(Path::new(&path)) {
-			insert_path(&mut roots, path);
-		}
-	}
 	if let Ok(path) = canonicalize_existing(&std::env::temp_dir()) {
 		insert_path(&mut roots, path);
 	}
+	#[cfg(target_os = "linux")]
+	insert_path(&mut roots, PathBuf::from("/tmp"));
+	#[cfg(target_os = "macos")]
+	insert_path(&mut roots, PathBuf::from("/private/tmp"));
 	roots
 }
 
-pub(crate) fn os_string_bytes(value: &OsStr) -> Vec<u8> {
+pub fn os_string_bytes(value: &OsStr) -> Vec<u8> {
 	#[cfg(unix)]
 	{
 		use std::os::unix::ffi::OsStrExt as _;
-		return value.as_bytes().to_vec();
+		value.as_bytes().to_vec()
 	}
 	#[cfg(windows)]
 	{

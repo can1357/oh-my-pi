@@ -10,10 +10,13 @@ use omp_core::Str;
 use serde::{Deserialize, Serialize};
 use toml::map;
 
-use super::{ExtensionCode, ExtensionError, Layer, TrustTier};
+use super::{
+	ExtensionCode, ExtensionError, Layer, TrustTier,
+	resolver::{normalize_distribution_name, validate_abi},
+};
 
 /// Current `omp.lock` format version.
-pub const LOCK_VERSION: u32 = 1;
+pub const LOCK_VERSION: u32 = 2;
 
 /// A hash-addressed wheel accepted by a target.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -34,32 +37,37 @@ pub struct Wheel {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LockedExtension {
 	/// Stable extension id.
-	pub id:                Str,
+	pub id: Str,
 	/// Exact PEP 440 version.
-	pub version:           Str,
+	pub version: Str,
 	/// Requested isolation tier.
-	pub tier:              TrustTier,
+	pub tier: TrustTier,
 	/// Optional explicit sharing group.
 	#[serde(skip_serializing_if = "Option::is_none")]
-	pub pool:              Option<Str>,
+	pub pool: Option<Str>,
 	/// Features enabled while resolving.
-	pub features:          Vec<Str>,
+	pub features: Vec<Str>,
 	/// Reproducible source description, never a link source.
-	pub source:            toml::Value,
+	pub source: toml::Value,
 	/// Canonical manifest BLAKE3 digest.
-	pub manifest_digest:   Str,
+	pub manifest_digest: Str,
+	/// Canonical digest of the selected declaration projection.
+	pub declaration_digest: Str,
 	/// Capability digest used for consent.
 	pub capability_digest: Str,
+	/// Canonical digest of the complete signed capability graph.
+	pub manifest_capability_digest: Str,
 	/// TOFU publisher key.
-	pub publisher:         Str,
-	/// Publisher signature over both artifact hashes and capability digest.
-	pub signature:         Str,
+	pub publisher: Str,
+	/// Publisher signature over both artifact hashes and the complete manifest
+	/// capability graph digest.
+	pub signature: Str,
 	/// Code shipping level.
-	pub ship:              Str,
+	pub ship: Str,
 	/// Exact direct requirements.
-	pub requires:          Vec<Str>,
+	pub requires: Vec<Str>,
 	/// Extension's primary wheel.
-	pub wheel:             Wheel,
+	pub wheel: Wheel,
 }
 
 /// A package closure node with one wheel per supported target.
@@ -152,6 +160,20 @@ impl LockFile {
 				"lock does not use first-index",
 			));
 		}
+		if !is_unique_nonempty(&self.targets) {
+			return Err(ExtensionError::new(
+				ExtensionCode::ELockDrift,
+				"lock targets must be non-empty, unique target triples",
+			));
+		}
+		if self.indexes.iter().any(String::is_empty)
+			|| self.indexes.iter().collect::<BTreeSet<_>>().len() != self.indexes.len()
+		{
+			return Err(ExtensionError::new(
+				ExtensionCode::EIndexDrift,
+				"lock indexes must be non-empty and unique while preserving first-index order",
+			));
+		}
 		let mut ids = BTreeSet::new();
 		for extension in &self.extensions {
 			if !ids.insert(&extension.id) {
@@ -160,6 +182,26 @@ impl LockFile {
 					format!("duplicate extension id {}", extension.id),
 				));
 			}
+			validate_canonical_features(&extension.features)?;
+			if !valid_digest(extension.manifest_digest.as_str(), "b3:")
+				|| !valid_digest(extension.declaration_digest.as_str(), "b3:")
+				|| !valid_digest(extension.capability_digest.as_str(), "b3:")
+				|| !valid_digest(extension.manifest_capability_digest.as_str(), "b3:")
+				|| !valid_digest(extension.wheel.blake3.as_str(), "b3:")
+				|| !valid_digest(extension.wheel.sha256.as_str(), "sha256:")
+			{
+				return Err(ExtensionError::new(
+					ExtensionCode::ELockDrift,
+					format!("{} has an incomplete or malformed digest set", extension.id),
+				));
+			}
+			if extension.wheel.file.is_empty() || extension.wheel.size == 0 {
+				return Err(ExtensionError::new(
+					ExtensionCode::ELockDrift,
+					format!("{} has incomplete wheel identity", extension.id),
+				));
+			}
+			validate_abi(extension.wheel.tag.as_str())?;
 			if extension
 				.source
 				.as_table()
@@ -173,7 +215,14 @@ impl LockFile {
 		}
 		let mut package_versions = BTreeMap::new();
 		for package in &self.packages {
-			if let Some(version) = package_versions.insert(&package.name, &package.version)
+			let normalized = normalize_distribution_name(package.name.as_str());
+			if normalized != package.name.as_str() {
+				return Err(ExtensionError::new(
+					ExtensionCode::ELockDrift,
+					format!("package name {} is not PEP 503-normalized", package.name),
+				));
+			}
+			if let Some(version) = package_versions.insert(normalized, &package.version)
 				&& version != &package.version
 			{
 				return Err(ExtensionError::new(
@@ -181,18 +230,81 @@ impl LockFile {
 					format!("multiple versions of {} in one host child", package.name),
 				));
 			}
+			for wheel in &package.wheels {
+				if wheel.file.is_empty()
+					|| wheel.size == 0
+					|| !valid_digest(wheel.blake3.as_str(), "b3:")
+					|| !valid_digest(wheel.sha256.as_str(), "sha256:")
+				{
+					return Err(ExtensionError::new(
+						ExtensionCode::ELockDrift,
+						format!("package {} has incomplete wheel identity", package.name),
+					));
+				}
+				validate_abi(wheel.tag.as_str())?;
+			}
 		}
 		Ok(())
 	}
 
+	/// Computes the immutable resolution identity used to fence package
+	/// snapshots and extension-host generations. Writer metadata is excluded:
+	/// regenerating an identical lock must retain the same identity.
+	pub fn resolution_digest(&self) -> Result<Str, ExtensionError> {
+		self.validate_for(self.layer)?;
+		#[derive(Serialize)]
+		struct Resolution<'a> {
+			layer:           Layer,
+			requires_python: &'a Str,
+			abi:             &'a Str,
+			targets:         &'a [Str],
+			exclude_newer:   Option<&'a Str>,
+			indexes:         &'a [String],
+			index_strategy:  &'a Str,
+			extensions:      &'a [LockedExtension],
+			packages:        &'a [LockedPackage],
+			frozen:          &'a [FrozenDistribution],
+		}
+		let bytes = serde_json::to_vec(&Resolution {
+			layer:           self.layer,
+			requires_python: &self.requires_python,
+			abi:             &self.abi,
+			targets:         &self.targets,
+			exclude_newer:   self.exclude_newer.as_ref(),
+			indexes:         &self.indexes,
+			index_strategy:  &self.index_strategy,
+			extensions:      &self.extensions,
+			packages:        &self.packages,
+			frozen:          &self.frozen,
+		})
+		.map_err(|error| ExtensionError::new(ExtensionCode::ELockDrift, error.to_string()))?;
+		Ok(Str::new(format!("b3:{}", blake3::hash(&bytes).to_hex())))
+	}
+
 	/// Reads and validates one `omp.lock`.
+	#[tracing::instrument(
+		name = "extension_lock_read",
+		level = "debug",
+		skip_all,
+		fields(path = %path.display(), layer = ?layer)
+	)]
 	pub fn read(path: &Path, layer: Layer) -> Result<Self, ExtensionError> {
-		let text = fs::read_to_string(path)
-			.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))?;
-		let lock: Self = toml::from_str(&text)
-			.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))?;
-		lock.validate_for(layer)?;
-		Ok(lock)
+		let result: Result<Self, ExtensionError> = (|| {
+			let text = fs::read_to_string(path)
+				.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))?;
+			let lock: Self = toml::from_str(&text)
+				.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))?;
+			lock.validate_for(layer)?;
+			Ok(lock)
+		})();
+		if let Ok(lock) = &result {
+			tracing::debug!(
+				extension_count = lock.extensions.len(),
+				package_count = lock.packages.len(),
+				"extension lock loaded"
+			);
+		}
+		result
 	}
 
 	/// Atomically writes a committed `omp.lock`.
@@ -255,6 +367,18 @@ impl LockFile {
 	}
 }
 
+fn is_unique_nonempty(values: &[Str]) -> bool {
+	!values.is_empty()
+		&& values.iter().all(|value| !value.is_empty())
+		&& values.iter().collect::<BTreeSet<_>>().len() == values.len()
+}
+
+fn valid_digest(value: &str, prefix: &str) -> bool {
+	value.strip_prefix(prefix).is_some_and(|digest| {
+		digest.len() == 64 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+	})
+}
+
 /// Local-only record of materialized extension selections, including `link`
 /// overlays that are intentionally excluded from `omp.lock`.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -268,20 +392,23 @@ pub struct InstalledRecord {
 }
 
 const fn installed_version() -> u32 {
-	1
+	2
 }
 
 /// One local extension selection.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct InstalledExtension {
 	/// Stable extension id.
-	pub id:      Str,
+	pub id:       Str,
+	/// Fully expanded, sorted concrete feature selection.
+	#[serde(default)]
+	pub features: Vec<Str>,
 	/// Local source, including permitted `{ link = ... }` overlays.
-	pub source:  toml::Value,
+	pub source:   toml::Value,
 	/// Requested tier.
-	pub tier:    TrustTier,
+	pub tier:     TrustTier,
 	/// Whether this local selection is enabled.
-	pub enabled: bool,
+	pub enabled:  bool,
 }
 
 /// The materialized per-host site tree carried into the Python package
@@ -319,6 +446,16 @@ pub fn package_snapshot(
 ) -> Result<Option<Str>, ExtensionError> {
 	if development_source(&installed.source) {
 		return Ok(None);
+	}
+	let expected_resolution = lock.resolution_digest()?;
+	if site.resolution != expected_resolution {
+		return Err(ExtensionError::new(
+			ExtensionCode::ELockDrift,
+			format!(
+				"materialized site resolution {} does not match lock {}",
+				site.resolution, expected_resolution
+			),
+		));
 	}
 	let extension = lock
 		.extensions
@@ -482,8 +619,19 @@ impl InstalledRecord {
 		}
 		let text = fs::read_to_string(path)
 			.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))?;
-		toml::from_str(&text)
-			.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))
+		let mut record: Self = toml::from_str(&text)
+			.map_err(|error| ExtensionError::new(ExtensionCode::ELockVersion, error.to_string()))?;
+		if record.version > installed_version() {
+			return Err(ExtensionError::new(
+				ExtensionCode::ELockVersion,
+				"install record format is newer than this binary",
+			));
+		}
+		for extension in &record.extensions {
+			validate_canonical_features(&extension.features)?;
+		}
+		record.version = installed_version();
+		Ok(record)
 	}
 
 	/// Atomically writes `installed.toml`.
@@ -507,6 +655,25 @@ pub(crate) fn atomic_toml<T: Serialize>(path: &Path, value: &T) -> io::Result<()
 	fs::write(&temporary, data)?;
 	fs::rename(temporary, path)
 }
+fn validate_canonical_features(features: &[Str]) -> Result<(), ExtensionError> {
+	let mut previous: Option<&Str> = None;
+	for feature in features {
+		if feature.is_empty() || feature.as_str().trim() != feature.as_str() {
+			return Err(ExtensionError::new(
+				ExtensionCode::EFeature,
+				"feature names must be non-empty and trimmed",
+			));
+		}
+		if previous.is_some_and(|previous| previous >= feature) {
+			return Err(ExtensionError::new(
+				ExtensionCode::EFeature,
+				"concrete features must be unique and lexically sorted",
+			));
+		}
+		previous = Some(feature);
+	}
+	Ok(())
+}
 
 /// Builds the source table used by reproducible lock entries.
 pub fn index_source(index: &str, distribution: &Str) -> toml::Value {
@@ -524,7 +691,7 @@ mod tests {
 
 	fn lock() -> LockFile {
 		LockFile {
-			version:         1,
+			version:         LOCK_VERSION,
 			generated_by:    "omp test".to_owned(),
 			generated_at:    "2026-08-20T00:00:00Z".to_owned(),
 			layer:           Layer::Workspace,
@@ -546,5 +713,25 @@ mod tests {
 		let path = directory.path().join("omp.lock");
 		lock().write(&path).expect("write lock");
 		assert_eq!(LockFile::read(&path, Layer::Workspace).expect("read lock"), lock());
+	}
+
+	#[test]
+	fn resolution_digest_ignores_writer_metadata_but_not_index_order() {
+		let first = lock();
+		let mut regenerated = first.clone();
+		regenerated.generated_by = "different writer".to_owned();
+		regenerated.generated_at = "2026-09-04T00:00:00Z".to_owned();
+		assert_eq!(
+			first.resolution_digest().expect("first digest"),
+			regenerated.resolution_digest().expect("regenerated digest")
+		);
+
+		regenerated
+			.indexes
+			.insert(0, "https://private.example/simple".to_owned());
+		assert_ne!(
+			first.resolution_digest().expect("first digest"),
+			regenerated.resolution_digest().expect("changed digest")
+		);
 	}
 }

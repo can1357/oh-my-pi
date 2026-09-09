@@ -98,10 +98,8 @@ fn parse(input: &str) -> Vec<Row> {
 			!ascii.chars().any(private_use),
 			"icons.tsv:{line_number}: ASCII fallback contains a private-use character"
 		);
-		// The `omp` brand mark is deliberately non-ASCII everywhere; every
-		// other fallback must honor the ASCII tier's pure-7-bit promise.
 		assert!(
-			name == "omp" || ascii.is_ascii(),
+			ascii.is_ascii(),
 			"icons.tsv:{line_number}: ASCII fallback for `{name}` contains non-ASCII characters"
 		);
 		assert!(!unicode.is_empty(), "icons.tsv:{line_number}: empty Unicode glyph");

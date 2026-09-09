@@ -12,8 +12,8 @@ use crate::{
 	gallery::RendererGalleryFixture,
 	think::{Fault as ThinkFault, Payload as ThinkPayload, Update as ThinkUpdate},
 	todo::{
-		Fault as TodoFault, Item as TodoItem, Payload as TodoPayload, Phase as TodoPhase,
-		Status as TodoStatus, Update as TodoUpdate,
+		Fault as TodoFault, InitListEntry as TodoInitListEntry, Payload as TodoPayload,
+		Phase as TodoPhase, Status as TodoStatus, Task as TodoTask, Update as TodoUpdate,
 	},
 	view,
 };
@@ -34,7 +34,7 @@ impl RenderFold for AskRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		let Some(questions) = args.get("questions").and_then(|value| value.as_array()) else {
 			return;
 		};
@@ -53,11 +53,21 @@ impl RenderFold for AskRenderer {
 			},
 			None => Some(render_ask(&state.questions, None).into()),
 			Some(CallOutcome::Ok(payload)) => {
-				Some(render_ask(&state.questions, Some(&payload.answers)).into())
+				let rendered = if state.questions.is_empty() {
+					render_durable_ask(&payload.answers)
+				} else {
+					render_ask(&state.questions, Some(&payload.answers))
+				};
+				Some(rendered.into())
 			},
 			Some(CallOutcome::Faulted(fault)) => {
 				let message = match fault {
-					AskFault::Invalid { message } | AskFault::Presenter { message } => message,
+					AskFault::Invalid { message } | AskFault::Presenter { message } => message.as_str(),
+					AskFault::Cancelled { message } => message.as_str(),
+					AskFault::RequiresInteractive => "Ask tool requires interactive mode",
+					AskFault::InvalidPresentation => {
+						"Ask presenter returned selections that do not match the questions"
+					},
 				};
 				Some(render_fault(message).into())
 			},
@@ -83,17 +93,23 @@ impl RenderFold for TodoRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		if let Some(op) = args.get("op").and_then(|value| value.as_str()) {
 			state.op = Some(Str::new(op));
 		}
 		if let Some(phases) = args.get("list").and_then(|value| value.as_array()) {
 			state.phases.clear();
-			state.phases.extend(
-				phases
-					.iter()
-					.filter_map(|phase| phase.deserialize_into::<TodoPhase>().ok()),
-			);
+			state.phases.extend(phases.iter().filter_map(|phase| {
+				let phase = phase.deserialize_into::<TodoInitListEntry>().ok()?;
+				Some(TodoPhase {
+					name:  phase.phase,
+					tasks: phase
+						.items
+						.into_iter()
+						.map(|content| TodoTask { content, status: TodoStatus::Pending, blocker: None })
+						.collect(),
+				})
+			}));
 		} else if let Some(items) = args.get("items").and_then(|value| value.as_array()) {
 			let phase = args
 				.get("phase")
@@ -101,14 +117,14 @@ impl RenderFold for TodoRenderer {
 				.unwrap_or("Todos");
 			state.phases.clear();
 			state.phases.push(TodoPhase {
-				phase: Str::new(phase),
-				items: items
+				name:  Str::new(phase),
+				tasks: items
 					.iter()
 					.filter_map(|item| item.as_str())
-					.map(|text| TodoItem {
-						text:   Str::new(text),
-						status: TodoStatus::Pending,
-						reason: None,
+					.map(|content| TodoTask {
+						content: Str::new(content),
+						status:  TodoStatus::Pending,
+						blocker: None,
 					})
 					.collect(),
 			});
@@ -142,7 +158,7 @@ impl RenderFold for ThinkRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
 		if let Some(thoughts) = args.get("thoughts").and_then(|value| value.as_str()) {
 			state.thoughts = Some(Str::new(thoughts));
 		}
@@ -169,6 +185,32 @@ fn render_ask(questions: &[AskQuestion], answers: Option<&[AskAnswer]>) -> El {
 		<col gap=1>
 			for question in questions {
 				{render_question(question, answers)}
+			}
+		</col>
+	}
+}
+
+fn render_durable_ask(answers: &[AskAnswer]) -> El {
+	view! {
+		<col gap=1>
+			for answer in answers {
+				<col gap=0>
+					<row sep=" · ">
+						<fact label="ID">{&answer.id}</fact>
+						<fact label="Options"><num value={answer.options.len()} compact/></fact>
+						if answer.multi { <fact label="Mode">{"multiple"}</fact> }
+					</row>
+					<text bold wrap="word">{&answer.question}</text>
+					for option in &answer.options {
+						<choice
+							multi={answer.multi}
+							selected={answer.selected.contains(option)}
+						>
+							{option}
+						</choice>
+					}
+					{render_written_answer(answer)}
+				</col>
 			}
 		</col>
 	}
@@ -203,6 +245,23 @@ fn render_question(question: &AskQuestion, answers: Option<&[AskAnswer]>) -> El 
 						<choice multi={question.multi} selected>{selected}</choice>
 					}
 				}
+				{render_written_answer(answer)}
+			}
+		</col>
+	}
+}
+
+fn render_written_answer(answer: &AskAnswer) -> El {
+	view! {
+		<col gap=0>
+			if let Some(custom) = &answer.custom_input {
+				<fact label="Other">{custom}</fact>
+			}
+			if let Some(note) = &answer.note {
+				<fact label="Note">{note}</fact>
+			}
+			if answer.timed_out {
+				<text fg=muted>{"auto-selected after timeout — not a user choice"}</text>
 			}
 		</col>
 	}
@@ -216,9 +275,9 @@ fn render_todo_phases(phases: &[TodoPhase]) -> El {
 	view! {
 		<todo guides="round" numbering="roman">
 			for phase in phases {
-				<task label={&phase.phase}>
-					for item in &phase.items {
-						{render_todo_item(item)}
+				<task label={&phase.name}>
+					for task in &phase.tasks {
+						{render_todo_task(task)}
 					}
 				</task>
 			}
@@ -226,16 +285,16 @@ fn render_todo_phases(phases: &[TodoPhase]) -> El {
 	}
 }
 
-fn render_todo_item(item: &TodoItem) -> El {
-	if item.status == TodoStatus::Blocked
-		&& let Some(reason) = item.reason.as_deref()
+fn render_todo_task(task: &TodoTask) -> El {
+	if task.status == TodoStatus::Blocked
+		&& let Some(blocker) = task.blocker.as_deref()
 	{
 		view! {
-			<task status={item.status.as_ref()} desc={reason}>{&item.text}</task>
+			<task status={task.status.as_ref()} desc={blocker}>{&task.content}</task>
 		}
 	} else {
 		view! {
-			<task status={item.status.as_ref()}>{&item.text}</task>
+			<task status={task.status.as_ref()}>{&task.content}</task>
 		}
 	}
 }
@@ -253,7 +312,7 @@ fn render_todo_live(op: Option<&str>) -> El {
 }
 
 fn render_todo_fault(fault: &TodoFault) -> El {
-	render_fault(fault.message())
+	render_fault(&fault.to_string())
 }
 
 fn render_fault(message: &str) -> El {
@@ -265,7 +324,7 @@ fn render_thought(thoughts: &str) -> El {
 }
 /// Native ask, todo, and think renderer lifecycle fixtures for the visual QA
 /// gallery.
-pub(crate) fn gallery_fixtures(
+pub fn gallery_fixtures(
 	ask: ToolIdentity,
 	todo: ToolIdentity,
 	think: ToolIdentity,
@@ -273,25 +332,22 @@ pub(crate) fn gallery_fixtures(
 	vec![
 		RendererGalleryFixture {
 			identity: ask,
-			title: "choose a database and v1 auth flows",
 			streaming_args: r#"{"questions":[{"id":"db","question":"Which database should the new service use?","options":[{"label":"Postgres","description":"Relational, strong consistency, JSONB support"},{"label":"SQLite","description":"Embedded, zero-ops, great for single-node"},{"label":"MongoDB","description":"Document store, flexible schema"}],"recommended":0},{"id":"features","question":"Which auth flows should sh"#,
 			args: r#"{"questions":[{"id":"db","question":"Which database should the new service use?","options":[{"label":"Postgres","description":"Relational, strong consistency, JSONB support"},{"label":"SQLite","description":"Embedded, zero-ops, great for single-node"},{"label":"MongoDB","description":"Document store, flexible schema"}],"recommended":0},{"id":"features","question":"Which auth flows should ship in v1?","options":[{"label":"Email + password"},{"label":"OAuth (Google, GitHub)"},{"label":"Magic links"},{"label":"SAML SSO","description":"Enterprise; can be deferred"}],"multi":true}]}"#,
 			progress_update: None,
-			success_outcome: br#"{"kind":"ok","value":{"answers":[{"id":"db","selected":["Postgres"],"timed_out":false},{"id":"features","selected":["Email + password","OAuth (Google, GitHub)","Custom <flow>"],"timed_out":false}],"headless":false}}"#,
+			success_outcome: br#"{"kind":"ok","value":{"answers":[{"id":"db","question":"Which database should the new service use?","options":["Postgres","SQLite","MongoDB"],"multi":false,"selected":["Postgres"],"timed_out":false},{"id":"features","question":"Which auth flows should ship in v1?","options":["Email + password","OAuth (Google, GitHub)","Magic links","SAML SSO"],"multi":true,"selected":["Email + password","OAuth (Google, GitHub)"],"customInput":"Custom <flow>","timed_out":false}]}}"#,
 			error_outcome: br#"{"kind":"faulted","value":{"kind":"presenter","message":"Prompt cancelled by user before any answer was given"}}"#,
 		},
 		RendererGalleryFixture {
 			identity: todo,
-			title: "initialize the Foundation and Auth plan",
-			streaming_args: r#"{"op":"init","list":[{"phase":"Foundation","items":[{"text":"Scaffold crate"},{"text":"Wire workspace"}]},{"phase":"Au"#,
-			args: r#"{"op":"init","list":[{"phase":"Foundation","items":[{"text":"Scaffold crate"},{"text":"Wire workspace"}]},{"phase":"Auth","items":[{"text":"Port credential store"},{"text":"Wire OAuth providers"}]}]}"#,
+			streaming_args: r#"{"op":"init","list":[{"phase":"Foundation","items":["Scaffold crate","Wire workspace"]},{"phase":"Au"#,
+			args: r#"{"op":"init","list":[{"phase":"Foundation","items":["Scaffold crate","Wire workspace"]},{"phase":"Auth","items":["Port credential store","Wire OAuth providers"]}]}"#,
 			progress_update: None,
-			success_outcome: br##"{"kind":"ok","value":{"phases":[{"phase":"Foundation","items":[{"text":"Scaffold crate","status":"completed","reason":null},{"text":"Wire workspace","status":"in_progress","reason":null}]},{"phase":"Auth","items":[{"text":"Port credential store","status":"pending","reason":null},{"text":"Wire OAuth providers","status":"pending","reason":null}]}],"rendered":"# Foundation\n- [x] Scaffold crate\n- [/] Wire workspace\n\n# Auth\n- [ ] Port credential store\n- [ ] Wire OAuth providers\n"}}"##,
-			error_outcome: br#"{"kind":"faulted","value":{"kind":"missing","message":"Unknown phase 'Auth' - initialize the list first"}}"#,
+			success_outcome: br#"{"kind":"ok","value":{"op":"init","phases":[{"name":"Foundation","tasks":[{"content":"Scaffold crate","status":"completed"},{"content":"Wire workspace","status":"in_progress"}]},{"name":"Auth","tasks":[{"content":"Port credential store","status":"pending"},{"content":"Wire OAuth providers","status":"pending"}]}],"completed_tasks":[{"phase":"Foundation","content":"Scaffold crate"}]}}"#,
+			error_outcome: br#"{"kind":"faulted","value":{"kind":"phase_not_found","name":"Auth"}}"#,
 		},
 		RendererGalleryFixture {
 			identity: think,
-			title: "reflect on retry-loop latency",
 			streaming_args: r#"{"thoughts":"The retry loop re-reads the config after every failure, which explains the doubled lat"#,
 			args: r#"{"thoughts":"The retry loop re-reads the config after every failure, which explains the doubled latency. Cache the parsed config outside the loop, then re-check the invalidation path."}"#,
 			progress_update: None,
@@ -321,7 +377,7 @@ mod tests {
 			serde_json::from_slice::<CallOutcome<AskPayload, AskFault>>(fixtures[0].error_outcome)
 				.expect("ask fault decodes");
 		let mut ask_state = AskState::default();
-		let streaming = omp_slopjson::parse_streaming(fixtures[0].streaming_args);
+		let streaming = omp_core::slopjson::parse_streaming(fixtures[0].streaming_args);
 		AskRenderer.fold_args(&mut ask_state, &streaming, false);
 		let live = AskRenderer
 			.view(&ask_state, None)
@@ -331,14 +387,14 @@ mod tests {
 		assert!(live.contains("<choice>Postgres</choice>"));
 		assert!(live.contains("Relational, strong consistency, JSONB support"));
 		assert!(!live.contains('↳'));
-		let committed = omp_slopjson::parse(fixtures[0].args).expect("ask args decode");
+		let committed = omp_core::slopjson::parse(fixtures[0].args).expect("ask args decode");
 		AskRenderer.fold_args(&mut ask_state, &committed, true);
 		let success = AskRenderer
 			.view(&ask_state, Some(&ask_outcome))
 			.expect("ask success renders");
 		assert!(success.contains("<choice selected>Postgres</choice>"));
 		assert!(success.contains("<choice multi selected>Email + password</choice>"));
-		assert!(success.contains("<choice multi selected>Custom &lt;flow&gt;</choice>"));
+		assert!(success.contains("<fact label=Other>Custom &lt;flow&gt;</fact>"));
 		assert!(success.contains("Relational, strong consistency, JSONB support"));
 		assert!(!success.contains('●'));
 		assert!(!success.contains('○'));
@@ -357,14 +413,14 @@ mod tests {
 			serde_json::from_slice::<CallOutcome<TodoPayload, TodoFault>>(fixtures[1].error_outcome)
 				.expect("todo fault decodes");
 		let mut todo_state = TodoState::default();
-		let streaming = omp_slopjson::parse_streaming(fixtures[1].streaming_args);
+		let streaming = omp_core::slopjson::parse_streaming(fixtures[1].streaming_args);
 		TodoRenderer.fold_args(&mut todo_state, &streaming, false);
 		let live = TodoRenderer
 			.view(&todo_state, None)
 			.expect("todo live view renders");
 		assert!(live.contains("label=Foundation"));
 		assert!(live.contains("<todo guides=round numbering=roman>"));
-		let committed = omp_slopjson::parse(fixtures[1].args).expect("todo args decode");
+		let committed = omp_core::slopjson::parse(fixtures[1].args).expect("todo args decode");
 		TodoRenderer.fold_args(&mut todo_state, &committed, true);
 		let todo = TodoRenderer
 			.view(&todo_state, Some(&todo_outcome))
@@ -377,7 +433,7 @@ mod tests {
 				.view(&todo_state, Some(&todo_fault))
 				.expect("todo fault renders")
 				.as_str(),
-			"<callout kind=error>Unknown phase 'Auth' - initialize the list first</callout>",
+			"<callout kind=error>Phase \"Auth\" not found</callout>",
 		);
 
 		let think_outcome = serde_json::from_slice::<CallOutcome<ThinkPayload, ThinkFault>>(
@@ -388,14 +444,14 @@ mod tests {
 			serde_json::from_slice::<CallOutcome<ThinkPayload, ThinkFault>>(fixtures[2].error_outcome)
 				.expect("think fault decodes");
 		let mut think_state = ThinkState::default();
-		let streaming = omp_slopjson::parse_streaming(fixtures[2].streaming_args);
+		let streaming = omp_core::slopjson::parse_streaming(fixtures[2].streaming_args);
 		ThinkRenderer.fold_args(&mut think_state, &streaming, false);
 		let live = ThinkRenderer
 			.view(&think_state, None)
 			.expect("think live view renders");
 		assert!(live.starts_with("<text fg=muted dim italic"));
 		assert!(live.contains("doubled lat"));
-		let committed = omp_slopjson::parse(fixtures[2].args).expect("think args decode");
+		let committed = omp_core::slopjson::parse(fixtures[2].args).expect("think args decode");
 		ThinkRenderer.fold_args(&mut think_state, &committed, true);
 		let success = ThinkRenderer
 			.view(&think_state, Some(&think_outcome))
@@ -419,15 +475,16 @@ mod tests {
 		);
 
 		let todo = TodoPayload {
-			phases:   vec![crate::todo::Phase {
-				phase: Str::new("Build \"core\""),
-				items: vec![crate::todo::Item {
-					text:   Str::new("<compile>"),
-					status: TodoStatus::Blocked,
-					reason: Some(Str::new("CI & review")),
+			op:              crate::todo::Op::View,
+			phases:          vec![crate::todo::Phase {
+				name:  Str::new("Build \"core\""),
+				tasks: vec![crate::todo::Task {
+					content: Str::new("<compile>"),
+					status:  TodoStatus::Blocked,
+					blocker: Some(Str::new("CI & review")),
 				}],
 			}],
-			rendered: Str::new("unused"),
+			completed_tasks: Vec::new(),
 		};
 		let rendered = render_todo(&todo).to_tml();
 		assert!(rendered.contains("label=\"Build &quot;core&quot;\""));

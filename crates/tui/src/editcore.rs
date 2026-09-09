@@ -1,5 +1,5 @@
-//! Pi-compatible editing core: the flat-text [`EditBuffer`] (grapheme-safe
-//! word wrapping and navigation, undo, kill-ring yank/yank-pop, atomic
+//! Editing core: the flat-text [`EditBuffer`] (grapheme-safe word wrapping
+//! and navigation, undo, kill-ring yank/yank-pop, atomic
 //! references, character jumps, sticky page motion) and the
 //! [`Editor`] built on top of it (pluggable completion, inline ghost
 //! hints, emoji expansion, prompt history).
@@ -28,7 +28,13 @@ use crate::{
 
 const KILL_CAP: usize = 60;
 const UNDO_CAP: usize = 100;
+/// Default dropdown window.
 const PICKER_ROWS: usize = 10;
+/// Page navigation fallback before a host reports its rendered viewport.
+const DEFAULT_PAGE_ROWS: usize = 10;
+/// Completion window bounds.
+const PICKER_ROWS_MIN: usize = 3;
+const PICKER_ROWS_MAX: usize = 20;
 const MAX_INPUT_ROWS: usize = 16;
 const MAX_EMOJI_SUGGESTIONS: usize = 12;
 const HISTORY_CAPACITY: usize = 100;
@@ -83,12 +89,22 @@ pub struct VisualRow<'a> {
 
 #[derive(Clone, Copy, Debug)]
 struct Segment {
-	start: usize,
-	end:   usize,
-	last:  bool,
+	/// Source span owned by this row, including whitespace hidden at a wrap.
+	source_start: usize,
+	source_end:   usize,
+	/// Visible contiguous slice within the source span.
+	start:        usize,
+	end:          usize,
+	last:         bool,
 }
 
-/// Shared Pi-style flat text editing model used by the widget and chat editors.
+#[derive(Clone, Debug)]
+struct KillEntry {
+	text:  String,
+	atoms: Vector<Atom>,
+}
+
+/// Shared flat text editing model used by the widget and chat editors.
 #[derive(Clone, Debug)]
 pub struct EditBuffer {
 	text:          String,
@@ -96,14 +112,14 @@ pub struct EditBuffer {
 	anchor:        Option<usize>,
 	copied:        Option<Str>,
 	desired:       Option<u16>,
-	kill_ring:     Vec<String>,
+	kill_ring:     Vec<KillEntry>,
 	kill_index:    usize,
 	last_yank:     Option<(usize, usize)>,
 	last_action:   Action,
 	undo:          Vec<(String, usize, Vector<Atom>)>,
 	atoms:         Vector<Atom>,
 	jump:          Option<Jump>,
-	layout_width:  u16,
+	layout_width:  Cell<u16>,
 	xml:           bool,
 	view_offset:   Cell<usize>,
 	manual_scroll: Cell<bool>,
@@ -133,7 +149,7 @@ impl EditBuffer {
 			undo: Vec::new(),
 			atoms: Vector::new(),
 			jump: None,
-			layout_width: 80,
+			layout_width: Cell::new(80),
 			view_offset: Cell::new(0),
 			manual_scroll: Cell::new(false),
 			xml: true,
@@ -241,7 +257,41 @@ impl EditBuffer {
 		self.undo.clear();
 		self.anchor = None;
 		self.desired = None;
+		self.view_offset.set(0);
+		self.manual_scroll.set(false);
 		self.break_sequence();
+	}
+
+	/// Moves the cursor to the start (`end == false`) or end of the whole
+	/// message, collapsing any selection.
+	pub fn move_to_message_edge(&mut self, end: bool) -> BufferOutcome {
+		let at = if end { self.text.len() } else { 0 };
+		self.anchor = None;
+		self.desired = None;
+		self.manual_scroll.set(false);
+		self.move_to(at)
+	}
+
+	/// Undoes the last meaningful edit while ignoring `transient` text that
+	/// was just removed at the cursor: every
+	/// undo snapshot that only differs from the current text by a partially
+	/// typed `transient` is discarded first, so a `#undo` trigger never
+	/// counts as the edit being undone.
+	pub fn undo_past_transient(&mut self, transient: &str) -> BufferOutcome {
+		let (before, after) = self.text.split_at(self.cursor);
+		while let Some((text, ..)) = self.undo.last() {
+			let typed = text
+				.strip_prefix(before)
+				.and_then(|rest| rest.strip_suffix(after));
+			let Some(typed) = typed else {
+				break;
+			};
+			if !transient.starts_with(typed) {
+				break;
+			}
+			self.undo.pop();
+		}
+		self.undo()
 	}
 
 	/// Places the cursor on a logical line and cell column.
@@ -260,29 +310,35 @@ impl EditBuffer {
 		self.cursor = self.snap_position(at, at >= self.cursor);
 		self.anchor = None;
 		self.desired = None;
+		self.manual_scroll.set(false);
 		self.break_sequence();
 	}
 
 	/// Places the cursor on a visible visual row and cell column.
 	pub fn set_cursor_visual_row(&mut self, row: usize, column: u16, width_limit: u16) {
+		self.layout_width.set(width_limit.max(1));
 		let at = self.visual_position(row, column, width_limit);
 		self.cursor = self.snap_position(at, at >= self.cursor);
 		self.anchor = None;
 		self.desired = None;
+		self.manual_scroll.set(false);
 		self.break_sequence();
 	}
 
 	/// Extends the selection to a visible visual row and cell column.
 	pub fn extend_selection_visual_row(&mut self, row: usize, column: u16, width_limit: u16) {
+		self.layout_width.set(width_limit.max(1));
 		let anchor = *self.anchor.get_or_insert(self.cursor);
 		let at = self.visual_position(row, column, width_limit);
 		self.cursor = self.snap_position(at, at >= anchor);
 		self.desired = None;
+		self.manual_scroll.set(false);
 		self.break_sequence();
 	}
 
 	/// Selects the coarse word around a position on a visible visual row.
 	pub fn select_word_visual_row(&mut self, row: usize, column: u16, width_limit: u16) {
+		self.layout_width.set(width_limit.max(1));
 		let at = self.visual_position(row, column, width_limit);
 		let (seed_start, seed_end) = if let Some(grapheme) = self.text[at..].graphemes().next() {
 			(at, at + grapheme.len())
@@ -315,6 +371,7 @@ impl EditBuffer {
 		self.anchor = Some(start);
 		self.cursor = end;
 		self.desired = None;
+		self.manual_scroll.set(false);
 		self.break_sequence();
 	}
 
@@ -330,6 +387,71 @@ impl EditBuffer {
 		};
 		self.cursor = start + replacement.len();
 		self.splice(start..end, replacement);
+		self.anchor = None;
+		self.desired = None;
+		self.break_sequence();
+	}
+
+	fn restore_cursor_offset(&mut self, offset: usize) {
+		let cursor = self.cursor.saturating_add(offset).min(self.text.len());
+		if self.text.is_char_boundary(cursor) {
+			self.cursor = cursor;
+		}
+	}
+
+	/// Replaces a transient range without recording an undo snapshot.
+	///
+	/// Streaming speech previews use this to replace one volatile span while
+	/// preserving a caret before or after that span.
+	fn replace_transient_range(
+		&mut self,
+		range: ops::Range<usize>,
+		replacement: &str,
+	) -> ops::Range<usize> {
+		let range = if range.start <= range.end
+			&& range.end <= self.text.len()
+			&& self.text.is_char_boundary(range.start)
+			&& self.text.is_char_boundary(range.end)
+		{
+			range
+		} else {
+			self.cursor..self.cursor
+		};
+		let old_end = range.end;
+		let was_empty = range.is_empty();
+		let prior_cursor = self.cursor;
+		let replacement = sanitize_paste(replacement);
+		self.splice(range.clone(), &replacement);
+		let new_end = range.start + replacement.len();
+		self.cursor = if was_empty && prior_cursor == range.start {
+			new_end
+		} else if prior_cursor <= range.start {
+			prior_cursor
+		} else if prior_cursor >= old_end {
+			prior_cursor - (old_end - range.start) + replacement.len()
+		} else {
+			new_end
+		};
+		self.anchor = None;
+		self.desired = None;
+		self.break_sequence();
+		range.start..new_end
+	}
+
+	/// Replaces a volatile range with one undoable committed edit.
+	fn commit_transient_range(&mut self, range: ops::Range<usize>, replacement: &str) {
+		let start = range.start;
+		self.replace_transient_range(range, "");
+		let replacement = sanitize_paste(replacement);
+		if replacement.is_empty() {
+			return;
+		}
+		self.snapshot();
+		let prior_cursor = self.cursor;
+		self.splice(start..start, &replacement);
+		if prior_cursor >= start {
+			self.cursor = prior_cursor + replacement.len();
+		}
 		self.anchor = None;
 		self.desired = None;
 		self.break_sequence();
@@ -479,13 +601,15 @@ impl EditBuffer {
 		self.desired = None;
 		self.undo.clear();
 		self.atoms.clear();
+		self.view_offset.set(0);
+		self.manual_scroll.set(false);
 		self.break_sequence();
 		result
 	}
 
 	/// Applies a decoded editor key at the given layout width.
 	pub fn handle(&mut self, key: Key, width: u16, page_rows: usize) -> BufferOutcome {
-		self.layout_width = width.max(1);
+		self.layout_width.set(width.max(1));
 		// The copy stash lives exactly one key: hosts drain it right after
 		// the `Copy`/`Cut` that filled it, and any other key voids it so a
 		// later drain can never emit stale clipboard contents.
@@ -540,12 +664,12 @@ impl EditBuffer {
 			}),
 			Key::Up => self.collapse_or(false, |buffer| buffer.move_visual(-1)),
 			Key::Down => self.collapse_or(true, |buffer| buffer.move_visual(1)),
-			Key::PageUp => {
-				self.collapse_or(false, |buffer| buffer.move_visual(-(page_rows.max(1) as isize)))
-			},
-			Key::PageDown => {
-				self.collapse_or(true, |buffer| buffer.move_visual(page_rows.max(1) as isize))
-			},
+			Key::PageUp => self.collapse_or(false, |buffer| {
+				buffer.move_visual(-(page_rows.saturating_sub(1).max(1) as isize))
+			}),
+			Key::PageDown => self.collapse_or(true, |buffer| {
+				buffer.move_visual(page_rows.saturating_sub(1).max(1) as isize)
+			}),
 			Key::SelectLeft => self.extend(Self::move_left),
 			Key::SelectRight => self.extend(Self::move_right),
 			Key::SelectWordLeft => self.extend(|buffer| {
@@ -607,7 +731,9 @@ impl EditBuffer {
 		width_limit: u16,
 		max_rows: usize,
 	) -> (SmallVec<VisualRow<'_>, 8>, (usize, usize, usize)) {
-		let segments = self.segments(width_limit.max(1));
+		let width_limit = width_limit.max(1);
+		self.layout_width.set(width_limit);
+		let segments = self.segments(width_limit);
 		let cursor_row = self.segment_at_cursor(&segments);
 		let total = segments.len();
 		let visible = total.min(max_rows);
@@ -626,10 +752,13 @@ impl EditBuffer {
 				start:         segment.start,
 				end:           segment.end,
 				text:          &self.text[segment.start..segment.end],
-				cursor_column: (self.cursor >= segment.start
-					&& self.cursor <= segment.end
-					&& (segment.last || self.cursor < segment.end))
-					.then(|| cell_width(&self.text[segment.start..self.cursor])),
+				cursor_column: (self.cursor >= segment.source_start
+					&& self.cursor <= segment.source_end
+					&& (segment.last || self.cursor < segment.source_end))
+					.then(|| {
+						let cursor = self.cursor.clamp(segment.start, segment.end);
+						cell_width(&self.text[segment.start..cursor])
+					}),
 			})
 			.collect();
 		(rows, (first, visible, total))
@@ -639,7 +768,9 @@ impl EditBuffer {
 	///
 	/// Returns whether the clamped viewport offset changed.
 	pub fn scroll_rows(&self, delta: i32, width_limit: u16, max_rows: usize) -> bool {
-		let segments = self.segments(width_limit.max(1));
+		let width_limit = width_limit.max(1);
+		self.layout_width.set(width_limit);
+		let segments = self.segments(width_limit);
 		let visible = segments.len().min(max_rows);
 		let max_offset = segments.len().saturating_sub(visible);
 		let current = if self.manual_scroll.get() {
@@ -658,17 +789,20 @@ impl EditBuffer {
 
 	/// Returns the clipped visual row count.
 	pub fn visual_height(&self, width: u16, max_rows: usize) -> usize {
-		self.segments(width.max(1)).len().min(max_rows)
+		let width = width.max(1);
+		self.layout_width.set(width);
+		self.segments(width).len().min(max_rows)
 	}
 
 	/// Reports whether the cursor is at the document's visual start.
 	pub fn at_visual_start(&self) -> bool {
-		self.segment_at_cursor(&self.segments(self.layout_width)) == 0 && self.cursor == 0
+		let width = self.layout_width.get();
+		self.segment_at_cursor(&self.segments(width)) == 0 && self.cursor == 0
 	}
 
 	/// Reports whether the cursor is at the document's visual end.
 	pub fn at_visual_end(&self) -> bool {
-		let segments = self.segments(self.layout_width);
+		let segments = self.segments(self.layout_width.get());
 		self.segment_at_cursor(&segments) + 1 == segments.len() && self.cursor == self.text.len()
 	}
 
@@ -734,7 +868,9 @@ impl EditBuffer {
 	}
 
 	fn insert_char(&mut self, ch: char) -> BufferOutcome {
-		let word = ch.is_alphanumeric() || ch == '_';
+		// Group every consecutive non-whitespace typing run into one undo unit,
+		// including punctuation and symbols.
+		let word = !ch.is_whitespace();
 		let selection = self.selection();
 		if selection.is_some() || !word || self.last_action != Action::TypeWord {
 			self.snapshot();
@@ -800,6 +936,10 @@ impl EditBuffer {
 	fn move_right(&mut self) -> BufferOutcome {
 		let Some(grapheme) = self.text[self.cursor..].graphemes().next() else {
 			self.break_sequence();
+			let segments = self.segments(self.layout_width.get());
+			let segment = segments[self.segment_at_cursor(&segments)];
+			let cursor = self.cursor.clamp(segment.start, segment.end);
+			self.desired = Some(cell_width(&self.text[segment.start..cursor]));
 			return BufferOutcome::Ignored;
 		};
 		let at = self
@@ -810,15 +950,15 @@ impl EditBuffer {
 
 	fn move_visual(&mut self, delta: isize) -> BufferOutcome {
 		self.break_sequence();
-		let segments = self.segments(self.layout_width);
+		let segments = self.segments(self.layout_width.get());
 		let current = self.segment_at_cursor(&segments);
 		let target = current.saturating_add_signed(delta).min(segments.len() - 1);
 		if target == current {
 			let edge = self.snap_position(
 				if delta < 0 {
-					segments[current].start
+					segments[current].source_start
 				} else {
-					segments[current].end
+					segments[current].source_end
 				},
 				delta > 0,
 			);
@@ -830,22 +970,20 @@ impl EditBuffer {
 		}
 		let source = segments[current];
 		let destination = segments[target];
-		let column = self
-			.desired
-			.unwrap_or_else(|| cell_width(&self.text[source.start..self.cursor]));
-		let max = if destination.last {
-			cell_width(&self.text[destination.start..destination.end])
-		} else {
-			let text = &self.text[destination.start..destination.end];
-			text
-				.graphemes()
-				.next_back()
-				.map_or(0, |g| cell_width(text).saturating_sub(cell_width(g)))
-		};
+		let source_cursor = self.cursor.clamp(source.start, source.end);
+		let column = cell_width(&self.text[source.start..source_cursor]);
+		let target_max =
+			segment_max_column(&self.text[destination.start..destination.end], destination.last);
+		let preferred = self.desired.unwrap_or(column);
+		let target_column = preferred.min(target_max);
 		let at = destination.start
-			+ byte_at_column(&self.text[destination.start..destination.end], column.min(max));
-		self.cursor = self.snap_position(at, delta > 0);
-		self.desired = Some(column);
+			+ byte_at_column(&self.text[destination.start..destination.end], target_column);
+		let cursor = self.snap_position(at, delta > 0);
+		let landed_column = self.text.get(destination.start..cursor).map(cell_width);
+		self.desired =
+			(target_column != preferred || cursor != at || landed_column != Some(preferred))
+				.then_some(preferred);
+		self.cursor = cursor;
 		BufferOutcome::Changed
 	}
 
@@ -878,6 +1016,9 @@ impl EditBuffer {
 	}
 
 	fn kill_line_start(&mut self) -> BufferOutcome {
+		if let Some(range) = self.selection() {
+			return self.delete_range(range.start, range.end, true);
+		}
 		let (start, _) = self.line_bounds();
 		let start = if start == self.cursor && start > 0 {
 			start - 1
@@ -888,6 +1029,9 @@ impl EditBuffer {
 	}
 
 	fn kill_line_end(&mut self) -> BufferOutcome {
+		if let Some(range) = self.selection() {
+			return self.delete_range(range.start, range.end, true);
+		}
 		let (_, end) = self.line_bounds();
 		let end = if self.cursor < end {
 			end
@@ -900,11 +1044,17 @@ impl EditBuffer {
 	}
 
 	fn kill_word_backward(&mut self) -> BufferOutcome {
+		if let Some(range) = self.selection() {
+			return self.delete_range(range.start, range.end, true);
+		}
 		let start = self.word_left();
 		self.delete_range(start, self.cursor, true)
 	}
 
 	fn kill_word_forward(&mut self) -> BufferOutcome {
+		if let Some(range) = self.selection() {
+			return self.delete_range(range.start, range.end, true);
+		}
 		let end = self.word_right();
 		self.delete_range(self.cursor, end, true)
 	}
@@ -919,6 +1069,16 @@ impl EditBuffer {
 		let (start, end) = self.expand_to_atoms(start, end);
 		self.snapshot();
 		let removed = self.text[start..end].to_owned();
+		let removed_atoms = self
+			.atoms
+			.iter()
+			.filter(|atom| atom.start >= start && atom.end <= end)
+			.map(|atom| Atom {
+				start:   atom.start - start,
+				end:     atom.end - start,
+				payload: atom.payload.clone(),
+			})
+			.collect();
 		let backward = end == self.cursor;
 		self.splice(start..end, "");
 		self.cursor = start;
@@ -926,19 +1086,37 @@ impl EditBuffer {
 		self.desired = None;
 		self.last_yank = None;
 		if kill {
-			self.record_kill(removed, backward);
+			self.record_kill(KillEntry { text: removed, atoms: removed_atoms }, backward);
 		} else {
 			self.last_action = Action::Other;
 		}
 		BufferOutcome::Changed
 	}
 
-	fn record_kill(&mut self, killed: String, backward: bool) {
+	fn record_kill(&mut self, mut killed: KillEntry, backward: bool) {
 		if self.last_action == Action::Kill && !self.kill_ring.is_empty() {
+			let current = &mut self.kill_ring[0];
 			if backward {
-				self.kill_ring[0].insert_str(0, &killed);
+				let shift = killed.text.len();
+				for atom in current.atoms.iter_mut() {
+					atom.start += shift;
+					atom.end += shift;
+				}
+				for atom in &current.atoms {
+					killed.atoms.push_back(atom.clone());
+				}
+				killed.text.push_str(&current.text);
+				*current = killed;
 			} else {
-				self.kill_ring[0].push_str(&killed);
+				let shift = current.text.len();
+				for atom in killed.atoms.iter_mut() {
+					atom.start += shift;
+					atom.end += shift;
+				}
+				current.text.push_str(&killed.text);
+				for atom in &killed.atoms {
+					current.atoms.push_back(atom.clone());
+				}
 			}
 		} else {
 			self.kill_ring.insert(0, killed);
@@ -950,6 +1128,17 @@ impl EditBuffer {
 		self.last_action = Action::Kill;
 	}
 
+	fn insert_kill_entry(&mut self, start: usize, value: &KillEntry) {
+		self.splice(start..start, &value.text);
+		for atom in &value.atoms {
+			self.atoms.push_back(Atom {
+				start:   start + atom.start,
+				end:     start + atom.end,
+				payload: atom.payload.clone(),
+			});
+		}
+	}
+
 	fn yank(&mut self) -> BufferOutcome {
 		let Some(value) = self.kill_ring.first().cloned() else {
 			self.break_sequence();
@@ -958,8 +1147,9 @@ impl EditBuffer {
 		self.snapshot();
 		let range = self.selection().unwrap_or(self.cursor..self.cursor);
 		let start = range.start;
-		self.splice(range, &value);
-		self.cursor = start + value.len();
+		self.splice(range, "");
+		self.insert_kill_entry(start, &value);
+		self.cursor = start + value.text.len();
 		self.anchor = None;
 		self.kill_index = 0;
 		self.last_yank = Some((start, self.cursor));
@@ -972,6 +1162,7 @@ impl EditBuffer {
 		let Some(range) = self.selection() else {
 			return BufferOutcome::Ignored;
 		};
+		self.break_sequence();
 		self.copied = Some(Str::new(&self.text[range]));
 		BufferOutcome::Changed
 	}
@@ -995,8 +1186,9 @@ impl EditBuffer {
 		self.snapshot();
 		self.kill_index = (self.kill_index + 1) % self.kill_ring.len();
 		let value = self.kill_ring[self.kill_index].clone();
-		self.splice(start..end, &value);
-		self.cursor = start + value.len();
+		self.splice(start..end, "");
+		self.insert_kill_entry(start, &value);
+		self.cursor = start + value.text.len();
 		self.last_yank = Some((start, self.cursor));
 		self.last_action = Action::YankPop;
 		BufferOutcome::Changed
@@ -1077,59 +1269,7 @@ impl EditBuffer {
 			let logical_end = self.text[logical_start..]
 				.find('\n')
 				.map_or(self.text.len(), |at| logical_start + at);
-			if logical_start == logical_end {
-				result.push(Segment { start: logical_start, end: logical_end, last: true });
-			} else if self.text[logical_start..logical_end]
-				.bytes()
-				.all(|byte| matches!(byte, b' '..=b'~'))
-			{
-				let limit = usize::from(width_limit.max(1));
-				let mut start = logical_start;
-				while start < logical_end {
-					let hard_end = start.saturating_add(limit).min(logical_end);
-					let end = if hard_end < logical_end {
-						self.text.as_bytes()[start..hard_end]
-							.iter()
-							.rposition(|byte| *byte == b' ')
-							.map_or(hard_end, |offset| start + offset + 1)
-					} else {
-						hard_end
-					};
-					result.push(Segment { start, end, last: end == logical_end });
-					start = end;
-				}
-			} else {
-				let mut start = logical_start;
-				while start < logical_end {
-					let mut cells = 0u16;
-					let mut end = start;
-					let mut whitespace_end = None;
-					for (offset, grapheme) in self.text[start..logical_end].grapheme_indices() {
-						let next = cells.saturating_add(cell_width(grapheme));
-						if next > width_limit && end > start {
-							break;
-						}
-						cells = next;
-						end = start + offset + grapheme.len();
-						if grapheme.chars().all(char::is_whitespace) {
-							whitespace_end = Some(end);
-						}
-						if cells >= width_limit {
-							break;
-						}
-					}
-					if end < logical_end
-						&& let Some(boundary) = whitespace_end.filter(|at| *at > start)
-					{
-						end = boundary;
-					}
-					if end == start {
-						end = start + self.text[start..].graphemes().next().map_or(0, str::len);
-					}
-					result.push(Segment { start, end, last: end == logical_end });
-					start = end;
-				}
-			}
+			wrap_logical_line(&self.text, logical_start, logical_end, width_limit.max(1), &mut result);
 			if logical_end == self.text.len() {
 				break;
 			}
@@ -1142,18 +1282,320 @@ impl EditBuffer {
 		segments
 			.iter()
 			.position(|segment| {
-				self.cursor >= segment.start
-					&& (self.cursor < segment.end || segment.last && self.cursor == segment.end)
+				self.cursor >= segment.source_start
+					&& (self.cursor < segment.source_end
+						|| segment.last && self.cursor == segment.source_end)
 			})
 			.unwrap_or(segments.len() - 1)
 	}
 }
 
+#[derive(Clone, Copy)]
+struct GraphemeCell {
+	start:      usize,
+	end:        usize,
+	width:      u16,
+	whitespace: bool,
+}
+
+fn push_wrapped_segment(
+	text: &str,
+	result: &mut SmallVec<Segment, 16>,
+	source_start: usize,
+	source_end: usize,
+	start: usize,
+	end: usize,
+) {
+	let end = start + text[start..end].trim_end_matches(char::is_whitespace).len();
+	result.push(Segment { source_start, source_end, start, end, last: false });
+}
+
+fn wrap_logical_line(
+	text: &str,
+	logical_start: usize,
+	logical_end: usize,
+	width_limit: u16,
+	result: &mut SmallVec<Segment, 16>,
+) {
+	let first_segment = result.len();
+	if logical_start == logical_end {
+		result.push(Segment {
+			source_start: logical_start,
+			source_end:   logical_end,
+			start:        logical_start,
+			end:          logical_end,
+			last:         true,
+		});
+		return;
+	}
+
+	let glyphs = text[logical_start..logical_end]
+		.grapheme_indices()
+		.map(|(offset, grapheme)| GraphemeCell {
+			start:      logical_start + offset,
+			end:        logical_start + offset + grapheme.len(),
+			width:      cell_width(grapheme),
+			whitespace: grapheme.chars().all(char::is_whitespace),
+		})
+		.collect::<Vec<_>>();
+
+	let mut chunk_source_start = logical_start;
+	let mut chunk_start = logical_start;
+	let mut chunk_end = logical_start;
+	let mut chunk_width = 0_u16;
+	let mut token_start = 0;
+	while token_start < glyphs.len() {
+		let whitespace = glyphs[token_start].whitespace;
+		let mut token_end = token_start + 1;
+		while token_end < glyphs.len() && glyphs[token_end].whitespace == whitespace {
+			token_end += 1;
+		}
+		let token_start_byte = glyphs[token_start].start;
+		let token_end_byte = glyphs[token_end - 1].end;
+		let token_width = glyphs[token_start..token_end]
+			.iter()
+			.fold(0_u16, |width, glyph| width.saturating_add(glyph.width));
+		let token_has_wide = glyphs[token_start..token_end]
+			.iter()
+			.any(|glyph| glyph.width > 1);
+
+		if chunk_end == chunk_start && whitespace {
+			if let Some(previous) = result
+				.get_mut(first_segment..)
+				.and_then(|rows| rows.last_mut())
+			{
+				previous.source_end = token_end_byte;
+			} else {
+				chunk_start = token_end_byte;
+				chunk_end = token_end_byte;
+			}
+			token_start = token_end;
+			continue;
+		}
+
+		if token_width > width_limit {
+			let mut consumed = token_start;
+			if chunk_end > chunk_start && chunk_width < width_limit {
+				let mut available = width_limit - chunk_width;
+				while consumed < token_end && glyphs[consumed].width <= available {
+					available -= glyphs[consumed].width;
+					chunk_width += glyphs[consumed].width;
+					chunk_end = glyphs[consumed].end;
+					consumed += 1;
+				}
+			}
+			if chunk_end > chunk_start {
+				let source_end = if consumed > token_start {
+					chunk_end
+				} else {
+					token_start_byte
+				};
+				push_wrapped_segment(
+					text,
+					result,
+					chunk_source_start,
+					source_end,
+					chunk_start,
+					chunk_end,
+				);
+				chunk_source_start = source_end;
+			}
+
+			while consumed < token_end {
+				let segment_start = glyphs[consumed].start;
+				let source_start = chunk_source_start;
+				let mut segment_end = segment_start;
+				let mut segment_width = 0_u16;
+				while consumed < token_end {
+					let next = segment_width.saturating_add(glyphs[consumed].width);
+					if next > width_limit && segment_end > segment_start {
+						break;
+					}
+					segment_width = next;
+					segment_end = glyphs[consumed].end;
+					consumed += 1;
+					if segment_width >= width_limit {
+						break;
+					}
+				}
+				if consumed < token_end {
+					push_wrapped_segment(
+						text,
+						result,
+						source_start,
+						segment_end,
+						segment_start,
+						segment_end,
+					);
+					chunk_source_start = segment_end;
+				} else {
+					chunk_source_start = source_start;
+					chunk_start = segment_start;
+					chunk_end = segment_end;
+					chunk_width = segment_width;
+				}
+			}
+			token_start = token_end;
+			continue;
+		}
+
+		if chunk_width.saturating_add(token_width) > width_limit {
+			let mut consumed = token_start;
+			if !whitespace && token_has_wide && chunk_end > chunk_start {
+				let mut available = width_limit - chunk_width;
+				while consumed < token_end && glyphs[consumed].width <= available {
+					available -= glyphs[consumed].width;
+					chunk_end = glyphs[consumed].end;
+					consumed += 1;
+				}
+			}
+			let source_end = if consumed > token_start {
+				chunk_end
+			} else {
+				token_start_byte
+			};
+			push_wrapped_segment(text, result, chunk_source_start, source_end, chunk_start, chunk_end);
+			chunk_source_start = source_end;
+			if consumed == token_end {
+				chunk_start = source_end;
+				chunk_end = source_end;
+				chunk_width = 0;
+			} else if whitespace {
+				if let Some(previous) = result.last_mut() {
+					previous.source_end = token_end_byte;
+				}
+				chunk_source_start = token_end_byte;
+				chunk_start = token_end_byte;
+				chunk_end = token_end_byte;
+				chunk_width = 0;
+			} else {
+				chunk_start = glyphs[consumed].start;
+				chunk_end = token_end_byte;
+				chunk_width = glyphs[consumed..token_end]
+					.iter()
+					.fold(0_u16, |width, glyph| width.saturating_add(glyph.width));
+			}
+		} else {
+			if chunk_end == chunk_start {
+				chunk_start = token_start_byte;
+			}
+			chunk_end = token_end_byte;
+			chunk_width = chunk_width.saturating_add(token_width);
+		}
+		token_start = token_end;
+	}
+
+	if chunk_end > chunk_start || result.len() == first_segment {
+		push_wrapped_segment(text, result, chunk_source_start, logical_end, chunk_start, chunk_end);
+	} else if let Some(last) = result.last_mut() {
+		last.source_end = logical_end;
+	}
+	if let Some(last) = result.last_mut() {
+		last.last = true;
+	}
+}
+
+/// Markdown code spans and fences whose contents are opaque to XML completion
+/// and prose assistance.
+pub fn code_ranges(text: &str) -> SmallVec<Range<usize>, 8> {
+	let bytes = text.as_bytes();
+	let mut ranges = SmallVec::new();
+	let mut at = 0;
+	while at < bytes.len() {
+		let marker = bytes[at];
+		if marker != b'`' && marker != b'~' {
+			at += 1;
+			continue;
+		}
+		let mut run = 1;
+		while bytes.get(at + run) == Some(&marker) {
+			run += 1;
+		}
+		let fenced = run >= 3
+			&& text[..at].rsplit_once('\n').map_or_else(
+				|| at <= 3 && text[..at].trim().is_empty(),
+				|(_, prefix)| prefix.len() <= 3 && prefix.trim().is_empty(),
+			);
+		if marker == b'~' && !fenced {
+			at += run;
+			continue;
+		}
+		let mut search = at + run;
+		let mut close = None;
+		while search < bytes.len() {
+			let Some(relative) = bytes[search..].iter().position(|byte| *byte == marker) else {
+				break;
+			};
+			let candidate = search + relative;
+			let mut candidate_run = 1;
+			while bytes.get(candidate + candidate_run) == Some(&marker) {
+				candidate_run += 1;
+			}
+			let closes = if fenced {
+				candidate_run >= run
+					&& text[..candidate].rsplit_once('\n').map_or_else(
+						|| candidate <= 3 && text[..candidate].trim().is_empty(),
+						|(_, prefix)| prefix.len() <= 3 && prefix.trim().is_empty(),
+					)
+			} else {
+				candidate_run == run
+			};
+			if closes {
+				close = Some(candidate + candidate_run);
+				break;
+			}
+			search = candidate + candidate_run;
+		}
+		let end = close.unwrap_or(text.len());
+		ranges.push(at..end);
+		at = end;
+	}
+	ranges
+}
+
+/// XML tags, comments, declarations, and processing instructions hidden from
+/// prose assistance. Apparent markup inside Markdown code is already covered
+/// by [`code_ranges`].
+pub fn xml_ranges(text: &str) -> SmallVec<Range<usize>, 8> {
+	let mut ranges = SmallVec::new();
+	let mut offset = 0;
+	while let Some(relative) = text[offset..].find('<') {
+		let start = offset + relative;
+		let rest = &text[start + 1..];
+		let valid = rest.chars().next().is_some_and(|character| {
+			matches!(character, '/' | '!' | '?') || character.is_ascii_alphabetic()
+		});
+		if !valid {
+			offset = start + 1;
+			continue;
+		}
+		let end = if let Some(comment) = text[start..].strip_prefix("<!--") {
+			comment
+				.find("-->")
+				.map_or(text.len(), |relative| start + 4 + relative + 3)
+		} else {
+			let processing = text[start..].starts_with("<?");
+			tag_end(text, start + 1, processing).map_or(text.len(), |end| end + 1)
+		};
+		ranges.push(start..end);
+		offset = end;
+	}
+	ranges
+}
+
 fn nearest_open_tag(text: &str) -> Option<&str> {
+	let code = code_ranges(text);
 	let mut stack: SmallVec<&str, 16> = SmallVec::new();
 	let mut offset = 0;
 	while let Some(relative) = text[offset..].find('<') {
 		let start = offset + relative;
+		if let Some(range) = code
+			.iter()
+			.find(|range| range.start <= start && start < range.end)
+		{
+			offset = range.end;
+			continue;
+		}
 		let rest = &text[start..];
 		if let Some(body) = rest.strip_prefix("<!--") {
 			let Some(end) = body.find("-->") else {
@@ -1184,10 +1626,13 @@ fn nearest_open_tag(text: &str) -> Option<&str> {
 		if name_end == name_start {
 			continue;
 		}
+		let name = &text[name_start..name_end];
 		if closing {
-			stack.pop();
+			if let Some(index) = stack.iter().rposition(|open| *open == name) {
+				stack.truncate(index);
+			}
 		} else if !text[name_end..end].trim_ascii_end().ends_with('/') {
-			stack.push(&text[name_start..name_end]);
+			stack.push(name);
 		}
 	}
 	stack.pop()
@@ -1214,6 +1659,19 @@ fn tag_end(text: &str, start: usize, processing: bool) -> Option<usize> {
 fn byte_at_column(text: &str, column: u16) -> usize {
 	text.truncate_width(usize::from(column)).len()
 }
+
+fn segment_max_column(text: &str, last: bool) -> u16 {
+	let width = cell_width(text);
+	if last {
+		width
+	} else {
+		text
+			.graphemes()
+			.next_back()
+			.map_or(0, |grapheme| width.saturating_sub(cell_width(grapheme)))
+	}
+}
+
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum WordClass {
 	Word,
@@ -1271,9 +1729,6 @@ fn word_left(text: &str, at: usize) -> usize {
 		return 0;
 	};
 	let class = word_class(grapheme);
-	if class == WordClass::Cjk {
-		return offset;
-	}
 	if class != WordClass::Word {
 		let mut target = offset;
 		while let Some((offset, grapheme)) = graphemes.peek() {
@@ -1316,9 +1771,6 @@ fn word_right(text: &str, at: usize) -> usize {
 	};
 	let class = word_class(first);
 	let mut end = at + first_at + first.len();
-	if class == WordClass::Cjk {
-		return end;
-	}
 	if class != WordClass::Word {
 		while let Some((_, grapheme)) = graphemes.peek() {
 			if word_class(grapheme) != class {
@@ -1356,17 +1808,34 @@ static EMOJI_BUCKETS: LazyLock<EmojiBuckets> = LazyLock::new(|| {
 pub struct EditorOptions {
 	/// `:emoji` shortcode dropdown plus inline `:shortcode:` and
 	/// emoticon (`:-)`) expansion while typing.
-	pub emoji:   bool,
+	pub emoji:       bool,
 	/// Up/Down prompt history with draft restore below the newest entry.
-	pub history: bool,
+	pub history:     bool,
 	/// XML affordances: `</` completes the innermost open tag, and
 	/// renderers should apply structural markup highlighting.
-	pub xml:     bool,
+	pub xml:         bool,
+	/// Rows the completion dropdown shows at once, clamped to `[3, 20]` on
+	/// use.
+	pub picker_rows: usize,
 }
 
 impl Default for EditorOptions {
 	fn default() -> Self {
-		Self { emoji: true, history: true, xml: true }
+		Self { emoji: true, history: true, xml: true, picker_rows: PICKER_ROWS }
+	}
+}
+
+impl EditorOptions {
+	/// The dropdown window after the `[3, 20]` clamp.
+	#[must_use]
+	pub const fn picker_rows(&self) -> usize {
+		if self.picker_rows < PICKER_ROWS_MIN {
+			PICKER_ROWS_MIN
+		} else if self.picker_rows > PICKER_ROWS_MAX {
+			PICKER_ROWS_MAX
+		} else {
+			self.picker_rows
+		}
 	}
 }
 
@@ -1444,7 +1913,7 @@ pub struct Suggestion {
 
 impl Suggestion {
 	/// Builds a row: on acceptance `insert` replaces the completion's
-	/// prefix range verbatim; `label` is shown in the dropdown.
+	/// replacement range verbatim; `label` is shown in the dropdown.
 	pub fn new(insert: impl IntoStr, label: impl IntoStr) -> Self {
 		Self {
 			value:       insert.into_str(),
@@ -1499,7 +1968,7 @@ impl Suggestion {
 
 	/// Marks this row as a complete command: Enter both applies the
 	/// completion and submits the input when only whitespace precedes the
-	/// command token (pi's submitted-slash-command rule).
+	/// command token (submitted-slash-command rule).
 	pub const fn with_submit(mut self) -> Self {
 		self.submits = true;
 		self
@@ -1542,11 +2011,12 @@ pub type SuggestionList = SmallVec<Suggestion, 8>;
 /// Ranked dropdown suggestions returned by [`EditorCompletion::suggest`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Suggestions {
-	/// Byte offset where the completed prefix starts; acceptance replaces
-	/// `prefix_start..cursor` with the chosen suggestion's insert text.
-	pub prefix_start: usize,
+	/// UTF-8 byte range replaced by the selected row. The editor clamps it
+	/// around the request cursor and inside the request text; acceptance
+	/// separately rejects a result whose text or caret snapshot went stale.
+	pub range: ops::Range<usize>,
 	/// Rows in display order; empty closes the dropdown.
-	pub items:        SuggestionList,
+	pub items: SuggestionList,
 }
 
 /// Buffer edit returned by [`EditorCompletion::tab`]: replaces `range`
@@ -1571,9 +2041,9 @@ pub enum TabAction {
 /// Pluggable completion engine registered with [`Editor::set_completion`].
 ///
 /// The editor consults it after every edit, so an implementation chooses
-/// its own trigger convention (`/`, `@`, `#`, or none at all) by
-/// inspecting the text before the cursor. [`SlashCommands`] is the
-/// built-in pi-style implementation.
+/// its own trigger convention (`/`, `@`, `#`, or none at all) by inspecting
+/// the text before the cursor. [`SlashCommands`] is the built-in
+/// implementation.
 pub trait EditorCompletion {
 	/// Dropdown suggestions for the current text and byte cursor, or
 	/// `None` to close the dropdown.
@@ -1587,9 +2057,9 @@ pub trait EditorCompletion {
 	}
 
 	/// Tab pressed. `selected` is the highlighted row while this engine's
-	/// dropdown is open. Defaults to pi's behavior: accept the open row,
-	/// otherwise pass Tab through to the embedding app. The built-in
-	/// emoji dropdown always accepts without consulting the engine.
+	/// dropdown is open. Accepts the open row, otherwise passes Tab through to
+	/// the embedding app. The built-in emoji dropdown always accepts without
+	/// consulting the engine.
 	fn tab(&mut self, text: &str, cursor: usize, selected: Option<&Suggestion>) -> TabAction {
 		let _ = (text, cursor);
 		if selected.is_some() {
@@ -1597,6 +2067,22 @@ pub trait EditorCompletion {
 		} else {
 			TabAction::Pass
 		}
+	}
+
+	/// Whether the editor may consult its built-in emoji provider after this
+	/// engine declines. Slash-command argument contexts use this to keep
+	/// `#action`/`:emoji` text literal while still allowing their own
+	/// argument, GitHub-ref, URL, and file providers.
+	fn allow_builtin_emoji(&mut self, text: &str, cursor: usize) -> bool {
+		let _ = (text, cursor);
+		true
+	}
+
+	/// One of this engine's rows was accepted: `replaced` is the buffer text
+	/// the row's value overwrote (the typed trigger and query). Action rows
+	/// record their side effect here for the host to apply.
+	fn accepted(&mut self, replaced: &str, suggestion: &Suggestion) {
+		let _ = (replaced, suggestion);
 	}
 }
 
@@ -1616,29 +2102,56 @@ pub enum PickerRow<'a> {
 
 /// Active completion dropdown state.
 pub struct Picker {
-	prefix_start: usize,
-	suggestions:  SuggestionList,
-	selected:     usize,
+	range:             ops::Range<usize>,
+	suggestions:       SuggestionList,
+	selected:          usize,
+	/// Exact request snapshot. Async producers may finish after another edit;
+	/// acceptance is allowed only while generation, text, and caret still match.
+	source_generation: u64,
+	source_text:       Str,
+	source_cursor:     usize,
+	/// Bytes between an assistance replacement and the request caret. These
+	/// bytes remain in the buffer and the caret is restored after them.
+	cursor_offset:     usize,
 	/// Produced by the registered engine (vs the built-in emoji dropdown).
-	provided:     bool,
+	provided:          bool,
+	/// Window height, from [`EditorOptions::picker_rows`] at open time.
+	rows:              usize,
 }
 
 impl Picker {
-	/// Returns the centered ten-row suggestion window and its first index.
+	/// The dropdown window height this picker opened with.
+	#[must_use]
+	pub const fn rows(&self) -> usize {
+		self.rows
+	}
+
+	/// Returns the centered suggestion window (`rows` tall) and its first
+	/// index.
 	pub fn visible_suggestions(&self) -> (usize, &[Suggestion]) {
-		let visible = self.suggestions.len().min(PICKER_ROWS);
+		let visible = self.suggestions.len().min(self.rows);
 		let max_start = self.suggestions.len().saturating_sub(visible);
-		let start = self.selected.saturating_sub(PICKER_ROWS / 2).min(max_start);
+		let start = self.selected.saturating_sub(self.rows / 2).min(max_start);
 		(start, &self.suggestions[start..start + visible])
 	}
 
-	/// Returns visible rows including category headers.
+	/// Returns visible rows including category headers. Headers only
+	/// separate mixed categories: a dropdown whose rows all share one
+	/// category is a plain list without a heading.
 	pub fn visible_rows(&self) -> SmallVec<PickerRow<'_>, 8> {
 		let (start, suggestions) = self.visible_suggestions();
 		let mut rows = SmallVec::new();
+		let first = self
+			.suggestions
+			.first()
+			.and_then(|suggestion| suggestion.category.as_ref());
+		let uniform = self
+			.suggestions
+			.iter()
+			.all(|suggestion| suggestion.category.as_ref() == first);
 		let mut category: Option<&Str> = None;
 		for (offset, suggestion) in suggestions.iter().enumerate() {
-			if suggestion.category.as_ref() != category {
+			if !uniform && suggestion.category.as_ref() != category {
 				category = suggestion.category.as_ref();
 				if let Some(header) = category {
 					rows.push(PickerRow::Header(header));
@@ -1676,22 +2189,31 @@ pub enum EditOutcome {
 	Ignored,
 }
 
-/// Editable multiline input with Pi-compatible completion and editing.
+/// Editable multiline input with completion and editing.
 ///
 /// Wraps an [`EditBuffer`] with a pluggable [`EditorCompletion`] dropdown,
 /// inline ghost hints, built-in emoji expansion, and prompt history —
 /// each governed by [`EditorOptions`].
 pub struct Editor {
-	buffer:            EditBuffer,
-	picker:            Option<Picker>,
-	completion:        Option<Box<dyn EditorCompletion>>,
-	options:           EditorOptions,
-	hint:              Option<Str>,
-	history:           Vec<Str>,
-	history_index:     Option<usize>,
-	history_draft:     Str,
-	history_query:     Option<Str>,
-	last_layout_width: Cell<u16>,
+	buffer:                EditBuffer,
+	picker:                Option<Picker>,
+	completion:            Option<Box<dyn EditorCompletion>>,
+	/// Monotonic identity of the current completion query. Text and caret
+	/// checks reject ordinary drift; this also fences ABA snapshots.
+	completion_generation: u64,
+	options:               EditorOptions,
+	hint:                  Option<Str>,
+	history:               Vec<Str>,
+	history_index:         Option<usize>,
+	history_draft:         Str,
+	history_query:         Option<Str>,
+	/// Volatile speech/IME preview range and exact text in the visible buffer.
+	volatile:              Option<(Range<usize>, Str)>,
+	/// Whether a volatile preview exposes its insertion caret. Native IMEs
+	/// use `None` to hide it while selecting a marked-text candidate.
+	volatile_cursor:       bool,
+	last_layout_width:     Cell<u16>,
+	last_page_rows:        Cell<usize>,
 }
 
 impl Editor {
@@ -1703,13 +2225,17 @@ impl Editor {
 			buffer,
 			picker: None,
 			completion: None,
+			completion_generation: 0,
 			options,
 			hint: None,
 			history: Vec::new(),
 			history_index: None,
 			history_draft: Default::default(),
 			history_query: None,
+			volatile: None,
+			volatile_cursor: true,
 			last_layout_width: Cell::new(80),
+			last_page_rows: Cell::new(DEFAULT_PAGE_ROWS),
 		}
 	}
 
@@ -1720,10 +2246,77 @@ impl Editor {
 	}
 
 	/// Replaces the editor text without adding an undo entry, preserving
-	/// completion and history configuration.
+	/// completion and history configuration. Leaves history browsing.
 	pub fn set_text(&mut self, text: &str) {
+		self.history_index = None;
+		self.history_query = None;
+		self.volatile = None;
+		self.volatile_cursor = true;
 		self.buffer.replace_external(text, false);
 		self.refresh();
+	}
+
+	/// Records a submitted prompt as the newest history entry: blank text is
+	/// ignored, an earlier copy is dropped, the list is capped, and browsing
+	/// state resets so the
+	/// next Up starts from the newest entry. The host calls this after it
+	/// decides the submission really happened.
+	pub fn add_to_history(&mut self, text: &str) {
+		self.history_index = None;
+		self.history_query = None;
+		if !self.options.history {
+			return;
+		}
+		let trimmed = text.trim();
+		if trimmed.is_empty() {
+			return;
+		}
+		self.history.retain(|entry| entry.as_str() != trimmed);
+		self.history.insert(0, Str::new(trimmed));
+		self.history.truncate(HISTORY_CAPACITY);
+	}
+
+	/// Replaces the history list with `prompts`, newest first. A resumed
+	/// session seeds Up/Down from stored prompts. Duplicates keep their first
+	/// (newest) position.
+	pub fn seed_history(&mut self, prompts: impl IntoIterator<Item = Str>) {
+		self.history_index = None;
+		self.history_query = None;
+		self.history.clear();
+		if !self.options.history {
+			return;
+		}
+		for prompt in prompts {
+			let trimmed = prompt.trim();
+			if trimmed.is_empty() || self.history.iter().any(|entry| entry.as_str() == trimmed) {
+				continue;
+			}
+			self.history.push(if trimmed.len() == prompt.len() {
+				prompt
+			} else {
+				Str::new(trimmed)
+			});
+			if self.history.len() == HISTORY_CAPACITY {
+				break;
+			}
+		}
+	}
+
+	/// Whether `key` would step prompt history instead of moving the caret:
+	/// Up on an empty draft or while browsing
+	/// from the first visual row, Down while browsing from the last visual
+	/// row. Hosts that borrow Up/Down at the draft's edges (transcript
+	/// scrolling) yield to the editor when this holds.
+	#[must_use]
+	pub fn history_navigates(&self, key: Key) -> bool {
+		if !self.options.history || self.picker.is_some() {
+			return false;
+		}
+		match key {
+			Key::Up => self.history_gate_up() && !self.history.is_empty(),
+			Key::Down => self.history_index.is_some() && self.buffer.at_visual_end(),
+			_ => false,
+		}
 	}
 
 	/// Replaces the editor text without an undo entry, optionally parking the
@@ -1745,9 +2338,33 @@ impl Editor {
 		self.options
 	}
 
+	/// Replaces the feature switches at runtime: an open dropdown re-queries
+	/// so its window and built-in emoji source follow the new switches.
+	pub fn set_options(&mut self, options: EditorOptions) {
+		self.options = options;
+		self.buffer.set_xml(options.xml);
+		if !options.history {
+			self.history_index = None;
+			self.history_query = None;
+		}
+		self.refresh();
+	}
+
 	/// Returns the visible text, with paste markers unexpanded.
 	pub fn text(&self) -> &str {
 		self.buffer.text()
+	}
+
+	/// Returns the visible text of the line containing the cursor, without
+	/// its trailing newline, for host copy-line actions.
+	pub fn current_line(&self) -> &str {
+		let text = self.buffer.text();
+		let cursor = self.buffer.cursor().min(text.len());
+		let start = text[..cursor].rfind('\n').map_or(0, |index| index + 1);
+		let end = text[cursor..]
+			.find('\n')
+			.map_or(text.len(), |index| cursor + index);
+		&text[start..end]
 	}
 
 	/// Returns the open completion dropdown, if any.
@@ -1761,7 +2378,7 @@ impl Editor {
 			self
 				.picker
 				.as_ref()
-				.map_or(0, |picker| picker.visible_rows().len().min(PICKER_ROWS)),
+				.map_or(0, |picker| picker.visible_rows().len().min(picker.rows)),
 		)
 		.unwrap_or(u16::MAX)
 	}
@@ -1786,6 +2403,7 @@ impl Editor {
 	/// Returns up to `max_rows` cursor-centered visible input rows at `width`.
 	pub fn view_rows(&self, width: u16, max_rows: usize) -> SmallVec<VisualRow<'_>, 8> {
 		self.last_layout_width.set(width.max(1));
+		self.last_page_rows.set(max_rows.max(1));
 		self.buffer.rows(width, max_rows)
 	}
 
@@ -1797,6 +2415,7 @@ impl Editor {
 		max_rows: usize,
 	) -> (SmallVec<VisualRow<'_>, 8>, (usize, usize, usize)) {
 		self.last_layout_width.set(width.max(1));
+		self.last_page_rows.set(max_rows.max(1));
 		self.buffer.rows_with_metrics(width, max_rows)
 	}
 
@@ -1840,6 +2459,8 @@ impl Editor {
 	///
 	/// Returns whether the clamped viewport offset changed.
 	pub fn scroll_rows(&self, delta: i32, width: u16, max_rows: usize) -> bool {
+		self.last_layout_width.set(width.max(1));
+		self.last_page_rows.set(max_rows.max(1));
 		self.buffer.scroll_rows(delta, width, max_rows)
 	}
 
@@ -1865,6 +2486,7 @@ impl Editor {
 				Key::PageDown => self.select_page(true),
 				Key::Enter => self.enter_picker(),
 				Key::Tab => self.tab_complete(),
+				Key::Right if self.cursor_at_logical_line_end() => self.tab_complete(),
 				_ => self.handle_without_picker(key),
 			};
 		}
@@ -1885,13 +2507,16 @@ impl Editor {
 				self.history_newer()
 			},
 			_ => {
-				if matches!(key, Key::Char(_) | Key::Space | Key::Backspace | Key::Delete) {
+				// Any edit leaves history browsing; caret motion inside a recalled
+				// entry keeps it and never pops the dropdown.
+				if !is_caret_motion(key) {
 					self.history_index = None;
 					self.history_query = None;
 				}
-				let outcome = self
-					.buffer
-					.handle(key, self.last_layout_width.get(), MAX_INPUT_ROWS);
+				let outcome =
+					self
+						.buffer
+						.handle(key, self.last_layout_width.get(), self.last_page_rows.get());
 				if matches!(outcome, BufferOutcome::Changed) {
 					if self.options.emoji {
 						match key {
@@ -1901,7 +2526,11 @@ impl Editor {
 							_ => {},
 						}
 					}
-					self.refresh();
+					if self.history_index.is_some() {
+						self.refresh_recalled();
+					} else {
+						self.refresh();
+					}
 					EditOutcome::Changed
 				} else {
 					EditOutcome::Ignored
@@ -1910,7 +2539,25 @@ impl Editor {
 		}
 	}
 
+	fn cursor_at_logical_line_end(&self) -> bool {
+		self
+			.buffer
+			.text()
+			.as_bytes()
+			.get(self.buffer.cursor())
+			.is_none_or(|byte| *byte == b'\n')
+	}
+
 	fn tab_complete(&mut self) -> EditOutcome {
+		// Fence a delayed provider result before asking that provider to act
+		// on its selected row. `accept_picker` closes it without an edit.
+		if self
+			.picker
+			.as_ref()
+			.is_some_and(|picker| !self.picker_is_current(picker))
+		{
+			return self.accept_picker();
+		}
 		// the built-in emoji dropdown accepts without consulting the engine
 		if self.picker.as_ref().is_some_and(|picker| !picker.provided) {
 			return self.accept_picker();
@@ -1958,8 +2605,17 @@ impl Editor {
 		self.history_query = None;
 		self.history_index = Some(next);
 		self.buffer.replace_external(&self.history[next], true);
-		self.refresh();
+		self.refresh_recalled();
 		EditOutcome::Changed
+	}
+
+	/// Re-queries completion after a history step but keeps the dropdown
+	/// closed. A recalled `/command` is a prompt to resend, and Up/Down keep
+	/// stepping history
+	/// instead of walking a popup that popped over it.
+	fn refresh_recalled(&mut self) {
+		self.refresh();
+		self.picker = None;
 	}
 
 	fn history_search(&mut self) -> EditOutcome {
@@ -1990,7 +2646,7 @@ impl Editor {
 		};
 		self.history_index = Some(index);
 		self.buffer.replace_external(&self.history[index], false);
-		self.refresh();
+		self.refresh_recalled();
 		EditOutcome::Changed
 	}
 
@@ -2013,8 +2669,110 @@ impl Editor {
 			self.history_query = None;
 			self.buffer.replace_external(&self.history_draft, false);
 		}
-		self.refresh();
+		self.refresh_recalled();
 		EditOutcome::Changed
+	}
+
+	/// Applies a programmatic replacement (word completion, platform
+	/// autocorrect) as one undo unit, leaving the cursor after `insert`,
+	/// and re-queries completion state.
+	pub fn apply_edit(&mut self, range: Range<usize>, insert: &str) {
+		self.history_index = None;
+		self.history_query = None;
+		self.buffer.replace_range(range, insert);
+		self.refresh();
+	}
+
+	/// Shows or replaces one volatile speech-recognition preview.
+	///
+	/// Replacements do not enter undo history. The caret stays synchronized
+	/// with its logical position around the span as its byte length changes.
+	pub fn set_volatile_text(&mut self, text: &str) {
+		self.set_volatile_text_selection(text, Some(text.len()..text.len()));
+	}
+
+	/// Shows or replaces one volatile native-IME preedit and applies the
+	/// byte-indexed selection winit reports inside that preedit. `None`
+	/// hides the insertion caret while the platform candidate picker owns it.
+	pub fn set_volatile_text_selection(&mut self, text: &str, selection: Option<Range<usize>>) {
+		self.history_index = None;
+		self.history_query = None;
+		let range = self
+			.volatile
+			.take()
+			.filter(|(range, expected)| {
+				self.buffer.text().get(range.clone()) == Some(expected.as_str())
+			})
+			.map_or_else(|| self.buffer.cursor()..self.buffer.cursor(), |(range, _)| range);
+		let range = self.buffer.replace_transient_range(range, text);
+		self.volatile_cursor = selection.is_some();
+		if let Some(selection) = selection {
+			let (start, end) = {
+				// `replace_transient_range` applies the same NFC/control
+				// sanitation as ordinary input. Clamp the platform's offsets
+				// against those retained bytes so decomposed marked text
+				// cannot place the caret beyond the normalized span.
+				let retained = &self.buffer.text()[range.clone()];
+				let boundary = |mut at: usize| {
+					at = at.min(retained.len());
+					while !retained.is_char_boundary(at) {
+						at -= 1;
+					}
+					at
+				};
+				let start = boundary(selection.start);
+				let end = boundary(selection.end);
+				if start <= end {
+					(start, end)
+				} else {
+					(end, start)
+				}
+			};
+			self.buffer.cursor = range.start + end;
+			self.buffer.anchor = (start != end).then_some(range.start + start);
+		}
+		self.volatile =
+			(!range.is_empty()).then(|| (range.clone(), Str::new(&self.buffer.text()[range])));
+		self.refresh();
+	}
+
+	/// Whether the retained editor should expose its hardware/native caret.
+	#[must_use]
+	pub const fn caret_visible(&self) -> bool {
+		self.volatile_cursor
+	}
+
+	/// Whether a volatile speech/IME span is currently retained.
+	#[must_use]
+	pub const fn volatile_active(&self) -> bool {
+		self.volatile.is_some()
+	}
+
+	/// Discards the active volatile speech-recognition preview.
+	pub fn clear_volatile_text(&mut self) {
+		self.volatile_cursor = true;
+		let Some((range, expected)) = self.volatile.take() else {
+			return;
+		};
+		if self.buffer.text().get(range.clone()) == Some(expected.as_str()) {
+			self.buffer.replace_transient_range(range, "");
+			self.refresh();
+		}
+	}
+
+	/// Replaces the volatile preview with one undoable finalized segment.
+	pub fn commit_volatile_text(&mut self, text: &str) {
+		self.history_index = None;
+		self.history_query = None;
+		self.volatile_cursor = true;
+		if let Some((range, expected)) = self.volatile.take()
+			&& self.buffer.text().get(range.clone()) == Some(expected.as_str())
+		{
+			self.buffer.commit_transient_range(range, text);
+			self.refresh();
+		} else if matches!(self.buffer.insert_text(text), BufferOutcome::Changed) {
+			self.refresh();
+		}
 	}
 
 	/// Inserts sanitized text at the cursor (pastes, programmatic prefill).
@@ -2064,30 +2822,45 @@ impl Editor {
 		self.buffer.atom_ranges()
 	}
 
-	/// Opens a replacement picker for `range`; acceptance replaces that range.
+	/// Opens a replacement picker for `range` at or before the cursor;
+	/// acceptance replaces that range and preserves the cursor's trailing
+	/// offset (for example, after a word-boundary space).
 	pub fn show_replacements(
 		&mut self,
 		range: Range<usize>,
 		items: impl IntoIterator<Item = Str>,
 	) -> bool {
+		let text = self.buffer.text();
+		let cursor = self.buffer.cursor();
 		if range.start >= range.end
-			|| range.end > self.buffer.text().len()
-			|| range.end != self.buffer.cursor()
-			|| !self.buffer.text().is_char_boundary(range.start)
-			|| !self.buffer.text().is_char_boundary(range.end)
+			|| range.end > text.len()
+			|| cursor < range.start
+			|| !text.is_char_boundary(range.start)
+			|| !text.is_char_boundary(range.end)
 		{
 			return false;
 		}
+		let cursor_offset = cursor.saturating_sub(range.end);
+		let rows = self.options.picker_rows();
 		let suggestions: SuggestionList = items
 			.into_iter()
-			.take(PICKER_ROWS)
+			.take(rows)
 			.map(|item| Suggestion::new(item.clone(), item))
 			.collect();
 		if suggestions.is_empty() {
 			return false;
 		}
-		self.picker =
-			Some(Picker { prefix_start: range.start, suggestions, selected: 0, provided: false });
+		self.picker = Some(Picker {
+			range,
+			suggestions,
+			selected: 0,
+			source_generation: self.completion_generation,
+			source_text: Str::new(self.buffer.text()),
+			source_cursor: self.buffer.cursor(),
+			cursor_offset,
+			provided: false,
+			rows,
+		});
 		true
 	}
 
@@ -2095,19 +2868,16 @@ impl Editor {
 		if self.buffer.text().trim().is_empty() {
 			return EditOutcome::Ignored;
 		}
-		if self.options.history {
-			let submitted = self.buffer.expanded_text();
-			self
-				.history
-				.retain(|entry| entry.as_str() != submitted.as_str());
-			self.history.insert(0, submitted.into_str());
-			self.history.truncate(HISTORY_CAPACITY);
-		}
-		self.history_index = None;
-		self.history_query = None;
+		let submitted = self.buffer.clear_after_submit();
+		let submitted = if self.options.emoji {
+			expand_emoticons(submitted)
+		} else {
+			submitted
+		};
+		self.add_to_history(&submitted);
 		self.picker = None;
 		self.hint = None;
-		EditOutcome::Submitted(self.buffer.clear_after_submit())
+		EditOutcome::Submitted(submitted)
 	}
 
 	const fn select_previous(&mut self) -> EditOutcome {
@@ -2131,21 +2901,47 @@ impl Editor {
 		picker.selected = if down {
 			picker
 				.selected
-				.saturating_add(PICKER_ROWS)
+				.saturating_add(picker.rows)
 				.min(picker.len() - 1)
 		} else {
-			picker.selected.saturating_sub(PICKER_ROWS)
+			picker.selected.saturating_sub(picker.rows)
 		};
 		EditOutcome::Changed
 	}
 
+	/// Moves keyboard selection one row without wrapping, as a pointer wheel
+	/// over the completion list does.
+	pub fn wheel_picker(&mut self, down: bool) -> EditOutcome {
+		let Some(picker) = self.picker.as_mut() else {
+			return EditOutcome::Ignored;
+		};
+		let next = if down {
+			picker.selected.saturating_add(1).min(picker.len() - 1)
+		} else {
+			picker.selected.saturating_sub(1)
+		};
+		if next == picker.selected {
+			return EditOutcome::Ignored;
+		}
+		picker.selected = next;
+		EditOutcome::Changed
+	}
+
+	/// Promotes one pointer row to keyboard selection and accepts it.
+	pub fn click_picker(&mut self, index: usize) -> EditOutcome {
+		let Some(picker) = self.picker.as_mut() else {
+			return EditOutcome::Ignored;
+		};
+		if index >= picker.len() {
+			return EditOutcome::Ignored;
+		}
+		picker.selected = index;
+		self.accept_picker()
+	}
+
 	fn accept_picker(&mut self) -> EditOutcome {
 		let picker = self.picker.take().expect("picker presence was checked");
-		let suggestion = &picker.suggestions[picker.selected];
-		// Accepting an already-typed value is a no-op; re-querying would
-		// reopen the identical dropdown and trap Enter forever. Close the
-		// dropdown and let the next keypress act on the finished text.
-		if self.buffer.text()[picker.prefix_start..self.buffer.cursor()] == *suggestion.value {
+		if !self.picker_is_current(&picker) {
 			let cursor = self.buffer.cursor();
 			self.hint = self
 				.completion
@@ -2153,16 +2949,80 @@ impl Editor {
 				.and_then(|completion| completion.hint(self.buffer.text(), cursor));
 			return EditOutcome::Changed;
 		}
-		self
-			.buffer
-			.replace_range(picker.prefix_start..self.buffer.cursor(), &suggestion.value);
+		let suggestion = &picker.suggestions[picker.selected];
+		// Accepting an already-typed value is a no-op; re-querying would
+		// reopen the identical dropdown and trap Enter forever. Close the
+		// dropdown and let the next keypress act on the finished text.
+		if self.buffer.text()[picker.range.clone()] == *suggestion.value {
+			let cursor = self.buffer.cursor();
+			self.hint = self
+				.completion
+				.as_mut()
+				.and_then(|completion| completion.hint(self.buffer.text(), cursor));
+			return EditOutcome::Changed;
+		}
+		self.apply_suggestion(&picker, suggestion);
 		self.refresh();
 		EditOutcome::Changed
 	}
 
-	/// pi's Enter rule while the dropdown is open: a command row accepted
-	/// with nothing before its token completes the command and submits in
-	/// one keypress; every other row is accepted in place.
+	fn picker_is_current(&self, picker: &Picker) -> bool {
+		picker.source_generation == self.completion_generation
+			&& picker.source_text == self.buffer.text()
+			&& picker.source_cursor == self.buffer.cursor()
+			&& self
+				.buffer
+				.atom_ranges()
+				.iter()
+				.all(|&(start, end)| picker.range.end <= start || picker.range.start >= end)
+	}
+
+	/// Replaces the picker's range with the row's value and, for
+	/// engine-provided rows, reports the acceptance to the engine.
+	fn apply_suggestion(&mut self, picker: &Picker, suggestion: &Suggestion) {
+		let Some(completion) = self.completion.as_mut().filter(|_| picker.provided) else {
+			self
+				.buffer
+				.replace_range(picker.range.clone(), &suggestion.value);
+			self.buffer.restore_cursor_offset(picker.cursor_offset);
+			return;
+		};
+		let replaced = Str::new(&self.buffer.text()[picker.range.clone()]);
+		self
+			.buffer
+			.replace_range(picker.range.clone(), &suggestion.value);
+		completion.accepted(&replaced, suggestion);
+	}
+
+	/// Moves the cursor to the start or end of the whole message.
+	pub fn move_to_message_edge(&mut self, end: bool) -> EditOutcome {
+		match self.buffer.move_to_message_edge(end) {
+			BufferOutcome::Changed => {
+				self.refresh();
+				EditOutcome::Changed
+			},
+			BufferOutcome::Ignored => EditOutcome::Ignored,
+		}
+	}
+
+	/// Undoes the last meaningful edit, skipping snapshots that only carry
+	/// the just-removed `transient` trigger text (see
+	/// [`EditBuffer::undo_past_transient`]).
+	pub fn undo_past_transient(&mut self, transient: &str) -> EditOutcome {
+		self.history_index = None;
+		self.history_query = None;
+		match self.buffer.undo_past_transient(transient) {
+			BufferOutcome::Changed => {
+				self.refresh();
+				EditOutcome::Changed
+			},
+			BufferOutcome::Ignored => EditOutcome::Ignored,
+		}
+	}
+
+	/// When the dropdown is open, a command row with nothing before its token
+	/// completes the command and submits in one keypress; every other row is
+	/// accepted in place.
 	fn enter_picker(&mut self) -> EditOutcome {
 		if self.picker_enter_submits() {
 			self.accept_for_submit();
@@ -2176,42 +3036,76 @@ impl Editor {
 	/// whitespace precedes its token.
 	pub fn picker_enter_submits(&self) -> bool {
 		self.picker.as_ref().is_some_and(|picker| {
-			picker.suggestions[picker.selected].submits
-				&& self.buffer.text()[..picker.prefix_start].trim().is_empty()
+			self.picker_is_current(picker)
+				&& picker.suggestions[picker.selected].submits
+				&& self.buffer.text()[..picker.range.start].trim().is_empty()
 		})
 	}
 
 	/// Applies the selected dropdown row and closes the dropdown without
 	/// re-querying, leaving the completed text in place for the host's
-	/// submit path (pi: Enter on a submitted slash command applies, then
-	/// submits).
+	/// submit path. Enter on a submitted slash command applies, then submits.
 	pub fn accept_for_submit(&mut self) {
 		let Some(picker) = self.picker.take() else {
 			return;
 		};
+		if !self.picker_is_current(&picker) {
+			let cursor = self.buffer.cursor();
+			self.hint = self
+				.completion
+				.as_mut()
+				.and_then(|completion| completion.hint(self.buffer.text(), cursor));
+			return;
+		}
 		let suggestion = &picker.suggestions[picker.selected];
-		self
-			.buffer
-			.replace_range(picker.prefix_start..self.buffer.cursor(), &suggestion.value);
+		self.apply_suggestion(&picker, suggestion);
 		self.hint = None;
 	}
 
 	/// Re-queries the completion engine (dropdown and ghost hint), falling
 	/// back to the built-in emoji dropdown when the engine declines.
 	fn refresh(&mut self) {
+		self.completion_generation = self.completion_generation.wrapping_add(1);
+		let generation = self.completion_generation;
 		let cursor = self.buffer.cursor();
 		let text = self.buffer.text();
-		let mut picker = self.completion.as_mut().and_then(|completion| {
-			let suggestions = completion.suggest(text, cursor)?;
-			(!suggestions.items.is_empty()).then_some(Picker {
-				prefix_start: suggestions.prefix_start,
-				suggestions:  suggestions.items,
-				selected:     0,
-				provided:     true,
+		let atoms = self.buffer.atom_ranges();
+		// A dropdown replaces its range on accept; a range that touches an
+		// atomic marker (a `<icon> #N` chip whose text merely looks like a
+		// trigger) would tear the unit, so no engine may open over one.
+		let clear_of_atoms = |range: &ops::Range<usize>| {
+			atoms
+				.iter()
+				.all(|&(start, end)| range.end <= start || range.start >= end)
+		};
+		let rows = self.options.picker_rows();
+		let mut picker = self
+			.completion
+			.as_mut()
+			.and_then(|completion| {
+				let suggestions = completion.suggest(text, cursor)?;
+				(!suggestions.items.is_empty()).then(|| Picker {
+					range: clamp_completion_range(text, cursor, suggestions.range),
+					suggestions: suggestions.items,
+					selected: 0,
+					source_generation: generation,
+					source_text: Str::new(text),
+					source_cursor: cursor,
+					cursor_offset: 0,
+					provided: true,
+					rows,
+				})
 			})
-		});
-		if picker.is_none() && self.options.emoji {
-			picker = emoji_picker(&text[..cursor]);
+			.filter(|picker| clear_of_atoms(&picker.range));
+		if picker.is_none()
+			&& self.options.emoji
+			&& self
+				.completion
+				.as_mut()
+				.is_none_or(|completion| completion.allow_builtin_emoji(text, cursor))
+		{
+			picker = emoji_picker(text, cursor, generation, rows)
+				.filter(|picker| clear_of_atoms(&picker.range));
 		}
 		self.hint = self
 			.completion
@@ -2279,6 +3173,27 @@ impl Editor {
 			break;
 		}
 	}
+}
+
+/// Clamps an engine-supplied replacement range around its request cursor:
+/// both ends are pulled onto char boundaries inside the request text.
+/// Picker snapshot validation separately rejects asynchronous drift.
+fn clamp_completion_range(text: &str, cursor: usize, range: Range<usize>) -> Range<usize> {
+	let mut start = range.start.min(cursor);
+	while !text.is_char_boundary(start) {
+		start -= 1;
+	}
+	let mut end = range.end.max(cursor).min(text.len());
+	while !text.is_char_boundary(end) {
+		end += 1;
+	}
+	start..end
+}
+
+fn completion_token_end(text: &str, cursor: usize) -> usize {
+	text[cursor..]
+		.find(char::is_whitespace)
+		.map_or(text.len(), |offset| cursor + offset)
 }
 
 /// One slash-command palette entry completed by [`SlashCommands`].
@@ -2351,7 +3266,7 @@ impl Command {
 
 	/// Argument candidates offered once the command name is complete:
 	/// `(name, description, usage)`, with `""` usage meaning none. Usage
-	/// text ghosts after the argument pi-style (`<path>`, `<a> <b>`).
+	/// text ghosts after the argument (`<path>`, `<a> <b>`).
 	pub fn with_args(mut self, args: &[(&str, &str, &str)]) -> Self {
 		self.args = args
 			.iter()
@@ -2364,7 +3279,7 @@ impl Command {
 		self
 	}
 
-	/// Usage hint shown as dim ghost text after the cursor, pi-style
+	/// Usage hint shown as dim ghost text after the cursor
 	/// (e.g. `<name> [--scope project|user]`).
 	pub fn with_hint(mut self, hint: &str) -> Self {
 		self.hint = Some(Str::new(hint));
@@ -2387,11 +3302,10 @@ impl Command {
 	}
 }
 
-/// Pi-compatible slash-command completion over a fixed [`Command`] palette.
+/// Slash-command completion over a fixed [`Command`] palette.
 ///
 /// `/` at a line start opens ranked name completion, the first argument
-/// completes against candidates, and usage text ghosts after the cursor
-/// (pi `buildSubcommandInlineHint`).
+/// completes against candidates, and usage text ghosts after the cursor.
 pub struct SlashCommands {
 	commands: Box<[Command]>,
 	usage:    Option<Arc<dyn Fn(&str) -> u64 + Send + Sync>>,
@@ -2416,7 +3330,12 @@ impl SlashCommands {
 			.find(|command| command.name == name || command.aliases.iter().any(|a| a == name))
 	}
 
-	fn name_suggestions(&self, line_start: usize, line: &str) -> Option<Suggestions> {
+	fn name_suggestions(
+		&self,
+		line_start: usize,
+		line: &str,
+		range_end: usize,
+	) -> Option<Suggestions> {
 		const SKILL_NAMESPACE: &str = "skill:";
 		let trimmed = line.trim_start_matches([' ', '\t']);
 		let body = trimmed.strip_prefix('/')?;
@@ -2425,7 +3344,25 @@ impl SlashCommands {
 		}
 		let prefix_start = line_start + line.len() - trimmed.len();
 		let query = body.to_ascii_lowercase();
-		let expand_skills = query.starts_with(SKILL_NAMESPACE);
+		let in_skill_namespace = query.starts_with(SKILL_NAMESPACE);
+		let approaches_skill_namespace = SKILL_NAMESPACE.starts_with(&query);
+		let strongest_command_tier = if !approaches_skill_namespace {
+			{
+				self
+					.commands
+					.iter()
+					.filter(|command| !command.name.starts_with(SKILL_NAMESPACE))
+					.flat_map(|command| {
+						std::iter::once(command.name.as_str())
+							.chain(command.aliases.iter().map(Str::as_str))
+					})
+					.map(|name| breakout_match_tier(&query, name))
+					.max()
+					.unwrap_or(0)
+			}
+		} else {
+			0
+		};
 		let skill_count = self
 			.commands
 			.iter()
@@ -2438,11 +3375,19 @@ impl SlashCommands {
 			.and_then(|command| command.icon);
 		let mut ranked: SmallVec<(u16, u64, Suggestion), 8> = SmallVec::new();
 		for command in &self.commands {
-			if !expand_skills && command.name.starts_with(SKILL_NAMESPACE) {
+			let skill_name = command.name.strip_prefix(SKILL_NAMESPACE);
+			if let Some(ref bare_name) = skill_name
+				&& !in_skill_namespace
+				&& (approaches_skill_namespace
+					|| breakout_match_tier(&query, bare_name) <= strongest_command_tier)
+			{
 				continue;
 			}
 			let mut selected_name = &command.name;
 			let mut score = command_score(&query, &command.name);
+			if let Some(bare_name) = skill_name {
+				score = score.max(command_score(&query, &bare_name));
+			}
 			for alias in &command.aliases {
 				let alias_score = command_score(&query, alias);
 				if alias_score > score {
@@ -2474,7 +3419,7 @@ impl SlashCommands {
 				));
 			}
 		}
-		if !expand_skills && skill_count > 0 && SKILL_NAMESPACE.starts_with(&query) {
+		if !in_skill_namespace && skill_count > 0 && approaches_skill_namespace {
 			ranked.push((command_score(&query, SKILL_NAMESPACE), 0, Suggestion {
 				value:       sf!("/skill:"),
 				display:     SuggestionDisplay::Text(sf!("skill:")),
@@ -2494,7 +3439,7 @@ impl SlashCommands {
 			.into_iter()
 			.map(|(_, _, suggestion)| suggestion)
 			.collect::<SuggestionList>();
-		(!items.is_empty()).then_some(Suggestions { prefix_start, items })
+		(!items.is_empty()).then_some(Suggestions { range: prefix_start..range_end, items })
 	}
 
 	fn argument_suggestions(
@@ -2502,21 +3447,25 @@ impl SlashCommands {
 		cursor: usize,
 		body: &str,
 		delimiter: usize,
+		range_end: usize,
 	) -> Option<Suggestions> {
 		let (name, rest) = body.split_at(delimiter);
 		let partial = rest.trim_start_matches([' ', '\t', ':']);
-		if partial.contains(char::is_whitespace) {
-			return None;
-		}
+		let first_argument = !partial.contains(char::is_whitespace);
 		let command = self.find(name)?;
+		// Dynamic providers receive the whole argument tail. This lets
+		// declarative subcommand providers switch to a second-token source
+		// (`/mcp test <server>`) while static candidates stay first-token only.
 		let dynamic = command
 			.dynamic_args
 			.as_ref()
 			.map(|provider| provider(partial))
 			.unwrap_or_default();
-		let paths = (command.name == "move")
-			.then(|| filesystem_path_arguments(partial))
-			.unwrap_or_default();
+		let paths = if first_argument && command.name == "move" {
+			filesystem_path_arguments(partial)
+		} else {
+			Default::default()
+		};
 		if command.args.is_empty() && dynamic.is_empty() && paths.is_empty() {
 			return None;
 		}
@@ -2526,6 +3475,7 @@ impl SlashCommands {
 		for (arg, spaced) in command
 			.args
 			.iter()
+			.filter(|_| first_argument)
 			.map(|arg| {
 				(
 					CommandArgument {
@@ -2563,7 +3513,7 @@ impl SlashCommands {
 			.into_iter()
 			.map(|(_, suggestion)| suggestion)
 			.collect::<SuggestionList>();
-		(!items.is_empty()).then_some(Suggestions { prefix_start, items })
+		(!items.is_empty()).then_some(Suggestions { range: prefix_start..range_end, items })
 	}
 }
 
@@ -2665,18 +3615,19 @@ impl EditorCompletion for SlashCommands {
 		let line_start = before.rfind('\n').map_or(0, |index| index + 1);
 		let line = &before[line_start..];
 		let body = line.trim_start_matches([' ', '\t']).strip_prefix('/')?;
+		let range_end = completion_token_end(text, cursor);
 		if body.starts_with("skill:") && !body.contains(char::is_whitespace) {
-			return self.name_suggestions(line_start, line);
+			return self.name_suggestions(line_start, line, range_end);
 		}
 		match body.find(|ch: char| ch.is_whitespace() || ch == ':') {
-			Some(delimiter) => self.argument_suggestions(cursor, body, delimiter),
-			None => self.name_suggestions(line_start, line),
+			Some(delimiter) => self.argument_suggestions(cursor, body, delimiter, range_end),
+			None => self.name_suggestions(line_start, line, range_end),
 		}
 	}
 
-	/// Pi-style usage ghosting: bare `/name ` shows the command's own
-	/// usage; a partial argument shows its remaining characters plus
-	/// usage; a chosen argument ghosts the usage words not yet typed.
+	/// Usage ghosting: bare `/name ` shows the command's own usage; a partial
+	/// argument shows its remaining characters plus usage; a chosen argument
+	/// ghosts the usage words not yet typed.
 	fn hint(&mut self, text: &str, cursor: usize) -> Option<Str> {
 		let line_start = text[..cursor].rfind('\n').map_or(0, |at| at + 1);
 		let line = &text[line_start..cursor];
@@ -2719,10 +3670,28 @@ impl EditorCompletion for SlashCommands {
 			},
 		}
 	}
+
+	fn allow_builtin_emoji(&mut self, text: &str, cursor: usize) -> bool {
+		let before = &text[..cursor];
+		let line_start = before.rfind('\n').map_or(0, |at| at + 1);
+		if !before[..line_start].trim().is_empty() {
+			return true;
+		}
+		let Some(body) = before[line_start..]
+			.trim_start_matches([' ', '\t'])
+			.strip_prefix('/')
+		else {
+			return true;
+		};
+		let Some(delimiter) = body.find(char::is_whitespace) else {
+			return true;
+		};
+		self.find(&body[..delimiter]).is_none()
+	}
 }
 
-fn emoji_picker(text_before_cursor: &str) -> Option<Picker> {
-	let (prefix_start, query) = emoji_trigger(text_before_cursor)?;
+fn emoji_picker(text: &str, cursor: usize, generation: u64, rows: usize) -> Option<Picker> {
+	let (prefix_start, query) = emoji_trigger(&text[..cursor])?;
 	let mut suggestions = SuggestionList::new();
 	let wanted = format!(":{query}");
 	for &(pattern, emoji) in EMOTICONS {
@@ -2764,8 +3733,29 @@ fn emoji_picker(text_before_cursor: &str) -> Option<Picker> {
 	if suggestions.is_empty() {
 		None
 	} else {
-		Some(Picker { prefix_start, suggestions, selected: 0, provided: false })
+		Some(Picker {
+			range: prefix_start..emoji_token_end(text, cursor),
+			suggestions,
+			selected: 0,
+			source_generation: generation,
+			source_text: Str::new(text),
+			source_cursor: cursor,
+			cursor_offset: 0,
+			provided: false,
+			rows,
+		})
 	}
+}
+
+fn emoji_token_end(text: &str, mut cursor: usize) -> usize {
+	while text
+		.as_bytes()
+		.get(cursor)
+		.is_some_and(|byte| is_name_byte(*byte))
+	{
+		cursor += 1;
+	}
+	cursor
 }
 
 fn emoji_trigger(text: &str) -> Option<(usize, String)> {
@@ -2800,6 +3790,47 @@ fn lookup_emoji(name: &str) -> Option<&'static str> {
 		.get(index)
 		.filter(|entry| entry[0] == name)
 		.map(|entry| entry[1])
+}
+
+fn expand_emoticons(text: String) -> String {
+	if text.len() < 2 {
+		return text;
+	}
+	let bytes = text.as_bytes();
+	let mut output: Option<String> = None;
+	let mut copied = 0;
+	let mut index = 0;
+	while index < text.len() {
+		let boundary = index == 0 || has_left_boundary(bytes, index);
+		let matched = boundary
+			.then(|| {
+				EMOTICONS.iter().find_map(|&(pattern, emoji)| {
+					let end = index.checked_add(pattern.len())?;
+					(end <= text.len()
+						&& &bytes[index..end] == pattern.as_bytes()
+						&& (end == text.len()
+							|| bytes
+								.get(end)
+								.is_some_and(|byte| matches!(*byte, b' ' | b'\t' | b'\n' | b'\r'))))
+					.then_some((end, emoji))
+				})
+			})
+			.flatten();
+		if let Some((end, emoji)) = matched {
+			let out = output.get_or_insert_with(|| String::with_capacity(text.len()));
+			out.push_str(&text[copied..index]);
+			out.push_str(emoji);
+			copied = end;
+			index = end;
+			continue;
+		}
+		index += text[index..].chars().next().map_or(1, char::len_utf8);
+	}
+	let Some(mut output) = output else {
+		return text;
+	};
+	output.push_str(&text[copied..]);
+	output
 }
 
 fn fuzzy_match_spans(candidate: &str, query: &str) -> SmallVec<(u16, u16), 8> {
@@ -2847,6 +3878,45 @@ fn command_score(query: &str, target: &str) -> u16 {
 	} else {
 		fuzzy_score(query, target)
 	}
+}
+
+fn breakout_match_tier(query: &str, target: &str) -> u16 {
+	if query == target {
+		1_000
+	} else if target.starts_with(query) {
+		900
+	} else {
+		0
+	}
+}
+
+/// Keys that move or select without editing text (the readline motions
+/// included), so browsing prompt history survives them.
+const fn is_caret_motion(key: Key) -> bool {
+	matches!(
+		key,
+		Key::Up
+			| Key::Down
+			| Key::Left
+			| Key::Right
+			| Key::SelectLeft
+			| Key::SelectRight
+			| Key::SelectUp
+			| Key::SelectDown
+			| Key::Home
+			| Key::End
+			| Key::SelectHome
+			| Key::SelectEnd
+			| Key::PageUp
+			| Key::PageDown
+			| Key::WordLeft
+			| Key::WordRight
+			| Key::SelectWordLeft
+			| Key::SelectWordRight
+			| Key::SelectAll
+			| Key::Copy
+			| Key::Ctrl('a' | 'e' | 'b' | 'f')
+	)
 }
 
 fn history_entry_matches(query: &str, entry: &str) -> bool {
@@ -2931,6 +4001,40 @@ mod tests {
 	}
 
 	#[test]
+	fn close_tag_ignores_inline_and_fenced_code() {
+		let inline = type_slash("<real>`<fake>`<");
+		assert_eq!(inline.text(), "<real>`<fake>`</real>");
+
+		let fenced = type_slash("<real>\n```\n<fake>\n```\n<");
+		assert_eq!(fenced.text(), "<real>\n```\n<fake>\n```\n</real>");
+	}
+
+	#[test]
+	fn close_tag_recovers_from_a_mismatched_closer_without_leaking_inner_tags() {
+		let buffer = type_slash("<outer><inner></outer><");
+		assert_eq!(buffer.text(), "<outer><inner></outer></");
+	}
+
+	#[test]
+	fn code_and_xml_masks_cover_structural_text_only() {
+		let text = "prose `let x = <fake>` <real attr=\">\">body</real>\n~~~\n<tag>\n~~~";
+		assert_eq!(
+			code_ranges(text)
+				.iter()
+				.map(|range| &text[range.clone()])
+				.collect::<Vec<_>>(),
+			["`let x = <fake>`", "~~~\n<tag>\n~~~"]
+		);
+		assert_eq!(
+			xml_ranges(text)
+				.iter()
+				.map(|range| &text[range.clone()])
+				.collect::<Vec<_>>(),
+			["<fake>", "<real attr=\">\">", "</real>", "<tag>"]
+		);
+	}
+
+	#[test]
 	fn close_tag_types_literal_slash_when_stack_is_empty() {
 		let buffer = type_slash("<");
 		assert_eq!(buffer.text(), "</");
@@ -2985,6 +4089,134 @@ mod tests {
 		assert_eq!(editor.handle_key(key(Key::Tab)), EditOutcome::Changed);
 		assert_eq!(editor.text(), "/settings ");
 	}
+
+	#[test]
+	fn right_arrow_at_logical_line_end_accepts_the_selected_completion() {
+		let mut editor = editor();
+		type_text(&mut editor, "/se");
+		assert_eq!(editor.handle_key(Key::Right), EditOutcome::Changed);
+		assert_eq!(editor.text(), "/security ");
+	}
+
+	#[test]
+	fn emoji_popup_stays_suppressed_inside_recognized_slash_arguments() {
+		let mut editor = editor();
+		type_text(&mut editor, "/security :joy");
+		assert!(editor.picker().is_none());
+		editor.set_text("prose :joy");
+		assert!(editor.picker().is_some());
+	}
+
+	#[test]
+	fn replacement_picker_replaces_the_word_under_the_cursor() {
+		let mut editor = Editor::new(EditorOptions::default());
+		editor.replace_external("teh", true);
+		assert_eq!(editor.handle_key(Key::Right), EditOutcome::Changed);
+		assert!(editor.show_replacements(0..3, [Str::new("the")]));
+		assert_eq!(editor.handle_key(Key::Enter), EditOutcome::Changed);
+		assert_eq!(editor.text(), "the");
+	}
+
+	#[test]
+	fn replacement_picker_preserves_caret_after_trailing_boundary() {
+		let mut editor = Editor::new(EditorOptions::default());
+		editor.replace_external("teh ", false);
+		assert!(editor.show_replacements(0..3, [Str::new("the")]));
+		assert_eq!(editor.handle_key(Key::Tab), EditOutcome::Changed);
+		assert_eq!(editor.text(), "the ");
+		assert_eq!(editor.buffer().cursor(), 4);
+	}
+
+	#[test]
+	fn completion_replaces_text_after_the_cursor() {
+		let mut editor = Editor::new(EditorOptions::default());
+		editor.set_completion(Box::new(AtNames));
+		type_text(&mut editor, "@alicex");
+		assert_eq!(editor.handle_key(Key::Left), EditOutcome::Changed);
+		assert!(editor.picker().is_some(), "exact prefix reopens the picker");
+		assert_eq!(editor.handle_key(Key::Enter), EditOutcome::Changed);
+		assert_eq!(editor.text(), "@alice ");
+	}
+
+	/// Engine claiming a range that no longer contains the cursor (stale
+	/// async rows): the dropdown must stay open on the clamped span.
+	#[test]
+	fn degenerate_completion_range_is_clamped_not_hidden() {
+		struct StaleRange;
+		impl EditorCompletion for StaleRange {
+			fn suggest(&mut self, text: &str, _cursor: usize) -> Option<Suggestions> {
+				(!text.is_empty()).then(|| Suggestions {
+					range: 0..0,
+					items: [Suggestion::new("value", "value")].into_iter().collect(),
+				})
+			}
+		}
+		let mut editor = Editor::new(EditorOptions::default());
+		editor.set_completion(Box::new(StaleRange));
+		type_text(&mut editor, "ab");
+		assert!(editor.picker().is_some(), "degenerate range keeps the dropdown open");
+		assert_eq!(editor.handle_key(Key::Enter), EditOutcome::Changed);
+		assert!(editor.text().starts_with("value"), "{}", editor.text());
+	}
+
+	#[test]
+	fn stale_async_picker_snapshot_never_overwrites_a_newer_buffer_or_caret() {
+		let mut editor = editor();
+		type_text(&mut editor, "/se");
+		assert!(editor.picker().is_some());
+		// Model an async request that completed for `/se` while an input
+		// mutation advanced without installing a replacement result.
+		editor.buffer.replace_external("keep this", true);
+		assert_eq!(editor.handle_key(Key::Tab), EditOutcome::Changed);
+		assert_eq!(editor.text(), "keep this");
+		assert_eq!(editor.buffer.cursor(), 0);
+
+		// An ABA query can have the same text and caret as an old result.
+		// Generation identity still prevents that result being accepted.
+		editor.set_text("/se");
+		let stale = editor.picker.take().expect("matching picker");
+		editor.set_text("other");
+		editor.set_text("/se");
+		editor.picker = Some(stale);
+		assert_eq!(editor.handle_key(Key::Enter), EditOutcome::Changed);
+		assert_eq!(editor.text(), "/se");
+		assert_eq!(editor.buffer.cursor(), 3);
+	}
+
+	/// A `#N` chip marker looks like a `#<number>` reference trigger, but the
+	/// engine's range would tear the atom on accept: no dropdown opens over
+	/// it, and the same key still removes the whole chip.
+	#[test]
+	fn completion_never_opens_over_an_atomic_marker() {
+		struct HashRefs;
+		impl EditorCompletion for HashRefs {
+			fn suggest(&mut self, text: &str, cursor: usize) -> Option<Suggestions> {
+				let hash = text[..cursor].rfind('#')?;
+				let digits = &text[hash + 1..cursor];
+				(!digits.is_empty() && digits.bytes().all(|byte| byte.is_ascii_digit())).then(|| {
+					Suggestions {
+						range: hash..cursor,
+						items: [Suggestion::new("pr://1 ", "pr #1")].into_iter().collect(),
+					}
+				})
+			}
+		}
+		let mut editor = Editor::new(EditorOptions::default());
+		editor.set_completion(Box::new(HashRefs));
+		let chip = "\u{f15c} #1";
+		editor.insert_reference_group(&[(chip.to_owned(), "payload".to_owned())], " ");
+		assert_eq!(editor.text(), format!("{chip} "));
+		assert_eq!(editor.handle_key(Key::Backspace), EditOutcome::Changed);
+		assert_eq!(editor.text(), chip);
+		assert!(editor.picker().is_none(), "the chip's `#1` is not a reference token");
+		assert_eq!(editor.handle_key(Key::Backspace), EditOutcome::Changed);
+		assert_eq!(editor.text(), "");
+		// Ordinary text after the chip still completes.
+		editor.insert_reference_group(&[(chip.to_owned(), "payload".to_owned())], " ");
+		type_text(&mut editor, "#2");
+		assert!(editor.picker().is_some(), "a typed reference after the chip completes");
+	}
+
 	#[test]
 	fn command_frequency_breaks_equal_text_score_ties() {
 		let mut usage = HashMap::new();
@@ -3053,6 +4285,73 @@ mod tests {
 		assert_eq!(editor.text(), "/skill:");
 		assert_eq!(editor.picker().expect("skill candidates reopen").len(), 1);
 	}
+
+	#[test]
+	fn bare_skill_prefix_breaks_out_above_fuzzy_commands() {
+		let commands = vec![
+			Command::new("skill:batch", "Run batch workflows", &[]),
+			Command::new("skill:reviewer", "Review code", &[]),
+			Command::new("run-batch", "Run a saved batch job", &[]),
+		];
+		let mut editor = Editor::new(EditorOptions::default());
+		editor.set_completion(Box::new(SlashCommands::new(commands)));
+		type_text(&mut editor, "/batch");
+		assert_eq!(
+			editor
+				.picker()
+				.expect("bare skill prefix opens")
+				.suggestions
+				.iter()
+				.map(|suggestion| suggestion.value().as_str())
+				.collect::<Vec<_>>(),
+			["/skill:batch ", "/run-batch "],
+		);
+	}
+
+	#[test]
+	fn bare_skill_prefix_alias_tie_keeps_command_only() {
+		let commands = vec![
+			Command::new("skill:setup-ci", "Bootstrap CI pipelines", &[]),
+			Command::new("configure", "Open settings", &["settings"]),
+		];
+		let mut editor = Editor::new(EditorOptions::default());
+		editor.set_completion(Box::new(SlashCommands::new(commands)));
+		type_text(&mut editor, "/set");
+		let picker = editor.picker().expect("command prefix opens");
+		assert_eq!(picker.suggestions.len(), 1);
+		assert_eq!(picker.suggestions[0].value(), "/settings ");
+	}
+
+	#[test]
+	fn exact_bare_skill_breaks_out_above_command_prefix() {
+		let commands = vec![
+			Command::new("skill:set", "Set tracked values", &[]),
+			Command::new("settings", "Open settings", &[]),
+		];
+		let mut editor = Editor::new(EditorOptions::default());
+		editor.set_completion(Box::new(SlashCommands::new(commands)));
+		type_text(&mut editor, "/set");
+		assert_eq!(
+			editor
+				.picker()
+				.expect("exact skill opens")
+				.suggestions
+				.iter()
+				.map(|suggestion| suggestion.value().as_str())
+				.collect::<Vec<_>>(),
+			["/skill:set ", "/settings "],
+		);
+	}
+
+	#[test]
+	fn fuzzy_only_bare_skill_does_not_break_out() {
+		let commands = vec![Command::new("skill:humanizer", "Remove signs of AI writing", &[])];
+		let mut editor = Editor::new(EditorOptions::default());
+		editor.set_completion(Box::new(SlashCommands::new(commands)));
+		type_text(&mut editor, "/hmz");
+		assert!(editor.picker().is_none());
+	}
+
 	#[test]
 	fn command_picker_defaults_to_ten_visible_suggestions() {
 		let commands = (0..12)
@@ -3178,8 +4477,8 @@ mod tests {
 		// usage words already typed stop ghosting
 		type_text(&mut editor, "report.json");
 		assert_eq!(editor.inline_hint(), None);
-		// multi-word usages ghost only the remainder (pi counts whole and
-		// in-progress words alike)
+		// Multi-word usages ghost only the remainder; whole and in-progress
+		// words count alike.
 		let mut compare = make_editor();
 		type_text(&mut compare, "/security compare one");
 		assert_eq!(compare.inline_hint().as_deref(), Some("<run-b>"));
@@ -3209,6 +4508,13 @@ mod tests {
 		let mut editor = editor();
 		type_text(&mut editor, "é:) ");
 		assert_eq!(editor.text(), "é:) ");
+	}
+
+	#[test]
+	fn submit_expands_a_complete_emoticon_without_a_trailing_space() {
+		let mut editor = editor();
+		type_text(&mut editor, "hello :)");
+		assert_eq!(editor.handle_key(Key::Enter), EditOutcome::Submitted("hello 🙂".to_owned()));
 	}
 
 	#[test]
@@ -3287,6 +4593,31 @@ mod tests {
 	}
 
 	#[test]
+	fn word_motion_matches_pi_unicode_coarse_blocks() {
+		let text = "你好，世界\u{a0}foo‑bar «привет»";
+		let mut buffer = EditBuffer::new(text);
+		for expected in [
+			text.rfind('»').expect("closing quote"),
+			text.find('п').expect("Russian word"),
+			text.find('«').expect("opening quote"),
+			text.find('f').expect("joined Latin word"),
+			text.find('世').expect("second CJK block"),
+			text.find('，').expect("Unicode delimiter"),
+			0,
+		] {
+			assert_eq!(buffer.handle(Key::WordLeft, 80, 10), BufferOutcome::Changed);
+			assert_eq!(buffer.cursor(), expected);
+		}
+
+		assert_eq!(buffer.handle(Key::WordRight, 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.cursor(), text.find('，').expect("after first CJK block"));
+		assert_eq!(buffer.handle(Key::WordRight, 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.cursor(), text.find('，').expect("delimiter") + '，'.len_utf8());
+		assert_eq!(buffer.handle(Key::WordRight, 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.cursor(), text.find('\u{a0}').expect("after second CJK block"));
+	}
+
+	#[test]
 	fn word_deletes_merge_logical_lines() {
 		let mut editor = editor();
 		editor.insert_text("first\nsecond");
@@ -3337,13 +4668,59 @@ mod tests {
 	}
 
 	#[test]
-	fn undo_coalesces_word_typing_and_splits_at_punctuation() {
+	fn kill_and_yank_preserve_atomic_reference_identity() {
+		let mut buffer = EditBuffer::new("prefix ");
+		buffer.insert_reference("[chip]", "<attachment/>");
+		assert_eq!(buffer.handle(Key::Ctrl('w'), 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.text(), "prefix ");
+		assert!(buffer.atom_ranges().is_empty());
+
+		assert_eq!(buffer.handle(Key::Ctrl('y'), 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.text(), "prefix [chip]");
+		assert_eq!(buffer.atom_ranges().as_slice(), &[(7, 13)]);
+		assert_eq!(buffer.expanded_text(), "prefix <attachment/>");
+
+		assert_eq!(buffer.handle(Key::Backspace, 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.text(), "prefix ");
+	}
+
+	#[test]
+	fn backward_kill_accumulation_keeps_reference_offsets() {
+		let mut buffer = EditBuffer::new("");
+		buffer.insert_reference("[one]", "<one/>");
+		buffer.insert_text(" tail");
+		buffer.handle(Key::Ctrl('w'), 80, 10);
+		buffer.handle(Key::Ctrl('w'), 80, 10);
+		assert_eq!(buffer.handle(Key::Ctrl('y'), 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.text(), "[one] tail");
+		assert_eq!(buffer.atom_ranges().as_slice(), &[(0, 5)]);
+		assert_eq!(buffer.expanded_text(), "<one/> tail");
+	}
+
+	#[test]
+	fn yank_pop_restores_atoms_from_an_older_kill_entry() {
+		let mut buffer = EditBuffer::new("");
+		buffer.insert_reference("[one]", "<one/>");
+		buffer.handle(Key::Ctrl('w'), 80, 10);
+		buffer.insert_text("plain");
+		buffer.handle(Key::Ctrl('w'), 80, 10);
+
+		buffer.handle(Key::Ctrl('y'), 80, 10);
+		assert_eq!(buffer.text(), "plain");
+		assert_eq!(buffer.handle(Key::Alt('y'), 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.text(), "[one]");
+		assert_eq!(buffer.atom_ranges().as_slice(), &[(0, 5)]);
+		assert_eq!(buffer.expanded_text(), "<one/>");
+	}
+
+	#[test]
+	fn undo_coalesces_non_whitespace_typing_and_splits_at_spaces() {
 		let mut editor = editor();
-		type_text(&mut editor, "abc def");
+		type_text(&mut editor, "abc.def ghi");
 		assert_eq!(editor.handle(Key::Ctrl('-')), EditOutcome::Changed);
-		assert_eq!(editor.text(), "abc ");
+		assert_eq!(editor.text(), "abc.def ");
 		assert_eq!(editor.handle(Key::Ctrl('_')), EditOutcome::Changed);
-		assert_eq!(editor.text(), "abc");
+		assert_eq!(editor.text(), "abc.def");
 		assert_eq!(editor.handle(Key::Ctrl('-')), EditOutcome::Changed);
 		assert_eq!(editor.text(), "");
 	}
@@ -3367,6 +4744,52 @@ mod tests {
 		assert_eq!(editor.handle(Key::Down), EditOutcome::Changed);
 		assert_eq!(editor.handle(Key::Down), EditOutcome::Changed);
 		assert_eq!(editor.text(), "draft");
+	}
+
+	#[test]
+	fn host_recorded_and_seeded_history_drives_up_down_navigation() {
+		// The host records what it actually sent; a resumed session seeds
+		// newest-first.
+		let mut editor = editor();
+		assert!(!editor.history_navigates(Key::Up), "nothing recorded yet");
+		editor.seed_history(["older".into(), "  ".into(), "newest".into(), "older".into()]);
+		assert_eq!(editor.history, vec![Str::new_static("older"), Str::new_static("newest")]);
+		editor.add_to_history("  older ");
+		assert_eq!(editor.history, vec![Str::new_static("older"), Str::new_static("newest")]);
+		editor.add_to_history("");
+		assert_eq!(editor.history.len(), 2);
+		assert!(editor.history_navigates(Key::Up));
+		assert!(!editor.history_navigates(Key::Down), "not browsing yet");
+		assert_eq!(editor.handle(Key::Up), EditOutcome::Changed);
+		assert_eq!(editor.text(), "older");
+		assert!(editor.history_navigates(Key::Up));
+		editor.handle(Key::End);
+		assert!(editor.history_navigates(Key::Down));
+		assert_eq!(editor.handle(Key::Down), EditOutcome::Changed);
+		assert_eq!(editor.text(), "");
+		// A non-empty draft owns Up unless the editor is already browsing.
+		type_text(&mut editor, "draft");
+		editor.handle(Key::Home);
+		assert!(!editor.history_navigates(Key::Up));
+		// The host replacing the draft leaves browsing mode.
+		editor.set_text("");
+		editor.handle(Key::Up);
+		assert_eq!(editor.text(), "older");
+		assert_eq!(editor.history_index, Some(0));
+		editor.set_text("");
+		assert!(editor.history_index.is_none());
+		assert_eq!(editor.handle(Key::Up), EditOutcome::Changed);
+		assert_eq!(editor.text(), "older", "Up restarts from the newest entry");
+		// A recalled `/command` never opens the dropdown, so the next Down
+		// steps history, not rows.
+		editor.set_text("");
+		editor.add_to_history("/settings");
+		assert_eq!(editor.handle(Key::Up), EditOutcome::Changed);
+		assert_eq!(editor.text(), "/settings");
+		assert!(editor.picker().is_none(), "recall keeps the popup closed");
+		editor.handle(Key::End);
+		assert_eq!(editor.handle(Key::Down), EditOutcome::Changed);
+		assert_eq!(editor.text(), "");
 	}
 
 	#[test]
@@ -3474,6 +4897,21 @@ mod tests {
 	}
 
 	#[test]
+	fn reference_markers_are_single_units_for_caret_and_selection_motion() {
+		let mut buffer = EditBuffer::new("a");
+		buffer.insert_reference("[chip]", "<ref/>");
+		buffer.insert_text("z");
+		buffer.set_cursor_line_column(0, 1);
+		assert_eq!(buffer.handle(Key::Right, 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.cursor(), 7);
+		assert_eq!(buffer.handle(Key::Left, 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.cursor(), 1);
+		assert_eq!(buffer.handle(Key::SelectRight, 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.selection(), Some(1..7));
+		assert_eq!(buffer.selected_text(), Some("[chip]"));
+	}
+
+	#[test]
 	fn partial_replacements_widen_to_whole_reference_markers() {
 		let mut torn = editor();
 		type_text(&mut torn, "ab");
@@ -3505,6 +4943,37 @@ mod tests {
 	}
 
 	#[test]
+	fn character_jump_crosses_lines_and_never_lands_inside_an_atom() {
+		let mut buffer = EditBuffer::new("a\n");
+		buffer.insert_reference("[chip]", "<ref/>");
+		buffer.insert_text("\nz");
+		buffer.set_cursor_line_column(0, 0);
+		buffer.handle(Key::Ctrl(']'), 80, 10);
+		assert_eq!(buffer.handle(Key::Char('h'), 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.cursor(), 8, "forward jump snaps to the atom's far edge");
+
+		buffer.handle(Key::CtrlAlt(']'), 80, 10);
+		assert_eq!(buffer.handle(Key::Char('c'), 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.cursor(), 2, "backward jump snaps to the atom's near edge");
+	}
+
+	#[test]
+	fn line_message_and_selection_motions_use_distinct_boundaries() {
+		let mut buffer = EditBuffer::new("one\ntwo\nthree");
+		buffer.set_cursor_line_column(1, 1);
+		assert_eq!(buffer.handle(Key::SelectEnd, 80, 10), BufferOutcome::Changed);
+		assert_eq!(buffer.selected_text(), Some("wo"));
+		assert_eq!(buffer.handle(Key::Home, 80, 10), BufferOutcome::Changed);
+		assert_eq!((buffer.cursor_line(), buffer.cursor_column()), (1, 1));
+		assert_eq!(buffer.handle(Key::Home, 80, 10), BufferOutcome::Changed);
+		assert_eq!((buffer.cursor_line(), buffer.cursor_column()), (1, 0));
+		assert_eq!(buffer.move_to_message_edge(false), BufferOutcome::Changed);
+		assert_eq!(buffer.cursor(), 0);
+		assert_eq!(buffer.move_to_message_edge(true), BufferOutcome::Changed);
+		assert_eq!(buffer.cursor(), buffer.text().len());
+	}
+
+	#[test]
 	fn page_motion_uses_visible_rows_and_keeps_sticky_column() {
 		let mut editor = editor();
 		editor.insert_text("abcd\nx\nabcd\nx\nabcd\nx\nabcd\nx\nabcd");
@@ -3513,6 +4982,74 @@ mod tests {
 		assert_eq!((editor.buffer.cursor_line(), editor.buffer.cursor_column()), (8, 3));
 		editor.handle(Key::PageUp);
 		assert_eq!((editor.buffer.cursor_line(), editor.buffer.cursor_column()), (0, 3));
+
+		// The rendered viewport, not logical lines, controls the jump. With a
+		// three-row viewport these wrapped rows move two at a time, preserving
+		// the requested display column across the short logical line.
+		editor.set_text("abcde\nx\nabcde\nx\nabcde");
+		editor.buffer.set_cursor_line_column(0, 2);
+		let _ = editor.view_rows(3, 3);
+		editor.handle(Key::PageDown);
+		assert_eq!((editor.buffer.cursor_line(), editor.buffer.cursor_column()), (1, 1));
+		editor.handle(Key::PageDown);
+		assert_eq!((editor.buffer.cursor_line(), editor.buffer.cursor_column()), (2, 5));
+
+		// A viewport resize immediately changes the page distance.
+		let _ = editor.view_rows(3, 2);
+		editor.handle(Key::PageUp);
+		assert_eq!((editor.buffer.cursor_line(), editor.buffer.cursor_column()), (2, 2));
+
+		// A display column that falls inside a wide grapheme snaps to a valid
+		// boundary without losing the sticky column on the following page.
+		editor.set_text("ab\nx\ne\u{301}界z\nx\nab");
+		editor.buffer.set_cursor_line_column(0, 2);
+		let _ = editor.view_rows(20, 3);
+		editor.handle(Key::PageDown);
+		assert_eq!((editor.buffer.cursor_line(), editor.buffer.cursor_column()), (2, 1));
+		assert_eq!(&editor.text()[..editor.buffer.cursor()], "ab\nx\né");
+		editor.handle(Key::PageDown);
+		assert_eq!((editor.buffer.cursor_line(), editor.buffer.cursor_column()), (4, 2));
+
+		// Atomic markers may only be crossed as a whole. Landing inside one
+		// chooses the motion-direction edge while retaining the requested
+		// display column for the next page.
+		editor.set_text("ab\nx\n");
+		editor.insert_reference("[chip]", "<ref/>");
+		editor.insert_text("z\nx\nab");
+		editor.buffer.set_cursor_line_column(0, 1);
+		let _ = editor.view_rows(20, 3);
+		let (atom_start, atom_end) = editor.buffer.atom_ranges()[0];
+		editor.handle(Key::PageDown);
+		assert_eq!(editor.buffer.cursor(), atom_end);
+		editor.handle(Key::PageDown);
+		assert_eq!((editor.buffer.cursor_line(), editor.buffer.cursor_column()), (4, 1));
+		editor.handle(Key::PageUp);
+		assert_eq!(editor.buffer.cursor(), atom_start);
+		editor.handle(Key::PageUp);
+		assert_eq!((editor.buffer.cursor_line(), editor.buffer.cursor_column()), (0, 1));
+	}
+
+	#[test]
+	fn page_motion_uses_the_rendered_viewport_minus_one_row() {
+		let mut editor = editor();
+		editor.insert_text("0\n1\n2\n3\n4\n5\n6");
+		editor.buffer.set_cursor_line_column(0, 0);
+		let _ = editor.view_rows(20, 4);
+		assert_eq!(editor.handle(Key::PageDown), EditOutcome::Changed);
+		assert_eq!(editor.buffer.cursor_line(), 3);
+		assert_eq!(editor.handle(Key::PageUp), EditOutcome::Changed);
+		assert_eq!(editor.buffer.cursor_line(), 0);
+	}
+
+	#[test]
+	fn right_at_message_end_seeds_the_vertical_sticky_column() {
+		let mut buffer = EditBuffer::new("abcd\nx\nabcd");
+		buffer.set_cursor_line_column(2, 4);
+		assert_eq!(buffer.handle(Key::Right, 80, 8), BufferOutcome::Ignored);
+		assert_eq!(buffer.handle(Key::Up, 80, 8), BufferOutcome::Changed);
+		assert_eq!((buffer.cursor_line(), buffer.cursor_column()), (1, 1));
+		assert_eq!(buffer.handle(Key::Up, 80, 8), BufferOutcome::Changed);
+		assert_eq!((buffer.cursor_line(), buffer.cursor_column()), (0, 4));
 	}
 
 	#[test]
@@ -3524,12 +5061,85 @@ mod tests {
 			.iter()
 			.map(|row| row.text)
 			.collect::<Vec<_>>();
-		assert_eq!(rows, ["hello ", "world"]);
+		assert_eq!(rows, ["hello", "world"]);
 		editor.buffer.set_cursor_line_column(0, 4);
 		editor.handle(Key::Down);
 		assert_eq!(editor.buffer.cursor(), 10);
 		editor.handle(Key::Up);
 		assert_eq!(editor.buffer.cursor(), 4);
+	}
+
+	#[test]
+	fn wrapping_fills_wide_tokens_but_keeps_narrow_words_whole() {
+		let wide = EditBuffer::new("word 一二三四五");
+		assert_eq!(
+			wide
+				.rows(10, 8)
+				.iter()
+				.map(|row| row.text)
+				.collect::<Vec<_>>(),
+			["word 一二", "三四五"]
+		);
+
+		let mixed = EditBuffer::new("word 一a二b三c四d");
+		assert_eq!(
+			mixed
+				.rows(10, 8)
+				.iter()
+				.map(|row| row.text)
+				.collect::<Vec<_>>(),
+			["word 一a二", "b三c四d"]
+		);
+
+		let narrow = EditBuffer::new("word über");
+		assert_eq!(
+			narrow
+				.rows(8, 8)
+				.iter()
+				.map(|row| row.text)
+				.collect::<Vec<_>>(),
+			["word", "über"]
+		);
+	}
+
+	#[test]
+	fn wrapping_uses_remaining_width_before_splitting_a_long_token() {
+		let buffer = EditBuffer::new("word abcdefghijklmnop");
+		assert_eq!(
+			buffer
+				.rows(10, 8)
+				.iter()
+				.map(|row| row.text)
+				.collect::<Vec<_>>(),
+			["word abcde", "fghijklmno", "p"]
+		);
+	}
+
+	#[test]
+	fn wrap_hidden_whitespace_stays_addressable_and_rows_fit() {
+		let mut buffer = EditBuffer::new("word     next");
+		let rows = buffer.rows(6, 8);
+		assert_eq!(rows.iter().map(|row| row.text).collect::<Vec<_>>(), ["word", "next"]);
+		assert!(rows.iter().all(|row| cell_width(row.text) <= 6));
+		drop(rows);
+
+		buffer.set_cursor_line_column(0, 7);
+		let rows = buffer.rows(6, 8);
+		assert_eq!(rows[0].cursor_column, Some(4));
+		assert_eq!(rows[1].cursor_column, None);
+	}
+
+	#[test]
+	fn manual_scroll_detaches_until_the_next_edit_then_follows_the_caret() {
+		let mut buffer = EditBuffer::new("0\n1\n2\n3\n4");
+		assert_eq!(buffer.rows_with_metrics(20, 2).1, (3, 2, 5));
+		assert!(buffer.scroll_rows(-2, 20, 2));
+		assert_eq!(buffer.rows_with_metrics(20, 2).1, (1, 2, 5));
+
+		assert_eq!(buffer.handle(Key::Char('x'), 20, 2), BufferOutcome::Changed);
+		assert_eq!(buffer.rows_with_metrics(20, 2).1, (3, 2, 5));
+		buffer.replace_external("a\nb\nc", false);
+		assert_eq!(buffer.rows_with_metrics(20, 2).1, (1, 2, 3));
 	}
 
 	#[test]
@@ -3565,6 +5175,18 @@ mod tests {
 		assert_eq!(buffer.text(), "abcd");
 		assert_eq!(buffer.cursor(), 2);
 		assert_eq!(buffer.handle(Key::Ctrl('_'), 80, 8), BufferOutcome::Ignored);
+	}
+
+	#[test]
+	fn kill_commands_prefer_the_active_selection() {
+		for key in [Key::Ctrl('u'), Key::Ctrl('k'), Key::Ctrl('w'), Key::WordDelete] {
+			let mut buffer = EditBuffer::new("one two");
+			buffer.handle(Key::SelectWordLeft, 80, 8);
+			assert_eq!(buffer.handle(key, 80, 8), BufferOutcome::Changed);
+			assert_eq!(buffer.text(), "one ", "{key:?}");
+			assert_eq!(buffer.handle(Key::Ctrl('y'), 80, 8), BufferOutcome::Changed);
+			assert_eq!(buffer.text(), "one two", "{key:?}");
+		}
 	}
 
 	#[test]
@@ -3647,7 +5269,8 @@ mod tests {
 				.filter(|name| !query.is_empty() && name.starts_with(query))
 				.map(|name| Suggestion::new(sf!("@{name} "), *name))
 				.collect::<SuggestionList>();
-			(!items.is_empty()).then_some(Suggestions { prefix_start: at, items })
+			(!items.is_empty())
+				.then_some(Suggestions { range: at..completion_token_end(text, cursor), items })
 		}
 
 		fn hint(&mut self, text: &str, cursor: usize) -> Option<Str> {

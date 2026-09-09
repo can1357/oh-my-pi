@@ -1,4 +1,4 @@
-//! Schema-derived command-line mappings for devices invoked through `xd`.
+//! Schema-derived command-line mappings for devices invoked through `dyn`.
 
 use std::{fmt, fmt::Write as _, io};
 
@@ -729,7 +729,7 @@ fn coerce(
 fn enum_matches(member: &Value, raw: &str) -> bool {
 	member
 		.as_str()
-		.map_or_else(|| member.to_string() == raw, |member| member == raw)
+		.map_or_else(|| member == raw, |member| member == raw)
 }
 
 fn invalid_value(flag: &str, expected: &str, found: &str) -> CliParseError {
@@ -1188,9 +1188,9 @@ mod tests {
 	fn usage_is_stable_and_exposes_schema_shapes() {
 		let cli = DeviceCli::compile(&create_pr_schema()).expect("create_pr schema compiles");
 		assert_eq!(
-			cli.usage("xd github/create_pr"),
+			cli.usage("dyn github/create_pr"),
 			concat!(
-				"  xd github/create_pr <title> [OPTIONS]\n",
+				"  dyn github/create_pr <title> [OPTIONS]\n",
 				"\n",
 				"Arguments:\n",
 				"  <title>\n",

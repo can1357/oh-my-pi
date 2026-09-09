@@ -4,14 +4,14 @@
 	clippy::perf,
 	clippy::pedantic,
 	clippy::nursery,
-	reason = "ported from pi-builtins; kept close to upstream"
+	reason = "shared builtin implementations use deliberate lint exceptions"
 )]
 //! In-process utility and process builtins for omp-shell.
-//!
-//! Ported from pi-builtins.
 
 mod cksum;
+mod r#dyn;
 mod factory;
+pub mod graphics;
 mod host;
 mod proc_match;
 mod proc_snapshot;
@@ -86,6 +86,12 @@ mod sleep;
 mod timeout;
 mod top;
 
-pub use factory::{process_builtins, utility_builtins};
-pub use host::{panic_scope_active, rayon_global_pool_available, set_rayon_global_pool_available};
+pub use factory::{dyn_builtin, process_builtins, utility_builtins};
+pub use graphics::{
+	ImagePassthrough, encode_image_passthrough, extract_image_passthrough, image_passthrough_ranges,
+};
+pub use host::{
+	DynCallOutput, DynDevice, DynFault, DynFuture, DynHost, DynOutput, DynSchema,
+	panic_scope_active, rayon_global_pool_available, set_rayon_global_pool_available,
+};
 pub use proc_snapshot::{ProcInfo, ProcessStatus};

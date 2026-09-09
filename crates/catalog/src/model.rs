@@ -197,6 +197,21 @@ pub struct ModelProvenance {
 	pub deprecated:       bool,
 }
 
+/// Catalog-estimated model quality and output throughput.
+///
+/// Values use millionth precision so catalog snapshots remain deterministic and
+/// never depend on floating-point serialization.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
+pub struct CatalogModelMetrics {
+	/// Intelligence score multiplied by one million.
+	pub intelligence_millionths:             Option<u32>,
+	/// Estimated output tokens per second multiplied by one million.
+	pub output_tokens_per_second_millionths: Option<u32>,
+}
+
+const _: () =
+	assert!(std::mem::size_of::<CatalogModelMetrics>() <= 16, "catalog metrics must stay compact");
+
 /// Selectable model deployment and its route-specific wire identifiers.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct ModelSpec {
@@ -224,6 +239,8 @@ pub struct ModelSpec {
 	pub context: ContextStrategy,
 	/// Integer-only price schedule.
 	pub pricing: Pricing,
+	/// Catalog-estimated quality and output throughput.
+	pub catalog_metrics: CatalogModelMetrics,
 	/// Model availability state.
 	pub availability: ModelAvailability,
 	/// Auditable source and lifecycle facts.

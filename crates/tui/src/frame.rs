@@ -93,8 +93,9 @@ impl Color {
 			return self;
 		};
 		let amount = amount.clamp(0.0, 1.0);
-		let channel =
-			|a: u8, b: u8| (f32::from(a) + (f32::from(b) - f32::from(a)) * amount).round() as u8;
+		let channel = |a: u8, b: u8| {
+			f32::mul_add(f32::from(b) - f32::from(a), amount, f32::from(a)).round() as u8
+		};
 		Self::Rgb(channel(ar, br), channel(ag, bg), channel(ab, bb))
 	}
 
@@ -106,16 +107,27 @@ impl Color {
 		let Self::Rgb(red, green, blue) = self else {
 			return 0.0;
 		};
-		(0.2126 * f32::from(red) + 0.7152 * f32::from(green) + 0.0722 * f32::from(blue)) / 255.0
+		(0.7152f32.mul_add(f32::from(green), 0.2126 * f32::from(red)) + 0.0722 * f32::from(blue))
+			/ 255.0
 	}
 
-	/// Derives a readable label color by blending this fill toward black or
-	/// white.
+	/// Derives a readable label color from this fill.
+	///
+	/// RGB fills blend toward black or white. Xterm-indexed fills select the
+	/// corresponding black or white palette endpoint; the terminal-default
+	/// surface remains terminal-default because its actual color is unknown.
 	pub fn contrast_label(self) -> Self {
-		if self.luminance() > 0.5 {
-			self.mix(Self::Rgb(0, 0, 0), 0.82)
-		} else {
-			self.mix(Self::Rgb(255, 255, 255), 0.92)
+		match self {
+			Self::Default => Self::Default,
+			Self::Indexed(index) => {
+				if indexed_rgb(index).luminance() > 0.5 {
+					Self::Indexed(16)
+				} else {
+					Self::Indexed(231)
+				}
+			},
+			Self::Rgb(..) if self.luminance() > 0.5 => self.mix(Self::Rgb(0, 0, 0), 0.82),
+			Self::Rgb(..) => self.mix(Self::Rgb(255, 255, 255), 0.92),
 		}
 	}
 
@@ -178,6 +190,43 @@ impl Color {
 		}
 	}
 }
+
+const fn indexed_rgb(index: u8) -> Color {
+	const ANSI: [(u8, u8, u8); 16] = [
+		(0, 0, 0),
+		(128, 0, 0),
+		(0, 128, 0),
+		(128, 128, 0),
+		(0, 0, 128),
+		(128, 0, 128),
+		(0, 128, 128),
+		(192, 192, 192),
+		(128, 128, 128),
+		(255, 0, 0),
+		(0, 255, 0),
+		(255, 255, 0),
+		(0, 0, 255),
+		(255, 0, 255),
+		(0, 255, 255),
+		(255, 255, 255),
+	];
+	if index < 16 {
+		let (red, green, blue) = ANSI[index as usize];
+		return Color::Rgb(red, green, blue);
+	}
+	if index < 232 {
+		const LEVELS: [u8; 6] = [0, 95, 135, 175, 215, 255];
+		let cube = index - 16;
+		return Color::Rgb(
+			LEVELS[(cube / 36) as usize],
+			LEVELS[((cube % 36) / 6) as usize],
+			LEVELS[(cube % 6) as usize],
+		);
+	}
+	let gray = 8 + 10 * (index - 232);
+	Color::Rgb(gray, gray, gray)
+}
+
 const fn nearest_level(channel: u8) -> u8 {
 	let levels = [0_u8, 95, 135, 175, 215, 255];
 	let mut best = 0_u8;
@@ -404,6 +453,18 @@ fn intern_link(url: &str) -> Option<LinkId> {
 	Some(links.intern(url))
 }
 
+/// Underline shape carried by a [`Style`] (SGR `4` / `4:x`).
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum Underline {
+	/// No underline.
+	#[default]
+	None,
+	/// Single straight underline (SGR `4`).
+	Straight,
+	/// Curly underline (SGR `4:3`), used for typo squiggles.
+	Curly,
+}
+
 /// Canonical visual attributes for one or more cells.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct Style {
@@ -412,7 +473,7 @@ pub struct Style {
 	pub(super) bold:            bool,
 	pub(super) dim:             bool,
 	pub(super) italic:          bool,
-	pub(super) underline:       bool,
+	pub(super) underline:       Underline,
 	/// Underline color (SGR 58); also carries the Kitty placeholder
 	/// placement-ID reference on typed image cells.
 	pub(super) underline_color: Color,
@@ -430,7 +491,7 @@ impl Style {
 			bold:            false,
 			dim:             false,
 			italic:          false,
-			underline:       false,
+			underline:       Underline::None,
 			underline_color: Color::Default,
 			reverse:         false,
 			strikethrough:   false,
@@ -470,7 +531,13 @@ impl Style {
 
 	/// Enables underlining.
 	pub const fn underline(mut self) -> Self {
-		self.underline = true;
+		self.underline = Underline::Straight;
+		self
+	}
+
+	/// Enables a curly underline (SGR `4:3`), the typo-squiggle shape.
+	pub const fn undercurl(mut self) -> Self {
+		self.underline = Underline::Curly;
 		self
 	}
 
@@ -518,7 +585,9 @@ impl Style {
 		self.bold |= parent.bold;
 		self.dim |= parent.dim;
 		self.italic |= parent.italic;
-		self.underline |= parent.underline;
+		if matches!(self.underline, Underline::None) {
+			self.underline = parent.underline;
+		}
 		if matches!(self.underline_color, Color::Default) {
 			self.underline_color = parent.underline_color;
 		}
@@ -575,7 +644,7 @@ pub struct StyleSpec {
 	/// Italics.
 	pub italic:          bool,
 	/// Underlining.
-	pub underline:       bool,
+	pub underline:       Underline,
 	/// Underline color (SGR 58); [`Color::Default`] follows the foreground.
 	pub underline_color: Color,
 	/// Reverse video.
@@ -645,6 +714,19 @@ impl Cell {
 	}
 }
 
+/// A semantic mark on one frame row, materialized by the terminal renderer
+/// as an OSC 133 shell-integration zone around the row's cells. Marks are row
+/// metadata like soft-wrap flags: they
+/// ride along with single-row blits and never touch cell content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum RowMark {
+	/// First row of a prompt zone: `OSC 133;A` precedes the row.
+	PromptStart,
+	/// Last row of a prompt zone: `OSC 133;B`, `133;C`, and `133;D;0`
+	/// follow the row, closing the zone within the same paint.
+	PromptEnd,
+}
+
 /// A complete declarative terminal viewport.
 ///
 /// Each frame owns a fixed cell grid. Wide graphemes reserve continuation
@@ -662,6 +744,10 @@ pub struct Frame {
 	/// Soft row boundaries: bit `y` set means row `y` wraps onto row
 	/// `y + 1` mid-word, forming one logical line broken only by width.
 	soft_wraps:      SmolBitmap,
+	/// Rows carrying [`RowMark::PromptStart`].
+	prompt_starts:   SmolBitmap,
+	/// Rows carrying [`RowMark::PromptEnd`].
+	prompt_ends:     SmolBitmap,
 }
 
 impl Frame {
@@ -677,6 +763,8 @@ impl Frame {
 			source_id: NEXT_FRAME_ID.fetch_add(1, Ordering::Relaxed),
 			revision: 0,
 			soft_wraps: SmolBitmap::new(),
+			prompt_starts: SmolBitmap::new(),
+			prompt_ends: SmolBitmap::new(),
 		}
 	}
 
@@ -701,6 +789,9 @@ impl Frame {
 		// drop them so a later regrowth cannot resurrect stale joins.
 		let first_invalid = usize::from(height.saturating_sub(1));
 		self.soft_wraps.retain(|index| index < first_invalid);
+		let rows = usize::from(height);
+		self.prompt_starts.retain(|index| index < rows);
+		self.prompt_ends.retain(|index| index < rows);
 		self.size.height = height;
 		if self.cursor.is_some_and(|(_, y)| y >= height) {
 			self.cursor = None;
@@ -734,6 +825,44 @@ impl Frame {
 	#[inline]
 	pub fn soft_wrap(&self, y: u16) -> bool {
 		y.saturating_add(1) < self.size.height && self.soft_wraps.get(usize::from(y))
+	}
+
+	/// Marks row `y` with a semantic zone boundary. Rows outside the frame
+	/// are ignored. Marks are metadata: they do not change cell content.
+	pub fn mark_row(&mut self, y: u16, mark: RowMark) {
+		if y >= self.size.height {
+			return;
+		}
+		self.touch();
+		self.marks_mut(mark).insert(usize::from(y));
+	}
+
+	/// Whether row `y` carries `mark`.
+	#[inline]
+	pub fn row_mark(&self, y: u16, mark: RowMark) -> bool {
+		y < self.size.height && self.marks(mark).get(usize::from(y))
+	}
+
+	const fn marks(&self, mark: RowMark) -> &SmolBitmap {
+		match mark {
+			RowMark::PromptStart => &self.prompt_starts,
+			RowMark::PromptEnd => &self.prompt_ends,
+		}
+	}
+
+	const fn marks_mut(&mut self, mark: RowMark) -> &mut SmolBitmap {
+		match mark {
+			RowMark::PromptStart => &mut self.prompt_starts,
+			RowMark::PromptEnd => &mut self.prompt_ends,
+		}
+	}
+
+	/// Drops every row mark on rows `[top, bottom)`.
+	fn clear_row_marks(&mut self, top: u16, bottom: u16) {
+		for index in usize::from(top)..usize::from(bottom.min(self.size.height)) {
+			self.prompt_starts.set(index, false);
+			self.prompt_ends.set(index, false);
+		}
 	}
 
 	#[inline]
@@ -799,13 +928,22 @@ impl Frame {
 		self.cursor = Some((x, y));
 	}
 
+	/// Removes the terminal/native hardware cursor from this frame.
+	pub const fn clear_cursor(&mut self) {
+		self.touch();
+		self.cursor = None;
+	}
+
 	/// Replaces every cell with a styled blank.
 	pub fn clear(&mut self, style: Style) {
 		self.touch();
 		self.cells.fill(Cell::blank(style));
+		self.cursor = None;
 		self.decors.clear();
 		self.noselect.clear();
 		self.soft_wraps.clear();
+		self.prompt_starts.clear();
+		self.prompt_ends.clear();
 	}
 
 	/// Fills a clipped rectangle with styled blanks.
@@ -826,6 +964,11 @@ impl Frame {
 		// Blanking any part of a row invalidates its exact joinability;
 		// painters re-flag when they redraw.
 		self.clear_soft_wraps_touching(top, bottom);
+		// A full-width blank retires the row's zone marks the same way;
+		// a partial blank keeps them, since the marked content survives.
+		if left == 0 && right == self.size.width {
+			self.clear_row_marks(top, bottom);
+		}
 
 		let blank = Cell::blank(style);
 		for y in top..bottom {
@@ -1060,6 +1203,8 @@ impl Frame {
 		self.size == other.size
 			&& self.cursor == other.cursor
 			&& self.soft_wraps == other.soft_wraps
+			&& self.prompt_starts == other.prompt_starts
+			&& self.prompt_ends == other.prompt_ends
 			&& self.cells == other.cells
 	}
 
@@ -1075,6 +1220,9 @@ impl Frame {
 		let other_start = usize::from(other_row) * width;
 		self.cells[start..start + width] == other.cells[other_start..other_start + width]
 			&& self.soft_wrap(row) == other.soft_wrap(other_row)
+			&& self.row_mark(row, RowMark::PromptStart)
+				== other.row_mark(other_row, RowMark::PromptStart)
+			&& self.row_mark(row, RowMark::PromptEnd) == other.row_mark(other_row, RowMark::PromptEnd)
 	}
 
 	/// Copies one row's cells from `src` (same width required). The
@@ -1098,6 +1246,11 @@ impl Frame {
 		if self.soft_wraps != src.soft_wraps {
 			self.touch();
 			self.soft_wraps.clone_from(&src.soft_wraps);
+		}
+		if self.prompt_starts != src.prompt_starts || self.prompt_ends != src.prompt_ends {
+			self.touch();
+			self.prompt_starts.clone_from(&src.prompt_starts);
+			self.prompt_ends.clone_from(&src.prompt_ends);
 		}
 	}
 
@@ -1210,10 +1363,24 @@ impl Frame {
 		// boundaries; anything else conservatively hardens the touched
 		// rows, since exact joinability cannot survive a partial rewrite.
 		self.clear_soft_wraps_touching(dst_y, dst_y.saturating_add(copied));
-		if dst_x == 0 && width == self.size.width && width == src.size.width {
+		let full_width = dst_x == 0 && width == self.size.width && width == src.size.width;
+		if full_width {
 			for offset in 0..copied.saturating_sub(1) {
 				if src.soft_wrap(src_top.saturating_add(offset)) {
 					self.set_soft_wrap(dst_y.saturating_add(offset));
+				}
+			}
+			// A full-width copy replaces the rows' zone marks outright.
+			self.clear_row_marks(dst_y, dst_y.saturating_add(copied));
+		}
+		// Zone marks are row metadata, so every copied row carries them —
+		// including the single-row blits that retire history.
+		for offset in 0..copied {
+			let from_y = src_top.saturating_add(offset);
+			let to_y = dst_y.saturating_add(offset);
+			for mark in [RowMark::PromptStart, RowMark::PromptEnd] {
+				if src.row_mark(from_y, mark) {
+					self.mark_row(to_y, mark);
 				}
 			}
 		}
@@ -1326,7 +1493,9 @@ impl Frame {
 
 #[cfg(test)]
 mod tests {
-	use super::{CellContent, Color, Decor, DecorFill, DecorKind, Frame, Rect, Size, Style};
+	use super::{
+		CellContent, Color, Decor, DecorFill, DecorKind, Frame, Rect, RowMark, Size, Style,
+	};
 	use crate::{
 		context::JamoWidth,
 		rich::{jamo_width, set_jamo_width},
@@ -1352,6 +1521,9 @@ mod tests {
 			Color::Rgb(236, 238, 239),
 			"dark fills blend 92% toward white"
 		);
+		assert_eq!(Color::Default.contrast_label(), Color::Default);
+		assert_eq!(Color::Indexed(255).contrast_label(), Color::Indexed(16));
+		assert_eq!(Color::Indexed(233).contrast_label(), Color::Indexed(231));
 	}
 
 	#[test]
@@ -1511,6 +1683,47 @@ mod tests {
 		partial.set_soft_wrap(1);
 		partial.blit(&source, 0, 3, 1, 1);
 		assert!(!partial.soft_wrap(1), "an offset copy hardens the rows it rewrites");
+	}
+
+	#[test]
+	fn prompt_zone_marks_first_and_last_rows() {
+		let mut frame = Frame::new(Size::new(4, 5));
+		frame.mark_row(1, RowMark::PromptStart);
+		frame.mark_row(3, RowMark::PromptEnd);
+		frame.mark_row(9, RowMark::PromptEnd);
+		assert!(frame.row_mark(1, RowMark::PromptStart));
+		assert!(!frame.row_mark(1, RowMark::PromptEnd));
+		assert!(frame.row_mark(3, RowMark::PromptEnd));
+		assert!(!frame.row_mark(9, RowMark::PromptEnd), "marks outside the frame are ignored");
+
+		// Single-row blits (history retirement) carry the marks with the row.
+		let mut start = Frame::new(Size::new(4, 1));
+		start.blit(&frame, 1, 1, 0, 0);
+		assert!(start.row_mark(0, RowMark::PromptStart));
+		assert!(!start.row_mark(0, RowMark::PromptEnd));
+		let mut end = Frame::new(Size::new(4, 1));
+		end.blit(&frame, 3, 1, 0, 0);
+		assert!(end.row_mark(0, RowMark::PromptEnd));
+		let mut middle = Frame::new(Size::new(4, 1));
+		middle.mark_row(0, RowMark::PromptStart);
+		middle.blit(&frame, 2, 1, 0, 0);
+		assert!(!middle.row_mark(0, RowMark::PromptStart), "a full-width copy replaces marks");
+
+		// Row equality sees marks so damage diffing re-emits a marked row.
+		let plain = Frame::new(Size::new(4, 5));
+		assert!(!frame.row_equals(1, &plain, 1));
+		assert!(frame.row_equals(2, &plain, 2));
+
+		// A full-width fill retires the marks; clear drops them all.
+		frame.fill(Rect::new(0, 1, 4, 1), Style::default());
+		assert!(!frame.row_mark(1, RowMark::PromptStart));
+		frame.fill(Rect::new(1, 3, 2, 1), Style::default());
+		assert!(frame.row_mark(3, RowMark::PromptEnd), "a partial fill keeps the row's mark");
+		frame.resize_height(3, Style::default());
+		assert!(!frame.row_mark(3, RowMark::PromptEnd), "shrinking drops stale marks");
+		frame.mark_row(0, RowMark::PromptStart);
+		frame.clear(Style::default());
+		assert!(!frame.row_mark(0, RowMark::PromptStart));
 	}
 
 	#[test]

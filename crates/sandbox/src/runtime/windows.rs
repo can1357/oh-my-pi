@@ -23,6 +23,7 @@ pub(crate) struct AppContainerPrepared {
 	pub(crate) work_dir:         Option<PathBuf>,
 	pub(crate) capability_sids:  Vec<CapabilitySid>,
 	pub(crate) read_deny:        Vec<PathBuf>,
+	pub(crate) write_deny:       Vec<PathBuf>,
 	pub(crate) read_grants:      Vec<PathBuf>,
 	pub(crate) write_grants:     Vec<PathBuf>,
 	pub(crate) child_restricted: bool,
@@ -105,6 +106,7 @@ pub(crate) fn prepare(
 		work_dir,
 		capability_sids: capability_sids(spec.network),
 		read_deny: spec.read_deny.clone(),
+		write_deny: spec.write_deny.clone(),
 		read_grants,
 		write_grants,
 		child_restricted: spec.no_exec,
@@ -512,6 +514,7 @@ mod windows {
 		let mut acl = match AclMutationStack::apply(
 			sid.0,
 			&prepared.read_deny,
+			&prepared.write_deny,
 			&prepared.read_grants,
 			&prepared.write_grants,
 		) {

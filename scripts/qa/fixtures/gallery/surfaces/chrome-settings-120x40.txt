@@ -1,0 +1,40 @@
+╭─ Settings ───────────────────────────────────────────────────────────────────────────────────────────────────────────╮
+│  🎨 Appearance    🤖 Model    ⌨ Interaction    📋 Context    🧠 Memory    📁 Files    💻    🔧    📦    🌐    📦     │          
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│   Theme              │   Theme                                                                                     █ │
+│   Composer           │ ❯ Dark Theme                  titanium                                                      █ │
+│   Status Line        │   Light Theme                 light                                                         █ │
+│   Display            │   Symbol Preset               unicode                                                       █ │
+│   Images             │   Color-Blind Mode            false                                                         █ │
+│                      │   Composer                                                                                  █ │
+│                      │   Composer Shape              band                                                          █ │
+│                      │   Status Line                                                                               █ │
+│                      │   Status Line Preset          default                                                       █ │
+│                      │   Status Line Separator       powerline-thin                                                █ │
+│                      │   Context-Reactive Line       embedded                                                      █ │
+│                      │   Session Accent              true                                                          █ │
+│                      │   Transparent Status Line     false                                                         █ │
+│                      │   Compact Thinking Level      true                                                          █ │
+│                      │   Show Hook Status            true                                                          █ │
+│                      │   Display                                                                                   █ │
+│                      │   Resize Scrollback           rebuild                                                       █ │
+│                      │   Native Terminal Progress    false                                                         █ │
+│                      │   Large Headings (Kitty)      false                                                         █ │
+│                      │   Render Mermaid Diagrams     true                                                          │ │
+│                      │   Codex Reset Fireworks       false                                                         │ │
+│                      │   Terminal Title Run State    true                                                          │ │
+│                      │   Terminal Hyperlinks         auto                                                          │ │
+│                      │   Tight Layout                false                                                         │ │
+│                      │   Shimmer                     classic                                                       │ │
+│                      │   Smooth Streaming            true                                                          │ │
+│                      │   Hide Tool Activity          false                                                         │ │
+│                                                                                                                      │
+│   Theme used when the terminal has a dark background                                                                 │
+│                                                                                                                      │
+│                                                                                                                      │
+│                                                                                                                      │
+│ Preview:                                                                                                             │
+│  π  > ◒ Fable 5 > 🗑 …ettings-120x40-parent-9tiCEM/pi-capture > ⑂ main ▶─2%────────────────────────────────────┃────… │
+├──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ Enter/Space to change · Tab to jump sections · ←/→ to switch tabs · Type to search · Esc to close                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╯

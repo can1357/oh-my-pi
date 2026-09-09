@@ -165,6 +165,46 @@ class Backend:
             }
             return {"total": bucket, "groups": [bucket], "series": [], "sessions": 1, "truncated": False}
         if operation == "omp.sessions.journal":
+            if arguments.get("structure"):
+                return {
+                    "entries": [
+                        {
+                            "id": {"session": "session-a", "index": 0},
+                            "parent": None,
+                            "kind": "init",
+                            "ts": 1,
+                            "data": {"agent": None},
+                            "label": "root",
+                        },
+                        {
+                            "id": {"session": "session-a", "index": 1},
+                            "parent": {"session": "session-a", "index": 0},
+                            "kind": "msg",
+                            "ts": 2,
+                            "data": {"role": "user"},
+                            "label": None,
+                        },
+                        {
+                            "id": {"session": "session-a", "index": 3},
+                            "parent": {"session": "session-a", "index": 99},
+                            "kind": "msg",
+                            "ts": 3,
+                            "data": {"role": "orphan"},
+                            "label": None,
+                        },
+                        {
+                            "id": {"session": "session-a", "index": 4},
+                            "parent": {"session": "session-a", "index": 0},
+                            "kind": "msg",
+                            "ts": 4,
+                            "data": {"role": "assistant"},
+                            "label": None,
+                        },
+                    ],
+                    "leaf": {"session": "session-a", "index": 4},
+                    "cursor": None,
+                    "done": True,
+                }
             assert arguments["since"] == 1
             return {
                 "entries": [{
@@ -241,6 +281,15 @@ async def exercise():
     assert report.total.duration == omp.Duration("5ms")
     entries = [entry async for entry in sessions.journal("session-a", since=omp.EntryId("session-a", 1))]
     assert entries[0].raw == b'{"answer":42}'
+    roots = await sessions.tree()
+    assert [node.id.index for node in roots] == [0, 3]
+    assert [node.id.index for node in roots[0].children] == [1, 4]
+    assert roots[0].label == "root"
+    assert [node.id.index for node in await sessions.branch()] == [0, 4]
+    assert [
+        node.id.index
+        for node in await sessions.branch(omp.EntryId("session-a", 1))
+    ] == [0, 1]
     assert entries[0].artifact.id == "1"
     try:
         await sessions.delete("session-a")

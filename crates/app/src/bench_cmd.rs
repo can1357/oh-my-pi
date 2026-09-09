@@ -7,9 +7,7 @@ use std::{
 
 use futures::{StreamExt as _, stream};
 use miette::{IntoDiagnostic as _, miette};
-use omp_catalog::ModelKey;
-use omp_core::Str;
-use omp_inference::{
+use omp_ai::{
 	Client,
 	call::{CallMeta, Target},
 	event::ChatEvent,
@@ -17,6 +15,8 @@ use omp_inference::{
 	receipt::{ExecutionBudget, Usage},
 	router,
 };
+use omp_catalog::ModelKey;
+use omp_core::Str;
 use serde::Serialize;
 
 use crate::{
@@ -321,18 +321,20 @@ pub async fn run(args: BenchArgs) -> miette::Result<()> {
 }
 
 async fn sample(
-	registry: omp_inference::Registry,
+	registry: omp_ai::Registry,
 	model: ModelKey,
 	challenge: Challenge,
 	run: u32,
 ) -> miette::Result<Sample> {
 	let planner = router::Router::new(registry.clone(), Duration::from_secs(30));
 	let meta = CallMeta {
-		id:       RequestId::from(format!("omp-bench-{run}")),
-		target:   Target::Model(model),
-		deadline: None,
-		budget:   ExecutionBudget::default(),
-		session:  None,
+		id:             RequestId::from(format!("omp-bench-{run}")),
+		target:         Target::Model(model),
+		deadline:       None,
+		budget:         ExecutionBudget::default(),
+		session:        None,
+		debug_session:  None,
+		response_hooks: Default::default(),
 	};
 	let mut request = cli::chat_request(challenge.prompt);
 	request.max_output_tokens = Some(challenge.max_tokens);

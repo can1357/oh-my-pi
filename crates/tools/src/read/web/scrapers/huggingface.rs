@@ -43,8 +43,8 @@ pub(super) async fn render<C: HttpClient + Sync>(
 		Kind::ModelOrUser => render_model_or_user(client, &target.id).await,
 	};
 
-	// pi's `loadPage` converts transport failures into an unsuccessful result,
-	// and the handler's outer catch returns null for the remaining failures.
+	// Transport failures produce no site-specific result; all other failures
+	// also decline so the ordinary web reader can handle the request.
 	// A site-specific outage must therefore fall through to the ordinary web
 	// reader rather than turn the read into a tool error.
 	Ok(rendered.unwrap_or(None))
@@ -674,7 +674,7 @@ mod tests {
 		);
 		assert_eq!(rendered.method.as_str(), "huggingface");
 		assert_eq!(rendered.content_type.as_deref(), Some("text/markdown"));
-		assert!(rendered.notes.is_empty());
+		assert!(rendered.diags.is_empty());
 		assert_eq!(
 			rendered.content.as_str(),
 			"# acme/model\n\n**Task:** text-generation\n**Library:** transformers\n**Downloads:** \
@@ -835,7 +835,7 @@ mod tests {
 				.unwrap()
 				.unwrap();
 			assert_eq!(rendered.content.as_str(), "# acme/model");
-			assert!(rendered.notes.is_empty());
+			assert!(rendered.diags.is_empty());
 		}
 	}
 }

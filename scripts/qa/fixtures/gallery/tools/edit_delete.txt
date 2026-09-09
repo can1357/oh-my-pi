@@ -1,0 +1,24 @@
+── edit_delete — Delete ────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Delete:  scripts/prune-changelogs.ts                                                             
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Delete:  scripts/prune-changelogs.ts                                                             
+                                                                                                    
+
+  · done
+                                                                                                    
+ Delete:  scripts/prune-changelogs.ts                                                             
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  Delete:  scripts/prune-changelogs.ts ──────────────────────────────────────────────────────╮
+│Cannot delete scripts/prune-changelogs.ts: the file does not exist.                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

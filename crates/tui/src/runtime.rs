@@ -37,13 +37,13 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{
 	AltScreenUse, Appearance, Chord, CursorStyle, Graphics, InputEvent, Key, OverlayId, PaintStats,
-	ProbeResults, Renderer, Size, Terminal, TerminalCaps, TerminalOptions, TerminalResponse, Theme,
-	TtyOut, Ui, UiContext, UiEvent,
+	ProbeResults, Renderer, Size, Terminal, TerminalCaps, TerminalOptions, TerminalResponse, TtyOut,
+	Ui, UiContext, UiEvent,
 	component::Slot,
 	components,
 	components::ImgState,
 	debug, detect, imagereg, negotiate_async, paste,
-	paste::{Clipboard, ClipboardRead, Pasted, PastedImage},
+	paste::{Clipboard, ClipboardRead, ClipboardReadOutcome, Pasted, PastedImage},
 	pump::{DebugOp, DebugQuery, TerminalEvent},
 	test_support,
 };
@@ -63,18 +63,16 @@ pub enum Msg {
 	/// A finished off-thread decode for the `Img` at `slot`.
 	ImageDecoded { slot: Slot, state: ImgState },
 	/// A finished background system-clipboard read, tagged with its
-	/// [`ClipboardGate`] generation; `raw` requests verbatim insertion and
-	/// `None` means the clipboard was empty.
-	Pasted { generation: u64, raw: bool, clipboard: Option<Clipboard> },
+	/// [`ClipboardGate`] generation; `raw` requests verbatim insertion.
+	Pasted { generation: u64, raw: bool, outcome: ClipboardReadOutcome },
 }
 
 /// Ordering discipline for one in-flight background clipboard read.
 ///
-/// pi queues keystrokes typed behind an unsettled paste so a trailing Enter
-/// cannot submit before the payload lands (`custom-editor.ts` pending-input
-/// queue); this gate reproduces that contract for [`App`]. Input admitted
-/// while a read is in flight is buffered and replayed in order once the
-/// read settles or expires; quit chords bypass the buffer so a hung backend
+/// Keystrokes typed behind an unsettled paste queue so a trailing Enter
+/// cannot submit before the payload lands. Input admitted
+/// while a read is in flight is buffered and replayed in order once the read
+/// settles or expires; quit chords bypass the buffer so a hung backend
 /// can never lock the user in, and results from an expired read are dropped
 /// by generation.
 #[derive(Default)]
@@ -170,7 +168,7 @@ impl ImageLoader {
 		slot: Slot,
 		source: Str,
 		width: u16,
-		height: Option<u16>,
+		rows: components::RowBound,
 		trim: bool,
 		prepare_kitty: bool,
 	) {
@@ -179,7 +177,7 @@ impl ImageLoader {
 			if prepare_kitty {
 				let _ = imagereg::prepare_png(&source);
 			}
-			let state = components::decode_source(&source, width, height, trim);
+			let state = components::decode_source(&source, width, rows, trim);
 			let _ = tx.send(Msg::ImageDecoded { slot, state });
 		});
 	}
@@ -377,12 +375,14 @@ impl AppOptions {
 		// frame one on the alternate screen; the main buffer stays untouched
 		// (and unseeded) until release.
 		let initial_hold = hold_alt || ui.has_overlay();
+		let paint_started = Instant::now();
 		let last_stats = if initial_hold {
 			let alt_enter = terminal.stage_alt_enter(AltScreenUse::Interactive);
 			ui.repaint(&mut renderer, viewport.height, alt_enter.as_deref().unwrap_or(""))?
 		} else {
 			ui.present(&mut renderer, viewport.height)?
 		};
+		let last_frame_cost = paint_started.elapsed();
 		let now = Instant::now();
 		Ok(App {
 			ui,
@@ -405,6 +405,8 @@ impl AppOptions {
 			hold_request: hold_alt,
 			clipboard: ClipboardGate::default(),
 			last_stats,
+			last_frame_cost,
+			animation_not_before: None,
 			terminal,
 		})
 	}
@@ -527,24 +529,26 @@ pub enum AppEvent {
 
 /// Running retained-UI terminal host.
 pub struct App {
-	ui:             Ui,
-	renderer:       Renderer<TtyOut>,
-	msgs:           Receiver<Msg>,
-	tx:             flume::Sender<Msg>,
-	cancel:         CancellationToken,
-	epoch:          Instant,
-	caps:           TerminalCaps,
-	viewport:       Size,
-	quit:           SmallVec<Key, 4>,
-	hotkeys:        SmallVec<Key, 4>,
-	quit_on_cancel: bool,
-	resize_wait:    Option<Instant>,
-	resize_settle:  Option<Instant>,
-	alt_hold:       bool,
-	hold_request:   bool,
-	clipboard:      ClipboardGate,
-	last_stats:     PaintStats,
-	terminal:       Terminal,
+	ui:                   Ui,
+	renderer:             Renderer<TtyOut>,
+	msgs:                 Receiver<Msg>,
+	tx:                   flume::Sender<Msg>,
+	cancel:               CancellationToken,
+	epoch:                Instant,
+	caps:                 TerminalCaps,
+	viewport:             Size,
+	quit:                 SmallVec<Key, 4>,
+	hotkeys:              SmallVec<Key, 4>,
+	quit_on_cancel:       bool,
+	resize_wait:          Option<Instant>,
+	resize_settle:        Option<Instant>,
+	alt_hold:             bool,
+	hold_request:         bool,
+	clipboard:            ClipboardGate,
+	last_stats:           PaintStats,
+	last_frame_cost:      Duration,
+	animation_not_before: Option<Instant>,
+	terminal:             Terminal,
 }
 
 impl App {
@@ -594,6 +598,11 @@ impl App {
 		self.last_stats
 	}
 
+	/// Returns the compose-and-write cost of the most recent completed frame.
+	pub const fn last_frame_cost(&self) -> Duration {
+		self.last_frame_cost
+	}
+
 	/// Requests or releases a persistent alternate-screen hold.
 	///
 	/// Fullscreen scenes — a welcome screen, a pager — hold the alternate
@@ -619,6 +628,7 @@ impl App {
 		reason = "terminal UI components are intentionally confined to their owning thread"
 	)]
 	pub async fn next(&mut self) -> io::Result<Option<AppEvent>> {
+		let mut animation_paint = false;
 		loop {
 			if self.cancel.is_cancelled() {
 				return Ok(None);
@@ -627,7 +637,7 @@ impl App {
 			// Alternate-screen transitions and ordinary paints all render the
 			// same fixed viewport. Only the staged enter/leave prefix differs.
 			let want_hold = self.hold_request || self.ui.has_overlay();
-			if want_hold != self.alt_hold {
+			let painted = if want_hold != self.alt_hold {
 				let prefix = if want_hold {
 					self
 						.terminal
@@ -636,15 +646,26 @@ impl App {
 				} else {
 					Str::new(self.terminal.stage_alt_leave().unwrap_or(""))
 				};
-				self.last_stats = self
-					.ui
-					.repaint(&mut self.renderer, self.viewport.height, &prefix)?;
+				self.paint(Some(&prefix))?;
 				if !want_hold {
 					self.terminal.commit_alt_leave();
 				}
 				self.alt_hold = want_hold;
+				true
 			} else if self.ui.has_damage() {
-				self.last_stats = self.ui.present(&mut self.renderer, self.viewport.height)?;
+				self.paint(None)?;
+				true
+			} else {
+				false
+			};
+			if animation_paint {
+				if painted {
+					self.animation_not_before = Some(
+						Instant::now()
+							+ components::Spinner::animation_backpressure(self.last_frame_cost),
+					);
+				}
+				animation_paint = false;
 			}
 
 			// Replay input queued behind a clipboard read — oldest first, one
@@ -654,7 +675,7 @@ impl App {
 					// `dispatch_input` already resolved `Unclaimed` fallbacks.
 					Routed::Continue | Routed::Unclaimed => continue,
 					Routed::Copy(text) => {
-						self.terminal.copy_to_clipboard(&text)?;
+						let _ = self.terminal.copy_to_clipboard(&text)?;
 						continue;
 					},
 					Routed::Event(event) => return Ok(Some(event)),
@@ -662,7 +683,12 @@ impl App {
 				}
 			}
 
-			let wake = self.ui.next_wake().map(|at| self.epoch + at);
+			let wake = self.ui.next_wake().map(|at| {
+				let scheduled = self.epoch + at;
+				self
+					.animation_not_before
+					.map_or(scheduled, |not_before| scheduled.max(not_before))
+			});
 			let wakeup = tokio::select! {
 				() = self.cancel.cancelled() => Wakeup::Cancelled,
 				message = self.msgs.recv_async() => Wakeup::Message(message),
@@ -679,11 +705,11 @@ impl App {
 				Wakeup::Message(Ok(Msg::ImageDecoded { slot, state })) => {
 					self.ui.deliver_image(slot, state);
 				},
-				Wakeup::Message(Ok(Msg::Pasted { generation, raw, clipboard })) => {
+				Wakeup::Message(Ok(Msg::Pasted { generation, raw, outcome })) => {
 					// A result from an expired or superseded read is dropped;
 					// its queued input already replayed without it.
 					if self.clipboard.settle(generation)
-						&& let Some(clipboard) = clipboard
+						&& let ClipboardReadOutcome::Payload(clipboard) = outcome
 						&& let Some(event) = self.deliver_clipboard(clipboard, raw)
 					{
 						return Ok(Some(event));
@@ -698,7 +724,7 @@ impl App {
 					TerminalEvent::Effect(_) => {},
 					// `Terminal::next` reports closure as an error.
 					TerminalEvent::Closed => return Ok(None),
-					TerminalEvent::Input(event) => {
+					TerminalEvent::Input(event) | TerminalEvent::InputWithMeta { event, .. } => {
 						let in_band_resize =
 							matches!(&event, InputEvent::Response(TerminalResponse::InBandResize { .. }));
 						if self
@@ -722,7 +748,9 @@ impl App {
 							match self.dispatch_input(event) {
 								// `dispatch_input` already resolved `Unclaimed` fallbacks.
 								Routed::Continue | Routed::Unclaimed => {},
-								Routed::Copy(text) => self.terminal.copy_to_clipboard(&text)?,
+								Routed::Copy(text) => {
+									let _ = self.terminal.copy_to_clipboard(&text)?;
+								},
 								Routed::Event(event) => return Ok(Some(event)),
 								Routed::Stop => return Ok(None),
 							}
@@ -730,7 +758,7 @@ impl App {
 					},
 				},
 				Wakeup::Animation => {
-					self.ui.tick(self.epoch.elapsed());
+					animation_paint = self.ui.tick(self.epoch.elapsed());
 				},
 				Wakeup::ClipboardExpired => self.clipboard.expire(),
 				Wakeup::ResizeCheck => {
@@ -778,10 +806,7 @@ impl App {
 			return None;
 		}
 		let mut ctx = current.clone();
-		if ctx.theme == Theme::for_appearance(ctx.appearance) {
-			ctx.theme = Theme::for_appearance(appearance);
-		}
-		ctx.appearance = appearance;
+		ctx.apply_appearance(appearance);
 		self.ui.set_context(ctx);
 		Some(AppEvent::Appearance(appearance))
 	}
@@ -859,8 +884,9 @@ impl App {
 	/// The read rides [`crate::paste::spawn_clipboard_read`]'s detached
 	/// thread; a result arriving after the gate expired is dropped by
 	/// generation. A channel closed without a value (the reader thread
-	/// never spawned) settles the gate immediately so queued input is not
-	/// held until the deadline.
+	/// never spawned) becomes [`ClipboardReadOutcome::ReadFailure`] and
+	/// settles the gate immediately so queued input is not held until the
+	/// deadline.
 	fn begin_clipboard_read(&mut self, scope: ClipboardRead) {
 		let Some(generation) = self.clipboard.begin(Instant::now()) else {
 			return;
@@ -869,13 +895,26 @@ impl App {
 		let raw = scope == ClipboardRead::Text;
 		let tx = self.tx.clone();
 		tokio::spawn(async move {
-			let clipboard = rx.await.unwrap_or(None);
-			let _ = tx.send(Msg::Pasted { generation, raw, clipboard });
+			let outcome = rx.await.unwrap_or(ClipboardReadOutcome::ReadFailure);
+			let _ = tx.send(Msg::Pasted { generation, raw, outcome });
 		});
 	}
 
 	/// Routes one decoded input event into the retained tree, mapping the
 	/// outcome exactly like the inline dispatch it replaced.
+	fn paint(&mut self, prefix: Option<&str>) -> io::Result<()> {
+		let started = Instant::now();
+		let result = match prefix {
+			Some(prefix) => self
+				.ui
+				.repaint(&mut self.renderer, self.viewport.height, prefix),
+			None => self.ui.present(&mut self.renderer, self.viewport.height),
+		};
+		self.last_frame_cost = started.elapsed();
+		self.last_stats = result?;
+		Ok(())
+	}
+
 	fn dispatch_input(&mut self, event: InputEvent) -> Routed {
 		// Input lands on the real clock: transitions started by this event
 		// must not begin on a stale animation tick.
@@ -894,6 +933,15 @@ impl App {
 					}
 				},
 				routed => routed,
+			},
+			InputEvent::Chord(event) => {
+				if event.pressed
+					&& let Some(key) = event.key
+				{
+					self.route_key(key)
+				} else {
+					Routed::Continue
+				}
 			},
 			InputEvent::Mouse(report) => {
 				let event =
@@ -947,7 +995,7 @@ impl App {
 		self.viewport = viewport;
 		self.ui.resize(viewport.width);
 		self.ui.damage_all();
-		self.last_stats = self.ui.present(&mut self.renderer, viewport.height)?;
+		self.paint(None)?;
 		self.resize_settle = Some(now + RESIZE_SETTLE);
 		Ok(())
 	}
@@ -1339,7 +1387,7 @@ mod tests {
 		// Unreserved, the same chord stays the input's kill-line.
 		assert_eq!(
 			route_key_event(&mut ui, Key::Ctrl('k'), &quit, &[], true),
-			Routed::Event(AppEvent::Updated)
+			Routed::Event(AppEvent::Changed { id: "composer".into(), value: "".into() })
 		);
 		assert_eq!(ui.values()["composer"], "");
 	}

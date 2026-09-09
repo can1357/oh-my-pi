@@ -10,13 +10,13 @@ use std::{
 	ffi::OsString,
 	io::{self, ErrorKind, Read, Write},
 	process,
-	process::{Command, Stdio},
+	process::Stdio,
 	sync::atomic::{AtomicBool, Ordering},
 	thread,
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command as ClapCommand, builder::ValueParser};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, matches_parser, util};
 
@@ -115,11 +115,10 @@ fn app() -> ClapCommand {
 
 /// Spawns the child and pumps stdin into it while draining its stdout/stderr.
 fn spawn_and_pump(host: &mut Host, command: &[OsString], first: Option<u8>) -> i32 {
-	let mut child = match Command::new(&command[0])
+	let mut child = match host
+		.command(&command[0])
 		.args(&command[1..])
 		.current_dir(host.cwd())
-		.env_clear()
-		.envs(host.env())
 		.stdin(Stdio::piped())
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
@@ -131,6 +130,7 @@ fn spawn_and_pump(host: &mut Host, command: &[OsString], first: Option<u8>) -> i
 			return 127;
 		},
 	};
+	host.observe_spawn(child.id());
 
 	let mut child_stdin = child.stdin.take().expect("piped stdin");
 	let mut child_stdout = child.stdout.take().expect("piped stdout");
@@ -160,7 +160,9 @@ fn spawn_and_pump(host: &mut Host, command: &[OsString], first: Option<u8>) -> i
 		};
 		drop(child_stdin); // EOF so the child terminates.
 		if matches!(pump, Err(CopyError::Cancelled)) {
-			let _ = child.kill();
+			if i32::try_from(child.id()).is_ok_and(|pid| host.may_signal(pid)) {
+				let _ = child.kill();
+			}
 		}
 		(out.join().unwrap_or_default(), err.join().unwrap_or_default(), pump)
 	});

@@ -1,0 +1,25 @@
+── think — Think ───────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ The retry loop re-reads the config after every failure, which explains the doubled latency.        
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ The retry loop re-reads the config after every failure, which explains the doubled latency. Cache  
+ the parsed config outside the loop, then re-check the invalidation path.                           
+                                                                                                    
+
+  · done
+                                                                                                    
+ The retry loop re-reads the config after every failure, which explains the doubled latency. Cache  
+ the parsed config outside the loop, then re-check the invalidation path.                           
+                                                                                                    
+
+  · failed
+                                                                                                    
+ The retry loop re-reads the config after every failure, which explains the doubled latency. Cache  
+ the parsed config outside the loop, then re-check the invalidation path.                           
+                                                                                                    
+

@@ -180,8 +180,7 @@ pub(super) fn format_number(number: u64) -> Str {
 	}
 	result.into()
 }
-/// Formats a number with the compact K/M/B notation used by pi registry
-/// projections.
+/// Formats a number with compact K/M/B notation.
 pub(super) fn format_compact_number(number: u64) -> Str {
 	match number {
 		0..=999 => number.to_string().into(),

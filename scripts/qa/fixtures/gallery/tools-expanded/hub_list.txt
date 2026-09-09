@@ -1,0 +1,25 @@
+── hub_list — Hub peers ────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+  IRC peers                                                                                        
+                                                                                                    
+
+  · in progress
+                                                                                                    
+  IRC peers                                                                                        
+                                                                                                    
+
+  · done
+                                                                                                    
+  IRC peers 1 idle · 1 parked · 2 unread                                                           
+ ├─  idle AuthLoader task sub · of Main 2m ago                                                     
+ └─  parked RateLimiter task sub · of Main ⟨2 unread⟩ 12m ago                                      
+                                                                                                    
+
+  · failed
+                                                                                                    
+  IRC peers                                                                                        
+   IRC list failed: agent hub is unavailable.                                                       
+                                                                                                    
+

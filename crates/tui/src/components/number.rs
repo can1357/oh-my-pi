@@ -12,17 +12,29 @@ use crate::{
 	rich::cell_width,
 };
 
-/// Writes a count using the status line's compact `k`/`m` convention.
+/// Writes a count using the status line's compact `K`/`M`/`B` convention.
 ///
-/// Thousands are rounded to a whole number and millions retain one decimal.
+/// A single leading digit keeps one decimal unless it is `.0`; larger
+/// values round to a whole unit: `999`, `1K`, `1.5K`, `25K`, `1M`, `1.5M`.
 pub fn write_compact_count(out: &mut impl fmt::Write, value: u64) -> fmt::Result {
-	if value >= 1_000_000 {
-		write!(out, "{:.1}m", value as f64 / 1_000_000.0)
-	} else if value >= 1_000 {
-		write!(out, "{:.0}k", value as f64 / 1_000.0)
-	} else {
-		write!(out, "{value}")
+	const UNITS: [(u64, char); 3] = [(1_000_000_000, 'B'), (1_000_000, 'M'), (1_000, 'K')];
+	for (scale, unit) in UNITS {
+		if value < scale {
+			continue;
+		}
+		let scaled = value as f64 / scale as f64;
+		if scaled < 10.0 {
+			// One decimal, dropping a trailing `.0`.
+			let tenths = (scaled * 10.0).round() as u64;
+			return if tenths.is_multiple_of(10) {
+				write!(out, "{}{unit}", tenths / 10)
+			} else {
+				write!(out, "{}.{}{unit}", tenths / 10, tenths % 10)
+			};
+		}
+		return write!(out, "{}{unit}", scaled.round() as u64);
 	}
+	write!(out, "{value}")
 }
 
 /// Writes a byte count using the tool renderer's decimal `B`/`K`/`M`/`G`/`T`
@@ -231,13 +243,17 @@ mod tests {
 	fn compact_counts_keep_status_thresholds_and_rounding() {
 		assert_eq!(compact(0), "0");
 		assert_eq!(compact(999), "999");
-		assert_eq!(compact(1_000), "1k");
-		assert_eq!(compact(1_499), "1k");
-		assert_eq!(compact(1_500), "2k");
-		assert_eq!(compact(999_999), "1000k");
-		assert_eq!(compact(1_000_000), "1.0m");
-		assert_eq!(compact(1_500_000), "1.5m");
-		assert_eq!(compact(u64::MAX), "18446744073709.6m");
+		assert_eq!(compact(1_000), "1K");
+		assert_eq!(compact(1_499), "1.5K");
+		assert_eq!(compact(1_550), "1.6K");
+		assert_eq!(compact(9_950), "10K");
+		assert_eq!(compact(25_000), "25K");
+		assert_eq!(compact(999_999), "1000K");
+		assert_eq!(compact(1_000_000), "1M");
+		assert_eq!(compact(1_500_000), "1.5M");
+		assert_eq!(compact(200_000), "200K");
+		assert_eq!(compact(2_500_000_000), "2.5B");
+		assert_eq!(compact(u64::MAX), "18446744074B");
 	}
 
 	#[test]
@@ -257,7 +273,7 @@ mod tests {
 			.with(Prop::Value, "-1500")
 			.with(Prop::Compact, true);
 		number.refresh();
-		assert_eq!(number.text.as_str(), "-2k");
+		assert_eq!(number.text.as_str(), "-1.5K");
 
 		let mut byte_count = NumberLeaf::bytes().with(Prop::Value, "-1536");
 		byte_count.refresh();
@@ -291,7 +307,7 @@ mod tests {
 
 		number.props_mut().set(Prop::Value, 2_000_000i64);
 		number.paint(&mut pc, Rect::new(0, 0, 12, 1));
-		assert_eq!(number.text.as_str(), "2.0m");
+		assert_eq!(number.text.as_str(), "2M");
 		assert_eq!(number.formatting_passes, 2);
 	}
 }

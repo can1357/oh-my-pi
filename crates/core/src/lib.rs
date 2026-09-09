@@ -26,12 +26,16 @@ pub mod fasthash;
 pub mod fs;
 pub mod hash32;
 pub mod location;
+pub mod logging;
 pub mod open;
 pub mod path;
 pub mod phase;
 pub mod principal;
+pub mod qr;
 pub mod secret;
 pub mod semver;
+/// Tolerant JSON for malformed, partial, and streaming documents.
+pub mod slopjson;
 pub mod sparse_index;
 pub mod sparse_map;
 pub mod sparse_set;
@@ -60,6 +64,7 @@ pub use phase::{ActivateReason, InvocationPhase, LifecyclePhase, Point, PointSet
 pub use principal::{
 	ArtifactDigest, ArtifactDigestError, CredentialTier, Principal, Provenance, RemotePrincipal,
 };
+pub use qr::{QrCode, QrEc, QrOverflow};
 pub use secret::{ExposeSecret, Secret, SecretBox, SecretString, ct_eq};
 pub use semver::SemVer;
 pub use sparse_map::SparseMap;

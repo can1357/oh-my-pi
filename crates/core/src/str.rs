@@ -4285,8 +4285,8 @@ mod tests {
 
 	#[test]
 	fn test_sf_numbers() {
-		let s = sf!("count: {}, pi: {:.2}", 42, std::f64::consts::PI);
-		assert_eq!(s.as_str(), "count: 42, pi: 3.14");
+		let s = sf!("count: {}, value: {:.2}", 42, std::f64::consts::PI);
+		assert_eq!(s.as_str(), "count: 42, value: 3.14");
 	}
 
 	#[test]

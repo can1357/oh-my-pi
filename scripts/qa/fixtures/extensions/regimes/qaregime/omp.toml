@@ -1,0 +1,22 @@
+id = "qaregime"
+version = "0.1.0"
+omp_api = 1
+entry = "qaregime"
+
+[[declarations]]
+id = "hello"
+kind = "hard"
+module = "qaregime"
+key = "hello@qaregime.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"
+
+[[declarations]]
+id = "activated"
+kind = "regime"
+module = "qaregime"
+key = "activated"
+trigger = "lazy"
+api = 1
+failure = "fail-open"

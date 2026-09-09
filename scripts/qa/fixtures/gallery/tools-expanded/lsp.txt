@@ -1,0 +1,51 @@
+── lsp — LSP ───────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ LSP: references src/server/auth.ts                                                                
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ LSP: references src/server/auth.ts:42 (validateToken)                                             
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  LSP references ─────────────────────────────────────────────────────────────────────────────╮
+│ src/server/auth.ts                                                                               │
+│ line 42                                                                                          │
+│ symbol: validateToken                                                                            │
+├─── Response ─────────────────────────────────────────────────────────────────────────────────────┤
+│  6 found                                                                                        │
+│  ├─ src/server/auth.ts 2 references                                                              │
+│  │  ├─ line 42, col 14                                                                           │
+│  │  │  at src/server/auth.ts:42:14                                                               │
+│  │  └─ line 118, col 21                                                                          │
+│  │     at src/server/auth.ts:118:21                                                              │
+│  ├─ src/server/middleware/session.ts 1 reference                                                 │
+│  │  └─ line 57, col 18                                                                           │
+│  │     at src/server/middleware/session.ts:57:18                                                 │
+│  ├─ src/server/router.ts 1 reference                                                             │
+│  │  └─ line 153, col 20                                                                          │
+│  │     at src/server/router.ts:153:20                                                            │
+│  └─ test/auth.test.ts 2 references                                                               │
+│     ├─ line 24, col 9                                                                            │
+│     │  at test/auth.test.ts:24:9                                                                 │
+│     └─ line 41, col 9                                                                            │
+│        at test/auth.test.ts:41:9                                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  LSP references ─────────────────────────────────────────────────────────────────────────────╮
+│ src/server/auth.ts                                                                               │
+│ line 42                                                                                          │
+│ symbol: validateToken                                                                            │
+├─── Response ─────────────────────────────────────────────────────────────────────────────────────┤
+│  Output                                                                                         │
+│  └─ No language server found for this file                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

@@ -25,15 +25,17 @@ inspect = ["pyo3/experimental-inspect", "dep:pyo3-introspection"]
 workspace = true
 
 [dependencies]
-pyo3 = { workspace = true, features = ["multiple-pymethods"] }
-pyo3-introspection = { version = "0.29.2", optional = true }
-omp-core = { workspace = true }
-omp-env = { workspace = true }
-omp-tool = { workspace = true }
-omp-storage = { workspace = true }
-omp-scribe = { workspace = true }
-parking_lot = { workspace = true }
-tokio = { workspace = true }
+pyo3.workspace = true
+pyo3-introspection = { workspace = true, optional = true }
+omp-core.workspace = true
+omp-env.workspace = true
+omp-tool.workspace = true
+omp-scribe.workspace = true
+parking_lot.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
 
 [build-dependencies]
-serde_json = { workspace = true }
+serde_json.workspace = true

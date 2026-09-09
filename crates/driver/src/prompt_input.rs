@@ -1,15 +1,12 @@
 //! File-or-inline prompt customization resolution.
 
 use std::{
-	fs, io, iter,
+	fs, io,
 	path::{Path, PathBuf},
 };
 
-use omp_agent::prompt_assets::PromptAssetId;
 use omp_core::Str;
 use thiserror::Error;
-
-use crate::discovery::native;
 
 /// A prompt customization file could not be read.
 #[derive(Debug, Error)]
@@ -29,7 +26,7 @@ pub enum PromptInputError {
 /// Resolves a value as inline text or a readable file.
 ///
 /// Values containing a newline are always inline. Missing and overlong paths
-/// are treated as literal text, matching pi's command-boundary behavior.
+/// are treated as literal text at the command boundary.
 pub fn resolve_prompt_input(input: Option<&str>) -> Result<Option<Str>, PromptInputError> {
 	let Some(input) = input else {
 		return Ok(None);
@@ -50,13 +47,7 @@ pub fn discover_prompt_file(
 	home: &Path,
 	name: &str,
 ) -> Result<Option<Str>, PromptInputError> {
-	let roots = native::discover_roots(cwd, home, 32);
-	for path in roots
-		.project
-		.iter()
-		.map(|root| root.join(name))
-		.chain(iter::once(roots.user.join(name)))
-	{
+	for path in [cwd.join(".omp").join(name), home.join(".omp").join(name)] {
 		match fs::read_to_string(&path) {
 			Ok(content) => return Ok(Some(content.into())),
 			Err(source) if tolerant_literal_error(&source) => {},
@@ -72,7 +63,8 @@ pub fn discover_user_prompt_file(
 	home: &Path,
 	name: &str,
 ) -> Result<Option<Str>, PromptInputError> {
-	let path = native::discover_roots(cwd, home, 32).user.join(name);
+	let _ = cwd;
+	let path = home.join(".omp").join(name);
 	match fs::read_to_string(&path) {
 		Ok(content) if !content.trim().is_empty() => Ok(Some(content.into())),
 		Ok(_) => Ok(None),
@@ -99,9 +91,8 @@ pub fn resolve_system_inputs(
 /// Resolves the title-generation system prompt with project-over-user
 /// `TITLE_SYSTEM.md` precedence and the embedded native prompt as fallback.
 pub fn resolve_title_system_prompt(cwd: &Path, home: &Path) -> Result<Str, PromptInputError> {
-	Ok(discover_prompt_file(cwd, home, "TITLE_SYSTEM.md")?.unwrap_or_else(|| {
-		Str::new_static(omp_agent::prompt_assets::prompt_asset(PromptAssetId::TitleSystem).content)
-	}))
+	Ok(discover_prompt_file(cwd, home, "TITLE_SYSTEM.md")?
+		.unwrap_or_else(|| Str::new_static("Generate a concise title for this coding session.")))
 }
 
 fn tolerant_literal_error(error: &io::Error) -> bool {
@@ -140,10 +131,7 @@ mod tests {
 			resolve_title_system_prompt(&project, &home)
 				.expect("embedded title prompt fallback")
 				.as_str(),
-			omp_agent::prompt_assets::prompt_asset(
-				omp_agent::prompt_assets::PromptAssetId::TitleSystem,
-			)
-			.content
+			"Generate a concise title for this coding session."
 		);
 
 		fs::write(project.join(".omp/TITLE_SYSTEM.md"), "project title")

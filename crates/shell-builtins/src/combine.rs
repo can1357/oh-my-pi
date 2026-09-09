@@ -1,6 +1,5 @@
 //! `combine` builtin: boolean set operations on the lines of two files.
 //!
-//! Ported from the moreutils-inspired in-process implementation in `pi-shell`.
 //! Keeping the utility in process lets it use the shell's scoped streams,
 //! working directory, and cancellation rather than spawning an external tool.
 //!
@@ -18,7 +17,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
@@ -76,7 +75,7 @@ impl Utility for Combine {
 /// The `combine` argument model.
 fn command() -> Command {
 	Command::new(Combine::NAME)
-		.version("combine (pi-shell) 17.2.11")
+		.version("combine 17.2.11")
 		.about("Combine the lines of two files using boolean operations.")
 		.override_usage(format_usage("combine FILE1 and|not|or|xor FILE2"))
 		.disable_help_flag(true)

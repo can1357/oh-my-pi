@@ -52,6 +52,11 @@ message CollabFrame {
     UiRequestEnd ui_request_end = 41;
     TranscriptChunk transcript = 42;
     BusEvent bus_event = 43;
+    AgentViewRequest agent_view_request = 44;
+    AgentViewCancel agent_view_cancel = 45;
+    AgentViewSnapshot agent_view_snapshot = 46;
+    AgentViewEvent agent_view_event = 47;
+    AgentViewEnd agent_view_end = 48;
   }
   omp.inference.v1.ValueMap props = 15;
 }
@@ -271,6 +276,32 @@ message TranscriptChunk {
   uint64 new_size = 3;
   optional string error = 4;
 }
+
+// Native observer protocol. Unlike TranscriptChunk, this never exposes or
+// tails a journal file: the host controller publishes a detached DOM snapshot
+// followed by the same ordered event stream consumed by local actors.
+message AgentViewRequest {
+  uint32 request_id = 1;
+  string agent_id = 2;
+}
+message AgentViewCancel {
+  uint32 request_id = 1;
+}
+message AgentViewSnapshot {
+  uint32 request_id = 1;
+  uint32 chunk_index = 2;
+  bytes snapshot_bytes = 3;
+  bool final = 4;
+}
+message AgentViewEvent {
+  uint32 request_id = 1;
+  JournalRecord event = 2;
+}
+message AgentViewEnd {
+  uint32 request_id = 1;
+  optional ErrorMessage error = 2;
+}
+
 message BusEvent {
   enum Channel {
     CHANNEL_UNSPECIFIED = 0;

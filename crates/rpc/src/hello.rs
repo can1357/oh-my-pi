@@ -28,6 +28,11 @@ impl HelloService {
 
 #[tonic::async_trait]
 impl Gateway for HelloService {
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "gateway", rpc.method = "hello")
+	)]
 	async fn hello(
 		&self,
 		_request: Request<HelloRequest>,
@@ -64,6 +69,11 @@ impl Peer {
 
 /// Perform the mandatory Hello handshake and reject incompatible schema
 /// revisions.
+#[tracing::instrument(
+	level = "debug",
+	skip_all,
+	fields(rpc.service = "gateway", rpc.method = "hello", client = %client, capability_count = capabilities.len())
+)]
 pub async fn handshake(
 	channel: Channel,
 	client: &str,
@@ -89,15 +99,30 @@ async fn handshake_at(
 		.into_inner();
 
 	if response.schema_rev < client_rev {
+		tracing::warn!(
+			server_schema_rev = response.schema_rev,
+			client_schema_rev = client_rev,
+			"RPC handshake rejected an older server schema"
+		);
 		return Err(Error::SchemaTooOld { server: response.schema_rev, client: client_rev });
 	}
 	if omp_proto::SCHEMA_REV < response.min_schema_rev {
+		tracing::warn!(
+			server_min_schema_rev = response.min_schema_rev,
+			client_schema_rev = omp_proto::SCHEMA_REV,
+			"RPC handshake rejected an unsupported client schema"
+		);
 		return Err(Error::SchemaUnsupported {
 			server_min: response.min_schema_rev,
 			client:     omp_proto::SCHEMA_REV,
 		});
 	}
 
+	tracing::debug!(
+		server_schema_rev = response.schema_rev,
+		capability_count = response.capabilities.len(),
+		"RPC handshake completed"
+	);
 	Ok(Peer {
 		schema_rev:     response.schema_rev,
 		capabilities:   response

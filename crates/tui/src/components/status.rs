@@ -124,7 +124,7 @@ impl GaugeLabel {
 		u16::from(self.len)
 	}
 
-	fn is_empty(&self) -> bool {
+	const fn is_empty(&self) -> bool {
 		self.len == 0
 	}
 }
@@ -144,7 +144,7 @@ impl fmt::Write for GaugeLabel {
 
 /// Cell plan for the embedded context gauge bridging the status groups.
 ///
-/// Ports pi's `statusLine.contextLine = "embedded"` top-border gauge: a
+/// The `statusLine.contextLine = "embedded"` top-border gauge uses a
 /// proportional fill with the usage percent and context window absorbed as
 /// in-line labels, plus ticks where background speculation starts and where
 /// auto-compaction fires. An unknown window plans a solid used line (no
@@ -171,6 +171,18 @@ impl ContextGauge {
 		tokens: u64,
 		window: Option<u64>,
 		boundaries: Option<CompactionBoundaries>,
+	) -> Self {
+		Self::plan_with_labels(width, tokens, window, boundaries, true)
+	}
+
+	/// Plans a gauge while allowing status presets to suppress the embedded
+	/// percent/window labels but retain proportional fill and boundary ticks.
+	pub fn plan_with_labels(
+		width: u16,
+		tokens: u64,
+		window: Option<u64>,
+		boundaries: Option<CompactionBoundaries>,
+		labels: bool,
 	) -> Self {
 		let mut gauge = Self {
 			width,
@@ -212,7 +224,8 @@ impl ContextGauge {
 
 		// Absorb both labels only when the line leaves fill on their flanks.
 		let mut scale = width;
-		if !percent_label.is_empty()
+		if labels
+			&& !percent_label.is_empty()
 			&& !window_label.is_empty()
 			&& width >= percent_label.width() + window_label.width() + 4
 		{
@@ -322,11 +335,11 @@ impl ContextGauge {
 /// Returns the themed accent shared by the compaction threshold marker and
 /// context-window usage labels.
 pub const fn compaction_threshold_color(theme: &Theme) -> Color {
-	theme.accent
+	theme.status_rule
 }
 /// Returns the dimmed accent painting compaction boundary ticks and the
-/// embedded window label; pi dims the session accent by HSV saturation ×0.7
-/// and value ×0.75. Non-RGB colors pass through unchanged.
+/// embedded window label: HSV saturation ×0.7 and value ×0.75. Non-RGB
+/// colors pass through unchanged.
 pub fn compaction_boundary_color(theme: &Theme) -> Color {
 	scale_hsv(compaction_threshold_color(theme), 0.7, 0.75)
 }
@@ -387,11 +400,11 @@ pub fn spend_label(amount_nanos: u64, subscription: bool, charset: Charset) -> S
 	}
 	let amount = amount_nanos as f64 / 1_000_000_000.0;
 	if !subscription {
-		return Str::from(format!("${amount:.4}"));
+		return Str::from(format!("${amount:.2}"));
 	}
 	match charset {
-		Charset::NerdFont => Str::from(format!("{} {amount:.4}", charset.icon(Icon::Subscription))),
-		Charset::Unicode | Charset::Ascii => Str::from(format!("S{amount:.4}")),
+		Charset::NerdFont => Str::from(format!("{} {amount:.2}", charset.icon(Icon::Subscription))),
+		Charset::Unicode | Charset::Ascii => Str::from(format!("S{amount:.2}")),
 	}
 }
 
@@ -684,7 +697,7 @@ mod tests {
 			)
 			.segment(Segment::new().label("gamma").with(Prop::Fg, "blue"));
 		let (frame, hits) = paint(status, 40);
-		assert_eq!(frame_row_text(&frame, 0), " alpha › beta › gamma ›");
+		assert_eq!(frame_row_text(&frame, 0), " alpha > beta > gamma ▶");
 		assert_eq!(frame.cell(1, 0).style.foreground_color(), Color::Rgb(255, 0, 0));
 		assert_eq!(frame.cell(9, 0).style.foreground_color(), Color::Rgb(0, 128, 0));
 		assert_eq!(frame.cell(16, 0).style.foreground_color(), Color::Rgb(0, 0, 255));
@@ -743,7 +756,7 @@ mod tests {
 				.segment(Segment::new().label("beta")),
 			20,
 		);
-		assert_eq!(frame_row_text(&frame, 0), "‹ alpha › beta");
+		assert_eq!(frame_row_text(&frame, 0), "◀ alpha < beta");
 	}
 
 	#[test]
@@ -754,13 +767,13 @@ mod tests {
 			.segment(Segment::new().label("gamma"));
 		let (frame, _) = paint(status, 10);
 		let painted = frame_row_text(&frame, 0);
-		assert_eq!(painted, " alpha ›");
+		assert_eq!(painted, " alpha ▶");
 		assert!(!painted.contains("beta"));
 	}
 
 	#[test]
 	fn status_truncates_its_last_chip_at_boundary_widths() {
-		for (width, expected) in [(7, " alp… ›"), (4, " … ›"), (3, " …›"), (2, "…›")]
+		for (width, expected) in [(7, " alp… ▶"), (4, " … ▶"), (3, " …▶"), (2, "…▶")]
 		{
 			let status = Status::new().segment(Segment::new().label("alphabet"));
 			let (frame, _) = paint(status, width);
@@ -777,7 +790,7 @@ mod tests {
 		)
 		.expect("status markup should parse");
 		let painted = frame_row_text(ui.frame(), 0);
-		assert!(painted.contains("alpha › beta"));
+		assert!(painted.contains("alpha > beta"));
 	}
 
 	#[test]
@@ -837,7 +850,7 @@ mod tests {
 	fn context_gauge_embeds_percent_and_window_labels() {
 		let gauge = ContextGauge::plan(30, 50_000, Some(200_000), None);
 		assert!(!gauge.overflowed());
-		assert_eq!(gauge_row(&gauge), "======25%----------------200k-");
+		assert_eq!(gauge_row(&gauge), "======25%----------------200K-");
 	}
 
 	#[test]
@@ -845,14 +858,14 @@ mod tests {
 		let boundaries =
 			CompactionBoundaries { threshold_percent: 80.0, speculation_percent: Some(70.0) };
 		let gauge = ContextGauge::plan(30, 160_000, Some(200_000), Some(boundaries));
-		assert_eq!(gauge_row(&gauge), "==================S=T80%-200k-");
+		assert_eq!(gauge_row(&gauge), "==================S=T80%-200K-");
 	}
 
 	#[test]
 	fn context_gauge_overflow_breaks_the_percent_past_the_window_label() {
 		let gauge = ContextGauge::plan(30, 400_000, Some(200_000), None);
 		assert!(gauge.overflowed());
-		assert_eq!(gauge_row(&gauge), "=====================200k-200%");
+		assert_eq!(gauge_row(&gauge), "=====================200K-200%");
 	}
 
 	#[test]
@@ -864,7 +877,7 @@ mod tests {
 	#[test]
 	fn context_gauge_keeps_one_accent_cell_for_a_fresh_session() {
 		let gauge = ContextGauge::plan(30, 0, Some(200_000), None);
-		assert_eq!(gauge_row(&gauge), "=0%----------------------200k-");
+		assert_eq!(gauge_row(&gauge), "=0%----------------------200K-");
 	}
 
 	#[test]
@@ -882,10 +895,10 @@ mod tests {
 	fn compact_counts_share_the_context_label_notation() {
 		let mut label = String::new();
 		let _ = write_compact_count(&mut label, 200_000);
-		assert_eq!(label, "200k");
+		assert_eq!(label, "200K");
 		label.clear();
 		let _ = write_compact_count(&mut label, 1_500_000);
-		assert_eq!(label, "1.5m");
+		assert_eq!(label, "1.5M");
 		label.clear();
 		let _ = write_compact_count(&mut label, 999);
 		assert_eq!(label, "999");
@@ -893,19 +906,19 @@ mod tests {
 
 	#[test]
 	fn billing_labels_degrade_by_charset() {
-		assert_eq!(spend_label(250_000_000, false, Charset::Ascii), "$0.2500");
-		assert_eq!(spend_label(250_000_000, true, Charset::Ascii), "S0.2500");
+		assert_eq!(spend_label(250_000_000, false, Charset::Ascii), "$0.25");
+		assert_eq!(spend_label(250_000_000, true, Charset::Ascii), "S0.25");
 		assert_eq!(spend_label(0, true, Charset::Unicode), "(sub)");
-		assert_eq!(spend_label(250_000_000, true, Charset::NerdFont), "\u{f067a} 0.2500",);
+		assert_eq!(spend_label(250_000_000, true, Charset::NerdFont), "\u{f067a} 0.25",);
 	}
 
 	#[test]
 	fn advisor_billing_uses_semantic_glyphs() {
-		assert_eq!(advisor_spend_label(250_000_000, false, Charset::Ascii), "$0.2500 (adv)",);
-		assert_eq!(advisor_spend_label(250_000_000, true, Charset::Unicode), "👁 S0.2500",);
+		assert_eq!(advisor_spend_label(250_000_000, false, Charset::Ascii), "$0.25 (adv)",);
+		assert_eq!(advisor_spend_label(250_000_000, true, Charset::Unicode), "👁 S0.25",);
 		assert_eq!(
 			advisor_spend_label(250_000_000, true, Charset::NerdFont),
-			"\u{ea70} \u{f067a} 0.2500",
+			"\u{ea70} \u{f067a} 0.25",
 		);
 	}
 }

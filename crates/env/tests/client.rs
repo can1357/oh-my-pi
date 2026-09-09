@@ -108,6 +108,20 @@ fn data_response(result: document_result::Result) -> server_frame::Body {
 	})
 }
 
+fn document_head(sequence: u64, uri: &str) -> document::DocumentHead {
+	document::DocumentHead {
+		document: Some(document::DocumentRef {
+			id:  Bytes::from_static(b"document-owner"),
+			uri: uri.into(),
+		}),
+		revision: Some(document::Revision {
+			sequence,
+			content_hash: Bytes::from_static(b"0123456789abcdef0123456789abcdef"),
+		}),
+		..document::DocumentHead::default()
+	}
+}
+
 #[test]
 fn invocation_grants_are_clone_local_and_stamped_on_each_request() {
 	let (client, transport) = EnvClient::in_process(0);
@@ -630,6 +644,175 @@ fn scoped_walk_and_search_interleave_and_fuse_after_completion() {
 }
 
 #[test]
+fn owner_document_operations_omit_scope_and_advance_committed_lease_head() {
+	let (client, transport) = EnvClient::in_process(0);
+	let (requests, responses) = transport.into_parts();
+	let uri = "file:///workspace/src/owner.rs";
+	let path = EnvPath::new(uri).expect("typed owner document path");
+	let server = thread::spawn(move || {
+		let hello = receive(&requests);
+		assert!(hello.scope.is_none(), "owner hello unexpectedly carried scope");
+		respond(
+			&responses,
+			hello.request_id,
+			server_frame::Body::Hello(frame::ServerHello {
+				server_epoch: Bytes::from_static(b"epoch-owner"),
+				..frame::ServerHello::default()
+			}),
+		);
+
+		let open = receive(&requests);
+		assert!(open.scope.is_none(), "owner open unexpectedly carried scope");
+		assert!(matches!(
+			open.body,
+			Some(client_frame::Body::Data(frame::DataRequest {
+				body: Some(data_request::Body::Document(frame::DocumentOp {
+					op: Some(document_op::Op::Open(_)),
+					..
+				})),
+				..
+			}))
+		));
+		respond(
+			&responses,
+			open.request_id,
+			data_response(document_result::Result::Opened(document::OpenDocumentResponse {
+				lease_id: Bytes::from_static(b"lease-owner"),
+				head:     Some(document_head(1, uri)),
+			})),
+		);
+
+		let read = receive(&requests);
+		assert!(read.scope.is_none(), "owner read unexpectedly carried scope");
+		assert!(matches!(
+			read.body,
+			Some(client_frame::Body::Data(frame::DataRequest {
+				body: Some(data_request::Body::Document(frame::DocumentOp {
+					op: Some(document_op::Op::Read(_)),
+					..
+				})),
+				..
+			}))
+		));
+		respond(
+			&responses,
+			read.request_id,
+			data_response(document_result::Result::Read(document::ReadDocumentResponse {
+				head: Some(document_head(1, uri)),
+				body: Some(document::read_document_response::Body::Content(Bytes::from_static(
+					b"before",
+				))),
+			})),
+		);
+
+		let commit = receive(&requests);
+		assert!(commit.scope.is_none(), "owner commit unexpectedly carried scope");
+		let Some(client_frame::Body::Data(frame::DataRequest {
+			body:
+				Some(data_request::Body::Document(frame::DocumentOp {
+					op: Some(document_op::Op::CommitTransaction(transaction)),
+					..
+				})),
+			..
+		})) = commit.body
+		else {
+			panic!("expected owner transaction");
+		};
+		assert_eq!(transaction.transaction_id, Bytes::from_static(b"txn-owner"));
+		assert_eq!(
+			transaction.operations[0]
+				.operation
+				.as_ref()
+				.and_then(|operation| match operation {
+					document::document_mutation::Operation::Text(text) => text.base_revision.as_ref(),
+					_ => None,
+				})
+				.map(|revision| revision.sequence),
+			Some(1),
+		);
+		respond(
+			&responses,
+			commit.request_id,
+			data_response(document_result::Result::Transaction(document::CommitTransactionResponse {
+				outcome: Some(commit_transaction_response::Outcome::Committed(
+					document::TransactionCommitted {
+						transaction_id: Bytes::from_static(b"txn-owner"),
+						operations:     vec![document::OperationResult {
+							operation_index: 0,
+							head: Some(document_head(2, uri)),
+							..document::OperationResult::default()
+						}],
+					},
+				)),
+			})),
+		);
+
+		let close = receive(&requests);
+		assert!(close.scope.is_none(), "owner close unexpectedly carried scope");
+		assert!(matches!(
+			close.body,
+			Some(client_frame::Body::Data(frame::DataRequest {
+				body: Some(data_request::Body::Document(frame::DocumentOp {
+					op: Some(frame::document_op::Op::Close(document::CloseDocumentRequest {
+						lease_id,
+					})),
+					..
+				})),
+				..
+			})) if lease_id == Bytes::from_static(b"lease-owner")
+		));
+		respond(
+			&responses,
+			close.request_id,
+			data_response(document_result::Result::Closed(document::CloseDocumentResponse::default())),
+		);
+		assert!(
+			requests.recv_timeout(QUIET_PERIOD).is_err(),
+			"explicit lease close emitted a duplicate drop close"
+		);
+	});
+
+	block_on(client.hello(frame::ClientHello::default())).expect("owner hello");
+	let mut lease = block_on(client.open_document(&path, Some("rust"))).expect("owner lease");
+	let read = block_on(client.read_document(
+		&lease,
+		None,
+		Some(document::ReadSelection {
+			selection: Some(document::read_selection::Selection::Whole(document::WholeDocument {})),
+		}),
+	))
+	.expect("owner read");
+	assert_eq!(read.content(), Some(&Bytes::from_static(b"before")));
+	let outcome = block_on(client.commit_document(
+		&mut lease,
+		Bytes::from_static(b"txn-owner"),
+		document::TextMutation {
+			change: Some(document::text_mutation::Change::ProposedContent(Bytes::from_static(
+				b"after",
+			))),
+			..document::TextMutation::default()
+		},
+	))
+	.expect("owner commit");
+	assert!(matches!(outcome, TransactionOutcome::Committed(_)));
+	assert_eq!(
+		lease
+			.head()
+			.revision
+			.as_ref()
+			.map(|revision| revision.sequence),
+		Some(2)
+	);
+	let retained = client
+		.last_transaction()
+		.expect("retained owner transaction");
+	assert_eq!(retained.server_epoch, Bytes::from_static(b"epoch-owner"));
+	assert_eq!(retained.txn_id, Bytes::from_static(b"txn-owner"));
+	block_on(lease.close()).expect("owner close");
+	server.join().expect("owner document server");
+}
+
+#[test]
 fn document_stream_loss_is_terminal_and_drop_closes_connection_owned_lease() {
 	let (client, transport) = EnvClient::in_process(0);
 	let worker = client.worker_scope(data_scope());
@@ -638,6 +821,7 @@ fn document_stream_loss_is_terminal_and_drop_closes_connection_owned_lease() {
 
 	let server = thread::spawn(move || {
 		let open = receive(&requests);
+		assert!(open.scope.is_some(), "worker open omitted invocation authority");
 		assert!(matches!(
 			open.body,
 			Some(frame::client_frame::Body::Data(frame::DataRequest {
@@ -798,6 +982,7 @@ fn transaction_ids_are_epoch_scoped_duplicates_reuse_outcome_and_partial_stays_d
 	let server = thread::spawn(move || {
 		for duplicate in 0..2 {
 			let request = receive(&requests);
+			assert!(request.scope.is_some(), "worker commit omitted invocation authority");
 			let Some(client_frame::Body::Data(frame::DataRequest {
 				body:
 					Some(data_request::Body::Document(frame::DocumentOp {
@@ -827,6 +1012,7 @@ fn transaction_ids_are_epoch_scoped_duplicates_reuse_outcome_and_partial_stays_d
 			assert!(duplicate < 2);
 		}
 		let request = receive(&requests);
+		assert!(request.scope.is_some(), "worker commit omitted invocation authority");
 		respond(
 			&responses,
 			request.request_id,
@@ -836,6 +1022,20 @@ fn transaction_ids_are_epoch_scoped_duplicates_reuse_outcome_and_partial_stays_d
 						transaction_id: Bytes::from_static(b"txn-partial"),
 						failed_operation_index: 1,
 						..document::TransactionPartiallyCommitted::default()
+					},
+				)),
+			})),
+		);
+		let request = receive(&requests);
+		assert!(request.scope.is_some(), "worker commit omitted invocation authority");
+		respond(
+			&responses,
+			request.request_id,
+			data_response(document_result::Result::Transaction(document::CommitTransactionResponse {
+				outcome: Some(commit_transaction_response::Outcome::Rejected(
+					document::TransactionRejected {
+						transaction_id: Bytes::from_static(b"txn-other"),
+						..document::TransactionRejected::default()
 					},
 				)),
 			})),
@@ -864,6 +1064,14 @@ fn transaction_ids_are_epoch_scoped_duplicates_reuse_outcome_and_partial_stays_d
 			failed_operation_index: 1,
 			..
 		})
+	));
+	let mismatch = block_on(worker.commit_transaction(document::CommitTransactionRequest {
+		transaction_id: Bytes::from_static(b"txn-expected"),
+		..document::CommitTransactionRequest::default()
+	}));
+	assert!(matches!(
+		mismatch,
+		Err(ClientError::UnexpectedResponse { expected: "matching transaction id" })
 	));
 	server.join().expect("transaction server");
 }

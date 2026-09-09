@@ -3,17 +3,18 @@
 use std::{future::poll_fn, thread};
 
 use bytes::Bytes;
-use omp_core::Str;
-use omp_inference::{
+use omp_ai::{
 	codec::Cancellation,
 	transport::browser::{
 		BrowserFetch, BrowserFetchError, BrowserFetchFuture, BrowserFetchRequest,
 		BrowserFetchResponse,
 	},
 };
+use omp_core::Str;
 use omp_webview::{
 	CloseHandle, Engine, FrameConfig, SurfaceKind, WebViewBuilder, automation::ExtractFormat,
 };
+use tracing::Instrument as _;
 
 /// Stateless entry to supervised, ephemeral browser fetches.
 #[derive(Clone, Copy, Debug, Default)]
@@ -25,42 +26,63 @@ impl BrowserFetch for BrowserFetchAdapter {
 		request: BrowserFetchRequest,
 		cancellation: Cancellation,
 	) -> BrowserFetchFuture<'_> {
-		Box::pin(async move {
-			request.validate()?;
-			if cancellation.is_cancelled() {
-				return Err(BrowserFetchError::Cancelled);
-			}
-			let deadline = request.deadline;
-			let worker_cancellation = cancellation.clone();
-			let (close_tx, close_rx) = flume::bounded::<CloseHandle>(1);
-			let (result_tx, result_rx) = flume::bounded(1);
-			thread::Builder::new()
-				.name("omp-browser-fetch".to_owned())
-				.spawn(move || {
-					let result = fetch_on_driver(request, &worker_cancellation, &close_tx);
-					let _ = result_tx.send(result);
-				})
-				.map_err(|_| BrowserFetchError::Unavailable)?;
+		let span = tracing::debug_span!(
+			"browser_fetch_request",
+			host = tracing::field::Empty,
+			max_bytes = request.max_bytes,
+		);
+		if let Ok(url) = url::Url::parse(request.url.as_str())
+			&& let Some(host) = url.host_str()
+		{
+			span.record("host", host);
+		}
+		Box::pin(
+			async move {
+				if let Err(error) = request.validate() {
+					tracing::warn!(error = ?error, "browser fetch request rejected");
+					return Err(error);
+				}
+				if cancellation.is_cancelled() {
+					return Err(BrowserFetchError::Cancelled);
+				}
+				let deadline = request.deadline;
+				let worker_cancellation = cancellation.clone();
+				let (close_tx, close_rx) = flume::bounded::<CloseHandle>(1);
+				let (result_tx, result_rx) = flume::bounded(1);
+				if thread::Builder::new()
+					.name("omp-browser-fetch".to_owned())
+					.spawn(move || {
+						let result = fetch_on_driver(request, &worker_cancellation, &close_tx);
+						let _ = result_tx.send(result);
+					})
+					.is_err()
+				{
+					tracing::warn!("browser fetch worker failed to start");
+					return Err(BrowserFetchError::Unavailable);
+				}
 
-			let cancelled = poll_fn(|context| cancellation.poll_cancelled(context));
-			tokio::select! {
-				result = result_rx.recv_async() => result.map_err(|_| BrowserFetchError::Unavailable)?,
-				() = cancelled => {
-					if let Ok(handle) = close_rx.recv_async().await {
-						let _ = handle.close();
-					}
-					let _ = result_rx.recv_async().await;
-					Err(BrowserFetchError::Cancelled)
-				},
-				() = tokio::time::sleep(deadline) => {
-					if let Ok(handle) = close_rx.recv_async().await {
-						let _ = handle.close();
-					}
-					let _ = result_rx.recv_async().await;
-					Err(BrowserFetchError::TimedOut)
-				},
+				let cancelled = poll_fn(|context| cancellation.poll_cancelled(context));
+				tokio::select! {
+					result = result_rx.recv_async() => result.map_err(|_| BrowserFetchError::Unavailable)?,
+					() = cancelled => {
+						if let Ok(handle) = close_rx.recv_async().await {
+							let _ = handle.close();
+						}
+						let _ = result_rx.recv_async().await;
+						Err(BrowserFetchError::Cancelled)
+					},
+					() = tokio::time::sleep(deadline) => {
+						if let Ok(handle) = close_rx.recv_async().await {
+							let _ = handle.close();
+						}
+						let _ = result_rx.recv_async().await;
+						tracing::warn!("browser fetch request timed out");
+						Err(BrowserFetchError::TimedOut)
+					},
+				}
 			}
-		})
+			.instrument(span),
+		)
 	}
 }
 

@@ -1,0 +1,24 @@
+│                          │ / for commands                                  │  
+│       ████████████       │ ! to run bash                                   │  
+│          ██  ██          │ $ to run python                                 │  
+│          ██  ██          │ ─────────────────────────────────────────────── │  
+│          ▒▒  ██          │ LSP Servers                                     │  
+│              ██          │ No LSP servers                                  │  
+│                          │                                                 │  
+│      Claude Fable 5      │                                                 │  
+│        anthropic         │                                                 │  
+│                          │ ─────────────────────────────────────────────── │  
+│                          │ Recent sessions                                 │  
+│                          │ No recent sessions                              │  
+│                          │                                                 │  
+│                          │                                                 │  
+│                          │                                                 │  
+│                          │                                                 │  
+╰──────────────────────────┴─────────────────────────────────────────────────╯  
+ Tip: `/force read` pins the next turn to one specific tool when the model      
+      keeps reaching for the wrong one                                          
+                                                                                
+                                                                                
+                                                                                
+ π  > ◒ Fable 5 > 🗑 …r-resize-80x24-parent-cjj4Tr/pi-capture > ⑂ main ▶─2%──┃1M─
+╰─                                                                              

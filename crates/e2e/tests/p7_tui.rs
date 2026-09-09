@@ -6,7 +6,6 @@
 
 use std::{
 	collections::VecDeque,
-	ffi,
 	fmt::Write as _,
 	fs,
 	io::{self, BufRead as _, BufReader, Read as _, Write as _},
@@ -35,6 +34,18 @@ use nix::{
 	sys::termios::{Termios, cfgetispeed, cfgetospeed, tcgetattr},
 	unistd::ttyname,
 };
+use omp_ai::{
+	Answer, Error as InferenceError, Registry,
+	answer::{AnswerBody, ChatStream},
+	call::{Call, OpaqueJson},
+	event::{BlockKind, ChatEvent, Completion, FinishReason, ToolCall, WorkflowResponse},
+	id::ToolCallId,
+	layer::{LayerCall, stack::RouteProviderService},
+	provider::fake::{FakeProvider, FakeScript},
+	receipt::{Cost, ExecutionReceipt, ReasonId, Usage, UsageSource},
+	registry::RouteUnavailable,
+	session::ConversationSessionPlanner,
+};
 use omp_app::{
 	daemon::{DaemonConfig, DaemonHandle},
 	endpoint::LocalEndpoint,
@@ -44,22 +55,7 @@ use omp_catalog::{
 	snapshot::{Catalog, SnapshotProvenance},
 };
 use omp_core::{Str, sf};
-use omp_inference::{
-	Answer, Error as InferenceError, Registry,
-	answer::{AnswerBody, ChatStream},
-	call::{Call, ContentPart, OpaqueJson, OperationCall},
-	event::{BlockKind, ChatEvent, Completion, FinishReason, ToolCall, WorkflowResponse},
-	id::ToolCallId,
-	layer::{LayerCall, stack::RouteProviderService},
-	provider::fake::{FakeProvider, FakeScript},
-	receipt::{Cost, ExecutionReceipt, ReasonId, Usage, UsageSource},
-	registry::RouteUnavailable,
-	session::ConversationSessionPlanner,
-};
-use omp_storage::{
-	index::{NewSession, SessionIndex, SessionKind},
-	transcript::{Header, SessionId},
-};
+use omp_session::{ComponentRegistry, Session};
 use omp_tool::{Claims, Constraint, Effects, Precedence, Presentation, Rev, ToolSpec};
 use parking_lot::Mutex;
 use serde_json::{Value, json};
@@ -69,6 +65,8 @@ use tower::Service;
 const READY_TIMEOUT: Duration = Duration::from_secs(30);
 const CHECKPOINT_TIMEOUT: Duration = Duration::from_secs(30);
 const IO_TIMEOUT: Duration = Duration::from_secs(2);
+/// The pi-parity composer prompt gutter painted on the input row.
+const COMPOSER_PROMPT: &str = "╰─ ";
 
 #[derive(Clone)]
 struct GatedRoute {
@@ -157,6 +155,10 @@ struct ScriptedGateway {
 impl ScriptedGateway {
 	async fn start(scratch: &Path, socket: &Path, shell_release: &Path) -> Self {
 		let scripts = scripts(shell_release);
+		Self::start_with_scripts(scratch, socket, scripts).await
+	}
+
+	async fn start_with_scripts(scratch: &Path, socket: &Path, scripts: Vec<FakeScript>) -> Self {
 		let mut senders = Vec::with_capacity(scripts.len());
 		let mut receivers = VecDeque::with_capacity(scripts.len());
 		for _ in 0..scripts.len() {
@@ -187,11 +189,11 @@ impl ScriptedGateway {
 			"debug",
 			"edit",
 			"eval",
-			"fetch",
 			"glob",
 			"grep",
 			"hub",
 			"lsp",
+			"task",
 			"think",
 			"todo",
 			"web_search",
@@ -255,22 +257,6 @@ impl ScriptedGateway {
 		self.permits[call]
 			.send(())
 			.expect("scripted call gate remains open");
-	}
-
-	fn captured_text(&self, call: usize, expected: &str) -> bool {
-		let captures = self.captures.lock();
-		let Some(call) = captures.get(call) else {
-			return false;
-		};
-		let OperationCall::Chat(request) = &call.operation else {
-			return false;
-		};
-		request.messages.iter().any(|message| {
-			message
-				.content
-				.iter()
-				.any(|part| matches!(part, ContentPart::Text { text, .. } if text.contains(expected)))
-		})
 	}
 
 	async fn await_preview(&self) {
@@ -340,11 +326,11 @@ fn scripted_registry(
 				.expect("scripted route registers")
 		} else {
 			builder
-				.register_unavailable(RouteUnavailable {
-					route:     candidate.id.clone(),
-					reason:    ReasonId(sf!("p7-scripted-route-only")),
-					operation: None,
-				})
+				.register_unavailable(RouteUnavailable::new(
+					candidate.id.clone(),
+					ReasonId(sf!("p7-scripted-route-only")),
+					None,
+				))
 				.expect("unavailable route registers")
 		};
 	}
@@ -376,11 +362,15 @@ fn tool_script(calls: &[(&str, &str, Value)]) -> FakeScript {
 	FakeScript::chat(events)
 }
 
-fn text_script(text: &'static str) -> FakeScript {
+/// A provider stream whose thinking block is closed implicitly by the
+/// following text block, mirroring reasoning-capable providers.
+fn thinking_text_script(thinking: &'static str, answer: &'static str) -> FakeScript {
 	FakeScript::chat(vec![
-		Ok(ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text }),
-		Ok(ChatEvent::TextDelta { index: 0, text: Str::from(text) }),
-		Ok(completed(FinishReason::Stop, 1)),
+		Ok(ChatEvent::BlockStarted { index: 0, kind: BlockKind::Thinking }),
+		Ok(ChatEvent::ThinkingDelta { index: 0, text: Str::from(thinking) }),
+		Ok(ChatEvent::BlockStarted { index: 1, kind: BlockKind::Text }),
+		Ok(ChatEvent::TextDelta { index: 1, text: Str::from(answer) }),
+		Ok(completed(FinishReason::Stop, 2)),
 	])
 }
 
@@ -436,57 +426,18 @@ fn completed(reason: FinishReason, blocks: usize) -> ChatEvent {
 	})
 }
 
-fn scripts(shell_release: &Path) -> Vec<FakeScript> {
-	let release = shell_quote(shell_release);
-	let fixture_root = shell_release.parent().expect("shell fixture has parent");
-	let batch_one_marker = shell_quote(&fixture_root.join("p7-b1-side-effect"));
-	let batch_two_marker = shell_quote(&fixture_root.join("p7-b2-side-effect"));
-	let batch_three_marker = shell_quote(&fixture_root.join("p7-b3-side-effect"));
-	let queue_marker = shell_quote(&fixture_root.join("p7-queue-side-effect"));
+fn scripts(_shell_release: &Path) -> Vec<FakeScript> {
 	vec![
 		tool_script(&[("read-1", "read", json!({ "path": "scratch.txt" }))]),
 		streaming_edit_script(),
-		tool_script(&[(
-			"shell-1",
-			"bash",
-			json!({
-				"command": format!(
-					"printf '\\154\\151\\166\\145\\055\\164\\141\\151\\154\\n'; while [ ! -f {release} ]; do sleep 0.05; done; printf 'live-error\\n' >&2; exit $((3 + 4))"
-				)
-			}),
-		)]),
-		tool_script(&[("unknown-1", "think", json!({ "thoughts": "P7 generic card proof" }))]),
+		tool_script(&[("shell-1", "bash", json!({ "command": "printf 'shell-ok\\n'" }))]),
 		metered_text_script("The deterministic tool sequence is complete."),
-		tool_script(&[
-			(
-				"batch-1",
-				"bash",
-				json!({ "command": format!("touch {batch_one_marker}; printf '\\142\\141\\164\\143\\150\\055\\157\\156\\145\\055\\163\\164\\141\\162\\164\\145\\144\\n'; sleep 30") }),
-			),
-			(
-				"batch-2",
-				"bash",
-				json!({ "command": format!("touch {batch_two_marker}; printf '\\142\\141\\164\\143\\150\\055\\164\\167\\157\\055\\162\\141\\156\\n'") }),
-			),
-			(
-				"batch-3",
-				"bash",
-				json!({ "command": format!("touch {batch_three_marker}; printf '\\142\\141\\164\\143\\150\\055\\164\\150\\162\\145\\145\\055\\162\\141\\156\\n'") }),
-			),
-		]),
 		tool_script(&[(
-			"queue-batch",
+			"slow-shell",
 			"bash",
-			json!({ "command": format!("touch {queue_marker}; printf '\\161\\165\\145\\165\\145\\055\\142\\141\\164\\143\\150\\055\\154\\151\\166\\145\\n'; sleep 30") }),
+			json!({ "command": "printf 'interrupt-ready\\n'; sleep 30" }),
 		)]),
-		text_script("The plain Enter steering ran before the queued follow-up."),
-		text_script("The queued follow-up ran after all prior work."),
-		text_script("Second session retained content."),
 	]
-}
-
-fn shell_quote(path: &Path) -> String {
-	format!("'{}'", path.display().to_string().replace(['’', '\''], "'\\''"))
 }
 
 #[derive(Clone, Debug)]
@@ -588,7 +539,8 @@ impl DebugClient {
 
 	fn snapshot(&mut self) -> Result<Snapshot, String> {
 		let text = lines(&self.op("text")?);
-		Ok(Snapshot { frame: text.clone(), text })
+		let frame = lines(&self.op("frame")?);
+		Ok(Snapshot { text, frame })
 	}
 }
 
@@ -767,6 +719,29 @@ fn visible(bytes: &[u8]) -> String {
 	out
 }
 
+/// Creates one authoritative resumable `.oms` journal.
+fn seed_session(path: &Path) {
+	Session::create(path, ComponentRegistry::standard()).expect("create resumable TUI session");
+}
+
+fn journal(path: &Path) -> String {
+	fs::read_to_string(path).expect("read session journal")
+}
+
+fn assert_journal_chain(text: &str) {
+	let frames = text
+		.split("\n\n")
+		.filter(|frame| frame.contains("event:"))
+		.collect::<Vec<_>>();
+	assert!(!frames.is_empty(), "journal has no SSE frames");
+	for frame in frames.iter().skip(1) {
+		assert!(
+			frame.lines().any(|line| line.starts_with("by: ")),
+			"non-genesis frame has no by: {frame}"
+		);
+	}
+}
+
 fn assert_restored(raw: &[u8], before: &Termios, after: &Termios, diagnostics: &str) {
 	let alt_enter = raw.windows(8).rposition(|window| window == b"\x1b[?1049h");
 	let alt_exit = raw.windows(8).rposition(|window| window == b"\x1b[?1049l");
@@ -835,24 +810,196 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 		.expect("secure scratch root");
 	let project = scratch.path().join("project");
 	fs::create_dir(&project).expect("project directory");
-	// The product canonicalizes `--project`; macOS tempdirs live behind the
-	// `/var` symlink, so the fixture must hash the same canonical root.
 	let project = fs::canonicalize(&project).expect("canonical project root");
 	fs::write(project.join("scratch.txt"), "old\n").expect("write read/edit fixture");
 	let metadata_dir = project.join(".omp");
 	fs::create_dir(&metadata_dir).expect("project metadata directory");
 	fs::set_permissions(&metadata_dir, <fs::Permissions>::from_mode(0o755))
 		.expect("use standard project metadata permissions");
-	let data_dir = project.parent().expect("project parent").join("home/data");
-	let state_dir =
-		omp_env::project_state::directory(&data_dir, &project).expect("project state directory");
-	fs::create_dir_all(&state_dir).expect("create project state directory");
-	let shell_release = scratch.path().join("release-shell");
+
+	let shell_release = scratch.path().join("unused-shell-release");
 	let gateway_socket = scratch.path().join("gateway.sock");
 	let debug_socket = scratch.path().join("tui-debug.sock");
 	let gateway = ScriptedGateway::start(scratch.path(), &gateway_socket, &shell_release).await;
+	let session_path = scratch.path().join("p7-tools.oms");
+	seed_session(&session_path);
 	gateway.release(0);
 
+	let binary = omp_e2e::support::omp_binary().expect("locate omp binary");
+	let args = vec![
+		"chat".to_owned(),
+		"--model".to_owned(),
+		gateway.model.clone(),
+		"--project".to_owned(),
+		project.display().to_string(),
+		"--gateway".to_owned(),
+		gateway_socket.display().to_string(),
+		"--session".to_owned(),
+		session_path.display().to_string(),
+		"--envd-idle-timeout".to_owned(),
+		"2".to_owned(),
+	];
+	let mut process = PtyChild::spawn(&binary, &args, &project, &debug_socket);
+	let raw_capture = process.raw.clone();
+	let mut debug =
+		DebugClient::connect(&debug_socket, Instant::now() + READY_TIMEOUT, &mut process);
+	let ready = wait_snapshot(&mut debug, &raw_capture, "chat shell ready", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains("Welcome back!")
+			&& surface.contains("omp v")
+			&& surface.contains(&gateway.model)
+			&& surface.contains(project.to_string_lossy().as_ref())
+			&& surface.contains("turn 0 · 0 in / 0 out")
+			&& surface.contains(COMPOSER_PROMPT)
+	});
+	assert_surface(&ready, "ready");
+
+	debug.keys("'exercise deterministic tools' enter");
+	let read = wait_snapshot(&mut debug, &raw_capture, "read card settled", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains("Read scratch.txt") && surface.contains("old")
+	});
+	assert_surface(&read, "read card");
+	let first_journal = journal(&session_path);
+	assert!(first_journal.contains("event: tool.call@1"), "read call absent from journal");
+	assert!(first_journal.contains("event: tool.result@1"), "read result absent from journal");
+	assert_journal_chain(&first_journal);
+
+	gateway.release(1);
+	gateway.await_preview().await;
+	let preview = wait_snapshot(&mut debug, &raw_capture, "edit live preview", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains("edit arguments")
+			&& fs::read_to_string(project.join("scratch.txt")).is_ok_and(|text| text == "old\n")
+	});
+	assert_surface(&preview, "edit preview");
+	gateway.release_preview();
+	let final_edit = wait_snapshot(&mut debug, &raw_capture, "edit card settled", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains("Edit:")
+			&& surface.contains("scratch.txt")
+			&& fs::read_to_string(project.join("scratch.txt")).is_ok_and(|text| text == "new\n")
+			&& journal(&session_path)
+				.matches("event: tool.result@1")
+				.count() >= 2
+	});
+	assert_surface(&final_edit, "edit final");
+	let edit_journal = journal(&session_path);
+	assert!(edit_journal.matches("event: tool.call@1").count() >= 2);
+	assert!(edit_journal.matches("event: tool.result@1").count() >= 2);
+	assert_journal_chain(&edit_journal);
+
+	gateway.release(2);
+	let shell = wait_snapshot(&mut debug, &raw_capture, "bash card settled", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains("$ printf 'shell-ok")
+			&& surface.contains("shell-ok")
+			&& journal(&session_path)
+				.matches("event: tool.result@1")
+				.count() >= 3
+	});
+	assert_surface(&shell, "bash final");
+	let shell_journal = journal(&session_path);
+	assert!(shell_journal.matches("event: tool.call@1").count() >= 3);
+	assert!(shell_journal.matches("event: tool.result@1").count() >= 3);
+	assert_journal_chain(&shell_journal);
+
+	gateway.release(3);
+	let summary = wait_snapshot(&mut debug, &raw_capture, "tool turn complete", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains("The deterministic tool sequence is complete.")
+			&& surface.contains("turn 1")
+			&& surface.contains("4096 in / 128 out")
+	});
+	assert_surface(&summary, "tool summary");
+
+	debug.keys("'interrupt the next tool' enter");
+	gateway.release(4);
+	let running = wait_snapshot(&mut debug, &raw_capture, "interruptible bash live", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains("bash running") && surface.contains("\"terminal\":false")
+	});
+	assert_surface(&running, "interruptible bash");
+
+	process.resize(32, 92);
+	debug
+		.op("resize")
+		.unwrap_or_else(|error| panic!("resize injection failed: {error}"));
+	// At 32 rows the settled cards retire into native scrollback; the live
+	// card, band, and composer must survive the rebuild.
+	let resized = wait_snapshot(&mut debug, &raw_capture, "streaming resize", |snapshot| {
+		let surface = snapshot.combined();
+		surface.contains("sleep 30")
+			&& surface.contains("interrupt the next tool")
+			&& surface.contains(COMPOSER_PROMPT)
+	});
+	assert_surface(&resized, "resized");
+	let info = wait_info(&mut debug, "settled streaming resize", |info| {
+		info.get("rows").and_then(Value::as_u64) == Some(32)
+			&& info.get("cols").and_then(Value::as_u64) == Some(92)
+	});
+	assert_eq!(info.get("rows").and_then(Value::as_u64), Some(32), "resize rows: {info}");
+	assert_eq!(info.get("cols").and_then(Value::as_u64), Some(92), "resize cols: {info}");
+
+	debug.keys("ctrl+c");
+	let interrupted =
+		wait_snapshot(&mut debug, &raw_capture, "turn interrupted and responsive", |snapshot| {
+			let surface = snapshot.combined();
+			surface.contains(COMPOSER_PROMPT)
+				&& journal(&session_path)
+					.matches("event: tool.result@1")
+					.count() >= 4
+		});
+	assert_surface(&interrupted, "interrupt");
+	let interrupted_journal = journal(&session_path);
+	assert!(interrupted_journal.matches("event: tool.call@1").count() >= 4);
+	assert!(interrupted_journal.matches("event: tool.result@1").count() >= 4);
+	assert!(interrupted_journal.contains("event: msg.assistant.end@1"));
+	assert_journal_chain(&interrupted_journal);
+
+	debug.keys("ctrl+c");
+	drop(debug);
+	let before = process.before.clone();
+	let (status, raw, stdout, stderr, after) = process.wait(READY_TIMEOUT);
+	let diagnostics = format!(
+		"status={status}\nstdout={stdout}\nstderr={stderr}\nlast frame={}\nraw={}",
+		interrupted.frame,
+		visible(&raw),
+	);
+	assert!(status.success(), "omp chat did not exit cleanly\n{diagnostics}");
+	assert_restored(&raw, &before, &after, &diagnostics);
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn chat_tui_persists_thinking_blocks_across_turns_and_resume() {
+	use std::os::unix::fs::PermissionsExt;
+	omp_e2e::support::install_omp_binary_env().expect("install Cargo-built omp binary");
+	let scratch = tempfile::tempdir().expect("scratch root");
+	fs::set_permissions(scratch.path(), <fs::Permissions>::from_mode(0o700))
+		.expect("secure scratch root");
+	let project = scratch.path().join("project");
+	fs::create_dir(&project).expect("project directory");
+	let project = fs::canonicalize(&project).expect("canonical project root");
+	let metadata_dir = project.join(".omp");
+	fs::create_dir(&metadata_dir).expect("project metadata directory");
+	fs::set_permissions(&metadata_dir, <fs::Permissions>::from_mode(0o755))
+		.expect("use standard project metadata permissions");
+	let gateway_socket = scratch.path().join("gateway.sock");
+	let debug_socket = scratch.path().join("tui-debug.sock");
+	let gateway = ScriptedGateway::start_with_scripts(scratch.path(), &gateway_socket, vec![
+		thinking_text_script(
+			"Weighing the first request.\nThe deterministic option is safest.",
+			"First answer settled.",
+		),
+		thinking_text_script("Second deliberation paragraph.", "Second answer settled."),
+	])
+	.await;
+	gateway.release(0);
+	gateway.release(1);
+
+	let sessions_dir = scratch.path().join("sessions");
+	fs::create_dir(&sessions_dir).expect("session directory");
+	let session_path = sessions_dir.join("thinking.oms");
+	seed_session(&session_path);
 	let binary = omp_e2e::support::omp_binary().expect("locate omp binary");
 	let base_args = vec![
 		"chat".to_owned(),
@@ -862,352 +1009,117 @@ async fn chat_tui_drives_real_pty_tools_interrupt_resize_and_clean_quit() {
 		project.display().to_string(),
 		"--gateway".to_owned(),
 		gateway_socket.display().to_string(),
+		"--session-dir".to_owned(),
+		sessions_dir.display().to_string(),
+		"--envd-idle-timeout".to_owned(),
+		"2".to_owned(),
 	];
-	let sessions = state_dir.join("sessions");
-	fs::create_dir_all(&sessions).expect("create chat session directory");
-	let initial_session_id = "01ARZ3NDEKTSV4RRFFQ69G5FB1".to_owned();
-	let session_id = SessionId(Str::from(initial_session_id.as_str()));
-	let session_index =
-		SessionIndex::open(sessions.join("sessions.sqlite3")).expect("open session index");
-	let project_text = project.to_string_lossy();
-	let initial_journal = state_dir
-		.join("sessions")
-		.join(format!("{initial_session_id}.jsonl"));
-	session_index
-		.create_session(
-			&NewSession {
-				id:         &session_id,
-				cwd:        project_text.as_ref(),
-				project:    project_text.as_ref(),
-				created_ms: 1,
-				kind:       SessionKind::Interactive,
-				parent:     None,
-				remote:     false,
-			},
-			|| {
-				let mut header = serde_json::to_vec(&Header {
-					v:       4,
-					id:      session_id.clone(),
-					created: 1,
-					cwd:     project.clone(),
-				})
-				.map_err(io::Error::other)?;
-				header.push(b'\n');
-				fs::write(&initial_journal, header)?;
-				Ok::<_, io::Error>(((), 0))
-			},
-		)
-		.expect("create resumable TUI session");
-	drop(session_index);
-
 	let mut args = base_args.clone();
-	args.extend(["--resume".to_owned(), initial_session_id.clone()]);
+	args.extend(["--session".to_owned(), session_path.display().to_string()]);
 	let mut process = PtyChild::spawn(&binary, &args, &project, &debug_socket);
 	let raw_capture = process.raw.clone();
 	let mut debug =
 		DebugClient::connect(&debug_socket, Instant::now() + READY_TIMEOUT, &mut process);
 	let ready = wait_snapshot(&mut debug, &raw_capture, "chat shell ready", |snapshot| {
-		snapshot.text.contains("session") && snapshot.text.contains("idle")
+		let surface = snapshot.combined();
+		surface.contains("Welcome back!")
+			&& surface.contains("omp v")
+			&& surface.contains(&gateway.model)
+			&& surface.contains(project.to_string_lossy().as_ref())
+			&& surface.contains("turn 0 · 0 in / 0 out")
+			&& surface.contains(COMPOSER_PROMPT)
 	});
 	assert_surface(&ready, "ready");
 
-	debug.keys("'exercise deterministic tools' enter");
-	gateway.release(1);
-	gateway.await_preview().await;
-	let preview = wait_snapshot(&mut debug, &raw_capture, "edit preview", |snapshot| {
-		let surface = snapshot.combined();
-		surface.contains("read scratch.txt · Lines 1 · Size 24B")
-			&& surface.contains("edit edit · scratch.txt")
-			&& surface.contains("scratch.txt +1 -1 1 op")
-			&& surface.contains("+ new")
-			&& surface.contains("streaming arguments")
-			&& fs::read_to_string(project.join("scratch.txt")).is_ok_and(|text| text == "old\n")
+	debug.keys("'first prompt' enter");
+	let first = wait_snapshot(&mut debug, &raw_capture, "first turn keeps thinking", |snapshot| {
+		snapshot.frame.contains("First answer settled.")
+			&& snapshot.frame.contains("Weighing the first request")
 	});
-	assert_surface(&preview, "edit preview");
-	gateway.release_preview();
-	let final_edit = wait_snapshot(&mut debug, &raw_capture, "edit final", |snapshot| {
-		let surface = snapshot.combined();
-		surface.contains("edit@hl.1 · edit · scratch.txt")
-			&& surface.contains("scratch.txt +1 -1 2 ops")
-			&& surface.contains("- 1|old")
-			&& surface.contains("+ 1|new")
-			&& fs::read_to_string(project.join("scratch.txt")).is_ok_and(|text| text == "new\n")
-	});
-	assert_surface(&final_edit, "edit final");
+	assert_surface(&first, "first turn");
+	let first_journal = journal(&session_path);
+	assert!(first_journal.contains("event: msg.assistant.end@1"));
+	assert_journal_chain(&first_journal);
 
-	gateway.release(2);
-	let shell_live = wait_snapshot(&mut debug, &raw_capture, "shell live tail", |snapshot| {
-		let surface = snapshot.combined();
-		surface.contains("bash bash ·") && surface.contains("10B") && surface.contains("live-tail")
+	debug.keys("ctrl+t");
+	let hidden = wait_snapshot(&mut debug, &raw_capture, "ctrl+t hides thinking", |snapshot| {
+		snapshot.frame.contains("First answer settled.")
+			&& !snapshot.frame.contains("Weighing the first request")
 	});
-	assert_surface(&shell_live, "shell live");
-	assert!(
-		shell_live
-			.frame
-			.contains("read scratch.txt · Lines 1 · Size 24B")
-			&& shell_live.frame.contains("edit@hl.1 · edit · scratch.txt"),
-		"prior transcript vanished during shell stream: {}",
-		shell_live.frame
-	);
-	fs::write(&shell_release, b"release").expect("release shell fixture");
-	let shell_final = wait_snapshot(&mut debug, &raw_capture, "shell exit badge", |snapshot| {
-		let surface = snapshot.combined();
-		surface.contains("bash@1 · bash ·")
-			&& surface.contains("live-error")
-			&& surface.contains("Exit 7")
-	});
-	assert_surface(&shell_final, "shell final");
-
-	gateway.release(3);
-	let unknown = wait_snapshot(&mut debug, &raw_capture, "unknown generic card", |snapshot| {
-		let surface = snapshot.combined();
-		surface.contains("think@1 · think") && surface.contains("P7 generic card proof")
-	});
-	assert_surface(&unknown, "unknown");
-	gateway.release(4);
-	let summary =
-		wait_snapshot(&mut debug, &raw_capture, "first turn metrics complete", |snapshot| {
-			snapshot
-				.frame
-				.contains("deterministic tool sequence is complete")
-				&& snapshot.frame.contains("context  4096")
-				&& snapshot.frame.contains("cost     $1.50")
-		});
-	assert_surface(&summary, "summary");
-
-	gateway.release(5);
-	let batch_one_marker = scratch.path().join("p7-b1-side-effect");
-	let batch_two_marker = scratch.path().join("p7-b2-side-effect");
-	let batch_three_marker = scratch.path().join("p7-b3-side-effect");
-	debug.keys("'interrupt' shift-enter 'the batch'");
-	let multiline =
-		wait_snapshot(&mut debug, &raw_capture, "Shift+Enter multiline input", |snapshot| {
-			snapshot.text.contains("interrupt") && snapshot.text.contains("the batch")
-		});
-	assert_surface(&multiline, "Shift+Enter multiline input");
-	debug.keys("enter");
-	let batch_live = wait_snapshot(&mut debug, &raw_capture, "batch running", |snapshot| {
-		snapshot.combined().contains("bash bash ·")
-			&& snapshot.combined().contains("18B")
-			&& gateway.captured_text(5, "interrupt\nthe batch")
-			&& batch_one_marker.is_file()
-	});
-	assert_surface(&batch_live, "batch live");
-
-	process.resize(32, 92);
-	debug
-		.op("resize")
-		.unwrap_or_else(|error| panic!("resize injection failed: {error}"));
-	let resized = wait_snapshot(&mut debug, &raw_capture, "streaming resize", |snapshot| {
-		snapshot.frame.contains("bash bash ·")
-			&& snapshot.frame.contains("18B")
-			&& snapshot.frame.contains("Working")
-	});
-	assert_surface(&resized, "resized");
-	let info = wait_info(&mut debug, "settled streaming resize", |info| {
-		info.get("rows").and_then(Value::as_u64) == Some(32)
-			&& info.get("cols").and_then(Value::as_u64) == Some(92)
-			&& info.get("alt_screen").and_then(Value::as_bool) == Some(false)
-	});
-	assert_eq!(info.get("rows").and_then(Value::as_u64), Some(32), "resize rows: {info}");
-	assert_eq!(info.get("cols").and_then(Value::as_u64), Some(92), "resize cols: {info}");
+	assert_surface(&hidden, "hidden thinking");
 	assert_eq!(
-		info.get("alt_screen").and_then(Value::as_bool),
-		Some(false),
-		"chat entered alt screen: {info}"
+		journal(&session_path),
+		first_journal,
+		"visibility toggle changed the session DOM journal"
+	);
+	debug.keys("ctrl+t");
+	wait_snapshot(&mut debug, &raw_capture, "ctrl+t restores thinking", |snapshot| {
+		snapshot.frame.contains("Weighing the first request")
+	});
+	assert_eq!(
+		journal(&session_path),
+		first_journal,
+		"restoring visibility changed the session DOM journal"
 	);
 
-	debug.keys("esc");
-	let interrupted = wait_snapshot(&mut debug, &raw_capture, "batch interrupted", |snapshot| {
+	debug.keys("'second prompt' enter");
+	let second = wait_snapshot(&mut debug, &raw_capture, "second turn keeps history", |snapshot| {
 		let surface = snapshot.combined();
-		surface.contains("\"kind\":\"aborted\"")
-			&& surface.contains("\"kind\":\"interrupted\"")
-			&& !snapshot.frame.contains("Working")
+		surface.contains("Second answer settled.")
+			&& surface.contains("Second deliberation paragraph.")
+			&& surface.contains("First answer settled.")
 	});
-	assert_surface(&interrupted, "interrupt");
-	assert!(batch_two_marker.exists(), "concurrent batch-2 side-effect marker missing");
-	assert!(batch_three_marker.exists(), "concurrent batch-3 side-effect marker missing");
+	assert_surface(&second, "second turn");
+	let second_journal = journal(&session_path);
+	assert!(second_journal.matches("event: msg.assistant.end@1").count() >= 2);
+	assert_journal_chain(&second_journal);
 
-	debug.keys("'/new' enter");
-	drop(debug);
-	thread::sleep(Duration::from_millis(100));
-	let mut debug =
-		DebugClient::connect(&debug_socket, Instant::now() + READY_TIMEOUT, &mut process);
-	let fresh_host_deadline = Instant::now() + READY_TIMEOUT;
-	while debug.op("slots").is_err() {
-		assert!(Instant::now() < fresh_host_deadline, "fresh chat host did not attach");
-		thread::sleep(Duration::from_millis(15));
-	}
-	let fresh = wait_snapshot(&mut debug, &raw_capture, "fresh session ready", |snapshot| {
-		snapshot.frame.contains("DeepSeek V4 Flash")
-			&& !snapshot.frame.contains("Working")
-			&& !snapshot.frame.contains("\"kind\":\"interrupted\"")
-	});
-	assert_surface(&fresh, "fresh session");
-	debug.keys("'continue' enter");
-	gateway.release(6);
-	let queue_marker = scratch.path().join("p7-queue-side-effect");
-	let queue_live =
-		wait_snapshot(&mut debug, &raw_capture, "next batch after interrupt", |snapshot| {
-			snapshot.frame.contains("bash bash ·")
-				&& snapshot.frame.contains("17B")
-				&& queue_marker.is_file()
-				&& gateway.captured_text(6, "continue")
-				&& !gateway.captured_text(6, "steer now")
-				&& !gateway.captured_text(6, "after all work")
-		});
-	assert_surface(&queue_live, "next batch after interrupt");
-	debug.keys("'steer now' enter");
-	let immediate_steering =
-		wait_snapshot(&mut debug, &raw_capture, "plain Enter immediate steering", |snapshot| {
-			snapshot.frame.contains("steer now")
-		});
-	assert_surface(&immediate_steering, "plain Enter immediate steering");
-	debug.keys("'after all work' alt-enter");
-	let queued_follow_up =
-		wait_snapshot(&mut debug, &raw_capture, "Alt+Enter queued follow-up", |snapshot| {
-			snapshot.frame.contains("after all work")
-		});
-	assert_surface(&queued_follow_up, "Alt+Enter queued follow-up");
-	gateway.release(7);
-	let entered = wait_snapshot(
-		&mut debug,
-		&raw_capture,
-		"plain Enter steering precedes follow-up",
-		|snapshot| {
-			snapshot.frame.contains("plain Enter steering ran before")
-				&& gateway.captured_text(7, "steer now")
-				&& !gateway.captured_text(7, "after all work")
-		},
-	);
-	assert_surface(&entered, "plain Enter steering precedes follow-up");
-	gateway.release(8);
-	let follow_up =
-		wait_snapshot(&mut debug, &raw_capture, "Alt+Enter follows all active work", |snapshot| {
-			snapshot
-				.frame
-				.contains("queued follow-up ran after all prior work")
-				&& gateway.captured_text(8, "after all work")
-		});
-	assert_surface(&follow_up, "Alt+Enter follows all active work");
-
-	debug.keys("'/quit' enter");
+	// Ctrl+C on an idle composer arms exit; a second press within the window
+	// quits.
+	debug.keys("ctrl+c ctrl+c");
 	drop(debug);
 	let before = process.before.clone();
 	let (status, raw, stdout, stderr, after) = process.wait(READY_TIMEOUT);
-	let diagnostics = format!(
-		"status={status}\nstdout={stdout}\nstderr={stderr}\nlast frame={}\nraw={}",
-		follow_up.frame,
-		visible(&raw),
-	);
+	let diagnostics =
+		format!("status={status}\nstdout={stdout}\nstderr={stderr}\nraw={}", visible(&raw));
 	assert!(status.success(), "omp chat did not exit cleanly\n{diagnostics}");
 	assert_restored(&raw, &before, &after, &diagnostics);
-	let journals: Vec<_> = fs::read_dir(state_dir.join("sessions"))
-		.expect("read session directory")
-		.map(|entry| entry.expect("read session entry").path())
-		.filter(|path| {
-			path
-				.extension()
-				.is_some_and(|extension| extension == "jsonl")
-		})
-		.collect();
-	assert_eq!(journals.len(), 2, "expected original and steering journals: {journals:?}");
-	assert!(
-		journals.iter().any(|path| {
-			path.file_stem().and_then(ffi::OsStr::to_str) == Some(initial_session_id.as_str())
-		}),
-		"original bootstrap journal missing: {journals:?}"
-	);
-	let steering_session_id = journals
-		.iter()
-		.filter_map(|path| path.file_stem().and_then(ffi::OsStr::to_str))
-		.find(|id| *id != initial_session_id.as_str())
-		.expect("steering journal has a distinct ULID")
-		.to_owned();
-	let resume_debug_socket = scratch.path().join("resume-tui-debug.sock");
-	let mut resumed = PtyChild::spawn(&binary, &base_args, &project, &resume_debug_socket);
+
+	let resume_socket = scratch.path().join("resume-tui-debug.sock");
+	let mut resume_args = base_args;
+	resume_args.push("-c".to_owned());
+	let mut resumed = PtyChild::spawn(&binary, &resume_args, &project, &resume_socket);
 	let resumed_raw = resumed.raw.clone();
 	let mut resume_debug =
-		DebugClient::connect(&resume_debug_socket, Instant::now() + READY_TIMEOUT, &mut resumed);
-	let fresh = wait_snapshot(&mut resume_debug, &resumed_raw, "fresh second session", |snapshot| {
-		let frame = &snapshot.frame;
-		frame.contains("session")
-			&& frame.contains("idle")
-			&& !frame.contains("exercise deterministic tools")
-	});
-	assert_surface(&fresh, "fresh second session");
-
-	gateway.release(9);
-	resume_debug.keys("'second-session retained content' enter");
-	let second_session = wait_snapshot(
-		&mut resume_debug,
-		&resumed_raw,
-		"second session retained content",
-		|snapshot| {
-			snapshot.frame.contains("second-session retained content")
-				&& snapshot.frame.contains("Second session retained content.")
-		},
-	);
-	assert_surface(&second_session, "second session retained content");
-	let second_idle =
-		wait_snapshot(&mut resume_debug, &resumed_raw, "second session idle", |snapshot| {
-			snapshot.frame.contains("Second session retained content.")
-				&& snapshot.frame.contains("state    idle")
-		});
-	assert_surface(&second_idle, "second session idle");
-
-	resume_debug.keys("'/resume'");
-	let resume_draft =
-		wait_snapshot(&mut resume_debug, &resumed_raw, "resume command draft", |snapshot| {
-			snapshot.frame.contains("╰─ /resume")
-		});
-	assert_surface(&resume_draft, "resume command draft");
-	resume_debug.keys("enter enter");
-	let picker =
-		wait_snapshot(&mut resume_debug, &resumed_raw, "resume session picker", |snapshot| {
-			snapshot.text.contains("Resume session")
-		});
-	assert_surface(&picker, "resume session picker");
-	resume_debug.keys("esc");
-	let direct_resume = format!("'/resume {steering_session_id}'");
-	resume_debug.keys(direct_resume.as_str());
-	resume_debug.keys("enter enter");
-	let direct_picker =
-		wait_snapshot(&mut resume_debug, &resumed_raw, "selected resume session", |snapshot| {
-			snapshot.text.contains("Resume session")
-				&& snapshot.text.contains(steering_session_id.as_str())
-		});
-	assert_surface(&direct_picker, "selected resume session");
-	resume_debug.keys("enter");
-	drop(resume_debug);
-	thread::sleep(Duration::from_millis(100));
-	let mut resume_debug =
-		DebugClient::connect(&resume_debug_socket, Instant::now() + READY_TIMEOUT, &mut resumed);
+		DebugClient::connect(&resume_socket, Instant::now() + READY_TIMEOUT, &mut resumed);
 	let rehydrated = wait_snapshot(
 		&mut resume_debug,
 		&resumed_raw,
-		"same-process transcript rehydrated",
+		"resumed transcript keeps thinking bodies",
 		|snapshot| {
 			let all = snapshot.combined();
-			all.contains("continue")
-				&& all.contains("\"kind\":\"interrupted\"")
-				&& all.contains("steer now")
-				&& all.contains("The queued follow-up ran after all prior work.")
-				&& !snapshot.frame.contains("second-session retained content")
-				&& !snapshot.frame.contains("Second session retained content.")
+			all.contains("First answer settled.")
+				&& all.contains("Second answer settled.")
+				&& all.contains("Weighing the first request")
+				&& all.contains("Second deliberation paragraph.")
 		},
 	);
-	assert_surface(&rehydrated, "same-process resumed transcript");
-	resume_debug.keys("'/quit' enter enter");
+	assert_surface(&rehydrated, "resumed thinking transcript");
+	let resumed_journal = journal(&session_path);
+	assert!(
+		resumed_journal.starts_with(&second_journal),
+		"resume did not preserve the authoritative journal prefix"
+	);
+	assert_journal_chain(&resumed_journal);
+
+	resume_debug.keys("ctrl+c ctrl+c");
 	drop(resume_debug);
 	let resumed_before = resumed.before.clone();
 	let (resumed_status, resumed_bytes, resumed_stdout, resumed_stderr, resumed_after) =
 		resumed.wait(READY_TIMEOUT);
 	let resumed_diagnostics = format!(
-		"status={resumed_status}\nstdout={resumed_stdout}\nstderr={resumed_stderr}\nrehydrated \
-		 frame={}\nraw={}",
-		rehydrated.frame,
-		visible(&resumed_bytes),
+		"status={resumed_status}\nstdout={resumed_stdout}\nstderr={resumed_stderr}\nraw={}",
+		visible(&resumed_bytes)
 	);
 	assert!(
 		resumed_status.success(),

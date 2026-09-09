@@ -12,18 +12,18 @@ use crate::SandboxOperation;
 use crate::{
 	Backend, BackendStatus, Capability, CapabilitySet, Caveat, DegradationPolicy,
 	FilesystemVirtualizationKind, NetworkMode, Plan, ProbeFailure, SandboxError, SandboxSpec,
-	WriteMode,
+	WriteMode, paths::path_under_any,
 };
 
 const RUNSC_ENV: &str = "OMP_SANDBOX_RUNSC";
 #[cfg(target_os = "linux")]
 const DIAGNOSTIC_LIMIT: usize = 4096;
 
-pub(crate) fn runtime() -> OsString {
+pub fn runtime() -> OsString {
 	env::var_os(RUNSC_ENV).unwrap_or_else(|| OsString::from("runsc"))
 }
 
-pub(crate) fn compile(
+pub fn compile(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -33,17 +33,37 @@ pub(crate) fn compile(
 	let has_future_deny = spec.read_deny.iter().any(|path| !path.exists());
 	if has_future_deny {
 		enforced = enforced.difference(CapabilitySet::one(Capability::FsReadDeny));
-		if spec.degradation == DegradationPolicy::Reject {
+		if spec.degradation == DegradationPolicy::Reject
+			&& !spec.tolerated.contains(Capability::FsReadDeny)
+		{
 			return Err(SandboxError::BackendCapabilities {
 				backend: Backend::Gvisor,
 				missing: CapabilitySet::one(Capability::FsReadDeny),
 			});
 		}
 	}
+	let has_future_write_deny = spec.write_deny.iter().any(|path| !path.exists());
+	let has_unmounted_write_deny = spec
+		.write_deny
+		.iter()
+		.any(|path| !path_under_any(path, &spec.writable));
+	if has_future_write_deny || has_unmounted_write_deny {
+		enforced = enforced.difference(CapabilitySet::one(Capability::FsWriteDeny));
+		if spec.degradation == DegradationPolicy::Reject
+			&& !spec.tolerated.contains(Capability::FsWriteDeny)
+		{
+			return Err(SandboxError::BackendCapabilities {
+				backend: Backend::Gvisor,
+				missing: CapabilitySet::one(Capability::FsWriteDeny),
+			});
+		}
+	}
 	let filesystem_view = needs_filesystem_view(spec);
 	if filesystem_view && enforced.contains(Capability::IpcRestrict) {
 		enforced = enforced.difference(CapabilitySet::one(Capability::IpcRestrict));
-		if spec.degradation == DegradationPolicy::Reject {
+		if spec.degradation == DegradationPolicy::Reject
+			&& !spec.tolerated.contains(Capability::IpcRestrict)
+		{
 			return Err(SandboxError::BackendCapabilities {
 				backend: Backend::Gvisor,
 				missing: CapabilitySet::one(Capability::IpcRestrict),
@@ -92,6 +112,25 @@ pub(crate) fn compile(
 			plan.add_caveat(Caveat::capability(
 				Capability::FsReadDeny,
 				"gVisor cannot pre-mount a read-deny mask for a path that does not yet exist",
+			));
+		}
+	}
+	if !spec.write_deny.is_empty() {
+		plan.add_caveat(Caveat::capability(
+			Capability::FsWriteDeny,
+			"gVisor remounts existing denied write subtrees read-only inside writable bind mounts",
+		));
+		if has_future_write_deny {
+			plan.add_caveat(Caveat::capability(
+				Capability::FsWriteDeny,
+				"gVisor cannot pre-mount a read-only carve-out for a path that does not yet exist",
+			));
+		}
+		if has_unmounted_write_deny {
+			plan.add_caveat(Caveat::capability(
+				Capability::FsWriteDeny,
+				"gVisor cannot carve a rootfs or temporary path read-only without replacing it with a \
+				 host bind mount",
 			));
 		}
 	}
@@ -178,13 +217,13 @@ fn runtime_flags(spec: &SandboxSpec) -> Vec<OsString> {
 	flags
 }
 
-pub(crate) fn probe() -> BackendStatus {
+pub fn probe() -> BackendStatus {
 	#[cfg(not(target_os = "linux"))]
 	{
-		return BackendStatus::unavailable(Backend::Gvisor, ProbeFailure::WrongHost {
+		BackendStatus::unavailable(Backend::Gvisor, ProbeFailure::WrongHost {
 			backend: Backend::Gvisor,
 			os:      std::env::consts::OS,
-		});
+		})
 	}
 	#[cfg(target_os = "linux")]
 	probe_output(
@@ -217,7 +256,7 @@ pub(crate) fn probe_oci_seccomp() -> BackendStatus {
 		rejected(output.status.code(), diagnostic)
 	}
 }
-pub(crate) fn check_requirements(spec: &SandboxSpec) -> Result<BackendStatus, SandboxError> {
+pub fn check_requirements(spec: &SandboxSpec) -> Result<BackendStatus, SandboxError> {
 	let status = probe();
 	if !status.is_available() || !needs_oci(spec) {
 		return Ok(status);

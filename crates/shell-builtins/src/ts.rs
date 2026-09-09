@@ -18,7 +18,7 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use jiff::{Timestamp, fmt::strtime, tz::TimeZone};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
@@ -60,7 +60,7 @@ impl Utility for Ts {
 /// The `ts` argument model.
 fn command() -> Command {
 	Command::new(Ts::NAME)
-		.version("ts (pi-shell) 17.2.11")
+		.version("ts 17.2.11")
 		.about("Timestamp each line of standard input.")
 		.override_usage(format_usage("ts [-r] [-i | -s] [-m] [FORMAT]"))
 		.disable_help_flag(true)

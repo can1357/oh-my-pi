@@ -20,8 +20,12 @@
     {
       "expected": {
         "headers": {
-          "User-Agent": "opencode/1.3.15",
-          "X-GitHub-Api-Version": "2026-06-01"
+          "Copilot-Harness-Id": "copilot-sdk",
+          "Copilot-Integration-Id": "copilot-developer-cli",
+          "Editor-Version": "copilot/1.0.82",
+          "Openai-Intent": "conversation-agent",
+          "User-Agent": "copilot/1.0.82",
+          "X-GitHub-Api-Version": "2026-08-01"
         },
         "premium_multiplier": 0.33,
         "thinking": {

@@ -11,15 +11,21 @@ use omp_core::Str;
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct LaunchRoles {
 	/// Primary model when explicitly overridden.
-	pub primary:       Option<ModelKey>,
+	pub primary:          Option<ModelKey>,
+	/// Primary selector's explicit thinking annotation.
+	pub primary_thinking: Option<Str>,
 	/// Fast/low-cost model.
-	pub smol:          Option<ModelKey>,
+	pub smol:             Option<ModelKey>,
+	/// Fast selector's explicit thinking annotation.
+	pub smol_thinking:    Option<Str>,
 	/// Deep-reasoning model.
-	pub slow:          Option<ModelKey>,
+	pub slow:             Option<ModelKey>,
+	/// Deep selector's explicit thinking annotation.
+	pub slow_thinking:    Option<Str>,
 	/// Planning model.
-	pub plan:          Option<ModelKey>,
+	pub plan:             Option<ModelKey>,
 	/// Planning selector's explicit thinking annotation.
-	pub plan_thinking: Option<Str>,
+	pub plan_thinking:    Option<Str>,
 }
 
 /// Resolves role selectors through the catalog authority. CLI values override
@@ -58,11 +64,16 @@ pub fn resolve_launch_roles(
 	let slow = resolve_selected(slow, "OMP_SLOW_MODEL", "slow")?;
 	let plan = resolve_selected(plan, "OMP_PLAN_MODEL", "plan")?;
 	Ok(LaunchRoles {
-		primary:       primary.map(|selected| selected.model),
-		smol:          smol.map(|selected| selected.model),
-		slow:          slow.map(|selected| selected.model),
-		plan_thinking: plan.as_ref().and_then(|selected| selected.thinking.clone()),
-		plan:          plan.map(|selected| selected.model),
+		primary_thinking: primary
+			.as_ref()
+			.and_then(|selected| selected.thinking.clone()),
+		primary:          primary.map(|selected| selected.model),
+		smol_thinking:    smol.as_ref().and_then(|selected| selected.thinking.clone()),
+		smol:             smol.map(|selected| selected.model),
+		slow_thinking:    slow.as_ref().and_then(|selected| selected.thinking.clone()),
+		slow:             slow.map(|selected| selected.model),
+		plan_thinking:    plan.as_ref().and_then(|selected| selected.thinking.clone()),
+		plan:             plan.map(|selected| selected.model),
 	})
 }
 /// Resolves one explicit role selector through the catalog authority with no
@@ -248,6 +259,26 @@ mod tests {
 			"example",
 			Some(&denied_provider),
 		));
+	}
+	#[test]
+	fn every_launch_role_preserves_its_explicit_thinking_annotation() {
+		let catalog = omp_catalog::snapshot::Catalog::try_embedded().expect("catalog");
+		let settings = ModelSettings::default();
+		let selector = "openai/gpt-5:high";
+		let launch = resolve_launch_roles(
+			catalog,
+			&settings,
+			Some(selector),
+			Some(selector),
+			Some(selector),
+			Some(selector),
+		)
+		.expect("annotated roles");
+		for thinking in
+			[launch.primary_thinking, launch.smol_thinking, launch.slow_thinking, launch.plan_thinking]
+		{
+			assert_eq!(thinking.as_deref(), Some("high"));
+		}
 	}
 
 	#[test]

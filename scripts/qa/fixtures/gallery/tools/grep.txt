@@ -1,0 +1,28 @@
+── grep — Grep ─────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+  Grep: useState                                                                                   
+                                                                                                    
+
+  · in progress
+                                                                                                    
+  Grep: useState in packages/tui/src                                                               
+                                                                                                    
+
+  · done
+                                                                                                    
+  Grep: useState 5 matches · 3 files · in packages/tui/src                                         
+ ├─ # packages/tui/src/components/                                                                  
+ │  ## SearchBox.tsx                                                                                
+ │  *18│  const [query, setQuery] = useState("");                                                   
+ │  *19│  const [results, setResults] = useState<Match[]>([]);                                      
+ │  ## StatusBar.tsx                                                                                
+ └─ … 3 more matches                                                                                
+                                                                                                    
+
+  · failed
+                                                                                                    
+  Error: Invalid regex pattern: unclosed group near index 8                                        
+                                                                                                    
+

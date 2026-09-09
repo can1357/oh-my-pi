@@ -32,6 +32,11 @@ pub const PULL_ALIAS_MAX_COUNT: usize = 16;
 pub const PULL_EXPECTED_MAX_BYTES: usize = 256;
 /// Largest decoded prefix carried by one streaming argument reply.
 pub const PULL_CHUNK_MAX_BYTES: usize = 64 * 1024;
+/// Largest result payload chunk accepted from an extension worker.
+///
+/// Keeping result frames at the same fixed granularity as cursor replies lets
+/// the host apply filesystem backpressure without retaining the result in RAM.
+pub const RESULT_CHUNK_MAX_BYTES: usize = 64 * 1024;
 /// Largest TML source accepted by an extension-facing UI frame.
 pub const TML_MAX_BYTES: usize = 262_144;
 /// Largest syntactic nesting depth accepted in TML source.
@@ -223,10 +228,13 @@ enum MessageKind {
 	ContextHost,
 	#[strum(serialize = "ContextWorkerEnvelope")]
 	ContextWorker,
+	#[strum(serialize = "ResultWorkerEnvelope")]
+	ResultWorker,
 	RegisterTools,
 	ToolDecl,
 	ToolExample,
-	ToolComplete,
+	ToolResultStart,
+	ToolResultChunk,
 	PullRequest,
 	PullReply,
 	ArgIssue,
@@ -447,9 +455,7 @@ const fn length_rule(kind: MessageKind, field: u32) -> Option<LengthRule> {
 
 		(M::WorkerFrame, 2) => Some(Message(M::Generic)),
 		(M::WorkerFrame, 3) => Some(Message(M::RegisterTools)),
-		(M::WorkerFrame, 4) => Some(Message(M::Generic)),
-		(M::WorkerFrame, 5) => Some(Message(M::ToolComplete)),
-		(M::WorkerFrame, 6..=9) => Some(Message(M::Generic)),
+		(M::WorkerFrame, 4..=9) => Some(Message(M::Generic)),
 		(M::WorkerFrame, 10) => Some(Message(M::LifecycleWorker)),
 		(M::WorkerFrame, 11) => Some(Message(M::ArgumentWorker)),
 		(M::WorkerFrame, 12) => Some(Message(M::HookWorker)),
@@ -458,7 +464,8 @@ const fn length_rule(kind: MessageKind, field: u32) -> Option<LengthRule> {
 		(M::WorkerFrame, 15) => Some(Message(M::ValueMap)),
 
 		(M::WorkerFrame, 16) => Some(Message(M::ContextWorker)),
-		(M::WorkerFrame, 17..=20) => Some(Message(M::Generic)),
+		(M::WorkerFrame, 17..=21) => Some(Message(M::Generic)),
+		(M::WorkerFrame, 22) => Some(Message(M::ResultWorker)),
 
 		(M::LifecycleHost, 1) => Some(Message(M::AdmitExtensions)),
 		(M::LifecycleWorker, 1) => Some(Message(M::SetAvailability)),
@@ -587,12 +594,14 @@ const fn length_rule(kind: MessageKind, field: u32) -> Option<LengthRule> {
 			Some(RepeatedMessage { max_count: TOOL_EXAMPLE_MAX_COUNT, kind: M::ToolExample })
 		},
 		(M::ToolExample, 1) => Some(Bytes(FIELD_MAX_BYTES)),
-		(M::ToolComplete, 2) => {
+		(M::ResultWorker, 1) => Some(Message(M::ToolResultStart)),
+		(M::ResultWorker, 2) => Some(Message(M::ToolResultChunk)),
+		(M::ResultWorker, 3) => Some(Message(M::Generic)),
+		(M::ToolResultStart, 2) => {
 			Some(RepeatedMessage { max_count: REPEATED_MAX_COUNT, kind: M::ThreadPart })
 		},
-
-		(M::ToolComplete, 6) => Some(Message(M::ArgIssue)),
-		(M::ToolComplete, 7) => Some(Message(M::Generic)),
+		(M::ToolResultStart, 4) => Some(Message(M::ArgIssue)),
+		(M::ToolResultChunk, 2) => Some(Bytes(RESULT_CHUNK_MAX_BYTES)),
 		(M::ArgIssue, 1) => {
 			Some(RepeatedBytes { max_count: PULL_PATH_MAX_SEGMENTS, max_bytes: PULL_NAME_MAX_BYTES })
 		},

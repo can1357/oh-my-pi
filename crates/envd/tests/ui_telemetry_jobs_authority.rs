@@ -14,7 +14,7 @@ use omp_envd::exthost::{
 		UiControlOwner, UiControlRequest, UiControlResult,
 	},
 };
-use omp_telemetry::authority::{
+use omp_observability::authority::{
 	DurableTelemetryQuery, TelemetryAuthorityError, TelemetryAuthorityIdentity,
 };
 use serde_json::{Map, Value, json};

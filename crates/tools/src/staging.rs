@@ -17,10 +17,17 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// Stable notice appended when a tool leaves a proposal uncommitted.
-pub const PROPOSAL_PENDING_NOTICE: &str =
-	"A staged proposal is pending. Finalize it by running `xd resolve \"<one-sentence reason>\"` \
-	 or `xd reject \"<one-sentence reason>\"` in the shell before using another tool.";
+/// Builds the model-facing notice for an exact staged proposal.
+///
+/// The proposal id is mandatory because more than one preview may be pending;
+/// "latest" is not a transaction identity.
+pub fn proposal_pending_notice(id: &str) -> Str {
+	sf!(
+		"Staged as proposal `{id}` — files NOT modified yet. To apply this exact preview, run `dyn \
+		 resolve \"{id}\" \"<one-sentence reason>\"`. To discard it, run `dyn reject \"{id}\" \
+		 \"<one-sentence reason>\"`."
+	)
+}
 /// Why a staged proposal was rejected.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,7 +55,7 @@ pub enum ProposalDecision {
 }
 
 /// Successful terminal result from a staged action.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct ProposalOutcome {
 	/// Unique proposal identity.
 	pub id:       Str,
@@ -149,6 +156,20 @@ struct Inner {
 #[derive(Clone)]
 pub struct StagedProposalRegistry(Arc<Inner>);
 
+struct StageRollback {
+	registry: StagedProposalRegistry,
+	id:       Str,
+	armed:    bool,
+}
+
+impl Drop for StageRollback {
+	fn drop(&mut self) {
+		if self.armed {
+			self.registry.0.entries.lock().remove(self.id.as_str());
+		}
+	}
+}
+
 impl Default for StagedProposalRegistry {
 	fn default() -> Self {
 		Self(Arc::new(Inner {
@@ -177,8 +198,8 @@ impl StagedProposalRegistry {
 
 	/// Stages an action, then announces it to the active agent owner.
 	///
-	/// An observer failure rolls the action back so no unresolvable proposal is
-	/// left behind.
+	/// An observer failure or cancellation rolls the action back so no
+	/// unresolvable proposal is left behind.
 	pub async fn stage(
 		&self,
 		source_tool: Str,
@@ -192,6 +213,8 @@ impl StagedProposalRegistry {
 			.entries
 			.lock()
 			.insert(id.clone(), Entry { sequence, action: Box::new(action) });
+		let mut rollback =
+			StageRollback { registry: self.clone(), id: id.clone(), armed: true };
 		let registry = self.clone();
 		let invoke_id = id.clone();
 		let resolver: ProposalResolver =
@@ -199,13 +222,10 @@ impl StagedProposalRegistry {
 		let pending = StagedProposal { id: id.clone(), source_tool, summary, resolver };
 		let observer = self.0.observer.lock().clone();
 		let Some(observer) = observer else {
-			self.0.entries.lock().remove(id.as_str());
 			return Err(ProposalActivationError::Unavailable);
 		};
-		if let Err(error) = observer(pending.clone()).await {
-			self.0.entries.lock().remove(id.as_str());
-			return Err(error);
-		}
+		observer(pending.clone()).await?;
+		rollback.armed = false;
 		Ok(pending)
 	}
 
@@ -258,6 +278,14 @@ mod tests {
 		}
 	}
 
+	#[test]
+	fn pending_notice_names_the_exact_transaction() {
+		let notice = proposal_pending_notice("pending-action:ast_edit:7");
+		assert!(notice.contains("dyn resolve \"pending-action:ast_edit:7\""));
+		assert!(notice.contains("dyn reject \"pending-action:ast_edit:7\""));
+		assert!(notice.contains("files NOT modified yet"));
+	}
+
 	#[tokio::test]
 	async fn stage_requires_observer_and_finalizes_once() {
 		let registry = StagedProposalRegistry::new();
@@ -300,6 +328,17 @@ mod tests {
 		}
 		assert_eq!(registry.latest_pending().as_ref(), staged.last());
 
+		let earliest = staged.remove(0);
+		registry
+			.finalize(
+				earliest.as_str(),
+				ProposalDecision::Reject(ProposalRejection::Requested {
+					reason: sf!("Reject this exact older proposal."),
+				}),
+			)
+			.expect("exact older proposal rejects");
+		assert_eq!(registry.latest_pending().as_ref(), staged.last());
+
 		let latest = staged.pop().expect("latest proposal");
 		registry
 			.finalize(
@@ -308,6 +347,23 @@ mod tests {
 			)
 			.expect("latest proposal rejects");
 		assert_eq!(registry.latest_pending().as_ref(), staged.last());
+	}
+
+	#[tokio::test]
+	async fn cancelling_activation_rolls_back_unannounced_proposal() {
+		let registry = StagedProposalRegistry::new();
+		registry.install_activation_observer(Arc::new(|_| Box::pin(futures::future::pending())));
+		{
+			let future = registry.stage(
+				sf!("ast_edit"),
+				sf!("one file changed"),
+				RecordingAction(Arc::new(Mutex::new(Vec::new()))),
+			);
+			futures::pin_mut!(future);
+			assert!(futures::poll!(future.as_mut()).is_pending());
+			assert!(registry.latest_pending().is_some());
+		}
+		assert!(registry.latest_pending().is_none());
 	}
 
 	#[tokio::test]

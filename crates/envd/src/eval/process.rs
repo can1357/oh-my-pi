@@ -37,7 +37,6 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::Value;
 use tokio::{
 	io::{AsyncBufRead, AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
-	net::TcpListener,
 	process::{Child, Command},
 	runtime,
 	sync::Mutex as AsyncMutex,
@@ -56,6 +55,7 @@ use super::{
 		ChildBridgeTransport, PreludeStubWire, SessionBridgeHost,
 	},
 };
+use crate::{exec::ExecHost, exec_sandbox::ExecSandbox};
 
 /// Private argv selector used to re-enter `omp` as an eval kernel child.
 pub const EVAL_CHILD_ARG: &str = "__omp-eval-child";
@@ -65,12 +65,10 @@ const MAX_BRIDGE_PROGRESS_BYTES: usize = 256 * 1024;
 const CHILD_TIMEOUT_EXIT: i32 = 124;
 const SECRET_MARKERS: &[&str] =
 	&["TOKEN", "SECRET", "PASSWORD", "PASSWD", "API_KEY", "PRIVATE_KEY", "CREDENTIAL"];
-const OUTPUT_SPILL_THRESHOLD: usize = 128 * 1024;
 const MAX_RUNTIME_CWD_BYTES: usize = 16 * 1024;
 const MAX_MANAGED_ENV_VALUE_BYTES: usize = 1024 * 1024;
 const MAX_MANAGED_ENV_BYTES: usize = 2 * 1024 * 1024;
-const MANAGED_ENV_KEYS: [&str; 3] =
-	["OMP_ARTIFACTS_DIR", "OMP_EVAL_LOCAL_ROOTS", "OMP_SESSION_FILE"];
+const MANAGED_ENV_KEYS: [&str; 1] = ["OMP_EVAL_LOCAL_ROOTS"];
 const EMBEDDED_INTERPRETER: &str = "embedded:cpython-3.14t";
 const EXTERNAL_RUNNER_SOURCE: &str = include_str!("external_runner.py");
 
@@ -84,6 +82,7 @@ pub struct ProcessEvalExec {
 struct ProcessEvalInner {
 	executable:      PathBuf,
 	interpreter:     PathBuf,
+	exec:            ExecHost,
 	host:            Arc<SessionBridgeHost>,
 	blobs:           Option<BlobHost>,
 	interrupt_grace: OmpDuration,
@@ -123,6 +122,7 @@ impl ProcessEvalExec {
 	/// is set, interpreter discovery is deferred until the authoritative
 	/// runtime working directory is available.
 	pub fn production(
+		exec: ExecHost,
 		host: Arc<SessionBridgeHost>,
 		interrupt_grace: OmpDuration,
 		blobs: BlobHost,
@@ -143,12 +143,13 @@ impl ProcessEvalExec {
 			})?,
 			None => PathBuf::from(EMBEDDED_INTERPRETER),
 		};
-		Ok(Self::new_inner(executable, interpreter, host, interrupt_grace, Some(blobs)))
+		Ok(Self::new_inner(executable, interpreter, exec, host, interrupt_grace, Some(blobs)))
 	}
 
 	fn new_inner(
 		executable: PathBuf,
 		interpreter: PathBuf,
+		exec: ExecHost,
 		host: Arc<SessionBridgeHost>,
 		interrupt_grace: OmpDuration,
 		blobs: Option<BlobHost>,
@@ -157,6 +158,7 @@ impl ProcessEvalExec {
 			inner: Arc::new(ProcessEvalInner {
 				executable,
 				interpreter,
+				exec,
 				host,
 				blobs,
 				interrupt_grace,
@@ -296,6 +298,14 @@ impl ProcessEvalExec {
 			message: sf!("unknown supervised Python process session"),
 		})?;
 		let gate = Arc::clone(&owned.run_gate).lock_owned().await;
+		let sandbox = self
+			.inner
+			.exec
+			.active_sandbox()
+			.map_err(|error| Fault::Resource {
+				operation: sf!("open_session"),
+				message:   Str::from(error.to_string()),
+			})?;
 		// The gate covers child replacement as well as execution, so callers
 		// queued on the same session coalesce around the first fresh child.
 		let forced_reset = owned.needs_reset.swap(false, Ordering::AcqRel);
@@ -306,7 +316,7 @@ impl ProcessEvalExec {
 			"{}:cell-{number}",
 			String::from_utf8_lossy(owned.key.session.as_ref())
 		));
-		let (events_tx, events) = flume::unbounded();
+		let (events_tx, events) = flume::bounded(1);
 		let cancelled = CancellationToken::new();
 		let task_cancelled = cancelled.clone();
 		let executable = self.inner.executable.clone();
@@ -326,7 +336,12 @@ impl ProcessEvalExec {
 		tokio::spawn(async move {
 			let _gate = gate;
 			if task_cancelled.is_cancelled() {
-				owned.needs_reset.store(true, Ordering::Release);
+				if forced_reset {
+					owned.needs_reset.store(true, Ordering::Release);
+				}
+				let _ = events_tx
+					.send_async(Ok(RunEvent::Completed(cancelled_completion(0))))
+					.await;
 				return;
 			}
 			let mut child_slot = owned.child.lock().await;
@@ -353,6 +368,7 @@ impl ProcessEvalExec {
 							.unwrap_or_else(|| Path::new(".")),
 						Arc::clone(&host),
 						interrupt_grace,
+						sandbox.clone(),
 					)
 					.await
 					{
@@ -362,9 +378,13 @@ impl ProcessEvalExec {
 							if task_cancelled.is_cancelled()
 								&& let Some(completion) = retry_cancelled.take()
 							{
-								let _ = events_tx.send(Ok(RunEvent::Completed(completion)));
+								let _ = events_tx
+									.send_async(Ok(RunEvent::Completed(completion)))
+									.await;
 							} else {
-								let _ = events_tx.send(Err(resource_fault("open_session", error)));
+								let _ = events_tx
+									.send_async(Err(resource_fault("open_session", error)))
+									.await;
 							}
 							return;
 						},
@@ -379,7 +399,9 @@ impl ProcessEvalExec {
 					if disposable && let Some(mut child) = child_slot.take() {
 						child.terminate().await;
 					}
-					let _ = events_tx.send(Ok(RunEvent::Completed(completion)));
+					let _ = events_tx
+						.send_async(Ok(RunEvent::Completed(completion)))
+						.await;
 					return;
 				}
 				let child = child_slot.as_mut().expect("eval child initialized above");
@@ -405,11 +427,13 @@ impl ProcessEvalExec {
 						retry_cancelled = Some(completion);
 						if task_cancelled.is_cancelled() {
 							owned.needs_reset.store(true, Ordering::Release);
-							let _ = events_tx.send(Ok(RunEvent::Completed(
-								retry_cancelled
-									.take()
-									.expect("dead-kernel cancellation recorded above"),
-							)));
+							let _ = events_tx
+								.send_async(Ok(RunEvent::Completed(
+									retry_cancelled
+										.take()
+										.expect("dead-kernel cancellation recorded above"),
+								)))
+								.await;
 							return;
 						}
 					},
@@ -439,7 +463,13 @@ impl EvalRun for ProcessEvalRun {
 				self.terminal = true;
 				Err(error)
 			},
-			Err(_) => Ok(None),
+			Err(_) if self.terminal => Ok(None),
+			Err(_) => {
+				self.terminal = true;
+				Err(Fault::SessionLost {
+					message: sf!("Python eval supervisor exited without a terminal completion"),
+				})
+			},
 		}
 	}
 
@@ -485,73 +515,6 @@ impl BridgeProgressSink for ProgressChannel {
 	}
 }
 
-struct OutputSpill {
-	host:        Option<BlobHost>,
-	buffered:    Vec<u8>,
-	stage:       Option<omp_storage::blob::BlobStage>,
-	total_lines: usize,
-	total_bytes: usize,
-}
-
-impl OutputSpill {
-	fn new(host: Option<BlobHost>) -> Self {
-		Self {
-			host,
-			buffered: Vec::with_capacity(OUTPUT_SPILL_THRESHOLD.min(64 * 1024)),
-			stage: None,
-			total_lines: 0,
-			total_bytes: 0,
-		}
-	}
-
-	fn push(&mut self, data: &[u8]) -> Result<(), ProcessError> {
-		self.total_bytes = self.total_bytes.saturating_add(data.len());
-		self.total_lines = self
-			.total_lines
-			.saturating_add(bytecount::count(data, b'\n'));
-		if let Some(stage) = self.stage.as_mut() {
-			stage
-				.write_all(data)
-				.map_err(|error| ProcessError::Spill(Str::from(error.to_string())))?;
-			return Ok(());
-		}
-		if self.buffered.len().saturating_add(data.len()) <= OUTPUT_SPILL_THRESHOLD {
-			self.buffered.extend_from_slice(data);
-			return Ok(());
-		}
-		let Some(host) = self.host.as_ref() else {
-			self.buffered.clear();
-			return Ok(());
-		};
-		let mut stage = host
-			.begin_spill()
-			.map_err(|error| ProcessError::Spill(Str::from(error.to_string())))?;
-		stage
-			.write_all(&self.buffered)
-			.and_then(|()| stage.write_all(data))
-			.map_err(|error| ProcessError::Spill(Str::from(error.to_string())))?;
-		self.buffered.clear();
-		self.stage = Some(stage);
-		Ok(())
-	}
-
-	async fn finish(self) -> Result<Option<BlobRef>, ProcessError> {
-		let Some(stage) = self.stage else {
-			return Ok(None);
-		};
-		let reference = task::spawn_blocking(move || stage.finish())
-			.await
-			.map_err(|error| ProcessError::Spill(Str::from(error.to_string())))?
-			.map_err(|error| ProcessError::Spill(Str::from(error.to_string())))?;
-		let hash = reference.hash.to_hex();
-		Ok(Some(BlobRef {
-			hash:       Str::from(hash.as_str()),
-			media_type: sf!("text/plain; charset=utf-8"),
-			byte_len:   reference.size,
-		}))
-	}
-}
-
 type ProtocolInput = Box<dyn AsyncRead + Unpin + Send>;
 type ProtocolOutput = Box<dyn AsyncWrite + Unpin + Send>;
 
@@ -584,6 +547,12 @@ const fn should_retry_dead_kernel_cancellation(
 }
 
 impl EvalChild {
+	#[tracing::instrument(
+		level = "debug",
+		name = "eval_child_spawn",
+		skip_all,
+		fields(external = interpreter != Path::new(EMBEDDED_INTERPRETER))
+	)]
 	async fn spawn(
 		executable: &Path,
 		interpreter: &Path,
@@ -591,46 +560,50 @@ impl EvalChild {
 		cwd: &Path,
 		host: Arc<SessionBridgeHost>,
 		interrupt_grace: OmpDuration,
+		sandbox: Option<Arc<ExecSandbox>>,
 	) -> Result<Self, ProcessError> {
 		let interrupt_grace_std = interrupt_grace.to_std()?;
 		let capabilities = host.capabilities()?.allowed_names();
 		let prelude = host.prelude_stubs();
 		let token = Str::from(Ulid::generate().to_string());
 		let parent_pid = process::id();
-		let (mut command, external_protocol, external_runner) =
-			if interpreter == Path::new(EMBEDDED_INTERPRETER) {
-				let mut command = Command::new(executable);
-				command.arg(EVAL_CHILD_ARG);
-				(command, None, None)
-			} else {
-				let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
-				let address = listener.local_addr()?;
-				let secret = Str::from(Ulid::generate().to_string());
-				let runner = stage_external_runner()?;
-				let mut command = Command::new(interpreter);
-				command
-					.arg("-u")
-					.arg(&runner)
-					.arg("--omp-connect")
-					.arg(address.to_string())
-					.arg(secret.as_str());
-				(command, Some((listener, address, secret)), Some(runner))
-			};
+		// Both worker forms keep their authenticated protocol on inherited pipes.
+		// The external runner duplicates these descriptors before redirecting user
+		// stdout/stderr, so confinement needs no loopback or Unix-socket exception.
+		let command_for = |program: &Path| {
+			sandbox.as_deref().map_or_else(
+				|| Command::new(program),
+				|sandbox| sandbox.tokio_command(program.as_os_str()),
+			)
+		};
+		let (mut command, external_runner) = if interpreter == Path::new(EMBEDDED_INTERPRETER) {
+			let mut command = command_for(executable);
+			command.arg(EVAL_CHILD_ARG);
+			(command, None)
+		} else {
+			let runner = stage_external_runner()?;
+			let mut command = command_for(interpreter);
+			command.arg("-u").arg(&runner);
+			(command, Some(runner))
+		};
+		let environment = sanitized_spawn_env();
+		let environment = if let Some(sandbox) = sandbox.as_deref() {
+			sandbox.resolve_env(environment)
+		} else {
+			environment
+		};
 		command
 			.current_dir(cwd)
 			.env_clear()
-			.envs(sanitized_spawn_env())
+			.envs(environment)
 			.env("PYTHONUNBUFFERED", "1")
 			.env("PYTHONIOENCODING", "utf-8")
 			.env("MPLBACKEND", "Agg")
 			.env("OMP_EVAL_SESSION", String::from_utf8_lossy(session_id.as_ref()).as_ref())
 			.stderr(Stdio::inherit())
+			.stdin(Stdio::piped())
+			.stdout(Stdio::piped())
 			.kill_on_drop(true);
-		if external_protocol.is_some() {
-			command.stdin(Stdio::null()).stdout(Stdio::null());
-		} else {
-			command.stdin(Stdio::piped()).stdout(Stdio::piped());
-		}
 		#[cfg(unix)]
 		{
 			use std::os::unix::process::CommandExt;
@@ -641,36 +614,24 @@ impl EvalChild {
 			use windows_sys::Win32::System::Threading::CREATE_NEW_PROCESS_GROUP;
 			command.creation_flags(CREATE_NEW_PROCESS_GROUP);
 		}
-		let mut child = command.spawn()?;
-		let process_group = child.id();
-		let (stdin, stdout) = if let Some((listener, _, secret)) = external_protocol {
-			let (stream, _) = time::timeout(Duration::from_secs(30), listener.accept())
-				.await
-				.map_err(|_| {
-					ProcessError::Protocol(sf!("external Python protocol connect timed out"))
-				})??;
-			let (reader, writer) = stream.into_split();
-			let mut reader = BufReader::new(Box::new(reader) as ProtocolInput);
-			match read_frame::<_, ExternalHello>(&mut reader).await? {
-				Some(ExternalHello { secret: actual }) if actual == secret => {},
-				_ => {
-					return Err(ProcessError::Protocol(sf!(
-						"external Python protocol authentication failed"
-					)));
-				},
-			}
-			(Box::new(writer) as ProtocolOutput, reader)
-		} else {
-			let stdin = child
-				.stdin
-				.take()
-				.ok_or_else(|| ProcessError::Protocol(sf!("eval child stdin unavailable")))?;
-			let stdout = child
-				.stdout
-				.take()
-				.ok_or_else(|| ProcessError::Protocol(sf!("eval child stdout unavailable")))?;
-			(Box::new(stdin) as ProtocolOutput, BufReader::new(Box::new(stdout) as ProtocolInput))
+		let mut child = match command.spawn() {
+			Ok(child) => child,
+			Err(error) => {
+				tracing::warn!(%error, "eval child spawn failed");
+				return Err(error.into());
+			},
 		};
+		let process_group = child.id();
+		let stdin = child
+			.stdin
+			.take()
+			.ok_or_else(|| ProcessError::Protocol(sf!("eval child stdin unavailable")))?;
+		let stdout = child
+			.stdout
+			.take()
+			.ok_or_else(|| ProcessError::Protocol(sf!("eval child stdout unavailable")))?;
+		let (stdin, stdout) =
+			(Box::new(stdin) as ProtocolOutput, BufReader::new(Box::new(stdout) as ProtocolInput));
 		let mut process = Self {
 			child,
 			stdin,
@@ -689,14 +650,18 @@ impl EvalChild {
 			python_prelude: Str::from(PYTHON_PRELUDE),
 			interrupt_grace: Str::from(interrupt_grace.to_string()),
 		})
-		.await?;
+		.await
+		.map_err(|error| {
+			tracing::warn!(%error, "eval child handshake failed");
+			error
+		})?;
 		// Cold start covers exec plus embedded-interpreter boot; tolerate load
 		// spikes that the per-frame runtime deadlines must not.
 		let ready = time::timeout(Duration::from_secs(30), read_frame(&mut process.stdout)).await;
 		if let Some(runner) = external_runner {
 			let _ = fs::remove_file(runner);
 		}
-		match ready {
+		let result = match ready {
 			Ok(Ok(Some(ChildFrame::Ready))) => Ok(process),
 			Ok(Ok(Some(ChildFrame::Fatal { message }))) => Err(ProcessError::Protocol(message)),
 			Ok(Ok(Some(_))) => {
@@ -705,9 +670,19 @@ impl EvalChild {
 			Ok(Ok(None)) => Err(ProcessError::Exited),
 			Ok(Err(error)) => Err(error),
 			Err(_) => Err(ProcessError::Protocol(sf!("eval child startup timed out"))),
+		};
+		if let Err(error) = &result {
+			tracing::warn!(%error, "eval child handshake failed");
 		}
+		result
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		name = "eval_child_roundtrip",
+		skip_all,
+		fields(run_id = tracing::field::Empty)
+	)]
 	async fn run_cell(
 		&mut self,
 		cell_id: Bytes,
@@ -722,6 +697,7 @@ impl EvalChild {
 		retry_dead_cancellation: bool,
 	) -> RunCellDisposition {
 		let run_id = self.next_run.fetch_add(1, Ordering::Relaxed);
+		tracing::Span::current().record("run_id", run_id);
 		let started = Instant::now();
 		let timeout = TimeoutHandle::new(request.timeout);
 		let Ok(timeout_ns) = request
@@ -730,7 +706,8 @@ impl EvalChild {
 			.transpose()
 		else {
 			let _ = events
-				.send(Err(resource_fault("run", ProcessError::Duration(DurationError::Overflow))));
+				.send_async(Err(resource_fault("run", ProcessError::Duration(DurationError::Overflow))))
+				.await;
 			return RunCellDisposition::Drop;
 		};
 		if let Err(error) = write_frame(&mut self.stdin, &ParentFrame::Run {
@@ -744,14 +721,13 @@ impl EvalChild {
 		.await
 		{
 			needs_reset.store(true, Ordering::Release);
-			let _ = events.send(Err(session_lost(error)));
+			let _ = events.send_async(Err(session_lost(error))).await;
 			return RunCellDisposition::Drop;
 		}
 
 		let mut result = None;
 		let mut display_outputs = Vec::new();
 		let mut exception = None;
-		let mut spill = OutputSpill::new(blobs.clone());
 		let mut wire_sequence = 0_u64;
 		let (bridge_events_tx, bridge_events_rx) = flume::unbounded();
 		let mut bridge_tasks = JoinSet::new();
@@ -799,8 +775,9 @@ impl EvalChild {
 				ParentLoopEvent::InterruptGraceExpired => {
 					needs_reset.store(true, Ordering::Release);
 					cancel_bridge_tasks(&mut bridge_tasks).await;
-					let _ =
-						events.send(Ok(RunEvent::Completed(cancelled_completion(elapsed_ms(started)))));
+					let _ = events
+						.send_async(Ok(RunEvent::Completed(cancelled_completion(elapsed_ms(started)))))
+						.await;
 					return RunCellDisposition::Drop;
 				},
 				ParentLoopEvent::Timeout => {
@@ -808,8 +785,9 @@ impl EvalChild {
 					self.interrupt();
 					cancel_bridge_tasks(&mut bridge_tasks).await;
 					time::sleep(self.interrupt_grace).await;
-					let _ =
-						events.send(Ok(RunEvent::Completed(timeout_completion(elapsed_ms(started)))));
+					let _ = events
+						.send_async(Ok(RunEvent::Completed(timeout_completion(elapsed_ms(started)))))
+						.await;
 					return RunCellDisposition::Drop;
 				},
 				ParentLoopEvent::Bridge(Some(BridgeTaskEvent::Progress { request_id, event })) => {
@@ -825,6 +803,13 @@ impl EvalChild {
 					{
 						needs_reset.store(true, Ordering::Release);
 						cancel_bridge_tasks(&mut bridge_tasks).await;
+						let _ = events
+							.send_async(Err(Fault::SessionLost {
+								message: sf!(
+									"Python eval child exited during a host bridge progress update",
+								),
+							}))
+							.await;
 						return RunCellDisposition::Drop;
 					}
 					continue;
@@ -845,9 +830,11 @@ impl EvalChild {
 					{
 						needs_reset.store(true, Ordering::Release);
 						cancel_bridge_tasks(&mut bridge_tasks).await;
-						let _ = events.send(Err(Fault::SessionLost {
-							message: sf!("Python eval child exited during a host bridge response",),
-						}));
+						let _ = events
+							.send_async(Err(Fault::SessionLost {
+								message: sf!("Python eval child exited during a host bridge response",),
+							}))
+							.await;
 						return RunCellDisposition::Drop;
 					}
 					continue;
@@ -867,18 +854,21 @@ impl EvalChild {
 						.and_then(|status| status.code())
 						== Some(CHILD_TIMEOUT_EXIT)
 					{
-						let _ =
-							events.send(Ok(RunEvent::Completed(timeout_completion(elapsed_ms(started)))));
+						let _ = events
+							.send_async(Ok(RunEvent::Completed(timeout_completion(elapsed_ms(started)))))
+							.await;
 					} else {
-						let _ = events.send(Err(Fault::SessionLost {
-							message: sf!("Python eval child exited during the active cell"),
-						}));
+						let _ = events
+							.send_async(Err(Fault::SessionLost {
+								message: sf!("Python eval child exited during the active cell"),
+							}))
+							.await;
 					}
 					return RunCellDisposition::Drop;
 				},
 				Err(error) => {
 					needs_reset.store(true, Ordering::Release);
-					let _ = events.send(Err(session_lost(error)));
+					let _ = events.send_async(Err(session_lost(error))).await;
 					return RunCellDisposition::Drop;
 				},
 			};
@@ -886,19 +876,17 @@ impl EvalChild {
 				ChildFrame::Started { run_id: actual, cell_id: actual_cell }
 					if actual == run_id && actual_cell == cell_id =>
 				{
-					let _ = events.send(Ok(RunEvent::Started { cell_id: actual_cell }));
+					let _ = events
+						.send_async(Ok(RunEvent::Started { cell_id: actual_cell }))
+						.await;
 				},
 				ChildFrame::Stdout { run_id: actual, mut update }
 				| ChildFrame::Stderr { run_id: actual, mut update }
 					if actual == run_id =>
 				{
-					if let Err(error) = spill.push(update.data.as_ref()) {
-						let _ = events.send(Err(resource_fault("spill_output", error)));
-						return RunCellDisposition::Drop;
-					}
 					update.sequence = wire_sequence;
 					wire_sequence = wire_sequence.saturating_add(1);
-					let _ = events.send(Ok(RunEvent::Output(update)));
+					let _ = events.send_async(Ok(RunEvent::Output(update))).await;
 				},
 				ChildFrame::Display { run_id: actual, output } if actual == run_id => {
 					upsert_display_output(
@@ -912,35 +900,11 @@ impl EvalChild {
 				ChildFrame::Error { run_id: actual, value } if actual == run_id => {
 					exception = Some(value);
 				},
-				ChildFrame::Done {
-					run_id: actual,
-					mut status,
-					truncated,
-					spilled_output,
-					total_lines,
-					total_bytes,
-				} if actual == run_id => {
+				ChildFrame::Done { run_id: actual, mut status } if actual == run_id => {
 					timeout.dispose();
 					cancel_bridge_tasks(&mut bridge_tasks).await;
 					status.exception = exception;
-					let spill_total_lines = spill.total_lines;
-					let spill_total_bytes = spill.total_bytes;
-					let spilled = match spill.finish().await {
-						Ok(value) => value,
-						Err(error) => {
-							let _ = events.send(Err(resource_fault("spill_output", error)));
-							return RunCellDisposition::Drop;
-						},
-					};
-					let completion = RunCompletion {
-						status,
-						result,
-						display_outputs,
-						truncated: truncated || spilled.is_some(),
-						spilled_output: spilled.or(spilled_output),
-						total_lines: total_lines.max(spill_total_lines),
-						total_bytes: total_bytes.max(spill_total_bytes),
-					};
+					let completion = RunCompletion { status, result, display_outputs };
 					if matches!(completion.status.outcome, CellOutcome::Cancelled) {
 						let kernel_alive = self.is_alive();
 						if should_retry_dead_kernel_cancellation(
@@ -951,14 +915,14 @@ impl EvalChild {
 						) {
 							return RunCellDisposition::RetryDeadCancellation(completion);
 						}
-						let _ = events.send(Ok(RunEvent::Completed(completion)));
+						let _ = events.send_async(Ok(RunEvent::Completed(completion))).await;
 						return if kernel_alive {
 							RunCellDisposition::Keep
 						} else {
 							RunCellDisposition::Drop
 						};
 					}
-					let _ = events.send(Ok(RunEvent::Completed(completion)));
+					let _ = events.send_async(Ok(RunEvent::Completed(completion))).await;
 					return RunCellDisposition::Keep;
 				},
 				ChildFrame::BridgeCall { run_id: actual, request_id, token, name, args }
@@ -980,6 +944,13 @@ impl EvalChild {
 						{
 							needs_reset.store(true, Ordering::Release);
 							cancel_bridge_tasks(&mut bridge_tasks).await;
+							let _ = events
+								.send_async(Err(Fault::SessionLost {
+									message: sf!(
+										"Python eval child exited during a denied host bridge response",
+									),
+								}))
+								.await;
 							return RunCellDisposition::Drop;
 						}
 						continue;
@@ -1010,13 +981,16 @@ impl EvalChild {
 				},
 				ChildFrame::Fatal { message } => {
 					needs_reset.store(true, Ordering::Release);
-					let _ = events.send(Err(Fault::SessionLost { message }));
+					let _ = events.send_async(Err(Fault::SessionLost { message })).await;
+					return RunCellDisposition::Drop;
 				},
 				_ => {
 					needs_reset.store(true, Ordering::Release);
-					let _ = events.send(Err(Fault::SessionLost {
-						message: sf!("Python eval child sent an invalid or out-of-order frame",),
-					}));
+					let _ = events
+						.send_async(Err(Fault::SessionLost {
+							message: sf!("Python eval child sent an invalid or out-of-order frame",),
+						}))
+						.await;
 
 					return RunCellDisposition::Drop;
 				},
@@ -1047,7 +1021,15 @@ impl EvalChild {
 			.await
 			.is_ok_and(|status| status.is_ok())
 		{
-			self.process_group.take();
+			#[cfg(unix)]
+			if let Some(pid) = self.process_group.take() {
+				let group = Pid::from_raw(pid.cast_signed());
+				if signal::killpg(group, None).is_ok() {
+					let _ = signal::killpg(group, signal::Signal::SIGKILL);
+				}
+			}
+			#[cfg(windows)]
+			let _ = self.process_group.take();
 			return;
 		}
 		let pid = self.process_group.take();
@@ -1063,6 +1045,13 @@ impl EvalChild {
 			.await
 			.is_ok_and(|status| status.is_ok())
 		{
+			#[cfg(unix)]
+			if let Some(pid) = pid {
+				let group = Pid::from_raw(pid.cast_signed());
+				if signal::killpg(group, None).is_ok() {
+					let _ = signal::killpg(group, signal::Signal::SIGKILL);
+				}
+			}
 			return;
 		}
 		#[cfg(unix)]
@@ -1088,11 +1077,6 @@ impl Drop for EvalChild {
 			let _ = self.child.start_kill();
 		}
 	}
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct ExternalHello {
-	secret: Str,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1160,12 +1144,8 @@ enum ChildFrame {
 		value:  PythonException,
 	},
 	Done {
-		run_id:         u64,
-		status:         CellStatus,
-		truncated:      bool,
-		spilled_output: Option<BlobRef>,
-		total_lines:    usize,
-		total_bytes:    usize,
+		run_id: u64,
+		status: CellStatus,
 	},
 	BridgeCall {
 		run_id:     u64,
@@ -1233,13 +1213,14 @@ impl ChildBridgeTransport for ChildBridgeHost {
 		self.pending.lock().insert(request_id, sender);
 		if self
 			.outgoing
-			.send(ChildFrame::BridgeCall {
+			.send_async(ChildFrame::BridgeCall {
 				run_id,
 				request_id,
 				token: self.token.clone(),
 				name: Str::from(name),
 				args,
 			})
+			.await
 			.is_err()
 		{
 			self.pending.lock().remove(&request_id);
@@ -1531,6 +1512,7 @@ fn validate_runtime_snapshot(snapshot: RuntimeSnapshot) -> Result<RuntimeSnapsho
 }
 
 /// Runs the hidden eval child entry before ordinary CLI or telemetry startup.
+#[tracing::instrument(level = "debug", name = "eval_child_entry", skip_all)]
 pub async fn run_eval_child_entry() -> Result<(), ProcessError> {
 	let ShieldedProtocol { input, mut output, capture } = shield_protocol_fds()?;
 	let mut stdin = BufReader::new(input);
@@ -1552,7 +1534,7 @@ pub async fn run_eval_child_entry() -> Result<(), ProcessError> {
 		};
 	validate_parent_identity(parent_pid)?;
 	start_parent_watchdog(parent_pid)?;
-	let (outgoing, outgoing_rx) = flume::unbounded();
+	let (outgoing, outgoing_rx) = flume::bounded(1);
 	let child_host = Arc::new(ChildBridgeHost {
 		token,
 		capabilities: BridgeCapabilities::from_allowed_names(capabilities),
@@ -1580,7 +1562,8 @@ pub async fn run_eval_child_entry() -> Result<(), ProcessError> {
 	let session = eval.open_session().await.map_err(ProcessError::Eval)?;
 	child_host
 		.outgoing
-		.send(ChildFrame::Ready)
+		.send_async(ChildFrame::Ready)
+		.await
 		.map_err(|_| ProcessError::Exited)?;
 	let active = Arc::new(AtomicBool::new(false));
 	loop {
@@ -1589,9 +1572,10 @@ pub async fn run_eval_child_entry() -> Result<(), ProcessError> {
 				if active.swap(true, Ordering::AcqRel) {
 					child_host
 						.outgoing
-						.send(ChildFrame::Fatal {
+						.send_async(ChildFrame::Fatal {
 							message: sf!("eval child received overlapping Run frames"),
 						})
+						.await
 						.map_err(|_| ProcessError::Exited)?;
 					continue;
 				}
@@ -1613,7 +1597,8 @@ pub async fn run_eval_child_entry() -> Result<(), ProcessError> {
 						child_host.active_run.store(0, Ordering::Release);
 						child_host
 							.outgoing
-							.send(ChildFrame::Fatal { message: Str::from(format!("{error:?}")) })
+							.send_async(ChildFrame::Fatal { message: Str::from(format!("{error:?}")) })
+							.await
 							.map_err(|_| ProcessError::Exited)?;
 						continue;
 					},
@@ -1626,61 +1611,60 @@ pub async fn run_eval_child_entry() -> Result<(), ProcessError> {
 					loop {
 						match run.next_event().await {
 							Ok(Some(RunEvent::Started { .. })) => {
-								let _ =
-									outgoing.send(ChildFrame::Started { run_id, cell_id: cell_id.clone() });
+								let _ = outgoing
+									.send_async(ChildFrame::Started { run_id, cell_id: cell_id.clone() })
+									.await;
 							},
 							Ok(Some(RunEvent::Output(update))) => {
 								let frame = match update.channel {
 									OutputChannel::Stdout => ChildFrame::Stdout { run_id, update },
 									OutputChannel::Stderr => ChildFrame::Stderr { run_id, update },
 								};
-								let _ = outgoing.send(frame);
+								let _ = outgoing.send_async(frame).await;
 							},
 							Ok(Some(RunEvent::Completed(completion))) => {
 								capture_barrier.drain().await;
 								run_route.active_run.store(0, Ordering::Release);
 								active_flag.store(false, Ordering::Release);
-								let RunCompletion {
-									mut status,
-									result,
-									display_outputs,
-									truncated,
-									spilled_output,
-									total_lines,
-									total_bytes,
-								} = completion;
+								let RunCompletion { mut status, result, display_outputs } = completion;
 								for output in display_outputs {
-									let _ = outgoing.send(ChildFrame::Display { run_id, output });
+									let _ = outgoing
+										.send_async(ChildFrame::Display { run_id, output })
+										.await;
 								}
 								if let Some(value) = result {
-									let _ = outgoing.send(ChildFrame::Result { run_id, value });
+									let _ = outgoing
+										.send_async(ChildFrame::Result { run_id, value })
+										.await;
 								}
 								if let Some(value) = status.exception.take() {
-									let _ = outgoing.send(ChildFrame::Error { run_id, value });
+									let _ = outgoing
+										.send_async(ChildFrame::Error { run_id, value })
+										.await;
 								}
-								let _ = outgoing.send(ChildFrame::Done {
-									run_id,
-									status,
-									truncated,
-									spilled_output,
-									total_lines,
-									total_bytes,
-								});
+								let _ = outgoing
+									.send_async(ChildFrame::Done { run_id, status })
+									.await;
 								break;
 							},
 							Ok(None) => {
 								run_route.active_run.store(0, Ordering::Release);
 								active_flag.store(false, Ordering::Release);
-								let _ = outgoing.send(ChildFrame::Fatal {
-									message: sf!("embedded eval stream ended without completion",),
-								});
+								let _ = outgoing
+									.send_async(ChildFrame::Fatal {
+										message: sf!("embedded eval stream ended without completion",),
+									})
+									.await;
 								break;
 							},
 							Err(error) => {
 								run_route.active_run.store(0, Ordering::Release);
 								active_flag.store(false, Ordering::Release);
 								let _ = outgoing
-									.send(ChildFrame::Fatal { message: Str::from(format!("{error:?}")) });
+									.send_async(ChildFrame::Fatal {
+										message: Str::from(format!("{error:?}")),
+									})
+									.await;
 								break;
 							},
 						}
@@ -1762,9 +1746,6 @@ pub enum ProcessError {
 	/// The child's embedded eval kernel rejected an operation.
 	#[error("eval child kernel failed: {0:?}")]
 	Eval(Fault),
-	/// Durable oversized-output staging failed.
-	#[error("eval child output spill failed: {0}")]
-	Spill(Str),
 	/// The child closed its protocol stream.
 	#[error("eval child exited")]
 	Exited,
@@ -2078,10 +2059,6 @@ const fn cancelled_completion(duration_ms: u64) -> RunCompletion {
 		},
 		result:          None,
 		display_outputs: Vec::new(),
-		truncated:       false,
-		spilled_output:  None,
-		total_lines:     0,
-		total_bytes:     0,
 	}
 }
 
@@ -2099,10 +2076,6 @@ const fn timeout_completion(duration_ms: u64) -> RunCompletion {
 		},
 		result:          None,
 		display_outputs: Vec::new(),
-		truncated:       false,
-		spilled_output:  None,
-		total_lines:     0,
-		total_bytes:     0,
 	}
 }
 
@@ -2117,6 +2090,20 @@ fn session_lost(error: ProcessError) -> Fault {
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[tokio::test]
+	async fn run_channel_eof_before_completion_is_a_typed_session_loss() {
+		let (events_tx, events) = flume::bounded(1);
+		drop(events_tx);
+		let mut run = ProcessEvalRun {
+			events,
+			cancelled: CancellationToken::new(),
+			terminal: false,
+			effective_reset: false,
+		};
+		assert!(matches!(run.next_event().await, Err(Fault::SessionLost { .. })));
+		assert!(run.next_event().await.expect("terminal EOF").is_none());
+	}
 
 	#[test]
 	fn spawn_environment_is_allowlisted_and_rejects_secret_names() {
@@ -2162,6 +2149,7 @@ mod tests {
 			&cwd,
 			Arc::clone(&host),
 			"1s".parse().expect("interrupt grace"),
+			None,
 		)
 		.await
 		.expect("launch selected interpreter");
@@ -2209,6 +2197,70 @@ mod tests {
 		);
 		child.terminate().await;
 	}
+	#[tokio::test]
+	async fn external_process_streams_output_beyond_legacy_limits_byte_for_byte() {
+		use omp_tool::Registry;
+
+		let cwd = env::current_dir().expect("current directory");
+		let interpreter = discover_external_python(&cwd, None).expect("test host provides Python");
+		let host = Arc::new(SessionBridgeHost::new());
+		host
+			.bind_registry(Arc::new(Registry::new()))
+			.expect("bind empty bridge registry");
+		let session = Bytes::from_static(b"external-runner-large-output");
+		let mut child = EvalChild::spawn(
+			Path::new("unused-for-external-python"),
+			&interpreter,
+			&session,
+			&cwd,
+			Arc::clone(&host),
+			"1s".parse().expect("interrupt grace"),
+			None,
+		)
+		.await
+		.expect("launch selected interpreter");
+		let (events, received) = flume::unbounded();
+		let reset = AtomicBool::new(false);
+		let disposition = child
+			.run_cell(
+				Bytes::from_static(b"external-runner-large-output:cell-1"),
+				RunRequest {
+					code:    sf!("import sys\nsys.stdout.write(('x' * 350 + '\\n') * 3001)"),
+					timeout: None,
+					reset:   false,
+					runtime: runtime_snapshot(cwd),
+				},
+				CancellationToken::new(),
+				&events,
+				"owner",
+				&session,
+				host,
+				&reset,
+				None,
+				true,
+			)
+			.await;
+		assert!(matches!(disposition, RunCellDisposition::Keep));
+		let mut actual = Vec::new();
+		let mut completed = false;
+		for event in received.try_iter() {
+			match event.expect("successful run event") {
+				RunEvent::Output(update) if update.channel == OutputChannel::Stdout => {
+					actual.extend_from_slice(update.data.as_ref());
+				},
+				RunEvent::Completed(_) => completed = true,
+				RunEvent::Started { .. } | RunEvent::Output(_) => {},
+			}
+		}
+		let mut line = vec![b'x'; 350];
+		line.push(b'\n');
+		let expected = line.repeat(3_001);
+		assert!(expected.len() > 1024 * 1024);
+		assert_eq!(actual, expected);
+		assert!(completed);
+		child.terminate().await;
+	}
+
 	struct OverlapParent {
 		cwd:       PathBuf,
 		barrier:   tokio::sync::Barrier,
@@ -2224,8 +2276,6 @@ mod tests {
 			Ok(crate::eval::bridge::EvalSessionConfig {
 				cwd:              self.cwd.clone(),
 				local_roots_json: None,
-				artifacts_dir:    None,
-				session_file:     None,
 			})
 		}
 
@@ -2289,6 +2339,7 @@ mod tests {
 			&cwd,
 			Arc::clone(&host),
 			"1s".parse().expect("interrupt grace"),
+			None,
 		)
 		.await
 		.expect("launch selected interpreter");
@@ -2343,7 +2394,7 @@ mod tests {
 		assert!(validate_runtime_snapshot(runtime_snapshot(cwd.clone())).is_ok());
 
 		let mut missing = runtime_snapshot(cwd.clone());
-		missing.managed_env.remove("OMP_SESSION_FILE");
+		missing.managed_env.remove("OMP_EVAL_LOCAL_ROOTS");
 		assert!(matches!(
 			validate_runtime_snapshot(missing),
 			Err(ProcessError::InvalidManagedEnvironment)

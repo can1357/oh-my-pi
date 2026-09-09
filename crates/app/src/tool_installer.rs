@@ -8,10 +8,10 @@ use std::{
 };
 
 use futures::StreamExt as _;
-use omp_core::Str;
-use omp_inference::local::{
+use omp_ai::local::{
 	ArtifactError, ArtifactFetchRequest, ArtifactFetcher as _, SystemArtifactFetcher,
 };
+use omp_core::Str;
 use thiserror::Error;
 use tokio::io::AsyncWriteExt as _;
 

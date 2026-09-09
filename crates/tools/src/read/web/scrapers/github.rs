@@ -2,9 +2,9 @@
 
 use std::{cmp, cmp::Ordering, fmt::Write};
 
-use omp_core::{Str, base64, sf};
+use omp_core::{base64, sf};
+use omp_tool::{Diag, DiagKind, Unit};
 use serde::Deserialize;
-use smallvec::SmallVec;
 use url::Url;
 
 use super::{
@@ -172,17 +172,19 @@ async fn render_blob<C: HttpClient + Sync>(
 	let Some(response) = get(client, &raw_url, None).await? else {
 		return Ok(None);
 	};
-	let (content, truncated) = finalize_output(response.text().as_ref());
-	let mut notes = SmallVec::<Str, 4>::new();
-	notes.push(sf!("Fetched raw: {raw_url}"));
-	if truncated {
-		notes.push(sf!("Output truncated to 500000 characters"));
+	let (content, omitted) = finalize_output(response.text().as_ref());
+	let mut diags = vec![Diag::info(DiagKind::Provenance, sf!("Fetched raw: {raw_url}"))];
+	if omitted != 0 {
+		diags.push(
+			Diag::warn(DiagKind::OutputBounded, "scraper output truncated")
+				.omitted(omitted as u64, Unit::Chars),
+		);
 	}
 	Ok(Some(RenderResult {
 		content,
 		content_type: Some(sf!("text/plain")),
 		method: sf!("github-raw"),
-		notes,
+		diags,
 	}))
 }
 
@@ -797,9 +799,15 @@ fn repo_endpoint(target: &Target, suffix: &str) -> String {
 	format!("{API}/repos/{}/{}{suffix}", target.owner, target.repo)
 }
 
-fn markdown_result(content: String, method: &'static str, note: &'static str) -> RenderResult {
+fn markdown_result(
+	content: String,
+	method: &'static str,
+	provenance: &'static str,
+) -> RenderResult {
 	let mut result = build_result(&content, method);
-	result.notes.insert(0, sf!(note));
+	result
+		.diags
+		.insert(0, Diag::info(DiagKind::Provenance, provenance));
 	result
 }
 

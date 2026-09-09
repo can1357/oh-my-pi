@@ -1,0 +1,24 @@
+── hub_start — Hub start ───────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+󱑍 Launch start: web                                                                                 
+                                                                                                    
+
+  · in progress
+                                                                                                    
+󱑍 Launch start: web bun run dev                                                                     
+                                                                                                    
+
+  · done
+                                                                                                    
+ Launch start: web bun run dev · ready · pid 51234 · up 2.1s                                       
+log matched: Local:   http://localhost:5173/                                                        
+                                                                                                    
+
+  · failed
+                                                                                                    
+ Launch start: web                                                                                 
+start requires application                                                                          
+                                                                                                    
+

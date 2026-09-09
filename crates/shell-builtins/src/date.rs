@@ -2,7 +2,7 @@
 //!
 //! Ported from uutils coreutils 0.8.0.
 
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 
 use crate::host::{Host, Stdin, Utility, format_usage, matches_parser, util};
 
@@ -61,7 +61,7 @@ mod format_modifiers {
 		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 			match self {
 				Self::JiffError(e) => write!(f, "{e}"),
-				// pi-uutils: literalized en-US translation of
+				// Literalized en-US translation of
 				// `date-error-format-modifier-width-too-large`.
 				Self::FieldWidthTooLarge { width, specifier } => {
 					write!(
@@ -84,7 +84,7 @@ mod format_modifiers {
 	/// Flags: -, _, 0, ^, #, +
 	/// Width: one or more digits
 	/// Specifier: any letter or special sequence like :z, ::z, :::z
-	// pi-uutils: `LazyLock` instead of upstream's function-local `OnceLock`.
+	// `LazyLock` avoids a function-local `OnceLock`.
 	static FORMAT_SPEC_REGEX: LazyLock<Regex> =
 		LazyLock::new(|| Regex::new(r"%([_0^#+-]*)(\d*)(:*[a-zA-Z])").unwrap());
 
@@ -2331,7 +2331,7 @@ mod tests {
 	/// reading of `-r` (GNU `--reference` semantics are primary).
 	#[test]
 	fn reference_prefers_existing_file_over_epoch() {
-		let dir = env::temp_dir().join(format!("pi-date-r-{}", process::id()));
+		let dir = env::temp_dir().join(format!("omp-date-r-{}", process::id()));
 		fs::create_dir_all(&dir).unwrap();
 		let file = dir.join("1700000000");
 		fs::write(&file, b"x").unwrap();

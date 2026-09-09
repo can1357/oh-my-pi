@@ -27,7 +27,7 @@
 
 #[cfg(unix)]
 use std::os::fd;
-use std::{fs::File, future, io, mem, sync, sync::atomic, thread, time::Instant};
+use std::{fs::File, future, io, sync, sync::atomic, thread, time::Instant};
 
 use flume::Receiver;
 use parking_lot::Mutex;
@@ -35,7 +35,7 @@ use parking_lot::Mutex;
 use tokio::io::unix::AsyncFd;
 use tokio::sync::watch;
 
-use crate::input::{InputDecoder, InputEvent, Keymap};
+use crate::input::{Chord, InputDecoder, InputEvent, Keymap};
 
 /// One decoded terminal event.
 ///
@@ -47,6 +47,13 @@ pub enum TerminalEvent {
 	/// A decoded input event — key, mouse, paste, focus, or a terminal
 	/// response the host forwards to [`crate::Terminal::handle_input_event`].
 	Input(InputEvent),
+	/// A decoded input event carrying physical-read context needed by hosts.
+	InputWithMeta {
+		/// Decoded key, mouse, paste, focus, or terminal response.
+		event:              InputEvent,
+		/// A submit key follows this paste in the same terminal read.
+		submit_after_paste: bool,
+	},
 	/// Terminal geometry may have changed; resolve it with
 	/// [`crate::Terminal::take_resize`]. Delivered ahead of queued input
 	/// through the resize watch in [`crate::Terminal::next`].
@@ -107,6 +114,9 @@ enum Ctl {
 	Event(TerminalEvent),
 	/// Raw bytes to run through the live decoder.
 	Bytes(Vec<u8>),
+	/// Physical chords to emit through the live keymap, exactly like
+	/// decoded bytes.
+	Chords(Vec<Chord>),
 	/// Replace the chord keymap.
 	Keymap(Keymap),
 }
@@ -126,6 +136,13 @@ pub fn send_event(event: TerminalEvent) -> bool {
 /// decode happens before any later ingress action is emitted.
 pub fn inject_bytes(bytes: Vec<u8>) -> bool {
 	send_ctl(Ctl::Bytes(bytes))
+}
+
+/// Emits debug-injected physical chords through the active actor's live
+/// keymap, so a bound chord reaches the host as the same
+/// [`crate::InputEvent::Chord`] edge the terminal would have produced.
+pub fn inject_chords(chords: Vec<Chord>) -> bool {
+	send_ctl(Ctl::Chords(chords))
 }
 
 fn send_ctl(ctl: Ctl) -> bool {
@@ -414,6 +431,28 @@ fn bridge_loop(input: File, tx: &flume::Sender<Vec<u8>>, stop: &atomic::AtomicBo
 	}
 }
 
+fn send_inputs(events: &mut Vec<InputEvent>, events_tx: &flume::Sender<TerminalEvent>) -> bool {
+	let events = std::mem::take(events);
+	let last_submit = events.iter().rposition(|event| match event {
+		InputEvent::Key(crate::Key::Enter) => true,
+		InputEvent::Chord(event) => event.pressed && event.key == Some(crate::Key::Enter),
+		_ => false,
+	});
+	for (index, event) in events.into_iter().enumerate() {
+		let submit_after_paste =
+			matches!(&event, InputEvent::Paste(_)) && last_submit.is_some_and(|submit| submit > index);
+		let event = if submit_after_paste {
+			TerminalEvent::InputWithMeta { event, submit_after_paste }
+		} else {
+			TerminalEvent::Input(event)
+		};
+		if events_tx.send(event).is_err() {
+			return false;
+		}
+	}
+	true
+}
+
 /// The decode loop: byte source, control channel, decoder deadline, and
 /// resize pipe merged into one ordered stream of [`TerminalEvent`]s.
 async fn actor(
@@ -431,10 +470,8 @@ async fn actor(
 	// wakes never fire.
 	let mut resize_wakes = 0_u64;
 	loop {
-		for event in mem::take(&mut events) {
-			if events_tx.send(TerminalEvent::Input(event)).is_err() {
-				return;
-			}
+		if !send_inputs(&mut events, &events_tx) {
+			return;
 		}
 		let wake = decoder.deadline();
 		tokio::select! {
@@ -487,11 +524,15 @@ fn apply_ctl(
 			decoder.feed(&bytes, Instant::now(), events);
 			true
 		},
+		Ctl::Chords(chords) => {
+			for chord in chords {
+				decoder.inject(chord, events);
+			}
+			true
+		},
 		Ctl::Event(event) => {
-			for decoded in events.drain(..) {
-				if events_tx.send(TerminalEvent::Input(decoded)).is_err() {
-					return false;
-				}
+			if !send_inputs(events, events_tx) {
+				return false;
 			}
 			events_tx.send(event).is_ok()
 		},
@@ -508,16 +549,16 @@ async fn resize_readable(resize: &mut Option<tokio::signal::unix::Signal>) {
 	match resize {
 		Some(signal) => {
 			if signal.recv().await.is_none() {
-				future::pending().await
+				future::pending::<()>().await;
 			}
 		},
-		None => future::pending().await,
+		None => future::pending::<()>().await,
 	}
 }
 
 #[cfg(windows)]
 async fn resize_readable(_resize: ()) {
-	future::pending().await
+	future::pending::<()>().await
 }
 
 /// Sleeps until `at`; `None` disables the branch.
@@ -526,6 +567,6 @@ async fn deadline(at: Option<Instant>) {
 		Some(at) => {
 			tokio::time::sleep_until(at.into()).await;
 		},
-		None => future::pending().await,
+		None => future::pending::<()>().await,
 	}
 }

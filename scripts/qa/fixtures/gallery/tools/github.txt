@@ -1,0 +1,31 @@
+── github — GitHub ─────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ GitHub Search PRs is:open author:@me                                                              
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ GitHub Search PRs is:open review-requested:@me sort:updated · oh-my-pi/pi                         
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  GitHub Search PRs is:open review-requested:@me sort:updated · oh-my-pi/pi ──────────────────╮
+│ #1842  feat(tui): virtualized scrollback for tool output     openyou · 2h ago   +312 -47         │
+│ #1839  fix(agent): retry stream on transient 529             dvir   · 5h ago   +18 -4            │
+│ #1830  refactor(edit): unify hashline + ast_edit previews    mira   · 1d ago   +540 -210         │
+│ #1817  docs: document gallery fixtures contract             leo    · 2d ago   +96 -0             │
+│                                                                                                  │
+│ 4 open pull requests requesting your review                                                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  GitHub Search PRs is:open review-requested:@me sort:updated · oh-my-pi/pi ──────────────────╮
+│ gh: Could not resolve to a Repository with the name 'oh-my-pi/pi'. (HTTP 404)                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

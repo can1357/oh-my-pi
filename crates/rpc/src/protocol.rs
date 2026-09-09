@@ -666,7 +666,10 @@ pub enum RpcAuthEvent {
 	/// Open a browser at a public authorization URL.
 	OpenUrl {
 		/// Public URL.
-		url: String,
+		url:    String,
+		/// Short loopback URL that redirects to the public authorization URL.
+		#[serde(default, skip_serializing_if = "Option::is_none")]
+		launch: Option<String>,
 	},
 	/// Display a short-lived device code and its public verification URL.
 	DeviceCode {

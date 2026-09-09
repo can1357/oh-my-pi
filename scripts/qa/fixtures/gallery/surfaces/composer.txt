@@ -1,0 +1,57 @@
+
+── composer · band — Status Band (Default) ─────────────────────────────────────────────────────────
+
+  · canonical preview
+ 󰵗    Sonnet 4.5 · 󰪣 high   Plan ──────────────────────────────────󰁨─────  62.0%/200K 󰁨 
+╰─ Ask anything, edit files, run tools                                                          
+
+── composer · box — Rounded Box ────────────────────────────────────────────────────────────────────
+
+  · canonical preview
+╭── 󰵗    Sonnet 4.5 · 󰪣 high   Plan ─────────────────────󰁨─── gallery   62.0%/200K 󰁨 ──╮
+╰─ Ask anything, edit files, run tools                                                        ─╯
+
+── composer · claude — Claude Code ─────────────────────────────────────────────────────────────────
+
+  · canonical preview
+───────────────────────────────────────────────────────────────────── gallery ·  62.0%/200K 󰁨 ─
+❯ Ask anything, edit files, run tools                                                           
+────────────────────────────────────────────────────────────────────────────────────────────────
+ 󰵗  ·  Sonnet 4.5 · 󰪣 high ·  Plan 
+
+── composer · pi — Pi ──────────────────────────────────────────────────────────────────────────────
+
+  · canonical preview
+────────────────────────────────────────────────────────────────────────────────────────────────
+ Ask anything, edit files, run tools                                                           
+────────────────────────────────────────────────────────────────────────────────────────────────
+ 󰵗  ·  Sonnet 4.5 · 󰪣 high ·  Plan                                   gallery ·  62.0%/200K 󰁨 
+
+── composer · borderless — Borderless ──────────────────────────────────────────────────────────────
+
+  · canonical preview
+❯ Ask anything, edit files, run tools                                                           
+ 󰵗  ·  Sonnet 4.5 · 󰪣 high ·  Plan                                   gallery ·  62.0%/200K 󰁨 
+
+── composer · rule — Top Rule Dock ─────────────────────────────────────────────────────────────────
+
+  · canonical preview
+───────────────────────────────────────────────────────────────────── gallery ·  62.0%/200K 󰁨 ─
+❯ Ask anything, edit files, run tools                                                           
+
+ 󰵗  ·  Sonnet 4.5 · 󰪣 high ·  Plan 
+
+── composer · field — Compact Field ────────────────────────────────────────────────────────────────
+
+  · canonical preview
+▐ Ask anything, edit files, run tools                                                          ▌
+
+ 󰵗  ·  Sonnet 4.5 · 󰪣 high ·  Plan                                   gallery ·  62.0%/200K 󰁨 
+
+── composer · rail — Accent Rail ───────────────────────────────────────────────────────────────────
+
+  · canonical preview
+▎ Ask anything, edit files, run tools                                                           
+
+ 󰵗  ·  Sonnet 4.5 · 󰪣 high ·  Plan                                   gallery ·  62.0%/200K 󰁨 
+

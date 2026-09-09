@@ -6,86 +6,88 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "In-process command-line utility and process builtins for the OMP shell"
+description = "In-process builtins and the standalone omp-sh shell"
 
 [lints]
 workspace = true
 
 [dependencies]
-argmax = { workspace = true }
-bigdecimal = { workspace = true }
-blake2 = { workspace = true }
-blake3 = { workspace = true }
-bstr = { workspace = true }
-bytecount = { workspace = true }
-cfg-if = { workspace = true }
-clap = { workspace = true }
-codesnake = { workspace = true }
-crc32fast = { workspace = true }
-digest = { workspace = true }
-fancy-regex = { workspace = true }
-flume = { workspace = true }
-futures = { workspace = true }
-grep-cli = { workspace = true }
-grep-matcher = { workspace = true }
-grep-pcre2 = { workspace = true }
-grep-printer = { workspace = true }
-grep-regex = { workspace = true }
-grep-searcher = { workspace = true }
-hifijson = { workspace = true }
-im = { workspace = true }
-ignore = { workspace = true }
-indicatif = { workspace = true }
-itertools = { workspace = true }
-jaq-core = { workspace = true }
-jaq-json = { workspace = true }
-jaq-std = { workspace = true }
-jiff = { workspace = true }
-lscolors = { workspace = true }
-memchr = { workspace = true }
-md-5 = { workspace = true }
-memmap2 = { workspace = true }
-num-bigint = { workspace = true }
-num-traits = { workspace = true }
-omp-core = { workspace = true }
-omp-shell-engine = { workspace = true }
-omp-walker = { workspace = true }
-parking_lot = { workspace = true }
-parse_datetime = { workspace = true }
-rand = { workspace = true }
-rayon = { workspace = true }
-regex = { workspace = true }
-self_cell = { workspace = true }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
-sha3 = { workspace = true }
-similar = { workspace = true }
-sha1 = { workspace = true }
-smallvec = { workspace = true }
-strum = { workspace = true }
-tempfile = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-tracing = { workspace = true }
-xutf = { workspace = true }
+bytes.workspace = true
+argmax.workspace = true
+bigdecimal.workspace = true
+blake2.workspace = true
+blake3.workspace = true
+bstr.workspace = true
+bytecount.workspace = true
+cfg-if.workspace = true
+clap.workspace = true
+codesnake.workspace = true
+crc32fast.workspace = true
+digest.workspace = true
+fancy-regex.workspace = true
+flume.workspace = true
+futures.workspace = true
+grep-cli.workspace = true
+grep-matcher.workspace = true
+grep-pcre2.workspace = true
+grep-printer.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+hifijson.workspace = true
+im.workspace = true
+ignore.workspace = true
+indicatif.workspace = true
+itertools.workspace = true
+jaq-core.workspace = true
+jaq-json.workspace = true
+jaq-std.workspace = true
+jiff.workspace = true
+lscolors.workspace = true
+memchr.workspace = true
+md-5.workspace = true
+memmap2.workspace = true
+num-bigint.workspace = true
+num-traits.workspace = true
+omp-core.workspace = true
+omp-shell.workspace = true
+omp-tool.workspace = true
+omp-walker.workspace = true
+parking_lot.workspace = true
+parse_datetime.workspace = true
+rand.workspace = true
+rayon.workspace = true
+regex.workspace = true
+self_cell.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+sha3.workspace = true
+similar.workspace = true
+sha1.workspace = true
+smallvec.workspace = true
+strum.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+xutf.workspace = true
 
 [target.'cfg(any(unix, windows))'.dependencies]
-notify = { workspace = true }
-rustix = { workspace = true }
+notify.workspace = true
+rustix.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 # Enable runtime-dispatched ARMv8 SHA instructions in checksum builtins.
-sha2 = { workspace = true, features = ["asm"] }
-sha3 = { workspace = true, features = ["asm"] }
+sha2.workspace = true
+sha3.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-libc = { workspace = true }
-nix = { workspace = true, features = ["feature", "hostname"] }
+libc.workspace = true
+nix.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true }
+windows-sys.workspace = true
 
 [dev-dependencies]
-pretty_assertions = { workspace = true }
-tempfile = { workspace = true }
+pretty_assertions.workspace = true
+tempfile.workspace = true

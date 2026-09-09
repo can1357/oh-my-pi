@@ -8,70 +8,70 @@ use proc_macro2::{Delimiter, Group, Span, TokenStream as TokenStream2, TokenTree
 use quote::quote;
 use syn::{Arm, Expr, ExprForLoop, ExprIf, ExprMatch, LitInt, LitStr, parse2};
 
-pub(crate) struct Element {
+pub struct Element {
 	pub(crate) name:     Name,
 	pub(crate) attrs:    Vec<Attr>,
 	pub(crate) children: Vec<Child>,
 }
 
-pub(crate) struct Name {
+pub struct Name {
 	pub(crate) text: String,
 	pub(crate) span: Span,
 	pub(crate) icon: Option<String>,
 }
 
-pub(crate) struct Attr {
+pub struct Attr {
 	pub(crate) name:  String,
 	pub(crate) span:  Span,
 	pub(crate) value: AttrValue,
 }
 
-pub(crate) enum AttrValue {
+pub enum AttrValue {
 	Flag,
 	String(LitStr),
 	Expr(TokenStream2),
 	Bare(LitStr),
 }
 
-pub(crate) enum Child {
+pub enum Child {
 	Element(Element),
 	Expr(TokenStream2),
 	String(LitStr),
 	Control(Control),
 }
 
-pub(crate) enum Control {
+pub enum Control {
 	For(ForControl),
 	If(IfControl),
 	Match(MatchControl),
 }
 
-pub(crate) struct ForControl {
+pub struct ForControl {
 	pub(crate) head: TokenStream2,
 	pub(crate) body: Vec<Child>,
 }
 
-pub(crate) struct IfControl {
+pub struct IfControl {
 	pub(crate) branches:  Vec<IfBranch>,
 	pub(crate) else_body: Option<Vec<Child>>,
 }
 
-pub(crate) struct IfBranch {
+pub struct IfBranch {
 	pub(crate) head: TokenStream2,
 	pub(crate) body: Vec<Child>,
 }
 
-pub(crate) struct MatchControl {
+pub struct MatchControl {
 	pub(crate) head: TokenStream2,
 	pub(crate) arms: Vec<MatchArm>,
 }
 
-pub(crate) struct MatchArm {
+pub struct MatchArm {
 	pub(crate) prefix: TokenStream2,
 	pub(crate) body:   Vec<Child>,
 }
 
-pub(crate) struct Parser {
+pub struct Parser {
 	tokens: Vec<TokenTree>,
 	at:     usize,
 }
@@ -434,7 +434,7 @@ impl Parser {
 	}
 }
 
-pub(crate) fn parse_expr_group(group: Group) -> syn::Result<TokenStream2> {
+pub fn parse_expr_group(group: Group) -> syn::Result<TokenStream2> {
 	let tokens = group.stream();
 	if tokens.is_empty() {
 		return Err(syn::Error::new(group.span(), "expected an expression inside braces"));
@@ -443,7 +443,7 @@ pub(crate) fn parse_expr_group(group: Group) -> syn::Result<TokenStream2> {
 	Ok(tokens)
 }
 
-pub(crate) fn parse_child_group(group: Group) -> syn::Result<Vec<Child>> {
+pub fn parse_child_group(group: Group) -> syn::Result<Vec<Child>> {
 	let tokens = group.stream();
 	match Parser::new(tokens).fragment() {
 		Ok(children) => Ok(children),
@@ -458,7 +458,7 @@ pub(crate) fn parse_child_group(group: Group) -> syn::Result<Vec<Child>> {
 	}
 }
 
-pub(crate) fn string_literal(token: TokenTree, message: &str) -> syn::Result<LitStr> {
+pub fn string_literal(token: TokenTree, message: &str) -> syn::Result<LitStr> {
 	let span = token.span();
 	parse2::<LitStr>(token.into()).map_err(|_| syn::Error::new(span, message))
 }

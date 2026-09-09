@@ -1,6 +1,7 @@
 """Per-invocation authority scopes; inert at import."""
 from __future__ import annotations
 
+import asyncio
 import contextvars
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -52,6 +53,9 @@ class Scope:
     )
     secret_settings: frozenset[str] = frozenset()
     cancelled: bool = False
+    cancel_signal: asyncio.Event = field(
+        default_factory=asyncio.Event, init=False, repr=False, compare=False
+    )
     cancel_callbacks: list[Callable[[], None]] = field(default_factory=list)
 
 _current: contextvars.ContextVar[Scope | None] = contextvars.ContextVar("omp_scope", default=None)
@@ -77,6 +81,7 @@ def _request_cancel(scope: Scope) -> bool:
     if scope.cancelled:
         return False
     object.__setattr__(scope, "cancelled", True)
+    scope.cancel_signal.set()
     return True
 
 

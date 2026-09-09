@@ -34,11 +34,14 @@ impl RenderFold for WriteRenderer {
 		match update {}
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
-		if let Some(path) = args.get("path").and_then(omp_slopjson::Value::as_str) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
+		if let Some(path) = args.get("path").and_then(omp_core::slopjson::Value::as_str) {
 			state.path = Str::new(path);
 		}
-		if let Some(content) = args.get("content").and_then(omp_slopjson::Value::as_str) {
+		if let Some(content) = args
+			.get("content")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.content = Str::new(content);
 		}
 	}
@@ -73,8 +76,8 @@ impl RenderFold for ReadRenderer {
 		state.phase = Some(update.phase);
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, _complete: bool) {
-		if let Some(path) = args.get("path").and_then(omp_slopjson::Value::as_str) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, _complete: bool) {
+		if let Some(path) = args.get("path").and_then(omp_core::slopjson::Value::as_str) {
 			state.path = Str::new(path);
 		}
 	}
@@ -119,8 +122,8 @@ fn render_read_live(state: &ReadState) -> El {
 /// Whether a read target collapses into the compact, chrome-free grouped
 /// presentation.
 ///
-/// Filesystem paths, web URLs, and unrecognized schemes (including `xd://`
-/// devices) collapse — mirroring pi's read grouping — while recognized
+/// Filesystem paths, web URLs, and unrecognized schemes (including
+/// extension-defined schemes) collapse into compact groups — while recognized
 /// internal URLs (`skill://`, `agent://`, `pr://`, …) keep the full card so
 /// their resolved content stays visible.
 fn grouped_read_target(path: &str) -> bool {
@@ -283,14 +286,10 @@ fn is_read_header(line: &str) -> bool {
 }
 
 /// Native write and read renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(
-	write: ToolIdentity,
-	read: ToolIdentity,
-) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(write: ToolIdentity, read: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity: write,
-			title: "write tests/session.test.ts",
 			streaming_args: r#"{"path":"tests/session.test.ts","content":"import { descr"#,
 			args: r#"{"path":"tests/session.test.ts","content":"import { describe, expect, test } from \"bun:test\";\nimport { createSession } from \"../src/session\";\n\ndescribe(\"session\", () => {\n\ttest(\"refreshes an expired token\", async () => {\n\t\tconst session = createSession({ expiresAt: 0 });\n\t\tawait session.refresh();\n\t\texpect(session.expired).toBe(false);\n\t});\n});"}"#,
 			progress_update: None,
@@ -299,7 +298,6 @@ pub(crate) fn gallery_fixtures(
 		},
 		RendererGalleryFixture {
 			identity: read,
-			title: "read src/session.ts:437-442",
 			streaming_args: r#"{"path":"src/session.ts:437-"#,
 			args: r#"{"path":"src/session.ts:437-442"}"#,
 			progress_update: Some(br#"{"phase":"resolving source range"}"#),
@@ -389,7 +387,7 @@ mod tests {
 			.fold_args(
 				identity,
 				&mut state,
-				&omp_slopjson::parse_streaming(r#"{"path":"src/<&>.rs:9-"}"#),
+				&omp_core::slopjson::parse_streaming(r#"{"path":"src/<&>.rs:9-"}"#),
 				false,
 			)
 			.expect("streaming read args fold");
@@ -424,7 +422,7 @@ mod tests {
 			.fold_args(
 				identity,
 				&mut state,
-				&omp_slopjson::parse_streaming(
+				&omp_core::slopjson::parse_streaming(
 					r#"{"path":"tests/session.test.ts","content":"import { descr"#,
 				),
 				false,
@@ -467,7 +465,7 @@ mod tests {
 			.fold_args(
 				write_identity,
 				&mut state,
-				&omp_slopjson::parse_streaming(r#"{"path":"a<&.txt","content":"a<&>\nline"}"#),
+				&omp_core::slopjson::parse_streaming(r#"{"path":"a<&.txt","content":"a<&>\nline"}"#),
 				true,
 			)
 			.expect("write args fold");
@@ -492,10 +490,9 @@ mod tests {
 	fn read_success_shows_path_metadata_and_numbered_preview() {
 		let (registry, identities) = registry(identities());
 		let outcome = CallOutcome::<ReadPayload, ReadFault>::Ok(ReadPayload {
-			parts:     vec![PayloadPart::Text {
+			parts: vec![PayloadPart::Text {
 				text: sf!("[src/a.rs#ABCD]\n437:let x = <tag>;\n438:return x & 1;"),
 			}],
-			artifacts: Vec::new(),
 		});
 		let encoded = serde_json::to_vec(&outcome).expect("outcome serializes");
 		let read_identity = identities.read.as_ref().expect("read identity registered");
@@ -504,7 +501,7 @@ mod tests {
 			.fold_args(
 				read_identity,
 				&mut state,
-				&omp_slopjson::parse_streaming(r#"{"path":"skill://react"}"#),
+				&omp_core::slopjson::parse_streaming(r#"{"path":"skill://react"}"#),
 				true,
 			)
 			.expect("read args fold");
@@ -522,10 +519,9 @@ mod tests {
 	#[test]
 	fn grouped_file_read_settles_to_a_flush_one_liner() {
 		let payload = ReadPayload {
-			parts:     vec![PayloadPart::Text {
+			parts: vec![PayloadPart::Text {
 				text: sf!("[src/a.rs#ABCD]\n437:let x = <tag>;\n438:return x & 1;"),
 			}],
-			artifacts: Vec::new(),
 		};
 		let rendered = super::render_read_payload("src/a.rs:437-438", &payload).to_tml();
 		assert_eq!(
@@ -545,13 +541,12 @@ mod tests {
 	#[test]
 	fn overflow_pre_retains_the_full_semantic_body_without_manual_chrome() {
 		let payload = ReadPayload {
-			parts:     vec![PayloadPart::Text {
+			parts: vec![PayloadPart::Text {
 				text: sf!(
 					"[src/a.rs#ABCD]\n21:one\n22:two\n23:three\n24:four\n25:five\n26:six\n27:seven\n28:\
 					 eight\n29:nine\n30:ten"
 				),
 			}],
-			artifacts: Vec::new(),
 		};
 		let rendered = super::render_read_payload("agent://abc123", &payload);
 		let rendered = rendered.to_tml();
@@ -576,7 +571,7 @@ mod tests {
 			.fold_args(
 				read_identity,
 				&mut state,
-				&omp_slopjson::parse_streaming(r#"{"path":"assets/<&>.bin"}"#),
+				&omp_core::slopjson::parse_streaming(r#"{"path":"assets/<&>.bin"}"#),
 				true,
 			)
 			.expect("read args fold");
@@ -587,12 +582,11 @@ mod tests {
 			byte_len:   7,
 		};
 		let multipart = CallOutcome::<ReadPayload, ReadFault>::Ok(ReadPayload {
-			parts:     vec![
+			parts: vec![
 				PayloadPart::Text { text: sf!("[a#1]\n9:&") },
-				PayloadPart::Blob { blob: blob.clone(), alt: sf!("binary") },
+				PayloadPart::Blob { blob: blob.clone(), alt: sf!("binary"), vision: None },
 				PayloadPart::Text { text: sf!("[b#2]\n20:<") },
 			],
-			artifacts: Vec::new(),
 		});
 		let encoded = serde_json::to_vec(&multipart).expect("multipart outcome serializes");
 		assert_eq!(
@@ -606,8 +600,7 @@ mod tests {
 		);
 
 		let blob_only = CallOutcome::<ReadPayload, ReadFault>::Ok(ReadPayload {
-			parts:     vec![PayloadPart::Blob { blob, alt: sf!("binary") }],
-			artifacts: Vec::new(),
+			parts: vec![PayloadPart::Blob { blob, alt: sf!("binary"), vision: None }],
 		});
 		let encoded = serde_json::to_vec(&blob_only).expect("blob outcome serializes");
 		assert_eq!(

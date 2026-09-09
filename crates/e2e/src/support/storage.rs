@@ -1,15 +1,15 @@
+//! Session/journal helpers for the authoritative `.oms` spine.
+
 use std::path::Path;
 
-use omp_agent::{Journal, JournalError};
-use omp_storage::transcript::{self, Log};
+use omp_session::{ComponentRegistry, Session, SessionError};
 
-/// Reopens the physical transcript, preserving tombstones and exact event
-/// indexes.
-pub fn reopen_transcript(path: &Path) -> Result<Log, transcript::Error> {
-	transcript::load(path)
+/// Creates a standard journal-derived session.
+pub fn create_session(path: &Path) -> Result<Session, SessionError> {
+	Session::create(path, ComponentRegistry::standard())
 }
 
-/// Reopens the durable agent journal and rebuilds its terminal-turn index.
-pub fn reopen_journal(path: &Path) -> Result<Journal, JournalError> {
-	Journal::open(path)
+/// Reopens a standard session through the production replay fold.
+pub fn reopen_session(path: &Path) -> Result<Session, SessionError> {
+	Session::open(path, ComponentRegistry::standard())
 }

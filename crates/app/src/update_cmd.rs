@@ -20,24 +20,40 @@ use omp_ext::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use thiserror::Error;
 
 use crate::{
 	cli::{RegistryArgs, UpdateArgs},
 	ext_cli,
+	settings::{CL_UPDATE_CHANNEL, UpdateChannel},
 };
 
 const CORE_PACKAGE: &str = "omp-cli";
 const MAX_ASSET_BYTES: u64 = 256 * 1024 * 1024;
-const GITHUB_LATEST_RELEASE: &str = "https://api.github.com/repos/can1357/oh-my-pi/releases/latest";
+const MAX_MANIFEST_BYTES: usize = 256 * 1024;
+const NPM_STABLE_MANIFEST: &str = "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest";
+const NPM_CANARY_MANIFEST: &str = "https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/canary";
+const GITHUB_RELEASE_BY_TAG: &str = "https://api.github.com/repos/can1357/oh-my-pi/releases/tags";
+const GITHUB_DOWNLOAD_ROOT: &str = "https://github.com/can1357/oh-my-pi/releases/download";
 const GITHUB_USER_AGENT: &str = concat!("omp/", env!("CARGO_PKG_VERSION"));
-const STARTUP_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(60 * 60);
-const STARTUP_FETCH_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(3);
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+const RELEASE_METADATA_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Eq,
+	PartialEq,
+	Serialize,
+	strum::Display,
+	strum::EnumString,
+	strum::IntoStaticStr,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "lowercase", ascii_case_insensitive)]
 enum InstallManager {
 	Native,
 	Npm,
+	#[strum(to_string = "homebrew", serialize = "brew")]
 	Homebrew,
 	Mise,
 	Nix,
@@ -73,18 +89,110 @@ struct Selected<'a> {
 	release:   &'a IndexRelease,
 	artifact:  &'a IndexArtifact,
 }
+
+#[derive(Clone, Debug, Deserialize)]
+struct ReleaseManifest {
+	version: Str,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct GithubRelease {
-	tag_name: Str,
-	assets:   Vec<GithubAsset>,
+	tag_name:   Str,
+	draft:      bool,
+	prerelease: bool,
+	assets:     Vec<GithubAsset>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 struct GithubAsset {
 	name:                 Str,
 	browser_download_url: String,
+	state:                Str,
 	size:                 u64,
 	digest:               Option<Str>,
+}
+
+#[derive(Debug, Error)]
+enum UpdateError {
+	#[error("--canary and --stable are mutually exclusive")]
+	ConflictingChannels,
+	#[error(
+		"--plugins is exactly `omp ext upgrade` and cannot be combined with core update options"
+	)]
+	PluginsWithCoreOptions,
+	#[error("release channel controls cannot be combined with a signed package-index override")]
+	ChannelWithIndex,
+	#[error("npm owns this installation; run `npm update -g @oh-my-pi/pi-coding-agent`")]
+	NpmManagedInstallation,
+	#[error("Homebrew owns this installation; run `brew upgrade can1357/tap/omp`")]
+	HomebrewManagedInstallation,
+	#[error("Mise owns this installation; run `mise upgrade github:can1357/oh-my-pi --bump`")]
+	MiseManagedInstallation,
+	#[error("Nix owns this installation; update the pinned Nix input")]
+	NixManagedInstallation,
+	#[error("timed out fetching the {channel} release manifest")]
+	ManifestTimeout { channel: UpdateChannel },
+	#[error("failed to fetch the {channel} release manifest")]
+	ManifestRequest {
+		channel: UpdateChannel,
+		#[source]
+		source:  reqwest::Error,
+	},
+	#[error("no canary release has been published yet; try `omp update --stable`")]
+	CanaryUnavailable,
+	#[error("the {channel} release manifest returned HTTP {status}")]
+	ManifestHttp { channel: UpdateChannel, status: reqwest::StatusCode },
+	#[error("the {channel} release manifest exceeded the 256 KiB safety ceiling")]
+	ManifestTooLarge { channel: UpdateChannel },
+	#[error("the {channel} release manifest is malformed")]
+	ManifestDecode {
+		channel: UpdateChannel,
+		#[source]
+		source:  serde_json::Error,
+	},
+	#[error("the {channel} release manifest contains invalid version `{version}`")]
+	InvalidManifestVersion { channel: UpdateChannel, version: Str },
+	#[error("the stable release manifest selected prerelease version `{version}`")]
+	StableManifestPrerelease { version: Str },
+	#[error("timed out fetching GitHub metadata for release `{tag}`")]
+	GithubTimeout { tag: Str },
+	#[error("failed to fetch GitHub metadata for release `{tag}`")]
+	GithubRequest {
+		tag:    Str,
+		#[source]
+		source: reqwest::Error,
+	},
+	#[error("GitHub rate-limited metadata lookup for release `{tag}`; set GITHUB_TOKEN or GH_TOKEN")]
+	GithubRateLimited { tag: Str },
+	#[error("GitHub metadata lookup for release `{tag}` returned HTTP {status}")]
+	GithubHttp { tag: Str, status: reqwest::StatusCode },
+	#[error("GitHub metadata for release `{tag}` is malformed")]
+	GithubDecode {
+		tag:    Str,
+		#[source]
+		source: reqwest::Error,
+	},
+	#[error("GitHub release tag mismatch: expected `{expected}`, received `{actual}`")]
+	GithubTagMismatch { expected: Str, actual: Str },
+	#[error("GitHub release `{tag}` is still a draft")]
+	GithubDraft { tag: Str },
+	#[error("GitHub release `{tag}` is a prerelease; only the canary channel installs prereleases")]
+	StablePrerelease { tag: Str },
+	#[error("GitHub release `{tag}` has {count} assets named `{name}`")]
+	GithubAssetCount { tag: Str, name: Str, count: usize },
+	#[error("GitHub release asset `{name}` is not fully uploaded (state `{state}`)")]
+	GithubAssetState { name: Str, state: Str },
+	#[error("GitHub release asset `{name}` has an invalid size")]
+	GithubAssetSize { name: Str },
+	#[error("GitHub release asset `{name}` has no SHA-256 digest")]
+	GithubAssetDigestMissing { name: Str },
+	#[error("GitHub release asset `{name}` has a malformed SHA-256 digest")]
+	GithubAssetDigestMalformed { name: Str },
+	#[error(
+		"GitHub release asset `{name}` has an unexpected download URL: expected `{expected}`, \
+		 received `{actual}`"
+	)]
+	GithubAssetUrl { name: Str, expected: String, actual: String },
 }
 
 #[must_use]
@@ -96,19 +204,37 @@ impl Drop for UpdateLock {
 	}
 }
 
-/// Runs the signed core updater or explicitly delegates extension upgrades.
+/// Runs the verified core updater or explicitly delegates extension upgrades.
+#[tracing::instrument(
+	level = "debug",
+	name = "update",
+	skip_all,
+	fields(
+		check = args.check,
+		force = args.force,
+		plugins = args.plugins,
+		canary = args.canary,
+		stable = args.stable
+	)
+)]
 pub async fn run(args: UpdateArgs) -> miette::Result<()> {
+	let requested_channel = requested_channel(&args).into_diagnostic()?;
 	if args.plugins {
-		if args.check || args.force || args.index.is_some() || args.index_key.is_some() {
-			return Err(miette!(
-				"--plugins is exactly `omp ext upgrade` and cannot be combined with core update \
-				 options"
-			));
+		if args.check
+			|| args.force
+			|| requested_channel.is_some()
+			|| args.index.is_some()
+			|| args.index_key.is_some()
+		{
+			return Err(UpdateError::PluginsWithCoreOptions).into_diagnostic();
 		}
 		return upgrade_extensions().await;
 	}
 	if !release_override_requested(&args) {
-		return run_github_update(args).await;
+		return run_channel_update(args, requested_channel).await;
+	}
+	if requested_channel.is_some() {
+		return Err(UpdateError::ChannelWithIndex).into_diagnostic();
 	}
 	let (index, _) = load_index(args.index.as_deref(), args.index_key.as_deref())?;
 	let target = platform_target();
@@ -116,19 +242,25 @@ pub async fn run(args: UpdateArgs) -> miette::Result<()> {
 	let manager = classify_installation(&env::current_exe().into_diagnostic()?);
 	let current = env!("CARGO_PKG_VERSION");
 	let newer = compare_versions(selected.release.version.as_str(), current).is_gt();
+	tracing::debug!(
+		current_version = current,
+		latest_version = %selected.release.version,
+		%target,
+		?manager,
+		update_available = newer,
+		"verified signed update metadata"
+	);
 	if args.check || (!newer && !args.force) {
 		println!(
-			"current={current}\tlatest={}\ttarget={target}\tmanager={manager:?}\\
-			 tupdate_available={newer}",
-			selected.release.version
+			"current={}\tlatest={}\ttarget={}\tmanager={:?}\tupdate_available={}",
+			current, selected.release.version, target, manager, newer
 		);
 		return Ok(());
 	}
-	if manager != InstallManager::Native {
-		return Err(miette!("{}", manager_instruction(manager)));
-	}
+	ensure_native_installation(manager).into_diagnostic()?;
 	let version = selected.release.version.clone();
 	install(selected).await?;
+	tracing::info!(version = %version, %target, "update installed");
 	println!("updated omp to {version} ({target})");
 	Ok(())
 }
@@ -139,68 +271,315 @@ fn release_override_requested(args: &UpdateArgs) -> bool {
 		|| env::var_os("OMP_RELEASE_INDEX_KEY").is_some()
 }
 
-async fn run_github_update(args: UpdateArgs) -> miette::Result<()> {
-	let release = fetch_github_release(std::time::Duration::from_secs(15)).await?;
+fn requested_channel(args: &UpdateArgs) -> Result<Option<UpdateChannel>, UpdateError> {
+	match (args.canary, args.stable) {
+		(true, true) => Err(UpdateError::ConflictingChannels),
+		(true, false) => Ok(Some(UpdateChannel::Canary)),
+		(false, true) => Ok(Some(UpdateChannel::Stable)),
+		(false, false) => Ok(None),
+	}
+}
+
+fn ensure_native_installation(manager: InstallManager) -> Result<(), UpdateError> {
+	match manager {
+		InstallManager::Native => Ok(()),
+		InstallManager::Npm => Err(UpdateError::NpmManagedInstallation),
+		InstallManager::Homebrew => Err(UpdateError::HomebrewManagedInstallation),
+		InstallManager::Mise => Err(UpdateError::MiseManagedInstallation),
+		InstallManager::Nix => Err(UpdateError::NixManagedInstallation),
+	}
+}
+
+fn read_persisted_channel() -> miette::Result<UpdateChannel> {
+	let path = crate::config_path().into_diagnostic()?;
+	read_persisted_channel_at(&path)
+}
+
+fn read_persisted_channel_at(path: &Path) -> miette::Result<UpdateChannel> {
+	let ctx = crate::config_cmd::load_cfg(path)?;
+	Ok(CL_UPDATE_CHANNEL.get(&ctx))
+}
+
+fn persist_channel(channel: UpdateChannel) -> miette::Result<()> {
+	let path = crate::config_path().into_diagnostic()?;
+	persist_channel_at(&path, channel)
+}
+
+fn persist_channel_at(path: &Path, channel: UpdateChannel) -> miette::Result<()> {
+	crate::config_cmd::update_cfg(path, |ctx| CL_UPDATE_CHANNEL.set(ctx, channel).into_diagnostic())
+}
+
+#[tracing::instrument(
+	level = "debug",
+	name = "channel_update",
+	skip_all,
+	fields(check = args.check, force = args.force)
+)]
+async fn run_channel_update(
+	args: UpdateArgs,
+	requested_channel: Option<UpdateChannel>,
+) -> miette::Result<()> {
+	let persisted_channel = read_persisted_channel()?;
+	let channel = requested_channel.unwrap_or(persisted_channel);
+	let switching_channel =
+		requested_channel.is_some_and(|requested| requested != persisted_channel);
+	let version = fetch_release_manifest(channel, RELEASE_METADATA_TIMEOUT)
+		.await
+		.into_diagnostic()?;
+	let release = fetch_github_release(version.as_str(), RELEASE_METADATA_TIMEOUT)
+		.await
+		.into_diagnostic()?;
 	let target = platform_target();
 	let asset_name = github_asset_name();
+	let (asset, digest) =
+		resolve_github_asset(&release, version.as_str(), &asset_name, channel).into_diagnostic()?;
+	let manager = classify_installation(&env::current_exe().into_diagnostic()?);
+	let current = env!("CARGO_PKG_VERSION");
+	let newer = compare_versions(version.as_str(), current).is_gt();
+	tracing::debug!(
+		current_version = current,
+		latest_version = %version,
+		%channel,
+		%target,
+		?manager,
+		update_available = newer,
+		switching_channel,
+		"verified channel update metadata"
+	);
+	if switching_channel {
+		let direction = if newer { "upgrade" } else { "downgrade" };
+		if args.check {
+			println!("would switch to {channel} {version} ({direction})");
+		} else {
+			println!("switching to {channel} {version} ({direction})");
+		}
+	}
+	if !should_install(args.check, args.force, newer, switching_channel) {
+		println!(
+			"current={}\tlatest={}\tchannel={}\ttarget={}\tmanager={:?}\tupdate_available={}",
+			current, version, channel, target, manager, newer
+		);
+		return Ok(());
+	}
+	ensure_native_installation(manager).into_diagnostic()?;
+	install_github_asset(asset, digest, version.as_str()).await?;
+	if requested_channel.is_some() {
+		persist_channel(channel)?;
+	}
+	tracing::info!(%version, %channel, %target, "update installed");
+	println!("updated omp to {version} on the {channel} channel ({target})");
+	Ok(())
+}
+
+const fn should_install(check: bool, force: bool, newer: bool, switching_channel: bool) -> bool {
+	!check && (force || newer || switching_channel)
+}
+
+const fn manifest_url(channel: UpdateChannel) -> &'static str {
+	match channel {
+		UpdateChannel::Stable => NPM_STABLE_MANIFEST,
+		UpdateChannel::Canary => NPM_CANARY_MANIFEST,
+	}
+}
+
+async fn fetch_release_manifest(
+	channel: UpdateChannel,
+	timeout: std::time::Duration,
+) -> Result<Str, UpdateError> {
+	let fetch = async {
+		// The endpoint and headers are closed here: startup checks never
+		// inherit credentials, registry mirrors, or redirect targets.
+		let response = omp_http::no_redirect_client()
+			.get(manifest_url(channel))
+			.header("User-Agent", GITHUB_USER_AGENT)
+			.send()
+			.await
+			.map_err(|source| UpdateError::ManifestRequest { channel, source })?;
+		if response.status() == reqwest::StatusCode::NOT_FOUND && channel == UpdateChannel::Canary {
+			return Err(UpdateError::CanaryUnavailable);
+		}
+		if !response.status().is_success() {
+			return Err(UpdateError::ManifestHttp { channel, status: response.status() });
+		}
+		if response
+			.content_length()
+			.is_some_and(|length| length > u64::try_from(MAX_MANIFEST_BYTES).unwrap_or(u64::MAX))
+		{
+			return Err(UpdateError::ManifestTooLarge { channel });
+		}
+		let mut body = Vec::with_capacity(
+			response
+				.content_length()
+				.and_then(|length| usize::try_from(length).ok())
+				.unwrap_or_default()
+				.min(MAX_MANIFEST_BYTES),
+		);
+		let mut stream = response.bytes_stream();
+		while let Some(chunk) = stream.next().await {
+			let chunk = chunk.map_err(|source| UpdateError::ManifestRequest { channel, source })?;
+			if body.len().saturating_add(chunk.len()) > MAX_MANIFEST_BYTES {
+				return Err(UpdateError::ManifestTooLarge { channel });
+			}
+			body.extend_from_slice(&chunk);
+		}
+		let manifest = serde_json::from_slice::<ReleaseManifest>(&body)
+			.map_err(|source| UpdateError::ManifestDecode { channel, source })?;
+		validate_manifest_version(channel, manifest.version)
+	};
+	tokio::time::timeout(timeout, fetch)
+		.await
+		.map_err(|_| UpdateError::ManifestTimeout { channel })?
+}
+
+/// Revalidates a cached startup-check version before it enters presentation.
+pub(crate) fn validate_startup_release(channel: UpdateChannel, version: Str) -> Option<Str> {
+	validate_manifest_version(channel, version).ok()
+}
+
+/// Fetches one validated official channel manifest for the silent startup
+/// checker. Failures are intentionally reduced to absence at this boundary:
+/// request diagnostics can contain proxy details and never belong in the
+/// interactive transcript.
+pub(crate) async fn fetch_startup_release_manifest(
+	channel: UpdateChannel,
+	timeout: std::time::Duration,
+) -> Option<Str> {
+	match fetch_release_manifest(channel, timeout).await {
+		Ok(version) => Some(version),
+		Err(_) => {
+			tracing::debug!(%channel, "official startup release check unavailable");
+			None
+		},
+	}
+}
+
+fn validate_manifest_version(
+	channel: UpdateChannel,
+	manifest_version: Str,
+) -> Result<Str, UpdateError> {
+	let version = manifest_version.trim();
+	let Some(parsed) = parse_release_version(&version) else {
+		return Err(UpdateError::InvalidManifestVersion { channel, version: manifest_version });
+	};
+	if !version
+		.bytes()
+		.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'-' | b'+'))
+	{
+		return Err(UpdateError::InvalidManifestVersion { channel, version: manifest_version });
+	}
+	if channel == UpdateChannel::Stable && parsed.prerelease.is_some() {
+		return Err(UpdateError::StableManifestPrerelease { version: manifest_version });
+	}
+	Ok(Str::new(version))
+}
+
+async fn fetch_github_release(
+	version: &str,
+	timeout: std::time::Duration,
+) -> Result<GithubRelease, UpdateError> {
+	let tag = Str::from(format!("v{version}"));
+	let url = format!("{GITHUB_RELEASE_BY_TAG}/{tag}");
+	let mut request = omp_http::default_client()
+		.get(url)
+		.header("User-Agent", GITHUB_USER_AGENT)
+		.header("Accept", "application/vnd.github+json")
+		.header("X-GitHub-Api-Version", "2022-11-28");
+	let github_token = env::var("GITHUB_TOKEN")
+		.ok()
+		.filter(|token| !token.is_empty())
+		.or_else(|| env::var("GH_TOKEN").ok().filter(|token| !token.is_empty()));
+	if let Some(token) = &github_token {
+		request = request.bearer_auth(token);
+	}
+	let response = tokio::time::timeout(timeout, request.send())
+		.await
+		.map_err(|_| UpdateError::GithubTimeout { tag: tag.clone() })?
+		.map_err(|source| UpdateError::GithubRequest { tag: tag.clone(), source })?;
+	if response.status() == reqwest::StatusCode::TOO_MANY_REQUESTS
+		|| (response.status() == reqwest::StatusCode::FORBIDDEN && github_token.is_none())
+	{
+		return Err(UpdateError::GithubRateLimited { tag });
+	}
+	if !response.status().is_success() {
+		return Err(UpdateError::GithubHttp { tag, status: response.status() });
+	}
+	response
+		.json::<GithubRelease>()
+		.await
+		.map_err(|source| UpdateError::GithubDecode { tag, source })
+}
+
+fn resolve_github_asset<'a>(
+	release: &'a GithubRelease,
+	version: &str,
+	asset_name: &str,
+	channel: UpdateChannel,
+) -> Result<(&'a GithubAsset, &'a str), UpdateError> {
+	let expected_tag = Str::from(format!("v{version}"));
+	if release.tag_name != expected_tag {
+		return Err(UpdateError::GithubTagMismatch {
+			expected: expected_tag,
+			actual:   release.tag_name.clone(),
+		});
+	}
+	if release.draft {
+		return Err(UpdateError::GithubDraft { tag: expected_tag });
+	}
+	if release.prerelease && channel != UpdateChannel::Canary {
+		return Err(UpdateError::StablePrerelease { tag: expected_tag });
+	}
+	let count = release
+		.assets
+		.iter()
+		.filter(|asset| asset.name.as_str() == asset_name)
+		.count();
+	if count != 1 {
+		return Err(UpdateError::GithubAssetCount {
+			tag: expected_tag,
+			name: Str::new(asset_name),
+			count,
+		});
+	}
 	let asset = release
 		.assets
 		.iter()
 		.find(|asset| asset.name.as_str() == asset_name)
-		.ok_or_else(|| miette!("latest GitHub release has no exact `{asset_name}` asset"))?;
-	let digest = github_sha256(asset)?;
-	let version = release.tag_name.as_str().trim_start_matches('v');
-	if version.is_empty() {
-		return Err(miette!("latest GitHub release has an empty version tag"));
+		.expect("the exact asset count is one");
+	if asset.state != "uploaded" {
+		return Err(UpdateError::GithubAssetState {
+			name:  asset.name.clone(),
+			state: asset.state.clone(),
+		});
 	}
-	let manager = classify_installation(&env::current_exe().into_diagnostic()?);
-	let current = env!("CARGO_PKG_VERSION");
-	let newer = compare_versions(version, current).is_gt();
-	if args.check || (!newer && !args.force) {
-		println!(
-			"current={current}\tlatest={version}\ttarget={target}\tmanager={manager:?}\\
-			 tupdate_available={newer}"
-		);
-		return Ok(());
+	if asset.size == 0 || asset.size > MAX_ASSET_BYTES {
+		return Err(UpdateError::GithubAssetSize { name: asset.name.clone() });
 	}
-	if manager != InstallManager::Native {
-		return Err(miette!("{}", manager_instruction(manager)));
-	}
-	install_github_asset(asset, digest, version).await?;
-	println!("updated omp to {version} ({target})");
-	Ok(())
-}
-
-async fn fetch_github_release(timeout: std::time::Duration) -> miette::Result<GithubRelease> {
-	tokio::time::timeout(timeout, async {
-		let response = omp_http::default_client()
-			.get(GITHUB_LATEST_RELEASE)
-			.header("User-Agent", GITHUB_USER_AGENT)
-			.header("Accept", "application/vnd.github+json")
-			.send()
-			.await
-			.into_diagnostic()?;
-		if !response.status().is_success() {
-			return Err(miette!("GitHub release lookup returned HTTP {}", response.status()));
-		}
-		response.json::<GithubRelease>().await.into_diagnostic()
-	})
-	.await
-	.map_err(|_| miette!("GitHub release lookup timed out"))?
-}
-
-fn github_sha256(asset: &GithubAsset) -> miette::Result<&str> {
-	let digest = asset
-		.digest
-		.as_deref()
-		.and_then(|digest| digest.strip_prefix("sha256:"))
-		.ok_or_else(|| miette!("GitHub release asset `{}` has no SHA-256 digest", asset.name))?;
+	let Some(digest) = asset.digest.as_deref() else {
+		return Err(UpdateError::GithubAssetDigestMissing { name: asset.name.clone() });
+	};
+	let Some(digest) = digest.strip_prefix("sha256:") else {
+		return Err(UpdateError::GithubAssetDigestMalformed { name: asset.name.clone() });
+	};
 	if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-		return Err(miette!("GitHub release asset `{}` has a malformed SHA-256 digest", asset.name));
+		return Err(UpdateError::GithubAssetDigestMalformed { name: asset.name.clone() });
 	}
-	Ok(digest)
+	let expected_url = format!("{GITHUB_DOWNLOAD_ROOT}/{expected_tag}/{asset_name}");
+	if asset.browser_download_url != expected_url {
+		return Err(UpdateError::GithubAssetUrl {
+			name:     asset.name.clone(),
+			expected: expected_url,
+			actual:   asset.browser_download_url.clone(),
+		});
+	}
+	Ok((asset, digest))
 }
 
+#[tracing::instrument(
+	level = "debug",
+	name = "update_install",
+	skip_all,
+	fields(source = "github", %version)
+)]
 async fn install_github_asset(
 	asset: &GithubAsset,
 	expected_sha256: &str,
@@ -268,7 +647,7 @@ async fn fetch_github_asset(asset: &GithubAsset) -> miette::Result<Vec<u8>> {
 	Ok(bytes)
 }
 
-fn update_cache_dir() -> miette::Result<PathBuf> {
+pub(crate) fn update_cache_dir() -> miette::Result<PathBuf> {
 	if let Some(cache) = env::var_os("OMP_CACHE_DIR").filter(|value| !value.is_empty()) {
 		return Ok(PathBuf::from(cache).join("updates"));
 	}
@@ -282,6 +661,12 @@ fn update_cache_dir() -> miette::Result<PathBuf> {
 }
 
 /// Inspects the verified package registry without mutating locks or TOFU pins.
+#[tracing::instrument(
+	level = "debug",
+	name = "update_registry_inspect",
+	skip_all,
+	fields(package = %args.package, json = args.json)
+)]
 pub fn registry(args: RegistryArgs) -> miette::Result<()> {
 	let (index, _) = load_index(args.index.as_deref(), args.index_key.as_deref())?;
 	let target = platform_target();
@@ -336,67 +721,6 @@ pub fn registry(args: RegistryArgs) -> miette::Result<()> {
 		}
 	}
 	Ok(())
-}
-
-/// Returns a newer verified core release configured for this platform.
-///
-/// The canonical GitHub response is cached for one hour; startup never
-/// downloads binaries, mutates TOFU pins, or refreshes extension indexes.
-pub fn startup_available() -> Option<Str> {
-	if env::var_os("OMP_RELEASE_INDEX").is_some() || env::var_os("OMP_RELEASE_INDEX_KEY").is_some() {
-		let (index, _) = load_index(None, None).ok()?;
-		let target = platform_target();
-		let selected = select(&index, CORE_PACKAGE, &target).ok()?;
-		return compare_versions(selected.release.version.as_str(), env!("CARGO_PKG_VERSION"))
-			.is_gt()
-			.then(|| selected.release.version.clone());
-	}
-	startup_github_release().and_then(|release| {
-		let asset_name = github_asset_name();
-		let asset = release
-			.assets
-			.iter()
-			.find(|asset| asset.name.as_str() == asset_name)?;
-		github_sha256(asset).ok()?;
-		let version = release.tag_name.as_str().trim_start_matches('v');
-		compare_versions(version, env!("CARGO_PKG_VERSION"))
-			.is_gt()
-			.then(|| Str::new(version))
-	})
-}
-fn startup_github_release() -> Option<GithubRelease> {
-	let cache = update_cache_dir().ok()?.join("latest.json");
-	let cached = || {
-		fs::read(&cache)
-			.ok()
-			.and_then(|bytes| serde_json::from_slice::<GithubRelease>(&bytes).ok())
-	};
-	let fresh = fs::metadata(&cache)
-		.and_then(|metadata| metadata.modified())
-		.and_then(|modified| modified.elapsed().map_err(io::Error::other))
-		.is_ok_and(|age| age <= STARTUP_CACHE_TTL);
-	if fresh {
-		return cached();
-	}
-	let runtime = tokio::runtime::Builder::new_current_thread()
-		.enable_all()
-		.build()
-		.ok()?;
-	match runtime.block_on(fetch_github_release(STARTUP_FETCH_TIMEOUT)) {
-		Ok(release) => {
-			if let Some(parent) = cache.parent()
-				&& fs::create_dir_all(parent).is_ok()
-				&& let Ok(bytes) = serde_json::to_vec(&release)
-			{
-				let staged = cache.with_extension("json.tmp");
-				if fs::write(&staged, bytes).is_ok() {
-					let _ = fs::rename(staged, &cache);
-				}
-			}
-			Some(release)
-		},
-		Err(_) => cached(),
-	}
 }
 
 fn load_index(index: Option<&Path>, key: Option<&Path>) -> miette::Result<(SignedIndex, String)> {
@@ -455,6 +779,12 @@ fn target_artifact<'a>(release: &'a IndexRelease, target: &str) -> Option<&'a In
 		.find(|artifact| artifact.target.as_str() == target)
 }
 
+#[tracing::instrument(
+	level = "debug",
+	name = "update_install",
+	skip_all,
+	fields(source = "signed_index", version = %selected.release.version)
+)]
 async fn install(selected: Selected<'_>) -> miette::Result<()> {
 	if selected.artifact.size > MAX_ASSET_BYTES {
 		return Err(miette!("signed update asset exceeds the 256 MiB safety ceiling"));
@@ -725,7 +1055,7 @@ fn prune_stale(directory: &Path) -> miette::Result<()> {
 		let name = entry.file_name();
 		if is_update_artifact_name(&name.to_string_lossy()) {
 			// A mapped Windows backup may still belong to a running older
-			// updater. Deletion remains best-effort just like pi.
+			// updater. Deletion remains best-effort.
 			let _ = fs::remove_file(entry.path());
 		}
 	}
@@ -734,13 +1064,10 @@ fn prune_stale(directory: &Path) -> miette::Result<()> {
 
 fn classify_installation(executable: &Path) -> InstallManager {
 	if let Some(value) = env::var_os("OMP_INSTALL_MANAGER") {
-		return match value.to_string_lossy().to_ascii_lowercase().as_str() {
-			"npm" => InstallManager::Npm,
-			"homebrew" | "brew" => InstallManager::Homebrew,
-			"mise" => InstallManager::Mise,
-			"nix" => InstallManager::Nix,
-			_ => InstallManager::Native,
-		};
+		return value
+			.to_string_lossy()
+			.parse()
+			.unwrap_or(InstallManager::Native);
 	}
 	let path = executable.to_string_lossy().to_ascii_lowercase();
 	if path.contains("/nix/store/") {
@@ -754,16 +1081,6 @@ fn classify_installation(executable: &Path) -> InstallManager {
 		InstallManager::Npm
 	} else {
 		InstallManager::Native
-	}
-}
-
-const fn manager_instruction(manager: InstallManager) -> &'static str {
-	match manager {
-		InstallManager::Native => "native installation can update in place",
-		InstallManager::Npm => "npm owns this installation; run `npm update -g @oh-my-pi/omp`",
-		InstallManager::Homebrew => "Homebrew owns this installation; run `brew upgrade omp`",
-		InstallManager::Mise => "Mise owns this installation; run `mise upgrade omp`",
-		InstallManager::Nix => "Nix owns this installation; update the pinned Nix input",
 	}
 }
 
@@ -797,9 +1114,42 @@ fn platform_target() -> String {
 	}
 }
 
-fn compare_versions(left: &str, right: &str) -> cmp::Ordering {
-	let mut left = left.trim_start_matches('v').split(['.', '-', '+']);
-	let mut right = right.trim_start_matches('v').split(['.', '-', '+']);
+struct ParsedVersion<'a> {
+	core:       [u64; 3],
+	prerelease: Option<&'a str>,
+}
+
+fn parse_release_version(version: &str) -> Option<ParsedVersion<'_>> {
+	let version = version.trim_start_matches('v');
+	let (version, build) = version
+		.split_once('+')
+		.map_or((version, None), |(version, build)| (version, Some(build)));
+	let (core, prerelease) = version
+		.split_once('-')
+		.map_or((version, None), |(core, prerelease)| (core, Some(prerelease)));
+	if [build, prerelease].into_iter().flatten().any(|suffix| {
+		suffix.is_empty()
+			|| suffix.split('.').any(|part| {
+				part.is_empty()
+					|| !part
+						.bytes()
+						.all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+			})
+	}) {
+		return None;
+	}
+	let mut parts = core.split('.');
+	let parsed =
+		[parts.next()?.parse().ok()?, parts.next()?.parse().ok()?, parts.next()?.parse().ok()?];
+	if parts.next().is_some() {
+		return None;
+	}
+	Some(ParsedVersion { core: parsed, prerelease })
+}
+
+fn compare_prereleases(left: &str, right: &str) -> cmp::Ordering {
+	let mut left = left.split('.');
+	let mut right = right.split('.');
 	loop {
 		match (left.next(), right.next()) {
 			(None, None) => return cmp::Ordering::Equal,
@@ -808,13 +1158,34 @@ fn compare_versions(left: &str, right: &str) -> cmp::Ordering {
 			(Some(left), Some(right)) => {
 				let ordering = match (left.parse::<u64>(), right.parse::<u64>()) {
 					(Ok(left), Ok(right)) => left.cmp(&right),
-					_ => left.cmp(right),
+					(Ok(_), Err(_)) => cmp::Ordering::Less,
+					(Err(_), Ok(_)) => cmp::Ordering::Greater,
+					(Err(_), Err(_)) => left.cmp(right),
 				};
 				if !ordering.is_eq() {
 					return ordering;
 				}
 			},
 		}
+	}
+}
+
+pub(crate) fn compare_versions(left: &str, right: &str) -> cmp::Ordering {
+	match (parse_release_version(left), parse_release_version(right)) {
+		(Some(left), Some(right)) => {
+			left
+				.core
+				.cmp(&right.core)
+				.then_with(|| match (left.prerelease, right.prerelease) {
+					(None, None) => cmp::Ordering::Equal,
+					(None, Some(_)) => cmp::Ordering::Greater,
+					(Some(_), None) => cmp::Ordering::Less,
+					(Some(left), Some(right)) => compare_prereleases(left, right),
+				})
+		},
+		_ => left
+			.trim_start_matches('v')
+			.cmp(right.trim_start_matches('v')),
 	}
 }
 
@@ -869,33 +1240,164 @@ mod tests {
 		}
 	}
 
+	fn update_args() -> UpdateArgs {
+		UpdateArgs {
+			check:     false,
+			force:     false,
+			plugins:   false,
+			canary:    false,
+			stable:    false,
+			index:     None,
+			index_key: None,
+		}
+	}
+
+	fn github_release(version: &'static str, prerelease: bool) -> GithubRelease {
+		let tag = Str::from(format!("v{version}"));
+		let name = Str::new_static("omp-darwin-arm64");
+		GithubRelease {
+			tag_name: tag.clone(),
+			draft: false,
+			prerelease,
+			assets: vec![GithubAsset {
+				name:                 name.clone(),
+				browser_download_url: format!("{GITHUB_DOWNLOAD_ROOT}/{tag}/{name}"),
+				state:                Str::new_static("uploaded"),
+				size:                 1,
+				digest:               Some(Str::new_static(
+					"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				)),
+			}],
+		}
+	}
+
+	#[test]
+	fn channel_controls_select_exact_manifests_and_conflict() {
+		assert_eq!(manifest_url(UpdateChannel::Stable), NPM_STABLE_MANIFEST);
+		assert_eq!(manifest_url(UpdateChannel::Canary), NPM_CANARY_MANIFEST);
+
+		let mut args = update_args();
+		args.canary = true;
+		assert_eq!(requested_channel(&args).unwrap(), Some(UpdateChannel::Canary));
+		args.stable = true;
+		assert!(matches!(requested_channel(&args), Err(UpdateError::ConflictingChannels)));
+	}
+
+	#[test]
+	fn stable_manifest_rejects_prereleases_while_canary_accepts_them() {
+		let version = Str::new_static("18.1.0-canary.1");
+		assert!(matches!(
+			validate_manifest_version(UpdateChannel::Stable, version.clone()),
+			Err(UpdateError::StableManifestPrerelease { .. })
+		));
+		assert_eq!(
+			validate_manifest_version(UpdateChannel::Canary, version).unwrap(),
+			"18.1.0-canary.1"
+		);
+	}
+
+	#[test]
+	fn explicit_channel_switch_installs_downgrades_but_check_never_mutates() {
+		assert!(should_install(false, false, false, true));
+		assert!(should_install(false, true, false, false));
+		assert!(should_install(false, false, true, false));
+		assert!(!should_install(false, false, false, false));
+		assert!(!should_install(true, true, true, true));
+	}
+
+	#[test]
+	fn explicit_channel_persists_through_the_archived_convar() {
+		let root = tempfile::tempdir().unwrap();
+		let path = root.path().join("config.cfg");
+		assert_eq!(read_persisted_channel_at(&path).unwrap(), UpdateChannel::Stable);
+		persist_channel_at(&path, UpdateChannel::Canary).unwrap();
+		assert_eq!(read_persisted_channel_at(&path).unwrap(), UpdateChannel::Canary);
+		assert!(
+			fs::read_to_string(path)
+				.unwrap()
+				.contains("cl_update_channel canary")
+		);
+	}
+
+	#[test]
+	fn exact_release_asset_resolution_enforces_channel_and_integrity_metadata() {
+		let stable = github_release("18.0.0", false);
+		let (asset, digest) =
+			resolve_github_asset(&stable, "18.0.0", "omp-darwin-arm64", UpdateChannel::Stable)
+				.unwrap();
+		assert_eq!(asset.name, "omp-darwin-arm64");
+		assert_eq!(digest, "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef");
+
+		let canary = github_release("18.1.0-canary.1", true);
+		assert!(
+			resolve_github_asset(
+				&canary,
+				"18.1.0-canary.1",
+				"omp-darwin-arm64",
+				UpdateChannel::Canary,
+			)
+			.is_ok()
+		);
+		assert!(matches!(
+			resolve_github_asset(
+				&canary,
+				"18.1.0-canary.1",
+				"omp-darwin-arm64",
+				UpdateChannel::Stable,
+			),
+			Err(UpdateError::StablePrerelease { .. })
+		));
+	}
+
+	#[test]
+	fn exact_release_asset_resolution_rejects_untrusted_metadata() {
+		let mut release = github_release("18.0.0", false);
+		release.assets[0].browser_download_url =
+			"https://attacker.invalid/omp-darwin-arm64".to_owned();
+		assert!(matches!(
+			resolve_github_asset(&release, "18.0.0", "omp-darwin-arm64", UpdateChannel::Stable,),
+			Err(UpdateError::GithubAssetUrl { .. })
+		));
+
+		let mut release = github_release("18.0.0", false);
+		release.assets[0].digest = None;
+		assert!(matches!(
+			resolve_github_asset(&release, "18.0.0", "omp-darwin-arm64", UpdateChannel::Stable,),
+			Err(UpdateError::GithubAssetDigestMissing { .. })
+		));
+
+		let mut release = github_release("18.0.0", false);
+		let duplicate = release.assets[0].clone();
+		release.assets.push(duplicate);
+		assert!(matches!(
+			resolve_github_asset(&release, "18.0.0", "omp-darwin-arm64", UpdateChannel::Stable,),
+			Err(UpdateError::GithubAssetCount { count: 2, .. })
+		));
+	}
+
+	#[test]
+	fn stable_versions_sort_after_matching_canary_prereleases() {
+		assert!(compare_versions("18.0.0", "18.0.0-canary.1").is_gt());
+		assert!(compare_versions("18.0.0-canary.2", "18.0.0-canary.1").is_gt());
+		assert!(compare_versions("18.0.0-canary.10", "18.0.0-canary.2").is_gt());
+	}
+
 	#[test]
 	fn windows_release_selects_its_attested_target_asset() {
-		let asset = GithubAsset {
-			name:                 Str::new_static("omp-x86_64-apple-darwin"),
-			browser_download_url: "https://example.invalid/omp".to_owned(),
-			size:                 1,
-			digest:               Some(Str::new_static(
-				"sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-			)),
-		};
-		assert_eq!(
-			github_sha256(&asset).expect("digest"),
-			"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-		);
-		let mut missing = asset;
-		missing.digest = None;
-		assert!(github_sha256(&missing).is_err());
-
 		let windows = "x86_64-pc-windows-msvc";
 		let release = IndexRelease {
-			version:           Str::new_static("18.0.0"),
-			manifest_digest:   Str::new_static("b3:manifest"),
-			capability_digest: Str::new_static("b3:capabilities"),
-			attested:          true,
-			yanked:            false,
-			shadows:           Vec::new(),
-			artifacts:         vec![
+			version:                    Str::new_static("18.0.0"),
+			manifest_digest:            Str::new_static("b3:manifest"),
+			manifest_capability_digest: Str::new_static("b3:capabilities"),
+			capability_digest:          Str::new_static("b3:capabilities"),
+			requires:                   Vec::new(),
+			capabilities:               Vec::new(),
+			features:                   std::collections::BTreeMap::new(),
+			declarations:               Vec::new(),
+			attested:                   true,
+			yanked:                     false,
+			shadows:                    Vec::new(),
+			artifacts:                  vec![
 				artifact("aarch64-apple-darwin", "omp-darwin"),
 				artifact(windows, "omp.exe"),
 			],

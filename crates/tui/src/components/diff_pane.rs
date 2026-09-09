@@ -165,12 +165,12 @@ impl Palette {
 		let strong = if dark { 0.42 } else { 0.48 };
 		let canvas = ctx.theme.panel;
 		Self {
-			add_soft:   canvas.mix(ctx.theme.ok, soft),
-			add_strong: canvas.mix(ctx.theme.ok, strong),
-			del_soft:   canvas.mix(ctx.theme.err, soft),
-			del_strong: canvas.mix(ctx.theme.err, strong),
-			fill_add:   canvas.mix(ctx.theme.ok, 0.07),
-			fill_del:   canvas.mix(ctx.theme.err, 0.07),
+			add_soft:   canvas.mix(ctx.theme.tool_diff_added, soft),
+			add_strong: canvas.mix(ctx.theme.tool_diff_added, strong),
+			del_soft:   canvas.mix(ctx.theme.tool_diff_removed, soft),
+			del_strong: canvas.mix(ctx.theme.tool_diff_removed, strong),
+			fill_add:   canvas.mix(ctx.theme.tool_diff_added, 0.07),
+			fill_del:   canvas.mix(ctx.theme.tool_diff_removed, 0.07),
 			selection:  canvas.mix(ctx.theme.fg, 0.14),
 		}
 	}
@@ -238,7 +238,7 @@ impl SyntaxHighlights {
 		self.new.runs.resize_with(document.new_lines.len(), || None);
 	}
 
-	fn pending(&self, document: &DiffDocument) -> bool {
+	const fn pending(&self, document: &DiffDocument) -> bool {
 		(self.old.stream.is_some() && self.old.offset < document.old_lines.len())
 			|| (self.new.stream.is_some() && self.new.offset < document.new_lines.len())
 	}
@@ -490,7 +490,7 @@ impl DiffPane {
 	/// Clears a shift-extended selection while preserving the cursor row.
 	///
 	/// Returns whether an explicit selection was active.
-	pub fn clear_selection(&mut self) -> bool {
+	pub const fn clear_selection(&mut self) -> bool {
 		self.anchor.take().is_some()
 	}
 
@@ -578,7 +578,7 @@ impl DiffPane {
 		true
 	}
 
-	fn action_allowed(&self, action: DiffActionKind) -> bool {
+	const fn action_allowed(&self, action: DiffActionKind) -> bool {
 		matches!(
 			(self.patch_target, action),
 			(Some(DiffPatchTarget::Stage), DiffActionKind::Stage | DiffActionKind::Discard)
@@ -628,15 +628,15 @@ impl DiffPane {
 	}
 
 	fn segments(&self, width: u16, content: u16) -> u16 {
-		if !self.wrap {
-			1
-		} else {
+		if self.wrap {
 			content
 				.max(1)
 				.saturating_add(width - 1)
 				.checked_div(width)
 				.unwrap_or(1)
 				.max(1)
+		} else {
+			1
 		}
 	}
 
@@ -1150,11 +1150,11 @@ impl DiffPane {
 					x,
 					y,
 					"│",
-					Style::new().fg(pc.ctx.theme.border).bg(
-						selected
-							.then_some(palette.selection)
-							.unwrap_or(Color::Default),
-					),
+					Style::new().fg(pc.ctx.theme.border).bg(if selected {
+						palette.selection
+					} else {
+						Color::Default
+					}),
 				);
 				self.paint_side(
 					pc,
@@ -1177,9 +1177,11 @@ impl DiffPane {
 				let source = &document.file_lines[line];
 				let gutter = document.gutter_width;
 				let text_width = self.file_text_width(rect.width);
-				let bg = selected
-					.then_some(palette.selection)
-					.unwrap_or(Color::Default);
+				let bg = if selected {
+					palette.selection
+				} else {
+					Color::Default
+				};
 				pc.frame
 					.fill(Rect::new(rect.x, y, self.body_width(rect.width), 1), Style::new().bg(bg));
 				if segment == 0 {
@@ -1254,12 +1256,12 @@ impl DiffPane {
 					Style::new()
 						.fg(if changed {
 							if old {
-								pc.ctx.theme.err
+								pc.ctx.theme.tool_diff_removed
 							} else {
-								pc.ctx.theme.ok
+								pc.ctx.theme.tool_diff_added
 							}
 						} else {
-							pc.ctx.theme.muted
+							pc.ctx.theme.tool_diff_context
 						})
 						.bg(bg),
 				);
@@ -1344,9 +1346,9 @@ impl DiffPane {
 					&old.gutter,
 					Style::new()
 						.fg(if is_del {
-							pc.ctx.theme.err
+							pc.ctx.theme.tool_diff_removed
 						} else {
-							pc.ctx.theme.muted
+							pc.ctx.theme.tool_diff_context
 						})
 						.bg(bg),
 				);
@@ -1360,9 +1362,9 @@ impl DiffPane {
 					&new.gutter,
 					Style::new()
 						.fg(if is_add {
-							pc.ctx.theme.ok
+							pc.ctx.theme.tool_diff_added
 						} else {
-							pc.ctx.theme.muted
+							pc.ctx.theme.tool_diff_context
 						})
 						.bg(bg),
 				);
@@ -1392,11 +1394,11 @@ impl DiffPane {
 	fn paint_header(&self, pc: &mut PaintCtx<'_>, rect: Rect, y: u16, hunk: usize, selected: bool) {
 		let document = self.document.as_ref().expect("document");
 		let body = self.body_width(rect.width);
-		let style = Style::new().fg(pc.ctx.theme.accent).bg(
-			selected
-				.then_some(pc.ctx.theme.surface)
-				.unwrap_or(Color::Default),
-		);
+		let style = Style::new().fg(pc.ctx.theme.accent).bg(if selected {
+			pc.ctx.theme.surface
+		} else {
+			Color::Default
+		});
 		pc.frame.fill(Rect::new(rect.x, y, body, 1), style);
 		pc.frame.put_clipped(
 			rect.x,
@@ -1413,7 +1415,9 @@ impl DiffPane {
 			return;
 		}
 		let (primary_label, primary_action, primary_color) = match self.patch_target {
-			Some(DiffPatchTarget::Stage) => (" Stage Hunk ", DiffActionKind::Stage, pc.ctx.theme.ok),
+			Some(DiffPatchTarget::Stage) => {
+				(" Stage Hunk ", DiffActionKind::Stage, pc.ctx.theme.tool_diff_added)
+			},
 			Some(DiffPatchTarget::Unstage) => {
 				(" Unstage Hunk ", DiffActionKind::Unstage, pc.ctx.theme.warn)
 			},
@@ -1448,7 +1452,7 @@ impl DiffPane {
 				x,
 				y,
 				" Discard Hunk ",
-				pc.ctx.theme.err,
+				pc.ctx.theme.tool_diff_removed,
 				pc.ctx.theme.contrast,
 				caps,
 				selected,
@@ -1502,9 +1506,13 @@ impl DiffPane {
 			let bottom_band = top_band + 1;
 			let color = |kind: Option<MapKind>, band: usize| {
 				let base = match kind? {
-					MapKind::Del => pc.ctx.theme.err,
-					MapKind::Add => pc.ctx.theme.ok,
-					MapKind::Change => pc.ctx.theme.ok.mix(pc.ctx.theme.err, 0.5),
+					MapKind::Del => pc.ctx.theme.tool_diff_removed,
+					MapKind::Add => pc.ctx.theme.tool_diff_added,
+					MapKind::Change => pc
+						.ctx
+						.theme
+						.tool_diff_added
+						.mix(pc.ctx.theme.tool_diff_removed, 0.5),
 					MapKind::Hunk => pc.ctx.theme.accent,
 					MapKind::Context => pc.ctx.theme.panel.mix(pc.ctx.theme.fg, 0.2),
 				};
@@ -1810,7 +1818,7 @@ fn minimap_bucket_range(total: usize, band: usize, bands: usize) -> Option<Range
 	Some(from..to)
 }
 
-fn row_map_kind(kind: DiffRowKind) -> MapKind {
+const fn row_map_kind(kind: DiffRowKind) -> MapKind {
 	match kind {
 		DiffRowKind::Context => MapKind::Context,
 		DiffRowKind::Change => MapKind::Change,
@@ -1820,19 +1828,19 @@ fn row_map_kind(kind: DiffRowKind) -> MapKind {
 }
 
 fn segments(width: u16, content: u16, wrap: bool) -> u16 {
-	if !wrap {
-		1
-	} else {
+	if wrap {
 		content
 			.max(1)
 			.saturating_add(width - 1)
 			.checked_div(width)
 			.unwrap_or(1)
 			.max(1)
+	} else {
+		1
 	}
 }
 
-fn visual_row(visual: Visual) -> Option<usize> {
+const fn visual_row(visual: Visual) -> Option<usize> {
 	match visual {
 		Visual::Split { row, .. } | Visual::Line { row, .. } => Some(row),
 		Visual::File { row, .. } => row,

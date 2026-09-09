@@ -7,10 +7,8 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_shell::{
-	ProfileLoadBehavior, RcLoadBehavior, Shell, SourceInfo, builtins, process_builtins,
-	utility_builtins,
-};
+use omp_shell::{ProfileLoadBehavior, RcLoadBehavior, Shell, SourceInfo, builtins};
+use omp_shell_builtins::{process_builtins, utility_builtins};
 use tokio_util::sync::CancellationToken;
 
 use crate::cli::ShellCliArgs;

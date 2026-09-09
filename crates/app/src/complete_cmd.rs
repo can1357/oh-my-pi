@@ -1,10 +1,8 @@
 //! Dynamic model and session candidates used by generated shell completions.
 
-use std::{fs, path::Path};
+use std::fs;
 
 use miette::IntoDiagnostic as _;
-use omp_catalog::snapshot;
-use omp_storage::index::{SessionFilter, SessionIndex};
 
 /// Dynamic completion candidate class.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, clap::ValueEnum)]
@@ -24,8 +22,9 @@ pub fn run(kind: CompletionKind, prefix: &str) -> miette::Result<()> {
 }
 
 fn models(prefix: &str) -> miette::Result<()> {
+	let data = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let catalog =
-		snapshot::Catalog::try_embedded().map_err(|error| miette::miette!(error.to_string()))?;
+		omp_driver::registry::production_catalog(&data).map_err(|error| miette::miette!(error))?;
 	let needle = prefix.to_ascii_lowercase();
 	let mut rows = Vec::new();
 	for model in catalog.models() {
@@ -44,21 +43,14 @@ fn sessions(prefix: &str) -> miette::Result<()> {
 	let data = omp_core::dirs::data_dir(None).into_diagnostic()?;
 	let project = fs::canonicalize(".").into_diagnostic()?;
 	let state = omp_env::project_state::directory(&data, &project).into_diagnostic()?;
-	let path = state.join("sessions.sqlite3");
-	if !Path::new(&path).is_file() {
-		return Ok(());
-	}
-	let index = SessionIndex::open_authoritative_reader(path).into_diagnostic()?;
-	let page = index
-		.list(&SessionFilter { limit: 200, ..SessionFilter::default() })
-		.into_diagnostic()?;
-	let mut rows = page
-		.sessions
+	let index =
+		omp_driver::sessions::SessionIndex::open(state.join("sessions")).into_diagnostic()?;
+	let mut rows = index
+		.list()
 		.into_iter()
-		.filter(|session| prefix.is_empty() || session.id.0.as_str().starts_with(prefix))
+		.filter(|session| prefix.is_empty() || session.id.starts_with(prefix))
 		.map(|session| {
-			let description = session.title.as_deref().unwrap_or(session.cwd.as_str());
-			format!("{}\t{}", clean(session.id.0.as_str()), truncate(&clean(description), 72))
+			format!("{}\t{}", clean(session.id.as_str()), truncate(&clean(session.cwd.as_str()), 72))
 		})
 		.collect::<Vec<_>>();
 	rows.sort_unstable();

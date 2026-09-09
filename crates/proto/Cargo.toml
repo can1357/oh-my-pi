@@ -13,22 +13,20 @@ default = []
 tonic = ["dep:tonic", "dep:tonic-prost"]
 
 [dependencies]
-bytes = { workspace = true }
-omp-core = { workspace = true }
-prost = { workspace = true }
-serde = { workspace = true }
-strum = { workspace = true }
-thiserror = { workspace = true }
+bytes.workspace = true
+omp-core.workspace = true
+prost.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+strum.workspace = true
+thiserror.workspace = true
 tonic = { workspace = true, optional = true }
 tonic-prost = { workspace = true, optional = true }
 
-[dev-dependencies]
-serde_json = { workspace = true }
-
 [build-dependencies]
-prost-types = { workspace = true }
-protox = { workspace = true }
-tonic-prost-build = { workspace = true }
+prost-types.workspace = true
+protox.workspace = true
+tonic-prost-build.workspace = true
 
 [lints]
 workspace = true

@@ -8,7 +8,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, value_parser};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use operation::{
 	DeleteOperation, Sequence, SqueezeOperation, SymbolTranslator, TranslateOperation, flush_output,
 	translate_input,

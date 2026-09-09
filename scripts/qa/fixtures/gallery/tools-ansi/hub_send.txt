@@ -1,0 +1,29 @@
+[38;2;0;180;255m── hub_send — Hub send ─────────────────────────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mIRC  AuthLoader[39m                                                                                  
+  [38;2;107;114;128m│[39m [38;2;107;114;128mAre you still touching[39m                                                                          
+                                                                                                    
+
+[38;2;107;114;128m  · in progress[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mIRC  AuthLoader[39m [38;2;107;114;128mawait reply[39m                                                                      
+  [38;2;107;114;128m│[39m [38;2;107;114;128mAre you still touching src/server/auth.ts? I need to add a 401 path.[39m                            
+                                                                                                    
+
+[38;2;107;114;128m  · done[39m
+                                                                                                    
+[38;2;0;180;255m[39m [38;2;0;180;255mIRC  AuthLoader[39m [38;2;107;114;128m[38;2;255;179;71mrevived[39m[39m                                                                          
+  [38;2;107;114;128m│[39m [38;2;107;114;128mAre you still touching src/server/auth.ts? I need to add a 401 path.[39m                            
+  [38;2;107;114;128m[39m [38;2;0;180;255mAuthLoader[39m [38;2;107;114;128mjust now[39m                                                                             
+  [38;2;107;114;128m│[39m [38;2;156;163;176mDone with auth.ts — go ahead, just rebase past my session-store rename.[39m                         
+                                                                                                    
+
+[38;2;107;114;128m  · failed[39m
+                                                                                                    
+[38;2;255;71;87m[39m [38;2;0;180;255mIRC  RateLimiter[39m [38;2;107;114;128m[38;2;255;71;87mfailed[39m[39m                                                                          
+  [38;2;107;114;128m│[39m [38;2;107;114;128mAre you still touching src/server/auth.ts? I need to add a 401 path.[39m                            
+[38;2;107;114;128m└─[39m [38;2;156;163;176mRateLimiter[39m [38;2;255;71;87m⟨failed⟩[39m [38;2;255;71;87m– unknown agent "RateLimiter"[39m                                               
+                                                                                                    
+

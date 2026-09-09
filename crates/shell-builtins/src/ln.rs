@@ -17,7 +17,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use thiserror::Error;
 
 use crate::{
@@ -378,6 +378,7 @@ fn link_files_in_dir(
 	let mut all_successful = true;
 	for srcpath in files {
 		let targetpath = if settings.no_dereference && target_dir_fs.is_symlink() {
+			host.ensure_writable(target_dir)?;
 			let remove_target = |host: &mut Host| {
 				// In that case, we don't want to do link resolution.
 				if target_dir_fs.is_file()
@@ -473,7 +474,7 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 	// Resolve both filesystem operands, but never resolve `source`: it is the
 	// text stored inside a symbolic link.
 	let src_fs = host.resolve(src);
-	let dst_fs = host.resolve(dst);
+	let dst_fs = host.ensure_writable(dst)?;
 
 	if dst_fs.is_symlink() || dst_fs.exists() {
 		// Probe numbered backups from the resolved destination.
@@ -485,6 +486,7 @@ fn link(host: &mut Host, src: &Path, dst: &Path, settings: &Settings) -> LnResul
 			}
 		}
 		if let Some(p) = &backup_path {
+			host.ensure_writable(p)?;
 			fs::rename(&dst_fs, p)
 				.map_err(|e| LnError::Message(format!("cannot backup {}: {e}", dst.quote())))?;
 		}
@@ -614,10 +616,10 @@ fn make_symlink<P1: AsRef<Path>, P2: AsRef<Path>>(
 
 #[cfg(test)]
 mod tests {
-	use std::{fs, path::PathBuf};
+	use std::{fs, path::PathBuf, sync::Arc};
 
 	use super::Ln;
-	use crate::host::run_util;
+	use crate::host::{ScopedPathPolicy, run_util, run_util_with_policy};
 
 	fn run_in(cwd: PathBuf, args: &[&str]) -> (i32, String, String) {
 		let (code, capture) = run_util::<Ln>(args, "", cwd);
@@ -634,6 +636,28 @@ mod tests {
 		let dir = tempfile::tempdir().unwrap();
 		let canon = fs::canonicalize(dir.path()).unwrap();
 		(dir, canon)
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn write_policy_denies_destination_and_allows_scoped_link() {
+		let (_dir, root) = canonical_tempdir();
+		let allowed = root.join("allowed");
+		fs::create_dir(&allowed).unwrap();
+		let denied = root.join("denied");
+		fs::write(&denied, b"original").unwrap();
+		let policy = Arc::new(ScopedPathPolicy::new(&allowed));
+
+		let (code, capture) =
+			run_util_with_policy::<Ln>(&["-sf", "target", "denied"], "", &root, policy.clone());
+		assert_eq!(code, 1);
+		assert!(capture.err().contains("sandbox denied write"));
+		assert_eq!(fs::read(&denied).unwrap(), b"original");
+
+		let (code, capture) =
+			run_util_with_policy::<Ln>(&["-s", "target", "allowed/link"], "", &root, policy);
+		assert_eq!((code, capture.err()), (0, String::new()));
+		assert_eq!(fs::read_link(allowed.join("link")).unwrap(), PathBuf::from("target"));
 	}
 
 	#[cfg(unix)]

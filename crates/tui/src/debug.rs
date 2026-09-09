@@ -32,7 +32,7 @@
 //! | `tree` | | component tree with kinds, ids, rects, focus (retained) |
 //! | `slots` | | extension mount keys and resolved rectangles (retained host) |
 //! | `effect` | `effect` | inject one serialized extension `UiEffect` |
-//! | `keys` | `keys` | inject decoded keys, e.g. `"tab C-a enter 'text'"` |
+//! | `keys` | `keys` | inject physical chords through the live keymap, e.g. `"tab C-a enter 'text'"` |
 //! | `event` | `event` | inject one serialized [`crate::TerminalEvent`] |
 //! | `bytes` | `data` | feed raw bytes through the input decoder |
 //! | `paste` | `text` | inject a bracketed paste |
@@ -53,7 +53,7 @@ use parking_lot::Mutex;
 
 use crate::{
 	frame::{CellContent, Frame, Style},
-	input::{InputEvent, Key, Mouse, MouseButton, MouseReport},
+	input::{Chord, InputEvent, Key, Mods, Mouse, MouseButton, MouseReport},
 	kitty, pump,
 	pump::{DebugOp, DebugQuery, TerminalEvent},
 	renderer, terminal, test_support,
@@ -165,12 +165,12 @@ pub fn frame_ansi(frame: &Frame) -> String {
 			let cell = frame.cell(x, row);
 			match cell.content() {
 				CellContent::Blank => {
-					set_ansi_style(&mut output, &mut active, cell.style().without_link());
+					set_ansi_style(&mut output, &mut active, cell.style());
 					output.push(' ');
 					x += 1;
 				},
 				CellContent::Grapheme { text, width } => {
-					set_ansi_style(&mut output, &mut active, cell.style().without_link());
+					set_ansi_style(&mut output, &mut active, cell.style());
 					output.push_str(text);
 					x = x.saturating_add((*width).max(1));
 				},
@@ -184,6 +184,7 @@ pub fn frame_ansi(frame: &Frame) -> String {
 				CellContent::Continuation => x += 1,
 			}
 		}
+		renderer::close_active_link(&mut output, &mut active, true);
 	}
 	renderer::emit_style(&mut output, Style::default());
 	output
@@ -191,10 +192,7 @@ pub fn frame_ansi(frame: &Frame) -> String {
 
 /// Switches the active SGR state when the next cell's style differs.
 fn set_ansi_style(output: &mut String, active: &mut Style, style: Style) {
-	if style != *active {
-		renderer::emit_style(output, style);
-		*active = style;
-	}
+	renderer::emit_cell_style(output, style, active, true);
 }
 
 /// Rasterizes one painted terminal frame to a native PNG.
@@ -266,6 +264,16 @@ fn direct_response(request: DebugRequest) -> Result<serde_json::Value, DebugOp> 
 				json!({ "ok": false, "error": "no live terminal to inject into" })
 			}
 		},
+		DebugRequest::Chords(chords) => {
+			// Physical chords resolve through the live keymap, so a bound
+			// `M-p` runs its bind exactly like the terminal's `ESC p`.
+			let injected = chords.len();
+			if pump::inject_chords(chords) {
+				json!({ "ok": true, "injected": injected })
+			} else {
+				json!({ "ok": false, "error": "no live terminal to inject into" })
+			}
+		},
 	})
 }
 
@@ -289,6 +297,7 @@ pub fn terminal_response(op: DebugOp) -> Option<serde_json::Value> {
 				"cols": snapshot.cols,
 				"rows": snapshot.rows,
 				"height": snapshot.doc_height,
+				"cursor": snapshot.cursor.map(|(row, col)| vec![row, col]),
 				"window_top": snapshot.window_top,
 				"alt_screen": crate::terminal::alt_screen_active(),
 				"overlay": snapshot.overlay,
@@ -325,6 +334,9 @@ pub enum DebugRequest {
 	Effect(serde_json::Value),
 	/// Events to inject into the mailbox, already decoded.
 	Inject(Vec<InputEvent>),
+	/// Physical chords for the live keymap (`keys` op): delivered as the
+	/// chord edges or semantic keys the decoder would emit for them.
+	Chords(Vec<Chord>),
 	/// Serialized terminal events to inject verbatim.
 	Events(Vec<TerminalEvent>),
 	/// Raw bytes for the live input decoder.
@@ -359,7 +371,7 @@ pub fn parse_request(line: &[u8]) -> Result<DebugRequest, String> {
 				.get("keys")
 				.and_then(serde_json::Value::as_str)
 				.ok_or_else(|| "keys op needs a \"keys\" string".to_owned())?;
-			Ok(DebugRequest::Inject(parse_keys(spec)?.into_iter().map(InputEvent::Key).collect()))
+			Ok(DebugRequest::Chords(parse_keys(spec)?))
 		},
 		"bytes" => {
 			let data = value
@@ -395,13 +407,15 @@ pub fn parse_request(line: &[u8]) -> Result<DebugRequest, String> {
 	}
 }
 
-/// Parses a whitespace-separated key spec.
+/// Parses a whitespace-separated key spec into physical chords.
 ///
 /// Named tokens (`tab`, `enter`, `esc`, `up`, `pgdn`, `f5`, ...) map to
-/// their [`Key`] variants; `C-x`, `M-x`/`A-x`, and `C-M-x` are chords; a
-/// single-quoted or double-quoted token types its characters literally, as
-/// does any single-character token.
-pub fn parse_keys(spec: &str) -> Result<Vec<Key>, String> {
+/// their native keys; `C-x`, `M-x`/`A-x`, and `C-M-x` carry modifiers; the
+/// semantic spellings (`word-left`, `copy-line`, `paste-raw`, ...) name the
+/// default chord the keymap folds into that key; a single-quoted or
+/// double-quoted token types its characters literally, as does any
+/// single-character token.
+pub fn parse_keys(spec: &str) -> Result<Vec<Chord>, String> {
 	let mut keys = Vec::new();
 	let mut rest = spec.trim_start();
 	while !rest.is_empty() {
@@ -424,56 +438,66 @@ pub fn parse_keys(spec: &str) -> Result<Vec<Key>, String> {
 	Ok(keys)
 }
 
-/// The key the terminal decoder would produce for typing `ch`.
-const fn literal_key(ch: char) -> Key {
-	match ch {
+/// The chord the terminal decoder would produce for typing `ch`.
+const fn literal_key(ch: char) -> Chord {
+	Chord::plain(match ch {
 		' ' => Key::Space,
 		_ => Key::Char(ch),
-	}
+	})
 }
 
-fn parse_token(token: &str) -> Result<Key, String> {
+const fn with_mods(key: Key, ctrl: bool, alt: bool, shift: bool) -> Chord {
+	Chord::new(key, Mods { ctrl, alt, shift, super_key: false, hyper: false, meta: false })
+}
+
+fn parse_token(token: &str) -> Result<Chord, String> {
 	// Chord prefixes; a bare single character falls through to literal.
 	if token.chars().count() > 1 {
 		let lower = token.to_ascii_lowercase();
 		if let Some(ch) = strip_chord(&lower, &["c-m-", "m-c-", "ctrl-alt-"]) {
-			return Ok(Key::CtrlAlt(ch));
+			return Ok(with_mods(Key::Char(ch), true, true, false));
 		}
 		if let Some(ch) = strip_chord(&lower, &["c-", "ctrl-", "ctrl+"]) {
-			return Ok(Key::Ctrl(ch));
+			return Ok(with_mods(Key::Char(ch), true, false, false));
 		}
 		if let Some(ch) = strip_chord(&lower, &["m-", "a-", "alt-", "alt+"]) {
-			return Ok(Key::Alt(ch));
+			return Ok(with_mods(Key::Char(ch), false, true, false));
 		}
 	}
 	let named = match token.to_ascii_lowercase().as_str() {
-		"up" => Key::Up,
-		"down" => Key::Down,
-		"left" => Key::Left,
-		"right" => Key::Right,
-		"tab" => Key::Tab,
-		"backtab" | "shift-tab" => Key::BackTab,
-		"alt-enter" => Key::FollowUp,
-		"enter" | "return" | "cr" => Key::Enter,
-		"space" => Key::Space,
-		"esc" | "escape" => Key::Esc,
-		"backspace" | "bs" => Key::Backspace,
-		"delete" | "del" => Key::Delete,
-		"insert" => Key::Insert,
-		"home" => Key::Home,
-		"end" => Key::End,
-		"pgup" | "pageup" => Key::PageUp,
-		"pgdn" | "pagedown" => Key::PageDown,
-		"shift-enter" => Key::ShiftEnter,
-		"word-left" => Key::WordLeft,
-		"word-right" => Key::WordRight,
-		"word-delete" => Key::WordDelete,
+		"up" => Chord::plain(Key::Up),
+		"down" => Chord::plain(Key::Down),
+		"left" => Chord::plain(Key::Left),
+		"right" => Chord::plain(Key::Right),
+		"tab" => Chord::plain(Key::Tab),
+		"backtab" | "shift-tab" => with_mods(Key::Tab, false, false, true),
+		"alt-enter" => with_mods(Key::Enter, false, true, false),
+		"enter" | "return" | "cr" => Chord::plain(Key::Enter),
+		"space" => Chord::plain(Key::Space),
+		"esc" | "escape" => Chord::plain(Key::Esc),
+		"backspace" | "bs" => Chord::plain(Key::Backspace),
+		"delete" | "del" => Chord::plain(Key::Delete),
+		"insert" => Chord::plain(Key::Insert),
+		"home" => Chord::plain(Key::Home),
+		"end" => Chord::plain(Key::End),
+		"pgup" | "pageup" => Chord::plain(Key::PageUp),
+		"pgdn" | "pagedown" => Chord::plain(Key::PageDown),
+		"shift-enter" => with_mods(Key::Enter, false, false, true),
+		"word-left" => with_mods(Key::Left, true, false, false),
+		"word-right" => with_mods(Key::Right, true, false, false),
+		"word-delete" => with_mods(Key::Char('d'), false, true, false),
+		"alt-up" | "restore-queue" => with_mods(Key::Up, false, true, false),
+		"copy-line" => with_mods(Key::Char('l'), false, true, true),
+		"copy-prompt" => with_mods(Key::Char('c'), false, true, true),
+		"paste" => with_mods(Key::Char('v'), true, false, false),
+		"paste-raw" => with_mods(Key::Char('v'), true, false, true),
+		"plan-toggle" => with_mods(Key::Char('p'), false, true, true),
 		other => {
 			if let Some(number) = other.strip_prefix('f')
 				&& let Ok(number) = number.parse::<u8>()
 				&& (1..=12).contains(&number)
 			{
-				return Ok(Key::Function(number));
+				return Ok(Chord::plain(Key::Function(number)));
 			}
 			let mut chars = token.chars();
 			return match (chars.next(), chars.next()) {
@@ -783,6 +807,7 @@ mod server {
 						if let Ok((stream, _)) = accepted {
 							let id = *next_conn;
 							*next_conn += 1;
+							tracing::info!(client_id = id, "tui debug client connected");
 							conns.push(Conn {
 								id,
 								stream,
@@ -917,22 +942,51 @@ mod tests {
 	fn key_spec_tokens_chords_and_literals() {
 		let keys = parse_keys("tab C-c M-y 'hi there' x pgdn f5 alt-enter").expect("valid spec");
 		assert_eq!(keys, vec![
-			Key::Tab,
-			Key::Ctrl('c'),
-			Key::Alt('y'),
-			Key::Char('h'),
-			Key::Char('i'),
-			Key::Space,
-			Key::Char('t'),
-			Key::Char('h'),
-			Key::Char('e'),
-			Key::Char('r'),
-			Key::Char('e'),
-			Key::Char('x'),
-			Key::PageDown,
-			Key::Function(5),
-			Key::FollowUp,
+			Chord::plain(Key::Tab),
+			with_mods(Key::Char('c'), true, false, false),
+			with_mods(Key::Char('y'), false, true, false),
+			Chord::plain(Key::Char('h')),
+			Chord::plain(Key::Char('i')),
+			Chord::plain(Key::Space),
+			Chord::plain(Key::Char('t')),
+			Chord::plain(Key::Char('h')),
+			Chord::plain(Key::Char('e')),
+			Chord::plain(Key::Char('r')),
+			Chord::plain(Key::Char('e')),
+			Chord::plain(Key::Char('x')),
+			Chord::plain(Key::PageDown),
+			Chord::plain(Key::Function(5)),
+			with_mods(Key::Enter, false, true, false),
 		]);
+	}
+
+	/// Injected chords ride the decoder's emission rule: with chord events
+	/// on they arrive as the same `alt+p` edge the terminal's `ESC p`
+	/// produces (so a `bind alt+p` runs), and otherwise as the keymap's
+	/// semantic key — identical to feeding the raw bytes.
+	#[test]
+	fn injected_chords_match_decoded_bytes_under_both_keymap_modes() {
+		let chord = parse_keys("M-p").expect("spec")[0];
+		let mut decoder = crate::InputDecoder::new();
+		for chords in [false, true] {
+			decoder.keymap_mut().set_chord_events(chords);
+			let mut injected = Vec::new();
+			decoder.inject(chord, &mut injected);
+			let mut decoded = Vec::new();
+			let now = std::time::Instant::now();
+			decoder.feed(b"\x1bp", now, &mut decoded);
+			decoder.tick(now + std::time::Duration::from_secs(1), &mut decoded);
+			assert_eq!(injected, decoded, "chord events {chords}");
+			match &injected[..] {
+				[InputEvent::Chord(event)] if chords => {
+					assert_eq!(event.chord.label(), "alt+p");
+					assert_eq!(event.key, Some(Key::Alt('p')));
+					assert!(event.pressed);
+				},
+				[InputEvent::Key(Key::Alt('p'))] if !chords => {},
+				other => panic!("unexpected emission {other:?}"),
+			}
+		}
 	}
 
 	#[test]
@@ -946,7 +1000,7 @@ mod tests {
 		assert!(matches!(parse_request(br#"{"op":"text"}"#), Ok(DebugRequest::Text)));
 		assert!(matches!(
 			parse_request(br#"{"op":"keys","keys":"enter"}"#),
-			Ok(DebugRequest::Inject(events)) if events == vec![InputEvent::Key(Key::Enter)]
+			Ok(DebugRequest::Chords(chords)) if chords == vec![Chord::plain(Key::Enter)]
 		));
 		assert!(matches!(parse_request(br#"{"op":"slots"}"#), Ok(DebugRequest::Slots)));
 		assert!(matches!(

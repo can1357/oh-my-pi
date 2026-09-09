@@ -1,0 +1,23 @@
+── recall — Recall ─────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Recall: bun vs node                                                                               
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Recall: Which runtime does the user prefer for scripts?                                           
+                                                                                                    
+
+  · done
+                                                                                                    
+ Recall: Which runtime does the user prefer for scripts? 2 found                                   
+  ⟨Ctrl+O: Expand⟩                                                                                  
+                                                                                                    
+
+  · failed
+                                                                                                    
+ Error: Recall failed: vector index unavailable.                                                   
+                                                                                                    
+

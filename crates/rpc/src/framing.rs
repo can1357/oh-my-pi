@@ -12,7 +12,8 @@ use std::{
 use omp_core::base64;
 use serde_json::{Map, Value, json};
 
-/// Maximum size of one physical JSON line, excluding the trailing newline.
+/// Maximum UTF-8 size of one physical JSON line, including the trailing
+/// newline.
 pub const MAX_FRAME_BYTES: usize = 1024 * 1024;
 /// Maximum size of a reassembled protocol-v2 JSON payload.
 pub const MAX_REASSEMBLED_BYTES: usize = 64 * 1024 * 1024;
@@ -70,7 +71,7 @@ impl JsonLineDecoder {
 			if line.is_empty() {
 				continue;
 			}
-			if line.len() > MAX_FRAME_BYTES {
+			if line.len().saturating_add(1) > MAX_FRAME_BYTES {
 				output.diagnostics.push(FramingDiagnostic {
 					skipped_bytes: line.len(),
 					reason:        "JSON line exceeds transport limit",
@@ -79,7 +80,7 @@ impl JsonLineDecoder {
 			}
 			output.frames.push(line);
 		}
-		if self.buffer.len() > MAX_FRAME_BYTES && !self.discarding {
+		if self.buffer.len() >= MAX_FRAME_BYTES && !self.discarding {
 			let skipped_bytes = self.buffer.len();
 			self.buffer.clear();
 			self.discarding = true;
@@ -316,7 +317,7 @@ fn encode_json_v2_payload(value: &Value, sequence_id: &str) -> Result<Vec<Vec<u8
 	if payload.len() > MAX_REASSEMBLED_BYTES {
 		return Err(FramingError::LogicalFrameTooLarge { bytes: payload.len() });
 	}
-	if payload.len() <= MAX_FRAME_BYTES {
+	if payload.len().saturating_add(1) <= MAX_FRAME_BYTES {
 		return Ok(vec![encode_json_line(&payload)?]);
 	}
 	let count = payload.len().div_ceil(RPC_CHUNK_BYTES);
@@ -338,8 +339,8 @@ fn encode_json_v2_payload(value: &Value, sequence_id: &str) -> Result<Vec<Vec<u8
 }
 
 fn encode_json_line(payload: &[u8]) -> Result<Vec<u8>, FramingError> {
-	if payload.len() > MAX_FRAME_BYTES {
-		return Err(FramingError::FrameTooLarge { bytes: payload.len() });
+	if payload.len().saturating_add(1) > MAX_FRAME_BYTES {
+		return Err(FramingError::FrameTooLarge { bytes: payload.len().saturating_add(1) });
 	}
 	let mut framed = Vec::with_capacity(payload.len() + 1);
 	framed.extend_from_slice(payload);

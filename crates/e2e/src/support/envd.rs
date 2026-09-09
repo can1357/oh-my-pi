@@ -71,12 +71,16 @@ impl EnvHarness {
 			omp_core::sf!("e2e-session"),
 			1,
 		);
+		let con = Arc::new(omp_con::Ctx::new());
+		let convars = Arc::new(omp_envd::exthost::ConvarControlFactory::new(Arc::clone(&con)));
 		let server = Arc::new(
 			EnvServer::open_local(
 				scratch.project(),
 				scratch.state(),
 				Registry::new(),
 				ext_host_config,
+				&con,
+				convars,
 				RegistryBridges::default(),
 			)
 			.await

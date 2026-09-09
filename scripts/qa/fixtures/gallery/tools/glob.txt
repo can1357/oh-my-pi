@@ -1,0 +1,27 @@
+── glob — Glob ─────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+  Glob: packages/coding-agent/src/tools/*-render                                                   
+                                                                                                    
+
+  · in progress
+                                                                                                    
+  Glob: packages/coding-agent/src/**/*.test.ts limit:50                                            
+                                                                                                    
+
+  · done
+                                                                                                    
+  Glob: packages/coding-agent/src/**/*.test.ts 5 files · in packages/coding-agent/src              
+ ├─  packages/coding-agent/src/cli/gallery-cli.test.ts                                             
+ ├─  packages/coding-agent/src/edit/edit.test.ts                                                   
+ ├─  packages/coding-agent/src/tools/glob.test.ts                                                  
+ ├─  packages/coding-agent/src/tools/read.test.ts                                                  
+ └─  packages/coding-agent/src/tools/write.test.ts                                                 
+                                                                                                    
+
+  · failed
+                                                                                                    
+  Error: invalid glob pattern '[unclosed'                                                          
+                                                                                                    
+

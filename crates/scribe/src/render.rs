@@ -3,18 +3,20 @@
 use std::{cmp, collections::HashMap};
 
 use omp_core::Str;
+use omp_dom::{Dom, Value as DomValue};
 use smallvec::SmallVec;
 
 use crate::{
-	Props, Value,
-	error::{Error, Span, TypeErrorKind},
+	Props, ScopedProps, Value,
+	error::{Error, HelperError, Span, TypeErrorKind},
 	filters,
 	parse::{self, BinOp, Expr, Node},
 };
 
 /// A filter or function callable from templates. For filters, `args[0]` is
-/// the piped input followed by the written arguments.
-type HelperFn = Box<dyn Fn(&[Value]) -> Result<Value, Error> + Send + Sync>;
+/// the piped input followed by the written arguments. DOM-aware functions
+/// receive the render-scoped authoritative tree without owning or copying it.
+type HelperFn = Box<dyn Fn(&[Value], Option<&Dom>) -> Result<Value, Error> + Send + Sync>;
 /// A block helper: receives evaluated arguments plus the rendered body and
 /// writes its output.
 type BlockFn = Box<dyn Fn(&[Value], &str, &mut String) -> Result<(), Error> + Send + Sync>;
@@ -37,6 +39,7 @@ impl Engine {
 		let mut engine =
 			Self { filters: HashMap::new(), functions: HashMap::new(), blocks: HashMap::new() };
 		filters::install(&mut engine);
+		install_dom_functions(&mut engine);
 		engine
 	}
 
@@ -47,7 +50,9 @@ impl Engine {
 		name: &'static str,
 		f: impl Fn(&[Value]) -> Result<Value, Error> + Send + Sync + 'static,
 	) {
-		self.filters.insert(name, Box::new(f));
+		self
+			.filters
+			.insert(name, Box::new(move |args, _dom| f(args)));
 	}
 
 	/// Registers a function: `{{ name(args) }}`.
@@ -55,6 +60,16 @@ impl Engine {
 		&mut self,
 		name: &'static str,
 		f: impl Fn(&[Value]) -> Result<Value, Error> + Send + Sync + 'static,
+	) {
+		self
+			.functions
+			.insert(name, Box::new(move |args, _dom| f(args)));
+	}
+
+	fn add_dom_function(
+		&mut self,
+		name: &'static str,
+		f: impl Fn(&[Value], Option<&Dom>) -> Result<Value, Error> + Send + Sync + 'static,
 	) {
 		self.functions.insert(name, Box::new(f));
 	}
@@ -88,6 +103,75 @@ impl Default for Engine {
 	}
 }
 
+fn install_dom_functions(engine: &mut Engine) {
+	engine.add_dom_function("select", |args, dom| {
+		let selector = one_selector_arg("select", args)?;
+		let dom = dom.ok_or_else(|| Error::helper("select", HelperError::MissingDom))?;
+		let handles = dom
+			.select(selector)
+			.map_err(|source| Error::helper("select", source))?;
+		Ok(Value::List(
+			handles
+				.filter_map(|handle| dom.get(handle).map(|node| node_value(handle, node)))
+				.collect(),
+		))
+	});
+	engine.add_dom_function("count", |args, dom| {
+		if args.len() != 1 {
+			return Err(Error::helper("count", HelperError::Arity {
+				expected: 1,
+				got:      args.len(),
+			}));
+		}
+		let count = match &args[0] {
+			Value::List(items) => items.len(),
+			Value::Str(selector) => dom
+				.ok_or_else(|| Error::helper("count", HelperError::MissingDom))?
+				.count(selector)
+				.map_err(|source| Error::helper("count", source))?,
+			_ => return Err(Error::helper("count", HelperError::SelectorOrList)),
+		};
+		Ok(Value::Int(i64::try_from(count).unwrap_or(i64::MAX)))
+	});
+}
+
+fn one_selector_arg<'a>(name: &'static str, args: &'a [Value]) -> Result<&'a str, Error> {
+	if args.len() != 1 {
+		return Err(Error::helper(name, HelperError::Arity { expected: 1, got: args.len() }));
+	}
+	args[0]
+		.as_str()
+		.ok_or_else(|| Error::helper(name, HelperError::ExpectedString))
+}
+
+fn node_value(handle: omp_dom::Handle, node: &omp_dom::Node) -> Value {
+	let mut props = im::OrdMap::new();
+	for (key, value) in &node.props {
+		props.insert(Str::from(key.to_string()), dom_value(value));
+	}
+	let mut map = im::OrdMap::new();
+	map.insert(Str::new_static("handle"), Value::Int(handle.get() as i64));
+	map.insert(Str::new_static("tag"), Value::Str(Str::from(node.tag.to_string())));
+	map.insert(Str::new_static("content"), node.content.clone().map_or(Value::None, Value::Str));
+	map.insert(Str::new_static("props"), Value::Map(props));
+	Value::Map(map)
+}
+
+fn dom_value(value: &DomValue) -> Value {
+	match value {
+		DomValue::Null => Value::None,
+		DomValue::Bool(value) => Value::Bool(*value),
+		DomValue::Int(value) => Value::Int(*value),
+		DomValue::Float(value) => Value::Float(*value),
+		DomValue::Str(value) => Value::Str(value.clone()),
+		DomValue::Json(value) => {
+			let parsed: serde_json::Value = serde_json::from_str(value.get())
+				.expect("DOM raw JSON values are validated at construction");
+			Value::from(&parsed)
+		},
+	}
+}
+
 /// A compiled template: name, retained source (for error snippets and
 /// zero-copy text nodes), AST, and the referenced top-level prop keys.
 #[derive(Debug)]
@@ -118,9 +202,31 @@ impl Template {
 	/// Renders into `out`. Pure and deterministic: output depends only on
 	/// the template, the engine's registered helpers, and `props`.
 	pub fn render(&self, engine: &Engine, props: &Props, out: &mut String) -> Result<(), Error> {
+		self.render_inner(engine, props, None, out)
+	}
+
+	/// Renders with a borrowed authoritative session DOM available to the
+	/// `select` and `count` template functions.
+	pub fn render_scoped(
+		&self,
+		engine: &Engine,
+		props: &ScopedProps<'_>,
+		out: &mut String,
+	) -> Result<(), Error> {
+		self.render_inner(engine, props.values, Some(props.dom), out)
+	}
+
+	fn render_inner(
+		&self,
+		engine: &Engine,
+		props: &Props,
+		dom: Option<&Dom>,
+		out: &mut String,
+	) -> Result<(), Error> {
 		let mut ctx = Ctx {
 			engine,
 			props,
+			dom,
 			name: &self.name,
 			source: self.source.as_str(),
 			frames: vec![Vec::new()],
@@ -132,6 +238,13 @@ impl Template {
 	pub fn render_str(&self, engine: &Engine, props: &Props) -> Result<Str, Error> {
 		let mut out = String::new();
 		self.render(engine, props, &mut out)?;
+		Ok(Str::from(out))
+	}
+
+	/// Renders to an owned string with a borrowed authoritative session DOM.
+	pub fn render_scoped_str(&self, engine: &Engine, props: &ScopedProps<'_>) -> Result<Str, Error> {
+		let mut out = String::new();
+		self.render_scoped(engine, props, &mut out)?;
 		Ok(Str::from(out))
 	}
 
@@ -313,6 +426,7 @@ fn collect_expr_keys(expr: &Expr, bound: &[Str], keys: &mut Vec<Str>) {
 struct Ctx<'r> {
 	engine: &'r Engine,
 	props:  &'r Props,
+	dom:    Option<&'r Dom>,
 	name:   &'r Str,
 	source: &'r str,
 	frames: Vec<Vec<(Str, Value)>>,
@@ -509,7 +623,7 @@ fn eval(expr: &Expr, ctx: &mut Ctx<'_>) -> Result<Eval, Error> {
 				.filters
 				.get(name.as_str())
 				.ok_or_else(|| ctx.type_error(*name_span, TypeErrorKind::UnknownFilter))?;
-			Ok(Eval::Val(filter(&evaluated)?))
+			Ok(Eval::Val(filter(&evaluated, ctx.dom)?))
 		},
 		Expr::Call { name, name_span, args } => {
 			let mut evaluated: SmallVec<Value, 4> = SmallVec::new();
@@ -521,7 +635,7 @@ fn eval(expr: &Expr, ctx: &mut Ctx<'_>) -> Result<Eval, Error> {
 				.functions
 				.get(name.as_str())
 				.ok_or_else(|| ctx.type_error(*name_span, TypeErrorKind::UnknownFunction))?;
-			Ok(Eval::Val(function(&evaluated)?))
+			Ok(Eval::Val(function(&evaluated, ctx.dom)?))
 		},
 	}
 }
@@ -666,6 +780,8 @@ fn value_cmp(left: &Value, right: &Value) -> Option<cmp::Ordering> {
 
 #[cfg(test)]
 mod tests {
+	use omp_dom::{KnownTag, NodeSpec, Op, PropId, Txn, Value as DomValue};
+
 	use super::*;
 	use crate::{TypeErrorKind, list, map};
 
@@ -686,6 +802,71 @@ mod tests {
 	fn conditionals_and_emission_compose() {
 		let bag = props(&[("tools", list!["a"]), ("name", Value::from("x"))]);
 		assert_eq!(render("{% if tools %}yes{% endif %}{{ name }}", &bag).unwrap(), "yesx");
+	}
+
+	#[test]
+	fn dom_select_count_and_each_project_nodes_without_serialization() {
+		let mut dom = Dom::new();
+		let todo = dom
+			.apply(&Txn {
+				cause: Default::default(),
+				label: None,
+				ops:   vec![Op::Ins {
+					parent: dom.meta(),
+					after:  None,
+					node:   NodeSpec::new(KnownTag::Todo),
+				}],
+			})
+			.unwrap()
+			.minted[0];
+		dom.apply(&Txn {
+			cause: Default::default(),
+			label: None,
+			ops:   vec![
+				Op::Ins {
+					parent: todo,
+					after:  None,
+					node:   NodeSpec::new(KnownTag::Item)
+						.with_prop(PropId::Status, DomValue::Str(Str::new_static("pending")))
+						.with_content("first"),
+				},
+				Op::Ins {
+					parent: todo,
+					after:  None,
+					node:   NodeSpec::new(KnownTag::Item)
+						.with_prop(PropId::Status, DomValue::Str(Str::new_static("completed")))
+						.with_content("second"),
+				},
+			],
+		})
+		.unwrap();
+
+		let engine = Engine::new();
+		let template = engine
+			.compile(
+				"dom",
+				"{{ count(\"todo item[status!=completed]\") }}/{{ count(select(\"todo item\")) }}:{% \
+				 for item in select(\"todo item[status!=completed]\") %}{{ item.content }}={{ \
+				 item.props.status }}{% endfor %}",
+			)
+			.unwrap();
+		let props = Props::new();
+		assert_eq!(
+			template
+				.render_scoped_str(&engine, &props.with_dom(&dom))
+				.unwrap(),
+			"1/2:first=pending"
+		);
+	}
+
+	#[test]
+	fn dom_functions_require_an_explicit_render_scope() {
+		let engine = Engine::new();
+		let template = engine.compile("dom", "{{ count(\"todo\") }}").unwrap();
+		let error = template.render_str(&engine, &Props::new()).unwrap_err();
+		assert!(
+			matches!(error, Error::Helper { source, .. } if source.downcast_ref::<HelperError>() == Some(&HelperError::MissingDom))
+		);
 	}
 
 	#[test]

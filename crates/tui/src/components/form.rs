@@ -176,6 +176,7 @@ pub struct Form {
 	editing:    bool,
 	open:       Option<u16>,
 	sub_cursor: u16,
+	scroll:     u16,
 	scratch:    String,
 }
 
@@ -190,6 +191,7 @@ impl Form {
 			editing:    false,
 			open:       None,
 			sub_cursor: 0,
+			scroll:     0,
 			scratch:    String::new(),
 		}
 	}
@@ -210,6 +212,79 @@ impl Form {
 	pub fn field(mut self, field: Field) -> Self {
 		self.fields.push(FieldData::from_field(field));
 		self
+	}
+
+	/// Extra rows contributed by the open dropdown, if any.
+	fn open_rows(&self) -> u16 {
+		self
+			.open
+			.and_then(|open| self.fields.get(usize::from(open)))
+			.map_or(0, |field| field.options.len() as u16)
+	}
+
+	/// Scrollable rows: one per field plus the open dropdown's options.
+	fn content_rows(&self) -> u16 {
+		(self.fields.len() as u16).saturating_add(self.open_rows())
+	}
+
+	/// One pinned description row is reserved when any field carries one,
+	/// so moving the cursor never changes the form's height.
+	fn desc_rows(&self) -> u16 {
+		u16::from(self.fields.iter().any(|field| field.desc.is_some()))
+	}
+
+	/// Field rows visible at once given the component's own row count.
+	fn window(&self, view_rows: u16) -> u16 {
+		view_rows.saturating_sub(self.desc_rows()).max(1)
+	}
+
+	/// Scrolls the viewport the minimum distance that shows `row`.
+	fn chase_row(&mut self, row: u16, view_rows: u16) {
+		let window = self.window(view_rows);
+		if row < self.scroll {
+			self.scroll = row;
+		} else if row >= self.scroll.saturating_add(window) {
+			self.scroll = row.saturating_add(1).saturating_sub(window);
+		}
+		self.scroll = self.scroll.min(self.content_rows().saturating_sub(window));
+	}
+
+	/// Shows the cursor row, plus as much of its open dropdown as fits.
+	fn chase_cursor(&mut self, view_rows: u16) {
+		if self.open == Some(self.cursor) {
+			self.chase_row(self.cursor.saturating_add(self.open_rows()), view_rows);
+		}
+		self.chase_row(self.cursor, view_rows);
+	}
+
+	/// Moves the viewport without touching the cursor; false at the edges.
+	fn scroll_by(&mut self, delta: i32, view_rows: u16) -> bool {
+		let window = self.window(view_rows);
+		let max = self.content_rows().saturating_sub(window);
+		let next = (i64::from(self.scroll) + i64::from(delta)).clamp(0, i64::from(max)) as u16;
+		let changed = next != self.scroll;
+		self.scroll = next;
+		changed
+	}
+
+	/// Centers the scrollbar thumb on the pointer row — the inverse of the
+	/// thumb placement painted by [`Component::paint`].
+	fn scrollbar_jump(&mut self, at: (u16, u16), rect: Rect) -> Flow {
+		let track = rect.height;
+		let content = self.content_rows();
+		if track == 0 || content <= track {
+			return Flow::Consumed;
+		}
+		let thumb_h = (track.saturating_mul(track) / content).max(1);
+		let span = track - thumb_h;
+		if span == 0 {
+			return Flow::Consumed;
+		}
+		let row = at.1.saturating_sub(rect.y).min(track - 1);
+		let grab = row.saturating_sub(thumb_h / 2).min(span);
+		let range = u32::from(content - track);
+		self.scroll = ((u32::from(grab) * range + u32::from(span / 2)) / u32::from(span)) as u16;
+		Flow::Consumed
 	}
 
 	fn activate(&mut self) {
@@ -240,7 +315,7 @@ impl Form {
 		}
 	}
 
-	fn click_row(&mut self, index: u16) {
+	fn click_row(&mut self, index: u16, view_rows: u16) {
 		if usize::from(index) >= self.fields.len() {
 			return;
 		}
@@ -249,6 +324,7 @@ impl Form {
 			self.open = None;
 		}
 		self.activate();
+		self.chase_cursor(view_rows);
 	}
 
 	fn click_sub(&mut self, index: u16) {
@@ -296,22 +372,25 @@ impl Component for Form {
 	}
 
 	fn height(&mut self, _ctx: &UiContext, _width: u16) -> u16 {
-		let mut height = self.fields.len() as u16;
-		if let Some(open) = self.open {
-			height += self.fields[usize::from(open)].options.len() as u16;
-		}
-		if self
-			.fields
-			.get(usize::from(self.cursor))
-			.is_some_and(|field| field.desc.is_some())
-		{
-			height += 1;
-		}
-		height
+		let natural = self.content_rows().saturating_add(self.desc_rows());
+		self
+			.props
+			.max_rows()
+			.map_or(natural, |cap| natural.min(cap))
 	}
 
 	fn paint(&mut self, pc: &mut PaintCtx<'_>, rect: Rect) {
 		let focused = pc.focus == Some(self.slot);
+		if self.fields.is_empty() || rect.height == 0 {
+			return;
+		}
+		let desc_rows = self.desc_rows();
+		let content_rows = self.content_rows();
+		let window = rect.height.saturating_sub(desc_rows).max(1);
+		self.scroll = self.scroll.min(content_rows.saturating_sub(window));
+		let overflow = content_rows > window;
+		let row_width = rect.width.saturating_sub(u16::from(overflow));
+		let right = rect.x.saturating_add(row_width);
 		let label_width = self
 			.fields
 			.iter()
@@ -319,120 +398,179 @@ impl Component for Form {
 			.max()
 			.unwrap_or(8)
 			+ 2;
-		let mut hit_y = rect.y;
-		for (index, field) in self.fields.iter().enumerate() {
-			pc.hits.push(Hit {
-				rect: Rect::new(rect.x, hit_y, rect.width, 1),
-				slot: self.slot,
-				tag:  HitTag::Row(index as u16),
-			});
-			hit_y = hit_y.saturating_add(1);
-			if self.open == Some(index as u16) {
-				for option_index in 0..field.options.len() as u16 {
-					pc.hits.push(Hit {
-						rect: Rect::new(rect.x, hit_y, rect.width, 1),
-						slot: self.slot,
-						tag:  HitTag::Sub(option_index),
-					});
-					hit_y = hit_y.saturating_add(1);
-				}
-			}
-		}
+		let bottom = rect.y.saturating_add(window).min(pc.clip);
+		pc.hits.push(Hit {
+			rect: Rect::new(rect.x, rect.y, rect.width, window),
+			slot: self.slot,
+			tag:  HitTag::Wheel,
+		});
 		let mut y = rect.y;
-		for (index, field) in self.fields.iter().enumerate() {
-			if y >= pc.clip {
-				return;
+		let mut row = 0u16;
+		'rows: for (index, field) in self.fields.iter().enumerate() {
+			if y >= bottom {
+				break;
 			}
-			let here = focused && index as u16 == self.cursor;
-			let hovered = matches!(pc.hover, Some((slot, HitTag::Row(row))) if slot == self.slot && row == index as u16);
-			if hovered {
-				pc.frame
-					.fill(Rect::new(rect.x, y, rect.width, 1), Style::new().bg(pc.ctx.theme.hover));
-			}
-			let tint = |style: Style| {
+			if row >= self.scroll {
+				let here = focused && index as u16 == self.cursor;
+				let hovered = matches!(pc.hover, Some((slot, HitTag::Row(hover_row))) if slot == self.slot && hover_row == index as u16);
 				if hovered {
-					style.bg(pc.ctx.theme.hover)
-				} else {
-					style
+					pc.frame
+						.fill(Rect::new(rect.x, y, row_width, 1), Style::new().bg(pc.ctx.theme.hover));
 				}
-			};
-			let mut x = pc.frame.put(
-				rect.x,
-				y,
-				if here { pc.ctx.charset.cursor() } else { "  " },
-				tint(Style::new().fg(pc.ctx.theme.accent)),
-			);
-			let label_style = if here {
-				tint(Style::new().fg(pc.ctx.theme.accent).bold())
-			} else {
-				tint(base(&pc.ctx.theme))
-			};
-			x = pc.frame.put(x, y, &field.label, label_style);
-			for _ in cell_width(&field.label)..label_width {
-				x = pc.frame.put(x, y, " ", tint(base(&pc.ctx.theme)));
+				let tint = |style: Style| {
+					if hovered {
+						style.bg(pc.ctx.theme.hover)
+					} else {
+						style
+					}
+				};
+				let mut x = pc.frame.put(
+					rect.x,
+					y,
+					if here { pc.ctx.charset.cursor() } else { "  " },
+					tint(Style::new().fg(pc.ctx.theme.accent)),
+				);
+				let label_style = if here {
+					tint(Style::new().fg(pc.ctx.theme.accent).bold())
+				} else {
+					tint(base(&pc.ctx.theme))
+				};
+				x = pc
+					.frame
+					.put_clipped(x, y, right.saturating_sub(x), &field.label, label_style);
+				for _ in cell_width(&field.label)..label_width {
+					if x >= right {
+						break;
+					}
+					x = pc.frame.put(x, y, " ", tint(base(&pc.ctx.theme)));
+				}
+				x = paint_field_value(
+					pc.ctx,
+					pc.frame,
+					x,
+					y,
+					right,
+					field,
+					here,
+					tint,
+					&mut self.scratch,
+				);
+				if here && self.editing && x < right {
+					pc.frame.put(
+						x,
+						y,
+						pc.ctx.charset.beam(),
+						tint(Style::new().fg(pc.ctx.theme.accent)),
+					);
+				}
+				pc.hits.push(Hit {
+					rect: Rect::new(rect.x, y, row_width, 1),
+					slot: self.slot,
+					tag:  HitTag::Row(index as u16),
+				});
+				y += 1;
 			}
-			x = paint_field_value(pc.ctx, pc.frame, x, y, field, here, tint, &mut self.scratch);
-			if here && self.editing {
-				pc.frame
-					.put(x, y, pc.ctx.charset.beam(), tint(Style::new().fg(pc.ctx.theme.accent)));
-			}
-			y += 1;
+			row += 1;
 			if self.open == Some(index as u16) {
 				for (option_index, option) in field.options.iter().enumerate() {
-					if y >= pc.clip {
-						return;
+					if row >= self.scroll {
+						if y >= bottom {
+							break 'rows;
+						}
+						let sub_here = option_index as u16 == self.sub_cursor;
+						let picked = match &field.value {
+							FieldValue::Choice(choice) => choice == option,
+							FieldValue::Many(values) => values.contains(option),
+							_ => false,
+						};
+						let mark = if field.kind == FieldKind::Multi {
+							pc.ctx.charset.checkbox(picked)
+						} else {
+							pc.ctx.charset.radio(picked)
+						};
+						let mut sx = pc.frame.put(
+							rect.x + 4,
+							y,
+							if sub_here {
+								pc.ctx.charset.cursor()
+							} else {
+								"  "
+							},
+							Style::new().fg(pc.ctx.theme.accent),
+						);
+						sx = pc.frame.put(
+							sx,
+							y,
+							mark,
+							Style::new().fg(if picked {
+								pc.ctx.theme.ok
+							} else {
+								pc.ctx.theme.muted
+							}),
+						);
+						sx = pc.frame.put(sx, y, " ", base(&pc.ctx.theme));
+						pc.frame.put_clipped(
+							sx,
+							y,
+							right.saturating_sub(sx),
+							option,
+							if sub_here {
+								Style::new().fg(pc.ctx.theme.accent).bold()
+							} else {
+								base(&pc.ctx.theme)
+							},
+						);
+						pc.hits.push(Hit {
+							rect: Rect::new(rect.x, y, row_width, 1),
+							slot: self.slot,
+							tag:  HitTag::Sub(option_index as u16),
+						});
+						y += 1;
 					}
-					let sub_here = option_index as u16 == self.sub_cursor;
-					let picked = match &field.value {
-						FieldValue::Choice(choice) => choice == option,
-						FieldValue::Many(values) => values.contains(option),
-						_ => false,
-					};
-					let mark = if field.kind == FieldKind::Multi {
-						pc.ctx.charset.checkbox(picked)
-					} else {
-						pc.ctx.charset.radio(picked)
-					};
-					let mut sx = pc.frame.put(
-						rect.x + 4,
-						y,
-						if sub_here {
-							pc.ctx.charset.cursor()
-						} else {
-							"  "
-						},
-						Style::new().fg(pc.ctx.theme.accent),
-					);
-					sx = pc.frame.put(
-						sx,
-						y,
-						mark,
-						Style::new().fg(if picked {
-							pc.ctx.theme.ok
-						} else {
-							pc.ctx.theme.muted
-						}),
-					);
-					sx = pc.frame.put(sx, y, " ", base(&pc.ctx.theme));
-					pc.frame.put(
-						sx,
-						y,
-						option,
-						if sub_here {
-							Style::new().fg(pc.ctx.theme.accent).bold()
-						} else {
-							base(&pc.ctx.theme)
-						},
-					);
-					y += 1;
+					row += 1;
 				}
 			}
 		}
-		if let Some(field) = self.fields.get(usize::from(self.cursor))
-			&& let Some(desc) = &field.desc
-			&& y < pc.clip
-		{
-			pc.frame.put(rect.x + 2, y, desc, dim(&pc.ctx.theme));
+		if overflow {
+			let bar_x = rect.x.saturating_add(rect.width.saturating_sub(1));
+			let thumb_h = (window.saturating_mul(window) / content_rows).max(1);
+			let denom = content_rows.saturating_sub(window).max(1);
+			let thumb_top = window.saturating_sub(thumb_h).saturating_mul(self.scroll) / denom;
+			for bar_row in 0..window {
+				let bar_y = rect.y.saturating_add(bar_row);
+				if bar_y >= pc.clip {
+					break;
+				}
+				let (glyph, style) =
+					if bar_row >= thumb_top && bar_row < thumb_top.saturating_add(thumb_h) {
+						(pc.ctx.charset.scrollbar().1, Style::new().fg(pc.ctx.theme.accent))
+					} else {
+						(pc.ctx.charset.scrollbar().0, Style::new().fg(pc.ctx.theme.muted))
+					};
+				pc.frame.put(bar_x, bar_y, glyph, style);
+			}
+			pc.hits.push(Hit {
+				rect: Rect::new(bar_x, rect.y, 1, window),
+				slot: self.slot,
+				tag:  HitTag::Scrollbar,
+			});
+		}
+		if desc_rows == 1 {
+			let desc_y = rect.y.saturating_add(window);
+			if desc_y < pc.clip
+				&& let Some(desc) = self
+					.fields
+					.get(usize::from(self.cursor))
+					.and_then(|field| field.desc.as_ref())
+			{
+				pc.frame.put_clipped(
+					rect.x + 2,
+					desc_y,
+					rect.width.saturating_sub(2),
+					desc,
+					dim(&pc.ctx.theme),
+				);
+			}
 		}
 	}
 
@@ -446,9 +584,10 @@ impl Component for Form {
 		} else {
 			self.fields.len().saturating_sub(1) as u16
 		};
+		self.scroll = if forward { 0 } else { self.content_rows() };
 	}
 
-	fn key(&mut self, _ec: &mut EventCtx<'_>, key: Key) -> Flow {
+	fn key(&mut self, ec: &mut EventCtx<'_>, key: Key) -> Flow {
 		if self.fields.is_empty() {
 			return Flow::Skip;
 		}
@@ -472,6 +611,13 @@ impl Component for Form {
 				},
 				Key::Esc => self.open = None,
 				_ => {},
+			}
+			match self.open {
+				Some(open) => {
+					let sub_row = open.saturating_add(1).saturating_add(self.sub_cursor);
+					self.chase_row(sub_row, ec.view_rows);
+				},
+				None => self.chase_cursor(ec.view_rows),
 			}
 			return Flow::Consumed;
 		}
@@ -515,14 +661,32 @@ impl Component for Form {
 			},
 			Key::Up if self.cursor > 0 => {
 				self.cursor -= 1;
+				self.chase_cursor(ec.view_rows);
 				Flow::Consumed
 			},
 			Key::Down if self.cursor + 1 < field_count => {
 				self.cursor += 1;
+				self.chase_cursor(ec.view_rows);
+				Flow::Consumed
+			},
+			Key::PageUp => {
+				let window = self.window(ec.view_rows);
+				self.cursor = self.cursor.saturating_sub(window);
+				self.chase_cursor(ec.view_rows);
+				Flow::Consumed
+			},
+			Key::PageDown => {
+				let window = self.window(ec.view_rows);
+				self.cursor = self
+					.cursor
+					.saturating_add(window)
+					.min(field_count.saturating_sub(1));
+				self.chase_cursor(ec.view_rows);
 				Flow::Consumed
 			},
 			Key::Enter | Key::Space => {
 				self.activate();
+				self.chase_cursor(ec.view_rows);
 				Flow::Consumed
 			},
 			_ => Flow::Skip,
@@ -531,28 +695,36 @@ impl Component for Form {
 
 	fn mouse(
 		&mut self,
-		_ec: &mut EventCtx<'_>,
+		ec: &mut EventCtx<'_>,
 		tag: HitTag,
-		_at: (u16, u16),
-		_rect: Rect,
+		at: (u16, u16),
+		rect: Rect,
 		mouse: Mouse,
 	) -> Flow {
 		match mouse {
 			Mouse::Click => {
 				match tag {
-					HitTag::Row(index) => self.click_row(index),
+					HitTag::Row(index) => self.click_row(index, ec.view_rows),
 					HitTag::Sub(index) => self.click_sub(index),
+					HitTag::Scrollbar => return self.scrollbar_jump(at, rect),
 					_ => return Flow::Skip,
 				}
 				Flow::Consumed
+			},
+			Mouse::Drag if tag == HitTag::Scrollbar => self.scrollbar_jump(at, rect),
+			Mouse::WheelUp | Mouse::WheelDown => {
+				let delta = if mouse == Mouse::WheelUp { -1 } else { 1 };
+				if self.scroll_by(delta, ec.view_rows) {
+					Flow::Consumed
+				} else {
+					Flow::Skip
+				}
 			},
 			Mouse::RightClick
 			| Mouse::MiddleClick
 			| Mouse::Move
 			| Mouse::Drag
 			| Mouse::Release
-			| Mouse::WheelUp
-			| Mouse::WheelDown
 			| Mouse::WheelLeft
 			| Mouse::WheelRight => Flow::Skip,
 		}
@@ -686,15 +858,19 @@ fn paint_field_value(
 	frame: &mut Frame,
 	x: u16,
 	y: u16,
+	right: u16,
 	field: &FieldData,
 	here: bool,
 	tint: impl Fn(Style) -> Style,
 	scratch: &mut String,
 ) -> u16 {
+	let put = |frame: &mut Frame, x: u16, text: &str, style: Style| {
+		frame.put_clipped(x, y, right.saturating_sub(x), text, style)
+	};
 	match (&field.value, field.kind) {
-		(FieldValue::Bool(value), _) => frame.put(
+		(FieldValue::Bool(value), _) => put(
+			frame,
 			x,
-			y,
 			if *value { "true" } else { "false" },
 			tint(Style::new().fg(if *value {
 				ctx.theme.ok
@@ -703,18 +879,18 @@ fn paint_field_value(
 			})),
 		),
 		(FieldValue::Choice(choice), FieldKind::Enum) => {
-			let mut x = frame.put(x, y, choice, tint(Style::new().fg(ctx.theme.info)));
+			let mut x = put(frame, x, choice, tint(Style::new().fg(ctx.theme.info)));
 			if here {
-				x = frame.put(x, y, "  ", tint(dim(&ctx.theme)));
-				x = frame.put(x, y, ctx.charset.arrows().0, tint(dim(&ctx.theme)));
-				x = frame.put(x, y, " ", tint(dim(&ctx.theme)));
-				x = frame.put(x, y, ctx.charset.arrows().1, tint(dim(&ctx.theme)));
+				x = put(frame, x, "  ", tint(dim(&ctx.theme)));
+				x = put(frame, x, ctx.charset.arrows().0, tint(dim(&ctx.theme)));
+				x = put(frame, x, " ", tint(dim(&ctx.theme)));
+				x = put(frame, x, ctx.charset.arrows().1, tint(dim(&ctx.theme)));
 			}
 			x
 		},
 		(FieldValue::Choice(choice), _) => {
-			let x = frame.put(x, y, choice, tint(Style::new().fg(ctx.theme.info)));
-			frame.put(x, y, ctx.charset.dropdown(), tint(dim(&ctx.theme)))
+			let x = put(frame, x, choice, tint(Style::new().fg(ctx.theme.info)));
+			put(frame, x, ctx.charset.dropdown(), tint(dim(&ctx.theme)))
 		},
 		(FieldValue::Many(values), _) => {
 			scratch.clear();
@@ -728,27 +904,27 @@ fn paint_field_value(
 					scratch.push_str(value);
 				}
 			}
-			let x = frame.put(x, y, scratch, tint(Style::new().fg(ctx.theme.info)));
-			frame.put(x, y, ctx.charset.dropdown(), tint(dim(&ctx.theme)))
+			let x = put(frame, x, scratch, tint(Style::new().fg(ctx.theme.info)));
+			put(frame, x, ctx.charset.dropdown(), tint(dim(&ctx.theme)))
 		},
 		(FieldValue::Number(value), _) => {
 			let mut x = x;
 			if here {
-				x = frame.put(x, y, ctx.charset.arrows().0, tint(dim(&ctx.theme)));
-				x = frame.put(x, y, " ", tint(dim(&ctx.theme)));
+				x = put(frame, x, ctx.charset.arrows().0, tint(dim(&ctx.theme)));
+				x = put(frame, x, " ", tint(dim(&ctx.theme)));
 			}
 			scratch.clear();
 			let _ = write!(scratch, "{value}");
-			x = frame.put(x, y, scratch, tint(Style::new().fg(ctx.theme.warn)));
+			x = put(frame, x, scratch, tint(Style::new().fg(ctx.theme.warn)));
 			if here {
-				x = frame.put(x, y, " ", tint(dim(&ctx.theme)));
-				x = frame.put(x, y, ctx.charset.arrows().1, tint(dim(&ctx.theme)));
+				x = put(frame, x, " ", tint(dim(&ctx.theme)));
+				x = put(frame, x, ctx.charset.arrows().1, tint(dim(&ctx.theme)));
 			}
 			x
 		},
-		(FieldValue::Text(text), _) => frame.put(
+		(FieldValue::Text(text), _) => put(
+			frame,
 			x,
-			y,
 			if field.masked && !text.is_empty() {
 				ctx.charset.icon_named("secret").unwrap_or("secret")
 			} else {

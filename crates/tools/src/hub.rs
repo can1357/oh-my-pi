@@ -110,85 +110,89 @@ pub struct Ready {
 #[serde(deny_unknown_fields)]
 pub struct Params {
 	/// Operation to perform.
-	pub op:                   Op,
+	pub op:          Op,
 	/// Peer recipient or `all`.
-	pub to:                   Option<Str>,
+	pub to:          Option<Str>,
 	/// Peer message body.
-	pub message:              Option<Str>,
+	pub message:     Option<Str>,
 	/// Prior peer message ID being answered.
 	#[serde(rename = "replyTo")]
-	pub reply_to:             Option<Str>,
+	pub reply_to:    Option<Str>,
 	/// Block for the recipient's threaded reply.
+	///
+	/// A terminal recipient turn without a matching reply settles promptly with
+	/// a stopped-without-replying note.
 	#[serde(rename = "await", default)]
-	pub await_reply:          bool,
+	pub await_reply: bool,
 	/// Only accept a peer message from this sender.
 	#[serde(rename = "from")]
-	pub from_peer:            Option<Str>,
+	pub from_peer:   Option<Str>,
 	/// Job IDs selected for wait or cancellation.
-	pub ids:                  Option<Vec<Str>>,
+	pub ids:         Option<Vec<Str>>,
 	/// Explicit timeout in milliseconds; zero means infinite.
 	#[serde(rename = "timeoutMs")]
-	pub timeout_ms:           Option<u64>,
+	pub timeout_ms:  Option<u64>,
 	/// Inspect inbox without consuming it.
 	#[serde(default)]
-	pub peek:                 bool,
+	pub peek:        bool,
 	/// Agent lifecycle filter for `list`; omitted means running plus idle.
-	pub status:               Option<ListStatus>,
+	pub status:      Option<ListStatus>,
 	/// Maximum peer rows returned by `list`.
-	pub limit:                Option<u16>,
+	pub limit:       Option<u16>,
 	/// Stable process name.
-	pub name:                 Option<Str>,
+	pub name:        Option<Str>,
 	/// Process executable.
-	pub application:          Option<Str>,
+	pub application: Option<Str>,
 	/// Process argv.
-	pub args:                 Option<Vec<Str>>,
+	pub args:        Option<Vec<Str>>,
 	/// Process environment.
-	pub env:                  Option<BTreeMap<Str, Str>>,
+	pub env:         Option<BTreeMap<Str, Str>>,
 	/// Process working directory.
-	pub cwd:                  Option<Str>,
+	pub cwd:         Option<Str>,
 	/// Allocate an interactive PTY.
-	pub pty:                  Option<bool>,
+	pub pty:         Option<bool>,
 	/// Readiness criteria.
-	pub ready:                Option<Ready>,
+	pub ready:       Option<Ready>,
 	/// Automatic restart policy.
-	pub restart:              Option<RestartPolicy>,
+	pub restart:     Option<RestartPolicy>,
 	/// Keep the process beyond the last session handle.
 	#[serde(default)]
-	pub persist:              bool,
+	pub persist:     bool,
 	/// Keep the process beyond environment shutdown; implies persist and
 	/// disables PTY.
 	#[serde(default)]
-	pub detached:             bool,
+	pub detached:    bool,
 	/// Log line limit.
-	pub lines:                Option<u16>,
+	pub lines:       Option<u16>,
 	/// Return logs from the beginning.
 	#[serde(default)]
-	pub head:                 bool,
+	pub head:        bool,
 	/// Regex log filter.
-	pub grep:                 Option<Str>,
+	pub grep:        Option<Str>,
 	/// Output sequence cursor.
-	pub cursor:               Option<u64>,
+	pub cursor:      Option<u64>,
 	/// Follow output after the current cursor.
 	#[serde(default)]
-	pub follow:               bool,
-	/// Reconstruct PTY output as terminal screen rows instead of raw log bytes.
-	#[serde(rename = "renderTerminalRows", default)]
-	pub render_terminal_rows: bool,
+	pub follow:      bool,
 	/// Process lifecycle target (`ready` or `exit`).
+	///
+	/// Each wait is fenced to the named process generation observed when the
+	/// call starts; a restart settles the wait instead of following the
+	/// replacement.
 	#[serde(rename = "for")]
-	pub wait_for:             Option<Str>,
+	pub wait_for:    Option<Str>,
 	/// Output regex taking precedence over lifecycle target.
-	pub pattern:              Option<Str>,
+	pub pattern:     Option<Str>,
 	/// Process stdin text.
-	pub text:                 Option<Str>,
+	pub text:        Option<Str>,
 	/// Append Enter after process stdin text.
-	pub enter:                Option<bool>,
+	pub enter:       Option<bool>,
 	/// Named control keys.
-	pub keys:                 Option<Vec<Str>>,
+	pub keys:        Option<Vec<Str>>,
 	/// OS process-group signal.
-	pub signal:               Option<Signal>,
+	pub signal:      Option<Signal>,
 	/// Process-operation timeout in seconds.
-	pub timeout:              Option<f64>,
+	pub timeout:     Option<f64>,
 }
 
 /// Validated hub request handed to the app-owned broker/process composition.
@@ -215,8 +219,13 @@ pub struct Fault {
 	pub message: Str,
 }
 
-/// Injected app composition over the agent broker, job board, and env process
-/// host.
+/// Injected host composition over authoritative session trees, the runtime job
+/// index, and the environment process host.
+///
+/// Peer and job implementations must read `<meta><jobs>` and write peer
+/// messages as target-session `<queues><steering>` patches. The backend may
+/// cache handles for execution, but must rebuild that index from the DOM after
+/// open or rewind; it must not maintain a second durable peer/job registry.
 ///
 /// `execute` owns the multi-source wait race. It must check the bounded inbox
 /// before subscribing, preserve unrelated FIFO messages, prioritize a peer
@@ -230,8 +239,8 @@ pub struct Fault {
 /// queued facts.
 pub trait HubBackend: Send + Sync + 'static {
 	/// Executes one fully validated request for an authenticated invocation
-	/// owner. The backend resolves that owner to its broker inbox, job board,
-	/// completion lease, and environment process client.
+	/// owner. The backend resolves that owner to its session queues, DOM-derived
+	/// job board, completion lease, and environment process client.
 	fn execute<'a>(
 		&'a self,
 		caller_id: &'a str,
@@ -301,28 +310,32 @@ pub struct Hub<B> {
 	spec:    ToolSpec,
 }
 
-/// Constructs `hub@1` over the per-agent broker/process composition.
-pub fn tool<B: HubBackend>(backend: B) -> Hub<B> {
-	Hub {
-		backend,
-		spec: ToolSpec {
-			name:            sf!("hub"),
-			rev:             Rev { family: Default::default(), n: 1 },
-			description:     sf!(DESCRIPTION),
-			schema:          omp_tool::schema::<Params>(),
-			constraint:      Constraint::Schema {
-				priority:       100,
-				on_unsupported: omp_tool::Fallback::Unspecified,
-			},
-			effects:         Effects::default(),
-			projection_code: omp_tool::native_projection_code(
-				env!("CARGO_PKG_NAME"),
-				env!("CARGO_PKG_VERSION"),
-				include_bytes!("hub.rs"),
-			)
-			.into(),
+/// Returns the canonical `hub@2` declaration shared by registry advertisement
+/// and session-owned execution.
+#[must_use]
+pub fn spec() -> ToolSpec {
+	ToolSpec {
+		name:            sf!("hub"),
+		rev:             Rev { family: Default::default(), n: 2 },
+		description:     sf!(DESCRIPTION),
+		schema:          omp_tool::schema::<Params>(),
+		constraint:      Constraint::Schema {
+			priority:       100,
+			on_unsupported: omp_tool::Fallback::Unspecified,
 		},
+		effects:         Effects::default(),
+		projection_code: omp_tool::native_projection_code(
+			env!("CARGO_PKG_NAME"),
+			env!("CARGO_PKG_VERSION"),
+			include_bytes!("hub.rs"),
+		)
+		.into(),
 	}
+}
+
+/// Constructs `hub@2` over the per-agent broker/process composition.
+pub fn tool<B: HubBackend>(backend: B) -> Hub<B> {
+	Hub { backend, spec: spec() }
 }
 
 impl<B: HubBackend> Tool for Hub<B> {
@@ -449,6 +462,24 @@ pub fn validate(mut params: Params, caller_id: &str) -> Result<Request, Fault> {
 				params.pty = Some(false);
 			}
 		},
+		Op::Wait
+			if params.name.is_some() && params.ids.as_ref().is_some_and(|ids| !ids.is_empty()) =>
+		{
+			return Err(invalid("wait accepts a process `name` or job `ids`, not both"));
+		},
+		Op::Wait
+			if params
+				.wait_for
+				.as_deref()
+				.is_some_and(|target| target != "ready" && target != "exit") =>
+		{
+			return Err(invalid("wait `for` must be `ready` or `exit`"));
+		},
+		Op::Wait
+			if params.name.is_none() && (params.wait_for.is_some() || params.pattern.is_some()) =>
+		{
+			return Err(invalid("process wait fields require `name`"));
+		},
 		Op::Logs | Op::Stop | Op::Restart | Op::Describe if params.name.is_none() => {
 			return Err(invalid("process operation requires `name`"));
 		},
@@ -474,6 +505,11 @@ pub fn validate(mut params: Params, caller_id: &str) -> Result<Request, Fault> {
 		.is_some_and(|timeout| !timeout.is_finite() || timeout <= 0.0)
 	{
 		return Err(invalid("process timeout must be a positive finite number"));
+	}
+	if params.grep.as_deref().is_some_and(str::is_empty)
+		|| params.pattern.as_deref().is_some_and(str::is_empty)
+	{
+		return Err(invalid("log and wait patterns must be non-empty"));
 	}
 	Ok(Request { params })
 }
@@ -512,7 +548,7 @@ fn commit_event(error: omp_tool::CommitError) -> Ev<Response, Response, Fault> {
 fn protocol_issue(message: Str) -> ArgIssue {
 	ArgIssue {
 		path:     Vec::new(),
-		expected: sf!("one committed hub@1 argument object"),
+		expected: sf!("one committed hub@2 argument object"),
 		kind:     ArgIssueKind::Protocol,
 		example:  Some(sf!(r#"{{"op":"list"}}"#)),
 		found:    Some(message),
@@ -553,7 +589,6 @@ mod tests {
 			grep: None,
 			cursor: None,
 			follow: false,
-			render_terminal_rows: false,
 			wait_for: None,
 			pattern: None,
 			text: None,
@@ -610,5 +645,55 @@ mod tests {
 		assert!(validate(list.clone(), "main").is_ok());
 		list.limit = Some(101);
 		assert!(validate(list, "main").is_err());
+	}
+
+	#[test]
+	fn every_hub_operation_has_a_valid_branch() {
+		let mut send_peer = params(Op::Send);
+		send_peer.to = Some("peer".into());
+		send_peer.message = Some("hello".into());
+		assert!(validate(send_peer, "main").is_ok());
+
+		let mut send_process = params(Op::Send);
+		send_process.name = Some("proc".into());
+		send_process.text = Some("status".into());
+		assert!(validate(send_process, "main").is_ok());
+
+		assert!(validate(params(Op::Wait), "main").is_ok());
+		assert!(validate(params(Op::Inbox), "main").is_ok());
+		assert!(validate(params(Op::List), "main").is_ok());
+		assert!(validate(params(Op::Jobs), "main").is_ok());
+		let mut cancel = params(Op::Cancel);
+		cancel.ids = Some(vec!["job-1".into()]);
+		assert!(validate(cancel, "main").is_ok());
+
+		let mut start = params(Op::Start);
+		start.name = Some("proc".into());
+		start.application = Some("echo".into());
+		assert!(validate(start, "main").is_ok());
+		assert!(validate(params(Op::Ps), "main").is_ok());
+		for op in [Op::Logs, Op::Stop, Op::Restart, Op::Describe] {
+			let mut request = params(op);
+			request.name = Some("proc".into());
+			assert!(validate(request, "main").is_ok());
+		}
+	}
+
+	#[test]
+	fn process_wait_contract_rejects_shadowed_routes() {
+		let mut mixed = params(Op::Wait);
+		mixed.name = Some("proc".into());
+		mixed.ids = Some(vec!["job-1".into()]);
+		assert!(validate(mixed, "main").is_err());
+
+		let mut bad_target = params(Op::Wait);
+		bad_target.name = Some("proc".into());
+		bad_target.wait_for = Some("running".into());
+		assert!(validate(bad_target, "main").is_err());
+
+		let mut valid = params(Op::Wait);
+		valid.name = Some("proc".into());
+		valid.wait_for = Some("ready".into());
+		assert!(validate(valid, "main").is_ok());
 	}
 }

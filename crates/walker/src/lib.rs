@@ -4,16 +4,17 @@
 	clippy::perf,
 	clippy::pedantic,
 	clippy::nursery,
-	reason = "vendored from pi-walker; kept close to upstream"
+	reason = "shared traversal implementation has deliberate lint exceptions"
 )]
 
 //! Reusable platform directory traversal primitives.
 //!
 //! # Overview
-//! `pi-walker` owns the native directory-read fast path that higher-level tools
-//! use for globbing, grep candidate discovery, AST scans, and shell builtins.
-//! The crate exposes plain Rust types, visitor interfaces, cache policy, and a
-//! caller-supplied heartbeat so consumers do not inherit N-API dependencies.
+//! `omp-walker` owns the native directory-read fast path that higher-level
+//! tools use for globbing, grep candidate discovery, AST scans, and shell
+//! builtins. The crate exposes plain Rust types, visitor interfaces, cache
+//! policy, and a caller-supplied heartbeat so consumers do not inherit N-API
+//! dependencies.
 
 mod cache;
 pub mod glob;
@@ -1054,6 +1055,12 @@ impl WalkRequest {
 		run_file_candidate_parallel(self, &sink, &heartbeat)
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		name = "walker_scan",
+		skip_all,
+		fields(root = %self.root.display(), entry_count = tracing::field::Empty)
+	)]
 	fn collect_with_rank_and_limit<E, H>(
 		&self,
 		rank: Option<WalkRank>,
@@ -1102,6 +1109,7 @@ impl WalkRequest {
 			filtered_entries,
 			limited_entries,
 		};
+		tracing::Span::current().record("entry_count", scan.entries.len());
 		Ok(WalkOutcome { entries: scan.entries, backend, stats })
 	}
 
@@ -4303,7 +4311,7 @@ mod tests {
 			.duration_since(UNIX_EPOCH)
 			.expect("system time should be after UNIX_EPOCH")
 			.as_nanos();
-		let root = env::temp_dir().join(format!("pi-walker-{name}-{unique}"));
+		let root = env::temp_dir().join(format!("omp-walker-{name}-{unique}"));
 		fs::create_dir_all(&root).expect("temp root should be created");
 		TempTree { root }
 	}

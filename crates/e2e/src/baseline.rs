@@ -1,37 +1,28 @@
-//! P8 performance recorder for retained TUI frames and the agent loop.
+//! P8 performance recorder for retained TUI frames and the journal-first
+//! kernel.
 //!
-//! The `baseline` bin records artifacts from these measurements; the
-//! `p8_baselines` test locks the metric math and artifact schema.
+//! P8 records host measurements but never gates CI on timing.
 
 use std::{
 	fs,
-	future::{self, Future},
 	path::Path,
-	pin::Pin,
 	sync::Arc,
-	task::{Context as TaskContext, Poll},
 	time::{Duration, Instant},
 };
 
-use bytes::Bytes;
-use futures::{Stream, StreamExt};
-use omp_agent::{
-	Agent, AgentSnapshot, AgentState, Error as TurnError, InvokeFrame, Journal, TurnClient, TurnId,
-	TurnInput, TurnOptions, TurnSession,
-};
+use omp_agent::{DispatchPolicy, Kernel, RunControl, StaticPrompt, TurnInput};
+use omp_ai::{BlockKind, ChatEvent, Completion, ExecutionReceipt, FinishReason, Usage};
 use omp_core::Str;
-use omp_env::{EnvClient, InProcessEnvTransport};
-use omp_proto::{
-	inference::v1::{self as pb, TurnEvent, part_start, turn_event},
-	thread::v1::{self as thread, Item, item},
-};
-use omp_storage::transcript::{Header, SessionId};
-use omp_tool::{CapsBase, ModelClass};
+use omp_journal::blob::BlobStore;
+use omp_session::{ComponentRegistry, Session};
+use omp_tool::Registry;
 use omp_tui::{Prop, Renderer, Ui, UiContext, components::TextLeaf};
 use serde::{Deserialize, Serialize};
-use tempfile::TempDir;
 
-use crate::{Context as _, Result, error};
+use crate::{
+	Context as _, Result, error,
+	support::{ScriptedInference, scripted_stream},
+};
 
 const SCHEMA_VERSION: u32 = 1;
 const GROSS_REGRESSION_LIMIT: f64 = 5.0;
@@ -44,7 +35,7 @@ pub struct BaselineMetrics {
 	pub schema_version: u32,
 	/// Retained-TUI frame measurements.
 	pub frame:          FrameMetrics,
-	/// Full agent-loop measurements.
+	/// Journal-first kernel measurements.
 	pub r#loop:         LoopMetrics,
 }
 
@@ -59,7 +50,7 @@ pub struct FrameMetrics {
 	pub p95_frame_ns: u128,
 }
 
-/// Agent-loop throughput measurements collected from scripted token streams.
+/// Kernel throughput measurements collected from canonical event streams.
 #[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
 pub struct LoopMetrics {
 	/// Number of tokens processed in each sample.
@@ -68,144 +59,36 @@ pub struct LoopMetrics {
 	pub sample_count:           usize,
 	/// Total raw client-stream duration in nanoseconds.
 	pub raw_duration_ns:        u128,
-	/// Total end-to-end agent-loop duration in nanoseconds.
+	/// Total end-to-end kernel duration in nanoseconds.
 	pub full_loop_duration_ns:  u128,
 	/// Raw client-stream throughput in tokens per second.
 	pub raw_tokens_per_second:  f64,
-	/// End-to-end agent-loop throughput in tokens per second.
+	/// End-to-end kernel throughput in tokens per second.
 	pub full_tokens_per_second: f64,
 	/// Ratio of raw throughput to end-to-end throughput.
 	pub slowdown_ratio:         f64,
 	/// Threshold used to mark gross throughput regressions.
 	pub regression_limit:       f64,
-	/// Whether the measured slowdown exceeds the regression threshold.
+	/// Whether the measured slowdown exceeds the recorder threshold.
 	pub gross_regression:       bool,
 }
 
-#[derive(Clone)]
-struct ScriptedTurnClient {
-	events: Arc<[TurnEvent]>,
-}
-
-impl ScriptedTurnClient {
-	fn token_storm(tokens: usize) -> Self {
-		let mut events = Vec::with_capacity(tokens.saturating_add(4));
-		events.push(turn_event(turn_event::Event::Accepted(pb::Accepted { replay: false })));
-		events.push(turn_event(turn_event::Event::PartStart(pb::PartStart {
-			index:        0,
-			kind:         part_start::Kind::Text.into(),
-			tool_call_id: String::new(),
-			tool_name:    String::new(),
-		})));
-		let chunk = Bytes::from_static(TOKEN.as_bytes());
-		for _ in 0..tokens {
-			events.push(turn_event(turn_event::Event::PartDelta(pb::PartDelta {
-				index: 0,
-				chunk: chunk.clone(),
-			})));
-		}
-		events.push(turn_event(turn_event::Event::PartEnd(pb::PartEnd {
-			index:     0,
-			signature: Bytes::new(),
-		})));
-		events.push(turn_event(turn_event::Event::Outcome(pb::Outcome {
-			stop: pb::StopReason::StopEndTurn.into(),
-			provider: "scripted".to_owned(),
-			model: "baseline".to_owned(),
-			..Default::default()
-		})));
-		Self { events: events.into() }
+fn token_events(tokens: usize) -> Vec<ChatEvent> {
+	let mut events = Vec::with_capacity(tokens.saturating_add(3));
+	events.push(ChatEvent::BlockStarted { index: 0, kind: BlockKind::Text });
+	for _ in 0..tokens {
+		events.push(ChatEvent::TextDelta { index: 0, text: Str::new_static(TOKEN) });
 	}
+	events.push(ChatEvent::Completed(Completion {
+		reason:  FinishReason::Stop,
+		blocks:  1,
+		usage:   Usage::default(),
+		receipt: ExecutionReceipt::default().into(),
+	}));
+	events
 }
 
-struct ScriptedTurnSession {
-	events: Arc<[TurnEvent]>,
-	cursor: usize,
-}
-
-struct ScriptedEvents<'a> {
-	session: &'a mut ScriptedTurnSession,
-}
-
-impl Stream for ScriptedEvents<'_> {
-	type Item = Result<TurnEvent, TurnError>;
-
-	fn poll_next(
-		mut self: Pin<&mut Self>,
-		_context: &mut TaskContext<'_>,
-	) -> Poll<Option<Self::Item>> {
-		let Some(event) = self.session.events.get(self.session.cursor).cloned() else {
-			return Poll::Ready(None);
-		};
-		self.session.cursor += 1;
-		Poll::Ready(Some(Ok(event)))
-	}
-}
-
-impl TurnSession for ScriptedTurnSession {
-	fn events(&mut self) -> impl Stream<Item = Result<TurnEvent, TurnError>> + Send + Unpin + '_ {
-		ScriptedEvents { session: self }
-	}
-
-	fn submit(
-		&mut self,
-		_frame: InvokeFrame,
-	) -> impl Future<Output = Result<(), TurnError>> + Send + '_ {
-		future::ready(Ok(()))
-	}
-}
-
-impl TurnClient for ScriptedTurnClient {
-	type Session<'client> = ScriptedTurnSession;
-
-	fn turn<'client>(
-		&'client self,
-		_turn_id: TurnId,
-		_input: TurnInput,
-		_options: &'client TurnOptions,
-	) -> impl Future<Output = Result<Self::Session<'client>, TurnError>> + Send + 'client {
-		future::ready(Ok(ScriptedTurnSession { events: Arc::clone(&self.events), cursor: 0 }))
-	}
-}
-
-struct LoopFixture {
-	agent:          Agent<ScriptedTurnClient>,
-	_env_transport: InProcessEnvTransport,
-	_scratch:       TempDir,
-}
-
-impl LoopFixture {
-	fn new(client: ScriptedTurnClient, ordinal: usize) -> Result<Self> {
-		let scratch = tempfile::tempdir().context("create loop baseline scratch directory")?;
-		let journal = Journal::create(&scratch.path().join("session.jsonl"), &Header {
-			v:       4,
-			id:      SessionId(Str::from(format!("p8-baseline-{ordinal}"))),
-			created: 1,
-			cwd:     scratch.path().to_owned(),
-		})
-		.context("create loop baseline journal")?;
-		let (env, env_transport) = EnvClient::in_process(8);
-		let agent =
-			Agent::new(client, env, AgentState::new(AgentSnapshot::default()), journal, CapsBase {
-				maximum_parts:      64,
-				maximum_text_bytes: 1_048_576,
-				media:              false,
-				model_class:        ModelClass::Standard,
-			});
-		Ok(Self { agent, _env_transport: env_transport, _scratch: scratch })
-	}
-
-	async fn warm(&mut self) -> Result<()> {
-		self
-			.agent
-			.submit([user_item("warmup")], TurnId::new(omp_core::Ulid::generate().to_string()))
-			.await
-			.context("warm full agent loop")?;
-		Ok(())
-	}
-}
-
-/// Measures retained-frame and end-to-end agent-loop performance.
+/// Measures retained-frame and end-to-end kernel performance.
 pub async fn measure(
 	frame_tokens: usize,
 	loop_tokens: usize,
@@ -215,29 +98,34 @@ pub async fn measure(
 		return Err(error("baseline requires at least 100 frame and loop tokens and one sample"));
 	}
 	let frame = measure_frames(frame_tokens)?;
-	let scripted = ScriptedTurnClient::token_storm(loop_tokens);
-	let raw_duration = measure_raw(&scripted, samples).await?;
-
-	let mut fixtures = Vec::with_capacity(samples);
-	for ordinal in 0..samples {
-		let mut fixture = LoopFixture::new(scripted.clone(), ordinal)?;
-		fixture.warm().await?;
-		fixtures.push(fixture);
-	}
-	let measured_inputs: Vec<_> = (0..samples)
-		.map(|_| ([user_item("measure")], TurnId::new(omp_core::Ulid::generate().to_string())))
-		.collect();
+	let raw_duration = measure_raw(loop_tokens, samples).await?;
+	let scratch = tempfile::tempdir().context("create loop baseline scratch directory")?;
+	let scripts = (0..samples).map(|_| token_events(loop_tokens));
+	let (inference, _) = ScriptedInference::new(scripts);
+	let mut kernel = Kernel::new(
+		inference,
+		Arc::new(Registry::new()),
+		DispatchPolicy::new(
+			BlobStore::open(scratch.path().join("blobs")).context("open blob store")?,
+		),
+		StaticPrompt(Str::new_static("P8 baseline")),
+	);
 	let mut full_duration = Duration::ZERO;
-	for (fixture, (items, turn_id)) in fixtures.iter_mut().zip(measured_inputs) {
+	for ordinal in 0..samples {
+		let path = scratch.path().join(format!("sample-{ordinal}.oms"));
+		let mut session =
+			Session::create(path, ComponentRegistry::standard()).context("create baseline session")?;
 		let started = Instant::now();
-		fixture
-			.agent
-			.submit(items, turn_id)
+		kernel
+			.run_turn(
+				&mut session,
+				TurnInput { text: Str::new_static("measure"), attachments: Vec::new() },
+				RunControl::default(),
+			)
 			.await
-			.context("measure full agent loop")?;
+			.context("measure full kernel loop")?;
 		full_duration = full_duration.saturating_add(started.elapsed());
 	}
-
 	let total_tokens = loop_tokens
 		.checked_mul(samples)
 		.context("loop token count overflow")?;
@@ -267,7 +155,6 @@ fn measure_frames(tokens: usize) -> Result<FrameMetrics> {
 	let mut renderer = Renderer::new(Vec::<u8>::with_capacity(tokens.saturating_mul(16)));
 	ui.present(&mut renderer, 24)
 		.context("paint warmup frame")?;
-
 	let mut text = String::with_capacity(tokens.saturating_mul(TOKEN.len()));
 	let mut elapsed = Vec::with_capacity(tokens);
 	for _ in 0..tokens {
@@ -293,23 +180,14 @@ fn measure_frames(tokens: usize) -> Result<FrameMetrics> {
 	})
 }
 
-async fn measure_raw(client: &ScriptedTurnClient, samples: usize) -> Result<Duration> {
-	let inputs: Vec<_> = (0..samples)
-		.map(|_| {
-			(
-				TurnId::new(omp_core::Ulid::generate().to_string()),
-				TurnInput::Full(thread::Thread { items: vec![user_item("measure")] }),
-			)
-		})
-		.collect();
-	let options = TurnOptions::default();
+async fn measure_raw(tokens: usize, samples: usize) -> Result<Duration> {
+	use futures::StreamExt as _;
 	let mut total = Duration::ZERO;
-	for (turn_id, input) in inputs {
+	for _ in 0..samples {
 		let started = Instant::now();
-		let mut session = client.turn(turn_id, input, &options).await?;
-		let mut events = session.events();
-		while let Some(event) = events.next().await {
-			event?;
+		let mut stream = scripted_stream(token_events(tokens));
+		while let Some(event) = stream.next().await {
+			event.context("consume canonical inference event")?;
 		}
 		total = total.saturating_add(started.elapsed());
 	}
@@ -337,20 +215,6 @@ pub fn slowdown_ratio(raw_rate: f64, full_rate: f64) -> Result<f64> {
 		return Err(error("token rates must be finite and positive"));
 	}
 	Ok(raw_rate / full_rate)
-}
-
-fn user_item(text: &str) -> Item {
-	Item {
-		kind: Some(item::Kind::Message(thread::Message {
-			role:  thread::Role::User.into(),
-			parts: vec![thread::Part { kind: Some(thread::part::Kind::Text(text.to_owned())) }],
-		})),
-		..Default::default()
-	}
-}
-
-const fn turn_event(event: turn_event::Event) -> TurnEvent {
-	TurnEvent { event: Some(event) }
 }
 
 /// Serializes measurements to the requested artifact path.

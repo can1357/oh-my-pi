@@ -12,31 +12,31 @@ description = "GPU-accelerated native window host for omp-tui applications"
 workspace = true
 
 [dependencies]
-omp-core = { workspace = true }
-omp-tui = { workspace = true }
-bytemuck = { workspace = true }
-etagere = { workspace = true }
-fontdb = { workspace = true }
-parking_lot = { workspace = true }
-png = { workspace = true }
-pollster = { workspace = true }
-rustybuzz = { workspace = true }
-self_cell = { workspace = true }
-smallvec = { workspace = true }
-swash = { workspace = true }
-thiserror = { workspace = true }
-wgpu = { workspace = true }
-winit = { workspace = true }
+omp-core.workspace = true
+omp-tui.workspace = true
+bytemuck.workspace = true
+etagere.workspace = true
+fontdb.workspace = true
+parking_lot.workspace = true
+png.workspace = true
+pollster.workspace = true
+rustybuzz.workspace = true
+self_cell.workspace = true
+smallvec.workspace = true
+swash.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+wgpu.workspace = true
+winit.workspace = true
 
 [target.'cfg(target_os = "macos")'.dependencies]
-objc2-app-kit = { workspace = true }
-raw-window-handle = { workspace = true }
+objc2-app-kit.workspace = true
+raw-window-handle.workspace = true
 
 [dev-dependencies]
-flume = { workspace = true }
-omp-chat-ui = { workspace = true }
-omp-webview = { workspace = true }
-xutf = { workspace = true }
+flume.workspace = true
+omp-webview.workspace = true
+xutf.workspace = true
 
 [target.'cfg(target_os = "macos")'.dev-dependencies]
-objc2-foundation = { workspace = true }
+objc2-foundation.workspace = true

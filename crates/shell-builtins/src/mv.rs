@@ -21,7 +21,7 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, error::ErrorKind};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
 use omp_core::{FastHashSet, FastState};
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use parking_lot::Mutex;
 use thiserror::Error;
 #[cfg(windows)]
@@ -960,9 +960,13 @@ fn rename(
 			},
 		}
 
+		host.ensure_writable(from)?;
+		host.ensure_writable(to)?;
+
 		// numbered-backup probing hits the shell's working directory.
 		backup_path = backup_control::get_backup_path(opts.backup, &to_fs, &opts.suffix);
 		if let Some(backup_path) = &backup_path {
+			host.ensure_writable(backup_path)?;
 			// For backup renames, we don't need to track hardlinks as we're just moving the
 			// existing file
 			rename_with_fallback(host, to, backup_path, display_manager, false, None, None)?;
@@ -1046,8 +1050,8 @@ fn rename_with_fallback(
 	#[cfg(not(unix))] _hardlink_tracker: Option<()>,
 	#[cfg(not(unix))] _hardlink_scanner: Option<()>,
 ) -> io::Result<()> {
-	let from_fs = host.resolve(from);
-	let to_fs = host.resolve(to);
+	let from_fs = host.ensure_writable(from)?;
+	let to_fs = host.ensure_writable(to)?;
 
 	fs::rename(&from_fs, &to_fs).or_else(|err| {
 		#[cfg(windows)]
@@ -1324,6 +1328,8 @@ fn copy_dir_contents_recursive(
 		let file_name = entry.file_name();
 		let from_path = from_dir.join(&file_name);
 		let to_path = to_dir.join(&file_name);
+		host.ensure_writable(&from_path)?;
+		host.ensure_writable(&to_path)?;
 
 		if let Some(pb) = progress_bar {
 			pb.set_message(from_path.to_string_lossy().to_string());
@@ -1674,14 +1680,13 @@ pub(crate) fn mv_builtin<SE: ShellExtensions>() -> Registration<SE> {
 #[cfg(unix)]
 mod hardlink {
 	use std::{
-		error,
-		fmt::{self, Display},
 		fs,
 		io::{self, Write},
 		path::{Path, PathBuf},
 	};
 
 	use omp_core::FastHashMap;
+	use thiserror::Error;
 
 	use super::Host;
 	use crate::support::quote::Quotable;
@@ -1713,49 +1718,28 @@ mod hardlink {
 	}
 
 	/// Errors that can occur during hardlink operations
-	#[derive(Debug)]
+	#[derive(Debug, Error)]
 	pub enum HardlinkError {
 		/// An underlying filesystem operation failed.
-		Io(io::Error),
+		#[error("I/O error during hardlink operation: {0}")]
+		Io(#[from] io::Error),
 		/// Pre-scanning a hardlink group failed.
+		#[error("Failed to scan files for hardlinks: {0}")]
 		Scan(String),
 		/// Recreating a hardlink at its destination failed.
-		Preservation { source: PathBuf, target: PathBuf },
+		#[error(
+			"Failed to preserve hardlink: {} -> {}",
+			.source_path.quote(),
+			.target_path.quote()
+		)]
+		Preservation { source_path: PathBuf, target_path: PathBuf },
 		/// Metadata for a candidate hardlink could not be read.
-		Metadata { path: PathBuf, error: io::Error },
-	}
-
-	impl Display for HardlinkError {
-		fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-			match self {
-				Self::Io(e) => write!(f, "I/O error during hardlink operation: {e}"),
-				Self::Scan(msg) => {
-					write!(f, "Failed to scan files for hardlinks: {msg}")
-				},
-				Self::Preservation { source, target } => {
-					write!(f, "Failed to preserve hardlink: {} -> {}", source.quote(), target.quote())
-				},
-				Self::Metadata { path, error } => {
-					write!(f, "Metadata access error for {}: {error}", path.quote())
-				},
-			}
-		}
-	}
-
-	impl error::Error for HardlinkError {
-		fn source(&self) -> Option<&(dyn error::Error + 'static)> {
-			match self {
-				Self::Io(e) => Some(e),
-				Self::Metadata { error, .. } => Some(error),
-				_ => None,
-			}
-		}
-	}
-
-	impl From<io::Error> for HardlinkError {
-		fn from(error: io::Error) -> Self {
-			Self::Io(error)
-		}
+		#[error("Metadata access error for {}: {source}", .path.quote())]
+		Metadata {
+			path:   PathBuf,
+			#[source]
+			source: io::Error,
+		},
 	}
 
 	impl From<HardlinkError> for io::Error {
@@ -1763,14 +1747,13 @@ mod hardlink {
 			match error {
 				HardlinkError::Io(e) => e,
 				HardlinkError::Scan(msg) => Self::other(msg),
-				HardlinkError::Preservation { source, target } => Self::other(format!(
+				HardlinkError::Preservation { source_path, target_path } => Self::other(format!(
 					"Failed to preserve hardlink: {} -> {}",
-					source.quote(),
-					target.quote()
+					source_path.quote(),
+					target_path.quote()
 				)),
-
-				HardlinkError::Metadata { path, error } => {
-					Self::other(format!("Metadata access error for {}: {error}", path.quote(),))
+				HardlinkError::Metadata { path, source } => {
+					Self::other(format!("Metadata access error for {}: {source}", path.quote(),))
 				},
 			}
 		}

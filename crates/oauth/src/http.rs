@@ -42,7 +42,12 @@ impl OAuthHttpRequest {
 		body: Option<SecretString>,
 	) -> Result<Self, OAuthRequestError> {
 		let url = Url::parse(url).map_err(|_| OAuthRequestError::InvalidUrl)?;
-		if !matches!(url.scheme(), "http" | "https") || url.host().is_none() {
+		if !matches!(url.scheme(), "http" | "https")
+			|| url.host().is_none()
+			|| !url.username().is_empty()
+			|| url.password().is_some()
+			|| url.fragment().is_some()
+		{
 			return Err(OAuthRequestError::InvalidUrl);
 		}
 		Ok(Self { method, url, headers, body, cancellation: CancellationToken::new() })

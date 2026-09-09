@@ -108,11 +108,11 @@ pub(crate) fn read_fs_list() -> io::Result<Vec<MountInfo>> {
 	{
 		use std::fs;
 
-		let (bytes, mountinfo) = match fs::read("/proc/self/mountinfo") {
-			Ok(bytes) => (bytes, true),
-			Err(_) => (fs::read("/proc/mounts")?, false),
-		};
-		return Ok(parse_linux_mounts(&bytes, mountinfo));
+		// `/proc/self/mountinfo` is process-directed metadata. The traditional
+		// mount table contains the filesystem data these builtins need without
+		// naming the embedding process.
+		let bytes = fs::read("/proc/mounts")?;
+		return Ok(parse_linux_mounts(&bytes, false));
 	}
 	#[cfg(any(
 		target_vendor = "apple",

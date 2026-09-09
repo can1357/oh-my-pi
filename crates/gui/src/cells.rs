@@ -8,6 +8,7 @@ use std::{f32::consts, mem, time::Duration};
 
 use omp_tui::{
 	Border, Cell, CellContent, Color, DecorFill, DecorKind, Frame, Gradient, Layer, Rect, Size,
+	Underline,
 };
 use smallvec::SmallVec;
 
@@ -872,13 +873,43 @@ impl Compositor {
 		}
 
 		let line_h = (metrics.line_height * 0.055).max(1.0);
-		if spec.underline {
-			let color = color4(spec.underline_color, None).unwrap_or(fg);
-			self.instances.rects.push(RectInst::fill(
-				[pen_x, metrics.descent.mul_add(0.35, baseline)],
-				[box_width, line_h],
-				color,
-			));
+		match spec.underline {
+			Underline::None => {},
+			Underline::Straight => {
+				let color = color4(spec.underline_color, None).unwrap_or(fg);
+				self.instances.rects.push(RectInst::fill(
+					[pen_x, metrics.descent.mul_add(0.35, baseline)],
+					[box_width, line_h],
+					color,
+				));
+			},
+			Underline::Curly => {
+				// Zigzag approximation; phase derives from absolute x so the
+				// wave stays continuous across adjacent clusters.
+				let color = color4(spec.underline_color, None).unwrap_or(fg);
+				let y = metrics.descent.mul_add(0.35, baseline);
+				let step = (metrics.advance * 0.5).max(1.0);
+				let end = pen_x + box_width;
+				let first = (pen_x / step).floor() as i64;
+				let last = (end / step).ceil() as i64;
+				for segment in first..last {
+					let left = (segment as f32 * step).max(pen_x);
+					let right = ((segment + 1) as f32 * step).min(end);
+					if right <= left {
+						continue;
+					}
+					let offset = if segment & 1 == 0 {
+						-line_h * 0.6
+					} else {
+						line_h * 0.6
+					};
+					self.instances.rects.push(RectInst::fill(
+						[left, y + offset],
+						[right - left, line_h],
+						color,
+					));
+				}
+			},
 		}
 		if spec.strikethrough {
 			self.instances.rects.push(RectInst::fill(
