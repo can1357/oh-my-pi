@@ -58,6 +58,8 @@ export interface DaemonBrokerClient {
 	/** Canonical project directory or synthetic directory identifying a global scope. */
 	readonly projectDir: string;
 	request(operation: DaemonOperation, signal?: AbortSignal): Promise<DaemonRpcResult>;
+	/** Whether the connected broker resolves `send` `keys` per transport. Cached per connection. */
+	supportsInputKeys(signal?: AbortSignal): Promise<boolean>;
 	close(): void;
 }
 
@@ -151,6 +153,8 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#buffer = "";
 	#closed = false;
 	#completionReconnectTimer: NodeJS.Timeout | undefined;
+	/** Broker-lifetime capability; reset whenever the socket is rebound. */
+	#inputKeys: Promise<boolean> | undefined;
 
 	constructor(projectDir: string, runtimeDir: string, token: string, options: DaemonBrokerClientOptions) {
 		this.projectDir = projectDir;
@@ -223,6 +227,18 @@ class SocketDaemonClient implements DaemonBrokerClient {
 		this.#completionReplays.clear();
 		this.#socket = undefined;
 		this.#rejectPending(new Error("Daemon broker client closed"));
+	}
+
+	async supportsInputKeys(signal?: AbortSignal): Promise<boolean> {
+		await this.#connect();
+		this.#inputKeys ??= this.request({ op: "ping" }, signal).then(
+			result => result.op === "ping" && result.inputKeys === true,
+			error => {
+				this.#inputKeys = undefined;
+				throw error;
+			},
+		);
+		return this.#inputKeys;
 	}
 
 	onCompletion(
@@ -326,6 +342,7 @@ class SocketDaemonClient implements DaemonBrokerClient {
 	#bindSocket(socket: net.Socket): void {
 		this.#socket = socket;
 		this.#buffer = "";
+		this.#inputKeys = undefined;
 		socket.setEncoding("utf8");
 		socket.on("data", chunk => this.#onData(chunk));
 		socket.on("error", () => {

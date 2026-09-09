@@ -14,6 +14,7 @@ import {
 import * as terminalOutput from "../../src/launch/terminal-output";
 import type { ToolSession } from "../../src/tools";
 import { executeLaunch } from "../../src/tools/hub/launch";
+import { shortenPath } from "../../src/tools/render-utils";
 
 function restoreEnv(name: string, value: string | undefined): void {
 	if (value === undefined) delete process.env[name];
@@ -279,7 +280,9 @@ process.stdout.write("READY\\x1b[6n");
 				const recovered = await Promise.all(paths!.map(file => Bun.file(file).text()));
 				expect(recovered.join("")).toContain("OUTSIDE-WINDOW");
 				const text = logs.content.find(part => part.type === "text")?.text ?? "";
-				expect(paths!.every(file => text.includes(file))).toBeTrue();
+				// Model-facing text shortens $HOME; details keep the exact paths for tooling.
+				expect(text).not.toContain(process.env.HOME ?? "\u0000");
+				expect(paths!.every(file => text.includes(shortenPath(file)))).toBeTrue();
 			},
 		);
 	}, 20_000);
@@ -331,6 +334,28 @@ process.stdin.on("data", chunk => {
 				const logs = await executeLaunch(session, { op: "logs", name: "worker", grep: "RECEIVED:" });
 				const text = logs.content.find(part => part.type === "text")?.text ?? "";
 				expect(text).toContain(`RECEIVED:${JSON.stringify("first\rsecond\n")}`);
+			},
+		);
+	}, 20_000);
+
+	it("resolves the broker's key capability once per connection, not once per send", async () => {
+		await withWorker(
+			`process.stdin.setEncoding("utf8");
+let lines = 0;
+process.stdin.on("data", chunk => {
+	lines += chunk.split("\\n").length - 1;
+	if (lines >= 3) process.exit(0);
+});`,
+			false,
+			async session => {
+				const client = await daemonClient.daemonClientForProject(session.cwd);
+				const request = vi.spyOn(client, "request");
+				for (let i = 0; i < 3; i++) await executeLaunch(session, { op: "send", name: "worker", text: `line ${i}` });
+				const completed = await executeLaunch(session, { op: "wait", name: "worker", for: "exit", timeout: 1 });
+				expect(completed.details?.timedOut).toBeFalse();
+				const ops = request.mock.calls.map(([operation]) => operation.op);
+				expect(ops.filter(op => op === "ping")).toHaveLength(1);
+				expect(ops.filter(op => op === "send")).toHaveLength(3);
 			},
 		);
 	}, 20_000);

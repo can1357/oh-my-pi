@@ -307,8 +307,9 @@ function toolContent(result: DaemonRpcResult, params: LaunchParams): string {
 				: "No daemons.";
 		case "logs": {
 			const text = sanitizeText(result.text);
+			// `details.truncatedLogPaths` keeps the exact paths; the rendered copy must not leak $HOME.
 			const recovery = result.truncatedLogPaths
-				? `Log byte window is partial; grep searches only this window. Read retained raw logs (oldest first; files may rotate):\n${result.truncatedLogPaths.map(file => `- ${file}`).join("\n")}\n`
+				? `Log byte window is partial; grep searches only this window. Read retained raw logs (oldest first; files may rotate):\n${result.truncatedLogPaths.map(file => `- ${shortenPath(file)}`).join("\n")}\n`
 				: "";
 			return `${text}${text && !text.endsWith("\n") ? "\n" : ""}${recovery}[${result.name}: ${result.state}; cursor=${result.cursor}${result.timedOut ? "; follow timed out" : ""}]`;
 		}
@@ -397,20 +398,17 @@ export async function executeLaunch(
 			? registerCompletionSink(session, client, resumedOwner)
 			: undefined;
 	try {
-		if (operation.op === "send" && operation.keys?.length) {
+		if (operation.op === "send" && operation.keys?.length && !(await client.supportsInputKeys(signal))) {
 			// A broker that predates transport-aware keys ignores the field. Fall back
 			// to the legacy pre-encoded bytes so Enter still reaches it (PTY exact;
 			// pipes keep the old CR behavior until that broker restarts).
-			const ping = await client.request({ op: "ping" }, signal);
-			if (ping.op === "ping" && !ping.inputKeys) {
-				let data = operation.data ?? "";
-				for (const rawKey of operation.keys) {
-					const input = DAEMON_KEY_INPUT[rawKey.trim().toUpperCase()];
-					if (input === undefined) throw new ToolError(`Unsupported launch key ${rawKey}`);
-					data += input;
-				}
-				operation = { op: "send", name: operation.name, data, signal: operation.signal };
+			let data = operation.data ?? "";
+			for (const rawKey of operation.keys) {
+				const input = DAEMON_KEY_INPUT[rawKey.trim().toUpperCase()];
+				if (input === undefined) throw new ToolError(`Unsupported launch key ${rawKey}`);
+				data += input;
 			}
+			operation = { op: "send", name: operation.name, data, signal: operation.signal };
 		}
 		const result = await client.request(operation, signal);
 		const sessionOwner = session.getSessionId?.();
