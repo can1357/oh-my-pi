@@ -78,6 +78,7 @@ import type {
 	WriteToolInput,
 } from "../../tools";
 import type { ApprovalMode } from "../../tools/approval";
+import type { SubagentObservability } from "./subagent-observability";
 import type { FileDeleteFallbackHandler, FileWriteFallbackHandler } from "../../tools/file-write-fallback";
 import type { EventBus } from "../../utils/event-bus";
 import type {
@@ -461,6 +462,8 @@ export interface ExtensionContext {
 	getContextUsage(): ContextUsage | undefined;
 	/** Get a read-only snapshot of async jobs owned by this session. */
 	getAsyncJobSnapshot(): AsyncJobSnapshot | null;
+	/** Optional read-only, sanitized view of this session's root subagent tree. */
+	subagents?: SubagentObservability;
 	/** Compact the session context (interactive mode shows UI). */
 	compact(instructionsOrOptions?: string | CompactOptions): Promise<void>;
 	/** Whether UI is available (false in print/RPC mode) */

@@ -210,6 +210,7 @@ Handlers and tool `execute` receive `ctx` with:
 - `localProtocolOptions` (optional calling-session `local://` root mapping for external tool bridges)
 - `getContextUsage()`
 - `getAsyncJobSnapshot()` returns the current session's read-only async-job snapshot, or `null` when no session owns the context
+- `subagents` (optional versioned, read-only root-agent-tree observability; see below)
 - `compact(...)`
 - `isIdle()`, `hasPendingMessages()`, `abort()`
 - `shutdown()`
@@ -239,6 +240,24 @@ pi.on("session_start", async (_event, ctx) => {
 ```
 
 If you use raw `setInterval`/`setTimeout` or detached promises instead, you own the isolation: wrap the callback body in your own `try/catch` (an unhandled throw will take down the session) and clear the timer on `session_shutdown`.
+
+### Subagent observability (`ctx.subagents`)
+
+Feature-detect `ctx.subagents?.version === 1`, subscribe before taking the initial snapshot, and discard queued events whose `revision` is not newer than the snapshot. Revisions are monotonic within that root observer, so a revision gap can be recovered with another snapshot.
+
+```ts
+if (ctx.subagents?.version === 1) {
+  const unsubscribe = ctx.subagents.subscribe((event) => {
+    // Update a read-only dashboard from registered/lifecycle/progress/removed.
+  });
+  const initial = ctx.subagents.getSnapshot();
+  // Ignore queued events with event.revision <= initial.revision.
+
+  pi.on("session_shutdown", unsubscribe);
+}
+```
+
+The snapshot contains at most 512 records and retains the root record for stable correlation. Agent, parent, root, and parent-tool-call IDs are opaque. Progress exposes only allowlisted counts, current tool, actual resolved model/thinking metadata, and timestamps. Prompts, assignments, tool arguments/output, free-form intent/errors, transcripts, environment values, and absolute session paths never cross this API. `subscribe()` returns an idempotent unsubscribe function; session teardown also releases the observer's internal registry and event-bus listeners.
 
 ### Model selection (`ctx.models`)
 

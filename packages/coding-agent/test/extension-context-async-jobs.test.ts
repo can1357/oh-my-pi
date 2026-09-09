@@ -2,8 +2,12 @@ import { describe, expect, it } from "bun:test";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
 import type { ExtensionRuntime } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/types";
 import type { AsyncJobSnapshot } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import type { SubagentObservabilityController } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/subagent-observability";
 
-function createRunner(getAsyncJobSnapshot?: () => AsyncJobSnapshot | null): ExtensionRunner {
+function createRunner(
+	getAsyncJobSnapshot?: () => AsyncJobSnapshot | null,
+	subagents?: SubagentObservabilityController,
+): ExtensionRunner {
 	const runtime = {
 		flagValues: new Map(),
 		pendingProviderRegistrations: [],
@@ -18,6 +22,7 @@ function createRunner(getAsyncJobSnapshot?: () => AsyncJobSnapshot | null): Exte
 		undefined,
 		undefined,
 		getAsyncJobSnapshot,
+		subagents,
 	);
 }
 
@@ -37,5 +42,15 @@ describe("ExtensionRunner async job context", () => {
 				.createContext()
 				.getAsyncJobSnapshot(),
 		).toBe(snapshot);
+	});
+
+	it("exposes the root-scoped subagent capability", () => {
+		const subagents: SubagentObservabilityController = {
+			version: 1,
+			getSnapshot: () => ({ version: 1, rootAgentId: "Root", revision: 0, capturedAt: 1, agents: [] }),
+			subscribe: () => () => {},
+			dispose: () => {},
+		};
+		expect(createRunner(undefined, subagents).createContext().subagents).toBe(subagents);
 	});
 });

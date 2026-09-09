@@ -115,6 +115,9 @@ import {
 	loadExtensions,
 	type PreparedExtension,
 	type RegisteredTool,
+	createSubagentObservability,
+	resolveRootAgentId,
+	type SubagentObservabilityController,
 	type ToolDefinition,
 	wrapRegisteredTools,
 } from "./extensibility/extensions";
@@ -1359,6 +1362,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 	// buffer — so we can't rely on it to catch startup events for the extension runner.
 	const startupCredentialDisabledEvents: CredentialDisabledEvent[] = [];
 	let credentialDisabledTarget: ExtensionRunner | undefined;
+	let subagentObservability: SubagentObservabilityController | undefined;
 	const unsubscribeCredentialDisabled: (() => void) | undefined = authStorage.onCredentialDisabled(event => {
 		if (credentialDisabledTarget) {
 			// Discard return: any handler error is routed through runner.onError listeners.
@@ -2799,6 +2803,12 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// (The builtin autoresearch extension is unconditionally loaded above, so this scenario
 		// is unreachable; unconditional runner construction keeps that invariant explicit and
 		// prevents future optional extensions from silently re-opening the hole.)
+		const rootAgentId = resolveRootAgentId(agentRegistry, options.parentAgentId ?? resolvedAgentId);
+		subagentObservability = createSubagentObservability({
+			registry: agentRegistry,
+			eventBus: subagentEventBus,
+			rootAgentId,
+		});
 		const extensionRunner: ExtensionRunner = new ExtensionRunner(
 			extensionsResult.extensions,
 			extensionsResult.runtime,
@@ -2809,6 +2819,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			settings,
 			localProtocolOptions,
 			() => (hasSession ? session.getAsyncJobSnapshot() : null),
+			subagentObservability,
 		);
 
 		credentialDisabledTarget = extensionRunner;
@@ -4316,6 +4327,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		// dispose-wrap took ownership. Idempotent with dispose() — Set.delete is a no-op
 		// for already-removed listeners.
 		unsubscribeCredentialDisabled?.();
+		subagentObservability?.dispose();
 		try {
 			if (hasSession) {
 				await session.dispose();
