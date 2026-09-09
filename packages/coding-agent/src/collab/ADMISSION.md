@@ -105,7 +105,7 @@ room for its own frame and then report it as overloaded.
 | Outcome                                 | Guest sees                                                                                                                                                                                               |
 | --------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | Refused, peer not served                | Nothing; the peer has left or is one microtask from being told to rejoin                                                                                                                                 |
-| Advisory dropped                        | One missing transcript line. The roster comes from `state`, so it stays correct                                                                                                                          |
+| Advisory dropped                        | One missing transcript line. The roster comes from `state`, which is re-sent on the next change — but `state` is itself advisory, so a guest can hold a stale roster until then                          |
 | Advisory shed to admit replica state    | Same                                                                                                                                                                                                     |
 | Batch superseded                        | The older snapshot stops before its terminator; the newer welcome re-primes the accumulator                                                                                                              |
 | Peer shed for exceeding its share       | A targeted `error` telling it to rejoin, best-effort: under saturation that frame is itself droppable, and the guest's 30 s first-welcome timer and snapshot-progress timer are the client-side backstop |
@@ -156,9 +156,14 @@ its own room's bookkeeping: a recreated room clears the map, so an old-room
 capture has nothing of its own left to release, while the id it held may now carry
 a live capture for the new room's occupant.
 
-Retention is why that is safe, so it is only for work that finishes in bounded
-time. A prompt or an `agent-cmd` can fail a whole model turn later, which is too
-long to pin a record for, so those error replies take
+Retention is why that is safe, so it is only for work whose length the host
+controls. The one lease holder is a transcript read: a `stat` plus one read of at
+most `TRANSCRIPT_READ_CAP`, local file I/O with no model call and no network in
+it. That bounds the work per read, not the wall clock — a slow or contended
+filesystem pins one record per outstanding read for as long as it takes, which
+`#trimRetired` honours deliberately rather than capping. A prompt or an
+`agent-cmd` is unbounded in kind rather than in latency: it can fail a whole model
+turn later, which is too long to pin a record for, so those error replies take
 `CollabSocket#bestEffortAddressee` instead: it keeps the room and holds nothing. A
 departure the record still remembers suppresses the reply, and so does any room
 boundary — without the latter a reissued id's own share of the queue pays for the
@@ -230,8 +235,14 @@ chunks pass through are _not_ charged again: one chunk is materialized at a time
 so the retained charge is the larger and the longer-lived of the two.
 `SNAPSHOT_CHUNK_BYTES` is a _soft_ cap on a chunk — `#snapshotChunks` always puts
 at least one entry in a chunk, so an entry larger than the cap ships in a chunk of
-its own — and what bounds the transient is `shrinkForReplication`, which caps any
-one entry at `MAX_REPLICATED_PAYLOAD_BYTES` (1 MiB).
+its own — and the per-entry ceiling behind it is softer than it looks.
+`shrinkForReplication` compares `JSON.stringify(entry).length` with
+`MAX_REPLICATED_PAYLOAD_BYTES`, so that 1 MiB is 1 Mi UTF-16 code units: measured,
+a CJK entry of 700,112 code units comes back unchanged at 2,100,112 bytes, and
+`#snapshotChunks` measures its own target in code units too. The last shrink pass
+is returned whether or not it fits, as well. So the transient is bounded by up to
+3x the nominal figure on non-ASCII text — still comfortably under the relay's
+16 MB frame cap, but not the margin the number reads as.
 
 Two consequences worth stating. An entry with nothing ahead of it is admitted
 whatever it costs, so a session larger than the whole budget is still shareable
@@ -268,13 +279,14 @@ was joining.
   is to reject a second `hello` from a peer already in `#peers` — a reconnecting
   guest always gets a fresh relay id, so a repeat from a live id is never
   legitimate — but it changes join semantics and is not done here.
-- **Transcript reads are unbounded in time and concurrency.** Each
-  `fetch-transcript` reply is capped at `TRANSCRIPT_READ_CAP` (4 MiB) and costs
-  the asker one queue entry, so the queue side is accounted for. The read itself
-  is not: a peer may have any number in flight, on files of any size, and nothing
-  bounds how long one takes. The `stat`/`open`/`read` cost is inbound work the
-  admission policy never sees, which is why the causation invariant is stated for
-  queued work only.
+- **A transcript read pins a retirement record for as long as it takes.** Each
+  `fetch-transcript` reply is capped at `TRANSCRIPT_READ_CAP` (4 MiB) and costs the
+  asker one queue entry, so the queue side is accounted for and the work per read
+  is bounded. The wall clock is not, and neither is the count: a peer may have any
+  number of reads in flight, on files of any size, and each holds an exact capture,
+  so a slow filesystem keeps that many records alive. The `stat`/`open`/`read` cost
+  is also inbound work the admission policy never sees, which is why the causation
+  invariant is stated for queued work only.
 - **A batch's charge is declared, not measured.** The queue trusts what
   `sendBatch` was told, so a caller that under-declares under-charges, and there
   is no longer a per-chunk charge to notice runaway output as it passes through.

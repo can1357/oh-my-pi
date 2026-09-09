@@ -120,7 +120,8 @@ export class CollabSocket {
 	 * from inside this scope. Letting either evict somebody would cost a
 	 * quota-abiding peer its backlog as a side effect of another peer's report,
 	 * and letting the broadcast reach the terminal path would end the room over an
-	 * advisory line. Remedy traffic fits in the queue or is dropped.
+	 * advisory line. Remedy traffic fits in the queue, in the global budget and in
+	 * the recipient's own share, or it is dropped.
 	 */
 	#reporting = false;
 	#sending = false;
@@ -374,11 +375,15 @@ export class CollabSocket {
 			});
 			return false;
 		}
-		// Enforced once here rather than per capacity branch: a saturated queue plus
-		// remedy traffic is always a drop, whoever it is addressed to. Reading the
-		// flag inside the branches instead left the broadcast path — which the
-		// notice mirror reaches — able to shed and able to go terminal.
-		if (this.#reporting && this.#overCapacity(bytes)) {
+		// Enforced once here rather than per capacity branch: while a report is on
+		// the stack a frame is admitted only if nothing has to be evicted to fit it,
+		// whoever it is addressed to. Both eviction paths count. The global budget
+		// sheds and then goes terminal, which the notice mirror reaches; and a peer
+		// already at its share is shed by the next frame for it, which the report
+		// reaches because what a report causes is not addressed only to the peer
+		// being reported — settling the asks that peer was holding fans
+		// `ui-request-end` out to every other writable guest.
+		if (this.#reporting && this.#wouldEvict(targetPeer, bytes)) {
 			logger.debug("collab: dropping frame emitted while reporting a shed", { targetPeer });
 			return false;
 		}
@@ -449,6 +454,12 @@ export class CollabSocket {
 		// only shrink from here. The ceiling is therefore the budget plus one entry.
 		if (this.#pendingSends.length === 0) return false;
 		return this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES;
+	}
+
+	/** Whether admitting {@link bytes} for {@link targetPeer} would have to evict something first. */
+	#wouldEvict(targetPeer: number, bytes: number): boolean {
+		if (targetPeer !== 0 && this.#pendingForPeer(targetPeer) >= MAX_PEER_PENDING_SENDS) return true;
+		return this.#overCapacity(bytes);
 	}
 
 	#pendingForPeer(peerId: number): number {

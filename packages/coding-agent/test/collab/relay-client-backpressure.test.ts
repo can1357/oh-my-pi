@@ -8,6 +8,10 @@ const HIGH_WATER_MARK = 64 * 1024;
 const DRAIN_RETRY_MS = 25;
 /** `MAX_RETIRED_PEERS` in relay-client.ts. */
 const RETIREMENT_CAP = 256;
+/** `MAX_PEER_PENDING_SENDS` in relay-client.ts. */
+const PEER_SHARE = 32;
+const BYSTANDER = 2;
+const GREEDY = 1;
 
 /** A one-frame welcome batch: what the newcomer reservation is actually reserved for. */
 function welcomeBatch(message: string): Iterable<CollabFrame> {
@@ -394,6 +398,56 @@ describe("CollabSocket send backpressure", () => {
 				await Bun.sleep(20);
 			}
 			expect(ws.sent.filter(bytes => unpackEnvelope(bytes)?.peerId === 1).length).toBe(6);
+			expect(closeReason).toBeUndefined();
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
+	it("does not shed a bystander the settlement of a report is addressed to", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/settle", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		let closeReason: string | undefined;
+		socket.onClose = reason => {
+			closeReason = reason;
+		};
+		// The whole of what a report causes, which is more than a reply to the peer
+		// being reported. `CollabHost#handlePeerOverload` also settles the asks that
+		// peer was holding, and a settle fans `ui-request-end` out to every other
+		// writable guest — so a report puts targeted frames on bystanders' queues.
+		socket.onPeerOverload = peer => {
+			shed.push(peer);
+			socket.send({ t: "error", message: "the host discarded your backlog; rejoin to resync" }, peer);
+			socket.send({ t: "ui-request-end", reqId: 1 }, BYSTANDER);
+			socket.send({ t: "event", event: { type: "notice", level: "warning", message: `peer ${peer} dropped` } });
+		};
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// The bystander sits at exactly its share, having broken no rule: the next
+			// targeted frame for it is the one that would shed it. Nothing here is
+			// near the global budget or the entry cap, so only the per-peer branch can
+			// evict — which is the branch the reporting mask did not cover.
+			for (let i = 0; i < PEER_SHARE; i++) socket.send({ t: "error", message: `bystander-${i}` }, BYSTANDER);
+			for (let i = 0; i <= PEER_SHARE; i++) socket.send({ t: "error", message: `greedy-${i}` }, GREEDY);
+			await Bun.sleep(30);
+
+			expect(shed).toEqual([GREEDY]);
+			const deadline = Date.now() + 3_000;
+			while (
+				Date.now() < deadline &&
+				ws.sent.filter(b => unpackEnvelope(b)?.peerId === BYSTANDER).length < PEER_SHARE
+			) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(20);
+			}
+			// Its backlog is intact: a report may not spend somebody else's share.
+			expect(ws.sent.filter(bytes => unpackEnvelope(bytes)?.peerId === BYSTANDER).length).toBe(PEER_SHARE);
 			expect(closeReason).toBeUndefined();
 		} finally {
 			socket.close();
