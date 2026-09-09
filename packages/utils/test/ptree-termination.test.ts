@@ -51,13 +51,16 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 			// whose point is a descendant still holding that pipe once the root is
 			// gone. The states that need an EOF cannot afford a second writer.
 			const survivorPipes = readerState === "raw" ? "2>/dev/null" : ">/dev/null 2>&1";
-			// Closing both pipes lets the stdout consumer and the internal stderr
-			// drain reach EOF while the root is still alive, so these really are
-			// the zero-reader states rather than ones whose drains never finished.
+			// Closing both pipes while the root is still alive is what lets the stdout
+			// consumer see EOF and lets the internal stderr drain run out of input, so
+			// these are the states with nothing left reading rather than ones whose
+			// reads merely had not finished yet.
 			const close = readerState === "eof" || readerState === "unread" ? "exec 1>&- 2>&-;" : "";
-			// Written last, so observing it in the drained tail is evidence that
-			// everything before it — including the buffered filler — has been
-			// written, instead of waiting a fixed time and assuming so.
+			// Written last, so observing it in the drained tail is evidence that every
+			// write before it — including the buffered filler — has landed and been
+			// consumed, instead of waiting a fixed time and assuming so. It says
+			// nothing about the drain having reached EOF, which is one read further
+			// on and is not what any assertion here depends on.
 			const sentinel = "stderr-drained";
 			const script = `sleep 30 ${survivorPipes} & ${report}; ${filler} echo ${sentinel} >&2; ${close} while [ ! -f ${goFile} ]; do sleep 0.01; done`;
 			const child = spawn(["/bin/sh", "-c", script], { detached: true });

@@ -128,7 +128,10 @@ impl Process {
 		let options = options.unwrap_or_default();
 		let timeout = Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(5000)));
 		let ct = task::CancelToken::new(None, options.signal);
-		let waiter = self.inner.hard_kill_tree();
+		let waiter = self
+			.inner
+			.hard_kill_tree()
+			.map_err(|err| napi::Error::from_reason(err.to_string()))?;
 		task::future(env, "process.kill_tree_and_wait", async move {
 			waiter
 				.wait(timeout, ct.into_core())

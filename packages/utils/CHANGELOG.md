@@ -8,7 +8,7 @@
 
 ### Changed
 
-- Dead-root process-group cleanup no longer depends on a live stdout reader, and now resolves the group through the exited leader's retained handle instead of its pgid number where the kernel allows it (the Linux 6.9 `pidfd_send_signal` process-group scope, detected at runtime). That reaches survivors the number can no longer safely name. Where the scope is unavailable the number is the only handle, so cleanup is limited to the window before the runtime reaps the leader; past it, survivors are left running and `killAndWait()` reports the incomplete termination instead of signalling a group it cannot attribute.
+- Dead-root process-group cleanup no longer depends on a live stdout reader, and now resolves the group through the exited leader's retained handle instead of its pgid number where the kernel allows it (the Linux 6.9 `pidfd_send_signal` process-group scope, detected at runtime). That reaches survivors the number can no longer safely name. Where the scope is unavailable — macOS, and Linux before 6.9 — the number is the only handle, so this narrows what may be signalled: cleanup is limited to the window before the runtime reaps the leader, and past it a legitimate dead-leader sweep now rejects and leaves the survivors running rather than signalling a group it cannot attribute. `killAndWait()` surfaces that rejection to its caller.
 
 ### Fixed
 

@@ -423,6 +423,57 @@ describe("LspMuxServer", () => {
 	);
 
 	it.skipIf(process.platform === "win32")(
+		"refuses connections that arrive after shutdown begins",
+		async () => {
+			// Shutdown snapshots the sessions and servers, waits on the stops, then
+			// closes the listener. A connection accepted after that snapshot is in
+			// neither set: it can spawn a server nothing will stop, and it keeps
+			// `close()` pending for as long as it stays connected.
+			const helperFile = path.join(tmpDir, "helper.pid");
+			connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
+			const { client } = await link();
+			await initialize(client);
+			const helperPid = await readPid(helperFile);
+			const sweeping = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const killTreeAndWait = Process.prototype.killTreeAndWait;
+			const helperSpy = spyOn(Process.prototype, "killTreeAndWait").mockImplementation(
+				async function (this: Process, options) {
+					if (this.pid !== helperPid) return killTreeAndWait.call(this, options);
+					sweeping.resolve();
+					await release.promise;
+					return killTreeAndWait.call(this, options);
+				},
+			);
+			let late: net.Socket | undefined;
+			try {
+				const shutdown = server.shutdown();
+				await withTimeout(sweeping.promise, "helper sweep", 6_000);
+				const socket = net.connect(socketPath);
+				late = socket;
+				const closed = new Promise<void>(resolve => socket.once("close", () => resolve()));
+				await new Promise<void>((resolve, reject) => {
+					socket.once("connect", () => resolve());
+					socket.once("error", reject);
+				});
+				const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: MUX_CONNECT_METHOD, params: connectParams });
+				socket.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
+				await withTimeout(closed, "late connection refused", 4_000);
+				release.resolve();
+				await withTimeout(shutdown, "shutdown past a late connection", 6_000);
+				expect(server.sessionCount).toBe(0);
+			} finally {
+				release.resolve();
+				late?.destroy();
+				helperSpy.mockRestore();
+				killPid(helperPid);
+				server = new LspMuxServer();
+			}
+		},
+		15_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
 		"reports a helper sweep still running after its server was retired",
 		async () => {
 			// A server is retired the moment its root termination finishes, which is

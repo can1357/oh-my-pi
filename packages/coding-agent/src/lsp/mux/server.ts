@@ -296,6 +296,14 @@ export class LspMuxServer {
 	}
 
 	#accept(socket: net.Socket): void {
+		// Shutdown snapshots the sessions and the servers, then waits on the stops
+		// and closes the listener. A connection accepted after that snapshot is in
+		// neither set, so it can spawn a server nothing will stop and hold the
+		// listener open for as long as it stays connected.
+		if (this.#shuttingDown) {
+			socket.destroy();
+			return;
+		}
 		const session = new Session(socket);
 		this.#sessions.add(session);
 		this.#disarmMuxIdle();
@@ -344,6 +352,13 @@ export class LspMuxServer {
 			const params = parseConnectParams(message.params);
 			if (!params) {
 				this.#sendSession(session, rpcError(message.id, -32602, "invalid mux connect params"));
+				return;
+			}
+			// Racing the shutdown snapshot: the socket was accepted before shutdown
+			// began but this request arrived after, so spawning here would put a
+			// server behind the snapshot just as surely as a late connection would.
+			if (this.#shuttingDown) {
+				this.#sendSession(session, rpcError(message.id, -32603, "lsp mux is shutting down"));
 				return;
 			}
 			const key = muxServerKey(params);
