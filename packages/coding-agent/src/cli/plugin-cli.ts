@@ -369,6 +369,29 @@ async function handleInstall(
 		const target = classifyInstallTarget(spec, knownMarketplaces);
 
 		if (target.type === "marketplace") {
+			if (flags.dryRun) {
+				try {
+					const entry = await mktMgr.getPluginInfo(target.name, target.marketplace);
+					if (!entry) {
+						throw new Error(`Plugin "${target.name}" not found in marketplace "${target.marketplace}"`);
+					}
+					if (flags.json) {
+						console.log(
+							JSON.stringify(
+								{ dryRun: true, action: "install", plugin: target.name, marketplace: target.marketplace },
+								null,
+								2,
+							),
+						);
+					} else {
+						console.log(chalk.dim(`[dry-run] Would install ${spec}`));
+					}
+				} catch (err) {
+					console.error(chalk.red(`${theme.status.error} Failed to install ${spec}: ${err}`));
+					process.exit(1);
+				}
+				continue;
+			}
 			try {
 				const entry = await mktMgr.installPlugin(target.name, target.marketplace, {
 					force: flags.force,

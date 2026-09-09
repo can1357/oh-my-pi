@@ -1,4 +1,7 @@
-import { describe, expect, it } from "bun:test";
+import { describe, expect, it, spyOn } from "bun:test";
+
+import { runPluginCommand } from "@oh-my-pi/pi-coding-agent/cli/plugin-cli";
+import { MarketplaceManager } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
 
 // Import from the zero-dep classify module — plugin-cli.ts transitively loads native addons.
 import { classifyInstallTarget } from "@oh-my-pi/pi-coding-agent/cli/classify-install-target";
@@ -80,4 +83,33 @@ describe("classifyInstallTarget", () => {
 			expect(classifyInstallTarget("pkg@1.2.3", KNOWN)).toEqual({ type: "npm", spec: "pkg@1.2.3" });
 		});
 	});
+});
+
+it("marketplace dry-run previews without invoking installPlugin", async () => {
+	const listSpy = spyOn(MarketplaceManager.prototype, "listMarketplaces").mockResolvedValue([
+		{ name: "my-marketplace" } as never,
+	]);
+	const infoSpy = spyOn(MarketplaceManager.prototype, "getPluginInfo").mockResolvedValue({ name: "hello" } as never);
+	const installSpy = spyOn(MarketplaceManager.prototype, "installPlugin");
+	const logSpy = spyOn(console, "log").mockImplementation(() => undefined);
+	try {
+		await runPluginCommand({
+			action: "install",
+			args: ["hello@my-marketplace"],
+			flags: { dryRun: true, json: true },
+		});
+		expect(infoSpy).toHaveBeenCalledWith("hello", "my-marketplace");
+		expect(installSpy).not.toHaveBeenCalled();
+		expect(JSON.parse(String(logSpy.mock.calls[0]?.[0]))).toEqual({
+			dryRun: true,
+			action: "install",
+			plugin: "hello",
+			marketplace: "my-marketplace",
+		});
+	} finally {
+		listSpy.mockRestore();
+		infoSpy.mockRestore();
+		installSpy.mockRestore();
+		logSpy.mockRestore();
+	}
 });
