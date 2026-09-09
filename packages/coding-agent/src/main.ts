@@ -42,6 +42,7 @@ import {
 	getModelMatchPreferences,
 	parseModelString,
 	resolveCliModel,
+	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
 } from "./config/model-resolver";
