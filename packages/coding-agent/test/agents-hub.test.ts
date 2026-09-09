@@ -106,6 +106,28 @@ describe("AgentsHub layout", () => {
 		expect(rendered).toContain("+ New agent");
 	});
 
+	test("highlights the full selected agent row and follows keyboard navigation", async () => {
+		mockAgents();
+		const settings = Settings.isolated();
+		settings.set("task.agentModelOverrides", { dev: "anthropic/claude-sonnet-4-5:high" });
+		const { hub } = await createHub(settings);
+		const lines = hub.render(200);
+		const selected = lines.find(line => line.includes("claude-sonnet-4-5:high") && line.includes("dev"))!;
+		const match = selected.match(/\x1b\[48;(?:2;\d+;\d+;\d+|5;\d+)m/);
+		expect(match).not.toBeNull();
+		const background = match![0];
+		expect(selected).toContain("\x1b[49m");
+		const painted = selected.slice(selected.indexOf(background) + background.length).split("\x1b[49m")[0];
+		expect(painted).toContain("dev");
+		expect(painted).toContain("anthropic/claude-sonnet-4-5:high");
+		expect(painted.replace(ANSI_PATTERN, "")).toMatch(/high $/);
+		expect(lines.find(line => line.includes("scout"))).not.toContain(background);
+		hub.handleInput("\x1b[B");
+		const moved = hub.render(200);
+		expect(moved.find(line => line.includes("dev"))).not.toContain(background);
+		expect(moved.find(line => line.includes("scout"))).toContain(background);
+	});
+
 	test("sidebar scope filters the rows to one source", async () => {
 		mockAgents();
 		const { hub, strip } = await createHub(Settings.isolated());
