@@ -19,6 +19,7 @@
 
 ### Changed
 
+- Storage maintenance streams large session journals and gzip archives instead of loading complete files into memory.
 - When enabled (`task.showResolvedModelBadge`), subagent model badges show the thinking-level icon, model name, and attached-advisor eye before the agent name in task, eval, job, and HUD rows.
 
 ### Fixed
