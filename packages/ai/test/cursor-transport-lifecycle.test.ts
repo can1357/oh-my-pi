@@ -402,6 +402,29 @@ describe("openCursorTransport lifecycle", () => {
 		attempt.close();
 	});
 
+	it("threads a custom provider slug into the availability probe", async () => {
+		const h1Url = await startH1Fixture();
+		vi.spyOn(h2Pool, "acquireCursorH2").mockResolvedValue({
+			ok: false,
+			unavailable: { reason: "alpn", cause: alpnCause() },
+		});
+		const probeSpy = vi.spyOn(serverConfig, "fetchCursorBidiAvailability").mockResolvedValue("bidi-disabled");
+
+		const attempt = await openCursorTransport({
+			baseUrl: h1Url,
+			apiKey: API_KEY,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+			provider: "custom-gateway",
+		});
+		const probeArgs = probeSpy.mock.calls[0]?.[0];
+		expect(probeArgs?.provider).toBe("custom-gateway");
+		expect(probeArgs?.baseUrl).toBe(h1Url);
+		attempt.close();
+		await expect(attempt.trailers()).resolves.toEqual({});
+	});
+
 	it("never downgrades a non-ALPN acquisition failure even when config would disable bidi", async () => {
 		h2Config = { http2Config: Http2Config.FORCE_BIDI_DISABLED };
 		const h2Url = await startH2ConfigServer();
@@ -680,9 +703,8 @@ describe("openCursorTransport lifecycle", () => {
 	}, 10_000);
 
 	it("accepts more than 1024 tiny frames when decoded bytes stay within budget", async () => {
-		let server: http2.Http2Server | undefined;
 		const sessions = new Set<http2.Http2Session>();
-		server = http2.createServer();
+		const server = http2.createServer();
 		server.on("session", session => {
 			sessions.add(session);
 			session.on("close", () => sessions.delete(session));
@@ -737,9 +759,8 @@ describe("openCursorTransport lifecycle", () => {
 		// in one DATA chunk. The decoder withholds the untrustworthy end frame,
 		// so the consumer cannot break on it and report a clean turn; the pump
 		// reaches stream EOF and finish() surfaces the protocol error instead.
-		let server: http2.Http2Server | undefined;
 		const sessions = new Set<http2.Http2Session>();
-		server = http2.createServer();
+		const server = http2.createServer();
 		server.on("session", session => {
 			sessions.add(session);
 			session.on("close", () => sessions.delete(session));
@@ -792,9 +813,8 @@ describe("openCursorTransport lifecycle", () => {
 		// never closes the HTTP/2 stream. The decoder poison must fail the pump
 		// before the client waits for an EOF/caller timeout, while the data
 		// frame decoded ahead of the tail remains observable.
-		let server: http2.Http2Server | undefined;
 		const sessions = new Set<http2.Http2Session>();
-		server = http2.createServer();
+		const server = http2.createServer();
 		server.on("session", session => {
 			sessions.add(session);
 			session.on("close", () => sessions.delete(session));

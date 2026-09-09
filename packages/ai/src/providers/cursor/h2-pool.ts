@@ -8,13 +8,14 @@ import { connectProxiedSocket, getProxyForUrl } from "../../utils/proxy";
  * reservation-before-connect, GOAWAY drain, a typed pre-dispatch ALPN outcome,
  * and proxy tunneling.
  *
- * A session is keyed by `baseUrl|proxyUrl` and reused for as many concurrent
- * streams as arrive. When the peer sends GOAWAY (or the session errors after
- * connect), the entry is marked draining: no new lease is issued from it and
- * it leaves the reusable pool immediately. The in-flight leases finish, and
- * the session is destroyed once the last lease releases; until then the entry
- * is retained in a tracking set so {@link disposeCursorH2Pool} can still
- * reach and destroy it even after a replacement session takes the key.
+ * A session is keyed by a JSON tuple of `(baseUrl, proxyUrl, provider)` and
+ * reused for as many concurrent streams as arrive. When the peer sends GOAWAY
+ * (or the session errors after connect), the entry is marked draining: no new
+ * lease is issued from it and it leaves the reusable pool immediately. The
+ * in-flight leases finish, and the session is destroyed once the last lease
+ * releases; until then the entry is retained in a tracking set so
+ * {@link disposeCursorH2Pool} can still reach and destroy it even after a
+ * replacement session takes the key.
  *
  * Reusable sessions are intentionally unreferenced while idle so the pool does
  * not keep short-lived consumers alive. This module registers no process-level
@@ -78,6 +79,16 @@ interface PoolEntry {
 	 */
 	referenced: boolean;
 	/**
+	 * Settles when the session's terminal `close` has been observed (or when
+	 * destruction threw, meaning no close will ever arrive). The listener is
+	 * armed at publication — before ANY teardown can run — so disposal awaits
+	 * a real `close` without racing one that fires synchronously inside
+	 * `destroy()`, and a close that already fired is never awaited.
+	 */
+	closeSettled: Promise<void>;
+	/** Resolves {@link closeSettled}; safe to call more than once. */
+	settleClose: () => void;
+	/**
 	 * Wall-clock timestamp stamped when the entry last dropped to zero
 	 * outstanding leases (or at creation), used by opportunistic idle
 	 * eviction. Undefined while at least one lease is outstanding.
@@ -85,7 +96,7 @@ interface PoolEntry {
 	idleSince: number | undefined;
 }
 
-/** Base-url → live (non-draining) session with its outstanding lease count. */
+/** Pool key → live (non-draining) session with its outstanding lease count. */
 const pool = new Map<string, PoolEntry>();
 /**
  * Draining entries that left the pool by a terminal signal or a replacement
@@ -127,7 +138,7 @@ interface ConnectHandle {
 	finished: boolean;
 }
 /**
- * Base-url → in-flight connect shared by concurrent acquisitions. This is the
+ * Pool key → in-flight connect shared by concurrent acquisitions. This is the
  * reservation slot that stops a second acquisition from racing a duplicate
  * connect or grabbing a session that is about to be released.
  */
@@ -159,8 +170,8 @@ let __establishBodyGate: ((key: string) => Promise<void>) | undefined;
  */
 let __handshakeTimeoutMs: number | undefined;
 
-function poolKey(baseUrl: string, proxyUrl: string | undefined): string {
-	return `${baseUrl}|${proxyUrl ?? ""}`;
+function poolKey(baseUrl: string, proxyUrl: string | undefined, provider: string): string {
+	return JSON.stringify([baseUrl, proxyUrl ?? null, provider]);
 }
 
 /** True when the raw connect error is the ALPN negotiation failure. */
@@ -173,7 +184,11 @@ function isAlpnUnavailable(error: unknown): boolean {
 /** Initiates destruction exactly once per entry. Terminal paths can
  * interleave on one entry — a final release racing disposal, close handlers
  * arriving after eviction — so the flag, not the caller, guarantees
- * `session.destroy()` runs once. */
+ * `session.destroy()` runs once. The entry's close waiter was armed at
+ * publication, before this function could ever run, so the `close` event is
+ * observed whether it fires synchronously inside `destroy()` or on a later
+ * tick; a `destroy()` that throws means the session is already gone and no
+ * close will ever arrive, so the waiter is settled here instead. */
 function destroySessionOnce(entry: PoolEntry): void {
 	if (entry.destroyed) return;
 	entry.destroyed = true;
@@ -181,7 +196,7 @@ function destroySessionOnce(entry: PoolEntry): void {
 	try {
 		entry.session.destroy();
 	} catch {
-		/* session already gone */
+		entry.settleClose();
 	}
 }
 
@@ -251,19 +266,6 @@ function evictIdleEntries(): void {
 			destroyEntry(key, entry);
 		}
 	}
-}
-
-/** Resolves on `close`; the listener is installed before `destroy()` because `close` fires exactly once. */
-function closeSession(session: http2.ClientHttp2Session): Promise<void> {
-	if (session.destroyed) return Promise.resolve();
-	const { promise, resolve } = Promise.withResolvers<void>();
-	session.once("close", () => resolve());
-	try {
-		session.destroy();
-	} catch {
-		resolve();
-	}
-	return promise;
 }
 
 /**
@@ -531,6 +533,15 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 				displaced.draining = true;
 				draining.add(displaced);
 			}
+			// Arm the terminal-close waiter BEFORE this entry can ever be
+			// destroyed. `close` fires exactly once, and the pool's own
+			// terminal-signal path (drainEntry) may destroy the session long
+			// before disposal; arming at publication means the awaited close is
+			// never missed (it fires synchronously inside a later `destroy()`
+			// or on a later tick) and never awaited after it already happened
+			// (the promise is already resolved).
+			const close = Promise.withResolvers<void>();
+			connect.once("close", () => close.resolve());
 			pool.set(key, {
 				session: connect,
 				outstanding: 0,
@@ -538,6 +549,8 @@ function establishSession(options: CursorH2AcquireOptions, key: string): CursorE
 				referenced: false,
 				idleSince: Date.now(),
 				destroyed: false,
+				closeSettled: close.promise,
+				settleClose: close.resolve,
 			});
 			evictBeyondCap(key);
 			handshake.resolve({ kind: "ok", session: connect });
@@ -778,7 +791,7 @@ async function acquireCursorH2AtGeneration(
 	options: CursorH2AcquireOptions,
 	acquisitionGeneration: number,
 ): Promise<CursorH2Acquisition> {
-	const key = poolKey(options.baseUrl, getProxyForUrl(options.provider, new URL(options.baseUrl)));
+	const key = poolKey(options.baseUrl, getProxyForUrl(options.provider, new URL(options.baseUrl)), options.provider);
 	if (acquisitionGeneration !== generation) {
 		throw new Error("HTTP/2 pool disposed during acquire");
 	}
@@ -900,8 +913,13 @@ export async function disposeCursorH2Pool(): Promise<void> {
 			}
 		}),
 		...entries.map(async entry => {
+			// Destruction first, then the waiter — but the waiter was armed at
+			// publication, before this call site could run, so a `close` that
+			// fires synchronously inside `destroy()` is still observed and
+			// disposal genuinely awaits the session's terminal event instead
+			// of returning the moment `destroyed` flips.
 			destroySessionOnce(entry);
-			await closeSession(entry.session);
+			await entry.closeSettled;
 		}),
 	]);
 }

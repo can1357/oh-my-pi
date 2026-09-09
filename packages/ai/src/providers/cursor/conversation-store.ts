@@ -44,6 +44,18 @@ const rotatedConversationIds = new Map<string, string>();
 const successfulRotatedConversationIds = new Set<string>();
 /** Rotated ids that have not yet completed a turn, so cached state is skipped (`freshRotatedConversationIds`). */
 const freshRotatedConversationIds = new Set<string>();
+/**
+ * Base conversation id → the rotated wire id it has moved off of, pending the
+ * failed turn's final unpin. `cursor.ts` catches a poisoned turn and rotates
+ * the base to a replacement id *before* the turn's `finally` unpins the id it
+ * used. At that unpin the used id is no longer the target of any base mapping
+ * and its fresh/success markers are already cleared — indistinguishable from
+ * a plain live entry without this record. The unpin consumes it: the dead id
+ * is reclaimed outright and the recorded base's replacement mapping is
+ * shielded from the overflow scan. `evictCursorRotationState` drops the record
+ * with the base's other rotation state, so it cannot outlive the conversation.
+ */
+const supersededRotatedConversationIds = new Map<string, string>();
 /** Number of rotations issued per base id — the rotation-depth cap. */
 const rotationCounts = new Map<string, number>();
 
@@ -84,6 +96,7 @@ function evictCursorRotationState(victimId: string): void {
 	}
 	rotatedConversationIds.delete(victimId);
 	rotationCounts.delete(victimId);
+	supersededRotatedConversationIds.delete(victimId);
 	for (const target of rotatedConversationIds.values()) {
 		if (target === victimId) return;
 	}
@@ -95,7 +108,11 @@ function evictCursorRotationState(victimId: string): void {
  * Releases one pin. On the final unpin the entry moves to the retained LRU,
  * which evicts oldest-first beyond `CURSOR_RETAINED_CONVERSATION_LIMIT`.
  * Candidates of the turn that just finished — the unpinned id and any base
- * resolving to it — are never victims of that unpin's overflow eviction.
+ * resolving to it — are never victims of that unpin's overflow eviction. An
+ * unpin of a *superseded* rotated id (the wire id a failed turn used, whose
+ * base has already rotated to a replacement) reclaims the dead id itself
+ * instead of admitting it to the retained set, and protects the base whose
+ * replacement mapping the retry now owns.
  * Unknown ids are a no-op (reset-first discipline: this is an exit-path gate
  * and must run on every path without itself failing).
  */
@@ -112,9 +129,39 @@ export function unpinCursorConversation(id: string): void {
 	activePinCounts.delete(id);
 	const entry = entries.get(id);
 	if (!entry) return;
-	// Most-recently-unpinned goes to the tail; the LRU is oldest-first.
-	retainedLru.delete(id);
-	retainedLru.add(id);
+	// A failed turn rotates its base to a replacement id before its finally
+	// unpins the superseded one. Admitting the dead id to the retained set in
+	// that state overflowed the LRU onto the base whose mapping the retry now
+	// owns — deleting the replacement together with its rotation count, so
+	// the next attempt fell back to the poisoned original id.
+	let owningBase: string | undefined;
+	for (const [base, superseded] of supersededRotatedConversationIds) {
+		if (superseded !== id) continue;
+		owningBase = base;
+		supersededRotatedConversationIds.delete(base);
+		retainedLru.delete(id);
+		entries.delete(id);
+		successfulRotatedConversationIds.delete(id);
+		freshRotatedConversationIds.delete(id);
+		break;
+	}
+	if (owningBase === undefined) {
+		// Most-recently-unpinned goes to the tail; the LRU is oldest-first.
+		retainedLru.delete(id);
+		retainedLru.add(id);
+	}
+	trimRetainedConversations(id, owningBase);
+}
+
+/**
+ * Trims the retained LRU oldest-first beyond the limit. `unpinningId` is the
+ * id whose final unpin triggered the scan; `protectedBaseId` is the base whose
+ * *current* mapping superseded that id, set only when the unpin reclaimed a
+ * superseded wire id. Both — and any base still resolving to `unpinningId` —
+ * are never victims. Every other retained mapping stays eligible, fresh ones
+ * only as fallback victims, so bounded retention is preserved.
+ */
+function trimRetainedConversations(unpinningId: string, protectedBaseId: string | undefined): void {
 	while (retainedLru.size > CURSOR_RETAINED_CONVERSATION_LIMIT) {
 		let victim: string | undefined;
 		let freshVictim: string | undefined;
@@ -130,7 +177,10 @@ export function unpinCursorConversation(id: string): void {
 			// cleared the mapping's freshness by unpin time, so the fresh check
 			// below no longer sees it; the resolved-id comparison is what keeps
 			// the mapping reachable.
-			if (candidate === id || resolved === id) continue;
+			if (candidate === unpinningId || resolved === unpinningId) continue;
+			// The base whose replacement mapping superseded the reclaimed id:
+			// evicting it would delete the rotation the retry is actively using.
+			if (candidate === protectedBaseId) continue;
 			if ((activePinCounts.get(resolved) ?? 0) > 0) continue;
 			if (freshRotatedConversationIds.has(resolved)) {
 				freshVictim ??= candidate;
@@ -198,7 +248,14 @@ export function rotateCursorConversation(baseId: string): string | undefined {
 		return undefined;
 	}
 	const rotated = randomUUID();
-	if (currentRotated) successfulRotatedConversationIds.delete(currentRotated);
+	if (currentRotated) {
+		successfulRotatedConversationIds.delete(currentRotated);
+		// `currentRotated` is superseded: the turn that used it still has to
+		// unpin it (its `finally` runs after this catch), and that unpin
+		// reclaims the dead id instead of overflowing onto this replacement
+		// mapping.
+		supersededRotatedConversationIds.set(baseId, currentRotated);
+	}
 	rotatedConversationIds.set(baseId, rotated);
 	freshRotatedConversationIds.add(rotated);
 	rotationCounts.set(baseId, rotations + 1);
@@ -238,5 +295,6 @@ export function resetCursorConversationStore(): void {
 	rotatedConversationIds.clear();
 	successfulRotatedConversationIds.clear();
 	freshRotatedConversationIds.clear();
+	supersededRotatedConversationIds.clear();
 	rotationCounts.clear();
 }

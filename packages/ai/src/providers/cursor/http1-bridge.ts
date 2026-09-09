@@ -88,6 +88,13 @@ export function openCursorHttp1Bridge(args: {
 	runHeaders: http2.OutgoingHttpHeaders;
 	gzipRequest: boolean;
 	signal?: AbortSignal;
+	/**
+	 * Provider slug for proxy selection (`PI_PROXY_<SLUG>`), matching the
+	 * config probe's resolution in `fetchServerConfigOverHttp1`. Defaults to
+	 * the built-in `cursor` so callers that do not thread a slug keep their
+	 * routing.
+	 */
+	provider?: string;
 }): CursorHttp1BridgeAttempt {
 	const requestId = randomUUID();
 	const abort = new AbortController();
@@ -114,7 +121,7 @@ export function openCursorHttp1Bridge(args: {
 	// deployment that cannot reach the origin directly would otherwise open the
 	// bridge on the probe's downgrade permit and then fail every bridge
 	// request. Resolved once per bridge from `args.baseUrl`.
-	const proxy = getProxyForUrl("cursor", new URL(args.baseUrl));
+	const proxy = getProxyForUrl(args.provider ?? "cursor", new URL(args.baseUrl));
 
 	const settleSuccess = (): void => {
 		if (terminal) return;
@@ -260,8 +267,6 @@ export function openCursorHttp1Bridge(args: {
 			}
 			const payload = decodeOutboundFrame(frame);
 			const seqno = nextAppendSeqno++;
-			const isInitial = firstWrite;
-			if (isInitial) firstWrite = false;
 			const retainedBytes = APPEND_FRAME_RETAINED_BYTES + payload.length;
 			const appendByteLimit = __appendPendingByteLimit ?? APPEND_PENDING_BYTE_LIMIT;
 			if (pendingAppendBytes + retainedBytes > appendByteLimit) {
@@ -269,6 +274,8 @@ export function openCursorHttp1Bridge(args: {
 				settleFailure(error);
 				throw error;
 			}
+			const isInitial = firstWrite;
+			if (isInitial) firstWrite = false;
 			pendingAppendBytes += retainedBytes;
 			appendTail = appendTail.then(async () => {
 				const headers: Record<string, string> = { ...baseHeaders, "content-type": "application/proto" };

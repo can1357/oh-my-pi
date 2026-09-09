@@ -370,6 +370,18 @@ describe("fetchCursorBidiAvailability", () => {
 		expect(invocations).toBe(2);
 	});
 
+	it("scopes the cache by provider as well as apiKey + baseUrl", async () => {
+		scenario = { kind: "bidi-disabled" };
+		const baseUrl = await startServer();
+		expect(await fetchFor(baseUrl)).toBe("bidi-disabled");
+		expect(await fetchCursorBidiAvailability({ apiKey: "test-token", baseUrl, provider: "custom-gateway" })).toBe(
+			"bidi-disabled",
+		);
+		// Same origin and key, different provider: two wire requests, two entries.
+		expect(invocations).toBe(2);
+		expect(__cursorServerConfigCacheSize()).toBe(2);
+	});
+
 	it("fails open to unspecified when the cumulative response exceeds 1 MiB", async () => {
 		scenario = { kind: "oversized" };
 		const baseUrl = await startServer();

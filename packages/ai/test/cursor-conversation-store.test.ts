@@ -435,4 +435,109 @@ describe("cursor conversation store — rotation", () => {
 		expect(isCursorRotationMarked(rotated)).toBe(true);
 		expect(rotateCursorConversation("victim-base")).toBeDefined();
 	});
+
+	it("evicts the superseded rotated id, not the base's fresh replacement mapping, on the failed turn's unpin", () => {
+		// #9852: a previously successful rotated id fails again, the catch
+		// rotates to a second fresh id, and the failed turn's finally unpins
+		// the now-superseded first id. With 63 pin-protected older mappings,
+		// the overflow fell through to the fresh victim — the base itself —
+		// deleting the new mapping and resetting the rotation count, so the
+		// next retry reused the poisoned original id.
+		const olderRotations: string[] = [];
+		for (let i = 0; i < CURSOR_RETAINED_CONVERSATION_LIMIT - 1; i++) {
+			const base = `superseded-prot-${i}`;
+			pinCursorConversation(base);
+			const older = requireRotation(rotateCursorConversation(base));
+			pinCursorConversation(older);
+			unpinCursorConversation(base);
+			olderRotations.push(older);
+		}
+		pinCursorConversation("superseded-base");
+		unpinCursorConversation("superseded-base");
+		const first = requireRotation(rotateCursorConversation("superseded-base"));
+		const firstEntry = pinCursorConversation(first);
+		markCursorRotationSucceeded(first);
+		unpinCursorConversation(first);
+		// The next turn on `first` fails and rotates to a fresh replacement
+		// before its finally unpins the superseded id.
+		pinCursorConversation(first);
+		const second = requireRotation(rotateCursorConversation("superseded-base"));
+		unpinCursorConversation(first);
+
+		// The base keeps its replacement mapping (pre-fix: the base was the
+		// fresh fallback victim and resolved back to the poisoned base id).
+		expect(resolveCursorConversationId("superseded-base")).toBe(second);
+		expect(isCursorRotationFresh(second)).toBe(true);
+		// The superseded wire id itself was the eviction victim: re-pinning
+		// it recreates the entry instead of returning the retained one.
+		expect(pinCursorConversation(first)).not.toBe(firstEntry);
+		unpinCursorConversation(first);
+		// The rotation count survived, so the base may still rotate again.
+		markCursorRotationSucceeded(second);
+		expect(rotateCursorConversation("superseded-base")).toBeDefined();
+		for (const older of olderRotations) unpinCursorConversation(older);
+	});
+
+	it("keeps the base's marked replacement mapping when the superseded id unpins after the retry succeeded", () => {
+		// #9852 variant: the retry on the replacement id completed — marking
+		// removed it from the fresh set — before the failed turn's finally
+		// unpins the superseded id, so the base was an unprotected plain
+		// victim and its successful mapping was deleted. The unpin must
+		// protect the mapping the turn's base now owns.
+		const olderRotations: string[] = [];
+		for (let i = 0; i < CURSOR_RETAINED_CONVERSATION_LIMIT - 1; i++) {
+			const base = `marked-prot-${i}`;
+			pinCursorConversation(base);
+			const older = requireRotation(rotateCursorConversation(base));
+			pinCursorConversation(older);
+			unpinCursorConversation(base);
+			olderRotations.push(older);
+		}
+		pinCursorConversation("marked-base");
+		unpinCursorConversation("marked-base");
+		const first = requireRotation(rotateCursorConversation("marked-base"));
+		pinCursorConversation(first);
+		markCursorRotationSucceeded(first);
+		unpinCursorConversation(first);
+		pinCursorConversation(first);
+		const second = requireRotation(rotateCursorConversation("marked-base"));
+		// The retry on `second` runs to completion before the failed turn's
+		// finally unpins the superseded `first`.
+		pinCursorConversation(second);
+		markCursorRotationSucceeded(second);
+		unpinCursorConversation(second);
+		unpinCursorConversation(first);
+
+		expect(resolveCursorConversationId("marked-base")).toBe(second);
+		expect(isCursorRotationMarked(second)).toBe(true);
+		expect(rotateCursorConversation("marked-base")).toBeDefined();
+		for (const older of olderRotations) unpinCursorConversation(older);
+	});
+
+	it("still evicts an unrelated fresh mapping at overflow while protecting the unpin's own ids", () => {
+		// The superseded-permission fix must not remove bounded retention for
+		// unrelated fresh mappings: when the turn's own candidates are all
+		// protected, the oldest fresh mapping remains the fallback victim.
+		const olderRotations: string[] = [];
+		for (let i = 0; i < CURSOR_RETAINED_CONVERSATION_LIMIT - 1; i++) {
+			const base = `fresh-prot-${i}`;
+			pinCursorConversation(base);
+			const older = requireRotation(rotateCursorConversation(base));
+			pinCursorConversation(older);
+			unpinCursorConversation(base);
+			olderRotations.push(older);
+		}
+		// An unrelated base whose fresh mapping is the only unprotected candidate.
+		pinCursorConversation("unrelated-base");
+		const unrelated = requireRotation(rotateCursorConversation("unrelated-base"));
+		unpinCursorConversation("unrelated-base");
+		// The unpinning id: plain and current, protected by the turn-ownership
+		// skip, so the overflow must fall back to the fresh victim.
+		pinCursorConversation("plain-turn");
+		unpinCursorConversation("plain-turn");
+
+		expect(resolveCursorConversationId("unrelated-base")).toBe("unrelated-base");
+		expect(isCursorRotationFresh(unrelated)).toBe(false);
+		for (const older of olderRotations) unpinCursorConversation(older);
+	});
 });

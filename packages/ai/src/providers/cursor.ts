@@ -544,16 +544,15 @@ function streamCursorWithWireMode(
 		const drainInFlightDispatches = async (): Promise<void> => {
 			if (inFlightDispatches.size === 0) return;
 			const signal = options?.signal;
-			let timeoutId: NodeJS.Timeout | undefined;
 			const timeout = Promise.withResolvers<"timeout">();
-			timeoutId = setTimeout(() => timeout.resolve("timeout"), CURSOR_TURN_END_DRAIN_TIMEOUT_MS);
+			const timeoutId = setTimeout(() => timeout.resolve("timeout"), CURSOR_TURN_END_DRAIN_TIMEOUT_MS);
 			// A bounded drain must not become the reason a completed print-mode
 			// process stays alive.
 			timeoutId.unref();
 			try {
 				while (inFlightDispatches.size > 0) {
 					if (signal?.aborted) return;
-					const settled = Promise.all([...inFlightDispatches]).then(() => "settled" as const);
+					const settled = Promise.all(inFlightDispatches).then(() => "settled" as const);
 					if (!signal) {
 						const winner = await Promise.race([settled, timeout.promise]);
 						if (winner === "timeout") {
@@ -594,7 +593,7 @@ function streamCursorWithWireMode(
 		// dispatch that exits without delivering one. A handler that never
 		// settles gets no synthetic result at all: the real result must win.
 		const deferSyntheticExecPairs = (pairState: BlockState, output: AssistantMessage): void => {
-			for (const dispatch of [...inFlightDispatches]) {
+			for (const dispatch of inFlightDispatches) {
 				const ownedIds = dispatchExecToolCallIds.get(dispatch);
 				if (!ownedIds || ownedIds.length === 0) continue;
 				void dispatch.finally(() => {

@@ -100,6 +100,7 @@ export async function openCursorTransport(args: {
 		const availability = await serverConfig.fetchCursorBidiAvailability({
 			apiKey: args.apiKey,
 			baseUrl: args.baseUrl,
+			provider: args.provider,
 			callerHeaders: sanitizeCursorCallerHeaders(flattenRunCallerHeaders(headers)),
 			signal: args.signal,
 		});
@@ -110,6 +111,7 @@ export async function openCursorTransport(args: {
 				runHeaders: headers,
 				gzipRequest: args.gzipRequest,
 				signal: args.signal,
+				provider: args.provider,
 			});
 		}
 	}

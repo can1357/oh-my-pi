@@ -849,6 +849,40 @@ describe("cursor HTTP/1.1 poll bridge", () => {
 		releaseAllHeldAppends();
 	});
 
+	it("rejects the initial-append latch when the first write exceeds the byte budget", async () => {
+		// Order-biting pin for the admission fix: the budget throw must land
+		// while firstWrite is still true so settleFailure rejects
+		// initialAppendReady and the parked poll task finishes. Pre-fix the
+		// capture ran before the budget check, the latch never rejected, and
+		// the poll count stuck at 1.
+		plan = { kind: "success" };
+		await settleStragglerPollTasks();
+		expect(pendingCursorHttp1BridgePolls()).toBe(0);
+		// First frame costs 64 B overhead + 12 B payload = 76 B; a 70 B budget
+		// fails the FIRST write while it is still the initial append.
+		__setCursorAppendPendingByteLimit(70);
+		const baseUrl = await startServer();
+		const bridge = openCursorHttp1Bridge({
+			baseUrl,
+			requestPath: RUN_PATH,
+			runHeaders: testRunHeaders(),
+			gzipRequest: false,
+		});
+		expect(pendingCursorHttp1BridgePolls()).toBe(1);
+		let writeError: unknown;
+		try {
+			bridge.write(encodeConnectFrame(Buffer.from("client-request"), false));
+		} catch (cause) {
+			writeError = cause;
+		}
+		expect(String(writeError)).toContain("append chain exceeded");
+		await expect(bridge.trailers()).rejects.toBeTruthy();
+		for (let i = 0; i < 20 && pendingCursorHttp1BridgePolls() > 0; i++) await nextTick();
+		expect(pendingCursorHttp1BridgePolls()).toBe(0);
+		expect(appendHits).toBe(0);
+		bridge.close();
+	});
+
 	it("delivers a >64-frame burst in order across frame queue compaction", async () => {
 		// The queue dequeues by advancing a head index and compacts once the
 		// index passes 64. Park the consumer on the empty queue first, then

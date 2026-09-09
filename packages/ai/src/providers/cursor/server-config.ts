@@ -96,12 +96,20 @@ export function __cursorServerConfigCacheSize(): number {
 /**
  * Returns the account's bidi availability, or `"unspecified"` when it cannot
  * be determined for any reason (fail open). The result is cached per
- * `apiKey` + `baseUrl` + caller headers for the TTL; the cache is LRU-bounded
- * and pruned on every write.
+ * `provider` + `apiKey` + `baseUrl` + caller headers for the TTL; the cache
+ * is LRU-bounded and pruned on every write.
  */
 export async function fetchCursorBidiAvailability(args: {
 	apiKey: string;
 	baseUrl: string;
+	/**
+	 * Provider slug for proxy selection (`PI_PROXY_<SLUG>`) and cache
+	 * identity. Defaults to the built-in `cursor` so callers that do not
+	 * thread a slug keep their routing and share one cache entry.
+	 * Part of the cache and in-flight key: two providers behind one
+	 * origin must never share a cached or coalesced probe result.
+	 */
+	provider?: string;
 	/**
 	 * Sanitized caller headers (see `sanitizeCursorCallerHeaders`) forwarded to
 	 * both config transports beneath the fixed unary set — a gateway may require
@@ -118,7 +126,8 @@ export async function fetchCursorBidiAvailability(args: {
 	 */
 	signal?: AbortSignal;
 }): Promise<CursorBidiAvailability> {
-	const key = serverConfigCacheKey(args.apiKey, args.baseUrl, args.callerHeaders);
+	const provider = args.provider ?? "cursor";
+	const key = serverConfigCacheKey(provider, args.apiKey, args.baseUrl, args.callerHeaders);
 	const cached = cache.get(key);
 	if (cached && cached.expiresAt > Date.now()) {
 		// LRU: move to most-recently-used end.
@@ -129,12 +138,13 @@ export async function fetchCursorBidiAvailability(args: {
 	// Coalesce concurrent misses onto one fetch so N callers make one wire
 	// request and all receive the same published value.
 	const existing = inflight.get(key);
-	const shared = existing ?? beginSharedServerConfigFetch(key, args.apiKey, args.baseUrl, args.callerHeaders);
+	const shared =
+		existing ?? beginSharedServerConfigFetch(key, provider, args.apiKey, args.baseUrl, args.callerHeaders);
 	return awaitSharedServerConfig(shared, args.signal);
 }
 
 /**
- * Cache and in-flight key: `apiKey` + `baseUrl` plus a canonical serialization
+ * Cache and in-flight key: `provider` + `apiKey` + `baseUrl` plus a canonical serialization
  * of the sanitized caller headers. A gateway can answer `GetServerConfig`
  * per caller header, so two callers that differ only in headers must not
  * share a cached or coalesced result. The tuple is structurally serialized
@@ -145,13 +155,14 @@ export async function fetchCursorBidiAvailability(args: {
  * serialize to the same key.
  */
 function serverConfigCacheKey(
+	provider: string,
 	apiKey: string,
 	baseUrl: string,
 	callerHeaders: Record<string, string> | undefined,
 ): string {
 	const names = Object.keys(callerHeaders ?? {}).sort();
 	const entries = names.map(name => [name, callerHeaders?.[name] ?? ""]);
-	return JSON.stringify([apiKey, baseUrl, entries]);
+	return JSON.stringify([provider, apiKey, baseUrl, entries]);
 }
 
 /**
@@ -163,12 +174,13 @@ function serverConfigCacheKey(
  */
 function beginSharedServerConfigFetch(
 	key: string,
+	provider: string,
 	apiKey: string,
 	baseUrl: string,
 	callerHeaders: Record<string, string> | undefined,
 ): Promise<CursorBidiAvailability> {
 	const generation = serverConfigGeneration;
-	const shared = fetchServerConfig(apiKey, baseUrl, callerHeaders).then(value => {
+	const shared = fetchServerConfig(provider, apiKey, baseUrl, callerHeaders).then(value => {
 		if (generation !== serverConfigGeneration) return value;
 		pruneExpiredCache();
 		cache.set(key, { value, expiresAt: Date.now() + CURSOR_SERVER_CONFIG_TTL_MS });
@@ -225,6 +237,7 @@ function cursorUnaryHeaders(apiKey: string, callerHeaders: Record<string, string
 }
 
 async function fetchServerConfig(
+	provider: string,
 	apiKey: string,
 	baseUrl: string,
 	callerHeaders: Record<string, string> | undefined,
@@ -240,7 +253,7 @@ async function fetchServerConfig(
 			baseUrl,
 			requestPath: GET_SERVER_CONFIG_PATH,
 			headers: cursorUnaryHeaders(apiKey, callerHeaders),
-			provider: "cursor",
+			provider,
 			signal: timeout,
 		});
 		if (!acquisition.ok) {
@@ -249,7 +262,7 @@ async function fetchServerConfig(
 			// FORCE_ALL_DISABLED remain discoverable; do not treat ALPN failure itself
 			// as a downgrade permit.
 			if (acquisition.unavailable.reason === "alpn") {
-				return await fetchServerConfigOverHttp1(apiKey, baseUrl, callerHeaders, timeout);
+				return await fetchServerConfigOverHttp1(provider, apiKey, baseUrl, callerHeaders, timeout);
 			}
 			return "unspecified";
 		}
@@ -261,6 +274,7 @@ async function fetchServerConfig(
 }
 
 async function fetchServerConfigOverHttp1(
+	provider: string,
 	apiKey: string,
 	baseUrl: string,
 	callerHeaders: Record<string, string> | undefined,
@@ -273,7 +287,7 @@ async function fetchServerConfigOverHttp1(
 		// `PI_PROXY`, or proxied deployments probe direct, observe
 		// `"unspecified"`, and lose the HTTP/1 bridge exactly where an
 		// ALPN-stripping proxy forces the downgrade.
-		const proxyUrl = proxy.getProxyForUrl("cursor", url);
+		const proxyUrl = proxy.getProxyForUrl(provider, url);
 		const response = await Bun.fetch(url, {
 			method: "POST",
 			headers: cursorUnaryHeaders(apiKey, callerHeaders),
