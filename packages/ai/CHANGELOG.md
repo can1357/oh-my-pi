@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- OpenAI Responses requests now honor per-effort `effortRouting` on custom models: one effort level can route to a sibling upstream wire model id while cost and identity stay on the configured model ([#11278](https://github.com/can1357/oh-my-pi/issues/11278)).
+
 ### Fixed
 
 - Fixed custom `google-generative-ai` providers failing mid-turn model fallback when Gemini 3 tool calls are replayed without their original thought signature ([#11270](https://github.com/can1357/oh-my-pi/issues/11270)).
