@@ -494,6 +494,101 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});
 
+	it("consults fallback when a hard-error retry hint exceeds the delay cap", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError(
+				`Devin API error: empty response body retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}`,
+				{ provider: "devin", kind: "empty-body" },
+			),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 10,
+			"retry.hardErrorSameModelRetries": 2,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Fall back instead of waiting past the cap");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	it("fails fast on an over-cap hard-error hint when no fallback is configured", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) throw new Error("Expected bundled hard-error model");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError(
+				`Devin API error: empty response body retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}`,
+				{ provider: "devin", kind: "empty-body" },
+			),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 10,
+			"retry.hardErrorSameModelRetries": 2,
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Fail instead of waiting without a fallback");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector]);
+		expect(waitSpy).not.toHaveBeenCalled();
+		expect(getLastAssistantMessage(session).errorMessage).toContain(`retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}`);
+	});
+
+	it("keeps same-model waiting unlimited when the delay cap is zero", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError(
+				`Devin API error: empty response body retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}`,
+				{ provider: "devin", kind: "empty-body" },
+			),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 0,
+			"retry.hardErrorSameModelRetries": 1,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Wait without a delay cap");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, primarySelector]);
+		expect(waitSpy).toHaveBeenCalledWith(FALLBACK_TEST_RETRY_AFTER_MS, { signal: expect.any(AbortSignal) });
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
+	});
+
 	it("retries a persistent hard error twice before consulting the fallback chain", async () => {
 		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
 		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");

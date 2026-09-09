@@ -2141,10 +2141,15 @@ export class TurnRecovery {
 		const fallbackInitialRequest = this.#retryFallbackInitialRequestPending && !classifierRefusal;
 		this.#retryFallbackInitialRequestPending = false;
 		if (!fallbackInitialRequest) this.#retryAttempt++;
+		const errorMessage = message.errorMessage || "Unknown error";
+		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 		const hardErrorSameModelRetry =
 			options?.hardErrorFallback === true &&
 			!AIError.isPayloadRejection(message) &&
-			this.#hardErrorSameModelRetryCount < retrySettings.hardErrorSameModelRetries;
+			this.#hardErrorSameModelRetryCount < retrySettings.hardErrorSameModelRetries &&
+			(retrySettings.maxDelayMs === 0 ||
+				parsedRetryAfterMs === undefined ||
+				parsedRetryAfterMs <= retrySettings.maxDelayMs);
 		if (hardErrorSameModelRetry) this.#hardErrorSameModelRetryCount++;
 		let recoveryAttempt = hardErrorSameModelRetry ? this.#hardErrorSameModelRetryCount : this.#retryAttempt;
 
@@ -2167,7 +2172,6 @@ export class TurnRecovery {
 			: retrySettings.maxRetries;
 		const retryBudgetExhausted = this.#retryAttempt > maxRetries;
 
-		const errorMessage = message.errorMessage || "Unknown error";
 		const id = this.#classifyRetryMessage(message);
 		const preserveFailedTurn =
 			options?.preserveFailedTurn === true ||
@@ -2177,7 +2181,6 @@ export class TurnRecovery {
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
-		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
 		let delayMs = staleOpenAIResponsesReplayError
 			? 0
 			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, recoveryAttempt);
