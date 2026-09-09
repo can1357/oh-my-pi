@@ -20,8 +20,6 @@ use std::{
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, error::ErrorKind};
 use indicatif::{MultiProgress, ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-use omp_core::FastHashMap;
 use omp_core::{FastHashSet, FastState};
 use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use parking_lot::Mutex;
@@ -36,7 +34,7 @@ use self::hardlink::{
 };
 #[cfg(unix)]
 use crate::support::fsutil::{display_permissions_unix, make_fifo};
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+#[cfg(target_os = "linux")]
 use crate::support::xattr as fsxattr;
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
@@ -1166,9 +1164,9 @@ fn rename_symlink_fallback(host: &mut Host, from: &Path, to: &Path) -> io::Resul
 	// must not be resolved; only the from/to operands are filesystem locations.
 	let path_symlink_points_to = fs::read_link(host.resolve(from))?;
 	unix::fs::symlink(path_symlink_points_to, host.resolve(to))?;
-	#[cfg(not(any(target_os = "macos", target_os = "redox")))]
+	#[cfg(target_os = "linux")]
 	{
-		let _ = copy_xattrs_if_supported(host, from, to);
+		let _ = copy_link_xattrs_if_supported(host, from, to);
 	}
 	fs::remove_file(host.resolve(from))
 }
@@ -1231,10 +1229,6 @@ fn rename_dir_fallback(
 		(..) => None,
 	};
 
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-	let xattrs =
-		fsxattr::retrieve_xattrs(host.resolve(from)).unwrap_or_else(|_| FastHashMap::default());
-
 	// Use directory copying (with or without hardlink support)
 	let result = copy_dir_contents(
 		host,
@@ -1249,10 +1243,12 @@ fn rename_dir_fallback(
 		display_manager,
 	);
 
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-	fsxattr::apply_xattrs(host.resolve(to), xattrs)?;
-
 	result?;
+
+	#[cfg(target_os = "linux")]
+	{
+		copy_xattrs_if_supported(host, from, to)?;
+	}
 
 	// Remove the source directory after successful copy
 	fs::remove_dir_all(host.resolve(from))?;
@@ -1435,7 +1431,7 @@ fn copy_file_with_hardlinks_helper(
 		// Copy a regular file.
 		fs::copy(host.resolve(from), host.resolve(to))?;
 		// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
-		#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+		#[cfg(target_os = "linux")]
 		{
 			let _ = copy_xattrs_if_supported(host, from, to);
 		}
@@ -1490,7 +1486,7 @@ fn rename_file_fallback(
 		.map_err(|err| io::Error::new(err.kind(), "Permission denied"))?;
 
 	// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+	#[cfg(target_os = "linux")]
 	{
 		let _ = copy_xattrs_if_supported(host, from, to);
 	}
@@ -1503,9 +1499,20 @@ fn rename_file_fallback(
 /// Copy xattrs from source to destination, ignoring ENOTSUP/EOPNOTSUPP errors.
 /// These errors indicate the filesystem doesn't support extended attributes,
 /// which is acceptable when moving files across filesystems.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+#[cfg(target_os = "linux")]
 fn copy_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
 	match fsxattr::copy_xattrs(host.resolve(from), host.resolve(to)) {
+		Ok(()) => Ok(()),
+		Err(e) if e.raw_os_error() == Some(libc::EOPNOTSUPP) => Ok(()),
+		Err(e) => Err(e),
+	}
+}
+
+/// Same as [`copy_xattrs_if_supported`] but for symlinks: the `l`-prefixed
+/// xattr syscalls operate on the link itself, never on the file it names.
+#[cfg(target_os = "linux")]
+fn copy_link_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
+	match fsxattr::copy_link_xattrs(host.resolve(from), host.resolve(to)) {
 		Ok(()) => Ok(()),
 		Err(e) if e.raw_os_error() == Some(libc::EOPNOTSUPP) => Ok(()),
 		Err(e) => Err(e),

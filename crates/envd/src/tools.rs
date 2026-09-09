@@ -190,8 +190,8 @@ pub struct RegistryBridges {
 	pub goal_control:           Option<Arc<dyn GoalAuthority>>,
 	/// Auxiliary inference used by workspace search and media tools.
 	pub search:                 Option<Arc<dyn SearchInference>>,
-	/// Active model identity captured by edit regression observation.
-	pub edit_model:             Option<Str>,
+	/// Shared active model identity captured by edit regression observation.
+	pub edit_model:             Option<omp_tools::edit::observer::EditBlackboxModel>,
 	/// Typed small-model completion bridge for validated edit auto-repair.
 	pub edit_repair:            Option<omp_tools::edit::observer::EditRepairClient>,
 	/// Host-resource broker used by composition-owned internal resource URLs.
@@ -4254,6 +4254,24 @@ fn managed_skills_enabled(con: &Ctx, autolearn_enabled: bool) -> bool {
 	autolearn_enabled && crate::SV_SKILLS_ENABLED.get(con)
 }
 
+/// Resolves the automatic edit-repair client for one production registry.
+///
+/// An explicitly supplied bridge client wins; otherwise the
+/// invocation-scoped completion route is used. Disabling auto-repair
+/// drops both.
+pub(crate) fn resolve_edit_repair(
+	enabled: bool,
+	bridge: Option<omp_tools::edit::observer::EditRepairClient>,
+) -> Option<omp_tools::edit::observer::EditRepairClient> {
+	enabled.then(|| {
+		bridge
+			.unwrap_or_else(|| {
+				omp_tools::edit::observer::EditRepairClient::from_completion(invocation_edit_repair)
+			})
+			.with_model_identity(invocation_edit_model)
+	})
+}
+
 /// Builds the complete registry shared by environment dispatch and the agent.
 ///
 /// Resource adapters are cloned into their typed executors. Worker declarations
@@ -4492,13 +4510,14 @@ pub(crate) fn production_registry<
 	if tool_settings.enabled("read") {
 		environment_registry(&mut registry, read, essential_presentation(policy), core_claims())?;
 	}
-	let edit_repair = tool_settings.edit_auto_repair.then(|| {
-		edit_repair
-			.unwrap_or_else(|| {
-				omp_tools::edit::observer::EditRepairClient::from_completion(invocation_edit_repair)
-			})
-			.with_model_identity(invocation_edit_model)
-	});
+
+	let edit_model = match edit_model {
+		Some(model) => model,
+		None => omp_tools::edit::observer::EditBlackboxModel::new(
+			configured_model_identity(con).unwrap_or_else(|| sf!("unknown")),
+		),
+	};
+	let edit_repair = resolve_edit_repair(tool_settings.edit_auto_repair, edit_repair);
 	let edit_observer = omp_tools::edit::observer::EditObserver::new(
 		omp_tools::edit::observer::EditBlackboxConfig {
 			path: tool_settings.edit_blackbox_path.as_ref().map(|path| {
@@ -4508,11 +4527,9 @@ pub(crate) fn production_registry<
 					workspace.root().join(path)
 				}
 			}),
-			model: edit_model
-				.or_else(|| configured_model_identity(con))
-				.unwrap_or_else(|| sf!("unknown")),
 			..omp_tools::edit::observer::EditBlackboxConfig::default()
 		},
+		edit_model,
 		edit_repair,
 	);
 	let mut hashline_edit = Some(omp_tools::edit::tool_with_observer(
@@ -6157,6 +6174,87 @@ mod tests {
 		assert_eq!(first, Some(sf!("model-a")));
 		assert_eq!(second, Some(sf!("model-b")));
 		assert_eq!(invocation_edit_model(), None);
+	}
+
+	/// A syntactically invalid Rust region to hand the repair route.
+	fn repair_prompt() -> omp_tools::edit::observer::EditRepairPrompt {
+		omp_tools::edit::observer::EditRepairPrompt {
+			language:         sf!("rust"),
+			before:           Str::new_static("fn ok() {}"),
+			after:            Str::new_static("fn bad( {}"),
+			previous_attempt: None,
+		}
+	}
+
+	/// Bound for one repair round-trip so a misrouted client fails fast.
+	const REPAIR_REQUEST_WAIT: time::Duration = time::Duration::from_secs(5);
+
+	/// Answers the next queued repair request, echoing the prompt it carries.
+	async fn answer_next_repair(
+		requests: flume::Receiver<omp_tools::edit::observer::EditRepairRequest>,
+		repaired: Str,
+	) -> omp_tools::edit::observer::EditRepairPrompt {
+		let timeout = tokio::time::timeout(REPAIR_REQUEST_WAIT, requests.recv_async());
+		let request = timeout
+			.await
+			.expect("the resolved client must route one repair request")
+			.expect("the repair request stream must stay open");
+		request
+			.reply
+			.send(Ok(repaired))
+			.expect("the repair reply channel must be open");
+		request.prompt
+	}
+
+	/// Resolves inside the invocation scope and round-trips one repair request.
+	async fn resolve_and_round_trip(
+		bridge: Option<omp_tools::edit::observer::EditRepairClient>,
+		requests: flume::Receiver<omp_tools::edit::observer::EditRepairRequest>,
+		repaired: Str,
+	) -> (
+		Result<Str, omp_tools::edit::observer::EditRepairError>,
+		omp_tools::edit::observer::EditRepairPrompt,
+	) {
+		let client = resolve_edit_repair(true, bridge)
+			.expect("enabled auto-repair must never resolve to no client");
+		let requested = client.complete(repair_prompt());
+		let answered = answer_next_repair(requests, repaired);
+		tokio::join!(requested, answered)
+	}
+
+	#[tokio::test]
+	async fn resolve_edit_repair_falls_back_to_the_invocation_route() {
+		let (route, requests) = omp_tools::edit::observer::EditRepairClient::channel();
+		let (reply, echoed) = with_edit_repair_scope(
+			InvocationEditRepairContext::new(Some(route), Some(sf!("model-a"))),
+			resolve_and_round_trip(None, requests, sf!("fixed")),
+		)
+		.await;
+		assert_eq!(reply, Ok(sf!("fixed")));
+		assert_eq!(echoed, repair_prompt());
+	}
+
+	#[tokio::test]
+	async fn resolve_edit_repair_prefers_the_explicit_bridge_client() {
+		let (route, route_requests) = omp_tools::edit::observer::EditRepairClient::channel();
+		let (explicit, requests) = omp_tools::edit::observer::EditRepairClient::channel();
+		let (reply, echoed) = with_edit_repair_scope(
+			InvocationEditRepairContext::new(Some(route), Some(sf!("model-a"))),
+			resolve_and_round_trip(Some(explicit), requests, sf!("host")),
+		)
+		.await;
+		assert_eq!(reply, Ok(sf!("host")));
+		assert_eq!(echoed, repair_prompt());
+		assert!(route_requests.is_empty(), "the invocation fallback must stay unused");
+	}
+
+	#[test]
+	fn resolve_edit_repair_returns_no_client_when_disabled() {
+		let (_route, requests) = omp_tools::edit::observer::EditRepairClient::channel();
+		let (explicit, explicit_requests) = omp_tools::edit::observer::EditRepairClient::channel();
+		assert!(resolve_edit_repair(false, None).is_none());
+		assert!(resolve_edit_repair(false, Some(explicit)).is_none());
+		assert!(requests.is_empty() && explicit_requests.is_empty());
 	}
 
 	#[test]

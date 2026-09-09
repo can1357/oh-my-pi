@@ -57,13 +57,38 @@ pub struct EditBlackboxRecord {
 	pub args:   serde_json::Value,
 }
 
+/// Shared active model identity for edit observation.
+#[derive(Clone, Debug)]
+pub struct EditBlackboxModel(Arc<parking_lot::RwLock<Str>>);
+
+impl EditBlackboxModel {
+	/// Creates a shared model identity.
+	pub fn new(model: Str) -> Self {
+		Self(Arc::new(parking_lot::RwLock::new(model)))
+	}
+
+	/// Replaces the active model identity before subsequent edit records.
+	pub fn set(&self, model: Str) {
+		*self.0.write() = model;
+	}
+
+	/// Returns the active model identity for edit attribution.
+	pub fn current(&self) -> Str {
+		self.0.read().clone()
+	}
+}
+
+impl Default for EditBlackboxModel {
+	fn default() -> Self {
+		Self::new(sf!("unknown"))
+	}
+}
+
 /// Optional valid-to-invalid recorder configuration.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct EditBlackboxConfig {
 	/// JSONL destination. Absence disables recording.
 	pub path:             Option<PathBuf>,
-	/// Active model identity captured with each record.
-	pub model:            Str,
 	/// Maximum bytes retained from each source image.
 	pub max_source_bytes: usize,
 	/// Maximum serialized invocation-argument bytes.
@@ -74,7 +99,6 @@ impl Default for EditBlackboxConfig {
 	fn default() -> Self {
 		Self {
 			path:             None,
-			model:            sf!("unknown"),
 			max_source_bytes: DEFAULT_CAPTURE_BYTES,
 			max_args_bytes:   DEFAULT_ARGS_BYTES,
 		}
@@ -234,6 +258,7 @@ impl EditRepairClient {
 #[derive(Clone, Debug, Default)]
 pub struct EditObserver {
 	blackbox:    Arc<EditBlackboxConfig>,
+	model:       EditBlackboxModel,
 	auto_repair: Option<EditRepairClient>,
 	append_lock: Arc<parking_lot::Mutex<()>>,
 }
@@ -241,9 +266,14 @@ pub struct EditObserver {
 impl EditObserver {
 	/// Constructs an observer. `None` blackbox path and repair client disable
 	/// all work.
-	pub fn new(blackbox: EditBlackboxConfig, auto_repair: Option<EditRepairClient>) -> Self {
+	pub fn new(
+		blackbox: EditBlackboxConfig,
+		model: EditBlackboxModel,
+		auto_repair: Option<EditRepairClient>,
+	) -> Self {
 		Self {
 			blackbox: Arc::new(blackbox),
+			model,
 			auto_repair,
 			append_lock: Arc::new(parking_lot::Mutex::new(())),
 		}
@@ -260,17 +290,15 @@ impl EditObserver {
 		let Some(language) = parse_regression_language(&snapshot) else {
 			return EditInspection { content: snapshot.after, diag: None, pending: None };
 		};
-		let pending = self.blackbox.path.as_ref().map(|_| PendingBlackbox {
-			record: bounded_record(
-				&snapshot,
-				mode,
-				args,
-				&self.blackbox,
-				self
-					.auto_repair
-					.as_ref()
-					.and_then(EditRepairClient::model_identity),
-			),
+		let pending = self.blackbox.path.as_ref().map(|_| {
+			let model = self
+				.auto_repair
+				.as_ref()
+				.and_then(EditRepairClient::model_identity)
+				.unwrap_or_else(|| self.model.current());
+			PendingBlackbox {
+				record: bounded_record(&snapshot, mode, args, &self.blackbox, model),
+			}
 		});
 		if let Some(client) = &self.auto_repair
 			&& let Some(repaired) = repair_parse_regression(&snapshot, client).await
@@ -387,13 +415,13 @@ fn bounded_record(
 	mode: &str,
 	args: &serde_json::Value,
 	config: &EditBlackboxConfig,
-	model: Option<Str>,
+	model: Str,
 ) -> EditBlackboxRecord {
 	EditBlackboxRecord {
 		path:   snapshot.path.clone(),
 		before: capture(&snapshot.before, config.max_source_bytes),
 		after:  capture(&snapshot.after, config.max_source_bytes),
-		model:  model.unwrap_or_else(|| config.model.clone()),
+		model,
 		mode:   Str::new(mode),
 		args:   bounded_args(args, config.max_args_bytes),
 	}
@@ -667,17 +695,17 @@ mod tests {
 		);
 		let temp = tempdir().expect("tempdir");
 		let log = temp.path().join("blackbox.jsonl");
-		let (client, requests) = EditRepairClient::channel();
-		drop(requests);
+		let model = EditBlackboxModel::new(sf!("openai/launch"));
 		let observer = EditObserver::new(
 			EditBlackboxConfig {
 				path:             Some(log.clone()),
-				model:            sf!("openai/test"),
 				max_source_bytes: 24,
 				max_args_bytes:   16,
 			},
-			Some(client),
+			model.clone(),
+			None,
 		);
+		model.set(sf!("openai/revived"));
 		for mode in ["hashline", "replace", "patch", "apply_patch", "sloppy"] {
 			let inspected = observer
 				.inspect(
@@ -707,7 +735,7 @@ mod tests {
 			["hashline", "replace", "patch", "apply_patch", "sloppy"]
 		);
 		let record = &records[1];
-		assert_eq!(record.model, "openai/test");
+		assert_eq!(record.model, "openai/revived");
 		assert_eq!(record.mode, "replace");
 		assert!(record.before.truncated);
 		assert_eq!(record.args["truncated"], true);
@@ -728,9 +756,9 @@ mod tests {
 		let observer = EditObserver::new(
 			EditBlackboxConfig {
 				path: Some(PathBuf::from("unused.jsonl")),
-				model: sf!("registry/model"),
 				..EditBlackboxConfig::default()
 			},
+			EditBlackboxModel::new(sf!("registry/model")),
 			Some(client),
 		);
 
@@ -789,7 +817,11 @@ mod tests {
 				.await
 				.expect("reply");
 		});
-		let observer = EditObserver::new(EditBlackboxConfig::default(), Some(client));
+		let observer = EditObserver::new(
+			EditBlackboxConfig::default(),
+			EditBlackboxModel::default(),
+			Some(client),
+		);
 		let inspected = observer
 			.inspect(snapshot(INVALID), "replace", &serde_json::Value::Null)
 			.await;
@@ -810,7 +842,11 @@ mod tests {
 					.expect("reply");
 			}
 		});
-		let observer = EditObserver::new(EditBlackboxConfig::default(), Some(client));
+		let observer = EditObserver::new(
+			EditBlackboxConfig::default(),
+			EditBlackboxModel::default(),
+			Some(client),
+		);
 		let inspected = observer
 			.inspect(snapshot(INVALID), "replace", &serde_json::Value::Null)
 			.await;

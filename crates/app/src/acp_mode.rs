@@ -6,6 +6,7 @@ use miette::{IntoDiagnostic as _, miette};
 use omp_agent::{
 	ApprovalDecision, ApprovalScope, ApprovalSource, Inference, Kernel, RunControl, TurnInput, Up,
 };
+use omp_catalog::{ModelKey, ThinkingEffort, clamp_thinking_effort, snapshot};
 use omp_core::{Str, base64};
 use omp_driver::{headless::kernel::SessionHome, sessions::SessionIndex};
 use omp_session::{AttachmentInput, Session, SessionError};
@@ -1253,6 +1254,50 @@ fn error(id: Value, code: i64, message: &str) -> Value {
 	json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
 }
 
+fn validate_thinking_for_model(
+	catalog: &snapshot::Catalog,
+	model: &str,
+	requested: &str,
+) -> miette::Result<()> {
+	if matches!(requested, "auto" | "none") {
+		return Ok(());
+	}
+	let _ = resolve_thinking_effort(catalog, model, requested)?;
+	Ok(())
+}
+
+fn clamp_thinking_level(
+	catalog: &snapshot::Catalog,
+	model: &str,
+	requested: &str,
+) -> miette::Result<&'static str> {
+	if matches!(requested, "auto" | "none") {
+		return Ok(if requested == "none" { "none" } else { "auto" });
+	}
+	let effort = resolve_thinking_effort(catalog, model, requested)?;
+	Ok(<&'static str>::from(effort))
+}
+
+fn resolve_thinking_effort(
+	catalog: &snapshot::Catalog,
+	model: &str,
+	requested: &str,
+) -> miette::Result<ThinkingEffort> {
+	let requested = requested
+		.parse::<ThinkingEffort>()
+		.map_err(|_| miette!("unknown thinking level `{requested}`"))?;
+	let model = catalog
+		.model(ModelKey::from_ref(model))
+		.ok_or_else(|| miette!("unknown model `{model}`"))?;
+	let policy = model
+		.thinking
+		.as_ref()
+		.and_then(|id| catalog.thinking_policy(id))
+		.ok_or_else(|| miette!("model `{}` does not support thinking", model.key))?;
+	clamp_thinking_effort(policy, Some(requested), None)
+		.ok_or_else(|| miette!("model `{}` has no compatible thinking level", model.key))
+}
+
 #[cfg(test)]
 mod tests {
 	use super::*;
@@ -1343,5 +1388,61 @@ mod tests {
 		.expect("an image-only prompt is a valid turn");
 		assert!(image_only.text.is_empty());
 		assert_eq!(image_only.images.len(), 1);
+	}
+
+	#[test]
+	fn acp_pre_open_thinking_validation_rejects_unknown_level() {
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
+		let error =
+			validate_thinking_for_model(catalog, "apple-intelligence/apple-intelligence", "bogus")
+				.expect_err("unknown level rejected");
+		assert!(error.to_string().contains("unknown thinking level"));
+	}
+
+	#[test]
+	fn acp_pre_open_thinking_validation_accepts_auto_and_none() {
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
+		validate_thinking_for_model(catalog, "apple-intelligence/apple-intelligence", "auto")
+			.expect("auto valid");
+		validate_thinking_for_model(catalog, "apple-intelligence/apple-intelligence", "none")
+			.expect("none valid");
+	}
+
+	#[test]
+	fn acp_thinking_clamp_preserves_auto_and_none() {
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
+		assert_eq!(
+			clamp_thinking_level(catalog, "apple-intelligence/apple-intelligence", "auto").unwrap(),
+			"auto"
+		);
+		assert_eq!(
+			clamp_thinking_level(catalog, "apple-intelligence/apple-intelligence", "none").unwrap(),
+			"none"
+		);
+	}
+
+	#[test]
+	fn acp_thinking_clamp_requires_a_catalog_governing_the_model() {
+		let catalog = snapshot::Catalog::try_embedded().expect("catalog");
+		let levels = ["minimal", "low", "medium", "high", "xhigh", "max"];
+		let (key, requested, clamped) = catalog
+			.models()
+			.iter()
+			.find_map(|model| {
+				levels.iter().find_map(|level| {
+					clamp_thinking_level(catalog, model.key.as_str(), level)
+						.ok()
+						.map(|clamped| (model.key.clone(), *level, clamped))
+				})
+			})
+			.expect("a catalog model with a resolvable thinking policy");
+		assert_eq!(clamp_thinking_level(catalog, key.as_str(), requested).expect("clamped"), clamped);
+		// A catalog snapshot that predates the opened model — the stale
+		// outer-catalog failure mode — cannot clamp the session's effective
+		// model, which is why the post-open clamp must consult the opened
+		// session's own catalog.
+		let error = clamp_thinking_level(catalog, "nonexistent/unavailable", requested)
+			.expect_err("model outside the consulted catalog");
+		assert!(error.to_string().contains("unknown model"));
 	}
 }

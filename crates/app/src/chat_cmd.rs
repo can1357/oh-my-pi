@@ -1755,6 +1755,7 @@ pub(crate) fn set_plan_mode(
 			session,
 			omp_agent::directors::plan::Plan::new(omp_chat::commands::plan::DEFAULT_PLAN),
 		);
+
 	}
 	stack.pause(session, PLAN)?;
 	Ok(())
