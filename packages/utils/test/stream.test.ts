@@ -1,6 +1,7 @@
 import { describe, expect, it, spyOn } from "bun:test";
 import { sanitizeText } from "@oh-my-pi/pi-utils/sanitize-text";
 import {
+	ConcatSink,
 	parseJsonlLenient,
 	readJsonl,
 	readLines,
@@ -143,6 +144,54 @@ describe("readJsonl", () => {
 
 		const output = await collectAsync(readJsonl(readable));
 		expect(output).toEqual([{ z: 9 }]);
+	});
+});
+
+describe("ConcatSink", () => {
+	const text = (sink: ConcatSink) => new TextDecoder().decode(sink.flush());
+
+	it("accumulates appended chunks in order", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abc"));
+		sink.append(encoder.encode("de"));
+		expect(sink.isEmpty).toBe(false);
+		expect(text(sink)).toBe("abcde");
+	});
+
+	it("keeps the remainder after consuming a prefix", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abcde"));
+		sink.consume(2);
+		expect(text(sink)).toBe("cde");
+		sink.append(encoder.encode("fg"));
+		expect(text(sink)).toBe("cdefg");
+	});
+
+	it("empties when consuming at or past the buffered length", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abc"));
+		sink.consume(3);
+		expect(sink.isEmpty).toBe(true);
+		expect(sink.flush()).toBeUndefined();
+
+		sink.append(encoder.encode("xy"));
+		sink.consume(99);
+		expect(sink.isEmpty).toBe(true);
+	});
+
+	it("ignores non-positive consume counts", () => {
+		const sink = new ConcatSink();
+		sink.append(encoder.encode("abc"));
+		sink.consume(0);
+		sink.consume(-5);
+		expect(text(sink)).toBe("abc");
+	});
+
+	it("preserves multibyte sequences split across appends", () => {
+		const bytes = encoder.encode("é🚀");
+		const sink = new ConcatSink();
+		for (const byte of bytes) sink.append(new Uint8Array([byte]));
+		expect(text(sink)).toBe("é🚀");
 	});
 });
 

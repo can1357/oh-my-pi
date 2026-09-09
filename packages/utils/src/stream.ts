@@ -56,11 +56,16 @@ export async function* readJsonl<T>(stream: ReadableStream<Uint8Array>, signal?:
 	}
 }
 
-// =============================================================================
-// SSE (Server-Sent Events)
-// =============================================================================
-
-class ConcatSink {
+/**
+ * Amortized byte accumulator for chunked stream readers.
+ *
+ * Holds the unconsumed tail of a stream in a single growing `Buffer` so that
+ * appending N chunks costs O(total bytes) instead of re-copying the whole
+ * prefix per chunk. Backs {@link readLines}, {@link readJsonl} and
+ * {@link readSseEvents}; also usable directly when a reader needs its own
+ * framing loop (see `consume` and `flush`).
+ */
+export class ConcatSink {
 	#space?: Buffer;
 	#length = 0;
 
@@ -100,9 +105,24 @@ class ConcatSink {
 		return this.#length === 0;
 	}
 
+	/**
+	 * The buffered bytes as a live view — invalidated by the next `append`,
+	 * `reset` or `consume`.
+	 */
 	flush(): Uint8Array | undefined {
 		if (!this.#length) return undefined;
 		return this.#space!.subarray(0, this.#length);
+	}
+
+	/** Drop the first `count` buffered bytes, keeping the remainder. */
+	consume(count: number) {
+		if (count <= 0) return;
+		if (count >= this.#length) {
+			this.#length = 0;
+			return;
+		}
+		this.#space!.copyWithin(0, count, this.#length);
+		this.#length -= count;
 	}
 
 	clear() {
@@ -196,6 +216,10 @@ class ConcatSink {
 		this.#length = rem;
 	}
 }
+
+// =============================================================================
+// SSE (Server-Sent Events)
+// =============================================================================
 
 /**
  * Stream parsed JSON objects from SSE `data:` lines.
