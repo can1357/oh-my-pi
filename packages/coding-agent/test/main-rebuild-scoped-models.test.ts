@@ -414,6 +414,62 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 		expect(refreshed).toBe(false);
 		expect(registry.refreshProviderCalls).toEqual([]);
 	});
+
+	it("refreshes when a colon-bearing literal id is missing even if the base id is cold-cached", async () => {
+		// OpenRouter-style `:free` is not a thinking suffix — stripping it would
+		// falsely treat the base row as satisfying the requested tier.
+		const registry = new FakeRegistry([
+			buildModel({
+				id: "deepseek/deepseek-v4-flash",
+				name: "deepseek-v4-flash",
+				api: "openai-completions",
+				provider: "kilo",
+				baseUrl: "https://example.com",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 8_192,
+			}),
+		]);
+		registry.discoverableProviders = ["kilo"];
+
+		const refreshed = await refreshCredentialScopedModelIfMissing(
+			{ model: "kilo/deepseek/deepseek-v4-flash:free" },
+			registry,
+			"kilo",
+		);
+
+		expect(refreshed).toBe(true);
+		expect(registry.refreshProviderCalls).toEqual([{ providerId: "kilo", strategy: "online-if-uncached" }]);
+	});
+
+	it("still treats a recognized :high thinking suffix as present when the base id is cold-cached", async () => {
+		const registry = new FakeRegistry([
+			buildModel({
+				id: "sand-default",
+				name: "sand-default",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 8_192,
+			}),
+		]);
+		registry.discoverableProviders = ["grokbot"];
+
+		const refreshed = await refreshCredentialScopedModelIfMissing(
+			{ model: "grokbot/sand-default:high" },
+			registry,
+			"grokbot",
+		);
+
+		expect(refreshed).toBe(false);
+		expect(registry.refreshProviderCalls).toEqual([]);
+	});
 });
 
 describe("buildSessionOptions --models scope selection", () => {

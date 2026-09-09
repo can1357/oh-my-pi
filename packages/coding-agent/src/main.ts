@@ -44,6 +44,7 @@ import {
 	resolveCliModel,
 	resolveModelRoleValue,
 	resolveModelScope,
+	splitModelThinkingSuffix,
 	type ScopedModel,
 } from "./config/model-resolver";
 import { ModelsConfigFile } from "./config/models-config";
@@ -919,19 +920,30 @@ export async function refreshCredentialScopedModelIfMissing(
 	const selectors = credentialScopedRefreshSelectors(parsed, providerId);
 	if (selectors.length === 0) return false;
 	const available = modelRegistry.getAvailable();
-	const allPresent = selectors.every(raw => {
-		const withoutThinking = raw.includes(":") ? raw.slice(0, raw.indexOf(":")) : raw;
-		const slash = withoutThinking.indexOf("/");
-		const bare = slash >= 0 ? withoutThinking.slice(slash + 1) : withoutThinking;
-		return available.some(
-			model =>
-				model.provider === providerId &&
-				(model.id === bare || model.id === withoutThinking || `${model.provider}/${model.id}` === withoutThinking),
-		);
-	});
+	const allPresent = selectors.every(raw => credentialScopedSelectorPresent(raw, providerId, available));
 	if (allPresent) return false;
 	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
 	return true;
+}
+
+/** Exact id match first; only strip a recognized trailing thinking suffix. */
+function credentialScopedSelectorPresent(raw: string, providerId: string, available: readonly Model[]): boolean {
+	const trimmed = raw.trim();
+	if (!trimmed) return false;
+	const matches = (id: string) =>
+		available.some(
+			model => model.provider === providerId && (model.id === id || `${model.provider}/${model.id}` === id),
+		);
+	const slash = trimmed.indexOf("/");
+	const bare = slash >= 0 ? trimmed.slice(slash + 1) : trimmed;
+	// Literal colon-bearing tiers (e.g. `deepseek-v4-flash:free`) must hit exactly
+	// before any suffix stripping — otherwise a cold base row skips refresh.
+	if (matches(trimmed) || matches(bare)) return true;
+	const { base, level } = splitModelThinkingSuffix(trimmed);
+	if (!level || base === trimmed) return false;
+	const baseSlash = base.indexOf("/");
+	const baseBare = baseSlash >= 0 ? base.slice(baseSlash + 1) : base;
+	return matches(base) || matches(baseBare);
 }
 
 /** models.yml/runtime discovery OR a built-in catalog model-manager descriptor. */

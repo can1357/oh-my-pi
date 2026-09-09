@@ -1433,6 +1433,47 @@ describe("grokbot incomplete tool calls", () => {
 		]);
 	});
 
+	test("normalizes Write contents alias for customWireName extension owners", async () => {
+		mockAuth();
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "w1",
+					toolName: "Write",
+					args: '{"path":"/tmp/x","contents":"tools-pong"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(complete, trailer)) as FetchImpl;
+		const writeContext: Context = {
+			messages: [{ role: "user", content: "write", timestamp: 1 }],
+			tools: [
+				{
+					name: "save",
+					description: "extension write",
+					customWireName: "Write",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" }, content: { type: "string" } },
+						required: ["path", "content"],
+					},
+				},
+			],
+		};
+
+		const result = await streamGrokBot(model, writeContext, { apiKey: "renew", fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("toolUse");
+		expect(result.content).toEqual([
+			expect.objectContaining({
+				type: "toolCall",
+				name: "save",
+				arguments: expect.objectContaining({ path: "/tmp/x", content: "tools-pong" }),
+			}),
+		]);
+	});
+
 	test("synthesizes totalTokens from extendedUsage including cache buckets", async () => {
 		mockAuth();
 		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "hi", isFinal: true } }));

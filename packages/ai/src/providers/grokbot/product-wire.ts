@@ -199,6 +199,15 @@ function withRequiredPropertyAlias(
 	};
 }
 
+/** Clone canonical property constraints onto an alias key; override description. */
+function propertyAliasFromCanonical(canonical: unknown, aliasDescription: string): Record<string, unknown> {
+	const base =
+		canonical && typeof canonical === "object" && !Array.isArray(canonical)
+			? { ...(canonical as Record<string, unknown>) }
+			: { type: "string" };
+	return { ...base, description: aliasDescription.trim() };
+}
+
 function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 	if (!tool || typeof tool !== "object") return undefined;
 	const name = typeof tool.name === "string" ? tool.name : "";
@@ -221,10 +230,7 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 					...schema,
 					properties: {
 						...props,
-						contents: {
-							type: "string",
-							description: writeContentsAliasDescription.trim(),
-						},
+						contents: propertyAliasFromCanonical(props.content, writeContentsAliasDescription),
 					},
 				},
 				"content",
@@ -240,10 +246,7 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 					...parametersSchema,
 					properties: {
 						...props,
-						target_file: {
-							type: "string",
-							description: readTargetFileAliasDescription.trim(),
-						},
+						target_file: propertyAliasFromCanonical(props.path, readTargetFileAliasDescription),
 					},
 				},
 				"path",

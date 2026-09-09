@@ -357,6 +357,36 @@ describe("product wire helpers", () => {
 		expect((schema?.properties?.contents as { description?: string })?.description).toContain("alias of content");
 	});
 
+	test("Write contents alias clones canonical property constraints", () => {
+		const tools = toProductField2Tools(
+			[
+				{
+					name: "write",
+					description: "write file",
+					parameters: {
+						type: "object",
+						properties: {
+							path: { type: "string" },
+							content: { type: "string", enum: ["a", "b"], minLength: 1 },
+						},
+						required: ["path", "content"],
+					},
+				},
+			],
+			"automation",
+		);
+		const schema = (
+			tools[0]?.parameters as {
+				jsonSchema?: { properties?: Record<string, Record<string, unknown>> };
+			}
+		).jsonSchema;
+		const contents = schema?.properties?.contents;
+		expect(contents?.enum).toEqual(["a", "b"]);
+		expect(contents?.minLength).toBe(1);
+		expect(contents?.type).toBe("string");
+		expect(String(contents?.description ?? "")).toContain("alias of content");
+	});
+
 	test("Read alias preserves preexisting anyOf required groups via allOf", () => {
 		const tools = toProductField2Tools(
 			[

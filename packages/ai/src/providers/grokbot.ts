@@ -666,23 +666,39 @@ function contextEndsWithWriteToolResult(context: Context): boolean {
 }
 
 /** Gemini/Cursor Write often emits `contents` instead of omp `content`. */
-function normalizeProductWriteArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
-	if (toSandField2Name(name) !== "Write" && !/^(write|Write|edit)$/i.test(name)) return args;
+function normalizeProductWriteArgs(
+	name: string,
+	args: Record<string, unknown>,
+	grammarTools?: Map<string, ProductWireToolIndexMeta>,
+): Record<string, unknown> {
+	const meta = grammarTools?.get(name);
+	const wire = meta?.productWireName || meta?.customWireName || toSandField2Name(name);
+	if (wire !== "Write" && !/^(write|Write|edit)$/i.test(name)) return args;
 	if (typeof args.content === "string") return args;
 	if (typeof args.contents === "string") return { ...args, content: args.contents };
 	return args;
 }
 
 /** Cursor Read sometimes emits `target_file` instead of omp `path`. */
-function normalizeProductReadArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
-	if (toSandField2Name(name) !== "Read" && !/^(read|Read)$/i.test(name)) return args;
+function normalizeProductReadArgs(
+	name: string,
+	args: Record<string, unknown>,
+	grammarTools?: Map<string, ProductWireToolIndexMeta>,
+): Record<string, unknown> {
+	const meta = grammarTools?.get(name);
+	const wire = meta?.productWireName || meta?.customWireName || toSandField2Name(name);
+	if (wire !== "Read" && !/^(read|Read)$/i.test(name)) return args;
 	if (typeof args.path === "string") return args;
 	if (typeof args.target_file === "string") return { ...args, path: args.target_file };
 	return args;
 }
 
-function normalizeProductToolArgs(name: string, args: Record<string, unknown>): Record<string, unknown> {
-	return normalizeProductReadArgs(name, normalizeProductWriteArgs(name, args));
+function normalizeProductToolArgs(
+	name: string,
+	args: Record<string, unknown>,
+	grammarTools?: Map<string, ProductWireToolIndexMeta>,
+): Record<string, unknown> {
+	return normalizeProductReadArgs(name, normalizeProductWriteArgs(name, args, grammarTools), grammarTools);
 }
 
 function uniqueToolStates(toolStates: Map<string, GrokbotToolState>): GrokbotToolState[] {
@@ -1274,6 +1290,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					state.block.arguments = normalizeProductToolArgs(
 						state.block.name,
 						parseCompletedToolArgs(state.argsText, state.isGrammar),
+						grammarTools,
 					);
 					clearStreamingPartialJson(state.block);
 					state.ended = true;

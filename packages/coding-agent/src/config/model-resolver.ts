@@ -155,6 +155,17 @@ function splitThinkingSuffix(
 	return level ? { base: pattern.slice(0, colonIdx), level } : { base: pattern };
 }
 
+/**
+ * Strip a trailing `:thinking` / `:max` / `:auto` suffix when recognized.
+ * Literal colon-bearing model ids (e.g. OpenRouter `:free`) are left intact.
+ */
+export function splitModelThinkingSuffix(pattern: string): {
+	base: string;
+	level?: ConfiguredThinkingLevel;
+} {
+	return splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
+}
+
 function matchingGlobModels(pattern: string, availableModels: readonly Model<Api>[]): Model<Api>[] {
 	const glob = new Bun.Glob(pattern.toLowerCase());
 	return availableModels.filter(model => {
