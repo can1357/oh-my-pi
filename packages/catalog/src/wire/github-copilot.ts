@@ -1,4 +1,5 @@
 import { USER_AGENT } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "@oh-my-pi/pi-utils/lru";
 import type { FetchImpl } from "../types";
 import { isRecord } from "../utils";
 
@@ -30,17 +31,25 @@ export const COPILOT_CHAT_IDENTITY_HEADERS = {
 	"Openai-Intent": "conversation-edits",
 } as const;
 
-const copilotCliDisabledTokens = new Set<string>();
+const copilotCliDisabledTokens = new LRUCache<string, boolean>({ max: 64, ttl: 24 * 60 * 60 * 1000 });
 
 export function markCopilotCliDisabled(token?: string): void {
 	if (token?.trim()) {
-		copilotCliDisabledTokens.add(token.trim());
+		copilotCliDisabledTokens.set(token.trim(), true);
 	}
 }
 
 export function isCopilotCliDisabled(token?: string): boolean {
 	if (!token?.trim()) return false;
-	return copilotCliDisabledTokens.has(token.trim());
+	return copilotCliDisabledTokens.get(token.trim()) === true;
+}
+
+export function clearCopilotCliDisabled(token?: string): void {
+	if (token?.trim()) {
+		copilotCliDisabledTokens.delete(token.trim());
+	} else {
+		copilotCliDisabledTokens.clear();
+	}
 }
 
 export function getCopilotCapiIdentityHeaders(options?: { cliDisabled?: boolean }): Record<string, string> {
@@ -93,6 +102,18 @@ export function sanitizeCopilotHeaders(headers?: Readonly<Record<string, string>
 	}
 	return result;
 }
+function getHeaderCaseInsensitive(
+	headers: Readonly<Record<string, string>> | undefined,
+	name: string,
+): string | undefined {
+	if (!headers) return undefined;
+	const lower = name.toLowerCase();
+	for (const key of Object.keys(headers)) {
+		if (key.toLowerCase() === lower) return headers[key];
+	}
+	return undefined;
+}
+
 /** Preserve model-specific headers while enforcing the current Copilot API identity. */
 export function mergeCopilotApiHeaders(
 	headers?: Readonly<Record<string, string>>,
@@ -100,7 +121,15 @@ export function mergeCopilotApiHeaders(
 ): Record<string, string> {
 	const baseIdentity = getCopilotCapiIdentityHeaders(options);
 	const custom = sanitizeCopilotHeaders(headers);
-	return { ...custom, ...baseIdentity, "X-GitHub-Api-Version": COPILOT_API_VERSION };
+	const initiator = getHeaderCaseInsensitive(headers, "x-initiator");
+	const interactionType = getHeaderCaseInsensitive(headers, "x-interaction-type");
+	return {
+		...custom,
+		...baseIdentity,
+		"X-GitHub-Api-Version": COPILOT_API_VERSION,
+		...(initiator ? { "X-Initiator": initiator } : {}),
+		...(interactionType ? { "X-Interaction-Type": interactionType } : {}),
+	};
 }
 
 type GitHubCopilotApiKeyPayload = {

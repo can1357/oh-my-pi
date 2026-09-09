@@ -2932,6 +2932,9 @@ const streamAnthropicOnce = (
 							kind: "output",
 						});
 					}
+					if (hasFallenBackToCopilotChat && copilotApiKey) {
+						markCopilotCliDisabled(copilotApiKey);
+					}
 					break;
 				} catch (streamError) {
 					const streamFailure = activeAbortTracker.getLocalAbortReason() ?? streamError;
@@ -3059,7 +3062,6 @@ const streamAnthropicOnce = (
 						AIError.status(streamFailure) === 403
 					) {
 						hasFallenBackToCopilotChat = true;
-						markCopilotCliDisabled(copilotApiKey);
 						cliDisabled = true;
 						copilotDynamicHeaders = buildCopilotDynamicHeaders({
 							messages: context.messages,

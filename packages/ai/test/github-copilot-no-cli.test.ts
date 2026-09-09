@@ -4,7 +4,7 @@ import { streamOpenAICompletions } from "@oh-my-pi/pi-ai/providers/openai-comple
 import { streamOpenAIResponses } from "@oh-my-pi/pi-ai/providers/openai-responses";
 import type { Context, Model, TextContent } from "@oh-my-pi/pi-ai/types";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
-
+import { isCopilotCliDisabled } from "@oh-my-pi/pi-catalog/wire/github-copilot";
 afterEach(() => {
 	vi.restoreAllMocks();
 });
@@ -276,8 +276,9 @@ describe("GitHub Copilot direct OAuth streaming without CLI identity", () => {
 		expect(captured?.headers.get("x-initiator")).toBe("agent");
 	});
 
-	it("transparently falls back from CLI identity to chat identity on 403 and remembers for future turns", async () => {
-		const fetchMock = createCopilotFetchFixture();
+	it("transparently falls back from CLI identity to chat identity on 403, preserves X-Initiator, and remembers for future turns", async () => {
+		const capturedRequests: CapturedRequest[] = [];
+		const fetchMock = createCopilotFetchFixture({ onCapture: req => capturedRequests.push(req) });
 		const model = makeModel<"openai-responses">("gpt-5.6-sol");
 
 		// Turn 1: starts with default CLI headers, gets 403, transparently retries with chat headers
@@ -291,6 +292,11 @@ describe("GitHub Copilot direct OAuth streaming without CLI identity", () => {
 		expect((turn1.content[0] as TextContent).text).toBe("gpt-5.6-sol direct answer");
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 
+		// Verified that the fallback request preserved X-Initiator and X-Interaction-Type
+		expect(capturedRequests[1]?.headers.get("x-initiator")).toBe("user");
+		expect(capturedRequests[1]?.headers.get("x-interaction-type")).toBe("conversation-user");
+		expect(capturedRequests[1]?.headers.get("copilot-integration-id")).toBeNull();
+
 		// Turn 2: token is now remembered as cliDisabled, so it uses chat headers directly (1 call)
 		fetchMock.mockClear();
 		const turn2 = await streamOpenAIResponses(model, textContext, {
@@ -303,7 +309,7 @@ describe("GitHub Copilot direct OAuth streaming without CLI identity", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(1);
 	});
 
-	it("surfaces genuine 403 access denied without retrying", async () => {
+	it("surfaces genuine 403 access denied and does not permanently downgrade token", async () => {
 		const fetchMock = createCopilotFetchFixture();
 		const model = makeModel<"openai-responses">("gpt-5.6-sol");
 		const result = await streamOpenAIResponses(model, textContext, {
@@ -314,5 +320,6 @@ describe("GitHub Copilot direct OAuth streaming without CLI identity", () => {
 		expect(fetchMock).toHaveBeenCalledTimes(2);
 		expect(result.stopReason).toBe("error");
 		expect(result.errorStatus).toBe(403);
+		expect(isCopilotCliDisabled(FORBIDDEN_OAUTH_TOKEN)).toBe(false);
 	});
 });

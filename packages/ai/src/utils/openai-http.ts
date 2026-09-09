@@ -112,7 +112,6 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		if (isCopilotCli) {
 			const authHeader = Object.entries(init.headers).find(([k]) => k.toLowerCase() === "authorization")?.[1];
 			const token = authHeader?.replace(/^Bearer\s+/i, "");
-			markCopilotCliDisabled(token);
 			const fallbackHeaders = mergeCopilotApiHeaders(init.headers, { cliDisabled: true });
 			const retryResponse = await fetchWithRetry(init.url, {
 				method: "POST",
@@ -124,6 +123,7 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 				timeout: false,
 			});
 			if (retryResponse.ok) {
+				markCopilotCliDisabled(token);
 				response = retryResponse;
 			}
 		}

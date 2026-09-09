@@ -5,6 +5,7 @@ import {
 	COPILOT_CHAT_IDENTITY_HEADERS,
 	getCopilotCapiIdentityHeaders,
 	getGitHubCopilotBaseUrl,
+	clearCopilotCliDisabled,
 	isCopilotCliDisabled,
 	markCopilotCliDisabled,
 	mergeCopilotApiHeaders,
@@ -83,11 +84,35 @@ describe("GitHub Copilot wire identity selection", () => {
 		expect(chatMerged["User-Agent"]).toBe(USER_AGENT);
 	});
 
+	it("preserves X-Initiator and X-Interaction-Type when merging headers", () => {
+		const cliMerged = mergeCopilotApiHeaders({
+			"X-Initiator": "agent",
+			"X-Interaction-Type": "conversation-agent",
+		});
+		expect(cliMerged["X-Initiator"]).toBe("agent");
+		expect(cliMerged["X-Interaction-Type"]).toBe("conversation-agent");
+		expect(cliMerged["Copilot-Integration-Id"]).toBe("copilot-developer-cli");
+
+		const chatMerged = mergeCopilotApiHeaders(
+			{
+				"X-Initiator": "user",
+				"X-Interaction-Type": "conversation-user",
+			},
+			{ cliDisabled: true },
+		);
+		expect(chatMerged["X-Initiator"]).toBe("user");
+		expect(chatMerged["X-Interaction-Type"]).toBe("conversation-user");
+		expect(chatMerged["Copilot-Integration-Id"]).toBeUndefined();
+		expect(chatMerged["User-Agent"]).toBe(USER_AGENT);
+	});
+
 	it("tracks cli-disabled status per token", () => {
 		const token = "ghu_sample_tracking_token";
 		expect(isCopilotCliDisabled(token)).toBe(false);
 		markCopilotCliDisabled(token);
 		expect(isCopilotCliDisabled(token)).toBe(true);
 		expect(parseGitHubCopilotApiKey(token).cliDisabled).toBe(true);
+		clearCopilotCliDisabled(token);
+		expect(isCopilotCliDisabled(token)).toBe(false);
 	});
 });
