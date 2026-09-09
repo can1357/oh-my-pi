@@ -1551,11 +1551,27 @@ async fn ordinary_conflict_warning_requires_a_complete_emitted_marker_block() {
 	let sources = Sources::default();
 	sources.file("window.txt", SOURCE);
 
-	let hidden = text(sources.clone(), r#"{"path":"window.txt:10"}"#).await;
-	assert!(!hidden.contains("unresolved conflict"), "{hidden}");
+	let (hidden, hidden_diags) =
+		text_with_diags(sources.clone(), r#"{"path":"window.txt:10"}"#).await;
+	assert!(!hidden.contains("<<<<<<<"), "{hidden}");
+	assert!(
+		hidden_diags
+			.iter()
+			.all(|diag| diag.native_kind() != Some(DiagKind::Conflicts)),
+		"window without a complete marker block emits no conflict diagnostic: {hidden_diags:?}"
+	);
 
-	let visible = text(sources, r#"{"path":"window.txt:3-7"}"#).await;
-	assert!(visible.contains("\n⚠ 1 unresolved conflict detected"), "{visible}");
+	let (visible, diags) = text_with_diags(sources, r#"{"path":"window.txt:3-7"}"#).await;
+	assert!(
+		visible.contains("2:<<<<<<< HEAD") && visible.contains("8:>>>>>>> feature"),
+		"emitted window must contain the complete marker block: {visible}"
+	);
+	let [diag] = diags.as_slice() else {
+		panic!("window read emits one conflict diagnostic: {diags:?}");
+	};
+	assert_eq!(diag.native_kind(), Some(DiagKind::Conflicts));
+	assert_eq!(diag.severity, Severity::Warn);
+	assert_eq!(diag.continuation.as_deref(), Some("window.txt:conflicts"));
 }
 
 const fn png_fixture() -> Bytes {

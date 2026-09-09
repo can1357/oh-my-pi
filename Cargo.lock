@@ -252,11 +252,10 @@ dependencies = [
 
 [[package]]
 name = "anydoc"
-version = "0.1.9"
+version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93a8b0dbecf79be9329111093b493d256db2a573ed3f1cc827c96bdbbe32a936"
+checksum = "cf0d78e4cfe3654eb3ea04422ec5a94352000ee56e97902125e68e51f7527062"
 dependencies = [
- "calamine",
  "cfb",
  "csv",
  "encoding_rs",
@@ -587,16 +586,6 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 3.0.4",
-]
-
-[[package]]
-name = "atoi_simd"
-version = "0.18.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3cdb3708a128e559a30fb830e8a77a5022ee6902806925c216658652b452a44"
-dependencies = [
- "debug_unsafe",
- "rustversion",
 ]
 
 [[package]]
@@ -1161,24 +1150,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7354288c522e7e980fafd2075d63d1285794c3a6a16cdd492f189ea406e5f18b"
 
 [[package]]
-name = "calamine"
-version = "0.36.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fa68281b1a76b54a62156474adb06bb380a67e07dd60656e3217152b42183f3"
-dependencies = [
- "atoi_simd",
- "byteorder",
- "chrono",
- "codepage",
- "encoding_rs",
- "fast-float2",
- "log",
- "quick-xml",
- "serde",
- "zip",
-]
-
-[[package]]
 name = "calloop"
 version = "0.13.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1595,15 +1566,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fa961b519f0b462e3a3b4a34b64d119eeaca1d59af726fe450bbba07a9fc0a1"
 dependencies = [
  "thiserror 2.0.20",
-]
-
-[[package]]
-name = "codepage"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "48f68d061bc2828ae826206326e61251aca94c1e4a5305cf52d9138639c918b4"
-dependencies = [
- "encoding_rs",
 ]
 
 [[package]]
@@ -2221,12 +2183,6 @@ name = "data-url"
 version = "0.3.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be1e0bca6c3637f992fc1cc7cbc52a78c1ef6db076dbf1059c4323d6a2048376"
-
-[[package]]
-name = "debug_unsafe"
-version = "0.1.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7eed2c4702fa172d1ce21078faa7c5203e69f5394d48cc436d25928394a867a2"
 
 [[package]]
 name = "defmt"
@@ -2954,12 +2910,6 @@ dependencies = [
  "regex-automata",
  "regex-syntax",
 ]
-
-[[package]]
-name = "fast-float2"
-version = "0.2.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c6e8948ce679d00a02a94739ea185595dca7118ed04feb991127e443bd3d761f"
 
 [[package]]
 name = "fastembed"
@@ -8147,7 +8097,6 @@ name = "omp-e2e"
 version = "0.1.0"
 dependencies = [
  "async-stream",
- "async-trait",
  "bytes",
  "flume",
  "futures",
@@ -8224,6 +8173,7 @@ dependencies = [
  "omp-proto",
  "parking_lot",
  "serde",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -8407,7 +8357,6 @@ dependencies = [
  "omp-vocab",
  "proc-macro2",
  "quote",
- "strum",
  "syn 2.0.119",
 ]
 
@@ -8477,6 +8426,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec 2.0.0-alpha.13",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -8900,6 +8850,7 @@ dependencies = [
  "gix",
  "jj-lib",
  "libc",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -10328,7 +10279,6 @@ version = "0.41.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e660451e55124f798a69a5af3f49ccfbefbd41910eefd25caf2393e1f3473ec1"
 dependencies = [
- "encoding_rs",
  "memchr",
 ]
 

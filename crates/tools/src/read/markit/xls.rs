@@ -13,8 +13,8 @@ const MAX_CFB_STREAM_BUFFER: usize = 64 * 1024;
 
 /// Detects BIFF's package-level encryption marker without reading cell data.
 ///
-/// `open_workbook_auto_from_rs` discards format-specific errors while probing,
-/// so this check runs before handing the stream to anydoc.
+/// anydoc collapses format-specific errors while probing, so this check
+/// runs before handing the stream to anydoc.
 fn workbook_is_encrypted(bytes: &[u8]) -> bool {
 	let Ok(mut compound) = OpenOptions::new()
 		.max_buffer_size(MAX_CFB_STREAM_BUFFER)
@@ -44,8 +44,8 @@ fn workbook_is_encrypted(bytes: &[u8]) -> bool {
 	false
 }
 
-/// Converts an OLE/BIFF workbook through anydoc's calamine-backed spreadsheet
-/// reader. Calamine reads cached formula results and never evaluates VBA.
+/// Converts an OLE/BIFF workbook through anydoc's in-house BIFF reader.
+/// Cached formula results are read, never evaluated; VBA is never executed.
 pub(super) fn convert(bytes: &[u8]) -> Result<Str, MarkitError> {
 	if workbook_is_encrypted(bytes) {
 		return Err(MarkitError::conversion(FORMAT, "document is encrypted"));

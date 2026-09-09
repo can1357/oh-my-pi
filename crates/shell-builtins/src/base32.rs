@@ -106,8 +106,9 @@ impl Config {
 	fn from(options: &clap::ArgMatches) -> BaseResult<Self> {
 		let to_read = match options.get_many::<OsString>(options::FILE) {
 			Some(mut values) => {
-				let name = values.next().unwrap();
-
+				let Some(name) = values.next() else {
+					return Err(BaseError::new("missing file operand"));
+				};
 				if let Some(extra_op) = values.next() {
 					return Err(BaseError::new(format!("extra operand {}", extra_op.quote())));
 				}

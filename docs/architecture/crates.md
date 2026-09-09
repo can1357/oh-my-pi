@@ -44,9 +44,9 @@ a convar declaration plus command stream, with archived values represented by cf
 | `omp-tools` | Built-in resource-owning tool implementations. |
 | `omp-env` / `omp-envd` | Typed environment client / trusted environment host and worker supervision. |
 | `omp-catalog` | Compiled provider/model compatibility, routes, capabilities, and pricing. |
-| `omp-inference` | Typed requests, provider codecs, routing, recovery, and canonical `ChatEvent` streams. |
+| `omp-ai` | Typed requests, provider codecs, routing, recovery, and canonical `ChatEvent` streams. |
 | `omp-ext` / `omp-py` | Extension manifests/trust / embedded free-threaded Python runtime and frozen modules. |
-| `omp-shell-engine` / `omp-shell-builtins` | In-process Bash parser/runtime and built-ins. |
+| `omp-shell` / `omp-shell-builtins` | In-process Bash parser/runtime and built-ins. |
 
 ## Presentation and transports
 
@@ -63,7 +63,7 @@ a convar declaration plus command stream, with archived values represented by cf
 ## Supporting engines
 
 `omp-core` supplies allocation-aware primitives; `omp-proto` owns generated wire contracts;
-`omp-observability` and `omp-telemetry` own diagnostics and telemetry. The document authority now lives
+`omp-observability` owns diagnostics and telemetry. The document authority now lives
 inside `omp-envd`. Resource and editing engines include `omp-ast`, `omp-walker`, `omp-grep`, `omp-ar`,
 and `omp-edit`, while tolerant JSON parsing is provided by `omp_core::slopjson`. These are libraries
 below the production spine and never assemble a competing agent/session stack.

@@ -8,12 +8,12 @@ use std::{
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
-		mpsc::{self, Sender},
 	},
 	thread::{self, JoinHandle},
 	time::Duration,
 };
 
+use flume::Sender;
 use omp_core::Str;
 use windows_sys::{
 	Win32::{
@@ -727,7 +727,7 @@ impl PlaybackDevice {
 	pub fn start(config: DeviceConfig, fill: PlaybackFill) -> VoiceResult<Self> {
 		let stop = Arc::new(AtomicBool::new(false));
 		let worker_stop = Arc::clone(&stop);
-		let (startup_tx, startup_rx) = mpsc::channel();
+		let (startup_tx, startup_rx) = flume::unbounded();
 		let thread = thread::Builder::new()
 			.name("omp-audio-wasapi-playback".to_owned())
 			.spawn(move || playback_thread(config, fill, worker_stop, startup_tx))
@@ -771,7 +771,7 @@ impl CaptureDevice {
 	pub fn start(config: DeviceConfig, sink: CaptureSink) -> VoiceResult<Self> {
 		let stop = Arc::new(AtomicBool::new(false));
 		let worker_stop = Arc::clone(&stop);
-		let (startup_tx, startup_rx) = mpsc::channel();
+		let (startup_tx, startup_rx) = flume::unbounded();
 		let thread = thread::Builder::new()
 			.name("omp-audio-wasapi-capture".to_owned())
 			.spawn(move || capture_thread(config, sink, worker_stop, startup_tx))

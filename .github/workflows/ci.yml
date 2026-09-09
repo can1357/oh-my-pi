@@ -240,6 +240,9 @@ jobs:
             cargo-p7-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'crates/*/Cargo.toml', 'rust-toolchain.toml') }}-
             cargo-p7-${{ runner.os }}-${{ runner.arch }}-
 
+      - name: Check workspace on Linux
+        run: cargo check --workspace --locked
+
       - name: Run terminal proof P7 on Linux PTY
         env:
           TERM: xterm-256color

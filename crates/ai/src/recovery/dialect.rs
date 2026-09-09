@@ -75,7 +75,8 @@ static MINIMAX: &[Delimiter] = &[Delimiter {
 ///
 /// Selection belongs to the catalog compiler/router. The runtime never derives
 /// this value from provider or model names.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(serialize_all = "lowercase", const_into_str)]
 pub enum Dialect {
 	/// GLM keyed XML calls.
 	Glm,
@@ -94,6 +95,7 @@ pub enum Dialect {
 	/// Qwen 3 JSON-in-tag calls.
 	Qwen3,
 	/// Qwen self-closing XML calls.
+	#[strum(serialize = "qwen-xml")]
 	QwenXml,
 	/// Gemini Python fenced calls.
 	Gemini,
@@ -144,20 +146,7 @@ impl Dialect {
 	}
 
 	const fn rule(self) -> &'static str {
-		match self {
-			Self::Glm => "glm",
-			Self::Hermes => "hermes",
-			Self::Kimi => "kimi",
-			Self::Xml => "xml",
-			Self::Anthropic => "anthropic",
-			Self::DeepSeek => "deepseek",
-			Self::Harmony => "harmony",
-			Self::Qwen3 => "qwen3",
-			Self::QwenXml => "qwen-xml",
-			Self::Gemini => "gemini",
-			Self::Gemma => "gemma",
-			Self::MiniMax => "minimax",
-		}
+		self.into_str()
 	}
 }
 

@@ -35,7 +35,7 @@ pub trait TrySparseIndex: Sized {
 	/// This method should only be called with indices that are known to be valid
 	/// for the type. For fallible conversion, use [`Self::try_from_index`].
 	fn from_index(index: usize) -> Self {
-		Self::try_from_index(index).unwrap()
+		Self::try_from_index(index).expect("index is valid by TrySparseIndex::from_index contract")
 	}
 
 	/// Attempts to convert an index to this type.

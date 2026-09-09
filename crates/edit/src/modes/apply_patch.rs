@@ -361,7 +361,10 @@ fn natural_order_previews(input: &str) -> Vec<PreviewFile> {
 		if let Some(path) = &current
 			&& (matches!(raw.as_bytes().first(), Some(b'+' | b'-' | b' ')) || raw.starts_with("@@"))
 		{
-			groups.get_mut(path).unwrap().push(raw.to_owned());
+			groups
+				.get_mut(path)
+				.expect("current path was inserted into groups above")
+				.push(raw.to_owned());
 		}
 	}
 	order
@@ -414,7 +417,12 @@ fn inspect_entries(input: &str) -> (Vec<String>, Vec<(String, String)>, Vec<File
 	}
 	let matcher_entries = order
 		.into_iter()
-		.map(|path| (path.clone(), digests.remove(&path).unwrap()))
+		.map(|path| {
+			let digest = digests
+				.remove(&path)
+				.expect("path digest was recorded when it was added to order");
+			(path, digest)
+		})
 		.collect();
 	(paths, matcher_entries, file_ops)
 }

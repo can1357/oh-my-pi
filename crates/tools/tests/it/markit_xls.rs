@@ -229,7 +229,8 @@ fn cfb_workbook(mut workbook: Vec<u8>) -> Vec<u8> {
 }
 
 fn behavior_workbook() -> Vec<u8> {
-	let hidden = worksheet([
+	let hidden = worksheet([dimensions(1, 2), label(0, 0, "Secret"), label(0, 1, "shh")]);
+	let types = worksheet([
 		dimensions(4, 2),
 		label(0, 0, "Kind"),
 		label(0, 1, "Value"),
@@ -239,27 +240,35 @@ fn behavior_workbook() -> Vec<u8> {
 		bool_or_error(2, 1, 1, false),
 		label(3, 0, "Error"),
 		bool_or_error(3, 1, 0x07, true),
-		far_away_merge(),
 	]);
-	let visible = worksheet([
+	let text = worksheet([
 		dimensions(2, 2),
 		label(0, 0, "Text"),
 		label(0, 1, "Number"),
 		label(1, 0, "café"),
 		number(1, 1, 5649.5599999999995),
+		far_away_merge(),
 	]);
-	cfb_workbook(workbook_stream(&[(1, "Hidden", hidden), (0, "Visible", visible)], &[]))
+	cfb_workbook(workbook_stream(
+		&[(1, "Hidden", hidden), (0, "Types", types), (0, "Text", text)],
+		&[],
+	))
 }
 
 #[test]
-fn xls_preserves_sheet_order_visibility_cached_values_and_cell_types() {
+fn xls_skips_hidden_sheets_preserves_order_cached_values_and_cell_types() {
+	// Hidden sheet pins the omission; the visible Types sheet keeps the
+	// cached-formula/boolean/error coverage the old Hidden sheet carried,
+	// and the far-away merge lives in a visible sheet so the used-range
+	// bound stays meaningful. Error literals follow Excel canonical form
+	// (`#DIV/0!`) under anydoc 0.2; 0.1.9 Debug-formatted the error enum.
 	let conversion = markit::convert(Path::new("legacy.xls"), &behavior_workbook())
 		.expect("BIFF8 conversion succeeds")
 		.expect("XLS is supported");
 	assert_eq!(
 		conversion.text.as_str(),
-		"## Hidden\n\n| Kind | Value |\n| --- | --- |\n| Formula | 99 |\n| Boolean | TRUE |\n| \
-		 Error | #Div0 |\n\n## Visible\n\n| Text | Number |\n| --- | --- |\n| café | 5649.56 |\n"
+		"## Types\n\n| Kind | Value |\n| --- | --- |\n| Formula | 99 |\n| Boolean | TRUE |\n| Error \
+		 | #DIV/0! |\n\n## Text\n\n| Text | Number |\n| --- | --- |\n| café | 5649.56 |\n"
 	);
 	assert!(conversion.text.len() < 512, "far-away merge must not expand the used range");
 }
