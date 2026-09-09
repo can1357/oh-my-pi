@@ -2458,6 +2458,7 @@ function mapOptionsForApi<TApi extends Api>(
 				conversationId: options?.sessionId,
 				stopSequences: options?.stopSequences,
 				effort,
+				toolChoice: options?.toolChoice,
 				...thinkingOption,
 			});
 		}

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, spyOn, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { streamGrokBot } from "../../src/providers/grokbot";
 import * as grokbotAuth from "../../src/providers/grokbot/auth";
+import { streamSimple } from "../../src/stream";
 import {
 	advertisedNamesForJsonTextToolCall,
 	assistantTextForJsonPromotion,
@@ -421,6 +422,55 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 			maxTokens: 512,
 		});
 		const result = await streamGrokBot(
+			model as Model<"grokbot-sand">,
+			{
+				messages: [{ role: "user", content: "Summarize", timestamp: 1 }],
+				tools: [bashTool],
+			},
+			{
+				apiKey: "renew",
+				fetch: fetchImpl,
+				toolChoice: "none",
+				onPayload: body => {
+					advertised = (body as { tools?: unknown }).tools;
+					return body;
+				},
+			},
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(advertised).toEqual([]);
+		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
+	});
+
+	test("streamSimple forwards toolChoice none into Grok Bot provider options", async () => {
+		// Handoff / generateHandoffFromContext go through streamSimple → mapOptionsForApi;
+		// dropping toolChoice there left the provider advertising live tools.
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+		const text = Buffer.concat([
+			frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "handoff", isFinal: true } })),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		let advertised: unknown;
+		const fetchImpl = (async () => connectBody(...[text])) as FetchImpl;
+		const model = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+		});
+		const result = await streamSimple(
 			model as Model<"grokbot-sand">,
 			{
 				messages: [{ role: "user", content: "Summarize", timestamp: 1 }],

@@ -865,6 +865,34 @@ export async function resolveScopedModels(
 }
 
 /**
+ * Provider + selectors for the pre-session cold catalog refresh.
+ * Prefers CLI `--provider`/`--model`/`--models`; when those leave ownership
+ * unbound, falls back to a provider-qualified `modelRoles.default` so a fresh
+ * profile whose default is a live-only Grok Bot id still warms AvailableModels
+ * before session construction (no CLI model flags).
+ */
+export function resolveCredentialScopedRefreshTarget(
+	parsed: Pick<Args, "provider" | "model" | "models">,
+	configuredDefault?: string,
+): { providerId: string; selectors: Pick<Args, "model" | "models"> } | undefined {
+	const cliProvider = resolveCliRuntimeApiKeyProvider(parsed);
+	if (cliProvider) {
+		return {
+			providerId: cliProvider,
+			selectors: { model: parsed.model, models: parsed.models },
+		};
+	}
+	const defaultRole = configuredDefault?.trim();
+	if (!defaultRole) return undefined;
+	const parsedDefault = parseModelString(defaultRole);
+	if (!parsedDefault?.provider) return undefined;
+	return {
+		providerId: parsedDefault.provider.trim().toLowerCase(),
+		selectors: { model: defaultRole },
+	};
+}
+
+/**
  * When `--provider`/`--model` (or `provider/model`) selects a discoverable
  * provider and the model is missing from the cold/startup catalog (fresh
  * profile, no credential-scoped cache), refresh that provider before
@@ -872,6 +900,8 @@ export async function resolveScopedModels(
  * `--api-key`, env, secrets file, or `models.yml` — not specifically a CLI key.
  * A single-provider `--models grokbot/<id>` scope is accepted the same way
  * (no `parsed.model`); multi-provider / bare scopes stay unbound.
+ * Callers without CLI selection may pass a provider-qualified
+ * `modelRoles.default` via {@link resolveCredentialScopedRefreshTarget}.
  *
  * Built-in descriptor providers (e.g. Grok Bot) are not listed by
  * {@link ModelRegistry.getDiscoverableProviders} — that API only covers
@@ -1661,15 +1691,17 @@ export async function runRootCommand(
 		);
 		// Credential-scoped live catalogs (e.g. grokbot AvailableModels) are absent
 		// on a fresh profile until discovery runs. Refresh before --provider/--model
-		// resolve so buildSessionOptions does not exit on a cold miss — for env,
-		// secrets-file, models.yml, and --api-key credentials alike.
-		if (selectedProvider) {
+		// (or a provider-qualified modelRoles.default) resolve so buildSessionOptions
+		// does not exit on a cold miss — for env, secrets-file, models.yml, and
+		// --api-key credentials alike.
+		const refreshTarget = resolveCredentialScopedRefreshTarget(parsedArgs, settingsInstance.getModelRole("default"));
+		if (refreshTarget) {
 			await logger.time(
 				"refreshCredentialScopedModel",
 				refreshCredentialScopedModelIfMissing,
-				parsedArgs,
+				refreshTarget.selectors,
 				modelRegistry,
-				selectedProvider,
+				refreshTarget.providerId,
 			);
 		}
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {

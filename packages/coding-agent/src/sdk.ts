@@ -28,6 +28,7 @@ import {
 	prewarmOpenAICodexResponses,
 } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
 import { FALLBACK_DIALECT, preferredDialect } from "@oh-my-pi/pi-catalog/identity";
+import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
 import type { Component } from "@oh-my-pi/pi-tui";
 import {
 	$env,
@@ -2713,13 +2714,32 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 				// configured (must win over `pick`) or nothing resolved at all.
 				// The common path — role already resolved, or a `pick` with no
 				// configured default — never pays for it.
-				const defaultRoleConfigured = Boolean(settings.getModelRole("default"));
+				// Built-in credential-scoped catalogs (e.g. grokbot) are not listed
+				// by getDiscoverableProviders(); refresh that provider when the
+				// configured default is provider-qualified against a descriptor
+				// with createModelManagerOptions.
+				const defaultRoleSelector = settings.getModelRole("default")?.trim();
+				const defaultRoleConfigured = Boolean(defaultRoleSelector);
+				const defaultRoleProvider = defaultRoleSelector
+					? parseModelString(defaultRoleSelector)?.provider?.trim().toLowerCase()
+					: undefined;
+				const canRefreshDiscoverable = modelRegistry.getDiscoverableProviders().length > 0;
+				const canRefreshBuiltInDefault =
+					defaultRoleProvider !== undefined &&
+					modelRegistry.hasProvider(defaultRoleProvider) &&
+					Boolean(getCatalogProviderEntry(defaultRoleProvider)?.createModelManagerOptions);
 				if (
 					!hasExplicitModel &&
 					(defaultRoleConfigured || !pick) &&
-					modelRegistry.getDiscoverableProviders().length > 0
+					(canRefreshDiscoverable || canRefreshBuiltInDefault)
 				) {
-					await logger.time("resolveModelDiscoveryFallback", () => modelRegistry.refresh("online-if-uncached"));
+					await logger.time("resolveModelDiscoveryFallback", async () => {
+						if (canRefreshDiscoverable) {
+							await modelRegistry.refresh("online-if-uncached");
+						} else if (defaultRoleProvider) {
+							await modelRegistry.refreshProvider(defaultRoleProvider, "online-if-uncached");
+						}
+					});
 					if (!(await tryResolveDefaultRole()) && !model) {
 						const refreshedCandidates = await resolveAllowedModels(
 							modelRegistry,

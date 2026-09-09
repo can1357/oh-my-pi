@@ -10,6 +10,7 @@ import {
 	buildSessionOptions,
 	rebuildScopedModelsAfterDiscovery,
 	refreshCredentialScopedModelIfMissing,
+	resolveCredentialScopedRefreshTarget,
 	resolveScopedModels,
 	type ScopedModelSink,
 	toSessionScopedModels,
@@ -227,6 +228,26 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 
 	afterEach(() => {
 		vi.restoreAllMocks();
+	});
+
+	it("resolveCredentialScopedRefreshTarget falls back to provider-qualified modelRoles.default", () => {
+		// No CLI model flags: still warm a live-only Grok Bot default before session build.
+		expect(resolveCredentialScopedRefreshTarget({}, "grokbot/live-only")).toEqual({
+			providerId: "grokbot",
+			selectors: { model: "grokbot/live-only" },
+		});
+		expect(resolveCredentialScopedRefreshTarget({}, "GrokBot/sand-default")).toEqual({
+			providerId: "grokbot",
+			selectors: { model: "GrokBot/sand-default" },
+		});
+		// Bare defaults and missing roles stay unbound (ownership indeterminate).
+		expect(resolveCredentialScopedRefreshTarget({}, "sand-default")).toBeUndefined();
+		expect(resolveCredentialScopedRefreshTarget({})).toBeUndefined();
+		// CLI selection still wins over the configured default.
+		expect(resolveCredentialScopedRefreshTarget({ model: "openai/gpt-4o" }, "grokbot/live-only")).toEqual({
+			providerId: "openai",
+			selectors: { model: "openai/gpt-4o", models: undefined },
+		});
 	});
 
 	it("refreshes a cold credential-scoped provider when --model is absent from startup catalog", async () => {
