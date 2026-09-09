@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Grok Bot JSON-as-text promotion tries individual text/thinking blocks before joining them, so ordinary reasoning before a tool JSON dump still promotes.
 - Grok Bot product Read/Write alias schemas rewrite branch-local `required` under `anyOf`/`oneOf`/`allOf` so advertised `contents`/`target_file` calls validate.
 - Grok Bot catalog keep-model on non-Anthropic rows preserves `maxMode` / `isVariantStringRepresentation` while stripping retry-disabled parameters.
 - Grok Bot promotes every advertised Gemini `tool_code` call in a fence (not only the first).

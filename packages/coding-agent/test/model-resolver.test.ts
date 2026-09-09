@@ -1810,6 +1810,29 @@ describe("resolveModelScope", () => {
 		expect(scoped[0]!.model.provider).toBe("grokbot");
 	});
 
+	test("bracket character-class globs expand via Bun.Glob instead of fuzzy single-match", async () => {
+		const gpt5 = allModels.find(m => m.provider === "openai" && m.id === "gpt-5") ?? {
+			...allModels[0]!,
+			id: "gpt-5",
+			provider: "openai" as const,
+			name: "gpt-5",
+		};
+		const gpt4 = allModels.find(m => m.provider === "openai" && m.id === "gpt-4") ?? {
+			...allModels[0]!,
+			id: "gpt-4",
+			provider: "openai" as const,
+			name: "gpt-4",
+		};
+		const available = [gpt5, gpt4] as (typeof allModels)[number][];
+		// Fuzzy would pick gpt-5; Bun.Glob `gpt-[!5]` excludes that character.
+		const scoped = await resolveModelScope(["openai/gpt-[!5]"], {
+			getAvailable: () => available,
+		});
+		expect(scoped.map(s => s.model.id).sort()).toEqual(["gpt-4"]);
+		const filtered = filterAvailableModelsByEnabledPatterns(available, ["openai/gpt-[!5]"]);
+		expect(filtered.map(m => m.id).sort()).toEqual(["gpt-4"]);
+	});
+
 	test("resolves role aliases in --models scope to the role's model with its thinking level", async () => {
 		const settings = Settings.isolated({
 			modelRoles: { fable: "anthropic/claude-sonnet-4-5:high" },

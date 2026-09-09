@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Bracket-only `enabledModels` / `--models` patterns (e.g. `openai/gpt-[!5]`) expand via Bun.Glob instead of fuzzy-matching a single wrong id; literal `default[]` selectors stay exact.
 - Grok Bot probe-config tests inject secrets path / env overlays instead of mutating process-wide credentials or the agent directory.
 - Catalog matrix shell smoke rejects conditional `&&` / `||` arms and loads OMP tool descriptions from static `.md` assets.
 - Catalog matrix shell smoke ignores quoted `;` / `&&` separators when validating write/echo evidence.

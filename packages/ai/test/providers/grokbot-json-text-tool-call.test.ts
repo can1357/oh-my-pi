@@ -10,6 +10,7 @@ import {
 	parseGeminiInbandToolCall,
 	parseGeminiInbandToolCalls,
 	parseJsonTextToolCall,
+	promoteJsonTextToolCallsFromContent,
 	shouldHoldPromotableToolText,
 	shouldPromoteJsonTextToolCall,
 } from "../../src/providers/grokbot/json-text-tool-call";
@@ -113,6 +114,38 @@ describe("parseJsonTextToolCall", () => {
 				{ type: "thinking", thinking: '{"name":"bash","arguments":{"command":"echo hi"}}' },
 			]),
 		).toBe('{"name":"bash","arguments":{"command":"echo hi"}}');
+	});
+
+	test("promoteJsonTextToolCallsFromContent tries blocks before joining reasoning prose", () => {
+		const advertised = new Set(["Shell", "bash"]);
+		const promoted = promoteJsonTextToolCallsFromContent(
+			[
+				{ type: "thinking", thinking: "I should run a shell command next." },
+				{ type: "text", text: '{"name":"Shell","arguments":{"command":"echo hi"}}' },
+			],
+			advertised,
+		);
+		expect(promoted).toEqual([{ name: "Shell", arguments: { command: "echo hi" } }]);
+		// Combined candidate would start with prose and fail — individual text wins.
+		expect(
+			parseJsonTextToolCall(
+				assistantTextForJsonPromotion([
+					{ type: "thinking", thinking: "I should run a shell command next." },
+					{ type: "text", text: '{"name":"Shell","arguments":{"command":"echo hi"}}' },
+				]),
+				advertised,
+			),
+		).toBeUndefined();
+	});
+
+	test("promoteJsonTextToolCallsFromContent still promotes thought-only JSON via fallback", () => {
+		const advertised = new Set(["bash"]);
+		expect(
+			promoteJsonTextToolCallsFromContent(
+				[{ type: "thinking", thinking: '{"name":"bash","arguments":{"command":"echo hi"}}' }],
+				advertised,
+			),
+		).toEqual([{ name: "bash", arguments: { command: "echo hi" } }]);
 	});
 
 	test("advertisedNamesForJsonTextToolCall aliases only from advertised wire tools", () => {

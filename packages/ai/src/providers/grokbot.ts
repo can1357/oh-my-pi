@@ -45,11 +45,9 @@ import {
 } from "./grokbot/anthropic-sand-wire";
 import {
 	advertisedNamesForJsonTextToolCall,
-	assistantTextForJsonPromotion,
 	shouldHoldPromotableToolText,
 	shouldPromoteJsonTextToolCall,
-	parseGeminiInbandToolCalls,
-	parseJsonTextToolCall,
+	promoteJsonTextToolCallsFromContent,
 } from "./grokbot/json-text-tool-call";
 import { nativeToolParametersForIdentity } from "./grokbot/tool-policy";
 import {
@@ -1782,10 +1780,12 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					}) &&
 					!output.content.some(b => b.type === "toolCall")
 				) {
-					const text = assistantTextForJsonPromotion(output.content, sendToUserTextIndexes);
 					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
-					const promotedJson = parseJsonTextToolCall(text, advertised);
-					const promotedList = promotedJson ? [promotedJson] : parseGeminiInbandToolCalls(text, advertised);
+					const promotedList = promoteJsonTextToolCallsFromContent(
+						output.content,
+						advertised,
+						sendToUserTextIndexes,
+					);
 					if (promotedList.length > 0) {
 						const removedIndexes = new Set<number>();
 						for (let i = 0; i < output.content.length; i++) {

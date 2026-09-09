@@ -327,3 +327,42 @@ export function parseGeminiInbandToolCall(
 ): JsonTextToolCall | undefined {
 	return parseGeminiInbandToolCalls(text, advertisedNames)[0];
 }
+
+function blockTextForJsonPromotion(block: { type: string; text?: string; thinking?: string }): string | undefined {
+	if (block.type === "text" && typeof block.text === "string") return block.text;
+	if (block.type === "thinking" && typeof block.thinking === "string") return block.thinking;
+	return undefined;
+}
+
+function parsePromotableToolCallsFromText(
+	text: string,
+	advertisedNames: Iterable<string>,
+): JsonTextToolCall[] {
+	const promotedJson = parseJsonTextToolCall(text, advertisedNames);
+	if (promotedJson) return [promotedJson];
+	return parseGeminiInbandToolCalls(text, advertisedNames);
+}
+
+/**
+ * Prefer promoting individual non-excluded text/thinking blocks so ordinary
+ * reasoning prose before a JSON dump does not poison the candidate. Fall back
+ * to the joined assistant text for thought-only / split dumps.
+ */
+export function promoteJsonTextToolCallsFromContent(
+	content: ReadonlyArray<{ type: string; text?: string; thinking?: string }>,
+	advertisedNames: Iterable<string>,
+	excludeIndexes?: ReadonlySet<number>,
+): JsonTextToolCall[] {
+	for (let i = 0; i < content.length; i++) {
+		if (excludeIndexes?.has(i)) continue;
+		const block = content[i];
+		if (!block) continue;
+		const text = blockTextForJsonPromotion(block);
+		if (!text?.trim()) continue;
+		const promoted = parsePromotableToolCallsFromText(text, advertisedNames);
+		if (promoted.length > 0) return promoted;
+	}
+	const combined = assistantTextForJsonPromotion(content, excludeIndexes);
+	if (!combined.trim()) return [];
+	return parsePromotableToolCallsFromText(combined, advertisedNames);
+}

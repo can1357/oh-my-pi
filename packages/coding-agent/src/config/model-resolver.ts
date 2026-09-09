@@ -989,7 +989,7 @@ function parseModelPatternWithContext(
 	pattern: string,
 	availableModels: Model<Api>[],
 	context: ModelPreferenceContext,
-	options?: { allowInvalidThinkingSelectorFallback?: boolean },
+	options?: { allowInvalidThinkingSelectorFallback?: boolean; exactOnly?: boolean },
 ): ParsedModelResult {
 	// Exact match on the full pattern first (no fuzzy): a literal id that
 	const exactMatch = matchModel(pattern, availableModels, context, { exactOnly: true });
@@ -1002,7 +1002,9 @@ function parseModelPatternWithContext(
 	// fuzzy results (e.g. `kimi-for-coding-highspeed`) cannot absorb the suffix.
 	const { base, level } = splitThinkingSuffix(pattern, -1, MAX_THINKING_SUFFIX_OPTIONS);
 	if (level) {
-		const literalSuffixMatch = matchModel(pattern, availableModels, context);
+		const literalSuffixMatch = options?.exactOnly
+			? matchModel(pattern, availableModels, context, { exactOnly: true })
+			: matchModel(pattern, availableModels, context);
 		if (literalSuffixMatch?.id.toLowerCase().endsWith(`:${level}`)) {
 			return {
 				model: literalSuffixMatch,
@@ -1029,6 +1031,12 @@ function parseModelPatternWithContext(
 			};
 		}
 		return result;
+	}
+
+	// Bracket-only / exact-only callers must not fuzzy-match character classes
+	// such as `openai/gpt-[!5]` onto `gpt-5` — leave those for Bun.Glob.
+	if (options?.exactOnly) {
+		return { model: undefined, thinkingLevel: undefined, warning: undefined, explicitThinkingLevel: false };
 	}
 
 	// No valid thinking suffix: fall back to fuzzy/substring matching on the
@@ -1790,7 +1798,9 @@ export async function resolveModelScope(
 		// fuzzy-match one row and skip the multi-model glob expansion.
 		if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
 			if (!pattern.includes("*") && !pattern.includes("?")) {
-				const exact = parseModelPatternWithContext(pattern, availableModels, context);
+				// Exact-only: bracketed literal ids (`default[]`) win, but character
+				// classes such as `openai/gpt-[!5]` must not fuzzy-match `gpt-5`.
+				const exact = parseModelPatternWithContext(pattern, availableModels, context, { exactOnly: true });
 				if (exact.model) {
 					if (exact.warning) logger.warn(exact.warning);
 					if (exact.thinkingLevel === AUTO_THINKING) {
@@ -1932,8 +1942,10 @@ export function filterAvailableModelsByEnabledPatterns(
 		if (pattern.includes("*") || pattern.includes("?") || pattern.includes("[")) {
 			// Mirror resolveModelScope: bracket-only selectors (`default[]`) resolve
 			// exactly before Bun.Glob treats `[]` as an empty character class.
+			// Stay exact-only so `openai/gpt-[!5]` expands via Bun.Glob instead of
+			// fuzzy-matching `gpt-5`.
 			if (!pattern.includes("*") && !pattern.includes("?")) {
-				const { model } = parseModelPatternWithContext(pattern, available, context);
+				const { model } = parseModelPatternWithContext(pattern, available, context, { exactOnly: true });
 				if (model) {
 					addAllowed(model);
 					continue;
