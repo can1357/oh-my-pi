@@ -148,6 +148,23 @@ describe("parseJsonTextToolCall", () => {
 		).toEqual([{ name: "bash", arguments: { command: "echo hi" } }]);
 	});
 
+	test("promoteJsonTextToolCallsFromContent accumulates calls across multiple blocks", () => {
+		const advertised = new Set(["Shell", "Read"]);
+		expect(
+			promoteJsonTextToolCallsFromContent(
+				[
+					{ type: "thinking", thinking: "I'll read then shell." },
+					{ type: "text", text: '{"name":"Read","arguments":{"path":"a.ts"}}' },
+					{ type: "text", text: '{"name":"Shell","arguments":{"command":"echo hi"}}' },
+				],
+				advertised,
+			),
+		).toEqual([
+			{ name: "Read", arguments: { path: "a.ts" } },
+			{ name: "Shell", arguments: { command: "echo hi" } },
+		]);
+	});
+
 	test("advertisedNamesForJsonTextToolCall aliases only from advertised wire tools", () => {
 		const names = advertisedNamesForJsonTextToolCall(
 			[{ name: "Shell" }, { name: "Write" }],

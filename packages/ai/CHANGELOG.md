@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Grok Bot JSON-as-text promotion accumulates tool calls from every eligible text/thinking block so parallel one-call-per-block dumps are not dropped after the first.
 - Grok Bot native tool-schema projection (`google` / `strict`) comes from catalog KDL `sand-native-tool-schema`, not TypeScript model-class branches.
 - Grok Bot JSON-as-text promotion tries individual text/thinking blocks before joining them, so ordinary reasoning before a tool JSON dump still promotes.
 - Grok Bot product Read/Write alias schemas rewrite branch-local `required` under `anyOf`/`oneOf`/`allOf` so advertised `contents`/`target_file` calls validate.

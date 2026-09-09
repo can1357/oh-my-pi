@@ -345,14 +345,16 @@ function parsePromotableToolCallsFromText(
 
 /**
  * Prefer promoting individual non-excluded text/thinking blocks so ordinary
- * reasoning prose before a JSON dump does not poison the candidate. Fall back
- * to the joined assistant text for thought-only / split dumps.
+ * reasoning prose before a JSON dump does not poison the candidate. Accumulate
+ * calls across every eligible block (parallel one-call-per-block dumps) before
+ * falling back to the joined assistant text for thought-only / split dumps.
  */
 export function promoteJsonTextToolCallsFromContent(
 	content: ReadonlyArray<{ type: string; text?: string; thinking?: string }>,
 	advertisedNames: Iterable<string>,
 	excludeIndexes?: ReadonlySet<number>,
 ): JsonTextToolCall[] {
+	const collected: JsonTextToolCall[] = [];
 	for (let i = 0; i < content.length; i++) {
 		if (excludeIndexes?.has(i)) continue;
 		const block = content[i];
@@ -360,8 +362,9 @@ export function promoteJsonTextToolCallsFromContent(
 		const text = blockTextForJsonPromotion(block);
 		if (!text?.trim()) continue;
 		const promoted = parsePromotableToolCallsFromText(text, advertisedNames);
-		if (promoted.length > 0) return promoted;
+		if (promoted.length > 0) collected.push(...promoted);
 	}
+	if (collected.length > 0) return collected;
 	const combined = assistantTextForJsonPromotion(content, excludeIndexes);
 	if (!combined.trim()) return [];
 	return parsePromotableToolCallsFromText(combined, advertisedNames);
