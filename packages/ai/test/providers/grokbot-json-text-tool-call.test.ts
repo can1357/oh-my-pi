@@ -393,6 +393,205 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.upstreamModel).toBeUndefined();
 	});
 
+	test("toolChoice none omits tools even when context.tools is retained", async () => {
+		// Handoff keeps live tools for prompt-cache reuse while forcing toolChoice none.
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+		const text = Buffer.concat([
+			frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "handoff", isFinal: true } })),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		let advertised: unknown;
+		const fetchImpl = (async () => connectBody(...[text])) as FetchImpl;
+		const model = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+		});
+		const result = await streamGrokBot(
+			model as Model<"grokbot-sand">,
+			{
+				messages: [{ role: "user", content: "Summarize", timestamp: 1 }],
+				tools: [bashTool],
+			},
+			{
+				apiKey: "renew",
+				fetch: fetchImpl,
+				toolChoice: "none",
+				onPayload: body => {
+					advertised = (body as { tools?: unknown }).tools;
+					return body;
+				},
+			},
+		).result();
+		expect(result.stopReason).toBe("stop");
+		expect(advertised).toEqual([]);
+		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
+	});
+
+	test("empty-tool retry uses catalog sandEmptyToolsRetryWire keep-model product tools", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinkingOnly = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					thinkingPart: { text: "planning", isFinal: true },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const toolCall = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					toolCallPart: {
+						toolCallId: "c-retry",
+						toolName: "Shell",
+						args: '{"command":"echo retried"}',
+						isComplete: true,
+					},
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const toolNameSnapshots: string[][] = [];
+		let calls = 0;
+		const fetchImpl = (async () => {
+			calls += 1;
+			return connectBody(...(calls === 1 ? [thinkingOnly] : [toolCall]));
+		}) as FetchImpl;
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+			// Catalog fact (also applied via KDL for gemini-*); set explicitly so the
+			// contract does not depend on class === "gemini" in the streamer.
+			sandEmptyToolsRetryWire: "keep-model",
+		});
+		expect(gemini.sandEmptyToolsRetryWire).toBe("keep-model");
+		const result = await streamGrokBot(
+			gemini as Model<"grokbot-sand">,
+			{
+				messages: [{ role: "user", content: "Use bash", timestamp: 1 }],
+				tools: [bashTool],
+			},
+			{
+				apiKey: "renew",
+				fetch: fetchImpl,
+				maxTokens: 512,
+				onPayload: body => {
+					const tools = (body as { tools?: Array<{ name?: string }> }).tools ?? [];
+					toolNameSnapshots.push(tools.map(t => String(t.name ?? "")));
+					return body;
+				},
+			},
+		).result();
+		expect(calls).toBe(2);
+		expect(toolNameSnapshots).toHaveLength(2);
+		expect(toolNameSnapshots[0]).toContain("bash");
+		expect(toolNameSnapshots[0]).not.toContain("Shell");
+		expect(toolNameSnapshots[1]).toContain("Shell");
+		expect(result.stopReason).toBe("toolUse");
+	});
+
+	test("empty-tool retry without sandEmptyToolsRetryWire keeps the original tool wire", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const thinkingOnly = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					thinkingPart: { text: "planning", isFinal: true },
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const toolCall = Buffer.concat([
+			frameConnectProto(
+				encodeInferenceStreamResponse({
+					toolCallPart: {
+						toolCallId: "c-retry",
+						toolName: "bash",
+						args: '{"command":"echo retried"}',
+						isComplete: true,
+					},
+				}),
+			),
+			frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG),
+		]);
+		const toolNameSnapshots: string[][] = [];
+		let calls = 0;
+		const fetchImpl = (async () => {
+			calls += 1;
+			return connectBody(...(calls === 1 ? [thinkingOnly] : [toolCall]));
+		}) as FetchImpl;
+		// Non-Gemini row with no catalog retry wire — must not invent keep-model.
+		const model = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+		});
+		expect(model.sandEmptyToolsRetryWire).toBeUndefined();
+		await streamGrokBot(
+			model as Model<"grokbot-sand">,
+			{
+				messages: [{ role: "user", content: "Use bash", timestamp: 1 }],
+				tools: [bashTool],
+			},
+			{
+				apiKey: "renew",
+				fetch: fetchImpl,
+				maxTokens: 512,
+				onPayload: body => {
+					const tools = (body as { tools?: Array<{ name?: string }> }).tools ?? [];
+					toolNameSnapshots.push(tools.map(t => String(t.name ?? "")));
+					return body;
+				},
+			},
+		).result();
+		expect(calls).toBe(2);
+		expect(toolNameSnapshots).toHaveLength(2);
+		expect(toolNameSnapshots[0]).toEqual(toolNameSnapshots[1]);
+		expect(toolNameSnapshots[0]).toContain("bash");
+		expect(toolNameSnapshots[0]).not.toContain("Shell");
+	});
+
 	test("empty-tool retry clears effort defaults when forcing thinking off", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",

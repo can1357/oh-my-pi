@@ -83,6 +83,17 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	) {
 		model.sandToolsWire = sandToolsWire;
 	}
+	const sandEmptyToolsRetryWire = catalog.sandEmptyToolsRetryWire;
+	if (
+		(sandEmptyToolsRetryWire === "parent-chat" ||
+			sandEmptyToolsRetryWire === "automation" ||
+			sandEmptyToolsRetryWire === "keep-model" ||
+			sandEmptyToolsRetryWire === "error" ||
+			sandEmptyToolsRetryWire === "sand-default-fallback") &&
+		model.sandEmptyToolsRetryWire === undefined
+	) {
+		model.sandEmptyToolsRetryWire = sandEmptyToolsRetryWire;
+	}
 	const sandWireModelId = catalog.sandWireModelId;
 	if (typeof sandWireModelId === "string" && sandWireModelId.trim() && model.sandWireModelId === undefined) {
 		model.sandWireModelId = sandWireModelId.trim();

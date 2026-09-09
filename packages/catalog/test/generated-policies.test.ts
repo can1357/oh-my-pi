@@ -946,6 +946,35 @@ describe("Grok Bot generated thinking policy", () => {
 		expect(resolveModelPolicy(seed).catalog.credentialScopedCatalog).toBe(true);
 	});
 
+	it("assigns sand-empty-tools-retry-wire keep-model to gemini-* via provider KDL", () => {
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(gemini.sandEmptyToolsRetryWire).toBe("keep-model");
+		const grok = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(grok.sandEmptyToolsRetryWire).toBeUndefined();
+	});
+
 	it("excludes grokbot from gen:models catalog discovery like other credential-scoped providers", () => {
 		// A renewer in the generator environment must not bake AvailableModels into models.json,
 		// and prior private roster rows must not resurrect from the previous snapshot.

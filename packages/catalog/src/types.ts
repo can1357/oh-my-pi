@@ -1134,6 +1134,12 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	sandToolsWire?: "parent-chat" | "automation" | "keep-model" | "error" | "sand-default-fallback";
 	/**
+	 * On an empty first tool turn, replay once with this wire (KDL
+	 * `sand-empty-tools-retry-wire`). Typically `keep-model` for Gemini-class
+	 * sand rows that otherwise burn the budget on thinking.
+	 */
+	sandEmptyToolsRetryWire?: "parent-chat" | "automation" | "keep-model" | "error" | "sand-default-fallback";
+	/**
 	 * Reviewed Grok Bot `requestedModel.modelId` rewrite (KDL `sand-wire-model-id`).
 	 * Catalog id stays the AvailableModels slug; the stream sends this bare id.
 	 */

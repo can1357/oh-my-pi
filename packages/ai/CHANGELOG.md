@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Grok Bot honors `toolChoice: "none"` by advertising no tools (handoff keeps `context.tools` for prompt-cache reuse).
+- Grok Bot empty-tool replay product wire comes from catalog `sand-empty-tools-retry-wire` (gemini-* → keep-model), not a TypeScript Gemini class branch.
 - Grok Bot JSON-as-text promotion aliases only tools that survived product wire-name collision resolution (e.g. drops unadvertised `edit` when `Write` came from `write`).
 - Grok Bot JSON-as-text promotion aliases the surviving custom `customWireName` owner (does not invent preferred omp names like `bash` for an extension-owned Shell slot).
 - Grok Bot product Read/Write alias schemas preserve preexisting `anyOf` required groups via `allOf` instead of replacing them.

@@ -316,6 +316,17 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		values: SAND_TOOLS_WIRES,
 	},
 	/**
+	 * On an empty first tool turn, replay once with this sand tools wire
+	 * (typically `keep-model` product Shell/Read/Write). KDL-owned per row —
+	 * do not infer from model class in TypeScript.
+	 */
+	"sand-empty-tools-retry-wire": {
+		key: "sandEmptyToolsRetryWire",
+		set: "catalog",
+		shape: "scalar",
+		values: SAND_TOOLS_WIRES,
+	},
+	/**
 	 * Reviewed Grok Bot requestedModel rewrite. Discovery/seeds keep the listed
 	 * AvailableModels id; the stream sends this bare wire id (same pattern as
 	 * Auto → sand-default). Used when a listed slug is a broken peer of a

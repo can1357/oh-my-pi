@@ -47,6 +47,12 @@ provider "grokbot" {
 		sand-wire-model-id-when "tools"
 		sand-promote-json-text-tools #true
 	}
+	// Empty first tool turns on Gemini-class sand rows often spend the budget
+	// on thinking. One replay with product keep-model tools (Shell/Read/Write)
+	// recovers native toolCallPart — declared per row, not via class checks in TS.
+	models "gemini-*" {
+		sand-empty-tools-retry-wire "keep-model"
+	}
 	models "sand-default" "sand-cua" "sand-automation" "default" "default[]" "auto" "auto[]" {
 		context-window-floor 200000
 	}

@@ -8928,7 +8928,22 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:50",
+				"source": "providers/grokbot.kdl:53",
+				"providers": [
+					"grokbot"
+				],
+				"models": [
+					{
+						"kind": "glob",
+						"value": "gemini-*"
+					}
+				],
+				"catalog": {
+					"sandEmptyToolsRetryWire": "keep-model"
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:56",
 				"providers": [
 					"grokbot"
 				],
@@ -8967,7 +8982,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:58",
+				"source": "providers/grokbot.kdl:64",
 				"providers": [
 					"grokbot"
 				],
@@ -8996,7 +9011,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:66",
+				"source": "providers/grokbot.kdl:72",
 				"providers": [
 					"grokbot"
 				],

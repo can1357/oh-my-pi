@@ -17,6 +17,7 @@ import type {
 	ThinkingContent,
 	Tool,
 	ToolCall,
+	ToolChoice,
 } from "../types";
 import { clearStreamingPartialJson, setStreamingPartialJson } from "../utils/block-symbols";
 import { AssistantMessageEventStream } from "../utils/event-stream";
@@ -85,6 +86,11 @@ const DEFAULT_IMAGE_MIME = "image/png";
 export interface GrokbotOptions extends StreamOptions {
 	/** Optional sand conversation id; preferred over sessionId, else a fresh UUID. */
 	conversationId?: string;
+	/**
+	 * Tool choice for this request. `"none"` advertises an empty tool list even
+	 * when `context.tools` is retained (handoff prompt-cache reuse).
+	 */
+	toolChoice?: ToolChoice;
 	/** Sand effort parameter; when set from mapOptionsForApi, overrides the default `high`. */
 	effort?: Effort | string;
 	/**
@@ -778,12 +784,15 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					? model.requestModelId.trim()
 					: model.id;
 			const identity = classifyModel("grokbot", policyModelId, { lenient: true });
-			const tools = toInferenceTools(context.tools, identity);
+			// Handoff / side-channel turns keep `context.tools` for prompt-cache
+			// reuse while forcing `toolChoice: "none"` — do not advertise tools.
+			const tools = options?.toolChoice === "none" ? [] : toInferenceTools(context.tools, identity);
 			const grammarTools = buildGrammarToolIndex(context.tools);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
 			let emptyToolRetryUsed = false;
 			let incompleteToolRetryUsed = false;
-			let geminiProductRetryUsed = false;
+			/** Catalog `sand-empty-tools-retry-wire` engaged for this empty-tool replay. */
+			let emptyToolsRetryWire: typeof model.sandEmptyToolsRetryWire | undefined;
 			let started = false;
 			let anthropicWire: AnthropicSandToolWireResult = {
 				requestedModel: { modelId: model.id },
@@ -985,7 +994,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			};
 
 			attempt: while (true) {
-				const replayToolTurn = emptyToolRetryUsed || incompleteToolRetryUsed || geminiProductRetryUsed;
+				const replayToolTurn = emptyToolRetryUsed || incompleteToolRetryUsed || emptyToolsRetryWire !== undefined;
 				const modelConfig = buildModelConfig(model, {
 					...options,
 					maxTokens: replayToolTurn ? Math.max(Number(options?.maxTokens) || 0, 4096) : options?.maxTokens,
@@ -1024,7 +1033,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					conversationId,
 				};
 				if (modelConfig) body.modelConfig = modelConfig;
-				const retrySandWire = geminiProductRetryUsed ? "keep-model" : model.sandToolsWire;
+				const retrySandWire = emptyToolsRetryWire ?? model.sandToolsWire;
 				const resolvedWire = resolveAnthropicSandToolsWire(
 					typeof process !== "undefined" ? process.env.GROKBOT_ANTHROPIC_TOOLS_WIRE : undefined,
 					options?.anthropicToolsWire,
@@ -1735,13 +1744,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					// cap is enough for native bash/read/write to appear.
 					if (!emptyToolRetryUsed && tools.length > 0) {
 						emptyToolRetryUsed = true;
+						const retryWire = model.sandEmptyToolsRetryWire;
 						if (
-							identity.class === "gemini" &&
+							retryWire &&
 							anthropicWire.wireMode !== "keep-model" &&
 							anthropicWire.wireMode !== "parent-chat" &&
 							anthropicWire.wireMode !== "automation"
 						) {
-							geminiProductRetryUsed = true;
+							emptyToolsRetryWire = retryWire;
 						}
 						discardAttemptEvents();
 						clearAbandonedAttemptMetadata();
@@ -1758,7 +1768,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						logger.info("grokbot: retrying empty tool turn", {
 							modelId: model.id,
 							class: identity.class,
-							geminiProductRetry: geminiProductRetryUsed,
+							emptyToolsRetryWire,
 						});
 						continue attempt;
 					}
