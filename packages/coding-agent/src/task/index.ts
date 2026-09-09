@@ -24,6 +24,7 @@ import { resolveModelOverride } from "../config/model-resolver";
 import type { ExtensionRunner } from "../extensibility/extensions/runner";
 import { MCPManager } from "../mcp/manager";
 import type { Theme } from "../modes/theme/theme";
+import { OperationalStore } from "../operational/store";
 import {
 	type AgentHarness,
 	defaultAgentTypeHarnessPolicy,
@@ -1677,7 +1678,14 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 		});
 		const assignment = (params.assignment ?? "").trim();
 		const isolationMode = this.session.settings.get("task.isolation.mode");
-		const isolationRequested = "isolated" in params ? params.isolated === true : false;
+		const isAutonomous =
+			this.session.settings.get("fusion.enabled") === true &&
+			this.session.settings.get("fusion.mode") === "autonomous";
+		const isWritingWorker =
+			!effectiveAgent.tools ||
+			effectiveAgent.tools.some(t => ["edit", "write", "ast_edit"].includes(t.toLowerCase()));
+		const isolationRequested =
+			"isolated" in params ? params.isolated === true : isAutonomous && isWritingWorker && isolationMode !== "none";
 		const isIsolated = isolationMode !== "none" && isolationRequested;
 		const mergeMode = this.session.settings.get("task.isolation.merge");
 		const commitStyle = this.session.settings.get("task.isolation.commits");
@@ -1755,6 +1763,27 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			const outputManager =
 				this.session.agentOutputManager ?? new AgentOutputManager(this.session.getArtifactsDir ?? (() => null));
 			const agentId = preAllocatedId ?? (await outputManager.allocate(params.id?.trim() || generateTaskName()));
+			let durableJobId: string | undefined;
+			if (isAutonomous) {
+				try {
+					const store = OperationalStore.open();
+					durableJobId = `task-${agentId}-${Date.now()}`;
+					store.createJob({
+						id: durableJobId,
+						type: "native_task",
+						payload: {
+							agentId,
+							agent: effectiveAgent.name,
+							role: params.role ?? null,
+							assignment: assignment.slice(0, 500),
+							isIsolated,
+						},
+					});
+					store.claimJobById(durableJobId, `session-${this.session.getSessionId?.() ?? "root"}`);
+				} catch {
+					// Non-fatal to task execution
+				}
+			}
 
 			const availableSkills = filterSkillsForHarness(harness, this.session.skills ?? [], agent.autoloadSkills);
 			// Resolve autoload skills from agent definition against the harness-filtered set
@@ -2178,6 +2207,26 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				await fs.rm(tempArtifactsDir, { recursive: true, force: true });
 			}
 
+			result.changesApplied = changesApplied ?? undefined;
+			result.mergeSummary = mergeSummary || undefined;
+			if (durableJobId) {
+				result.durableJobId = durableJobId;
+				try {
+					const store = OperationalStore.open();
+					store.transitionJob(durableJobId, {
+						to: result.exitCode === 0 && !result.isError ? "completed" : "failed",
+						leaseOwner: `session-${this.session.getSessionId?.() ?? "root"}`,
+						result: {
+							exitCode: result.exitCode,
+							changesApplied: result.changesApplied ?? null,
+							durationMs: result.durationMs,
+						},
+						error: result.exitCode === 0 && !result.isError ? undefined : (result.error ?? "Task failed"),
+					});
+				} catch {
+					// Non-fatal
+				}
+			}
 			return this.#buildResultPayload(result, projectAgentsDir, Date.now() - startTime, mergeSummary);
 		} catch (err) {
 			return {

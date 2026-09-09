@@ -12,7 +12,7 @@ import { resolutionNote } from "./fusion-resolution";
 import { commandConsumed, parseSubcommand, usage } from "./parse";
 
 /** Valid `fusion.mode` values, mirrored from the settings schema enum. */
-const FUSION_MODES = ["off", "delegate", "escalate", "token-savings", "savings"] as const;
+const FUSION_MODES = ["off", "delegate", "escalate", "token-savings", "savings", "autonomous"] as const;
 type FusionModeValue = (typeof FUSION_MODES)[number];
 
 function isFusionMode(value: string): value is FusionModeValue {
@@ -59,7 +59,7 @@ export function buildFusionStatusText(runtime: SlashCommandRuntime): string {
 	}`;
 	const lines = [
 		header,
-		`  Mode:            ${mode}`,
+		`  Mode:            ${mode}${mode === "autonomous" ? " (planning-only root, isolated durable workers)" : ""}`,
 		`  Sidekick model:  ${sidekick}`,
 		`  Sidekick state:  ${sidekickState.label}`,
 		`  Strong sidekick: ${strong || "(unset)"}`,
@@ -185,7 +185,7 @@ export function disableFusion(runtime: SlashCommandRuntime): string {
 }
 
 export const FUSION_USAGE =
-	"Usage: /fusion [on|off|status|mode <off|delegate|escalate|token-savings>|routing <on|off>|sidekick <model>|strong <model|clear>|compact <model|clear>|pool <list|set|remove|clear>]";
+	"Usage: /fusion [on|off|status|mode <off|delegate|escalate|token-savings|autonomous>|routing <on|off>|sidekick <model>|strong <model|clear>|compact <model|clear>|pool <list|set|remove|clear>]";
 /**
  * Text/ACP handler for `/fusion`. Bare invocation prints status (the TUI
  * dispatcher intercepts bare `/fusion` earlier and shows the menu instead).
@@ -215,16 +215,22 @@ export async function handleFusionCommand(
 			const value = rest.trim().toLowerCase();
 			if (!value) {
 				await runtime.output(
-					`fusion.mode is "${runtime.settings.get("fusion.mode")}". Usage: /fusion mode <off|delegate|escalate|token-savings>`,
+					`fusion.mode is "${runtime.settings.get("fusion.mode")}". Usage: /fusion mode <off|delegate|escalate|token-savings|autonomous>`,
 				);
 				return commandConsumed();
 			}
 			if (!isFusionMode(value)) {
-				return usage("Usage: /fusion mode <off|delegate|escalate|token-savings>", runtime);
+				return usage("Usage: /fusion mode <off|delegate|escalate|token-savings|autonomous>", runtime);
 			}
 			const canonicalValue = value === "savings" ? "token-savings" : value;
 			runtime.settings.set("fusion.mode", canonicalValue);
-			await runtime.output(`fusion.mode set to "${canonicalValue}".`);
+			const wasEnabled = runtime.settings.get("fusion.enabled") === true;
+			if (!wasEnabled && canonicalValue !== "off") {
+				runtime.settings.set("fusion.enabled", true);
+				await runtime.output(`fusion.mode set to "${canonicalValue}" and Fusion enabled.`);
+			} else {
+				await runtime.output(`fusion.mode set to "${canonicalValue}".`);
+			}
 			return commandConsumed();
 		}
 		case "routing": {

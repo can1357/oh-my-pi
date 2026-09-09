@@ -438,7 +438,7 @@ const FUSION_SUBCOMMANDS: SubcommandDef[] = [
 	{ name: "on", description: "Enable fusion (spawns the sidekick)" },
 	{ name: "off", description: "Disable fusion" },
 	{ name: "status", description: "Show fusion status and assignments" },
-	{ name: "mode", description: "Set fusion mode", usage: "<off|delegate|escalate|token-savings>" },
+	{ name: "mode", description: "Set fusion mode", usage: "<off|delegate|escalate|token-savings|autonomous>" },
 	{ name: "routing", description: "Toggle dynamic routing", usage: "<on|off>" },
 	{ name: "sidekick", description: "Assign the sidekick model", usage: "<model-or-alias>" },
 	{ name: "strong", description: "Assign the strong sidekick model", usage: "<model-or-alias|clear>" },
@@ -3003,6 +3003,13 @@ function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix: string
 	};
 }
 
+/** Direct `/fusion` menu choice that completes to the full `mode autonomous` command. */
+const FUSION_AUTONOMOUS_COMPLETION: AutocompleteItem = {
+	value: "mode autonomous ",
+	label: "autonomous",
+	description: "Autonomous workflow: planning-only root, durable tasks, isolated workers",
+};
+
 /** Direct `/fusion` menu choice that completes to the full `mode token-savings` command. */
 const FUSION_TOKEN_SAVINGS_COMPLETION: AutocompleteItem = {
 	value: "mode token-savings ",
@@ -3020,6 +3027,9 @@ const FUSION_TOKEN_SAVINGS_COMPLETION: AutocompleteItem = {
 function completeFusionArguments(argumentPrefix: string): AutocompleteItem[] | null {
 	if (argumentPrefix.includes(" ")) return null; // past the subcommand
 	const items = buildArgumentCompletions(FUSION_SUBCOMMANDS)(argumentPrefix) ?? [];
+	if ("autonomous".startsWith(argumentPrefix.toLowerCase())) {
+		items.unshift(FUSION_AUTONOMOUS_COMPLETION);
+	}
 	if ("token-savings".startsWith(argumentPrefix.toLowerCase())) {
 		items.unshift(FUSION_TOKEN_SAVINGS_COMPLETION);
 	}

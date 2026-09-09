@@ -503,6 +503,12 @@ export interface SingleResult {
 	outputMeta?: { lineCount: number; charCount: number };
 	/** Deterministic model-routing provenance for this spawn's resolved route. Immutable. See {@link AgentProgress.modelRouting}. */
 	readonly modelRouting?: SubagentModelRoutingDecision;
+	/** Structured integration status for isolated worktree / merge operations */
+	changesApplied?: boolean;
+	/** Rendered merge summary or conflict note */
+	mergeSummary?: string;
+	/** OperationalStore durable job tracking ID */
+	durableJobId?: string;
 }
 
 /** Tool details for TUI rendering */

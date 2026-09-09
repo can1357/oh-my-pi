@@ -804,6 +804,36 @@ CREATE INDEX IF NOT EXISTS idx_events_job ON trajectory_events(job_id, created_a
 		return claim();
 	}
 
+	/**
+	 * Atomically claim a specific queued job by ID.
+	 * Returns null if the job does not exist or is not in 'queued' status.
+	 */
+	claimJobById(id: string, leaseOwner: string, leaseMs = DEFAULT_LEASE_MS): DurableJob | null {
+		this.#assertOpen();
+		if (!id.trim()) throw new Error("id is required");
+		if (!leaseOwner.trim()) throw new Error("leaseOwner is required");
+		const owner = leaseOwner.trim();
+		const leaseDuration = Math.max(1, leaseMs);
+
+		const claim = this.#db.transaction(() => {
+			const candidate = this.#getJobStmt.get(id) as JobRow | null;
+			if (candidate?.status !== "queued") return null;
+			const now = this.#now();
+			const updated: JobRow = {
+				...candidate,
+				status: "running",
+				lease_owner: owner,
+				lease_expires_at: now + leaseDuration,
+				updated_at: now,
+				started_at: candidate.started_at ?? now,
+			};
+			this.#writeJobRow(updated);
+			return this.#toJob(updated);
+		});
+
+		return claim();
+	}
+
 	transitionJob(id: string, input: JobTransitionInput): DurableJob {
 		this.#assertOpen();
 		const transition = this.#db.transaction(() => {

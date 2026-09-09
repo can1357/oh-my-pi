@@ -19,6 +19,12 @@
       "host": "100.64.216.11",
       "username": "root",
       "description": "Hetzner Cloud VPS"
+    },
+    "colab": {
+      "host": "colab-pkherdr",
+      "port": 2222,
+      "username": "root",
+      "description": "Ephemeral Colab VM via /colab-ssh (MagicDNS; IP changes per session)"
     }
   }
 }

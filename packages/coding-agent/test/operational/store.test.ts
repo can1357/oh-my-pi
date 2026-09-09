@@ -242,6 +242,23 @@ describe("OperationalStore", () => {
 		expect(() => s.renewLease(job.id, "other", 1_000)).toThrow(/stale lease/);
 	});
 
+	it("claims a specific queued job by ID and rejects absent or non-queued jobs", () => {
+		const clock = new TestClock(1_000);
+		const s = openStore({ clock });
+		const job1 = s.createJob({ type: "first" });
+		const job2 = s.createJob({ type: "second" });
+
+		const claimed = s.claimJobById(job2.id, "worker-target", 60_000);
+		expect(claimed).not.toBeNull();
+		expect(claimed?.id).toBe(job2.id);
+		expect(claimed?.status).toBe("running");
+		expect(claimed?.leaseOwner).toBe("worker-target");
+
+		expect(s.claimJobById(job2.id, "worker-other")).toBeNull();
+		expect(s.claimJobById("does-not-exist", "worker-target")).toBeNull();
+		expect(s.getJob(job1.id)?.status).toBe("queued");
+	});
+
 	it("CAS-materializes a due schedule into exactly one queued job", () => {
 		const clock = new TestClock(5_000);
 		const s = openStore({ clock });

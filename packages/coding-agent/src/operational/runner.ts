@@ -261,6 +261,25 @@ export class DurableRunner {
 		return await this.#executeClaimed(claimed, signal);
 	}
 
+	/**
+	 * Atomically claim and execute a specific queued job by ID.
+	 * Returns null if the job cannot be claimed (e.g. not queued or does not exist).
+	 */
+	async runJobById(id: string, signal?: AbortSignal): Promise<DurableJob | null> {
+		this.#assertOpen();
+		if (signal?.aborted) return null;
+
+		const claimed = this.#store.claimJobById(id, this.#workerId, this.#leaseMs);
+		if (!claimed) return null;
+		this.#store.appendEvent({
+			kind: "job_state",
+			jobId: claimed.id,
+			payload: { status: "running", action: "claim_by_id", workerId: this.#workerId },
+		});
+
+		return await this.#executeClaimed(claimed, signal);
+	}
+
 	async runLoop(signal?: AbortSignal): Promise<void> {
 		this.#assertOpen();
 		if (this.#runningLoop) throw new Error("runLoop is already active");

@@ -26,6 +26,7 @@ describe("fusion settings schema", () => {
 			"escalate",
 			"token-savings",
 			"savings",
+			"autonomous",
 		]);
 	});
 

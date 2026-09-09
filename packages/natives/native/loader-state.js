@@ -628,7 +628,7 @@ function buildHelpMessage(ctx) {
 		const expectedPaths = ctx.addonFilenames.map(filename => `  ${path.join(ctx.versionedDir, filename)}`).join("\n");
 		const downloadHints = ctx.addonFilenames
 			.map(filename => {
-				const downloadUrl = `https://github.com/can1357/oh-my-pi/releases/latest/download/${filename}`;
+				const downloadUrl = `https://github.com/kingkillery/oh-my-pk/releases/latest/download/${filename}`;
 				const targetPath = path.join(ctx.versionedDir, filename);
 				return `  curl -fsSL "${downloadUrl}" -o "${targetPath}"`;
 			})
@@ -639,7 +639,10 @@ function buildHelpMessage(ctx) {
 		);
 	}
 	return (
-		"If installed via npm/bun, try reinstalling: bun install @pk-nerdsaver-ai/pi-natives\n" +
+		"On Linux / Colab / cloud instances, install the standalone prebuilt binary (includes embedded native addons):\n" +
+		"  curl -fsSL https://oh-my-pk.pkking.computer/install.sh | sh -s -- --binary\n" +
+		"Or download directly:\n" +
+		"  curl -fsSL https://oh-my-pk.pkking.computer/bin/v16.4.17/omp-linux-x64 -o /usr/local/bin/ompk && chmod +x /usr/local/bin/ompk\n\n" +
 		"If developing locally, build with: bun --cwd=packages/natives run build\n" +
 		"Optional x64 variants: TARGET_VARIANT=baseline|modern bun --cwd=packages/natives run build"
 	);

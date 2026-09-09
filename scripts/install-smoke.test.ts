@@ -51,6 +51,7 @@ interface InstallerFixture {
 	arch: string;
 	args?: string[];
 	version?: string;
+	env?: Record<string, string>;
 }
 
 interface InstallerResult {
@@ -66,6 +67,7 @@ function runInstaller({
 	arch,
 	args = ["--binary", "--ref", "fixture-ref"],
 	version = "v16.4.6",
+	env = {},
 }: InstallerFixture): InstallerResult {
 	const fixtureDir = mkdtempSync(join(tmpdir(), "ompk-install-smoke-"));
 	const curlLog = join(fixtureDir, "curl.log");
@@ -78,6 +80,7 @@ function runInstaller({
 				cwd: import.meta.dir,
 				env: {
 					...process.env,
+					...env,
 					MOCK_UNAME_OS: os,
 					MOCK_UNAME_ARCH: arch,
 					MOCK_VERSION: version,
@@ -270,6 +273,20 @@ describe("install.sh", () => {
 		["Linux", "aarch64", "omp-linux-arm64"],
 		["Linux", "x86_64", "omp-linux-x64"],
 	] as const;
+
+	test("defaults to standalone binary on Google Colab", () => {
+		const result = runInstaller({
+			os: "Linux",
+			arch: "x86_64",
+			args: [],
+			env: { COLAB_RELEASE_TAG: "colab-runtime" },
+		});
+
+		expect(result.exitCode).toBe(0);
+		expect(result.stdout).toContain("Downloading omp-linux-x64...");
+		expect(result.curlCalls).toContain(`${DIST_BASE}/bin/v16.4.6/omp-linux-x64`);
+		expect(result.bunCalls).toBe("");
+	});
 
 	for (const [os, arch, filename] of supportedTargets) {
 		test(`downloads ${filename} for ${os} ${arch}`, () => {

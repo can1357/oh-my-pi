@@ -2549,6 +2549,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					agentKind === "main" &&
 					settings.get("fusion.enabled") === true &&
 					isTokenSavingsFusionMode(settings.get("fusion.mode")),
+				fusionAutonomous:
+					agentKind === "main" &&
+					settings.get("fusion.enabled") === true &&
+					settings.get("fusion.mode") === "autonomous",
 				sidekickModel: settings.get("fusion.sidekickModel") || "pi/smol",
 				sidekickId,
 				secretsEnabled,
@@ -2908,6 +2912,36 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				thinkingLevel: toReasoningEffort(effectiveThinkingLevel),
 				disableReasoning: shouldDisableReasoning(effectiveThinkingLevel),
 				tools: initialTools,
+			},
+			beforeToolCall: async context => {
+				const isAutonomous =
+					settings.get("fusion.enabled") === true && settings.get("fusion.mode") === "autonomous";
+				if (isAutonomous && agentKind === "main") {
+					const toolName = context.toolCall.name.toLowerCase();
+					const RESTRICTED_ROOT_TOOLS = new Set(["edit", "write", "ast_edit", "memory_edit"]);
+					if (RESTRICTED_ROOT_TOOLS.has(toolName)) {
+						return {
+							block: true,
+							reason: `[Autonomous Fusion Mode] Direct modification via "${toolName}" is restricted for the planning-only root session. Delegate implementation to an isolated task worker via the \`task\` tool with defined targets, explicit changes, and acceptance criteria.`,
+						};
+					}
+					if (toolName === "bash") {
+						const cmd = String(context.args?.command ?? "").trim();
+						const destructivePatterns = [
+							/\b(git\s+(commit|push|merge|rebase|cherry-pick|tag|branch\s+-[dD]))\b/i,
+							/\b(rm|del|rmdir|unlink)\s+/i,
+							/\b(mkdir|touch)\s+/i,
+							/>\s*[^&|]/,
+						];
+						if (destructivePatterns.some(p => p.test(cmd))) {
+							return {
+								block: true,
+								reason: `[Autonomous Fusion Mode] Mutating shell command "${cmd}" is restricted for the planning-only root session. Delegate mutations to a task worker via the \`task\` tool.`,
+							};
+						}
+					}
+				}
+				return undefined;
 			},
 			convertToLlm: convertToLlmFinal,
 			onPayload,

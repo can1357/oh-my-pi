@@ -29,6 +29,7 @@ describe("/fusion argument completion", () => {
 		const items = await getCompletions("");
 		expect(items?.map(item => item.label)).toEqual([
 			"token-savings",
+			"autonomous",
 			"on",
 			"off",
 			"status",

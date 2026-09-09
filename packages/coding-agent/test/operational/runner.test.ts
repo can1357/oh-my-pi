@@ -114,6 +114,27 @@ describe("DurableRunner", () => {
 		expect(events.some(e => e.kind === "outcome")).toBe(true);
 	});
 
+	it("executes a targeted queued job by ID via runJobById without claiming others", async () => {
+		const s = openStore();
+		const job1 = s.createJob({ type: "first", payload: { step: 1 } });
+		const job2 = s.createJob({ type: "second", payload: { step: 2 } });
+
+		const executed: string[] = [];
+		const runner = createRunner(s, async ctx => {
+			executed.push(ctx.job.id);
+			return { done: ctx.job.id };
+		});
+
+		const result = await runner.runJobById(job2.id);
+		expect(result).not.toBeNull();
+		expect(result?.status).toBe("completed");
+		expect(result?.result).toEqual({ done: job2.id });
+		expect(executed).toEqual([job2.id]);
+
+		expect(s.getJob(job1.id)?.status).toBe("queued");
+		expect(await runner.runJobById(job2.id)).toBeNull();
+	});
+
 	it("records failing executor outcomes", async () => {
 		const s = openStore();
 		const runner = createRunner(s, async () => {

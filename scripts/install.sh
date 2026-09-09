@@ -66,6 +66,16 @@ done
 if [ -n "$REF" ] && [ -z "$MODE" ]; then
     MODE="source"
 fi
+# Detect Google Colab environment
+is_colab() {
+    [ -d "/content" ] || [ -n "$COLAB_RELEASE_TAG" ] || [ -n "$COLAB_GPU" ]
+}
+
+# If in Google Colab, default to binary install (prebuilt standalone, avoids npm native gaps)
+if is_colab && [ -z "$MODE" ] && [ -z "$REF" ]; then
+    MODE="binary"
+fi
+
 
 # Check if bun is available
 has_bun() {
@@ -224,7 +234,14 @@ install_binary() {
     # Download binary from the distribution endpoint.
     BINARY_URL="${DIST_BASE}/bin/${LATEST}/${BINARY}"
     echo "Downloading ${BINARY}..."
-    curl -fsSL "$BINARY_URL" -o "${INSTALL_DIR}/oh-my-pk"
+    if ! curl -fsSL "$BINARY_URL" -o "${INSTALL_DIR}/oh-my-pk"; then
+        echo "Distribution endpoint unavailable; trying GitHub Releases..."
+        GITHUB_URL="https://github.com/kingkillery/oh-my-pk/releases/download/${LATEST}/${BINARY}"
+        curl -fsSL "$GITHUB_URL" -o "${INSTALL_DIR}/oh-my-pk" || {
+            echo "Failed to download ${BINARY} from distribution endpoint and GitHub Releases."
+            exit 1
+        }
+    fi
     chmod +x "${INSTALL_DIR}/oh-my-pk"
     # Keep `omp` and `ompk` as launch aliases for the renamed command.
     cp "${INSTALL_DIR}/oh-my-pk" "${INSTALL_DIR}/omp"
@@ -234,10 +251,29 @@ install_binary() {
     echo ""
     echo "✓ Installed oh-my-pk to ${INSTALL_DIR}/oh-my-pk (aliases: omp, ompk)"
 
+    # If /usr/local/bin is writable, symlink there so it is in PATH immediately
+    # (essential for Colab, Docker, and root environments).
+    if [ -w "/usr/local/bin" ] && [ "$INSTALL_DIR" != "/usr/local/bin" ]; then
+        ln -sf "${INSTALL_DIR}/oh-my-pk" "/usr/local/bin/oh-my-pk" 2>/dev/null || true
+        ln -sf "${INSTALL_DIR}/omp" "/usr/local/bin/omp" 2>/dev/null || true
+        ln -sf "${INSTALL_DIR}/ompk" "/usr/local/bin/ompk" 2>/dev/null || true
+        echo "✓ Created symlinks in /usr/local/bin (oh-my-pk, omp, ompk)"
+    fi
+
+    # Clean up stale/broken npm/bun global wrappers if present so the standalone binary is invoked
+    if [ -d "$HOME/.bun/bin" ]; then
+        rm -f "$HOME/.bun/bin/oh-my-pk" "$HOME/.bun/bin/omp" "$HOME/.bun/bin/ompk" 2>/dev/null || true
+    fi
+
     # Check if in PATH
     case ":$PATH:" in
-        *":$INSTALL_DIR:"*) echo "Run 'oh-my-pk' (or 'ompk') to get started!" ;;
-        *) echo "Add ${INSTALL_DIR} to your PATH, then run 'oh-my-pk' or 'ompk'" ;;
+        *":$INSTALL_DIR:"*|*":/usr/local/bin:"*) echo "Run 'oh-my-pk' (or 'ompk') to get started!" ;;
+        *)
+            if [ -f "$HOME/.bashrc" ] && ! grep -q "$INSTALL_DIR" "$HOME/.bashrc" 2>/dev/null; then
+                echo "export PATH=\"$INSTALL_DIR:\$PATH\"" >> "$HOME/.bashrc"
+            fi
+            echo "Add ${INSTALL_DIR} to your PATH, then run 'oh-my-pk' or 'ompk'"
+            ;;
     esac
 }
 

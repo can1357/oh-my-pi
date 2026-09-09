@@ -909,7 +909,7 @@ export const SETTINGS_SCHEMA = {
 
 	"fusion.mode": {
 		type: "enum",
-		values: ["off", "delegate", "escalate", "token-savings", "savings"] as const,
+		values: ["off", "delegate", "escalate", "token-savings", "savings", "autonomous"] as const,
 		default: "escalate",
 		ui: {
 			tab: "interaction",
@@ -933,6 +933,12 @@ export const SETTINGS_SCHEMA = {
 					label: "Token Savings",
 					description:
 						"Explicit token savings: default model limited to two calls/simple tasks, planning to thinking/max-intelligence, delegated work to task, browser to browser models, and context gathering to smol.",
+				},
+				{
+					value: "autonomous",
+					label: "Autonomous",
+					description:
+						"Autonomous workflow: planning-only root, durable delegated work, isolated writing workers, and continuous replanning from rich handoffs.",
 				},
 			],
 			condition: "fusionEnabled",
