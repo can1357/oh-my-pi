@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced memory retained by `complete()` and `completeSimple()` while streaming responses.
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed

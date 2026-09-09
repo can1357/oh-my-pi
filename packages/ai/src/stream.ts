@@ -1060,7 +1060,11 @@ async function resolveWithThinkingLoopRetries(
 	onAttempt?: (message: AssistantMessage) => void,
 ): Promise<AssistantMessage> {
 	const dispatchAttempt = async (): Promise<AssistantMessage> => {
-		const message = await dispatch().result();
+		const response = dispatch();
+		for await (const _event of response) {
+			// Completion callers do not consume deltas; drain them as they arrive to avoid retaining the response history.
+		}
+		const message = await response.result();
 		onAttempt?.(message);
 		return message;
 	};
