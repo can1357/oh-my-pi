@@ -4,6 +4,7 @@ import {
 	collectIncompleteTodoRows,
 	formatIncompleteTodoSnapshotLines,
 	formatIncompleteTodosSection,
+	hasIncompleteTodosSection,
 	INCOMPLETE_TODOS_SNAPSHOT_CAP,
 	parseIncompleteTodosFromSummary,
 	upsertIncompleteTodosSection,
@@ -254,6 +255,53 @@ describe("getLatestTodoPhasesFromEntries reconstructs leftover todos after compa
 				},
 			},
 			compaction("c1", "todo", "## Goal\nPre-feature compact with no Incomplete Todos section.\n"),
+		] as SessionEntry[];
+
+		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([
+			{ name: "Work", tasks: [{ content: "legacy plan", status: "pending" }] },
+		]);
+	});
+
+	it("ignores prose Incomplete Todos headings without rows or a marker", () => {
+		const prose = [
+			"## Goal",
+			"Ship the parser",
+			"",
+			"## Incomplete Todos: later",
+			"We should revisit the remaining work after lunch.",
+			"",
+			"## Next Steps",
+			"1. Keep going",
+			"",
+		].join("\n");
+		expect(hasIncompleteTodosSection(prose)).toBe(false);
+		expect(parseIncompleteTodosFromSummary(prose)).toEqual([]);
+	});
+
+	it("recovers older todo toolResults when the latest compact only mentions todos in prose", () => {
+		const entries = [
+			{
+				type: "message",
+				id: "todo",
+				parentId: null,
+				timestamp: TIMESTAMP,
+				message: {
+					role: "toolResult",
+					toolName: "todo",
+					toolCallId: "call-1",
+					content: [{ type: "text", text: "ok" }],
+					isError: false,
+					details: {
+						phases: [{ name: "Work", tasks: [{ content: "legacy plan", status: "pending" }] }],
+					},
+					timestamp: 1,
+				},
+			},
+			compaction(
+				"c1",
+				"todo",
+				"## Goal\nPre-feature compact.\n\n## Incomplete Todos: later\nWe should revisit this.\n",
+			),
 		] as SessionEntry[];
 
 		expect(getLatestTodoPhasesFromEntries(entries)).toEqual([

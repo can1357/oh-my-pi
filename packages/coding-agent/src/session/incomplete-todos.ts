@@ -3,11 +3,16 @@ import type { TodoPhase } from "../tools/todo";
 /** Cap leftover-todo dumps so a huge list cannot overflow summarizer / nudge prompts. */
 export const INCOMPLETE_TODOS_SNAPSHOT_CAP = 40;
 const INCOMPLETE_TODOS_HEADING = "## Incomplete Todos";
-/** Unique marker emitted by {@link formatIncompleteTodosSection}; required for durable parse. */
+/** Unique marker emitted by {@link formatIncompleteTodosSection}; identifies post-feature snapshots. */
 export const INCOMPLETE_TODOS_MARKER = "<!-- omp-incomplete-todos-v1 -->";
-/** Exact h2 plus required durable marker on the following line. */
-const INCOMPLETE_TODOS_HEADING_RE =
-	/^## Incomplete Todos(?:[ \t]*:.*|[ \t]+.+)?[ \t]*\n[ \t]*<!-- omp-incomplete-todos-v1 -->[ \t]*$/m;
+/** H2 with optional `: suffix` or ` suffix` (legacy summaries predate the canonical heading). */
+const INCOMPLETE_TODOS_HEADING_LINE_RE = /^## Incomplete Todos(?:[ \t]*:.*|[ \t]+.+)?[ \t]*$/m;
+/**
+ * A heading starts a durable section only when its body carries the marker, a task row, or
+ * `(none)`. Pure-prose headings (legacy `## Incomplete Todos: later` discussion) never match,
+ * so legacy compactions stay untrusted and older toolResults survive.
+ */
+const INCOMPLETE_TODOS_BODY_RE = /<!-- omp-incomplete-todos-v1 -->|^\s*\(none\)\s*$/m;
 
 export type IncompleteTodoStatus = "pending" | "in_progress" | "abandoned" | "blocked";
 
@@ -210,18 +215,31 @@ export function upsertIncompleteTodosSection(summary: string, block: string | un
 }
 
 function splitIncompleteTodosSection(summary: string): { before: string; body: string; after: string } | undefined {
-	const match = INCOMPLETE_TODOS_HEADING_RE.exec(summary);
+	const match = INCOMPLETE_TODOS_HEADING_LINE_RE.exec(summary);
 	if (!match) return undefined;
 	const start = match.index;
 	const afterHeading = start + match[0].length;
 	const rest = summary.slice(afterHeading);
 	const nextHeading = /^## /m.exec(rest);
 	const end = nextHeading ? afterHeading + nextHeading.index : summary.length;
+	const body = summary.slice(start, end).trim();
+	if (!INCOMPLETE_TODOS_BODY_RE.test(body) && !hasIncompleteTodoTaskRow(body)) return undefined;
 	return {
 		before: summary.slice(0, start).trimEnd(),
-		body: summary.slice(start, end).trim(),
+		body,
 		after: summary.slice(end).replace(/^\n+/, "").trimEnd(),
 	};
+}
+
+/** True when a section body carries at least one durable task row. */
+function hasIncompleteTodoTaskRow(body: string): boolean {
+	return body
+		.split(/\r?\n/)
+		.some(
+			line =>
+				/^\s+- \[(pending|in_progress|abandoned|blocked)\] /.test(line) ||
+				/^\s+- \[(pending|in_progress|abandoned|blocked)\]$/.test(line),
+		);
 }
 
 const INCOMPLETE_TODO_TASK_RE =
@@ -238,7 +256,7 @@ export function parseIncompleteTodosFromSummary(summary: string): TodoPhase[] {
 	if (!split) return [];
 	const phases: TodoPhase[] = [];
 	for (const line of split.body.split(/\r?\n/)) {
-		if (INCOMPLETE_TODOS_HEADING_RE.test(line)) continue;
+		if (INCOMPLETE_TODOS_HEADING_LINE_RE.test(line)) continue;
 		if (line.trim() === "(none)") continue;
 		// Durable section never emits `- + N more`; treat that shape as a real phase name.
 		const task = INCOMPLETE_TODO_TASK_RE.exec(line);
