@@ -20,6 +20,16 @@ const FATAL_CLOSE_REASONS: Record<number, string> = {
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 const MAX_PENDING_SENDS = 256;
+/**
+ * Budget for everything the queue is holding on to, charged once per entry when
+ * it is admitted: a frame's serialized length, and for a lazy batch the size of
+ * the data its iterator keeps reachable. Retained data is the dominant cost —
+ * a batch is one entry that can pin a whole session snapshot for as long as the
+ * transport takes to drain it — so charging it at admission is what makes this
+ * number the real ceiling. Serialized chunk bytes are transient by comparison
+ * (one chunk is materialized at a time, bounded by the producer's chunk size)
+ * and are not charged again as they pass through.
+ */
 const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
 /**
  * Settled retirement records kept, as a memory backstop only. Correctness is an
@@ -137,10 +147,18 @@ export class CollabSocket {
 		}
 	}
 
-	/** Keeps a snapshot contiguous with its welcome and ahead of subsequent live traffic. */
-	sendBatch(frames: Iterable<CollabFrame>, targetPeer = 0): void {
+	/**
+	 * Keeps a snapshot contiguous with its welcome and ahead of subsequent live traffic.
+	 *
+	 * @param retainedBytes size of the data {@link frames} keeps reachable until the
+	 * batch drains. Charged against the send budget at admission, since a lazy batch
+	 * is one queue entry that can hold a whole snapshot. A serialized size is the
+	 * expected measure; it is a proxy for the object graph, within a small factor in
+	 * either direction, so pass an upper bound where one is cheap.
+	 */
+	sendBatch(frames: Iterable<CollabFrame>, targetPeer: number, retainedBytes: number): void {
 		if (this.#closed) return;
-		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, 0);
+		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, retainedBytes);
 	}
 
 	/**
@@ -217,7 +235,12 @@ export class CollabSocket {
 	}
 
 	#overCapacity(bytes: number): boolean {
-		return this.#pendingSends.length >= MAX_PENDING_SENDS || this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES;
+		if (this.#pendingSends.length >= MAX_PENDING_SENDS) return true;
+		// An entry with nothing ahead of it is admitted whatever it costs: a session
+		// larger than the whole budget still has to be shareable, and the queue can
+		// only shrink from here. The ceiling is therefore the budget plus one entry.
+		if (this.#pendingSends.length === 0) return false;
+		return this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES;
 	}
 
 	#failOverload(): void {
@@ -257,22 +280,11 @@ export class CollabSocket {
 				continue;
 			}
 			const serialized = typeof next.value === "string" ? next.value : JSON.stringify(next.value);
-			const bytes = pending.bytes === 0 ? Buffer.byteLength(serialized) : 0;
-			if (this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES) {
-				this.#failOverload();
+			const sealed = await sealSerialized(this.#opts.key, serialized);
+			if (this.#closed || generation !== this.#sendGeneration) return;
+			if (pending.cancelled) continue;
+			if ((await this.#sendEnvelope(pending, packEnvelope(pending.targetPeer, sealed), generation)) === "stop") {
 				return;
-			}
-			this.#pendingSendBytes += bytes;
-			try {
-				const sealed = await sealSerialized(this.#opts.key, serialized);
-				if (this.#closed || generation !== this.#sendGeneration) return;
-				if (pending.cancelled) continue;
-				if ((await this.#sendEnvelope(pending, packEnvelope(pending.targetPeer, sealed), generation)) === "stop") {
-					return;
-				}
-			} finally {
-				// Every terminal path that flips the generation also zeroes the counter.
-				if (generation === this.#sendGeneration) this.#pendingSendBytes -= bytes;
 			}
 		}
 	}

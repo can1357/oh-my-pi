@@ -412,7 +412,8 @@ export class CollabHost {
 		// Enqueue the snapshot synchronously so live traffic cannot overtake it;
 		// materialize its chunks only as the transport drains.
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
-		if (JSON.stringify(snapshot).length > WELCOME_IMAGE_STRIP_THRESHOLD) {
+		const snapshotBytes = JSON.stringify(snapshot).length;
+		if (snapshotBytes > WELCOME_IMAGE_STRIP_THRESHOLD) {
 			let stripped = 0;
 			for (const entry of snapshot.entries) {
 				if (entry.type === "message") stripped += stripImagesFromMessage(entry.message);
@@ -434,7 +435,10 @@ export class CollabHost {
 			},
 			fromPeer,
 		);
-		socket.sendBatch(this.#snapshotChunks(entries), fromPeer);
+		// snapshotForReplication clones, and the batch holds that clone until it
+		// drains, so the queue is told what it is keeping alive. Measured before
+		// image stripping and entry filtering, both of which only shrink it.
+		socket.sendBatch(this.#snapshotChunks(entries), fromPeer, snapshotBytes);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
 				socket.send({ t: "ui-request", request: pending.request }, fromPeer);

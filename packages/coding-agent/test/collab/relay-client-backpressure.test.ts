@@ -119,7 +119,7 @@ describe("CollabSocket send backpressure", () => {
 			socket.connect();
 			const first = BackpressuredWebSocket.instances[0]!;
 			first.open();
-			socket.sendBatch(chunks(), 7);
+			socket.sendBatch(chunks(), 7, 0);
 			// Wait for the condition the test needs — the drain blocked above the
 			// high-water mark, so the batch is still queued when the transport drops.
 			// A sleep only guesses at how long real AES-GCM takes, and the first frame
@@ -461,6 +461,70 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
+	it("charges a lazy batch for the snapshot it keeps reachable", () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/retained", role: "host", key: {} as CryptoKey });
+		let reason: string | undefined;
+		socket.onClose = message => {
+			reason = message;
+		};
+		let generated = 0;
+		function* chunks(): Generator<CollabFrame> {
+			generated++;
+			yield { t: "snapshot-chunk", entries: [], final: true };
+		}
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			// Each batch declares 8 MB of snapshot held behind its iterator. Two fit
+			// the budget; the third cannot, and nothing has been serialized yet, so
+			// only what the queue is keeping alive can account for the refusal.
+			socket.sendBatch(chunks(), 7, 8 * 1024 * 1024);
+			socket.sendBatch(chunks(), 8, 8 * 1024 * 1024);
+			expect(reason).toBeUndefined();
+			socket.sendBatch(chunks(), 9, 8 * 1024 * 1024);
+			expect(reason).toContain("backlog exceeded");
+			expect(generated).toBe(0);
+		} finally {
+			socket.close();
+		}
+	});
+
+	it("delivers a snapshot larger than the whole send budget", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const key = await importRoomKey(generateRoomKey());
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/oversized", role: "host", key });
+		let reason: string | undefined;
+		socket.onClose = message => {
+			reason = message;
+		};
+		function* chunks(): Generator<CollabFrame> {
+			for (let i = 0; i < 3; i++) yield { t: "snapshot-chunk", entries: [], final: i === 2 };
+		}
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// A session bigger than the budget still has to be shareable: with an
+			// empty queue there is nothing to protect, and admitting it is the only
+			// way the guest ever gets a replica.
+			socket.sendBatch(chunks(), 7, 64 * 1024 * 1024);
+			const deadline = Date.now() + 3_000;
+			while (ws.sent.length < 3 && Date.now() < deadline) {
+				ws.bufferedAmount = 0;
+				await Bun.sleep(10);
+			}
+			expect(ws.sent).toHaveLength(3);
+			expect(reason).toBeUndefined();
+		} finally {
+			socket.close();
+		}
+	});
+
 	it("delivers more than 256 lazy snapshot chunks in order before live traffic through a slow transport", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
@@ -490,7 +554,7 @@ describe("CollabSocket send backpressure", () => {
 			socket.connect();
 			const ws = BackpressuredWebSocket.instances[0]!;
 			ws.open();
-			socket.sendBatch(chunks(), 7);
+			socket.sendBatch(chunks(), 7, 0);
 			socket.send({ t: "bye", reason: "after snapshot" }, 7);
 			await Bun.sleep(30);
 			expect(generated).toBe(0);
