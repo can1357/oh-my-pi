@@ -564,7 +564,20 @@ export class ImageBudget {
 		this.#pendingTransmits.clear();
 	}
 
+	/**
+	 * Release `id`'s stable key so a component recreated under it gets a fresh id
+	 * — but only once the terminal no longer holds `id`'s data, because a key must
+	 * never resolve to an id whose graphic is gone.
+	 *
+	 * Key lifetime follows residency, not the live/text split. The two usually
+	 * agree: an image shown as text has had its graphic purged. They diverge when
+	 * {@link #retire} refuses, which leaves a suppressed image resident on another
+	 * surface — and releasing a resident id's key orphans it. The recreation mints
+	 * a new id, nothing observes the old one again, and the next pass retires it,
+	 * deleting every placement it ever made including scrollback copies.
+	 */
 	#forgetKeyForId(id: number): void {
+		if (this.#transmitted.has(id)) return;
 		const key = this.#idToKey.get(id);
 		if (key === undefined) return;
 		this.#idToKey.delete(id);

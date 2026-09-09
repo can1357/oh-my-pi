@@ -902,6 +902,88 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
+	it("releases a demoted image's key once its graphic is actually retired", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 20);
+		trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const transcript = Array.from({ length: 3 }, (_, i) => makeImage(tui.imageBudget, `row-${i}`));
+		const oldestId = tui.imageBudget.acquireId("row-0");
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: transcript.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+
+			// Over cap, so the oldest is demoted and its graphic really is gone.
+			// Its key must not hand that id back to a recreated component.
+			expect(tui.imageBudget.acquireId("row-0")).not.toBe(oldestId);
+			expect(tui.imageBudget.acquireId("row-2")).toBe(tui.imageBudget.acquireId("row-2"));
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("keeps a shared image's key when the overlay's demotion is refused", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed, deleted } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const other = makeImage(tui.imageBudget, "other");
+		const shared = makeImage(tui.imageBudget, "shared");
+		const sharedId = tui.imageBudget.acquireId("shared");
+		// Rendered first inside an over-cap modal, so the alt pass suppresses this
+		// id while the transcript behind still shows its graphic.
+		const modalImages = [
+			makeImage(tui.imageBudget, "shared"),
+			makeImage(tui.imageBudget, "modal-0"),
+			makeImage(tui.imageBudget, "modal-1"),
+		];
+		let transcript = [shared, other];
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: transcript.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(placed.has(sharedId)).toBe(true);
+
+			const overlay = tui.showOverlay(
+				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+			overlay.hide();
+			await settle(term);
+
+			// Suppression is not retirement: the graphic survived, so the key must
+			// still resolve to it. A fresh id here orphans the old one, and the next
+			// pass deletes every placement it ever made, scrollback included.
+			transcript = [makeImage(tui.imageBudget, "shared"), other];
+			expect(tui.imageBudget.acquireId("shared")).toBe(sharedId);
+
+			tui.requestRender();
+			await settle(term);
+			expect(deleted).not.toContain(sharedId);
+			expect(placed.has(sharedId)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
 	it("starts each alternate-buffer lifecycle without the previous overlay's split", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
 		const term = new VirtualTerminal(40, 12);
