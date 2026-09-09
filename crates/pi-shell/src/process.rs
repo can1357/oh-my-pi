@@ -1576,11 +1576,21 @@ impl Process {
 		}
 
 		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
-		// period — or any process re-parented to the root — is signalled too.
+		// period — or any process re-parented to the root — is signalled too. The
+		// rescan is unioned with the descendants pinned before the polite wave
+		// rather than replacing them: a root that dies to its own SIGTERM releases
+		// its surviving children to init, where a walk rooted at the dead pid can
+		// no longer see them and would report the tree gone while they run on.
 		if let Some(pgid) = process_group {
 			let _ = kill_process_group(pgid, KILL_SIGNAL);
 		}
-		descendants = self.signalable_descendants(&protected);
+		let mut captured: HashSet<i32> = descendants.iter().map(Self::pid).collect();
+		descendants.extend(
+			self
+				.signalable_descendants(&protected)
+				.into_iter()
+				.filter(|descendant| captured.insert(descendant.pid())),
+		);
 		for child in &descendants {
 			let _ = child.inner.kill(KILL_SIGNAL);
 		}
@@ -2021,6 +2031,47 @@ mod tests {
 		assert!(!pending.expect("wait for live child"), "a live process must exhaust the deadline");
 		assert!(finished.expect("wait after hard kill"), "an unreaped child has already exited");
 		assert_eq!(status, ProcessStatus::Exited);
+	}
+
+	/// A root that dies to its own polite signal reparents the descendants that
+	/// outlived it, so the hard wave's fresh walk cannot see them. The pinned
+	/// set has to survive into the hard wave and its wait.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn hard_wave_kills_descendants_orphaned_by_the_polite_signal() {
+		use std::io::{BufRead, BufReader};
+
+		// The descendant reports its pid only after ignoring TERM, and SIG_IGN
+		// survives the exec, so reading that line means the polite wave cannot
+		// race the descendant's startup.
+		let mut child = std::process::Command::new("/bin/sh")
+			.arg("-c")
+			.arg(r#"/bin/sh -c 'trap "" TERM; echo $$; exec sleep 30' & wait"#)
+			.stdout(std::process::Stdio::piped())
+			.spawn()
+			.expect("spawn root");
+		let mut line = String::new();
+		BufReader::new(child.stdout.take().expect("root stdout"))
+			.read_line(&mut line)
+			.expect("read descendant pid");
+		let orphan =
+			Process::from_pid(line.trim().parse().expect("descendant pid")).expect("pin descendant");
+		let root = Process::from_pid(i32::try_from(child.id()).expect("root pid")).expect("pin root");
+
+		let terminated = root
+			.terminate_tree(false, 100, 5000, CancelToken::default())
+			.await;
+
+		let orphan_status = orphan.status();
+		let _ = orphan.inner.kill(KILL_SIGNAL);
+		let _ = child.kill();
+		let _ = child.wait();
+		assert!(terminated.expect("terminate tree"), "the tree must be reported gone");
+		assert_eq!(
+			orphan_status,
+			ProcessStatus::Exited,
+			"a descendant orphaned by the polite wave must still be hard-killed"
+		);
 	}
 
 	/// The harness pid must be the only protected pid. Including its recorded
