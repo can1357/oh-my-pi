@@ -465,7 +465,6 @@ export interface EditorTextAssistProvider {
 	): EditorWordReplacements | null | Promise<EditorWordReplacements | null>;
 }
 
-type HistoryCursorAnchor = "start" | "end";
 type AutocompleteRequest = { kind: "regular"; explicitTab: boolean } | { kind: "force" };
 
 /** What the paste transport knew about the input burst before the editor inserts the payload. */
@@ -816,24 +815,18 @@ export class Editor implements Component, Focusable {
 		this.#historyIndex = newIndex;
 		if (this.#historyIndex === -1) {
 			// Returned to "current" state - clear editor
-			this.#setTextInternal("", "end");
+			this.#setTextInternal("");
 		} else {
-			const cursorAnchor: HistoryCursorAnchor = direction === -1 ? "start" : "end";
-			this.#setTextInternal(this.#history[this.#historyIndex] || "", cursorAnchor);
+			this.#setTextInternal(this.#history[this.#historyIndex] || "");
 		}
 	}
 	/** Internal setText that doesn't reset history state - used by navigateHistory */
-	#setTextInternal(text: string, cursorAnchor: HistoryCursorAnchor = "end"): void {
+	#setTextInternal(text: string): void {
 		this.#undoStack.length = 0;
 		const lines = sanitizeLoadedText(text).split("\n");
 		this.#state.lines = lines.length === 0 ? [""] : lines;
-		if (cursorAnchor === "start") {
-			this.#state.cursorLine = 0;
-			this.#setCursorCol(0);
-		} else {
-			this.#state.cursorLine = this.#state.lines.length - 1;
-			this.#setCursorCol(this.#state.lines[this.#state.cursorLine]?.length || 0);
-		}
+		this.#state.cursorLine = this.#state.lines.length - 1;
+		this.#setCursorCol(this.#state.lines[this.#state.cursorLine]?.length || 0);
 		if (this.onChange) {
 			this.onChange(this.getText());
 		}
