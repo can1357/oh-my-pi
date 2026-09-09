@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, describe, expect, it, spyOn } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -290,6 +290,45 @@ describe("loadEntriesFromFileStream (Bun.JSONL parity)", () => {
 
 		expect(entryIds(visited)).toEqual(["s1"]);
 		expect(malformedRecords).toBe(1);
+	});
+
+	it("stops after the first chunk of a delimiter-free file when the record cap is zero", async () => {
+		// No newline until EOF: the streaming loop's delimiter-free fast path skips
+		// the parser, so the record cap has to be enforced before buffering or the
+		// whole journal is read despite a zero budget.
+		const content = `{"type":"session","version":3,"id":"s1","timestamp":"${ISO}","cwd":"/tmp","pad":"${"z".repeat(4 * 1024 * 1024)}"}`;
+		expect(content).not.toInclude("\n");
+		const file = await writeTemp(content);
+
+		let bytesRead = 0;
+		let firstChunkBytes = 0;
+		const realBunFile = Bun.file.bind(Bun);
+		const bunFileSpy = spyOn(Bun, "file").mockImplementation((arg: unknown, opts?: BlobPropertyBag) => {
+			const handle = realBunFile(arg as string, opts);
+			const realStream = handle.stream.bind(handle);
+			// An async generator, not a piped stream: it is strictly pull-driven, so
+			// the count reflects what the loader asked for and not read-ahead.
+			handle.stream = () =>
+				(async function* () {
+					for await (const chunk of realStream() as AsyncIterable<Uint8Array>) {
+						if (firstChunkBytes === 0) firstChunkBytes = chunk.byteLength;
+						bytesRead += chunk.byteLength;
+						yield chunk;
+					}
+				})() as unknown as ReturnType<typeof realStream>;
+			return handle;
+		});
+
+		try {
+			const visited: FileEntry[] = [];
+			await sessionLoader.visitEntriesFromFileStream(file, entry => void visited.push(entry), { maxRecords: 0 });
+
+			expect(visited).toEqual([]);
+			expect(firstChunkBytes).toBeLessThan(Buffer.byteLength(content));
+			expect(bytesRead).toBe(firstChunkBytes);
+		} finally {
+			bunFileSpy.mockRestore();
+		}
 	});
 
 	it("retains an unfinished value across embedded newlines before the trailing fragment", async () => {

@@ -216,6 +216,13 @@ export async function visitEntriesFromFileStream(
 			// Parsing before the chunk closes a line re-scans the unfinished record
 			// on every chunk, which is quadratic for large records.
 			if (chunk.lastIndexOf(0x0a) === -1) {
+				// Skipping drain() also skips the only enforcement of the record cap,
+				// so re-check it here: a delimiter-free file would otherwise be read
+				// and buffered in full despite an exhausted budget.
+				if (recordsSeen >= maxRecords) {
+					stopped = true;
+					break;
+				}
 				sink.append(chunk);
 				await yieldToMacrotask();
 				continue;
