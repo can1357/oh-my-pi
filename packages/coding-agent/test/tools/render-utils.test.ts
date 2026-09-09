@@ -14,10 +14,16 @@ import {
 	formatParseErrors,
 	formatFeedModelBadge,
 	formatScreenshot,
+	sanitizeDisplayLines,
 	shortenPath,
 	truncateDiffByHunk,
 } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
-import { getKeybindings, setKeybindings, type KeybindingsManager as TuiKeybindingsManager } from "@oh-my-pi/pi-tui";
+import {
+	DEFAULT_TAB_WIDTH,
+	getKeybindings,
+	setKeybindings,
+	type KeybindingsManager as TuiKeybindingsManager,
+} from "@oh-my-pi/pi-tui";
 
 describe("feed model badges", () => {
 	let uiTheme: Theme;
@@ -501,5 +507,22 @@ describe("formatExpandHint / expandKeyHint", () => {
 		setKeybindings(KeybindingsManager.inMemory());
 		expect(formatExpandHint(plainTheme, true, true)).toBe("");
 		expect(formatExpandHint(plainTheme, false, false)).toBe("");
+	});
+});
+
+describe("sanitizeDisplayLines", () => {
+	it("expands tabs so error lines never emit raw tab stops", () => {
+		expect(sanitizeDisplayLines("offending\tkey")).toEqual([`offending${" ".repeat(DEFAULT_TAB_WIDTH)}key`]);
+	});
+
+	it("splits Windows CRLF stderr without leaving carriage returns", () => {
+		const lines = sanitizeDisplayLines("SHA256:abc\r\nHost key verification failed.\r\n");
+		expect(lines.join("\n")).not.toContain("\r");
+		expect(lines).toContain("SHA256:abc");
+		expect(lines).toContain("Host key verification failed.");
+	});
+
+	it("collapses carriage-return progress overwrites to the final segment", () => {
+		expect(sanitizeDisplayLines("50%\r100%")).toEqual(["100%"]);
 	});
 });
