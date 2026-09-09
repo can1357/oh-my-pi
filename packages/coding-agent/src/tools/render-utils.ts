@@ -318,6 +318,21 @@ function sanitizeErrorText(message: string | undefined): string {
 	return clean ? replaceTabs(truncateToWidth(clean, TRUNCATE_LENGTHS.LINE)) : "Unknown error";
 }
 
+/**
+ * Split multi-line tool text into TUI-safe display lines.
+ * Splits CRLF/LF, collapses stray `\r` progress overwrites to the final
+ * segment (mirroring terminal rendering), and expands tabs — so raw
+ * subprocess or fetched output (e.g. Windows ssh emitting CRLF, tab-indented
+ * web content) can't corrupt the framed block layout with cursor-moving
+ * control characters or tab-stop width mismatches.
+ */
+export function sanitizeDisplayLines(text: string): string[] {
+	return text.split(/\r?\n/).map(line => {
+		const idx = line.lastIndexOf("\r");
+		return replaceTabs(idx < 0 ? line : line.slice(idx + 1));
+	});
+}
+
 export function formatErrorMessage(message: string | undefined, theme: Theme): string {
 	return `${theme.styledSymbol("status.error", "error")} ${theme.fg("error", `Error: ${sanitizeErrorText(message)}`)}`;
 }
