@@ -1,4 +1,5 @@
 export * from "./abort";
+export * from "./body-error";
 export * from "./auth";
 export * from "./auth-classify";
 export * from "./aws";

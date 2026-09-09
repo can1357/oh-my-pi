@@ -14,7 +14,7 @@
  *   captured response body for the strict-tools fallback and the responses
  *   chain-state detectors, which regex over `error.message`.
  */
-import { fetchWithRetry, readSseJson, type SseEventObserver } from "@oh-my-pi/pi-utils";
+import { fetchWithRetry, readSseJsonOrText, type SseEventObserver } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
 import { OpenAIHttpError } from "../error";
 
@@ -113,10 +113,38 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		});
 	}
 	return {
-		events: readSseJson<TEvent>(response.body, init.signal, init.onSseEvent),
+		events: decodeStream<TEvent>(response.body, init.signal, init.onSseEvent),
 		response,
 		requestId: response.headers.get("x-request-id"),
 	};
+}
+
+/**
+ * Consume `readSseJsonOrText` and turn a non-JSON `data:` frame into a
+ * classified in-band error. A reverse proxy that already committed to an HTTP
+ * 200 stream (so the status line can no longer carry the failure) answers with
+ * plain text — `data: 429 Too Many Requests`, an nginx throttle page — and
+ * that has to advance the fallback chain like a real 429 (body-error.ts).
+ * Frames that are not recognisable throttles rethrow the original parse error,
+ * preserving the pre-existing loud failure for genuinely malformed payloads.
+ */
+async function* decodeStream<TEvent>(
+	body: ReadableStream<Uint8Array>,
+	signal: AbortSignal | undefined,
+	onSseEvent: SseEventObserver | undefined,
+): AsyncGenerator<TEvent> {
+	for await (const frame of readSseJsonOrText<TEvent>(body, signal, onSseEvent)) {
+		if (typeof frame === "string") {
+			const inBand = AIError.createInBandProviderErrorFromText(frame);
+			if (inBand) throw inBand;
+			// Not a recognisable throttle: reproduce the exact strict-parse failure the
+			// previous reader raised, so genuinely malformed payloads stay equally loud.
+			// The frame is a string that already failed once, so this always throws.
+			JSON.parse(frame);
+			continue;
+		}
+		yield frame;
+	}
 }
 
 /** Decode a non-2xx response into an {@link OpenAIHttpError} without consuming it twice. */
