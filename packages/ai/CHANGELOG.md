@@ -4,6 +4,8 @@
 
 ### Fixed
 
+- Grok Bot product Read/Write alias schemas rewrite branch-local `required` under `anyOf`/`oneOf`/`allOf` so advertised `contents`/`target_file` calls validate.
+- Grok Bot catalog keep-model on non-Anthropic rows preserves `maxMode` / `isVariantStringRepresentation` while stripping retry-disabled parameters.
 - Grok Bot promotes every advertised Gemini `tool_code` call in a fence (not only the first).
 - Catalog matrix shell smoke treats only the first arm of `&&` / `||` / `&` as reachable so conditional echoes/writes cannot pass fabricated gates.
 - Catalog matrix shell smoke splits on `;` / `&&` / `||` / `&` with quote awareness so quoted separators cannot invent executable write/echo segments.

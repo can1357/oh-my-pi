@@ -162,41 +162,83 @@ function toolParametersToJson(tool: Tool): Record<string, unknown> {
 
 type Tool = NonNullable<Context["tools"]>[number];
 
+const SCHEMA_COMBINATORS = ["anyOf", "oneOf", "allOf"] as const;
+
+function stringRequiredList(value: unknown): string[] {
+	return Array.isArray(value) ? value.filter((key): key is string => typeof key === "string") : [];
+}
+
 /**
- * When advertising a property alias (e.g. `contents` for `content`), keep the
- * rest of `required` and express the alias pair as `anyOf` so strict schema
- * consumers accept either key. If the schema already carries an `anyOf` (e.g.
- * alternative required argument groups), AND that union with the alias pair via
- * `allOf` instead of replacing it — and retain any preexisting `allOf` entries.
+ * When advertising a property alias (e.g. `contents` for `content`), rewrite
+ * every `required` list that pins the canonical key — root or branch-local
+ * under `anyOf` / `oneOf` / `allOf` — so strict schema consumers accept either
+ * key. Root `anyOf` groups are preserved via `allOf` instead of replaced, and
+ * preexisting `allOf` entries are retained.
  */
 function withRequiredPropertyAlias(
 	schema: Record<string, unknown>,
 	canonical: string,
 	alias: string,
 ): Record<string, unknown> {
-	const required = Array.isArray(schema.required)
-		? (schema.required as unknown[]).filter((key): key is string => typeof key === "string")
-		: [];
-	if (!required.includes(canonical)) return schema;
 	const aliasConstraint = {
 		anyOf: [{ required: [canonical] }, { required: [alias] }],
 	};
-	const { anyOf: existingAnyOf, allOf: existingAllOf, ...rest } = schema;
-	const remainingRequired = required.filter(key => key !== canonical);
-	if (Array.isArray(existingAnyOf) && existingAnyOf.length > 0) {
-		const priorAllOf = Array.isArray(existingAllOf) ? existingAllOf : [];
+	let changed = false;
+
+	const rewriteCombinators = (
+		node: Record<string, unknown>,
+	): Partial<Record<(typeof SCHEMA_COMBINATORS)[number], unknown[]>> => {
+		const combinatorEntries: Partial<Record<(typeof SCHEMA_COMBINATORS)[number], unknown[]>> = {};
+		for (const key of SCHEMA_COMBINATORS) {
+			const arr = node[key];
+			if (!Array.isArray(arr) || arr.length === 0) continue;
+			const rewritten = arr.map(item => {
+				if (!item || typeof item !== "object" || Array.isArray(item)) return item;
+				return rewriteNode(item as Record<string, unknown>);
+			});
+			if (rewritten.some((item, i) => item !== arr[i])) {
+				combinatorEntries[key] = rewritten;
+			}
+		}
+		return combinatorEntries;
+	};
+
+	const rewriteNode = (node: Record<string, unknown>): Record<string, unknown> => {
+		const required = stringRequiredList(node.required);
+		const combinatorEntries = rewriteCombinators(node);
+
+		if (!required.includes(canonical)) {
+			if (Object.keys(combinatorEntries).length === 0) return node;
+			changed = true;
+			return { ...node, ...combinatorEntries };
+		}
+
+		changed = true;
+		const remainingRequired = required.filter(key => key !== canonical);
+		const existingAnyOf = combinatorEntries.anyOf ?? (Array.isArray(node.anyOf) ? node.anyOf : undefined);
+		const existingAllOf = combinatorEntries.allOf ?? (Array.isArray(node.allOf) ? node.allOf : undefined);
+		const existingOneOf = combinatorEntries.oneOf ?? (Array.isArray(node.oneOf) ? node.oneOf : undefined);
+		const { required: _required, anyOf: _anyOf, allOf: _allOf, oneOf: _oneOf, ...rest } = node;
+		if (Array.isArray(existingAnyOf) && existingAnyOf.length > 0) {
+			const priorAllOf = Array.isArray(existingAllOf) ? existingAllOf : [];
+			return {
+				...rest,
+				...(Array.isArray(existingOneOf) && existingOneOf.length > 0 ? { oneOf: existingOneOf } : {}),
+				required: remainingRequired,
+				allOf: [...priorAllOf, { anyOf: existingAnyOf }, aliasConstraint],
+			};
+		}
 		return {
 			...rest,
+			...(Array.isArray(existingAllOf) && existingAllOf.length > 0 ? { allOf: existingAllOf } : {}),
+			...(Array.isArray(existingOneOf) && existingOneOf.length > 0 ? { oneOf: existingOneOf } : {}),
 			required: remainingRequired,
-			allOf: [...priorAllOf, { anyOf: existingAnyOf }, aliasConstraint],
+			...aliasConstraint,
 		};
-	}
-	return {
-		...rest,
-		...(Array.isArray(existingAllOf) && existingAllOf.length > 0 ? { allOf: existingAllOf } : {}),
-		required: remainingRequired,
-		...aliasConstraint,
 	};
+
+	const next = rewriteNode(schema);
+	return changed ? next : schema;
 }
 
 /** Clone canonical property constraints onto an alias key; override description. */

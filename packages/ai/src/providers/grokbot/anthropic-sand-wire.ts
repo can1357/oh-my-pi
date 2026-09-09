@@ -112,6 +112,22 @@ function productProfileForWire(wire: AnthropicSandToolsWire): ProductWireProfile
 	return undefined;
 }
 
+/**
+ * Catalog-owned non-Anthropic keep-model (e.g. gemini empty-tool retry) drops
+ * thinking/effort/fast parameters, but must keep routing flags that
+ * `resolveGrokbotRequestedModel()` already selected.
+ */
+function keepModelRequestedModel(
+	requested: GrokbotRequestedModel,
+	anthropic: boolean,
+): GrokbotRequestedModel {
+	if (anthropic) return requested;
+	const next: GrokbotRequestedModel = { modelId: requested.modelId };
+	if (requested.maxMode) next.maxMode = true;
+	if (requested.isVariantStringRepresentation) next.isVariantStringRepresentation = true;
+	return next;
+}
+
 function applyProductWire(
 	input: AnthropicSandToolWireInput,
 	profile: ProductWireProfile,
@@ -153,7 +169,7 @@ export function applyAnthropicSandToolWire(
 		// non-Anthropic row onto product tools without rewriting requestedModel.
 		if (!anthropic && !catalogOwns) return input;
 		return applyProductWire(input, "automation", "keep-model", {
-			requestedModel: anthropic ? input.requestedModel : { modelId: input.requestedModel.modelId },
+			requestedModel: keepModelRequestedModel(input.requestedModel, anthropic),
 			originalModelId: modelId,
 		});
 	}

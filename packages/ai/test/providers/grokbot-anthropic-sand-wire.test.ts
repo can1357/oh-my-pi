@@ -224,6 +224,44 @@ describe("anthropic sand tool wire", () => {
 		expect(applyAnthropicSandToolWire(input, "keep-model")).toEqual(input);
 	});
 
+	test("catalog keep-model on non-anthropic strips parameters but keeps routing flags", () => {
+		const requestedModel = resolveGrokbotRequestedModel("gemini-3-flash", {
+			sandParameterIds: ["effort", "fast"],
+			sandMaxMode: true,
+			sandVariantStringRepresentation: true,
+			effort: "high",
+		});
+		expect(requestedModel.maxMode).toBe(true);
+		expect(requestedModel.isVariantStringRepresentation).toBe(true);
+		expect(requestedModel.parameters?.length).toBeGreaterThan(0);
+		const tools = [
+			{
+				name: "bash",
+				description: "shell",
+				parameters: { type: "object", properties: { command: { type: "string" } } },
+			},
+		];
+		const wired = applyAnthropicSandToolWire(
+			{
+				requestedModel,
+				tools,
+				modelId: "gemini-3-flash",
+				ompTools: tools,
+				sandToolsWire: "keep-model",
+			},
+			"keep-model",
+		);
+		expect(wired.wireMode).toBe("keep-model");
+		expect(wired.requestedModel).toEqual({
+			modelId: "gemini-3-flash",
+			maxMode: true,
+			isVariantStringRepresentation: true,
+		});
+		expect(wired.requestedModel.parameters).toBeUndefined();
+		const names = (wired.tools as Array<{ name: string }>).map(t => t.name);
+		expect(names).toContain("Shell");
+	});
+
 	test("automation/parent-chat without catalog sandToolsWire is a no-op for non-anthropic ids", () => {
 		const automationModel = resolveGrokbotRequestedModel("sand-automation", {
 			sandParameterIds: [],
@@ -379,6 +417,74 @@ describe("product wire helpers", () => {
 		expect(schema?.required).toEqual(["path"]);
 		expect(schema?.anyOf).toEqual([{ required: ["content"] }, { required: ["contents"] }]);
 		expect((schema?.properties?.contents as { description?: string })?.description).toContain("alias of content");
+	});
+
+	test("Write alias rewrites branch-local required when canonical is only in anyOf", () => {
+		const tools = toProductField2Tools(
+			[
+				{
+					name: "write",
+					description: "write file",
+					parameters: {
+						type: "object",
+						properties: {
+							path: { type: "string" },
+							content: { type: "string" },
+						},
+						anyOf: [{ required: ["content"] }, { required: ["path"] }],
+					},
+				},
+			],
+			"automation",
+		);
+		const schema = (
+			tools[0]?.parameters as {
+				jsonSchema?: {
+					properties?: Record<string, unknown>;
+					required?: string[];
+					anyOf?: Array<{ required?: string[]; anyOf?: Array<{ required?: string[] }> }>;
+				};
+			}
+		).jsonSchema;
+		expect(schema?.properties).toHaveProperty("contents");
+		expect(schema?.required).toBeUndefined();
+		expect(schema?.anyOf).toEqual([
+			{ required: [], anyOf: [{ required: ["content"] }, { required: ["contents"] }] },
+			{ required: ["path"] },
+		]);
+	});
+
+	test("Read alias rewrites branch-local required when canonical is only in oneOf", () => {
+		const tools = toProductField2Tools(
+			[
+				{
+					name: "read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: {
+							path: { type: "string" },
+							offset: { type: "number" },
+						},
+						oneOf: [{ required: ["path"] }, { required: ["offset"] }],
+					},
+				},
+			],
+			"automation",
+		);
+		const schema = (
+			tools[0]?.parameters as {
+				jsonSchema?: {
+					properties?: Record<string, unknown>;
+					oneOf?: Array<{ required?: string[]; anyOf?: Array<{ required?: string[] }> }>;
+				};
+			}
+		).jsonSchema;
+		expect(schema?.properties).toHaveProperty("target_file");
+		expect(schema?.oneOf).toEqual([
+			{ required: [], anyOf: [{ required: ["path"] }, { required: ["target_file"] }] },
+			{ required: ["offset"] },
+		]);
 	});
 
 	test("Write contents alias clones canonical property constraints", () => {
