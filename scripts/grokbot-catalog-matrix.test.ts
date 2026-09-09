@@ -279,6 +279,9 @@ describe("toolSmokePrompt", () => {
 		// Conditional arms after `&&` / `||` are unreachable for fabricated results.
 		expect(echoLikeShellCommand(`false && echo ${ping}`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`true || echo ${ping}`, ping)).toBe(false);
+		// Earlier exit/return stops the shell before a later echo can run.
+		expect(echoLikeShellCommand(`exit 0; echo ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`return; echo ${ping}`, ping)).toBe(false);
 	});
 
 	test("binds read/write shell smoke evidence to the operation statement", () => {
@@ -324,6 +327,15 @@ describe("toolSmokePrompt", () => {
 			matchesToolSmokeCall(
 				"read",
 				{ name: "Shell", arguments: { command: `cat ${readPath} | cat` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		// Earlier exit prevents a later matching read from running under fabricated tool results.
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `exit 0; cat ${readPath}` } },
 				"tools-pong-read-x",
 				id,
 			),
@@ -452,6 +464,9 @@ describe("toolSmokePrompt", () => {
 		expect(matchesToolSmokeCall("bash", { name: "Shell", arguments: { command: `echo ${ping}` } }, ping, id)).toBe(
 			true,
 		);
+		expect(
+			matchesToolSmokeCall("bash", { name: "Shell", arguments: { command: `exit 0; echo ${ping}` } }, ping, id),
+		).toBe(false);
 		expect(matchesToolSmokeCall("bash", { name: "Shell", arguments: { command: `true # ${ping}` } }, ping, id)).toBe(
 			false,
 		);

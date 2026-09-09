@@ -13,6 +13,7 @@
 - Catalog matrix shell smoke rejects conditional `&&` / `||` arms and loads OMP tool descriptions from static `.md` assets.
 - Catalog matrix shell smoke ignores quoted `;` / `&&` separators when validating write/echo evidence.
 - Catalog matrix write smoke requires the redirect destination itself (rejects `> /dev/null expected-path`).
+- Catalog matrix bash/read smoke rejects probes after an earlier `exit`/`return` (matching write).
 - `--models` / `enabledModels` exact matches on ordinary built-ins (e.g. `openai/…`) no longer force a synchronous credential-scoped discovery refresh when the cold catalog already satisfies the scope.
 - `--models` / `enabledModels` resolve bracketed Grok Bot variant selectors (e.g. `grokbot/default[]`) by exact id before glob matching so `[]` is not treated as an empty character class.
 - Cold catalog refresh also uses a provider-qualified `modelRoles.default` when no CLI model flags are set, and the SDK discovery fallback refreshes built-in descriptor providers (e.g. Grok Bot) the same way.

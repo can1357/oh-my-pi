@@ -8,6 +8,7 @@
 - Catalog matrix shell smoke treats only the first arm of `&&` / `||` / `&` as reachable so conditional echoes/writes cannot pass fabricated gates.
 - Catalog matrix shell smoke splits on `;` / `&&` / `||` / `&` with quote awareness so quoted separators cannot invent executable write/echo segments.
 - Catalog matrix write smoke matches only the redirect destination word (not trailing args after `> /dev/null path`).
+- Catalog matrix bash/read smoke stops after an earlier `exit`/`return` (same as write), so `exit; echo ping` cannot pass a fabricated gate.
 - Catalog matrix OMP tool descriptions load from static `.md` prompt assets.
 - Grok Bot Anthropic keep-model auto wire comes from catalog `sand-tools-wire` (KDL), so a reviewed row can opt into `native` / `error` without a TypeScript class branch.
 - Grok Bot parent-chat SendToUser ownership uses the advertised wire name (`customWireName` or name), so an internal `SendToUser` aliased to another wire still treats injected `SendToUser` as visible text.

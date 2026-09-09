@@ -409,19 +409,22 @@ function isTrailingPathBoundary(ch: string): boolean {
 /**
  * Bash smoke must actually echo/printf the ping to stdout — not in a sibling
  * statement, comment, redirect filename (`echo wrong > ping`), diverted stdout
- * (`echo ping >/dev/null`, `echo ping | tee file`), or a pipeline that can
- * filter the token away (`echo ping | grep -v ping`).
+ * (`echo ping >/dev/null`, `echo ping | tee file`), a pipeline that can filter
+ * the token away (`echo ping | grep -v ping`), or after an earlier `exit`/`return`
+ * (`exit; echo ping` — `runOneTool` fabricates success without executing).
  */
 export function echoLikeShellCommand(command: string, ping: string): boolean {
 	if (!ping) return false;
 	const cmd = command.trim();
 	if (!cmd) return false;
-	return shellStatementSegments(cmd).some(segment => {
-		if (!/^(?:echo|printf)\b/.test(segment)) return false;
+	for (const segment of shellStatementSegments(cmd)) {
+		if (earlyExitShellSegment(segment)) return false;
+		if (!/^(?:echo|printf)\b/.test(segment)) continue;
 		// Redirects / any pipeline can discard or transform stdout.
-		if (/(?:>>?|\|)/.test(segment)) return false;
-		return segment.includes(ping);
-	});
+		if (/(?:>>?|\|)/.test(segment)) continue;
+		if (segment.includes(ping)) return true;
+	}
+	return false;
 }
 
 /** Read smoke: path must appear in the same cat/head/sed statement. */
@@ -429,14 +432,16 @@ export function readPathInShellCommand(command: string, filePath: string): boole
 	if (!filePath) return false;
 	const cmd = command.trim();
 	if (!cmd || writeLikeShellCommand(cmd)) return false;
-	return shellStatementSegments(cmd).some(segment => {
-		if (!/^(?:cat|head|sed)\b/.test(segment)) return false;
+	for (const segment of shellStatementSegments(cmd)) {
+		if (earlyExitShellSegment(segment)) return false;
+		if (!/^(?:cat|head|sed)\b/.test(segment)) continue;
 		// Redirects / any pipeline can discard or transform stdout — `runOneTool`
 		// fabricates the expected token without executing, so `cat path | grep -v`
 		// would otherwise pass the gate.
-		if (/(?:>>?|\|)/.test(segment)) return false;
-		return commandMentionsPath(segment, filePath);
-	});
+		if (/(?:>>?|\|)/.test(segment)) continue;
+		if (commandMentionsPath(segment, filePath)) return true;
+	}
+	return false;
 }
 
 /**
