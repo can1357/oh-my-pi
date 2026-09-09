@@ -24,11 +24,10 @@ import { GROKBOT_API } from "../packages/catalog/src/provider-models/grokbot.ts"
 import { applyAnthropicSandToolWire } from "../packages/ai/src/providers/grokbot/anthropic-sand-wire.ts";
 import { resolveGrokbotRequestedModel } from "../packages/ai/src/providers/grokbot/model-request.ts";
 import {
-	CONNECT_END_STREAM_FLAG,
-	decodeInferenceStreamResponse,
 	encodeInferenceStreamRequest,
 	frameConnectProto,
 } from "../packages/ai/src/providers/grokbot/proto.ts";
+import { parseConnectStreamFrames } from "./grokbot-probes/parse-connect-stream.mjs";
 import * as prompt from "../packages/utils/src/prompt.ts";
 import textSystemPrompt from "./grokbot-catalog-matrix/text-system.md" with { type: "text" };
 import textUserPrompt from "./grokbot-catalog-matrix/text-user.md" with { type: "text" };
@@ -110,46 +109,9 @@ const mode = (() => {
 })();
 
 function parseFrames(buf) {
-	let o = 0;
-	let texts = "";
-	let end;
-	let responseModel = "";
-	const toolNames = [];
-	while (o + 5 <= buf.length) {
-		const flags = buf[o];
-		const len = buf.readUInt32BE(o + 1);
-		o += 5;
-		const bytes = buf.subarray(o, o + len);
-		o += len;
-		if (flags & CONNECT_END_STREAM_FLAG) {
-			try {
-				end = JSON.parse(bytes.toString("utf8"));
-			} catch {
-				end = { parseError: true };
-			}
-		} else {
-			try {
-				const msg = decodeInferenceStreamResponse(bytes);
-				if (msg.textPart?.text) texts += msg.textPart.text;
-				if (msg.responseInfo?.model) responseModel = String(msg.responseInfo.model);
-				if (msg.toolCallPart?.toolName) toolNames.push(String(msg.toolCallPart.toolName));
-			} catch {
-				/* ignore partial */
-			}
-		}
-	}
-	const dbg = end?.error?.details?.[0]?.debug;
-	return {
-		ok: end !== undefined && !end?.parseError && !end?.error && o === buf.length,
-		texts,
-		responseModel,
-		toolNames,
-		message: end?.error?.message,
-		status: dbg?.details?.additionalInfo?.providerStatusCode,
-		providerError: dbg?.error,
-		detail: dbg?.details?.detail,
-	};
+	return parseConnectStreamFrames(buf);
 }
+
 
 async function sandProbe({ id, sandParameterIds, effort, sandParameterDefaults, sandMaxMode, tools }) {
 	const cfg = await loadGrokbotConfig();
@@ -382,7 +344,8 @@ async function sandAutomationProbe(catalog) {
 		body: frameConnectProto(encodeInferenceStreamRequest(body)),
 	});
 	const result = parseFrames(Buffer.from(await res.arrayBuffer()));
-	const sawShell = result.toolNames?.includes("Shell");
+	// Shipping decoder rejects incomplete toolCallPart; name-only is not enough.
+	const sawShell = result.completedShell === true;
 	const pass = res.ok && result.ok && sawShell;
 	return {
 		id: "claude-opus-5:automation",

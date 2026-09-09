@@ -20,11 +20,10 @@ import {
 } from "../packages/ai/src/providers/grokbot/anthropic-sand-wire.ts";
 import { resolveGrokbotRequestedModel } from "../packages/ai/src/providers/grokbot/model-request.ts";
 import {
-	CONNECT_END_STREAM_FLAG,
-	decodeInferenceStreamResponse,
 	encodeInferenceStreamRequest,
 	frameConnectProto,
 } from "../packages/ai/src/providers/grokbot/proto.ts";
+import { parseConnectStreamFrames } from "./grokbot-probes/parse-connect-stream.mjs";
 import * as prompt from "../packages/utils/src/prompt.ts";
 import automationShellUserPrompt from "./grokbot-probes/automation-shell-user.md" with { type: "text" };
 import automationSystemPrompt from "./grokbot-probes/automation-system.md" with { type: "text" };
@@ -35,34 +34,16 @@ const STREAM = "/aiserver.v1.InferenceService/Stream";
 const ompTools = probeOmpToolsAutomation();
 
 function parseFrames(buf) {
-	let o = 0;
-	const toolNames = [];
-	let responseModel = "";
-	let end;
-	while (o + 5 <= buf.length) {
-		const flags = buf[o];
-		const len = buf.readUInt32BE(o + 1);
-		o += 5;
-		const bytes = buf.subarray(o, o + len);
-		o += len;
-		if (flags & CONNECT_END_STREAM_FLAG) {
-			try {
-				end = JSON.parse(bytes.toString("utf8"));
-			} catch {
-				end = { parseError: true };
-			}
-			continue;
-		}
-		try {
-			const msg = decodeInferenceStreamResponse(bytes);
-			if (msg.toolCallPart?.toolName) toolNames.push(String(msg.toolCallPart.toolName));
-			if (msg.responseInfo?.model) responseModel = String(msg.responseInfo.model);
-		} catch {
-			/* partial frame */
-		}
-	}
-	return { ok: !end?.error, toolNames, responseModel, message: end?.error?.message };
+	const parsed = parseConnectStreamFrames(buf);
+	return {
+		ok: parsed.ok,
+		toolNames: parsed.toolNames,
+		responseModel: parsed.responseModel,
+		message: parsed.message,
+		completedShell: parsed.completedShell,
+	};
 }
+
 
 async function main() {
 	const cfg = await loadGrokbotConfig();
@@ -112,7 +93,7 @@ async function main() {
 		body: frameConnectProto(encodeInferenceStreamRequest(body)),
 	});
 	const parsed = parseFrames(Buffer.from(await res.arrayBuffer()));
-	const pass = res.ok && parsed.ok && parsed.toolNames.includes("Shell");
+	const pass = res.ok && parsed.ok && parsed.completedShell === true;
 	console.log(
 		`${pass ? "PASS" : "FAIL"}  automation-tools  http=${res.status}  tools=${parsed.toolNames.join(",") || "none"}  model=${parsed.responseModel || "?"}`,
 	);
