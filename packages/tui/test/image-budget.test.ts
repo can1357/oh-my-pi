@@ -770,12 +770,24 @@ describe("TUI inline-image budget", () => {
 	 * still have a placement on screen: an eviction that deletes a visible image
 	 * is only repaired if the frame re-emits its placement, and the frame diff
 	 * skips rows whose text is unchanged.
+	 *
+	 * `deleted` is append-only because `d=I` drops every placement of the id,
+	 * scrollback copies included, and only the current frame is ever repainted —
+	 * so a later re-place does not undo it.
 	 */
-	function trackKittyGraphics(term: VirtualTerminal): { resident: Set<number>; placed: Set<number> } {
+	function trackKittyGraphics(term: VirtualTerminal): {
+		resident: Set<number>;
+		placed: Set<number>;
+		deleted: number[];
+		writes: string[];
+	} {
 		const resident = new Set<number>();
 		const placed = new Set<number>();
+		const deleted: number[] = [];
+		const writes: string[] = [];
 		const realWrite = term.write.bind(term);
 		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			writes.push(data);
 			for (const match of data.matchAll(/\x1b_G([^;\x1b]+)(?:;[^\x1b]*)?\x1b\\/g)) {
 				const fields = new Map(match[1]!.split(",").map(field => field.split("=") as [string, string]));
 				const id = Number(fields.get("i"));
@@ -785,15 +797,17 @@ describe("TUI inline-image budget", () => {
 				if (action === "d" && fields.get("d") === "I") {
 					resident.delete(id);
 					placed.delete(id);
+					deleted.push(id);
 				}
 				if (action === "d" && fields.get("d") === "A") {
+					deleted.push(...resident);
 					resident.clear();
 					placed.clear();
 				}
 			}
 			realWrite(data);
 		});
-		return { resident, placed };
+		return { resident, placed, deleted, writes };
 	}
 
 	it("keeps normal-buffer placements visible across a fullscreen overlay pass", async () => {
@@ -881,6 +895,51 @@ describe("TUI inline-image budget", () => {
 
 			expect(placed.has(sharedId)).toBe(true);
 			expect(resident.has(sharedId)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("does not demote transcript images under a closing overlay's suppression threshold", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed, deleted, writes } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
+		const behindIds = behind.map((_, i) => tui.imageBudget.acquireId(`behind-${i}`));
+		// Three modal images against a cap of 2: the overlay's own pass demotes one
+		// and leaves a stricter threshold behind for whichever pass runs next.
+		const modalImages = Array.from({ length: 3 }, (_, i) => makeImage(tui.imageBudget, `modal-${i}`));
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: behind.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(behindIds.every(id => placed.has(id))).toBe(true);
+
+			const overlay = tui.showOverlay(
+				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+
+			writes.length = 0;
+			overlay.hide();
+			await settle(term);
+
+			// The modal's split must not reach the transcript. A `d=I` here also
+			// takes the id's scrollback placements, which no repaint restores, and
+			// the retransmit that follows is the visible placement/text flicker.
+			expect(deleted.filter(id => behindIds.includes(id))).toEqual([]);
+			expect(behindIds.every(id => placed.has(id))).toBe(true);
+			expect(writes.join("")).not.toContain(BASE64_ONE_PIXEL_PNG);
 		} finally {
 			tui.stop();
 			setKittyGraphics(originalGraphics);

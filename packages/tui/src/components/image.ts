@@ -57,6 +57,36 @@ interface PlacementEmitState {
 	 */
 	cellsArchived: boolean;
 }
+
+/**
+ * The live/text split of one drawing surface. The normal screen and the
+ * alternate buffer hold separate frames with separate display orders, so each
+ * carries its own thresholds: a modal's split describes the modal, and applying
+ * it to the transcript would demote — and purge — images the modal never showed.
+ */
+interface SurfaceSplit {
+	/**
+	 * Suppress threshold reflected in the frame currently on this surface: images
+	 * at display indices `[0, onTerminal)` are shown as text there.
+	 */
+	onTerminal: number;
+	/** Suppress threshold the current/next render of this surface should apply. */
+	planned: number;
+	/** Images the last full pass on this surface observed. */
+	lastTotal: number;
+	/**
+	 * Image ids shown as text in the frame currently on this surface: the
+	 * display-order prefix [0, onTerminal) of its last full pass, snapshotted by
+	 * id so a partial pass reproduces the on-screen live/text split without a
+	 * full, correctly-ordered walk.
+	 */
+	suppressedIds: Set<number>;
+}
+
+function newSurfaceSplit(): SurfaceSplit {
+	return { onTerminal: 0, planned: 0, lastTotal: 0, suppressedIds: new Set() };
+}
+
 let nextImageBudgetSeed = Math.floor(Math.random() * 0xffffff);
 function nextImageIdSeed(): number {
 	nextImageBudgetSeed = (nextImageBudgetSeed + 0x10000) & 0xffffff;
@@ -92,19 +122,17 @@ export class ImageBudget {
 	#passIds: number[] = [];
 	/** Per-id suppression decision from the first observation in this pass. */
 	#passSuppression = new Map<number, boolean>();
-	/**
-	 * Suppress threshold reflected in the frame currently on the terminal: images
-	 * at display indices `[0, #onTerminal)` are shown as text there.
-	 */
-	#onTerminal = 0;
-	/** Suppress threshold the current/next render should apply. */
-	#planned = 0;
+	/** Live/text split of the normal screen. */
+	#screenSplit = newSurfaceSplit();
+	/** Live/text split of the alternate buffer (fullscreen overlay, resize borrow). */
+	#altSplit = newSurfaceSplit();
+	/** The split the in-flight pass reads and writes; selected by {@link beginPass}. */
+	#split = this.#screenSplit;
 	/**
 	 * True while the in-flight pass applies a stricter threshold than the terminal
 	 * shows — the demotion frame that must purge graphics and fully repaint.
 	 */
 	#applyingReset = false;
-	#lastTotal = 0;
 	#purgeIds: number[] = [];
 	/** Image ids whose data is believed to be loaded in the terminal's store. */
 	#transmitted = new Set<number>();
@@ -115,11 +143,6 @@ export class ImageBudget {
 	// tail, bottom-up. Such a pass cannot derive display order from observe()
 	// call order, so its suppression decisions replay the committed split below.
 	#stablePass = false;
-	// Image ids shown as text in the frame currently on the terminal: the
-	// display-order prefix [0, #onTerminal) of the last full pass, snapshotted by
-	// id so a partial pass reproduces the on-screen live/text split without a
-	// full, correctly-ordered walk.
-	#suppressedIds = new Set<number>();
 	/**
 	 * Image ids rendered as live graphics in the last frame painted on the normal
 	 * screen. A fullscreen overlay borrows the alternate buffer without walking
@@ -172,7 +195,7 @@ export class ImageBudget {
 		const next = normalizeCap(cap);
 		if (next === this.#cap) return;
 		this.#cap = next;
-		if (!this.#reconcile(this.#lastTotal)) this.#requestRender();
+		if (!this.#reconcile(this.#split.lastTotal)) this.#requestRender();
 	}
 
 	/**
@@ -203,16 +226,18 @@ export class ImageBudget {
 	 * call order, and the pass must NOT be closed with {@link endPass}.
 	 *
 	 * Pass `altScreen: true` when the frame is painted on the alternate buffer
-	 * (fullscreen overlay, resize borrow). The pass then walks only that buffer's
-	 * content while the normal screen keeps its placements, so its live set adds
-	 * to the recorded normal-screen one instead of replacing it.
+	 * (fullscreen overlay, resize borrow). The pass then reads and writes that
+	 * surface's own {@link SurfaceSplit} and its live set adds to the recorded
+	 * normal-screen one instead of replacing it, so a modal's threshold never
+	 * reaches the transcript standing behind it.
 	 */
 	beginPass(stable = false, altScreen = false): void {
 		this.#passIds.length = 0;
 		this.#passSuppression.clear();
 		this.#stablePass = stable;
 		this.#altScreenPass = altScreen;
-		this.#applyingReset = !stable && this.#cap > 0 && this.#planned > this.#onTerminal;
+		this.#split = altScreen ? this.#altSplit : this.#screenSplit;
+		this.#applyingReset = !stable && this.#cap > 0 && this.#split.planned > this.#split.onTerminal;
 	}
 
 	/**
@@ -221,21 +246,21 @@ export class ImageBudget {
 	 * on a cache hit, so the image keeps its display-order slot.
 	 *
 	 * During a `stable` pass ({@link beginPass}) the call order and visible subset
-	 * are not authoritative, so the decision is the committed on-terminal split
-	 * (`#suppressedIds`) keyed by id — order- and partiality-independent.
+	 * are not authoritative, so the decision is the surface's committed
+	 * on-terminal split, keyed by id — order- and partiality-independent.
 	 */
 	observe(imageId: number): boolean {
 		const existing = this.#passSuppression.get(imageId);
 		if (existing !== undefined) return existing;
 		if (this.#stablePass) {
-			const suppressed = this.#cap > 0 && this.#suppressedIds.has(imageId);
+			const suppressed = this.#cap > 0 && this.#split.suppressedIds.has(imageId);
 			this.#passSuppression.set(imageId, suppressed);
 			if (suppressed) this.#forgetKeyForId(imageId);
 			return suppressed;
 		}
 		const index = this.#passIds.length;
 		this.#passIds.push(imageId);
-		const suppressed = this.#cap > 0 && index < this.#planned;
+		const suppressed = this.#cap > 0 && index < this.#split.planned;
 		this.#passSuppression.set(imageId, suppressed);
 		if (suppressed) this.#forgetKeyForId(imageId);
 		return suppressed;
@@ -247,9 +272,10 @@ export class ImageBudget {
 	 */
 	endPass(): boolean {
 		const total = this.#passIds.length;
-		this.#lastTotal = total;
+		const split = this.#split;
+		split.lastTotal = total;
 		if (this.#applyingReset) {
-			for (let i = this.#onTerminal; i < this.#planned && i < total; i++) {
+			for (let i = split.onTerminal; i < split.planned && i < total; i++) {
 				const id = this.#passIds[i];
 				// The modal renders its own copy as text, but deleting the graphic
 				// would take the normal buffer's placement of the same id with it —
@@ -262,15 +288,15 @@ export class ImageBudget {
 				this.#deletePlacementState(id);
 				this.#forgetKeyForId(id);
 			}
-			this.#onTerminal = this.#planned;
+			split.onTerminal = split.planned;
 			this.#applyingReset = false;
 		}
 		const retry = this.#reconcile(total);
 		// Snapshot the committed display-order suppression by id: the prefix
-		// [0, #onTerminal) is what the terminal currently shows as text. Partial
+		// [0, onTerminal) is what this surface currently shows as text. Partial
 		// passes replay this per id (see #stablePass) instead of re-deriving it
 		// from a reversed, tail-only walk.
-		this.#suppressedIds = new Set(this.#passIds.slice(0, this.#onTerminal));
+		split.suppressedIds = new Set(this.#passIds.slice(0, split.onTerminal));
 		return retry;
 	}
 
@@ -459,18 +485,17 @@ export class ImageBudget {
 	}
 
 	/**
-	 * True when the budget has nothing in flight: no live images observed on
-	 * the last pass, no queued transmits, no pending purges, and no stricter
-	 * threshold left to apply. A component-scoped frame may skip the observe
-	 * pass only then — a partial tree walk would under-count display order.
+	 * True when the budget has nothing in flight on either surface: no live images
+	 * observed on the last pass, no queued transmits, no pending purges, and no
+	 * stricter threshold left to apply. A component-scoped frame may skip the
+	 * observe pass only then — a partial tree walk would under-count display order.
 	 */
 	get quiescent(): boolean {
-		return (
-			this.#lastTotal === 0 &&
-			this.#pendingTransmits.size === 0 &&
-			this.#purgeIds.length === 0 &&
-			this.#planned === this.#onTerminal
-		);
+		if (this.#pendingTransmits.size > 0 || this.#purgeIds.length > 0) return false;
+		for (const split of [this.#screenSplit, this.#altSplit]) {
+			if (split.lastTotal !== 0 || split.planned !== split.onTerminal) return false;
+		}
+		return true;
 	}
 
 	/** Transmit sequences to write before this frame's placements; clears the queue. */
@@ -506,21 +531,22 @@ export class ImageBudget {
 	}
 
 	#reconcile(total: number): boolean {
+		const split = this.#split;
 		const desired = this.#cap > 0 ? Math.max(0, total - this.#cap) : 0;
-		if (desired === this.#planned) {
+		if (desired === split.planned) {
 			// Budget relaxed without a stricter frame (cap raised or images
 			// removed): surviving graphics are untouched and re-exposed rows
 			// repaint normally, so just track the looser threshold.
-			if (this.#planned < this.#onTerminal) this.#onTerminal = this.#planned;
+			if (split.planned < split.onTerminal) split.onTerminal = split.planned;
 			return false;
 		}
-		const retry = desired > this.#onTerminal;
-		this.#planned = desired;
+		const retry = desired > split.onTerminal;
+		split.planned = desired;
 		// More images must be demoted than the terminal shows: schedule the purge +
 		// full-redraw frame. Fewer: no ghosts to clear, so just catch the tracking
 		// up — a normal repaint re-exposes the un-demoted images. Either way a
 		// render is needed to apply the new threshold.
-		if (desired <= this.#onTerminal) this.#onTerminal = desired;
+		if (desired <= split.onTerminal) split.onTerminal = desired;
 		this.#requestRender();
 		return retry;
 	}
