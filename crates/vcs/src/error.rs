@@ -93,6 +93,17 @@ pub enum Error {
 		message: String,
 	},
 
+	/// An underlying backend failure whose concrete source must remain
+	/// inspectable.
+	#[error("{context}: {source}")]
+	BackendSource {
+		/// Operation being performed (`"git merge-base"`, …).
+		context: &'static str,
+		/// Typed backend failure.
+		#[source]
+		source:  Box<dyn std::error::Error + Send + Sync + 'static>,
+	},
+
 	/// The operation was canceled via its interrupt flag.
 	#[error("operation canceled")]
 	Canceled,
@@ -119,6 +130,14 @@ impl Error {
 		Self::Backend { context, message: err.to_string() }
 	}
 
+	/// Wrap a backend error while retaining its typed source chain.
+	pub fn backend_source(
+		context: &'static str,
+		source: impl std::error::Error + Send + Sync + 'static,
+	) -> Self {
+		Self::BackendSource { context, source: Box::new(source) }
+	}
+
 	/// Stable machine-readable discriminant for this failure.
 	pub const fn kind(&self) -> &'static str {
 		match self {
@@ -132,6 +151,7 @@ impl Error {
 			Self::CliTimeout { .. } => "CliTimeout",
 			Self::Io(_) => "Io",
 			Self::Backend { .. } => "Backend",
+			Self::BackendSource { .. } => "BackendSource",
 			Self::Canceled => "Canceled",
 			Self::Unsupported { .. } => "Unsupported",
 		}

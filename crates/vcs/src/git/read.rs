@@ -116,16 +116,16 @@ impl GitRepo {
 		let repo = self.gix()?;
 		let ancestor_id = repo
 			.rev_parse_single(ancestor)
-			.map_err(|err| Error::backend("git merge-base", err))?
+			.map_err(|err| Error::backend_source("git merge-base", err))?
 			.detach();
 		let descendant_id = repo
 			.rev_parse_single(descendant)
-			.map_err(|err| Error::backend("git merge-base", err))?
+			.map_err(|err| Error::backend_source("git merge-base", err))?
 			.detach();
 		match repo.merge_base(ancestor_id, descendant_id) {
 			Ok(base) => Ok(base.detach() == ancestor_id),
 			Err(gix::repository::merge_base::Error::NotFound { .. }) => Ok(false),
-			Err(err) => Err(Error::backend("git merge-base", err)),
+			Err(err) => Err(Error::backend_source("git merge-base", err)),
 		}
 	}
 
@@ -1402,6 +1402,19 @@ mod tests {
 		assert!(repo.is_ancestor_of(&base, &base)?, "a commit is an ancestor of itself");
 		assert!(!repo.is_ancestor_of(&child, &base)?, "a child is not an ancestor of its parent");
 		assert!(!repo.is_ancestor_of(&sibling, &child)?, "a divergent sibling is not an ancestor",);
+		Ok(())
+	}
+
+	#[test]
+	fn is_ancestor_of_preserves_revision_errors() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "one", "one\n", "base")?;
+
+		let error = repo
+			.is_ancestor_of("missing-revision", "HEAD")
+			.expect_err("an unresolved revision must fail");
+		assert!(matches!(&error, crate::error::Error::BackendSource { .. }));
+		assert!(std::error::Error::source(&error).is_some());
 		Ok(())
 	}
 }

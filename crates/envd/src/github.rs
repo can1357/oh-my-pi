@@ -3,7 +3,7 @@
 use std::{
 	fmt::Write as _,
 	fs, io,
-	path::{Path, PathBuf},
+	path::{Component, Path, PathBuf},
 	sync::Arc,
 	time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
@@ -1276,13 +1276,40 @@ fn reset_hard(worktree: &GitRepo, target: &str) -> Result<(), Fault> {
 }
 
 /// Remove an untracked file or directory that obstructs a forced checkout.
+///
+/// Walk the path with `symlink_metadata` so the first symlink is removed
+/// itself rather than following it into an external directory.
 fn remove_untracked(root: &Path, rel: &str) -> Result<(), Fault> {
-	let full = root.join(rel);
-	if fs::symlink_metadata(&full).map_err(io_fault)?.is_dir() {
-		fs::remove_dir_all(&full).map_err(io_fault)
-	} else {
-		fs::remove_file(&full).map_err(io_fault)
+	let mut full = root.to_owned();
+	let mut components = Path::new(rel).components().peekable();
+	while let Some(component) = components.next() {
+		match component {
+			Component::CurDir => continue,
+			Component::Normal(name) => full.push(name),
+			Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
+				return Err(fault("github_git_failed", "invalid checkout collision path"));
+			},
+		}
+		let metadata = match fs::symlink_metadata(&full) {
+			Ok(metadata) => metadata,
+			Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+			Err(error) => return Err(io_fault(error)),
+		};
+		if metadata.file_type().is_symlink() {
+			fs::remove_file(&full).map_err(io_fault)?;
+			return Ok(());
+		}
+		if components.peek().is_some() && metadata.is_dir() {
+			continue;
+		}
+		if metadata.is_dir() {
+			fs::remove_dir_all(&full).map_err(io_fault)?;
+		} else {
+			fs::remove_file(&full).map_err(io_fault)?;
+		}
+		return Ok(());
 	}
+	Ok(())
 }
 
 /// Drop in-progress merge/cherry-pick/revert state the way `git reset --hard`
@@ -3185,6 +3212,37 @@ mod tests {
 		assert_eq!(sync.worktree_head, fetched);
 		assert_eq!(sync.expected_head, fetched);
 		assert_eq!(std::fs::read_to_string(worktree.join("b")).expect("file"), "tracked\n");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn forced_reuse_removes_symlink_collision_without_following_ancestor() {
+		let (temp, root, worktree, _base, _fetched, repo) = pr_worktree_fixture();
+		git(&root, &["checkout", "-q", "omp/github-fetch/pr-7"]);
+		std::fs::create_dir_all(root.join("dir")).expect("tracked directory");
+		std::fs::write(root.join("dir/file"), "tracked\n").expect("tracked file");
+		git(&root, &["add", "."]);
+		git(&root, &["commit", "-qm", "add nested file"]);
+		let fetched = git(&root, &["rev-parse", "HEAD"]);
+		git(&root, &["checkout", "-q", "main"]);
+
+		let external = temp.path().join("external");
+		std::fs::create_dir_all(&external).expect("external directory");
+		std::fs::write(external.join("file"), "must survive\n").expect("external file");
+		std::os::unix::fs::symlink(&external, worktree.join("dir")).expect("symlink collision");
+
+		let sync = finish_checkout_git(repo, &worktree, 7, "omp/github-fetch/pr-7", true, None)
+			.expect("forced reset");
+		assert_eq!(sync.worktree_head, fetched);
+		assert_eq!(sync.expected_head, fetched);
+		assert_eq!(
+			std::fs::read_to_string(external.join("file")).expect("external file"),
+			"must survive\n",
+		);
+		assert_eq!(
+			std::fs::read_to_string(worktree.join("dir/file")).expect("tracked file"),
+			"tracked\n",
+		);
 	}
 
 	#[tokio::test]
