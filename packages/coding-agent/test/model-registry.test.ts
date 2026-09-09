@@ -2554,12 +2554,12 @@ describe("ModelRegistry", () => {
 					maxTokens: 16_384,
 				});
 			litellmStaleNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
-				// Rows cached under the retired namespace whose `compatConfig`
-				// retained a colliding bundled model's provider-specific transport
-				// (issue #9938) must be orphaned instead of served.
+				// Rows cached under the retired rich-v4 namespace predate LiteLLM's
+				// authoritative reasoning-effort mapping (issue #11353): they carry
+				// inferred/reference effort metadata and must be orphaned, not served.
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v3",
+						"litellm-proxy:litellm-rich-v4",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3 (3x usage)")],
 						true,
@@ -2570,7 +2570,7 @@ describe("ModelRegistry", () => {
 			litellmCurrentNamespaceCache = readonlyRegistry(litellmProxyConfig(), {
 				seedCache: dbPath =>
 					writeModelCache(
-						"litellm-proxy:litellm-rich-v4",
+						"litellm-proxy:litellm-rich-v5",
 						Date.now(),
 						[litellmCachedModel("MiniMax-M3")],
 						true,
@@ -2656,13 +2656,13 @@ describe("ModelRegistry", () => {
 			});
 		});
 
-		test("ignores litellm discovery rows cached under the retired rich-v3 namespace", () => {
-			// Warm rich-v3 rows carry the leaked provider-specific compat and must not load.
+		test("ignores litellm discovery rows cached under the retired rich-v4 namespace", () => {
+			// Warm rich-v4 rows carry inferred effort metadata and must not load.
 			expect(litellmStaleNamespaceCache.find("litellm-proxy", "minimax/minimax-m3")).toBeUndefined();
 			expect(getModelsForProvider(litellmStaleNamespaceCache, "litellm-proxy")).toHaveLength(0);
 		});
 
-		test("loads litellm discovery rows cached under the rich-v4 namespace", () => {
+		test("loads litellm discovery rows cached under the rich-v5 namespace", () => {
 			const model = litellmCurrentNamespaceCache.find("litellm-proxy", "minimax/minimax-m3");
 			expect(model?.name).toBe("MiniMax-M3");
 			expect(model?.provider).toBe("litellm-proxy");

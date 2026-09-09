@@ -1,11 +1,12 @@
 import { afterEach, describe, expect, test, vi } from "bun:test";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
 import {
 	fetchLiteLLMRichModels,
 	litellmModelManagerOptions,
 	resolveLiteLLMApi,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
-import type { Api, FetchImpl, ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import type { Api, FetchImpl, ModelSpec, ThinkingConfig } from "@oh-my-pi/pi-catalog/types";
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
 const ORIGINAL_LITELLM_BASE_URL = Bun.env.LITELLM_BASE_URL;
@@ -131,7 +132,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
+			`litellm:rich-v9:${Bun.hash("http://litellm.example:4100/v1").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -155,7 +156,7 @@ describe("LiteLLM provider discovery", () => {
 		const models = await options.fetchDynamicModels?.();
 
 		expect(options.cacheProviderId).toBe(
-			`litellm:rich-v8:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
+			`litellm:rich-v9:${Bun.hash("http://litellm-config.example:4200/v1/").toString(36)}`,
 		);
 		expect(fetchMock).toHaveBeenCalledTimes(6);
 		expect(models).toHaveLength(1);
@@ -296,6 +297,101 @@ describe("LiteLLM provider discovery", () => {
 		if (!spec) throw new Error("expected exactly one discovered model");
 		expect(spec.compat).not.toHaveProperty("supportsReasoningEffort");
 		expect(buildModel(spec).compat.supportsReasoningEffort).toBe(true);
+	});
+
+	test("advertised effort vocabulary overrides incomplete params and reference inference", async () => {
+		const calls: string[] = [];
+		const groupModelInfo = {
+			supports_vision: false,
+			supports_reasoning: true,
+			supported_openai_params: ["tools", "temperature"],
+		};
+		const richModelInfo = {
+			supports_vision: false,
+			supports_reasoning: true,
+			reasoning_effort_levels: ["none", "low", "high", "max"],
+			supported_openai_params: ["tools", "temperature"],
+		};
+		const fetchMock: FetchImpl = vi.fn(async (input: string | URL | Request) => {
+			const url = inputUrl(input);
+			calls.push(url);
+			if (url === "http://primary:4000/model_group/info") {
+				return Response.json({
+					data: [
+						{ model_group: "my-gateway/coding-pro", ...groupModelInfo },
+						{ model_group: "zai-org/GLM-5.3", ...groupModelInfo },
+					],
+				});
+			}
+			if (url === "http://primary:4000/v2/model/info") {
+				return new Response("{}", { status: 404 });
+			}
+			if (url === "http://primary:4000/model/info") {
+				return Response.json({
+					data: [
+						{
+							model_name: "my-gateway/coding-pro",
+							model_info: { ...richModelInfo, default_reasoning_effort: "high" },
+						},
+						{
+							model_name: "zai-org/GLM-5.3",
+							model_info: { ...richModelInfo, default_reasoning_effort: null },
+						},
+					],
+				});
+			}
+			return new Response("{}", { status: 404 });
+		});
+		const reference: ModelSpec<"openai-completions"> = {
+			id: "zai-org/GLM-5.3",
+			name: "GLM 5.3",
+			api: "openai-completions",
+			provider: "zai",
+			baseUrl: "https://api.z.ai/v1",
+			reasoning: true,
+			thinking: {
+				mode: "effort",
+				efforts: [Effort.Low, Effort.High, Effort.Max],
+				defaultLevel: Effort.Max,
+			},
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 131_072,
+			maxTokens: 32_768,
+			compat: { supportsReasoningEffort: true },
+		};
+
+		const specs = await fetchLiteLLMRichModels<"openai-completions">({
+			api: "openai-completions",
+			provider: "private-litellm",
+			baseUrl: "http://primary:4000/v1",
+			fetch: fetchMock,
+			referenceResolver: id => (id === reference.id ? reference : undefined),
+		});
+
+		expect(calls).toEqual([
+			"http://primary:4000/model_group/info",
+			"http://primary:4000/v2/model/info",
+			"http://primary:4000/model/info",
+		]);
+		const expectedThinking: ThinkingConfig = {
+			mode: "effort",
+			efforts: [Effort.Minimal, Effort.Low, Effort.High, Effort.Max],
+			effortMap: { [Effort.Minimal]: "none" },
+		};
+		const aliased = specs?.find(model => model.id === "my-gateway/coding-pro");
+		const direct = specs?.find(model => model.id === "zai-org/GLM-5.3");
+		if (!aliased || !direct) throw new Error("expected both LiteLLM models");
+		expect(aliased.thinking).toEqual({
+			...expectedThinking,
+			defaultLevel: Effort.High,
+		});
+		expect(direct.thinking).toEqual({ ...expectedThinking, defaultLevel: null });
+		// The incomplete `supported_openai_params` (no `reasoning_effort`) must not
+		// suppress the wire dial: advertised effort levels are authoritative.
+		expect(buildModel(aliased).compat.supportsReasoningEffort).toBe(true);
+		expect(buildModel(direct).compat.supportsReasoningEffort).toBe(true);
+		expect(buildModel(direct).thinking?.defaultLevel).toBeNull();
 	});
 
 	test("routes only OpenAI-backed rich models through Responses", async () => {

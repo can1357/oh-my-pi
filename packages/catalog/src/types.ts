@@ -41,8 +41,11 @@ export interface ThinkingConfig {
 	 * `thinking: undefined` instead of an empty list.
 	 */
 	efforts: readonly Effort[];
-	/** Optional default effort applied when this model is selected. Falls back to global default if absent. */
-	defaultLevel?: Effort;
+	/**
+	 * Model-specific default effort. `null` explicitly delegates to the user's
+	 * global default instead of allowing identity policy to fill a model default.
+	 */
+	defaultLevel?: Effort | null;
 	/**
 	 * Effort → provider wire-value remap, baked at build time. Identity for
 	 * efforts the map omits. Used by Anthropic adaptive thinking, OpenAI-

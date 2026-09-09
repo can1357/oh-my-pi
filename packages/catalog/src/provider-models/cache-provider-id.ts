@@ -69,10 +69,9 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 		}
 		case "litellm": {
 			const baseUrl = options.baseUrl ?? getDefaultModelDiscoveryBaseUrl(providerId)!;
-			// rich-v8 invalidates rows whose `compatConfig` retained a colliding
-			// bundled model's provider-specific transport (e.g. Fireworks
-			// `wireModelIdMode`) before that leak was fixed (issue #9938).
-			return `litellm:rich-v8:${Bun.hash(baseUrl).toString(36)}`;
+			// rich-v9 invalidates rows discovered before LiteLLM's authoritative
+			// reasoning effort metadata was mapped (issue #11353).
+			return `litellm:rich-v9:${Bun.hash(baseUrl).toString(36)}`;
 		}
 		case "opencode-go":
 		case "opencode-zen": {

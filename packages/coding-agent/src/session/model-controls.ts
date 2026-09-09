@@ -249,7 +249,7 @@ export class ModelControls {
 
 		// Re-apply thinking for the newly selected model. Prefer the model's
 		// configured defaultLevel; otherwise preserve the current level (or auto).
-		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+		this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel ?? undefined);
 		await this.#host.syncAfterModelChange(previousEditMode);
 		return { switched: true };
 	}
@@ -287,7 +287,7 @@ export class ModelControls {
 		if (thinkingLevel !== undefined) {
 			this.setThinkingLevel(thinkingLevel);
 		} else {
-			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel);
+			this.#reapplyThinkingLevel(targetModel.thinking?.defaultLevel ?? undefined);
 		}
 		await this.#host.syncAfterModelChange(previousEditMode);
 	}

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed LiteLLM discovery ignoring deployment-advertised reasoning effort levels and defaults for gateway aliases ([#11353](https://github.com/can1357/oh-my-pi/issues/11353)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

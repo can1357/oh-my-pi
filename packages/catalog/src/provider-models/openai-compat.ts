@@ -4047,8 +4047,8 @@ interface SyntheticModelRecord extends OpenAICompatibleModelRecord {
 	pricing?: unknown;
 }
 
-/** Synthetic's thinking-off wire tier — a router state, not a user effort. */
-const SYNTHETIC_WIRE_EFFORT_NONE = "none";
+/** OpenAI-compatible thinking-off wire tier, represented by OMP's minimal effort. */
+const WIRE_EFFORT_NONE = "none";
 /** Output cap for routes that advertise no `max_output_length`. */
 const SYNTHETIC_FALLBACK_MAX_TOKENS = 8192;
 
@@ -4057,32 +4057,45 @@ function toSyntheticStringList(value: unknown): readonly string[] {
 }
 
 /**
- * Translate Synthetic's per-model `reasoning_effort` vocabulary into an effort
- * ladder. Every advertised value that names an OMP tier maps verbatim; `none`
- * is the thinking-off state rather than a tier of its own, so it backs the
- * `minimal` selector through the wire map (same shape as the Fireworks
- * `minimal → none` map) and gives these routes a real no-thinking tier.
- * A route that advertises only `none` (or tiers this client doesn't know)
- * still gets the minimal-off mapping: falling through to identity inference
- * would fabricate an unadvertised ladder, and leaving thinking unset would
- * leak any stale reference ladder past the wire vocabulary.
+ * Translate an OpenAI-compatible wire effort vocabulary into OMP's effort
+ * ladder. `none` is exposed as `minimal` with an explicit wire map because it
+ * is a selectable upstream effort rather than OMP's omitted-thinking state.
  */
-function resolveSyntheticThinking(wireEfforts: readonly string[]): ThinkingConfig | undefined {
+function resolveWireEffortThinking(
+	wireEfforts: readonly string[],
+	defaultWireEffort?: string | null,
+): ThinkingConfig | undefined {
 	const efforts = THINKING_EFFORTS.filter(effort => wireEfforts.includes(effort));
-	const wireHasNone = wireEfforts.includes(SYNTHETIC_WIRE_EFFORT_NONE);
+	const wireHasNone = wireEfforts.includes(WIRE_EFFORT_NONE);
+	let thinking: ThinkingConfig;
 	if (efforts.length === 0) {
-		return wireHasNone
-			? { mode: "effort", efforts: [Effort.Minimal], effortMap: { [Effort.Minimal]: SYNTHETIC_WIRE_EFFORT_NONE } }
-			: undefined;
+		if (!wireHasNone) return undefined;
+		thinking = {
+			mode: "effort",
+			efforts: [Effort.Minimal],
+			effortMap: { [Effort.Minimal]: WIRE_EFFORT_NONE },
+		};
+	} else if (!wireHasNone || efforts.includes(Effort.Minimal)) {
+		thinking = { mode: "effort", efforts };
+	} else {
+		thinking = {
+			mode: "effort",
+			efforts: [Effort.Minimal, ...efforts],
+			effortMap: { [Effort.Minimal]: WIRE_EFFORT_NONE },
+		};
 	}
-	if (!wireHasNone || efforts.includes(Effort.Minimal)) {
-		return { mode: "effort", efforts };
+	if (defaultWireEffort === null) {
+		thinking.defaultLevel = null;
+		return thinking;
 	}
-	return {
-		mode: "effort",
-		efforts: [Effort.Minimal, ...efforts],
-		effortMap: { [Effort.Minimal]: SYNTHETIC_WIRE_EFFORT_NONE },
-	};
+	const defaultLevel =
+		defaultWireEffort === WIRE_EFFORT_NONE && wireHasNone
+			? Effort.Minimal
+			: THINKING_EFFORTS.find(effort => effort === defaultWireEffort);
+	if (defaultLevel !== undefined && thinking.efforts.includes(defaultLevel)) {
+		thinking.defaultLevel = defaultLevel;
+	}
+	return thinking;
 }
 
 /** Synthetic quotes per-token USD as `"$0.000001"`; catalog cost is per-million. */
@@ -4148,7 +4161,7 @@ export function syntheticModelManagerOptions(
 							? toSyntheticStringList(record.reasoning_parameters.efforts)
 							: [];
 						const wireReasoning = features.includes("reasoning") || wireEfforts.length > 0;
-						const thinking = resolveSyntheticThinking(wireEfforts);
+						const thinking = resolveWireEffortThinking(wireEfforts);
 						// An advertised effort vocabulary is authoritative over the bundled
 						// reference: when the wire names tiers (even only `none`), the
 						// reference's reasoning flag must not re-add a dial the route
@@ -4159,7 +4172,7 @@ export function syntheticModelManagerOptions(
 						// effort dial for a dial with one stop. When the wire is silent on
 						// reasoning entirely, the reference gets a vote.
 						const namedTierCount =
-							(thinking?.efforts.length ?? 0) - (wireEfforts.includes(SYNTHETIC_WIRE_EFFORT_NONE) ? 1 : 0);
+							(thinking?.efforts.length ?? 0) - (wireEfforts.includes(WIRE_EFFORT_NONE) ? 1 : 0);
 						const reasoning =
 							wireReasoning && namedTierCount > 0
 								? true
@@ -5364,6 +5377,7 @@ type LiteLLMRichEndpointModel<TApi extends Api> = {
 	hasMaxTokens: boolean;
 	hasToolMetadata: boolean;
 	hasSupportedOpenAIParams: boolean;
+	hasThinkingMetadata: boolean;
 	hasCost: boolean;
 	reportedCost: Partial<ModelSpec<Api>["cost"]>;
 };
@@ -5540,6 +5554,20 @@ function getSupportedOpenAIParams(entry: LiteLLMRichModelEntry): string[] | unde
 	return value.flatMap(item => (typeof item === "string" ? [item] : []));
 }
 
+function mapLiteLLMThinking(entry: LiteLLMRichModelEntry): ThinkingConfig | null {
+	const value = getLiteLLMMetadataValue(entry, "reasoning_effort_levels");
+	if (!Array.isArray(value)) {
+		return null;
+	}
+	const wireEfforts = value.flatMap(item => (typeof item === "string" ? [item] : []));
+	const rawDefaultEffort =
+		entry.default_reasoning_effort !== undefined
+			? entry.default_reasoning_effort
+			: getLiteLLMModelInfo(entry)?.default_reasoning_effort;
+	const defaultWireEffort = rawDefaultEffort === null ? null : toNonEmptyString(rawDefaultEffort);
+	return resolveWireEffortThinking(wireEfforts, defaultWireEffort) ?? null;
+}
+
 function getLiteLLMProviders(entry: LiteLLMRichModelEntry): string[] | undefined {
 	if (!Array.isArray(entry.providers)) {
 		return undefined;
@@ -5638,6 +5666,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	entry: LiteLLMRichModelEntry,
 	options: FetchLiteLLMRichModelsOptions<TApi>,
 	runtimeBaseUrl: string,
+	richThinking: ThinkingConfig | null,
 ): ModelSpec<TApi> | null {
 	if (isLiteLLMUnusableSentinelPlaceholder(entry)) {
 		return null;
@@ -5685,13 +5714,17 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 	const compat: OpenAICompat = {
 		supportsStore: false,
 		supportsDeveloperRole: false,
-		...(supportedOpenAIParams !== undefined
-			? { supportsReasoningEffort: supportedOpenAIParams.includes("reasoning_effort") }
-			: referenceCompat?.supportsReasoningEffort !== undefined
-				? { supportsReasoningEffort: referenceCompat.supportsReasoningEffort }
-				: {}),
-		...(referenceCompat?.reasoningEffortMap ? { reasoningEffortMap: referenceCompat.reasoningEffortMap } : {}),
-		...(referenceCompat?.omitReasoningEffort !== undefined
+		...(richThinking !== null
+			? { supportsReasoningEffort: true }
+			: supportedOpenAIParams !== undefined
+				? { supportsReasoningEffort: supportedOpenAIParams.includes("reasoning_effort") }
+				: referenceCompat?.supportsReasoningEffort !== undefined
+					? { supportsReasoningEffort: referenceCompat.supportsReasoningEffort }
+					: {}),
+		...(richThinking === null && referenceCompat?.reasoningEffortMap
+			? { reasoningEffortMap: referenceCompat.reasoningEffortMap }
+			: {}),
+		...(richThinking === null && referenceCompat?.omitReasoningEffort !== undefined
 			? { omitReasoningEffort: referenceCompat.omitReasoningEffort }
 			: {}),
 	};
@@ -5710,7 +5743,7 @@ function mapLiteLLMRichEntry<TApi extends Api>(
 					? ["text"]
 					: (reference?.input ?? ["text"]),
 		reasoning: typeof supportsReasoning === "boolean" ? supportsReasoning : (reference?.reasoning ?? false),
-		thinking: reference?.thinking,
+		thinking: richThinking ?? reference?.thinking,
 		cost: getLiteLLMCost(entry) ?? reference?.cost ?? UNKNOWN_PROXY_COST,
 		...(supportsTools !== undefined ? { supportsTools } : {}),
 		compat: compat as ModelSpec<TApi>["compat"],
@@ -5736,8 +5769,9 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		maxTokens: next.hasMaxTokens ? next.model.maxTokens : existing.model.maxTokens,
 		input: next.supportsVision === true || next.supportsVision === false ? next.model.input : existing.model.input,
 		reasoning: typeof next.supportsReasoning === "boolean" ? next.model.reasoning : existing.model.reasoning,
+		thinking: next.hasThinkingMetadata ? next.model.thinking : existing.model.thinking,
 		cost: { ...existing.model.cost, ...existing.reportedCost, ...next.reportedCost },
-		compat: next.hasSupportedOpenAIParams ? next.model.compat : existing.model.compat,
+		compat: next.hasSupportedOpenAIParams || next.hasThinkingMetadata ? next.model.compat : existing.model.compat,
 	};
 	if (next.hasToolMetadata) {
 		model.supportsTools = next.model.supportsTools;
@@ -5751,6 +5785,7 @@ function mergeLiteLLMRichEndpointModels<TApi extends Api>(
 		hasMaxTokens: existing.hasMaxTokens || next.hasMaxTokens,
 		hasToolMetadata: existing.hasToolMetadata || next.hasToolMetadata,
 		hasSupportedOpenAIParams: existing.hasSupportedOpenAIParams || next.hasSupportedOpenAIParams,
+		hasThinkingMetadata: existing.hasThinkingMetadata || next.hasThinkingMetadata,
 		hasCost: existing.hasCost || next.hasCost,
 	};
 }
@@ -5795,7 +5830,8 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 	}
 	const deduped = new Map<string, LiteLLMRichEndpointModel<TApi>>();
 	for (const entry of entries) {
-		const model = mapLiteLLMRichEntry(entry, options, runtimeBaseUrl);
+		const richThinking = mapLiteLLMThinking(entry);
+		const model = mapLiteLLMRichEntry(entry, options, runtimeBaseUrl, richThinking);
 		if (model) {
 			const supportsVision = getLiteLLMMetadataValue(entry, "supports_vision");
 			const supportsReasoning = getLiteLLMMetadataValue(entry, "supports_reasoning");
@@ -5813,6 +5849,7 @@ async function fetchLiteLLMRichEndpoint<TApi extends Api>(
 					supportsFunctionCalling === false ||
 					supportedOpenAIParams !== undefined,
 				hasSupportedOpenAIParams: supportedOpenAIParams !== undefined,
+				hasThinkingMetadata: richThinking !== null,
 				hasCost: getLiteLLMCost(entry) !== undefined,
 				reportedCost: getLiteLLMReportedCost(entry),
 			};
@@ -5876,6 +5913,7 @@ async function fetchLiteLLMRichModelsInternal<TApi extends Api>(
 			for (const entry of deduped.values()) {
 				if (
 					(entry.supportsVision !== true && entry.supportsVision !== false) ||
+					(entry.model.reasoning && !entry.hasThinkingMetadata) ||
 					(options.resolveApi !== undefined && entry.apiRoute === "unknown") ||
 					(Object.keys(entry.reportedCost).length > 0 &&
 						(entry.reportedCost.input === undefined ||
@@ -5918,14 +5956,13 @@ export function litellmModelManagerOptions(config?: LiteLLMModelManagerConfig): 
 	const baseUrl = config?.baseUrl ?? getDefaultModelDiscoveryBaseUrl("litellm")!;
 	return {
 		providerId: "litellm",
-		// rich-v8 invalidates rows whose `compatConfig` retained a colliding
-		// bundled model's provider-specific transport (e.g. Fireworks
-		// `wireModelIdMode`) before that leak was fixed. Earlier versions added
-		// bundled reference fallback, moved OpenAI models to Responses, continued
-		// past incomplete vision/API metadata and endpoints omitting cache
-		// pricing, stripped reseller usage suffixes, filtered placeholder rows,
-		// and mapped rich pricing. Bump the version whenever these mappers change,
-		// or warm authoritative caches keep serving pre-change rows for the full TTL.
+		// rich-v9 invalidates rows discovered before LiteLLM's authoritative
+		// reasoning effort metadata was mapped. Earlier versions added bundled
+		// reference fallback, moved OpenAI models to Responses, continued past
+		// incomplete vision/API metadata and endpoints omitting cache pricing,
+		// stripped reseller usage suffixes, filtered placeholder rows, mapped
+		// rich pricing, and isolated reference transport. Bump whenever these
+		// mappers change or warm caches serve pre-change rows for the full TTL.
 		cacheProviderId: resolveModelCacheProviderId("litellm", { baseUrl }),
 		// litellm is a local-only proxy and is never bundled in models.json (that
 		// would leak the machine's localhost catalog). Prefer the proxy's richer

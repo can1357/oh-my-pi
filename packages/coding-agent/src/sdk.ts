@@ -1612,7 +1612,11 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 		if (level === undefined && !hasExplicitModel && !hasThinkingEntry && defaultRoleSpec.explicitThinkingLevel) {
 			level = defaultRoleSpec.thinkingLevel;
 		}
-		if (level === undefined && selectedModel?.thinking?.defaultLevel !== undefined) {
+		if (
+			level === undefined &&
+			selectedModel?.thinking?.defaultLevel !== undefined &&
+			selectedModel.thinking.defaultLevel !== null
+		) {
 			level = selectedModel.thinking.defaultLevel;
 		}
 		if (level === undefined) {

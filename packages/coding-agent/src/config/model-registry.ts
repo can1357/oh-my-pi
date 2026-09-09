@@ -1563,12 +1563,13 @@ export class ModelRegistry {
 				: `${providerConfig.provider}:openai-models-list-context-v3`;
 		}
 		if (providerConfig.discovery.type === "litellm") {
-			// rich-v4 invalidates rows whose `compatConfig` retained a colliding
-			// bundled model's provider-specific transport (e.g. Fireworks
-			// `wireModelIdMode`) before that leak was fixed (issue #9938); keep in
-			// lockstep with the catalog package's `litellm:rich-vN` namespace
-			// whenever LiteLLM mapping behavior changes.
-			return `${providerConfig.provider}:litellm-rich-v4`;
+			// rich-v5 invalidates rows discovered before LiteLLM's authoritative
+			// reasoning effort metadata was mapped (issue #11353); earlier bumps
+			// covered the colliding-transport leak (issue #9938). Provider-scoped
+			// here because configured gateways carry arbitrary provider names;
+			// keep the version in lockstep with the catalog package's
+			// `litellm:rich-vN` namespace whenever LiteLLM mapping behavior changes.
+			return `${providerConfig.provider}:litellm-rich-v5`;
 		}
 		return providerConfig.provider;
 	}
