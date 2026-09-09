@@ -4,6 +4,13 @@
 
 ### Added
 
+- Added `retry.hardErrorSameModelRetries` setting (default `0`), which retries eligible hard provider errors on the same model N times before fallback when `retry.modelFallback` is enabled and a `retry.fallbackChains` entry covers the active model; payload rejections skip same-model retries ([#11277](https://github.com/can1357/oh-my-pi/issues/11277)).
+- Added `advisor.maxNotesPerUpdate` setting and `WATCHDOG.yml` configuration (default `4`): allows reasoning verifiers to batch findings in a single review update without being rate-limited.
+- Headless browser tabs now freeze when a turn settles so idle animated/WebGL pages stop burning CPU/GPU, resuming automatically on next use; tabs idle past `browser.idleCloseSec` (default 30 minutes) are closed. `persist: true` on `browser.open` opts a tab out of both ([#8246](https://github.com/can1357/oh-my-pi/issues/8246) by [@H4vC](https://github.com/H4vC)).
+
+### Fixed
+
+- Retry fallback chains now bound each selector to one normal visit plus at most one deliberate cross-provider wraparound revisit for long usage limits, and each fallback gets its initial request plus the full configured retry allowance.
 - `/rename` without a title now generates a session name from recent conversation using the configured tiny model.
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
 - `/loop` accepts `--until '<cmd>'` / `--while '<cmd>'` to gate each iteration on a shell command's exit status, so a loop can stop on real project state instead of only a count or duration. ([#10858](https://github.com/can1357/oh-my-pi/pull/10858) by [@andyhite](https://github.com/andyhite))

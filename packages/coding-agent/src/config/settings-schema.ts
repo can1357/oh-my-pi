@@ -1845,6 +1845,25 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"retry.hardErrorSameModelRetries": {
+		type: "number",
+		default: 0,
+		ui: {
+			tab: "model",
+			group: "Retry & Fallback",
+			label: "Hard-Error Same-Model Retries",
+			description:
+				"Retry eligible hard provider errors on the same model N times with backoff before fallback; requires retry.modelFallback and a retry.fallbackChains entry that covers the active model. Payload rejections skip same-model retries, and 0 preserves immediate fallback.",
+			options: [
+				{ value: "0", label: "No retries" },
+				{ value: "1", label: "1 retry" },
+				{ value: "2", label: "2 retries" },
+				{ value: "3", label: "3 retries" },
+				{ value: "5", label: "5 retries" },
+			],
+		},
+	},
+
 	"retry.baseDelayMs": { type: "number", default: 500 },
 	"retry.maxDelayMs": {
 		type: "number",
@@ -6273,6 +6292,7 @@ export interface ContextPromotionSettings {
 export interface RetrySettings {
 	enabled: boolean;
 	maxRetries: number;
+	hardErrorSameModelRetries: number;
 	baseDelayMs: number;
 	maxDelayMs: number;
 	waitForUsageReset: boolean;

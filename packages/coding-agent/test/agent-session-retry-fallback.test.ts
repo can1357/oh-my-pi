@@ -341,6 +341,7 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.provider).toBe(secondFallback.provider);
 		expect(session.model?.id).toBe(secondFallback.id);
 		expect(retryStartEvents.map(event => event.delayMs)).toEqual([0, 0]);
+		expect(retryStartEvents.map(event => event.attempt)).toEqual([1, 1]);
 		expect(fallbackAppliedEvents).toEqual([
 			{
 				type: "retry_fallback_applied",
@@ -356,7 +357,7 @@ describe("AgentSession retry fallback", () => {
 			},
 		]);
 		expect(retryEndEvents).toHaveLength(1);
-		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 2 });
+		expect(retryEndEvents[0]).toMatchObject({ success: true, attempt: 1 });
 		expect(fallbackSucceededEvents).toEqual([
 			{
 				type: "retry_fallback_succeeded",
@@ -489,6 +490,678 @@ describe("AgentSession retry fallback", () => {
 			`${primaryModel.provider}/${primaryModel.id}`,
 			`${fallbackModel.provider}/${fallbackModel.id}`,
 		]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	it("consults fallback when a hard-error retry hint exceeds the delay cap", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError(
+				`Devin API error: empty response body retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}`,
+				{ provider: "devin", kind: "empty-body" },
+			),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 10,
+			"retry.hardErrorSameModelRetries": 2,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Fall back instead of waiting past the cap");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	it("fails fast on an over-cap hard-error hint when no fallback is configured", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) throw new Error("Expected bundled hard-error model");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError(
+				`Devin API error: empty response body retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}`,
+				{ provider: "devin", kind: "empty-body" },
+			),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 10,
+			"retry.hardErrorSameModelRetries": 2,
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const { retryStartEvents } = trackRetryEvents(session);
+
+		await session.prompt("Fail instead of waiting without a fallback");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector]);
+		expect(retryStartEvents).toEqual([]);
+		expect(getLastAssistantMessage(session).errorMessage).toContain(`retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}`);
+	});
+
+	it.each([0, -1])("keeps same-model waiting unlimited when the delay cap is %i", async maxDelayMs => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError(
+				`Devin API error: empty response body retry-after-ms=${FALLBACK_TEST_RETRY_AFTER_MS}`,
+				{ provider: "devin", kind: "empty-body" },
+			),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": maxDelayMs,
+			"retry.hardErrorSameModelRetries": 1,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const waitSpy = vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Wait without a delay cap");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, primarySelector]);
+		expect(waitSpy).toHaveBeenCalledWith(FALLBACK_TEST_RETRY_AFTER_MS, { signal: expect.any(AbortSignal) });
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
+	});
+
+	it("consults fallback when computed backoff exceeds the cap with no hint", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError("Devin API error: empty response body", {
+				provider: "devin",
+				kind: "empty-body",
+			}),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 50,
+			"retry.maxDelayMs": 10,
+			"retry.hardErrorSameModelRetries": 2,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Fall back instead of sleeping past the cap with no hint");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	it("consults fallback when a later backoff step exceeds the cap with no hint", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				mock.push(
+					selector === primarySelector
+						? {
+								throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
+									provider: "devin",
+									kind: "empty-body",
+								}),
+							}
+						: { content: ["Recovered after backoff cap fallback"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxDelayMs": 10,
+			"retry.hardErrorSameModelRetries": 3,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Fall back when exponential backoff outgrows the cap");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, primarySelector, primarySelector, fallbackSelector]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	it.each([0, -1])("retries the same model past computed backoff when the delay cap is %i", async maxDelayMs => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError("Devin API error: empty response body", {
+				provider: "devin",
+				kind: "empty-body",
+			}),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 50,
+			"retry.maxDelayMs": maxDelayMs,
+			"retry.hardErrorSameModelRetries": 1,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Wait without a delay cap for computed backoff");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, primarySelector]);
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
+	});
+
+	it("retries the same model when computed backoff equals the delay cap", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const agent = createFallbackAgent(primaryModel, requestedModels, {
+			firstError: new AIError.ProviderResponseError("Devin API error: empty response body", {
+				provider: "devin",
+				kind: "empty-body",
+			}),
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 10,
+			"retry.maxDelayMs": 10,
+			"retry.hardErrorSameModelRetries": 1,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(Math, "random").mockReturnValue(0);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Retry when backoff meets the cap exactly");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, primarySelector]);
+		expect(session.model?.provider).toBe(primaryModel.provider);
+		expect(session.model?.id).toBe(primaryModel.id);
+	});
+
+	it("retries a persistent hard error twice before consulting the fallback chain", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				mock.push(
+					selector === primarySelector
+						? {
+								throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
+									provider: "devin",
+									kind: "empty-body",
+								}),
+							}
+						: { content: ["Recovered after hard-error retries"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.hardErrorSameModelRetries": 2,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Retry the hard error before fallback");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, primarySelector, primarySelector, fallbackSelector]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	it("resets hard-error retries after a same-model retry succeeds", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		let primaryAttempt = 0;
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				if (selector === primarySelector) primaryAttempt++;
+				mock.push(
+					selector === primarySelector && primaryAttempt !== 2
+						? {
+								throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
+									provider: "devin",
+									kind: "empty-body",
+								}),
+							}
+						: { content: [`ok:${selector}`] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.hardErrorSameModelRetries": 2,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const fallbackApplied: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		session.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackApplied.push(event);
+		});
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Recover on the same model");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([primarySelector, primarySelector]);
+		expect(fallbackApplied).toHaveLength(0);
+
+		await session.prompt("Use a fresh hard-error retry budget");
+		await session.waitForIdle();
+		expect(requestedModels).toEqual([
+			primarySelector,
+			primarySelector,
+			primarySelector,
+			primarySelector,
+			primarySelector,
+			fallbackSelector,
+		]);
+		expect(fallbackApplied).toHaveLength(1);
+	});
+
+	it("resets hard-error retries when the fallback chain changes models", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const firstFallback = getBundledModel("openai", "gpt-4o-mini");
+		const secondFallback = getBundledModel("openai", "gpt-4o");
+		if (!primaryModel || !firstFallback || !secondFallback) {
+			throw new Error("Expected bundled hard-error fallback models");
+		}
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const firstFallbackSelector = `${firstFallback.provider}/${firstFallback.id}`;
+		const secondFallbackSelector = `${secondFallback.provider}/${secondFallback.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				mock.push(
+					selector === secondFallbackSelector
+						? { content: ["Recovered after both hard-error budgets"] }
+						: {
+								throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
+									provider: "devin",
+									kind: "empty-body",
+								}),
+							},
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.hardErrorSameModelRetries": 2,
+			"retry.fallbackChains": {
+				default: [firstFallbackSelector],
+				[firstFallbackSelector]: [secondFallbackSelector],
+			},
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Reset retries across model changes");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			primarySelector,
+			primarySelector,
+			primarySelector,
+			firstFallbackSelector,
+			firstFallbackSelector,
+			firstFallbackSelector,
+			secondFallbackSelector,
+		]);
+		expect(session.model?.provider).toBe(secondFallback.provider);
+		expect(session.model?.id).toBe(secondFallback.id);
+	});
+	it("gives a fallback model a fresh transient retry budget after hard-error retries", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled hard-error fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		let fallbackAttempts = 0;
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				if (selector === fallbackSelector) fallbackAttempts++;
+				mock.push(
+					selector === primarySelector
+						? {
+								throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
+									provider: "devin",
+									kind: "empty-body",
+								}),
+							}
+						: fallbackAttempts <= 10
+							? { throw: "429 rate limit exceeded" }
+							: { content: ["Recovered after the fallback retry budget"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxRetries": 10,
+			"retry.hardErrorSameModelRetries": 2,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Use the fallback model's full retry budget");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			...Array<string>(3).fill(primarySelector),
+			...Array<string>(11).fill(fallbackSelector),
+		]);
+		expect(session.model?.provider).toBe(fallbackModel.provider);
+		expect(session.model?.id).toBe(fallbackModel.id);
+	});
+
+	it("does not revisit models when fallback cooldowns expire during one retry saga", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled cyclic fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const hardError = new AIError.ProviderResponseError("Devin API error: empty response body", {
+			provider: "devin",
+			kind: "empty-body",
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				mock.push(requestedModels.length > 2 ? { content: ["cycle escaped"] } : { throw: hardError });
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.hardErrorSameModelRetries": 0,
+			"retry.fallbackChains": { default: [fallbackSelector], [fallbackSelector]: [primarySelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		let now = Date.now();
+		vi.spyOn(Date, "now").mockImplementation(() => now);
+		vi.spyOn(scheduler, "wait").mockImplementation(async () => {
+			now += 5 * 60_000 + 1;
+		});
+
+		await session.prompt("Bound a cyclic fallback chain");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+	});
+
+	it("allows one long-usage wraparound revisit and then stops the retry saga", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const firstOpenCodeModel = getBundledModel("opencode-go", "deepseek-v4-pro");
+		const secondOpenCodeModel = getBundledModel("opencode-go", "deepseek-v4-flash");
+		const thirdOpenCodeModel = getBundledModel("opencode-go", "muse-spark-1.2-contributor");
+		const fallbackModel = getBundledModel("openai", "gpt-5.5");
+		if (!primaryModel || !firstOpenCodeModel || !secondOpenCodeModel || !thirdOpenCodeModel || !fallbackModel) {
+			throw new Error("Expected bundled wraparound test models");
+		}
+		authStorage.setRuntimeApiKey("opencode-go", "opencode-go-test-key");
+		authStorage.setRuntimeApiKey("openai", "openai-test-key");
+
+		const primarySelector = primaryModel.provider + "/" + primaryModel.id;
+		const firstOpenCodeSelector = firstOpenCodeModel.provider + "/" + firstOpenCodeModel.id;
+		const secondOpenCodeSelector = secondOpenCodeModel.provider + "/" + secondOpenCodeModel.id;
+		const thirdOpenCodeSelector = thirdOpenCodeModel.provider + "/" + thirdOpenCodeModel.id;
+		const fallbackSelector = fallbackModel.provider + "/" + fallbackModel.id;
+		const requestedModels: string[] = [];
+		const refusal = {
+			content: [{ type: "thinking" as const, thinking: "Classifier refusal." }],
+			errorMessage: "Refusal (cyber): Declined.",
+			stopDetails: { type: "refusal" as const, category: "cyber", explanation: "Declined." },
+			stopReason: "error" as const,
+		};
+		const longUsageLimit = {
+			throw: "429 Weekly usage limit reached. type=GoUsageLimitError retry-after-ms=3242000",
+		};
+		const mock = createMockModel({
+			responses: [
+				{ throw: "503 service unavailable: overloaded_error retry-after-ms=60000" },
+				longUsageLimit,
+				refusal,
+				longUsageLimit,
+				refusal,
+				longUsageLimit,
+				{ content: ["must not revisit a selector twice"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => model.provider + "-test-key",
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(model.provider + "/" + model.id);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.maxDelayMs": 300_000,
+			"retry.maxRetries": 3,
+			"retry.fallbackChains": {
+				default: [firstOpenCodeSelector, fallbackSelector, secondOpenCodeSelector, thirdOpenCodeSelector],
+			},
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		await session.prompt("Bound repeated long-usage wraparound");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([
+			primarySelector,
+			firstOpenCodeSelector,
+			fallbackSelector,
+			secondOpenCodeSelector,
+			fallbackSelector,
+			thirdOpenCodeSelector,
+		]);
+		expect(getLastAssistantMessage(session).stopReason).toBe("error");
+		expect(getLastAssistantMessage(session).errorMessage).toContain("GoUsageLimitError");
+	});
+
+	it("stops an exhausted fallback after its initial request and ten retries", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled exhausted fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				mock.push(
+					selector === primarySelector
+						? {
+								throw: new AIError.ProviderResponseError("Devin API error: empty response body", {
+									provider: "devin",
+									kind: "empty-body",
+								}),
+							}
+						: { throw: "429 rate limit exceeded" },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.maxRetries": 10,
+			"retry.hardErrorSameModelRetries": 0,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+		const { retryEndEvents } = trackRetryEvents(session);
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+
+		await session.prompt("Exhaust the fallback model retry budget");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, ...Array<string>(11).fill(fallbackSelector)]);
+		expect(getLastAssistantMessage(session).errorMessage).toBe(
+			"Retry budget exhausted after 10 retries: 429 rate limit exceeded",
+		);
+		expect(retryEndEvents.at(-1)).toMatchObject({ success: false, attempt: 10 });
+	});
+
+	it("sends payload rejections straight to fallback without same-model waits", async () => {
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		const fallbackModel = getBundledModel("openai", "gpt-4o-mini");
+		if (!primaryModel || !fallbackModel) throw new Error("Expected bundled payload fallback models");
+
+		const primarySelector = `${primaryModel.provider}/${primaryModel.id}`;
+		const fallbackSelector = `${fallbackModel.provider}/${fallbackModel.id}`;
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				const selector = `${model.provider}/${model.id}`;
+				requestedModels.push(selector);
+				mock.push(
+					selector === primarySelector
+						? {
+								stopReason: "error",
+								errorMessage: "request_too_large: image count exceeds the limit of 20",
+								usage: { input: 5_000 },
+							}
+						: { content: ["Recovered from the payload rejection"] },
+				);
+				return mock.stream(model, context, options);
+			},
+		});
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 1,
+			"retry.hardErrorSameModelRetries": 2,
+			"retry.fallbackChains": { default: [fallbackSelector] },
+		});
+		settings.setModelRole("default", primarySelector);
+		session = new AgentSession({ agent, sessionManager: SessionManager.inMemory(), settings, modelRegistry });
+
+		await session.prompt("Fallback without retrying the rejected payload");
+		await session.waitForIdle();
+
+		expect(requestedModels).toEqual([primarySelector, fallbackSelector]);
 		expect(session.model?.provider).toBe(fallbackModel.provider);
 		expect(session.model?.id).toBe(fallbackModel.id);
 	});

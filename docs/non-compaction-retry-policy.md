@@ -58,19 +58,20 @@ Beyond `isRetryableError(...)`, empty generic aborts may enter the same retry en
 
 Retry state is owned by `TurnRecovery`:
 
-- retry attempt counter (`0` means idle)
+- per-model retry attempt counter (`0` means idle outside an active retry saga)
 - retry lifecycle promise and resolver
 - retry backoff abort controller
+- selectors visited by the current saga, plus selectors that consumed their one permitted long-usage wraparound revisit
 
 Flow (`#handleRetryableError`):
 
 1. Read the `retry` settings group and stop when retry is disabled (except the intrinsic one-shot Fireworks Fast-to-base fallback).
-2. Increment the retry attempt and create the shared retry lifecycle promise on the first attempt.
+2. Increment the retry attempt and create the shared retry lifecycle promise on the first attempt. A switched model's initial request does not consume one of its retries.
 3. Calculate whether the current model's retry budget is exhausted.
 4. Classify the error, parse retry timing, and compute capped jittered backoff: `min(retry.baseDelayMs * 2^(attempt-1), 8000ms) * (75–100% jitter)`. Stale OpenAI Responses replay errors reset the provider session and use delay `0`.
 5. For usage limits, apply a successful credential switch or banked Codex reset immediately; otherwise wait for the earlier of the provider hint and the next temporarily blocked sibling credential.
 6. When allowed, consult configured model fallback chains. A switch uses delay `0`; classifier refusals only continue when a fallback is applied.
-7. If the current model's retry budget is exhausted, stop unless a fallback model was found. A fallback receives a fresh retry budget.
+7. If the current model's retry budget is exhausted, stop unless an eligible fallback model was found. Each fallback receives an initial request plus a fresh retry budget. Normal fallback selection visits each selector once; long OpenCode Go usage-limit recovery may revisit an earlier cross-provider selector once, and a second wraparound to that selector is rejected.
 8. If the final delay exceeds `retry.maxDelayMs` and no credential/model switch happened, emit final failure without sleeping.
 9. Emit `auto_retry_start`, record the recoverable error, and remove the failed assistant from active context unless this is a resolved interrupted tool turn.
 10. Sleep with abort support, then schedule `agent.continue()` through the post-prompt task scheduler for the same prompt generation.
@@ -99,7 +100,7 @@ Settings:
 
 Attempt numbering:
 
-- attempt counter is incremented before max-check
+- attempt counter is incremented before max-check, except for a fallback model's initial request
 - start events use current attempt (1-based)
 - max-exceeded end event reports `attempt: this.#retryAttempt - 1` (last attempted retry count)
 
