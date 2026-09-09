@@ -237,6 +237,38 @@ function toolOutputKind(type: unknown): ToolCallKind | undefined {
  *   tool-result child is dropped from the reconstructed history) or when a turn
  *   is aborted/crashes after the call streamed but before its result persisted.
  */
+/**
+ * Sanitize an OpenAI Responses/Codex tool call ID to <= 64 characters and valid charset.
+ * Composite IDs with '|' or '\n' have their secondary/item part stripped.
+ * Hashing is anchored on the canonical base part so assistant and result composites
+ * with different item halves stay identical. Short lossy changes include a hash suffix
+ * to preserve collision resistance across distinct IDs.
+ */
+export function sanitizeCodexCallId(rawCallId: string): string {
+	if (!rawCallId) return `call_${Bun.hash("empty").toString(36)}`;
+	const sep = rawCallId.search(/[\n|]/);
+	const base = sep > 0 ? rawCallId.slice(0, sep) : sep === 0 ? rawCallId.slice(1) : rawCallId;
+	const sanitized = base.replace(/[^a-zA-Z0-9_-]/g, "_").replace(/_+$/, "");
+	if (sanitized.length > 0 && sanitized.length <= 64 && sanitized === base) {
+		return sanitized;
+	}
+	const hash = Bun.hash(base || rawCallId).toString(36);
+	const effectiveBase = sanitized.length > 0 ? sanitized : "call";
+	const prefixLen = Math.max(0, 63 - hash.length);
+	return `${effectiveBase.slice(0, prefixLen)}_${hash}`.slice(0, 64);
+}
+
+/**
+ * In-place mutates the `call_id` property on every input item in the array to conform
+ * to the OpenAI Responses/Codex 64-character limit and valid charset constraints.
+ */
+export function sanitizeInputCallIds(input: InputItem[]): void {
+	for (const item of input) {
+		if (typeof item.call_id === "string") {
+			item.call_id = sanitizeCodexCallId(item.call_id);
+		}
+	}
+}
 function repairToolCallPairs(input: InputItem[]): InputItem[] {
 	const callKinds = new Map<string, ToolCallKind>();
 	const outputKinds = new Map<string, ToolCallKind>();
@@ -332,6 +364,7 @@ export interface CodexLiteShapedBody {
 export function applyCodexResponsesLiteShape(body: CodexLiteShapedBody): void {
 	const input = Array.isArray(body.input) ? body.input : [];
 	stripImageDetails(input);
+	sanitizeInputCallIds(input as InputItem[]);
 	body.parallel_tool_calls = false;
 	const declaredTools = Array.isArray(body.tools) ? body.tools : [];
 	let additionalTools = declaredTools;
@@ -382,6 +415,7 @@ export async function transformRequestBody(
 	if (body.input && Array.isArray(body.input)) {
 		body.input = filterInput(body.input);
 		if (body.input) {
+			sanitizeInputCallIds(body.input);
 			body.input = repairToolCallPairs(body.input);
 		}
 	}

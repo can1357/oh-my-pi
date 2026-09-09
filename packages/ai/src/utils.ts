@@ -45,8 +45,10 @@ export function normalizeResponsesToolCallId(
 	id: string,
 	itemPrefix: ResponsesToolItemIdPrefix = "fc",
 ): { callId: string; itemId: string } {
-	const [callId, itemId] = id.split("|");
-	if (callId && itemId) {
+	const sep = id.search(/[\n|]/);
+	if (sep > 0) {
+		const callId = id.slice(0, sep);
+		const itemId = id.slice(sep + 1);
 		return { callId, itemId: normalizeResponsesItemId(itemId, itemPrefix) };
 	}
 	const hash = Bun.hash(id).toString(36);
