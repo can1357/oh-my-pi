@@ -78,6 +78,130 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
+	it("discards a stale targeted batch across a transient reconnect", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		// Real sealing: the enveloped size has to cross the high-water mark for the
+		// batch to still be queued when the transport drops.
+		const key = await importRoomKey(generateRoomKey());
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/rejoin", role: "host", key });
+		let generated = 0;
+		function* chunks(): Generator<CollabFrame> {
+			for (let i = 0; i < 60; i++) {
+				generated++;
+				yield {
+					t: "snapshot-chunk",
+					entries: [
+						{
+							type: "message",
+							id: `e${i}`,
+							parentId: null,
+							timestamp: "2026-09-08T00:00:00Z",
+							message: { role: "user", content: "x".repeat(32 * 1024), timestamp: 0 },
+						},
+					],
+					final: i === 59,
+				};
+			}
+		}
+		try {
+			socket.connect();
+			const first = BackpressuredWebSocket.instances[0]!;
+			first.open();
+			socket.sendBatch(chunks(), 7);
+			await Bun.sleep(30);
+			expect(first.sent.length).toBeGreaterThan(0);
+			expect(generated).toBeLessThan(60);
+
+			// Transient drop: code 1000 is not fatal, so the socket retries and the
+			// relay it comes back to is a new room with reissued peer ids.
+			const generatedAtDrop = generated;
+			first.close();
+			const appeared = Date.now() + 3_000;
+			while (BackpressuredWebSocket.instances.length < 2 && Date.now() < appeared) await Bun.sleep(20);
+			const second = BackpressuredWebSocket.instances[1];
+			if (!second) throw new Error("socket never retried after the transient drop");
+			second.open();
+			socket.send({ t: "error", message: "welcome stand-in for the new guest" }, 9);
+
+			const deadline = Date.now() + 3_000;
+			while (Date.now() < deadline && !second.sent.some(bytes => unpackEnvelope(bytes)?.peerId === 9)) {
+				second.bufferedAmount = 0;
+				await Bun.sleep(20);
+			}
+			const targets = second.sent.map(bytes => unpackEnvelope(bytes)?.peerId);
+			expect(targets).toContain(9);
+			// The stale batch must not resume: it would sit ahead of peer 9 forever.
+			expect(targets).not.toContain(7);
+			expect(generated).toBe(generatedAtDrop);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
+	it("serves a reissued peer id after a reconnect", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/reissue", role: "host", key: {} as CryptoKey });
+		try {
+			socket.connect();
+			const first = BackpressuredWebSocket.instances[0]!;
+			first.open();
+			first.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer: 1 }) } as MessageEvent);
+			expect(socket.isServing(1)).toBe(false);
+
+			first.close();
+			const appeared = Date.now() + 3_000;
+			while (BackpressuredWebSocket.instances.length < 2 && Date.now() < appeared) await Bun.sleep(20);
+			const second = BackpressuredWebSocket.instances[1];
+			if (!second) throw new Error("socket never retried after the transient drop");
+			second.open();
+
+			// The recreated room hands out ids from 1 again, so retiring an id must
+			// not outlive the connection that retired it.
+			expect(socket.isServing(1)).toBe(true);
+			socket.send({ t: "error", message: "welcome stand-in" }, 1);
+			const deadline = Date.now() + 3_000;
+			while (Date.now() < deadline && second.sent.length === 0) {
+				second.bufferedAmount = 0;
+				await Bun.sleep(20);
+			}
+			expect(second.sent.map(bytes => unpackEnvelope(bytes)?.peerId)).toEqual([1]);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
+	it("forgets the oldest retirements instead of growing for the room's lifetime", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/retire", role: "host", key: {} as CryptoKey });
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// A view-link client can connect and disconnect in a loop without ever
+			// saying hello; the relay still issues an id and announces the departure.
+			const churn = 300;
+			for (let peer = 1; peer <= churn; peer++) {
+				ws.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer }) } as MessageEvent);
+			}
+			// Recent retirements still hold — that is the correctness property.
+			expect(socket.isServing(churn)).toBe(false);
+			expect(socket.isServing(churn - 10)).toBe(false);
+			// The oldest are forgotten, so the record cannot grow with the room's age.
+			expect(socket.isServing(1)).toBe(true);
+			expect(socket.isServing(churn - 280)).toBe(true);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
 	it("bounds pending bytes even when the frame count is small", () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;

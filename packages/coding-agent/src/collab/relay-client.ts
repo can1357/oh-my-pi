@@ -21,6 +21,15 @@ const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
 const MAX_PENDING_SENDS = 256;
 const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
+/**
+ * Retirement records kept. A record only has to outlive the frames already on
+ * {@link CollabSocket.#recvChain} when the departure arrives — microseconds —
+ * so this is four orders of magnitude more history than correctness needs. It
+ * exists because relay ids increase for the room's lifetime: without a cap, a
+ * client holding the view link can connect and disconnect in a loop, never
+ * sending `hello`, and add one permanent entry per connection.
+ */
+const MAX_RETIRED_PEERS = 256;
 const WS_BACKPRESSURE_THRESHOLD = 64 * 1024;
 const WS_BACKPRESSURE_DRAIN_THRESHOLD = 32 * 1024;
 const WS_BACKPRESSURE_DRAIN_RETRY_MS = 25;
@@ -29,6 +38,7 @@ interface PendingSend {
 	frames: Iterator<CollabFrame | string>;
 	targetPeer: number;
 	bytes: number;
+	cancelled: boolean;
 }
 
 export interface CollabSocketOptions {
@@ -53,6 +63,8 @@ export class CollabSocket {
 	#attempt = 0;
 	/** Terminal state: intentional close or fatal failure. Cleared by connect(). */
 	#closed = false;
+	/** Set while a transient drop is being retried; the next open is a new room. */
+	#rejoining = false;
 	#sending = false;
 	#sendGeneration = 0;
 	#wakeSender: (() => void) | undefined;
@@ -60,6 +72,19 @@ export class CollabSocket {
 	#recvChain: Promise<void> = Promise.resolve();
 	#pendingSends: PendingSend[] = [];
 	#pendingSendBytes = 0;
+	/**
+	 * Peers the relay has retired. Sole authority for the queue invariant: **every
+	 * entry in {@link #pendingSends} with a non-zero `targetPeer` is work for a
+	 * peer absent from here.**
+	 *
+	 * Entered synchronously in {@link #handleMessage}, before any owner callback
+	 * runs, so it changes atomically with respect to anything that can enqueue.
+	 * Kept past the departure because decryption reorders dispatch: a frame that
+	 * finishes opening after its sender's `peer-left` must still be recognised as
+	 * stale. Capped by {@link MAX_RETIRED_PEERS}, since relay ids climb for the
+	 * room's lifetime.
+	 */
+	#retiredPeers = new Set<number>();
 
 	constructor(opts: CollabSocketOptions) {
 		this.#opts = opts;
@@ -67,6 +92,16 @@ export class CollabSocket {
 
 	get isOpen(): boolean {
 		return this.#ws?.readyState === WebSocket.OPEN;
+	}
+
+	/**
+	 * False once the relay has retired this peer. Owners read this instead of
+	 * keeping their own departure bookkeeping: a frame that finishes decrypting
+	 * after its sender's `peer-left` sees `false` here, because reception order is
+	 * exact even though dispatch order is not.
+	 */
+	isServing(peerId: number): boolean {
+		return !this.#retiredPeers.has(peerId);
 	}
 
 	connect(): void {
@@ -86,20 +121,84 @@ export class CollabSocket {
 		}
 	}
 
-	/** Keeps a lazy snapshot contiguous with its welcome and ahead of subsequent live traffic. */
+	/** Keeps a snapshot contiguous with its welcome and ahead of subsequent live traffic. */
 	sendBatch(frames: Iterable<CollabFrame>, targetPeer = 0): void {
 		if (this.#closed) return;
 		this.#enqueueSend(frames[Symbol.iterator](), targetPeer, 0);
 	}
 
+	/**
+	 * Discard everything still queued for a peer that left. The queue is shared
+	 * and strictly FIFO, so a half-delivered snapshot would otherwise hold its
+	 * head and stall every later frame — including the next guest's welcome —
+	 * behind a retransmission the relay drops on arrival.
+	 *
+	 * @returns how many queued entries were discarded.
+	 */
+	dropPeer(peerId: number): number {
+		if (peerId === 0) return 0;
+		return this.#discardWhere(pending => pending.targetPeer === peerId);
+	}
+
+	/** Single eviction path: cancels an in-flight head cleanly and refunds its accounting. */
+	#discardWhere(match: (pending: PendingSend) => boolean): number {
+		if (this.#pendingSends.length === 0) return 0;
+		const keep: PendingSend[] = [];
+		for (const pending of this.#pendingSends) {
+			if (!match(pending)) {
+				keep.push(pending);
+				continue;
+			}
+			pending.cancelled = true;
+			this.#pendingSendBytes -= pending.bytes;
+			pending.frames.return?.(undefined);
+		}
+		const discarded = this.#pendingSends.length - keep.length;
+		this.#pendingSends = keep;
+		return discarded;
+	}
+
+	/**
+	 * A reconnect lands in a room the relay recreated: `local-relay.ts` deletes the
+	 * room when the host socket closes, closes every guest with 4001, and hands
+	 * out peer ids from 1 again. No `peer-left` announces any of it, so every id
+	 * this socket knew is meaningless and may already have been reissued.
+	 *
+	 * Targeted work is therefore undeliverable and must go. A batch is the
+	 * pressing case: it is one queue entry whose accounting covers only the chunk
+	 * in flight, so nothing bounds how long it keeps iterating at a retired id
+	 * while every new guest's welcome waits behind it. Retirement records go too —
+	 * keeping them would permanently refuse a reissued id. Broadcast work is
+	 * addressed to whoever is in the room and survives, which is the reconnect
+	 * backlog contract the drain tests pin.
+	 */
+	#resetForRecreatedRoom(): void {
+		this.#retiredPeers.clear();
+		const discarded = this.#discardWhere(pending => pending.targetPeer !== 0);
+		if (discarded > 0) logger.debug("collab: discarded targeted sends across a reconnect", { discarded });
+	}
+
 	#enqueueSend(frames: Iterator<CollabFrame | string>, targetPeer: number, bytes: number): void {
-		if (this.#pendingSends.length >= MAX_PENDING_SENDS || this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES) {
+		// The queue invariant, enforced in one place: targeted work is only ever
+		// admitted for a peer still being served. A batch queued for a peer that has
+		// left would hold the head of a queue shared with everyone else, which is
+		// the stall dropPeer exists to prevent, and reception order settles the
+		// peer's lifetime even though decryption reorders dispatch.
+		if (targetPeer !== 0 && this.#retiredPeers.has(targetPeer)) {
+			logger.debug("collab: refusing frame for a peer that has left", { targetPeer });
+			return;
+		}
+		if (this.#overCapacity(bytes)) {
 			this.#failOverload();
 			return;
 		}
-		this.#pendingSends.push({ frames, targetPeer, bytes });
+		this.#pendingSends.push({ frames, targetPeer, bytes, cancelled: false });
 		this.#pendingSendBytes += bytes;
 		this.#pumpSends();
+	}
+
+	#overCapacity(bytes: number): boolean {
+		return this.#pendingSends.length >= MAX_PENDING_SENDS || this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES;
 	}
 
 	#failOverload(): void {
@@ -131,6 +230,7 @@ export class CollabSocket {
 			const pending = this.#pendingSends[0];
 			if (!pending || !(await this.#waitForWritable(generation))) return;
 			if (this.#closed || generation !== this.#sendGeneration) return;
+			if (pending.cancelled) continue;
 			const next = pending.frames.next();
 			if (next.done) {
 				this.#pendingSends.shift();
@@ -144,23 +244,36 @@ export class CollabSocket {
 				return;
 			}
 			this.#pendingSendBytes += bytes;
-			const sealed = await sealSerialized(this.#opts.key, serialized);
-			if (!(await this.#sendEnvelope(packEnvelope(pending.targetPeer, sealed), generation))) return;
-			if (this.#closed || generation !== this.#sendGeneration) return;
-			this.#pendingSendBytes -= bytes;
+			try {
+				const sealed = await sealSerialized(this.#opts.key, serialized);
+				if (this.#closed || generation !== this.#sendGeneration) return;
+				if (pending.cancelled) continue;
+				if ((await this.#sendEnvelope(pending, packEnvelope(pending.targetPeer, sealed), generation)) === "stop") {
+					return;
+				}
+			} finally {
+				// Every terminal path that flips the generation also zeroes the counter.
+				if (generation === this.#sendGeneration) this.#pendingSendBytes -= bytes;
+			}
 		}
 	}
 
-	async #sendEnvelope(envelope: Uint8Array, generation: number): Promise<boolean> {
+	async #sendEnvelope(
+		pending: PendingSend,
+		envelope: Uint8Array,
+		generation: number,
+	): Promise<"sent" | "cancelled" | "stop"> {
 		while (!this.#closed && generation === this.#sendGeneration) {
+			if (pending.cancelled) return "cancelled";
 			const ws = await this.#waitForWritable(generation);
-			if (!ws || this.#closed || generation !== this.#sendGeneration) return false;
+			if (!ws || this.#closed || generation !== this.#sendGeneration) return "stop";
+			if (pending.cancelled) return "cancelled";
 			if (ws !== this.#ws || ws.readyState !== WebSocket.OPEN || ws.bufferedAmount >= WS_BACKPRESSURE_THRESHOLD)
 				continue;
 			ws.send(envelope);
-			return true;
+			return "sent";
 		}
-		return false;
+		return "stop";
 	}
 
 	async #waitForWritable(generation: number): Promise<WebSocket | undefined> {
@@ -183,10 +296,12 @@ export class CollabSocket {
 		return undefined;
 	}
 
+	/** Terminal-only: every caller is closing for good, so no peer is served any more. */
 	#discardPendingSends(): void {
 		this.#sendGeneration++;
 		this.#pendingSends.length = 0;
 		this.#pendingSendBytes = 0;
+		this.#retiredPeers.clear();
 		this.#sending = false;
 		this.#wakeSender?.();
 	}
@@ -226,6 +341,11 @@ export class CollabSocket {
 		ws.onopen = () => {
 			if (this.#ws !== ws) return;
 			this.#attempt = 0;
+			// Before waking the sender, or it resumes a stale targeted iterator.
+			if (this.#rejoining) {
+				this.#rejoining = false;
+				this.#resetForRecreatedRoom();
+			}
 			this.#wakeSender?.();
 			this.onOpen?.();
 		};
@@ -246,11 +366,15 @@ export class CollabSocket {
 
 	#handleMessage(ws: WebSocket, data: unknown): void {
 		if (typeof data === "string") {
+			let msg: RelayControlMessage;
 			try {
-				this.onControl?.(JSON.parse(data) as RelayControlMessage);
+				msg = JSON.parse(data) as RelayControlMessage;
 			} catch {
 				logger.debug("collab: ignoring malformed control message");
+				return;
 			}
+			this.#applyPeerLifecycle(msg);
+			this.onControl?.(msg);
 			return;
 		}
 		const bytes = data instanceof ArrayBuffer ? new Uint8Array(data) : data instanceof Uint8Array ? data : null;
@@ -275,6 +399,26 @@ export class CollabSocket {
 			});
 	}
 
+	/**
+	 * Peer lifetime, applied synchronously so no owner callback can enqueue for a
+	 * peer whose departure this socket has already seen. Dropping the backlog here
+	 * rather than in the owner keeps the invariant with the set that defines it.
+	 */
+	#applyPeerLifecycle(msg: RelayControlMessage): void {
+		if (msg.t !== "peer-left") return;
+		this.#retiredPeers.add(msg.peer);
+		this.dropPeer(msg.peer);
+		this.#trimRetired();
+	}
+
+	/** Forget the oldest retirements past the cap; insertion order is Set order. */
+	#trimRetired(): void {
+		for (const peer of this.#retiredPeers) {
+			if (this.#retiredPeers.size <= MAX_RETIRED_PEERS) return;
+			this.#retiredPeers.delete(peer);
+		}
+	}
+
 	#handleClose(code: number, reason: string): void {
 		if (this.#closed) return;
 		this.#clearBackpressureDrain();
@@ -285,6 +429,7 @@ export class CollabSocket {
 			this.onClose?.(fatalReason, false);
 			return;
 		}
+		this.#rejoining = true;
 		this.onClose?.(reason || `connection lost (code ${code})`, true);
 		this.#scheduleRetry();
 	}

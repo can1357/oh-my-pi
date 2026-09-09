@@ -130,6 +130,14 @@ export class CollabHost {
 	#writeToken: Uint8Array | null = null;
 	#sessionId = "";
 	#unsubscribe?: () => void;
+	/**
+	 * Guest identity and permission, keyed by relay peer id. Drives the
+	 * participant list, notices, the status segment and the writable-peer fan-out.
+	 * Deliverability is not its job: {@link CollabSocket.isServing} owns that, and
+	 * the two disagree on purpose while a peer is connected but has not said hello
+	 * yet, and after a shed, when the peer leaves the participant list but is
+	 * still owed a resync error.
+	 */
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
@@ -338,6 +346,14 @@ export class CollabHost {
 	}
 
 	#handleFrame(frame: CollabFrame, fromPeer: number): void {
+		// Controls are dispatched synchronously while frames finish decrypting, so
+		// a hello can land after its sender's `peer-left`. The socket settled the
+		// peer's lifetime at reception; re-read it here rather than acting on a
+		// sender that is already gone and registering a ghost participant.
+		if (!this.#socket?.isServing(fromPeer)) {
+			logger.debug("collab host ignoring frame from a peer it no longer serves", { type: frame.t, fromPeer });
+			return;
+		}
 		switch (frame.t) {
 			case "hello":
 				this.#handleHello(frame.name, frame.proto, frame.writeToken, fromPeer);
@@ -514,6 +530,7 @@ export class CollabHost {
 			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
 	}
 
+	/** Identity and UI only: the socket already retired the peer and dropped its backlog. */
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
