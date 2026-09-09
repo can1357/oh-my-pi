@@ -6,6 +6,7 @@ import {
 	readLines,
 	readSseEvents,
 	readSseJson,
+	readSseJsonOrText,
 	type ServerSentEvent,
 } from "@oh-my-pi/pi-utils/stream";
 
@@ -339,6 +340,84 @@ describe("readSseJson", () => {
 			const output = await collectAsync(readSseJson(stream));
 			expect(output).toEqual([{ a: 1 }]);
 		}
+	});
+});
+
+describe("readSseJsonOrText", () => {
+	it("yields parsed events and stops at the [DONE] sentinel", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode('data: {"a":1}\n\n'),
+			encoder.encode("data: \n\n"),
+			encoder.encode("data: [DONE]\n\n"),
+			encoder.encode('data: {"c":3}\n\n'),
+		]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual([{ a: 1 }]);
+	});
+
+	it("yields a non-JSON frame as its raw text instead of throwing", async () => {
+		// The whole point of the reader: a proxy that already committed to the
+		// stream answers with a plain-text throttle line, and the consumer has to
+		// see the text rather than lose the turn to a SyntaxError.
+		const stream = bytesStreamFromChunks([
+			encoder.encode("data: 429 Too Many Requests\n\n"),
+			encoder.encode('data: {"a":1}\n\n'),
+		]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual(["429 Too Many Requests", { a: 1 }]);
+	});
+
+	it("joins a multi-line HTML frame into one text yield", async () => {
+		// SSE joins consecutive `data:` fields with \n, which is exactly how an
+		// nginx throttle page arrives: several lines, none of them JSON.
+		const stream = bytesStreamFromChunks([
+			encoder.encode(
+				"data: <html>\ndata: <head><title>Service Temporarily Unavailable</title></head>\ndata: </html>\n\n",
+			),
+		]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual([
+			"<html>\n<head><title>Service Temporarily Unavailable</title></head>\n</html>",
+		]);
+	});
+
+	it("yields a double-encoded JSON string frame as the decoded string", async () => {
+		// A gateway that JSON-wraps its text error page *parses*, so it arrives as
+		// the string value rather than as rejected text. Both lanes are
+		// indistinguishable by type, which is the safe direction: a consumer
+		// branching on `typeof === "string"` classifies it instead of trusting it.
+		const stream = bytesStreamFromChunks([encoder.encode('data: "429 Too Many Requests"\n\n')]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual(["429 Too Many Requests"]);
+	});
+
+	it("ends iteration on a cut-off container-shaped tail, exactly like readSseJson", async () => {
+		const stream = bytesStreamFromChunks([encoder.encode('data: {"a":1}\n\n'), encoder.encode('data: {"b":2,}')]);
+
+		expect(await collectAsync(readSseJsonOrText(stream))).toEqual([{ a: 1 }]);
+	});
+
+	it("rethrows nothing for a middle malformed frame that readSseJson rejects", async () => {
+		// The strict reader's contract is unchanged; this reader's contract is that
+		// the same input is surfaced as text. Both share one frame loop, so pin them
+		// against each other.
+		const chunks = [encoder.encode('data: {"a":1\n\n'), encoder.encode('data: {"b":2}\n\n')];
+
+		expect(await collectAsync(readSseJsonOrText(bytesStreamFromChunks(chunks)))).toEqual(['{"a":1', { b: 2 }]);
+		await expect(collectAsync(readSseJson(bytesStreamFromChunks(chunks)))).rejects.toThrow(SyntaxError);
+	});
+
+	it("reports raw events to diagnostic observers", async () => {
+		const stream = bytesStreamFromChunks([
+			encoder.encode("event: message\ndata: not json\n\n"),
+			encoder.encode("data: [DONE]\n\n"),
+		]);
+		const observed: ServerSentEvent[] = [];
+
+		const output = await collectAsync(readSseJsonOrText(stream, undefined, event => observed.push(event)));
+
+		expect(output).toEqual(["not json"]);
+		expect(observed.map(event => event.data)).toEqual(["not json", "[DONE]"]);
 	});
 });
 

@@ -146,6 +146,18 @@ describe("in-band 429/5xx bodies (openai-completions stream)", () => {
 		expect(result.errorMessage).toBe("503 Service Temporarily Unavailable nginx");
 	});
 
+	it("retries a throttle page that carries no numeric status", async () => {
+		// Stock nginx wording without the code in the title: the page is still an
+		// unambiguous "temporarily unavailable", but no status may be invented for
+		// it, so it retries as a statusless transient.
+		const result = await streamFrame("<html><head><title>Service Temporarily Unavailable</title></head></html>");
+
+		expect(result.errorStatus).toBeUndefined();
+		expect(is(result.errorId, Flag.Transient)).toBe(true);
+		expect(retriable(result.errorId)).toBe(true);
+		expect(result.errorMessage).toBe("Service Temporarily Unavailable");
+	});
+
 	it("reads a retry hint out of the in-band message", async () => {
 		// `extractRetryHint` works on message text, so the upstream detail has to
 		// survive into the message rather than being hidden behind a placeholder.
