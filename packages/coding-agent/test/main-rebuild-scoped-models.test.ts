@@ -192,7 +192,7 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 		registry.discoverableProviders = ["grokbot"];
 
 		const refreshed = await refreshCredentialScopedModelIfMissing(
-			{ apiKey: "renewal", model: "live-only" },
+			{ model: "live-only" },
 			registry,
 			"grokbot",
 		);
@@ -200,6 +200,47 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 		expect(refreshed).toBe(true);
 		expect(registry.refreshProviderCalls).toEqual([{ providerId: "grokbot", strategy: "online-if-uncached" }]);
 		expect(registry.available.map(m => m.id)).toEqual(["live-only"]);
+	});
+
+	it("refreshes without --api-key when env/secrets/models.yml credentials back the provider", async () => {
+		// Documented grokbot auth paths leave cliApiKeyProvider undefined; cold
+		// `--provider grokbot --model <live-only-id>` still needs a pre-resolve refresh.
+		const registry = new FakeRegistry([], () => {
+			registry.available = [
+				buildModel({
+					id: "live-only",
+					name: "live-only",
+					api: "grokbot-sand",
+					provider: "grokbot",
+					baseUrl: "https://api2.cursor.sh",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 8_192,
+				}),
+			];
+		});
+		registry.discoverableProviders = ["grokbot"];
+
+		const refreshed = await refreshCredentialScopedModelIfMissing(
+			{ model: "grokbot/live-only" },
+			registry,
+			"grokbot",
+		);
+
+		expect(refreshed).toBe(true);
+		expect(registry.refreshProviderCalls).toEqual([{ providerId: "grokbot", strategy: "online-if-uncached" }]);
+	});
+
+	it("skips refresh when the provider is not discoverable", async () => {
+		const registry = new FakeRegistry([]);
+		registry.discoverableProviders = [];
+
+		const refreshed = await refreshCredentialScopedModelIfMissing({ model: "live-only" }, registry, "grokbot");
+
+		expect(refreshed).toBe(false);
+		expect(registry.refreshProviderCalls).toEqual([]);
 	});
 
 	it("skips refresh when the explicit model is already in the startup catalog", async () => {
@@ -220,7 +261,7 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 		registry.discoverableProviders = ["grokbot"];
 
 		const refreshed = await refreshCredentialScopedModelIfMissing(
-			{ apiKey: "renewal", model: "sand-default" },
+			{ model: "sand-default" },
 			registry,
 			"grokbot",
 		);

@@ -1124,6 +1124,65 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
 	});
 
+	test("remaps SendToUser indexes after dropping incomplete leftover so JSON example stays text", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const parent = buildModel({
+			id: "sand-default",
+			name: "sand-default",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandToolsWire: "parent-chat",
+			sandParameterIds: [],
+			sandPromoteJsonTextTools: true,
+		});
+		const jsonExample = '{"name":"Shell","arguments":{"command":"echo demo-after-drop"}}';
+		// Incomplete tool at index 0, SendToUser text at index 1. Dropping the
+		// leftover shifts text to 0 — sendToUserTextIndexes must remap or
+		// promotion would execute the user-visible JSON example.
+		const leftover = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "hang", toolName: "Write", args: '{"path":', isComplete: false },
+			}),
+		);
+		const sendToUser = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu-json-drop",
+					toolName: "SendToUser",
+					args: JSON.stringify({ type: "text", content: jsonExample }),
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(leftover, sendToUser, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "show example", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(parent as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
+		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: jsonExample })]);
+	});
+
 	test("promotes thinking JSON while remapping retained SendToUser text indices", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",

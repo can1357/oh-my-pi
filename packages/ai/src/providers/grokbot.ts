@@ -1532,6 +1532,15 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							if (!drop.has(i)) oldToNew.set(i, nextIndex++);
 						}
 						output.content = output.content.filter((_, i) => !drop.has(i));
+						// Compact shifts retained SendToUser text left — remap so
+						// JSON promotion still excludes user-visible examples.
+						const remappedSendToUser = new Set<number>();
+						for (const idx of sendToUserTextIndexes) {
+							const mapped = oldToNew.get(idx);
+							if (mapped !== undefined) remappedSendToUser.add(mapped);
+						}
+						sendToUserTextIndexes.clear();
+						for (const idx of remappedSendToUser) sendToUserTextIndexes.add(idx);
 						for (const state of leftovers) state.ended = true;
 						for (const state of states) {
 							if (drop.has(state.index)) continue;

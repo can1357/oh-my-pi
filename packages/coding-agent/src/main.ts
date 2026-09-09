@@ -846,18 +846,21 @@ export async function resolveScopedModels(
 }
 
 /**
- * When `--api-key` scopes a discoverable provider and `--model` is missing from
- * the cold/startup catalog (fresh profile, no credential-scoped cache), refresh
- * that provider before {@link buildSessionOptions} exits on miss. `--models`
- * scopes already refresh via {@link resolveScopedModels}; provider+model does not.
+ * When `--provider`/`--model` (or `provider/model`) selects a discoverable
+ * provider and the model is missing from the cold/startup catalog (fresh
+ * profile, no credential-scoped cache), refresh that provider before
+ * {@link buildSessionOptions} exits on miss. Credentials may come from
+ * `--api-key`, env, secrets file, or `models.yml` — not specifically a CLI key.
+ * `--models` scopes already refresh via {@link resolveScopedModels}.
  */
 export async function refreshCredentialScopedModelIfMissing(
-	parsed: Pick<Args, "apiKey" | "model">,
-	modelRegistry: Pick<ModelRegistry, "getAvailable" | "hasProvider" | "refreshProvider">,
+	parsed: Pick<Args, "model">,
+	modelRegistry: Pick<ModelRegistry, "getAvailable" | "hasProvider" | "refreshProvider" | "getDiscoverableProviders">,
 	providerId: string | undefined,
 ): Promise<boolean> {
-	if (!parsed.apiKey || !parsed.model || !providerId) return false;
+	if (!parsed.model || !providerId) return false;
 	if (!modelRegistry.hasProvider(providerId)) return false;
+	if (!modelRegistry.getDiscoverableProviders().includes(providerId)) return false;
 	const raw = parsed.model.trim();
 	const withoutThinking = raw.includes(":") ? raw.slice(0, raw.indexOf(":")) : raw;
 	const slash = withoutThinking.indexOf("/");
@@ -1573,7 +1576,8 @@ export async function runRootCommand(
 
 		// Install --api-key before ModelRegistry so credential-scoped startup cache
 		// ids (grokbot renewer hash, etc.) match discovery and warm live rows.
-		const cliApiKeyProvider = parsedArgs.apiKey ? resolveCliRuntimeApiKeyProvider(parsedArgs) : undefined;
+		const selectedProvider = resolveCliRuntimeApiKeyProvider(parsedArgs);
+		const cliApiKeyProvider = parsedArgs.apiKey ? selectedProvider : undefined;
 		if (parsedArgs.apiKey && cliApiKeyProvider) {
 			authStorage.setRuntimeApiKey(cliApiKeyProvider, parsedArgs.apiKey);
 		}
@@ -1586,14 +1590,15 @@ export async function runRootCommand(
 		);
 		// Credential-scoped live catalogs (e.g. grokbot AvailableModels) are absent
 		// on a fresh profile until discovery runs. Refresh before --provider/--model
-		// resolve so buildSessionOptions does not exit on a cold miss.
-		if (cliApiKeyProvider) {
+		// resolve so buildSessionOptions does not exit on a cold miss — for env,
+		// secrets-file, models.yml, and --api-key credentials alike.
+		if (selectedProvider) {
 			await logger.time(
 				"refreshCredentialScopedModel",
 				refreshCredentialScopedModelIfMissing,
 				parsedArgs,
 				modelRegistry,
-				cliApiKeyProvider,
+				selectedProvider,
 			);
 		}
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
