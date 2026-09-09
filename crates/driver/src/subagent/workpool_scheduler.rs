@@ -643,6 +643,7 @@ impl SchedulerRegistry {
 			state: Arc::clone(&state),
 			commands: command_rx,
 			events: flume::unbounded(),
+			retry_admission: Vec::new(),
 			cancel: cancel.clone(),
 			retired: Vec::new(),
 			parent: self.parent.clone(),
@@ -972,6 +973,11 @@ where
 	}
 }
 
+/// Idle delay before re-driving items held by transient admission
+/// backpressure; long enough for the owner JobBoard to commit a settled
+/// worker and release its global concurrency slot.
+const ADMISSION_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(50);
+
 struct PoolActor {
 	owner:        Str,
 	name:         Str,
@@ -986,9 +992,12 @@ struct PoolActor {
 	state:        Arc<Mutex<Snapshot>>,
 	commands:     flume::Receiver<Command>,
 	events:       (flume::Sender<WorkerEvent>, flume::Receiver<WorkerEvent>),
-	cancel:       CancellationToken,
-	retired:      Vec<(flume::Receiver<()>, tokio::task::AbortHandle)>,
-	parent:       SessionMutator,
+	/// Item indices rejected by transient admission backpressure and awaiting
+	/// a delayed re-drive after the owner's global slot is released.
+	retry_admission: Vec<usize>,
+	cancel:          CancellationToken,
+	retired:         Vec<(flume::Receiver<()>, tokio::task::AbortHandle)>,
+	parent:          SessionMutator,
 }
 
 impl PoolActor {
@@ -1111,6 +1120,14 @@ impl PoolActor {
 					Ok(command) => self.command(command).await,
 					Err(_) => return self.finish(true).await,
 				},
+				// Fires only after the actor has idled through the delay, so
+				// pending settlements and commands always drain first.
+				() = tokio::time::sleep(ADMISSION_RETRY_DELAY), if !self.retry_admission.is_empty() => {
+					let retry = std::mem::take(&mut self.retry_admission);
+					for item in retry {
+						self.schedule(item).await;
+					}
+				},
 			}
 		}
 	}
@@ -1211,7 +1228,11 @@ impl PoolActor {
 		if self.state.lock().workers.len() < limit {
 			match self.spawn_worker().await {
 				Ok(worker) => self.dispatch(worker, vec![item], false).await,
-				Err(_) => self.state.lock().items[item].state = ItemState::Failed,
+				Err(error) => {
+					if !self.item_stays_queued(item, &error) {
+						self.state.lock().items[item].state = ItemState::Failed;
+					}
+				},
 			}
 			return;
 		}
@@ -1303,9 +1324,30 @@ impl PoolActor {
 				worker.handle.cancel.cancel();
 				self.retired.push((worker.handle.finished, worker.handle.abort));
 			}
+			// A durable-state write failure is pool-terminal, not a per-item
+			// spawn failure: cancel so finish(true) reports the pool
+			// cancelled instead of completing against a stale snapshot.
+			self.cancel.cancel();
 			return Err(error);
 		}
 		Ok(worker)
+	}
+
+	/// Whether a spawn failure leaves the item queued instead of failed: a
+	/// cancelled pool defers its queue to `finish(true)`, and transient
+	/// global-capacity backpressure in a fresh pool re-drives only the
+	/// rejected item.
+	fn item_stays_queued(&mut self, item: usize, error: &WorkpoolSchedulerError) -> bool {
+		if self.cancel.is_cancelled() {
+			return true;
+		}
+		if self.fresh_agents && is_concurrency_backpressure(error) {
+			if !self.retry_admission.contains(&item) {
+				self.retry_admission.push(item);
+			}
+			return true;
+		}
+		false
 	}
 
 	async fn dispatch(&mut self, worker: usize, items: Vec<usize>, follow_up: bool) {
@@ -1541,7 +1583,10 @@ impl PoolActor {
 			};
 			match self.spawn_worker().await {
 				Ok(worker) => self.dispatch(worker, vec![item], false).await,
-				Err(_) => {
+				Err(error) => {
+					if self.item_stays_queued(item, &error) {
+						break;
+					}
 					self.state.lock().items[item].state = ItemState::Failed;
 				},
 			}
@@ -1684,6 +1729,18 @@ impl PoolActor {
 			}
 		}
 	}
+}
+
+/// A `SpawnError::Concurrency` rejection is transient global-capacity
+/// backpressure, not a terminal spawn failure: the owner's JobBoard still
+/// counts a settled-but-uncommitted worker, and the slot frees as soon as
+/// the board polls it.
+fn is_concurrency_backpressure(error: &WorkpoolSchedulerError) -> bool {
+	matches!(
+		error,
+		WorkpoolSchedulerError::WorkerSpawn { source, .. }
+			if matches!(source.as_ref(), SpawnError::Concurrency { .. })
+	)
 }
 
 fn context_load(worker: &Worker) -> f64 {

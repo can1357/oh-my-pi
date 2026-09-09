@@ -57,6 +57,11 @@ struct Launcher {
 	maximum:    Arc<AtomicUsize>,
 	die_once:   Arc<AtomicBool>,
 	fail_after: AtomicUsize,
+	/// Transiently rejects this many spawns with `SpawnError::Concurrency`.
+	fail_next:  AtomicUsize,
+	/// Parks spawn calls at or beyond this ordinal so tests can cancel
+	/// mid-admission.
+	spawn_delay_from: AtomicUsize,
 	forwarded:  Arc<RwLock<Option<Arc<omp_tools::eval::EvalToolRoster>>>>,
 }
 
@@ -68,11 +73,23 @@ impl WorkpoolLauncher for Launcher {
 		events: flume::Sender<WorkerEvent>,
 	) -> Result<WorkerHandle, WorkpoolSchedulerError> {
 		let spawned = self.spawned.fetch_add(1, Ordering::Relaxed) + 1;
-		if spawned > self.fail_after.load(Ordering::Relaxed) {
+		if spawned >= self.spawn_delay_from.load(Ordering::Relaxed) {
+			tokio::time::sleep(Duration::from_millis(500)).await;
+		}
+		if self.fail_next.load(Ordering::Relaxed) > 0 {
+			self.fail_next.fetch_sub(1, Ordering::Relaxed);
 			return Err(WorkpoolSchedulerError::WorkerSpawn {
 				id:     request.id,
 				source: Arc::new(omp_driver::subagent::spawn::SpawnError::Concurrency {
 					maximum: 1,
+				}),
+			});
+		}
+		if spawned > self.fail_after.load(Ordering::Relaxed) {
+			return Err(WorkpoolSchedulerError::WorkerSpawn {
+				id:     request.id,
+				source: Arc::new(omp_driver::subagent::spawn::SpawnError::Denied {
+					reason: Str::new_static("injected spawn failure"),
 				}),
 			});
 		}
@@ -209,6 +226,8 @@ fn harness(limit: usize, fresh: bool, die_once: bool) -> Harness {
 		maximum: Arc::new(AtomicUsize::new(0)),
 		die_once: Arc::new(AtomicBool::new(die_once)),
 		fail_after: AtomicUsize::new(usize::MAX),
+		fail_next: AtomicUsize::new(0),
+		spawn_delay_from: AtomicUsize::new(usize::MAX),
 		forwarded: Arc::new(RwLock::new(None)),
 	});
 	let parent = Arc::new(Mutex::new(parent));
@@ -563,6 +582,71 @@ async fn fresh_spawn_failure_fails_every_remaining_queued_item_and_closes() {
 	assert_eq!(status.items.queued, 0);
 	assert_eq!(status.items.running, 0);
 	assert!(status.closed);
+}
+
+#[tokio::test]
+async fn fresh_concurrency_rejection_retries_queued_items_until_capacity_frees() {
+	let harness = harness(1, true, false);
+	harness.launcher.fail_next.store(2, Ordering::Relaxed);
+	let pool = harness
+		.registry
+		.create(WorkpoolCreate { name: sf!("backpressure"), agent: sf!("task"), context: None })
+		.expect("create pool");
+	pool
+		.push(vec![sf!("a"), sf!("b")])
+		.await
+		.expect("push");
+	wait_pending(&pool, 0).await;
+	wait_closed(&pool).await;
+	wait_finished(&harness.jobs, "backpressure").await;
+	let status = pool.status();
+	assert_eq!(status.items.completed, 2);
+	assert_eq!(status.items.failed, 0);
+	assert_eq!(status.items.queued, 0);
+	assert!(
+		harness.launcher.spawned.load(Ordering::Relaxed) > 2,
+		"transient rejections were retried instead of failing items"
+	);
+}
+
+#[tokio::test]
+async fn fresh_cancel_during_slot_fill_reports_cancelled_not_completed() {
+	let harness = harness(1, true, false);
+	harness.launcher.spawn_delay_from.store(2, Ordering::Relaxed);
+	let pool = harness
+		.registry
+		.create(WorkpoolCreate { name: sf!("drain"), agent: sf!("task"), context: None })
+		.expect("create pool");
+	pool
+		.push(vec![sf!("a"), sf!("b")])
+		.await
+		.expect("push");
+	for _ in 0..200 {
+		if harness.launcher.spawned.load(Ordering::Relaxed) >= 2 {
+			break;
+		}
+		tokio::time::sleep(Duration::from_millis(5)).await;
+	}
+	assert_eq!(
+		harness.launcher.spawned.load(Ordering::Relaxed),
+		2,
+		"second spawn is parked mid-admission"
+	);
+	harness.registry.release_owner();
+	wait_finished(&harness.jobs, "drain").await;
+	let mut parent = harness.parent.lock().await;
+	let settled = harness
+		.jobs
+		.wait(&mut parent, Some(&[sf!("drain")]))
+		.await
+		.expect("wait aggregate")
+		.expect("aggregate job");
+	drop(parent);
+	assert_eq!(settled.status, "cancelled");
+	let status = pool.status();
+	assert_eq!(status.items.completed, 1);
+	assert_eq!(status.items.cancelled, 1);
+	assert_eq!(status.items.failed, 0);
 }
 
 #[tokio::test]
