@@ -433,6 +433,19 @@ function completeMoveDirectories(argumentPrefix: string): Promise<AutocompleteIt
 	return listMoveDirectoryCompletions(resolveMoveCompletionBase(base, cwd), base, query);
 }
 
+/** Declarative subcommands for `/fusion`, shared by the registry spec and its argument completion. */
+const FUSION_SUBCOMMANDS: SubcommandDef[] = [
+	{ name: "on", description: "Enable fusion (spawns the sidekick)" },
+	{ name: "off", description: "Disable fusion" },
+	{ name: "status", description: "Show fusion status and assignments" },
+	{ name: "mode", description: "Set fusion mode", usage: "<off|delegate|escalate|token-savings>" },
+	{ name: "routing", description: "Toggle dynamic routing", usage: "<on|off>" },
+	{ name: "sidekick", description: "Assign the sidekick model", usage: "<model-or-alias>" },
+	{ name: "strong", description: "Assign the strong sidekick model", usage: "<model-or-alias|clear>" },
+	{ name: "compact", description: "Assign the compaction downgrade model", usage: "<model-or-alias|clear>" },
+	{ name: "pool", description: "Manage the routing pool", usage: "[list|set <1-5> <model>|remove <1-5>|clear]" },
+];
+
 const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "pk-speak",
@@ -761,17 +774,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		description: "Fusion cost mode: menu, toggle, model assignments, and routing pool",
 		acpDescription: "Manage Fusion cost mode (toggle, models, routing pool)",
 		acpInputHint: "[on|off|status|mode <m>|routing <on|off>|sidekick <model>|strong <model>|compact <model>|pool …]",
-		subcommands: [
-			{ name: "on", description: "Enable fusion (spawns the sidekick)" },
-			{ name: "off", description: "Disable fusion" },
-			{ name: "status", description: "Show fusion status and assignments" },
-			{ name: "mode", description: "Set fusion mode", usage: "<off|delegate|escalate|token-savings>" },
-			{ name: "routing", description: "Toggle dynamic routing", usage: "<on|off>" },
-			{ name: "sidekick", description: "Assign the sidekick model", usage: "<model-or-alias>" },
-			{ name: "strong", description: "Assign the strong sidekick model", usage: "<model-or-alias|clear>" },
-			{ name: "compact", description: "Assign the compaction downgrade model", usage: "<model-or-alias|clear>" },
-			{ name: "pool", description: "Manage the routing pool", usage: "[list|set <1-5> <model>|remove <1-5>|clear]" },
-		],
+		subcommands: FUSION_SUBCOMMANDS,
+		getArgumentCompletions: completeFusionArguments,
 		allowArgs: true,
 		handle: handleFusionCommand,
 		handleTui: async (command, runtime) => {
@@ -2997,6 +3001,29 @@ function buildArgumentCompletions(subcommands: SubcommandDef[]): (prefix: string
 			}));
 		return matches.length > 0 ? matches : null;
 	};
+}
+
+/** Direct `/fusion` menu choice that completes to the full `mode token-savings` command. */
+const FUSION_TOKEN_SAVINGS_COMPLETION: AutocompleteItem = {
+	value: "mode token-savings ",
+	label: "token-savings",
+	description: "Use token-saving model routing",
+};
+
+/**
+ * Argument completions for `/fusion`: a direct `token-savings` entry first,
+ * then the declarative subcommand list, so the mode is discoverable straight
+ * from `/fusion ` without knowing the `mode` verb first. Accepting it inserts
+ * the valid `mode token-savings` command; behavior past the first token is
+ * unchanged (no dropdown while typing a subcommand's own arguments).
+ */
+function completeFusionArguments(argumentPrefix: string): AutocompleteItem[] | null {
+	if (argumentPrefix.includes(" ")) return null; // past the subcommand
+	const items = buildArgumentCompletions(FUSION_SUBCOMMANDS)(argumentPrefix) ?? [];
+	if ("token-savings".startsWith(argumentPrefix.toLowerCase())) {
+		items.unshift(FUSION_TOKEN_SAVINGS_COMPLETION);
+	}
+	return items.length > 0 ? items : null;
 }
 
 /**

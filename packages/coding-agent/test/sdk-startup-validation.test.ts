@@ -129,6 +129,56 @@ describe("SDK spawn selector startup validation", () => {
 		expect(created.session).toBeDefined();
 	});
 
+	it("preserves an explicit root model when unrelated role selectors are unavailable", async () => {
+		const model = modelRegistry.getAll()[0];
+		expect(model).toBeDefined();
+		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		const settings = Settings.isolated({
+			modelRoles: {
+				slow: "missing-role/retired-model:xhigh",
+				task: "missing-role/retired-model:medium",
+			},
+		});
+
+		const created = await createAgentSession({ ...sessionOptions(settings), model });
+
+		expect(created.session.model?.provider).toBe(model.provider);
+		expect(created.session.model?.id).toBe(model.id);
+	});
+
+	it("resolves an explicit model pattern despite an unavailable role", async () => {
+		authStorage.setRuntimeApiKey("runtime-provider", "test-key");
+		const created = await createAgentSession({
+			...sessionOptions(Settings.isolated({ modelRoles: { slow: "missing-role/retired-model:xhigh" } })),
+			modelPattern: "runtime-provider/runtime-model",
+			extensions: [runtimeProviderExtension],
+		});
+
+		expect(created.session.model?.provider).toBe("runtime-provider");
+		expect(created.session.model?.id).toBe("runtime-model");
+		expect(created.modelFallbackMessage).toBeUndefined();
+	});
+
+	it("reports an invalid explicit model rather than falling back when a role is unavailable", async () => {
+		const created = await createAgentSession({
+			...sessionOptions(Settings.isolated({ modelRoles: { slow: "missing-role/retired-model:xhigh" } })),
+			modelPattern: "missing-explicit/model",
+		});
+
+		expect(created.session.model).toBeUndefined();
+		expect(created.modelFallbackMessage).toBe('Model "missing-explicit/model" not found');
+	});
+
+	it("keeps a missing selector fatal when both a role and a required task policy reference it", async () => {
+		const selector = "missing-role/retired-model:xhigh";
+		const settings = Settings.isolated({
+			modelRoles: { slow: selector },
+			"task.agentPolicies": { task: { modelPool: [selector] } },
+		});
+
+		await expect(createAgentSession(sessionOptions(settings))).rejects.toThrow(`[unresolved-selector] ${selector}`);
+	});
+
 	it("fails closed with aggregated semantic diagnostics for required task and Fusion lanes", async () => {
 		const settings = Settings.isolated({
 			"task.agentPolicies": {

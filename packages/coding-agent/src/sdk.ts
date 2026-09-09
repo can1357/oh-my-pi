@@ -2109,16 +2109,21 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			}
 			for (const selector of Object.values(settings.get("subagent.modelAliases"))) addRequiredSelector(selector);
 			for (const selector of Object.values(settings.get("task.agentModelOverrides"))) addRequiredSelector(selector);
-			for (const selector of Object.values(settings.get("modelRoles"))) addRequiredSelector(selector);
 			if (settings.get("fusion.enabled")) {
 				for (const selector of fusionPoolSelectors) addRequiredSelector(selector);
 				addRequiredSelector(settings.get("fusion.sidekickModel"));
 				addRequiredSelector(settings.get("fusion.sidekickStrongModel"));
 				addRequiredSelector(settings.get("fusion.compactModel"));
 			}
-			if (requiredSelectors.size > 0) {
+			// Roles are checked when selected, not mandatory for unrelated root sessions.
+			// Keep validating them for diagnostics without blocking an unrelated root model.
+			const selectors = new Set(requiredSelectors);
+			for (const selector of Object.values(settings.get("modelRoles"))) {
+				if (typeof selector === "string" && selector.trim()) selectors.add(selector.trim());
+			}
+			if (selectors.size > 0) {
 				const semanticSpawnDiagnostics = validateSpawnSelectorsSemantic({
-					selectors: [...requiredSelectors],
+					selectors: [...selectors],
 					resolveStatus: selector => {
 						const resolved = resolveModelRoleValue(selector, modelRegistry.getAll() as Model[], {
 							settings,
@@ -2141,7 +2146,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// real model, so the session proceeds and the default-model fallback
 				// (with its allow-list filters) decides what actually runs.
 				const fatalSpawnDiagnostics = semanticSpawnDiagnostics.filter(
-					diagnostic => diagnostic.code !== "unauthenticated-selector",
+					diagnostic =>
+						diagnostic.code !== "unauthenticated-selector" && requiredSelectors.has(diagnostic.selector ?? ""),
 				);
 				if (fatalSpawnDiagnostics.length > 0) {
 					const message = fatalSpawnDiagnostics
@@ -2150,7 +2156,11 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					throw new Error(`Spawn selector semantic validation failed:\n${message}`);
 				}
 				for (const diagnostic of semanticSpawnDiagnostics) {
-					logger.warn("Spawn selector resolved without configured auth", { selector: diagnostic.selector });
+					logger.warn("Configured spawn selector unavailable; continuing with runtime selection checks", {
+						selector: diagnostic.selector,
+						code: diagnostic.code,
+						message: diagnostic.message,
+					});
 				}
 			}
 		}

@@ -4,11 +4,13 @@
 
 ### Added
 
-- Fusion token-savings mode (`fusion.mode=token-savings` or `/fusion token-savings`): the default model handles only the first two calls and simple turns; planning and intelligence steer to the thinking/max-intelligence models, delegated task work routes to the task model, browser work to the browser models, and low-key context gathering to the smol fast model. Root sessions auto-switch at most once per turn, restore the saved model at the next user prompt, and disable steering after a manual model switch; subagent routing and task-ledger rendering follow the same savings route.
+- Fusion token-savings mode (`fusion.mode=token-savings` or `/fusion mode token-savings`): the default model handles only the first two calls and simple turns; planning and intelligence steer to the thinking/max-intelligence models, delegated task work routes to the task model, browser work to the browser models, and low-key context gathering to the smol fast model. Root sessions auto-switch at most once per turn, restore the saved model at the next user prompt, and disable steering after a manual model switch; subagent routing and task-ledger rendering follow the same savings route.
+- The `/fusion ` autocomplete menu now offers a direct `token-savings` choice (with a short description) that inserts the valid `/fusion mode token-savings` command, alongside the unchanged subcommand list.
 - Token-savings bulk-work delegation now uses a terminal, deduplicated prompt block gated on task availability. Fresh task subagents can receive explicit paths and an exact question through an evidence-digest contract, route through the provider-independent task model role, and return concise cited findings covering exports and side effects without implementation dumps; explicit model choices and normal-mode routing remain unchanged.
 
 ### Fixed
 
+- Unavailable model-role preferences no longer block unrelated session startup; diagnostics remain visible in logs, while required spawn policies and runtime model-selection checks remain enforced.
 - Fixed token-savings restoration leaving a stale automatic-model marker: subsequent user prompts now enforce the default-model call limit again, while genuine manual model choices still disable automatic routing.
 - Fixed Windows `vault://` CLI operations failing with exit code 255 by selecting Obsidian's console launcher and normalizing its executable path for Bun.
 - Fixed first-time IRC replies stalling behind tool discovery: inbound messages now activate the `irc` tool on the recipient through the normal discovery path (profiles, ceilings, and schema budget still apply) before the aside or wake turn runs.
