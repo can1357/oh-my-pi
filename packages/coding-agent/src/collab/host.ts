@@ -412,13 +412,18 @@ export class CollabHost {
 		// Enqueue the snapshot synchronously so live traffic cannot overtake it;
 		// materialize its chunks only as the transport drains.
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
-		const snapshotBytes = JSON.stringify(snapshot).length;
+		let snapshotBytes = JSON.stringify(snapshot).length;
 		if (snapshotBytes > WELCOME_IMAGE_STRIP_THRESHOLD) {
 			let stripped = 0;
 			for (const entry of snapshot.entries) {
 				if (entry.type === "message") stripped += stripImagesFromMessage(entry.message);
 			}
-			logger.info("collab welcome exceeded size threshold; stripped images", { stripped });
+			// Re-measure: stripping is what decides how much of this snapshot the
+			// queue will hold, and an image-heavy session shrinks by an order of
+			// magnitude. Charging the arrival size instead refuses joins the budget
+			// has room for and sheds guests to make room for memory nobody holds.
+			if (stripped > 0) snapshotBytes = JSON.stringify(snapshot).length;
+			logger.info("collab welcome exceeded size threshold; stripped images", { stripped, snapshotBytes });
 		}
 		const entries = snapshot.entries.filter(isWireSessionEntry);
 		const socket = this.#socket;
@@ -436,8 +441,9 @@ export class CollabHost {
 			fromPeer,
 		);
 		// snapshotForReplication clones, and the batch holds that clone until it
-		// drains, so the queue is told what it is keeping alive. Measured before
-		// image stripping and entry filtering, both of which only shrink it.
+		// drains, so the queue is told what it is keeping alive: the serialized
+		// length of what stripping left, before an entry filter that only shrinks
+		// it further.
 		socket.sendBatch(this.#snapshotChunks(entries), fromPeer, snapshotBytes);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
