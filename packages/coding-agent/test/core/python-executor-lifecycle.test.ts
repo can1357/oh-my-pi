@@ -100,7 +100,7 @@ describe("executePython lifecycle", () => {
 		expect(kernelNext.execute).toHaveBeenCalledTimes(1);
 	});
 
-	it("restarts after an execution failure when kernel is dead", async () => {
+	it("reports uncertain completion after a kernel crash and restarts for the next cell", async () => {
 		const kernel = new FakeKernel(OK_RESULT);
 		kernel.execute.mockImplementation(async () => {
 			kernel.alive = false;
@@ -113,7 +113,12 @@ describe("executePython lifecycle", () => {
 			.mockResolvedValueOnce(kernel as unknown as pythonKernel.PythonKernel)
 			.mockResolvedValueOnce(kernelNext as unknown as pythonKernel.PythonKernel);
 
-		await executePython("1 + 1", { kernelMode: "session", sessionId: "crash-session", cwd: getProjectDir() });
+		const options = { kernelMode: "session" as const, sessionId: "crash-session", cwd: getProjectDir() };
+		await expect(executePython("1 + 1", options)).rejects.toThrow("completion is uncertain");
+		expect(startSpy).toHaveBeenCalledTimes(1);
+		expect(kernelNext.execute).not.toHaveBeenCalled();
+		const next = await executePython("2 + 2", options);
+		expect(next.exitCode).toBe(0);
 
 		expect(startSpy).toHaveBeenCalledTimes(2);
 		expect(kernel.execute).toHaveBeenCalledTimes(1);

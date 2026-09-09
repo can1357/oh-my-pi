@@ -1,9 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { GoalModeState } from "@oh-my-pi/pi-coding-agent/goals/state";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
+import { SelectorController } from "@oh-my-pi/pi-coding-agent/modes/controllers/selector-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 async function flushMicrotasks(): Promise<void> {
 	for (let i = 0; i < 10; i++) {
@@ -37,20 +41,17 @@ function createContext(
 		goalObjective?: string;
 		isCompacting?: boolean;
 		isStreaming?: boolean;
-		runIdleCompaction?: () => void;
-		runEphemeralTurn?: (args: {
-			promptText: string;
-			signal?: AbortSignal;
-		}) => Promise<{ replyText: string; assistantMessage: AssistantMessage }>;
+		runIdleCompaction?: AgentSession["runIdleCompaction"];
+		runEphemeralTurn?: AgentSession["runEphemeralTurn"];
 		sessionName?: string;
-		showStatus?: (message: string, options?: { dim?: boolean }) => void;
+		showStatus?: InteractiveModeContext["showStatus"];
 		todoPhases?: InteractiveModeContext["todoPhases"];
 	} = {},
-): InteractiveModeContext {
-	const runIdleCompaction = options.runIdleCompaction ?? (() => {});
+) {
+	const runIdleCompaction = options.runIdleCompaction ?? (async () => {});
 	const runEphemeralTurn =
 		options.runEphemeralTurn ?? (async () => ({ replyText: "", assistantMessage: createAssistantMessage() }));
-	const goalState = options.goalObjective
+	const goalState: GoalModeState | undefined = options.goalObjective
 		? {
 				enabled: true,
 				mode: "active",
@@ -65,25 +66,11 @@ function createContext(
 				},
 			}
 		: undefined;
-	const context = {
-		isInitialized: true,
-		loadingAnimation: undefined,
-		streamingComponent: undefined,
-		streamingMessage: undefined,
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map<string, unknown>(),
-		flushPendingModelSwitch: async () => {},
-		flushPendingCommandOutput: () => {},
-		syncRetryHintRow: vi.fn(),
-		ui: { requestRender: vi.fn() },
-		chatContainer: { removeChild: vi.fn() },
-		statusContainer: { clear: vi.fn() },
-		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
+	return createInteractiveModeContext({
 		editor: { getText: () => options.editorText ?? "" },
 		sessionManager: { getSessionName: () => options.sessionName },
 		todoPhases: options.todoPhases ?? [],
-		showStatus: options.showStatus ?? (() => {}),
+		...(options.showStatus ? { showStatus: options.showStatus } : {}),
 		session: {
 			isCompacting: options.isCompacting ?? false,
 			isStreaming: options.isStreaming ?? false,
@@ -91,16 +78,10 @@ function createContext(
 			runEphemeralTurn,
 			model: { provider: "anthropic", id: "claude-sonnet-4-5" },
 			messages: [createAssistantMessage()],
-			getContextUsage: () => ({ tokens: 210 }),
+			getContextUsage: () => ({ tokens: 210, contextWindow: 1_000, percent: 21 }),
 			getGoalModeState: () => goalState,
-			agent: { state: { messages: [createAssistantMessage()] } },
 		},
-		get viewSession() {
-			return (this as typeof context).session;
-		},
-		clearTransientSessionUi: () => {},
-	} as unknown as InteractiveModeContext;
-	return context;
+	});
 }
 
 describe("EventController idle compaction teardown", () => {
@@ -125,7 +106,7 @@ describe("EventController idle compaction teardown", () => {
 	});
 
 	it("cancels scheduled idle compaction when disposed", async () => {
-		const runIdleCompaction = vi.fn();
+		const runIdleCompaction = vi.fn(async () => {});
 		const context = createContext({ runIdleCompaction });
 
 		const controller = new EventController(context);
@@ -134,6 +115,30 @@ describe("EventController idle compaction teardown", () => {
 		vi.advanceTimersByTime(60_000);
 
 		expect(runIdleCompaction).not.toHaveBeenCalled();
+	});
+
+	it("arms idle compaction when it is enabled after the turn becomes idle", async () => {
+		resetSettingsForTest();
+		await Settings.init({
+			inMemory: true,
+			overrides: {
+				"compaction.idleThresholdTokens": 100,
+				"compaction.idleTimeoutSeconds": 60,
+			},
+		});
+		const runIdleCompaction = vi.fn();
+		const context = createContext({ runIdleCompaction });
+		const controller = new EventController(context);
+		Object.defineProperty(context, "eventController", { value: controller });
+		const selector = new SelectorController(context);
+		await controller.handleEvent({ type: "agent_end", messages: [createAssistantMessage()] });
+
+		settings.set("compaction.idleEnabled", true);
+		selector.handleSettingChange("compaction.idleEnabled", true);
+		vi.advanceTimersByTime(60_000);
+
+		expect(runIdleCompaction).toHaveBeenCalledTimes(1);
+		controller.dispose();
 	});
 
 	it("emits an LLM-generated recap after the default four-minute delay", async () => {

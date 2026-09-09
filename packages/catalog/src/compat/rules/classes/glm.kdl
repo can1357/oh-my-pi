@@ -10,7 +10,10 @@ class "glm" {
 	// GLM-5.2 exposes the default lower tiers plus a genuine max on generic
 	// OpenAI-compatible hosts; the zai-dialect and Anthropic-route hosts
 	// (Z.ai, Zhipu, Umans, Ollama Cloud, Baseten) serve only high/max.
-	revision ">=5.2 <5.3" {
+	// priority breaks the intentional overlap with provider-level blanket GLM
+	// ladders authored for the pre-5.2 census (e.g. alibaba-coding-plan.kdl),
+	// so the 5.2 lineage ladder wins on generic hosts that lack a 5.2 residue.
+	revision ">=5.2 <5.3" priority=10 {
 		thinking-efforts "minimal" "low" "medium" "high" "max"
 	}
 	on "zai" "zhipu-coding-plan" {
@@ -28,6 +31,35 @@ class "glm" {
 	on "vercel-ai-gateway" {
 		revision ">=5.2 <5.3" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	// Abliteration serves abliterated GLM deployments behind opaque product ids
+	// (docs.abliteration.ai/capabilities/thinking, 2026-09). The large models
+	// run fewer modes than the six-level ladder they accept, rounding aliases
+	// UP at the midpoint (medium → high, xhigh → max). Those aliases stay in
+	// the ladder so a request is never clamped down past its documented mode,
+	// and the map sends the native mode on the wire.
+	on "abliteration" {
+		// Base `abliterated-model`: distinct depths; Responses rejects `max`.
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		// Large (GLM-5.2): high/max, default high; minimal..high → high.
+		revision ">=5.2 <5.3" {
+			thinking-default-level "high"
+			thinking-efforts "high" "xhigh" "max"
+			reasoning-effort-map {
+				xhigh "max"
+			}
+		}
+		// Large V2 (GLM-5.3): low/high/max, default max; reasoning cannot be
+		// disabled (disable-shaped controls run at hidden low).
+		revision ">=5.3" {
+			thinking-default-level "max"
+			thinking-efforts "low" "medium" "high" "xhigh" "max"
+			thinking-requires-effort #true
+			reasoning-effort-map {
+				medium "high"
+				xhigh "max"
+			}
 		}
 	}
 	// GLM Coding Plan: the selectable 1M-context served ids; pin them so

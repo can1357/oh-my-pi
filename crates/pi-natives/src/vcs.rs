@@ -11,7 +11,10 @@ use napi_derive::napi;
 use pi_vcs::types as core;
 use tokio_util::sync::CancellationToken;
 
-use crate::task;
+use crate::{
+	iso::{IsoBackendKind, from_napi_kind, to_napi_kind},
+	task,
+};
 
 /// Build the JS `VcsError` on the JS thread and hand it to napi as the
 /// rejection/throw value. napi retains a reference to the constructed object,
@@ -118,6 +121,22 @@ pub struct VcsWorktreeEntry {
 	pub head:     Option<String>,
 	pub branch:   Option<String>,
 	pub detached: bool,
+}
+/// Worktree creation options.
+#[napi(object)]
+pub struct VcsWorktreeAddOptions {
+	pub detach:       bool,
+	pub clone:        bool,
+	pub backend:      Option<IsoBackendKind>,
+	/// Carry the source checkout's uncommitted changes into the new worktree
+	/// (target must be the source `HEAD`).
+	pub keep_changes: Option<bool>,
+}
+/// Worktree creation outcome.
+#[napi(object)]
+pub struct VcsWorktreeAddResult {
+	pub cloned_with: Option<IsoBackendKind>,
+	pub clone_error: Option<String>,
 }
 /// Commit author identity.
 #[napi(object)]
@@ -845,11 +864,26 @@ impl VcsGitRepo {
 		&self,
 		path: String,
 		ref_name: String,
-		detach: bool,
+		options: VcsWorktreeAddOptions,
 		signal: Option<Unknown>,
-	) -> Promise<()> {
+	) -> Promise<VcsWorktreeAddResult> {
 		blocking("vcs.worktreeAdd", self.inner.clone(), signal, move |r| {
-			r.worktree_add(Path::new(&path), &ref_name, detach)
+			let clone = if !options.clone {
+				core::WorktreeClone::Off
+			} else if let Some(kind) = options.backend {
+				core::WorktreeClone::Prefer(from_napi_kind(kind))
+			} else {
+				core::WorktreeClone::Auto
+			};
+			r.worktree_add(Path::new(&path), &ref_name, core::WorktreeAddOptions {
+				detach: options.detach,
+				clone,
+				keep_changes: options.keep_changes.unwrap_or(false),
+			})
+			.map(|result| VcsWorktreeAddResult {
+				cloned_with: result.cloned_with.map(to_napi_kind),
+				clone_error: result.clone_error,
+			})
 		})
 	}
 
@@ -1471,7 +1505,7 @@ mod tests {
 	use super::catch_panic;
 
 	/// A gix-style panic (e.g. worker-thread spawn `.expect(...)` hitting
-	/// ERROR_COMMITMENT_LIMIT) must surface as a typed backend error carrying
+	/// `ERROR_COMMITMENT_LIMIT`) must surface as a typed backend error carrying
 	/// the operation tag and panic message — never as an unwind.
 	#[test]
 	fn catch_panic_converts_native_panics_into_backend_errors() {

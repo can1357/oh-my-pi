@@ -1,5 +1,5 @@
 import type { AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import { formatBytes, sanitizeText } from "@oh-my-pi/pi-utils";
+import { formatBytes, materializeString, sanitizeText } from "@oh-my-pi/pi-utils";
 import { sanitizeWithOptionalSixelPassthrough } from "../utils/sixel";
 
 // =============================================================================
@@ -108,6 +108,7 @@ export interface TruncationResult {
 	tailLines?: number;
 	/** True when either retained side is a partial byte range of a source line. */
 	partialByteWindows?: boolean;
+	/** True when the retained suffix ends with a partial final source line. */
 	lastLinePartial?: boolean;
 	firstLineExceedsLimit?: boolean;
 }
@@ -272,7 +273,7 @@ export function truncateLine(
 	maxChars: number = DEFAULT_MAX_COLUMN,
 ): { text: string; wasTruncated: boolean } {
 	if (line.length <= maxChars) return { text: line, wasTruncated: false };
-	return { text: `${line.slice(0, maxChars)}…`, wasTruncated: true };
+	return { text: materializeString(`${line.slice(0, maxChars)}…`), wasTruncated: true };
 }
 
 // =============================================================================
@@ -380,7 +381,7 @@ export function truncateHead(content: string, options: TruncationOptions = {}): 
 	if (includedLines >= maxLines && bytesUsed <= maxBytes) truncatedBy = "lines";
 
 	return {
-		content: content.slice(0, cutIndex),
+		content: materializeString(content.slice(0, cutIndex)),
 		truncated: true,
 		truncatedBy,
 		totalLines,
@@ -429,64 +430,58 @@ export function truncateTail(content: string, options: TruncationOptions = {}): 
 		}
 
 		const lineCodeUnits = end - lineStart;
+		let partialLine: ByteTruncationResult | undefined;
 
-		// Fast reject huge line without slicing/encoding.
-		if (lineCodeUnits > remaining) {
+		// Fast reject a giant line without slicing/encoding.
+		if (lineCodeUnits > maxBytes) {
 			truncatedBy = "bytes";
-			if (includedLines === 0) {
-				// Window the line substring to avoid materializing a giant string.
-				const windowStart = Math.max(lineStart, end - maxBytes);
-				const window = content.substring(windowStart, end);
-				const tail = truncateTailBytes(window, maxBytes);
-				return {
-					content: tail.text,
-					truncated: true,
-					truncatedBy: "bytes",
-					totalLines,
-					totalBytes,
-					outputLines: 1,
-					outputBytes: tail.bytes,
-					lastLinePartial: true,
-					firstLineExceedsLimit: false,
-				};
+			// Window the line substring to avoid materializing a giant string.
+			const windowStart = Math.max(lineStart, end - remaining);
+			const window = content.substring(windowStart, end);
+			partialLine = truncateTailBytes(window, remaining);
+		} else {
+			const lineText = content.slice(lineStart, end);
+			const lineBytes = Buffer.byteLength(lineText, "utf-8");
+
+			if (lineBytes > remaining) {
+				truncatedBy = "bytes";
+				if (lineBytes > maxBytes) partialLine = truncateTailBytes(lineText, remaining);
+			} else {
+				bytesUsed += sepBytes + lineBytes;
+				includedLines++;
+				startIndex = lineStart;
+
+				if (nl === -1) break;
+				end = nl; // exclude the newline itself; it'll be accounted as sepBytes in the next iteration
+				continue;
 			}
-			break;
 		}
 
-		const lineText = content.slice(lineStart, end);
-		const lineBytes = Buffer.byteLength(lineText, "utf-8");
-
-		if (lineBytes > remaining) {
-			truncatedBy = "bytes";
-			if (includedLines === 0) {
-				const tail = truncateTailBytes(lineText, maxBytes);
-				return {
-					content: tail.text,
-					truncated: true,
-					truncatedBy: "bytes",
-					totalLines,
-					totalBytes,
-					outputLines: 1,
-					outputBytes: tail.bytes,
-					lastLinePartial: true,
-					firstLineExceedsLimit: false,
-				};
-			}
-			break;
+		if (partialLine && (partialLine.bytes > 0 || includedLines === 0)) {
+			const hasCompleteLines = includedLines > 0;
+			const separator = hasCompleteLines && partialLine.bytes > 0 ? NL : "";
+			const completeTail = hasCompleteLines ? content.slice(startIndex) : "";
+			const output = materializeString(`${partialLine.text}${separator}${completeTail}`);
+			return {
+				content: output,
+				truncated: true,
+				truncatedBy: "bytes",
+				totalLines,
+				totalBytes,
+				outputLines: includedLines + (partialLine.bytes > 0 ? 1 : 0),
+				outputBytes: bytesUsed + separator.length + partialLine.bytes,
+				partialByteWindows: partialLine.bytes > 0,
+				lastLinePartial: partialLine.bytes > 0 && !hasCompleteLines,
+				firstLineExceedsLimit: false,
+			};
 		}
-
-		bytesUsed += sepBytes + lineBytes;
-		includedLines++;
-		startIndex = lineStart;
-
-		if (nl === -1) break;
-		end = nl; // exclude the newline itself; it'll be accounted as sepBytes in the next iteration
+		break;
 	}
 
 	if (includedLines >= maxLines && bytesUsed <= maxBytes) truncatedBy = "lines";
 
 	return {
-		content: content.slice(startIndex),
+		content: materializeString(content.slice(startIndex)),
 		truncated: true,
 		truncatedBy,
 		totalLines,
@@ -551,6 +546,7 @@ export function truncateMiddle(content: string, options: TruncationOptions = {})
 	const tailLinesKept = tail.outputLines ?? 0;
 	const headBytesKept = head.outputBytes ?? Buffer.byteLength(head.content, "utf-8");
 	const tailBytesKept = tail.outputBytes ?? Buffer.byteLength(tail.content, "utf-8");
+	const tailHasPartialWindow = tail.partialByteWindows === true || tail.lastLinePartial === true;
 
 	// A giant first/last line cannot use one of the line-preserving windows. Use
 	// a byte window only for that side and retain the normal line cap on the other.
@@ -587,15 +583,15 @@ export function truncateMiddle(content: string, options: TruncationOptions = {})
 			elidedLines: Math.max(0, totalLines - actualHeadLines - actualTailLines),
 			headLines: actualHeadLines,
 			tailLines: actualTailLines,
-			partialByteWindows: useByteHead || useByteTail || tail.lastLinePartial === true,
+			partialByteWindows: useByteHead || useByteTail || tailHasPartialWindow,
 			elidedBytes,
-			lastLinePartial: true,
+			lastLinePartial: tail.lastLinePartial,
 			firstLineExceedsLimit: false,
 		};
 	}
 	// Fully retained line windows need no marker. A partial tail still omitted
 	// bytes from its source line even when the windows account for every line.
-	if (headLinesKept + tailLinesKept >= totalLines && !tail.lastLinePartial) {
+	if (headLinesKept + tailLinesKept >= totalLines && !tailHasPartialWindow) {
 		return noTruncResult(content, totalLines, totalBytes);
 	}
 
@@ -619,6 +615,7 @@ export function truncateMiddle(content: string, options: TruncationOptions = {})
 		elidedBytes,
 		headLines: headLinesKept,
 		tailLines: tailLinesKept,
+		partialByteWindows: tailHasPartialWindow,
 		lastLinePartial: tail.lastLinePartial,
 		firstLineExceedsLimit: false,
 	};
@@ -1454,6 +1451,8 @@ export function formatTailTruncationNotice(
 			lastLineSizePart = ` (line is ${formatBytes(Buffer.byteLength(lastLine, "utf-8"))})`;
 		}
 		notice = `[Showing last ${formatBytes(truncation.outputBytes ?? truncation.totalBytes)} of line ${endLine}${lastLineSizePart}${fullOutputPart}${suffix}]`;
+	} else if (truncation.partialByteWindows) {
+		notice = `[Showing last ${formatBytes(truncation.outputBytes ?? truncation.totalBytes)} across lines ${startLine}-${endLine} of ${truncation.totalLines}; line ${startLine} is partial${fullOutputPart}${suffix}]`;
 	} else {
 		notice = `[Showing lines ${startLine}-${endLine} of ${truncation.totalLines}${fullOutputPart}${suffix}]`;
 	}

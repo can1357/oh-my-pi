@@ -25,8 +25,12 @@ provider "zai" {
 	}
 	// GLM-5.3-Flash is the first mandatory-thinking flash SKU. Its exact
 	// deployment keeps the Anthropic budget+effort wire mode instead of the
-	// older optional-thinking flash family's budget-only mode.
+	// older optional-thinking flash family's budget-only mode. The SKU rides
+	// Z.AI's native OpenAI-completions endpoint, so clamp the sent max_tokens
+	// to the advertised 131K cap rather than the 64K OpenAI default (the
+	// axis is a no-op on the Anthropic route).
 	models "glm-5.3-flash" {
 		thinking-mode "anthropic-budget-effort"
+		clamp-output-to-model-max #true
 	}
 }

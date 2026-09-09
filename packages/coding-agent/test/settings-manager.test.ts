@@ -965,6 +965,87 @@ describe("Settings", () => {
 			expect(settings.getModelRole("global_role")).toBe("openai/global");
 			expect(settings.getModelRole("project_role")).toBe("openai/project");
 		});
+		it("refreshes native project settings without changing overlay or runtime precedence", async () => {
+			await writeSettings({
+				task: { enableEffort: true, maxConcurrency: 2 },
+				retry: { modelFallback: true },
+			});
+			const overlayPath = tempDir.join("reload-overlay.yml");
+			await Bun.write(overlayPath, YAML.stringify({ task: { enableEffort: false } }, null, 2));
+			const reloadProjectDir = tempDir.join("reload-project");
+			await fsp.mkdir(reloadProjectDir, { recursive: true });
+			const projectConfigPath = path.join(getProjectAgentDir(reloadProjectDir), "config.yml");
+			const settings = await Settings.loadIsolated({
+				cwd: reloadProjectDir,
+				agentDir,
+				configFiles: [overlayPath],
+				overrides: { "task.maxConcurrency": 7 },
+			});
+
+			expect(await Bun.file(projectConfigPath).exists()).toBe(false);
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						task: {
+							agentModelOverrides: { task: "xai-oauth/grok-4.6:medium" },
+							enableEffort: true,
+							maxConcurrency: 3,
+						},
+						retry: { modelFallback: false },
+					},
+					null,
+					2,
+				),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({
+				task: "xai-oauth/grok-4.6:medium",
+			});
+			expect(settings.get("retry.modelFallback")).toBe(false);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify(
+					{
+						task: {
+							agentModelOverrides: { task: "openai/gpt-4o" },
+							enableEffort: true,
+							maxConcurrency: 4,
+						},
+						retry: { modelFallback: true },
+					},
+					null,
+					2,
+				),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({ task: "openai/gpt-4o" });
+			expect(settings.get("retry.modelFallback")).toBe(true);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+
+			await Bun.write(
+				projectConfigPath,
+				YAML.stringify({ task: { enableEffort: true, maxConcurrency: 4 } }, null, 2),
+			);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({});
+			expect(settings.get("retry.modelFallback")).toBe(true);
+
+			await fsp.rm(projectConfigPath);
+			await settings.reloadFromDisk();
+
+			expect(settings.get("task.agentModelOverrides")).toEqual({});
+			expect(settings.get("retry.modelFallback")).toBe(true);
+			expect(settings.get("task.enableEffort")).toBe(false);
+			expect(settings.get("task.maxConcurrency")).toBe(7);
+		});
 		it("retries when a persisted setting changes while files are being read", async () => {
 			await writeSettings({ setupVersion: 1 });
 			const settings = await Settings.init({ cwd: projectDir, agentDir });
@@ -1658,6 +1739,57 @@ describe("Settings", () => {
 		});
 	});
 	describe("migrations", () => {
+		it("moves the legacy image question timeout and removes its tool settings", async () => {
+			await writeSettings({ inspect_image: { mode: "on", timeoutMs: 42 } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("images.questionTimeoutMs")).toBe(42);
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			expect((await readSettings()).inspect_image).toBeUndefined();
+		});
+
+		it("migrates nested task isolation mode none to disabled", async () => {
+			await writeSettings({ task: { isolation: { mode: "none" } } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("task.isolation.enabled")).toBe(false);
+			expect(settings.get("isolation.backend")).toBe("auto");
+			settings.set("display.showTokenUsage", true);
+			await settings.flush();
+			const saved = await readSettings();
+			expect((saved.task as Record<string, Record<string, unknown>>).isolation).toEqual({ enabled: false });
+		});
+
+		it("migrates flat task isolation mode to enabled with its backend", async () => {
+			await writeSettings({ [["task", "isolation", "mode"].join(".")]: "reflink" });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("task.isolation.enabled")).toBe(true);
+			expect(settings.get("isolation.backend")).toBe("reflink");
+		});
+
+		it("renames legacy isolation backends during mode migration", async () => {
+			await writeSettings({ task: { isolation: { mode: "worktree" } }, isolation: { backend: "fuse-overlay" } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("task.isolation.enabled")).toBe(true);
+			expect(settings.get("isolation.backend")).toBe("overlayfs");
+		});
+
+		it("keeps explicit task isolation enabled over a legacy mode", async () => {
+			await writeSettings({ task: { isolation: { enabled: false, mode: "reflink" } } });
+
+			const settings = await Settings.init({ cwd: projectDir, agentDir });
+
+			expect(settings.get("task.isolation.enabled")).toBe(false);
+			expect(settings.get("isolation.backend")).toBe("reflink");
+		});
+
 		it("consolidates legacy Exa suite toggles onto exa.enabled", async () => {
 			await writeSettings({
 				exa: {

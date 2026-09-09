@@ -2534,6 +2534,37 @@ mod tests {
 		assert!(!output.contains("Broken pipe"), "{output:?}");
 	}
 
+	/// Regression: every ported utility upstream of a stage that quits early
+	/// printed `<name>: Broken pipe (os error 32)` (and `write error`
+	/// variants) and exited 1 — `cut f | sed 'bad'` when sed died at parse
+	/// time, `sed … | head`, `ls | head`. SIGPIPE emulation lives in the host
+	/// boundary, so ports that know nothing about broken pipes must still die
+	/// silently with 141.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn builtins_upstream_of_closed_pipe_are_silent_and_exit_141() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let file = dir.path().join("big.txt");
+		let file = file.display();
+		// Large enough that the writer is still producing when the reader exits.
+		let cases = [
+			format!("cut -c1-5 '{file}' | sed -n 1-30p"),
+			format!("sed -n p '{file}' | head -n 1 > /dev/null"),
+			format!("sort -n '{file}' | head -n 1 > /dev/null"),
+			format!("uniq '{file}' | head -n 1 > /dev/null"),
+			format!("cat '{file}' | head -n 1 > /dev/null"),
+			format!("tr a-z A-Z < '{file}' | head -n 1 > /dev/null"),
+		];
+		for case in cases {
+			let command =
+				format!("seq 1 200000 > '{file}'; set -o pipefail; {case}; echo rc=${{PIPESTATUS[0]}}");
+			let (result, output) = execute_captured(command).await;
+			assert_eq!(result.exit_code, Some(0), "{case}: {output:?}");
+			assert!(output.contains("rc=141"), "{case}: {output:?}");
+			assert!(!output.contains("Broken pipe"), "{case}: {output:?}");
+			assert!(!output.contains("write error"), "{case}: {output:?}");
+		}
+	}
+
 	/// The kill builtin accepts a numeric signal and applies it to every process
 	/// operand.
 	#[cfg(unix)]
@@ -3246,6 +3277,56 @@ mod tests {
 		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
 		assert!(out.contains("'rel'"), "verbose output missing operand `rel`: {out:?}");
 		assert!(!out.contains(tmp_str), "verbose output leaked absolute path: {out:?}");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
+	/// `command -v`/`-V` must iterate over every operand like bash/zsh, printing
+	/// one line per name that resolves and skipping the misses, rather than
+	/// honoring only the first operand. Regression test for silently dropped
+	/// operands in `command -v a b c` (issue #10544).
+	#[tokio::test(flavor = "multi_thread")]
+	async fn command_v_iterates_all_operands() {
+		let tmp = std::env::temp_dir().join(format!("pi-command-v-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		let tmp_str = tmp.to_str().expect("utf8 temp path");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("set cwd");
+
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		// Three always-registered builtins plus a name that never resolves. bash
+		// prints one line per resolved builtin and skips the miss, exiting 0.
+		let exec = session
+			.shell
+			.run_string("command -v true false pwd nope-xyz-10544 > out.txt", &source_info, &params)
+			.await
+			.expect("run_string");
+		assert_eq!(exit_code(&exec), 0, "command -v exit code with a resolvable name");
+
+		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
+		let lines: Vec<&str> = out.lines().collect();
+		assert_eq!(
+			lines,
+			vec!["true", "false", "pwd"],
+			"command -v must print one line per resolved operand and skip misses: {out:?}"
+		);
+
+		// When no operand resolves, the exit status is a general error.
+		let exec = session
+			.shell
+			.run_string("command -v nope-a-10544 nope-b-10544", &source_info, &params)
+			.await
+			.expect("run_string");
+		assert_eq!(exit_code(&exec), 1, "command -v exit code when nothing resolves");
 
 		let _ = std::fs::remove_dir_all(&tmp);
 	}

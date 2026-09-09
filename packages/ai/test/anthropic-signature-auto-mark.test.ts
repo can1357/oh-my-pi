@@ -107,6 +107,19 @@ function createSignatureRejection(): Error {
 	return error;
 }
 
+/**
+ * Bedrock-backed anthropic-messages proxies reject the same `signature: ""`
+ * replay in schema validation instead of the signature check, so the wording is
+ * a missing required field rather than an invalid signature.
+ */
+function createBedrockSignatureRejection(): Error {
+	const error = new Error(
+		'400 {"type":"error","error":{"type":"ValidationException","message":"The model returned the following errors: messages.1.content.0.thinking.signature: Field required"}}',
+	);
+	Object.assign(error, { status: 400 });
+	return error;
+}
+
 interface AnthropicWireBlock {
 	type: string;
 	thinking?: string;
@@ -245,6 +258,42 @@ describe("#4297 anthropic-messages runtime signing auto-mark", () => {
 
 		expect(readReplayUnsignedThinkingDisabled(providerSessionState)).toBe(true);
 		expect(result.disabledFeatures).toContain("unsigned-thinking-replay");
+	});
+
+	it("also heals the Bedrock missing-signature wording", async () => {
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const capturedPayloads: unknown[] = [];
+		let attempt = 0;
+		vi.spyOn(AnthropicMessages.prototype, "create").mockImplementation((params: unknown) => {
+			attempt += 1;
+			capturedPayloads.push(params);
+			if (attempt === 1) {
+				return {
+					async withResponse() {
+						throw createBedrockSignatureRejection();
+					},
+				} as never;
+			}
+			return successRequest() as never;
+		});
+
+		const stream = streamAnthropic(model, priorTurnContext, {
+			apiKey: "sk-ant-test",
+			providerSessionState,
+		});
+		for await (const _ of stream) {
+			/* drain */
+		}
+		const result = await stream.result();
+
+		expect(attempt).toBe(2);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+
+		const retryBlocks = extractPriorAssistantBlocks(capturedPayloads[1]);
+		expect(retryBlocks.find(block => block.type === "thinking")).toBeUndefined();
+		expect(retryBlocks.find(block => block.type === "text")?.text).toContain("Read the file, then summarise.");
+		expect(readReplayUnsignedThinkingDisabled(providerSessionState)).toBe(true);
 	});
 
 	it("pre-demotes unsigned thinking on subsequent turns once the session is pinned", async () => {

@@ -5,13 +5,15 @@
  * regenerate + commit together with rule changes.
  */
 import * as path from "node:path";
-import { compileCompatRules } from "./compat-compiler";
+import { compileCompatRules, renderAuthIds } from "./compat-compiler";
 
 const rulesDir = path.join(import.meta.dir, "../src/compat/rules");
 const outPath = path.join(import.meta.dir, "../src/compat/rules.json");
+const authIdsPath = path.join(import.meta.dir, "../src/compat/auth-ids.ts");
 
 const compiled = await compileCompatRules(rulesDir);
 await Bun.write(outPath, `${JSON.stringify(compiled, null, "\t")}\n`);
+await Bun.write(authIdsPath, renderAuthIds(compiled.auth));
 console.log(
-	`wrote ${path.relative(process.cwd(), outPath)} (${compiled.cascade.rules.length} rules, ${compiled.taxonomy.classes.length} classes, ${compiled.files.length} files)`,
+	`wrote ${path.relative(process.cwd(), outPath)} (${compiled.cascade.rules.length} rules, ${compiled.taxonomy.classes.length} classes, ${compiled.auth.providers.length} auth providers, ${compiled.files.length} files)`,
 );

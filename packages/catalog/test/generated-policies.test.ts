@@ -105,6 +105,33 @@ describe("generated model policies", () => {
 		expect(built[3]?.priority).toBe(1);
 	});
 
+	it("projects Cursor tool schemas only for Anthropic Fable variants", () => {
+		const fableModels = [
+			"claude-fable-5-high",
+			"claude-fable-5-low",
+			"claude-fable-5-max",
+			"claude-fable-5-medium",
+			"claude-fable-5-xhigh",
+		].map(id => buildGenerated(createSpec({ id, api: "cursor-agent", provider: "cursor" })));
+		const grok = buildGenerated(createSpec({ id: "cursor-grok-4.6", api: "cursor-agent", provider: "cursor" }));
+		const otherCursorAnthropic = buildGenerated(
+			createSpec({ id: "claude-opus-4-7-high", api: "cursor-agent", provider: "cursor" }),
+		);
+
+		for (const model of fableModels) {
+			expect(model.requiresCursorToolSchemaProjection).toBe(true);
+		}
+		expect(grok.requiresCursorToolSchemaProjection).toBeUndefined();
+		expect(otherCursorAnthropic.requiresCursorToolSchemaProjection).toBeUndefined();
+
+		const rebuiltGrok = buildModel({
+			...fableModels[0],
+			id: "cursor-grok-4.6",
+			name: "cursor-grok-4.6",
+		});
+		expect(rebuiltGrok.requiresCursorToolSchemaProjection).toBeUndefined();
+	});
+
 	it("preserves OpenRouter's mandatory provider-authored effort ladder", () => {
 		const models: ModelSpec<Api>[] = [
 			createSpec({
@@ -235,6 +262,26 @@ describe("generated model policies", () => {
 
 		expect(models[0]?.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 10, output: 45 });
 		expect(models[1]?.cost.longContext).toMatchObject({ inputThreshold: 272_000, input: 0.4, output: 1.8 });
+		expect(models[2]?.cost.longContext).toBeUndefined();
+	});
+
+	it("bills Astra API long-context above 272K while the sub route stays exempt", () => {
+		const models = [
+			createSpec({ id: "gpt-6-astra", api: "openai-responses", provider: "openai" }),
+			createSpec({ id: "gpt-6-astra", api: "openai-codex-responses", provider: "openai-codex" }),
+			// Third-party carriers of the same id must not inherit the tier.
+			createSpec({ id: "gpt-6-astra", api: "openai-completions", provider: "openrouter" }),
+		].map(model => buildGenerated(model));
+
+		expect(models[0]?.cost.longContext).toMatchObject({
+			inputThreshold: 272_000,
+			input: 20,
+			output: 75,
+			cacheRead: 2,
+			cacheWrite: 25,
+		});
+		expect(models[1]?.cost.longContext).toBeUndefined();
+		expect(models[1]?.cost).toMatchObject({ cacheWrite: 0 });
 		expect(models[2]?.cost.longContext).toBeUndefined();
 	});
 

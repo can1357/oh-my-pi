@@ -10,7 +10,14 @@
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { mapEffortToAnthropicAdaptiveEffort, requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
-import { $flag, fetchWithRetry, logger, parseStreamingJson, parseStreamingJsonThrottled } from "@oh-my-pi/pi-utils";
+import {
+	$flag,
+	fetchWithRetry,
+	logger,
+	parseStreamingJson,
+	parseStreamingJsonThrottled,
+	USER_AGENT,
+} from "@oh-my-pi/pi-utils";
 import { renderDemotedThinking } from "../dialect/demotion";
 import * as AIError from "../error";
 import { resolveAwsBearerToken } from "../registry/aws";
@@ -102,6 +109,13 @@ export interface BedrockOptions extends StreamOptions {
 	 * we omit it for them.
 	 */
 	thinkingDisplay?: BedrockThinkingDisplay;
+	/**
+	 * Per-request Bedrock invocation-log tags. Merged over `model.requestMetadata`
+	 * (per-call entries win on key collision). AWS caps the result at 16 entries;
+	 * keys 1-256 chars, values 0-256 chars, both limited to
+	 * `[a-zA-Z0-9\s:_@$#=/+,-.]`. Entries outside those limits are dropped.
+	 */
+	requestMetadata?: Record<string, string>;
 }
 
 function resolveBearerToken(options: BedrockOptions): string | undefined {
@@ -283,6 +297,7 @@ interface ConverseStreamRequest {
 	toolConfig?: WireToolConfig;
 	guardrailConfig?: WireGuardrailConfig;
 	additionalModelRequestFields?: Record<string, unknown>;
+	requestMetadata?: Record<string, string>;
 	additionalModelResponseFieldPaths?: string[];
 }
 
@@ -317,6 +332,41 @@ interface MetadataEvent {
 		cacheWriteInputTokens?: number;
 		totalTokens?: number;
 	};
+}
+
+const REQUEST_METADATA_PATTERN = /^[a-zA-Z0-9\s:_@$#=/+,\-.]*$/;
+const REQUEST_METADATA_MAX_ENTRIES = 16;
+const REQUEST_METADATA_MAX_LENGTH = 256;
+
+/**
+ * Bedrock rejects the whole invocation on a malformed `requestMetadata` entry.
+ * Attribution tags must never cost a turn, so invalid and excess entries are
+ * dropped with a warning instead of failing the request. Returns `undefined`
+ * for an empty result so the field is omitted from the body entirely.
+ */
+function sanitizeRequestMetadata(raw: unknown): Record<string, string> | undefined {
+	if (!isRecord(raw)) return undefined;
+	const out: Record<string, string> = {};
+	const dropped: string[] = [];
+	let kept = 0;
+	for (const [key, value] of Object.entries(raw)) {
+		if (
+			typeof value !== "string" ||
+			key.length < 1 ||
+			key.length > REQUEST_METADATA_MAX_LENGTH ||
+			!REQUEST_METADATA_PATTERN.test(key) ||
+			value.length > REQUEST_METADATA_MAX_LENGTH ||
+			!REQUEST_METADATA_PATTERN.test(value) ||
+			kept >= REQUEST_METADATA_MAX_ENTRIES
+		) {
+			dropped.push(key);
+			continue;
+		}
+		out[key] = value;
+		kept++;
+	}
+	if (dropped.length > 0) logger.warn("Bedrock requestMetadata entries dropped", { keys: dropped });
+	return kept > 0 ? out : undefined;
 }
 
 export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
@@ -391,10 +441,17 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 				toolConfig,
 				guardrailConfig: buildGuardrailConfig(options),
 				additionalModelRequestFields,
+				requestMetadata:
+					model.requestMetadata || options.requestMetadata
+						? { ...model.requestMetadata, ...options.requestMetadata }
+						: undefined,
 				...(prefixMismatchBehavior ? { additionalModelResponseFieldPaths: ["/input_transformations"] } : {}),
 			};
 			const replacementInput = await options?.onPayload?.(commandInput, model);
 			if (replacementInput !== undefined) commandInput = replacementInput as ConverseStreamRequest;
+			// After the hook so extension-injected tags are validated too, and before the
+			// raw dump so the inspector shows exactly what was sent.
+			commandInput = { ...commandInput, requestMetadata: sanitizeRequestMetadata(commandInput.requestMetadata) };
 
 			const host = `bedrock-runtime.${region}.amazonaws.com`;
 			const url = `https://${host}/model/${encodeURIComponent(model.id)}/converse-stream`;
@@ -429,11 +486,21 @@ export const streamBedrock: StreamFunction<"bedrock-converse-stream"> = (
 			// comma-joined wire header, so AWS validates different bytes than were
 			// signed and rejects the request.
 			const callerHeaders: Record<string, string> = {};
-			for (const [name, value] of Object.entries(options?.headers ?? {})) {
-				const field = name.toLowerCase();
-				if (SIGNER_OWNED_HEADERS.has(field) || BEDROCK_RESERVED_HEADERS.has(field)) continue;
-				callerHeaders[field] = value;
+			// `model.headers` first, `options.headers` second: `StreamOptions.headers` is
+			// documented (types.ts:431-435) as merged ON TOP of model-defined headers.
+			// Both pass the same filter, so a config-authored `Host`/`Content-Type`
+			// cannot desync the signature either.
+			for (const source of [model.headers, options?.headers]) {
+				for (const [name, value] of Object.entries(source ?? {})) {
+					const field = name.toLowerCase();
+					if (SIGNER_OWNED_HEADERS.has(field) || BEDROCK_RESERVED_HEADERS.has(field)) continue;
+					callerHeaders[field] = value;
+				}
 			}
+			// SigV4 never signs `user-agent` (UNSIGNABLE in aws-sigv4.ts:42-58), so this
+			// default cannot break the signature. Without it Bun's fetch sends
+			// `Bun/<version>`, and that is what CloudTrail records for every request.
+			callerHeaders["user-agent"] ??= USER_AGENT;
 			const baseHeaders: Record<string, string> = {
 				...callerHeaders,
 				"content-type": "application/json",

@@ -138,6 +138,34 @@ describe("supportsFreeformApplyPatch", () => {
 describe("convertTools: freeform emission", () => {
 	const freeformModel = makeModel({ applyPatchToolType: "freeform" });
 
+	test("muse-code keeps the edit tool a function — api.meta.ai/v1 rejects custom tools", () => {
+		// Verified 2026-09-05: POST /v1/responses with a `custom` tool 400s with
+		// "`custom` tools are not supported on this endpoint" on muse-code; the
+		// same model as a function tool returns 200. The catalog must not re-add
+		// apply-patch-tool-type "freeform" for this provider.
+		const museSpec = {
+			id: "muse-spark-1.3-contributor",
+			name: "Muse Spark 1.3 (C)",
+			api: "openai-responses",
+			baseUrl: "https://api.meta.ai/v1",
+			reasoning: true,
+			input: ["text", "image"],
+			cost: { input: 0.1, output: 0.2, cacheRead: 0.002, cacheWrite: 0 },
+			contextWindow: 1_048_576,
+			maxTokens: 131_072,
+		};
+		const muse = buildModel({ ...museSpec, provider: "muse-code" } as ModelSpec<"openai-responses">);
+		expect(supportsFreeformApplyPatch(muse)).toBe(false);
+		const [out] = convertTools([editTool], false, muse) as unknown as Array<Record<string, unknown>>;
+		expect(out.type).toBe("function");
+
+		// Same model id on the direct Meta API key provider is also function.
+		const meta = buildModel({ ...museSpec, provider: "meta" } as ModelSpec<"openai-responses">);
+		expect(supportsFreeformApplyPatch(meta)).toBe(false);
+		const [functionOut] = convertTools([editTool], false, meta) as unknown as Array<Record<string, unknown>>;
+		expect(functionOut.type).toBe("function");
+	});
+
 	test("edit tool with customFormat becomes a custom grammar tool", () => {
 		const [out] = convertTools([editTool], false, freeformModel) as unknown as Array<Record<string, unknown>>;
 		expect(out.type).toBe("custom");

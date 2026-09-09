@@ -1,0 +1,11 @@
+auth "wafer-serverless" {
+	name "Wafer Serverless (pay-as-you-go)"
+	login "api-key" {
+		// Wafer exposes its pay-as-you-go OpenAI-compatible SKU at this endpoint.
+		// Keys use the `wfr_…` prefix and the models probe costs no tokens.
+		auth-url "https://app.wafer.ai/usage"
+		instructions "Create or copy your Wafer Serverless API key from the Wafer dashboard"
+		prompt "Paste your Wafer Serverless API key" placeholder="wfr_..."
+		validate "models-endpoint" label="Wafer Serverless" url="https://pass.wafer.ai/v1/models"
+	}
+}

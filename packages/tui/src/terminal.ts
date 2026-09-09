@@ -454,6 +454,13 @@ export interface TerminalStartOptions {
 }
 /** Identity of an accepted explicit terminal appearance refresh request. */
 export type TerminalAppearanceRequestToken = number;
+/**
+ * Fired once per DEC private mode when DECRQM support resolves.
+ * `confirmed` is false when only the DA1 sentinel arrived.
+ * `status` is the DECRPM value (0 unrecognized, 1/2 set/reset, 3 permanently
+ * set, 4 permanently reset) when the terminal answered DECRQM.
+ */
+export type PrivateModeReportHandler = (mode: number, supported: boolean, confirmed?: boolean, status?: number) => void;
 export interface Terminal {
 	// Start the terminal with input, resize, and host-disconnect handlers.
 	start(
@@ -577,8 +584,9 @@ export interface Terminal {
 	 * status resolves. `confirmed` is false when the terminal answered the DA1
 	 * sentinel without answering DECRQM, which proves only that querying support
 	 * is unavailable — not that the private mode itself is unsupported.
+	 * `status` is the DECRPM value when the terminal answered DECRQM.
 	 */
-	onPrivateModeReport?(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void;
+	onPrivateModeReport?(callback: PrivateModeReportHandler): void;
 }
 
 /**
@@ -724,7 +732,7 @@ export class ProcessTerminal implements Terminal {
 	#da1SentinelOwners: Da1SentinelOwner[] = [];
 	/** Resolved DECRQM support per private mode (mode → supported). */
 	#privateModeSupport = new Map<number, boolean>();
-	#privateModeCallbacks: Array<(mode: number, supported: boolean, confirmed: boolean) => void> = [];
+	#privateModeCallbacks: PrivateModeReportHandler[] = [];
 	/** Whether DEC 2048 in-band resize notifications are currently enabled. */
 	#inBandResizeActive = false;
 	/** Reassembly buffer for a DEC 2048 in-band resize report split across stdin reads. */
@@ -815,7 +823,7 @@ export class ProcessTerminal implements Terminal {
 		return token;
 	}
 
-	onPrivateModeReport(callback: (mode: number, supported: boolean, confirmed?: boolean) => void): void {
+	onPrivateModeReport(callback: PrivateModeReportHandler): void {
 		this.#privateModeCallbacks.push(callback);
 	}
 
@@ -1351,10 +1359,13 @@ export class ProcessTerminal implements Terminal {
 			}
 		});
 
-		// Re-wrap paste content with bracketed paste markers for existing editor handling
-		this.#stdinBuffer.on("paste", (content: string) => {
+		// Re-wrap paste content with bracketed paste markers for existing editor
+		// handling. An Enter that shared the paste's stdin read rides along so
+		// paste and submit reach the component focused right now, not one the
+		// paste itself is about to open.
+		this.#stdinBuffer.on("paste", (content: string, enter?: string) => {
 			if (this.#inputHandler) {
-				this.#inputHandler(`\x1b[200~${content}\x1b[201~`);
+				this.#inputHandler(`\x1b[200~${content}\x1b[201~${enter ?? ""}`);
 			}
 		});
 
@@ -1537,7 +1548,7 @@ export class ProcessTerminal implements Terminal {
 	}
 
 	#handlePrivateModeReport(mode: number, status: string): void {
-		this.#resolvePrivateMode(mode, isPrivateModeSupported(status), true);
+		this.#resolvePrivateMode(mode, isPrivateModeSupported(status), true, Number.parseInt(status, 10));
 		if (isXtermScrollToBottomMode(mode) && isPrivateModeSet(status)) {
 			this.#disableXtermScrollToBottomMode(mode);
 		}
@@ -1549,12 +1560,12 @@ export class ProcessTerminal implements Terminal {
 	 * unsupported response from an absent response followed by the DA1 sentinel.
 	 * Enables DEC 2048 in-band resize only after positive confirmation.
 	 */
-	#resolvePrivateMode(mode: number, supported: boolean, confirmed: boolean): void {
+	#resolvePrivateMode(mode: number, supported: boolean, confirmed: boolean, status?: number): void {
 		if (this.#privateModeSupport.has(mode)) return;
 		this.#privateModeSupport.set(mode, supported);
 		for (const cb of this.#privateModeCallbacks) {
 			try {
-				cb(mode, supported, confirmed);
+				cb(mode, supported, confirmed, status);
 			} catch {
 				// Ignore subscriber errors — capability reporting must not crash input.
 			}

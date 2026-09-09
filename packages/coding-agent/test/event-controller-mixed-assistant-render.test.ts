@@ -1,13 +1,14 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { type } from "@oh-my-pi/omptype";
+import type { AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage, ToolCall, Usage } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
+import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { UiHelpers } from "@oh-my-pi/pi-coding-agent/modes/utils/ui-helpers";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import type { Component, TUI } from "@oh-my-pi/pi-tui";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 const TOOL_CALL_A_ID = "toolu_mixed_text_order_a";
 const TOOL_CALL_B_ID = "toolu_mixed_text_order_b";
@@ -54,39 +55,12 @@ function lineContaining(lines: string[], marker: string): number {
 
 function createFixture(
 	hideToolActivity = false,
-	toolByName: (name: string) => { name: string; label?: string } | undefined = () => undefined,
+	toolByName: (name: string) => AgentTool | undefined = () => undefined,
 ) {
-	const chatContainer = new TranscriptContainer();
-	chatContainer.setToolActivityVisible(!hideToolActivity);
-	const pendingTools = new Map();
-	const ui = {
-		requestRender: vi.fn(),
-		requestComponentRender: vi.fn(),
-		imageBudget: undefined,
-	} as unknown as TUI;
-	const viewSession = {
-		getToolByName: toolByName,
-		hasBuiltInTool: () => true,
-		sessionManager: { getCwd: () => process.cwd() },
-		extensionRunner: undefined,
-		isTtsrAbortPending: false,
-		retryAttempt: 0,
-	};
 	let hasDisplayableThinkingContent = false;
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		ui,
-		settings,
-		chatContainer,
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools,
-		toolOutputExpanded: false,
+	const ctx = createInteractiveModeContext({
+		session: { getToolByName: toolByName },
 		hideToolActivity,
-		effectiveHideThinkingBlock: false,
-		proseOnlyThinking: true,
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
 		noteDisplayableThinkingContent: vi.fn((message: AssistantMessage) => {
 			const hasThinking = message.content.some(
 				content => content.type === "thinking" && content.thinking.trim() !== "",
@@ -95,16 +69,11 @@ function createFixture(
 			hasDisplayableThinkingContent = true;
 			return true;
 		}),
-		session: viewSession,
-		viewSession,
-		sessionManager: { getCwd: () => process.cwd() },
-		showWarning: vi.fn(),
-		showPinnedError: vi.fn(),
-		clearTransientSessionUi: vi.fn(),
 		lastAssistantUsage: zeroUsage(),
-	} as unknown as InteractiveModeContext;
+	});
+	ctx.chatContainer.setToolActivityVisible(!hideToolActivity);
 
-	return { controller: new EventController(ctx), chatContainer, ctx };
+	return { controller: new EventController(ctx), chatContainer: ctx.chatContainer, ctx };
 }
 
 describe("EventController mixed assistant text/tool rendering", () => {
@@ -255,7 +224,13 @@ describe("EventController mixed assistant text/tool rendering", () => {
 	});
 
 	it("uses the canonical mounted-tool renderer for prefixed calls live and after transcript rebuild", async () => {
-		const githubTool = { name: "github", label: "GitHub" };
+		const githubTool: AgentTool = {
+			name: "github",
+			label: "GitHub",
+			description: "GitHub test tool",
+			parameters: type({}),
+			execute: async () => ({ content: [] }),
+		};
 		const toolByName = (name: string) => (name === "github" || name === "xd://github" ? githubTool : undefined);
 		const toolCall: ToolCall = {
 			type: "toolCall",

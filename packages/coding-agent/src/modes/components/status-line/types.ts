@@ -7,6 +7,7 @@ import type {
 } from "../../../config/settings-schema";
 import type { AgentSession } from "../../../session/agent-session";
 import type { ActiveRepoContext } from "../../../utils/active-repo-context";
+import type { LoopConditionConfig } from "../../loop-condition";
 import type { LoopLimitRuntime } from "../../loop-limit";
 
 export type { ContextLineMode, StatusLinePreset, StatusLineSegmentId, StatusLineSeparatorStyle };
@@ -69,11 +70,15 @@ export interface SegmentContext {
 	sessionAccent?: boolean;
 	/** Stand-in session title for previews; `session_name` renders it when the session is unnamed. */
 	previewTitle?: string;
+	/** Replace dynamic values with ellipses while preserving each segment's icon, color, and static text. */
+	startupPlaceholder?: boolean;
 	activeRepo: ActiveRepoContext | null;
 	width: number;
 	options: StatusLineSegmentOptions;
 	/** Render the model segment's thinking level as a compact leading glyph. */
 	compactThinkingLevel: boolean;
+	/** Key-sorted extension/hook status values. Segment renderers sanitize before display. */
+	hookStatuses?: readonly string[];
 	planMode: {
 		enabled: boolean;
 		paused: boolean;
@@ -84,6 +89,7 @@ export interface SegmentContext {
 	loopMode: {
 		state: "waiting" | "running" | "paused";
 		limit?: LoopLimitRuntime;
+		condition?: LoopConditionConfig;
 	} | null;
 	goalMode: {
 		enabled: boolean;

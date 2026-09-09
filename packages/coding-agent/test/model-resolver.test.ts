@@ -789,6 +789,37 @@ describe("parseModelPattern", () => {
 			expect(result.model?.provider).toBe("openrouter");
 			expect(result.model?.id).toBe("openai/gpt-4o:extended");
 		});
+
+		describe("dotted revision spelling", () => {
+			// First-party ids spell revisions with dashes (`claude-fable-5-1`);
+			// aggregators use dots, and their flat id is verbatim the dotted
+			// provider-qualified selector (`anthropic/claude-fable-5.1`).
+			const anthropicFable = createOpusModel("anthropic", "claude-fable-5-1", "Claude Fable 5.1");
+			const openRouterFable = createOpusModel("openrouter", "anthropic/claude-fable-5.1", "Claude Fable 5.1 (OR)");
+
+			test("anthropic/claude-fable-5.1:high resolves to anthropic, not the OpenRouter flat id", () => {
+				const result = parseModelPattern("anthropic/claude-fable-5.1:high", [openRouterFable, anthropicFable]);
+				expect(result.model?.provider).toBe("anthropic");
+				expect(result.model?.id).toBe("claude-fable-5-1");
+				expect(result.thinkingLevel).toBe(Effort.High);
+			});
+
+			test("anthropic/claude-fable-5.1 fails closed when anthropic is unavailable", () => {
+				// Bundled anthropic carries claude-fable-5-1: the dotted spelling is
+				// still provider-locked and must not re-bind to OpenRouter.
+				const result = parseModelPattern("anthropic/claude-fable-5.1", [openRouterFable]);
+				expect(result.model).toBeUndefined();
+			});
+
+			test("openrouter/anthropic/claude-fable-5-1 resolves the dotted OpenRouter id", () => {
+				const result = parseModelPattern("openrouter/anthropic/claude-fable-5-1", [
+					anthropicFable,
+					openRouterFable,
+				]);
+				expect(result.model?.provider).toBe("openrouter");
+				expect(result.model?.id).toBe("anthropic/claude-fable-5.1");
+			});
+		});
 	});
 
 	describe("edge cases", () => {
@@ -1087,14 +1118,47 @@ describe("resolveAgentModelPatterns", () => {
 		expect(result).toEqual(["anthropic/claude-sonnet-4-6", "zai/glm-5.2:high"]);
 	});
 
-	test("uses default for unconfigured smol, slow, and designer agent roles before priority defaults", () => {
+	test("uses default for unconfigured smol and slow agent roles before priority defaults", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "local/llama" },
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["local/llama"]);
 		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["local/llama"]);
-		expect(resolveAgentModelPatterns({ agentModel: "@designer", settings })).toEqual(["local/llama"]);
+	});
+
+	test("uses configured smol for unconfigured tiny before priority defaults", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "local/default",
+				smol: "baseten/custom-smol:max",
+			},
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(["baseten/custom-smol:max"]);
+	});
+
+	test("breaks the tiny/smol fallback cycle via a default alias", () => {
+		const settings = Settings.isolated({ modelRoles: { default: "@tiny" } });
+		const baseline = resolveAgentModelPatterns({ agentModel: "@smol", settings: Settings.isolated() });
+
+		const tiny = resolveAgentModelPatterns({ agentModel: "@tiny", settings });
+		const smol = resolveAgentModelPatterns({ agentModel: "@smol", settings });
+
+		expect(baseline.length).toBeGreaterThan(0);
+		expect(tiny).not.toContain("@tiny");
+		expect(smol).not.toContain("@tiny");
+		expect(tiny).toEqual(baseline);
+		expect(smol).toEqual(tiny);
+	});
+
+	test("preserves thinking suffix when breaking the smol fallback cycle", () => {
+		const settings = Settings.isolated({ modelRoles: { smol: "@tiny:high" } });
+		const baseline = resolveAgentModelPatterns({ agentModel: "@smol", settings: Settings.isolated() });
+
+		const tiny = resolveAgentModelPatterns({ agentModel: "@tiny", settings });
+
+		expect(tiny).toEqual(baseline.map(pattern => `${pattern}:high`));
 	});
 
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
@@ -1103,22 +1167,6 @@ describe("resolveAgentModelPatterns", () => {
 		});
 
 		expect(resolveAgentModelPatterns({ agentModel: "@smol", settings })).toEqual(["anthropic/claude-sonnet-4-5"]);
-	});
-
-	test("prefers configured designer role override over priority defaults", () => {
-		const settings = Settings.isolated({
-			modelRoles: {
-				default: "anthropic/claude-sonnet-4-5",
-				designer: "openai/gpt-4o",
-			},
-		});
-
-		const result = resolveAgentModelPatterns({
-			agentModel: "@designer",
-			settings,
-		});
-
-		expect(result).toEqual(["openai/gpt-4o"]);
 	});
 
 	test("slow priority falls forward to Opus 4.8 before older Opus aliases", () => {
