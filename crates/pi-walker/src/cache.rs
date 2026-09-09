@@ -350,6 +350,44 @@ pub fn resolve_search_path(path: &str) -> Result<PathBuf, WalkError<String>> {
 	Ok(std::fs::canonicalize(&root).unwrap_or(root))
 }
 
+#[cfg(not(test))]
+const fn scan_seam() {}
+
+#[cfg(test)]
+thread_local! {
+	static SCAN_SEAM: std::cell::RefCell<Option<std::rc::Rc<dyn Fn()>>> =
+		const { std::cell::RefCell::new(None) };
+}
+
+/// Pause point reached once a walk has produced its entries but before any
+/// caller can observe them, so a test can hold its own scan in flight. Thread
+/// local so an installed seam never reaches a scan some other test is running.
+#[cfg(test)]
+fn scan_seam() {
+	let seam = SCAN_SEAM.with_borrow(Clone::clone);
+	if let Some(seam) = seam {
+		seam();
+	}
+}
+
+#[cfg(test)]
+struct ScanSeamGuard;
+
+#[cfg(test)]
+impl ScanSeamGuard {
+	fn install(seam: impl Fn() + 'static) -> Self {
+		SCAN_SEAM.with_borrow_mut(|slot| *slot = Some(std::rc::Rc::new(seam)));
+		Self
+	}
+}
+
+#[cfg(test)]
+impl Drop for ScanSeamGuard {
+	fn drop(&mut self) {
+		SCAN_SEAM.with_borrow_mut(|slot| *slot = None);
+	}
+}
+
 fn collect_entries_uncached<H, E>(
 	root: &Path,
 	mut options: WalkOptions,
@@ -360,7 +398,10 @@ where
 	E: fmt::Display,
 {
 	options.cache = false;
-	crate::collect_entries_native(root, options, || heartbeat().map_err(|err| err.to_string()))
+	let scan =
+		crate::collect_entries_native(root, options, || heartbeat().map_err(|err| err.to_string()))?;
+	scan_seam();
+	Ok(scan)
 }
 
 fn get_or_scan<H, E>(
@@ -547,6 +588,12 @@ mod tests {
 		super::cache_key(Path::new(name), crate::WalkOptions::default())
 	}
 
+	fn sorted_paths(entries: &[CollectedEntry]) -> Vec<&str> {
+		let mut paths: Vec<&str> = entries.iter().map(|entry| entry.path.as_str()).collect();
+		paths.sort_unstable();
+		paths
+	}
+
 	#[test]
 	fn cache_evicts_oldest_by_allocated_bytes_and_rejects_oversized_scans() {
 		let now = std::time::Instant::now();
@@ -610,36 +657,62 @@ mod tests {
 	}
 
 	#[test]
-	fn invalidation_prevents_inflight_scan_repopulation() {
+	fn cache_rejects_inserts_carrying_a_pre_invalidation_generation() {
 		let now = std::time::Instant::now();
-		let cache = std::sync::Arc::new(parking_lot::Mutex::new(super::ScanCache::new(
-			Duration::from_secs(60),
-			16,
-			4096,
-		)));
-		let scanned = std::sync::Arc::new(std::sync::Barrier::new(2));
-		let invalidated = std::sync::Arc::new(std::sync::Barrier::new(2));
-		let worker = {
-			let cache = std::sync::Arc::clone(&cache);
-			let scanned = std::sync::Arc::clone(&scanned);
-			let invalidated = std::sync::Arc::clone(&invalidated);
-			std::thread::spawn(move || {
-				let generation = cache.lock().generation;
-				let entry = cached_entry("stale", 0, now);
-				scanned.wait();
-				invalidated.wait();
-				cache.lock().insert(key("root"), entry, generation, now);
-			})
-		};
-		scanned.wait();
-		cache.lock().invalidate(Some(Path::new("root/changed")));
-		invalidated.wait();
-		worker.join().unwrap();
-		let mut cache = cache.lock();
+		let mut cache = super::ScanCache::new(Duration::from_secs(60), 16, 4096);
+		let generation = cache.generation;
+		cache.invalidate(Some(Path::new("root/changed")));
+		cache.insert(key("root"), cached_entry("stale", 0, now), generation, now);
 		assert!(cache.get(&key("root"), now).is_none());
 		let generation = cache.generation;
 		cache.insert(key("root"), cached_entry("fresh", 0, now), generation, now);
 		assert_eq!(cache.get(&key("root"), now).unwrap().entries[0].path, "fresh");
+	}
+
+	#[test]
+	fn collect_entries_discards_a_scan_invalidated_while_in_flight() {
+		let root = TempDirGuard::new();
+		fs::write(root.path().join("before.txt"), "ok").unwrap();
+		let options = crate::WalkOptions {
+			cache: true,
+			..scan_options(true, false, crate::WalkDetail::Minimal)
+		};
+
+		let paused = std::sync::Arc::new(std::sync::Barrier::new(2));
+		let resume = std::sync::Arc::new(std::sync::Barrier::new(2));
+		let scanner = {
+			let root = root.path().to_path_buf();
+			let paused = std::sync::Arc::clone(&paused);
+			let resume = std::sync::Arc::clone(&resume);
+			std::thread::spawn(move || {
+				let _seam = super::ScanSeamGuard::install(move || {
+					paused.wait();
+					resume.wait();
+				});
+				super::collect_entries(&root, options, ok_heartbeat)
+			})
+		};
+
+		paused.wait();
+		fs::write(root.path().join("after.txt"), "ok").unwrap();
+		super::invalidate_path(&root.path().join("after.txt"));
+		resume.wait();
+
+		let inflight = scanner.join().unwrap().unwrap();
+		assert_eq!(inflight.cache_age_ms, 0);
+		assert_eq!(sorted_paths(&inflight.entries), ["before.txt"]);
+
+		let refreshed = super::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		assert_eq!(
+			sorted_paths(&refreshed.entries),
+			["after.txt", "before.txt"],
+			"the invalidated in-flight scan must not repopulate the cache"
+		);
+
+		std::thread::sleep(Duration::from_millis(2));
+		let repopulated = super::collect_entries(root.path(), options, ok_heartbeat).unwrap();
+		assert!(repopulated.cache_age_ms > 0, "scans after invalidation must cache again");
+		super::invalidate_path(root.path());
 	}
 
 	#[test]
