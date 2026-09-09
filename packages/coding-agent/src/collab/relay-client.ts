@@ -318,6 +318,12 @@ export class CollabSocket {
 	/** Terminal-only: every caller is closing for good, so no peer is served any more. */
 	#discardPendingSends(): void {
 		this.#sendGeneration++;
+		// The room ends here as surely as it does on a reconnect, and `connect()` may
+		// reopen this same socket onto a new one — a documented, tested reuse. Advance
+		// the generation with the records it clears, or bookkeeping deferred from the
+		// closed room applies to the reopened one, which is the reconnect hole with a
+		// synchronous trigger instead of a timer.
+		this.#roomGeneration++;
 		this.#pendingSends.length = 0;
 		this.#pendingSendBytes = 0;
 		this.#retiredPeers.clear();
@@ -410,7 +416,13 @@ export class CollabSocket {
 				try {
 					frame = await open(this.#opts.key, envelope.payload);
 				} catch {
-					this.#failFatal("bad key or corrupted frame");
+					// The same identity check the success path makes below, for the same
+					// reason: decryption is awaited, so the connection that received this
+					// frame can be gone by now. A frame from a connection that is over
+					// says nothing about the key of the one that is open, and ending that
+					// one is fatal and does not reconnect — a corrupt tail from a dropped
+					// socket would take the healthy room it was replaced by with it.
+					if (this.#ws === ws) this.#failFatal("bad key or corrupted frame");
 					return;
 				}
 				if (this.#ws !== ws) return;

@@ -120,10 +120,14 @@ describe("CollabSocket send backpressure", () => {
 			const first = BackpressuredWebSocket.instances[0]!;
 			first.open();
 			socket.sendBatch(chunks(), 7);
-			// Wait for the first sealed chunk rather than guessing at how long real
-			// AES-GCM takes: a fixed sleep here asserts the batch is in flight before
-			// it necessarily is.
-			await waitUntil(() => first.sent.length > 0, "the batch never reached the transport");
+			// Wait for the condition the test needs — the drain blocked above the
+			// high-water mark, so the batch is still queued when the transport drops.
+			// A sleep only guesses at how long real AES-GCM takes, and the first frame
+			// alone is ~32 KiB, half of what it takes to block.
+			await waitUntil(
+				() => first.bufferedAmount >= HIGH_WATER_MARK,
+				"the transport never blocked with the batch still queued",
+			);
 			expect(generated).toBeLessThan(60);
 
 			// Transient drop: code 1000 is not fatal, so the socket retries and the
@@ -297,6 +301,108 @@ describe("CollabSocket send backpressure", () => {
 			// settlement runs the obligation is discharged and the cap may age it out,
 			// which is the backstop working rather than the hole reopening.
 			expect(dispatched).toEqual([{ peer: 1, served: false }]);
+		} finally {
+			gate.resolve();
+			socket.close();
+		}
+	}, 15_000);
+
+	it("does not let a closed room's retirement settle a record in the reopened one", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const key = await importRoomKey(generateRoomKey());
+		const gate = Promise.withResolvers<void>();
+		let gated = false;
+		const realDecrypt = crypto.subtle.decrypt.bind(crypto.subtle);
+		const decrypt = vi
+			.spyOn(crypto.subtle, "decrypt")
+			.mockImplementation(async (...args: Parameters<typeof crypto.subtle.decrypt>) => {
+				if (!gated) {
+					gated = true;
+					await gate.promise;
+				}
+				return realDecrypt(...args);
+			});
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/reuse", role: "host", key });
+		const dispatched: { peer: number; served: boolean }[] = [];
+		socket.onFrame = (_frame, fromPeer) => dispatched.push({ peer: fromPeer, served: socket.isServing(fromPeer) });
+		try {
+			socket.connect();
+			const first = BackpressuredWebSocket.instances[0]!;
+			first.open();
+			const stale = await seal(key, { t: "hello", proto: 1, name: "old" } as CollabFrame);
+			first.onmessage?.({ data: packEnvelope(1, stale).buffer } as MessageEvent);
+			await waitUntil(() => decrypt.mock.calls.length > 0, "socket never began opening the old room's frame");
+			first.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer: 1 }) } as MessageEvent);
+
+			// Not a transient drop this time: the owner closes the socket and connects
+			// it again, which the API supports and which reaches a relay that hands out
+			// ids from 1 exactly as a reconnect does.
+			socket.close();
+			socket.connect();
+			const second = BackpressuredWebSocket.instances[1]!;
+			second.open();
+
+			const fresh = await seal(key, { t: "hello", proto: 1, name: "new" } as CollabFrame);
+			second.onmessage?.({ data: packEnvelope(1, fresh).buffer } as MessageEvent);
+			second.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer: 1 }) } as MessageEvent);
+			for (let peer = 2; peer <= RETIREMENT_CAP + 45; peer++) {
+				second.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer }) } as MessageEvent);
+			}
+
+			gate.resolve();
+			await waitUntil(() => dispatched.length > 0, "the reopened room's frame was never dispatched");
+			expect(dispatched).toEqual([{ peer: 1, served: false }]);
+		} finally {
+			gate.resolve();
+			socket.close();
+		}
+	}, 15_000);
+
+	it("does not end a replacement connection over the previous one's bad frame", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const key = await importRoomKey(generateRoomKey());
+		const gate = Promise.withResolvers<void>();
+		let gated = false;
+		const decrypt = vi.spyOn(crypto.subtle, "decrypt").mockImplementation(async () => {
+			if (!gated) {
+				gated = true;
+				await gate.promise;
+				throw new Error("bad key");
+			}
+			throw new Error("bad key");
+		});
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/stale-key", role: "host", key });
+		const closes: { reason: string; willReconnect: boolean }[] = [];
+		socket.onClose = (reason, willReconnect) => closes.push({ reason, willReconnect });
+		try {
+			socket.connect();
+			const first = BackpressuredWebSocket.instances[0]!;
+			first.open();
+			// A frame from this connection parks mid-decryption and will fail.
+			const stale = await seal(key, { t: "hello", proto: 1, name: "old" } as CollabFrame);
+			first.onmessage?.({ data: packEnvelope(1, stale).buffer } as MessageEvent);
+			await waitUntil(() => decrypt.mock.calls.length > 0, "socket never began opening the frame");
+
+			// The connection drops and is replaced before that decryption resolves.
+			first.close();
+			await waitUntil(
+				() => BackpressuredWebSocket.instances.length > 1,
+				"socket never retried after the transient drop",
+			);
+			const second = BackpressuredWebSocket.instances[1]!;
+			second.open();
+			expect(closes.map(close => close.willReconnect)).toEqual([true]);
+
+			// Now it fails. A bad frame from a connection that is over says nothing
+			// about the key of the one that is open, and this close would be fatal.
+			gate.resolve();
+			await Bun.sleep(20);
+			expect(closes.filter(close => !close.willReconnect)).toEqual([]);
+			expect(socket.isOpen).toBe(true);
 		} finally {
 			gate.resolve();
 			socket.close();
