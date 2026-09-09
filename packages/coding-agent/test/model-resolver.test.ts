@@ -1149,6 +1149,19 @@ describe("resolveAgentModelPatterns", () => {
 		expect(resolveAgentModelPatterns({ agentModel: "@advisor", settings })).toEqual(["baseten/custom-slow:max"]);
 	});
 
+	test("outer advisor thinking level overrides the inherited slow suffix", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "local/default",
+				slow: "baseten/custom-slow:max",
+			},
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@advisor:high", settings })).toEqual([
+			"baseten/custom-slow:high",
+		]);
+	});
+
 	test("keeps advisor on the built-in slow chain when slow is unconfigured", () => {
 		const baseline = resolveAgentModelPatterns({ agentModel: "@advisor", settings: Settings.isolated() });
 		const settings = Settings.isolated({ modelRoles: { default: "local/default" } });

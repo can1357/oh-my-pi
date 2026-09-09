@@ -1209,6 +1209,22 @@ function resolveDefaultInheritedPatterns(
 	return resolved;
 }
 
+/**
+ * Apply an explicit outer thinking level to a resolved model pattern, replacing
+ * any level the pattern already carries. A selector like `@advisor:high` must
+ * win over an inherited role's own suffix (e.g. `slow = custom-slow:max`)
+ * instead of producing a doubled `custom-slow:max:high` the matcher cannot
+ * resolve.
+ */
+function overrideThinkingSuffix(pattern: string, level: ConfiguredThinkingLevel): string {
+	const { base } = splitThinkingSuffix(
+		pattern,
+		modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+		MAX_THINKING_SUFFIX_OPTIONS,
+	);
+	return `${base}:${level}`;
+}
+
 function resolveConfiguredRolePattern(
 	value: string,
 	settings?: ModelRoleLookup,
@@ -1269,7 +1285,7 @@ function resolveConfiguredRolePattern(
 		return undefined;
 	}
 
-	return thinkingLevel ? resolved.map(pattern => `${pattern}:${thinkingLevel}`) : resolved;
+	return thinkingLevel ? resolved.map(pattern => overrideThinkingSuffix(pattern, thinkingLevel)) : resolved;
 }
 
 /**
