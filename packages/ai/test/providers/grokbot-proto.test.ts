@@ -718,7 +718,7 @@ describe("grokbot checksum", () => {
 		expect(status).not.toContain("Host: https://api2.cursor.sh");
 	});
 
-	test("redacts URL userinfo and credential query params from Host status", async () => {
+	test("redacts URL userinfo and all query params from Host status", async () => {
 		spyOn(grokbotCatalogAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew-present",
 			machineId: "machine-present",
@@ -728,14 +728,16 @@ describe("grokbot checksum", () => {
 		spyOn(grokbotCatalogAuth, "grokbotSecretsPath").mockReturnValue("/tmp/agent/secrets/grokbot.env");
 
 		const status = await formatGrokbotStatus({
-			baseUrl: "https://token:sekrit@proxy.example/grokbot?api_key=leak&keep=1",
+			baseUrl: "https://token:sekrit@proxy.example/grokbot?api_key=leak&x-api-key=also&keep=1",
 		});
 		const hostLine = status.split("\n").find(line => line.startsWith("Host:"));
-		expect(hostLine).toBe("Host: https://proxy.example/grokbot?keep=1");
+		expect(hostLine).toBe("Host: https://proxy.example/grokbot");
 		expect(hostLine).not.toContain("token");
 		expect(hostLine).not.toContain("sekrit");
 		expect(hostLine).not.toContain("api_key");
+		expect(hostLine).not.toContain("x-api-key");
 		expect(hostLine).not.toContain("leak");
+		expect(hostLine).not.toContain("keep=1");
 	});
 });
 

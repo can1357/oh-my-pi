@@ -394,6 +394,43 @@ describe("product wire helpers", () => {
 		]);
 	});
 
+	test("Read alias retains preexisting allOf when combining with anyOf", () => {
+		const tools = toProductField2Tools(
+			[
+				{
+					name: "read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: {
+							path: { type: "string" },
+							offset: { type: "number" },
+							start_line: { type: "number" },
+						},
+						required: ["path"],
+						anyOf: [{ required: ["offset"] }, { required: ["start_line"] }],
+						allOf: [{ not: { required: ["forbidden"] } }],
+					},
+				},
+			],
+			"automation",
+		);
+		const schema = (
+			tools[0]?.parameters as {
+				jsonSchema?: {
+					anyOf?: unknown;
+					allOf?: unknown[];
+				};
+			}
+		).jsonSchema;
+		expect(schema?.anyOf).toBeUndefined();
+		expect(schema?.allOf).toEqual([
+			{ not: { required: ["forbidden"] } },
+			{ anyOf: [{ required: ["offset"] }, { required: ["start_line"] }] },
+			{ anyOf: [{ required: ["path"] }, { required: ["target_file"] }] },
+		]);
+	});
+
 	test("parent profile injects SendToUser", () => {
 		const tools = toProductField2Tools([], "parent-chat");
 		expect(tools[0]?.name).toBe("SendToUser");

@@ -49,19 +49,17 @@ function formatGrokbotStatusValue(value: string): string {
 	return truncateToWidth(cleaned, TRUNCATE_LENGTHS.TITLE);
 }
 
-/** Strip URL userinfo and credential-shaped query params before /grokbot Host display. */
+/** Strip URL userinfo and all query params before `/grokbot` Host display. */
 function formatGrokbotDisplayHost(raw: string): string {
 	const trimmed = raw.replace(/\/+$/, "") || GROKBOT_BACKEND;
 	try {
 		const url = new URL(trimmed);
 		url.username = "";
 		url.password = "";
-		for (const key of [...url.searchParams.keys()]) {
-			if (/^(?:api[_-]?key|access[_-]?token|auth|password|secret|token|key)$/i.test(key)) {
-				url.searchParams.delete(key);
-			}
-		}
-		const display = `${url.protocol}//${url.host}${url.pathname}${url.search}${url.hash}`.replace(/\/+$/, "");
+		// Omit the entire query string — reverse proxies may auth with arbitrary
+		// keys (`x-api-key`, signed tokens, …) that no allowlist can exhaust.
+		url.search = "";
+		const display = `${url.protocol}//${url.host}${url.pathname}${url.hash}`.replace(/\/+$/, "");
 		return formatGrokbotStatusValue(display || GROKBOT_BACKEND);
 	} catch {
 		return formatGrokbotStatusValue(trimmed);

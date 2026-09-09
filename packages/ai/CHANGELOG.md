@@ -18,6 +18,8 @@
 - Catalog matrix omp `-p` slice derives `--thinking` from each selected model's probe effort (omits the flag when none is known).
 - Catalog matrix bash smoke rejects pipelines that can suppress the probe token (not only redirects/`tee`).
 - Keep-model Anthropic probe validates and replays returned Shell arguments (no fabricated echo).
+- `/grokbot` Host status omits the entire URL query string (not only a credential-name allowlist) so proxy auth keys cannot leak.
+- Grok Bot product Read/Write alias schemas retain preexisting `allOf` entries when combining with `anyOf` alias constraints.
 
 ## [18.1.15] - 2026-09-08
 

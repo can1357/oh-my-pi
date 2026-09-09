@@ -165,7 +165,7 @@ type Tool = NonNullable<Context["tools"]>[number];
  * rest of `required` and express the alias pair as `anyOf` so strict schema
  * consumers accept either key. If the schema already carries an `anyOf` (e.g.
  * alternative required argument groups), AND that union with the alias pair via
- * `allOf` instead of replacing it.
+ * `allOf` instead of replacing it — and retain any preexisting `allOf` entries.
  */
 function withRequiredPropertyAlias(
 	schema: Record<string, unknown>,
@@ -179,17 +179,19 @@ function withRequiredPropertyAlias(
 	const aliasConstraint = {
 		anyOf: [{ required: [canonical] }, { required: [alias] }],
 	};
-	const { anyOf: existingAnyOf, ...rest } = schema;
+	const { anyOf: existingAnyOf, allOf: existingAllOf, ...rest } = schema;
 	const remainingRequired = required.filter(key => key !== canonical);
 	if (Array.isArray(existingAnyOf) && existingAnyOf.length > 0) {
+		const priorAllOf = Array.isArray(existingAllOf) ? existingAllOf : [];
 		return {
 			...rest,
 			required: remainingRequired,
-			allOf: [{ anyOf: existingAnyOf }, aliasConstraint],
+			allOf: [...priorAllOf, { anyOf: existingAnyOf }, aliasConstraint],
 		};
 	}
 	return {
 		...rest,
+		...(Array.isArray(existingAllOf) && existingAllOf.length > 0 ? { allOf: existingAllOf } : {}),
 		required: remainingRequired,
 		...aliasConstraint,
 	};
