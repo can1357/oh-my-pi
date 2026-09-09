@@ -17,6 +17,19 @@ export const DAEMON_RUNTIME_DIR_ENV = "OMP_DAEMON_RUNTIME_DIR";
 /** Optional environment key overriding last-client shutdown grace. */
 export const DAEMON_IDLE_GRACE_ENV = "OMP_DAEMON_IDLE_GRACE_MS";
 
+/** Terminal key bytes for `send` `keys`. Brokers substitute `\n` for ENTER on pipe-backed daemons. */
+export const DAEMON_KEY_INPUT: Readonly<Record<string, string>> = {
+	ENTER: "\r",
+	TAB: "\t",
+	ESCAPE: "\u001b",
+	CTRL_C: "\u0003",
+	CTRL_D: "\u0004",
+	UP: "\u001b[A",
+	DOWN: "\u001b[B",
+	RIGHT: "\u001b[C",
+	LEFT: "\u001b[D",
+};
+
 /** Stable lifecycle states exposed by the launch tool. */
 export type DaemonState = "starting" | "running" | "ready" | "restarting" | "stopping" | "exited" | "failed";
 
@@ -88,7 +101,7 @@ export type DaemonOperation =
 			timeoutMs: number;
 	  }
 	| { op: "wait"; name: string; for: "ready" | "exit"; pattern?: string; timeoutMs: number }
-	| { op: "send"; name: string; data?: string; signal?: DaemonSignal }
+	| { op: "send"; name: string; data?: string; keys?: string[]; signal?: DaemonSignal }
 	| { op: "stop"; name: string; timeoutMs: number }
 	| { op: "restart"; name: string }
 	| { op: "describe"; name: string }
@@ -96,7 +109,8 @@ export type DaemonOperation =
 
 /** Typed broker result decoded before it reaches tool code. */
 export type DaemonRpcResult =
-	| { op: "ping"; projectDir: string }
+	/** `inputKeys` is advertised by brokers that resolve `send` `keys` per transport; legacy brokers omit it. */
+	| { op: "ping"; projectDir: string; inputKeys?: boolean }
 	| { op: "start"; daemon: DaemonSnapshot; readyTimedOut: boolean }
 	| { op: "list"; daemons: DaemonSnapshot[] }
 	| {
@@ -107,6 +121,8 @@ export type DaemonRpcResult =
 			terminalRows?: string[];
 			/** Raw PTY bytes returned by legacy brokers and to clients that did not request rendered rows. */
 			terminalText?: string;
+			/** Live retained log files, oldest first, when the searched byte window is incomplete. */
+			truncatedLogPaths?: string[];
 			cursor: number;
 			timedOut: boolean;
 			state: DaemonState;
@@ -383,6 +399,7 @@ function parseDaemonOperation(value: unknown): DaemonOperation {
 				op,
 				name: stringValue(source.name, "operation.name"),
 				data: optionalString(source.data, "operation.data"),
+				keys: source.keys === undefined ? undefined : stringArray(source.keys, "operation.keys"),
 				signal: source.signal === undefined ? undefined : daemonSignal(source.signal),
 			};
 		case "stop":
@@ -404,7 +421,11 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 	const source = record(value, `${operation.op} result`);
 	switch (operation.op) {
 		case "ping":
-			return { op: "ping", projectDir: stringValue(source.projectDir, "result.projectDir") };
+			return {
+				op: "ping",
+				projectDir: stringValue(source.projectDir, "result.projectDir"),
+				inputKeys: source.inputKeys === true ? true : undefined,
+			};
 		case "start":
 			return {
 				op: "start",
@@ -424,6 +445,10 @@ export function parseDaemonRpcResult(operation: DaemonOperation, value: unknown)
 					source.terminalRows === undefined ? undefined : stringArray(source.terminalRows, "result.terminalRows"),
 				terminalText:
 					source.terminalText === undefined ? undefined : rawString(source.terminalText, "result.terminalText"),
+				truncatedLogPaths:
+					source.truncatedLogPaths === undefined
+						? undefined
+						: stringArray(source.truncatedLogPaths, "result.truncatedLogPaths"),
 				cursor: numberValue(source.cursor, "result.cursor"),
 				timedOut: booleanValue(source.timedOut, "result.timedOut"),
 				state: daemonState(source.state),

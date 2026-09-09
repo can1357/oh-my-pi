@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
 import type { DaemonBrokerClient } from "../../../src/launch/client";
 import * as daemonClient from "../../../src/launch/client";
-import type { DaemonCompletionNotification, DaemonRpcResult } from "../../../src/launch/protocol";
+import type { DaemonCompletionNotification, DaemonOperation, DaemonRpcResult } from "../../../src/launch/protocol";
 import type { ToolSession } from "../../../src/tools";
 import { executeLaunch } from "../../../src/tools/hub/launch";
 
@@ -86,6 +86,73 @@ describe("launch broker protocol compatibility", () => {
 			}
 		}
 		expect(Object.getOwnPropertyDescriptor(globalThis, "Worker")).toEqual(originalWorkerDescriptor);
+	});
+
+	it("pre-encodes Enter for a legacy broker that ignores send keys", async () => {
+		const projectDir = process.cwd();
+		const requests: DaemonOperation[] = [];
+		const daemon = {
+			name: "repl",
+			id: "d",
+			state: "running",
+			createdAt: 0,
+			startedAt: 0,
+			restartCount: 0,
+			outputBytes: 0,
+			persist: false,
+			detached: false,
+		} as const;
+		const client = {
+			projectDir,
+			request: async (operation: DaemonOperation): Promise<DaemonRpcResult> => {
+				requests.push(operation);
+				if (operation.op === "ping") return { op: "ping", projectDir };
+				return { op: "send", daemon };
+			},
+			onCompletion: () => () => {},
+			close() {},
+		} satisfies DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+
+		await executeLaunch({ cwd: projectDir } as ToolSession, {
+			op: "send",
+			name: "repl",
+			text: "step",
+			keys: ["TAB"],
+		});
+
+		expect(requests.at(-1)).toEqual({ op: "send", name: "repl", data: "step\r\t", signal: undefined });
+	});
+
+	it("passes send keys through to a broker that advertises transport-aware input", async () => {
+		const projectDir = process.cwd();
+		const requests: DaemonOperation[] = [];
+		const daemon = {
+			name: "repl",
+			id: "d",
+			state: "running",
+			createdAt: 0,
+			startedAt: 0,
+			restartCount: 0,
+			outputBytes: 0,
+			persist: false,
+			detached: false,
+		} as const;
+		const client = {
+			projectDir,
+			request: async (operation: DaemonOperation): Promise<DaemonRpcResult> => {
+				requests.push(operation);
+				if (operation.op === "ping") return { op: "ping", projectDir, inputKeys: true };
+				return { op: "send", daemon };
+			},
+			onCompletion: () => () => {},
+			close() {},
+		} satisfies DaemonBrokerClient;
+		vi.spyOn(daemonClient, "daemonClientForProject").mockResolvedValue(client);
+
+		await executeLaunch({ cwd: projectDir } as ToolSession, { op: "send", name: "repl", text: "step" });
+
+		expect(requests.at(-1)).toEqual({ op: "send", name: "repl", data: "step", keys: ["ENTER"], signal: undefined });
 	});
 
 	it("restores a completion sink when a resumed session lists its live daemon", async () => {

@@ -11,6 +11,7 @@ import { workerEnvFromParent } from "../subprocess/worker-client";
 import { daemonBrokerEndpoint, writeDaemonScopeMeta } from "./paths";
 import { hasLiveDaemonProjectPresence, pruneDeadDaemonRuntimeDirs } from "./presence";
 import {
+	DAEMON_KEY_INPUT,
 	DAEMON_IDLE_GRACE_ENV,
 	DAEMON_PROJECT_DIR_ENV,
 	DAEMON_PTY_COLUMNS,
@@ -101,6 +102,7 @@ interface DaemonLogRead {
 	text: string;
 	terminalOutput: string;
 	cursor: number;
+	truncatedLogPaths?: string[];
 }
 
 function quoteShellArg(value: string): string {
@@ -166,16 +168,14 @@ function syncReadyPending(record: ManagedDaemon): void {
 	record.snapshot.readyPending = pending.length > 0 ? pending : undefined;
 }
 
-async function fileTextSlice(filePath: string, head: boolean): Promise<string> {
+async function fileTextSlice(filePath: string, head: boolean): Promise<{ text: string; bytes: number }> {
 	try {
 		const stat = await fs.stat(filePath);
 		const file = Bun.file(filePath);
-		if (stat.size <= LOG_READ_BYTES) return await file.text();
-		return head
-			? await file.slice(0, LOG_READ_BYTES).text()
-			: await file.slice(Math.max(0, stat.size - LOG_READ_BYTES)).text();
+		const start = head ? 0 : Math.max(0, stat.size - LOG_READ_BYTES);
+		return { text: await file.slice(start, Math.min(stat.size, start + LOG_READ_BYTES)).text(), bytes: stat.size };
 	} catch (error) {
-		if (isEnoent(error)) return "";
+		if (isEnoent(error)) return { text: "", bytes: 0 };
 		throw error;
 	}
 }
@@ -253,7 +253,8 @@ class DaemonLog {
 		grep?: string,
 	): Promise<DaemonLogRead> {
 		const [previous, current] = await Promise.all([fileTextSlice(previousPath, head), fileTextSlice(logPath, head)]);
-		const combined = `${previous}${previous && current && !previous.endsWith("\n") ? "\n" : ""}${current}`;
+		const separator = previous.text && current.text && !previous.text.endsWith("\n") ? "\n" : "";
+		const combined = `${previous.text}${separator}${current.text}`;
 		const terminalOutput = head
 			? truncateHeadBytes(combined, LOG_READ_BYTES).text
 			: truncateTailBytes(combined, LOG_READ_BYTES).text;
@@ -270,11 +271,19 @@ class DaemonLog {
 				.filter(line => pattern.test(line))
 				.join("\n");
 		}
-		const options = { maxLines: lines, maxBytes: 256 * 1024 };
+		// The file window already bounds bytes. A second, smaller cap silently
+		// destroyed long JSON lines before the tool's recoverable artifact spill.
+		const options = { maxLines: lines, maxBytes: LOG_READ_BYTES };
 		return {
 			text: head ? truncateHead(text, options).content : truncateTail(text, options).content,
 			terminalOutput,
 			cursor,
+			truncatedLogPaths:
+				previous.bytes + current.bytes + separator.length > LOG_READ_BYTES
+					? [previous.bytes > 0 ? previousPath : undefined, current.bytes > 0 ? logPath : undefined].filter(
+							(file): file is string => file !== undefined,
+						)
+					: undefined,
 		};
 	}
 
@@ -561,7 +570,7 @@ class DaemonBroker {
 	async #dispatch(operation: DaemonOperation): Promise<DaemonRpcResult> {
 		switch (operation.op) {
 			case "ping":
-				return { op: "ping", projectDir: this.#projectDir };
+				return { op: "ping", projectDir: this.#projectDir, inputKeys: true };
 			case "start":
 				return this.#start(operation.spec, operation.owner);
 			case "list": {
@@ -1063,6 +1072,7 @@ class DaemonBroker {
 				terminalOutput !== undefined && (operation.renderTerminalRows !== true || terminalRows === undefined)
 					? terminalOutput
 					: undefined,
+			truncatedLogPaths: output.truncatedLogPaths,
 			cursor: output.cursor,
 			timedOut,
 			state: record.snapshot.state,
@@ -1127,13 +1137,20 @@ class DaemonBroker {
 		if (terminalState(record.snapshot.state) || record.snapshot.state === "stopping") {
 			throw new Error(`Daemon ${operation.name} is ${record.snapshot.state}`);
 		}
-		if (operation.data === undefined && operation.signal === undefined) {
-			throw new Error("send requires data or signal");
+		if (operation.data === undefined && !operation.keys?.length && operation.signal === undefined) {
+			throw new Error("send requires data, keys, or signal");
 		}
-		if (operation.data !== undefined) {
-			if (record.pty) record.pty.write(operation.data);
+		let data = operation.data ?? "";
+		for (const rawKey of operation.keys ?? []) {
+			const key = rawKey.trim().toUpperCase();
+			const input = DAEMON_KEY_INPUT[key];
+			if (input === undefined) throw new Error(`Unsupported launch key ${rawKey}`);
+			data += key === "ENTER" && !record.pty ? "\n" : input;
+		}
+		if (data) {
+			if (record.pty) record.pty.write(data);
 			else if (record.input) {
-				record.input.write(operation.data);
+				record.input.write(data);
 				await record.input.flush();
 			} else throw new Error(`Daemon ${operation.name} stdin is unavailable`);
 		}
