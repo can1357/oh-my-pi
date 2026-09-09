@@ -19,6 +19,20 @@ function makeModel(provider: "openai" | "xai-oauth" = "openai"): Model<"openai-r
 		maxTokens: 128000,
 	} as ModelSpec<"openai-responses">);
 }
+function makeGeminiModel(): Model<"openai-responses"> {
+	return buildModel({
+		id: "gemini-3.8-flash",
+		name: "Gemini 3.8 Flash",
+		api: "openai-responses",
+		provider: "custom",
+		baseUrl: "https://api.example.com/v1",
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 1_000_000,
+		maxTokens: 65_536,
+	} satisfies ModelSpec<"openai-responses">);
+}
 
 const leftoverRootUnion = {
 	type: "object",
@@ -121,6 +135,28 @@ const computerTool: Tool = {
 	native: { type: "computer" },
 };
 
+const taskTool: Tool = {
+	name: "task",
+	description: "spawn task",
+	strict: false,
+	parameters: {
+		type: "object",
+		properties: {
+			tasks: {
+				type: "array",
+				items: {
+					type: "object",
+					properties: {
+						outputSchema: {
+							anyOf: [{ type: "object" }, { type: "boolean" }, { type: "string" }, { type: "null" }],
+						},
+					},
+				},
+			},
+		},
+	},
+};
+
 describe("convertTools quarantine (#2652)", () => {
 	test("drops only the tool with the provider-rejecting schema, keeping the rest", () => {
 		const out = convertTools([goodTool, badTool], true, makeModel()) as Array<{ name: string }>;
@@ -193,6 +229,30 @@ describe("convertTools quarantine (#2652)", () => {
 		const dropped: Array<{ name: string; path: string }> = [];
 		convertTools([badTool], true, makeModel(), (name, path) => dropped.push({ name, path }));
 		expect(dropped).toEqual([{ name: "mcp__server__bad", path: "#/properties/choice/enum" }]);
+	});
+});
+
+describe("Gemini function-declaration schema projection (#11336)", () => {
+	test("types task outputSchema after Responses schema adaptation", () => {
+		const model = makeGeminiModel();
+		expect(model.compat.toolSchemaFlavor).toBe("google-function");
+
+		const out = convertTools([taskTool], false, model);
+		expect(out[0]).toMatchObject({
+			type: "function",
+			name: "task",
+			parameters: {
+				properties: {
+					tasks: {
+						items: {
+							properties: {
+								outputSchema: { type: "object", properties: {} },
+							},
+						},
+					},
+				},
+			},
+		});
 	});
 });
 

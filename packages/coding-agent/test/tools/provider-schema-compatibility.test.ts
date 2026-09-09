@@ -101,6 +101,21 @@ describe("builtin tool schemas provider compatibility", () => {
 		expect(adaptSchemaForStrict(toolWireSchema(todo), todo.strict !== false).strict).toBe(true);
 	});
 
+	it("types task outputSchema for Gemini function declarations", async () => {
+		const tools = await builtinToolsPromise;
+		const task = tools.find(tool => tool.name === "task");
+		expect(task).toBeDefined();
+		if (!task) return;
+
+		const normalized = asSchemaObject(normalizeSchemaForCCA(toolWireSchema(task)));
+		const properties = asSchemaObject(normalized?.properties);
+		const tasks = asSchemaObject(properties?.tasks);
+		const items = asSchemaObject(tasks?.items);
+		const itemProperties = asSchemaObject(items?.properties);
+
+		expect(itemProperties?.outputSchema).toEqual({ type: "object", properties: {} });
+	});
+
 	it("keeps all builtin and hidden tool schemas valid after provider enforcement", async () => {
 		const toolSchemas = await toolSchemasPromise;
 		const failures: string[] = [];

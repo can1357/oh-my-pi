@@ -128,6 +128,19 @@ async function captureOpenAICompletionsPayload(
 	});
 	return promise;
 }
+function toolParameters(payload: unknown, toolName: string): Record<string, unknown> {
+	const tools = toObject(payload)?.tools;
+	if (!Array.isArray(tools)) throw new Error("payload tools missing");
+	for (const entry of tools) {
+		const fn = getNestedObject(entry, "function");
+		if (fn?.name === toolName) {
+			const params = toObject(fn.parameters);
+			if (!params) throw new Error(`tool ${toolName} has no parameters`);
+			return params;
+		}
+	}
+	throw new Error(`tool ${toolName} not in payload`);
+}
 
 function getPayloadMessages(payload: unknown): Record<string, unknown>[] {
 	const payloadObject = toObject(payload);
@@ -2552,20 +2565,6 @@ describe("Moonshot Flavored JSON Schema tool normalization", () => {
 		},
 	];
 
-	function toolParameters(payload: unknown, toolName: string): Record<string, unknown> {
-		const tools = toObject(payload)?.tools;
-		if (!Array.isArray(tools)) throw new Error("payload tools missing");
-		for (const entry of tools) {
-			const fn = getNestedObject(entry, "function");
-			if (fn?.name === toolName) {
-				const params = toObject(fn.parameters);
-				if (!params) throw new Error(`tool ${toolName} has no parameters`);
-				return params;
-			}
-		}
-		throw new Error(`tool ${toolName} not in payload`);
-	}
-
 	function probeProperty(payload: unknown, toolName: string, prop: string): Record<string, unknown> {
 		const properties = toObject(toolParameters(payload, toolName).properties);
 		const node = toObject(properties?.[prop]);
@@ -2623,6 +2622,46 @@ describe("Moonshot Flavored JSON Schema tool normalization", () => {
 		expect(taskProperties?.outputSchema).toBe(true);
 	});
 });
+describe("Google function-declaration tool normalization (issue #11336)", () => {
+	const taskTool: Tool = {
+		name: "task",
+		description: "spawn task",
+		strict: false,
+		parameters: {
+			type: "object",
+			properties: {
+				tasks: {
+					type: "array",
+					items: {
+						type: "object",
+						properties: {
+							outputSchema: {
+								anyOf: [{ type: "object" }, { type: "boolean" }, { type: "string" }, { type: "null" }],
+							},
+						},
+					},
+				},
+			},
+		},
+	};
+
+	it("gives the task outputSchema node an explicit type for Gemini models behind OpenAI-compatible hosts", async () => {
+		const model = buildModel({
+			...gpt4oMiniSpec,
+			api: "openai-completions",
+			provider: "custom",
+			baseUrl: "https://api.example.com/v1",
+			id: "gemini-3.8-flash",
+		} as ModelSpec<"openai-completions">);
+		expect(model.compat.toolSchemaFlavor).toBe("google-function");
+
+		const payload = await captureOpenAICompletionsPayload(model, { ...baseContext(), tools: [taskTool] });
+		const tasks = getNestedObject(toObject(toolParameters(payload, "task").properties), "tasks");
+		const items = getNestedObject(tasks, "items");
+		const outputSchema = getNestedObject(toObject(items?.properties), "outputSchema");
+		expect(outputSchema).toEqual({ type: "object", properties: {} });
+	});
+});
 
 describe("grammar tool-schema normalization (issue #5914)", () => {
 	const primitiveUnion = {
@@ -2657,20 +2696,6 @@ describe("grammar tool-schema normalization (issue #5914)", () => {
 			additionalProperties: false,
 		},
 	};
-
-	function toolParameters(payload: unknown, toolName: string): Record<string, unknown> {
-		const tools = toObject(payload)?.tools;
-		if (!Array.isArray(tools)) throw new Error("payload tools missing");
-		for (const entry of tools) {
-			const fn = getNestedObject(entry, "function");
-			if (fn?.name === toolName) {
-				const params = toObject(fn.parameters);
-				if (!params) throw new Error(`tool ${toolName} has no parameters`);
-				return params;
-			}
-		}
-		throw new Error(`tool ${toolName} not in payload`);
-	}
 
 	function localLlamaModel(): Model<"openai-completions"> {
 		return buildModel({

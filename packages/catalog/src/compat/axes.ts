@@ -174,7 +174,12 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		"chat-template",
 	]),
 	"thinking-keep": wire("thinkingKeep", ["openai"]),
-	"tool-schema-flavor": wire("toolSchemaFlavor", OAI, "scalar", ["moonshot-mfjs", "grammar", "none"]),
+	"tool-schema-flavor": wire("toolSchemaFlavor", OAI, "scalar", [
+		"google-function",
+		"moonshot-mfjs",
+		"grammar",
+		"none",
+	]),
 	"tool-strict-mode": wire("toolStrictMode", ["openai"], "scalar", ["all_strict", "none", "mixed"]),
 	"uses-openai-tool-call-id-limit": wire("usesOpenAIToolCallIdLimit", OAI),
 	"when-thinking": wire("whenThinking", ["openai"], "object"),

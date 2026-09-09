@@ -4839,7 +4839,19 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:102",
+				"source": "classes/gemini.kdl:103",
+				"class": "gemini",
+				"apis": [
+					"openai-completions",
+					"openai-responses",
+					"openrouter"
+				],
+				"wire": {
+					"toolSchemaFlavor": "google-function"
+				}
+			},
+			{
+				"source": "classes/gemini.kdl:108",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity",

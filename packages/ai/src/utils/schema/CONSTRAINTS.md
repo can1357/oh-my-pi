@@ -85,14 +85,15 @@ Schemas sent on the Google JSON Schema path MUST follow:
    - `{ "type": "object" }` becomes `{ "type": "object", "properties": {} }`.
 ---
 
-## 3) Claude via Cloud Code Assist (`normalizeSchemaForCCA`)
+## 3) Typed Google function declarations (`normalizeSchemaForCCA`)
 
-For Cloud Code Assist Claude tool declarations, schema MUST satisfy stricter constraints than generic Google path.
+Cloud Code Assist Claude declarations and Gemini models routed through OpenAI-compatible adapters use a legacy function-declaration schema that is stricter than the generic Google JSON Schema path.
 
 ### 3.1 Transport contract
 
-1. **Use legacy `parameters` field** (not `parametersJsonSchema`) for CCA Claude.
-2. CCA path uses the full `normalizeSchemaForCCA` pipeline.
+1. Cloud Code Assist Claude uses the legacy `parameters` field (not `parametersJsonSchema`).
+2. Gemini models on `openai-completions` and `openai-responses` select the `google-function` tool-schema flavor.
+3. Both paths use the full `normalizeSchemaForCCA` pipeline.
 
 ### 3.2 Sanitization contract
 
@@ -105,7 +106,7 @@ For Cloud Code Assist Claude tool declarations, schema MUST satisfy stricter con
 
 1. Object-only `anyOf`/`oneOf` variants SHOULD be merged into a single object shape where safe.
 2. Same-type combiner variants SHOULD be collapsed to one schema.
-3. Mixed-type combiner variants MAY be lossy-collapsed to first non-null scalar type when required for CCA acceptance.
+3. Mixed-type combiner variants MAY be lossy-collapsed to the first non-null scalar type when typed function-declaration acceptance requires it.
 4. Residual combiners are recursively stripped where collapsible (`stripResidualCombiners`).
 
 ### 3.4 Nullable property normalization contract
@@ -152,6 +153,9 @@ If any remain, schema is incompatible.
 
 - **Cloud Code Assist Claude models (`model.id` starts with `claude-`)**:
   - Use `normalizeSchemaForCCA` and send sanitized normalized schema in `parameters`.
+
+- **Gemini models through OpenAI-compatible adapters**:
+  - Use `normalizeSchemaForCCA` after strict-schema adaptation so composition-only nodes are projected onto a representable top-level type.
 
 ---
 

@@ -178,6 +178,17 @@ describe("buildModel", () => {
 		expect(model.compat?.supportsStrictMode).toBe(true);
 	});
 
+	it("selects the typed Google function schema flavor for Gemini across OpenAI-compatible adapters", () => {
+		expect(buildModel(completionsSpec({ id: "gemini-3.8-flash" })).compat.toolSchemaFlavor).toBe("google-function");
+		expect(buildModel(responsesSpec({ id: "gemini-3.8-flash" })).compat.toolSchemaFlavor).toBe("google-function");
+		expect(
+			buildModel(openrouterSpec({ id: "google/gemini-2.5-flash", name: "Gemini 2.5 Flash" })).compat
+				.toolSchemaFlavor,
+		).toBe("google-function");
+		// Non-Gemini models on the same adapters keep the host default.
+		expect(buildModel(completionsSpec()).compat.toolSchemaFlavor).toBeUndefined();
+	});
+
 	it("strips gateway author prefixes and extrinsic tags from display names", () => {
 		const cases: [string, string][] = [
 			["Anthropic: Claude Opus 4.6 (Fast) ($$$$)", "Claude Opus 4.6 (Fast)"],

@@ -98,6 +98,12 @@ class "gemini" {
 			supports-function-part-id #true
 		}
 	}
+	// OpenAI-compatible gateways translate tool parameters back into Google's
+	// legacy functionDeclaration schema, which requires a type on every node.
+	on-api "openai-completions" "openai-responses" "openrouter" {
+		tool-schema-flavor "google-function"
+	}
+
 	on "google-antigravity" "google-gemini-cli" {
 		family "flash" {
 			stream-first-event-timeout-ms 60000

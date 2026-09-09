@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Gemini models routed through OpenAI-compatible providers now project tool schemas onto Google's typed function-declaration subset, preventing `task.outputSchema` unions from rejecting the whole request ([#11336](https://github.com/can1357/oh-my-pi/issues/11336)).
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed

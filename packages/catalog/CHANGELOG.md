@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Gemini models on OpenAI-compatible transports now select the typed Google function-declaration schema flavor, including custom gateways ([#11336](https://github.com/can1357/oh-my-pi/issues/11336)).
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

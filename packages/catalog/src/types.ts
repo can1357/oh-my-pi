@@ -363,6 +363,9 @@ export interface OpenAICompat {
 	 * (collapse `const`→`enum`, infer `type` on bare enums, strip unsupported
 	 * validators/`prefixItems`) because Moonshot/Kimi native hosts reject
 	 * standard JSON Schema constructs with HTTP 400.
+	 * `"google-function"` triggers the typed function-declaration projection
+	 * used by Gemini/Vertex-backed OpenAI-compatible hosts, whose legacy schema
+	 * validator rejects composition-only nodes without a top-level `type`.
 	 *
 	 * `"grammar"` triggers grammar-sampler normalization (widen bare boolean
 	 * `true`/`{}` subschemas in genuine subschema slots into a value-accepting
@@ -373,13 +376,14 @@ export interface OpenAICompat {
 	 * grammar converter reads them as closed/open-object semantics, and
 	 * `additionalProperties: false` pins the strict object shape.
 	 *
-	 * Default: auto-detected — `"moonshot-mfjs"` on Moonshot native hosts
+	 * Default: auto-detected — `"google-function"` for Gemini-family models on
+	 * OpenAI-compatible adapters; `"moonshot-mfjs"` on Moonshot native hosts
 	 * (api.moonshot.ai / api.kimi.com) and Kimi-family model ids on any host,
 	 * since proxies (OpenRouter, custom gateways) forward schemas to Moonshot
 	 * verbatim; `"grammar"` on local OpenAI-compatible backends. Set `"none"`
 	 * to opt a host out.
 	 */
-	toolSchemaFlavor?: "moonshot-mfjs" | "grammar" | "none";
+	toolSchemaFlavor?: "google-function" | "moonshot-mfjs" | "grammar" | "none";
 	/**
 	 * Stream-watchdog first-event timeout in ms.
 	 * Set to `0` to allow unbounded prompt processing. Default: auto-detected

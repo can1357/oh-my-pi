@@ -46,6 +46,7 @@ import {
 	findStrictToolSchemaViolation,
 	flattenExclusiveRequiredRootUnion,
 	NO_STRICT,
+	normalizeSchemaForCCA,
 	normalizeSchemaForMoonshot,
 	sanitizeSchemaForGrammar,
 	toolWireSchema,
@@ -2466,6 +2467,9 @@ function convertTools(
 		const includeExplicitFalse =
 			!includeStrict && tool.strict === false && toolStrictMode === "mixed" && compat.supportsStrictMode !== false;
 		const wireParameters = includeStrict ? parameters : baseParameters;
+		// Gemini/Vertex-backed OpenAI-compatible hosts translate tools into the
+		// typed legacy functionDeclaration subset and reject composition-only
+		// nodes such as task.outputSchema (issue #11336).
 		// Moonshot/Kimi native hosts validate against the stricter MFJS subset
 		// (const→enum, typed enums, no validators) and 400 otherwise.
 		// Grammar-constrained local backends (llama.cpp, LM Studio, vLLM)
@@ -2473,11 +2477,13 @@ function convertTools(
 		// `Unrecognized schema: true` on the bare boolean subschema
 		// `toolWireSchema` emits for open fields (issue #5914).
 		const emittedParameters =
-			compat.toolSchemaFlavor === "moonshot-mfjs"
-				? (normalizeSchemaForMoonshot(wireParameters) as Record<string, unknown>)
-				: compat.toolSchemaFlavor === "grammar"
-					? sanitizeSchemaForGrammar(wireParameters)
-					: wireParameters;
+			compat.toolSchemaFlavor === "google-function"
+				? (normalizeSchemaForCCA(wireParameters) as Record<string, unknown>)
+				: compat.toolSchemaFlavor === "moonshot-mfjs"
+					? (normalizeSchemaForMoonshot(wireParameters) as Record<string, unknown>)
+					: compat.toolSchemaFlavor === "grammar"
+						? sanitizeSchemaForGrammar(wireParameters)
+						: wireParameters;
 		const violation = findStrictToolSchemaViolation(emittedParameters, "#", { rejectRootObjectUnion });
 		if (violation) {
 			logger.warn(

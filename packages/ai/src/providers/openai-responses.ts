@@ -38,6 +38,7 @@ import {
 	findStrictToolSchemaViolation,
 	flattenExclusiveRequiredRootUnion,
 	NO_STRICT,
+	normalizeSchemaForCCA,
 	normalizeSchemaForMoonshot,
 	sanitizeSchemaForOpenAIResponses,
 	toolWireSchema,
@@ -1445,7 +1446,13 @@ export function convertTools(
 			model.compat.toolSchemaFlavor === "moonshot-mfjs"
 				? (normalizeSchemaForMoonshot(providerParameters) as Record<string, unknown>)
 				: providerParameters;
-		const { schema: parameters, strict: effectiveStrict } = adaptSchemaForStrict(responseParameters, strict);
+		const { schema: adaptedParameters, strict: effectiveStrict } = adaptSchemaForStrict(responseParameters, strict);
+		// Gemini/Vertex's legacy functionDeclaration validator requires a type
+		// on every node, including unions introduced by strict adaptation.
+		const parameters =
+			model.compat.toolSchemaFlavor === "google-function"
+				? (normalizeSchemaForCCA(adaptedParameters) as Record<string, unknown>)
+				: adaptedParameters;
 		// Quarantine a tool whose emitted schema carries a provider-rejecting
 		// enum/const-vs-type contradiction: dropping just that tool keeps the rest
 		// of the request valid instead of letting one bad MCP schema 400 the whole
