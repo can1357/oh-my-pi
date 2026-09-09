@@ -14,7 +14,7 @@ use std::{
 use async_trait::async_trait;
 use omp_agent::{JobBoard, JobSettlement};
 pub use omp_agent::jobs::WORKPOOL_STATE;
-use omp_core::{FastHashMap, Str, sf};
+use omp_core::{FastHashMap, SparseSet, Str, sf};
 use omp_dom::{Handle, KnownTag, Op, PropId, PropKey, Tag, Txn, Value};
 use omp_journal::blob::BlobStore;
 use omp_session::{Session, components::jobs};
@@ -644,6 +644,7 @@ impl SchedulerRegistry {
 			commands: command_rx,
 			events: flume::unbounded(),
 			retry_admission: Vec::new(),
+			retry_admission_seen: SparseSet::new(),
 			cancel: cancel.clone(),
 			retired: Vec::new(),
 			parent: self.parent.clone(),
@@ -994,7 +995,9 @@ struct PoolActor {
 	events:       (flume::Sender<WorkerEvent>, flume::Receiver<WorkerEvent>),
 	/// Item indices rejected by transient admission backpressure and awaiting
 	/// a delayed re-drive after the owner's global slot is released.
-	retry_admission: Vec<usize>,
+	retry_admission:      Vec<usize>,
+	/// Membership mirror for constant-time retry deduplication.
+	retry_admission_seen: SparseSet<usize>,
 	cancel:          CancellationToken,
 	retired:         Vec<(flume::Receiver<()>, tokio::task::AbortHandle)>,
 	parent:          SessionMutator,
@@ -1124,6 +1127,7 @@ impl PoolActor {
 				// pending settlements and commands always drain first.
 				() = tokio::time::sleep(ADMISSION_RETRY_DELAY), if !self.retry_admission.is_empty() => {
 					let retry = std::mem::take(&mut self.retry_admission);
+					self.retry_admission_seen.clear();
 					for item in retry {
 						self.schedule(item).await;
 					}
@@ -1342,7 +1346,7 @@ impl PoolActor {
 			return true;
 		}
 		if self.fresh_agents && is_concurrency_backpressure(error) {
-			if !self.retry_admission.contains(&item) {
+			if self.retry_admission_seen.insert(item) {
 				self.retry_admission.push(item);
 			}
 			return true;
