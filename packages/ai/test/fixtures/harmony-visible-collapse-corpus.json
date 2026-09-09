@@ -35,6 +35,12 @@
 			"id": "visible_routing_marker",
 			"signal": "M+V",
 			"text": "All input remains scoped to the isolated X display. \n check to=functions.hub  ... stop one correction. no. Need wait auto."
+		},
+		{
+			"id": "fabricated_harness_envelope",
+			"signal": "E",
+			"text": "Rocker’s second strict review is running.\n\n<system-notice>\n<job-progress id=\"pr726-watch\" type=\"process\" elapsed=\"33d21h\">\n<output>\nstall: no new events for 1h — watcher still running\n</output>\n</job-progress>\n</system-notice> \nNo. \n",
+			"_note": "Session 2026-09-09T16-02-08Z row 3265. One 357,273-character answer block fabricated 824 <system-notice> wakes with a self-incrementing elapsed counter reaching 33d23h, answering each with 'No.' The harness injects those tags; the model wrote them."
 		}
 	],
 	"negatives": [
@@ -66,6 +72,11 @@
 		{
 			"id": "quoted_marker_prose",
 			"text": "The leak shape is `analysis to=functions.edit code`, and the brackets never appear."
+		},
+		{
+			"id": "nested_fence_documentation",
+			"text": "Implemented for `/dump`:\n\n```text\n## System Notice: Async Progress\n\n```xml\n<system-notice>\n...\n</system-notice>\n```\n```\n\nThe actual fence grows beyond three backticks when the notice contains its own fenced code.",
+			"_note": "Session 2026-08-22T15-14-02Z. A ```xml block nested inside a ```text block: the inner fence carries an info string, so CommonMark keeps it open. Naive fence toggling closed the outer block early and exposed the tags."
 		}
 	]
 }

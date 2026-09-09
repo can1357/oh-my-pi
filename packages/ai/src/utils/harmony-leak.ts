@@ -105,8 +105,17 @@ const REPEATED_TOKEN_LINE_RE = /^[ \t]*(\S{1,2})[ \t]+\1[ \t]*$/m;
 const RESIDUE_MAX_CHARS = 8;
 const RESIDUE_MIN_TEXT_LEN = 8;
 const RESIDUE_MIN_ASCII_RATIO = 0.9;
+// Harness-envelope fabrication (`E`): the model writing omp's own injected
+// wrapper tags into its answer. These are produced by the harness and arrive as
+// input; a model has no legitimate reason to emit one outside code. Observed at
+// scale in 2026-09-09T16-02-08Z, where a single answer block fabricated 824
+// `<system-notice>` wakes with a self-incrementing `elapsed` up to `33d23h`.
+const HARNESS_ENVELOPE_RE = /<\/?(?:system-notice|job-progress|system-reminder|system-directive|async-result|job-summary)\b/g;
 
-const FENCE_RE = /^\s*(?:```+|~~~+)/;
+// Fence open/close. CommonMark: a closer repeats the opener's character at
+// least as many times and carries no info string, so ```` ```xml ```` nested in
+// a ```` ```text ```` block opens nothing and closes nothing.
+const FENCE_RE = /^ {0,3}(`{3,}|~{3,})([^\n`]*)$/;
 // Inline code spans, matched per line: a backtick run closed by an equal run.
 const INLINE_CODE_RE = /(`+)(?:(?!\1)[\s\S])*?\1/g;
 
@@ -145,7 +154,7 @@ const RECOVERY_REGISTRY: Record<string, RecoveryConfig> = {
 	},
 };
 
-const SIGNAL_ORDER = ["M", "V", "C", "G", "S", "B", "D", "N", "R", "T"] as const;
+const SIGNAL_ORDER = ["M", "V", "C", "G", "S", "B", "D", "N", "E", "R", "T"] as const;
 
 export type HarmonySignalClass = "H" | (typeof SIGNAL_ORDER)[number];
 
@@ -285,6 +294,12 @@ export function detectHarmonyLeak(
 		if (notice) signals.push(makeSignal(["N"], notice.start, notice.end, notice.text));
 		const residue = findScriptResidue(text, code);
 		if (residue) signals.push(makeSignal(["S"], residue.start, residue.end, residue.text));
+		for (const match of text.matchAll(HARNESS_ENVELOPE_RE)) {
+			const start = match.index ?? 0;
+			if (isInsideCode(code, start)) continue;
+			signals.push(makeSignal(["E"], start, start + match[0].length, match[0]));
+			break;
+		}
 	}
 
 	if (signals.length === 0) return undefined;
@@ -451,22 +466,24 @@ function makeSignal(classes: HarmonySignalClass[], start: number, end: number, t
  */
 function computeCodeRanges(text: string): Array<[number, number]> {
 	const ranges: Array<[number, number]> = [];
-	let inFence = false;
-	let fenceStart = 0;
+	let fence: { start: number; marker: string } | undefined;
 	let lineStart = 0;
 	while (lineStart <= text.length) {
 		const newline = text.indexOf("\n", lineStart);
 		const lineEnd = newline === -1 ? text.length : newline;
 		const line = text.slice(lineStart, lineEnd);
-		if (FENCE_RE.test(line)) {
-			if (inFence) {
-				ranges.push([fenceStart, lineEnd]);
-				inFence = false;
-			} else {
-				fenceStart = lineStart;
-				inFence = true;
+		const match = FENCE_RE.exec(line);
+		if (match) {
+			const run = match[1];
+			const info = match[2].trim();
+			const closes = fence !== undefined && run[0] === fence.marker[0] && run.length >= fence.marker.length && info.length === 0;
+			if (closes) {
+				ranges.push([fence!.start, lineEnd]);
+				fence = undefined;
+			} else if (fence === undefined) {
+				fence = { start: lineStart, marker: run };
 			}
-		} else if (!inFence && line.includes("`")) {
+		} else if (fence === undefined && line.includes("`")) {
 			INLINE_CODE_RE.lastIndex = 0;
 			for (const span of line.matchAll(INLINE_CODE_RE)) {
 				const spanStart = span.index ?? 0;
@@ -476,7 +493,7 @@ function computeCodeRanges(text: string): Array<[number, number]> {
 		if (newline === -1) break;
 		lineStart = newline + 1;
 	}
-	if (inFence) ranges.push([fenceStart, text.length]);
+	if (fence !== undefined) ranges.push([fence.start, text.length]);
 	return ranges;
 }
 

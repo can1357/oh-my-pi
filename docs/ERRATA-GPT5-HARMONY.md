@@ -21,9 +21,11 @@ Current behavior is implemented in
   (`V`): fenced blocks and inline code spans are exempt, and documentation, bug
   reports and this repository's tests all quote the marker in backticks.
 - The visible answer is additionally scanned for marker-free prior collapse
-  (§2.9): staccato line runs (`D`), fabricated harness notices (`N`), and
-  stranded non-Latin script residue (`S`). Thinking blocks are exempt — they are
-  legitimately staccato and legitimately multilingual.
+  (§2.9): staccato line runs (`D`), fabricated harness notices (`N`), stranded
+  non-Latin script residue (`S`), and fabricated harness envelopes (`E`) — the
+  model writing omp's own `<system-notice>` / `<job-progress>` wrapper tags into
+  its answer. Thinking blocks are exempt: they are legitimately staccato and
+  legitimately multilingual.
 - The agent loop scans finalized visible text and thinking. On a hit it discards
   the partial response and retries up to two times, then escalates with an
   error. Audit callbacks receive action/signal metadata and a hash/redacted
@@ -256,18 +258,20 @@ answer* with no marker at all. Every marker-anchored signal (`C`/`G`/`S`/`B`/`R`
 is therefore blind to it: the earlier detector needed `M` before it would
 evaluate any co-signal.
 
-Three shapes, all observed:
+Four shapes, all observed:
 
 | Signal | Shape | Blocks |
 | ------ | ----- | -----: |
-| `D` | Staccato run — one short clause per line, whitespace-only separators between them: `stop.` `no.` `end.` `done.` `final.` | 53 |
-| `N` | Fabricated harness notice — `You have 1431 weighted tokens left`, `a a`, `A third-party application wants to take over your screen. Continue? (y/n)` | 33 |
+| `D` | Staccato run — one short clause per line, whitespace-only separators between them: `stop.` `no.` `end.` `done.` `final.` | 54 |
+| `N` | Fabricated harness notice — `You have 1431 weighted tokens left`, `a a`, `A third-party application wants to take over your screen. Continue? (y/n)` | 35 |
 | `S` | Script residue stranded in an ASCII answer, including substitution *inside* an ASCII word: `declauding` rendered as `declაუდing` 14 times in one session | 25 |
+| `E` | Fabricated harness envelope — the model writing omp's own injected `<system-notice>` / `<job-progress>` wrapper tags into its answer | 2 |
 
-103 distinct blocks across 6 sessions and 4 projects. Zero hits on the other 255
-sessions and zero on all 75,159 thinking blocks.
+104 distinct blocks across 6 sessions and 4 projects, counting a block once per
+signal set. Zero hits on the other 255 sessions and zero on all 52,033 thinking
+blocks.
 
-Two observations that matter for the runtime contract:
+Three observations that matter for the runtime contract:
 
 - **The notice text is fabricated, not echoed.** No omp surface emits
   `You have N weighted tokens left`; the phrase appears nowhere in the harness
@@ -280,6 +284,16 @@ Two observations that matter for the runtime contract:
   Remote compaction preserves provider-native history, so `/compact` does not
   clear it. Detection has to fire on the *first* contaminated turn, which is why
   `V` trips on a bare marker in a rendered answer.
+- **The collapse target is whatever protocol the model has been conditioned
+  on.** §2.8 describes mass landing on the plain-text shadow of the *Harmony*
+  envelope. In 2026-09-09T16-02-08Z it landed on the plain-text shadow of the
+  *omp* envelope instead: one 357,273-character answer block fabricated 824
+  `<system-notice>` wakes, incremented their `elapsed` attribute from `9.1s` to
+  `33d23h`, and answered each of its own fabricated wakes — `No.` 167 times,
+  then `34d. I'll quit.`, then `I will now actually send a final message.` The
+  mechanism is identical; only the scaffolding the model reaches for changed.
+  `E` therefore detects harness-envelope fabrication directly, independent of
+  any Harmony marker.
 
 Thresholds are measured against that corpus, not chosen:
 
@@ -287,5 +301,11 @@ Thresholds are measured against that corpus, not chosen:
   block was 4.
 - `S` allows at most 8 non-Latin characters in a block that is ≥90% ASCII.
   Genuinely multilingual answers blow the budget and stay clean.
+- `V` and `E` are exempt inside fenced blocks and inline code spans. Fence
+  tracking follows CommonMark: a closer repeats the opener's character at least
+  as many times and carries no info string. Naive toggling let a ```` ```xml ````
+  block nested in a ```` ```text ```` block close the outer fence early, which
+  produced the only false positive measured across the corpus — a real answer
+  documenting how `/dump` renders system notices.
 
 Fixtures: `packages/ai/test/fixtures/harmony-visible-collapse-corpus.json`.
