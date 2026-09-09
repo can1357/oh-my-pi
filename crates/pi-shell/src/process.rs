@@ -1288,6 +1288,103 @@ impl ProcessExitWait {
 	}
 }
 
+/// A termination target pinned before its waves run.
+///
+/// Built by [`Process::capture_termination`]; see that method for why the
+/// capture cannot be deferred to the first wave.
+pub struct TerminationPlan {
+	root:            Process,
+	process_group:   Option<i32>,
+	descendants:     Vec<Process>,
+	protected:       HashSet<i32>,
+	live_at_capture: bool,
+}
+
+impl TerminationPlan {
+	/// Process group pinned at capture time, when one was requested and the root
+	/// still had one.
+	#[must_use]
+	pub const fn process_group(&self) -> Option<i32> {
+		self.process_group
+	}
+
+	/// Run the polite and hard waves over the captured tree.
+	///
+	/// Sends `TERM_SIGNAL` to the captured group, every captured descendant, and
+	/// the root, then optionally waits up to `graceful_ms` for the tree to exit
+	/// before escalating to `KILL_SIGNAL`. Pass `graceful_ms < 0` to skip the
+	/// wait entirely (the polite signal is still emitted). Returns `true` when
+	/// the tree has exited by the end of the hard wave's wait window.
+	pub async fn terminate(
+		mut self,
+		graceful_ms: i32,
+		timeout_ms: u32,
+		ct: CancelToken,
+	) -> Result<bool> {
+		if !self.live_at_capture {
+			return Ok(true);
+		}
+		let root_signalable = !self.protected.contains(&self.root.pid());
+
+		// Polite wave: SIGTERM the group, every captured descendant, then the root.
+		if let Some(pgid) = self.process_group {
+			let _ = kill_process_group(pgid, TERM_SIGNAL);
+		}
+		for child in &self.descendants {
+			let _ = child.inner.kill(TERM_SIGNAL);
+		}
+		if root_signalable {
+			let _ = self.root.inner.kill(TERM_SIGNAL);
+		}
+
+		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
+		// (we still emit the polite signal so cleanup handlers can run before KILL).
+		if graceful_ms >= 0 {
+			let exited = wait_for_exit(
+				&self.root,
+				&self.descendants,
+				Some(Duration::from_millis(graceful_ms as u64)),
+				ct.clone(),
+			)
+			.await?;
+			if exited {
+				return Ok(true);
+			}
+		}
+
+		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
+		// period — or any process re-parented to the root — is signalled too. The
+		// rescan is unioned with the captured set rather than replacing it: a root
+		// that dies to its own SIGTERM releases its surviving children to init,
+		// where a walk rooted at the dead pid can no longer see them and would
+		// report the tree gone while they run on.
+		if let Some(pgid) = self.process_group {
+			let _ = kill_process_group(pgid, KILL_SIGNAL);
+		}
+		let rescan = self.root.signalable_descendants(&self.protected);
+		let mut seen: HashSet<i32> = self.descendants.iter().map(Process::pid).collect();
+		self.descendants.extend(
+			rescan
+				.into_iter()
+				.filter(|descendant| seen.insert(descendant.pid())),
+		);
+		for child in &self.descendants {
+			let _ = child.inner.kill(KILL_SIGNAL);
+		}
+		if root_signalable {
+			let _ = self.root.inner.kill(KILL_SIGNAL);
+		}
+
+		wait_for_exit(
+			&self.root,
+			&self.descendants,
+			Some(Duration::from_millis(u64::from(timeout_ms))),
+			ct,
+		)
+		.await
+	}
+}
+
 impl Process {
 	/// Open a stable process reference from a PID.
 	pub fn from_pid(pid: i32) -> Option<Self> {
@@ -1437,11 +1534,9 @@ impl Process {
 
 	/// Gracefully terminate this process and its descendants.
 	///
-	/// Sends `TERM_SIGNAL` to the optional process group, every live descendant,
-	/// and the root, then optionally waits up to `graceful_ms` for the tree to
-	/// exit before escalating to `KILL_SIGNAL`. Pass `graceful_ms < 0` to skip
-	/// the wait entirely (the polite signal is still emitted). Returns `true`
-	/// when the tree has exited by the end of the hard wave's wait window.
+	/// Captures the tree and runs both waves in one call; see
+	/// [`Process::capture_termination`] and [`TerminationPlan::terminate`].
+	/// Split the two when the waves are scheduled onto an executor.
 	pub async fn terminate_tree(
 		&self,
 		group: bool,
@@ -1450,7 +1545,8 @@ impl Process {
 		ct: CancelToken,
 	) -> Result<bool> {
 		self
-			.terminate_tree_impl(group, graceful_ms, timeout_ms, ct)
+			.capture_termination(group)
+			.terminate(graceful_ms, timeout_ms, ct)
 			.await
 	}
 
@@ -1534,72 +1630,37 @@ impl Process {
 			.collect()
 	}
 
-	async fn terminate_tree_impl(
-		&self,
-		group: bool,
-		graceful_ms: i32,
-		timeout_ms: u32,
-		ct: CancelToken,
-	) -> Result<bool> {
-		if self.status() != ProcessStatus::Running {
-			return Ok(true);
-		}
-
-		let process_group = if group { self.group_id() } else { None };
+	/// Pin everything a termination will need to signal, before any of it can
+	/// disappear.
+	///
+	/// The group id and the descendant walk are only observable while the root
+	/// is alive: once it exits, `getpgid` fails and a walk rooted at its pid
+	/// returns nothing, because the survivors have been reparented. Callers that
+	/// schedule the waves onto an executor must capture here, synchronously,
+	/// rather than letting the first wave re-derive the tree after the root has
+	/// had a scheduling hop to die.
+	///
+	/// A root that is already gone captures nothing and skips the walk entirely:
+	/// hunting its group afterwards would risk a recycled pgid, so that decision
+	/// belongs to the caller that still holds proof the group is its own.
+	pub fn capture_termination(&self, group: bool) -> TerminationPlan {
 		let protected = host_protected_pids();
-
-		// Polite wave: SIGTERM the group, every live descendant, then the root.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, TERM_SIGNAL);
+		if self.status() != ProcessStatus::Running {
+			return TerminationPlan {
+				root: self.clone(),
+				process_group: None,
+				descendants: Vec::new(),
+				protected,
+				live_at_capture: false,
+			};
 		}
-		let mut descendants = self.signalable_descendants(&protected);
-		for child in &descendants {
-			let _ = child.inner.kill(TERM_SIGNAL);
+		TerminationPlan {
+			process_group: if group { self.group_id() } else { None },
+			descendants: self.signalable_descendants(&protected),
+			root: self.clone(),
+			protected,
+			live_at_capture: true,
 		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(TERM_SIGNAL);
-		}
-
-		// Optional grace wait. A negative `graceful_ms` skips the wait entirely
-		// (we still emit the polite signal so cleanup handlers can run before KILL).
-		if graceful_ms >= 0 {
-			let exited = wait_for_exit(
-				self,
-				&descendants,
-				Some(Duration::from_millis(graceful_ms as u64)),
-				ct.clone(),
-			)
-			.await?;
-			if exited {
-				return Ok(true);
-			}
-		}
-
-		// Hard wave. Re-walk the tree so any grandchild spawned during the grace
-		// period — or any process re-parented to the root — is signalled too. The
-		// rescan is unioned with the descendants pinned before the polite wave
-		// rather than replacing them: a root that dies to its own SIGTERM releases
-		// its surviving children to init, where a walk rooted at the dead pid can
-		// no longer see them and would report the tree gone while they run on.
-		if let Some(pgid) = process_group {
-			let _ = kill_process_group(pgid, KILL_SIGNAL);
-		}
-		let mut captured: HashSet<i32> = descendants.iter().map(Self::pid).collect();
-		descendants.extend(
-			self
-				.signalable_descendants(&protected)
-				.into_iter()
-				.filter(|descendant| captured.insert(descendant.pid())),
-		);
-		for child in &descendants {
-			let _ = child.inner.kill(KILL_SIGNAL);
-		}
-		if !protected.contains(&self.pid()) {
-			let _ = self.inner.kill(KILL_SIGNAL);
-		}
-
-		wait_for_exit(self, &descendants, Some(Duration::from_millis(u64::from(timeout_ms))), ct)
-			.await
 	}
 }
 
@@ -2071,6 +2132,60 @@ mod tests {
 			orphan_status,
 			ProcessStatus::Exited,
 			"a descendant orphaned by the polite wave must still be hard-killed"
+		);
+	}
+
+	/// The napi binding captures on the calling thread and runs the waves on an
+	/// executor. A leader that dies in that hop must not take its group and its
+	/// descendants out of reach.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn captured_plan_terminates_a_tree_whose_leader_dies_before_the_waves_run() {
+		use std::{
+			io::{BufRead, BufReader},
+			os::unix::process::CommandExt,
+			process::Stdio,
+		};
+
+		// `process_group(0)` reproduces a detached Bun child: the leader leads its
+		// own group, and `read` holds it alive until the capture is taken.
+		let mut child = std::process::Command::new("/bin/sh")
+			.arg("-c")
+			.arg("sleep 30 & echo $!; read line")
+			.process_group(0)
+			.stdin(Stdio::piped())
+			.stdout(Stdio::piped())
+			.spawn()
+			.expect("spawn leader");
+		let mut line = String::new();
+		BufReader::new(child.stdout.take().expect("leader stdout"))
+			.read_line(&mut line)
+			.expect("read descendant pid");
+		let descendant =
+			Process::from_pid(line.trim().parse().expect("descendant pid")).expect("pin descendant");
+		let root =
+			Process::from_pid(i32::try_from(child.id()).expect("leader pid")).expect("pin leader");
+
+		let plan = root.capture_termination(true);
+		assert_eq!(plan.process_group(), Some(root.pid()), "the leader must lead its own group");
+
+		// The leader exits and is reaped before a single wave has run.
+		drop(child.stdin.take());
+		let _ = child.wait();
+		assert_eq!(root.status(), ProcessStatus::Exited, "the leader must be gone before the waves");
+
+		let terminated = plan.terminate(-1, 5000, CancelToken::default()).await;
+
+		let descendant_status = descendant.status();
+		let _ = descendant.inner.kill(KILL_SIGNAL);
+		assert!(
+			terminated.expect("terminate captured plan"),
+			"the captured tree must be reported gone"
+		);
+		assert_eq!(
+			descendant_status,
+			ProcessStatus::Exited,
+			"a tree captured before the leader died must still be signalled and awaited"
 		);
 	}
 

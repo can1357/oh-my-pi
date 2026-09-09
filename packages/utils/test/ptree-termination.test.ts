@@ -30,6 +30,39 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 		},
 	);
 
+	it.skipIf(process.platform === "win32")(
+		"terminates a dead root's descendant while its stdout consumer is paused",
+		async () => {
+			// The descendant emits a second chunk once the pid has been read, so the
+			// wrapper's one-chunk queue fills and its pulls stop while the consumer
+			// is paused on an uncancelled stream.
+			const child = spawn(
+				["/bin/sh", "-c", `/bin/sh -c 'echo $$; sleep 0.05; echo filler; exec sleep 30' 2>/dev/null &`],
+				{ detached: true, stderr: "full" },
+			);
+			const reader = child.stdout.getReader();
+			let descendant: Process | null = null;
+			try {
+				const first = await reader.read();
+				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(first.value), 10));
+				if (!descendant) throw new Error("Descendant exited before termination");
+				await child.proc.exited;
+				await Bun.readableStreamToText(child.stderr!);
+				await Bun.sleep(150);
+				expect(descendant.status()).toBe(ProcessStatus.Running);
+				await child.killAndWait(undefined, -1);
+				expect(descendant.status()).toBe(ProcessStatus.Exited);
+				// Proves the consumer really was paused over a queued chunk rather
+				// than sitting at EOF, where dropping ownership is correct.
+				expect(new TextDecoder().decode((await reader.read()).value)).toBe("filler\n");
+			} finally {
+				descendant?.killTree(9);
+				await reader.cancel();
+				child.kill(undefined, -1);
+			}
+		},
+	);
+
 	for (const finish of ["eof", "cancel"] as const) {
 		it.skipIf(process.platform === "win32")(`drops raw stdout ownership after ${finish}`, async () => {
 			const script = finish === "eof" ? "sleep 30 >/dev/null 2>&1 & echo $!" : "sleep 30 2>/dev/null & echo $!";
@@ -78,6 +111,32 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 			await reader.cancel();
 		}
 	});
+
+	it.skipIf(process.platform === "win32")(
+		"terminates a detached group before Bun reports the leader's exit",
+		async () => {
+			const child = spawn(["/bin/sh", "-c", "sleep 30 & echo $!"], { detached: true });
+			const reader = child.stdout.getReader();
+			let descendant: Process | null = null;
+			try {
+				const output = await reader.read();
+				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
+				if (!descendant) throw new Error("Descendant exited before termination");
+				// The window under test: the leader is already gone, but Bun's reaper
+				// has not run yet, so exitCode still reads null. Asserted rather than
+				// assumed — without it this silently becomes the exited-root case above.
+				expect(child.proc.exitCode).toBe(null);
+				expect(Process.fromPid(child.pid)?.status()).toBe(ProcessStatus.Exited);
+				expect(descendant.status()).toBe(ProcessStatus.Running);
+				await child.killAndWait(undefined, -1);
+				expect(descendant.status()).toBe(ProcessStatus.Exited);
+			} finally {
+				descendant?.killTree(9);
+				child.kill(undefined, -1);
+				await reader.cancel();
+			}
+		},
+	);
 
 	it.skipIf(process.platform === "win32")(
 		"reports synchronous group-termination errors without interrupting kill",

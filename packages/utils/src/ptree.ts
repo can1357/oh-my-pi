@@ -7,7 +7,7 @@
  * - Convenience helpers: captureText / execText, AbortSignal, timeouts.
  */
 
-import { Process } from "@oh-my-pi/pi-natives";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { Spawn, Subprocess } from "bun";
 
 type InMask = "pipe" | "ignore" | Buffer | Uint8Array | null;
@@ -310,30 +310,39 @@ export class ChildProcess<In extends InMask = InMask> {
 	get stdout() {
 		if (!this.#stdoutStream) {
 			const reader = this.proc.stdout.getReader();
+			// Handing the stream out transfers the pipe to the consumer, and only
+			// EOF, cancel, or a read error hand it back. Counting pending reads
+			// instead loses the pipe whenever an unread chunk fills the queue: pull
+			// is not re-entered until the consumer resumes, so a paused reader that
+			// still owns stdout would read as nobody holding it.
+			this.#openPipeReaders++;
+			let owned = true;
+			const release = () => {
+				if (!owned) return;
+				owned = false;
+				this.#openPipeReaders--;
+				reader.releaseLock();
+			};
 			this.#stdoutStream = new ReadableStream<Uint8Array>({
 				pull: async controller => {
-					// Buffered output can outlive the process group; only pending reads imply an open pipe.
-					this.#openPipeReaders++;
 					try {
 						const chunk = await reader.read();
 						if (chunk.done) {
 							controller.close();
-							reader.releaseLock();
+							release();
 						} else {
 							controller.enqueue(chunk.value);
 						}
 					} catch (error) {
 						controller.error(error);
-						reader.releaseLock();
-					} finally {
-						this.#openPipeReaders--;
+						release();
 					}
 				},
 				cancel: async reason => {
 					try {
 						await reader.cancel(reason);
 					} finally {
-						reader.releaseLock();
+						release();
 					}
 				},
 			});
@@ -364,6 +373,21 @@ export class ChildProcess<In extends InMask = InMask> {
 		return this;
 	}
 
+	/**
+	 * Whether the root is still running, as the kernel reports it.
+	 *
+	 * `proc.exitCode` only turns non-null once Bun's reaper has observed the
+	 * exit, at least one loop turn after the process is gone. Routing the
+	 * dead-leader fallbacks on that lag leaves the native handle to discover the
+	 * exit instead, and a handle for a dead root can no longer reach the group
+	 * or the descendants that outlived it.
+	 */
+	#rootIsLive(): boolean {
+		if (this.proc.exitCode !== null) return false;
+		const root = this.#windowsRootProcess ?? Process.fromPid(this.proc.pid);
+		return root?.status() === ProcessStatus.Running;
+	}
+
 	kill(reason?: Exception, gracefulMs?: number) {
 		if (reason && !this.#exitReasonPending) {
 			this.#exitReasonPending = reason;
@@ -382,12 +406,7 @@ export class ChildProcess<In extends InMask = InMask> {
 				return;
 			}
 		}
-		if (
-			this.proc.exitCode !== null &&
-			this.#terminateGroup &&
-			this.#openPipeReaders > 0 &&
-			process.platform !== "win32"
-		) {
+		if (this.#terminateGroup && this.#openPipeReaders > 0 && process.platform !== "win32" && !this.#rootIsLive()) {
 			// Bun detached children are POSIX session/process-group leaders. If
 			// the leader has exited, the native Process handle cannot rediscover
 			// its PGID, but a pipe-holding descendant keeps that exact group alive.
@@ -395,7 +414,7 @@ export class ChildProcess<In extends InMask = InMask> {
 			void this.#terminating.catch(() => {});
 			return;
 		}
-		if (this.proc.exitCode !== null && this.#windowsRootProcess && this.#openPipeReaders > 0) {
+		if (this.#windowsRootProcess && this.#openPipeReaders > 0 && !this.#rootIsLive()) {
 			// The retained handle keeps the dead root PID reserved, making the
 			// Windows Toolhelp descendant walk identity-safe after root exit.
 			const root = this.#windowsRootProcess;
