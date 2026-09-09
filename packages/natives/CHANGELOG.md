@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Bounded filesystem scan cache memory and prevented stale scans from repopulating the cache after file changes.
+
 ## [18.1.15] - 2026-09-08
 
 ### Fixed

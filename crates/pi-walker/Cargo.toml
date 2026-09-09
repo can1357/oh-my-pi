@@ -10,7 +10,6 @@ repository.workspace = true
 workspace = true
 
 [dependencies]
-dashmap.workspace = true
 globset.workspace = true
 ignore.workspace = true
 parking_lot.workspace = true

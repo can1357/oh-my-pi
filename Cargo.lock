@@ -6469,7 +6469,6 @@ dependencies = [
 name = "pi-walker"
 version = "18.1.15"
 dependencies = [
- "dashmap",
  "globset",
  "ignore",
  "libc",
