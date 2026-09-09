@@ -242,6 +242,7 @@ export class CollabHost {
 				firstOpen.resolve();
 			}
 		};
+		socket.onRoomRecreated = () => this.#handleRoomRecreated();
 		socket.onFrame = (frame, fromPeer) => this.#handleFrame(frame, fromPeer);
 		socket.onControl = msg => {
 			if (msg.t === "peer-left") this.#handlePeerLeft(msg.peer);
@@ -528,6 +529,23 @@ export class CollabHost {
 			.abort({ reason: USER_INTERRUPT_LABEL })
 			.then(() => this.#ctx.session.emitNotice("info", `${name} interrupted`, "collab"))
 			.catch(err => logger.warn("collab guest abort failed", { error: String(err) }));
+	}
+
+	/**
+	 * The relay recreated the room and will reissue peer ids from 1, so every id in
+	 * {@link #peers} is meaningless — and `#peers` is the permission registry, not
+	 * just the roster. Leaving it populated lets whoever takes a reissued id inherit
+	 * the `canWrite` of the guest that held it, which a read-only link is enough to
+	 * exploit: `#handleFrame` admits a frame before its sender has said hello, so a
+	 * `prompt`, `abort`, `agent-cmd` or `ui-response` would be authorized against
+	 * the stale entry. Runs before the socket reports the open, so no frame from the
+	 * new room can be dispatched against the old identities.
+	 */
+	#handleRoomRecreated(): void {
+		if (this.#stopped || this.#peers.size === 0) return;
+		this.#peers.clear();
+		this.#updateStatusSegment();
+		this.#scheduleStateBroadcast();
 	}
 
 	/** Identity and UI only: the socket already retired the peer and dropped its backlog. */

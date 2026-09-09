@@ -22,12 +22,14 @@ const BACKOFF_MAX_MS = 30_000;
 const MAX_PENDING_SENDS = 256;
 const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
 /**
- * Retirement records kept. A record only has to outlive the frames already on
- * {@link CollabSocket.#recvChain} when the departure arrives — microseconds —
- * so this is four orders of magnitude more history than correctness needs. It
- * exists because relay ids increase for the room's lifetime: without a cap, a
- * client holding the view link can connect and disconnect in a loop, never
- * sending `hello`, and add one permanent entry per connection.
+ * Settled retirement records kept, as a memory backstop only. Correctness is an
+ * *ordering* obligation, not a count: a record must outlive the frames that were
+ * already on {@link CollabSocket.#recvChain} when the departure arrived, and
+ * connection churn can cross any count while an earlier frame is still being
+ * decrypted. Eviction therefore skips records whose obligation is unmet, and this
+ * bounds only the settled remainder — needed because relay ids climb for the
+ * room's lifetime, so a client with the view link could otherwise add one
+ * permanent entry per connect/disconnect cycle without ever sending `hello`.
  */
 const MAX_RETIRED_PEERS = 256;
 const WS_BACKPRESSURE_THRESHOLD = 64 * 1024;
@@ -81,10 +83,14 @@ export class CollabSocket {
 	 * runs, so it changes atomically with respect to anything that can enqueue.
 	 * Kept past the departure because decryption reorders dispatch: a frame that
 	 * finishes opening after its sender's `peer-left` must still be recognised as
-	 * stale. Capped by {@link MAX_RETIRED_PEERS}, since relay ids climb for the
-	 * room's lifetime.
+	 * stale.
+	 *
+	 * The value is whether that ordering obligation is met — whether the frames
+	 * received before the departure have been dispatched. Only settled records may
+	 * be evicted, so churn cannot retire a tombstone whose frame is still in the
+	 * chain; {@link MAX_RETIRED_PEERS} then bounds the settled remainder.
 	 */
-	#retiredPeers = new Set<number>();
+	#retiredPeers = new Map<number, boolean>();
 
 	constructor(opts: CollabSocketOptions) {
 		this.#opts = opts;
@@ -103,6 +109,9 @@ export class CollabSocket {
 	isServing(peerId: number): boolean {
 		return !this.#retiredPeers.has(peerId);
 	}
+
+	/** Fires on every reconnect: the relay recreated the room and reissues peer ids from 1. */
+	onRoomRecreated?: () => void;
 
 	connect(): void {
 		if (this.#ws || this.#retryTimer) return;
@@ -168,9 +177,11 @@ export class CollabSocket {
 	 * pressing case: it is one queue entry whose accounting covers only the chunk
 	 * in flight, so nothing bounds how long it keeps iterating at a retired id
 	 * while every new guest's welcome waits behind it. Retirement records go too —
-	 * keeping them would permanently refuse a reissued id. Broadcast work is
-	 * addressed to whoever is in the room and survives, which is the reconnect
-	 * backlog contract the drain tests pin.
+	 * keeping them would permanently refuse a reissued id, and so does the owner's
+	 * view of who is in the room — see {@link onRoomRecreated}, because an id is
+	 * also what the owner keys write permission off. Broadcast work is addressed to
+	 * whoever is in the room and survives, which is the reconnect backlog contract
+	 * the drain tests pin.
 	 */
 	#resetForRecreatedRoom(): void {
 		this.#retiredPeers.clear();
@@ -345,6 +356,9 @@ export class CollabSocket {
 			if (this.#rejoining) {
 				this.#rejoining = false;
 				this.#resetForRecreatedRoom();
+				// Before onOpen, and before onmessage can dispatch anything: the owner
+				// keys permissions off peer ids the relay is about to reissue.
+				this.onRoomRecreated?.();
 			}
 			this.#wakeSender?.();
 			this.onOpen?.();
@@ -406,16 +420,23 @@ export class CollabSocket {
 	 */
 	#applyPeerLifecycle(msg: RelayControlMessage): void {
 		if (msg.t !== "peer-left") return;
-		this.#retiredPeers.add(msg.peer);
-		this.dropPeer(msg.peer);
-		this.#trimRetired();
+		const peer = msg.peer;
+		this.#retiredPeers.set(peer, false);
+		this.dropPeer(peer);
+		// The obligation is discharged once everything received before this control
+		// message has been dispatched; nothing can arrive from the id afterwards.
+		void this.#recvChain.then(() => {
+			if (this.#retiredPeers.has(peer)) this.#retiredPeers.set(peer, true);
+			this.#trimRetired();
+		});
 	}
 
-	/** Forget the oldest retirements past the cap; insertion order is Set order. */
+	/** Forget the oldest *settled* retirements past the cap; insertion order is Map order. */
 	#trimRetired(): void {
-		for (const peer of this.#retiredPeers) {
+		if (this.#retiredPeers.size <= MAX_RETIRED_PEERS) return;
+		for (const [peer, settled] of this.#retiredPeers) {
 			if (this.#retiredPeers.size <= MAX_RETIRED_PEERS) return;
-			this.#retiredPeers.delete(peer);
+			if (settled) this.#retiredPeers.delete(peer);
 		}
 	}
 

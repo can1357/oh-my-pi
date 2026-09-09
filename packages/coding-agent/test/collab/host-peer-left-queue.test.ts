@@ -15,7 +15,7 @@ import { importRoomKey } from "@oh-my-pi/pi-coding-agent/collab/crypto";
 import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
-import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import { FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
 import {
 	HIGH_WATER_MARK,
 	type HostObservations,
@@ -105,6 +105,57 @@ it("discards a departed guest's queued snapshot instead of stalling the next gue
 		snapshot.entries.map(entry => entry.id),
 	);
 }, 15_000);
+
+it("does not let a reissued peer id inherit write permission", async () => {
+	const relay = installInMemoryRelay();
+	const probe = instrumentRelay(relay, { throttle: false });
+	const snapshot = makeSnapshot();
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const context = makeHostContext(snapshot, seen);
+	const prompted: unknown[] = [];
+	// The only side effect that matters: whether a prompt actually runs.
+	(context.session as unknown as { promptCustomMessage: (message: unknown) => Promise<void> }).promptCustomMessage =
+		message => {
+			prompted.push(message);
+			return Promise.resolve();
+		};
+	const host = new CollabHost(context);
+	cleanups.push(() => void host.stop("test done"));
+
+	await host.start("ws://localhost:8788");
+	const full = parseCollabLink(host.link);
+	const view = parseCollabLink(host.viewLink);
+	if ("error" in full) throw new Error(full.error);
+	if ("error" in view) throw new Error(view.error);
+	expect(view.writeToken).toBeUndefined();
+	const joins = () => seen.notices.filter(notice => notice.includes("joined the collab session")).length;
+
+	// A guest with the full link joins and takes the first peer id.
+	const writer = new CollabSocket({ wsUrl: full.wsUrl, role: "guest", key: await importRoomKey(full.key) });
+	cleanups.push(() => writer.close());
+	const writeToken = full.writeToken ? Buffer.from(full.writeToken).toString("base64url") : undefined;
+	writer.onOpen = () => writer.send({ t: "hello", proto: COLLAB_PROTO, name: "writer", writeToken });
+	writer.connect();
+	await waitFor(() => joins() >= 1, "host never handled the writable guest");
+	expect(seen.participantCounts.at(-1)).toBe(2);
+
+	// The host uplink drops transiently. The relay destroys the room, closes the
+	// guest, and issues ids from 1 again when the host comes back.
+	probe.hostSocket().close();
+	await waitFor(() => probe.hostSocket().readyState === FakeWebSocket.OPEN, "host never reconnected", 8_000);
+	await Bun.sleep(50);
+
+	// A client holding only the view link takes the reissued id and, without ever
+	// sending hello, tries to drive the session.
+	const viewer = new CollabSocket({ wsUrl: view.wsUrl, role: "guest", key: await importRoomKey(view.key) });
+	cleanups.push(() => viewer.close());
+	viewer.onOpen = () => viewer.send({ t: "prompt", text: "unauthenticated command" });
+	viewer.connect();
+	await Bun.sleep(200);
+
+	expect(prompted).toEqual([]);
+	expect(joins()).toBe(1);
+}, 30_000);
 
 it("ignores a hello that finishes decrypting after its sender's peer-left", async () => {
 	const relay = installInMemoryRelay();
