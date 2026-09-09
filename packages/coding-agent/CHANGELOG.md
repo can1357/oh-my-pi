@@ -4,6 +4,7 @@
 
 ### Fixed
 
+- Background job snapshots preserve complete sibling results when a capture fails and show each capture warning only once.
 - Failed raw-output captures now show a warning without failing the command or advertising an incomplete artifact as full output.
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Added

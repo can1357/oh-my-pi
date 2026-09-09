@@ -17,7 +17,7 @@ import type { StructuredSubagentOutput } from "../../task/types";
 import { parseConfiguredThinkingLevel } from "../../thinking";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import type { ToolSession } from "..";
-import { formatArtifactErrorNotice } from "../output-meta";
+import { formatArtifactErrorNotice, stripOutputNotice } from "../output-meta";
 import {
 	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
@@ -213,9 +213,7 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(advisor ? { advisor: true } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
-			...(!resultConsumed && latest.latestDetails?.meta?.artifactError
-				? { artifactError: latest.latestDetails.meta.artifactError }
-				: {}),
+			...(!resultConsumed && latest.latestDetails?.meta ? { meta: latest.latestDetails.meta } : {}),
 			...(!resultConsumed && latest.structured
 				? { structured: latest.structured, agentUrlId: current?.agentId ?? latest.id }
 				: {}),
@@ -240,7 +238,6 @@ export function buildJobResult(
 	});
 	const jobResults = snapshotJobs(session, uniqueJobs);
 	const alreadyConsumed = new Set(jobResults.filter(job => manager.isJobResultConsumed(job.id)).map(job => job.id));
-	const artifactError = jobResults.find(job => job.artifactError)?.artifactError;
 
 	manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
 
@@ -313,7 +310,8 @@ export function buildJobResult(
 
 	const details: CoordinationDetails = {
 		op,
-		...(artifactError ? { meta: { artifactError } } : {}),
+		// The report is complete even when an individual job's raw capture failed.
+		meta: { source: { type: "report", value: "background jobs snapshot" } },
 		jobs: jobResults,
 		...(cancelOutcomes.length ? { cancelled: cancelOutcomes.map(({ id, status }) => ({ id, status })) } : {}),
 		...(agents.length ? { agents } : {}),
@@ -642,6 +640,16 @@ export function jobsRenderResult(
 		uiTheme,
 	);
 
+	const outputMeta = result.details?.meta;
+	// Historical snapshots promoted a job failure to the root. Render it there
+	// only when no row identifies that failure; new report capture errors are distinct.
+	const aggregateArtifactError =
+		outputMeta?.artifactError &&
+		(outputMeta.source?.type === "report" ||
+			!jobs.some(job => (job.meta?.artifactError ?? job.artifactError) === outputMeta.artifactError))
+			? outputMeta.artifactError
+			: undefined;
+
 	// Sort: running first (so user sees what's still pending), then failed, then completed/cancelled.
 	const statusOrder: Record<JobSnapshot["status"], number> = {
 		running: 0,
@@ -747,14 +755,23 @@ export function jobsRenderResult(
 								`  ${uiTheme.fg("toolOutput", truncateToWidth(visibleLabelLines[i]!, continuationWidth))}`,
 							);
 						}
-						if (job.artifactError) {
+						const artifactError = job.meta?.artifactError ?? job.artifactError;
+						if (artifactError) {
 							lines.push(
-								uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(job.artifactError), rowWidth)),
+								uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(artifactError), rowWidth)),
 							);
 						}
 
+						// Legacy rows did not retain full metadata. Strip the known warning
+						// footer so the dedicated row/root warning remains the only copy.
+						const previewError =
+							artifactError ?? (outputMeta?.source?.type !== "report" ? outputMeta?.artifactError : undefined);
+						const previewMeta = job.meta ?? (previewError ? { artifactError: previewError } : undefined);
+
 						const preview = flattenStructuredPreview(
-							stripTaskResultEnvelope(job.errorText?.trim() || job.resultText?.trim() || ""),
+							stripTaskResultEnvelope(
+								stripOutputNotice(job.errorText?.trim() || job.resultText?.trim() || "", previewMeta).trim(),
+							),
 						);
 						if (preview) {
 							const maxLines = expanded ? PREVIEW_LINES_EXPANDED : PREVIEW_LINES_COLLAPSED;
@@ -816,7 +833,12 @@ export function jobsRenderResult(
 							uiTheme,
 						);
 
-			const all = [header, ...itemLines, ...agentLines].map(l => truncateToWidth(l, width, Ellipsis.Unicode));
+			const all = [header];
+			if (aggregateArtifactError) {
+				all.push(uiTheme.fg("warning", formatArtifactErrorNotice(aggregateArtifactError)));
+			}
+			all.push(...itemLines, ...agentLines);
+			for (let i = 0; i < all.length; i++) all[i] = truncateToWidth(all[i]!, width, Ellipsis.Unicode);
 			cached = { key, lines: all };
 			return all;
 		},

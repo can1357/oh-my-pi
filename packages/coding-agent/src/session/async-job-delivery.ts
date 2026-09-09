@@ -47,6 +47,8 @@ type AsyncResultJobDetails = {
 	type?: AsyncJobType;
 	label?: string;
 	durationMs?: number;
+	/** Source capture metadata belongs to this job, not to the enclosing delivery report. */
+	meta?: OutputMeta;
 	/** Full structured payload (source/mode/status/data/error), when the job used an output schema. */
 	schema?: StructuredSubagentOutput;
 };
@@ -92,6 +94,7 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			type: entry.job?.type,
 			label: entry.job?.label,
 			durationMs: entry.durationMs,
+			meta: entry.job?.latestDetails?.meta,
 			structured,
 			structuredJson,
 			hasStructuredData,
@@ -100,15 +103,14 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			schemaValid: structured?.status === "valid",
 		};
 	});
-	const artifactError = entries.find(entry => entry.job?.latestDetails?.meta?.artifactError)?.job?.latestDetails?.meta
-		?.artifactError;
 	const details: AsyncResultDetails = {
-		...(artifactError ? { meta: { artifactError } } : {}),
+		meta: { source: { type: "report", value: "background job delivery" } },
 		jobs: jobs.map(job => ({
 			jobId: job.jobId,
 			type: job.type,
 			label: job.label,
 			durationMs: job.durationMs,
+			...(job.meta ? { meta: job.meta } : {}),
 			...(job.structured ? { schema: job.structured } : {}),
 		})),
 	};

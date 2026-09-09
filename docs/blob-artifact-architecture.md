@@ -136,7 +136,9 @@ Practical effect:
 
 If artifact I/O fails, the sink stops further capture attempts, retains the existing bounded inline output, and still closes its writer. The tool's execution result is unchanged; its output metadata and terminal warning state that full output was not saved completely, without advertising the incomplete artifact as a full recovery source. `dump()` and `dispose()` share completion so concurrent finalization cannot publish success before an asynchronous write or close failure settles. The streaming sink does not enable a disk cap or retry failed capture.
 
-The capture warning also survives background job delivery, `hub jobs`/`wait` recovery, cancellation, and transcript rebuilds. Incomplete previews are not re-spilled and advertised as full original output.
+The capture warning also survives background job delivery, `hub jobs`/`wait` recovery, cancellation, and transcript rebuilds. Capture failures belong to individual jobs, not the aggregate report. Oversized snapshots can persist the complete annotated report, including healthy jobs' results, and advertise it as a "full report" rather than a full original command log. Each source capture warning appears once in model-facing text and once on its own live or rebuilt terminal row. Individual incomplete captures are still not re-spilled and advertised as full original output.
+
+Transcript rebuilds also read capture errors from historical per-job fields. A historical aggregate warning is retained when no job identifies its source; it is not repeated when a row already carries the same failure.
 
 ## URL access model
 

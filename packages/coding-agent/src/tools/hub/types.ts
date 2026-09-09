@@ -7,7 +7,6 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { AsyncJobType } from "../../async";
 import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
-import type { OutputArtifactError } from "../../session/streaming-output";
 import type { OutputMeta } from "../output-meta";
 import type { StructuredSubagentOutput } from "../../task/types";
 import type { ConfiguredThinkingLevel } from "../../thinking";
@@ -76,7 +75,10 @@ export interface JobSnapshot {
 	advisor?: boolean;
 	resultText?: string;
 	errorText?: string;
-	artifactError?: OutputArtifactError;
+	/** Source-output metadata retained for per-job warnings and persisted row rendering. */
+	meta?: OutputMeta;
+	/** Capture error in historical snapshots; new snapshots store source metadata in `meta`. */
+	artifactError?: OutputMeta["artifactError"];
 	structured?: StructuredSubagentOutput;
 	/**
 	 * `agent://<id>` handle backing this job's artifacts — the job-row's

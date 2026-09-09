@@ -38,7 +38,7 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 			type?: AsyncJobType;
 			label?: string;
 			durationMs?: number;
-			jobs?: Array<{ jobId?: string; type?: AsyncJobType; label?: string; durationMs?: number }>;
+			jobs?: Array<{ jobId?: string; type?: AsyncJobType; label?: string; durationMs?: number; meta?: OutputMeta }>;
 			meta?: OutputMeta;
 		}>
 	).details;
@@ -67,6 +67,9 @@ export function buildAsyncResultBlock(message: CustomOrHookMessage): ToolActivit
 			.filter(Boolean)
 			.join(" ");
 		block.addChild(new Text(line, 1, 0));
+		if (job.meta?.artifactError) {
+			block.addChild(new Text(theme.fg("warning", formatArtifactErrorNotice(job.meta.artifactError)), 1, 0));
+		}
 	}
 	if (details?.meta?.artifactError) {
 		block.addChild(new Text(theme.fg("warning", formatArtifactErrorNotice(details.meta.artifactError)), 1, 0));

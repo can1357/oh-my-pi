@@ -1413,7 +1413,7 @@ export class OutputSink {
 	/**
 	 * Flush any capped artifact tail and close the spill file descriptor,
 	 * awaiting an in-flight sink creation so a descriptor opened by a late
-	 * chunk is still released. Idempotent via {@link #finalized}: the artifact
+	 * chunk is still released. Idempotent via {@link #fileFinalization}: the artifact
 	 * is finalized exactly once whether the caller reached {@link dump} or
 	 * bailed through {@link dispose}. `#file` is left set so {@link dump} can
 	 * still read `artifactId` for its summary.

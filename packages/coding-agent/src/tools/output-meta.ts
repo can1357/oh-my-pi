@@ -64,7 +64,9 @@ export interface TruncationMeta {
 export type SourceMeta =
 	| { type: "path"; value: string }
 	| { type: "url"; value: string }
-	| { type: "internal"; value: string };
+	| { type: "internal"; value: string }
+	/** A complete aggregate report, whose entries may contain incomplete source captures. */
+	| { type: "report"; value: string };
 
 /**
  * LSP diagnostic info (for edit/write tools).
@@ -89,7 +91,7 @@ export interface LimitsMeta {
  */
 export interface OutputMeta {
 	truncation?: TruncationMeta;
-	/** Artifact capture failed independently of command execution or inline truncation. */
+	/** Capture failure of this output itself; aggregate reports keep source failures on their entries. */
 	artifactError?: OutputArtifactError;
 	source?: SourceMeta;
 	diagnostics?: DiagnosticMeta;
@@ -492,8 +494,14 @@ export function stripGeneratedOutputNotice(text: string): string {
 	return trimmed.slice(0, lineStart === -1 ? 0 : lineStart).trimEnd();
 }
 
-export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
+export function formatTruncationMetaNotice(truncation: TruncationMeta, source?: SourceMeta): string {
 	let notice: string;
+	const artifactReference =
+		truncation.artifactId == null
+			? undefined
+			: source?.type === "report"
+				? `Read artifact://${truncation.artifactId} for full report (${source.value})`
+				: formatFullOutputReference(truncation.artifactId);
 
 	if (truncation.direction === "middle") {
 		const head = truncation.headRange;
@@ -513,8 +521,8 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
 		if (truncation.nextOffset != null) {
 			notice += `. Use :${truncation.nextOffset} to continue`;
 		}
-		if (truncation.artifactId != null) {
-			notice += `. ${formatFullOutputReference(truncation.artifactId)}`;
+		if (artifactReference) {
+			notice += `. ${artifactReference}`;
 		}
 		return notice;
 	}
@@ -522,8 +530,8 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
 	if (truncation.partialLine) {
 		const line = truncation.shownRange?.start ?? 1;
 		notice = `Showing line ${line} (partial, ${formatBytes(truncation.outputBytes)} of ${formatBytes(truncation.totalBytes)}) of ${truncation.totalLines}`;
-		if (truncation.artifactId != null) {
-			notice += `. ${formatFullOutputReference(truncation.artifactId)}`;
+		if (artifactReference) {
+			notice += `. ${artifactReference}`;
 		}
 		return notice;
 	}
@@ -544,8 +552,8 @@ export function formatTruncationMetaNotice(truncation: TruncationMeta): string {
 		notice += `. Use :${truncation.nextOffset} to continue`;
 	}
 
-	if (truncation.artifactId != null) {
-		notice += `. ${formatFullOutputReference(truncation.artifactId)}`;
+	if (artifactReference) {
+		notice += `. ${artifactReference}`;
 	}
 
 	return notice;
@@ -574,7 +582,7 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 
 	// Truncation notice
 	if (meta.truncation) {
-		parts.push(formatTruncationMetaNotice(meta.truncation));
+		parts.push(formatTruncationMetaNotice(meta.truncation, meta.source));
 	}
 	if (meta.artifactError) {
 		parts.push(formatArtifactErrorNotice(meta.artifactError));
@@ -615,7 +623,7 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 export function formatStyledTruncationWarning(meta: OutputMeta | undefined, theme: Theme): string | null {
 	if (!meta?.truncation && !meta?.artifactError) return null;
 	const parts: string[] = [];
-	if (meta.truncation) parts.push(formatTruncationMetaNotice(meta.truncation));
+	if (meta.truncation) parts.push(formatTruncationMetaNotice(meta.truncation, meta.source));
 	if (meta.artifactError) parts.push(formatArtifactErrorNotice(meta.artifactError));
 	return theme.fg("warning", wrapBrackets(parts.join(". "), theme));
 }
