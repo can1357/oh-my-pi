@@ -609,7 +609,7 @@ function buildDevinChatRequest(
 			maxNewlines: 400n,
 			temperature: options?.temperature ?? 1.0,
 			topK: 40n,
-			topP: options?.topP ?? 0.95,
+			topP: Math.fround(options?.topP ?? 0.95), // CLI widens float32 (mitmproxy 2026-09-09).
 			stopPatterns,
 		}),
 		tools: (context.tools ?? []).map((tool: Tool) =>
@@ -682,7 +682,7 @@ function buildChatMessagePrompts(
 					messageId:
 						isNativeDevinMessage && msg.responseId
 							? msg.responseId
-							: `bot-${deterministicUuid(`${cascadeId}\0${index}\0assistant`)}`,
+							: deterministicUuid(`${cascadeId}\0${index}\0assistant`),
 					source: ChatMessageSource.SYSTEM,
 					prompt: promptText,
 					thinking: thinkingText,

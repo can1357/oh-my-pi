@@ -27,6 +27,7 @@
 - Catalog matrix omp `-p` slice derives `--thinking` from each selected model's probe effort (omits the flag when none is known).
 - Catalog matrix bash smoke rejects pipelines that can suppress the probe token (not only redirects/`tee`).
 - Keep-model Anthropic probe validates and replays returned Shell arguments (no fabricated echo).
+- Updated Devin CLI request identity to 3000.6.14, float32-rounded topP, and plain-UUID assistant message ids to match current CLI wire traffic.
 
 ## [18.1.15] - 2026-09-08
 
