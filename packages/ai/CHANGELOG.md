@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added `compat.warmNativeHistoryReplay` for `openai-responses` models: a resumed session replays native history (reasoning items, message ids) from its first request, so providers that keep prior-turn thinking in context (Anthropic behind OpenAI-compatible gateways) hit the prompt cache instead of rewriting the whole prefix on every process restart ([#11266](https://github.com/can1357/oh-my-pi/issues/11266), [#11269](https://github.com/can1357/oh-my-pi/pull/11269) by [@mttzzz](https://github.com/mttzzz))
 - Added per-model `compat.statefulResponses` to enable or disable stored Responses chaining (`previous_response_id` with `store: true`) for one endpoint without the official-only request fields that `compat.officialEndpoint` implies ([#13686](https://github.com/can1357/oh-my-pi/pull/13686) by [@alphastorm](https://github.com/alphastorm)).
 - Added Snowflake Cortex with browser OAuth, token refresh, PAT environment authentication, and streaming Claude/OpenAI models with local tool execution ([#14507](https://github.com/can1357/oh-my-pi/pull/14507) by [@jorgoose](https://github.com/jorgoose)).
 - `AuthStorage.health.check()` accepts `excludeProviders` to skip credentials of providers the caller does not serve ([#14234](https://github.com/can1357/oh-my-pi/pull/14234) by [@will-bogusz](https://github.com/will-bogusz))
@@ -119,7 +120,6 @@
 
 - Changed to fall back to adaptive thinking when between_tools is used with xhigh effort
 - xAI requests (`xai`, `xai-oauth` chat and image generation) honor `XAI_BASE_URL` again when the model uses the bundled `https://api.x.ai/v1` endpoint; a custom `baseUrl` from models.yml still wins, and `xai-oauth` OAuth access tokens always stay on the bundled endpoint.
-- Added `compat.warmNativeHistoryReplay` for `openai-responses` models: a resumed session replays native history (reasoning items, message ids) from its first request, so providers that keep prior-turn thinking in context (Anthropic behind OpenAI-compatible gateways) hit the prompt cache instead of rewriting the whole prefix on every process restart ([#11266](https://github.com/can1357/oh-my-pi/issues/11266), [#11269](https://github.com/can1357/oh-my-pi/pull/11269) by [@mttzzz](https://github.com/mttzzz))
 
 ### Fixed
 
