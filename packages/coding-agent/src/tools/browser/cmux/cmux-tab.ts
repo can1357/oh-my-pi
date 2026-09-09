@@ -34,9 +34,9 @@ import type {
 } from "../tab-protocol";
 import {
 	checkNavigationTarget,
-	isBlockedCommittedNavigation,
 	navigationBlockedMessage,
 	policyFromSettings,
+	recheckCommittedNavigation,
 } from "../url-guard";
 import {
 	type CmuxEvalResult,
@@ -355,6 +355,14 @@ export class CmuxTab {
 	 * after the navigate request; the run's reply is failed by `runCmuxCode`.
 	 */
 	#navViolation: string | undefined;
+	/**
+	 * Hostname → answers memoized for the ACTIVE run: one DNS lookup per host,
+	 * shared between `goto`'s pre-check and its post-commit recheck (a cached
+	 * answer is still classified on every use). Cleared by
+	 * {@link beginNavigationRun} so a long-lived surface never pins a stale
+	 * answer across runs.
+	 */
+	#resolvedHosts = new Map<string, readonly string[]>();
 	constructor(opts: {
 		client: CmuxSocketClient;
 		surfaceId: string;
@@ -431,9 +439,10 @@ export class CmuxTab {
 		this.#runContext = undefined;
 	}
 
-	/** Clear the per-run committed-navigation violation flag (run start). */
+	/** Clear the per-run committed-navigation violation flag and host memo (run start). */
 	beginNavigationRun(): void {
 		this.#navViolation = undefined;
+		this.#resolvedHosts = new Map();
 	}
 
 	/** Consume the committed-navigation violation recorded during the run. */
@@ -446,14 +455,17 @@ export class CmuxTab {
 	async goto(url: string, opts?: { waitUntil?: WaitUntil; timeoutMs?: number }): Promise<void> {
 		const timeoutMs = opts?.timeoutMs ?? this.#runContext?.timeoutMs ?? 30_000;
 		const settings = this.#runContext?.session.navigation ?? this.#navigation;
-		const verdict = await checkNavigationTarget(url, policyFromSettings(settings));
+		const policy = { ...policyFromSettings(settings), resolvedHosts: this.#resolvedHosts };
+		const verdict = await checkNavigationTarget(url, policy);
 		if (!verdict.allow) throw new ToolError(navigationBlockedMessage(verdict));
 		const result = await this.#request("browser.navigate", { url }, timeoutMs);
 		const navigatedUrl = result.url;
 		this.#lastUrl = typeof navigatedUrl === "string" && navigatedUrl.length > 0 ? navigatedUrl : url;
 		// Server-issued redirects can land somewhere the request URL did not:
-		// recheck the committed URL DNS-free and quarantine the surface.
-		if (isBlockedCommittedNavigation(this.#lastUrl, policyFromSettings(settings))) {
+		// recheck the committed URL — DNS-free first, then re-resolving a host
+		// that never passed this run's pre-check (rebinding window) — and
+		// quarantine the surface.
+		if (await recheckCommittedNavigation(this.#lastUrl, policy)) {
 			this.#navViolation = this.#lastUrl;
 			await this.goto("about:blank", { timeoutMs: 5_000 }).catch(() => undefined);
 		}

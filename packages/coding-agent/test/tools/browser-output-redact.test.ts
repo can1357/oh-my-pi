@@ -86,7 +86,7 @@ describe("browser-output redaction: recursive + integration", () => {
 			a: ["ghp_ABCDEFGHIJKLMNOPQRST1234", 5],
 			b: { c: null },
 			d: new Date(0),
-		});
+		}) as { a: unknown[]; b: { c: null }; d: Date };
 		expect(result.a[0]).toBe("ghp_AB...1234");
 		expect(result.a[1]).toBe(5);
 		expect(result.b).toEqual({ c: null });
@@ -100,11 +100,92 @@ describe("browser-output redaction: recursive + integration", () => {
 			title: "Acme",
 			elements: [{ id: 1, role: "textbox", name: "api_key", value: "sk-proj-abcdef1234567890ZZ" }],
 		};
-		const redacted = redactBrowserOutput(snapshot);
+		const redacted = redactBrowserOutput(snapshot) as {
+			url: string;
+			title: string;
+			elements: { id: number; role: string; name: string; value: string }[];
+		};
 		// Bare token values (no key= context) get partial shape-masking, never
 		// the full secret.
 		expect(redacted.elements[0].value).toContain("...");
 		expect(redacted.elements[0].value).not.toContain("abcdef1234567890ZZ");
 		expect(redacted.url).toBe("https://example.com/");
+	});
+
+	it("collapses aliased objects into one redacted copy (no raw second reference)", () => {
+		const inner = { token: "ghp_ABCDEFGHIJKLMNOPQRST1234" };
+		const out = redactBrowserOutput({ a: inner, b: inner, list: [inner, inner] }) as {
+			a: { token: string };
+			b: { token: string };
+			list: { token: string }[];
+		};
+		expect(JSON.stringify(out)).not.toContain("ABCDEFGHIJKLMNOPQRST1234");
+		// Identity is preserved: every alias points at the SAME masked copy.
+		expect(out.b).toBe(out.a);
+		expect(out.list[0]).toBe(out.a);
+		expect(out.list[1]).toBe(out.a);
+		expect(out.a.token).toBe("ghp_AB...1234");
+	});
+
+	it("terminates a self-cycle against the redacted copy", () => {
+		const node: Record<string, unknown> = { secret: "ghp_ABCDEFGHIJKLMNOPQRST1234" };
+		node.self = node;
+		const out = redactBrowserOutput(node) as Record<string, unknown>;
+		// The cycle must point at the masked copy, never the raw original.
+		expect(out.self).toBe(out);
+		expect(out.secret).toBe("ghp_AB...1234");
+	});
+
+	it("masks a string value whose object key names a credential", () => {
+		// `{ api_key: "..." }` carries no `api_key=` text, so no assignment pass
+		// can see it — the key name is the only credential context.
+		const out = redactBrowserOutput({ api_key: "SuperSecretValue18", note: "SuperSecretValue18" }) as {
+			api_key: string;
+			note: string;
+		};
+		expect(out.api_key).toBe("SuperS...ue18");
+		// A neutral key is not masked by name (text passes still apply).
+		expect(out.note).toBe("SuperSecretValue18");
+	});
+
+	it("keeps env-lookup expressions intact under a secret key", () => {
+		const out = redactBrowserOutput({ token: "process.env.MY_TOKEN" }) as { token: string };
+		expect(out.token).toBe("process.env.MY_TOKEN");
+	});
+});
+
+describe("browser-output redaction: header/cookie family and gate edges", () => {
+	it("masks credential-bearing JSON fields beyond the api-key name list", () => {
+		expect(redactBrowserText('{"cookie": "sessionid=abcdefghijklmnop"}')).toBe('{"cookie": "sessio...mnop"}');
+		expect(redactBrowserText('{"set-cookie": "abc123def456ghi789jkl; HttpOnly"}')).not.toContain("abc123def456ghi789jkl");
+		expect(redactBrowserText('{"authorization": "Bearer abcdefghijklmnop1234"}')).not.toContain("abcdefghijklmnop1234");
+		expect(redactBrowserText('{"x-api-key": "abcdefABCDEF0123456789"}')).not.toContain("abcdefABCDEF0123456789");
+	});
+
+	it("masks a bare cookie-jar body but not URL query params", () => {
+		const jar = "sid=abcdefghijklmnop; csrf_token=zzzzzzzzzzzzzzzz1234";
+		const masked = redactBrowserText(jar);
+		expect(masked).not.toContain("abcdefghijklmnop");
+		expect(masked).not.toContain("zzzzzzzzzzzzzzzz1234");
+		// hermes parity: magic-link / OAuth query params round-trip.
+		expect(redactBrowserText("https://x.test/cb?state=abcdefghijklmnop&code=123")).toBe(
+			"https://x.test/cb?state=abcdefghijklmnop&code=123",
+		);
+	});
+
+	it("masks userinfo in a protocol-relative reference", () => {
+		expect(redactBrowserText("link //admin:hunter2pass@internal.example/x")).toContain(":***@");
+		expect(redactBrowserText("link //admin:hunter2pass@internal.example/x")).not.toContain("hunter2pass");
+	});
+
+	it("catches vendor prefixes split by control bytes inside the prefix itself", () => {
+		// zero-width space between `sk` and `-`: the substring pre-screen must
+		// run on a control-stripped copy or this token escapes entirely.
+		const split = `sk\u200b-proj-abcdef1234567890ZZ`;
+		expect(redactBrowserText(split)).not.toContain("abcdef1234567890ZZ");
+		// control inside the token body (already covered by hermes' pass)
+		expect(redactBrowserText("sk-proj-\u001babcdef1234567890ZZ")).not.toContain("abcdef1234567890ZZ");
+		// control at the very end, where the line guard could skip the span
+		expect(redactBrowserText(`sk-proj-abcdef1234567890ZZ\u200b`)).not.toContain("abcdef1234567890ZZ");
 	});
 });

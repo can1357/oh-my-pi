@@ -545,6 +545,14 @@ async function acquireCmuxTab(
 			surfaceId = result.surface_id;
 			ownsSurface = true;
 			if (typeof result.url === "string" && result.url.length > 0) initialUrl = result.url;
+			// A fresh split is navigated BY cmux, so the request never crosses
+			// `CmuxTab.goto`: the landed URL (which can differ from `opts.url`
+			// through a server redirect) would otherwise be handed to the model
+			// unvalidated. Reuse the same policy the worker enforces.
+			if (initialUrl) {
+				const verdict = await checkNavigationTarget(initialUrl, policyFromSettings(opts.navigation));
+				if (!verdict.allow) throw new ToolError(navigationBlockedMessage(verdict));
+			}
 			if (opts.url) {
 				await browser.client.request(
 					"browser.wait",
@@ -561,6 +569,14 @@ async function acquireCmuxTab(
 		const cmuxTab = new CmuxTab({ client: browser.client, surfaceId, url: initialUrl, navigation: opts.navigation });
 		if (attachedSurface && opts.url) {
 			await cmuxTab.goto(opts.url, { waitUntil: opts.waitUntil ?? "load", timeoutMs: opts.timeoutMs });
+		}
+		// `goto` quarantines a policy-violating landed URL and records it; an
+		// acquisition that ends on such a target must not hand the surface over.
+		const landed = cmuxTab.takeNavigationViolation();
+		if (landed) {
+			throw new ToolError(
+				`Blocked: navigation committed to ${JSON.stringify(landed)}, a private/internal or disallowed target.`,
+			);
 		}
 		const info = await cmuxTab.readyInfo(opts.viewport ?? DEFAULT_VIEWPORT);
 		// If the caller aborted while we were opening the cmux surface, close the

@@ -38,9 +38,14 @@
  *
  * It FAILS CLOSED: DNS failure, empty answers, unparseable addresses,
  * malformed URLs and any unexpected error all block (:449-485, :515-519). The
- * one ported carve-out is hermes' proxy-delegation case: when an HTTP(S)/ALL
- * proxy env var is configured, a DNS failure allows the navigation because the
- * proxy — not this process — resolves the name (:450-472).
+ * one ported carve-out is hermes' proxy-delegation case, narrowed to the proxy
+ * omp's browser actually uses: when `PUPPETEER_PROXY` is set (launch.ts turns it
+ * into Chromium's `--proxy-server`), name resolution happens at the proxy, so a
+ * locally-failing lookup allows the navigation — unless `NO_PROXY` names the
+ * host, the hostname is internal by class (`localhost`, `*.local`, …), or the
+ * metadata floor already matched. The generic `HTTP(S)_PROXY`/`ALL_PROXY` vars
+ * hermes consults do NOT count: omp never routes the browser through them, so
+ * honouring them would fail open for a proxy that is not in the path.
  *
  * Deltas vs hermes (see NOTICE):
  *  - `new URL()` (WHATWG/Ada) replaces `urlparse`: it already normalizes
@@ -63,11 +68,18 @@
  *    connections, so the window remains: a hostile DNS record answering public
  *    at check time and flipping to `127.0.0.1` before Chromium connects still
  *    reaches the loopback service. The mitigation available here is the
- *    post-commit recheck (`isAlwaysBlockedNavigationTarget` + the worker's
- *    `framenavigated` observer): the committed URL is re-validated, the
- *    navigation stopped, the page pulled back to `about:blank`, and the run's
- *    output discarded so the fetched content never reaches the model.
- *    Honestly: content suppression, not prevention.
+ *    post-commit recheck: every committed frame URL passes
+ *    `isBlockedCommittedNavigation` (DNS-free: literals, metadata names, the
+ *    allowlist) and then `recheckCommittedNavigation`, which additionally
+ *    RE-RESOLVES a committed hostname that is not an IP literal, so a name that
+ *    was public at pre-flight and private at commit is caught.
+ *    `isAlwaysBlockedNavigationTarget` is the DNS-free floor subset, used to
+ *    fail fast before any lookup. The violating load is stopped, the page pulled
+ *    back to `about:blank`, and the run's output discarded so the fetched
+ *    content never reaches the model. Honestly: content suppression, not
+ *    prevention. Lookups are memoized per navigation run
+ *    (`NavigationGuardPolicy.resolvedHosts`), so a redirect chain costs one
+ *    lookup per distinct hostname instead of one per commit.
  *  - The relay/CDP *transport* (`wsEndpoint`, e.g. `127.0.0.1:9224`) never
  *    passes through this module: the guard inspects navigation TARGETS only,
  *    so `app.relay` sessions keep driving the owner's Chrome unchanged; the
@@ -100,6 +112,16 @@ export interface NavigationGuardPolicy {
 	readonly allowFileUrls?: boolean;
 	/** Injectable DNS resolver (tests, sandboxes). Defaults to `node:dns`. */
 	readonly lookup?: HostnameResolver;
+	/**
+	 * Optional DNS answer memo (hostname → addresses). `checkNavigationTarget`
+	 * records every lookup it performs here, and `recheckCommittedNavigation`
+	 * reads it to tell "already vetted in this navigation run" from "arrived via
+	 * a redirect or a script navigation that never passed the pre-flight". A
+	 * miss is therefore treated as unvetted and re-resolved (answers are written
+	 * back, so a redirect chain costs one lookup per distinct host). Mutable
+	 * call state, not serialized config; `policyFromSettings` leaves it absent.
+	 */
+	readonly resolvedHosts?: Map<string, readonly string[]>;
 }
 
 export type NavigationVerdict =
@@ -112,7 +134,14 @@ export type NavigationVerdict =
 			readonly detail?: string;
 	  };
 
-const PROXY_ENV_VARS = ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"] as const;
+/**
+ * The proxy omp's Chromium actually consumes (launch.ts:443 → `--proxy-server`).
+ * Only a proxy on this path can be the party that resolves a name, so only this
+ * variable unlocks the DNS-failure carve-out.
+ */
+const BROWSER_PROXY_ENV_VARS = ["PUPPETEER_PROXY", "puppeteer_proxy"] as const;
+/** `NO_PROXY` spellings whose host list re-disables the carve-out. */
+const NO_PROXY_ENV_VARS = ["NO_PROXY", "no_proxy"] as const;
 
 /** Cloud metadata hostnames blocked without any DNS lookup (url_safety.py:166-169). */
 const ALWAYS_BLOCKED_HOSTNAMES: Record<string, true> = {
@@ -143,6 +172,7 @@ const ALWAYS_BLOCKED_V4_EXACT: readonly number[] = [
 	ip4("169.254.170.2"), // AWS ECS task metadata (task IAM creds)
 	ip4("169.254.169.253"), // Azure IMDS wire server
 	ip4("100.100.100.200"), // Alibaba Cloud metadata
+	ip4("192.0.0.192"), // Oracle Cloud secondary IMDS (RFC 6890 reserved, not link-local)
 ];
 
 /** IPv4 CIDRs blocked even under every relaxation (:192-195). */
@@ -298,6 +328,48 @@ function sixToFourV4(bytes: Uint8Array): number | undefined {
 	return ((bytes[2] ?? 0) * 16777216 + (bytes[3] ?? 0) * 65536 + (bytes[4] ?? 0) * 256 + (bytes[5] ?? 0)) >>> 0;
 }
 
+/** Reads the big-endian IPv4 starting at byte `at`. */
+function v4At(bytes: Uint8Array, at: number): number {
+	return ((bytes[at] ?? 0) * 16777216 + (bytes[at + 1] ?? 0) * 65536 + (bytes[at + 2] ?? 0) * 256 + (bytes[at + 3] ?? 0)) >>> 0;
+}
+
+/**
+ * RFC 6052 NAT64: the well-known `64:ff9b::/96` prefix carries the IPv4 in the
+ * last four bytes, the local-use `64:ff9b:1::/48` right after the 48-bit
+ * prefix. Without this unwrap, `http://[64:ff9b::a9fea9fe]/` reaches
+ * 169.254.169.254 through a NAT64 gateway while every v4 check sees only a
+ * "public" v6 address.
+ */
+function nat64V4(bytes: Uint8Array): number | undefined {
+	if (bytes[0] !== 0x00 || bytes[1] !== 0x64 || bytes[2] !== 0xff || bytes[3] !== 0x9b) return undefined;
+	const wellKnown =
+		bytes[4] === 0 && bytes[5] === 0 && bytes[6] === 0 && bytes[7] === 0 && bytes[8] === 0 && bytes[9] === 0;
+	if (wellKnown) return v4At(bytes, 12);
+	if (bytes[4] !== 0x00 || bytes[5] !== 0x01) return undefined;
+	// Real-world URLs also spell the local-use form with the IPv4 in the trailing
+	// 32 bits (`64:ff9b:1::a9fe:a9fe`); either placement can reach the gateway,
+	// so judge whichever one carries an address.
+	const afterPrefix = v4At(bytes, 6);
+	return afterPrefix !== 0 ? afterPrefix : v4At(bytes, 12);
+}
+
+/**
+ * Teredo (`2001:0000::/32`) carries the client-visible IPv4 in bytes 4..7,
+ * bitwise-inverted. Only the server-side/universal form is unwrapped here — a
+ * Teredo address that is NOT `2001:0000::/32` already starts with the public
+ * `2001::/23` routing space and is judged as plain IPv6.
+ */
+function teredoV4(bytes: Uint8Array): number | undefined {
+	if (bytes[0] !== 0x20 || bytes[1] !== 0x01 || bytes[2] !== 0x00 || bytes[3] !== 0x00) return undefined;
+	return (
+		(((~(bytes[4] ?? 0)) & 0xff) * 16777216 +
+			((~(bytes[5] ?? 0)) & 0xff) * 65536 +
+			((~(bytes[6] ?? 0)) & 0xff) * 256 +
+			((~(bytes[7] ?? 0)) & 0xff)) >>>
+		0
+	);
+}
+
 function alwaysBlockedV4(value: number): boolean {
 	if (ALWAYS_BLOCKED_V4_EXACT.includes(value)) return true;
 	return inCidrs4(value, ALWAYS_BLOCKED_V4_NETWORKS);
@@ -326,11 +398,11 @@ export function classifyIpAddress(ip: string): {
 	}
 	const v6 = parseIpv6(normalized);
 	if (!v6) return { kind: "v6", private: true, alwaysBlocked: true };
-	const embedded = embeddedV4(v6) ?? sixToFourV4(v6);
+	const embedded = embeddedV4(v6) ?? sixToFourV4(v6) ?? nat64V4(v6) ?? teredoV4(v6);
 	if (embedded !== undefined) {
-		// `::ffff:x.x.x.x` / `::x.x.x.x` / `2002:x.x.x.x.*`: judged by the
-		// embedded IPv4 — incl. the mapped link-local metadata floor
-		// (`::ffff:169.254.0.0/112` in hermes terms).
+		// `::ffff:x.x.x.x` / `::x.x.x.x` / `2002:x.x.x.x.*` / NAT64 / Teredo:
+		// judged by the embedded IPv4 — incl. the mapped link-local metadata
+		// floor (`::ffff:169.254.0.0/112` in hermes terms).
 		return {
 			kind: "v6",
 			private: inCidrs4(embedded, PRIVATE_V4_NETWORKS),
@@ -377,6 +449,20 @@ function splitHostPort(input: string): { hostname: string; port: string } {
 	return { hostname: text.toLowerCase(), port: "" };
 }
 
+/** The port a scheme implies when a URL spells none (`URL.port === ""`). */
+function schemeDefaultPort(scheme: string | undefined): string | undefined {
+	switch (scheme) {
+		case "http":
+		case "ws":
+			return "80";
+		case "https":
+		case "wss":
+			return "443";
+		default:
+			return undefined;
+	}
+}
+
 function normalizeHostname(hostname: string): string {
 	return hostname.toLowerCase().replace(/\.+$/, "");
 }
@@ -385,35 +471,74 @@ function normalizeHostname(hostname: string): string {
  * Match a normalized hostname (and optional `host:port`) against an explicit
  * allowlist entry: exact hostname, exact `host:port`, `*.suffix` wildcard,
  * bare IP literal, or CIDR prefix. Entries come from configuration only.
+ *
+ * `scheme` is the target's URL scheme: WHATWG `URL.port` is EMPTY for a
+ * default port, so an entry spelled `host:443` would otherwise never match
+ * `https://host/`. Default-port spellings are normalized away for the scheme
+ * they name, and IPv6 brackets are stripped on both sides so `[::1]:9222` and
+ * `http://[::1]:9222/` line up.
  */
-export function matchesAllowlistEntry(hostname: string, port: string, entry: string): boolean {
+export function matchesAllowlistEntry(hostname: string, port: string, entry: string, scheme?: string): boolean {
 	const normalized = entry.trim().toLowerCase().replace(/\.+$/, "");
 	if (!normalized) return false;
+	const target = normalizeHostname(stripBrackets(hostname));
 	if (normalized.includes("/")) {
 		const [baseText, bitsText] = normalized.split("/");
 		const bits = Number.parseInt(bitsText ?? "", 10);
 		if (!Number.isFinite(bits)) return false;
 		const base4 = baseText !== undefined ? parseIpv4(baseText) : undefined;
 		if (base4 !== undefined) {
-			const host4 = parseIpv4(hostname);
+			const host4 = parseIpv4(target);
 			return host4 !== undefined && inCidr4(host4, base4, bits);
 		}
 		const base6 = baseText !== undefined ? parseIpv6(baseText) : undefined;
-		const host6 = parseIpv6(hostname);
+		const host6 = parseIpv6(target);
 		return !!base6 && !!host6 && inCidr6(host6, base6, bits);
 	}
 	if (normalized.startsWith("*.")) {
 		const suffix = normalized.slice(2);
-		return hostname === suffix || hostname.endsWith(`.${suffix}`);
+		return target === suffix || target.endsWith(`.${suffix}`);
 	}
 	const { hostname: entryHost, port: entryPort } = splitHostPort(normalized);
-	if (entryPort && entryPort !== port) return false;
-	return normalizeHostname(entryHost) === hostname;
+	if (entryPort && entryPort !== port && !(port === "" && entryPort === schemeDefaultPort(scheme))) return false;
+	return normalizeHostname(stripBrackets(entryHost)) === target;
 }
 
-function proxyIsConfigured(): boolean {
-	for (const name of PROXY_ENV_VARS) if (process.env[name]) return true;
+/** True when the browser's own Chromium is launched with an upstream proxy. */
+function browserProxyIsConfigured(env: Record<string, string | undefined> = process.env): boolean {
+	for (const name of BROWSER_PROXY_ENV_VARS) if (env[name]?.trim()) return true;
 	return false;
+}
+
+/**
+ * `NO_PROXY` matching, narrowed to hostnames (Chromium's own syntax also allows
+ * CIDRs and `<-loopback>` sentinels; a non-matching token is simply inert here).
+ * `*` bypasses the proxy for everything, which removes the delegation premise.
+ */
+function hostMatchesNoProxy(hostname: string, noProxy: string | undefined): boolean {
+	if (!noProxy) return false;
+	for (const raw of noProxy.split(/[\s,]+/)) {
+		const entry = raw.trim().toLowerCase().replace(/^\*?\./, ".");
+		if (!entry) continue;
+		if (entry === "*") return true;
+		const bare = entry.startsWith(".") ? entry.slice(1) : entry;
+		if (hostname === bare || hostname === `.${bare}` || hostname.endsWith(`.${bare}`)) return true;
+	}
+	return false;
+}
+
+/**
+ * Does the DNS-failure carve-out apply for `hostname`? Only when Chromium's
+ * traffic really is delegated to `PUPPETEER_PROXY` AND that proxy is not told to
+ * bypass this host via `NO_PROXY` — in which case "we could not resolve it" does
+ * not mean "the browser will not".
+ */
+export function proxyDelegationApplies(hostname: string, env: Record<string, string | undefined> = process.env): boolean {
+	if (!browserProxyIsConfigured(env)) return false;
+	for (const name of NO_PROXY_ENV_VARS) {
+		if (hostMatchesNoProxy(normalizeHostname(stripBrackets(hostname)), env[name])) return false;
+	}
+	return true;
 }
 
 /** Default resolver: every `node:dns` answer, mirroring hermes' getaddrinfo loop. */
@@ -481,14 +606,32 @@ function parseTarget(raw: string): ParsedTarget | undefined {
 }
 
 /**
+ * Presigned object-storage download URLs (`X-Amz-Credential`/`X-Amz-Signature`,
+ * S3-style `Expires`+`Signature`, Aliyun `OSSAccessKeyId`) legitimately carry
+ * long opaque signature material in the query string. The secret-URL rule
+ * exists to stop the model putting an API key in a URL it may leak; a presigned
+ * URL is scoped, time-limited and *meant* to be handed around, and refusing
+ * them broke the documented `browser.fetch(cdnUrl)` download pattern. Only the
+ * secret-shape refusal is exempted — every other stage of the chain (scheme,
+ * metadata floor, private ranges, DNS) still applies.
+ */
+const PRESIGNED_QUERY_RE = /[?&](?:x-amz-credential|x-amz-signature|ossaccesskeyid)=/i;
+const PRESIGNED_EXPIRES_RE = /[?&]expires=/i;
+const PRESIGNED_SIGNATURE_RE = /(?:^|[?&])signature=/i;
+
+function isPresignedUrlNavigation(raw: string): boolean {
+	return PRESIGNED_QUERY_RE.test(raw) || (PRESIGNED_EXPIRES_RE.test(raw) && PRESIGNED_SIGNATURE_RE.test(raw));
+}
+
+/**
  * The guard entry point: classify one navigation target against `policy`.
  * Fails closed on every error path (see module header).
  */
 export async function checkNavigationTarget(raw: string, policy: NavigationGuardPolicy = {}): Promise<NavigationVerdict> {
+	if (!isPresignedUrlNavigation(raw) && (containsSecretTokenShape(raw) || containsSecretTokenShape(safeDecode(raw)))) {
+		return { allow: false, code: "secret-url", target: raw, detail: "URL carries a credential-shaped token" };
+	}
 	try {
-		if (containsSecretTokenShape(raw) || containsSecretTokenShape(safeDecode(raw))) {
-			return { allow: false, code: "secret-url", target: raw, detail: "URL carries a credential-shaped token" };
-		}
 		const parsed = parseTarget(raw);
 		if (!parsed) return { allow: false, code: "malformed", target: raw };
 		if (parsed.kind === "opaque") {
@@ -507,12 +650,13 @@ export async function checkNavigationTarget(raw: string, policy: NavigationGuard
 		if (parsed.ipText) {
 			const classification = classifyIpAddress(parsed.ipText);
 			if (classification.alwaysBlocked) return { allow: false, code: "metadata", target: raw, hostname };
-			if (policy.allowPrivateUrls === true || isAllowlisted(hostname, parsed.port, policy)) return { allow: true };
+			if (policy.allowPrivateUrls === true || isAllowlisted(hostname, parsed.port, policy, parsed.scheme))
+				return { allow: true };
 			if (classification.private) return { allow: false, code: "private", target: raw, hostname };
 			return { allow: true };
 		}
 		const privateByName = hostnameIsPrivateByName(hostname);
-		const relaxed = policy.allowPrivateUrls === true || isAllowlisted(hostname, parsed.port, policy);
+		const relaxed = policy.allowPrivateUrls === true || isAllowlisted(hostname, parsed.port, policy, parsed.scheme);
 		// Obvious-private names need no DNS round-trip to know they are internal
 		// (browser_tool.py:1427-1430) — but under relaxation they still fall
 		// through to resolution + floor check below, because hermes enforces the
@@ -527,14 +671,22 @@ export async function checkNavigationTarget(raw: string, policy: NavigationGuard
 		// always-blocked range stays blocked; under `allowPrivateUrls` only the
 		// floor is enforced).
 		const resolver = policy.lookup ?? dnsResolver;
+		const cached = policy.resolvedHosts?.get(hostname);
 		let answers: string[];
-		try {
-			answers = await resolver(hostname);
-		} catch {
-			// hermes is_safe_url:448-474 — fail closed, except the
-			// proxy-delegation carve-out (the proxy resolves the name).
-			if (proxyIsConfigured()) return { allow: true };
-			return { allow: false, code: "dns", target: raw, hostname, detail: "DNS resolution failed" };
+		if (cached) {
+			answers = [...cached];
+		} else {
+			try {
+				answers = await resolver(hostname);
+			} catch {
+				// hermes is_safe_url:448-474 — fail closed, except the
+				// proxy-delegation carve-out, and only when the browser's
+				// traffic really is delegated for THIS host: a configured
+				// PUPPETEER_PROXY that NO_PROXY excludes resolves nothing.
+				if (proxyDelegationApplies(hostname)) return { allow: true };
+				return { allow: false, code: "dns", target: raw, hostname, detail: "DNS resolution failed" };
+			}
+			policy.resolvedHosts?.set(hostname, answers);
 		}
 		if (!answers.length) {
 			if (relaxed) return { allow: true };
@@ -555,8 +707,13 @@ export async function checkNavigationTarget(raw: string, policy: NavigationGuard
 	}
 }
 
-function isAllowlisted(hostname: string, port: string, policy: NavigationGuardPolicy): boolean {
-	return (policy.privateUrlAllowlist ?? []).some(entry => matchesAllowlistEntry(hostname, port, entry));
+function isAllowlisted(
+	hostname: string,
+	port: string,
+	policy: NavigationGuardPolicy,
+	scheme: "http" | "https" = "https",
+): boolean {
+	return (policy.privateUrlAllowlist ?? []).some(entry => matchesAllowlistEntry(hostname, port, entry, scheme));
 }
 
 function safeDecode(text: string): string {
@@ -574,12 +731,13 @@ function safeDecode(text: string): string {
 }
 
 /**
- * Cheap, DNS-free classification of an already-committed URL — the
- * post-navigation recheck seam. Literal IPs and the always-blocked hostname
- * set are classified exactly, plus the private-by-name classes. Returns false
- * for hostnames that would need a resolver (the async pre-check owns that
- * path) and for malformed input (a committed `page.url()` is already
- * normalized by Chromium; a parse failure here is not a metadata endpoint).
+ * DNS-free floor classification of an already-committed URL: literal IPs and
+ * the always-blocked hostname set are classified exactly, plus the
+ * private-by-name classes. Returns false for hostnames that would need a
+ * resolver — `recheckCommittedNavigation` is the policy-aware async path that
+ * also re-resolves them — and for malformed input (a committed `page.url()` is
+ * already normalized by Chromium; a parse failure here is not a metadata
+ * endpoint).
  */
 export function isAlwaysBlockedNavigationTarget(url: string): boolean {
 	const parsed = parseTarget(url);
@@ -590,26 +748,43 @@ export function isAlwaysBlockedNavigationTarget(url: string): boolean {
 }
 
 /**
+ * Committed URL schemes that are never content the guard exists to hide:
+ * internal Chromium pages and opaque in-page object URLs carry no fetched
+ * body. `data:`, `filesystem:`, `view-source:` and `javascript:` commits stay
+ * violations — they can smuggle fetched content or drive privileged actions.
+ */
+const NON_VIOLATION_OPAQUE_SCHEMES: readonly string[] = [
+	"about",
+	"blob",
+	"chrome",
+	"chrome-error",
+	"chrome-extension",
+	"devtools",
+];
+
+/**
  * Policy-aware, DNS-free check of an ALREADY-COMMITTED navigation (redirect /
  * client-side nav / new-tab adoption): true = the page landed somewhere it
  * must not show the model. Same ordering as the async pre-check minus
  * resolution: the metadata floor survives every relaxation; ordinary private
  * ranges and private-by-name hosts block unless `allowPrivateUrls` or an
- * allowlist entry covers them; hostnames that would need DNS are allowed
- * here (the pre-check already vetted them; re-resolving per commit would
- * multiply DNS traffic on redirect chains). Non-http(s) commits (`file:`,
- * `chrome:`) violate unless internally exempted by `allowFileUrls`.
+ * allowlist entry covers them. Hostnames that would need DNS are allowed here
+ * only as far as this DNS-free step goes — callers that can await should use
+ * `recheckCommittedNavigation`, which re-resolves unvetted hosts. Non-http(s)
+ * commits violate unless internally exempted by `allowFileUrls` or listed in
+ * `NON_VIOLATION_OPAQUE_SCHEMES`.
  */
 export function isBlockedCommittedNavigation(url: string, policy: NavigationGuardPolicy = {}): boolean {
 	const parsed = parseTarget(url);
 	if (!parsed) return false; // Chromium-normalized URLs parse; unparseable is not a private target
 	if (parsed.kind === "opaque") {
-		if (parsed.scheme === "about") return false;
+		if (NON_VIOLATION_OPAQUE_SCHEMES.includes(parsed.scheme)) return false;
 		if (parsed.scheme === "file") return policy.allowFileUrls !== true;
 		return true;
 	}
 	if (ALWAYS_BLOCKED_HOSTNAMES[parsed.hostname] === true) return true;
-	const relaxed = policy.allowPrivateUrls === true || isAllowlisted(parsed.hostname, parsed.port, policy);
+	const relaxed =
+		policy.allowPrivateUrls === true || isAllowlisted(parsed.hostname, parsed.port, policy, parsed.scheme);
 	if (parsed.ipText) {
 		const classification = classifyIpAddress(parsed.ipText);
 		if (classification.alwaysBlocked) return true;
@@ -617,6 +792,51 @@ export function isBlockedCommittedNavigation(url: string, policy: NavigationGuar
 	}
 	if (relaxed) return false;
 	return hostnameIsPrivateByName(parsed.hostname);
+}
+
+/**
+ * The async post-commit recheck: everything `isBlockedCommittedNavigation`
+ * covers DNS-free, PLUS re-resolution of a committed hostname that never
+ * passed this run's pre-check. Server-side redirects, `meta refresh`, and
+ * script navigations change the committed URL without ever being the string
+ * the guard vetted; a DNS record that answered public at pre-flight and flips
+ * private before Chromium connects is caught here (one lookup per distinct
+ * host, memoized through `policy.resolvedHosts`). DNS failure on an UNVETTED
+ * committed host fails closed — the pre-check's proxy carve-out does not
+ * extend to hosts that were never checked at all.
+ */
+export async function recheckCommittedNavigation(url: string, policy: NavigationGuardPolicy = {}): Promise<boolean> {
+	if (isBlockedCommittedNavigation(url, policy)) return true;
+	const parsed = parseTarget(url);
+	if (!parsed || parsed.kind !== "host") return false;
+	// Literal IPs, metadata/private-by-name hosts, and relaxed (allowlisted or
+	// `allowPrivateUrls`) hosts were answered DNS-free above; floor-vs-relaxed
+	// ordering cannot change for them.
+	if (parsed.ipText) return false;
+	const hostname = parsed.hostname;
+	if (policy.allowPrivateUrls === true || isAllowlisted(hostname, parsed.port, policy, parsed.scheme)) return false;
+	// The memo exists to bound lookups (one per distinct host per run), NOT to
+	// skip classification: a cached answer is judged exactly like a fresh one so
+	// a second frame/redirect to the same host cannot slip through.
+	const cached = policy.resolvedHosts?.get(hostname);
+	let answers: readonly string[];
+	if (cached) {
+		answers = cached;
+	} else {
+		try {
+			answers = await (policy.lookup ?? dnsResolver)(hostname);
+		} catch {
+			return true; // unvetted host that cannot be resolved: fail closed
+		}
+		policy.resolvedHosts?.set(hostname, answers);
+	}
+	if (!answers.length) return true;
+	for (const answer of answers) {
+		const address = answer.includes("%") ? (answer.split("%")[0] ?? answer) : answer;
+		const classification = classifyIpAddress(address);
+		if (classification.alwaysBlocked || classification.private) return true;
+	}
+	return false;
 }
 
 /** Model-facing explanation with the exact remediation for a blocked verdict. */
@@ -646,10 +866,15 @@ export function navigationBlockedMessage(verdict: NavigationVerdict): string {
  * that crosses into the tab worker with every run/message.
  *
  * `configuredEndpointUrls` is the "explicit relay allow" of the port
- * contract: a relay/CDP endpoint host the *user configured themselves*
+ * contract: a relay/CDP endpoint the *user configured themselves*
  * (`browser.relayUrl`, `browser.cdpUrl`, `app.cdp_url`) joins the allowlist,
  * mirroring how hermes exempts its own sidecar from the blocked target set.
- * It is read from settings only — never from page content.
+ * It is read from settings only — never from page content. Endpoints are
+ * emitted as `host:port` whenever they spell a non-default port, so a CDP
+ * proxy on `127.0.0.1:9224` does not also allow whatever else listens on other
+ * ports of that loopback host. Caveat: `app.cdp_url` is set by the model-facing
+ * `app` argument — an origin-level allowance, so whoever sets it decides which
+ * `host:port` becomes navigable for the session.
  */
 export function resolveNavigationPolicy(input: {
 	readonly allowPrivateUrlsSetting?: unknown;
@@ -668,8 +893,7 @@ export function resolveNavigationPolicy(input: {
 		}
 	}
 	for (const endpoint of input.configuredEndpointUrls ?? []) {
-		const host = endpointHostname(endpoint);
-		if (host) allowlist.add(host);
+		for (const entry of endpointAllowlistEntries(endpoint)) allowlist.add(entry);
 	}
 	return {
 		allowPrivateUrls,
@@ -691,14 +915,29 @@ function truthy(value: unknown): boolean {
 	return value === true || value === "true" || value === 1 || value === "1";
 }
 
-function endpointHostname(endpoint: string | undefined): string | undefined {
+/**
+ * Allowlist entries for one configured relay/CDP endpoint URL: the hostname,
+ * plus `host:port` when the URL spells a port that is not its scheme default.
+ * A port-less endpoint (or a plain `host:port` setting text) yields the bare
+ * hostname only — matching the previous behavior for default-port services.
+ */
+function endpointAllowlistEntries(endpoint: string | undefined): readonly string[] {
 	const text = endpoint?.trim();
-	if (!text) return undefined;
+	if (!text) return [];
+	let url: URL;
 	try {
-		return normalizeHostname(new URL(text).hostname);
+		url = new URL(text);
 	} catch {
-		return undefined;
+		return [];
 	}
+	const scheme = url.protocol.replace(/:$/, "").toLowerCase();
+	const hostname = normalizeHostname(url.hostname);
+	if (!hostname) return [];
+	const port = url.port;
+	if (!port) return [hostname];
+	const defaultPort = scheme === "https" || scheme === "wss" ? "443" : scheme === "http" || scheme === "ws" ? "80" : "";
+	if (port === defaultPort) return [hostname];
+	return [`${hostname}:${port}`];
 }
 
 /**

@@ -39,6 +39,8 @@
  */
 
 const DISPLAY_CONTROL_RE = /[\x00-\x1f\x7f\x80-\x9f\u200b-\u200f\u202a-\u202e\u2060-\u2064]/;
+/** Global twin of `DISPLAY_CONTROL_RE`, hoisted so `maskToken` allocates nothing. */
+const DISPLAY_CONTROL_GLOBAL_RE = new RegExp(DISPLAY_CONTROL_RE.source, "g");
 
 /** Mask a secret token: preserve the first 6 and last 4 chars, floor 18 → `"***"`. */
 export function maskToken(token: string): string {
@@ -46,7 +48,7 @@ export function maskToken(token: string): string {
 	// A masked secret must never carry control bytes (newline, tab, DEL, C1,
 	// zero-width) into model-facing text — strip before slicing so the length
 	// check sees the displayable length (hermes `_DISPLAY_CONTROL_RE` + #55319).
-	const cleaned = token.replace(new RegExp(DISPLAY_CONTROL_RE.source, "g"), "");
+	const cleaned = token.replace(DISPLAY_CONTROL_GLOBAL_RE, "");
 	if (!cleaned || cleaned.length < 18) return "***";
 	return `${cleaned.slice(0, 6)}...${cleaned.slice(-4)}`;
 }
@@ -214,8 +216,11 @@ function isWordEnd(s: string, j: number, allowPlural: boolean = true): boolean {
 
 /**
  * Word-boundary validator for mixed/lowercase secret keys: rejects prose words
- * that merely embed a keyword (`Secretary:`, `tokenizer:`, `author=`) while
- * all-caps keys keep legacy embedded matching (`MYTOKEN=`). Ported from
+ * that merely embed a keyword (`Secretary:`, `tokenizer:`, `author=`). An
+ * ALL-CAPS key still needs an underscore/word boundary to match here — bare
+ * `MYTOKEN=` is NOT detected (the `isWordStart` camel/acronym rules don't fire
+ * inside an unbroken caps run), which is deliberate: `PROXY`, `MONKEY`, `KEYNOTE`
+ * style all-caps names would otherwise mask their own values. Ported from
  * hermes `_key_has_secret_keyword` (nearai/ironclaw#6129 lesson).
  */
 export function keyHasSecretKeyword(key: string): boolean {
@@ -254,6 +259,15 @@ const SECRET_HEADER_RE =
 	/((?:x-api-key|x-goog-api-key|api-key|apikey|x-api-token|x-auth-token|x-access-token)\s*:\s*)(\S+)/gi;
 // omp extension (the port contract names cookies explicitly; hermes has no cookie pass).
 const COOKIE_HEADER_RE = /((?:Set-Cookie|Cookie):\s*)([^\r\n"']+)/gi;
+// Credential-bearing JSON *fields*: the `document.cookie` / request-header dumps
+// an aria snapshot or `JSON.stringify(getAllResponseHeaders())` produces carry
+// these quoted keys, which JSON_FIELD_RE's name list does not include.
+const JSON_CRED_FIELD_RE =
+	/("(?:authorization|proxy-authorization|cookie|set-cookie|x-api-key|credential)")\s*:\s*"([^"]+)"/gi;
+// Bare cookie-jar bodies (`sid=…; csrf_token=…`) with no `Cookie:` header name in
+// sight — what `document.cookie` and pasted request dumps look like. Value class
+// excludes dots so an IP/path-shaped run is not mistaken for a cookie value.
+const COOKIE_JAR_RE = /([A-Za-z][A-Za-z0-9_.-]*)=([A-Za-z0-9+/=_-]{8,})(?![A-Za-z0-9+/=_-])/g;
 const TELEGRAM_RE = /(?:(bot)?(\d{8,}):)([-A-Za-z0-9_]{30,})/g;
 const PRIVATE_KEY_RE = /-----BEGIN[A-Z ]*PRIVATE KEY-----[\s\S]*?-----END[A-Z ]*PRIVATE KEY-----/g;
 const DB_CONNSTR_RE = /((?:postgres(?:ql)?|mysql|mongodb(?:\+srv)?|redis|amqp):\/\/[^:\s]+:)([^@\s]+)(@)/gi;
@@ -292,7 +306,16 @@ const SENSITIVE_FORM_KEYS: Record<string, true> = {
 // Control / zero-width characters that can split a token body so
 // SECRET_TOKEN_SHAPE_RE cannot match across them (`sk-abc\x1bdef…`).
 const CONTROL_CHARS_RE = /[\x00-\x1f\x7f\u200b-\u200f\u2028-\u202f\u2060\ufeff]/g;
+/** Non-global twin for the single-character membership tests below. */
+const CONTROL_CHAR_RE = new RegExp(CONTROL_CHARS_RE.source);
+/** Global twin of the vendor-shape matcher, hoisted out of the per-call path. */
+const SECRET_TOKEN_SHAPE_GLOBAL_RE = new RegExp(SECRET_TOKEN_SHAPE_RE.source, "g");
 const TOKEN_BODY_CHARS = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789_-.";
+
+/** True when `text` holds any control/zero-width byte. */
+function hasControlChar(text: string): boolean {
+	return CONTROL_CHAR_RE.test(text);
+}
 
 /**
  * Mask tokens whose body is split by control/zero-width characters (hermes
@@ -306,13 +329,12 @@ function maskControlSplitTokens(text: string): string {
 	if (stripped === text) return text;
 	const origIdx: number[] = [];
 	for (let i = 0; i < text.length; i++) {
-		const c = text[i] ?? "";
-		if (!new RegExp(CONTROL_CHARS_RE.source).test(c)) origIdx.push(i);
+		if (!hasControlChar(text[i] ?? "")) origIdx.push(i);
 	}
 	const spans: Array<[start: number, end: number, replacement: string]> = [];
-	const shape = new RegExp(SECRET_TOKEN_SHAPE_RE.source, "g");
+	SECRET_TOKEN_SHAPE_GLOBAL_RE.lastIndex = 0;
 	let m: RegExpExecArray | null;
-	while ((m = shape.exec(stripped)) !== null) {
+	while ((m = SECRET_TOKEN_SHAPE_GLOBAL_RE.exec(stripped)) !== null) {
 		const body = m[0];
 		const startOrig = origIdx[m.index] ?? 0;
 		const endOrig = (origIdx[m.index + body.length - 1] ?? 0) + 1;
@@ -323,7 +345,7 @@ function maskControlSplitTokens(text: string): string {
 		let ok = true;
 		for (const c of span) {
 			if (TOKEN_BODY_CHARS.includes(c)) continue;
-			if (new RegExp(CONTROL_CHARS_RE.source).test(c)) continue;
+			if (hasControlChar(c)) continue;
 			ok = false;
 			break;
 		}
@@ -380,9 +402,13 @@ export function redactBrowserText(text: string): string {
 	if (!text) return text;
 
 	// 1. Known vendor prefixes (sk-, ghp_, …) incl. control-split smuggling.
-	if (hasKnownPrefixSubstring(text)) {
+	//    The substring pre-screen is also run on a control-stripped copy: a
+	//    zero-width byte inside the literal prefix itself (`sk\u200b-…`) would
+	//    otherwise skip the pass that exists precisely to catch that trick.
+	const controlStripped = hasControlChar(text) ? text.replace(CONTROL_CHARS_RE, "") : "";
+	if (hasKnownPrefixSubstring(text) || (controlStripped !== "" && hasKnownPrefixSubstring(controlStripped))) {
 		text = maskControlSplitTokens(text);
-		text = text.replace(new RegExp(SECRET_TOKEN_SHAPE_RE.source, "g"), m => maskToken(m));
+		text = text.replace(SECRET_TOKEN_SHAPE_GLOBAL_RE, m => maskToken(m));
 	}
 
 	if (text.includes("=")) {
@@ -413,9 +439,13 @@ export function redactBrowserText(text: string): string {
 	}
 
 	// 3. JSON fields: "apiKey": "value" (quoted values; the YAML pass skips
-	//    them via its lookahead, so order matters).
+	//    them via its lookahead, so order matters), plus the credential-bearing
+	//    header/cookie field names a snapshot or header dump produces.
 	if (text.includes(":") && text.includes('"')) {
 		text = text.replace(JSON_FIELD_RE, (_match, key: string, value: string) =>
+			ENV_LOOKUP_VALUE_RE.test(value) ? `${key}: "${value}"` : `${key}: "${maskToken(value)}"`,
+		);
+		text = text.replace(JSON_CRED_FIELD_RE, (_match, key: string, value: string) =>
 			ENV_LOOKUP_VALUE_RE.test(value) ? `${key}: "${value}"` : `${key}: "${maskToken(value)}"`,
 		);
 	}
@@ -456,12 +486,23 @@ export function redactBrowserText(text: string): string {
 		text = text.replace(TELEGRAM_RE, (_m, bot: string | undefined, digits: string) => `${bot ?? ""}${digits}:***`);
 	}
 
+	// 8b. Cookie-jar bodies without a `Cookie:` header name in sight
+	//     (`document.cookie`, pasted request dumps). URL query params are
+	//     skipped — hermes parity keeps magic links and OAuth callbacks
+	//     round-trippable; this pass only fires on `; `/`,`-separated pairs.
+	if (text.includes("=") && (text.includes("; ") || text.includes(","))) {
+		COOKIE_JAR_RE.lastIndex = 0;
+		text = text.replace(COOKIE_JAR_RE, (match, name: string, value: string, offset: number) =>
+			insideUrlToken(text, offset) ? match : `${name}=${maskToken(value)}`,
+		);
+	}
+
 	// 9. Private key blocks.
 	if (text.includes("BEGIN") && text.includes("-----")) {
 		text = text.replace(PRIVATE_KEY_RE, "[REDACTED PRIVATE KEY]");
 	}
 
-	if (text.includes("://")) {
+	if (text.includes("//")) {
 		// 10. Database connection-string passwords.
 		text = text.replace(DB_CONNSTR_RE, (_m, head: string, _pw: string, at: string) => `${head}***${at}`);
 		// 11. Bare-token userinfo: scheme://TOKEN@host.
@@ -496,15 +537,20 @@ export function redactBrowserText(text: string): string {
  * walked; everything else (numbers, booleans, binary payloads, class
  * instances) passes through untouched so image data and structured-clone
  * shapes survive.
+ *
+ * `seen` maps an already-walked object to THE copy produced for it, so an
+ * aliased value (`{ a, b: a }`) collapses to one redacted object instead of
+ * leaking the raw second reference — and a cycle terminates against the copy
+ * rather than the original.
  */
-export function redactBrowserOutput(value: unknown, seen: WeakSet<object> = new WeakSet()): unknown {
+export function redactBrowserOutput(value: unknown, seen: Map<object, unknown> = new Map()): unknown {
 	if (typeof value === "string") return redactBrowserText(value);
 	if (Array.isArray(value)) {
 		return value.map(item => redactBrowserOutput(item, seen));
 	}
 	if (value !== null && typeof value === "object") {
-		if (seen.has(value)) return value;
-		seen.add(value);
+		const memo = seen.get(value);
+		if (seen.has(value)) return memo;
 		const proto = Object.getPrototypeOf(value);
 		if (proto !== Object.prototype && proto !== null) {
 			// Not a plain object (Page, ElementHandle, Date, RegExp, typed
@@ -513,7 +559,28 @@ export function redactBrowserOutput(value: unknown, seen: WeakSet<object> = new 
 		}
 		const source = value as Record<string, unknown>;
 		const out: Record<string, unknown> = {};
-		for (const key of Object.keys(source)) out[key] = redactBrowserOutput(source[key], seen);
+		// Register before recursing so cycles/aliases resolve to this copy.
+		seen.set(value, out);
+		for (const key of Object.keys(source)) {
+			const redacted = redactBrowserOutput(source[key], seen);
+			const original = source[key];
+			// A secret-bearing key name is itself the context that makes a raw
+			// value a credential (`{ api_key: "…" }` carries no `api_key=` text
+			// for the assignment passes). Mask it only when the text passes left
+			// the string untouched — an already-masked value must not be masked
+			// again (that would collapse `ghp_AB...1234` to `***`), and a value
+			// that is an env-lookup expression stays intact.
+			if (
+				typeof redacted === "string" &&
+				redacted === original &&
+				keyHasSecretKeyword(key.replace(/^["']|["']$/g, "")) &&
+				!ENV_LOOKUP_VALUE_RE.test(redacted)
+			) {
+				out[key] = maskToken(redacted);
+			} else {
+				out[key] = redacted;
+			}
+		}
 		return out;
 	}
 	return value;

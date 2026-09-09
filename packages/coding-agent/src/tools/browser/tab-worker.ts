@@ -53,10 +53,19 @@ import { redactBrowserOutput, redactBrowserText } from "./output-redact";
 import { extractReadableFromHtml, type ReadableFormat } from "./readable";
 import { cloneSafe, RunOutput } from "./run-output";
 import {
+	attachNavigationObserver,
+	createRunBrowserScope,
+	createRunPageScope,
+	RequestInterceptionCleanupError,
+	type RunBrowserScope,
+	type RunPageScope,
+} from "./navigation-scope";
+import {
 	checkNavigationTarget,
-	isBlockedCommittedNavigation,
 	navigationBlockedMessage,
 	policyFromSettings,
+	recheckCommittedNavigation,
+	type NavigationGuardPolicy,
 } from "./url-guard";
 import type {
 	NavigationGuardSettings,
@@ -173,8 +182,6 @@ const OP_DEADLINE_SLACK_MS = CELL_BUDGET_SLACK_MS;
 const ZERO_MATCH_FAIL_FAST_MS = 2_000;
 /** Poll cadence for the zero-match watchdog. */
 const ZERO_MATCH_POLL_MS = 250;
-/** Cleanup must settle inside the supervisor's 750ms post-run grace window. */
-const REQUEST_INTERCEPTION_CLEANUP_TIMEOUT_MS = 500;
 /** Bound cleanup window after a timed-out raw handle action. */
 const HANDLE_ACTION_INVALIDATION_TIMEOUT_MS = 500;
 
@@ -547,111 +554,6 @@ function redactUrlCredentials(url: string): string {
 	}
 }
 
-class RequestInterceptionCleanupError extends ToolError {}
-
-interface RunPageScope {
-	page: Page;
-	cleanup(): Promise<void>;
-}
-
-/**
- * Expose the tab page while retaining the request handlers created by this run.
- * Puppeteer's Page wraps an internal emitter, so `removeAllListeners("request")`
- * would also remove its forwarding listener; the facade removes only user handlers.
- */
-function createRunPageScope(page: Page): RunPageScope {
-	const requestHandlers: unknown[] = [];
-	const on = page.on;
-	const off = page.off;
-	const once = page.once;
-	const removeAllListeners = page.removeAllListeners;
-	const onDescriptor = Object.getOwnPropertyDescriptor(page, "on");
-	const offDescriptor = Object.getOwnPropertyDescriptor(page, "off");
-	const onceDescriptor = Object.getOwnPropertyDescriptor(page, "once");
-	const removeAllDescriptor = Object.getOwnPropertyDescriptor(page, "removeAllListeners");
-
-	Object.defineProperties(page, {
-		on: {
-			configurable: true,
-			value: (type: unknown, handler: unknown): Page => {
-				Reflect.apply(on, page, [type, handler]);
-				if (type === "request") requestHandlers.push(handler);
-				return page;
-			},
-		},
-		once: {
-			configurable: true,
-			value: (type: unknown, handler: unknown): Page => {
-				if (type !== "request" || typeof handler !== "function") {
-					Reflect.apply(once, page, [type, handler]);
-					return page;
-				}
-				const wrapper = (event: unknown): void => {
-					const index = requestHandlers.lastIndexOf(wrapper);
-					if (index >= 0) requestHandlers.splice(index, 1);
-					Reflect.apply(off, page, ["request", wrapper]);
-					Reflect.apply(handler, page, [event]);
-				};
-				requestHandlers.push(wrapper);
-				Reflect.apply(on, page, [type, wrapper]);
-				return page;
-			},
-		},
-		off: {
-			configurable: true,
-			value: (type: unknown, handler?: unknown): Page => {
-				Reflect.apply(off, page, [type, handler]);
-				if (type === "request") {
-					if (handler === undefined) requestHandlers.length = 0;
-					else {
-						const index = requestHandlers.lastIndexOf(handler);
-						if (index >= 0) requestHandlers.splice(index, 1);
-					}
-				}
-				return page;
-			},
-		},
-		removeAllListeners: {
-			configurable: true,
-			value: (type?: unknown): Page => {
-				Reflect.apply(removeAllListeners, page, [type]);
-				if (type === undefined || type === "request") requestHandlers.length = 0;
-				return page;
-			},
-		},
-	});
-
-	return {
-		page,
-		async cleanup() {
-			if (onDescriptor) Object.defineProperty(page, "on", onDescriptor);
-			else Reflect.deleteProperty(page, "on");
-			if (offDescriptor) Object.defineProperty(page, "off", offDescriptor);
-			else Reflect.deleteProperty(page, "off");
-			if (onceDescriptor) Object.defineProperty(page, "once", onceDescriptor);
-			else Reflect.deleteProperty(page, "once");
-			if (removeAllDescriptor) Object.defineProperty(page, "removeAllListeners", removeAllDescriptor);
-			else Reflect.deleteProperty(page, "removeAllListeners");
-			for (const handler of requestHandlers) Reflect.apply(off, page, ["request", handler]);
-			requestHandlers.length = 0;
-			try {
-				await withTimeout(
-					page.setRequestInterception(false),
-					REQUEST_INTERCEPTION_CLEANUP_TIMEOUT_MS,
-					"Timed out clearing browser request interception",
-				);
-			} catch (error) {
-				throw new RequestInterceptionCleanupError(
-					"Failed to clear browser request interception after browser.run",
-					{
-						error: error instanceof Error ? error.message : String(error),
-					},
-				);
-			}
-		},
-	};
-}
-
 function errorPayload(error: unknown): RunErrorPayload {
 	const recoverTab = error instanceof RequestInterceptionCleanupError || undefined;
 	if (error instanceof ToolAbortError) {
@@ -993,6 +895,12 @@ export class WorkerCore {
 	#currentNavigation?: NavigationGuardSettings;
 	/** Committed navigation that violated the policy during the active run; blocks the ok reply. */
 	#navViolation?: string;
+	/**
+	 * Hostname → answers memoized for the ACTIVE run, so the pre-check and the
+	 * post-commit recheck share one lookup per host (bounded DNS, and a cached
+	 * answer is still classified on every use). Cleared at run start.
+	 */
+	#resolvedHosts = new Map<string, readonly string[]>();
 
 	constructor(transport: Transport, isolated: boolean) {
 		this.#transport = transport;
@@ -1162,31 +1070,54 @@ export class WorkerCore {
 	 * serializable policy that travelled with the init/run message — the main
 	 * thread's acquire-time pre-check is UX, this is enforcement. Absent
 	 * policy fails closed: private ranges and file:// blocked, metadata floor
-	 * always blocked.
+	 * always blocked. Answers are memoized per run in `#resolvedHosts` so the
+	 * post-commit recheck needs no second lookup for the same host.
 	 */
 	async #guardNavigation(url: string, settings: NavigationGuardSettings | undefined): Promise<void> {
-		const verdict = await checkNavigationTarget(url, policyFromSettings(settings));
+		const verdict = await checkNavigationTarget(url, this.#navigationPolicy(settings));
 		if (!verdict.allow) throw new ToolError(navigationBlockedMessage(verdict));
 	}
 
+	/** Settings + the run's shared hostname memo. */
+	#navigationPolicy(settings: NavigationGuardSettings | undefined): NavigationGuardPolicy {
+		return { ...policyFromSettings(settings), resolvedHosts: this.#resolvedHosts };
+	}
+
 	/**
-	 * Post-commit recheck seam: a redirect or client-side navigation that
-	 * landed on a disallowed target gets the load stopped and the page pulled
-	 * back to `about:blank`, and the run is failed at reply time. DNS cannot
-	 * be pinned over CDP (see url-guard header), so this suppression — not
-	 * prevention — is what keeps private-range content away from the model.
+	 * Post-commit recheck seam: a server redirect, `meta refresh`, script
+	 * navigation, or iframe that lands on a disallowed target gets the load
+	 * stopped and the page pulled back to `about:blank`, and the run is failed
+	 * at reply time. Unlike the DNS-free fast path this also re-resolves a
+	 * committed hostname that never passed this run's pre-check, closing the
+	 * DNS-rebinding window between the check and Chromium's own connect.
+	 *
+	 * This is suppression, not prevention: DNS cannot be pinned over CDP (see
+	 * url-guard header), so content can be fetched into the renderer before the
+	 * load is stopped — what the model is prevented from ever seeing is the
+	 * result. Every frame is classified, not just the main frame, because an
+	 * iframe is a committed navigation into an attacker-chosen host too.
 	 */
 	#observeNavigationViolations(): void {
-		const page = this.#requirePage();
-		page.on("framenavigated", frame => {
-			if (frame !== page.mainFrame()) return;
-			const landed = frame.url();
-			if (!landed || landed === "about:blank") return;
-			if (!isBlockedCommittedNavigation(landed, policyFromSettings(this.#currentNavigation))) return;
-			this.#navViolation = landed;
-			void this.#stopLoading().catch(() => undefined);
-			void page.goto("about:blank", { timeout: 5_000 }).catch(() => undefined);
-		});
+		attachNavigationObserver(
+			this.#requirePage(),
+			url => recheckCommittedNavigation(url, this.#navigationPolicy(this.#currentNavigation)),
+			landed => {
+				this.#navViolation = landed;
+			},
+			() => this.#stopLoading(),
+		);
+	}
+
+	/** Same observer for a page the model created through `browser.newPage`. */
+	#attachRunNavigationObserver(page: Page): void {
+		attachNavigationObserver(
+			page,
+			url => recheckCommittedNavigation(url, this.#navigationPolicy(this.#currentNavigation)),
+			landed => {
+				this.#navViolation = landed;
+			},
+			() => this.#stopLoading(),
+		);
 	}
 
 	async #findAttachedTarget(targetId: string): Promise<Target> {
@@ -1315,6 +1246,7 @@ export class WorkerCore {
 		// observer reads `#currentNavigation`, so refresh it before any code runs.
 		this.#currentNavigation = msg.session.navigation ?? this.#navigation;
 		this.#navViolation = undefined;
+		this.#resolvedHosts.clear();
 		const timeoutSignal = AbortSignal.timeout(msg.timeoutMs);
 		const ac = new AbortController();
 		const runAc = new AbortController();
@@ -1340,17 +1272,26 @@ export class WorkerCore {
 		let returnValue: unknown;
 		let failure: { error: unknown } | undefined;
 		let runPage: RunPageScope | undefined;
+		let runBrowser: RunBrowserScope | undefined;
 		try {
 			throwIfAborted(signal);
-			runPage = createRunPageScope(this.#requirePage());
-			const browser = this.#requireBrowser();
+			// `page.goto` on the handed-out page is guarded too: the run facade is
+			// a get-only proxy and cannot intercept it, so the raw descriptor is
+			// patched for the duration of the run (P1: model code could otherwise
+			// reach a private target without any pre-check).
+			runPage = createRunPageScope(this.#requirePage(), url =>
+				this.#guardNavigation(url, this.#currentNavigation),
+			);
+			// Pages the model creates itself get the same committed-navigation
+			// observer as the tab page (patched on the raw browser pre-facade).
+			runBrowser = createRunBrowserScope(this.#requireBrowser(), page => this.#attachRunNavigationObserver(page));
 			const tabApi = this.#createTabApi(msg.name, msg.timeoutMs, signal, msg.session, output, screenshots, active);
 			const runtime = this.#ensureRuntime(msg.session);
 			runtime.setCwd(msg.session.cwd);
 			const onFloatingRejection = (reason: unknown): void => this.#recordFloatingRejection(active, reason);
 			runtime.setRunScope({
 				page: bindRunFacade(runPage.page, signal, active.rejectionOwner, onFloatingRejection),
-				browser: bindRunFacade(browser, signal, active.rejectionOwner, onFloatingRejection),
+				browser: bindRunFacade(runBrowser.browser, signal, active.rejectionOwner, onFloatingRejection),
 				tab: bindRunFacade(tabApi, signal, active.rejectionOwner, onFloatingRejection),
 				assert: (cond: unknown, text?: string): void => {
 					if (!cond) throw new ToolError(text ?? "Assertion failed");
@@ -1430,6 +1371,7 @@ export class WorkerCore {
 			await Bun.sleep(0);
 			try {
 				await runPage?.cleanup();
+				await runBrowser?.cleanup();
 			} catch (error) {
 				failure = { error };
 			}

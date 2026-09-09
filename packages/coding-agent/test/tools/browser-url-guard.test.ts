@@ -12,7 +12,9 @@ import {
 	classifyIpAddress,
 	isAlwaysBlockedNavigationTarget,
 	isBlockedCommittedNavigation,
+	matchesAllowlistEntry,
 	navigationBlockedMessage,
+	recheckCommittedNavigation,
 	resolveNavigationPolicy,
 } from "../../src/tools/browser/url-guard";
 
@@ -166,14 +168,48 @@ describe("navigation guard: DNS posture", () => {
 		expect(await verdict("http://empty.name/")).toBe("BLOCK:dns");
 	});
 
-	it("trusts proxy env for the DNS failure (hermes proxy parity)", async () => {
-		const previous = process.env.HTTPS_PROXY;
-		process.env.HTTPS_PROXY = "http://proxy:8080";
+	it("trusts the browser's own proxy for a DNS failure (hermes proxy parity)", async () => {
+		const previous = process.env.PUPPETEER_PROXY;
+		process.env.PUPPETEER_PROXY = "http://proxy:8080";
 		try {
 			expect(await verdict("http://fail.name/")).toBe("ALLOW");
 		} finally {
-			if (previous === undefined) delete process.env.HTTPS_PROXY;
-			else process.env.HTTPS_PROXY = previous;
+			if (previous === undefined) delete process.env.PUPPETEER_PROXY;
+			else process.env.PUPPETEER_PROXY = previous;
+		}
+	});
+
+	it("does not trust generic proxy vars: omp never routes the browser through them", async () => {
+		const saved = { https: process.env.HTTPS_PROXY, http: process.env.HTTP_PROXY, all: process.env.ALL_PROXY };
+		process.env.HTTPS_PROXY = "http://proxy:8080";
+		process.env.HTTP_PROXY = "http://proxy:8080";
+		process.env.ALL_PROXY = "http://proxy:8080";
+		try {
+			expect(await verdict("http://fail.name/")).toBe("BLOCK:dns");
+		} finally {
+			for (const [key, value] of Object.entries({ HTTPS_PROXY: saved.https, HTTP_PROXY: saved.http, ALL_PROXY: saved.all })) {
+				if (value === undefined) delete process.env[key];
+				else process.env[key] = value;
+			}
+		}
+	});
+
+	it("keeps failing closed for hosts NO_PROXY excludes from the proxy", async () => {
+		const saved = { proxy: process.env.PUPPETEER_PROXY, noProxy: process.env.NO_PROXY };
+		process.env.PUPPETEER_PROXY = "http://proxy:8080";
+		process.env.NO_PROXY = "other.example, fail.example";
+		try {
+			// fail.name is not in NO_PROXY: the proxy resolves it, so the
+			// carve-out applies...
+			expect(await verdict("http://fail.name/")).toBe("ALLOW");
+			// ...but a NO_PROXY-listed host resolves directly, so a local DNS
+			// failure is the browser's own failure: block.
+			expect(await verdict("http://fail.example/")).toBe("BLOCK:dns");
+		} finally {
+			if (saved.proxy === undefined) delete process.env.PUPPETEER_PROXY;
+			else process.env.PUPPETEER_PROXY = saved.proxy;
+			if (saved.noProxy === undefined) delete process.env.NO_PROXY;
+			else process.env.NO_PROXY = saved.noProxy;
 		}
 	});
 });
@@ -185,8 +221,11 @@ describe("navigation guard: explicit relaxation", () => {
 		expect(await verdict("http://127.0.0.1:9224/json", policy)).toBe("ALLOW");
 		// Wildcard match, then the resolved address decides (public here).
 		expect(await verdict("http://ok.dev.local/x", policy)).toBe("ALLOW");
-		// A wildcard entry relaxes the name class but never the resolved range…
+		// An allowlist entry relaxes the name class AND the ordinary private
+		// ranges for that host (deliberate: the entry is the explicit permission)
+		// but never the metadata floor.
 		expect(await verdict("http://lp.dev.local/x", { privateUrlAllowlist: ["*.dev.local"] })).toBe("ALLOW");
+		expect(await verdict("http://api.dev.local/x", { privateUrlAllowlist: ["*.dev.local"] })).toBe("BLOCK:metadata");
 	});
 
 	it("allowPrivateUrls relaxes ordinary private ranges but not the floor or file://", async () => {
@@ -235,6 +274,126 @@ describe("navigation guard: post-commit fast path (DNS-free)", () => {
 	});
 });
 
+describe("navigation guard: IPv4 smuggled inside IPv6 forms", () => {
+	it("unwraps NAT64 and Teredo to the embedded IPv4", async () => {
+		// 64:ff9b::/96 + a9fe a9fe == 169.254.169.254.
+		expect(await verdict("http://[64:ff9b::a9fe:a9fe]/")).toBe("BLOCK:metadata");
+		// An 8-digit hextet is not a valid IPv6 literal at all: malformed.
+		expect(await verdict("http://[64:ff9b::a9fea9fe]/")).toBe("BLOCK:malformed");
+		// 64:ff9b:1::/48 local-use form, IPv4 right after the 48-bit prefix and
+		// in the common trailing spelling.
+		expect(await verdict("http://[64:ff9b:1::a9fe:a9fe]/")).toBe("BLOCK:metadata");
+		expect(await verdict("http://[64:ff9b:1::7fa1:a9fe]/")).toBe("BLOCK:private");
+		// Teredo (`2001:0000::/32`) carries the inverted client IPv4 in bytes
+		// 4..7: ~a9 = 56, ~fe = 01 → 5601:5601 wraps 169.254.169.254.
+		expect(await verdict("http://[2001:0:5601:5601::1]/")).toBe("BLOCK:metadata");
+		// 2002::/16 (6to4) loopback.
+		expect(await verdict("http://[2002:c0a8:1::]/")).toBe("BLOCK:private");
+		// NAT64 carrying a genuinely public v4 stays allowed.
+		expect(await verdict("http://[64:ff9b::5d5d:5d5d]/")).toBe("ALLOW");
+	});
+
+	it("keeps the Oracle Cloud secondary IMDS address on the floor", async () => {
+		expect(await verdict("http://192.0.0.192/", { allowPrivateUrls: true })).toBe("BLOCK:metadata");
+		expect(await verdict("http://192.0.0.193/", { allowPrivateUrls: true })).toBe("ALLOW");
+	});
+});
+
+describe("navigation guard: presigned URLs and opaque committed schemes", () => {
+	it("does not treat a presigned signed query as an embedded secret", async () => {
+		const presigned =
+			"https://93.184.216.34/f.pdf?X-Amz-Algorithm=AWS4-HMAC-SHA256" +
+			"&X-Amz-Credential=AKIAIOSFODNN7EXAMPLE%2F20240101%2Fus-east-1%2Fs3%2Faws4_request" +
+			"&X-Amz-Signature=1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcd";
+		expect(await verdict(presigned)).toBe("ALLOW");
+		expect(await verdict("https://93.184.216.34/?Expires=1893456000&Signature=aK9%2Fz3QXcVb%3D")).toBe("ALLOW");
+		// A bare api-key-shaped query parameter is still refused.
+		expect(await verdict("https://x.test/?api_key=sk-proj-abcdef1234567890ZZ")).toBe("BLOCK:secret-url");
+	});
+
+	it("accepts browser-internal opaque schemes as committed targets", () => {
+		for (const url of [
+			"about:blank",
+			"chrome-error://chromewebdata/",
+			"blob:https://example.com/uuid",
+			"devtools://devtools/bundled/inspector.html",
+		]) {
+			expect(isBlockedCommittedNavigation(url), url).toBe(false);
+		}
+		// Schemes that can carry private content stay violations.
+		for (const url of ["data:text/html,hi", "filesystem:http://127.0.0.1/temporary/a", "view-source:http://10.0.0.5"]) {
+			expect(isBlockedCommittedNavigation(url), url).toBe(true);
+		}
+	});
+});
+
+describe("navigation guard: allowlist entry matching", () => {
+	it("normalizes brackets and scheme-default ports", () => {
+		expect(matchesAllowlistEntry("[::1]", "", "[::1]")).toBe(true);
+		expect(matchesAllowlistEntry("::1", "", "[::1]")).toBe(true);
+		// A port-less https target matches an entry that spells :443, and an
+		// http target matches :80 — but not the other scheme's default.
+		expect(matchesAllowlistEntry("localhost", "", "localhost:443", "https")).toBe(true);
+		expect(matchesAllowlistEntry("localhost", "", "localhost:80", "http")).toBe(true);
+		expect(matchesAllowlistEntry("localhost", "", "localhost:443", "http")).toBe(false);
+		// An explicit non-matching port never matches.
+		expect(matchesAllowlistEntry("localhost", "9222", "localhost:443", "http")).toBe(false);
+	});
+});
+
+describe("navigation guard: committed recheck (DNS-rebinding window)", () => {
+	it("re-resolves an unvetted hostname and flags a private answer", async () => {
+		const policy = { lookup: dns, resolvedHosts: new Map<string, readonly string[]>() };
+		expect(await recheckCommittedNavigation("http://internal.corp/x", policy)).toBe(true);
+		// The answer is memoized: a second call must not re-query the resolver.
+		expect(await recheckCommittedNavigation("http://internal.corp/x", policy)).toBe(true);
+		expect(policy.resolvedHosts?.get("internal.corp")).toEqual(["10.1.2.3"]);
+	});
+
+	it("treats a cached (pre-vetted public) answer as already checked", async () => {
+		let lookups = 0;
+		const policy = {
+			lookup: async (hostname: string): Promise<string[]> => {
+				lookups++;
+				return ["93.184.216.34"];
+			},
+			resolvedHosts: new Map<string, readonly string[]>([["vetted.host", ["93.184.216.34"]]]),
+		};
+		expect(await recheckCommittedNavigation("http://vetted.host/x", policy)).toBe(false);
+		expect(lookups).toBe(0);
+	});
+
+	it("fails closed on an empty answer or a resolver throw for an unvetted host", async () => {
+		expect(await recheckCommittedNavigation("http://empty.name/", { lookup: dns })).toBe(true);
+		expect(await recheckCommittedNavigation("http://fail.name/", { lookup: dns })).toBe(true);
+	});
+
+	it("does not re-resolve literal IPs, relaxed hosts, or metadata-floor targets", async () => {
+		let lookups = 0;
+		const policy = {
+			lookup: async (hostname: string): Promise<string[]> => {
+				lookups++;
+				return ["93.184.216.34"];
+			},
+		};
+		expect(await recheckCommittedNavigation("http://10.0.0.5/x", policy)).toBe(true);
+		expect(await recheckCommittedNavigation("http://169.254.169.254/x", policy)).toBe(true);
+		expect(await recheckCommittedNavigation("http://10.0.0.5/x", { ...policy, allowPrivateUrls: true })).toBe(false);
+		expect(await recheckCommittedNavigation("http://localhost/x", { ...policy, privateUrlAllowlist: ["localhost"] })).toBe(
+			false,
+		);
+		expect(lookups).toBe(0);
+	});
+
+	it("still blocks a private port on a host relaxed only by a configured endpoint", async () => {
+		const policy = resolveNavigationPolicy({
+			configuredEndpointUrls: ["http://127.0.0.1:9224"],
+			env: {},
+		});
+		expect(await recheckCommittedNavigation("http://127.0.0.1:5432/", policy)).toBe(true);
+	});
+});
+
 describe("navigation guard: policy resolution (explicit config only)", () => {
 	it("env override wins in both directions", () => {
 		expect(
@@ -251,13 +410,22 @@ describe("navigation guard: policy resolution (explicit config only)", () => {
 		).toBe(false);
 	});
 
-	it("normalizes allowlist entries and merges configured endpoint hostnames", () => {
+	it("normalizes allowlist entries and merges configured endpoints as host:port", async () => {
 		const policy = resolveNavigationPolicy({
 			allowlistSetting: ["Dev.Local", " ", 42],
 			configuredEndpointUrls: ["http://127.0.0.1:9224", "ws://localhost:9222", undefined],
 			env: {},
 		});
-		expect(policy.privateUrlAllowlist).toEqual(["dev.local", "127.0.0.1", "localhost"]);
+		// Non-default endpoint ports are carried into the entry: configuring the
+		// CDP proxy on 9224 must not also allow a database on 5432 of the same
+		// loopback host.
+		expect(policy.privateUrlAllowlist).toEqual(["dev.local", "127.0.0.1:9224", "localhost:9222"]);
+		expect(await verdict("http://127.0.0.1:5432/", policy)).toBe("BLOCK:private");
+	});
+
+	it("drops scheme-default ports from endpoint entries", () => {
+		const policy = resolveNavigationPolicy({ configuredEndpointUrls: ["https://relay.example:443"], env: {} });
+		expect(policy.privateUrlAllowlist).toEqual(["relay.example"]);
 	});
 	it("classifies IPv4-mapped and zone-scoped addresses like the Python ipaddress module", () => {
 		expect(classifyIpAddress("::ffff:100.100.100.200").alwaysBlocked).toBe(true);
