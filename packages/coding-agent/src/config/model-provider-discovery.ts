@@ -39,6 +39,21 @@ const LOCAL_PROVIDER_PLACEHOLDERS = new Set<string>(["llama-cpp-local", "lm-stud
  * so a successful fast path does not leave an armed timeout signal for concurrent GC.
  */
 export const RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS = 15_000;
+
+/** Slack so a built-in manager can still run `/v1/models` after its own walk deadline. */
+const BUILT_IN_DISCOVERY_FALLBACK_MARGIN_MS = 5_000;
+
+/**
+ * Outer race budget for a built-in manager whose probe accepts
+ * `discoveryTimeoutMs`. Never shrinks below {@link RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS};
+ * grows so a configured deadline is not silently capped by the 15 s race.
+ */
+export function resolveBuiltInDiscoveryBudgetMs(configuredTimeoutMs: number | undefined): number {
+	if (configuredTimeoutMs === undefined || !Number.isFinite(configuredTimeoutMs) || configuredTimeoutMs <= 0) {
+		return RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS;
+	}
+	return Math.max(RUNTIME_DYNAMIC_MODEL_FETCH_TIMEOUT_MS, configuredTimeoutMs + BUILT_IN_DISCOVERY_FALLBACK_MARGIN_MS);
+}
 // Built-in discovery preflight mirror of the catalog model-manager's private
 // cache timings (model-manager.ts: DEFAULT_CACHE_TTL_MS / NON_AUTHORITATIVE_RETRY_MS).
 // Built-in descriptors never override cacheTtlMs, so agreeing with these values

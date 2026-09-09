@@ -19,6 +19,8 @@ export interface ProviderOverride {
 	guardrailVersion?: Model<Api>["guardrailVersion"];
 	guardrailTrace?: Model<Api>["guardrailTrace"];
 	requestMetadata?: Model<Api>["requestMetadata"];
+	/** Deadline (ms) handed to the provider's built-in runtime model manager. */
+	discoveryTimeoutMs?: number;
 }
 
 /**
