@@ -18,6 +18,9 @@
  *   # or: omp plugin link /path/to/pii/integrations/omp
  */
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ImageContent, TextContent } from "@oh-my-pi/pi-ai";
+
+type ToolResultContent = (TextContent | ImageContent)[];
 
 const EMAIL = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi;
 const PHONE = /\b(?:\+?\d{1,3}[-.\s]?)?(?:\(?\d{3}\)?[-.\s]?)\d{3}[-.\s]?\d{4}\b/g;
@@ -87,16 +90,35 @@ export async function redactText(pi: ExtensionAPI, text: string, placeholder: st
 	return regexRedact(text, placeholder);
 }
 
-async function redactContent(pi: ExtensionAPI, content: unknown, placeholder: string): Promise<unknown> {
+async function redactToolResultContent(
+	pi: ExtensionAPI,
+	content: ToolResultContent,
+	placeholder: string,
+): Promise<ToolResultContent> {
+	const next: ToolResultContent = [];
+	for (const part of content) {
+		if (part && typeof part === "object" && part.type === "text" && typeof part.text === "string") {
+			next.push({ ...part, text: await redactText(pi, part.text, placeholder) });
+			continue;
+		}
+		next.push(part);
+	}
+	return next;
+}
+
+async function redactMessageContent(pi: ExtensionAPI, content: unknown, placeholder: string): Promise<unknown> {
 	if (typeof content === "string") {
 		return await redactText(pi, content, placeholder);
 	}
 	if (!Array.isArray(content)) return content;
-	const next = [];
+	const next: unknown[] = [];
 	for (const part of content) {
 		if (part && typeof part === "object" && "type" in part && part.type === "text" && "text" in part) {
-			if (typeof part.text === "string") {
-				next.push({ ...part, text: await redactText(pi, part.text, placeholder) });
+			if (typeof (part as { text?: unknown }).text === "string") {
+				next.push({
+					...(part as object),
+					text: await redactText(pi, (part as { text: string }).text, placeholder),
+				});
 				continue;
 			}
 		}
@@ -121,7 +143,7 @@ export default function piiRedactExtension(pi: ExtensionAPI) {
 	pi.on("tool_result", async event => {
 		if (!enabled) return;
 		// Error results are model-visible and persisted; scrub them too.
-		const redacted = await redactContent(pi, event.content, placeholder);
+		const redacted = await redactToolResultContent(pi, event.content, placeholder);
 		if (redacted === event.content) return;
 		return { content: redacted };
 	});
@@ -134,11 +156,12 @@ export default function piiRedactExtension(pi: ExtensionAPI) {
 				messages.push(message);
 				continue;
 			}
-			const next = { ...message };
-			if ("content" in next) {
-				next.content = await redactContent(pi, next.content, placeholder);
+			if (!("content" in message)) {
+				messages.push(message);
+				continue;
 			}
-			messages.push(next);
+			const content = await redactMessageContent(pi, (message as { content?: unknown }).content, placeholder);
+			messages.push({ ...message, content } as typeof message);
 		}
 		return { messages };
 	});
