@@ -13,7 +13,6 @@ import {
 	convertToLlm,
 	SKILL_PROMPT_MESSAGE_TYPE,
 } from "@oh-my-pi/pi-coding-agent/session/messages";
-import { buildSessionContext } from "@oh-my-pi/pi-coding-agent/session/session-context";
 import type { CompactionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
 import { ExtensionRuntime, loadExtensionFromFactory } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader";
 import { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner";
