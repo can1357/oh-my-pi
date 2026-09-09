@@ -1,0 +1,2680 @@
+syntax = "proto3";
+
+package exa.seat_management_pb;
+
+import "buf/validate/validate.proto";
+import "exa/codeium_common_pb/codeium_common.proto";
+import "google/protobuf/timestamp.proto";
+
+enum PaymentPeriod {
+  PAYMENT_PERIOD_UNSPECIFIED = 0;
+  PAYMENT_PERIOD_MONTH = 1;
+  PAYMENT_PERIOD_YEAR = 2;
+}
+
+enum RecentTopUpStatus {
+  RECENT_TOP_UP_STATUS_UNSPECIFIED = 0;
+  RECENT_TOP_UP_STATUS_PENDING = 1;
+  RECENT_TOP_UP_STATUS_COMPLETED = 2;
+}
+
+enum SubInterval {
+  SUB_INTERVAL_UNSPECIFIED = 0;
+  SUB_INTERVAL_MONTH = 1;
+  SUB_INTERVAL_YEAR = 2;
+}
+
+enum StripePrice {
+  STRIPE_PRICE_UNSPECIFIED = 0;
+  STRIPE_PRICE_TEAMS_MONTHLY = 1;
+  STRIPE_PRICE_TEAMS_YEARLY = 2;
+}
+
+enum CascadeSeatType {
+  CASCADE_SEAT_TYPE_UNSPECIFIED = 0;
+  CASCADE_SEAT_TYPE_ENTRY = 1;
+  CASCADE_SEAT_TYPE_STANDARD = 2;
+}
+
+enum UserTeamDetailsType {
+  USER_TEAM_DETAILS_TYPE_UNSPECIFIED = 0;
+  USER_TEAM_DETAILS_TYPE_CASCADE_SEAT = 1;
+}
+
+enum PendingTransactionType {
+  PENDING_TRANSACTION_TYPE_UNSPECIFIED = 0;
+  PENDING_TRANSACTION_TYPE_TOP_UP = 1;
+}
+
+enum FlexCreditChronicleType {
+  FLEX_CREDIT_CHRONICLE_TYPE_UNSPECIFIED = 0;
+  FLEX_CREDIT_CHRONICLE_TYPE_PURCHASE = 1;
+  FLEX_CREDIT_CHRONICLE_TYPE_REFERRER = 2;
+  FLEX_CREDIT_CHRONICLE_TYPE_AVERY = 3;
+  FLEX_CREDIT_CHRONICLE_TYPE_TOP_UP = 4;
+  FLEX_CREDIT_CHRONICLE_TYPE_SUPPORT = 5;
+  FLEX_CREDIT_CHRONICLE_TYPE_GTM = 6;
+  FLEX_CREDIT_CHRONICLE_TYPE_FREE_CREDITS = 7;
+}
+
+enum PurchaseReasonType {
+  PURCHASE_REASON_TYPE_UNSPECIFIED = 0;
+  PURCHASE_REASON_TYPE_MANUAL = 1;
+  PURCHASE_REASON_TYPE_TOP_UP = 2;
+}
+
+message User {
+  reserved 31;
+
+  string api_key = 1;
+  string name = 2;
+  string email = 3;
+  .google.protobuf.Timestamp signup_time = 4;
+  .google.protobuf.Timestamp last_update_time = 5;
+  string id = 6;
+  string team_id = 7;
+  .exa.codeium_common_pb.UserTeamStatus team_status = 8;
+  string username = 9;
+  string preferred_time_zone = 10;
+  bool public_profile_enabled = 11;
+  string bio = 12;
+  bool pro = 13;
+  string profile_picture_uri = 14;
+  bool disable_codeium = 16;
+  .exa.codeium_common_pb.CliAccessOverride cli_access_override = 32;
+  string profile_picture_presigned_url = 15;
+  string occupation_company = 17;
+  string occupation_role = 18;
+  uint32 years_of_experience_min = 23;
+  uint32 years_of_experience_max = 24;
+  bool newsletter = 19;
+  bool disabled_telemetry = 20;
+  string inbound_source = 21;
+  string signup_stage = 22;
+  bool used_trial = 25;
+  .google.protobuf.Timestamp first_windsurf_use_time = 26;
+  .google.protobuf.Timestamp windsurf_pro_trial_end_time = 27;
+  int64 used_prompt_credits = 28 [deprecated = true];
+  int64 used_flow_credits = 29 [deprecated = true];
+  string referral_code = 30;
+  string devin_user_id = 33;
+  string devin_account_id = 34;
+}
+
+message Team {
+  reserved 30;
+  reserved 35;
+  reserved "allowed_ip_ranges";
+
+  string id = 1;
+  string name = 2;
+  .google.protobuf.Timestamp signup_time = 3;
+  string invite_id = 4;
+  bool used_trial = 5;
+  string stripe_subscription_id = 6;
+  bool subscription_active = 7;
+  string stripe_customer_id = 8;
+  .google.protobuf.Timestamp current_billing_period_start = 9;
+  .google.protobuf.Timestamp current_billing_period_end = 18;
+  int64 num_seats_current_billing_period = 10;
+  bool attribution_enabled = 11;
+  string sso_provider_id = 12;
+  bool offers_enabled = 13;
+  .exa.codeium_common_pb.TeamsTier teams_tier = 14;
+  int64 flex_credit_quota = 15;
+  int64 used_flow_credits = 16;
+  int64 used_prompt_credits = 17;
+  int64 num_cascade_seats = 19;
+  .google.protobuf.Timestamp cascade_usage_month_start = 20;
+  .google.protobuf.Timestamp cascade_usage_month_end = 21;
+  .exa.seat_management_pb.CascadeSeatType cascade_seat_type = 22;
+  bool top_up_enabled = 23;
+  int64 monthly_top_up_amount = 24;
+  int64 top_up_spent = 25;
+  int64 top_up_increment = 26;
+  int64 used_flex_credits = 27;
+  bool is_pooled = 29;
+  int64 prepurchased_credits = 28;
+  int64 orphaned_credit_usage = 31;
+  .google.protobuf.Timestamp grace_period_end = 32;
+  .exa.codeium_common_pb.GracePeriodStatus grace_period_status = 33;
+  optional int32 max_session_duration_seconds = 34;
+  string devin_account_id = 36;
+  optional int32 api_key_expiration_days = 37;
+}
+
+message PreapprovedUser {
+  string id = 1;
+  string name = 2;
+  string email = 3;
+  string team_id = 4;
+  string issued_by_api_key = 5;
+  .google.protobuf.Timestamp created_at = 6;
+  .google.protobuf.Timestamp updated_at = 7;
+}
+
+message ReadOnlyPreapprovedUser {
+  reserved 1;
+  reserved "id";
+
+  string name = 2;
+  string email = 3;
+  string team_id = 4;
+  string issued_by_api_key = 5;
+  .google.protobuf.Timestamp created_at = 6;
+  .google.protobuf.Timestamp updated_at = 7;
+}
+
+message UserSettings {
+  bool exists = 1;
+  bool newsletter = 2;
+  bool disabled_telemetry = 3;
+  string inbound_source = 4;
+  string signup_stage = 5;
+}
+
+message UserRole {
+  string api_key = 1;
+  repeated string roles = 2;
+  string role_id = 3;
+  string role_name = 4;
+}
+
+message GetUserStatusRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+}
+
+message GetUserStatusResponse {
+  .exa.codeium_common_pb.UserStatus user_status = 1;
+  .exa.codeium_common_pb.PlanInfo plan_info = 2;
+}
+
+message GetCurrentUserRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  bool generate_profile_picture_url = 2;
+  bool create_if_not_exist = 3;
+  bool include_subscription = 4;
+  string sso_token = 5 [deprecated = true];
+  string saml_provider_id = 6 [deprecated = true];
+}
+
+message ReferralInfo {
+  string referrer_name = 1;
+  string referrer_email = 2;
+  .google.protobuf.Timestamp referral_accepted_time = 3;
+  .google.protobuf.Timestamp granted_time = 4;
+}
+
+message GetCurrentUserResponse {
+  reserved 3;
+  reserved "license";
+
+  .exa.seat_management_pb.User user = 1;
+  repeated string roles = 2;
+  .exa.seat_management_pb.Team team = 4;
+  .exa.seat_management_pb.UserSettings subscription = 5;
+  repeated .exa.codeium_common_pb.Permission permissions = 8;
+  .exa.seat_management_pb.UserRole role = 7;
+  .exa.codeium_common_pb.PlanInfo plan_info = 6;
+  .exa.seat_management_pb.UserTeamDetails user_team_details = 9;
+  .exa.seat_management_pb.ReferralInfo referral = 10;
+  map<int32, .exa.codeium_common_pb.TeamsFeaturesMetadata> team_features = 11;
+  repeated string group_ids = 12;
+  string redirect_url = 13 [deprecated = true];
+  repeated .exa.seat_management_pb.SSOTeamOption team_options = 14;
+  bool show_disable_cli_setting = 15;
+  bool show_self_serve_purchase_for_enterprise = 16;
+  bool is_effective_super_admin = 17;
+}
+
+message GetUsersRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string group_id = 2;
+}
+
+message GetUsersResponse {
+  repeated .exa.seat_management_pb.User users = 1;
+  repeated .exa.seat_management_pb.UserRole user_roles = 2;
+  repeated .exa.seat_management_pb.UserTeamDetails user_team_details = 3;
+  repeated .exa.seat_management_pb.UserCascadeDetails user_cascade_details = 4;
+}
+
+message GetRolesForUserRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string api_key = 2;
+}
+
+message GetRolesForUserResponse {
+  repeated string roles = 1;
+}
+
+message GetPrimaryApiKeyForDevsOnlyRequest {
+  string session_token = 1;
+}
+
+message GetPrimaryApiKeyForDevsOnlyResponse {
+  string api_key = 1;
+}
+
+message AddUserRoleRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string api_key_to_add = 2;
+  string role = 3;
+  string group_id = 4;
+  string service_key = 5;
+}
+
+message AddUserRoleResponse {
+}
+
+message RemoveUserRoleRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string api_key_to_remove = 2;
+  string role = 3;
+  string group_id = 4;
+}
+
+message RemoveUserRoleResponse {
+}
+
+message RegisterUserRequest {
+  string firebase_id_token = 1;
+}
+
+message RegisterUserResponse {
+  string api_key = 1;
+  string name = 2;
+  string api_server_url = 3;
+  string redirect_url = 4 [deprecated = true];
+  repeated .exa.seat_management_pb.SSOTeamOption team_options = 5;
+}
+
+message MigrateApiKeyRequest {
+  string api_key = 1;
+}
+
+message MigrateApiKeyResponse {
+  string session_token = 1;
+}
+
+message CreateFbUserRequest {
+  string email = 1;
+  string password = 2;
+  string turnstile_token = 3;
+  string phone_number = 4;
+  string otp_code = 5;
+  string first_name = 6;
+  string last_name = 7;
+}
+
+message CreateFbUserResponse {
+  string uid = 1;
+}
+
+message UpdateNameRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string full_name = 2;
+}
+
+message UpdateNameResponse {
+}
+
+message GetProfilePicturePresignedUploadUrlRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetProfilePicturePresignedUploadUrlResponse {
+  string url = 1;
+}
+
+message ProfilePictureUploadCompleteRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message ProfilePictureUploadCompleteResponse {
+}
+
+message GetProfileDataRequest {
+  string api_key = 1;
+}
+
+message GetProfileDataResponse {
+  string profile_picture_url = 1;
+}
+
+message DeleteProfilePictureRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message DeleteProfilePictureResponse {
+}
+
+message UpdateInboundSourceRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string inbound_source = 2;
+}
+
+message UpdateInboundSourceResponse {
+}
+
+message DeleteUserRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string api_key_to_delete = 3;
+}
+
+message DeleteUserResponse {
+}
+
+message GetLicenseRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetLicenseResponse {
+  .exa.seat_management_pb.EnterpriseLicenseConfig license = 1;
+}
+
+message RequestTeamAccessRequest {
+  reserved 1;
+  reserved "api_key";
+
+  string invite_id = 2;
+}
+
+message RequestTeamAccessResponse {
+}
+
+message UpdateUserTeamStatusRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  message UserTeamStatusUpdateItem {
+    string api_key = 1;
+    .exa.codeium_common_pb.UserTeamStatus status = 2;
+  }
+
+  repeated .exa.seat_management_pb.UpdateUserTeamStatusRequest.UserTeamStatusUpdateItem updates = 2;
+}
+
+message UpdateUserTeamStatusResponse {
+  repeated .exa.seat_management_pb.User users = 1;
+}
+
+message GetTeamMetadataRequest {
+  string invite_id = 1;
+}
+
+message GetTeamMetadataResponse {
+  .exa.seat_management_pb.Team team = 1;
+}
+
+message RemoveUserFromTeamRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string api_key_to_remove = 2;
+}
+
+message RemoveUserFromTeamResponse {
+}
+
+message RefreshTeamInviteIdRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message RefreshTeamInviteIdResponse {
+  .exa.seat_management_pb.Team team = 1;
+}
+
+message GrantPreapprovalRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  message PreapprovalUserItem {
+    string name = 1;
+    string email = 2;
+  }
+
+  repeated .exa.seat_management_pb.GrantPreapprovalRequest.PreapprovalUserItem preapprovals = 2;
+}
+
+message GrantPreapprovalResponse {
+  repeated .exa.seat_management_pb.ReadOnlyPreapprovedUser preapprovals = 1;
+}
+
+message GetPreapprovalsRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetPreapprovalsResponse {
+  repeated .exa.seat_management_pb.ReadOnlyPreapprovedUser preapprovals = 1;
+}
+
+message GetPreapprovalMetadataRequest {
+  string approval_id = 1;
+}
+
+message GetPreapprovalMetadataResponse {
+  string name = 1;
+  string email = 2;
+  string team_name = 3;
+}
+
+message AcceptPreapprovalRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string approval_id = 2;
+}
+
+message AcceptPreapprovalResponse {
+}
+
+message RejectPreapprovalRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string approval_id = 2;
+}
+
+message RejectPreapprovalResponse {
+}
+
+message GetPreapprovalForUserRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetPreapprovalForUserResponse {
+  .exa.seat_management_pb.PreapprovedUser preapproval = 1;
+  string admin_name = 2;
+  string team_name = 3;
+  bool can_accept_directly = 4;
+}
+
+message RevokePreapprovalRequest {
+  reserved 1;
+  reserved 2;
+  reserved "auth_token", "approval_id";
+
+  string email = 3;
+}
+
+message RevokePreapprovalResponse {
+}
+
+message SubscribeToPlanRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string stripe_price_id = 2 [deprecated = true];
+  bool start_trial = 3;
+  string success_url = 4;
+  string cancel_url = 5;
+  .exa.codeium_common_pb.TeamsTier teams_tier = 8;
+  .exa.seat_management_pb.PaymentPeriod payment_period = 9;
+  string team_name = 7;
+  int64 seats = 6;
+  string turnstile_token = 10;
+}
+
+message SubscribeToPlanResponse {
+  string checkout_url = 1;
+}
+
+message PurchaseCascadeCreditsRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string success_url = 4;
+  string cancel_url = 5;
+  optional int32 overage_amount = 6;
+}
+
+message PurchaseCascadeCreditsResponse {
+  string checkout_url = 1;
+  int64 add_on_credits_available = 2;
+  int64 add_on_credits_used = 3;
+  .exa.seat_management_pb.RecentTopUpStatus recent_top_up_status = 4;
+}
+
+message UpdateCreditTopUpSettingsRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  bool enabled = 2;
+  int32 monthly_top_up_amount = 3;
+  int32 top_up_increment = 4;
+}
+
+message UpdateCreditTopUpSettingsResponse {
+}
+
+message GetTeamBillingRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetTeamBillingResponse {
+  reserved 13;
+
+  message Invoice {
+    float amount = 1;
+    string currency = 2;
+    bool paid = 3;
+    .google.protobuf.Timestamp created = 4;
+    string invoice_pdf_url = 5;
+  }
+
+  message PaymentMethod {
+    message CardType {
+      string brand = 1;
+      int64 exp_month = 2;
+      int64 exp_year = 3;
+      string last4 = 4;
+    }
+
+    string type = 1;
+    oneof payment_type {
+      .exa.seat_management_pb.GetTeamBillingResponse.PaymentMethod.CardType card = 2;
+    }
+  }
+
+  message FailedSubscriptionPayment {
+    string invoice_link = 1;
+    string decline_code = 2;
+    .google.protobuf.Timestamp pay_by_date = 3;
+  }
+
+  bool subscription_active = 1;
+  bool on_trial = 2;
+  .google.protobuf.Timestamp subscription_renewal_time = 3;
+  int64 num_seats = 5;
+  float plan_unit_amount = 6;
+  .exa.seat_management_pb.SubInterval sub_interval = 7;
+  bool cancel_at_period_end = 8;
+  repeated .exa.seat_management_pb.GetTeamBillingResponse.Invoice invoices = 9 [deprecated = true];
+  .exa.seat_management_pb.GetTeamBillingResponse.PaymentMethod payment_method = 10;
+  bool trial_only = 11;
+  .exa.codeium_common_pb.PlanStatus plan_status = 12;
+  int64 num_users = 14;
+  int64 num_seats_current_billing_period = 15;
+  int64 num_cascade_users = 16;
+  int64 num_cascade_seats = 17;
+  int64 num_core_users = 18;
+  int64 num_core_seats = 19;
+  .exa.seat_management_pb.GetTeamBillingResponse.FailedSubscriptionPayment failed_subscription_payment = 20;
+  string top_up_error_string = 21;
+  bool team_top_up_criteria_reached = 22;
+}
+
+message UpdateSeatsRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  int64 num_seats = 2;
+  bool preview = 3;
+}
+
+message UpdateSeatsResponse {
+  .exa.seat_management_pb.BillingUpdate billing_update = 1;
+}
+
+message UpdatePlanRequest {
+  reserved 1;
+  reserved 2;
+  reserved "auth_token";
+
+  bool preview = 3;
+  .exa.seat_management_pb.PaymentPeriod payment_period = 4;
+  .exa.codeium_common_pb.TeamsTier teams_tier = 5;
+}
+
+message UpdatePlanResponse {
+  .exa.seat_management_pb.BillingUpdate billing_update = 1;
+  bool applied_changes = 2;
+  string next_action_client_secret = 3;
+  string payment_failure_reason = 4;
+  bool requires_password_reset = 5;
+}
+
+message BillingUpdate {
+  float amount_due_immediately = 1;
+  float price_per_seat = 3;
+  int64 num_seats = 4;
+  .exa.seat_management_pb.SubInterval sub_interval = 5;
+  float amount_per_interval = 6;
+  .google.protobuf.Timestamp billing_start = 7;
+  .google.protobuf.Timestamp billing_end = 8;
+  bool unused_plan_refunded = 9;
+  bool has_sso_add_on = 10;
+}
+
+message CancelPlanRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  bool cancel_plan = 2;
+  bool resume_plan = 3;
+  string cancel_comment = 4;
+  string cancel_reason = 5;
+}
+
+message CancelPlanResponse {
+}
+
+message UpdateBillingRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string success_url = 2 [deprecated = true];
+  string cancel_url = 3 [deprecated = true];
+}
+
+message UpdateBillingResponse {
+  string checkout_url = 1 [deprecated = true];
+}
+
+message GetCustomerPortalRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string return_url = 2;
+}
+
+message GetCustomerPortalResponse {
+  string portal_url = 1;
+}
+
+message AddTeamAddOnFeatureRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  .exa.codeium_common_pb.TeamsFeatures feature_type = 2;
+  bool preview = 3;
+}
+
+message AddTeamAddOnFeatureResponse {
+  .exa.seat_management_pb.BillingUpdate billing_update = 1;
+  bool applied_changes = 2;
+  string next_action_client_secret = 3;
+  string payment_failure_reason = 4;
+}
+
+message ShowSSOAddOnRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message ShowSSOAddOnResponse {
+  bool show_sso_add_on = 1;
+}
+
+message GetUserSubscriptionRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetUserSubscriptionResponse {
+  bool exists = 1;
+  bool newsletter = 2;
+  bool disabled_telemetry = 3;
+  string inbound_source = 4;
+  string signup_stage = 5;
+  .exa.seat_management_pb.UserSettings subscription = 6;
+}
+
+message UpdateOccupationRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string occupation_company = 2;
+  string occupation_role = 3;
+  uint32 years_of_experience_min = 4;
+  uint32 years_of_experience_max = 5;
+}
+
+message UpdateOccupationResponse {
+}
+
+message UpdateProfileRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string new_name = 2;
+  string new_email = 3;
+  string new_bio = 4;
+  string otp_code = 5;
+}
+
+message UpdateProfileResponse {
+}
+
+message AddUsersToTeamRequest {
+  string secret = 1;
+  string team_id = 2;
+  repeated string emails = 3;
+  bool create_if_not_exists = 4;
+  bool send_email = 5;
+}
+
+message AddUsersToTeamResponse {
+}
+
+message UpdateUserRolesRequest {
+  string secret = 1;
+  string email = 2;
+  repeated string roles = 3;
+}
+
+message UpdateUserRolesResponse {
+}
+
+message BulkUpdateUserRolesRequest {
+  string service_key = 1;
+  repeated string emails = 2;
+  string role = 3;
+  string group_name = 4;
+}
+
+message BulkUpdateUserRolesResponse {
+  repeated string successful_emails = 1;
+  repeated string failed_emails = 2;
+}
+
+message GetTeamActivityRequest {
+  string api_key = 1;
+  .google.protobuf.Timestamp start_timestamp = 2;
+  .google.protobuf.Timestamp end_timestamp = 3;
+}
+
+message GetTeamActivityResponse {
+  message UserActivity {
+    .exa.seat_management_pb.User user = 1;
+    .exa.codeium_common_pb.CompletionStatistics completion_statistics = 2;
+  }
+
+  repeated .exa.seat_management_pb.GetTeamActivityResponse.UserActivity user_activity = 1;
+}
+
+message GetSSOProviderRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetSSOProviderResponse {
+  .exa.seat_management_pb.SAMLAuthProvider saml_auth_provider = 1;
+}
+
+message SaveSSOProviderRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  .exa.seat_management_pb.SAMLAuthProvider saml_auth_provider = 2;
+  bool is_test = 3;
+}
+
+message SaveSSOProviderResponse {
+}
+
+message SAMLAuthProvider {
+  string sso_provider_id = 1;
+  string idp_entity_id = 2;
+  string sso_url = 3;
+  string x509_certificate = 4;
+  bool enabled = 5;
+}
+
+message JoinTeamWithSSOLoginRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string saml_provider_id = 2;
+  string saml_auth_token = 3;
+}
+
+message JoinTeamWithSSOLoginResponse {
+}
+
+message UserSSOLoginRedirectRequest {
+  string email = 1;
+}
+
+message UserSSOLoginRedirectResponse {
+  bool should_redirect = 1;
+  string sso_provider_id = 2;
+  bool disallow_enterprise_user_login = 3;
+  string redirect_url = 4;
+}
+
+message CheckEmailForSSORequest {
+  string email = 1;
+}
+
+message CheckEmailForSSOResponse {
+  string redirect_url = 1;
+  bool show_sso_requirement_message = 2;
+}
+
+message CheckUserLoginMethodRequest {
+  string email = 1;
+  string approval_id = 2;
+}
+
+message CheckUserLoginMethodResponse {
+  string redirect_url = 1;
+  bool disallow_enterprise_user_login = 2;
+  bool user_exists = 3;
+  bool is_migrated = 4;
+  bool has_password = 5;
+  bool has_legacy_invite = 6;
+  bool redirect_to_enterprise_register = 7;
+}
+
+message SSOTeamOption {
+  string team_name = 1;
+  string redirect_url = 2;
+}
+
+message EnterpriseLicenseConfig {
+  .google.protobuf.Timestamp expiration_timestamp = 1;
+  uint32 seat_limit = 2;
+  bool attribution_enabled = 3;
+  bool audit_logs_enabled = 4;
+  .google.protobuf.Timestamp start_timestamp = 5;
+  uint32 mucs_total = 6;
+  bool mucs_enabled = 7;
+  uint32 license_length_months = 8;
+  bool enable_individual_user_analytics = 9;
+}
+
+message DeleteTeamRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message DeleteTeamResponse {
+}
+
+message GetTeamsFeaturesRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetTeamsFeaturesResponse {
+  repeated .exa.codeium_common_pb.TeamsFeatures features = 1;
+}
+
+message GrantSuperAdminAccessRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string user_email = 2;
+  string team_id = 3;
+}
+
+message GrantSuperAdminAccessResponse {
+  .exa.seat_management_pb.User user = 1;
+}
+
+message GrantTeamAdminAccessRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string user_email = 2;
+  string team_id = 3;
+}
+
+message GrantTeamAdminAccessResponse {
+  .exa.seat_management_pb.User user = 1;
+  bool pre_provisioned = 2;
+}
+
+message AddFlexCreditsToMultiTenantTeamRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_id = 2;
+  int64 flex_credits_to_add = 3;
+}
+
+message AddFlexCreditsToMultiTenantTeamResponse {
+  .exa.seat_management_pb.Team team = 1;
+}
+
+message GetTeamsFeaturesInternalRequest {
+  string secret = 1;
+  string team_id = 2;
+}
+
+message GetTeamsFeaturesInternalResponse {
+  repeated .exa.codeium_common_pb.TeamsFeatures features = 1;
+}
+
+message UpdateTeamsFeaturesInternalRequest {
+  string secret = 1;
+  string team_id = 2;
+  repeated .exa.codeium_common_pb.TeamsFeatures add_features = 3;
+  repeated .exa.codeium_common_pb.TeamsFeatures remove_features = 4;
+}
+
+message SetTeamsFeaturesRequest {
+  string secret = 1;
+  string team_id = 2;
+  repeated .exa.codeium_common_pb.TeamsFeatures features = 3;
+}
+
+message UpdateTeamsFeaturesInternalResponse {
+}
+
+message SetTeamsFeaturesResponse {
+}
+
+message BulkEditUserApprovalsRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  repeated string emails = 2;
+  .exa.seat_management_pb.UserTeamDetailsType approval_type = 3;
+  bool approve = 4;
+}
+
+message UserTeamDetails {
+  string auth_uid = 1;
+  string team_id = 2;
+  bool has_cascade_seat = 3;
+}
+
+message BulkEditUserApprovalsResponse {
+}
+
+message BulkEditUserApprovalsInternalRequest {
+  string secret = 1;
+  string team_name = 2;
+  repeated string emails = 3;
+  .exa.seat_management_pb.UserTeamDetailsType approval_type = 4;
+  bool approve = 5;
+}
+
+message BulkEditUserApprovalsInternalResponse {
+}
+
+message GetCliTeamSettingsRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+}
+
+message GetCliTeamSettingsResponse {
+  reserved 2;
+  reserved 5;
+  reserved 13;
+  reserved 16;
+  reserved 17;
+  reserved 18;
+  reserved "allowed_mcp_servers_json";
+
+  bool allow_mcp_servers = 1;
+  bool disable_fast_context = 3;
+  bool cascade_web_search_enabled = 4;
+  .google.protobuf.Timestamp fetched_at = 6;
+  repeated string allowed_model_uids = 7;
+  repeated .exa.codeium_common_pb.McpServerConfig allowed_mcp_servers = 8;
+  repeated string permission_allow = 9;
+  repeated string permission_deny = 10;
+  repeated string permission_ask = 11;
+  bool allow_bundling_devin_cli = 12;
+  repeated string mcp_registry_urls = 14;
+  string acp_registry_config = 15;
+  .exa.codeium_common_pb.SandboxEnforcementMode sandbox_enforcement_mode = 19;
+  repeated string sandbox_allowed_domains = 20;
+  repeated string sandbox_denied_domains = 21;
+  bool devin_terminal_acp_enabled = 22;
+  bool devin_cloud_acp_enabled = 23;
+  optional bool enforce_mcp_registry = 24;
+  string cascade_hooks_json = 25;
+  string default_model_uid = 26;
+  .exa.codeium_common_pb.CascadeCommandsAutoExecution max_cascade_auto_execution_level = 27;
+  bool attribution_enabled = 28;
+  bool disable_plugins = 29;
+}
+
+message GetGroupsRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  .exa.codeium_common_pb.Permission permission = 2;
+}
+
+message Group {
+  string id = 1;
+  string name = 2;
+}
+
+message GetGroupsResponse {
+  repeated .exa.seat_management_pb.Group groups = 1;
+}
+
+message CreateTeamApiSecretRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string name = 2;
+  string role = 3;
+  string group_id = 4;
+  .google.protobuf.Timestamp expiration_date = 5;
+}
+
+message CreateTeamApiSecretResponse {
+  string secret = 1;
+}
+
+message UpdateTeamApiSecretRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string service_key_id = 2;
+  string name = 3;
+  string role = 4;
+  string group_id = 5;
+}
+
+message UpdateTeamApiSecretResponse {
+}
+
+message GetAllTeamApiSecretsRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message TeamApiSecret {
+  string id = 1;
+  string name = 2;
+  .google.protobuf.Timestamp created_at = 3;
+  string role_id = 4;
+  string group_id = 5;
+  .google.protobuf.Timestamp expiration_date = 6;
+}
+
+message GetAllTeamApiSecretsResponse {
+  repeated .exa.seat_management_pb.TeamApiSecret secrets = 1;
+}
+
+message DeleteTeamApiSecretRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string secret_id = 2;
+}
+
+message DeleteTeamApiSecretResponse {
+}
+
+message GetUserNotificationsRequest {
+  string api_key = 1;
+}
+
+message GetUserNotificationsResponse {
+  message TeamPreapprovalMetadata {
+    string admin_name = 1;
+    string team_name = 2;
+    .google.protobuf.Timestamp created_at = 3;
+  }
+
+  .exa.seat_management_pb.GetUserNotificationsResponse.TeamPreapprovalMetadata team_preapproval_metadata = 1;
+}
+
+message ConnectGithubAccountRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string github_refresh_token = 2;
+  .google.protobuf.Timestamp github_refresh_token_expires_at = 3;
+}
+
+message ConnectGithubAccountResponse {
+  string github_access_token = 1;
+  .google.protobuf.Timestamp github_access_token_expires_at = 2;
+}
+
+message GetGitHubAccountStatusRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetGitHubAccountStatusResponse {
+  bool connected = 1;
+  string username = 2;
+  .google.protobuf.Timestamp expires_at = 3;
+}
+
+message GetGitHubAccessTokenRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetGitHubAccessTokenResponse {
+  string access_token = 1;
+  .google.protobuf.Timestamp expires_at = 2;
+}
+
+message ConnectNetlifyAccountRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string netlify_access_token = 2;
+  .google.protobuf.Timestamp expires_at = 3;
+  string netlify_user_id = 4;
+}
+
+message ConnectNetlifyAccountResponse {
+}
+
+message DisconnectNetlifyAccountRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message DisconnectNetlifyAccountResponse {
+}
+
+message GetNetlifyAccountStatusRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetNetlifyAccountStatusResponse {
+  bool connected = 1;
+  string netlify_user_id = 2;
+  .google.protobuf.Timestamp expires_at = 3;
+}
+
+message UpdateCodeiumAccessRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string api_key_to_update = 2;
+  bool disable_codeium_access = 3;
+}
+
+message UpdateCodeiumAccessResponse {
+}
+
+message UpdateCliAccessRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string api_key_to_update = 2;
+  bool disable_cli_access = 3;
+}
+
+message UpdateCliAccessResponse {
+}
+
+message CreateRoleRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string name = 2;
+  repeated .exa.codeium_common_pb.Permission permissions = 3;
+}
+
+message CreateRoleResponse {
+}
+
+message DeleteRoleRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string role_id = 2;
+  optional string reassign_to_role_id = 3;
+}
+
+message DeleteRoleResponse {
+}
+
+message UpdateRoleRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string role_id = 2;
+  repeated .exa.codeium_common_pb.Permission permissions = 3;
+}
+
+message UpdateRoleResponse {
+}
+
+message GetRolesRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message Role {
+  string role_id = 1;
+  string name = 2;
+  repeated .exa.codeium_common_pb.Permission permissions = 3;
+  bool mutable = 4;
+}
+
+message GetRolesResponse {
+  repeated .exa.seat_management_pb.Role roles = 1;
+}
+
+message GetMucsInfoRequest {
+}
+
+message MonthlyMucsMessage {
+  int32 billing_months = 1;
+  int32 billing_years = 2;
+  int32 mucs_charged = 3;
+  int32 mucs_deducted = 4;
+}
+
+message GetMucsInfoResponse {
+  int32 mucs_left = 1;
+  int32 mucs_used = 2;
+  bool is_mucs_enabled = 3;
+  .google.protobuf.Timestamp start_date = 4;
+  int32 current_registered_users = 5;
+  int32 current_high_watermark = 6;
+  repeated .exa.seat_management_pb.MonthlyMucsMessage mucs_table = 7;
+}
+
+message GetCascadeAnalyticsRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  .google.protobuf.Timestamp start_timestamp = 2;
+  .google.protobuf.Timestamp end_timestamp = 3;
+}
+
+message GetCascadeAnalyticsResponse {
+  int32 used_prompt_credits = 1;
+  int32 used_flow_credits = 2;
+  int32 estimated_monthly_prompts = 3;
+  int32 estimated_monthly_flows = 4;
+  int64 purchased_credits = 5;
+}
+
+message GetPlanStatusRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  bool include_top_up_status = 2;
+}
+
+message GetPlanStatusResponse {
+  .exa.codeium_common_pb.PlanStatus plan_status = 1;
+  int64 team_used_prompt_credits = 2;
+}
+
+message Wrapped2024 {
+  string api_key = 1;
+  string email = 2;
+  string name = 3;
+  int32 total_minutes_coded = 4;
+  double coding_percentile = 5;
+  .google.protobuf.Timestamp biggest_coding_day = 6;
+  int32 minutes_coding_biggest_day = 7;
+  int32 autocompletes_accepted = 8;
+  int32 cascade_messages_sent = 9;
+  int32 cascade_lines_written = 10;
+  int32 longest_streak = 11;
+  int32 most_productive_day = 12;
+}
+
+message GetWrapped2024Request {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetWrapped2024Response {
+  .exa.seat_management_pb.Wrapped2024 wrapped_data = 1;
+}
+
+message FlexCreditChronicleEntry {
+  string team_id = 1;
+  .google.protobuf.Timestamp grant_date = 2;
+  int32 num_credits = 3;
+  .exa.seat_management_pb.FlexCreditChronicleType type = 4;
+  uint32 referral_id = 5;
+  string invoice_id = 6;
+  oneof reason {
+    .exa.seat_management_pb.ReferrerReason referrer = 7;
+    .exa.seat_management_pb.AveryReason avery = 8;
+    .exa.seat_management_pb.PurchaseReason purchase = 9;
+  }
+  int64 amount_micros = 10;
+}
+
+message ReferrerReason {
+  string user_email = 1;
+  string avery_email = 2;
+}
+
+message AveryReason {
+  string user_email = 1;
+  string referrer_email = 2;
+}
+
+message PurchaseReason {
+  .exa.seat_management_pb.PurchaseReasonType type = 1;
+}
+
+message GetTeamCreditEntriesRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetTeamCreditEntriesResponse {
+  repeated .exa.seat_management_pb.FlexCreditChronicleEntry entries = 1;
+}
+
+message SendEmailVerificationRequest {
+  string first_name = 1;
+  string email = 2;
+  string turnstile_token = 3;
+}
+
+message SendEmailVerificationResponse {
+}
+
+message CreateEnterpriseRequest {
+  string secret = 1;
+  string team_name = 2;
+  string admin_email = 3;
+  repeated string tags = 4;
+  string organization = 5;
+  string source = 6;
+  string creation_reason = 7;
+  bool trial = 8;
+  .google.protobuf.Timestamp end_date = 9;
+  bool hybrid = 10;
+  int32 flow_seats = 11;
+  int32 core_seats = 12;
+  repeated string users_to_add = 13;
+  string created_by = 14;
+  bool paid_out_of_band = 15;
+  bool enable_auto_cascade_seat_provisioning = 16;
+  int32 user_prompt_credit_cap = 17;
+  int32 user_flow_credit_cap = 18;
+  bool send_email = 19;
+  bool is_pooled = 20;
+  int64 prepurchased_credits = 21;
+}
+
+message CreateEnterpriseResponse {
+}
+
+message UpdateTeamConfigRequest {
+  string secret = 1;
+  string team_name = 2;
+  int32 user_prompt_credit_cap = 3;
+  int32 user_flow_credit_cap = 4;
+  bool disable_prompt_limit = 5;
+  bool disable_flow_limit = 6;
+}
+
+message UpdateTeamConfigResponse {
+}
+
+message UpdateTeamConfigExternalRequest {
+  reserved 1;
+  reserved 37;
+  reserved 38;
+  reserved 40;
+  reserved 41;
+  reserved 42;
+  reserved "auth_token";
+
+  optional bool allow_auto_run_commands = 2;
+  optional bool allow_mcp_servers = 3;
+  optional bool allow_app_deployments = 4;
+  optional bool allow_github_reviews = 5;
+  optional bool allow_github_description_edits = 6;
+  optional string pull_request_review_guidelines = 7;
+  optional string pull_request_description_guidelines = 8;
+  optional bool allow_individual_level_analytics = 9;
+  optional bool allow_conversation_sharing = 10;
+  optional bool allow_sandbox_app_deployments = 11;
+  optional bool allow_teams_app_deployments = 12;
+  optional bool allow_attribution = 13;
+  optional string allowed_mcp_servers = 14;
+  optional bool allow_github_auto_reviews = 15;
+  optional bool allow_browser_experimental_features = 16;
+  optional bool allow_vibe_and_replace = 17;
+  optional bool disable_deepwiki = 18;
+  optional bool disable_codemaps = 19;
+  optional string allow_codemap_sharing = 20;
+  optional bool disable_fast_context = 21;
+  optional bool disable_lifeguard = 22;
+  optional bool disable_tool_call_execution_outside_workspace = 23;
+  repeated string allowed_ip_ranges = 24 [deprecated = true];
+  .exa.codeium_common_pb.CascadeCommandsAutoExecution max_cascade_auto_execution_level = 25;
+  optional .exa.seat_management_pb.IpAllowlist ip_allowlist = 26;
+  optional .exa.seat_management_pb.TerminalAllowList terminal_allow_list = 27;
+  optional .exa.seat_management_pb.TerminalDenyList terminal_deny_list = 28;
+  optional .exa.seat_management_pb.CliPermissionsList cli_permissions_allow = 29;
+  optional .exa.seat_management_pb.CliPermissionsList cli_permissions_deny = 30;
+  optional .exa.seat_management_pb.CliPermissionsList cli_permissions_ask = 31;
+  optional string default_model_uid = 32;
+  optional bool allow_arena_mode = 33;
+  optional string cascade_hooks_json = 34;
+  optional bool cascade_web_search_enabled = 35;
+  optional bool allow_bundling_devin_cli = 36;
+  optional .exa.seat_management_pb.McpRegistryUrlsList mcp_registry_urls_list = 49;
+  optional string acp_registry_config = 39;
+  optional .exa.codeium_common_pb.SandboxEnforcementMode sandbox_enforcement_mode = 43;
+  optional .exa.seat_management_pb.SandboxDomainAllowlist sandbox_domain_allowlist = 44;
+  optional .exa.seat_management_pb.SandboxDomainDenylist sandbox_domain_denylist = 45;
+  optional bool devin_terminal_acp_enabled = 46;
+  optional bool devin_cloud_acp_enabled = 47;
+  optional bool enforce_mcp_registry = 48;
+  optional bool user_configured_banner_enabled = 50;
+  optional string user_configured_banner_label = 51;
+  optional string user_configured_banner_color = 52;
+  optional bool disable_cascade = 53;
+  optional string extension_policy = 54;
+  optional int32 api_key_expiration_days = 55;
+  optional bool disable_plugins = 56;
+}
+
+message UpdateTeamConfigExternalResponse {
+}
+
+message TerminalAllowList {
+  repeated string allowed = 1;
+}
+
+message TerminalDenyList {
+  repeated string deny = 1;
+}
+
+message SandboxDomainAllowlist {
+  repeated string domains = 1;
+}
+
+message SandboxDomainDenylist {
+  repeated string domains = 1;
+}
+
+message CliPermissionsList {
+  repeated string rules = 1;
+}
+
+message IpAllowlist {
+  repeated string ranges = 1;
+}
+
+message McpRegistryUrlsList {
+  repeated string urls = 1;
+}
+
+message GetTeamConfigRecordRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetTeamConfigRecordResponse {
+  .exa.codeium_common_pb.TeamConfig team_config = 1;
+  optional int32 api_key_expiration_days = 2;
+}
+
+message UsageConfigRequest {
+  string service_key = 1;
+  oneof user_add_on_credit_cap_update {
+    bool clear_add_on_credit_cap = 2;
+    uint32 set_add_on_credit_cap = 3;
+  }
+  oneof scope {
+    bool team_level = 4;
+    string group_id = 5;
+    string user_email = 6;
+  }
+}
+
+message UsageConfigResponse {
+}
+
+message GetUsageConfigRequest {
+  string service_key = 1;
+  oneof scope {
+    bool team_level = 2;
+    string group_id = 3;
+    string user_email = 4;
+  }
+}
+
+message GetUsageConfigResponse {
+  optional uint32 add_on_credit_cap = 1;
+}
+
+message GetTeamCreditBalanceRequest {
+  string service_key = 1;
+}
+
+message GetTeamCreditBalanceResponse {
+  int64 prompt_credits_per_seat = 1;
+  int64 num_seats = 2;
+  int64 add_on_credits_available = 3;
+  int64 add_on_credits_used = 4;
+  .google.protobuf.Timestamp billing_cycle_start = 5;
+  .google.protobuf.Timestamp billing_cycle_end = 6;
+}
+
+message GetTeamInfoRequest {
+  string secret = 1;
+  string team_name = 2;
+}
+
+message UserInfo {
+  string api_key = 1;
+  string name = 2;
+  string email = 3;
+  .google.protobuf.Timestamp signup_time = 4;
+  int32 flows_used = 5;
+  int32 prompts_used = 6;
+  int32 num_acceptances = 7;
+  int32 num_lines_accepted = 8;
+  .google.protobuf.Timestamp last_update_time = 9;
+  .google.protobuf.Timestamp first_windsurf_use_time = 10;
+  .exa.codeium_common_pb.UserTeamStatus team_status = 11;
+  bool has_cascade_seat = 12;
+}
+
+message GetTeamInfoResponse {
+  .exa.seat_management_pb.Team team = 1;
+  repeated string users_with_cascade = 2 [deprecated = true];
+  repeated string users_on_team = 3 [deprecated = true];
+  repeated .exa.seat_management_pb.UserInfo user_infos = 4;
+  .exa.codeium_common_pb.TeamConfig team_config = 5;
+}
+
+message IsValidReferralCodeRequest {
+  string referral_code = 1;
+}
+
+message IsValidReferralCodeResponse {
+  string referrer_name = 1;
+}
+
+message ProcessReferralCodeRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string referral_code = 2;
+}
+
+message ProcessReferralCodeResponse {
+}
+
+message CreateMultiTenantTeamRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string name = 2;
+  string org_id = 3;
+}
+
+message CreateMultiTenantTeamResponse {
+  .exa.seat_management_pb.Team team = 1;
+}
+
+message GetMultiTenantTeamsRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetMultiTenantTeamsResponse {
+  repeated .exa.seat_management_pb.Team teams = 1;
+}
+
+message GetTeamOrgIdRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_id = 2;
+}
+
+message GetTeamOrgIdResponse {
+  string org_id = 1;
+}
+
+message DeleteMultiTenantTeamRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_name = 2;
+  bool soft_delete = 3;
+}
+
+message DeleteMultiTenantTeamResponse {
+}
+
+message SetTeamLicenseRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_name = 2;
+  .google.protobuf.Timestamp billing_start_date = 3;
+  .google.protobuf.Timestamp billing_end_date = 4;
+  int64 num_seats = 5;
+}
+
+message SetTeamLicenseResponse {
+  .exa.seat_management_pb.Team team = 1;
+}
+
+message UpdatePlanDetailsInternalRequest {
+  string secret = 1;
+  string email = 2;
+  .exa.codeium_common_pb.TeamsTier teams_tier = 3;
+  int64 num_flex_credits = 4;
+  int64 used_flex_credits = 5;
+  int64 used_flow_credits = 6;
+  int64 used_prompt_credits = 7;
+  int64 num_teams_seats = 8;
+  int64 user_used_prompt_credits = 9;
+  int64 user_used_flow_credits = 10;
+  bool for_credit_update = 11;
+  int64 user_used_flex_credits_for_prompts = 12;
+}
+
+message UpdatePlanDetailsInternalResponse {
+}
+
+message RemoveUsersFromTeamInternalRequest {
+  string secret = 1;
+  repeated string emails = 2;
+  bool override_subscription_active_check = 3;
+}
+
+message RemoveUsersFromTeamInternalResponse {
+}
+
+message DevinUserIdentifier {
+  string user_id = 1;
+  string account_id = 2;
+  string email = 3;
+}
+
+message BulkDeleteUsersInternalRequest {
+  string secret = 1;
+  repeated string emails = 2;
+  bool delete_from_bigquery = 3 [deprecated = true];
+  repeated .exa.seat_management_pb.DevinUserIdentifier devin_users = 4;
+}
+
+message BulkDeleteUsersInternalResponse {
+}
+
+message BulkDeleteUsersInternalFromBigQueryRequest {
+  string secret = 1;
+  repeated string emails = 2;
+}
+
+message BulkDeleteUsersInternalFromBigQueryResponse {
+}
+
+message ExportUserDataInternalRequest {
+  string secret = 1;
+  string email = 2;
+}
+
+message ExportUserDataInternalResponse {
+  message Invoice {
+    string id = 1;
+    int64 amount_paid = 2;
+    string currency = 3;
+    .google.protobuf.Timestamp created = 4;
+    bool paid = 5;
+    string invoice_pdf = 6;
+    string status = 7;
+  }
+
+  message StripeData {
+    string customer_id = 1;
+    string subscription_id = 2;
+    bool subscription_active = 3;
+    string subscription_status = 4;
+    .google.protobuf.Timestamp current_period_start = 5;
+    .google.protobuf.Timestamp current_period_end = 6;
+    bool cancel_at_period_end = 7;
+    string payment_method_type = 8;
+    string payment_method_last4 = 9;
+    repeated .exa.seat_management_pb.ExportUserDataInternalResponse.Invoice invoices = 10;
+  }
+
+  message BrevoData {
+    string email = 1;
+    map<string, string> attributes = 2;
+    repeated int64 list_ids = 3;
+    .google.protobuf.Timestamp created_at = 4;
+    .google.protobuf.Timestamp modified_at = 5;
+  }
+
+  message BigQueryData {
+    message PreapprovedUserRow {
+      string id = 1;
+      string name = 2;
+      string email = 3;
+      string team_id = 4;
+      string issued_by_api_key = 5;
+      .google.protobuf.Timestamp created_at = 6;
+      .google.protobuf.Timestamp updated_at = 7;
+    }
+
+    message WaitlistRow {
+      string email = 1;
+      string feature_name = 2;
+      .google.protobuf.Timestamp signup_time = 3;
+      .google.protobuf.Timestamp accepted_at = 4;
+    }
+
+    message BlogSubscriptionRow {
+      string id = 1;
+      string email = 2;
+      .google.protobuf.Timestamp created_at = 3;
+    }
+
+    message Wrapped2024Row {
+      string api_key = 1;
+      string email = 2;
+      string name = 3;
+      int32 total_minutes_coded = 4;
+      float coding_percentile = 5;
+      .google.protobuf.Timestamp biggest_coding_day = 6;
+      int32 minutes_coding_biggest_day = 7;
+      int32 autocompletes_accepted = 8;
+      int32 cascade_messages_sent = 9;
+      int32 cascade_lines_written = 10;
+    }
+
+    message EmailTrackingRow {
+      string auth_uid = 1;
+      string email_id = 2;
+      .google.protobuf.Timestamp sent_at = 3;
+    }
+
+    message CascadeCostRow {
+      string api_key = 1;
+      string user_email = 2;
+      .google.protobuf.Timestamp date = 3;
+      float cascade_cost = 4;
+      int64 prompt_credits = 5;
+      int64 flow_credits = 6;
+      int64 num_product_events = 7;
+    }
+
+    repeated .exa.seat_management_pb.ExportUserDataInternalResponse.BigQueryData.PreapprovedUserRow preapproved_users = 1;
+    repeated .exa.seat_management_pb.ExportUserDataInternalResponse.BigQueryData.WaitlistRow waitlist = 2;
+    repeated .exa.seat_management_pb.ExportUserDataInternalResponse.BigQueryData.BlogSubscriptionRow blog_subscriptions = 3;
+    repeated .exa.seat_management_pb.ExportUserDataInternalResponse.BigQueryData.Wrapped2024Row wrapped_2024 = 4;
+    repeated .exa.seat_management_pb.ExportUserDataInternalResponse.BigQueryData.EmailTrackingRow email_tracking = 5;
+    repeated .exa.seat_management_pb.ExportUserDataInternalResponse.BigQueryData.CascadeCostRow cascade_costs = 6;
+  }
+
+  message FirebaseAuthData {
+    string uid = 1;
+    .google.protobuf.Timestamp creation_time = 2;
+    .google.protobuf.Timestamp last_sign_in_time = 3;
+    bool email_verified = 4;
+    repeated .exa.seat_management_pb.ExportUserDataInternalResponse.ProviderData providers = 5;
+  }
+
+  message ProviderData {
+    string provider_id = 1;
+    string uid = 2;
+    string email = 3;
+  }
+
+  message GitHubAuthData {
+    string auth_uid = 1;
+    string github_username = 2;
+    .google.protobuf.Timestamp created_at = 3;
+    .google.protobuf.Timestamp updated_at = 4;
+  }
+
+  message NetlifyAuthData {
+    string auth_uid = 1;
+    string netlify_user_id = 2;
+    .google.protobuf.Timestamp created_at = 3;
+    .google.protobuf.Timestamp updated_at = 4;
+  }
+
+  message OfferTrackingRow {
+    string auth_uid = 1;
+    string offer_id = 2;
+    .google.protobuf.Timestamp created_at = 3;
+  }
+
+  message UserFeaturesRow {
+    string id = 1;
+    string api_key = 2;
+    int32 feature = 3;
+    .google.protobuf.Timestamp created_at = 4;
+  }
+
+  message CompletionExampleRow {
+    string auth_uid = 1;
+    string completion_id = 2;
+    string file_path = 3;
+    string short_prefix = 4;
+    string completion_text = 5;
+    string short_suffix = 6;
+    .google.protobuf.Timestamp timestamp = 7;
+  }
+
+  message WindsurfProjectRow {
+    string windsurf_project_id = 1;
+    string auth_uid = 2;
+    string deployment_provider = 3;
+    string provider_project_id = 4;
+    string project_name = 5;
+    string domain = 6;
+    string subdomain_name = 7;
+    .google.protobuf.Timestamp expires_at = 8;
+    .google.protobuf.Timestamp claimed_at = 9;
+    .google.protobuf.Timestamp deprovisioned_at = 10;
+    .google.protobuf.Timestamp created_at = 11;
+    .google.protobuf.Timestamp updated_at = 12;
+  }
+
+  message WindsurfDeploymentRow {
+    string windsurf_deployment_id = 1;
+    string windsurf_project_id = 2;
+    string provider_deployment_id = 3;
+    string workspace_path = 4;
+    string deployment_url = 5;
+    .google.protobuf.Timestamp created_at = 6;
+    .google.protobuf.Timestamp updated_at = 7;
+  }
+
+  message UserReferralRow {
+    uint32 id = 1;
+    string auth_uid = 2;
+    string referred_email = 3;
+    string details = 4;
+    .google.protobuf.Timestamp created_at = 5;
+    .google.protobuf.Timestamp granted_at = 6;
+  }
+
+  message UserRoleRow {
+    string api_key = 1;
+    string role = 2;
+    string group_id = 3;
+  }
+
+  message GroupMemberRow {
+    string id = 1;
+    string group_id = 2;
+    string user_id = 3;
+    .google.protobuf.Timestamp created_at = 4;
+    .google.protobuf.Timestamp updated_at = 5;
+  }
+
+  message AuditLogRow {
+    string event_id = 1;
+    .google.protobuf.Timestamp timestamp = 2;
+    string team_id = 3;
+    string user_email = 4;
+    string user_name = 5;
+    string api_key = 6;
+    string event = 7;
+    string status_code = 8;
+    string status_reason = 9;
+    string description = 10;
+  }
+
+  message RegistrationActivityRow {
+    string email_id = 1;
+    int32 action_value = 2;
+    string action_description = 3;
+    .google.protobuf.Timestamp time_of_action = 4;
+    bool successful_action = 5;
+  }
+
+  .exa.seat_management_pb.User user = 1;
+  .exa.seat_management_pb.Team team = 2;
+  .exa.codeium_common_pb.UserTeamStatus user_team_status = 3;
+  .exa.seat_management_pb.ExportUserDataInternalResponse.StripeData stripe_data = 4;
+  .exa.seat_management_pb.ExportUserDataInternalResponse.BrevoData brevo_data = 5;
+  .exa.seat_management_pb.ExportUserDataInternalResponse.BigQueryData bigquery_data = 6;
+  .exa.seat_management_pb.ExportUserDataInternalResponse.FirebaseAuthData firebase_auth_data = 7;
+  .exa.seat_management_pb.ExportUserDataInternalResponse.GitHubAuthData github_auth_data = 8;
+  .exa.seat_management_pb.ExportUserDataInternalResponse.NetlifyAuthData netlify_auth_data = 9;
+  repeated .exa.seat_management_pb.ExportUserDataInternalResponse.OfferTrackingRow offer_tracking = 10;
+  repeated .exa.seat_management_pb.ExportUserDataInternalResponse.UserFeaturesRow user_features = 11;
+  repeated .exa.seat_management_pb.ExportUserDataInternalResponse.CompletionExampleRow completion_examples = 12;
+  repeated .exa.seat_management_pb.ExportUserDataInternalResponse.WindsurfProjectRow windsurf_projects = 13;
+  repeated .exa.seat_management_pb.ExportUserDataInternalResponse.WindsurfDeploymentRow windsurf_deployments = 14;
+  repeated .exa.seat_management_pb.ExportUserDataInternalResponse.UserReferralRow user_referrals = 15;
+  repeated .exa.seat_management_pb.ExportUserDataInternalResponse.UserRoleRow user_roles = 16;
+  repeated .exa.seat_management_pb.ExportUserDataInternalResponse.GroupMemberRow group_members = 17;
+  repeated .exa.seat_management_pb.ExportUserDataInternalResponse.AuditLogRow audit_logs = 18;
+  repeated .exa.seat_management_pb.ExportUserDataInternalResponse.RegistrationActivityRow registration_activity = 19;
+}
+
+message InitiateAccountOwnershipVerificationInternalRequest {
+  string secret = 1;
+  string email = 2;
+}
+
+message InitiateAccountOwnershipVerificationInternalResponse {
+  bool success = 1;
+  string message = 2;
+}
+
+message VerifyAccountOwnershipInternalRequest {
+  string secret = 1;
+  string email = 2;
+  string verification_code = 3;
+}
+
+message VerifyAccountOwnershipInternalResponse {
+  bool verified = 1;
+  string message = 2;
+}
+
+message InitiateTopUpRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message InitiateTopUpResponse {
+  .exa.codeium_common_pb.TransactionStatus status = 1;
+}
+
+message UserCascadeDetails {
+  string auth_uid = 1;
+  int64 used_prompt_credits = 2;
+  int64 used_flow_credits = 3;
+  .google.protobuf.Timestamp free_cascade_usage_month_start = 4;
+}
+
+message AddExtraFlexCreditsInternalRequest {
+  string secret = 1;
+  string team_id = 2;
+  int64 amount = 3;
+  .exa.seat_management_pb.FlexCreditChronicleType type = 4;
+  string email = 5;
+}
+
+message AddExtraFlexCreditsInternalResponse {
+  int64 previous_flex_credits = 1;
+  int64 new_flex_credits = 2;
+}
+
+message GetOneTimeAuthTokenRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetOneTimeAuthTokenResponse {
+  string auth_token = 1;
+}
+
+message CreatePKCEAuthorizationCodeRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string code_challenge = 2;
+  string code_challenge_method = 3;
+}
+
+message CreatePKCEAuthorizationCodeResponse {
+  string authorization_code = 1;
+}
+
+message ExchangePKCEAuthorizationCodeRequest {
+  string authorization_code = 1;
+  string code_verifier = 2;
+}
+
+message ExchangePKCEAuthorizationCodeResponse {
+  string api_key = 1;
+  string name = 2;
+  string api_server_url = 3;
+  string devin_webapp_host = 4;
+  string devin_api_url = 5;
+}
+
+message GetSetUserApiProviderKeysRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetSetUserApiProviderKeysResponse {
+  repeated .exa.codeium_common_pb.APIProvider providers = 1;
+}
+
+message SetUserApiProviderKeyRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  .exa.codeium_common_pb.APIProvider provider = 2;
+  string provider_api_key = 3;
+}
+
+message SetUserApiProviderKeyResponse {
+}
+
+message DeleteUserApiProviderKeyRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  .exa.codeium_common_pb.APIProvider provider = 2;
+}
+
+message DeleteUserApiProviderKeyResponse {
+}
+
+message DeleteApiKeyRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  oneof auth {
+    string service_key = 3;
+  }
+  oneof target {
+    string key_id = 2;
+    string api_key = 4;
+    string group_id = 5;
+  }
+}
+
+message DeleteApiKeyResponse {
+  int64 num_deleted = 1;
+}
+
+message GetApiKeySummaryRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message ApiKeyForDisplay {
+  string key_id = 1;
+  string key_for_display = 2;
+  .google.protobuf.Timestamp created_at = 3;
+  .google.protobuf.Timestamp last_used_at = 4;
+  .google.protobuf.Timestamp expires_at = 5;
+}
+
+message GetApiKeySummaryResponse {
+  repeated .exa.seat_management_pb.ApiKeyForDisplay api_keys = 1;
+}
+
+message LogOutUserRequest {
+  string uid = 1;
+}
+
+message LogOutUserResponse {
+}
+
+message TeamDomain {
+  string domain = 1;
+  bool verified = 2;
+}
+
+message AddTeamDomainRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string domain = 2;
+}
+
+message AddTeamDomainResponse {
+  string verification_token = 1;
+}
+
+message ListTeamDomainsRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message ListTeamDomainsResponse {
+  repeated .exa.seat_management_pb.TeamDomain team_domains = 1;
+}
+
+message VerifyTeamDomainRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string domain = 2;
+}
+
+message VerifyTeamDomainResponse {
+}
+
+message DeleteTeamDomainRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string domain = 2;
+}
+
+message DeleteTeamDomainResponse {
+}
+
+message AddTeamDomainInternalRequest {
+  string secret = 1;
+  string team_id = 2;
+  string domain = 3;
+}
+
+message AddTeamDomainInternalResponse {
+}
+
+message DeleteTeamDomainInternalRequest {
+  string secret = 1;
+  string team_id = 2;
+  string domain = 3;
+}
+
+message DeleteTeamDomainInternalResponse {
+}
+
+message ListTeamDomainsInternalRequest {
+  string secret = 1;
+  string team_id = 2;
+}
+
+message ListTeamDomainsInternalResponse {
+  repeated .exa.seat_management_pb.TeamDomain team_domains = 1;
+}
+
+message UpdateTeamNameInternalRequest {
+  string secret = 1;
+  string team_id = 2;
+  string new_name = 3;
+}
+
+message UpdateTeamNameInternalResponse {
+}
+
+message VerifySSOLoginInternalRequest {
+  string secret = 1;
+  string saml_provider_id = 2;
+  string user_email = 3;
+}
+
+message VerifySSOLoginInternalResponse {
+  bool is_allowed = 1;
+  string error_message = 2;
+}
+
+message CheckProTrialEligibilityRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message CheckProTrialEligibilityResponse {
+  bool is_eligible = 1;
+}
+
+message ExchangeDevinCodeRequest {
+  string code = 1;
+}
+
+message ExchangeDevinCodeResponse {
+  string session_token = 1;
+  optional string auth1_token = 2;
+  optional string account_id = 3;
+  optional string primary_org_id = 4;
+}
+
+message GetSelfDevinSessionTokenRequest {
+  .exa.codeium_common_pb.Metadata metadata = 1;
+}
+
+message GetSelfDevinSessionTokenResponse {
+  string session_token = 1;
+}
+
+message GetEligibleDevinOrganizationsRequest {
+}
+
+message GetEligibleDevinOrganizationsResponse {
+  message DevinOrganization {
+    string org_id = 1;
+    string display_name = 2;
+    string account_id = 3;
+    bool is_admin = 4;
+    bool can_use_cli = 5;
+    bool can_use_cascade = 6;
+  }
+
+  repeated .exa.seat_management_pb.GetEligibleDevinOrganizationsResponse.DevinOrganization organizations = 1;
+}
+
+message WindsurfPostAuthRequest {
+  reserved 1;
+  reserved "auth1_token";
+
+  string org_id = 2;
+}
+
+message WindsurfPostAuthResponse {
+  message WindsurfPostAuthOrg {
+    string id = 1;
+    string name = 2;
+    bool is_admin = 3;
+    bool can_use_cli = 4;
+    bool can_use_cascade = 5;
+    string plan_slug = 6;
+    string subscription_status = 7;
+    string webapp_host = 8;
+    bool sso_login_required = 9;
+  }
+
+  string session_token = 1;
+  repeated .exa.seat_management_pb.WindsurfPostAuthResponse.WindsurfPostAuthOrg orgs = 2;
+  optional string auth1_token = 3;
+  optional string account_id = 4;
+  optional string primary_org_id = 5;
+}
+
+message GetStripeSubscriptionStateRequest {
+  reserved 1;
+  reserved "auth_token";
+}
+
+message GetStripeSubscriptionStateResponse {
+  string email = 1;
+  string subscription_id = 2;
+  string subscription_status = 3;
+  bool cancel_at_period_end = 4;
+  .google.protobuf.Timestamp current_period_start = 5;
+  .google.protobuf.Timestamp current_period_end = 6;
+  string customer_id = 7;
+  .exa.codeium_common_pb.TeamsTier teams_tier = 8;
+  bool on_trial = 9;
+  .google.protobuf.Timestamp grace_period_end = 10;
+  .exa.codeium_common_pb.GracePeriodStatus grace_period_status = 11;
+  .exa.codeium_common_pb.TeamsTier next_teams_tier = 12;
+}
+
+message GetQuotaUsageInternalRequest {
+  string secret = 1;
+  string user_id = 2;
+}
+
+message GetQuotaUsageInternalResponse {
+  int64 daily_usage_micros = 1;
+  int64 weekly_usage_micros = 2;
+  int64 daily_limit_micros = 3;
+  int64 weekly_limit_micros = 4;
+  .exa.codeium_common_pb.BillingStrategy billing_strategy = 5;
+  int64 daily_reset_at_unix = 6;
+  int64 weekly_reset_at_unix = 7;
+}
+
+message ResetQuotaUsageInternalRequest {
+  string secret = 1;
+  string user_id = 2;
+  bool reset_daily = 3;
+  bool reset_weekly = 4;
+}
+
+message ResetQuotaUsageInternalResponse {
+  int64 previous_daily_usage_micros = 1;
+  int64 previous_weekly_usage_micros = 2;
+}
+
+message GetOverageBalanceInternalRequest {
+  string secret = 1;
+  string team_id = 2;
+}
+
+message GetOverageBalanceInternalResponse {
+  int64 balance_micros = 1;
+  bool exists_in_valkey = 2;
+  int64 postgres_balance_micros = 3;
+}
+
+message AdjustOverageBalanceInternalRequest {
+  string secret = 1;
+  string team_id = 2;
+  int64 amount_micros = 3;
+  string reason = 4;
+}
+
+message AdjustOverageBalanceInternalResponse {
+  int64 previous_balance_micros = 1;
+  int64 new_balance_micros = 2;
+}
+
+message UpdateCodeSnippetTelemetryRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  bool disabled_telemetry = 2;
+}
+
+message UpdateCodeSnippetTelemetryResponse {
+}
+
+message InvalidateDevinCachesRequest {
+  string account_id = 1;
+  repeated string user_ids = 2;
+  repeated string session_tokens = 3;
+}
+
+message InvalidateDevinCachesResponse {
+  int64 deleted_keys = 1;
+}
+
+message GetSelfHostedAcuConfigRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_id = 2;
+}
+
+message GetSelfHostedAcuConfigResponse {
+  bool acu_billing_enabled = 1;
+  string billing_strategy = 2;
+  string billing_model = 3;
+  double cycle_acu_limit = 4;
+  double cascade_acu_multiplier = 5;
+  double cli_acu_multiplier = 6;
+  double prompt_credits_per_acu = 7;
+}
+
+message SetSelfHostedAcuConfigRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_id = 2;
+  string billing_model = 3;
+  double cycle_acu_limit = 4;
+  double cascade_acu_multiplier = 5;
+  double cli_acu_multiplier = 6;
+  double prompt_credits_per_acu = 7;
+}
+
+message SetSelfHostedAcuConfigResponse {
+}
+
+message DisableSelfHostedAcuBillingRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_id = 2;
+}
+
+message DisableSelfHostedAcuBillingResponse {
+}
+
+message BatchGetSelfHostedAcuConfigRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  repeated string team_ids = 2;
+}
+
+message BatchGetSelfHostedAcuConfigResponse {
+  map<string, .exa.seat_management_pb.GetSelfHostedAcuConfigResponse> configs = 1;
+}
+
+message GetSelfHostedAcuTeamCycleUsageRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_id = 2;
+}
+
+message GetSelfHostedAcuTeamCycleUsageResponse {
+  double total_acus = 1;
+  .google.protobuf.Timestamp cycle_start = 2;
+  .google.protobuf.Timestamp cycle_end = 3;
+}
+
+message GetSelfHostedAcuUserOverrideRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_id = 2;
+  string auth_uid = 3;
+}
+
+message GetSelfHostedAcuUserOverrideResponse {
+  bool has_override = 1;
+  double cycle_acu_limit = 2;
+  double current_cycle_usage = 3;
+  double team_cycle_acu_limit = 4;
+}
+
+message SetSelfHostedAcuUserOverrideRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_id = 2;
+  string auth_uid = 3;
+  double cycle_acu_limit = 4;
+}
+
+message SetSelfHostedAcuUserOverrideResponse {
+}
+
+message DeleteSelfHostedAcuUserOverrideRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_id = 2;
+  string auth_uid = 3;
+}
+
+message DeleteSelfHostedAcuUserOverrideResponse {
+}
+
+message BatchGetSelfHostedAcuUserOverridesRequest {
+  reserved 1;
+  reserved "auth_token";
+
+  string team_id = 2;
+}
+
+message BatchGetSelfHostedAcuUserOverridesResponse {
+  message Entry {
+    string auth_uid = 1;
+    double cycle_acu_limit = 2;
+    double current_cycle_usage = 3;
+  }
+
+  repeated .exa.seat_management_pb.BatchGetSelfHostedAcuUserOverridesResponse.Entry entries = 1;
+}
+
+message GetCurrentUserNameRequest {
+}
+
+message GetCurrentUserNameResponse {
+  string name = 1;
+  string user_id = 2;
+}
+
+message PreviewApiKeyExpirationImpactRequest {
+  int32 api_key_expiration_days = 1;
+}
+
+message PreviewApiKeyExpirationImpactResponse {
+  int32 total_keys = 1;
+  int32 keys_already_expired = 2;
+  int32 users_affected = 3;
+}
+
+service SeatManagementService {
+  rpc GetUserStatus (.exa.seat_management_pb.GetUserStatusRequest) returns (.exa.seat_management_pb.GetUserStatusResponse);
+  rpc GetUsers (.exa.seat_management_pb.GetUsersRequest) returns (.exa.seat_management_pb.GetUsersResponse);
+  rpc GetRolesForUser (.exa.seat_management_pb.GetRolesForUserRequest) returns (.exa.seat_management_pb.GetRolesForUserResponse);
+  rpc AddUserRole (.exa.seat_management_pb.AddUserRoleRequest) returns (.exa.seat_management_pb.AddUserRoleResponse);
+  rpc RemoveUserRole (.exa.seat_management_pb.RemoveUserRoleRequest) returns (.exa.seat_management_pb.RemoveUserRoleResponse);
+  rpc RegisterUser (.exa.seat_management_pb.RegisterUserRequest) returns (.exa.seat_management_pb.RegisterUserResponse);
+  rpc MigrateApiKey (.exa.seat_management_pb.MigrateApiKeyRequest) returns (.exa.seat_management_pb.MigrateApiKeyResponse);
+  rpc CreateFbUser (.exa.seat_management_pb.CreateFbUserRequest) returns (.exa.seat_management_pb.CreateFbUserResponse);
+  rpc GetOneTimeAuthToken (.exa.seat_management_pb.GetOneTimeAuthTokenRequest) returns (.exa.seat_management_pb.GetOneTimeAuthTokenResponse);
+  rpc CreatePKCEAuthorizationCode (.exa.seat_management_pb.CreatePKCEAuthorizationCodeRequest) returns (.exa.seat_management_pb.CreatePKCEAuthorizationCodeResponse);
+  rpc ExchangePKCEAuthorizationCode (.exa.seat_management_pb.ExchangePKCEAuthorizationCodeRequest) returns (.exa.seat_management_pb.ExchangePKCEAuthorizationCodeResponse);
+  rpc UpdateName (.exa.seat_management_pb.UpdateNameRequest) returns (.exa.seat_management_pb.UpdateNameResponse);
+  rpc UpdateInboundSource (.exa.seat_management_pb.UpdateInboundSourceRequest) returns (.exa.seat_management_pb.UpdateInboundSourceResponse);
+  rpc GetProfilePicturePresignedUploadUrl (.exa.seat_management_pb.GetProfilePicturePresignedUploadUrlRequest) returns (.exa.seat_management_pb.GetProfilePicturePresignedUploadUrlResponse);
+  rpc ProfilePictureUploadComplete (.exa.seat_management_pb.ProfilePictureUploadCompleteRequest) returns (.exa.seat_management_pb.ProfilePictureUploadCompleteResponse);
+  rpc GetProfileData (.exa.seat_management_pb.GetProfileDataRequest) returns (.exa.seat_management_pb.GetProfileDataResponse);
+  rpc DeleteProfilePicture (.exa.seat_management_pb.DeleteProfilePictureRequest) returns (.exa.seat_management_pb.DeleteProfilePictureResponse);
+  rpc DeleteUser (.exa.seat_management_pb.DeleteUserRequest) returns (.exa.seat_management_pb.DeleteUserResponse);
+  rpc UpdateCodeiumAccess (.exa.seat_management_pb.UpdateCodeiumAccessRequest) returns (.exa.seat_management_pb.UpdateCodeiumAccessResponse);
+  rpc UpdateCliAccess (.exa.seat_management_pb.UpdateCliAccessRequest) returns (.exa.seat_management_pb.UpdateCliAccessResponse);
+  rpc GetCurrentUser (.exa.seat_management_pb.GetCurrentUserRequest) returns (.exa.seat_management_pb.GetCurrentUserResponse);
+  rpc GetLicense (.exa.seat_management_pb.GetLicenseRequest) returns (.exa.seat_management_pb.GetLicenseResponse);
+  rpc RequestTeamAccess (.exa.seat_management_pb.RequestTeamAccessRequest) returns (.exa.seat_management_pb.RequestTeamAccessResponse);
+  rpc UpdateUserTeamStatus (.exa.seat_management_pb.UpdateUserTeamStatusRequest) returns (.exa.seat_management_pb.UpdateUserTeamStatusResponse);
+  rpc GetTeamMetadata (.exa.seat_management_pb.GetTeamMetadataRequest) returns (.exa.seat_management_pb.GetTeamMetadataResponse);
+  rpc RemoveUserFromTeam (.exa.seat_management_pb.RemoveUserFromTeamRequest) returns (.exa.seat_management_pb.RemoveUserFromTeamResponse);
+  rpc RefreshTeamInviteId (.exa.seat_management_pb.RefreshTeamInviteIdRequest) returns (.exa.seat_management_pb.RefreshTeamInviteIdResponse);
+  rpc GrantPreapproval (.exa.seat_management_pb.GrantPreapprovalRequest) returns (.exa.seat_management_pb.GrantPreapprovalResponse);
+  rpc RevokePreapproval (.exa.seat_management_pb.RevokePreapprovalRequest) returns (.exa.seat_management_pb.RevokePreapprovalResponse);
+  rpc GetPreapprovals (.exa.seat_management_pb.GetPreapprovalsRequest) returns (.exa.seat_management_pb.GetPreapprovalsResponse);
+  rpc GetPreapprovalMetadata (.exa.seat_management_pb.GetPreapprovalMetadataRequest) returns (.exa.seat_management_pb.GetPreapprovalMetadataResponse);
+  rpc AcceptPreapproval (.exa.seat_management_pb.AcceptPreapprovalRequest) returns (.exa.seat_management_pb.AcceptPreapprovalResponse);
+  rpc RejectPreapproval (.exa.seat_management_pb.RejectPreapprovalRequest) returns (.exa.seat_management_pb.RejectPreapprovalResponse);
+  rpc GetPreapprovalForUser (.exa.seat_management_pb.GetPreapprovalForUserRequest) returns (.exa.seat_management_pb.GetPreapprovalForUserResponse);
+  rpc UpdateSeats (.exa.seat_management_pb.UpdateSeatsRequest) returns (.exa.seat_management_pb.UpdateSeatsResponse);
+  rpc SubscribeToPlan (.exa.seat_management_pb.SubscribeToPlanRequest) returns (.exa.seat_management_pb.SubscribeToPlanResponse);
+  rpc PurchaseCascadeCredits (.exa.seat_management_pb.PurchaseCascadeCreditsRequest) returns (.exa.seat_management_pb.PurchaseCascadeCreditsResponse);
+  rpc GetTeamBilling (.exa.seat_management_pb.GetTeamBillingRequest) returns (.exa.seat_management_pb.GetTeamBillingResponse);
+  rpc UpdatePlan (.exa.seat_management_pb.UpdatePlanRequest) returns (.exa.seat_management_pb.UpdatePlanResponse);
+  rpc CancelPlan (.exa.seat_management_pb.CancelPlanRequest) returns (.exa.seat_management_pb.CancelPlanResponse);
+  rpc UpdateBilling (.exa.seat_management_pb.UpdateBillingRequest) returns (.exa.seat_management_pb.UpdateBillingResponse);
+  rpc GetCustomerPortal (.exa.seat_management_pb.GetCustomerPortalRequest) returns (.exa.seat_management_pb.GetCustomerPortalResponse);
+  rpc GetUserSubscription (.exa.seat_management_pb.GetUserSubscriptionRequest) returns (.exa.seat_management_pb.GetUserSubscriptionResponse);
+  rpc UpdateOccupation (.exa.seat_management_pb.UpdateOccupationRequest) returns (.exa.seat_management_pb.UpdateOccupationResponse);
+  rpc UpdateProfile (.exa.seat_management_pb.UpdateProfileRequest) returns (.exa.seat_management_pb.UpdateProfileResponse);
+  rpc GetSSOProvider (.exa.seat_management_pb.GetSSOProviderRequest) returns (.exa.seat_management_pb.GetSSOProviderResponse);
+  rpc SaveSSOProvider (.exa.seat_management_pb.SaveSSOProviderRequest) returns (.exa.seat_management_pb.SaveSSOProviderResponse);
+  rpc JoinTeamWithSSOLogin (.exa.seat_management_pb.JoinTeamWithSSOLoginRequest) returns (.exa.seat_management_pb.JoinTeamWithSSOLoginResponse);
+  rpc UserSSOLoginRedirect (.exa.seat_management_pb.UserSSOLoginRedirectRequest) returns (.exa.seat_management_pb.UserSSOLoginRedirectResponse);
+  rpc CheckEmailForSSO (.exa.seat_management_pb.CheckEmailForSSORequest) returns (.exa.seat_management_pb.CheckEmailForSSOResponse);
+  rpc CheckUserLoginMethod (.exa.seat_management_pb.CheckUserLoginMethodRequest) returns (.exa.seat_management_pb.CheckUserLoginMethodResponse);
+  rpc SendEmailVerification (.exa.seat_management_pb.SendEmailVerificationRequest) returns (.exa.seat_management_pb.SendEmailVerificationResponse);
+  rpc GetTeamActivity (.exa.seat_management_pb.GetTeamActivityRequest) returns (.exa.seat_management_pb.GetTeamActivityResponse);
+  rpc DeleteTeam (.exa.seat_management_pb.DeleteTeamRequest) returns (.exa.seat_management_pb.DeleteTeamResponse);
+  rpc GetTeamsFeatures (.exa.seat_management_pb.GetTeamsFeaturesRequest) returns (.exa.seat_management_pb.GetTeamsFeaturesResponse);
+  rpc GrantSuperAdminAccess (.exa.seat_management_pb.GrantSuperAdminAccessRequest) returns (.exa.seat_management_pb.GrantSuperAdminAccessResponse);
+  rpc GrantTeamAdminAccess (.exa.seat_management_pb.GrantTeamAdminAccessRequest) returns (.exa.seat_management_pb.GrantTeamAdminAccessResponse);
+  rpc AddFlexCreditsToMultiTenantTeam (.exa.seat_management_pb.AddFlexCreditsToMultiTenantTeamRequest) returns (.exa.seat_management_pb.AddFlexCreditsToMultiTenantTeamResponse);
+  rpc GetGroups (.exa.seat_management_pb.GetGroupsRequest) returns (.exa.seat_management_pb.GetGroupsResponse);
+  rpc GetUserNotifications (.exa.seat_management_pb.GetUserNotificationsRequest) returns (.exa.seat_management_pb.GetUserNotificationsResponse);
+  rpc GetCascadeAnalytics (.exa.seat_management_pb.GetCascadeAnalyticsRequest) returns (.exa.seat_management_pb.GetCascadeAnalyticsResponse);
+  rpc GetTeamCreditEntries (.exa.seat_management_pb.GetTeamCreditEntriesRequest) returns (.exa.seat_management_pb.GetTeamCreditEntriesResponse);
+  rpc UpdateCreditTopUpSettings (.exa.seat_management_pb.UpdateCreditTopUpSettingsRequest) returns (.exa.seat_management_pb.UpdateCreditTopUpSettingsResponse);
+  rpc GetPrimaryApiKeyForDevsOnly (.exa.seat_management_pb.GetPrimaryApiKeyForDevsOnlyRequest) returns (.exa.seat_management_pb.GetPrimaryApiKeyForDevsOnlyResponse);
+  rpc ConnectGithubAccount (.exa.seat_management_pb.ConnectGithubAccountRequest) returns (.exa.seat_management_pb.ConnectGithubAccountResponse);
+  rpc GetGitHubAccountStatus (.exa.seat_management_pb.GetGitHubAccountStatusRequest) returns (.exa.seat_management_pb.GetGitHubAccountStatusResponse);
+  rpc GetGitHubAccessToken (.exa.seat_management_pb.GetGitHubAccessTokenRequest) returns (.exa.seat_management_pb.GetGitHubAccessTokenResponse);
+  rpc ConnectNetlifyAccount (.exa.seat_management_pb.ConnectNetlifyAccountRequest) returns (.exa.seat_management_pb.ConnectNetlifyAccountResponse);
+  rpc DisconnectNetlifyAccount (.exa.seat_management_pb.DisconnectNetlifyAccountRequest) returns (.exa.seat_management_pb.DisconnectNetlifyAccountResponse);
+  rpc GetNetlifyAccountStatus (.exa.seat_management_pb.GetNetlifyAccountStatusRequest) returns (.exa.seat_management_pb.GetNetlifyAccountStatusResponse);
+  rpc CreateTeamApiSecret (.exa.seat_management_pb.CreateTeamApiSecretRequest) returns (.exa.seat_management_pb.CreateTeamApiSecretResponse);
+  rpc UpdateTeamApiSecret (.exa.seat_management_pb.UpdateTeamApiSecretRequest) returns (.exa.seat_management_pb.UpdateTeamApiSecretResponse);
+  rpc GetAllTeamApiSecrets (.exa.seat_management_pb.GetAllTeamApiSecretsRequest) returns (.exa.seat_management_pb.GetAllTeamApiSecretsResponse);
+  rpc DeleteTeamApiSecret (.exa.seat_management_pb.DeleteTeamApiSecretRequest) returns (.exa.seat_management_pb.DeleteTeamApiSecretResponse);
+  rpc GetPlanStatus (.exa.seat_management_pb.GetPlanStatusRequest) returns (.exa.seat_management_pb.GetPlanStatusResponse);
+  rpc CreateRole (.exa.seat_management_pb.CreateRoleRequest) returns (.exa.seat_management_pb.CreateRoleResponse);
+  rpc DeleteRole (.exa.seat_management_pb.DeleteRoleRequest) returns (.exa.seat_management_pb.DeleteRoleResponse);
+  rpc UpdateRole (.exa.seat_management_pb.UpdateRoleRequest) returns (.exa.seat_management_pb.UpdateRoleResponse);
+  rpc GetRoles (.exa.seat_management_pb.GetRolesRequest) returns (.exa.seat_management_pb.GetRolesResponse);
+  rpc AddUsersToTeam (.exa.seat_management_pb.AddUsersToTeamRequest) returns (.exa.seat_management_pb.AddUsersToTeamResponse);
+  rpc UpdateUserRoles (.exa.seat_management_pb.UpdateUserRolesRequest) returns (.exa.seat_management_pb.UpdateUserRolesResponse);
+  rpc BulkUpdateUserRoles (.exa.seat_management_pb.BulkUpdateUserRolesRequest) returns (.exa.seat_management_pb.BulkUpdateUserRolesResponse);
+  rpc GetTeamsFeaturesInternal (.exa.seat_management_pb.GetTeamsFeaturesInternalRequest) returns (.exa.seat_management_pb.GetTeamsFeaturesInternalResponse);
+  rpc UpdateTeamsFeaturesInternal (.exa.seat_management_pb.UpdateTeamsFeaturesInternalRequest) returns (.exa.seat_management_pb.UpdateTeamsFeaturesInternalResponse);
+  rpc SetTeamsFeatures (.exa.seat_management_pb.SetTeamsFeaturesRequest) returns (.exa.seat_management_pb.SetTeamsFeaturesResponse);
+  rpc BulkEditUserApprovals (.exa.seat_management_pb.BulkEditUserApprovalsRequest) returns (.exa.seat_management_pb.BulkEditUserApprovalsResponse);
+  rpc BulkEditUserApprovalsInternal (.exa.seat_management_pb.BulkEditUserApprovalsInternalRequest) returns (.exa.seat_management_pb.BulkEditUserApprovalsInternalResponse);
+  rpc CreateEnterprise (.exa.seat_management_pb.CreateEnterpriseRequest) returns (.exa.seat_management_pb.CreateEnterpriseResponse);
+  rpc UpdateTeamConfig (.exa.seat_management_pb.UpdateTeamConfigRequest) returns (.exa.seat_management_pb.UpdateTeamConfigResponse);
+  rpc GetTeamInfo (.exa.seat_management_pb.GetTeamInfoRequest) returns (.exa.seat_management_pb.GetTeamInfoResponse);
+  rpc UpdatePlanDetailsInternal (.exa.seat_management_pb.UpdatePlanDetailsInternalRequest) returns (.exa.seat_management_pb.UpdatePlanDetailsInternalResponse);
+  rpc InitiateTopUp (.exa.seat_management_pb.InitiateTopUpRequest) returns (.exa.seat_management_pb.InitiateTopUpResponse);
+  rpc UpdateTeamConfigExternal (.exa.seat_management_pb.UpdateTeamConfigExternalRequest) returns (.exa.seat_management_pb.UpdateTeamConfigExternalResponse);
+  rpc GetTeamConfigRecord (.exa.seat_management_pb.GetTeamConfigRecordRequest) returns (.exa.seat_management_pb.GetTeamConfigRecordResponse);
+  rpc UsageConfig (.exa.seat_management_pb.UsageConfigRequest) returns (.exa.seat_management_pb.UsageConfigResponse);
+  rpc GetUsageConfig (.exa.seat_management_pb.GetUsageConfigRequest) returns (.exa.seat_management_pb.GetUsageConfigResponse);
+  rpc GetTeamCreditBalance (.exa.seat_management_pb.GetTeamCreditBalanceRequest) returns (.exa.seat_management_pb.GetTeamCreditBalanceResponse);
+  rpc GetCliTeamSettings (.exa.seat_management_pb.GetCliTeamSettingsRequest) returns (.exa.seat_management_pb.GetCliTeamSettingsResponse);
+  rpc CreateMultiTenantTeam (.exa.seat_management_pb.CreateMultiTenantTeamRequest) returns (.exa.seat_management_pb.CreateMultiTenantTeamResponse);
+  rpc GetMultiTenantTeams (.exa.seat_management_pb.GetMultiTenantTeamsRequest) returns (.exa.seat_management_pb.GetMultiTenantTeamsResponse);
+  rpc DeleteMultiTenantTeam (.exa.seat_management_pb.DeleteMultiTenantTeamRequest) returns (.exa.seat_management_pb.DeleteMultiTenantTeamResponse);
+  rpc GetTeamOrgId (.exa.seat_management_pb.GetTeamOrgIdRequest) returns (.exa.seat_management_pb.GetTeamOrgIdResponse);
+  rpc GetSelfHostedAcuConfig (.exa.seat_management_pb.GetSelfHostedAcuConfigRequest) returns (.exa.seat_management_pb.GetSelfHostedAcuConfigResponse);
+  rpc SetSelfHostedAcuConfig (.exa.seat_management_pb.SetSelfHostedAcuConfigRequest) returns (.exa.seat_management_pb.SetSelfHostedAcuConfigResponse);
+  rpc DisableSelfHostedAcuBilling (.exa.seat_management_pb.DisableSelfHostedAcuBillingRequest) returns (.exa.seat_management_pb.DisableSelfHostedAcuBillingResponse);
+  rpc BatchGetSelfHostedAcuConfig (.exa.seat_management_pb.BatchGetSelfHostedAcuConfigRequest) returns (.exa.seat_management_pb.BatchGetSelfHostedAcuConfigResponse);
+  rpc GetSelfHostedAcuTeamCycleUsage (.exa.seat_management_pb.GetSelfHostedAcuTeamCycleUsageRequest) returns (.exa.seat_management_pb.GetSelfHostedAcuTeamCycleUsageResponse);
+  rpc GetSelfHostedAcuUserOverride (.exa.seat_management_pb.GetSelfHostedAcuUserOverrideRequest) returns (.exa.seat_management_pb.GetSelfHostedAcuUserOverrideResponse);
+  rpc SetSelfHostedAcuUserOverride (.exa.seat_management_pb.SetSelfHostedAcuUserOverrideRequest) returns (.exa.seat_management_pb.SetSelfHostedAcuUserOverrideResponse);
+  rpc DeleteSelfHostedAcuUserOverride (.exa.seat_management_pb.DeleteSelfHostedAcuUserOverrideRequest) returns (.exa.seat_management_pb.DeleteSelfHostedAcuUserOverrideResponse);
+  rpc BatchGetSelfHostedAcuUserOverrides (.exa.seat_management_pb.BatchGetSelfHostedAcuUserOverridesRequest) returns (.exa.seat_management_pb.BatchGetSelfHostedAcuUserOverridesResponse);
+  rpc GetMucsInfo (.exa.seat_management_pb.GetMucsInfoRequest) returns (.exa.seat_management_pb.GetMucsInfoResponse);
+  rpc GetWrapped2024 (.exa.seat_management_pb.GetWrapped2024Request) returns (.exa.seat_management_pb.GetWrapped2024Response);
+  rpc SetTeamLicense (.exa.seat_management_pb.SetTeamLicenseRequest) returns (.exa.seat_management_pb.SetTeamLicenseResponse);
+  rpc IsValidReferralCode (.exa.seat_management_pb.IsValidReferralCodeRequest) returns (.exa.seat_management_pb.IsValidReferralCodeResponse);
+  rpc ProcessReferralCode (.exa.seat_management_pb.ProcessReferralCodeRequest) returns (.exa.seat_management_pb.ProcessReferralCodeResponse);
+  rpc RemoveUsersFromTeamInternal (.exa.seat_management_pb.RemoveUsersFromTeamInternalRequest) returns (.exa.seat_management_pb.RemoveUsersFromTeamInternalResponse);
+  rpc BulkDeleteUsersInternal (.exa.seat_management_pb.BulkDeleteUsersInternalRequest) returns (.exa.seat_management_pb.BulkDeleteUsersInternalResponse);
+  rpc BulkDeleteUsersInternalFromBigQuery (.exa.seat_management_pb.BulkDeleteUsersInternalFromBigQueryRequest) returns (.exa.seat_management_pb.BulkDeleteUsersInternalFromBigQueryResponse);
+  rpc ExportUserDataInternal (.exa.seat_management_pb.ExportUserDataInternalRequest) returns (.exa.seat_management_pb.ExportUserDataInternalResponse);
+  rpc InitiateAccountOwnershipVerificationInternal (.exa.seat_management_pb.InitiateAccountOwnershipVerificationInternalRequest) returns (.exa.seat_management_pb.InitiateAccountOwnershipVerificationInternalResponse);
+  rpc VerifyAccountOwnershipInternal (.exa.seat_management_pb.VerifyAccountOwnershipInternalRequest) returns (.exa.seat_management_pb.VerifyAccountOwnershipInternalResponse);
+  rpc AddExtraFlexCreditsInternal (.exa.seat_management_pb.AddExtraFlexCreditsInternalRequest) returns (.exa.seat_management_pb.AddExtraFlexCreditsInternalResponse);
+  rpc AddTeamAddOnFeature (.exa.seat_management_pb.AddTeamAddOnFeatureRequest) returns (.exa.seat_management_pb.AddTeamAddOnFeatureResponse);
+  rpc ShowSSOAddOn (.exa.seat_management_pb.ShowSSOAddOnRequest) returns (.exa.seat_management_pb.ShowSSOAddOnResponse);
+  rpc CheckProTrialEligibility (.exa.seat_management_pb.CheckProTrialEligibilityRequest) returns (.exa.seat_management_pb.CheckProTrialEligibilityResponse);
+  rpc GetSetUserApiProviderKeys (.exa.seat_management_pb.GetSetUserApiProviderKeysRequest) returns (.exa.seat_management_pb.GetSetUserApiProviderKeysResponse);
+  rpc SetUserApiProviderKey (.exa.seat_management_pb.SetUserApiProviderKeyRequest) returns (.exa.seat_management_pb.SetUserApiProviderKeyResponse);
+  rpc DeleteUserApiProviderKey (.exa.seat_management_pb.DeleteUserApiProviderKeyRequest) returns (.exa.seat_management_pb.DeleteUserApiProviderKeyResponse);
+  rpc GetApiKeySummary (.exa.seat_management_pb.GetApiKeySummaryRequest) returns (.exa.seat_management_pb.GetApiKeySummaryResponse);
+  rpc DeleteApiKey (.exa.seat_management_pb.DeleteApiKeyRequest) returns (.exa.seat_management_pb.DeleteApiKeyResponse);
+  rpc LogOutUser (.exa.seat_management_pb.LogOutUserRequest) returns (.exa.seat_management_pb.LogOutUserResponse);
+  rpc AddTeamDomain (.exa.seat_management_pb.AddTeamDomainRequest) returns (.exa.seat_management_pb.AddTeamDomainResponse);
+  rpc ListTeamDomains (.exa.seat_management_pb.ListTeamDomainsRequest) returns (.exa.seat_management_pb.ListTeamDomainsResponse);
+  rpc VerifyTeamDomain (.exa.seat_management_pb.VerifyTeamDomainRequest) returns (.exa.seat_management_pb.VerifyTeamDomainResponse);
+  rpc DeleteTeamDomain (.exa.seat_management_pb.DeleteTeamDomainRequest) returns (.exa.seat_management_pb.DeleteTeamDomainResponse);
+  rpc AddTeamDomainInternal (.exa.seat_management_pb.AddTeamDomainInternalRequest) returns (.exa.seat_management_pb.AddTeamDomainInternalResponse);
+  rpc DeleteTeamDomainInternal (.exa.seat_management_pb.DeleteTeamDomainInternalRequest) returns (.exa.seat_management_pb.DeleteTeamDomainInternalResponse);
+  rpc ListTeamDomainsInternal (.exa.seat_management_pb.ListTeamDomainsInternalRequest) returns (.exa.seat_management_pb.ListTeamDomainsInternalResponse);
+  rpc UpdateTeamNameInternal (.exa.seat_management_pb.UpdateTeamNameInternalRequest) returns (.exa.seat_management_pb.UpdateTeamNameInternalResponse);
+  rpc VerifySSOLoginInternal (.exa.seat_management_pb.VerifySSOLoginInternalRequest) returns (.exa.seat_management_pb.VerifySSOLoginInternalResponse);
+  rpc ExchangeDevinCode (.exa.seat_management_pb.ExchangeDevinCodeRequest) returns (.exa.seat_management_pb.ExchangeDevinCodeResponse);
+  rpc WindsurfPostAuth (.exa.seat_management_pb.WindsurfPostAuthRequest) returns (.exa.seat_management_pb.WindsurfPostAuthResponse);
+  rpc GetSelfDevinSessionToken (.exa.seat_management_pb.GetSelfDevinSessionTokenRequest) returns (.exa.seat_management_pb.GetSelfDevinSessionTokenResponse);
+  rpc GetEligibleDevinOrganizations (.exa.seat_management_pb.GetEligibleDevinOrganizationsRequest) returns (.exa.seat_management_pb.GetEligibleDevinOrganizationsResponse);
+  rpc UpdateCodeSnippetTelemetry (.exa.seat_management_pb.UpdateCodeSnippetTelemetryRequest) returns (.exa.seat_management_pb.UpdateCodeSnippetTelemetryResponse);
+  rpc GetCurrentUserName (.exa.seat_management_pb.GetCurrentUserNameRequest) returns (.exa.seat_management_pb.GetCurrentUserNameResponse);
+  rpc GetStripeSubscriptionState (.exa.seat_management_pb.GetStripeSubscriptionStateRequest) returns (.exa.seat_management_pb.GetStripeSubscriptionStateResponse);
+  rpc GetQuotaUsageInternal (.exa.seat_management_pb.GetQuotaUsageInternalRequest) returns (.exa.seat_management_pb.GetQuotaUsageInternalResponse);
+  rpc ResetQuotaUsageInternal (.exa.seat_management_pb.ResetQuotaUsageInternalRequest) returns (.exa.seat_management_pb.ResetQuotaUsageInternalResponse);
+  rpc GetOverageBalanceInternal (.exa.seat_management_pb.GetOverageBalanceInternalRequest) returns (.exa.seat_management_pb.GetOverageBalanceInternalResponse);
+  rpc AdjustOverageBalanceInternal (.exa.seat_management_pb.AdjustOverageBalanceInternalRequest) returns (.exa.seat_management_pb.AdjustOverageBalanceInternalResponse);
+  rpc InvalidateDevinCaches (.exa.seat_management_pb.InvalidateDevinCachesRequest) returns (.exa.seat_management_pb.InvalidateDevinCachesResponse);
+  rpc PreviewApiKeyExpirationImpact (.exa.seat_management_pb.PreviewApiKeyExpirationImpactRequest) returns (.exa.seat_management_pb.PreviewApiKeyExpirationImpactResponse);
+}

@@ -1,0 +1,465 @@
+[workspace]
+# Explicit, not `crates/pi-*`: a glob member that resolves to a directory
+# without a Cargo.toml (a deleted crate whose dir survives `git reset --hard`
+# because an ignored file stayed behind) is a hard error that fails the whole
+# workspace, not a skipped entry.
+members = [
+   "crates/pi-ast",
+   "crates/pi-builtins",
+   "crates/pi-diff",
+   "crates/pi-edit",
+   "crates/pi-iso",
+   "crates/pi-natives",
+   "crates/pi-shell",
+   "crates/pi-vcs",
+   "crates/pi-voice",
+   "crates/pi-walker",
+   "crates/vendor/brush-core",
+]
+resolver = "3"
+
+[workspace.package]
+version = "18.1.15"
+edition = "2024"
+license = "MIT"
+authors = ["Stencil Labs, Inc."]
+homepage = "https://omp.sh/"
+repository = "https://github.com/can1357/oh-my-pi"
+
+[patch.crates-io]
+brush-core = { path = "crates/vendor/brush-core" }
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = true
+# Unwind (not abort) so panics inside vendored code and native tasks stay
+# recoverable at the appropriate boundary: the uutils boundary
+# (pi-shell coreutils) turns a panic into a failed command, and the
+# `task::blocking` wrapper in `crates/pi-natives/src/task.rs` catches unwinds
+# inside `Blocking::compute` before they cross napi-rs's async-work
+# `extern "C"` callback (napi `src/async_work.rs:109`) so they surface as
+# rejected JS Promises instead of forced process aborts under Rust's C-unwind
+# rules (RFC 2945, stable since 1.81). napi-rs does NOT install its own
+# per-call `catch_unwind` on the `Task`/`AsyncTask` path; the tokio-future
+# path (`env.spawn_future`) is guarded upstream. Recoverable uutils panics
+# are kept out of the crash report by the crash hook
+# (see crates/pi-natives/src/crash_handler.rs).
+panic = "unwind"
+
+[profile.ci]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+debug = false
+strip = "symbols"
+# Safe here only because `debug = false` leaves no debuginfo to lose. Never
+# copy this line into a profile that sets `debug` — see [profile.dev] below.
+split-debuginfo = "off"
+
+[profile.local]
+inherits = "release"
+lto = "thin"
+codegen-units = 16
+incremental = true
+strip = false
+# `release` codegen with symbols kept for `perf`/`samply`/Instruments. Full
+# opt-level so timings match production; only the binary size differs.
+# `cargo build --profile profiling`.
+[profile.profiling]
+inherits = "release"
+debug = "line-tables-only"
+split-debuginfo = "unpacked"
+strip = false
+
+[profile.dev]
+opt-level = 0
+lto = false
+codegen-units = 256
+incremental = true
+debug = "line-tables-only"
+# Mach-O keeps DWARF in the .o files and points at them from the executable's
+# debug map (N_OSO); `unpacked` is what retains those .o files. Setting this to
+# "off" silently strips file:line from backtrace frames in our own crates,
+# because ld64 never merges DWARF into the binary. The `panicked at foo.rs:3`
+# header survives via #[track_caller] and hides the loss. Linux: split DWARF
+# (.dwo) rather than debuginfo packed into every rlib. Windows: no-op (PDB).
+split-debuginfo = "unpacked"
+
+# Deps compile optimized once and cache; your own crates stay fast.
+[profile.dev.package."*"]
+opt-level = 2
+debug = false
+
+[workspace.lints.rust]
+# ──────────────────────────────────────────────────────────────────────────────
+# Rust Lint Levels
+# ──────────────────────────────────────────────────────────────────────────────
+mismatched_lifetime_syntaxes = "allow"
+
+[workspace.lints.clippy]
+# ──────────────────────────────────────────────────────────────────────────────
+# Base Lint Levels
+# ──────────────────────────────────────────────────────────────────────────────
+all = { level = "warn", priority = -1 }
+correctness = { level = "deny", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+perf = { level = "warn", priority = -1 }
+style = { level = "warn", priority = -1 }
+suspicious = { level = "deny", priority = -1 }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Meta: Lint Attributes
+# ──────────────────────────────────────────────────────────────────────────────
+allow_attributes_without_reason = "warn" # Enforce reason for all #[allow]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Safety & Unsafe Code
+# ──────────────────────────────────────────────────────────────────────────────
+borrow_as_ptr = "allow"
+cast_ptr_alignment = "allow"
+ptr_as_ptr = "allow"
+ref_as_ptr = "allow"
+undocumented_unsafe_blocks = "warn"
+unsafe_derive_deserialize = "allow"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Numeric Casts & Conversions
+# ──────────────────────────────────────────────────────────────────────────────
+cast_lossless = "allow"            # u32 as u64 - 'as' is cleaner than From
+cast_possible_truncation = "allow" # u64 as u32 - often intentional
+cast_possible_wrap = "allow"       # u32 as i32 - can be intentional
+cast_precision_loss = "allow"      # f64 as f32 - sometimes acceptable
+cast_sign_loss = "allow"           # i32 as u32 - sometimes needed
+tuple_array_conversions = "allow"  # Non-Into conversion is more clear
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Floating Point
+# ──────────────────────────────────────────────────────────────────────────────
+float_cmp = "allow" # Tests mostly do this + we know what we're doing
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Functions & Closures
+# ──────────────────────────────────────────────────────────────────────────────
+inline_always = "allow"                      # Needed for performance-critical code
+must_use_candidate = "allow"                 # Not every function needs #[must_use]
+needless_pass_by_value = "allow"
+redundant_closure_for_method_calls = "allow" # .map(ToString::to_string) can be clearer
+return_self_not_must_use = "allow"           # Builder pattern methods
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Structs & Types
+# ──────────────────────────────────────────────────────────────────────────────
+inconsistent_struct_constructor = "allow"
+missing_fields_in_debug = "allow"         # Not every field needs to be in Debug output
+struct_excessive_bools = "allow"          # Usually with builders
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Pattern Matching
+# ──────────────────────────────────────────────────────────────────────────────
+match_same_arms = "allow"                    # Can be intentional for clarity
+match_wildcard_for_single_variants = "allow" # _ can be clearer than listing variants
+option_if_let_else = "allow"                 # match/if-let-else often clearer
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Imports & Module Organization
+# ──────────────────────────────────────────────────────────────────────────────
+enum_glob_use = "allow"
+items_after_statements = "allow" # Sometimes more readable
+wildcard_imports = "allow"       # Cleaner for preludes and test modules
+redundant_pub_crate = "allow"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Variables & Type Inference
+# ──────────────────────────────────────────────────────────────────────────────
+let_underscore_untyped = "allow" # Type obvious from context
+similar_names = "allow"          # 'req' and 'res' together are fine
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Literals & Formatting
+# ──────────────────────────────────────────────────────────────────────────────
+unreadable_literal = "allow" # 10_000_000 vs 0xDEADBEEF is context dependent
+verbose_bit_mask = "allow"   # Explicit bit patterns can be clearer than hex
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Code Style
+# ──────────────────────────────────────────────────────────────────────────────
+default_trait_access = "allow"        # Default::default() sometimes clearer
+significant_drop_tightening = "allow" # We pay attention to this already
+# ──────────────────────────────────────────────────────────────────────────────
+# Tests & Assertions
+# ──────────────────────────────────────────────────────────────────────────────
+assert_is_empty = "allow" # `is_empty()` states intent without brittle type annotations
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Documentation
+# ──────────────────────────────────────────────────────────────────────────────
+missing_errors_doc = "allow" # Documenting every error return is often redundant
+missing_panics_doc = "allow" # Not every panic needs docs, especially assert!
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Complexity
+# ──────────────────────────────────────────────────────────────────────────────
+too_many_arguments = "allow" # Argument count is rarely the real complexity signal
+too_many_lines = "allow"     # Arbitrary limits don't account for necessary complexity
+
+[workspace.dependencies]
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Internal Libraries
+# ──────────────────────────────────────────────────────────────────────────────
+pi-ast = { path = "crates/pi-ast" }
+pi-diff = { path = "crates/pi-diff" }
+pi-edit = { path = "crates/pi-edit" }
+pi-iso = { path = "crates/pi-iso" }
+pi-shell = { path = "crates/pi-shell" }
+pi-voice = { path = "crates/pi-voice" }
+pi-walker = { path = "crates/pi-walker" }
+pi-vcs = { path = "crates/pi-vcs" }
+brush-core = { path = "crates/vendor/brush-core" }
+pi-builtins = { path = "crates/pi-builtins" }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Async Runtime & Concurrency
+# ──────────────────────────────────────────────────────────────────────────────
+async-trait = "0.1"
+futures = "0.3"
+dashmap = "6.1"
+parking_lot = "0.12.5"
+rayon = "1.12"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["full"] }
+flume = "0.11"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Serialization & Data Formats
+# ──────────────────────────────────────────────────────────────────────────────
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", features = ["preserve_order"] }
+toml = "1.1"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Error Handling
+# ──────────────────────────────────────────────────────────────────────────────
+anyhow = "1.0"
+thiserror = "2"
+bytes = "1"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# CLI & Configuration
+# ──────────────────────────────────────────────────────────────────────────────
+clap = { version = "4", features = ["derive"] }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Text Processing & Parsing
+# ──────────────────────────────────────────────────────────────────────────────
+pdf-inspector = "1"
+regex = "1"
+similar = "3.1.0"
+fontdue = { version = "0.9", default-features = false }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Data Structures - Collections
+# ──────────────────────────────────────────────────────────────────────────────
+phf = { version = "0.13", features = ["macros"] }
+heapless = "0.9"
+smallvec = { version = "1.15.1", features = [
+   "serde",
+   "write",
+   "union",
+   "const_new",
+] }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Hashing
+# ──────────────────────────────────────────────────────────────────────────────
+xxhash-rust = { version = "0.8", features = ["xxh64", "xxh32"] }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Audio & Realtime Media
+# ──────────────────────────────────────────────────────────────────────────────
+audiopus_sys = { version = "0.2.2", features = ["static"] }
+opus = "0.3.1"
+webrtc = "0.17.2"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# System & Platform
+# ──────────────────────────────────────────────────────────────────────────────
+libc = "0.2"
+os_pipe = "1"
+windows-sys = { version = "0.61", features = [
+   "Win32_Foundation",
+   "Win32_Media_Audio",
+   "Win32_Media_Multimedia",
+   "Win32_Security",
+   "Win32_Storage_FileSystem",
+   "Win32_Storage_ProjectedFileSystem",
+   "Win32_System_Com",
+   "Win32_System_LibraryLoader",
+   "Win32_System_IO",
+   "Win32_System_Ioctl",
+   "Win32_System_Threading",
+] }
+winreg = "0.56"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Node.js Bindings (NAPI)
+# ──────────────────────────────────────────────────────────────────────────────
+napi = { version = "3", features = ["napi10", "tokio_rt", "tokio_time"] }
+napi-build = "2"
+napi-derive = "3"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Terminal & PTY
+# ──────────────────────────────────────────────────────────────────────────────
+arboard = { version = "3.6.1", features = ["wayland-data-control"] }
+clipboard-win = "5.4"
+icy_sixel = "0.5"
+portable-pty = "0.9"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Search & File Walking
+# ──────────────────────────────────────────────────────────────────────────────
+globset = "0.4"
+grep-matcher = "0.1"
+grep-pcre2 = "0.1"
+grep-regex = "0.1"
+grep-searcher = "0.1"
+ignore = "0.4"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Image Processing & Syntax Highlighting
+# ──────────────────────────────────────────────────────────────────────────────
+image = { version = "0.25", default-features = false, features = [
+   "png",
+   "jpeg",
+   "gif",
+   "webp",
+] }
+resvg = "0.48"
+# Not used directly: activates zune-jpeg's non-default `log` feature so image's
+# JPEG decoder compiles — zune-jpeg 0.5.15's no-log stub macros are not
+# expression-safe and the crate fails to build without it.
+zune-jpeg = { version = "0.5", default-features = false, features = ["log"] }
+# Not used directly: pins tinyvec to 1.12.0 because 1.13.0 was published broken
+# (cannot find macro `vec` in alloc-only context).
+tinyvec = "=1.12.0"
+png = "0.18"
+inferno = { version = "0.12", default-features = false }
+syntect = { version = "5.3", default-features = false, features = [
+   "default-syntaxes",
+   "default-themes",
+   "regex-fancy",
+   "yaml-load",
+] }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Markup Conversion
+# ──────────────────────────────────────────────────────────────────────────────
+html-to-markdown-rs = { version = "3.9.2", default-features = false }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Tokenization
+# ──────────────────────────────────────────────────────────────────────────────
+xutf = "1.4"
+zstd = "0.13"
+fancy-regex = "0.16"
+tiktoken-rs = "0.11"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Shell Parsing
+# ──────────────────────────────────────────────────────────────────────────────
+brush-parser = "0.3"
+# ──────────────────────────────────────────────────────────────────────────────
+# Version Control (in-process git + jujutsu)
+# ──────────────────────────────────────────────────────────────────────────────
+# gix is pinned to the minor jj-lib depends on so both VCS backends share one
+# gitoxide stack in the binary. No transport/credential features: network ops
+# (clone/fetch/push) deliberately shell out to the git CLI for auth parity.
+gix = { version = "0.85", default-features = false, features = [
+   "attributes",
+   "blob-diff",
+   "dirwalk",
+   "excludes",
+   "index",
+   "max-performance-safe",
+   "merge",
+   "revision",
+   "sha1",
+   "sha256",
+   "status",
+   "tree-editor",
+   "worktree-mutation",
+   "zlib-rs",
+] }
+jj-lib = { version = "0.44", default-features = false, features = ["git"] }
+
+# ──────────────────────────────────────────────────────────────────────────────
+# AST & Tree-Sitter
+# ──────────────────────────────────────────────────────────────────────────────
+ast-grep-core = { version = "0.39", default-features = false, features = [
+   "tree-sitter",
+] }
+tree-sitter = "0.25"
+tree-sitter-astro = { version = "0.1.1", package = "tree-sitter-astro-next" }
+tree-sitter-bash = "0.25"
+tree-sitter-c = "0.24"
+tree-sitter-c-sharp = "0.23"
+tree-sitter-clojure = "0.1"
+tree-sitter-cmake = "0.7.1"
+tree-sitter-cpp = "0.23"
+tree-sitter-css = "0.25"
+tree-sitter-dart = "0.2"
+tree-sitter-diff = "0.1"
+tree-sitter-dockerfile = { version = "0.2.0", package = "tree-sitter-dockerfile-updated" }
+tree-sitter-elixir = "0.3"
+tree-sitter-elisp = "1.6.1"
+tree-sitter-erlang = "0.16.0"
+tree-sitter-fortran = "0.6.0"
+tree-sitter-go = "0.25"
+tree-sitter-graphql = "0.1.0"
+tree-sitter-haskell = "0.23"
+tree-sitter-hcl = "1.1"
+tree-sitter-html = "0.23"
+tree-sitter-ini = "1.4.0"
+tree-sitter-java = "0.23"
+tree-sitter-javascript = "0.25"
+tree-sitter-json = "0.24"
+tree-sitter-julia = "0.23"
+tree-sitter-just = "0.2.0"
+tree-sitter-kotlin = { version = "0.4", package = "tree-sitter-kotlin-sg" }
+tree-sitter-lua = "0.5"
+tree-sitter-make = "1.1"
+tree-sitter-md = "0.5"
+tree-sitter-nix = "0.3"
+tree-sitter-objc = "3.0"
+tree-sitter-ocaml = "0.24.2"
+tree-sitter-odin = "1.3"
+tree-sitter-php = "0.24"
+tree-sitter-powershell = "0.26.4"
+tree-sitter-proto = "0.4.0"
+tree-sitter-python = "0.25"
+tree-sitter-r = "1.2.0"
+tree-sitter-regex = "0.25"
+tree-sitter-ruby = "0.23"
+tree-sitter-rust = "0.24"
+tree-sitter-scala = "0.26"
+tree-sitter-solidity = "1.2"
+tree-sitter-sql = { version = "0.3.11", package = "tree-sitter-sequel" }
+tree-sitter-starlark = "1.3"
+tree-sitter-svelte = { version = "0.1.1", package = "tree-sitter-svelte-next" }
+tree-sitter-swift = "0.7"
+tree-sitter-tlaplus = "1.5"
+tree-sitter-toml-ng = "0.7"
+tree-sitter-typescript = "0.23"
+tree-sitter-verilog = "1.0"
+tree-sitter-vue = { version = "0.1.0", package = "tree-sitter-vue-next" }
+tree-sitter-xml = "0.7"
+tree-sitter-yaml = "0.7"
+tree-sitter-zig = "1.1"
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Unsorted (added by `cargo add` - move into a section above)
+# ──────────────────────────────────────────────────────────────────────────────

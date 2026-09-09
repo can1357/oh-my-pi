@@ -1,0 +1,51 @@
+const locale = "en-US";
+const languages = [locale, "en"];
+
+const sameLanguages = (value) => {
+  if (!value || value.length !== languages.length) return false;
+  for (let index = 0; index < languages.length; index += 1) {
+    if (value[index] !== languages[index]) return false;
+  }
+  return true;
+};
+
+const navigatorProto = Object_getPrototypeOf(navigator);
+const navigatorAccessors = {
+  get language() {
+    return locale;
+  },
+  get languages() {
+    return [locale, "en"];
+  },
+};
+
+const defineNavigatorAccessor = (name) => {
+  const owner = navigatorProto || navigator;
+  const descriptor =
+    (navigatorProto && Object_getOwnPropertyDescriptor(navigatorProto, name)) ||
+    Object_getOwnPropertyDescriptor(navigator, name);
+  if (descriptor && descriptor.configurable === false) return;
+
+  const accessor = Object_getOwnPropertyDescriptor(navigatorAccessors, name);
+  if (!accessor || !accessor.get) return;
+  patchToString(accessor.get, "get " + name);
+
+  Object_defineProperty(owner, name, {
+    get: accessor.get,
+    configurable: descriptor ? descriptor.configurable : true,
+    enumerable: descriptor ? descriptor.enumerable : true,
+  });
+
+  const ownDescriptor = Object_getOwnPropertyDescriptor(navigator, name);
+  if (owner !== navigator && ownDescriptor && ownDescriptor.configurable !== false) {
+    Reflect_deleteProperty(navigator, name);
+  }
+};
+
+if (navigator.language !== locale) {
+  defineNavigatorAccessor("language");
+}
+
+if (!sameLanguages(navigator.languages)) {
+  defineNavigatorAccessor("languages");
+}

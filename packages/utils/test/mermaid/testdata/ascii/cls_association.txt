@@ -1,0 +1,14 @@
+classDiagram
+  Student --> Course : enrolls
+---
++---------+    
+| Student |    
++---------+    
+     |         
+  enrolls      
+     v         
++--------+     
+| Course |     
++--------+     
+               
+               

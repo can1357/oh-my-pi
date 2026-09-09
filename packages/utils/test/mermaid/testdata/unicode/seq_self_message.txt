@@ -1,0 +1,18 @@
+sequenceDiagram
+  Alice->>Alice: Think
+  Alice->>Bob: Result
+---
+ ┌───────┐    ┌─────┐   
+ │ Alice │    │ Bob │   
+ └───┬───┘    └──┬──┘   
+     │           │      
+     ├───┐       │      
+     │   │ Think │      
+     ◀───┘       │      
+     │           │      
+     │  Result   │      
+     │───────────▶      
+     │           │      
+ ┌───┴───┐    ┌──┴──┐   
+ │ Alice │    │ Bob │   
+ └───────┘    └─────┘   

@@ -1,0 +1,95 @@
+# Dependencies
+node_modules
+.npm/
+
+# Build output
+dist/
+packages/*/dist/
+packages/*/dist-chrome/
+packages/*/dist-firefox/
+target/
+.xwin-cache/
+*.tsbuildinfo
+*.node
+*.b64.js
+/result
+/result-*
+
+# Environment
+.env
+
+# Editors
+.vscode/
+.zed/
+.idea/
+*.swp
+*.swo
+*.kate-swp
+*~
+
+# OS
+*.tmp
+# Bun compile temp artifacts, left in cwd if a `Bun.build({ compile })` run is killed mid-write
+*.bun-build
+.DS_Store
+
+# Logs & profiling
+*.log
+tui-debug.log
+*.cpuprofile
+
+# Test & coverage
+coverage/
+.nyc_output/
+packages/ai/test/.temp-images/
+
+# Project specific
+!.omp/
+.omp/plugins/
+.pi_config/
+.opencode/
+.worktrees/
+.worktree/
+compaction-results/
+changes/
+__pycache__/
+
+# Scratch files
+syntax.jsonl
+out.jsonl
+out.html
+pi-*.html
+.close_issue.sh
+
+# Generated files
+packages/coding-agent/src/export/html/tool-views.generated.js
+packages/natives/npm/
+/runs/
+python/omp-rpc/src/omp_rpc.egg-info/
+python/omp-rpc/build/
+# parallel-agent worktrees
+.wt/
+CPU*.md
+packages/coding-agent/binaries/
+
+# robomp runtime state
+python/robomp/data/
+python/robomp/.cache/
+python/robomp/src/robomp/static/
+python/robomp/web/dist/
+python/robomp/web/verify-out/
+/verify-out/
+python/robomp/.env
+
+# Local, machine-specific boot perf baseline (see packages/coding-agent/scripts/bench-guard.ts)
+packages/coding-agent/bench/boot-baseline.json
+
+# Bazel
+/bazel-bin
+/bazel-out
+/bazel-testlogs
+/bazel-pi
+/bazel-oh-my-pi
+/.bazelrc.user
+
+.parity/

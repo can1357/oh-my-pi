@@ -1,0 +1,26 @@
+# x64 ISA variant axis for shipped addons: `baseline` (x86-64-v2) runs on any
+# 2010+ CPU, `modern` (x86-64-v3) needs AVX2. Non-x64 targets use `default`.
+# The constraint rides on //bazel/platforms:* and drives -Ctarget-cpu selects
+# in //crates/pi-natives.
+
+package(default_visibility = ["//visibility:public"])
+
+constraint_setting(
+    name = "cpu_variant",
+    default_constraint_value = ":default",
+)
+
+constraint_value(
+    name = "default",
+    constraint_setting = ":cpu_variant",
+)
+
+constraint_value(
+    name = "baseline",
+    constraint_setting = ":cpu_variant",
+)
+
+constraint_value(
+    name = "modern",
+    constraint_setting = ":cpu_variant",
+)

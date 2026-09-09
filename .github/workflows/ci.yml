@@ -1,0 +1,978 @@
+name: CI
+
+on:
+   push:
+      branches: [main]
+      paths:
+         - "packages/**"
+         - "crates/**"
+         - "scripts/**"
+         - "bazel/**"
+         - "MODULE.bazel"
+         - "MODULE.bazel.lock"
+         - "BUILD.bazel"
+         - ".bazelrc"
+         - ".bazelignore"
+         - ".bazelversion"
+         - "Cargo.toml"
+         - "Cargo.lock"
+         - "deny.toml"
+         - "about.toml"
+         - "LICENSE"
+         - "THIRD-PARTY-NOTICES.txt"
+         - "rust-toolchain.toml"
+         - "rustfmt.toml"
+         # A root dependency change (lockfile/catalog/patches) affects every
+         # job; without these a lockfile-only push shipped untested — and a
+         # release retagged onto such a commit never triggered its run.
+         - "bun.lock"
+         - "bunfig.toml"
+         - "package.json"
+         - "patches/**"
+         - ".github/**"
+   pull_request:
+      branches: [main]
+      paths:
+         - "packages/**"
+         - "crates/**"
+         - "scripts/**"
+         - "bazel/**"
+         - "MODULE.bazel"
+         - "MODULE.bazel.lock"
+         - "BUILD.bazel"
+         - ".bazelrc"
+         - ".bazelignore"
+         - ".bazelversion"
+         - "Cargo.toml"
+         - "Cargo.lock"
+         - "deny.toml"
+         - "about.toml"
+         - "LICENSE"
+         - "THIRD-PARTY-NOTICES.txt"
+         - "rust-toolchain.toml"
+         - "rustfmt.toml"
+         - "bun.lock"
+         - "bunfig.toml"
+         - "package.json"
+         - "patches/**"
+         - ".github/**"
+   workflow_dispatch:
+      inputs:
+         skip_npm:
+            description: "Skip npm publish"
+            type: boolean
+            default: false
+
+# Release runs publish a `v*` tag pushed atomically with main HEAD; sharing
+# the cheap branch-wide `CI-refs/heads/main` group meant a later main push
+# silently cancelled the in-flight release and left the tag without a GitHub
+# Release or npm publish (#2564). Detect release runs at workflow-scheduling
+# time via the release-script commit subject (`chore: bump version to vX.Y.Z`),
+# via `v*` tag-ref dispatches, and via manual dispatches whose tag-on-HEAD
+# status is only known after checkout; scope them to a per-sha group with no
+# cancellation. Every other event keeps branch-wide cancellation for PR/main churn.
+concurrency:
+   group: "${{ github.workflow }}-${{ (startsWith(github.event.head_commit.message, 'chore: bump version to ') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') && format('release-{0}', github.sha) || github.ref }}"
+   cancel-in-progress: "${{ !(startsWith(github.event.head_commit.message, 'chore: bump version to ') || startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch') }}"
+
+env:
+   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+   contents: read
+
+jobs:
+   # scripts/release.ts pushes the version-bump commit and its `v*` tag
+   # atomically (`git push --atomic origin refs/heads/main:refs/heads/main
+   # <sha>:refs/tags/v<version>`), so a release now arrives as a single `push` to
+   # `refs/heads/main` — we no longer trigger on the tag ref at all (see
+   # `on.push`). This one branch-push run is therefore authoritative: it runs the
+   # full build AND, when HEAD carries a release tag, the release/publish jobs.
+   # `release_metadata` resolves that tag once so downstream jobs switch on
+   # `is-release` and address the tag by name — `github.ref` is
+   # `refs/heads/main` here, not the tag. A `workflow_dispatch` from a `v*` tag
+   # ref (or from a tagged main HEAD) is also treated as a release.
+   release_metadata:
+      name: Resolve release metadata
+      # Hosted, not omp-kata: this ~20 s git-tag probe gates the whole release
+      # chain, and queueing it behind the 4-runner kata pool adds dead minutes
+      # to the darwin critical path.
+      runs-on: ubuntu-22.04
+      outputs:
+         is-release: ${{ steps.detect.outputs.is-release }}
+         release-tag: ${{ steps.detect.outputs.release-tag }}
+         # Canary tags publish to npm's canary dist-tag (derived script-side), mark
+         # the GitHub release prerelease, and skip the stable-only brew tap.
+         channel: ${{ steps.detect.outputs.channel }}
+      steps:
+         # Only a main-branch run needs tags fetched, so `git tag --points-at
+         # HEAD` can see the freshly-pushed `v*`. A tag-ref dispatch reads the
+         # tag straight from `github.ref_name`, and fetching `--tags` while
+         # checkout uses an explicit tag refspec makes git refuse — so scope
+         # fetch-tags to main refs.
+         - uses: actions/checkout@v4
+           with:
+              fetch-tags: ${{ github.ref == 'refs/heads/main' }}
+         - name: Detect release tag at HEAD
+           id: detect
+           shell: bash
+           run: |
+              is_release=false
+              release_tag=""
+              channel=stable
+              case "${{ github.ref }}" in
+                refs/tags/v[0-9]*)
+                  release_tag="${{ github.ref_name }}"
+                  ;;
+                refs/heads/main)
+                  if [ "${{ github.event_name }}" != "pull_request" ]; then
+                    release_tag=$(git tag --points-at HEAD | grep -E '^v[0-9]' | head -n1 || true)
+                  fi
+                  ;;
+              esac
+              if [ -n "$release_tag" ]; then
+                echo "HEAD carries release tag $release_tag; this run builds and publishes the release."
+                is_release=true
+              fi
+              if [[ "$release_tag" == *-canary.* ]]; then
+                channel=canary
+              fi
+              {
+                echo "is-release=$is_release"
+                echo "release-tag=$release_tag"
+                echo "channel=$channel"
+              } >> "$GITHUB_OUTPUT"
+
+   check:
+      name: Lint, type check & web build
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/bun-install
+         - name: Verify Rust license compliance (cargo-deny 0.20.2)
+           run: |
+              cargo install --locked --version 0.20.2 cargo-deny
+              # `--offline` needs every workspace crate already in the registry
+              # cache. PR runs use a fresh GitHub-hosted runner (see runs-on
+              # above), where the only prior cargo work is the cargo-deny
+              # install, so nothing populates the index for our own graph and
+              # resolution fails. Non-PR events land on omp-kata, whose Cargo
+              # cache is warm, which is why main stayed green. Fetch first.
+              cargo fetch --locked
+              cargo deny --locked --offline check licenses sources
+         - name: Type check workspace
+           run: bun run ci:check:full
+         - name: Build collab web
+           run: bun run collab:web:build
+
+   # Rust validation (tests, clippy, rustfmt) runs on non-PR events only.
+   # Native-changing PRs are rare enough that they do not warrant PR-side
+   # Rust validation or a PR-side addon build (see native_addons): Rust is
+   # validated post-merge on main (kata remote cache, warm) and again at
+   # release. A skipped required check still satisfies branch protection.
+   rust_validate:
+      name: Validate Rust workspace (bazel)
+      if: github.event_name != 'pull_request'
+      runs-on: omp-kata
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/bun-install
+         - id: cache
+           uses: ./.github/actions/bazel-cache
+           with:
+              scope: linux
+         - name: Rust tests
+           # The ulimit guard runs in the step that launches the bazel server
+           # (limits are per-process and the server persists across steps).
+           run: |
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" test //crates/...
+         # Clippy scope mirrors `cargo clippy --workspace` (libraries only, no
+         # test targets) plus the strict/default split: crates with
+         # `[lints] workspace = true` get the workspace policy, except
+         # brush-core (a vendored fork excluded from the Cargo task too).
+         # pi-builtins allows every clippy group in its own manifest (ported
+         # brush/uutils/jaq code) but is still held to zero rustc warnings;
+         # Cargo honors that via `[lints]`, Bazel via the clippy-ported config.
+         - name: Clippy (workspace lint policy on opted-in crates)
+           run: |
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-ast/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...)" \
+                | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-strict --
+         - name: Clippy (default lints elsewhere)
+           run: |
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/... - (//crates/pi-ast/... + //crates/pi-iso/... + //crates/pi-natives/... + //crates/pi-shell/... + //crates/pi-vcs/... + //crates/pi-voice/... + //crates/pi-walker/...) - //crates/pi-builtins/... - //crates/vendor/brush-core/...)" \
+                | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy --
+         - name: Clippy (manifest allows on ported pi-builtins)
+           run: |
+              bazelisk query "kind('rust_library|rust_shared_library', //crates/pi-builtins/...)" \
+                | xargs bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=clippy-ported --
+         - name: Rustfmt
+           run: bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build --config=rustfmt //crates/...
+
+   # Provides the native addons every downstream TS job installs. PRs never
+   # build: they fetch the latest release's Linux x64 pair from the
+   # @oh-my-pi/pi-natives-linux-x64 npm leaf instead. The workspace loader
+   # skips its version sentinel for workspace loads, so release addons load
+   # fine under a newer checkout; a PR whose TS tests depend on changed
+   # native behavior fails visibly and the native side lands via main.
+   # Main (kata, cluster remote cache) builds all Linux-hosted targets with
+   # bazel. Job name says "bazel" for continuity with required checks.
+   native_addons:
+      name: Build native addons (bazel)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      steps:
+         - uses: actions/checkout@v4
+
+         # ---- PR path: latest release addons from npm ----
+         - name: Fetch release native addons (npm)
+           if: github.event_name == 'pull_request'
+           shell: bash
+           run: |
+              set -euo pipefail
+              tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
+              echo "Fetching $tarball"
+              curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
+              mkdir -p bazel-bin/natives-linux-x64-baseline bazel-bin/natives-linux-x64-modern
+              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" bazel-bin/natives-linux-x64-baseline/
+              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" bazel-bin/natives-linux-x64-modern/
+         # A corrupt download must fail here, not as a confusing dlopen error
+         # in every downstream test shard.
+         - name: Smoke release addons
+           if: github.event_name == 'pull_request'
+           shell: bash
+           run: |
+              set -euo pipefail
+              # NOTE: `bun -e 'require("./x.node")'` swallows dlopen failures
+              # (exit 0 on a bogus addon); a script file enforces them in
+              # both bun and node. Verified against a corrupt .node fixture.
+              cat > "$RUNNER_TEMP/smoke-addons.js" <<'EOF'
+              for (const f of process.argv.slice(2)) {
+               const m = require(f);
+               if (!m || Object.keys(m).length === 0) {
+               	console.error(`addon failed to load: ${f}`);
+               	process.exit(1);
+               }
+              }
+              EOF
+              loader=node
+              if command -v bun >/dev/null 2>&1; then loader=bun; fi
+              "$loader" "$RUNNER_TEMP/smoke-addons.js" \
+                "$PWD/bazel-bin/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
+                "$PWD/bazel-bin/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
+         # Make the policy visible on the rare native-touching PR instead of
+         # leaving a reviewer to wonder which addons the tests exercised.
+         # Best-effort: a diff-API failure must not fail the job over a notice.
+         - name: Note native changes tested against release addons
+           if: github.event_name == 'pull_request'
+           shell: bash
+           env:
+              GH_TOKEN: ${{ github.token }}
+           run: |
+              if gh pr diff ${{ github.event.pull_request.number }} --name-only 2>/dev/null \
+                 | grep -qE '^(crates/|bazel/|Cargo\.(toml|lock)|MODULE\.bazel(\.lock)?|BUILD\.bazel|\.bazelrc|\.bazelignore|\.bazelversion|rust-toolchain\.toml|rustfmt\.toml)'; then
+                echo "::notice title=Native sources changed::PR CI tests against the latest release addons by design; native changes are validated post-merge on main and at release."
+              fi
+
+         # ---- main path: bazel build of all Linux-hosted targets ----
+         - id: cache
+           if: github.event_name != 'pull_request'
+           uses: ./.github/actions/bazel-cache
+           with:
+              scope: linux
+         - name: Build native addons once
+           if: github.event_name != 'pull_request'
+           run: |
+              set -eo pipefail
+              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
+              # The addon cdylib links each peak at several GiB of rustc RSS;
+              # the aggregate //:natives-linux-all build runs all six
+              # concurrently, which OOMs the kata pod and takes the bazel
+              # server with it (exit 37 "Server terminated abruptly", runs
+              # 30556752623 / 30557524371). Build one addon per invocation —
+              # analysis and cached actions are shared through the persistent
+              # server, so only the heavy links serialize — then assemble the
+              # aggregate as a no-op (also catches targets added to the
+              # filegroup but missing from this list).
+              : > "$RUNNER_TEMP/bazel-build.log"
+              for target in \
+                natives-linux-arm64 \
+                natives-linux-musl-arm64 \
+                natives-linux-musl-x64-baseline \
+                natives-linux-x64-baseline \
+                natives-linux-x64-modern \
+                natives-win32-x64-baseline; do
+                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+              done
+              bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build //:natives-linux-all 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
+         # Cache-hit visibility: a supposedly warm build that executes
+         # thousands of actions is the failure mode that made CI slow — make
+         # it visible in the run summary instead of discovering it weeks in.
+         - name: Report bazel cache stats
+           if: github.event_name != 'pull_request'
+           shell: bash
+           run: |
+              # Bazel runs with --color=yes (config=ci); strip ANSI before
+              # matching — escapes split "INFO:" from the process count in
+              # the raw log.
+              summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ processes:' | tail -1 || true)
+              echo "::notice title=Bazel build summary::${summary:-no process summary found}"
+
+         - name: Upload native addon artifacts
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: native-addons
+              path: bazel-bin/natives-*/*.node
+              if-no-files-found: error
+              retention-days: 1
+
+   test_workspace:
+      name: Test TS workspace fast
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: Test workspace packages and repo scripts (TS)
+           env:
+              OMP_TEST_CONCURRENCY: "4"
+           run: |
+              bun run ci:test:ts:workspace
+              # Not `test:scripts`: scripts/musl-release.test.ts fails on main
+              # (its install.sh smoke-check executes a fake binary), so running
+              # the whole group here would red this job on an unrelated break.
+              bun test scripts/ci-test-ts.test.ts scripts/release.test.ts
+
+   test_coding_agent_singleton:
+      name: Test coding-agent singleton/global-state (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      timeout-minutes: 20
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: Test coding-agent singleton/global-state bucket
+           # Keep global Settings/env/fake-timer tests serial; native addon
+           # artifacts are still available like every other coding-agent bucket.
+           run: bun run ci:test:coding-agent:singleton
+
+   test_ts_native:
+      name: Test TS native/integration packages
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      timeout-minutes: 25
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: Test native/TUI/browser-ish packages (TS)
+           env:
+              OMP_TEST_CONCURRENCY: "4"
+           run: bun run ci:test:ts:native
+
+   test_coding_agent_ui:
+      name: Test coding-agent UI/TUI (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      timeout-minutes: 25
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: Test coding-agent UI/TUI bucket
+           env:
+              OMP_TEST_CONCURRENCY: "2"
+           run: bun run ci:test:coding-agent:ui
+
+   test_coding_agent_runtime:
+      name: Test coding-agent runtime/session (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      timeout-minutes: 25
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: Test coding-agent runtime bucket
+           # Runtime/session tests import native-backed barrels too; keep this
+           # separate for concurrency, not as a native-free guardrail.
+           env:
+              OMP_TEST_CONCURRENCY: "4"
+           run: bun run ci:test:coding-agent:runtime
+
+   test_coding_agent_native:
+      name: Test coding-agent native/unit (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      timeout-minutes: 25
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: Test coding-agent native/unit bucket
+           env:
+              OMP_TEST_CONCURRENCY: "4"
+           run: bun run ci:test:coding-agent:native
+
+   test_smoke:
+      name: Test CLI smoke (TS)
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      timeout-minutes: 15
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: CLI smoke test
+           run: bun run ci:test:smoke
+
+   install_methods:
+      name: Install method smoke tests
+      runs-on: ${{ github.event_name == 'pull_request' && 'ubuntu-22.04' || 'omp-kata' }}
+      needs: [native_addons]
+      if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/setup-system-deps
+         - uses: ./.github/actions/bun-install
+         - uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: Install method smoke tests
+           env:
+              OMP_INSTALL_TEST_SKIP_NATIVE_BUILD: "1"
+           run: bun run ci:test:install-methods
+
+   # Aggregates every validation job so publish-side release jobs gate on one
+   # result. Binary BUILDS deliberately do not wait for this gate — they run
+   # in parallel with the test fan-out and only publishing is held back.
+   release_gate:
+      name: Release validation gate
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.rust_validate.result == 'success' &&
+         needs.native_addons.result == 'success' &&
+         needs.test_workspace.result == 'success' &&
+         needs.test_coding_agent_singleton.result == 'success' &&
+         needs.test_ts_native.result == 'success' &&
+         needs.test_coding_agent_ui.result == 'success' &&
+         needs.test_coding_agent_runtime.result == 'success' &&
+         needs.test_coding_agent_native.result == 'success' &&
+         needs.test_smoke.result == 'success' && needs.check.result == 'success' &&
+         needs.install_methods.result == 'success' }}
+      needs: [release_metadata, check, rust_validate, native_addons, test_workspace, test_coding_agent_singleton, test_ts_native, test_coding_agent_ui, test_coding_agent_runtime, test_coding_agent_native, test_smoke, install_methods]
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/bun-install
+         # Generated-config drift gate: bazel/clippy.bazelrc is maintained by
+         # scripts/release.ts (like the lockfiles); a stale file only blocks
+         # publishing, never ordinary CI.
+         - name: Check generated clippy config
+           run: bun scripts/gen-clippy-bazelrc.ts --check
+         - run: echo "release validation green"
+
+   # Builds (does not publish) the Linux-hosted release binaries in parallel
+   # with the test fan-out; the single need is native_addons, whose artifact
+   # supplies their addons. Native-host builds live in release_binary_hosted
+   # and start at release_metadata time instead. Publishing (npm leaves,
+   # GitHub release, core npm) is gated on release_gate downstream.
+   release_binary:
+      name: "Release binary: ${{ matrix.target_id }}"
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.native_addons.result == 'success' }}
+      needs: [release_metadata, native_addons]
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - {
+                    os: ubuntu-22.04,
+                    platform: linux,
+                    arch: x64,
+                    target_id: linux-x64,
+                    binary_path: packages/coding-agent/binaries/omp-linux-x64,
+                    native_targets: linux-x64-baseline linux-x64-modern,
+                 }
+               - {
+                    os: ubuntu-22.04,
+                    platform: linux,
+                    libc: musl,
+                    arch: x64,
+                    target_id: linux-musl-x64,
+                    binary_path: packages/coding-agent/binaries/omp-linux-musl-x64,
+                    native_targets: linux-musl-x64-baseline,
+                 }
+               - {
+                    os: ubuntu-24.04-arm,
+                    platform: linux,
+                    arch: arm64,
+                    target_id: linux-arm64,
+                    binary_path: packages/coding-agent/binaries/omp-linux-arm64,
+                    native_targets: linux-arm64,
+                 }
+               - {
+                    os: ubuntu-24.04-arm,
+                    platform: linux,
+                    libc: musl,
+                    arch: arm64,
+                    target_id: linux-musl-arm64,
+                    binary_path: packages/coding-agent/binaries/omp-linux-musl-arm64,
+                    native_targets: linux-musl-arm64,
+                 }
+               - {
+                    os: ubuntu-22.04,
+                    platform: win32,
+                    arch: x64,
+                    target_id: win32-x64,
+                    binary_path: packages/coding-agent/binaries/omp-windows-x64.exe,
+                    native_targets: win32-x64-baseline,
+                 }
+      runs-on: ${{ matrix.os }}
+      permissions:
+         contents: read
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.4"
+         - name: Cache bun dependencies
+           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+         - run: bun install --frozen-lockfile
+         - name: Install prebuilt native addon(s)
+           uses: ./.github/actions/native-artifacts
+           with:
+              targets: ${{ matrix.native_targets }}
+         - name: Build release binary
+           env:
+              RELEASE_TARGETS: ${{ matrix.target_id }}
+           run: bun run ci:release:build-binaries
+         # Windows binary is cross-built on Linux, so we have no Windows runner
+         # to smoke it on. Cross-build correctness is verified via the bun
+         # `--compile --target=bun-windows-x64-*` cross-compile. Musl binaries
+         # need the musl loader, which glibc runners lack — they are smoked in
+         # the Alpine container step below instead.
+         - name: Smoke release binary
+           if: matrix.platform != 'win32' && matrix.libc != 'musl'
+           run: |
+              runtime_dir="$(mktemp -d)"
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --smoke-test
+         - name: Smoke musl release binary on Alpine
+           if: matrix.libc == 'musl'
+           run: |
+              binary="$(realpath "${{ matrix.binary_path }}")"
+              # Bun's musl-target binaries link libstdc++/libgcc dynamically;
+              # Alpine users install them alongside the binary (same as bun itself).
+              docker run --rm -v "$binary:/usr/local/bin/omp:ro" alpine:3.22 sh -ec '
+                apk add --no-cache libstdc++ libgcc >/dev/null
+                runtime_dir="$(mktemp -d)"
+                HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" omp --version
+                HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" omp --smoke-test
+              '
+         - name: Upload release binary artifact
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: omp-binary-${{ matrix.target_id }}
+              path: ${{ matrix.binary_path }}
+
+   # Native-host builds make addons that native_addons cannot provide: Darwin
+   # uses Bazel/Xcode and Windows ARM64 uses Cargo/MSVC. They gate on
+   # release_metadata alone and start as soon as a release is detected, fully
+   # overlapped with the tests.
+   release_binary_hosted:
+      name: "Release binary: ${{ matrix.target_id }}"
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() }}
+      needs: [release_metadata]
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - {
+                    os: macos-15-intel,
+                    platform: darwin,
+                    target_id: darwin-x64,
+                    binary_path: packages/coding-agent/binaries/omp-darwin-x64,
+                    native_targets: darwin-x64-baseline,
+                 }
+               - {
+                    os: macos-14,
+                    platform: darwin,
+                    target_id: darwin-arm64,
+                    binary_path: packages/coding-agent/binaries/omp-darwin-arm64,
+                    native_targets: darwin-arm64,
+                 }
+               - {
+                    os: windows-11-arm,
+                    platform: win32,
+                    target_id: win32-arm64,
+                    binary_path: packages/coding-agent/binaries/omp-windows-arm64.exe,
+                 }
+      runs-on: ${{ matrix.os }}
+      permissions:
+         contents: read
+      env:
+         MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY != '' }}
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.4"
+         - name: Cache bun dependencies
+           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+         - run: bun install --frozen-lockfile
+         # Darwin addons use the host Xcode toolchain. The warm workflow keeps
+         # these scopes seeded near HEAD, so this is normally the version-bump
+         # delta.
+         - name: Build native addon (bazel)
+           if: matrix.platform == 'darwin'
+           uses: ./.github/actions/bazel-natives
+           with:
+              targets: ${{ matrix.native_targets }}
+              cache-scope: release-${{ matrix.target_id }}
+         # The Bazel MSVC toolchain is cross-host-only. Build natively on the
+         # Windows ARM64 runner with its installed Rust and Visual Studio tools.
+         - name: Build native addon (cargo)
+           if: matrix.platform == 'win32'
+           env:
+              OMP_NATIVE_CARGO_PROFILE: ci
+           run: bun scripts/bazel-natives.ts host --dest packages/natives/native
+         - name: Build release binary
+           env:
+              RELEASE_TARGETS: ${{ matrix.target_id }}
+           run: bun run ci:release:build-binaries
+         - name: Sign and notarize macOS binary (Developer ID)
+           # Replaces the ad-hoc signature with a Developer ID + hardened-runtime
+           # one (+JIT/library-validation entitlements; omp dlopens its
+           # runtime-extracted native addon, which has a different Team ID) and
+           # notarizes. Auto-skips until the APPLE_* secrets are configured.
+           if: matrix.platform == 'darwin' && env.MACOS_SIGNING == 'true'
+           env:
+              APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+              APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+              APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+              APPLE_API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+              APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
+           run: bash scripts/ci-macos-sign.sh "${{ matrix.binary_path }}"
+         - name: Smoke release binary
+           if: matrix.platform == 'darwin'
+           run: |
+              runtime_dir="$(mktemp -d)"
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --version
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" "${{ matrix.binary_path }}" --smoke-test
+         - name: Smoke release binary (Windows)
+           if: matrix.platform == 'win32'
+           shell: pwsh
+           run: |
+              $runtimeDir = Join-Path $env:RUNNER_TEMP "omp-smoke"
+              $env:HOME = Join-Path $runtimeDir "home"
+              $env:USERPROFILE = $env:HOME
+              $env:LOCALAPPDATA = Join-Path $runtimeDir "local"
+              $env:XDG_DATA_HOME = Join-Path $runtimeDir "xdg"
+              New-Item -ItemType Directory -Force -Path $env:HOME, $env:LOCALAPPDATA, $env:XDG_DATA_HOME | Out-Null
+              & "${{ matrix.binary_path }}" --version
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              & "${{ matrix.binary_path }}" --smoke-test
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+         # Native-host addons exist only on these runners; export them so
+         # release_native_leaves can publish every leaf package after the
+         # validation gate. Other leaves reuse the native-addons artifact.
+         - name: Upload native-host addon artifact
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: native-addons-${{ matrix.target_id }}
+              path: packages/natives/native/pi_natives.${{ matrix.target_id }}*.node
+              if-no-files-found: error
+              retention-days: 1
+         - name: Upload release binary artifact
+           uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+           with:
+              name: omp-binary-${{ matrix.target_id }}
+              path: ${{ matrix.binary_path }}
+
+   # Publishes the six @oh-my-pi/pi-natives-<tag> leaf packages once
+   # validation passes and every binary built. Runs on one linux runner: leaf
+   # publishing is platform-agnostic file packaging (gen-npm-packages reads
+   # packages/natives/native), so no per-platform runners are needed.
+   release_native_leaves:
+      name: Publish native leaf packages
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_gate.result == 'success' &&
+         needs.release_binary.result == 'success' &&
+         needs.release_binary_hosted.result == 'success' &&
+         !inputs.skip_npm }}
+      needs: [release_metadata, release_gate, release_binary, release_binary_hosted]
+      runs-on: ubuntu-22.04
+      # id-token lets npm mint the OIDC token for trusted publishing; the
+      # NODE_AUTH_TOKEN below is the fallback for unconfigured packages.
+      permissions:
+         id-token: write
+         contents: read
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.4"
+         - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+           with:
+              node-version: "24"
+              registry-url: "https://registry.npmjs.org"
+         # npm runs under Bun when invoked by the release script; npm 12
+         # requires a newer emulated Node version than Bun 1.3 provides.
+         - name: Ensure npm supports trusted publishing
+           run: npm install -g npm@11.17.0
+         - name: Cache bun dependencies
+           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+         - run: bun install --frozen-lockfile
+         # Linux + win32-x64 addons from the native_addons artifact (gnu targets
+         # only — musl reuses the linux filenames and has no leaf package).
+         - name: Install linux and win32-x64 native addons
+           uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern linux-arm64 win32-x64-baseline
+         # Native-host addons come flat (canonical filenames) from the
+         # release_binary_hosted legs.
+         - name: Install native-host addons
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: native-addons-*
+              path: packages/natives/native
+              merge-multiple: true
+         - name: Publish native leaf packages
+           env:
+              # Fallback auth: setup-node wrote an .npmrc referencing
+              # NODE_AUTH_TOKEN; npm uses it only when OIDC has no trusted
+              # publisher for the package (or on a first publish).
+              NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+           run: |
+              set -euo pipefail
+              for tag in linux-x64 linux-arm64 darwin-x64 darwin-arm64 win32-x64 win32-arm64; do
+                bun run ci:release:publish-native-leaf "$tag"
+              done
+
+   release_github:
+      name: Publish GitHub release
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_gate.result == 'success' &&
+         needs.release_binary.result == 'success' &&
+         needs.release_binary_hosted.result == 'success' }}
+      needs: [release_metadata, release_gate, release_binary, release_binary_hosted]
+      runs-on: ubuntu-22.04
+      permissions:
+         contents: write
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.4"
+         - name: Generate release notes from CHANGELOGs
+           env:
+              # `gh release list` (used to find the latest published GitHub
+              # Release tag below the target so silent-tag changelog sections
+              # roll forward — #2596) requires GH_TOKEN in Actions. Without
+              # it gh exits non-zero and the script would degrade to legacy
+              # single-version notes, defeating the recovery.
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+           run: bun scripts/ci-release-notes.ts ${{ needs.release_metadata.outputs.release-tag }}
+         - name: Download release binaries
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+           with:
+              pattern: omp-binary-*
+              path: packages/coding-agent/binaries
+              merge-multiple: true
+         # Dependency-free build (bun APIs + zip only), so no `bun install`
+         # is needed on this runner.
+         - name: Build browser relay artifacts
+           run: bun run --cwd packages/browser-relay build
+         # Generated after every other release asset is in place and before
+         # the release is created, so SHA256SUMS.txt itself ships as an asset
+         # and covers every other file uploaded alongside it.
+         - name: Generate checksums
+           run: |
+              bun run ci:release:checksums SHA256SUMS.txt \
+                packages/coding-agent/binaries/omp-* \
+                packages/browser-relay/dist/omp-browser-relay-extension.zip \
+                LICENSE \
+                THIRD-PARTY-NOTICES.txt
+         - name: Create GitHub Release
+           uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2.6.2
+           with:
+              tag_name: ${{ needs.release_metadata.outputs.release-tag }}
+              prerelease: ${{ needs.release_metadata.outputs.channel == 'canary' }}
+              files: |
+                 packages/coding-agent/binaries/omp-*
+                 packages/browser-relay/dist/omp-browser-relay-extension.zip
+                 LICENSE
+                 THIRD-PARTY-NOTICES.txt
+                 SHA256SUMS.txt
+              body_path: release-notes.md
+              generate_release_notes: true
+
+   release_github_verify:
+      name: Verify published release (macOS)
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_github.result == 'success' }}
+      needs: [release_metadata, release_github]
+      runs-on: macos-14
+      permissions:
+         contents: read
+      env:
+         MACOS_SIGNING: ${{ secrets.APPLE_CERTIFICATE_P12 != '' && secrets.APPLE_CERTIFICATE_PASSWORD != '' && secrets.APPLE_API_KEY_ID != '' && secrets.APPLE_API_ISSUER_ID != '' && secrets.APPLE_API_KEY != '' }}
+      steps:
+         - name: Download published macOS arm64 binary
+           run: |
+              curl -fsSL -o omp-darwin-arm64 "https://github.com/${{ github.repository }}/releases/download/${{ needs.release_metadata.outputs.release-tag }}/omp-darwin-arm64"
+              chmod +x omp-darwin-arm64
+         - name: Verify published macOS arm64 binary
+           run: |
+              codesign -dvvv ./omp-darwin-arm64
+              codesign --verify --strict --verbose=4 ./omp-darwin-arm64
+              runtime_dir="$(mktemp -d)"
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" ./omp-darwin-arm64 --version
+              HOME="$runtime_dir/home" XDG_DATA_HOME="$runtime_dir/xdg" ./omp-darwin-arm64 --smoke-test
+         - name: Assert signed release is not ad-hoc
+           if: env.MACOS_SIGNING == 'true'
+           run: |
+              if codesign -dvvv ./omp-darwin-arm64 2>&1 | grep -qE "flags=.*adhoc|Signature=adhoc"; then
+                echo "published binary is still ad-hoc signed (Developer ID signing did not run)" >&2
+                exit 1
+              fi
+              # Gatekeeper assessment: a notarized Developer ID binary is accepted.
+              # Informational — a bare (unstapled) Mach-O relies on the online ticket
+              # lookup, so surface the result without gating the release on it.
+              spctl -a -t exec -vv ./omp-darwin-arm64 || echo "spctl non-zero (expected for unstapled bare binary; ticket served online)"
+
+   release_npm:
+      name: Publish to npm
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_binary.result == 'success' &&
+         needs.release_binary_hosted.result == 'success' &&
+         needs.release_github_verify.result == 'success' &&
+         needs.release_native_leaves.result == 'success' &&
+         !inputs.skip_npm }}
+      # release_native_leaves must finish first: the core package lists the
+      # leaf packages as lockstep-versioned optionalDependencies, so installs
+      # resolve them the moment the core version is live.
+      needs: [release_metadata, release_binary, release_binary_hosted, release_github_verify, release_native_leaves]
+      runs-on: ubuntu-22.04
+      # `id-token: write` lets npm mint the GitHub OIDC token it exchanges for a
+      # short-lived publish token (trusted publishing + provenance). When a
+      # package has no matching trusted publisher configured, npm silently falls
+      # back to NODE_AUTH_TOKEN below — which also covers first-ever publishes.
+      permissions:
+         id-token: write
+         contents: read
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.4"
+         - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+           with:
+              node-version: "24"
+              registry-url: "https://registry.npmjs.org"
+         # npm runs under Bun when invoked by the release script; npm 12
+         # requires a newer emulated Node version than Bun 1.3 provides.
+         - name: Ensure npm supports trusted publishing
+           run: npm install -g npm@11.17.0
+         - name: Cache bun dependencies
+           uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+           with:
+              path: ~/.bun/install/cache
+              key: bun-${{ runner.os }}-${{ hashFiles('**/bun.lock') }}
+         - run: bun install --frozen-lockfile
+         # The prepack executes workspace code which loads the Linux x64
+         # addon, so install the native_addons job's artifact before publishing.
+         - name: Install prebuilt native addons
+           uses: ./.github/actions/native-artifacts
+           with:
+              targets: linux-x64-baseline linux-x64-modern
+         - name: Publish to npm
+           env:
+              # Fallback auth: setup-node wrote an .npmrc referencing
+              # NODE_AUTH_TOKEN; npm uses it only when OIDC has no trusted
+              # publisher for the package (or on a first publish).
+              NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+           run: bun run ci:release:publish
+
+   # Regenerate the Homebrew tap formula (can1357/homebrew-tap) from the freshly
+   # published release assets and push it. Gated on release_github_verify so the
+   # tap only cuts over to a release whose published binary was verified (matches
+   # how release_npm is gated). No-ops when HOMEBREW_TAP_DEPLOY_KEY is unset, so a
+   # release never blocks on tap access.
+   release_brew:
+      name: Update Homebrew tap
+      if: ${{ needs.release_metadata.outputs.is-release == 'true' && !cancelled() &&
+         needs.release_metadata.outputs.channel != 'canary' &&
+         needs.release_github_verify.result == 'success' }}
+      needs: [release_metadata, release_github_verify]
+      runs-on: ubuntu-22.04
+      env:
+         HAS_TAP_KEY: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY != '' }}
+      steps:
+         - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           if: env.HAS_TAP_KEY == 'true'
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           if: env.HAS_TAP_KEY == 'true'
+           with:
+              bun-version: "1.4"
+         - name: Check out the Homebrew tap
+           if: env.HAS_TAP_KEY == 'true'
+           uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+           with:
+              repository: can1357/homebrew-tap
+              ssh-key: ${{ secrets.HOMEBREW_TAP_DEPLOY_KEY }}
+              path: homebrew-tap
+         - name: Regenerate and push the formula
+           if: env.HAS_TAP_KEY == 'true'
+           env:
+              GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+           run: |
+              bun scripts/ci-update-brew-formula.ts "${{ needs.release_metadata.outputs.release-tag }}" --out homebrew-tap/Formula/omp.rb
+              cd homebrew-tap
+              if git diff --quiet -- Formula/omp.rb; then
+                echo "formula already up to date for ${{ needs.release_metadata.outputs.release-tag }}"
+                exit 0
+              fi
+              git -c user.name="github-actions[bot]" \
+                  -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                  commit -m "omp ${{ needs.release_metadata.outputs.release-tag }}" -- Formula/omp.rb
+              git push origin HEAD:main

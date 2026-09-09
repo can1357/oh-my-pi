@@ -1,0 +1,14 @@
+--- a/build.rs
++++ b/build.rs
+@@ -39,7 +39,10 @@ fn build_opus(is_static: bool) {
+     );
+ 
+     println!("cargo:info=Building Opus via CMake.");
+-    let opus_build_dir = cmake::build(opus_path);
++    let opus_build_dir = cmake::Config::new(opus_path)
++        // link_opus() expects the installed archive under <prefix>/lib.
++        .define("CMAKE_INSTALL_LIBDIR", "lib")
++        .build();
+     link_opus(is_static, opus_build_dir.display())
+ }
+ 

@@ -1,0 +1,25 @@
+sequenceDiagram
+  Alice->>Bob: Hello
+  Bob->>Charlie: Forward
+  Charlie-->>Bob: Reply
+  Bob-->>Alice: Done
+---
+ +-------+   +-----+    +---------+   
+ | Alice |   | Bob |    | Charlie |   
+ +-------+   +-----+    +---------+   
+     |          |            |        
+     |  Hello   |            |        
+     |---------->            |        
+     |          |            |        
+     |          |  Forward   |        
+     |          |------------>        
+     |          |            |        
+     |          |   Reply    |        
+     |          <............|        
+     |          |            |        
+     |  Done    |            |        
+     <..........|            |        
+     |          |            |        
+ +-------+   +-----+    +---------+   
+ | Alice |   | Bob |    | Charlie |   
+ +-------+   +-----+    +---------+   

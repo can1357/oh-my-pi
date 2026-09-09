@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package cel.expr;
+
+import "cel/expr/value.proto";
+
+message Explain {
+  message ExprStep {
+    int64 id = 1;
+    int32 value_index = 2;
+  }
+
+  repeated .cel.expr.Value values = 1;
+  repeated .cel.expr.Explain.ExprStep expr_steps = 2;
+}

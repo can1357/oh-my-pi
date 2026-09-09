@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#07090c" />
+    <title>robomp</title>
+    <link
+      rel="icon"
+      href="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><circle cx='32' cy='32' r='28' fill='%23ed4abf'/><circle cx='32' cy='32' r='12' fill='%23ffffff'/></svg>"
+    />
+  </head>
+  <body>
+    <div id="app"></div>
+    <script id="robomp-config" type="application/json">__ROBOMP_CONFIG__</script>
+    <script>(function(){try{var s=localStorage.getItem("omp-robomp-theme");var sys=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";var t=(s==="light"||s==="dark")?s:sys;document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t;}catch(e){}})();</script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

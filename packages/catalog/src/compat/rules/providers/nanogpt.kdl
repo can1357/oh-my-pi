@@ -1,0 +1,100 @@
+// Provider-wire compat for "nanogpt"; regenerated from the frozen census using deployment contract selectors.
+
+provider "nanogpt" {
+	// Replaces the reasoning-gated K2.6 stream-idle baseline.
+	models "moonshotai/kimi-k2.6:thinking" {
+		stream-idle-timeout-ms 300000
+	}
+	thinking-mode "effort"
+	class "anthropic" {
+		revision ">=4 <4.5" {
+			thinking-requires-effort #true
+		}
+	}
+	class "glm" {
+		family "flash" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+		family "turbo" {
+			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		}
+	}
+	class "openai" {
+		family "o-series" {
+			revision ">=4 <4.1" {
+				thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+			}
+		}
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*5.2:thinking" "*glm-5.2" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "*glm-5.1" "aion-labs/aion-3*" "google*latest" "holo*" "inclusionai*thinking" "meta/*" \
+		"nanogpt*" "nex-agi/nex*" "nousresearch/hermes-4*" "nvidia*b" "nvidia*thinking" "poolside*" \
+		"sakana*" "sarvam*" "tencent/hy*" "thinkingmachines*thinking" "z-ai/glm-4*" \
+		"zai-org/glm-4*thinking" "zai-org/glm-5-original*" "TEE/glm-5-1" "aion-labs/aion-2.0" \
+		"arcee-ai/trinity-large" "arcee-ai/trinity-mini" "bytedance-seed/seed-2.0-lite" \
+		"inclusionai/ring-2.6-1t" "longcat-2.0:thinking" "mercury-2" "minimax/minimax-latest" \
+		"mistralai/devstral-2-123b-instruct-2512" "moonshotai/kimi-latest" \
+		"nvidia/nvidia-nemotron-nano-9b-v2" "openai/gpt-chat-latest" "openai/gpt-latest" "openai/o1" \
+		"openai/o3" "openai/o3-deep-research" "openai/o3-pro-2025-06-10" "pokee-isaac" "sonar-pro" \
+		"tngtech/tng-r1t-chimera" "upstage/solar-pro-3" "zai-org/glm-4.7" "zai-org/glm-4.7-original" \
+		"zai-org/glm-5" "zai-org/glm-5.1:thinking" "zai-org/glm-5:thinking" "zai-org/glm-latest" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "Qwen/Qwen3-235B-A22B-Thinking-2507" {
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "claw" "hermes" {
+		thinking-efforts "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek/deepseek-latest" {
+		requires-reasoning-content-for-all-assistant-turns #true
+		thinking-efforts "high" "max"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "deepseek/deepseek-v4-flash*" "deepseek-ai/DeepSeek-R1-0528" \
+		"deepseek/deepseek-v3.2:thinking" {
+		requires-reasoning-content-for-all-assistant-turns #true
+	}
+	// Tiered provider aliases are one logical model despite lacking source behavior policy.
+	models "linkup-research" {
+		thinking-default-level "high"
+		thinking-efforts "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		thinking-requires-effort #true
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex" "openai/gpt-5.1-codex-max" {
+		thinking-efforts "minimal" "low" "medium" "high"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "openai/gpt-5.1-codex-mini" {
+		thinking-efforts "medium" "high"
+	}
+	// residue: the reviewed Claude-distill lineage keeps its student serving
+	// dialect on NanoGPT's chat endpoint (qwen thinking format, no store).
+	models "Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-Derestricted" \
+		"Qwen3.5-27B-Claude-4.6-Opus-Reasoning-Distilled-Derestricted-Lite" {
+		disable-reasoning-on-forced-tool-choice #false
+		supports-store #false
+		thinking-format "qwen"
+	}
+	models "Gemma-4-31B-Claude-4.6-Opus-Reasoning-Distilled" {
+		disable-reasoning-on-forced-tool-choice #false
+		thinking-requires-effort #true
+	}
+	// residue: the abliterated R1 distill leaks DSML envelopes like its teacher.
+	models "*deepseek-r1-distill*" {
+		stream-markup-healing-pattern "dsml"
+	}
+}

@@ -1,0 +1,23 @@
+# just task runner output.
+# Mostly passes through; drops blank lines and caps length.
+
+[filters.just]
+description = "Compact just task runner output"
+match_command = "^just$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+]
+truncate_lines_at = 250
+max_lines = 80
+on_empty = "just: ok"
+
+[[tests.just]]
+name = "keeps recipe output"
+input = "cargo build\n   Compiling foo v0.1.0\n\n    Finished in 1.2s\n"
+expected = "cargo build\n   Compiling foo v0.1.0\n    Finished in 1.2s\n"
+
+[[tests.just]]
+name = "blank input"
+input = "\n\n"
+expected = "just: ok"

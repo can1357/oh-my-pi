@@ -1,0 +1,99 @@
+# Rust target-triple config_settings for crate_universe's rendered selects
+# (MODULE.bazel sets platforms_template = "@@//bazel/triples:{triple}").
+#
+# rules_rust's builtin @rules_rust//rust/platform settings can't express musl:
+# gnu and musl triples share (os, cpu), so the libc axis rides on
+# @zig_sdk//libc. The gnu settings match both the zig gnu.2.17 platforms and
+# libc-unconstrained platforms (host builds, GH runners); musl requires the
+# explicit constraint carried by //bazel/platforms:linux-musl-*.
+
+load("@bazel_skylib//lib:selects.bzl", "selects")
+
+package(default_visibility = ["//visibility:public"])
+
+_LINUX_CPUS = {
+    "x86_64": "x86_64",
+    "aarch64": "aarch64",
+}
+
+[
+    config_setting(
+        name = "_linux-{}-libc-default".format(cpu),
+        constraint_values = [
+            "@platforms//os:linux",
+            "@platforms//cpu:" + cv,
+            "@zig_sdk//libc:unconstrained",
+        ],
+    )
+    for cpu, cv in _LINUX_CPUS.items()
+]
+
+[
+    config_setting(
+        name = "_linux-{}-libc-gnu217".format(cpu),
+        constraint_values = [
+            "@platforms//os:linux",
+            "@platforms//cpu:" + cv,
+            "@zig_sdk//libc:gnu.2.17",
+        ],
+    )
+    for cpu, cv in _LINUX_CPUS.items()
+]
+
+selects.config_setting_group(
+    name = "x86_64-unknown-linux-gnu",
+    match_any = [
+        ":_linux-x86_64-libc-default",
+        ":_linux-x86_64-libc-gnu217",
+    ],
+)
+
+selects.config_setting_group(
+    name = "aarch64-unknown-linux-gnu",
+    match_any = [
+        ":_linux-aarch64-libc-default",
+        ":_linux-aarch64-libc-gnu217",
+    ],
+)
+
+config_setting(
+    name = "x86_64-unknown-linux-musl",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:x86_64",
+        "@zig_sdk//libc:musl",
+    ],
+)
+
+config_setting(
+    name = "aarch64-unknown-linux-musl",
+    constraint_values = [
+        "@platforms//os:linux",
+        "@platforms//cpu:aarch64",
+        "@zig_sdk//libc:musl",
+    ],
+)
+
+config_setting(
+    name = "x86_64-apple-darwin",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:x86_64",
+    ],
+)
+
+config_setting(
+    name = "aarch64-apple-darwin",
+    constraint_values = [
+        "@platforms//os:macos",
+        "@platforms//cpu:arm64",
+    ],
+)
+
+config_setting(
+    name = "x86_64-pc-windows-msvc",
+    constraint_values = [
+        "@platforms//os:windows",
+        "@platforms//cpu:x86_64",
+    ],
+)

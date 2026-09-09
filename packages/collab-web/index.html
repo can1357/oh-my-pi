@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<meta name="color-scheme" content="light dark" />
+		<meta name="theme-color" media="(prefers-color-scheme: light)" content="#faf7fc" />
+		<meta name="theme-color" media="(prefers-color-scheme: dark)" content="#0f0b14" />
+
+		<title>omp collab — live agent session in your browser</title>
+		<meta
+			name="description"
+			content="Guest client for omp collab sessions: watch a live coding-agent session — streaming transcript, tool calls, subagents — and prompt the host agent from any browser. End-to-end encrypted; the room key never leaves the URL fragment."
+		/>
+		<meta name="author" content="can1357" />
+		<link rel="canonical" href="https://my.omp.sh/" />
+		<meta name="robots" content="index, follow, max-image-preview:large" />
+
+		<link rel="icon" type="image/svg+xml" href="./public/favicon.svg" />
+		<link rel="icon" type="image/x-icon" href="./public/favicon.ico" sizes="any" />
+		<link rel="icon" type="image/png" sizes="256x256" href="./public/favicon.png" />
+		<link rel="icon" type="image/png" sizes="32x32" href="./public/favicon-32x32.png" />
+		<link rel="icon" type="image/png" sizes="16x16" href="./public/favicon-16x16.png" />
+		<link rel="apple-touch-icon" sizes="180x180" href="./public/favicon-180x180.png" />
+		<link rel="manifest" href="./public/manifest.webmanifest" />
+
+		<!-- Open Graph -->
+		<meta property="og:site_name" content="omp" />
+		<meta property="og:type" content="website" />
+		<meta property="og:url" content="https://my.omp.sh/" />
+		<meta property="og:title" content="omp collab — live agent session in your browser" />
+		<meta
+			property="og:description"
+			content="Watch a live omp session and prompt the host agent from any browser. End-to-end encrypted; the key stays in the URL fragment."
+		/>
+		<meta property="og:image" content="https://my.omp.sh/og-image.png" />
+		<meta property="og:image:type" content="image/png" />
+		<meta property="og:image:width" content="1200" />
+		<meta property="og:image:height" content="630" />
+		<meta property="og:image:alt" content="omp collab — your agent, live in any browser" />
+		<meta property="og:locale" content="en_US" />
+
+		<!-- Twitter / X -->
+		<meta name="twitter:card" content="summary_large_image" />
+		<meta name="twitter:url" content="https://my.omp.sh/" />
+		<meta name="twitter:title" content="omp collab — live agent session in your browser" />
+		<meta
+			name="twitter:description"
+			content="Watch a live omp session and prompt the host agent from any browser. End-to-end encrypted; the key stays in the URL fragment."
+		/>
+		<meta name="twitter:image" content="https://my.omp.sh/og-image.png" />
+		<meta name="twitter:image:alt" content="omp collab — your agent, live in any browser" />
+
+		<!-- Structured data: WebApplication -->
+		<script type="application/ld+json">
+			{
+				"@context": "https://schema.org",
+				"@type": "WebApplication",
+				"name": "omp collab",
+				"url": "https://my.omp.sh/",
+				"applicationCategory": "DeveloperApplication",
+				"operatingSystem": "Any",
+				"description": "Browser guest client for omp collab live sessions: streaming transcript, tool calls, subagent panel, and a composer that prompts the host agent. End-to-end encrypted.",
+				"isPartOf": { "@type": "WebSite", "name": "omp", "url": "https://omp.sh/" }
+			}
+		</script>
+
+		<!-- Analytics. data-exclude-hash keeps the E2E room key (URL fragment) out of analytics. -->
+		<script defer src="https://um.can.ac/script.js" data-website-id="28ab5a7d-3ca4-4c85-9da5-666fa731cb92" data-exclude-hash="true"></script>
+	</head>
+	<body>
+		<div id="root"></div>
+		<script>(function(){try{var s=localStorage.getItem("omp-collab-theme");var sys=matchMedia("(prefers-color-scheme: dark)").matches?"dark":"light";var t=(s==="light"||s==="dark")?s:sys;document.documentElement.dataset.theme=t;document.documentElement.style.colorScheme=t;}catch(e){}})();</script>
+		<script type="module" src="./src/main.tsx"></script>
+	</body>
+</html>

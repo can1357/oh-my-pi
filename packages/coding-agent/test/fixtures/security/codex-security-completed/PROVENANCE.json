@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/openai/codex-security",
+  "revision": "f22d4a36f26d16287bcdfd707b369116e02a08c3",
+  "packageVersion": "0.1.1",
+  "pluginVersion": "0.1.14",
+  "archiveSha256": "13745c495b7c5cf5273cf2115df86b9c3ec3056f43151c869e004aa3f30bcffb",
+  "source": "sdk/typescript/_bundled_plugin/examples/completed-scan"
+}

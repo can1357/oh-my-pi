@@ -1,0 +1,110 @@
+name: Bug Report
+description: Report a bug or crash
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened?
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to Reproduce
+      description: Minimal steps to reproduce the issue
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected Behavior
+      description: What did you expect to happen?
+    validations:
+      required: true
+
+  - type: textarea
+    id: error-output
+    attributes:
+      label: Error Output
+      description: Paste any error messages or stack traces
+      render: shell
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux
+        - Windows (native)
+        - Windows (WSL)
+    validations:
+      required: true
+
+  - type: input
+    id: version
+    attributes:
+      label: omp version
+      description: Output of `omp --version`
+      placeholder: "e.g. 12.1.0"
+    validations:
+      required: true
+
+  - type: input
+    id: bun-version
+    attributes:
+      label: Bun version
+      description: Output of `bun --version`
+      placeholder: "e.g. 1.3.8"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: provider
+    attributes:
+      label: Provider
+      description: Which provider were you using? Leave blank if not provider-specific.
+      options:
+        - Anthropic (Claude Pro/Max)
+        - ChatGPT Plus/Pro (Codex)
+        - GitHub Copilot
+        - Google Cloud Code Assist (Gemini CLI)
+        - Antigravity (Gemini 3, Claude, GPT-OSS)
+        - Cursor
+        - OpenCode Zen
+        - Kimi Code
+        - Z.AI (GLM)
+        - MiniMax Coding Plan
+        - Perplexity
+        - Amazon Bedrock
+        - OpenRouter
+        - Ollama / Local
+        - Custom (models.yml)
+        - Other
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Area
+      description: Which part of omp is affected?
+      options:
+        - TUI / Display
+        - Authentication / Login
+        - Model selection
+        - Tool execution
+        - MCP servers
+        - Extensions / Plugins
+        - CLI commands
+        - Setup / Installation
+        - Session / Compaction
+        - Other
+
+  - type: textarea
+    id: additional-context
+    attributes:
+      label: Additional context
+      description: Screenshots, config snippets, or other relevant information

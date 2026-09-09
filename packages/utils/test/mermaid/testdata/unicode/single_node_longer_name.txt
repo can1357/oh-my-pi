@@ -1,0 +1,8 @@
+graph LR
+LongerName
+---
+┌────────────┐
+│            │
+│ LongerName │
+│            │
+└────────────┘

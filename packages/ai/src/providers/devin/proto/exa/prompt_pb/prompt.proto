@@ -1,0 +1,92 @@
+syntax = "proto3";
+
+package exa.prompt_pb;
+
+import "exa/chat_pb/chat.proto";
+import "exa/codeium_common_pb/codeium_common.proto";
+import "exa/context_module_pb/context_module.proto";
+import "exa/cortex_pb/cortex.proto";
+import "exa/language_server_pb/language_server.proto";
+
+message PendingCommand {
+  string instruction = 1;
+  string completion = 2;
+}
+
+message CommandIntentInfo {
+  string selection = 1;
+  string instruction = 2;
+  .exa.codeium_common_pb.Document input_document = 3;
+  uint64 selection_start_line = 4;
+  uint64 selection_end_line = 5;
+  .exa.codeium_common_pb.TerminalCommandData terminal_command_data = 6;
+  repeated .exa.codeium_common_pb.TerminalShellCommand previous_commands = 7;
+  repeated .exa.prompt_pb.PendingCommand pending_commands = 8;
+  .exa.codeium_common_pb.CommandRequestSource request_source = 9;
+  repeated .exa.codeium_common_pb.IntellisenseSuggestion intellisense_prompt = 10;
+  repeated .exa.codeium_common_pb.CodeDiagnostic diagnostics_prompt = 11;
+}
+
+message SupercompleteFeedback {
+  bool accepted = 1;
+  bool intentional_reject = 2;
+  string completion_id = 3;
+  int64 timestamp_ms = 4;
+  .exa.language_server_pb.HandleStreamingTabV2Response.Diff diff_suggestion = 5;
+  .exa.language_server_pb.HandleStreamingTabV2Response.TabJump tabjump_suggestion = 6;
+}
+
+message SupercompleteFeedbackContext {
+  repeated .exa.prompt_pb.SupercompleteFeedback feedback = 1;
+}
+
+message UnifiedPromptComponents {
+  reserved 6;
+  reserved 7;
+  reserved 8;
+  reserved "knowledge_base_result", "knowledge_base_items", "knowledge_base_groups";
+
+  .exa.context_module_pb.ContextModuleResult context_module_result = 2;
+  .exa.cortex_pb.CortexTrajectory cortex_trajectory = 3;
+  .exa.prompt_pb.CommandIntentInfo command_intent_info = 4;
+  repeated .exa.chat_pb.ChatMessage chat_messages = 1;
+  repeated .exa.codeium_common_pb.CodeDiagnostic code_diagnostics = 5;
+  repeated .exa.codeium_common_pb.Document other_documents = 9;
+  .exa.chat_pb.DeepWikiSymbolContext deep_wiki_context = 10 [deprecated = true];
+  .exa.chat_pb.DeepWikiContext deep_wiki_context_v2 = 11;
+  .exa.prompt_pb.SupercompleteFeedbackContext supercomplete_feedback_context = 12;
+}
+
+message SystemPromptConstructionConfig {
+  string element_separator = 1;
+}
+
+message CommandPromptCacheConfig {
+  int64 max_tracked_files = 1;
+  int64 max_cache_age_seconds = 2;
+}
+
+message CumulativePromptConfig {
+  reserved 1;
+  reserved 3;
+  reserved 4;
+  reserved 5;
+  reserved "active_document_context_multiplier", "context_item_context_multiplier", "cache_context_multiplier", "max_ccis_considered";
+
+  float persistent_context_multiplier = 7;
+  float persistent_active_document_multiplier = 10;
+  float persistent_open_docs_multiplier = 11;
+  int64 persistent_max_tokens_per_open_doc = 17;
+  int64 persistent_max_ccis_considered = 12;
+  float persistent_document_suffix_frac = 20;
+  float trajectory_context_multiplier = 2;
+  float trajectory_refresh_threshold_multiplier = 15;
+  float trajectory_truncation_multiplier = 16;
+  float ephemeral_context_multiplier = 9;
+  int64 intent_reservation_tokens = 6;
+  float ephemeral_active_document_multiplier = 13;
+  int64 ephemeral_max_ccis_considered = 14;
+  float ephemeral_document_suffix_frac = 21;
+  repeated .exa.cortex_pb.CortexStepType allowed_cascade_step_types = 18;
+  map<string, bool> allowed_implicit_step_types = 22;
+}

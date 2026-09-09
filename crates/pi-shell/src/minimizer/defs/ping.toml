@@ -1,0 +1,52 @@
+# ping: runs as an OVERLAY on system.rs compact_ping_output (which already
+# strips PING/Pinging headers and per-packet reply lines). The per-packet
+# lines are rarely useful once a run is over. Keep the stats separators, the
+# loss/rtt summary, and — critically — any error or timeout lines.
+#
+# Failures must never be masked: gate on exit 0 so nonzero-exit runs (e.g.
+# "ping: unknown host") pass the native output through untouched instead of
+# collapsing to the on_empty sentinel.
+
+[filters.ping]
+description = "Keep only ping summary + loss/error lines (exit 0 only)"
+match_command = "^ping6?$"
+strip_ansi = true
+only_on_exit = [0]
+keep_lines_matching = [
+	"^PING ",
+	"^--- .* ping statistics ---$",
+	"packet loss",
+	"^rtt min",
+	"^round-trip min",
+	"timeout",
+	"[Uu]nreachable",
+	"^ping:",
+	"^From ",
+	"^Ping statistics for",
+	"Packets: Sent",
+	"^\\s*Minimum =",
+	"^Approximate round trip",
+]
+tail_lines = 6
+on_empty = "ping: ok"
+
+[[tests.ping]]
+name = "keeps summary tail drops per-packet lines"
+input = "PING google.com (1.2.3.4) 56(84) bytes of data.\n64 bytes from a (1.2.3.4): icmp_seq=1 ttl=58 time=12.3 ms\n64 bytes from a (1.2.3.4): icmp_seq=2 ttl=58 time=12.5 ms\n\n--- google.com ping statistics ---\n2 packets transmitted, 2 received, 0% packet loss, time 1001ms\nrtt min/avg/max/mdev = 12.3/12.4/12.5/0.1 ms\n"
+expected = "PING google.com (1.2.3.4) 56(84) bytes of data.\n--- google.com ping statistics ---\n2 packets transmitted, 2 received, 0% packet loss, time 1001ms\nrtt min/avg/max/mdev = 12.3/12.4/12.5/0.1 ms\n"
+
+[[tests.ping]]
+name = "unknown host on nonzero exit passes through unchanged"
+exit = 2
+input = "ping: unknown host\nName or service not known\n"
+expected = "ping: unknown host\nName or service not known\n"
+
+[[tests.ping]]
+name = "windows stats block survives"
+input = "Pinging 192.0.2.1 with 32 bytes of data:\n\nPing statistics for 192.0.2.1:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),\nApproximate round trip times in milli-seconds:\n    Minimum = 13ms, Maximum = 14ms, Average = 13ms\n"
+expected = "Ping statistics for 192.0.2.1:\n    Packets: Sent = 4, Received = 4, Lost = 0 (0% loss),\nApproximate round trip times in milli-seconds:\n    Minimum = 13ms, Maximum = 14ms, Average = 13ms\n"
+
+[[tests.ping]]
+name = "timeout lines survive on exit 0"
+input = "Request timeout for icmp_seq 0\nRequest timeout for icmp_seq 1\n\n--- host ping statistics ---\n2 packets transmitted, 0 received, 100% packet loss, time 1001ms\n"
+expected = "Request timeout for icmp_seq 0\nRequest timeout for icmp_seq 1\n--- host ping statistics ---\n2 packets transmitted, 0 received, 100% packet loss, time 1001ms\n"

@@ -1,0 +1,33 @@
+This directory contains an in-house Mermaid-diagram-to-ASCII renderer adapted
+from beautiful-mermaid (https://github.com/lukilabs/beautiful-mermaid), used
+under the MIT License.
+
+  Copyright (c) 2026 Craft Docs
+
+Only the ASCII rendering pipeline is ported (flowchart/state, sequence, class,
+ER, and xychart diagrams); the SVG renderer and its `elkjs` graph-layout
+dependency, the browser entry point, and the SVG theme/style modules were
+dropped. Terminal display width is reimplemented on `Bun.stringWidth`, and
+inline label formatting (HTML tags, markdown emphasis) is reduced to plain text
+for ASCII output. Layout and edge-routing logic is preserved faithfully so
+ASCII output matches the upstream package.
+
+MIT License
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

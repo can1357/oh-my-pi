@@ -1,0 +1,23 @@
+# jira CLI output. Strip ANSI and decorative separators.
+
+[filters.jira]
+description = "Compact jira CLI output"
+match_command = "^jira$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^[\\s\\-+=]+$",
+]
+truncate_lines_at = 200
+max_lines = 80
+on_empty = "jira: ok"
+
+[[tests.jira]]
+name = "strips separators and blanks"
+input = "KEY-1  Bug  Open  Fix login\n---\n\nKEY-2  Task Done Deploy\n"
+expected = "KEY-1  Bug  Open  Fix login\nKEY-2  Task Done Deploy\n"
+
+[[tests.jira]]
+name = "empty becomes sentinel"
+input = "\n"
+expected = "jira: ok"

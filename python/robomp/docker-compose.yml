@@ -1,0 +1,168 @@
+services:
+  # ───────────────────────────────────────────────────────────────────────────
+  # roboomp orchestrator
+  #
+  # NOTE: `env_file:` is INTENTIONALLY ABSENT. We never want the gh-proxy's
+  # PAT (`GITHUB_TOKEN` in .env) to leak into this container's environment.
+  # Every variable below is an explicit allowlist; compose still reads `.env`
+  # for `${VAR}` interpolation, but only the keys listed here flow into the
+  # container. Adding a new secret means an explicit compose-level decision
+  # about which container is allowed to see it.
+  # ───────────────────────────────────────────────────────────────────────────
+  robomp:
+    build:
+      # pi root: gives the web-builder stage access to the workspace
+      # bun.lock + catalog (web/package.json refs `catalog:` versions).
+      # python/robomp/data and pi-root excludes are filtered via
+      # Dockerfile.robomp.dockerignore at the context root.
+      context: ../..
+      dockerfile: Dockerfile.robomp
+      args:
+        # Tag of the pre-built pi-base image produced by `bun run pi:image`
+        # (sources: pi root /Dockerfile). Override per-environment as needed.
+        PI_BASE: oh-my-pi/pi:dev
+    image: robomp:dev
+    container_name: robomp
+    # Stable hostname: os.hostname() inside the container feeds usage
+    # attribution (x-omp-hostname → broker `clients.hostname`); without this
+    # it reports the random docker container id.
+    hostname: robomp
+    # Phase B (graceful shutdown): gives the orchestrator at least
+    # ROBOMP_SHUTDOWN_DRAIN_TIMEOUT_SECONDS + ROBOMP_SHUTDOWN_KILL_TIMEOUT_SECONDS
+    # before SIGKILL. Defaults: 25 + 5 = 30s.
+    stop_grace_period: 30s
+    restart: unless-stopped
+    environment:
+      # --- gh-proxy channel ---
+      # The orchestrator NEVER holds GITHUB_TOKEN; it talks to the sibling
+      # gh-proxy container over the internal-only network.
+      ROBOMP_GH_PROXY_URL: http://gh-proxy:8081
+      ROBOMP_GH_PROXY_HMAC_KEY: ${ROBOMP_GH_PROXY_HMAC_KEY:?ROBOMP_GH_PROXY_HMAC_KEY must be set in .env}
+
+      # --- webhook + identity ---
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET must be set in .env}
+      ROBOMP_BOT_LOGIN: ${ROBOMP_BOT_LOGIN:?ROBOMP_BOT_LOGIN must be set in .env}
+      ROBOMP_GIT_AUTHOR_NAME: ${ROBOMP_GIT_AUTHOR_NAME:-}
+      ROBOMP_GIT_AUTHOR_EMAIL: ${ROBOMP_GIT_AUTHOR_EMAIL:?ROBOMP_GIT_AUTHOR_EMAIL must be set in .env}
+      ROBOMP_REPO_ALLOWLIST: ${ROBOMP_REPO_ALLOWLIST:?ROBOMP_REPO_ALLOWLIST must be set in .env}
+      ROBOMP_MAINTAINER_LOGINS: ${ROBOMP_MAINTAINER_LOGINS:-}
+      ROBOMP_REVIEWER_BOTS: ${ROBOMP_REVIEWER_BOTS:-}
+
+      # --- PR review ---
+      ROBOMP_PR_REVIEW_ENABLED: ${ROBOMP_PR_REVIEW_ENABLED:-true}
+
+      # --- release sentinel ---
+      ROBOMP_RELEASE_SENTINEL_ENABLED: ${ROBOMP_RELEASE_SENTINEL_ENABLED:-false}
+      ROBOMP_RELEASE_COMMIT_PREFIX: "${ROBOMP_RELEASE_COMMIT_PREFIX:-chore: bump version to }"
+      ROBOMP_RELEASE_MAX_ROUNDS: ${ROBOMP_RELEASE_MAX_ROUNDS:-5}
+      ROBOMP_RELEASE_TASK_TIMEOUT_SECONDS: ${ROBOMP_RELEASE_TASK_TIMEOUT_SECONDS:-3600}
+      ROBOMP_RELEASE_MODEL: ${ROBOMP_RELEASE_MODEL:-}
+
+      # --- model selection ---
+      ROBOMP_MODEL: ${ROBOMP_MODEL:-anthropic/claude-sonnet-4-6}
+      ROBOMP_PROVIDER: ${ROBOMP_PROVIDER:-}
+      ROBOMP_THINKING: ${ROBOMP_THINKING:-high}
+
+      # --- runtime tuning ---
+      ROBOMP_MAX_CONCURRENCY: ${ROBOMP_MAX_CONCURRENCY:-8}
+      ROBOMP_TASK_TIMEOUT_SECONDS: ${ROBOMP_TASK_TIMEOUT_SECONDS:-2400}
+      ROBOMP_TASK_TIMEOUT_HARD_GRACE_SECONDS: ${ROBOMP_TASK_TIMEOUT_HARD_GRACE_SECONDS:-60}
+      ROBOMP_REQUEST_TIMEOUT_SECONDS: ${ROBOMP_REQUEST_TIMEOUT_SECONDS:-120}
+      ROBOMP_RATE_LIMIT_WINDOW_SECONDS: ${ROBOMP_RATE_LIMIT_WINDOW_SECONDS:-3600}
+      ROBOMP_RATE_LIMIT_DEFAULT: ${ROBOMP_RATE_LIMIT_DEFAULT:-3}
+      ROBOMP_RATE_LIMIT_CONTRIBUTOR: ${ROBOMP_RATE_LIMIT_CONTRIBUTOR:-10}
+      ROBOMP_RATE_LIMIT_UNLIMITED: ${ROBOMP_RATE_LIMIT_UNLIMITED:-}
+      ROBOMP_QUESTION_AUTOCLOSE_ENABLED: ${ROBOMP_QUESTION_AUTOCLOSE_ENABLED:-true}
+      ROBOMP_QUESTION_AUTOCLOSE_HOURS: ${ROBOMP_QUESTION_AUTOCLOSE_HOURS:-4}
+      ROBOMP_QUESTION_AUTOCLOSE_SCAN_SECONDS: ${ROBOMP_QUESTION_AUTOCLOSE_SCAN_SECONDS:-60}
+      ROBOMP_REPLAY_TOKEN: ${ROBOMP_REPLAY_TOKEN:-}
+
+      # --- container-fixed paths ---
+      ROBOMP_OMP_COMMAND: omp
+      ROBOMP_WORKSPACE_ROOT: /data/workspaces
+      ROBOMP_SQLITE_PATH: /data/robomp.sqlite
+      ROBOMP_LOG_DIR: /data/logs
+      ROBOMP_BIND_HOST: ${ROBOMP_BIND_HOST:-0.0.0.0}
+      ROBOMP_BIND_PORT: ${ROBOMP_BIND_PORT:-8080}
+      PI_ROOT: /work/pi
+    depends_on:
+      gh-proxy:
+        condition: service_started
+    # Resolve `llm-gateway.internal` (used in /srv/agent-home/.omp/agent/models.yml) to the
+    # Docker host. The actual gateway listens on 127.0.0.1:4000 on the host;
+    # `host-gateway` is Docker's alias for the host bridge IP.
+    extra_hosts:
+      - "llm-gateway.internal:host-gateway"
+    networks:
+      - default
+      - robomp_internal
+    volumes:
+      - ${PI_ROOT:-../..}:/work/pi:ro
+      - robomp_data:/data
+      # Host agent config is mounted read-only under /srv/agent-home-stage
+      # with host-controlled permissions. The entrypoint copies it into
+      # root-owned, world-readable files under /srv/agent-home; the agent
+      # subprocess runs with HOME=/srv/agent-home, so ~/.omp and ~/.agent
+      # resolve there without exposing mutable host mounts.
+      - ${HOME}/.omp/agent/models.container.yml:/srv/agent-home-stage/.omp/agent/models.yml:ro
+      - ${HOME}/.agent/AGENTS.md:/srv/agent-home-stage/.agent/AGENTS.md:ro
+      - ${HOME}/.agent/rules:/srv/agent-home-stage/.agent/rules:ro
+    ports:
+      - "0.0.0.0:6543:8080"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # gh-proxy
+  #
+  # The only container that ever holds GITHUB_TOKEN. Reachable only from the
+  # orchestrator on the internal-only network — no host port mapping. Every
+  # request must carry a valid HMAC signature (ROBOMP_GH_PROXY_HMAC_KEY).
+  # `env_file:` is INTENTIONALLY ABSENT for the same reason: the explicit
+  # allowlist below is the only place where any var lands in this container.
+  # ───────────────────────────────────────────────────────────────────────────
+  gh-proxy:
+    image: robomp:dev
+    container_name: gh-proxy
+    restart: unless-stopped
+    command: ["python", "-m", "robomp.proxy", "serve"]
+    environment:
+      # PAT: lives ONLY here. The orchestrator's compose block refuses to
+      # let this var into its container.
+      GITHUB_TOKEN: ${GITHUB_TOKEN:?GITHUB_TOKEN must be set in .env}
+      # Shared with the orchestrator: HMAC verification key.
+      ROBOMP_GH_PROXY_HMAC_KEY: ${ROBOMP_GH_PROXY_HMAC_KEY:?ROBOMP_GH_PROXY_HMAC_KEY must be set in .env}
+      # The proxy reuses the SandboxManager pool layout under /data/workspaces.
+      ROBOMP_WORKSPACE_ROOT: /data/workspaces
+      ROBOMP_SQLITE_PATH: /data/robomp.sqlite
+      ROBOMP_LOG_DIR: /data/logs
+      # Bind on the internal network only.
+      ROBOMP_GH_PROXY_BIND_HOST: 0.0.0.0
+      ROBOMP_GH_PROXY_BIND_PORT: 8081
+      # Settings still requires these on construction; the proxy never uses
+      # them but the validator runs the same code path as the orchestrator.
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:?GITHUB_WEBHOOK_SECRET must be set in .env}
+      ROBOMP_BOT_LOGIN: ${ROBOMP_BOT_LOGIN:?ROBOMP_BOT_LOGIN must be set in .env}
+      ROBOMP_GIT_AUTHOR_EMAIL: ${ROBOMP_GIT_AUTHOR_EMAIL:?ROBOMP_GIT_AUTHOR_EMAIL must be set in .env}
+      ROBOMP_REPO_ALLOWLIST: ${ROBOMP_REPO_ALLOWLIST:?ROBOMP_REPO_ALLOWLIST must be set in .env}
+    networks:
+      # `default` gives gh-proxy outbound NAT to api.github.com; `robomp_internal`
+      # is how the orchestrator reaches it. No `ports:` mapping → still
+      # unreachable from the host or any sibling project.
+      - default
+      - robomp_internal
+    volumes:
+      # Shared workspace pool/worktrees so the proxy can drive git operations
+      # against the same per-issue worktrees the orchestrator builds.
+      - robomp_data:/data
+
+networks:
+  # External-facing bridge: webhook ingress (8080) and the orchestrator's
+  # outbound path to the host LLM gateway via extra_hosts.
+  default: {}
+  # Orchestrator <-> gh-proxy only. internal: true means no egress and no
+  # ingress from outside the compose project.
+  robomp_internal:
+    internal: true
+
+volumes:
+  # Docker-managed Linux volume so UID/GID permissions on /data are enforced.
+  robomp_data: {}

@@ -1,0 +1,57 @@
+*.wasm filter=lfs diff=lfs merge=lfs -text linguist-vendored
+
+# Default: normalize text files, but do not force binary files as text.
+* text=auto eol=lf
+
+# Common binary assets and archives must never be line-ending normalized.
+*.png -text
+*.jpg -text
+*.jpeg -text
+*.gif -text
+*.webp -text
+*.ico -text
+*.pdf -text
+*.zip -text
+*.gz -text
+*.tar -text
+*.tgz -text
+*.7z -text
+*.ttf -text
+*.otf -text
+*.woff -text
+*.woff2 -text
+*.mp3 -text
+*.mp4 -text
+*.mov -text
+*.avi -text
+*.db -text
+*.sqlite -text
+*.exe -text
+*.dll -text
+*.so -text
+*.dylib -text
+*.class -text
+*.jar -text
+
+# Lock files are binary (machine-generated, should not be manually edited)
+*.lock -text
+Cargo.lock -text
+package-lock.json -text
+bun.lock -text
+bun.lockb -text
+yarn.lock -text
+pnpm-lock.yaml -text
+poetry.lock -text
+
+# Executed by Linux
+*.sh text eol=lf
+*.py text eol=lf
+
+# Windows-native scripts
+*.ps1 text eol=lf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# Changelogs are append-mostly; auto-merge by unioning both sides.
+packages/*/CHANGELOG.md merge=union
+

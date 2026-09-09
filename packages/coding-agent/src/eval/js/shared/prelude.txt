@@ -1,0 +1,442 @@
+if (!globalThis.__omp_js_prelude_loaded__) {
+	globalThis.__omp_js_prelude_loaded__ = true;
+
+	const isNil = value => value === undefined || value === null;
+	const isPlainObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
+	const positionalOptions = (name, args, keys, example) => {
+		for (let index = keys.length; index < args.length; index++) {
+			if (!isNil(args[index])) {
+				throw new TypeError(
+					`${name}() accepts at most ${keys.length} positional optional args; got ${args.length}. Pass ${name}(..., ${example}) for named options.`,
+				);
+			}
+		}
+		const options = {};
+		for (let index = 0; index < keys.length && index < args.length; index++) {
+			const value = args[index];
+			if (!isNil(value)) options[keys[index]] = value;
+		}
+		return options;
+	};
+	const optionsArg = (name, value, rest, keys, example) => {
+		if (isNil(value)) return positionalOptions(name, [value, ...rest], keys, example);
+		if (isPlainObject(value)) {
+			if (rest.some(arg => !isNil(arg))) {
+				throw new TypeError(
+					`${name}() takes either a single trailing options object like ${example} or positional optional args; do not mix both forms.`,
+				);
+			}
+			return value;
+		}
+		if (typeof value === "object") {
+			const kind = Array.isArray(value) ? "an array" : value.constructor?.name ?? "object";
+			throw new TypeError(
+				`${name}() options must be a plain object like ${example}, null/undefined, or positional optional args, not ${kind}.`,
+			);
+		}
+		return positionalOptions(name, [value, ...rest], keys, example);
+	};
+	const callHelper = (name, ...args) => globalThis.__omp_helpers__[name](...args);
+	const hasScheme = path => typeof path === "string" && /^[A-Za-z][A-Za-z0-9+.-]*:\/\//.test(path);
+	const shouldDelegateRead = path => hasScheme(path) && !path.toLowerCase().startsWith("local://");
+	const withReadLineSelector = (path, options) => {
+		const offset = typeof options.offset === "number" ? options.offset : 1;
+		const limit = typeof options.limit === "number" ? options.limit : undefined;
+		if (offset <= 1 && limit === undefined) return path;
+		if (limit !== undefined && limit <= 0) return null;
+		const start = Math.max(1, offset);
+		if (limit === undefined) return `${path}:${start}-`;
+		return `${path}:${start}-${start + limit - 1}`;
+	};
+	const readToolText = async path => {
+		const res = await globalThis.__omp_call_tool__("read", { path });
+		return res && typeof res === "object" && "text" in res ? res.text : res;
+	};
+
+
+	const read = async (path, opts, ...rest) => {
+		const options = optionsArg("read", opts, rest, ["offset", "limit"], "{ offset, limit }");
+		if (shouldDelegateRead(path)) {
+			const toolPath = withReadLineSelector(path, options);
+			return toolPath === null ? "" : readToolText(toolPath);
+		}
+		return callHelper("read", path, options);
+	};
+	const write = async (path, data) => callHelper("writeFile", path, data);
+	const env = (key, value) => callHelper("env", key, value);
+
+	const __tools = new Map();
+	globalThis.__omp_tools__ = __tools;
+	const registerTool = (fn, opts = {}) => {
+		if (typeof fn !== "function") throw new TypeError("tool() expects a function");
+		if (!isPlainObject(opts)) throw new TypeError("tool() options must be a plain object");
+		const name = opts.name ?? fn.name;
+		if (typeof name !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(name)) {
+			throw new TypeError(`invalid tool name ${JSON.stringify(name)}`);
+		}
+		const description = opts.description ?? `JS tool ${name}`;
+		const parameters = opts.parameters ?? { type: "object", properties: {}, additionalProperties: true };
+		__tools.set(name, { name, fn, description, parameters });
+		globalThis.__omp_emit_status__("tool_define", {
+			name,
+			params: Object.keys(parameters.properties ?? {}),
+		});
+		return fn;
+	};
+	const tool = new Proxy(registerTool, {
+		apply(_target, _thisArg, args) {
+			return registerTool(args[0], args[1]);
+		},
+		get(_target, prop) {
+			if (prop === "defined") return () => [...__tools.keys()];
+			if (prop === "undefine") return name => __tools.delete(name);
+			if (typeof prop !== "string") return undefined;
+			return async args => globalThis.__omp_call_tool__(prop, args ?? {});
+		},
+	});
+
+	const output = async (...args) => {
+		let opts = {};
+		let ids = args;
+		if (args.length > 0) {
+			const last = args.at(-1);
+			if (last && typeof last === "object" && !Array.isArray(last)) {
+				opts = last;
+				ids = args.slice(0, -1);
+			}
+		}
+		const reads = ids.map(id => tool.read({ path: `agent://${id}`, ...opts }));
+		const values = await Promise.all(reads);
+		return values.length === 1 ? values[0] : values;
+	};
+
+	const hasOwn = (object, key) => Object.prototype.hasOwnProperty.call(object, key);
+	const HANDLE_UNSET = Symbol("handle-unset");
+	const timeoutError = message => {
+		const error = new Error(message);
+		error.name = "TimeoutError";
+		return error;
+	};
+
+	class EvalHandle {
+		constructor(kind, id, schema) {
+			this.kind = kind;
+			this.id = id;
+			this._schema = schema;
+			this._result = HANDLE_UNSET;
+		}
+
+		async status() {
+			const snapshot = await globalThis.__omp_call_tool__("__status__", {
+				item: { kind: this.kind, id: this.id },
+			});
+			return snapshot?.status ?? "failed";
+		}
+
+		async done() {
+			return (await this.status()) !== "running";
+		}
+
+		async wait({ timeout } = {}) {
+			if (this._result !== HANDLE_UNSET) return this._result;
+			return (await wait([this], { timeout }))[0];
+		}
+
+		async cancel() {
+			const result = await globalThis.__omp_call_tool__("__cancel__", {
+				item: { kind: this.kind, id: this.id },
+			});
+			return Boolean(result?.cancelled);
+		}
+	}
+
+	class AgentHandle extends EvalHandle {
+		constructor(id, agentName, schema) {
+			super("agent", id, schema);
+			this.agent = agentName;
+			this.handle = `agent://${id}`;
+		}
+
+		toString() {
+			return `<agent ${this.id} (${this.agent})>`;
+		}
+
+		async send(message) {
+			return await globalThis.__omp_call_tool__("hub", {
+				op: "send",
+				to: this.id,
+				message: String(message),
+				i: "agent handle",
+			});
+		}
+
+		async output(opts = {}) {
+			return await output(this.id, opts);
+		}
+	}
+
+	class CompletionHandle extends EvalHandle {
+		constructor(id, schema) {
+			super("completion", id, schema);
+		}
+
+		toString() {
+			return `<completion ${this.id}>`;
+		}
+	}
+
+	const resolveHandleSnapshot = (handle, snapshot) => {
+		const status = snapshot?.status ?? "failed";
+		if (status === "running") throw timeoutError(`${handle.kind} handle ${handle.id} is still running`);
+		if (status === "failed" || status === "cancelled") {
+			throw new Error(snapshot?.error || `${handle.kind} handle ${handle.id} failed`);
+		}
+		const value = hasOwn(snapshot ?? {}, "data")
+			? snapshot.data
+			: handle._schema !== undefined
+				? JSON.parse(snapshot?.text ?? "")
+				: (snapshot?.text ?? "");
+		handle._result = value;
+		return value;
+	};
+
+	const wait = async (handles, { timeout, raiseErrors = true } = {}) => {
+		const raw = handles instanceof EvalHandle ? [handles] : Array.from(handles ?? []);
+		const items = await Promise.all(raw);
+		for (const handle of items) {
+			if (!(handle instanceof EvalHandle)) throw new TypeError("wait() expects agent or completion handles");
+		}
+		const results = new Array(items.length);
+		const pending = [];
+		const pendingIndexes = [];
+		for (let index = 0; index < items.length; index++) {
+			const handle = items[index];
+			if (handle._result === HANDLE_UNSET) {
+				pending.push({ kind: handle.kind, id: handle.id });
+				pendingIndexes.push(index);
+			} else {
+				results[index] = handle._result;
+			}
+		}
+		if (pending.length > 0) {
+			const args = { items: pending };
+			if (timeout !== undefined) args.timeoutMs = Math.max(0, Number(timeout) * 1000);
+			const response = await globalThis.__omp_call_tool__("__wait__", args);
+			const snapshots = Array.isArray(response?.items) ? response.items : [];
+			if (snapshots.length !== pending.length) throw new Error("wait() returned an incomplete handle result");
+			for (let offset = 0; offset < pendingIndexes.length; offset++) {
+				const index = pendingIndexes[offset];
+				try {
+					results[index] = resolveHandleSnapshot(items[index], snapshots[offset]);
+				} catch (error) {
+					if (error?.name === "TimeoutError") throw error;
+					results[index] = error instanceof Error ? error : new Error(String(error));
+				}
+			}
+		}
+		if (raiseErrors) {
+			const failure = results.find(value => value instanceof Error);
+			if (failure) throw failure;
+		}
+		return results;
+	};
+
+	const completion = async (prompt, opts, ...rest) => {
+		const options = optionsArg("completion", opts, rest, ["model", "system", "schema"], "{ model, system, schema }");
+		const result = await globalThis.__omp_call_tool__("__completion__", { prompt, ...options });
+		if (!result || typeof result.id !== "string") throw new Error("completion() did not return a handle");
+		return new CompletionHandle(result.id, options.schema);
+	};
+
+	const agent = async (prompt, opts, ...rest) => {
+		const options = optionsArg(
+			"agent",
+			opts,
+			rest,
+			["agent", "label", "schema", "isolated", "apply", "merge", "schemaMode", "tools"],
+			"{ agent, label, schema, schemaMode, isolated, apply, merge, tools }",
+		);
+		const result = await globalThis.__omp_call_tool__("__agent__", { prompt, ...options });
+		if (!result || typeof result.id !== "string") throw new Error("agent() did not return a handle");
+		return new AgentHandle(result.id, result.agent, options.schema);
+	};
+
+	class WorkPool {
+		constructor(name, agentName, limit) {
+			this.name = name;
+			this.agent = agentName;
+			this.limit = limit;
+		}
+
+		async push(...items) {
+			if (!items.every(item => typeof item === "string")) {
+				throw new TypeError("WorkPool.push() expects string items");
+			}
+			const result = await globalThis.__omp_call_tool__("__workpool__", {
+				op: "push",
+				name: this.name,
+				items,
+			});
+			return result?.ids ?? [];
+		}
+
+		async status() {
+			return await globalThis.__omp_call_tool__("__workpool__", {
+				op: "status",
+				name: this.name,
+			});
+		}
+
+		async peek() {
+			return await globalThis.__omp_call_tool__("__workpool__", {
+				op: "peek",
+				name: this.name,
+			});
+		}
+
+		async close() {
+			return await globalThis.__omp_call_tool__("__workpool__", {
+				op: "close",
+				name: this.name,
+			});
+		}
+
+		toString() {
+			return `<workpool ${this.name} (${this.agent}) ${this.limit} agents>`;
+		}
+	}
+
+	const workpool = async (agentName, opts, ...rest) => {
+		if (isPlainObject(agentName) && isNil(opts) && rest.every(isNil)) {
+			opts = agentName;
+			agentName = undefined;
+		}
+		const options = optionsArg(
+			"workpool",
+			opts,
+			rest,
+			["name", "context", "tools"],
+			"{ name, context, tools }",
+		);
+		const result = await globalThis.__omp_call_tool__("__workpool__", {
+			op: "create",
+			...(agentName === undefined ? {} : { agent: agentName }),
+			...options,
+		});
+		if (!result || typeof result.name !== "string") throw new Error("workpool() did not return a pool");
+		return new WorkPool(result.name, result.agent, result.limit);
+	};
+
+	const log = message => globalThis.__omp_emit_status__("log", { message: String(message) });
+
+	const phase = title => {
+		globalThis.__omp_phase__ = String(title);
+		globalThis.__omp_emit_status__("phase", { title: String(title) });
+	};
+
+	const __budgetSnap = async () => {
+		const r = await globalThis.__omp_call_tool__("__budget__", {});
+		return r && typeof r === "object" ? r : {};
+	};
+
+	const budget = {
+		total: async () => {
+			const s = await __budgetSnap();
+			return s.total ?? null;
+		},
+		spent: async () => Number((await __budgetSnap()).spent ?? 0),
+		remaining: async () => {
+			const s = await __budgetSnap();
+			return s.total == null ? Infinity : Math.max(0, Number(s.total) - Number(s.spent ?? 0));
+		},
+		hard: async () => Boolean((await __budgetSnap()).hard),
+	};
+
+	const display = value => {
+		globalThis.__omp_display__(value);
+	};
+
+	const formatArgs = args => args.map(arg => (typeof arg === "string" ? arg : arg));
+
+	const consoleTimers = new Map();
+	const consoleCounts = new Map();
+	const consoleBridge = {
+		log: (...args) => globalThis.__omp_log__("log", ...formatArgs(args)),
+		info: (...args) => globalThis.__omp_log__("info", ...formatArgs(args)),
+		warn: (...args) => globalThis.__omp_log__("warn", ...formatArgs(args)),
+		error: (...args) => globalThis.__omp_log__("error", ...formatArgs(args)),
+		debug: (...args) => globalThis.__omp_log__("debug", ...formatArgs(args)),
+		table: (data, columns) =>
+			columns === undefined
+				? globalThis.__omp_table__(data)
+				: globalThis.__omp_table__(data, columns),
+		dir: (value, _options) => globalThis.__omp_log__("log", value),
+		dirxml: (...args) => globalThis.__omp_log__("log", ...formatArgs(args)),
+		trace: (...args) => {
+			const stack = (new Error().stack ?? "").split("\n").slice(2).join("\n");
+			globalThis.__omp_log__("log", args.length > 0 ? `Trace: ${formatArgs(args).join(" ")}` : "Trace", `\n${stack}`);
+		},
+		assert: (condition, ...args) => {
+			if (condition) return;
+			if (args.length > 0) globalThis.__omp_log__("error", "Assertion failed:", ...formatArgs(args));
+			else globalThis.__omp_log__("error", "Assertion failed");
+		},
+		group: (...args) => {
+			if (args.length > 0) globalThis.__omp_log__("log", ...formatArgs(args));
+		},
+		groupCollapsed: (...args) => {
+			if (args.length > 0) globalThis.__omp_log__("log", ...formatArgs(args));
+		},
+		groupEnd: () => {},
+		time: label => {
+			consoleTimers.set(String(label ?? "default"), Date.now());
+		},
+		timeLog: (label, ...args) => {
+			const key = String(label ?? "default");
+			const start = consoleTimers.get(key);
+			if (start === undefined) {
+				globalThis.__omp_log__("warn", `Timer '${key}' does not exist`);
+				return;
+			}
+			globalThis.__omp_log__("log", `${key}: ${Date.now() - start}ms`, ...formatArgs(args));
+		},
+		timeEnd: label => {
+			const key = String(label ?? "default");
+			const start = consoleTimers.get(key);
+			if (start === undefined) {
+				globalThis.__omp_log__("warn", `Timer '${key}' does not exist`);
+				return;
+			}
+			consoleTimers.delete(key);
+			globalThis.__omp_log__("log", `${key}: ${Date.now() - start}ms`);
+		},
+		count: label => {
+			const key = String(label ?? "default");
+			const next = (consoleCounts.get(key) ?? 0) + 1;
+			consoleCounts.set(key, next);
+			globalThis.__omp_log__("log", `${key}: ${next}`);
+		},
+		countReset: label => {
+			consoleCounts.delete(String(label ?? "default"));
+		},
+	};
+
+	globalThis.console = consoleBridge;
+	globalThis.print = consoleBridge.log;
+	globalThis.display = display;
+	globalThis.tool = tool;
+	globalThis.completion = completion;
+	globalThis.output = output;
+	globalThis.agent = agent;
+	globalThis.wait = wait;
+	globalThis.AgentHandle = AgentHandle;
+	globalThis.CompletionHandle = CompletionHandle;
+	globalThis.workpool = workpool;
+	globalThis.WorkPool = WorkPool;
+	globalThis.log = log;
+	globalThis.phase = phase;
+	globalThis.budget = budget;
+	globalThis.read = read;
+	globalThis.write = write;
+	globalThis.env = env;
+}

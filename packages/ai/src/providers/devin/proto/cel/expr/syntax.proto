@@ -1,0 +1,113 @@
+syntax = "proto3";
+
+package cel.expr;
+
+import "google/protobuf/duration.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+message ParsedExpr {
+  .cel.expr.Expr expr = 2;
+  .cel.expr.SourceInfo source_info = 3;
+}
+
+message Expr {
+  message Ident {
+    string name = 1;
+  }
+
+  message Select {
+    .cel.expr.Expr operand = 1;
+    string field = 2;
+    bool test_only = 3;
+  }
+
+  message Call {
+    .cel.expr.Expr target = 1;
+    string function = 2;
+    repeated .cel.expr.Expr args = 3;
+  }
+
+  message CreateList {
+    repeated .cel.expr.Expr elements = 1;
+    repeated int32 optional_indices = 2;
+  }
+
+  message CreateStruct {
+    message Entry {
+      int64 id = 1;
+      oneof key_kind {
+        string field_key = 2;
+        .cel.expr.Expr map_key = 3;
+      }
+      .cel.expr.Expr value = 4;
+      bool optional_entry = 5;
+    }
+
+    string message_name = 1;
+    repeated .cel.expr.Expr.CreateStruct.Entry entries = 2;
+  }
+
+  message Comprehension {
+    string iter_var = 1;
+    string iter_var2 = 8;
+    .cel.expr.Expr iter_range = 2;
+    string accu_var = 3;
+    .cel.expr.Expr accu_init = 4;
+    .cel.expr.Expr loop_condition = 5;
+    .cel.expr.Expr loop_step = 6;
+    .cel.expr.Expr result = 7;
+  }
+
+  int64 id = 2;
+  oneof expr_kind {
+    .cel.expr.Constant const_expr = 3;
+    .cel.expr.Expr.Ident ident_expr = 4;
+    .cel.expr.Expr.Select select_expr = 5;
+    .cel.expr.Expr.Call call_expr = 6;
+    .cel.expr.Expr.CreateList list_expr = 7;
+    .cel.expr.Expr.CreateStruct struct_expr = 8;
+    .cel.expr.Expr.Comprehension comprehension_expr = 9;
+  }
+}
+
+message Constant {
+  oneof constant_kind {
+    .google.protobuf.NullValue null_value = 1;
+    bool bool_value = 2;
+    int64 int64_value = 3;
+    uint64 uint64_value = 4;
+    double double_value = 5;
+    string string_value = 6;
+    bytes bytes_value = 7;
+    .google.protobuf.Duration duration_value = 8 [deprecated = true];
+    .google.protobuf.Timestamp timestamp_value = 9 [deprecated = true];
+  }
+}
+
+message SourceInfo {
+  message Extension {
+    message Version {
+      int64 major = 1;
+      int64 minor = 2;
+    }
+
+    enum Component {
+      COMPONENT_UNSPECIFIED = 0;
+      COMPONENT_PARSER = 1;
+      COMPONENT_TYPE_CHECKER = 2;
+      COMPONENT_RUNTIME = 3;
+    }
+
+    string id = 1;
+    repeated .cel.expr.SourceInfo.Extension.Component affected_components = 2;
+    .cel.expr.SourceInfo.Extension.Version version = 3;
+  }
+
+  string syntax_version = 1;
+  string location = 2;
+  repeated int32 line_offsets = 3;
+  map<int64, int32> positions = 4;
+  map<int64, .cel.expr.Expr> macro_calls = 5;
+  repeated .cel.expr.SourceInfo.Extension extensions = 6;
+}

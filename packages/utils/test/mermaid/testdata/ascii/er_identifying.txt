@@ -1,0 +1,16 @@
+erDiagram
+  PERSON ||--o{ ADDRESS : lives_at
+  PERSON {
+    string name PK
+  }
+  ADDRESS {
+    string street
+    string city
+  }
+---
++----------------+      +------------------+
+| PERSON         |      | ADDRESS          |
++----------------+|---o<+------------------+
+| PK string name |lives_|    string street |
++----------------+      |    string city   |
+                        +------------------+

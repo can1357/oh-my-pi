@@ -1,0 +1,83 @@
+# Repo-local toolchains, registered in MODULE.bazel BEFORE @rust_toolchains//:all.
+#
+# musl wrappers: rules_rust's generated gnu and musl rust toolchains share
+# (os, cpu) constraints, so plain registration order would hand musl platforms
+# the gnu std. These wrappers re-register the musl toolchains gated on
+# @zig_sdk//libc:musl (carried by //bazel/platforms:linux-musl-*), and lose to
+# nothing on gnu platforms because the constraint cannot match there.
+#
+# //bazel/toolchains/msvc: hermetic clang-cl + lld-link + xwin CRT/SDK
+# cc toolchain for x86_64-pc-windows-msvc cross builds from linux.
+
+package(default_visibility = ["//visibility:public"])
+
+_MUSL_RUST_TOOLCHAINS = {
+    "linux-x64-to-musl-x64": (
+        ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+        ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+        "@rust_linux_x86_64__x86_64-unknown-linux-musl__nightly_tools//:rust_toolchain",
+    ),
+    "linux-x64-to-musl-arm64": (
+        ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+        ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+        "@rust_linux_x86_64__aarch64-unknown-linux-musl__nightly_tools//:rust_toolchain",
+    ),
+    "darwin-arm64-to-musl-x64": (
+        ["@platforms//os:osx", "@platforms//cpu:aarch64"],
+        ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+        "@rust_macos_aarch64__x86_64-unknown-linux-musl__nightly_tools//:rust_toolchain",
+    ),
+    "darwin-arm64-to-musl-arm64": (
+        ["@platforms//os:osx", "@platforms//cpu:aarch64"],
+        ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+        "@rust_macos_aarch64__aarch64-unknown-linux-musl__nightly_tools//:rust_toolchain",
+    ),
+    "linux-arm64-to-musl-arm64": (
+        ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+        ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+        "@rust_linux_aarch64__aarch64-unknown-linux-musl__nightly_tools//:rust_toolchain",
+    ),
+    "linux-arm64-to-musl-x64": (
+        ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+        ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+        "@rust_linux_aarch64__x86_64-unknown-linux-musl__nightly_tools//:rust_toolchain",
+    ),
+}
+
+[
+    toolchain(
+        name = "rust-musl-" + name,
+        exec_compatible_with = exec_cv,
+        target_compatible_with = target_cv + ["@zig_sdk//libc:musl"],
+        target_settings = ["@rules_rust//rust/toolchain/channel:nightly"],
+        toolchain = tools,
+        toolchain_type = "@rules_rust//rust:toolchain",
+    )
+    for name, (exec_cv, target_cv, tools) in _MUSL_RUST_TOOLCHAINS.items()
+]
+
+# msvc cross cc toolchain: @msvc_cc generates its wrappers for whichever host
+# fetches it, so one toolchain() per supported exec host points at the same
+# cc_toolchain — only the variant matching the local host can ever resolve.
+# target_compatible_with pins these to windows/x86_64, so they can never
+# shadow the zig cc toolchains on linux (or the host Xcode toolchain on mac).
+_MSVC_EXEC_HOSTS = {
+    "linux-x64": ["@platforms//os:linux", "@platforms//cpu:x86_64"],
+    "linux-arm64": ["@platforms//os:linux", "@platforms//cpu:aarch64"],
+    "darwin-arm64": ["@platforms//os:osx", "@platforms//cpu:aarch64"],
+    "darwin-x64": ["@platforms//os:osx", "@platforms//cpu:x86_64"],
+}
+
+[
+    toolchain(
+        name = "msvc-cc-from-" + name,
+        exec_compatible_with = exec_cv,
+        target_compatible_with = [
+            "@platforms//os:windows",
+            "@platforms//cpu:x86_64",
+        ],
+        toolchain = "@msvc_cc//:cc_toolchain",
+        toolchain_type = "@bazel_tools//tools/cpp:toolchain_type",
+    )
+    for name, exec_cv in _MSVC_EXEC_HOSTS.items()
+]

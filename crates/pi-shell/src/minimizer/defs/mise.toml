@@ -1,0 +1,38 @@
+# mise / rtx version manager output.
+# Drop hint lines and "already installed" noise, keep real install activity.
+
+[filters.mise]
+description = "Compact mise version manager output"
+match_command = "^(mise|rtx)$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^mise\\s+hint\\s",
+	"^mise\\s+.*already installed",
+	"^mise\\s+Downloading\\s",
+	"^mise\\s+Extracting\\s",
+	"^mise\\s+(trust|install|upgrade).*✓",
+]
+truncate_lines_at = 250
+max_lines = 80
+on_empty = "mise: ok"
+
+[[tests.mise]]
+name = "keeps install activity"
+input = "mise node@20.0.0 already installed\nmise node@22.0.0 install\nmise node@22.0.0 installed\n"
+expected = "mise node@22.0.0 install\nmise node@22.0.0 installed\n"
+
+[[tests.mise]]
+name = "all already installed"
+input = "mise node@20.0.0 already installed\n"
+expected = "mise: ok"
+
+[[tests.mise]]
+name = "preserves error output"
+input = "mise run lint\nError: biome check failed\nsrc/index.ts:5 — unused variable\n"
+expected = "mise run lint\nError: biome check failed\nsrc/index.ts:5 — unused variable\n"
+
+[[tests.mise]]
+name = "strips trust/download/extract noise keeps installed result"
+input = "mise trust ~/dev/.mise.toml ✓\nmise Downloading node@22.0.0\nmise Extracting node@22.0.0\nmise node@22.0.0 installed\n"
+expected = "mise node@22.0.0 installed\n"

@@ -1,0 +1,212 @@
+const mimeTypesData = [
+	{
+		type: "application/pdf",
+		suffixes: "pdf",
+		description: "",
+		__pluginName: "Chrome PDF Viewer",
+	},
+	{
+		type: "application/x-google-chrome-pdf",
+		suffixes: "pdf",
+		description: "Portable Document Format",
+		__pluginName: "Chrome PDF Plugin",
+	},
+	{
+		type: "application/x-nacl",
+		suffixes: "",
+		description: "Native Client Executable",
+		__pluginName: "Native Client",
+	},
+	{
+		type: "application/x-pnacl",
+		suffixes: "",
+		description: "Portable Native Client Executable",
+		__pluginName: "Native Client",
+	},
+];
+
+const pluginsData = [
+	{
+		name: "Chrome PDF Plugin",
+		filename: "internal-pdf-viewer",
+		description: "Portable Document Format",
+		__mimeTypes: ["application/x-google-chrome-pdf"],
+	},
+	{
+		name: "Chrome PDF Viewer",
+		filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
+		description: "",
+		__mimeTypes: ["application/pdf"],
+	},
+	{
+		name: "Native Client",
+		filename: "internal-nacl-plugin",
+		description: "",
+		__mimeTypes: ["application/x-nacl", "application/x-pnacl"],
+	},
+];
+
+const defineProp = (obj, prop, value) =>
+	Object_defineProperty(obj, prop, {
+		value,
+		writable: false,
+		enumerable: false,
+		configurable: true,
+	});
+
+const generateFunctionMocks = (proto, itemMainProp, dataArray) => {
+	const item = new Window_Proxy(proto.item, {
+		apply(target, ctx, args) {
+			if (!args.length) {
+				throw new TypeError(
+					`Failed to execute 'item' on '${proto[Symbol.toStringTag]}': 1 argument required, but only 0 present.`,
+				);
+			}
+			const isInteger = args[0] && Number.isInteger(Number(args[0]));
+			return (isInteger ? dataArray[Number(args[0])] : dataArray[0]) || null;
+		},
+	});
+	const namedItem = new Window_Proxy(proto.namedItem, {
+		apply(target, ctx, args) {
+			if (!args.length) {
+				throw new TypeError(
+					`Failed to execute 'namedItem' on '${proto[Symbol.toStringTag]}': 1 argument required, but only 0 present.`,
+				);
+			}
+			return dataArray.find(item => item[itemMainProp] === args[0]) || null;
+		},
+	});
+	patchToString(item, "item");
+	patchToString(namedItem, "namedItem");
+	const refresh = proto.refresh
+		? new Window_Proxy(proto.refresh, {
+				apply() {
+					return undefined;
+				},
+			})
+		: undefined;
+	patchToString(refresh, "refresh");
+	return { item, namedItem, refresh };
+};
+
+const generateMagicArray = (dataArray, proto, itemProto, itemMainProp) => {
+	const makeItem = (data) => {
+		const item = {};
+		for (const prop of Object_keys(data)) {
+			if (prop.startsWith("__")) continue;
+			defineProp(item, prop, data[prop]);
+		}
+		return patchItem(item, data);
+	};
+
+	const patchItem = (item, data) => {
+		let descriptor = Object_getOwnPropertyDescriptors(item);
+		if (itemProto === Plugin.prototype) {
+			descriptor = {
+				...descriptor,
+				length: {
+					value: data.__mimeTypes.length,
+					writable: false,
+					enumerable: false,
+					configurable: true,
+				},
+			};
+		}
+
+		const obj = Object_create(itemProto, descriptor);
+		const blacklist = [...Object_keys(data), "length", "enabledPlugin"];
+		return new Window_Proxy(obj, {
+			ownKeys(target) {
+				return [...Object_getOwnPropertyNames(target), ...Object.getOwnPropertySymbols(target)].filter(
+					key => !blacklist.includes(key),
+				);
+			},
+			getOwnPropertyDescriptor(target, prop) {
+				if (blacklist.includes(prop)) return undefined;
+				return Object_getOwnPropertyDescriptor(target, prop);
+			},
+		});
+	};
+
+	const magicArray = [];
+	dataArray.forEach(data => {
+		magicArray.push(makeItem(data));
+	});
+
+	magicArray.forEach(entry => {
+		defineProp(magicArray, entry[itemMainProp], entry);
+	});
+
+	const magicArrayObj = Object_create(proto, {
+		...Object_getOwnPropertyDescriptors(magicArray),
+		length: {
+			value: magicArray.length,
+			writable: false,
+			enumerable: false,
+			configurable: true,
+		},
+	});
+
+	const functionMocks = generateFunctionMocks(proto, itemMainProp, magicArray);
+
+	return new Window_Proxy(magicArrayObj, {
+		get(target, key = "") {
+			if (key === "item") return functionMocks.item;
+			if (key === "namedItem") return functionMocks.namedItem;
+			if (proto === PluginArray.prototype && key === "refresh") return functionMocks.refresh;
+			return Reflect_get(target, key);
+		},
+		ownKeys(target) {
+			const keys = [];
+			const typeProps = magicArray.map(entry => entry[itemMainProp]);
+			typeProps.forEach((_, index) => keys.push(`${index}`));
+			typeProps.forEach(propName => keys.push(propName));
+			return keys;
+		},
+		getOwnPropertyDescriptor(target, prop) {
+			if (prop === "length") return undefined;
+			return Object_getOwnPropertyDescriptor(target, prop);
+		},
+	});
+};
+
+const generateMimeTypeArray = (data) =>
+	generateMagicArray(data, MimeTypeArray.prototype, MimeType.prototype, "type");
+const generatePluginArray = (data) =>
+	generateMagicArray(data, PluginArray.prototype, Plugin.prototype, "name");
+
+const mimeTypes = generateMimeTypeArray(mimeTypesData);
+const plugins = generatePluginArray(pluginsData);
+
+for (const pluginData of pluginsData) {
+	pluginData.__mimeTypes.forEach((type, index) => {
+		plugins[pluginData.name][index] = mimeTypes[type];
+		Object_defineProperty(plugins[pluginData.name], type, {
+			value: mimeTypes[type],
+			writable: false,
+			enumerable: false,
+			configurable: true,
+		});
+		Object_defineProperty(mimeTypes[type], "enabledPlugin", {
+			value:
+				type === "application/x-pnacl"
+					? mimeTypes["application/x-nacl"].enabledPlugin
+					: new Window_Proxy(plugins[pluginData.name], {}),
+			writable: false,
+			enumerable: false,
+			configurable: true,
+		});
+	});
+}
+
+const patchNavigator = (name, value) =>
+	Object_defineProperty(Object_getPrototypeOf(navigator), name, {
+		get() {
+			return value;
+		},
+	});
+
+if (!("plugins" in navigator) || navigator.plugins.length === 0) {
+	patchNavigator("plugins", plugins);
+	patchNavigator("mimeTypes", mimeTypes);
+}

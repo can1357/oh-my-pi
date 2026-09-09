@@ -1,0 +1,380 @@
+
+// Ensure navigator.webdriver behaves like real Chrome
+if (navigator.webdriver !== false && navigator.webdriver !== undefined) {
+	const proto = Object_getPrototypeOf(navigator);
+	if (proto && "webdriver" in proto) {
+		delete proto.webdriver;
+	}
+}
+
+// Ensure window.chrome exists and is populated with standard Chrome APIs
+if (!window.chrome) {
+	Object_defineProperty(window, "chrome", {
+		writable: true,
+		enumerable: true,
+		configurable: false,
+		value: {},
+	});
+}
+
+if (window.chrome && !("app" in window.chrome)) {
+	const STATIC_DATA = {
+		isInstalled: false,
+		InstallState: {
+			DISABLED: "disabled",
+			INSTALLED: "installed",
+			NOT_INSTALLED: "not_installed",
+		},
+		RunningState: {
+			CANNOT_RUN: "cannot_run",
+			READY_TO_RUN: "ready_to_run",
+			RUNNING: "running",
+		},
+	};
+
+	const makeError = (fn) => new TypeError(`Error in invocation of app.${fn}()`);
+
+	window.chrome.app = {
+		...STATIC_DATA,
+		get isInstalled() {
+			return false;
+		},
+		getDetails: function getDetails() {
+			if (arguments.length) throw makeError("getDetails");
+			return null;
+		},
+		getIsInstalled: function getIsInstalled() {
+			if (arguments.length) throw makeError("getIsInstalled");
+			return false;
+		},
+		runningState: function runningState() {
+			if (arguments.length) throw makeError("runningState");
+			return "cannot_run";
+		},
+	};
+
+	patchToString(window.chrome.app.getDetails, "getDetails");
+	patchToString(window.chrome.app.getIsInstalled, "getIsInstalled");
+	patchToString(window.chrome.app.runningState, "runningState");
+}
+
+if (window.chrome && !("csi" in window.chrome) && window.performance?.timing) {
+	window.chrome.csi = function csi() {
+		const { timing } = window.performance;
+		return {
+			onloadT: timing.domContentLoadedEventEnd,
+			startE: timing.navigationStart,
+			pageT: Date.now() - timing.navigationStart,
+			tran: 15,
+		};
+	};
+	patchToString(window.chrome.csi, "csi");
+}
+
+if (
+	window.chrome &&
+	!("loadTimes" in window.chrome) &&
+	window.performance?.timing &&
+	window.PerformancePaintTiming
+) {
+	const { performance } = window;
+	const ntEntryFallback = {
+		nextHopProtocol: "h2",
+		type: "other",
+	};
+
+	const protocolInfo = {
+		get connectionInfo() {
+			const ntEntry = performance.getEntriesByType("navigation")[0] || ntEntryFallback;
+			return ntEntry.nextHopProtocol;
+		},
+		get npnNegotiatedProtocol() {
+			const ntEntry = performance.getEntriesByType("navigation")[0] || ntEntryFallback;
+			return ["h2", "hq"].includes(ntEntry.nextHopProtocol) ? ntEntry.nextHopProtocol : "unknown";
+		},
+		get navigationType() {
+			const ntEntry = performance.getEntriesByType("navigation")[0] || ntEntryFallback;
+			return ntEntry.type;
+		},
+		get wasAlternateProtocolAvailable() {
+			return false;
+		},
+		get wasFetchedViaSpdy() {
+			const ntEntry = performance.getEntriesByType("navigation")[0] || ntEntryFallback;
+			return ["h2", "hq"].includes(ntEntry.nextHopProtocol);
+		},
+		get wasNpnNegotiated() {
+			const ntEntry = performance.getEntriesByType("navigation")[0] || ntEntryFallback;
+			return ["h2", "hq"].includes(ntEntry.nextHopProtocol);
+		},
+	};
+
+	const { timing } = window.performance;
+
+	const toFixed = (num, fixed) => {
+		const re = new RegExp("^-?\\d+(?:.\\d{0," + (fixed || -1) + "})?");
+		return num.toString().match(re)[0];
+	};
+
+	const timingInfo = {
+		get firstPaintAfterLoadTime() {
+			return 0;
+		},
+		get requestTime() {
+			return timing.navigationStart / 1000;
+		},
+		get startLoadTime() {
+			return timing.navigationStart / 1000;
+		},
+		get commitLoadTime() {
+			return timing.responseStart / 1000;
+		},
+		get finishDocumentLoadTime() {
+			return timing.domContentLoadedEventEnd / 1000;
+		},
+		get finishLoadTime() {
+			return timing.loadEventEnd / 1000;
+		},
+		get firstPaintTime() {
+			const fpEntry = performance.getEntriesByType("paint")[0] || {
+				startTime: timing.loadEventEnd / 1000,
+			};
+			return toFixed((fpEntry.startTime + performance.timeOrigin) / 1000, 3);
+		},
+	};
+
+	window.chrome.loadTimes = function loadTimes() {
+		return { ...protocolInfo, ...timingInfo };
+	};
+	patchToString(window.chrome.loadTimes, "loadTimes");
+}
+
+const isSecureOrigin = document.location.protocol.startsWith("https");
+if (window.chrome && !("runtime" in window.chrome) && isSecureOrigin) {
+	const STATIC_DATA = {
+		OnInstalledReason: {
+			CHROME_UPDATE: "chrome_update",
+			INSTALL: "install",
+			SHARED_MODULE_UPDATE: "shared_module_update",
+			UPDATE: "update",
+		},
+		OnRestartRequiredReason: {
+			APP_UPDATE: "app_update",
+			OS_UPDATE: "os_update",
+			PERIODIC: "periodic",
+		},
+		PlatformArch: {
+			ARM: "arm",
+			ARM64: "arm64",
+			MIPS: "mips",
+			MIPS64: "mips64",
+			X86_32: "x86-32",
+			X86_64: "x86-64",
+		},
+		PlatformNaclArch: {
+			ARM: "arm",
+			MIPS: "mips",
+			MIPS64: "mips64",
+			X86_32: "x86-32",
+			X86_64: "x86-64",
+		},
+		PlatformOs: {
+			ANDROID: "android",
+			CROS: "cros",
+			LINUX: "linux",
+			MAC: "mac",
+			OPENBSD: "openbsd",
+			WIN: "win",
+		},
+		RequestUpdateCheckStatus: {
+			NO_UPDATE: "no_update",
+			THROTTLED: "throttled",
+			UPDATE_AVAILABLE: "update_available",
+		},
+	};
+
+	const makeCustomRuntimeErrors = (preamble, method, extensionId) => ({
+		NoMatchingSignature: new TypeError(preamble + "No matching signature."),
+		MustSpecifyExtensionID: new TypeError(
+			preamble +
+				`${method} called from a webpage must specify an Extension ID (string) for its first argument.`,
+		),
+		InvalidExtensionID: new TypeError(preamble + `Invalid extension id: '${extensionId}'`),
+	});
+
+	const isValidExtensionId = (value) => value.length === 32 && value.toLowerCase().match(/^[a-p]+$/);
+
+	const sendMessageHandler = {
+		apply(target, _ctx, args) {
+			const [extensionId, options, responseCallback] = args || [];
+			const errorPreamble =
+				"Error in invocation of runtime.sendMessage(optional string extensionId, any message, optional object options, optional function responseCallback): ";
+			const Errors = makeCustomRuntimeErrors(errorPreamble, "chrome.runtime.sendMessage()", extensionId);
+
+			const noArguments = args.length === 0;
+			const tooManyArguments = args.length > 4;
+			const incorrectOptions = options && typeof options !== "object";
+			const incorrectResponseCallback = responseCallback && typeof responseCallback !== "function";
+
+			if (noArguments || tooManyArguments || incorrectOptions || incorrectResponseCallback) {
+				throw Errors.NoMatchingSignature;
+			}
+
+			if (args.length < 2) {
+				throw Errors.MustSpecifyExtensionID;
+			}
+
+			if (typeof extensionId !== "string") {
+				throw Errors.NoMatchingSignature;
+			}
+
+			if (!isValidExtensionId(extensionId)) {
+				throw Errors.InvalidExtensionID;
+			}
+
+			return undefined;
+		},
+	};
+
+	const connectHandler = {
+		apply(target, _ctx, args) {
+			const [extensionId, connectInfo] = args || [];
+			const errorPreamble =
+				"Error in invocation of runtime.connect(optional string extensionId, optional object connectInfo): ";
+			const Errors = makeCustomRuntimeErrors(errorPreamble, "chrome.runtime.connect()", extensionId);
+
+			const noArguments = args.length === 0;
+			const emptyStringArgument = args.length === 1 && extensionId === "";
+			if (noArguments || emptyStringArgument) {
+				throw Errors.MustSpecifyExtensionID;
+			}
+
+			const tooManyArguments = args.length > 2;
+			const incorrectConnectInfoType = connectInfo && typeof connectInfo !== "object";
+			if (tooManyArguments || incorrectConnectInfoType) {
+				throw Errors.NoMatchingSignature;
+			}
+
+			const extensionIdIsString = typeof extensionId === "string";
+			if (extensionIdIsString && extensionId === "") {
+				throw Errors.MustSpecifyExtensionID;
+			}
+			if (extensionIdIsString && !isValidExtensionId(extensionId)) {
+				throw Errors.InvalidExtensionID;
+			}
+
+			const validateConnectInfo = (info) => {
+				if (args.length > 1) {
+					throw Errors.NoMatchingSignature;
+				}
+				if (Object_keys(info).length === 0) {
+					throw Errors.MustSpecifyExtensionID;
+				}
+				Object_entries(info).forEach(([key, value]) => {
+					const isExpected = ["name", "includeTlsChannelId"].includes(key);
+					if (!isExpected) {
+						throw new TypeError(errorPreamble + `Unexpected property: '${key}'.`);
+					}
+					const mismatch = (propName, expected, found) =>
+						TypeError(
+							errorPreamble +
+								`Error at property '${propName}': Invalid type: expected ${expected}, found ${found}.`,
+						);
+					if (key === "name" && typeof value !== "string") {
+						throw mismatch(key, "string", typeof value);
+					}
+					if (key === "includeTlsChannelId" && typeof value !== "boolean") {
+						throw mismatch(key, "boolean", typeof value);
+					}
+				});
+			};
+
+			if (typeof extensionId === "object") {
+				validateConnectInfo(extensionId);
+				throw Errors.MustSpecifyExtensionID;
+			}
+
+			const makeConnectResponse = () => {
+				const onSomething = () => ({
+					addListener: function addListener() {},
+					dispatch: function dispatch() {},
+					hasListener: function hasListener() {},
+					hasListeners: function hasListeners() {
+						return false;
+					},
+					removeListener: function removeListener() {},
+				});
+
+				return {
+					name: "",
+					sender: undefined,
+					disconnect: function disconnect() {},
+					onDisconnect: onSomething(),
+					onMessage: onSomething(),
+					postMessage: function postMessage() {
+						if (!arguments.length) {
+							throw new TypeError("Insufficient number of arguments.");
+						}
+						throw new Error("Attempting to use a disconnected port object");
+					},
+				};
+			};
+
+			return makeConnectResponse();
+		},
+	};
+
+	window.chrome.runtime = {
+		...STATIC_DATA,
+		get id() {
+			return undefined;
+		},
+		connect: null,
+		sendMessage: null,
+	};
+
+	const sendMessageProxy = new Window_Proxy(function sendMessage() {}, sendMessageHandler);
+	const connectProxy = new Window_Proxy(function connect() {}, connectHandler);
+	patchToString(sendMessageProxy, "sendMessage");
+	patchToString(connectProxy, "connect");
+	window.chrome.runtime.sendMessage = sendMessageProxy;
+	window.chrome.runtime.connect = connectProxy;
+}
+
+// Suppress Permission.query for automation-controlled
+if (navigator.permissions?.query) {
+	if (isSecureOrigin && "Notification" in window) {
+		const notificationPermissionGetter = Object_getOwnPropertyDescriptor({
+			get permission() {
+				return "default";
+			},
+		}, "permission").get;
+		patchToString(notificationPermissionGetter, "get permission");
+		Object_defineProperty(Notification, "permission", {
+			get: notificationPermissionGetter,
+			configurable: true,
+		});
+	} else if (!isSecureOrigin) {
+		const originalQuery = navigator.permissions.query;
+		const patchedPermissionsQuery = function query(parameters) {
+			if (parameters?.name === "notifications") {
+			const status = { state: "denied", onchange: null };
+			if (typeof PermissionStatus !== "undefined") {
+				Object_setPrototypeOf(status, PermissionStatus.prototype);
+			}
+			return Promise_resolve(status);
+			}
+			return originalQuery.call(this, parameters);
+		};
+		patchToString(patchedPermissionsQuery, "query");
+		navigator.permissions.query = patchedPermissionsQuery;
+	}
+}
+
+// Remove CDC_ markers from document
+const documentProps = Object_getOwnPropertyNames(document);
+for (const prop of documentProps) {
+	if (prop.startsWith("cdc_")) {
+		delete document[prop];
+	}
+}

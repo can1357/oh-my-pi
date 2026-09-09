@@ -1,0 +1,97 @@
+name: Warm bazel disk cache
+
+# GitHub-hosted runners cannot use the cluster remote cache and only see
+# actions/cache entries created on the default branch, and bazel action keys
+# do not transfer across runner environments (a kata-produced disk cache
+# misses every action on a hosted image) — so seed each hosted consumer from
+# the same image it runs on:
+#
+#   warm_darwin (macos-*)  -> scopes `release-darwin-*`, consumed by the
+#                             release_binary darwin jobs. Releases are the
+#                             only other producers for these scopes and a
+#                             release always changes CONFIG_HASH (version
+#                             bump rewrites Cargo.toml/Cargo.lock), so
+#                             without warming here every release rebuilt the
+#                             darwin addons cold (~40-50 min on
+#                             macos-15-intel — run 30357804722).
+#   warm_bun (ubuntu-22.04)-> the shared `bun-<os>-<lockhash>` store entry.
+#                             PR jobs restore it but never save (per-PR-ref
+#                             copies of the ~500 MB store once ate ~9.4 GB of
+#                             the 10 GB repo cache quota and evicted every
+#                             bazel archive).
+#
+# The v3 key embeds a crates/** source fingerprint, so a native change on
+# main means an exact miss: the build seeds from a previous generation via
+# the prefix/bare restore keys and the refreshed archive is saved. An exact
+# hit makes every invocation a cache replay and saves nothing.
+#
+# Paths mirror the cache-key inputs (bazel-cache action) plus bun.lock — a
+# packages/** push cannot change any archive, so it does not trigger a warm.
+
+on:
+   push:
+      branches: [main]
+      paths:
+         - "crates/**"
+         - "bazel/**"
+         - "MODULE.bazel"
+         - "MODULE.bazel.lock"
+         - "BUILD.bazel"
+         - ".bazelrc"
+         - ".bazelignore"
+         - ".bazelversion"
+         - "Cargo.toml"
+         - "Cargo.lock"
+         - "rust-toolchain.toml"
+         - "rustfmt.toml"
+         - "bun.lock"
+         - ".github/**"
+   workflow_dispatch:
+
+permissions:
+   contents: read
+
+# No cancel-in-progress: a cancelled warm saves nothing, and the first darwin
+# warm on a cold runner takes long enough that back-to-back native pushes
+# would cancel it forever. Superseded queued runs still collapse to the
+# newest one, and staleness is harmless — consumers seed via prefix keys.
+concurrency:
+   group: bazel-cache-warm
+   cancel-in-progress: false
+
+jobs:
+   # Keeps the release_binary darwin scopes seeded near HEAD so a release's
+   # bazel build is the version-bump delta, not a cold graph. Scope, runner
+   # image, and target must stay in lockstep with the release_binary matrix
+   # in ci.yml — a mismatched scope warms an archive nobody restores.
+   warm_darwin:
+      name: "Seed darwin release bazel cache: ${{ matrix.target }}"
+      strategy:
+         fail-fast: false
+         matrix:
+            include:
+               - { os: macos-15-intel, target: darwin-x64-baseline, scope: release-darwin-x64 }
+               - { os: macos-14, target: darwin-arm64, scope: release-darwin-arm64 }
+      runs-on: ${{ matrix.os }}
+      steps:
+         - uses: actions/checkout@v4
+         - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+           with:
+              bun-version: "1.4"
+         # scripts/bazel-natives.ts is dependency-free (node builtins only), so
+         # no `bun install` is needed; the bazel-natives action restores,
+         # builds, and saves the scope's disk cache.
+         - uses: ./.github/actions/bazel-natives
+           with:
+              targets: ${{ matrix.target }}
+              cache-scope: ${{ matrix.scope }}
+
+   # Produces the shared bun store entry PR jobs restore. bun-install's save
+   # half only runs on non-PR events, and main CI jobs run on omp-kata (PVC
+   # store, no GitHub cache), so this is the sole hosted-runner producer.
+   warm_bun:
+      name: Seed bun store cache
+      runs-on: ubuntu-22.04
+      steps:
+         - uses: actions/checkout@v4
+         - uses: ./.github/actions/bun-install

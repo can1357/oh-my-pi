@@ -1,0 +1,33 @@
+# Spring Boot application startup output (via `spring-boot:run` or standalone).
+# Command name is keyed off 'spring-boot'.
+
+[filters.spring-boot]
+description = "Compact Spring Boot startup output"
+match_command = "^spring-boot$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	" INFO \\d+ --- ",
+	" DEBUG \\d+ --- ",
+	" TRACE \\d+ --- ",
+	"^\\s*:: Spring Boot ::",
+	"^\\s*\\.\\s+____",
+	"^\\s*/\\\\\\\\\\s*/",
+	"^\\s*\\( \\( \\)",
+	"^\\s*\\\\\\\\/\\s+___",
+	"^\\s*'\\s+\\|____\\|",
+	"^\\s*=+\\|_\\|=+",
+]
+truncate_lines_at = 300
+max_lines = 80
+on_empty = "spring-boot: ok"
+
+[[tests.spring-boot]]
+name = "keeps errors and stack"
+input = "2024-01-01 12:00:00.000  INFO 12345 --- [main] c.e.App : Starting App\n2024-01-01 12:00:01.000 ERROR 12345 --- [main] c.e.App : Context failed\nCaused by: java.lang.NullPointerException"
+expected = "2024-01-01 12:00:01.000 ERROR 12345 --- [main] c.e.App : Context failed\nCaused by: java.lang.NullPointerException\n"
+
+[[tests.spring-boot]]
+name = "quiet startup collapses"
+input = "2024-01-01 12:00:00.000  INFO 12345 --- [main] c.e.App : Starting App\n2024-01-01 12:00:01.000  INFO 12345 --- [main] c.e.App : Started App in 2.3s"
+expected = "spring-boot: ok"

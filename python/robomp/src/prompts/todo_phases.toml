@@ -1,0 +1,71 @@
+[[triage_issue]]
+name = "Classify"
+tasks = [
+  "Read the issue body + every prior comment",
+  "gh_search_issues for duplicates and already-merged fixes",
+  "Call classify_issue with primary type + labels",
+]
+
+[[triage_issue]]
+name = "Respond"
+tasks = [
+  "Branch on the classification (see system prompt)",
+  "Bug: repro_record, fix, open PR. Else: one gh_post_comment, stop.",
+]
+
+[[review_pr]]
+name = "Orient"
+tasks = [
+  "Call fetch_pr and read the changed files",
+  "Compare the PR head against its base",
+]
+
+[[review_pr]]
+name = "Classify"
+tasks = [
+  "Call classify_pr with rank, type, and areas",
+]
+
+[[review_pr]]
+name = "Review"
+tasks = [
+  "Stage inline findings with pr_review_comment",
+  "Call submit_pr_review once with the summary",
+]
+
+[[handle_comment]]
+name = "Follow up"
+tasks = [
+  "Read the new comment in full",
+  "Decide the action it demands",
+  "Apply the change, then gh_post_comment reply",
+]
+
+[[handle_review]]
+name = "Review response"
+tasks = [
+  "Read the review comment in full",
+  "Address the requested change in the worktree",
+  "gh_push_branch, then gh_post_comment reply",
+]
+
+[[handle_release_ci]]
+name = "Diagnose"
+tasks = [
+  "Read the failure dossier and identify the root cause",
+  "Use release_job_log only when the dossier lacks detail",
+]
+
+[[handle_release_ci]]
+name = "Fix"
+tasks = [
+  "Apply the smallest root-cause fix",
+  "Run focused local verification",
+]
+
+[[handle_release_ci]]
+name = "Retag"
+tasks = [
+  "Commit with the mandated release subject",
+  "Call release_retag and end the turn",
+]

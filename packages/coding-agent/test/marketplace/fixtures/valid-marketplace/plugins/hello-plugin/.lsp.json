@@ -1,0 +1,8 @@
+{
+  "lspServers": {
+    "test-lsp": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/lsp",
+      "args": ["--stdio"]
+    }
+  }
+}

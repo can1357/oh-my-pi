@@ -1,0 +1,260 @@
+;(() => {
+  if (typeof Window_Proxy !== "function" || typeof Reflect_apply !== "function") return;
+
+  const screenObject = window.screen;
+  if (!screenObject) return;
+
+  const isFiniteNumber = (value) =>
+    typeof value === "number" &&
+    value === value &&
+    value !== Infinity &&
+    value !== -Infinity;
+
+  const readValue = (object, prop, fallback) => {
+    try {
+      const value = object[prop];
+      return value === undefined ? fallback : value;
+    } catch {
+      return fallback;
+    }
+  };
+
+  const finiteNumber = (value, fallback) =>
+    isFiniteNumber(value) ? value : fallback;
+
+  const positiveNumber = (value, fallback) =>
+    isFiniteNumber(value) && value > 0 ? value : fallback;
+
+  const integerNumber = (value, fallback) =>
+    isFiniteNumber(value) ? Math_floor(value) : fallback;
+
+  const positiveInteger = (value, fallback) =>
+    isFiniteNumber(value) && value > 0 ? Math_floor(value) : fallback;
+
+  const findDescriptorOwner = (object, prop) => {
+    let owner = object;
+    while (owner) {
+      let descriptor;
+      try {
+        descriptor = Object_getOwnPropertyDescriptor(owner, prop);
+      } catch {
+        return undefined;
+      }
+      if (descriptor) return [owner, descriptor];
+      try {
+        owner = Object_getPrototypeOf(owner);
+      } catch {
+        return undefined;
+      }
+    }
+    return undefined;
+  };
+
+  const patchGetter = (object, prop, getValue) => {
+    const found = findDescriptorOwner(object, prop);
+    if (!found) return false;
+
+    const owner = found[0];
+    const descriptor = found[1];
+    if (descriptor.configurable !== true || typeof descriptor.get !== "function") {
+      return false;
+    }
+
+    const originalGet = descriptor.get;
+    const patchedGet = new Window_Proxy(originalGet, {
+      apply(target, thisArg, args) {
+        const nativeValue = Reflect_apply(target, thisArg, args);
+        return getValue(nativeValue, thisArg);
+      },
+    });
+    patchToString(patchedGet, "get " + prop);
+    try {
+      Object_defineProperty(owner, prop, {
+        configurable: descriptor.configurable,
+        enumerable: descriptor.enumerable,
+        get: patchedGet,
+        set: descriptor.set,
+      });
+      return true;
+    } catch {
+      return false;
+    }
+  };
+
+  const patchStableNumber = (object, prop, value) => {
+    const current = readValue(object, prop, undefined);
+    if (current === value) return;
+    patchGetter(object, prop, () => value);
+  };
+
+  const initialInnerWidth = positiveInteger(readValue(window, "innerWidth", 0), 0);
+  const initialInnerHeight = positiveInteger(readValue(window, "innerHeight", 0), 0);
+  const initialOuterWidth = positiveInteger(
+    readValue(window, "outerWidth", Math_max(initialInnerWidth, 1)),
+    Math_max(initialInnerWidth, 1),
+  );
+  const initialOuterHeight = positiveInteger(
+    readValue(window, "outerHeight", Math_max(initialInnerHeight, 1)),
+    Math_max(initialInnerHeight, 1),
+  );
+  // Real Chrome reserves vertical space for the tab strip + URL bar, so
+  // outerHeight is always taller than innerHeight (~88px on a stock window).
+  // Headless reports outerHeight === innerHeight, which is a well-known tell, so
+  // synthesize a realistic chrome height when the window has no visible chrome.
+  const browserChromeHeight = 88;
+  const targetOuterHeight =
+    initialOuterHeight > initialInnerHeight
+      ? initialOuterHeight
+      : initialInnerHeight + browserChromeHeight;
+  const requiredWidth = Math_max(initialInnerWidth, initialOuterWidth, 1);
+  const requiredHeight = Math_max(initialInnerHeight, initialOuterHeight, targetOuterHeight, 1);
+
+  const screenWidth = Math_max(
+    positiveInteger(readValue(screenObject, "width", requiredWidth), requiredWidth),
+    requiredWidth,
+  );
+  const screenHeight = Math_max(
+    positiveInteger(readValue(screenObject, "height", requiredHeight), requiredHeight),
+    requiredHeight,
+  );
+
+  let screenAvailWidth = positiveInteger(
+    readValue(screenObject, "availWidth", screenWidth),
+    screenWidth,
+  );
+  if (screenAvailWidth < requiredWidth || screenAvailWidth > screenWidth) {
+    screenAvailWidth = screenWidth;
+  }
+
+  let screenAvailHeight = positiveInteger(
+    readValue(screenObject, "availHeight", screenHeight),
+    screenHeight,
+  );
+  if (screenAvailHeight < requiredHeight || screenAvailHeight > screenHeight) {
+    screenAvailHeight = screenHeight;
+  }
+
+  const screenAvailLeft = integerNumber(readValue(screenObject, "availLeft", 0), 0);
+  const screenAvailTop = integerNumber(readValue(screenObject, "availTop", 0), 0);
+  const screenColorDepth = positiveInteger(readValue(screenObject, "colorDepth", 24), 24);
+  const screenPixelDepth = positiveInteger(
+    readValue(screenObject, "pixelDepth", screenColorDepth),
+    screenColorDepth,
+  );
+
+  for (const entry of [
+    ["width", screenWidth],
+    ["height", screenHeight],
+    ["availWidth", screenAvailWidth],
+    ["availHeight", screenAvailHeight],
+    ["availLeft", screenAvailLeft],
+    ["availTop", screenAvailTop],
+    ["colorDepth", screenColorDepth],
+    ["pixelDepth", screenPixelDepth],
+  ]) {
+    patchStableNumber(screenObject, entry[0], entry[1]);
+  }
+
+  const outerWidthNeedsPatch =
+    !isFiniteNumber(readValue(window, "outerWidth", undefined)) ||
+    readValue(window, "outerWidth", 0) <= 0 ||
+    Math_floor(readValue(window, "outerWidth", 0)) < initialInnerWidth;
+  if (outerWidthNeedsPatch) {
+    patchGetter(window, "outerWidth", (nativeValue) =>
+      Math_max(
+        positiveInteger(nativeValue, initialOuterWidth),
+        positiveInteger(readValue(window, "innerWidth", requiredWidth), requiredWidth),
+      ),
+    );
+  }
+
+  const outerHeightNeedsPatch =
+    !isFiniteNumber(readValue(window, "outerHeight", undefined)) ||
+    readValue(window, "outerHeight", 0) <= 0 ||
+    Math_floor(readValue(window, "outerHeight", 0)) <= initialInnerHeight;
+  if (outerHeightNeedsPatch) {
+    patchGetter(window, "outerHeight", (nativeValue) =>
+      Math_max(
+        positiveInteger(nativeValue, initialOuterHeight),
+        positiveInteger(readValue(window, "innerHeight", requiredHeight), requiredHeight) +
+          browserChromeHeight,
+      ),
+    );
+  }
+
+  const initialDevicePixelRatio = positiveNumber(
+    readValue(window, "devicePixelRatio", 1),
+    1,
+  );
+  if (readValue(window, "devicePixelRatio", undefined) !== initialDevicePixelRatio) {
+    patchGetter(window, "devicePixelRatio", () => initialDevicePixelRatio);
+  }
+
+  const visualViewportObject = readValue(window, "visualViewport", null);
+  if (visualViewportObject) {
+    const initialScale = positiveNumber(readValue(visualViewportObject, "scale", 1), 1);
+    if (readValue(visualViewportObject, "scale", undefined) !== initialScale) {
+      patchGetter(visualViewportObject, "scale", (nativeValue) =>
+        positiveNumber(nativeValue, initialScale),
+      );
+    }
+
+    const getViewportScale = () =>
+      positiveNumber(readValue(visualViewportObject, "scale", initialScale), initialScale);
+
+    const getViewportWidthFallback = () =>
+      positiveNumber(readValue(window, "innerWidth", requiredWidth), requiredWidth) /
+      getViewportScale();
+
+    const getViewportHeightFallback = () =>
+      positiveNumber(readValue(window, "innerHeight", requiredHeight), requiredHeight) /
+      getViewportScale();
+
+    if (positiveNumber(readValue(visualViewportObject, "width", 0), 0) <= 0) {
+      patchGetter(visualViewportObject, "width", (nativeValue) =>
+        positiveNumber(nativeValue, getViewportWidthFallback()),
+      );
+    }
+
+    if (positiveNumber(readValue(visualViewportObject, "height", 0), 0) <= 0) {
+      patchGetter(visualViewportObject, "height", (nativeValue) =>
+        positiveNumber(nativeValue, getViewportHeightFallback()),
+      );
+    }
+
+    const getViewportOffsetLeft = () =>
+      finiteNumber(readValue(visualViewportObject, "offsetLeft", 0), 0);
+    const getViewportOffsetTop = () =>
+      finiteNumber(readValue(visualViewportObject, "offsetTop", 0), 0);
+
+    if (!isFiniteNumber(readValue(visualViewportObject, "offsetLeft", undefined))) {
+      patchGetter(visualViewportObject, "offsetLeft", (nativeValue) =>
+        finiteNumber(nativeValue, 0),
+      );
+    }
+
+    if (!isFiniteNumber(readValue(visualViewportObject, "offsetTop", undefined))) {
+      patchGetter(visualViewportObject, "offsetTop", (nativeValue) =>
+        finiteNumber(nativeValue, 0),
+      );
+    }
+
+    if (!isFiniteNumber(readValue(visualViewportObject, "pageLeft", undefined))) {
+      patchGetter(visualViewportObject, "pageLeft", (nativeValue) =>
+        finiteNumber(
+          nativeValue,
+          finiteNumber(readValue(window, "scrollX", 0), 0) + getViewportOffsetLeft(),
+        ),
+      );
+    }
+
+    if (!isFiniteNumber(readValue(visualViewportObject, "pageTop", undefined))) {
+      patchGetter(visualViewportObject, "pageTop", (nativeValue) =>
+        finiteNumber(
+          nativeValue,
+          finiteNumber(readValue(window, "scrollY", 0), 0) + getViewportOffsetTop(),
+        ),
+      );
+    }
+  }
+})();

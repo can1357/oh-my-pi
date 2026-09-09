@@ -1,0 +1,1 @@
+Cache benchmark suffix {{variant}}.

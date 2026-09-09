@@ -1,0 +1,255 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/can1357/oh-my-pi/main/packages/coding-agent/src/config/mcp-schema.json",
+  "title": "OMP MCP configuration",
+  "description": "Schema for mcp.json, .mcp.json, .omp/mcp.json, and ~/.omp/agent/mcp.json used by the OMP coding agent.",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string",
+      "description": "Optional schema reference for editor autocomplete and validation."
+    },
+    "mcpServers": {
+      "type": "object",
+      "description": "Map of MCP server name to server configuration.",
+      "propertyNames": {
+        "pattern": "^[a-zA-Z0-9_.-]{1,100}$"
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/serverConfig"
+      }
+    },
+    "disabledServers": {
+      "type": "array",
+      "description": "User-level denylist for disabling discovered servers by name. Highest precedence: a server here is hidden regardless of any other source.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "enabledServers": {
+      "type": "array",
+      "description": "User-level allowlist that overrides a discovered server's `enabled: false` flag (e.g. when the source config is owned by another tool such as opencode.json). The denylist still wins.",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    }
+  },
+  "$defs": {
+    "stringMap": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "authConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "type": "string",
+          "enum": ["oauth", "apikey"],
+          "description": "Auth strategy understood by OMP."
+        },
+        "credentialId": {
+          "type": "string",
+          "description": "Stored OAuth credential id from agent auth storage."
+        },
+        "tokenUrl": {
+          "type": "string",
+          "description": "Token endpoint persisted for refresh."
+        },
+        "clientId": {
+          "type": "string",
+          "description": "OAuth client id persisted for refresh."
+        },
+        "clientSecret": {
+          "type": "string",
+          "description": "OAuth client secret persisted for refresh."
+        },
+        "resource": {
+          "type": "string",
+          "description": "MCP resource URI persisted for OAuth resource indicators."
+        }
+      }
+    },
+    "oauthConfig": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "clientId": {
+          "type": "string"
+        },
+        "clientSecret": {
+          "type": "string"
+        },
+        "scope": {
+          "type": "string"
+        },
+        "redirectUri": {
+          "type": "string"
+        },
+        "callbackPort": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "callbackPath": {
+          "type": "string"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "OAuth `prompt` parameter sent during authorization (default: omit unless the requested scope contains `offline_access`, which sends \"consent\"; set to \"\" to always omit)."
+        }
+      },
+      "description": "Explicit OAuth client settings for servers that need them during /mcp reauth or initial connect."
+    },
+    "serverBase": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "description": "Whether OMP should try to connect this server."
+        },
+        "timeout": {
+          "type": "number",
+          "minimum": 0,
+          "description": "MCP request timeout in milliseconds. Set to 0 to disable client-side MCP timeouts."
+        },
+        "requestIdFormat": {
+          "type": "string",
+          "enum": ["string", "number"],
+          "description": "Encoding for outgoing JSON-RPC request ids (default: \"number\"). Use \"string\" for servers that need collision-resistant snowflake string ids instead of per-transport integers. OMP-specific: set it in an OMP-owned config (`.omp/mcp.json`, `~/.omp/agent/mcp.json`, a project `mcp.json`/`.mcp.json`, or an OMP plugin). Servers imported from another tool's config (Claude, Cursor, VS Code, Gemini, OpenCode, Windsurf) ignore it, since that key is not part of those formats."
+        },
+        "auth": {
+          "$ref": "#/$defs/authConfig"
+        },
+        "oauth": {
+          "$ref": "#/$defs/oauthConfig"
+        }
+      }
+    },
+    "stdioServer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/serverBase"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["command"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["stdio"],
+              "description": "Default transport when omitted."
+            },
+            "command": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Executable to spawn."
+            },
+            "args": {
+              "type": "array",
+              "items": {
+                "type": "string"
+              },
+              "description": "Arguments passed to the stdio server process."
+            },
+            "env": {
+              "$ref": "#/$defs/stringMap",
+              "description": "Environment variables passed to the stdio process."
+            },
+            "cwd": {
+              "type": "string",
+              "description": "Working directory used when spawning the stdio process."
+            }
+          },
+          "not": {
+            "required": ["url"]
+          }
+        }
+      ]
+    },
+    "httpServer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/serverBase"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "url"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["http"],
+              "description": "Streamable HTTP transport."
+            },
+            "url": {
+              "type": "string",
+              "minLength": 1,
+              "description": "MCP endpoint URL."
+            },
+            "headers": {
+              "$ref": "#/$defs/stringMap",
+              "description": "HTTP headers sent with MCP requests."
+            }
+          },
+          "not": {
+            "required": ["command"]
+          }
+        }
+      ]
+    },
+    "sseServer": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/serverBase"
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["type", "url"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["sse"],
+              "description": "Legacy SSE transport kept for compatibility. Prefer http for new configs."
+            },
+            "url": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Legacy SSE endpoint URL."
+            },
+            "headers": {
+              "$ref": "#/$defs/stringMap",
+              "description": "HTTP headers sent with the SSE transport."
+            }
+          },
+          "not": {
+            "required": ["command"]
+          }
+        }
+      ]
+    },
+    "serverConfig": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/stdioServer"
+        },
+        {
+          "$ref": "#/$defs/httpServer"
+        },
+        {
+          "$ref": "#/$defs/sseServer"
+        }
+      ]
+    }
+  }
+}

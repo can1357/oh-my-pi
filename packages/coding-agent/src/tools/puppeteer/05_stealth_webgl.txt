@@ -1,0 +1,233 @@
+const webglPlatformSource =
+	String(navigator.userAgentData?.platform || navigator.platform || "") +
+	" " +
+	String(navigator.userAgent || "");
+const webglPlatformText = webglPlatformSource.toLowerCase();
+const webglPlatformKind = webglPlatformText.includes("android")
+	? "android"
+	: webglPlatformText.includes("iphone") ||
+		  webglPlatformText.includes("ipad") ||
+		  webglPlatformText.includes("ipod")
+		? "ios"
+		: webglPlatformText.includes("mac")
+			? "mac"
+			: webglPlatformText.includes("win")
+				? "windows"
+				: webglPlatformText.includes("cros")
+					? "cros"
+					: "linux";
+
+const webglFallbackProfiles = {
+	android: {
+		vendor: "Qualcomm",
+		renderer: "Adreno (TM) 640",
+	},
+	ios: {
+		vendor: "Apple Inc.",
+		renderer: "Apple GPU",
+	},
+	mac: {
+		vendor: "Google Inc. (Intel Inc.)",
+		renderer: "ANGLE (Intel Inc., Intel(R) Iris(TM) Plus Graphics 640 OpenGL Engine, OpenGL 4.1)",
+	},
+	windows: {
+		vendor: "Google Inc. (Intel)",
+		renderer: "ANGLE (Intel, Intel(R) UHD Graphics 620 Direct3D11 vs_5_0 ps_5_0, D3D11)",
+	},
+	cros: {
+		vendor: "Google Inc. (Intel)",
+		renderer: "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)",
+	},
+	linux: {
+		vendor: "Google Inc. (Intel)",
+		renderer: "ANGLE (Intel, Mesa Intel(R) UHD Graphics 620 (KBL GT2), OpenGL 4.6)",
+	},
+};
+const webglFallbackProfile = webglFallbackProfiles[webglPlatformKind] || webglFallbackProfiles.linux;
+const webglContextProfiles = new WeakMap();
+const webglIsObjectKey = (value) =>
+	(typeof value === "object" && value !== null) || typeof value === "function";
+
+const webglLooksSoftware = (value) => {
+	const text = String(value || "").toLowerCase();
+	return (
+		text.includes("swiftshader") ||
+		text.includes("llvmpipe") ||
+		text.includes("lavapipe") ||
+		text.includes("software") ||
+		text.includes("mesa offscreen") ||
+		text.includes("google inc. (google)")
+	);
+};
+
+const webglMatchesPlatform = (renderer) => {
+	const text = String(renderer || "").toLowerCase();
+	if (webglPlatformKind === "windows") {
+		return !text.includes("apple") && !text.includes("mesa") && !text.includes("opengl engine");
+	}
+	if (webglPlatformKind === "mac") {
+		return !text.includes("direct3d") && !text.includes("d3d") && !text.includes("mesa");
+	}
+	if (webglPlatformKind === "android") {
+		return (
+			text.includes("adreno") ||
+			text.includes("mali") ||
+			text.includes("powervr") ||
+			text.includes("qualcomm")
+		);
+	}
+	if (webglPlatformKind === "ios") {
+		return text.includes("apple");
+	}
+	return !text.includes("direct3d") && !text.includes("d3d") && !text.includes("apple");
+};
+
+const webglGetContextProfile = (target, thisArg) => {
+	if (!webglIsObjectKey(thisArg)) return webglFallbackProfile;
+	const cached = Reflect_apply(Page_WeakMap_get, webglContextProfiles, [thisArg]);
+	if (cached) return cached;
+
+	let nativeVendor;
+	let nativeRenderer;
+	try {
+		nativeVendor = Reflect_apply(target, thisArg, [0x9245]);
+		nativeRenderer = Reflect_apply(target, thisArg, [0x9246]);
+	} catch {}
+
+	const nativeProfile =
+		typeof nativeVendor === "string" &&
+		typeof nativeRenderer === "string" &&
+		nativeVendor &&
+		nativeRenderer &&
+		!webglLooksSoftware(nativeVendor) &&
+		!webglLooksSoftware(nativeRenderer) &&
+		webglMatchesPlatform(nativeRenderer)
+			? { vendor: nativeVendor, renderer: nativeRenderer }
+			: webglFallbackProfile;
+
+	Reflect_apply(Page_WeakMap_set, webglContextProfiles, [thisArg, nativeProfile]);
+	return nativeProfile;
+};
+
+const webglGetParameterHandler = {
+	apply(target, thisArg, args) {
+		const nativeValue = Reflect_apply(target, thisArg, args);
+		const param = args[0];
+		if (param === 0x1f00 && typeof nativeValue === "string") return "WebKit";
+		if (param === 0x1f01 && typeof nativeValue === "string") return "WebKit WebGL";
+		if ((param === 0x9245 || param === 0x9246) && typeof nativeValue === "string") {
+			const profile = webglGetContextProfile(target, thisArg);
+			return param === 0x9245 ? profile.vendor : profile.renderer;
+		}
+		return nativeValue;
+	},
+};
+
+const webglFloatPrecisionTypes = {
+	0x8df0: true,
+	0x8df1: true,
+	0x8df2: true,
+};
+
+const webglClonePrecisionFormat = (result, values) => {
+	const ownKeys = Reflect_ownKeys(result);
+	let hasRangeMin = false;
+	let hasRangeMax = false;
+	let hasPrecision = false;
+	for (let index = 0; index < ownKeys.length; index += 1) {
+		if (ownKeys[index] === "rangeMin") hasRangeMin = true;
+		if (ownKeys[index] === "rangeMax") hasRangeMax = true;
+		if (ownKeys[index] === "precision") hasPrecision = true;
+	}
+	if (!hasRangeMin || !hasRangeMax || !hasPrecision) return result;
+
+	const clone = Object_create(Object_getPrototypeOf(result));
+	for (let index = 0; index < ownKeys.length; index += 1) {
+		const key = ownKeys[index];
+		const descriptor = Object_getOwnPropertyDescriptor(result, key);
+		if (!descriptor) return result;
+		if (key === "rangeMin" || key === "rangeMax" || key === "precision") {
+			if (!("value" in descriptor)) return result;
+			descriptor.value = values[key];
+		}
+		try {
+			Object_defineProperty(clone, key, descriptor);
+		} catch {
+			return result;
+		}
+	}
+	return clone;
+};
+
+const webglGetShaderPrecisionFormatHandler = {
+	apply(target, thisArg, args) {
+		const result = Reflect_apply(target, thisArg, args);
+		const precisionType = args[1];
+		if (
+			!result ||
+			webglPlatformKind === "android" ||
+			webglPlatformKind === "ios" ||
+			!webglFloatPrecisionTypes[precisionType]
+		) {
+			return result;
+		}
+
+		const rangeMin = result.rangeMin;
+		const rangeMax = result.rangeMax;
+		const precision = result.precision;
+		if (
+			typeof rangeMin !== "number" ||
+			typeof rangeMax !== "number" ||
+			typeof precision !== "number"
+		) {
+			return result;
+		}
+
+		const values = {
+			rangeMin: Math_max(rangeMin, 127),
+			rangeMax: Math_max(rangeMax, 127),
+			precision: Math_max(precision, 23),
+		};
+		if (
+			values.rangeMin === rangeMin &&
+			values.rangeMax === rangeMax &&
+			values.precision === precision
+		) {
+			return result;
+		}
+		return webglClonePrecisionFormat(result, values);
+	},
+};
+
+const webglInstallMethodProxy = (proto, name, handler) => {
+	if (!proto) return;
+	const descriptor = Object_getOwnPropertyDescriptor(proto, name);
+	if (!descriptor || typeof descriptor.value !== "function") return;
+	const proxy = new Window_Proxy(descriptor.value, handler);
+	patchToString(proxy, name);
+	try {
+		Object_defineProperty(proto, name, {
+			value: proxy,
+			writable: descriptor.writable,
+			configurable: descriptor.configurable,
+			enumerable: descriptor.enumerable,
+		});
+	} catch {}
+};
+
+if (window.WebGLRenderingContext) {
+	webglInstallMethodProxy(WebGLRenderingContext.prototype, "getParameter", webglGetParameterHandler);
+	webglInstallMethodProxy(
+		WebGLRenderingContext.prototype,
+		"getShaderPrecisionFormat",
+		webglGetShaderPrecisionFormatHandler,
+	);
+}
+if (window.WebGL2RenderingContext) {
+	webglInstallMethodProxy(WebGL2RenderingContext.prototype, "getParameter", webglGetParameterHandler);
+	webglInstallMethodProxy(
+		WebGL2RenderingContext.prototype,
+		"getShaderPrecisionFormat",
+		webglGetShaderPrecisionFormatHandler,
+	);
+}

@@ -1,0 +1,61 @@
+=== RUN   TestParseConfig
+=== PAUSE TestParseConfig
+=== CONT  TestParseConfig
+=== RUN   TestParseConfig/empty_input
+=== PAUSE TestParseConfig/empty_input
+=== CONT  TestParseConfig/empty_input
+=== RUN   TestParseConfig/with_defaults
+=== PAUSE TestParseConfig/with_defaults
+=== CONT  TestParseConfig/with_defaults
+=== RUN   TestParseConfig/with_overrides
+=== PAUSE TestParseConfig/with_overrides
+=== CONT  TestParseConfig/with_overrides
+--- PASS: TestParseConfig (0.00s)
+=== RUN   TestEncodeDecode
+=== PAUSE TestEncodeDecode
+=== CONT  TestEncodeDecode
+=== RUN   TestEncodeDecode/utf8
+=== PAUSE TestEncodeDecode/utf8
+=== CONT  TestEncodeDecode/utf8
+=== RUN   TestEncodeDecode/binary
+=== PAUSE TestEncodeDecode/binary
+=== CONT  TestEncodeDecode/binary
+--- PASS: TestEncodeDecode (0.01s)
+=== RUN   TestRoundTrip
+=== PAUSE TestRoundTrip
+=== CONT  TestRoundTrip
+--- PASS: TestRoundTrip (0.02s)
+PASS
+ok  	github.com/example/project/internal/config	0.031s
+=== RUN   TestHandlerGet
+=== PAUSE TestHandlerGet
+=== CONT  TestHandlerGet
+=== RUN   TestHandlerPost
+=== PAUSE TestHandlerPost
+=== CONT  TestHandlerPost
+=== RUN   TestHandlerDelete
+=== PAUSE TestHandlerDelete
+=== CONT  TestHandlerDelete
+--- PASS: TestHandlerGet (0.00s)
+--- PASS: TestHandlerPost (0.00s)
+--- PASS: TestHandlerDelete (0.00s)
+PASS
+ok  	github.com/example/project/internal/server	0.044s
+=== RUN   TestRouterMatch
+=== PAUSE TestRouterMatch
+=== CONT  TestRouterMatch
+=== RUN   TestRouterFallback
+=== PAUSE TestRouterFallback
+=== CONT  TestRouterFallback
+--- PASS: TestRouterMatch (0.00s)
+--- PASS: TestRouterFallback (0.00s)
+PASS
+ok  	github.com/example/project/internal/router	0.012s
+=== RUN   TestMiddlewareChain
+=== PAUSE TestMiddlewareChain
+=== CONT  TestMiddlewareChain
+--- PASS: TestMiddlewareChain (0.00s)
+PASS
+ok  	github.com/example/project/internal/middleware	0.009s
+?   	github.com/example/project/cmd/cli	[no test files]
+ok  	github.com/example/project/pkg/util	0.008s

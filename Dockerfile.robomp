@@ -1,0 +1,82 @@
+# syntax=docker/dockerfile:1.7-labs
+###############################################################################
+# robomp — GitHub triage+fix bot orchestrator.
+#
+# Extends `pi-base` (from /Dockerfile, default target oh-my-pi/pi:dev) and adds
+# the robomp Python package + a Vite-built SolidJS dashboard bundle. The pi
+# toolchain (python + bun + rustup launcher + pi-natives + omp_rpc wheel +
+# /usr/local/bin/omp shim) all comes from PI_BASE; this file only layers what's
+# robomp-specific.
+#
+# Build (from pi root):
+#     bun run pi:image                              # build oh-my-pi/pi:dev first
+#     docker build -f Dockerfile.robomp -t robomp:dev .
+#
+# Compose (recommended):
+#     docker compose --project-directory python/robomp build
+###############################################################################
+
+ARG PI_BASE=oh-my-pi/pi:dev
+ARG BUN_VERSION=1.4.0
+
+############################
+# 1) web-builder — Bun + Vite, builds the SolidJS dashboard bundle.
+############################
+FROM oven/bun:${BUN_VERSION}-slim AS web-builder
+WORKDIR /work
+# Root manifests + the web workspace manifest are enough for `bun install
+# --filter robomp-web` to hydrate just the dashboard's node_modules.
+COPY package.json bun.lock ./
+COPY python/robomp/web/package.json ./python/robomp/web/package.json
+# Root package.json declares patchedDependencies, so the patch file must be
+# present before any root-level `bun install` (even a filtered one).
+COPY patches/*.patch ./patches/
+RUN bun install --filter robomp-web
+COPY --exclude=node_modules --exclude=dist python/robomp/web/ ./python/robomp/web/
+RUN bun --cwd=python/robomp/web run build
+
+############################
+# 2) runtime — pi-base + robomp src + web bundle + pip install
+############################
+FROM ${PI_BASE} AS runtime
+
+# robomp runs against the host pi checkout mounted at /work/pi read-only.
+ENV PI_ROOT=/work/pi
+
+WORKDIR /app
+
+# robomp is an MIT product; OMP's dual-license payload remains available from
+# the inherited base image under /usr/share/doc/omp.
+COPY LICENSE THIRD-PARTY-NOTICES.txt /usr/share/doc/robomp/
+
+# robomp itself. Drop the Vite-built dashboard into the package tree before
+# `pip install` so it lands in the installed wheel (`static/**/*` is declared
+# as package-data in pyproject.toml).
+COPY python/robomp/pyproject.toml ./
+COPY python/robomp/src/ ./src/
+COPY --from=web-builder /work/python/robomp/web/dist/ ./src/static/
+
+RUN pip install --no-cache-dir \
+        "fastapi>=0.112" "uvicorn[standard]>=0.30" "httpx>=0.27" \
+        "pydantic>=2.6" "pydantic-settings>=2.2" "python-dotenv>=1.0" \
+        "click>=8.1" \
+    && pip install --no-cache-dir --no-deps .
+
+# Host agent config is mounted read-only under /srv/agent-home-stage with
+# host-controlled permissions. The entrypoint copies it into root-owned
+# world-readable files under /srv/agent-home; the agent subprocess runs with
+# HOME=/srv/agent-home, so ~/.omp and ~/.agent resolve there without exposing
+# mutable host mounts.
+RUN mkdir -p /srv/agent-home/.agent /srv/agent-home/.omp/agent \
+    && mkdir -p /srv/agent-home-stage/.agent /srv/agent-home-stage/.omp/agent \
+    && printf '[install]\nbackend = "copyfile"\n' > /srv/agent-home/.bunfig.toml
+
+COPY python/robomp/entrypoint.sh /usr/local/bin/robomp-entrypoint
+RUN chmod +x /usr/local/bin/robomp-entrypoint
+
+VOLUME ["/data"]
+EXPOSE 8080
+EXPOSE 8081
+
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/robomp-entrypoint"]
+CMD ["python", "-m", "robomp", "serve"]

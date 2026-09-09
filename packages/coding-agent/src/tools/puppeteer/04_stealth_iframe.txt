@@ -1,0 +1,174 @@
+const iframeWindowProxies = new WeakMap();
+
+const isFrameIndexKey = (key) => {
+	if (typeof key !== "string" || key === "") return false;
+	const number = +key;
+	return number >= 0 && number < 4294967295 && Math_floor(number) === number && `${number}` === key;
+};
+
+const getPropertyDescriptor = (object, key) => {
+	let current = object;
+	while (current) {
+		const descriptor = Object_getOwnPropertyDescriptor(current, key);
+		if (descriptor) return descriptor;
+		current = Object_getPrototypeOf(current);
+	}
+};
+
+const descriptorWithValue = (target, key, value, writable) => {
+	const descriptor = Reflect_getOwnPropertyDescriptor(target, key);
+	if (descriptor && descriptor.configurable === false) return descriptor;
+	const next = descriptor ? Object_assign({}, descriptor) : { configurable: true, enumerable: true };
+	Reflect_deleteProperty(next, "get");
+	Reflect_deleteProperty(next, "set");
+	next.value = value;
+	if (!Reflect_has(next, "writable")) next.writable = writable;
+	return next;
+};
+const iframeContentWindowDescriptor =
+	typeof HTMLIFrameElement === "undefined"
+		? undefined
+		: getPropertyDescriptor(HTMLIFrameElement.prototype, "contentWindow");
+const iframeSrcdocDescriptor =
+	typeof HTMLIFrameElement === "undefined"
+		? undefined
+		: getPropertyDescriptor(HTMLIFrameElement.prototype, "srcdoc");
+
+const getNativeContentWindow = (iframe) => {
+	if (iframeContentWindowDescriptor && iframeContentWindowDescriptor.get) {
+		return Reflect_apply(iframeContentWindowDescriptor.get, iframe, []);
+	}
+	return undefined;
+};
+
+const addContentWindowProxy = (iframe) => {
+	let state = Reflect_apply(Page_WeakMap_get, iframeWindowProxies, [iframe]);
+	if (state) return state.proxy;
+
+	state = { proxy: undefined, target: undefined, wasConnected: false, setProxyTarget: undefined };
+
+	const isDiscarded = () => {
+		if (iframe.isConnected) state.wasConnected = true;
+		return state.wasConnected && !iframe.isConnected;
+	};
+
+	const currentFrameElement = () => {
+		if (iframe.isConnected) {
+			state.wasConnected = true;
+			return iframe;
+		}
+		return state.wasConnected ? null : iframe;
+	};
+
+	const contentWindowProxy = {
+		get(target, key) {
+			if (key === "self" || key === "window" || key === "frames" || key === "globalThis") return state.proxy;
+			if (key === "frameElement") return currentFrameElement();
+			if (key === "closed" && isDiscarded()) return true;
+			if (isFrameIndexKey(key)) return undefined;
+			if (key === "length") return 0;
+			return Reflect_get(target, key);
+		},
+		getOwnPropertyDescriptor(target, key) {
+			if (key === "self" || key === "window" || key === "frames" || key === "globalThis") {
+				return descriptorWithValue(target, key, state.proxy, true);
+			}
+			if (key === "frameElement") {
+				return descriptorWithValue(target, key, currentFrameElement(), false);
+			}
+			if (key === "closed" && isDiscarded()) {
+				return descriptorWithValue(target, key, true, false);
+			}
+			if (isFrameIndexKey(key)) return undefined;
+			if (key === "length") return descriptorWithValue(target, key, 0, false);
+			return Reflect_getOwnPropertyDescriptor(target, key);
+		},
+		has(target, key) {
+			if (key === "self" || key === "window" || key === "frames" || key === "globalThis" || key === "frameElement") return true;
+			if (isFrameIndexKey(key)) return false;
+			return Reflect_has(target, key);
+		},
+		ownKeys(target) {
+			const keys = Reflect_ownKeys(target);
+			const filtered = [];
+			for (let index = 0; index < keys.length; index++) {
+				if (!isFrameIndexKey(keys[index])) filtered.push(keys[index]);
+			}
+			return filtered;
+		},
+	};
+
+	const setProxyTarget = (target) => {
+		if (state.target === target && state.proxy) return state.proxy;
+		state.target = target;
+		state.proxy = new Window_Proxy(target, contentWindowProxy);
+		return state.proxy;
+	};
+	state.setProxyTarget = setProxyTarget;
+	const initialContentWindow = getNativeContentWindow(iframe);
+	if (initialContentWindow) setProxyTarget(initialContentWindow);
+	if (iframe.isConnected) state.wasConnected = true;
+	Reflect_apply(Page_WeakMap_set, iframeWindowProxies, [iframe, state]);
+
+
+	return state.proxy;
+};
+if (
+	iframeContentWindowDescriptor &&
+	iframeContentWindowDescriptor.get &&
+	iframeContentWindowDescriptor.configurable !== false
+) {
+	const contentWindowAccessors = {
+		get contentWindow() {
+			const state = Reflect_apply(Page_WeakMap_get, iframeWindowProxies, [this]);
+			if (!state) return getNativeContentWindow(this);
+			if (this.isConnected) state.wasConnected = true;
+			if (state.wasConnected && !this.isConnected) return null;
+			const nativeContentWindow = getNativeContentWindow(this);
+			if (!nativeContentWindow) return nativeContentWindow;
+			return state.setProxyTarget(nativeContentWindow);
+		},
+	};
+	const contentWindowGetter = Object_getOwnPropertyDescriptor(contentWindowAccessors, "contentWindow").get;
+	patchToString(contentWindowGetter, "get contentWindow");
+	Object_defineProperty(HTMLIFrameElement.prototype, "contentWindow", {
+		get: contentWindowGetter,
+		set: iframeContentWindowDescriptor.set,
+		enumerable: iframeContentWindowDescriptor.enumerable,
+		configurable: iframeContentWindowDescriptor.configurable,
+	});
+}
+
+
+if (
+	iframeSrcdocDescriptor &&
+	iframeSrcdocDescriptor.configurable !== false
+) {
+	const srcdocAccessors = {
+		get srcdoc() {
+			if (iframeSrcdocDescriptor.get) {
+				return Reflect_apply(iframeSrcdocDescriptor.get, this, []);
+			}
+			const value = this.getAttribute("srcdoc");
+			return value === null ? "" : value;
+		},
+		set srcdoc(newValue) {
+			addContentWindowProxy(this);
+			if (iframeSrcdocDescriptor.set) {
+				return Reflect_apply(iframeSrcdocDescriptor.set, this, [newValue]);
+			}
+			return this.setAttribute("srcdoc", newValue);
+		},
+	};
+	const srcdocDescriptor = Object_getOwnPropertyDescriptor(srcdocAccessors, "srcdoc");
+	const srcdocGetter = srcdocDescriptor.get;
+	const srcdocSetter = srcdocDescriptor.set;
+	patchToString(srcdocGetter, "get srcdoc");
+	patchToString(srcdocSetter, "set srcdoc");
+	Object_defineProperty(HTMLIFrameElement.prototype, "srcdoc", {
+		get: srcdocGetter,
+		set: srcdocSetter,
+		enumerable: iframeSrcdocDescriptor.enumerable,
+		configurable: iframeSrcdocDescriptor.configurable,
+	});
+}

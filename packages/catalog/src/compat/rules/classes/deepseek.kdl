@@ -1,0 +1,80 @@
+// Model-lineage compat for "deepseek"; regenerated from the frozen census using class taxonomy selectors.
+
+class "deepseek" {
+	on "aiand" "aimlapi" "alibaba-token-plan" "baseten" "coreweave" "deepseek" "fireworks" \
+		"huggingface" "kilo" "nanogpt" "novita" "nvidia" "opencode-go" "opencode-zen" "together" \
+		"venice" "wafer-serverless" "zenmux" {
+		family "pro" {
+			thinking-efforts "low" "high" "max"
+		}
+	}
+	on "aiand" "aimlapi" "coreweave" "deepseek" "fireworks" "gmi-cloud" "huggingface" "kilo" \
+		"nanogpt" "novita" "nvidia" "ollama-cloud" "opencode-go" "opencode-zen" "openrouter" \
+		"together" "venice" "wafer-serverless" "zenmux" {
+		family "flash" {
+			thinking-efforts "low" "high" "max"
+		}
+	}
+	// DeepSeek V4 ladders are model properties: the wire-exact low/high/max
+	// scale holds on every host (medium/xhigh fold into high). OpenRouter's
+	// non-Flash V4 route exposes only high, except the dated -0813 SKU.
+	family "pro" {
+		thinking-efforts "low" "high" "max"
+	}
+	family "flash" {
+		thinking-efforts "low" "high" "max"
+	}
+	family "v4" {
+		thinking-efforts "low" "high" "max"
+	}
+	family "r1" {
+		thinking-efforts "high" "max"
+	}
+	family "v3" {
+		thinking-efforts "high" "max"
+	}
+	family "reasoner" {
+		thinking-efforts "high" "max"
+	}
+	on "openrouter" {
+		family "pro" {
+			thinking-efforts "high"
+			models "*deepseek-v4-pro-0813*" {
+				thinking-efforts "low" "high" "max"
+			}
+		}
+		family "v4" {
+			thinking-efforts "high"
+		}
+		family "r1" {
+			thinking-efforts "high"
+		}
+		family "v3" {
+			thinking-efforts "high"
+		}
+		family "reasoner" {
+			thinking-efforts "high"
+		}
+	}
+	on "alibaba-token-plan" "deepseek" {
+		supports-developer-role #false
+	}
+	on "deepseek" "opencode-go" {
+		family "pro" {
+			max-tokens-field "max_tokens"
+			reasoning-content-field "reasoning_content"
+			requires-reasoning-content-for-tool-calls #true
+		}
+	}
+	strip-image-input #true
+	models token="ocr" {
+		strip-image-input #false
+	}
+	models token="vision" {
+		strip-image-input #false
+	}
+	on "ollama-cloud" "nvidia" "deepseek" "fireworks" "nanogpt" "opencode-go" "openrouter" {
+		stream-markup-healing-pattern "dsml"
+	}
+	thinking-loop-guard "deepseek"
+}

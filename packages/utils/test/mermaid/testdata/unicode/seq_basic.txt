@@ -1,0 +1,17 @@
+sequenceDiagram
+  Alice->>Bob: Hello Bob
+  Bob-->>Alice: Hi Alice
+---
+ ┌───────┐       ┌─────┐   
+ │ Alice │       │ Bob │   
+ └───┬───┘       └──┬──┘   
+     │              │      
+     │  Hello Bob   │      
+     │──────────────▶      
+     │              │      
+     │  Hi Alice    │      
+     ◀╌╌╌╌╌╌╌╌╌╌╌╌╌╌│      
+     │              │      
+ ┌───┴───┐       ┌──┴──┐   
+ │ Alice │       │ Bob │   
+ └───────┘       └─────┘   

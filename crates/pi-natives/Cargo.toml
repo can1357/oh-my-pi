@@ -1,0 +1,120 @@
+[package]
+name = "pi-natives"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+authors.workspace = true
+repository.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[lints]
+workspace = true
+
+
+[features]
+# Off by default: the pipewire crate hard-links system libpipewire-0.3 via
+# pkg-config, which no CI/cross triple (musl, arm64) can satisfy, and the
+# Bazel-shipped addons build with crate_features = [] anyway. Linux devs who
+# want Wayland screencast opt in with `--features wayland-pipewire`.
+default = []
+wayland-pipewire = ["dep:pipewire"]
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+arboard.workspace = true
+ast-grep-core.workspace = true
+base64.workspace = true
+clap.workspace = true
+globset.workspace = true
+heapless.workspace = true
+fontdue.workspace = true
+grep-matcher.workspace = true
+futures.workspace = true
+grep-pcre2.workspace = true
+grep-regex.workspace = true
+grep-searcher.workspace = true
+html-to-markdown-rs.workspace = true
+icy_sixel.workspace = true
+ignore.workspace = true
+image = { workspace = true, features = ["bmp"] }
+resvg.workspace = true
+# Feature activation only (see workspace manifest): zune-jpeg needs `log` to compile.
+zune-jpeg.workspace = true
+# Upstream pinning only (see workspace manifest): tinyvec 1.13.0 is broken upstream.
+tinyvec.workspace = true
+inferno.workspace = true
+napi.workspace = true
+napi-derive.workspace = true
+pi-vcs.workspace = true
+parking_lot.workspace = true
+pdf-inspector.workspace = true
+phf.workspace = true
+flume.workspace = true
+pi-ast.workspace = true
+pi-diff.workspace = true
+pi-edit.workspace = true
+pi-iso.workspace = true
+pi-shell.workspace = true
+pi-voice.workspace = true
+pi-walker.workspace = true
+portable-pty.workspace = true
+png.workspace = true
+rayon.workspace = true
+regex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
+syntect.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+toml.workspace = true
+xutf.workspace = true
+zstd.workspace = true
+xxhash-rust.workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "=0.11.1", default-features = false, features = ["tokio"] }
+atspi = { version = "=0.30.0", features = ["tokio", "zbus"] }
+pipewire = { version = "=0.9.2", optional = true }
+reis = { version = "=0.5.0", features = ["tokio"] }
+x11rb = { version = "=0.13.2", features = ["randr", "xinput", "xtest"] }
+xkeysym = "=0.2.1"
+zbus = { version = "5.18", default-features = false, features = ["async-io", "blocking-api"] }
+log = "0.4"
+
+[target.'cfg(any(target_os = "macos", target_os = "windows"))'.dependencies]
+enigo = { version = "=0.6.1", default-features = false }
+xcap = { version = "=0.9.6", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+tempfile = "=3.27.0"
+core-graphics = "0.25"
+foreign-types = "=0.5.0"
+objc2-app-kit = "=0.3.2"
+objc2 = "=0.6.4"
+objc2-core-graphics = "=0.3.2"
+objc2-foundation = "=0.3.2"
+objc2-application-services = { version = "=0.3.2", default-features = true }
+objc2-core-foundation = "=0.3.2"
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Security", "Win32_System_Power", "Win32_System_Registry", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_Shell", "Win32_UI_WindowsAndMessaging"] }
+clipboard-win.workspace = true
+uiautomation = "=0.25.0"
+winreg.workspace = true
+
+[dev-dependencies]
+fancy-regex.workspace = true # utok scanner differential oracle
+tiktoken-rs.workspace = true # utok openai differential oracle
+xkeysym = "=0.2.1"
+
+[build-dependencies]
+napi-build.workspace = true
+serde.workspace = true
+serde_json.workspace = true

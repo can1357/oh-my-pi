@@ -1,0 +1,26 @@
+name: Setup system deps
+description: >-
+   Install the canvas/native runtime deps CI needs (cairo/pango stack, fd,
+   ripgrep, imagemagick). No-op on the preloaded omp-kata runner image, which
+   already ships them; self-heals on a stock runner by installing via apt.
+
+runs:
+   using: composite
+   steps:
+      - name: Install system deps (skip when preloaded)
+        shell: bash
+        run: |
+           # The preloaded omp-kata runner image bakes these in. Detect that
+           # and skip the apt round-trip; otherwise install the exact same set so
+           # stock runners (and any future host) still work.
+           if command -v fd >/dev/null 2>&1 \
+              && command -v rg >/dev/null 2>&1 \
+              && command -v magick >/dev/null 2>&1 \
+              && pkg-config --exists cairo pango 2>/dev/null; then
+             echo "System deps already present (preloaded runner image); skipping apt."
+             exit 0
+           fi
+           sudo apt-get update
+           sudo apt-get install -y libcairo2-dev libpango1.0-dev libjpeg-dev libgif-dev librsvg2-dev fd-find ripgrep imagemagick
+           sudo ln -sf "$(command -v fdfind)" /usr/local/bin/fd
+           sudo ln -sf /usr/bin/convert /usr/local/bin/magick

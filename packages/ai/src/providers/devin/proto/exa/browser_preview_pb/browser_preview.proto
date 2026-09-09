@@ -1,0 +1,32 @@
+syntax = "proto3";
+
+package exa.browser_preview_pb;
+
+import "exa/codeium_common_pb/codeium_common.proto";
+
+message SendDOMElementRequest {
+  .exa.codeium_common_pb.DOMElementScopeItem dom_element = 1;
+}
+
+message SendDOMElementResponse {
+}
+
+message SendScreenshotRequest {
+  .exa.codeium_common_pb.ImageData image = 1;
+}
+
+message SendScreenshotResponse {
+}
+
+message SendConsoleOutputRequest {
+  .exa.codeium_common_pb.ConsoleLogScopeItem console_log = 1;
+}
+
+message SendConsoleOutputResponse {
+}
+
+service BrowserPreviewService {
+  rpc SendDOMElement (.exa.browser_preview_pb.SendDOMElementRequest) returns (.exa.browser_preview_pb.SendDOMElementResponse);
+  rpc SendScreenshot (.exa.browser_preview_pb.SendScreenshotRequest) returns (.exa.browser_preview_pb.SendScreenshotResponse);
+  rpc SendConsoleOutput (.exa.browser_preview_pb.SendConsoleOutputRequest) returns (.exa.browser_preview_pb.SendConsoleOutputResponse);
+}

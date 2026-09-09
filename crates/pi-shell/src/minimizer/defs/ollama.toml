@@ -1,0 +1,49 @@
+# ollama output. For management subcommands (pull/push/list/...), drop
+# pull/download progress spinners and verifying/writing chatter, keep the
+# final lines, and cap. For `ollama run`, the model response IS the payload,
+# so it must pass uncapped — only spinner residue is stripped.
+#
+# BTreeMap/first-match note: `[filters.ollama]` sorts before
+# `[filters.ollama-run]`, but its match_subcommand gate excludes `run`, so the
+# run entry is the one that claims `ollama run`.
+
+[filters.ollama]
+description = "Compact ollama management output"
+match_command = "^ollama$"
+match_subcommand = "^(pull|push|list|ls|rm|cp|show|create|serve|stop|ps)$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^pulling\\s+[0-9a-f]+",
+	"^pulling manifest",
+	"^verifying sha256",
+	"^writing manifest",
+	"^downloading",
+]
+truncate_lines_at = 200
+max_lines = 60
+on_empty = "ollama: ok"
+
+[filters.ollama-run]
+description = "Strip spinner residue from ollama run, keep the full response"
+match_command = "^ollama$"
+match_subcommand = "^run$"
+strip_ansi = true
+strip_lines_matching = [
+	"^[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏\\s]*$",
+]
+
+[[tests.ollama]]
+name = "strips pull progress keeps success"
+input = "pulling manifest\npulling abc123 100%\nverifying sha256 digest\nwriting manifest\nsuccess\n"
+expected = "success\n"
+
+[[tests.ollama]]
+name = "empty becomes sentinel"
+input = "pulling manifest\n"
+expected = "ollama: ok"
+
+[[tests.ollama-run]]
+name = "long run response passes uncapped with spinner residue stripped"
+input = "⠋ \n⠙ \nHere is a long answer.\nLine two of the response.\nLine three of the response.\nLine four of the response.\n"
+expected = "Here is a long answer.\nLine two of the response.\nLine three of the response.\nLine four of the response.\n"

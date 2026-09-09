@@ -1,0 +1,8 @@
+On branch feature/new-filters
+Your branch is up to date with 'origin/feature/new-filters'.
+
+Changes to be committed:
+  (use "git restore --staged <file>..." to unstage)
+	new file:   internal/filter/kubectl.go
+	new file:   internal/filter/kubectl_test.go
+	modified:   internal/filter/registry.go

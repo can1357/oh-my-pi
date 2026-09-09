@@ -1,0 +1,109 @@
+# bazel-remote cache for the self-hosted Bazel pipeline.
+#
+# One replica, node-local storage (RWO local-path PVC), TLS + htpasswd auth from
+# secrets created by setup.sh (run that script on the CI host; it generates the
+# CA/server cert and credentials, then applies this file).
+#
+# Exposure: ClusterIP `bazel-remote` only — gRPC :9092 + HTTP :8080 for
+# in-cluster runner pods (kata microVMs). Nothing is published outside the
+# cluster: GitHub-hosted runners never talk to this infrastructure (they use
+# an actions/cache-backed bazel disk cache instead).
+#
+# Clients verify the self-signed server cert against the CA committed at
+# infra/bazel-remote/ca.crt (`--tls_certificate=infra/bazel-remote/ca.crt`).
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: bazel-cache
+  labels:
+    kubernetes.io/metadata.name: bazel-cache
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: bazel-remote-data
+  namespace: bazel-cache
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 100Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bazel-remote
+  namespace: bazel-cache
+  labels: { app: bazel-remote }
+spec:
+  replicas: 1
+  strategy: { type: Recreate }
+  selector:
+    matchLabels: { app: bazel-remote }
+  template:
+    metadata:
+      labels: { app: bazel-remote }
+    spec:
+      # kubelet's legacy service-link envs (BAZEL_REMOTE_PORT=tcp://...) collide
+      # with bazel-remote's own BAZEL_REMOTE_* config env prefix.
+      enableServiceLinks: false
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+        fsGroupChangePolicy: OnRootMismatch
+      containers:
+        - name: bazel-remote
+          image: buchgr/bazel-remote-cache:v2.6.2
+          imagePullPolicy: IfNotPresent
+          args:
+            - --max_size=90
+            - --dir=/data
+            - --grpc_address=:9092
+            - --http_address=:8080
+            - --tls_cert_file=/tls/tls.crt
+            - --tls_key_file=/tls/tls.key
+            - --htpasswd_file=/auth/htpasswd
+            - --allow_unauthenticated_reads
+          ports:
+            - { name: grpc, containerPort: 9092 }
+            - { name: http, containerPort: 8080 }
+          volumeMounts:
+            - { name: data, mountPath: /data }
+            - { name: tls, mountPath: /tls, readOnly: true }
+            - { name: auth, mountPath: /auth, readOnly: true }
+          # TLS is enabled, so /status is served over HTTPS on the http port.
+          # Kubelet probes skip certificate verification.
+          readinessProbe:
+            httpGet: { path: /status, port: http, scheme: HTTPS }
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: { path: /status, port: http, scheme: HTTPS }
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          resources:
+            requests: { cpu: "500m", memory: "2Gi" }
+            # Concurrent uploads of ~150MB addon artifacts spike RSS well past
+            # 4Gi (memcg OOM-killed the server mid-build); 10Gi gives headroom
+            # for a full 8-target push wave.
+            limits: { cpu: "4", memory: "10Gi" }
+      volumes:
+        - name: data
+          persistentVolumeClaim: { claimName: bazel-remote-data }
+        - name: tls
+          secret: { secretName: bazel-remote-tls }
+        - name: auth
+          secret: { secretName: bazel-remote-auth }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bazel-remote
+  namespace: bazel-cache
+spec:
+  selector: { app: bazel-remote }
+  ports:
+    - { name: grpc, port: 9092, targetPort: grpc, protocol: TCP }
+    - { name: http, port: 8080, targetPort: http, protocol: TCP }

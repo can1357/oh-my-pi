@@ -1,0 +1,41 @@
+# rsync -v / -av output. Long file lists collapse to head+tail; the trailing
+# summary block (sent/received/speedup/total size) stays in the tail.
+
+[filters.rsync]
+description = "Compact rsync transfer logs"
+match_command = "^rsync$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^sending incremental file list$",
+	"^receiving incremental file list$",
+]
+only_on_exit = [0]
+match_output = [
+	{ pattern = "total size is", message = "ok (synced)", unless = "(?i)(error|failed|no such file)" },
+]
+truncate_lines_at = 250
+head_lines = 5
+tail_lines = 15
+max_lines = 40
+on_empty = "rsync: ok"
+
+[[tests.rsync]]
+name = "strips incremental banner"
+input = "sending incremental file list\nfile1\nfile2\nsent 200 bytes  received 20 bytes\ntotal size is 1024  speedup is 4.65\n"
+expected = "ok (synced)"
+
+[[tests.rsync]]
+name = "successful sync short-circuits to ok (synced)"
+input = "sending incremental file list\n./\nfile1.txt\nfile2.txt\n\nsent 1,234 bytes  received 42 bytes  2,552.00 bytes/sec\ntotal size is 98,765  speedup is 77.31\n"
+expected = "ok (synced)"
+
+[[tests.rsync]]
+name = "errors not swallowed when total size present"
+input = "rsync: [sender] error\nerror in rsync protocol data stream (code 12)\nsent 100 bytes  received 200 bytes  60.00 bytes/sec\ntotal size is 1000  speedup is 3.33\n"
+expected = "rsync: [sender] error\nerror in rsync protocol data stream (code 12)\nsent 100 bytes  received 200 bytes  60.00 bytes/sec\ntotal size is 1000  speedup is 3.33\n"
+
+[[tests.rsync]]
+name = "error case-insensitive not swallowed"
+input = "sending incremental file list\nERROR: some error\ntotal size is 1024  speedup is 4.65\n"
+expected = "ERROR: some error\ntotal size is 1024  speedup is 4.65\n"

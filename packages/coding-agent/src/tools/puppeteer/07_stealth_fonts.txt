@@ -1,0 +1,99 @@
+const commonFonts = [
+  "Arial",
+  "Arial Black",
+  "Arial Narrow",
+  "Arial Rounded MT Bold",
+  "Book Antiqua",
+  "Bookman Old Style",
+  "Calibri",
+  "Cambria",
+  "Cambria Math",
+  "Century",
+  "Century Gothic",
+  "Century Schoolbook",
+  "Comic Sans MS",
+  "Consolas",
+  "Courier",
+  "Courier New",
+  "Garamond",
+  "Geneva",
+  "Georgia",
+  "Gill Sans",
+  "Gill Sans MT",
+  "Helvetica",
+  "Helvetica Neue",
+  "Impact",
+  "Lucida Console",
+  "Lucida Grande",
+  "Lucida Sans Unicode",
+  "MS Gothic",
+  "MS PGothic",
+  "MS Sans Serif",
+  "MS Serif",
+  "Palatino",
+  "Palatino Linotype",
+  "Segoe Print",
+  "Segoe Script",
+  "Segoe UI",
+  "Segoe UI Emoji",
+  "Segoe UI Symbol",
+  "Tahoma",
+  "Times",
+  "Times New Roman",
+  "Trebuchet MS",
+  "Verdana",
+  "Wingdings",
+  "Wingdings 2",
+  "Wingdings 3",
+  "Apple Color Emoji",
+  "Apple SD Gothic Neo",
+  "Hoefler Text",
+  "Menlo",
+  "Monaco",
+  "San Francisco",
+  "SF Pro Display",
+  "SF Pro Text",
+];
+
+if ("queryLocalFonts" in window) {
+  const queryLocalFonts = async function queryLocalFonts() {
+    return commonFonts.map((family) => ({
+      family,
+      fullName: family,
+      postscriptName: family.replace(/\s+/g, ""),
+      style: "Regular",
+      blob: () => Promise_resolve(new Window_Blob([])),
+    }));
+  };
+  patchToString(queryLocalFonts, "queryLocalFonts");
+  Object_defineProperty(window, "queryLocalFonts", {
+    value: queryLocalFonts,
+    writable: true,
+    configurable: true,
+    enumerable: true,
+  });
+}
+
+const originalGetContext = HTMLCanvasElement.prototype.getContext;
+const patchedGetContext = function getContext(type, options) {
+  const ctx = originalGetContext.call(this, type, options);
+  if (ctx && type === "2d") {
+    const originalFillText = ctx.fillText;
+    const patchedFillText = function fillText(text, x, y, maxWidth) {
+      const noiseX = (Math_random() - 0.5) * 0.02;
+      const noiseY = (Math_random() - 0.5) * 0.02;
+      return originalFillText.call(
+        this,
+        text,
+        x + noiseX,
+        y + noiseY,
+        maxWidth,
+      );
+    };
+    patchToString(patchedFillText, "fillText");
+    ctx.fillText = patchedFillText;
+  }
+  return ctx;
+};
+patchToString(patchedGetContext, "getContext");
+HTMLCanvasElement.prototype.getContext = patchedGetContext;

@@ -1,0 +1,74 @@
+# Edition
+edition = "2024"
+style_edition = "2024"
+
+# Import Organization
+group_imports = "StdExternalCrate"
+imports_granularity = "Crate"
+imports_indent = "Block"
+reorder_imports = true
+
+# Comments & Documentation
+comment_width = 80
+format_code_in_doc_comments = true
+normalize_doc_attributes = true
+wrap_comments = true
+
+# Width & Length
+chain_width = 60
+max_width = 100
+single_line_if_else_max_width = 50
+single_line_let_else_max_width = 50
+
+# Indentation
+hard_tabs = true
+indent_style = "Block"
+tab_spaces = 3
+
+# Spacing
+binop_separator = "Front"
+space_after_colon = true
+space_before_colon = false
+spaces_around_ranges = false
+
+# Trailing Delimiters
+match_block_trailing_comma = true
+trailing_comma = "Vertical"
+trailing_semicolon = true
+
+# Formatting Behavior
+condense_wildcard_suffixes = true
+merge_derives = true
+overflow_delimited_expr = true
+remove_nested_parens = true
+use_field_init_shorthand = true
+use_small_heuristics = "Max"
+
+# Macros & Strings
+format_macro_bodies = true
+format_macro_matchers = true
+format_strings = true
+
+# Code Structure
+brace_style = "SameLineWhere"
+fn_params_layout = "Tall"
+reorder_impl_items = true
+where_single_line = false
+
+# Match Expressions
+match_arm_blocks = true
+match_arm_leading_pipes = "Never"
+
+# Alignment
+enum_discrim_align_threshold = 20
+struct_field_align_threshold = 20
+
+# Blank Lines
+blank_lines_lower_bound = 0
+blank_lines_upper_bound = 1
+
+# Miscellaneous
+force_explicit_abi = true
+hex_literal_case = "Lower"
+newline_style = "Unix"
+ignore = ["crates/vendor/brush-core/**", "crates/pi-builtins/**"]

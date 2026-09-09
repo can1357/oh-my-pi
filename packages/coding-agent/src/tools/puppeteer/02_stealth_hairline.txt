@@ -1,0 +1,57 @@
+{
+  const htmlElementOffsetHeightDescriptor =
+    typeof HTMLElement === "undefined"
+      ? undefined
+      : Object_getOwnPropertyDescriptor(HTMLElement.prototype, "offsetHeight");
+  const htmlDivElementOffsetHeightDescriptor =
+    typeof HTMLDivElement === "undefined"
+      ? undefined
+      : Object_getOwnPropertyDescriptor(HTMLDivElement.prototype, "offsetHeight");
+  const offsetHeightDescriptor =
+    htmlDivElementOffsetHeightDescriptor || htmlElementOffsetHeightDescriptor;
+  const offsetHeightPrototype = htmlDivElementOffsetHeightDescriptor
+    ? HTMLDivElement.prototype
+    : htmlElementOffsetHeightDescriptor
+      ? HTMLElement.prototype
+      : undefined;
+  const elementIdDescriptor =
+    typeof Element === "undefined"
+      ? undefined
+      : Object_getOwnPropertyDescriptor(Element.prototype, "id");
+
+  if (
+    typeof HTMLDivElement !== "undefined" &&
+    offsetHeightPrototype &&
+    offsetHeightDescriptor &&
+    typeof offsetHeightDescriptor.get === "function" &&
+    offsetHeightDescriptor.configurable &&
+    elementIdDescriptor &&
+    typeof elementIdDescriptor.get === "function"
+  ) {
+    const offsetHeightGetter = new Window_Proxy(offsetHeightDescriptor.get, {
+      apply(target, thisArg, args) {
+        const height = Reflect_apply(target, thisArg, args);
+
+        if (
+          height === 0 &&
+          Object_getPrototypeOf(thisArg) === HTMLDivElement.prototype &&
+          Reflect_apply(elementIdDescriptor.get, thisArg, []) === "modernizr"
+        ) {
+          return 1;
+        }
+
+        return height;
+      },
+    });
+
+    patchToString(offsetHeightGetter, "get offsetHeight");
+
+    Object_defineProperty(
+      offsetHeightPrototype,
+      "offsetHeight",
+      Object_assign({}, offsetHeightDescriptor, {
+        get: offsetHeightGetter,
+      }),
+    );
+  }
+}

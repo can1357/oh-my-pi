@@ -1,0 +1,32 @@
+# Quarto render output.
+
+[filters.quarto]
+description = "Compact Quarto render output"
+match_command = "^quarto$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^processing file:",
+	"^output file:",
+	"^Starting python3 kernel",
+	"^Starting \\S+ kernel",
+	"^Executing ",
+	"^pandoc ",
+	"^\\s+to: ",
+	"^\\s+output-file: ",
+	"^\\s+standalone: ",
+	"^\\s+self-contained: ",
+]
+truncate_lines_at = 300
+max_lines = 80
+on_empty = "quarto: ok"
+
+[[tests.quarto]]
+name = "keeps render error"
+input = "processing file: index.qmd\npandoc index.qmd\nERROR: Quitting from lines 10-12\nExecution halted"
+expected = "ERROR: Quitting from lines 10-12\nExecution halted\n"
+
+[[tests.quarto]]
+name = "clean render keeps result"
+input = "processing file: index.qmd\noutput file: index.html\nOutput created: index.html"
+expected = "Output created: index.html\n"
