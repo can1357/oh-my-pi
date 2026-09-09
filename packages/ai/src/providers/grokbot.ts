@@ -88,7 +88,9 @@ export interface GrokbotOptions extends StreamOptions {
 	conversationId?: string;
 	/**
 	 * Tool choice for this request. `"none"` advertises an empty tool list even
-	 * when `context.tools` is retained (handoff prompt-cache reuse).
+	 * when `context.tools` is retained (handoff prompt-cache reuse). `"auto"` /
+	 * omit leave tools advertised. Sand InferenceStreamRequest has no wire
+	 * tool_choice field — `"required"` / `"any"` / named / computer choices throw.
 	 */
 	toolChoice?: ToolChoice;
 	/** Sand effort parameter; when set from mapOptionsForApi, overrides the default `high`. */
@@ -279,6 +281,30 @@ function parseCompletedToolArgs(raw: unknown, isGrammar: boolean): Record<string
 	return parseToolArgs(raw, true);
 }
 
+/** Sand InferenceStreamRequest has no tool_choice field — only auto/none. */
+function assertGrokbotToolChoiceSupported(choice: ToolChoice | undefined): void {
+	if (choice === undefined || choice === "auto" || choice === "none") return;
+	const label =
+		typeof choice === "string"
+			? choice
+			: typeof choice === "object" && choice !== null && "name" in choice && typeof choice.name === "string"
+				? `named:${choice.name}`
+				: typeof choice === "object" &&
+					  choice !== null &&
+					  "function" in choice &&
+					  choice.function &&
+					  typeof choice.function === "object" &&
+					  "name" in choice.function &&
+					  typeof choice.function.name === "string"
+					? `named:${choice.function.name}`
+					: typeof choice === "object" && choice !== null && "type" in choice
+						? String(choice.type)
+						: "unknown";
+	throw new AIError.ConfigurationError(
+		`Grok Bot does not support toolChoice "${label}" (InferenceStreamRequest has no tool_choice); use "auto" or "none"`,
+	);
+}
+
 function toolCallFromPart(part: unknown, grammarTools?: Map<string, ProductWireToolIndexMeta>) {
 	if (!part || typeof part !== "object") return undefined;
 	const p = part as Record<string, unknown>;
@@ -293,9 +319,11 @@ function toolCallFromPart(part: unknown, grammarTools?: Map<string, ProductWireT
 	const meta =
 		(name ? grammarTools?.get(name) : undefined) ?? (customWireName ? grammarTools?.get(customWireName) : undefined);
 	// Grammar/customFormat tools (apply_patch, hashline, sloppy) replay as wire
-	// name + raw input (protobuf field 4), not Struct args. hashline/sloppy omit
-	// customWireName on the tool definition — use context.tools or a stored marker.
-	const isGrammar = Boolean(customWireName) || Boolean(meta?.isGrammar);
+	// name + raw input (protobuf field 4), not Struct args. Prefer the live tool
+	// index (`meta.isGrammar`); only fall back to a persisted `customWireName`
+	// when tools are absent — never treat a wire alias alone as grammar while
+	// the advertised tool declares structured field-3 parameters.
+	const isGrammar = meta !== undefined ? Boolean(meta.isGrammar) : Boolean(customWireName);
 	const wireName = customWireName || meta?.customWireName || name;
 	const tc: { toolCallId: string; toolName: string; args?: Record<string, unknown>; rawToolCallArgs?: string } = {
 		toolCallId: id,
@@ -786,6 +814,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			const identity = classifyModel("grokbot", policyModelId, { lenient: true });
 			// Handoff / side-channel turns keep `context.tools` for prompt-cache
 			// reuse while forcing `toolChoice: "none"` — do not advertise tools.
+			// Sharpshooter `required` / named choices have no sand wire field.
+			assertGrokbotToolChoiceSupported(options?.toolChoice);
 			const tools = options?.toolChoice === "none" ? [] : toInferenceTools(context.tools, identity);
 			const grammarTools = buildGrammarToolIndex(context.tools);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
@@ -1294,13 +1324,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					if (!state) {
 						closeOpen();
 						const meta = (name ? grammarTools.get(name) : undefined) ?? undefined;
-						// Mark every grammar/customFormat call (hashline/sloppy have no
-						// customWireName) so live preview + history replay stay on raw args.
-						// Do not persist productWireName (Shell/Read/Write) — that alias is
-						// lookup-only and must not flip OpenAI Responses into custom_tool_call.
+						// Persist customWireName only for grammar/customFormat calls
+						// (hashline/sloppy have no definition alias — store the omp name
+						// as the orphaned-history grammar marker). Non-grammar wire
+						// aliases stay off ToolCall.customWireName so replay does not
+						// enter the raw field-4 path.
 						const grammarWire = meta?.isGrammar
 							? meta.customWireName || meta.name || name || undefined
-							: meta?.customWireName;
+							: undefined;
 						const block: ToolCall = {
 							type: "toolCall",
 							id: id || `call_${output.content.length}`,
@@ -1334,8 +1365,6 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							if (meta?.isGrammar) {
 								state.isGrammar = true;
 								state.block.customWireName = meta.customWireName || meta.name || name;
-							} else if (meta?.customWireName) {
-								state.block.customWireName = meta.customWireName;
 							}
 						}
 					}

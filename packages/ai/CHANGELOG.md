@@ -5,6 +5,8 @@
 ### Fixed
 
 - Grok Bot honors `toolChoice: "none"` by advertising no tools (handoff keeps `context.tools` for prompt-cache reuse).
+- Grok Bot rejects `toolChoice` values other than `"auto"` / `"none"` (InferenceStreamRequest has no tool_choice field).
+- Grok Bot history replay treats grammar mode from the live tool index (`isGrammar`), not from `customWireName` alone.
 - `streamSimple` forwards `toolChoice` into Grok Bot provider options so handoff `toolChoice: "none"` reaches the wire.
 - Grok Bot empty-tool replay product wire comes from catalog `sand-empty-tools-retry-wire` (gemini-* → keep-model), not a TypeScript Gemini class branch.
 - Grok Bot empty Write follow-up acceptance is gated by catalog `sand-accept-empty-write-followup` (gemini-*), not the entire Gemini taxonomy class.

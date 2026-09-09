@@ -491,6 +491,39 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
 	});
 
+	test("rejects unsupported required toolChoice (no sand wire field)", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+		const model = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 512,
+		});
+		const result = await streamGrokBot(
+			model as Model<"grokbot-sand">,
+			{
+				messages: [{ role: "user", content: "Extract", timestamp: 1 }],
+				tools: [bashTool],
+			},
+			{ apiKey: "renew", toolChoice: "required" },
+		).result();
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage ?? "").toMatch(/toolChoice "required"/);
+		expect(result.errorMessage ?? "").toMatch(/auto|none/);
+	});
+
 	test("empty-tool retry uses catalog sandEmptyToolsRetryWire keep-model product tools", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",

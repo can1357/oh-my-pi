@@ -1200,6 +1200,68 @@ describe("grokbot sand-host client parity", () => {
 		]);
 	});
 
+	test("does not treat customWireName alone as grammar when the live tool is structured", () => {
+		// Extension tools may advertise a PascalCase wire alias with JSON-schema
+		// parameters. History that still carries that alias must replay as field-3
+		// Struct args — not raw field-4 — once the tool index says isGrammar=false.
+		const messages = toInferenceMessages(
+			{
+				tools: [
+					{
+						name: "customThing",
+						description: "extension shell",
+						parameters: {
+							type: "object",
+							properties: {
+								command: { type: "string" },
+								input: { type: "string" },
+							},
+						},
+						customWireName: "Shell",
+					},
+				],
+				messages: [
+					{
+						role: "assistant",
+						content: [
+							{
+								type: "toolCall",
+								id: "c1",
+								name: "customThing",
+								customWireName: "Shell",
+								arguments: { command: "echo hi", input: "should-not-become-raw" },
+							},
+						],
+						api: "grokbot-sand",
+						provider: "grokbot",
+						model: "grok-4.5",
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "toolUse",
+						timestamp: 2,
+					},
+				],
+			},
+			conversionModel,
+		);
+		const assistant = messages.find(m => m.role === 2) as {
+			toolCalls?: Array<{ toolCallId: string; toolName: string; args?: unknown; rawToolCallArgs?: string }>;
+		};
+		expect(assistant?.toolCalls).toEqual([
+			{
+				toolCallId: "c1",
+				toolName: "Shell",
+				args: { command: "echo hi", input: "should-not-become-raw" },
+			},
+		]);
+	});
+
 	test("redacts credential-shaped tokens from system and history when enabled", () => {
 		configureCredentialRedaction(true);
 		try {
