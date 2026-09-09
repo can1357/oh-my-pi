@@ -9,6 +9,7 @@ import * as os from "node:os";
 import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
+import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
 import {
 	$env,
 	directoryIsMissing,
@@ -39,8 +40,8 @@ import {
 	expandRoleAlias,
 	formatModelSelectorValue,
 	getModelMatchPreferences,
+	parseModelString,
 	resolveCliModel,
-	resolveModelRoleValue,
 	resolveModelScope,
 	type ScopedModel,
 } from "./config/model-resolver";
@@ -851,30 +852,77 @@ export async function resolveScopedModels(
  * profile, no credential-scoped cache), refresh that provider before
  * {@link buildSessionOptions} exits on miss. Credentials may come from
  * `--api-key`, env, secrets file, or `models.yml` — not specifically a CLI key.
- * `--models` scopes already refresh via {@link resolveScopedModels}.
+ * A single-provider `--models` scope gets the same treatment: without
+ * `parsed.model` the scope path below cannot refresh built-in descriptor
+ * providers (e.g. Grok Bot) that {@link ModelRegistry.getDiscoverableProviders}
+ * omits, so a cold `--models grokbot/<live-only-id>` would resolve empty.
+ *
+ * Built-in descriptor providers (e.g. Grok Bot) are not listed by
+ * {@link ModelRegistry.getDiscoverableProviders} — that API only covers
+ * models.yml / runtime discovery / implicit local providers — so the gate also
+ * accepts catalog entries with `createModelManagerOptions`.
  */
 export async function refreshCredentialScopedModelIfMissing(
-	parsed: Pick<Args, "model">,
+	parsed: Pick<Args, "model" | "models">,
 	modelRegistry: Pick<ModelRegistry, "getAvailable" | "hasProvider" | "refreshProvider" | "getDiscoverableProviders">,
 	providerId: string | undefined,
 ): Promise<boolean> {
-	if (!parsed.model || !providerId) return false;
+	if (!providerId) return false;
 	if (!modelRegistry.hasProvider(providerId)) return false;
-	if (!modelRegistry.getDiscoverableProviders().includes(providerId)) return false;
-	const raw = parsed.model.trim();
-	const withoutThinking = raw.includes(":") ? raw.slice(0, raw.indexOf(":")) : raw;
-	const slash = withoutThinking.indexOf("/");
-	const bare = slash >= 0 ? withoutThinking.slice(slash + 1) : withoutThinking;
-	const present = modelRegistry
-		.getAvailable()
-		.some(
-			model =>
-				model.provider === providerId &&
-				(model.id === bare || model.id === withoutThinking || `${model.provider}/${model.id}` === withoutThinking),
-		);
-	if (present) return false;
+	if (!providerSupportsCredentialScopedRefresh(providerId, modelRegistry)) return false;
+	const wanted = requestedScopedModelIds(parsed, providerId);
+	if (wanted.length === 0) return false;
+	const available = modelRegistry.getAvailable();
+	const missing = wanted.some(
+		({ bare, withoutThinking }) =>
+			!available.some(
+				model =>
+					model.provider === providerId &&
+					(model.id === bare ||
+						model.id === withoutThinking ||
+						`${model.provider}/${model.id}` === withoutThinking),
+			),
+	);
+	if (!missing) return false;
 	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
 	return true;
+}
+
+/**
+ * Selectors owned by `providerId`: the explicit `--model`, or `--models`
+ * entries qualified with that provider. Bare entries stay out — ownership is
+ * indeterminate until a concrete model is selected.
+ */
+function requestedScopedModelIds(
+	parsed: Pick<Args, "model" | "models">,
+	providerId: string,
+): Array<{ bare: string; withoutThinking: string }> {
+	const raws: string[] = [];
+	if (parsed.model?.trim()) {
+		raws.push(parsed.model.trim());
+	} else {
+		for (const pattern of parsed.models ?? []) {
+			const trimmed = pattern.trim();
+			if (!trimmed) continue;
+			const selector = parseModelString(trimmed);
+			if (!selector || selector.provider.toLowerCase() !== providerId.toLowerCase()) continue;
+			raws.push(trimmed);
+		}
+	}
+	return raws.map(raw => {
+		const withoutThinking = raw.includes(":") ? raw.slice(0, raw.indexOf(":")) : raw;
+		const slash = withoutThinking.indexOf("/");
+		return { bare: slash >= 0 ? withoutThinking.slice(slash + 1) : withoutThinking, withoutThinking };
+	});
+}
+
+/** models.yml/runtime discovery OR a built-in catalog model-manager descriptor. */
+function providerSupportsCredentialScopedRefresh(
+	providerId: string,
+	modelRegistry: Pick<ModelRegistry, "getDiscoverableProviders">,
+): boolean {
+	if (modelRegistry.getDiscoverableProviders().includes(providerId)) return true;
+	return Boolean(getCatalogProviderEntry(providerId)?.createModelManagerOptions);
 }
 
 /**

@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import type { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { Api, AuthStorage, Model } from "@oh-my-pi/pi-ai";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -172,6 +172,23 @@ describe("resolveScopedModels", () => {
 });
 
 describe("refreshCredentialScopedModelIfMissing", () => {
+	let tempDir: TempDir;
+	let authStorage: AuthStorage;
+
+	beforeAll(async () => {
+		tempDir = await TempDir.create("@main-refresh-cold-catalog-");
+		authStorage = createInMemoryAuthStorage();
+	});
+
+	afterAll(async () => {
+		authStorage.close();
+		await tempDir.remove();
+	});
+
+	afterEach(() => {
+		vi.restoreAllMocks();
+	});
+
 	it("refreshes a cold credential-scoped provider when --model is absent from startup catalog", async () => {
 		const registry = new FakeRegistry([], () => {
 			registry.available = [
@@ -229,14 +246,46 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 		expect(registry.refreshProviderCalls).toEqual([{ providerId: "grokbot", strategy: "online-if-uncached" }]);
 	});
 
-	it("skips refresh when the provider is not discoverable", async () => {
-		const registry = new FakeRegistry([]);
+	it("skips refresh when the provider is neither models.yml-discoverable nor a built-in manager", async () => {
+		const registry = new FakeRegistry([model("custom-only")]);
 		registry.discoverableProviders = [];
+		registry.available = [
+			buildModel({
+				id: "custom-only",
+				name: "custom-only",
+				api: "openai-completions",
+				provider: "custom-local",
+				baseUrl: "https://example.com",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 8_192,
+			}),
+		];
 
-		const refreshed = await refreshCredentialScopedModelIfMissing({ model: "live-only" }, registry, "grokbot");
+		const refreshed = await refreshCredentialScopedModelIfMissing(
+			{ model: "missing-live" },
+			registry,
+			"custom-local",
+		);
 
 		expect(refreshed).toBe(false);
 		expect(registry.refreshProviderCalls).toEqual([]);
+	});
+
+	it("refreshes built-in descriptor providers via a real ModelRegistry even when getDiscoverableProviders omits them", async () => {
+		const registry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		expect(registry.hasProvider("grokbot")).toBe(true);
+		expect(registry.getDiscoverableProviders()).not.toContain("grokbot");
+		const liveOnly = "live-only-fresh-xyz";
+		expect(registry.getAvailable().some(m => m.provider === "grokbot" && m.id === liveOnly)).toBe(false);
+
+		const spy = vi.spyOn(registry, "refreshProvider").mockResolvedValue();
+		const refreshed = await refreshCredentialScopedModelIfMissing({ model: liveOnly }, registry, "grokbot");
+
+		expect(refreshed).toBe(true);
+		expect(spy).toHaveBeenCalledWith("grokbot", "online-if-uncached");
 	});
 
 	it("skips refresh when the explicit model is already in the startup catalog", async () => {
@@ -257,6 +306,64 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 		registry.discoverableProviders = ["grokbot"];
 
 		const refreshed = await refreshCredentialScopedModelIfMissing({ model: "sand-default" }, registry, "grokbot");
+
+		expect(refreshed).toBe(false);
+		expect(registry.refreshProviderCalls).toEqual([]);
+	});
+
+	it("refreshes a cold single-provider --models scope without parsed.model", async () => {
+		const registry = new FakeRegistry([], () => {
+			registry.available = [
+				buildModel({
+					id: "live-only",
+					name: "live-only",
+					api: "grokbot-sand",
+					provider: "grokbot",
+					baseUrl: "https://api2.cursor.sh",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 8_192,
+				}),
+			];
+		});
+		registry.discoverableProviders = ["grokbot"];
+
+		const refreshed = await refreshCredentialScopedModelIfMissing({ models: ["grokbot/live-only"] }, registry, "grokbot");
+
+		expect(refreshed).toBe(true);
+		expect(registry.refreshProviderCalls).toEqual([{ providerId: "grokbot", strategy: "online-if-uncached" }]);
+	});
+
+	it("skips refresh when the --models scope is already in the startup catalog", async () => {
+		const registry = new FakeRegistry([
+			buildModel({
+				id: "live-only",
+				name: "live-only",
+				api: "grokbot-sand",
+				provider: "grokbot",
+				baseUrl: "https://api2.cursor.sh",
+				reasoning: false,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 8_192,
+			}),
+		]);
+		registry.discoverableProviders = ["grokbot"];
+
+		const refreshed = await refreshCredentialScopedModelIfMissing({ models: ["grokbot/live-only"] }, registry, "grokbot");
+
+		expect(refreshed).toBe(false);
+		expect(registry.refreshProviderCalls).toEqual([]);
+	});
+
+	it("skips refresh when the --models scope names no qualified model for the provider", async () => {
+		const registry = new FakeRegistry([]);
+		registry.discoverableProviders = ["grokbot"];
+
+		const refreshed = await refreshCredentialScopedModelIfMissing({ models: ["live-only"] }, registry, "grokbot");
 
 		expect(refreshed).toBe(false);
 		expect(registry.refreshProviderCalls).toEqual([]);
