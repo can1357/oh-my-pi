@@ -446,8 +446,23 @@ function toolResultPayload(msg: Record<string, unknown>): unknown {
 	return "";
 }
 
+/** Options for inference history conversion. */
+export type ToInferenceMessagesOptions = {
+	/**
+	 * When true, apply product Shell/Read/Write collision ownership so history
+	 * aliases match product-wire winners (bash owns Shell, etc.). Native wire
+	 * must leave this off — otherwise an extension's advertised `Shell`
+	 * customWireName loses to bash and replays under an undeclared internal name.
+	 */
+	productWireOwnership?: boolean;
+};
+
 /** @internal Exported for Grok Bot message-conversion contract tests. */
-export function toInferenceMessages(context: Context, model: Model<"grokbot-sand">) {
+export function toInferenceMessages(
+	context: Context,
+	model: Model<"grokbot-sand">,
+	options?: ToInferenceMessagesOptions,
+) {
 	const out: Array<Record<string, unknown>> = [];
 	const systemPrompts = normalizeSystemPrompts(context.systemPrompt);
 	if (systemPrompts.length) {
@@ -469,9 +484,11 @@ export function toInferenceMessages(context: Context, model: Model<"grokbot-sand
 	};
 
 	const toolWireIndex = buildGrammarToolIndex(context.tools);
-	// Align Shell/Read/Write (and customWireName) ownership with product
-	// advertisement so history aliases match collision winners.
-	augmentToolIndexForProductWire(toolWireIndex, context.tools);
+	// Product wire only: align Shell/Read/Write ownership with product
+	// advertisement. Native history must keep extension customWireName aliases.
+	if (options?.productWireOwnership) {
+		augmentToolIndexForProductWire(toolWireIndex, context.tools);
+	}
 	// Prefer the wire name from the preceding assistant call with the same
 	// toolCallId — edit.mode / tool set can change after a grammar call is in
 	// history, so looking up the current context.tools would mismatch names.
@@ -1241,10 +1258,10 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						anthropicWire.wireMode === "parent-chat" ||
 						anthropicWire.wireMode === "keep-model"
 					) {
-						// History stores omp names (bash/read/write); product tools are
-						// Shell/Read/Write — rewrite replayed call/result names to match.
+						// Re-convert with product collision ownership so extension Shell
+						// losers keep internal names; then rewrite omp owners to Shell/Read/Write.
 						body.messages = rewriteInferenceMessagesForProductWire(
-							(body.messages as Record<string, unknown>[]) ?? [],
+							toInferenceMessages(context, model, { productWireOwnership: true }),
 							context.tools,
 						);
 						logger.info("grokbot: product sand tool wire", {
