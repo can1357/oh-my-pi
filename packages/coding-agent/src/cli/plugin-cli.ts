@@ -138,7 +138,7 @@ export function parsePluginArgs(args: string[]): PluginCommandArgs | undefined {
 	return result;
 }
 
-import { classifyInstallTarget } from "./classify-install-target";
+import { classifyInstallTarget, previewMarketplaceInstall } from "./classify-install-target";
 
 export { classifyInstallTarget } from "./classify-install-target";
 
@@ -371,18 +371,9 @@ async function handleInstall(
 		if (target.type === "marketplace") {
 			if (flags.dryRun) {
 				try {
-					const entry = await mktMgr.getPluginInfo(target.name, target.marketplace);
-					if (!entry) {
-						throw new Error(`Plugin "${target.name}" not found in marketplace "${target.marketplace}"`);
-					}
+					const preview = await previewMarketplaceInstall(mktMgr, target);
 					if (flags.json) {
-						console.log(
-							JSON.stringify(
-								{ dryRun: true, action: "install", plugin: target.name, marketplace: target.marketplace },
-								null,
-								2,
-							),
-						);
+						console.log(JSON.stringify(preview, null, 2));
 					} else {
 						console.log(chalk.dim(`[dry-run] Would install ${spec}`));
 					}

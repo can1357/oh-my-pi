@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `omp plugin install --dry-run` now previews marketplace installs without mutating plugin state.
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

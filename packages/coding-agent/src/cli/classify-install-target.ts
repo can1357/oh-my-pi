@@ -52,6 +52,33 @@ export type ClassifiedInstallTarget =
 	| { type: "marketplace"; name: string; marketplace: string }
 	| { type: "npm"; spec: string };
 
+export interface MarketplacePreviewReader {
+	getPluginInfo(name: string, marketplace: string): Promise<unknown>;
+}
+
+export type MarketplaceInstallPreview = {
+	dryRun: true;
+	action: "install";
+	plugin: string;
+	marketplace: string;
+};
+
+export async function previewMarketplaceInstall(
+	manager: MarketplacePreviewReader,
+	target: Extract<ClassifiedInstallTarget, { type: "marketplace" }>,
+): Promise<MarketplaceInstallPreview> {
+	const entry = await manager.getPluginInfo(target.name, target.marketplace);
+	if (!entry) {
+		throw new Error(`Plugin "${target.name}" not found in marketplace "${target.marketplace}"`);
+	}
+	return {
+		dryRun: true,
+		action: "install",
+		plugin: target.name,
+		marketplace: target.marketplace,
+	};
+}
+
 export function classifyInstallTarget(spec: string, knownMarketplaces: Set<string>): ClassifiedInstallTarget {
 	// Rule 0: filesystem path — bypass npm/marketplace validation entirely.
 	if (isLocalPathSpec(spec)) return { type: "local", path: spec };
