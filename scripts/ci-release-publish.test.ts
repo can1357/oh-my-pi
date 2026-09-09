@@ -194,4 +194,34 @@ describe("published file: vendor bundling", () => {
 			await fs.rm(root, { recursive: true, force: true });
 		}
 	});
+
+	it("replaces an existing node_modules symlink to the file: vendor", async () => {
+		const root = await fs.mkdtemp(path.join(os.tmpdir(), "omp-bundle-file-symlink-"));
+		const pkgDir = path.join(root, "package");
+		const vendor = path.join(root, "vendor", "thinking-orbs");
+		try {
+			await fs.mkdir(vendor, { recursive: true });
+			await fs.mkdir(path.join(pkgDir, "node_modules"), { recursive: true });
+			await Bun.write(
+				path.join(vendor, "package.json"),
+				JSON.stringify({ name: "thinking-orbs", version: "0.0.1", type: "module", exports: { ".": "./index.js" } }),
+			);
+			await Bun.write(path.join(vendor, "LICENSE"), "MIT\n");
+			await Bun.write(path.join(vendor, "index.js"), "export const x = 1;\n");
+			await fs.symlink(vendor, path.join(pkgDir, "node_modules", "thinking-orbs"));
+			const manifest = {
+				name: "host-pkg",
+				version: "1.0.0",
+				files: ["src"],
+				dependencies: { "thinking-orbs": "file:../vendor/thinking-orbs" },
+			};
+			await bundleExternalFileDependencies(manifest, pkgDir, true);
+			const nested = path.join(pkgDir, "node_modules", "thinking-orbs");
+			expect((await fs.lstat(nested)).isSymbolicLink()).toBe(false);
+			expect(await Bun.file(path.join(nested, "LICENSE")).text()).toBe("MIT\n");
+			expect(await Bun.file(path.join(vendor, "LICENSE")).text()).toBe("MIT\n");
+		} finally {
+			await fs.rm(root, { recursive: true, force: true });
+		}
+	});
 });

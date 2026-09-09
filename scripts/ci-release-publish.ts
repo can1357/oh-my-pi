@@ -305,7 +305,16 @@ export async function bundleExternalFileDependencies(
 			delete deps[name];
 			bundled.add(name);
 			if (!files.includes(destRel)) files.push(destRel);
-			if (write) await fs.cp(source, path.join(pkgDir, destRel), { recursive: true, force: true });
+			if (write) {
+				// Bun install materializes `file:` deps as symlinks under
+				// node_modules. `fs.cp` rejects when src and dest resolve to the
+				// same path (EINVAL), so drop the link/tree first and copy from
+				// the real vendor path into a nested tree `bun pm pack` can ship.
+				const dest = path.join(pkgDir, destRel);
+				const sourceReal = await fs.realpath(source);
+				await fs.rm(dest, { recursive: true, force: true });
+				await fs.cp(sourceReal, dest, { recursive: true, force: true });
+			}
 		}
 	}
 	manifest.files = files;
