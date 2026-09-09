@@ -191,11 +191,7 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 		});
 		registry.discoverableProviders = ["grokbot"];
 
-		const refreshed = await refreshCredentialScopedModelIfMissing(
-			{ model: "live-only" },
-			registry,
-			"grokbot",
-		);
+		const refreshed = await refreshCredentialScopedModelIfMissing({ model: "live-only" }, registry, "grokbot");
 
 		expect(refreshed).toBe(true);
 		expect(registry.refreshProviderCalls).toEqual([{ providerId: "grokbot", strategy: "online-if-uncached" }]);
@@ -260,11 +256,7 @@ describe("refreshCredentialScopedModelIfMissing", () => {
 		]);
 		registry.discoverableProviders = ["grokbot"];
 
-		const refreshed = await refreshCredentialScopedModelIfMissing(
-			{ model: "sand-default" },
-			registry,
-			"grokbot",
-		);
+		const refreshed = await refreshCredentialScopedModelIfMissing({ model: "sand-default" }, registry, "grokbot");
 
 		expect(refreshed).toBe(false);
 		expect(registry.refreshProviderCalls).toEqual([]);
