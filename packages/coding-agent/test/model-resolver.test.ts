@@ -1127,6 +1127,17 @@ describe("resolveAgentModelPatterns", () => {
 		expect(resolveAgentModelPatterns({ agentModel: "@slow", settings })).toEqual(["local/llama"]);
 	});
 
+	test("uses configured smol for unconfigured tiny before priority defaults", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "local/default",
+				smol: "baseten/custom-smol:max",
+			},
+		});
+
+		expect(resolveAgentModelPatterns({ agentModel: "@tiny", settings })).toEqual(["baseten/custom-smol:max"]);
+	});
+
 	test("expands cross-role default aliases when inheriting for an unset role", () => {
 		const settings = Settings.isolated({
 			modelRoles: { default: "@slow", slow: "anthropic/claude-sonnet-4-5" },
