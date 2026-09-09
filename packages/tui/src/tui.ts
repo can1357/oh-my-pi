@@ -1761,6 +1761,18 @@ export class TUI extends Container {
 		this.#paintEndSequence = enabled ? PAINT_END : PAINT_END_NO_SYNC;
 	}
 
+	/**
+	 * Retire every eligible history batch into native scrollback before quitting.
+	 *
+	 * The only frame path that deliberately does not composite overlays. Its
+	 * output is the transcript the shell prompt lands under, and it forces
+	 * commits that {@link #compositeOverlaysIntoWindow} otherwise relies on being
+	 * frozen while an overlay is up — so a modal painted here would leave debris
+	 * above the prompt and could reach native scrollback. `stop()` drops the
+	 * alternate buffer without unstacking the overlay, so leaving it in would also
+	 * charge a no-longer-painted modal's images against the cap and delete the
+	 * transcript's visible graphics on the way out.
+	 */
 	#flushHistoryBeforeStop(): void {
 		const provider = this.#frameProvider;
 		if (provider?.beginHistoryFlush === undefined) return;
@@ -1776,7 +1788,6 @@ export class TUI extends Container {
 				plan = provider.renderFrame({ columns: width, rows: height });
 				viewport = Array.from(plan.viewport);
 				if (viewport.length > height) viewport = viewport.slice(0, height);
-				viewport = this.#compositeVisibleOverlays(viewport, width, height);
 			} while (this.#imageBudget.endPass());
 			if (plan.history === undefined) return;
 			const acceptedBefore = this.#acceptedHistoryBatchId;

@@ -951,6 +951,59 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
+	it("keeps transcript placements when the shutdown flush runs under a fullscreen overlay", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { placed, deleted } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
+		const behindIds = behind.map((_, i) => tui.imageBudget.acquireId(`behind-${i}`));
+		const modalImages = [makeImage(tui.imageBudget, "modal-0"), makeImage(tui.imageBudget, "modal-1")];
+		let flushing = false;
+		let nextHistoryId = 1;
+		let pendingHistory: string[] | undefined = ["retired row"];
+		tui.setFrameProvider({
+			renderFrame: size => ({
+				history: flushing && pendingHistory !== undefined ? { id: nextHistoryId, rows: pendingHistory } : undefined,
+				viewport: behind.flatMap(image => image.render(size.columns)),
+			}),
+			acknowledgeHistory: id => {
+				if (id !== nextHistoryId) return;
+				pendingHistory = undefined;
+				nextHistoryId++;
+			},
+			beginHistoryFlush: () => {
+				flushing = true;
+			},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(behindIds.every(id => placed.has(id))).toBe(true);
+
+			tui.showOverlay(
+				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+
+			// stop() leaves the alternate buffer but not the overlay stack, so the
+			// flush must not count a modal that is no longer painted: its images
+			// would push the transcript's over the cap and delete them for good.
+			tui.stop();
+			await settle(term);
+
+			expect(deleted.filter(id => behindIds.includes(id))).toEqual([]);
+			expect(behindIds.every(id => placed.has(id))).toBe(true);
+		} finally {
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
 	it("does not demote transcript images under a closing overlay's suppression threshold", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
 		const term = new VirtualTerminal(40, 12);

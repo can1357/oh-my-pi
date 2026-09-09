@@ -260,10 +260,13 @@ export class ImageBudget {
 		this.#stablePass = stable;
 		this.#surface = altScreen ? "alt" : "screen";
 		this.#split = altScreen ? this.#altSplit : this.#screenSplit;
-		// The alternate buffer holds a frame only while it is the current surface:
-		// TUI#doRender routes every alt-buffer owner (fullscreen overlay, resize
-		// borrow) away from the normal-screen paths, so composing for the screen
-		// means nothing stands on alt to protect.
+		// Composing for the screen means the alternate buffer holds no frame to
+		// protect: live renders reach the normal-screen paths only when
+		// TUI#doRender has ruled out both alt-buffer owners, and the one caller
+		// outside that dispatch — the shutdown history flush — writes `?1049l`
+		// first. Note that leaving alt mode is not the same as unstacking a
+		// fullscreen overlay: the flush must exclude one that is still stacked
+		// from the pass itself, which is that caller's job, not this line's.
 		if (!altScreen) this.#liveIds.alt.clear();
 		this.#applyingReset = !stable && this.#cap > 0 && this.#split.planned > this.#split.onTerminal;
 	}
