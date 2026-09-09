@@ -106,6 +106,54 @@ it("discards a departed guest's queued snapshot instead of stalling the next gue
 	);
 }, 15_000);
 
+it("settles an outstanding guest ask when the room is recreated", async () => {
+	const relay = installInMemoryRelay();
+	const probe = instrumentRelay(relay, { throttle: false });
+	const snapshot = makeSnapshot();
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const host = new CollabHost(makeHostContext(snapshot, seen));
+	cleanups.push(() => void host.stop("test done"));
+
+	await host.start("ws://localhost:8788");
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+	const joins = () => seen.notices.filter(notice => notice.includes("joined the collab session")).length;
+
+	const answerer = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	cleanups.push(() => answerer.close());
+	answerer.onOpen = () => answerer.send({ t: "hello", proto: COLLAB_PROTO, name: "answerer", writeToken });
+	answerer.connect();
+	await waitFor(() => joins() >= 1, "host never handled the writable guest");
+
+	// The host asks the guest something and waits on the answer, the way
+	// ExtensionUIController#requestGuestUiString does: a bare await, no local race
+	// and no timeout of its own.
+	const asked = host.requestGuestUi({ kind: "select", title: "pick one", options: [{ label: "a" }, { label: "b" }] });
+	if (!asked) throw new Error("host did not offer the ask to the writable guest");
+
+	// The uplink drops: the relay destroys the room and closes the only guest that
+	// could answer.
+	probe.hostSocket().close();
+	await waitFor(() => probe.hostSocket().readyState === FakeWebSocket.OPEN, "host never reconnected", 8_000);
+
+	// Bounded, so a hang fails an assertion instead of the runner's timeout.
+	const settled = await Promise.race([asked, Bun.sleep(1_000).then(() => "still-waiting" as const)]);
+	expect(settled).toEqual({ kind: "unavailable" });
+
+	// And the question is not re-posed to whoever joins the new room next.
+	const latecomer = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	cleanups.push(() => latecomer.close());
+	const received: CollabFrame[] = [];
+	latecomer.onFrame = frame => received.push(frame);
+	latecomer.onOpen = () => latecomer.send({ t: "hello", proto: COLLAB_PROTO, name: "latecomer", writeToken });
+	latecomer.connect();
+	await waitFor(() => joins() >= 2, "host never handled the latecomer");
+	await Bun.sleep(100);
+	expect(received.filter(frame => frame.t === "ui-request")).toEqual([]);
+}, 30_000);
+
 it("does not let a reissued peer id inherit write permission", async () => {
 	const relay = installInMemoryRelay();
 	const probe = instrumentRelay(relay, { throttle: false });

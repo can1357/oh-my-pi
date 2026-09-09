@@ -139,6 +139,11 @@ export class CollabHost {
 	 * still owed a resync error.
 	 */
 	#peers = new Map<number, { name: string; canWrite: boolean }>();
+	/**
+	 * Never reset, including across a room recreation: ids must not be reissued, or
+	 * a late `ui-response` carrying an old id would settle an unrelated new request.
+	 * An old id that maps to nothing is harmless.
+	 */
 	#uiReqSeq = 0;
 	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
 	#lastStateJson = "";
@@ -542,8 +547,19 @@ export class CollabHost {
 	 * new room can be dispatched against the old identities.
 	 */
 	#handleRoomRecreated(): void {
-		if (this.#stopped || this.#peers.size === 0) return;
+		if (this.#stopped) return;
+		if (this.#peers.size === 0 && this.#pendingUi.size === 0) return;
+		// Identities first: settle() fans `ui-request-end` out over #peers, and those
+		// ids belong to the room that just went away.
 		this.#peers.clear();
+		// The relay closed everyone who could answer, so an outstanding ask has no
+		// recipient. Leaving it pending hangs callers that await it without racing a
+		// local dialog, and #handleHello re-poses every pending request to the next
+		// writable guest — a different occupant of a different room. Matches the
+		// teardown path; settle() is guarded against a second resolve, so a teardown
+		// after this is a no-op.
+		for (const pending of this.#pendingUi.values()) pending.settle({ kind: "unavailable" });
+		this.#pendingUi.clear();
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
 	}
