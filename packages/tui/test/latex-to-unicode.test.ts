@@ -62,6 +62,66 @@ describe("latexToUnicode ANSI colors", () => {
 		expect(stripVTControlCharacters(rendered)).toBe("alert");
 		expect(rendered).toContain(fg("#ff0000"));
 	});
+
+	it("renders text-mode styles with terminal attributes", () => {
+		setTrueColor(true);
+		const rendered = latexToUnicode(String.raw`\textcolor{red}{\textbf{strongest}}`);
+
+		expect(stripVTControlCharacters(rendered)).toBe("strongest");
+		expect(rendered).toContain(fg("#ff0000"));
+		expect(rendered).toContain("\x1b[1m");
+		expect(rendered).not.toMatch(/[\u{1d400}-\u{1d7ff}]/u);
+	});
+
+	it("maps all supported text styles to terminal attributes", () => {
+		for (const [command, on, off] of [
+			["textbf", "\x1b[1m", "\x1b[22m"],
+			["textit", "\x1b[3m", "\x1b[23m"],
+			["textsl", "\x1b[3m", "\x1b[23m"],
+			["emph", "\x1b[3m", "\x1b[23m"],
+		]) {
+			expect(latexToUnicode(`\\${command}{x}`)).toBe(`${on}x${off}`);
+		}
+	});
+
+	it("reopens nested terminal styles after nested resets", () => {
+		const rendered = latexToUnicode(String.raw`\textbf{outer \textbf{inner} outer}`);
+
+		expect(stripVTControlCharacters(rendered)).toBe("outer inner outer");
+		expect(rendered).toContain("\x1b[22m\x1b[1m outer");
+	});
+
+	it("keeps terminal attributes out of glyph transforms", () => {
+		expect(latexToUnicode(String.raw`\hat{\textbf{x}}`)).toBe("\x1b[1mx̂\x1b[22m");
+		expect(latexToUnicode(String.raw`\frac{\textbf{a}}{b}`)).toBe("\x1b[1ma\x1b[22m/b");
+		expect(latexToUnicode(String.raw`\sqrt{\textbf{x}}`)).toBe("√\x1b[1mx\x1b[22m");
+	});
+
+	it("keeps synthetic wrapper glyphs at the caller style", () => {
+		setTrueColor(true);
+
+		expect(latexToUnicode(String.raw`\boxed{\textcolor{red}{x}}`)).toBe(`[${fg("#ff0000")}x${FG_RESET}]`);
+		expect(latexToUnicode(String.raw`\pmod{\textbf{x}}`)).toBe("(mod \x1b[1mx\x1b[22m)");
+	});
+
+	it("keeps fallback script glyphs at the script-site style", () => {
+		expect(latexToUnicode(String.raw`x_{\textit{word}}`)).toBe("x_(\x1b[3mword\x1b[23m)");
+		expect(latexToUnicode(String.raw`x^{\textbf{foo!}}`)).toBe("x^(\x1b[1mfoo!\x1b[22m)");
+	});
+
+	it("cancels an enclosing terminal style for nested text overrides", () => {
+		const bold = latexToUnicode(String.raw`\textbf{A\textmd{B}C}`);
+		const italic = latexToUnicode(String.raw`\textit{A\textup{B}C}`);
+
+		expect(stripVTControlCharacters(bold)).toBe("ABC");
+		expect(stripVTControlCharacters(italic)).toBe("ABC");
+		expect(bold).toBe("\x1b[1mA\x1b[22mB\x1b[1mC\x1b[22m");
+		expect(italic).toBe("\x1b[3mA\x1b[23mB\x1b[3mC\x1b[23m");
+	});
+
+	it("leaves terminal fallbacks as plain text", () => {
+		expect(latexToUnicode(String.raw`\texttt{x}\textsf{y}`)).toBe("xy");
+	});
 });
 
 describe("isBareMathEnvironment", () => {

@@ -1,6 +1,6 @@
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import * as git from "../utils/git";
+import { github } from "../utils/github";
 import { appendRepoFlag, ghApiHostArgs, parseRepoRef } from "./gh-common";
 import type { ViewLookupResult } from "./gh-view";
 import { getOrFetchView, resolveGithubCacheAuthKey } from "./github-cache";
@@ -374,7 +374,7 @@ export async function fetchPrDiffViaFilesApi(
 	signal: AbortSignal | undefined,
 ): Promise<string> {
 	const ref = parseRepoRef(repo);
-	const pull = await git.github.json<GhPrApi>(
+	const pull = await github.json<GhPrApi>(
 		cwd,
 		["api", ...ghApiHostArgs(ref), "--method", "GET", `/repos/${ref.slug}/pulls/${number}`],
 		signal,
@@ -389,7 +389,7 @@ export async function fetchPrDiffViaFilesApi(
 	const sections: string[] = [];
 	let page = 1;
 	while (true) {
-		const response = await git.github.json<GhPrFileApi[]>(
+		const response = await github.json<GhPrFileApi[]>(
 			cwd,
 			[
 				"api",
@@ -429,7 +429,7 @@ export async function fetchPrDiffFresh(
 	appendRepoFlag(args, repo, String(number));
 	let text: string;
 	try {
-		text = await git.github.text(cwd, args, signal, { repoProvided: true, trimOutput: false });
+		text = await github.text(cwd, args, signal, { repoProvided: true, trimOutput: false });
 	} catch (err) {
 		if (!isPrDiffTooLargeError(err)) throw err;
 		logger.debug("gh pr diff exceeded GitHub's aggregate line limit; falling back to per-file API", {

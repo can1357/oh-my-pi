@@ -1,6 +1,6 @@
 import { scheduler } from "node:timers/promises";
 import type { AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
-import * as git from "../utils/git";
+import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type {
 	GhRunWatchFailedLogDetails,
@@ -581,7 +581,7 @@ export async function resolveGitHubBranchHead(
 	signal?: AbortSignal,
 ): Promise<string> {
 	const ref = parseRepoRef(repo);
-	const response = await git.github.json<GhBranchApiResponse>(
+	const response = await github.json<GhBranchApiResponse>(
 		cwd,
 		["api", ...ghApiHostArgs(ref), "--method", "GET", `/repos/${ref.slug}/branches/${encodeURIComponent(branch)}`],
 		signal,
@@ -603,7 +603,7 @@ export async function fetchRunsForCommit(
 	// release workflows (`head_branch=v1.2.3`) or PR-triggered runs
 	// (`head_branch=<pr head>`). See coding-agent issue tracker for details.
 	const ref = parseRepoRef(repo);
-	const response = await git.github.json<GhActionsRunListResponse>(
+	const response = await github.json<GhActionsRunListResponse>(
 		cwd,
 		[
 			"api",
@@ -653,7 +653,7 @@ export async function fetchRunJobs(
 	let page = 1;
 
 	while (true) {
-		const response = await git.github.json<GhActionsJobsResponse>(
+		const response = await github.json<GhActionsJobsResponse>(
 			cwd,
 			[
 				"api",
@@ -697,7 +697,7 @@ export async function fetchRunSnapshot(
 ): Promise<GhRunSnapshot> {
 	const ref = parseRepoRef(repo);
 	const [run, jobs] = await Promise.all([
-		git.github.json<GhActionsRunApi>(
+		github.json<GhActionsRunApi>(
 			cwd,
 			["api", ...ghApiHostArgs(ref), "--method", "GET", `/repos/${ref.slug}/actions/runs/${runId}`],
 			signal,
@@ -731,7 +731,7 @@ export async function fetchFailedJobLogs(
 	const ref = parseRepoRef(repo);
 	return Promise.all(
 		failedJobs.map(async entry => {
-			const result = await git.github.run(
+			const result = await github.run(
 				cwd,
 				["api", ...ghApiHostArgs(ref), `/repos/${ref.slug}/actions/jobs/${entry.job.id}/logs`],
 				signal,

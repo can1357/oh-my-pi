@@ -1,7 +1,8 @@
 import * as path from "node:path";
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { untilAborted } from "@oh-my-pi/pi-utils";
-import * as git from "../utils/git";
+import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "./gh";
 import type { GhLabel, GhUser } from "./gh-types";
@@ -108,7 +109,8 @@ export const PR_URL_PATTERN = /^https:\/\/([^/]+)\/([^/]+\/[^/]+)\/pull\/(\d+)(?
 export const ISSUE_URL_PATTERN = /^https:\/\/([^/]+)\/([^/]+\/[^/]+)\/issues\/(\d+)(?:\/.*)?$/;
 
 export async function requireCurrentGitBranch(cwd: string, signal?: AbortSignal): Promise<string> {
-	const branch = await git.branch.current(cwd, signal);
+	const repo = vcs.git(cwd);
+	const branch = repo ? await repo.currentBranch(signal).catch(() => null) : null;
 	if (!branch) {
 		throw new ToolError("Current git branch is unavailable. Pass `branch` or `run` explicitly.");
 	}
@@ -117,7 +119,8 @@ export async function requireCurrentGitBranch(cwd: string, signal?: AbortSignal)
 }
 
 export async function requireCurrentGitHead(cwd: string, signal?: AbortSignal): Promise<string> {
-	const headSha = await git.head.sha(cwd, signal);
+	const repo = vcs.git(cwd);
+	const headSha = repo ? await repo.headSha(signal).catch(() => null) : null;
 	if (!headSha) {
 		throw new ToolError("Current git HEAD is unavailable. Pass `run` explicitly.");
 	}
@@ -217,10 +220,7 @@ export function githubRepoSlugEquals(left: string | undefined, right: string): b
  * the host `gh` itself resolved from the remote.
  */
 async function resolveRepoFromCwd(cwd: string, signal?: AbortSignal): Promise<string> {
-	const url = requireNonEmpty(
-		await git.github.text(cwd, ["repo", "view", "--json", "url", "-q", ".url"], signal),
-		"repo",
-	);
+	const url = requireNonEmpty(await github.text(cwd, ["repo", "view", "--json", "url", "-q", ".url"], signal), "repo");
 	const repo = repoFromUrl(url);
 	if (!repo) {
 		throw new ToolError(`GitHub CLI returned an unrecognized repository URL: ${url}`);

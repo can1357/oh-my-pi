@@ -1140,6 +1140,11 @@ export class AskDialogComponent implements Component, Focusable {
 			if (!question.multi) {
 				state.selectedOptions.clear();
 				clearNoteUnlessRow(state, rowItem.key);
+			}
+			if (question.multi && this.#questions.length === 1) {
+				this.#activeTabIndex = this.#submitTabIndex();
+				this.#submitScrollOffset = 0;
+			} else {
 				this.#advanceAfterQuestion();
 			}
 		} finally {

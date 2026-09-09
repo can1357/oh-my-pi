@@ -15,6 +15,60 @@ async function waitUntil(condition: () => boolean | Promise<boolean>, timeoutMs:
 	return condition();
 }
 
+type ConsumerProcess = Bun.Subprocess<"pipe", "ignore", "pipe">;
+
+interface ObservedConsumer {
+	process: ConsumerProcess;
+	stderr: () => string;
+	stderrClosed: Promise<void>;
+}
+
+function observeConsumer(process: ConsumerProcess): ObservedConsumer {
+	let stderr = "";
+	const stderrClosed = (async () => {
+		const decoder = new TextDecoder();
+		for await (const chunk of process.stderr) {
+			stderr += decoder.decode(chunk, { stream: true });
+		}
+		stderr += decoder.decode();
+	})();
+	return { process, stderr: () => stderr, stderrClosed };
+}
+
+async function waitForConsumerReady(consumer: ObservedConsumer, marker: string, timeoutMs: number): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (Date.now() < deadline) {
+		if (await Bun.file(marker).exists()) return;
+		if (consumer.process.exitCode !== null) break;
+		// The readiness signal crosses a real child-process/filesystem boundary, so fake timers cannot drive it.
+		await Promise.race([Bun.sleep(50), consumer.process.exited]);
+	}
+	if (await Bun.file(marker).exists()) return;
+	const exitCode = consumer.process.exitCode;
+	if (exitCode !== null) {
+		await consumer.stderrClosed;
+		const stderr = consumer.stderr().trim();
+		throw new Error(
+			`Relay consumer exited with code ${exitCode} before becoming ready${stderr ? `:\n${stderr}` : ""}`,
+		);
+	}
+	expect(
+		false,
+		`Relay consumer did not become ready within ${timeoutMs}ms; stderr: ${consumer.stderr().trim() || "(empty)"}`,
+	).toBeTrue();
+}
+
+async function stopConsumer(consumer: ObservedConsumer): Promise<void> {
+	consumer.process.stdin.end();
+	const [exitCode] = await Promise.all([consumer.process.exited, consumer.stderrClosed]);
+	if (exitCode !== 0) throw new Error(consumer.stderr());
+}
+
+async function terminateConsumer(consumer: ObservedConsumer): Promise<void> {
+	if (consumer.process.exitCode === null) consumer.process.kill();
+	await Promise.all([consumer.process.exited, consumer.stderrClosed]);
+}
+
 describe("browser relay daemon", () => {
 	it("bypasses HTTP_PROXY when probing the loopback relay", async () => {
 		let relayHits = 0;
@@ -74,6 +128,24 @@ process.stdout.write(String(await probeRelayServer(url)));`,
 		}
 	});
 
+	it("surfaces stderr when a consumer exits before becoming ready", async () => {
+		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-failed-consumer-"));
+		const marker = path.join(home, "ready");
+		const consumer = observeConsumer(
+			Bun.spawn([process.execPath, "-e", 'console.error("synthetic relay startup failure"); process.exit(1)'], {
+				stdin: "pipe",
+				stdout: "ignore",
+				stderr: "pipe",
+			}),
+		);
+		try {
+			await expect(waitForConsumerReady(consumer, marker, 5_000)).rejects.toThrow("synthetic relay startup failure");
+		} finally {
+			await terminateConsumer(consumer);
+			await fs.rm(home, { recursive: true, force: true });
+		}
+	});
+
 	it("stays alive while a consumer in another project holds the global broker lease", async () => {
 		const home = await fs.mkdtemp(path.join(os.tmpdir(), "omp-relay-global-"));
 		const firstProject = path.join(home, "project-a");
@@ -107,50 +179,45 @@ try {
 		);
 
 		const spawnConsumer = (cwd: string, profile: string, marker: string) =>
-			Bun.spawn([process.execPath, scriptPath], {
-				cwd,
-				env: {
-					...process.env,
-					HOME: home,
-					USERPROFILE: home,
-					PI_CONFIG_DIR: ".omp",
-					OMP_PROFILE: profile,
-					OMP_DAEMON_IDLE_GRACE_MS: "200",
-					OMP_TEST_RELAY_URL: cdpUrl,
-					OMP_TEST_READY_MARKER: marker,
-				},
-				stdin: "pipe",
-				stdout: "ignore",
-				stderr: "pipe",
-			});
+			observeConsumer(
+				Bun.spawn([process.execPath, scriptPath], {
+					cwd,
+					env: {
+						...process.env,
+						HOME: home,
+						USERPROFILE: home,
+						PI_CONFIG_DIR: ".omp",
+						OMP_PROFILE: profile,
+						OMP_DAEMON_IDLE_GRACE_MS: "200",
+						OMP_TEST_RELAY_URL: cdpUrl,
+						OMP_TEST_READY_MARKER: marker,
+					},
+					stdin: "pipe",
+					stdout: "ignore",
+					stderr: "pipe",
+				}),
+			);
 
 		const first = spawnConsumer(firstProject, "profile-a", firstMarker);
 		try {
-			expect(await waitUntil(() => Bun.file(firstMarker).exists(), 15_000)).toBeTrue();
+			await waitForConsumerReady(first, firstMarker, 15_000);
 			expect(await probeRelayServer(cdpUrl)).toBeTrue();
 
 			const second = spawnConsumer(secondProject, "profile-b", secondMarker);
 			try {
-				expect(await waitUntil(() => Bun.file(secondMarker).exists(), 15_000)).toBeTrue();
-				first.stdin.end();
-				const firstExit = await first.exited;
-				if (firstExit !== 0) throw new Error(await new Response(first.stderr).text());
-
+				await waitForConsumerReady(second, secondMarker, 15_000);
+				await stopConsumer(first);
 				// The global broker's real idle clock must pass while the second client remains connected.
 				await Bun.sleep(500);
 				expect(await probeRelayServer(cdpUrl)).toBeTrue();
 
-				second.stdin.end();
-				const secondExit = await second.exited;
-				if (secondExit !== 0) throw new Error(await new Response(second.stderr).text());
+				await stopConsumer(second);
 				expect(await waitUntil(async () => !(await probeRelayServer(cdpUrl)), 5_000)).toBeTrue();
 			} finally {
-				if (second.exitCode === null) second.kill();
-				await second.exited;
+				await terminateConsumer(second);
 			}
 		} finally {
-			if (first.exitCode === null) first.kill();
-			await first.exited;
+			await terminateConsumer(first);
 			const rescue = await createDaemonBrokerClient(globalRuntimeDir, {
 				runtimeDir: globalRuntimeDir,
 				idleGraceMs: 200,

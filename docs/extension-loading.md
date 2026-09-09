@@ -225,8 +225,8 @@ Implication: if the same module path is both auto-discovered and explicitly conf
 
 Each candidate path is loaded via `loadLegacyPiModule()` (`src/extensibility/plugins/legacy-pi-compat.ts`):
 
-- the entry's realpath is resolved, then dynamically imported with an `?mtime` cache-buster so edited source reloads
-- a scoped Bun `onLoad` hook rewrites legacy pi-package specifiers (`@mariozechner/*`, `@earendil-works/*`) and bare `@sinclair/typebox` onto the host-bundled copies before evaluation
+- the entry's realpath is resolved, then dynamically imported with an `?mtime` cache-buster so edited source reloads. Since 16.3.7 the same mtime tag propagates to every module in the extension-owned dependency graph — relative `./`/`../` imports, package `imports` aliases (`#alias/*`), and extension-local bare dependencies — via the graph-wide `onLoad` rewrite, so same-process re-imports pick up edits across the whole graph, not just the entry file. Host-resolved rewrites (legacy pi-package specifiers, the TypeBox shim) stay untagged `file://` URLs because they point at in-process host code that never changes between reloads
+- a scoped Bun `onLoad` hook rewrites legacy pi-package specifiers (`@mariozechner/*`, `@earendil-works/*`) and bare `@sinclair/typebox` onto the host-bundled copies before evaluation. Legacy Pi package-root imports resolve through compat shims: catalog symbols that moved to `@oh-my-pi/pi-catalog/models` (`calculateCost`, `modelsAreEqual`, `getBundledProviders`, plus `getModel`/`getModels` aliases) are re-exported by the legacy pi-ai shim (`src/extensibility/legacy-pi-ai-shim.ts`), and legacy `@oh-my-pi/pi-coding-agent` imports — including `DefaultResourceLoader` — resolve to the compat loader in `src/extensibility/legacy-pi-coding-agent-shim.ts`
 - factory is selected by `getExtensionFactory(module)`: the module itself if it is a function, otherwise `module.default`
 - factory must be a function (`ExtensionFactory`) and may return `void` or a promise; loading awaits it before continuing to the next path
 

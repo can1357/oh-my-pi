@@ -9,11 +9,11 @@ const LEGACY_TIMESTAMP = 1_700_000_000;
 let tempDir: TempDir | null = null;
 
 beforeEach(() => {
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 });
 
 afterEach(async () => {
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 	if (tempDir) {
 		await Bun.sleep(0);
 		await tempDir.remove().catch(() => {});
@@ -121,7 +121,7 @@ it("collapses preexisting whitespace-padded duplicates on open, keeping the late
 	tempDir = TempDir.createSync("@omp-history-storage-padded-");
 	const dbPath = tempDir.join("history.db");
 	HistoryStorage.open(dbPath);
-	HistoryStorage.resetInstance();
+	HistoryStorage.close();
 
 	const raw = new Database(dbPath);
 	const insert = raw.prepare("INSERT INTO history (prompt, created_at, cwd, session_id) VALUES (?, ?, ?, ?)");

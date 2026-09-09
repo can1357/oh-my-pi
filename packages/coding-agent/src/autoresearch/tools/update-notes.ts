@@ -1,9 +1,9 @@
 import { type } from "@oh-my-pi/omptype";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { Text } from "@oh-my-pi/pi-tui";
 import type { ToolDefinition } from "../../extensibility/extensions";
 import type { Theme } from "../../modes/theme/theme";
 import { replaceTabs, truncateToWidth } from "../../tools/render-utils";
-import * as git from "../../utils/git";
 import { buildExperimentState } from "../state";
 import { openAutoresearchStorageIfExists } from "../storage";
 import type { AutoresearchToolFactoryOptions } from "../types";
@@ -29,7 +29,7 @@ export function createUpdateNotesTool(
 		defaultInactive: true,
 		async execute(_toolCallId, params, _signal, _onUpdate, ctx) {
 			const storage = await openAutoresearchStorageIfExists(ctx.cwd);
-			const currentBranch = (await git.branch.current(ctx.cwd)) ?? null;
+			const currentBranch = (await vcs.git(ctx.cwd)?.currentBranch()) ?? null;
 			const session = storage?.getActiveSessionForBranch(currentBranch) ?? null;
 			if (!storage || !session) {
 				return {

@@ -200,6 +200,58 @@ describe("Editor slash autocomplete acceptance", () => {
 			fs.rmSync(baseDir, { recursive: true, force: true });
 		}
 	});
+
+	it("keeps autocomplete open after accepting an @ directory with Tab", async () => {
+		const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "editor-at-directory-tab-"));
+		try {
+			fs.mkdirSync(path.join(baseDir, "packages", "tui"), { recursive: true });
+			fs.mkdirSync(path.join(baseDir, "packages", "utils"), { recursive: true });
+			const editor = new Editor(defaultEditorTheme);
+			editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], baseDir));
+			editor.setText("@pack");
+
+			const autocompleteOpened = untilAutocompleteShown(editor);
+			editor.handleInput("\t");
+			await autocompleteOpened;
+
+			editor.handleInput("\t");
+			await untilAutocompleteShown(editor);
+
+			expect(editor.getText()).toBe("@packages/");
+			expect(editor.isShowingAutocomplete()).toBe(true);
+		} finally {
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
+	it("keeps autocomplete open after accepting an @ directory with Enter", async () => {
+		const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "editor-at-directory-enter-"));
+		try {
+			fs.mkdirSync(path.join(baseDir, "packages", "tui"), { recursive: true });
+			fs.mkdirSync(path.join(baseDir, "packages", "utils"), { recursive: true });
+			const editor = new Editor(defaultEditorTheme);
+			editor.setAutocompleteProvider(new CombinedAutocompleteProvider([], baseDir));
+			let submitted = "";
+			editor.onSubmit = text => {
+				submitted = text;
+			};
+			editor.setText("@pack");
+
+			const autocompleteOpened = untilAutocompleteShown(editor);
+			editor.handleInput("\t");
+			await autocompleteOpened;
+
+			editor.handleInput("\r");
+			await untilAutocompleteShown(editor);
+
+			expect(editor.getText()).toBe("@packages/");
+			expect(editor.isShowingAutocomplete()).toBe(true);
+			expect(submitted).toBe("");
+		} finally {
+			fs.rmSync(baseDir, { recursive: true, force: true });
+		}
+	});
+
 	it("shows a sole forced file suggestion before applying it", async () => {
 		const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "editor-single-file-tab-"));
 		try {
@@ -228,6 +280,43 @@ describe("Editor slash autocomplete acceptance", () => {
 		} finally {
 			fs.rmSync(baseDir, { recursive: true, force: true });
 		}
+	});
+	it("accepts the selection with right arrow when the cursor is at end of line", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "skills:fix-bug", description: "Fix a bug" }], "/tmp"),
+		);
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+		editor.handleInput("s");
+		editor.handleInput("k");
+		editor.handleInput("i");
+		await untilAutocompleteShown(editor);
+
+		editor.handleInput("\x1b[C");
+
+		expect(editor.getText()).toBe("/skills:fix-bug ");
+	});
+
+	it("keeps right arrow as cursor movement mid-line while the popup is open", async () => {
+		const editor = new Editor(defaultEditorTheme);
+		editor.setAutocompleteProvider(
+			new CombinedAutocompleteProvider([{ name: "skills:fix-bug", description: "Fix a bug" }], "/tmp"),
+		);
+
+		editor.handleInput("/");
+		await untilAutocompleteShown(editor);
+		editor.handleInput("s");
+		editor.handleInput("k");
+		editor.handleInput("i");
+		await untilAutocompleteShown(editor);
+
+		editor.handleInput("\x1b[D"); // Left: cursor now mid-line before "i"
+		editor.handleInput("\x1b[C"); // Right: plain movement back to EOL, no accept
+
+		expect(editor.getText()).toBe("/ski");
+		expect(editor.getCursor()).toEqual({ line: 0, col: 4 });
 	});
 });
 class SyncSlashProvider implements AutocompleteProvider {

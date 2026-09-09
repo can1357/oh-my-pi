@@ -11,7 +11,7 @@
  * requests a repaint via #onBranchChange. (Post-dispose suppression of the
  * same callback is covered by status-line-dispose-async-leak.test.ts.)
  */
-import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
@@ -20,9 +20,8 @@ import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config
 import type { StatusLineSettings } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { StatusLineComponent } from "@oh-my-pi/pi-coding-agent/modes/components/status-line";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { GitHeadState, GitRefHead, GitRepository } from "@oh-my-pi/pi-coding-agent/utils/git";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
-import * as jj from "@oh-my-pi/pi-coding-agent/utils/jj";
+import type { VcsGitRepo, VcsGitRepoInfo, VcsHeadState, VcsRepo } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 
 type GitStatus = { staged: number; unstaged: number; untracked: number };
@@ -74,18 +73,97 @@ function makeSession() {
 	} as unknown as ConstructorParameters<typeof StatusLineComponent>[0];
 }
 
-const fakeRefHead: GitRefHead = {
+const fakeRefHead: VcsHeadState = {
 	kind: "ref",
-	branchName: "main",
-	ref: "refs/heads/main",
-	commit: null,
+	branch: "main",
+	refName: "refs/heads/main",
+	commit: undefined,
+};
+const fakeRepoInfo: VcsGitRepoInfo = {
 	commonDir: "/fake/.git",
 	gitDir: "/fake/.git",
 	gitEntryPath: "/fake/.git",
 	headPath: "/fake/.git/HEAD",
 	repoRoot: "/fake",
-	headContent: "ref: refs/heads/main\n",
+	isReftable: false,
 };
+
+const gitControls = {
+	defaultBranch: vi.fn(async (_signal?: AbortSignal): Promise<string | null> => null),
+	head: vi.fn(async (_signal?: AbortSignal): Promise<VcsHeadState | null> => fakeRefHead),
+	headSync: vi.fn((): VcsHeadState | null => fakeRefHead),
+	statusSummary: vi.fn(async (_signal?: AbortSignal): Promise<GitStatus | null> => ({
+		staged: 0,
+		unstaged: 0,
+		untracked: 0,
+	})),
+};
+
+const fakeRepository = {
+	defaultBranch: (signal?: AbortSignal) => gitControls.defaultBranch(signal),
+	head: (signal?: AbortSignal) => gitControls.head(signal),
+	headSync: () => gitControls.headSync(),
+	linkedWorktree: () => null,
+	statusSummary: (signal?: AbortSignal) => gitControls.statusSummary(signal),
+} as unknown as VcsGitRepo;
+
+const jjControls = {
+	statusSummary: vi.fn(async (_signal?: AbortSignal): Promise<GitStatus | null> => ({
+		staged: 0,
+		unstaged: 0,
+		untracked: 0,
+	})),
+	label: vi.fn(async (_signal?: AbortSignal): Promise<string | null> => null),
+};
+
+function unifiedGit(repository: VcsGitRepo, info: VcsGitRepoInfo = fakeRepoInfo): VcsRepo {
+	return {
+		kind: () => "git",
+		asGit: () => repository,
+		asJj: () => null,
+		root: () => info.repoRoot,
+		watchTarget: () => info.headPath,
+		statusSummary: (signal?: AbortSignal) => repository.statusSummary(signal),
+	} as unknown as VcsRepo;
+}
+
+const fakeVcsRepository = unifiedGit(fakeRepository);
+
+const fakeJjRepository = {
+	kind: () => "jj",
+	asGit: () => null,
+	asJj: () => null,
+	root: () => "/fake/jj/root",
+	watchTarget: () => "/fake/jj/root/.jj/repo/op_heads/heads",
+	statusSummary: (signal?: AbortSignal) => jjControls.statusSummary(signal),
+	label: (signal?: AbortSignal) => jjControls.label(signal),
+} as unknown as VcsRepo;
+
+beforeEach(() => {
+	gitControls.defaultBranch.mockReset().mockResolvedValue(null);
+	gitControls.head.mockReset().mockResolvedValue(fakeRefHead);
+	gitControls.headSync.mockReset().mockReturnValue(fakeRefHead);
+	gitControls.statusSummary.mockReset().mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
+	jjControls.statusSummary.mockReset().mockResolvedValue({ staged: 0, unstaged: 0, untracked: 0 });
+	jjControls.label.mockReset().mockResolvedValue(null);
+	vi.spyOn(vcs, "gitInfo").mockReturnValue(fakeRepoInfo);
+	vi.spyOn(vcs, "git").mockReturnValue(fakeRepository);
+	vi.spyOn(vcs, "repo").mockReturnValue(fakeVcsRepository);
+});
+
+function useReftable(info: Partial<VcsGitRepoInfo> = {}): void {
+	vi.spyOn(vcs, "gitInfo").mockReturnValue({ ...fakeRepoInfo, ...info, isReftable: true });
+}
+
+function fakeRepoHandle(info: VcsGitRepoInfo, branch: string): VcsRepo {
+	const repository = {
+		defaultBranch: (signal?: AbortSignal) => gitControls.defaultBranch(signal),
+		headSync: () => ({ ...fakeRefHead, branch, refName: `refs/heads/${branch}` }),
+		linkedWorktree: () => null,
+		statusSummary: (signal?: AbortSignal) => gitControls.statusSummary(signal),
+	} as unknown as VcsGitRepo;
+	return unifiedGit(repository, info);
+}
 
 const gitSegment: StatusLineSettings = {
 	preset: "custom",
@@ -98,10 +176,10 @@ const gitSegment: StatusLineSettings = {
 
 describe("StatusLineComponent repaints when an async VCS fetch resolves", () => {
 	it("fires #onBranchChange when git status resolves on the cold paint", async () => {
-		vi.spyOn(git.head, "resolveSync").mockReturnValue(fakeRefHead);
-		vi.spyOn(git.branch, "default").mockReturnValue(Promise.withResolvers<string | null>().promise);
+		gitControls.headSync.mockReturnValue(fakeRefHead);
+		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
 		const status = Promise.withResolvers<GitStatus | null>();
-		vi.spyOn(git.status, "summary").mockReturnValue(status.promise);
+		gitControls.statusSummary.mockReturnValue(status.promise);
 
 		const onBranchChange = vi.fn();
 		const component = new StatusLineComponent(makeSession());
@@ -120,12 +198,12 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 	});
 
 	it("fires #onBranchChange when the jj label resolves on the cold paint", async () => {
-		vi.spyOn(git.head, "resolveSync").mockReturnValue(null); // no git branch -> jj overlay
-		vi.spyOn(git.branch, "default").mockReturnValue(Promise.withResolvers<string | null>().promise);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise); // isolate the jj fire
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue("/fake/jj/root");
+		gitControls.headSync.mockReturnValue(null); // no git branch -> jj overlay
+		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise); // isolate the jj fire
+		vi.spyOn(vcs, "repo").mockReturnValue(fakeJjRepository);
 		const label = Promise.withResolvers<string | null>();
-		vi.spyOn(jj.workingCopy, "label").mockReturnValue(label.promise);
+		jjControls.label.mockReturnValue(label.promise);
 
 		const onBranchChange = vi.fn();
 		const component = new StatusLineComponent(makeSession());
@@ -144,13 +222,13 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 	});
 
 	it("fires #onBranchChange when jj status resolves on the cold paint", async () => {
-		vi.spyOn(git.head, "resolveSync").mockReturnValue(null); // no git -> jj repo
-		vi.spyOn(git.branch, "default").mockReturnValue(Promise.withResolvers<string | null>().promise);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue("/fake/jj/root");
-		vi.spyOn(jj.workingCopy, "label").mockReturnValue(Promise.withResolvers<string | null>().promise); // isolate the status fire
+		gitControls.headSync.mockReturnValue(null); // no git -> jj repo
+		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
+		vi.spyOn(vcs, "repo").mockReturnValue(fakeJjRepository);
+		jjControls.label.mockReturnValue(Promise.withResolvers<string | null>().promise); // isolate the status fire
 		const status = Promise.withResolvers<GitStatus | null>();
-		vi.spyOn(jj.status, "summary").mockReturnValue(status.promise);
+		jjControls.statusSummary.mockReturnValue(status.promise);
 
 		const onBranchChange = vi.fn();
 		const component = new StatusLineComponent(makeSession());
@@ -170,32 +248,21 @@ describe("StatusLineComponent repaints when an async VCS fetch resolves", () => 
 });
 describe("StatusLineComponent reftable branch resolve honors mid-flight invalidation", () => {
 	it("discards a stale resolve invalidated mid-flight, keeps the fresh one", async () => {
-		// Force the reftable async-resolve path: #getCurrentBranch only spawns
-		// git.head.resolve when the repo resolves as reftable.
-		const fakeRepo = {
-			commonDir: "/fake/.git",
-			gitDir: "/fake/.git",
-			gitEntryPath: "/fake/.git",
-			headPath: "/fake/.git/HEAD",
-			repoRoot: "/fake",
-		} satisfies GitRepository;
-		vi.spyOn(git.repo, "resolveSync").mockReturnValue(fakeRepo);
-		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
+		// Force the reftable async-resolve path.
+		useReftable();
 		// Keep the sibling async fetches quiet so only the branch resolve drives
 		// #onBranchChange: git.status stays in flight forever, jj is no repo here.
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue(null);
-
-		const refHead = (branchName: string): GitRefHead => ({
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
+		const refHead = (branchName: string): VcsHeadState => ({
 			...fakeRefHead,
-			branchName,
-			ref: `refs/heads/${branchName}`,
+			branch: branchName,
+			refName: `refs/heads/${branchName}`,
 		});
 
 		// Two controllable resolves: the stale one (R1) then the fresh one (R2).
-		const r1 = Promise.withResolvers<GitHeadState | null>();
-		const r2 = Promise.withResolvers<GitHeadState | null>();
-		const resolveSpy = vi.spyOn(git.head, "resolve");
+		const r1 = Promise.withResolvers<VcsHeadState | null>();
+		const r2 = Promise.withResolvers<VcsHeadState | null>();
+		const resolveSpy = gitControls.head;
 		resolveSpy.mockReturnValueOnce(r1.promise);
 		resolveSpy.mockReturnValueOnce(r2.promise);
 
@@ -206,7 +273,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 
 		// Cold paint kicks the stale resolve (R1).
 		component.getTopBorder(80);
-		expect(git.head.resolve).toHaveBeenCalledTimes(1);
+		expect(gitControls.head).toHaveBeenCalledTimes(1);
 
 		// A HEAD move fires the watcher: invalidateGitCaches bumps the
 		// generation and releases the in-flight slot.
@@ -214,7 +281,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 
 		// The repaint starts a fresh resolve (R2) for the same cwd.
 		component.getTopBorder(80);
-		expect(git.head.resolve).toHaveBeenCalledTimes(2);
+		expect(gitControls.head).toHaveBeenCalledTimes(2);
 
 		// R1 (stale) lands first. Pre-fix it passed the in-flight-cwd guard
 		// (R2 had re-set the slot), installed the stale branch, cleared the
@@ -233,33 +300,23 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 
 		// The committed value is the fresh branch, served from cache with no new
 		// resolve, and the stale name never reaches the rendered segment.
-		expect(git.head.resolve).toHaveBeenCalledTimes(2);
+		expect(gitControls.head).toHaveBeenCalledTimes(2);
 		const border = component.getTopBorder(80);
 		expect(border.content).toContain("fresh-branch");
 		expect(border.content).not.toContain("stale-branch");
-		expect(git.head.resolve).toHaveBeenCalledTimes(2);
+		expect(gitControls.head).toHaveBeenCalledTimes(2);
 
 		component.dispose();
 	});
 
 	it("aborts an invalidated resolve and starts only one replacement resolve", async () => {
-		const fakeRepo = {
-			commonDir: "/fake/.git",
-			gitDir: "/fake/.git",
-			gitEntryPath: "/fake/.git",
-			headPath: "/fake/.git/HEAD",
-			repoRoot: "/fake",
-		} satisfies GitRepository;
-		vi.spyOn(git.repo, "resolveSync").mockReturnValue(fakeRepo);
-		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue(null);
-
+		useReftable();
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
 		const signals: AbortSignal[] = [];
-		vi.spyOn(git.head, "resolve").mockImplementation((_cwd, signal) => {
+		gitControls.head.mockImplementation(signal => {
 			if (!signal) throw new Error("reftable resolve must receive an abort signal");
 			signals.push(signal);
-			const { promise, reject } = Promise.withResolvers<GitHeadState | null>();
+			const { promise, reject } = Promise.withResolvers<VcsHeadState | null>();
 			signal.addEventListener("abort", () => reject(signal.reason), { once: true });
 			return promise;
 		});
@@ -267,14 +324,14 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 		const component = new StatusLineComponent(makeSession());
 		component.updateSettings(gitSegment);
 		component.getTopBorder(80);
-		expect(git.head.resolve).toHaveBeenCalledTimes(1);
+		expect(gitControls.head).toHaveBeenCalledTimes(1);
 
 		component.invalidateGitCaches();
 		expect(signals[0]?.aborted).toBe(true);
 		component.invalidateGitCaches();
 		component.getTopBorder(80);
 		component.getTopBorder(80);
-		expect(git.head.resolve).toHaveBeenCalledTimes(2);
+		expect(gitControls.head).toHaveBeenCalledTimes(2);
 
 		component.dispose();
 		expect(signals[1]?.aborted).toBe(true);
@@ -282,24 +339,15 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 	});
 
 	it("generic invalidate does not abort or restart a live reftable HEAD resolve", async () => {
-		const fakeRepo = {
-			commonDir: "/fake/.git",
-			gitDir: "/fake/.git",
-			gitEntryPath: "/fake/.git",
-			headPath: "/fake/.git/HEAD",
-			repoRoot: "/fake",
-		} satisfies GitRepository;
-		vi.spyOn(git.repo, "resolveSync").mockReturnValue(fakeRepo);
-		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue(null);
+		useReftable();
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
 		vi.spyOn(nodeFs, "watchFile").mockImplementation(() => {
 			throw new Error("watch unavailable");
 		});
 
 		const signals: AbortSignal[] = [];
-		const { promise, reject } = Promise.withResolvers<GitHeadState | null>();
-		vi.spyOn(git.head, "resolve").mockImplementation((_cwd, signal) => {
+		const { promise, reject } = Promise.withResolvers<VcsHeadState | null>();
+		gitControls.head.mockImplementation(signal => {
 			if (!signal) throw new Error("reftable resolve must receive an abort signal");
 			signals.push(signal);
 			signal.addEventListener("abort", () => reject(signal.reason), { once: true });
@@ -310,7 +358,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 		component.updateSettings(gitSegment);
 		component.watchBranch(vi.fn());
 		component.getTopBorder(80);
-		expect(git.head.resolve).toHaveBeenCalledTimes(1);
+		expect(gitControls.head).toHaveBeenCalledTimes(1);
 
 		// Many generic invalidations (message events, model switches, theme
 		// changes, …) must not abort the live resolve or fan out replacement
@@ -323,7 +371,7 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 		component.getTopBorder(80);
 
 		expect(signals[0]?.aborted).toBe(false);
-		expect(git.head.resolve).toHaveBeenCalledTimes(1);
+		expect(gitControls.head).toHaveBeenCalledTimes(1);
 
 		// Disposal still aborts the in-flight resolve.
 		component.dispose();
@@ -332,25 +380,16 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 	});
 
 	it("polls a reftable branch after HEAD watcher installation fails", async () => {
-		const fakeRepo = {
-			commonDir: "/fake/.git",
-			gitDir: "/fake/.git",
-			gitEntryPath: "/fake/.git",
-			headPath: "/fake/.git/HEAD",
-			repoRoot: "/fake",
-		} satisfies GitRepository;
-		vi.spyOn(git.repo, "resolveSync").mockReturnValue(fakeRepo);
-		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue(null);
+		useReftable();
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
 		vi.spyOn(nodeFs, "watchFile").mockImplementation(() => {
 			throw new Error("watch unavailable");
 		});
 		let now = 1_000_000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
-		vi.spyOn(git.head, "resolve")
-			.mockResolvedValueOnce({ ...fakeRefHead, branchName: "before-change", ref: "refs/heads/before-change" })
-			.mockResolvedValueOnce({ ...fakeRefHead, branchName: "after-change", ref: "refs/heads/after-change" });
+		gitControls.head
+			.mockResolvedValueOnce({ ...fakeRefHead, branch: "before-change", refName: "refs/heads/before-change" })
+			.mockResolvedValueOnce({ ...fakeRefHead, branch: "after-change", refName: "refs/heads/after-change" });
 
 		const component = new StatusLineComponent(makeSession());
 		component.updateSettings(gitSegment);
@@ -359,12 +398,12 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(component.getTopBorder(80).content).toContain("before-change");
-		expect(git.head.resolve).toHaveBeenCalledTimes(1);
+		expect(gitControls.head).toHaveBeenCalledTimes(1);
 
 		// No filesystem event arrives, but the next bounded poll observes the new HEAD.
 		now += 5_001;
 		component.getTopBorder(80);
-		expect(git.head.resolve).toHaveBeenCalledTimes(2);
+		expect(gitControls.head).toHaveBeenCalledTimes(2);
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(component.getTopBorder(80).content).toContain("after-change");
@@ -375,30 +414,26 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 		const jjRootDir = await fs.mkdtemp(path.join(os.tmpdir(), "status-line-jj-root-"));
 		const nestedGitCwd = path.join(jjRootDir, "nested-ordinary-git");
 		await fs.mkdir(nestedGitCwd);
-		const fakeRepo = {
+		useReftable({
 			commonDir: `${nestedGitCwd}/.git`,
 			gitDir: `${nestedGitCwd}/.git`,
 			gitEntryPath: `${nestedGitCwd}/.git`,
 			headPath: `${nestedGitCwd}/.git/HEAD`,
 			repoRoot: nestedGitCwd,
-		} satisfies GitRepository;
-		vi.spyOn(git.repo, "resolveSync").mockReturnValue(fakeRepo);
-		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
-		vi.spyOn(git.head, "resolve").mockReturnValue(Promise.withResolvers<GitHeadState | null>().promise);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		const jjRoot = vi.spyOn(jj.repo, "rootSync").mockReturnValue("/workspace/jj-root");
-		const jjLabel = vi.spyOn(jj.workingCopy, "label").mockReturnValue(Promise.resolve("ancestor-bookmark"));
-		const jjStatus = vi
-			.spyOn(jj.status, "summary")
-			.mockReturnValue(Promise.resolve({ staged: 0, unstaged: 0, untracked: 0 }));
+		});
+		gitControls.head.mockReturnValue(Promise.withResolvers<VcsHeadState | null>().promise);
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
+		const jjLabel = jjControls.label.mockReturnValue(Promise.resolve("ancestor-bookmark"));
+		const jjStatus = jjControls.statusSummary.mockReturnValue(
+			Promise.resolve({ staged: 0, unstaged: 0, untracked: 0 }),
+		);
 		setProjectDir(nestedGitCwd);
 
 		try {
 			const component = new StatusLineComponent(makeSession());
 			component.updateSettings(gitSegment);
 			component.getTopBorder(80);
-			expect(git.head.resolve).toHaveBeenCalledTimes(1);
-			expect(jjRoot).not.toHaveBeenCalled();
+			expect(gitControls.head).toHaveBeenCalledTimes(1);
 			expect(jjLabel).not.toHaveBeenCalled();
 			expect(jjStatus).not.toHaveBeenCalled();
 			component.dispose();
@@ -409,18 +444,15 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 	});
 
 	it("does not query an ancestor jj workspace after nested Git HEAD resolution fails", async () => {
-		const fakeRepo = {
+		useReftable({
 			commonDir: "/nested/.git",
 			gitDir: "/nested/.git",
 			gitEntryPath: "/nested/.git",
 			headPath: "/nested/.git/HEAD",
 			repoRoot: "/nested",
-		} satisfies GitRepository;
-		vi.spyOn(git.repo, "resolveSync").mockReturnValue(fakeRepo);
-		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
-		vi.spyOn(git.head, "resolve").mockResolvedValue(null);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		const jjRoot = vi.spyOn(jj.repo, "rootSync").mockReturnValue("/workspace/jj-root");
+		});
+		gitControls.head.mockResolvedValue(null);
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
 
 		const component = new StatusLineComponent(makeSession());
 		component.updateSettings(gitSegment);
@@ -429,50 +461,56 @@ describe("StatusLineComponent reftable branch resolve honors mid-flight invalida
 		await Promise.resolve();
 		component.getTopBorder(80);
 
-		expect(git.head.resolve).toHaveBeenCalledTimes(1);
-		expect(jjRoot).not.toHaveBeenCalled();
+		expect(gitControls.head).toHaveBeenCalledTimes(1);
+		expect(jjControls.label).not.toHaveBeenCalled();
 		component.dispose();
 	});
 });
 
 describe("StatusLineComponent VCS watcher and jj request lifecycle", () => {
-	const fakeRepo = {
-		commonDir: "/fake/.git",
-		gitDir: "/fake/.git",
-		gitEntryPath: "/fake/.git",
-		headPath: "/fake/.git/HEAD",
-		repoRoot: "/fake",
-	} satisfies GitRepository;
+	it("reuses one repository handle across repeated paints", () => {
+		const repoSpy = vi.spyOn(vcs, "repo");
+		const component = new StatusLineComponent(makeSession());
+		component.updateSettings(gitSegment);
+
+		component.getTopBorder(80);
+		component.getTopBorder(80);
+		component.getTopBorder(80);
+
+		expect(repoSpy).toHaveBeenCalledTimes(1);
+		component.dispose();
+	});
 
 	it("discovers a repository created after setup with bounded single-flight polling", async () => {
 		let now = 1_000_000;
 		const repositoryCreatedAt = now + 5_000;
 		vi.spyOn(Date, "now").mockImplementation(() => now);
-		vi.spyOn(git.repo, "resolveSync").mockImplementation(() => (now >= repositoryCreatedAt ? fakeRepo : null));
-		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(true);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue(null);
-		const head = Promise.withResolvers<GitHeadState | null>();
-		vi.spyOn(git.head, "resolve").mockReturnValue(head.promise);
+		vi.spyOn(vcs, "gitInfo").mockImplementation(() =>
+			now >= repositoryCreatedAt ? { ...fakeRepoInfo, isReftable: true } : null,
+		);
+		vi.spyOn(vcs, "repo").mockImplementation(() => (now >= repositoryCreatedAt ? fakeVcsRepository : null));
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
+		const head = Promise.withResolvers<VcsHeadState | null>();
+		gitControls.head.mockReturnValue(head.promise);
 
 		const component = new StatusLineComponent(makeSession());
 		component.updateSettings(gitSegment);
 		component.watchBranch(vi.fn());
 		component.getTopBorder(80);
-		expect(git.head.resolve).not.toHaveBeenCalled();
+		expect(gitControls.head).not.toHaveBeenCalled();
 
 		now += 1_000;
 		component.getTopBorder(80);
-		expect(git.head.resolve).not.toHaveBeenCalled();
+		expect(gitControls.head).not.toHaveBeenCalled();
 
 		// The bounded discovery interval reaches the new repository. Repeated
 		// paints while its reftable resolve is hung must reuse the one request.
 		now += 4_001;
 		component.getTopBorder(80);
 		component.getTopBorder(80);
-		expect(git.head.resolve).toHaveBeenCalledTimes(1);
+		expect(gitControls.head).toHaveBeenCalledTimes(1);
 
-		head.resolve({ ...fakeRefHead, branchName: "created-later", ref: "refs/heads/created-later" });
+		head.resolve({ ...fakeRefHead, branch: "created-later", refName: "refs/heads/created-later" });
 		await Promise.resolve();
 		await Promise.resolve();
 		expect(component.getTopBorder(80).content).toContain("created-later");
@@ -480,29 +518,29 @@ describe("StatusLineComponent VCS watcher and jj request lifecycle", () => {
 	});
 
 	it("aborts superseded jj branch and status queries without blocking their replacements", async () => {
-		vi.spyOn(git.head, "resolveSync").mockReturnValue(null);
-		vi.spyOn(git.branch, "default").mockReturnValue(Promise.withResolvers<string | null>().promise);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue("/fake/jj/root");
+		gitControls.headSync.mockReturnValue(null);
+		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
+		vi.spyOn(vcs, "repo").mockReturnValue(fakeJjRepository);
 
 		const labelRequests: Array<{ signal: AbortSignal; resolve: (value: string | null) => void }> = [];
-		vi.spyOn(jj.workingCopy, "label").mockImplementation((_root, options) => {
-			if (!options?.signal || options.timeoutMs !== jj.JJ_COMMAND_TIMEOUT_MS) {
+		jjControls.label.mockImplementation(signal => {
+			if (!signal) {
 				throw new Error("jj label requires the central bounded options");
 			}
 			const request = Promise.withResolvers<string | null>();
-			options.signal.addEventListener("abort", () => request.resolve(null), { once: true });
-			labelRequests.push({ signal: options.signal, resolve: request.resolve });
+			signal.addEventListener("abort", () => request.resolve(null), { once: true });
+			labelRequests.push({ signal, resolve: request.resolve });
 			return request.promise;
 		});
 		const statusRequests: Array<{ signal: AbortSignal; resolve: (value: GitStatus | null) => void }> = [];
-		vi.spyOn(jj.status, "summary").mockImplementation((_root, options) => {
-			if (!options?.signal || options.timeoutMs !== jj.JJ_COMMAND_TIMEOUT_MS) {
+		jjControls.statusSummary.mockImplementation(signal => {
+			if (!signal) {
 				throw new Error("jj status requires the central bounded options");
 			}
 			const request = Promise.withResolvers<GitStatus | null>();
-			options.signal.addEventListener("abort", () => request.resolve(null), { once: true });
-			statusRequests.push({ signal: options.signal, resolve: request.resolve });
+			signal.addEventListener("abort", () => request.resolve(null), { once: true });
+			statusRequests.push({ signal, resolve: request.resolve });
 			return request.promise;
 		});
 
@@ -540,27 +578,33 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 	let dirA: string;
 	let dirB: string;
 	let dirNoRepo: string;
-	let repoA: GitRepository;
-	let repoB: GitRepository;
+	let repoA: VcsRepo;
+	let repoB: VcsRepo;
+	let repoAInfo: VcsGitRepoInfo;
+	let repoBInfo: VcsGitRepoInfo;
 
 	beforeAll(async () => {
 		dirA = await fs.mkdtemp(path.join(os.tmpdir(), "status-line-repoA-"));
 		dirB = await fs.mkdtemp(path.join(os.tmpdir(), "status-line-repoB-"));
 		dirNoRepo = await fs.mkdtemp(path.join(os.tmpdir(), "status-line-norepo-"));
-		repoA = {
+		repoAInfo = {
 			commonDir: path.join(dirA, ".git"),
 			gitDir: path.join(dirA, ".git"),
 			gitEntryPath: path.join(dirA, ".git"),
 			headPath: path.join(dirA, ".git", "HEAD"),
 			repoRoot: dirA,
+			isReftable: false,
 		};
-		repoB = {
+		repoBInfo = {
 			commonDir: path.join(dirB, ".git"),
 			gitDir: path.join(dirB, ".git"),
 			gitEntryPath: path.join(dirB, ".git"),
 			headPath: path.join(dirB, ".git", "HEAD"),
 			repoRoot: dirB,
+			isReftable: false,
 		};
+		repoA = fakeRepoHandle(repoAInfo, "branch-a");
+		repoB = fakeRepoHandle(repoBInfo, "branch-b");
 	});
 
 	afterAll(async () => {
@@ -572,7 +616,7 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 		]);
 	});
 
-	// Test double for node:fs.StatWatcher — `git.head.watch` only calls
+	// Test double for node:fs.StatWatcher — `vcs.watch` only calls
 	// `.unref()` on it; the listener is captured from the watchFile call args.
 	function fakeStatWatcher(): nodeFs.StatWatcher {
 		return { unref: vi.fn() } as unknown as nodeFs.StatWatcher;
@@ -592,21 +636,18 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 	const statsOf = (n: number) => ({ mtimeMs: n, ino: n, size: n }) as nodeFs.Stats;
 
 	it("retires the old stat-watch and re-points at the new repo on cwd change", () => {
-		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(false);
-		vi.spyOn(git.repo, "linkedWorktreeSync").mockReturnValue(null);
-		vi.spyOn(git.repo, "resolveSync").mockImplementation((cwd: string) => {
+		vi.spyOn(vcs, "repo").mockImplementation((cwd: string) => {
 			if (cwd === dirA) return repoA;
 			if (cwd === dirB) return repoB;
 			return null;
 		});
-		vi.spyOn(git.head, "resolveSync").mockImplementation((cwd: string) => {
-			if (cwd === dirA) return { ...fakeRefHead, branchName: "branch-a", ref: "refs/heads/branch-a" };
-			if (cwd === dirB) return { ...fakeRefHead, branchName: "branch-b", ref: "refs/heads/branch-b" };
+		vi.spyOn(vcs, "gitInfo").mockImplementation((cwd: string) => {
+			if (cwd === dirA) return repoAInfo;
+			if (cwd === dirB) return repoBInfo;
 			return null;
 		});
-		vi.spyOn(git.branch, "default").mockReturnValue(Promise.withResolvers<string | null>().promise);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue(null);
+		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
 		const watchFileSpy = vi.spyOn(nodeFs, "watchFile").mockReturnValue(fakeStatWatcher());
 		const unwatchFileSpy = vi.spyOn(nodeFs, "unwatchFile").mockImplementation(() => {});
 
@@ -616,7 +657,7 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 		component.updateSettings(gitSegment);
 		component.watchBranch(onBranchChange);
 		expect(component.getTopBorder(80).content).toContain("branch-a");
-		expect(watchFileSpy).toHaveBeenCalledWith(repoA.headPath, expect.anything(), expect.any(Function));
+		expect(watchFileSpy).toHaveBeenCalledWith(repoAInfo.headPath, expect.anything(), expect.any(Function));
 
 		// Move cwd to repo B — the SessionManager's cwd has already moved.
 		setProjectDir(dirB);
@@ -626,9 +667,9 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 		onBranchChange.mockClear();
 
 		// Old stat-watch is retired: its exact (path, listener) pair unwatched.
-		expect(unwatchFileSpy).toHaveBeenCalledWith(repoA.headPath, statCall(watchFileSpy, 0).listener);
+		expect(unwatchFileSpy).toHaveBeenCalledWith(repoAInfo.headPath, statCall(watchFileSpy, 0).listener);
 		// New stat-watch is live on repo B's HEAD.
-		expect(watchFileSpy).toHaveBeenCalledWith(repoB.headPath, expect.anything(), expect.any(Function));
+		expect(watchFileSpy).toHaveBeenCalledWith(repoBInfo.headPath, expect.anything(), expect.any(Function));
 
 		// Stale stat event from repo A's retired watch must not invalidate B's
 		// caches or request a repaint — the ownership guard rejects it.
@@ -642,19 +683,14 @@ describe("StatusLineComponent applyCwdChange re-points watcher ownership", () =>
 
 		// No watch leak: dispose unwatches B's (path, listener) pair.
 		component.dispose();
-		expect(unwatchFileSpy).toHaveBeenCalledWith(repoB.headPath, statCall(watchFileSpy, 1).listener);
+		expect(unwatchFileSpy).toHaveBeenCalledWith(repoBInfo.headPath, statCall(watchFileSpy, 1).listener);
 	});
 
 	it("falls back to bounded polling when the new cwd has no repository", () => {
-		vi.spyOn(git.repo, "isReftableSync").mockReturnValue(false);
-		vi.spyOn(git.repo, "linkedWorktreeSync").mockReturnValue(null);
-		vi.spyOn(git.repo, "resolveSync").mockImplementation((cwd: string) => (cwd === dirA ? repoA : null));
-		vi.spyOn(git.head, "resolveSync").mockImplementation((cwd: string) =>
-			cwd === dirA ? { ...fakeRefHead, branchName: "branch-a", ref: "refs/heads/branch-a" } : null,
-		);
-		vi.spyOn(git.branch, "default").mockReturnValue(Promise.withResolvers<string | null>().promise);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue(null);
+		vi.spyOn(vcs, "repo").mockImplementation((cwd: string) => (cwd === dirA ? repoA : null));
+		vi.spyOn(vcs, "gitInfo").mockImplementation((cwd: string) => (cwd === dirA ? repoAInfo : null));
+		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
 		const watchFileSpy = vi.spyOn(nodeFs, "watchFile").mockReturnValue(fakeStatWatcher());
 		const unwatchFileSpy = vi.spyOn(nodeFs, "unwatchFile").mockImplementation(() => {});
 
@@ -704,12 +740,12 @@ describe("StatusLineComponent git watcher survives atomic HEAD renames", () => {
 	// unlinks the inode. A file-bound `fs.watch` died on the stale inode after the
 	// first switch (issue #8412), and Bun's inotify-backed directory watch on
 	// Linux permanently stops delivering events after the first rename it observes
-	// (oven-sh/bun#24875). `git.head.watch` stat-polls the HEAD path, which
+	// (oven-sh/bun#24875). `vcs.watch` stat-polls the HEAD path, which
 	// survives the inode swap on every platform.
 	it("keeps firing #onBranchChange across consecutive branch switches", async () => {
-		vi.spyOn(git.branch, "default").mockReturnValue(Promise.withResolvers<string | null>().promise);
-		vi.spyOn(git.status, "summary").mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
-		vi.spyOn(jj.repo, "rootSync").mockReturnValue(null);
+		vi.restoreAllMocks();
+		gitControls.defaultBranch.mockReturnValue(Promise.withResolvers<string | null>().promise);
+		gitControls.statusSummary.mockReturnValue(Promise.withResolvers<GitStatus | null>().promise);
 		const watchFileSpy = vi.spyOn(nodeFs, "watchFile");
 
 		setProjectDir(repoDir);
@@ -729,7 +765,7 @@ describe("StatusLineComponent git watcher survives atomic HEAD renames", () => {
 		// *path* (inode-independent), not an fs.watch event subscription.
 		expect(watchFileSpy).toHaveBeenCalledWith(
 			path.join(repoDir, ".git", "HEAD"),
-			expect.objectContaining({ interval: git.HEAD_WATCH_INTERVAL_MS }),
+			expect.objectContaining({ interval: vcs.HEAD_WATCH_INTERVAL_MS }),
 			expect.any(Function),
 		);
 		// Prime the branch cache off the initial HEAD. The status/default mocks

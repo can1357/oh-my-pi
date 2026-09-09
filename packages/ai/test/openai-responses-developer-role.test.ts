@@ -1,6 +1,28 @@
 import { describe, expect, it } from "bun:test";
 
-import { buildOpenAIResponsesCompat } from "@oh-my-pi/pi-catalog/compat/openai";
+import { resolveModelPolicy } from "@oh-my-pi/pi-catalog/compat/resolve";
+
+interface ResponsesCompatTestSpec {
+	id?: string;
+	name: string;
+	provider: string;
+	baseUrl: string;
+}
+
+function buildOpenAIResponsesCompat(spec: ResponsesCompatTestSpec) {
+	return resolveModelPolicy({
+		id: spec.id ?? "test-model",
+		api: "openai-responses",
+		provider: spec.provider,
+		baseUrl: spec.baseUrl,
+		name: spec.name,
+		reasoning: false,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 16_384,
+	}).compat;
+}
 
 describe("resolveOpenAIResponsesCompat supportsDeveloperRole", () => {
 	it("returns true for openai provider with official API base URL", () => {

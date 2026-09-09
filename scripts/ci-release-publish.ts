@@ -152,7 +152,6 @@ export const packages: PublishPackage[] = [
 	{ dir: "packages/ai", kind: "typescript" },
 	{ dir: "packages/natives", kind: "native" },
 	{ dir: "packages/tui", kind: "typescript" },
-	{ dir: "packages/hashline", kind: "typescript" },
 	{ dir: "packages/mnemopi", kind: "typescript" },
 	{ dir: "packages/snapcompact", kind: "typescript" },
 	{
@@ -307,6 +306,8 @@ export async function prepareNativeCorePackage(pkgDir: string, write: boolean): 
 		"native/desktop-adapter.d.ts",
 		"native/loader-state.js",
 		"native/loader-state.d.ts",
+		"native/vcs.js",
+		"native/vcs.d.ts",
 		"native/embedded-addon.js",
 		"README.md",
 		...legalFiles,

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { colorLuma, hslToHex, relativeLuminance } from "@oh-my-pi/pi-utils/color";
+import { colorLuma, hexToOklch, hslToHex, oklchToHex, relativeLuminance } from "@oh-my-pi/pi-utils/color";
 
 describe("relativeLuminance (WCAG, linearized sRGB)", () => {
 	it("hits the extremes", () => {
@@ -50,5 +50,26 @@ describe("hslToHex", () => {
 	it("collapses to grayscale at zero saturation", () => {
 		expect(hslToHex(0, 0, 0)).toBe("#000000");
 		expect(hslToHex(210, 0, 1)).toBe("#ffffff");
+	});
+});
+describe("OKLCH conversions", () => {
+	it("round-trips in-gamut colors through hexToOklch → oklchToHex", () => {
+		for (const hex of ["#e5c07b", "#4ade80", "#7287fd", "#808080", "#ff0000"]) {
+			expect(oklchToHex(hexToOklch(hex))).toBe(hex);
+		}
+	});
+
+	it("reports near-zero chroma on the gray axis and matching lightness extremes", () => {
+		expect(hexToOklch("#808080").c).toBeLessThan(0.01);
+		expect(hexToOklch("#000000").l).toBeCloseTo(0, 3);
+		expect(hexToOklch("#ffffff").l).toBeCloseTo(1, 2);
+	});
+
+	it("gamut-maps out-of-sRGB chroma by desaturating, preserving lightness and hue", () => {
+		// Chroma 0.4 at this lightness/hue exceeds sRGB for every hue.
+		const mapped = hexToOklch(oklchToHex({ l: 0.6, c: 0.4, h: 250 }));
+		expect(mapped.c).toBeLessThan(0.4);
+		expect(mapped.l).toBeCloseTo(0.6, 2);
+		expect(Math.abs(mapped.h - 250)).toBeLessThan(2);
 	});
 });

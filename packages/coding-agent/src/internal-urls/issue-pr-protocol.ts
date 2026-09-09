@@ -33,7 +33,7 @@ import {
 	resolveDefaultRepoMemoized,
 } from "../tools/gh";
 import { type CacheStatus, formatFreshnessNote } from "../tools/github-cache";
-import * as git from "../utils/git";
+import { github } from "../utils/github";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext } from "./types";
 
 type Scheme = "issue" | "pr";
@@ -356,7 +356,7 @@ async function fetchAndRenderList(
 			? await githubIssueJsonWithStateReasonFallback<Array<IssueListItem>>(cwd, args, context?.signal, {
 					repoProvided: true,
 				})
-			: await git.github.json<Array<PrListItem>>(cwd, args, context?.signal, {
+			: await github.json<Array<PrListItem>>(cwd, args, context?.signal, {
 					repoProvided: true,
 				});
 	const header =

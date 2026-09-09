@@ -1,12 +1,18 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import * as url from "node:url";
+import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { LocalProtocolHandler } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { getMarkdownTheme, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import {
+	applyHyperlinkSetting,
 	fileHyperlink,
 	isHyperlinkEnabled,
+	resolveMarkdownLinkTargets,
 	tryResolveInternalUrlSync,
 	uriHyperlink,
 	urlHyperlink,
@@ -102,17 +108,22 @@ describe("isHyperlinkEnabled", () => {
 		}
 	});
 
-	it("returns TERMINAL.hyperlinks value in auto mode when conditions are met", () => {
+	it("resolves auto against detected capability, immune to runtime flag mutation", () => {
 		setHyperlinkMode("auto");
 		delete Bun.env.NO_COLOR;
 		const origTTY = Object.getOwnPropertyDescriptor(process.stdout, "isTTY");
+		const origHyperlinks = terminalCaps.TERMINAL.hyperlinks;
 		try {
 			Object.defineProperty(process.stdout, "isTTY", { value: true, configurable: true });
-			// TERMINAL.hyperlinks may be true or false depending on the test runner env;
-			// what matters is that isHyperlinkEnabled mirrors it.
-			const expected = terminalCaps.TERMINAL.hyperlinks;
-			expect(isHyperlinkEnabled()).toBe(expected);
+			// Other test modules may have already changed the runtime flag since
+			// hyperlink.ts captured detection. Neither runtime value may change auto.
+			const detected = isHyperlinkEnabled();
+			terminalCaps.setTerminalHyperlinks(false);
+			expect(isHyperlinkEnabled()).toBe(detected);
+			terminalCaps.setTerminalHyperlinks(true);
+			expect(isHyperlinkEnabled()).toBe(detected);
 		} finally {
+			terminalCaps.setTerminalHyperlinks(origHyperlinks);
 			if (origTTY) {
 				Object.defineProperty(process.stdout, "isTTY", origTTY);
 			} else {
@@ -310,5 +321,218 @@ describe("tryResolveInternalUrlSync", () => {
 	it("swallows errors from malformed URLs", () => {
 		// Malformed input should not throw, just return undefined.
 		expect(tryResolveInternalUrlSync("local://%ZZ")).toBeUndefined();
+	});
+});
+
+describe("chat markdown links honor tui.hyperlinks", () => {
+	// The Markdown renderer gates OSC 8 on TERMINAL.hyperlinks. The coding-agent
+	// applies its setting to that shared flag so chat links track path/resource
+	// links (issue #10195).
+	const originalHyperlinks = terminalCaps.TERMINAL.hyperlinks;
+
+	beforeAll(async () => {
+		await initTheme();
+	});
+	afterEach(() => {
+		terminalCaps.TERMINAL.hyperlinks = originalHyperlinks;
+	});
+
+	function renderChatLink(): string {
+		applyHyperlinkSetting();
+		const md = new terminalCaps.Markdown(
+			"See [the docs](https://example.com/path) for details.",
+			0,
+			0,
+			getMarkdownTheme(),
+		);
+		return md.render(80).join("\n");
+	}
+
+	it("applies the configured policy while Settings.init publishes the singleton", async () => {
+		resetSettingsForTest();
+		terminalCaps.setTerminalHyperlinks(false);
+		try {
+			await Settings.init({ inMemory: true, overrides: { "tui.hyperlinks": "always" } });
+			const output = new terminalCaps.Markdown(
+				"See [the docs](https://example.com/path) for details.",
+				0,
+				0,
+				getMarkdownTheme(),
+			)
+				.render(80)
+				.join("\n");
+			expect(terminalCaps.TERMINAL.hyperlinks).toBe(true);
+			expect(extractAnyTerminatorLinkUri(output)).toBe("https://example.com/path");
+		} finally {
+			resetSettingsForTest();
+			await Settings.init({ inMemory: true });
+		}
+	});
+
+	it('wraps the link in OSC 8 under "always" even when the terminal did not advertise support', () => {
+		terminalCaps.TERMINAL.hyperlinks = false;
+		setHyperlinkMode("always");
+		const output = renderChatLink();
+		// The Markdown renderer terminates OSC 8 with BEL, so match either terminator.
+		expect(output.includes(`${OSC}8;`)).toBe(true);
+		expect(extractAnyTerminatorLinkUri(output)).toBe("https://example.com/path");
+	});
+
+	it('suppresses the OSC 8 wrap under "off" even when the terminal advertised support', () => {
+		terminalCaps.TERMINAL.hyperlinks = true;
+		setHyperlinkMode("off");
+		const output = renderChatLink();
+		expect(output).toContain("the docs");
+		expect(output.includes(`${OSC}8;`)).toBe(false);
+	});
+});
+
+describe("resource links in chat markdown", () => {
+	let tempDir: string;
+	let originalHyperlinks: boolean;
+
+	beforeEach(async () => {
+		tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-markdown-links-"));
+		originalHyperlinks = terminalCaps.TERMINAL.hyperlinks;
+		terminalCaps.setTerminalHyperlinks(true);
+		await initTheme();
+	});
+
+	afterEach(async () => {
+		terminalCaps.setTerminalHyperlinks(originalHyperlinks);
+		await fs.rm(tempDir, { recursive: true, force: true });
+	});
+
+	it("expands labeled, reference, and table links to real local and artifact files", async () => {
+		const localFile = path.join(tempDir, "local", "reviewed findings#.json");
+		const artifactFile = path.join(tempDir, "42.txt");
+		await Bun.write(localFile, '{"reviewed":true}');
+		await Bun.write(artifactFile, "artifact output");
+		const href = "local://reviewed%20findings%23.json";
+		const text = [
+			`[Reviewed findings](${href})`,
+			"",
+			"| Report |",
+			"| --- |",
+			"| [Artifact][output] |",
+			"",
+			"[output]: artifact://42",
+		].join("\n");
+		const targets = await resolveMarkdownLinkTargets([text], {
+			localProtocolOptions: { getArtifactsDir: () => tempDir },
+		});
+		const localUri = url.pathToFileURL(await fs.realpath(localFile)).href;
+		const artifactUri = url.pathToFileURL(artifactFile).href;
+		const markdown = new terminalCaps.Markdown(text, 0, 0, {
+			...getMarkdownTheme(),
+			resolveLink: href => targets.get(href),
+		});
+		const output = markdown.render(300).join("\n");
+		expect(extractAnyTerminatorLinkUri(output)).toBe(localUri);
+		expect(output).toContain(`\x1b]8;;${artifactUri}\x07`);
+		const visible = stripVTControlCharacters(output);
+		expect(visible).toContain(`Reviewed findings (${href})`);
+		expect(visible).toContain("Artifact (artifact://42)");
+		expect(visible).not.toContain("file://");
+	});
+
+	it("links ordinary paths against the session cwd while preserving displayed paths and source anchors", async () => {
+		const file = path.join(tempDir, "src", "my file.ts");
+		await Bun.write(file, "export const value = 1;");
+		const relative = "src/my%20file.ts#L7";
+		const absolute = file.replaceAll("\\", "/").replaceAll(" ", "%20");
+		const text = `[Source](${relative}) and [Absolute](${absolute}) and [Missing](src/missing.ts) and [Heading](#heading)`;
+		const targets = await resolveMarkdownLinkTargets([text], { cwd: tempDir });
+		const fileUri = url.pathToFileURL(file).href;
+		const output = new terminalCaps.Markdown(text, 0, 0, {
+			...getMarkdownTheme(),
+			resolveLink: href => targets.get(href),
+		})
+			.render(300)
+			.join("\n");
+		expect(extractAnyTerminatorLinkUri(output)).toBe(`${fileUri}#L7`);
+		expect(output).toContain(`\x1b]8;;${fileUri}\x07`);
+		expect(output).toContain("\x1b]8;;src/missing.ts\x07");
+		expect(output).toContain("\x1b]8;;#heading\x07");
+		const visible = stripVTControlCharacters(output);
+		expect(visible).toContain(`Source (${relative})`);
+		expect(visible).toContain(`Absolute (${absolute})`);
+		expect(visible).not.toContain("file://");
+	});
+
+	it("leaves missing, escaping, remote, and non-link destinations unexpanded", async () => {
+		await Bun.write(path.join(tempDir, "local", "report.json"), "{}");
+		await Bun.write(path.join(tempDir, "outside.json"), "{}");
+		await fs.symlink(path.join(tempDir, "outside.json"), path.join(tempDir, "local", "escape.json"));
+		const text = [
+			"`[code](local://report.json)`",
+			"![image](local://report.json)",
+			"```md",
+			"[fenced](local://report.json)",
+			"```",
+			"[missing](local://missing.json)",
+			"[escape](local://escape.json)",
+			"[remote](mcp://server/resource)",
+			"[web](https://example.com/report)",
+		].join("\n\n");
+		const targets = await resolveMarkdownLinkTargets([text], {
+			localProtocolOptions: { getArtifactsDir: () => tempDir },
+		});
+		expect([...targets]).toEqual([]);
+		const output = new terminalCaps.Markdown(text, 0, 0, {
+			...getMarkdownTheme(),
+			resolveLink: href => targets.get(href),
+		})
+			.render(200)
+			.join("\n");
+		expect(output).toContain("\x1b]8;;local://missing.json\x07");
+		expect(output).toContain("\x1b]8;;https://example.com/report\x07");
+	});
+
+	it("pins identical local links to their calling sessions", async () => {
+		const text = "[Report](local://report.json)";
+		const outputs: string[] = [];
+		for (const session of ["a", "b"]) {
+			const artifactsDir = path.join(tempDir, session);
+			const file = path.join(artifactsDir, "local", "report.json");
+			await Bun.write(file, session);
+			const targets = await resolveMarkdownLinkTargets([text], {
+				localProtocolOptions: { getArtifactsDir: () => artifactsDir },
+			});
+			const output = new terminalCaps.Markdown(text, 0, 0, {
+				...getMarkdownTheme(),
+				resolveLink: href => targets.get(href),
+			})
+				.render(300)
+				.join("\n");
+			expect(extractAnyTerminatorLinkUri(output)).toBe(url.pathToFileURL(await fs.realpath(file)).href);
+			outputs.push(output);
+		}
+		expect(outputs[0]).not.toBe(outputs[1]);
+	});
+});
+
+describe("applyHyperlinkSetting on project-scoped reload", () => {
+	// A cross-project reload (`/move`, resume, rollback) fires SETTING_HOOKS via
+	// Settings.reloadForCwd → the tui.hyperlinks hook reapplies the policy, so
+	// renderers gating on TERMINAL.hyperlinks never keep the previous project's
+	// value while path links already track the new one (#10196 review).
+	it("reapplies the effective policy so the runtime flag tracks the reloaded setting", async () => {
+		const origHyperlinks = terminalCaps.TERMINAL.hyperlinks;
+		const dirA = path.join(os.tmpdir(), "omp-hyperlink-reload-a");
+		const dirB = path.join(os.tmpdir(), "omp-hyperlink-reload-b");
+		try {
+			terminalCaps.setTerminalHyperlinks(false);
+			settings.override("tui.hyperlinks", "always");
+			await settings.reloadForCwd(dirA);
+			expect(terminalCaps.TERMINAL.hyperlinks).toBe(true);
+
+			settings.override("tui.hyperlinks", "off");
+			await settings.reloadForCwd(dirB);
+			expect(terminalCaps.TERMINAL.hyperlinks).toBe(false);
+		} finally {
+			settings.clearOverride("tui.hyperlinks");
+			terminalCaps.setTerminalHyperlinks(origHyperlinks);
+		}
 	});
 });

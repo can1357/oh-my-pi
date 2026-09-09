@@ -69,6 +69,11 @@ describe("getLanguageFromPath", () => {
 		expect(getLanguageFromPath("/home/user/project/src/index.ts")).toBe("typescript");
 		expect(getLanguageFromPath("C:\\Users\\dev\\app\\main.rs")).toBe("rust");
 	});
+
+	it("resolves CUDA sources and headers as C++", () => {
+		expect(getLanguageFromPath("kernel.cu")).toBe("cpp");
+		expect(getLanguageFromPath("kernel.cuh")).toBe("cpp");
+	});
 });
 
 describe("detectLanguageId", () => {
@@ -109,5 +114,10 @@ describe("detectLanguageId", () => {
 
 	it("falls back to plaintext for files with no extension", () => {
 		expect(detectLanguageId("README")).toBe("plaintext");
+	});
+
+	it("detects CUDA sources and headers as cpp", () => {
+		expect(detectLanguageId("kernel.cu")).toBe("cpp");
+		expect(detectLanguageId("kernel.cuh")).toBe("cpp");
 	});
 });

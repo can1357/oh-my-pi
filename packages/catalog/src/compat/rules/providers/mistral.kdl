@@ -1,0 +1,8 @@
+// Provider-wire compat for "mistral"; regenerated from the frozen census using deployment contract selectors.
+
+provider "mistral" {
+	thinking-mode "effort"
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+}

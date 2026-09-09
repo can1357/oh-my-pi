@@ -7,7 +7,11 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
-import { disposeAllKernelSessions, executePythonWithKernel } from "@oh-my-pi/pi-coding-agent/eval/py/executor";
+import {
+	disposeAllKernelSessions,
+	executePython,
+	executePythonWithKernel,
+} from "@oh-my-pi/pi-coding-agent/eval/py/executor";
 import { PythonKernel } from "@oh-my-pi/pi-coding-agent/eval/py/kernel";
 import { filterEnv, resolvePythonRuntime } from "@oh-my-pi/pi-coding-agent/eval/py/runtime";
 import { TempDir } from "@oh-my-pi/pi-utils";
@@ -42,6 +46,35 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 	afterEach(async () => {
 		await disposeAllKernelSessions();
 	});
+
+	it("does not replay a crashed cell's file write and accepts the next cell in a fresh kernel", async () => {
+		using tempDir = TempDir.createSync("@python-runner-crash-");
+		const options = {
+			cwd: tempDir.path(),
+			sessionId: "crash-recovery",
+			kernelMode: "session" as const,
+			timeoutMs: 10_000,
+		};
+		const result = await executePython(
+			[
+				"import os",
+				"with open('effects.txt', 'a') as effects:",
+				"    effects.write('once\\n')",
+				"print('before crash', flush=True)",
+				"os._exit(17)",
+			].join("\n"),
+			options,
+		);
+		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
+		expect(result.cancelled).toBe(true);
+		expect(result.output).toContain("before crash");
+		expect(result.output).toContain("completion is uncertain");
+
+		const next = await executePython("print(21 * 2)", options);
+		expect(next.exitCode).toBe(0);
+		expect(next.output.trim()).toBe("42");
+		expect(await Bun.file(path.join(tempDir.path(), "effects.txt")).text()).toBe("once\n");
+	}, 30_000);
 
 	it("streams stdout chunks as they are produced", async () => {
 		using tempDir = TempDir.createSync("@python-runner-stream-");
@@ -110,6 +143,87 @@ describe.skipIf(!SHOULD_RUN)("python runner subprocess", () => {
 			const result = await executePythonWithKernel(kernel, "x + 1");
 			expect(result.exitCode).toBe(0);
 			expect(result.output).toContain("42");
+		} finally {
+			await kernel.shutdown();
+		}
+	});
+
+	it("describes and invokes tools while the retained kernel remains live", async () => {
+		using tempDir = TempDir.createSync("@python-runner-tools-");
+		const kernel = await PythonKernel.start({ cwd: tempDir.path() });
+		try {
+			const defined = await executePythonWithKernel(
+				kernel,
+				[
+					"@tool",
+					"async def dbl(n: int) -> int:",
+					'    """Double an integer."""',
+					"    await asyncio.sleep(0)",
+					"    return n * 2",
+				].join("\n"),
+			);
+			expect(defined.exitCode).toBe(0);
+
+			const described: unknown[] = [];
+			const describeResult = await kernel.invokeTool(
+				{ op: "describe", names: ["dbl", "missing"] },
+				{
+					onDisplay: output => {
+						described.push(output);
+					},
+				},
+			);
+			expect(describeResult.status).toBe("ok");
+			expect(described).toEqual([
+				{
+					type: "json",
+					data: {
+						ok: true,
+						tools: [
+							{
+								name: "dbl",
+								description: "Double an integer.",
+								parameters: {
+									type: "object",
+									properties: { n: { type: "integer" } },
+									required: ["n"],
+									additionalProperties: false,
+								},
+							},
+						],
+						missing: ["missing"],
+					},
+				},
+			]);
+
+			const called: unknown[] = [];
+			const callResult = await kernel.invokeTool(
+				{ op: "call", name: "dbl", args: { n: 2 } },
+				{
+					onDisplay: output => {
+						called.push(output);
+					},
+				},
+			);
+			expect(callResult.status).toBe("ok");
+			expect(called).toEqual([{ type: "json", data: { ok: true, value: 4 } }]);
+
+			// A raising tool is reported to the caller, not surfaced as a kernel crash.
+			const failing = await executePythonWithKernel(
+				kernel,
+				["@tool", "def boom(n: int) -> int:", "    raise ValueError('kaboom')"].join("\n"),
+			);
+			expect(failing.exitCode).toBe(0);
+			const failed = await kernel.invokeTool({ op: "call", name: "boom", args: { n: 1 } });
+			expect(failed.status).toBe("error");
+			expect(failed.error?.name).toBe("ValueError");
+			expect(failed.error?.value).toBe("kaboom");
+			const badArgs = await kernel.invokeTool({ op: "call", name: "dbl", args: { nope: 1 } });
+			expect(badArgs.status).toBe("error");
+			expect(badArgs.error?.name).toBe("TypeError");
+			expect(kernel.isAlive()).toBe(true);
+			const alive = await executePythonWithKernel(kernel, "print('still here')");
+			expect(alive.output).toContain("still here");
 		} finally {
 			await kernel.shutdown();
 		}

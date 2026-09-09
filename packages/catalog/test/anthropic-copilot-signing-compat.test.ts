@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { buildAnthropicCompat } from "../src/compat/anthropic";
+import { resolveModelPolicy } from "../src/compat/resolve";
 import type { ModelSpec } from "../src/types";
 
 /**
@@ -27,27 +27,29 @@ function spec(overrides: Partial<ModelSpec<"anthropic-messages">>): ModelSpec<"a
 
 describe("#2851 anthropic compat: github-copilot is a signing endpoint", () => {
 	it("does NOT replay unsigned thinking for the github-copilot anthropic proxy", () => {
-		const compat = buildAnthropicCompat(
+		const compat = resolveModelPolicy(
 			spec({ provider: "github-copilot", baseUrl: "https://api.githubcopilot.com" }),
-		);
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 		expect(compat.officialEndpoint).toBe(false);
 	});
 
 	it("also excludes github-copilot enterprise (copilot-api.*) hosts", () => {
-		const compat = buildAnthropicCompat(
+		const compat = resolveModelPolicy(
 			spec({ provider: "github-copilot", baseUrl: "https://copilot-api.ghe.example.com" }),
-		);
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 	});
 
 	it("still replays unsigned thinking for generic non-official reasoning endpoints (#2005, no regression)", () => {
-		const compat = buildAnthropicCompat(spec({ provider: "custom", baseUrl: "https://llm.example.com/anthropic" }));
+		const compat = resolveModelPolicy(
+			spec({ provider: "custom", baseUrl: "https://llm.example.com/anthropic" }),
+		).compat;
 		expect(compat.replayUnsignedThinking).toBe(true);
 	});
 
 	it("still degrades unsigned thinking to text for official Anthropic", () => {
-		const compat = buildAnthropicCompat(spec({ provider: "anthropic", baseUrl: "https://api.anthropic.com" }));
+		const compat = resolveModelPolicy(spec({ provider: "anthropic", baseUrl: "https://api.anthropic.com" })).compat;
 		expect(compat.replayUnsignedThinking).toBe(false);
 		expect(compat.officialEndpoint).toBe(true);
 	});

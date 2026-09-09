@@ -57,6 +57,8 @@ it("resolves subscription and advisor icons in Nerd Font mode", async () => {
 	const theme = await getThemeByName(customThemeName);
 	expect(theme?.symbol("icon.subscription")).toBe("\u{f067a}");
 	expect(theme?.symbol("icon.advisor")).toBe("\uea70");
+	expect(theme?.symbol("icon.advisorClosed")).toBe("\ueae7");
 	expect(theme?.icon.subscription).toBe("\u{f067a}");
 	expect(theme?.icon.advisor).toBe("\uea70");
+	expect(theme?.icon.advisorClosed).toBe("\ueae7");
 });

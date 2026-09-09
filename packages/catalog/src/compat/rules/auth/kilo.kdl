@@ -1,0 +1,4 @@
+auth "kilo" {
+	name "Kilo Gateway"
+	login "custom" hook="kilo"
+}

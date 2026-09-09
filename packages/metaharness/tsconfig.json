@@ -6,5 +6,6 @@
 	},
 	"include": [
 		"src"
-	]
+	],
+	"exclude": ["src/tb"]
 }

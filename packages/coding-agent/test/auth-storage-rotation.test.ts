@@ -169,6 +169,34 @@ describe("AuthStorage account rotation", () => {
 		expect(result.switched).toBe(true);
 		expect(await authStorage.getApiKey("openai-codex", sessionId)).toBe("access-2");
 	});
+	test("marks selected credential ineligible and rotates to sibling on usage limit", async () => {
+		await authStorage.set("openai-codex", [
+			{
+				type: "oauth",
+				access: "access-A",
+				refresh: "refresh-A",
+				expires: Date.now() + 60_000,
+				accountId: "acct-A",
+			},
+			{
+				type: "oauth",
+				access: "access-B",
+				refresh: "refresh-B",
+				expires: Date.now() + 60_000,
+				accountId: "acct-B",
+			},
+		]);
+
+		const sessionId = "usage-limit-rotation-session";
+		const selectedA = await authStorage.getApiKey("openai-codex", sessionId);
+		expect(selectedA).toBe("access-A");
+
+		const result = await authStorage.markUsageLimitReached("openai-codex", sessionId, { apiKey: selectedA });
+		expect(result.switched).toBe(true);
+
+		const selectedB = await authStorage.getApiKey("openai-codex", sessionId);
+		expect(selectedB).toBe("access-B");
+	});
 
 	test("usage-limit rotation trusts the failed bearer over stale session stickiness", async () => {
 		await authStorage.set("openai-codex", [

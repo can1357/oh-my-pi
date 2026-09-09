@@ -6,6 +6,7 @@
  * the split diff pane, and the staging/commit actions the sidebar triggers.
  */
 import * as path from "node:path";
+import type { VcsGitRepo, VcsNumstatEntry } from "@oh-my-pi/pi-natives";
 import {
 	DiffSide,
 	DiffStream,
@@ -13,10 +14,9 @@ import {
 	type DiffStreamResult,
 	rasterizeSvg,
 } from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { BINARY_SNIFF_BYTES, isEnoent, isProbablyBinaryHeader } from "@oh-my-pi/pi-utils";
-import { parseNumstat } from "../../commit/git/diff";
 import type { NumstatEntry } from "../../commit/types";
-import * as git from "../../utils/git";
 
 /** SHA of git's canonical empty tree: diff base for a root commit. */
 const EMPTY_TREE = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
@@ -282,6 +282,13 @@ function kindFromLetter(letter: string): ChangeKind {
 }
 
 const CONFLICT_STATES: Record<string, true> = { DD: true, AU: true, UD: true, UA: true, DU: true, AA: true, UU: true };
+function mapNumstat(entries: VcsNumstatEntry[]): NumstatEntry[] {
+	return entries.map(entry => ({
+		path: entry.path,
+		additions: entry.added ?? 0,
+		deletions: entry.removed ?? 0,
+	}));
+}
 
 /**
  * Repository state backing the git TUI. `refresh()` re-reads everything and
@@ -289,6 +296,7 @@ const CONFLICT_STATES: Record<string, true> = { DD: true, AU: true, UD: true, UA
  */
 export class GitModel {
 	readonly cwd: string;
+	readonly #repo: VcsGitRepo;
 	/** Resolved SHA when the TUI is pinned to one commit (`omp git <rev>`). */
 	readonly pinnedSha: string | null;
 	branch: string | null = null;
@@ -302,6 +310,7 @@ export class GitModel {
 
 	constructor(cwd: string, options: { pinnedSha?: string } = {}) {
 		this.cwd = cwd;
+		this.#repo = vcs.requireGit(cwd);
 		this.pinnedSha = options.pinnedSha ?? null;
 	}
 
@@ -320,21 +329,21 @@ export class GitModel {
 			return true;
 		}
 		const [statusText, branchName, headSha] = await Promise.all([
-			git.status(this.cwd, { porcelainV1: true, z: true, untrackedFiles: "all" }).catch(() => null),
-			git.branch.current(this.cwd).catch(() => null),
-			git.head.sha(this.cwd).catch(() => null),
+			this.#repo.statusPorcelain({ nulTerminated: true, untracked: "all" }).catch(() => null),
+			this.#repo.currentBranch(),
+			this.#repo.headSha(),
 		]);
 		if (statusText === null) throw new Error("Not a git repository");
 		const fingerprint = `${headSha ?? ""}\u0000${statusText}`;
 		if (fingerprint === this.#fingerprint) {
-			this.branch = branchName;
+			this.branch = branchName ?? null;
 			return false;
 		}
 		this.#fingerprint = fingerprint;
 		this.#statusStatsLoad = null;
-		this.branch = branchName;
+		this.branch = branchName ?? null;
 		this.#setChanges(statusText);
-		if (headSha !== this.headCommit?.sha) {
+		if ((headSha ?? null) !== this.headCommit?.sha) {
 			this.#headFilesLoad = null;
 			this.headCommit = headSha ? await this.#loadHeadMetadata(headSha) : null;
 		}
@@ -348,8 +357,14 @@ export class GitModel {
 		const fingerprint = this.#fingerprint;
 		const load = (async (): Promise<boolean> => {
 			const [unstagedStat, stagedStat] = await Promise.all([
-				git.diff(this.cwd, { numstat: true, allowFailure: true }).then(parseNumstat),
-				git.diff(this.cwd, { numstat: true, cached: true, allowFailure: true }).then(parseNumstat),
+				this.#repo
+					.numstat({})
+					.then(mapNumstat)
+					.catch(() => []),
+				this.#repo
+					.numstat({ cached: true })
+					.then(mapNumstat)
+					.catch(() => []),
 			]);
 			if (fingerprint !== this.#fingerprint) return false;
 			const unstagedCounts = new Map(unstagedStat.map(entry => [entry.path, entry]));
@@ -373,9 +388,10 @@ export class GitModel {
 		if (this.#headFilesLoad) return await this.#headFilesLoad;
 		const load = (async (): Promise<boolean> => {
 			const base = head.parents[0] ?? EMPTY_TREE;
-			const numstat = parseNumstat(
-				await git.diff(this.cwd, { numstat: true, base, head: head.sha, allowFailure: true }),
-			);
+			const numstat = await this.#repo
+				.numstat({ base, head: head.sha })
+				.then(mapNumstat)
+				.catch(() => []);
 			if (this.headCommit?.sha !== head.sha) return false;
 			this.headCommit = {
 				...head,
@@ -435,7 +451,7 @@ export class GitModel {
 
 	async #loadHeadMetadata(sha: string): Promise<HeadCommit | null> {
 		try {
-			const details = await git.commitDetails(this.cwd, sha);
+			const details = await this.#repo.commitDetails(sha);
 			const [subject = "", ...bodyLines] = details.message.split("\n");
 			return {
 				sha,
@@ -556,7 +572,13 @@ export class GitModel {
 		let byteLength = 0;
 		let streaming = false;
 		try {
-			for await (const chunk of git.show.stream(this.cwd, spec, { maxOutputBytes: MAX_FILE_BYTES, signal })) {
+			const result = await this.#repo.showBlob(spec, MAX_FILE_BYTES, signal);
+			if (result.truncated) {
+				stream.markTooLarge(side);
+				emit();
+				return { kind: "tooLarge" };
+			}
+			for (const chunk of [result.data]) {
 				byteLength += chunk.byteLength;
 				if (streaming) {
 					const progress = stream.pushBytes(side, chunk);
@@ -599,12 +621,7 @@ export class GitModel {
 			return { kind: "text", byteLength };
 		} catch (error) {
 			if (signal?.aborted) throw error;
-			if (error instanceof git.GitOutputTruncatedError) {
-				stream.markTooLarge(side);
-				emit();
-				return { kind: "tooLarge" };
-			}
-			if (error instanceof git.GitCommandError) {
+			if (vcs.isVcsError(error)) {
 				stream.finishSide(side);
 				emit();
 				return { kind: "empty" };
@@ -717,7 +734,10 @@ export class GitModel {
 		if (pointer.size > MAX_FILE_BYTES) {
 			return { kind: "tooLarge", byteLength: pointer.size, lfsOid: pointer.oid };
 		}
-		this.#lfsMediaDir ??= git.lfs.mediaDir(this.cwd);
+		this.#lfsMediaDir ??= this.#repo
+			.lfsMediaDir()
+			.then(mediaDir => mediaDir ?? null)
+			.catch(() => null);
 		const mediaDir = await this.#lfsMediaDir;
 		if (!mediaDir) return { kind: "lfsMissing", oid: pointer.oid, byteLength: pointer.size };
 		const objectPath = path.join(mediaDir, pointer.oid.slice(0, 2), pointer.oid.slice(2, 4), pointer.oid);
@@ -736,20 +756,21 @@ export class GitModel {
 
 	/** Stage the given files (or everything when omitted). */
 	async stage(files?: readonly ChangedFile[]): Promise<void> {
-		await git.stage.files(this.cwd, files?.map(file => file.path) ?? []);
+		await this.#repo.stageFiles(files?.map(file => file.path) ?? []);
 	}
 
 	/** Unstage the given files (or everything when omitted). */
 	async unstage(files?: readonly ChangedFile[]): Promise<void> {
-		await git.stage.reset(this.cwd, files?.map(file => file.path) ?? []);
+		await this.#repo.unstage(files?.map(file => file.path) ?? []);
 	}
 
 	/** Create (or amend) a commit from the staged changes. */
 	async commit(message: string, options: { amend?: boolean } = {}): Promise<void> {
-		await git.commit(this.cwd, message, { amend: options.amend });
+		await this.#repo.commitCreate(message, { amend: options.amend });
 	}
 	/** Apply a patch to the index (`cached`) and/or worktree; `reverse` undoes it. */
 	async applyPatch(patchText: string, options: { cached?: boolean; reverse?: boolean } = {}): Promise<void> {
-		await git.patch.applyText(this.cwd, patchText, options);
+		if (!patchText.trim()) return;
+		await this.#repo.applyPatch(patchText, options);
 	}
 }

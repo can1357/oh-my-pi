@@ -7,6 +7,7 @@ import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
 import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { MODEL_ROLE_IDS } from "@oh-my-pi/pi-coding-agent/config/model-roles";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { ReadToolGroupComponent } from "@oh-my-pi/pi-coding-agent/modes/components/read-tool-group";
@@ -16,6 +17,7 @@ import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/mode
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { ResolvedRoleModel } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AUTO_THINKING } from "@oh-my-pi/pi-coding-agent/thinking";
+import { setTerminalHyperlinks, TERMINAL } from "@oh-my-pi/pi-tui";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
 import { beginSettingsTest, restoreSettingsTestState, type SettingsTestState } from "./helpers/settings-test-state";
 
@@ -67,6 +69,32 @@ describe("selector setting side effects", () => {
 		expect(invalidate).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
+	it("applies tui.hyperlinks changes to live renderers", () => {
+		const originalHyperlinks = TERMINAL.hyperlinks;
+		const statusInvalidate = vi.fn();
+		const invalidate = vi.fn();
+		const requestRender = vi.fn();
+		const controller = new SelectorController({
+			statusLine: { invalidate: statusInvalidate },
+			ui: { invalidate, requestRender },
+		} as unknown as InteractiveModeContext);
+
+		try {
+			setTerminalHyperlinks(false);
+			Settings.instance.override("tui.hyperlinks", "always");
+			controller.handleSettingChange("tui.hyperlinks", "always");
+			expect(TERMINAL.hyperlinks).toBe(true);
+
+			Settings.instance.override("tui.hyperlinks", "off");
+			controller.handleSettingChange("tui.hyperlinks", "off");
+			expect(TERMINAL.hyperlinks).toBe(false);
+			expect(statusInvalidate).toHaveBeenCalledTimes(2);
+			expect(invalidate).toHaveBeenCalledTimes(2);
+			expect(requestRender).toHaveBeenCalledTimes(2);
+		} finally {
+			setTerminalHyperlinks(originalHyperlinks);
+		}
+	});
 	it("applies memory backend changes to the live session", () => {
 		const applyMemoryBackend = vi.fn(async () => {});
 		const controller = new SelectorController({
@@ -92,6 +120,22 @@ describe("selector setting side effects", () => {
 
 		expect(setAdvisorEnabled).toHaveBeenCalledWith(false);
 		expect(invalidate).toHaveBeenCalledTimes(1);
+		expect(requestRender).toHaveBeenCalledTimes(1);
+	});
+
+	it("re-enables live advisor runtime to rebuild when advisor.maxNotesPerUpdate changes in /settings", () => {
+		const setAdvisorEnabled = vi.fn();
+		const isAdvisorEnabled = vi.fn().mockReturnValue(true);
+		const requestRender = vi.fn();
+		const controller = new SelectorController({
+			session: { setAdvisorEnabled, isAdvisorEnabled },
+			ui: { requestRender },
+		} as unknown as InteractiveModeContext);
+
+		controller.handleSettingChange("advisor.maxNotesPerUpdate", 3);
+
+		expect(isAdvisorEnabled).toHaveBeenCalledTimes(1);
+		expect(setAdvisorEnabled).toHaveBeenCalledWith(true);
 		expect(requestRender).toHaveBeenCalledTimes(1);
 	});
 
@@ -239,7 +283,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -331,7 +375,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -344,7 +388,8 @@ describe("selector setting side effects", () => {
 		try {
 			hub.handleInput("\x1b[A"); // All models → Roles.
 			hub.handleInput("\n"); // Enter the role rows.
-			for (let i = 0; i < 8; i++) hub.handleInput("\x1b[B"); // Default → task.
+			const taskOffset = MODEL_ROLE_IDS.indexOf("task") - MODEL_ROLE_IDS.indexOf("default");
+			for (let i = 0; i < taskOffset; i++) hub.handleInput("\x1b[B"); // Default → task.
 			hub.handleInput("t");
 
 			const levels = [ThinkingLevel.Inherit, ThinkingLevel.Off, AUTO_THINKING, ...getSupportedEfforts(taskModel)];
@@ -415,7 +460,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -503,7 +548,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -602,7 +647,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -704,7 +749,7 @@ describe("selector setting side effects", () => {
 				},
 				statusLine: { invalidate: vi.fn() },
 				updateEditorBorderColor: vi.fn(),
-				keybindings: { getKeys: () => [] },
+				keybindings: { getKeys: () => [], getDisplayString: () => "" },
 				showStatus,
 				showError: vi.fn(),
 			} as unknown as InteractiveModeContext);
@@ -812,7 +857,7 @@ describe("selector setting side effects", () => {
 				},
 				statusLine: { invalidate: vi.fn() },
 				updateEditorBorderColor: vi.fn(),
-				keybindings: { getKeys: () => [] },
+				keybindings: { getKeys: () => [], getDisplayString: () => "" },
 				showStatus,
 				showError: vi.fn(),
 			} as unknown as InteractiveModeContext);
@@ -916,7 +961,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -990,7 +1035,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError,
 		} as unknown as InteractiveModeContext);
@@ -1084,7 +1129,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showModelCycleTrack,
 			showError,
 		} as unknown as InteractiveModeContext);
@@ -1158,7 +1203,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: statusInvalidate },
 			updateEditorBorderColor,
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError,
 		} as unknown as InteractiveModeContext);
@@ -1243,7 +1288,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus: vi.fn(),
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -1330,7 +1375,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -1415,7 +1460,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError,
 		} as unknown as InteractiveModeContext);
@@ -1518,7 +1563,7 @@ describe("selector setting side effects", () => {
 				},
 				statusLine: { invalidate: statusInvalidate },
 				updateEditorBorderColor,
-				keybindings: { getKeys: () => [] },
+				keybindings: { getKeys: () => [], getDisplayString: () => "" },
 				showStatus,
 				showError,
 			} as unknown as InteractiveModeContext);
@@ -1625,7 +1670,7 @@ describe("selector setting side effects", () => {
 				},
 				statusLine: { invalidate: vi.fn() },
 				updateEditorBorderColor: vi.fn(),
-				keybindings: { getKeys: () => [] },
+				keybindings: { getKeys: () => [], getDisplayString: () => "" },
 				showStatus,
 				showError,
 			} as unknown as InteractiveModeContext);
@@ -1715,7 +1760,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);
@@ -1796,7 +1841,7 @@ describe("selector setting side effects", () => {
 			},
 			statusLine: { invalidate: vi.fn() },
 			updateEditorBorderColor: vi.fn(),
-			keybindings: { getKeys: () => [] },
+			keybindings: { getKeys: () => [], getDisplayString: () => "" },
 			showStatus,
 			showError: vi.fn(),
 		} as unknown as InteractiveModeContext);

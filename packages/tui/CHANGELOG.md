@@ -2,6 +2,102 @@
 
 ## [Unreleased]
 
+## [18.1.15] - 2026-09-08
+
+### Fixed
+
+- Stopped long flicker when moving or resizing an omp pane in Warp. Resize repaints in place there after the drag settles (override with `PI_TUI_RESIZE_IN_PLACE=0`), with no alternate-screen borrow, no scrollback replay, blanked live rows so shrink drags cannot archive unfinished rows, and overlay toggle echoes repainting the modal instead of probing ([#11247](https://github.com/can1357/oh-my-pi/pull/11247) by [@H4vC](https://github.com/H4vC)).
+
+## [18.1.14] - 2026-09-07
+
+### Fixed
+
+- `extractMarkdownLinks()` now returns one-row visible labels for formatted and multiline links ([#11086](https://github.com/can1357/oh-my-pi/pull/11086) by [@mustafaabidali](https://github.com/mustafaabidali)).
+
+## [18.1.13] - 2026-09-07
+
+### Fixed
+
+- Fixed notifications never arriving in a Herdr pane. Herdr multiplexes panes like tmux but swallows bare OSC 9 / OSC 99 and has no passthrough envelope, so a backgrounded pane got no signal at all; delivery now goes through `herdr notification show` (a waiting question or an error rings `request`, a settled turn rings `done`), and the in-band write stays as the fallback when the pane id or the `herdr` binary is missing.
+
+## [18.1.12] - 2026-09-06
+
+### Fixed
+
+- Avoid inserting a trailing space when auto-completing directory paths with `@`, and keep autocomplete open when accepting a directory with Tab or Enter.
+- Horizontal wheel reports (the sideways drift of a two-finger trackpad scroll) no longer decode as a vertical wheel direction, so fullscreen selectors such as `/copy` and the rewind picker stop jumping up and back down at the end of a scroll gesture.
+
+## [18.1.9] - 2026-09-04
+
+### Added
+
+- Added Markdown hyperlink target resolution while preserving the displayed URL text.
+
+## [18.1.6] - 2026-09-03
+
+### Fixed
+
+- Fixed the band composer layout so the status line remains visible and no longer causes the prompt to shift unexpectedly when the top border is empty.
+
+## [18.1.5] - 2026-09-03
+
+### Fixed
+
+- Fixed terminal query support in supervised PTY processes, including cursor position reports.
+- Fixed paste-and-submit handling so an Enter keypress received with a bracketed paste is delivered to the previously focused component; `Editor.onLargePaste` now receives `PasteOptions` describing the queued submit.
+
+## [18.1.3] - 2026-09-02
+
+### Fixed
+
+- Fixed the TUI tearing in Herdr panes so the live viewport updates as one frame instead of leaving the top frozen while only the bottom refreshed. Pane identity vars (`HERDR_PANE_ID` / `HERDR_TAB_ID` / `HERDR_WORKSPACE_ID`) also count as inside Herdr, not only `HERDR_ENV=1`. A DECRPM “unrecognized” report keeps synchronized output on; a “permanently reset” report, or a custom terminal that omits the DECRPM status, still turns it off.
+
+## [18.1.0] - 2026-09-01
+
+### Fixed
+
+- Improved terminal stability when resuming image-heavy sessions, preventing large transcript repaints from being mistaken for stalled output or exceeding the terminal output limit.
+- Fixed inline images leaving blank rows in Herdr panes when resuming or rendering sessions in nested terminals.
+- Fixed the TUI crashing on reference-style Markdown links whose labels match JavaScript built-in names; these links now render safely as plain text.
+- Fixed fatal cleanup leaving the cursor inside a focused input before error output is displayed.
+- Fixed resumed sessions showing stale background bands until the next keypress in WSL and Windows Terminal.
+
+## [18.0.11] - 2026-08-29
+
+### Added
+
+- Added `setTerminalHyperlinks()` to let hosts control OSC 8 hyperlink behavior in rendered Markdown links.
+
+### Fixed
+
+- Fixed inline color swatches appearing for words with hex-like prefixes, such as `#each`; swatches now appear only when the entire word is a valid color.
+
+## [18.0.10] - 2026-08-28
+
+### Added
+
+- Press the Right Arrow at the end of a line to accept autocomplete suggestions, inline ghost-text completions, and spelling corrections, just like Tab.
+- Added a smooth brand-color transition and an elapsed turn timer to the status line while the agent is working.
+- Added a full-width “band” composer style for flush status lines.
+
+## [18.0.9] - 2026-08-28
+
+### Added
+
+- Exported TuiDebugServer for programmatic headless control
+- Added debug demonstration script to examples
+- Added an `OMP_TUI_DEBUG` Unix socket for headless TUI driving and structured inspection.
+
+### Changed
+
+- Inline hex colors now render with VS Code-style colored backgrounds and automatically selected black or white text for readability, alongside the color swatch.
+- LaTeX text formatting commands such as \textbf, \textit, \textsl, and \emph now render as terminal bold or italic text.
+
+### Fixed
+
+- Fixed inline color swatches rendering incorrectly inside highlighted lines.
+- Fixed terminal resizing in tmux panes and Windows consoles duplicating the current in-progress turn in scrollback.
+
 ## [18.0.8] - 2026-08-27
 
 ### Added

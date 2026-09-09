@@ -1,7 +1,7 @@
 import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { AsyncDrain, getDbBusyTimeoutMs, getHistoryDbPath, logger } from "@oh-my-pi/pi-utils";
+import { checkpointWal, getDbBusyTimeoutMs, getHistoryDbPath, logger, postmortem } from "@oh-my-pi/pi-utils";
 
 /** A unique prompt with provenance from its most recent submission. */
 export interface HistoryEntry {
@@ -60,11 +60,12 @@ CREATE TABLE IF NOT EXISTS history (
 CREATE INDEX IF NOT EXISTS idx_history_created_at ON history(created_at DESC);
 `;
 
+let cancelExitCleanup: (() => void) | undefined;
+
 /** Stores searchable prompts with only their latest project and session metadata. */
 export class HistoryStorage {
 	#db: Database;
 	static #instance?: HistoryStorage;
-	#drain = new AsyncDrain<Pick<HistoryEntry, "prompt" | "cwd" | "sessionId">>(100);
 	#sessionResolver?: () => string | undefined;
 
 	// Prepared statements
@@ -126,20 +127,29 @@ ON CONFLICT(prompt) DO UPDATE SET
 
 	/** Opens the process-wide prompt history database. */
 	static open(dbPath: string = getHistoryDbPath()): HistoryStorage {
-		if (!HistoryStorage.#instance) {
-			HistoryStorage.#instance = new HistoryStorage(dbPath);
-		}
-		return HistoryStorage.#instance;
+		const existing = HistoryStorage.#instance;
+		if (existing) return existing;
+
+		const instance = new HistoryStorage(dbPath);
+		// Exit-only: a keep-alive cleanup leaves the handle valid so the editor can
+		// keep submitting prompts; the real exit closes. Register before publishing
+		// so a real-exit-in-progress late registration cannot close this instance.
+		cancelExitCleanup = postmortem.register("history-storage", () => HistoryStorage.close(), { exitOnly: true });
+		HistoryStorage.#instance = instance;
+		return instance;
 	}
 
-	/** @internal Reset the singleton and close its database — test-only. */
-	static resetInstance(): void {
+	/** Checkpoints and closes the process-wide database, and permits reopening it. */
+	static close(): void {
 		const instance = HistoryStorage.#instance;
 		HistoryStorage.#instance = undefined;
+		cancelExitCleanup?.();
+		cancelExitCleanup = undefined;
 		if (instance) instance.#close();
 	}
 
 	#close(): void {
+		checkpointWal(this.#db);
 		for (const stmt of this.#substringStmts.values()) stmt.finalize();
 		this.#substringStmts.clear();
 		this.#upsertRowStmt.finalize();
@@ -159,20 +169,28 @@ ON CONFLICT(prompt) DO UPDATE SET
 	/**
 	 * Register a resolver that supplies the current session ID for prompts added
 	 * without an explicit `sessionId`. Evaluated synchronously at `add()` time so
-	 * batched writes capture the session active when the prompt was submitted.
+	 * each write captures the session active when the prompt was submitted.
 	 */
 	setSessionResolver(resolver: () => string | undefined): void {
 		this.#sessionResolver = resolver;
 	}
 
-	/** Stores a prompt and replaces its provenance with the latest submission. */
+	/**
+	 * Stores a prompt and replaces its provenance with the latest submission.
+	 * The write is synchronous: prompt submission is human-paced, not a hot
+	 * path, so the row is durable the moment `add()` returns and can never be
+	 * lost to an exit racing a deferred flush. Failures are logged, not thrown.
+	 */
 	add(prompt: string, cwd?: string, sessionId?: string): Promise<void> {
 		const trimmed = normalizePrompt(prompt);
 		if (!trimmed) return Promise.resolve();
 		const session = sessionId ?? this.#sessionResolver?.();
-		return this.#drain.push({ prompt: trimmed, cwd: cwd ?? undefined, sessionId: session || undefined }, rows => {
-			this.#insertBatch(rows);
-		});
+		try {
+			this.#insertBatch([{ prompt: trimmed, cwd: cwd ?? undefined, sessionId: session || undefined }]);
+		} catch (error) {
+			logger.error("HistoryStorage add failed", { error: String(error) });
+		}
+		return Promise.resolve();
 	}
 
 	/** Returns unique prompts ordered by their most recent submission. */

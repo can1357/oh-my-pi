@@ -12,8 +12,8 @@ import {
 } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import type { SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import * as worktreeModule from "@oh-my-pi/pi-coding-agent/task/worktree";
-import * as gitModule from "@oh-my-pi/pi-coding-agent/utils/git";
 import * as natives from "@oh-my-pi/pi-natives";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { $ } from "bun";
 
 function result(overrides: Partial<SingleResult> = {}): SingleResult {
@@ -117,9 +117,16 @@ describe("runIsolatedSubprocess", () => {
 			status: "parked",
 		});
 		// No branch was ever created, so the rescue probe finds nothing to keep.
-		vi.spyOn(gitModule.revList, "range").mockRejectedValue(new Error("unknown revision"));
-		vi.spyOn(gitModule.ref, "exists").mockResolvedValue(false);
-		const deleteSpy = vi.spyOn(gitModule.branch, "tryDelete").mockResolvedValue(true);
+		const deleteSpy = vi.fn(async () => true);
+		const repository = {
+			deleteBranch: deleteSpy,
+			refExists: async () => false,
+			revListRange: async () => {
+				throw new Error("unknown revision");
+			},
+		} as unknown as natives.VcsGitRepo;
+		vi.spyOn(vcs, "git").mockReturnValue(repository);
+		vi.spyOn(vcs, "requireGit").mockReturnValue(repository);
 
 		const outcome = await runIsolatedSubprocess({
 			baseOptions: {
@@ -148,7 +155,7 @@ describe("runIsolatedSubprocess", () => {
 		expect(await Bun.file(patchPath).text()).toBe(rootPatch);
 		expect(outcome.nestedPatches).toEqual([]);
 		expect(captureSpy).toHaveBeenCalledWith(isolationDir, baseline);
-		expect(deleteSpy).toHaveBeenCalledWith(repoRoot, "omp/task/PreserveBranchFailure");
+		expect(deleteSpy).toHaveBeenCalledWith("omp/task/PreserveBranchFailure", true);
 		expect(cleanupSpy).toHaveBeenCalledTimes(1);
 		expect(AgentRegistry.global().get("PreserveBranchFailure")?.history?.patchPath).toBe(patchPath);
 	});
@@ -194,9 +201,18 @@ describe("runIsolatedSubprocess", () => {
 			session: null,
 			status: "parked",
 		});
-		const rangeSpy = vi.spyOn(gitModule.revList, "range").mockRejectedValue(new Error("object database unavailable"));
-		const refSpy = vi.spyOn(gitModule.ref, "exists").mockResolvedValue(true);
-		const deleteSpy = vi.spyOn(gitModule.branch, "tryDelete").mockResolvedValue(true);
+		const rangeSpy = vi.fn(async () => {
+			throw new Error("object database unavailable");
+		});
+		const refSpy = vi.fn(async () => true);
+		const deleteSpy = vi.fn(async () => true);
+		const repository = {
+			deleteBranch: deleteSpy,
+			refExists: refSpy,
+			revListRange: rangeSpy,
+		} as unknown as natives.VcsGitRepo;
+		vi.spyOn(vcs, "git").mockReturnValue(repository);
+		vi.spyOn(vcs, "requireGit").mockReturnValue(repository);
 
 		const outcome = await runIsolatedSubprocess({
 			baseOptions: {
@@ -219,8 +235,8 @@ describe("runIsolatedSubprocess", () => {
 			buildFailureResult: err => result({ exitCode: 1, error: String(err) }),
 		});
 
-		expect(rangeSpy).toHaveBeenCalledWith(repoRoot, "base", "omp/task/RescueBranchCommits");
-		expect(refSpy).toHaveBeenCalledWith(repoRoot, "refs/heads/omp/task/RescueBranchCommits");
+		expect(rangeSpy).toHaveBeenCalledWith("base", "omp/task/RescueBranchCommits");
+		expect(refSpy).toHaveBeenCalledWith("refs/heads/omp/task/RescueBranchCommits");
 		expect(deleteSpy).not.toHaveBeenCalled();
 		expect(outcome.error).toContain("git apply --3way failed");
 		expect(outcome.error).toContain("preserved on branch omp/task/RescueBranchCommits");
@@ -432,6 +448,7 @@ describe("mergeIsolatedChanges", () => {
 	});
 
 	it("allows nested-only branch-mode patches to apply when no root branch was created", async () => {
+		vi.spyOn(vcs, "requireGit").mockReturnValue({} as natives.VcsGitRepo);
 		const mergeSpy = vi.spyOn(worktreeModule, "mergeTaskBranches");
 		const outcome = await mergeIsolatedChanges({
 			repoRoot: "/repo",
@@ -449,6 +466,7 @@ describe("mergeIsolatedChanges", () => {
 	});
 
 	it("surfaces branch preparation errors instead of reporting no changes", async () => {
+		vi.spyOn(vcs, "requireGit").mockReturnValue({} as natives.VcsGitRepo);
 		const mergeSpy = vi.spyOn(worktreeModule, "mergeTaskBranches");
 		const outcome = await mergeIsolatedChanges({
 			repoRoot: "/repo",
@@ -470,6 +488,7 @@ describe("mergeIsolatedChanges", () => {
 	});
 
 	it("relays the rescued task branch into the merge summary", async () => {
+		vi.spyOn(vcs, "requireGit").mockReturnValue({} as natives.VcsGitRepo);
 		const outcome = await mergeIsolatedChanges({
 			repoRoot: "/repo",
 			mergeMode: "branch",
@@ -532,8 +551,8 @@ describe("mergeIsolatedChanges", () => {
 		// `--check` also succeeds (e.g. repeated context with the postimage present
 		// elsewhere), the outcome must NOT be a silent no-op.
 		const { repoRoot, patchPath } = await seedFooRepo("old\n");
-		const canApplySpy = vi.spyOn(gitModule.patch, "canApplyText").mockResolvedValue(true);
-		const applySpy = vi.spyOn(gitModule.patch, "applyText").mockResolvedValue(undefined);
+		const canApplySpy = vi.spyOn(natives.VcsGitRepo.prototype, "canApplyPatch").mockResolvedValue(true);
+		const applySpy = vi.spyOn(natives.VcsGitRepo.prototype, "applyPatch").mockResolvedValue(undefined);
 
 		const outcome = await mergeIsolatedChanges({
 			repoRoot,
@@ -548,6 +567,7 @@ describe("mergeIsolatedChanges", () => {
 	});
 
 	it("does not mark failed branch-mode runs as nested-patch eligible", async () => {
+		vi.spyOn(vcs, "requireGit").mockReturnValue({} as natives.VcsGitRepo);
 		const outcome = await mergeIsolatedChanges({
 			repoRoot: "/repo",
 			mergeMode: "branch",

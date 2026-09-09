@@ -1,5 +1,5 @@
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
-import * as git from "../utils/git";
+import { github } from "../utils/github";
 import type { ToolSession } from ".";
 import type { GhToolDetails } from "./gh";
 import {
@@ -427,7 +427,7 @@ export async function executeSearchIssues(
 	const apiQuery = composeSearchQuery([displayQuery, scope.qualifier, "is:issue"]);
 	const args = buildGhApiSearchArgs("issues", apiQuery, limit, { host: scope.host });
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(session.cwd, args, signal);
+	const response = await github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(session.cwd, args, signal);
 	const items = (response.items ?? []).map(apiIssueToSearchResult);
 	return buildTextResult(formatSearchResults("issues", displayQuery, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -448,7 +448,7 @@ export async function executeSearchPrs(
 	const apiQuery = composeSearchQuery([displayQuery, scope.qualifier, "is:pr"]);
 	const args = buildGhApiSearchArgs("issues", apiQuery, limit, { host: scope.host });
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(session.cwd, args, signal);
+	const response = await github.json<GhApiSearchResponse<GhApiSearchIssueItem>>(session.cwd, args, signal);
 	const items = (response.items ?? []).map(apiIssueToSearchResult);
 	return buildTextResult(formatSearchResults("pull requests", displayQuery, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -475,7 +475,7 @@ export async function executeSearchCode(
 		extraHeaders: ["Accept: application/vnd.github.text-match+json"],
 	});
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchCodeItem>>(session.cwd, args, signal);
+	const response = await github.json<GhApiSearchResponse<GhApiSearchCodeItem>>(session.cwd, args, signal);
 	const items = (response.items ?? []).map(apiCodeToSearchResult);
 	return buildTextResult(formatSearchCodeResults(query, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -496,7 +496,7 @@ export async function executeSearchCommits(
 	const apiQuery = composeSearchQuery([displayQuery, scope.qualifier]);
 	const args = buildGhApiSearchArgs("commits", apiQuery, limit, { host: scope.host });
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchCommitItem>>(session.cwd, args, signal);
+	const response = await github.json<GhApiSearchResponse<GhApiSearchCommitItem>>(session.cwd, args, signal);
 	const items = (response.items ?? []).map(apiCommitToSearchResult);
 	return buildTextResult(formatSearchCommitsResults(displayQuery, repo, items), undefined, undefined, {
 		useless: items.length === 0,
@@ -514,7 +514,7 @@ export async function executeSearchRepos(
 	const query = composeSearchQuery([params.query, dateQualifier]);
 	const args = buildGhApiSearchArgs("repositories", query, limit);
 
-	const response = await git.github.json<GhApiSearchResponse<GhApiSearchRepoItem>>(session.cwd, args, signal);
+	const response = await github.json<GhApiSearchResponse<GhApiSearchRepoItem>>(session.cwd, args, signal);
 	const items = (response.items ?? []).map(apiRepoToSearchResult);
 	return buildTextResult(formatSearchReposResults(query, items), undefined, undefined, {
 		useless: items.length === 0,

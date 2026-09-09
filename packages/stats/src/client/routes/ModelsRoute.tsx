@@ -1,7 +1,7 @@
 import { useMemo, useState } from "react";
 import { Line } from "react-chartjs-2";
 import { getModelDashboardStats } from "../api";
-import { CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
+import { buildModelColorLookup, CHART_THEMES, MODEL_COLORS } from "../components/chart-shared";
 import {
 	DetailChartEmpty,
 	detailChartPlugins,
@@ -40,17 +40,23 @@ export function ModelsRoute({ active, range, refreshTrigger }: ModelsRouteProps)
 		pollMs: 30000,
 		enabled: active,
 	});
+	const modelColorLookup = useMemo(() => buildModelColorLookup(modelStats?.byModel ?? []), [modelStats?.byModel]);
 
 	return (
 		<div className="stats-route-container space-y-6">
 			<AsyncBoundary loading={loading} error={error} data={modelStats}>
 				{modelStats && (
 					<>
-						<ModelShareChart modelSeries={modelStats.modelSeries} timeRange={range} />
+						<ModelShareChart
+							modelSeries={modelStats.modelSeries}
+							timeRange={range}
+							colorLookup={modelColorLookup}
+						/>
 						<ModelsTable
 							models={modelStats.byModel}
 							performanceSeries={modelStats.modelPerformanceSeries}
 							timeRange={range}
+							colorLookup={modelColorLookup}
 						/>
 					</>
 				)}
@@ -59,7 +65,15 @@ export function ModelsRoute({ active, range, refreshTrigger }: ModelsRouteProps)
 	);
 }
 
-function ModelShareChart({ modelSeries, timeRange }: { modelSeries: ModelTimeSeriesPoint[]; timeRange: TimeRange }) {
+function ModelShareChart({
+	modelSeries,
+	timeRange,
+	colorLookup,
+}: {
+	modelSeries: ModelTimeSeriesPoint[];
+	timeRange: TimeRange;
+	colorLookup: ReadonlyMap<string, string>;
+}) {
 	const theme = useSystemTheme();
 	const chartTheme = CHART_THEMES[theme];
 	const meta = rangeMeta(timeRange);
@@ -69,19 +83,25 @@ function ModelShareChart({ modelSeries, timeRange }: { modelSeries: ModelTimeSer
 	const data = useMemo(() => {
 		return {
 			labels: chartData.data.map(d => formatRangeTick(d.timestamp, timeRange)),
-			datasets: chartData.series.map((seriesName, index) => ({
-				label: seriesName,
-				data: chartData.data.map(d => d[seriesName] ?? 0),
-				borderColor: MODEL_COLORS[index % MODEL_COLORS.length],
-				backgroundColor: `${MODEL_COLORS[index % MODEL_COLORS.length]}20`,
-				fill: true,
-				tension: 0.4,
-				pointRadius: 0,
-				pointHoverRadius: 4,
-				borderWidth: 2,
-			})),
+			datasets: chartData.series.map((series, index) => {
+				const fallbackColor = MODEL_COLORS[index % MODEL_COLORS.length];
+				const color = series.key ? (colorLookup.get(series.key) ?? fallbackColor) : fallbackColor;
+				const dataKey = series.key ?? series.label;
+
+				return {
+					label: series.label,
+					data: chartData.data.map(d => d[dataKey] ?? 0),
+					borderColor: color,
+					backgroundColor: `${color}20`,
+					fill: true,
+					tension: 0.4,
+					pointRadius: 0,
+					pointHoverRadius: 4,
+					borderWidth: 2,
+				};
+			}),
 		};
-	}, [chartData, timeRange]);
+	}, [chartData, colorLookup, timeRange]);
 
 	const options = useMemo(() => {
 		return {
@@ -166,7 +186,7 @@ function buildModelPreferenceSeries(
 	topN = 5,
 ): {
 	data: Array<Record<string, number>>;
-	series: string[];
+	series: Array<{ key?: string; label: string }>;
 } {
 	if (points.length === 0) return { data: [], series: [] };
 
@@ -209,22 +229,26 @@ function buildModelPreferenceSeries(
 			total: 0,
 		};
 		bucket.total += point.requests;
-		const seriesLabel = topKeys.has(key) ? (labelByKey.get(key) ?? point.model) : "Other";
-		bucket[seriesLabel] = (bucket[seriesLabel] ?? 0) + point.requests;
+		const seriesKey = topKeys.has(key) ? key : "Other";
+		bucket[seriesKey] = (bucket[seriesKey] ?? 0) + point.requests;
 		dataMap.set(point.timestamp, bucket);
 	}
 
-	const series = topEntries.map(entry => labelByKey.get(entry.key) ?? entry.model);
+	const series: Array<{ key?: string; label: string }> = topEntries.map(entry => ({
+		key: entry.key,
+		label: labelByKey.get(entry.key) ?? entry.model,
+	}));
 	if ([...dataMap.values()].some(row => (row.Other ?? 0) > 0)) {
-		series.push("Other");
+		series.push({ label: "Other" });
 	}
 
 	const data = [...dataMap.values()]
 		.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0))
 		.map(row => {
 			const total = row.total ?? 0;
-			for (const key of series) {
-				row[key] = total > 0 ? ((row[key] ?? 0) / total) * 100 : 0;
+			for (const seriesItem of series) {
+				const seriesKey = seriesItem.key ?? seriesItem.label;
+				row[seriesKey] = total > 0 ? ((row[seriesKey] ?? 0) / total) * 100 : 0;
 			}
 			return row;
 		});
@@ -238,10 +262,12 @@ function ModelsTable({
 	models,
 	performanceSeries,
 	timeRange,
+	colorLookup,
 }: {
 	models: ModelStats[];
 	performanceSeries: ModelPerformancePoint[];
 	timeRange: TimeRange;
+	colorLookup: ReadonlyMap<string, string>;
 }) {
 	const [expandedKey, setExpandedKey] = useState<string | null>(null);
 	const meta = rangeMeta(timeRange);
@@ -280,7 +306,7 @@ function ModelsTable({
 					const key = `${model.model}::${model.provider}`;
 					const performance = performanceSeriesByKey.get(key);
 					const trendData = performance?.data ?? [];
-					const trendColor = MODEL_COLORS[index % MODEL_COLORS.length];
+					const trendColor = colorLookup.get(key) ?? MODEL_COLORS[index % MODEL_COLORS.length];
 					const isExpanded = expandedKey === key;
 					const errorRate = model.errorRate * 100;
 
