@@ -51,6 +51,8 @@ const SAND_TOOLS_WIRES = [
 	"sand-default-fallback",
 ] as const;
 const SAND_WIRE_MODEL_ID_WHEN = ["tools"] as const;
+/** Native field-2 JSON Schema projection for Grok Bot sand InferenceService. */
+const SAND_NATIVE_TOOL_SCHEMAS = ["google", "strict"] as const;
 
 /** Effort tiers accepted by taxonomy collapse/override vocabulary (`Effort` ∪ `"off"`). */
 export const EFFORT_TIERS: readonly string[] = [...EFFORTS, "off"];
@@ -364,6 +366,19 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 		key: "sandAcceptEmptyWriteFollowup",
 		set: "catalog",
 		shape: "scalar",
+	},
+	/**
+	 * Native omp field-2 JSON Schema projection for Grok Bot sand.
+	 * `google` strips keywords Gemini backends reject; `strict` forces
+	 * `additionalProperties: false` for OpenAI-class sand rows. Unset keeps
+	 * the raw omp schema (grok/composer working path). Do not branch on model
+	 * class in TypeScript — declare the projection per row/class in KDL.
+	 */
+	"sand-native-tool-schema": {
+		key: "sandNativeToolSchema",
+		set: "catalog",
+		shape: "scalar",
+		values: SAND_NATIVE_TOOL_SCHEMAS,
 	},
 	/**
 	 * Reviewed reasoning capability. Applied as a correction so synthetic

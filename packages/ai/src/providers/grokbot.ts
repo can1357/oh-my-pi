@@ -1,5 +1,4 @@
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
-import type { ModelIdentity } from "@oh-my-pi/pi-catalog/compat/types";
 import type { Effort } from "@oh-my-pi/pi-catalog/effort";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { logger } from "@oh-my-pi/pi-utils";
@@ -206,7 +205,7 @@ function toolParametersToJson(tool: Tool): Record<string, unknown> {
 	}
 }
 
-function toInferenceTools(tools: Context["tools"], identity?: Pick<ModelIdentity, "class">) {
+function toInferenceTools(tools: Context["tools"], sandNativeToolSchema?: "google" | "strict") {
 	if (!Array.isArray(tools)) return [];
 	const out: Array<{
 		name: string;
@@ -220,8 +219,8 @@ function toInferenceTools(tools: Context["tools"], identity?: Pick<ModelIdentity
 		if (!name) continue;
 		const wireName =
 			typeof tool.customWireName === "string" && tool.customWireName.trim() ? tool.customWireName.trim() : name;
-		const parameters = identity
-			? nativeToolParametersForIdentity(toolParametersToJson(tool), identity)
+		const parameters = sandNativeToolSchema
+			? nativeToolParametersForIdentity(toolParametersToJson(tool), sandNativeToolSchema)
 			: toolParametersToJson(tool);
 		const entry: (typeof out)[number] = {
 			name: wireName,
@@ -890,7 +889,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 			// reuse while forcing `toolChoice: "none"` — do not advertise tools.
 			// Sharpshooter `required` / named choices have no sand wire field.
 			assertGrokbotToolChoiceSupported(options?.toolChoice);
-			const tools = options?.toolChoice === "none" ? [] : toInferenceTools(context.tools, identity);
+			const tools = options?.toolChoice === "none" ? [] : toInferenceTools(context.tools, model.sandNativeToolSchema);
 			const grammarTools = buildGrammarToolIndex(context.tools);
 			const conversationId = options?.conversationId || options?.sessionId || crypto.randomUUID();
 			let emptyToolRetryUsed = false;

@@ -110,6 +110,13 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (catalog.sandAcceptEmptyWriteFollowup === true && model.sandAcceptEmptyWriteFollowup === undefined) {
 		model.sandAcceptEmptyWriteFollowup = true;
 	}
+	const sandNativeToolSchema = catalog.sandNativeToolSchema;
+	if (
+		(sandNativeToolSchema === "google" || sandNativeToolSchema === "strict") &&
+		model.sandNativeToolSchema === undefined
+	) {
+		model.sandNativeToolSchema = sandNativeToolSchema;
+	}
 }
 
 /**

@@ -380,7 +380,7 @@ describe("grokbot family tool mapping", () => {
 			required: ["command"],
 			additionalProperties: true,
 		};
-		const gemini = nativeToolParametersForIdentity(raw, { class: "gemini" });
+		const gemini = nativeToolParametersForIdentity(raw, "google");
 		expect(gemini).not.toHaveProperty("additionalProperties");
 		const command = gemini.properties as Record<string, Record<string, unknown>>;
 		expect(command.command).not.toHaveProperty("format");
@@ -393,11 +393,53 @@ describe("grokbot family tool mapping", () => {
 			properties: { command: { type: "string" } },
 			required: ["command"],
 		};
-		const openai = nativeToolParametersForIdentity(raw, { class: "openai" });
+		const openai = nativeToolParametersForIdentity(raw, "strict");
 		expect(openai.additionalProperties).toBe(false);
 		expect(openai.required).toEqual(["command"]);
-		const xai = nativeToolParametersForIdentity(raw, { class: "xai" });
+		const xai = nativeToolParametersForIdentity(raw);
 		expect(xai).not.toHaveProperty("additionalProperties");
 		expect(xai).toEqual(raw);
+	});
+
+	test("catalog sandNativeToolSchema drives gemini/openai projections via KDL", () => {
+		const gemini = buildModel({
+			id: "gemini-3-flash",
+			name: "gemini-3-flash",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(gemini.sandNativeToolSchema).toBe("google");
+		const openai = buildModel({
+			id: "gpt-5.4-luna",
+			name: "gpt-5.4-luna",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(openai.sandNativeToolSchema).toBe("strict");
+		const grok = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(grok.sandNativeToolSchema).toBeUndefined();
 	});
 });

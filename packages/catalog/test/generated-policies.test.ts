@@ -991,6 +991,20 @@ describe("Grok Bot generated thinking policy", () => {
 		});
 		expect(gemini.sandEmptyToolsRetryWire).toBe("keep-model");
 		expect(gemini.sandAcceptEmptyWriteFollowup).toBe(true);
+		expect(gemini.sandNativeToolSchema).toBe("google");
+		const openai = buildModel({
+			id: "gpt-5.4-luna",
+			name: "gpt-5.4-luna",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+		});
+		expect(openai.sandNativeToolSchema).toBe("strict");
 		const grok = buildModel({
 			id: "grok-4.6",
 			name: "grok-4.6",
@@ -1005,6 +1019,7 @@ describe("Grok Bot generated thinking policy", () => {
 		});
 		expect(grok.sandEmptyToolsRetryWire).toBeUndefined();
 		expect(grok.sandAcceptEmptyWriteFollowup).toBeUndefined();
+		expect(grok.sandNativeToolSchema).toBeUndefined();
 	});
 
 	it("excludes grokbot from gen:models catalog discovery like other credential-scoped providers", () => {

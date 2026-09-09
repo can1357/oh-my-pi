@@ -103,24 +103,24 @@ export function applyGrokbotSandToolPolicy(
 }
 
 /**
- * Family-specific native field-2 parameter schema.
+ * Native field-2 parameter schema projection from catalog
+ * `sand-native-tool-schema` (not model class). Unset keeps the raw omp schema.
  *
- * Gemini backends reject leftover JSON Schema keywords (`additionalProperties`,
- * `format`, …). OpenAI mini/strict backends require `additionalProperties: false`.
- * Other families keep the raw omp JSON Schema (the working grok/composer path).
+ * `google` strips leftover JSON Schema keywords Gemini backends reject.
+ * `strict` forces `additionalProperties: false` for OpenAI-class sand backends.
  */
 export function nativeToolParametersForIdentity(
 	schema: Record<string, unknown>,
-	identity: Pick<ModelIdentity, "class">,
+	projection?: "google" | "strict",
 ): Record<string, unknown> {
-	if (identity.class === "gemini") {
+	if (projection === "google") {
 		const normalized = normalizeSchemaForGoogle(schema);
 		if (normalized && typeof normalized === "object" && !Array.isArray(normalized)) {
 			return normalized as Record<string, unknown>;
 		}
 		return schema;
 	}
-	if (identity.class === "openai") {
+	if (projection === "strict") {
 		return adaptSchemaForStrict(schema, true).schema;
 	}
 	return schema;

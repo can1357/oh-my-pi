@@ -8861,6 +8861,26 @@
 			},
 			{
 				"source": "providers/grokbot.kdl:22",
+				"class": "gemini",
+				"providers": [
+					"grokbot"
+				],
+				"catalog": {
+					"sandNativeToolSchema": "google"
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:25",
+				"class": "openai",
+				"providers": [
+					"grokbot"
+				],
+				"catalog": {
+					"sandNativeToolSchema": "strict"
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:31",
 				"providers": [
 					"grokbot"
 				],
@@ -8877,7 +8897,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:27",
+				"source": "providers/grokbot.kdl:36",
 				"providers": [
 					"grokbot"
 				],
@@ -8893,7 +8913,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:31",
+				"source": "providers/grokbot.kdl:40",
 				"providers": [
 					"grokbot"
 				],
@@ -8909,7 +8929,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:41",
+				"source": "providers/grokbot.kdl:50",
 				"providers": [
 					"grokbot"
 				],
@@ -8939,7 +8959,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:51",
+				"source": "providers/grokbot.kdl:60",
 				"providers": [
 					"grokbot"
 				],
@@ -8960,7 +8980,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:60",
+				"source": "providers/grokbot.kdl:69",
 				"providers": [
 					"grokbot"
 				],
@@ -8976,7 +8996,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:64",
+				"source": "providers/grokbot.kdl:73",
 				"providers": [
 					"grokbot"
 				],
@@ -9015,7 +9035,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:72",
+				"source": "providers/grokbot.kdl:81",
 				"providers": [
 					"grokbot"
 				],
@@ -9044,7 +9064,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:80",
+				"source": "providers/grokbot.kdl:89",
 				"providers": [
 					"grokbot"
 				],

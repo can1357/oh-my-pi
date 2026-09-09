@@ -1161,6 +1161,12 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	sandAcceptEmptyWriteFollowup?: boolean;
 	/**
+	 * Native omp field-2 JSON Schema projection (KDL `sand-native-tool-schema`).
+	 * `google` / `strict` adapt schemas for Gemini / OpenAI-class sand backends;
+	 * unset keeps the raw omp schema.
+	 */
+	sandNativeToolSchema?: "google" | "strict";
+	/**
 	 * Default Grok Bot `requestedModel.parameters` values from live AvailableModels
 	 * variants (e.g. default `context` tier). Wire mapping prefers explicit request
 	 * options, then these defaults, then reviewed fallbacks.
