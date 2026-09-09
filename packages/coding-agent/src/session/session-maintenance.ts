@@ -1875,7 +1875,7 @@ export class SessionMaintenance {
 				preserveData: args.preserveData,
 				method: args.method,
 				providerReplayThroughEntryId: args.providerReplayThroughEntryId,
-2: 				tokensAfter:
+				tokensAfter:
 					isRecord(args.details) && args.details.kind === "experimental-context-rollover"
 						? this.#projectExperimentalContextRolloverTokens({ ...args, summary })
 						: this.#projectCompactedContextTokens({ ...args, summary }),
