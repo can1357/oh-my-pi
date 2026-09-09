@@ -128,14 +128,27 @@ class FileSessionStorageWriter implements SessionStorageWriter {
 	}
 
 	#writeNow(line: string): void {
+		const originalSize = fs.fstatSync(this.#fd).size;
 		const buf = Buffer.from(line, "utf-8");
 		let offset = 0;
-		while (offset < buf.length) {
-			const written = fs.writeSync(this.#fd, buf, offset, buf.length - offset);
-			if (written === 0) {
-				throw new Error("Short write");
+		try {
+			while (offset < buf.length) {
+				const written = fs.writeSync(this.#fd, buf, offset, buf.length - offset);
+				if (written === 0) {
+					throw new Error("Short write");
+				}
+				offset += written;
 			}
-			offset += written;
+		} catch (writeError) {
+			try {
+				fs.ftruncateSync(this.#fd, originalSize);
+			} catch (rollbackError) {
+				throw new AggregateError(
+					[toError(writeError), toError(rollbackError)],
+					"Session append failed and its partial bytes could not be rolled back",
+				);
+			}
+			throw writeError;
 		}
 	}
 
@@ -204,24 +217,23 @@ export class FileSessionStorage implements SessionStorage {
 		const tempPath = path.join(dir, `.${path.basename(fpath)}.${Snowflake.next()}.tmp`);
 		try {
 			fs.writeFileSync(tempPath, content);
-			fs.renameSync(tempPath, fpath);
 		} catch (err) {
-			try {
-				if (fs.existsSync(tempPath)) fs.unlinkSync(tempPath);
-			} catch (cleanupErr) {
-				if (!isEnoent(cleanupErr)) {
-					logger.warn("Failed to remove session rewrite temp file", {
-						sessionFile: fpath,
-						tempPath,
-						error: toError(cleanupErr).message,
-					});
-				}
-			}
-			if (hasFsCode(err, "EPERM")) {
-				fs.writeFileSync(fpath, content);
-				return;
-			}
+			this.#discardTemp(tempPath, fpath);
 			throw toError(err);
+		}
+		try {
+			this.renameSync(tempPath, fpath);
+		} catch (err) {
+			if (!hasFsCode(err, "EPERM")) {
+				this.#discardTemp(tempPath, fpath);
+				throw toError(err);
+			}
+			try {
+				this.#replaceSessionFileAfterEpermSync(tempPath, fpath, err);
+			} catch (fallbackErr) {
+				this.#discardTemp(tempPath, fpath);
+				throw fallbackErr;
+			}
 		}
 	}
 

@@ -6,7 +6,7 @@
  * (the reported "first char off / title shift"). Scrolling must also move the
  * visible window.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -172,25 +172,40 @@ function withViewer(fn: (viewer: AgentTranscriptViewer) => void): void {
 	const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-"));
 	const file = path.join(dir, "__advisor.jsonl");
 	fs.writeFileSync(file, buildJsonl());
+	const viewer = makeViewer(file);
 	try {
-		fn(makeViewer(file));
+		fn(viewer);
 	} finally {
+		viewer.dispose();
 		removeSyncWithRetries(dir);
 	}
 }
+async function settleRemoteRefresh(): Promise<void> {
+	await Promise.resolve();
+	await Promise.resolve();
+}
+
+beforeAll(async () => {
+	resetSettingsForTest();
+	await Settings.init({ inMemory: true });
+	await initTheme();
+});
+
+afterAll(() => {
+	resetSettingsForTest();
+});
 
 describe("AgentTranscriptViewer", () => {
 	let rowsDesc: PropertyDescriptor | undefined;
 
-	beforeEach(async () => {
-		resetSettingsForTest();
-		await Settings.init({ inMemory: true });
-		initTheme();
+	beforeEach(() => {
+		vi.useFakeTimers();
 		rowsDesc = Object.getOwnPropertyDescriptor(process.stdout, "rows");
 		Object.defineProperty(process.stdout, "rows", { configurable: true, get: () => 24, set: () => {} });
 	});
 
 	afterEach(() => {
+		vi.useRealTimers();
 		if (rowsDesc) {
 			Object.defineProperty(process.stdout, "rows", rowsDesc);
 		} else {
@@ -297,8 +312,8 @@ describe("AgentTranscriptViewer", () => {
 		});
 	});
 
-	it("renders tool-result images through the shared Kitty placeholder budget", async () => {
-		await Settings.init({ inMemory: true, overrides: { "terminal.showImages": true } });
+	it("renders tool-result images through the shared Kitty placeholder budget", () => {
+		Settings.instance.override("terminal.showImages", true);
 		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "adv-view-image-"));
 		const file = path.join(dir, "__advisor.jsonl");
 		fs.writeFileSync(file, buildImageJsonl());
@@ -322,6 +337,7 @@ describe("AgentTranscriptViewer", () => {
 			expect(imageBudget.takeTransmits().join("")).toContain("a=t");
 		} finally {
 			viewer.dispose();
+			Settings.instance.clearOverride("terminal.showImages");
 			setKittyGraphics(previousGraphics);
 			setTerminalImageProtocol(previousProtocol);
 			removeSyncWithRetries(dir);
@@ -344,11 +360,8 @@ describe("AgentTranscriptViewer", () => {
 			expect(body()).toContain("PROMPTMARKER");
 
 			removeSyncWithRetries(file);
-			// Poll until the viewer's own poll timer re-stats and clears (deadline-bounded).
-			const deadline = Date.now() + 5000;
-			while (body().includes("PROMPTMARKER") && Date.now() < deadline) {
-				await Bun.sleep(50);
-			}
+			// Drive the viewer's own 250ms polling interval without paying wall-clock time.
+			vi.advanceTimersByTime(250);
 			expect(body()).not.toContain("PROMPTMARKER");
 		} finally {
 			viewer.dispose();
@@ -370,10 +383,7 @@ describe("AgentTranscriptViewer", () => {
 					.render(80)
 					.map(l => Bun.stripANSI(l))
 					.join("\n");
-			const deadline = Date.now() + 5000;
-			while (!body().includes("TAILMARKER") && Date.now() < deadline) {
-				await Bun.sleep(50);
-			}
+			vi.advanceTimersByTime(250);
 			expect(body()).toContain("TAILMARKER");
 			expect(readFileSpy).not.toHaveBeenCalled();
 		} finally {
@@ -423,10 +433,7 @@ describe("AgentTranscriptViewer", () => {
 					.render(80)
 					.map(l => Bun.stripANSI(l))
 					.join("\n");
-			const deadline = Date.now() + 5000;
-			while (!body().includes("TAILMARK") && Date.now() < deadline) {
-				await Bun.sleep(50);
-			}
+			vi.advanceTimersByTime(250);
 			expect(body()).toContain("BASEMARK");
 			expect(body()).toContain("TAILMARK");
 			// The race-window entry must be rendered exactly once, not duplicated
@@ -459,10 +466,7 @@ describe("AgentTranscriptViewer", () => {
 					.render(80)
 					.map(l => Bun.stripANSI(l))
 					.join("\n");
-			const deadline = Date.now() + 5000;
-			while (body().includes("Loading transcript from host") && Date.now() < deadline) {
-				await Bun.sleep(10);
-			}
+			await settleRemoteRefresh();
 			expect(body()).toContain("No messages yet.");
 		} finally {
 			viewer.dispose();
@@ -497,10 +501,7 @@ describe("AgentTranscriptViewer", () => {
 			// Completing the dangling line via a single newline must surface the
 			// buffered entry; it must NOT be dropped as a malformed fragment.
 			fs.appendFileSync(file, "\n");
-			const deadline = Date.now() + 5000;
-			while (!body().includes("PARTIALMARK") && Date.now() < deadline) {
-				await Bun.sleep(50);
-			}
+			vi.advanceTimersByTime(250);
 			expect(body()).toContain("PARTIALMARK");
 		} finally {
 			viewer.dispose();
@@ -508,22 +509,7 @@ describe("AgentTranscriptViewer", () => {
 		}
 	});
 
-	it("stops polling after an oversized remote JSONL entry cannot fit in one host read", async () => {
-		const transcriptReadCap = 4 * 1024 * 1024;
-		const oversizedLine = `${JSON.stringify({
-			type: "message",
-			id: "oversized",
-			parentId: null,
-			timestamp: TS,
-			message: {
-				role: "user",
-				synthetic: true,
-				attribution: "agent",
-				content: "x".repeat(transcriptReadCap + 1),
-				timestamp: 0,
-			},
-		})}\n`;
-		const transcript = Buffer.from(oversizedLine, "utf-8");
+	it("stops polling after the host reports an oversized remote JSONL entry", async () => {
 		const calls: number[] = [];
 		const remote: AgentHubRemote = {
 			chat: () => {},
@@ -531,22 +517,18 @@ describe("AgentTranscriptViewer", () => {
 			revive: () => {},
 			readTranscript: async (_id: string, fromByte: number) => {
 				calls.push(fromByte);
-				const slice = transcript.subarray(fromByte, fromByte + transcriptReadCap);
-				const lastNewline = slice.lastIndexOf(0x0a);
-				if (lastNewline < 0) {
-					return {
-						text: "",
-						newSize: fromByte,
-						error: `transcript entry exceeds transcript fetch cap (${transcriptReadCap} bytes)`,
-					};
-				}
-				const complete = slice.subarray(0, lastNewline + 1);
-				return { text: complete.toString("utf-8"), newSize: fromByte + complete.byteLength };
+				return {
+					text: "",
+					newSize: fromByte,
+					error: "transcript entry exceeds transcript fetch cap (4194304 bytes)",
+				};
 			},
 		};
 		const viewer = makeViewer("", remote);
 		try {
-			await Bun.sleep(650);
+			await settleRemoteRefresh();
+			vi.advanceTimersByTime(650);
+			await settleRemoteRefresh();
 			const body = viewer
 				.render(80)
 				.map(l => Bun.stripANSI(l))
@@ -582,7 +564,10 @@ describe("AgentTranscriptViewer", () => {
 		};
 		const viewer = makeViewer("", remote);
 		try {
-			await Bun.sleep(650);
+			await settleRemoteRefresh();
+			vi.advanceTimersByTime(250);
+			await settleRemoteRefresh();
+			vi.advanceTimersByTime(400);
 			const body = viewer
 				.render(80)
 				.map(l => Bun.stripANSI(l))
@@ -635,10 +620,9 @@ describe("AgentTranscriptViewer", () => {
 					.render(80)
 					.map(l => Bun.stripANSI(l))
 					.join("\n");
-			const deadline = Date.now() + 5000;
-			while (!body().includes("AFTER_ROTATE") && Date.now() < deadline) {
-				await Bun.sleep(20);
-			}
+			await settleRemoteRefresh();
+			vi.advanceTimersByTime(250);
+			await settleRemoteRefresh();
 			expect(body()).toContain("AFTER_ROTATE");
 			// Pre-rotation rows must not stack underneath the refetched transcript.
 			expect(body()).not.toContain("BEFORE_ROTATE");

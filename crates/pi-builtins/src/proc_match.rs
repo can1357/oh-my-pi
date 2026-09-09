@@ -513,7 +513,7 @@ fn parse_proc_match_args(
 								.map_err(|_| (2, "invalid queue value".to_string()))?,
 						);
 					},
-					'q' if mode == ProcMatchMode::Grep && cfg!(target_os = "macos") => {
+					'q' if mode == ProcMatchMode::Grep => {
 						options.quiet = true;
 					},
 					'q' => return Err((2, "unrecognized option '-q'".to_string())),
@@ -887,11 +887,11 @@ fn parse_states(value: &str, target: &mut HashSet<char>) -> std::result::Result<
 }
 
 fn resolve_shell_path(cwd: &Path, value: &str) -> PathBuf {
-	let path = Path::new(value);
-	if path.is_absolute() {
-		path.to_path_buf()
+	let normalized = brush_core::sys::fs::normalize_shell_path(Path::new(value));
+	if normalized.is_absolute() {
+		normalized.into_owned()
 	} else {
-		cwd.join(path)
+		cwd.join(normalized)
 	}
 }
 
@@ -950,10 +950,21 @@ fn write_proc_match_help(
 	if mode == ProcMatchMode::Kill {
 		writeln!(output, "  -q value, --queue value  send an integer with sigqueue")?;
 	}
-	#[cfg(target_os = "macos")]
 	if mode == ProcMatchMode::Grep {
 		writeln!(output, "  -q  suppress output")?;
 	}
 	Ok(())
 }
 
+#[cfg(all(test, windows))]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn resolves_msys_drive_alias_pidfiles() {
+		assert_eq!(
+			resolve_shell_path(Path::new(r"C:\workspace"), "/c/Users/Adam/app.pid"),
+			PathBuf::from(r"C:\Users\Adam\app.pid"),
+		);
+	}
+}

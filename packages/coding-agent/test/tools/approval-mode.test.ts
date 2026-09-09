@@ -14,6 +14,7 @@ const BASE_SETTINGS = {
 	"async.enabled": false,
 	"bash.autoBackground.enabled": false,
 	"bashInterceptor.enabled": false,
+	"bash.patterns": [{ match: "rm -rf *", approval: "deny" }],
 } as const;
 
 function emptyWorkspaceTree(cwd: string) {
@@ -154,6 +155,18 @@ describe("tools.approvalMode setting", () => {
 			} as AgentToolContext,
 		);
 		expect(textOf(result)).toContain("(no output)");
+	});
+
+	it("attributes bash pattern denies to tool policy", async () => {
+		const settings = approvalSettings({
+			"tools.approvalMode": "yolo",
+			"tools.approval": { bash: "allow" },
+		});
+		await expect(
+			bashTool().execute("pattern-deny", { command: "rm -rf /tmp/never-run" }, undefined, undefined, {
+				settings,
+			} as AgentToolContext),
+		).rejects.toThrow('Tool "bash" is blocked by tool policy.\nReason: Blocked by bash pattern: rm -rf *');
 	});
 
 	it("CLI --auto-approve forces yolo mode for non-overriding tool calls", async () => {

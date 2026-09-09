@@ -15,6 +15,7 @@ try {
  * lightweight CLI runner from pi-utils.
  */
 import { parentPort } from "node:worker_threads";
+import type { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import type { CliConfig, CommandMetadata } from "@oh-my-pi/pi-utils/cli";
 import {
 	APP_NAME,
@@ -24,9 +25,10 @@ import {
 	setProfile,
 	VERSION,
 } from "@oh-my-pi/pi-utils/dirs";
-import { interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
+import { fatal, interceptUnhandledRejections } from "@oh-my-pi/pi-utils/postmortem";
 import { setProcessName } from "@oh-my-pi/pi-utils/process-name";
 import { declareWorkerHostEntry, installWorkerInbox, isWorkerHostSelector } from "@oh-my-pi/pi-utils/worker-host";
+import { BLOB_BROKER_WORKER_ARG } from "./blob-broker/protocol";
 import { installProfileAlias, resolveProfileAliasCommandFromProcess } from "./cli/profile-alias";
 import { extractProfileFlags } from "./cli/profile-bootstrap";
 import { startJsEvalProcess } from "./eval/js/process-entry";
@@ -34,9 +36,10 @@ import type { WorkerInbound as JsWorkerInbound, WorkerOutbound as JsWorkerOutbou
 import { DAEMON_BROKER_WORKER_ARG } from "./launch/protocol";
 import { TERMINAL_OUTPUT_WORKER_ARG } from "./launch/terminal-output-worker-protocol";
 import { LSP_MUX_WORKER_ARG } from "./lsp/mux/protocol";
+import { STATS_ACTIVITY_WORKER_ARG } from "./stats/activity-protocol";
+import rootLicense from "./tools/browser/relay/extension-assets/LICENSE.txt" with { type: "text" };
+import thirdPartyNotices from "./tools/browser/relay/extension-assets/THIRD-PARTY-NOTICES.txt" with { type: "text" };
 import { COMPUTER_WORKER_ARG } from "./tools/computer/protocol";
-import { smokeTestComputerWorker } from "./tools/computer/supervisor";
-import { startComputerWorker } from "./tools/computer/worker-entry";
 
 if (Bun.semver.order(Bun.version, MIN_BUN_VERSION) < 0) {
 	process.stderr.write(
@@ -54,6 +57,10 @@ setProcessName(APP_NAME);
 // CLI builds are unaffected. A compiled binary's entry module is by definition
 // the process entry, so the define-folded PI_COMPILED marker stands in.
 const isProcessEntry = import.meta.main || process.env.PI_COMPILED === "true";
+
+function formatLicenseOutput(): string {
+	return `OMP License and Third-Party Notices\n\n${rootLicense.trimEnd()}\n\n${thirdPartyNotices.trimEnd()}\n`;
+}
 
 // Worker-host entry declaration (Worker threads and worker subprocesses
 // re-enter `Bun.main` with a hidden argv selector instead of loading separate
@@ -91,12 +98,15 @@ async function runSmokeTest(): Promise<void> {
 	const { smokeTestSttWorker } = await import("./stt/asr-client");
 	const { smokeTestTtsWorker } = await import("./tts/tts-client");
 	const { smokeTestMnemopiEmbedWorker } = await import("./mnemopi/embed-client");
+	const { smokeTestStatsActivityWorker } = await import("./stats/activity-client");
 	const { smokeTestJsEvalWorker } = await import("./eval/js/context-manager");
 	// Other smoke dependencies stay lazy so normal CLI startup does not load their worker clients.
 	const { smokeTestDaemonBroker } = await import("./launch/client");
 	const { smokeTestLspMux } = await import("./lsp/mux/daemon");
+	const { smokeTestBlobBroker } = await import("./blob-broker/daemon");
 	const { smokeTestTerminalOutputWorker } = await import("./launch/terminal-output-worker-client");
 	await smokeTestSyncWorker();
+	await smokeTestStatsActivityWorker();
 
 	const statsServer = await startServer(0);
 	try {
@@ -113,11 +123,13 @@ async function runSmokeTest(): Promise<void> {
 	await smokeTestTinyTitleWorker();
 	await smokeTestSttWorker();
 	await smokeTestJsEvalWorker();
+	const { smokeTestComputerWorker } = await import("./tools/computer/supervisor");
 	await smokeTestComputerWorker();
 	await smokeTestTtsWorker();
 	await smokeTestMnemopiEmbedWorker();
 	await smokeTestDaemonBroker();
 	await smokeTestLspMux();
+	await smokeTestBlobBroker();
 	await smokeTestTerminalOutputWorker();
 	process.stdout.write("smoke-test: ok\n");
 }
@@ -170,6 +182,7 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	}
 	if (arg === COMPUTER_WORKER_ARG) {
 		if (parentPort) installWorkerInbox(parentPort);
+		const { startComputerWorker } = await import("./tools/computer/worker-entry");
 		startComputerWorker();
 		return true;
 	}
@@ -205,6 +218,11 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 		await runIpcSubprocessWorker(startMnemopiEmbedWorker);
 		return true;
 	}
+	if (arg === STATS_ACTIVITY_WORKER_ARG) {
+		const { startStatsActivityWorker } = await import("./stats/activity-worker");
+		await runIpcSubprocessWorker(startStatsActivityWorker);
+		return true;
+	}
 	if (arg === TERMINAL_OUTPUT_WORKER_ARG) {
 		if (parentPort) installWorkerInbox(parentPort);
 		// This selector is the isolation boundary; a static import would evaluate xterm in normal CLI startup.
@@ -220,6 +238,11 @@ async function runWorkerEntrypoint(arg: string | undefined): Promise<boolean> {
 	if (arg === LSP_MUX_WORKER_ARG) {
 		const { startLspMuxFromEnvironment } = await import("./lsp/mux/server");
 		await startLspMuxFromEnvironment();
+		return true;
+	}
+	if (arg === BLOB_BROKER_WORKER_ARG) {
+		const { startBlobBrokerFromEnvironment } = await import("./blob-broker/server");
+		await startBlobBrokerFromEnvironment();
 		return true;
 	}
 	return false;
@@ -260,6 +283,11 @@ async function runIpcSubprocessWorker<In, Out>(
 	// always spawns us that way. If it's missing, the parent vanished and
 	// there's no one to talk to.
 	const ipcSend = (): IpcSend | undefined => (process as NodeJS.Process & { send?: IpcSend }).send;
+	if (!ipcSend()) {
+		// Intentional fall-through: shutdown() only resolves the promise;
+		// the await + SIGKILL tail below is what actually exits.
+		shutdown();
+	}
 	const send = (message: Out): void => {
 		const sender = ipcSend();
 		if (!sender) {
@@ -299,6 +327,66 @@ async function runIpcSubprocessWorker<In, Out>(
 			};
 		},
 	});
+	let parentWatchdog: NodeJS.Timeout | undefined;
+	const initialParentPid = process.ppid;
+	if (process.platform === "win32" && initialParentPid <= 0) {
+		shutdown();
+	} else if (initialParentPid > 0) {
+		let parentProcess: Process | null = null;
+		let runningStatus: ProcessStatus | undefined;
+		try {
+			if (!process.env.PI_TEST_NO_NATIVES) {
+				const natives = await import("@oh-my-pi/pi-natives");
+				parentProcess = natives.Process.fromPid(initialParentPid);
+				runningStatus = natives.ProcessStatus.Running;
+			}
+		} catch {}
+
+		// Note on container environments (Docker/Kubernetes): omp often runs as
+		// PID 1, so workers start with process.ppid === 1. Treating ppid <= 1 as
+		// an orphan at boot would break containerized workers. Instead, we allow
+		// PID 1 to boot normally and detect post-spawn reparenting dynamically via
+		// `process.ppid !== initialParentPid`.
+		//
+		// Note on Linux seccomp/kernels: On hosts where pidfd_open is blocked or
+		// unavailable (e.g. pre-5.3 kernels, restrictive seccomp), Process.fromPid
+		// returns null even when the parent is alive. We treat null as the native
+		// handle being unavailable and fall through to the isParentAlive() check
+		// rather than assuming null means dead at boot.
+		const isParentAlive = (): boolean => {
+			if (process.ppid !== initialParentPid) {
+				return false;
+			}
+			if (parentProcess && runningStatus !== undefined) {
+				try {
+					return parentProcess.status() === runningStatus;
+				} catch {}
+			}
+			try {
+				process.kill(initialParentPid, 0);
+				return true;
+			} catch (err: unknown) {
+				return (err as NodeJS.ErrnoException)?.code === "EPERM";
+			}
+		};
+
+		if (!isParentAlive()) {
+			shutdown();
+		} else {
+			if (parentProcess) {
+				void parentProcess.waitForExit().then(
+					() => shutdown(),
+					() => shutdown(),
+				);
+			}
+			parentWatchdog = setInterval(() => {
+				if (!isParentAlive()) {
+					shutdown();
+				}
+			}, 1000);
+			parentWatchdog.unref();
+		}
+	}
 	const keepalive = setInterval(() => {}, 2 ** 30);
 	// Parent went away (crashed, SIGKILL, etc.) — commit suicide so we don't
 	// linger as an orphan. SIGKILL via `process.kill` keeps us symmetrical with
@@ -308,21 +396,22 @@ async function runIpcSubprocessWorker<In, Out>(
 		await shuttingDown;
 	} finally {
 		clearInterval(keepalive);
+		if (parentWatchdog) clearInterval(parentWatchdog);
 	}
 	process.kill(process.pid, "SIGKILL");
 }
 
 /**
- * Hidden subcommand that boots the tiny-model worker inside this process over
- * the parent's IPC channel. The agent's main process spawns the same binary
- * with this flag so `onnxruntime-node` (loaded transitively by
- * `@huggingface/transformers`) lives in a child address space. The parent
- * `SIGKILL`s the child on shutdown so the NAPI finalizer never runs in either
- * process — that finalizer segfaults Bun on Windows (issue #1606).
+ * Hidden subcommand that boots the ONNX tiny-model worker for one model: a
+ * detached process owning that model's socket (`OMP_TINY_WORKER_SOCKET`),
+ * shared by every omp process on the machine and exiting on its own when
+ * idle. It exists so `onnxruntime-node` (loaded transitively by
+ * `@huggingface/transformers`) never runs in an omp address space — its NAPI
+ * finalizer segfaults Bun on Windows (issue #1606).
  */
 async function runTinyWorker(): Promise<void> {
-	const { startTinyTitleWorker } = await import("./tiny/worker");
-	await runIpcSubprocessWorker(startTinyTitleWorker);
+	const { startTinyWorkerFromEnvironment } = await import("./tiny/worker");
+	await startTinyWorkerFromEnvironment();
 }
 
 /** Run the CLI with the given argv (no `process.argv` prefix). */
@@ -368,6 +457,18 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
+	// Declare this module as the worker-host entry now that the active profile
+	// is resolved. The worker-host module is side-effect-free; importing
+	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
+	// Gated on `isProcessEntry`: only the real CLI process entry is a valid
+	// worker host. Worker-thread re-entry has `!Bun.isMainThread` (isProcessEntry === false),
+	// and importers (`runCli` in profile-CLI tests, SDK embedding) have `import.meta.main === false`
+	// — declaring there would poison `workerHostEntry()` for the whole test process, forcing eval/stats/
+	// browser workers onto the same-realm inline fallback.
+	// This must run before worker selector dispatch so that worker subprocesses
+	// (e.g. stats activity) are registered as hosts and can themselves spawn worker threads.
+	if (isProcessEntry) declareWorkerHostEntry();
+
 	// Worker-thread entry dispatch must run before the first `await`: the
 	// stats sync worker's buffering onmessage handler is installed in the
 	// synchronous prefix of `runWorkerEntrypoint`, and Bun flushes the
@@ -382,34 +483,56 @@ export async function runCli(argv: string[]): Promise<void> {
 		return;
 	}
 
-	// Declare this module as the worker-host entry now that the active profile
-	// is resolved. The worker-host module is side-effect-free; importing
-	// `@oh-my-pi/pi-utils/env` here would snapshot the wrong agent `.env`.
-	// Gated on `isProcessEntry`: only the real CLI process entry is a valid
-	// worker host. Worker-thread re-entry already returned above at the
-	// `__omp_worker_` dispatch, and importers (`runCli` in profile-CLI tests,
-	// SDK embedding) have `import.meta.main === false` — declaring there would
-	// poison `workerHostEntry()` for the whole test process, forcing eval/stats/
-	// browser workers onto the same-realm inline fallback.
-	if (isProcessEntry) declareWorkerHostEntry();
+	// `PI_PROXY` must reach the bare global `fetch` before any provider call:
+	// OAuth refresh/login and usage probes never pass through
+	// `wrapFetchForProxy`, so without this they bypass the proxy and fail
+	// wherever the provider blocks the caller's region. Dynamically imported
+	// like every other dependency in this entry module: a static `pi-ai` import
+	// would load the provider graph before profile bootstrap and on paths
+	// (`--version`, worker selectors) that never touch the network.
+	const { installGlobalProxyFetch } = await import("@oh-my-pi/pi-ai/utils/proxy");
+	installGlobalProxyFetch();
 
 	if (resolvedArgv[0] === "--smoke-test") {
 		await runSmokeTest();
 		return;
 	}
-	const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
-		import("@oh-my-pi/pi-utils/cli"),
-		import("./cli-commands"),
-	]);
-	// --help and --version are handled by run() directly, don't rewrite those.
-	// Everything else that isn't a known subcommand routes to "launch".
-	const resolved = resolveCliArgv(resolvedArgv);
-	if ("error" in resolved) {
-		process.stderr.write(`error: ${resolved.error}\n`);
-		process.exitCode = 1;
+	if (resolvedArgv[0] === "--license") {
+		process.stdout.write(formatLicenseOutput());
 		return;
 	}
-	return run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	let stopStartupComposer: (() => void) | undefined;
+	if (
+		!process.env.PI_TIMING &&
+		process.stdin.isTTY === true &&
+		process.stdout.isTTY === true &&
+		(resolvedArgv.length === 0 || (resolvedArgv.length === 1 && resolvedArgv[0] === "--no-session"))
+	) {
+		// Intentional exception to the static-import convention: this latency boundary
+		// keeps the TUI graph out of worker, subcommand, help, and version launches.
+		// Loading it statically would erase the measured cold-start improvement.
+		const { beginStartupComposer, stopPendingStartupComposer } = await import("./modes/startup-composer");
+		beginStartupComposer({ version: VERSION });
+		stopStartupComposer = stopPendingStartupComposer;
+	}
+
+	try {
+		const [{ run }, { commands, resolveCliArgv }] = await Promise.all([
+			import("@oh-my-pi/pi-utils/cli"),
+			import("./cli-commands"),
+		]);
+		// --help and --version are handled by run() directly; --license returned above.
+		// Everything else that isn't a known subcommand routes to "launch".
+		const resolved = resolveCliArgv(resolvedArgv);
+		if ("error" in resolved) {
+			process.stderr.write(`error: ${resolved.error}\n`);
+			process.exitCode = 1;
+			return;
+		}
+		await run({ bin: APP_NAME, version: VERSION, argv: resolved.argv, commands, metadataHelp: showHelp });
+	} finally {
+		stopStartupComposer?.();
+	}
 }
 
 // Floating call instead of top-level await: TLA forces `--bytecode` (CJS
@@ -421,8 +544,5 @@ export async function runCli(argv: string[]): Promise<void> {
 // their entry with `import.meta.main === false`, so the worker-host dispatch
 // is admitted via `!Bun.isMainThread`.
 if (isProcessEntry || !Bun.isMainThread) {
-	runCli(process.argv.slice(2)).catch((err: unknown) => {
-		process.stderr.write(`${Bun.inspect(err, { colors: process.stderr.isTTY === true })}\n`);
-		process.exit(1);
-	});
+	runCli(process.argv.slice(2)).catch(fatal);
 }

@@ -87,7 +87,7 @@ describe("AgentSession plan-mode compaction hook contract (issue #4359)", () => 
 		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), `models-${cleanups.length}.yml`));
 		const settings = Settings.isolated({
 			"compaction.enabled": true,
-			"compaction.strategy": "context-full",
+			"compaction.methodOrder": ["soft"],
 			// Aggressive keep-recent budget so the small seeded conversation still
 			// yields a non-empty messagesToSummarize window (prepareCompaction
 			// otherwise short-circuits with "Nothing to compact").
@@ -97,7 +97,6 @@ describe("AgentSession plan-mode compaction hook contract (issue #4359)", () => 
 		});
 		const sessionManager = SessionManager.inMemory(tempDir.path());
 
-		let session: AgentSession;
 		const agent = new Agent({
 			getApiKey: () => "test-key",
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -145,7 +144,7 @@ describe("AgentSession plan-mode compaction hook contract (issue #4359)", () => 
 			// when an extensionRunner is present; the shim mirrors the no-op path.
 			emitBeforeAgentStart: async () => undefined,
 		};
-		session = new AgentSession({
+		const session = new AgentSession({
 			agent,
 			sessionManager,
 			settings,

@@ -1,8 +1,17 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
 import type { CapturedHttpErrorResponse } from "../utils/http-inspector";
 
+/**
+ * Fallback marker: the server rejected the `chat_template_kwargs.reasoning_effort`
+ * spelling itself (strict kwargs whitelists — Ninfer-style servers), not the
+ * effort value. Apply strips the kwarg and hoists the value onto the top-level
+ * `reasoning_effort` field when that spelling is absent.
+ * @internal
+ */
+export const STRIP_TEMPLATE_KWARG_REASONING_EFFORT = Symbol("strip-template-kwarg-reasoning-effort");
+
 /** @internal */
-export type OpenAIReasoningEffortFallback = string | null;
+export type OpenAIReasoningEffortFallback = string | null | typeof STRIP_TEMPLATE_KWARG_REASONING_EFFORT;
 
 /** @internal */
 export interface OpenAIReasoningEffortFallbackState {
@@ -73,7 +82,23 @@ export function readOpenAIReasoningEffort(params: unknown): string | undefined {
 	if (!isRecord(params)) return undefined;
 	if (typeof params.reasoning_effort === "string") return params.reasoning_effort;
 	const reasoning = params.reasoning;
-	return isRecord(reasoning) && typeof reasoning.effort === "string" ? reasoning.effort : undefined;
+	if (isRecord(reasoning) && typeof reasoning.effort === "string") return reasoning.effort;
+	return readTemplateKwargReasoningEffort(params);
+}
+
+function readTemplateKwargReasoningEffort(params: Record<string, unknown>): string | undefined {
+	const kwargs = params.chat_template_kwargs;
+	return isRecord(kwargs) && typeof kwargs.reasoning_effort === "string" ? kwargs.reasoning_effort : undefined;
+}
+
+/** Remove `chat_template_kwargs.reasoning_effort`, dropping the kwargs object when it becomes empty. */
+function deleteTemplateKwargReasoningEffort(kwargs: Record<string, unknown>, parent: Record<string, unknown>): void {
+	delete kwargs.reasoning_effort;
+	for (const key in kwargs) {
+		void key;
+		return;
+	}
+	delete parent.chat_template_kwargs;
 }
 
 function deleteReasoningEffort(reasoning: Record<string, unknown>, parent: Record<string, unknown>): boolean {
@@ -89,6 +114,17 @@ function deleteReasoningEffort(reasoning: Record<string, unknown>, parent: Recor
 /** @internal */
 export function applyOpenAIReasoningEffortFallback(params: unknown, fallback: OpenAIReasoningEffortFallback): boolean {
 	if (!isRecord(params)) return false;
+	if (fallback === STRIP_TEMPLATE_KWARG_REASONING_EFFORT) {
+		const kwargs = params.chat_template_kwargs;
+		if (!isRecord(kwargs) || typeof kwargs.reasoning_effort !== "string") return false;
+		const effort = kwargs.reasoning_effort;
+		deleteTemplateKwargReasoningEffort(kwargs, params);
+		// The `qwen-chat-template` dialect rides kwargs alone; keep the effort
+		// selection alive on the standard OpenAI field (Ninfer-style servers
+		// accept it, vLLM-style renderers ignore it).
+		if (typeof params.reasoning_effort !== "string") params.reasoning_effort = effort;
+		return true;
+	}
 	let changed = false;
 	if (typeof params.reasoning_effort === "string") {
 		if (fallback === null) {
@@ -106,6 +142,17 @@ export function applyOpenAIReasoningEffortFallback(params: unknown, fallback: Op
 			reasoning.effort = fallback;
 			changed = true;
 		}
+	}
+	// Keep the Qwen template kwarg twin in lockstep — a value remap or drop
+	// must not leave a stale effort for kwargs-reading renderers.
+	const kwargs = params.chat_template_kwargs;
+	if (isRecord(kwargs) && typeof kwargs.reasoning_effort === "string") {
+		if (fallback === null) {
+			deleteTemplateKwargReasoningEffort(kwargs, params);
+		} else {
+			kwargs.reasoning_effort = fallback;
+		}
+		changed = true;
 	}
 	return changed;
 }
@@ -132,7 +179,15 @@ function collectMessageParts(error: unknown, captured: CapturedHttpErrorResponse
 	return parts.join("\n");
 }
 
-const REASONING_EFFORT_FIELD_PATTERN = /reasoning[_. ]effort|reasoning value/i;
+/**
+ * Text that identifies a 400 as being about the reasoning-effort field.
+ * OpenAI-compatible gateways (cliproxy, …) never name the field — they reject
+ * the value alone with `level "none" not supported, valid levels: low, …` — so
+ * the allowed-level phrasing counts as a mention too. GitHub Copilot phrases
+ * the same rejection with `Supported values are: …`, so value lists count too.
+ */
+const REASONING_EFFORT_FIELD_PATTERN =
+	/reasoning[_. ]effort|reasoning value|(?:valid|supported|allowed) (?:levels?|values?)/i;
 
 function mentionsReasoningEffort(error: unknown, captured: CapturedHttpErrorResponse | undefined): boolean {
 	const param = capturedStringField(captured, "param");
@@ -147,6 +202,68 @@ function mentionsReasoningEffort(error: unknown, captured: CapturedHttpErrorResp
 	);
 }
 
+/** Which request field a rejection attributes itself to, parsed once. */
+type EffortRejectionField = "reasoning-effort" | "other" | "unknown";
+
+/**
+ * Parsed attribution of a 400/422, in precedence order: the structured error
+ * field first, the message verdict second, bare vocabulary last. New server
+ * wordings extend these parsers; the decision in
+ * {@link isInvalidReasoningEffortError} stays fixed.
+ */
+interface EffortRejectionSignal {
+	/** Authoritative attribution: explicit `param`, else message content, else unknown. */
+	field: EffortRejectionField;
+	/** The message names the reasoning-effort option without a verdict. */
+	namesFieldInMessage: boolean;
+	/** The message carries a fielded rejection verdict (any word order). */
+	messageVerdict: boolean;
+	/** The message lists allowed tiers in gateway levels vocabulary. */
+	listsLevels: boolean;
+	/** The rejected effort is quoted next to a rejection verdict. */
+	rejectedMatches: boolean;
+}
+
+const EFFORT_FIELD_PATTERN = /reasoning[_. ]effort|reasoning value/i;
+const ALLOWED_LEVELS_PATTERN = /(?:valid|supported|allowed) levels?/i;
+
+/** Fielded rejection verdicts in any word order: verdict-first, field-first, or bare mention plus verdict. */
+function messageCarriesEffortVerdict(message: string): boolean {
+	return (
+		/invalid[^\n]*(?:reasoning[_. ]effort|reasoning value)/i.test(message) ||
+		/(?:reasoning[_. ]effort|reasoning value)[^\n]*(?:invalid|unsupported|not supported|not permitted|must be|expected|unknown|unexpected|unrecognized)/i.test(
+			message,
+		) ||
+		/(?:unsupported|not supported|not permitted|unknown|unexpected|unrecognized|extra)[^\n]*(?:reasoning[_. ]effort|reasoning value)/i.test(
+			message,
+		)
+	);
+}
+
+function parseEffortRejectionSignal(
+	message: string,
+	captured: CapturedHttpErrorResponse | undefined,
+	currentEffort: string,
+): EffortRejectionSignal {
+	const namesFieldInMessage = EFFORT_FIELD_PATTERN.test(message);
+	const param = capturedStringField(captured, "param") ?? "";
+	const quoted = `["'\`]${escapeRegExp(currentEffort)}["'\`]`;
+	return {
+		field:
+			namesFieldInMessage || EFFORT_FIELD_PATTERN.test(param)
+				? "reasoning-effort"
+				: param.trim() !== ""
+					? "other"
+					: "unknown",
+		namesFieldInMessage,
+		messageVerdict: messageCarriesEffortVerdict(message),
+		listsLevels: ALLOWED_LEVELS_PATTERN.test(message),
+		rejectedMatches:
+			new RegExp(`(?:invalid|unsupported|not supported)[^\\n]*${quoted}`, "i").test(message) ||
+			new RegExp(`${quoted}[^\\n]*(?:invalid|unsupported|not supported)`, "i").test(message),
+	};
+}
+
 function isInvalidReasoningEffortError(
 	error: unknown,
 	captured: CapturedHttpErrorResponse | undefined,
@@ -157,21 +274,15 @@ function isInvalidReasoningEffortError(
 	if (!mentionsReasoningEffort(error, captured)) return false;
 	const message = collectMessageParts(error, captured);
 	if (/reasoning[_ ]content/i.test(message) && !REASONING_EFFORT_FIELD_PATTERN.test(message)) return false;
-	if (/invalid[^\n]*(?:reasoning[_. ]effort|reasoning value)/i.test(message)) return true;
-	if (
-		/(?:reasoning[_. ]effort|reasoning value)[^\n]*(?:invalid|unsupported|not supported|must be|expected)/i.test(
-			message,
-		)
-	) {
-		return true;
-	}
-	if (/(?:unsupported|not supported)[^\n]*(?:reasoning[_. ]effort|reasoning value)/i.test(message)) {
-		return true;
-	}
-	return new RegExp(
-		`(?:invalid|unsupported|not supported)[^\\n]*["'\`]${escapeRegExp(currentEffort)}["'\`]`,
-		"i",
-	).test(message);
+	const signal = parseEffortRejectionSignal(message, captured, currentEffort);
+	// Precedence is fixed: an explicit foreign field defeats the heuristic,
+	// a fielded verdict always qualifies, and fieldless values-lists are
+	// trusted only for the reasoning-off value (levels vocabulary is
+	// gateway-effort dialect, so it stays trusted for every tier).
+	if (signal.field === "other" && !signal.namesFieldInMessage) return false;
+	if (signal.messageVerdict) return true;
+	if (currentEffort.toLowerCase() !== "none" && !signal.namesFieldInMessage && !signal.listsLevels) return false;
+	return signal.rejectedMatches;
 }
 
 function escapeRegExp(value: string): string {
@@ -186,9 +297,12 @@ function parseKnownReasoningValues(text: string): Set<string> {
 		values.add(quotedMatch[1]!.toLowerCase());
 		quotedMatch = quotedPattern.exec(text);
 	}
-	const allowedMatch = /(?:must be|one of|allowed values?|supported values?(?: are)?|expected)([^.\n]+)/i.exec(text);
+	const allowedMatch =
+		/(?:must be|one of|allowed values?|supported values?(?: are)?|expected|(?:valid|supported|allowed) levels?(?: are)?)[^.\n]+/i.exec(
+			text,
+		);
 	if (allowedMatch) {
-		const allowedText = allowedMatch[1]!;
+		const allowedText = allowedMatch[0]!;
 		const barePattern = /\b(none|minimal|low|medium|high|xhigh|max)\b/gi;
 		let bareMatch = barePattern.exec(allowedText);
 		while (bareMatch !== null) {
@@ -201,7 +315,8 @@ function parseKnownReasoningValues(text: string): Set<string> {
 
 function parseAllowedReasoningValues(message: string, currentEffort: string): Set<string> | undefined {
 	const values = parseKnownReasoningValues(message);
-	const hasAllowedCue = /must be|one of|allowed values?|supported values?|expected/i.test(message);
+	const hasAllowedCue =
+		/must be|one of|allowed values?|supported values?|expected|(?:valid|supported|allowed) levels?/i.test(message);
 	values.delete(currentEffort.toLowerCase());
 	if (!hasAllowedCue && values.size === 0) return undefined;
 	return values;
@@ -245,6 +360,35 @@ function nearestEnabledReasoningFallback(currentEffort: string, allowed: Set<str
 	return best;
 }
 
+/**
+ * Text that identifies a rejection of the kwargs spelling itself: the server
+ * names `chat_template_kwargs` together with `reasoning_effort` (Ninfer-style
+ * strict kwargs whitelists: `chat_template_kwargs.reasoning_effort is not
+ * supported`).
+ */
+const TEMPLATE_KWARG_EFFORT_PATTERN =
+	/chat_template_kwargs[^\n]{0,120}reasoning[_. ]effort|reasoning[_. ]effort[^\n]{0,120}chat_template_kwargs/i;
+const FIELD_REJECTION_PATTERN =
+	/invalid|unsupported|not supported|not permitted|unknown|unexpected|unrecognized|rejected|extra input/i;
+
+function resolveStripTemplateKwargFallback(
+	error: unknown,
+	captured: CapturedHttpErrorResponse | undefined,
+	params: unknown,
+): typeof STRIP_TEMPLATE_KWARG_REASONING_EFFORT | undefined {
+	if (!isRecord(params)) return undefined;
+	const effort = readTemplateKwargReasoningEffort(params);
+	if (effort === undefined) return undefined;
+	const status = extractHttpStatusFromError(error) ?? captured?.status;
+	if (status !== 400 && status !== 422) return undefined;
+	const message = collectMessageParts(error, captured);
+	if (!TEMPLATE_KWARG_EFFORT_PATTERN.test(message) || !FIELD_REJECTION_PATTERN.test(message)) return undefined;
+	// A value-level rejection listing allowed levels wants the value remapped
+	// (in every spelling) by the ordinary flow, not the kwarg stripped.
+	if (parseAllowedReasoningValues(message, effort) !== undefined) return undefined;
+	return STRIP_TEMPLATE_KWARG_REASONING_EFFORT;
+}
+
 /** @internal */
 export function resolveOpenAIReasoningEffortFallback(
 	error: unknown,
@@ -252,6 +396,8 @@ export function resolveOpenAIReasoningEffortFallback(
 	params: unknown,
 	options?: { explicitDisable?: boolean },
 ): OpenAIReasoningEffortFallback | undefined {
+	const strip = resolveStripTemplateKwargFallback(error, captured, params);
+	if (strip !== undefined) return strip;
 	const currentEffort = readOpenAIReasoningEffort(params);
 	if (!currentEffort || !KNOWN_REASONING_VALUE[currentEffort.toLowerCase()]) return undefined;
 	if (!isInvalidReasoningEffortError(error, captured, currentEffort)) return undefined;

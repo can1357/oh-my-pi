@@ -4,13 +4,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type { Model } from "@oh-my-pi/pi-ai";
+import { resolveDelegationBias } from "@oh-my-pi/pi-catalog/compat/delegation";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { buildSystemPrompt } from "@oh-my-pi/pi-coding-agent/system-prompt";
-import { usesCodexTaskPrompt } from "@oh-my-pi/pi-coding-agent/task/prompt-policy";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 import { cleanupTempHome } from "./helpers/temp-home-cleanup";
 
@@ -33,37 +33,29 @@ async function expectPromptDateFromStartupTimezone(options: {
 	const scenarioPath = path.join(options.tempDir, "prompt-date-timezone.test.ts");
 	await Bun.write(
 		scenarioPath,
-		`import { expect, it, setSystemTime } from "bun:test";
-import { buildSystemPrompt } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/system-prompt.ts"))};
+		`import { setSystemTime } from "bun:test";
+import { renderDateCwdReminder } from ${JSON.stringify(
+			path.resolve(import.meta.dir, "../src/session/date-cwd-reminder.ts"),
+		)};
+import { formatLocalCalendarDate } from ${JSON.stringify(path.resolve(import.meta.dir, "../src/utils/local-date.ts"))};
 
-it("renders the prompt date in the startup timezone", async () => {
-	setSystemTime(new Date(process.env.OMP_TEST_NOW!));
-	try {
-		const { systemPrompt } = await buildSystemPrompt({
-			cwd: process.cwd(),
-			contextFiles: [],
-			skills: [],
-			rules: [],
-			toolNames: [],
-			workspaceTree: {
-				rootPath: process.cwd(),
-				rendered: "",
-				truncated: false,
-				totalLines: 0,
-				agentsMdFiles: [],
-			},
-			activeRepoContext: null,
-		});
-		const rendered = systemPrompt.join("\\n\\n");
-		expect(rendered).toContain(\`Today is \${process.env.OMP_EXPECTED_DATE}\`);
-		expect(rendered).not.toContain(\`Today is \${process.env.OMP_REJECTED_DATE}\`);
-	} finally {
-		setSystemTime();
+setSystemTime(new Date(process.env.OMP_TEST_NOW!));
+try {
+	// The date/cwd reminder is built per request in the startup local timezone;
+	// the system prompt no longer embeds the date (#7404).
+	const reminder = renderDateCwdReminder(formatLocalCalendarDate(), "/cwd");
+	if (!reminder.includes(\`Today: \${process.env.OMP_EXPECTED_DATE}\`)) {
+		throw new Error(\`Reminder did not contain expected local date:\\n\${reminder}\`);
 	}
-});
+	if (reminder.includes(\`Today: \${process.env.OMP_REJECTED_DATE}\`)) {
+		throw new Error(\`Reminder contained rejected UTC date:\\n\${reminder}\`);
+	}
+} finally {
+	setSystemTime();
+}
 `,
 	);
-	const child = Bun.spawn([process.execPath, "test", scenarioPath], {
+	const child = Bun.spawn([process.execPath, scenarioPath], {
 		cwd: options.tempDir,
 		env: {
 			...process.env,
@@ -81,8 +73,7 @@ it("renders the prompt date in the startup timezone", async () => {
 		new Response(child.stderr).text(),
 		child.exited,
 	]);
-	expect(`${stdout}\n${stderr}`).toContain("1 pass");
-	expect(exitCode).toBe(0);
+	expect(exitCode, `${stdout}\n${stderr}`).toBe(0);
 }
 
 describe("system prompt model identifier", () => {
@@ -113,7 +104,7 @@ describe("system prompt model identifier", () => {
 		expect(systemPrompt.join("\n\n")).toContain("Model: anthropic/claude-opus-4");
 	});
 
-	it("renders the prompt date from the startup local timezone rather than UTC", async () => {
+	it("renders the first-turn reminder date from the startup local timezone rather than UTC", async () => {
 		await expectPromptDateFromStartupTimezone({
 			tempDir,
 			tempHomeDir,
@@ -173,18 +164,18 @@ describe("AgentSession model-change prompt refresh", () => {
 		const second = all.find(
 			model =>
 				(model.provider !== first.provider || model.id !== first.id) &&
-				usesCodexTaskPrompt(model.id) === usesCodexTaskPrompt(first.id),
+				resolveDelegationBias(model) === resolveDelegationBias(first),
 		);
-		if (!first || !second) throw new Error("Expected two distinct models with the same task prompt policy");
+		if (!first || !second) throw new Error("Expected two distinct models with the same delegation bias");
 		return [first, second];
 	}
 
 	function pickModelsAcrossTaskPolicies(): [Model, Model] {
 		const all = modelRegistry.getAll();
-		const defaultPolicy = all.find(model => !usesCodexTaskPrompt(model.id));
-		const codexPolicy = all.find(model => usesCodexTaskPrompt(model.id));
-		if (!defaultPolicy || !codexPolicy) throw new Error("Expected default-policy and GPT-5.6 models");
-		return [defaultPolicy, codexPolicy];
+		const eager = all.find(model => resolveDelegationBias(model) === "eager");
+		const restrained = all.find(model => resolveDelegationBias(model) === "restrained");
+		if (!eager || !restrained) throw new Error("Expected eager and restrained delegation models");
+		return [eager, restrained];
 	}
 
 	function newSession(

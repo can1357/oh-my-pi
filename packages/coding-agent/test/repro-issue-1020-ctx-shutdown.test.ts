@@ -29,10 +29,12 @@ describe("issue #1020 - ctx.shutdown() in interactive mode", () => {
 			): void {
 				capturedContextActions = contextActions;
 			},
+			getComposerShapes: () => [],
 		};
 
 		const ctxStub = {
 			shutdownRequested: false,
+			syncComposerShape: () => {},
 			session: {
 				extensionRunner: fakeExtensionRunner,
 				// other session fields are only touched lazily by other actions; we
@@ -64,11 +66,13 @@ describe("issue #1020 - ctx.shutdown() in interactive mode", () => {
 				capturedContextActions = contextActions;
 			},
 			onError(_handler: (error: unknown) => void): void {},
+			getComposerShapes: () => [],
 			async emit(_event: unknown): Promise<void> {},
 		};
 
 		const ctxStub = {
 			shutdownRequested: false,
+			syncComposerShape: () => {},
 			session: {
 				extensionRunner: fakeExtensionRunner,
 			},

@@ -10,7 +10,7 @@ use std::{
 	cmp::Reverse,
 	ffi::{OsStr, OsString},
 	fs::{self, DirEntry, FileType, Metadata, ReadDir},
-	io::{BufWriter, ErrorKind, Write},
+	io::{ErrorKind, Write},
 	ops::RangeInclusive,
 	path::{Path, PathBuf},
 	rc::Rc,
@@ -37,7 +37,7 @@ use uucore::{
 	version_cmp::version_cmp,
 };
 
-use crate::host::{Host, Utility, format_usage, matches_parser, os_bytes_lossy, util};
+use crate::host::{Host, StreamWriter, Utility, format_usage, matches_parser, os_bytes_lossy, util};
 
 mod colors {
 //! Color handling for the `ls` builtin.
@@ -1996,7 +1996,7 @@ mod dired {
 
 use std::{
 	fmt,
-	io::{self, BufWriter, Write},
+	io::{self, Write},
 };
 
 /// `dired` Module Documentation
@@ -2068,7 +2068,7 @@ pub fn calculate_dired(
 	(start, end)
 }
 
-pub fn indent<W: Write>(out: &mut BufWriter<W>) -> io::Result<()> {
+pub fn indent<W: Write>(out: &mut W) -> io::Result<()> {
 	write!(out, "  ")?;
 	Ok(())
 }
@@ -2085,7 +2085,7 @@ pub fn calculate_subdired(dired: &mut DiredOutput, path_len: usize) {
 pub fn print_dired_output<W: Write>(
 	config: &Config,
 	dired: &DiredOutput,
-	out: &mut BufWriter<W>,
+	out: &mut W,
 ) -> io::Result<()> {
 	out.flush()?;
 	if !dired.dired_positions.is_empty() {
@@ -2102,7 +2102,7 @@ pub fn print_dired_output<W: Write>(
 
 /// Helper function to print positions with a given prefix.
 fn print_positions<W: Write>(
-	out: &mut BufWriter<W>,
+	out: &mut W,
 	prefix: &str,
 	positions: &[BytePosition],
 ) -> io::Result<()> {
@@ -2318,17 +2318,17 @@ use std::os::unix::fs::{FileTypeExt, MetadataExt};
 #[cfg(windows)]
 use std::os::windows::fs::MetadataExt;
 /// Show the directory name in the case where several arguments are given to ls
-use std::{borrow::Cow, iter};
 use std::{
+	borrow::Cow,
 	cell::LazyCell,
 	ffi::{OsStr, OsString},
 	fmt::Write as FmtWrite,
 	fs::{self, DirEntry, FileType, Metadata},
-	io::{BufWriter, Write},
+	io::Write,
+	iter,
 	sync::LazyLock,
 	time::SystemTime,
 };
-use brush_core::openfiles::OpenFile;
 
 use ansi_width::ansi_width;
 use glob::MatchOptions;
@@ -2442,9 +2442,9 @@ enum SizeOrDeviceId {
 /// dir1:               <- This as well
 /// file11
 /// ```
-pub fn show_dir_name(
+pub fn show_dir_name<W: Write>(
 	path_data: &PathData,
-	out: &mut BufWriter<OpenFile>,
+	out: &mut W,
 	config: &Config,
 ) -> std::io::Result<()> {
 	let escaped_name = escape_dir_name_with_locale(path_data.path().as_os_str(), config);
@@ -2761,11 +2761,11 @@ pub fn display_items(
 	Ok(())
 }
 
-fn display_grid(
+fn display_grid<W: Write>(
 	names: impl Iterator<Item = OsString>,
 	width: u16,
 	direction: Direction,
-	out: &mut BufWriter<OpenFile>,
+	out: &mut W,
 	quoted: bool,
 	tab_size: usize,
 ) -> std::io::Result<()> {
@@ -3155,8 +3155,7 @@ fn display_item_name(
 	DisplayItemName { displayed: name, dired_name_len }
 }
 
-/// This writes to the [`BufWriter`] `state.out` a single string of the output
-/// of `ls -l`.
+/// This writes to `state.out` a single string of the output of `ls -l`.
 ///
 /// It writes the following keys, in order:
 /// * `inode` ([`display_inode`], config-optional)
@@ -3736,7 +3735,8 @@ struct LsRuntime {
 
 impl LsRuntime {
 	fn resolve(&self, path: impl AsRef<Path>) -> PathBuf {
-		let path = path.as_ref();
+		let normalized_path = brush_core::sys::fs::normalize_shell_path(path.as_ref());
+		let path = normalized_path.as_ref();
 		if path.is_absolute() { path.to_path_buf() } else { self.cwd.join(path) }
 	}
 
@@ -4737,7 +4737,7 @@ type DirData = (PathBuf, bool);
 // A struct to encapsulate state that is passed around from `list` functions.
 #[cfg_attr(not(unix), allow(dead_code))]
 struct ListState<'a> {
-	out:               BufWriter<OpenFile>,
+	out:               StreamWriter,
 	style_manager:     Option<StyleManager<'a>>,
 	// TODO: More benchmarking with different use cases is required here.
 	// From experiments, BTreeMap may be faster than HashMap, especially as the
@@ -4768,7 +4768,7 @@ pub fn list(locs: Vec<&Path>, config: &Config, stdout: OpenFile) -> std::io::Res
 	let now = SystemTime::now();
 
 	let mut state = ListState {
-		out: BufWriter::new(stdout),
+		out: StreamWriter::new(stdout),
 		style_manager: config
 			.color
 			.as_ref()
@@ -5123,10 +5123,10 @@ fn get_metadata_with_deref_opt(path: &Path, dereference: bool) -> std::io::Resul
 	}
 }
 
-fn write_total(
+fn write_total<W: Write>(
 	items: &[PathData],
 	config: &Config,
-	out: &mut BufWriter<OpenFile>,
+	out: &mut W,
 ) -> std::io::Result<usize> {
 	let mut total_size = 0;
 	for item in items {
@@ -5234,6 +5234,23 @@ mod integration_tests {
 		let dir = tempfile::tempdir().unwrap();
 		File::create(dir.path().join("visible-name")).unwrap();
 		let (code, capture) = run_util::<Ls>(&["visible-name"], "", dir.path());
+		assert_eq!(code, 0);
+		assert_eq!(capture.out(), "visible-name\n");
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn resolves_msys_drive_alias_operands() {
+		let dir = tempfile::tempdir().unwrap();
+		File::create(dir.path().join("visible-name")).unwrap();
+		let native = dir.path().to_string_lossy().replace('\\', "/");
+		let (drive, tail) = native
+			.split_once(":/")
+			.unwrap_or_else(|| panic!("expected drive-qualified temp path, got {native:?}"));
+		let alias = format!("/{}/{}", drive.to_ascii_lowercase(), tail);
+
+		let (code, capture) = run_util::<Ls>(&[&alias], "", dir.path());
+
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "visible-name\n");
 	}

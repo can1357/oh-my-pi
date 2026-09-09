@@ -22,6 +22,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { getGithubCacheDbPath, logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
+import { defaultGhHost, parseRepoRef } from "./gh-common";
 import { ToolAbortError } from "./tool-errors";
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -202,7 +203,7 @@ const authKeyMemo = new Map<string, AuthKeyMemoEntry>();
  * The DB stores only a hash, never the token or hosts.yml contents. If no
  * credential source is visible, callers should pass `null` to bypass caching.
  */
-export function resolveGithubCacheAuthKey(host: string = process.env.GH_HOST || "github.com"): string | undefined {
+export function resolveGithubCacheAuthKey(host: string = defaultGhHost()): string | undefined {
 	const hostsPath = path.join(getGhConfigDir(), "hosts.yml");
 	let envSig = "";
 	for (const name of AUTH_KEY_TOKEN_ENV_VARS) {
@@ -242,8 +243,16 @@ export function resolveGithubCacheAuthKey(host: string = process.env.GH_HOST || 
 	return value;
 }
 
+/**
+ * Row identity for a repo, relative to the host `gh` defaults to. A prefix
+ * naming that same host is dropped so `github.com/owner/repo` and `owner/repo`
+ * share one row — but under `GH_HOST` the bare form means the configured
+ * instance, so an explicit `github.com/` prefix then stays and keeps its own
+ * rows instead of answering with another host's issue.
+ */
 function normalizeRepo(repo: string): string {
-	return repo.toLowerCase();
+	const ref = parseRepoRef(repo.toLowerCase());
+	return ref.host && ref.host !== defaultGhHost() ? `${ref.host}/${ref.slug}` : ref.slug;
 }
 
 export function getCached<T = unknown>(

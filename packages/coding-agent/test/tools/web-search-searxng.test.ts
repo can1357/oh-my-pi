@@ -121,6 +121,49 @@ describe("SearXNG web search provider", () => {
 		expect(captured.url?.searchParams.get("language")).toBeNull();
 	});
 
+	it("sends configured category and safe-search filters and preserves instant answers", async () => {
+		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "searxng-filters-"));
+		try {
+			await Bun.write(
+				path.join(agentDir, "config.yml"),
+				["searxng:", "  endpoint: https://searx.example.org", "  categories: news", "  safesearch: 2", ""].join(
+					"\n",
+				),
+			);
+			await Settings.init({ agentDir });
+
+			const captured: { url?: URL } = {};
+			const fetchMock: FetchImpl = input => {
+				captured.url = new URL(input.toString());
+				return Promise.resolve(
+					new Response(
+						JSON.stringify({
+							results: [{ title: "r", url: "https://example.com", snippet: "Fallback snippet" }],
+							answers: [
+								"  Forty-two  ",
+								{ template: "answer/legacy.html", answer: "Legacy answer" },
+								{
+									template: "answer/translations.html",
+									translations: [{ text: "Hallo" }, { text: "Guten Tag" }],
+								},
+							],
+						}),
+						{ status: 200, headers: { "Content-Type": "application/json" } },
+					),
+				);
+			};
+
+			const response = await searchSearXNG({ query: "filtered answers", fetch: fetchMock });
+
+			expect(captured.url?.searchParams.get("categories")).toBe("news");
+			expect(captured.url?.searchParams.get("safesearch")).toBe("2");
+			expect(response.answer).toBe("Forty-two\n\nLegacy answer\n\nHallo\nGuten Tag");
+			expect(response.sources[0]?.snippet).toBe("Fallback snippet");
+		} finally {
+			await removeWithRetries(agentDir);
+		}
+	});
+
 	it("reads Basic auth credentials from nested config.yml settings", async () => {
 		const agentDir = await fs.mkdtemp(path.join(os.tmpdir(), "searxng-settings-"));
 		try {

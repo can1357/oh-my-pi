@@ -112,16 +112,16 @@ export class RpcSubagentRegistry {
 	#output: RpcSubagentOutput;
 	#subscriptionLevel: RpcSubagentSubscriptionLevel = "off";
 
-	constructor(eventBus: EventBus, output: RpcSubagentOutput) {
+	constructor(observabilityBus: EventBus, output: RpcSubagentOutput) {
 		this.#output = output;
 		this.#unsubscribers.push(
-			eventBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
+			observabilityBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, data => {
 				this.handleLifecycle(data as SubagentLifecyclePayload);
 			}),
-			eventBus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, data => {
+			observabilityBus.on(TASK_SUBAGENT_PROGRESS_CHANNEL, data => {
 				this.handleProgress(data as SubagentProgressPayload);
 			}),
-			eventBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
+			observabilityBus.on(TASK_SUBAGENT_EVENT_CHANNEL, data => {
 				this.handleEvent(data as SubagentEventPayload);
 			}),
 		);

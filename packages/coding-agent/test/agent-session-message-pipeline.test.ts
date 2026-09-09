@@ -17,6 +17,7 @@ import {
 	registerCustomApi,
 	type SimpleStreamOptions,
 	type TextContent,
+	type ToolCall,
 } from "@oh-my-pi/pi-ai";
 import { AssistantMessageEventStream } from "@oh-my-pi/pi-ai/utils/event-stream";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -178,7 +179,177 @@ describe("AgentSession message pipeline", () => {
 			isError: false,
 		});
 
-		expect(session.getImageAttachments()).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage }]);
+		const attachments = session.getImageAttachments();
+		const sourcePath = attachments[0]?.sourcePath;
+		if (!sourcePath) {
+			throw new Error("Expected attachment sourcePath to be populated");
+		}
+		expect(attachments).toEqual([{ label: "Image #1", uri: "attachment://1", image: userImage, sourcePath }]);
+	});
+
+	it("normalizes historical WebP on the main provider request path", async () => {
+		using tempDir = TempDir.createSync("@pi-stb-main-path-");
+		const api = "test-stb-main-path";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const seed = Buffer.from(
+			"iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+			"base64",
+		);
+		const webpData = Buffer.from(await new Bun.Image(seed).resize(2, 2).webp({ quality: 90 }).bytes()).toBase64();
+		const historicalImage: ImageContent = {
+			type: "image",
+			data: webpData,
+			// Confirm byte sniffing catches persisted blocks with stale metadata.
+			mimeType: "image/png",
+		};
+		const model = buildModel({
+			id: "stb-main-path",
+			name: "STB main path",
+			api,
+			provider: "managed-primary",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			imageInputDecoder: "stb",
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		try {
+			session.agent.appendMessage({
+				role: "toolResult",
+				toolCallId: "read-1",
+				toolName: "read",
+				content: [{ type: "text", text: "screenshot" }, historicalImage],
+				isError: false,
+				timestamp: 1,
+			});
+
+			await session.sendUserMessage("continue");
+
+			expect(contexts).toHaveLength(1);
+			const outboundImages: ImageContent[] = [];
+			for (const message of contexts[0]!.messages) {
+				if (typeof message.content === "string") continue;
+				for (const part of message.content) {
+					if (part.type === "image") outboundImages.push(part);
+				}
+			}
+			expect(outboundImages).toHaveLength(1);
+			expect(outboundImages[0]!.mimeType).not.toBe("image/webp");
+			expect(Buffer.from(outboundImages[0]!.data.slice(0, 16), "base64").toString("ascii", 8, 12)).not.toBe("WEBP");
+			expect(historicalImage.mimeType).toBe("image/png");
+			expect(Buffer.from(historicalImage.data.slice(0, 16), "base64").toString("ascii", 8, 12)).toBe("WEBP");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("continues a user turn when an attached WebP is undecodable by an STB model", async () => {
+		using tempDir = TempDir.createSync("@pi-stb-corrupt-attachment-");
+		const api = "test-stb-corrupt-attachment";
+		const contexts: Context[] = [];
+		registerCustomApi(api, (_model, context) => {
+			contexts.push(context);
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				const message = createAssistantMessage("ok");
+				stream.push({ type: "text_delta", contentIndex: 0, delta: "ok", partial: message });
+				stream.push({ type: "done", reason: "stop", message });
+			});
+			return stream;
+		});
+		const model = buildModel({
+			id: "stb-corrupt-attachment",
+			name: "STB corrupt attachment",
+			api,
+			provider: "managed-primary",
+			baseUrl: "http://127.0.0.1:8080/v1",
+			reasoning: false,
+			input: ["text", "image"],
+			imageInputDecoder: "stb",
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		} as ModelSpec<Api>) as Model<Api>;
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		authStorage.setRuntimeApiKey(model.provider, "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({ "compaction.enabled": false }),
+			model,
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			taskDepth: 1,
+			agentId: "SubAgent",
+		});
+		try {
+			// Session persistence accepts historical image blocks without MIME
+			// metadata, so exercise that runtime shape through the real provider path.
+			const corrupt = {
+				type: "image",
+				data: Buffer.from("RIFF0000WEBPbroken-attachment").toBase64(),
+			} as unknown as ImageContent;
+
+			await session.sendUserMessage([{ type: "text", text: "inspect this" }, corrupt]);
+
+			expect(contexts).toHaveLength(1);
+			const userMessage = contexts[0]!.messages.find(message => message.role === "user");
+			// The date/cwd reminder rides on the first user turn (#7404); the contract
+			// here is that the undecodable WebP is replaced by the placeholder text.
+			expect(userMessage?.content).toEqual([
+				{ type: "text", text: expect.stringContaining("<system-reminder>") },
+				{ type: "text", text: "inspect this" },
+				{ type: "text", text: "[image omitted: WebP could not be decoded for this model]" },
+			]);
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
 	});
 
 	it("keeps stored steering text raw while pre-LLM conversion wraps it", async () => {
@@ -1047,6 +1218,101 @@ describe("AgentSession message pipeline", () => {
 			// The native bash actually ran the wrapper's command, not the model's.
 			expect(delegatedText).toContain("from-wrapper");
 			expect(delegatedText).not.toContain("from-model");
+		} finally {
+			await session.dispose();
+			authStorage.close();
+		}
+	});
+
+	it("uses an extension web_search implementation when the built-in is enabled", async () => {
+		using tempDir = TempDir.createSync("@pi-web-search-override-");
+		const api: Api = "test-web-search-override";
+		let requests = 0;
+		registerCustomApi(api, () => {
+			requests++;
+			const stream = new AssistantMessageEventStream();
+			queueMicrotask(() => {
+				if (requests === 1) {
+					const message = createAssistantMessage("");
+					const toolCall: ToolCall = {
+						type: "toolCall",
+						id: "call-web-search-1",
+						name: "web_search",
+						arguments: {},
+					};
+					message.content = [toolCall];
+					message.stopReason = "toolUse";
+					stream.push({ type: "toolcall_start", contentIndex: 0, partial: message });
+					stream.push({ type: "toolcall_end", contentIndex: 0, toolCall, partial: message });
+					stream.push({ type: "done", reason: "toolUse", message });
+				} else {
+					const message = createAssistantMessage("done");
+					stream.push({ type: "done", reason: "stop", message });
+				}
+			});
+			return stream;
+		});
+		const modelSpec: ModelSpec<Api> = {
+			id: "local-web-search-override-model",
+			name: "Local Web Search Override Model",
+			api,
+			provider: "ollama",
+			baseUrl: "http://127.0.0.1:11434",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 4096,
+			maxTokens: 1024,
+		};
+		const model = buildModel(modelSpec);
+		let customInvoked = false;
+		const customWebSearch: ExtensionFactory = pi => {
+			pi.registerTool({
+				name: "web_search",
+				label: "Custom Web Search",
+				description: "Custom extension web search",
+				parameters: pi.arktype({}),
+				async execute() {
+					customInvoked = true;
+					return {
+						content: [{ type: "text", text: "custom-web-search-result" }],
+						details: {},
+					};
+				},
+			});
+		};
+		const authStorage = await AuthStorage.create(tempDir.join("auth.db"));
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		const { session } = await createAgentSession({
+			cwd: tempDir.path(),
+			agentDir: tempDir.path(),
+			sessionManager: SessionManager.inMemory(tempDir.path()),
+			authStorage,
+			modelRegistry,
+			settings: Settings.isolated({
+				"compaction.enabled": false,
+				"tools.xdev": false,
+				"web_search.enabled": true,
+			}),
+			model,
+			disableExtensionDiscovery: true,
+			extensions: [customWebSearch],
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+			toolNames: ["web_search"],
+		});
+		try {
+			await session.sendUserMessage("search");
+
+			expect(customInvoked).toBe(true);
+			const toolResult = session.agent.state.messages.find(message => message.role === "toolResult");
+			const text = toolResult?.content.find(block => block.type === "text");
+			expect(text?.type === "text" ? text.text : "").toBe("custom-web-search-result");
 		} finally {
 			await session.dispose();
 			authStorage.close();

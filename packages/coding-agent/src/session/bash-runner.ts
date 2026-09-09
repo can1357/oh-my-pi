@@ -2,7 +2,7 @@ import * as path from "node:path";
 import type { Agent } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
-import { type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
+import { type BashPtyOptions, type BashResult, executeBash as executeBashCommand } from "../exec/bash-executor";
 import type { ExtensionRunner } from "../extensibility/extensions";
 import { outputMeta } from "../tools/output-meta";
 import { clampTimeout } from "../tools/tool-timeouts";
@@ -69,7 +69,7 @@ export class BashRunner {
 	async executeBash(
 		command: string,
 		onChunk?: (chunk: string) => void,
-		options?: { excludeFromContext?: boolean; useUserShell?: boolean },
+		options?: { excludeFromContext?: boolean; useUserShell?: boolean; pty?: BashPtyOptions },
 	): Promise<BashResult> {
 		const target = this.#captureSessionTarget();
 		let targetTransferred = false;
@@ -91,6 +91,22 @@ export class BashRunner {
 				}
 			}
 
+			// The hook's adapter forwards only entries that differ from the baseline
+			// it is handed, and the child shell starts from the (cached, filtered)
+			// spawn env — NOT from live process.env. Diffing against process.env
+			// cancels out any variable an extension both mirrors into process.env
+			// and injects via its hook (e.g. the secretsd session token file), so
+			// hand the hook the env the child will actually receive. Pass a copy:
+			// this.#host.settings.getShellConfig().env is a cached, shared object,
+			// and a legacy hook that mutates its context.env in place (a supported
+			// pattern) would otherwise poison that cache for every later command.
+			const shellEnv =
+				options?.useUserShell === true
+					? extensionRunner
+							?.getRegisteredTool("bash")
+							?.definition.shellEnv?.({ command, cwd, env: { ...this.#host.settings.getShellConfig().env } })
+					: undefined;
+
 			const abortController = new AbortController();
 			this.#abortControllers.add(abortController);
 			let result: BashResult;
@@ -102,7 +118,9 @@ export class BashRunner {
 					cwd,
 					timeout: clampTimeout("bash", undefined, this.#host.settings.get("tools.maxTimeout")) * 1000,
 					onMinimizedSave: originalText => this.#saveOriginalArtifact(target, originalText),
+					env: shellEnv,
 					useUserShell: options?.useUserShell,
+					pty: options?.pty,
 				});
 			} finally {
 				this.#abortControllers.delete(abortController);
@@ -268,6 +286,7 @@ export class BashRunner {
 			exitCode: result.exitCode,
 			cancelled: result.cancelled,
 			truncated: result.truncated,
+			images: result.images,
 			meta,
 			timestamp: Date.now(),
 			excludeFromContext: options?.excludeFromContext,

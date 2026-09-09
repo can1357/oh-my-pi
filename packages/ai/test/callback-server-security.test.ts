@@ -86,17 +86,24 @@ describe("OAuthCallbackFlow callback security", () => {
 		}
 	});
 
-	it("binds localhost callback URLs to the IPv4 loopback interface", async () => {
+	it("binds localhost callback URLs to the loopback interfaces only", async () => {
 		const serve = Bun.serve;
-		let hostname: string | undefined;
+		const hostnames: (string | undefined)[] = [];
 		vi.spyOn(Bun, "serve").mockImplementation(options => {
-			hostname = options.hostname;
+			hostnames.push(options.hostname);
 			return serve(options);
 		});
 
 		const { abort, login } = await startFlow();
 		try {
-			expect(hostname).toBe("127.0.0.1");
+			// `localhost` resolves to both loopback families, so the flow binds one
+			// literal per family: IPv4 first (it resolves the port), then the IPv6
+			// companion that keeps a wildcard-bound dev server from receiving the
+			// authorization code. Never the `localhost` name itself, and never a
+			// routable interface.
+			expect(hostnames[0]).toBe("127.0.0.1");
+			expect(hostnames).toContain("::1");
+			expect(hostnames.every(hostname => hostname === "127.0.0.1" || hostname === "::1")).toBe(true);
 		} finally {
 			abort.abort("test cleanup");
 			await login.catch(() => undefined);

@@ -1,7 +1,6 @@
 import { describe, expect, it } from "bun:test";
 import * as geminiCliProvider from "@oh-my-pi/pi-ai/providers/google-gemini-cli";
 import {
-	ANTIGRAVITY_SYSTEM_INSTRUCTION,
 	buildRequest,
 	parseGeminiCliCredentials,
 	shouldRefreshGeminiCliCredentials,
@@ -10,16 +9,19 @@ import {
 import { getOAuthApiKey } from "@oh-my-pi/pi-ai/registry/oauth";
 import type { AssistantMessageEvent, Context, FetchImpl, Model, TJsonSchema } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
-import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
 
-function createModel(provider: "google-gemini-cli" | "google-antigravity"): Model<"google-gemini-cli"> {
+function createModel(
+	provider: "google-gemini-cli" | "google-antigravity",
+	id = provider === "google-antigravity" ? "gemini-3-flash" : "gemini-2.5-flash",
+	reasoning = false,
+): Model<"google-gemini-cli"> {
 	return buildModel({
-		id: provider === "google-antigravity" ? "gemini-3-flash" : "gemini-2.5-flash",
-		name: provider,
+		id: id,
+		name: id,
 		api: "google-gemini-cli",
 		provider,
 		baseUrl: "https://example.com",
-		reasoning: false,
+		reasoning: reasoning,
 		input: ["text"],
 		cost: {
 			input: 0,
@@ -154,6 +156,7 @@ describe("Google Gemini CLI alignment", () => {
 		expect(shouldRefreshGeminiCliCredentials).toBe(geminiCliProvider.shouldRefreshGeminiCliCredentials);
 		expect(Object.hasOwn(geminiCliProvider, "refreshGeminiCliCredentialsIfNeeded")).toBe(false);
 	});
+
 	it("omits antigravity-only metadata in non-antigravity request payloads", () => {
 		const model = createModel("google-gemini-cli");
 		const payload = buildRequest(model, createContext(), "proj-123", {}, false) as {
@@ -188,9 +191,65 @@ describe("Google Gemini CLI alignment", () => {
 		expect(payload.request.contents).toEqual([{ role: "user", parts: [{ text: "implement token refresh" }] }]);
 	});
 
+	it("drops only unsigned thinking when replaying Antigravity Claude history", () => {
+		const signedThinking = "signed reasoning";
+		const unsignedThinking = "unsigned reasoning";
+		const signature = "c2lnbmVk";
+		const createThinkingContext = (model: Model<"google-gemini-cli">): Context => ({
+			messages: [
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: signedThinking, thinkingSignature: signature },
+						{ type: "thinking", thinking: unsignedThinking },
+					],
+					api: model.api,
+					provider: model.provider,
+					model: model.id,
+					usage: {
+						input: 0,
+						output: 0,
+						cacheRead: 0,
+						cacheWrite: 0,
+						totalTokens: 0,
+						cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+					},
+					stopReason: "stop",
+					timestamp: 1,
+				},
+				{ role: "user", content: "continue", timestamp: 2 },
+			],
+		});
+		const claudeModel = createModel("google-antigravity", "claude-sonnet-4-6", true);
+		const claudePayload = buildRequest(claudeModel, createThinkingContext(claudeModel), "proj-123", {}, true) as {
+			request: {
+				contents: Array<{
+					role: string;
+					parts: Array<{ text?: string; thought?: boolean; thoughtSignature?: string }>;
+				}>;
+			};
+		};
+		const claudeParts = claudePayload.request.contents.find(content => content.role === "model")?.parts;
+		expect(claudeParts).toEqual([{ thought: true, text: signedThinking, thoughtSignature: signature }]);
+
+		const geminiModel = createModel("google-antigravity");
+		const geminiPayload = buildRequest(geminiModel, createThinkingContext(geminiModel), "proj-123", {}, true) as {
+			request: {
+				contents: Array<{
+					role: string;
+					parts: Array<{ text?: string; thought?: boolean; thoughtSignature?: string }>;
+				}>;
+			};
+		};
+		const geminiParts = geminiPayload.request.contents.find(content => content.role === "model")?.parts ?? [];
+		expect(geminiParts).toContainEqual({ thought: true, text: signedThinking, thoughtSignature: signature });
+		expect(geminiParts.some(part => part.text?.includes(unsignedThinking))).toBe(true);
+	});
+
 	it("keeps antigravity metadata in antigravity request payloads", () => {
 		const model = createModel("google-antigravity");
-		const payload = buildRequest(model, createContext(), "proj-123", {}, true) as {
+		const context: Context = { ...createContext(), systemPrompt: ["be terse"] };
+		const payload = buildRequest(model, context, "proj-123", {}, true) as {
 			request: {
 				sessionId?: string;
 				labels?: Record<string, string>;
@@ -323,30 +382,6 @@ describe("Google Gemini CLI alignment", () => {
 		expect(parameters).toBeDefined();
 		expect(JSON.stringify(parameters)).not.toContain('"patternProperties"');
 	});
-	it("injects ANTIGRAVITY_SYSTEM_INSTRUCTION for gemini-3.1-pro-high and gemini-3.1-pro-low", () => {
-		// Regression test for #1274: shouldInjectAntigravitySystemInstruction checked
-		// "gemini-3-pro-high" (hyphen) but the deployed model IDs use "gemini-3.1-pro-high" (dot),
-		// so the injection was silently skipped and the Cloud Code Assist API returned HTTP 400.
-		for (const modelId of ["gemini-3.1-pro-high", "gemini-3.1-pro-low"] as const) {
-			const model: Model<"google-gemini-cli"> = buildModel({
-				...createModel("google-antigravity"),
-				id: modelId,
-			} as ModelSpec<"google-gemini-cli">);
-			const context: Context = {
-				systemPrompt: ["my instructions"],
-				messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
-			};
-			const payload = buildRequest(model, context, "proj-123", {}, true) as {
-				request: { systemInstruction?: { role?: string; parts: Array<{ text: string }> } };
-			};
-
-			const parts = payload.request.systemInstruction?.parts ?? [];
-			// The antigravity identity header must be injected as the first part.
-			expect(parts[0]?.text).toBe(ANTIGRAVITY_SYSTEM_INSTRUCTION);
-			// The user-supplied system prompt must appear after the single injected part.
-			expect(parts.slice(1).some(p => p.text === "my instructions")).toBe(true);
-		}
-	});
 	it("adds anthropic-beta for Antigravity Claude reasoning models without relying on id suffix", async () => {
 		let requestHeaders: Headers | undefined;
 		const fetchMock: FetchImpl = async (_url, init) => {
@@ -354,12 +389,7 @@ describe("Google Gemini CLI alignment", () => {
 			return new Response('{"error":{"message":"bad request"}}', { status: 400 });
 		};
 
-		const model: Model<"google-gemini-cli"> = buildModel({
-			...createModel("google-antigravity"),
-			id: "claude-sonnet-4-6",
-			name: "Claude Sonnet 4.6",
-			reasoning: true,
-		} as ModelSpec<"google-gemini-cli">);
+		const model: Model<"google-gemini-cli"> = createModel("google-antigravity", "claude-sonnet-4-6", true);
 
 		const result = await streamGoogleGeminiCli(model, createContext(), {
 			apiKey: JSON.stringify({ token: "token", projectId: "proj-123" }),
@@ -367,7 +397,6 @@ describe("Google Gemini CLI alignment", () => {
 		}).result();
 
 		expect(result.stopReason).toBe("error");
-		expect(requestHeaders).toBeDefined();
 		expect(requestHeaders!.get("anthropic-beta")).toBe("interleaved-thinking-2025-05-14");
 		expect(requestHeaders!.get("X-Goog-Api-Client")).toBeNull();
 		expect(requestHeaders!.get("Client-Metadata")).toBeNull();
@@ -386,7 +415,6 @@ describe("Google Gemini CLI alignment", () => {
 			fetch: fetchMock,
 		}).result();
 
-		expect(requestHeaders).toBeDefined();
 		expect(requestHeaders!.get("User-Agent")).toMatch(/^antigravity\/hub\/[0-9.]+ /);
 	});
 
@@ -402,7 +430,7 @@ describe("Google Gemini CLI alignment", () => {
 					const encoder = new TextEncoder();
 					for (const chunk of sseChunks) {
 						controller.enqueue(encoder.encode(chunk));
-						await Bun.sleep(5);
+						await Promise.resolve();
 					}
 					controller.close();
 				},
@@ -413,12 +441,7 @@ describe("Google Gemini CLI alignment", () => {
 			});
 		};
 
-		const model: Model<"google-gemini-cli"> = buildModel({
-			...createModel("google-antigravity"),
-			id: "gemini-3.5-flash",
-			name: "Gemini 3.5 Flash",
-			reasoning: true,
-		} as ModelSpec<"google-gemini-cli">);
+		const model: Model<"google-gemini-cli"> = createModel("google-antigravity", "gemini-3.5-flash", true);
 
 		const events: AssistantMessageEvent[] = [];
 		const stream = streamGoogleGeminiCli(model, createContext(), {
@@ -465,7 +488,7 @@ describe("Google Gemini CLI alignment", () => {
 					const encoder = new TextEncoder();
 					for (const chunk of sseChunks) {
 						controller.enqueue(encoder.encode(chunk));
-						await Bun.sleep(5);
+						await Promise.resolve();
 					}
 					controller.close();
 				},
@@ -476,12 +499,7 @@ describe("Google Gemini CLI alignment", () => {
 			});
 		};
 
-		const model: Model<"google-gemini-cli"> = buildModel({
-			...createModel("google-antigravity"),
-			id: "gemini-3.5-flash",
-			name: "Gemini 3.5 Flash",
-			reasoning: true,
-		} as ModelSpec<"google-gemini-cli">);
+		const model: Model<"google-gemini-cli"> = createModel("google-antigravity", "gemini-3.5-flash", true);
 
 		const events: AssistantMessageEvent[] = [];
 		const stream = streamGoogleGeminiCli(model, createContext(), {
@@ -578,7 +596,7 @@ describe("Google Gemini CLI alignment", () => {
 						const encoder = new TextEncoder();
 						for (const chunk of chunks) {
 							controller.enqueue(encoder.encode(chunk));
-							await Bun.sleep(5);
+							await Promise.resolve();
 						}
 						controller.close();
 					},
@@ -625,7 +643,7 @@ describe("Google Gemini CLI alignment", () => {
 						const encoder = new TextEncoder();
 						for (const chunk of sseChunks) {
 							controller.enqueue(encoder.encode(chunk));
-							await Bun.sleep(5);
+							await Promise.resolve();
 						}
 						controller.close();
 					},
@@ -669,7 +687,7 @@ describe("Google Gemini CLI alignment", () => {
 						const encoder = new TextEncoder();
 						for (const chunk of sseChunks) {
 							controller.enqueue(encoder.encode(chunk));
-							await Bun.sleep(5);
+							await Promise.resolve();
 						}
 						controller.close();
 					},
@@ -822,7 +840,7 @@ describe("Google Gemini CLI alignment", () => {
 						const encoder = new TextEncoder();
 						for (const chunk of sseChunks) {
 							controller.enqueue(encoder.encode(chunk));
-							await Bun.sleep(5);
+							await Promise.resolve();
 						}
 						controller.close();
 					},

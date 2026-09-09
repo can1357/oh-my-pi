@@ -1,37 +1,35 @@
-# Release Command
+# Release
 
-Release all packages with the specified version.
+Release all packages at specified version.
 
 ## Arguments
 
-- `$ARGUMENTS`: The version number (semver, e.g., `3.13.0`)
+`$ARGUMENTS`: semver version, e.g. `3.13.0`.
 
-## Version Guidance
+## Version
 
-- Find the last release version by checking the latest git tag (`vX.Y.Z`) and confirm it matches `packages/*/package.json` versions.
-- If no version is specified, review commits since the last tag, decide major/minor/patch, then bump accordingly.
-- If the user specifies `major`, `minor`, or `patch`, bump from the last tag: major -> X+1.0.0, minor -> X.Y+1.0, patch -> X.Y.Z+1.
+- Last release: latest git tag (`vX.Y.Z`); confirm matches `packages/*/package.json` versions.
+- No version: review commits since last tag; choose major/minor/patch; bump.
+- `major`/`minor`/`patch`: bump last tag — major `X+1.0.0`; minor `X.Y+1.0`; patch `X.Y.Z+1`.
 
-## Usage
-
-Run the release script:
+## Run
 
 ```bash
 bun scripts/release.ts $ARGUMENTS
 ```
 
-The script handles everything automatically:
-1. Pre-flight checks (clean working dir, on main branch)
-2. Updates all package.json versions
-3. Regenerates bun.lock
-4. Updates CHANGELOGs ([Unreleased] → [version] - date)
-5. Commits and tags
-6. Pushes to origin
-7. Watches CI until all workflows pass
+Script automatically:
+1. Pre-flight: clean working dir; main branch.
+2. Update all `package.json` versions.
+3. Regenerate `bun.lock`.
+4. Update CHANGELOGs: `[Unreleased] → [version] - date`.
+5. Commit and tag.
+6. Push to origin.
+7. Watch CI until all workflows pass.
 
-## Handling CI Failures
+## CI failures
 
-If CI fails, the script exits with an error. Fix the issue, then repeat until CI passes:
+CI failure → script exits with error. Fix, then repeat until CI passes:
 
 ```bash
 git commit -m "fix: <brief description>"
@@ -40,4 +38,4 @@ git tag -f v$ARGUMENTS && git push origin v$ARGUMENTS --force
 bun scripts/release.ts watch
 ```
 
-The `watch` subcommand re-watches CI for the current commit until all checks pass.
+`watch`: re-watches CI for current commit until all checks pass.

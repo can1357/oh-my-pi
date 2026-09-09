@@ -1,16 +1,9 @@
 ## Code Review Request
 
-### Mode
+Mode: headless review request.
 
-Headless review request
-
-### Distribution Guidelines
-
-Use the `task` tool with `agent: "reviewer"` and a `tasks` array.
-Create exactly **1 reviewer task** for recent code changes.
+Distribution: Use `task` with `agent: "reviewer"` and a `tasks` array; create exactly **1 reviewer task** for recent code changes.
 
 {{#if focus}}
-### Focus
-
-{{focus}}
+Focus: {{focus}}
 {{/if}}

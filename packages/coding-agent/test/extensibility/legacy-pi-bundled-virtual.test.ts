@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import * as path from "node:path";
+import * as url from "node:url";
 import {
 	__getLegacyPiBundledModulesGlobal,
 	__synthesizeLegacyPiBundledSourceWithModules,
@@ -104,11 +104,7 @@ describe("legacy-pi bundled virtual module synthesizer (issue #3423)", () => {
 
 		await Bun.write(
 			entryPath,
-			[
-				'import { legacyAnswer } from "omp-legacy-pi-bundled:@oh-my-pi/pi-utils";',
-				"process.stdout.write(legacyAnswer);",
-				"",
-			].join("\n"),
+			['export { legacyAnswer } from "omp-legacy-pi-bundled:@oh-my-pi/pi-utils";', ""].join("\n"),
 		);
 
 		expect(resolveBundledVirtualSpecifier("@oh-my-pi/pi-utils")).toEqual({
@@ -152,19 +148,8 @@ describe("legacy-pi bundled virtual module synthesizer (issue #3423)", () => {
 		await Bun.write(bundlePath, await buildResult.outputs[0]!.text());
 		expect(onLoadPaths).toEqual(["@oh-my-pi/pi-utils"]);
 
-		const proc = Bun.spawn([process.execPath, `./${path.basename(bundlePath)}`], {
-			cwd: path.dirname(bundlePath),
-			stderr: "pipe",
-			stdout: "pipe",
-		});
-		const [stdout, stderr, exitCode] = await Promise.all([
-			new Response(proc.stdout).text(),
-			new Response(proc.stderr).text(),
-			proc.exited,
-		]);
-
-		expect(exitCode, stderr).toBe(0);
-		expect(stderr).toBe("");
-		expect(stdout).toBe("served:@oh-my-pi/pi-utils");
+		// The generated bundle has a runtime-selected temp path; importing it is the loading boundary under test.
+		const bundledModule = (await import(url.pathToFileURL(bundlePath).href)) as { legacyAnswer: string };
+		expect(bundledModule.legacyAnswer).toBe("served:@oh-my-pi/pi-utils");
 	});
 });

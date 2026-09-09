@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
+import { type AgentMessage, Tokenizer } from "@oh-my-pi/pi-agent-core";
 import type { SessionEntry, SessionMessageEntry, ShakeConfig } from "@oh-my-pi/pi-agent-core/compaction";
 import {
 	AGGRESSIVE_SHAKE_CONFIG,
@@ -7,9 +7,12 @@ import {
 	applyShakeRegions,
 	collectShakeRegions,
 	DEFAULT_SHAKE_CONFIG,
-	estimateTokens,
+	RESCUE_SHAKE_CONFIG,
 } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, TextContent, ToolCall, ToolResultMessage } from "@oh-my-pi/pi-ai";
+import { convertMessageToLlm } from "../src/compaction/messages";
+
+const tokenizer = new Tokenizer();
 
 let idCounter = 0;
 function nextId(): string {
@@ -73,7 +76,7 @@ describe("collectShakeRegions — tool results", () => {
 	test("collects unprotected tool results and applyShakeRegion sets prunedAt", () => {
 		const tr = toolResultMessage("bash", "x".repeat(400));
 		const entry = messageEntry(tr);
-		const regions = collectShakeRegions([entry], cfg());
+		const regions = collectShakeRegions([entry], tokenizer, cfg());
 
 		expect(regions).toHaveLength(1);
 		const region = regions[0];
@@ -85,15 +88,32 @@ describe("collectShakeRegions — tool results", () => {
 		expect(tr.content).toEqual([{ type: "text", text: "[shaken]" }]);
 	});
 
+	test("keeps images in the provider view of an elided mixed tool result", () => {
+		const image: ImageContent = {
+			type: "image",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+			mimeType: "image/png",
+		};
+		const tr = toolResultMessage("bash", "[shaken]", {
+			content: [{ type: "text", text: "[shaken]" }, image],
+			prunedAt: Date.now(),
+		});
+
+		const converted = convertMessageToLlm(tr);
+
+		expect(converted?.content).toEqual([{ type: "text", text: "[shaken]" }, image]);
+		expect(Array.isArray(converted?.content) ? converted.content[1] : undefined).toBe(image);
+	});
+
 	test("never collects protected tools", () => {
 		const entry = messageEntry(toolResultMessage("skill", "y".repeat(800)));
-		const regions = collectShakeRegions([entry], cfg({ protectedTools: ["skill"] }));
+		const regions = collectShakeRegions([entry], tokenizer, cfg({ protectedTools: ["skill"] }));
 		expect(regions).toHaveLength(0);
 	});
 
 	test("never collects already-pruned tool results", () => {
 		const entry = messageEntry(toolResultMessage("bash", "z".repeat(800), { prunedAt: Date.now() }));
-		const regions = collectShakeRegions([entry], cfg());
+		const regions = collectShakeRegions([entry], tokenizer, cfg());
 		expect(regions).toHaveLength(0);
 	});
 
@@ -102,9 +122,13 @@ describe("collectShakeRegions — tool results", () => {
 		const older = messageEntry(toolResultMessage("bash", text));
 		const middle = messageEntry(toolResultMessage("bash", text));
 		const recent = messageEntry(toolResultMessage("bash", text));
-		const perEntry = estimateTokens(older.message);
+		const perEntry = tokenizer.countMessage(older.message);
 		// Window covers the most recent ~1.5 entries → middle & recent protected, older eligible.
-		const regions = collectShakeRegions([older, middle, recent], cfg({ protectTokens: Math.floor(perEntry * 1.5) }));
+		const regions = collectShakeRegions(
+			[older, middle, recent],
+			tokenizer,
+			cfg({ protectTokens: Math.floor(perEntry * 1.5) }),
+		);
 
 		expect(regions).toHaveLength(1);
 		expect(regions[0].entry).toBe(older);
@@ -112,9 +136,9 @@ describe("collectShakeRegions — tool results", () => {
 
 	test("minSavings gates the whole batch", () => {
 		const entry = messageEntry(toolResultMessage("bash", "q".repeat(800)));
-		const tokens = estimateTokens(entry.message);
-		expect(collectShakeRegions([entry], cfg({ minSavings: tokens * 10 }))).toHaveLength(0);
-		expect(collectShakeRegions([entry], cfg({ minSavings: 0 }))).toHaveLength(1);
+		const tokens = tokenizer.countMessage(entry.message);
+		expect(collectShakeRegions([entry], tokenizer, cfg({ minSavings: tokens * 10 }))).toHaveLength(0);
+		expect(collectShakeRegions([entry], tokenizer, cfg({ minSavings: 0 }))).toHaveLength(1);
 	});
 });
 
@@ -123,7 +147,7 @@ describe("collectShakeRegions — fenced / XML blocks", () => {
 		const fence = fencedBlock(120);
 		const text = `intro line\n${fence}\noutro line`;
 		const entry = messageEntry(assistantMessage([{ type: "text", text }]));
-		const regions = collectShakeRegions([entry], cfg());
+		const regions = collectShakeRegions([entry], tokenizer, cfg());
 
 		expect(regions).toHaveLength(1);
 		const region = regions[0];
@@ -139,14 +163,14 @@ describe("collectShakeRegions — fenced / XML blocks", () => {
 	test("ignores fenced blocks below fenceMinTokens", () => {
 		const text = "intro\n```ts\nconst a = 1;\n```\noutro";
 		const entry = messageEntry(assistantMessage([{ type: "text", text }]));
-		expect(collectShakeRegions([entry], cfg({ fenceMinTokens: 400 }))).toHaveLength(0);
+		expect(collectShakeRegions([entry], tokenizer, cfg({ fenceMinTokens: 400 }))).toHaveLength(0);
 	});
 
 	test("detects a top-level XML block", () => {
 		const xml = xmlBlock(120);
 		const text = `before\n${xml}\nafter`;
 		const entry = messageEntry(assistantMessage([{ type: "text", text }]));
-		const regions = collectShakeRegions([entry], cfg());
+		const regions = collectShakeRegions([entry], tokenizer, cfg());
 
 		expect(regions).toHaveLength(1);
 		const region = regions[0];
@@ -160,7 +184,7 @@ describe("collectShakeRegions — fenced / XML blocks", () => {
 		const entry = messageEntry(
 			assistantMessage([{ type: "text", text: "tiny" }, toolCall, { type: "text", text: `pre\n${fence}\npost` }]),
 		);
-		const regions = collectShakeRegions([entry], cfg());
+		const regions = collectShakeRegions([entry], tokenizer, cfg());
 
 		expect(regions).toHaveLength(1);
 		const region = regions[0];
@@ -171,7 +195,7 @@ describe("collectShakeRegions — fenced / XML blocks", () => {
 	test("does not cross message boundaries — each large block stays in its own entry", () => {
 		const a = messageEntry(assistantMessage([{ type: "text", text: `a\n${fencedBlock(120)}\na` }]));
 		const b = messageEntry(assistantMessage([{ type: "text", text: `b\n${fencedBlock(120, "py")}\nb` }]));
-		const regions = collectShakeRegions([a, b], cfg());
+		const regions = collectShakeRegions([a, b], tokenizer, cfg());
 
 		expect(regions).toHaveLength(2);
 		expect(regions[0].entry).toBe(a);
@@ -181,7 +205,7 @@ describe("collectShakeRegions — fenced / XML blocks", () => {
 	test("ignores unterminated fences (conservative)", () => {
 		const text = `intro\n\`\`\`ts\n${"const a = 1;\n".repeat(60)}`; // never closes
 		const entry = messageEntry(assistantMessage([{ type: "text", text }]));
-		expect(collectShakeRegions([entry], cfg())).toHaveLength(0);
+		expect(collectShakeRegions([entry], tokenizer, cfg())).toHaveLength(0);
 	});
 });
 
@@ -191,7 +215,7 @@ describe("applyShakeRegions — multi-region ordering", () => {
 		const second = fencedBlock(80, "py");
 		const text = `head\n${first}\nmiddle\n${second}\ntail`;
 		const entry = messageEntry(assistantMessage([{ type: "text", text }]));
-		const regions = collectShakeRegions([entry], cfg());
+		const regions = collectShakeRegions([entry], tokenizer, cfg());
 		expect(regions).toHaveLength(2);
 
 		applyShakeRegions([
@@ -204,10 +228,21 @@ describe("applyShakeRegions — multi-region ordering", () => {
 });
 
 describe("shake config presets", () => {
-	test("aggressive preset protects skill and drops everything else", () => {
-		expect(AGGRESSIVE_SHAKE_CONFIG.protectTokens).toBe(0);
+	test("aggressive preset protects skill and keeps a small recent tail", () => {
+		expect(AGGRESSIVE_SHAKE_CONFIG.protectTokens).toBeGreaterThan(0);
 		expect(AGGRESSIVE_SHAKE_CONFIG.minSavings).toBe(0);
 		expect(AGGRESSIVE_SHAKE_CONFIG.protectedTools).toContain("skill");
+	});
+
+	test("manual shake preserves the recent tool-result tail instead of stripping everything", () => {
+		const older = messageEntry(toolResultMessage("bash", "old-result ".repeat(300)));
+		const recent = messageEntry(toolResultMessage("bash", "recent-result ".repeat(3000)));
+		const regions = collectShakeRegions([older, recent], tokenizer, AGGRESSIVE_SHAKE_CONFIG);
+
+		// The recent result sits inside the preserved tail; the older one is
+		// still shaken aggressively.
+		expect(regions).toHaveLength(1);
+		expect(regions[0].entry).toBe(older);
 	});
 
 	test("default preset keeps a protect window", () => {
@@ -215,8 +250,15 @@ describe("shake config presets", () => {
 		expect(DEFAULT_SHAKE_CONFIG.protectedTools).toContain("skill");
 	});
 
+	test("rescue preset overrides the manual tail so it can elide the newest result", () => {
+		const recent = messageEntry(toolResultMessage("bash", "oversized-result ".repeat(2000)));
+		const regions = collectShakeRegions([recent], tokenizer, RESCUE_SHAKE_CONFIG);
+		expect(regions).toHaveLength(1);
+		expect(regions[0].entry).toBe(recent);
+	});
+
 	test("empty branch yields no regions", () => {
-		expect(collectShakeRegions([] as SessionEntry[], AGGRESSIVE_SHAKE_CONFIG)).toHaveLength(0);
+		expect(collectShakeRegions([] as SessionEntry[], tokenizer, AGGRESSIVE_SHAKE_CONFIG)).toHaveLength(0);
 	});
 });
 
@@ -226,13 +268,13 @@ describe("collectShakeRegions — useless results", () => {
 		const flagged = messageEntry(toolResultMessage("search", text, { useless: true }));
 		const plain = messageEntry(toolResultMessage("search", text));
 		// Window far larger than the whole branch: only the flagged result bypasses it.
-		const regions = collectShakeRegions([flagged, plain], cfg({ protectTokens: 1_000_000 }));
+		const regions = collectShakeRegions([flagged, plain], tokenizer, cfg({ protectTokens: 1_000_000 }));
 		expect(regions).toHaveLength(1);
 		expect(regions[0].entry).toBe(flagged);
 	});
 
 	test("an error result never bypasses the window even when flagged", () => {
 		const entry = messageEntry(toolResultMessage("search", "boom\n".repeat(50), { useless: true, isError: true }));
-		expect(collectShakeRegions([entry], cfg({ protectTokens: 1_000_000 }))).toHaveLength(0);
+		expect(collectShakeRegions([entry], tokenizer, cfg({ protectTokens: 1_000_000 }))).toHaveLength(0);
 	});
 });

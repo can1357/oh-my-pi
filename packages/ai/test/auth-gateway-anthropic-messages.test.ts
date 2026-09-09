@@ -1,6 +1,8 @@
 import { describe, expect, it } from "bun:test";
 import { encodeResponse, encodeStream, parseRequest } from "@oh-my-pi/pi-ai/providers/anthropic-messages-server";
 import type {
+	ToolSearchServerToolUseBlockParam,
+	ToolSearchToolResultBlockParam,
 	WebSearchServerToolUseBlockParam,
 	WebSearchToolResultBlockParam,
 } from "@oh-my-pi/pi-ai/providers/anthropic-wire";
@@ -173,6 +175,52 @@ describe("anthropic-messages parseRequest", () => {
 		expect(msgs[4]).toMatchObject({ role: "user", content: "and another result coming" });
 	});
 
+	it("preserves thinking binding and mid-conversation controls", () => {
+		const parsed = parseRequest({
+			model: "claude-fable-5-1",
+			max_tokens: 1024,
+			thinking: {
+				type: "adaptive",
+				block_binding: { prefix_mismatch_behavior: "drop_block" },
+			},
+			tools: [
+				{
+					name: "lookup",
+					description: "find a thing",
+					input_schema: { type: "object", properties: {} },
+					defer_loading: true,
+				},
+			],
+			messages: [
+				{ role: "user", content: "hi" },
+				{
+					role: "system",
+					clear_at: "next_user_message",
+					output_config: { effort: "low" },
+					content: [
+						{ type: "text", text: "Use fewer tokens." },
+						{
+							type: "tool_addition",
+							tool: { type: "tool_reference", name: "lookup" },
+						},
+					],
+				},
+			],
+		});
+
+		expect(parsed.options.anthropicPrefixMismatchBehavior).toBe("drop_block");
+		expect(parsed.context.tools?.[0]?.deferLoading).toBe(true);
+		const system = parsed.context.messages[1];
+		if (system?.role !== "developer") throw new Error("expected developer message");
+		expect(system.content).toEqual([{ type: "text", text: "Use fewer tokens." }]);
+		expect(system.providerPayload).toEqual({
+			type: "anthropicMessage",
+			clearAt: "next_user_message",
+			effort: "low",
+			toolChanges: [{ type: "tool_addition", name: "lookup" }],
+		});
+	});
+
 	it("maps tool_choice variants and suppresses user wrappers that hold only tool_result", () => {
 		const auto = parseRequest({
 			model: "m",
@@ -341,6 +389,47 @@ describe("anthropic-messages parseRequest", () => {
 			{ type: "anthropicServerTool", block: serverToolUse },
 			{ type: "anthropicServerTool", block: searchResult },
 			{ type: "text", text: "forecast ready" },
+		]);
+	});
+
+	it("preserves inbound assistant tool-search call/result blocks verbatim", () => {
+		const serverToolUse: ToolSearchServerToolUseBlockParam = {
+			type: "server_tool_use",
+			id: "srvtoolu_search",
+			name: "tool_search_tool_regex",
+			input: { pattern: "read" },
+		};
+		const searchResult: ToolSearchToolResultBlockParam = {
+			type: "tool_search_tool_result",
+			tool_use_id: "srvtoolu_search",
+			content: {
+				type: "tool_search_tool_search_result",
+				tool_references: [{ type: "tool_reference", tool_name: "_read" }],
+			},
+		};
+		const parsed = parseRequest({
+			model: "claude-opus-4-7",
+			max_tokens: 8,
+			messages: [
+				{ role: "user", content: "read notes" },
+				{
+					role: "assistant",
+					content: [
+						{ type: "thinking", thinking: "find read", signature: "sig-1" },
+						serverToolUse,
+						searchResult,
+						{ type: "text", text: "tool loaded" },
+					],
+				},
+			],
+		});
+		const assistant = parsed.context.messages.find(message => message.role === "assistant");
+
+		expect(assistant?.content).toEqual([
+			{ type: "thinking", thinking: "find read", thinkingSignature: "sig-1" },
+			{ type: "anthropicServerTool", block: serverToolUse },
+			{ type: "anthropicServerTool", block: searchResult },
+			{ type: "text", text: "tool loaded" },
 		]);
 	});
 

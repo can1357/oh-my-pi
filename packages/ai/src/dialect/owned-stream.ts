@@ -7,6 +7,7 @@ import type {
 } from "../types";
 import {
 	clearStreamingPartialJson,
+	copyCursorExecResolved,
 	getStreamingPartialJson,
 	type StreamingPartialJsonCarrier,
 	setStreamingPartialJson,
@@ -54,6 +55,7 @@ function cloneToolCall(source: StreamingToolCall): StreamingToolCall {
 	};
 	const partialJson = getStreamingPartialJson(source);
 	if (partialJson !== undefined) setStreamingPartialJson(block, partialJson);
+	copyCursorExecResolved(block, source);
 	return block;
 }
 
@@ -65,6 +67,7 @@ function syncToolCall(target: StreamingToolCall, source: StreamingToolCall): voi
 	const partialJson = getStreamingPartialJson(source);
 	if (partialJson === undefined) clearStreamingPartialJson(target);
 	else setStreamingPartialJson(target, partialJson);
+	copyCursorExecResolved(target, source);
 }
 
 function hasNamedNativeToolCall(source: StreamingToolCall | undefined): source is StreamingToolCall {
@@ -364,6 +367,9 @@ class InbandStreamProjector {
 					break;
 				case "thinkingEnd":
 					this.thinkingEnd();
+					break;
+				case "impliedThinkingEnd":
+					// Dialect scanners never emit this; only the leaked-thinking healer does.
 					break;
 				case "toolStart":
 					this.#beginTool(event);

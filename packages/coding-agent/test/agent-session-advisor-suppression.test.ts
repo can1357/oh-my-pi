@@ -17,7 +17,7 @@
  *     (which converts to `developer`) would send an invalid provider tail, so the
  *     follow-up stays queued for the next explicit resume rather than auto-running.
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { ToolCall } from "@oh-my-pi/pi-ai";
@@ -39,7 +39,7 @@ interface MockYieldDetails {
 }
 
 const mockYieldParameters = type({
-	result: "unknown",
+	data: "unknown",
 	"type?": "unknown",
 });
 
@@ -72,7 +72,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 	let session: AgentSession;
 	const authStorages: AuthStorage[] = [];
 
-	beforeEach(() => {
+	beforeAll(() => {
 		tempDir = TempDir.createSync("@pi-advisor-suppress-");
 	});
 
@@ -82,9 +82,11 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			await session?.dispose();
 		} finally {
 			for (const authStorage of authStorages.splice(0)) authStorage.close();
-			await Bun.sleep(0);
-			await tempDir?.remove();
 		}
+	});
+
+	afterAll(async () => {
+		await tempDir?.remove();
 	});
 
 	/**
@@ -112,17 +114,12 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false });
-		const authStorage = await AuthStorage.create(tempDir.join(`auth-${Snowflake.next()}.db`));
+		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
 		session = new AgentSession({ agent, sessionManager, settings, modelRegistry });
 		return { session, sessionManager, mock, streamStarted: started.promise };
-	}
-
-	function readYieldResultData(result: unknown): unknown {
-		if (!result || typeof result !== "object" || !("data" in result)) return undefined;
-		return result.data;
 	}
 
 	function isYieldType(value: unknown): value is string | string[] {
@@ -139,7 +136,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 			description: "Mock yield tool",
 			parameters: mockYieldParameters,
 			execute: async (_toolCallId, params) => {
-				const details: MockYieldDetails = { status: "success", data: readYieldResultData(params.result) };
+				const details: MockYieldDetails = { status: "success", data: params.data };
 				if (isYieldType(params.type)) details.type = params.type;
 				return {
 					content: [{ type: "text", text: "Result submitted." }],
@@ -149,7 +146,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		};
 	}
 
-	function createYieldMockResponse(args: { result: { data: unknown }; type?: string | string[] }): MockResponse {
+	function createYieldMockResponse(args: { data: unknown; type?: string | string[] }): MockResponse {
 		const toolCall: ToolCall = {
 			type: "toolCall",
 			id: `call_yield_${Snowflake.next()}`,
@@ -203,7 +200,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false, "retry.enabled": false });
 		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
-		const authStorage = await AuthStorage.create(tempDir.join(`auth-${Snowflake.next()}.db`));
+		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
@@ -229,7 +226,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		};
 	}
 
-	function isAdvisorCard(message: AgentMessage): boolean {
+	function isAdvisorCard(message: AgentMessage): message is AgentMessage & { role: "custom"; content: string } {
 		return message.role === "custom" && (message as { customType?: string }).customType === ADVISOR_TYPE;
 	}
 
@@ -256,6 +253,63 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		};
 		return persisted;
 	}
+
+	it("preserves a final-yield blocker without starting a hidden post-yield turn", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({
+			responses: [
+				createYieldMockResponse({ data: "FINAL RESULT" }),
+				{ content: ["must not run"], stopReason: "stop" },
+			],
+		});
+		const advisorMock = createMockModel({
+			responses: [
+				{
+					content: [
+						{
+							type: "toolCall",
+							name: "advise",
+							arguments: { note: "Final yield needs correction", severity: "blocker" },
+						},
+					],
+				},
+				{ content: [], stopReason: "stop" },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [createMockYieldTool()] },
+			streamFn: mock.stream,
+		});
+		const sessionManager = SessionManager.inMemory();
+		const settings = Settings.isolated({
+			"advisor.syncBacklog": "1",
+			"compaction.enabled": false,
+			"retry.enabled": false,
+		});
+		settings.setModelRole("advisor", "anthropic/claude-sonnet-4-5");
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings,
+			modelRegistry,
+			advisorTools: [],
+			advisorStreamFn: advisorMock.stream,
+		});
+		expect(session.setAdvisorEnabled(true)).toBe(true);
+		await session.prompt("yield the final result");
+		expect(await session.waitForAdvisorCatchup(1000)).toBe(true);
+
+		expect(advisorMock.calls).toHaveLength(2);
+		expect(mock.calls).toHaveLength(1);
+		const advisorCards = session.agent.state.messages.filter(isAdvisorCard);
+		expect(advisorCards).toHaveLength(1);
+		expect(advisorCards[0].content).toContain("Final yield needs correction");
+	});
 
 	it("preserves a late advisor concern after a terminal answer without waking the primary", async () => {
 		const { session, sessionManager, mock, advisorMock } = await createCompletedAdvisorSession();
@@ -610,7 +664,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 				if (providerCalls > 1) {
 					throw new Error("terminal yield must not start a second provider call");
 				}
-				return createYieldMockResponse({ result: { data: { ok: true } } });
+				return createYieldMockResponse({ data: { ok: true } });
 			},
 		});
 		const agent = new Agent({
@@ -620,7 +674,7 @@ describe("AgentSession advisor auto-resume suppression", () => {
 		});
 		const sessionManager = SessionManager.inMemory();
 		const settings = Settings.isolated({ "compaction.enabled": false });
-		const authStorage = await AuthStorage.create(tempDir.join(`auth-${Snowflake.next()}.db`));
+		const authStorage = await AuthStorage.create(":memory:");
 		authStorages.push(authStorage);
 		authStorage.setRuntimeApiKey("anthropic", "test-key");
 		const modelRegistry = new ModelRegistry(authStorage, tempDir.join("models.yml"));

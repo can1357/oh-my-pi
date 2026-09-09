@@ -1,9 +1,12 @@
 /**
- * Dev-only napi build that regenerates the TypeScript bindings
- * (native/index.d.ts) and the runtime enum exports. Shipping addons are built
- * by Bazel (`bun run build` → scripts/bazel-natives.ts); run this
- * (`bun run build:bindings`) only when the Rust API changes its exported
- * typedefs. Host target only, local cargo profile — no cross-compilation.
+ * Local napi build: regenerates the TypeScript bindings (native/index.d.ts)
+ * and the runtime enum exports, then installs the host addon. This is the
+ * default backend for the `host` target (`bun run build` →
+ * scripts/bazel-natives.ts); release addons build through Bazel with explicit
+ * //:natives-* targets. Host target only — no cross-compilation.
+ *
+ * `OMP_NATIVE_CARGO_PROFILE` selects the cargo profile (default `local`:
+ * incremental, unstripped). Image builds set `ci` for a stripped addon.
  */
 
 import * as fsSync from "node:fs";
@@ -11,17 +14,12 @@ import * as fs from "node:fs/promises";
 import { createRequire } from "node:module";
 import * as path from "node:path";
 import { $ } from "bun";
-import { detectHostAvx2Support } from "../../../scripts/host-detect";
+import { detectHostAvx2Support, resolveLocalHostAddon } from "../../../scripts/host-detect";
 import { generateEnumExports } from "./gen-enums";
 
 // pcre2-sys prefers a system libpcre2 when pkg-config finds one. Keep the
 // static build so the local addon never retains host Homebrew paths.
 process.env.PCRE2_SYS_STATIC ??= "1";
-
-// audiopus_sys builds its bundled opus via CMake; that opus tree declares a
-// cmake_minimum_required below 3.5, which CMake 4.x refuses without this
-// policy override.
-process.env.CMAKE_POLICY_VERSION_MINIMUM ??= "3.5";
 
 // Windows: cc-rs and rustc auto-locate cl.exe/link.exe through the VS
 // registry, but the cmake crate (audiopus_sys' bundled opus) needs cmake —
@@ -30,6 +28,10 @@ process.env.CMAKE_POLICY_VERSION_MINIMUM ??= "3.5";
 // "cmake not found". Resolve the VS install via vswhere and append its
 // CMake/Ninja dirs, keeping any user-provided tools ahead.
 if (process.platform === "win32" && (!Bun.which("cmake") || !Bun.which("ninja"))) {
+	const vcToolsComponent =
+		process.arch === "arm64"
+			? "Microsoft.VisualStudio.Component.VC.Tools.ARM64"
+			: "Microsoft.VisualStudio.Component.VC.Tools.x86.x64";
 	const vswhere = path.join(
 		process.env["ProgramFiles(x86)"] ?? "C:\\Program Files (x86)",
 		"Microsoft Visual Studio",
@@ -37,16 +39,7 @@ if (process.platform === "win32" && (!Bun.which("cmake") || !Bun.which("ninja"))
 		"vswhere.exe",
 	);
 	const probe = Bun.spawnSync(
-		[
-			vswhere,
-			"-latest",
-			"-products",
-			"*",
-			"-requires",
-			"Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
-			"-property",
-			"installationPath",
-		],
+		[vswhere, "-latest", "-products", "*", "-requires", vcToolsComponent, "-property", "installationPath"],
 		{ stdout: "pipe", stderr: "pipe" },
 	);
 	const vsRoot = probe.exitCode === 0 ? probe.stdout.toString("utf-8").trim() : "";
@@ -66,22 +59,32 @@ const rustDir = path.join(repoRoot, "crates/pi-natives");
 const nativeDir = path.join(import.meta.dir, "../native");
 const packageJsonPath = path.join(import.meta.dir, "../package.json");
 
-type X64Variant = "modern" | "baseline";
-
-const effectiveVariant: X64Variant | null =
-	process.arch === "x64" ? (detectHostAvx2Support() ? "modern" : "baseline") : null;
+const localAddon = resolveLocalHostAddon({
+	platform: process.platform,
+	arch: process.arch,
+	avx2: detectHostAvx2Support(),
+});
+const effectiveVariant = localAddon.x64Variant;
 const variantSuffix = effectiveVariant ? `-${effectiveVariant}` : "";
 
 // Pin Rust target-cpu so x64 baseline/modern variants get a reproducible ISA floor
 // instead of inheriting the host CPU when RUSTFLAGS is unset. Non-x64 builds keep
 // the target's default CPU features: `-C target-cpu=native` would bake the build
 // host's CPU features into the addon and trips ring 0.17's aarch64-apple
-// const assertion (CAPS_STATIC == MIN_STATIC_FEATURES).
+// const assertion (CAPS_STATIC == MIN_STATIC_FEATURES). Shipping Windows addons
+// also link the MSVC CRT statically so clean systems need no VC++ Redistributable.
 if (!Bun.env.RUSTFLAGS) {
+	const rustFlags: string[] = [];
+	if (process.platform === "win32") {
+		rustFlags.push("-C", "target-feature=+crt-static");
+	}
 	if (effectiveVariant === "modern") {
-		Bun.env.RUSTFLAGS = "-C target-cpu=x86-64-v3";
+		rustFlags.push("-C", "target-cpu=x86-64-v3");
 	} else if (effectiveVariant === "baseline") {
-		Bun.env.RUSTFLAGS = "-C target-cpu=x86-64-v2";
+		rustFlags.push("-C", "target-cpu=x86-64-v2");
+	}
+	if (rustFlags.length > 0) {
+		Bun.env.RUSTFLAGS = rustFlags.join(" ");
 	}
 }
 
@@ -171,7 +174,7 @@ async function installGeneratedBindings(outputDir: string): Promise<void> {
 	}
 }
 
-const canonicalAddonFilename = `pi_natives.${process.platform}-${process.arch}${variantSuffix}.node`;
+const canonicalAddonFilename = localAddon.filename;
 const canonicalAddonPath = path.join(nativeDir, canonicalAddonFilename);
 
 console.log(`Building pi-natives bindings for ${process.platform}-${process.arch}${variantSuffix} (local)…`);
@@ -206,6 +209,10 @@ if (!napiBinEntry) {
 }
 const napiBin = path.join(path.dirname(napiManifestPath), napiBinEntry);
 
+// Profiles live in the root Cargo.toml; `local` trades size for iteration
+// speed, `ci` strips and drops incremental state.
+const cargoProfile = Bun.env.OMP_NATIVE_CARGO_PROFILE?.trim() || "local";
+
 const napiArgs = [
 	"build",
 	"--manifest-path",
@@ -219,7 +226,7 @@ const napiArgs = [
 	"-o",
 	buildOutputDir,
 	"--profile",
-	"local",
+	cargoProfile,
 ];
 
 // napi-rs / cargo route much failure detail to stdout (e.g. `cargo metadata`

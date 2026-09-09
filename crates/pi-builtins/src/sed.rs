@@ -1115,102 +1115,7 @@ fn parse_command_ending(
 	Ok(())
 }
 
-/// Convert a primitive BRE pattern to a safe ERE-compatible pattern string.
-/// - Replaces `\(`, `\)`, `\?`, `\+`, `\|`, `\{` and `\}` with `(`, `)`, `?`,
-///   `+`, `|`, `{` and `}`.
-/// - Puts single-digit back-references in non-capturing groups..
-/// - Escapes ERE-only metacharacters: `+ ? { } | ( )`.
-/// - Leaves all other characters as-is.
-fn bre_to_ere(pattern: &str) -> String {
-	let mut result = String::with_capacity(pattern.len());
-	let mut chars = pattern.chars().peekable();
-
-	let mut at_beginning = true;
-	let mut previous: Option<char> = None;
-	while let Some(c) = chars.next() {
-		if c == '\\' {
-			match chars.peek() {
-				Some('(') => {
-					chars.next();
-					result.push('('); // Group start
-				},
-				Some(')') => {
-					chars.next();
-					result.push(')'); // Group end
-				},
-				Some('?') => {
-					chars.next();
-					result.push('?'); // Quantifier 0 or 1
-				},
-				Some('+') => {
-					chars.next();
-					result.push('+'); // Quantifier 1 or more
-				},
-				Some('|') => {
-					chars.next();
-					result.push('|'); // Alternation operator
-				},
-				Some('{') => {
-					chars.next();
-					result.push('{'); // Brace quantifier start
-				},
-				Some('}') => {
-					chars.next();
-					result.push('}'); // Brace quantifier end
-				},
-				Some(v) if v.is_ascii_digit() => {
-					// Back-reference.  In sed BREs these are single-digit
-					// (\1-\9) whereas fancy_regex supports multi-digit
-					// back-references. Put them in a non-capturing group
-					// to avoid having the number extend beyond the single
-					// digit. Example: In sed \11 matches group 1 followed
-					// by '1', not group 11.
-					result.push_str(&format!(r"(?:\{v})"));
-					chars.next();
-				},
-				Some(&next) => {
-					// Preserve other escaped characters.
-					chars.next();
-					result.push('\\');
-					result.push(next);
-				},
-				None => {
-					// Trailing backslash; keep it.
-					result.push('\\');
-				},
-			}
-		} else {
-			match c {
-				'+' | '?' | '{' | '}' | '|' | '(' | ')' => {
-					// Escape unsupported ERE metacharacters.
-					result.push('\\');
-					result.push(c);
-				},
-				'^' if !at_beginning && previous != Some('[') => {
-					// In BREs ^ has special meaning at the beginning
-					// and as bracket negation.  This heuristic escapes
-					// all other uses, which per POSIX are valid in EREs.
-					// "the ERE "a^b" is valid, but can never match because
-					// the 'a' prevents the expression "^b" from matching
-					// starting at the first character."
-					// POSIX 9.4.9 ERE Expression Anchoring
-					result.push('\\');
-					result.push(c);
-				},
-				'$' if chars.peek().is_some() => {
-					// Similarly for $ appearing not at the end.
-					result.push('\\');
-					result.push(c);
-				},
-				_ => result.push(c),
-			}
-		}
-		at_beginning = false;
-		previous = Some(c);
-	}
-
-	result
-}
+// The BRE→ERE translation lives in `crate::bre`, shared with `grep`.
 
 /// Compile the provided regular expression string into a corresponding engine.
 /// An empty pattern results in None, which means that the last RE employed
@@ -1227,12 +1132,20 @@ fn compile_regex(
 		return Ok(None);
 	}
 
-	// Convert basic to extended regular expression if needed.
-	let pattern = if context.regex_extended {
-		pattern
+	// Convert basic to extended regular expression if needed. A BRE the
+	// dialect cannot express is a compilation error, matching real sed:
+	// `sed 's/\{1,3\}/X/'` reports an invalid RE rather than substituting.
+	let translated = if context.regex_extended {
+		None
 	} else {
-		&bre_to_ere(pattern)
+		Some(
+			crate::bre::bre_to_ere(pattern, crate::bre::Backrefs::Supported).map_err(|e| {
+				compilation_error::<Regex>(lines, line, format!("invalid regex '{pattern}': {}", e.message()))
+					.unwrap_err()
+			})?,
+		)
 	};
+	let pattern = translated.as_deref().unwrap_or(pattern);
 
 	let mut modifiers = String::new();
 	if icase {
@@ -1558,7 +1471,14 @@ pub fn compile_subst_flags(
 				}
 				let location = ScriptLocation::at_position(lines, line);
 				let mut path = read_file_path(lines, line)?;
-				if let Some(cwd) = cwd && path.is_relative() { path = cwd.join(path); }
+				if let Some(cwd) = cwd {
+					let normalized = brush_core::sys::fs::normalize_shell_path(&path);
+					path = if normalized.is_absolute() {
+						normalized.into_owned()
+					} else {
+						cwd.join(normalized)
+					};
+				}
 				subst.write_file = Some(NamedWriter::new(path, location)?);
 				return Ok(()); // 'w' is the last flag allowed
 			},
@@ -1633,7 +1553,12 @@ fn compile_read_file_command(
 		return compilation_error(lines, line, ERR_SANDBOX);
 	}
 	let mut path = read_file_path(lines, line)?;
-	if path.is_relative() { path = context.cwd.join(path); }
+	let normalized = brush_core::sys::fs::normalize_shell_path(&path);
+	path = if normalized.is_absolute() {
+		normalized.into_owned()
+	} else {
+		context.cwd.join(normalized)
+	};
 	cmd.data = CommandData::Path(path);
 	Ok(CommandHandling::Continue)
 }
@@ -1651,7 +1576,12 @@ fn compile_write_file_command(
 	}
 	let location = ScriptLocation::at_position(lines, line);
 	let mut path = read_file_path(lines, line)?;
-	if path.is_relative() { path = context.cwd.join(path); }
+	let normalized = brush_core::sys::fs::normalize_shell_path(&path);
+	path = if normalized.is_absolute() {
+		normalized.into_owned()
+	} else {
+		context.cwd.join(normalized)
+	};
 	cmd.data = CommandData::NamedWriter(NamedWriter::new(path, location)?);
 	Ok(CommandHandling::Continue)
 }
@@ -2168,6 +2098,47 @@ mod tests {
 				.is_match(&mut IOChunk::new_from_str("acaa\nccc"))
 				.unwrap()
 		);
+	}
+
+	#[test]
+	fn test_compile_re_basic_leading_plus_is_a_literal() {
+		// REGRESSION: `s/^\+/X/` used to substitute at the start of EVERY
+		// line, because `\+` became `+` unconditionally and `^+` compiles as
+		// `(?:^)+`. Real sed changes only lines that begin with a plus.
+		let (lines, chars) = dummy_providers();
+		let regex = compile_regex(&lines, &chars, r"^\+", &ctx(), false, false)
+			.unwrap()
+			.expect("regex should be present");
+		assert!(regex.is_match(&mut IOChunk::new_from_str("+added")).unwrap());
+		assert!(!regex.is_match(&mut IOChunk::new_from_str("alpha")).unwrap());
+		assert!(!regex.is_match(&mut IOChunk::new_from_str(" context")).unwrap());
+	}
+
+	#[test]
+	fn test_compile_re_basic_no_operand_brace_is_rejected() {
+		// Real sed refuses this rather than substituting: emitting the
+		// operator would give `{1,3}` or, after an anchor, `^{1,3}` - which
+		// fancy-regex accepts and matches at every line start.
+		let (lines, chars) = dummy_providers();
+		for pattern in [r"\{1,3\}", r"^\{1,3\}"] {
+			let err = compile_regex(&lines, &chars, pattern, &ctx(), false, false)
+				.expect_err("a brace quantifier with no operand must not compile");
+			assert!(
+				err.to_string().contains("repetition-operator operand invalid"),
+				"{pattern}: {err}"
+			);
+		}
+	}
+
+	#[test]
+	fn test_compile_re_basic_caret_is_an_anchor_inside_a_group() {
+		// `\(^a\)` anchors in a BRE; escaping the caret matched nothing.
+		let (lines, chars) = dummy_providers();
+		let regex = compile_regex(&lines, &chars, r"\(^alpha\)", &ctx(), false, false)
+			.unwrap()
+			.expect("regex should be present");
+		assert!(regex.is_match(&mut IOChunk::new_from_str("alpha")).unwrap());
+		assert!(!regex.is_match(&mut IOChunk::new_from_str("xalpha")).unwrap());
 	}
 
 	#[test]
@@ -2932,59 +2903,7 @@ mod tests {
 		assert!(err.to_string().contains("invalid reference \\2"));
 	}
 
-	// bre_to_ere
-	#[test]
-	fn test_bre_group_translation() {
-		assert_eq!(bre_to_ere(r"\(a\?b\+c\|\)"), "(a?b+c|)");
-		assert_eq!(bre_to_ere(r"a\(b\)c"), "a(b)c");
-	}
-
-	#[test]
-	fn test_bre_brace_quantifier_translation() {
-		assert_eq!(bre_to_ere(r"\{1,4\}"), "{1,4}");
-	}
-
-	#[test]
-	fn test_ere_metacharacters_escaped() {
-		assert_eq!(bre_to_ere(r"a+b?c{1}|(d)"), r"a\+b\?c\{1\}\|\(d\)");
-	}
-
-	#[test]
-	fn test_literal_backslashes_preserved() {
-		assert_eq!(bre_to_ere(r"foo\\bar"), r"foo\\bar");
-		assert_eq!(bre_to_ere(r"\."), r"\.");
-	}
-
-	#[test]
-	fn test_character_classes_unchanged() {
-		assert_eq!(bre_to_ere(r"[a-z]"), "[a-z]");
-		assert_eq!(bre_to_ere(r"[^0-9]"), "[^0-9]");
-	}
-
-	#[test]
-	fn test_anchors_and_dot_and_star() {
-		assert_eq!(bre_to_ere(r"^a.*b$"), "^a.*b$");
-	}
-
-	#[test]
-	fn test_trailing_backslash_is_preserved() {
-		assert_eq!(bre_to_ere(r"abc\"), r"abc\");
-	}
-
-	#[test]
-	fn test_caret_escaped_in_middle() {
-		assert_eq!(bre_to_ere(r"^a^[^x]c"), r"^a\^[^x]c");
-	}
-
-	#[test]
-	fn test_dollar_escaped_in_middle() {
-		assert_eq!(bre_to_ere(r"a$c$"), r"a\$c$");
-	}
-
-	#[test]
-	fn test_bre_back_reference() {
-		assert_eq!(bre_to_ere(r"\(.\)\1\(.\)\2"), r"(.)(?:\1)(.)(?:\2)");
-	}
+	// The BRE→ERE translation and its tests live in `crate::bre`.
 
 	// patch_block_endings
 
@@ -5611,6 +5530,7 @@ struct MmapOutput {
 /// All other output is buffered and writen via BufWriter.
 pub struct OutputBuffer {
 	out:               BufWriter<Box<dyn OutputWrite + 'static>>, // Where to write
+	line_buffered:     bool, // Flush completed lines for non-file stdout
 	#[cfg(unix)]
 	max_pending_write: usize,                        /* Max bytes to keep before
 	                                                               * flushing */
@@ -5637,9 +5557,10 @@ const MAX_PENDING_WRITE_NON_FILE: usize = 64 * 1024;
 
 impl OutputBuffer {
 	#[cfg(not(unix))]
-	pub fn new(w: Box<dyn OutputWrite + 'static>) -> Self {
+	pub fn new(w: Box<dyn OutputWrite + 'static>, line_buffered: bool) -> Self {
 		Self {
 			out: BufWriter::new(w),
+			line_buffered,
 			pending_newline: false,
 			#[cfg(test)]
 			low_level_flushes: 0,
@@ -5647,12 +5568,15 @@ impl OutputBuffer {
 	}
 
 	#[cfg(unix)]
-	pub fn new(w: Box<dyn OutputWrite + 'static>) -> Self {
-		// The writer is not fd-backed, so regular-file output detection is gone;
-		// always bound pending data by the pipe-sized limit.
+	pub fn new(w: Box<dyn OutputWrite + 'static>, line_buffered: bool) -> Self {
 		Self {
 			out: BufWriter::new(w),
-			max_pending_write: MAX_PENDING_WRITE_NON_FILE,
+			line_buffered,
+			max_pending_write: if line_buffered {
+				MAX_PENDING_WRITE_NON_FILE
+			} else {
+				usize::MAX
+			},
 			mmap_chunk: None,
 			pending_newline: false,
 			#[cfg(test)]
@@ -5684,7 +5608,33 @@ impl OutputBuffer {
 		};
 
 		let mut reader = BufReader::new(file);
-		io::copy(&mut reader, &mut self.out)?;
+		if self.line_buffered {
+			let mut buf = [0; 8 * 1024];
+			loop {
+				let len = reader.read(&mut buf)?;
+				if len == 0 {
+					break;
+				}
+				self.out.write_all(&buf[..len])?;
+				if buf[..len].contains(&b'\n') {
+					self.flush_completed_line()?;
+				}
+			}
+		} else {
+			io::copy(&mut reader, &mut self.out)?;
+		}
+		Ok(())
+	}
+
+	/// Flush output through a completed line when writing to a non-file stdout.
+	fn flush_completed_line(&mut self) -> io::Result<()> {
+		if self.line_buffered {
+			#[cfg(test)]
+			{
+				self.low_level_flushes += 1;
+			}
+			self.out.flush()?;
+		}
 		Ok(())
 	}
 }
@@ -5723,6 +5673,7 @@ impl OutputBuffer {
 			self.flush_mmap(WriteRange::Complete)?;
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 
 		match &new_chunk.content {
@@ -5772,6 +5723,13 @@ impl OutputBuffer {
 				self.pending_newline = !has_newline;
 			},
 		}
+
+		if self.line_buffered && new_chunk.is_newline_terminated() {
+			// Mmap output reaches the BufWriter only here; file-backed mmap
+			// output is block-buffered, so this cannot affect its fast path.
+			self.flush_mmap(WriteRange::Complete)?;
+			self.flush_completed_line()?;
+		}
 		Ok(())
 	}
 
@@ -5802,6 +5760,7 @@ impl OutputBuffer {
 			self.flush_mmap(WriteRange::Complete)?;
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 		Ok(())
 	}
@@ -5824,6 +5783,7 @@ impl OutputBuffer {
 		if self.pending_newline {
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 
 		match &chunk.content {
@@ -5833,6 +5793,9 @@ impl OutputBuffer {
 					self.out.write_all(b"\n")?;
 				}
 				self.pending_newline = !has_newline;
+				if *has_newline {
+					self.flush_completed_line()?;
+				}
 				Ok(())
 			},
 		}
@@ -5843,6 +5806,7 @@ impl OutputBuffer {
 		if self.pending_newline {
 			self.out.write_all(b"\n")?;
 			self.pending_newline = false;
+			self.flush_completed_line()?;
 		}
 		Ok(())
 	}
@@ -5887,7 +5851,7 @@ mod tests {
 		let tmp = NamedTempFile::new()?;
 		{
 			let file = tmp.reopen()?;
-			let mut out = OutputBuffer::new(Box::new(file));
+			let mut out = OutputBuffer::new(Box::new(file), false);
 			out.write_str("foo\n")?;
 			out.write_str("bar\n")?;
 			out.flush()?;
@@ -5922,7 +5886,7 @@ mod tests {
 		let output = NamedTempFile::new()?;
 		let output_path = output.path().to_path_buf();
 		let out_file = std::fs::File::create(&output_path)?;
-		let mut out = OutputBuffer::new(Box::new(Box::new(out_file)));
+		let mut out = OutputBuffer::new(Box::new(Box::new(out_file)), false);
 
 		// Drain reader → writer
 		while let Some(chunk) = reader.get_line()? {
@@ -5957,7 +5921,7 @@ mod tests {
 		let output = NamedTempFile::new()?;
 		let output_path = output.path().to_path_buf();
 		let out_file = File::create(&output_path)?;
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 
 		// Read the first mmap line ("zero\n") and write it
 		if let Some(chunk) = reader.get_line()? {
@@ -6011,7 +5975,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6050,7 +6014,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6085,7 +6049,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6120,7 +6084,7 @@ mod tests {
 		let out_file = File::create(&output_path)?;
 
 		// Wrap it in your OutputBuffer and run the loop:
-		let mut out = OutputBuffer::new(Box::new(out_file));
+		let mut out = OutputBuffer::new(Box::new(out_file), false);
 		let mut nline = 0;
 		while let Some(chunk) = reader.get_line()? {
 			out.write_chunk(&chunk)?;
@@ -6424,6 +6388,7 @@ mod tests {
 		let file = tempfile().unwrap();
 		let buf = OutputBuffer {
 			out: BufWriter::new(Box::new(file.try_clone().unwrap())),
+			line_buffered: false,
 			#[cfg(unix)]
 			max_pending_write: 8,
 			#[cfg(unix)]
@@ -7316,9 +7281,14 @@ use tempfile::NamedTempFile;
 use uucore::display::Quotable;
 
 use brush_core::openfiles::OpenFile;
-use crate::sed::error_handling::{IoContext, SedError, SedResult};
-
-use crate::sed::{command::ProcessingContext, fast_io::OutputBuffer};
+use crate::{
+	host::is_regular_file,
+	sed::{
+		command::ProcessingContext,
+		error_handling::{IoContext, SedError, SedResult},
+		fast_io::OutputBuffer,
+	},
+};
 
 /// Context for in-place editing
 pub struct InPlace {
@@ -7336,9 +7306,10 @@ impl InPlace {
 	/// Depending on its settings it may or may not perform in-place
 	/// editing, backup the original file, or follow symlinks.
 	pub fn new_with_stdout(context: ProcessingContext, stdout: OpenFile) -> Self {
+		let line_buffered = !is_regular_file(&stdout);
 		Self {
 			stdout: stdout.clone(),
-			output:          OutputBuffer::new(Box::new(stdout.clone())),
+			output:          OutputBuffer::new(Box::new(stdout.clone()), line_buffered),
 			in_place:        context.in_place,
 			in_place_suffix: context.in_place_suffix,
 			follow_symlinks: context.follow_symlinks,
@@ -7372,7 +7343,8 @@ impl InPlace {
 	/// to the context settings.
 	fn begin_resolved(&mut self, file_name: &Path) -> SedResult<&mut OutputBuffer> {
 		if !self.in_place {
-			self.output = OutputBuffer::new(Box::new(self.stdout.clone()));
+			self.output =
+				OutputBuffer::new(Box::new(self.stdout.clone()), !is_regular_file(&self.stdout));
 			return Ok(&mut self.output);
 		}
 
@@ -7401,8 +7373,10 @@ impl InPlace {
 			fs::set_permissions(temp_file.path(), perms)?;
 		}
 
-		let output =
-			OutputBuffer::new(Box::new(temp_file.reopen().expect("reopening NamedTempFile")));
+		let output = OutputBuffer::new(
+			Box::new(temp_file.reopen().expect("reopening NamedTempFile")),
+			false,
+		);
 		self.output = output;
 		self.temp_file = Some(temp_file);
 		self.original_path = Some(file_name.to_path_buf());
@@ -7913,7 +7887,7 @@ fn re_or_saved_re<'a>(
 
 #[cfg(unix)]
 fn shell_command(cmd: &str, host: &Host) -> std::process::Command {
-	let mut c = std::process::Command::new("/bin/sh");
+	let mut c = std::process::Command::new("sh");
 	c.arg("-c").arg(cmd);
 	// run relative to the shell's cwd,
 	// not the host process cwd. `output()` already keeps the child's stdio
@@ -8822,9 +8796,15 @@ impl ScriptLineProvider {
 						line_number: 0,
 					};
 				} else {
-					// resolve `-f`
-					// script files against the shell working directory.
-					let resolved = if p.is_absolute() { p.clone() } else { self.cwd.join(p) };
+					// resolve `-f` script files against the shell working
+					// directory, normalizing MSYS/WSL drive aliases (`/c/...`)
+					// to native drive paths first — mirrors `Host::resolve`.
+					let normalized = brush_core::sys::fs::normalize_shell_path(p);
+					let resolved = if normalized.is_absolute() {
+						normalized.into_owned()
+					} else {
+						self.cwd.join(normalized)
+					};
 					let file = File::open(resolved)
 						.map_err_context(|| format!("error opening script file {}", p.quote()))?;
 					self.state = State::Active {
@@ -8913,6 +8893,30 @@ mod tests {
 		}
 
 		assert_eq!(lines, vec!["file line 1", "file line 2"]);
+	}
+
+	#[cfg(windows)]
+	#[test]
+	fn test_file_source_resolves_msys_drive_alias() {
+		let mut temp_file = NamedTempFile::new().unwrap();
+		writeln!(temp_file, "aliased line 1").unwrap();
+		writeln!(temp_file, "aliased line 2").unwrap();
+
+		let native = temp_file.path().to_string_lossy().replace('\\', "/");
+		let (drive, tail) = native
+			.split_once(":/")
+			.unwrap_or_else(|| panic!("expected drive-qualified temp path, got {native:?}"));
+		let alias = format!("/{}/{}", drive.to_ascii_lowercase(), tail);
+
+		let input = vec![ScriptValue::PathVal(PathBuf::from(alias))];
+		let mut provider = ScriptLineProvider::new(input);
+
+		let mut lines = Vec::new();
+		while let Some(line) = provider.next_line().unwrap() {
+			lines.push(line.trim_end().to_string());
+		}
+
+		assert_eq!(lines, vec!["aliased line 1", "aliased line 2"]);
 	}
 
 	#[test]
@@ -9491,6 +9495,43 @@ mod tests {
 		assert_eq!(code, 0);
 		assert_eq!(capture.out(), "world\n");
 		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn builtin_substitutes_only_plus_prefixed_lines() {
+		// THE OBSERVABLE DEFECT this change exists for, covered end to end:
+		// argument parsing, BRE compilation and substitution together.
+		// `s/^\+/PLUS/` used to rewrite the start of EVERY line, because
+		// `\+` became `+` unconditionally and `^+` compiles as `(?:^)+`.
+		let input = "alpha\n+added\n-removed\n context\n+another\n";
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&[r"s/^\+/PLUS/"], input, "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "alpha\nPLUSadded\n-removed\n context\nPLUSanother\n");
+		assert_eq!(capture.err(), "");
+	}
+
+	#[test]
+	fn builtin_rejects_a_brace_quantifier_with_no_operand() {
+		// Real sed refuses this. Emitting the operator gave `^{1,3}`, which
+		// fancy-regex accepts and matches at every line start.
+		let (code, capture) =
+			crate::host::run_util::<Sed>(&[r"s/^\{1,3\}/X/"], "alpha\n+added\n", "/");
+		assert_ne!(code, 0, "must not substitute: {:?}", capture.out());
+		assert!(
+			capture.err().contains("repetition-operator operand invalid"),
+			"{}",
+			capture.err()
+		);
+	}
+
+	#[test]
+	fn builtin_treats_only_the_first_caret_of_a_branch_as_an_anchor() {
+		// Measured: `sed 's/^^/X/'` rewrites only lines that begin with a
+		// literal caret, consuming one of them.
+		let (code, capture) = crate::host::run_util::<Sed>(&["s/^^/X/"], "^a\naaa\n^^b\n", "/");
+		assert_eq!(code, 0, "{}", capture.err());
+		assert_eq!(capture.out(), "Xa\naaa\nX^b\n");
 	}
 
 	#[test]

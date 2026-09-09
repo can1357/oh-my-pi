@@ -68,10 +68,43 @@ describe("legacy-pi TypeBox remap", () => {
 		};
 
 		expect(loaded.probe).toBe(TypeBoxShimType);
-		expect(toolWireSchema({ name: "fixture", description: "", parameters: loaded.schema })).toEqual({
+		// `Type.Unsafe` is now a first-class omptype schema (so `Type.Optional`/
+		// `Type.Object` can compose it), so a top-level Unsafe tool param takes the
+		// omptype wire path and is closed like every other tool param. Compare the
+		// JSON-serialized wire — internal memoization stamps are non-serialized.
+		const wire = toolWireSchema({ name: "fixture", description: "", parameters: loaded.schema });
+		expect(JSON.parse(JSON.stringify(wire))).toEqual({
 			type: "object",
 			properties: { path: { type: "string" } },
 			required: ["path"],
+			additionalProperties: false,
+		});
+	});
+
+	it("preserves raw JSON Schema properties passed directly to Type.Object", async () => {
+		const entry = await writeFixtureExtension(
+			[
+				'import { Type } from "typebox";',
+				"export const schema = Type.Object({ cfg: { type: 'string', pattern: '^ok' }, label: Type.Optional(Type.String()) });",
+			].join("\n"),
+		);
+
+		const loaded = (await loadLegacyPiModule(entry)) as {
+			schema: Record<string, unknown> & { safeParse(input: unknown): { success: boolean } };
+		};
+
+		expect(loaded.schema.safeParse({ cfg: "okay" }).success).toBe(true);
+		expect(loaded.schema.safeParse({ cfg: "bad" }).success).toBe(false);
+		expect(loaded.schema.safeParse({ cfg: { type: "string" } }).success).toBe(false);
+		const wire = toolWireSchema({ name: "fixture", description: "", parameters: loaded.schema });
+		expect(JSON.parse(JSON.stringify(wire))).toEqual({
+			type: "object",
+			properties: {
+				cfg: { type: "string", pattern: "^ok" },
+				label: { type: "string" },
+			},
+			required: ["cfg"],
+			additionalProperties: false,
 		});
 	});
 

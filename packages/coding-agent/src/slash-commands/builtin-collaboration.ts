@@ -8,19 +8,14 @@ import { parseExportArgs } from "../export/html/args";
 import { shareSession } from "../export/share";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
-import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
-import { urlHyperlinkAlways } from "../tui";
+import { extractLastCodeBlock, extractLastCommand, extractLastLink } from "../modes/utils/copy-targets";
+import { restartBrowserForModeChange } from "../tools/browser";
+import { openPath } from "../utils/open";
 import { copyToClipboard } from "../utils/clipboard";
 import { refreshStatusLine } from "./builtin-modes";
-import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
+import { CollabQrCodeComponent, collabBrowserLink } from "./helpers/collab-qrcode";
 import { commandConsumed, errorMessage, parseSubcommand, usage } from "./helpers/parse";
 import type { SlashCommandSpec } from "./types";
-
-/** Scheme-less display form of a browser deep link: accent + underline, OSC-8 linked to the full URL. */
-function collabWebLinkClickable(webLink: string): string {
-	const display = theme.fg("accent", `\x1b[4m${webLink.replace(/^https?:\/\//, "")}\x1b[24m`);
-	return urlHyperlinkAlways(webLink, display);
-}
 
 /** Join hint printed by /collab: compact terminal link + clickable browser deep link. */
 function collabLinkHint(host: CollabHost, heading: string, view = false): string {
@@ -28,9 +23,11 @@ function collabLinkHint(host: CollabHost, heading: string, view = false): string
 	const link = view ? host.viewLink : host.link;
 	const webLink = view ? host.webViewLink : host.webLink;
 	return [
-		theme.fg("success", heading),
+		// Keep the URL on the first row: under transcript pressure the status
+		// block is clipped to rendered[0], which used to drop the join link.
+		`${collabBrowserLink(webLink, "Join in browser")}  ${theme.fg("success", heading)}`,
 		` ${bullet} ${theme.fg("muted", view ? "Watch from another terminal:" : "Join from another terminal:")} ${APP_NAME} join "${link}"`,
-		` ${bullet} ${theme.fg("muted", "or any web browser:")} ${collabWebLinkClickable(webLink)}`,
+		` ${bullet} ${theme.fg("muted", "or any web browser:")} ${collabBrowserLink(webLink)}`,
 		theme.fg(
 			"dim",
 			view
@@ -56,6 +53,7 @@ function showCollabLink(ctx: InteractiveModeContext, host: CollabHost, heading: 
 export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "advisor",
+		icon: "advisor",
 		description: "Toggle the advisor (a second model that reviews each turn and injects notes)",
 		acpDescription: "Toggle advisor",
 		acpInputHint: "[on|off|status|dump [raw]|configure]",
@@ -172,6 +170,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 	},
 	{
 		name: "export",
+		icon: "export",
 		description: "Export session to HTML file",
 		inlineHint: "[--themes] [path]",
 		allowArgs: true,
@@ -194,7 +193,35 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		},
 	},
 	{
+		name: "trace",
+		icon: "stats",
+		description: "Open this session's trace in the stats dashboard",
+		handle: async (_command, runtime) => {
+			const sessionFile = runtime.session.sessionFile;
+			if (!sessionFile) {
+				await runtime.output("No session file yet — send a message first.");
+				return commandConsumed();
+			}
+			try {
+				// Lazy: the stats dashboard (server + sqlite) loads on demand only,
+				// matching src/cli/stats-cli.ts, to keep CLI startup fast.
+				const { formatStatsDashboardUrl, startServer } = await import("@oh-my-pi/omp-stats");
+				const { hostname, port } = await startServer();
+				const url = `${formatStatsDashboardUrl(hostname, port)}/#/traces?s=${encodeURIComponent(sessionFile)}`;
+				await runtime.output(url);
+				return commandConsumed();
+			} catch (err) {
+				return usage(`Failed to open trace: ${errorMessage(err)}`, runtime);
+			}
+		},
+		handleTui: async (_command, runtime) => {
+			await runtime.ctx.handleTraceCommand();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "dump",
+		icon: "clipboard",
 		description: "Copy session transcript to clipboard (and write LLM request JSON to tmp)",
 		acpDescription: "Return full transcript as plain text, with LLM request JSON path",
 		allowArgs: true,
@@ -227,6 +254,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 	},
 	{
 		name: "share",
+		icon: "share",
 		description: "Share session via an encrypted link (share server or secret gist)",
 		handle: async (_command, runtime) => {
 			try {
@@ -252,6 +280,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 	},
 	{
 		name: "collab",
+		icon: "broadcast",
 		description: "Share this session live via a relay",
 		inlineHint: "[start|view|stop|status] [relayUrl]",
 		subcommands: [
@@ -287,7 +316,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 					const names = ctx.collabHost.participants.map(p =>
 						p.role === "host" ? `${p.name} (host)` : p.readOnly ? `${p.name} (view-only)` : p.name,
 					);
-					ctx.showStatus(`Collab: ${names.join(", ")} — ${collabWebLinkClickable(ctx.collabHost.webLink)}`);
+					ctx.showStatus(`Collab: ${names.join(", ")} — ${collabBrowserLink(ctx.collabHost.webLink)}`);
 				} else if (ctx.collabGuest) {
 					ctx.showStatus(
 						ctx.collabGuest.readOnly
@@ -338,6 +367,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 	},
 	{
 		name: "join",
+		icon: "signIn",
 		description: "Join a shared collab session",
 		inlineHint: "<link>",
 		allowArgs: true,
@@ -366,6 +396,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 	},
 	{
 		name: "leave",
+		icon: "signOut",
 		description: "Leave the collab session",
 		getTuiAutocompleteDescription: runtime => {
 			if (runtime.ctx.collabHost) return "Leave collab: hosting";
@@ -389,7 +420,8 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 	},
 	{
 		name: "browser",
-		description: "Toggle browser headless vs visible mode",
+		icon: "globe",
+		description: "Toggle browser eval-prelude headless vs visible mode",
 		acpInputHint: "[headless|visible]",
 		subcommands: [
 			{ name: "headless", description: "Switch to headless mode" },
@@ -403,7 +435,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 		handle: async (command, runtime) => {
 			const arg = command.args.toLowerCase();
 			const enabled = runtime.settings.get("browser.enabled" as SettingPath) as boolean;
-			if (!enabled) return usage("Browser tool is disabled (enable in settings).", runtime);
+			if (!enabled) return usage("Browser capability is disabled (enable in settings).", runtime);
 			const current = runtime.settings.get("browser.headless" as SettingPath) as boolean;
 			let next = current;
 			if (!arg) next = !current;
@@ -411,18 +443,15 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			else if (arg === "visible" || arg === "show" || arg === "headful") next = false;
 			else return usage("Usage: /browser [headless|visible]", runtime);
 			runtime.settings.set("browser.headless" as SettingPath, next as SettingValue<SettingPath>);
-			const tool = runtime.session.getToolByName("browser");
-			if (tool && "restartForModeChange" in tool) {
-				try {
-					await (tool as { restartForModeChange: () => Promise<void> }).restartForModeChange();
-				} catch (err) {
-					// Setting was already mutated; surface the restart failure so the
-					// user knows the browser is in an inconsistent state.
-					await runtime.output(
-						`Browser mode set to ${next ? "headless" : "visible"}, but restart failed: ${errorMessage(err)}`,
-					);
-					return commandConsumed();
-				}
+			try {
+				await restartBrowserForModeChange();
+			} catch (err) {
+				// Setting was already mutated; surface the restart failure so the
+				// user knows the browser is in an inconsistent state.
+				await runtime.output(
+					`Browser mode set to ${next ? "headless" : "visible"}, but restart failed: ${errorMessage(err)}`,
+				);
+				return commandConsumed();
 			}
 			await runtime.output(`Browser mode: ${next ? "headless" : "visible"}`);
 			return commandConsumed();
@@ -432,7 +461,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 			const current = settings.get("browser.headless" as SettingPath) as boolean;
 			let next = current;
 			if (!(settings.get("browser.enabled" as SettingPath) as boolean)) {
-				runtime.ctx.showWarning("Browser tool is disabled (enable in settings)");
+				runtime.ctx.showWarning("Browser capability is disabled (enable in settings)");
 				runtime.ctx.editor.setText("");
 				return;
 			}
@@ -448,15 +477,12 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				return;
 			}
 			settings.set("browser.headless" as SettingPath, next as SettingValue<SettingPath>);
-			const tool = runtime.ctx.session.getToolByName("browser");
-			if (tool && "restartForModeChange" in tool) {
-				try {
-					await (tool as { restartForModeChange: () => Promise<void> }).restartForModeChange();
-				} catch (error) {
-					runtime.ctx.showWarning(`Failed to restart browser: ${errorMessage(error)}`);
-					runtime.ctx.editor.setText("");
-					return;
-				}
+			try {
+				await restartBrowserForModeChange();
+			} catch (error) {
+				runtime.ctx.showWarning(`Failed to restart browser: ${errorMessage(error)}`);
+				runtime.ctx.editor.setText("");
+				return;
 			}
 			runtime.ctx.showStatus(`Browser mode: ${next ? "headless" : "visible"}`);
 			runtime.ctx.editor.setText("");
@@ -464,6 +490,7 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 	},
 	{
 		name: "copy",
+		icon: "copy",
 		description: "Pick text or code from the conversation to copy",
 		allowArgs: true,
 		handleTui: async (command, runtime) => {
@@ -497,7 +524,42 @@ export const BUILTIN_COLLABORATION_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpe
 				runtime.ctx.editor.setText("");
 				return;
 			}
-			runtime.ctx.showStatus("Usage: /copy [code|cmd]");
+			if (arg === "link" || arg === "url") {
+				const link = extractLastLink(runtime.ctx.session.messages);
+				if (!link) {
+					runtime.ctx.showStatus("No link to copy.");
+					runtime.ctx.editor.setText("");
+					return;
+				}
+				await copyToClipboard(link.href);
+				runtime.ctx.showStatus("Copied link to clipboard");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.showStatus("Usage: /copy [code|cmd|link]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "open",
+		icon: "globe",
+		description: "Open the last link from the conversation in your browser (or pick one with /copy)",
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (arg && arg !== "link" && arg !== "url") {
+				runtime.ctx.showStatus("Usage: /open [link]  (pick a specific link: /copy, → blocks, o)");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			const link = extractLastLink(runtime.ctx.session.messages);
+			if (!link) {
+				runtime.ctx.showStatus("No link to open.");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			openPath(link.href);
+			runtime.ctx.showStatus(`Opening ${link.href}`);
 			runtime.ctx.editor.setText("");
 		},
 	},

@@ -1,4 +1,4 @@
-import { tryParseJson } from "@oh-my-pi/pi-utils";
+import { tryParseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, loadPage } from "./types";
 
@@ -178,7 +178,7 @@ export const handleSecEdgar: SpecialHandler = async (
 			timeout,
 			signal,
 			headers: {
-				"User-Agent": "CodingAgent/1.0 (research tool)",
+				"User-Agent": USER_AGENT,
 				Accept: "application/json",
 			},
 		});

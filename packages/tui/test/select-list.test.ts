@@ -86,6 +86,55 @@ describe("SelectList", () => {
 		expect(list.render(40)).toEqual(["> run"]);
 	});
 
+	it("caps wrapped descriptions at maxDescriptionRows with a trailing ellipsis", () => {
+		const longDescription = Array.from({ length: 12 }, (_, i) => `chunk${i} filler words`).join(" ");
+		const items = [
+			{ value: "long", label: "long", description: longDescription },
+			{ value: "short", label: "short", description: "fits" },
+		];
+
+		const list = new SelectList(items, 10, testTheme, {
+			wrapDescription: true,
+			maxDescriptionRows: 2,
+			maxPrimaryColumnWidth: 12,
+		});
+		const rendered = list.render(60);
+
+		// One capped item (2 rows) + one single-row item.
+		expect(rendered.length).toBe(3);
+		expect(rendered[1]).toContain("…");
+	});
+
+	it("reserves one icon column so labels and descriptions align across icon and iconless rows", () => {
+		const items = [
+			{ value: "changelog", label: "changelog", icon: "★", description: "Show changelog entries" },
+			{ value: "hotkeys", label: "hotkeys", description: "Show all keyboard shortcuts" },
+		];
+
+		const list = new SelectList(items, 5, testTheme);
+		const rendered = list.render(80);
+
+		expect(rendered[0]).toContain("★ changelog");
+		expect(rendered[1]).not.toContain("★");
+		expect(visibleIndexOf(rendered[0]!, "changelog")).toBe(visibleIndexOf(rendered[1]!, "hotkeys"));
+		expect(visibleIndexOf(rendered[0]!, "Show changelog")).toBe(visibleIndexOf(rendered[1]!, "Show all"));
+	});
+
+	it("styles icons on unselected rows only, leaving the selected row to selectedText", () => {
+		const themeWithIcon: SelectListTheme = { ...testTheme, icon: (text: string) => `«${text}»` };
+		const items = [
+			{ value: "first", label: "first", icon: "★" },
+			{ value: "second", label: "second", icon: "☂" },
+		];
+
+		const list = new SelectList(items, 5, themeWithIcon);
+		const rendered = list.render(80);
+
+		expect(rendered[0]).toContain("★");
+		expect(rendered[0]).not.toContain("«");
+		expect(rendered[1]).toContain("«☂");
+	});
+
 	it("keeps descriptions aligned when the primary text is truncated", () => {
 		const items = [
 			{ value: "short", label: "short", description: "short description" },

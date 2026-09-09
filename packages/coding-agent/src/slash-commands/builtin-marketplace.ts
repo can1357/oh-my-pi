@@ -30,7 +30,7 @@ import type { SlashCommandSpec } from "./types";
 export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise<void> {
 	const projectPath = await resolveActiveProjectRegistryPath(ctx.sessionManager.getCwd());
 	clearPluginRootsAndCaches(projectPath ? [projectPath] : undefined);
-	await refreshAgentDiscovery(ctx.sessionManager.getCwd());
+	await refreshAgentDiscovery(ctx.sessionManager.getCwd(), ctx.session.effectiveExtensionRoots);
 	await ctx.refreshSkillState();
 	await ctx.refreshSlashCommandState();
 	resetCapabilities();
@@ -42,6 +42,7 @@ export async function reloadTuiPluginState(ctx: InteractiveModeContext): Promise
 export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "marketplace",
+		icon: "cart",
 		description: "Manage marketplace plugin sources and installed plugins",
 		acpDescription: "Manage plugins from marketplaces",
 		acpInputHint: "<subcommand>",
@@ -421,6 +422,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 	},
 	{
 		name: "plugins",
+		icon: "package",
 		description: "View and manage installed plugins",
 		acpDescription: "Manage plugins",
 		acpInputHint: "[list|enable|disable]",
@@ -551,6 +553,7 @@ export const BUILTIN_MARKETPLACE_SLASH_COMMANDS: ReadonlyArray<SlashCommandSpec>
 	},
 	{
 		name: "reload-plugins",
+		icon: "restart",
 		description: "Reload all plugins (skills, commands, hooks, tools, agents, MCP)",
 		acpDescription: "Reload all plugins",
 		handle: async (_command, runtime) => {

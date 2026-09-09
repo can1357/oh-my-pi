@@ -3,35 +3,29 @@ import { Container, getKeybindings, Input, Spacer, Text, type TUI, wrapTextWithA
 import { theme } from "../../modes/theme/theme";
 import { urlHyperlinkAlways, WidthAwareText } from "../../tui";
 import { openPath } from "../../utils/open";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 
 /**
  * Login dialog component - replaces editor during OAuth login flow
  */
-export class LoginDialogComponent extends Container {
+export class LoginDialogComponent extends OverlayPanel {
 	#contentContainer: Container;
 	#input: Input;
 	#tui: TUI;
 	#abortController = new AbortController();
 	#inputResolver?: (value: string) => void;
 	#inputRejecter?: (error: Error) => void;
+	#inputAbortCleanup?: () => void;
 
 	constructor(
 		tui: TUI,
 		providerId: string,
 		private onComplete: (success: boolean, message?: string) => void,
 	) {
-		super();
-		this.#tui = tui;
-
 		const providerInfo = getOAuthProviders().find(p => p.id === providerId);
 		const providerName = providerInfo?.name || providerId;
-
-		// Top border
-		this.addChild(new DynamicBorder());
-
-		// Title
-		this.addChild(new Text(theme.fg("warning", `Login to ${providerName}`), 1, 0));
+		super(`Login to ${providerName}`);
+		this.#tui = tui;
 
 		// Dynamic content area
 		this.#contentContainer = new Container();
@@ -40,18 +34,14 @@ export class LoginDialogComponent extends Container {
 		// Input (always present, used when needed)
 		this.#input = new Input();
 		this.#input.onSubmit = () => {
-			if (this.#inputResolver) {
-				this.#inputResolver(this.#input.getValue());
-				this.#inputResolver = undefined;
-				this.#inputRejecter = undefined;
-			}
+			const resolve = this.#inputResolver;
+			if (!resolve) return;
+			this.#clearInputHandlers();
+			resolve(this.#input.getValue());
 		};
 		this.#input.onEscape = () => {
 			this.#cancel();
 		};
-
-		// Bottom border
-		this.addChild(new DynamicBorder());
 	}
 
 	get signal(): AbortSignal {
@@ -60,11 +50,9 @@ export class LoginDialogComponent extends Container {
 
 	#cancel(): void {
 		this.#abortController.abort();
-		if (this.#inputRejecter) {
-			this.#inputRejecter(new Error("Login cancelled"));
-			this.#inputResolver = undefined;
-			this.#inputRejecter = undefined;
-		}
+		const reject = this.#inputRejecter;
+		this.#clearInputHandlers();
+		reject?.(new Error("Login cancelled"));
 		this.onComplete(false, "Login cancelled");
 	}
 
@@ -88,24 +76,24 @@ export class LoginDialogComponent extends Container {
 					wrapTextWithAnsi(url, contentWidth)
 						.map(row => theme.fg("accent", urlHyperlinkAlways(url, row)))
 						.join("\n"),
-				1,
+				0,
 				0,
 			),
 		);
 
 		const clickHint = process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
 		const hyperlink = `\x1b]8;;${url}\x07${clickHint}\x1b]8;;\x07`;
-		this.#contentContainer.addChild(new Text(theme.fg("dim", hyperlink), 1, 0));
+		this.#contentContainer.addChild(new Text(theme.fg("dim", hyperlink), 0, 0));
 
 		if (launchUrl && launchUrl !== url) {
 			this.#contentContainer.addChild(
-				new Text(theme.fg("dim", `Local shortcut (this machine only): ${launchUrl}`), 1, 0),
+				new Text(theme.fg("dim", `Local shortcut (this machine only): ${launchUrl}`), 0, 0),
 			);
 		}
 
 		if (instructions) {
 			this.#contentContainer.addChild(new Spacer(1));
-			this.#contentContainer.addChild(new Text(theme.fg("warning", instructions), 1, 0));
+			this.#contentContainer.addChild(new Text(theme.fg("warning", instructions), 0, 0));
 		}
 
 		// Open browser (best-effort)
@@ -117,22 +105,34 @@ export class LoginDialogComponent extends Container {
 	/**
 	 * Show input for manual code/URL entry (for callback server providers)
 	 */
-	showManualInput(prompt: string): Promise<string> {
+	showManualInput(prompt: string, signal?: AbortSignal): Promise<string> {
 		// Invalid pastes re-prompt (the OAuth callback loop calls this again), so
 		// reuse the already-mounted input instead of stacking duplicate prompt and
 		// hint lines beneath the dialog. Reset the value so each retry starts clean.
 		if (!this.#contentContainer.children.includes(this.#input)) {
 			this.#contentContainer.addChild(new Spacer(1));
-			this.#contentContainer.addChild(new Text(theme.fg("dim", prompt), 1, 0));
+			this.#contentContainer.addChild(new Text(theme.fg("dim", prompt), 0, 0));
 			this.#contentContainer.addChild(this.#input);
-			this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel)"), 1, 0));
+			this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel)"), 0, 0));
 		}
 		this.#input.setValue("");
 		this.#tui.requestRender();
 
+		if (signal?.aborted) {
+			return Promise.reject(signal.reason instanceof Error ? signal.reason : new Error("Login input cancelled"));
+		}
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		this.#inputResolver = resolve;
 		this.#inputRejecter = reject;
+		if (signal) {
+			const onAbort = () => {
+				if (this.#inputRejecter !== reject) return;
+				this.#clearInputHandlers();
+				reject(signal.reason instanceof Error ? signal.reason : new Error("Login input cancelled"));
+			};
+			signal.addEventListener("abort", onAbort, { once: true });
+			this.#inputAbortCleanup = () => signal.removeEventListener("abort", onAbort);
+		}
 		return promise;
 	}
 
@@ -142,22 +142,31 @@ export class LoginDialogComponent extends Container {
 	 */
 	showPrompt(message: string, placeholder?: string): Promise<string> {
 		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text(theme.fg("text", message), 1, 0));
+		this.#contentContainer.addChild(new Text(theme.fg("text", message), 0, 0));
 		if (placeholder) {
-			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${placeholder}`), 1, 0));
+			this.#contentContainer.addChild(new Text(theme.fg("dim", `e.g., ${placeholder}`), 0, 0));
 		}
 		if (!this.#contentContainer.children.includes(this.#input)) {
 			this.#contentContainer.addChild(this.#input);
 		}
-		this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel, Enter to submit)"), 1, 0));
+		this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel, Enter to submit)"), 0, 0));
 
 		this.#input.setValue("");
 		this.#tui.requestRender();
 
+		this.#inputAbortCleanup?.();
+		this.#inputAbortCleanup = undefined;
 		const { promise, resolve, reject } = Promise.withResolvers<string>();
 		this.#inputResolver = resolve;
 		this.#inputRejecter = reject;
 		return promise;
+	}
+
+	#clearInputHandlers(): void {
+		this.#inputAbortCleanup?.();
+		this.#inputAbortCleanup = undefined;
+		this.#inputResolver = undefined;
+		this.#inputRejecter = undefined;
 	}
 
 	/**
@@ -165,8 +174,8 @@ export class LoginDialogComponent extends Container {
 	 */
 	showWaiting(message: string): void {
 		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text(theme.fg("dim", message), 1, 0));
-		this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel)"), 1, 0));
+		this.#contentContainer.addChild(new Text(theme.fg("dim", message), 0, 0));
+		this.#contentContainer.addChild(new Text(theme.fg("dim", "(Escape to cancel)"), 0, 0));
 		this.#tui.requestRender();
 	}
 
@@ -174,7 +183,7 @@ export class LoginDialogComponent extends Container {
 	 * Called by onProgress callback
 	 */
 	showProgress(message: string): void {
-		this.#contentContainer.addChild(new Text(theme.fg("dim", message), 1, 0));
+		this.#contentContainer.addChild(new Text(theme.fg("dim", message), 0, 0));
 		this.#tui.requestRender();
 	}
 

@@ -23,7 +23,7 @@
 		"success": "jade",
 		"error": "crimson",
 		"warning": "gold",
-		"muted": "smoke",
+		"muted": "#8a857f",
 		"dim": "#4a4642",
 		"text": "",
 		"thinkingText": "silver",

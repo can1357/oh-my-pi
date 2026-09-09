@@ -34,7 +34,7 @@ import {
 } from "@oh-my-pi/pi-ai/auth-storage";
 import type { UsageProvider } from "@oh-my-pi/pi-ai/usage";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
-import { opencodeGoUsageProvider } from "@oh-my-pi/pi-ai/usage/opencode-go";
+import { ollamaCloudUsageProvider } from "@oh-my-pi/pi-ai/usage/ollama";
 
 function oauthRow(id: number, email: string, opts?: { expired?: boolean }): StoredAuthCredential {
 	const credential: AuthCredential = {
@@ -402,13 +402,13 @@ describe("AuthStorage.checkCredentials", () => {
 	it("does not mark local-only usage providers healthy without upstream validation", async () => {
 		const apiKeyRow: StoredAuthCredential = {
 			id: 12,
-			provider: "opencode-go",
-			credential: { type: "api_key", key: "sk-opencode-go" },
+			provider: "ollama-cloud",
+			credential: { type: "api_key", key: "sk-ollama-cloud" },
 			disabledCause: null,
 		};
 		const store = makeStore([apiKeyRow]);
 		const storage = new AuthStorage(store, {
-			usageProviderResolver: provider => (provider === "opencode-go" ? opencodeGoUsageProvider : undefined),
+			usageProviderResolver: provider => (provider === "ollama-cloud" ? ollamaCloudUsageProvider : undefined),
 		});
 		await storage.reload();
 
@@ -518,6 +518,40 @@ describe("AuthStorage.checkCredentials", () => {
 				expect(input.credential.refreshToken).toBe(REMOTE_REFRESH_SENTINEL);
 				expect(input.credential.accessToken).toBe("oat-13");
 			}
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("probes reference-stored API keys with the resolved secret", async () => {
+		// Keys stored as references (env var name, "!command") must reach the
+		// usage probe as the resolved secret — probing with the literal
+		// reference string would 401 and flag a working credential as bad.
+		const apiKeyRow: StoredAuthCredential = {
+			id: 21,
+			provider: "opencode-go",
+			credential: { type: "api_key", key: "ref:opencode" },
+			disabledCause: null,
+		};
+		const seenKeys: Array<string | undefined> = [];
+		const probeProvider: UsageProvider = {
+			id: "opencode-go",
+			validatesCredentials: true,
+			async fetchUsage(params) {
+				seenKeys.push(params.credential.type === "api_key" ? params.credential.apiKey : undefined);
+				return { provider: "opencode-go", fetchedAt: Date.now(), limits: [] };
+			},
+		};
+		const storage = new AuthStorage(makeStore([apiKeyRow]), {
+			usageProviderResolver: provider => (provider === "opencode-go" ? probeProvider : undefined),
+			configValueResolver: async config => (config === "ref:opencode" ? "sk-resolved-secret" : config),
+		});
+		await storage.reload();
+
+		try {
+			const [result] = await storage.checkCredentials();
+			expect(seenKeys).toEqual(["sk-resolved-secret"]);
+			expect(result.ok).toBe(true);
 		} finally {
 			storage.close();
 		}

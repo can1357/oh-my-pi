@@ -102,6 +102,11 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 			});
 			break;
 		}
+		case "test/documentText": {
+			const params = message.params as { uri: string };
+			respond(id, documents.get(params.uri)?.text ?? null);
+			break;
+		}
 		case "test/echo":
 			respond(id, message.params);
 			break;

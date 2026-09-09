@@ -1,5 +1,4 @@
 import * as path from "node:path";
-import { formatHashlineHeader } from "@oh-my-pi/hashline";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentTool, AgentToolContext, AgentToolResult, AgentToolUpdateCallback } from "@oh-my-pi/pi-agent-core";
 import type { ToolExample } from "@oh-my-pi/pi-ai";
@@ -7,8 +6,9 @@ import { type AstReplaceChange, type AstReplaceFileChange, astEdit } from "@oh-m
 import type { Component } from "@oh-my-pi/pi-tui";
 import { replaceTabs, Text } from "@oh-my-pi/pi-tui";
 import { $envpos, prompt, untilAborted } from "@oh-my-pi/pi-utils";
-import { canonicalSnapshotKey, getFileSnapshotStore } from "../edit/file-snapshot-store";
+import { getEditStore } from "../edit/store";
 import { normalizeToLF } from "../edit/normalize";
+import { formatHashlineHeader } from "./hashline-format";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
 import type { Theme } from "../modes/theme/theme";
 import astEditDescription from "../prompts/tools/ast-edit.md" with { type: "text" };
@@ -290,8 +290,12 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 				internalUrlAction: "rewrite",
 				settings: this.session.settings,
 				signal,
+				sessionFile: this.session.getSessionFile() ?? undefined,
+				sessionId: this.session.sessionManager?.getSessionId?.() ?? this.session.getSessionId?.() ?? undefined,
+				agentRegistry: this.session.agentRegistry,
 				localProtocolOptions: this.session.localProtocolOptions,
 				skills: this.session.skills,
+				rules: this.session.activeRules,
 				resolveExternalUrl: async rawPath => {
 					if (!parseReadUrlTarget(rawPath)) return undefined;
 					throw new ToolError(
@@ -354,12 +358,12 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 			const useHashLines = resolveFileDisplayMode(this.session).hashLines;
 			const hashContexts = new Map<string, { tag: string }>();
 			if (useHashLines) {
-				const snapshotStore = getFileSnapshotStore(this.session);
+				const snapshotStore = getEditStore(this.session);
 				for (const relativePath of fileList) {
 					const absolutePath = path.resolve(this.session.cwd, relativePath);
 					try {
 						const fullText = normalizeToLF(await Bun.file(absolutePath).text());
-						const tag = snapshotStore.record(canonicalSnapshotKey(absolutePath), fullText);
+						const tag = snapshotStore.recordSnapshot(absolutePath, fullText);
 						hashContexts.set(relativePath, { tag });
 					} catch {
 						// Best-effort: if a file disappears between ast-edit and rendering, emit plain line output.
@@ -471,12 +475,12 @@ export class AstEditTool implements AgentTool<typeof astEditSchema, AstEditToolD
 						// so the model's next hashline edit anchors against fresh tags.
 						const freshTagLines: string[] = [];
 						if (useHashLines) {
-							const snapshotStore = getFileSnapshotStore(this.session);
+							const snapshotStore = getEditStore(this.session);
 							for (const relativePath of appliedFileList) {
 								const appliedAbsolutePath = path.resolve(this.session.cwd, relativePath);
 								try {
 									const fullText = normalizeToLF(await Bun.file(appliedAbsolutePath).text());
-									const freshTag = snapshotStore.record(canonicalSnapshotKey(appliedAbsolutePath), fullText);
+									const freshTag = snapshotStore.recordSnapshot(appliedAbsolutePath, fullText);
 									freshTagLines.push(formatHashlineHeader(relativePath, freshTag));
 								} catch {
 									// File disappeared between apply and re-read; skip its tag.

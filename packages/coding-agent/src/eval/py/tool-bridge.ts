@@ -1,13 +1,13 @@
 /**
- * HTTP loopback bridge that lets the Python kernel synchronously invoke
- * host-side tools by name, mirroring the JS worker's `tool.<name>(args)` proxy.
+ * HTTP loopback bridge that lets the Python kernel invoke host-side tools and
+ * enabled eval-prelude capabilities, mirroring the JavaScript worker bridge.
  *
- * The Python prelude builds a `tool` proxy that POSTs to `/v1/tool` over a
- * 127.0.0.1 loopback socket; the host resolves the request against the
- * `ToolSession` registered for the current execution and forwards to the same
- * `callSessionTool` implementation the JS bridge uses.
+ * The Python prelude POSTs to `/v1/tool` over a 127.0.0.1 loopback socket; the
+ * host resolves the request against the `ToolSession` registered for the
+ * current execution and forwards to the same `callSessionTool` implementation
+ * the JavaScript bridge uses.
  */
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../../tools";
 import { callSessionTool, type JsStatusEvent } from "../js/tool-bridge";
 
@@ -43,6 +43,16 @@ interface BridgeServer {
 const registrations = new Map<string, PyToolBridgeEntry>();
 let serverPromise: Promise<BridgeServer> | null = null;
 
+function markExpectedBridgeShutdownError(error: unknown): error is Error {
+	if (!(error instanceof Error)) return false;
+	const expected =
+		error.name === "AbortError" ||
+		("code" in error &&
+			(error.code === "ERR_SOCKET_CLOSED" || error.code === "ECONNRESET" || error.code === "EPIPE"));
+	if (expected) postmortem.markExpectedCleanupError(error);
+	return expected;
+}
+
 /**
  * Forward a bridge call to {@link callSessionTool}, failing fast once the cell
  * has been interrupted.
@@ -71,6 +81,7 @@ async function callSessionToolPromptOnAbort(name: string, args: unknown, entry: 
 		session: entry.toolSession,
 		signal: entry.signal,
 		emitStatus: entry.emitStatus,
+		defaultIntent: "py prelude",
 	});
 	const signal = entry.shieldedSignal ?? entry.signal;
 	if (!signal) return await call;
@@ -136,6 +147,16 @@ async function startServer(): Promise<BridgeServer> {
 				});
 			}
 		},
+		error(err) {
+			if (markExpectedBridgeShutdownError(err)) {
+				logger.debug("Python tool bridge connection closed during shutdown", { error: err.message });
+			} else {
+				logger.error("Python tool bridge request failed", { error: err });
+			}
+			// Bun requires an error response even when the peer has already gone.
+			// An empty body minimizes further writes to a closing socket.
+			return new Response(null, { status: 500 });
+		},
 	});
 
 	const info: PyToolBridgeInfo = {
@@ -143,11 +164,18 @@ async function startServer(): Promise<BridgeServer> {
 		token,
 	};
 	logger.debug("Python tool bridge listening", { url: info.url });
+	let stopPromise: Promise<void> | null = null;
 
 	return {
 		info,
-		stop: async () => {
-			await server.stop(true);
+		stop: () => {
+			stopPromise ??= Promise.try(() => server.stop(true)).catch(error => {
+				if (!markExpectedBridgeShutdownError(error)) throw error;
+				logger.debug("Python tool bridge stopped after its socket closed", {
+					error: error.message,
+				});
+			});
+			return stopPromise;
 		},
 	};
 }

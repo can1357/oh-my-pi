@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, setSystemTime, vi } from "bun:test";
 import type { AuthStorage, FetchImpl } from "@oh-my-pi/pi-ai";
 import type { AgentStorage } from "@oh-my-pi/pi-coding-agent/session/agent-storage";
 import { searchWithParallel } from "@oh-my-pi/pi-coding-agent/web/parallel";
@@ -149,6 +149,29 @@ describe("Parallel web search", () => {
 		});
 	});
 
+	it("maps recency onto source_policy.after_date", async () => {
+		setSystemTime(new Date("2026-08-10T12:00:00Z"));
+		try {
+			const fetchMock = mockFetch({
+				search_id: "search-parallel-recency",
+				results: [],
+				warnings: null,
+				usage: null,
+			});
+
+			await searchParallel({ query: "recent api changes", recency: "week", fetch: fetchMock }, fakeAuthStorage);
+			expect(capturedRequestBody).toEqual({
+				objective: "recent api changes",
+				search_queries: ["recent api changes"],
+				mode: "fast",
+				excerpts: { max_chars_per_result: 10_000 },
+				source_policy: { after_date: "2026-08-03" },
+			});
+		} finally {
+			setSystemTime();
+		}
+	});
+
 	it("maps -site: and after: onto exclude_domains/after_date, keeping phrases and negation", async () => {
 		const fetchMock = mockFetch({
 			search_id: "search-parallel-4",
@@ -158,7 +181,11 @@ describe("Parallel web search", () => {
 		});
 
 		await searchParallel(
-			{ query: '"web api" -legacy -site:reddit.com/r/node after:2025-06-01', fetch: fetchMock },
+			{
+				query: '"web api" -legacy -site:reddit.com/r/node after:2025-06-01',
+				recency: "day",
+				fetch: fetchMock,
+			},
 			fakeAuthStorage,
 		);
 		expect(capturedRequestBody).toEqual({
@@ -176,6 +203,15 @@ describe("Parallel web search", () => {
 			provider: "parallel",
 			status: 503,
 			message: "Parallel API error (503): upstream unavailable",
+		});
+	});
+
+	it("classifies malformed successful responses as Parallel errors", async () => {
+		const fetchMock: FetchImpl = () =>
+			Promise.resolve(new Response("{not-json", { status: 200, headers: { "Content-Type": "application/json" } }));
+		await expect(searchParallel({ query: "broken", fetch: fetchMock }, fakeAuthStorage)).rejects.toMatchObject({
+			provider: "parallel",
+			message: expect.stringContaining("Parallel search returned invalid JSON:"),
 		});
 	});
 });

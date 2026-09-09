@@ -39,6 +39,13 @@ class Settings(BaseSettings):
     repo_allowlist_raw: str = Field("", alias="ROBOMP_REPO_ALLOWLIST")
     pr_review_enabled: bool = Field(True, alias="ROBOMP_PR_REVIEW_ENABLED")
 
+    # Release sentinel
+    release_sentinel_enabled: bool = Field(False, alias="ROBOMP_RELEASE_SENTINEL_ENABLED")
+    release_commit_prefix: str = Field("chore: bump version to ", alias="ROBOMP_RELEASE_COMMIT_PREFIX")
+    release_max_rounds: int = Field(5, alias="ROBOMP_RELEASE_MAX_ROUNDS")
+    release_task_timeout_seconds: float = Field(3600.0, alias="ROBOMP_RELEASE_TASK_TIMEOUT_SECONDS")
+    release_model: str | None = Field(None, alias="ROBOMP_RELEASE_MODEL")
+
     # gh-proxy. Set BOTH to route GitHub through the proxy; leave both empty
     # to keep PAT-on-orchestrator behavior. Mixing the two (PAT + proxy) is
     # rejected to prevent silent fallback to direct GitHub access.
@@ -326,6 +333,18 @@ class Settings(BaseSettings):
     def pick_model(self) -> str:
         """Random selection from the pool (uniform). One-element pools return that one."""
         return random.choice(self.model_pool)
+
+    @property
+    def release_model_pool(self) -> tuple[str, ...]:
+        """Release-specific model pool, falling back to the general pool."""
+        items = [piece.strip() for piece in (self.release_model or "").split(",") if piece.strip()]
+        return tuple(items) or self.model_pool
+
+    def pick_release_model(self) -> str:
+        """Select a release model, falling back to the general selector."""
+        if not self.release_model or not self.release_model.strip():
+            return self.pick_model()
+        return random.choice(self.release_model_pool)
 
     @field_validator("event_retry_delays_raw", mode="before")
     @classmethod

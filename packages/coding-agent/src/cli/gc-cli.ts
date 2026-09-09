@@ -151,11 +151,21 @@ function numberSetting(value: number | undefined, fallback: unknown, defaultValu
 async function resolveOptions(flags: GcCommandFlags): Promise<ResolvedGcOptions> {
 	const agentDir = path.resolve(flags.agentDir ?? getAgentDir());
 	const selected = flags.blobs === true || flags.archive === true || flags.wal === true;
+	const archiveSelected = selected && flags.archive === true;
+	const needsArchiveSettings =
+		archiveSelected &&
+		(flags.coldArchiveAfterDays === undefined ||
+			flags.retainNewestGlobal === undefined ||
+			flags.retainNewestPerCwd === undefined);
 	const settings =
-		flags.apply === true ? await Settings.loadIsolated({ agentDir }) : await Settings.loadReadOnly({ agentDir });
-	const getBoolean = (pathKey: "gc.blobs" | "gc.archive" | "gc.wal") => settings.get(pathKey);
+		!selected || needsArchiveSettings
+			? flags.apply === true
+				? await Settings.loadIsolated({ agentDir })
+				: await Settings.loadReadOnly({ agentDir })
+			: undefined;
+	const getBoolean = (pathKey: "gc.blobs" | "gc.archive" | "gc.wal") => settings?.get(pathKey) ?? getDefault(pathKey);
 	const getNumber = (pathKey: "gc.coldArchiveAfterDays" | "gc.retainNewestGlobal" | "gc.retainNewestPerCwd") =>
-		settings.get(pathKey);
+		settings?.get(pathKey) ?? getDefault(pathKey);
 	return {
 		apply: flags.apply === true,
 		json: flags.json === true,

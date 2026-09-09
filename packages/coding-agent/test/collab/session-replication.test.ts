@@ -19,7 +19,7 @@ afterEach(async () => {
 });
 
 // Comfortably above BLOB_EXTERNALIZE_THRESHOLD (1024 base64 chars).
-const BIG_IMAGE_B64 = Buffer.alloc(4096, 7).toString("base64");
+const BIG_IMAGE_B64 = Buffer.alloc(1024, 7).toString("base64");
 
 describe("SessionManager collab replication", () => {
 	it("onEntryAppended receives the in-memory entry with inline image data while the persisted line externalizes it", async () => {
@@ -92,7 +92,8 @@ describe("SessionManager collab replication", () => {
 	});
 
 	it("snapshotForReplication deep-copies entries and preserves the header identity", () => {
-		const { manager, cwd } = makeManager();
+		const cwd = process.cwd();
+		const manager = SessionManager.inMemory(cwd);
 		manager.appendMessage({ role: "user", content: "snapshot me", timestamp: Date.now() });
 
 		const snapshot = manager.snapshotForReplication();

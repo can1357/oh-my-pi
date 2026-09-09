@@ -10,6 +10,7 @@ import chalk from "@oh-my-pi/pi-utils/chalk";
 import { Settings } from "../config/settings";
 import { extractUriScheme } from "../internal-urls/parse";
 import { InternalUrlRouter } from "../internal-urls/router";
+import { closeDaemonClients } from "../launch/client";
 import { discoverAndLoadMCPTools } from "../mcp/loader";
 import { MCPManager } from "../mcp/manager";
 import { discoverAuthStorage } from "../session/auth-broker-config";
@@ -61,7 +62,8 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 			const result = await discoverAndLoadMCPTools(cwd, {
 				enableProjectConfig: settings.get("mcp.enableProjectConfig") ?? true,
 				filterExa: true,
-				filterBrowser: settings.get("browser.enabled") ?? false,
+				// `omp read` has no Eval prelude, so browser MCP remains available.
+				filterBrowser: false,
 				cacheStorage: settings.getStorage(),
 				authStorage,
 			});
@@ -93,6 +95,7 @@ export async function runReadCommand(cmd: ReadCommandArgs): Promise<void> {
 			if (MCPManager.instance() === mcpManager) MCPManager.setInstance(undefined);
 		}
 		authStorage?.close();
+		await closeDaemonClients();
 	}
 
 	if (failed) process.exit(1);

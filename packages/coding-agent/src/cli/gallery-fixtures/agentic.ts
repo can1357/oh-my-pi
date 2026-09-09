@@ -21,19 +21,17 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 	task: {
 		label: "Task",
 		customRendered: true,
-		// Streaming: agent chosen, assignment still landing.
+		// Streaming: agent chosen, assignment still landing. The args follow the
+		// tool schema `renderCall` reads (`agent`, `name`, `task`).
 		streamingArgs: {
 			agent: "task",
-			id: "AuthLoader",
-			description: "Load auth middleware",
-			assignment: "Read packages/server/src/auth/*.ts and summarize the session-cookie",
+			name: "AuthLoader",
+			task: "Read packages/server/src/auth/*.ts and summarize the session-cookie",
 		},
 		args: {
 			agent: "task",
-			id: "AuthLoader",
-			description: "Load auth middleware",
-			assignment:
-				"Read packages/server/src/auth/session.ts and middleware.ts, then document the session-cookie validation flow and any TODOs.",
+			name: "AuthLoader",
+			task: "Read packages/server/src/auth/session.ts and middleware.ts, then document the session-cookie validation flow and any TODOs.",
 		},
 		result: {
 			content: [
@@ -358,6 +356,22 @@ export const agenticFixtures: Record<string, GalleryFixture> = {
 			isError: true,
 			content: [{ type: "text", text: "Goal tool failed: objective is required when op=create." }],
 			details: { op: "create" },
+		},
+	},
+
+	think: {
+		label: "Think",
+		// Streaming: scratchpad thoughts still arriving.
+		streamingArgs: {
+			thoughts: "The retry loop re-reads the config after every failure, which explains the doubled latency.",
+		},
+		args: {
+			thoughts:
+				"The retry loop re-reads the config after every failure, which explains the doubled latency. Cache the parsed config outside the loop, then re-check the invalidation path.",
+		},
+		result: {
+			content: [{ type: "text", text: "------" }],
+			details: { recorded: true },
 		},
 	},
 

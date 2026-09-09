@@ -26,7 +26,7 @@ export interface CustomCommandAPI {
 	/** Injected TypeBox shim (legacy/compat). */
 	typebox: typeof TypeBox;
 	/** Injected omptype schema builder for custom commands. */
-	arktype: typeof ArkType;
+	arktype: typeof ArkType & { type: typeof ArkType };
 	/** Injected Zod-compatible omptype builder for custom commands. */
 	zod: typeof zod;
 	/** Injected pi-coding-agent exports */

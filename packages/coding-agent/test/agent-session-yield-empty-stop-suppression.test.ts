@@ -7,8 +7,8 @@
  * already-yielded child resumes and can enter post-yield retries or tool calls
  * (see issues #3389 and #4963).
  */
-import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { scheduler } from "node:timers/promises";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import { createMockModel, type MockModel, type MockResponse } from "@oh-my-pi/pi-ai/providers/mock";
@@ -16,16 +16,23 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
-const yieldToolSchema = type({ result: type("unknown") });
+const yieldToolSchema = type({ data: type("unknown") });
 const recordToolSchema = type({ value: type("string") });
 
-type Harness = { session: AgentSession; authStorage: AuthStorage; tempDir: TempDir };
+type Harness = { session: AgentSession; tempDir: TempDir };
 const activeHarnesses: Harness[] = [];
+const sharedAuthStorage = createInMemoryAuthStorage();
+sharedAuthStorage.setRuntimeApiKey("mock", "test-key");
+const sharedModelRegistry = new ModelRegistry(sharedAuthStorage);
+
+afterAll(() => {
+	sharedAuthStorage.close();
+});
 
 const yieldTool: AgentTool<typeof yieldToolSchema, { value: unknown }> = {
 	name: "yield",
@@ -33,10 +40,9 @@ const yieldTool: AgentTool<typeof yieldToolSchema, { value: unknown }> = {
 	description: "Finish the task with structured JSON output.",
 	parameters: yieldToolSchema,
 	async execute(_toolCallId, params) {
-		const result = (params.result ?? {}) as Record<string, unknown>;
 		return {
 			content: [{ type: "text", text: "Result submitted." }],
-			details: { value: result.data ?? null },
+			details: { value: params.data ?? null },
 		};
 	},
 };
@@ -56,7 +62,7 @@ const recordTool: AgentTool<typeof recordToolSchema, { value: string }> = {
 
 function yieldCall(value: string, id: string): MockResponse {
 	return {
-		content: [{ type: "toolCall", id, name: "yield", arguments: { result: { data: { value } } } }],
+		content: [{ type: "toolCall", id, name: "yield", arguments: { data: { value } } }],
 		stopReason: "toolUse",
 	};
 }
@@ -76,16 +82,21 @@ function emptyStop(): MockResponse {
 	};
 }
 
-async function createHarness(responses: MockResponse[]): Promise<Harness & { mock: MockModel }> {
+async function createHarness(
+	responses: MockResponse[],
+	options?: { retryEnabled?: boolean },
+): Promise<Harness & { mock: MockModel }> {
 	const tempDir = TempDir.createSync("@pi-yield-empty-stop-");
-	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-	authStorage.setRuntimeApiKey("mock", "test-key");
 
 	const mock = createMockModel({ responses });
-	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
+	const modelRegistry = sharedModelRegistry;
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
-		"retry.enabled": false,
+		"retry.enabled": options?.retryEnabled ?? false,
+		"retry.baseDelayMs": 5,
+		"retry.maxDelayMs": 100,
+		"retry.maxRetries": 1,
+		"retry.modelFallback": false,
 		"todo.enabled": false,
 		"todo.eager": "default",
 		"todo.reminders": false,
@@ -113,7 +124,7 @@ async function createHarness(responses: MockResponse[]): Promise<Harness & { moc
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
-	const harness = { session, authStorage, tempDir };
+	const harness = { session, tempDir };
 	activeHarnesses.push(harness);
 	return { ...harness, mock };
 }
@@ -140,13 +151,41 @@ function assistantText(messages: AgentMessage[]): string {
 afterEach(async () => {
 	for (const harness of activeHarnesses.splice(0)) {
 		await harness.session.dispose();
-		harness.authStorage.close();
 		harness.tempDir.removeSync();
 	}
 	vi.restoreAllMocks();
 });
 
 describe("AgentSession yield empty-stop suppression", () => {
+	it("settles a successful retry that ends in a terminal yield", async () => {
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const { session, mock } = await createHarness(
+			[{ throw: "503 service unavailable: overloaded_error" }, yieldCall("recovered", "call-yield-after-retry")],
+			{ retryEnabled: true },
+		);
+		const retryEvents: Array<"auto_retry_start" | "auto_retry_end"> = [];
+		session.subscribe(event => {
+			if (event.type === "auto_retry_start" || event.type === "auto_retry_end") {
+				retryEvents.push(event.type);
+			}
+		});
+
+		const prompt = session.prompt("retry once then yield");
+		const outcome = await Promise.race([
+			prompt.then(() => "completed" as const),
+			Bun.sleep(1_000).then(() => "stuck" as const),
+		]);
+		if (outcome === "stuck") {
+			session.abortRetry();
+			await prompt;
+		}
+
+		expect(outcome).toBe("completed");
+		expect(mock.calls).toHaveLength(2);
+		expect(retryEvents).toEqual(["auto_retry_start", "auto_retry_end"]);
+		expect(session.isRetrying).toBe(false);
+	});
+
 	it("does not continue to a trailing empty assistant stop after a successful yield", async () => {
 		const { session, mock } = await createHarness([yieldCall("done", "call-yield-done")]);
 

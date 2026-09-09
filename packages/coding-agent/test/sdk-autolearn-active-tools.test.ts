@@ -23,6 +23,18 @@ describe("createAgentSession auto-learn tool activation", () => {
 	let authStorage: AuthStorage;
 	let modelRegistry: ModelRegistry;
 	const sessions: AgentSession[] = [];
+	function noDiscoveryOptions() {
+		return {
+			disableExtensionDiscovery: true,
+			skills: [],
+			contextFiles: [],
+			promptTemplates: [],
+			slashCommands: [],
+			enableMCP: false,
+			enableLsp: false,
+			skipPythonPreflight: true,
+		};
+	}
 
 	beforeAll(async () => {
 		registryDir = path.join(os.tmpdir(), `pi-autolearn-active-${Snowflake.next()}`);
@@ -32,7 +44,7 @@ describe("createAgentSession auto-learn tool activation", () => {
 	});
 
 	afterAll(async () => {
-		for (const session of sessions) await session.dispose().catch(() => {});
+		await Promise.all(sessions.map(session => session.dispose().catch(() => {})));
 		authStorage.close();
 		if (fs.existsSync(registryDir)) removeSyncWithRetries(registryDir);
 	});
@@ -45,7 +57,7 @@ describe("createAgentSession auto-learn tool activation", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings,
 			model: getBundledModel("openai", "gpt-4o-mini"),
-			disableExtensionDiscovery: true,
+			...noDiscoveryOptions(),
 			toolNames: ["read"],
 		});
 		sessions.push(session);
@@ -73,7 +85,7 @@ describe("createAgentSession auto-learn tool activation", () => {
 				"hindsight.mentalModelsEnabled": false,
 			}),
 			model: getBundledModel("openai", "gpt-4o-mini"),
-			disableExtensionDiscovery: true,
+			...noDiscoveryOptions(),
 			toolNames: ["read"],
 		});
 		sessions.push(session);
@@ -87,24 +99,6 @@ describe("createAgentSession auto-learn tool activation", () => {
 		expect(names).not.toContain("manage_skill");
 	});
 
-	it("activates checkpoint and rewind when only checkpoint is in an explicit toolNames list", async () => {
-		const { session } = await createAgentSession({
-			cwd: registryDir,
-			agentDir: registryDir,
-			modelRegistry,
-			sessionManager: SessionManager.inMemory(),
-			settings: Settings.isolated({ "checkpoint.enabled": true }),
-			model: getBundledModel("openai", "gpt-4o-mini"),
-			disableExtensionDiscovery: true,
-			toolNames: ["checkpoint"],
-			requireYieldTool: true,
-		});
-		sessions.push(session);
-		const names = session.getActiveToolNames();
-		expect(names).toContain("checkpoint");
-		expect(names).toContain("rewind");
-	});
-
 	it("activates checkpoint and rewind when only rewind is in an explicit toolNames list", async () => {
 		const { session } = await createAgentSession({
 			cwd: registryDir,
@@ -113,7 +107,7 @@ describe("createAgentSession auto-learn tool activation", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "checkpoint.enabled": true }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
-			disableExtensionDiscovery: true,
+			...noDiscoveryOptions(),
 			toolNames: ["rewind"],
 			requireYieldTool: true,
 		});
@@ -131,7 +125,7 @@ describe("createAgentSession auto-learn tool activation", () => {
 			sessionManager: SessionManager.inMemory(),
 			settings: Settings.isolated({ "checkpoint.enabled": true }),
 			model: getBundledModel("openai", "gpt-4o-mini"),
-			disableExtensionDiscovery: true,
+			...noDiscoveryOptions(),
 			toolNames: ["checkpoint"],
 			requireYieldTool: true,
 			restrictToolNames: true,

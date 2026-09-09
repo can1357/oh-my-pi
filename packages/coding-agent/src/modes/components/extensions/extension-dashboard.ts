@@ -10,7 +10,7 @@
  * - Tab/Shift+Tab or ←/→: switch provider tab
  * - Up/Down/j/k or wheel: move list selection
  * - Space/Enter or click: toggle selected item (or provider master switch)
- * - Wheel over the inspector: scroll the detail pane
+ * - Wheel over the inspector, or PageUp/PageDown when the inspector overflows: scroll the detail pane
  * - Esc: clear search (if active) then close
  */
 import {
@@ -26,13 +26,25 @@ import {
 } from "@oh-my-pi/pi-tui";
 import { getMCPConfigPath, logger } from "@oh-my-pi/pi-utils";
 import { Settings } from "../../../config/settings";
+import type { CustomTool } from "../../../extensibility/custom-tools/types";
 import { setMcpServerEnabled } from "../../../mcp/config-writer";
+import type { MCPManager } from "../../../mcp/manager";
+import { MCP_CONNECTION_STATUS_EVENT_CHANNEL } from "../../../mcp/startup-events";
 import { getTabBarTheme } from "../../../modes/shared";
 import { theme } from "../../../modes/theme/theme";
-import { matchesAppInterrupt } from "../../../modes/utils/keybinding-matchers";
+import {
+	matchesAppInterrupt,
+	matchesAppToolsExpand,
+	matchesSelectPageDown,
+	matchesSelectPageUp,
+} from "../../../modes/utils/keybinding-matchers";
+import { expandKeyHint } from "../../../tools/render-utils";
+import type { EventBus } from "../../../utils/event-bus";
 import { bottomBorder, divider, row, topBorder } from "../overlay-box";
 import { ExtensionList } from "./extension-list";
-import { InspectorPanel } from "./inspector-panel";
+import { InspectorPanel, type ToolRuntimeSource } from "./inspector-panel";
+import { snapshotToolRuntimeSource } from "./live-tool-session";
+import { applyMcpToggleRuntime } from "./mcp-runtime";
 import {
 	applyDisabledExtensionsToState,
 	applyFilter,
@@ -40,10 +52,24 @@ import {
 	filterByProvider,
 	refreshState,
 	toggleProvider,
+	toggleUserSource,
 } from "./state-manager";
-import type { DashboardState, ProviderTab } from "./types";
+import { type DashboardState, isShadowedExtension, type ProviderTab } from "./types";
 
-const EXT_FOOTER = " ↑/↓: navigate · Space: toggle · ←/→: provider · Esc: close";
+export interface ExtensionDashboardOptions {
+	cwd: string;
+	settings?: Settings | null;
+	terminalHeight?: number;
+	mcpManager?: MCPManager;
+	eventBus?: EventBus;
+	toolSource?: ToolRuntimeSource;
+	onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void;
+	browserMcpFilterEnabled?: () => boolean;
+}
+
+function extFooter(): string {
+	return ` ↑/↓: navigate · Space: toggle · ←/→: provider · PgUp/PgDn: inspector · ${expandKeyHint()}: expand · Esc: close`;
+}
 
 /**
  * Map dashboard provider tabs to {@link TabBar} tabs. Empty *enabled* providers
@@ -79,19 +105,30 @@ export class ExtensionDashboard implements Component {
 
 	onClose?: () => void;
 	onRequestRender?: () => void;
+	#unsubscribers: Array<() => void> = [];
 
 	private constructor(
 		private readonly cwd: string,
 		private readonly settings: Settings | null,
 		private readonly terminalHeight: number,
+		private readonly mcpManager: MCPManager | undefined,
+		private readonly eventBus: EventBus | undefined,
+		private readonly toolSource: ToolRuntimeSource | undefined,
+		private readonly onMcpToolsChanged: ((tools: CustomTool[]) => Promise<void> | void) | undefined,
+		private readonly browserMcpFilterEnabled: (() => boolean) | undefined,
 	) {}
 
-	static async create(
-		cwd: string,
-		settings: Settings | null = null,
-		terminalHeight?: number,
-	): Promise<ExtensionDashboard> {
-		const dashboard = new ExtensionDashboard(cwd, settings, terminalHeight ?? process.stdout.rows ?? 24);
+	static async create(options: ExtensionDashboardOptions): Promise<ExtensionDashboard> {
+		const dashboard = new ExtensionDashboard(
+			options.cwd,
+			options.settings ?? null,
+			options.terminalHeight ?? process.stdout.rows ?? 24,
+			options.mcpManager,
+			options.eventBus,
+			options.toolSource,
+			options.onMcpToolsChanged,
+			options.browserMcpFilterEnabled,
+		);
 		await dashboard.#init();
 		return dashboard;
 	}
@@ -102,27 +139,35 @@ export class ExtensionDashboard implements Component {
 		this.#state = await createInitialState(this.cwd, disabledIds);
 
 		const initialMaxVisible = Math.max(3, this.terminalHeight - 9);
+		this.#inspector = new InspectorPanel();
+		this.#inspector.setMcpSource(this.mcpManager);
+		this.#inspector.setToolSource(this.toolSource);
 		this.#mainList = new ExtensionList(
 			this.#state.searchFiltered,
 			{
 				onSelectionChange: ext => {
 					this.#state.selected = ext;
 					this.#inspector.setExtension(ext);
-					// A fresh selection resets the inspector to the top.
 					this.#body.resetInspectorScroll();
 				},
 				onToggle: (extensionId, enabled) => this.#handleExtensionToggle(extensionId, enabled),
 				onMasterToggle: providerId => this.#handleProviderToggle(providerId),
+				onUserSourceToggle: providerId => this.#handleUserSourceToggle(providerId),
 				masterSwitchProvider: this.#getActiveProviderId(),
+				mcpSource: this.mcpManager,
+				toolSource: this.toolSource,
 			},
 			initialMaxVisible,
 		);
 		this.#mainList.setFocused(true);
+		this.#mainList.setMcpSource(this.mcpManager);
+		this.#mainList.setToolSource(this.toolSource);
 
-		this.#inspector = new InspectorPanel();
 		if (this.#state.selected) {
 			this.#inspector.setExtension(this.#state.selected);
 		}
+
+		this.#subscribeMcpRuntime();
 
 		this.#body = new TwoColumnBody(this.#mainList, this.#inspector, this.terminalHeight);
 
@@ -159,6 +204,9 @@ export class ExtensionDashboard implements Component {
 
 		this.#mainList.setMaxVisible(Math.max(3, contentRows - 2));
 		this.#body.setMaxHeight(contentRows);
+		const toolFrame = snapshotToolRuntimeSource(this.toolSource);
+		this.#mainList.setToolSource(toolFrame);
+		this.#inspector.setToolSource(toolFrame);
 		const bodyLines = this.#body.render(innerWidth);
 
 		const out: string[] = [];
@@ -171,7 +219,7 @@ export class ExtensionDashboard implements Component {
 		this.#bodyRowCount = contentRows;
 		for (let i = 0; i < contentRows; i++) out.push(row(bodyLines[i] ?? "", width));
 		out.push(divider(width));
-		out.push(row(theme.fg("dim", EXT_FOOTER), width));
+		out.push(row(theme.fg("dim", extFooter()), width));
 		out.push(bottomBorder(width));
 		return out;
 	}
@@ -257,8 +305,67 @@ export class ExtensionDashboard implements Component {
 	}
 
 	#handleProviderToggle(providerId: string): void {
+		const enabling = this.#state.tabs.find(tab => tab.id === providerId)?.enabled === false;
 		toggleProvider(providerId);
+		if (!enabling) {
+			void this.#disconnectProviderMcpServers(providerId);
+			return;
+		}
 		void this.#refreshFromState();
+	}
+
+	/** Flip the `~/` opt-in for a foreign provider; user-level MCP servers go down on opt-out. */
+	#handleUserSourceToggle(providerId: string): void {
+		const enabled = toggleUserSource(providerId);
+		if (!enabled) {
+			void this.#disconnectProviderMcpServers(providerId, "user");
+			return;
+		}
+		void this.#refreshFromState();
+	}
+
+	/**
+	 * Provider disable is discovery-only: do not rewrite mcp.json. Disconnect
+	 * live MCP servers owned by this provider so their tools leave the session.
+	 * Re-enable does not auto-connect — startup/reload still owns that.
+	 */
+	async #disconnectProviderMcpServers(providerId: string, level?: "user" | "project"): Promise<void> {
+		const names = [
+			...new Set(
+				this.#state.extensions
+					.filter(
+						ext =>
+							ext.kind === "mcp" &&
+							ext.source.provider === providerId &&
+							(level === undefined || ext.source.level === level) &&
+							!isShadowedExtension(ext) &&
+							this.mcpManager?.getConnectionStatus(ext.name) !== "disconnected",
+					)
+					.map(ext => ext.name),
+			),
+		];
+		for (const name of names) {
+			try {
+				await applyMcpToggleRuntime({
+					name,
+					enabled: false,
+					cwd: this.cwd,
+					manager: this.mcpManager,
+					session: this.onMcpToolsChanged ? { refreshMCPTools: this.onMcpToolsChanged } : undefined,
+					onStatus: event => {
+						this.eventBus?.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
+						this.onRequestRender?.();
+					},
+				});
+			} catch (error) {
+				logger.warn("Failed to disconnect MCP server after provider disable", {
+					name,
+					providerId,
+					error: String(error),
+				});
+			}
+		}
+		await this.#refreshFromState();
 	}
 
 	#handleExtensionToggle(extensionId: string, enabled: boolean): void {
@@ -303,6 +410,29 @@ export class ExtensionDashboard implements Component {
 			});
 		} catch (error) {
 			logger.warn("Failed to persist MCP toggle", { name, enabled, error: String(error) });
+			await this.#refreshFromState();
+			return;
+		}
+
+		try {
+			await applyMcpToggleRuntime({
+				name,
+				enabled,
+				cwd: this.cwd,
+				discovery: {
+					enableProjectConfig: sm.get("mcp.enableProjectConfig") ?? true,
+					filterExa: true,
+					filterBrowser: this.browserMcpFilterEnabled?.() ?? false,
+				},
+				manager: this.mcpManager,
+				session: this.onMcpToolsChanged ? { refreshMCPTools: this.onMcpToolsChanged } : undefined,
+				onStatus: event => {
+					this.eventBus?.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, event);
+					this.onRequestRender?.();
+				},
+			});
+		} catch (error) {
+			logger.warn("Failed to apply MCP toggle to live manager", { name, enabled, error: String(error) });
 		}
 
 		// Reconcile `settings.disabledExtensions` with the canonical mcp.json
@@ -321,7 +451,7 @@ export class ExtensionDashboard implements Component {
 	}
 
 	#writableMcpSourcePath(extensionId: string): string | undefined {
-		const extension = this.#state.extensions.find(ext => ext.id === extensionId);
+		const extension = this.#state.extensions.find(ext => ext.id === extensionId && !isShadowedExtension(ext));
 		if (!extension) return undefined;
 		if (extension.source.provider !== "native" && extension.source.provider !== "mcp-json") return undefined;
 		return extension.path;
@@ -375,6 +505,7 @@ export class ExtensionDashboard implements Component {
 
 		// Ctrl+C - close immediately
 		if (matchesKey(data, "ctrl+c")) {
+			this.dispose();
 			this.onClose?.();
 			return;
 		}
@@ -389,7 +520,19 @@ export class ExtensionDashboard implements Component {
 				this.onRequestRender?.();
 				return;
 			}
+			this.dispose();
 			this.onClose?.();
+			return;
+		}
+
+		if (matchesAppToolsExpand(data)) {
+			this.#inspector.toggleExpanded();
+			this.onRequestRender?.();
+			return;
+		}
+
+		if (this.#body.pageInspector(matchesSelectPageUp(data) ? -1 : matchesSelectPageDown(data) ? 1 : 0)) {
+			this.onRequestRender?.();
 			return;
 		}
 
@@ -408,6 +551,43 @@ export class ExtensionDashboard implements Component {
 			this.#state.searchFiltered = applyFilter(this.#state.tabFiltered, query);
 		}
 		this.onRequestRender?.();
+	}
+
+	/**
+	 * Live MCP health is joined at render time. Connection-status events and
+	 * list-changed notifications only need to request a repaint — they must not
+	 * rewrite Extension.raw.
+	 */
+	#subscribeMcpRuntime(): void {
+		if (this.eventBus) {
+			this.#unsubscribers.push(
+				this.eventBus.on(MCP_CONNECTION_STATUS_EVENT_CHANNEL, () => {
+					this.onRequestRender?.();
+				}),
+			);
+		}
+		if (this.mcpManager) {
+			this.#unsubscribers.push(
+				this.mcpManager.addNotificationListener(() => {
+					this.onRequestRender?.();
+				}),
+			);
+			this.#unsubscribers.push(
+				this.mcpManager.addConnectionStatusListener(() => {
+					this.onRequestRender?.();
+				}),
+			);
+			this.#unsubscribers.push(
+				this.mcpManager.addCatalogChangeListener(() => {
+					this.onRequestRender?.();
+				}),
+			);
+		}
+	}
+
+	dispose(): void {
+		for (const unsub of this.#unsubscribers) unsub();
+		this.#unsubscribers = [];
 	}
 }
 
@@ -450,21 +630,29 @@ class TwoColumnBody implements Component {
 		this.#rightScroll = Math.max(0, Math.min(this.#rightScroll + delta, max));
 	}
 
+	pageInspector(delta: -1 | 0 | 1): boolean {
+		if (delta === 0 || this.#rightTotal <= this.#maxHeight) return false;
+		const before = this.#rightScroll;
+		const step = Math.max(1, this.#maxHeight - 1);
+		const max = Math.max(0, this.#rightTotal - this.#maxHeight);
+		this.#rightScroll = Math.max(0, Math.min(this.#rightScroll + delta * step, max));
+		return this.#rightScroll !== before;
+	}
+
 	render(width: number): readonly string[] {
 		const leftWidth = Math.floor(width * 0.5);
 		this.#leftWidth = leftWidth;
 		const rightWidth = Math.max(0, width - leftWidth - 3);
 		const numLines = this.#maxHeight;
+		const inspectorWidth = Math.max(0, rightWidth - 2);
 
 		const leftLines = this.leftPane.render(leftWidth);
-		const rightLines = this.rightPane.render(rightWidth);
+		this.rightPane.setHeight(numLines);
+		const rightLines = this.rightPane.render(inspectorWidth);
 		this.#rightTotal = rightLines.length;
 		const maxScroll = Math.max(0, this.#rightTotal - numLines);
 		if (this.#rightScroll > maxScroll) this.#rightScroll = maxScroll;
 
-		// `totalRows` omitted so the ScrollView windows `rightLines` by the scroll
-		// offset (rather than treating them as a pre-windowed slice) and pads short
-		// content to exactly `numLines`.
 		const rightView = new ScrollView(rightLines, {
 			height: numLines,
 			scrollbar: "auto",

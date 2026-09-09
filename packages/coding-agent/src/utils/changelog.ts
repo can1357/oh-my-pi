@@ -1,5 +1,7 @@
 import * as path from "node:path";
 import { getLastChangelogVersionPath, isEnoent, logger } from "@oh-my-pi/pi-utils";
+import { Lexer } from "@oh-my-pi/pi-utils/marked";
+import type { BunFile } from "bun";
 import bundledChangelogPath from "../../CHANGELOG.md" with { type: "file" };
 import type { SettingValue } from "../config/settings";
 
@@ -58,6 +60,9 @@ function emptyStartupSelection(persistCurrentVersion: boolean): StartupChangelog
 	};
 }
 
+/** Bucket for release bullets written above any `###` category heading, so the breakdown never loses them. */
+const UNCATEGORIZED_CHANGELOG_CATEGORY = "Other";
+
 function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	changeCount: number;
 	categoryCounts: Record<string, number>;
@@ -66,16 +71,22 @@ function summarizeChangelogEntries(entries: readonly ChangelogEntry[]): {
 	let changeCount = 0;
 
 	for (const entry of entries) {
-		let category: string | undefined;
-		for (const line of entry.content.split("\n")) {
-			const heading = line.match(/^###\s+(.+?)\s*$/);
-			if (heading) {
-				category = heading[1];
+		let category = UNCATEGORIZED_CHANGELOG_CATEGORY;
+		// Count what the renderer shows: top-level list items per `###` section, straight
+		// from the shared lexer. There is no parallel list grammar left here to drift.
+		for (const token of Lexer.lex(entry.content)) {
+			if (token.type === "heading" && token.depth === 3) {
+				const name = token.text.trim();
+				category = name === "" ? UNCATEGORIZED_CHANGELOG_CATEGORY : name;
 				continue;
 			}
-			if (!category || !/^-\s+\S/.test(line)) continue;
-			categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
-			changeCount++;
+			if (token.type !== "list") continue;
+			for (const item of token.items) {
+				// A bare marker renders an empty item; it announces no change.
+				if (!item.task && item.text.trim() === "") continue;
+				categoryCounts[category] = (categoryCounts[category] ?? 0) + 1;
+				changeCount++;
+			}
 		}
 	}
 
@@ -197,6 +208,88 @@ function parseChangelogContent(content: string): ChangelogEntry[] {
 	return entries;
 }
 
+async function parseStartupChangelog(
+	changelogPath: string | undefined,
+	lastVersion: ChangelogEntry,
+): Promise<{ entries: ChangelogEntry[]; totalUnseenEntries: number }> {
+	if (changelogPath) {
+		try {
+			return await parseStartupChangelogFile(Bun.file(changelogPath), lastVersion);
+		} catch (error) {
+			if (!isEnoent(error)) {
+				logger.error(`Warning: Could not parse changelog: ${error}`);
+			}
+		}
+	}
+	return parseStartupChangelogFile(
+		Bun.file(resolveBundledChangelogPath(bundledChangelogPath, import.meta.url)),
+		lastVersion,
+	);
+}
+
+async function parseStartupChangelogFile(
+	file: BunFile,
+	lastVersion: ChangelogEntry,
+): Promise<{ entries: ChangelogEntry[]; totalUnseenEntries: number }> {
+	const entries: ChangelogEntry[] = [];
+	let currentVersion: ChangelogEntry | undefined;
+	let currentLines: string[] | undefined;
+	let totalUnseenEntries = 0;
+
+	const finishCurrentEntry = () => {
+		if (currentVersion && currentLines) {
+			entries.push({ ...currentVersion, content: currentLines.join("\n").trim() });
+		}
+		currentVersion = undefined;
+		currentLines = undefined;
+	};
+	const processLine = (line: string): boolean => {
+		if (!line.startsWith("## ")) {
+			currentLines?.push(line);
+			return false;
+		}
+
+		finishCurrentEntry();
+		const versionMatch = line.match(/##\s+\[?(\d+)\.(\d+)\.(\d+)\]?/);
+		if (!versionMatch) return false;
+
+		const version = {
+			major: Number.parseInt(versionMatch[1], 10),
+			minor: Number.parseInt(versionMatch[2], 10),
+			patch: Number.parseInt(versionMatch[3], 10),
+			content: "",
+		};
+		if (compareChangelogEntries(version, lastVersion) <= 0) return true;
+
+		totalUnseenEntries++;
+		if (entries.length < RECENT_CHANGELOG_ENTRY_LIMIT) {
+			currentVersion = version;
+			currentLines = [line];
+		}
+		return false;
+	};
+
+	const decoder = new TextDecoder();
+	let pending = "";
+	const chunkSize = 32 * 1024;
+	for (let start = 0; start < file.size; start += chunkSize) {
+		const end = Math.min(start + chunkSize, file.size);
+		pending += decoder.decode(await file.slice(start, end).arrayBuffer(), { stream: end < file.size });
+		let newlineIndex = pending.indexOf("\n");
+		while (newlineIndex !== -1) {
+			if (processLine(pending.slice(0, newlineIndex))) {
+				return { entries, totalUnseenEntries };
+			}
+			pending = pending.slice(newlineIndex + 1);
+			newlineIndex = pending.indexOf("\n");
+		}
+	}
+	if (pending && !processLine(pending + decoder.decode())) {
+		finishCurrentEntry();
+	}
+	return { entries, totalUnseenEntries };
+}
+
 /**
  * Compare changelog entries by their parsed version parts.
  * Returns: -1 if v1 < v2, 0 if v1 === v2, 1 if v1 > v2
@@ -264,6 +357,32 @@ export function renderChangelogEntries(
 	return { markdown: markdown.slice(0, low) + suffix, truncated: true };
 }
 
+function selectStartupChangelogEntries(
+	newEntries: ChangelogEntry[],
+	totalUnseenEntries: number,
+): StartupChangelogSelection {
+	if (newEntries.length === 0) {
+		return emptyStartupSelection(false);
+	}
+
+	const rendered = renderChangelogEntries(newEntries, {
+		maxBytes: STARTUP_CHANGELOG_MAX_BYTES,
+		truncationHint: STARTUP_CHANGELOG_FULL_HINT,
+		oldestFirst: false,
+	});
+	const summary = summarizeChangelogEntries(newEntries);
+	const latestEntry = newEntries[0];
+	return {
+		markdown: rendered.markdown,
+		persistCurrentVersion: true,
+		truncated: rendered.truncated,
+		selectedEntries: newEntries.length,
+		totalUnseenEntries,
+		latestVersion: latestEntry ? `${latestEntry.major}.${latestEntry.minor}.${latestEntry.patch}` : undefined,
+		...summary,
+	};
+}
+
 /**
  * Select bounded release notes for interactive startup.
  */
@@ -282,27 +401,7 @@ export function selectStartupChangelog(
 	}
 
 	const allNewEntries = getNewEntries(entries, markerVersion);
-	const newEntries = allNewEntries.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT);
-	if (newEntries.length === 0) {
-		return emptyStartupSelection(false);
-	}
-
-	const rendered = renderChangelogEntries(newEntries, {
-		maxBytes: STARTUP_CHANGELOG_MAX_BYTES,
-		truncationHint: STARTUP_CHANGELOG_FULL_HINT,
-		oldestFirst: false,
-	});
-	const summary = summarizeChangelogEntries(newEntries);
-	const latestEntry = newEntries[0];
-	return {
-		markdown: rendered.markdown,
-		persistCurrentVersion: true,
-		truncated: rendered.truncated,
-		selectedEntries: newEntries.length,
-		totalUnseenEntries: allNewEntries.length,
-		latestVersion: latestEntry ? `${latestEntry.major}.${latestEntry.minor}.${latestEntry.patch}` : undefined,
-		...summary,
-	};
+	return selectStartupChangelogEntries(allNewEntries.slice(0, RECENT_CHANGELOG_ENTRY_LIMIT), allNewEntries.length);
 }
 
 /**
@@ -334,9 +433,8 @@ export async function resolveStartupChangelogForDisplay(options: {
 		}
 		return undefined;
 	}
-
-	const entries = await parseChangelog(options.changelogPath);
-	const startupChangelog = selectStartupChangelog(entries, lastVersion, options.currentVersion);
+	const { entries, totalUnseenEntries } = await parseStartupChangelog(options.changelogPath, parsedLastVersion);
+	const startupChangelog = selectStartupChangelogEntries(entries, totalUnseenEntries);
 	if (startupChangelog.persistCurrentVersion) {
 		await writeLastChangelogVersion(options.currentVersion, options.agentDir);
 	}

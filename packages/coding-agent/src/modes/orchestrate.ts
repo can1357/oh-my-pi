@@ -1,3 +1,4 @@
+import { prompt } from "@oh-my-pi/pi-utils";
 import orchestrateNotice from "../prompts/system/orchestrate-notice.md" with { type: "text" };
 import { createGradientHighlighter, type KeywordHighlighter } from "./gradient-highlight";
 import { magicKeywordRegex } from "./magic-keyword-boundary";
@@ -8,8 +9,8 @@ import { keywordInProse } from "./markdown-prose";
  *
  * Typing the standalone word in the input editor paints it with a cool
  * teal→violet gradient ({@link highlightOrchestrate}); submitting a message that
- * mentions it appends a hidden {@link ORCHESTRATE_NOTICE} that switches the model
- * into multi-agent orchestration mode. Matching is prose-delimited and
+ * mentions it appends a hidden {@link renderOrchestrateNotice} notice that switches
+ * the model into multi-agent orchestration mode. Matching is prose-delimited and
  * case-sensitive (lowercase only), so "orchestrated", "Orchestrate", or a path
  * like "orchestrate.ts" never trigger either behavior. Replaces the former
  * `/orchestrate` slash command.
@@ -19,7 +20,9 @@ import { keywordInProse } from "./markdown-prose";
 const ORCHESTRATE_WORD = magicKeywordRegex("orchestrate");
 
 /** Hidden system notice appended after a user message that mentions "orchestrate". */
-export const ORCHESTRATE_NOTICE: string = orchestrateNotice.trim();
+export function renderOrchestrateNotice(options: { tools: readonly string[] }): string {
+	return prompt.render(orchestrateNotice, { tools: options.tools }).trim();
+}
 
 /**
  * Whether `text` contains the standalone keyword "orchestrate" (lowercase,

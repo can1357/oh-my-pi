@@ -38,6 +38,12 @@ struct ShellSessionCore {
 	shell: BrushShell,
 }
 
+impl Drop for ShellSessionCore {
+	fn drop(&mut self) {
+		terminate_internal_background_jobs(&mut self.shell);
+	}
+}
+
 #[derive(Clone, Default)]
 struct ShellAbortState(Arc<TokioMutex<Option<AbortToken>>>);
 
@@ -581,6 +587,63 @@ async fn create_session(config: &ShellConfig) -> Result<ShellSessionCore> {
 	create_session_for_run(config, None, None).await
 }
 
+/// Copies the host environment into `shell`, merging duplicate `PATH` values
+/// and registering the merged `PATH` last.
+///
+/// Entries whose key or value is not valid Unicode are skipped: a corrupt
+/// entry carries no usable meaning, and `std::env::vars()` — the naive way to
+/// read the host environment — panics on the first one before any command can
+/// run. `vars_os()` yields the raw entries without panicking, leaving the
+/// skip decision here.
+fn copy_env_into_shell(
+	shell: &mut BrushShell,
+	env: impl Iterator<Item = (std::ffi::OsString, std::ffi::OsString)>,
+) -> Result<()> {
+	let mut merged_path: Option<String> = None;
+	for (key, value) in env {
+		// A key or value that cannot be decoded as Unicode is unusable; drop
+		// it rather than panicking startup for a corrupt host environment.
+		let (Some(key), Some(value)) = (key.to_str(), value.to_str()) else {
+			continue;
+		};
+		let normalized_key = normalize_env_key(key);
+		if should_skip_env_var(normalized_key) {
+			continue;
+		}
+		if normalized_key == "PATH" {
+			merged_path = Some(match merged_path {
+				Some(existing) => merge_path_values(&existing, value),
+				None => value.to_string(),
+			});
+			continue;
+		}
+		let mut var = ShellVariable::new(ShellValue::String(value.to_string()));
+		var.export();
+		shell
+			.env_mut()
+			.set_global(normalized_key, var)
+			.map_err(|err| Error::msg(format!("Failed to set env: {err}")))?;
+	}
+
+	#[cfg(windows)]
+	if merged_path.is_none()
+		&& let Some(value) = std::env::var_os("Path").or_else(|| std::env::var_os("PATH"))
+	{
+		merged_path = Some(value.to_string_lossy().into_owned());
+	}
+
+	if let Some(path_value) = &merged_path {
+		let mut var = ShellVariable::new(ShellValue::String(path_value.clone()));
+		var.export();
+		shell
+			.env_mut()
+			.set_global("PATH", var)
+			.map_err(|err| Error::msg(format!("Failed to set env: {err}")))?;
+	}
+
+	Ok(())
+}
+
 async fn create_session_for_run(
 	config: &ShellConfig,
 	spawn_registry: Option<Arc<process::SpawnRegistry>>,
@@ -637,42 +700,7 @@ async fn create_session_for_run(
 		}
 	}
 
-	let mut merged_path: Option<String> = None;
-	for (key, value) in std::env::vars() {
-		let normalized_key = normalize_env_key(&key);
-		if should_skip_env_var(normalized_key) {
-			continue;
-		}
-		if normalized_key == "PATH" {
-			merged_path = Some(match merged_path {
-				Some(existing) => merge_path_values(&existing, &value),
-				None => value,
-			});
-			continue;
-		}
-		let mut var = ShellVariable::new(ShellValue::String(value));
-		var.export();
-		shell
-			.env_mut()
-			.set_global(normalized_key, var)
-			.map_err(|err| Error::msg(format!("Failed to set env: {err}")))?;
-	}
-
-	#[cfg(windows)]
-	if merged_path.is_none()
-		&& let Some(value) = std::env::var_os("Path").or_else(|| std::env::var_os("PATH"))
-	{
-		merged_path = Some(value.to_string_lossy().into_owned());
-	}
-
-	if let Some(path_value) = &merged_path {
-		let mut var = ShellVariable::new(ShellValue::String(path_value.clone()));
-		var.export();
-		shell
-			.env_mut()
-			.set_global("PATH", var)
-			.map_err(|err| Error::msg(format!("Failed to set env: {err}")))?;
-	}
+	copy_env_into_shell(&mut shell, std::env::vars_os())?;
 
 	if let Some(env) = config.session_env.as_ref() {
 		for (key, value) in env {
@@ -1408,10 +1436,16 @@ async fn terminate_run(registry: &process::SpawnRegistry) {
 		}
 	}
 }
-fn terminate_background_jobs(shell: &mut BrushShell) {
-	let mut targets = process::TerminationTargets::new();
+fn terminate_internal_background_jobs(shell: &mut BrushShell) {
 	for job in &mut shell.jobs_mut().jobs {
 		job.abort_internal_tasks();
+	}
+}
+
+fn terminate_background_jobs(shell: &mut BrushShell) {
+	let mut targets = process::TerminationTargets::new();
+	terminate_internal_background_jobs(shell);
+	for job in &shell.jobs().jobs {
 		if let Some(pgid) = job.process_group_id() {
 			targets.add_pgid(pgid);
 		}
@@ -1961,6 +1995,58 @@ mod tests {
 		(result, output)
 	}
 
+	/// Regression for issue #8925: a host env entry whose key or value is not
+	/// valid Unicode must be skipped, not fatal. `std::env::vars()` panics on
+	/// the first one (e.g. the corrupt `GHOSTTY_BIN_DIR` cmux/Ghostty stages,
+	/// bytes `9d d9 50`) before any command runs; `copy_env_into_shell` reads
+	/// via `vars_os()` and drops corrupt entries while still copying the rest
+	/// and merging duplicate `PATH` values.
+	#[cfg(unix)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn copy_env_skips_non_utf8_entries_and_merges_path() {
+		use std::os::unix::ffi::OsStringExt;
+
+		let mut shell = BrushShell::builder()
+			.do_not_inherit_env(true)
+			.profile(ProfileLoadBehavior::Skip)
+			.rc(RcLoadBehavior::Skip)
+			.builtins(default_builtins(BuiltinSet::BashMode))
+			.build()
+			.await
+			.expect("build shell");
+
+		// GHOSTTY_BIN_DIR with the corrupt bytes, a normal var, a corrupt key,
+		// and a duplicate PATH — in host-env iteration order.
+		let entries = vec![
+			(std::ffi::OsString::from("PATH"), std::ffi::OsString::from("/usr/bin:/bin")),
+			(
+				std::ffi::OsString::from("GHOSTTY_BIN_DIR"),
+				std::ffi::OsString::from_vec(vec![0x9d, 0xd9, 0x50]),
+			),
+			(std::ffi::OsString::from("HOME"), std::ffi::OsString::from("/home/tester")),
+			(
+				std::ffi::OsString::from_vec(vec![0xff, b'B', b'A', b'D']),
+				std::ffi::OsString::from("x"),
+			),
+			(std::ffi::OsString::from("PATH"), std::ffi::OsString::from("/opt/bin")),
+		];
+		copy_env_into_shell(&mut shell, entries.into_iter()).expect("copy host env");
+
+		let value = |name: &str| {
+			shell
+				.env()
+				.get(name)
+				.and_then(|(_, var)| match var.value() {
+					ShellValue::String(value) => Some(value.clone()),
+					_ => None,
+				})
+		};
+		assert_eq!(value("PATH").as_deref(), Some("/opt/bin"), "PATH is merged/preserved");
+		assert_eq!(value("HOME").as_deref(), Some("/home/tester"), "valid entry copied");
+		assert!(value("GHOSTTY_BIN_DIR").is_none(), "non-UTF-8 value must be skipped");
+		assert!(value("BAD").is_none(), "non-UTF-8 key must be skipped");
+	}
+
 	#[cfg(unix)]
 	async fn wait_for_process_name(pid: i32, expected: &str) {
 		time::timeout(Duration::from_secs(2), async {
@@ -1980,12 +2066,55 @@ mod tests {
 	}
 
 	#[cfg(unix)]
+	fn test_executable(name: &str) -> std::path::PathBuf {
+		use std::os::unix::fs::PermissionsExt as _;
+
+		std::env::var_os("PATH")
+			.and_then(|path| {
+				std::env::split_paths(&path)
+					.map(|directory| directory.join(name))
+					.find(|candidate| {
+						candidate.metadata().is_ok_and(|metadata| {
+							metadata.is_file() && metadata.permissions().mode() & 0o111 != 0
+						})
+					})
+			})
+			.unwrap_or_else(|| panic!("{name} executable on PATH"))
+	}
+
+	#[cfg(unix)]
 	fn process_test_command(prefix: &str) -> (tempfile::TempDir, std::path::PathBuf, String) {
 		let dir = tempfile::tempdir().expect("process test directory");
 		let name = format!("{prefix}{}", std::process::id());
 		let command = dir.path().join(&name);
-		std::os::unix::fs::symlink("/bin/sleep", &command).expect("sleep symlink");
+		let test_binary = std::env::current_exe().expect("current test executable");
+		std::os::unix::fs::symlink(test_binary, &command).expect("test executable symlink");
 		(dir, command, name)
+	}
+
+	#[cfg(unix)]
+	fn process_test_child(command: &std::path::Path, duration: Duration) -> Command {
+		let duration_ms = u64::try_from(duration.as_millis()).expect("test duration fits u64");
+		let mut child = Command::new(command);
+		child
+			.args(["--ignored", "--exact", "shell::tests::process_test_sleeper"])
+			.env("PI_SHELL_PROCESS_TEST_SLEEP_MS", duration_ms.to_string())
+			.stdout(std::process::Stdio::null())
+			.stderr(std::process::Stdio::null());
+		child
+	}
+
+	#[cfg(unix)]
+	#[test]
+	#[ignore = "spawned by process-control tests"]
+	fn process_test_sleeper() {
+		let Ok(duration_ms) = std::env::var("PI_SHELL_PROCESS_TEST_SLEEP_MS") else {
+			return;
+		};
+		let duration_ms = duration_ms
+			.parse()
+			.expect("valid process test sleep duration");
+		std::thread::sleep(Duration::from_millis(duration_ms));
 	}
 
 	#[cfg(unix)]
@@ -2010,8 +2139,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pgrep_matches_name_and_pkills_signal_probe() {
 		let (_dir, command, name) = process_test_command("opg");
-		let mut child = Command::new(command)
-			.arg("30")
+		let mut child = process_test_child(&command, Duration::from_secs(30))
 			.spawn()
 			.expect("matching process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
@@ -2027,7 +2155,7 @@ mod tests {
 		assert_eq!(pgrep_result.exit_code, Some(0));
 		assert_eq!(output, format!("{pid}\n"));
 		assert_eq!(pkill_result.exit_code, Some(0));
-		assert!(pkill_output.is_empty());
+		assert_eq!(pkill_output, "");
 		assert!(still_running, "signal 0 must not terminate a matching process");
 	}
 
@@ -2067,8 +2195,8 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pkill_queue_option_consumes_its_value() {
 		let (_dir, command, name) = process_test_command("opq");
-		let mut command = Command::new(command);
-		command.arg("30").kill_on_drop(true);
+		let mut command = process_test_child(&command, Duration::from_secs(30));
+		command.kill_on_drop(true);
 		let mut child = command.spawn().expect("queue test process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
 		wait_for_process_name(pid, &name).await;
@@ -2086,8 +2214,8 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pkill_interactive_prompt_honors_cancellation() {
 		let (_dir, command, name) = process_test_command("opi");
-		let mut command = Command::new(command);
-		command.arg("30").kill_on_drop(true);
+		let mut command = process_test_child(&command, Duration::from_secs(30));
+		command.kill_on_drop(true);
 		let mut child = command.spawn().expect("interactive target");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
 		wait_for_process_name(pid, &name).await;
@@ -2123,8 +2251,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pgrep_reads_pidfile_from_standard_input() {
 		let (_dir, command, name) = process_test_command("opf");
-		let mut child = Command::new(command)
-			.arg("30")
+		let mut child = process_test_child(&command, Duration::from_secs(30))
 			.spawn()
 			.expect("pidfile process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
@@ -2148,8 +2275,7 @@ mod tests {
 		}
 
 		let (_dir, command, name) = process_test_command("opl");
-		let mut child = Command::new(command)
-			.arg("30")
+		let mut child = process_test_child(&command, Duration::from_secs(30))
 			.spawn()
 			.expect("locked pidfile process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
@@ -2204,12 +2330,10 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pkill_signals_every_matching_process() {
 		let (_dir, command, name) = process_test_command("opk");
-		let mut first = Command::new(&command)
-			.arg("30")
+		let mut first = process_test_child(&command, Duration::from_secs(30))
 			.spawn()
 			.expect("first matching process");
-		let mut second = Command::new(command)
-			.arg("30")
+		let mut second = process_test_child(&command, Duration::from_secs(30))
 			.spawn()
 			.expect("second matching process");
 		let first_pid = i32::try_from(first.id().expect("first pid")).expect("pid fits i32");
@@ -2228,7 +2352,7 @@ mod tests {
 			let _ = second.wait().await;
 		}
 		assert_eq!(result.exit_code, Some(0));
-		assert!(output.is_empty());
+		assert_eq!(output, "");
 		assert!(statuses.is_ok(), "pkill did not signal every matching process");
 	}
 
@@ -2236,8 +2360,7 @@ mod tests {
 	#[tokio::test(flavor = "multi_thread")]
 	async fn pidwait_returns_after_the_matching_process_exits() {
 		let (_dir, command, name) = process_test_command("opw");
-		let mut child = Command::new(command)
-			.arg("0.25")
+		let mut child = process_test_child(&command, Duration::from_millis(250))
 			.spawn()
 			.expect("waited process");
 		let pid = i32::try_from(child.id().expect("child pid")).expect("pid fits i32");
@@ -2250,7 +2373,7 @@ mod tests {
 			let _ = child.wait().await;
 		}
 		assert_eq!(result.exit_code, Some(0));
-		assert!(output.is_empty());
+		assert_eq!(output, "");
 		assert!(status.is_some(), "pidwait returned while its matching process was still running");
 	}
 
@@ -2409,6 +2532,37 @@ mod tests {
 		assert_eq!(result.exit_code, Some(0));
 		assert!(output.contains("rc=141"), "{output:?}");
 		assert!(!output.contains("Broken pipe"), "{output:?}");
+	}
+
+	/// Regression: every ported utility upstream of a stage that quits early
+	/// printed `<name>: Broken pipe (os error 32)` (and `write error`
+	/// variants) and exited 1 — `cut f | sed 'bad'` when sed died at parse
+	/// time, `sed … | head`, `ls | head`. SIGPIPE emulation lives in the host
+	/// boundary, so ports that know nothing about broken pipes must still die
+	/// silently with 141.
+	#[tokio::test(flavor = "multi_thread")]
+	async fn builtins_upstream_of_closed_pipe_are_silent_and_exit_141() {
+		let dir = tempfile::tempdir().expect("tempdir");
+		let file = dir.path().join("big.txt");
+		let file = file.display();
+		// Large enough that the writer is still producing when the reader exits.
+		let cases = [
+			format!("cut -c1-5 '{file}' | sed -n 1-30p"),
+			format!("sed -n p '{file}' | head -n 1 > /dev/null"),
+			format!("sort -n '{file}' | head -n 1 > /dev/null"),
+			format!("uniq '{file}' | head -n 1 > /dev/null"),
+			format!("cat '{file}' | head -n 1 > /dev/null"),
+			format!("tr a-z A-Z < '{file}' | head -n 1 > /dev/null"),
+		];
+		for case in cases {
+			let command =
+				format!("seq 1 200000 > '{file}'; set -o pipefail; {case}; echo rc=${{PIPESTATUS[0]}}");
+			let (result, output) = execute_captured(command).await;
+			assert_eq!(result.exit_code, Some(0), "{case}: {output:?}");
+			assert!(output.contains("rc=141"), "{case}: {output:?}");
+			assert!(!output.contains("Broken pipe"), "{case}: {output:?}");
+			assert!(!output.contains("write error"), "{case}: {output:?}");
+		}
 	}
 
 	/// The kill builtin accepts a numeric signal and applies it to every process
@@ -2869,13 +3023,14 @@ mod tests {
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn kill_builtin_refuses_ancestors_but_not_unrelated_processes() {
-		let (result, output) = execute_captured(
+		let sleep = test_executable("sleep");
+		let command = format!(
 			"parent=$(ps -o ppid= -p $$ | tr -d ' ')\nkill -CONT \"$parent\"; printf \
-			 'ancestor=%s\\n' \"$?\"\n/bin/sleep 30 &\nchild=$!\nkill -TERM \"$child\"; printf \
-			 'child=%s\\n' \"$?\"\nprintf 'survived\\n'"
-				.to_string(),
-		)
-		.await;
+			 'ancestor=%s\\n' \"$?\"\n{} 30 &\nchild=$!\nkill -TERM \"$child\"; printf 'child=%s\\n' \
+			 \"$?\"\nprintf 'survived\\n'",
+			quote_arg(sleep.to_str().expect("utf8 sleep path"))
+		);
+		let (result, output) = execute_captured(command).await;
 		assert_eq!(result.exit_code, Some(0), "the shell must survive: {output:?}");
 		assert!(output.contains("survived"), "{output:?}");
 		assert!(
@@ -3012,11 +3167,14 @@ mod tests {
 		// An identity "compressor" that also proves it was started with the
 		// shell's working directory and reaches the command's stderr.
 		let shim = bin.join("pi-test-compress");
-		std::fs::write(
-			&shim,
-			"#!/bin/sh\nprintf 'compressor cwd=%s\\n' \"$PWD\" >&2\nexec /bin/cat\n",
-		)
-		.expect("write shim");
+		let shell = test_executable("sh");
+		let cat = test_executable("cat");
+		let shim_source = format!(
+			"#!{}\nprintf 'compressor cwd=%s\\n' \"$PWD\" >&2\nexec {}\n",
+			shell.display(),
+			quote_arg(cat.to_str().expect("utf8 cat path"))
+		);
+		std::fs::write(&shim, shim_source).expect("write shim");
 		std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).expect("chmod shim");
 
 		// Enough distinct lines that the 1K buffer forces spilling through the
@@ -3123,6 +3281,56 @@ mod tests {
 		let _ = std::fs::remove_dir_all(&tmp);
 	}
 
+	/// `command -v`/`-V` must iterate over every operand like bash/zsh, printing
+	/// one line per name that resolves and skipping the misses, rather than
+	/// honoring only the first operand. Regression test for silently dropped
+	/// operands in `command -v a b c` (issue #10544).
+	#[tokio::test(flavor = "multi_thread")]
+	async fn command_v_iterates_all_operands() {
+		let tmp = std::env::temp_dir().join(format!("pi-command-v-{}", std::process::id()));
+		let _ = std::fs::remove_dir_all(&tmp);
+		std::fs::create_dir_all(&tmp).expect("temp dir");
+		let tmp_str = tmp.to_str().expect("utf8 temp path");
+
+		let config = ShellConfig { session_env: None, snapshot_path: None, minimizer: None };
+		let mut session = create_session(&config).await.expect("create_session");
+		session.shell.set_working_dir(tmp_str).expect("set cwd");
+
+		let mut params = session.shell.default_exec_params();
+		params.set_fd(OpenFiles::STDIN_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDOUT_FD, null_file().expect("null"));
+		params.set_fd(OpenFiles::STDERR_FD, null_file().expect("null"));
+
+		let source_info = SourceInfo::from("pi-natives:test");
+
+		// Three always-registered builtins plus a name that never resolves. bash
+		// prints one line per resolved builtin and skips the miss, exiting 0.
+		let exec = session
+			.shell
+			.run_string("command -v true false pwd nope-xyz-10544 > out.txt", &source_info, &params)
+			.await
+			.expect("run_string");
+		assert_eq!(exit_code(&exec), 0, "command -v exit code with a resolvable name");
+
+		let out = std::fs::read_to_string(tmp.join("out.txt")).expect("out.txt");
+		let lines: Vec<&str> = out.lines().collect();
+		assert_eq!(
+			lines,
+			vec!["true", "false", "pwd"],
+			"command -v must print one line per resolved operand and skip misses: {out:?}"
+		);
+
+		// When no operand resolves, the exit status is a general error.
+		let exec = session
+			.shell
+			.run_string("command -v nope-a-10544 nope-b-10544", &source_info, &params)
+			.await
+			.expect("run_string");
+		assert_eq!(exit_code(&exec), 1, "command -v exit code when nothing resolves");
+
+		let _ = std::fs::remove_dir_all(&tmp);
+	}
+
 	/// Every utility `pi-builtins` offers must actually be dispatchable in
 	/// process, under the name it is registered as.
 	///
@@ -3160,6 +3368,7 @@ mod tests {
 			"base64",
 			"basename",
 			"cat",
+			"cksum",
 			"cmp",
 			"combine",
 			"comm",
@@ -3496,11 +3705,7 @@ mod tests {
 			.await
 			.expect("run_string head bad flag");
 		assert_ne!(exit_code(&bad), 0, "invalid flag should be a usage error");
-		assert!(
-			!std::fs::read_to_string(tmp.join("err.txt"))
-				.expect("err.txt")
-				.is_empty()
-		);
+		assert_ne!(std::fs::read_to_string(tmp.join("err.txt")).expect("err.txt"), "");
 
 		let _ = std::fs::remove_dir_all(&tmp);
 	}
@@ -4405,7 +4610,7 @@ mod tests {
 		.expect("process substitution should not hang");
 
 		assert_eq!(result.exit_code, Some(1));
-		assert!(output.contains("-a\n+b\n"), "diff output missing changed lines: {output:?}");
+		assert!(output.contains("< a\n---\n> b\n"), "diff output missing changed lines: {output:?}");
 	}
 
 	#[cfg(unix)]
@@ -4432,13 +4637,40 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		}
 	}
 
+	#[tokio::test(flavor = "multi_thread")]
+	async fn one_shot_completion_aborts_internal_background_jobs() {
+		let marker = tempfile::NamedTempFile::new().expect("marker file");
+		let marker_path = marker.path().to_string_lossy();
+		std::fs::remove_file(marker.path()).expect("remove initial marker");
+		let command = format!("{{ sleep 1; echo leaked > {}; }} &", quote_arg(&marker_path));
+
+		execute_shell(
+			ShellExecuteOptions { command, ..Default::default() },
+			None,
+			CancelToken::default(),
+		)
+		.await
+		.expect("one-shot shell execution");
+		// `execute_shell` returns after its short post-exit idle drain (~250ms),
+		// while the background job cannot write the marker until its 1s sleep
+		// elapses. Wait well past that delay so a job that outlived the dropped
+		// session has demonstrably had its chance to run — the pre-fix leak fires
+		// at ~1s and is caught here; the fixed path aborts the task on drop and the
+		// marker never appears.
+		time::sleep(Duration::from_millis(2000)).await;
+
+		assert!(
+			!marker.path().exists(),
+			"an internal background job outlived its one-shot shell session"
+		);
+	}
+
 	/// `live_background_job_count` reports 0 when the session has no live
 	/// external background jobs and 1 while one is running. The host relies on
 	/// this to retain a per-call shell whose `&`/`nohup` child is still alive
 	/// instead of dropping it (which would SIGKILL the child via kill-on-drop).
-	/// Path-qualified `/bin/sleep` is used so it spawns a real external process
-	/// (the bare `sleep` builtin runs in-process and is intentionally not
-	/// counted).
+	/// `sh -c` forces an external process because the bare `sleep` builtin runs
+	/// in-process and is intentionally not counted.
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn live_background_job_count_tracks_external_background_jobs() {
@@ -4462,7 +4694,7 @@ replace = [{ pattern = "hello", replacement = "HI" }]
 		// An external background process is tracked while it runs.
 		shell
 			.run(
-				ShellRunOptions { command: "/bin/sleep 30 &".into(), ..Default::default() },
+				ShellRunOptions { command: "sh -c 'sleep 30' &".into(), ..Default::default() },
 				None,
 				CancelToken::default(),
 			)
@@ -4600,7 +4832,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let root = unique_temp_dir("heredoc-chain");
 		let minimizer = printf_minimizer(&root.join("minimizer.toml"), None);
 		let (result, output) = run_command_capture(
-			"/bin/cat <<'PY'\nhello $USER\nPY\nprintf 'after\\n'",
+			"cat <<'PY'\nhello $USER\nPY\nprintf 'after\\n'",
 			None,
 			Some(minimizer),
 			CancelToken::default(),
@@ -4805,7 +5037,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			// `printf '%d\n' "$$"` then `sleep 0.5`. Long enough for our `getsid`.
 			let exec = session
 				.shell
-				.run_string("/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &source_info, &params)
+				.run_string("sh -c 'printf \"%d\\n\" \"$$\"; sleep 0.5'", &source_info, &params)
 				.await
 				.expect("run_string");
 			drop(params);
@@ -4870,7 +5102,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			shell_b
 				.run(
 					ShellRunOptions {
-						command: "/bin/sh -c 'printf \"ready\\n\"; sleep 30'".into(),
+						command: "sh -c 'printf \"ready\\n\"; sleep 30'".into(),
 						..Default::default()
 					},
 					Some(tx_b),
@@ -4902,7 +5134,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 			shell_a
 				.run(
 					ShellRunOptions {
-						command: "/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
+						command: "sh -c 'printf \"%d\\n\" \"$$\"; sleep 2'".into(),
 						..Default::default()
 					},
 					Some(tx_a),
@@ -4963,9 +5195,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let escaped_pid_path = pid_path.to_string_lossy().replace('\'', "'\\''");
 		std::fs::write(
 			&snapshot_path,
-			format!(
-				"/bin/sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"
-			),
+			format!("sh -c 'printf \"%d\\n\" \"$$\" > \"$1\"; sleep 30' sh '{escaped_pid_path}'\n"),
 		)
 		.expect("write snapshot file");
 
@@ -5018,7 +5248,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 		let child_dead = time::timeout(Duration::from_secs(5), async {
 			loop {
-				// SAFETY: `child_pid` came from the foreground `/bin/sh` spawned by the
+				// SAFETY: `child_pid` came from the foreground `sh` spawned by the
 				// snapshot; `kill(pid, 0)` only probes whether that process still exists.
 				let kill_result = unsafe { libc::kill(child_pid, 0) };
 				if kill_result == -1 {
@@ -5108,14 +5338,14 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 
 		let shell_handle = tokio::spawn(async move {
 			let source_info = SourceInfo::from("pi-natives:test");
-			// First stage prints its own PID and sleeps; `cat` forwards the PID
-			// line to our reader and exits on EOF. The first stage leads the
-			// pipeline's process group, the second (`cat`) is the join-or-detach
-			// stage that would EPERM without the wiring fix.
+			// First stage prints its own PID and sleeps; `sh -c cat` forwards
+			// the PID line to our reader and exits on EOF. The first stage
+			// leads the pipeline's process group, while the second stage is the
+			// join-or-detach process that would EPERM without the wiring fix.
 			let exec = session
 				.shell
 				.run_string(
-					"/bin/sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | /bin/cat",
+					"sh -c 'printf \"%d\\n\" \"$$\"; sleep 1' | sh -c cat",
 					&source_info,
 					&params,
 				)
@@ -5170,7 +5400,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_accepts_last_background_process_id() {
 		let options = ShellExecuteOptions {
-			command: "/bin/sh -c 'exit 7' & mover=$!; wait \"$mover\"".to_string(),
+			command: "sh -c 'exit 7' & mover=$!; wait \"$mover\"".to_string(),
 			..Default::default()
 		};
 
@@ -5187,9 +5417,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_n_p_records_completed_process_id() {
 		let options = ShellExecuteOptions {
-			command: "/bin/sh -c 'sleep 0.2; exit 42' & slow=$!; /bin/sh -c 'exit 13' & fast=$!; \
-			          wait -n -p hit \"$slow\" \"$fast\"; status=$?; wait \"$slow\"; [ \"$status\" \
-			          -eq 13 ] && [ \"$hit\" = \"$fast\" ]"
+			command: "sh -c 'sleep 0.2; exit 42' & slow=$!; sh -c 'exit 13' & fast=$!; wait -n -p \
+			          hit \"$slow\" \"$fast\"; status=$?; wait \"$slow\"; [ \"$status\" -eq 13 ] && \
+			          [ \"$hit\" = \"$fast\" ]"
 				.to_string(),
 			..Default::default()
 		};
@@ -5207,7 +5437,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn wait_f_accepts_process_id() {
 		let options = ShellExecuteOptions {
-			command: "/bin/sh -c 'exit 5' & child=$!; wait -f \"$child\"".to_string(),
+			command: "sh -c 'exit 5' & child=$!; wait -f \"$child\"".to_string(),
 			..Default::default()
 		};
 
@@ -5350,13 +5580,9 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	#[cfg(unix)]
 	#[tokio::test(flavor = "multi_thread")]
 	async fn quoted_heredoc_without_trailing_newline_runs() {
-		let (result, output) = run_command_capture(
-			"/bin/cat <<'PY'\nhello $USER\nPY",
-			None,
-			None,
-			CancelToken::default(),
-		)
-		.await;
+		let (result, output) =
+			run_command_capture("cat <<'PY'\nhello $USER\nPY", None, None, CancelToken::default())
+				.await;
 
 		assert_eq!(result.exit_code, Some(0));
 		assert_eq!(output, "hello $USER\n");
@@ -5397,7 +5623,7 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 		let command = if cfg!(windows) {
 			"nohup cmd /C exit 7"
 		} else {
-			"nohup /bin/sh -c 'exit 7'"
+			"nohup sh -c 'exit 7'"
 		};
 		let options = ShellExecuteOptions { command: command.to_string(), ..Default::default() };
 		let result = execute_shell(options, None, CancelToken::default())
@@ -5415,8 +5641,8 @@ replace = [{ pattern = "^.+$", replacement = "PWD" }]
 	async fn nohup_background_captures_operand_pid() {
 		let (tx, rx) = flume::unbounded::<String>();
 		let options = ShellExecuteOptions {
-			command: "nohup /bin/sh -c 'exit 0' >/dev/null 2>&1 & pid=$!; printf 'pid=%s\n' \
-			          \"$pid\"; test -n \"$pid\""
+			command: "nohup sh -c 'exit 0' >/dev/null 2>&1 & pid=$!; printf 'pid=%s\n' \"$pid\"; \
+			          test -n \"$pid\""
 				.to_string(),
 			..Default::default()
 		};

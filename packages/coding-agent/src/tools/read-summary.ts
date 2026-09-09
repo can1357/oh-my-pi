@@ -52,21 +52,26 @@ export function routeReadThroughBridge(
 	if (!bridge?.capabilities.readTextFile || !bridge.readTextFile) return undefined;
 	return bridge.readTextFile({ path: absolutePath, ...options });
 }
+/**
+ * Structural summary of `absolutePath`, or `null` when the file is too large,
+ * too short, or unparseable. `diskText` lets a caller that already read the file
+ * hand those bytes over instead of forcing a second read; an ACP bridge still
+ * wins, since the editor's buffer is the source of truth.
+ */
 export async function trySummarize(
 	session: ToolSession,
 	absolutePath: string,
 	fileSize: number,
 	signal?: AbortSignal,
+	diskText?: string,
 ): Promise<SummaryResult | null> {
 	if (fileSize > MAX_SUMMARY_BYTES) return null;
 
 	try {
 		throwIfAborted(signal);
 		const bridgePromise = routeReadThroughBridge(session, absolutePath);
-		const code =
-			bridgePromise !== undefined
-				? await bridgePromise.catch(() => Bun.file(absolutePath).text())
-				: await Bun.file(absolutePath).text();
+		const readDisk = async () => diskText ?? (await Bun.file(absolutePath).text());
+		const code = bridgePromise !== undefined ? await bridgePromise.catch(readDisk) : await readDisk();
 		throwIfAborted(signal);
 		const lineCount = countTextLines(code);
 		if (lineCount > MAX_SUMMARY_LINES) return null;

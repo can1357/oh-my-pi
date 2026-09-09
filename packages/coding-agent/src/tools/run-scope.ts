@@ -38,7 +38,7 @@ interface ObservedPromiseState {
 const observedBrowserPromises = new WeakMap<Promise<unknown>, ObservedPromiseState>();
 const observedPromiseConstructor = { [Symbol.species]: Promise };
 
-type PromiseCombinatorName = "all" | "race";
+type PromiseCombinatorName = "all" | "race" | "allSettled" | "any";
 type PromiseCombinator = (this: PromiseConstructor, values: Iterable<unknown>) => Promise<unknown>;
 
 interface PromiseCombinatorTrackingContext {
@@ -46,11 +46,13 @@ interface PromiseCombinatorTrackingContext {
 	onFloatingRejection: FloatingRejectionHandler;
 }
 
-const PROMISE_COMBINATORS: readonly PromiseCombinatorName[] = ["all", "race"];
+const PROMISE_COMBINATORS: readonly PromiseCombinatorName[] = ["all", "race", "allSettled", "any"];
 const NativePromise = Promise;
 const nativePromiseCombinators: Record<PromiseCombinatorName, PromiseCombinator> = {
 	all: Promise.all,
 	race: Promise.race,
+	allSettled: Promise.allSettled,
+	any: Promise.any,
 };
 const promiseCombinatorTracking = new AsyncLocalStorage<PromiseCombinatorTrackingContext>();
 let previousPromiseDescriptor: PropertyDescriptor | undefined;
@@ -172,13 +174,13 @@ function observeBrowserRunPromiseWithState<T>(
 	});
 	Object.defineProperties(promise, {
 		constructor: { configurable: true, value: observedPromiseConstructor },
-		// biome-ignore lint/suspicious/noThenProperty: native Promise continuations must remain thenable.
+		// oxlint-disable-next-line unicorn/no-thenable -- native Promise continuations must remain thenable.
 		then: {
 			configurable: true,
-			value: <TResult1 = T, TResult2 = never>(
-				onFulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
-				onRejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
-			): Promise<TResult1 | TResult2> => {
+			value: <R1 = T, R2 = never>(
+				onFulfilled?: ((value: T) => R1 | PromiseLike<R1>) | null,
+				onRejected?: ((reason: unknown) => R2 | PromiseLike<R2>) | null,
+			): Promise<R1 | R2> => {
 				state.handled = true;
 				const childState = createContinuationState();
 				return observeBrowserRunPromiseWithState(
@@ -194,9 +196,7 @@ function observeBrowserRunPromiseWithState<T>(
 		},
 		catch: {
 			configurable: true,
-			value: <TResult = never>(
-				onRejected?: ((reason: unknown) => TResult | PromiseLike<TResult>) | null,
-			): Promise<T | TResult> => {
+			value: <R = never>(onRejected?: ((reason: unknown) => R | PromiseLike<R>) | null): Promise<T | R> => {
 				state.handled = true;
 				const childState = createContinuationState();
 				return observeBrowserRunPromiseWithState(
@@ -228,10 +228,10 @@ function createContinuationState(): ObservedPromiseState {
 	return { handled: false, userContinuationFailed: false };
 }
 
-function recordContinuationFailure<TArgs extends unknown[], TResult>(
-	continuation: ((...args: TArgs) => TResult | PromiseLike<TResult>) | null | undefined,
+function recordContinuationFailure<TArgs extends unknown[], R>(
+	continuation: ((...args: TArgs) => R | PromiseLike<R>) | null | undefined,
 	state: ObservedPromiseState,
-): ((...args: TArgs) => TResult | PromiseLike<TResult>) | null | undefined {
+): ((...args: TArgs) => R | PromiseLike<R>) | null | undefined {
 	if (!continuation) return continuation;
 	return (...args) => {
 		try {
@@ -240,7 +240,7 @@ function recordContinuationFailure<TArgs extends unknown[], TResult>(
 			return Promise.resolve(result).catch(reason => {
 				state.userContinuationFailed = true;
 				throw reason;
-			}) as PromiseLike<TResult>;
+			}) as PromiseLike<R>;
 		} catch (reason) {
 			state.userContinuationFailed = true;
 			throw reason;

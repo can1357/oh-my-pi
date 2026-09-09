@@ -8,10 +8,10 @@
  * tests to spy on.
  */
 
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import { isTimeoutError, withTimeoutSignal } from "../utils/fetch-timeout";
 import type { HindsightConfig } from "./config";
 
-const USER_AGENT = "oh-my-pi-coding-agent";
 const DEFAULT_USER_AGENT = USER_AGENT;
 /** Fallback deadlines (ms) applied when the caller supplies no override. */
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;

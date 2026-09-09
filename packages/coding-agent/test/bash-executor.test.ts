@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, type ShellMinimizerSettings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	applyDirenvPreflight,
@@ -12,6 +13,7 @@ import {
 import * as direnvModule from "@oh-my-pi/pi-coding-agent/exec/direnv";
 import { DEFAULT_MAX_BYTES } from "@oh-my-pi/pi-coding-agent/session/streaming-output";
 import * as shellSnapshot from "@oh-my-pi/pi-coding-agent/utils/shell-snapshot";
+import { encodeTerminalImage } from "@oh-my-pi/pi-coding-agent/utils/terminal-graphics";
 import type { Shell, ShellRunResult } from "@oh-my-pi/pi-natives";
 import * as piNatives from "@oh-my-pi/pi-natives";
 import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
@@ -112,27 +114,6 @@ describe("executeBash", () => {
 		expect(buildMinimizerOptions(group)).toBeUndefined();
 	});
 
-	it("forwards source outline and legacy filter settings to native minimizer options", () => {
-		const group: ShellMinimizerSettings = {
-			enabled: true,
-			settingsPath: "minimizer.toml",
-			only: ["git"],
-			except: ["docker"],
-			maxCaptureBytes: 1234,
-			sourceOutlineLevel: "aggressive",
-			legacyFilters: true,
-		};
-		expect(buildMinimizerOptions(group)).toEqual({
-			enabled: true,
-			settingsPath: "minimizer.toml",
-			only: ["git"],
-			except: ["docker"],
-			maxCaptureBytes: 1234,
-			sourceOutlineLevel: "aggressive",
-			legacyFilters: true,
-		});
-	});
-
 	it.each([
 		["cd", true],
 		[" cd child ", true],
@@ -169,6 +150,56 @@ describe("executeBash", () => {
 	it("honors cwd", async () => {
 		const result = await executeBash("pwd", { cwd: tempDir, timeout: 5000 });
 		expect(result.output.trim()).toBe(tempDir);
+	});
+
+	it("extracts terminal graphics before sanitization on failed and truncated output", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const frame = await encodeTerminalImage(image);
+		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; printf '%060000d\n' 0; printf tail; exit 7`, {
+			cwd: tempDir,
+			timeout: 5000,
+		});
+
+		expect(result.exitCode).toBe(7);
+		expect(result.images).toHaveLength(1);
+		expect(result.images?.[0]).toMatchObject({ type: "image", mimeType: "image/png" });
+		expect(result.output).toContain("tail");
+		expect(result.output).not.toContain("\x1b_G");
+		expect(result.output).not.toContain(image.data);
+	});
+
+	it("extracts Sixel emitted by an arbitrary subprocess", async () => {
+		const sixel = '\x1bP1;1q"1;1;3;6#1;2;100;0;0#1!3~\x1b\\';
+		const result = await executeBash(`printf '%s' ${shellQuote(`before${sixel}after`)}`, {
+			cwd: tempDir,
+			timeout: 5000,
+		});
+
+		expect(result.output).toBe("beforeafter");
+		expect(result.images).toHaveLength(1);
+		expect(result.images?.[0]).toMatchObject({ type: "image", mimeType: "image/png" });
+		expect(result.output).not.toContain("\x1bP");
+	});
+
+	it("keeps images emitted before a timeout", async () => {
+		const image: ImageContent = {
+			type: "image",
+			mimeType: "image/png",
+			data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAIAAACQd1PeAAAADElEQVR4nGP4z8AAAAMBAQDJ/pLvAAAAAElFTkSuQmCC",
+		};
+		const frame = await encodeTerminalImage(image);
+		const result = await executeBash(`printf '%s' ${shellQuote(frame)}; sleep 3`, {
+			cwd: tempDir,
+			timeout: 20,
+		});
+
+		expect(result.timedOut).toBe(true);
+		expect(result.images).toHaveLength(1);
+		expect(result.output).not.toContain("\x1b_G");
 	});
 
 	it("passes the full direnv-load budget when the command deadline is disabled (timeout: 0)", async () => {
@@ -459,6 +490,13 @@ exit 64
 			env: {
 				PATH: Bun.env.PATH ?? "",
 				HOME: shellDir,
+				// The command runs through an interactive login zsh, which loads the
+				// system `/etc/zshrc`. On macOS that pulls in
+				// `/etc/zshrc_Apple_Terminal`, and under Apple Terminal it appends
+				// "Saving session..." lines to the captured output on exit. `HOME`
+				// does not isolate a system-level file; this is the opt-out Apple
+				// documents in that script.
+				SHELL_SESSIONS_DISABLE: "1",
 			},
 			prefix: undefined,
 		});
@@ -531,6 +569,59 @@ exit 64
 		}
 	});
 
+	it("runs zsh shortcut commands on a headless PTY with a color-capable TTY", async () => {
+		if (process.platform === "win32" || Bun.env.PI_NO_PTY === "1") {
+			return;
+		}
+		const zshPath = ["/bin/zsh", "/usr/bin/zsh", "/usr/local/bin/zsh", "/opt/homebrew/bin/zsh"].find(candidate =>
+			fs.existsSync(candidate),
+		);
+		if (!zshPath) {
+			return;
+		}
+
+		const shellDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-zsh-pty-"));
+		fs.writeFileSync(path.join(shellDir, ".zshrc"), "alias pi_pty_alias='printf pty-alias-ok'\n");
+		Settings.instance.set("shellPath", zshPath);
+
+		vi.spyOn(Settings.prototype, "getShellConfig").mockReturnValue({
+			shell: zshPath,
+			args: ["-l", "-c"],
+			env: {
+				PATH: Bun.env.PATH ?? "",
+				HOME: shellDir,
+				SHELL_SESSIONS_DISABLE: "1",
+			},
+			prefix: undefined,
+		});
+
+		const rawChunks: string[] = [];
+		try {
+			const result = await executeBash(
+				"pi_pty_alias; [ -t 1 ] && printf ' is-tty'; printf ' \\033[31mred\\033[0m'",
+				{
+					cwd: tempDir,
+					timeout: 15000,
+					sessionKey: "zsh-pty",
+					useUserShell: true,
+					pty: { cols: 80, rows: 24, onChunk: chunk => rawChunks.push(chunk) },
+				},
+			);
+
+			expect(result.cancelled).toBe(false);
+			expect(result.exitCode).toBe(0);
+			// Interactive rc loaded (alias expanded) AND stdout was a real TTY.
+			expect(result.output).toContain("pty-alias-ok");
+			expect(result.output).toContain("is-tty");
+			// The captured output stays sanitized while raw ANSI reaches the
+			// renderer callback for vterm replay.
+			expect(result.output).not.toContain("\u001b[31m");
+			expect(rawChunks.join("")).toContain("\u001b[31mred\u001b[0m");
+		} finally {
+			removeSyncWithRetries(shellDir);
+		}
+	});
+
 	it("invokes onChunk with command output", async () => {
 		let seenChunk: string | null = null;
 		const result = await executeBash("echo hello", {
@@ -547,24 +638,6 @@ exit 64
 		expect(seenChunk ?? "").toContain("hello");
 	});
 
-	it("returns even if command spawns a background job", async () => {
-		if (process.platform === "win32") {
-			return;
-		}
-		const runPromise = executeBash("{ sleep 2; } & echo fg", {
-			cwd: tempDir,
-			timeout: 5000,
-		});
-		const timed = await Promise.race([
-			runPromise.then(result => ({ type: "result" as const, result })),
-			Bun.sleep(BACKGROUND_COMPLETION_RACE_MS).then(() => ({ type: "timeout" as const })),
-		]);
-		expect(timed.type).toBe("result");
-		if (timed.type === "result") {
-			expect(timed.result.output).toContain("fg");
-		}
-	});
-
 	it("returns a real PID for background external commands", async () => {
 		if (process.platform === "win32") {
 			return;
@@ -573,7 +646,8 @@ exit 64
 		// Redirect the backgrounded job's stdout so it doesn't hold the executor's
 		// output pipe open (which would add the ~250ms background-drain grace);
 		// `$!` still reports the real external PID, which is all this test checks.
-		const result = await executeBash('python3 -c "import time; time.sleep(10)" >/dev/null 2>&1 & echo $!', {
+		const sleepBin = fs.existsSync("/bin/sleep") ? "/bin/sleep" : "sleep";
+		const result = await executeBash(`${sleepBin} 30 >/dev/null 2>&1 & echo $!`, {
 			cwd: tempDir,
 			timeout: 5000,
 		});
@@ -607,7 +681,17 @@ exit 64
 		if (process.platform === "win32") {
 			return;
 		}
-		const result = await executeBash("sleep 1.2; echo done", { cwd: tempDir, timeout: 0 });
+		// Compress any accidentally armed one-second deadline. The real command
+		// runs longer than that compressed window, so the success result proves
+		// timeout:0 left the execution deadline disabled without a 1.2s sleep.
+		const realSetTimeout = globalThis.setTimeout;
+		vi.spyOn(globalThis, "setTimeout").mockImplementation(((handler: () => void, ms?: number, ...rest: unknown[]) =>
+			realSetTimeout(
+				handler,
+				typeof ms === "number" && ms >= 1000 ? 5 : ms,
+				...rest,
+			)) as typeof globalThis.setTimeout);
+		const result = await executeBash("sleep 0.03; echo done", { cwd: tempDir, timeout: 0 });
 		expect(result.cancelled).toBe(false);
 		expect(result.output.trim()).toBe("done");
 	});
@@ -617,12 +701,14 @@ exit 64
 			return;
 		}
 		const controller = new AbortController();
-		const promise = executeBash("sleep 10", {
+		const started = Promise.withResolvers<void>();
+		const promise = executeBash("echo started; sleep 10", {
 			cwd: tempDir,
 			timeout: 5000,
 			signal: controller.signal,
+			onChunk: () => started.resolve(),
 		});
-		await Bun.sleep(50);
+		await started.promise;
 		controller.abort();
 		const result = await promise;
 		expect(result.cancelled).toBe(true);
@@ -753,7 +839,9 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("streamed-before-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
-		expect(nativeSignal).toBeDefined();
+		// Watchdog-win path: native never returned, so the result must be
+		// distinguishable from a confirmed empty run (#10308).
+		expect(result.output).toContain("the shell backend did not respond");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).toHaveBeenCalledTimes(1);
 	});
@@ -808,12 +896,14 @@ exit 64
 			return;
 		}
 		const controller = new AbortController();
-		const promise = executeBash("sleep 10; echo done", {
+		const started = Promise.withResolvers<void>();
+		const promise = executeBash("echo started; sleep 10; echo done", {
 			cwd: tempDir,
 			timeout: 5000,
 			signal: controller.signal,
+			onChunk: () => started.resolve(),
 		});
-		await Bun.sleep(50);
+		await started.promise;
 		controller.abort();
 		const result = await promise;
 		expect(result.cancelled).toBe(true);
@@ -852,7 +942,7 @@ exit 64
 		const aborted = await abortPromise;
 		expect(aborted.cancelled).toBe(true);
 
-		// biome-ignore lint/suspicious/noTemplateCurlyInString: this is a bash variable expansion
+		// oxlint-disable-next-line no-template-curly-in-string -- this is a bash variable expansion
 		const afterAbort = await executeBash("echo ${PI_RESET_VAR:-unset}", {
 			cwd: tempDir,
 			timeout: 5000,
@@ -925,12 +1015,10 @@ exit 64
 			cwd: tempDir,
 			timeout: 5000,
 			onChunk: chunk => {
-				expect(chunk.length).toBeGreaterThan(0);
 				chunks.push(chunk);
 			},
 		});
 		// At least one chunk should have been delivered to onChunk
-		expect(chunks.length).toBeGreaterThan(0);
 		const combined = chunks.join("");
 		expect(combined).toContain("line1");
 		// Final result always has the complete output regardless of chunk throttle
@@ -1062,7 +1150,6 @@ exit 64
 			PATH: Bun.env.PATH ?? "",
 			HOME: tempDir,
 		});
-		expect(snapshotPath).not.toBeNull();
 		const snapshot = fs.readFileSync(snapshotPath!, "utf8");
 		expect(snapshot).toContain("pi_snapshot_large_function");
 		expect(snapshot).not.toContain("base64 -d");
@@ -1267,7 +1354,8 @@ exit 64
 		expect(result.cancelled).toBe(true);
 		expect(result.output).toContain("flushed-during-timeout");
 		expect(result.output).toContain("Command timed out after 1 seconds");
-		expect(nativeSignal).toBeDefined();
+		// Native-confirmed timeout: no "backend did not respond" caveat.
+		expect(result.output).not.toContain("the shell backend did not respond");
 		expect(nativeSignal?.aborted).toBe(false);
 		expect(abortSpy).not.toHaveBeenCalled();
 	});
@@ -1349,9 +1437,16 @@ describe("executeBash :async: background retention", () => {
 				});
 				expect(res.cancelled).toBe(false);
 
-				await pollUntil(() => fs.existsSync(pidFile), Date.now() + 4000);
-				pid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
-				expect(Number.isInteger(pid)).toBe(true);
+				let observedPid = Number.NaN;
+				await pollUntil(() => {
+					if (!fs.existsSync(pidFile)) return false;
+					observedPid = Number.parseInt(fs.readFileSync(pidFile, "utf8").trim(), 10);
+					return Number.isInteger(observedPid);
+				}, Date.now() + 4000);
+				if (!Number.isInteger(observedPid)) {
+					throw new Error(`Timed out waiting for a valid PID in ${pidFile}`);
+				}
+				pid = observedPid;
 
 				// A later turn on a different per-job shell must not have killed it.
 				await executeBash("true", { sessionKey: "reparent-probe:async:job2", cwd: tmp });

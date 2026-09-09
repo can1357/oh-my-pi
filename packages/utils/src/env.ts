@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { getAgentDir, getConfigRootDir, refreshDirsFromEnv } from "./dirs";
+import { getAgentDir, getConfigRootDir, getProjectDir, refreshDirsFromEnv } from "./dirs";
 
 export * from "./worker-host";
 
@@ -34,6 +34,18 @@ export function isSafeEnvValue(value: string): boolean {
 
 export function isMacosMallocStackLoggingEnvName(name: string): boolean {
 	return name === "MallocStackLogging" || name === "MallocStackLoggingNoCompact";
+}
+
+/**
+ * True when running inside a WSL (Windows Subsystem for Linux) distribution.
+ *
+ * WSL reports `linux` for `process.platform`, so the only reliable signal is
+ * the `WSL_DISTRO_NAME`/`WSL_INTEROP` variables the interop layer injects.
+ * Callers use this to translate Windows drive paths to their `/mnt/<drive>`
+ * mounts and to route clipboard access through `powershell.exe`.
+ */
+export function isWsl(platform: NodeJS.Platform = process.platform, env: NodeJS.ProcessEnv = process.env): boolean {
+	return platform === "linux" && Boolean(env.WSL_DISTRO_NAME || env.WSL_INTEROP);
 }
 
 export function filterProcessEnv(env: Record<string, string | undefined>): Record<string, string> {
@@ -100,37 +112,69 @@ export function filterChildShellEnv(
 	env: Record<string, string | undefined>,
 	cwd: string = process.cwd(),
 ): Record<string, string> {
+	const runtimeLaunchEnvValues = env === Bun.env || env === process.env ? launchEnvValues : undefined;
 	const result = filterProcessEnv(env);
 	const projectEnv = parseEnvFile(path.join(cwd, ".env"));
-	const nodeEnvName = `.env.${env.NODE_ENV || "development"}`;
+	const launchNodeEnv = runtimeLaunchEnvValues ? runtimeLaunchEnvValues.get("NODE_ENV") : env.NODE_ENV;
+	const nodeEnvName = `.env.${launchNodeEnv || "development"}`;
 	const modeEnv = parseEnvFile(path.join(cwd, nodeEnvName));
 	const localEnv = parseEnvFile(path.join(cwd, ".env.local"));
-	const launchEnv = { ...projectEnv, ...modeEnv, ...localEnv };
+	const modeLocalEnv = parseEnvFile(path.join(cwd, `${nodeEnvName}.local`));
+	const launchEnv = { ...projectEnv, ...modeEnv, ...localEnv, ...modeLocalEnv };
 	const expandedLaunchEnv = {
 		...expandDotenvValues(projectEnv, result),
 		...expandDotenvValues(modeEnv, result),
 		...expandDotenvValues(localEnv, result),
+		...expandDotenvValues(modeLocalEnv, result),
 	};
-	for (const key in launchEnv) {
-		const launchValue = launchEnvValues?.get(key);
+	let fallbackLaunchEnv: Record<string, string> | undefined;
+	let expandedFallbackLaunchEnv: Record<string, string> | undefined;
+	if (!runtimeLaunchEnvValues && nodeEnvName !== ".env.development") {
+		const fallbackModeEnv = parseEnvFile(path.join(cwd, ".env.development"));
+		const fallbackModeLocalEnv = parseEnvFile(path.join(cwd, ".env.development.local"));
+		const candidate = { ...projectEnv, ...fallbackModeEnv, ...localEnv, ...fallbackModeLocalEnv };
+		const expandedCandidate = {
+			...expandDotenvValues(projectEnv, result),
+			...expandDotenvValues(fallbackModeEnv, result),
+			...expandDotenvValues(localEnv, result),
+			...expandDotenvValues(fallbackModeLocalEnv, result),
+		};
+		if (candidate.NODE_ENV === env.NODE_ENV || expandedCandidate.NODE_ENV === env.NODE_ENV) {
+			// Without a launch snapshot, NODE_ENV may itself have come from dotenv.
+			// Bun chose the default mode before loading it, so retain both candidates.
+			fallbackLaunchEnv = candidate;
+			expandedFallbackLaunchEnv = expandedCandidate;
+		}
+	}
+	const allLaunchEnv = fallbackLaunchEnv ? { ...launchEnv, ...fallbackLaunchEnv } : launchEnv;
+	for (const key in allLaunchEnv) {
+		const launchValue = runtimeLaunchEnvValues?.get(key);
 		if (launchValue !== undefined) {
 			// Launcher-owned name: it keeps the launcher's own value. Bun overwrites
 			// an empty launcher value with the dotenv one, so restore the launcher
 			// value whenever what survived is exactly what the dotenv file defines.
 			if (
 				result[key] !== launchValue &&
-				(result[key] === launchEnv[key] || result[key] === expandedLaunchEnv[key])
+				(result[key] === launchEnv[key] ||
+					result[key] === expandedLaunchEnv[key] ||
+					result[key] === fallbackLaunchEnv?.[key] ||
+					result[key] === expandedFallbackLaunchEnv?.[key])
 			) {
 				result[key] = launchValue;
 			}
 			continue;
 		}
-		if (launchEnvValues || projectEnvNamesLoadedByOmp.has(key)) {
+		if (runtimeLaunchEnvValues || projectEnvNamesLoadedByOmp.has(key)) {
 			// Strong provenance: the launch environment is known and this name is
 			// absent from it, or OMP itself injected the value — either way it came
 			// from a project dotenv file, not the parent shell.
 			delete result[key];
-		} else if (result[key] === launchEnv[key] || result[key] === expandedLaunchEnv[key]) {
+		} else if (
+			result[key] === launchEnv[key] ||
+			result[key] === expandedLaunchEnv[key] ||
+			result[key] === fallbackLaunchEnv?.[key] ||
+			result[key] === expandedFallbackLaunchEnv?.[key]
+		) {
 			// No launch-env snapshot (dotenv autoloaded without procfs): best-effort
 			// value match against the Bun-parsed dotenv.
 			delete result[key];
@@ -197,7 +241,7 @@ export function parseEnvFile(filePath: string): Record<string, string> {
 const homeEnv = parseEnvFile(path.join(os.homedir(), ".env"));
 const piEnv = parseEnvFile(path.join(getConfigRootDir(), ".env"));
 const agentEnv = parseEnvFile(path.join(getAgentDir(), ".env"));
-const projectEnv = parseEnvFile(path.join(process.cwd(), ".env"));
+const projectEnv = parseEnvFile(path.join(getProjectDir(), ".env"));
 
 for (const key of Object.keys(Bun.env)) {
 	const value = Bun.env[key];

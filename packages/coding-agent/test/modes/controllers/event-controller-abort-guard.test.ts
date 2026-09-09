@@ -21,10 +21,10 @@ import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-ag
 import { SETTINGS_SCHEMA } from "@oh-my-pi/pi-coding-agent/config/settings-schema";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import * as titleGenerator from "@oh-my-pi/pi-coding-agent/utils/title-generator";
 import { TERMINAL } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 const originalWarpProtocolVersion = process.env.WARP_CLI_AGENT_PROTOCOL_VERSION;
 
@@ -66,12 +66,12 @@ function makeAssistantMessage(stopReason: StopReason): AssistantMessage {
 	} as unknown as AssistantMessage;
 }
 
-function makeContext(): InteractiveModeContext {
-	return {
+function makeContext() {
+	return createInteractiveModeContext({
 		sessionManager: {
 			getSessionName: () => "test-session",
 		},
-	} as unknown as InteractiveModeContext;
+	});
 }
 
 function makeAgentEndEvent(messages: AssistantMessage[]): Extract<AgentSessionEvent, { type: "agent_end" }> {
@@ -79,37 +79,13 @@ function makeAgentEndEvent(messages: AssistantMessage[]): Extract<AgentSessionEv
 }
 
 /** Full context needed to drive `#handleAgentEnd` -> `#finishAgentEnd` end to end. */
-function makeTurnEndContext(options: { lastAssistantMessage?: AssistantMessage } = {}): InteractiveModeContext {
-	const session = {
-		isStreaming: false,
-		isCompacting: false,
-		messages: [] as AssistantMessage[],
-		getLastAssistantMessage: () => options.lastAssistantMessage,
-		getContextUsage: () => undefined,
-	};
-	return {
-		isInitialized: true,
-		loadingAnimation: undefined,
-		autoCompactionLoader: undefined,
-		retryLoader: undefined,
-		focusedAgentId: undefined,
-		streamingComponent: undefined,
-		streamingMessage: undefined,
-		pendingTools: new Map<string, unknown>(),
-		flushPendingModelSwitch: async () => {},
-		flushPendingCommandOutput: () => {},
-		ui: { requestRender: () => {}, requestComponentRender: () => {} },
-		chatContainer: { removeChild: () => {} },
-		statusContainer: { clear: () => {}, disposeChildren: () => {}, addChild: () => {} },
-		statusLine: { markActivityEnd: () => {}, markActivityStart: () => {} },
-		editor: { getText: () => "" },
+function makeTurnEndContext(options: { lastAssistantMessage?: AssistantMessage } = {}) {
+	return createInteractiveModeContext({
 		sessionManager: { getSessionName: () => "test-session" },
-		clearPinnedError: () => {},
-		ensureLoadingAnimation: () => {},
-		showError: () => {},
-		session,
-		viewSession: session,
-	} as unknown as InteractiveModeContext;
+		viewSession: {
+			getLastAssistantMessage: () => options.lastAssistantMessage,
+		},
+	});
 }
 
 describe("EventController.sendCompletionNotification — abort guard", () => {

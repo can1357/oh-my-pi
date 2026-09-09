@@ -14,7 +14,9 @@ const stats: AggregatedStats = {
 	totalCacheReadTokens: 300,
 	totalCacheWriteTokens: 40,
 	cacheRate: 0.75,
+	cacheSavings: 0.695,
 	totalCost: 0,
+	unpricedRequests: 0,
 	totalPremiumRequests: 0,
 	avgDuration: 1000,
 	avgTtft: 100,
@@ -31,6 +33,11 @@ describe("overview token metrics", () => {
 		expect(html).toContain("Cache Read");
 		expect(html).toContain("Conversation Total");
 		expect(html).toContain("Uncached input + cache reads + cache writes + output");
+		expect(html).toContain("Cache Rate");
+		expect(html).toContain("Cache Savings");
+		expect(html).toContain("75.0%");
+		expect(html).toContain("69.5%");
+		expect(html).toContain("cache writes can make this negative");
 
 		const expectedTotal = formatCompact(
 			stats.totalInputTokens +

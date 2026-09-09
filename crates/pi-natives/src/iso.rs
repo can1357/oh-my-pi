@@ -22,7 +22,10 @@ use napi::bindgen_prelude::*;
 use napi_derive::napi;
 use pi_iso::{BackendKind, ChangeKind, Diff, FileChange, IsoError, IsolationBackend};
 
+use crate::js;
+
 const ISO_UNAVAILABLE_PREFIX: &str = "ISO_UNAVAILABLE:";
+const ISO_UNAVAILABLE_WITH_LEADING_SPACE: &str = " ISO_UNAVAILABLE:";
 
 /// Isolation backend identifier. Numeric so the JS side can `switch` on
 /// the enum without string comparisons.
@@ -174,12 +177,13 @@ pub async fn iso_diff(lower: String, merged: String) -> Result<IsoDiff> {
 /// Use this to distinguish "this backend isn't installed" from a hard
 /// failure when handling caught errors on the JS side.
 #[napi]
-pub fn iso_is_unavailable_error(message: String) -> bool {
-	message.starts_with(ISO_UNAVAILABLE_PREFIX)
-		|| message.contains(&format!(" {ISO_UNAVAILABLE_PREFIX}"))
+pub fn iso_is_unavailable_error(message: napi::JsString) -> Result<bool> {
+	let message = js::utf8(message)?;
+	Ok(message.starts_with(ISO_UNAVAILABLE_PREFIX)
+		|| message.contains(ISO_UNAVAILABLE_WITH_LEADING_SPACE))
 }
 
-const fn to_napi_kind(kind: BackendKind) -> IsoBackendKind {
+pub(crate) const fn to_napi_kind(kind: BackendKind) -> IsoBackendKind {
 	match kind {
 		BackendKind::Apfs => IsoBackendKind::Apfs,
 		BackendKind::Btrfs => IsoBackendKind::Btrfs,
@@ -192,7 +196,7 @@ const fn to_napi_kind(kind: BackendKind) -> IsoBackendKind {
 	}
 }
 
-const fn from_napi_kind(kind: IsoBackendKind) -> BackendKind {
+pub(crate) const fn from_napi_kind(kind: IsoBackendKind) -> BackendKind {
 	match kind {
 		IsoBackendKind::Apfs => BackendKind::Apfs,
 		IsoBackendKind::Btrfs => BackendKind::Btrfs,

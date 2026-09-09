@@ -67,7 +67,7 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 			const extensionPath = path.join(extensionsDir, "compaction-short-circuit.ts");
 			const extensionLines = ["export default function(pi) {"];
 			if (options.delayMessageEndPersistence) {
-				extensionLines.push('\tpi.on("message_end", async () => {', "\t\tawait Bun.sleep(50);", "\t});");
+				extensionLines.push('\tpi.on("message_end", async () => {', "\t\tawait Promise.resolve();", "\t});");
 			}
 			if (options.shortCircuitCompaction) {
 				extensionLines.push(
@@ -101,7 +101,7 @@ describe("AgentSession mid-turn compaction dead-end", () => {
 			streamFn: mock.stream,
 		});
 		const settings = Settings.isolated({
-			"compaction.strategy": "context-full",
+			"compaction.methodOrder": ["soft"],
 			"compaction.thresholdTokens": 100_000,
 			"compaction.midTurnEnabled": true,
 			"compaction.autoContinue": false,

@@ -7,15 +7,16 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
-import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
+import { ThinkingLevel, type ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { getKeybindings, replaceTabs, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { pluralize } from "@oh-my-pi/pi-utils";
+import { getKeybindings, replaceTabs, sliceByColumn, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
+import { pluralize, sanitizeText } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import type { Theme } from "../modes/theme/theme";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
 import { Hasher } from "../tui/utils";
 import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
 
@@ -72,6 +73,54 @@ export const PREVIEW_LIMITS = {
 /** Default number of terminal output rows shown before expansion. */
 export const DEFAULT_TERMINAL_PREVIEW_LINES = 10;
 
+export const FEED_MODEL_BADGE_WIDTH = 30;
+
+export function isFeedModelBadgeEnabled(): boolean {
+	return isSettingsInitialized() && settings.get("task.showResolvedModelBadge");
+}
+
+/** Compact glyph for a configured thinking level; empty for `inherit` (nothing to show). */
+export function thinkingLevelGlyph(level: ConfiguredThinkingLevel, uiTheme: Theme): string {
+	if (level === ThinkingLevel.Inherit) return "";
+	if (level === ThinkingLevel.Off) return uiTheme.status.disabled;
+	const symbol = uiTheme.thinking[level === AUTO_THINKING ? "autoPending" : level];
+	if (typeof symbol !== "string") return "";
+	const space = symbol.indexOf(" ");
+	return space < 0 ? symbol : symbol.slice(0, space);
+}
+
+/**
+ * Compact feed-row prefix: explicit thinking glyph, sanitized model identity,
+ * then advisor eye. Keep fitting icons if no model fits; preserve literal identity suffixes.
+ */
+export function formatFeedModelBadge(
+	modelIdentity: string | undefined,
+	thinkingLevel: ConfiguredThinkingLevel | undefined,
+	advisor: boolean | undefined,
+	uiTheme: Theme,
+	maxWidth = FEED_MODEL_BADGE_WIDTH,
+): string {
+	if (!modelIdentity) return "";
+	const width = Math.max(0, Math.floor(maxWidth));
+	const clean = sanitizeText(modelIdentity).replace(/\s+/g, " ").trim();
+	if (!clean || !(width > 0)) return "";
+	const glyph = thinkingLevel !== undefined ? thinkingLevelGlyph(thinkingLevel, uiTheme) : "";
+	const advisorIcon = advisor === true ? uiTheme.icon.advisor : "";
+	const prefix = glyph ? `${glyph} ` : "";
+	const suffix = advisorIcon ? ` ${advisorIcon}` : "";
+	const modelWidth = width - visibleWidth(prefix) - visibleWidth(suffix);
+	if (modelWidth < 1) {
+		const advisorWidth = visibleWidth(advisorIcon);
+		if (advisorIcon && advisorWidth <= width) {
+			const thinkingPrefix = glyph && visibleWidth(prefix) + advisorWidth <= width ? prefix : "";
+			return uiTheme.fg("accent", thinkingPrefix) + uiTheme.fg("dim", advisorIcon);
+		}
+		return glyph && visibleWidth(glyph) <= width ? uiTheme.fg("accent", glyph) : "";
+	}
+	const model = truncateMiddleToWidth(clean, modelWidth);
+	return uiTheme.fg("accent", prefix) + uiTheme.fg("dim", `${model}${suffix}`);
+}
+
 /** Truncation lengths for different content types */
 export const TRUNCATE_LENGTHS = {
 	/** Short titles, labels */
@@ -102,6 +151,15 @@ export function expandKeyHint(): string {
 // =============================================================================
 // Text Truncation Utilities
 // =============================================================================
+/** Keep both ends of a single-line label without splitting wide characters. */
+function truncateMiddleToWidth(text: string, maxWidth: number): string {
+	const width = visibleWidth(text);
+	if (width <= maxWidth) return text;
+	if (maxWidth <= 1) return maxWidth === 1 ? "…" : "";
+	const tailWidth = Math.ceil((maxWidth - 1) / 2);
+	const headWidth = maxWidth - 1 - tailWidth;
+	return `${sliceByColumn(text, 0, headWidth, true)}…${sliceByColumn(text, width - tailWidth, tailWidth, true)}`;
+}
 
 /**
  * Get first N lines of text as preview, with each line truncated.
@@ -258,6 +316,21 @@ export function formatMeta(meta: string[], theme: Theme): string {
 function sanitizeErrorText(message: string | undefined): string {
 	const clean = (message ?? "").replace(/^Error:\s*/, "").trim();
 	return clean ? replaceTabs(truncateToWidth(clean, TRUNCATE_LENGTHS.LINE)) : "Unknown error";
+}
+
+/**
+ * Split multi-line tool text into TUI-safe display lines.
+ * Splits CRLF/LF, collapses stray `\r` progress overwrites to the final
+ * segment (mirroring terminal rendering), and expands tabs — so raw
+ * subprocess or fetched output (e.g. Windows ssh emitting CRLF, tab-indented
+ * web content) can't corrupt the framed block layout with cursor-moving
+ * control characters or tab-stop width mismatches.
+ */
+export function sanitizeDisplayLines(text: string): string[] {
+	return text.split(/\r?\n/).map(line => {
+		const idx = line.lastIndexOf("\r");
+		return replaceTabs(idx < 0 ? line : line.slice(idx + 1));
+	});
 }
 
 export function formatErrorMessage(message: string | undefined, theme: Theme): string {
@@ -599,79 +672,111 @@ export function truncateDiffByHunk(
 		let keptHunks = 0;
 
 		for (const seg of segments) {
-			if (seg.isChange) {
-				keptHunks++;
-				if (keptHunks > maxHunks) break;
-			}
-			kept.push(...seg.lines);
 			if (kept.length >= maxLines) break;
+			if (seg.isChange) {
+				if (keptHunks >= maxHunks) break;
+				keptHunks++;
+			}
+			const take = Math.min(seg.lines.length, maxLines - kept.length);
+			for (let i = 0; i < take; i++) {
+				kept.push(seg.lines[i]!);
+			}
 		}
 
-		const keptStats = getDiffStats(kept.join("\n"));
 		return {
 			text: kept.join("\n"),
-			hiddenHunks: Math.max(0, totalStats.hunks - keptStats.hunks),
+			hiddenHunks: Math.max(0, totalStats.hunks - keptHunks),
 			hiddenLines: Math.max(0, lines.length - kept.length),
 		};
 	}
 
 	const contextBudget = maxLines - changeLineCount;
-	const contextSegments = segments.filter(s => !s.isChange && !s.isEllipsis);
+	const contextSegments = segments.filter(s => !s.isChange);
 	const totalContextLines = contextSegments.reduce((sum, s) => sum + s.lines.length, 0);
 
 	const kept: string[] = [];
 	let keptHunks = 0;
+	let keptSourceLines = 0;
 
 	if (totalContextLines <= contextBudget) {
 		for (const seg of segments) {
 			if (seg.isChange) {
+				if (keptHunks >= maxHunks) break;
 				keptHunks++;
-				if (keptHunks > maxHunks) break;
 			}
 			kept.push(...seg.lines);
+			keptSourceLines += seg.lines.length;
 		}
 	} else {
-		const contextRatio = contextSegments.length > 0 ? contextBudget / totalContextLines : 0;
+		const contextRatio = totalContextLines > 0 ? contextBudget / totalContextLines : 0;
+		let remainingContextBudget = contextBudget;
 
 		for (let i = 0; i < segments.length; i++) {
 			const seg = segments[i];
 
 			if (seg.isChange) {
+				if (keptHunks >= maxHunks) break;
 				keptHunks++;
-				if (keptHunks > maxHunks) break;
 				kept.push(...seg.lines);
-			} else if (seg.isEllipsis) {
-				kept.push(...seg.lines);
+				keptSourceLines += seg.lines.length;
+				continue;
+			}
+			if (remainingContextBudget <= 0) continue;
+
+			const allowedLines = Math.min(
+				remainingContextBudget,
+				Math.max(1, Math.floor(seg.lines.length * contextRatio)),
+			);
+			const outputStart = kept.length;
+			let sourceLinesAdded = 0;
+
+			if (seg.isEllipsis || seg.lines.length <= allowedLines) {
+				for (let j = 0; j < allowedLines; j++) {
+					kept.push(seg.lines[j]!);
+				}
+				sourceLinesAdded = allowedLines;
 			} else {
-				const allowedLines = Math.max(1, Math.floor(seg.lines.length * contextRatio));
 				const isBeforeChange = segments[i + 1]?.isChange;
 				const isAfterChange = segments[i - 1]?.isChange;
 
 				if (isBeforeChange && isAfterChange) {
-					const half = Math.ceil(allowedLines / 2);
-					if (seg.lines.length > allowedLines) {
-						kept.push(...seg.lines.slice(0, half));
+					if (allowedLines >= 3) {
+						const sourceBudget = allowedLines - 1;
+						const firstCount = Math.ceil(sourceBudget / 2);
+						const lastCount = sourceBudget - firstCount;
+						kept.push(...seg.lines.slice(0, firstCount));
 						kept.push("");
-						kept.push(...seg.lines.slice(-half));
+						if (lastCount > 0) kept.push(...seg.lines.slice(-lastCount));
+						sourceLinesAdded = sourceBudget;
 					} else {
-						kept.push(...seg.lines);
+						const firstCount = Math.ceil(allowedLines / 2);
+						const lastCount = allowedLines - firstCount;
+						kept.push(...seg.lines.slice(0, firstCount));
+						if (lastCount > 0) kept.push(...seg.lines.slice(-lastCount));
+						sourceLinesAdded = allowedLines;
 					}
 				} else if (isBeforeChange) {
 					kept.push(...seg.lines.slice(-allowedLines));
+					sourceLinesAdded = allowedLines;
 				} else if (isAfterChange) {
 					kept.push(...seg.lines.slice(0, allowedLines));
+					sourceLinesAdded = allowedLines;
 				} else {
-					kept.push(...seg.lines.slice(0, Math.min(allowedLines, 2)));
+					const take = Math.min(allowedLines, 2);
+					kept.push(...seg.lines.slice(0, take));
+					sourceLinesAdded = take;
 				}
 			}
+
+			keptSourceLines += sourceLinesAdded;
+			remainingContextBudget -= kept.length - outputStart;
 		}
 	}
 
-	const keptStats = getDiffStats(kept.join("\n"));
 	return {
 		text: kept.join("\n"),
-		hiddenHunks: Math.max(0, totalStats.hunks - keptStats.hunks),
-		hiddenLines: Math.max(0, lines.length - kept.length),
+		hiddenHunks: Math.max(0, totalStats.hunks - keptHunks),
+		hiddenLines: Math.max(0, lines.length - keptSourceLines),
 	};
 }
 
@@ -684,7 +789,11 @@ export function shortenPath(filePath: unknown, homeDir?: string): string {
 		return "";
 	}
 	const home = homeDir ?? os.homedir();
-	if (home && filePath.startsWith(home)) {
+	const windowsStyle = /^[A-Za-z]:[\\/]/.test(home) || home.startsWith("\\\\");
+	const hasHomePrefix = windowsStyle
+		? filePath.toLowerCase().startsWith(home.toLowerCase())
+		: filePath.startsWith(home);
+	if (home && hasHomePrefix) {
 		const suffix = filePath.slice(home.length);
 		if (suffix === "" || suffix.startsWith(path.posix.sep) || suffix.startsWith(path.win32.sep)) {
 			return `~${suffix.replaceAll(path.win32.sep, path.posix.sep)}`;

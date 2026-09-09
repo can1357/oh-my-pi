@@ -168,6 +168,74 @@ describe("filterProcessEnv", () => {
 	});
 });
 
+describe("filterChildShellEnv", () => {
+	it("uses the supplied mode for an isolated environment and cwd", async () => {
+		const cwd = path.dirname(writeTempEnv(""));
+		fs.writeFileSync(
+			path.join(cwd, ".env.development.local"),
+			"OMP_DOTENV_REPRO_MARKER=synthetic-mode-local-value\n",
+		);
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const script = [
+			`import { filterChildShellEnv } from ${JSON.stringify(envModulePath)};`,
+			"const child = filterChildShellEnv(",
+			'  { OMP_DOTENV_REPRO_MARKER: "synthetic-mode-local-value", UNCHANGED: "parent-value" },',
+			`  ${JSON.stringify(cwd)},`,
+			");",
+			"process.stdout.write(JSON.stringify(child));",
+		].join("\n");
+		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+			env: { ...process.env, NODE_ENV: "test", OMP_DOTENV_REPRO_MARKER: undefined },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout)).toEqual({ UNCHANGED: "parent-value" });
+	});
+
+	it("uses the launch mode when dotenv changes NODE_ENV", async () => {
+		const cwd = path.dirname(writeTempEnv("NODE_ENV=production\n"));
+		fs.writeFileSync(
+			path.join(cwd, ".env.development.local"),
+			"OMP_DOTENV_REPRO_MARKER=synthetic-mode-local-value\n",
+		);
+		const envModulePath = path.join(import.meta.dir, "..", "src", "env.ts");
+		const script = [
+			`import { filterChildShellEnv } from ${JSON.stringify(envModulePath)};`,
+			"const child = filterChildShellEnv(process.env, process.cwd());",
+			"process.stdout.write(JSON.stringify({",
+			"  processValue: process.env.OMP_DOTENV_REPRO_MARKER ?? null,",
+			"  childValue: child.OMP_DOTENV_REPRO_MARKER ?? null,",
+			"  nodeEnv: process.env.NODE_ENV ?? null,",
+			"}));",
+		].join("\n");
+		const proc = Bun.spawn([process.execPath, "--no-install", "--eval", script], {
+			cwd,
+			env: { ...process.env, NODE_ENV: undefined, OMP_DOTENV_REPRO_MARKER: undefined },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(proc.stdout).text(),
+			new Response(proc.stderr).text(),
+			proc.exited,
+		]);
+
+		expect(exitCode, stderr).toBe(0);
+		expect(JSON.parse(stdout)).toEqual({
+			processValue: "synthetic-mode-local-value",
+			childValue: null,
+			nodeEnv: "production",
+		});
+	});
+});
+
 describe("isBunTestRuntime", () => {
 	it("does not treat shared application env names as a test runner signal", async () => {
 		expect(await runRuntimeProbe({ NODE_ENV: "test", BUN_ENV: undefined, PI_TEST_RUNTIME: undefined })).toBe(false);

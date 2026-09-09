@@ -3,7 +3,8 @@
  * Replaces per-provider JSON files with a single cache.db.
  */
 import { Database } from "bun:sqlite";
-import { getModelDbPath } from "@oh-my-pi/pi-utils";
+import { renameSync } from "node:fs";
+import { getModelDbPath, isEnoent, isSqliteCorruptionError, logger } from "@oh-my-pi/pi-utils";
 import type { Api, Model, ModelSpec } from "./types";
 
 // Rows persist ModelSpec JSON (sparse `compat`, never the resolved record);
@@ -91,13 +92,14 @@ function openDb(resolvedPath: string): Database {
 	return db;
 }
 
-function getSharedDb(): Database {
-	const resolvedPath = getModelDbPath();
+function getSharedDb(resolvedPath: string): Database {
 	if (sharedDb && sharedDbPath === resolvedPath) {
 		return sharedDb;
 	}
 	if (sharedDb) {
 		sharedDb.close();
+		sharedDb = null;
+		sharedDbPath = null;
 	}
 	const db = openDb(resolvedPath);
 	sharedDb = db;
@@ -105,13 +107,72 @@ function getSharedDb(): Database {
 	return db;
 }
 
-function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) => T): T {
-	if (!dbPath) return useDb(getSharedDb());
-	const db = openDb(dbPath);
+function runModelCacheDb<T>(resolvedPath: string, shared: boolean, useDb: (db: Database) => T): T {
+	if (shared) return useDb(getSharedDb(resolvedPath));
+	const db = openDb(resolvedPath);
 	try {
 		return useDb(db);
 	} finally {
 		db.close();
+	}
+}
+
+// Paths already reported corrupt this process: the first unrecoverable failure
+// is logged at `error`, later heals at `debug`, so a dying disk cannot spam.
+const reportedCorruptPaths = new Set<string>();
+
+/**
+ * Move a physically corrupt `models.db` (plus its `-wal`/`-shm` sidecars) aside
+ * so {@link openDb} can recreate a fresh cache at the original path. Renames are
+ * best-effort: a vanished sidecar (already healed by a peer process) is fine,
+ * and any other rename failure is left for {@link openDb} to surface.
+ */
+function quarantineCorruptModelCache(resolvedPath: string): void {
+	const stamp = Date.now();
+	for (const suffix of ["", "-wal", "-shm"]) {
+		try {
+			renameSync(`${resolvedPath}${suffix}`, `${resolvedPath}.corrupt-${stamp}${suffix}`);
+		} catch (err) {
+			if (!isEnoent(err)) {
+				logger.debug("model cache: could not quarantine corrupt file", { path: `${resolvedPath}${suffix}` });
+			}
+		}
+	}
+}
+
+/**
+ * Recover from unrecoverable `models.db` corruption: drop the cached handle,
+ * quarantine the broken files, and let the next open recreate the cache. A
+ * corrupt cache would otherwise be re-queried on every read/write forever,
+ * permanently masking a successful live catalog (issue #8867). Only
+ * {@link isSqliteCorruptionError} codes reach here; BUSY/permission errors keep
+ * their existing best-effort paths.
+ */
+function healCorruptModelCache(resolvedPath: string, shared: boolean, err: unknown): void {
+	if (shared && sharedDb) {
+		sharedDb.close();
+		sharedDb = null;
+		sharedDbPath = null;
+	}
+	quarantineCorruptModelCache(resolvedPath);
+	const code = err && typeof err === "object" && "code" in err ? err.code : undefined;
+	if (reportedCorruptPaths.has(resolvedPath)) {
+		logger.debug("model cache: re-healed corrupt database", { path: resolvedPath, code });
+	} else {
+		reportedCorruptPaths.add(resolvedPath);
+		logger.error("model cache corrupt; quarantined and recreated a fresh cache", { path: resolvedPath, code });
+	}
+}
+
+function withModelCacheDb<T>(dbPath: string | undefined, useDb: (db: Database) => T): T {
+	const resolvedPath = dbPath ?? getModelDbPath();
+	const shared = dbPath === undefined;
+	try {
+		return runModelCacheDb(resolvedPath, shared, useDb);
+	} catch (err) {
+		if (!isSqliteCorruptionError(err)) throw err;
+		healCorruptModelCache(resolvedPath, shared, err);
+		return runModelCacheDb(resolvedPath, shared, useDb);
 	}
 }
 
@@ -248,9 +309,9 @@ export function writeModelCache<TApi extends Api>(
 					const staticHeaderSource =
 						staticById.get(model.id) ?? (model.requestModelId ? staticById.get(model.requestModelId) : undefined);
 					// A model with no static source is still restorable when its live
-					// headers equal the provider's trusted constant (a compile-time,
-					// non-credential value the reader can reattach by value). This keeps
-					// reference-less Copilot models (e.g. claude-opus-5) alive offline.
+					// headers equal a trusted provider-wide fallback that the reader can
+					// re-derive without persisting it. This keeps reference-less models
+					// with constant or configured headers alive offline.
 					const matchesStatic = staticHeaderSource
 						? headersEqual(model.headers, staticHeaderSource.headers)
 						: headersEqual(model.headers, restorableHeaderFallback);

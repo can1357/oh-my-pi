@@ -1,5 +1,4 @@
 import { Effort } from "@oh-my-pi/pi-catalog/effort";
-import { supportsAllTurnsReasoningContext, supportsCodexReasoningSummary } from "@oh-my-pi/pi-catalog/identity";
 import { requireSupportedEffort } from "@oh-my-pi/pi-catalog/model-thinking";
 import { $env } from "@oh-my-pi/pi-utils";
 import type { Model } from "../../types";
@@ -32,16 +31,16 @@ export interface ReasoningConfig {
 export interface CodexRequestOptions {
 	/** User-facing effort; maps 1:1 onto the wire tier of the same name. */
 	reasoningEffort?: CodexCallerEffort | "none";
+	/** Suppress native reasoning by sending `reasoning.effort: "none"`. */
+	reasoningOff?: boolean;
 	reasoningSummary?: ReasoningConfig["summary"] | null;
 	/** Explicit `reasoning.context` override. Omitted by default; Responses Lite forces `all_turns` as required by that transport. */
 	reasoningContext?: CodexReasoningContext;
 	textVerbosity?: "low" | "medium" | "high";
 	include?: string[];
 	/**
-	 * Responses Lite transport override; defaults to the model's
-	 * `useResponsesLite`. Lite moves instructions/tools into input items,
-	 * strips image detail, and disables parallel tool calling (codex-rs
-	 * `use_responses_lite`).
+	 * Responses Lite transport opt-in. Normal inference defaults to full
+	 * Responses so the model can emit independent tool calls in parallel.
 	 */
 	responsesLite?: boolean;
 }
@@ -92,21 +91,33 @@ export interface RequestBody {
 }
 
 /**
- * Resolve whether a Codex request uses the Responses Lite transport: an
- * explicit option wins, then the `PI_CODEX_RESPONSES_LITE` env override
- * (`1`/`true` forces Lite, `0`/`false` forces the full Responses body),
- * otherwise the model's catalog flag (codex-rs `model_info.use_responses_lite`)
- * decides.
+ * Resolve whether a Codex request explicitly opts into Responses Lite.
+ *
+ * Provider-native compaction passes the model's `useResponsesLite` flag as an
+ * explicit option; normal inference defaults to the full Responses contract.
  */
-export function resolveCodexResponsesLite(
-	model: Model<"openai-codex-responses">,
-	requested: boolean | undefined,
-): boolean {
+export function resolveCodexResponsesLite(requested: boolean | undefined): boolean {
 	if (requested !== undefined) return requested;
 	const env = $env.PI_CODEX_RESPONSES_LITE?.trim().toLowerCase();
 	if (env === "1" || env === "true") return true;
 	if (env === "0" || env === "false") return false;
-	return model.useResponsesLite === true;
+	return false;
+}
+
+/**
+ * Whether to request `stream_options.reasoning_summary_delivery =
+ * "sequential_cutoff"` (codex-rs `concurrent_reasoning_summaries`), enabled by
+ * `PI_CODEX_CONCURRENT_SUMMARIES=1`.
+ *
+ * Off by default because the mode cancels summary sections still in flight when
+ * the reasoning item closes: measured over 12 interleaved turns it halved
+ * visible thinking (0.83 vs 1.67 summary parts, 37 vs 69 chars per turn) and
+ * produced no summary at all on 3 of 12 turns. codex-rs ships it disabled too
+ * (`Stage::UnderDevelopment`, `default_enabled: false`).
+ */
+function concurrentSummariesEnabled(): boolean {
+	const env = $env.PI_CODEX_CONCURRENT_SUMMARIES?.trim().toLowerCase();
+	return env === "1" || env === "true";
 }
 
 /**
@@ -145,16 +156,17 @@ function getReasoningConfig(
 	const config: ReasoningConfig = {
 		effort: effort === "none" ? "none" : mapCodexWireEffort(model, effort),
 	};
-	if (
-		options.reasoningSummary !== undefined &&
-		options.reasoningSummary !== null &&
-		supportsCodexReasoningSummary(model.id)
-	) {
-		config.summary = options.reasoningSummary;
+	// The backend only emits reasoning summaries when `reasoning.summary` is
+	// present: omitting it yields zero `response.reasoning_summary_text.*`
+	// events (measured against gpt-5.5, gpt-5.6-sol and gpt-5.6-terra). So
+	// `undefined` means "default on" — matching `applyResponsesCompatPolicy`
+	// on the plain Responses path — and only an explicit `null` (the caller
+	// hiding thinking) opts out.
+	if (options.reasoningSummary !== null && model.compat.supportsReasoningSummary) {
+		config.summary = options.reasoningSummary ?? "auto";
 	}
 	return config;
 }
-
 function filterInput(input: InputItem[] | undefined): InputItem[] | undefined {
 	if (!Array.isArray(input)) return input;
 
@@ -431,43 +443,52 @@ export async function transformRequestBody(
 		}
 	}
 
-	const responsesLite = resolveCodexResponsesLite(model, options.responsesLite);
+	const responsesLite = resolveCodexResponsesLite(options.responsesLite);
 	if (responsesLite) {
 		applyCodexResponsesLiteShape(body);
 	}
 
-	if (options.reasoningEffort !== undefined || responsesLite) {
-		const reasoningConfig =
-			options.reasoningEffort !== undefined ? getReasoningConfig(model, options.reasoningEffort, options) : {};
+	if (options.reasoningOff || options.reasoningEffort !== undefined || responsesLite) {
+		const reasoningConfig: Partial<ReasoningConfig> = options.reasoningOff
+			? { effort: "none" }
+			: options.reasoningEffort !== undefined
+				? getReasoningConfig(model, options.reasoningEffort, options)
+				: {};
 		body.reasoning = {
 			...body.reasoning,
 			...reasoningConfig,
 		};
-		// Responses Lite requires `all_turns`; the full transport leaves context to the server unless explicitly set.
-		const context = responsesLite ? "all_turns" : options.reasoningContext;
-		if (context !== undefined) {
-			if (context === "all_turns" && !supportsAllTurnsReasoningContext(model.id)) {
+		// Lite requires `all_turns` even for opaque/codenamed model ids. Only explicit
+		// full-transport overrides are gated by the known model wire generation.
+		if (responsesLite) {
+			body.reasoning.context = "all_turns";
+		} else if (options.reasoningContext !== undefined) {
+			if (options.reasoningContext === "all_turns" && !model.compat.supportsAllTurnsReasoningContext) {
 				delete body.reasoning.context;
 			} else {
-				body.reasoning.context = context;
+				body.reasoning.context = options.reasoningContext;
 			}
 		}
 	} else {
 		delete body.reasoning;
 	}
+	if (!model.compat.supportsReasoningSummary && body.reasoning) {
+		delete body.reasoning.summary;
+	}
 	// Catalog pro aliases (`gpt-5.6-*-pro`): applied after the effort branch so
 	// the mode is sent even when no effort is set (the branch above deletes
 	// `body.reasoning` in that case) — mode and effort are independent fields.
-	if (model.reasoningMode) {
+	if (model.reasoningMode && !options.reasoningOff) {
 		body.reasoning = { ...body.reasoning, mode: model.reasoningMode };
 	}
 
-	// Concurrent reasoning summaries (codex-rs `concurrent_reasoning_summaries`
-	// feature): `sequential_cutoff` lets the server stream output without
-	// blocking on summary generation. Only meaningful when a summary is
-	// requested; codex-rs additionally gates on its OpenAI provider check,
-	// which is inherent here.
-	if (body.reasoning?.summary !== undefined) {
+	// Concurrent reasoning summaries (codex-rs `concurrent_reasoning_summaries`):
+	// `sequential_cutoff` lets the server stream output without blocking on
+	// summary generation, delivering each completed section as an atomic
+	// `response.reasoning_summary_text.done`. Opt-in only — see
+	// {@link concurrentSummariesEnabled} for why. Requires a requested summary;
+	// codex-rs additionally gates on its OpenAI provider check, inherent here.
+	if (body.reasoning?.summary !== undefined && concurrentSummariesEnabled()) {
 		body.stream_options = { reasoning_summary_delivery: "sequential_cutoff" };
 	} else {
 		delete body.stream_options;

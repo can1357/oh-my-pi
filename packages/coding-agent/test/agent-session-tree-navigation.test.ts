@@ -8,16 +8,29 @@
  * - Summary attachment at correct position in tree
  * - Abort handling during summarization
  */
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import type { ExtensionRunner } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { createTestSession, e2eApiKey, type TestSessionContext } from "./utilities";
 
 describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("AgentSession tree navigation e2e", () => {
 	let ctx: TestSessionContext;
 
+	let observeTreePreparation: boolean;
+	let treePreparationStarted: PromiseWithResolvers<void>;
 	beforeEach(async () => {
+		observeTreePreparation = false;
+		treePreparationStarted = Promise.withResolvers<void>();
+		const extensionRunner = {
+			hasHandlers: vi.fn((eventType: string) => observeTreePreparation && eventType === "session_before_tree"),
+			emit: vi.fn().mockImplementation(async () => {
+				treePreparationStarted.resolve();
+				return undefined;
+			}),
+		} as unknown as ExtensionRunner;
 		ctx = await createTestSession({
 			systemPrompt: ["You are a helpful assistant. Reply with just a few words."],
 			settingsOverrides: { compaction: { keepRecentTokens: 1 } },
+			extensionRunner,
 		});
 	});
 
@@ -187,11 +200,11 @@ describe.skipIf(!e2eApiKey("ANTHROPIC_API_KEY"))("AgentSession tree navigation e
 		const tree = sessionManager.getTree();
 		const rootNode = tree[0];
 
-		// Start navigation with summarization but abort immediately
+		// Synchronize on the session_before_tree boundary: at this point the
+		// production abort controller exists, so aborting cannot race setup.
+		observeTreePreparation = true;
 		const navigationPromise = session.navigateTree(rootNode.entry.id, { summarize: true });
-
-		// Abort after a short delay (let the LLM call start)
-		await Bun.sleep(100);
+		await treePreparationStarted.promise;
 		session.abortBranchSummary();
 
 		const result = await navigationPromise;

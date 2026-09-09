@@ -3,7 +3,7 @@ import type * as fsNode from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { type ApiKey, completeSimple, Effort, type Model } from "@oh-my-pi/pi-ai";
+import { type ApiKey, completeSimple, Effort, type Model, retryTransientCompletion } from "@oh-my-pi/pi-ai";
 import { clampThinkingLevelForModel } from "@oh-my-pi/pi-catalog/model-thinking";
 import { getAgentDbPath, getMemoriesDir, isEnoent, logger, parseJsonlLenient, prompt } from "@oh-my-pi/pi-utils";
 
@@ -403,6 +403,7 @@ async function runPhase1(options: MemoryStartupOptions): Promise<void> {
 				claim,
 				model: phase1Model,
 				apiKey: modelRegistry.resolver(phase1Model, session.sessionId),
+				sessionId: session.sessionId,
 				modelMaxTokens: computeModelTokenBudget(phase1Model, config),
 				config,
 				metadata: session.agent?.metadataForProvider(phase1Model.provider),
@@ -565,6 +566,7 @@ async function runPhase2(options: MemoryStartupOptions): Promise<void> {
 				memoryRoot,
 				model: phase2Model,
 				apiKey: modelRegistry.resolver(phase2Model, session.sessionId),
+				sessionId: session.sessionId,
 				metadata: session.agent?.metadataForProvider(phase2Model.provider),
 			});
 			if (!isMemoryStartupActive(options)) return;
@@ -723,6 +725,7 @@ async function runStage1Job(options: {
 	claim: Stage1Claim;
 	model: Model;
 	apiKey: ApiKey;
+	sessionId: string;
 	modelMaxTokens: number;
 	config: MemoryRuntimeConfig;
 	metadata?: Record<string, unknown>;
@@ -750,18 +753,21 @@ async function runStage1Job(options: {
 			response_items_json: truncatedItems,
 		});
 
-		const response = await completeSimple(
-			model,
-			{
-				systemPrompt: [stageOneSystemTemplate],
-				messages: [{ role: "user", content: [{ type: "text", text: inputPrompt }], timestamp: Date.now() }],
-			},
-			{
-				apiKey,
-				metadata: options.metadata,
-				maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
-				reasoning: clampThinkingLevelForModel(model, Effort.Low),
-			},
+		const response = await retryTransientCompletion(() =>
+			completeSimple(
+				model,
+				{
+					systemPrompt: [stageOneSystemTemplate],
+					messages: [{ role: "user", content: [{ type: "text", text: inputPrompt }], timestamp: Date.now() }],
+				},
+				{
+					apiKey,
+					sessionId: options.sessionId,
+					metadata: options.metadata,
+					maxTokens: Math.max(1024, Math.min(4096, Math.floor(modelMaxTokens * 0.2))),
+					reasoning: clampThinkingLevelForModel(model, Effort.Low),
+				},
+			),
 		);
 
 		if (response.stopReason === "error") {
@@ -867,6 +873,7 @@ async function runConsolidationModel(options: {
 	memoryRoot: string;
 	model: Model;
 	apiKey: ApiKey;
+	sessionId: string;
 	metadata?: Record<string, unknown>;
 }): Promise<{
 	memoryMd: string;
@@ -887,18 +894,21 @@ async function runConsolidationModel(options: {
 		rollout_summaries: truncateByApproxTokens(rolloutSummaries, 12_000),
 	});
 
-	const response = await completeSimple(
-		model,
-		{
-			systemPrompt: [consolidationSystemTemplate],
-			messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
-		},
-		{
-			apiKey,
-			metadata: options.metadata,
-			maxTokens: 8192,
-			reasoning: clampThinkingLevelForModel(model, Effort.Medium),
-		},
+	const response = await retryTransientCompletion(() =>
+		completeSimple(
+			model,
+			{
+				systemPrompt: [consolidationSystemTemplate],
+				messages: [{ role: "user", content: [{ type: "text", text: input }], timestamp: Date.now() }],
+			},
+			{
+				apiKey,
+				sessionId: options.sessionId,
+				metadata: options.metadata,
+				maxTokens: 8192,
+				reasoning: clampThinkingLevelForModel(model, Effort.Medium),
+			},
+		),
 	);
 	if (response.stopReason === "error") {
 		throw new Error(response.errorMessage || "phase2 model error");
@@ -1423,6 +1433,7 @@ async function runWithConcurrency<T>(
 	worker: (item: T) => Promise<void>,
 ): Promise<void> {
 	const queue = [...items];
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const workers = new Array(Math.max(1, concurrency)).fill(0).map(async () => {
 		while (queue.length > 0) {
 			const item = queue.shift();

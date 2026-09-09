@@ -127,6 +127,8 @@ export class AgentLifecycleManager {
 	#persistedReviverFactory: PersistedSubagentReviverFactory | undefined;
 	/** TTL applied when a cold-revived ref is adopted on demand. */
 	#persistedReviveTtlMs = 0;
+	/** Set once {@link dispose} runs; blocks late revivals from adopting into a torn-down manager. */
+	#disposed = false;
 
 	constructor(registry: AgentRegistry = AgentRegistry.global()) {
 		this.#registry = registry;
@@ -170,6 +172,40 @@ export class AgentLifecycleManager {
 		return Boolean(
 			adopted && (expected === undefined || adopted.ref === expected || adopted.ref.session === expected),
 		);
+	}
+
+	/**
+	 * Reclaim a provably-dead parked corpse so a fresh spawn can reuse its id.
+	 * Refuses live, adopted, in-flight, or cold-revivable refs. For a parked ref
+	 * restored from disk, the persisted factory is consulted before removal
+	 * because cold revivers are created lazily by {@link ensureLive}.
+	 *
+	 * Only refs in the registry this manager owns are touched; the transcript
+	 * stays readable at `history://<id>`. Returns true when the corpse was
+	 * unregistered.
+	 */
+	async reclaimDeadCorpse(id: string, expected: AgentRef): Promise<boolean> {
+		const ref = this.#registry.get(id);
+		if (ref !== expected || ref.status !== "parked" || ref.session) return false;
+		if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
+
+		const persistedFactory = ref.sessionFile ? this.#persistedReviverFactory : undefined;
+		if (persistedFactory) {
+			try {
+				if (await persistedFactory(ref)) return false;
+			} catch (error) {
+				logger.warn("AgentLifecycleManager.reclaimDeadCorpse: persisted reviver probe failed", {
+					id,
+					error: error instanceof Error ? error.message : String(error),
+				});
+				return false;
+			}
+			// The factory awaited I/O; another lifecycle operation may now own or
+			// have replaced this ref. Revalidate every reclaim invariant.
+			if (this.#registry.get(id) !== ref || ref.status !== "parked" || ref.session) return false;
+			if (this.#adopted.has(id) || this.#parks.has(id) || this.#revivals.has(id)) return false;
+		}
+		return this.#registry.unregister(id, ref);
 	}
 
 	/**
@@ -332,6 +368,14 @@ export class AgentLifecycleManager {
 		let coldAdopted = false;
 		if (!revive && ref.status === "parked" && ref.sessionFile && this.#persistedReviverFactory) {
 			revive = await this.#persistedReviverFactory(ref);
+			// Teardown can complete during the factory await. A late cold revive must
+			// not cold-adopt (and later attach a live session + TTL) into a disposed
+			// manager — reject deterministically before creating any session.
+			if (this.#disposed) {
+				throw new Error(
+					`Agent "${id}" revival aborted: its lifecycle was disposed while its persisted session was being prepared.`,
+				);
+			}
 			if (revive) {
 				adoption = { ref, idleTtlMs: this.#persistedReviveTtlMs, revive };
 				this.#adopted.set(id, adoption);
@@ -391,29 +435,45 @@ export class AgentLifecycleManager {
 			await park.promise;
 		}
 
-		if (options?.tombstone) {
-			// Persist the terminal decision before detaching the session. The
-			// sidecar prevents a later discovery pass from reviving this transcript
-			// as a fresh parked ref.
-			if (ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
-			this.#registry.setStatus(id, "aborted", ref);
-		}
 		const live = this.#registry.get(id) === ref ? ref.session : null;
-		if (options?.tombstone) this.#registry.detachSession(id, ref);
-		if (live) {
-			try {
-				await live.dispose();
-			} catch (error) {
-				logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
+		if (options?.tombstone) {
+			// Apply the terminal transition synchronously, before any await. The
+			// dying session's own dispose path calls unregisterUnlessParked
+			// (sdk.ts), which spares a ref only when it is already `aborted` AND
+			// already detached; awaiting persistAgentTombstone before this
+			// transition left a window in which that unregister deleted the ref
+			// (issue #10531). Persisting the sidecar afterward is safe: within the
+			// process the still-registered `aborted` row already blocks re-adoption
+			// via the `if (!registry.get(id))` discovery guard, and the sidecar
+			// only needs to exist before a later cross-restart discovery pass —
+			// release awaits the write below before returning.
+			// Detach before publishing `aborted`: setStatus emits synchronously, so
+			// every subscriber must observe a terminal ref with session === null.
+			if (!this.#registry.detachSession(id, ref) || !this.#registry.setStatus(id, "aborted", ref)) {
+				logger.warn("AgentLifecycleManager.release: terminal transition rejected", { id });
+			}
+		}
+		try {
+			if (options?.tombstone && ref.sessionFile) await persistAgentTombstone(ref.sessionFile);
+		} finally {
+			// Detaching removes the registry's only route to the live session. Always
+			// dispose the captured session, even when tombstone persistence fails.
+			if (live) {
+				try {
+					await live.dispose();
+				} catch (error) {
+					logger.warn("AgentLifecycleManager.release: session dispose failed", { id, error: String(error) });
+				}
 			}
 		}
 		if (!options?.tombstone) this.#registry.unregister(id, ref);
 		return true;
 	}
 
-	/** Teardown everything (process exit / main session dispose). */
+	/** Teardown everything; disposing the global manager makes its next owner a fresh instance. */
 	async dispose(deadlineAt: number = Date.now() + AGENT_RELEASE_GRACE_MS): Promise<void> {
 		this.#unsubscribe?.();
+		this.#disposed = true;
 		this.#unsubscribe = undefined;
 		const ids = [...new Set([...this.#adopted.keys(), ...this.#parks.keys()])];
 		await Promise.all(
@@ -435,10 +495,19 @@ export class AgentLifecycleManager {
 		this.#revivals.clear();
 		this.#parks.clear();
 		this.#persistedReviverFactory = undefined;
+		if (AgentLifecycleManager.#global === this) AgentLifecycleManager.#global = undefined;
 	}
 
 	async #revive(id: string, revive: AgentReviver, ref: AgentRef, adopted: AdoptedAgent): Promise<AgentSession> {
 		const session = await revive(ref);
+		if (this.#disposed) {
+			// The owning lifecycle tore down while the reviver was in flight; dispose
+			// the freshly built session instead of attaching it, and fail the waiter.
+			await session.dispose();
+			throw new Error(
+				`Agent "${id}" revival aborted: its lifecycle was disposed while its persisted session was reviving.`,
+			);
+		}
 		let liveRef = this.#registry.get(id);
 		if (liveRef === ref && ref.status === "parked" && !ref.session) {
 			// A simple reviver returned a session without claiming the parked ref;

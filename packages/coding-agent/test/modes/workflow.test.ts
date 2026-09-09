@@ -1,11 +1,6 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import {
-	containsWorkflow,
-	highlightWorkflow,
-	renderWorkflowNotice,
-	WORKFLOW_NOTICE,
-} from "@oh-my-pi/pi-coding-agent/modes/workflow";
+import { containsWorkflow, highlightWorkflow, renderWorkflowNotice } from "@oh-my-pi/pi-coding-agent/modes/workflow";
 
 beforeAll(() => {
 	// highlightWorkflow reads the global theme's color mode.
@@ -39,6 +34,18 @@ describe("workflow keyword detection", () => {
 	});
 });
 
+describe("workflow notice", () => {
+	it("defaults to workpools and hides eval-defined tools when disabled", () => {
+		const enabled = renderWorkflowNotice({ taskBatch: true, evalTools: true });
+		const disabled = renderWorkflowNotice({ taskBatch: true, evalTools: false });
+		expect(enabled).toContain("Default to `workpool()`");
+		expect(enabled).toContain("`@tool`");
+		expect(disabled).toContain("Default to `workpool()`");
+		expect(disabled).not.toContain("`@tool`");
+		expect(disabled).not.toContain("tools=None");
+	});
+});
+
 describe("workflow keyword highlighting", () => {
 	it("decorates the keyword with zero-width escapes, preserving visible text", () => {
 		const input = "please workflowz this";
@@ -61,19 +68,5 @@ describe("workflow keyword highlighting", () => {
 		expect(highlightWorkflow("Workflowz this")).toBe("Workflowz this");
 		const filePath = "packages/coding-agent/test/modes/workflowz.test.ts";
 		expect(highlightWorkflow(filePath)).toBe(filePath);
-	});
-});
-
-describe("workflow notice", () => {
-	it("renders the Workflowz trigger with eval orchestration helper guidance", () => {
-		expect(WORKFLOW_NOTICE).toContain("**workflowz** keyword");
-		expect(WORKFLOW_NOTICE).toContain("`parallel(thunks)`");
-		expect(WORKFLOW_NOTICE).toContain("await budget.remaining()");
-	});
-
-	it("renders the same eval notice when task.batch is disabled", () => {
-		const notice = renderWorkflowNotice({ taskBatch: false });
-		expect(notice).toContain("**workflowz** keyword");
-		expect(notice).toContain("`parallel(thunks)`");
 	});
 });

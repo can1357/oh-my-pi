@@ -2,6 +2,7 @@ import { toNumber } from "@oh-my-pi/pi-catalog/utils";
 import { $env } from "@oh-my-pi/pi-utils";
 import { getKimiCommonHeaders } from "../registry/oauth/kimi";
 import type {
+	CredentialRankingStrategy,
 	UsageAmount,
 	UsageFetchContext,
 	UsageFetchParams,
@@ -77,6 +78,23 @@ function formatDurationLabel(duration: number, timeUnit: string): string | undef
 	return undefined;
 }
 
+const MINUTE_MS = 60_000;
+const HOUR_MS = 3_600_000;
+const DAY_MS = 86_400_000;
+
+/**
+ * Status-line and ranking consumers match on canonical window ids ("5h",
+ * "7d"), so derive the id from the reported span: the 300-minute burst window
+ * surfaces as "5h" instead of "300time_unit_minute". Mirrors the
+ * intervalWindowId convention in minimax-code.ts.
+ */
+function canonicalWindowId(durationMs: number): string {
+	if (durationMs > 0 && durationMs % DAY_MS === 0) return `${durationMs / DAY_MS}d`;
+	if (durationMs > 0 && durationMs % HOUR_MS === 0) return `${durationMs / HOUR_MS}h`;
+	const minutes = Math.round(durationMs / MINUTE_MS);
+	return minutes > 0 ? `${minutes}m` : "default";
+}
+
 function buildWindow(windowData: Record<string, unknown>, nowMs: number): UsageWindow | undefined {
 	const duration = toNumber(windowData.duration);
 	const timeUnit = typeof windowData.timeUnit === "string" ? windowData.timeUnit : "";
@@ -86,14 +104,15 @@ function buildWindow(windowData: Record<string, unknown>, nowMs: number): UsageW
 	if (duration === undefined && !label && !resetsAt) return undefined;
 	let durationMs: number | undefined;
 	if (duration !== undefined) {
-		if (timeUnit.toUpperCase().includes("MINUTE")) durationMs = duration * 60_000;
-		else if (timeUnit.toUpperCase().includes("HOUR")) durationMs = duration * 3_600_000;
-		else if (timeUnit.toUpperCase().includes("DAY")) durationMs = duration * 86_400_000;
+		if (timeUnit.toUpperCase().includes("MINUTE")) durationMs = duration * MINUTE_MS;
+		else if (timeUnit.toUpperCase().includes("HOUR")) durationMs = duration * HOUR_MS;
+		else if (timeUnit.toUpperCase().includes("DAY")) durationMs = duration * DAY_MS;
+		else if (timeUnit.toUpperCase().includes("WEEK")) durationMs = duration * 7 * DAY_MS;
 		else if (timeUnit.toUpperCase().includes("SECOND")) durationMs = duration * 1000;
 	}
 
 	return {
-		id: duration !== undefined && timeUnit ? `${duration}${timeUnit.toLowerCase()}` : "default",
+		id: durationMs !== undefined ? canonicalWindowId(durationMs) : "default",
 		label: label ?? "Usage window",
 		durationMs,
 		resetsAt,
@@ -177,7 +196,13 @@ function parseUsagePayload(payload: unknown, nowMs: number): { rows: KimiUsageRo
 
 	if (isRecord(data.usage)) {
 		const summary = buildUsageRow(data.usage, "Total quota", nowMs);
-		if (summary) rows.push(summary);
+		if (summary) {
+			// Kimi Code's aggregate quota resets weekly, but the payload carries
+			// only `resetTime` and no duration. Attach the canonical weekly
+			// window explicitly so status-line/ranking consumers recognize it.
+			summary.window = { id: "7d", label: "7 Day", resetsAt: summary.resetsAt };
+			rows.push(summary);
+		}
 	}
 
 	if (Array.isArray(data.limits)) {
@@ -261,11 +286,25 @@ export const kimiUsageProvider: UsageProvider = {
 			fetchedAt: nowMs,
 			limits,
 			metadata: {
+				accountId: credential.accountId,
 				endpoint: url,
 			},
 			raw: parsed.raw,
 		};
 
 		return report;
+	},
+};
+
+/** Ranks Kimi OAuth accounts by the canonical 5-hour and 7-day quota windows. */
+export const kimiRankingStrategy: CredentialRankingStrategy = {
+	findWindowLimits: report => ({
+		primary: report.limits.find(limit => limit.window?.id === "5h"),
+		secondary: report.limits.find(limit => limit.window?.id === "7d"),
+	}),
+	scopeLimits: report => report.limits.filter(limit => limit.window?.id === "5h" || limit.window?.id === "7d"),
+	windowDefaults: {
+		primaryMs: 5 * HOUR_MS,
+		secondaryMs: 7 * DAY_MS,
 	},
 };

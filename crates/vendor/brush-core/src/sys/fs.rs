@@ -84,12 +84,16 @@ fn translate_unix_drive_path(path: &Path) -> Option<PathBuf> {
 	let bytes = raw.as_bytes();
 	let (drive, tail) = drive_alias_parts(bytes)?;
 
+	// `tail` is a suffix of the valid UTF-8 `raw` beginning at an ASCII `/`
+	// boundary, so it is itself valid UTF-8. Translate separators per `char` —
+	// iterating bytes would split multibyte scalars (e.g. `José` → `JosÃ©`).
+	let tail = std::str::from_utf8(tail).ok()?;
 	let mut native = String::with_capacity(3 + tail.len());
 	native.push(char::from(drive).to_ascii_uppercase());
 	native.push(':');
 	native.push('\\');
-	for &byte in tail {
-		native.push(if is_path_separator(byte) { '\\' } else { char::from(byte) });
+	for ch in tail.chars() {
+		native.push(if ch == '/' || ch == '\\' { '\\' } else { ch });
 	}
 	Some(PathBuf::from(native))
 }
@@ -117,11 +121,6 @@ fn drive_alias_parts(bytes: &[u8]) -> Option<(u8, &[u8])> {
 	}
 
 	None
-}
-
-#[cfg(any(windows, test))]
-const fn is_path_separator(byte: u8) -> bool {
-	byte == b'/' || byte == b'\\'
 }
 
 pub use super::platform::fs::*;
@@ -186,6 +185,18 @@ mod tests {
 		assert_eq!(
 			translate_unix_drive_path(Path::new("/MNT/c")).as_deref(),
 			Some(Path::new("C:\\")),
+		);
+	}
+
+	#[test]
+	fn drive_alias_tail_preserves_non_ascii_components() {
+		assert_eq!(
+			translate_unix_drive_path(Path::new("/c/Users/José/file")).as_deref(),
+			Some(Path::new("C:\\Users\\José\\file")),
+		);
+		assert_eq!(
+			translate_unix_drive_path(Path::new("/mnt/d/项目/データ")).as_deref(),
+			Some(Path::new("D:\\项目\\データ")),
 		);
 	}
 

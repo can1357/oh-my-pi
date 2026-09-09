@@ -2,6 +2,7 @@ import { beforeAll, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import type { BashResult } from "@oh-my-pi/pi-coding-agent/exec/bash-executor";
 import { BashExecutionComponent } from "@oh-my-pi/pi-coding-agent/modes/components/bash-execution";
 import { CommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/command-controller";
 import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
@@ -16,9 +17,9 @@ function createContainer() {
 	};
 }
 
-function createCwdContext(sourceDir: string, isStreaming = false) {
+function createCwdContext(sourceDir: string, isStreaming = false, showImages = true) {
 	const state = { cwd: sourceDir, executedCwds: [] as string[] };
-	const executeBash = vi.fn(async (command: string) => {
+	const executeBash = vi.fn(async (command: string): Promise<BashResult> => {
 		state.executedCwds.push(state.cwd);
 		return {
 			output: command === "pwd" ? `${state.cwd}\n` : "ok",
@@ -44,16 +45,22 @@ function createCwdContext(sourceDir: string, isStreaming = false) {
 			moveTo: vi.fn(async (cwd: string) => {
 				state.cwd = cwd;
 			}),
+			captureState: vi.fn(() => ({ cwd: state.cwd, sessionDir: "/tmp/bash-sessions" })),
+			restoreState: vi.fn((snapshot: { cwd: string }) => {
+				state.cwd = snapshot.cwd;
+			}),
 		},
 		chatContainer: createContainer(),
 		pendingMessagesContainer,
 		pendingBashComponents: [],
+		settings: { get: () => showImages },
 		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 		present,
 		showError: vi.fn(),
 		showWarning: vi.fn(),
 		applyCwdChange: vi.fn(async (cwd: string) => {
 			expect(state.cwd).toBe(cwd);
+			return true;
 		}),
 		updateEditorBorderColor: vi.fn(),
 		reloadTodos: vi.fn(async () => {}),
@@ -90,6 +97,7 @@ describe("bash shortcut command", () => {
 			chatContainer: createContainer(),
 			pendingMessagesContainer: createContainer(),
 			pendingBashComponents: [],
+			settings: { get: () => true },
 			ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
 			present: vi.fn(),
 			showError: vi.fn(),
@@ -104,6 +112,11 @@ describe("bash shortcut command", () => {
 		expect(executeBash).toHaveBeenCalledWith("echo hi", expect.any(Function), {
 			excludeFromContext: false,
 			useUserShell: true,
+			pty: {
+				cols: expect.any(Number),
+				rows: expect.any(Number),
+				onChunk: expect.any(Function),
+			},
 		});
 	});
 
@@ -153,10 +166,20 @@ describe("bash shortcut command", () => {
 			expect(executeBash).toHaveBeenNthCalledWith(1, "cd child", expect.any(Function), {
 				excludeFromContext: false,
 				useUserShell: true,
+				pty: {
+					cols: expect.any(Number),
+					rows: expect.any(Number),
+					onChunk: expect.any(Function),
+				},
 			});
 			expect(executeBash).toHaveBeenNthCalledWith(2, "cd", expect.any(Function), {
 				excludeFromContext: false,
 				useUserShell: true,
+				pty: {
+					cols: expect.any(Number),
+					rows: expect.any(Number),
+					onChunk: expect.any(Function),
+				},
 			});
 			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(1, childDir);
 			expect(ctx.applyCwdChange).toHaveBeenNthCalledWith(2, sourceDir);
@@ -253,6 +276,39 @@ describe("bash shortcut command", () => {
 		} finally {
 			await fs.rm(sourceDir, { recursive: true, force: true });
 		}
+	});
+
+	it("renders images extracted from a completed manual Bash command", async () => {
+		const { ctx, executeBash, present } = createCwdContext("/tmp", false, false);
+		executeBash.mockResolvedValueOnce({
+			output: "generated",
+			exitCode: 0,
+			cancelled: false,
+			truncated: false,
+			totalLines: 1,
+			totalBytes: 9,
+			outputLines: 1,
+			outputBytes: 9,
+			workingDir: "/tmp",
+			images: [
+				{
+					type: "image",
+					data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=",
+					mimeType: "image/png",
+				},
+			],
+		});
+		const controller = new CommandController(ctx);
+
+		await controller.handleBashCommand("emit-image");
+
+		const component = present.mock.calls[0]?.[0];
+		expect(component).toBeInstanceOf(BashExecutionComponent);
+		if (!(component instanceof BashExecutionComponent)) throw new Error("Expected BashExecutionComponent");
+		const bashComponent = component;
+		expect(Bun.stripANSI(bashComponent.render(80).join("\n"))).toContain("[Image: [image/png] 1x1]");
+		bashComponent.setExpanded(true);
+		expect(Bun.stripANSI(bashComponent.render(80).join("\n"))).toContain("[Image: [image/png] 1x1]");
 	});
 
 	it("finalizes successful output before reporting a standalone cd refresh failure", async () => {

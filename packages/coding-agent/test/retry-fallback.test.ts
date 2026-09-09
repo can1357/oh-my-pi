@@ -63,6 +63,20 @@ describe("retry fallback selector resolution", () => {
 		expect(resolveRetryFallbackChainKey(defaultContext, selector)).toBe("default");
 	});
 
+	it("does not let a later shared-assignment role steal the default chain", () => {
+		const selector = "openrouter/google/gemini-2.5-flash";
+		const context = createContext(
+			{
+				vision: ["openai/gpt-4o-mini"],
+				default: ["google/gemini-2.5-flash"],
+			},
+			{ default: selector, vision: selector },
+		);
+		expect(resolveRetryFallbackChainKey(context, selector)).toBe("default");
+		expect(resolveRetryFallbackChainKey(context, selector, undefined, "default")).toBe("default");
+		expect(resolveRetryFallbackChainKey(context, selector, undefined, "vision")).toBe("vision");
+	});
+
 	it("uses a hinted role chain when its unqualified primary cannot resolve", () => {
 		const context = createContext({ task: ["openai/gpt-4o-mini"] });
 		const chainKey = resolveRetryFallbackChainKey(context, "missing-model:high", undefined, "task");

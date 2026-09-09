@@ -1,5 +1,4 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -51,16 +50,22 @@ function countCommand(mode: InteractiveMode): number {
 
 describe("issue #6516 — tool output appears twice", () => {
 	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
 	let mode: InteractiveMode;
 	let session: AgentSession;
 	let tempDir: TempDir;
+	let settingsDir: TempDir;
 	const created: ToolExecutionComponent[] = [];
-
-	beforeAll(() => {
+	beforeAll(async () => {
 		initTheme();
+		resetSettingsForTest();
+		settingsDir = TempDir.createSync("@pi-issue-6516-settings-");
+		await Settings.init({ inMemory: true, cwd: settingsDir.path() });
+		authStorage = await AuthStorage.create(":memory:");
+		modelRegistry = new ModelRegistry(authStorage);
 	});
 
-	beforeEach(async () => {
+	beforeEach(() => {
 		vi.spyOn(process.stdout, "write").mockReturnValue(true);
 		vi.spyOn(process.stdin, "resume").mockReturnValue(process.stdin);
 		vi.spyOn(process.stdin, "pause").mockReturnValue(process.stdin);
@@ -69,11 +74,7 @@ describe("issue #6516 — tool output appears twice", () => {
 			vi.spyOn(process.stdin, "setRawMode").mockReturnValue(process.stdin);
 		}
 
-		resetSettingsForTest();
 		tempDir = TempDir.createSync("@pi-issue-6516-");
-		await Settings.init({ inMemory: true, cwd: tempDir.path() });
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "testauth.db"));
-		const modelRegistry = new ModelRegistry(authStorage);
 		const model = modelRegistry.find("anthropic", "claude-sonnet-4-5");
 		if (!model) throw new Error("Expected claude-sonnet-4-5 test model");
 
@@ -92,8 +93,12 @@ describe("issue #6516 — tool output appears twice", () => {
 		mode?.stop();
 		vi.restoreAllMocks();
 		await session?.dispose();
-		authStorage?.close();
 		tempDir?.removeSync();
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		settingsDir.removeSync();
 		resetSettingsForTest();
 	});
 

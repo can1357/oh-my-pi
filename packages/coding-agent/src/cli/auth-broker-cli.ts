@@ -33,10 +33,14 @@ import {
 	SqliteAuthCredentialStore,
 } from "@oh-my-pi/pi-ai";
 import { AuthBrokerClient, DEFAULT_AUTH_BROKER_BIND, startAuthBroker } from "@oh-my-pi/pi-ai/auth-broker";
+import { refreshOAuthToken } from "@oh-my-pi/pi-ai/oauth";
+import type { OAuthCredentials } from "@oh-my-pi/pi-ai/oauth/types";
 import { $which, APP_NAME, getAgentDbPath, getConfigRootDir, isEnoent, logger, VERSION } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import { $ } from "bun";
+import { refreshManagedMcpOAuthCredential } from "../mcp/oauth-credentials";
+import { isManagedMCPOAuthCredentialId, mcpOAuthServerUrlFromCredentialId } from "../mcp/oauth-flow";
 import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
 export type AuthBrokerAction = "serve" | "token" | "login" | "logout" | "status" | "import" | "migrate" | "list";
@@ -119,6 +123,34 @@ async function ensureToken(): Promise<string> {
 	return token;
 }
 
+/**
+ * OAuth refresh handler for `omp auth-broker serve`'s {@link AuthStorage}.
+ *
+ * The vault holds provider OAuth rows AND OMP-managed `mcp_oauth:*` rows.
+ * Provider rows refresh through the per-provider registry. MCP rows are
+ * self-describing — the embedded token endpoint and client credentials are the
+ * only refresh material — so they refresh with a generic `refresh_token` grant.
+ * The serve process never loads the MCP manager, so this is the only place that
+ * teaches the broker to refresh MCP tokens; without it
+ * `POST /v1/credential/:id/refresh` fails with "Unknown OAuth provider" and the
+ * background refresher lets MCP access tokens expire (issue #8933).
+ */
+export function refreshBrokerOAuthCredential(
+	provider: string,
+	credential: OAuthCredential,
+	signal?: AbortSignal,
+): Promise<OAuthCredentials> {
+	if (isManagedMCPOAuthCredentialId(provider)) {
+		return refreshManagedMcpOAuthCredential(credential, {
+			serverUrl: mcpOAuthServerUrlFromCredentialId(provider),
+			signal,
+		});
+	}
+	// Non-MCP rows: same per-provider path AuthStorage would take by default
+	// (the serve process registers no custom OAuth providers).
+	return refreshOAuthToken(provider as OAuthProvider, credential);
+}
+
 async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	// The broker is a long-running headless service: route structured logs to
 	// stdout so a process supervisor (pm2, journald, k8s) captures them, and
@@ -129,7 +161,10 @@ async function runServe(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const token = await ensureToken();
 	const dbPath = getAgentDbPath();
 	const store = await SqliteAuthCredentialStore.open(dbPath);
-	const storage = new AuthStorage(store);
+	const storage = new AuthStorage(store, {
+		refreshOAuthCredential: (provider, _credentialId, credential, signal) =>
+			refreshBrokerOAuthCredential(provider, credential, signal),
+	});
 	await storage.reload();
 	const handle = startAuthBroker({
 		storage,
@@ -207,7 +242,7 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 	// Drive the per-provider OAuth dance in-process. Persists into the same
 	// SQLite store the broker uses.
 	const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
-	const ask = (msg: string) => promptLine(rl, `${msg} `);
+	const ask = (msg: string, signal?: AbortSignal) => promptLine(rl, `${msg} `, signal);
 	const store = await SqliteAuthCredentialStore.open(getAgentDbPath());
 	const storage = new AuthStorage(store);
 	await storage.reload();
@@ -215,10 +250,9 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 		// Only paste-code providers (fixed non-loopback redirect, e.g. GitLab Duo
 		// Agent's vscode:// URI) get the manual paste fallback. An explicit
 		// `onManualCodeInput` is honored for ANY provider (the storage escape hatch),
-		// so for loopback providers we must not pass it: it would make
-		// `OAuthCallbackFlow` race a readline prompt against the HTTP callback and, if
-		// the callback wins, leave that prompt outstanding (dirty/blocked terminal).
-		// `AuthStorage.login` independently refuses to synthesize the default prompt
+		// so for loopback providers we do not pass it: an eager readline prompt adds
+		// noise to a flow that normally completes through HTTP. `AuthStorage.login`
+		// independently refuses to synthesize the default prompt
 		// for non-paste-code providers, so this is defense-in-depth on the same gate.
 		const usesManualInput = PASTE_CODE_LOGIN_PROVIDERS.has(provider);
 		await storage.login(provider, {
@@ -246,8 +280,8 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
 			},
 			...(usesManualInput
 				? {
-						onManualCodeInput() {
-							return ask("Paste the authorization code (or full redirect URL):");
+						onManualCodeInput(signal) {
+							return ask("Paste the authorization code (or full redirect URL):", signal);
 						},
 					}
 				: undefined),
@@ -263,7 +297,7 @@ async function runLocalLogin(provider: OAuthProvider): Promise<void> {
  * Interactive `readline` prompt that cleanly tears down on Ctrl-C / Escape so
  * cancelling a half-finished login flow doesn't leave the terminal in raw mode.
  */
-function promptLine(rl: readline.Interface, question: string): Promise<string> {
+function promptLine(rl: readline.Interface, question: string, signal?: AbortSignal): Promise<string> {
 	const { promise, resolve, reject } = Promise.withResolvers<string>();
 	const input = process.stdin as NodeJS.ReadStream;
 	const supportsRawMode = input.isTTY && typeof input.setRawMode === "function";
@@ -272,6 +306,7 @@ function promptLine(rl: readline.Interface, question: string): Promise<string> {
 
 	const cleanup = () => {
 		rl.off("SIGINT", onSigint);
+		signal?.removeEventListener("abort", onAbort);
 		if (supportsRawMode) {
 			input.off("keypress", onKeypress);
 			input.setRawMode?.(wasRaw);
@@ -293,6 +328,10 @@ function promptLine(rl: readline.Interface, question: string): Promise<string> {
 		cancel();
 	};
 
+	const onAbort = () => {
+		finish(() => reject(signal?.reason instanceof Error ? signal.reason : new Error("Login input cancelled")));
+	};
+
 	const onKeypress = (_str: string, key: readline.Key) => {
 		if (key.name === "escape" || (key.ctrl && key.name === "c")) {
 			cancel();
@@ -307,9 +346,18 @@ function promptLine(rl: readline.Interface, question: string): Promise<string> {
 	}
 
 	rl.once("SIGINT", onSigint);
-	rl.question(question, answer => {
-		finish(() => resolve(answer));
-	});
+	if (signal?.aborted) {
+		onAbort();
+	} else if (signal) {
+		signal.addEventListener("abort", onAbort, { once: true });
+		rl.question(question, { signal }, answer => {
+			finish(() => resolve(answer));
+		});
+	} else {
+		rl.question(question, answer => {
+			finish(() => resolve(answer));
+		});
+	}
 	return promise;
 }
 

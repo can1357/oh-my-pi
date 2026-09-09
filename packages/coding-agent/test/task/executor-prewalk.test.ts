@@ -23,6 +23,7 @@ import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 function yieldEmittingSession(
 	initialTools: string[] = ["read", "yield"],
@@ -30,10 +31,16 @@ function yieldEmittingSession(
 ): AgentSession {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
 	let activeTools = initialTools;
+	// `servingModel` mirrors the real session: attribution names the model that
+	// produced output, so a prewalk hand-off moves it along with `model`.
+	const serving = (model: Model | undefined): { selector: string; isFallback: boolean } | undefined =>
+		model ? { selector: `${model.provider}/${model.id}`, isFallback: false } : undefined;
 	const session = {
+		...createSessionDefaults(),
 		state: { messages: [] },
 		agent: { state: { systemPrompt: ["test"] } },
 		model: modelSwitch?.from,
+		servingModel: serving(modelSwitch?.from),
 		extensionRunner: undefined,
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => activeTools,
@@ -52,6 +59,7 @@ function yieldEmittingSession(
 		prompt: async (_text: string, _options?: PromptOptions) => {
 			if (modelSwitch) {
 				session.model = modelSwitch.to;
+				session.servingModel = serving(modelSwitch.to);
 				for (const listener of listeners) {
 					listener({ type: "notice", level: "info", message: "Prewalk switched", source: "prewalk" });
 				}
@@ -69,11 +77,6 @@ function yieldEmittingSession(
 				});
 			}
 		},
-		waitForIdle: async () => {},
-		getLastAssistantMessage: () => undefined,
-		abort: async () => {},
-		dispose: async () => {},
-		setIrcWakeTurnObserver: () => {},
 	};
 	return session as unknown as AgentSession;
 }
@@ -370,7 +373,7 @@ describe("task tool plan-mode prewalk guard", () => {
 		return {
 			cwd: "/tmp",
 			hasUI: false,
-			settings: Settings.isolated({ "task.isolation.mode": "none" }),
+			settings: Settings.isolated({ "task.isolation.enabled": false }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 			getPlanModeState: () => (planMode ? { enabled: true, planFilePath: "local://PLAN.md" } : undefined),

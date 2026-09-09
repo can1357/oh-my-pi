@@ -7,10 +7,10 @@ import {
 	Input,
 	matchesKey,
 	Spacer,
-	Text,
 	TruncatedText,
 	truncateToWidth,
 } from "@oh-my-pi/pi-tui";
+import { isRecord, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { TreeFilterMode } from "../../config/settings-schema";
 import { theme } from "../../modes/theme/theme";
 import {
@@ -25,7 +25,7 @@ import { toPathList } from "../../tools/path-utils";
 import { shortenPath } from "../../tools/render-utils";
 import { canonicalizeMessage } from "../../utils/thinking-display";
 import { resolveAssistantErrorPresentation } from "../utils/transcript-render-helpers";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel, PanelDivider } from "./overlay-box";
 import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
 
 /** Gutter info: position (displayIndent where connector was) and whether to show │ */
@@ -60,6 +60,91 @@ interface ToolCallInfo {
 	name: string;
 	arguments: Record<string, unknown>;
 }
+
+/** Advisor note metadata surfaced on a single session-tree row. */
+interface AdvisorTreeDisplay {
+	/** Non-default advisor names then severities, comma-joined (e.g. `sec, blocker`). */
+	qualifier: string;
+	/** Note bodies joined into one line. */
+	text: string;
+}
+
+/**
+ * Collapse untrusted session metadata to one safe tree-row field: strip
+ * ANSI/control characters, then fold preserved tabs/newlines into spaces.
+ */
+function sanitizeTreeField(value: string): string {
+	return sanitizeText(value)
+		.replace(/[\n\t]/g, " ")
+		.trim();
+}
+
+/**
+ * Extract display metadata from an advisor custom-message's `details.notes`,
+ * ignoring the model-facing `<advisory>` wrapper stored in `content`. Collects
+ * distinct non-default advisor names and severities so the tree row can tag the
+ * note the way its transcript card does.
+ */
+function advisorTreeDisplay(details: unknown): AdvisorTreeDisplay {
+	if (!isRecord(details) || !Array.isArray(details.notes)) return { qualifier: "", text: "" };
+	const notes: string[] = [];
+	const advisors: string[] = [];
+	const severities: string[] = [];
+	for (const note of details.notes) {
+		if (!isRecord(note)) continue;
+		if (typeof note.note === "string") notes.push(note.note);
+		if (typeof note.advisor === "string") {
+			const name = sanitizeTreeField(note.advisor);
+			if (name && name !== "default" && !advisors.includes(name)) advisors.push(name);
+		}
+		if (typeof note.severity === "string") {
+			const severity = sanitizeTreeField(note.severity);
+			if (severity && !severities.includes(severity)) severities.push(severity);
+		}
+	}
+	return { qualifier: [...advisors, ...severities].join(", "), text: notes.join(" ") };
+}
+
+/**
+ * Strip one model-facing `<system-*>` envelope from custom-message content.
+ * Nested system tags belong to the recorded payload and remain visible.
+ */
+function stripSystemWrapperTags(content: string): string {
+	const trimmed = content.trim();
+	const opening = /^<(system-[\w-]+)/i.exec(trimmed);
+	if (!opening) return content;
+
+	const attributeStart = opening[0].length;
+	const firstAttributeCharacter = trimmed[attributeStart];
+	if (firstAttributeCharacter !== ">" && !/\s/.test(firstAttributeCharacter ?? "")) return content;
+
+	let quote: '"' | "'" | undefined;
+	let openingEnd = -1;
+	for (let index = attributeStart; index < trimmed.length; index++) {
+		const character = trimmed[index];
+		if (quote) {
+			if (character === quote) quote = undefined;
+		} else if (character === '"' || character === "'") {
+			quote = character;
+		} else if (character === "<") {
+			return content;
+		} else if (character === ">") {
+			openingEnd = index;
+			break;
+		}
+	}
+	if (openingEnd === -1 || quote) return content;
+
+	const closingTag = `</${opening[1]}>`;
+	const closingStart = trimmed.length - closingTag.length;
+	if (closingStart <= openingEnd || trimmed.slice(closingStart).toLowerCase() !== closingTag.toLowerCase()) {
+		return content;
+	}
+	return trimmed.slice(openingEnd + 1, closingStart).trim();
+}
+
+/** Per-message cap on text folded into the tree search index. */
+const SEARCH_TEXT_LIMIT = 200;
 
 class TreeList implements Component {
 	#flatNodes: FlatNode[] = [];
@@ -292,6 +377,7 @@ class TreeList implements Component {
 				entry.type === "label" ||
 				entry.type === "custom" ||
 				entry.type === "model_change" ||
+				entry.type === "model_usage" ||
 				entry.type === "thinking_level_change" ||
 				entry.type === "service_tier_change" ||
 				entry.type === "title_change" ||
@@ -373,10 +459,13 @@ class TreeList implements Component {
 			}
 			case "custom_message": {
 				parts.push(entry.customType);
-				if (typeof entry.content === "string") {
-					parts.push(entry.content);
+				if (entry.customType === "advisor") {
+					const { qualifier, text } = advisorTreeDisplay(entry.details);
+					if (qualifier) parts.push(qualifier);
+					if (text) parts.push(text);
 				} else {
-					parts.push(this.#extractContent(entry.content));
+					const content = stripSystemWrapperTags(this.#joinTextContent(entry.content)).slice(0, SEARCH_TEXT_LIMIT);
+					if (content) parts.push(content);
 				}
 				break;
 			}
@@ -388,6 +477,15 @@ class TreeList implements Component {
 				break;
 			case "model_change":
 				parts.push("model", entry.model);
+				break;
+			case "model_usage":
+				parts.push(
+					"model usage",
+					sanitizeTreeField(entry.purpose),
+					sanitizeTreeField(entry.role ?? ""),
+					sanitizeTreeField(entry.provider),
+					sanitizeTreeField(entry.model),
+				);
 				break;
 			case "thinking_level_change":
 				parts.push("thinking", entry.thinkingLevel ?? ThinkingLevel.Off);
@@ -477,25 +575,25 @@ class TreeList implements Component {
 			//    `model_change` + `thinking_level_change` (both hidden by the default filter)
 			//    read as "broken /tree" — see #1909.
 			if (this.#flatNodes.length === 0) {
-				lines.push(truncateToWidth(theme.fg("muted", "  No entries found"), width));
-				lines.push(truncateToWidth(theme.fg("muted", `  (0/0)${this.#getFilterLabel()}`), width));
+				lines.push(truncateToWidth(theme.fg("muted", "No entries found"), width));
+				lines.push(truncateToWidth(theme.fg("muted", `(0/0)${this.#getFilterLabel()}`), width));
 			} else if (this.#searchQuery.length > 0) {
-				lines.push(truncateToWidth(theme.fg("muted", `  No entries match search "${this.#searchQuery}"`), width));
-				lines.push(truncateToWidth(theme.fg("muted", "  Press Backspace to clear the search"), width));
+				lines.push(truncateToWidth(theme.fg("muted", `No entries match search "${this.#searchQuery}"`), width));
+				lines.push(truncateToWidth(theme.fg("muted", "Press Backspace to clear the search"), width));
 				lines.push(
-					truncateToWidth(theme.fg("muted", `  (0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
+					truncateToWidth(theme.fg("muted", `(0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
 				);
 			} else {
 				const filterLabel = this.#getFilterLabel().trim() || "[default]";
 				lines.push(
 					truncateToWidth(
-						theme.fg("muted", `  ${this.#flatNodes.length} entries hidden by the current filter ${filterLabel}`),
+						theme.fg("muted", `${this.#flatNodes.length} entries hidden by the current filter ${filterLabel}`),
 						width,
 					),
 				);
-				lines.push(truncateToWidth(theme.fg("muted", "  Press Alt+A to show all, Alt+D for default"), width));
+				lines.push(truncateToWidth(theme.fg("muted", "Press Alt+A to show all, Alt+D for default"), width));
 				lines.push(
-					truncateToWidth(theme.fg("muted", `  (0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
+					truncateToWidth(theme.fg("muted", `(0/${this.#flatNodes.length})${this.#getFilterLabel()}`), width),
 				);
 			}
 			return lines;
@@ -605,7 +703,7 @@ class TreeList implements Component {
 
 		const filterLabel = this.#getFilterLabel();
 		if (filterLabel) {
-			lines.push(truncateToWidth(theme.fg("muted", `  ${filterLabel.trim()}`), width));
+			lines.push(truncateToWidth(theme.fg("muted", filterLabel.trim()), width));
 		}
 
 		return lines;
@@ -664,13 +762,13 @@ class TreeList implements Component {
 				break;
 			}
 			case "custom_message": {
-				const content =
-					typeof entry.content === "string"
-						? entry.content
-						: entry.content
-								.filter((c): c is { type: "text"; text: string } => c.type === "text")
-								.map(c => c.text)
-								.join("");
+				if (entry.customType === "advisor") {
+					const { qualifier, text } = advisorTreeDisplay(entry.details);
+					const label = qualifier ? `advisor (${qualifier}): ` : "advisor: ";
+					result = theme.fg("customMessageLabel", label) + normalize(text);
+					break;
+				}
+				const content = stripSystemWrapperTags(this.#joinTextContent(entry.content));
 				result = theme.fg("customMessageLabel", `[${entry.customType}]: `) + normalize(content);
 				break;
 			}
@@ -685,6 +783,14 @@ class TreeList implements Component {
 			case "model_change":
 				result = theme.fg("dim", `[model: ${entry.model}]`);
 				break;
+			case "model_usage": {
+				const purpose = sanitizeTreeField(entry.purpose);
+				const role = sanitizeTreeField(entry.role ?? "");
+				const provider = sanitizeTreeField(entry.provider);
+				const model = sanitizeTreeField(entry.model);
+				result = theme.fg("dim", `[model usage: ${purpose} ${role ? `${role} ` : ""}${provider}/${model}]`);
+				break;
+			}
 			case "thinking_level_change":
 				result = theme.fg("dim", `[thinking: ${entry.thinkingLevel ?? ThinkingLevel.Off}]`);
 				break;
@@ -725,14 +831,24 @@ class TreeList implements Component {
 	}
 
 	#extractContent(content: unknown): string {
-		const maxLen = 200;
-		if (typeof content === "string") return content.slice(0, maxLen);
+		return this.#joinTextContent(content).slice(0, SEARCH_TEXT_LIMIT);
+	}
+
+	/** Concatenate every text block (or return a string as-is) with no length cap. */
+	#joinTextContent(content: unknown): string {
+		if (typeof content === "string") return content;
 		if (Array.isArray(content)) {
 			let result = "";
 			for (const c of content) {
-				if (typeof c === "object" && c !== null && "type" in c && c.type === "text") {
-					result += (c as { text: string }).text;
-					if (result.length >= maxLen) return result.slice(0, maxLen);
+				if (
+					typeof c === "object" &&
+					c !== null &&
+					"type" in c &&
+					c.type === "text" &&
+					"text" in c &&
+					typeof c.text === "string"
+				) {
+					result += c.text;
 				}
 			}
 			return result;
@@ -849,13 +965,18 @@ class TreeList implements Component {
 			this.#selectedIndex = Math.max(0, this.#selectedIndex - this.maxVisibleLines);
 		} else if (matchesSelectPageDown(keyData) || matchesKey(keyData, "right")) {
 			this.#selectedIndex = Math.min(this.#filteredNodes.length - 1, this.#selectedIndex + this.maxVisibleLines);
-		} else if (matchesKey(keyData, "shift+enter") || matchesKey(keyData, "shift+return")) {
+		} else if (
+			matchesKey(keyData, "shift+enter") ||
+			matchesKey(keyData, "shift+return") ||
+			keyData === "\n" || // Shift+Enter delivered as bare LF (iTerm2 legacy mapping) — matches the composer (issue #8821)
+			keyData === "\x1b[13;2~" // Shift+Enter legacy CSI ~ form — also accepted by the composer (editor.ts:1466)
+		) {
 			// Summarize-and-switch: fork with a branch summary without the extra prompt.
 			const selected = this.#filteredNodes[this.#selectedIndex];
 			if (selected && this.onSelect) {
 				this.onSelect(selected.node.entry.id, { summarize: true });
 			}
-		} else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return") || keyData === "\n") {
+		} else if (matchesKey(keyData, "enter") || matchesKey(keyData, "return")) {
 			const selected = this.#filteredNodes[this.#selectedIndex];
 			if (selected && this.onSelect) {
 				this.onSelect(selected.node.entry.id, { summarize: false });
@@ -925,9 +1046,9 @@ class SearchLine implements Component {
 	render(width: number): readonly string[] {
 		const query = this.treeList.getSearchQuery();
 		if (query) {
-			return [truncateToWidth(`  ${theme.fg("muted", "Search:")} ${theme.fg("accent", query)}`, width)];
+			return [truncateToWidth(`${theme.fg("muted", "Search:")} ${theme.fg("accent", query)}`, width)];
 		}
-		return [truncateToWidth(`  ${theme.fg("muted", "Search:")}`, width)];
+		return [truncateToWidth(theme.fg("muted", "Search:"), width)];
 	}
 
 	handleInput(_keyData: string): void {}
@@ -953,11 +1074,9 @@ class LabelInput implements Component {
 
 	render(width: number): readonly string[] {
 		const lines: string[] = [];
-		const indent = "  ";
-		const availableWidth = width - indent.length;
-		lines.push(truncateToWidth(`${indent}${theme.fg("muted", "Label (empty to remove):")}`, width));
-		lines.push(...this.#input.render(availableWidth).map(line => truncateToWidth(`${indent}${line}`, width)));
-		lines.push(truncateToWidth(`${indent}${theme.fg("dim", "enter: save  esc: cancel")}`, width));
+		lines.push(truncateToWidth(theme.fg("muted", "Label (empty to remove):"), width));
+		lines.push(...this.#input.render(width));
+		lines.push(truncateToWidth(theme.fg("dim", "enter: save  esc: cancel"), width));
 		return lines;
 	}
 
@@ -976,7 +1095,7 @@ class LabelInput implements Component {
 /**
  * Component that renders a session tree selector for navigation
  */
-export class TreeSelectorComponent extends Container {
+export class TreeSelectorComponent extends OverlayPanel {
 	#treeList: TreeList;
 	#labelInput: LabelInput | null = null;
 	#labelInputContainer: Container;
@@ -991,8 +1110,14 @@ export class TreeSelectorComponent extends Container {
 		private readonly onLabelChangeCallback?: (entryId: string, label: string | undefined) => void,
 		initialFilterMode: FilterMode = "default",
 	) {
-		super();
-		const maxVisibleLines = Math.max(5, Math.floor(terminalHeight / 2));
+		super("Session Tree");
+		// The outer panel has eight fixed rows around the tree list: top/bottom
+		// borders, the two spacers, help, search, and section divider.
+		const PANEL_CHROME_ROWS = 8;
+		const maxVisibleLines = Math.max(
+			1,
+			Math.min(Math.max(5, Math.floor(terminalHeight / 2)), terminalHeight - PANEL_CHROME_ROWS),
+		);
 
 		this.#treeList = new TreeList(tree, currentLeafId, maxVisibleLines, initialFilterMode);
 		this.#treeList.onSelect = onSelect;
@@ -1005,8 +1130,6 @@ export class TreeSelectorComponent extends Container {
 		this.#labelInputContainer = new Container();
 
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold("  Session Tree"), 1, 0));
 		this.addChild(
 			new TruncatedText(
 				theme.fg(
@@ -1018,12 +1141,11 @@ export class TreeSelectorComponent extends Container {
 			),
 		);
 		this.addChild(new SearchLine(this.#treeList));
-		this.addChild(new DynamicBorder());
+		this.addChild(new PanelDivider());
 		this.addChild(new Spacer(1));
 		this.addChild(this.#treeContainer);
 		this.addChild(this.#labelInputContainer);
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 
 		if (tree.length === 0) {
 			setTimeout(() => onCancel(), 100);

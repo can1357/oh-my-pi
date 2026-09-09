@@ -1,12 +1,12 @@
 Manage the active goal-mode objective and its durable wayfinding state.
 
-Use a single `op` field:
-- `create` starts a goal and enables goal mode. Requires `objective`; optional `token_budget` must be positive. Use only when no goal exists and no goal is paused.
+Single `op` field:
+- `create`: starts goal; enables goal mode. Requires `objective`; optional positive `token_budget`. Only when no goal exists and none is paused.
 - `get` returns the current goal, `goal_id`, wayfinding revision, and remaining token budget.
 - `update` atomically replaces the mutable wayfinding snapshot without changing the canonical objective, goal identity, or accumulated budget usage. Requires the current `goal_id`, `expected_revision`, `next_action`, and `why` from the latest `create`, `get`, `resume`, or `update` result.
-- `resume` re-activates a paused goal so work can continue.
-- `complete` marks the goal complete after you have verified every deliverable against current evidence.
-- `drop` discards the current goal without completing it.
+- `resume`: re-activates paused goal for continued work.
+- `complete`: marks goal complete only when actually done and every deliverable verified against current evidence. NEVER because budget low or turn ending.
+- `drop`: discards current goal without completing it.
 
 For `update`:
 - `focus` states the current problem boundary.
@@ -22,5 +22,4 @@ An `update` is a full wayfinding snapshot. Omitted optional fields and lists are
 
 The objective is user-owned and stable. Wayfinding is agent-owned and mutable. Never use `update` to weaken success criteria or silently change user scope.
 
-NEVER call `complete` because a budget is low or a turn is ending. Call it only when the goal is actually done and verified.
-If `get` shows a paused goal, call `resume` before continuing work on it.
+Paused goal from `get` → MUST `resume` before continuing work.

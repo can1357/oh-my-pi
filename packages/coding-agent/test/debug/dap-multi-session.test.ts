@@ -8,6 +8,7 @@ import type {
 	DapResolvedAdapter,
 	DapThread,
 } from "@oh-my-pi/pi-coding-agent/dap/types";
+import { type ChildProcess, ptree } from "@oh-my-pi/pi-utils";
 
 const TEST_ADAPTER: DapResolvedAdapter = {
 	name: "js-debug-adapter",
@@ -370,6 +371,52 @@ describe("DAP multi-session debugging", () => {
 			{ id: 1, name: "worker.js" },
 			{ id: 1, name: "worker.js" },
 		]);
+
+		await manager.terminate(undefined, 1_000);
+	});
+
+	it("drains a runInTerminal debuggee's stdout into the session output buffer", async () => {
+		const root = new FakeDapClient(undefined, "launch", true);
+		spyOn(DapClient, "spawn").mockResolvedValue(root as unknown as DapClient);
+
+		// Synthetic debuggee stdout: >64KB ahead of a unique terminal marker,
+		// then a trailing sentinel and EOF. The handler discards the ptree child
+		// after reading its PID, so the drain must consume this whole stream and
+		// route it to the session output — undrained, the marker never reaches
+		// the buffer. The sentinel after the marker guarantees the marker chunk
+		// is routed (in the read cycle before it) before `closed` resolves.
+		const marker = "__RUNINTERMINAL_MARKER__";
+		const enc = new TextEncoder();
+		const chunks = [enc.encode("x".repeat(128 * 1024)), enc.encode(`${marker}\n`), enc.encode("tail\n")];
+		let next = 0;
+		const closed = Promise.withResolvers<void>();
+		const stdout = new ReadableStream<Uint8Array>({
+			pull(controller) {
+				if (next < chunks.length) {
+					controller.enqueue(chunks[next++]);
+				} else {
+					controller.close();
+					closed.resolve();
+				}
+			},
+		});
+		const spawnSpy = spyOn(ptree, "spawn").mockReturnValue({ pid: 4242, stdout } as unknown as ChildProcess);
+
+		const manager = new DapSessionManager();
+		await manager.launch({ adapter: TEST_ADAPTER, program: "/tmp/target.js", cwd: "/tmp" }, undefined, 1_000);
+
+		await root.triggerReverse("runInTerminal", { args: ["/usr/bin/debuggee", "--verbose"] });
+		// The stream reaching EOF proves the drain consumed it end to end; the
+		// marker (routed before close) is then present in the session output.
+		await closed.promise;
+
+		expect(spawnSpy).toHaveBeenCalledTimes(1);
+		expect(spawnSpy.mock.calls[0]?.[0]).toEqual(["/usr/bin/debuggee", "--verbose"]);
+		const output = manager.getOutput();
+		expect(output.output).toContain(marker);
+		expect(output.snapshot.outputBytes).toBeGreaterThan(128 * 1024);
+		expect(output.snapshot.outputTruncated).toBe(true);
+		expect(Buffer.byteLength(output.output, "utf-8")).toBeLessThanOrEqual(128 * 1024);
 
 		await manager.terminate(undefined, 1_000);
 	});

@@ -12,6 +12,7 @@ import type { SessionEntry } from "../src/session/session-entries";
 import type { SessionManager } from "../src/session/session-manager";
 
 const IV_LENGTH = 12;
+const TEST_MAX_SEALED_BYTES = 4_000;
 
 async function makeKey(): Promise<CryptoKey> {
 	const bytes = new Uint8Array(32);
@@ -66,14 +67,14 @@ describe("sealToFit", () => {
 	test("trims oversized text into budget without dropping entries", async () => {
 		const key = await makeKey();
 		const data = sessionData(
-			[messageEntry("e1", null, "keep me"), messageEntry("e2", "e1", randomHex(1_500_000))],
+			[messageEntry("e1", null, "keep me"), messageEntry("e2", "e1", randomHex(10_000))],
 			"e2",
 		);
 
-		const { sealed, truncated } = await sealToFit(key, data, SERVER_MAX_SEALED_BYTES);
+		const { sealed, truncated } = await sealToFit(key, data, TEST_MAX_SEALED_BYTES);
 
 		expect(truncated).toBe(true);
-		expect(sealed.byteLength).toBeLessThanOrEqual(SERVER_MAX_SEALED_BYTES);
+		expect(sealed.byteLength).toBeLessThanOrEqual(TEST_MAX_SEALED_BYTES);
 		const opened = await open(key, sealed);
 		expect(opened.entries).toHaveLength(2);
 		expect(opened.leafId).toBe("e2");
@@ -92,13 +93,13 @@ describe("sealToFit", () => {
 				role: "user",
 				content: [
 					{ type: "text", text: "see screenshot" },
-					{ type: "image", data: randomHex(800_000), mimeType: "image/png" },
+					{ type: "image", data: randomHex(2_000), mimeType: "image/png" },
 				],
 			},
 		} as unknown as SessionEntry;
 		const data = sessionData([imageEntry], "img");
 
-		const { sealed, truncated } = await sealToFit(key, data, SERVER_MAX_SEALED_BYTES);
+		const { sealed, truncated } = await sealToFit(key, data, TEST_MAX_SEALED_BYTES);
 
 		expect(truncated).toBe(true);
 		const flat = JSON.stringify(await open(key, sealed));

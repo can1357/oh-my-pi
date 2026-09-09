@@ -196,10 +196,19 @@ function makePlainUrlPunctuationSseResponse(model: string): string {
 }
 
 describe("searchCodex model selection", () => {
+	const residencyPayload = Buffer.from(
+		JSON.stringify({
+			"https://api.openai.com/auth": {
+				chatgpt_account_id: "acct-test",
+				chatgpt_data_residency: "us",
+			},
+		}),
+	).toString("base64url");
+	const residencyToken = `header.${residencyPayload}.signature`;
 	const fakeAuthStorage = {
 		async getOAuthAccess() {
 			return {
-				accessToken: "test-access-token",
+				accessToken: residencyToken,
 				accountId: "acct-test",
 			};
 		},
@@ -292,6 +301,7 @@ describe("searchCodex model selection", () => {
 
 		expect(capturedRequest).not.toBeNull();
 		expect(capturedRequest?.url).toBe("https://chatgpt.com/backend-api/codex/responses");
+		expect(new Headers(capturedRequest?.headers).get("x-openai-internal-codex-residency")).toBe("us");
 		expect(capturedRequest?.body?.model).toBe("gpt-5.6-luna");
 		expect(result.model).toBe("gpt-5.6-luna");
 		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
@@ -355,6 +365,7 @@ describe("searchCodex model selection", () => {
 		expect(headers.get("authorization")).toBe("Bearer test-proxy-key");
 		expect(headers.get("x-proxy-tenant")).toBe("tenant-1");
 		expect(headers.has("chatgpt-account-id")).toBe(false);
+		expect(headers.has("x-openai-internal-codex-residency")).toBe(false);
 		expect(result.answer).toBe("Codex answer");
 	});
 
@@ -529,6 +540,68 @@ describe("searchCodex model selection", () => {
 		expect(capturedRequest).not.toBeNull();
 		expect(capturedRequest?.body?.tool_choice).toEqual({ type: "web_search" });
 		expect(result.sources).toEqual([{ title: "Example Article", url: "https://example.com/article" }]);
+	});
+
+	it("requests and merges web-search action sources with citation metadata", async () => {
+		process.env.PI_CODEX_WEB_SEARCH_MODEL = "gpt-5.4";
+		const answer = "The Responses API supports hosted web search.";
+		const citationStart = answer.indexOf("hosted web search");
+		const sse = [
+			`data: ${JSON.stringify({
+				type: "response.created",
+				response: { id: "resp_created_id", model: "gpt-5.4" },
+			})}`,
+			"",
+			`data: ${JSON.stringify({
+				type: "response.output_item.done",
+				item: {
+					type: "web_search_call",
+					action: {
+						sources: [
+							{
+								url: "https://example.com/article?utm_source=openai",
+								title: "Search result title",
+							},
+						],
+					},
+				},
+			})}`,
+			"",
+			`data: ${JSON.stringify({
+				type: "response.output_item.done",
+				item: {
+					type: "message",
+					content: [
+						{
+							type: "output_text",
+							text: answer,
+							annotations: [
+								{
+									type: "url_citation",
+									url: "https://example.com/article?utm_source=openai",
+									title: "Example Article",
+									start_index: citationStart,
+									end_index: citationStart + "hosted web search".length,
+								},
+							],
+						},
+					],
+				},
+			})}`,
+			"",
+		].join("\n");
+
+		const result = await searchCodex(makeSearchParams("action sources", mockCodexFetch("gpt-5.4", sse)));
+
+		expect(capturedRequest?.body?.include).toEqual(["web_search_call.action.sources"]);
+		expect(result.requestId).toBe("resp_created_id");
+		expect(result.sources).toEqual([
+			{
+				title: "Search result title",
+				url: "https://example.com/article",
+				snippet: answer,
+			},
+		]);
 	});
 
 	it("extracts plain text URLs when annotations are absent", async () => {
@@ -768,5 +841,23 @@ describe("searchCodex model selection", () => {
 		await expect(searchCodex(makeSearchParams("structured failure", fetchMock))).rejects.toThrow(
 			"Codex request failed (model_snapshot_unavailable): The requested model snapshot is unavailable.",
 		);
+	});
+
+	it("classifies rate-limit failures delivered inside a successful SSE response", async () => {
+		const sse = [
+			`data: ${JSON.stringify({
+				type: "response.failed",
+				response: {
+					error: { code: "rate_limit_exceeded", message: "Too many requests" },
+				},
+			})}`,
+			"",
+		].join("\n");
+		const fetchMock: FetchImpl = () =>
+			Promise.resolve(new Response(sse, { status: 200, headers: { "Content-Type": "text/event-stream" } }));
+
+		await expect(searchCodex(makeSearchParams("rate-limited search", fetchMock))).rejects.toMatchObject({
+			status: 429,
+		});
 	});
 });

@@ -12,7 +12,7 @@
  */
 import type { StreamFn } from "@oh-my-pi/pi-agent-core";
 import { type SimpleStreamOptions, streamSimple } from "@oh-my-pi/pi-ai";
-import { isAnthropicFableOrMythosModel } from "@oh-my-pi/pi-catalog/identity";
+import { classifyModel } from "@oh-my-pi/pi-catalog/identity";
 import { type Settings, validateProviderMaxInFlightRequests } from "../config/settings";
 
 function timeoutSecondsToMs(value: number): number | undefined {
@@ -41,6 +41,12 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 				: model.api === "openai-responses"
 					? settings.get("textVerbosity")
 					: undefined;
+		// "auto" leaves the option unset so provider defaults and the
+		// PI_CACHE_RETENTION env override keep working; anything else is an
+		// explicit per-request retention (long restores 1h Anthropic TTLs and
+		// implicitly disables the short-entry keep-alive refresh loop).
+		const cacheRetentionSetting = settings.get("providers.cacheRetention");
+		const cacheRetention = cacheRetentionSetting === "auto" ? undefined : cacheRetentionSetting;
 		const streamFirstEventTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamFirstEventTimeoutSeconds"));
 		const streamIdleTimeoutMs = timeoutSecondsToMs(settings.get("providers.streamIdleTimeoutSeconds"));
 		// Server-side fallback (opt-in): when the user enables it AND the
@@ -48,11 +54,16 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 		// API, inject the `fallbacks: [{ model: "claude-opus-4-8" }]` chain.
 		// The provider layer picks it up, sends the beta header, and honors
 		// the response signals. Every other model / API is untouched.
-		const serverSideFallbackEnabled =
+		const serverSideFallbackEligible =
 			settings.get("providers.anthropic.serverSideFallback") &&
 			model.api === "anthropic-messages" &&
-			model.provider === "anthropic" &&
-			isAnthropicFableOrMythosModel(model.id);
+			model.provider === "anthropic";
+		const serverSideFallbackIdentity = serverSideFallbackEligible
+			? (model.identity ?? classifyModel(model.provider, model.id ?? "", { lenient: true }))
+			: undefined;
+		const serverSideFallbackEnabled =
+			serverSideFallbackIdentity?.class === "anthropic" &&
+			(serverSideFallbackIdentity.family === "fable" || serverSideFallbackIdentity.family === "mythos");
 		const fallbacks =
 			streamOptions?.fallbacks ?? (serverSideFallbackEnabled ? [{ model: "claude-opus-4-8" }] : undefined);
 		const merged: SimpleStreamOptions = {
@@ -60,6 +71,7 @@ export function createSettingsAwareStreamFn(settings: Settings, base: StreamFn =
 			openrouterVariant: streamOptions?.openrouterVariant ?? openrouterVariant,
 			antigravityEndpointMode: streamOptions?.antigravityEndpointMode ?? antigravityEndpointMode,
 			textVerbosity: streamOptions?.textVerbosity ?? textVerbosity,
+			cacheRetention: streamOptions?.cacheRetention ?? cacheRetention,
 			streamFirstEventTimeoutMs: streamOptions?.streamFirstEventTimeoutMs ?? streamFirstEventTimeoutMs,
 			streamIdleTimeoutMs: streamOptions?.streamIdleTimeoutMs ?? streamIdleTimeoutMs,
 			maxRetryDelayMs: streamOptions?.maxRetryDelayMs ?? settings.get("retry.maxDelayMs"),

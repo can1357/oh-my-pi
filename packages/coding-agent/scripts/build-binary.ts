@@ -32,6 +32,9 @@ export function resolveCrossBuild(value: string | undefined): CrossBuild | null 
 		case "win32-x64":
 		case "windows-x64":
 			return { id: value, platform: "win32", arch: "x64", target: "bun-windows-x64-baseline" };
+		case "win32-arm64":
+		case "windows-arm64":
+			return { id: value, platform: "win32", arch: "arm64", target: "bun-windows-arm64" };
 		default:
 			throw new Error(`Unsupported CROSS_TARGET: ${value}`);
 	}
@@ -53,10 +56,6 @@ if (
 }
 const transformersVersion = transformersManifest.version;
 
-function shouldAdhocSignDarwinBinary(crossBuild: CrossBuild | null): boolean {
-	return process.platform === "darwin" && !crossBuild;
-}
-
 async function runCommand(
 	command: string[],
 	env: NodeJS.ProcessEnv = Bun.env,
@@ -76,6 +75,7 @@ async function runCommand(
 
 async function main(): Promise<void> {
 	const crossBuild = resolveCrossBuild(Bun.env.CROSS_TARGET);
+	const shouldAdhocSign = process.platform === "darwin" && !crossBuild && Bun.env.BUN_NO_CODESIGN_MACHO_BINARY !== "1";
 	const outName = crossBuild ? `omp-${crossBuild.id}` : "omp";
 	const outputPath = path.join(packageDir, "dist", outName);
 	// Generate inside the try so the finally always restores the empty checked-in
@@ -91,7 +91,6 @@ async function main(): Promise<void> {
 			["bun", "--cwd=../natives", "run", "gen:native"],
 			crossBuild ? { ...Bun.env, TARGET_PLATFORM: crossBuild.platform, TARGET_ARCH: crossBuild.arch } : Bun.env,
 		);
-		await runCommand(["bun", "run", "gen:mupdf"]);
 		try {
 			await compileCodingAgent({
 				repoRoot,
@@ -99,14 +98,14 @@ async function main(): Promise<void> {
 				outfile: outputPath,
 				transformersVersion,
 				target: crossBuild?.target,
-				skipBuiltinCodesign: shouldAdhocSignDarwinBinary(crossBuild),
+				executablePath: Bun.env.BUN_COMPILE_EXECUTABLE_PATH || undefined,
+				skipBuiltinCodesign: shouldAdhocSign,
 			});
 
-			if (shouldAdhocSignDarwinBinary(crossBuild)) {
+			if (shouldAdhocSign) {
 				await runCommand(["codesign", "--force", "--sign", "-", outputPath]);
 			}
 		} finally {
-			await runCommand(["bun", "run", "gen:mupdf:reset"]);
 			await runCommand(["bun", "--cwd=../natives", "run", "gen:native:reset"]);
 		}
 	} finally {

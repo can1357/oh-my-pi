@@ -1,6 +1,6 @@
 # Follow-up on {{repo.full_name}}#{{inbound.number}} ({{inbound.kind}})
 
-Thread context: {{origin.description}}. PR state: `{{state.pr_status}}`.
+Thread: {{origin.description}}. PR: `{{state.pr_status}}`.
 
 ## Prior conversation
 
@@ -8,18 +8,18 @@ Thread context: {{origin.description}}. PR state: `{{state.pr_status}}`.
 
 ---
 
-## New comment by @{{comment.author}} ({{comment.created_at}})
+## New comment: @{{comment.author}} ({{comment.created_at}})
 
 {{comment.body}}
 
 ---
 
-Decide what to do:
+## Action
 
-- **New repro info?** Re-run via `repro_record`, then `gh_post_comment` with the outcome.
-- **Maintainer dismissal?** A maintainer saying "intended", "not an issue", "works as designed", or similar — however terse — permanently ends the fix workflow. No further commits, pushes, or PRs, even mid-fix with work already done. Apply `wontfix` via `set_issue_labels` (when available on this thread), reply with at most one short acknowledgement, and stop.
-- **PR change requested?** Amend `{{workspace.branch}}` and push only for an already-open PR / authorized implementation; NEVER open a second PR, and NEVER open the first PR for an unauthorized enhancement/proposal. Reply with a short `gh_post_comment` naming what changed.
-- **Confirmation or unrelated question?** Reply with one `gh_post_comment`. Leave code untouched.
-- **Bot author or no actionable content?** No-op.
+- New repro info: re-run `repro_record`; `gh_post_comment` outcome.
+- Maintainer dismissal: "intended", "not an issue", "works as designed", or similar, however terse, permanently ends fix workflow—even mid-fix with completed work. No commits, pushes, or PRs. Apply `wontfix` via `set_issue_labels` when available on this thread; at most one short acknowledgement; stop.
+- PR change requested: amend `{{workspace.branch}}`; push only for an already-open PR / authorized implementation. NEVER open a second PR or first PR for an unauthorized enhancement/proposal. Short `gh_post_comment` naming changes.
+- Confirmation or unrelated question: one `gh_post_comment`; code untouched.
+- Bot author or no actionable content: no-op.
 
-You MUST reuse the recorded session state. NEVER restart from scratch.
+MUST reuse recorded session state. NEVER restart from scratch.

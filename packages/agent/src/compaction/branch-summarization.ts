@@ -9,8 +9,8 @@ import type { Api, ApiKey, AssistantMessage, Context, Model, SimpleStreamOptions
 import { preferredDialect } from "@oh-my-pi/pi-catalog/identity";
 import { prompt } from "@oh-my-pi/pi-utils";
 import { type AgentTelemetry, instrumentedCompleteSimple } from "../telemetry";
+import { Tokenizer } from "../tokenizer";
 import type { AgentMessage } from "../types";
-import { estimateTokens } from "./compaction";
 import type { ReadonlySessionManager, SessionEntry } from "./entries";
 import {
 	type ConvertToLlm,
@@ -191,7 +191,9 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 			return createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp);
 
 		case "compaction":
-			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp, entry.shortSummary);
+			return createCompactionSummaryMessage(entry.summary, entry.tokensBefore, entry.timestamp, {
+				shortSummary: entry.shortSummary,
+			});
 
 		// These don't contribute to conversation content
 		case "thinking_level_change":
@@ -206,14 +208,14 @@ function getMessageFromEntry(entry: SessionEntry): AgentMessage | undefined {
 	}
 }
 
-function estimateBranchSummaryTokens(message: AgentMessage): number {
-	if (message.role !== "toolResult") return estimateTokens(message);
+function estimateBranchSummaryTokens(message: AgentMessage, tokenizer: Tokenizer): number {
+	if (message.role !== "toolResult") return tokenizer.countMessage(message);
 	const text = message.content
 		.filter((c): c is { type: "text"; text: string } => c.type === "text")
 		.map(c => c.text)
 		.join("");
 	if (!text) return 0;
-	return estimateTokens({
+	return tokenizer.countMessage({
 		...message,
 		content: [{ type: "text", text: truncateToolResultForSummary(text) }],
 	});
@@ -232,7 +234,11 @@ function estimateBranchSummaryTokens(message: AgentMessage): number {
  * @param entries - Entries in chronological order
  * @param tokenBudget - Maximum tokens to include (0 = no limit)
  */
-export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: number = 0): BranchPreparation {
+export function prepareBranchEntries(
+	entries: SessionEntry[],
+	tokenizer: Tokenizer,
+	tokenBudget: number = 0,
+): BranchPreparation {
 	const messages: AgentMessage[] = [];
 	const fileOps = createFileOps();
 	let totalTokens = 0;
@@ -264,7 +270,7 @@ export function prepareBranchEntries(entries: SessionEntry[], tokenBudget: numbe
 		// Extract file ops from assistant messages (tool calls)
 		extractFileOpsFromMessage(message, fileOps);
 
-		const tokens = estimateBranchSummaryTokens(message);
+		const tokens = estimateBranchSummaryTokens(message, tokenizer);
 
 		// Check budget before adding
 		if (tokenBudget > 0 && totalTokens + tokens > tokenBudget) {
@@ -309,8 +315,9 @@ export async function generateBranchSummary(
 	// Token budget = context window minus reserved space for prompt + response
 	const contextWindow = model.contextWindow || 128000;
 	const tokenBudget = contextWindow - reserveTokens;
+	const tokenizer = new Tokenizer(model);
 
-	const { messages, fileOps } = prepareBranchEntries(entries, tokenBudget);
+	const { messages, fileOps } = prepareBranchEntries(entries, tokenizer, tokenBudget);
 
 	if (messages.length === 0) {
 		return { summary: "No content to summarize" };
@@ -334,12 +341,18 @@ export async function generateBranchSummary(
 	];
 
 	// Call LLM for summarization
-	const response = await instrumentedCompleteSimple(
-		model,
-		{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
-		{ apiKey, signal, maxTokens: 2048, metadata },
-		{ telemetry: options.telemetry, oneshotKind: "branch_summary", completeImpl: options.completeImpl },
-	);
+	let response: AssistantMessage;
+	try {
+		response = await instrumentedCompleteSimple(
+			model,
+			{ systemPrompt: [SUMMARIZATION_SYSTEM_PROMPT], messages: summarizationMessages },
+			{ apiKey, signal, maxTokens: 2048, metadata },
+			{ telemetry: options.telemetry, oneshotKind: "branch_summary", completeImpl: options.completeImpl, retry: {} },
+		);
+	} catch (error) {
+		if (signal.aborted) return { aborted: true };
+		throw error;
+	}
 
 	// Check if aborted or errored
 	if (response.stopReason === "aborted") {

@@ -7,13 +7,18 @@
  * code. Shutdown writes `{"type":"exit"}` and escalates to SIGTERM/SIGKILL on
  * timeout.
  */
-import * as fs from "node:fs";
-import * as os from "node:os";
 import * as path from "node:path";
 import { $flag, isBunTestRuntime, logger, Snowflake } from "@oh-my-pi/pi-utils";
-import { $ } from "bun";
 import { Settings } from "../../config/settings";
-import { BaseKernel, getRemainingTimeMs, type KernelStartOptions } from "../kernel-base";
+import {
+	BaseKernel,
+	getRemainingTimeMs,
+	type KernelExecuteOptions,
+	type KernelExecuteResult,
+	type KernelStartOptions,
+} from "../kernel-base";
+import { type BackendProbeOptions, probeCandidates } from "../probe";
+import { stageRunnerScript } from "../runner-cache";
 import { PYTHON_PRELUDE } from "./prelude";
 import RUNNER_SCRIPT from "./runner.py" with { type: "text" };
 import {
@@ -24,6 +29,7 @@ import {
 	resolvePythonRuntime,
 } from "./runtime";
 import { hostHasInheritableConsole, shouldDetachKernel, shouldHideKernelWindow } from "./spawn-options";
+import type { PythonToolRequest } from "./executor";
 
 export type {
 	KernelExecuteOptions,
@@ -38,23 +44,6 @@ export { renderKernelDisplay } from "./display";
 
 const TRACE_IPC = $flag("PI_PYTHON_IPC_TRACE");
 
-// Cache the runner script on disk so the subprocess loads it normally. Cached
-// per script hash so installs don't race across versions.
-const RUNNER_CACHE_DIR = path.join(os.tmpdir(), "omp-python-runner");
-let RUNNER_SCRIPT_PATH: string | null = null;
-
-async function ensureRunnerScript(): Promise<string> {
-	if (RUNNER_SCRIPT_PATH) return RUNNER_SCRIPT_PATH;
-	await fs.promises.mkdir(RUNNER_CACHE_DIR, { recursive: true });
-	const hash = Bun.hash(RUNNER_SCRIPT).toString(36);
-	const target = path.join(RUNNER_CACHE_DIR, `runner-${hash}.py`);
-	if (!fs.existsSync(target)) {
-		await Bun.write(target, RUNNER_SCRIPT);
-	}
-	RUNNER_SCRIPT_PATH = target;
-	return target;
-}
-
 const SHUTDOWN_GRACE_MS = 1_000;
 const STARTUP_TIMEOUT_MS = 10_000;
 // How long to wait after SIGINT for the runner to emit `done`. If the cell is
@@ -65,12 +54,39 @@ const STARTUP_TIMEOUT_MS = 10_000;
 // kernel's state, so we only kill as a last-resort recovery path.
 const INTERRUPT_ESCALATION_MS = 5_000;
 
+const PYTHON_RESERVED_PRELUDE_EXPORTS: Record<string, true> = {
+	__omp_tools__: true,
+	_omp_prelude: true,
+	AgentHandle: true,
+	CompletionHandle: true,
+	WorkPool: true,
+	agent: true,
+	budget: true,
+	completion: true,
+	display: true,
+	env: true,
+	log: true,
+	output: true,
+	phase: true,
+	read: true,
+	tool: true,
+	wait: true,
+	workpool: true,
+	write: true,
+};
+
 export interface PythonKernelAvailability {
 	ok: boolean;
 	pythonPath?: string;
 	reason?: string;
 	/** The probed-working runtime, when one was found. */
 	runtime?: PythonRuntime;
+}
+
+export interface PythonPreludeSource {
+	name: string;
+	exports: string[];
+	source: string;
 }
 
 // Cache successful probes per resolved cwd + explicit interpreter: every cell
@@ -82,7 +98,7 @@ const availabilityCache = new Map<string, Promise<PythonKernelAvailability>>();
 export async function checkPythonKernelAvailability(
 	cwd: string,
 	interpreter?: string,
-	options?: { forceProbe?: boolean },
+	options?: { forceProbe?: boolean } & BackendProbeOptions,
 ): Promise<PythonKernelAvailability> {
 	if (!options?.forceProbe && (isBunTestRuntime() || $flag("PI_PYTHON_SKIP_CHECK"))) {
 		return { ok: true };
@@ -91,16 +107,18 @@ export async function checkPythonKernelAvailability(
 	const key = `${resolvedCwd}\0${interpreter ?? ""}`;
 	const cached = availabilityCache.get(key);
 	if (cached) return await cached;
-	const probe = probePythonKernelAvailability(resolvedCwd, interpreter);
-	availabilityCache.set(key, probe);
-	const result = await probe;
-	if (!result.ok && availabilityCache.get(key) === probe) {
-		availabilityCache.delete(key);
-	}
+	// Probe controls belong to one caller. Do not share an in-flight promise:
+	// aborting one eval must not cancel a concurrent session's availability check.
+	const result = await probePythonKernelAvailability(resolvedCwd, interpreter, options);
+	if (result.ok) availabilityCache.set(key, Promise.resolve(result));
 	return result;
 }
 
-async function probePythonKernelAvailability(cwd: string, interpreter?: string): Promise<PythonKernelAvailability> {
+async function probePythonKernelAvailability(
+	cwd: string,
+	interpreter?: string,
+	probeOpts?: BackendProbeOptions,
+): Promise<PythonKernelAvailability> {
 	try {
 		const settings = await Settings.init();
 		const { env } = settings.getShellConfig();
@@ -111,30 +129,25 @@ async function probePythonKernelAvailability(cwd: string, interpreter?: string):
 		if (runtimes.length === 0) {
 			return { ok: false, reason: "Python executable not found on PATH" };
 		}
-		// Probe each candidate in priority order and use the first that actually
-		// runs. A managed env left behind by a removed `uv` install can exist on
-		// disk yet fail to execute; falling through to the next candidate lets a
-		// working system Python take over instead of failing the whole session.
-		const failures: string[] = [];
-		for (const runtime of runtimes) {
-			try {
-				const probe = await $`${runtime.pythonPath} -c "import sys;sys.exit(0)"`
-					.quiet()
-					.nothrow()
-					.cwd(cwd)
-					.env(runtime.env);
-				if (probe.exitCode === 0) {
-					return { ok: true, pythonPath: runtime.pythonPath, runtime };
-				}
-				failures.push(`${runtime.pythonPath} (exit code ${probe.exitCode})`);
-			} catch (err) {
-				failures.push(`${runtime.pythonPath} (${err instanceof Error ? err.message : String(err)})`);
-			}
+		const result = await probeCandidates(
+			runtimes.map(runtime => ({
+				command: [runtime.pythonPath, "-c", "import sys;sys.exit(0)"],
+				env: runtime.env,
+				label: runtime.pythonPath,
+			})),
+			{ cwd, signal: probeOpts?.signal, timeoutMs: probeOpts?.timeoutMs },
+		);
+		if (result.ok) {
+			const runtime = runtimes[result.index];
+			return { ok: true, pythonPath: runtime.pythonPath, runtime };
+		}
+		if (result.aborted) {
+			return { ok: false, pythonPath: runtimes[0].pythonPath, reason: "Python availability probe was cancelled." };
 		}
 		return {
 			ok: false,
 			pythonPath: runtimes[0].pythonPath,
-			reason: `No working Python interpreter found. Tried: ${failures.join("; ")}`,
+			reason: `No working Python interpreter found. Tried: ${result.failures.join("; ")}`,
 		};
 	} catch (err) {
 		return { ok: false, reason: err instanceof Error ? err.message : String(err) };
@@ -142,6 +155,8 @@ async function probePythonKernelAvailability(cwd: string, interpreter?: string):
 }
 
 export class PythonKernel extends BaseKernel {
+	#installedPreludes = new Map<string, PythonPreludeSource>();
+
 	private constructor(id: string) {
 		super(id, {
 			languageName: "Python",
@@ -159,6 +174,81 @@ export class PythonKernel extends BaseKernel {
 					storeHistory: opts?.storeHistory ?? !(opts?.silent ?? false),
 				}),
 		});
+	}
+
+	/** Describe or invoke a tool defined in this retained Python kernel. */
+	async invokeTool(request: PythonToolRequest, options?: KernelExecuteOptions): Promise<KernelExecuteResult> {
+		const id = options?.id ?? Snowflake.next();
+		return await this.submitRequest(id, JSON.stringify({ type: "tool", id, ...request }), options);
+	}
+
+	/** Synchronize enabled capability snippets before the next user cell. */
+	async syncPreludes(
+		preludes: readonly PythonPreludeSource[],
+		signal: AbortSignal | undefined,
+		timeoutMs: number,
+	): Promise<void> {
+		const desired = new Map<string, PythonPreludeSource>();
+		const exportOwners = new Map<string, string>();
+		for (const prelude of preludes) {
+			if (desired.has(prelude.name)) throw new Error(`Duplicate eval prelude name: ${prelude.name}`);
+			for (const name of prelude.exports) {
+				if (Object.hasOwn(PYTHON_RESERVED_PRELUDE_EXPORTS, name)) {
+					throw new Error(`Eval prelude ${prelude.name} cannot replace reserved global ${name}`);
+				}
+				const owner = exportOwners.get(name);
+				if (owner) throw new Error(`Eval preludes ${owner} and ${prelude.name} both export ${name}`);
+				exportOwners.set(name, prelude.name);
+			}
+			desired.set(prelude.name, prelude);
+		}
+
+		const removedExports: string[] = [];
+		const changed: PythonPreludeSource[] = [];
+		for (const [name, installed] of this.#installedPreludes) {
+			const next = desired.get(name);
+			if (
+				next &&
+				next.source === installed.source &&
+				next.exports.length === installed.exports.length &&
+				next.exports.every((value, index) => value === installed.exports[index])
+			) {
+				continue;
+			}
+			removedExports.push(...installed.exports);
+		}
+		for (const [name, prelude] of desired) {
+			const installed = this.#installedPreludes.get(name);
+			if (
+				installed &&
+				prelude.source === installed.source &&
+				prelude.exports.length === installed.exports.length &&
+				prelude.exports.every((value, index) => value === installed.exports[index])
+			) {
+				continue;
+			}
+			changed.push(prelude);
+		}
+		if (removedExports.length === 0 && changed.length === 0) return;
+
+		const source: string[] = [];
+		if (removedExports.length > 0) {
+			source.push(
+				`for __omp_export in ${JSON.stringify(removedExports)}:\n    globals().pop(__omp_export, None)`,
+				'globals().pop("__omp_export", None)',
+			);
+		}
+		for (const prelude of changed) source.push(prelude.source);
+		await this.executeWithBudget(source.join("\n"), signal, timeoutMs, "Python eval prelude sync");
+
+		this.#installedPreludes.clear();
+		for (const [name, prelude] of desired) {
+			this.#installedPreludes.set(name, {
+				name,
+				exports: [...prelude.exports],
+				source: prelude.source,
+			});
+		}
 	}
 
 	static async start(options: KernelStartOptions): Promise<PythonKernel> {
@@ -189,7 +279,7 @@ export class PythonKernel extends BaseKernel {
 		spawnEnv.PYTHONUNBUFFERED = "1";
 		spawnEnv.PYTHONIOENCODING = "utf-8";
 
-		const scriptPath = await ensureRunnerScript();
+		const scriptPath = await stageRunnerScript("omp-python-runner", "py", RUNNER_SCRIPT);
 		const kernel = new PythonKernel(Snowflake.next());
 
 		const proc = Bun.spawn([runtime.pythonPath, "-u", scriptPath], {

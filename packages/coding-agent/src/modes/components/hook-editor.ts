@@ -7,7 +7,8 @@
  *   (Ctrl+Q / Ctrl+Enter) submits, bordered popup
  * - Prompt-style (ask): Enter submits, Shift+Enter inserts newline, legacy ask chrome
  */
-import { Container, Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { Editor, type Focusable, matchesKey, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { BracketedPasteHandler } from "@oh-my-pi/pi-tui/bracketed-paste";
 import { getEditorTheme, theme } from "../../modes/theme/theme";
 import {
 	matchesAppExternalEditor,
@@ -15,7 +16,7 @@ import {
 	matchesAppInterrupt,
 } from "../../modes/utils/keybinding-matchers";
 import { getEditorCommand, openInEditor } from "../../utils/external-editor";
-import { DynamicBorder } from "./dynamic-border";
+import { OverlayPanel } from "./overlay-box";
 
 export interface HookEditorOptions {
 	/** When true, use prompt-style keybindings with the legacy ask prompt chrome. */
@@ -30,12 +31,16 @@ export interface HookEditorOptions {
 }
 
 /** Interactive multiline dialog used by hooks and the ask tool's Other response. */
-export class HookEditorComponent extends Container implements Focusable {
+export class HookEditorComponent extends OverlayPanel implements Focusable {
 	#editor: Editor;
 	#onSubmitCallback: (value: string) => void;
 	#onCancelCallback: () => void;
 	#tui: TUI;
 	#promptStyle: boolean;
+	#pasteHandler = new BracketedPasteHandler();
+	#pendingPastes: { settled: boolean; text: string | undefined }[] = [];
+	#submitQueued = false;
+	#disposed = false;
 	/** Focus state mirrored to the nested editor during rendering. */
 	focused = false;
 
@@ -47,22 +52,22 @@ export class HookEditorComponent extends Container implements Focusable {
 		onCancel: () => void,
 		options?: HookEditorOptions,
 	) {
-		super();
+		// First title line insets into the panel border; remaining lines (e.g. the
+		// bounded ask question under "◆ Other (type your own)") stay as body rows
+		// so they are never truncated into the one-row border.
+		const [titleLine = "", ...detailLines] = title.split("\n");
+		super(titleLine);
 
 		this.#tui = tui;
 		this.#onSubmitCallback = onSubmit;
 		this.#onCancelCallback = onCancel;
 		this.#promptStyle = options?.promptStyle ?? false;
 
-		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
-
-		// Title. Prompt-style renders the borderless editor's `> ` gutter at
-		// column 0, so pad the title to match; hook-style keeps the 1-col indent
-		// that lines up with its bordered editor body (#5313).
-		const chromePadX = this.#promptStyle ? 0 : 1;
-		this.addChild(new Text(theme.fg("accent", title), chromePadX, 0));
-		this.addChild(new Spacer(1));
+		if (detailLines.length > 0) {
+			for (const line of detailLines) this.addChild(new Text(theme.fg("accent", line), 0, 0));
+			this.addChild(new Spacer(1));
+		}
 
 		// Editor
 		this.#editor = new Editor(getEditorTheme());
@@ -87,10 +92,8 @@ export class HookEditorComponent extends Container implements Focusable {
 		const hint = this.#promptStyle
 			? "enter or ctrl+q submit  esc cancel  ctrl+g external editor"
 			: "ctrl+q/ctrl+enter submit  esc cancel  ctrl+g external editor";
-		this.addChild(new Text(theme.fg("dim", hint), chromePadX, 0));
-
+		this.addChild(new Text(theme.fg("dim", hint), 0, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 	}
 
 	/** Keep the nested editor's software/hardware cursor mode aligned with the dialog focus target. */
@@ -106,6 +109,14 @@ export class HookEditorComponent extends Container implements Focusable {
 	}
 
 	handleInput(keyData: string): void {
+		if (this.#disposed) return;
+		const paste = this.#pasteHandler.process(keyData);
+		if (paste.handled) {
+			if (paste.pasteContent === undefined) return;
+			this.pasteText(paste.pasteContent);
+			if (paste.remaining.length > 0) this.handleInput(paste.remaining);
+			return;
+		}
 		if (this.#promptStyle) {
 			this.#handlePromptStyleInput(keyData);
 		} else {
@@ -113,8 +124,55 @@ export class HookEditorComponent extends Container implements Focusable {
 		}
 	}
 
-	#submitCurrentText(): void {
-		this.#onSubmitCallback(this.#editor.getExpandedText());
+	#submitCurrentText(requireText = false): void {
+		if (this.#disposed) return;
+		if (this.#pendingPastes.length > 0) {
+			this.#submitQueued = true;
+			return;
+		}
+		const text = this.#editor.getExpandedText();
+		if (requireText && text.trim().length === 0) return;
+		this.dispose();
+		this.#onSubmitCallback(text);
+	}
+
+	/** Reserve ordered clipboard delivery. Completion accepts nonempty text once, or releases on undefined. */
+	beginPaste(): (text: string | undefined) => boolean {
+		if (this.#disposed) return () => false;
+		const pending: { settled: boolean; text: string | undefined } = { settled: false, text: undefined };
+		this.#pendingPastes.push(pending);
+		return text => {
+			if (this.#disposed || pending.settled) return false;
+			pending.settled = true;
+			pending.text = text;
+			// A failed/empty read releases the wait, but must not submit an answer.
+			if (!text) this.#submitQueued = false;
+			let delivered = 0;
+			for (const paste of this.#pendingPastes) {
+				if (!paste.settled) break;
+				if (paste.text) this.#editor.pasteText(paste.text);
+				delivered++;
+			}
+			if (delivered > 0) this.#pendingPastes.splice(0, delivered);
+			if (this.#pendingPastes.length === 0 && this.#submitQueued) {
+				this.#submitQueued = false;
+				this.#submitCurrentText(true);
+			}
+			return !!text;
+		};
+	}
+
+	override dispose(): void {
+		if (this.#disposed) return;
+		this.#disposed = true;
+		this.#submitQueued = false;
+		this.#pendingPastes.length = 0;
+		super.dispose();
+	}
+
+	#cancel(): void {
+		this.dispose();
+		this.#onCancelCallback();
 	}
 
 	/** Route non-bracketed paste transports (e.g. kitty's OSC 5522 enhanced clipboard)
@@ -122,7 +180,9 @@ export class HookEditorComponent extends Container implements Focusable {
 	 *  enhanced-paste routing falls back to the main prompt editor hidden behind the
 	 *  dialog (#2127 routing contract). */
 	pasteText(text: string): void {
-		this.#editor.pasteText(text);
+		if (this.#disposed) return;
+		if (this.#pendingPastes.length > 0) this.beginPaste()(text);
+		else this.#editor.pasteText(text);
 	}
 
 	/**
@@ -142,7 +202,7 @@ export class HookEditorComponent extends Container implements Focusable {
 
 		// Prompt-style keeps Escape as an explicit cancel key and also honors app.interrupt remaps.
 		if (matchesKey(keyData, "escape") || matchesKey(keyData, "esc") || matchesAppInterrupt(keyData)) {
-			this.#onCancelCallback();
+			this.#cancel();
 			return;
 		}
 
@@ -180,7 +240,7 @@ export class HookEditorComponent extends Container implements Focusable {
 
 		// Escape to cancel
 		if (matchesAppInterrupt(keyData)) {
-			this.#onCancelCallback();
+			this.#cancel();
 			return;
 		}
 
@@ -202,7 +262,7 @@ export class HookEditorComponent extends Container implements Focusable {
 		try {
 			this.#tui.stop();
 			const result = await openInEditor(editorCmd, currentText);
-			if (result !== null) {
+			if (!this.#disposed && result !== null) {
 				this.#editor.setText(result);
 			}
 		} finally {

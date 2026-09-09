@@ -37,12 +37,12 @@ Does not cover `/tree` UI rendering behavior beyond semantics that affect sessio
 Default file-session location:
 
 ```text
-~/.omp/agent/sessions/<scope>-<project-basename>-<sha256(canonical-cwd)>/<timestamp>_<sessionId>.jsonl
+~/.omp/agent/sessions/<encoded-cwd>/<timestamp>_<sessionId>.jsonl
 ```
 
-`<scope>` is `home`, `tmp`, or `abs`, chosen after canonicalizing cwd (so symlink aliases share a bucket). The readable basename is sanitized and capped at 80 characters; the full canonical cwd digest prevents the collisions possible with the old separator-replacement scheme.
+`<encoded-cwd>` is derived from the canonicalized cwd (so symlink aliases share a bucket): `-<relative>` for directories under home, `-tmp-<relative>` for directories under the temp root, and `--<encoded-absolute>--` for anything else, with path separators replaced by `-`.
 
-On access, the old home-relative (`-<relative>`), temp-relative (`-tmp-<relative>`), and absolute (`--<encoded-absolute>--`) buckets are migrated into the hashed bucket best-effort. Colliding legacy buckets are split by the cwd recorded in each session header before migration.
+On access, buckets written by the short-lived hashed scheme (`<scope>-<project-basename>-<sha256(canonical-cwd)>`, used in 17.2.5-17.2.8 and reverted in 17.2.9 by #7397) are migrated back into the path-encoded names best-effort, along with older `--<home-encoded>-*--` spellings of home-relative buckets.
 
 Blob store location:
 

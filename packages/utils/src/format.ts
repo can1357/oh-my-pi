@@ -9,7 +9,7 @@ const DAY = 24 * HOUR;
  */
 export function formatDuration(ms: number): string {
 	if (!Number.isFinite(ms) || ms <= 0) return "0ms";
-	if (ms < SEC) return `${ms}ms`;
+	if (ms < SEC) return `${Math.floor(ms)}ms`;
 	if (ms < MIN) return `${(ms / SEC).toFixed(1)}s`;
 	if (ms < HOUR) {
 		const mins = Math.floor(ms / MIN);

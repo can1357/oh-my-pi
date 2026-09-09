@@ -1,7 +1,8 @@
 import { afterEach, beforeAll, beforeEach, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
-import { KeybindingsManager } from "@oh-my-pi/pi-coding-agent/config/keybindings";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
+import { KeybindingsManager, setKeyHintPlatform } from "@oh-my-pi/pi-coding-agent/config/keybindings";
 import { getThemeByName, initTheme, type Theme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	dedupeParseErrors,
@@ -11,11 +12,91 @@ import {
 	formatErrorMessage,
 	formatExpandHint,
 	formatParseErrors,
+	formatFeedModelBadge,
 	formatScreenshot,
+	sanitizeDisplayLines,
 	shortenPath,
 	truncateDiffByHunk,
 } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
-import { getKeybindings, setKeybindings, type KeybindingsManager as TuiKeybindingsManager } from "@oh-my-pi/pi-tui";
+import {
+	DEFAULT_TAB_WIDTH,
+	getKeybindings,
+	setKeybindings,
+	type KeybindingsManager as TuiKeybindingsManager,
+} from "@oh-my-pi/pi-tui";
+
+describe("feed model badges", () => {
+	let uiTheme: Theme;
+
+	beforeAll(async () => {
+		const loaded = await getThemeByName("dark");
+		if (!loaded) throw new Error("Dark theme is unavailable");
+		uiTheme = loaded;
+	});
+
+	it("preserves literal effort-like model suffixes and uses only explicit thinking metadata", () => {
+		const glyph = uiTheme.thinking.high.split(" ")[0];
+		expect(Bun.stripANSI(formatFeedModelBadge("custom:model:max", undefined, false, uiTheme))).toBe(
+			"custom:model:max",
+		);
+		expect(Bun.stripANSI(formatFeedModelBadge("custom:model:max", ThinkingLevel.High, true, uiTheme))).toBe(
+			`${glyph} custom:model:max ${uiTheme.icon.advisor}`,
+		);
+		expect(formatFeedModelBadge("custom:model:max", ThinkingLevel.High, true, uiTheme)).toBe(
+			uiTheme.fg("accent", `${glyph} `) + uiTheme.fg("dim", `custom:model:max ${uiTheme.icon.advisor}`),
+		);
+		expect(uiTheme.fg("accent", glyph)).not.toBe(uiTheme.fg("dim", glyph));
+		expect(Bun.stripANSI(formatFeedModelBadge("custom:model:auto", ThinkingLevel.Inherit, false, uiTheme))).toBe(
+			"custom:model:auto",
+		);
+	});
+
+	it("ignores unknown runtime thinking levels without changing the model identity", () => {
+		for (const level of ["future-level", "toString"]) {
+			expect(Bun.stripANSI(formatFeedModelBadge("custom:model:max", level as ThinkingLevel, true, uiTheme))).toBe(
+				`custom:model:max ${uiTheme.icon.advisor}`,
+			);
+		}
+	});
+
+	it("removes terminal controls and collapses whitespace into a single model row", () => {
+		const badge = formatFeedModelBadge("\x1b[31mcustom\tmodel\nname\x1b[0m", undefined, false, uiTheme);
+		expect(badge).not.toContain("\x1b[31m");
+		expect(Bun.stripANSI(badge)).toBe("custom model name");
+		expect(formatFeedModelBadge("\t\n\x1b[31m", undefined, true, uiTheme)).toBe("");
+	});
+
+	it("preserves disambiguating model tails and reserves advisor space when truncating wide names", () => {
+		const badge = Bun.stripANSI(
+			formatFeedModelBadge(`provider/${"界".repeat(20)}-variant-b`, ThinkingLevel.High, true, uiTheme, 24),
+		);
+		expect(badge).toContain("…");
+		expect(badge.endsWith(`variant-b ${uiTheme.icon.advisor}`)).toBe(true);
+		expect(Bun.stringWidth(badge)).toBeLessThanOrEqual(24);
+	});
+
+	it("never overflows tiny budgets even when glyphs leave no room for a model", () => {
+		for (let width = 0; width <= 8; width++) {
+			const badge = formatFeedModelBadge("provider/界界界-version", ThinkingLevel.Off, true, uiTheme, width);
+			expect(Bun.stringWidth(badge)).toBeLessThanOrEqual(width);
+		}
+		const glyph = uiTheme.thinking.high.split(" ")[0];
+		const advisor = uiTheme.icon.advisor;
+		const advisorWidth = Bun.stringWidth(advisor);
+		const iconsWidth = Bun.stringWidth(`${glyph} ${advisor}`);
+		expect(Bun.stripANSI(formatFeedModelBadge("model", ThinkingLevel.High, true, uiTheme, advisorWidth))).toBe(
+			advisor,
+		);
+		expect(Bun.stripANSI(formatFeedModelBadge("model", ThinkingLevel.High, true, uiTheme, iconsWidth))).toBe(
+			`${glyph} ${advisor}`,
+		);
+		expect(
+			Bun.stripANSI(formatFeedModelBadge("model", ThinkingLevel.High, false, uiTheme, Bun.stringWidth(glyph))),
+		).toBe(glyph);
+		expect(formatFeedModelBadge("model", ThinkingLevel.High, true, uiTheme, 0)).toBe("");
+		expect(formatFeedModelBadge(undefined, ThinkingLevel.High, true, uiTheme)).toBe("");
+	});
+});
 
 describe("parse error formatting", () => {
 	it("deduplicates parse errors while preserving order", () => {
@@ -108,6 +189,11 @@ describe("formatScreenshot", () => {
 	it("uses forward slashes after a shortened Windows home", () => {
 		const home = String.raw`C:\Users\me`;
 		expect(shortenPath(String.raw`C:\Users\me\projects\demo`, home)).toBe("~/projects/demo");
+	});
+
+	it("shortens Windows home paths case-insensitively", () => {
+		const home = String.raw`C:\Users\Alice`;
+		expect(shortenPath(String.raw`c:\users\alice\projects\demo`, home)).toBe("~/projects/demo");
 	});
 
 	it("does not shorten paths outside the home boundary", () => {
@@ -286,6 +372,75 @@ describe("truncateDiffByHunk", () => {
 		expect(idxOld).toBeLessThan(idxNew);
 		expect(idxNew).toBeLessThan(idxTrailing);
 	});
+	it("caps one oversized change hunk at the line budget", () => {
+		const diff = makeHunk("+", 0, 1_000).join("\n");
+		const head = truncateDiffByHunk(diff, 4, 32);
+		const tail = truncateDiffByHunk(diff, 4, 32, { fromTail: true });
+
+		expect(head.text.split("\n")).toHaveLength(32);
+		expect(head.text).toStartWith("+ new 0\n");
+		expect(head.text).toEndWith("+ new 31");
+		expect(head.hiddenLines).toBe(968);
+		expect(head.hiddenHunks).toBe(0);
+
+		expect(tail.text.split("\n")).toHaveLength(32);
+		expect(tail.text).toStartWith("+ new 968\n");
+		expect(tail.text).toEndWith("+ new 999");
+		expect(tail.hiddenLines).toBe(968);
+		expect(tail.hiddenHunks).toBe(0);
+	});
+
+	it("keeps an exact-size change hunk unchanged", () => {
+		const diff = makeHunk("-", 0, 32).join("\n");
+		expect(truncateDiffByHunk(diff, 4, 32)).toEqual({
+			text: diff,
+			hiddenHunks: 0,
+			hiddenLines: 0,
+		});
+	});
+	it("drops surrounding context when changes exactly fill the line budget", () => {
+		const diff = [" leading context", ...makeHunk("+", 0, 32), " trailing context"].join("\n");
+
+		for (const result of [truncateDiffByHunk(diff, 4, 32), truncateDiffByHunk(diff, 4, 32, { fromTail: true })]) {
+			expect(result.text.split("\n")).toHaveLength(32);
+			expect(result.text).not.toContain("context");
+			expect(result.hiddenLines).toBe(2);
+			expect(result.hiddenHunks).toBe(0);
+		}
+	});
+
+	it("does not exceed the line budget when context rounding spans multiple hunks", () => {
+		const diff = [
+			" leading context",
+			...makeHunk("+", 0, 15),
+			" middle context a",
+			" middle context b",
+			...makeHunk("-", 100, 15),
+			" trailing context",
+		].join("\n");
+
+		for (const result of [truncateDiffByHunk(diff, 4, 32), truncateDiffByHunk(diff, 4, 32, { fromTail: true })]) {
+			expect(result.text.split("\n")).toHaveLength(32);
+			expect(result.hiddenLines).toBe(2);
+			expect(result.hiddenHunks).toBe(0);
+		}
+	});
+	it("does not count a removed separator as a hidden hunk", () => {
+		const diff = [...makeHunk("+", 0, 16), " hunk separator", ...makeHunk("-", 100, 16)].join("\n");
+
+		for (const result of [truncateDiffByHunk(diff, 4, 32), truncateDiffByHunk(diff, 4, 32, { fromTail: true })]) {
+			expect(result.text.split("\n")).toHaveLength(32);
+			expect(result.hiddenLines).toBe(1);
+			expect(result.hiddenHunks).toBe(0);
+		}
+	});
+	it("reports every hunk excluded by the hunk limit", () => {
+		const diff = buildDiff(6, 1);
+
+		for (const result of [truncateDiffByHunk(diff, 2, 100), truncateDiffByHunk(diff, 2, 100, { fromTail: true })]) {
+			expect(result.hiddenHunks).toBe(4);
+		}
+	});
 });
 
 describe("formatErrorMessage (F4 sanitization)", () => {
@@ -328,9 +483,11 @@ describe("formatExpandHint / expandKeyHint", () => {
 	let previous: TuiKeybindingsManager;
 	beforeEach(() => {
 		previous = getKeybindings();
+		setKeyHintPlatform("linux");
 	});
 	afterEach(() => {
 		setKeybindings(previous);
+		setKeyHintPlatform(undefined);
 	});
 
 	it("reports the default tool-output expand key", () => {
@@ -350,5 +507,22 @@ describe("formatExpandHint / expandKeyHint", () => {
 		setKeybindings(KeybindingsManager.inMemory());
 		expect(formatExpandHint(plainTheme, true, true)).toBe("");
 		expect(formatExpandHint(plainTheme, false, false)).toBe("");
+	});
+});
+
+describe("sanitizeDisplayLines", () => {
+	it("expands tabs so error lines never emit raw tab stops", () => {
+		expect(sanitizeDisplayLines("offending\tkey")).toEqual([`offending${" ".repeat(DEFAULT_TAB_WIDTH)}key`]);
+	});
+
+	it("splits Windows CRLF stderr without leaving carriage returns", () => {
+		const lines = sanitizeDisplayLines("SHA256:abc\r\nHost key verification failed.\r\n");
+		expect(lines.join("\n")).not.toContain("\r");
+		expect(lines).toContain("SHA256:abc");
+		expect(lines).toContain("Host key verification failed.");
+	});
+
+	it("collapses carriage-return progress overwrites to the final segment", () => {
+		expect(sanitizeDisplayLines("50%\r100%")).toEqual(["100%"]);
 	});
 });

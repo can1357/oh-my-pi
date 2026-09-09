@@ -21,6 +21,11 @@ Follow-up issue comments and PR review comments resume the same omp session
 (`--continue` against the persisted JSONL transcript). On orchestrator
 restart, in-flight events are re-queued and resume the same way.
 
+Completed `workflow_run` events can also drive the default-off release sentinel:
+it diagnoses failed release CI in a reusable `main` worktree, atomically pushes
+the repair commit and existing release tag, then resumes the same session on
+the next verdict until every run and the GitHub Release are green.
+
 ## Architecture
 
 Two containers, one trust boundary:
@@ -39,6 +44,9 @@ Flow: webhook → HMAC verify → `github_events.route` → sqlite `events`
 → `worker.run_task` spawns `omp --mode rpc` with `cwd=worktree`,
 persistent `session_dir`, model randomly drawn from `ROBOMP_MODEL` (CSV).
 
+Release events serialize under `<owner>/<repo>#release`; each tag persists its
+own `releases` row and `.omp-session-<tag>` transcript.
+
 The agent uses omp's built-in tools (`read`/`edit`/`bash`/`lsp`, scoped to
 the worktree) plus the host tools in `src/host_tools.py` — the
 exclusive surface for GitHub writes. Every host-tool invocation is audited
@@ -53,9 +61,10 @@ monorepo at `python/robomp/`; both the docker build context and the
 `PI_ROOT` only if you want a different oh-my-pi checkout backing the build
 and runtime.
 
-Bot account needs **Write** on every repo in `ROBOMP_REPO_ALLOWLIST`. A
-fine-grained PAT with Contents / Issues / Pull requests RW + Metadata R is
-enough.
+Bot account needs **Write** on every repo in `ROBOMP_REPO_ALLOWLIST`. Use a
+fine-grained PAT with Contents / Issues / Pull requests RW + Metadata R.
+Release sentinel deployments additionally require **Actions: Read** for runs,
+jobs, and logs.
 
 ```bash
 cp .env.example .env
@@ -82,15 +91,16 @@ roboomp's `Dockerfile.robomp` extends via `FROM ${PI_BASE}`.
 
 roboomp does not ship a tunnel. Cloudflare, smee, ngrok are all fine. The
 recommended ingress rule restricts the public hostname to
-`/webhook/github` exactly; `/healthz`, `/events`, `/issues`, `/replay`
-stay localhost-only.
+`/webhook/github` exactly; `/healthz`, `/events`, `/issues`, `/releases`,
+and `/replay` stay localhost-only.
 
 ### GitHub webhook
 
 In *Settings → Webhooks*: payload URL `https://…/webhook/github`, content
 type `application/json`, secret = `GITHUB_WEBHOOK_SECRET`, events =
 *Issues, Issue comments, Pull requests, Pull request reviews, Pull
-request review comments*. GitHub's `ping` should produce
+request review comments*, and *Workflow runs*. The last event is required
+only for the release sentinel. GitHub's `ping` should produce
 `POST /webhook/github 202` within a second.
 
 ### Configuration
@@ -98,6 +108,31 @@ request review comments*. GitHub's `ping` should produce
 See `.env.example` for the authoritative variable list. The shipped
 `docker-compose.yml` uses per-service `environment:` allowlists rather
 than `env_file:`, so `GITHUB_TOKEN` only reaches the gh-proxy container.
+
+## Release sentinel
+
+`ROBOMP_RELEASE_SENTINEL_ENABLED=false` by default because this workflow may
+push directly to the default branch and move an existing release tag. Enable it
+only after adding the *Workflow runs* webhook event and **Actions: Read** PAT
+permission.
+
+For release commits whose subject starts with
+`ROBOMP_RELEASE_COMMIT_PREFIX` (default `chore: bump version to `), each
+completed Actions run is matched to the commit currently named by
+`v<version>`. A stale event is ignored whenever the remote tag no longer points
+at that run's SHA. Blocking conclusions start or resume one fix round in the
+repo's `main` release worktree; `release_retag` atomically advances `main` and
+the tag. Cancelled, skipped, neutral, and stale runs do not block finalization.
+Success becomes `green` only after all runs complete without a blocking
+conclusion and a non-draft GitHub Release exists.
+
+Durable states: `awaiting_ci`, `fixing`, `green`, `failed`, and `superseded`.
+`ROBOMP_RELEASE_MAX_ROUNDS` (default 5) bounds automated repairs;
+`ROBOMP_RELEASE_TASK_TIMEOUT_SECONDS` controls each round. Optional
+`ROBOMP_RELEASE_MODEL` selects a release-only model or CSV pool and otherwise
+falls back to `ROBOMP_MODEL`. Terminal states are intentionally silent on
+GitHub: inspect the dashboard Releases table, `GET /releases?limit=N`, or
+`robomp status`.
 
 ## CLI
 
@@ -107,7 +142,7 @@ inside the running container:
 ```bash
 docker compose exec robomp robomp triage  owner/repo#123   # synthesize an issues.opened and wait
 docker compose exec robomp robomp replay  <delivery_id>    # re-enqueue a stored event and wait
-docker compose exec robomp robomp status                   # dump issues table
+docker compose exec robomp robomp status                   # dump issue + release tables
 docker compose exec robomp robomp cleanup owner/repo#123   # force workspace removal, state=abandoned
 ```
 
@@ -153,9 +188,13 @@ The integration test spawns a real `omp --mode rpc` against an
   to real newlines — message-only, trees/identities/dates preserved.
 - Pre-PR gates (`gh_open_pr`): when the repo defines them, `bun run fix`
   runs first (any diff amended into the agent's HEAD commit — no
-  standalone `style:` noise commits) and then
-  `bun check`. A failing `bun check` returns to the agent as
-  `RpcCommandError` for iteration.
+  standalone `style:` noise commits), then `bun check`, then the repo's
+  full `bun run test` (1h budget). Any failure returns to the agent as
+  `RpcCommandError` for iteration and no PR is created — the suite runs
+  after the formatter amend, so it validates the exact tree being
+  published. `skip_checks=true` bypasses all three and the bypass is
+  recorded in `tool_calls`. `gh_push_branch` runs fix + check only; the
+  suite is gated once, at PR creation.
 - `gh_open_pr` validates `## Repro` / `## Cause` / `## Fix` /
   `## Verification` headers and a `Fixes`/`Closes`/`Resolves #N`
   reference before opening.
@@ -176,8 +215,8 @@ The integration test spawns a real `omp --mode rpc` against an
 - **Logs.** Structured JSON on stdout, rotated to
   `/data/logs/robomp.log.jsonl`.
 - **Inspection** (localhost only): `GET /events?limit=N`,
-  `GET /issues?limit=N`, `GET /healthz`, `GET /readyz`, and the
-  dashboard at `/`.
+  `GET /issues?limit=N`, `GET /releases?limit=N`, `GET /healthz`,
+  `GET /readyz`, and the dashboard at `/`.
 
 ## Troubleshooting
 
@@ -189,6 +228,7 @@ The integration test spawns a real `omp --mode rpc` against an
 | `refusing to push: commit author identity mismatch` | Some commit not authored as `ROBOMP_GIT_AUTHOR_*`. The error lists the offending shas; `git commit --amend --reset-author --no-edit`. |
 | `refusing to push: working tree is dirty` | Uncommitted agent edits. Or just call `gh_open_pr`, which auto-commits `bun run fix` output. |
 | `bun check failed before PR creation` | Fix the reported failure and retry `gh_open_pr`. |
+| `refusing to open PR: \`bun run test\` failed before open PR` | The repo suite is red at HEAD. Fix and commit, or `skip_checks=true` if the failure pre-exists on the default branch. |
 | `Failed to load pi_natives` | Wrong arch / missing native. `bun run pi:image` then `bun run robomp:build`. |
 | `No API key found for <provider>` | `~/.omp/agent/models.container.yml` mount missing or provider id mismatch with `ROBOMP_MODEL`. |
 
@@ -196,14 +236,13 @@ The integration test spawns a real `omp --mode rpc` against an
 
 ```
 src/
-  server.py          FastAPI app, /webhook/github, /events, /issues, /replay, dashboard at /
+  server.py          FastAPI app, webhook/status APIs including /releases, dashboard at /
   github_events.py   verify_signature + route()
   queue.py           WorkerPool, dispatch loop, per-issue _inflight serialization
-  tasks.py           triage_issue, handle_comment, handle_pr_conversation, handle_review, cleanup_workspace
+  tasks.py           issue/PR handlers plus handle_release_ci and cleanup_workspace
   worker.py          synchronous omp RPC driver, prompt assembly, env scrubbing
-  host_tools.py      classify_issue, set_issue_labels, gh_post_comment, repro_record,
-                     gh_push_branch, gh_open_pr, gh_request_review,
-                     mark_unable_to_reproduce, abort_task, fetch_issue_thread
+  host_tools.py      issue/PR tools plus release_ci_status, release_job_log,
+                     release_retag, and abort_task
   sandbox.py         clone pool + worktree lifecycle
   github_client.py   typed httpx client; webhook payload parsing
   proxy_client.py    GitHubProxyClient + HMAC signer

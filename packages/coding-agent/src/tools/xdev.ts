@@ -25,22 +25,25 @@
  * `read xd://<tool>` remains for on-demand re-fetch.
  *
  * Rendering: the write renderer draws NOTHING until the streamed `path` is
- * known and provably does not target `xd://`; device writes then delegate to
- * the wrapped tool's own renderer with the decoded inner args.
+ * known and provably does not target `xd://`. Device writes then show as
+ * queued/planning until `tool_execution_start`, and only then delegate to the
+ * wrapped tool's own renderer with the decoded inner args.
  */
 import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLoadMode } from "@oh-my-pi/pi-agent-core";
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
 import { parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { XD_URL_PREFIX } from "../internal-urls/xd-protocol";
+import { stripXdUrlPrefix, XD_URL_PREFIX } from "../internal-urls/xd-protocol";
+import { parseMCPToolName } from "../mcp/tool-bridge";
 import type { Theme } from "../modes/theme/theme";
 import { truncateHeadBytes } from "../session/streaming-output";
 import { resolveToolTier, type ToolTier } from "./approval";
 import { renderDefaultToolExecution } from "./default-renderer";
 import type { Tool } from "./index";
 import { replaceTabs } from "./render-utils";
-import type { ToolRenderer } from "./renderers";
+import type { ToolActivitySummary, ToolRenderer } from "./renderers";
 import { renderError, ToolAbortError, ToolError } from "./tool-errors";
 
 /**
@@ -110,13 +113,6 @@ let rendererLookup: ((name: string) => ToolRenderer | undefined) | undefined;
 /** Wire the wrapped-renderer lookup. Called once by `renderers.ts`. */
 export function setXdevRendererLookup(lookup: (name: string) => ToolRenderer | undefined): void {
 	rendererLookup = lookup;
-}
-
-/** Whether a wire JSON schema declares a top-level `i` (intent) property. */
-function schemaDeclaresIntentField(schema: unknown): boolean {
-	if (!schema || typeof schema !== "object" || !("properties" in schema)) return false;
-	const props = schema.properties;
-	return !!props && typeof props === "object" && "i" in props;
 }
 
 function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string {
@@ -268,9 +264,17 @@ export function resolveXdevTool(state: XdevState, name: string): Tool | undefine
 	return state.tools.get(name);
 }
 
-/** Resolve a mounted tool for top-level fallback execution. */
+/**
+ * Resolve a mounted tool for top-level fallback execution.
+ *
+ * A model may reach a mounted device by emitting a direct tool call instead of
+ * a `write`; the fallback in `sdk.ts` routes that here. Names arrive both bare
+ * (`github`) and carrying the very `xd://` prefix the device docs advertise
+ * (`xd://github`) — strip it so both spellings resolve to the same device.
+ */
 export function resolveMountedXdevTool(state: XdevState, name: string): Tool | undefined {
-	return state.mountedNames.has(name) ? state.tools.get(name) : undefined;
+	const canonicalName = stripXdUrlPrefix(name);
+	return state.mountedNames.has(canonicalName) ? state.tools.get(canonicalName) : undefined;
 }
 
 /** Resolve a mounted tool with its execution-only permission decorator. */
@@ -492,10 +496,76 @@ function resolveDeviceRenderer(
 	return rendererLookup?.(name);
 }
 
+/** Human label for a device write: mounted tool label, else `server/tool` for MCP names. */
+function displayDeviceLabel(name: string, mounted?: { label?: string }): string {
+	if (mounted?.label) return mounted.label;
+	const parsed = parseMCPToolName(name);
+	if (parsed) return `${parsed.serverName}/${parsed.toolName}`;
+	return name;
+}
+/** Salient inner-arg keys for the compact activity line: the verb first, then its object. */
+const ACTIVITY_VERB_KEYS = ["action", "op", "command"] as const;
+const ACTIVITY_OBJECT_KEYS = ["query", "symbol", "path", "file", "pattern", "url", "name"] as const;
+
 /**
- * Streaming-safe call preview for an `xd://` write: forwards the decoded inner
- * args to the mounted tool's renderer (session instance first, then the static
- * map). Returns `undefined` (render nothing) when no renderer produces output.
+ * Compact `label · verb object` activity summary for a device write, so a
+ * squeezed transcript row reads `LSP · references foo` instead of
+ * `Write · xd://lsp`. Prose payloads (resolution devices, report_issue)
+ * surface their first line instead.
+ */
+export function xdevActivitySummary(
+	name: string,
+	content: unknown,
+	resolveMounted?: (name: string) => Tool | undefined,
+): ToolActivitySummary {
+	const mounted = resolveMounted?.(name);
+	const args = decodeInnerArgs(content);
+	const pick = (keys: readonly string[]): string | undefined => {
+		for (const key of keys) {
+			const value = args[key];
+			if (typeof value === "string" && value.length > 0) return value.split("\n", 1)[0];
+		}
+		return undefined;
+	};
+	let detail = [pick(ACTIVITY_VERB_KEYS), pick(ACTIVITY_OBJECT_KEYS)].filter(Boolean).join(" ");
+	if (!detail && typeof content === "string" && !content.trimStart().startsWith("{")) {
+		detail = content.trim().split("\n", 1)[0];
+	}
+	return { label: displayDeviceLabel(name, mounted), detail: detail || undefined };
+}
+
+/** Drop the streaming-decode bookkeeping key before showing inner args. */
+function displayDeviceArgs(args: Record<string, unknown>): Record<string, unknown> {
+	const { __partialJson: _partial, ...rest } = args;
+	return rest;
+}
+
+/** Pre-execution card so a streamed `xd://` write does not look like a hung MCP call. */
+function renderQueuedXdevCall(
+	label: string,
+	args: Record<string, unknown>,
+	options: RenderResultOptions,
+	theme: Theme,
+): Component {
+	return renderDefaultToolExecution(
+		{
+			label: `queued ${label}`,
+			args: displayDeviceArgs(args),
+			options: { ...options, isPartial: true, spinnerFrame: undefined },
+		},
+		theme,
+	);
+}
+
+/**
+ * Streaming-safe call preview for an `xd://` write. Until the write actually
+ * executes (`executionStarted` / `tool_execution_start`), show a queued/planning
+ * card so Grok-style think-after-toolcall stalls do not look like a hung
+ * inner tool. `argsComplete` alone is not enough: exclusive writes can sit
+ * complete at `message_end` while an earlier call still runs. Once execution
+ * starts, forward the decoded inner args to the mounted tool's renderer
+ * (session instance first, then the static map). Returns `undefined` (render
+ * nothing) when no renderer produces output.
  */
 export function renderXdevCall(
 	name: string,
@@ -505,8 +575,11 @@ export function renderXdevCall(
 	resolveMounted?: (name: string) => Tool | undefined,
 ): Component | undefined {
 	const mounted = resolveMounted?.(name);
-	const renderer = resolveDeviceRenderer(name, mounted);
 	const args = decodeInnerArgs(content);
+	if (!options.executionStarted) {
+		return renderQueuedXdevCall(displayDeviceLabel(name, mounted), args, options, theme);
+	}
+	const renderer = resolveDeviceRenderer(name, mounted);
 	if (renderer?.renderCall) {
 		return renderer.renderCall(args, options, theme);
 	}

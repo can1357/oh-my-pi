@@ -6,22 +6,37 @@
  * master switch is off.
  */
 import { type Component, matchesKey, padding, truncateToWidth, visibleWidth } from "@oh-my-pi/pi-tui";
-import { isProviderEnabled } from "../../../discovery";
+import { isForeignUserProvider, isProviderEnabled, isUserSourceEnabled } from "../../../discovery";
 import { theme } from "../../../modes/theme/theme";
 import { matchesSelectDown, matchesSelectUp } from "../../utils/keybinding-matchers";
 import { clampSelection, contentRowWidth, renderScrollableList, searchableChar } from "../selector-helpers";
+import { sanitizeDisplayLine } from "./display-text";
+import {
+	formatExtensionListHint,
+	joinListHints,
+	liveToolsForExtension,
+	projectListHint,
+	type ToolRuntimeSource,
+} from "./inspector-model";
+import { snapshotToolRuntimeSource } from "./live-tool-session";
+import {
+	formatMcpListHint,
+	isDiscoveredMcpServer,
+	type MCPConnectionHealth,
+	type MCPRuntimeSource,
+	snapshotMcpRuntime,
+} from "./mcp-runtime";
 import { applyFilter } from "./state-manager";
-import type { Extension, ExtensionKind, ExtensionState } from "./types";
+import { type Extension, type ExtensionKind, type ExtensionState, isShadowedExtension } from "./types";
 
 export interface ExtensionListCallbacks {
-	/** Called when selection changes */
 	onSelectionChange?: (extension: Extension | null) => void;
-	/** Called when extension is toggled */
 	onToggle?: (extensionId: string, enabled: boolean) => void;
-	/** Called when master switch is toggled */
 	onMasterToggle?: (providerId: string) => void;
-	/** Provider ID for master switch (null = no master switch) */
+	onUserSourceToggle?: (providerId: string) => void;
 	masterSwitchProvider?: string | null;
+	mcpSource?: MCPRuntimeSource;
+	toolSource?: ToolRuntimeSource;
 }
 
 const DEFAULT_MAX_VISIBLE = 15;
@@ -29,6 +44,7 @@ const DEFAULT_MAX_VISIBLE = 15;
 /** Flattened list item for rendering */
 type ListItem =
 	| { type: "master"; providerId: string; providerName: string; enabled: boolean }
+	| { type: "user-source"; providerId: string; providerName: string; enabled: boolean }
 	| { type: "kind-header"; kind: ExtensionKind; label: string; icon: string; count: number }
 	| { type: "extension"; item: Extension };
 
@@ -43,6 +59,9 @@ export class ExtensionList implements Component {
 	#hoveredIndex: number | null = null;
 	/** Item rows rendered in the last frame, for mouse hit-testing. */
 	#visibleCount = 0;
+	#mcpSource: MCPRuntimeSource | undefined;
+	#toolSource: ToolRuntimeSource | undefined;
+	#toolFrame: ToolRuntimeSource | undefined;
 
 	constructor(
 		private extensions: Extension[],
@@ -50,6 +69,8 @@ export class ExtensionList implements Component {
 		maxVisible?: number,
 	) {
 		this.#masterSwitchProvider = callbacks.masterSwitchProvider ?? null;
+		this.#mcpSource = callbacks.mcpSource;
+		this.#toolSource = callbacks.toolSource;
 		this.#maxVisible = maxVisible ?? DEFAULT_MAX_VISIBLE;
 		this.#rebuildList();
 	}
@@ -72,6 +93,14 @@ export class ExtensionList implements Component {
 	setMasterSwitchProvider(providerId: string | null): void {
 		this.#masterSwitchProvider = providerId;
 		this.#rebuildList();
+	}
+
+	setMcpSource(source: MCPRuntimeSource | undefined): void {
+		this.#mcpSource = source;
+	}
+
+	setToolSource(source: ToolRuntimeSource | undefined): void {
+		this.#toolSource = source;
 	}
 
 	getSearchQuery(): string {
@@ -110,6 +139,7 @@ export class ExtensionList implements Component {
 	invalidate(): void {}
 
 	render(width: number): readonly string[] {
+		this.#toolFrame = snapshotToolRuntimeSource(this.#toolSource);
 		const lines: string[] = [];
 		this.#visibleCount = 0;
 
@@ -145,6 +175,8 @@ export class ExtensionList implements Component {
 			let rowStr: string;
 			if (listItem.type === "master") {
 				rowStr = this.#renderMasterSwitch(listItem, isSelected, rowWidth);
+			} else if (listItem.type === "user-source") {
+				rowStr = this.#renderUserSourceSwitch(listItem, isSelected, masterDisabled, rowWidth);
 			} else if (listItem.type === "kind-header") {
 				rowStr = this.#renderKindHeader(listItem, isSelected, rowWidth);
 			} else {
@@ -164,6 +196,30 @@ export class ExtensionList implements Component {
 		);
 
 		return lines;
+	}
+
+	#renderUserSourceSwitch(
+		item: ListItem & { type: "user-source" },
+		isSelected: boolean,
+		masterDisabled: boolean,
+		width: number,
+	): string {
+		const checkbox = item.enabled
+			? theme.fg("success", theme.checkbox.checked)
+			: theme.fg("dim", theme.checkbox.unchecked);
+		const label = `Load ~/ ${item.providerName} config`;
+		const badge = theme.fg("muted", "(opt-in; project config always loads)");
+
+		let line = `${checkbox} ${theme.icon.folder} ${label}  ${badge}`;
+
+		if (isSelected) {
+			line = theme.bold(theme.fg("accent", line));
+			line = theme.bg("selectedBg", line);
+		} else if (!item.enabled || masterDisabled) {
+			line = theme.fg("dim", line);
+		}
+
+		return truncateToWidth(line, width);
 	}
 
 	#renderMasterSwitch(item: ListItem & { type: "master" }, isSelected: boolean, width: number): string {
@@ -201,14 +257,22 @@ export class ExtensionList implements Component {
 	}
 
 	#renderExtensionRow(ext: Extension, isSelected: boolean, width: number, masterDisabled: boolean): string {
-		// When master is disabled, all items appear dimmed
+		const shadowed = isShadowedExtension(ext);
 		const effectivelyDisabled = masterDisabled || ext.state === "disabled";
+		const mcpSnap =
+			ext.kind === "mcp" && isDiscoveredMcpServer(ext.raw) && !shadowed
+				? snapshotMcpRuntime(ext.raw, this.#mcpSource, {
+						enabled: !effectivelyDisabled,
+						shadowed: false,
+					})
+				: undefined;
 
-		// Status icon
-		const stateIcon = this.#getStateIcon(ext.state, masterDisabled);
-
-		// Name
-		let name = ext.displayName;
+		const stateIcon = shadowed
+			? this.#getStateIcon("shadowed", masterDisabled)
+			: mcpSnap
+				? this.#getMcpHealthIcon(mcpSnap.health, masterDisabled)
+				: this.#getStateIcon(ext.state, masterDisabled);
+		let name = sanitizeDisplayLine(ext.displayName);
 		const nameWidth = Math.min(24, width - 16);
 
 		// Build the line with indentation (visually "inside" the master switch)
@@ -218,7 +282,7 @@ export class ExtensionList implements Component {
 			name = theme.bold(theme.fg("accent", name));
 		} else if (effectivelyDisabled) {
 			name = theme.fg("dim", name);
-		} else if (ext.state === "shadowed") {
+		} else if (shadowed) {
 			name = theme.fg("warning", name);
 		}
 
@@ -226,12 +290,20 @@ export class ExtensionList implements Component {
 		const namePadded = this.#padText(name, nameWidth);
 		line += namePadded;
 
-		// Trigger hint
-		if (ext.trigger) {
-			const triggerStyle = effectivelyDisabled ? "dim" : "muted";
+		const hint = mcpSnap
+			? joinListHints(formatMcpListHint(mcpSnap), projectListHint(ext))
+			: formatExtensionListHint(ext, ext.kind === "tool" ? liveToolsForExtension(ext, this.#toolFrame) : []);
+		if (hint) {
+			const triggerStyle = effectivelyDisabled
+				? "dim"
+				: mcpSnap?.health === "disconnected" || mcpSnap?.health === "inactive"
+					? mcpSnap.health === "inactive"
+						? "warning"
+						: "dim"
+					: "muted";
 			const remainingWidth = width - visibleWidth(line) - 2;
 			if (remainingWidth > 5) {
-				line += `  ${truncateToWidth(theme.fg(triggerStyle as "dim" | "muted", ext.trigger), remainingWidth)}`;
+				line += `  ${truncateToWidth(theme.fg(triggerStyle, sanitizeDisplayLine(hint)), remainingWidth)}`;
 			}
 		}
 
@@ -284,6 +356,22 @@ export class ExtensionList implements Component {
 		}
 	}
 
+	#getMcpHealthIcon(health: MCPConnectionHealth, masterDisabled: boolean): string {
+		if (masterDisabled) {
+			return theme.fg("dim", theme.status.disabled);
+		}
+		switch (health) {
+			case "connected":
+				return theme.fg("success", theme.status.enabled);
+			case "connecting":
+				return theme.fg("muted", theme.status.running);
+			case "disconnected":
+				return theme.fg("dim", theme.status.shadowed);
+			case "inactive":
+				return theme.fg("warning", theme.status.disabled);
+		}
+	}
+
 	#padText(text: string, targetWidth: number): string {
 		const width = visibleWidth(text);
 		if (width >= targetWidth) {
@@ -317,6 +405,14 @@ export class ExtensionList implements Component {
 				providerName,
 				enabled,
 			});
+			if (isForeignUserProvider(this.#masterSwitchProvider)) {
+				this.#listItems.push({
+					type: "user-source",
+					providerId: this.#masterSwitchProvider,
+					providerName,
+					enabled: isUserSourceEnabled(this.#masterSwitchProvider),
+				});
+			}
 
 			for (const ext of filtered) {
 				this.#listItems.push({ type: "extension", item: ext });
@@ -401,8 +497,12 @@ export class ExtensionList implements Component {
 		const item = this.#listItems[this.#selectedIndex];
 		if (item?.type === "master") {
 			this.callbacks.onMasterToggle?.(item.providerId);
+		} else if (item?.type === "user-source") {
+			if (isProviderEnabled(item.providerId)) this.callbacks.onUserSourceToggle?.(item.providerId);
 		} else if (item?.type === "extension") {
-			// Only allow toggling if the provider master switch is enabled.
+			// Shadowed same-name rows share the winner's id (`mcp:github`).
+			// Toggling them would mutate whichever config `find(id)` hits first.
+			if (isShadowedExtension(item.item)) return;
 			const masterDisabled = this.#masterSwitchProvider !== null && !isProviderEnabled(this.#masterSwitchProvider);
 			if (!masterDisabled) {
 				const newEnabled = item.item.state === "disabled";

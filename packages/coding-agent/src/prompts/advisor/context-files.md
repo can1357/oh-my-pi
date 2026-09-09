@@ -1,5 +1,5 @@
 <project-context>
-These context files carry the user's standing instructions for this project (AGENTS.md and the like). The driving agent is bound by them. Hold the agent to them and flag drift the moment it starts; never advise against what these files mandate.
+Context files: user's standing project instructions (AGENTS.md etc.); binding on driving agent. Enforce; flag drift immediately; NEVER advise against mandates.
 {{#each contextFiles}}
 <file path="{{path}}">
 {{content}}

@@ -11,6 +11,7 @@ use std::{
 	io::{self, BufReader, Read, Write},
 };
 
+use brush_core::{ShellExtensions, builtins::Registration};
 use clap::{Arg, ArgAction, ArgMatches, Command, ValueHint, builder::ValueParser};
 use os_display::Quotable;
 use uucore::{
@@ -18,6 +19,7 @@ use uucore::{
 		AlgoKind, BlakeLength, ChecksumError, ReadingMode, ShaLength, SizedAlgoKind,
 		digest_reader, escape_filename, parse_blake_length, unescape_filename, SUPPORTED_ALGORITHMS,
 	},
+	hardware::{HasHardwareFeatures as _, SimdPolicy},
 	line_ending::LineEnding,
 	os_str_from_bytes,
 	quoting_style::{QuotingStyle, locale_aware_escape_name},
@@ -25,7 +27,7 @@ use uucore::{
 	sum::{self, Blake2b, Blake3, DigestOutput},
 };
 
-use crate::host::{Host, os_bytes};
+use crate::host::{Host, Utility, matches_parser, os_bytes, util};
 
 #[derive(Debug, Clone)]
 struct Failure(String);
@@ -413,6 +415,164 @@ pub(crate) fn run(
 			1
 		},
 	}
+}
+
+/// Parsed `cksum` invocation.
+pub(crate) struct Cksum {
+	matches: ArgMatches,
+}
+
+matches_parser!(Cksum, cksum_app);
+
+impl Utility for Cksum {
+	const NAME: &'static str = "cksum";
+
+	fn run(self, host: &mut Host) -> i32 {
+		match run_cksum(host, self.matches) {
+			Ok(()) => host.exit_code(),
+			Err(error) => {
+				if !error.0.is_empty() {
+					host.error(error, 1);
+				}
+				1
+			},
+		}
+	}
+}
+
+/// Builds the clap command for the GNU `cksum` multi-algorithm front-end.
+fn cksum_app() -> Command {
+	default_checksum_app(
+		"Print or verify checksums; without --algorithm, prints the POSIX CRC and byte count",
+		"cksum [OPTION]... [FILE]...",
+	)
+	.name("cksum")
+	.with_algo()
+	.with_untagged()
+	.with_tag(true)
+	.with_length()
+	.with_raw()
+	.with_check_and_opts()
+	.with_base64()
+	.with_text(false)
+	.with_binary()
+	.with_zero()
+	.with_debug()
+}
+
+/// Creates the `cksum` builtin registration.
+pub(crate) fn cksum_builtin<SE: ShellExtensions>() -> Registration<SE> {
+	util::<Cksum, SE>()
+}
+
+/// Sanitizes `--length` against `--algorithm`, mirroring GNU `cksum`.
+fn sanitize_cksum_length(
+	host: &mut Host,
+	algo: Option<AlgoKind>,
+	input_length: Option<&str>,
+) -> ExecResult<Option<usize>> {
+	match (algo, input_length) {
+		// No provided length is not a problem so far.
+		(_, None) => Ok(None),
+
+		// For SHA2 and SHA3, if a length is provided, ensure it is correct.
+		(Some(algo @ (AlgoKind::Sha2 | AlgoKind::Sha3)), Some(len)) => {
+			// Positive overflow while parsing counts as an invalid number,
+			// but a number still; it gets the extra reminder of the accepted
+			// inputs, unlike a plain parse failure.
+			let parsed = match len.parse::<usize>() {
+				Ok(parsed) => Some(parsed),
+				Err(error) if *error.kind() == std::num::IntErrorKind::PosOverflow => None,
+				Err(_) => return Err(failure(ChecksumError::InvalidLength(len.into()))),
+			};
+			match parsed {
+				Some(parsed @ (224 | 256 | 384 | 512)) => Ok(Some(parsed)),
+				_ => {
+					host.error(ChecksumError::InvalidLength(len.into()), 1);
+					Err(failure(ChecksumError::InvalidLengthForSha(algo.to_uppercase().into())))
+				},
+			}
+		},
+
+		// SHAKE128 and SHAKE256 algorithms optionally take a bit length. No
+		// validation is performed on this length, any value is valid.
+		(Some(AlgoKind::Shake128 | AlgoKind::Shake256), Some(len)) => match len.parse::<usize>() {
+			Ok(0) => Ok(None),
+			Ok(parsed) => Ok(Some(parsed)),
+			Err(_) => Err(failure(ChecksumError::InvalidLength(len.into()))),
+		},
+
+		// For BLAKE, if a length is provided, validate it.
+		(Some(algo @ (AlgoKind::Blake2b | AlgoKind::Blake3)), Some(len)) => {
+			parse_blake_length(algo, BlakeLength::String(len)).map(Some).map_err(failure)
+		},
+
+		// For any other provided algorithm, check if length is 0.
+		// Otherwise, this is an error.
+		(_, Some(len)) if len.parse::<u32>() == Ok(0) => Ok(None),
+		(_, Some(_)) => Err(failure(ChecksumError::LengthOnlyForBlake2bSha2Sha3)),
+	}
+}
+
+/// Prints CPU hardware capability detection info, matching GNU `cksum
+/// --debug`.
+fn print_cpu_debug_info(host: &mut Host) {
+	let features = SimdPolicy::detect();
+
+	let mut print_feature = |name: &str, available: bool| {
+		if available {
+			let _ = writeln!(host.stderr, "using {name} hardware support");
+		} else {
+			let _ = writeln!(host.stderr, "{name} support not detected");
+		}
+	};
+
+	// x86/x86_64
+	print_feature("avx512", features.has_avx512());
+	print_feature("avx2", features.has_avx2());
+	print_feature("pclmul", features.has_pclmul());
+
+	// ARM aarch64
+	if cfg!(target_arch = "aarch64") {
+		print_feature("vmull", features.has_vmull());
+	}
+}
+
+/// Runs one parsed `cksum` invocation. Unlike the standalone utilities, the
+/// algorithm comes from `--algorithm` (default: legacy POSIX CRC), output
+/// defaults to tagged, and `--raw`/`--base64` are accepted.
+fn run_cksum(host: &mut Host, matches: ArgMatches) -> ExecResult<()> {
+	let algo = matches
+		.get_one::<String>(options::ALGORITHM)
+		.map(AlgoKind::from_cksum)
+		.transpose()
+		.map_err(failure)?;
+
+	let input_length = matches.get_one::<String>(options::LENGTH).map(String::as_str);
+	let length = sanitize_cksum_length(host, algo, input_length)?;
+
+	let tag = !matches.get_flag(options::UNTAGGED);
+	let binary = matches.get_flag(options::BINARY);
+	let text = matches.get_flag(options::TEXT);
+
+	// Specifying --text without ever mentioning --untagged fails.
+	if text && tag {
+		return Err(failure(ChecksumError::TextWithoutUntagged));
+	}
+
+	let output_format = OutputFormat::from_cksum(
+		algo.unwrap_or(AlgoKind::Crc),
+		tag,
+		binary,
+		matches.get_flag(options::RAW),
+		matches.get_flag(options::BASE64),
+	);
+
+	if matches.get_flag(options::DEBUG) {
+		print_cpu_debug_info(host);
+	}
+
+	checksum_main(host, algo, length, matches, output_format)
 }
 
 /// Use the same buffer size as GNU when reading a file to create a checksum
@@ -1951,6 +2111,159 @@ mod tests {
             let mut buffer: Vec<u8> = vec![];
             write_file_report(&mut buffer, filename, *result, prefix, opts.verbose);
             assert_eq!(&buffer, expected);
+        }
+    }
+
+    mod cksum_front_end {
+        //! `cksum` is the GNU multi-algorithm front-end; without these the
+        //! builtin would shadow the system binary while rejecting or
+        //! misprinting invocations the real `cksum` accepts.
+
+        use std::fs;
+
+        use super::super::Cksum;
+        use crate::host::run_util;
+
+        /// Failure mode: default invocation must keep the POSIX CRC format
+        /// (`<crc> <size>`), not a hex digest.
+        #[test]
+        fn default_is_posix_crc_output() {
+            let (code, capture) = run_util::<Cksum>(&[], "hi", "/");
+            assert_eq!(code, 0);
+            assert_eq!(capture.out(), "2352138605 2\n");
+        }
+
+        /// Failure mode: `cksum somefile` printing no filename or the wrong
+        /// CRC would silently diverge from `/usr/bin/cksum`.
+        #[test]
+        fn file_operand_appends_the_filename() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("input"), b"hi").unwrap();
+            let (code, capture) = run_util::<Cksum>(&["input"], "", dir.path());
+            assert_eq!(code, 0);
+            assert_eq!(capture.out(), "2352138605 2 input\n");
+        }
+
+        /// Failure mode: `-a sha256` is the flagship GNU extension; it must
+        /// parse and produce BSD-tagged output by default.
+        #[test]
+        fn algorithm_selects_tagged_sha256() {
+            let (code, capture) = run_util::<Cksum>(&["-a", "sha256"], "hi", "/");
+            assert_eq!(code, 0);
+            assert_eq!(
+                capture.out(),
+                "SHA256 (-) = 8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4\n"
+            );
+        }
+
+        /// Failure mode: `--untagged` must switch to the two-space coreutils
+        /// format so output can be fed back to `sha256sum -c`.
+        #[test]
+        fn untagged_prints_coreutils_format() {
+            let (code, capture) = run_util::<Cksum>(&["-a", "sha256", "--untagged"], "hi", "/");
+            assert_eq!(code, 0);
+            assert_eq!(
+                capture.out(),
+                "8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4  -\n"
+            );
+        }
+
+        /// Failure mode: `--base64` must encode the digest, not error or
+        /// print hex.
+        #[test]
+        fn base64_encodes_the_digest() {
+            let (code, capture) = run_util::<Cksum>(&["-a", "sha256", "--base64"], "hi", "/");
+            assert_eq!(code, 0);
+            assert_eq!(capture.out(), "SHA256 (-) = j0NDRmSPa5bfid2pAcUXaxCm2Dlh3TwayItZstwyeqQ=\n");
+        }
+
+        /// Failure mode: `-a blake2b -l N` (the one length-taking algorithm
+        /// agents use) must honor the bit length in the tag.
+        #[test]
+        fn blake2b_length_is_honored() {
+            let (code, capture) = run_util::<Cksum>(&["-a", "blake2b", "-l", "8"], "abc", "/");
+            assert_eq!(code, 0);
+            assert_eq!(capture.out(), "BLAKE2b-8 (-) = 6b\n");
+        }
+
+        /// Failure mode: GNU rejects `--length` for non-length algorithms;
+        /// silently ignoring it would hide user error.
+        #[test]
+        fn length_requires_a_length_algorithm() {
+            let (code, capture) = run_util::<Cksum>(&["-l", "16"], "", "/");
+            assert_eq!(code, 1);
+            assert!(
+                capture.err().contains("--length is only supported with"),
+                "{}",
+                capture.err()
+            );
+        }
+
+        /// Failure mode: `--text` without `--untagged` is a GNU usage error
+        /// (`--text mode is only supported with --untagged`), even though the
+        /// standalone `*sum` utilities accept `-t` freely.
+        #[test]
+        fn text_without_untagged_is_rejected() {
+            let (code, capture) = run_util::<Cksum>(&["-a", "sha256", "-t"], "", "/");
+            assert_eq!(code, 1);
+            assert!(
+                capture.err().contains("--text mode is only supported with --untagged"),
+                "{}",
+                capture.err()
+            );
+        }
+
+        /// Failure mode: verification must accept tagged lines produced by
+        /// the compute side and exit 0.
+        #[test]
+        fn check_verifies_tagged_lines() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("data"), b"hi").unwrap();
+            fs::write(
+                dir.path().join("list"),
+                b"SHA256 (data) = 8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4\n",
+            )
+            .unwrap();
+            let (code, capture) = run_util::<Cksum>(&["-c", "list"], "", dir.path());
+            assert_eq!(code, 0, "stderr: {}", capture.err());
+            assert_eq!(capture.out(), "data: OK\n");
+        }
+
+        /// Failure mode: real GNU 9.x treats `-c -b` as a fatal usage error
+        /// ("meaningless when verifying checksums", exit 1, nothing
+        /// verified); the builtin must not silently verify anyway.
+        #[test]
+        fn check_with_binary_stays_fatal_like_gnu() {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(dir.path().join("data"), b"hi").unwrap();
+            fs::write(
+                dir.path().join("list"),
+                b"SHA256 (data) = 8f434346648f6b96df89dda901c5176b10a6d83961dd3c1ac88b59b2dc327aa4\n",
+            )
+            .unwrap();
+            let (code, capture) = run_util::<Cksum>(&["-c", "-b", "list"], "", dir.path());
+            assert_eq!(code, 1);
+            assert!(
+                capture
+                    .err()
+                    .contains("the --binary and --text options are meaningless when verifying checksums"),
+                "{}",
+                capture.err()
+            );
+            assert!(!capture.out().contains("OK"), "must not verify: {}", capture.out());
+        }
+
+        /// Failure mode: legacy algorithms cannot be verified; GNU errors out
+        /// rather than parsing the list.
+        #[test]
+        fn check_rejects_legacy_algorithms() {
+            let (code, capture) = run_util::<Cksum>(&["-a", "crc", "-c"], "", "/");
+            assert_eq!(code, 1);
+            assert!(
+                capture.err().contains("--check is not supported with --algorithm"),
+                "{}",
+                capture.err()
+            );
         }
     }
 }

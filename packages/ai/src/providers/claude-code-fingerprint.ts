@@ -1,5 +1,5 @@
 /**
- * Cowork inference-fingerprint constants, kept in a leaf module so consumers
+ * Claude Code inference-fingerprint constants, kept in a leaf module so consumers
  * outside the provider (`registry/oauth/anthropic`, `usage/claude`) don't
  * import the heavy `providers/anthropic` module.
  *
@@ -8,13 +8,15 @@
  * provider module.
  */
 
-/** Claude runtime version bundled by the current Cowork desktop release. */
-export const claudeCodeVersion = "2.1.220";
-/** User-Agent emitted by Cowork's `claude-desktop` inference entrypoint. */
-export const coworkUserAgent = `claude-cli/${claudeCodeVersion} (external, claude-desktop)`;
+/** Current Claude Code CLI version represented on the Anthropic wire. */
+export const claudeCodeVersion = "2.1.257";
+/** `@anthropic-ai/sdk` version bundled by the current Claude Code release. */
+export const claudeCodeSdkVersion = "0.112.1";
+/** User-Agent emitted by Claude Code's CLI inference entrypoint. */
+export const claudeCodeUserAgent = `claude-cli/${claudeCodeVersion} (external, cli)`;
 /** Prefix used to isolate custom Anthropic OAuth tools from built-in tools. */
 export const claudeToolPrefix: string = "_";
-/** Identity block prepended by Cowork's Claude runtime. */
-export const claudeCodeSystemInstruction = "You are a Claude agent, built on Anthropic's Claude Agent SDK.";
-/** Cowork's per-request output-token ceiling. */
+/** Identity block prepended by Claude Code's CLI runtime. */
+export const claudeCodeSystemInstruction = "You are Claude Code, Anthropic's official CLI for Claude.";
+/** Claude Code's per-request output-token ceiling. */
 export const CLAUDE_CODE_MAX_OUTPUT_TOKENS = 64000;

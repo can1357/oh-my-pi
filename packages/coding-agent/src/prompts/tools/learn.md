@@ -1,7 +1,7 @@
-Capture a reusable lesson into long-term memory, and optionally mint or enhance a managed skill in the same call.
+Capture reusable lessons in long-term memory; optionally mint/enhance a managed skill in the same call.
 
-Use after solving something whose insight will pay off again: a non-obvious fix, a project convention you had to discover, a workflow that worked.
+Use after solving insight likely to pay off again: a non-obvious fix, discovered project convention, or workflow that worked.
 
-Provide the optional `skill` object when the lesson is a repeatable *procedure* worth codifying as a `SKILL.md` (not just a fact). Managed skills are written to an isolated directory (`~/.omp/agent/managed-skills`) and are surfaced like normal skills next session. They NEVER touch user-authored skills. Frontmatter is generated from `name` and `description`.
+`skill` optional; provide only for a repeatable procedure worth codifying as `SKILL.md`, not a fact. Managed skills: isolated `~/.omp/agent/managed-skills`; surfaced as normal skills next session; NEVER touch user-authored skills. Frontmatter: generated from `name` and `description`.
 
-Capture sparingly and specifically. One strong, reusable lesson beats several vague ones.
+Capture sparingly, specifically: one strong reusable lesson > several vague ones.

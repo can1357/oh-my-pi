@@ -98,7 +98,7 @@ export class KagiApiError extends Error {
 }
 
 function extractKagiErrorMessage(payload: unknown): string | null {
-	if (!payload || typeof payload !== "object") return null;
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
 	const record = payload as Record<string, unknown>;
 
 	for (const value of [record.message, record.detail]) {
@@ -107,17 +107,20 @@ function extractKagiErrorMessage(payload: unknown): string | null {
 		}
 	}
 
-	if (typeof record.error === "string" && record.error.trim().length > 0) {
-		return record.error.trim();
-	}
-
-	if (Array.isArray(record.error)) {
-		for (const entry of record.error) {
+	for (const errors of [record.error, record.errors]) {
+		if (typeof errors === "string" && errors.trim().length > 0) {
+			return errors.trim();
+		}
+		if (!Array.isArray(errors)) continue;
+		for (const entry of errors) {
 			if (!entry || typeof entry !== "object") continue;
 			const e = entry as Record<string, unknown>;
-			for (const value of [e.message, e.msg]) {
-				if (typeof value === "string" && value.trim().length > 0) {
-					return value.trim();
+			for (const value of [e.message, e.msg, e.code]) {
+				if (
+					(typeof value === "string" && value.trim().length > 0) ||
+					(typeof value === "number" && Number.isFinite(value))
+				) {
+					return String(value).trim();
 				}
 			}
 		}
@@ -145,6 +148,34 @@ function parseKagiErrorResponse(statusCode: number, responseText: string): KagiA
 	} catch {
 		return createKagiApiError(statusCode, trimmed);
 	}
+}
+
+function parseKagiSuccessResponse(statusCode: number, responseText: string): KagiSearchResponse {
+	let payload: unknown;
+	try {
+		payload = JSON.parse(responseText);
+	} catch {
+		throw new KagiApiError("Kagi API returned an invalid response: invalid JSON", statusCode);
+	}
+	if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+		throw new KagiApiError("Kagi API returned an invalid response: expected an object envelope", statusCode);
+	}
+
+	const record = payload as Record<string, unknown>;
+	const errorMessage = extractKagiErrorMessage(payload);
+	if (errorMessage && (record.error !== undefined || record.errors !== undefined)) {
+		const errors = Array.isArray(record.error) ? record.error : Array.isArray(record.errors) ? record.errors : [];
+		const first = errors[0];
+		const code =
+			first && typeof first === "object" && typeof (first as Record<string, unknown>).code === "number"
+				? ((first as Record<string, unknown>).code as number)
+				: statusCode;
+		throw createKagiApiError(code, errorMessage);
+	}
+	if (record.data !== undefined && (!record.data || typeof record.data !== "object" || Array.isArray(record.data))) {
+		throw new KagiApiError("Kagi API returned an invalid response: expected data to be an object", statusCode);
+	}
+	return payload as KagiSearchResponse;
 }
 
 // ---------------------------------------------------------------------------
@@ -216,23 +247,40 @@ function buildRequestBody(query: string, options: KagiSearchOptions): KagiSearch
 	return req;
 }
 
-/** Push every item in a result bucket as a source, with an optional title tag. */
-function collectSources(sources: KagiSearchSource[], items: KagiSearchResultItem[] | undefined, tag?: string): void {
-	if (!items) return;
-	for (const item of items) {
+function firstNonEmptyString(...values: unknown[]): string | undefined {
+	for (const value of values) {
+		if (typeof value === "string" && value.trim().length > 0) return value.trim();
+	}
+	return undefined;
+}
+
+/** Push every valid item in a result bucket as a source, with an optional title tag. */
+function collectSources(sources: KagiSearchSource[], items: unknown, tag?: string): void {
+	if (!Array.isArray(items)) return;
+	for (const value of items) {
+		if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+		const item = value as Record<string, unknown>;
+		const url = firstNonEmptyString(item.url, item.href, item.link);
+		if (!url) continue;
+		const title = firstNonEmptyString(item.title, item.name) ?? url;
 		sources.push({
-			title: tag ? `${tag} ${item.title}` : item.title,
-			url: item.url,
-			snippet: item.snippet,
-			publishedDate: item.time,
+			title: tag ? `${tag} ${title}` : title,
+			url,
+			snippet: firstNonEmptyString(item.snippet, item.description, item.summary),
+			publishedDate: firstNonEmptyString(item.time),
 		});
 	}
 }
 
 /** Pull a related/adjacent question from an item's props or fall back to title. */
-function questionOf(item: KagiSearchResultItem): string | undefined {
-	const q = item.props?.question ?? item.props?.query ?? item.title;
-	return typeof q === "string" && q.length > 0 ? q : undefined;
+function questionOf(value: unknown): string | undefined {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+	const item = value as Record<string, unknown>;
+	const props =
+		item.props && typeof item.props === "object" && !Array.isArray(item.props)
+			? (item.props as Record<string, unknown>)
+			: undefined;
+	return firstNonEmptyString(props?.question, props?.query, item.title);
 }
 
 export async function searchWithKagi(
@@ -269,11 +317,7 @@ export async function searchWithKagi(
 		},
 	);
 
-	const payload = (await response.json()) as KagiSearchResponse;
-	if (payload.error && payload.error.length > 0) {
-		const first = payload.error[0];
-		throw createKagiApiError(first.code ?? response.status, extractKagiErrorMessage(payload) ?? first.message);
-	}
+	const payload = parseKagiSuccessResponse(response.status, await response.text());
 
 	const data = payload.data;
 	const sources: KagiSearchSource[] = [];
@@ -284,17 +328,30 @@ export async function searchWithKagi(
 	collectSources(sources, data?.news, "[News]");
 	collectSources(sources, data?.infobox, "[Info]");
 
-	for (const item of data?.adjacent_question ?? []) {
-		const q = questionOf(item);
-		if (q) relatedQuestions.push(q);
+	const adjacentQuestions: unknown = data?.adjacent_question;
+	if (Array.isArray(adjacentQuestions)) {
+		for (const item of adjacentQuestions) {
+			const question = questionOf(item);
+			if (question) relatedQuestions.push(question);
+		}
 	}
-	for (const item of data?.related_search ?? []) {
-		const q = questionOf(item);
-		if (q) relatedQuestions.push(q);
+	const relatedSearches: unknown = data?.related_search;
+	if (Array.isArray(relatedSearches)) {
+		for (const item of relatedSearches) {
+			const question = questionOf(item);
+			if (question) relatedQuestions.push(question);
+		}
 	}
 
-	const directAnswer = data?.direct_answer?.[0];
-	const answer = directAnswer ? (directAnswer.snippet ?? directAnswer.title) : undefined;
+	const directAnswers: unknown = data?.direct_answer;
+	const directAnswer = Array.isArray(directAnswers) ? directAnswers[0] : undefined;
+	const answer =
+		directAnswer && typeof directAnswer === "object" && !Array.isArray(directAnswer)
+			? firstNonEmptyString(
+					(directAnswer as Record<string, unknown>).snippet,
+					(directAnswer as Record<string, unknown>).title,
+				)
+			: undefined;
 
 	return {
 		requestId: payload.meta?.trace ?? payload.meta?.id ?? "",

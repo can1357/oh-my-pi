@@ -222,6 +222,13 @@ export class StreamingRevealController {
 	#component: StreamingRevealComponent | undefined;
 	#timer: NodeJS.Timeout | undefined;
 	#revealed = 0;
+	#targetDirty = false;
+	// Immutable deep clone of the leading content snapped at the tool-call
+	// boundary. Kept independent of the live message so an in-place provider
+	// rewrite of a previously emitted block (e.g. OpenAI Responses replacing
+	// streamed text with authoritative terminal content) is still detected —
+	// aliasing the live array would make the equality check compare it to itself.
+	#snappedToolBoundaryContent: AssistantMessage["content"] | undefined;
 	#hideThinkingBlock = false;
 	#proseOnlyThinking = true;
 	#smoothStreaming = true;
@@ -247,7 +254,7 @@ export class StreamingRevealController {
 		);
 	}
 
-	begin(component: StreamingRevealComponent, message: AssistantMessage): void {
+	begin(component: StreamingRevealComponent, message: AssistantMessage, hasToolCalls: boolean): void {
 		this.stop();
 		this.#component = component;
 		this.#target = message;
@@ -261,20 +268,21 @@ export class StreamingRevealController {
 			return;
 		}
 		const total = this.#visibleUnits(message);
-		if (message.content.some(block => block.type === "toolCall")) {
+		if (hasToolCalls) {
 			// A tool call is a transcript-order boundary: finish any leading
 			// assistant text before EventController renders the separate tool card.
 			this.#revealed = total;
 			component.updateContent(this.#build(message, this.#revealed), {
 				transient: true,
 			});
+			this.#snappedToolBoundaryContent = structuredClone(message.content);
 			return;
 		}
 		this.#renderCurrent();
 		this.#syncTimer(total);
 	}
 
-	setTarget(message: AssistantMessage): void {
+	setTarget(message: AssistantMessage, hasToolCalls: boolean): void {
 		this.#target = message;
 		this.#hideThinkingBlock = this.#getHideThinkingBlock();
 		this.#proseOnlyThinking = this.#getProseOnlyThinking();
@@ -282,25 +290,47 @@ export class StreamingRevealController {
 		if (!this.#component) return;
 		if (!this.#smoothStreaming) {
 			const total = this.#visibleUnits(message);
+			this.#revealed = total;
+			this.#targetDirty = false;
+			this.#stopTimer();
 			this.#component.updateContent(this.#build(message, total), { transient: true });
 			return;
 		}
 		const total = this.#visibleUnits(message);
-		if (message.content.some(block => block.type === "toolCall")) {
+		if (hasToolCalls) {
+			const alreadySnapped =
+				this.#revealed === total &&
+				this.#snappedToolBoundaryContent !== undefined &&
+				Bun.deepEquals(this.#snappedToolBoundaryContent, message.content);
 			// A tool call is a transcript-order boundary: finish any leading
 			// assistant text before EventController renders the separate tool card.
 			this.#revealed = total;
+			this.#targetDirty = false;
 			this.#stopTimer();
+			if (alreadySnapped) return;
 			this.#component.updateContent(this.#build(message, this.#revealed), {
 				transient: true,
 			});
+			this.#snappedToolBoundaryContent = structuredClone(message.content);
 			return;
 		}
+		this.#snappedToolBoundaryContent = undefined;
 		if (this.#revealed > total) {
 			this.#revealed = total;
 		}
-		this.#renderCurrent();
-		this.#syncTimer(total);
+		if (this.#revealed < total) {
+			// Behind: the running reveal tick renders the newest target at the
+			// cadence; skip the redundant per-delta render (the reveal cadence
+			// bounds markdown work even when the provider deltas arrive faster).
+			this.#targetDirty = false;
+			this.#syncTimer(total);
+			return;
+		}
+		// Caught up: defer the render to the next reveal tick so a burst of
+		// post-catch-up deltas coalesces into one render instead of one per
+		// token. The tick always renders the latest target — nothing is lost.
+		if (!this.#timer) this.#startTimer();
+		this.#targetDirty = true;
 	}
 
 	stop(): void {
@@ -308,6 +338,8 @@ export class StreamingRevealController {
 		this.#target = undefined;
 		this.#component = undefined;
 		this.#revealed = 0;
+		this.#targetDirty = false;
+		this.#snappedToolBoundaryContent = undefined;
 		this.#unitCounter.reset();
 	}
 
@@ -384,6 +416,12 @@ export class StreamingRevealController {
 		}
 		const total = this.#visibleUnits(target);
 		if (this.#revealed >= total) {
+			if (this.#targetDirty) {
+				this.#targetDirty = false;
+				this.#revealed = total;
+				this.#renderCurrent();
+				this.#requestRender(component);
+			}
 			this.#stopTimer();
 			return;
 		}

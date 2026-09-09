@@ -565,7 +565,14 @@ export class EpisodicGraph {
 	}
 
 	private extractParticipants(content: string): string[] {
-		const names = Array.from(content.matchAll(/\b([A-Z][a-z]+(?:\s+[A-Z][a-z]+)?)\b/g), match => match[1] ?? "");
+		// Match capitalized proper nouns across cased scripts (Latin, Greek, Cyrillic, …).
+		// `[A-Z][a-z]+` plus ASCII `\b` matched no non-Latin token, so any non-English
+		// memory produced zero participants (issue #7918). Unicode property escapes with
+		// the `u` flag, and `\p{L}`-based lookaround boundaries in place of `\b`, fix that.
+		const names = Array.from(
+			content.matchAll(/(?<![\p{L}\p{N}_])(\p{Lu}\p{Ll}+(?:\s+\p{Lu}\p{Ll}+)?)(?![\p{L}\p{N}_])/gu),
+			match => match[1] ?? "",
+		);
 		const pronouns = Array.from(
 			content.matchAll(/\b(I|you|we|they|he|she|it|me|us|them|him|her)\b/gi),
 			match => match[1] ?? "",
@@ -590,7 +597,7 @@ export class EpisodicGraph {
 
 	private extractLocation(content: string): string | null {
 		const properPlace =
-			/\b(?:at|in|from)\s+([A-Z][a-zA-Z\s]+?)(?:\s+(?:yesterday|today|tomorrow|now|last|next|on|at)\b|$)/i.exec(
+			/\b(?:at|in|from)\s+([A-Z][a-zA-Z\s]+?)(?:\s+(?:yesterday|today|tomorrow|now|last|next|on|at)\b|$)/.exec(
 				content,
 			);
 		if (properPlace?.[1] !== undefined) return properPlace[1].trim();

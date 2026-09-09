@@ -1,60 +1,54 @@
 # Fix Issues Command
 
-Diagnose, reproduce, and (when reproducible) fix open GitHub issues in parallel — each in its own clean worktree, with build artifacts symlinked so nothing recompiles.
+Diagnose, reproduce, then fix reproducible open GitHub issues in parallel: one clean worktree/issue; symlink build artifacts to avoid rebuilds.
 
 ## Arguments
 
-- `$ARGUMENTS` — optional. Either:
-  - a space- or comma-separated list of issue numbers / URLs, OR
-  - GitHub-search qualifiers (`is:open`, `label:bug`, `author:foo`, ...) and/or a relative time window like `3d`, `2w`, `12h`.
+`$ARGUMENTS` optional: space/comma-separated issue numbers/URLs, or GitHub-search qualifiers (`is:open`, `label:bug`, `author:foo`, ...) and/or time window (`3d`, `2w`, `12h`).
 
-If no issues and no flags are passed, default to **all open issues opened in the last 3 days**.
+No issues/flags → all issues open and created within last 3 days.
 
-## Steps
-
-### 1. Resolve the issue set
+## 1. Resolve issues
 
 Parse `$ARGUMENTS`.
 
-- If explicit issue numbers/URLs given, use them verbatim.
-- Otherwise call the `github` tool with `op: search_issues`. Default (no args):
+- Explicit numbers/URLs: use verbatim.
+- Otherwise `github` `op: search_issues`. No args:
 
   ```
   github { op: "search_issues", query: "is:open", since: "3d", limit: 50 }
   ```
 
-  Pass any user-supplied qualifiers verbatim through `query` (combine with `is:open` if not already present). Use `since` for the time window (`3d`, `2w`, `12h`, ISO date — see the `github` tool docs); set `dateField: "updated"` instead of the `created` default only when the user explicitly asks for recently-touched issues.
+  User qualifiers verbatim in `query`; add `is:open` unless present. Time window (`3d`, `2w`, `12h`, ISO date; see `github` docs) → `since`. `dateField` defaults `created`; set `"updated"` only for explicitly requested recently-touched issues.
 
-Print the resolved set before fanning out so the user can confirm scope.
+Print resolved set before fan-out for scope confirmation.
 
-### 2. Fan out one subagent per issue
+## 2. Parallel subagents
 
-Use **`task` with parallel subagents** — one task per issue. Pass the issue number, title, body summary, and the workflow below as the assignment. Subagents work in isolation; coordinate via `irc` only when two issues clearly touch the same file.
+Use parallel `task` subagents: one/issue. Assignment: number, title, body summary, workflow below. Isolated work; `irc` only if issues clearly touch the same file.
 
-Each subagent **MUST** follow this exact workflow:
+Each subagent MUST:
 
-#### a. Read everything
+### a. Read
 
-1. Read `issue://<N>` (or `issue://<owner>/<repo>/<N>` for cross-repo) — fetches the issue body plus comments; comments often carry the real repro and fix hints. Append `?comments=0` only if you explicitly want to skip them.
-2. `gh search prs` for the issue number to see if a fix is already in flight.
-   - If a PR exists and looks reasonable → switch tracks: review that PR per `.omp/commands/review-prs.md` instead, and report back as `existing-pr`. Do **not** open a competing fix.
+1. Read `issue://<N>`; cross-repo: `issue://<owner>/<repo>/<N>`. Includes body/comments; comments often contain repro/fix hints. Append `?comments=0` only to explicitly skip comments.
+2. Run `gh search prs` for issue number. Reasonable existing PR → review per `.omp/commands/review-prs.md`, report `existing-pr`; do NOT create competing fix.
 
-#### b. Diagnose & try to reproduce — **in the current cwd, on `main`**
+### b. Diagnose/reproduce
 
-Reproduce **here first**, before touching any worktree. The point is to confirm the bug is real on current main before investing in a fix branch.
+MUST reproduce in current cwd on `main`, before any worktree.
 
-1. Read the relevant source paths in this checkout. Form a concrete hypothesis (one or two sentences) about the failure.
-2. Write a focused test file under the package the bug lives in. Naming: `repro-issue-<N>-<slug>.test.ts` (or `.rs`, etc.) — unique, greppable, deletable.
-3. Run **only that test file**, not the suite. Confirm it fails for the reason in the issue.
+1. Read relevant checkout source; state concrete 1–2-sentence failure hypothesis.
+2. Under affected package, create focused `repro-issue-<N>-<slug>.test.ts` (or `.rs`, etc.): unique, greppable, deletable.
+3. Run only that file, never suite; confirm expected failure.
 
-Outcomes:
-- **Reproduced** → continue to (c).
-- **Not reproduced** → stop. Delete the test file. Report `unreproduced` with: hypothesis tried, evidence it doesn't fail, and what info would unblock (versions, OS, config, repro snippet from author). Do **not** create a worktree or commit.
-- **Out of scope / not a bug** (e.g. user config error, intended behavior, dup) → stop. Report `not-a-bug` with the explanation suitable for posting to the issue.
+- Reproduced → c.
+- Not reproduced → stop; delete test; report `unreproduced`: hypothesis, non-failure evidence, unblockers (versions, OS, config, author repro snippet). No worktree/commit.
+- Out-of-scope/not bug (user-config error, intended behavior, dup) → stop; report `not-a-bug` with issue-postable explanation.
 
-#### c. Create a worktree off main
+### c. Worktree
 
-Only after a confirmed local repro:
+Confirmed local repro required.
 
 ```bash
 MAIN="$(git rev-parse --show-toplevel)"
@@ -65,11 +59,11 @@ git -C "$MAIN" fetch origin main
 git -C "$MAIN" worktree add -B "fix/issue-<N>" "$WT" origin/main
 ```
 
-Branch naming: `fix/issue-<N>` (or `fix/issue-<N>-<slug>` if you'll open multiple). Path under `~/.omp/wt/<encoded-main-path>/...` matches the convention `pr_checkout` uses.
+Branch: `fix/issue-<N>`; `fix/issue-<N>-<slug>` for multiple fixes. Worktree path follows `pr_checkout` convention.
 
-#### d. Symlink build artifacts
+### d. Symlink artifacts
 
-From the new worktree, link build outputs from `$MAIN` so `bun check` / `cargo build` / native loaders skip rebuilds:
+Before any worktree build/test, use absolute paths:
 
 ```bash
 cd "$WT"
@@ -84,20 +78,20 @@ for f in "$MAIN"/packages/natives/native/*.node; do
 done
 ```
 
-Use absolute paths — the worktree lives outside the main checkout.
+MUST NOT symlink whole `packages/natives/native/`: shadows tracked source.
 
-#### e. Move the repro test in & fix
+### e. Fix
 
-1. Move (don't copy) the failing test file from the main checkout into the same path inside the worktree. Delete it from main so the original cwd is left clean.
-2. Confirm it still fails inside the worktree on the current branch.
-3. Implement the fix in source. Match existing patterns (see `AGENTS.md`); fix at the source, not at the symptom; no stubs, no mocks added to product code.
-4. Re-run the repro test until it passes.
-5. Add or adjust adjacent unit/contract tests where the fix changes a real contract — not just plumbing. Run **only** the affected test files; no full-suite runs from subagents.
-6. Run `bun fmt` over the union of files edited.
+1. Move, never copy, failing test from main into same worktree path; remove it from main.
+2. Confirm failure in worktree/current branch.
+3. Fix source, following `AGENTS.md` patterns: root cause, not symptom; no product-code stubs/mocks.
+4. Re-run repro until passing.
+5. If real contract changed, add/adjust adjacent unit/contract tests; run only affected files, never full suite.
+6. `bun fmt` union of edited files.
 
-#### f. Commit
+### f. Commit
 
-Conventional commit, one logical change per commit, with `Fixes #<N>`:
+One logical conventional commit with `Fixes #<N>`:
 
 ```bash
 git add -A
@@ -108,11 +102,9 @@ git commit -m "fix(<scope>): <one-line summary>
 Fixes #<N>."
 ```
 
-Do **not** push. The human pushes / opens the PR.
+Do NOT push; human pushes/opens PR.
 
-#### g. Report back
-
-Each subagent returns a short structured report:
+### g. Report
 
 ```
 Issue #<N>  <title>
@@ -124,25 +116,21 @@ Commits:   <shas + one-liners>                    (if any)
 Notes:     <root cause in one sentence; or what info is missing>
 ```
 
-### 3. Aggregate
+## 3. Aggregate
 
-After all subagents finish, print a single summary table:
+After all subagents, print:
 
 ```
 | # | Title | Status | Branch / Notes |
 |---|-------|--------|----------------|
 ```
 
-Group worktree paths by status (`fixed` first), so the user can `cd` and push the ready ones in one pass.
+Group worktree paths by status, `fixed` first, for batch `cd`/push.
 
 ## Rules
 
-- **MUST** reproduce on `main` in the current cwd **before** creating any worktree. No worktree until repro is confirmed.
-- **MUST** use parallel subagents — one per issue.
-- **MUST** check for an existing PR first; if one exists and is reasonable, divert to `review-prs` flow instead of duplicating work.
-- **MUST** symlink `target`, `node_modules`, and the native `*.node` binaries before any build/test runs in the worktree. **MUST NOT** symlink the whole `packages/natives/native/` directory that would shadow tracked source files.
-- **MUST** use conventional commits with `Fixes #<N>` in the body.
-- **MUST NOT** push, open PRs, or comment on issues. Human handles delivery.
-- **MUST NOT** ship stubs, mocks-as-product-code, or "TODO: implement" placeholders as a fix.
-- **MUST NOT** expand scope: fix the reported bug, not adjacent code smells.
-- If repro fails, delete the temporary test file from cwd before yielding — leave the original checkout clean.
+MUST: reproduce on current-cwd `main` before worktree; parallel one-issue subagents; check existing PR first and divert reasonable ones to `review-prs`; symlink `target`, `node_modules`, native `*.node` before worktree builds/tests; conventional commits with body `Fixes #<N>`.
+
+MUST NOT: symlink entire `packages/natives/native/`; push, open PRs, or comment on issues; ship stubs, product-code mocks, or `TODO: implement` placeholders; expand beyond reported bug into adjacent code smells.
+
+Failed repro → delete temporary cwd test before yielding; leave original checkout clean.

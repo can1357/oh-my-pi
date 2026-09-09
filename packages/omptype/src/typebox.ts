@@ -220,7 +220,11 @@ function tString(opts?: StringOpts): TString {
 		const valid = formatPredicate(format);
 		schema = schema.narrow((value, ctx) => valid(value) || ctx.mustBe(`a string in ${format} format`));
 	}
-	return applyMeta(schema, opts);
+	const result = applyMeta(schema, opts);
+	const keywords: Record<string, unknown> = {};
+	if (opts?.pattern !== undefined) keywords.pattern = opts.pattern;
+	if (opts?.format !== undefined) keywords.format = opts.format === "url" ? "uri" : opts.format;
+	return opts?.pattern !== undefined || opts?.format !== undefined ? withJsonSchemaKeywords(result, keywords) : result;
 }
 
 function formatPredicate(format: string): (value: string) => boolean {
@@ -290,7 +294,8 @@ function tNumber(opts?: NumberOpts, integer = false): TNumber {
 			);
 		});
 	}
-	return applyMeta(schema, opts);
+	const result = applyMeta(schema, opts);
+	return opts?.multipleOf !== undefined ? withJsonSchemaKeywords(result, { multipleOf: opts.multipleOf }) : result;
 }
 
 function tLiteral<const V extends string | number | boolean | null>(value: V, opts?: Meta): TLiteral<V> {

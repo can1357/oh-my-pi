@@ -1,5 +1,7 @@
 import * as net from "node:net";
+import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
+import type { Socket } from "bun";
 import type { Browser, Page } from "puppeteer-core";
 import { ToolError, throwIfAborted } from "../tool-errors";
 
@@ -29,31 +31,92 @@ export async function findFreeCdpPort(): Promise<number> {
 	return promise;
 }
 
+/**
+ * Loopback HTTP/1.1 GET that never routes through a proxy, resolving to the
+ * response status code (or null when the endpoint is unreachable, aborted,
+ * malformed, or slow past `timeoutMs`).
+ *
+ * Chrome's DevTools endpoint listens on loopback and speaks plain HTTP/1.1.
+ * Both `fetch` and Bun's `node:http` honor `HTTP_PROXY`/`HTTPS_PROXY` and
+ * forward even `127.0.0.1` requests to the proxy unless `NO_PROXY` covers them,
+ * so a local proxy that 502s internal addresses makes a healthy daemon look
+ * dead and the CDP readiness checks tear it down (issue #8567). Talking to the
+ * socket over raw TCP sidesteps proxy env entirely.
+ */
+export async function probeCdpStatus(
+	url: string,
+	opts: { timeoutMs: number; signal?: AbortSignal },
+): Promise<number | null> {
+	let target: URL;
+	try {
+		target = new URL(url);
+	} catch {
+		return null;
+	}
+	if (opts.signal?.aborted) return null;
+	const port = target.port ? Number(target.port) : 80;
+	const requestPath = `${target.pathname}${target.search}` || "/";
+	const { promise, resolve } = Promise.withResolvers<number | null>();
+	let socket: Socket<undefined> | undefined;
+	let settled = false;
+	const finish = (status: number | null) => {
+		if (settled) return;
+		settled = true;
+		clearTimeout(timer);
+		opts.signal?.removeEventListener("abort", onAbort);
+		try {
+			socket?.end();
+		} catch {
+			// socket already torn down
+		}
+		resolve(status);
+	};
+	const onAbort = () => finish(null);
+	const timer = setTimeout(() => finish(null), opts.timeoutMs);
+	opts.signal?.addEventListener("abort", onAbort, { once: true });
+	let buffered = "";
+	try {
+		socket = await Bun.connect({
+			hostname: target.hostname,
+			port,
+			socket: {
+				open(s) {
+					s.write(`GET ${requestPath} HTTP/1.1\r\nHost: ${target.hostname}:${port}\r\nConnection: close\r\n\r\n`);
+				},
+				data(_s, chunk) {
+					buffered += chunk.toString("latin1");
+					const match = /^HTTP\/\d(?:\.\d)? (\d{3})/.exec(buffered);
+					if (match) finish(Number(match[1]));
+				},
+				error() {
+					finish(null);
+				},
+				close() {
+					finish(null);
+				},
+			},
+		});
+	} catch {
+		finish(null);
+	}
+	return promise;
+}
+
 /** Poll `${cdpUrl}/json/version` until it responds with 200, with abort + timeout support. */
 export async function waitForCdp(cdpUrl: string, timeoutMs: number, signal?: AbortSignal): Promise<void> {
 	const deadline = Date.now() + timeoutMs;
-	let lastErr: unknown;
 	const probeUrl = `${cdpUrl.replace(/\/+$/, "")}/json/version`;
+	let lastStatus: number | null = null;
 	while (Date.now() < deadline) {
 		throwIfAborted(signal);
-		const probeTimeout = AbortSignal.timeout(2000);
-		const probeSignal = signal ? AbortSignal.any([signal, probeTimeout]) : probeTimeout;
-		try {
-			const res = await fetch(probeUrl, { signal: probeSignal });
-			if (res.ok) {
-				await res.body?.cancel();
-				return;
-			}
-			lastErr = new Error(`HTTP ${res.status}`);
-			await res.body?.cancel();
-		} catch (err) {
-			if (signal?.aborted) throwIfAborted(signal);
-			lastErr = err;
-		}
+		const status = await probeCdpStatus(probeUrl, { timeoutMs: 2000, signal });
+		if (status !== null && status >= 200 && status < 300) return;
+		lastStatus = status;
 		await Bun.sleep(150);
 	}
+	throwIfAborted(signal);
 	throw new ToolError(
-		`Timed out waiting for CDP endpoint ${cdpUrl}${lastErr instanceof Error ? `: ${lastErr.message}` : ""}`,
+		`Timed out waiting for CDP endpoint ${cdpUrl}${lastStatus !== null ? `: HTTP ${lastStatus}` : ""}`,
 	);
 }
 
@@ -79,41 +142,83 @@ function findCdpPortInArgs(args: string[]): number | null {
 	return null;
 }
 
+function findUserDataDirInArgs(args: string[] | undefined): string | null {
+	if (!args) return null;
+	let result: string | null = null;
+	const inlinePrefix = "--user-data-dir=";
+	for (let index = 0; index < args.length; index++) {
+		const arg = args[index]!;
+		if (arg.startsWith(inlinePrefix)) {
+			result = arg.length > inlinePrefix.length ? arg.slice(inlinePrefix.length) : null;
+			continue;
+		}
+		if (arg !== "--user-data-dir") continue;
+		const value = args[index + 1];
+		result = value !== undefined && value.length > 0 && !value.startsWith("--") ? value : null;
+		if (result !== null) index++;
+	}
+	return result;
+}
+
+function normalizeUserDataDir(userDataDir: string): string {
+	const normalized = path.resolve(userDataDir);
+	return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
 /** One-shot probe: returns true when `/json/version` answers 200 within the timeout. */
 async function probeCdpAt(port: number, signal?: AbortSignal): Promise<boolean> {
-	const probeTimeout = AbortSignal.timeout(1500);
-	const probeSignal = signal ? AbortSignal.any([signal, probeTimeout]) : probeTimeout;
-	try {
-		const res = await fetch(`http://127.0.0.1:${port}/json/version`, { signal: probeSignal });
-		await res.body?.cancel();
-		return res.ok;
-	} catch {
-		return false;
-	}
+	const status = await probeCdpStatus(`http://127.0.0.1:${port}/json/version`, { timeoutMs: 1500, signal });
+	return status !== null && status >= 200 && status < 300;
 }
 
 /**
- * If any running instance of `exe` was launched with `--remote-debugging-port`
- * and that endpoint actually answers, return it so attach can reuse it instead
- * of killing and respawning. Idempotent re-attaches are the common case.
+ * Return a reusable CDP endpoint for `exe`, or null when no instance is
+ * running. Refuse to replace an occupied instance unless the caller can
+ * launch an isolated profile.
  */
 export async function findReusableCdp(
 	exe: string,
-	signal?: AbortSignal,
+	options: { signal?: AbortSignal; appArgs?: string[] } = {},
 ): Promise<{ cdpUrl: string; pid: number } | null> {
-	const candidates = Process.fromPath(exe).filter(p => p.status() === ProcessStatus.Running);
-	for (const proc of candidates) {
+	const candidates = Process.fromPath(exe).filter(process => process.status() === ProcessStatus.Running);
+	const candidateArgs: string[][] = [];
+	let hasUnreadableCandidate = false;
+	for (const process of candidates) {
 		let args: string[];
 		try {
-			args = proc.args();
+			args = process.args();
 		} catch {
+			hasUnreadableCandidate = true;
 			continue;
 		}
+		candidateArgs.push(args);
 		const port = findCdpPortInArgs(args);
 		if (port === null) continue;
-		if (await probeCdpAt(port, signal)) {
-			return { cdpUrl: `http://127.0.0.1:${port}`, pid: proc.pid };
+		if (await probeCdpAt(port, options.signal)) {
+			return { cdpUrl: `http://127.0.0.1:${port}`, pid: process.pid };
 		}
+	}
+	const requestedUserDataDir = findUserDataDirInArgs(options.appArgs);
+	const normalizedRequestedUserDataDir =
+		requestedUserDataDir !== null && path.isAbsolute(requestedUserDataDir)
+			? normalizeUserDataDir(requestedUserDataDir)
+			: null;
+	const canLaunchIsolatedProfile =
+		normalizedRequestedUserDataDir !== null &&
+		!hasUnreadableCandidate &&
+		candidateArgs.every(args => {
+			const existingUserDataDir = findUserDataDirInArgs(args);
+			return (
+				existingUserDataDir === null ||
+				(path.isAbsolute(existingUserDataDir) &&
+					normalizeUserDataDir(existingUserDataDir) !== normalizedRequestedUserDataDir)
+			);
+		});
+	if (!canLaunchIsolatedProfile && candidates.length > 0) {
+		const name = path.basename(exe);
+		throw new ToolError(
+			`Cannot launch ${name} because it is already running without a reusable CDP endpoint. Close ${name}, relaunch it with --remote-debugging-port, or pass app.cdp_url for an existing endpoint.`,
+		);
 	}
 	return null;
 }
@@ -200,20 +305,4 @@ export async function gracefulKillTreeOnce(pid: number, gracePeriodMs = 2000): P
 	const process = Process.fromPid(pid);
 	if (!process) return;
 	await process.terminate({ gracefulMs: gracePeriodMs, timeoutMs: 500 });
-}
-
-/**
- * Multi-process variant for attach: find every PID running `executablePath`
- * (single-instance apps may keep an orphan around) and tear them all down.
- */
-export async function killExistingByPath(executablePath: string, signal?: AbortSignal): Promise<number> {
-	const processes = Process.fromPath(executablePath);
-	if (!processes.length) return 0;
-	const results = await Promise.all(
-		processes.map(async process => {
-			throwIfAborted(signal);
-			return await process.terminate({ gracefulMs: 3000, timeoutMs: 1000 });
-		}),
-	);
-	return results.length;
 }

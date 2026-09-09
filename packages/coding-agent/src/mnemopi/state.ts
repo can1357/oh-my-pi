@@ -574,10 +574,25 @@ export class MnemopiSessionState {
 		this.unsubscribe?.();
 		this.unsubscribe = this.session.subscribe((event: AgentSessionEvent) => {
 			if (event.type === "agent_start") {
-				void this.maybeRecallOnAgentStart();
+				void this.maybeRecallOnAgentStart().catch(error => {
+					this.#logLifecycleFailure(
+						"agent_start recall",
+						this.scoped.recall.map(target => target.bank),
+						error,
+					);
+				});
 			} else if (event.type === "agent_end") {
-				void this.maybeRetainOnAgentEnd(event.messages);
+				void this.maybeRetainOnAgentEnd(event.messages).catch(error => {
+					this.#logLifecycleFailure("agent_end retention", [this.scoped.retain.bank], error);
+				});
 			}
+		});
+	}
+	#logLifecycleFailure(operation: string, banks: readonly string[], error: unknown): void {
+		logger.warn("Mnemopi: lifecycle hook failed", {
+			banks,
+			operation,
+			error: toError(error).message,
 		});
 	}
 
@@ -609,12 +624,41 @@ export class MnemopiSessionState {
 	}
 
 	/**
-	 * Drain in-flight fact extraction and run beam consolidation on every owned
-	 * bank, after capturing the current transcript. Mirrors the manual
-	 * `/memory enqueue` slash command, but stops short of closing the DBs so
-	 * callers can keep using the state. {@link dispose} composes this with the
-	 * close step so normal session shutdown promotes working memory to
-	 * episodic/gists/graph automatically (see issue #2320).
+	 * Promote age-eligible working-memory rows to episodic once at session start,
+	 * before any write can trigger the working-memory TTL trim.
+	 *
+	 * `remember` runs `trimWorkingMemory` on every write, which deletes
+	 * unconsolidated rows older than `workingMemoryTtlHours` (24h). Consolidation
+	 * (`sleep`) is age-gated to rows >= 12h old, but otherwise only ran via the
+	 * explicit `/memory enqueue` path (`dispose` passes `sleep:false`, #4843), so
+	 * `retain`/`learn`/transcript rows that were never manually enqueued were
+	 * silently deleted after a >24h session gap (#10770). Running the age-gated
+	 * sleep here stamps `consolidated_at` on those rows before the session's first
+	 * write, so the `consolidated_at IS NULL` trim filter no longer removes them.
+	 *
+	 * Bank-global because each bank opens with `sessionId = <bank>`, so a single
+	 * session-scoped `sleep` covers rows written by every prior session. Cheap
+	 * when nothing is old enough — `sleep` short-circuits to a no-op with no
+	 * eligible rows — and failures are logged, never thrown, so a consolidation
+	 * error cannot make the backend inert.
+	 */
+	promoteEligibleWorkingMemory(): void {
+		if (this.aliasOf) return;
+		for (const memory of this.scoped.owned) {
+			try {
+				memory.sleep(false);
+			} catch (error) {
+				this.#logLifecycleFailure("startup consolidation", [this.scoped.retain.bank], error);
+			}
+		}
+	}
+
+	/**
+	 * Capture the current transcript by default, drain in-flight fact extraction,
+	 * and optionally run beam consolidation on every owned bank.
+	 * The explicit `/memory enqueue` path
+	 * requests retention plus full cross-session consolidation; disposal composes
+	 * the lighter configured-retain-and-flush path with closing the DB handles.
 	 *
 	 * Aliased subagent states share `scoped` (and therefore the actual SQLite
 	 * banks) with their parent. `consolidate()` deliberately does NOT
@@ -622,22 +666,29 @@ export class MnemopiSessionState {
 	 * itself, and an explicit `/memory enqueue` invoked from within a subagent
 	 * still needs to flush extractions and sleep the parent's shared banks —
 	 * otherwise enqueue would report success while leaving the subagent's
-	 * retained memories unconsolidated until the parent eventually shuts down
+	 * retained memories unconsolidated until a later full consolidation request
 	 * (PR #2327 review).
 	 *
 	 * @param options.full - When true, run `sleepAllSessions` on every owned bank
 	 *  (the full cross-session consolidation used by `/memory enqueue`). When
-	 *  false (the default), run only `sleep` on the current session for a
-	 *  lighter, bounded shutdown pass.
+	 *  false (the default), run only `sleep` on the current session when bank
+	 *  sleep is enabled.
 	 * @param options.sleep - When false, skips the bank sleep step entirely.
 	 *  Used on the interactive shutdown path so `dispose` does not block on
 	 *  synchronous consolidation of old working rows from previous sessions.
-	 * @param options.extract - When false, the retained transcript is stored but
-	 *  no LLM fact extraction is scheduled. Used on the interactive shutdown path
-	 *  so `dispose` does not block on a fresh LLM round-trip.
+	 * @param options.extract - When false, any retained transcript is stored but no
+	 *  LLM fact extraction is scheduled. Used on the interactive shutdown path so
+	 *  `dispose` does not block on a fresh LLM round-trip.
+	 * @param options.retain - When false, skip transcript retention.
+	 *  Explicit consolidation retains by default; disposal passes the configured
+	 *  automatic-retention setting.
 	 */
-	async consolidate(options: { full?: boolean; extract?: boolean; sleep?: boolean } = {}): Promise<void> {
-		await this.forceRetainCurrentSession({ extract: options.extract });
+	async consolidate(
+		options: { full?: boolean; extract?: boolean; sleep?: boolean; retain?: boolean } = {},
+	): Promise<void> {
+		if (options.retain !== false) {
+			await this.forceRetainCurrentSession({ extract: options.extract });
+		}
 		for (const memory of this.scoped.owned) {
 			await memory.flushExtractions();
 			if (options.sleep === false) continue;
@@ -652,9 +703,10 @@ export class MnemopiSessionState {
 	/**
 	 * Release the per-session resources. Defaults to running a lighter
 	 * {@link consolidate} pass before closing handles: it retains the current
-	 * transcript and flushes in-flight extractions, but skips the synchronous
-	 * bank sleep so normal session shutdown returns promptly. Full promotion of
-	 * working memory into long-term storage is still performed by the explicit
+	 * transcript only when auto-retention is enabled and flushes in-flight
+	 * extractions, but skips the synchronous bank sleep so normal session
+	 * shutdown returns promptly. Full age-gated
+	 * promotion of eligible working memory is still requested by the explicit
 	 * `/memory enqueue` and backend enqueue paths. Callers that are about to
 	 * delete the DB files — e.g. `mnemopiBackend.clear` — pass
 	 * `{ consolidate: false }` to skip the retain/flush pass, since spending
@@ -696,11 +748,14 @@ export class MnemopiSessionState {
 		const boundedTimeoutMs = timeoutMs !== undefined && timeoutMs > 0 ? timeoutMs : undefined;
 		const deadline = boundedTimeoutMs !== undefined ? performance.now() + boundedTimeoutMs : undefined;
 		if (boundedTimeoutMs !== undefined) this.#boundOwnedBusyTimeout(boundedTimeoutMs);
-		const consolidatePromise = this.consolidate({ full: false, extract: false, sleep: false }).catch(
-			(error: unknown) => {
-				logger.warn("Mnemopi: consolidation on dispose failed.", { error: String(error) });
-			},
-		);
+		const consolidatePromise = this.consolidate({
+			full: false,
+			extract: false,
+			sleep: false,
+			retain: this.config.autoRetain,
+		}).catch((error: unknown) => {
+			logger.warn("Mnemopi: consolidation on dispose failed.", { error: String(error) });
+		});
 		if (deadline !== undefined) {
 			const remainingMs = deadline - performance.now();
 			const completed =

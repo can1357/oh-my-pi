@@ -4,6 +4,7 @@ import { SessionSelectorComponent } from "../modes/components/session-selector";
 import { HistoryStorage } from "../session/history-storage";
 import type { SessionInfo } from "../session/session-listing";
 import { SessionManager } from "../session/session-manager";
+import { loadPinnedSessionIds } from "../session/session-pins";
 import { FileSessionStorage } from "../session/session-storage";
 
 /** Presentation and capability controls for the standalone session picker. */
@@ -15,6 +16,7 @@ export interface SessionPickerOptions {
 	allowDelete?: boolean;
 	allowGlobalScope?: boolean;
 	historySearch?: boolean;
+	pinnedIds?: ReadonlySet<string>;
 }
 
 /**
@@ -35,6 +37,8 @@ export async function selectSession(
 	// Rank sessions with prompt-history matches too, recovering prompts the 4KB
 	// session-list prefix never sees. Best-effort: a missing/locked history.db
 	// must not break the picker.
+	const pinnedIds = options.pinnedIds ?? (await loadPinnedSessionIds());
+
 	let historyMatcher: ((query: string) => string[]) | undefined;
 	if (options.historySearch !== false) {
 		try {
@@ -85,6 +89,7 @@ export async function selectSession(
 				title: options.title,
 				scopeLabel: options.scopeLabel,
 				showCwd: options.showCwd,
+				pinnedIds,
 			},
 		);
 		return selector;

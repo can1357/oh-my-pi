@@ -32,6 +32,8 @@ export interface MCPServer {
 	 * §§4.1/9.2) — exempt from env-name lookup and `!command` resolution.
 	 */
 	envPolicy?: "literal";
+	/** Env keys whose values are final package data (expanded by the provider). */
+	envLiteralKeys?: string[];
 	/** Working directory for stdio transport */
 	cwd?: string;
 	/** URL (for HTTP/SSE transport) */
@@ -53,10 +55,11 @@ export interface MCPServer {
 		clientSecret?: string;
 		resource?: string;
 	};
-	/** OAuth configuration (clientId, clientSecret, redirectUri, callbackPort, callbackPath, prompt) for servers requiring explicit client credentials */
+	/** OAuth configuration for servers requiring explicit client credentials */
 	oauth?: {
 		clientId?: string;
 		clientSecret?: string;
+		scope?: string;
 		redirectUri?: string;
 		callbackPort?: number;
 		callbackPath?: string;
@@ -69,7 +72,7 @@ export interface MCPServer {
 }
 
 /** Compare the transport inputs that determine which MCP endpoint gets connected. */
-function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean {
+export function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean {
 	if (!Bun.deepEquals(left.auth, right.auth) || !Bun.deepEquals(left.oauth, right.oauth)) return false;
 	// Normalize against the allocator's own default so an explicit "number" is
 	// equivalent to leaving the option unset, not a distinct connection.
@@ -80,10 +83,19 @@ function isSameMCPConnection(left: MCPServer, right: MCPServer): boolean {
 	if (leftTransport !== rightTransport) return false;
 
 	if (leftTransport === "stdio") {
+		// Effective literal keys: `envPolicy: "literal"` makes every env value
+		// literal (equivalent to an envLiteralKeys set covering all keys), and an
+		// inert policy on an env-less server must not distinguish otherwise
+		// identical connections. Insertion order is irrelevant; compare as sets.
+		const literalKeysOf = (server: MCPServer): string[] =>
+			server.envPolicy === "literal"
+				? Object.keys(server.env ?? {}).sort()
+				: [...(server.envLiteralKeys ?? [])].sort();
 		return (
 			left.command === right.command &&
 			Bun.deepEquals(left.args, right.args) &&
 			Bun.deepEquals(left.env, right.env) &&
+			Bun.deepEquals(literalKeysOf(left), literalKeysOf(right)) &&
 			left.cwd === right.cwd
 		);
 	}

@@ -25,6 +25,53 @@ describe("cursor usage provider", () => {
 			expect(parseCursorUsage(payload)).toBeNull();
 		});
 
+		it("emits an uncapped used-only bucket when the request limit is null", () => {
+			// Exact sanitized payload reported in #6381: the plan has no legacy cap.
+			const payload = {
+				"gpt-4": {
+					numRequests: 0,
+					numRequestsTotal: 0,
+					numTokens: 0,
+					maxTokenUsage: null,
+					maxRequestUsage: null,
+				},
+				startOfMonth: "2026-07-23T01:19:45.000Z",
+			};
+
+			const report = parseCursorUsage(payload);
+			expect(report).not.toBeNull();
+			expect(report?.limits).toHaveLength(1);
+
+			const limit = report?.limits[0];
+			expect(limit?.id).toBe("cursor:requests:gpt-4");
+			expect(limit?.label).toBe("gpt-4 requests");
+			expect(limit?.amount).toEqual({ used: 0, unit: "requests" });
+			expect(limit?.status).toBeUndefined();
+			expect(limit?.window?.resetsAt).toBe(Date.parse("2026-08-23T01:19:45.000Z"));
+		});
+
+		it("keeps capped and uncapped buckets side by side", () => {
+			const payload = {
+				"gpt-4": {
+					numRequests: 12,
+					maxRequestUsage: null,
+				},
+				"claude-3-5-sonnet": {
+					used: 80,
+					limit: 100,
+				},
+			};
+
+			const report = parseCursorUsage(payload);
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:requests:gpt-4",
+				"cursor:requests:claude-3-5-sonnet",
+			]);
+			expect(report?.limits[0]?.amount).toEqual({ used: 12, unit: "requests" });
+			expect(report?.limits[1]?.amount.limit).toBe(100);
+			expect(report?.limits[1]?.status).toBe("ok");
+		});
+
 		it("parses request-count buckets with stable IDs and labels", () => {
 			const payload = {
 				"gpt-4": {
@@ -194,6 +241,116 @@ describe("cursor usage provider", () => {
 				],
 				raw: payload,
 			});
+		});
+
+		it("maps plan.auto/api percent rails to Cursor Models / Other Models", () => {
+			const payload = {
+				individualUsage: {
+					plan: {
+						enabled: true,
+						used: 1504,
+						limit: 7000,
+						remaining: 5496,
+						autoPercentUsed: 1.85,
+						apiPercentUsed: 0,
+						totalPercentUsed: 1.63,
+					},
+					onDemand: {
+						enabled: true,
+						used: 0,
+						limit: 2000,
+						remaining: 2000,
+					},
+				},
+				billingCycleEnd: "2026-09-08T08:00:31.000Z",
+			};
+
+			const report = parseCursorIndividualUsage(payload, 123);
+			expect(report?.limits.map(limit => ({ id: limit.id, label: limit.label }))).toEqual([
+				{ id: "cursor:usd:individual-auto", label: "Cursor Models" },
+				{ id: "cursor:usd:individual-api", label: "Other Models" },
+				{ id: "cursor:usd:individual-ondemand", label: "On-Demand Usage" },
+			]);
+			const auto = report?.limits[0]?.amount;
+			const api = report?.limits[1]?.amount;
+			const onDemand = report?.limits[2]?.amount;
+			expect(auto?.unit).toBe("percent");
+			expect(auto?.used).toBeCloseTo(1.85);
+			expect(auto?.usedFraction).toBeCloseTo(0.0185);
+			// Critically: do NOT trust plan.used/limit cents as the dashboard %.
+			expect(auto?.usedFraction).not.toBeCloseTo(1504 / 7000);
+			expect(api).toEqual({
+				used: 0,
+				limit: 70,
+				remaining: 70,
+				usedFraction: 0,
+				remainingFraction: 1,
+				unit: "usd",
+			});
+			expect(onDemand).toEqual({
+				used: 0,
+				limit: 20,
+				remaining: 20,
+				usedFraction: 0,
+				remainingFraction: 1,
+				unit: "usd",
+			});
+		});
+
+		it("prefers individualUsage.overall when both overall and plan exist", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					overall: { enabled: true, used: 100, limit: 1000, remaining: 900 },
+					plan: { enabled: true, used: 924, limit: 7000, remaining: 6076 },
+				},
+			});
+			expect(report?.limits.map(limit => limit.id)).toEqual(["cursor:usd:individual-overall"]);
+		});
+
+		it("falls back to plan when overall is present but disabled", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					overall: { enabled: false, used: 100, limit: 1000, remaining: 900 },
+					plan: {
+						enabled: true,
+						used: 1504,
+						limit: 7000,
+						remaining: 5496,
+						autoPercentUsed: 1.85,
+						apiPercentUsed: 0,
+					},
+				},
+			});
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:usd:individual-auto",
+				"cursor:usd:individual-api",
+			]);
+		});
+
+		it("rejects disabled plan buckets even when stale percent fields remain", () => {
+			expect(
+				parseCursorIndividualUsage({
+					individualUsage: {
+						plan: {
+							enabled: false,
+							used: 1504,
+							limit: 7000,
+							autoPercentUsed: 1.85,
+							apiPercentUsed: 0,
+						},
+					},
+				}),
+			).toBeNull();
+		});
+
+		it("keeps on-demand when the included plan bucket is unusable", () => {
+			const report = parseCursorIndividualUsage({
+				individualUsage: {
+					plan: { enabled: false, used: 1504, limit: 7000, autoPercentUsed: 1.85 },
+					onDemand: { enabled: true, used: 0, limit: 2000, remaining: 2000 },
+				},
+			});
+			expect(report?.limits.map(limit => limit.id)).toEqual(["cursor:usd:individual-ondemand"]);
 		});
 
 		it("rejects disabled, malformed, and non-positive personal usage buckets", () => {
@@ -492,8 +649,14 @@ describe("cursor usage provider", () => {
 				accountId: "account_123",
 				projectId: "project_123",
 			});
-			expect(report?.limits).toHaveLength(1);
-			expect(report?.limits[0]).toMatchObject({
+			// The legacy bucket is uncapped (`maxRequestUsage: null`) but still reported,
+			// so it merges ahead of the personal summary instead of vanishing (#6381).
+			expect(report?.limits.map(limit => limit.id)).toEqual([
+				"cursor:requests:gpt-4",
+				"cursor:usd:individual-overall",
+			]);
+			expect(report?.limits[0]?.amount).toEqual({ used: 0, unit: "requests" });
+			expect(report?.limits[1]).toMatchObject({
 				id: "cursor:usd:individual-overall",
 				amount: {
 					used: 20,
@@ -502,7 +665,10 @@ describe("cursor usage provider", () => {
 					unit: "usd",
 				},
 			});
-			expect(report?.raw).toEqual(usageSummaryPayload);
+			expect(report?.raw).toEqual({
+				authUsage: authUsagePayload,
+				usageSummary: usageSummaryPayload,
+			});
 		});
 
 		it("ignores a profile email returned for a different subject", async () => {

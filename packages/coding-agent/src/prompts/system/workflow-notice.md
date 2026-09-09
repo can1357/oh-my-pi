@@ -1,112 +1,109 @@
 <system-notice>
-The user's message above contains the **workflowz** keyword: drive this task as a deterministic multi-subagent workflow. Author the orchestration in the `eval` tool and fan out subagents — to be comprehensive (decompose and cover in parallel), to be confident (independent perspectives and adversarial checks before you commit), or to take on scale one context can't hold (audits, migrations, broad sweeps). This overrides any default tendency to do the whole task inline when fanning out would be more thorough.
+User message contains **workflowz** → deterministic multi-subagent workflow. Default to `workpool()` for 2+ independent items; use individual `agent()` handles only for dependency-coupled or schema-returning calls.
 
 <when>
-Worth it when the task benefits from decomposition + parallel coverage, or from independent/adversarial cross-checking before you commit. For a quick lookup or single edit, just do it directly — don't spin up agents.{{#if scoutAvailable}} Scout inline FIRST{{else}} Explore inline FIRST{{/if}} (list the files, scope the diff, find the call sites) to discover the work-list, then fan out over it — you don't need to know the shape before the *task*, only before the *fan-out*. Common shapes, each a well-scoped `eval` call you can chain across turns:
-- **Understand** — parallel readers over subsystems → structured map
-- **Design** — judge panel of N independent approaches → scored synthesis
-- **Review** — split into dimensions → find per dimension → adversarially verify each finding
-- **Research** — multi-modal sweep → deep-read the hits → synthesize
-- **Migrate** — discover sites → transform each → verify
+Use for broad research, reviews, migrations, adversarial coverage, and open-ended work lists. Quick lookup/single edit: direct; no agents. {{#if scoutAvailable}}Scout inline FIRST{{else}}Explore inline FIRST{{/if}} — scope files, call sites, and contracts before creating the pool.
+
+Pool-first phases:
+- **Understand**: queue subsystem readers → poll pool job → synthesize
+- **Review**: queue one item per lens/file → poll → verify survivors
+- **Migrate**: discover sites → queue file-disjoint transforms → verify once
+- **Research**: queue modalities/sources → deep-read hits → synthesize
+- **Design**: queue independent proposals/judges → choose and integrate
 </when>
 
 <helpers>
-State persists across eval calls,{{#if scoutAvailable}} so scout in one call and fan out in the next.{{else}} so explore in one call and fan out in the next.{{/if}} Every eval call has:
+State persists across `eval` calls. Every call provides:
 
-- `agent(prompt, *, agent="task", label=None, schema=None, isolated=None, apply=None, merge=None, handle=False)` — run ONE subagent; returns its final text, or the validated object when `schema` (a JSON Schema dict) is given. With `schema` the subagent is forced to emit structured output that is validated for you — branch on the object, not on parsed prose. `agent` picks a discovered agent{{#if scoutAvailable}} ("scout", "reviewer", …){{/if}}; `label` names the artifact. Shared background goes in a `local://` file referenced from each prompt, not a parameter. Subagents are told their final text IS the return value, so they hand back raw data. `agent()` blocks until the subagent finishes. Recursion follows `task.maxRecursionDepth` (default 2; a negative value disables the cap); deeper ca…
-- `parallel(thunks)` — run zero-arg callables concurrently through a bounded pool, preserving input order; returns once all finish. The pool is bounded by the session's `task` concurrency — don't hand-tune it; fan out as wide as the work divides. A thunk that raises propagates — wrap risky work in `try/except` inside the thunk to keep partial results. In a loop, bind each closure's value with a default arg (`lambda d=d: …`) or every thunk captures the last one.
-- `pipeline(items, *stages)` — map items through `stages` left-to-right. There is a BARRIER between stages: ALL items clear stage N before stage N+1 begins. Each stage is a one-arg callable; stage 1 gets the original item, later stages get the previous result. Same pool width as `parallel()`.
-- `completion(prompt, *, model="default", system=None, schema=None)` — oneshot, stateless model call (no tools, no history). Tiers: "smol", "default", "slow". Cheap classification/scoring inside a fan-out.
-- `log(message)` — emit a progress line above the status tree. `phase(title)` — start a phase; the status lines that follow group under it.
-- `budget` — `budget.total` (output-token ceiling, or `None` when none is set), `budget.spent()` (tokens spent this turn — main loop + eval subagents), `budget.remaining()` (`math.inf` when total is `None`), `budget.hard` (whether it's enforced). A ceiling is set by the user: `+Nk` in their message is advisory (you self-limit via `budget.remaining()`), `+Nk!` (or Goal Mode) is hard — `agent()` refuses to spawn once spent reaches it. Gate loops on `budget.total` first, since it's `None` when the user set no budget.
-
-Everything runs INLINE and synchronously inside the eval call — no background mode, no resume, no separate progress app. Each eval call is one well-scoped fan-out; chain several across calls and turns for multi-phase work, reading each result before you decide the next phase.
+- `workpool(agent=None, *, name=None, context=None{{#if evalTools}}, tools=None{{/if}})`: pool of keep-alive workers bounded by live `task.maxConcurrency`. `.push(*items)` returns item ids; each item goes to the least context-loaded idle worker, a new worker while capacity remains, or a busy worker's round-robin queue. `eval.workpool.freshAgents=true` instead spawns a new agent per item. `.status()` reports counts/workers; `.peek()` returns a non-consuming batch snapshot; `.close()` drops queued work.
+  - The pool name is its background job id and label. Push all items while it is active; its first full drain settles and closes that pool job. New phase/wave after drain → create a new named pool.
+  - Results auto-deliver. Need to block? Leave `eval`, then call `hub` with `op:"wait", ids:["<pool-name>"]`; re-issue until settled. NEVER block the kernel with `pool.wait()`.
+- `agent(prompt, *, agent=None, label=None, schema=None, isolated=None, apply=None, merge=None{{#if evalTools}}, tools=None{{/if}})`: immediate `AgentHandle`; use for a small fixed dependency graph or when the parent needs validated `schema` data. `.wait()` returns text/data; `.handle` is `agent://<id>`. Unwaited results auto-deliver.
+- `completion(prompt, *, model="default", system=None, schema=None)`: immediate `CompletionHandle` for a tool-free one-shot call. Tiers: `"smol"`, `"default"`, `"slow"`.
+- `wait(handles, timeout=None, *, raise_errors=True)`: ordered barrier for agent/completion handles only; `raise_errors=False` keeps an error in its slot.
+{{#if evalTools}}- `@tool` (Python) / `tool(fn, {…})` (JS): kernel-local tool exposed via `tools=`. Use for shared caches, dedup sets, scoring, or structured accumulation across pool workers; calls execute in YOUR kernel and a raised exception returns to the caller without killing it.
+{{/if}}- `log(message)`: progress line. `phase(title)`: status-tree phase.
+- `budget`: Python `budget.total` / `budget.spent()` / `budget.remaining()`; JS awaits them. User `+Nk` = advisory; `+Nk!` = hard.
 </helpers>
 
-<structure>
-For independent per-item chains (review → verify, fetch → extract → score), wrap the WHOLE chain in one function and run it with `parallel()` — then each item flows through its own steps without waiting on the others:
+<pool-workflow>
+1. Scope the full independent work list before spawning.
+2. Create ONE explicitly named pool per phase.
+3. Push every known item in one cell; later discoveries MAY be pushed while the pool job is still running.
+4. Continue useful local work. Results auto-deliver.
+5. Completely blocked? Poll `hub wait` with `ids:[pool-name]`, never `pool.wait()`.
+6. Read every batch result; YOU verify and integrate.
 
-**Python (`eval`, Python backend):**
+**Python:**
 
 ```python
-DIMENSIONS = [{"key": "bugs", "prompt": "…"}, {"key": "perf", "prompt": "…"}]
-def review_and_verify(d):
-    found = agent(d["prompt"], label=f"review:{d['key']}", schema=FINDINGS_SCHEMA)
-    return parallel([lambda f=f: {**f, "verdict": agent(
-        f"Refute if you can (default refuted when unsure): {f['title']}",
-        label=f"verify:{f['file']}", schema=VERDICT_SCHEMA)} for f in found["findings"]])
 phase("Review")
-results = parallel([lambda d=d: review_and_verify(d) for d in DIMENSIONS])
-confirmed = [f for group in results for f in group if f["verdict"]["is_real"]]
+review = workpool({{#if scoutAvailable}}"scout", {{/if}}name="review", context="Return evidence with exact paths; do not edit.")
+review.push(*[
+    "Review authentication correctness",
+    "Review authorization boundaries",
+    "Review cancellation and cleanup",
+    "Review performance regressions",
+])
+print(review.name)   # poll outside eval: hub wait, ids:["review"]
 ```
 
-**JavaScript (`eval`, JavaScript backend):**
+**JavaScript:**
 
 ```js
-const DIMENSIONS = [{ key: "bugs", prompt: "…" }, { key: "perf", prompt: "…" }];
-async function reviewAndVerify(d) {
-    const found = await agent(d.prompt, {
-        label: `review:${d.key}`,
-        schema: FINDINGS_SCHEMA,
-    });
-    return await parallel(found.findings.map((f) => async () => ({
-        ...f,
-        verdict: await agent(
-            `Refute if you can (default refuted when unsure): ${f.title}`,
-            { label: `verify:${f.file}`, schema: VERDICT_SCHEMA },
-        ),
-    })));
-}
 phase("Review");
-const results = await parallel(DIMENSIONS.map((d) => async () => reviewAndVerify(d)));
-const confirmed = results.flat().filter((f) => f.verdict.is_real);
+const review = await workpool({{#if scoutAvailable}}"scout", {{/if}}{
+    name: "review",
+    context: "Return evidence with exact paths; do not edit.",
+});
+await review.push(
+    "Review authentication correctness",
+    "Review authorization boundaries",
+    "Review cancellation and cleanup",
+    "Review performance regressions",
+);
+console.log(review.name); // poll outside eval: hub wait, ids:["review"]
 ```
-Reach for `pipeline()` only when a stage genuinely needs ALL of the previous stage first — dedup/merge across the whole set, early-exit on zero, or "compare against the other findings" — because its inter-stage barrier makes every item wait for the slowest peer:
 
-**Python (`eval`, Python backend):**
+Need a snapshot without consuming/delivering results? `review.peek()` (JS: `await review.peek()`). Need activity counts? `review.status()`.
+</pool-workflow>
+
+<dependencies>
+Use handles only when work item B requires A's exact output before B can be written:
 
 ```python
-phase("Find")
-found = parallel([lambda d=d: agent(d["prompt"], schema=FINDINGS_SCHEMA) for d in DIMENSIONS])
-findings = dedupe([f for r in found for f in r["findings"]])   # needs everything at once
-phase("Verify")
-verdicts = parallel([lambda f=f: agent(verify_prompt(f), schema=VERDICT_SCHEMA) for f in findings])
+spec = agent("Extract the protocol", {{#if scoutAvailable}}agent="scout", {{/if}}schema=SPEC).wait()
+impl = agent(f"Implement this protocol: {spec}")
+result = impl.wait()
 ```
-
-**JavaScript (`eval`, JavaScript backend):**
 
 ```js
-phase("Find");
-const found = await parallel(DIMENSIONS.map((d) => async () =>
-    await agent(d.prompt, { schema: FINDINGS_SCHEMA }),
-));
-const findings = dedupe(found.flatMap((r) => r.findings)); // needs everything at once
-phase("Verify");
-const verdicts = await parallel(findings.map((f) => async () =>
-    await agent(verifyPrompt(f), { schema: VERDICT_SCHEMA }),
-));
+const specHandle = await agent("Extract the protocol", { {{#if scoutAvailable}}agent: "scout", {{/if}}schema: SPEC });
+const spec = await specHandle.wait();
+const impl = await agent(`Implement this protocol: ${JSON.stringify(spec)}`);
+const result = await impl.wait();
 ```
-Use ordinary code between calls to flatten/map/filter; don't add a barrier just for that. Nested `parallel()` pools each cap independently, so keep total fan-out sane.
-</structure>
+
+Fixed independent handles are acceptable when each result must be returned directly into the kernel as structured data. Otherwise use a pool.
+</dependencies>
 
 <patterns>
-Compose the harness the task calls for:
-- **Adversarial verify** — N independent skeptics per finding, each prompted to REFUTE; keep it only if a majority survive. `votes = parallel([lambda i=i: agent(f"Refute: {claim}. refuted=true if unsure.", schema=VERDICT) for i in range(3)])`, then keep when `sum(not v["refuted"] for v in votes) ≥ 2`.
-- **Perspective-diverse verify** — give each verifier a distinct lens (correctness, security, perf, does-it-reproduce) instead of N identical refuters.
-- **Judge panel** — N attempts from different angles, scored by parallel judges; synthesize from the winner, graft the best of the rest.
-- **Loop-until-dry** — for unknown-size discovery, keep spawning finders until K consecutive rounds surface nothing new; dedup against everything SEEN, not just what was confirmed, or it never converges.
-- **Multi-modal sweep** — parallel finders each searching a different way (by-container, by-content, by-entity, by-time), each blind to the others.
-- **Completeness critic** — a final agent that asks "what's missing — modality not run, claim unverified, file unread?"; its answer is the next round.
-- **Budget/count loops** — Python: `while len(bugs) < 10:`; JavaScript: `while (bugs.length < 10) { … }`. In Python, gate an explicit budget with `budget.total` and `budget.remaining()`; in JavaScript, use `await budget.total()` and `await budget.remaining()`. `log()` each round.
-- **No silent caps** — if you bound coverage (top-N, no-retry, sampling), `log()` what you dropped; silent truncation reads as "covered everything" when it didn't.
+- **Adversarial verify**: pool one REFUTE task per claim/lens; retain only evidence-backed survivors.
+- **Perspective-diverse review**: distinct correctness/security/perf/reproduction items; NEVER clone one vague prompt.
+- **Judge panel**: pool proposals, then a second named pool scores them after the first pool settles.
+- **Loop-until-dry**: push newly discovered items while the pool remains active; dedup against all SEEN.
+- **Multi-modal sweep**: queue by-container/by-content/by-entity/by-time items.
+- **Completeness critic**: final pool item asks what modality/file/claim remains unchecked.
+- **No silent caps**: if sampling/top-N drops work, `log()` what was omitted.
 
-Scale to the ask: "find any bugs" → a few finders, single-vote verify. "thoroughly audit / be comprehensive" → larger finder pool, 3–5-vote adversarial pass, a synthesis stage.
+Scale: `"find any bugs"` → small pool. `"thoroughly audit"` → broad pool + a separate adversarial verification pool.
 </patterns>
 
 <execution>
-- Decompose the surface first; capture it in `todo` when it spans phases.
-- Prefer `schema=` for any agent whose output you branch on.
-- After a fan-out returns, YOU own correctness: read the artifacts, run the gate, verify before acting. Subagents do the legwork; they don't get the last word.
-- Keep going until the task is closed — a returned fan-out is a step, not a stopping point.
+- Multi-phase work: capture in `todo`.
+- Each pool item: self-contained target, change/read scope, acceptance.
+- Same-file mutation? One worker owns it; serialize shared boundaries.
+- Pool output is evidence, not truth. Read artifacts, gate findings, run final verification yourself.
+- Continue until closed; a drained pool is a phase boundary, not task completion.
 </execution>
 </system-notice>

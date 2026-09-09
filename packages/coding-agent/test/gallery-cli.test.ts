@@ -1,12 +1,23 @@
 import { beforeAll, describe, expect, it } from "bun:test";
 import {
 	GALLERY_STATES,
+	GALLERY_SURFACES,
 	parseGalleryStates,
+	parseGallerySurfaces,
 	renderGalleryState,
+	renderGallerySurfaceSections,
 	resolveFixture,
 } from "@oh-my-pi/pi-coding-agent/cli/gallery-cli";
-import type { GalleryFixture } from "@oh-my-pi/pi-coding-agent/cli/gallery-fixtures";
+import {
+	type GalleryFixture,
+	getComposerGalleryEntries,
+	getComposerGalleryInventory,
+	getSegmentGalleryEntries,
+	getSegmentGalleryInventory,
+} from "@oh-my-pi/pi-coding-agent/cli/gallery-fixtures";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { getComposerShapeOptions } from "@oh-my-pi/pi-coding-agent/modes/components/composer-shape-registry";
+import { ALL_SEGMENT_IDS } from "@oh-my-pi/pi-coding-agent/modes/components/status-line/segments";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { toolRenderers } from "@oh-my-pi/pi-coding-agent/tools/renderers";
 
@@ -31,6 +42,48 @@ describe("gallery harness", () => {
 		expect(() => parseGalleryStates(["bogus"])).toThrow(
 			/Invalid --state 'bogus'.*streaming args.*in progress.*done.*failed/,
 		);
+	});
+
+	it("parses repeatable surfaces and expands all in product order", () => {
+		expect(parseGallerySurfaces(["segment", "tool", "segment"])).toEqual(["tool", "segment"]);
+		expect(parseGallerySurfaces(["all"])).toEqual([...GALLERY_SURFACES]);
+		expect(() => parseGallerySurfaces(["bogus"])).toThrow(/Invalid --surface 'bogus'.*tool.*composer.*segment.*all/);
+	});
+
+	it("derives composer and segment coverage from the production registries", () => {
+		const composerRegistry = getComposerShapeOptions().map(option => option.value);
+		expect(getComposerGalleryInventory()).toEqual(composerRegistry);
+		expect(getComposerGalleryEntries().map(entry => entry.id)).toEqual(composerRegistry);
+		expect(getSegmentGalleryInventory()).toEqual(ALL_SEGMENT_IDS);
+		expect(getSegmentGalleryEntries().map(entry => entry.id)).toEqual(ALL_SEGMENT_IDS);
+	});
+
+	it("orders surfaces tool then composer then segment and lets entry filters imply their surface", async () => {
+		const composer = getComposerGalleryInventory()[0];
+		const segment = getSegmentGalleryInventory()[0];
+		if (!composer || !segment) throw new Error("Production gallery registries must not be empty");
+
+		const sections = await renderGallerySurfaceSections({
+			surfaces: [...GALLERY_SURFACES],
+			tool: "bash",
+			composer,
+			segment,
+			states: ["success"],
+		});
+		expect(sections.map(section => section.heading)).toEqual([
+			"bash — Bash",
+			expect.stringContaining(`composer · ${composer}`),
+			`segment · ${segment}`,
+		]);
+
+		const toolOnly = await renderGallerySurfaceSections({ tool: "bash", states: ["success"] });
+		expect(toolOnly.map(section => section.heading)).toEqual(["bash — Bash"]);
+		const composerOnly = await renderGallerySurfaceSections({ composer });
+		expect(composerOnly).toHaveLength(1);
+		expect(composerOnly[0]?.heading).toContain(`composer · ${composer}`);
+		const segmentOnly = await renderGallerySurfaceSections({ segment });
+		expect(segmentOnly).toHaveLength(1);
+		expect(segmentOnly[0]?.heading).toBe(`segment · ${segment}`);
 	});
 
 	it("renders every registered tool in every lifecycle state without throwing", async () => {

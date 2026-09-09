@@ -32,6 +32,7 @@ import { type ModelRoleLookup, type ResolvedModelRoleValue, resolveModelRoleValu
 import { getKnownRoleIds, getRoleInfo } from "../../config/model-roles";
 import type { Settings } from "../../config/settings";
 import { AUTO_THINKING, type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
+import { thinkingLevelGlyph } from "../../tools/render-utils";
 import { theme } from "../theme/theme";
 import { matchesSelectCancel, matchesSelectDown, matchesSelectUp } from "../utils/keybinding-matchers";
 import {
@@ -41,7 +42,6 @@ import {
 	type RoleAssignments,
 	resolveRoleAssignments,
 	sortModelItems,
-	thinkingLevelGlyph,
 } from "./model-browser";
 import { bottomBorder, dividerSplit, row, splitBodyWidth, splitRow, topBorderSplit } from "./overlay-box";
 import { renderSegmentTrack } from "./segment-track";
@@ -113,6 +113,17 @@ interface SidebarEntry {
 	annotation?: string;
 	oauth?: boolean;
 	catalogCount?: number;
+}
+
+/**
+ * The focused sidebar entry plus its screen row, captured before a rebuild so
+ * the viewport can be restored around it. `index` is the entry's position in
+ * `#entries` (−1 when absent); `offset` is its row relative to the scroll top.
+ */
+interface SidebarAnchor {
+	id: string;
+	index: number;
+	offset: number;
 }
 
 interface StripChip {
@@ -198,15 +209,19 @@ export class ModelHubComponent implements Component {
 	#sidebarFollowActive = true;
 	#sidebarHover: number | null = null;
 	/**
-	 * Arrow-key ownership: `scope` (default) hops the sidebar even while the
-	 * search bar holds the caret; `list` navigates rows (browser models or
-	 * role rows). Tab toggles.
+	 * Arrow-key ownership: `scope` (default) hops the sidebar; `list`
+	 * navigates rows (browser models or role rows). Typing anywhere focuses
+	 * the model list; Tab toggles; ←/→ switches between sidebar and list.
 	 */
 	#focus: "scope" | "list" = "scope";
 
 	#rolesRows: RolesRow[] = [];
 	#roleIndex = 0;
 	#roleHover: number | null = null;
+	/** First roles row drawn in the scroll window; follows the cursor and clamps to the list. */
+	#roleScrollStart = 0;
+	/** Roles rows actually drawn this frame; bounds mouse hit-testing to the visible window. */
+	#rolesVisibleCount = 0;
 
 	#assigning: AssignTarget | null = null;
 	#strip: StripState | null = null;
@@ -218,7 +233,6 @@ export class ModelHubComponent implements Component {
 	#scheduledProviderRefreshes = new Map<string, Timer>();
 	#refreshSpinnerFrame = 0;
 	#refreshSpinnerInterval?: Timer;
-
 	// Frame geometry from the last render, for mouse hit-testing (the
 	// fullscreen overlay paints from screen row 0, so mouse rows map 1:1).
 	#contentRowStart = 1;
@@ -267,7 +281,7 @@ export class ModelHubComponent implements Component {
 		// the synchronous hydration above.
 		if (this.#scopedModels.length === 0) {
 			this.#registry
-				.refresh("offline")
+				.refresh("online")
 				.then(() => this.#syncFromRegistryState())
 				.catch(error => {
 					this.#configError = error instanceof Error ? error.message : String(error);
@@ -305,6 +319,10 @@ export class ModelHubComponent implements Component {
 
 	/** Rebuild items, roles, and the sidebar from the registry's in-memory state. */
 	#syncFromRegistryState(): void {
+		// A background rebuild (provider refresh, mutation) must not yank the
+		// sidebar viewport: remember the focused entry's screen row so it — or
+		// its nearest survivor — stays put after #buildSidebar reshuffles entries.
+		const anchor = this.#captureSidebarAnchor();
 		let allModels: ReadonlyArray<Model>;
 		let availableModels: ReadonlyArray<Model>;
 		if (this.#scopedModels.length > 0) {
@@ -343,6 +361,7 @@ export class ModelHubComponent implements Component {
 		}
 
 		this.#buildSidebar(allModels, availableModels);
+		this.#restoreSidebarAnchor(anchor);
 		this.#applyScope();
 	}
 
@@ -379,6 +398,19 @@ export class ModelHubComponent implements Component {
 				// locked; keyless/custom endpoints (ollama, vllm, …) surface as
 				// selectable so discovery can populate them.
 				if (authStorage.hasAuth(provider) || !locked.has(provider)) {
+					// #2761: implicit local endpoints (optional: true) stay hidden
+					// until discovery actually reaches a server. "idle" means never
+					// probed; "unavailable" means the endpoint is unreachable; both
+					// would render a dead tab for a provider the user never
+					// configured. models.yml discovery providers (optional: false)
+					// and providers with stored auth keep their entry so
+					// misconfigurations stay visible and diagnosable.
+					if (!authStorage.hasAuth(provider)) {
+						const discovery = this.#registry.getProviderDiscoveryState(provider);
+						if (discovery?.optional && (discovery.status === "idle" || discovery.status === "unavailable")) {
+							continue;
+						}
+					}
 					locked.delete(provider);
 					unlocked.add(provider);
 				}
@@ -457,6 +489,45 @@ export class ModelHubComponent implements Component {
 			this.#activeEntryId = "all";
 			this.#sidebarFollowActive = true;
 		}
+	}
+
+	/** Snapshot the focused entry and its row within the sidebar viewport. */
+	#captureSidebarAnchor(): SidebarAnchor {
+		const index = this.#entries.findIndex(entry => entry.id === this.#activeEntryId);
+		return { id: this.#activeEntryId, index, offset: index - this.#sidebarScroll };
+	}
+
+	/**
+	 * Reposition the sidebar after {@link #buildSidebar} rebuilt `#entries`. A
+	 * surviving focused entry keeps its screen row; if it vanished (a keyless
+	 * provider flipping back to hidden mid-navigation), focus falls to the
+	 * nearest surviving entry instead of snapping to the top.
+	 */
+	#restoreSidebarAnchor(anchor: SidebarAnchor): void {
+		if (anchor.index < 0) return;
+		const survivor = this.#entries.findIndex(entry => entry.id === anchor.id);
+		if (survivor >= 0) {
+			this.#sidebarScroll = Math.max(0, survivor - anchor.offset);
+			return;
+		}
+		const replacement = this.#nearestNavigableEntry(anchor.index);
+		if (!replacement) return;
+		this.#activeEntryId = replacement.id;
+		this.#sidebarScroll = Math.max(0, this.#entries.indexOf(replacement) - anchor.offset);
+	}
+
+	/** The selectable entry nearest `preferredIndex` in the current `#entries`. */
+	#nearestNavigableEntry(preferredIndex: number): SidebarEntry | undefined {
+		const entries = this.#entries;
+		if (entries.length === 0) return undefined;
+		const start = Math.max(0, Math.min(preferredIndex, entries.length - 1));
+		for (let radius = 0; radius < entries.length; radius++) {
+			for (const index of radius === 0 ? [start] : [start + radius, start - radius]) {
+				const entry = entries[index];
+				if (entry && !this.#isHopSkipped(entry)) return entry;
+			}
+		}
+		return undefined;
 	}
 
 	#activeEntry(): SidebarEntry {
@@ -884,7 +955,7 @@ export class ModelHubComponent implements Component {
 				: (this.#roles[role]?.thinkingLevel ?? ThinkingLevel.Inherit);
 		const chips: StripChip[] = options.map(level => {
 			const label = getConfiguredThinkingLevelMetadata(level).label;
-			const glyph = thinkingLevelGlyph(level);
+			const glyph = thinkingLevelGlyph(level, theme);
 			return {
 				label,
 				styled: glyph ? `${theme.fg("accent", glyph)} ${label}` : label,
@@ -1196,8 +1267,7 @@ export class ModelHubComponent implements Component {
 			return;
 		}
 
-		// Arrow ownership: scope mode hops the sidebar even while the search
-		// bar holds the caret; list mode navigates rows.
+		// Arrow ownership: scope mode hops the sidebar; list mode navigates rows.
 		if (this.#focus === "scope") {
 			if (matchesSelectUp(data)) {
 				this.#moveSidebar(-1);
@@ -1210,16 +1280,36 @@ export class ModelHubComponent implements Component {
 		}
 
 		if (rolesView) {
+			const printable = extractPrintableText(data);
+			if (this.#focus === "scope" && printable !== undefined && printable.trim().length > 0) {
+				this.#setActiveEntry("all");
+				this.#focus = "list";
+				this.#browser.handleInput(data);
+				return;
+			}
 			this.#handleRolesViewInput(data);
 			return;
 		}
 		if (lockedView) {
+			const printable = extractPrintableText(data);
+			if (printable !== undefined && printable.trim().length > 0) {
+				this.#setActiveEntry("all");
+				this.#focus = "list";
+				this.#browser.handleInput(data);
+				return;
+			}
 			if (matchesKey(data, "enter") || matchesKey(data, "return") || data === "\n") {
 				this.#requestLogin(entry);
 			}
 			return;
 		}
+
+		const beforeQuery = this.#browser.query;
+		const isPrintable = extractPrintableText(data) !== undefined;
 		this.#browser.handleInput(data);
+		if (isPrintable || this.#browser.query !== beforeQuery) {
+			this.#focus = "list";
+		}
 	}
 
 	#isBrowserView(entry: SidebarEntry): boolean {
@@ -1300,6 +1390,15 @@ export class ModelHubComponent implements Component {
 			case "separator":
 				return;
 		}
+	}
+
+	/** Scroll `#roleScrollStart` just enough to keep `#roleIndex` inside a window of `viewHeight` rows, clamped to the list. */
+	#ensureRoleVisible(viewHeight: number, total: number): number {
+		if (viewHeight <= 0) return 0;
+		let start = this.#roleScrollStart;
+		if (this.#roleIndex < start) start = this.#roleIndex;
+		else if (this.#roleIndex >= start + viewHeight) start = this.#roleIndex - viewHeight + 1;
+		return Math.max(0, Math.min(start, Math.max(0, total - viewHeight)));
 	}
 
 	/** Step the roles cursor by one row, skipping separator rows. Wraps at the ends unless `wrap: false` (then the cursor stays put). */
@@ -1473,7 +1572,8 @@ export class ModelHubComponent implements Component {
 			this.#sidebarHover = overSidebar ? this.#sidebarEntryIndexAt(contentLine) : null;
 			if (overBody && entry.kind === "roles" && this.#assigning === null) {
 				const roleLine = bodyLine - this.#rolesRowStart;
-				this.#roleHover = roleLine >= 0 && roleLine < this.#rolesRowCount ? roleLine : null;
+				this.#roleHover =
+					roleLine >= 0 && roleLine < this.#rolesVisibleCount ? roleLine + this.#roleScrollStart : null;
 			} else {
 				this.#roleHover = null;
 				if (overBody && this.#isBrowserView(entry)) {
@@ -1508,8 +1608,9 @@ export class ModelHubComponent implements Component {
 		if (overBody) {
 			if (entry.kind === "roles" && this.#assigning === null) {
 				this.#focus = "list";
-				const roleLine = bodyLine - this.#rolesRowStart;
-				if (roleLine >= 0 && roleLine < this.#rolesRowCount) {
+				const listLine = bodyLine - this.#rolesRowStart;
+				if (listLine >= 0 && listLine < this.#rolesVisibleCount) {
+					const roleLine = listLine + this.#roleScrollStart;
 					const rowDef = this.#rolesRows[roleLine];
 					if (rowDef && rowDef.kind !== "separator") {
 						if (roleLine === this.#roleIndex) {
@@ -1718,7 +1819,16 @@ export class ModelHubComponent implements Component {
 
 		const cycleOrder = this.#cycleOrder();
 		const listFocused = this.#focus === "list";
-		for (let i = 0; i < this.#rolesRows.length && lines.length < rows - 2; i++) {
+		// Window the list around the cursor so entries past the panel height stay
+		// reachable; the trailing indicator line steals one row when clipped.
+		const total = this.#rolesRows.length;
+		const capacity = Math.max(0, rows - 2 - this.#rolesRowStart);
+		const overflow = total > capacity;
+		const viewHeight = overflow ? Math.max(0, capacity - 1) : capacity;
+		this.#roleScrollStart = this.#ensureRoleVisible(viewHeight, total);
+		const endIndex = Math.min(this.#roleScrollStart + viewHeight, total);
+		this.#rolesVisibleCount = Math.max(0, endIndex - this.#roleScrollStart);
+		for (let i = this.#roleScrollStart; i < endIndex; i++) {
 			const rowDef = this.#rolesRows[i];
 			if (!rowDef) continue;
 			const selected = i === this.#roleIndex;
@@ -1772,7 +1882,7 @@ export class ModelHubComponent implements Component {
 				dot = theme.fg(info.color ?? "muted", theme.status.enabled);
 				tagStyled = theme.fg(info.color ?? "muted", tag);
 				value = `${theme.fg("dim", `${assignment.model.provider}/`)}${selected ? theme.fg("accent", assignment.model.id) : assignment.model.id}`;
-				const glyph = thinkingLevelGlyph(assignment.thinkingLevel);
+				const glyph = thinkingLevelGlyph(assignment.thinkingLevel, theme);
 				const label = getConfiguredThinkingLevelMetadata(assignment.thinkingLevel).label;
 				if (assignment.thinkingLevel !== ThinkingLevel.Inherit) {
 					levelStyled = theme.fg("dim", glyph ? `${glyph} ${label}` : label);
@@ -1787,9 +1897,9 @@ export class ModelHubComponent implements Component {
 				value = theme.fg("dim", "—");
 			}
 
-			// Quick-cycle membership badge (`⟳2` = second stop of the ctrl+p cycle).
+			// Quick-cycle membership badge (`⟳ 2` = second stop of the ctrl+p cycle).
 			const cycleIndex = cycleOrder.indexOf(role);
-			const cycleStyled = cycleIndex >= 0 ? theme.fg("accent", `${theme.icon.loop}${cycleIndex + 1}`) : "";
+			const cycleStyled = cycleIndex >= 0 ? theme.fg("accent", `${theme.icon.loop} ${cycleIndex + 1}`) : "";
 
 			let line = ` ${cursor} ${dot} ${tagStyled}  ${value}`;
 			const right = [levelStyled, cycleStyled].filter(part => part.length > 0).join("  ");
@@ -1800,6 +1910,15 @@ export class ModelHubComponent implements Component {
 			}
 			line = this.#finishRolesRow(line, width, hovered);
 			lines.push(line);
+		}
+
+		if (overflow) {
+			const hiddenAbove = this.#roleScrollStart;
+			const hiddenBelow = total - endIndex;
+			const parts: string[] = [];
+			if (hiddenAbove > 0) parts.push(`↑ ${hiddenAbove} more`);
+			if (hiddenBelow > 0) parts.push(`↓ ${hiddenBelow} more`);
+			lines.push(truncateToWidth(theme.fg("dim", `   ${parts.join("   ")}`), width));
 		}
 
 		// Live preview of the quick-switch cycle, rendered with the exact

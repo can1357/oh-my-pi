@@ -97,6 +97,7 @@ export interface PublishDiagnosticsParams {
 export interface TextEdit {
 	range: Range;
 	newText: string;
+	insertTextFormat?: 1 | 2;
 }
 
 export interface AnnotatedTextEdit extends TextEdit {
@@ -314,7 +315,7 @@ export interface LinterClient {
 	format(filePath: string, content: string): Promise<string>;
 
 	/** Get diagnostics for a file. Content should already be written to disk. */
-	lint(filePath: string): Promise<Diagnostic[]>;
+	lint(filePath: string, signal?: AbortSignal): Promise<Diagnostic[]>;
 
 	/** Dispose of any resources (e.g., LSP connection) */
 	dispose?(): void;

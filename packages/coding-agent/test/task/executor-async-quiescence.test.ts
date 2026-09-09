@@ -16,6 +16,7 @@ import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/
 import { runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 const baseAgent: AgentDefinition = { name: "task", description: "test", systemPrompt: "test", source: "bundled" };
 
@@ -75,6 +76,7 @@ function createAsyncSession(
 	let toolCallSeq = 0;
 
 	const emit = (event: AgentSessionEvent) => {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 		for (const listener of [...listeners]) listener(event);
 	};
 
@@ -128,6 +130,7 @@ function createAsyncSession(
 	};
 
 	const session = {
+		...createSessionDefaults(),
 		state,
 		agent: { state: { systemPrompt: ["test"] } },
 		model: undefined,
@@ -135,7 +138,6 @@ function createAsyncSession(
 		sessionManager: { appendSessionInit: () => {} },
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
-		setActiveToolsByName: async (_toolNames: string[]) => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -147,7 +149,6 @@ function createAsyncSession(
 			prompts.push(text);
 			onPrompt({ text, promptIndex: prompts.length, harness });
 		},
-		waitForIdle: async () => {},
 		getLastAssistantMessage: () => state.messages[state.messages.length - 1],
 		hasPendingAsyncWork: () => pendingAsync,
 		getAsyncJobSnapshot: () => ({ running: runningJobs, recent: [] }),
@@ -160,7 +161,6 @@ function createAsyncSession(
 			await options.abort?.();
 		},
 		dispose: options.dispose ?? (async () => {}),
-		setIrcWakeTurnObserver: () => {},
 	};
 	harness.session = session as unknown as AgentSession;
 	return harness;
@@ -304,13 +304,14 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 		expect(result.output).toContain("done");
 	});
 
-	it("returns an aborted result after cleanup grace and waits for every late resource", async () => {
+	it("preserves a successful yield across deferred cleanup and waits for every late resource", async () => {
 		const abortStarted = Promise.withResolvers<void>();
 		const abortGate = Promise.withResolvers<void>();
 		const disposeGate = Promise.withResolvers<void>();
 		const lateJobGate = Promise.withResolvers<void>();
 		const manager = new AsyncJobManager({});
 		AsyncJobManager.setInstance(manager);
+		const cleanupGraceMs = 0;
 		let lateJobId: string | undefined;
 		let deferredCleanup: Promise<void> | undefined;
 		const harness = createAsyncSession(
@@ -348,19 +349,22 @@ describe("runSubprocess async quiescence fresh-yield contract", () => {
 			index: 0,
 			id: "cleanup-timeout",
 			keepAlive: false,
+			cleanupGraceMs,
 			onCleanupDeferred: completion => {
 				deferredCleanup = completion;
 			},
 		});
 		await abortStarted.promise;
+		// abortStarted synchronizes with the in-flight cleanup; a zero grace
+		// exercises the deadline/deferred-ownership transition without sleeping.
 
 		const result = await run;
-		expect(result.exitCode).toBe(1);
-		expect(result.aborted).toBe(true);
-		expect(result.abortReason).toBe("cleanup exceeded 10000 ms");
-		expect(result.error).toBe(
-			"Task aborted. Cleanup did not finish within 10000 ms. This task was not isolated, so its changes may remain in the working directory.",
-		);
+		// The run yielded successfully; a teardown that drains past the cleanup
+		// deadline is handed off asynchronously and MUST NOT overwrite the
+		// successful outcome with an aborted status (issue #9670).
+		expect(result.exitCode).toBe(0);
+		expect(result.aborted).toBe(false);
+		expect(result.abortReason).toBeUndefined();
 		expect(result.output).toContain("yielded output");
 		expect(result.usage?.totalTokens).toBe(7);
 		expect(lateJobId).toBeDefined();

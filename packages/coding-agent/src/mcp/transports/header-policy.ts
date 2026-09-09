@@ -48,6 +48,34 @@ export function setGeneratedHeader(headers: Record<string, string>, name: string
 	headers[name] = value;
 }
 
+/**
+ * Return `headers` without any entry whose name case-insensitively matches
+ * `name`. Used to keep transport-reserved protocol headers (e.g.
+ * `MCP-Protocol-Version`) out of user-configured headers so config can never
+ * inject them. Returns the original reference when there is nothing to strip,
+ * so the common (no-match) path allocates nothing.
+ */
+export function withoutHeader(
+	headers: Record<string, string> | undefined,
+	name: string,
+): Record<string, string> | undefined {
+	if (!headers) return headers;
+	const lower = name.toLowerCase();
+	let hasMatch = false;
+	for (const key in headers) {
+		if (key.toLowerCase() === lower) {
+			hasMatch = true;
+			break;
+		}
+	}
+	if (!hasMatch) return headers;
+	const result: Record<string, string> = {};
+	for (const key in headers) {
+		if (key.toLowerCase() !== lower) result[key] = headers[key];
+	}
+	return result;
+}
+
 const REDIRECT_STATUSES: Record<number, true> = { 301: true, 302: true, 303: true, 307: true, 308: true };
 const MAX_REDIRECT_HOPS = 5;
 

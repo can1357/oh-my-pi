@@ -1,8 +1,8 @@
-import { afterEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeAll, describe, expect, it } from "bun:test";
 import * as os from "node:os";
 import * as path from "node:path";
 import type { RenderResultOptions } from "@oh-my-pi/pi-agent-core";
-import { getThemeByName, setThemeInstance } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, setThemeInstance, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { bashToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { previewWindowRows } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import { ImageProtocol, TERMINAL } from "@oh-my-pi/pi-tui";
@@ -16,15 +16,19 @@ const terminal = TERMINAL as unknown as MutableTerminalInfo;
 
 describe("bashToolRenderer", () => {
 	const originalProtocol = TERMINAL.imageProtocol;
+	let uiTheme: Theme;
+
+	beforeAll(async () => {
+		const loadedTheme = await getThemeByName("dark");
+		if (!loadedTheme) throw new Error("Expected dark theme");
+		uiTheme = loadedTheme;
+	});
 
 	afterEach(() => {
 		terminal.imageProtocol = originalProtocol;
 	});
 
 	it("shows rendered env assignments in the command preview", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderCall(
 			{ command: "printf '%s' \"$MERMAID\"", env: { MERMAID: 'line "one"\ntwo' } },
 			{ expanded: false, isPartial: false },
@@ -36,9 +40,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("stringifies malformed env values in the command preview", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderCall(
 			{ command: 'echo "$DEBUG"', env: { DEBUG: true } },
 			{ expanded: false, isPartial: false },
@@ -50,9 +51,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("shows partial env assignments while tool args are still streaming", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderCall(
 			{
 				command: "printf '%s' \"$MERMAID\"",
@@ -67,9 +65,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("sanitizes command tabs and shortens home cwd in previews", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderCall(
 			{
 				command: "printf\t'%s'",
@@ -85,9 +80,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("renders the pending call as a bordered block with the command in the body", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderCall(
 			{ command: "sleep 30" },
 			{ expanded: false, isPartial: true },
@@ -106,9 +98,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("shows the effective timeout from result details when it differs from call args", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderResult(
 			{ content: [{ type: "text", text: "" }], details: { timeoutSeconds: 120 }, isError: false },
 			{ expanded: false, isPartial: false, renderContext: { timeout: 1200 } },
@@ -121,9 +110,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("renders wall time alongside the timeout label and strips the textual notice", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "hello\n\nWall time: 1.23 seconds" }],
@@ -143,9 +129,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("renders a backgrounded job as a static footer notice", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderResult(
 			{
 				content: [
@@ -171,9 +154,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("folds raw output artifact notices into the status footer", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "filtered\n[raw output: artifact://13]\n\nWall time: 0.08 seconds" }],
@@ -193,9 +173,6 @@ describe("bashToolRenderer", () => {
 		expect(rendered).not.toContain("artifact://13");
 	});
 	it("renders the exit status in the footer and strips the textual exit notice for failed commands", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "boom\n\nWall time: 0.02 seconds\n\nCommand exited with code 1" }],
@@ -220,9 +197,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("renders a timed-out command with a warning border instead of an error border", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "[Command timed out after 1 seconds]\n" }],
@@ -242,9 +216,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("omits the status footer for a successful command", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const component = bashToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "ok\n\nWall time: 0.02 seconds" }],
@@ -263,9 +234,6 @@ describe("bashToolRenderer", () => {
 
 	it("bypasses truncation/styling for SIXEL lines", async () => {
 		terminal.imageProtocol = ImageProtocol.Sixel;
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const sixel = "\x1bPqabc\x1b\\";
 		const renderOptions: RenderResultOptions & {
 			renderContext: {
@@ -296,8 +264,6 @@ describe("bashToolRenderer", () => {
 	});
 
 	it("highlights every line of a multi-line bash command in renderResult", async () => {
-		const uiTheme = await getThemeByName("dark");
-		expect(uiTheme).toBeDefined();
 		setThemeInstance(uiTheme!);
 		const command = 'for f in a b; do\n\techo "$f"\ndone';
 		const component = bashToolRenderer.renderResult(
@@ -329,9 +295,6 @@ describe("bashToolRenderer", () => {
 		// main thread in #2081. The eval renderer already caches by (width,
 		// previewLines) — this test pins the same contract for bash so future
 		// refactors don't silently drop the cache.
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		// A non-trivial output so a missed cache hit would do real string work.
 		const output = Array.from({ length: 200 }, (_, i) => `line ${i}: payload ${"x".repeat(20)}`).join("\n");
 		const component = bashToolRenderer.renderResult(
@@ -376,9 +339,6 @@ describe("bashToolRenderer", () => {
 		// lines" marker. The finalized collapsed block MUST render the identical
 		// window — snapping the full command open on completion makes the block
 		// jump. Only ctrl+o (expanded) uncaps.
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
-		const uiTheme = theme!;
 		const total = previewWindowRows() + 5;
 		const command = Array.from({ length: total }, (_, i) => `echo step_${i}`).join("\n");
 		const render = (opts: { expanded: boolean; isPartial: boolean }) => {

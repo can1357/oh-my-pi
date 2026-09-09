@@ -73,44 +73,145 @@ function deriveResetsAt(payload: Record<string, unknown>): number | undefined {
 	return undefined;
 }
 
-export function parseCursorIndividualUsage(payload: unknown, fetchedAt = Date.now()): UsageReport | null {
-	if (!isRecord(payload) || !isRecord(payload.individualUsage) || !isRecord(payload.individualUsage.overall)) {
-		return null;
-	}
-	const individual = payload.individualUsage.overall;
-	if (individual.enabled === false) return null;
+/**
+ * Parse a Cursor cents bucket (`used`/`limit`/`remaining` in USD cents).
+ * Returns null for disabled or non-positive / malformed buckets.
+ */
+function parseCursorCentsBucket(bucket: Record<string, unknown>): UsageAmount | null {
+	if (bucket.enabled === false) return null;
 
-	const reportedUsed = toNumber(individual.used);
-	const reportedRemaining = toNumber(individual.remaining);
+	const reportedUsed = toNumber(bucket.used);
+	const reportedRemaining = toNumber(bucket.remaining);
 	const hasValidUsed = reportedUsed !== undefined && reportedUsed >= 0;
 	const hasValidRemaining = reportedRemaining !== undefined && reportedRemaining >= 0;
-	const limit = toNumber(individual.limit);
+	const limit = toNumber(bucket.limit);
 
-	let amount: UsageAmount;
-	if (individual.limit === null || individual.limit === undefined) {
+	if (bucket.limit === null || bucket.limit === undefined) {
 		if (!hasValidUsed) return null;
-		amount = { used: reportedUsed / 100, unit: "usd" };
+		return { used: reportedUsed / 100, unit: "usd" };
+	}
+
+	if (limit === undefined || limit <= 0) return null;
+	let used: number;
+	if (reportedUsed !== undefined && reportedUsed > 0) {
+		used = reportedUsed;
+	} else if (hasValidRemaining && reportedRemaining < limit) {
+		used = Math.max(0, limit - reportedRemaining);
+	} else if (hasValidUsed) {
+		used = reportedUsed;
 	} else {
-		if (limit === undefined || limit <= 0) return null;
-		let used: number;
-		if (reportedUsed !== undefined && reportedUsed > 0) {
-			used = reportedUsed;
-		} else if (hasValidRemaining && reportedRemaining < limit) {
-			used = Math.max(0, limit - reportedRemaining);
-		} else if (hasValidUsed) {
-			used = reportedUsed;
-		} else {
-			return null;
+		return null;
+	}
+	const remaining = Math.max(0, limit - used);
+	return {
+		used: used / 100,
+		limit: limit / 100,
+		remaining: remaining / 100,
+		usedFraction: used / limit,
+		remainingFraction: remaining / limit,
+		unit: "usd",
+	};
+}
+
+/**
+ * Cursor's dashboard does not treat plan.used / plan.limit as the visible %.
+ * Pro+ shows separate quota pools (not one shared percent):
+ * - Cursor Models  ← autoPercentUsed
+ *   (includes Cursor Grok 4.5 and Composer 2.5)
+ * - Other Models   ← apiPercentUsed (separate included-$ pool; different quota)
+ * Prefer those fractions when present; fall back to cents only for older overall buckets.
+ */
+function parseCursorPlanDashboardAmounts(bucket: Record<string, unknown>): {
+	auto?: UsageAmount;
+	api?: UsageAmount;
+	fallback?: UsageAmount;
+} {
+	if (bucket.enabled === false) return {};
+
+	const limitCents = toNumber(bucket.limit);
+	const limitUsd = limitCents !== undefined && limitCents > 0 ? limitCents / 100 : undefined;
+	const autoPct = toNumber(bucket.autoPercentUsed);
+	const apiPct = toNumber(bucket.apiPercentUsed);
+	const totalPct = toNumber(bucket.totalPercentUsed);
+
+	const fromPercent = (pct: number, withLimit: boolean): UsageAmount => {
+		const usedFraction = Math.max(0, pct) / 100;
+		if (withLimit && limitUsd !== undefined) {
+			const used = limitUsd * usedFraction;
+			return {
+				used,
+				limit: limitUsd,
+				remaining: Math.max(0, limitUsd - used),
+				usedFraction,
+				remainingFraction: Math.max(0, 1 - usedFraction),
+				unit: "usd",
+			};
 		}
-		const remaining = Math.max(0, limit - used);
-		amount = {
-			used: used / 100,
-			limit: limit / 100,
-			remaining: remaining / 100,
-			usedFraction: used / limit,
-			remainingFraction: remaining / limit,
-			unit: "usd",
-		};
+		return { used: usedFraction * 100, usedFraction, unit: "percent" };
+	};
+
+	const result: { auto?: UsageAmount; api?: UsageAmount; fallback?: UsageAmount } = {};
+	if (autoPct !== undefined) result.auto = fromPercent(autoPct, false);
+	if (apiPct !== undefined) result.api = fromPercent(apiPct, true);
+	if (!result.auto && !result.api) {
+		if (totalPct !== undefined) {
+			result.fallback = fromPercent(totalPct, true);
+		} else {
+			const cents = parseCursorCentsBucket(bucket);
+			if (cents) result.fallback = cents;
+		}
+	}
+	return result;
+}
+
+function pushCursorPlanRails(limits: UsageLimit[], bucket: Record<string, unknown>, window: UsageWindow): void {
+	const rails = parseCursorPlanDashboardAmounts(bucket);
+	if (rails.auto) {
+		limits.push({
+			id: "cursor:usd:individual-auto",
+			label: "Cursor Models",
+			scope: { provider: "cursor", windowId: window.id },
+			window,
+			amount: rails.auto,
+			...(rails.auto.usedFraction !== undefined ? { status: usageStatus(rails.auto.usedFraction) } : {}),
+		});
+	}
+	if (rails.api) {
+		limits.push({
+			id: "cursor:usd:individual-api",
+			label: "Other Models",
+			scope: { provider: "cursor", windowId: window.id },
+			window,
+			amount: rails.api,
+			...(rails.api.usedFraction !== undefined ? { status: usageStatus(rails.api.usedFraction) } : {}),
+		});
+	}
+	if (rails.fallback) {
+		limits.push({
+			id: "cursor:usd:individual-plan",
+			label: "Personal Usage",
+			scope: { provider: "cursor", windowId: window.id },
+			window,
+			amount: rails.fallback,
+			...(rails.fallback.usedFraction !== undefined ? { status: usageStatus(rails.fallback.usedFraction) } : {}),
+		});
+	}
+}
+
+/**
+ * Cursor's `/api/usage-summary` has shipped two personal-bucket shapes:
+ * - Enterprise/team dashboards historically exposed `individualUsage.overall`
+ * - Current Pro / Pro+ / Ultra dashboards expose `individualUsage.plan`
+ *   (plus optional `onDemand`)
+ *
+ * Prefer a *usable* overall bucket; if overall is absent/disabled/malformed,
+ * fall through to plan rails (`autoPercentUsed` / `apiPercentUsed`). Always
+ * consider on-demand afterward so a valid on-demand meter is not dropped when
+ * the included plan bucket is empty.
+ */
+export function parseCursorIndividualUsage(payload: unknown, fetchedAt = Date.now()): UsageReport | null {
+	if (!isRecord(payload) || !isRecord(payload.individualUsage)) {
+		return null;
 	}
 
 	const resetsAt = deriveResetsAt(payload);
@@ -119,21 +220,52 @@ export function parseCursorIndividualUsage(payload: unknown, fetchedAt = Date.no
 		label: "Monthly",
 		...(resetsAt !== undefined ? { resetsAt } : {}),
 	};
-	const limitEntry: UsageLimit = {
-		id: "cursor:usd:individual-overall",
-		label: "Personal Usage",
-		scope: {
-			provider: "cursor",
-			windowId: window.id,
-		},
-		window,
-		amount,
-		...(amount.usedFraction !== undefined ? { status: usageStatus(amount.usedFraction) } : {}),
-	};
+	const limits: UsageLimit[] = [];
+
+	const overall = isRecord(payload.individualUsage.overall) ? payload.individualUsage.overall : null;
+	const plan = isRecord(payload.individualUsage.plan) ? payload.individualUsage.plan : null;
+
+	// Prefer a usable overall bucket; if it is disabled/malformed, fall through to plan.
+	let usedOverall = false;
+	if (overall) {
+		const amount = parseCursorCentsBucket(overall);
+		if (amount) {
+			usedOverall = true;
+			limits.push({
+				id: "cursor:usd:individual-overall",
+				label: "Personal Usage",
+				scope: { provider: "cursor", windowId: window.id },
+				window,
+				amount,
+				...(amount.usedFraction !== undefined ? { status: usageStatus(amount.usedFraction) } : {}),
+			});
+		}
+	}
+	if (!usedOverall && plan) {
+		pushCursorPlanRails(limits, plan, window);
+	}
+
+	// Keep on-demand even when the included plan/overall bucket is absent or unusable.
+	if (isRecord(payload.individualUsage.onDemand)) {
+		const onDemandAmount = parseCursorCentsBucket(payload.individualUsage.onDemand);
+		if (onDemandAmount && onDemandAmount.limit !== undefined && onDemandAmount.limit > 0) {
+			limits.push({
+				id: "cursor:usd:individual-ondemand",
+				label: "On-Demand Usage",
+				scope: { provider: "cursor", windowId: window.id },
+				window,
+				amount: onDemandAmount,
+				...(onDemandAmount.usedFraction !== undefined ? { status: usageStatus(onDemandAmount.usedFraction) } : {}),
+			});
+		}
+	}
+
+	if (limits.length === 0) return null;
+
 	return {
 		provider: "cursor",
 		fetchedAt,
-		limits: [limitEntry],
+		limits,
 		raw: payload,
 	};
 }
@@ -163,42 +295,49 @@ export function parseCursorUsage(payload: unknown, fetchedAt = Date.now()): Usag
 			toNumber(value.amountLimit) ??
 			toNumber(value.usdLimit);
 
-		if (usedVal !== undefined && limitVal !== undefined) {
-			const isUsd =
-				key === "planUsage" ||
-				key.toLowerCase().includes("usd") ||
-				key.toLowerCase().includes("billing") ||
-				key.toLowerCase().includes("stripe");
+		if (usedVal === undefined) continue;
 
-			const unit = isUsd ? "usd" : "requests";
-			const cleanBucket = key.toLowerCase().trim();
-			const limitId = isUsd ? `cursor:usd:${cleanBucket}` : `cursor:requests:${cleanBucket}`;
+		const isUsd =
+			key === "planUsage" ||
+			key.toLowerCase().includes("usd") ||
+			key.toLowerCase().includes("billing") ||
+			key.toLowerCase().includes("stripe");
 
-			const label = isUsd ? `${key} spend` : `${key} requests`;
+		const unit = isUsd ? "usd" : "requests";
+		const cleanBucket = key.toLowerCase().trim();
+		const limitId = isUsd ? `cursor:usd:${cleanBucket}` : `cursor:requests:${cleanBucket}`;
 
-			const amount: UsageAmount = {
+		const label = isUsd ? `${key} spend` : `${key} requests`;
+
+		// Some Cursor plans report no legacy numeric cap (`maxRequestUsage: null`).
+		// Emit an uncapped, used-only meter for those buckets instead of dropping
+		// them, which used to collapse the whole account to "no usage data".
+		let amount: UsageAmount;
+		if (limitVal === undefined) {
+			amount = { used: usedVal, unit };
+		} else {
+			const remaining = Math.max(0, limitVal - usedVal);
+			amount = {
 				used: usedVal,
 				limit: limitVal,
-				remaining: Math.max(0, limitVal - usedVal),
+				remaining,
 				usedFraction: limitVal > 0 ? usedVal / limitVal : 0,
-				remainingFraction: limitVal > 0 ? Math.max(0, limitVal - usedVal) / limitVal : 0,
+				remainingFraction: limitVal > 0 ? remaining / limitVal : 0,
 				unit,
 			};
-
-			const status = usageStatus(amount.usedFraction);
-
-			limits.push({
-				id: limitId,
-				label,
-				scope: {
-					provider: "cursor",
-					...(window ? { windowId: window.id } : {}),
-				},
-				...(window ? { window } : {}),
-				amount,
-				status,
-			});
 		}
+
+		limits.push({
+			id: limitId,
+			label,
+			scope: {
+				provider: "cursor",
+				...(window ? { windowId: window.id } : {}),
+			},
+			...(window ? { window } : {}),
+			amount,
+			...(amount.usedFraction !== undefined ? { status: usageStatus(amount.usedFraction) } : {}),
+		});
 	}
 
 	if (limits.length === 0) {

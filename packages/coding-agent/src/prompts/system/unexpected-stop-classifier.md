@@ -1,6 +1,6 @@
-You are checking whether an assistant message is an unexpected stop. A message is an unexpected stop if the assistant says it will take an action, continue working, or call a tool, but then ends without actually doing so.
+Classify whether this assistant message is an unexpected stop: it says it will act, continue working, or call a tool, then ends without doing so.
 
-Examples of unexpected stops:
+Unexpected stops:
 - "I should do the same for the JS eval worker. Doing that now."
 - "Let me run the tests next."
 - "I'll fix that now."
@@ -14,4 +14,4 @@ Not an unexpected stop:
 Message:
 {{message}}
 
-Answer with a single word: YES if this is an unexpected stop, NO otherwise.
+Answer one word: YES if unexpected stop; NO otherwise.

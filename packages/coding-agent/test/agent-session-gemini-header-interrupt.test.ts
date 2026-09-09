@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import type {
@@ -138,14 +138,21 @@ function successStream(model: Model<Api>, text: string): AssistantMessageEventSt
 }
 
 describe("AgentSession Gemini header-runaway interrupt", () => {
-	let tempDir: TempDir;
+	let sharedDir: TempDir;
 	let authStorage: AuthStorage;
+	let modelRegistry: ModelRegistry;
 	let session: AgentSession | undefined;
 
-	beforeEach(async () => {
-		tempDir = TempDir.createSync("@pi-gemini-header-interrupt-");
-		authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+	beforeAll(async () => {
+		sharedDir = TempDir.createSync("@pi-gemini-header-interrupt-shared-");
+		authStorage = await AuthStorage.create(path.join(sharedDir.path(), "auth.db"));
 		authStorage.setRuntimeApiKey("openrouter", "openrouter-test-key");
+		modelRegistry = new ModelRegistry(authStorage);
+	});
+
+	afterAll(() => {
+		authStorage.close();
+		sharedDir.removeSync();
 	});
 
 	afterEach(async () => {
@@ -153,14 +160,15 @@ describe("AgentSession Gemini header-runaway interrupt", () => {
 			await session.dispose();
 			session = undefined;
 		}
-		authStorage.close();
-		tempDir.removeSync();
 		vi.restoreAllMocks();
 	});
 
-	function buildSession(streamFn: Agent["streamFn"], overrides?: Record<string, unknown>): void {
-		const model = createMockModel({ provider: "openrouter", id: "google/gemini-3.5-flash" }).model;
-		const modelRegistry = new ModelRegistry(authStorage);
+	function buildSession(
+		streamFn: Agent["streamFn"],
+		overrides?: Record<string, unknown>,
+		modelId = "google/gemini-3.5-flash",
+	): void {
+		const model = createMockModel({ provider: "openrouter", id: modelId }).model;
 		const agent = new Agent({
 			getApiKey: requestedModel => `${requestedModel.provider}-test-key`,
 			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
@@ -248,5 +256,26 @@ describe("AgentSession Gemini header-runaway interrupt", () => {
 		const assistants = messages.filter((m): m is AssistantMessage => m.role === "assistant");
 		expect(assistants).toHaveLength(1);
 		expect(assistants[0].content.at(-1)).toEqual({ type: "text", text: "Visible final answer." });
+	});
+
+	it("does not interrupt a DeepSeek header run", async () => {
+		let call = 0;
+		buildSession(
+			(model, _context, options) => {
+				call++;
+				return headerRunawayStream(model, options, "Visible DeepSeek answer.");
+			},
+			undefined,
+			"deepseek-reasoner",
+		);
+
+		await session?.prompt("Do the task");
+		await session?.waitForIdle();
+
+		expect(call).toBe(1);
+		const messages = session?.agent.state.messages ?? [];
+		expect(
+			messages.some(message => message.role === "custom" && message.customType === "gemini-tool-call-reminder"),
+		).toBe(false);
 	});
 });

@@ -2,7 +2,9 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
 import type { AsyncJobRegisterOptions } from "@oh-my-pi/pi-coding-agent/async/job-manager";
+import type { EffectiveExtensionRoots } from "@oh-my-pi/pi-coding-agent/capability/types";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { PreparedExtension } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
 import { resolveLocalRoot } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import { TanCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/tan-command-controller";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
@@ -54,6 +56,8 @@ function createCloneStub(overrides?: {
 	abort?: () => void;
 	sessionManager?: { appendSessionInit: (init: unknown) => void };
 	lastAssistantText?: string;
+	activeToolNames?: string[];
+	enabledToolNames?: string[];
 }) {
 	const appendMessage = vi.fn();
 	let listener: ((event: TanSessionEvent) => void) | undefined;
@@ -61,6 +65,8 @@ function createCloneStub(overrides?: {
 		agent: { appendMessage },
 		sessionManager: overrides?.sessionManager,
 		setTodoPhases: vi.fn(),
+		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
+		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
 		subscribe: vi.fn((l: (event: TanSessionEvent) => void) => {
 			listener = l;
 			return () => {
@@ -88,6 +94,11 @@ function createContext(overrides?: {
 	agentId?: string;
 	parentPromptCacheKey?: string;
 	register?: (run: CapturedJobRun, options?: AsyncJobRegisterOptions) => string;
+	activeToolNames?: string[];
+	enabledToolNames?: string[];
+	preparedExtensions?: unknown;
+	effectiveExtensionRoots?: unknown;
+	extensionPaths?: unknown;
 }) {
 	const tempDir = TempDir.createSync("@omp-tan-controller-");
 	const parentFile = path.join(tempDir.path(), "parent.jsonl");
@@ -112,8 +123,12 @@ function createContext(overrides?: {
 		sessionId: "parent-session",
 		configuredThinkingLevel: vi.fn(() => undefined),
 		systemPrompt: ["system prompt"],
-		getActiveToolNames: vi.fn(() => ["read", "bash"]),
+		getActiveToolNames: vi.fn(() => overrides?.activeToolNames ?? ["read", "bash"]),
+		getEnabledToolNames: vi.fn(() => overrides?.enabledToolNames ?? overrides?.activeToolNames ?? ["read", "bash"]),
 		modelRegistry: { authStorage: { marker: "auth" } },
+		preparedExtensions: overrides?.preparedExtensions,
+		effectiveExtensionRoots: overrides?.effectiveExtensionRoots,
+		extensionPaths: overrides?.extensionPaths,
 		getAgentId: vi.fn(() => overrides?.agentId),
 		sendCustomMessage: vi.fn(async () => {
 			sequence.push("sendCustomMessage");
@@ -211,7 +226,12 @@ describe("TanCommandController", () => {
 			harness.tempDir.path(),
 			harness.parentFile.slice(0, -6),
 			undefined,
-			{ suppressBreadcrumb: true, sessionFile: expect.stringMatching(/Tan-.+\.jsonl$/) },
+			{
+				copyArtifacts: false,
+				suppressBreadcrumb: true,
+				sessionFile: expect.stringMatching(/Tan-.+\.jsonl$/),
+				resetInheritedCost: true,
+			},
 		);
 		expect(harness.register).toHaveBeenCalledWith("task", "/tan write the release note", expect.any(Function), {
 			ownerId: MAIN_AGENT_ID,
@@ -258,6 +278,75 @@ describe("TanCommandController", () => {
 		// The local mapping keys off the session-manager id (not `session.sessionId`,
 		// still "parent-session"), matching the parent's large-paste / local:// writes.
 		expect(opts.getSessionId?.()).toBe("parent-local-session");
+	});
+
+	it("forwards the parent's prepared extensions and root policy so the tan child rebinds runtime providers", async () => {
+		// Regression: the tan clone reuses the parent's shared ModelRegistry. If it
+		// is built without the parent's extensions, the SDK's syncExtensionSources
+		// prune unregisters extension-provided providers from that shared registry,
+		// so the child fails its API-key check ("No API key found for <provider>")
+		// and the parent loses the registration too. The child MUST rebind the
+		// parent's prepared extensions before that prune runs.
+		const preparedExtensions: PreparedExtension[] = [
+			{ path: "/ext/provider.ts", resolvedPath: "/ext/provider.ts", factory: null, error: null },
+		];
+		const effectiveExtensionRoots: EffectiveExtensionRoots = {
+			explicit: ["/ext/provider.ts"],
+			mode: "explicit-only",
+			configured: [],
+			configuredLevel: "user",
+		};
+		const extensionPaths = ["/ext/provider.ts"];
+		const harness = createContext({ preparedExtensions, effectiveExtensionRoots, extensionPaths });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const { clone } = createCloneStub({ lastAssistantText: "done" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: clone } as unknown as CreateAgentSessionResult;
+		});
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("chase the tangent");
+		const capturedRun = harness.capturedRun;
+		if (!capturedRun) throw new Error("run function was not captured");
+		await capturedRun({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		expect(capturedOptions?.preloadedPreparedExtensions).toBe(preparedExtensions);
+		// Path-list fallback is forwarded (fresh copy) for parent builds without prepared factories.
+		expect(capturedOptions?.preloadedExtensionPaths).toEqual(extensionPaths);
+		expect(capturedOptions?.extensionRoots?.()).toBe(effectiveExtensionRoots);
+		expect(capturedOptions?.disableExtensionDiscovery).toBe(true);
+	});
+
+	it("collapses an empty prepared-extensions list to undefined so the child selects the path fallback", async () => {
+		// `[]` is truthy: if forwarded verbatim the child would bind an empty
+		// factory list and skip the populated path fallback, then prune the shared
+		// registry from an empty source set — the exact failure the fix prevents.
+		const effectiveExtensionRoots: EffectiveExtensionRoots = {
+			explicit: ["/ext/provider.ts"],
+			mode: "explicit-only",
+			configured: [],
+			configuredLevel: "user",
+		};
+		const extensionPaths = ["/ext/provider.ts"];
+		const harness = createContext({ preparedExtensions: [], effectiveExtensionRoots, extensionPaths });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const { clone } = createCloneStub({ lastAssistantText: "done" });
+		let capturedOptions: CreateAgentSessionOptions | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return { session: clone } as unknown as CreateAgentSessionResult;
+		});
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("chase the tangent");
+		const capturedRun = harness.capturedRun;
+		if (!capturedRun) throw new Error("run function was not captured");
+		await capturedRun({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		expect(capturedOptions?.preloadedPreparedExtensions).toBeUndefined();
+		expect(capturedOptions?.preloadedExtensionPaths).toEqual(extensionPaths);
 	});
 
 	it("aborts the cloned agent when the background job signal aborts", async () => {
@@ -384,6 +473,30 @@ describe("TanCommandController", () => {
 		expect(detachSession).toHaveBeenCalledWith(expect.stringMatching(/^Tan-/));
 		expect(clone.dispose).toHaveBeenCalled();
 		expect(unregister).not.toHaveBeenCalled();
+	});
+
+	it("copies and persists the full enabled tool set", async () => {
+		const enabledToolNames = ["eval", "read", "bash"];
+		const harness = createContext({ activeToolNames: ["eval"], enabledToolNames });
+		vi.spyOn(SessionManager, "forkFrom").mockResolvedValue(harness.cloneManager);
+		const appendSessionInit = vi.fn();
+		const { clone } = createCloneStub({
+			sessionManager: { appendSessionInit },
+			activeToolNames: ["eval"],
+			enabledToolNames,
+		});
+		const createAgentSessionSpy = vi.spyOn(sdkModule, "createAgentSession").mockResolvedValue({
+			session: clone,
+		} as unknown as CreateAgentSessionResult);
+		const controller = new TanCommandController(harness.ctx);
+
+		await controller.start("preserve bridge tools");
+		const run = harness.capturedRun;
+		if (!run) throw new Error("run function was not captured");
+		await run({ jobId: "job-123", signal: new AbortController().signal, reportProgress: async () => {} });
+
+		expect(createAgentSessionSpy.mock.calls[0]?.[0]?.toolNames).toEqual(enabledToolNames);
+		expect(appendSessionInit).toHaveBeenCalledWith(expect.objectContaining({ tools: enabledToolNames }));
 	});
 
 	it("isolates the fork: clears inherited todos, injects the fork notice, and re-injects after compaction", async () => {

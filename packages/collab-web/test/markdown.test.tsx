@@ -51,4 +51,109 @@ describe("Transcript Markdown", () => {
 		expect(html).not.toContain("&lt;/advisory&gt;");
 	});
 
+	it("typesets every delimiter form and marks display math", () => {
+		const inline = renderMarkdown("energy $E=mc^2$ and \\(x^2\\) here");
+		expect(inline).toContain('encoding="application/x-tex">E=mc^2</annotation>');
+		expect(inline).toContain('encoding="application/x-tex">x^2</annotation>');
+		expect(inline).not.toContain('display="block"');
+
+		const display = renderMarkdown("$$E=mc^2$$ and \\[y^2\\]");
+		expect(display.match(/display="block"/g)?.length).toBe(2);
+	});
+
+	it("emits MathML rather than font-dependent KaTeX HTML", () => {
+		// The transcript ships no KaTeX stylesheet, so HTML output would have broken metrics.
+		const html = renderMarkdown("$E=mc^2$");
+
+		expect(html).toContain("<math");
+		expect(html).not.toContain("katex-html");
+		expect(html).not.toContain("katex-strut");
+	});
+
+	it("renders an own-line block as one display equation with its rows intact", () => {
+		const html = renderMarkdown("$$\n\\begin{pmatrix}a & b \\\\ c & d\\end{pmatrix}\n$$");
+
+		expect(html).toContain('display="block"');
+		expect(html).toContain("\\begin{pmatrix}a &amp; b \\\\ c &amp; d\\end{pmatrix}");
+	});
+
+	it("leaves currency, escaped dollars, and code spans untouched", () => {
+		const money = renderMarkdown("it costs $5 and $10 total, or \\$20 with tax");
+		expect(money).not.toContain("katex");
+		expect(money).toContain("it costs $5 and $10 total, or $20 with tax");
+
+		const code = renderMarkdown("run `$PATH` and `$5$`");
+		expect(code).not.toContain("katex");
+		expect(code).toContain("<code>$PATH</code>");
+	});
+
+	it("keeps a dollar run that contains a code span as prose", () => {
+		const html = renderMarkdown("$x `code` y$");
+
+		expect(html).not.toContain("katex");
+		expect(html).toContain("<code>code</code>");
+	});
+
+	it("matches the TUI by not typesetting a span behind a rejected dollar opener", () => {
+		// marked drops a `start` hint of 0, so the rejected `$5` swallows the rest of
+		// the line. Accepted so both renderers agree; tracked as its own change.
+		expect(renderMarkdown("it costs $5, and the growth is $x^2$ per year")).toBe(
+			'<div class="tr-md"><p>it costs $5, and the growth is $x^2$ per year</p>\n</div>',
+		);
+		// The same line typesets once the currency is escaped or the math comes first.
+		expect(renderMarkdown("it costs \\$5, and the growth is $x^2$ per year")).toContain(
+			'encoding="application/x-tex">x^2</annotation>',
+		);
+	});
+
+	it("typesets a span that follows a long run of ordinary prose", () => {
+		// `$` is not one of marked's text-cut characters: only the hint gets us here.
+		const html = renderMarkdown(`${"lorem ipsum dolor sit amet ".repeat(400)}and finally $q^2$`);
+
+		expect(html).toContain('encoding="application/x-tex">q^2</annotation>');
+	});
+
+	it("leaves half-streamed delimiters literal without reflowing the paragraph", () => {
+		expect(renderMarkdown("streaming $x^2")).toBe('<div class="tr-md"><p>streaming $x^2</p>\n</div>');
+		expect(renderMarkdown("streaming \\(x and \\[y")).toBe('<div class="tr-md"><p>streaming (x and [y</p>\n</div>');
+		expect(renderMarkdown("before\n   $$\nunclosed")).toBe('<div class="tr-md"><p>before<br>   $$<br>unclosed</p>\n</div>');
+	});
+
+	it("keeps a half-streamed display opener whole instead of re-opening its second dollar", () => {
+		// `$$x$` must not render as a literal `$` followed by math `$x$`.
+		expect(renderMarkdown("$$x$")).toBe('<div class="tr-md"><p>$$x$</p>\n</div>');
+		expect(renderMarkdown("total $$x$ pending")).toBe('<div class="tr-md"><p>total $$x$ pending</p>\n</div>');
+	});
+
+	it("closes a span at the first unescaped delimiter", () => {
+		// `\\` is a TeX row break: the `)` right after it is body text.
+		const html = renderMarkdown(String.raw`\(a \\) b\) tail`);
+
+		expect(html).toContain(String.raw`a \\) b`);
+		expect(html).toContain("tail");
+	});
+
+	it("renders display math that is attached to the prose line above it", () => {
+		const html = renderMarkdown("prose\n$$\n\\begin{pmatrix}a & b \\\\ c & d\\end{pmatrix}\n$$\ntail");
+
+		expect(html).toContain('display="block"');
+		expect(html).toContain("\\begin{pmatrix}a &amp; b \\\\ c &amp; d\\end{pmatrix}");
+		expect(html).toContain("prose");
+		expect(html).toContain("tail");
+	});
+
+	it("needs a blank line before a display block whose body contains one", () => {
+		// A blank line ends the paragraph, so an attached block with an interior
+		// blank line stays literal.
+		expect(renderMarkdown("prose\n\n$$\na\n\nb\n$$")).toContain('display="block"');
+		expect(renderMarkdown("prose\n$$\na\n\nb\n$$")).not.toContain("<math");
+	});
+
+	it("keeps the rest of a message when one span is invalid TeX", () => {
+		const html = renderMarkdown("$\\frac$ and **bold**");
+
+		expect(html).toContain("<strong>bold</strong>");
+		expect(html).toContain("\\frac");
+	});
+
 });

@@ -35,6 +35,32 @@ const DEFAULT_MAX_ATTEMPTS = 6;
 /** Bound the `Error.message` allocation for proxy HTML error pages and the like. */
 const MAX_DETAIL_CHARS = 4096;
 
+/**
+ * LiteLLM (and compatible proxies) shed over-concurrency requests *before* the
+ * upstream call with an immediate HTTP 429 marked `rate_limit_type:
+ * max_parallel_requests` — as a response header and/or a structured body field.
+ * This is an admission failure, not an upstream rate/quota limit: the request
+ * never reached a model. Retrying it inside the transport (honoring the proxy's
+ * `Retry-After`, up to {@link DEFAULT_MAX_ATTEMPTS} times) duplicates — worse,
+ * at 60s per sleep instead of 5s — the concurrency backoff and model fallback
+ * that `TurnRecovery` already owns, stalling one turn for up to ~300s
+ * (issue #8854). {@link isConcurrencyAdmissionRejection} lets the transport
+ * surface it on the first attempt so session recovery runs promptly. Genuine
+ * RPM/quota 429s carry no such marker and keep honoring `Retry-After`.
+ */
+const CONCURRENCY_ADMISSION_LIMITER = "max_parallel_requests";
+
+/** Body form of the marker: `"rate_limit_type": "max_parallel_requests"` (top level or under `error`). */
+const CONCURRENCY_ADMISSION_BODY_PATTERN = /"rate_limit_type"\s*:\s*"max_parallel_requests"/;
+
+/** `true` for a proxy concurrency-admission 429 that must bypass transport-level retry. */
+function isConcurrencyAdmissionRejection(response: Response, bodyText: string): boolean {
+	return (
+		response.headers.get("rate_limit_type")?.trim() === CONCURRENCY_ADMISSION_LIMITER ||
+		CONCURRENCY_ADMISSION_BODY_PATTERN.test(bodyText)
+	);
+}
+
 export interface OpenAIStreamRequestInit {
 	url: string;
 	headers: Record<string, string>;
@@ -69,6 +95,10 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
 		signal: init.signal,
 		fetch: init.fetch,
 		maxAttempts: DEFAULT_MAX_ATTEMPTS,
+		// A proxy concurrency-admission 429 (`rate_limit_type: max_parallel_requests`)
+		// surfaces immediately instead of being slept-and-retried here; session
+		// recovery owns its backoff/fallback (issue #8854).
+		shouldRetryResponse: (response, bodyText) => !isConcurrencyAdmissionRejection(response, bodyText),
 		// Bun's native fetch enforces a hard ~300s pre-response timeout (issue #2422).
 		// Cold large-context streams legitimately exceed it; the caller's
 		// `firstEventTimeoutMs`/`AbortSignal` already govern stuck requests.

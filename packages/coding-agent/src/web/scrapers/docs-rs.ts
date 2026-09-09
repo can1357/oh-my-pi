@@ -1,7 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { gunzipSync } from "node:zlib";
-import { getDocsRsCacheDir, isEnoent, logger, ptree, tryParseJson } from "@oh-my-pi/pi-utils";
+import { getDocsRsCacheDir, isEnoent, logger, ptree, tryParseJson, USER_AGENT } from "@oh-my-pi/pi-utils";
 import { ToolAbortError } from "../../tools/tool-errors";
 import type { RenderResult, SpecialHandler } from "./types";
 import { buildResult, MAX_BYTES } from "./types";
@@ -388,7 +388,7 @@ export const handleDocsRs: SpecialHandler = async (
 		const requestSignal = ptree.combineSignals(signal, timeout * 1000);
 		const response = await fetch(jsonUrl, {
 			signal: requestSignal,
-			headers: { "User-Agent": "omp-web-fetch/1.0", Accept: "application/gzip" },
+			headers: { "User-Agent": USER_AGENT, Accept: "application/gzip" },
 			redirect: "follow",
 		});
 		if (!response.ok) return null;

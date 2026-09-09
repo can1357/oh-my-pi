@@ -650,6 +650,43 @@ describe("ACP event mapper", () => {
 		});
 	});
 
+	it("does not serialize a hub wait progress envelope into content text", () => {
+		const partialResult = {
+			content: [{ type: "text", text: "" }],
+			details: {
+				op: "wait",
+				jobs: [
+					{ id: "bash_1", state: "running" },
+					{ id: "bash_2", state: "running" },
+				],
+			},
+		};
+		const updates = mapAgentSessionEventToAcpSessionUpdates(
+			{
+				type: "tool_execution_update",
+				toolCallId: "tc-hub-wait",
+				toolName: "hub",
+				args: { op: "wait", i: "waiting for jobs" },
+				partialResult,
+			} as AgentSessionEvent,
+			"session-1",
+		);
+
+		expect(updates).toHaveLength(1);
+		expectAcpNotifications(updates);
+		const update = updates[0]!.update as {
+			sessionUpdate: string;
+			content?: unknown;
+			rawOutput?: unknown;
+		};
+		expect(update.sessionUpdate).toBe("tool_call_update");
+		// The job details already ride the frame as structured rawOutput.
+		expect(update.rawOutput).toEqual(partialResult);
+		// An empty-text envelope must not be dumped as a JSON blob display row.
+		expect(update.content).toBeUndefined();
+		expect(JSON.stringify(update.content ?? [])).not.toContain('"op":"wait"');
+	});
+
 	it("keeps terminal content alongside readable text", () => {
 		const updates = mapAgentSessionEventToAcpSessionUpdates(
 			{
@@ -1002,26 +1039,32 @@ describe("ACP event mapper", () => {
 	});
 
 	it("builds replayed read tool-call locations against the replay cwd", () => {
-		const replayArgs = normalizeReplayToolArguments(JSON.stringify({ path: "src/foo.ts" }));
-		const update = buildToolCallStartUpdate({
-			toolCallId: "toolu_replay_read",
-			toolName: "read",
-			args: replayArgs.args,
-			cwd: path.resolve("/repo"),
-			status: "completed",
-		});
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acp-replay-read-"));
+		fs.writeFileSync(path.join(dir, "foo.ts"), "data\n");
+		try {
+			const replayArgs = normalizeReplayToolArguments(JSON.stringify({ path: "foo.ts" }));
+			const update = buildToolCallStartUpdate({
+				toolCallId: "toolu_replay_read",
+				toolName: "read",
+				args: replayArgs.args,
+				cwd: dir,
+				status: "completed",
+			});
 
-		expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
-		expect(update).toMatchObject({
-			sessionUpdate: "tool_call",
-			toolCallId: "toolu_replay_read",
-			title: "read: src/foo.ts",
-			kind: "read",
-			status: "completed",
-			rawInput: { path: "src/foo.ts" },
-			locations: [{ path: path.resolve("/repo", "src/foo.ts") }],
-		});
-		expect("content" in update).toBe(false);
+			expectAcpStructure(arkSessionNotification, { sessionId: "session-1", update });
+			expect(update).toMatchObject({
+				sessionUpdate: "tool_call",
+				toolCallId: "toolu_replay_read",
+				title: "read: foo.ts",
+				kind: "read",
+				status: "completed",
+				rawInput: { path: "foo.ts" },
+				locations: [{ path: path.join(dir, "foo.ts") }],
+			});
+			expect("content" in update).toBe(false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
 	});
 
 	it("keeps malformed replay arguments as raw input without command content", () => {
@@ -1089,27 +1132,147 @@ describe("ACP event mapper", () => {
 		expect(update.title).toBe("read: README.md");
 		expect(update.kind).toBe("read");
 		expect(update.rawInput).toEqual({ path: "README.md" });
-		expect(update.locations).toEqual([{ path: "README.md" }]);
+		expect("locations" in update).toBe(false);
 		expect("content" in update).toBe(false);
 	});
 	it("resolves tool_execution_start locations against mapper cwd", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acp-read-cwd-"));
+		fs.writeFileSync(path.join(dir, "file.ts"), "data\n");
+		try {
+			const updates = mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "tool_execution_start",
+					toolCallId: "toolu_read_cwd",
+					toolName: "read",
+					args: { path: "file.ts" },
+				} as AgentSessionEvent,
+				"session-1",
+				{ cwd: dir },
+			);
+
+			expect(updates).toHaveLength(1);
+			expectAcpNotifications(updates);
+			const update = updates[0]!.update as {
+				sessionUpdate: string;
+				locations?: { path: string }[];
+				content?: unknown;
+			};
+			expect(update.sessionUpdate).toBe("tool_call");
+			expect(update.locations).toEqual([{ path: path.join(dir, "file.ts") }]);
+			expect("content" in update).toBe(false);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+	it("strips read selectors from the ACP location while preserving rawInput", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acp-read-selector-"));
+		fs.writeFileSync(path.join(dir, "file.ts"), "data\n");
+		const cases = ["file.ts:1-20", "file.ts:raw", "file.ts:1-20:raw", "file.ts:raw:1-20", "file.ts:5-16,960-973"];
+		try {
+			for (const readPath of cases) {
+				const updates = mapAgentSessionEventToAcpSessionUpdates(
+					{
+						type: "tool_execution_start",
+						toolCallId: `toolu_read_sel_${readPath}`,
+						toolName: "read",
+						args: { path: readPath },
+					} as AgentSessionEvent,
+					"session-1",
+					{ cwd: dir },
+				);
+				expectAcpNotifications(updates);
+				const update = updates[0]!.update as { locations?: { path: string }[]; rawInput?: unknown };
+				expect(update.locations).toEqual([{ path: path.join(dir, "file.ts") }]);
+				expect(update.rawInput).toEqual({ path: readPath });
+			}
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+	it("omits read locations that are not single existing files", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acp-read-non-file-"));
+		fs.mkdirSync(path.join(dir, "docs"));
+		fs.writeFileSync(path.join(dir, "file.ts"), "data\n");
+		fs.writeFileSync(path.join(dir, "archive.rar"), "data\n");
+		const cases = ["src/**/*.ts", "file.ts:1-20; docs", "docs", "archive.rar:inner/SKILL.md"];
+		try {
+			for (const readPath of cases) {
+				const updates = mapAgentSessionEventToAcpSessionUpdates(
+					{
+						type: "tool_execution_start",
+						toolCallId: `toolu_read_non_file_${readPath}`,
+						toolName: "read",
+						args: { path: readPath },
+					} as AgentSessionEvent,
+					"session-1",
+					{ cwd: dir },
+				);
+				expectAcpNotifications(updates);
+				expect("locations" in updates[0]!.update).toBe(false);
+			}
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+	it("publishes the resolved file location when a read completes", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acp-read-result-"));
+		const file = path.join(dir, "file.ts");
+		fs.writeFileSync(file, "data\n");
+		try {
+			const updates = mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "tool_execution_end",
+					toolCallId: "toolu_read_result",
+					toolName: "read",
+					isError: false,
+					result: { content: [{ type: "text", text: "data" }], details: { resolvedPath: file } },
+				} as AgentSessionEvent,
+				"session-1",
+				{ cwd: dir },
+			);
+			expectAcpNotifications(updates);
+			const update = updates[0]!.update as { locations?: { path: string }[] };
+			expect(update.locations).toEqual([{ path: file }]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+	it("keeps a real file literally named like a selector as the read location", () => {
+		const dir = fs.mkdtempSync(path.join(os.tmpdir(), "acp-read-literal-"));
+		const literalName = "report:1-20";
+		fs.writeFileSync(path.join(dir, literalName), "data\n");
+		try {
+			const updates = mapAgentSessionEventToAcpSessionUpdates(
+				{
+					type: "tool_execution_start",
+					toolCallId: "toolu_read_literal",
+					toolName: "read",
+					args: { path: literalName },
+				} as AgentSessionEvent,
+				"session-1",
+				{ cwd: dir },
+			);
+			expectAcpNotifications(updates);
+			const update = updates[0]!.update as { locations?: { path: string }[] };
+			expect(update.locations).toEqual([{ path: path.join(dir, literalName) }]);
+		} finally {
+			fs.rmSync(dir, { recursive: true, force: true });
+		}
+	});
+	it("does not strip selector-looking suffixes from non-read tool paths", () => {
 		const updates = mapAgentSessionEventToAcpSessionUpdates(
 			{
 				type: "tool_execution_start",
-				toolCallId: "toolu_read_cwd",
-				toolName: "read",
-				args: { path: "src/file.ts" },
+				toolCallId: "tc-write-colon",
+				toolName: "write",
+				args: { path: "src/report:1-20", content: "x" },
 			} as AgentSessionEvent,
 			"session-1",
 			{ cwd: "/repo" },
 		);
-
-		expect(updates).toHaveLength(1);
 		expectAcpNotifications(updates);
-		const update = updates[0]!.update as { sessionUpdate: string; locations?: { path: string }[]; content?: unknown };
-		expect(update.sessionUpdate).toBe("tool_call");
-		expect(update.locations).toEqual([{ path: path.resolve("/repo", "src/file.ts") }]);
-		expect("content" in update).toBe(false);
+		const update = updates[0]!.update as { locations?: { path: string }[] };
+		expect(update.locations).toEqual([{ path: path.resolve("/repo", "src/report:1-20") }]);
 	});
 	it("emits distinct locations for move-style path arguments", () => {
 		const updates = mapAgentSessionEventToAcpSessionUpdates(

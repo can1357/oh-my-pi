@@ -191,14 +191,26 @@ def replay(delivery_id: str, wait_timeout: float | None) -> None:
 
 @main.command()
 def status() -> None:
-    """Dump the issue table."""
+    """Dump issue and release state."""
     cfg = _settings_or_die()
     cfg.ensure_paths()
     db = get_database(cfg.sqlite_path)
-    rows = db.list_issues()
-    for r in rows:
+    issue_rows = db.list_issues()
+    for row in issue_rows:
         click.echo(
-            f"{r.key:<40} state={r.state:<12} pr={r.pr_number or '-'} branch={r.branch or '-'} updated={r.updated_at}"
+            f"{row.key:<40} state={row.state:<12} pr={row.pr_number or '-'} "
+            f"branch={row.branch or '-'} updated={row.updated_at}"
+        )
+    release_rows = db.list_releases()
+    if release_rows:
+        if issue_rows:
+            click.echo()
+        click.echo("Releases:")
+    for row in release_rows:
+        error = f" error={row.last_error}" if row.last_error else ""
+        click.echo(
+            f"{row.key:<40} state={row.state:<12} rounds={row.rounds:<2} "
+            f"sha={row.current_sha[:12]} updated={row.updated_at}{error}"
         )
 
 

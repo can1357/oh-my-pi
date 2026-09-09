@@ -167,7 +167,9 @@ export async function resizeImage(img: ImageContent, options?: ImageResizeOption
 
 	try {
 		const { width: originalWidth, height: originalHeight, format } = await new Bun.Image(inputBuffer).metadata();
-		const sourceMime = img.mimeType ?? `image/${format}`;
+		// Trust decoded bytes over caller metadata. A mislabeled WebP must not take
+		// the fast path when the target decoder explicitly excludes WebP.
+		const sourceMime = format ? `image/${format}` : img.mimeType;
 
 		// Fast path: already within dimensions AND well under budget.
 		// Threshold is 1/4 of budget — if already that compact, don't re-encode.

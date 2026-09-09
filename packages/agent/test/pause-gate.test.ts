@@ -36,17 +36,27 @@ describe("agentPauseGate", () => {
 		const context: AgentContext = { systemPrompt: ["Test"], messages: [], tools: [] };
 		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
 
+		const parked = Promise.withResolvers<void>();
+		const originalWait = agentPauseGate.waitUntilResumed;
+		agentPauseGate.waitUntilResumed = (signal?: AbortSignal) => {
+			parked.resolve();
+			return originalWait.call(agentPauseGate, signal);
+		};
 		expect(agentPauseGate.pause()).toBe(true);
 		expect(agentPauseGate.pause()).toBe(false); // already engaged
 
 		const result = agentLoop([createUserMessage("hi")], context, config, undefined, mock.stream).result();
-		await Bun.sleep(20);
+		await parked.promise;
 		expect(mock.calls.length).toBe(0); // parked before the first provider call
 
-		expect(agentPauseGate.resume()).toBeGreaterThanOrEqual(0);
-		const messages = await result;
-		expect(mock.calls.length).toBe(1);
-		expect(messages[messages.length - 1].role).toBe("assistant");
+		try {
+			expect(agentPauseGate.resume()).toBeGreaterThanOrEqual(0);
+			const messages = await result;
+			expect(mock.calls.length).toBe(1);
+			expect(messages[messages.length - 1].role).toBe("assistant");
+		} finally {
+			agentPauseGate.waitUntilResumed = originalWait;
+		}
 	});
 
 	it("holds tool execution at the tool boundary when paused mid-turn", async () => {
@@ -96,6 +106,12 @@ describe("agentPauseGate", () => {
 		const config: AgentLoopConfig = { model: mock.model, convertToLlm: identityConverter };
 		const abortController = new AbortController();
 
+		const parked = Promise.withResolvers<void>();
+		const originalWait = agentPauseGate.waitUntilResumed;
+		agentPauseGate.waitUntilResumed = (signal?: AbortSignal) => {
+			parked.resolve();
+			return originalWait.call(agentPauseGate, signal);
+		};
 		agentPauseGate.pause();
 		const result = agentLoop(
 			[createUserMessage("hi")],
@@ -104,19 +120,23 @@ describe("agentPauseGate", () => {
 			abortController.signal,
 			mock.stream,
 		).result();
-		await Bun.sleep(20);
+		await parked.promise;
 		abortController.abort("user interrupt");
 
 		// The run must terminate as aborted promptly (not stay parked until
 		// resume). The provider request itself carries the aborted signal, so
 		// whether the transport is entered at all is an implementation detail.
-		const messages = await result;
-		const last = messages[messages.length - 1];
-		expect(last.role).toBe("assistant");
-		if (last.role === "assistant") {
-			expect(last.stopReason).toBe("aborted");
+		try {
+			const messages = await result;
+			const last = messages[messages.length - 1];
+			expect(last.role).toBe("assistant");
+			if (last.role === "assistant") {
+				expect(last.stopReason).toBe("aborted");
+			}
+			expect(agentPauseGate.paused).toBe(true); // aborting one run never resumes the process
+		} finally {
+			agentPauseGate.waitUntilResumed = originalWait;
 		}
-		expect(agentPauseGate.paused).toBe(true); // aborting one run never resumes the process
 	});
 
 	it("re-parks a waiter when the gate is re-engaged in the same tick as resume", async () => {
@@ -128,7 +148,7 @@ describe("agentPauseGate", () => {
 
 		agentPauseGate.resume();
 		agentPauseGate.pause(); // re-engage before the waiter's microtask runs
-		await Bun.sleep(10);
+		await Promise.resolve();
 		expect(released).toBe(false);
 
 		agentPauseGate.resume();

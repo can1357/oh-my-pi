@@ -209,7 +209,7 @@ describe("browser run cancellation", () => {
 
 	it("reports user rethrows from native browser-promise combinators", async () => {
 		vi.useRealTimers();
-		for (const name of ["all", "race"] as const) {
+		for (const name of ["all", "race", "allSettled", "any"] as const) {
 			const owner = {};
 			const browserFailure = new Error(`${name} browser failure`);
 			const floatingRejections: unknown[] = [];
@@ -229,15 +229,33 @@ describe("browser run cancellation", () => {
 				owner,
 				reason => floatingRejections.push(reason),
 				async () => {
-					const combined = name === "all" ? Promise.all([facade.fail()]) : Promise.race([facade.fail()]);
+					// oxlint-disable unicorn/no-single-promise-in-promise-methods -- the combinators themselves are under test
+					const combined =
+						name === "all"
+							? Promise.all([facade.fail()])
+							: name === "race"
+								? Promise.race([facade.fail()])
+								: name === "allSettled"
+									? Promise.allSettled([facade.fail()]).then(results => {
+											const [first] = results;
+											if (first?.status === "rejected") throw first.reason;
+										})
+									: Promise.any([facade.fail()]);
 					void combined.catch(reason => {
 						throw reason;
 					});
+					// oxlint-enable unicorn/no-single-promise-in-promise-methods
 					await Bun.sleep(20);
 				},
 			);
 
-			expect(floatingRejections).toEqual([browserFailure]);
+			if (name === "any") {
+				expect(floatingRejections).toHaveLength(1);
+				expect(floatingRejections[0]).toBeInstanceOf(AggregateError);
+				expect((floatingRejections[0] as AggregateError).errors).toEqual([browserFailure]);
+			} else {
+				expect(floatingRejections).toEqual([browserFailure]);
+			}
 			expect(Promise[name]).toBe(originalCombinator);
 		}
 	});
@@ -264,6 +282,7 @@ describe("browser run cancellation", () => {
 			reason => floatingRejections.push(reason),
 			async () => {
 				try {
+					// oxlint-disable-next-line unicorn/no-single-promise-in-promise-methods -- the tracked combinator is under test
 					await Promise.all([facade.fail()]);
 				} catch (error) {
 					caught = error;

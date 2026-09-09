@@ -3,10 +3,11 @@ import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import type { UsageFetchContext, UsageFetchParams } from "@oh-my-pi/pi-ai/usage";
 import { kimiUsageProvider } from "@oh-my-pi/pi-ai/usage/kimi";
 
-function makeCredential(): UsageFetchParams["credential"] {
+function makeCredential(accountId?: string): UsageFetchParams["credential"] {
 	return {
 		type: "oauth",
 		accessToken: "kimi-test-token",
+		accountId,
 	};
 }
 
@@ -45,11 +46,19 @@ describe("kimi usage provider", () => {
 		const total = report!.limits[0]!;
 		expect(total.label).toBe("Total quota");
 		expect(total.window?.resetsAt).toBe(Date.parse(usageReset));
+		// The aggregate quota is the weekly subscription window; canonical id
+		// lets the status-line usage segment pick it up.
+		expect(total.window?.id).toBe("7d");
+		expect(total.scope?.windowId).toBe("7d");
 
 		const fiveHour = report!.limits[1]!;
 		expect(fiveHour.label).toBe("5h limit");
 		expect(fiveHour.window?.durationMs).toBe(5 * 60 * 60 * 1000);
 		expect(fiveHour.window?.resetsAt).toBe(Date.parse(detailReset));
+		// 300 minutes canonicalizes to "5h" so the status-line usage segment
+		// recognizes the burst window.
+		expect(fiveHour.window?.id).toBe("5h");
+		expect(fiveHour.scope?.windowId).toBe("5h");
 	});
 
 	it("keeps an explicit window resetTime authoritative over the detail one", async () => {
@@ -70,5 +79,37 @@ describe("kimi usage provider", () => {
 		expect(report).not.toBeNull();
 		expect(report!.limits).toHaveLength(1);
 		expect(report!.limits[0]!.window?.resetsAt).toBe(Date.parse(windowReset));
+	});
+
+	it("canonicalizes whole-day and non-standard window durations", async () => {
+		const report = await kimiUsageProvider.fetchUsage!(
+			{ provider: "kimi-code", credential: makeCredential(), signal: undefined },
+			makeCtx({
+				limits: [
+					{
+						window: { duration: 7, timeUnit: "TIME_UNIT_DAY" },
+						detail: { limit: "100", remaining: "50" },
+					},
+					{
+						window: { duration: 90, timeUnit: "TIME_UNIT_MINUTE" },
+						detail: { limit: "100", remaining: "50" },
+					},
+				],
+			}),
+		);
+
+		expect(report).not.toBeNull();
+		expect(report!.limits).toHaveLength(2);
+		expect(report!.limits[0]!.window?.id).toBe("7d");
+		expect(report!.limits[1]!.window?.id).toBe("90m");
+	});
+
+	it("attaches the credential account id used by stable usage labels", async () => {
+		const report = await kimiUsageProvider.fetchUsage!(
+			{ provider: "kimi-code", credential: makeCredential("kimi-user-42"), signal: undefined },
+			makeCtx({ usage: { limit: "100", used: "28", remaining: "72" } }),
+		);
+
+		expect(report?.metadata?.accountId).toBe("kimi-user-42");
 	});
 });

@@ -97,6 +97,31 @@ describe("AssistantMessageComponent streaming fast path", () => {
 		}
 	});
 
+	it("repairs Gemini's lone closing fence when the streamed turn becomes final", () => {
+		const text = `=== PACED IP ROTATION SOAK RESULTS ===
+Average Latency: 1,240 ms
+\`\`\`
+
+---
+
+### Production Deployment Status
+
+| Workload | Pod Status |
+| :--- | :--- |
+| google-scraper | **1/1 Running** |`;
+		const message = msg([{ type: "text", text }]);
+		const component = new AssistantMessageComponent();
+
+		component.updateContent(message, { transient: true });
+		expect(Bun.stripANSI(component.render(W).join("\n"))).toContain("| :--- | :--- |");
+
+		component.updateContent(message);
+		const finalized = Bun.stripANSI(component.render(W).join("\n"));
+		expect(finalized).not.toContain("| :--- | :--- |");
+		expect(finalized).toContain("google-scraper");
+		expect(finalized).toContain("1/1 Running");
+	});
+
 	// Regression: theme/symbol changes reach the component via invalidate()
 	// (InteractiveMode clears the markdown render cache and invalidates the
 	// tree). Reused fast-path children captured getMarkdownTheme() at

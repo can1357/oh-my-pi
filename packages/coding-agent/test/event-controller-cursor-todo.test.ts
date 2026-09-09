@@ -1,10 +1,13 @@
-import { afterAll, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
+import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
+import type { Component } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -16,60 +19,46 @@ afterAll(() => {
 	resetSettingsForTest();
 });
 
-interface Fixture {
-	ctx: InteractiveModeContext;
-	controller: EventController;
-	showWarning: Mock<InteractiveModeContext["showWarning"]>;
-	/** Components the controller committed to the transcript, in order. */
-	blocks: unknown[];
+function createFixture() {
+	const ctx = createInteractiveModeContext({
+		streamingComponent: new AssistantMessageComponent(),
+	});
+	const blocks: Component[] = [];
+	const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
+	vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(block => {
+		blocks.push(block);
+		addChild(block);
+	});
+	return { ctx, controller: new EventController(ctx), showWarning: vi.spyOn(ctx, "showWarning"), blocks };
 }
 
-function createFixture(): Fixture {
-	const showWarning = vi.fn();
-	const blocks: unknown[] = [];
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
-		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn() },
-		session: { isAborting: false },
-		settings: { get: () => false },
-		updateEditorTopBorder: vi.fn(),
-		clearPinnedError: vi.fn(),
-		ensureLoadingAnimation: vi.fn(),
-		noteDisplayableThinkingContent: () => false,
-		effectiveHideThinkingBlock: false,
-		// A live streaming component: the streamed toolCall block path
-		// (`#handleMessageUpdate`) only runs while one exists.
-		streamingComponent: { setHideThinkingBlock: vi.fn(), markTranscriptBlockFinalized: vi.fn() },
-		streamingMessage: undefined,
-		viewSession: { isStreaming: false, getToolByName: () => undefined, hasBuiltInTool: () => true },
-		sessionManager: { getCwd: () => "/tmp" },
-		chatContainer: {
-			addChild: (block: unknown) => blocks.push(block),
-			removeChild: vi.fn(),
-			isBlockUncommitted: () => false,
-		},
-		toolOutputExpanded: false,
-		setTodos: vi.fn(),
-		present: vi.fn(),
-		showWarning,
-	} as unknown as InteractiveModeContext;
-	return { ctx, controller: new EventController(ctx), showWarning, blocks };
+function expectRetirableResult(block: Component): void {
+	const transcript = new TranscriptContainer();
+	transcript.addChild(block);
+	const batch = transcript.peekFinalizedBatch(80, 0);
+	const retired = Bun.stripANSI(batch?.rows.join("\n") ?? "");
+	expect(retired).toContain("done");
+	expect(retired).not.toContain("running");
 }
 
-/** A cumulative `message_update` whose content carries the streamed todo toolCall block. */
-function streamedTodoBlock(toolCallId: string): Extract<AgentSessionEvent, { type: "message_update" }> {
+/** A cumulative `message_update` carrying one streamed tool-call block. */
+function streamedToolBlock(
+	toolCallId: string,
+	toolName: string,
+	args: Record<string, unknown>,
+): Extract<AgentSessionEvent, { type: "message_update" }> {
 	return {
 		type: "message_update",
 		assistantMessageEvent: { type: "toolcall_start" },
 		message: {
 			role: "assistant",
-			content: [{ type: "toolCall", id: toolCallId, name: "todo", arguments: { todos: [] } }],
+			content: [{ type: "toolCall", id: toolCallId, name: toolName, arguments: args }],
 		},
 	} as unknown as Extract<AgentSessionEvent, { type: "message_update" }>;
+}
+
+function streamedTodoBlock(toolCallId: string): Extract<AgentSessionEvent, { type: "message_update" }> {
+	return streamedToolBlock(toolCallId, "todo", { todos: [] });
 }
 
 function todoEnd(
@@ -83,6 +72,25 @@ function todoEnd(
 		isError: false,
 		result: { content: [{ type: "text", text: "" }], details: { phases } },
 	} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
+}
+
+function evalEnd(toolCallId: string): Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
+	return {
+		type: "tool_execution_end",
+		toolCallId,
+		toolName: "eval",
+		isError: false,
+		result: { content: [{ type: "text", text: "done" }] },
+	} as Extract<AgentSessionEvent, { type: "tool_execution_end" }>;
+}
+
+function evalStart(toolCallId: string): Extract<AgentSessionEvent, { type: "tool_execution_start" }> {
+	return {
+		type: "tool_execution_start",
+		toolCallId,
+		toolName: "eval",
+		args: { language: "py", code: "print('done')" },
+	} as Extract<AgentSessionEvent, { type: "tool_execution_start" }>;
 }
 
 function todoFailure(text: string): Extract<AgentSessionEvent, { type: "tool_execution_end" }> {
@@ -117,6 +125,7 @@ describe("EventController + Cursor todo bridge", () => {
 		// The prefix is ours and fixed; only the untrusted tail is bounded.
 		expect(message.startsWith("Todo update failed: ")).toBe(true);
 		expect(Bun.stringWidth(message.slice("Todo update failed: ".length))).toBeLessThanOrEqual(TRUNCATE_LENGTHS.LINE);
+		expect(f.showWarning.mock.calls[0]![1]).toEqual({ hideWithToolActivity: true });
 	});
 
 	it("keeps the standalone hint when the failure carries no text", async () => {
@@ -126,7 +135,9 @@ describe("EventController + Cursor todo bridge", () => {
 
 		await f.controller.handleEvent(todoFailure(""));
 
-		expect(f.showWarning).toHaveBeenCalledWith("Todo update failed. Progress may be stale until todo succeeds.");
+		expect(f.showWarning).toHaveBeenCalledWith("Todo update failed. Progress may be stale until todo succeeds.", {
+			hideWithToolActivity: true,
+		});
 	});
 
 	it("settles a card whose completion arrived before the streamed block created it", async () => {
@@ -153,6 +164,36 @@ describe("EventController + Cursor todo bridge", () => {
 		expect(f.ctx.pendingTools.size).toBe(0);
 		// The mirror still ran: settling must not cost the panel refresh.
 		expect(f.ctx.setTodos).toHaveBeenCalledWith(phases);
+	});
+
+	it("settles a fast eval completion that outruns its streamed block", async () => {
+		const f = createFixture();
+
+		await f.controller.handleEvent(evalEnd("eval-call-1"));
+		await f.controller.handleEvent(
+			streamedToolBlock("eval-call-1", "eval", { language: "py", code: "print('done')" }),
+		);
+
+		expect(f.blocks).toHaveLength(1);
+		expect(f.ctx.pendingTools.size).toBe(0);
+		const block = f.blocks[0]!;
+		expect(block).toHaveProperty("isTranscriptBlockFinalized");
+		expect((block as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(true);
+		expectRetirableResult(block);
+	});
+
+	it("settles a held completion when execution start creates the card", async () => {
+		const f = createFixture();
+
+		await f.controller.handleEvent(evalEnd("eval-call-1"));
+		await f.controller.handleEvent(evalStart("eval-call-1"));
+
+		expect(f.blocks).toHaveLength(1);
+		expect(f.ctx.pendingTools.size).toBe(0);
+		const block = f.blocks[0]!;
+		expect(block).toHaveProperty("isTranscriptBlockFinalized");
+		expect((block as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(true);
+		expectRetirableResult(block);
 	});
 
 	it("fires the failure warning exactly once when a failed completion is replayed", async () => {

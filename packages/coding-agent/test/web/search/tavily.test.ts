@@ -214,4 +214,35 @@ describe("Tavily searchTavily request shape (integration)", () => {
 		expect(capturedBodies[1]).not.toHaveProperty("end_date");
 		expect(response.sources).toHaveLength(1);
 	});
+
+	it("ignores malformed response fields while preserving valid results", async () => {
+		process.env.TAVILY_API_KEY = "test-key";
+		const fetchMock: FetchImpl = async () =>
+			new Response(
+				JSON.stringify({
+					answer: 42,
+					results: [
+						null,
+						{ title: 7, url: "https://example.com/valid", content: 99, published_date: false },
+						{ title: "Missing URL" },
+					],
+					request_id: 123,
+				}),
+				{ status: 200, headers: { "Content-Type": "application/json" } },
+			);
+
+		const response = await searchTavily({ ...makeParams("robust parsing"), fetch: fetchMock });
+
+		expect(response.answer).toBeUndefined();
+		expect(response.requestId).toBeUndefined();
+		expect(response.sources).toEqual([
+			{
+				title: "https://example.com/valid",
+				url: "https://example.com/valid",
+				snippet: undefined,
+				publishedDate: undefined,
+				ageSeconds: undefined,
+			},
+		]);
+	});
 });

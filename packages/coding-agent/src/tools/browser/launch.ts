@@ -76,40 +76,90 @@ const USER_AGENT_TARGET_TYPES = new Set(["page", "webview", "background_page"]);
 const PUPPETEER_SOURCE_URL_SUFFIX = "//# sourceURL=__puppeteer_evaluation_script__";
 
 /**
- * Lazy-import puppeteer from a safe CWD so cosmiconfig doesn't choke
- * on malformed package.json files in the user's project tree.
- *
- * Dynamic import is required because puppeteer-core probes the cwd at module
- * load time; we must `process.chdir` to a safe scratch dir before loading and
- * restore cwd afterwards. A static import would run at module-init time before
- * cwd is safe.
+ * Lazy-import puppeteer while hiding the user's cwd from cosmiconfig. The
+ * import must not change the filesystem cwd: it is awaited and callers
+ * continue running on the main thread while it is pending.
  */
+let puppeteerCwdFailed = false;
+let puppeteerCwdFailure: unknown;
+async function importPuppeteerWithSafeCwd(safeDir: string): Promise<typeof Puppeteer> {
+	const cwdDescriptor = Object.getOwnPropertyDescriptor(process, "cwd");
+	if (!cwdDescriptor || typeof cwdDescriptor.value !== "function") {
+		throw new Error("Unable to safely override process.cwd for Puppeteer import");
+	}
+
+	try {
+		Object.defineProperty(process, "cwd", { ...cwdDescriptor, value: () => safeDir });
+	} catch (overrideFailure) {
+		puppeteerCwdFailed = true;
+		puppeteerCwdFailure = overrideFailure;
+		throw overrideFailure;
+	}
+	let loaded: typeof Puppeteer | undefined;
+	let importFailure: unknown;
+	let importFailed = false;
+	let restorationFailure: unknown;
+	let restorationFailed = false;
+	try {
+		try {
+			// Dynamic import is intentional: Puppeteer probes cwd during module initialization.
+			loaded = (await import("puppeteer-core")).default;
+		} catch (error) {
+			importFailed = true;
+			importFailure = error;
+		}
+	} finally {
+		try {
+			Object.defineProperty(process, "cwd", cwdDescriptor);
+		} catch (error) {
+			restorationFailed = true;
+			restorationFailure = error;
+		}
+	}
+	if (restorationFailed) {
+		const failure = importFailed
+			? new AggregateError([importFailure, restorationFailure], "Puppeteer import and cwd restoration failed")
+			: restorationFailure;
+		puppeteerCwdFailed = true;
+		puppeteerCwdFailure = failure;
+		throw failure;
+	}
+	if (importFailed) throw importFailure;
+	return loaded!;
+}
+
 let puppeteerModule: typeof Puppeteer | undefined;
+let puppeteerLoadPromise: Promise<typeof Puppeteer> | undefined;
+async function loadPuppeteerImport(safeDir: string, prepareSafeDir: boolean): Promise<typeof Puppeteer> {
+	if (puppeteerCwdFailed) throw puppeteerCwdFailure;
+	let loading = puppeteerLoadPromise;
+	if (!loading) {
+		loading = (async () => {
+			if (prepareSafeDir) await Bun.write(path.join(safeDir, "package.json"), "{}");
+			return importPuppeteerWithSafeCwd(safeDir);
+		})();
+		puppeteerLoadPromise = loading;
+	}
+	try {
+		return await loading;
+	} finally {
+		if (puppeteerLoadPromise === loading) puppeteerLoadPromise = undefined;
+	}
+}
+
 export async function loadPuppeteer(): Promise<typeof Puppeteer> {
 	if (puppeteerModule) return puppeteerModule;
-	const prev = process.cwd();
-	const safeDir = getPuppeteerDir();
-	await Bun.write(path.join(safeDir, "package.json"), "{}");
-	try {
-		process.chdir(safeDir);
-		puppeteerModule = (await import("puppeteer-core")).default;
-		return puppeteerModule;
-	} finally {
-		process.chdir(prev);
-	}
+	const loaded = await loadPuppeteerImport(getPuppeteerDir(), true);
+	puppeteerModule = loaded;
+	return loaded;
 }
 
 let puppeteerModuleWorker: typeof Puppeteer | undefined;
 export async function loadPuppeteerInWorker(safeDir: string): Promise<typeof Puppeteer> {
 	if (puppeteerModuleWorker) return puppeteerModuleWorker;
-	const orig = process.cwd;
-	Object.defineProperty(process, "cwd", { value: () => safeDir, configurable: true });
-	try {
-		puppeteerModuleWorker = (await import("puppeteer-core")).default;
-		return puppeteerModuleWorker;
-	} finally {
-		Object.defineProperty(process, "cwd", { value: orig, configurable: true });
-	}
+	const loaded = await loadPuppeteerImport(safeDir, false);
+	puppeteerModuleWorker = loaded;
+	return loaded;
 }
 
 let browsersModule: typeof BrowsersNs | undefined;
@@ -121,23 +171,36 @@ async function loadBrowsers(): Promise<typeof BrowsersNs> {
 }
 
 /**
- * Resolve the Chromium executable puppeteer will launch, honoring
- * PUPPETEER_EXECUTABLE_PATH before system browser detection and lazily
- * downloading Chromium otherwise. The browser is cached under
- * ~/.omp/puppeteer (getPuppeteerDir). Returns undefined when platform
- * detection fails (puppeteer default resolution takes over). Exported so
- * real-browser tests can probe launchability and skip on hosts missing
- * Chrome's system libraries.
+ * Resolve the Chromium executable puppeteer will launch.
+ *
+ * `PUPPETEER_EXECUTABLE_PATH` always wins. On macOS the isolated Chrome for
+ * Testing binary is preferred over a detected system Chrome: a headless
+ * daemon launched from a system `Google Chrome.app` bundle shares its
+ * LaunchServices bundle identity (`com.google.Chrome`), so macOS can deliver
+ * the user's open-URL Apple Events to the daemon and silently swallow their
+ * link clicks (#8673). Chrome for Testing uses a dedicated bundle id
+ * (`com.google.chrome.for.testing`) that is never a user's default handler;
+ * system Chrome is used on macOS only when Chrome for Testing cannot be
+ * obtained. Other platforms keep the download-avoiding system Chrome
+ * preference and fall back to Chrome for Testing. The managed browser is
+ * cached under ~/.omp/puppeteer (getPuppeteerDir). Returns undefined when
+ * platform detection fails (puppeteer default resolution takes over).
+ * Exported so real-browser tests can probe launchability and skip on hosts
+ * missing Chrome's system libraries.
  */
 let chromiumExecutablePromise: Promise<string | undefined> | undefined;
 export async function ensureChromiumExecutable(): Promise<string | undefined> {
 	const envPath = process.env.PUPPETEER_EXECUTABLE_PATH;
 	if (envPath) return envPath;
-	const sysChrome = await resolveSystemChromium();
-	if (sysChrome) return sysChrome;
-	if (chromiumExecutablePromise) return chromiumExecutablePromise;
+	// macOS: never route a background daemon through the user's GUI Chrome
+	// bundle; prefer the isolated Chrome for Testing binary instead (#8673).
+	const preferManagedChromium = process.platform === "darwin";
+	if (!preferManagedChromium) {
+		const sysChrome = await resolveSystemChromium();
+		if (sysChrome) return sysChrome;
+	}
 
-	chromiumExecutablePromise = (async () => {
+	chromiumExecutablePromise ??= (async () => {
 		const browsers = await loadBrowsers();
 		const platform = browsers.detectBrowserPlatform();
 		if (!platform) {
@@ -185,7 +248,23 @@ export async function ensureChromiumExecutable(): Promise<string | undefined> {
 				"Set PUPPETEER_EXECUTABLE_PATH to use an existing Chrome/Chromium binary, or install one manually.",
 		);
 	});
-	return chromiumExecutablePromise;
+
+	try {
+		return await chromiumExecutablePromise;
+	} catch (err) {
+		if (!preferManagedChromium) throw err;
+		// Chrome for Testing could not be obtained on macOS; degrade to the
+		// system Chrome bundle rather than leaving the browser tool unusable.
+		const sysChrome = await resolveSystemChromium();
+		if (!sysChrome) throw err;
+		logger.warn(
+			"Chrome for Testing unavailable; falling back to the system Chrome bundle. On macOS this can let the " +
+				"headless browser daemon capture your link clicks (#8673). Set PUPPETEER_EXECUTABLE_PATH to a " +
+				"dedicated Chromium to avoid this.",
+			{ path: sysChrome, error: (err as Error).message },
+		);
+		return sysChrome;
+	}
 }
 
 let resolvedChromium: string | null | undefined; // undefined = unchecked; null = not found
@@ -204,6 +283,15 @@ function isExecutableFile(p: string): boolean {
 
 async function isChromiumExecutable(p: string): Promise<boolean> {
 	if (!isExecutableFile(p)) return false;
+	// The version probe below launches the candidate. It exists to reject
+	// non-Chromium `chrome`/`chromium` wrapper scripts that appear on a Linux
+	// PATH (ecb22957, "validate Linux browser executables"). On Windows and
+	// macOS the candidates are fixed GUI application paths, not PATH wrappers,
+	// and executing them is harmful: a GUI `chrome.exe --version` does not print
+	// to a detached stdout and can hand off to the user's running instance,
+	// opening/activating a normal browser window (#8445). Confine the probe to
+	// Linux and trust the executable-file check elsewhere.
+	if (process.platform !== "linux") return true;
 	try {
 		const probeTimeoutMs = 3000;
 		const proc = Bun.spawn([p, "--version"], {
@@ -421,8 +509,8 @@ export interface SharedBrowserLaunchSpec {
  * Resolve the executable and complete argv for a shared Chromium the daemon
  * broker spawns directly (no puppeteer inside the broker). Mirrors
  * `launchHeadlessBrowser` flag assembly — puppeteer's default args minus the
- * stealth-suppressed set — plus `--remote-debugging-port=0` so every client
- * attaches over CDP. Returns null when no Chromium executable resolves;
+ * stealth-suppressed set — suppresses Puppeteer's unowned startup window, and
+ * exposes CDP on an ephemeral port. Returns null when no executable resolves;
  * callers fall back to a process-local launch.
  */
 export async function resolveSharedBrowserLaunchSpec(opts: {
@@ -442,7 +530,7 @@ export async function resolveSharedBrowserLaunchSpec(opts: {
 	});
 	return {
 		executablePath,
-		args: [...defaults.filter(arg => !ignored.has(arg)), "--remote-debugging-port=0"],
+		args: [...defaults.filter(arg => !ignored.has(arg)), "--no-startup-window", "--remote-debugging-port=0"],
 	};
 }
 

@@ -741,7 +741,7 @@ fn process_input(
 		return Ok(result);
 	}
 
-	if !options.no_run_if_empty || have_pending_command {
+	if have_pending_command || (!options.no_run_if_empty && builder_options.replace.is_none()) {
 		result.combine(current_builder.execute(host)?);
 	}
 
@@ -1466,6 +1466,12 @@ mod tests {
 		let (code, out, _) = run_simple(&[], "");
 		assert_eq!(code, 0);
 		assert_eq!(out, "\n");
+	}
+
+	#[test]
+	fn replace_mode_skips_empty_input_without_r() {
+		let result = run_simple(&["-I", "{}", "echo", "{}"], "");
+		assert_eq!(result, (0, String::new(), String::new()));
 	}
 
 	#[test]

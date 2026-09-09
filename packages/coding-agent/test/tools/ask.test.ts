@@ -1,4 +1,4 @@
-import { beforeAll, describe, expect, it, vi } from "bun:test";
+import { beforeAll, describe, expect, it, spyOn, vi } from "bun:test";
 import { stripVTControlCharacters } from "node:util";
 import { type } from "@oh-my-pi/omptype";
 import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
@@ -8,10 +8,11 @@ import type {
 	ExtensionAskDialogResult,
 	ExtensionUISelectItem,
 } from "@oh-my-pi/pi-coding-agent/extensibility/extensions";
-import { getThemeByName, initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { getThemeByName, initTheme, type Theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { AskTool, askToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/ask";
 import { ToolAbortError } from "@oh-my-pi/pi-coding-agent/tools/tool-errors";
+import { TERMINAL } from "@oh-my-pi/pi-tui";
 
 function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
@@ -21,6 +22,7 @@ function createSession(overrides: Partial<ToolSession> = {}): ToolSession {
 		getSessionSpawns: () => "*",
 		settings: Settings.isolated(),
 		...overrides,
+		canPromptUser: overrides.canPromptUser ?? overrides.hasUI ?? true,
 	};
 }
 
@@ -78,8 +80,13 @@ function selectItemLabel(option: ExtensionUISelectItem | undefined): string | un
 	return typeof option === "string" ? option : option?.label;
 }
 
+let darkTheme: Theme;
+
 beforeAll(async () => {
 	await initTheme(false);
+	const loadedTheme = await getThemeByName("dark");
+	if (!loadedTheme) throw new Error("Expected dark theme");
+	darkTheme = loadedTheme;
 });
 
 describe("AskTool cancellation", () => {
@@ -188,8 +195,6 @@ describe("AskTool cancellation", () => {
 				options: ExtensionUISelectItem[],
 				dialogOptions?: { initialIndex?: number; timeout?: number; onTimeout?: () => void },
 			) => {
-				const timeout = dialogOptions?.timeout ?? 1;
-				await Bun.sleep(timeout + 5);
 				dialogOptions?.onTimeout?.();
 				const selected = options[dialogOptions?.initialIndex ?? 0];
 				return typeof selected === "string" ? selected : selected?.label;
@@ -238,8 +243,6 @@ describe("AskTool cancellation", () => {
 		const abort = vi.fn();
 		const context = createContext({
 			select: async (_prompt, _options, dialogOptions) => {
-				const timeout = dialogOptions?.timeout ?? 1;
-				await Bun.sleep(timeout + 5);
 				dialogOptions?.onTimeout?.();
 				return undefined;
 			},
@@ -462,8 +465,7 @@ describe("AskTool option descriptions", () => {
 	});
 
 	it("renders descriptions under labels in ask call previews", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderCall(
 			{
 				question: "How should authentication continue?",
@@ -940,8 +942,7 @@ describe("AskTool custom input", () => {
 		expect(result.content[0].text).toContain("alpha");
 		expect(result.content[0].text).toContain("custom detail");
 
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme!);
 		const renderedText = stripAnsi(rendered.render(120).join("\n"));
 		expect(renderedText).toContain("alpha");
@@ -1028,8 +1029,7 @@ describe("AskTool multiline custom input rendering", () => {
 
 		expect(result.details?.customInput).toBe(multilineText);
 
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme!);
 		const renderedText = stripAnsi(rendered.render(120).join("\n"));
 
@@ -1083,8 +1083,7 @@ describe("AskTool multiline custom input rendering", () => {
 			context,
 		);
 
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderResult(result, { expanded: true, isPartial: false }, theme!);
 		const renderedText = stripAnsi(rendered.render(120).join("\n"));
 
@@ -1338,8 +1337,7 @@ describe("AskTool multi-question navigation", () => {
 
 describe("AskTool option markers", () => {
 	it("renders single-choice call options with circular radio markers, not checkboxes", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderCall(
 			{ question: "Pick one", options: [{ label: "Alpha" }, { label: "Beta" }] },
 			{ expanded: true, isPartial: false },
@@ -1351,8 +1349,7 @@ describe("AskTool option markers", () => {
 	});
 
 	it("renders multi-select call options with rectangular checkbox markers, not radios", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderCall(
 			{ question: "Pick many", options: [{ label: "Alpha" }, { label: "Beta" }], multi: true },
 			{ expanded: true, isPartial: false },
@@ -1364,8 +1361,7 @@ describe("AskTool option markers", () => {
 	});
 
 	it("keeps option rows stable across repeated renders", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const options = [
 			{ label: "TypeScript" },
 			{ label: "Rust" },
@@ -1416,8 +1412,7 @@ describe("AskTool option markers", () => {
 	});
 
 	it("keeps single-question option rows stable across repeated renders", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		// The question body comes from the Markdown render cache, which returns
 		// the SAME array on every render of identical text at identical width.
 		// Appending option rows in place would poison that cached entry, so a
@@ -1451,8 +1446,7 @@ describe("AskTool option markers", () => {
 		expect(secondResult.match(/OptionDupCanary/g)?.length).toBe(1);
 	});
 	it("renders single-choice result selection with a filled radio marker", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "" }],
@@ -1467,8 +1461,7 @@ describe("AskTool option markers", () => {
 	});
 
 	it("renders multi-select result selections with checkbox markers", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderResult(
 			{
 				content: [{ type: "text", text: "" }],
@@ -1485,8 +1478,7 @@ describe("AskTool option markers", () => {
 
 describe("askToolRenderer malformed call args", () => {
 	it("renders double-encoded questions string instead of crashing the TUI", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		// Models occasionally JSON-encode the questions array as a string; a bare
 		// string passes a truthy `.length` check but has no `.map` (TUI crash).
 		const doubleEncoded = JSON.stringify([
@@ -1504,8 +1496,7 @@ describe("askToolRenderer malformed call args", () => {
 	});
 
 	it("falls back to the error frame for unparseable questions without throwing", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		for (const questions of ["[{trunc", 42, { 0: { id: "x" } }]) {
 			const rendered = askToolRenderer.renderCall(
 				{ questions } as never,
@@ -1518,8 +1509,7 @@ describe("askToolRenderer malformed call args", () => {
 	});
 
 	it("drops malformed question entries and option items while keeping valid ones", async () => {
-		const theme = await getThemeByName("dark");
-		expect(theme).toBeDefined();
+		const theme = darkTheme;
 		const rendered = askToolRenderer.renderCall(
 			{
 				questions: [
@@ -1598,6 +1588,50 @@ describe("AskTool rich ask dialog", () => {
 		});
 	});
 
+	it("does not emit terminal notifications for non-terminal prompt surfaces", async () => {
+		const sendNotification = spyOn(TERMINAL, "sendNotification").mockImplementation(() => {});
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "storage",
+					question: "Storage?",
+					options: ["SQLite", "PostgreSQL"],
+					multi: false,
+					selectedOptions: ["PostgreSQL"],
+				},
+			],
+		});
+		const tool = new AskTool(
+			createSession({
+				hasUI: false,
+				canPromptUser: true,
+				settings: Settings.isolated({ "ask.notify": "on" }),
+			}),
+		);
+
+		try {
+			await tool.execute(
+				"call-acp-dialog",
+				{
+					questions: [
+						{
+							id: "storage",
+							question: "Storage?",
+							options: [{ label: "SQLite" }, { label: "PostgreSQL" }],
+						},
+					],
+				},
+				undefined,
+				undefined,
+				createContext({ askDialog }),
+			);
+			expect(sendNotification).not.toHaveBeenCalled();
+		} finally {
+			sendNotification.mockRestore();
+		}
+	});
+
 	it("aborts and throws ToolAbortError when askDialog returns undefined", async () => {
 		const tool = new AskTool(createSession());
 		const abort = vi.fn();
@@ -1617,6 +1651,84 @@ describe("AskTool rich ask dialog", () => {
 		).rejects.toThrow(ToolAbortError);
 
 		expect(abort).toHaveBeenCalledTimes(1);
+	});
+
+	it("accepts an empty multi-select submission instead of aborting", async () => {
+		const tool = new AskTool(createSession());
+		const abort = vi.fn();
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Choose?",
+					options: ["A", "B"],
+					multi: true,
+					selectedOptions: [],
+					customInput: undefined,
+					timedOut: undefined,
+				},
+			],
+		});
+		const context = createContext({ askDialog, abort });
+
+		const result = await tool.execute(
+			"call-empty-multi",
+			{
+				questions: [{ id: "q1", question: "Choose?", options: [{ label: "A" }, { label: "B" }], multi: true }],
+			},
+			undefined,
+			undefined,
+			context,
+		);
+
+		expect(abort).not.toHaveBeenCalled();
+		expect(result.details?.selectedOptions).toEqual([]);
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") {
+			expect(stripAnsi(result.content[0].text)).toContain("User did not select any options");
+		}
+	});
+
+	it("formats an empty multi-select answer in a multi-question response as an empty selection", async () => {
+		const tool = new AskTool(createSession());
+		const askDialog = vi.fn().mockResolvedValue({
+			kind: "submit",
+			results: [
+				{
+					id: "q1",
+					question: "Choose any?",
+					options: ["A", "B"],
+					multi: true,
+					selectedOptions: [],
+				},
+				{
+					id: "q2",
+					question: "Choose one?",
+					options: ["C", "D"],
+					multi: false,
+					selectedOptions: ["C"],
+				},
+			],
+		});
+
+		const result = await tool.execute(
+			"call-empty-multi-among-many",
+			{
+				questions: [
+					{ id: "q1", question: "Choose any?", options: [{ label: "A" }, { label: "B" }], multi: true },
+					{ id: "q2", question: "Choose one?", options: [{ label: "C" }, { label: "D" }] },
+				],
+			},
+			undefined,
+			undefined,
+			createContext({ askDialog }),
+		);
+
+		expect(result.content[0]?.type).toBe("text");
+		if (result.content[0]?.type === "text") {
+			expect(stripAnsi(result.content[0].text)).toBe("User answers:\nq1: []\nq2: C");
+		}
 	});
 
 	it("returns chat redirect result when askDialog returns kind chat", async () => {

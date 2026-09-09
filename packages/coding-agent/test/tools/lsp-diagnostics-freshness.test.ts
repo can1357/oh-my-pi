@@ -4,6 +4,7 @@ import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createLspWritethrough, type FileDiagnosticsResult, FileFormatResult } from "@oh-my-pi/pi-coding-agent/lsp";
 import * as lspClient from "@oh-my-pi/pi-coding-agent/lsp/client";
 import * as lspConfig from "@oh-my-pi/pi-coding-agent/lsp/config";
+import { formatContent } from "@oh-my-pi/pi-coding-agent/lsp/diagnostics";
 import type { Diagnostic, LinterClient, LspClient, ServerConfig } from "@oh-my-pi/pi-coding-agent/lsp/types";
 import { EquivalentUriMap, fileToUri } from "@oh-my-pi/pi-coding-agent/lsp/utils";
 import type { DeferredDiagnosticsEntry, ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
@@ -140,7 +141,7 @@ describe("LSP diagnostics freshness", () => {
 		});
 		const result = await writethrough(filePath, ".section {}\n");
 
-		expect(result).toBeUndefined();
+		expect(result.finalContent).toBe(".section {}\n");
 		expect(await Bun.file(filePath).text()).toBe(".section {}\n");
 		expect(notify).toHaveBeenCalledWith(
 			tempDir.path(),
@@ -164,7 +165,7 @@ describe("LSP diagnostics freshness", () => {
 		});
 		const result = await writethrough(filePath, "export const value = 1;\n");
 
-		expect(result).toBeUndefined();
+		expect(result.finalContent).toBe("export const value = 1;\n");
 		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
 		expect(notify).toHaveBeenCalledWith(
 			tempDir.path(),
@@ -198,11 +199,53 @@ describe("LSP diagnostics freshness", () => {
 		});
 		const result = await writethrough(filePath, "export const value=1\n");
 
-		expect(result?.formatter).toBe(FileFormatResult.FORMATTED);
+		expect(result?.diagnostics?.formatter).toBe(FileFormatResult.FORMATTED);
 		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
 		expect(getOrCreate).not.toHaveBeenCalled();
 		expect(sync).not.toHaveBeenCalled();
 		expect(notifySaved).not.toHaveBeenCalled();
+	});
+	it("reports a rejected custom formatter instead of unchanged formatting", async () => {
+		const filePath = path.join(tempDir.path(), "format-failure.ts");
+		const formatter = createFormatter(async () => {
+			throw new Error("formatter crashed");
+		});
+		vi.spyOn(lspConfig, "loadConfig").mockReturnValue({ servers: {}, idleTimeoutMs: undefined });
+		vi.spyOn(lspConfig, "getServersForFile").mockReturnValue([["broken-formatter", formatter]]);
+		vi.spyOn(lspClient, "notifyWorkspaceWatchedFiles").mockResolvedValue();
+
+		const writethrough = createLspWritethrough(tempDir.path(), {
+			enableFormat: true,
+			enableDiagnostics: false,
+		});
+		const content = "export const value=1\n";
+		const result = await writethrough(filePath, content);
+
+		expect(result?.diagnostics?.formatter).toBe(FileFormatResult.FAILED);
+		expect(await Bun.file(filePath).text()).toBe(content);
+	});
+
+	it("keeps an earlier formatter failure when a later server is unsupported", async () => {
+		const failedClient = createClient(tempDir.path(), { ...TEST_SERVER, command: "capable" });
+		failedClient.serverCapabilities = { documentFormattingProvider: true };
+		const unsupportedClient = createClient(tempDir.path(), { ...TEST_SERVER, command: "unsupported" });
+		unsupportedClient.serverCapabilities = {};
+		vi.spyOn(lspClient, "getOrCreateClient").mockImplementation(async config =>
+			config.command === "capable" ? failedClient : unsupportedClient,
+		);
+		const sendRequest = vi.spyOn(lspClient, "sendRequest").mockRejectedValue(new Error("formatter crashed"));
+		const content = "export const value=1\n";
+		const failed = await formatContent(path.join(tempDir.path(), "failed.ts"), content, tempDir.path(), [
+			["capable", failedClient.config],
+			["unsupported", unsupportedClient.config],
+		]);
+		const unsupported = await formatContent(path.join(tempDir.path(), "unsupported.ts"), content, tempDir.path(), [
+			["unsupported", unsupportedClient.config],
+		]);
+
+		expect(failed).toEqual({ content, failed: true, unsupported: false });
+		expect(unsupported).toEqual({ content, failed: false, unsupported: true });
+		expect(sendRequest).toHaveBeenCalledTimes(1);
 	});
 
 	it("keeps an already-running LSP client synchronized after custom formatting", async () => {
@@ -302,8 +345,8 @@ describe("LSP diagnostics freshness", () => {
 		});
 		const result = await writethrough(filePath, "export const value=1\n");
 
-		expect(result?.formatter).toBe(FileFormatResult.FORMATTED);
-		expect(result?.messages).toEqual([]);
+		expect(result?.diagnostics?.formatter).toBe(FileFormatResult.FORMATTED);
+		expect(result?.diagnostics?.messages).toEqual([]);
 		expect(await Bun.file(filePath).text()).toBe("export const value = 1;\n");
 	});
 
@@ -345,7 +388,7 @@ describe("LSP diagnostics freshness", () => {
 			flush: true,
 		});
 
-		expect(result?.summary).toBe("no issues");
+		expect(result.diagnostics?.summary).toBe("no issues");
 		expect(events[0]).toBe(`watched:probe.module.scss:${lspClient.FileChangeType.Created}`);
 		expect(notifySignals.some(signal => signal instanceof AbortSignal)).toBe(true);
 		expect(events).toContain("sync:probe.tsx");
@@ -389,9 +432,9 @@ describe("LSP diagnostics freshness", () => {
 		const result = await writethrough(filePath, "export const value = 2;\n");
 
 		expect(result).toBeDefined();
-		expect(result?.messages).toEqual([]);
-		expect(result?.summary).toBe("OK");
-		expect(result?.errored).toBe(false);
+		expect(result?.diagnostics?.messages).toEqual([]);
+		expect(result?.diagnostics?.summary).toBe("OK");
+		expect(result?.diagnostics?.errored).toBe(false);
 		expect(await Bun.file(filePath).text()).toBe("export const value = 2;\n");
 	});
 
@@ -433,9 +476,9 @@ describe("LSP diagnostics freshness", () => {
 		const result = await writethrough(filePath, "export const value: number = 'x';\n");
 
 		expect(result).toBeDefined();
-		expect(result?.errored).toBe(true);
-		expect(result?.messages.some(m => m.includes("real error"))).toBe(true);
-		expect(result?.messages.some(m => m.includes("stale error"))).toBe(false);
+		expect(result?.diagnostics?.errored).toBe(true);
+		expect(result?.diagnostics?.messages?.some(m => m.includes("real error"))).toBe(true);
+		expect(result?.diagnostics?.messages?.some(m => m.includes("stale error"))).toBe(false);
 	});
 
 	it("matches published diagnostics when the server renormalizes the document URI", async () => {
@@ -465,8 +508,8 @@ describe("LSP diagnostics freshness", () => {
 		});
 		const result = await writethrough(filePath, "export const value = missing;\n");
 
-		expect(result?.errored).toBe(true);
-		expect(result?.messages.some(message => message.includes("renormalized URI error"))).toBe(true);
+		expect(result?.diagnostics?.errored).toBe(true);
+		expect(result?.diagnostics?.messages?.some(message => message.includes("renormalized URI error"))).toBe(true);
 	});
 
 	it("matches Windows drive-letter case and percent-encoding differences", () => {
@@ -527,8 +570,8 @@ describe("LSP diagnostics freshness", () => {
 		);
 		deferredController.abort();
 
-		expect(inline?.errored).toBe(true);
-		expect(inline?.messages.some(message => message.includes("pull error"))).toBe(true);
+		expect(inline?.diagnostics?.errored).toBe(true);
+		expect(inline?.diagnostics?.messages?.some(message => message.includes("pull error"))).toBe(true);
 		expect(onDeferredDiagnostics).not.toHaveBeenCalled();
 	});
 
@@ -579,10 +622,8 @@ describe("LSP diagnostics freshness", () => {
 			() => handle,
 		);
 
-		// Inline returns undefined: the writethrough deferred rather than blocking on
-		// the slow publish. A result fresh within the inline budget would be returned
-		// inline, so `undefined` is proof it returned promptly via the deferred path.
-		expect(inline).toBeUndefined();
+		// The result carries the committed bytes while diagnostics may arrive later.
+		expect(inline.finalContent).toBe("export const value: number = 'x';\n");
 
 		// ...and the diagnostics arrive afterwards via the deferred channel.
 		const lateResult = await late.promise;
@@ -692,10 +733,10 @@ describe("LSP diagnostics freshness", () => {
 			const result = await writethrough(filePath, 'import { Database } from "bun:sqlite";\nawait Bun.sleep(1)\n');
 
 			expect(result).toBeDefined();
-			expect(result?.errored).toBe(true);
-			expect(result?.messages.some(message => message.includes("bun:sqlite"))).toBe(false);
-			expect(result?.messages.some(message => message.includes("Cannot find name 'Bun'"))).toBe(false);
-			expect(result?.messages.some(message => message.includes("';' expected."))).toBe(true);
+			expect(result?.diagnostics?.errored).toBe(true);
+			expect(result?.diagnostics?.messages?.some(message => message.includes("bun:sqlite"))).toBe(false);
+			expect(result?.diagnostics?.messages?.some(message => message.includes("Cannot find name 'Bun'"))).toBe(false);
+			expect(result?.diagnostics?.messages?.some(message => message.includes("';' expected."))).toBe(true);
 			expect(await Bun.file(filePath).text()).toBe('import { Database } from "bun:sqlite";\nawait Bun.sleep(1)\n');
 		} finally {
 			orphanDir.removeSync();

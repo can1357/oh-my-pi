@@ -1,6 +1,5 @@
 import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
-import * as os from "node:os";
 import * as path from "node:path";
 import type {
 	AssistantMessage,
@@ -13,6 +12,7 @@ import type {
 	UserMessage,
 } from "@oh-my-pi/pi-ai";
 import { isRecord } from "@oh-my-pi/pi-utils";
+import { resolveClaudePaths } from "../config/claude-paths";
 import { collectForeignJsonRecords, type ForeignJsonRecord, readForeignJsonRecords } from "./foreign-session-jsonl";
 import type { ForeignSessionInfo, ForeignSessionStore } from "./foreign-session-store";
 import type { ModelChangeEntry, SessionMessageEntry } from "./session-entries";
@@ -99,7 +99,8 @@ async function readHistoryIndex(file: string): Promise<Map<string, ClaudeHistory
 }
 
 async function readRegisteredProjects(root: string): Promise<string[]> {
-	const config = path.join(path.dirname(root), ".claude.json");
+	const { configDir, configFile } = resolveClaudePaths();
+	const config = root === configDir ? configFile : path.join(path.dirname(root), ".claude.json");
 	try {
 		const parsed: unknown = await Bun.file(config).json();
 		if (!isRecord(parsed) || !isRecord(parsed.projects)) return [];
@@ -306,7 +307,7 @@ export class ClaudeSessionStore implements ForeignSessionStore {
 	readonly #root: string;
 
 	/** Creates a store rooted at Claude's data directory, or at a fixture root when supplied. */
-	constructor(root: string = path.join(os.homedir(), ".claude")) {
+	constructor(root: string = resolveClaudePaths().configDir) {
 		this.#root = path.resolve(root);
 	}
 

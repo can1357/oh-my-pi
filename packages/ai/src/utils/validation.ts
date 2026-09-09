@@ -136,12 +136,20 @@ function tryCoerceBooleanToNumber(value: unknown, expectedTypes: string[]): { va
 	return { value: value ? 1 : 0, changed: true };
 }
 
-function tryCoerceString(value: unknown, expectedTypes: string[]): { value: unknown; changed: boolean } {
+function tryCoerceString(
+	value: unknown,
+	expectedTypes: string[],
+	allowLossy: boolean,
+): { value: unknown; changed: boolean } {
 	if (!expectedTypes.includes("string") || typeof value === "string" || value === null || value === undefined) {
 		return { value, changed: false };
 	}
 
 	if (Array.isArray(value) || typeof value === "object") {
+		// JSON.stringify is irreversible (downstream consumers receive encoded
+		// text where they expected structure), so it requires an authoritative
+		// diagnosis — never a union-branch guess.
+		if (!allowLossy) return { value, changed: false };
 		try {
 			const stringified = JSON.stringify(value);
 			if (stringified === undefined) return { value, changed: false };
@@ -158,7 +166,16 @@ function tryCoerceString(value: unknown, expectedTypes: string[]): { value: unkn
 	return { value: String(value), changed: true };
 }
 
-function tryCoerceForExpectedTypes(value: unknown, expectedTypes: string[]): { value: unknown; changed: boolean } {
+/**
+ * Schema-directed value repair for a single type issue. `allowLossy` gates the
+ * irreversible repairs (container→string stringification); lossless repairs
+ * (JSON parsing, boolean spellings, scalar stringification) always apply.
+ */
+function tryCoerceForExpectedTypes(
+	value: unknown,
+	expectedTypes: string[],
+	allowLossy: boolean,
+): { value: unknown; changed: boolean } {
 	if (typeof value === "string") {
 		const parsed = tryParseJsonForTypes(value, expectedTypes);
 		if (parsed.changed) return parsed;
@@ -171,7 +188,7 @@ function tryCoerceForExpectedTypes(value: unknown, expectedTypes: string[]): { v
 	const numericCoercion = tryCoerceBooleanToNumber(value, expectedTypes);
 	if (numericCoercion.changed) return numericCoercion;
 
-	return tryCoerceString(value, expectedTypes);
+	return tryCoerceString(value, expectedTypes, allowLossy);
 }
 
 function tryParseLeadingJsonContainer(value: string): unknown | undefined {
@@ -1360,6 +1377,184 @@ function normalizeSingleStringField(schema: unknown, value: unknown): { value: u
 	return { value, changed: false };
 }
 
+// ============================================================================
+// Flattened array-property normalization (LLM quirk).
+// ============================================================================
+//
+// Some providers (notably Gemini) serialize array arguments using flattened
+// property paths — `questions[0].id`, `questions[0].options[0].label`, ... —
+// instead of a nested `questions` array of objects. The schema sees only
+// unrecognized extra keys and rejects the call. This pass rebuilds the nested
+// structure before the schema ever runs.
+//
+// Conservative by design:
+//   - fires only when at least one key is a well-formed array-index path
+//     (`name[i]`, `name[i].prop`, `name[i][j]`, ...); plain keys and
+//     non-array dotted keys (`a.b`) never match;
+//   - aborts wholesale (returns unchanged) on any shape conflict so genuine
+//     schema mistakes still surface as validation errors;
+//   - array indices are capped so a runaway/hostile payload cannot allocate
+//     oversized arrays.
+// ============================================================================
+
+/** Cap on array indices accepted by the flattened-path parser. */
+const MAX_FLATTENED_INDEX = 100_000;
+
+interface FlattenedPathStep {
+	kind: "prop" | "index";
+	/** For `kind: "prop"` — the property name. */
+	name?: string;
+	/** For `kind: "index"` — the resolved array index. */
+	index: number;
+}
+
+interface ParsedFlattenedPath {
+	steps: FlattenedPathStep[];
+}
+
+const FLATTENED_IDENT_RE = /^[A-Za-z_$][A-Za-z0-9_$]*/;
+const FLATTENED_INDEX_RE = /^\[(\d+)\]/;
+
+/**
+ * Parse a single flattened array-path key into build steps. Returns `null` for
+ * keys that are not flattened array paths:
+ *   - no `[<digits>]` index anywhere (`questions`, `a.b`),
+ *   - a malformed or non-numeric index (`foo[bar]`),
+ *   - an index-first path (`[0].x`),
+ *   - an index outside the safety cap.
+ */
+function parseFlattenedPath(key: string): ParsedFlattenedPath | null {
+	if (key.length === 0) return null;
+	const steps: FlattenedPathStep[] = [];
+	// The path must start with a property name so `[0].x` / `[0]` are left alone.
+	const first = FLATTENED_IDENT_RE.exec(key);
+	if (!first) return null;
+	steps.push({ kind: "prop", name: first[0], index: 0 });
+	let pos = first[0].length;
+	let sawIndex = false;
+	while (pos < key.length) {
+		if (key[pos] === ".") {
+			pos++;
+			const m = FLATTENED_IDENT_RE.exec(key.slice(pos));
+			if (!m || m[0].length === 0) return null;
+			steps.push({ kind: "prop", name: m[0], index: 0 });
+			pos += m[0].length;
+			continue;
+		}
+		if (key[pos] === "[") {
+			const m = FLATTENED_INDEX_RE.exec(key.slice(pos));
+			if (!m) return null;
+			const index = Number(m[1]);
+			if (!Number.isSafeInteger(index) || index < 0 || index > MAX_FLATTENED_INDEX) return null;
+			steps.push({ kind: "index", index });
+			sawIndex = true;
+			pos += m[0].length;
+			continue;
+		}
+		// Any other character (lone `[foo]`, whitespace, invalid ident chars) is
+		// not a flattened array path.
+		return null;
+	}
+	if (!sawIndex) return null;
+	return { steps };
+}
+
+/**
+ * Write a leaf value into `root` along `steps`, creating intermediate objects
+ * and arrays as needed. Returns `false` (and leaves `root` in an undefined
+ * partial state — the caller aborts the whole normalization on that) when an
+ * existing node has a shape that contradicts the path.
+ */
+function buildFlattenedPath(root: Record<string, unknown>, steps: FlattenedPathStep[], value: unknown): boolean {
+	let node: unknown = root;
+	for (let i = 0; i < steps.length - 1; i++) {
+		const step = steps[i];
+		const nextIsArray = steps[i + 1].kind === "index";
+		if (step.kind === "prop") {
+			const obj = node as Record<string, unknown>;
+			if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return false;
+			const existing = Object.hasOwn(obj, step.name!) ? obj[step.name!] : undefined;
+			let child: unknown;
+			if (existing === undefined && !Object.hasOwn(obj, step.name!)) {
+				child = nextIsArray ? [] : {};
+			} else {
+				if (Array.isArray(existing) !== nextIsArray) return false;
+				child = existing;
+			}
+			// `defineProperty` so a decoded `__proto__` step becomes an own property.
+			Object.defineProperty(obj, step.name!, {
+				value: child,
+				writable: true,
+				enumerable: true,
+				configurable: true,
+			});
+			node = child;
+			continue;
+		}
+		const arr = node;
+		if (!Array.isArray(arr)) return false;
+		while (arr.length <= step.index) arr.push(undefined);
+		let child = arr[step.index];
+		if (child === undefined) {
+			child = nextIsArray ? [] : {};
+			arr[step.index] = child;
+		} else {
+			if (Array.isArray(child)) {
+				if (!nextIsArray) return false;
+			} else if (typeof child !== "object" || child === null) {
+				return false;
+			} else if (nextIsArray) {
+				return false;
+			}
+		}
+		node = child;
+	}
+	const last = steps[steps.length - 1];
+	if (last.kind === "prop") {
+		const obj = node as Record<string, unknown>;
+		if (obj === null || typeof obj !== "object" || Array.isArray(obj)) return false;
+		Object.defineProperty(obj, last.name!, {
+			value,
+			writable: true,
+			enumerable: true,
+			configurable: true,
+		});
+	} else {
+		const arr = node;
+		if (!Array.isArray(arr)) return false;
+		while (arr.length <= last.index) arr.push(undefined);
+		arr[last.index] = value;
+	}
+	return true;
+}
+
+/**
+ * Rebuild nested arrays/objects from LLM-emitted flattened property paths.
+ * See https://github.com/can1357/oh-my-pi/issues/8886.
+ */
+function normalizeFlattenedArrayProperties(value: unknown): { value: unknown; changed: boolean } {
+	if (!isPlainRecord(value)) return { value, changed: false };
+	const source = value as Record<string, unknown>;
+	const out: Record<string, unknown> = {};
+	let changed = false;
+	for (const [key, entry] of Object.entries(source)) {
+		const parsed = parseFlattenedPath(key);
+		if (!parsed) {
+			// Preserve non-flattened sibling keys. A plain key colliding with an
+			// already-built path is ambiguous — bail to the safer failure path so
+			// genuine schema mistakes still surface.
+			if (Object.hasOwn(out, key)) return { value, changed: false };
+			Object.defineProperty(out, key, { value: entry, writable: true, enumerable: true, configurable: true });
+			continue;
+		}
+		if (entry === undefined) continue;
+		if (!buildFlattenedPath(out, parsed.steps, entry)) return { value, changed: false };
+		changed = true;
+	}
+	if (!changed) return { value, changed: false };
+	return { value: out, changed: true };
+}
+
 // Validation issue → coercion bridge
 
 interface FlatIssue {
@@ -1398,9 +1593,11 @@ function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unkn
 	// a type coercion actually needs to write into a leaf.
 	let owned = false;
 	let nextArgs: unknown = args;
-
 	for (const issue of issues) {
+		// Failed union branches still contribute schema-directed type repairs.
+		// Container-to-string conversion remains enabled for string branches.
 		if (issue.keyword === "unrecognized") {
+			if (issue.unionBranch) continue;
 			const previous = nextArgs;
 			nextArgs = deleteValueAtPointer(nextArgs, issue.instancePath);
 			if (nextArgs !== previous) changed = true;
@@ -1410,7 +1607,7 @@ function coerceArgsFromIssues(args: unknown, issues: FlatIssue[]): { value: unkn
 		if (issue.expectedTypes.length === 0) continue;
 
 		const currentValue = getValueAtPointer(nextArgs, issue.instancePath);
-		const result = tryCoerceForExpectedTypes(currentValue, issue.expectedTypes);
+		const result = tryCoerceForExpectedTypes(currentValue, issue.expectedTypes, true);
 		let coercedValue = result.changed ? result.value : undefined;
 		if (
 			coercedValue === undefined &&
@@ -1762,6 +1959,16 @@ export function validateToolArguments(tool: Tool, toolCall: ToolCall): ToolCall[
 	const keyNormalization = normalizeDoubleEncodedKeys(normalizedArgs);
 	if (keyNormalization.changed) {
 		normalizedArgs = keyNormalization.value;
+		changed = true;
+	}
+
+	// Rebuild nested arrays/objects from flattened property paths some
+	// providers emit instead of real arrays (`questions[0].id`, ...). Runs
+	// after key unwrapping but before any schema pass so the validator sees the
+	// structurally correct payload.
+	const flattenedArgs = normalizeFlattenedArrayProperties(normalizedArgs);
+	if (flattenedArgs.changed) {
+		normalizedArgs = flattenedArgs.value;
 		changed = true;
 	}
 

@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
@@ -24,7 +24,7 @@ function pluginSkill(): Skill {
 	};
 }
 
-beforeEach(async () => {
+beforeAll(async () => {
 	tempDir = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "skill-contain-")));
 	pluginRoot = path.join(tempDir, "plugin");
 	skillDir = path.join(pluginRoot, "skills", "docs");
@@ -44,7 +44,7 @@ beforeEach(async () => {
 	await fs.symlink(path.join(tempDir, "not-created.md"), path.join(skillDir, "references", "dangle.md"));
 });
 
-afterEach(async () => {
+afterAll(async () => {
 	await fs.rm(tempDir, { recursive: true, force: true });
 });
 

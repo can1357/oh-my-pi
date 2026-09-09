@@ -7,7 +7,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent/modes/print-mode";
 import type { PlanModeState } from "@oh-my-pi/pi-coding-agent/plan-mode/state";
 import type { AgentSession, AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-import { type PlanProposalHandler, PROPOSE_DEVICE_NAME } from "@oh-my-pi/pi-coding-agent/tools/resolve";
+import type { PlanProposalHandler } from "@oh-my-pi/pi-coding-agent/tools/resolve";
 
 function makeAssistantMessage(text: string): AssistantMessage {
 	const timestamp = Date.now();
@@ -177,47 +177,38 @@ describe("print mode working indicator", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("enters default plan mode before submitting the initial prompt", async () => {
-		const delayed = createDelayedSession(makeAssistantMessage("plan ready"), { defaultPlanMode: true });
-		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "/plan hello" });
+	it("does not enter startup plan mode in headless print mode and warns instead (#8272)", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("final answer"), { defaultPlanMode: true });
+		const run = runPrintMode(delayed.session, { mode: "text", initialMessage: "Reply with exactly: OK" });
 
 		await delayed.promptStarted;
 		try {
-			expect(delayed.getPlanModeAtPrompt()).toMatchObject({
-				enabled: true,
-				planFilePath: "local://PLAN.md",
-			});
-			expect(delayed.getModeChanges()).toEqual([{ mode: "plan", data: { planFilePath: "local://PLAN.md" } }]);
-			const handler = delayed.getPlanProposalHandler();
-			if (!handler) throw new Error("Expected print plan proposal handler");
-			const proposal = await handler("hello");
-			expect(proposal).toMatchObject({
-				content: [{ type: "text", text: "Plan ready for review." }],
-				details: { planFilePath: "local://hello-plan.md", title: "hello", planExists: true },
-			});
-			expect(delayed.getCurrentPlanMode()).toMatchObject({ planFilePath: "local://hello-plan.md" });
-			expect(delayed.getModeChanges()).toEqual([
-				{ mode: "plan", data: { planFilePath: "local://PLAN.md" } },
-				{ mode: "plan", data: { planFilePath: "local://hello-plan.md" } },
-			]);
-			delayed.emit({
-				type: "tool_execution_end",
-				toolCallId: "proposal",
-				toolName: "write",
-				result: {
-					content: proposal.content,
-					details: {
-						xdev: {
-							tool: PROPOSE_DEVICE_NAME,
-							mode: "execute",
-							args: { title: "hello" },
-							inner: proposal.details,
-						},
-					},
-				},
-			});
-			await Promise.resolve();
-			expect(delayed.getAbortCalls()).toBe(1);
+			// Headless has no surface to review/approve/exit a plan, so the startup
+			// default must not arm the plan-review flow — doing so stranded the turn
+			// until the deadline (issue #8272).
+			expect(delayed.getPlanModeAtPrompt()).toBeUndefined();
+			expect(delayed.getModeChanges()).toEqual([]);
+			expect(delayed.getPlanProposalHandler()).toBeUndefined();
+			expect(stderrOutput.join("")).toContain("plan.defaultOnStartup is ignored in print mode");
+		} finally {
+			delayed.resolvePrompt();
+			await run;
+		}
+
+		expect(stdoutOutput.join("")).toBe("final answer\n");
+	});
+
+	it("suppresses the startup-default note when the headless plan flow is already active", async () => {
+		const delayed = createDelayedSession(makeAssistantMessage("final answer"), { defaultPlanMode: true });
+		const run = runPrintMode(delayed.session, {
+			mode: "text",
+			initialMessage: "Reply with exactly: OK",
+			planYolo: true,
+		});
+
+		await delayed.promptStarted;
+		try {
+			expect(stderrOutput.join("")).not.toContain("plan.defaultOnStartup");
 		} finally {
 			delayed.resolvePrompt();
 			await run;

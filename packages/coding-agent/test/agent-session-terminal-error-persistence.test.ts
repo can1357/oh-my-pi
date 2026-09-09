@@ -1,5 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "bun:test";
-import * as path from "node:path";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "bun:test";
 import { type } from "@oh-my-pi/omptype";
 import { Agent, type AgentMessage, type AgentTool } from "@oh-my-pi/pi-agent-core";
 import type { AssistantMessage } from "@oh-my-pi/pi-ai";
@@ -23,15 +22,24 @@ const failingTool: AgentTool<typeof failingToolSchema, Record<string, never>> = 
 	},
 };
 
-type Harness = { session: AgentSession; authStorage: AuthStorage; tempDir: TempDir };
+type Harness = { session: AgentSession; tempDir: TempDir };
 const activeHarnesses: Harness[] = [];
+let authStorage: AuthStorage;
+let modelRegistry: ModelRegistry;
+
+beforeAll(async () => {
+	authStorage = await AuthStorage.create(":memory:");
+	authStorage.setRuntimeApiKey("mock", "test-key");
+	modelRegistry = new ModelRegistry(authStorage);
+});
+
+afterAll(() => {
+	authStorage.close();
+});
 
 async function createHarness(responses: MockResponse[]): Promise<Harness & { sessionManager: SessionManager }> {
 	const tempDir = TempDir.createSync("@pi-terminal-error-persistence-");
-	const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
-	authStorage.setRuntimeApiKey("mock", "test-key");
 	const mock = createMockModel({ responses });
-	const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 	const settings = Settings.isolated({
 		"compaction.enabled": false,
 		"retry.enabled": false,
@@ -54,7 +62,7 @@ async function createHarness(responses: MockResponse[]): Promise<Harness & { ses
 		modelRegistry,
 		toolRegistry: new Map(tools.map(tool => [tool.name, tool])),
 	});
-	const harness = { session, authStorage, tempDir };
+	const harness = { session, tempDir };
 	activeHarnesses.push(harness);
 	return { ...harness, sessionManager };
 }
@@ -70,7 +78,6 @@ function persistedErrorTurns(sessionManager: SessionManager): AssistantMessage[]
 afterEach(async () => {
 	for (const harness of activeHarnesses.splice(0)) {
 		await harness.session.dispose();
-		harness.authStorage.close();
 		harness.tempDir.removeSync();
 	}
 	vi.restoreAllMocks();

@@ -47,6 +47,7 @@ describe("buildAvailableSlashCommands", () => {
 		expect(byName["reset-usage"]).toBeUndefined();
 
 		expect(byName.fast.description).toBe("Toggle fast mode");
+		expect(byName["extended-context"].description).toBe("Toggle extended context");
 		expect(byName["ext:hello"].description).toBe("Extension hello");
 		expect(byName["custom:hello"].description).toBe("Custom hello");
 		expect(byName["server:prompt"].description).toBe("MCP prompt");

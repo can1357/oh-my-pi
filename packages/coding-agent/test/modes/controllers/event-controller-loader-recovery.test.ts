@@ -1,14 +1,10 @@
-import { afterEach, beforeAll, beforeEach, describe, expect, it, type Mock, vi } from "bun:test";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
-
-interface FakeWorkingLoader {
-	stop: Mock<() => void>;
-	kind: "working";
-}
+import { Loader } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "../../helpers/interactive-mode-context";
 
 /**
  * Faithful model of the shared `statusContainer` + working-loader invariant that
@@ -26,76 +22,31 @@ interface FakeWorkingLoader {
  */
 function createContext(options: { terminalProgress?: boolean } = {}) {
 	const streamState = { isStreaming: false };
-	const children: unknown[] = [];
-	const statusContainer = {
-		children,
-		clear() {
-			children.length = 0;
-		},
-		disposeChildren() {
-			children.length = 0;
-		},
-		addChild(child: unknown) {
-			children.push(child);
-		},
-		removeChild(child: unknown) {
-			const index = children.indexOf(child);
-			if (index !== -1) children.splice(index, 1);
-		},
-	};
-	const workingLoaders: FakeWorkingLoader[] = [];
-	const setProgress = vi.fn();
-	const ctx = {
-		isInitialized: true,
-		settings: {
-			get: (path: string) => path === "terminal.showProgress" && options.terminalProgress === true,
-		},
-		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn(), markActivityEnd: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		flushPendingCommandOutput: vi.fn(),
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map<string, unknown>(),
-		hideThinkingBlock: false,
-		setWorkingMessage: vi.fn(),
-		clearPinnedError: vi.fn(),
-		loadingAnimation: undefined,
-		autoCompactionLoader: undefined,
-		retryLoader: undefined,
-		streamingComponent: undefined,
-		streamingMessage: undefined,
-		statusContainer,
-		chatContainer: { removeChild: vi.fn(), clear: vi.fn() },
-		flushPendingModelSwitch: vi.fn(async () => {}),
-		flushCompactionQueue: vi.fn(async () => {}),
-		rebuildChatFromMessages: vi.fn(),
-		reloadTodos: vi.fn(async () => {}),
-		showStatus: vi.fn(),
-		showWarning: vi.fn(),
-		showError: vi.fn(),
-		editor: { getText: () => "" },
-		sessionManager: { getSessionName: () => "test-session" },
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn(), terminal: { setProgress } },
-		viewSession: {
-			isCompacting: false,
-			getLastAssistantMessage: () => undefined,
-			get isStreaming() {
-				return streamState.isStreaming;
-			},
-		},
+	if (options.terminalProgress) settings.set("terminal.showProgress", true);
+	const setProgress = vi.fn((_active: boolean) => {});
+	const ctx = createInteractiveModeContext({
+		ui: { terminal: { setProgress } },
 		session: {
 			get isStreaming() {
 				return streamState.isStreaming;
 			},
-			getToolByName: () => undefined,
 		},
-	} as unknown as InteractiveModeContext;
+	});
+	const { statusContainer } = ctx;
+	const workingLoaders: Loader[] = [];
 	ctx.ensureLoadingAnimation = vi.fn(() => {
 		if (ctx.loadingAnimation) return;
 		statusContainer.clear();
-		const working: FakeWorkingLoader = { stop: vi.fn(), kind: "working" };
+		const working = new Loader(
+			ctx.ui,
+			text => text,
+			text => text,
+			"Working…",
+		);
+		vi.spyOn(working, "stop");
 		workingLoaders.push(working);
-		ctx.loadingAnimation = working as unknown as typeof ctx.loadingAnimation;
-		statusContainer.addChild(ctx.loadingAnimation);
+		ctx.loadingAnimation = working;
+		statusContainer.addChild(working);
 	});
 	return { ctx, streamState, statusContainer, workingLoaders, setProgress };
 }
@@ -154,7 +105,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		await controller.handleEvent(AGENT_START);
 		const firstWorking = workingLoaders[0];
 		expect(firstWorking).toBeDefined();
-		expect(statusContainer.children).toContain(ctx.loadingAnimation);
+		expect(statusContainer.children).toContain(ctx.loadingAnimation!);
 
 		// Overflow recovery hands the status container to the auto-compaction loader.
 		// The original turn's agent_end is held while the prompt is in flight, so the
@@ -174,7 +125,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		// status container so streaming shows "Working…" again (issue: it stayed gone).
 		await controller.handleEvent(AGENT_START);
 		expect(ctx.loadingAnimation).toBeDefined();
-		expect(statusContainer.children).toContain(ctx.loadingAnimation);
+		expect(statusContainer.children).toContain(ctx.loadingAnimation!);
 		expect(workingLoaders).toHaveLength(2);
 	});
 
@@ -184,7 +135,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 
 		await controller.handleEvent(AGENT_START);
 		const firstWorking = workingLoaders[0];
-		expect(statusContainer.children).toContain(ctx.loadingAnimation);
+		expect(statusContainer.children).toContain(ctx.loadingAnimation!);
 
 		// A transient error: the retry loader takes over the status container.
 		streamState.isStreaming = true;
@@ -195,7 +146,35 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		// The retry attempt re-enters the agent loop, emitting a fresh agent_start.
 		await controller.handleEvent(AGENT_START);
 		expect(ctx.loadingAnimation).toBeDefined();
-		expect(statusContainer.children).toContain(ctx.loadingAnimation);
+		expect(statusContainer.children).toContain(ctx.loadingAnimation!);
+	});
+
+	it("ticks the auto-retry countdown down on spinner ticks instead of freezing", async () => {
+		const { ctx, streamState } = createContext();
+		const controller = new EventController(ctx);
+		const visible = (s: string) => s.replace(/\x1b\[[0-9;]*m/g, "");
+
+		streamState.isStreaming = true;
+		await controller.handleEvent(RETRY_START);
+		expect(ctx.retryLoader).toBeDefined();
+
+		// Initial paint shows the full delay: RETRY_START carries delayMs 1000.
+		const first = visible(ctx.retryLoader!.render(80).join("\n"));
+		expect(first).toContain("Retrying (1/3) in 1.0s");
+
+		// 400ms of spinner ticks re-evaluate the closure: 600ms remain. A
+		// static label (the pre-fix banner) would still read "1.0s" here.
+		vi.advanceTimersByTime(400);
+		const second = visible(ctx.retryLoader!.render(80).join("\n"));
+		expect(second).toContain("in 600ms");
+		expect(second).not.toContain("in 1.0s");
+
+		// Past the deadline the remaining wait clamps at zero.
+		vi.advanceTimersByTime(2_000);
+		const third = visible(ctx.retryLoader!.render(80).join("\n"));
+		expect(third).toContain("in 0ms");
+
+		ctx.retryLoader!.stop();
 	});
 
 	it("re-shows the Working… loader after a subagent task completes while the session keeps streaming", async () => {
@@ -219,7 +198,7 @@ describe("EventController loader recovery after overflow maintenance", () => {
 		await controller.handleEvent(TASK_TOOL_EXECUTION_END);
 
 		expect(ctx.loadingAnimation).toBeDefined();
-		expect(statusContainer.children).toContain(ctx.loadingAnimation);
+		expect(statusContainer.children).toContain(ctx.loadingAnimation!);
 		expect(workingLoaders).toHaveLength(2);
 	});
 

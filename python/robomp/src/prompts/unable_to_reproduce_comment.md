@@ -6,4 +6,4 @@
 
 {{info_needed}}
 
-I'll keep this issue waiting on reporter details and resume from this context when the requested information arrives.
+I'll keep issue awaiting reporter details; resume from this context when requested info arrives.

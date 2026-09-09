@@ -21,7 +21,7 @@ describe("ModelRegistry.create() factory (F6)", () => {
 	});
 
 	test("produces an instance whose authStorage matches and that exposes bundled models", async () => {
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		try {
 			const registry = new ModelRegistry(authStorage, path.join(tempDir.path(), "models.yml"));
 			expect(registry.authStorage).toBe(authStorage);
@@ -44,7 +44,7 @@ describe("ModelRegistry.create() factory (F6)", () => {
 		await Bun.write(json, JSON.stringify({ models: [] }));
 		expect(fs.existsSync(yml)).toBe(false);
 
-		const authStorage = await AuthStorage.create(path.join(tempDir.path(), "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		try {
 			new ModelRegistry(authStorage, yml);
 			expect(fs.existsSync(yml)).toBe(true);

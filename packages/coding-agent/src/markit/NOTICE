@@ -1,15 +1,15 @@
-This directory contains an in-house document-to-markdown engine adapted from
+Portions of this in-house document-to-markdown engine are adapted from
 markit-ai (https://github.com/Michaelliv/markit), used under the MIT License.
+This attribution covers the shared registry/types and the DOCX, PPTX, XLSX,
+and EPUB converters. The PDF converter is implemented separately and is not
+derived from markit-ai.
 
   Copyright (c) 2026 Michael Liv
 
-Only the converters for the document formats omp supports are ported (pdf,
-docx, pptx, xlsx, epub); the CLI, plugin/provider, and unused converters
-(html, image, audio, plain-text, rss, github, wikipedia, csv, json, yaml,
-ipynb, iwork, zip, xml) were dropped. Legacy binary `.doc`/`.ppt`/`.xls` and
-`.rtf` are routed by the read/fetch tools but have no converter — they surface
-a conversion error, exactly as upstream markit did. Logic is ported faithfully
-so conversion output matches the upstream package.
+The CLI, plugin/provider, and unused converters (html, image, audio,
+plain-text, rss, github, wikipedia, csv, json, yaml, ipynb, iwork, zip, xml)
+were dropped. Legacy binary `.doc`/`.ppt`/`.xls` and `.rtf` have no converter
+and surface a conversion error.
 
 MIT License
 

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { gzipSync } from "node:zlib";
 import { decodeDocsIndex } from "@oh-my-pi/pi-coding-agent/internal-urls/docs-index";
+import { buildDocsIndexPayload } from "../../scripts/generate-docs-index";
 
 function embed(files: readonly string[], bodies: readonly string[]): string {
 	return `${JSON.stringify(files)}\n${Buffer.from(gzipSync(Buffer.from(JSON.stringify(bodies)))).toString("base64")}`;
@@ -32,5 +33,22 @@ describe("decodeDocsIndex (embedded docs path)", () => {
 
 	it("returns null when there is no newline separator (empty placeholder)", () => {
 		expect(decodeDocsIndex("")).toBeNull();
+	});
+});
+
+describe("shipped docs embed (generator↔runtime contract)", () => {
+	// bundle-dist.ts writes buildDocsIndexPayload().payload to
+	// dist/docs-index.generated.txt, which docs-index.ts reads back via
+	// decodeDocsIndex for npm/SDK consumers. If the generator's encoding and the
+	// runtime decoder drift, the shipped embed silently fails to resolve, so
+	// assert the real generator output round-trips through the runtime decoder.
+	it("decodes the real generator payload with round-tripped filenames and bodies", async () => {
+		const payload = await buildDocsIndexPayload();
+		const index = decodeDocsIndex(payload.payload);
+		expect(index).not.toBeNull();
+		expect(index?.filenames).toEqual([...payload.files]);
+		const first = payload.files[0];
+		expect(first).toBeDefined();
+		expect(await index?.getBody(first)).toBe(payload.bodies[0]);
 	});
 });

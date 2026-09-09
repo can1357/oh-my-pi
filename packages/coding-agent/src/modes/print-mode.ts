@@ -8,11 +8,9 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { logger, sanitizeText } from "@oh-my-pi/pi-utils";
-import { resolvePlanModelTransition } from "../plan-mode/model-transition";
 import { type AgentSession, type AgentSessionEvent, SHUTDOWN_CONSOLIDATE_BUDGET_MS } from "../session/agent-session";
 import { isSilentAbort } from "../session/messages";
 import { flushTelemetryExport } from "../telemetry-export";
-import { PROPOSE_DEVICE_NAME, writeDeviceDispatch } from "../tools/resolve";
 import { initializeExtensions } from "./runtime-init";
 
 /**
@@ -29,6 +27,8 @@ export interface PrintModeOptions {
 	initialImages?: ImageContent[];
 	/** If true, include thinking blocks in text output */
 	printThoughts?: boolean;
+	/** Whether the caller explicitly started the headless plan flow. */
+	planYolo?: boolean;
 }
 
 /** Matches the longest built-in provider request deadline while bounding tool-loop stalls. */
@@ -57,6 +57,8 @@ function stripProviderPayload<T extends AgentMessage>(message: T): T {
  */
 export function printableEvent(event: AgentSessionEvent): unknown {
 	switch (event.type) {
+		case "tool_stream_update":
+			return { type: event.type, toolCallId: event.toolCallId, toolName: event.toolName };
 		case "message_update": {
 			const streamEvent = event.assistantMessageEvent;
 			if (streamEvent.type === "done" || streamEvent.type === "error") {
@@ -89,7 +91,7 @@ export function printableEvent(event: AgentSessionEvent): unknown {
  * Sends prompts to the agent and outputs the result.
  */
 export async function runPrintMode(session: AgentSession, options: PrintModeOptions): Promise<void> {
-	const { mode, messages = [], initialMessage, initialImages, printThoughts } = options;
+	const { mode, messages = [], initialMessage, initialImages, printThoughts, planYolo = false } = options;
 
 	// process.stdout.write is fire-and-forget: a large final record (e.g. a
 	// multi-MB agent_end) can be dropped when the process exits before the pipe
@@ -118,6 +120,7 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 	}
 	// Set up extensions for print mode (no UI, no command context)
 	await initializeExtensions(session, {
+		mode: mode === "json" ? "json" : "print",
 		reportSendError: (action, err) => {
 			process.stderr.write(
 				`Extension ${action === "extension_send" ? "sendMessage" : "sendUserMessage"} failed: ${err.message}\n`,
@@ -128,66 +131,28 @@ export async function runPrintMode(session: AgentSession, options: PrintModeOpti
 		},
 	});
 
-	// InteractiveMode applies the same startup default during TUI initialization.
-	// Print mode has no TUI bootstrap, so arm the shared session directly before
-	// the first prompt; persisting the mode_change also lets a later interactive
-	// attachment restore and review the generated plan.
-	let abortAfterPlanProposal = false;
-	const planDefaultArmed =
+	// `plan.defaultOnStartup` opens fresh *interactive* sessions in plan mode so a
+	// human can review the plan before it executes. Headless print mode has no
+	// surface to review, approve, or exit a plan from, and the turn carries no
+	// deterministic way out of plan mode — the model must voluntarily emit a valid
+	// `xd://propose` execute-dispatch, and when it does not the run strands until
+	// the deadline (issue #8272). So do not honor the startup default here; the
+	// supported headless plan flow is `--plan-yolo` (auto-approve → implement),
+	// which is wired independently through the prewalk coordinator.
+	const planStartupIgnored =
 		session.settings.get("plan.defaultOnStartup") &&
 		session.settings.get("plan.enabled") &&
 		session.sessionManager.buildSessionContext().messages.length === 0 &&
-		!session.sessionManager.getEntries().some(entry => entry.type === "mode_change");
-	if (planDefaultArmed) {
-		const planFilePath = session.getPlanReferencePath() || "local://PLAN.md";
-		const previousTools = session.getEnabledToolNames();
-		const planTools = session.hasBuiltInTool("write") ? [...new Set([...previousTools, "write"])] : previousTools;
-		await session.setActiveToolsByName(planTools);
-		session.setPlanModeState({
-			enabled: true,
-			planFilePath,
-			workflow: "parallel",
-		});
-		session.sessionManager.appendModeChange("plan", { planFilePath });
-		abortAfterPlanProposal = true;
-		session.setPlanProposalHandler(async title => {
-			const result = await session.preparePlanForReview(title);
-			const details = result.details;
-			if (details) {
-				const state = session.getPlanModeState();
-				if (state?.enabled) {
-					session.setPlanModeState({ ...state, planFilePath: details.planFilePath });
-				}
-				session.sessionManager.appendModeChange("plan", { planFilePath: details.planFilePath });
-			}
-			return result;
-		});
-
-		const resolved = session.resolveRoleModelWithThinking("plan");
-		const transition = resolvePlanModelTransition(session.model, resolved, false);
-		if (transition.kind === "thinking") {
-			session.setThinkingLevel(transition.thinkingLevel);
-		} else if (transition.kind === "apply") {
-			try {
-				await session.setModelTemporary(transition.model, transition.thinkingLevel);
-			} catch (error) {
-				logger.warn("Failed to switch to plan model for print mode", { error: String(error) });
-			}
-		}
+		!session.sessionManager.getEntries().some(entry => entry.type === "mode_change") &&
+		!planYolo;
+	if (planStartupIgnored) {
+		process.stderr.write(
+			"Note: plan.defaultOnStartup is ignored in print mode (no interactive surface to review the plan). Use --plan-yolo for a headless plan flow.\n",
+		);
 	}
 
 	// Always subscribe to enable session persistence via _handleAgentEvent
 	session.subscribe(event => {
-		if (abortAfterPlanProposal && event.type === "tool_execution_end" && !event.isError) {
-			const dispatch = writeDeviceDispatch(event.toolName, event.result);
-			if (dispatch?.tool === PROPOSE_DEVICE_NAME && dispatch.mode === "execute") {
-				abortAfterPlanProposal = false;
-				session.markPlanInternalAbortPending();
-				void session.abort().finally(() => {
-					session.clearPlanInternalAbortPending();
-				});
-			}
-		}
 		// In JSON mode, output all events
 		if (mode === "json") {
 			writeStdoutLine(`${JSON.stringify(printableEvent(event))}\n`);

@@ -802,6 +802,67 @@ describe("xAI web search provider", () => {
 		});
 	});
 
+	it("extracts offset snippets and raw sources from web_search_call output", async () => {
+		const answer = "Context before [cited source](https://example.com/cited) context after.";
+		const start = answer.indexOf("[cited source]");
+		const capture = captureFetch({
+			id: "resp_raw_sources",
+			output: [
+				{
+					type: "message",
+					content: [
+						{
+							type: "output_text",
+							text: answer,
+							annotations: [
+								{
+									type: "url_citation",
+									url: "https://example.com/cited",
+									title: "Cited result",
+									start_index: start,
+									end_index: start + "[cited source]".length,
+								},
+							],
+						},
+					],
+				},
+				{
+					type: "web_search_call",
+					action: {
+						sources: [
+							{ url: "https://example.com/raw", title: "Raw result" },
+							{ source_website_url: "https://example.com/fallback", caption: "Fallback result" },
+						],
+					},
+					results: [{ url: "https://example.com/cited", title: "Duplicate result" }],
+				},
+			],
+		});
+
+		const response = await searchXAI(makeParams(capture.fetchMock));
+
+		expect(response.answer).toBe(answer);
+		expect(response.sources).toEqual([
+			{
+				title: "Cited result",
+				url: "https://example.com/cited",
+				snippet: "Context before cited source context after.",
+			},
+			{ title: "Raw result", url: "https://example.com/raw", snippet: undefined },
+			{ title: "Fallback result", url: "https://example.com/fallback", snippet: undefined },
+		]);
+	});
+
+	it("rejects successful responses with no answer or sources", async () => {
+		const capture = captureFetch({ id: "resp_empty", output: [] });
+
+		await expect(searchXAI(makeParams(capture.fetchMock))).rejects.toMatchObject({
+			provider: "xai",
+			status: 502,
+			message: "xAI web_search returned no answer or sources",
+		});
+	});
+
 	it.each([
 		[401, "xai: 401 unauthorized"],
 		[402, "xai: 402 credits exhausted"],

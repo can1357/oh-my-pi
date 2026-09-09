@@ -187,7 +187,7 @@ describe("AskDialogComponent", () => {
 		]);
 	});
 
-	it("multi-select: Space and Enter both toggle without advancing; Submit tab confirms", () => {
+	it("multi-select: Space toggles options; Enter submits the current selection", () => {
 		const onSubmit = vi.fn();
 		const onCancel = vi.fn();
 		const onPrompt = vi.fn();
@@ -207,22 +207,66 @@ describe("AskDialogComponent", () => {
 			onPrompt,
 		});
 
-		// Space on Option A - toggles without advancing
+		// Space toggles without submitting.
 		component.handleInput(SPACE);
 		expect(onSubmit).not.toHaveBeenCalled();
 
-		// Down to Option B, Enter - toggles B, still no submit and no movement
-		component.handleInput(DOWN);
-		component.handleInput(ENTER);
+		// Space again toggles the same option back off.
+		component.handleInput(SPACE);
 		expect(onSubmit).not.toHaveBeenCalled();
 
-		// Tab to the Submit tab (present even for a single multi question),
-		// Enter confirms the selection.
-		component.handleInput(TAB);
+		// Space once more re-selects it.
+		component.handleInput(SPACE);
+		expect(onSubmit).not.toHaveBeenCalled();
+
+		// Enter submits the current selection without toggling the focused
+		// option (issue #8252).
 		component.handleInput(ENTER);
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A", "Option B"]);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
+	});
+
+	it("multi-select: intrinsic Recommended suffix visibly follows selection state", () => {
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "target",
+					question: "Choose multiple?",
+					options: [{ label: "Generic MLE loop (Recommended)" }, { label: "Amazon-style (LPs)" }],
+					multi: true,
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		component.handleInput(SPACE);
+		expect(render(component)).toContain("❯ ☑ Generic MLE loop (Recommended)");
+
+		component.handleInput(SPACE);
+		expect(render(component)).toContain("❯ ☐ Generic MLE loop (Recommended)");
+
+		component.handleInput(SPACE);
+		component.handleInput(ENTER);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Generic MLE loop (Recommended)"]);
+	});
+
+	it("renders an intrinsic Recommended suffix only once for the recommended option", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "target",
+					question: "Choose one?",
+					options: [{ label: "Generic MLE loop (Recommended)" }, { label: "Amazon-style (LPs)" }],
+					recommended: 0,
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		expect(render(component)).toContain("Generic MLE loop (Recommended)");
+		expect(render(component)).not.toContain("Generic MLE loop (Recommended) (Recommended)");
 	});
 
 	it("tab-state persistence: answer question 0, Tab forward, Tab back, answer still present", () => {
@@ -551,9 +595,94 @@ describe("AskDialogComponent", () => {
 		expect(onSubmit.mock.calls[0][0].results[0].note).toBeUndefined();
 	});
 
-	it("shows selected multi-select options together with custom input on Submit", async () => {
-		const onPrompt = vi.fn().mockReturnValue(Promise.resolve("custom detail"));
+	it("saves multi-select choices and custom input, then advances exactly one question", async () => {
+		const onPrompt = vi.fn().mockResolvedValue("custom detail");
 		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose multiple?",
+					options: [{ label: "Option A" }, { label: "Option B" }],
+					multi: true,
+				},
+				{
+					id: "q2",
+					question: "Second question?",
+					options: [{ label: "Option C" }, { label: "Option D" }],
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
+
+		component.handleInput(SPACE);
+		component.handleInput(DOWN);
+		component.handleInput(SPACE);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+
+		expect(onSubmit).not.toHaveBeenCalled();
+		expect(render(component)).toContain("Second question?");
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		expect(onSubmit).not.toHaveBeenCalled();
+		component.handleInput(ENTER);
+
+		expect(onPrompt).toHaveBeenCalledTimes(1);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results).toMatchObject([
+			{ id: "q1", selectedOptions: ["Option A", "Option B"], customInput: "custom detail" },
+			{ id: "q2", selectedOptions: ["Option D"] },
+		]);
+	});
+
+	it("reviews a single multi-select custom answer and lets the user go back to edit it", async () => {
+		const onPrompt = vi.fn().mockResolvedValueOnce("first draft").mockResolvedValueOnce("revised answer");
+		const onSubmit = vi.fn();
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "Choose multiple?",
+					options: [{ label: "Option A" }, { label: "Option B" }],
+					multi: true,
+				},
+			],
+			{ onSubmit, onCancel: vi.fn(), onPrompt },
+		);
+
+		component.handleInput(SPACE);
+		component.handleInput(DOWN);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(onSubmit).not.toHaveBeenCalled();
+
+		component.handleInput(SHIFT_TAB);
+		component.handleInput(UP);
+		component.handleInput(SPACE);
+		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		await Promise.resolve();
+		await Promise.resolve();
+		expect(onSubmit).not.toHaveBeenCalled();
+		component.handleInput(ENTER);
+
+		expect(onPrompt).toHaveBeenCalledTimes(2);
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results).toMatchObject([
+			{ id: "q1", selectedOptions: ["Option A", "Option B"], customInput: "revised answer" },
+		]);
+	});
+
+	it("multi-question, multi-select: Enter on a plain option advances, does not submit", () => {
+		const onSubmit = vi.fn();
+		const onCancel = vi.fn();
+		const onPrompt = vi.fn();
+
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
 				id: "q1",
@@ -564,36 +693,53 @@ describe("AskDialogComponent", () => {
 			{
 				id: "q2",
 				question: "Second question?",
-				options: [{ label: "Option C" }],
+				options: [{ label: "Option C" }, { label: "Option D" }],
 			},
 		];
 
 		const component = new AskDialogComponent(questions, {
 			onSubmit,
-			onCancel: vi.fn(),
+			onCancel,
 			onPrompt,
 		});
+		expect(render(component)).toContain("Space toggle · Enter next");
 
+		// Space toggles Option A; Enter on the plain option row confirms and
+		// advances to Q2 instead of submitting the whole dialog (#8265 review).
 		component.handleInput(SPACE);
-		component.handleInput(DOWN);
+		component.handleInput(ENTER);
+		expect(onSubmit).not.toHaveBeenCalled();
+
+		// On Q2: Down to Option D and Enter advances to the Submit tab.
 		component.handleInput(DOWN);
 		component.handleInput(ENTER);
-		await Promise.resolve();
-		await Promise.resolve();
+		expect(onSubmit).not.toHaveBeenCalled();
 
-		// Multi questions do not auto-advance after the Other prompt: still on
-		// q1, so Tab twice (q2, then Submit) to reach the review.
-		component.handleInput(TAB);
-		component.handleInput(TAB);
-		const review = render(component);
-		expect(review).toContain("Option A");
-		expect(review).toContain("custom detail");
-
+		// On the Submit tab Enter submits once with both answers.
 		component.handleInput(ENTER);
-
 		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
-		expect(onSubmit.mock.calls[0][0].results[0].customInput).toBe("custom detail");
+		expect(onSubmit.mock.calls[0][0].results).toEqual([
+			{
+				id: "q1",
+				question: "Choose multiple?",
+				options: ["Option A", "Option B"],
+				multi: true,
+				selectedOptions: ["Option A"],
+				customInput: undefined,
+				note: undefined,
+				timedOut: undefined,
+			},
+			{
+				id: "q2",
+				question: "Second question?",
+				options: ["Option C", "Option D"],
+				multi: false,
+				selectedOptions: ["Option D"],
+				customInput: undefined,
+				note: undefined,
+				timedOut: undefined,
+			},
+		]);
 	});
 
 	it("defers a timeout that fires during a pending prompt and honors the resolved custom input", async () => {
@@ -933,7 +1079,7 @@ describe("AskDialogComponent", () => {
 		}
 	});
 
-	it("single-question multi-select: Enter toggles instead of submitting", () => {
+	it("single-question multi-select: Enter submits the current selection immediately", () => {
 		const onSubmit = vi.fn();
 		const questions: ExtensionAskDialogQuestion[] = [
 			{
@@ -949,43 +1095,36 @@ describe("AskDialogComponent", () => {
 			onCancel: vi.fn(),
 			onPrompt: vi.fn(),
 		});
+		expect(render(component)).toContain("Space toggle · Enter submit");
 
-		// Enter on Option B toggles it — no submit, no tab movement.
-		component.handleInput(DOWN);
-		component.handleInput(ENTER);
-		expect(onSubmit).not.toHaveBeenCalled();
-
-		// The toggle registered: Submit tab confirms only Option B.
-		component.handleInput(TAB);
-		component.handleInput(ENTER);
-		expect(onSubmit).toHaveBeenCalledTimes(1);
-		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option B"]);
-	});
-
-	it("multi-select: Enter on a checked option toggles it off; empty answer submits from Submit tab", () => {
-		const onSubmit = vi.fn();
-		const questions: ExtensionAskDialogQuestion[] = [
-			{
-				id: "q1",
-				question: "Choose multiple?",
-				options: [{ label: "Option A" }, { label: "Option B" }],
-				multi: true,
-			},
-		];
-
-		const component = new AskDialogComponent(questions, {
-			onSubmit,
-			onCancel: vi.fn(),
-			onPrompt: vi.fn(),
-		});
-
-		// Space checks Option A, Enter on the same row unchecks it.
+		// Space selects Option A; Enter submits right away — no need to
+		// discover the Submit tab (issue #8252).
 		component.handleInput(SPACE);
 		component.handleInput(ENTER);
 
-		// Submit tab warns about the unanswered question but still submits.
-		component.handleInput(TAB);
-		expect(render(component).toLowerCase()).toContain("unanswered");
+		expect(onSubmit).toHaveBeenCalledTimes(1);
+		expect(onSubmit.mock.calls[0][0].results[0].selectedOptions).toEqual(["Option A"]);
+	});
+
+	it("multi-select: Enter submits an empty selection instead of dead-ending", () => {
+		const onSubmit = vi.fn();
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Choose multiple?",
+				options: [{ label: "Option A" }, { label: "Option B" }],
+				multi: true,
+			},
+		];
+
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+
+		// Enter with nothing selected submits the empty selection rather than
+		// toggling or blocking on the Submit tab.
 		component.handleInput(ENTER);
 
 		expect(onSubmit).toHaveBeenCalledTimes(1);
@@ -1248,6 +1387,118 @@ describe("AskDialogComponent", () => {
 		// Count occurrences of the repeated phrase — should be far fewer than 30.
 		const matches = output.match(/This is a very long question/g);
 		expect(matches?.length ?? 0).toBeLessThan(10);
+		expect(output).toContain("Ctrl+O expand");
+	});
+
+	it("expands a truncated question header on Ctrl+O and collapses on a second press", () => {
+		const longQuestion = "This is a very long question ".repeat(200);
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: longQuestion,
+					options: [{ label: "Option A" }, { label: "Option B" }],
+				},
+			],
+			{
+				onSubmit: vi.fn(),
+				onCancel: vi.fn(),
+				onPrompt: vi.fn(),
+			},
+		);
+
+		const collapsed = render(component);
+		const collapsedCount = collapsed.match(/This is a very long question/g)?.length ?? 0;
+		expect(collapsedCount).toBeLessThan(10);
+		expect(collapsed).toContain("Ctrl+O expand");
+
+		component.handleInput("\x0f");
+		const expanded = render(component);
+		const expandedCount = expanded.match(/This is a very long question/g)?.length ?? 0;
+		expect(expandedCount).toBeGreaterThan(collapsedCount);
+		const cap = Math.max(12, Math.floor((process.stdout.rows || 40) * 0.7));
+		expect(component.render(80).length).toBeLessThanOrEqual(cap);
+		// Wrapping can split a few phrases across lines; require a clearly
+		// larger header rather than an exact copy count.
+		expect(expandedCount).toBeGreaterThanOrEqual(15);
+		expect(expanded).toContain("Ctrl+O collapse");
+		expect(expanded).not.toContain("Ctrl+O expand");
+
+		component.handleInput("\x0f");
+		const recollapsed = render(component);
+		expect(recollapsed.match(/This is a very long question/g)?.length ?? 0).toBe(collapsedCount);
+		expect(recollapsed).toContain("Ctrl+O expand");
+	});
+
+	it("does not consume expansion while the submit tab hides the question header", () => {
+		const component = new AskDialogComponent(
+			[
+				{
+					id: "q1",
+					question: "This is a very long question ".repeat(30),
+					options: [{ label: "Option A" }],
+					multi: true,
+				},
+			],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+		component.render(80);
+		expect(component.toggleQuestionExpansion()).toBe(true);
+
+		component.handleInput(SHIFT_TAB);
+		expect(component.toggleQuestionExpansion()).toBe(false);
+	});
+
+	it("leaves a short question unchanged and does not advertise expand", () => {
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Choose one?", options: [{ label: "Option A" }] }],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+		const before = render(component);
+		expect(before).not.toContain("Ctrl+O expand");
+		expect(component.toggleQuestionExpansion()).toBe(false);
+		expect(render(component)).toBe(before);
+	});
+
+	it("wraps long option labels onto indented continuation lines instead of truncating", () => {
+		const onSubmit = vi.fn();
+		const tail = "UNIQUE_TAIL_MARKER_8654";
+		const longLabel = `${"This is a deliberately long option label ".repeat(4)}${tail}`;
+		const questions: ExtensionAskDialogQuestion[] = [
+			{
+				id: "q1",
+				question: "Pick one?",
+				options: [{ label: longLabel }, { label: "Short" }],
+			},
+		];
+
+		const component = new AskDialogComponent(questions, {
+			onSubmit,
+			onCancel: vi.fn(),
+			onPrompt: vi.fn(),
+		});
+
+		const output = render(component);
+		// The unique label tail must be present — no ellipsis truncation.
+		expect(output).toContain(tail);
+		expect(output).not.toContain("…");
+		// The first line carries the cursor glyph; continuation lines are
+		// indented under the marker so the cursor stays visually anchored.
+		const lines = output.split("\n");
+		const first = lines.find(line => line.includes("This is a deliberately")) ?? "";
+		const continuation = lines.find(line => line.includes("option label") && !line.includes("❯")) ?? "";
+		expect(first).toMatch(/│ ❯/);
+		expect(continuation).toMatch(/│ {3}/);
+	});
+
+	it("does not wrap an option label that fits the dialog content width", () => {
+		const component = new AskDialogComponent(
+			[{ id: "q1", question: "Pick one?", options: [{ label: "x".repeat(70) }] }],
+			{ onSubmit: vi.fn(), onCancel: vi.fn(), onPrompt: vi.fn() },
+		);
+
+		const output = render(component);
+		expect(output.split("\n").filter(line => line.includes("x"))).toHaveLength(1);
 	});
 
 	it("Other editor cancel returns to the option list without submitting", async () => {
@@ -1347,13 +1598,13 @@ describe("AskDialogComponent", () => {
 		await Promise.resolve();
 		expect(render(component)).toContain("my custom answer");
 
-		// Reopen Other (prefilled with the current answer) and submit an
-		// empty value: the custom answer is unselected.
+		// Return from review to edit the saved custom answer.
+		component.handleInput(SHIFT_TAB);
 		onPrompt.mockReturnValueOnce(Promise.resolve(""));
 		component.handleInput(ENTER);
 		await Promise.resolve();
 		await Promise.resolve();
-		expect(onPrompt).toHaveBeenNthCalledWith(2, expect.any(String), "my custom answer");
+		expect(onSubmit).not.toHaveBeenCalled();
 		expect(render(component)).not.toContain("my custom answer");
 
 		// Submitting confirms nothing was kept.

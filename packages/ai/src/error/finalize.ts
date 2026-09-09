@@ -10,6 +10,8 @@ export interface FinalizeOptions {
 	api?: Api;
 	/** Provider id; forwarded to the message formatter for copilot rewrites. */
 	provider?: string;
+	/** Requested model id; paired with provider for model-entitlement classification. */
+	model?: string;
 	/** Caller signal, for providers that don't run an abort tracker. */
 	signal?: AbortSignal;
 	/** Abort tracker, preferred over `signal`: distinguishes caller vs. local aborts. */
@@ -55,6 +57,8 @@ export async function finalize(error: unknown, opts: FinalizeOptions = {}): Prom
 
 	const id = classifyMessage({
 		api: opts.api,
+		provider: opts.provider,
+		model: opts.model,
 		errorId: classify(error, opts.api),
 		errorMessage: message,
 		errorStatus: currentStatus,

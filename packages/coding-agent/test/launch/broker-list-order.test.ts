@@ -2,10 +2,36 @@ import { describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { startDaemonBrokerFromEnvironment } from "../../src/launch/broker";
 import { createDaemonBrokerClient, type DaemonBrokerClient } from "../../src/launch/client";
-import type { DaemonSnapshot, DaemonSpec } from "../../src/launch/protocol";
+import {
+	DAEMON_IDLE_GRACE_ENV,
+	DAEMON_PROJECT_DIR_ENV,
+	DAEMON_RUNTIME_DIR_ENV,
+	type DaemonSnapshot,
+	type DaemonSpec,
+} from "../../src/launch/protocol";
 
 const TERMINAL_HISTORY_LIMIT = 10;
+
+function restoreEnv(name: string, value: string | undefined): void {
+	if (value === undefined) delete process.env[name];
+	else process.env[name] = value;
+}
+
+function startBroker(projectDir: string, runtimeDir: string): Promise<void> {
+	const previousProjectDir = process.env[DAEMON_PROJECT_DIR_ENV];
+	const previousRuntimeDir = process.env[DAEMON_RUNTIME_DIR_ENV];
+	const previousGrace = process.env[DAEMON_IDLE_GRACE_ENV];
+	process.env[DAEMON_PROJECT_DIR_ENV] = projectDir;
+	process.env[DAEMON_RUNTIME_DIR_ENV] = runtimeDir;
+	process.env[DAEMON_IDLE_GRACE_ENV] = "5000";
+	const broker = startDaemonBrokerFromEnvironment();
+	restoreEnv(DAEMON_PROJECT_DIR_ENV, previousProjectDir);
+	restoreEnv(DAEMON_RUNTIME_DIR_ENV, previousRuntimeDir);
+	restoreEnv(DAEMON_IDLE_GRACE_ENV, previousGrace);
+	return broker;
+}
 
 function spec(name: string, cwd: string): DaemonSpec {
 	return {
@@ -43,10 +69,11 @@ async function seedTerminalRecord(runtimeDir: string, cwd: string, snapshot: Dae
 	await Bun.write(metaPath, JSON.stringify({ daemon: snapshot, spec: spec(snapshot.name, cwd) }));
 }
 
-async function shutdown(client: DaemonBrokerClient, activeName: string): Promise<void> {
+async function shutdown(client: DaemonBrokerClient, broker: Promise<void>, activeName: string): Promise<void> {
 	await client.request({ op: "stop", name: activeName, timeoutMs: 2_000 }).catch(() => undefined);
 	await client.request({ op: "shutdown" }).catch(() => undefined);
 	client.close();
+	await broker;
 }
 
 describe("broker list", () => {
@@ -56,11 +83,15 @@ describe("broker list", () => {
 		const runtimeDir = path.join(tempDir.path(), "runtime");
 		await fs.mkdir(projectDir);
 
-		for (let index = 0; index < TERMINAL_HISTORY_LIMIT + 5; index++) {
-			await seedTerminalRecord(runtimeDir, projectDir, terminalSnapshot(index));
-		}
+		await Promise.all(
+			Array.from({ length: TERMINAL_HISTORY_LIMIT + 5 }, (_, index) =>
+				seedTerminalRecord(runtimeDir, projectDir, terminalSnapshot(index)),
+			),
+		);
 
 		const client = await createDaemonBrokerClient(projectDir, { runtimeDir, idleGraceMs: 5_000 });
+		const previousTitle = process.title;
+		const broker = startBroker(projectDir, runtimeDir);
 		const activeName = "active-server";
 		try {
 			const started = await client.request({
@@ -83,7 +114,8 @@ describe("broker list", () => {
 			expect(listed.daemons[0]?.state).toBe("running");
 			expect(listed.daemons.at(-1)?.exitedAt).toBe(51);
 		} finally {
-			await shutdown(client, activeName);
+			await shutdown(client, broker, activeName);
+			process.title = previousTitle;
 		}
 	}, 20_000);
 });

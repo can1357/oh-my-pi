@@ -10,7 +10,7 @@ import {
 	VaultProtocolHandler,
 } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import * as vaultProtocol from "@oh-my-pi/pi-coding-agent/internal-urls/vault-protocol";
-import { removeWithRetries } from "@oh-my-pi/pi-utils";
+import { $which, removeWithRetries } from "@oh-my-pi/pi-utils";
 
 async function withTempDir<T>(fn: (dir: string) => Promise<T>): Promise<T> {
 	const dir = await fs.mkdtemp(path.join(os.tmpdir(), "vault-protocol-"));
@@ -367,9 +367,10 @@ describe("VaultProtocolHandler", () => {
 	});
 
 	it("aborts an in-flight spawn when the AbortSignal is cancelled", async () => {
-		if (!(await Bun.file("/bin/sleep").exists())) return;
+		const sleep = $which("sleep");
+		if (!sleep) return;
 		const controller = new AbortController();
-		const promise = vaultProtocol.spawnObsidian("/bin/sleep", ["10"], controller.signal, 30_000);
+		const promise = vaultProtocol.spawnObsidian(sleep, ["10"], controller.signal, 30_000);
 
 		await Bun.sleep(20);
 		controller.abort();

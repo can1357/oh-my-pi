@@ -8,7 +8,14 @@ import { Database, type Statement } from "bun:sqlite";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { parseAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
-import { getAgentDbPath, getDbBusyTimeoutMs, logger } from "@oh-my-pi/pi-utils";
+import { parseCloudflareAiGatewayCredential } from "@oh-my-pi/pi-catalog/wire/cloudflare-ai-gateway";
+import {
+	getAgentDbPath,
+	getDbBusyTimeoutMs,
+	isSqliteBusyError,
+	isSqliteCorruptionError,
+	logger,
+} from "@oh-my-pi/pi-utils";
 import type {
 	AuthCredential,
 	AuthCredentialStore,
@@ -25,8 +32,6 @@ import type {
 	ClientProviderUsage,
 	ClientUsageReport,
 	ClientUsageSummary,
-	UsageCostHistoryEntry,
-	UsageCostHistoryQuery,
 	UsageHistoryEntry,
 	UsageHistoryQuery,
 } from "../usage";
@@ -89,29 +94,10 @@ const LEGACY_CODEX_BLOCK_PROVIDER_KEY = "openai-codex:oauth";
 const LEGACY_CODEX_BLOCK_SCOPE = "shared";
 const CODEX_METER_BLOCK_SCOPES = ["chat", "spark"] as const;
 
-/**
- * SQLite's busy result code family — base `SQLITE_BUSY` plus the extended
- * variants `SQLITE_BUSY_RECOVERY` (concurrent WAL recovery), `SQLITE_BUSY_SNAPSHOT`,
- * and `SQLITE_BUSY_TIMEOUT`. All warrant the same backoff-and-retry treatment.
- */
-export function isSqliteBusyError(err: unknown): boolean {
-	if (err === null || typeof err !== "object") return false;
-	const code = (err as { code?: unknown }).code;
-	return typeof code === "string" && code.startsWith("SQLITE_BUSY");
-}
-
-/**
- * SQLite's unrecoverable-corruption result codes — the `SQLITE_CORRUPT` family
- * (base plus extended variants like `SQLITE_CORRUPT_VTAB` / `SQLITE_CORRUPT_INDEX`)
- * and `SQLITE_NOTADB` (the file header is not a database). Unlike
- * {@link isSqliteBusyError}, these never clear by retrying: the store must be
- * repaired or replaced, so callers latch and stop touching it.
- */
-export function isSqliteCorruptionError(err: unknown): boolean {
-	if (err === null || typeof err !== "object" || !("code" in err)) return false;
-	const code = err.code;
-	return typeof code === "string" && (code.startsWith("SQLITE_CORRUPT") || code === "SQLITE_NOTADB");
-}
+// SQLite error classifiers live in pi-utils so the credential store and the
+// model cache share one implementation; re-exported here to preserve the
+// pre-existing `@oh-my-pi/pi-ai/auth-storage` surface.
+export { isSqliteBusyError, isSqliteCorruptionError };
 
 function normalizeStoredAccountId(accountId: string | null | undefined): string | null {
 	const normalized = accountId?.trim();
@@ -230,10 +216,17 @@ function matchesReplacementCredential(
 	if (incoming.type === "api_key") {
 		if (existing.type !== "api_key") return false;
 		if (existing.key === incoming.key) return true;
-		if (provider !== "alibaba-token-plan") return false;
-		const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
-		const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
-		return existingToken !== undefined && existingToken === incomingToken;
+		if (provider === "alibaba-token-plan") {
+			const existingToken = parseAlibabaTokenPlanCredential(existing.key)?.token;
+			const incomingToken = parseAlibabaTokenPlanCredential(incoming.key)?.token;
+			return existingToken !== undefined && existingToken === incomingToken;
+		}
+		if (provider === "cloudflare-ai-gateway") {
+			const existingToken = parseCloudflareAiGatewayCredential(existing.key)?.token;
+			const incomingToken = parseCloudflareAiGatewayCredential(incoming.key)?.token;
+			return existingToken !== undefined && existingToken === incomingToken;
+		}
+		return false;
 	}
 	const incomingIdentifiers = extractOAuthCredentialIdentifiers(incoming);
 	const incomingIdentityKey = resolveProviderCredentialIdentityKey(provider, incomingIdentifiers);
@@ -387,8 +380,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 	#releaseCredentialRefreshLeaseStmt: Statement;
 	#credentialBlockReconcileAfter: Map<string, number> = new Map();
 	#insertUsageHistoryStmt: Statement;
-	#insertUsageCostStmt: Statement;
-	#listUsageCostsStmt: Statement;
 	#lastUsageHistoryStmt: Statement;
 	#listUsageHistoryStmt: Statement;
 	#updateUsageHistoryStmt: Statement;
@@ -516,12 +507,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#listUsageHistoryStmt = this.#db.prepare(
 			"SELECT recorded_at, provider, account_key, email, account_id, limit_id, label, window_label, used_fraction, status, resets_at FROM usage_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) ORDER BY recorded_at ASC",
 		);
-		this.#insertUsageCostStmt = this.#db.prepare(
-			"INSERT INTO usage_cost_history (recorded_at, provider, account_key, cost_usd) VALUES (?, ?, ?, ?)",
-		);
-		this.#listUsageCostsStmt = this.#db.prepare(
-			"SELECT recorded_at, provider, account_key, cost_usd FROM usage_cost_history WHERE recorded_at >= ? AND (? IS NULL OR provider = ?) AND (? IS NULL OR account_key = ?) ORDER BY recorded_at ASC",
-		);
 	}
 
 	static async open(dbPath: string = getAgentDbPath()): Promise<SqliteAuthCredentialStore> {
@@ -634,14 +619,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				resets_at INTEGER
 			);
 			CREATE INDEX IF NOT EXISTS idx_usage_history_series ON usage_history(provider, account_key, limit_id, recorded_at);
-			CREATE TABLE IF NOT EXISTS usage_cost_history (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				recorded_at INTEGER NOT NULL,
-				provider TEXT NOT NULL,
-				account_key TEXT NOT NULL,
-				cost_usd REAL NOT NULL
-			);
-			CREATE INDEX IF NOT EXISTS idx_usage_cost_history_lookup ON usage_cost_history(provider, account_key, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_usage_history_recorded ON usage_history(recorded_at);
 			CREATE TABLE IF NOT EXISTS clients (
 				install_id TEXT PRIMARY KEY,
@@ -653,6 +630,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				id INTEGER PRIMARY KEY AUTOINCREMENT,
 				recorded_at INTEGER NOT NULL,
 				install_id TEXT NOT NULL,
+				app TEXT NOT NULL DEFAULT '',
 				provider TEXT NOT NULL,
 				model TEXT NOT NULL,
 				requests INTEGER NOT NULL,
@@ -665,6 +643,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			CREATE INDEX IF NOT EXISTS idx_client_usage_series ON client_usage(install_id, provider, model, recorded_at);
 			CREATE INDEX IF NOT EXISTS idx_client_usage_recorded ON client_usage(recorded_at);
 		`);
+		this.#ensureClientUsageAppColumn();
 
 		if (!this.#authCredentialsTableExists()) {
 			this.#createAuthCredentialsTable();
@@ -1769,40 +1748,16 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			return [];
 		}
 	}
-	recordUsageCosts(entries: UsageCostHistoryEntry[]): void {
-		try {
-			for (const entry of entries) {
-				this.#insertUsageCostStmt.run(entry.recordedAt, entry.provider, entry.accountKey, entry.costUsd);
-			}
-		} catch {
-			// Cost history is best-effort; never break request persistence.
-		}
-	}
 
-	listUsageCosts(query?: UsageCostHistoryQuery): UsageCostHistoryEntry[] {
-		try {
-			const provider = query?.provider ?? null;
-			const accountKey = query?.accountKey ?? null;
-			const rows = this.#listUsageCostsStmt.all(
-				query?.sinceMs ?? 0,
-				provider,
-				provider,
-				accountKey,
-				accountKey,
-			) as Array<{
-				recorded_at: number;
-				provider: string;
-				account_key: string;
-				cost_usd: number;
-			}>;
-			return rows.map(row => ({
-				recordedAt: row.recorded_at,
-				provider: row.provider as Provider,
-				accountKey: row.account_key,
-				costUsd: row.cost_usd,
-			}));
-		} catch {
-			return [];
+	/**
+	 * Add the `app` attribution column to `client_usage` tables created before
+	 * it existed. `CREATE TABLE IF NOT EXISTS` skips established broker DBs, so
+	 * the column arrives via ALTER; legacy rows keep the `''` (unlabeled) app.
+	 */
+	#ensureClientUsageAppColumn(): void {
+		const columns = this.#db.query("PRAGMA table_info(client_usage)").all() as Array<{ name: string }>;
+		if (!columns.some(column => column.name === "app")) {
+			this.#db.run("ALTER TABLE client_usage ADD COLUMN app TEXT NOT NULL DEFAULT ''");
 		}
 	}
 
@@ -1814,9 +1769,10 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				 ON CONFLICT(install_id) DO UPDATE SET hostname = COALESCE(excluded.hostname, hostname), last_seen = excluded.last_seen`,
 			)
 			.run(report.installId, report.hostname ?? null, now, now);
+		const app = report.app?.trim() ?? "";
 		const findBucket = this.#db.query(
 			`SELECT id FROM client_usage
-			 WHERE install_id = ? AND provider = ? AND model = ? AND recorded_at >= ?
+			 WHERE install_id = ? AND app = ? AND provider = ? AND model = ? AND recorded_at >= ?
 			 ORDER BY recorded_at DESC LIMIT 1`,
 		);
 		const merge = this.#db.query(
@@ -1825,14 +1781,14 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				cache_write_tokens = cache_write_tokens + ?, cost_usd = cost_usd + ? WHERE id = ?`,
 		);
 		const insert = this.#db.query(
-			`INSERT INTO client_usage (recorded_at, install_id, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO client_usage (recorded_at, install_id, app, provider, model, requests, input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, cost_usd)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		);
 		for (const entry of report.entries) {
 			// Merge into the newest row of the same (install, provider, model)
 			// bucket so 10s client flushes don't accrete one row apiece forever.
 			const bucketFloor = entry.at - CLIENT_USAGE_BUCKET_MS;
-			const existing = findBucket.get(report.installId, entry.provider, entry.model, bucketFloor) as {
+			const existing = findBucket.get(report.installId, app, entry.provider, entry.model, bucketFloor) as {
 				id: number;
 			} | null;
 			if (existing) {
@@ -1851,6 +1807,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			insert.run(
 				entry.at,
 				report.installId,
+				app,
 				entry.provider,
 				entry.model,
 				entry.requests,
@@ -1869,14 +1826,15 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 			.all() as Array<{ install_id: string; hostname: string | null; first_seen: number; last_seen: number }>;
 		const aggregates = this.#db
 			.query(
-				`SELECT install_id, provider, SUM(requests) requests, SUM(input_tokens) input_tokens,
+				`SELECT install_id, app, provider, SUM(requests) requests, SUM(input_tokens) input_tokens,
 					SUM(output_tokens) output_tokens, SUM(cache_read_tokens) cache_read_tokens,
 					SUM(cache_write_tokens) cache_write_tokens, SUM(cost_usd) cost_usd
-				 FROM client_usage WHERE recorded_at >= ? GROUP BY install_id, provider
+				 FROM client_usage WHERE recorded_at >= ? GROUP BY install_id, app, provider
 				 ORDER BY install_id, SUM(input_tokens + output_tokens + cache_read_tokens + cache_write_tokens) DESC`,
 			)
 			.all(sinceMs) as Array<{
 			install_id: string;
+			app: string;
 			provider: string;
 			requests: number;
 			input_tokens: number;
@@ -1893,6 +1851,7 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 				providersByInstall.set(row.install_id, list);
 			}
 			list.push({
+				app: row.app === "" ? undefined : row.app,
 				provider: row.provider,
 				requests: row.requests,
 				inputTokens: row.input_tokens,
@@ -2051,8 +2010,6 @@ export class SqliteAuthCredentialStore implements AuthCredentialStore {
 		this.#lastUsageHistoryStmt.finalize();
 		this.#listUsageHistoryStmt.finalize();
 		this.#updateUsageHistoryStmt.finalize();
-		this.#insertUsageCostStmt.finalize();
-		this.#listUsageCostsStmt.finalize();
 		this.#updateIfMatchesStmt.finalize();
 		this.#updateIfMatchesWithLeaseStmt.finalize();
 		this.#deleteIfMatchesWithLeaseStmt.finalize();

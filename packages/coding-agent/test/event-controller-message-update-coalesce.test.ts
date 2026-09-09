@@ -1,11 +1,12 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "bun:test";
 import type { AssistantMessage, Usage } from "@oh-my-pi/pi-ai";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { vocalizer } from "@oh-my-pi/pi-coding-agent/tts/vocalizer";
-import type { TUI } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 function zeroUsage(): Usage {
 	return {
@@ -38,47 +39,30 @@ function messageUpdate(text: string): Extract<AgentSessionEvent, { type: "messag
 
 function createStreamingFixture() {
 	const listeners: Array<(event: AgentSessionEvent) => void> = [];
-	const ui = {
-		requestRender: vi.fn(),
-		requestComponentRender: vi.fn(),
-	} as unknown as TUI;
-	const viewSession = { isStreaming: true, getToolByName: () => undefined };
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		ui,
-		settings,
-		chatContainer: { addChild: vi.fn(), children: [] },
-		pendingTools: new Map(),
-		transcriptMessageComponents: new WeakMap(),
-		streamingComponent: {
-			setHideThinkingBlock: vi.fn(),
-			markTranscriptBlockFinalized: vi.fn(),
-			updateContent: vi.fn(),
-		},
-		noteDisplayableThinkingContent: vi.fn(() => false),
-		ensureLoadingAnimation: vi.fn(),
-		statusLine: { invalidate: vi.fn() },
-		updateEditorTopBorder: vi.fn(),
-		setWorkingMessage: vi.fn(),
-		viewSession,
+	const ctx = createInteractiveModeContext({
 		session: {
-			subscribe: (listener: (event: AgentSessionEvent) => void) => {
+			isStreaming: true,
+			subscribe: listener => {
 				listeners.push(listener);
 				return () => {};
 			},
-		} as unknown as InteractiveModeContext["session"],
-	} as unknown as InteractiveModeContext;
+		},
+		streamingComponent: new AssistantMessageComponent(),
+	});
 	const controller = new EventController(ctx);
 	controller.subscribeToAgent();
 	const emit = (event: AgentSessionEvent) => {
 		for (const listener of listeners) void listener(event);
 	};
-	return { controller, ctx, ui, emit };
+	return { controller, ctx, ui: ctx.ui, emit };
 }
 async function flushMicrotasks(): Promise<void> {
 	for (let i = 0; i < 12; i++) await Promise.resolve();
 }
+
+beforeAll(async () => {
+	await initTheme(false);
+});
 
 describe("EventController message_update coalescing", () => {
 	beforeEach(async () => {

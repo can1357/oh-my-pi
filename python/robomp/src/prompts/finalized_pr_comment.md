@@ -1,1 +1,1 @@
-This PR has been closed/merged — opening a fresh fix for further changes is recommended. If this is a regression, reopen the original issue and I'll triage from scratch.
+PR closed/merged. Further changes: opening fresh fix recommended. Regression: reopen original issue; I'll triage from scratch.

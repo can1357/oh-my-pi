@@ -1,6 +1,5 @@
 import {
 	type Component,
-	Container,
 	Ellipsis,
 	Input,
 	matchesKey,
@@ -19,8 +18,8 @@ import {
 	matchesSelectUp,
 } from "../../modes/utils/keybinding-matchers";
 import type { HistoryEntry, HistoryStorage } from "../../session/history-storage";
-import { DynamicBorder } from "./dynamic-border";
 import { rawKeyHint } from "./keybinding-hints";
+import { OverlayPanel } from "./overlay-box";
 import { centeredWindow, contentRowWidth, renderScrollableList } from "./selector-helpers";
 
 /** Visible result rows; also the jump distance for PageUp/PageDown. */
@@ -148,7 +147,7 @@ class HistoryResultsList implements Component {
 	}
 }
 
-export class HistorySearchComponent extends Container {
+export class HistorySearchComponent extends OverlayPanel {
 	#historyStorage: HistoryStorage;
 	#searchInput: Input;
 	#results: HistoryEntry[] = [];
@@ -159,7 +158,7 @@ export class HistorySearchComponent extends Container {
 	#resultLimit = 100;
 
 	constructor(historyStorage: HistoryStorage, onSelect: (prompt: string) => void, onCancel: () => void) {
-		super();
+		super("History");
 		this.#historyStorage = historyStorage;
 		this.#onSelect = onSelect;
 		this.#onCancel = onCancel;
@@ -177,22 +176,16 @@ export class HistorySearchComponent extends Container {
 
 		this.#resultsList = new HistoryResultsList();
 
-		const title = theme.bold(theme.fg("accent", `${theme.icon.rewind} Search History`));
 		const dot = theme.fg("dim", theme.sep.dot);
 		const hint = [rawKeyHint("↑↓", "navigate"), rawKeyHint("enter", "select"), rawKeyHint("esc", "cancel")].join(dot);
 
-		this.addChild(new Spacer(1));
-		this.addChild(new Text(title, 1, 0));
-		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
 		this.addChild(this.#searchInput);
 		this.addChild(new Spacer(1));
 		this.addChild(this.#resultsList);
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(hint, 1, 0));
+		this.addChild(new Text(hint, 0, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new DynamicBorder());
 
 		this.#updateResults();
 	}

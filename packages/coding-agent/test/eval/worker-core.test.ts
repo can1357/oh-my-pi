@@ -520,20 +520,27 @@ process.exit(0);
 				stderr: "pipe",
 				env: { ...process.env },
 			});
-			const watchdog = Bun.sleep(5000).then(() => {
-				proc.kill();
-				return -999;
-			});
-			const [stdout, stderr, exitCode] = await Promise.all([
-				new Response(proc.stdout).text(),
-				new Response(proc.stderr).text(),
-				Promise.race([proc.exited, watchdog]),
-			]);
-			expect(exitCode).toBe(0);
-			expect(stdout).toContain("survived concurrent setCwd");
-			expect(stderr).not.toContain("[Unhandled Rejection]");
-			expect(stderr).not.toContain("[Uncaught Exception]");
-			expect(stderr).not.toContain("another same-realm JS runtime is running");
+			// Real process liveness cannot use fake timers. Bound a wedged child, but
+			// clear the watchdog on the normal path so it never becomes a fixed wait.
+			const watchdog = setTimeout(() => {
+				try {
+					proc.kill("SIGKILL");
+				} catch {}
+			}, 5000);
+			try {
+				const [stdout, stderr, exitCode] = await Promise.all([
+					new Response(proc.stdout).text(),
+					new Response(proc.stderr).text(),
+					proc.exited,
+				]);
+				expect(exitCode).toBe(0);
+				expect(stdout).toContain("survived concurrent setCwd");
+				expect(stderr).not.toContain("[Unhandled Rejection]");
+				expect(stderr).not.toContain("[Uncaught Exception]");
+				expect(stderr).not.toContain("another same-realm JS runtime is running");
+			} finally {
+				clearTimeout(watchdog);
+			}
 		} finally {
 			await fs.rm(root, { recursive: true, force: true });
 		}

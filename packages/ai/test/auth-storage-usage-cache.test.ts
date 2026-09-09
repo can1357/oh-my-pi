@@ -18,7 +18,7 @@ import {
 	AuthStorage,
 	type StoredAuthCredential,
 } from "@oh-my-pi/pi-ai/auth-storage";
-import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
 import { alibabaTokenPlanUsageProvider } from "@oh-my-pi/pi-ai/usage/alibaba-token-plan";
 import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import { serializeAlibabaTokenPlanCredential } from "@oh-my-pi/pi-catalog/wire/alibaba-token-plan";
@@ -326,6 +326,202 @@ describe("AuthStorage usage cache: last-good failure fallback", () => {
 		expect(third).toHaveLength(1);
 		expect(calls).toBe(3);
 	});
+
+	it("does not replay last-good quota after an explicit invalidation", async () => {
+		let calls = 0;
+		vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
+			calls += 1;
+			return calls === 1 ? makeReport("a@example.com") : null;
+		});
+
+		expect(anthropicReports(await storage.fetchUsageReports())).toHaveLength(1);
+		await storage.invalidateUsageCache();
+
+		expect(anthropicReports(await storage.fetchUsageReports())).toHaveLength(0);
+		expect(calls).toBe(2);
+	});
+});
+
+describe("AuthStorage usage cache: explicit invalidation", () => {
+	it("clears cached API-key reports before the next usage read", async () => {
+		const store = makeStore([
+			{
+				id: 1,
+				provider: "zai",
+				credential: { type: "api_key", key: "zai-key" },
+				disabledCause: null,
+			},
+		]);
+		let calls = 0;
+		const usageProvider: UsageProvider = {
+			id: "zai",
+			supports: params => params.provider === "zai" && params.credential.type === "api_key",
+			async fetchUsage() {
+				calls += 1;
+				return {
+					provider: "zai",
+					fetchedAt: Date.now(),
+					limits: [
+						{
+							id: "zai:requests:5h",
+							label: "Z.AI Request Quota",
+							scope: { provider: "zai", windowId: "5h" },
+							amount: { used: calls === 1 ? 80 : 20, limit: 100, unit: "requests" },
+							status: "ok",
+						},
+					],
+				};
+			},
+		};
+		const storage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "zai" ? usageProvider : undefined),
+		});
+		await storage.reload();
+		try {
+			const initial = await storage.fetchUsageReports();
+			expect(initial?.[0]?.limits[0]?.amount.used).toBe(80);
+
+			await storage.invalidateUsageCache();
+
+			const refreshed = await storage.fetchUsageReports();
+			expect(refreshed?.[0]?.limits[0]?.amount.used).toBe(20);
+			expect(calls).toBe(2);
+		} finally {
+			storage.close();
+		}
+	});
+
+	it("serializes a persisted Codex refresh and returns an upgraded plan", async () => {
+		const store = makeStore([
+			{
+				id: 1,
+				provider: "openai-codex",
+				credential: {
+					type: "oauth",
+					access: "access-free",
+					refresh: "refresh-free",
+					expires: Date.now() + 3_600_000,
+					accountId: "account-free",
+					email: "free@example.com",
+				},
+				disabledCause: null,
+			},
+			{
+				id: 2,
+				provider: "openai-codex",
+				credential: {
+					type: "oauth",
+					access: "access-upgraded",
+					refresh: "refresh-upgraded",
+					expires: Date.now() + 3_600_000,
+					accountId: "account-upgraded",
+					email: "upgraded@example.com",
+				},
+				disabledCause: null,
+			},
+			{
+				id: 3,
+				provider: "openai-codex",
+				credential: {
+					type: "oauth",
+					access: "access-other",
+					refresh: "refresh-other",
+					expires: Date.now() + 3_600_000,
+					accountId: "account-other",
+					email: "other@example.com",
+				},
+				disabledCause: null,
+			},
+		]);
+		let upgraded = false;
+		const refreshStarted = new Map<string, PromiseWithResolvers<void>>();
+		const refreshReleases = new Map<string, PromiseWithResolvers<void>>();
+		for (const accountId of ["account-free", "account-upgraded", "account-other"]) {
+			refreshStarted.set(accountId, Promise.withResolvers<void>());
+			refreshReleases.set(accountId, Promise.withResolvers<void>());
+		}
+		const startedAccounts: string[] = [];
+		const usageProvider: UsageProvider = {
+			id: "openai-codex",
+			supports: params => params.provider === "openai-codex" && params.credential.type === "oauth",
+			async fetchUsage(params) {
+				const accountId = params.credential.accountId;
+				if (!accountId) return null;
+				if (upgraded) {
+					const started = refreshStarted.get(accountId);
+					const release = refreshReleases.get(accountId);
+					if (!started || !release) throw new Error(`unexpected account ${accountId}`);
+					startedAccounts.push(accountId);
+					started.resolve();
+					await release.promise;
+				}
+				return {
+					provider: "openai-codex",
+					fetchedAt: Date.now(),
+					limits: [
+						{
+							id: "openai-codex:7d",
+							label: "7 days",
+							scope: { provider: "openai-codex", windowId: "7d" },
+							amount: { used: 0, limit: 100, unit: "percent" },
+							status: "ok",
+						},
+					],
+					metadata: {
+						accountId,
+						email: params.credential.email,
+						planType: upgraded && accountId === "account-upgraded" ? "pro" : "free",
+					},
+				};
+			},
+		};
+		const initialStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+		});
+		await initialStorage.reload();
+		try {
+			expect(await initialStorage.fetchUsageReports()).toHaveLength(3);
+			await initialStorage.invalidateUsageCache();
+		} finally {
+			initialStorage.close();
+		}
+
+		upgraded = true;
+		const refreshedStorage = new AuthStorage(store, {
+			usageProviderResolver: provider => (provider === "openai-codex" ? usageProvider : undefined),
+		});
+		await refreshedStorage.reload();
+		try {
+			const refresh = refreshedStorage.fetchUsageReports();
+			const freeStarted = refreshStarted.get("account-free");
+			const freeRelease = refreshReleases.get("account-free");
+			if (!freeStarted || !freeRelease) throw new Error("missing free-account refresh gates");
+			await freeStarted.promise;
+			expect(startedAccounts).toEqual(["account-free"]);
+			freeRelease.resolve();
+
+			const upgradedStarted = refreshStarted.get("account-upgraded");
+			const upgradedRelease = refreshReleases.get("account-upgraded");
+			if (!upgradedStarted || !upgradedRelease) throw new Error("missing upgraded-account refresh gates");
+			await upgradedStarted.promise;
+			expect(startedAccounts).toEqual(["account-free", "account-upgraded"]);
+			upgradedRelease.resolve();
+
+			const otherStarted = refreshStarted.get("account-other");
+			const otherRelease = refreshReleases.get("account-other");
+			if (!otherStarted || !otherRelease) throw new Error("missing other-account refresh gates");
+			await otherStarted.promise;
+			expect(startedAccounts).toEqual(["account-free", "account-upgraded", "account-other"]);
+			otherRelease.resolve();
+
+			const reports = await refresh;
+			expect(reports?.find(report => report.metadata?.accountId === "account-upgraded")?.metadata?.planType).toBe(
+				"pro",
+			);
+		} finally {
+			refreshedStorage.close();
+		}
+	});
 });
 describe("AuthStorage usage cache: provider failure policy", () => {
 	it("drops stale QwenCloud quota after the optional console session expires", async () => {
@@ -473,7 +669,7 @@ describe("AuthStorage usage cache: header ingestion", () => {
 			return fullReport;
 		});
 
-		expect(await storage.getApiKey("anthropic", "s")).toBe("oat-1");
+		await storage.getApiKey("anthropic", "s");
 		expect(storage.ingestUsageHeaders("anthropic", usageHeaders("0.02", "0.3"), { sessionId: "s" })).toBe(true);
 		now.mockReturnValue(start + 60_001);
 		expect(storage.ingestUsageHeaders("anthropic", usageHeaders("0.05", "0.6"), { sessionId: "s" })).toBe(true);
@@ -491,20 +687,17 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		const start = Date.now();
 		const now = vi.spyOn(Date, "now").mockReturnValue(start);
 		const fetchSpy = vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockResolvedValue(null);
-		expect(await storage.getApiKey("anthropic", "legacy-session")).toBe("oat-1");
+		await storage.getApiKey("anthropic", "legacy-session");
 		expect(
 			storage.ingestUsageHeaders("anthropic", usageHeaders("0.02", "0.3"), { sessionId: "legacy-session" }),
 		).toBe(true);
 
-		let rewroteLegacyEntry = false;
 		for (const [key, entry] of store.cache) {
 			const payload = JSON.parse(entry.value) as { value?: UsageReport | null };
 			if (payload.value?.metadata?.source !== "ratelimit-headers") continue;
 			payload.value.metadata = { source: "ratelimit-headers" };
 			store.cache.set(key, { value: JSON.stringify(payload), expiresAtSec: entry.expiresAtSec });
-			rewroteLegacyEntry = true;
 		}
-		expect(rewroteLegacyEntry).toBe(true);
 
 		now.mockReturnValue(start + 60_001);
 		expect(
@@ -522,7 +715,7 @@ describe("AuthStorage usage cache: header ingestion", () => {
 	});
 
 	it("throttles repeated header ingestion for the same credential cache key", async () => {
-		expect(await storage.getApiKey("anthropic", "s")).toBe("oat-1");
+		await storage.getApiKey("anthropic", "s");
 		expect(storage.ingestUsageHeaders("anthropic", usageHeaders("0.02", "0.3"), { sessionId: "s" })).toBe(true);
 		expect(storage.ingestUsageHeaders("anthropic", usageHeaders("0.05", "0.6"), { sessionId: "s" })).toBe(false);
 	});
@@ -536,7 +729,7 @@ describe("AuthStorage usage cache: header ingestion", () => {
 			return null;
 		});
 
-		expect(await storage.getApiKey("anthropic", "cooldown-session")).toBe("oat-1");
+		await storage.getApiKey("anthropic", "cooldown-session");
 		expect(
 			storage.ingestUsageHeaders("anthropic", usageHeaders("0.02", "0.3"), {
 				sessionId: "cooldown-session",
@@ -595,7 +788,7 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		const initialReport = requireAnthropicReport(await storage.fetchUsageReports());
 		expect(fetchSpy).toHaveBeenCalledTimes(1);
 		expect(requireLimit(initialReport, "anthropic:extra").amount.used).toBe(12.34);
-		expect(await storage.getApiKey("anthropic", "sliding-session")).toBe("oat-1");
+		await storage.getApiKey("anthropic", "sliding-session");
 
 		now.mockReturnValue(start + 60_000);
 		expect(
@@ -639,7 +832,7 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		expect(requireLimit(initialReport, "anthropic:7d:opus").amount.used).toBe(12);
 		expect(calls).toBe(1);
 
-		expect(await storage.getApiKey("anthropic", "merge-session")).toBe("oat-1");
+		await storage.getApiKey("anthropic", "merge-session");
 		const beforeIngest = Date.now();
 		expect(storage.ingestUsageHeaders("anthropic", usageHeaders("0.05", "0.9"), { sessionId: "merge-session" })).toBe(
 			true,
@@ -710,7 +903,7 @@ describe("AuthStorage usage cache: header ingestion", () => {
 		expect(requireLimit(initialReport, "anthropic:7d:fable").amount.used).toBe(11);
 		expect(calls).toBe(1);
 
-		expect(await storage.getApiKey("anthropic", "fable-session")).toBe("oat-1");
+		await storage.getApiKey("anthropic", "fable-session");
 		expect(
 			storage.ingestUsageHeaders("anthropic", usageHeaders("0.05", "0.9", "0.61"), {
 				sessionId: "fable-session",

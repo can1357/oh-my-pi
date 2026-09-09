@@ -19,6 +19,7 @@
  * share one wire contract.
  */
 import { toNumber } from "@oh-my-pi/pi-catalog/utils";
+import { USER_AGENT } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
 import { isRecord } from "../utils";
 import { normalizeCodexBaseUrl } from "./openai-codex-base-url";
@@ -89,7 +90,7 @@ function buildUrl(baseUrl: string | undefined, routePath: string): string {
 function buildHeaders(auth: CodexResetAuth, json: boolean): Record<string, string> {
 	const headers: Record<string, string> = {
 		Authorization: `Bearer ${auth.accessToken}`,
-		"User-Agent": "OpenCode-Status-Plugin/1.0",
+		"User-Agent": USER_AGENT,
 	};
 	if (auth.accountId) headers["ChatGPT-Account-Id"] = auth.accountId;
 	if (json) headers["Content-Type"] = "application/json";

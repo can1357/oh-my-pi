@@ -15,7 +15,8 @@ import {
 } from "@oh-my-pi/pi-ai/auth-broker";
 import { snapshotResponseSchema } from "@oh-my-pi/pi-ai/auth-broker/wire-schemas";
 import * as oauthUtils from "@oh-my-pi/pi-ai/registry/oauth";
-import type { UsageLimit, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import type { UsageLimit, UsageProvider, UsageReport } from "@oh-my-pi/pi-ai/usage";
+import * as claudeUsage from "@oh-my-pi/pi-ai/usage/claude";
 import { removeWithRetries } from "../../utils/src/temp";
 
 function requireLimit(report: UsageReport, id: string): UsageLimit {
@@ -33,8 +34,10 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 	let serverStorage: AuthStorage | undefined;
 	let handle: AuthBrokerServerHandle | undefined;
 	const token = "remote-bearer";
+	let testUsageProviders: Map<string, UsageProvider> | undefined;
 
 	beforeEach(async () => {
+		testUsageProviders = undefined;
 		for (const key of ANTHROPIC_ENV) {
 			savedEnv[key] = process.env[key];
 			delete process.env[key];
@@ -48,7 +51,14 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			accountId: "account-1",
 			email: "a@example.com",
 		});
-		serverStorage = new AuthStorage(serverStore);
+		serverStorage = new AuthStorage(serverStore, {
+			usageProviderResolver: provider =>
+				testUsageProviders
+					? testUsageProviders.get(provider)
+					: provider === "anthropic"
+						? claudeUsage.claudeUsageProvider
+						: undefined,
+		});
 		await serverStorage.reload();
 		handle = startAuthBroker({
 			storage: serverStorage,
@@ -59,6 +69,7 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 	});
 
 	afterEach(async () => {
+		testUsageProviders = undefined;
 		vi.restoreAllMocks();
 		await handle?.close();
 		serverStorage?.close();
@@ -823,6 +834,47 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 			remoteStore.close();
 		}
 	});
+	test("retains the legacy Codex shared block from an older broker snapshot", () => {
+		const blockedUntilMs = Date.now() + 60_000;
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" }),
+			streamSnapshots: false,
+			initialSnapshot: {
+				generation: 1,
+				generatedAt: Date.now(),
+				serverNowMs: Date.now(),
+				refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+				credentials: [
+					{
+						id: 7,
+						provider: "openai-codex",
+						credential: {
+							type: "oauth",
+							access: "remote-codex-access",
+							refresh: REMOTE_REFRESH_SENTINEL,
+							expires: blockedUntilMs,
+							accountId: "remote-codex-account",
+							email: "remote-codex@example.com",
+						},
+						identityKey: "email:remote-codex@example.com",
+						rotatesInMs: null,
+						blocks: [
+							{
+								providerKey: "openai-codex:oauth",
+								blockScope: "shared",
+								blockedUntilMs,
+							},
+						],
+					},
+				],
+			},
+		});
+		try {
+			expect(remoteStore.getCredentialBlock(7, "openai-codex:oauth", "shared")).toBe(blockedUntilMs);
+		} finally {
+			remoteStore.close();
+		}
+	});
 
 	test("ingestUsageReport overlays only the matching Anthropic report and getUsageReport returns the overlaid Fable row", async () => {
 		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
@@ -1105,6 +1157,237 @@ describe("RemoteAuthCredentialStore + AuthStorage integration", () => {
 		clientStorage.close();
 	});
 
+	test("broker invalidation drops server-side last-good usage reports", async () => {
+		const credential = serverStore!.listAuthCredentials("anthropic")[0];
+		if (credential?.credential.type !== "oauth") throw new Error("expected OAuth credential");
+		serverStore!.updateAuthCredential(credential.id, {
+			...credential.credential,
+			expires: Date.now() + 3_600_000,
+		});
+		await serverStorage!.reload();
+
+		let calls = 0;
+		const fetchSpy = vi.spyOn(claudeUsage.claudeUsageProvider, "fetchUsage").mockImplementation(async () => {
+			calls += 1;
+			if (calls > 1) return null;
+			return {
+				provider: "anthropic",
+				fetchedAt: Date.now(),
+				limits: [
+					{
+						id: "anthropic:5h",
+						label: "Claude 5 Hour",
+						scope: { provider: "anthropic", windowId: "5h" },
+						amount: { used: 80, limit: 100, unit: "percent" },
+						status: "ok",
+					},
+				],
+				metadata: { accountId: "account-1", email: "a@example.com" },
+			};
+		});
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+		});
+		const clientStorage = new AuthStorage(remoteStore);
+		await clientStorage.reload();
+		try {
+			expect(await clientStorage.fetchUsageReports()).toHaveLength(1);
+			await clientStorage.invalidateUsageCache();
+			expect(await clientStorage.fetchUsageReports()).toEqual([]);
+			expect(fetchSpy).toHaveBeenCalledTimes(2);
+		} finally {
+			clientStorage.close();
+		}
+	});
+
+	test("broker returns an upgraded plan through a delayed serialized Codex refresh", async () => {
+		const accountIds = ["account-free", "account-upgraded", "account-other"];
+		const refreshStarted = new Map<string, PromiseWithResolvers<void>>();
+		const refreshReleases = new Map<string, PromiseWithResolvers<void>>();
+		for (const accountId of accountIds) {
+			refreshStarted.set(accountId, Promise.withResolvers<void>());
+			refreshReleases.set(accountId, Promise.withResolvers<void>());
+		}
+		const startedAccounts: string[] = [];
+		const usageProvider: UsageProvider = {
+			id: "openai-codex",
+			supports: params => params.provider === "openai-codex" && params.credential.type === "oauth",
+			async fetchUsage(params) {
+				const accountId = params.credential.accountId;
+				if (!accountId) return null;
+				const started = refreshStarted.get(accountId);
+				const release = refreshReleases.get(accountId);
+				if (!started || !release) throw new Error(`unexpected account ${accountId}`);
+				startedAccounts.push(accountId);
+				started.resolve();
+				await release.promise;
+				return {
+					provider: "openai-codex",
+					fetchedAt: Date.now(),
+					limits: [
+						{
+							id: "openai-codex:7d",
+							label: "7 days",
+							scope: { provider: "openai-codex", windowId: "7d" },
+							amount: { used: 0, limit: 100, unit: "percent" },
+							status: "ok",
+						},
+					],
+					metadata: {
+						accountId,
+						email: `${accountId.slice("account-".length)}@example.com`,
+						planType: accountId === "account-upgraded" ? "pro" : "free",
+					},
+				};
+			},
+		};
+		testUsageProviders = new Map([["openai-codex", usageProvider]]);
+		for (const accountId of accountIds) {
+			serverStore!.upsertAuthCredentialForProvider("openai-codex", {
+				type: "oauth",
+				access: `access-${accountId}`,
+				refresh: `refresh-${accountId}`,
+				expires: Date.now() + 3_600_000,
+				accountId,
+				email: `${accountId.slice("account-".length)}@example.com`,
+			});
+		}
+		await serverStorage!.reload();
+
+		const brokerClient = new AuthBrokerClient({ url: handle!.url, token, timeoutMs: 10_000 });
+		const initialResult = await brokerClient.fetchSnapshot();
+		if (initialResult.status !== 200) throw new Error("expected snapshot");
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			initialSnapshot: initialResult.snapshot,
+		});
+		const clientStorage = new AuthStorage(remoteStore);
+		await clientStorage.reload();
+		try {
+			await clientStorage.invalidateUsageCache();
+			const refresh = clientStorage.fetchUsageReports();
+			const freeStarted = refreshStarted.get("account-free");
+			const freeRelease = refreshReleases.get("account-free");
+			if (!freeStarted || !freeRelease) throw new Error("missing free-account refresh gates");
+			await freeStarted.promise;
+			expect(startedAccounts).toEqual(["account-free"]);
+			freeRelease.resolve();
+
+			const upgradedStarted = refreshStarted.get("account-upgraded");
+			const upgradedRelease = refreshReleases.get("account-upgraded");
+			if (!upgradedStarted || !upgradedRelease) throw new Error("missing upgraded-account refresh gates");
+			await upgradedStarted.promise;
+			expect(startedAccounts).toEqual(["account-free", "account-upgraded"]);
+			upgradedRelease.resolve();
+
+			const otherStarted = refreshStarted.get("account-other");
+			const otherRelease = refreshReleases.get("account-other");
+			if (!otherStarted || !otherRelease) throw new Error("missing other-account refresh gates");
+			await otherStarted.promise;
+			expect(startedAccounts).toEqual(["account-free", "account-upgraded", "account-other"]);
+			otherRelease.resolve();
+
+			const reports = await refresh;
+			expect(reports).toHaveLength(3);
+			expect(reports?.find(report => report.metadata?.accountId === "account-upgraded")?.metadata?.planType).toBe(
+				"pro",
+			);
+		} finally {
+			for (const release of refreshReleases.values()) release.resolve();
+			clientStorage.close();
+		}
+	});
+
+	test("sizes broker usage timeout from the unfiltered account-pool snapshot", async () => {
+		vi.useFakeTimers();
+		const now = Date.now();
+		const credentials: SnapshotResponse["credentials"] = [];
+		for (let index = 0; index < 6; index += 1) {
+			const accountId = `account-${index}`;
+			credentials.push({
+				id: index + 1,
+				provider: "openai-codex",
+				credential: {
+					type: "oauth",
+					access: `access-${index}`,
+					refresh: REMOTE_REFRESH_SENTINEL,
+					expires: now + 120_000,
+					accountId,
+					email: `${index}@example.com`,
+				},
+				identityKey: `email:${index}@example.com`,
+				rotatesInMs: null,
+			});
+		}
+		const visible = credentials[0];
+		if (!visible?.identityKey) throw new Error("expected visible account identity");
+		const initialSnapshot: SnapshotResponse = {
+			generation: 1,
+			generatedAt: now,
+			serverNowMs: now,
+			refresher: { enabled: false, intervalMs: 0, skewMs: 0, nextSweepInMs: Number.MAX_SAFE_INTEGER },
+			credentials,
+		};
+		const response = Promise.withResolvers<Response>();
+		const snapshotResponse = Promise.withResolvers<Response>();
+		let usageSignal: AbortSignal | undefined;
+		const fetchImpl: typeof fetch = Object.assign(
+			async (input: string | URL | Request, init?: RequestInit) => {
+				const pathname = new URL(String(input)).pathname;
+				if (pathname === "/v1/snapshot") return snapshotResponse.promise;
+				if (pathname !== "/v1/usage") throw new Error(`unexpected path ${pathname}`);
+				const signal = init?.signal;
+				if (signal) usageSignal = signal;
+				return response.promise;
+			},
+			{ preconnect: fetch.preconnect },
+		);
+		const brokerClient = new AuthBrokerClient({
+			url: "http://broker.invalid",
+			token: "unused",
+			timeoutMs: 10_000,
+			maxRetries: 0,
+			fetchImpl,
+		});
+		const remoteStore = new RemoteAuthCredentialStore({
+			client: brokerClient,
+			streamSnapshots: false,
+			accountPool: new Map([["openai-codex", new Set([visible.identityKey])]]),
+			initialSnapshot,
+		});
+		try {
+			const usage = remoteStore.fetchUsageReports();
+			await Promise.resolve();
+			const oneAccountBudget = AbortSignal.timeout(20_000);
+			vi.advanceTimersByTime(20_001);
+			await Promise.resolve();
+			expect(oneAccountBudget.aborted).toBe(true);
+			expect(usageSignal?.aborted).toBe(false);
+
+			response.resolve(
+				Response.json({
+					generatedAt: Date.now(),
+					reports: [
+						{
+							provider: "openai-codex",
+							fetchedAt: Date.now(),
+							limits: [],
+							metadata: { accountId: "account-0", email: "0@example.com" },
+						},
+					],
+				}),
+			);
+			expect(await usage).toHaveLength(1);
+		} finally {
+			remoteStore.close();
+			snapshotResponse.resolve(new Response(null, { status: 304, headers: { ETag: '"1"' } }));
+			vi.useRealTimers();
+		}
+	});
 	test("account pool exposes only qualified usage reports for visible OAuth identities", async () => {
 		const brokerClient = new AuthBrokerClient({ url: "http://127.0.0.1:9", token: "unused" });
 		const now = Date.now();

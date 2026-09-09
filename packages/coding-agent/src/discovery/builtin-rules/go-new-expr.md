@@ -7,13 +7,13 @@ astCondition:
   - "func $F[$$$TP]($V $T) *$T { return &$V }"
 ---
 
-Go 1.26 lets `new` take an expression: `new(expr)` allocates, stores `expr`, and returns its `*T`. That removes the need for hand-written `Ptr`/`boolPtr`/`Int64`-style helpers and the `x := v; p := &x` two-step.
+Go 1.26: `new(expr)` allocates, stores `expr`, returns `*T`; replaces pointer-value helpers and `x := v; p := &x`.
 
 ## Why
 
-- One builtin replaces a helper per type (`boolPtr`, `strPtr`, `int64Ptr`, …) and the generic `func Ptr[T any](v T) *T`.
-- No extra function-call frame and no separate heap escape — the value is constructed directly in the allocation.
-- The intent (`new(false)`) reads at the call site instead of hiding behind a helper name.
+- Replaces per-type helpers (`boolPtr`, `strPtr`, `int64Ptr`, …) and `func Ptr[T any](v T) *T`.
+- Value constructed directly in allocation: no extra function-call frame or separate heap escape.
+- Call-site intent visible: `new(false)`, not a helper name.
 
 ## Avoid
 
@@ -35,10 +35,10 @@ cfg := Config{Enabled: new(true), Name: new("svc")}
 p := new(int64(300))
 ```
 
-`new(true)` / `new(false)` give you `*bool`; `new(expr)` works for any expression, including function results (`new(time.Now())`).
+`new(true)` / `new(false)`: `*bool`. `new(expr)`: any expression, including function results (`new(time.Now())`).
 
 ## Notes
 
-- Requires Go 1.26+. If the module's `go` directive is older, keep the helper or the temp-variable form until the toolchain is bumped.
-- This is for helpers that *only* take a value and return its address. A function that does real work before taking an address is not in scope.
-- `new(T)` (a bare type) is unchanged and still zero-initializes.
+- Requires Go 1.26+. If the module's `go` directive is older, keep the helper or temp-variable form until the toolchain is bumped.
+- Scope: helpers only taking a value and returning its address; functions doing work before taking an address excluded.
+- `new(T)` (bare type) unchanged; still zero-initializes.

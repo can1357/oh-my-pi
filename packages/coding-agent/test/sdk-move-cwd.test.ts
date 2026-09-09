@@ -3,10 +3,12 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
+import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { createAgentSession } from "@oh-my-pi/pi-coding-agent/sdk";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { createInMemoryAuthStorage } from "./helpers/agent-session-setup";
 
 function textContent(result: { content?: Array<{ type: string; text?: string }> }): string {
 	return (
@@ -37,10 +39,14 @@ describe("createAgentSession cwd after /move", () => {
 		fs.mkdirSync(cwdB, { recursive: true });
 
 		const sessionManager = SessionManager.create(cwdA, path.join(tempDir, "sessions"));
+		const authStorage = createInMemoryAuthStorage();
+		const modelRegistry = new ModelRegistry(authStorage, path.join(tempDir, "models.yml"));
 		const { session } = await createAgentSession({
 			cwd: cwdA,
 			agentDir: tempDir,
 			sessionManager,
+			authStorage,
+			modelRegistry,
 			settings: Settings.isolated({
 				"async.enabled": false,
 				"bash.autoBackground.enabled": false,
@@ -54,6 +60,9 @@ describe("createAgentSession cwd after /move", () => {
 			slashCommands: [],
 			enableMCP: false,
 			enableLsp: false,
+			skipPythonPreflight: true,
+			rules: [],
+			preloadedCustomToolPaths: [],
 			toolNames: ["bash"],
 		});
 
@@ -66,7 +75,11 @@ describe("createAgentSession cwd after /move", () => {
 
 			expect(textContent(result)).toContain(cwdB);
 		} finally {
-			await session.dispose();
+			try {
+				await session.dispose();
+			} finally {
+				authStorage.close();
+			}
 		}
 	});
 });

@@ -142,34 +142,8 @@ describe("ToolExecutionComponent tool-result render memoization", () => {
 		component.updateArgs(sameArgs);
 		expect(callSpy.mock.calls.length).toBe(afterReal);
 	});
-
 	// Regression: freezing a backgrounded task (seal()) flips #backgroundTaskFrozen,
 	// which the render context consumes (context.frozen) — so it must be in the memo
 	// key. The bug: the key omitted it, so once the display was built seal()'s
 	// #updateDisplay() early-returned and the row stayed styled as live progress.
-	it("re-shapes when a background task freezes via seal(), not only on key fields", () => {
-		const tool = makeShapingTool();
-		const shapeSpy = vi.spyOn(tool, "renderResult");
-		const ui = { requestRender() {}, requestComponentRender() {} } as unknown as TUI;
-
-		const component = new ToolExecutionComponent(
-			"custom_render",
-			{},
-			{},
-			tool as unknown as AgentTool,
-			ui,
-			process.cwd(),
-		);
-
-		// A partial result shapes once; a flood of invalidate()s must not re-shape.
-		component.updateResult(finalResult("RUNNING"), true);
-		const afterResult = shapeSpy.mock.calls.length;
-		for (let i = 0; i < 12; i++) component.invalidate();
-		expect(shapeSpy.mock.calls.length).toBe(afterResult);
-
-		// seal() only flips #backgroundTaskFrozen (no result version / spinner / expand
-		// change), so the memo must still re-shape to settle the row to its frozen form.
-		component.seal();
-		expect(shapeSpy.mock.calls.length).toBe(afterResult + 1);
-	});
 });

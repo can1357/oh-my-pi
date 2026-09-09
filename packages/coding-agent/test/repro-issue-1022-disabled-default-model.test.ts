@@ -57,7 +57,7 @@ describe("issue #1022 — path-scoped enabledModels respected by default fallbac
 		expect(settings.get("enabledModels")).toEqual(["openai-codex"]);
 		expect(settings.get("disabledProviders")).toEqual(["github-copilot"]);
 
-		const authStorage = await AuthStorage.create(path.join(testDir, "auth.db"));
+		const authStorage = await AuthStorage.create(":memory:");
 		// Only anthropic has credentials. Per `enabledModels` the path allows
 		// only openai-codex, so no anthropic model should be selected.
 		authStorage.setRuntimeApiKey("anthropic", "test-anthropic-key");

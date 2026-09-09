@@ -5,6 +5,18 @@ import { discoveryFetch } from "../utils";
 const MODELS_PATH = "/models";
 
 /**
+ * Default hard deadline applied to an OpenAI-compatible `/models` probe when
+ * the caller supplies neither an `AbortSignal` nor an explicit `timeoutMs`.
+ *
+ * Built-in provider model managers (openrouter, xAI, DeepSeek, …) call
+ * {@link fetchOpenAICompatibleModels} with no timeout, so without this bound a
+ * stalled endpoint left the request pending forever and blocked startup's
+ * awaited `resolveModelDiscoveryFallback` discovery pass indefinitely
+ * (issue #8315). 10s matches the coding-agent's remote-discovery budget.
+ */
+export const DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS = 10_000;
+
+/**
  * Uses a cancellable timer rather than the native abort-timeout helper so
  * successful fast discovery requests do not leave armed timeout signals for
  * concurrent GC to trip over later.
@@ -96,7 +108,11 @@ export interface FetchOpenAICompatibleModelsOptions<TApi extends Api> {
 	headers?: Record<string, string>;
 	/** Optional AbortSignal for request cancellation; caller owns its lifecycle. */
 	signal?: AbortSignal;
-	/** Optional cancellable request timeout used when `signal` is omitted. */
+	/**
+	 * Optional cancellable request timeout used when `signal` is omitted.
+	 * Defaults to {@link DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS} so a
+	 * stalled endpoint can never hang discovery indefinitely.
+	 */
 	timeoutMs?: number;
 	/** Optional fetch implementation override for testing/custom runtimes. */
 	fetch?: FetchImpl;
@@ -164,9 +180,10 @@ export async function fetchOpenAICompatibleModels<TApi extends Api>(
 	const payload =
 		options.signal !== undefined
 			? await fetchPayload(options.signal)
-			: options.timeoutMs !== undefined
-				? await withOpenAICompatibleDiscoveryTimeout(options.timeoutMs, fetchPayload)
-				: await fetchPayload();
+			: await withOpenAICompatibleDiscoveryTimeout(
+					options.timeoutMs ?? DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS,
+					fetchPayload,
+				);
 	if (payload === null) {
 		return null;
 	}

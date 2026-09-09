@@ -396,9 +396,8 @@ describe("PluginManager.install with git sources", () => {
 
 	test("drains stdout/stderr concurrently with proc.exited (pipe-buffer deadlock, #4230)", async () => {
 		// Model the OS-pipe semantics that caused the deadlock: `exited` cannot
-		// resolve until both pipes have been read. If PluginManager.install
-		// awaits `exited` before starting to drain either stream, this test
-		// hangs — which we catch with Promise.race + a short timeout.
+		// resolve until both pipes have been read. Awaiting install directly is
+		// sufficient: the test runner's timeout catches a regression.
 		await Bun.write(
 			pluginsPkgJson,
 			JSON.stringify({ name: "omp-plugins", private: true, dependencies: {} }, null, 2),
@@ -445,12 +444,9 @@ describe("PluginManager.install with git sources", () => {
 		}) as typeof Bun.spawn);
 
 		const mgr = new PluginManager(tmpRoot);
-		const installed = await Promise.race([
-			mgr.install("github:foo/bar"),
-			new Promise<never>((_, reject) => setTimeout(() => reject(new Error("install deadlocked")), 2000)),
-		]);
+		const installed = await mgr.install("github:foo/bar");
 		expect(installed.name).toBe("real-name");
-	});
+	}, 2000);
 
 	test("refreshes Bun's cached git clone before updating an existing plugin (#5401)", async () => {
 		const sourceDir = path.join(tmpRoot, "source");
@@ -460,14 +456,24 @@ describe("PluginManager.install with git sources", () => {
 		await fs.mkdir(sourceDir, { recursive: true });
 		await fs.mkdir(path.dirname(remoteDir), { recursive: true });
 		await runCommand(["git", "init", "-b", "main"], sourceDir);
-		await runCommand(["git", "config", "user.name", "Plugin test"], sourceDir);
-		await runCommand(["git", "config", "user.email", "plugin-test@example.com"], sourceDir);
 		await Bun.write(
 			path.join(sourceDir, "package.json"),
 			JSON.stringify({ name: "@test/pi-package", version: "1.0.0" }, null, 2),
 		);
 		await runCommand(["git", "add", "package.json"], sourceDir);
-		await runCommand(["git", "commit", "-m", "version A"], sourceDir);
+		await runCommand(
+			[
+				"git",
+				"-c",
+				"user.name=Plugin test",
+				"-c",
+				"user.email=plugin-test@example.com",
+				"commit",
+				"-m",
+				"version A",
+			],
+			sourceDir,
+		);
 		await runCommand(["git", "clone", "--bare", sourceDir, remoteDir], tmpRoot);
 		await runCommand(["git", "update-server-info"], remoteDir);
 
@@ -506,7 +512,19 @@ describe("PluginManager.install with git sources", () => {
 				JSON.stringify({ name: "@test/pi-package", version: "2.0.0" }, null, 2),
 			);
 			await runCommand(["git", "add", "package.json"], sourceDir);
-			await runCommand(["git", "commit", "-m", "version B"], sourceDir);
+			await runCommand(
+				[
+					"git",
+					"-c",
+					"user.name=Plugin test",
+					"-c",
+					"user.email=plugin-test@example.com",
+					"commit",
+					"-m",
+					"version B",
+				],
+				sourceDir,
+			);
 			await runCommand(["git", "push", remoteDir, "main"], sourceDir);
 			await runCommand(["git", "update-server-info"], remoteDir);
 

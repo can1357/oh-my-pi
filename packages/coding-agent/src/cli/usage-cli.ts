@@ -17,10 +17,13 @@ import {
 	type UsageReport,
 	type UsageUnit,
 } from "@oh-my-pi/pi-ai";
+import { AuthBrokerClient } from "@oh-my-pi/pi-ai/auth-broker";
+import type { ClientUsageClientSummary } from "@oh-my-pi/pi-ai/usage";
 import { formatDuration, formatNumber, sanitizeText } from "@oh-my-pi/pi-utils";
 import chalk from "@oh-my-pi/pi-utils/chalk";
 import { ModelRegistry } from "../config/model-registry";
 import { discoverAuthStorage } from "../sdk";
+import { resolveAuthBrokerConfig } from "../session/auth-broker-config";
 
 const BAR_WIDTH = 28;
 
@@ -31,7 +34,7 @@ export interface UsageCommandArgs {
 	redact?: boolean;
 	/** Show recorded usage-limit history instead of a live snapshot. */
 	history?: boolean;
-	/** History window in days (with `history`). */
+	/** History window in days (with `history` or the `clients` action). */
 	days?: number;
 }
 
@@ -211,6 +214,7 @@ function formatUnitValue(value: number, unit: UsageUnit): string {
 const UNIT_SUFFIX: Record<UsageUnit, string> = {
 	tokens: " tokens",
 	requests: " requests",
+	credits: " credits",
 	minutes: " min",
 	bytes: " bytes",
 	percent: "",
@@ -479,32 +483,43 @@ export interface ProviderWindowStat {
 	/** Compact window label, e.g. "5h", "7d". */
 	window: string;
 	durationMs?: number;
+	/** Meter identity when a provider keeps independent meters in one window. */
+	meter?: string;
 	/** Accounts reporting a limit in this window. */
 	accounts: number;
-	/** Sum of each account's binding used fraction — accounts' worth of quota burned. */
+	/** Sum of each account's binding used fraction - accounts' worth of quota burned. */
 	usedAccounts: number;
 	/** Accounts' worth of quota still available across reporting accounts. */
 	remainingAccounts: number;
+}
+
+function meterForLimit(report: UsageReport, limit: UsageLimit): string | undefined {
+	if (report.provider !== "openai-codex") return undefined;
+	const tier = limit.scope.tier?.trim().toLowerCase();
+	if (tier) return tier;
+	const slug = limit.id.toLowerCase().split(":")[1];
+	return slug && slug !== "primary" && slug !== "secondary" ? slug : "chat";
 }
 
 /**
  * Aggregate one provider's reports into per-window quota capacity stats.
  *
  * Limits are bucketed by window duration (5h, 7d, ...). Within a bucket each
- * account contributes its single highest used fraction — when an account has
- * several meters on the same window (tiered/metered limits), the most-burned
- * one is what binds.
+ * account contributes its single highest used fraction. Codex keeps each meter
+ * in its own bucket because chat and Spark can share a window duration.
  */
 export function computeProviderWindowStats(reports: UsageReport[]): ProviderWindowStat[] {
-	const buckets = new Map<string, { window: string; durationMs?: number; fractions: number[] }>();
+	const buckets = new Map<string, { window: string; durationMs?: number; meter?: string; fractions: number[] }>();
 	for (const report of reports) {
 		const accountMax = new Map<string, number>();
 		for (const limit of report.limits) {
 			const fraction = resolveUsedFraction(limit);
 			if (fraction === undefined) continue;
 			const durationMs = limit.window?.durationMs;
-			const key =
+			const windowKey =
 				durationMs !== undefined ? `d:${durationMs}` : (limit.scope.windowId ?? limit.window?.label ?? limit.label);
+			const meter = meterForLimit(report, limit);
+			const key = meter === undefined ? windowKey : `m:${meter}\0${windowKey}`;
 			const previous = accountMax.get(key);
 			if (previous === undefined || fraction > previous) accountMax.set(key, fraction);
 			if (!buckets.has(key)) {
@@ -512,18 +527,22 @@ export function computeProviderWindowStats(reports: UsageReport[]): ProviderWind
 					durationMs !== undefined
 						? formatDuration(durationMs)
 						: (limit.window?.label ?? limit.scope.windowId ?? limit.label);
-				buckets.set(key, { window, durationMs, fractions: [] });
+				buckets.set(key, { window, durationMs, meter, fractions: [] });
 			}
 		}
 		for (const [key, fraction] of accountMax) buckets.get(key)!.fractions.push(fraction);
 	}
 	return [...buckets.values()]
-		.sort((a, b) => (a.durationMs ?? Number.POSITIVE_INFINITY) - (b.durationMs ?? Number.POSITIVE_INFINITY))
+		.sort((a, b) => {
+			const duration = (a.durationMs ?? Number.POSITIVE_INFINITY) - (b.durationMs ?? Number.POSITIVE_INFINITY);
+			return duration !== 0 ? duration : (a.meter ?? "").localeCompare(b.meter ?? "");
+		})
 		.map(bucket => {
 			const usedAccounts = bucket.fractions.reduce((sum, fraction) => sum + fraction, 0);
 			return {
 				window: bucket.window,
 				durationMs: bucket.durationMs,
+				...(bucket.meter === undefined ? {} : { meter: bucket.meter }),
 				accounts: bucket.fractions.length,
 				usedAccounts,
 				remainingAccounts: Math.max(0, bucket.fractions.length - usedAccounts),
@@ -705,10 +724,10 @@ export function formatUsageBreakdown(
 
 		const stats = computeProviderWindowStats(providerReports);
 		if (stats.length > 0) {
-			const parts = stats.map(
-				stat =>
-					`${stat.window} → ${stat.usedAccounts.toFixed(2)}/${stat.accounts} ${stat.accounts === 1 ? "account" : "accounts"} used (${stat.remainingAccounts.toFixed(2)}× quota left)`,
-			);
+			const parts = stats.map(stat => {
+				const meterLabel = stat.meter ? ` (${stat.meter.charAt(0).toUpperCase()}${stat.meter.slice(1)})` : "";
+				return `${stat.window}${meterLabel} → ${stat.usedAccounts.toFixed(2)}/${stat.accounts} ${stat.accounts === 1 ? "account" : "accounts"} used (${stat.remainingAccounts.toFixed(2)}× quota left)`;
+			});
 			lines.push(`  ${chalk.dim(`capacity: ${parts.join(" · ")}`)}`);
 		}
 	}
@@ -755,6 +774,7 @@ function historyStatus(fraction: number | undefined, status: UsageHistoryEntry["
 /** Peak-per-bucket sparkline over [sinceMs, nowMs]; empty buckets render dim dots. */
 function renderHistorySparkline(entries: UsageHistoryEntry[], sinceMs: number, nowMs: number): string {
 	const span = Math.max(1, nowMs - sinceMs);
+	// oxlint-disable-next-line unicorn/no-new-array -- length preallocation
 	const buckets: Array<number | undefined> = new Array(HISTORY_SPARK_WIDTH).fill(undefined);
 	for (const entry of entries) {
 		if (entry.usedFraction === undefined) continue;
@@ -935,6 +955,77 @@ function redactReportForJson(
 	return { ...report, metadata, limits };
 }
 
+/** Compact token count for burn tables: 1234 → "1.2k", 4_500_000_000 → "4.50B". */
+function formatTokenCount(value: number): string {
+	if (value >= 1e9) return `${(value / 1e9).toFixed(2)}B`;
+	if (value >= 1e6) return `${(value / 1e6).toFixed(1)}M`;
+	if (value >= 1e3) return `${(value / 1e3).toFixed(1)}k`;
+	return String(Math.round(value));
+}
+
+/**
+ * Render per-client token burn: one section per install (hostname, short
+ * install id, last-seen), one row per (app, provider) aggregate, plus a
+ * per-client total. Data comes from broker `/v1/usage/clients` or the local
+ * agent DB when this machine hosts the broker.
+ */
+export function formatClientUsage(clients: ClientUsageClientSummary[], sinceMs: number, nowMs: number): string {
+	const lines: string[] = [];
+	lines.push(chalk.bold(`Per-client token burn since ${new Date(sinceMs).toISOString().slice(0, 10)}`));
+	const headers = ["app", "provider", "requests", "input", "output", "cache r", "cache w", "total", "est cost"];
+	for (const client of clients) {
+		const label = client.hostname ?? client.installId;
+		const idNote = client.hostname ? ` · ${client.installId.slice(0, 8)}` : "";
+		const lastSeen = `last seen ${formatDuration(Math.max(0, nowMs - client.lastSeen))} ago`;
+		lines.push("");
+		lines.push(`${chalk.cyan(label)}${chalk.dim(idNote)} ${chalk.dim(`· ${lastSeen}`)}`);
+		if (client.providers.length === 0) {
+			lines.push(chalk.dim("  no usage in this window"));
+			continue;
+		}
+		const rows: string[][] = client.providers.map(usage => [
+			usage.app ?? "—",
+			usage.provider,
+			formatNumber(usage.requests),
+			formatTokenCount(usage.inputTokens),
+			formatTokenCount(usage.outputTokens),
+			formatTokenCount(usage.cacheReadTokens),
+			formatTokenCount(usage.cacheWriteTokens),
+			formatTokenCount(usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens),
+			`$${usage.costUsd.toFixed(2)}`,
+		]);
+		const total = client.providers.reduce(
+			(acc, usage) => {
+				acc.requests += usage.requests;
+				acc.tokens += usage.inputTokens + usage.outputTokens + usage.cacheReadTokens + usage.cacheWriteTokens;
+				acc.costUsd += usage.costUsd;
+				return acc;
+			},
+			{ requests: 0, tokens: 0, costUsd: 0 },
+		);
+		rows.push([
+			"",
+			"total",
+			formatNumber(total.requests),
+			"",
+			"",
+			"",
+			"",
+			formatTokenCount(total.tokens),
+			`$${total.costUsd.toFixed(2)}`,
+		]);
+		const widths = headers.map((header, column) => Math.max(header.length, ...rows.map(row => row[column].length)));
+		const renderRow = (cells: string[]): string =>
+			`  ${cells.map((cell, column) => (column < 2 ? cell.padEnd(widths[column]) : cell.padStart(widths[column]))).join("  ")}`;
+		lines.push(chalk.dim(renderRow(headers)));
+		for (const [index, row] of rows.entries()) {
+			const rendered = renderRow(row);
+			lines.push(index === rows.length - 1 ? chalk.bold(rendered) : rendered);
+		}
+	}
+	return lines.join("\n");
+}
+
 export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 	const authStorage = await discoverAuthStorage();
 	try {
@@ -946,6 +1037,36 @@ export async function runUsageCommand(cmd: UsageCommandArgs): Promise<void> {
 			} else {
 				process.stdout.write("Invalidated cached usage reports for all providers.\n");
 			}
+			return;
+		}
+		if (cmd.action === "clients") {
+			const days = cmd.days !== undefined && Number.isFinite(cmd.days) && cmd.days > 0 ? cmd.days : 7;
+			const nowMs = Date.now();
+			const sinceMs = nowMs - days * 86_400_000;
+			// Prefer the broker's fleet-wide record; fall back to the local agent
+			// DB, which has rows only when this machine hosts the broker.
+			const brokerConfig = await resolveAuthBrokerConfig();
+			let clients: ClientUsageClientSummary[];
+			if (brokerConfig) {
+				const client = new AuthBrokerClient({ url: brokerConfig.url, token: brokerConfig.token });
+				clients = (await client.fetchClientUsageSummary({ sinceMs })).clients;
+			} else {
+				clients = authStorage.getClientUsageSummary(sinceMs).clients;
+			}
+			if (cmd.json) {
+				process.stdout.write(`${JSON.stringify({ generatedAt: nowMs, sinceMs, clients }, null, 2)}\n`);
+				return;
+			}
+			if (clients.length === 0) {
+				process.stderr.write(
+					chalk.yellow(
+						"No per-client usage recorded yet. Broker-connected clients and the auth-gateway report token burn automatically; set OMP_AUTH_BROKER_URL (or run this on the broker host).\n",
+					),
+				);
+				process.exitCode = 1;
+				return;
+			}
+			process.stdout.write(`${formatClientUsage(clients, sinceMs, nowMs)}\n`);
 			return;
 		}
 		if (cmd.history) {

@@ -8,6 +8,7 @@ import * as util from "node:util";
 
 import * as logger from "@oh-my-pi/pi-utils/logger";
 
+import type { EvalPreludeSource } from "../worker-protocol";
 import { createHelpers, type HelperBundle } from "./helpers";
 import { awaitMaybePromise, indirectEval } from "./indirect-eval";
 import { LocalModuleLoader } from "./local-module-loader";
@@ -23,6 +24,29 @@ export interface RuntimeHooks {
 	onText(chunk: string): void;
 	onDisplay(output: JsDisplayOutput): void;
 	callTool(name: string, args: unknown): Promise<unknown>;
+}
+
+/**
+ * Bridged tool results carry image blocks as a base64 `images` array that no
+ * cell code consumes. Emit each block as an image display output so the model
+ * receives real image content — matching the direct tool path — and replace
+ * the payload with a note so echoing the result cannot flood the transcript
+ * with base64.
+ */
+function surfaceBridgedToolImages(value: unknown, hooks: RuntimeHooks): unknown {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+	const { images, ...rest } = value as { images?: unknown } & Record<string, unknown>;
+	if (!Array.isArray(images) || images.length === 0) return value;
+	let displayed = 0;
+	for (const image of images) {
+		if (!image || typeof image !== "object") continue;
+		const { data, mimeType } = image as { data?: unknown; mimeType?: unknown };
+		if (typeof data !== "string" || typeof mimeType !== "string") continue;
+		hooks.onDisplay({ type: "image", data, mimeType });
+		displayed++;
+	}
+	if (displayed === 0) return value;
+	return { ...rest, images: `(${displayed} image${displayed === 1 ? "" : "s"} displayed)` };
 }
 
 export interface RunContext {
@@ -57,6 +81,7 @@ const DECIMAL_CSV_RE = /^\d{1,3}(?:,\d{1,3})*$/;
 
 const PRELUDE_GLOBAL_KEYS = [
 	"__omp_js_prelude_loaded__",
+	"__omp_tools__",
 	"console",
 	"print",
 	"display",
@@ -64,12 +89,14 @@ const PRELUDE_GLOBAL_KEYS = [
 	"completion",
 	"output",
 	"agent",
-	"parallel",
-	"pipeline",
+	"wait",
+	"AgentHandle",
+	"CompletionHandle",
+	"workpool",
+	"WorkPool",
 	"log",
 	"phase",
 	"budget",
-	"__pool",
 	"read",
 	"write",
 	"env",
@@ -147,6 +174,8 @@ function describeDataType(data: unknown): string {
 export class JsRuntime {
 	#globalOwner = Symbol("JsRuntime globals");
 	#ownedGlobalKeys = new Set<string>();
+	#reservedGlobalKeys = new Set<string>();
+	#installedPreludes = new Map<string, EvalPreludeSource>();
 	#disposed = false;
 	#runHookResolver = () => this.#als.getStore()?.hooks;
 
@@ -154,6 +183,11 @@ export class JsRuntime {
 		if (this.#ownedGlobalKeys.has(key)) return;
 		claimGlobalKey(key, this.#globalOwner);
 		this.#ownedGlobalKeys.add(key);
+	}
+
+	#releaseGlobal(key: string): void {
+		if (!this.#ownedGlobalKeys.delete(key)) return;
+		releaseGlobalKey(key, this.#globalOwner);
 	}
 
 	#activateGlobals(action: string): void {
@@ -213,7 +247,90 @@ export class JsRuntime {
 	 */
 	setRunScope(scope: Record<string, unknown>): void {
 		this.#activateGlobals("set run scope");
-		Object.assign(globalThis, scope);
+		for (const key in scope) {
+			this.#ownGlobal(key);
+			(globalThis as Record<string, unknown>)[key] = scope[key];
+			recordGlobalValue(key, this.#globalOwner);
+		}
+	}
+
+	/**
+	 * Synchronize enabled capability snippets before an ordinary eval cell.
+	 * Unchanged sources retain their objects; removed or replaced definitions
+	 * release every declared global before replacement source runs.
+	 */
+	syncPreludes(preludes: readonly EvalPreludeSource[]): void {
+		if (preludes.length === 0 && this.#installedPreludes.size === 0) return;
+		this.#activateGlobals("sync eval preludes");
+		const desired = new Map<string, EvalPreludeSource>();
+		const exportOwners = new Map<string, string>();
+		for (const prelude of preludes) {
+			if (desired.has(prelude.name)) throw new Error(`Duplicate eval prelude name: ${prelude.name}`);
+			for (const name of prelude.exports) {
+				if (this.#reservedGlobalKeys.has(name)) {
+					throw new Error(`Eval prelude ${prelude.name} cannot replace reserved global ${name}`);
+				}
+				const owner = exportOwners.get(name);
+				if (owner) throw new Error(`Eval preludes ${owner} and ${prelude.name} both export ${name}`);
+				exportOwners.set(name, prelude.name);
+			}
+			desired.set(prelude.name, prelude);
+		}
+
+		for (const [name, installed] of this.#installedPreludes) {
+			const next = desired.get(name);
+			if (
+				next &&
+				next.source === installed.source &&
+				next.exports.length === installed.exports.length &&
+				next.exports.every((value, index) => value === installed.exports[index])
+			) {
+				continue;
+			}
+			for (const exported of installed.exports) this.#releaseGlobal(exported);
+			this.#installedPreludes.delete(name);
+		}
+
+		for (const [name, prelude] of desired) {
+			if (this.#installedPreludes.has(name)) continue;
+			for (const exported of prelude.exports) this.#ownGlobal(exported);
+			try {
+				indirectEval(prelude.source, `[eval-prelude:${name}]`);
+				for (const exported of prelude.exports) recordGlobalValue(exported, this.#globalOwner);
+				this.#installedPreludes.set(name, {
+					name,
+					exports: [...prelude.exports],
+					source: prelude.source,
+				});
+			} catch (error) {
+				for (const exported of prelude.exports) this.#releaseGlobal(exported);
+				throw error;
+			}
+		}
+	}
+
+	/** Read a prelude-owned global from this runtime's active global set. */
+	getGlobal(name: string): unknown {
+		this.#activateGlobals("read runtime global");
+		return Reflect.get(globalThis, name);
+	}
+
+	/** Invoke a callback inside this runtime's async run context. */
+	async runCallback<T>(runId: string, hooks: RuntimeHooks, callback: () => T | Promise<T>): Promise<T> {
+		this.#activateGlobals("run callback");
+		const leaveRun = enterGlobalRun(this.#globalOwner, "run callback");
+		const context: RunContext = {
+			runId,
+			hooks,
+			cwd: this.#cwd,
+			finalExpressionSet: false,
+			finalExpressionValue: undefined,
+		};
+		try {
+			return await this.#als.run(context, callback);
+		} finally {
+			leaveRun();
+		}
 	}
 
 	async run(
@@ -340,7 +457,13 @@ export class JsRuntime {
 			__omp_call_tool__: async (name: string, args: unknown) => {
 				const hooks = this.#activeHooks("tool");
 				if (!hooks) return undefined;
-				return await hooks.callTool(name, args);
+				return surfaceBridgedToolImages(await hooks.callTool(name, args), hooks);
+			},
+			__omp_prelude__: async (name: string, parameters: unknown) => {
+				const hooks = this.#activeHooks("prelude");
+				if (!hooks) return undefined;
+				const payload = { name, parameters };
+				return surfaceBridgedToolImages(await hooks.callTool("__prelude__", payload), hooks);
 			},
 			__omp_import__: async (source: string, options?: ImportCallOptions) => {
 				const resolved = await this.#moduleLoader.resolveForRun(this.#activeCwd(), source);
@@ -405,6 +528,7 @@ export class JsRuntime {
 			...PRELUDE_GLOBAL_KEYS,
 		]);
 
+		this.#reservedGlobalKeys = allGlobalKeys;
 		for (const key of allGlobalKeys) {
 			this.#ownGlobal(key);
 		}
@@ -424,6 +548,8 @@ export class JsRuntime {
 		RUN_HOOK_RESOLVERS.delete(this.#runHookResolver);
 		for (const key of this.#ownedGlobalKeys) releaseGlobalKey(key, this.#globalOwner);
 		this.#ownedGlobalKeys.clear();
+		this.#reservedGlobalKeys.clear();
+		this.#installedPreludes.clear();
 	}
 }
 

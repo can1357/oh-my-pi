@@ -22,9 +22,16 @@ exec hosts. Replaces cargo-xwin.
   work from Bazel actions (cwd = execroot) *and* from build scripts, where
   rules_rust `${pwd}`-expands `CC`/`AR` to absolute paths and cc-rs/cmake spawn
   tools from other cwds.
-- **CRT: dynamic `/MD`** (rules_cc's msvc branch default outside `dbg` without
-  the `static_link_msvcrt` feature) — matches what napi/cc-rs produced under
-  cargo-xwin (rust msvc targets default to dynamic CRT without `+crt-static`).
+- **CRT: static `/MT` for the shipped addon.** The toolchain *default* is
+  dynamic `/MD` (rules_cc's msvc branch default outside `dbg` without the
+  `static_link_msvcrt` feature), matching what napi/cc-rs produced under
+  cargo-xwin. But `//:natives-win32-x64-baseline` overrides to static CRT:
+  `-Ctarget-feature=+crt-static` for rustc (crate BUILD select) plus the
+  `static_link_msvcrt` cc feature (enabled for win32 in the `native_addon`
+  transition, `bazel/defs.bzl`) so the C deps compile `/MT` in lock-step.
+  Without this the `.node` imports `VCRUNTIME140.dll` from the Visual C++
+  Redistributable, which is absent on a clean Windows install and makes the
+  loader's dlopen fail with error 126 (issue #8439).
 - **SSE floor in the wrapper, not annotations**: `-msse4.1 -msse4.2` live in the
   clang-cl wrapper, which only ever targets win32-x64 (baseline = x86-64-v2 ⊇
   SSE4.2). This is the old build-native.ts CFLAGS hack, windows-only by
@@ -95,7 +102,8 @@ exec hosts. Replaces cargo-xwin.
   defaults to the Debug config → `/MDd` → `msvcrtd.lib`, which the lean splat
   (like cargo-xwin's) does not carry; toolchain.cmake pins
   `CMAKE_TRY_COMPILE_CONFIGURATION=Release`, `CMAKE_POLICY_DEFAULT_CMP0091=NEW`
-  and `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDLL` (/MD everywhere).
+  and `CMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded` (static release `/MT`
+  everywhere, matching the addon's static-CRT policy — issue #8439).
   Verified on darwin: scratch `project(C)` + `add_executable` configures with
   "Clang 20.1.7 with MSVC-like command-line" and links a valid PE32+ exe
   through vs_link_exe with the wrapper rc/mt/linker.
@@ -103,8 +111,9 @@ exec hosts. Replaces cargo-xwin.
 ## What to verify on can.internal (linux-x64)
 
 1. `bazel build //:natives-win32-x64-baseline` end-to-end link; check the
-   produced `pi_natives.win32-x64-baseline.node` imports (dumpbin/llvm-readobj:
-   expect VCRUNTIME140/api-ms-win-crt-* → `/MD`, no static CRT).
+   produced `pi_natives.win32-x64-baseline.node` imports (dumpbin/llvm-readobj):
+   expect **no** `VCRUNTIME140.dll` and **no** `api-ms-win-crt-*` (static CRT);
+   only core Windows system DLLs (kernel32, ntdll, advapi32, …) should remain.
 2. LLVM 20.1.7 Linux-X64 binaries are built on a newish Ubuntu: confirm the
    kata runner image's glibc is ≥ 2.35-ish and has `libtinfo6`/`libstdc++6`
    (usual LLVM release-binary runtime deps).

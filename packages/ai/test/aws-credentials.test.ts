@@ -128,6 +128,37 @@ describe("resolveAwsCredentials", () => {
 		Bun.env.AWS_SHARED_CREDENTIALS_FILE = sharedPath;
 	}
 
+	async function writeRawConfig(body: string): Promise<void> {
+		const cfg = path.join(tmp, "config");
+		await Bun.write(cfg, body);
+		Bun.env.AWS_CONFIG_FILE = cfg;
+		const sharedPath = path.join(tmp, "credentials");
+		await Bun.write(sharedPath, "");
+		Bun.env.AWS_SHARED_CREDENTIALS_FILE = sharedPath;
+	}
+
+	/** Mock STS: web-identity + AssumeRole exchanges, capturing each request body. */
+	function stsMock(captured: Array<Record<string, string>>): FetchImpl {
+		const decoder = new TextDecoder();
+		return Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				const raw = typeof init?.body === "string" ? init.body : decoder.decode(init?.body as Uint8Array);
+				const params = Object.fromEntries(new URLSearchParams(raw));
+				captured.push(params);
+				const tag = params.Action === "AssumeRoleWithWebIdentity" ? "AssumeRoleWithWebIdentity" : "AssumeRole";
+				const akid = params.Action === "AssumeRoleWithWebIdentity" ? "AKIABASE" : "AKIAFINAL";
+				return new Response(
+					`<${tag}Response><${tag}Result><Credentials>
+						<AccessKeyId>${akid}</AccessKeyId><SecretAccessKey>${akid}-secret</SecretAccessKey>
+						<SessionToken>${akid}-token</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration>
+					</Credentials></${tag}Result></${tag}Response>`,
+					{ headers: { "content-type": "text/xml" } },
+				);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+	}
+
 	test("parses a Version 1 envelope and honors Expiration", async () => {
 		const script = await writeFixture(
 			"good.js",
@@ -413,5 +444,76 @@ describe("resolveAwsCredentials", () => {
 		await expect(resolveAwsCredentials({ region: "us-east-1", fetch: fetchImpl })).rejects.toThrow(
 			/missing or invalid Expiration/,
 		);
+	});
+
+	test("chains role_arn + source_profile through web identity then AssumeRole", async () => {
+		const tokenPath = path.join(tmp, "sa-token");
+		await Bun.write(tokenPath, "irsa-jwt\n");
+		await writeRawConfig(
+			`[profile irsa]\nrole_arn = arn:aws:iam::111122223333:role/workspace\nweb_identity_token_file = ${tokenPath}\n\n` +
+				`[profile app]\nrole_arn = arn:aws:iam::111122223333:role/user\nrole_session_name = someone@example.com\n` +
+				`source_profile = irsa\nexternal_id = ext-1\nduration_seconds = 1800\n`,
+		);
+		const captured: Array<Record<string, string>> = [];
+
+		const creds = await resolveAwsCredentials({ profile: "app", region: "us-east-1", fetch: stsMock(captured) });
+
+		expect(captured).toHaveLength(2);
+		expect(captured[0].Action).toBe("AssumeRoleWithWebIdentity");
+		expect(captured[0].RoleArn).toBe("arn:aws:iam::111122223333:role/workspace");
+		expect(captured[0].WebIdentityToken).toBe("irsa-jwt");
+		expect(captured[1].Action).toBe("AssumeRole");
+		expect(captured[1].RoleArn).toBe("arn:aws:iam::111122223333:role/user");
+		// role_session_name must survive the second hop for per-user CloudTrail attribution.
+		expect(captured[1].RoleSessionName).toBe("someone@example.com");
+		expect(captured[1].ExternalId).toBe("ext-1");
+		expect(captured[1].DurationSeconds).toBe("1800");
+		expect(creds).toEqual({
+			accessKeyId: "AKIAFINAL",
+			secretAccessKey: "AKIAFINAL-secret",
+			sessionToken: "AKIAFINAL-token",
+			expiresAt: Date.parse("2099-01-01T00:00:00Z"),
+		});
+	});
+
+	test("SigV4-signs the AssumeRole hop with the source profile's credentials", async () => {
+		await writeRawConfig(
+			`[profile base]\naws_access_key_id = AKIASOURCE\naws_secret_access_key = source-secret\n\n` +
+				`[profile role]\nrole_arn = arn:aws:iam::111122223333:role/target\nsource_profile = base\n`,
+		);
+		let authorization: string | null = null;
+		const fetchImpl: FetchImpl = Object.assign(
+			async (_input: string | URL | Request, init?: RequestInit) => {
+				authorization = new Headers(init?.headers).get("authorization");
+				return new Response(
+					`<AssumeRoleResponse><AssumeRoleResult><Credentials>
+						<AccessKeyId>AKIAROLE</AccessKeyId><SecretAccessKey>role-secret</SecretAccessKey>
+						<SessionToken>role-token</SessionToken><Expiration>2099-01-01T00:00:00Z</Expiration>
+					</Credentials></AssumeRoleResult></AssumeRoleResponse>`,
+					{ headers: { "content-type": "text/xml" } },
+				);
+			},
+			{ preconnect: fetch.preconnect },
+		);
+
+		const creds = await resolveAwsCredentials({ profile: "role", region: "us-east-1", fetch: fetchImpl });
+
+		expect(authorization).toMatch(/^AWS4-HMAC-SHA256 Credential=AKIASOURCE\//);
+		expect(creds.accessKeyId).toBe("AKIAROLE");
+	});
+
+	test("rejects role_arn without a base credential source", async () => {
+		await writeRawConfig(`[profile orphan]\nrole_arn = arn:aws:iam::111122223333:role/target\n`);
+		await expect(resolveAwsCredentials({ profile: "orphan", region: "us-east-1" })).rejects.toThrow(
+			/sets role_arn without source_profile/,
+		);
+	});
+
+	test("detects source_profile cycles", async () => {
+		await writeRawConfig(
+			`[profile a]\nrole_arn = arn:aws:iam::1:role/a\nsource_profile = b\n\n` +
+				`[profile b]\nrole_arn = arn:aws:iam::1:role/b\nsource_profile = a\n`,
+		);
+		await expect(resolveAwsCredentials({ profile: "a", region: "us-east-1" })).rejects.toThrow(/cycle/);
 	});
 });

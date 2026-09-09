@@ -50,7 +50,14 @@ function resultText(result: { content: Array<{ type: string; text?: string }> })
 	return result.content.find(part => part.type === "text")?.text ?? "";
 }
 
-const neverResolves = () => new Promise<string>(() => {});
+const runsUntilAborted = ({ signal }: { signal: AbortSignal }) =>
+	new Promise<string>(resolve => {
+		if (signal.aborted) {
+			resolve("");
+			return;
+		}
+		signal.addEventListener("abort", () => resolve(""), { once: true });
+	});
 
 afterEach(async () => {
 	for (const manager of managers.splice(0)) {
@@ -66,6 +73,72 @@ describe("hub jobs snapshot", () => {
 
 		expect(resultText(result)).toBe("No background jobs.");
 		expect((result.details as CoordinationDetails)?.jobs).toEqual([]);
+	});
+
+	test("omits result bodies already auto-delivered to the owning agent", async () => {
+		const manager = createManager();
+		const deliveries: string[] = [];
+		manager.registerDeliverySink("Main", (_jobId, text) => {
+			deliveries.push(text);
+		});
+		const jobId = manager.register("eval", "completed cell", async () => "already delivered eval body", {
+			ownerId: "Main",
+		});
+		await manager.getJob(jobId)!.promise;
+		await manager.drainDeliveries({ timeoutMs: 200, filter: { ownerId: "Main" } });
+
+		const tool = new HubTool(createToolSession({ manager, agentId: "Main" }));
+		const result = await tool.execute("call", { op: "jobs" });
+
+		expect(deliveries).toEqual(["already delivered eval body"]);
+		expect(resultText(result)).not.toContain("already delivered eval body");
+		expect(resultText(result)).toContain("Delivery: already delivered or recovered.");
+		expect((result.details as CoordinationDetails)?.jobs?.[0]?.resultText).toBeUndefined();
+	});
+
+	test("recovers a result while auto-delivery still awaits consumer injection", async () => {
+		const manager = createManager();
+		const deliveryStarted = Promise.withResolvers<void>();
+		const allowInjection = Promise.withResolvers<void>();
+		const injected: string[] = [];
+		manager.registerDeliverySink("Main", async (jobId, text) => {
+			deliveryStarted.resolve();
+			await allowInjection.promise;
+			if (!manager.isDeliverySuppressed(jobId)) injected.push(text);
+		});
+		const jobId = manager.register("task", "queued child", async () => "queued child report", {
+			ownerId: "Main",
+		});
+		await manager.getJob(jobId)!.promise;
+		await deliveryStarted.promise;
+
+		const tool = new HubTool(createToolSession({ manager, agentId: "Main" }));
+		const recovered = await tool.execute("recover", { op: "jobs" });
+		allowInjection.resolve();
+		await manager.drainDeliveries({ timeoutMs: 200, filter: { ownerId: "Main" } });
+
+		expect(resultText(recovered)).toContain("queued child report");
+		expect(resultText(recovered)).toContain("Delivery: not auto-delivered; recovered by this snapshot.");
+		expect(injected).toEqual([]);
+	});
+
+	test("returns an undelivered result body once for manual recovery", async () => {
+		const manager = createManager();
+		const jobId = manager.register("task", "orphaned child", async () => "recover this child report", {
+			ownerId: "Main",
+		});
+		await manager.getJob(jobId)!.promise;
+		await manager.drainDeliveries({ timeoutMs: 200, filter: { ownerId: "Main" } });
+
+		const tool = new HubTool(createToolSession({ manager, agentId: "Main" }));
+		const recovered = await tool.execute("first", { op: "jobs" });
+		const consumed = await tool.execute("second", { op: "jobs" });
+
+		expect(resultText(recovered)).toContain("recover this child report");
+		expect(resultText(recovered)).toContain("Delivery: not auto-delivered; recovered by this snapshot.");
+		expect(resultText(consumed)).not.toContain("recover this child report");
+		expect(resultText(consumed)).toContain("Delivery: already delivered or recovered.");
+		expect((consumed.details as CoordinationDetails)?.jobs?.[0]?.resultText).toBeUndefined();
 	});
 
 	test("list surfaces running subagents that have no backing job", async () => {
@@ -90,10 +163,18 @@ describe("hub jobs snapshot", () => {
 		const manager = createManager();
 		const registry = new AgentRegistry();
 		// Task-style spawn: job id == agent id.
-		manager.register("task", "AgentA", neverResolves, { id: "AgentA", agentId: "AgentA", ownerId: "Main" });
+		manager.register("task", "AgentA", runsUntilAborted, {
+			id: "AgentA",
+			agentId: "AgentA",
+			ownerId: "Main",
+		});
 		registerRunningSub(registry, "AgentA");
 		// Vibe-style turn job: job id differs from the agent id; linkage via agentId.
-		manager.register("task", "vibe turn", neverResolves, { id: "vibe-1-t1", agentId: "vibe-1", ownerId: "Main" });
+		manager.register("task", "vibe turn", runsUntilAborted, {
+			id: "vibe-1-t1",
+			agentId: "vibe-1",
+			ownerId: "Main",
+		});
 		registerRunningSub(registry, "vibe-1");
 		// Woken via irc: running agent with no job at all.
 		registerRunningSub(registry, "Loner");

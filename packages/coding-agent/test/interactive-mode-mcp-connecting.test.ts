@@ -127,6 +127,7 @@ describe("InteractiveMode MCP connection status", () => {
 			type: "failed",
 			serverName: "broken",
 			error: "missing command",
+			sourcePath: "/tmp/codex/config.toml",
 		} satisfies McpConnectionStatusEvent);
 		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
 			type: "connected",
@@ -136,9 +137,40 @@ describe("InteractiveMode MCP connection status", () => {
 		expect(showStatusSpy.mock.calls.map(call => call[0])).toEqual([
 			"Connecting to MCP servers: alpha, broken, slow…",
 			"Connected: alpha. Still connecting: broken, slow…",
-			"Connected: alpha. Failed: broken: missing command. Still connecting: slow…",
-			"MCP finished with failures. Connected: alpha, slow. Failed: broken: missing command",
+			"Connected: alpha. Failed: broken [config: /tmp/codex/config.toml]: missing command. Still connecting: slow…",
+			"MCP finished with failures. Connected: alpha, slow. Failed: broken [config: /tmp/codex/config.toml]: missing command",
 		]);
+	});
+
+	it("retries one server without erasing other startup outcomes", () => {
+		const showStatusSpy = vi.spyOn(mode, "showStatus").mockImplementation(() => {});
+
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connecting",
+			serverNames: ["alpha", "retry", "broken"],
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "connected",
+			serverName: "alpha",
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "failed",
+			serverName: "broken",
+			error: "bad config",
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "failed",
+			serverName: "retry",
+			error: "timed out",
+		} satisfies McpConnectionStatusEvent);
+		eventBus.emit(MCP_CONNECTION_STATUS_EVENT_CHANNEL, {
+			type: "reconnecting",
+			serverName: "retry",
+		} satisfies McpConnectionStatusEvent);
+
+		expect(showStatusSpy).toHaveBeenLastCalledWith(
+			"Connected: alpha. Failed: broken: bad config. Still connecting: retry…",
+		);
 	});
 
 	it("rejects a malformed mcp:connection-status payload via the guard instead of letting it throw", () => {

@@ -1,3 +1,3 @@
-Complete the assignment below, thoroughly:
+Complete assignment thoroughly:
 
 {{assignment}}

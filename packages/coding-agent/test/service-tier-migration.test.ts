@@ -26,7 +26,7 @@ describe("serviceTier → tier.* settings migration", () => {
 	});
 
 	afterEach(async () => {
-		AgentStorage.resetInstance();
+		AgentStorage.close();
 		restoreSettingsTestState(settingsState);
 		settingsState = undefined;
 		try {
