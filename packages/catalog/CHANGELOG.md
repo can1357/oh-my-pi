@@ -7,6 +7,7 @@
 - Fixed the GitHub Copilot picker showing disabled models or hiding models available only through another configured account; successful discovery now uses the union of all accounts' grants.
 - Fixed shared Copilot models retaining the first account's Enterprise endpoint when another account is selected for inference.
 - Copilot discovery now retains each model's granting accounts across cache reloads.
+- Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).
 
 ## [18.1.14] - 2026-09-07
 
