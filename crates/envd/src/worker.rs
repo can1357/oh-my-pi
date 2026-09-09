@@ -3,6 +3,7 @@
 use std::{
 	collections::{BTreeMap, BTreeSet, HashSet},
 	env, fmt, io, mem,
+	future::Future,
 	path::{Path, PathBuf},
 	str,
 	sync::{
@@ -1231,6 +1232,8 @@ impl LifecycleHost for FrozenControlLifecycleHost {
 			.map_err(|error| Str::from(error.to_string()))?;
 			ensure_committed_argument_tools(&evidence.tools)
 				.map_err(|error| Str::from(error.to_string()))?;
+			validate_registrations(&evidence.tools)
+				.map_err(|error| Str::from(error.to_string()))?;
 			let evidence = Arc::new(evidence);
 			let key = (
 				self.identity.layer.clone(),
@@ -1412,6 +1415,7 @@ async fn freeze_control_registry(
 	let evidence = seal_registry_evidence(identity, session, manifest, payload)
 		.map_err(|error| ExtHostError::Protocol(Str::from(error.to_string())))?;
 	ensure_committed_argument_tools(&evidence.tools)?;
+	validate_registrations(&evidence.tools)?;
 	Ok(Arc::new(evidence))
 }
 
@@ -1563,6 +1567,35 @@ fn ensure_committed_argument_tools(tools: &[ToolDecl]) -> Result<(), ExtHostErro
 			"extension tool {name} declares streams_args, but CONTROL extension hosts accept \
 			 committed arguments only",
 		)));
+	}
+	Ok(())
+}
+fn validate_registrations(tools: &[ToolDecl]) -> Result<(), ExtHostError> {
+	let mut roots = HashSet::with_capacity(tools.len());
+	for tool in tools {
+		let Some(definition) = &tool.definition else {
+			return Err(ExtHostError::Protocol(sf!("registered tool has no definition")));
+		};
+		if definition.name.is_empty() || tool.rev.is_empty() {
+			return Err(ExtHostError::Protocol(sf!(
+				"registered tool name and revision must be nonempty"
+			)));
+		}
+		if tool.extension_id == "omp/core" {
+			return Err(ExtHostError::Protocol(sf!(
+				"reserved extension id omp/core is not valid for worker declarations"
+			)));
+		}
+		let chains = tool
+			.replaces
+			.iter()
+			.any(|replaced| replaced == definition.name.as_str());
+		if !chains && !roots.insert((tool.extension_id.as_str(), definition.name.as_str())) {
+			return Err(ExtHostError::Protocol(sf!(
+				"worker registered duplicate tool root: {}",
+				definition.name
+			)));
+		}
 	}
 	Ok(())
 }

@@ -1168,7 +1168,11 @@ fn rename_symlink_fallback(host: &mut Host, from: &Path, to: &Path) -> io::Resul
 	unix::fs::symlink(path_symlink_points_to, host.resolve(to))?;
 	#[cfg(not(any(target_os = "macos", target_os = "redox")))]
 	{
-		let _ = copy_xattrs_if_supported(host, from, to);
+		// The operands are the links themselves: a relative link can resolve
+		// to different files in the source and destination directories, so
+		// resolving either operand would copy the source target's attributes
+		// onto the destination target.
+		let _ = copy_xattrs_if_supported(host, from, to, fsxattr::copy_link_xattrs);
 	}
 	fs::remove_file(host.resolve(from))
 }
@@ -1250,7 +1254,7 @@ fn rename_dir_fallback(
 	);
 
 	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-	fsxattr::apply_xattrs(host.resolve(to), xattrs)?;
+	tolerate_unsupported_xattrs(fsxattr::apply_xattrs(host.resolve(to), xattrs))?;
 
 	result?;
 
@@ -1437,7 +1441,7 @@ fn copy_file_with_hardlinks_helper(
 		// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
 		#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
 		{
-			let _ = copy_xattrs_if_supported(host, from, to);
+			let _ = copy_xattrs_if_supported(host, from, to, fsxattr::copy_xattrs);
 		}
 	}
 
@@ -1492,7 +1496,7 @@ fn rename_file_fallback(
 	// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
 	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
 	{
-		let _ = copy_xattrs_if_supported(host, from, to);
+		let _ = copy_xattrs_if_supported(host, from, to, fsxattr::copy_xattrs);
 	}
 
 	fs::remove_file(host.resolve(from))
@@ -1500,16 +1504,31 @@ fn rename_file_fallback(
 	Ok(())
 }
 
-/// Copy xattrs from source to destination, ignoring ENOTSUP/EOPNOTSUPP errors.
-/// These errors indicate the filesystem doesn't support extended attributes,
-/// which is acceptable when moving files across filesystems.
+/// Tolerates destination filesystems that cannot carry extended attributes:
+/// `EOPNOTSUPP` (Linux's `ENOTSUP`) must not fail a cross-filesystem move
+/// whose contents already copied. Regular files, symlinks, and moved
+/// directories all route their attribute application through here.
 #[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
-fn copy_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
-	match fsxattr::copy_xattrs(host.resolve(from), host.resolve(to)) {
+fn tolerate_unsupported_xattrs(result: io::Result<()>) -> io::Result<()> {
+	match result {
 		Ok(()) => Ok(()),
-		Err(e) if e.raw_os_error() == Some(libc::EOPNOTSUPP) => Ok(()),
-		Err(e) => Err(e),
+		Err(error) if error.raw_os_error() == Some(libc::EOPNOTSUPP) => Ok(()),
+		Err(error) => Err(error),
 	}
+}
+
+/// Copies xattrs from source to destination through
+/// [`tolerate_unsupported_xattrs`]. `copy` picks the traversal mode:
+/// `fsxattr::copy_xattrs` resolves symlink operands to their targets,
+/// `fsxattr::copy_link_xattrs` operates on the links themselves.
+#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+fn copy_xattrs_if_supported(
+	host: &Host,
+	from: &Path,
+	to: &Path,
+	copy: fn(&Path, &Path) -> io::Result<()>,
+) -> io::Result<()> {
+	tolerate_unsupported_xattrs(copy(&host.resolve(from), &host.resolve(to)))
 }
 
 fn is_empty_dir(host: &Host, path: &Path) -> bool {
@@ -2016,5 +2035,88 @@ mod tests {
 		let (code, capture) = run_util::<Mv>(&["missing", "target"], "", fixture.path());
 		assert_eq!(code, 1);
 		assert_eq!(capture.err(), "mv: cannot stat 'missing': No such file or directory\n");
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn cross_filesystem_symlink_move_copies_the_links_own_attributes() {
+		use crate::support::xattr as fsxattr;
+
+		let fixture = tempdir().unwrap();
+		let (mut host, _capture) = Host::for_test("mv", "", fixture.path());
+		let source = fixture.path().join("source");
+		let destination = fixture.path().join("destination");
+		fs::create_dir(&source).unwrap();
+		fs::create_dir(&destination).unwrap();
+		// Same-named relative targets, so the moved link resolves to a
+		// different file in the destination directory than in the source.
+		fs::write(source.join("target"), b"").unwrap();
+		fs::write(destination.join("target"), b"").unwrap();
+		let attribute = |value: &str| {
+			[(b"user.omp-test\0".to_vec(), value.as_bytes().to_vec())]
+				.into_iter()
+				.collect::<omp_core::FastHashMap<_, _>>()
+		};
+		if let Err(error) = fsxattr::apply_xattrs(source.join("target"), attribute("source")) {
+			if error.raw_os_error() == Some(libc::EOPNOTSUPP) {
+				return;
+			}
+			panic!("{error}");
+		}
+		fsxattr::apply_xattrs(destination.join("target"), attribute("destination")).unwrap();
+
+		std::os::unix::fs::symlink("target", source.join("link")).unwrap();
+		let from = source.join("link");
+		let to = destination.join("link");
+		super::rename_symlink_fallback(&mut host, &from, &to).unwrap();
+
+		assert!(!from.exists());
+		assert_eq!(fs::read_link(&to).unwrap(), std::path::Path::new("target"));
+		// The move may only touch the link itself; the targets' attributes
+		// must not cross between the two directories.
+		let source_attributes = fsxattr::retrieve_xattrs(source.join("target")).unwrap();
+		assert_eq!(
+			source_attributes
+				.get(b"user.omp-test\0".as_slice())
+				.map(Vec::as_slice),
+			Some(b"source".as_slice())
+		);
+		let destination_attributes = fsxattr::retrieve_xattrs(destination.join("target")).unwrap();
+		assert_eq!(
+			destination_attributes
+				.get(b"user.omp-test\0".as_slice())
+				.map(Vec::as_slice),
+			Some(b"destination".as_slice())
+		);
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn directory_move_tolerates_unsupported_destination_attributes() {
+		use crate::support::xattr as fsxattr;
+
+		// The directory fallback applies the moved directory's attributes on
+		// the destination after its contents were copied, so a destination
+		// filesystem that cannot carry attributes (EOPNOTSUPP, ENOTSUP's
+		// Linux alias) must not fail the move, mirroring the regular-file
+		// fallback's tolerance.
+		let unsupported = std::io::Error::from_raw_os_error(libc::EOPNOTSUPP);
+		assert!(super::tolerate_unsupported_xattrs(Err(unsupported)).is_ok());
+		let denied = std::io::Error::from_raw_os_error(libc::EACCES);
+		assert!(super::tolerate_unsupported_xattrs(Err(denied)).is_err());
+
+		// The kernel rejects an unknown attribute namespace with the same
+		// EOPNOTSUPP a destination without user attribute support produces,
+		// so the shared apply path is exercised against a real error rather
+		// than only a synthetic errno.
+		let fixture = tempdir().unwrap();
+		let destination = fixture.path().join("destination");
+		fs::create_dir(&destination).unwrap();
+		let unnameable = [(b"unknown-namespace.attr\0".to_vec(), b"v".to_vec())]
+			.into_iter()
+			.collect::<omp_core::FastHashMap<_, _>>();
+		let applied =
+			super::tolerate_unsupported_xattrs(fsxattr::apply_xattrs(&destination, unnameable));
+		assert!(applied.is_ok());
 	}
 }

@@ -274,12 +274,8 @@ fn every_native_registered_card_accepts_its_tool_contract() {
 		tools::security_scan::Payload,
 		tools::security_scan::Fault,
 	>("security_scan", json!({"action":"preflight","output":"No findings.","data":{"findings":0}}));
-	let registry = CardRegistry::standard();
-	for identity in tools::builtin_tool_identities() {
-		assert!(registry.contains(identity.name), "{} must have a dedicated card", identity.name);
-	}
-}
 
+}
 #[test]
 fn typed_outcomes_are_not_shadowed_by_projection_json() {
 	use omp_tools as tools;

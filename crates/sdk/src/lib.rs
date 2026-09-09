@@ -83,7 +83,7 @@ impl<C: Inference> Sdk<C> {
 
 #[cfg(test)]
 mod tests {
-	use std::{future::ready, sync::Arc, time::SystemTime};
+	use std::{future::{Future, ready}, sync::Arc, time::SystemTime};
 
 	use futures::stream;
 	use omp_agent::StaticPrompt;

@@ -565,6 +565,8 @@ enum HookEventId {
   HOOK_EVENT_RETRY_END = 61;
   HOOK_EVENT_FALLBACK_APPLIED = 62;
   HOOK_EVENT_FALLBACK_SUCCEEDED = 63;
+  // omp2 assigns the next stable event identities; retain them because the
+  // shipped observer payloads use 64-66, superseding the PR's reserved range.
   HOOK_EVENT_MCP_NOTIFICATION = 64;
   HOOK_EVENT_PROVIDER_RESPONSE = 65;
   HOOK_EVENT_SESSION_RENAMED = 66;

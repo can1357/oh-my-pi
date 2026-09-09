@@ -146,8 +146,8 @@ use tokio_util::sync::CancellationToken;
 pub use tools::{
 	ActiveContentInputs, CommandCredentialExecutorFactory, ContentResolver, DeviceCatalogObserver,
 	DeviceControlFactory, DeviceInvocationAdmission, DynamicDeviceCatalogEntry, DynamicTool,
-	DynamicToolFactory, GoalAuthority, HostResourceResult, HostResources, RegistryBridges,
-	RegistryControlFactory, SearchInference, TelemetryUpload,
+	DynamicToolFactory, DynamicToolRegistrar, GoalAuthority, HostResourceResult, HostResources,
+	RegistryBridges, RegistryControlFactory, SearchInference, TelemetryUpload,
 };
 
 use self::{

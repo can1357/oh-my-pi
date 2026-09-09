@@ -70,6 +70,10 @@ impl Admitter for AllowAdmission {
 }
 
 const fn test_claims() -> Claims {
+	Claims { precedence: Precedence::CORE, claimant: sf!("test/envd-contract"), replaces: None }
+}
+
+const fn reserved_claims() -> Claims {
 	Claims { precedence: Precedence::CORE, claimant: sf!("omp/core"), replaces: None }
 }
 
@@ -848,14 +852,18 @@ fn hashline_tag<'o>(output: &'o str, path: &str) -> &'o str {
 }
 
 #[tokio::test]
-async fn write_name_is_reserved_before_production_registry_assembly() {
+async fn reserved_claimant_is_rejected_before_production_registry_assembly() {
 	let root = tempfile::tempdir().expect("workspace scratch directory");
 	let state = tempfile::tempdir().expect("state scratch directory");
-	let marker = state.path().join("reserved-write-marker");
+	let marker = state.path().join("reserved-claimant-marker");
 	let mut registry = Registry::new();
 	registry
-		.register(EffectTool::named("write", marker), Presentation::Slot, test_claims())
-		.expect("register colliding caller write tool");
+		.register(
+			EffectTool::named("reserved_probe", marker),
+			Presentation::Slot,
+			reserved_claims(),
+		)
+		.expect("register preloaded reserved claimant");
 	let con = Arc::new(omp_con::Ctx::new());
 	let convars = Arc::new(omp_envd::exthost::ConvarControlFactory::new(Arc::clone(&con)));
 	let result = EnvServer::open_local(
@@ -869,9 +877,44 @@ async fn write_name_is_reserved_before_production_registry_assembly() {
 	)
 	.await;
 	let Err(error) = result else {
-		panic!("production registry accepted a caller-owned write tool");
+		panic!("production registry accepted a preloaded reserved claimant");
 	};
-	assert_eq!(error.to_string(), "duplicate production tool name: write");
+	assert_eq!(
+		error.to_string(),
+		"tool reserved_probe cannot use reserved 'omp/core' claimant namespace"
+	);
+}
+
+#[tokio::test]
+async fn write_name_core_claim_wins_over_preloaded_foreign_revision() {
+	let root = tempfile::tempdir().expect("workspace scratch directory");
+	let state = tempfile::tempdir().expect("state scratch directory");
+	let marker = state.path().join("reserved-write-marker");
+	let mut registry = Registry::new();
+	registry
+		.register(EffectTool::named("write", marker), Presentation::Slot, test_claims())
+		.expect("register colliding caller write tool");
+	let con = Arc::new(omp_con::Ctx::new());
+	let convars = Arc::new(omp_envd::exthost::ConvarControlFactory::new(Arc::clone(&con)));
+	let server = EnvServer::open_local(
+		root.path(),
+		state.path(),
+		registry,
+		test_config(),
+		&con,
+		convars,
+		RegistryBridges::default(),
+	)
+	.await
+	.expect("production registry evicted the foreign write claim");
+	assert_eq!(
+		server
+			.registry()
+			.presentation("write")
+			.expect("production write presentation"),
+		Presentation::Device,
+		"core production implementation must evict the preloaded foreign write claim"
+	);
 }
 
 #[tokio::test]

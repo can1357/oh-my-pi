@@ -91,12 +91,5 @@ pub fn render() -> String {
 	for (name, description) in ENVIRONMENT_VARIABLES {
 		let _ = writeln!(output, "  {name:<24} {description}");
 	}
-	output.push_str("\nBuilt-in tools:\n  ");
-	let names = omp_tools::builtin_tool_identities()
-		.iter()
-		.filter(|tool| !tool.hidden)
-		.map(|tool| tool.name)
-		.collect::<Vec<_>>();
-	output.push_str(&names.join(", "));
 	output
 }

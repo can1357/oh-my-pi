@@ -264,6 +264,47 @@ pub struct ToolNames(
 	pub Vec<Str>,
 );
 
+fn is_builtin_tool_name(name: &str) -> bool {
+	matches!(
+		name,
+		"read"
+			| "write"
+			| "bash"
+			| "edit"
+			| "grep"
+			| "glob"
+			| "eval"
+			| "task"
+			| "hub"
+			| "browser"
+			| "learn"
+			| "manage_skill"
+			| "computer"
+			| "lsp"
+			| "debug"
+			| "todo"
+			| "ask"
+			| "web_search"
+			| "think"
+			| "goal"
+			| "yield"
+			| "checkpoint"
+			| "rewind"
+			| "github"
+			| "image_gen"
+			| "tts"
+			| "report_issue"
+			| "retain"
+			| "recall"
+			| "reflect"
+			| "memory_edit"
+			| "security_scan"
+			| "ast_grep"
+			| "ast_edit"
+			| "fetch"
+	)
+}
+
 impl FromStr for ToolNames {
 	type Err = convert::Infallible;
 
@@ -278,13 +319,7 @@ impl FromStr for ToolNames {
 			let normalized = match lowercase.as_str() {
 				"search" => "grep",
 				"find" => "glob",
-				name
-					if omp_tools::builtin_tool_identities()
-						.iter()
-						.any(|tool| tool.name == name) =>
-				{
-					name
-				},
+				name if is_builtin_tool_name(name) => name,
 				_ => name,
 			};
 			if !names

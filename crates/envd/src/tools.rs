@@ -220,11 +220,38 @@ pub trait CommandCredentialExecutorFactory: Send + Sync + 'static {
 		cwd: &Path,
 	) -> Arc<dyn omp_ai::auth::command::CommandCredentialExecutor>;
 }
+/// Restricted registration capability for caller-supplied dynamic tool
+/// factories.
+pub struct DynamicToolRegistrar<'registry> {
+	registry: &'registry mut Registry,
+}
+
+impl DynamicToolRegistrar<'_> {
+	/// Registers one factory tool unless it claims the reserved core identity.
+	pub fn register<T>(
+		&mut self,
+		tool: T,
+		presentation: Presentation,
+		claims: Claims,
+	) -> Result<(), omp_tool::RegistryError>
+	where
+		T: Tool,
+	{
+		if claims.claimant == "omp/core" {
+			return Err(omp_tool::RegistryError::ReservedClaimant { name: tool.spec().name.clone() });
+		}
+		self.registry.register(tool, presentation, claims)
+	}
+}
+
 /// Registers host-owned tools before registry freeze, then binds their live
 /// Environment client after transport composition.
 pub trait DynamicToolFactory: Send + Sync + 'static {
-	/// Registers every declaration-backed tool using factory-retained slots.
-	fn register(&self, registry: &mut Registry) -> Result<(), omp_tool::RegistryError>;
+	/// Registers every declaration-backed tool using the restricted registrar.
+	fn register(
+		&self,
+		registrar: &mut DynamicToolRegistrar<'_>,
+	) -> Result<(), omp_tool::RegistryError>;
 	/// Binds the live Environment process/data authority exactly once.
 	fn bind(&self, client: EnvClient, root: &Path);
 }
@@ -3593,56 +3620,43 @@ fn speech_config(ctx: &Ctx) -> SpeechConfig {
 }
 
 fn prepare_registry(registry: &mut Registry) -> Result<(), EnvdError> {
-	registry.protect_core_claims([
+	registry.reject_reserved_claims()?;
+	registry.protect_user_visible_core([
 		"read",
 		"write",
 		"bash",
 		"edit",
-		"glob",
-		"eval",
-		"task",
-		"hub",
-		"browser",
-		"learn",
-		"manage_skill",
-		"computer",
-		"lsp",
-		"debug",
-	]);
-	for name in [
-		"read",
-		"edit",
-		"bash",
 		"grep",
 		"glob",
-		"write",
 		"eval",
 		"todo",
 		"ask",
 		"web_search",
-		"think",
-		"goal",
-		"yield",
 		"checkpoint",
 		"rewind",
-		"hub",
 		"browser",
 		"github",
 		"image_gen",
 		"tts",
-		"report_issue",
 		"retain",
 		"recall",
 		"reflect",
 		"memory_edit",
-		"learn",
-		"manage_skill",
 		"lsp",
 		"debug",
+		"security_scan",
+	]);
+	registry.protect_core_claims([
+		"task",
+		"hub",
+		"vibe",
+		"learn",
+		"manage_skill",
 		"computer",
-	] {
-		ensure_name_absent(registry, name)?;
-	}
+		"think",
+		"goal",
+		"yield",
+	]);
 	Ok(())
 }
 
@@ -3678,8 +3692,14 @@ fn register_session_base(
 	for dynamic in dynamic_tools {
 		dynamic.register(registry)?;
 	}
-	for factory in dynamic_tool_factories {
-		factory.register(registry)?;
+	{
+		let mut registrar = DynamicToolRegistrar { registry };
+		for factory in dynamic_tool_factories {
+			factory.register(&mut registrar)?;
+		}
+	}
+	if registry.live_identity("vibe").is_some() {
+		registry.unlist_from_roster("vibe")?;
 	}
 	let search_bridge = Arc::new(SearchBridgeHost::new(search));
 	let github_credentials = Arc::new(GithubCredentialBridge::new());
@@ -3714,6 +3734,7 @@ fn register_session_base(
 		long_tail_presentation(policy),
 		builtin_device_claims(),
 	)?;
+	registry.unlist_from_roster("report_issue")?;
 	let github = GithubService::new(
 		project_root.to_path_buf(),
 		state_dir,
@@ -3766,6 +3787,7 @@ fn register_session_base(
 			Presentation::Hidden,
 			core_claims(),
 		)?;
+		registry.unlist_from_roster("think")?;
 	}
 	if let Some(goal_control) = goal_control {
 		register_instrumented(
@@ -3831,18 +3853,36 @@ fn register_session_workers(
 	} else {
 		None
 	};
+	// Process chained roots after ordinary declarations so a replacement wins
+	// independently of the supervisor's payload order.
+	let mut ordinary = Vec::new();
+	let mut root_replacements = Vec::new();
 	for registration in workers.registrations() {
 		let declaration = &registration.declaration;
 		if is_prelude_declaration(declaration)? {
 			continue;
 		}
+		let chains_own_root = declaration.definition.as_ref().is_some_and(|definition| {
+			declaration
+				.replaces
+				.iter()
+				.any(|replaced| replaced == &definition.name)
+		});
+		if chains_own_root {
+			root_replacements.push(registration);
+		} else {
+			ordinary.push(registration);
+		}
+	}
+	for registration in ordinary.into_iter().chain(root_replacements) {
+		let declaration = &registration.declaration;
 		let mut spec = worker_spec(declaration)?;
-		if flattened_slots.is_some() {
+		let flattened = flattened_slots.is_some();
+		if flattened {
 			spec.name = Str::from(spec.name.as_str().replace('/', "_"));
 		}
 		let device_name = spec.name.clone();
 		let owner = registration.owner.clone();
-		ensure_name_absent(registry, &spec.name)?;
 		let execution = match WorkerExecutionMode::try_from(declaration.execution_mode) {
 			Ok(WorkerExecutionMode::Unspecified | WorkerExecutionMode::Parallel) => {
 				ExecutionMode::Parallel
@@ -3850,9 +3890,16 @@ fn register_session_workers(
 			Ok(WorkerExecutionMode::Sequential) => ExecutionMode::Sequential,
 			Err(_) => return Err(worker_declaration_error("worker execution mode is invalid")),
 		};
+		let replaces = declaration.replaces.first().map(|name| {
+			if flattened {
+				Str::from(name.replace('/', "_"))
+			} else {
+				Str::from(name.as_str())
+			}
+		});
 		registry.register_worker_with_mode(
 			spec,
-			if flattened_slots.is_some() {
+			if flattened {
 				Presentation::Slot
 			} else {
 				Presentation::Device
@@ -3860,7 +3907,7 @@ fn register_session_workers(
 			Claims {
 				precedence: Precedence::DEFAULT,
 				claimant:   registration.owner.extension().clone(),
-				replaces:   None,
+				replaces,
 			},
 			execution,
 		)?;
@@ -4228,6 +4275,7 @@ pub(crate) fn session_registry(
 		}
 	}
 	register_session_workers(&mut registry, workers, policy)?;
+	registry.protect_live_claims();
 	Ok(SessionRegistryOutput {
 		registry:           Arc::new(registry),
 		search_bridge:      base.search_bridge,
@@ -4417,6 +4465,7 @@ pub(crate) fn production_registry<
 				Presentation::Device,
 				builtin_device_claims(),
 			)?;
+			registry.unlist_from_roster("manage_skill")?;
 			if memory_capabilities.writable {
 				environment_registry(
 					&mut registry,
@@ -4424,6 +4473,7 @@ pub(crate) fn production_registry<
 					Presentation::Device,
 					builtin_device_claims(),
 				)?;
+				registry.unlist_from_roster("learn")?;
 			}
 		}
 	}
@@ -4857,6 +4907,7 @@ pub(crate) fn production_registry<
 		environment_registry(&mut registry, shell, bash_presentation(policy), core_claims())?;
 	}
 	register_session_workers(&mut registry, workers, policy)?;
+	registry.protect_live_claims();
 	let registry = Arc::new(registry);
 	catalog
 		.install_registry(Arc::clone(&registry))

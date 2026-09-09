@@ -1,6 +1,7 @@
 //! Journal-first agent turn kernel.
 
 use std::{
+	future::Future,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},

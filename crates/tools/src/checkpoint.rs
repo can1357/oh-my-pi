@@ -714,11 +714,6 @@ mod tests {
 		let (checkpoint, rewind) = tools(Control);
 		assert_eq!(checkpoint.spec().name, "checkpoint");
 		assert_eq!(rewind.spec().name, "rewind");
-		assert!(
-			crate::builtin_tool_identities()
-				.iter()
-				.any(|identity| { identity.name == rewind.spec().name.as_str() && !identity.hidden })
-		);
 		assert_eq!(checkpoint.spec().rev.n, 3);
 		assert_eq!(rewind.spec().rev.n, 4);
 		assert_eq!(

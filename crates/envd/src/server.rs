@@ -346,9 +346,6 @@ pub enum EnvdError {
 	/// The selected edit dialect was not a registered built-in revision.
 	#[error("invalid edit dialect: {0}")]
 	EditDialect(Str),
-	/// Production assembly encountered a second live declaration for one name.
-	#[error("duplicate production tool name: {0}")]
-	DuplicateToolName(Str),
 	/// The environment client could not complete its protocol handshake.
 	#[error(transparent)]
 	Client(#[from] omp_env::ClientError),
@@ -2535,6 +2532,7 @@ impl EnvServer {
 			search_bridge,
 			github_credentials,
 			ask_presenter,
+			telemetry_upload_start,
 		) = production_registry(
 			&documents,
 			&blobs,
@@ -2572,6 +2570,7 @@ impl EnvServer {
 			.set(Arc::clone(&resources))
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
 		ext_hosts.activate_control_hosts().await?;
+		telemetry_upload_start.start();
 		let identity = ServerIdentity {
 			workspace_id:   hello.workspace_id,
 			root_uri:       hello.root_uri,
@@ -2822,6 +2821,7 @@ impl EnvServer {
 			search_bridge,
 			github_credentials,
 			ask_presenter,
+			telemetry_upload_start,
 		) = production_registry(
 			&documents,
 			&blobs,
@@ -2859,6 +2859,7 @@ impl EnvServer {
 			.set(Arc::clone(&resources))
 			.map_err(|_| EnvdError::State(sf!("CONTROL URL resolver owner was already bound")))?;
 		ext_hosts.activate_control_hosts().await?;
+		telemetry_upload_start.start();
 		let identity = ServerIdentity {
 			workspace_id:   hello.workspace_id,
 			root_uri:       hello.root_uri,
