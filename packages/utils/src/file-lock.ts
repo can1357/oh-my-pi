@@ -56,6 +56,38 @@ export async function withFileLock<T>(
 	}
 }
 
+/** Outcome of a non-destructive check for an existing advisory-lock holder. */
+export interface FileLockProbe {
+	/** A process owns the advisory lock for `filePath` right now. */
+	held: boolean;
+	/** Set when the probe itself could not run, so callers can report a degraded check. */
+	error?: string;
+}
+
+/**
+ * Ask whether `filePath` is locked, without waiting for it and without becoming
+ * its writer: winning the lock proves nobody held it, so ownership is handed
+ * straight back.
+ *
+ * On platforms whose lock is a real file (`flock(2)` on `${filePath}.lock`;
+ * Linux uses an abstract socket and creates nothing) the probe can leave an
+ * empty lock file behind. That file is deliberately never unlinked: dropping it
+ * while holding the lock lets the next acquirer `flock` a fresh inode and
+ * believe it owns a lock this process also owns — two writers, which is exactly
+ * what a destructive caller must never be talked into. An empty `.lock` file
+ * costs nothing by comparison.
+ */
+export function probeFileLock(filePath: string): FileLockProbe {
+	try {
+		const lock = tryAcquireLock(getLockPath(filePath));
+		if (!lock) return { held: true };
+		lock.release();
+		return { held: false };
+	} catch (error) {
+		return { held: false, error: error instanceof Error ? error.message : String(error) };
+	}
+}
+
 /**
  * Test-only acquisition handle for forcing ownership handoffs. This is not
  * part of the supported package API.
