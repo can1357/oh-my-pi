@@ -1,4 +1,6 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import * as os from "node:os";
+import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { spawn } from "@oh-my-pi/pi-utils/ptree";
 
@@ -33,9 +35,9 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 	it.skipIf(process.platform === "win32")(
 		"terminates a dead root's descendant while its stdout consumer is paused",
 		async () => {
-			// The descendant emits a second chunk once the pid has been read, so the
-			// wrapper's one-chunk queue fills and its pulls stop while the consumer
-			// is paused on an uncancelled stream.
+			// The descendant emits a second chunk once the pid has been read and then
+			// keeps stdout open, so the consumer is parked over unread output on an
+			// uncancelled stream when the kill arrives.
 			const child = spawn(
 				["/bin/sh", "-c", `/bin/sh -c 'echo $$; sleep 0.05; echo filler; exec sleep 30' 2>/dev/null &`],
 				{ detached: true, stderr: "full" },
@@ -52,8 +54,8 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 				expect(descendant.status()).toBe(ProcessStatus.Running);
 				await child.killAndWait(undefined, -1);
 				expect(descendant.status()).toBe(ProcessStatus.Exited);
-				// Proves the consumer really was paused over a queued chunk rather
-				// than sitting at EOF, where dropping ownership is correct.
+				// Proves the consumer really was parked over buffered output rather
+				// than sitting at EOF, and that the kill did not discard it.
 				expect(new TextDecoder().decode((await reader.read()).value)).toBe("filler\n");
 			} finally {
 				descendant?.killTree(9);
@@ -64,29 +66,80 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 	);
 
 	for (const finish of ["eof", "cancel"] as const) {
-		it.skipIf(process.platform === "win32")(`drops raw stdout ownership after ${finish}`, async () => {
-			const script = finish === "eof" ? "sleep 30 >/dev/null 2>&1 & echo $!" : "sleep 30 2>/dev/null & echo $!";
-			const child = spawn(["/bin/sh", "-c", script], { detached: true, stderr: "full" });
-			const reader = child.stdout.getReader();
+		it.skipIf(process.platform === "win32")(
+			`reaps a dead root's group after its stdout consumer reached ${finish}`,
+			async () => {
+				// The "eof" descendant redirects stdout away, so it holds no pipe of
+				// ours at all and group membership is the only thing connecting it to
+				// the child being killed.
+				const script = finish === "eof" ? "sleep 30 >/dev/null 2>&1 & echo $!" : "sleep 30 2>/dev/null & echo $!";
+				const child = spawn(["/bin/sh", "-c", script], { detached: true, stderr: "full" });
+				const reader = child.stdout.getReader();
+				let descendant: Process | null = null;
+				try {
+					const output = await reader.read();
+					descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
+					if (!descendant) throw new Error("Descendant exited before termination");
+					await child.proc.exited;
+					await Bun.readableStreamToText(child.stderr!);
+					if (finish === "eof") expect((await reader.read()).done).toBe(true);
+					else await reader.cancel();
+					await Bun.sleep(0);
+					// Whether a reader is still attached no longer decides this. The
+					// pinned leader's identity check is what keeps the group kill off a
+					// recycled pgid, so a survivor is reaped either way.
+					await child.killAndWait(undefined, -1);
+					expect(descendant.status()).toBe(ProcessStatus.Exited);
+				} finally {
+					descendant?.killTree(9);
+					await reader.cancel();
+					child.kill(undefined, -1);
+				}
+			},
+		);
+	}
+
+	it.skipIf(process.platform === "win32")(
+		"terminates a dead root's descendant when stdout was never read",
+		async () => {
+			// The descendant reports itself out of band and closes stderr, so neither
+			// pipe carries any evidence and no stdout reader is ever created — the
+			// distinguishing condition here.
+			const pidFile = path.join(os.tmpdir(), `omp-ptree-unread-${process.pid}-${Date.now()}`);
+			const child = spawn(["/bin/sh", "-c", `/bin/sh -c 'echo $$ > ${pidFile}; exec sleep 30' 2>/dev/null &`], {
+				detached: true,
+			});
 			let descendant: Process | null = null;
 			try {
-				const output = await reader.read();
-				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
-				if (!descendant) throw new Error("Descendant exited before termination");
+				for (let attempt = 0; attempt < 200 && !descendant; attempt++) {
+					const reported = Number.parseInt(
+						(
+							await Bun.file(pidFile)
+								.text()
+								.catch(() => "")
+						).trim(),
+						10,
+					);
+					descendant = Number.isFinite(reported) ? Process.fromPid(reported) : null;
+					if (!descendant) await Bun.sleep(10);
+				}
+				if (!descendant) throw new Error("Descendant never reported its pid");
 				await child.proc.exited;
-				await Bun.readableStreamToText(child.stderr!);
-				if (finish === "eof") expect((await reader.read()).done).toBe(true);
-				else await reader.cancel();
-				await Bun.sleep(0);
-				await child.killAndWait(undefined, -1);
+				// Let the internal stderr drain reach EOF, which is what used to leave
+				// this child with no pipe evidence and skip the group cleanup entirely.
+				await Bun.sleep(100);
 				expect(descendant.status()).toBe(ProcessStatus.Running);
+				await child.killAndWait(undefined, -1);
+				expect(descendant.status()).toBe(ProcessStatus.Exited);
 			} finally {
 				descendant?.killTree(9);
-				await reader.cancel();
 				child.kill(undefined, -1);
+				await Bun.file(pidFile)
+					.unlink()
+					.catch(() => {});
 			}
-		});
-	}
+		},
+	);
 
 	it("waits for a pipe-holding descendant after its root exits", async () => {
 		const command =
