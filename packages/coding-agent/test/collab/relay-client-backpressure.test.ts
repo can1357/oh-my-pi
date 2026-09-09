@@ -120,8 +120,10 @@ describe("CollabSocket send backpressure", () => {
 			const first = BackpressuredWebSocket.instances[0]!;
 			first.open();
 			socket.sendBatch(chunks(), 7);
-			await Bun.sleep(30);
-			expect(first.sent.length).toBeGreaterThan(0);
+			// Wait for the first sealed chunk rather than guessing at how long real
+			// AES-GCM takes: a fixed sleep here asserts the batch is in flight before
+			// it necessarily is.
+			await waitUntil(() => first.sent.length > 0, "the batch never reached the transport");
 			expect(generated).toBeLessThan(60);
 
 			// Transient drop: code 1000 is not fatal, so the socket retries and the
