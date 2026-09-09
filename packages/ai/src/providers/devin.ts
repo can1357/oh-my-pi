@@ -1,5 +1,6 @@
 import { gunzipSync, gzipSync } from "node:zlib";
 
+import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import {
 	AssignModelRequestSchema,
 	AssignModelResponseSchema,
@@ -26,12 +27,12 @@ import {
 	StopReason,
 } from "@oh-my-pi/pi-catalog/discovery/devin-proto";
 import { create, fromBinary, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
-import { isGeminiModelId } from "@oh-my-pi/pi-catalog/identity/family";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import { DEVIN_DEFAULT_BASE_URL, devinCliMetadata } from "@oh-my-pi/pi-catalog/wire/devin";
 import { decodeDevinUnaryMessage } from "@oh-my-pi/pi-catalog/wire/devin-proto";
 import { isRecord, logger, parseStreamingJson, parseStreamingJsonThrottled, sanitizeText } from "@oh-my-pi/pi-utils";
 import * as AIError from "../error";
+
 import type {
 	Api,
 	AssistantMessage,
@@ -643,8 +644,12 @@ function buildDevinChatRequest(
 	// Gemini backend applies Google's tool-schema constraints and rejects JSON
 	// Schema type arrays (e.g. `["number", "null"]`) as an opaque internal
 	// `invalid_argument`; normalize both direct Gemini models and router-assigned
-	// enum-style UIDs (`MODEL_GOOGLE_GEMINI_*`) before serializing tools.
-	const googleToolSchema = isGeminiModelId(model.id) || chatModelUid.toLowerCase().includes("gemini");
+	// enum-style UIDs (`MODEL_GOOGLE_GEMINI_*`) before serializing tools. The UID
+	// prefix is the server's own enum namespace, which classifyModel cannot parse.
+	const googleToolSchema =
+		classifyModel("devin", model.id, { lenient: true }).class === "gemini" ||
+		classifyModel("devin", chatModelUid, { lenient: true }).class === "gemini" ||
+		chatModelUid.startsWith("MODEL_GOOGLE_GEMINI_");
 	const tools = (context.tools ?? []).map((tool: Tool) => {
 		const schema = toolWireSchema(tool);
 		return create(ChatToolDefinitionSchema, {
