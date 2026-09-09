@@ -65,6 +65,7 @@ function createContext(): {
 		cancelPendingSubmission: Spy;
 		clearEditor: Spy;
 		clearQueue: Spy;
+		dropQueuedLoopReminders: Spy;
 		flushSync: Spy;
 		getQueuedMessages: Spy;
 		ensureLoadingAnimation: Spy;
@@ -92,6 +93,7 @@ function createContext(): {
 	const abortHandoff = vi.fn();
 	const addMessageToChat = vi.fn();
 	const cancelPendingSubmission = vi.fn(() => false);
+	const dropQueuedLoopReminders = vi.fn();
 	const clearQueue = vi.fn(() => ({ steering: [], followUp: [] }));
 	const getQueuedMessages = vi.fn(() => ({ steering: [], followUp: [] }));
 	const onInputCallback = vi.fn();
@@ -227,6 +229,7 @@ function createContext(): {
 		showSessionSelector: vi.fn(),
 		shutdown: vi.fn(async () => {}),
 		clearEditor: vi.fn(),
+		dropQueuedLoopReminders,
 		showStatus,
 	} as unknown as InteractiveModeContext;
 
@@ -235,6 +238,7 @@ function createContext(): {
 		editor,
 		spies: {
 			abort,
+			dropQueuedLoopReminders,
 			abortBash,
 			abortEval,
 			abortHandoff,
@@ -555,6 +559,28 @@ describe("InputController escape behavior", () => {
 		expect(spies.abort).toHaveBeenCalledTimes(1);
 		expect(spies.abort).toHaveBeenCalledWith({ reason: USER_INTERRUPT_LABEL });
 		expect(spies.showStatus).not.toHaveBeenCalledWith("Press Esc again within 2s to cancel streaming.");
+	});
+
+	it("drops a queued loop reminder before aborting, so Esc is not undone by the steer", () => {
+		const { ctx, editor } = createContext();
+		mutableSessionState(ctx).isStreaming = true;
+		// Order is the contract, not just the call: abort()'s stranded-message drain
+		// reads the steering queue, and #canAutoContinueForFollowUp resumes on any
+		// queued steer before it consults the user-interrupt suppression. Dropping
+		// the reminder after the abort would let it restart the run Esc just stopped.
+		const order: string[] = [];
+		ctx.dropQueuedLoopReminders = vi.fn(() => {
+			order.push("drop");
+		});
+		(ctx.session as unknown as { abort: () => void }).abort = vi.fn(() => {
+			order.push("abort");
+		});
+		const controller = new InputController(ctx);
+
+		controller.setupKeyHandlers();
+		editor.onEscape?.();
+
+		expect(order).toEqual(["drop", "abort"]);
 	});
 
 	it("aborts the submitted turn on the first Esc once the main session starts streaming", async () => {

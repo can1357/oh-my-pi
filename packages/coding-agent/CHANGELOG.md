@@ -5,6 +5,8 @@
 ### Fixed
 
 - Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
+- A duration-limited `/loop` (e.g. `/loop 30m fix the tests`) now fires on that fixed interval instead of waiting for the agent to stop before re-prompting it: a turn that is still working gets the prompt steered in — so a long turn is nudged repeatedly as it runs, keeping its cached context — and once the agent has stopped, the same tick simply submits the prompt and it continues. Count-based loops (`/loop 5`) are unchanged.
+
 ### Added
 
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
