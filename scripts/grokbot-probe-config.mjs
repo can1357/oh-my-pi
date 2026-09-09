@@ -9,6 +9,7 @@
 import * as path from "node:path";
 import { getAgentDir } from "../packages/utils/src/dirs.ts";
 import { parseEnvFile } from "../packages/utils/src/env.ts";
+import { mintGrokbotAccessToken as mintToken } from "../packages/catalog/src/discovery/grokbot-auth.ts";
 
 export const GROKBOT_BACKEND = "https://api2.cursor.sh";
 export const GROKBOT_RENEWAL_PATH = "/sand-box/inference-credential";
@@ -116,23 +117,7 @@ export function getAccessTokenExpiryMs(token) {
 	}
 }
 
-/** Mint a sand JWT — mirrors catalog mint without caching (probes are one-shot). */
-export async function mintGrokbotAccessToken(cfg, fetchImpl = fetch) {
-	if (!cfg.renewal) {
-		throw new Error(`Grok Bot renewer missing (GROKBOT_RENEWAL_CREDENTIAL env or ${grokbotSecretsPath()})`);
-	}
-	const response = await fetchImpl(joinGrokbotBackendUrl(GROKBOT_BACKEND, GROKBOT_RENEWAL_PATH), {
-		method: "POST",
-		headers: { "content-type": "application/json", ...grokbotClientHeaders(cfg) },
-		body: JSON.stringify({ credential: cfg.renewal }),
-	});
-	if (!response.ok) {
-		// Drain body without echoing it — reverse proxies may reflect the renewer.
-		await response.text().catch(() => "");
-		throw new Error(`Grok Bot token renew failed (HTTP ${response.status})`);
-	}
-	const parsed = await response.json();
-	const accessToken = typeof parsed.accessToken === "string" ? parsed.accessToken : "";
-	if (!accessToken) throw new Error("Grok Bot token renew returned no accessToken");
-	return accessToken;
+/** Share production minting and purpose selection; metadata and inference use different bearers. */
+export async function mintGrokbotAccessToken(cfg, fetchImpl = fetch, purpose = "api") {
+	return mintToken(cfg, fetchImpl, GROKBOT_BACKEND, undefined, undefined, purpose);
 }

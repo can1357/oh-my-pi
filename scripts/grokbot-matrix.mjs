@@ -46,14 +46,7 @@ const OPUS_SHELL_USER = prompt.render(matrixOpusShellUserPrompt, { token: "opus-
 const BASH_THEN_TOKEN_USER = prompt.render(matrixBashThenTokenUserPrompt, { token: TOKEN }).trim();
 
 /** Probe id sets — wire params/effort come from live catalog + buildModel policy. */
-const TOOL_MODEL_IDS = [
-	"grok-4.6",
-	"composer-2.5",
-	"gemini-3.7-flash",
-	"gpt-5.6-sol",
-	"kimi-k3",
-	"glm-5.2",
-];
+const TOOL_MODEL_IDS = ["grok-4.6", "composer-2.5", "gemini-3.7-flash", "gpt-5.6-sol", "kimi-k3", "glm-5.2"];
 const CLAUDE_TEXT_MODEL_IDS = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"];
 const GROK45_ID = "grok-4.5";
 
@@ -152,7 +145,7 @@ function parseFrames(buf) {
 
 async function sandProbe({ id, sandParameterIds, effort, tools }) {
 	const cfg = await loadGrokbotConfig();
-	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND, undefined, undefined, "inference");
 	const headers = {
 		...grokbotClientHeaders(cfg),
 		authorization: `Bearer ${token}`,
@@ -330,7 +323,7 @@ const AUTOMATION_OMP_TOOLS = [
 
 async function sandAutomationProbe(catalog) {
 	const cfg = await loadGrokbotConfig();
-	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND, undefined, undefined, "inference");
 	const headers = {
 		...grokbotClientHeaders(cfg),
 		authorization: `Bearer ${token}`,
@@ -341,7 +334,9 @@ async function sandAutomationProbe(catalog) {
 		"connect-protocol-version": "1",
 		"x-request-id": crypto.randomUUID(),
 	};
-	const opus = catalog.CLAUDE_TEXT_MODELS.find(m => m.id === "claude-opus-5") ?? matrixRowFromCatalog("claude-opus-5", new Map());
+	const opus =
+		catalog.CLAUDE_TEXT_MODELS.find(m => m.id === "claude-opus-5") ??
+		matrixRowFromCatalog("claude-opus-5", new Map());
 	const requestedModel = resolveGrokbotRequestedModel("claude-opus-5", {
 		effort: opus.effort,
 		sandParameterIds: opus.sandParameterIds,

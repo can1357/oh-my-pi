@@ -15,9 +15,7 @@ import {
 	loadGrokbotConfig,
 	mintGrokbotAccessToken,
 } from "../packages/catalog/src/discovery/grokbot-auth.ts";
-import {
-	applyAnthropicSandToolWire,
-} from "../packages/ai/src/providers/grokbot/anthropic-sand-wire.ts";
+import { applyAnthropicSandToolWire } from "../packages/ai/src/providers/grokbot/anthropic-sand-wire.ts";
 import { resolveGrokbotRequestedModel } from "../packages/ai/src/providers/grokbot/model-request.ts";
 import {
 	CONNECT_END_STREAM_FLAG,
@@ -84,7 +82,7 @@ function parseFrames(buf) {
 
 async function main() {
 	const cfg = await loadGrokbotConfig();
-	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
+	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND, undefined, undefined, "inference");
 	const requestedModel = resolveGrokbotRequestedModel("claude-opus-5", {
 		sandParameterIds: ["thinking", "context", "effort", "fast"],
 		effort: "low",

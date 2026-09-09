@@ -3,6 +3,12 @@
 // from neutral seeds instead of TypeScript per-id branches.
 
 provider "grokbot" {
+	// Anthropic rejects composed tool schemas added by product Read/Write aliases.
+	// Live Opus 5 medium: identical three-tool request fails 400 before projection,
+	// then emits a valid Shell call with the shared Cursor schema projection.
+	class "anthropic" {
+		requires-cursor-tool-schema-projection #true
+	}
 	// AvailableModels / seed-owned ladders must survive generate-models rebake,
 	// and buildModel must not invent fallback efforts when no thinking-efforts
 	// rule matched (routers, fast-only, unrecognized upstream-only values).

@@ -15,6 +15,9 @@
 
 ### Fixed
 
+- Grok Bot caches separate metadata and inference tokens and refreshes before either expires.
+- Grok Bot Anthropic tool schemas use the shared schema projection so Read/Write aliases remain usable.
+
 - Regenerated Cursor `cursor-proto.ts` from the vendored `agent.proto` (`bun run gen:proto`): `AgentRunRequest` gains fields 10–28 (capability flags, session ids, subagent/harness members) plus new server messages (`ttftBreakdown`, …).
 - Cursor discovery records the verbatim roster id as `requestModelId` on the `auto` entry so the provider echoes it instead of the synthetic `default` wire id.
 - Grok Bot backend URL join appends endpoints onto the pathname while preserving reverse-proxy query strings, including trailing `/` inside query values (mint + AvailableModels).

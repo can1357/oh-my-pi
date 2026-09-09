@@ -8828,7 +8828,17 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:16",
+				"source": "providers/grokbot.kdl:9",
+				"class": "anthropic",
+				"providers": [
+					"grokbot"
+				],
+				"catalog": {
+					"requiresCursorToolSchemaProjection": true
+				}
+			},
+			{
+				"source": "providers/grokbot.kdl:22",
 				"providers": [
 					"grokbot"
 				],
@@ -8845,7 +8855,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:21",
+				"source": "providers/grokbot.kdl:27",
 				"providers": [
 					"grokbot"
 				],
@@ -8861,7 +8871,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:25",
+				"source": "providers/grokbot.kdl:31",
 				"providers": [
 					"grokbot"
 				],
@@ -8877,7 +8887,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:35",
+				"source": "providers/grokbot.kdl:41",
 				"providers": [
 					"grokbot"
 				],
@@ -8907,7 +8917,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:45",
+				"source": "providers/grokbot.kdl:51",
 				"providers": [
 					"grokbot"
 				],
@@ -8928,7 +8938,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:50",
+				"source": "providers/grokbot.kdl:56",
 				"providers": [
 					"grokbot"
 				],
@@ -8967,7 +8977,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:58",
+				"source": "providers/grokbot.kdl:64",
 				"providers": [
 					"grokbot"
 				],
@@ -8996,7 +9006,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:66",
+				"source": "providers/grokbot.kdl:72",
 				"providers": [
 					"grokbot"
 				],

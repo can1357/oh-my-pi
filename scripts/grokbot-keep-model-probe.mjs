@@ -414,7 +414,7 @@ async function main() {
 	console.log(
 		`config: machineId=${cfg.machineId.slice(0, 8)}… namespace=${cfg.namespace} client=${cfg.clientVersion}`,
 	);
-	const token = await mintGrokbotAccessToken(cfg);
+	const token = await mintGrokbotAccessToken(cfg, fetch, "inference");
 	console.log(`token minted ✓`);
 
 	const results = [];

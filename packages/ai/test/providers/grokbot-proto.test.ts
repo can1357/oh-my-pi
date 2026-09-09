@@ -740,6 +740,44 @@ describe("grokbot checksum", () => {
 });
 
 describe("grokbot sand-host client parity", () => {
+	test("keeps leading developer instructions but serializes a late advisor as a chronological follow-up", () => {
+		const messages = toInferenceMessages(
+			{
+				systemPrompt: ["System instructions"],
+				messages: [
+					{ role: "developer", content: "Initial developer instructions", timestamp: 0 },
+					{ role: "user", content: "Run the task", timestamp: 1 },
+					{
+						role: "assistant",
+						content: [{ type: "text", text: "Task complete" }],
+						api: "grokbot-sand",
+						provider: "grokbot",
+						model: conversionModel.id,
+						usage: {
+							input: 0,
+							output: 0,
+							cacheRead: 0,
+							cacheWrite: 0,
+							totalTokens: 0,
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+						},
+						stopReason: "stop",
+						timestamp: 2,
+					},
+					{ role: "developer", content: "Late advisor: verify the result", timestamp: 3 },
+				],
+			},
+			conversionModel,
+		);
+		const decoded = decodeInferenceStreamRequest(encodeInferenceStreamRequest({ messages }));
+		expect(decoded.messages).toEqual([
+			{ role: 4, text: "System instructions" },
+			{ role: 4, text: "Initial developer instructions" },
+			{ role: 1, text: "Run the task" },
+			{ role: 2, text: "Task complete" },
+			{ role: 1, text: "Late advisor: verify the result" },
+		]);
+	});
 	test("strips stamped version and applies namespace suffixes like sand-host", () => {
 		expect(stampedVersionBaseOf("0.30.0-pre.16")).toBe("0.30.0");
 		expect(resolveGrokbotClientVersion("prod")).toBe("0.30.0");
@@ -2039,6 +2077,7 @@ describe("grokbot incomplete tool calls", () => {
 describe("grokbot request headers", () => {
 	afterEach(() => {
 		vi.restoreAllMocks();
+		grokbotCatalogAuth.clearGrokbotTokenCache();
 	});
 
 	const model: Model<"grokbot-sand"> = buildModel({
@@ -2061,6 +2100,102 @@ describe("grokbot request headers", () => {
 		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
 		return Buffer.concat([text, trailer]);
 	}
+
+	test("uses the separate inference bearer after metadata warms the token cache, including a remint", async () => {
+		const cfg = { renewal: "dual-token-renewer", machineId: "machine", namespace: "prod", clientVersion: "0.44.0" };
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue(cfg);
+		let mints = 0;
+		const bearers: string[] = [];
+		const fetchImpl: FetchImpl = async (url, init) => {
+			if (String(url).endsWith("/inference-credential")) {
+				mints++;
+				return Response.json({
+					accessToken: `metadata-${mints}`,
+					grokBotToken: `inference-${mints}`,
+					expiresAtMs: Date.now() + 600_000,
+				});
+			}
+			const bearer = new Headers(init?.headers).get("authorization") ?? "";
+			bearers.push(bearer);
+			// A rejected first token must refresh the pair and still select the inference token.
+			if (bearer !== "Bearer inference-2") return new Response(null, { status: 401 });
+			return new Response(textThenTrailer());
+		};
+		expect(
+			await grokbotCatalogAuth.mintGrokbotAccessToken(cfg, fetchImpl, model.baseUrl, undefined, model.headers),
+		).toBe("metadata-1");
+		const result = await streamGrokBot(model, context, { apiKey: cfg.renewal, fetch: fetchImpl }).result();
+		expect(result.stopReason).toBe("stop");
+		expect(bearers).toEqual(["Bearer inference-1", "Bearer inference-2"]);
+		expect(mints).toBe(2);
+		expect(
+			await grokbotCatalogAuth.mintGrokbotAccessToken(cfg, fetchImpl, model.baseUrl, undefined, model.headers),
+		).toBe("metadata-2");
+		expect(mints).toBe(2);
+	});
+
+	test("Opus tool schemas are projected on the wire without changing the selected effort or local schemas", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.44.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("inference-token");
+		const opus = buildModel({
+			...model,
+			id: "claude-opus-5",
+			name: "Opus",
+			sandParameterIds: ["thinking", "effort"],
+			sandToolsWire: undefined,
+		});
+		const writeSchema = {
+			type: "object",
+			properties: { path: { type: "string" }, content: { type: "string" } },
+			required: ["path", "content"],
+		};
+		const schemaBefore = structuredClone(writeSchema);
+		const toolContext: Context = {
+			...context,
+			tools: [{ name: "write", description: "Write a file", parameters: writeSchema }],
+		};
+		let request: Record<string, unknown> | undefined;
+		const fetchImpl: FetchImpl = async (_url, init) => {
+			request = decodeInferenceStreamRequest((init?.body as Uint8Array).subarray(5));
+			return new Response(textThenTrailer());
+		};
+		const result = await streamGrokBot(opus, toolContext, { fetch: fetchImpl, effort: "medium" }).result();
+		expect(result.stopReason).toBe("stop");
+		expect(request?.requestedModel).toMatchObject({
+			modelId: "claude-opus-5",
+			parameters: [
+				{ id: "thinking", value: "true" },
+				{ id: "effort", value: "medium" },
+			],
+		});
+		const tools = request?.tools as Array<{ name: string; parameters: { jsonSchema: Record<string, unknown> } }>;
+		expect(tools[0]?.name).toBe("Write");
+		expect(tools[0]?.parameters.jsonSchema).toEqual({
+			type: "object",
+			properties: {
+				path: { type: "string" },
+				content: { type: "string" },
+				contents: { type: "string", description: "File contents (alias of content)" },
+			},
+			required: ["path"],
+		});
+		expect(writeSchema).toEqual(schemaBefore);
+		// The router is a separate deployment contract: its alias union must survive.
+		await streamGrokBot(model, toolContext, { fetch: fetchImpl }).result();
+		const routerTools = request?.tools as Array<{
+			name: string;
+			parameters: { jsonSchema: Record<string, unknown> };
+		}>;
+		expect(routerTools.find(tool => tool.name === "Write")?.parameters.jsonSchema.anyOf).toEqual([
+			{ required: ["content"] },
+			{ required: ["contents"] },
+		]);
+	});
 
 	test("merges model.headers into the inference request", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({

@@ -3,6 +3,8 @@
 ### Fixed
 
 - Cursor can create new files after its destination probe reports a missing file.
+- Grok Bot inference uses the dedicated token returned by renewal, fixing authentication failures after successful model discovery.
+- Grok Bot Opus tool calls and late advisor follow-ups no longer fail with provider HTTP 400 errors.
 
 ### Fixed
 

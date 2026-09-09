@@ -476,7 +476,14 @@ export function toInferenceMessages(context: Context, model: Model<"grokbot-sand
 			continue;
 		}
 
-		const role = ROLE[roleName as keyof typeof ROLE] || ROLE.user;
+		// Sand has no developer role. Keep leading instructions in the system
+		// prefix, but deliver later notes as chronological user turns: a trailing
+		// system row is hoisted by the backend and leaves an invalid assistant
+		// prefill for thinking models (e.g. a late advisor after the final answer).
+		const role =
+			roleName === "developer" && out.some(message => message.role !== ROLE.system)
+				? ROLE.user
+				: ROLE[roleName as keyof typeof ROLE] || ROLE.user;
 		const parts = userPartsFromContent(msg.content);
 		if (!parts.length) continue;
 		const hasImage = parts.some(p => p.type === "image");
@@ -768,6 +775,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				model.baseUrl || GROKBOT_BACKEND,
 				options?.signal,
 				{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
+				"inference",
 			);
 			let jwtRemintUsed = false;
 			const messages = toInferenceMessages(context, model);
@@ -875,6 +883,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					model.baseUrl || GROKBOT_BACKEND,
 					options?.signal,
 					{ ...(model.headers ?? {}), ...(options?.headers ?? {}) },
+					"inference",
 				);
 				discardAttemptEvents();
 				// Retain a live-published start across remint so the consumer does not
@@ -1038,6 +1047,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 						ompTools: context.tools,
 						sandToolsWire: retrySandWire,
 						sandWireModelId: model.sandWireModelId,
+						requiresCursorToolSchemaProjection: model.requiresCursorToolSchemaProjection,
 					},
 					resolvedWire,
 				);
