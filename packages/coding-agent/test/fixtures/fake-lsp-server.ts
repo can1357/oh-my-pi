@@ -23,6 +23,14 @@ interface CloseDocumentParams {
 
 let initializeCount = 0;
 let stopReading = false;
+// A helper subprocess that outlives this server, for the mux's tree-termination
+// coverage: it is reparented away when this process exits, so a descendant walk
+// rooted at the dead server can no longer find it.
+if (Bun.env.TEST_LSP_HELPER_PID_FILE) {
+	const helper = Bun.spawn(["sleep", "60"], { stdin: "ignore", stdout: "ignore", stderr: "ignore" });
+	helper.unref();
+	await Bun.write(Bun.env.TEST_LSP_HELPER_PID_FILE, String(helper.pid));
+}
 let shutdownReceived = false;
 let processId: number | null = null;
 const didOpen: Record<string, number> = {};

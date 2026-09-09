@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { isRecord, logger, postmortem, ptree, setProcessName, withTimeout } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../../jsonrpc/message-framing";
 import type { LspJsonRpcId, LspJsonRpcNotification, LspJsonRpcRequest, LspJsonRpcResponse } from "../types";
@@ -752,6 +753,10 @@ export class LspMuxServer {
 		const id = server.muxId();
 		const { promise, resolve } = Promise.withResolvers<void>();
 		server.pending.set(id, { resolveInternal: resolve });
+		// Pinned before the handshake, because this method waits for the root to
+		// exit: a walk rooted at an exited pid finds nothing, so a helper the
+		// server leaves running would be unreachable by the time it is killed.
+		const helpers = Process.fromPid(server.proc.pid)?.children() ?? [];
 		try {
 			await withTimeout(
 				(async () => {
@@ -768,7 +773,27 @@ export class LspMuxServer {
 		} finally {
 			resolve();
 			server.pending.delete(id);
-			await this.#killServer(server);
+			const [termination] = await Promise.allSettled([this.#killServer(server), this.#killHelpers(server, helpers)]);
+			if (termination.status === "rejected") throw termination.reason;
+		}
+	}
+
+	/**
+	 * Hard-kill helpers pinned before the root exited.
+	 *
+	 * `killAndWait()` captures the tree when it runs, and by then the root is
+	 * gone, so these pinned references are the only remaining handle on anything
+	 * the server left behind. Each is identity-checked natively, so a pid that
+	 * has since been recycled is not signalled.
+	 */
+	async #killHelpers(server: ServerInstance, helpers: Process[]): Promise<void> {
+		const survivors = helpers.filter(helper => helper.status() === ProcessStatus.Running);
+		if (survivors.length === 0) return;
+		const results = await Promise.allSettled(survivors.map(helper => helper.killTreeAndWait()));
+		for (const result of results) {
+			if (result.status === "rejected")
+				logger.warn("LSP mux helper termination failed", { server: server.key, error: String(result.reason) });
+			else if (result.value === false) logger.warn("LSP mux helper termination timed out", { server: server.key });
 		}
 	}
 

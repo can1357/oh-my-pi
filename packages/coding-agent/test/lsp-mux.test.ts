@@ -223,6 +223,51 @@ describe("LspMuxServer", () => {
 		expect(await Bun.file(shutdownFile).json()).toEqual({ shutdownReceived: true, exitReceived: true });
 	});
 
+	it.skipIf(process.platform === "win32")(
+		"terminates a helper the language server leaves behind",
+		async () => {
+			// The server honours `exit`, so the mux waits for its root to be gone
+			// before terminating; the helper is only reachable through references
+			// pinned while the root was still alive.
+			const helperFile = path.join(tmpDir, "helper.pid");
+			connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
+			const { client } = await link();
+			await initialize(client);
+			let helperPid = 0;
+			await pollUntil(async () => {
+				helperPid =
+					Number.parseInt(
+						(
+							await Bun.file(helperFile)
+								.text()
+								.catch(() => "")
+						).trim(),
+						10,
+					) || 0;
+				return helperPid > 0;
+			}, "helper pid");
+			const helperAlive = () => {
+				try {
+					process.kill(helperPid, 0);
+					return true;
+				} catch (error) {
+					return (error as NodeJS.ErrnoException).code !== "ESRCH";
+				}
+			};
+			try {
+				expect(helperAlive()).toBe(true);
+				await server.shutdown();
+				expect(server.serverKeys).toEqual([]);
+				await pollUntil(() => Promise.resolve(!helperAlive()), "helper termination", 6_000);
+			} finally {
+				try {
+					process.kill(helperPid, "SIGKILL");
+				} catch {}
+			}
+		},
+		10_000,
+	);
+
 	it.skipIf(process.platform === "win32")("bounds shutdown when a language server ignores exit", async () => {
 		connectParams.env = { TEST_LSP_IGNORE_EXIT: "1" };
 		const { client } = await link();

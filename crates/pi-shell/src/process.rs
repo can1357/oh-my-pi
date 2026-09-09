@@ -1309,6 +1309,8 @@ impl ProcessExitWait {
 pub struct TerminationPlan {
 	root:            Process,
 	process_group:   Option<i32>,
+	/// Pinned leader of `process_group`, revalidated before each group signal.
+	group_leader:    Option<Process>,
 	descendants:     Vec<Process>,
 	protected:       HashSet<i32>,
 	live_at_capture: bool,
@@ -1341,7 +1343,9 @@ impl TerminationPlan {
 		let root_signalable = !self.protected.contains(&self.root.pid());
 
 		// Polite wave: SIGTERM the group, every captured descendant, then the root.
-		if let Some(pgid) = self.process_group {
+		if let Some(pgid) = self.process_group
+			&& group_still_led_by(pgid, self.group_leader.as_ref())
+		{
 			let _ = kill_process_group(pgid, TERM_SIGNAL);
 		}
 		for child in &self.descendants {
@@ -1372,7 +1376,11 @@ impl TerminationPlan {
 		// that dies to its own SIGTERM releases its surviving children to init,
 		// where a walk rooted at the dead pid can no longer see them and would
 		// report the tree gone while they run on.
-		if let Some(pgid) = self.process_group {
+		// Revalidated again: the grace wait above can be a full second, and a pgid
+		// whose group empties in that time is free for anyone to inherit.
+		if let Some(pgid) = self.process_group
+			&& group_still_led_by(pgid, self.group_leader.as_ref())
+		{
 			let _ = kill_process_group(pgid, KILL_SIGNAL);
 		}
 		let rescan = self.root.signalable_descendants(&self.protected);
@@ -1450,7 +1458,12 @@ impl Process {
 			&& pgid == self.pid()
 		{
 			processes.extend(Self::group_members(pgid));
-			let _ = kill_process_group(pgid, KILL_SIGNAL);
+			// The scan above takes milliseconds; the captured members are pinned and
+			// killed individually below, but the numeric broadcast needs the group to
+			// still be ours at the instant it fires.
+			if self.leads_group(pgid) {
+				let _ = kill_process_group(pgid, KILL_SIGNAL);
+			}
 		}
 		if !protected.contains(&self.pid()) {
 			processes.push(self.clone());
@@ -1480,21 +1493,10 @@ impl Process {
 	/// is not.
 	pub fn hard_kill_own_group(&self) -> Result<ProcessExitWait> {
 		let pgid = self.pid();
-		if let Some(current) = Self::from_pid(pgid) {
-			anyhow::ensure!(
-				self.is_same_process(&current),
-				"process group {pgid} now belongs to a different process"
-			);
-		}
-		Self::hard_kill_group(pgid)
-	}
-
-	/// Snapshot and hard-kill a caller-owned process group, even after its
-	/// leader exits.
-	///
-	/// Signals whatever currently carries `pgid`, so callers must establish that
-	/// the group is theirs. Reach it through [`Process::hard_kill_own_group`].
-	fn hard_kill_group(pgid: i32) -> Result<ProcessExitWait> {
+		anyhow::ensure!(
+			self.leads_group(pgid),
+			"process group {pgid} now belongs to a different process"
+		);
 		anyhow::ensure!(
 			pgid > 0 && !is_self_process_group(pgid),
 			"refusing to kill process group {pgid}"
@@ -1503,16 +1505,28 @@ impl Process {
 		anyhow::bail!("process groups are unsupported on Windows");
 		#[cfg(not(target_os = "windows"))]
 		{
-			let processes = Self::group_members(pgid);
+			let members = Self::group_members(pgid);
 			anyhow::ensure!(
-				!processes.is_empty() || !process_group_alive(pgid),
+				!members.is_empty() || !process_group_alive(pgid),
 				"cannot observe members of process group {pgid}"
 			);
-			if !processes.is_empty() {
+			if !members.is_empty() {
+				// Re-proved here rather than only at entry: the scan above walks the
+				// whole process table, and a group that empties during it releases the
+				// pgid for an unrelated session leader to claim before this signal.
+				anyhow::ensure!(
+					self.leads_group(pgid),
+					"process group {pgid} changed hands while its members were being collected"
+				);
 				let _ = kill_process_group(pgid, KILL_SIGNAL);
 			}
-			Ok(Self::hard_kill_processes(processes, &host_protected_pids()))
+			Ok(Self::hard_kill_processes(members, &host_protected_pids()))
 		}
+	}
+
+	/// Whether `pgid` still names the group this reference leads.
+	fn leads_group(&self, pgid: i32) -> bool {
+		pgid == self.pid() && group_still_led_by(pgid, Some(self))
 	}
 
 	fn group_members(pgid: i32) -> Vec<Self> {
@@ -1697,13 +1711,18 @@ impl Process {
 			return TerminationPlan {
 				root: self.clone(),
 				process_group: None,
+				group_leader: None,
 				descendants: Vec::new(),
 				protected,
 				live_at_capture: false,
 			};
 		}
+		let process_group = if group { self.group_id() } else { None };
 		TerminationPlan {
-			process_group: if group { self.group_id() } else { None },
+			// Pinned while the group is certainly still ours, so each later signal
+			// can prove the number has not changed hands.
+			group_leader: process_group.and_then(Self::from_pid),
+			process_group,
 			descendants: self.signalable_descendants(&protected),
 			root: self.clone(),
 			protected,
@@ -1754,6 +1773,23 @@ fn pid_in_protected_subtree(
 		}
 	}
 	false
+}
+
+/// Whether `pgid` still names the group that `anchor` led when it was pinned.
+///
+/// A pgid outlives its leader but the kernel releases the number once the group
+/// empties, so it can be handed to an unrelated session leader. `kill(2)` has
+/// no "signal iff leader identity" form, so this cannot be atomic with the
+/// signal; call it immediately before each numeric group signal so the gap is
+/// two syscalls wide instead of a process-table scan or a whole grace period.
+///
+/// An unallocated pid answers `true`: no live task holds the number, so no live
+/// group can have taken it.
+fn group_still_led_by(pgid: i32, anchor: Option<&Process>) -> bool {
+	match Process::from_pid(pgid) {
+		None => true,
+		Some(current) => anchor.is_some_and(|anchor| anchor.is_same_process(&current)),
+	}
 }
 
 async fn wait_for_exit(
@@ -2181,6 +2217,41 @@ mod tests {
 			ProcessStatus::Exited,
 			"a descendant orphaned by the polite wave must still be hard-killed"
 		);
+	}
+
+	/// The numeric group signals are guarded by this predicate, so it has to
+	/// tell a pid's current occupant apart from the reference pinned when the
+	/// group was still ours, and has to treat an unallocated pid as safe.
+	#[cfg(unix)]
+	#[test]
+	fn group_ownership_predicate_tracks_the_pids_current_occupant() {
+		let mut first = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn first");
+		let mut second = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn second");
+		let pin = |child: &std::process::Child| {
+			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child")
+		};
+		let first_pin = pin(&first);
+		let second_pin = pin(&second);
+		let owned = group_still_led_by(first_pin.pid(), Some(&first_pin));
+		let foreign = group_still_led_by(first_pin.pid(), Some(&second_pin));
+		let anchorless = group_still_led_by(first_pin.pid(), None);
+		// No task can hold `i32::MAX`, so nothing can have taken that number.
+		let unallocated = group_still_led_by(i32::MAX, Some(&first_pin));
+		let _ = first.kill();
+		let _ = first.wait();
+		let _ = second.kill();
+		let _ = second.wait();
+
+		assert!(owned, "the pinned leader still occupies its own pid");
+		assert!(!foreign, "a pid held by a different process is not ours");
+		assert!(!anchorless, "an occupied pid with no pinned anchor cannot be proved ours");
+		assert!(unallocated, "an unallocated pid cannot be held by a foreign group");
 	}
 
 	/// `hard_kill_own_group` signals whatever carries the leader's old pid, so
