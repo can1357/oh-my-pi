@@ -318,6 +318,7 @@ describe("Cursor conversation checkpoints", () => {
 			[],
 			undefined,
 			undefined,
+			undefined,
 			true,
 		);
 
@@ -352,6 +353,7 @@ describe("Cursor conversation checkpoints", () => {
 			undefined,
 			{ sawTokenDelta: false },
 			[],
+			undefined,
 			undefined,
 			undefined,
 			false,

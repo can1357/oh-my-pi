@@ -15,6 +15,8 @@
 
 ### Fixed
 
+- Regenerated Cursor `cursor-proto.ts` from the vendored `agent.proto` (`bun run gen:proto`): `AgentRunRequest` gains fields 10–28 (capability flags, session ids, subagent/harness members) plus new server messages (`ttftBreakdown`, …).
+- Cursor discovery records the verbatim roster id as `requestModelId` on the `auto` entry so the provider echoes it instead of the synthetic `default` wire id.
 - Grok Bot backend URL join appends endpoints onto the pathname while preserving reverse-proxy query strings, including trailing `/` inside query values (mint + AvailableModels).
 - Grok Bot AvailableModels discovery passes the configured base URL unmodified into `joinGrokbotBackendUrl` (no whole-URL trailing-slash strip before parse).
 - Opaque Grok Bot variant/legacy selectors resolve full model policy (identity, thinking, compat, catalog assignments/corrections) from `requestModelId` in `buildModel`.

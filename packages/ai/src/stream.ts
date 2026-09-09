@@ -2457,14 +2457,18 @@ function mapOptionsForApi<TApi extends Api>(
 				cursorClientSupportsPromptContextUsageRpc: options?.cursorClientSupportsPromptContextUsageRpc,
 				cursorRunId: options?.cursorRunId,
 				cursorAgentSessionId: options?.cursorAgentSessionId,
-				// Auto mode sends the "default" wire id; otherwise the provider
-				// resolves the wire id from the model's own requestModelId.
-				// Also pin synthetic catalog `auto` so streamSimple without the
-				// gateway header still hits the Cursor router contract.
+				// A roster-resolved `requestModelId` of "auto" echoes the roster
+				// verbatim (what the CLI sends); otherwise auto mode sends the
+				// "default" wire id, and non-auto resolves from the model's own
+				// requestModelId. Also pin synthetic catalog `auto` so
+				// streamSimple without the gateway header still hits the Cursor
+				// router contract.
 				wireModelId:
-					options?.cursorAutoMode || model.id === "auto" || model.requestModelId === "auto"
-						? "default"
-						: resolveWireModelId(cursorModel, effort),
+					model.requestModelId === "auto"
+						? "auto"
+						: options?.cursorAutoMode || model.id === "auto"
+							? "default"
+							: resolveWireModelId(cursorModel, effort),
 			});
 		}
 
