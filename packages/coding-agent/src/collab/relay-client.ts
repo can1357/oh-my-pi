@@ -146,8 +146,9 @@ export class CollabSocket {
 	 *
 	 * - `left`: the relay retired the id. `settled` records whether the frames
 	 *   received before the departure have been dispatched; only settled records
-	 *   may be evicted, so connection churn cannot retire a record whose frame is
-	 *   still in the chain, and {@link MAX_RETIRED_PEERS} bounds the settled
+	 *   with no reply outstanding may be evicted, so neither connection churn nor
+	 *   the cap can retire a record whose frame is still in the chain or whose
+	 *   reply is still being computed, and {@link MAX_RETIRED_PEERS} bounds the
 	 *   remainder.
 	 * - `shed`: {@link #shedPeer} discarded the peer's backlog and has not
 	 *   reported it yet. Lives one microtask turn, so the cap never evicts it. A
@@ -155,11 +156,14 @@ export class CollabSocket {
 	 *   report; `left` overwrites it, because departure wins.
 	 */
 	#notServing = new Map<number, { reason: "left" | "shed"; settled: boolean }>();
+	/** Replies captured by {@link addressee} and not yet delivered, per peer. */
+	#peerOps = new Map<number, number>();
 	/**
-	 * Bumped when the relay recreates the room. Bookkeeping deferred from one room
-	 * may not be applied in the next: the ids are reissued and the records cleared,
-	 * so the same id is a different peer and a callback that acts on it by id alone
-	 * is acting on somebody else's record.
+	 * Bumped when the relay recreates the room, and the ownership token for
+	 * everything deferred across one. The ids are reissued and the records cleared,
+	 * so the same id is a different peer: a settlement queued behind a held
+	 * decryption must not mark the new occupant's record, and a capture taken in
+	 * the old room must not report the new room's peer as the one that asked.
 	 */
 	#roomGeneration = 0;
 
@@ -181,6 +185,37 @@ export class CollabSocket {
 		return this.#notServing.get(peerId)?.reason !== "left";
 	}
 
+	/**
+	 * Captures who a not-yet-computed reply is for. Call the returned function at
+	 * the reply site: it reports whether that reply still goes to the peer that
+	 * asked, and releases the capture.
+	 *
+	 * Needed because {@link isServing} at the reply site is not enough on its own.
+	 * A retirement record is a *bounded* structure, so it can be evicted while an
+	 * asynchronous handler is still running, and a recreated room clears every
+	 * record and reissues the ids — either way the id reads as served again and
+	 * the reply is admitted for a peer that never asked for it. A capture holds
+	 * the record against eviction and remembers which room it belongs to.
+	 *
+	 * Only for work that finishes in bounded time: retention is why this is safe,
+	 * and a capture held across something as long as a model turn would let a
+	 * departed peer pin a record for the length of it.
+	 */
+	addressee(peerId: number): () => boolean {
+		const generation = this.#roomGeneration;
+		this.#peerOps.set(peerId, (this.#peerOps.get(peerId) ?? 0) + 1);
+		let released = false;
+		return () => {
+			if (released) return false;
+			released = true;
+			const outstanding = (this.#peerOps.get(peerId) ?? 1) - 1;
+			if (outstanding > 0) this.#peerOps.set(peerId, outstanding);
+			else this.#peerOps.delete(peerId);
+			this.#trimRetired();
+			return generation === this.#roomGeneration && this.isServing(peerId);
+		};
+	}
+
 	/** Fires on every reconnect: the relay recreated the room and reissues peer ids from 1. */
 	onRoomRecreated?: () => void;
 
@@ -191,13 +226,15 @@ export class CollabSocket {
 		this.#openSocket();
 	}
 
-	send(frame: CollabFrame, targetPeer = 0): void {
-		if (this.#closed) return;
+	/** @returns whether the frame was admitted to the queue; a caller awaiting a reply to it has to settle when it was not. */
+	send(frame: CollabFrame, targetPeer = 0): boolean {
+		if (this.#closed) return false;
 		try {
 			const serialized = JSON.stringify(frame);
-			this.#enqueueSend([serialized].values(), targetPeer, Buffer.byteLength(serialized), false, false);
+			return this.#enqueueSend([serialized].values(), targetPeer, Buffer.byteLength(serialized), false, false);
 		} catch (err) {
 			this.#failFatal(`could not serialize collab frame: ${String(err)}; rejoin to resync`);
+			return false;
 		}
 	}
 
@@ -281,6 +318,7 @@ export class CollabSocket {
 	 */
 	#resetForRecreatedRoom(): void {
 		this.#roomGeneration++;
+		this.#peerOps.clear();
 		this.#notServing.clear();
 		const discarded = this.#discardWhere(pending => pending.targetPeer !== 0);
 		if (discarded > 0) logger.debug("collab: discarded targeted sends across a reconnect", { discarded });
@@ -681,7 +719,7 @@ export class CollabSocket {
 		if (this.#notServing.size <= MAX_RETIRED_PEERS) return;
 		for (const [peer, record] of this.#notServing) {
 			if (this.#notServing.size <= MAX_RETIRED_PEERS) return;
-			if (record.reason === "left" && record.settled) this.#notServing.delete(peer);
+			if (record.reason === "left" && record.settled && !this.#peerOps.has(peer)) this.#notServing.delete(peer);
 		}
 	}
 

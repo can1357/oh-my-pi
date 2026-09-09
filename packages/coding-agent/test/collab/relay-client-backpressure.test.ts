@@ -959,6 +959,36 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
+	it("does not report a reply captured before the relay recreated the room", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/capture", role: "host", key: {} as CryptoKey });
+		try {
+			socket.connect();
+			const first = BackpressuredWebSocket.instances[0]!;
+			first.open();
+			const stillTheAsker = socket.addressee(4);
+			expect(socket.isServing(4)).toBe(true);
+
+			// A transient drop destroys the room and the next one issues ids from 1
+			// again, so peer 4 is a different client and no record says so.
+			first.close();
+			await waitUntil(
+				() => BackpressuredWebSocket.instances.length > 1,
+				"socket never retried after the transient drop",
+			);
+			BackpressuredWebSocket.instances[1]!.open();
+
+			expect(socket.isServing(4)).toBe(true);
+			expect(stillTheAsker()).toBe(false);
+			// Captures taken in the room that is actually open still resolve.
+			expect(socket.addressee(4)()).toBe(true);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
 	it("charges a lazy batch for the snapshot it keeps reachable", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;

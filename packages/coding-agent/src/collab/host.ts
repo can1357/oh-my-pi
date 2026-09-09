@@ -203,7 +203,14 @@ export class CollabHost {
 		if (signal?.aborted) return Promise.resolve({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
 		this.#pendingUi.set(reqId, { request: fullRequest, settle });
-		this.#sendWritablePeers({ t: "ui-request", request: fullRequest });
+		// A registration only means something if somebody was asked. The queue can
+		// refuse a targeted frame under pressure, and the caller awaits this with no
+		// timeout of its own, so an ask nobody received settles here instead of
+		// waiting for a reply that cannot come. A partial delivery still stands: one
+		// guest holding the dialog is enough to answer it.
+		if (this.#sendWritablePeers({ t: "ui-request", request: fullRequest }) === 0) {
+			settle({ kind: "unavailable" });
+		}
 		return promise;
 	}
 
@@ -214,12 +221,15 @@ export class CollabHost {
 		return false;
 	}
 
-	#sendWritablePeers(frame: CollabFrame): void {
+	/** @returns how many writable peers the frame was admitted for. */
+	#sendWritablePeers(frame: CollabFrame): number {
 		const socket = this.#socket;
-		if (!socket) return;
+		if (!socket) return 0;
+		let admitted = 0;
 		for (const [peerId, peer] of this.#peers) {
-			if (peer.canWrite) socket.send(frame, peerId);
+			if (peer.canWrite && socket.send(frame, peerId)) admitted++;
 		}
+		return admitted;
 	}
 
 	async start(relayUrl: string, webUrl = ""): Promise<void> {
@@ -562,7 +572,13 @@ export class CollabHost {
 			)
 			.catch(err => {
 				logger.warn("collab guest prompt failed", { error: String(err) });
-				this.#socket?.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
+				// A turn can outlast the guest by minutes, which is too long to hold a
+				// retirement record for, so this is best-effort: a departure the record
+				// still remembers suppresses it, and past that the reply is one stale
+				// error line.
+				if (this.#socket?.isServing(fromPeer)) {
+					this.#socket.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
+				}
 			});
 	}
 
@@ -716,7 +732,8 @@ export class CollabHost {
 		}
 		const fail = (err: unknown) => {
 			logger.warn("collab agent-cmd failed", { cmd, agentId, error: String(err) });
-			this.#socket?.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
+			if (!this.#socket?.isServing(fromPeer)) return;
+			this.#socket.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
 		};
 		switch (cmd) {
 			case "chat": {
@@ -752,8 +769,13 @@ export class CollabHost {
 
 	/** Incremental transcript read mirroring the hub's readFileIncremental contract. */
 	async #handleFetchTranscript(reqId: number, agentId: string, fromByte: number, fromPeer: number): Promise<void> {
-		const reply = (text: string, newSize: number, error?: string) =>
+		// The read is asynchronous, so the peer can leave — or the whole room can be
+		// recreated — before there is anything to reply with.
+		const stillTheAsker = this.#socket?.addressee(fromPeer);
+		const reply = (text: string, newSize: number, error?: string) => {
+			if (!stillTheAsker?.()) return;
 			this.#socket?.send({ t: "transcript", reqId, text, newSize, error }, fromPeer);
+		};
 		const file = AgentRegistry.global().get(agentId)?.sessionFile;
 		if (!file) {
 			reply("", fromByte, "no transcript available");
