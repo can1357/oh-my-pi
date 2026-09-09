@@ -236,11 +236,24 @@ function isRecoverableTrailingJson(data: string): boolean {
 	return typeof recovered === "object" && recovered !== null;
 }
 
-export async function* readSseJson<T>(
+/**
+ * One dispatched `data:` frame from {@link readSseFrames}: either the parsed JSON
+ * value, or the text of a frame `JSON.parse` rejected together with the
+ * `SyntaxError` it raised (so the strict reader can rethrow it unchanged).
+ */
+type SseFrame<T> = { ok: true; value: T } | { ok: false; raw: string; error: SyntaxError };
+
+/**
+ * Shared `data:`-line framing for {@link readSseJson} and
+ * {@link readSseJsonOrText}: skips empty events, stops at the OpenAI `[DONE]`
+ * sentinel, notifies the diagnostic observer, and treats a container-shaped
+ * stream tail as a clean end of iteration.
+ */
+async function* readSseFrames<T>(
 	stream: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
 	onEvent?: SseEventObserver,
-): AsyncGenerator<T> {
+): AsyncGenerator<SseFrame<T>> {
 	for await (const sse of readSseEvents(stream, signal)) {
 		const isTrailing = trailingEvents.has(sse);
 		notifySseEventObserver(onEvent, sse);
@@ -250,13 +263,28 @@ export async function* readSseJson<T>(
 			continue;
 		}
 		try {
-			yield JSON.parse(data) as T;
+			yield { ok: true, value: JSON.parse(data) as T };
 		} catch (err) {
 			if (err instanceof SyntaxError && isTrailing && isRecoverableTrailingJson(data)) {
 				return;
 			}
+			if (err instanceof SyntaxError) {
+				yield { ok: false, raw: data, error: err };
+				continue;
+			}
 			throw err;
 		}
+	}
+}
+
+export async function* readSseJson<T>(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+	onEvent?: SseEventObserver,
+): AsyncGenerator<T> {
+	for await (const frame of readSseFrames<T>(stream, signal, onEvent)) {
+		if (!frame.ok) throw frame.error;
+		yield frame.value;
 	}
 }
 
@@ -270,28 +298,22 @@ export async function* readSseJson<T>(
  * throttle page from a reverse proxy that already committed to the stream). This
  * exists because `readSseJson`'s baseline consumers span unrelated transports
  * whose error handling a text yield would subtly change; new call sites opt in.
+ *
+ * Note that the text lane is only the frames `JSON.parse` *rejected*: a frame
+ * carrying a JSON-encoded string (`data: "429 Too Many Requests"`) parses, so it
+ * is yielded as that string and is indistinguishable from a rejected frame by
+ * type alone. Consumers branching on `typeof === "string"` therefore see both,
+ * which is the safe direction — each is classified as text rather than trusted as
+ * an event object.
  */
 export async function* readSseJsonOrText<T>(
 	stream: ReadableStream<Uint8Array>,
 	signal?: AbortSignal,
 	onEvent?: SseEventObserver,
 ): AsyncGenerator<T | string> {
-	for await (const sse of readSseEvents(stream, signal)) {
-		const isTrailing = trailingEvents.has(sse);
-		notifySseEventObserver(onEvent, sse);
-		const data = sse.data;
-		if (data === "" || data === "[DONE]") {
-			if (data === "[DONE]") return;
-			continue;
-		}
-		try {
-			yield JSON.parse(data) as T;
-		} catch (err) {
-			if (err instanceof SyntaxError && isTrailing && isRecoverableTrailingJson(data)) {
-				return;
-			}
-			yield data;
-		}
+	for await (const frame of readSseFrames<T>(stream, signal, onEvent)) {
+		if (!frame.ok) yield frame.raw;
+		else yield frame.value;
 	}
 }
 

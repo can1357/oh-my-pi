@@ -3365,8 +3365,10 @@ export async function processResponsesStream<TApi extends Api>(
 				const statusDetailsReason = (response as any)?.status_details?.reason;
 				// A rate-limit/overload body inside a terminal response envelope must
 				// advance the fallback chain exactly like an HTTP-status 429 would
-				// (body-error.ts). Non-retryable failures keep their existing message.
-				const inBand = details ? undefined : AIError.createInBandProviderError({ error });
+				// (body-error.ts). The whole envelope goes to the probe so a status or
+				// code carried beside `error` is visible, not only the inner object.
+				// Non-retryable failures keep their existing message.
+				const inBand = details ? undefined : AIError.createInBandProviderError({ ...response, error });
 				if (inBand) throw inBand;
 				const message = error
 					? `${error.code || "unknown"}: ${error.message || "no message"}`
@@ -3411,9 +3413,10 @@ export async function processResponsesStream<TApi extends Api>(
 		} else if (event.type === "error") {
 			const err = (event as any).error ?? event;
 			// An in-band rate-limit/overload `error` event advances the fallback chain
-			// like an HTTP-status 429 (body-error.ts); other codes keep the existing
+			// like an HTTP-status 429 (body-error.ts); the whole event is passed so
+			// event-level status/code fields count too. Other codes keep the existing
 			// `Error Code <code>: <message>` message that error tests pin on.
-			const inBand = AIError.createInBandProviderError(err);
+			const inBand = AIError.createInBandProviderError(event);
 			if (inBand) throw inBand;
 			const code = err.code ?? "unknown";
 			const message = err.message ?? "no message";
@@ -3425,7 +3428,7 @@ export async function processResponsesStream<TApi extends Api>(
 			populateResponsesUsageFromResponse(output, event.response?.usage);
 			const error = event.response?.error ?? (event.response as any)?.status_details?.error;
 			const details = event.response?.incomplete_details;
-			const inBand = details ? undefined : AIError.createInBandProviderError({ error });
+			const inBand = details ? undefined : AIError.createInBandProviderError({ ...event.response, error });
 			if (inBand) throw inBand;
 			const message = error
 				? `${error.code || "unknown"}: ${error.message || "no message"}`

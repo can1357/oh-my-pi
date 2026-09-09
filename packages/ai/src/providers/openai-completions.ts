@@ -1147,16 +1147,23 @@ const streamOpenAICompletionsOnce = (
 			});
 			for await (const chunk of terminalAwareStream) {
 				if (!chunk || typeof chunk !== "object") continue;
-				const streamError = createOpenAICompletionsStreamError(chunk, model.provider);
-				if (streamError) throw streamError;
-
 				// Rate-limit/overload bodies sent inside an HTTP 200 stream (Azure,
 				// LiteLLM-style aggregators, some gates) arrive as an `error` member or
-				// a bare `{ code, status }` chunk. They must advance the fallback chain
-				// exactly like an HTTP-status 429 — see body-error.ts. Nothing here
-				// fabricates a status; unknown error envelopes fall through untouched.
+				// a bare `{ code, status }` chunk. This probe runs first: the legacy
+				// stream-error guard below turns *any* object `error` member into a
+				// statusless `ProviderResponseError`, so if it went first no throttle
+				// envelope would ever reach the in-band classifier.
+				//
+				// Invariants (body-error.ts): the status is read only from error
+				// `status`/`code` fields and restricted to 429/5xx — never derived from
+				// prose, so a body mentioning 401/403 stays out of the auth lane — and a
+				// synthesized message is never opaque, so an unreadable body cannot burn
+				// a credential. Envelopes that are not a recognised throttle return
+				// `undefined` and keep their pre-existing handling.
 				const inBand = AIError.createInBandProviderError(chunk);
 				if (inBand) throw inBand;
+				const streamError = createOpenAICompletionsStreamError(chunk, model.provider);
+				if (streamError) throw streamError;
 
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.

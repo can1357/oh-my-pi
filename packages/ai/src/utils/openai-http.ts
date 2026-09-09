@@ -127,6 +127,10 @@ export async function postOpenAIStream<TEvent>(init: OpenAIStreamRequestInit): P
  * that has to advance the fallback chain like a real 429 (body-error.ts).
  * Frames that are not recognisable throttles rethrow the original parse error,
  * preserving the pre-existing loud failure for genuinely malformed payloads.
+ * `readSseJsonOrText` also yields a frame that was a JSON-encoded *string* on the
+ * wire (a double-encoded proxy error page); it is not a usable event either, so
+ * it is classified the same way and then dropped — every consumer here already
+ * ignored a string chunk, the completions loop by its `typeof !== "object"` test.
  */
 async function* decodeStream<TEvent>(
 	body: ReadableStream<Uint8Array>,
@@ -138,8 +142,8 @@ async function* decodeStream<TEvent>(
 			const inBand = AIError.createInBandProviderErrorFromText(frame);
 			if (inBand) throw inBand;
 			// Not a recognisable throttle: reproduce the exact strict-parse failure the
-			// previous reader raised, so genuinely malformed payloads stay equally loud.
-			// The frame is a string that already failed once, so this always throws.
+			// previous reader raised, so genuinely malformed payloads stay equally
+			// loud. A frame that parses again was a JSON string, not a malformed one.
 			JSON.parse(frame);
 			continue;
 		}

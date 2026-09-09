@@ -4,7 +4,7 @@
 
 ### Fixed
 
-- Fixed rate-limit/overload failures that arrive *inside* an HTTP 200 body (Azure, LiteLLM-style aggregators, and reverse proxies that already committed to the stream) not advancing `retry.fallbackChains`: the OpenAI-wire providers previously dropped an `{"error":{…}}`/`{"code":429}` chunk or surfaced a non-JSON frame as an unclassified parse error, so `errorId` stayed 0 and session recovery treated a busy provider as terminal. In-band error bodies and plain-text throttle frames (`429 Too Many Requests`, nginx pages) are now classified through the same `ProviderHttpError` path as an HTTP-status 429, so streaming and non-streaming 429s back off and fail over identically.
+- Fixed rate-limit/overload failures that arrive *inside* an HTTP 200 body (Azure, LiteLLM-style aggregators, and reverse proxies that already committed to the stream) not advancing `retry.fallbackChains`: a `{"error":{…}}`/`{"code":429}` chunk or a plain-text throttle frame (`429 Too Many Requests`, an nginx page) is now classified as a retryable 429/5xx through the same path an HTTP-status 429 takes, so a busy provider backs off and fails over instead of ending the session. Only bodies the provider actually reported are used: no status is inferred from error wording, and an unreadable body can no longer consume a credential.
 
 ## [18.1.15] - 2026-09-08
 
