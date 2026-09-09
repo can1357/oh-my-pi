@@ -22,10 +22,14 @@ const CONNECT_END_STREAM_FLAG = 0b00000010;
 
 type Scenario =
 	| { kind: "success" }
+	| { kind: "connect-error-half-open" }
+	| { kind: "connect-clean-end-half-open" }
 	| { kind: "connect-error-after-turn" }
 	| { kind: "connect-detailed-error-after-turn" }
 	| { kind: "connect-classification-detail-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
+	| { kind: "grpc-trailer-after-clean-end" }
+	| { kind: "trailing-bytes-after-clean-end" }
 	| { kind: "end-before-turn" }
 	| { kind: "hang-after-turn" }
 	| { kind: "exec-in-final-chunk"; responseFinished: PromiseWithResolvers<void> }
@@ -179,6 +183,45 @@ async function startServer(): Promise<string> {
 			stream.end();
 			return;
 		}
+		if (scenario.kind === "grpc-trailer-after-clean-end") {
+			stream.respond(
+				{
+					":status": 200,
+					"content-type": "application/connect+proto",
+				},
+				{ waitForTrailers: true },
+			);
+			stream.on("wantTrailers", () => {
+				stream.sendTrailers({
+					"grpc-status": "13",
+					"grpc-message": encodeURIComponent("post-envelope trailer failure"),
+				});
+			});
+			stream.write(textDeltaFrame("hello"));
+			stream.write(turnEndedFrame());
+			// The terminal envelope must land well before the trailers: the
+			// trailing HEADERS flush in a later segment so the clean envelope
+			// cannot win the settle race by accident.
+			stream.write(frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG));
+			setTimeout(() => stream.end(), 25);
+			return;
+		}
+
+		if (scenario.kind === "trailing-bytes-after-clean-end") {
+			// turnEnded and a clean end envelope land first, so the consumer breaks
+			// for the clean-end trailer grace. Then trailing DATA bytes arrive in a
+			// later HTTP/2 DATA frame, poisoning the decoder and failing the pump;
+			// that pump failure must reject the trailers promise and beat the grace
+			// before the turn can settle as done.
+			stream.write(textDeltaFrame("hello"));
+			stream.write(turnEndedFrame());
+			stream.write(frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG));
+			setTimeout(() => {
+				stream.write(Buffer.from([0x00, 0x01, 0x02]));
+				stream.end();
+			}, 25);
+			return;
+		}
 
 		stream.respond({
 			":status": 200,
@@ -257,6 +300,20 @@ async function startServer(): Promise<string> {
 				]),
 			);
 			stream.end();
+			return;
+		}
+
+		if (scenario.kind === "connect-error-half-open") {
+			stream.write(connectEndErrorFrame("unavailable", "half-open connect failure"));
+			// Deliberately do NOT call stream.end(): the H2 stream stays
+			// half-open, so the transport's frame loop never sees a stream
+			// close. Without the fix the client hangs waiting for one.
+			return;
+		}
+
+		if (scenario.kind === "connect-clean-end-half-open") {
+			stream.write(frameConnectMessage(Buffer.from("{}", "utf8"), CONNECT_END_STREAM_FLAG));
+			// The end envelope must settle without waiting for this half-open stream.
 			return;
 		}
 
@@ -359,6 +416,37 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(result.errorMessage).toContain("Connect error unavailable: post-turn connect failure");
 	});
 
+	it("settles promptly on an error end frame even when the stream stays half-open", async () => {
+		// The server sends a Connect end-of-stream envelope carrying an error
+		// after turnEnded, then deliberately keeps the H2 stream half-open
+		// (no `stream.end()`). Without the fix, the provider's frame loop
+		// continues past the error end frame and waits for a stream close
+		// that never arrives — the client hangs indefinitely. The error end
+		// frame must settle the attempt immediately, surfacing the same
+		// terminal error as a closed-stream end frame.
+		scenario = { kind: "connect-error-half-open" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("Connect error unavailable: half-open connect failure");
+	});
+
+	it("settles promptly on a clean end frame even when the stream stays half-open", async () => {
+		// The server sends turnEnded and a clean end envelope, but never closes HTTP/2.
+		scenario = { kind: "connect-clean-end-half-open" };
+		const baseUrl = await startServer();
+		const started = Date.now();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		// Completion must not wait for the 5s heartbeat or the test timeout.
+		expect(Date.now() - started).toBeLessThan(2500);
+		expect(eventTypes).toEqual(["start", "text_start", "text_delta", "text_end", "done"]);
+		expect(result.stopReason).toBe("stop");
+		expect(result.errorMessage).toBeUndefined();
+	});
+
 	it("surfaces standard Connect detail values without changing recovery classification", async () => {
 		scenario = { kind: "connect-detailed-error-after-turn" };
 		const baseUrl = await startServer();
@@ -386,6 +474,28 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("gRPC error 13: post-turn trailer failure");
+	});
+
+	it("surfaces nonzero gRPC trailers that trail a clean end envelope", async () => {
+		scenario = { kind: "grpc-trailer-after-clean-end" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("gRPC error 13: post-envelope trailer failure");
+	});
+
+	it("rejects when trailing bytes after a clean end cause the trailers promise to fail during grace", async () => {
+		scenario = { kind: "trailing-bytes-after-clean-end" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(eventTypes).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toMatch(/bytes after end-of-stream|trailing|envelope|protocol/i);
 	});
 
 	it("rejects when the stream ends before turnEnded", async () => {

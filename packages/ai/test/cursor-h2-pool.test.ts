@@ -1,0 +1,1409 @@
+import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import * as http2 from "node:http2";
+import * as net from "node:net";
+import * as path from "node:path";
+import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import {
+	AgentServerMessageSchema,
+	InteractionUpdateSchema,
+	TextDeltaUpdateSchema,
+	TurnEndedUpdateSchema,
+} from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
+import { streamCursor } from "../src/providers/cursor";
+import type { CursorH2AcquireOptions, CursorH2Acquisition } from "../src/providers/cursor/h2-pool";
+import {
+	__cursorH2ConnectingSnapshot,
+	__cursorH2DrainingSnapshot,
+	__cursorH2PoolSnapshot,
+	__setCursorH2EstablishBodyGate,
+	__setCursorH2FreshSessionHook,
+	__setCursorH2HandshakeTimeoutMs,
+	acquireCursorH2,
+	disposeCursorH2Pool,
+} from "../src/providers/cursor/h2-pool";
+import type { Context, Model } from "../src/types";
+
+/**
+ * Pool fixtures run against a real loopback `http2.createServer()` so session
+ * reuse, GOAWAY drain, reservation-before-connect, and connect classification
+ * exercise the actual http2 stack rather than a mock (pattern:
+ * cursor-terminal-error.test.ts).
+ */
+
+const RUN_PATH = "/agent.v1.AgentService/Run";
+
+const servers: http2.Http2Server[] = [];
+const sessions = new Set<http2.Http2Session>();
+let totalSessions = 0;
+let streamCount = 0;
+let serveStream: ((stream: http2.ServerHttp2Stream) => void) | undefined;
+
+async function startServer(): Promise<string> {
+	const srv = http2.createServer();
+	servers.push(srv);
+	srv.on("session", session => {
+		totalSessions++;
+		sessions.add(session);
+		session.on("close", () => sessions.delete(session));
+	});
+	srv.on("stream", (stream: http2.ServerHttp2Stream) => {
+		streamCount++;
+		stream.on("data", () => {});
+		serveStream?.(stream);
+	});
+	const listening = Promise.withResolvers<void>();
+	srv.once("error", listening.reject);
+	srv.listen(0, "127.0.0.1", listening.resolve);
+	await listening.promise;
+	const address = srv.address();
+	if (!address || typeof address === "string") {
+		throw new Error("expected fixture http2 server to bind a tcp port");
+	}
+	return `http://127.0.0.1:${address.port}`;
+}
+
+function respondOk(stream: http2.ServerHttp2Stream): void {
+	stream.respond({ ":status": 200 });
+	stream.write(Buffer.from("ok"));
+	stream.end();
+}
+
+async function stopServer(): Promise<void> {
+	for (const session of sessions) {
+		session.destroy();
+	}
+	sessions.clear();
+	const closing = servers.splice(0);
+	await Promise.all(
+		closing.map(srv => {
+			const closed = Promise.withResolvers<void>();
+			srv.close(() => closed.resolve());
+			return closed.promise;
+		}),
+	);
+}
+
+function poolOutstanding(): number {
+	return __cursorH2PoolSnapshot().reduce((n, entry) => n + entry.outstanding, 0);
+}
+
+function poolIdleUnreferenced(): boolean {
+	const snapshot = __cursorH2PoolSnapshot();
+	return snapshot.length > 0 && snapshot.every(entry => entry.outstanding === 0 && !entry.referenced);
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 3000): Promise<void> {
+	const deadline = Date.now() + timeoutMs;
+	while (!predicate()) {
+		if (Date.now() > deadline) throw new Error("waitFor timed out");
+		await Bun.sleep(5);
+	}
+}
+
+/** Returns a loopback port that is currently free (connect will be refused). */
+async function freeClosedPort(): Promise<number> {
+	const srv = net.createServer();
+	const listening = Promise.withResolvers<void>();
+	srv.once("error", listening.reject);
+	srv.listen(0, "127.0.0.1", () => listening.resolve());
+	await listening.promise;
+	const address = srv.address();
+	const port = typeof address === "object" && address !== null ? address.port : 0;
+	const closed = Promise.withResolvers<void>();
+	srv.close(error => (error ? closed.reject(error) : closed.resolve()));
+	await closed.promise;
+	return port;
+}
+
+function runArgs(baseUrl: string): CursorH2AcquireOptions {
+	return { baseUrl, requestPath: RUN_PATH, headers: {}, provider: "cursor" };
+}
+
+/** Expected pool key for a loopback acquisition: a JSON tuple of (baseUrl, null, "cursor"). */
+function poolKeyFor(baseUrl: string): string {
+	return JSON.stringify([baseUrl, null, "cursor"]);
+}
+
+/**
+ * Child scenario for the pool-key isolation test, embedded instead of a
+ * fixtures/ file because that directory is outside this slice's file
+ * ownership. Spawned via `bun -e`; `__POOL_PATH__` is replaced with the
+ * absolute path of h2-pool.ts. The proxy env vars are process-global, so the
+ * mutations happen here instead of the parent test runner.
+ *
+ * Asserts, over ONE relayed TLS/h2 backend:
+ * - legacy pipe-joined keys were IDENTICAL for the collide-a/collide-b pair
+ *   (the '|' shuffled between baseUrl and proxyUrl) and for the
+ *   collide-c/collide-d pair (no provider dimension) — the collision premise;
+ * - the JSON-tuple keys are distinct per (baseUrl, proxyUrl, provider) triple;
+ * - each snapshot key parses back to exactly its input triple;
+ * - a repeated triple reuses its entry (outstanding 2), not a new session.
+ */
+const KEY_ISOLATION_CHILD_SCRIPT = `
+const RUN_PATH = '/agent.v1.AgentService/Run';
+const pool = await import(__POOL_PATH__);
+const child_process = await import('node:child_process');
+const fs = await import('node:fs');
+const os = await import('node:os');
+const pathMod = await import('node:path');
+const net = await import('node:net');
+const http2 = await import('node:http2');
+const tmpDir = fs.mkdtempSync(pathMod.join(os.tmpdir(), 'h2-key-collision-'));
+const keyPath = pathMod.join(tmpDir, 'key.pem');
+const certPath = pathMod.join(tmpDir, 'cert.pem');
+child_process.execSync('openssl req -x509 -newkey rsa:2048 -keyout ' + keyPath + ' -out ' + certPath + ' -days 1 -nodes -subj /CN=cursor.example.invalid 2>/dev/null');
+const key = fs.readFileSync(keyPath, 'utf8');
+const cert = fs.readFileSync(certPath, 'utf8');
+let serverSessions = 0;
+const h2srv = http2.createSecureServer({ key: key, cert: cert });
+h2srv.on('session', () => { serverSessions += 1; });
+h2srv.on('stream', stream => {
+	stream.on('data', () => {});
+	stream.respond({ ':status': 200 });
+	stream.write('ok');
+	stream.end();
+});
+const listening = Promise.withResolvers();
+h2srv.once('error', listening.reject);
+h2srv.listen(0, '127.0.0.1', listening.resolve);
+await listening.promise;
+const h2Port = h2srv.address().port;
+const proxy = net.createServer(clientSock => {
+	let buf = Buffer.alloc(0);
+	clientSock.on('data', chunk => {
+		buf = Buffer.concat([buf, chunk]);
+		const idx = buf.toString('binary').indexOf('\\r\\n\\r\\n');
+		if (idx === -1) return;
+		clientSock.removeAllListeners('data');
+		clientSock.write('HTTP/1.1 200 Connection Established\\r\\n\\r\\n');
+		const backend = net.connect({ host: '127.0.0.1', port: h2Port });
+		backend.on('error', () => clientSock.destroy());
+		clientSock.on('error', () => backend.destroy());
+		backend.on('connect', () => {
+			const leftover = buf.subarray(idx + 4);
+			if (leftover.length > 0) backend.write(leftover);
+			backend.pipe(clientSock);
+			clientSock.pipe(backend);
+		});
+		backend.on('close', () => clientSock.destroy());
+		clientSock.on('close', () => backend.destroy());
+	});
+	clientSock.on('error', () => {});
+});
+const proxyListening = Promise.withResolvers();
+proxy.once('error', proxyListening.reject);
+proxy.listen(0, '127.0.0.1', proxyListening.resolve);
+await proxyListening.promise;
+const proxyPort = proxy.address().port;
+const envKey = p => 'PI_PROXY_' + p.toUpperCase().replace(/[^A-Z0-9]/g, '_');
+const proxy1 = 'http://127.0.0.1:' + proxyPort + '/x';
+const proxy2 = 'http://127.0.0.1:' + proxyPort + '/x|http://127.0.0.1:' + proxyPort + '/x';
+Bun.env[envKey('cursor-h2-collide-a')] = proxy1;
+Bun.env[envKey('cursor-h2-collide-b')] = proxy2;
+Bun.env[envKey('cursor-h2-collide-c')] = proxy1;
+Bun.env[envKey('cursor-h2-collide-d')] = proxy1;
+Bun.env.NO_PROXY = '';
+Bun.env.no_proxy = '';
+Bun.env.NODE_TLS_REJECT_UNAUTHORIZED = '0';
+const baseA = 'https://cursor.example.invalid/a|http://127.0.0.1:' + proxyPort + '/x';
+const baseB = 'https://cursor.example.invalid/a';
+const baseC = 'https://cursor.example.invalid/c';
+if (baseA + '|' + proxy1 !== baseB + '|' + proxy2) {
+	throw new Error('premise broken: legacy keyA differs from legacy keyB');
+}
+const leases = [];
+async function acquire(provider, baseUrl) {
+	const result = await pool.acquireCursorH2({ baseUrl: baseUrl, requestPath: RUN_PATH, headers: {}, provider: provider });
+	if (!result.ok) throw new Error('acquire failed for ' + provider + ': ' + JSON.stringify(result.unavailable));
+	leases.push(result.lease);
+}
+await acquire('cursor-h2-collide-a', baseA);
+await acquire('cursor-h2-collide-b', baseB);
+await acquire('cursor-h2-collide-c', baseC);
+await acquire('cursor-h2-collide-d', baseC);
+// Same triple again: must reuse its pooled entry, not open a session.
+await acquire('cursor-h2-collide-c', baseC);
+const deadline = Date.now() + 5000;
+while (serverSessions < 4 && Date.now() < deadline) await Bun.sleep(5);
+const snapshot = pool.__cursorH2PoolSnapshot();
+const keys = snapshot.map(entry => entry.key);
+const triples = [
+	[baseA, proxy1, 'cursor-h2-collide-a'],
+	[baseB, proxy2, 'cursor-h2-collide-b'],
+	[baseC, proxy1, 'cursor-h2-collide-c'],
+	[baseC, proxy1, 'cursor-h2-collide-d'],
+];
+const tuplesMatch = triples.every(triple => keys.includes(JSON.stringify(triple)));
+const collideCEntry = snapshot.find(entry => entry.key === JSON.stringify([baseC, proxy1, 'cursor-h2-collide-c']));
+const collideCOutstanding = collideCEntry ? collideCEntry.outstanding : -1;
+const result = { serverSessions: serverSessions, keys: keys, distinct: new Set(keys).size, tuplesMatch: tuplesMatch, collideCOutstanding: collideCOutstanding };
+process.stdout.write(JSON.stringify(result) + '\\n');
+const passed = keys.length === 4 && new Set(keys).size === 4 && tuplesMatch && serverSessions === 4 && collideCOutstanding === 2;
+if (!passed) {
+	process.stderr.write('KEY ISOLATION REGRESSION\\n');
+	process.exitCode = 1;
+}
+for (const lease of leases) lease.release();
+await pool.disposeCursorH2Pool();
+h2srv.close();
+proxy.close();
+fs.rmSync(tmpDir, { recursive: true, force: true });
+`;
+
+beforeEach(async () => {
+	totalSessions = 0;
+	streamCount = 0;
+	serveStream = undefined;
+	await disposeCursorH2Pool();
+});
+
+afterEach(async () => {
+	await stopServer();
+	await disposeCursorH2Pool();
+	__setCursorH2HandshakeTimeoutMs(undefined);
+});
+
+describe("cursor HTTP/2 session pool", () => {
+	it("reuses one pooled session for two sequential acquisitions on the same baseUrl", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+
+		const first = await acquireCursorH2(runArgs(baseUrl));
+		expect(first.ok).toBe(true);
+		if (!first.ok) return;
+
+		const second = await acquireCursorH2(runArgs(baseUrl));
+		expect(second.ok).toBe(true);
+		if (!second.ok) return;
+
+		// Distinct request streams on the SAME underlying session.
+		expect(second.lease.request).not.toBe(first.lease.request);
+		await waitFor(() => streamCount >= 2);
+		expect(totalSessions).toBe(1);
+
+		first.lease.release();
+		second.lease.release();
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("caps retained sessions and evicts the oldest idle entry beyond the cap", async () => {
+		serveStream = respondOk;
+		// Nine distinct baseUrls, each acquired and released inside the idle
+		// window: age-based eviction alone would retain all nine sessions.
+		const urls: string[] = [];
+		for (let index = 0; index < 9; index++) urls.push(await startServer());
+		for (const url of urls) {
+			const acquired = await acquireCursorH2(runArgs(url));
+			expect(acquired.ok).toBe(true);
+			if (!acquired.ok) return;
+			acquired.lease.release();
+		}
+		const snapshot = __cursorH2PoolSnapshot();
+		expect(snapshot).toHaveLength(8);
+		// The first-established session is the oldest idle entry and is the
+		// one evicted; Map iteration order breaks Date.now() ties the same way.
+		expect(snapshot.map(entry => entry.key)).not.toContain(poolKeyFor(urls[0]));
+	});
+
+	it("never evicts the ninth session before its first lease when older entries are leased", async () => {
+		serveStream = respondOk;
+		// Hold eight leases, then publish a ninth origin. Before acquire returns,
+		// that new entry is the only zero-lease candidate; cap enforcement must
+		// protect it long enough to issue its first lease.
+		const urls: string[] = [];
+		for (let index = 0; index < 9; index++) urls.push(await startServer());
+		const leases = [];
+		for (const url of urls) {
+			const acquired = await acquireCursorH2(runArgs(url));
+			expect(acquired.ok).toBe(true);
+			if (!acquired.ok) return;
+			leases.push(acquired.lease);
+		}
+		const overCap = __cursorH2PoolSnapshot();
+		expect(overCap).toHaveLength(9);
+		expect(overCap.map(entry => entry.key)).toContain(poolKeyFor(urls[8]));
+		expect(overCap.find(entry => entry.key === poolKeyFor(urls[8]))?.outstanding).toBe(1);
+
+		// Once an older entry becomes idle it is eligible, so the deferred cap
+		// enforcement removes that older victim without touching the leased ninth.
+		leases[0]?.release();
+		const settled = __cursorH2PoolSnapshot();
+		expect(settled).toHaveLength(8);
+		expect(settled.map(entry => entry.key)).not.toContain(poolKeyFor(urls[0]));
+		expect(settled.map(entry => entry.key)).toContain(poolKeyFor(urls[8]));
+		for (const lease of leases.slice(1)) lease.release();
+	});
+
+	it("refs the idle session for a lease, unrefs at zero, and re-refs on the next acquire", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+
+		const first = await acquireCursorH2(runArgs(baseUrl));
+		expect(first.ok).toBe(true);
+		if (!first.ok) return;
+		expect(__cursorH2PoolSnapshot()).toEqual(
+			expect.arrayContaining([expect.objectContaining({ outstanding: 1, draining: false, referenced: true })]),
+		);
+
+		first.lease.release();
+		expect(poolIdleUnreferenced()).toBe(true);
+
+		const second = await acquireCursorH2(runArgs(baseUrl));
+		expect(second.ok).toBe(true);
+		if (!second.ok) return;
+		expect(totalSessions).toBe(1);
+		expect(__cursorH2PoolSnapshot()).toEqual(
+			expect.arrayContaining([expect.objectContaining({ outstanding: 1, draining: false, referenced: true })]),
+		);
+		second.lease.release();
+		expect(poolIdleUnreferenced()).toBe(true);
+	});
+
+	it("shares one in-flight connect across concurrent acquisitions on a fresh baseUrl", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+
+		// Both acquisitions race the same empty pool; the reservation
+		// (reserve-before-connect) makes the second await the first's in-flight
+		// connect instead of opening a duplicate session.
+		const [a, b] = await Promise.all([acquireCursorH2(runArgs(baseUrl)), acquireCursorH2(runArgs(baseUrl))]);
+		expect(a.ok).toBe(true);
+		expect(b.ok).toBe(true);
+		if (!a.ok || !b.ok) return;
+
+		expect(a.lease.request).not.toBe(b.lease.request);
+		await waitFor(() => streamCount >= 2);
+		expect(totalSessions).toBe(1);
+
+		a.lease.release();
+		b.lease.release();
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("drains an in-flight lease on GOAWAY and opens a fresh session on the next acquire", async () => {
+		const baseUrl = await startServer();
+		let goawaySent = false;
+		const requestEnded = Promise.withResolvers<void>();
+		serveStream = stream => {
+			respondOk(stream);
+			const session = stream.session;
+			if (!goawaySent && session) {
+				goawaySent = true;
+				session.goaway();
+			}
+		};
+
+		const first = await acquireCursorH2(runArgs(baseUrl));
+		expect(first.ok).toBe(true);
+		if (!first.ok) return;
+		// A real transport consumes the response to start the stream flowing;
+		// without a data/response consumer Node's http2 client never emits `end`.
+		first.lease.request.on("data", () => {});
+		first.lease.request.once("end", () => requestEnded.resolve());
+
+		// The in-flight lease completes even though the session received GOAWAY
+		// mid-stream.
+		await requestEnded.promise;
+		// GOAWAY must drop the entry from the reusable pool and retain it for
+		// disposal while its lease is still outstanding.
+		await waitFor(() => __cursorH2DrainingSnapshot().length === 1);
+		expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+		first.lease.release();
+		expect(poolOutstanding()).toBe(0);
+
+		// A draining session is never reused: the next acquire opens a fresh one.
+		const second = await acquireCursorH2(runArgs(baseUrl));
+		expect(second.ok).toBe(true);
+		if (!second.ok) return;
+		await waitFor(() => streamCount >= 2);
+		await waitFor(() => totalSessions === 2);
+		second.lease.release();
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("keeps a GOAWAY-drained leased session reachable to disposal after a replacement takes the key", async () => {
+		const baseUrl = await startServer();
+		let goawaySent = false;
+		serveStream = stream => {
+			respondOk(stream);
+			const session = stream.session;
+			if (!goawaySent && session) {
+				goawaySent = true;
+				session.goaway();
+			}
+		};
+
+		const first = await acquireCursorH2(runArgs(baseUrl));
+		expect(first.ok).toBe(true);
+		if (!first.ok) return;
+		const firstSession = first.lease.request.session;
+		if (!firstSession) throw new Error("expected the leased request to expose its session");
+		// A real transport consumes the response so the client observes GOAWAY
+		// while the lease is still in flight.
+		first.lease.request.on("data", () => {});
+
+		// GOAWAY mid-lease: the entry leaves the reusable pool but stays
+		// tracked and alive until its lease finishes.
+		await waitFor(() => __cursorH2DrainingSnapshot().length === 1);
+		expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+		expect(firstSession.destroyed).toBe(false);
+
+		// The next acquire replaces the drained entry with a fresh session.
+		const second = await acquireCursorH2(runArgs(baseUrl));
+		expect(second.ok).toBe(true);
+		if (!second.ok) return;
+		const secondSession = second.lease.request.session;
+		if (!secondSession) throw new Error("expected the leased request to expose its session");
+		await waitFor(() => totalSessions === 2);
+		// Replacement did not orphan the still-leased drained session: it is
+		// neither destroyed nor dropped from the draining set.
+		expect(firstSession.destroyed).toBe(false);
+		expect(__cursorH2DrainingSnapshot().map(entry => entry.outstanding)).toEqual([1]);
+
+		// Disposal reaches the replaced session even though it is not in the
+		// pool, and the post-disposal releases destroy nothing twice.
+		await disposeCursorH2Pool();
+		expect(firstSession.destroyed).toBe(true);
+		expect(secondSession.destroyed).toBe(true);
+		expect(__cursorH2DrainingSnapshot()).toHaveLength(0);
+		first.lease.release();
+		second.lease.release();
+		expect(__cursorH2DrainingSnapshot()).toHaveLength(0);
+		expect(poolOutstanding()).toBe(0);
+		await waitFor(() => sessions.size === 0);
+	});
+
+	it("destroys a gracefully closed session that still has an active stream and waits for its close", async () => {
+		const baseUrl = await startServer();
+		serveStream = stream => {
+			stream.on("data", () => {});
+		};
+
+		const acquired = await acquireCursorH2(runArgs(baseUrl));
+		expect(acquired.ok).toBe(true);
+		if (!acquired.ok) return;
+		const session = acquired.lease.request.session;
+		if (!session) throw new Error("expected the leased request to expose its session");
+
+		// Graceful close flips `closed` but not `destroyed` while the active
+		// stream keeps the session alive.
+		await waitFor(() => streamCount >= 1);
+		session.close();
+		await waitFor(() => session.closed);
+		expect(session.destroyed).toBe(false);
+
+		await disposeCursorH2Pool();
+		expect(session.destroyed).toBe(true);
+		await waitFor(() => acquired.lease.request.closed);
+		await waitFor(() => sessions.size === 0);
+	});
+
+	it("disposal awaits the session's terminal close and triggers destroy exactly once", async () => {
+		const baseUrl = await startServer();
+		serveStream = stream => {
+			stream.on("data", () => {});
+		};
+
+		const acquired = await acquireCursorH2(runArgs(baseUrl));
+		expect(acquired.ok).toBe(true);
+		if (!acquired.ok) return;
+		const session = acquired.lease.request.session;
+		if (!session) throw new Error("expected the leased request to expose its session");
+
+		// Withhold the terminal `close` event: destruction may start, but
+		// disposal must not resolve until the real close fires. The old
+		// ordering (destroy first, then a closeSession whose `destroyed`
+		// early-return skipped the wait) resolved here without ever awaiting
+		// the session's close.
+		const realEmit = session.emit.bind(session);
+		let releaseClose = false;
+		let withheldEmit: (() => void) | undefined;
+		session.emit = ((event: string | symbol, ...args: never[]) => {
+			if (event === "close" && !releaseClose) {
+				withheldEmit = () => realEmit(event, ...args);
+				return true;
+			}
+			return realEmit(event, ...args);
+		}) as typeof session.emit;
+
+		// The pool must initiate teardown synchronously when disposal starts.
+		// The platform may make additional idempotent destroy() calls while
+		// finishing the socket; those are allowed, but a lease release after
+		// disposal must not add another call.
+		let destroyCalls = 0;
+		const realDestroy = session.destroy.bind(session);
+		session.destroy = (() => {
+			destroyCalls++;
+			return realDestroy();
+		}) as typeof session.destroy;
+
+		let closeObserved = false;
+		session.once("close", () => {
+			closeObserved = true;
+		});
+
+		// The assertion is a NEGATIVE observation: disposal must NOT resolve
+		// while close is withheld. Real clock is required — the withheld
+		// `close` is a real event on a real session, which fake timers
+		// cannot produce; the sleep only bounds how long we observe.
+		const disposing = disposeCursorH2Pool();
+		expect(destroyCalls).toBe(1);
+		let state = "pending";
+		await Promise.race([
+			disposing.then(() => {
+				state = "resolved";
+			}),
+			Bun.sleep(60),
+		]);
+		expect(state).toBe("pending");
+		// Destruction has begun — only the close await is still pending.
+		expect(session.destroyed).toBe(true);
+		expect(closeObserved).toBe(false);
+
+		releaseClose = true;
+		withheldEmit?.();
+		await disposing;
+		expect(closeObserved).toBe(true);
+		const destroyCallsBeforeRelease = destroyCalls;
+		// A post-disposal release must not trigger a second destruction.
+		acquired.lease.release();
+		expect(destroyCalls).toBe(destroyCallsBeforeRelease);
+	});
+
+	it("rejects a pre-aborted acquisition instead of leasing, and leaks nothing", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+
+		// Establish a pooled session first, so the aborted acquisition below would
+		// otherwise take the synchronous pooled fast path.
+		const warm = await acquireCursorH2(runArgs(baseUrl));
+		expect(warm.ok).toBe(true);
+		if (!warm.ok) return;
+		warm.lease.release();
+		expect(poolOutstanding()).toBe(0);
+
+		// An abort that arrives mid-wait already rejects (joinEstablishment's
+		// listener), so a pre-aborted signal rejects too rather than handing back
+		// a lease whose request is already destroyed. The invariant either way is
+		// that no lease survives the abort.
+		const controller = new AbortController();
+		controller.abort();
+		await expect(acquireCursorH2({ ...runArgs(baseUrl), signal: controller.signal })).rejects.toThrow();
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("classifies an unreachable proxy tunnel as connect-tunnel unavailability, not a throw", async () => {
+		// The proxy env vars are process-global, so the scenario runs in a child
+		// process (pattern: cursor-proxy-env.test.ts) instead of mutating
+		// Bun.env underneath concurrent test files.
+		const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/cursor-h2-proxy-env.ts")], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode).toBe(0);
+		expect(stderr).toBe("");
+		const result = JSON.parse(stdout) as { ok: boolean; reason?: string };
+		expect(result.ok).toBe(false);
+		expect(result.reason).toBe("connect-tunnel");
+	}, 60_000);
+
+	it("keeps delimiter-colliding routes and distinct providers on separate sessions", async () => {
+		// Proxy env vars are process-global, so the scenario runs in a child
+		// process (pattern above). The child asserts the collision premise —
+		// the legacy pipe-joined keys for both pairs were IDENTICAL — and that
+		// the JSON-tuple keys route each triple to its own session.
+		const poolPath = path.resolve(import.meta.dir, "../src/providers/cursor/h2-pool.ts");
+		const script = KEY_ISOLATION_CHILD_SCRIPT.replace("__POOL_PATH__", JSON.stringify(poolPath));
+		const child = Bun.spawn([process.execPath, "-e", script], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			env: { ...process.env, NODE_NO_WARNINGS: "1" },
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(stderr).toBe("");
+		expect(exitCode).toBe(0);
+		const result = JSON.parse(stdout) as {
+			serverSessions: number;
+			keys: string[];
+			distinct: number;
+			tuplesMatch: boolean;
+			collideCOutstanding: number;
+		};
+		expect(result.distinct).toBe(4);
+		expect(result.tuplesMatch).toBe(true);
+		expect(result.serverSessions).toBe(4);
+		// Reuse: the second collide-c lease shared its entry instead of
+		// opening a fifth session.
+		expect(result.collideCOutstanding).toBe(2);
+	}, 60_000);
+
+	it("rejects a non-ALPN connect error instead of classifying it as unavailable", async () => {
+		const port = await freeClosedPort();
+		const promise = acquireCursorH2({
+			baseUrl: `http://127.0.0.1:${port}`,
+			requestPath: RUN_PATH,
+			headers: {},
+			provider: "cursor",
+		});
+		await expect(promise).rejects.toBeTruthy();
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("restores the lease count when session.request() throws synchronously", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+
+		const warm = await acquireCursorH2(runArgs(baseUrl));
+		expect(warm.ok).toBe(true);
+		if (!warm.ok) return;
+		const session = warm.lease.request.session as http2.ClientHttp2Session | undefined;
+		warm.lease.release();
+		expect(poolOutstanding()).toBe(0);
+		if (!session) return;
+
+		// Force a synchronous stream-creation failure on the pooled session: the
+		// reserved lease slot must be restored before the error propagates so a
+		// later acquire is not counted twice and the session stays reusable.
+		// Test-only monkeypatch: `request` is a prototype method; shadow it on the
+		// instance to force a synchronous stream-creation error.
+		const requestHost = session as { request: typeof session.request };
+		const originalRequest = requestHost.request.bind(session);
+		requestHost.request = () => {
+			throw new Error("forced synchronous request failure");
+		};
+		try {
+			await expect(acquireCursorH2(runArgs(baseUrl))).rejects.toThrow("forced synchronous request failure");
+		} finally {
+			requestHost.request = originalRequest;
+		}
+		expect(poolOutstanding()).toBe(0);
+		expect(poolIdleUnreferenced()).toBe(true);
+		// The pooled session survives the aborted stream creation.
+		const again = await acquireCursorH2(runArgs(baseUrl));
+		expect(again.ok).toBe(true);
+		if (again.ok) {
+			await waitFor(() => streamCount >= 2);
+			again.lease.release();
+		}
+		expect(poolOutstanding()).toBe(0);
+	});
+
+	it("does not deadlock when the fresh session is drained before its first lease", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+		let hookCalls = 0;
+
+		// Simulate a GOAWAY landing between connect and the first lease — a
+		// window a real fixture cannot hit (Node delivers goaway only after the
+		// establishing continuation's microtask has already leased), but exactly
+		// the drained-before-first-lease condition that previously made the retry
+		// re-acquire under its own unsettled reservation and hang forever.
+		__setCursorH2FreshSessionHook((_key, entry) => {
+			hookCalls++;
+			if (!entry) return;
+			entry.draining = true;
+			entry.session.destroy();
+		});
+		try {
+			// A bounded watchdog so a deadlock regression fails fast instead of
+			// hanging the whole suite. Deterministic clock control cannot model
+			// "never settles", which is what a deadlock is.
+			const result = (await Promise.race([
+				acquireCursorH2(runArgs(baseUrl)),
+				(() => {
+					const { promise, reject } = Promise.withResolvers<never>();
+					setTimeout(
+						() => reject(new Error("deadlock: acquire hung after fresh-session drain before first lease")),
+						3000,
+					);
+					return promise;
+				})(),
+			])) as CursorH2Acquisition;
+
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			// The retry built a fresh session to replace the drained one.
+			await waitFor(() => totalSessions >= 2);
+			result.lease.release();
+			expect(poolOutstanding()).toBe(0);
+		} finally {
+			__setCursorH2FreshSessionHook(undefined);
+		}
+		expect(hookCalls).toBe(1);
+	});
+
+	it("dispose cancels a stalled in-flight connect instead of awaiting it forever", async () => {
+		// A TCP sink that accepts but never performs the h2 handshake keeps the
+		// client's establish in-flight forever. Disposal must terminate that
+		// establishment via its cancellation handle — not by this test destroying
+		// the socket — and settle within a bounded window.
+		let stalledSocket: net.Socket | undefined;
+		const sink = net.createServer(sock => {
+			stalledSocket = sock;
+			// Flow the socket so the peer's teardown (FIN / close) is processed
+			// and `destroyed` flips true — on a paused socket Node never advances
+			// the stream state and the assertion below would be a false negative.
+			sock.resume();
+		});
+		const listening = Promise.withResolvers<void>();
+		sink.once("error", listening.reject);
+		sink.listen(0, "127.0.0.1", () => listening.resolve());
+		await listening.promise;
+		const address = sink.address();
+		const port = typeof address === "object" && address !== null ? address.port : 0;
+		const baseUrl = `http://127.0.0.1:${port}`;
+
+		try {
+			// Wait for the real event that proves the establish is in-flight: the
+			// client's TCP connection reached the sink.
+			const acquirer = acquireCursorH2(runArgs(baseUrl)).catch(e => e);
+			await waitFor(() => stalledSocket !== undefined, 2000);
+			// The socket is still open — disposal, not this test, must tear it down.
+			expect(stalledSocket?.destroyed).toBe(false);
+
+			// Disposal must cancel the stalled establishment and resolve within a
+			// bounded window; it must NOT hang until the socket is destroyed from
+			// outside.
+			const disposed = await Promise.race([
+				disposeCursorH2Pool().then(() => true),
+				(() => {
+					const { promise, resolve } = Promise.withResolvers<false>();
+					setTimeout(() => resolve(false), 3000);
+					return promise;
+				})(),
+			]);
+			expect(disposed).toBe(true);
+
+			// Disposal's cancellation destroyed the stalled socket as part of
+			// terminating the establishment.
+			await waitFor(() => stalledSocket?.destroyed === true, 2000);
+			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+
+			// `acquirer` settles exactly when the establishment does; nothing live
+			// may have been resurrected into the pool in that settlement.
+			await acquirer;
+			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+		} finally {
+			sink.close();
+		}
+	});
+
+	it("dispose tears down a still-resolving proxy tunnel instead of leaving it live", async () => {
+		// The proxy env vars are process-global, so the scenario runs in a child
+		// process (pattern: cursor-proxy-env.test.ts) instead of mutating
+		// Bun.env underneath concurrent test files. The child starts a silent
+		// CONNECT proxy and reports each teardown observation.
+		const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/cursor-h2-proxy-dispose.ts")], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode).toBe(0);
+		expect(stderr).toBe("");
+		const result = JSON.parse(stdout) as {
+			tunnelLiveBeforeDispose: boolean;
+			disposed: boolean;
+			socketDestroyedAfterDispose: boolean;
+			poolEmptyAfterDispose: boolean;
+			poolEmptyAfterAcquirer: boolean;
+		};
+		// The pre-disposal tunnel is live: the peer accepted the CONNECT.
+		expect(result.tunnelLiveBeforeDispose).toBe(true);
+		expect(result.disposed).toBe(true);
+		expect(result.socketDestroyedAfterDispose).toBe(true);
+		expect(result.poolEmptyAfterDispose).toBe(true);
+		expect(result.poolEmptyAfterAcquirer).toBe(true);
+	}, 60_000);
+	it("destroys the tunneled socket when http2.connect throws synchronously after a proxy tunnel succeeds", async () => {
+		// The failure class: the proxy CONNECT + TLS tunnel completes and
+		// negotiates h2, but `http2.connect(baseUrl, { createConnection })`
+		// throws synchronously (e.g. an unsupported URL scheme). At that point
+		// `session` is still undefined — the top-level rejection arm's
+		// `session?.destroy()` is a no-op — and the tunneled TLSSocket is local
+		// to the establishment body with no owner. Pre-fix it leaked: the socket
+		// stayed open, the acquisition rejected, but the proxy socket was never
+		// destroyed. The proxy env vars are process-global, so the scenario runs
+		// in a child process (pattern: cursor-proxy-env.ts).
+		const child = Bun.spawn(
+			[process.execPath, path.join(import.meta.dir, "fixtures/cursor-h2-proxy-sync-throw.ts")],
+			{
+				cwd: path.resolve(import.meta.dir, "../../.."),
+				env: { ...process.env, NODE_NO_WARNINGS: "1" },
+				stdout: "pipe",
+				stderr: "pipe",
+			},
+		);
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		expect(exitCode).toBe(0);
+		expect(stderr).toBe("");
+		const result = JSON.parse(stdout) as {
+			acquisitionRejected: boolean;
+			socketDestroyed: boolean;
+			poolEmptyAfterAcquire: boolean;
+			connectingEmptyAfterAcquire: boolean;
+		};
+		// The acquisition must reject (not hang or resolve with a lease).
+		expect(result.acquisitionRejected).toBe(true);
+		// The tunneled socket must be destroyed — no proxy socket survives the
+		// synchronous setup failure.
+		expect(result.socketDestroyed).toBe(true);
+		// No pool entry or connecting reservation survives.
+		expect(result.poolEmptyAfterAcquire).toBe(true);
+		expect(result.connectingEmptyAfterAcquire).toBe(true);
+	}, 60_000);
+
+	it("dispose does not resolve until the establishment body's done-teardown has fully run", async () => {
+		// Frames the exact audit race: `cancel` rejects the outward acquisition
+		// promise immediately, but the establishment body may still be in flight
+		// and go on to CREATE an http2 session after cancellation, observe `done`,
+		// and destroy it. The gate holds the body suspended immediately before it
+		// creates its session — the window where `cancel` has no session to
+		// destroy — so we can assert disposal has not completed while the body is
+		// still running. Without the establishment-completion await, disposal
+		// resolves the moment cancel rejects and this assertion fails (the body
+		// tears its transiently-created session down a moment later).
+		const baseUrl = await startServer();
+
+		let releaseBody: (() => void) | undefined;
+		const bodyAtGate = Promise.withResolvers<void>();
+		__setCursorH2EstablishBodyGate(() => {
+			bodyAtGate.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			releaseBody = resolve;
+			return promise;
+		});
+
+		try {
+			const acquirer = acquireCursorH2(runArgs(baseUrl)).catch(e => e);
+			// The body reached the gate: it is suspended before creating its
+			// session, so nothing is pooled or connected yet.
+			await bodyAtGate.promise;
+			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+
+			// Disposal starts while the body is still held. It MUST NOT resolve
+			// until the body has created its session, observed `done`, destroyed
+			// it, and fully exited.
+			let disposed = false;
+			const disposing = disposeCursorH2Pool().then(() => {
+				disposed = true;
+			});
+			await Bun.sleep(50);
+			expect(disposed).toBe(false);
+
+			// Release the body: it creates a session, hits `done`, destroys it,
+			// and exits — and only after that teardown may disposal resolve.
+			releaseBody?.();
+			await disposing;
+			expect(disposed).toBe(true);
+
+			// The pre-disposal establishment left nothing live behind: the
+			// session it transiently created (if it reached the fixture) was torn
+			// down as part of the body's done-teardown before disposal returned.
+			await waitFor(() => sessions.size === 0);
+
+			await acquirer;
+			expect(__cursorH2PoolSnapshot()).toHaveLength(0);
+		} finally {
+			__setCursorH2EstablishBodyGate(undefined);
+		}
+	});
+
+	it("rejects a fresh establishment whose first lease throws synchronously, clears the reservation, and leaves the key reusable", async () => {
+		// The failure class: the establishing body's very first `issueLease` (a
+		// fresh establishment — nothing pooled yet) throws synchronously. That is
+		// a top-level body throw the live-arm `settled.resolve()` cannot carry:
+		// pre-fix the rejection arm swallowed it wholesale, so the outward
+		// acquisition stayed pending forever AND the `connecting` reservation
+		// (cleared only when the outward promise settles) remained installed,
+		// hanging every subsequent acquisition for the key.
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+		let injected = false;
+		let pooledSession: http2.ClientHttp2Session | undefined;
+		let restoreRequest: (() => void) | undefined;
+
+		// The fresh-session hook runs synchronously right before the body issues
+		// its first lease. Monkeypatch the just-connected session's `request` to
+		// throw on first call, forcing the synchronous stream-creation failure on
+		// the FIRST-lease path (the pooled-session equivalent is covered by the
+		// "restores the lease count" case above; this is the fresh-establishment
+		// arm that previously never rejected).
+		__setCursorH2FreshSessionHook((_key, entry) => {
+			if (injected || !entry) return;
+			injected = true;
+			pooledSession = entry.session;
+			const session = entry.session as { request: typeof entry.session.request };
+			const originalRequest = session.request.bind(entry.session);
+			session.request = () => {
+				throw new Error("forced synchronous first-lease failure");
+			};
+			restoreRequest = () => {
+				session.request = originalRequest;
+			};
+		});
+
+		try {
+			const first = acquireCursorH2(runArgs(baseUrl));
+			// The acquisition must reject promptly; a bounded watchdog guards the
+			// regression where the error was swallowed and the promise never
+			// settled (no hang in the suite).
+			const verdict = await Promise.race([
+				first.then(
+					() => "resolved",
+					() => "rejected",
+				),
+				(() => {
+					const { promise, resolve } = Promise.withResolvers<string>();
+					setTimeout(() => resolve("hung"), 3000);
+					return promise;
+				})(),
+			]);
+			expect(verdict).toBe("rejected");
+			await expect(first).rejects.toThrow("forced synchronous first-lease failure");
+			expect(injected).toBe(true);
+			// The failed first lease restored its slot; nothing is leaked.
+			expect(poolOutstanding()).toBe(0);
+			expect(poolIdleUnreferenced()).toBe(true);
+
+			// Evict the broken pooled session so the second acquire must go
+			// through the connecting reservation and a FRESH establishment — which
+			// requires the pre-fix leaked reservation to have been cleared. A
+			// stale never-settling reservation would hang this acquire.
+			pooledSession?.destroy();
+			await waitFor(() => __cursorH2PoolSnapshot().length === 0, 2000);
+
+			// The failure is never cached and the key is not poisoned: a second
+			// acquisition for the same key settles and succeeds via a fresh
+			// establishment.
+			const second = await acquireCursorH2(runArgs(baseUrl));
+			expect(second.ok).toBe(true);
+			if (second.ok) {
+				await waitFor(() => streamCount >= 1);
+				second.lease.release();
+			}
+			expect(poolOutstanding()).toBe(0);
+		} finally {
+			__setCursorH2FreshSessionHook(undefined);
+			restoreRequest?.();
+		}
+	});
+
+	it("rejects a stalled h2 handshake when the acquisition signal aborts", async () => {
+		let stalledSocket: net.Socket | undefined;
+		const sink = net.createServer(sock => {
+			stalledSocket = sock;
+			sock.resume();
+		});
+		const listening = Promise.withResolvers<void>();
+		sink.once("error", listening.reject);
+		sink.listen(0, "127.0.0.1", () => listening.resolve());
+		await listening.promise;
+		const address = sink.address();
+		const port = typeof address === "object" && address !== null ? address.port : 0;
+		const baseUrl = `https://127.0.0.1:${port}`;
+		const reason = new Error("stalled-handshake-aborted");
+
+		try {
+			const controller = new AbortController();
+			const acquirer = acquireCursorH2({ ...runArgs(baseUrl), signal: controller.signal });
+			await waitFor(() => stalledSocket !== undefined, 2000);
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters >= 1), 2000);
+			controller.abort(reason);
+			const verdict = await Promise.race([
+				acquirer.then(
+					() => "resolved" as const,
+					(error: unknown) => error,
+				),
+				(() => {
+					const { promise, resolve } = Promise.withResolvers<"hung">();
+					setTimeout(() => resolve("hung"), 3000);
+					return promise;
+				})(),
+			]);
+			expect(verdict).toBe(reason);
+			await waitFor(() => __cursorH2ConnectingSnapshot().length === 0, 2000);
+			const disposed = await Promise.race([
+				disposeCursorH2Pool().then(() => true),
+				(() => {
+					const { promise, resolve } = Promise.withResolvers<false>();
+					setTimeout(() => resolve(false), 3000);
+					return promise;
+				})(),
+			]);
+			expect(disposed).toBe(true);
+		} finally {
+			sink.close();
+		}
+	});
+
+	it("does not cancel a shared stalled connect until the last waiter aborts", async () => {
+		let stalledSocket: net.Socket | undefined;
+		const sink = net.createServer(sock => {
+			stalledSocket = sock;
+			sock.resume();
+		});
+		const listening = Promise.withResolvers<void>();
+		sink.once("error", listening.reject);
+		sink.listen(0, "127.0.0.1", () => listening.resolve());
+		await listening.promise;
+		const address = sink.address();
+		const port = typeof address === "object" && address !== null ? address.port : 0;
+		const baseUrl = `https://127.0.0.1:${port}`;
+
+		try {
+			const firstController = new AbortController();
+			const secondController = new AbortController();
+			let firstSettled = false;
+			let secondSettled = false;
+			const first = acquireCursorH2({ ...runArgs(baseUrl), signal: firstController.signal }).then(
+				() => {
+					firstSettled = true;
+					return "resolved" as const;
+				},
+				(error: unknown) => {
+					firstSettled = true;
+					return error;
+				},
+			);
+			await waitFor(() => stalledSocket !== undefined, 2000);
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters >= 1), 2000);
+			const second = acquireCursorH2({ ...runArgs(baseUrl), signal: secondController.signal }).then(
+				() => {
+					secondSettled = true;
+					return "resolved" as const;
+				},
+				(error: unknown) => {
+					secondSettled = true;
+					return error;
+				},
+			);
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters === 2), 2000);
+
+			firstController.abort(new Error("first-waiter-aborted"));
+			expect(await first).toEqual(expect.objectContaining({ message: "first-waiter-aborted" }));
+			expect(firstSettled).toBe(true);
+			expect(secondSettled).toBe(false);
+			expect(stalledSocket?.destroyed).toBe(false);
+			expect(__cursorH2ConnectingSnapshot().some(entry => entry.waiters === 1)).toBe(true);
+
+			secondController.abort(new Error("last-waiter-aborted"));
+			expect(await second).toEqual(expect.objectContaining({ message: "last-waiter-aborted" }));
+			expect(secondSettled).toBe(true);
+			await waitFor(() => __cursorH2ConnectingSnapshot().length === 0, 2000);
+		} finally {
+			sink.close();
+		}
+	});
+
+	it("keeps the owner's establishment lease writable after a joiner aborts during shared connect", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+		const bodyAtGate = Promise.withResolvers<void>();
+		let releaseBody: (() => void) | undefined;
+		__setCursorH2EstablishBodyGate(() => {
+			bodyAtGate.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			releaseBody = resolve;
+			return promise;
+		});
+		try {
+			const owner = acquireCursorH2(runArgs(baseUrl));
+			await bodyAtGate.promise;
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters >= 1), 2000);
+			const joinerController = new AbortController();
+			const joiner = acquireCursorH2({ ...runArgs(baseUrl), signal: joinerController.signal });
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters === 2), 2000);
+
+			joinerController.abort(new Error("joiner-aborted-during-establish"));
+			await expect(joiner).rejects.toMatchObject({ message: "joiner-aborted-during-establish" });
+			expect(__cursorH2ConnectingSnapshot().some(entry => entry.waiters === 1)).toBe(true);
+
+			releaseBody?.();
+			const result = await owner;
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(result.lease.request.destroyed).toBe(false);
+			expect(result.lease.request.writable).toBe(true);
+			const wrote = result.lease.request.write(Buffer.from("owner-lease-still-live"));
+			expect(wrote).toBe(true);
+			await waitFor(() => streamCount >= 1);
+			result.lease.release();
+			expect(poolOutstanding()).toBe(0);
+		} finally {
+			__setCursorH2EstablishBodyGate(undefined);
+		}
+	});
+
+	it("retries from an abort handler while the canceled establishment is still settling", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+		const bodyAtGate = Promise.withResolvers<void>();
+		let releaseBody: (() => void) | undefined;
+		__setCursorH2EstablishBodyGate(() => {
+			bodyAtGate.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			releaseBody = resolve;
+			return promise;
+		});
+		try {
+			const controller = new AbortController();
+			const first = acquireCursorH2({ ...runArgs(baseUrl), signal: controller.signal });
+			await bodyAtGate.promise;
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters >= 1), 2000);
+
+			let retry: Promise<CursorH2Acquisition> | undefined;
+			controller.signal.addEventListener(
+				"abort",
+				() => {
+					retry = acquireCursorH2(runArgs(baseUrl));
+				},
+				{ once: true },
+			);
+			controller.abort(new Error("last-waiter-retried"));
+			await expect(first).rejects.toMatchObject({ message: "last-waiter-retried" });
+			expect(retry).toBeDefined();
+			// The first establishment is still gated, so this retry cannot have
+			// joined its rejected reservation; it must lease a replacement session.
+			const result = await retry;
+			expect(result?.ok).toBe(true);
+			if (!result?.ok) return;
+			expect(result.lease.request.destroyed).toBe(false);
+			expect(result.lease.request.writable).toBe(true);
+			expect(result.lease.request.write(Buffer.from("retry-after-cancel"))).toBe(true);
+			await waitFor(() => streamCount >= 1);
+			result.lease.release();
+			expect(poolOutstanding()).toBe(0);
+		} finally {
+			releaseBody?.();
+			__setCursorH2EstablishBodyGate(undefined);
+		}
+	});
+
+	it("issues exactly one Run stream for a live joiner after the reservation owner aborts", async () => {
+		const baseUrl = await startServer();
+		const received: Buffer[] = [];
+		serveStream = stream => {
+			stream.on("data", (chunk: Buffer) => received.push(chunk));
+			respondOk(stream);
+		};
+		const bodyAtGate = Promise.withResolvers<void>();
+		let releaseBody: (() => void) | undefined;
+		__setCursorH2EstablishBodyGate(() => {
+			bodyAtGate.resolve();
+			const { promise, resolve } = Promise.withResolvers<void>();
+			releaseBody = resolve;
+			return promise;
+		});
+		try {
+			const ownerController = new AbortController();
+			const owner = acquireCursorH2({ ...runArgs(baseUrl), signal: ownerController.signal });
+			await bodyAtGate.promise;
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters >= 1), 2000);
+
+			const joiner = acquireCursorH2(runArgs(baseUrl));
+			await waitFor(() => __cursorH2ConnectingSnapshot().some(entry => entry.waiters === 2), 2000);
+
+			ownerController.abort(new Error("owner-aborted-during-establish"));
+			await expect(owner).rejects.toMatchObject({ message: "owner-aborted-during-establish" });
+			expect(__cursorH2ConnectingSnapshot().some(entry => entry.waiters === 1)).toBe(true);
+			expect(streamCount).toBe(0);
+
+			releaseBody?.();
+			const result = await joiner;
+			expect(result.ok).toBe(true);
+			if (!result.ok) return;
+			expect(result.lease.request.destroyed).toBe(false);
+			expect(result.lease.request.writable).toBe(true);
+			expect(result.lease.request.write(Buffer.from("joiner-only"))).toBe(true);
+			await waitFor(() => streamCount === 1);
+			await waitFor(() => Buffer.concat(received).toString().includes("joiner-only"));
+			expect(streamCount).toBe(1);
+			result.lease.release();
+			expect(poolOutstanding()).toBe(0);
+		} finally {
+			releaseBody?.();
+			__setCursorH2EstablishBodyGate(undefined);
+		}
+	});
+
+	it("does not reconnect a pre-disposal acquisition after readiness", async () => {
+		const baseUrl = await startServer();
+		serveStream = respondOk;
+		const disposal = Promise.withResolvers<void>();
+		__setCursorH2FreshSessionHook(() => {
+			queueMicrotask(() => {
+				void disposeCursorH2Pool().then(disposal.resolve, disposal.reject);
+			});
+		});
+		try {
+			const acquisition = acquireCursorH2(runArgs(baseUrl));
+			await expect(acquisition).rejects.toThrow("HTTP/2 pool disposed during acquire");
+			await disposal.promise;
+			expect(__cursorH2ConnectingSnapshot()).toEqual([]);
+			expect(__cursorH2PoolSnapshot()).toEqual([]);
+			expect(totalSessions).toBe(1);
+		} finally {
+			__setCursorH2FreshSessionHook(undefined);
+		}
+	});
+});
+
+describe("direct HTTP/2 handshake deadline", () => {
+	// Real platform timers: the deadline under test is a wall-clock socket
+	// deadline inside the real http2 stack, which fake timers cannot drive.
+	// The explicit test timeout turns a regression (no deadline at all) into
+	// a fast failure instead of a hang.
+	it("rejects a stalled handshake, releases its reservation, and lets a later acquire reconnect", async () => {
+		__setCursorH2HandshakeTimeoutMs(60);
+		const accepted: net.Socket[] = [];
+		const srv = net.createServer(socket => {
+			// Accept TCP but never answer the TLS ClientHello: the h2 session's
+			// handshake never completes, so only the deadline can settle this
+			// establishment — the shape an SDK caller with no AbortSignal hits
+			// against a stalled gateway. (Plain-HTTP prior-knowledge connects
+			// emit `connect` on socket open, so the stall needs TLS.) The
+			// teardown follows the pool's cancel path; Bun's http2 cannot
+			// close this peer socket itself (ERR_HTTP2_NO_SOCKET_MANIPULATION),
+			// so the test asserts settlement, reservation release, and a fresh
+			// reconnect rather than server-side socket death.
+			accepted.push(socket);
+		});
+		const listening = Promise.withResolvers<void>();
+		srv.once("error", listening.reject);
+		srv.listen(0, "127.0.0.1", listening.resolve);
+		await listening.promise;
+		const address = srv.address();
+		if (!address || typeof address === "string") {
+			throw new Error("expected silent fixture to bind a tcp port");
+		}
+		const baseUrl = `https://127.0.0.1:${address.port}`;
+
+		const acquireExpectingTimeout = async (): Promise<unknown> => {
+			try {
+				const acquisition = await acquireCursorH2(runArgs(baseUrl));
+				return acquisition.ok ? new Error("expected rejection, got a lease") : acquisition.unavailable;
+			} catch (error) {
+				return error;
+			}
+		};
+
+		try {
+			const first = await acquireExpectingTimeout();
+			expect(String(first)).toContain("handshake timed out");
+			// The stalled establishment must not keep its shared reservation.
+			await waitFor(() => __cursorH2ConnectingSnapshot().length === 0);
+			// A later acquisition connects afresh instead of joining the
+			// stalled one: the silent server accepts a second connection.
+			const second = await acquireExpectingTimeout();
+			expect(String(second)).toContain("handshake timed out");
+			expect(accepted.length).toBe(2);
+		} finally {
+			__setCursorH2HandshakeTimeoutMs(undefined);
+			for (const socket of accepted) socket.destroy();
+			const closed = Promise.withResolvers<void>();
+			srv.close(error => (error ? closed.reject(error) : closed.resolve()));
+			await closed.promise;
+		}
+	}, 2_000);
+});
+
+describe("cursor transport gRPC trailer decoding", () => {
+	function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
+		const frame = Buffer.alloc(5 + data.length);
+		frame[0] = flags;
+		frame.writeUInt32BE(data.length, 1);
+		frame.set(data, 5);
+		return frame;
+	}
+
+	function textDeltaFrame(text: string): Buffer {
+		const message = create(AgentServerMessageSchema, {
+			message: {
+				case: "interactionUpdate",
+				value: create(InteractionUpdateSchema, {
+					message: { case: "textDelta", value: create(TextDeltaUpdateSchema, { text }) },
+				}),
+			},
+		});
+		return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+	}
+
+	function turnEndedFrame(): Buffer {
+		const message = create(AgentServerMessageSchema, {
+			message: {
+				case: "interactionUpdate",
+				value: create(InteractionUpdateSchema, {
+					message: { case: "turnEnded", value: create(TurnEndedUpdateSchema, {}) },
+				}),
+			},
+		});
+		return frameConnectMessage(toBinary(AgentServerMessageSchema, message));
+	}
+
+	function makeModel(baseUrl: string): Model<"cursor-agent"> {
+		return buildModel({
+			id: "cursor-trailer-fixture",
+			name: "Cursor trailer fixture",
+			api: "cursor-agent",
+			provider: "cursor",
+			baseUrl,
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 1,
+			maxTokens: 1,
+		});
+	}
+
+	const context: Context = {
+		messages: [{ role: "user", content: "trailer decoding", timestamp: 1 }],
+	};
+
+	it("records a nonzero grpc-status even when grpc-message is malformed percent-encoding", async () => {
+		const baseUrl = await startServer();
+		serveStream = stream => {
+			stream.respond({ ":status": 200, "content-type": "application/connect+proto" }, { waitForTrailers: true });
+			stream.on("wantTrailers", () => {
+				// "50% o..." is not valid percent-encoding: a naive
+				// decodeURIComponent throws on it inside the trailers
+				// fulfillment handler.
+				stream.sendTrailers({ "grpc-status": "13", "grpc-message": "50% of quota exhausted" });
+			});
+			stream.write(textDeltaFrame("hello"));
+			stream.write(turnEndedFrame());
+			stream.end();
+		};
+
+		const events: string[] = [];
+		const stream = streamCursor(makeModel(baseUrl), context, { apiKey: "test-token" });
+		for await (const event of stream) events.push(event.type);
+		const result = await stream.result();
+
+		expect(events.at(-1)).toBe("error");
+		expect(events).not.toContain("done");
+		expect(result.stopReason).toBe("error");
+		expect(result.errorMessage).toContain("gRPC error 13");
+		expect(result.errorMessage).toContain("50% of quota exhausted");
+	});
+});

@@ -1,0 +1,300 @@
+import { randomUUID } from "node:crypto";
+import type { ConversationStateStructure } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
+import { logger } from "@oh-my-pi/pi-utils";
+
+/**
+ * Bounded per-conversation proto state + blob cache with an active/retained
+ * split, and rotation with a bounded depth (#8345).
+ *
+ * On-disk persistence is deliberately out: the plan's contingency keeps the
+ * store in memory (active/retained split + rotation cap) rather than inventing
+ * a new on-disk format, because `packages/ai` is a library with no session
+ * state directory of its own to reuse. This replaces five unbounded,
+ * process-lifetime module-level `Map`s/`Set`s in `cursor.ts`.
+ */
+
+export interface CursorConversationEntry {
+	state: ConversationStateStructure | undefined;
+	blobs: Map<string, Uint8Array>;
+}
+
+/** Retained (unpinned) entries before LRU eviction begins. */
+export const CURSOR_RETAINED_CONVERSATION_LIMIT = 64;
+/** A single base conversation id may rotate its wire id at most this many times. */
+export const MAX_CURSOR_CONVERSATION_ROTATIONS = 3;
+
+/** Every entry, active and retained alike. */
+const entries = new Map<string, CursorConversationEntry>();
+/** Pin counts for entries held by an in-flight request — never evicted while > 0. */
+const activePinCounts = new Map<string, number>();
+/** Retained (unpinned) ids in insertion order, oldest first. */
+const retainedLru = new Set<string>();
+
+/**
+ * Base conversation id → rotated wire id (#8345). Cursor's backend can pin a
+ * per-conversation rejection (bare `resource_exhausted`, zero tokens) to one
+ * conversationId forever. On such a failure the id is rotated and the next
+ * attempt rebuilds a fresh conversation from `context` (no cached-state
+ * migration). A failed rotation is not repeated, so real account exhaustion
+ * is not hidden. After the rotated id completes a turn, a later poison of
+ * that id is allowed to rotate again.
+ */
+const rotatedConversationIds = new Map<string, string>();
+/** Rotated ids that have completed a full turn (`successfulRotatedConversationIds`). */
+const successfulRotatedConversationIds = new Set<string>();
+/** Rotated ids that have not yet completed a turn, so cached state is skipped (`freshRotatedConversationIds`). */
+const freshRotatedConversationIds = new Set<string>();
+/**
+ * Base conversation id → the rotated wire id it has moved off of, pending the
+ * failed turn's final unpin. `cursor.ts` catches a poisoned turn and rotates
+ * the base to a replacement id *before* the turn's `finally` unpins the id it
+ * used. At that unpin the used id is no longer the target of any base mapping
+ * and its fresh/success markers are already cleared — indistinguishable from
+ * a plain live entry without this record. The unpin consumes it: the dead id
+ * is reclaimed outright and the recorded base's replacement mapping is
+ * shielded from the overflow scan. `evictCursorRotationState` drops the record
+ * with the base's other rotation state, so it cannot outlive the conversation.
+ */
+const supersededRotatedConversationIds = new Map<string, string>();
+/** Number of rotations issued per base id — the rotation-depth cap. */
+const rotationCounts = new Map<string, number>();
+
+/**
+ * Returns (creating if needed) the entry and pins it active — a pinned entry
+ * is never evicted. A pin of an already-pinned id increments a re-entrancy
+ * count; the entry object is the handle, so state/blobs are mutated through
+ * the returned reference with no separate read call.
+ */
+export function pinCursorConversation(id: string): CursorConversationEntry {
+	let entry = entries.get(id);
+	if (!entry) {
+		entry = { state: undefined, blobs: new Map() };
+		entries.set(id, entry);
+	} else {
+		// A currently-retained entry becomes active again — it must not be in
+		// the eviction set while a live request holds it.
+		retainedLru.delete(id);
+	}
+	activePinCounts.set(id, (activePinCounts.get(id) ?? 0) + 1);
+	return entry;
+}
+
+/**
+ * Purges rotation bookkeeping owned by a victim evicted from the retained
+ * LRU: its base→rotated mapping and rotation count, and its current rotated
+ * id from the success/fresh sets. The victim's own success/fresh markers are
+ * cleared only when no base still maps to it: an evicted rotated wire id
+ * whose base lives on keeps its markers, because they belong to that
+ * mapping — clearing them would leave the base resolving to an unmarked id
+ * that `rotateCursorConversation()` refuses to replace forever.
+ */
+function evictCursorRotationState(victimId: string): void {
+	const rotated = rotatedConversationIds.get(victimId);
+	if (rotated !== undefined) {
+		successfulRotatedConversationIds.delete(rotated);
+		freshRotatedConversationIds.delete(rotated);
+	}
+	rotatedConversationIds.delete(victimId);
+	rotationCounts.delete(victimId);
+	supersededRotatedConversationIds.delete(victimId);
+	for (const target of rotatedConversationIds.values()) {
+		if (target === victimId) return;
+	}
+	successfulRotatedConversationIds.delete(victimId);
+	freshRotatedConversationIds.delete(victimId);
+}
+
+/**
+ * Releases one pin. On the final unpin the entry moves to the retained LRU,
+ * which evicts oldest-first beyond `CURSOR_RETAINED_CONVERSATION_LIMIT`.
+ * Candidates of the turn that just finished — the unpinned id and any base
+ * resolving to it — are never victims of that unpin's overflow eviction. An
+ * unpin of a *superseded* rotated id (the wire id a failed turn used, whose
+ * base has already rotated to a replacement) reclaims the dead id itself
+ * instead of admitting it to the retained set, and protects the base whose
+ * replacement mapping the retry now owns.
+ * Unknown ids are a no-op (reset-first discipline: this is an exit-path gate
+ * and must run on every path without itself failing).
+ */
+export function unpinCursorConversation(id: string): void {
+	const count = activePinCounts.get(id);
+	if (count === undefined || count <= 0) {
+		activePinCounts.delete(id);
+		return;
+	}
+	if (count > 1) {
+		activePinCounts.set(id, count - 1);
+		return;
+	}
+	activePinCounts.delete(id);
+	const entry = entries.get(id);
+	if (!entry) return;
+	// A failed turn rotates its base to a replacement id before its finally
+	// unpins the superseded one. Admitting the dead id to the retained set in
+	// that state overflowed the LRU onto the base whose mapping the retry now
+	// owns — deleting the replacement together with its rotation count, so
+	// the next attempt fell back to the poisoned original id.
+	let owningBase: string | undefined;
+	for (const [base, superseded] of supersededRotatedConversationIds) {
+		if (superseded !== id) continue;
+		owningBase = base;
+		supersededRotatedConversationIds.delete(base);
+		retainedLru.delete(id);
+		entries.delete(id);
+		successfulRotatedConversationIds.delete(id);
+		freshRotatedConversationIds.delete(id);
+		break;
+	}
+	if (owningBase === undefined) {
+		// Most-recently-unpinned goes to the tail; the LRU is oldest-first.
+		retainedLru.delete(id);
+		retainedLru.add(id);
+	}
+	trimRetainedConversations(id, owningBase);
+}
+
+/**
+ * Trims the retained LRU oldest-first beyond the limit. `unpinningId` is the
+ * id whose final unpin triggered the scan; `protectedBaseId` is the base whose
+ * *current* mapping superseded that id, set only when the unpin reclaimed a
+ * superseded wire id. Both — and any base still resolving to `unpinningId` —
+ * are never victims. Every other retained mapping stays eligible, fresh ones
+ * only as fallback victims, so bounded retention is preserved.
+ */
+function trimRetainedConversations(unpinningId: string, protectedBaseId: string | undefined): void {
+	while (retainedLru.size > CURSOR_RETAINED_CONVERSATION_LIMIT) {
+		let victim: string | undefined;
+		let freshVictim: string | undefined;
+		for (const candidate of retainedLru) {
+			// Raw mapping read, not resolveCursorConversationId: the overflow scan
+			// must stay side-effect-free — resolving here would re-admit its own
+			// candidate at the LRU tail mid-iteration.
+			const resolved = rotatedConversationIds.get(candidate) ?? candidate;
+			// Candidates of the turn that just finished are never victims of
+			// their own unpin: the id itself (the LRU tail) and any base whose
+			// resolved wire id is that id — the owner of the base→rotated
+			// mapping this turn resolved through. A completed turn has usually
+			// cleared the mapping's freshness by unpin time, so the fresh check
+			// below no longer sees it; the resolved-id comparison is what keeps
+			// the mapping reachable.
+			if (candidate === unpinningId || resolved === unpinningId) continue;
+			// The base whose replacement mapping superseded the reclaimed id:
+			// evicting it would delete the rotation the retry is actively using.
+			if (candidate === protectedBaseId) continue;
+			if ((activePinCounts.get(resolved) ?? 0) > 0) continue;
+			if (freshRotatedConversationIds.has(resolved)) {
+				freshVictim ??= candidate;
+				continue;
+			}
+			victim = candidate;
+			break;
+		}
+		// No plain victim: fall back to the oldest fresh mapping, or leave the
+		// overflow in place when every candidate is protected until an older
+		// evictable entry exists.
+		victim ??= freshVictim;
+		if (victim === undefined) break;
+		retainedLru.delete(victim);
+		entries.delete(victim);
+		evictCursorRotationState(victim);
+	}
+}
+
+/**
+ * Returns the current rotated wire id for a base conversation, or the base
+ * itself when no rotation has been issued. Public counterpart to the
+ * consumer's `rotatedConversationIds.get(base) ?? base` (`cursor.ts`), so an
+ * external consumer (Task 10) can resolve the id it should actually use and
+ * then query its fresh/marked state via `isCursorRotationFresh` /
+ * `isCursorRotationMarked`.
+ *
+ * A successful base→rotated resolution is a use of the conversation: it
+ * refreshes the base mapping's retained-LRU ownership. Later turns pin and
+ * unpin only the rotated id, so without this refresh the base's slot ages at
+ * its pre-rotation position and eviction purges a still-current mapping
+ * while its rotated entry was just used. The refresh only applies while the
+ * base actually holds a retained slot — a pinned base must stay out of the
+ * eviction set until its final unpin re-admits it.
+ */
+export function resolveCursorConversationId(baseId: string): string {
+	const rotated = rotatedConversationIds.get(baseId);
+	if (rotated === undefined) return baseId;
+	if (retainedLru.has(baseId)) {
+		// Most-recently-used goes to the tail; the LRU is oldest-first.
+		retainedLru.delete(baseId);
+		retainedLru.add(baseId);
+	}
+	return rotated;
+}
+
+/**
+ * Rotates the wire id for a base conversation to a fresh one, recording the
+ * base→rotated mapping. Each base may rotate at most
+ * `MAX_CURSOR_CONVERSATION_ROTATIONS` times; beyond that returns `undefined`.
+ * The id format matches today's scheme: `crypto.randomUUID()` per attempt.
+ *
+ * Mirrors the consumer's `canRotate` gate (`cursor.ts`): a new rotation is
+ * allowed only when there is no current rotated id OR that id has completed a
+ * turn (`markCursorRotationSucceeded`). Otherwise `undefined` is returned and
+ * the current (unmarked) rotated id stays in place — one failure streak must
+ * not consume ids and hide real account exhaustion.
+ */
+export function rotateCursorConversation(baseId: string): string | undefined {
+	const rotations = rotationCounts.get(baseId) ?? 0;
+	if (rotations >= MAX_CURSOR_CONVERSATION_ROTATIONS) return undefined;
+	const currentRotated = rotatedConversationIds.get(baseId);
+	// `canRotate` from cursor.ts, verbatim: currentRotated must be absent or marked.
+	if (currentRotated !== undefined && !successfulRotatedConversationIds.has(currentRotated)) {
+		return undefined;
+	}
+	const rotated = randomUUID();
+	if (currentRotated) {
+		successfulRotatedConversationIds.delete(currentRotated);
+		// `currentRotated` is superseded: the turn that used it still has to
+		// unpin it (its `finally` runs after this catch), and that unpin
+		// reclaims the dead id instead of overflowing onto this replacement
+		// mapping.
+		supersededRotatedConversationIds.set(baseId, currentRotated);
+	}
+	rotatedConversationIds.set(baseId, rotated);
+	freshRotatedConversationIds.add(rotated);
+	rotationCounts.set(baseId, rotations + 1);
+	logger.debug("cursor conversation rotated", {
+		base: baseId,
+		from: currentRotated ?? baseId,
+		to: rotated,
+	});
+	return rotated;
+}
+
+/**
+ * Marks a rotated id as having completed a full turn — the gate that today
+ * lives in `successfulRotatedConversationIds` ("After the rotated id
+ * completes a turn, a later poison of that id is allowed to rotate again").
+ */
+export function markCursorRotationSucceeded(id: string): void {
+	successfulRotatedConversationIds.add(id);
+	freshRotatedConversationIds.delete(id);
+}
+
+/** Whether a rotated id has completed a full turn (`successfulRotatedConversationIds.has`). */
+export function isCursorRotationMarked(id: string): boolean {
+	return successfulRotatedConversationIds.has(id);
+}
+
+/** Whether a rotated id has not yet completed a turn and must skip cached state (`freshRotatedConversationIds.has`). */
+export function isCursorRotationFresh(id: string): boolean {
+	return freshRotatedConversationIds.has(id);
+}
+
+/** Clears all module-level state. Tests must call this in `beforeEach`. */
+export function resetCursorConversationStore(): void {
+	entries.clear();
+	activePinCounts.clear();
+	retainedLru.clear();
+	rotatedConversationIds.clear();
+	successfulRotatedConversationIds.clear();
+	freshRotatedConversationIds.clear();
+	supersededRotatedConversationIds.clear();
+	rotationCounts.clear();
+}

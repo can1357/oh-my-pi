@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Routed Cursor model discovery through a pooled HTTP/2 transport.
+
+### Fixed
+
+- Removed the Cursor discovery timeout abort listener after the request completes so a long timeout cannot retain the response buffer.
+- Discarded the Cursor discovery HTTP/2 session when GetUsableModels times out.
+- Shared Cursor unary request headers and client version with the AI package so discovery and Run cannot drift.
 ## [18.1.16] - 2026-09-09
 
 - Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).

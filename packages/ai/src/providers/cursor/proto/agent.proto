@@ -4553,3 +4553,21 @@ message ConnectScmToolCall {
    ConnectScmArgs args = 1;
    ConnectScmResult result = 2;
 }
+
+// Server-forced HTTP/2 policy returned by GetServerConfig. Only
+// FORCE_ALL_DISABLED and FORCE_BIDI_DISABLED select HTTP/1; every other
+// value, including UNSPECIFIED and a failed config fetch, stays on HTTP/2.
+enum Http2Config {
+   HTTP2_CONFIG_UNSPECIFIED = 0;
+   HTTP2_CONFIG_FORCE_ALL_DISABLED = 1;
+   HTTP2_CONFIG_FORCE_ALL_ENABLED = 2;
+   HTTP2_CONFIG_FORCE_BIDI_DISABLED = 3;
+   HTTP2_CONFIG_FORCE_BIDI_ENABLED = 4;
+}
+
+message GetServerConfigRequest {
+}
+
+message GetServerConfigResponse {
+   Http2Config http2_config = 7;
+}

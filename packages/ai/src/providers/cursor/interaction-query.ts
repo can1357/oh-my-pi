@@ -1,4 +1,3 @@
-import type http2 from "node:http2";
 import {
 	AgentClientMessageSchema,
 	AskQuestionInteractionResponseSchema,
@@ -23,6 +22,8 @@ import {
 } from "@oh-my-pi/pi-catalog/discovery/cursor-proto";
 import { create, toBinary } from "@oh-my-pi/pi-catalog/discovery/protobuf";
 import { $env } from "@oh-my-pi/pi-utils";
+import { encodeConnectFrame } from "./connect-frame";
+import type { CursorFrameSink } from "./transport";
 
 const NOT_IMPLEMENTED_SUFFIX = "not implemented by this client";
 
@@ -31,14 +32,6 @@ type ProtoUnknownBag = { $unknown?: ProtoUnknownField[] };
 
 type InteractionQueryCase = NonNullable<InteractionQuery["query"]["case"]>;
 type InteractionResult = Exclude<InteractionResponse["result"], { case: undefined; value?: undefined }>;
-
-function frameConnectMessage(data: Uint8Array, flags = 0): Buffer {
-	const frame = Buffer.alloc(5 + data.length);
-	frame[0] = flags;
-	frame.writeUInt32BE(data.length, 1);
-	frame.set(data, 5);
-	return frame;
-}
 
 function isProtoUnknownField(value: unknown): value is ProtoUnknownField {
 	if (!value || typeof value !== "object") return false;
@@ -70,20 +63,16 @@ function log(type: string, subtype?: string, data?: unknown): void {
 	console.error(`[CURSOR] ${type}${subtype ? `: ${subtype}` : ""}${dataStr}`);
 }
 
-function sendInteractionResponse(h2Request: http2.ClientHttp2Stream, queryId: number, result: InteractionResult): void {
+function sendInteractionResponse(h2Request: CursorFrameSink, queryId: number, result: InteractionResult): void {
 	const response = create(InteractionResponseSchema, { id: queryId, result });
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "interactionResponse", value: response },
 	});
-	h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+	h2Request.write(encodeConnectFrame(toBinary(AgentClientMessageSchema, clientMessage), false));
 	log("interactionResponse", result.case, { id: queryId });
 }
 
-function sendUnknownApprovedInteractionResponse(
-	h2Request: http2.ClientHttp2Stream,
-	queryId: number,
-	fieldNo: number,
-): void {
+function sendUnknownApprovedInteractionResponse(h2Request: CursorFrameSink, queryId: number, fieldNo: number): void {
 	// `approved {}` on the matching response oneof: field N, empty message whose
 	// first member is field 1 (`approved`) with an empty length-delimited payload.
 	const response = create(InteractionResponseSchema, { id: queryId });
@@ -91,7 +80,7 @@ function sendUnknownApprovedInteractionResponse(
 	const clientMessage = create(AgentClientMessageSchema, {
 		message: { case: "interactionResponse", value: response },
 	});
-	h2Request.write(frameConnectMessage(toBinary(AgentClientMessageSchema, clientMessage)));
+	h2Request.write(encodeConnectFrame(toBinary(AgentClientMessageSchema, clientMessage), false));
 	log("interactionResponse", "unknownApproved", { id: queryId, field: fieldNo });
 }
 
@@ -107,7 +96,7 @@ function sendUnknownApprovedInteractionResponse(
  * Unsupported interactive queries are rejected so the server is not stranded.
  * VM setup is left unanswered rather than reporting a fake success.
  */
-export function handleInteractionQuery(query: InteractionQuery, h2Request: http2.ClientHttp2Stream): void {
+export function handleInteractionQuery(query: InteractionQuery, h2Request: CursorFrameSink): void {
 	const queryCase = query.query.case;
 	log("interactionQuery", queryCase, query.query.value);
 	if (!queryCase) {

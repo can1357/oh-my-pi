@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "bun:test";
 import * as http2 from "node:http2";
+import * as path from "node:path";
 import { streamCursor } from "@oh-my-pi/pi-ai/providers/cursor";
 import type { Context, Model } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
@@ -186,4 +187,25 @@ describe("Cursor caller headers reach the wire", () => {
 		expect(sent.host).toBeUndefined();
 		expect(sent["x-trace"]).toBe("kept");
 	});
+
+	it("records the same x-request-id on the wire and in the request-debug dump", async () => {
+		const child = Bun.spawn([process.execPath, path.join(import.meta.dir, "fixtures/cursor-request-debug.ts")], {
+			cwd: path.resolve(import.meta.dir, "../../.."),
+			stdout: "pipe",
+			stderr: "pipe",
+		});
+		const [stdout, stderr, exitCode] = await Promise.all([
+			new Response(child.stdout).text(),
+			new Response(child.stderr).text(),
+			child.exited,
+		]);
+		if (exitCode !== 0) {
+			throw new Error(`request-debug fixture exited ${exitCode}\nstdout:\n${stdout}\nstderr:\n${stderr}`);
+		}
+		expect(stderr).toBe("");
+		const result = JSON.parse(stdout) as { requestId?: string; dumpRequestId?: string };
+		expect(typeof result.requestId).toBe("string");
+		expect(result.requestId?.length).toBeGreaterThan(0);
+		expect(result.requestId).toBe(result.dumpRequestId);
+	}, 60_000);
 });
