@@ -356,6 +356,73 @@ describe("LspMuxServer", () => {
 	}
 
 	it.skipIf(process.platform === "win32")(
+		"reports an in-flight idle stop's helper failure to a concurrent shutdown",
+		async () => {
+			// A server that went idle is already being stopped when shutdown arrives,
+			// and the root's own termination promise settles first and covers only the
+			// root. Handing shutdown that promise would close the listener while the
+			// helper sweep is still running and report success over its failure, so
+			// the second caller has to get the stop itself.
+			//
+			// The server has to ignore `exit` for the window to exist at all: a server
+			// that exits politely is retired by its own exit callback before the sweep
+			// starts, and shutdown then finds nothing left to join.
+			const helperFile = path.join(tmpDir, "helper.pid");
+			connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile, TEST_LSP_IGNORE_EXIT: "1" };
+			const { client, connected } = await link();
+			const pid = connected.pid;
+			if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+			await initialize(client);
+			const helperPid = await readPid(helperFile);
+			const sweeping = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const rootRelease = Promise.withResolvers<void>();
+			const killTreeAndWait = Process.prototype.killTreeAndWait;
+			const helperSpy = spyOn(Process.prototype, "killTreeAndWait").mockImplementation(
+				async function (this: Process, options) {
+					if (this.pid !== helperPid) return killTreeAndWait.call(this, options);
+					sweeping.resolve();
+					await release.promise;
+					return false;
+				},
+			);
+			// Held so the root cannot retire the server before shutdown enumerates it,
+			// which would leave nothing for the second stop to be handed at all.
+			const killAndWait = ChildProcess.prototype.killAndWait;
+			const rootSpy = spyOn(ChildProcess.prototype, "killAndWait").mockImplementation(
+				async function (this: ChildProcess, reason, gracefulMs) {
+					if (this.pid === pid) await rootRelease.promise;
+					return killAndWait.call(this, reason, gracefulMs);
+				},
+			);
+			const schedule = globalThis.setTimeout;
+			const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+				handler: () => void,
+				delay?: number,
+				...args: unknown[]
+			) => schedule(handler, delay === 5 * 60 * 1_000 ? 1 : delay, ...args)) as typeof setTimeout);
+			try {
+				client.destroy();
+				await withTimeout(sweeping.promise, "idle stop reaching the helper sweep", 6_000);
+				const shutdown = server.shutdown();
+				rootRelease.resolve();
+				release.resolve();
+				await expect(shutdown).rejects.toThrow("LSP mux shutdown incomplete");
+			} finally {
+				rootRelease.resolve();
+				release.resolve();
+				helperSpy.mockRestore();
+				rootSpy.mockRestore();
+				timerSpy.mockRestore();
+				killPid(helperPid);
+				// The memoized rejection would resurface in afterEach's own shutdown.
+				server = new LspMuxServer();
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
 		"bounds helper termination by the hard-termination budget",
 		async () => {
 			// Asserted on the budget handed to the native wait rather than on elapsed

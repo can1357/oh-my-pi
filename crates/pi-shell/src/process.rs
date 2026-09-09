@@ -24,10 +24,13 @@ mod platform {
 		fs,
 		os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd},
 		ptr,
-		sync::Arc,
+		sync::{
+			Arc,
+			atomic::{AtomicU8, Ordering},
+		},
 	};
 
-	use super::ProcessStatus;
+	use super::{GroupScope, ProcessStatus};
 
 	/// Stable Linux process reference backed by a pidfd.
 	#[derive(Clone)]
@@ -176,6 +179,53 @@ mod platform {
 			ret == 0
 		}
 
+		/// Send `signal` to every task whose process group is the one this
+		/// pidfd's process leads, resolving the group through the retained
+		/// `struct pid`.
+		///
+		/// The number is never looked up, so this cannot reach a group that
+		/// inherited it: a recycled pgid is a different `struct pid`, and the
+		/// retained one has no tasks left attached. That also makes `ESRCH` a
+		/// *proof* of emptiness rather than an absence of evidence, and a
+		/// delivery a proof that the number still belongs to this group — the
+		/// kernel keeps it allocated while any task carries it.
+		pub fn signal_own_group(&self, signal: i32) -> GroupScope {
+			if PIDFD_GROUP_SCOPE.load(Ordering::Relaxed) == SCOPE_UNSUPPORTED {
+				return GroupScope::Unresolved;
+			}
+			// SAFETY: `self.pidfd` is an owned descriptor from a successful `pidfd_open`
+			// and stays open for the duration of this syscall. A null `siginfo_t` makes
+			// the kernel synthesize the same metadata as `kill(2)`. The flag names one
+			// signal scope, which is the only form the syscall accepts.
+			let ret = unsafe {
+				libc::syscall(
+					libc::SYS_pidfd_send_signal,
+					self.pidfd.as_raw_fd(),
+					signal,
+					ptr::null::<libc::siginfo_t>(),
+					PIDFD_SIGNAL_PROCESS_GROUP,
+				)
+			};
+			let scope = if ret == 0 {
+				GroupScope::Signalled
+			} else {
+				match std::io::Error::last_os_error().raw_os_error() {
+					// The scope flag is validated before the kernel looks at the descriptor,
+					// so this describes the kernel and not this group.
+					Some(libc::EINVAL) => {
+						PIDFD_GROUP_SCOPE.store(SCOPE_UNSUPPORTED, Ordering::Relaxed);
+						return GroupScope::Unresolved;
+					},
+					Some(libc::ESRCH) => GroupScope::Empty,
+					// Delivery failed for some member, but the group was resolved, which is
+					// what the caller reasons about.
+					_ => GroupScope::Signalled,
+				}
+			};
+			PIDFD_GROUP_SCOPE.store(SCOPE_SUPPORTED, Ordering::Relaxed);
+			scope
+		}
+
 		pub fn group_id(&self) -> Option<i32> {
 			if self.status() != ProcessStatus::Running {
 				return None;
@@ -295,6 +345,17 @@ mod platform {
 		unsafe { libc::kill(-pgid, signal) == 0 }
 	}
 
+	/// `PIDFD_SIGNAL_PROCESS_GROUP`, added in Linux 6.9. Not in libc yet.
+	const PIDFD_SIGNAL_PROCESS_GROUP: u32 = 4;
+
+	const SCOPE_UNKNOWN: u8 = 0;
+	const SCOPE_SUPPORTED: u8 = 1;
+	const SCOPE_UNSUPPORTED: u8 = 2;
+
+	/// Whether this kernel accepts a process-group scope on `pidfd_send_signal`.
+	/// Probed by the first real call and cached, since it is a kernel property.
+	static PIDFD_GROUP_SCOPE: AtomicU8 = AtomicU8::new(SCOPE_UNKNOWN);
+
 	/// Find processes whose `/proc/{pid}/exe` symlink resolves to exactly
 	/// `target`.
 	pub fn find_by_path(target: &str) -> Vec<Process> {
@@ -332,7 +393,7 @@ mod platform {
 		ptr,
 	};
 
-	use super::ProcessStatus;
+	use super::{GroupScope, ProcessStatus};
 
 	#[link(name = "proc", kind = "dylib")]
 	unsafe extern "C" {
@@ -418,6 +479,12 @@ mod platform {
 		pub fn group_id(&self) -> Option<i32> {
 			let info = self.live_bsdinfo()?;
 			i32::try_from(info.pbi_pgid).ok().filter(|pgid| *pgid > 0)
+		}
+
+		/// Darwin has no pidfd, so a process group is only ever reachable by its
+		/// number and the caller has to establish ownership itself.
+		pub const fn signal_own_group(&self, _signal: i32) -> GroupScope {
+			GroupScope::Unresolved
 		}
 
 		/// Walk the descendant tree in post-order (leaves first), de-duplicating
@@ -708,7 +775,7 @@ mod platform {
 
 	use smallvec::SmallVec;
 
-	use super::ProcessStatus;
+	use super::{GroupScope, ProcessStatus};
 
 	#[repr(C)]
 	#[allow(non_snake_case, reason = "Windows PROCESSENTRY32W field names must match Win32 ABI")]
@@ -979,6 +1046,11 @@ mod platform {
 
 		pub const fn group_id() -> Option<i32> {
 			None
+		}
+
+		/// Windows has no process groups, so there is nothing to resolve.
+		pub const fn signal_own_group(&self, _signal: i32) -> GroupScope {
+			GroupScope::Unresolved
 		}
 
 		pub fn status(&self) -> ProcessStatus {
@@ -1343,11 +1415,7 @@ impl TerminationPlan {
 		let root_signalable = !self.protected.contains(&self.root.pid());
 
 		// Polite wave: SIGTERM the group, every captured descendant, then the root.
-		if let Some(pgid) = self.process_group
-			&& group_still_led_by(pgid, self.group_leader.as_ref())
-		{
-			let _ = kill_process_group(pgid, TERM_SIGNAL);
-		}
+		self.signal_group(TERM_SIGNAL);
 		for child in &self.descendants {
 			let _ = child.inner.kill(TERM_SIGNAL);
 		}
@@ -1367,8 +1435,12 @@ impl TerminationPlan {
 			.await?;
 			// The pinned set going quiet does not prove the tree is gone: a member
 			// reparented before capture carries the pgid but appears in neither the
-			// root nor a walk rooted at it, so only the group can still see it.
-			if exited && self.group_survivors().is_empty() {
+			// root nor a walk rooted at it, so only the group can still see it. An
+			// unattributable group is not an empty one — reading it as complete here
+			// would report success over exactly the member this check exists for.
+			if exited
+				&& matches!(self.group_survivors(), GroupSurvivors::Known(members) if members.is_empty())
+			{
 				return Ok(true);
 			}
 		}
@@ -1381,16 +1453,16 @@ impl TerminationPlan {
 		// report the tree gone while they run on.
 		// Revalidated again: the grace wait above can be a full second, and a pgid
 		// whose group empties in that time is free for anyone to inherit.
-		if let Some(pgid) = self.process_group
-			&& group_still_led_by(pgid, self.group_leader.as_ref())
-		{
-			let _ = kill_process_group(pgid, KILL_SIGNAL);
-		}
+		self.signal_group(KILL_SIGNAL);
 		// Group survivors join the captured set as targets in their own right, so
 		// the closing wait covers them instead of only the root's own subtree.
 		let rescan = self.root.signalable_descendants(&self.protected);
 		let survivors = self.group_survivors();
-		extend_by_identity(&mut self.descendants, rescan.into_iter().chain(survivors));
+		let group_accounted = survivors.is_known();
+		extend_by_identity(
+			&mut self.descendants,
+			rescan.into_iter().chain(survivors.into_processes()),
+		);
 		for child in &self.descendants {
 			let _ = child.inner.kill(KILL_SIGNAL);
 		}
@@ -1398,13 +1470,33 @@ impl TerminationPlan {
 			let _ = self.root.inner.kill(KILL_SIGNAL);
 		}
 
-		wait_for_exit(
+		let exited = wait_for_exit(
 			&self.root,
 			&self.descendants,
 			Some(Duration::from_millis(u64::from(timeout_ms))),
 			ct,
 		)
-		.await
+		.await?;
+		// A group that could not be attributed contributes no targets, so a member
+		// reparented out of the root's subtree is in neither the wait set nor the
+		// signalled set. The pinned set going quiet says nothing about it.
+		Ok(exited && group_accounted)
+	}
+
+	/// Signal the captured process group, preferring the pinned leader's
+	/// identity over the pgid number.
+	fn signal_group(&self, signal: i32) {
+		let Some(pgid) = self.process_group else {
+			return;
+		};
+		if let Some(leader) = &self.group_leader
+			&& leader.signal_own_group(pgid, signal) != GroupScope::Unresolved
+		{
+			return;
+		}
+		if group_still_led_by(pgid, self.group_leader.as_ref()) {
+			let _ = kill_process_group(pgid, signal);
+		}
 	}
 
 	/// Live members of the captured process group, minus any protected pid.
@@ -1419,19 +1511,53 @@ impl TerminationPlan {
 	///
 	/// Only consulted once the pinned set has gone quiet, so the process-table
 	/// scan stays off the grace wait's polling loop.
-	fn group_survivors(&self) -> Vec<Process> {
+	fn group_survivors(&self) -> GroupSurvivors {
 		let Some(pgid) = self.process_group else {
-			return Vec::new();
+			return GroupSurvivors::Known(Vec::new());
 		};
-		if !group_still_led_by(pgid, self.group_leader.as_ref()) {
-			return Vec::new();
+		let leader = self.group_leader.as_ref();
+		match leader.map_or(GroupScope::Unresolved, |leader| leader.signal_own_group(pgid, 0)) {
+			// The kernel resolved the group from the pinned identity, so the number
+			// is still ours and the scan below can only see our own members.
+			GroupScope::Signalled => {},
+			GroupScope::Empty => return GroupSurvivors::Known(Vec::new()),
+			// Nothing but the number to go on, so the scan is only attributable
+			// while the leader's pid still holds the leader.
+			GroupScope::Unresolved if group_still_led_by(pgid, leader) => {},
+			GroupScope::Unresolved => return GroupSurvivors::Unattributable,
 		}
-		Process::group_members(pgid)
-			.into_iter()
-			.filter(|member| {
-				member.status() == ProcessStatus::Running && !self.protected.contains(&member.pid())
-			})
-			.collect()
+		GroupSurvivors::Known(
+			Process::group_members(pgid)
+				.into_iter()
+				.filter(|member| {
+					member.status() == ProcessStatus::Running && !self.protected.contains(&member.pid())
+				})
+				.collect(),
+		)
+	}
+}
+
+/// The captured group's live members, or the fact that the group could not be
+/// attributed to the capture at all.
+///
+/// Kept distinct because every consumer reads an empty survivor list as "the
+/// group is accounted for": conflating the two turns a group that may still
+/// hold a live member into a completed termination.
+enum GroupSurvivors {
+	Known(Vec<Process>),
+	Unattributable,
+}
+
+impl GroupSurvivors {
+	const fn is_known(&self) -> bool {
+		matches!(self, Self::Known(_))
+	}
+
+	fn into_processes(self) -> Vec<Process> {
+		match self {
+			Self::Known(members) => members,
+			Self::Unattributable => Vec::new(),
+		}
 	}
 }
 
@@ -1496,10 +1622,15 @@ impl Process {
 			&& pgid == self.pid()
 		{
 			processes.extend(Self::group_members(pgid));
-			// The scan above takes milliseconds; the captured members are pinned and
-			// killed individually below, but the numeric broadcast needs the group to
-			// still be ours at the instant it fires.
-			if self.leads_group(pgid) {
+			// `group_id` only answers for a reference whose identity still matches, so
+			// reaching this branch already means the scanned members are ours. The
+			// numeric broadcast is the part that needs re-establishing: the scan above
+			// takes milliseconds, and a group that empties during it releases the pgid.
+			// Signalling through the pinned identity sidesteps the number entirely
+			// where the kernel allows it.
+			if self.signal_own_group(pgid, KILL_SIGNAL) == GroupScope::Unresolved
+				&& self.leads_group(pgid)
+			{
 				let _ = kill_process_group(pgid, KILL_SIGNAL);
 			}
 		}
@@ -1516,25 +1647,39 @@ impl Process {
 		self.inner.is_same_process(&other.inner)
 	}
 
-	/// Snapshot and hard-kill the process group this reference leads, refusing
-	/// once its pid has been handed to a different process.
+	/// Signal the process group `pgid` through this reference's retained
+	/// identity, bypassing the pgid number entirely.
 	///
-	/// A detached child leads a group whose pgid is its own pid, so after the
-	/// leader exits that number is the only handle on the group. The kernel
-	/// keeps the number allocated while any member still carries the pgid, but
-	/// releases it once the group empties and the leader is reaped — and
-	/// `hard_kill_group` signals whoever holds the number at that point.
-	/// Comparing the pinned identity against the pid's current occupant is
-	/// therefore what separates our own descendants from an unrelated group
-	/// that inherited the id: a match (or an unallocated pid, which no live
-	/// task can hold) proves the group is still ours, and a mismatch proves it
-	/// is not.
+	/// `pgid` is required to match this pid because a pgid always numbers its
+	/// own leader: any other value means this reference is a mere member, and
+	/// signalling its group could reach the caller's own — which is also why
+	/// `is_self_process_group` is rechecked here rather than left to
+	/// `kill_process_group`, whose guard this path skips.
+	#[must_use]
+	pub fn signal_own_group(&self, pgid: i32, signal: i32) -> GroupScope {
+		if pgid <= 0 || pgid != self.pid() || is_self_process_group(pgid) {
+			return GroupScope::Unresolved;
+		}
+		self.inner.signal_own_group(signal)
+	}
+
+	/// Snapshot and hard-kill the process group this reference leads.
+	///
+	/// A detached child leads a group whose pgid is its own pid, so once the
+	/// leader exits that number is the only *numeric* handle on the group — and
+	/// the kernel releases it as soon as the group empties and the leader is
+	/// reaped, after which it can name an unrelated session. Where the kernel
+	/// can scope a signal to a pidfd's process group, the retained identity
+	/// reaches the group without the number and the question does not arise;
+	/// the answer also settles whether the number is still ours, so the scanned
+	/// members can be killed and waited on individually.
+	///
+	/// Without that scope the number is all there is, so ownership has to be
+	/// proved from the leader's pid, which is possible only while the leader is
+	/// still a task. Killing scanned members individually is as destructive as
+	/// the numeric broadcast, so both wait on the same proof.
 	pub fn hard_kill_own_group(&self) -> Result<ProcessExitWait> {
 		let pgid = self.pid();
-		anyhow::ensure!(
-			self.leads_group(pgid),
-			"process group {pgid} now belongs to a different process"
-		);
 		anyhow::ensure!(
 			pgid > 0 && !is_self_process_group(pgid),
 			"refusing to kill process group {pgid}"
@@ -1543,22 +1688,48 @@ impl Process {
 		anyhow::bail!("process groups are unsupported on Windows");
 		#[cfg(not(target_os = "windows"))]
 		{
+			// Scanned before the signal so the scope below also settles the scan:
+			// group membership only shrinks, so a group the kernel still resolves
+			// afterwards held the number for this whole window and nothing else can
+			// have answered to it.
 			let members = Self::group_members(pgid);
-			anyhow::ensure!(
-				!members.is_empty() || !process_group_alive(pgid),
-				"cannot observe members of process group {pgid}"
-			);
-			if !members.is_empty() {
-				// Re-proved here rather than only at entry: the scan above walks the
-				// whole process table, and a group that empties during it releases the
-				// pgid for an unrelated session leader to claim before this signal.
-				anyhow::ensure!(
-					self.leads_group(pgid),
-					"process group {pgid} changed hands while its members were being collected"
-				);
-				let _ = kill_process_group(pgid, KILL_SIGNAL);
+			let protected = host_protected_pids();
+			match self.signal_own_group(pgid, KILL_SIGNAL) {
+				GroupScope::Signalled => {
+					anyhow::ensure!(
+						!members.is_empty(),
+						"cannot observe members of process group {pgid}"
+					);
+					Ok(Self::hard_kill_processes(members, &protected))
+				},
+				// Emptiness proved by identity, so the scan's members — if any — answer
+				// to a number this group no longer holds.
+				GroupScope::Empty => Ok(Self::hard_kill_processes(Vec::new(), &protected)),
+				GroupScope::Unresolved => {
+					anyhow::ensure!(
+						!members.is_empty() || !process_group_alive(pgid),
+						"cannot observe members of process group {pgid}"
+					);
+					// Zombies carry the pgid but need no signal, so a group with nothing
+					// left running is swept by the identity-pinned per-process kills and
+					// never by the numeric broadcast — a no-op on it, and a wrong-kill on
+					// whoever claims the number next.
+					if members
+						.iter()
+						.any(|member| member.status() == ProcessStatus::Running)
+					{
+						// Proved after the scan, not before it: the scan walks the whole
+						// process table, and a group that empties during it releases the
+						// pgid for an unrelated session leader to claim.
+						anyhow::ensure!(
+							self.leads_group(pgid),
+							"process group {pgid} cannot be proven to still be ours"
+						);
+						let _ = kill_process_group(pgid, KILL_SIGNAL);
+					}
+					Ok(Self::hard_kill_processes(members, &protected))
+				},
 			}
-			Ok(Self::hard_kill_processes(members, &host_protected_pids()))
 		}
 	}
 
@@ -1848,13 +2019,17 @@ fn extend_by_identity(retained: &mut Vec<Process>, candidates: impl IntoIterator
 /// no "signal iff leader identity" form, so this cannot be atomic with the
 /// signal; call it immediately before each numeric group signal so the gap is
 /// two syscalls wide instead of a process-table scan or a whole grace period.
-///
-/// An unallocated pid answers `true`: no live task holds the number, so no live
-/// group can have taken it.
 fn group_still_led_by(pgid: i32, anchor: Option<&Process>) -> bool {
 	match Process::from_pid(pgid) {
-		None => true,
+		// The leader is still a task — running, or an unreaped zombie — so it
+		// carries the pgid and the kernel cannot have released the number. Its
+		// identity therefore settles ownership.
 		Some(current) => anchor.is_some_and(|anchor| anchor.is_same_process(&current)),
+		// Nothing holds the number, which is not evidence that it is still ours:
+		// "our leader was reaped while our own survivors carry the pgid" and "our
+		// group emptied, the number was reused, and that group then lost its own
+		// leader" are the same observation from here, so the group is unattributable.
+		None => false,
 	}
 }
 
@@ -1904,6 +2079,24 @@ async fn wait_for_processes(
 	}
 
 	Ok(false)
+}
+
+/// Outcome of resolving a process group through a pinned leader's identity
+/// rather than through its pgid number.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum GroupScope {
+	/// The kernel found tasks attached to the pinned group and signalled them.
+	/// Because the number stays allocated while any task carries it, this also
+	/// proves the number still names this group and nothing else.
+	Signalled,
+	/// No task carries the pinned group any more. This is a proof of emptiness:
+	/// whatever answers to the number now belongs to a different group.
+	Empty,
+	/// The group cannot be resolved from the pinned identity here — the kernel
+	/// has no process-group scope for pidfds, the platform has no pidfds, or the
+	/// reference does not lead the group. The caller has to fall back to the
+	/// numeric broadcast and establish ownership itself.
+	Unresolved,
 }
 
 /// Send `signal` to the process group `pgid`.
@@ -2287,7 +2480,9 @@ mod tests {
 
 	/// The numeric group signals are guarded by this predicate, so it has to
 	/// tell a pid's current occupant apart from the reference pinned when the
-	/// group was still ours, and has to treat an unallocated pid as safe.
+	/// group was still ours, and must not read an unallocated pid as a proof of
+	/// ownership: a reaped leader and a recycled-then-leaderless group are the
+	/// same observation from there.
 	#[cfg(unix)]
 	#[test]
 	fn group_ownership_predicate_tracks_the_pids_current_occupant() {
@@ -2307,7 +2502,8 @@ mod tests {
 		let owned = group_still_led_by(first_pin.pid(), Some(&first_pin));
 		let foreign = group_still_led_by(first_pin.pid(), Some(&second_pin));
 		let anchorless = group_still_led_by(first_pin.pid(), None);
-		// No task can hold `i32::MAX`, so nothing can have taken that number.
+		// No task can hold `i32::MAX`, and an unoccupied pid is exactly the state a
+		// reaped leader leaves behind, which is what must not pass.
 		let unallocated = group_still_led_by(i32::MAX, Some(&first_pin));
 		let _ = first.kill();
 		let _ = first.wait();
@@ -2317,7 +2513,197 @@ mod tests {
 		assert!(owned, "the pinned leader still occupies its own pid");
 		assert!(!foreign, "a pid held by a different process is not ours");
 		assert!(!anchorless, "an occupied pid with no pinned anchor cannot be proved ours");
-		assert!(unallocated, "an unallocated pid cannot be held by a foreign group");
+		assert!(!unallocated, "an unoccupied pid proves nothing about who holds the group");
+	}
+
+	/// A leader whose group must outlive it, with one survivor that keeps the
+	/// pgid populated. The leader is deliberately left unreaped so the caller
+	/// decides which of the two observable states it tests.
+	#[cfg(unix)]
+	fn spawn_own_group_with_survivor() -> (std::process::Child, Process, Process) {
+		use std::{io::Read, os::unix::process::CommandExt};
+
+		// `process_group(0)` makes the child its own group leader, so its pgid is
+		// its pid — the shape `hard_kill_own_group` is written for. The survivor
+		// drops the inherited stdout so reading to EOF means the leader has exited.
+		let mut leader = std::process::Command::new("/bin/sh")
+			.arg("-c")
+			.arg("sleep 30 >/dev/null 2>&1 & echo $!")
+			.process_group(0)
+			.stdout(std::process::Stdio::piped())
+			.spawn()
+			.expect("spawn group leader");
+		let leader_pin =
+			Process::from_pid(i32::try_from(leader.id()).expect("leader pid")).expect("pin leader");
+		let mut reported = String::new();
+		leader
+			.stdout
+			.take()
+			.expect("leader stdout")
+			.read_to_string(&mut reported)
+			.expect("read survivor pid");
+		let survivor =
+			Process::from_pid(reported.trim().parse().expect("survivor pid")).expect("pin survivor");
+		(leader, leader_pin, survivor)
+	}
+
+	/// The group fallback exists for a leader that is already gone, and the one
+	/// state in which its pgid is still attributable is the unreaped one: the
+	/// leader is still a task, so the kernel cannot have released the number and
+	/// its identity settles ownership.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn own_group_is_swept_while_its_unreaped_leader_still_holds_the_pgid() {
+		let (mut leader, leader_pin, survivor) = spawn_own_group_with_survivor();
+		assert_eq!(
+			leader_pin.status(),
+			ProcessStatus::Exited,
+			"the leader must be gone before the fallback is exercised"
+		);
+
+		let swept = leader_pin
+			.hard_kill_own_group()
+			.expect("an unreaped leader still proves the group is ours")
+			.wait(Duration::from_secs(5), CancelToken::default())
+			.await;
+
+		let survivor_status = survivor.status();
+		let _ = survivor.inner.kill(KILL_SIGNAL);
+		let _ = leader.wait();
+		assert!(swept.expect("wait for the swept group"), "the group must be reported gone");
+		assert_eq!(survivor_status, ProcessStatus::Exited, "the survivor must be swept");
+	}
+
+	/// Whether this kernel scopes a pidfd signal to the process group, measured
+	/// rather than inferred from a version, because it decides which contract
+	/// the group fallback is held to.
+	#[cfg(unix)]
+	fn pidfd_group_scope_supported() -> bool {
+		use std::os::unix::process::CommandExt;
+
+		let mut leader = std::process::Command::new("sleep")
+			.arg("30")
+			.process_group(0)
+			.spawn()
+			.expect("spawn group leader");
+		let pid = i32::try_from(leader.id()).expect("leader pid");
+		let scope = Process::from_pid(pid)
+			.expect("pin leader")
+			.signal_own_group(pid, 0);
+		let _ = leader.kill();
+		let _ = leader.wait();
+		scope != GroupScope::Unresolved
+	}
+
+	/// A reaped leader leaves its pgid number unattributable, but not the group
+	/// itself: a retained pidfd still names the `struct pid` the survivors
+	/// carry, and the kernel releases that number only once nothing holds it.
+	/// So where the pidfd carries a process-group scope the group is reachable
+	/// with no ownership proof at all — and where it does not, the number is
+	/// all there is and the sweep has to refuse instead of guessing.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn own_group_is_swept_through_the_pinned_identity_after_its_leader_is_reaped() {
+		let scoped = pidfd_group_scope_supported();
+		let (mut leader, leader_pin, survivor) = spawn_own_group_with_survivor();
+		leader.wait().expect("reap the leader");
+		assert!(
+			Process::from_pid(leader_pin.pid()).is_none(),
+			"the reaped leader's pid must be unoccupied for this to test anything"
+		);
+
+		let swept = leader_pin.hard_kill_own_group();
+
+		let outcome = match swept {
+			Ok(waiter) => Some(
+				waiter
+					.wait(Duration::from_secs(5), CancelToken::default())
+					.await,
+			),
+			Err(error) => {
+				assert!(
+					error
+						.to_string()
+						.contains("cannot be proven to still be ours"),
+					"a refusal must name the missing ownership proof, got {error}"
+				);
+				None
+			},
+		};
+		let survivor_status = survivor.status();
+		let _ = survivor.inner.kill(KILL_SIGNAL);
+		if scoped {
+			assert!(
+				outcome
+					.expect("a pidfd-scoped kernel needs no ownership proof")
+					.expect("wait for the swept group"),
+				"the group must be reported gone"
+			);
+			assert_eq!(
+				survivor_status,
+				ProcessStatus::Exited,
+				"the survivor must be swept through the retained identity"
+			);
+		} else {
+			assert!(outcome.is_none(), "without the scope the number cannot be attributed");
+			assert_eq!(
+				survivor_status,
+				ProcessStatus::Running,
+				"an unattributable group must be left running, not killed member by member"
+			);
+		}
+	}
+
+	/// Every consumer of the survivor list reads "empty" as "the group is
+	/// accounted for", so a group that cannot be attributed must not answer with
+	/// an empty list. Modelled with the leader handle absent, which is what
+	/// capture produces when the group's leader is already gone — the same state
+	/// a pre-6.9 kernel is left in once the leader is reaped.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn unattributable_group_is_not_reported_as_a_completed_termination() {
+		use std::{
+			io::{BufRead, BufReader},
+			os::unix::process::CommandExt,
+		};
+
+		// The survivor is orphaned before capture, so it appears in no walk rooted
+		// at the root and only the group can still see it, and it ignores TERM so
+		// the polite wave cannot retire it by accident.
+		let mut root = std::process::Command::new("/bin/sh")
+			.arg("-c")
+			.arg(r#"( /bin/sh -c 'trap "" TERM; echo $$; exec sleep 30' & ) ; exec sleep 30"#)
+			.process_group(0)
+			.stdout(std::process::Stdio::piped())
+			.spawn()
+			.expect("spawn root");
+		let mut line = String::new();
+		BufReader::new(root.stdout.take().expect("root stdout"))
+			.read_line(&mut line)
+			.expect("read survivor pid");
+		let survivor =
+			Process::from_pid(line.trim().parse().expect("survivor pid")).expect("pin survivor");
+		let root_pin =
+			Process::from_pid(i32::try_from(root.id()).expect("root pid")).expect("pin root");
+		let mut plan = root_pin.capture_termination(true);
+		assert_eq!(plan.process_group(), Some(root_pin.pid()), "the root must lead its group");
+		plan.group_leader = None;
+
+		let terminated = plan.terminate(100, 5_000, CancelToken::default()).await;
+
+		let survivor_status = survivor.status();
+		let _ = survivor.inner.kill(KILL_SIGNAL);
+		let _ = root.kill();
+		let _ = root.wait();
+		assert_eq!(
+			survivor_status,
+			ProcessStatus::Running,
+			"the survivor has to outlive the waves for the report to be under test"
+		);
+		assert!(
+			!terminated.expect("terminate the captured tree"),
+			"a group that cannot be attributed leaves the tree unaccounted for"
+		);
 	}
 
 	/// `hard_kill_own_group` signals whatever carries the leader's old pid, so

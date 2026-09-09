@@ -1,152 +1,157 @@
 import { describe, expect, it, spyOn } from "bun:test";
+import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { spawn } from "@oh-my-pi/pi-utils/ptree";
 
+/**
+ * Spin until the pinned root has exited, without yielding to the loop.
+ *
+ * Bun's reaper only runs on a loop turn, so a synchronous spin holds the
+ * process in the unreaped window it needs to be observed in. Polling a pinned
+ * handle rather than reopening the pid keeps the loop from allocating a pidfd
+ * per iteration.
+ */
+function spinUntilUnreapedExit(child: ReturnType<typeof spawn>): void {
+	const root = Process.fromPid(child.pid);
+	if (!root) throw new Error(`Root ${child.pid} vanished before it could be pinned`);
+	const deadline = Date.now() + 5_000;
+	while (root.status() === ProcessStatus.Running) {
+		if (Date.now() > deadline) throw new Error(`Root ${child.pid} never exited`);
+	}
+}
+
+/** Poll a file the survivor wrote its own pid into, for the never-read case. */
+async function readReportedPid(file: string): Promise<number> {
+	const deadline = Date.now() + 5_000;
+	for (;;) {
+		const reported = fs.existsSync(file) ? Number.parseInt(fs.readFileSync(file, "utf8").trim() || "0", 10) : 0;
+		if (reported > 0) return reported;
+		if (Date.now() > deadline) throw new Error(`Descendant never reported its pid to ${file}`);
+		await Bun.sleep(10);
+	}
+}
+
 describe("ptree.ChildProcess.killAndWait()", () => {
-	it.skipIf(process.platform === "win32")(
-		"terminates a dead root's descendant that holds only raw stdout open",
-		async () => {
-			const child = spawn(["/bin/sh", "-c", "sleep 30 2>/dev/null & echo $!"], { detached: true, stderr: "full" });
-			let reader = child.stdout.getReader();
+	for (const readerState of ["raw", "paused", "eof", "cancel", "unread"] as const) {
+		it.skipIf(process.platform === "win32")(`sweeps a dead root's group with its stdout ${readerState}`, async () => {
+			// How far a stdout consumer got is not a condition anywhere in the
+			// fallback: a survivor of a caller that never read — or finished
+			// reading — has to be swept like any other. The root parks on a file so
+			// each reader state is established while it is alive, then the exit is
+			// triggered synchronously to land in the unreaped window, where a dead
+			// leader's group is attributable on every platform.
+			const stamp = `${process.pid}-${Date.now()}-${readerState}`;
+			const goFile = path.join(os.tmpdir(), `omp-ptree-go-${stamp}`);
+			const pidFile = path.join(os.tmpdir(), `omp-ptree-pid-${stamp}`);
+			const report = readerState === "unread" ? `echo $! > ${pidFile}` : "echo $!";
+			const filler = readerState === "paused" ? "sleep 0.05; echo filler;" : "";
+			// Closing both pipes lets the stdout consumer and the internal stderr
+			// drain reach EOF while the root is still alive, so these really are
+			// the zero-reader states rather than ones whose drains never finished.
+			const close = readerState === "eof" || readerState === "unread" ? "exec 1>&- 2>&-;" : "";
+			const script = `sleep 30 >/dev/null 2>&1 & ${report}; ${filler} ${close} while [ ! -f ${goFile} ]; do sleep 0.01; done`;
+			const child = spawn(["/bin/sh", "-c", script], { detached: true });
+			// Declared by inference rather than annotation: Bun's reader carries an
+			// extra `readMany`, so the DOM lib type is not assignable to it.
+			let reader = readerState === "unread" ? undefined : child.stdout.getReader();
 			let descendant: Process | null = null;
 			try {
-				const output = await reader.read();
-				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
-				if (!descendant) throw new Error("Descendant exited before termination");
-				await child.proc.exited;
-				await Bun.readableStreamToText(child.stderr!);
-				await Bun.sleep(0);
-				expect(descendant.status()).toBe(ProcessStatus.Running);
-				reader.releaseLock();
-				reader = child.stdout.getReader();
-				await child.killAndWait(undefined, -1);
-				expect(descendant.status()).toBe(ProcessStatus.Exited);
-				expect((await reader.read()).done).toBe(true);
-			} finally {
-				descendant?.killTree(9);
-				await reader.cancel();
-				child.kill(undefined, -1);
-			}
-		},
-	);
-
-	it.skipIf(process.platform === "win32")(
-		"terminates a dead root's descendant while its stdout consumer is paused",
-		async () => {
-			// The descendant emits a second chunk once the pid has been read and then
-			// keeps stdout open, so the consumer is parked over unread output on an
-			// uncancelled stream when the kill arrives.
-			const child = spawn(
-				["/bin/sh", "-c", `/bin/sh -c 'echo $$; sleep 0.05; echo filler; exec sleep 30' 2>/dev/null &`],
-				{ detached: true, stderr: "full" },
-			);
-			const reader = child.stdout.getReader();
-			let descendant: Process | null = null;
-			try {
-				const first = await reader.read();
-				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(first.value), 10));
-				if (!descendant) throw new Error("Descendant exited before termination");
-				await child.proc.exited;
-				await Bun.readableStreamToText(child.stderr!);
-				await Bun.sleep(150);
-				expect(descendant.status()).toBe(ProcessStatus.Running);
-				await child.killAndWait(undefined, -1);
-				expect(descendant.status()).toBe(ProcessStatus.Exited);
-				// Proves the consumer really was parked over buffered output rather
-				// than sitting at EOF, and that the kill did not discard it.
-				expect(new TextDecoder().decode((await reader.read()).value)).toBe("filler\n");
-			} finally {
-				descendant?.killTree(9);
-				await reader.cancel();
-				child.kill(undefined, -1);
-			}
-		},
-	);
-
-	for (const finish of ["eof", "cancel"] as const) {
-		it.skipIf(process.platform === "win32")(
-			`reaps a dead root's group after its stdout consumer reached ${finish}`,
-			async () => {
-				// The "eof" descendant redirects stdout away, so it holds no pipe of
-				// ours at all and group membership is the only thing connecting it to
-				// the child being killed.
-				const script = finish === "eof" ? "sleep 30 >/dev/null 2>&1 & echo $!" : "sleep 30 2>/dev/null & echo $!";
-				const child = spawn(["/bin/sh", "-c", script], { detached: true, stderr: "full" });
-				const reader = child.stdout.getReader();
-				let descendant: Process | null = null;
-				try {
-					const output = await reader.read();
-					descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
-					if (!descendant) throw new Error("Descendant exited before termination");
-					await child.proc.exited;
-					await Bun.readableStreamToText(child.stderr!);
-					if (finish === "eof") expect((await reader.read()).done).toBe(true);
-					else await reader.cancel();
-					await Bun.sleep(0);
-					// Whether a reader is still attached no longer decides this. The
-					// pinned leader's identity check is what keeps the group kill off a
-					// recycled pgid, so a survivor is reaped either way.
-					await child.killAndWait(undefined, -1);
-					expect(descendant.status()).toBe(ProcessStatus.Exited);
-				} finally {
-					descendant?.killTree(9);
-					await reader.cancel();
-					child.kill(undefined, -1);
+				if (reader) {
+					const first = new TextDecoder().decode((await reader.read()).value);
+					descendant = Process.fromPid(Number.parseInt(first, 10));
+				} else {
+					descendant = Process.fromPid(await readReportedPid(pidFile));
 				}
-			},
-		);
+				if (!descendant) throw new Error("Descendant exited before termination");
+				if (readerState === "eof") expect((await reader?.read())?.done).toBe(true);
+				if (readerState === "cancel") {
+					await reader?.cancel();
+					reader = undefined;
+				}
+				// Long enough for the buffered chunk to land, and for the internal
+				// drains to settle on the states that closed their pipes.
+				await Bun.sleep(readerState === "paused" ? 150 : 50);
+				expect(descendant.status()).toBe(ProcessStatus.Running);
+
+				fs.writeFileSync(goFile, "");
+				spinUntilUnreapedExit(child);
+				expect(child.proc.exitCode).toBeNull();
+				await child.killAndWait(undefined, -1);
+
+				expect(descendant.status()).toBe(ProcessStatus.Exited);
+				// Proves the consumer was parked over buffered output rather than
+				// sitting at EOF, and that the kill did not discard it.
+				if (readerState === "paused")
+					expect(new TextDecoder().decode((await reader?.read())?.value)).toBe("filler\n");
+			} finally {
+				descendant?.killTree(9);
+				child.kill(undefined, -1);
+				await reader?.cancel();
+				fs.rmSync(goFile, { force: true });
+				fs.rmSync(pidFile, { force: true });
+			}
+		});
 	}
 
-	it.skipIf(process.platform === "win32")(
-		"terminates a dead root's descendant when stdout was never read",
-		async () => {
-			// The descendant reports itself out of band and closes stderr, so neither
-			// pipe carries any evidence and no stdout reader is ever created — the
-			// distinguishing condition here.
-			const pidFile = path.join(os.tmpdir(), `omp-ptree-unread-${process.pid}-${Date.now()}`);
-			const child = spawn(["/bin/sh", "-c", `/bin/sh -c 'echo $$ > ${pidFile}; exec sleep 30' 2>/dev/null &`], {
-				detached: true,
-			});
-			let descendant: Process | null = null;
-			try {
-				for (let attempt = 0; attempt < 200 && !descendant; attempt++) {
-					const reported = Number.parseInt(
-						(
-							await Bun.file(pidFile)
-								.text()
-								.catch(() => "")
-						).trim(),
-						10,
-					);
-					descendant = Number.isFinite(reported) ? Process.fromPid(reported) : null;
-					if (!descendant) await Bun.sleep(10);
-				}
-				if (!descendant) throw new Error("Descendant never reported its pid");
-				await child.proc.exited;
-				// Let the internal stderr drain reach EOF, which is what used to leave
-				// this child with no pipe evidence and skip the group cleanup entirely.
-				await Bun.sleep(100);
-				expect(descendant.status()).toBe(ProcessStatus.Running);
-				await child.killAndWait(undefined, -1);
+	it.skipIf(process.platform === "win32")("never hides a reaped root's unswept group behind success", async () => {
+		// Which arm runs depends on the kernel: with a process-group scope for
+		// pidfds the retained leader reaches the group with no ownership proof at
+		// all, and without one the pgid number is the only handle left and cannot
+		// be attributed. The native side pins each arm on the measured scope; what
+		// this covers is that neither outcome reaches the caller as a success over
+		// a process that is still running.
+		const child = spawn(["/bin/sh", "-c", "sleep 30 2>/dev/null & echo $!"], { detached: true });
+		const reader = child.stdout.getReader();
+		let descendant: Process | null = null;
+		try {
+			const output = await reader.read();
+			descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
+			if (!descendant) throw new Error("Descendant exited before termination");
+			await child.proc.exited;
+			expect(Process.fromPid(child.pid)).toBeNull();
+			const outcome = await child.killAndWait(undefined, -1).then(
+				() => "swept",
+				(error: unknown) => String(error),
+			);
+			if (outcome === "swept") {
 				expect(descendant.status()).toBe(ProcessStatus.Exited);
-			} finally {
-				descendant?.killTree(9);
-				child.kill(undefined, -1);
-				await Bun.file(pidFile)
-					.unlink()
-					.catch(() => {});
+			} else {
+				expect(outcome).toContain("cannot be proven to still be ours");
+				expect(descendant.status()).toBe(ProcessStatus.Running);
 			}
-		},
-	);
+		} finally {
+			descendant?.killTree(9);
+			await reader.cancel();
+		}
+	});
 
-	it("waits for a pipe-holding descendant after its root exits", async () => {
-		const command =
-			process.platform === "win32"
-				? [process.execPath, `${import.meta.dir}/fixtures/ptree-dead-root-probe.ts`]
-				: ["/bin/sh", "-c", "sleep 30 & echo $!"];
-		const child = spawn(command, { detached: true });
+	it.skipIf(process.platform === "win32")("leaves buffered stdout readable after the kill", async () => {
+		// The consumer is parked over unread output when the kill arrives, which
+		// it has to survive: the stream belongs to the caller, not to kill().
+		const child = spawn(["/bin/sh", "-c", "echo first; sleep 0.05; echo filler; exec sleep 30"], {
+			detached: true,
+		});
+		const reader = child.stdout.getReader();
+		try {
+			expect(new TextDecoder().decode((await reader.read()).value)).toBe("first\n");
+			await Bun.sleep(150);
+			await child.killAndWait(undefined, -1);
+			expect(new TextDecoder().decode((await reader.read()).value)).toBe("filler\n");
+		} finally {
+			await reader.cancel();
+			child.kill(undefined, -1);
+		}
+	});
+
+	it.skipIf(process.platform !== "win32")("waits for a pipe-holding descendant after its root exits", async () => {
+		// Windows keeps the dead root's pid reserved through the retained handle, so
+		// the Toolhelp descendant walk stays identity-safe after the root exits and
+		// needs no unreaped-leader window.
+		const child = spawn([process.execPath, `${import.meta.dir}/fixtures/ptree-dead-root-probe.ts`], {
+			detached: true,
+		});
 		const reader = child.stdout.getReader();
 		let descendant: Process | null = null;
 		try {
@@ -164,43 +169,6 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 			await reader.cancel();
 		}
 	});
-
-	it.skipIf(process.platform === "win32")(
-		"terminates a detached group before Bun reports the leader's exit",
-		async () => {
-			// The window under test is "the leader is gone but Bun's reaper has not
-			// run yet". The root races our read into it, and polling for its exit
-			// hands the reaper the turn it needs, so the setup is retried until one
-			// attempt lands. Never observing the window is a failure, not a skip.
-			for (let attempt = 1; ; attempt++) {
-				const child = spawn(["/bin/sh", "-c", "sleep 30 & echo $!"], { detached: true });
-				const reader = child.stdout.getReader();
-				const output = await reader.read();
-				const descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
-				const landed =
-					descendant !== null &&
-					child.proc.exitCode === null &&
-					Process.fromPid(child.pid)?.status() === ProcessStatus.Exited;
-				if (!landed || !descendant) {
-					descendant?.killTree(9);
-					child.kill(undefined, -1);
-					await reader.cancel();
-					if (attempt >= 10) throw new Error("Never observed the leader's exit ahead of Bun's reaper");
-					continue;
-				}
-				try {
-					expect(descendant.status()).toBe(ProcessStatus.Running);
-					await child.killAndWait(undefined, -1);
-					expect(descendant.status()).toBe(ProcessStatus.Exited);
-					return;
-				} finally {
-					descendant.killTree(9);
-					child.kill(undefined, -1);
-					await reader.cancel();
-				}
-			}
-		},
-	);
 
 	it.skipIf(process.platform === "win32")(
 		"reports synchronous group-termination errors without interrupting kill",

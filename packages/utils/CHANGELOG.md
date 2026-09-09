@@ -6,9 +6,14 @@
 
 - Added `ChildProcess.killAndWait()` to await process-tree termination and report termination failures.
 
+### Changed
+
+- Dead-root process-group cleanup no longer depends on a live stdout reader, and now resolves the group through the exited leader's retained handle instead of its pgid number where the kernel allows it (the Linux 6.9 `pidfd_send_signal` process-group scope, detected at runtime). That reaches survivors the number can no longer safely name. Where the scope is unavailable the number is the only handle, so cleanup is limited to the window before the runtime reaps the leader; past it, survivors are left running and `killAndWait()` reports the incomplete termination instead of signalling a group it cannot attribute.
+
 ### Fixed
 
-- Fixed dead-root cleanup skipping descendants that keep stdout open for direct stream readers after stderr closes.
+- Fixed dead-root cleanup broadcasting SIGKILL to whatever process group had inherited the exited leader's pid, and killing that group's members individually; without the pidfd process-group scope both now require the pinned leader's identity to still occupy the pid.
+- Fixed process-tree termination reporting success over a process group it could not attribute. An unattributable group is no longer read as an empty one, so a group member reparented out of the root's subtree before capture can no longer pass as a completed termination.
 
 ## [18.1.13] - 2026-09-07
 

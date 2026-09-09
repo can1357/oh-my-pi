@@ -375,11 +375,13 @@ export class ChildProcess<In extends InMask = InMask> {
 		if (groupLeader && !this.#rootIsLive()) {
 			// Bun detached children are POSIX session/process-group leaders. If the
 			// leader has exited, the native Process handle cannot rediscover its
-			// PGID, so the group is reached through the pinned leader, which refuses
-			// once that pid belongs to someone else. That identity check is what
-			// makes the attempt safe, so it is unconditional: gating it on a live
-			// stdout reader only meant survivors of a caller that never read — or
-			// finished reading — were never signalled at all.
+			// PGID, so the group is reached through the pinned leader: by its
+			// retained identity where the kernel can scope a signal that way, and
+			// otherwise by a number it will only signal while the leader still
+			// occupies its pid. Nothing about the caller's streams enters into that,
+			// so the attempt is unconditional: gating it on a live stdout reader only
+			// meant survivors of a caller that never read — or finished reading —
+			// were never signalled.
 			this.#terminating = Promise.try(() => groupLeader.killOwnGroupAndWait());
 			void this.#terminating.catch(() => {});
 			return;

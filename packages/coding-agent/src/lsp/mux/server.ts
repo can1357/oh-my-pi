@@ -742,8 +742,14 @@ export class LspMuxServer {
 	}
 
 	#stopServer(server: ServerInstance): Promise<void> {
+		// An in-flight stop outranks the root's own termination promise: it covers
+		// the helper subtree as well, and it is already set by the time the root
+		// enters termination. Returning the narrower promise would let shutdown
+		// close the listener as soon as the root exited, without waiting for — or
+		// reporting — a helper that is still terminating or ultimately times out.
+		if (server.stopPromise) return server.stopPromise;
 		if (server.terminationPromise) return server.terminationPromise;
-		server.stopPromise ??= this.#performStopServer(server);
+		server.stopPromise = this.#performStopServer(server);
 		return server.stopPromise;
 	}
 
