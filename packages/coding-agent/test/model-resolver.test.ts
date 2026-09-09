@@ -1149,6 +1149,21 @@ describe("resolveAgentModelPatterns", () => {
 		expect(resolveAgentModelPatterns({ agentModel: "@advisor", settings })).toEqual(["baseten/custom-slow:max"]);
 	});
 
+	test("expands nested role aliases from the configured slow fallback", () => {
+		const settings = Settings.isolated({
+			modelRoles: {
+				default: "openrouter/qwen/qwen3-coder:exacto",
+				smol: "@default",
+				slow: "@smol",
+			},
+		});
+
+		const result = resolveModelRoleValue("@advisor", allModels, { settings });
+
+		expect(result.model?.provider).toBe("openrouter");
+		expect(result.model?.id).toBe("qwen/qwen3-coder:exacto");
+	});
+
 	test("outer advisor thinking level overrides the inherited slow effort", () => {
 		const settings = Settings.isolated({
 			modelRoles: { slow: "nanogpt/coding-router:max" },

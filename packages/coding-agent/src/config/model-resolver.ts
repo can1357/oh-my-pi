@@ -1167,6 +1167,40 @@ function rolePriorityDefaults(role: ModelRole): string[] {
 	return normalizeModelPatternList(MODEL_PRIO[key]);
 }
 
+/** Resolve aliases inside a configured pattern list without leaking cycles to model matching. */
+function resolveNestedRolePatterns(
+	value: string,
+	roleDefaults: string[],
+	settings: ModelRoleLookup | undefined,
+	visited: Set<string>,
+): string[] {
+	const resolved: string[] = [];
+	for (const pattern of normalizeModelPatternList(value)) {
+		const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
+			pattern,
+			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
+			MAX_THINKING_SUFFIX_OPTIONS,
+		);
+		const aliasRole = getModelRoleAlias(aliasCandidate, settings);
+		if (!aliasRole) {
+			resolved.push(pattern);
+			continue;
+		}
+		if (visited.has(aliasRole)) {
+			resolved.push(
+				...(thinkingLevel
+					? roleDefaults.map(defaultPattern => `${defaultPattern}:${thinkingLevel}`)
+					: roleDefaults),
+			);
+			continue;
+		}
+
+		const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
+		if (recursed) resolved.push(...recursed);
+	}
+	return resolved;
+}
+
 function resolveDefaultInheritedPatterns(
 	role: ModelRole,
 	configuredDefault: string | undefined,
@@ -1175,38 +1209,7 @@ function resolveDefaultInheritedPatterns(
 	visited: Set<string>,
 ): string[] {
 	if (!shouldInheritDefaultBeforePriority(role) || !configuredDefault) return [];
-
-	const resolved: string[] = [];
-	for (const pattern of normalizeModelPatternList(configuredDefault)) {
-		const { base: aliasCandidate, level: thinkingLevel } = splitThinkingSuffix(
-			pattern,
-			modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
-			MAX_THINKING_SUFFIX_OPTIONS,
-		);
-		const aliasRole = getModelRoleAlias(aliasCandidate, settings);
-		if (aliasRole && visited.has(aliasRole)) {
-			// Cycle (self-alias like modelRoles.default = "@smol", or tiny → smol
-			// → default = "@tiny") would loop back to a visited role: fall back
-			// to the built-in chain instead of leaking the unresolved alias.
-			resolved.push(
-				...(thinkingLevel
-					? roleDefaults.map(defaultPattern => `${defaultPattern}:${thinkingLevel}`)
-					: roleDefaults),
-			);
-			continue;
-		}
-		if (aliasRole) {
-			// Cross-role alias (e.g. modelRoles.default = "@slow"): resolve the
-			// concrete model patterns instead of another role alias.
-			const recursed = resolveConfiguredRolePattern(pattern, settings, new Set(visited));
-			if (recursed && recursed.length > 0) {
-				resolved.push(...recursed);
-				continue;
-			}
-		}
-		resolved.push(pattern);
-	}
-	return resolved;
+	return resolveNestedRolePatterns(configuredDefault, roleDefaults, settings, visited);
 }
 
 function resolveConfiguredRolePattern(
@@ -1236,27 +1239,9 @@ function resolveConfiguredRolePattern(
 		!configuredFallback ||
 		(configuredFallback.configuredOnly && !settings?.getModelRole(configuredFallback.role)?.trim())
 			? undefined
-			: (
-					resolveConfiguredRolePattern(
-						formatModelRoleAlias(configuredFallback.role),
-						settings,
-						new Set(visited),
-					) ?? []
-				).flatMap(pattern => {
-					const { base, level } = splitThinkingSuffix(
-						pattern,
-						modelRoleAliasPrefixLength(pattern) ?? LEGACY_MODEL_ROLE_ALIAS_PREFIX.length,
-						MAX_THINKING_SUFFIX_OPTIONS,
-					);
-					const patternRole = getModelRoleAlias(base, settings);
-					if (!patternRole || !visited.has(patternRole)) return [pattern];
-					// Cyclic fallback alias (e.g. smol = "@tiny:high" while resolving
-					// @tiny): expand to the built-in chain, preserving the requested
-					// thinking level instead of dropping the suffix.
-					return level ? roleDefaults.map(defaultPattern => `${defaultPattern}:${level}`) : [];
-				});
+			: resolveConfiguredRolePattern(formatModelRoleAlias(configuredFallback.role), settings, new Set(visited));
 	const resolved = configured
-		? normalizeModelPatternList(configured)
+		? resolveNestedRolePatterns(configured, roleDefaults, settings, visited)
 		: fallbackPatterns
 			? fallbackPatterns
 			: isModelRole(role)
