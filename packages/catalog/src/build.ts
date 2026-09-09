@@ -87,6 +87,13 @@ function applyCatalogAssignments<TApi extends Api>(model: Model<TApi>, catalog: 
 	if (typeof sandWireModelId === "string" && sandWireModelId.trim() && model.sandWireModelId === undefined) {
 		model.sandWireModelId = sandWireModelId.trim();
 	}
+	const sandWireModelIdWhen = catalog.sandWireModelIdWhen;
+	if (sandWireModelIdWhen === "tools" && model.sandWireModelIdWhen === undefined) {
+		model.sandWireModelIdWhen = "tools";
+	}
+	if (catalog.sandPromoteJsonTextTools === true && model.sandPromoteJsonTextTools === undefined) {
+		model.sandPromoteJsonTextTools = true;
+	}
 }
 
 /**
@@ -231,21 +238,41 @@ function supportsOpenAIGAComputerUse(
  * this only runs for discovered/custom/override specs.
  */
 export function buildModel<TApi extends Api>(spec: ModelSpec<TApi>): Model<TApi> {
-	const policy = resolveModelPolicy(spec);
+	// Variant/legacy selectors keep opaque `id` for lookup but resolve the full
+	// model policy (identity, thinking, compat, catalog assignments/corrections)
+	// against the canonical `requestModelId` when present — otherwise opaque
+	// aliases of e.g. grok-4.5 miss supports-tools=false and gemini-3-flash
+	// misses sand-wire-model-id.
+	const requestModelId = spec.requestModelId?.trim();
+	const policy =
+		requestModelId && requestModelId !== spec.id
+			? resolveModelPolicy({ ...spec, id: requestModelId })
+			: resolveModelPolicy(spec);
+	const identity = policy.identity;
 	const supportsComputerUseConfig = explicitComputerUseConfig(spec);
 	const model: Model<TApi> = {
 		...spec,
 		name: cleanModelName(spec.name),
-		identity: policy.identity,
-		requiresGlyphTokenization: policy.identity.class === "anthropic",
+		identity,
+		requiresGlyphTokenization: identity.class === "anthropic",
 		tokenizer: spec.tokenizer ?? resolveModelTokenizer(spec.requestModelId ?? spec.id),
 		thinking: policy.thinking,
-		supportsComputerUse: supportsOpenAIGAComputerUse(spec, policy.identity, supportsComputerUseConfig),
+		supportsComputerUse: supportsOpenAIGAComputerUse(spec, identity, supportsComputerUseConfig),
 		supportsComputerUseConfig,
 		compat: policy.compat,
 		compatConfig: spec.compat,
 	};
 	applyCatalogAssignments(model, policy.catalog);
 	applyCatalogCorrections(model, policy.catalog);
+	// Discovery can mark non-reasoning / unrecognized-only vocabularies with an
+	// explicit empty thinking ladder. Catalog `reasoning` must not OR-upgrade
+	// that surface after resolveThinkingPolicy already preserved the absence.
+	if (
+		policy.catalog.preserveAuthoredThinking === true &&
+		spec.thinking !== undefined &&
+		spec.thinking.efforts.length === 0
+	) {
+		model.reasoning = Boolean(spec.reasoning);
+	}
 	return model;
 }

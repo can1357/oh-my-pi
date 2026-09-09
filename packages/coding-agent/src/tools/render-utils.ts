@@ -6,15 +6,23 @@
  */
 
 import * as path from "node:path";
-import type { ToolCallContext } from "@oh-my-pi/pi-agent-core";
+import { ThinkingLevel, type ToolCallContext } from "@oh-my-pi/pi-agent-core";
 import type { Ellipsis } from "@oh-my-pi/pi-natives";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { getKeybindings, replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "@oh-my-pi/pi-tui";
-import { pluralize, shortenPath } from "@oh-my-pi/pi-utils";
+import {
+	getKeybindings,
+	replaceTabs,
+	sliceByColumn,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+	visibleWidth,
+} from "@oh-my-pi/pi-tui";
+import { pluralize, sanitizeText, shortenPath } from "@oh-my-pi/pi-utils";
 import { formatKeyHints, type KeyId } from "../config/keybindings";
 import { isSettingsInitialized, settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import type { Theme } from "../modes/theme/theme";
+import { AUTO_THINKING, type ConfiguredThinkingLevel } from "../thinking";
 import { Hasher } from "../tui/utils";
 import { formatDimensionNote, type ResizedImage } from "../utils/image-resize";
 
@@ -51,6 +59,54 @@ export function resolveImageOptions(): { maxWidthCells: number; maxHeightCells?:
 /** Default number of terminal output rows shown before expansion. */
 export const DEFAULT_TERMINAL_PREVIEW_LINES = 10;
 
+export const FEED_MODEL_BADGE_WIDTH = 30;
+
+export function isFeedModelBadgeEnabled(): boolean {
+	return isSettingsInitialized() && settings.get("task.showResolvedModelBadge");
+}
+
+/** Compact glyph for a configured thinking level; empty for `inherit` (nothing to show). */
+export function thinkingLevelGlyph(level: ConfiguredThinkingLevel, uiTheme: Theme): string {
+	if (level === ThinkingLevel.Inherit) return "";
+	if (level === ThinkingLevel.Off) return uiTheme.status.disabled;
+	const symbol = uiTheme.thinking[level === AUTO_THINKING ? "autoPending" : level];
+	if (typeof symbol !== "string") return "";
+	const space = symbol.indexOf(" ");
+	return space < 0 ? symbol : symbol.slice(0, space);
+}
+
+/**
+ * Compact feed-row prefix: explicit thinking glyph, sanitized model identity,
+ * then advisor eye. Keep fitting icons if no model fits; preserve literal identity suffixes.
+ */
+export function formatFeedModelBadge(
+	modelIdentity: string | undefined,
+	thinkingLevel: ConfiguredThinkingLevel | undefined,
+	advisor: boolean | undefined,
+	uiTheme: Theme,
+	maxWidth = FEED_MODEL_BADGE_WIDTH,
+): string {
+	if (!modelIdentity) return "";
+	const width = Math.max(0, Math.floor(maxWidth));
+	const clean = sanitizeText(modelIdentity).replace(/\s+/g, " ").trim();
+	if (!clean || !(width > 0)) return "";
+	const glyph = thinkingLevel !== undefined ? thinkingLevelGlyph(thinkingLevel, uiTheme) : "";
+	const advisorIcon = advisor === true ? uiTheme.icon.advisor : "";
+	const prefix = glyph ? `${glyph} ` : "";
+	const suffix = advisorIcon ? ` ${advisorIcon}` : "";
+	const modelWidth = width - visibleWidth(prefix) - visibleWidth(suffix);
+	if (modelWidth < 1) {
+		const advisorWidth = visibleWidth(advisorIcon);
+		if (advisorIcon && advisorWidth <= width) {
+			const thinkingPrefix = glyph && visibleWidth(prefix) + advisorWidth <= width ? prefix : "";
+			return uiTheme.fg("accent", thinkingPrefix) + uiTheme.fg("dim", advisorIcon);
+		}
+		return glyph && visibleWidth(glyph) <= width ? uiTheme.fg("accent", glyph) : "";
+	}
+	const model = truncateMiddleToWidth(clean, modelWidth);
+	return uiTheme.fg("accent", prefix) + uiTheme.fg("dim", `${model}${suffix}`);
+}
+
 /** Keybinding action that toggles tool-output expansion. */
 const EXPAND_ACTION = "app.tools.expand";
 /** Fallback key when no binding is resolvable (e.g. outside an interactive session). */
@@ -65,6 +121,15 @@ export function expandKeyHint(): string {
 // =============================================================================
 // Text Truncation Utilities
 // =============================================================================
+/** Keep both ends of a single-line label without splitting wide characters. */
+function truncateMiddleToWidth(text: string, maxWidth: number): string {
+	const width = visibleWidth(text);
+	if (width <= maxWidth) return text;
+	if (maxWidth <= 1) return maxWidth === 1 ? "…" : "";
+	const tailWidth = Math.ceil((maxWidth - 1) / 2);
+	const headWidth = maxWidth - 1 - tailWidth;
+	return `${sliceByColumn(text, 0, headWidth, true)}…${sliceByColumn(text, width - tailWidth, tailWidth, true)}`;
+}
 
 /**
  * Get first N lines of text as preview, with each line truncated.
@@ -221,6 +286,21 @@ export function formatMeta(meta: string[], theme: Theme): string {
 function sanitizeErrorText(message: string | undefined): string {
 	const clean = (message ?? "").replace(/^Error:\s*/, "").trim();
 	return clean ? replaceTabs(truncateToWidth(clean, TRUNCATE_LENGTHS.LINE)) : "Unknown error";
+}
+
+/**
+ * Split multi-line tool text into TUI-safe display lines.
+ * Splits CRLF/LF, collapses stray `\r` progress overwrites to the final
+ * segment (mirroring terminal rendering), and expands tabs — so raw
+ * subprocess or fetched output (e.g. Windows ssh emitting CRLF, tab-indented
+ * web content) can't corrupt the framed block layout with cursor-moving
+ * control characters or tab-stop width mismatches.
+ */
+export function sanitizeDisplayLines(text: string): string[] {
+	return text.split(/\r?\n/).map(line => {
+		const idx = line.lastIndexOf("\r");
+		return replaceTabs(idx < 0 ? line : line.slice(idx + 1));
+	});
 }
 
 export function formatErrorMessage(message: string | undefined, theme: Theme): string {

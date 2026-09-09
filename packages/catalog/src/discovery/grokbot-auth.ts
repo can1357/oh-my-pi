@@ -6,6 +6,7 @@
  * /sand-box/inference-credential. Machine id feeds `x-cursor-checksum`.
  */
 import * as path from "node:path";
+import { AsyncLocalStorage } from "node:async_hooks";
 import { $env, getAgentDir, logger, parseEnvFile, parseEnvFileAsync } from "@oh-my-pi/pi-utils";
 import type { FetchImpl } from "../types";
 
@@ -15,13 +16,18 @@ export const GROKBOT_CLIENT_TYPE = "sand";
 
 /**
  * Join a sand API path onto a configured backend while preserving any reverse-proxy
- * path prefix (e.g. `https://proxy.example/grokbot`). `new URL("/sand-box/…", base)`
- * resets the pathname; concatenating onto the trailing-slash-trimmed base keeps it.
+ * path prefix (e.g. `https://proxy.example/grokbot`) and query string
+ * (e.g. `?api_key=secret`). `new URL("/sand-box/…", base)` resets the pathname;
+ * appending onto `pathname` keeps path + search intact.
  */
-export function joinGrokbotBackendUrl(baseUrl: string, path: string): URL {
-	const normalized = (baseUrl.trim() || GROKBOT_BACKEND).replace(/\/+$/, "") || GROKBOT_BACKEND;
-	const suffix = path.startsWith("/") ? path : `/${path}`;
-	return new URL(`${normalized}${suffix}`);
+export function joinGrokbotBackendUrl(baseUrl: string, apiPath: string): URL {
+	// Parse first so trailing-slash normalization only touches pathname — never
+	// a query value that happens to end in `/` (e.g. `?token=signed-value/`).
+	const url = new URL(baseUrl.trim() || GROKBOT_BACKEND);
+	const suffix = apiPath.startsWith("/") ? apiPath : `/${apiPath}`;
+	const basePath = url.pathname.replace(/\/+$/, "");
+	url.pathname = `${basePath}${suffix}`;
+	return url;
 }
 /**
  * Stamped sand client app version (matches current sand-host client stamp).
@@ -36,6 +42,39 @@ export const GROKBOT_DEFAULT_TOKEN_TTL_MS = 10 * 60_000;
 /** Shared with Bedrock/Vertex env hooks — not a literal renewal credential. */
 export const GROKBOT_AUTHENTICATED_SENTINEL = "<authenticated>";
 const STAMPED_VERSION_BASE = /^(\d+\.\d+\.\d+)(?:-.+)?$/;
+
+/**
+ * Parallel-safe auth source for tests and embedded callers. When set via
+ * {@link runWithGrokbotAuthSource}, secrets/env reads use this overlay instead
+ * of mutating `process.env` or the process-wide agent dir.
+ */
+export type GrokbotAuthSource = {
+	secretsPath?: string;
+	/** Present keys override `$env`; `undefined` values mean unset (no fallthrough). */
+	env?: Record<string, string | undefined>;
+};
+
+const grokbotAuthSource = new AsyncLocalStorage<GrokbotAuthSource>();
+
+/** Run `fn` with an injected secrets path / env overlay (parallel-test safe). */
+export function runWithGrokbotAuthSource<T>(source: GrokbotAuthSource, fn: () => T): T {
+	return grokbotAuthSource.run(source, fn);
+}
+
+/** Async counterpart of {@link runWithGrokbotAuthSource}. */
+export function runWithGrokbotAuthSourceAsync<T>(source: GrokbotAuthSource, fn: () => Promise<T>): Promise<T> {
+	return grokbotAuthSource.run(source, fn);
+}
+
+function grokbotEnv(name: string): string | undefined {
+	const overlay = grokbotAuthSource.getStore()?.env;
+	if (overlay && Object.prototype.hasOwnProperty.call(overlay, name)) {
+		const value = overlay[name];
+		return typeof value === "string" && value.trim() ? value.trim() : undefined;
+	}
+	const fromProcess = $env[name];
+	return typeof fromProcess === "string" && fromProcess.trim() ? fromProcess.trim() : undefined;
+}
 
 export type GrokbotConfig = {
 	renewal: string;
@@ -112,7 +151,7 @@ export function getAccessTokenExpiryMs(token: string): number | null {
 }
 
 export function grokbotSecretsPath(): string {
-	return path.join(getAgentDir(), "secrets", "grokbot.env");
+	return grokbotAuthSource.getStore()?.secretsPath ?? path.join(getAgentDir(), "secrets", "grokbot.env");
 }
 
 export async function loadGrokbotSecretFile(filePath = grokbotSecretsPath()): Promise<Record<string, string>> {
@@ -142,8 +181,10 @@ export function resolveGrokbotDiscoveryIdentity(overrides?: { namespace?: string
 		return { namespace: overrideNs, clientVersion: overrideVer };
 	}
 	const file = loadGrokbotSecretFileSync();
-	const namespace = overrideNs || $env.GROKBOT_NAMESPACE || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
-	const explicitVersion = overrideVer || $env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
+	const namespace =
+		overrideNs || grokbotEnv("GROKBOT_NAMESPACE") || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
+	const explicitVersion =
+		overrideVer || grokbotEnv("GROKBOT_CLIENT_VERSION") || file.GROKBOT_CLIENT_VERSION || undefined;
 	return {
 		namespace,
 		clientVersion: resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION, explicitVersion),
@@ -165,8 +206,10 @@ export async function resolveGrokbotDiscoveryIdentityAsync(overrides?: {
 		return { namespace: overrideNs, clientVersion: overrideVer };
 	}
 	const file = await loadGrokbotSecretFile();
-	const namespace = overrideNs || $env.GROKBOT_NAMESPACE || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
-	const explicitVersion = overrideVer || $env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
+	const namespace =
+		overrideNs || grokbotEnv("GROKBOT_NAMESPACE") || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
+	const explicitVersion =
+		overrideVer || grokbotEnv("GROKBOT_CLIENT_VERSION") || file.GROKBOT_CLIENT_VERSION || undefined;
 	return {
 		namespace,
 		clientVersion: resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION, explicitVersion),
@@ -178,7 +221,7 @@ export async function resolveGrokbotDiscoveryIdentityAsync(overrides?: {
  * Env wins over secrets-file, matching `loadGrokbotConfig`.
  */
 export function resolveGrokbotMachineId(): string | undefined {
-	const fromEnv = $env.GROKBOT_MACHINE_ID?.trim() || undefined;
+	const fromEnv = grokbotEnv("GROKBOT_MACHINE_ID");
 	if (fromEnv) return fromEnv;
 	const file = loadGrokbotSecretFileSync();
 	const fromFile = file.GROKBOT_MACHINE_ID?.trim() || undefined;
@@ -199,8 +242,8 @@ export function resolveGrokbotMachineId(): string | undefined {
  * or ModelRegistry would expose models that `streamGrokBot` always rejects.
  */
 export function resolveGrokbotEnvApiKey(): string | undefined {
-	const fromEnv = $env.GROKBOT_RENEWAL_CREDENTIAL || $env.SAND_INFERENCE_RENEWAL_CREDENTIAL || undefined;
-	const machineFromEnv = $env.GROKBOT_MACHINE_ID?.trim() || undefined;
+	const fromEnv = grokbotEnv("GROKBOT_RENEWAL_CREDENTIAL") || grokbotEnv("SAND_INFERENCE_RENEWAL_CREDENTIAL");
+	const machineFromEnv = grokbotEnv("GROKBOT_MACHINE_ID");
 	if (fromEnv && machineFromEnv) return fromEnv;
 
 	const file = loadGrokbotSecretFileSync();
@@ -222,7 +265,7 @@ export function resolveGrokbotEnvApiKey(): string | undefined {
 export function resolveGrokbotCacheCredential(apiKey?: string): string {
 	const trimmed = apiKey?.trim();
 	if (trimmed && trimmed !== GROKBOT_AUTHENTICATED_SENTINEL) return trimmed;
-	const fromEnv = $env.GROKBOT_RENEWAL_CREDENTIAL || $env.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
+	const fromEnv = grokbotEnv("GROKBOT_RENEWAL_CREDENTIAL") || grokbotEnv("SAND_INFERENCE_RENEWAL_CREDENTIAL") || "";
 	if (fromEnv) return fromEnv;
 	const file = loadGrokbotSecretFileSync();
 	return file.GROKBOT_RENEWAL_CREDENTIAL || file.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
@@ -232,7 +275,7 @@ export function resolveGrokbotCacheCredential(apiKey?: string): string {
 export async function resolveGrokbotCacheCredentialAsync(apiKey?: string): Promise<string> {
 	const trimmed = apiKey?.trim();
 	if (trimmed && trimmed !== GROKBOT_AUTHENTICATED_SENTINEL) return trimmed;
-	const fromEnv = $env.GROKBOT_RENEWAL_CREDENTIAL || $env.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
+	const fromEnv = grokbotEnv("GROKBOT_RENEWAL_CREDENTIAL") || grokbotEnv("SAND_INFERENCE_RENEWAL_CREDENTIAL") || "";
 	if (fromEnv) return fromEnv;
 	const file = await loadGrokbotSecretFile();
 	return file.GROKBOT_RENEWAL_CREDENTIAL || file.SAND_INFERENCE_RENEWAL_CREDENTIAL || "";
@@ -240,20 +283,20 @@ export async function resolveGrokbotCacheCredentialAsync(apiKey?: string): Promi
 
 export async function loadGrokbotConfig(renewalOverride?: string): Promise<GrokbotConfig> {
 	const file = await loadGrokbotSecretFile();
-	const namespace = $env.GROKBOT_NAMESPACE || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
-	const explicitVersion = $env.GROKBOT_CLIENT_VERSION || file.GROKBOT_CLIENT_VERSION || undefined;
+	const namespace = grokbotEnv("GROKBOT_NAMESPACE") || file.GROKBOT_NAMESPACE || GROKBOT_DEFAULT_NAMESPACE;
+	const explicitVersion = grokbotEnv("GROKBOT_CLIENT_VERSION") || file.GROKBOT_CLIENT_VERSION || undefined;
 	// ModelRegistry may forward the env-hook sentinel as apiKey; never mint with it.
 	const override = renewalOverride?.trim();
 	const effectiveOverride = override && override !== GROKBOT_AUTHENTICATED_SENTINEL ? override : undefined;
 	return {
 		renewal:
 			effectiveOverride ||
-			$env.GROKBOT_RENEWAL_CREDENTIAL ||
-			$env.SAND_INFERENCE_RENEWAL_CREDENTIAL ||
+			grokbotEnv("GROKBOT_RENEWAL_CREDENTIAL") ||
+			grokbotEnv("SAND_INFERENCE_RENEWAL_CREDENTIAL") ||
 			file.GROKBOT_RENEWAL_CREDENTIAL ||
 			file.SAND_INFERENCE_RENEWAL_CREDENTIAL ||
 			"",
-		machineId: $env.GROKBOT_MACHINE_ID || file.GROKBOT_MACHINE_ID || "",
+		machineId: grokbotEnv("GROKBOT_MACHINE_ID") || file.GROKBOT_MACHINE_ID || "",
 		namespace,
 		clientVersion: resolveGrokbotClientVersion(namespace, GROKBOT_STAMPED_CLIENT_VERSION, explicitVersion),
 	};
@@ -340,8 +383,10 @@ export async function mintGrokbotAccessToken(
 		signal,
 	});
 	if (!response.ok) {
-		const body = await response.text().catch(() => "");
-		logger.warn("Grok Bot token renew failed", { status: response.status, body: body.slice(0, 200) });
+		// Do not log the response body — reverse proxies may echo the mint
+		// request `{ credential }` and persist the long-lived renewer.
+		await response.text().catch(() => "");
+		logger.warn("Grok Bot token renew failed", { status: response.status });
 		throw new Error(`Grok Bot token renew failed (HTTP ${response.status})`);
 	}
 	const parsed = (await response.json()) as { accessToken?: unknown; expiresAtMs?: unknown };

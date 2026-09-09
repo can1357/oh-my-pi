@@ -10,11 +10,47 @@
 - Treat Anthropic message_start as stream metadata; restore Cloudflare and MCP OAuth notes to their released sections.
 
 - Authoritative HTTP status beats free-text aborted wording; Responses file_id refs are rejected on incompatible targets.
+- Grok Bot JSON-as-text promotion aliases only tools that survived product wire-name collision resolution (e.g. drops unadvertised `edit` when `Write` came from `write`).
+- Grok Bot product Read/Write alias schemas preserve preexisting `anyOf` required groups via `allOf` instead of replacing them.
+- Grok Bot `register-builtins` loads `streamGrokBot` via a top-level import (AGENTS.md; no `import("./grokbot")` dynamic path).
+- Grok Bot `sand-wire-model-id` rewrites are tools-scoped (`sand-wire-model-id-when=tools`) so text-only requests keep the selected model.
+- Grok Bot JSON-as-text tool promotion requires catalog `sand-promote-json-text-tools` or a product wire profile (native example JSON stays text).
+- Grok Bot remaps retained SendToUser content indexes after dropping incomplete leftover tools so JSON-shaped user text is not promoted into a tool call.
+- Grok Bot correlates name-less SendToUser continuation frames by call id/index so parent-chat replies stay synthetic text.
+- Grok Bot omits `fast` when discovery left no default (does not invent `true`/`false` from whether `thinking` is advertised).
+- Grok Bot stream and AvailableModels pass the configured base URL unmodified into `joinGrokbotBackendUrl` (preserves trailing `/` inside query values).
+- Grok Bot parent-chat `SendToUser` tool/schema descriptions load from static `.md` prompt assets.
+- Catalog matrix omp `-p` slice derives `--thinking` from each selected model's probe effort (omits the flag when none is known).
+- Catalog matrix bash smoke rejects pipelines that can suppress the probe token (not only redirects/`tee`).
+- Keep-model Anthropic probe validates and replays returned Shell arguments (no fabricated echo).
+
+## [18.1.15] - 2026-09-08
+
+### Fixed
+
+- Catalog matrix derives probe effort from each built model's thinking ladder / sand defaults (no hard-coded `low`).
+- Catalog matrix Gemini Write empty-follow-up classifies via `requestModelId` for variant/legacy selectors.
+- Grok Bot omits `thinking` when the parameter is advertised but discovery left no default and no effort is sent (does not invent `false`).
+- Grok Bot probe mint failures report HTTP status only (never response bodies that may echo the renewer).
+- Grok Bot keep-model Anthropic probe validates and replays returned Shell arguments (no fabricated echo).
+- Grok Bot automation probe classifies the routed model via `classifyModel` (no `grok` substring match).
+- Grok Bot `register-builtins` loads `./grokbot` via the same lazy dynamic import as other providers (no eager protobuf/TUI graph on startup).
+- Grok Bot protobuf codec is fully typed (removed file-wide `@ts-nocheck`).
+- Grok Bot legacy matrix derives sand parameter ids and effort from live catalog + buildModel policy instead of hard-coded per-model tables.
 - Block Grok Bot JWT remint/replay after no-tool events were already published live
 - Remint after start-only Connect `unauthenticated` (no published content) while keeping a single start event
 - Empty/incomplete tool retries clear effort defaults when forcing thinking off
 - `/grokbot` Host status redacts URL userinfo and credential-shaped query params
 - Grok Bot history conversion applies the same outbound credential redaction as other providers (`transformMessages` / `normalizeSystemPrompts`)
+- Grok Bot flushes buffered stream events in content-index order (completed tools before later text)
+- Grok Bot resets SendToUser reconstruction state when each synthetic call completes
+- Grok Bot product-wire history rewrite keeps hashline `edit` when `write` owns the shared Write slot
+- Grok Bot preserves empty structured tool `args` (`{}`) on history replay so the protobuf args oneof discriminator is not dropped
+- Grok Bot classifies variant/legacy selectors via `requestModelId` for Anthropic tool-wire policy
+- Grok Bot stream HTTP error throws omit response bodies (status only) so reverse-proxy echoes are not logged
+- Grok Bot omits unadvertised `context` tiers instead of inventing `300k` / `1m`
+- Grok Bot treats non-limit stream error frames (including errorType-only) as errors
+- Grok Bot prefers `toolUse` when a completed tool call survives an output-token-limit frame
 - Grok Bot omits `thinking` from streamSimple/completeSimple when effort is unset so discovered `sandParameterDefaults` apply
 - Buffer unlabeled markdown JSON fences until end-of-stream promotion
 - Remint and replay once after a rejected Grok Bot JWT (HTTP 401 / Connect unauthenticated)
@@ -114,6 +150,10 @@
 - Grok Bot remaps retained SendToUser event indices when promoting thinking JSON to a tool call, and holds flush while promotable thinking remains.
 - Grok Bot catalog matrix rejects unknown `--ids` and counts text failures on tool-gated (supportsTools=false) rows.
 - Grok Bot catalog matrix fails tool probes that omit the follow-up ping (Write empty-stop excepted), fails authenticated AvailableModels errors, and includes `--omp` smoke failures in the exit status.
+- GitHub Copilot sign-in keeps the GitHub-owned Copilot CLI OAuth app on Enterprise domains: private instances run their own OAuth registry and reject the github.com-registered OpenCode client, which is now used only for public github.com sign-ins ([#11285](https://github.com/can1357/oh-my-pi/pull/11285) by [@H4vC](https://github.com/H4vC))
+- GitHub Copilot sign-in uses the minimal-grant OpenCode OAuth app again (`read:user` only): GitHub renders each app's existing per-user grant on the consent page, so Enterprise organizations that block the Copilot CLI app's broad historic grant can log in as on 18.1.4. API request identity still mimics the Copilot CLI, and tokens minted by either app keep working ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
+- GitHub Copilot plan/model-policy 403s no longer count as credential failures for credential-lifetime decisions: the token is valid, so stored credentials are preserved instead of wiped ([#11280](https://github.com/can1357/oh-my-pi/pull/11280) by [@H4vC](https://github.com/H4vC)).
+- Fixed custom `google-generative-ai` providers failing mid-turn model fallback when Gemini 3 tool calls are replayed without their original thought signature ([#11270](https://github.com/can1357/oh-my-pi/issues/11270)).
 
 ## [18.1.14] - 2026-09-07
 

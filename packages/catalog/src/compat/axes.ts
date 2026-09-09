@@ -43,6 +43,7 @@ const OAI = ["openai", "openai-responses"] as const;
 const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 /** Reviewed Grok Bot Anthropic+tools auto wire profiles (routers). */
 const SAND_TOOLS_WIRES = ["parent-chat", "automation", "keep-model", "error", "sand-default-fallback"] as const;
+const SAND_WIRE_MODEL_ID_WHEN = ["tools"] as const;
 
 /** Effort tiers accepted by taxonomy collapse/override vocabulary (`Effort` ∪ `"off"`). */
 export const EFFORT_TIERS: readonly string[] = [...EFFORTS, "off"];
@@ -321,6 +322,22 @@ export const AXES: Readonly<Record<string, AxisDef>> = {
 	 * working live id (`gemini-3-flash` → `gemini-3.8-flash`).
 	 */
 	"sand-wire-model-id": { key: "sandWireModelId", set: "catalog", shape: "scalar" },
+	/**
+	 * When to apply `sand-wire-model-id`. `tools` ⇒ rewrite only when the
+	 * request advertises tools (text-only keeps the selected AvailableModels id).
+	 */
+	"sand-wire-model-id-when": {
+		key: "sandWireModelIdWhen",
+		set: "catalog",
+		shape: "scalar",
+		values: SAND_WIRE_MODEL_ID_WHEN,
+	},
+	/**
+	 * Promote fenced/in-band JSON tool dumps into real toolCallParts. Opt-in for
+	 * sand-automation / Gemini / parent-chat routes that emit Shell JSON as text
+	 * instead of toolCallPart — native text responses stay text.
+	 */
+	"sand-promote-json-text-tools": { key: "sandPromoteJsonTextTools", set: "catalog", shape: "scalar" },
 	/**
 	 * Reviewed reasoning capability. Applied as a correction so synthetic
 	 * discovery/seed rows can stay neutral (`reasoning: false`) while KDL

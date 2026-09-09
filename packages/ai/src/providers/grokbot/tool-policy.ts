@@ -57,13 +57,19 @@ export function grokbotToolsSkipReason(model: { id: string; supportsTools?: bool
 
 export function resolveGrokbotSandToolPolicy(opts: {
 	modelId: string;
+	/**
+	 * Canonical AvailableModels name when `modelId` is a variant/legacy selector.
+	 * Family-dependent wire policy classifies this id, not the opaque selector.
+	 */
+	requestModelId?: string;
 	toolCount: number;
 	sandToolsWire?: AnthropicSandWireResolveContext["sandToolsWire"];
 	supportsTools?: boolean;
 	envWire?: string;
 	optionWire?: AnthropicSandToolsWire;
 }): GrokbotSandToolPolicy {
-	const identity = classifyModel("grokbot", opts.modelId, { lenient: true });
+	const policyModelId = opts.requestModelId?.trim() || opts.modelId;
+	const identity = classifyModel("grokbot", policyModelId, { lenient: true });
 	if (opts.toolCount > 0 && opts.supportsTools === false) {
 		return {
 			kind: "disabled",
@@ -73,7 +79,7 @@ export function resolveGrokbotSandToolPolicy(opts: {
 		};
 	}
 	const wire = resolveAnthropicSandToolsWire(opts.envWire, opts.optionWire, {
-		modelId: opts.modelId,
+		modelId: policyModelId,
 		toolCount: opts.toolCount,
 		sandToolsWire: opts.sandToolsWire,
 	});

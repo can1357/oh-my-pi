@@ -252,6 +252,8 @@ describe("grokbot requested model mapping", () => {
 			sandVariantStringRepresentation: true,
 			canonicalModelId: "gemini-3-flash",
 			sandWireModelId: "gemini-3.8-flash",
+			sandWireModelIdWhen: "tools",
+			toolCount: 1,
 		});
 		expect(rewritten).toEqual({ modelId: "gemini-3.8-flash" });
 		const variant = resolveGrokbotRequestedModel("gemini-3-flash[]", {
@@ -260,6 +262,8 @@ describe("grokbot requested model mapping", () => {
 			sandVariantStringRepresentation: true,
 			canonicalModelId: "gemini-3-flash",
 			sandWireModelId: "gemini-3.8-flash",
+			sandWireModelIdWhen: "tools",
+			toolCount: 2,
 		});
 		expect(variant).toEqual({ modelId: "gemini-3.8-flash" });
 		expect(resolveGrokbotRequestedModel("gemini-3.8-flash", { sandParameterIds: ["effort"], effort: "low" })).toEqual(
@@ -268,6 +272,28 @@ describe("grokbot requested model mapping", () => {
 				parameters: [{ id: "effort", value: "low" }],
 			},
 		);
+	});
+
+	test("sand-wire-model-id-when=tools preserves the selected model for text-only requests", () => {
+		const textOnly = resolveGrokbotRequestedModel("gemini-3-flash", {
+			effort: "low",
+			sandParameterIds: ["effort", "fast"],
+			canonicalModelId: "gemini-3-flash",
+			sandWireModelId: "gemini-3.8-flash",
+			sandWireModelIdWhen: "tools",
+			toolCount: 0,
+		});
+		expect(textOnly).toEqual({
+			modelId: "gemini-3-flash",
+			parameters: [{ id: "effort", value: "low" }],
+		});
+		const autoText = resolveGrokbotRequestedModel("default", {
+			sandWireModelId: "sand-default",
+			sandWireModelIdWhen: "tools",
+			toolCount: 0,
+			sandParameterIds: [],
+		});
+		expect(autoText).toEqual({ modelId: "default" });
 	});
 
 	test("sand-default stays bare with no maxMode or parameters", () => {
@@ -282,10 +308,7 @@ describe("grokbot requested model mapping", () => {
 		});
 		expect(low).toEqual({
 			modelId: "grok-4.6",
-			parameters: [
-				{ id: "effort", value: "low" },
-				{ id: "fast", value: "true" },
-			],
+			parameters: [{ id: "effort", value: "low" }],
 		});
 		const withFast = resolveGrokbotRequestedModel("grok-4.6", {
 			effort: "xhigh",
@@ -298,18 +321,24 @@ describe("grokbot requested model mapping", () => {
 		]);
 	});
 
-	test("defaults fast to true when the model advertises the parameter", () => {
+	test("omits fast when discovery left no default (does not invent true/false)", () => {
 		expect(
 			resolveGrokbotRequestedModel("grok-4.6", {
 				sandParameterIds: ["effort", "fast"],
 			}).parameters,
-		).toEqual([{ id: "fast", value: "true" }]);
+		).toBeUndefined();
 		expect(
 			resolveGrokbotRequestedModel("grok-4.6", {
 				fast: false,
 				sandParameterIds: ["effort", "fast"],
 			}).parameters,
 		).toEqual([{ id: "fast", value: "false" }]);
+		expect(
+			resolveGrokbotRequestedModel("grok-4.6", {
+				sandParameterIds: ["effort", "fast"],
+				sandParameterDefaults: { fast: "true" },
+			}).parameters,
+		).toEqual([{ id: "fast", value: "true" }]);
 		expect(
 			resolveGrokbotRequestedModel("grok-4.6", {
 				sandParameterIds: ["effort"],
@@ -393,14 +422,11 @@ describe("grokbot requested model mapping", () => {
 		).toEqual([{ id: "effort", value: "low" }]);
 	});
 
-	test("defaults fast to true when advertised; preserves explicit false", () => {
+	test("omits fast when advertised without a discovered default; preserves explicit values", () => {
 		const bare = resolveGrokbotRequestedModel("composer-2.5", {
 			sandParameterIds: ["fast"],
 		});
-		expect(bare).toEqual({
-			modelId: "composer-2.5",
-			parameters: [{ id: "fast", value: "true" }],
-		});
+		expect(bare).toEqual({ modelId: "composer-2.5" });
 		const fast = resolveGrokbotRequestedModel("composer-2.5", {
 			fast: true,
 			sandParameterIds: ["fast"],
@@ -443,6 +469,21 @@ describe("grokbot requested model mapping", () => {
 		).toEqual([{ id: "context", value: "512k" }]);
 	});
 
+	test("omits context when discovery left no default (does not invent 300k/1m)", () => {
+		expect(
+			resolveGrokbotRequestedModel("gpt-5.6-sol", {
+				sandParameterIds: ["context", "reasoning", "fast"],
+				sandMaxMode: false,
+			}).parameters,
+		).toBeUndefined();
+		expect(
+			resolveGrokbotRequestedModel("gpt-5.6-sol", {
+				sandParameterIds: ["context"],
+				sandMaxMode: true,
+			}).parameters,
+		).toBeUndefined();
+	});
+
 	test("empty sandParameterIds omit parameters even when effort/fast are set", () => {
 		// Catalog fact: routers/Auto advertise no parameter ids ⇒ bare wire.
 		expect(
@@ -483,6 +524,7 @@ describe("grokbot requested model mapping", () => {
 			resolveGrokbotRequestedModel("claude-opus-5", {
 				effort: "max",
 				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { context: "300k", fast: "false" },
 			}),
 		).toEqual({
 			modelId: "claude-opus-5",
@@ -499,6 +541,7 @@ describe("grokbot requested model mapping", () => {
 				fast: true,
 				sandMaxMode: true,
 				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { context: "1m" },
 			}).parameters,
 		).toEqual([
 			{ id: "thinking", value: "true" },
@@ -511,12 +554,24 @@ describe("grokbot requested model mapping", () => {
 				thinking: false,
 				effort: "low",
 				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { context: "300k" },
 			}).parameters,
 		).toEqual([
 			{ id: "thinking", value: "false" },
 			{ id: "context", value: "300k" },
 			{ id: "effort", value: "low" },
-			{ id: "fast", value: "false" },
+		]);
+		// Without discovered/explicit fast, omit it (do not invent from thinking).
+		expect(
+			resolveGrokbotRequestedModel("claude-opus-5", {
+				effort: "max",
+				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { context: "300k" },
+			}).parameters,
+		).toEqual([
+			{ id: "thinking", value: "true" },
+			{ id: "context", value: "300k" },
+			{ id: "effort", value: "max" },
 		]);
 		// Discovered thinking=false must win over effort-derived true (Codex P1).
 		expect(
@@ -531,6 +586,15 @@ describe("grokbot requested model mapping", () => {
 			{ id: "effort", value: "high" },
 			{ id: "fast", value: "false" },
 		]);
+		// Advertised thinking with no discovered default and no effort must omit
+		// the parameter — inventing thinking=false silently disables the server default.
+		// Same for fast: do not invent false from thinking being advertised.
+		expect(
+			resolveGrokbotRequestedModel("claude-opus-5", {
+				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { context: "300k" },
+			}).parameters,
+		).toEqual([{ id: "context", value: "300k" }]);
 	});
 });
 
@@ -865,6 +929,38 @@ describe("grokbot sand-host client parity", () => {
 				toolCallId: "c-empty",
 				toolName: "apply_patch",
 				rawToolCallArgs: "",
+			},
+		]);
+	});
+
+	test("preserves empty structured args on the wire", () => {
+		// No-argument tools complete with `{}`; dropping field 3 loses the args
+		// oneof discriminator on history replay (omitEmpty would erase encodeStruct({})).
+		const encoded = encodeInferenceStreamRequest({
+			messages: [
+				{
+					role: 2,
+					toolCalls: [
+						{
+							toolCallId: "c-empty-args",
+							toolName: "list_resources",
+							args: {},
+						},
+					],
+				},
+			],
+			requestedModel: { modelId: "grok-4.5" },
+		});
+		const decoded = decodeInferenceStreamRequest(encoded) as unknown as {
+			messages: Array<{
+				toolCalls?: Array<{ toolCallId: string; toolName: string; args?: unknown; rawToolCallArgs?: string }>;
+			}>;
+		};
+		expect(decoded.messages[0]?.toolCalls).toEqual([
+			{
+				toolCallId: "c-empty-args",
+				toolName: "list_resources",
+				args: {},
 			},
 		]);
 	});
@@ -1618,6 +1714,69 @@ describe("grokbot incomplete tool calls", () => {
 		expect(result.content).toEqual([expect.objectContaining({ type: "toolCall", id: "c1", name: "Read" })]);
 	});
 
+	test("flushes completed tools before later buffered text by contentIndex", async () => {
+		// Incomplete tool@0 + text@1 + tool completion must publish toolcall_*@0
+		// before text_*@1 — otherwise ACP sees a sparse/out-of-order partial.
+		mockAuth();
+		const open = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: { toolCallId: "c1", toolName: "Read", args: '{"path":', isComplete: false },
+			}),
+		);
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: "later", isFinal: true } }));
+		const complete = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "c1",
+					toolName: "Read",
+					args: '{"path":"/tmp/x"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(open, text, complete, trailer)) as FetchImpl;
+		const toolsContext: Context = {
+			messages: [{ role: "user", content: "call", timestamp: 1 }],
+			tools: [
+				{
+					name: "Read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: { path: { type: "string" } },
+						required: ["path"],
+					},
+				},
+			],
+		};
+
+		const stream = streamGrokBot(model, toolsContext, { apiKey: "renew", fetch: fetchImpl });
+		const ordered: Array<{ type: string; contentIndex?: number }> = [];
+		for await (const event of stream) {
+			if (
+				event.type === "toolcall_start" ||
+				event.type === "toolcall_end" ||
+				event.type === "text_start" ||
+				event.type === "text_delta" ||
+				event.type === "text_end"
+			) {
+				ordered.push({
+					type: event.type,
+					contentIndex: "contentIndex" in event ? event.contentIndex : undefined,
+				});
+			}
+		}
+		const result = await stream.result();
+		expect(result.stopReason).toBe("toolUse");
+		const firstTool = ordered.findIndex(e => e.type === "toolcall_start");
+		const firstText = ordered.findIndex(e => e.type.startsWith("text_"));
+		expect(firstTool).toBeGreaterThanOrEqual(0);
+		expect(firstText).toBeGreaterThan(firstTool);
+		expect(ordered[firstTool]?.contentIndex).toBe(0);
+		expect(ordered[firstText]?.contentIndex).toBe(1);
+	});
+
 	test("finalizes complete tool calls as toolUse", async () => {
 		mockAuth();
 		const complete = frameConnectProto(
@@ -1958,7 +2117,7 @@ describe("grokbot request headers", () => {
 		expect(result.responseId).toBe("resp-1");
 	});
 
-	test("gemini-3-flash catalog rewrite sends bare gemini-3.8-flash on the wire", async () => {
+	test("gemini-3-flash catalog rewrite sends bare gemini-3.8-flash only when tools are present", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
 			machineId: "machine",
@@ -2001,9 +2160,10 @@ describe("grokbot request headers", () => {
 			});
 			expect(gemini.id).toBe(spec.id);
 			expect(gemini.sandWireModelId).toBe("gemini-3.8-flash");
+			expect(gemini.sandWireModelIdWhen).toBe("tools");
 			expect(gemini.sandToolsWire).toBeUndefined();
 
-			let requested: unknown;
+			let textOnlyRequested: unknown;
 			await streamGrokBot(
 				gemini as Model<"grokbot-sand">,
 				{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
@@ -2012,12 +2172,49 @@ describe("grokbot request headers", () => {
 					fetch: fetchImpl,
 					effort: "low",
 					onPayload: body => {
-						requested = (body as { requestedModel?: unknown }).requestedModel;
+						textOnlyRequested = (body as { requestedModel?: unknown }).requestedModel;
 						return body;
 					},
 				},
 			).result();
-			expect(requested).toEqual({ modelId: "gemini-3.8-flash" });
+			expect(textOnlyRequested).toEqual(
+				spec.sandParameterIds
+					? {
+							modelId: "gemini-3-flash",
+							isVariantStringRepresentation: true,
+							parameters: [{ id: "effort", value: "low" }],
+						}
+					: { modelId: "gemini-3-flash" },
+			);
+
+			let withToolsRequested: unknown;
+			await streamGrokBot(
+				gemini as Model<"grokbot-sand">,
+				{
+					messages: [{ role: "user", content: "hi", timestamp: 1 }],
+					tools: [
+						{
+							name: "bash",
+							description: "Run a shell command.",
+							parameters: {
+								type: "object",
+								properties: { command: { type: "string" } },
+								required: ["command"],
+							},
+						},
+					],
+				},
+				{
+					apiKey: "renew",
+					fetch: fetchImpl,
+					effort: "low",
+					onPayload: body => {
+						withToolsRequested = (body as { requestedModel?: unknown }).requestedModel;
+						return body;
+					},
+				},
+			).result();
+			expect(withToolsRequested).toEqual({ modelId: "gemini-3.8-flash" });
 		}
 	});
 

@@ -1065,7 +1065,9 @@ function resolveThinkingPolicy<TApi extends Api>(
 	axes: ResolvedAxes,
 	compat: CompatOf<TApi>,
 ): ThinkingConfig | undefined {
-	if (!spec.reasoning) return undefined;
+	// Spec reasoning OR reviewed catalog `reasoning` (neutral seeds/routers).
+	// Authored empty ladders still short-circuit below via preserve-authored-thinking.
+	if (!spec.reasoning && axes.catalog.reasoning !== true) return undefined;
 	if (
 		spec.provider === "cline-pass" &&
 		compat !== undefined &&
@@ -1187,6 +1189,7 @@ function fillExplicitThinking<TApi extends Api>(
 function buildResolveTarget<TApi extends Api>(spec: ModelSpec<TApi>, identity: ModelIdentity): ResolveTarget {
 	const target: ResolveTarget = {
 		provider: spec.provider,
+		api: spec.api,
 		class: identity.class,
 		model: spec.id,
 		reasoning: Boolean(spec.reasoning),

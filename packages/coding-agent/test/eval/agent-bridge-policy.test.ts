@@ -797,6 +797,8 @@ describe("agent() through eval runtimes", () => {
 
 		expect(result.exitCode).toBe(0);
 
+		// Wait-start, interval, and wait-end snapshots may all be delivered.
+		// Assert the final enriched state, not a timing-dependent event count (#10821).
 		const agentEvents = events.filter(event => event.op === "agent");
 		const completedIndex = agentEvents.findIndex(event => event.status === "completed");
 		expect(completedIndex).toBeGreaterThan(0);
@@ -809,7 +811,6 @@ describe("agent() through eval runtimes", () => {
 		expect(running.currentTool).toBe("read");
 		expect(running.lastIntent).toBe("Reading config");
 		expect(running.toolCount).toBe(4);
-
 		expect(completed.status).toBe("completed");
 		expect(completed.toolCount).toBe(7);
 		expect(completed.cost).toBeCloseTo(0.06);

@@ -5,7 +5,7 @@ import { type CodexModelDiscoveryResult, fetchCodexModels } from "../discovery/c
 import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import { fetchGrokbotAvailableModels } from "../discovery/grokbot";
-import { resolveGrokbotDiscoveryIdentity } from "../discovery/grokbot-auth";
+import { GROKBOT_AUTHENTICATED_SENTINEL, resolveGrokbotDiscoveryIdentity } from "../discovery/grokbot-auth";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModel } from "../models";
 import type { Api, FetchImpl, Model, ModelSpec } from "../types";
@@ -478,7 +478,23 @@ export function grokbotModelManagerOptions(
 		...(apiKey
 			? {
 					dynamicModelsAuthoritative: true,
-					fetchDynamicModels: async () => fetchGrokbotAvailableModels({ apiKey, baseUrl, fetch, headers }),
+					fetchDynamicModels: async () => {
+						// When apiKey is the file-backed sentinel, mint/discovery must
+						// use the same expanded renewer that scoped cacheProviderId —
+						// never re-read ambient secrets (profile can change mid-flight).
+						const discoveryApiKey =
+							apiKey === GROKBOT_AUTHENTICATED_SENTINEL && config.cacheCredential?.trim()
+								? config.cacheCredential.trim()
+								: apiKey;
+						return fetchGrokbotAvailableModels({
+							apiKey: discoveryApiKey,
+							baseUrl,
+							fetch,
+							headers,
+							namespace: identity.namespace,
+							clientVersion: identity.clientVersion,
+						});
+					},
 				}
 			: undefined),
 	};

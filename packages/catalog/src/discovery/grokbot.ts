@@ -13,6 +13,7 @@ import {
 	clearGrokbotTokenCache,
 	createGrokbotChecksum,
 	grokbotClientHeaders,
+	joinGrokbotBackendUrl,
 	loadGrokbotConfig,
 	mergeGrokbotHeaders,
 	mintGrokbotAccessToken,
@@ -39,6 +40,10 @@ export interface GrokbotModelDiscoveryOptions {
 	fetch?: FetchImpl;
 	/** Caller/model headers (e.g. reverse-proxy API key) for mint + AvailableModels. */
 	headers?: Record<string, string>;
+	/** Override `x-sand-box-namespace` (must match model-cache identity when set). */
+	namespace?: string;
+	/** Override `x-cursor-client-version` (must match model-cache identity when set). */
+	clientVersion?: string;
 }
 
 /**
@@ -52,15 +57,24 @@ export async function fetchGrokbotAvailableModels(
 	options: GrokbotModelDiscoveryOptions = {},
 ): Promise<ModelSpec<"grokbot-sand">[] | null> {
 	const timeoutMs = options.timeoutMs ?? 8_000;
-	const resolvedBaseUrl = (options.baseUrl ?? GROKBOT_BACKEND).replace(/\/+$/, "");
-	const requestUrl = `${resolvedBaseUrl}${GROKBOT_AVAILABLE_MODELS_PATH}`;
+	const resolvedBaseUrl = options.baseUrl?.trim() || GROKBOT_BACKEND;
+	const requestUrl = joinGrokbotBackendUrl(resolvedBaseUrl, GROKBOT_AVAILABLE_MODELS_PATH).href;
 
 	const controller = new AbortController();
 	const timer = setTimeout(() => controller.abort(), timeoutMs);
 	const signal = options.signal ? AbortSignal.any([controller.signal, options.signal]) : controller.signal;
 
 	try {
-		const cfg = await loadGrokbotConfig(options.apiKey);
+		const loaded = await loadGrokbotConfig(options.apiKey);
+		const overrideNs = options.namespace?.trim();
+		const overrideVer = options.clientVersion?.trim();
+		// Prefer the same resolved identity used for model-cache scoping so a
+		// catalog fetched under one namespace/version is never stored under another.
+		const cfg = {
+			...loaded,
+			...(overrideNs ? { namespace: overrideNs } : {}),
+			...(overrideVer ? { clientVersion: overrideVer } : {}),
+		};
 		const machineId = cfg.machineId;
 		if (!cfg.renewal || !machineId) {
 			return null;
@@ -201,29 +215,36 @@ function toGrokbotModelSpecs(row: GrokbotAvailableModel, baseUrl: string, id: st
 	for (const variant of row.variants ?? []) {
 		const legacySlug = variant.legacySlug?.trim();
 		const variantString = variant.variantStringRepresentation?.trim();
-		const selector =
-			legacySlug && legacySlug !== id
-				? legacySlug
-				: variantString && variantString !== id
-					? variantString
-					: undefined;
-		if (!selector) continue;
+		// Emit every distinct advertised selector — preferring legacy alone used
+		// to drop variantStringRepresentation when both were present.
+		const selectors: { id: string; isVariantString: boolean }[] = [];
+		if (legacySlug && legacySlug !== id) {
+			selectors.push({ id: legacySlug, isVariantString: false });
+		}
+		if (variantString && variantString !== id && variantString !== legacySlug) {
+			selectors.push({ id: variantString, isVariantString: true });
+		}
+		if (selectors.length === 0) continue;
 		const variantParams = collectVariantParameterIds(variant);
 		const parameterIds = variantParams.length > 0 ? variantParams : base.sandParameterIds;
 		const sandMaxMode =
 			variant.isDefaultMaxConfig === true ? true : variant.isDefaultNonMaxConfig === true ? false : base.sandMaxMode;
-		out.push({
-			...base,
-			id: selector,
-			name: variant.displayName?.trim() || selector,
-			requestModelId: id,
-			sandParameterIds: parameterIds,
-			sandParameterDefaults: collectVariantSandParameterDefaults(variant) ?? base.sandParameterDefaults,
-			sandMaxMode,
-			sandVariantStringRepresentation: !legacySlug && Boolean(variantString),
-			contextWindow: resolveGrokbotContextWindow(row, sandMaxMode === true),
-			aliases: undefined,
-		});
+		const sandParameterDefaults = collectVariantSandParameterDefaults(variant) ?? base.sandParameterDefaults;
+		const contextWindow = resolveGrokbotContextWindow(row, sandMaxMode === true);
+		for (const selector of selectors) {
+			out.push({
+				...base,
+				id: selector.id,
+				name: variant.displayName?.trim() || selector.id,
+				requestModelId: id,
+				sandParameterIds: parameterIds,
+				sandParameterDefaults,
+				sandMaxMode,
+				sandVariantStringRepresentation: selector.isVariantString,
+				contextWindow,
+				aliases: undefined,
+			});
+		}
 	}
 	return out;
 }
@@ -267,10 +288,15 @@ function toGrokbotModelSpec(row: GrokbotAvailableModel, baseUrl: string, id: str
 	const parameterIds = collectParameterIds(row);
 	const { efforts, unrecognizedEffortOnly } = collectEffortValues(row, parameterIds);
 	const reasoning = row.supportsThinking === true || efforts.length > 0 || unrecognizedEffortOnly;
+	// Empty ladder marks authored non-reasoning (and unrecognized-only effort
+	// vocabularies) so preserve-authored-thinking can block KDL reasoning
+	// upgrades on live rows. Synthetic sand routers omit thinking and still
+	// receive reviewed KDL `reasoning` fills.
+	const isSandRouter = (GROKBOT_SAND_ROUTER_IDS as readonly string[]).includes(id);
 	const thinking =
 		efforts.length > 0
 			? ({ mode: "effort", efforts } satisfies ThinkingConfig)
-			: unrecognizedEffortOnly
+			: unrecognizedEffortOnly || (!reasoning && !isSandRouter)
 				? ({ mode: "effort", efforts: [] } satisfies ThinkingConfig)
 				: undefined;
 	const variantLegacySlugs = (row.variants ?? [])
@@ -345,19 +371,11 @@ function collectEffortValues(
 	for (const level of THINKING_EFFORTS) {
 		if (values.has(level)) ordered.push(level);
 	}
-	// Common ladder only when the server advertised the param with no values at
-	// all. Nonempty unrecognized values (e.g. only `adaptive`) must not invent
-	// low/medium/high/xhigh the upstream never offered.
-	if (
-		ordered.length === 0 &&
-		values.size === 0 &&
-		(parameterIds.includes("effort") || parameterIds.includes("reasoning"))
-	) {
-		return {
-			efforts: [Effort.Low, Effort.Medium, Effort.High, Effort.XHigh],
-			unrecognizedEffortOnly: false,
-		};
-	}
+	// Leave the ladder empty when the server advertised the param with no
+	// values — reviewed fallbacks belong in `providers/grokbot.kdl` via
+	// buildModel, not an invented low/medium/high/xhigh vocabulary here.
+	// Nonempty unrecognized values (e.g. only `adaptive`) stay empty too so
+	// preserve-authored-thinking can block KDL backfill.
 	return { efforts: ordered, unrecognizedEffortOnly: ordered.length === 0 && values.size > 0 };
 }
 

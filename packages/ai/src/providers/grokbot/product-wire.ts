@@ -6,6 +6,9 @@
  */
 import type { Context } from "../../types";
 import { toolWireSchema } from "../../utils/schema/wire";
+import sendToUserContentDescription from "./send-to-user-content-description.md" with { type: "text" };
+import sendToUserDescription from "./send-to-user-description.md" with { type: "text" };
+import sendToUserTypeDescription from "./send-to-user-type-description.md" with { type: "text" };
 
 export type ProductWireProfile = "automation" | "parent-chat";
 
@@ -160,7 +163,9 @@ type Tool = NonNullable<Context["tools"]>[number];
 /**
  * When advertising a property alias (e.g. `contents` for `content`), keep the
  * rest of `required` and express the alias pair as `anyOf` so strict schema
- * consumers accept either key.
+ * consumers accept either key. If the schema already carries an `anyOf` (e.g.
+ * alternative required argument groups), AND that union with the alias pair via
+ * `allOf` instead of replacing it.
  */
 function withRequiredPropertyAlias(
 	schema: Record<string, unknown>,
@@ -171,10 +176,22 @@ function withRequiredPropertyAlias(
 		? (schema.required as unknown[]).filter((key): key is string => typeof key === "string")
 		: [];
 	if (!required.includes(canonical)) return schema;
-	return {
-		...schema,
-		required: required.filter(key => key !== canonical),
+	const aliasConstraint = {
 		anyOf: [{ required: [canonical] }, { required: [alias] }],
+	};
+	const { anyOf: existingAnyOf, ...rest } = schema;
+	const remainingRequired = required.filter(key => key !== canonical);
+	if (Array.isArray(existingAnyOf) && existingAnyOf.length > 0) {
+		return {
+			...rest,
+			required: remainingRequired,
+			allOf: [{ anyOf: existingAnyOf }, aliasConstraint],
+		};
+	}
+	return {
+		...rest,
+		required: remainingRequired,
+		...aliasConstraint,
 	};
 }
 
@@ -249,18 +266,18 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 export function sendToUserProductTool(): ProductWireTool {
 	return {
 		name: SEND_TO_USER_WIRE_NAME,
-		description: "Send a user-visible message. The user cannot see tool output or your thinking — only SendToUser.",
+		description: sendToUserDescription.trim(),
 		parameters: wrapToolParameters({
 			type: "object",
 			properties: {
 				type: {
 					type: "string",
 					enum: ["text"],
-					description: "text for chat messages visible to the user",
+					description: sendToUserTypeDescription.trim(),
 				},
 				content: {
 					type: "string",
-					description: "Message content the user will see",
+					description: sendToUserContentDescription.trim(),
 				},
 			},
 			required: ["type", "content"],
@@ -339,12 +356,39 @@ export function augmentToolIndexForProductWire(
 
 /**
  * Rewrite historical inference tool call/result names to product field-2 aliases
- * (bash→Shell, read→Read, write/edit→Write) so replayed history matches the
- * advertised product-wire schema. Does not mutate the input array.
+ * (bash→Shell, read→Read, write→Write) so replayed history matches the
+ * advertised product-wire schema. Shared sand slots (edit+write → Write) only
+ * rewrite the omp name that currently owns the slot — a hashline `edit` call
+ * must not be relabeled Write when `write` owns the advertised schema.
+ * Does not mutate the input array.
  */
 export function rewriteInferenceMessagesForProductWire(
 	messages: readonly Record<string, unknown>[],
+	tools?: Context["tools"],
 ): Record<string, unknown>[] {
+	const sandOwner = new Map<string, string>();
+	if (Array.isArray(tools)) {
+		for (const tool of tools) {
+			const ompName = typeof tool?.name === "string" ? tool.name : "";
+			if (!ompName) continue;
+			const sandName = toSandField2Name(ompName);
+			if (sandName === ompName) continue;
+			const previous = sandOwner.get(sandName);
+			if (!shouldClaimSandWireName(sandName, ompName, previous)) continue;
+			sandOwner.set(sandName, ompName);
+		}
+	}
+
+	const rewriteToolName = (name: string): string => {
+		const sandName = toSandField2Name(name);
+		if (sandName === name) return name;
+		const owner = sandOwner.get(sandName);
+		// When tools are known and another omp owns this sand slot, keep the
+		// historical identity (e.g. edit stays edit while write owns Write).
+		if (owner !== undefined && owner !== name) return name;
+		return sandName;
+	};
+
 	return messages.map(msg => {
 		if (!msg || typeof msg !== "object") return msg;
 		const toolCalls = Reflect.get(msg, "toolCalls");
@@ -356,7 +400,7 @@ export function rewriteInferenceMessagesForProductWire(
 					const tc = entry as Record<string, unknown>;
 					const name = typeof tc.toolName === "string" ? tc.toolName : "";
 					if (!name) return tc;
-					const sandName = toSandField2Name(name);
+					const sandName = rewriteToolName(name);
 					return sandName === name ? tc : { ...tc, toolName: sandName };
 				}),
 			};
@@ -374,7 +418,7 @@ export function rewriteInferenceMessagesForProductWire(
 							const p = part as Record<string, unknown>;
 							const name = typeof p.toolName === "string" ? p.toolName : "";
 							if (!name) return p;
-							const sandName = toSandField2Name(name);
+							const sandName = rewriteToolName(name);
 							return sandName === name ? p : { ...p, toolName: sandName };
 						}),
 					},

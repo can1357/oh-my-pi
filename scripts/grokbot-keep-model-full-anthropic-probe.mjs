@@ -6,7 +6,7 @@
  * 2. Filters to Anthropic class via isAnthropicSandModelId.
  * 3. For each: keep-model wire, 2-turn Shell round-trip, verify routed model
  *    stays Anthropic family.
- * 4. Also tests an extended omp tool set (bash/read/write/edit/grep/glob + 
+ * 4. Also tests an extended omp tool set (bash/read/write/edit/grep/glob +
  *    todoWrite/webSearch/webFetch) to verify unmapped tools pass through
  *    with jsonSchema and don't trigger ERROR_PROVIDER_ERROR.
  *
@@ -60,7 +60,7 @@ async function fetchAvailableModels(token, cfg) {
 	if (!res.ok) throw new Error(`AvailableModels HTTP ${res.status}`);
 	const data = await res.json();
 	const models = data.models || [];
-	return models.map((m) => ({
+	return models.map(m => ({
 		id: m.id || m.name || "",
 		name: m.name || m.id || "",
 		parameterIds: m.parameterIds || m.modelParameters || [],
@@ -84,20 +84,36 @@ function parseFrames(buf) {
 		const bytes = buf.subarray(o, o + len);
 		o += len;
 		if (flags & CONNECT_END_STREAM_FLAG) {
-			try { end = JSON.parse(bytes.toString("utf8")); } catch { end = { parseError: true }; }
+			try {
+				end = JSON.parse(bytes.toString("utf8"));
+			} catch {
+				end = { parseError: true };
+			}
 			continue;
 		}
 		try {
 			const msg = decodeInferenceStreamResponse(bytes);
 			if (msg.toolCallPart?.toolName) {
-				toolCalls.push({
-					name: String(msg.toolCallPart.toolName),
-					id: String(msg.toolCallPart.toolCallId || ""),
-				});
+				const id = String(msg.toolCallPart.toolCallId || "");
+				const chunk = msg.toolCallPart.args == null ? "" : String(msg.toolCallPart.args);
+				const existing = toolCalls.find(t => t.id === id && t.name === String(msg.toolCallPart.toolName));
+				if (existing) {
+					existing.args = `${existing.args || ""}${chunk}`;
+					if (msg.toolCallPart.isComplete) existing.complete = true;
+				} else {
+					toolCalls.push({
+						name: String(msg.toolCallPart.toolName),
+						id,
+						args: chunk,
+						complete: Boolean(msg.toolCallPart.isComplete),
+					});
+				}
 			}
 			if (msg.responseInfo?.model) responseModel = String(msg.responseInfo.model);
 			if (msg.textPart?.text) textParts.push(String(msg.textPart.text));
-		} catch { /* partial frame */ }
+		} catch {
+			/* partial frame */
+		}
 	}
 	return { ok: !end?.error, toolCalls, responseModel, text: textParts.join(""), message: end?.error?.message, end };
 }
@@ -125,12 +141,44 @@ async function sendStream(token, cfg, body) {
 
 // Standard 6 omp tools (maps to 5 product tools — edit+write dedupe to Write)
 const ompTools = [
-	{ name: "bash", description: "Run a shell command.", parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } },
-	{ name: "read", description: "Read a file.", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } },
-	{ name: "write", description: "Write a file.", parameters: { type: "object", properties: { path: { type: "string" }, content: { type: "string" } }, required: ["path", "content"] } },
-	{ name: "edit", description: "Patch a file.", parameters: { type: "object", properties: { path: { type: "string" }, old: { type: "string" }, new: { type: "string" } }, required: ["path", "old", "new"] } },
-	{ name: "grep", description: "Search files.", parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] } },
-	{ name: "glob", description: "Find files.", parameters: { type: "object", properties: { glob: { type: "string" } }, required: ["glob"] } },
+	{
+		name: "bash",
+		description: "Run a shell command.",
+		parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
+	},
+	{
+		name: "read",
+		description: "Read a file.",
+		parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
+	},
+	{
+		name: "write",
+		description: "Write a file.",
+		parameters: {
+			type: "object",
+			properties: { path: { type: "string" }, content: { type: "string" } },
+			required: ["path", "content"],
+		},
+	},
+	{
+		name: "edit",
+		description: "Patch a file.",
+		parameters: {
+			type: "object",
+			properties: { path: { type: "string" }, old: { type: "string" }, new: { type: "string" } },
+			required: ["path", "old", "new"],
+		},
+	},
+	{
+		name: "grep",
+		description: "Search files.",
+		parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
+	},
+	{
+		name: "glob",
+		description: "Find files.",
+		parameters: { type: "object", properties: { glob: { type: "string" } }, required: ["glob"] },
+	},
 ];
 
 // Extended set: adds unmapped tools (todoWrite, webSearch, webFetch) that pass
@@ -138,20 +186,57 @@ const ompTools = [
 // allowlist so sand should accept them as unadvertised tools.
 const ompToolsExtended = [
 	...ompTools,
-	{ name: "todoWrite", description: "Write a todo list.", parameters: { type: "object", properties: { todos: { type: "array" } }, required: ["todos"] } },
-	{ name: "webSearch", description: "Search the web.", parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
-	{ name: "webFetch", description: "Fetch a URL.", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
+	{
+		name: "todoWrite",
+		description: "Write a todo list.",
+		parameters: { type: "object", properties: { todos: { type: "array" } }, required: ["todos"] },
+	},
+	{
+		name: "webSearch",
+		description: "Search the web.",
+		parameters: { type: "object", properties: { query: { type: "string" } }, required: ["query"] },
+	},
+	{
+		name: "webFetch",
+		description: "Fetch a URL.",
+		parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] },
+	},
 ];
 
 // ─── Tests ───
 
 function describeWire(wired) {
-	const toolNames = (wired.tools || []).map((t) => t.name);
+	const toolNames = (wired.tools || []).map(t => t.name);
 	return `model=${wired.requestedModel?.modelId} tools=[${toolNames.join(",")}] field9=${wired.acceptedUnadvertisedToolNames?.length || 0}`;
 }
 
 function isAnthropicRouted(model) {
-	return isAnthropicSandModelId(model) || /claude|fable|opus|sonnet|haiku|mythos|anthropic/i.test(model);
+	return isAnthropicSandModelId(model);
+}
+
+/** Decode Shell args and require an echo/printf of the probe token (no fabricated command). */
+function parseValidatedShellArgs(call, token) {
+	const raw = typeof call?.args === "string" ? call.args.trim() : "";
+	if (!raw) return { ok: false, reason: "empty-shell-args" };
+	let parsed;
+	try {
+		parsed = JSON.parse(raw);
+	} catch {
+		return { ok: false, reason: "shell-args-not-json" };
+	}
+	const command = typeof parsed?.command === "string" ? parsed.command : "";
+	if (!command) return { ok: false, reason: "shell-args-missing-command" };
+	// Reject redirects that discard stdout; require the token as an echo/printf argv.
+	if (/(?:^|[\s;|&])(?:tee\b|>|>>)/.test(command.replace(/\$\(.*?\)/g, ""))) {
+		return { ok: false, reason: "shell-redirect-or-tee" };
+	}
+	const echoesToken =
+		new RegExp(String.raw`(?:^|[\s;|&])(?:echo|printf)\b(?:\s+(?:-[nEe]+))*\s+(?:(['"])${token}\1|${token})(?:\s|$|[;&|])`).test(
+			command,
+		) ||
+		new RegExp(String.raw`(?:^|[\s;|&])(?:echo|printf)\b[^\n#]*\b${token}\b`).test(command);
+	if (!echoesToken) return { ok: false, reason: "shell-command-missing-token" };
+	return { ok: true, args: { command }, result: `${token}\n` };
 }
 
 async function testModel(token, cfg, modelId, tools, label) {
@@ -159,19 +244,16 @@ async function testModel(token, cfg, modelId, tools, label) {
 		sandParameterIds: ["thinking", "context", "effort", "fast"],
 		effort: "low",
 	});
-	const wired = applyAnthropicSandToolWire(
-		{ requestedModel, tools, modelId, ompTools: tools },
-		"keep-model",
-	);
+	const wired = applyAnthropicSandToolWire({ requestedModel, tools, modelId, ompTools: tools }, "keep-model");
 
 	// Wire invariants
-	const toolNames = wired.tools.map((t) => t.name);
+	const toolNames = wired.tools.map(t => t.name);
 	const wireOk =
 		wired.requestedModel.modelId === modelId &&
 		wired.subagentType === undefined &&
 		wired.automationId === undefined &&
 		(wired.acceptedUnadvertisedToolNames?.length ?? 0) > 20 &&
-		wired.tools.every((t) => t.parameters?.jsonSchema);
+		wired.tools.every(t => t.parameters?.jsonSchema);
 
 	if (!wireOk) {
 		return { modelId, pass: false, reason: "wire-fail", wire: describeWire(wired), routed: "" };
@@ -198,16 +280,41 @@ async function testModel(token, cfg, modelId, tools, label) {
 	const { res: res1, parsed: parsed1 } = await sendStream(token, cfg, body1);
 
 	if (!res1.ok || !parsed1.ok) {
-		return { modelId, pass: false, reason: `turn1-http-${res1.status}`, wire: describeWire(wired), routed: parsed1.responseModel, err: parsed1.message };
+		return {
+			modelId,
+			pass: false,
+			reason: `turn1-http-${res1.status}`,
+			wire: describeWire(wired),
+			routed: parsed1.responseModel,
+			err: parsed1.message,
+		};
 	}
 
-	const shellCall = parsed1.toolCalls.find((t) => t.name === "Shell");
+	const shellCall = parsed1.toolCalls.find(t => t.name === "Shell");
 	if (!shellCall) {
-		return { modelId, pass: false, reason: `no-shell-call(${parsed1.toolCalls.map((t) => t.name).join(",")})`, wire: describeWire(wired), routed: parsed1.responseModel };
+		return {
+			modelId,
+			pass: false,
+			reason: `no-shell-call(${parsed1.toolCalls.map(t => t.name).join(",")})`,
+			wire: describeWire(wired),
+			routed: parsed1.responseModel,
+		};
 	}
 
-	// Turn 2: feed tool result back using encodeCoreMessage fields (toolCalls / toolContent).
-	const shellArgs = { command: "echo probe-ok" };
+	const validated = parseValidatedShellArgs(shellCall, "probe-ok");
+	if (!validated.ok) {
+		return {
+			modelId,
+			pass: false,
+			reason: validated.reason,
+			wire: describeWire(wired),
+			routed: parsed1.responseModel,
+			detail: (shellCall.args || "").slice(0, 160),
+		};
+	}
+
+	// Turn 2: replay the model's exact Shell args + a result matching that command.
+	const shellArgs = validated.args;
 	const body2 = {
 		messages: [
 			{ role: 4, text: systemText },
@@ -226,7 +333,7 @@ async function testModel(token, cfg, modelId, tools, label) {
 			{
 				role: 3,
 				toolContent: {
-					parts: [{ toolCallId: shellCall.id, toolName: "Shell", result: "probe-ok" }],
+					parts: [{ toolCallId: shellCall.id, toolName: "Shell", result: validated.result }],
 				},
 			},
 		],
@@ -242,8 +349,8 @@ async function testModel(token, cfg, modelId, tools, label) {
 
 	const routedModel = parsed2.responseModel || parsed1.responseModel;
 	const routedAnthropic = isAnthropicRouted(routedModel);
-	// History replay is only proven if turn 2 emits a final answer instead of another tool call.
-	const finalResponse = parsed2.toolCalls.length === 0;
+	// History replay is only proven if turn 2 emits a final answer with the probe token.
+	const finalResponse = parsed2.toolCalls.length === 0 && (parsed2.text || "").includes("probe-ok");
 
 	const pass = res2.ok && parsed2.ok && routedAnthropic && finalResponse;
 	return {
@@ -252,7 +359,9 @@ async function testModel(token, cfg, modelId, tools, label) {
 		reason: pass
 			? "ok"
 			: !finalResponse
-				? `turn2-retried-tools(${parsed2.toolCalls.map((t) => t.name).join(",")})`
+				? parsed2.toolCalls.length > 0
+					? `turn2-retried-tools(${parsed2.toolCalls.map(t => t.name).join(",")})`
+					: "turn2-missing-token"
 				: `turn2-http-${res2.status}-${routedModel}`,
 		wire: describeWire(wired),
 		routed: routedModel,
@@ -264,7 +373,9 @@ async function testModel(token, cfg, modelId, tools, label) {
 
 async function main() {
 	const cfg = loadGrokbotConfig();
-	console.log(`config: machineId=${cfg.machineId.slice(0, 8)}… namespace=${cfg.namespace} client=${cfg.clientVersion}`);
+	console.log(
+		`config: machineId=${cfg.machineId.slice(0, 8)}… namespace=${cfg.namespace} client=${cfg.clientVersion}`,
+	);
 	const token = await mintGrokbotAccessToken(cfg);
 	console.log(`token minted ✓`);
 
@@ -274,7 +385,7 @@ async function main() {
 	console.log(`total models: ${allModels.length}`);
 
 	// Filter to Anthropic
-	const anthropicModels = allModels.filter((m) => isAnthropicSandModelId(m.id));
+	const anthropicModels = allModels.filter(m => isAnthropicSandModelId(m.id));
 	console.log(`anthropic models: ${anthropicModels.length}`);
 	for (const m of anthropicModels) {
 		console.log(`  ${m.id}`);
@@ -292,20 +403,25 @@ async function main() {
 	const results = [];
 	for (const m of anthropicModels) {
 		const r = await testModel(token, cfg, m.id, ompTools, "standard");
-		console.log(`  ${r.pass ? "PASS" : "FAIL"}  ${m.id}  routed=${r.routed}  tools=${r.tools || "?"}  reason=${r.reason}  err=${r.err || "-"}`);
+		console.log(
+			`  ${r.pass ? "PASS" : "FAIL"}  ${m.id}  routed=${r.routed}  tools=${r.tools || "?"}  reason=${r.reason}  err=${r.err || "-"}`,
+		);
 		results.push({ ...r, set: "standard" });
 	}
 
 	// Test a representative subset with extended tools (adds unmapped todoWrite/webSearch/webFetch)
 	console.log(`\n${"=".repeat(60)}`);
 	console.log(`=== Extended tool set (+todoWrite/webSearch/webFetch unmapped passthrough) ===`);
-	const extendedSubset = anthropicModels.filter((m) =>
-		["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"].includes(m.id) ||
-		anthropicModels.length <= 6
+	const extendedSubset = anthropicModels.filter(
+		m =>
+			["claude-fable-5", "claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"].includes(m.id) ||
+			anthropicModels.length <= 6,
 	);
 	for (const m of extendedSubset.length > 0 ? extendedSubset : anthropicModels.slice(0, 4)) {
 		const r = await testModel(token, cfg, m.id, ompToolsExtended, "extended");
-		console.log(`  ${r.pass ? "PASS" : "FAIL"}  ${m.id}  routed=${r.routed}  tools=${r.tools || "?"}  reason=${r.reason}  err=${r.err || "-"}`);
+		console.log(
+			`  ${r.pass ? "PASS" : "FAIL"}  ${m.id}  routed=${r.routed}  tools=${r.tools || "?"}  reason=${r.reason}  err=${r.err || "-"}`,
+		);
 		results.push({ ...r, set: "extended" });
 	}
 

@@ -267,6 +267,8 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(geminiFlash?.sandWireModelId).toBeUndefined();
 		expect(buildModel(geminiFlash!).sandToolsWire).toBeUndefined();
 		expect(buildModel(geminiFlash!).sandWireModelId).toBe("gemini-3.8-flash");
+		expect(buildModel(geminiFlash!).sandWireModelIdWhen).toBe("tools");
+		expect(buildModel(geminiFlash!).sandPromoteJsonTextTools).toBe(true);
 		expect(buildModel(geminiFlash!).id).toBe("gemini-3-flash");
 		const geminiFlashVariant = models.find(m => m.id === "gemini-3-flash[]");
 		expect(geminiFlashVariant?.requestModelId).toBe("gemini-3-flash");
@@ -288,6 +290,10 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(bundled.find(m => m.id === "auto")?.sandToolsWire).toBe("parent-chat");
 		expect(bundled.find(m => m.id === "default")?.sandWireModelId).toBe("sand-default");
 		expect(bundled.find(m => m.id === "auto")?.sandWireModelId).toBe("sand-default");
+		expect(bundled.find(m => m.id === "default")?.sandWireModelIdWhen).toBe("tools");
+		expect(bundled.find(m => m.id === "auto")?.sandWireModelIdWhen).toBe("tools");
+		expect(bundled.find(m => m.id === "sand-automation")?.sandPromoteJsonTextTools).toBe(true);
+		expect(bundled.find(m => m.id === "sand-default")?.sandPromoteJsonTextTools).toBe(true);
 		expect(bundled.find(m => m.id === "sand-cua")?.sandWireModelId).toBeUndefined();
 		expect(bundled.find(m => m.id === "sand-default")?.sandWireModelId).toBeUndefined();
 
@@ -303,6 +309,38 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(variantString?.requestModelId).toBe("variant-string-model");
 		expect(variantString?.sandVariantStringRepresentation).toBe(true);
 		expect(variantString?.sandParameterDefaults).toEqual({ effort: "high" });
+	});
+
+	test("emits both legacySlug and variantStringRepresentation when both are advertised", () => {
+		const rows = decodeGrokbotAvailableModelsResponse({
+			models: [
+				{
+					name: "dual-selector-model",
+					clientDisplayName: "Dual Selector",
+					supportsThinking: true,
+					parameterDefinitions: [{ id: "effort" }],
+					variants: [
+						{
+							legacySlug: "dual-selector-legacy",
+							variantStringRepresentation: "dual-selector-model::high",
+							displayName: "High dual",
+							parameterValues: [{ id: "effort", value: "high" }],
+						},
+					],
+				},
+			],
+		});
+		expect(rows).not.toBeNull();
+		const models = normalizeGrokbotAvailableModels(rows!);
+		const legacy = models.find(m => m.id === "dual-selector-legacy");
+		const variant = models.find(m => m.id === "dual-selector-model::high");
+		expect(legacy?.requestModelId).toBe("dual-selector-model");
+		expect(legacy?.sandVariantStringRepresentation).toBeFalsy();
+		expect(legacy?.sandParameterDefaults).toEqual({ effort: "high" });
+		expect(variant?.requestModelId).toBe("dual-selector-model");
+		expect(variant?.sandVariantStringRepresentation).toBe(true);
+		expect(variant?.sandParameterDefaults).toEqual({ effort: "high" });
+		expect(variant?.name).toBe("High dual");
 	});
 
 	test("trims whitespace from AvailableModels model ids", () => {
@@ -432,12 +470,17 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(adaptive?.thinking).toEqual({ mode: "effort", efforts: [] });
 		const emptyValues = models.find(m => m.id === "effort-param-no-values");
 		expect(emptyValues?.sandParameterIds).toEqual(["effort"]);
-		expect([...((emptyValues?.thinking?.efforts as readonly string[] | undefined) ?? [])]).toEqual([
-			"low",
-			"medium",
-			"high",
-			"xhigh",
-		]);
+		// Param advertised with no values: leave ladder empty for KDL to fill.
+		expect(emptyValues?.thinking).toBeUndefined();
+		expect(emptyValues?.reasoning).toBe(true);
+		// Without a model-specific thinking-efforts rule, buildModel must not invent.
+		expect(buildModel(emptyValues!).thinking).toBeUndefined();
+		// Reviewed KDL still fills the offline grok-4.6 seed ladder.
+		expect([
+			...((buildModel(buildGrokbotStaticSeed().find(m => m.id === "grok-4.6")!).thinking?.efforts as
+				| readonly string[]
+				| undefined) ?? []),
+		]).toEqual(["low", "medium", "high", "xhigh"]);
 	});
 
 	test("rejects envelopes without a models array; empty models is valid", () => {
@@ -463,6 +506,8 @@ describe("grokbot AvailableModels normalize", () => {
 				provider: "grokbot",
 				baseUrl: "https://api2.cursor.sh",
 				reasoning: false,
+				// Empty ladder = authored non-reasoning (same as AvailableModels).
+				thinking: { mode: "effort", efforts: [] },
 				input: ["text"],
 				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
 				contextWindow: null,

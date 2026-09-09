@@ -21,22 +21,22 @@ export type GrokbotRequestedModelOptions = {
 	effortMap?: Partial<Record<string, string>>;
 	/**
 	 * sand `fast` parameter; only sent when the model lists `fast`.
-	 * Default: explicit `fast`, then `sandParameterDefaults.fast`, then
-	 * `false` when `thinking` is also advertised (Cursor Anthropic defaults),
-	 * otherwise `true` (Cursor composer / Grok defaults).
-	 * Note: Grok models reject `fast=false` with tools (sand HTTP 422); keep the default.
+	 * Default: explicit `fast`, then `sandParameterDefaults.fast`. When discovery
+	 * left no default, the parameter is omitted (do not invent `true`/`false`).
+	 * Reviewed provider fallbacks belong in KDL `sand-parameter-defaults`, not here.
 	 */
 	fast?: boolean;
 	/**
 	 * sand `thinking` boolean; only sent when the model lists `thinking`.
 	 * Default: explicit `thinking`, then `sandParameterDefaults.thinking`, then
-	 * `true` when an effort/reasoning value is being sent, else `false`.
+	 * `true` when an effort/reasoning value is being sent. When discovery left no
+	 * default and no effort is sent, the parameter is omitted (do not invent `false`).
 	 */
 	thinking?: boolean;
 	/**
 	 * sand `context` tier (e.g. `300k` / `1m` / `272k`); only sent when the model lists `context`.
-	 * Default: explicit `context`, then `sandParameterDefaults.context`, then
-	 * `1m` when `sandMaxMode`, otherwise `300k` when discovery left no default.
+	 * Default: explicit `context`, then `sandParameterDefaults.context`. When discovery
+	 * left no default, the parameter is omitted (do not invent `300k` / `1m`).
 	 */
 	context?: string;
 	/**
@@ -61,6 +61,13 @@ export type GrokbotRequestedModelOptions = {
 	 * sand-default.
 	 */
 	sandWireModelId?: string;
+	/**
+	 * Catalog `sand-wire-model-id-when`. `tools` ⇒ apply the rewrite only when
+	 * `toolCount > 0` so text-only requests keep the selected AvailableModels id.
+	 */
+	sandWireModelIdWhen?: "tools";
+	/** Number of tools on this request (drives tools-scoped wire rewrites). */
+	toolCount?: number;
 };
 
 /**
@@ -102,7 +109,11 @@ export function resolveGrokbotRequestedModel(
 	const slug = raw.startsWith("grokbot/") ? raw.slice("grokbot/".length) : raw;
 	const rewrite = options?.sandWireModelId?.trim();
 	if (rewrite) {
-		return { modelId: rewrite };
+		const toolsOnly = options?.sandWireModelIdWhen === "tools";
+		const hasTools = (options?.toolCount ?? 0) > 0;
+		if (!toolsOnly || hasTools) {
+			return { modelId: rewrite };
+		}
 	}
 	const wireId = options?.canonicalModelId?.trim() || slug;
 
@@ -119,15 +130,20 @@ export function resolveGrokbotRequestedModel(
 		// Anthropic variants are defined as complete combinations.
 		if (allowed.has("thinking")) {
 			const discoveredThinking = defaults?.thinking?.trim();
-			const thinking =
-				options?.thinking !== undefined
-					? options.thinking
-					: discoveredThinking === "true"
-						? true
-						: discoveredThinking === "false"
-							? false
-							: Boolean(effortValue);
-			parameters.push({ id: "thinking", value: thinking ? "true" : "false" });
+			let thinking: boolean | undefined;
+			if (options?.thinking !== undefined) {
+				thinking = options.thinking;
+			} else if (discoveredThinking === "true") {
+				thinking = true;
+			} else if (discoveredThinking === "false") {
+				thinking = false;
+			} else if (effortValue) {
+				// Effort on the wire implies thinking on; otherwise leave the server default.
+				thinking = true;
+			}
+			if (thinking !== undefined) {
+				parameters.push({ id: "thinking", value: thinking ? "true" : "false" });
+			}
 		}
 		if (allowed.has("context")) {
 			const discoveredDefault = options?.sandParameterDefaults?.context?.trim();
@@ -136,10 +152,9 @@ export function resolveGrokbotRequestedModel(
 					? options.context.trim()
 					: discoveredDefault && discoveredDefault.length > 0
 						? discoveredDefault
-						: options?.sandMaxMode === true
-							? "1m"
-							: "300k";
-			parameters.push({ id: "context", value: context });
+						: undefined;
+			// Never invent 300k/1m — unadvertised tiers can 400 or pin the wrong window.
+			if (context) parameters.push({ id: "context", value: context });
 		}
 		if (effortValue) {
 			if (allowed.has("effort")) {
@@ -150,15 +165,18 @@ export function resolveGrokbotRequestedModel(
 		}
 		if (allowed.has("fast")) {
 			const discoveredFast = defaults?.fast?.trim();
-			const fast =
-				options?.fast !== undefined
-					? options.fast
-					: discoveredFast === "true"
-						? true
-						: discoveredFast === "false"
-							? false
-							: !allowed.has("thinking");
-			parameters.push({ id: "fast", value: fast ? "true" : "false" });
+			let fast: boolean | undefined;
+			if (options?.fast !== undefined) {
+				fast = options.fast;
+			} else if (discoveredFast === "true") {
+				fast = true;
+			} else if (discoveredFast === "false") {
+				fast = false;
+			}
+			// Never invent true/false — unadvertised defaults can pin the wrong tier.
+			if (fast !== undefined) {
+				parameters.push({ id: "fast", value: fast ? "true" : "false" });
+			}
 		}
 	}
 

@@ -1,11 +1,16 @@
 import { describe, expect, test } from "bun:test";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import {
 	classifyError,
+	echoLikeShellCommand,
 	expectedReadPath,
 	expectedWritePath,
 	evaluateToolFollowupText,
 	idSafe,
 	matchesToolSmokeCall,
+	matrixOmpThinkingArgs,
+	matrixProbeEffort,
 	matrixRowFlag,
 	ompToolsExecutionEvidence,
 	parseArgs,
@@ -15,6 +20,21 @@ import {
 	toolSmokePrompt,
 	writeLikeShellCommand,
 } from "./grokbot-catalog-matrix/harness";
+
+function probeModel(partial: Partial<Model<Api>> & Pick<Model<Api>, "id">): Model<Api> {
+	return {
+		provider: "grokbot",
+		api: "grokbot-sand",
+		name: partial.id,
+		baseUrl: "https://api2.cursor.sh",
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 128_000,
+		maxTokens: 8192,
+		reasoning: false,
+		...partial,
+	} as Model<Api>;
+}
 
 describe("splitMatrixIds", () => {
 	test("keeps commas inside bracket params as one id", () => {
@@ -126,6 +146,90 @@ describe("evaluateToolFollowupText", () => {
 			}).pass,
 		).toBe(false);
 	});
+
+	test("Gemini empty Write uses the canonical request model, not an opaque selector", () => {
+		// Opaque legacy/variant display ids classify as unknown; callers must pass requestModelId.
+		expect(
+			evaluateToolFollowupText({
+				kind: "write",
+				body: "",
+				ping: "tools-pong-write-x",
+				stopReason: "stop",
+				modelId: "opaque-legacy-gemini-selector",
+			}).pass,
+		).toBe(false);
+		expect(
+			evaluateToolFollowupText({
+				kind: "write",
+				body: "",
+				ping: "tools-pong-write-x",
+				stopReason: "stop",
+				modelId: "gemini-3-flash",
+			}),
+		).toEqual({ pass: true, detail: "empty-followup-after-write" });
+	});
+});
+
+describe("matrixProbeEffort", () => {
+	test("prefers supported low, then defaultLevel, then max-only, then sand defaults; omits when unknown", () => {
+		expect(
+			matrixProbeEffort(
+				probeModel({
+					id: "with-low",
+					reasoning: true,
+					thinking: { efforts: [Effort.Low, Effort.High] },
+				}),
+			),
+		).toBe(Effort.Low);
+		expect(
+			matrixProbeEffort(
+				probeModel({
+					id: "default-high",
+					reasoning: true,
+					thinking: { efforts: [Effort.Medium, Effort.High], defaultLevel: Effort.High },
+				}),
+			),
+		).toBe(Effort.High);
+		expect(
+			matrixProbeEffort(
+				probeModel({
+					id: "max-only",
+					reasoning: true,
+					thinking: { efforts: [Effort.Max] },
+				}),
+			),
+		).toBe(Effort.Max);
+		expect(
+			matrixProbeEffort(
+				probeModel({
+					id: "adaptive-default",
+					sandParameterDefaults: { effort: "adaptive" },
+				}),
+			),
+		).toBe("adaptive");
+		expect(matrixProbeEffort(probeModel({ id: "no-effort" }))).toBeUndefined();
+	});
+
+	test("matrixOmpThinkingArgs mirrors probe effort or omits --thinking when unknown", () => {
+		expect(
+			matrixOmpThinkingArgs(
+				probeModel({
+					id: "max-only",
+					reasoning: true,
+					thinking: { efforts: [Effort.Max] },
+				}),
+			),
+		).toEqual(["--thinking", Effort.Max]);
+		expect(
+			matrixOmpThinkingArgs(
+				probeModel({
+					id: "adaptive-default",
+					sandParameterDefaults: { effort: "adaptive" },
+				}),
+			),
+		).toEqual(["--thinking", "adaptive"]);
+		expect(matrixOmpThinkingArgs(probeModel({ id: "no-effort" }))).toEqual([]);
+	});
 });
 
 describe("toolSmokePrompt", () => {
@@ -151,6 +255,63 @@ describe("toolSmokePrompt", () => {
 		expect(readLikeShellCommand("cat notes/grokbot-read-x.txt")).toBe(true);
 		expect(readLikeShellCommand("sed -n '1p' notes/grokbot-read-x.txt")).toBe(true);
 		expect(readLikeShellCommand("printf '%s\\n' x > notes/grokbot-write-x.txt")).toBe(false);
+	});
+
+	test("requires bash smoke commands to echo/printf the ping, not comment it", () => {
+		const ping = "tools-pong-bash-x";
+		expect(echoLikeShellCommand(`echo ${ping}`, ping)).toBe(true);
+		expect(echoLikeShellCommand(`printf '%s\\n' ${ping}`, ping)).toBe(true);
+		expect(echoLikeShellCommand(`true # ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo unrelated`, ping)).toBe(false);
+		// Token in a sibling statement does not count — must be an echo/printf arg.
+		expect(echoLikeShellCommand(`echo wrong; true ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo wrong && true ${ping}`, ping)).toBe(false);
+		// Redirect / diverted stdout / pipelines must not count as echoed output.
+		expect(echoLikeShellCommand(`echo wrong > ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo ${ping} >/dev/null`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`printf '%s\\n' ${ping} > /tmp/out.txt`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo ${ping} | tee /tmp/out.txt`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo ${ping} | grep -v ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`echo ${ping} | cat`, ping)).toBe(false);
+	});
+
+	test("binds read/write shell smoke evidence to the operation statement", () => {
+		const id = "claude-opus-5";
+		const readPath = expectedReadPath(idSafe(id));
+		const writePath = expectedWritePath(idSafe(id));
+		const ping = "tools-pong-write-x";
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat /dev/null; echo ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat ${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(true);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `echo ${ping}; true > ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `printf '%s\\n' ${ping} > ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(true);
 	});
 
 	test("rejects tool calls that only match by name", () => {
@@ -181,6 +342,9 @@ describe("toolSmokePrompt", () => {
 		expect(matchesToolSmokeCall("bash", { name: "Shell", arguments: { command: `echo ${ping}` } }, ping, id)).toBe(
 			true,
 		);
+		expect(matchesToolSmokeCall("bash", { name: "Shell", arguments: { command: `true # ${ping}` } }, ping, id)).toBe(
+			false,
+		);
 		expect(
 			matchesToolSmokeCall(
 				"read",
@@ -197,6 +361,39 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(false);
+		const readPath = expectedReadPath(idSafe(id));
+		const writePath = expectedWritePath(idSafe(id));
+		expect(
+			matchesToolSmokeCall("read", { name: "Read", arguments: { path: readPath } }, "tools-pong-read-x", id),
+		).toBe(true);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Read", arguments: { path: `/tmp/${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(true);
+		// Suffix-only paths must fail — `wrongnotes/...` ends with `notes/...`.
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Read", arguments: { path: `wrong${readPath}` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Write", arguments: { path: `backup-${writePath}`, content: ping } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall("write", { name: "Write", arguments: { path: writePath, content: ping } }, ping, id),
+		).toBe(true);
 	});
 });
 

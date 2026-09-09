@@ -19,6 +19,7 @@
 import { buildModel } from "../packages/catalog/src/build.ts";
 import type { ModelSpec } from "../packages/catalog/src/types.ts";
 import { streamGrokBot } from "../packages/ai/src/providers/grokbot.ts";
+import { isAnthropicSandModelId } from "../packages/ai/src/providers/grokbot/anthropic-sand-wire.ts";
 import type { Context, Tool, Message, AssistantMessage, ToolCall } from "../packages/ai/src/types.ts";
 import * as prompt from "../packages/utils/src/prompt.ts";
 import pipelineSystemPrompt from "./grokbot-probes/pipeline-system.md" with { type: "text" };
@@ -180,7 +181,7 @@ async function main() {
 	const stopOk = turn1.assistant.stopReason === "toolUse";
 	console.log(`  stopReason=toolUse: ${stopOk ? "✓" : "✗"}`);
 
-	const modelOk = /claude|fable|opus|sonnet|haiku|anthropic/i.test(turn1.assistant.model);
+	const modelOk = isAnthropicSandModelId(turn1.assistant.model);
 	console.log(`  model is Anthropic: ${modelOk ? "✓" : "✗"}`);
 
 	// ─── Turn 2: feed tool result back, get final text ───

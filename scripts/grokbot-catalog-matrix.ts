@@ -36,6 +36,8 @@ import {
 	idSafe,
 	evaluateToolFollowupText,
 	matchesToolSmokeCall,
+	matrixOmpThinkingArgs,
+	matrixProbeEffort,
 	matrixRowFlag,
 	ompToolsExecutionEvidence,
 	parseArgs,
@@ -137,10 +139,11 @@ async function streamOnce(
 	opts?: { maxTokens?: number },
 ): Promise<AssistantMessage> {
 	let last: AssistantMessage | undefined;
+	const effort = matrixProbeEffort(model);
 	for (let attempt = 0; attempt <= GATEWAY_RETRIES; attempt++) {
 		const result = await streamGrokBot(model as Model<"grokbot-sand">, context, {
 			maxTokens: opts?.maxTokens ?? 512,
-			effort: "low",
+			...(effort !== undefined ? { effort } : {}),
 			acceptEmptyResponse: false,
 		}).result();
 		last = result;
@@ -280,7 +283,12 @@ async function runOneTool(
 		body,
 		ping,
 		stopReason: turn2.stopReason,
-		modelId: model.id,
+		// Variant/legacy display selectors classify as unknown; production streaming
+		// uses the canonical request id for Gemini empty-Write acceptance.
+		modelId:
+			typeof model.requestModelId === "string" && model.requestModelId.trim()
+				? model.requestModelId.trim()
+				: model.id,
 	});
 	if (!followup.pass) {
 		return {
@@ -371,8 +379,8 @@ function ompCommand(args: string[]): string[] {
 	return ["bun", path.join(ROOT, "packages/coding-agent/src/cli.ts"), ...args];
 }
 
-function runOmp(model: string, { tools }: { tools: boolean }): { pass: boolean; status: number; out: string } {
-	const token = tools ? `omp-echo-${idSafe(model)}` : TEXT_TOKEN;
+function runOmp(model: Model<Api>, { tools }: { tools: boolean }): { pass: boolean; status: number; out: string } {
+	const token = tools ? `omp-echo-${idSafe(model.id)}` : TEXT_TOKEN;
 	const promptText = tools
 		? prompt.render(ompToolsUserPrompt, { token }).trim()
 		: prompt.render(ompTextUserPrompt, { token: TEXT_TOKEN }).trim();
@@ -386,9 +394,8 @@ function runOmp(model: string, { tools }: { tools: boolean }): { pass: boolean; 
 		"--no-rules",
 		...(tools ? ["--auto-approve"] : ["--no-tools"]),
 		"--model",
-		`grokbot/${model}`,
-		"--thinking",
-		"low",
+		`grokbot/${model.id}`,
+		...matrixOmpThinkingArgs(model),
 		promptText,
 	];
 	const r = Bun.spawnSync(ompCommand(args), {
@@ -450,8 +457,13 @@ async function main() {
 		}
 		selected = resolved.selected;
 	} else {
+		// KDL owns sand-tools-wire — raw discovery specs leave it unset.
+		// buildModel() before router selection so parent-chat/automation gate.
 		selected = selectGrokbotMatrixIds(
-			specs.map(s => ({ id: s.id, sandToolsWire: s.sandToolsWire })),
+			specs.map(s => {
+				const model = buildModel(s);
+				return { id: model.id, sandToolsWire: model.sandToolsWire };
+			}),
 			args.slice,
 		);
 	}
@@ -471,6 +483,7 @@ async function main() {
 		const model = buildModel(spec);
 		const policy = resolveGrokbotSandToolPolicy({
 			modelId: model.id,
+			requestModelId: model.requestModelId,
 			toolCount: OMP_TOOLS.length,
 			sandToolsWire: model.sandToolsWire,
 			supportsTools: model.supportsTools,
@@ -526,18 +539,20 @@ async function main() {
 		console.log("=== OMP -p SLICE ===");
 		const ompIds = selected.slice(0, Math.min(selected.length, 12));
 		for (const id of ompIds) {
+			const spec = byId.get(id);
+			if (!spec) continue;
+			const model = buildModel(spec);
 			if (args.mode !== "tools") {
-				const r = runOmp(id, { tools: false });
+				const r = runOmp(model, { tools: false });
 				console.log(`${r.pass ? "PASS" : "FAIL"}  omp-text   ${id}  exit=${r.status}`);
 				if (!r.pass) {
 					ompFails.push(`omp-text:${id}`);
 					console.log(r.out);
 				}
 			}
-			const spec = byId.get(id);
-			const skip = spec ? grokbotToolsSkipReason(buildModel(spec)) : undefined;
+			const skip = grokbotToolsSkipReason(model);
 			if (args.mode !== "text" && !skip) {
-				const r = runOmp(id, { tools: true });
+				const r = runOmp(model, { tools: true });
 				console.log(`${r.pass ? "PASS" : "FAIL"}  omp-tools  ${id}  exit=${r.status}`);
 				if (!r.pass) {
 					ompFails.push(`omp-tools:${id}`);

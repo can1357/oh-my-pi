@@ -846,6 +846,38 @@ export async function resolveScopedModels(
 }
 
 /**
+ * When `--provider`/`--model` (or `provider/model`) selects a discoverable
+ * provider and the model is missing from the cold/startup catalog (fresh
+ * profile, no credential-scoped cache), refresh that provider before
+ * {@link buildSessionOptions} exits on miss. Credentials may come from
+ * `--api-key`, env, secrets file, or `models.yml` — not specifically a CLI key.
+ * `--models` scopes already refresh via {@link resolveScopedModels}.
+ */
+export async function refreshCredentialScopedModelIfMissing(
+	parsed: Pick<Args, "model">,
+	modelRegistry: Pick<ModelRegistry, "getAvailable" | "hasProvider" | "refreshProvider" | "getDiscoverableProviders">,
+	providerId: string | undefined,
+): Promise<boolean> {
+	if (!parsed.model || !providerId) return false;
+	if (!modelRegistry.hasProvider(providerId)) return false;
+	if (!modelRegistry.getDiscoverableProviders().includes(providerId)) return false;
+	const raw = parsed.model.trim();
+	const withoutThinking = raw.includes(":") ? raw.slice(0, raw.indexOf(":")) : raw;
+	const slash = withoutThinking.indexOf("/");
+	const bare = slash >= 0 ? withoutThinking.slice(slash + 1) : withoutThinking;
+	const present = modelRegistry
+		.getAvailable()
+		.some(
+			model =>
+				model.provider === providerId &&
+				(model.id === bare || model.id === withoutThinking || `${model.provider}/${model.id}` === withoutThinking),
+		);
+	if (present) return false;
+	await modelRegistry.refreshProvider(providerId, "online-if-uncached");
+	return true;
+}
+
+/**
  * Map resolver scope entries to the session's Ctrl+P cycle shape, filling in the
  * configured default thinking level for entries without an explicit `:level`
  * suffix. `auto` is session-level only, so it is coerced to a concrete default here.
@@ -1544,7 +1576,8 @@ export async function runRootCommand(
 
 		// Install --api-key before ModelRegistry so credential-scoped startup cache
 		// ids (grokbot renewer hash, etc.) match discovery and warm live rows.
-		const cliApiKeyProvider = parsedArgs.apiKey ? resolveCliRuntimeApiKeyProvider(parsedArgs) : undefined;
+		const selectedProvider = resolveCliRuntimeApiKeyProvider(parsedArgs);
+		const cliApiKeyProvider = parsedArgs.apiKey ? selectedProvider : undefined;
 		if (parsedArgs.apiKey && cliApiKeyProvider) {
 			authStorage.setRuntimeApiKey(cliApiKeyProvider, parsedArgs.apiKey);
 		}
@@ -1555,6 +1588,19 @@ export async function runRootCommand(
 			"modelRegistry:init",
 			() => new ModelRegistry(authStorage, undefined, { settings: settingsInstance }),
 		);
+		// Credential-scoped live catalogs (e.g. grokbot AvailableModels) are absent
+		// on a fresh profile until discovery runs. Refresh before --provider/--model
+		// resolve so buildSessionOptions does not exit on a cold miss — for env,
+		// secrets-file, models.yml, and --api-key credentials alike.
+		if (selectedProvider) {
+			await logger.time(
+				"refreshCredentialScopedModel",
+				refreshCredentialScopedModelIfMissing,
+				parsedArgs,
+				modelRegistry,
+				selectedProvider,
+			);
+		}
 		if (parsedArgs.noPty || parsedArgs.mode === "rpc-ui") {
 			Bun.env.PI_NO_PTY = "1";
 		}

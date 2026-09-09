@@ -583,11 +583,18 @@ function mergeDynamicModel<TApi extends Api>(existingModel: Model<TApi>, dynamic
 	const longContextCost = dynamicModel.cost.longContext ?? existingModel.cost.longContext;
 	// Re-build from spec stage: sparse compat comes from `compatConfig` (the
 	// verbatim override vocabulary), never the resolved `compat` record.
+	// When discovery owns reasoning and reports false, do not keep the offline
+	// seed thinking ladder via object spread. Pass an explicit empty ladder so
+	// preserve-authored-thinking blocks KDL reasoning/effort re-attachment
+	// (`thinking: undefined` would unlock catalog `reasoning` fills again).
 	return buildModel({
 		...existingModel,
 		...dynamicModel,
 		name: preferDiscoveryName(dynamicModel.name, existingModel.name, dynamicModel.id),
 		reasoning,
+		...(dynamicReasoningAuthoritative && !dynamicModel.reasoning
+			? { thinking: { mode: "effort" as const, efforts: [] } }
+			: {}),
 		input: supportsImage ? ["text", "image"] : ["text"],
 		cost: {
 			input: preferDiscoveryCost(dynamicModel.cost.input, existingModel.cost.input),

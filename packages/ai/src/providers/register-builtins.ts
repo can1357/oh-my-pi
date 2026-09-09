@@ -39,7 +39,7 @@ import type { DevinOptions } from "./devin";
 import type { GoogleOptions } from "./google";
 import type { GoogleGeminiCliOptions } from "./google-gemini-cli";
 import type { GoogleVertexOptions } from "./google-vertex";
-import { streamGrokBot as streamGrokBotProvider } from "./grokbot";
+import { streamGrokBot as streamGrokBotImpl } from "./grokbot";
 import type { OllamaChatOptions } from "./ollama";
 import type { OpenAICodexResponsesOptions } from "./openai-codex-responses";
 import type { OpenAICompletionsOptions } from "./openai-completions";
@@ -161,7 +161,6 @@ let ollamaProviderModulePromise: Promise<LazyProviderModule<"ollama-chat">> | un
 let cursorProviderModulePromise: Promise<LazyProviderModule<"cursor-agent">> | undefined;
 let cursorProviderModuleOverride: LazyProviderModule<"cursor-agent"> | undefined;
 let devinProviderModulePromise: Promise<LazyProviderModule<"devin-agent">> | undefined;
-let grokbotProviderModulePromise: Promise<LazyProviderModule<"grokbot-sand">> | undefined;
 let bedrockProviderModuleOverride: LazyProviderModule<"bedrock-converse-stream"> | undefined;
 let bedrockProviderModulePromise: Promise<LazyProviderModule<"bedrock-converse-stream">> | undefined;
 
@@ -461,12 +460,9 @@ function loadDevinProviderModule(): Promise<LazyProviderModule<"devin-agent">> {
 }
 
 function loadGrokbotProviderModule(): Promise<LazyProviderModule<"grokbot-sand">> {
-	// Top-level import (AGENTS.md); neighbors still use dynamic import for lazy
-	// graphs, but new inline imports are banned — keep the stream export wired.
-	grokbotProviderModulePromise ||= Promise.resolve({
-		stream: streamGrokBotProvider,
-	});
-	return grokbotProviderModulePromise;
+	// Top-level import (AGENTS.md): no `import("./grokbot")` dynamic path.
+	// Grok Bot still goes through createLazyStream for idle/first-event wrappers.
+	return Promise.resolve({ stream: streamGrokBotImpl });
 }
 
 function loadBedrockProviderModule(): Promise<LazyProviderModule<"bedrock-converse-stream">> {

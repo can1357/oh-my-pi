@@ -355,9 +355,55 @@ describe("product wire helpers", () => {
 		expect(schema?.anyOf).toEqual([{ required: ["content"] }, { required: ["contents"] }]);
 	});
 
+	test("Read alias preserves preexisting anyOf required groups via allOf", () => {
+		const tools = toProductField2Tools(
+			[
+				{
+					name: "read",
+					description: "read file",
+					parameters: {
+						type: "object",
+						properties: {
+							path: { type: "string" },
+							offset: { type: "number" },
+							start_line: { type: "number" },
+						},
+						required: ["path"],
+						anyOf: [{ required: ["offset"] }, { required: ["start_line"] }],
+					},
+				},
+			],
+			"automation",
+		);
+		const schema = (
+			tools[0]?.parameters as {
+				jsonSchema?: {
+					properties?: Record<string, unknown>;
+					required?: string[];
+					anyOf?: unknown;
+					allOf?: Array<{ anyOf?: Array<{ required?: string[] }> }>;
+				};
+			}
+		).jsonSchema;
+		expect(schema?.properties).toHaveProperty("target_file");
+		expect(schema?.required ?? []).not.toContain("path");
+		expect(schema?.anyOf).toBeUndefined();
+		expect(schema?.allOf).toEqual([
+			{ anyOf: [{ required: ["offset"] }, { required: ["start_line"] }] },
+			{ anyOf: [{ required: ["path"] }, { required: ["target_file"] }] },
+		]);
+	});
+
 	test("parent profile injects SendToUser", () => {
 		const tools = toProductField2Tools([], "parent-chat");
 		expect(tools[0]?.name).toBe("SendToUser");
+		expect(tools[0]?.description).toContain("user-visible message");
+		expect(tools[0]?.description).toContain("SendToUser");
+		const schema = (
+			tools[0]?.parameters as { jsonSchema?: { properties?: Record<string, { description?: string }> } }
+		).jsonSchema;
+		expect(schema?.properties?.type?.description).toContain("visible to the user");
+		expect(schema?.properties?.content?.description).toContain("user will see");
 	});
 
 	test("prefers write over edit for the shared Write wire slot", () => {
@@ -552,6 +598,50 @@ describe("product wire helpers", () => {
 				parts: [
 					{ toolCallId: "c1", toolName: "Shell", result: "ok" },
 					{ toolCallId: "c2", toolName: "Read", result: "src" },
+				],
+			},
+		});
+	});
+
+	test("keeps historical edit when write owns the Write sand slot", () => {
+		const tools = [
+			{ name: "edit", description: "patch", parameters: { type: "object", properties: {} } },
+			{ name: "write", description: "create", parameters: { type: "object", properties: {} } },
+		];
+		const rewritten = rewriteInferenceMessagesForProductWire(
+			[
+				{
+					role: 2,
+					toolCalls: [
+						{ toolCallId: "c1", toolName: "edit", args: { path: "c.ts" } },
+						{ toolCallId: "c2", toolName: "write", args: { path: "b.ts", content: "x" } },
+					],
+				},
+				{
+					role: 3,
+					toolContent: {
+						parts: [
+							{ toolCallId: "c1", toolName: "edit", result: "patched" },
+							{ toolCallId: "c2", toolName: "write", result: "wrote" },
+						],
+					},
+				},
+			],
+			tools as never,
+		);
+		expect(rewritten[0]).toEqual({
+			role: 2,
+			toolCalls: [
+				{ toolCallId: "c1", toolName: "edit", args: { path: "c.ts" } },
+				{ toolCallId: "c2", toolName: "Write", args: { path: "b.ts", content: "x" } },
+			],
+		});
+		expect(rewritten[1]).toEqual({
+			role: 3,
+			toolContent: {
+				parts: [
+					{ toolCallId: "c1", toolName: "edit", result: "patched" },
+					{ toolCallId: "c2", toolName: "Write", result: "wrote" },
 				],
 			},
 		});

@@ -2,6 +2,9 @@
  * Pure catalog-matrix harness helpers (no grokbot/natives imports).
  */
 import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
+import { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { getSupportedEfforts } from "@oh-my-pi/pi-catalog/model-thinking";
+import type { Api, Model } from "@oh-my-pi/pi-catalog/types";
 import * as prompt from "@oh-my-pi/pi-utils/prompt";
 import toolBashUserPrompt from "./tool-bash-user.md" with { type: "text" };
 import toolReadUserPrompt from "./tool-read-user.md" with { type: "text" };
@@ -11,6 +14,28 @@ export type Mode = "text" | "tools" | "all";
 export type Slice = "representative" | "all";
 export type ToolsSet = "bash" | "core";
 export type ToolSmokeKind = "bash" | "read" | "write";
+
+/**
+ * Probe effort for a matrix row: prefer the built model's thinking default /
+ * supported ladder, then discovered sand defaults. Omit when nothing is known
+ * so adaptive-only / max-only / non-reasoning rows do not send an invented `low`.
+ */
+export function matrixProbeEffort(model: Model<Api>): Effort | string | undefined {
+	const levels = getSupportedEfforts(model);
+	const preferred = model.thinking?.defaultLevel;
+	if (preferred && levels.includes(preferred)) return preferred;
+	if (levels.includes(Effort.Low)) return Effort.Low;
+	if (levels[0]) return levels[0];
+	const defaults = model.sandParameterDefaults;
+	const fromDefaults = defaults?.effort?.trim() || defaults?.reasoning?.trim();
+	return fromDefaults || undefined;
+}
+
+/** CLI `--thinking` args for the omp `-p` slice; omit when no supported tier is known. */
+export function matrixOmpThinkingArgs(model: Model<Api>): string[] {
+	const effort = matrixProbeEffort(model);
+	return effort !== undefined ? ["--thinking", String(effort)] : [];
+}
 
 export type MatrixArgs = {
 	mode: Mode;
@@ -142,6 +167,70 @@ export function readLikeShellCommand(command: string): boolean {
 	return /(?:^|[;&|\n]\s*)(?:cat|head|sed)\b/.test(cmd);
 }
 
+/** Strip `#` comments, then split into statements (`\n`, `;`, `&&`, `&`). Pipes stay together. */
+function shellStatementSegments(command: string): string[] {
+	const withoutComments = command
+		.split("\n")
+		.map(line => line.replace(/(^|[\t ;&|])#[^\n]*/g, "$1"))
+		.join("\n");
+	return withoutComments
+		.split(/\n|&&|&|;/)
+		.map(s => s.trim())
+		.filter(Boolean);
+}
+
+/** True when `filePath` appears as a path segment (not a suffix of `wrongnotes/...`). */
+function commandMentionsPath(segment: string, filePath: string): boolean {
+	let from = 0;
+	while (from <= segment.length) {
+		const idx = segment.indexOf(filePath, from);
+		if (idx < 0) return false;
+		if (idx === 0) return true;
+		const before = segment[idx - 1]!;
+		if (before === "/" || /\s/.test(before) || before === "'" || before === '"' || before === "`") return true;
+		from = idx + 1;
+	}
+	return false;
+}
+
+/**
+ * Bash smoke must actually echo/printf the ping to stdout — not in a sibling
+ * statement, comment, redirect filename (`echo wrong > ping`), diverted stdout
+ * (`echo ping >/dev/null`, `echo ping | tee file`), or a pipeline that can
+ * filter the token away (`echo ping | grep -v ping`).
+ */
+export function echoLikeShellCommand(command: string, ping: string): boolean {
+	if (!ping) return false;
+	const cmd = command.trim();
+	if (!cmd) return false;
+	return shellStatementSegments(cmd).some(segment => {
+		if (!/^(?:echo|printf)\b/.test(segment)) return false;
+		// Redirects / any pipeline can discard or transform stdout.
+		if (/(?:>>?|\|)/.test(segment)) return false;
+		return segment.includes(ping);
+	});
+}
+
+/** Read smoke: path must appear in the same cat/head/sed statement. */
+export function readPathInShellCommand(command: string, filePath: string): boolean {
+	if (!filePath) return false;
+	const cmd = command.trim();
+	if (!cmd || writeLikeShellCommand(cmd)) return false;
+	return shellStatementSegments(cmd).some(
+		segment => /^(?:cat|head|sed)\b/.test(segment) && commandMentionsPath(segment, filePath),
+	);
+}
+
+/** Write smoke: path + ping must appear in the same write statement (incl. pipes). */
+export function writePathPingInShellCommand(command: string, filePath: string, ping: string): boolean {
+	if (!filePath || !ping) return false;
+	const cmd = command.trim();
+	if (!cmd) return false;
+	return shellStatementSegments(cmd).some(
+		segment => writeLikeShellCommand(segment) && commandMentionsPath(segment, filePath) && segment.includes(ping),
+	);
+}
+
 export function expectedReadPath(safeId: string): string {
 	return `notes/grokbot-read-${safeId}.txt`;
 }
@@ -184,17 +273,19 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 	const name = call.name;
 	if (kind === "bash") {
 		if (!/^(bash|Shell|shell)$/i.test(name)) return false;
-		return shellCommandOf(call).includes(ping);
+		return echoLikeShellCommand(shellCommandOf(call), ping);
 	}
 	if (kind === "read") {
 		const path = expectedReadPath(safe);
 		if (/^(read|Read)$/i.test(name)) {
 			const filePath = filePathOf(call);
-			return filePath === path || filePath.endsWith(`/${path}`) || filePath.endsWith(path);
+			// Exact relative path or absolute path ending in /${path} — never a bare
+			// endsWith(path) (wrongnotes/... would otherwise match notes/...).
+			return filePath === path || filePath.endsWith(`/${path}`);
 		}
 		if (/^(bash|Shell|shell)$/i.test(name)) {
 			const cmd = shellCommandOf(call);
-			return readLikeShellCommand(cmd) && cmd.includes(path);
+			return readPathInShellCommand(cmd, path);
 		}
 		return false;
 	}
@@ -202,12 +293,12 @@ export function matchesToolSmokeCall(kind: ToolSmokeKind, call: SmokeToolCall, p
 	if (/^(write|Write)$/i.test(name)) {
 		const filePath = filePathOf(call);
 		const content = fileContentOf(call);
-		const pathOk = filePath === path || filePath.endsWith(`/${path}`) || filePath.endsWith(path);
+		const pathOk = filePath === path || filePath.endsWith(`/${path}`);
 		return pathOk && content.includes(ping);
 	}
 	if (/^(bash|Shell|shell)$/i.test(name)) {
 		const cmd = shellCommandOf(call);
-		return writeLikeShellCommand(cmd) && cmd.includes(path) && cmd.includes(ping);
+		return writePathPingInShellCommand(cmd, path, ping);
 	}
 	return false;
 }
@@ -222,7 +313,11 @@ export function evaluateToolFollowupText(opts: {
 	body: string;
 	ping: string;
 	stopReason: string;
-	/** Catalog model id — empty Write acceptance is Gemini-class only. */
+	/**
+	 * Canonical request model id (prefer `model.requestModelId` over display
+	 * `model.id`). Empty Write acceptance is Gemini-class only; opaque
+	 * variant/legacy selectors classify as unknown and would false-fail.
+	 */
 	modelId: string;
 }): { pass: boolean; detail?: string } {
 	const isGemini = classifyModel("grokbot", opts.modelId, { lenient: true }).class === "gemini";

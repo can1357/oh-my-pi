@@ -10,9 +10,21 @@
 - Grok Bot `sand-cua` now has catalog `sand-tools-wire=parent-chat` so router tools use the product field-2 wire.
 - Grok Bot Auto routers (`default`, `default[]`, `auto`) now use catalog `sand-tools-wire=parent-chat` so tools stay off the grok-4.5 native 422 path.
 - Grok Bot `gemini-3-flash` / `gemini-3-flash[]` now rewrite `requestedModel` to bare `gemini-3.8-flash` (`sand-wire-model-id`) so tools use the working peer while AvailableModels still lists the old slug.
+- Grok Bot `sand-wire-model-id` rewrites apply only when tools are present (`sand-wire-model-id-when=tools`); text-only requests keep the selected AvailableModels id.
+- Grok Bot JSON-as-text tool promotion is opt-in via `sand-promote-json-text-tools` (routers + gemini-3-flash) so native models keep example Shell JSON as text.
 
 ### Fixed
 
+- Grok Bot backend URL join appends endpoints onto the pathname while preserving reverse-proxy query strings, including trailing `/` inside query values (mint + AvailableModels).
+- Grok Bot AvailableModels discovery passes the configured base URL unmodified into `joinGrokbotBackendUrl` (no whole-URL trailing-slash strip before parse).
+- Opaque Grok Bot variant/legacy selectors resolve full model policy (identity, thinking, compat, catalog assignments/corrections) from `requestModelId` in `buildModel`.
+- Grok Bot model-manager discovery mints with the captured `cacheCredential` when `apiKey` is the `<authenticated>` sentinel (does not re-read ambient secrets mid-flight).
+- Grok Bot auth/discovery tests inject secrets path and env via `runWithGrokbotAuthSource` (no process-wide `setAgentDir` / `process.env` mutation).
+- Grok Bot AvailableModels no longer invents a low/medium/high/xhigh effort ladder when a param is advertised without values; reviewed ladders stay KDL-owned.
+- Grok Bot offline `grok-4.6` reasoning capability is owned by catalog KDL (neutral seeds); live non-reasoning rows keep an empty thinking ladder so buildModel/merge does not OR-upgrade them.
+- Grok Bot token renew failure logs only the HTTP status (never the response body, which may echo the renewer credential).
+- Grok Bot AvailableModels emits both `legacySlug` and `variantStringRepresentation` selectors when a variant advertises both.
+- Grok Bot model-manager discovery uses the same namespace/client-version identity as model-cache scoping.
 - Grok Bot AvailableModels remints and retries once after HTTP 401 instead of failing the current refresh on a revoked cached JWT.
 - Fixed Grok Bot `sand-default` reasoning capability to be owned by catalog KDL instead of discovery id compares, and excluded host-secret file credentials from env-only auth-broker migration.
 - Grok Bot AvailableModels discovery emits separate catalog rows for variant **`legacySlug`** values with `requestModelId` pointing at the canonical model and variant `sandParameterIds`.
