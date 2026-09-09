@@ -844,14 +844,17 @@ export async function resolveScopedModels(
 	}
 	const preferences = getModelMatchPreferences(activeSettings);
 	const scopedModels = await resolveModelScope(modelPatterns, modelRegistry, preferences, activeSettings);
-	if (scopedModels.length > 0) {
-		return scopedModels;
-	}
 	const discoverable = modelRegistry.getDiscoverableProviders();
 	const builtInProviders = credentialScopedProvidersFromPatterns(modelPatterns).filter(
 		providerId =>
 			modelRegistry.hasProvider(providerId) && providerSupportsCredentialScopedRefresh(providerId, modelRegistry),
 	);
+	// Credential-scoped wildcards (`grokbot/*`) match offline seeds first; still
+	// refresh so live-only AvailableModels rows enter Ctrl+P scope before the
+	// session captures a partial seed match.
+	if (scopedModels.length > 0 && builtInProviders.length === 0) {
+		return scopedModels;
+	}
 	if (discoverable.length === 0 && builtInProviders.length === 0) {
 		return scopedModels;
 	}

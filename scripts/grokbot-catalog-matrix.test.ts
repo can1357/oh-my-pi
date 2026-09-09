@@ -220,6 +220,7 @@ describe("matrixProbeEffort", () => {
 				}),
 			),
 		).toEqual(["--thinking", Effort.Max]);
+		// Sand-only defaults like adaptive are not CLI ThinkingLevel values.
 		expect(
 			matrixOmpThinkingArgs(
 				probeModel({
@@ -227,7 +228,7 @@ describe("matrixProbeEffort", () => {
 					sandParameterDefaults: { effort: "adaptive" },
 				}),
 			),
-		).toEqual(["--thinking", "adaptive"]);
+		).toEqual([]);
 		expect(matrixOmpThinkingArgs(probeModel({ id: "no-effort" }))).toEqual([]);
 	});
 });
@@ -298,6 +299,15 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(true);
+		// Suffixed filenames must not count as the expected path.
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat ${readPath}.bak` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
 		// Pipelines can suppress file contents; fabricated tool results must not pass.
 		expect(
 			matchesToolSmokeCall(
@@ -331,6 +341,14 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(true);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `printf '%s\\n' ${ping} > ${writePath}.bak` } },
+				ping,
+				id,
+			),
+		).toBe(false);
 		// Quoted redirect character must not count as a write (no file is created).
 		expect(
 			matchesToolSmokeCall(

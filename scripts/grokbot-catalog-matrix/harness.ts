@@ -33,7 +33,14 @@ export function matrixProbeEffort(model: Model<Api>): Effort | string | undefine
 
 /** CLI `--thinking` args for the omp `-p` slice; omit when no supported tier is known. */
 export function matrixOmpThinkingArgs(model: Model<Api>): string[] {
-	const effort = matrixProbeEffort(model);
+	const levels = getSupportedEfforts(model);
+	const preferred = model.thinking?.defaultLevel;
+	let effort: Effort | undefined;
+	if (preferred && levels.includes(preferred)) effort = preferred;
+	else if (levels.includes(Effort.Low)) effort = Effort.Low;
+	else if (levels[0]) effort = levels[0];
+	// Do not forward sand-only defaults (e.g. `adaptive`) — omp CLI accepts only
+	// ThinkingLevel vocabulary from getSupportedEfforts().
 	return effort !== undefined ? ["--thinking", String(effort)] : [];
 }
 
@@ -231,18 +238,27 @@ function shellWriteRedirect(segment: string): { before: string; after: string; o
 	return null;
 }
 
-/** True when `filePath` appears as a path segment (not a suffix of `wrongnotes/...`). */
+/** True when `filePath` appears as a whole path segment (not a prefix of `….txt.bak`). */
 function commandMentionsPath(segment: string, filePath: string): boolean {
 	let from = 0;
 	while (from <= segment.length) {
 		const idx = segment.indexOf(filePath, from);
 		if (idx < 0) return false;
-		if (idx === 0) return true;
-		const before = segment[idx - 1]!;
-		if (before === "/" || /\s/.test(before) || before === "'" || before === '"' || before === "`") return true;
+		const beforeOk = idx === 0 || isLeadingPathBoundary(segment[idx - 1]!);
+		const afterIdx = idx + filePath.length;
+		const afterOk = afterIdx >= segment.length || isTrailingPathBoundary(segment[afterIdx]!);
+		if (beforeOk && afterOk) return true;
 		from = idx + 1;
 	}
 	return false;
+}
+
+function isLeadingPathBoundary(ch: string): boolean {
+	return ch === "/" || /\s/.test(ch) || ch === "'" || ch === '"' || ch === "`";
+}
+
+function isTrailingPathBoundary(ch: string): boolean {
+	return /\s/.test(ch) || ch === "'" || ch === '"' || ch === "`" || /[;&|<>()]/.test(ch);
 }
 
 /**

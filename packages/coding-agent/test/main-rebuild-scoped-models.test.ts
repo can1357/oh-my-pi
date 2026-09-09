@@ -210,6 +210,47 @@ describe("resolveScopedModels", () => {
 		expect(registry.refreshProviderCalls).toEqual([{ providerId: "grokbot", strategy: "online-if-uncached" }]);
 		expect(scoped.map(entry => entry.model.id)).toEqual(["live-only"]);
 	});
+
+	it("refreshes credential-scoped wildcards even when offline seeds already match", async () => {
+		// `grokbot/*` matches bundled fallback seeds; without a forced refresh the
+		// session would capture only those six rows and miss live-only ids.
+		const settings = Settings.isolated();
+		const sandDefault = buildModel({
+			id: "sand-default",
+			name: "sand-default",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+		const registry = new FakeRegistry([sandDefault], () => {
+			registry.available = [
+				sandDefault,
+				buildModel({
+					id: "live-only",
+					name: "live-only",
+					api: "grokbot-sand",
+					provider: "grokbot",
+					baseUrl: "https://api2.cursor.sh",
+					reasoning: false,
+					input: ["text"],
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+					contextWindow: 128_000,
+					maxTokens: 8_192,
+				}),
+			];
+		});
+		registry.discoverableProviders = [];
+
+		const scoped = await resolveScopedModels(parseArgs(["--models", "grokbot/*"]), registry, settings);
+
+		expect(registry.refreshProviderCalls).toEqual([{ providerId: "grokbot", strategy: "online-if-uncached" }]);
+		expect(scoped.map(entry => entry.model.id).sort()).toEqual(["live-only", "sand-default"]);
+	});
 });
 
 describe("refreshCredentialScopedModelIfMissing", () => {

@@ -26,6 +26,8 @@
 - Catalog matrix omp `-p` slice derives `--thinking` from each selected model's probe effort (omits the flag when none is known).
 - Catalog matrix bash smoke rejects pipelines that can suppress the probe token (not only redirects/`tee`).
 - Catalog matrix Shell read smoke rejects pipelines/redirects that can discard file contents (e.g. `cat path | grep -v …`).
+- Catalog matrix Shell read/write smoke requires a trailing path boundary so `path.bak` does not count as `path`.
+- Catalog matrix omp `--thinking` only passes efforts from `getSupportedEfforts()` (omits sand-only defaults like `adaptive`).
 - Catalog matrix Shell write smoke requires an unquoted redirect/`tee` of the ping into the expected path and rejects earlier `exit`/`return` statements (quoted `>` does not count).
 - Keep-model Anthropic probe validates and replays returned Shell arguments (no fabricated echo).
 - `/grokbot` Host status omits the entire URL query string (not only a credential-name allowlist) so proxy auth keys cannot leak.

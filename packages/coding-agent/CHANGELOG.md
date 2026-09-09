@@ -6,6 +6,7 @@
 
 - `--models` / `enabledModels` resolve bracketed Grok Bot variant selectors (e.g. `grokbot/default[]`) by exact id before glob matching so `[]` is not treated as an empty character class.
 - Cold catalog refresh also uses a provider-qualified `modelRoles.default` when no CLI model flags are set, and the SDK discovery fallback refreshes built-in descriptor providers (e.g. Grok Bot) the same way.
+- Cold `--models` / `enabledModels` credential-scoped wildcards (e.g. `grokbot/*`) refresh live catalogs even when offline seeds already match, so Ctrl+P includes AvailableModels rows.
 - Cold catalog refresh matches colon-bearing model ids literally before stripping a recognized thinking suffix (so OpenRouter-style `:free` tiers are not collapsed to a cold base row).
 - `--no-tools` (`toolNames: []`) active-set assembly uses an explicit undefined check so the empty whitelist cannot be mis-read as “omit tools” and fall through to the full registry.
 - Cold `--provider`/`--model` refresh also gates on built-in catalog model-manager descriptors (e.g. Grok Bot), not only `getDiscoverableProviders()` (models.yml / runtime / implicit local).
