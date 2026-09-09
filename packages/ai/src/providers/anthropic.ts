@@ -2402,9 +2402,13 @@ const streamAnthropicOnce = (
 						);
 					}
 				}
+				const fallbackChatHeaders =
+					hasFallenBackToCopilotChat && model.provider === "github-copilot"
+						? mergeCopilotApiHeaders(mergeHeaders(model.headers, options?.headers), { cliDisabled: true })
+						: undefined;
 				const perRequestHeaders =
-					umansGatewayWebSearchHeader || injectedClientBetaHeaders
-						? { ...umansGatewayWebSearchHeader, ...injectedClientBetaHeaders }
+					umansGatewayWebSearchHeader || injectedClientBetaHeaders || fallbackChatHeaders
+						? { ...umansGatewayWebSearchHeader, ...injectedClientBetaHeaders, ...fallbackChatHeaders }
 						: undefined;
 				const requestOptions = {
 					...createSdkStreamRequestOptions(requestSignal, requestTimeoutMs),

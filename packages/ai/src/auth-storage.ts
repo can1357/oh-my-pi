@@ -5900,6 +5900,7 @@ export class AuthStorage {
 						token: oauthSelection.credential.access,
 						enterpriseUrl: oauthSelection.credential.enterpriseUrl,
 						apiEndpoint: oauthSelection.credential.apiEndpoint,
+						cliDisabled: oauthSelection.credential.cliDisabled,
 					});
 				}
 				return oauthSelection.credential.access;
