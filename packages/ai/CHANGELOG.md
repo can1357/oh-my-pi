@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [18.1.16] - 2026-09-09
+
 ### Fixed
 
 - Grok Bot product Read/Write alias schemas rewrite branch-local `required` under `anyOf`/`oneOf`/`allOf` so advertised `contents`/`target_file` calls validate.
