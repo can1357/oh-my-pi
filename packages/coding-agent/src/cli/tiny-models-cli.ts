@@ -7,7 +7,7 @@ import {
 	TINY_LOCAL_MODELS,
 	type TinyLocalModelKey,
 } from "../tiny/models";
-import { shutdownTinyTitleClient, tinyTitleClient } from "../tiny/title-client";
+import { shutdownTinyTitleClient, tinyTitleClient, tinyWorkerUsesMlx } from "../tiny/title-client";
 import type { TinyTitleProgressEvent } from "../tiny/title-protocol";
 
 export type TinyModelsAction = "download" | "list";
@@ -50,14 +50,14 @@ function downloadErrorSummary(error: string | undefined): string | undefined {
 	return [first, ...details].join("\n");
 }
 
-export function resolveModels(model: string | undefined): TinyLocalModelKey[] {
+export function resolveModels(model: string | undefined, mlx = tinyWorkerUsesMlx()): TinyLocalModelKey[] {
 	if (!model) return [DEFAULT_TINY_TITLE_LOCAL_MODEL_KEY];
-	// `all` is a prefetch convenience: skip models that fail before load (unsupported
-	// runtime), so the bulk download stays green when every *usable* model succeeds.
+	// `all` is a prefetch convenience: skip models the active backend refuses before
+	// load, so the bulk download stays green when every *usable* model succeeds.
 	if (model === "all")
-		return TINY_LOCAL_MODELS.filter(spec => !("unsupportedReason" in spec) || !spec.unsupportedReason).map(
-			spec => spec.key,
-		);
+		return TINY_LOCAL_MODELS.filter(
+			spec => mlx || !("onnxUnsupportedReason" in spec) || !spec.onnxUnsupportedReason,
+		).map(spec => spec.key);
 	if (!isTinyLocalModelKey(model)) {
 		const values = TINY_LOCAL_MODELS.map(spec => spec.key).join(", ");
 		throw new Error(`Unknown tiny local model: ${model}. Expected one of: ${values}, all`);

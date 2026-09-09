@@ -1,12 +1,13 @@
-import { afterAll, beforeAll, describe, expect, it, type Mock, vi } from "bun:test";
+import { afterAll, beforeAll, describe, expect, it, vi } from "bun:test";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { TranscriptContainer } from "@oh-my-pi/pi-coding-agent/modes/components/transcript-container";
 import { EventController } from "@oh-my-pi/pi-coding-agent/modes/controllers/event-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
-import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { AgentSessionEvent } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { TRUNCATE_LENGTHS } from "@oh-my-pi/pi-coding-agent/tools/render-utils";
 import type { Component } from "@oh-my-pi/pi-tui";
+import { createInteractiveModeContext } from "./helpers/interactive-mode-context";
 
 beforeAll(async () => {
 	resetSettingsForTest();
@@ -18,53 +19,22 @@ afterAll(() => {
 	resetSettingsForTest();
 });
 
-interface Fixture {
-	ctx: InteractiveModeContext;
-	controller: EventController;
-	showWarning: Mock<InteractiveModeContext["showWarning"]>;
-	/** Components the controller committed to the transcript, in order. */
-	blocks: unknown[];
+function createFixture() {
+	const ctx = createInteractiveModeContext({
+		streamingComponent: new AssistantMessageComponent(),
+	});
+	const blocks: Component[] = [];
+	const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
+	vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(block => {
+		blocks.push(block);
+		addChild(block);
+	});
+	return { ctx, controller: new EventController(ctx), showWarning: vi.spyOn(ctx, "showWarning"), blocks };
 }
 
-function createFixture(): Fixture {
-	const showWarning = vi.fn();
-	const blocks: unknown[] = [];
-	const ctx = {
-		isInitialized: true,
-		init: vi.fn(async () => {}),
-		ui: { requestRender: vi.fn(), requestComponentRender: vi.fn() },
-		transcriptMessageComponents: new WeakMap(),
-		pendingTools: new Map(),
-		statusLine: { invalidate: vi.fn(), markActivityStart: vi.fn() },
-		session: { isAborting: false },
-		settings: { get: () => false },
-		updateEditorTopBorder: vi.fn(),
-		clearPinnedError: vi.fn(),
-		ensureLoadingAnimation: vi.fn(),
-		noteDisplayableThinkingContent: () => false,
-		effectiveHideThinkingBlock: false,
-		// A live streaming component: the streamed toolCall block path
-		// (`#handleMessageUpdate`) only runs while one exists.
-		streamingComponent: { setHideThinkingBlock: vi.fn(), markTranscriptBlockFinalized: vi.fn() },
-		streamingMessage: undefined,
-		viewSession: { isStreaming: false, getToolByName: () => undefined, hasBuiltInTool: () => true },
-		sessionManager: { getCwd: () => "/tmp" },
-		chatContainer: {
-			addChild: (block: unknown) => blocks.push(block),
-			removeChild: vi.fn(),
-			canRemoveBlock: () => false,
-		},
-		toolOutputExpanded: false,
-		setTodos: vi.fn(),
-		present: vi.fn(),
-		showWarning,
-	} as unknown as InteractiveModeContext;
-	return { ctx, controller: new EventController(ctx), showWarning, blocks };
-}
-
-function expectRetirableResult(block: unknown): void {
+function expectRetirableResult(block: Component): void {
 	const transcript = new TranscriptContainer();
-	transcript.addChild(block as Component);
+	transcript.addChild(block);
 	const batch = transcript.peekFinalizedBatch(80, 0);
 	const retired = Bun.stripANSI(batch?.rows.join("\n") ?? "");
 	expect(retired).toContain("done");
@@ -206,8 +176,9 @@ describe("EventController + Cursor todo bridge", () => {
 
 		expect(f.blocks).toHaveLength(1);
 		expect(f.ctx.pendingTools.size).toBe(0);
-		const block = f.blocks[0] as { isTranscriptBlockFinalized(): boolean };
-		expect(block.isTranscriptBlockFinalized()).toBe(true);
+		const block = f.blocks[0]!;
+		expect(block).toHaveProperty("isTranscriptBlockFinalized");
+		expect((block as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(true);
 		expectRetirableResult(block);
 	});
 
@@ -219,8 +190,9 @@ describe("EventController + Cursor todo bridge", () => {
 
 		expect(f.blocks).toHaveLength(1);
 		expect(f.ctx.pendingTools.size).toBe(0);
-		const block = f.blocks[0] as { isTranscriptBlockFinalized(): boolean };
-		expect(block.isTranscriptBlockFinalized()).toBe(true);
+		const block = f.blocks[0]!;
+		expect(block).toHaveProperty("isTranscriptBlockFinalized");
+		expect((block as AssistantMessageComponent).isTranscriptBlockFinalized()).toBe(true);
 		expectRetirableResult(block);
 	});
 

@@ -171,4 +171,77 @@ describe("SessionManager.forkFrom", () => {
 		expect(await Bun.file(path.join(forkArtifactsDir, "unrelated.txt")).exists()).toBe(false);
 		expect(await Bun.file(unrelatedFile).text()).toBe("must not be copied");
 	});
+
+	it("zeroes inherited cost while preserving token counts only when reset is requested", async () => {
+		using tempDir = TempDir.createSync("@omp-session-fork-cost-");
+		const cwd = path.join(tempDir.path(), "project");
+		const sessionDir = path.join(tempDir.path(), "sessions");
+		await fs.mkdir(sessionDir, { recursive: true });
+		const sourceFile = path.join(sessionDir, "source.jsonl");
+		const timestamp = new Date().toISOString();
+		const sourceHeader: SessionHeader = {
+			type: "session",
+			version: CURRENT_SESSION_VERSION,
+			id: "cost-source",
+			timestamp,
+			cwd,
+		};
+		const assistantEntry = {
+			type: "message",
+			id: "assistant-1",
+			parentId: null,
+			timestamp,
+			message: {
+				role: "assistant",
+				content: [],
+				api: "anthropic-messages",
+				provider: "anthropic",
+				model: "claude",
+				stopReason: "stop",
+				timestamp: Date.now(),
+				usage: {
+					input: 100,
+					output: 50,
+					cacheRead: 10,
+					cacheWrite: 5,
+					totalTokens: 165,
+					premiumRequests: 2,
+					credits: { cost: 3, committedCost: 3, acuCost: 1 },
+					cost: { input: 1, output: 4, cacheRead: 0.5, cacheWrite: 0.5, total: 6 },
+				},
+			},
+		};
+		await Bun.write(sourceFile, `${JSON.stringify(sourceHeader)}\n${JSON.stringify(assistantEntry)}\n`);
+
+		const findAssistant = async (file: string) => {
+			const entries = await loadEntriesFromFile(file);
+			const entry = entries.find((e): e is SessionMessageEntry => e.type === "message");
+			if (entry?.message.role !== "assistant") throw new Error("expected assistant message");
+			return entry.message;
+		};
+
+		const preserved = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "keep"), undefined, {
+			suppressBreadcrumb: true,
+		});
+		const preservedFile = preserved.getSessionFile();
+		if (!preservedFile) throw new Error("expected preserved fork file");
+		const preservedMessage = await findAssistant(preservedFile);
+		expect(preservedMessage.usage.cost.total).toBe(6);
+		expect(preservedMessage.usage.premiumRequests).toBe(2);
+
+		const reset = await SessionManager.forkFrom(sourceFile, cwd, path.join(tempDir.path(), "reset"), undefined, {
+			suppressBreadcrumb: true,
+			resetInheritedCost: true,
+		});
+		const resetFile = reset.getSessionFile();
+		if (!resetFile) throw new Error("expected reset fork file");
+		const resetMessage = await findAssistant(resetFile);
+		expect(resetMessage.usage.cost).toEqual({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 });
+		expect(resetMessage.usage.credits).toBeUndefined();
+		expect(resetMessage.usage.premiumRequests).toBeUndefined();
+		// Token counts are context, not spend — compaction anchors depend on them.
+		expect(resetMessage.usage.input).toBe(100);
+		expect(resetMessage.usage.output).toBe(50);
+		expect(resetMessage.usage.totalTokens).toBe(165);
+	});
 });

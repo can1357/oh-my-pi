@@ -6,21 +6,26 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
+import { Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { AsyncJob, AsyncJobManager, AsyncJobType } from "../../async";
-import { settings } from "../../config/settings";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
+import { renderStructuredJson } from "../../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import type { StructuredSubagentOutput } from "../../task/types";
+import { parseConfiguredThinkingLevel } from "../../thinking";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import type { ToolSession } from "..";
 import {
+	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
 	formatDuration,
 	formatEmptyMessage,
+	formatFeedModelBadge,
 	formatStatusIcon,
 	getPreviewLines,
+	isFeedModelBadgeEnabled,
 	PREVIEW_LIMITS,
 	replaceTabs,
 	type ToolUIColor,
@@ -152,6 +157,7 @@ interface TrackedJobLike {
 	latestDetails?: Record<string, unknown>;
 	resultText?: string;
 	errorText?: string;
+	structured?: StructuredSubagentOutput;
 }
 
 export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobSnapshot[] {
@@ -161,6 +167,9 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 		const latest = current ?? j;
 		const resultConsumed = session.asyncJobManager?.isJobResultConsumed(latest.id) === true;
 		let resolvedModel: string | undefined;
+		let resolvedModelIdentity: string | undefined;
+		let resolvedThinkingLevel: JobSnapshot["resolvedThinkingLevel"];
+		let advisor = false;
 		if (latest.type === "task") {
 			const progressValue = latest.latestDetails?.progress;
 			if (Array.isArray(progressValue)) {
@@ -179,6 +188,16 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 					const trimmed = modelValue.trim();
 					if (trimmed) resolvedModel = trimmed;
 				}
+				const identityValue = progressRecord?.resolvedModelIdentity;
+				if (typeof identityValue === "string") {
+					const trimmed = identityValue.trim();
+					if (trimmed) resolvedModelIdentity = trimmed;
+				}
+				const thinkingValue = progressRecord?.resolvedThinkingLevel;
+				if (typeof thinkingValue === "string") {
+					resolvedThinkingLevel = parseConfiguredThinkingLevel(thinkingValue);
+				}
+				advisor = progressRecord?.advisor === true;
 			}
 		}
 		return {
@@ -188,8 +207,14 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			label: latest.label,
 			durationMs: Math.max(0, now - latest.startTime),
 			...(resolvedModel ? { resolvedModel } : {}),
+			...(resolvedModelIdentity ? { resolvedModelIdentity } : {}),
+			...(resolvedThinkingLevel !== undefined ? { resolvedThinkingLevel } : {}),
+			...(advisor ? { advisor: true } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
+			...(!resultConsumed && latest.structured
+				? { structured: latest.structured, agentUrlId: current?.agentId ?? latest.id }
+				: {}),
 		};
 	});
 }
@@ -242,6 +267,22 @@ export function buildJobResult(
 			}
 			if (j.errorText) {
 				lines.push(`Error: ${j.errorText}`);
+			}
+			if (j.structured) {
+				const hasData = Object.hasOwn(j.structured, "data");
+				let header = `Structured output: schema ${j.structured.status}`;
+				if (j.structured.error) header += `: ${j.structured.error}`;
+				// Valid results never inline the JSON here — it duplicates the
+				// `<output>` block above (or breaks mid-JSON once truncated at
+				// 4k), which contradicts async-result.md's contract of pointing
+				// to `agent://<id>` instead (PR #10625 review).
+				if (hasData)
+					header += `; full payload at agent://${j.agentUrlId}, fields via agent://${j.agentUrlId}?q=.<field>`;
+				lines.push(header);
+				if (j.structured.status !== "valid") {
+					const block = renderStructuredJson(j.structured);
+					if (block) lines.push("```json", block, "```");
+				}
 			}
 			lines.push("");
 		}
@@ -459,7 +500,6 @@ const PREVIEW_LINES_EXPANDED = 4;
 const LABEL_LINES_COLLAPSED = 1;
 const LABEL_LINES_EXPANDED = 3;
 const PREVIEW_LINE_WIDTH = 80;
-const MODEL_BADGE_MAX_WIDTH = 48;
 
 function statusToIcon(status: JobSnapshot["status"]): ToolUIStatus {
 	switch (status) {
@@ -621,7 +661,14 @@ export function jobsRenderResult(
 			// the animation state so a sealed block never hits stale shimmered
 			// bytes (spinnerFrame falls back to 0 on both sides of the seal).
 			const shimmerActive = counts.running > 0 && options.spinnerFrame !== undefined && shimmerEnabled();
-			const key = new Hasher().bool(expanded).u32(width).u32(spinnerFrame).bool(shimmerActive).digest();
+			const showModelBadge = isFeedModelBadgeEnabled();
+			const key = new Hasher()
+				.bool(expanded)
+				.u32(width)
+				.u32(spinnerFrame)
+				.bool(shimmerActive)
+				.bool(showModelBadge)
+				.digest();
 			if (!shimmerActive && cached?.key === key) return cached.lines;
 
 			const itemLines = renderTreeList<JobSnapshot>(
@@ -630,7 +677,8 @@ export function jobsRenderResult(
 					expanded,
 					maxCollapsed: COLLAPSED_LIST_LIMIT,
 					itemType: "job",
-					renderItem: job => {
+					renderItem: (job, context) => {
+						const rowWidth = Math.max(0, width - (context.prefixWidth ?? 0));
 						const lines: string[] = [];
 						const icon = formatStatusIcon(
 							statusToIcon(job.status),
@@ -638,9 +686,12 @@ export function jobsRenderResult(
 							job.status === "running" ? options.spinnerFrame : undefined,
 						);
 						const typeBadge = formatBadge(job.type, statusToColor(job.status), uiTheme);
-						// Task jobs label themselves with their agent id, which is also
-						// the job id — drop the id column instead of stuttering it twice.
-						const idPart = job.label.trim() === job.id ? "" : ` ${uiTheme.fg("muted", job.id)}`;
+						const durationSuffix = `${uiTheme.sep.dot}${uiTheme.fg("dim", formatDuration(job.durationMs))}`;
+						const displayId = truncateToWidth(
+							replaceTabs(job.id).replace(/\s+/g, " "),
+							Math.max(0, rowWidth - visibleWidth(`${icon} ${typeBadge} ${durationSuffix}`)),
+							Ellipsis.Unicode,
+						);
 						const rawLabelLines = (job.label || "(no label)").split(/\r?\n/);
 						const maxLabelLines = expanded ? LABEL_LINES_EXPANDED : LABEL_LINES_COLLAPSED;
 						const visibleLabelLines = rawLabelLines
@@ -650,37 +701,45 @@ export function jobsRenderResult(
 							const last = visibleLabelLines[visibleLabelLines.length - 1]!;
 							visibleLabelLines[visibleLabelLines.length - 1] = `${last} …`;
 						}
-						const durationText = uiTheme.fg("dim", formatDuration(job.durationMs));
-						const modelText =
-							job.type === "task" &&
-							typeof job.resolvedModel === "string" &&
-							job.resolvedModel.trim() &&
-							settings.get("task.showResolvedModelBadge")
-								? `${uiTheme.sep.dot}${uiTheme.fg(
-										"dim",
-										truncateToWidth(
-											replaceTabs(job.resolvedModel.trim()),
-											MODEL_BADGE_MAX_WIDTH,
-											Ellipsis.Unicode,
+						const rowPrefix = `${icon} ${typeBadge} `;
+						const modelIdentity = job.resolvedModelIdentity ?? job.resolvedModel;
+						const modelBadge =
+							job.type === "task" && showModelBadge && typeof modelIdentity === "string"
+								? formatFeedModelBadge(
+										modelIdentity,
+										job.resolvedThinkingLevel,
+										job.advisor === true,
+										uiTheme,
+										Math.min(
+											FEED_MODEL_BADGE_WIDTH,
+											Math.max(0, rowWidth - visibleWidth(`${rowPrefix}${displayId}${durationSuffix}`) - 1),
 										),
-									)}`
+									)
 								: "";
+						const modelLead = modelBadge ? `${modelBadge} ` : "";
+						const headRaw = displayId;
 						// Running rows in a live block shimmer their label; once the block
 						// stops animating (sealed, or a settled snapshot — spinnerFrame
 						// cleared) they render static so scrollback never keeps a mid-sweep
 						// shimmer band.
 						const live = job.status === "running" && options.spinnerFrame !== undefined;
-						const headRaw = visibleLabelLines[0] ?? "";
 						const headLabel = live
 							? shimmerEnabled()
 								? shimmerText(headRaw, uiTheme)
 								: uiTheme.fg("accent", headRaw)
 							: uiTheme.fg("toolOutput", headRaw);
-						lines.push(
-							`${icon}${idPart} ${typeBadge} ${headLabel}${modelText}${modelText ? uiTheme.sep.dot : " "}${durationText}`,
-						);
-						for (let i = 1; i < visibleLabelLines.length; i++) {
-							lines.push(`  ${uiTheme.fg("toolOutput", visibleLabelLines[i]!)}`);
+						let row = `${rowPrefix}${modelLead}${headLabel}`;
+						const distinctLabel = job.label.trim() !== job.id;
+						const label = visibleLabelLines[0] ?? "";
+						const inlineLabel = distinctLabel && visibleWidth(`${row} ${label}${durationSuffix}`) <= rowWidth;
+						if (inlineLabel) row += ` ${uiTheme.fg("toolOutput", label)}`;
+						row += durationSuffix;
+						lines.push(truncateToWidth(row, rowWidth, ""));
+						const continuationWidth = Math.max(0, rowWidth - visibleWidth("  "));
+						for (let i = distinctLabel && !inlineLabel ? 0 : 1; i < visibleLabelLines.length; i++) {
+							lines.push(
+								`  ${uiTheme.fg("toolOutput", truncateToWidth(visibleLabelLines[i]!, continuationWidth))}`,
+							);
 						}
 
 						const preview = flattenStructuredPreview(
@@ -688,7 +747,12 @@ export function jobsRenderResult(
 						);
 						if (preview) {
 							const maxLines = expanded ? PREVIEW_LINES_EXPANDED : PREVIEW_LINES_COLLAPSED;
-							const previewLines = getPreviewLines(preview, maxLines, PREVIEW_LINE_WIDTH, Ellipsis.Unicode);
+							const previewLines = getPreviewLines(
+								preview,
+								maxLines,
+								Math.min(PREVIEW_LINE_WIDTH, continuationWidth),
+								Ellipsis.Unicode,
+							);
 							const tone = job.errorText ? "error" : "dim";
 							for (const pl of previewLines) {
 								lines.push(`  ${uiTheme.fg(tone, pl)}`);
@@ -711,19 +775,31 @@ export function jobsRenderResult(
 								expanded,
 								maxCollapsed: COLLAPSED_LIST_LIMIT,
 								itemType: "agent",
-								renderItem: agent => {
+								renderItem: (agent, context) => {
+									const rowWidth = Math.max(0, width - (context.prefixWidth ?? 0));
 									const icon = agent.live
 										? formatStatusIcon("running", uiTheme, options.spinnerFrame)
 										: formatStatusIcon("warning", uiTheme);
 									const badge = agent.live
 										? formatBadge("agent", "accent", uiTheme)
 										: formatBadge("agent · no turn", "warning", uiTheme);
+									const id = truncateToWidth(
+										replaceTabs(agent.id).replace(/\s+/g, " "),
+										Math.max(0, rowWidth - visibleWidth(`${icon}  ${badge}`)),
+										Ellipsis.Unicode,
+									);
 									const gist = agent.activity
 										? ` ${uiTheme.fg("toolOutput", truncateToWidth(replaceTabs(agent.activity), LABEL_MAX_WIDTH, Ellipsis.Unicode))}`
 										: "";
 									const parent = agent.parentId ? uiTheme.fg("dim", ` ← ${agent.parentId}`) : "";
 									const age = uiTheme.fg("dim", formatDuration(agent.ageMs));
-									return [`${icon} ${uiTheme.fg("muted", agent.id)} ${badge}${gist} ${age}${parent}`];
+									return [
+										truncateToWidth(
+											`${icon} ${uiTheme.fg("muted", id)} ${badge}${gist} ${age}${parent}`,
+											rowWidth,
+											"",
+										),
+									];
 								},
 							},
 							uiTheme,

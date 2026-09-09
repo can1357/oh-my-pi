@@ -52,6 +52,7 @@ import {
 	filterByProvider,
 	refreshState,
 	toggleProvider,
+	toggleUserSource,
 } from "./state-manager";
 import { type DashboardState, isShadowedExtension, type ProviderTab } from "./types";
 
@@ -63,6 +64,7 @@ export interface ExtensionDashboardOptions {
 	eventBus?: EventBus;
 	toolSource?: ToolRuntimeSource;
 	onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void;
+	browserMcpFilterEnabled?: () => boolean;
 }
 
 function extFooter(): string {
@@ -112,7 +114,8 @@ export class ExtensionDashboard implements Component {
 		private readonly mcpManager: MCPManager | undefined,
 		private readonly eventBus: EventBus | undefined,
 		private readonly toolSource: ToolRuntimeSource | undefined,
-		private readonly onMcpToolsChanged?: (tools: CustomTool[]) => Promise<void> | void,
+		private readonly onMcpToolsChanged: ((tools: CustomTool[]) => Promise<void> | void) | undefined,
+		private readonly browserMcpFilterEnabled: (() => boolean) | undefined,
 	) {}
 
 	static async create(options: ExtensionDashboardOptions): Promise<ExtensionDashboard> {
@@ -124,6 +127,7 @@ export class ExtensionDashboard implements Component {
 			options.eventBus,
 			options.toolSource,
 			options.onMcpToolsChanged,
+			options.browserMcpFilterEnabled,
 		);
 		await dashboard.#init();
 		return dashboard;
@@ -148,6 +152,7 @@ export class ExtensionDashboard implements Component {
 				},
 				onToggle: (extensionId, enabled) => this.#handleExtensionToggle(extensionId, enabled),
 				onMasterToggle: providerId => this.#handleProviderToggle(providerId),
+				onUserSourceToggle: providerId => this.#handleUserSourceToggle(providerId),
 				masterSwitchProvider: this.#getActiveProviderId(),
 				mcpSource: this.mcpManager,
 				toolSource: this.toolSource,
@@ -309,12 +314,22 @@ export class ExtensionDashboard implements Component {
 		void this.#refreshFromState();
 	}
 
+	/** Flip the `~/` opt-in for a foreign provider; user-level MCP servers go down on opt-out. */
+	#handleUserSourceToggle(providerId: string): void {
+		const enabled = toggleUserSource(providerId);
+		if (!enabled) {
+			void this.#disconnectProviderMcpServers(providerId, "user");
+			return;
+		}
+		void this.#refreshFromState();
+	}
+
 	/**
 	 * Provider disable is discovery-only: do not rewrite mcp.json. Disconnect
 	 * live MCP servers owned by this provider so their tools leave the session.
 	 * Re-enable does not auto-connect — startup/reload still owns that.
 	 */
-	async #disconnectProviderMcpServers(providerId: string): Promise<void> {
+	async #disconnectProviderMcpServers(providerId: string, level?: "user" | "project"): Promise<void> {
 		const names = [
 			...new Set(
 				this.#state.extensions
@@ -322,6 +337,7 @@ export class ExtensionDashboard implements Component {
 						ext =>
 							ext.kind === "mcp" &&
 							ext.source.provider === providerId &&
+							(level === undefined || ext.source.level === level) &&
 							!isShadowedExtension(ext) &&
 							this.mcpManager?.getConnectionStatus(ext.name) !== "disconnected",
 					)
@@ -406,7 +422,7 @@ export class ExtensionDashboard implements Component {
 				discovery: {
 					enableProjectConfig: sm.get("mcp.enableProjectConfig") ?? true,
 					filterExa: true,
-					filterBrowser: sm.get("browser.enabled") ?? false,
+					filterBrowser: this.browserMcpFilterEnabled?.() ?? false,
 				},
 				manager: this.mcpManager,
 				session: this.onMcpToolsChanged ? { refreshMCPTools: this.onMcpToolsChanged } : undefined,

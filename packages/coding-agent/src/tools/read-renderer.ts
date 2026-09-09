@@ -10,7 +10,7 @@ import { formatFullOutputReference, formatStyledTruncationWarning, stripOutputNo
 import { isReadableUrlPath, splitInternalUrlSel, splitPathAndSel } from "./path-utils";
 import type { ReadToolDetails } from "./read";
 import { isRawSelector, parseSel } from "./read-selector";
-import { formatBytes, replaceTabs, shortenPath, wrapBrackets } from "./render-utils";
+import { formatBytes, sanitizeDisplayLines, shortenPath, wrapBrackets } from "./render-utils";
 
 // =============================================================================
 // TUI Renderer
@@ -138,7 +138,7 @@ export const readToolRenderer = {
 				title += `:${startLine}${endLine ? `-${endLine}` : ""}`;
 			}
 			const header = renderStatusLine({ icon: "error", title }, uiTheme);
-			const errorLines = errorText.split("\n").map(line => uiTheme.fg("error", replaceTabs(line)));
+			const errorLines = sanitizeDisplayLines(errorText).map(line => uiTheme.fg("error", line));
 			const outputBlock = new CachedOutputBlock();
 			return markFramedBlockComponent({
 				render: (width: number) =>
@@ -191,7 +191,9 @@ export const readToolRenderer = {
 				{ icon: suffix ? "warning" : "success", title: "Read", description: `${displayPath}${correction}` },
 				uiTheme,
 			);
-			const detailLines = contentText ? contentText.split("\n").map(line => uiTheme.fg("toolOutput", line)) : [];
+			const detailLines = contentText
+				? sanitizeDisplayLines(contentText).map(line => uiTheme.fg("toolOutput", line))
+				: [];
 			const lines = [...detailLines, ...warningLines];
 			const outputBlock = new CachedOutputBlock();
 			return markFramedBlockComponent({

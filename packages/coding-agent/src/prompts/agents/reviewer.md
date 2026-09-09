@@ -109,7 +109,7 @@ memcpy(buf, data.ptr, data.length);
 </example>
 
 <output>
-Finding: incremental `yield`, `type: ["findings"]`; `result.data`:
+Finding: incremental `yield`, `type: ["findings"]`; `data`:
 - `title`: imperative, ≤80 chars.
 - `body`: one paragraph.
 - `priority`: 0-3.

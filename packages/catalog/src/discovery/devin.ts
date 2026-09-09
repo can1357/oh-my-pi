@@ -1,8 +1,8 @@
 import { logger } from "@oh-my-pi/pi-utils";
+import { collapseVariants, type EffortVariantFamily } from "../compat/collapse";
 import { Effort, THINKING_EFFORTS } from "../effort";
 import type { DevinCompat, FetchImpl, ModelCost, ModelSpec } from "../types";
 import { discoveryFetch } from "../utils";
-import { collapseEffortVariants, DEVIN_VARIANT_COLLAPSE_TABLE, type EffortVariantFamily } from "../variant-collapse";
 import { DEVIN_DEFAULT_BASE_URL, devinDiscoveryMetadata } from "../wire/devin";
 import { decodeDevinUnaryMessage } from "../wire/devin-proto";
 import {
@@ -452,7 +452,7 @@ function normalizeDevinModels(
 	// whatever upstream served without family metadata; families already
 	// collapsed above pass through it untouched.
 	const families = devinDynamicFamilies(lanes.values());
-	const dynamic = families.length > 0 ? collapseEffortVariants(specs, { families }) : specs;
-	const collapsed = collapseEffortVariants(dynamic, DEVIN_VARIANT_COLLAPSE_TABLE);
+	const dynamic = families.length > 0 ? collapseVariants(specs, { table: { families } }) : specs;
+	const collapsed = collapseVariants(dynamic);
 	return collapsed.sort((a, b) => a.id.localeCompare(b.id));
 }
