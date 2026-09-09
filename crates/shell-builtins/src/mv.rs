@@ -34,7 +34,7 @@ use self::hardlink::{
 };
 #[cfg(unix)]
 use crate::support::fsutil::{display_permissions_unix, make_fifo};
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+#[cfg(target_os = "linux")]
 use crate::support::xattr as fsxattr;
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
@@ -1164,7 +1164,7 @@ fn rename_symlink_fallback(host: &mut Host, from: &Path, to: &Path) -> io::Resul
 	// must not be resolved; only the from/to operands are filesystem locations.
 	let path_symlink_points_to = fs::read_link(host.resolve(from))?;
 	unix::fs::symlink(path_symlink_points_to, host.resolve(to))?;
-	#[cfg(not(any(target_os = "macos", target_os = "redox")))]
+	#[cfg(target_os = "linux")]
 	{
 		let _ = copy_link_xattrs_if_supported(host, from, to);
 	}
@@ -1245,7 +1245,7 @@ fn rename_dir_fallback(
 
 	result?;
 
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+	#[cfg(target_os = "linux")]
 	{
 		copy_xattrs_if_supported(host, from, to)?;
 	}
@@ -1431,7 +1431,7 @@ fn copy_file_with_hardlinks_helper(
 		// Copy a regular file.
 		fs::copy(host.resolve(from), host.resolve(to))?;
 		// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
-		#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+		#[cfg(target_os = "linux")]
 		{
 			let _ = copy_xattrs_if_supported(host, from, to);
 		}
@@ -1486,7 +1486,7 @@ fn rename_file_fallback(
 		.map_err(|err| io::Error::new(err.kind(), "Permission denied"))?;
 
 	// Copy xattrs, ignoring ENOTSUP errors (filesystem doesn't support xattrs)
-	#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+	#[cfg(target_os = "linux")]
 	{
 		let _ = copy_xattrs_if_supported(host, from, to);
 	}
@@ -1499,7 +1499,7 @@ fn rename_file_fallback(
 /// Copy xattrs from source to destination, ignoring ENOTSUP/EOPNOTSUPP errors.
 /// These errors indicate the filesystem doesn't support extended attributes,
 /// which is acceptable when moving files across filesystems.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+#[cfg(target_os = "linux")]
 fn copy_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
 	match fsxattr::copy_xattrs(host.resolve(from), host.resolve(to)) {
 		Ok(()) => Ok(()),
@@ -1510,7 +1510,7 @@ fn copy_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<(
 
 /// Same as [`copy_xattrs_if_supported`] but for symlinks: the `l`-prefixed
 /// xattr syscalls operate on the link itself, never on the file it names.
-#[cfg(all(unix, not(any(target_os = "macos", target_os = "redox"))))]
+#[cfg(target_os = "linux")]
 fn copy_link_xattrs_if_supported(host: &Host, from: &Path, to: &Path) -> io::Result<()> {
 	match fsxattr::copy_link_xattrs(host.resolve(from), host.resolve(to)) {
 		Ok(()) => Ok(()),
