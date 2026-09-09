@@ -13,9 +13,10 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import * as vcs from "@oh-my-pi/pi-natives/vcs";
-import { isEnoent, pathIsWithin } from "@oh-my-pi/pi-utils";
+import { isEnoent, pathIsWithin, sanitizeText } from "@oh-my-pi/pi-utils";
 import type { ArchiveLimits } from "@oh-my-pi/pi-utils/ar";
 import { extractArchive } from "@oh-my-pi/pi-utils/ar";
+import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 
 import type { MarketplaceCatalogMetadata, MarketplacePluginEntry, PluginSource, PluginSourceNpm } from "./types";
 import { assertRuntimePackageName } from "./types";
@@ -77,16 +78,17 @@ function resolveLimits(limits?: ResolveContext["limits"]): NpmFetchLimits {
 		maxRedirects: limits?.maxRedirects ?? MAX_REDIRECTS,
 	};
 }
-
 /**
- * Truncate and strip every C0 control character and DEL from an untrusted
- * fragment before echoing it into a thrown error. Keeps registry- or
- * archive-controlled strings from carrying arbitrary bytes, ANSI escapes,
- * tabs, or line breaks into a single-line message and the TUI.
+ * Sanitize an untrusted fragment for display in an error message: strip control
+ * bytes and ANSI escapes, expand tabs, collapse line breaks, and truncate to a
+ * standard width. Keeps registry- or archive-controlled strings from overflowing
+ * the TUI line or carrying terminal sequences.
  */
-function sanitizeFragment(s: unknown, maxLen = 64): string {
-	const stripped = String(s).replace(/[\x00-\x1f\x7f]/g, "");
-	return stripped.length > maxLen ? `${stripped.slice(0, maxLen)}…` : stripped;
+function sanitizeFragment(s: unknown, maxLen: number = TRUNCATE_LENGTHS.CONTENT): string {
+	const text = replaceTabs(sanitizeText(String(s)))
+		.replace(/[\r\n]+/g, " ")
+		.trim();
+	return text ? truncateToWidth(text, maxLen) : "";
 }
 
 export interface ResolveContext {
@@ -269,7 +271,7 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 	// ── Validate version metadata ────────────────────────────────────
 	const versionMeta = packument.versions?.[selectedVersion];
 	if (!versionMeta || typeof versionMeta !== "object") {
-		throw new Error(stage(`no metadata for version "${selectedVersion}"`));
+		throw new Error(stage(`no metadata for version "${sanitizeFragment(selectedVersion)}"`));
 	}
 
 	if (versionMeta.name !== pkg) {
@@ -279,7 +281,7 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 	// ── Validate tarball URL ─────────────────────────────────────────
 	const tarballUrl = versionMeta.dist?.tarball;
 	if (typeof tarballUrl !== "string" || tarballUrl.length === 0) {
-		throw new Error(stage(`no tarball URL for version "${selectedVersion}"`));
+		throw new Error(stage(`no tarball URL for version "${sanitizeFragment(selectedVersion)}"`));
 	}
 	if (!isPublicHttpsUrl(tarballUrl)) {
 		throw new Error(stage(`tarball URL must be public HTTPS without credentials`));
@@ -288,7 +290,7 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 	// ── Validate SRI integrity ───────────────────────────────────────
 	const integrity = versionMeta.dist?.integrity;
 	if (typeof integrity !== "string" || integrity.length === 0) {
-		throw new Error(stage(`missing integrity hash for version "${selectedVersion}"`));
+		throw new Error(stage(`missing integrity hash for version "${sanitizeFragment(selectedVersion)}"`));
 	}
 	const expectedDigest = parseSriSha512(integrity, stage);
 
@@ -304,7 +306,7 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 
 		// ── Verify SHA-512 digest before extraction ──────────────────
 		if (actualDigest.length !== 64 || !crypto.timingSafeEqual(actualDigest, expectedDigest)) {
-			throw new Error(stage(`integrity verification failed for version "${selectedVersion}"`));
+			throw new Error(stage(`integrity verification failed for version "${sanitizeFragment(selectedVersion)}"`));
 		}
 
 		// ── Extract through extractArchive ───────────────────────────
@@ -318,7 +320,7 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 			// so it gets the same treatment as every other untrusted fragment here
 			// rather than being echoed raw.
 			const detail = err instanceof Error ? err.message : String(err);
-			throw new Error(stage(`archive extraction failed: ${sanitizeFragment(detail, 200)}`));
+			throw new Error(stage(`archive extraction failed: ${sanitizeFragment(detail, TRUNCATE_LENGTHS.LINE)}`));
 		}
 
 		// ── Require one top-level package/ directory ─────────────────
@@ -363,7 +365,7 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 		if (manifest.version !== undefined && manifest.version !== selectedVersion) {
 			throw new Error(
 				stage(
-					`package identity mismatch: expected version "${selectedVersion}", got "${sanitizeFragment(manifest.version)}"`,
+					`package identity mismatch: expected version "${sanitizeFragment(selectedVersion)}", got "${sanitizeFragment(manifest.version)}"`,
 				),
 			);
 		}
@@ -622,6 +624,7 @@ async function fetchPackument(
 		}
 	} finally {
 		clearTimer();
+		await response.body?.cancel().catch(() => {});
 	}
 }
 
@@ -648,6 +651,7 @@ async function readCappedBytes(
 			chunks.push(value);
 		}
 	} finally {
+		await reader.cancel().catch(() => {});
 		reader.releaseLock();
 	}
 	return Buffer.concat(chunks);
@@ -896,11 +900,13 @@ async function downloadTarball(
 
 	try {
 		if (!response.ok) {
+			await response.body?.cancel().catch(() => {});
 			throw new Error(stage(`tarball download failed: HTTP ${response.status}`));
 		}
 
 		const contentLength = response.headers.get("content-length");
 		if (contentLength && parseInt(contentLength, 10) > lim.tarballMaxBytes) {
+			await response.body?.cancel().catch(() => {});
 			throw new Error(stage(`tarball exceeds ${lim.tarballMaxBytes} bytes`));
 		}
 
@@ -935,6 +941,7 @@ async function downloadTarball(
 			} catch {}
 			throw err;
 		} finally {
+			await reader.cancel().catch(() => {});
 			reader.releaseLock();
 		}
 
@@ -946,6 +953,7 @@ async function downloadTarball(
 		throw err;
 	} finally {
 		clearTimer();
+		await response.body?.cancel().catch(() => {});
 	}
 }
 

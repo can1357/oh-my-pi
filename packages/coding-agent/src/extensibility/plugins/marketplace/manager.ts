@@ -629,6 +629,8 @@ export class MarketplaceManager {
 	async checkForUpdates(): Promise<Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>> {
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const updates: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
+		const npmVersionCache = new Map<string, string>();
+		const npmFailed = new Set<string>();
 
 		// Keyed by (path, scope) so each scope is checked independently.
 		// A plugin current in user scope but stale in project scope must still appear.
@@ -654,12 +656,7 @@ export class MarketplaceManager {
 					const catalog = await this.#readCatalog(mktEntry);
 					const pluginEntry = catalog.plugins.find(p => p.name === parsed.name);
 					catalogVersion = pluginEntry?.version;
-					if (
-						!catalogVersion &&
-						pluginEntry &&
-						typeof pluginEntry.source === "object" &&
-						pluginEntry.source.source === "npm"
-					) {
+					if (pluginEntry && typeof pluginEntry.source === "object" && pluginEntry.source.source === "npm") {
 						npmSource = pluginEntry.source;
 					}
 				} catch {
@@ -670,16 +667,23 @@ export class MarketplaceManager {
 				// "^1.2.0" or omit the version entirely (dist-tag `latest`), while
 				// installation persisted the exact version it resolved to. Comparing the
 				// selector string against that exact version can never observe an
-				// ordinary registry release, so resolve the selector and compare
-				// versions. A catalog `version` still wins when present.
+				// ordinary registry release, so an npm source is always resolved against
+				// the registry and its selected version is the comparison.
 				let comparisonVersion = catalogVersion;
 				if (npmSource) {
-					try {
-						comparisonVersion = await resolveNpmVersion(npmSource);
-					} catch {
-						// Registry unreachable or selector unresolvable — report nothing
-						// for this plugin rather than guessing from the selector string.
-						continue;
+					const key = JSON.stringify([npmSource.package, npmSource.version, npmSource.registry]);
+					if (npmFailed.has(key)) continue;
+					const cached = npmVersionCache.get(key);
+					if (cached) {
+						comparisonVersion = cached;
+					} else {
+						try {
+							comparisonVersion = await resolveNpmVersion(npmSource);
+							npmVersionCache.set(key, comparisonVersion);
+						} catch {
+							npmFailed.add(key);
+							continue;
+						}
 					}
 				}
 				if (!comparisonVersion || comparisonVersion === installed.version) continue;

@@ -1456,10 +1456,58 @@ describe("MarketplaceManager — npm source", () => {
 // ── Package-name invariant (types.ts) ────────────────────────────────
 
 describe("assertRuntimePackageName — 214-byte cap", () => {
-	it("accepts a 214-char lowercase name", () => {
-		const name = `a${"b".repeat(213)}`;
-		expect(name.length).toBe(214);
-		expect(assertRuntimePackageName(name)).toBe(name);
+	it("accepts a 214-char package name through a local install", async () => {
+		const pkg = `a${"b".repeat(213)}`;
+		expect(pkg.length).toBe(214);
+
+		const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-long-name-"));
+		try {
+			const marketplaceDir = path.join(tmpDir, "marketplace");
+			const pluginDir = path.join(marketplaceDir, "plugins", "long-name-plugin");
+			fs.mkdirSync(path.join(marketplaceDir, ".claude-plugin"), { recursive: true });
+			fs.mkdirSync(pluginDir, { recursive: true });
+			fs.writeFileSync(
+				path.join(marketplaceDir, ".claude-plugin", "marketplace.json"),
+				JSON.stringify({
+					name: "long-name-marketplace",
+					owner: { name: "Test" },
+					metadata: { description: "A test marketplace", version: "1.0.0" },
+					plugins: [
+						{
+							name: "long-name-plugin",
+							source: "./plugins/long-name-plugin",
+							description: "A test plugin",
+							version: "1.0.0",
+						},
+					],
+				}),
+			);
+			fs.writeFileSync(
+				path.join(pluginDir, "package.json"),
+				JSON.stringify({
+					name: pkg,
+					version: "1.0.0",
+					omp: { extensions: ["./extensions"] },
+				}),
+			);
+			fs.mkdirSync(path.join(pluginDir, "extensions"), { recursive: true });
+			fs.writeFileSync(path.join(pluginDir, "extensions", "index.ts"), "export default {};\n");
+
+			const manager = new MarketplaceManager({
+				marketplacesRegistryPath: path.join(tmpDir, "marketplaces.json"),
+				installedRegistryPath: path.join(tmpDir, "installed_plugins.json"),
+				marketplacesCacheDir: path.join(tmpDir, "cache", "marketplaces"),
+				pluginsCacheDir: path.join(tmpDir, "cache", "plugins"),
+			});
+
+			await manager.addMarketplace(marketplaceDir);
+			const entry = await manager.installPlugin("long-name-plugin", "long-name-marketplace");
+
+			expect(entry.version).toBe("1.0.0");
+			expect(fs.realpathSync(path.join(tmpDir, "node_modules", pkg))).toBe(fs.realpathSync(entry.installPath));
+		} finally {
+			removeSyncWithRetries(tmpDir);
+		}
 	});
 
 	it("rejects a 215-char name", () => {
