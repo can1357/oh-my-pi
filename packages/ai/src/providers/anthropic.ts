@@ -3335,9 +3335,8 @@ export function buildAnthropicClientOptions(args: AnthropicClientOptionsArgs): A
 				Authorization: `Bearer ${copilotApiKey}`,
 				...(betaFeatures.length > 0 ? { "anthropic-beta": buildBetaHeader([], betaFeatures) } : {}),
 			},
-			mergeCopilotApiHeaders(model.headers, { cliDisabled }),
+			mergeCopilotApiHeaders(mergeHeaders(model.headers, headers), { cliDisabled }),
 			dynamicHeaders,
-			headers,
 		);
 		applyInferenceHeaders(defaultHeaders, {
 			provider: model.provider,

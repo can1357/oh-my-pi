@@ -386,6 +386,10 @@ export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Pr
 
 	const apiEndpoint = await discoverGitHubCopilotApiEndpoint(githubAccessToken, fetchImpl);
 
+	// Enable all models after successful login
+	options.onProgress?.("Enabling models...");
+	await enableAllGitHubCopilotModels(githubAccessToken, enterpriseDomain ?? undefined, apiEndpoint, fetchImpl);
+
 	// Keep storing the GitHub token directly so credentials minted by the
 	// Copilot CLI OAuth app remain valid alongside new OpenCode app logins.
 	const credentials: OAuthCredentials = {
@@ -396,10 +400,6 @@ export async function loginGitHubCopilot(options: GitHubCopilotLoginOptions): Pr
 		apiEndpoint,
 		cliDisabled: isCopilotCliDisabled(githubAccessToken) ? true : undefined,
 	};
-
-	// Enable all models after successful login
-	options.onProgress?.("Enabling models...");
-	await enableAllGitHubCopilotModels(githubAccessToken, enterpriseDomain ?? undefined, apiEndpoint, fetchImpl);
 	return credentials;
 }
 
