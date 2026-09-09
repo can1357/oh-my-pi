@@ -343,4 +343,61 @@ describe("tool usage stats pipeline", () => {
 		await syncAllSessions({ workers: 1 });
 		expect(getToolStats()).toEqual(first);
 	});
+
+	it("collapses provider-polluted tool names and skips nameless calls", async () => {
+		// Real-world shapes observed when a gateway hands the model's whole
+		// invocation text back as the function name (see sanitizeToolName):
+		// inlined `key=value` args, parenthesized args, a shell command in
+		// the name slot with a stray in-band closer, and whitespace-only
+		// noise that carries no tool identity at all.
+		await writeSessionFile("session.jsonl", { id: "sess0004" }, [
+			buildAssistantEntry({
+				entryId: "asst-1",
+				timestamp: TS1,
+				toolCalls: [
+					{ id: "call-1", name: 'bash command="ls -la /repo" i="List repo"', arguments: {} },
+					{
+						id: "call-2",
+						name: 'bash(i="Probe repo", timeout=30)</arg-value>',
+						arguments: {},
+					},
+					{
+						id: "call-3",
+						name: "curl --resolve oracle.example:443:127.0.0.1 -k https://oracle.example --max-time 5</arg-value>",
+						arguments: { i: "Comparing cert routes" },
+					},
+					{ id: "call-4", name: 'grep -rn "token" --include=*.go . | head -10', arguments: {} },
+					{ id: "call-5", name: "  \u0000\t  ", arguments: {} },
+				],
+				totalTokens: TURN1_TOTAL_TOKENS,
+				outputTokens: TURN1_OUTPUT_TOKENS,
+				costTotal: TURN1_COST,
+			}),
+			buildToolResultEntry({
+				entryId: "tr-1",
+				parentId: "asst-1",
+				timestamp: TS1,
+				toolCallId: "call-3",
+				toolName: "curl --resolve oracle.example:443:127.0.0.1 -k https://oracle.example --max-time 5</arg-value>",
+				text: "000",
+				isError: true,
+			}),
+		]);
+		await syncAllSessions({ workers: 1 });
+
+		const stats = getToolStats();
+		// Surviving rows collapse onto their leading identifier token; the
+		// nameless call is dropped entirely.
+		expect(stats.map(row => row.tool).sort()).toEqual(["bash", "curl", "grep"]);
+		expect(toolRow(stats, "bash").calls).toBe(2);
+		expect(toolRow(stats, "curl").calls).toBe(1);
+		expect(toolRow(stats, "curl").errors).toBe(1);
+
+		// The dashboard's per-model rows - the source of the tool filter
+		// dropdown - see the same collapsed names.
+		const byModel = getToolStatsByModel()
+			.map(row => row.tool)
+			.sort();
+		expect(byModel).toEqual(["bash", "curl", "grep"]);
+	});
 });

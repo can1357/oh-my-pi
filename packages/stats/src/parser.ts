@@ -29,6 +29,9 @@ import { computeUserMessageMetrics } from "./user-metrics";
 /** Basename of an advisor agent's transcript inside a session artifacts dir. */
 const ADVISOR_TRANSCRIPT_BASENAME = "__advisor.jsonl";
 
+/** Characters a persisted tool name may consist of without sanitization. */
+const TOOL_NAME_PATTERN = /^[\w.:-]+$/;
+
 /**
  * Classify which agent produced a transcript from its path within the sessions
  * directory. Layout: `<sessionsDir>/<project>/<file>.jsonl` is the `main`
@@ -292,27 +295,51 @@ function extractToolCalls(
 	);
 	if (blocks.length === 0) return [];
 
-	return blocks.map(block => {
+	const calls: ToolCallStats[] = [];
+	for (const block of blocks) {
+		// Names reduced to nothing by sanitization carry no tool identity:
+		// skip them rather than attributing usage to garbage (see
+		// sanitizeToolName). callsInTurn still counts the raw block total.
+		const toolName = sanitizeToolName(block.name);
+		if (toolName === null) continue;
 		let argsChars = 0;
 		try {
 			argsChars = JSON.stringify(block.arguments ?? {}).length;
 		} catch {
 			// Non-serializable arguments (shouldn't happen in persisted JSONL); size unknown.
 		}
-		return {
+		calls.push({
 			sessionFile,
 			entryId: entry.id,
 			toolCallId: block.id,
 			folder,
-			toolName: block.name,
+			toolName,
 			model: msg.model,
 			provider: msg.provider,
 			timestamp: coerceEntryTimestamp(msg.timestamp, entry),
 			agentType,
 			callsInTurn: blocks.length,
 			argsChars,
-		};
-	});
+		});
+	}
+	return calls;
+}
+
+/**
+ * Tool names as persisted can be polluted by provider-side parse garbage — a
+ * gateway may hand the model's whole invocation text back as the function
+ * name (e.g. `bash command="ls -la …"` with a stray in-band closer), which
+ * then shows up verbatim in every `GROUP BY tool_name` aggregate and the
+ * dashboard tool filter. Reduce such names to their leading identifier token;
+ * names that yield no identifier at all carry no tool identity and are
+ * returned as `null` so the row is skipped.
+ */
+function sanitizeToolName(name: string): string | null {
+	const trimmed = name.trim();
+	if (trimmed.length === 0) return null;
+	if (TOOL_NAME_PATTERN.test(trimmed)) return trimmed;
+	const candidate = trimmed.split(/[^\w.:-]/)[0] ?? "";
+	return candidate.length > 0 ? candidate : null;
 }
 
 /**
