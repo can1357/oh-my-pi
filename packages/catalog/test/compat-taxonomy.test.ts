@@ -19,6 +19,17 @@ describe("classifyModel", () => {
 		});
 	});
 
+	test("class namespace does not compete with the product family", () => {
+		expect(classifyModel("litellm", "mistral.mixtral-8x7b-instruct-v0:1")).toEqual({
+			class: "mistral",
+			family: "mixtral",
+		});
+		expect(classifyModel("litellm", "mistral.mistral-large-2402-v1:0")).toEqual({
+			class: "mistral",
+			family: "mistral",
+		});
+	});
+
 	test("bare o-series names carry no revision", () => {
 		expect(classifyModel("openai", "o3")).toEqual({ class: "openai", family: "o-series" });
 		expect(classifyModel("openai", "o3-mini")).toEqual({

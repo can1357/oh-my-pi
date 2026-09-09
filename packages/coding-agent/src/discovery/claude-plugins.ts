@@ -7,7 +7,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import { registerProvider } from "../capability";
+import { isUserSourceEnabled, registerProvider } from "../capability";
 import { readFile } from "../capability/fs";
 import { type Hook, hookCapability } from "../capability/hook";
 import { type MCPServer, mcpCapability } from "../capability/mcp";
@@ -18,7 +18,7 @@ import { type CustomTool, toolCapability } from "../capability/tool";
 import type { LoadContext, LoadResult } from "../capability/types";
 import { legacyProviderAllowed } from "./agent-plugin-format";
 import {
-	buildRuleFromMarkdown,
+	discoverRuleFromMarkdown,
 	type ClaudePluginRoot,
 	createSourceMeta,
 	expandEnvVarsDeep,
@@ -44,8 +44,10 @@ async function allowedRoots(
 	surface: "skills" | "mcp" | "other",
 ): Promise<{ roots: ClaudePluginRoot[]; warnings: string[] }> {
 	const { roots, warnings } = await listClaudePluginRoots(ctx.home, ctx.cwd);
-	const flags = await Promise.all(roots.map(root => legacyProviderAllowed(root.path, surface)));
-	return { roots: roots.filter((_, i) => flags[i]), warnings };
+	const userEnabled = isUserSourceEnabled("claude-plugins", ctx) || isUserSourceEnabled("claude", ctx);
+	const scopedRoots = userEnabled ? roots : roots.filter(root => root.scope === "project" || root.origin !== "claude");
+	const flags = await Promise.all(scopedRoots.map(root => legacyProviderAllowed(root.path, surface)));
+	return { roots: scopedRoots.filter((_, i) => flags[i]), warnings };
 }
 
 interface ClaudePluginManifest {
@@ -229,6 +231,7 @@ async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
 						providerId: PROVIDER_ID,
 						level: root.scope,
 						includeSelf: true,
+						origin: root.origin,
 					}),
 				),
 			);
@@ -262,7 +265,7 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 			loadFilesFromDir<Rule>(ctx, path.join(root.path, "rules"), PROVIDER_ID, root.scope, {
 				extensions: ["md", "mdc"],
 				transform: (name, content, filePath, source) =>
-					buildRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
+					discoverRuleFromMarkdown(name, content, filePath, source, { stripNamePattern: /\.(md|mdc)$/ }),
 			}),
 		),
 	);

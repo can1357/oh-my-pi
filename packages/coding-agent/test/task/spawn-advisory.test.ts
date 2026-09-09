@@ -72,7 +72,7 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 			cwd: "/tmp",
 			hasUI: false,
 			suppressSpawnAdvisory: suppress,
-			settings: Settings.isolated({ "task.isolation.mode": "none", "task.batch": true }),
+			settings: Settings.isolated({ "task.isolation.enabled": false, "task.batch": true }),
 			getSessionFile: () => null,
 			getSessionSpawns: () => "*",
 		} as unknown as ToolSession;
@@ -85,7 +85,7 @@ describe("task tool advisory gating via suppressSpawnAdvisory", () => {
 			// `task.disabledAgents` is what the task tool reads to drop scout from
 			// the rendered description and the appended specialization advisory.
 			settings: Settings.isolated({
-				"task.isolation.mode": "none",
+				"task.isolation.enabled": false,
 				"task.batch": true,
 				"task.disabledAgents": ["scout"],
 			}),

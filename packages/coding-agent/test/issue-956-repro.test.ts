@@ -6,7 +6,13 @@ import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as mcpConfigWriter from "@oh-my-pi/pi-coding-agent/mcp/config-writer";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import type { Component } from "@oh-my-pi/pi-tui";
 import { getConfigRootDir, getProjectDir, removeWithRetries, setAgentDir, setProjectDir } from "@oh-my-pi/pi-utils";
+import {
+	createInteractiveModeContext,
+	createMcpManagerStub,
+	type ContextOverrides,
+} from "./helpers/interactive-mode-context";
 
 const originalProjectDir = getProjectDir();
 const originalAgentDir = process.env.PI_CODING_AGENT_DIR;
@@ -16,6 +22,16 @@ type RenderableBlock = {
 	render: (width: number) => readonly string[];
 	isTranscriptBlockFinalized: () => boolean;
 };
+
+function isRenderableBlock(component: Component): component is Component & RenderableBlock {
+	return "isTranscriptBlockFinalized" in component && typeof component.isTranscriptBlockFinalized === "function";
+}
+
+function createController(overrides: ContextOverrides = {}) {
+	const mcpManager = createMcpManagerStub(overrides.mcpManager);
+	const ctx = createInteractiveModeContext({ ...overrides, mcpManager });
+	return { controller: new MCPCommandController(ctx), ctx, mcpManager };
+}
 
 describe("interactive /mcp test", () => {
 	let projectDir = "";
@@ -78,42 +94,12 @@ describe("interactive /mcp test", () => {
 			serverInfo: { name: "GitHub MCP", version: "1.0.0" },
 			capabilities: {},
 		};
-		const showError = vi.fn();
-		const showStatus = vi.fn();
-		const requestRender = vi.fn();
-		const addChild = vi.fn();
-		const presented: { render: (width: number) => readonly string[] }[] = [];
-		const refreshMCPTools = vi.fn();
 		const connectToServer = vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
 		const listTools = vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
 		const disconnectServer = vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
 		const mcpTestEscapeHandlers = new Set<() => void>();
-		const controller = new MCPCommandController({
-			mcpTestEscapeHandlers,
-			chatContainer: { addChild },
-			present: (content: unknown) => {
-				for (const item of Array.isArray(content) ? content : [content]) addChild(item);
-				requestRender();
-			},
-			presentCommandOutput: (content: unknown) => {
-				for (const item of Array.isArray(content) ? content : [content]) {
-					addChild(item);
-					if (typeof (item as { render?: unknown }).render === "function") {
-						presented.push(item as { render: (width: number) => readonly string[] });
-					}
-				}
-				requestRender();
-			},
-			ui: { requestRender },
-			editor: {},
-			showError,
-			showStatus,
-			session: { refreshMCPTools },
-			mcpManager: {
-				prepareConfig: vi.fn(async config => config),
-				getConnectionStatus: vi.fn(() => "connected"),
-			},
-		} as never);
+		const { controller, ctx } = createController({ mcpTestEscapeHandlers });
+		const { showError, showStatus } = ctx;
 
 		await controller.handle("/mcp test github");
 		const signal = connectToServer.mock.calls[0]?.[2]?.signal;
@@ -122,7 +108,7 @@ describe("interactive /mcp test", () => {
 
 		// The settled hint must stop advertising Esc the moment cancellation is
 		// impossible, or a later press kills the running agent turn instead.
-		const rendered = presented.map(block => block.render(80).join("\n")).join("\n");
+		const rendered = ctx.chatContainer.children.map(block => block.render(80).join("\n")).join("\n");
 		expect(rendered).toContain(`Tested connection to "github".`);
 		expect(rendered).not.toContain("(esc to cancel)");
 
@@ -150,7 +136,7 @@ describe("interactive /mcp test", () => {
 		);
 		expect(listTools).toHaveBeenCalledWith(connection, expect.objectContaining({ signal: expect.any(AbortSignal) }));
 		expect(disconnectServer).toHaveBeenCalledWith(connection);
-		expect(requestRender).toHaveBeenCalled();
+		expect(ctx.ui.requestRender).toHaveBeenCalled();
 	});
 
 	it("cancelling a pending test consumes Esc ownership without a grace window", async () => {
@@ -177,30 +163,15 @@ describe("interactive /mcp test", () => {
 			mcpServers: Record<string, { type: string; command: string; args: string[] }>;
 		}>();
 		vi.spyOn(mcpConfigWriter, "readMCPConfigFile").mockReturnValue(lookup as never);
-		const showStatus = vi.fn();
-		const presented: RenderableBlock[] = [];
 		const { promise: hintPresented, resolve: hintResolve } = Promise.withResolvers<void>();
 		const mcpTestEscapeHandlers = new Set<() => void>();
-		const controller = new MCPCommandController({
-			mcpTestEscapeHandlers,
-			chatContainer: { addChild: vi.fn() },
-			present: vi.fn(),
-			presentCommandOutput: (content: unknown) => {
-				if (typeof (content as { render?: unknown }).render === "function") {
-					presented.push(content as RenderableBlock);
-					hintResolve();
-				}
-			},
-			ui: { requestRender: vi.fn() },
-			editor: {},
-			showError: vi.fn(),
-			showStatus,
-			session: { refreshMCPTools: vi.fn() },
-			mcpManager: {
-				prepareConfig: vi.fn(async config => config),
-				getConnectionStatus: vi.fn(() => "connected"),
-			},
-		} as never);
+		const { controller, ctx } = createController({ mcpTestEscapeHandlers });
+		const { showStatus } = ctx;
+		const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
+		vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(component => {
+			addChild(component);
+			hintResolve();
+		});
 
 		const pending = controller.handle("/mcp test github");
 		expect(mcpTestEscapeHandlers).toHaveLength(1);
@@ -211,6 +182,7 @@ describe("interactive /mcp test", () => {
 		// Let the hint render before cancelling: this exercises the post-hint
 		// cancellation path (connect still pending), not the pre-hint bailout.
 		await hintPresented;
+		const presented = ctx.chatContainer.children.filter(isRenderableBlock);
 		// keeps re-rendering it (post-settlement rewrite stays visible).
 		expect(presented[0]?.isTranscriptBlockFinalized()).toBe(false);
 
@@ -255,40 +227,36 @@ describe("interactive /mcp test", () => {
 		vi.spyOn(mcpClient, "connectToServer").mockResolvedValue(connection);
 		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
 		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
-		const showStatus = vi.fn();
-		const presented: RenderableBlock[] = [];
 		const { promise: hintPresented, resolve: hintResolve } = Promise.withResolvers<void>();
 		const { promise: syncStarted, resolve: syncStartedResolve } = Promise.withResolvers<void>();
 		const { promise: syncGate, resolve: syncResolve } = Promise.withResolvers<void>();
 		const mcpTestEscapeHandlers = new Set<() => void>();
-		const controller = new MCPCommandController({
+		const { controller, ctx } = createController({
 			mcpTestEscapeHandlers,
-			chatContainer: { addChild: vi.fn() },
-			present: vi.fn(),
-			presentCommandOutput: (content: unknown) => {
-				if (typeof (content as { render?: unknown }).render === "function") {
-					presented.push(content as RenderableBlock);
-					hintResolve();
-				}
-			},
-			ui: { requestRender: vi.fn() },
-			editor: {},
-			showError: vi.fn(),
-			showStatus,
-			session: { refreshMCPTools: vi.fn() },
 			mcpManager: {
-				prepareConfig: vi.fn(async config => config),
-				getConnectionStatus: vi.fn(() => "disconnected"),
+				getConnectionStatus: vi.fn(() => "disconnected" as const),
 				connectServers: vi.fn(async () => {
 					syncStartedResolve();
 					await syncGate;
-					return {};
+					return {
+						tools: [],
+						errors: new Map<string, string>(),
+						connectedServers: [],
+						exaApiKeys: [],
+					};
 				}),
 			},
-		} as never);
+		});
+		const { showStatus } = ctx;
+		const addChild = ctx.chatContainer.addChild.bind(ctx.chatContainer);
+		vi.spyOn(ctx.chatContainer, "addChild").mockImplementation(component => {
+			addChild(component);
+			hintResolve();
+		});
 
 		const pending = controller.handle("/mcp test github");
 		await hintPresented;
+		const presented = ctx.chatContainer.children;
 
 		// Wait until the test is past listTools and inside #syncManagerConnection:
 		// an abort here does not observe the signal, so the flow still completes.
@@ -306,7 +274,7 @@ describe("interactive /mcp test", () => {
 		expect(rendered).toContain(`Tested connection to "github".`);
 		expect(rendered).not.toContain("Cancelled connection test");
 		expect(showStatus).not.toHaveBeenCalledWith(`Cancelled MCP test for "github"`);
-		expect(presented[0]?.isTranscriptBlockFinalized()).toBe(true);
+		expect(presented.find(isRenderableBlock)?.isTranscriptBlockFinalized()).toBe(true);
 	});
 
 	it("aborts during the awaited lookup without ever advertising esc", async () => {
@@ -314,26 +282,9 @@ describe("interactive /mcp test", () => {
 			mcpServers: Record<string, { type: string; command: string; args: string[] }>;
 		}>();
 		vi.spyOn(mcpConfigWriter, "readMCPConfigFile").mockReturnValue(lookup as never);
-		const presentCommandOutput = vi.fn();
-		const showStatus = vi.fn();
 		const mcpTestEscapeHandlers = new Set<() => void>();
-		const controller = new MCPCommandController({
-			mcpTestEscapeHandlers,
-			chatContainer: { addChild: vi.fn() },
-			present: vi.fn(),
-			presentCommandOutput,
-			ui: { requestRender: vi.fn() },
-			editor: {},
-			showError: vi.fn(),
-			showStatus,
-			session: { refreshMCPTools: vi.fn() },
-			mcpManager: {
-				getServerConfig: vi.fn(() => undefined),
-				getSource: vi.fn(() => undefined),
-				prepareConfig: vi.fn(async config => config),
-				getConnectionStatus: vi.fn(() => "connected"),
-			},
-		} as never);
+		const { controller, ctx } = createController({ mcpTestEscapeHandlers });
+		const { presentCommandOutput, showStatus } = ctx;
 
 		const pending = controller.handle("/mcp test github");
 		expect(mcpTestEscapeHandlers).toHaveLength(1);
@@ -361,26 +312,9 @@ describe("interactive /mcp test", () => {
 			mcpServers: Record<string, { type: string; command: string; args: string[] }>;
 		}>();
 		vi.spyOn(mcpConfigWriter, "readMCPConfigFile").mockReturnValue(lookup as never);
-		const presentCommandOutput = vi.fn();
-		const showStatus = vi.fn();
 		const mcpTestEscapeHandlers = new Set<() => void>();
-		const controller = new MCPCommandController({
-			mcpTestEscapeHandlers,
-			chatContainer: { addChild: vi.fn() },
-			present: vi.fn(),
-			presentCommandOutput,
-			ui: { requestRender: vi.fn() },
-			editor: {},
-			showError: vi.fn(),
-			showStatus,
-			session: { refreshMCPTools: vi.fn() },
-			mcpManager: {
-				getServerConfig: vi.fn(() => undefined),
-				getSource: vi.fn(() => undefined),
-				prepareConfig: vi.fn(async config => config),
-				getConnectionStatus: vi.fn(() => "connected"),
-			},
-		} as never);
+		const { controller, ctx } = createController({ mcpTestEscapeHandlers });
+		const { presentCommandOutput, showStatus } = ctx;
 
 		const pending = controller.handle("/mcp test github");
 		expect(mcpTestEscapeHandlers).toHaveLength(1);
@@ -414,21 +348,7 @@ describe("interactive /mcp test", () => {
 		vi.spyOn(mcpClient, "listTools").mockResolvedValue([{ name: "search_issues" }] as never);
 		vi.spyOn(mcpClient, "disconnectServer").mockResolvedValue();
 		const mcpTestEscapeHandlers = new Set<() => void>();
-		const controller = new MCPCommandController({
-			mcpTestEscapeHandlers,
-			chatContainer: { addChild: vi.fn() },
-			present: vi.fn(),
-			presentCommandOutput: vi.fn(),
-			ui: { requestRender: vi.fn() },
-			editor: {},
-			showError: vi.fn(),
-			showStatus: vi.fn(),
-			session: { refreshMCPTools: vi.fn() },
-			mcpManager: {
-				prepareConfig: vi.fn(async config => config),
-				getConnectionStatus: vi.fn(() => "connected"),
-			},
-		} as never);
+		const { controller } = createController({ mcpTestEscapeHandlers });
 
 		// Do not await: the handler must be registered synchronously, before the
 		// awaited `#resolveServerForAuth()` config read can suspend and let Esc
@@ -441,23 +361,9 @@ describe("interactive /mcp test", () => {
 	it("releases Esc immediately when lookup fails before the hint is shown", async () => {
 		vi.spyOn(mcpConfigWriter, "readMCPConfigFile").mockRejectedValue(new Error("EACCES: config unreadable"));
 		const connectToServer = vi.spyOn(mcpClient, "connectToServer");
-		const showError = vi.fn();
 		const mcpTestEscapeHandlers = new Set<() => void>();
-		const controller = new MCPCommandController({
-			mcpTestEscapeHandlers,
-			chatContainer: { addChild: vi.fn() },
-			present: vi.fn(),
-			presentCommandOutput: vi.fn(),
-			ui: { requestRender: vi.fn() },
-			editor: {},
-			showError,
-			showStatus: vi.fn(),
-			session: { refreshMCPTools: vi.fn() },
-			mcpManager: {
-				getServerConfig: vi.fn(() => undefined),
-				getSource: vi.fn(() => undefined),
-			},
-		} as never);
+		const { controller, ctx } = createController({ mcpTestEscapeHandlers });
+		const { showError } = ctx;
 
 		await controller.handle("/mcp test github");
 

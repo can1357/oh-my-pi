@@ -7,6 +7,7 @@ import {
 	type Api,
 	type AssistantMessage,
 	Effort,
+	type Message,
 	type Model,
 	type ModelUsageHealth,
 	type ProviderSessionState,
@@ -31,6 +32,7 @@ import {
 	validateRetryFallbackChains,
 } from "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { convertToLlm } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
 
@@ -1550,6 +1552,8 @@ describe("AgentSession retry fallback", () => {
 		// from the first request — there is no earlier model's work to misattribute.
 		expect(session.servingModel).toEqual({
 			selector: `${firstFallback.provider}/${firstFallback.id}`,
+			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
+			thinkingLevel: undefined,
 			isFallback: true,
 		});
 
@@ -1582,9 +1586,18 @@ describe("AgentSession retry fallback", () => {
 		// Nothing had served when the chain advanced, so there was no earlier work
 		// to miscredit and the candidate being attempted is the only answer — but
 		// it is still reported as fallback-routed.
-		expect(swapProbe).toEqual([{ selector: `${secondFallback.provider}/${secondFallback.id}`, isFallback: true }]);
+		expect(swapProbe).toEqual([
+			{
+				selector: `${secondFallback.provider}/${secondFallback.id}`,
+				modelIdentity: `${secondFallback.provider}/${secondFallback.id}`,
+				thinkingLevel: undefined,
+				isFallback: true,
+			},
+		]);
 		expect(session.servingModel).toEqual({
 			selector: `${secondFallback.provider}/${secondFallback.id}`,
+			modelIdentity: `${secondFallback.provider}/${secondFallback.id}`,
+			thinkingLevel: undefined,
 			isFallback: true,
 		});
 	});
@@ -4481,6 +4494,8 @@ describe("AgentSession retry fallback", () => {
 		// The restored primary answered, so attribution moves back with it.
 		expect(session.servingModel).toEqual({
 			selector: `${primaryModel.provider}/${primaryModel.id}`,
+			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
+			thinkingLevel: undefined,
 			isFallback: false,
 		});
 	});
@@ -4534,6 +4549,8 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 		expect(session.servingModel).toEqual({
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
+			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
+			thinkingLevel: undefined,
 			isFallback: true,
 		});
 
@@ -4595,13 +4612,23 @@ describe("AgentSession retry fallback", () => {
 		// The degrade swaps models without arming a retry-fallback chain, but it is
 		// still fallback routing — a bare model badge would hide that.
 		expect(requestedModels).toEqual([`${fastModel.provider}/${fastModel.id}`, `fireworks/${baseId}`]);
-		expect(session.servingModel).toEqual({ selector: `fireworks/${baseId}`, isFallback: true });
+		expect(session.servingModel).toEqual({
+			selector: `fireworks/${baseId}`,
+			modelIdentity: `fireworks/${baseId}`,
+			thinkingLevel: undefined,
+			isFallback: true,
+		});
 
 		// How the previous transcript was routed says nothing about a freshly
 		// loaded one: switching sessions in place must not describe the new
 		// session's model as fallback-routed.
 		vi.spyOn(session.sessionManager, "getSessionId").mockReturnValue("some-other-session");
-		expect(session.servingModel).toEqual({ selector: `fireworks/${baseId}`, isFallback: false });
+		expect(session.servingModel).toEqual({
+			selector: `fireworks/${baseId}`,
+			modelIdentity: `fireworks/${baseId}`,
+			thinkingLevel: undefined,
+			isFallback: false,
+		});
 	});
 
 	it("re-checks context before a cooldown-expiry revert onto a smaller-window model in the auto-continue path", async () => {
@@ -5418,16 +5445,6 @@ describe("AgentSession retry fallback", () => {
 				throw new Error("Not exercised");
 			},
 		});
-		const inspectImageTool: AgentTool = {
-			name: "inspect_image",
-			label: "Inspect Image",
-			description: "Inspect an image",
-			parameters: type({ value: "string" }),
-			strict: true,
-			async execute() {
-				return { content: [{ type: "text", text: "inspected" }] };
-			},
-		};
 
 		session = new AgentSession({
 			agent,
@@ -5435,29 +5452,26 @@ describe("AgentSession retry fallback", () => {
 			settings,
 			modelRegistry: registry,
 			rebindModelAfterDiscovery: true,
-			toolRegistry: new Map([[inspectImageTool.name, inspectImageTool]]),
 		});
 
 		// Stale until discovery settles: the active model and its context-usage
 		// derivation both carry the 1.05M window that contradicts the catalog.
 		expect(session.model?.contextWindow).toBe(1_050_000);
 		expect(session.getContextUsage()?.contextWindow).toBe(1_050_000);
-		expect(session.inspectImageState().active).toBe(false);
 
-		const { promise: inspectImageActiveAtNotification, resolve: resolveInspectImageActiveAtNotification } =
-			Promise.withResolvers<boolean>();
+		const { promise: modelChanged, resolve: resolveModelChanged } = Promise.withResolvers<void>();
 		const unsubscribe = session.subscribe(event => {
 			if (event.type === "model_changed") {
 				unsubscribe();
-				resolveInspectImageActiveAtNotification(session!.inspectImageState().active);
+				resolveModelChanged();
 			}
 		});
 
 		// The CLI starts discovery only after the session is built; the rebind
 		// waiter armed in the constructor resolves once this settles.
 		registry.refreshInBackground("offline");
-		const activeAtNotification = await Promise.race([
-			inspectImageActiveAtNotification,
+		await Promise.race([
+			modelChanged,
 			scheduler.wait(5_000).then(() => {
 				throw new Error("model_changed was not emitted after discovery settled");
 			}),
@@ -5468,8 +5482,6 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe("deepseek-v4-tiered");
 		expect(session.model?.contextWindow).toBe(400_000);
 		expect(session.getContextUsage()?.contextWindow).toBe(400_000);
-		expect(activeAtNotification).toBe(true);
-		expect(session.inspectImageState().active).toBe(true);
 	});
 
 	it("warns on unknown or malformed model-selector chain keys at startup", () => {
@@ -5621,6 +5633,75 @@ describe("AgentSession retry fallback", () => {
 			throw new Error(`Expected text content block, got ${contentBlock.type}`);
 		}
 		expect(contentBlock.text).toBe("Recovered after Gemini malformed function call");
+	});
+
+	it("continues a Gemini MALFORMED_FUNCTION_CALL transcribed as text with a corrective reminder", async () => {
+		const model = getBundledModel("google", "gemini-1.5-flash");
+		if (!model) {
+			throw new Error("Expected bundled Google test model to exist");
+		}
+
+		const malformedError = "Generation failed with finish reason: MALFORMED_FUNCTION_CALL";
+		const transcribedCall = "```call:default_api:read{i:Read call_frame.rs,path:src/call_frame.rs:215-320}```";
+		const requestContexts: Message[][] = [];
+		const mock = createMockModel({
+			responses: [
+				{ content: [transcribedCall], stopReason: "error", errorMessage: malformedError },
+				{ content: ["Recovered after transcribed function call"] },
+			],
+		});
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model, systemPrompt: ["Test"], tools: [], messages: [] },
+			// agent-core's default converter drops developer messages; the CLI wires
+			// the coding-agent converter, which is what carries the reminder.
+			convertToLlm,
+			streamFn: (requestedModel, context, options) => {
+				requestContexts.push([...context.messages]);
+				return mock.stream(requestedModel, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			"retry.maxRetries": 1,
+		});
+		settings.setModelRole("default", `${model.provider}/${model.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+		const { retryStartEvents } = trackRetryEvents(session);
+
+		await session.prompt("recover from a transcribed function call");
+		await session.waitForIdle();
+
+		// The committed text vetoes the replay retry; the preserved-turn continuation
+		// must carry the failed turn plus the corrective reminder to the provider.
+		expect(retryStartEvents).toHaveLength(0);
+		expect(requestContexts).toHaveLength(2);
+		const secondRequest = requestContexts[1];
+		expect(secondRequest.map(message => message.role)).toEqual(["user", "assistant", "developer"]);
+		const failedTurn = secondRequest[1];
+		if (failedTurn.role !== "assistant") throw new Error(`Expected assistant, got ${failedTurn.role}`);
+		expect(failedTurn.content).toEqual([{ type: "text", text: transcribedCall }]);
+		const reminder = secondRequest[2];
+		if (reminder.role !== "developer") throw new Error(`Expected developer, got ${reminder.role}`);
+		const reminderText =
+			typeof reminder.content === "string"
+				? reminder.content
+				: reminder.content.map(part => (part.type === "text" ? part.text : "")).join("");
+		expect(reminderText).toContain("malformed");
+
+		const messages = session.agent.state.messages;
+		expect(messages.map(message => message.role)).toEqual(["user", "assistant", "developer", "assistant"]);
+		const recovered = messages[3];
+		if (recovered.role !== "assistant") throw new Error(`Expected assistant, got ${recovered.role}`);
+		expect(recovered.content).toEqual([{ type: "text", text: "Recovered after transcribed function call" }]);
 	});
 
 	it("auto-retries provider finish_reason errors after partial text", async () => {
@@ -5800,6 +5881,8 @@ describe("AgentSession retry fallback", () => {
 		expect(session.servingModel?.isFallback).toBeFalsy();
 		expect(session.servingModel).toEqual({
 			selector: `${primaryModel.provider}/${primaryModel.id}`,
+			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
+			thinkingLevel: undefined,
 			isFallback: false,
 		});
 
@@ -5812,6 +5895,8 @@ describe("AgentSession retry fallback", () => {
 		expect(session.servingModel?.isFallback).toBeFalsy();
 		expect(session.servingModel).toEqual({
 			selector: `${primaryModel.provider}/${primaryModel.id}`,
+			modelIdentity: `${primaryModel.provider}/${primaryModel.id}`,
+			thinkingLevel: undefined,
 			isFallback: false,
 		});
 		// Both attribution and how the model was routed belong to the session they
@@ -5822,6 +5907,8 @@ describe("AgentSession retry fallback", () => {
 		vi.spyOn(session.sessionManager, "getSessionId").mockReturnValue("some-other-session");
 		expect(session.servingModel).toEqual({
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
+			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
+			thinkingLevel: undefined,
 			isFallback: false,
 		});
 	});
@@ -5860,6 +5947,8 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(fallbackModel.id);
 		expect(session.servingModel).toEqual({
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
+			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
+			thinkingLevel: undefined,
 			isFallback: true,
 		});
 	});
@@ -5888,6 +5977,8 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 		const served = {
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
+			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
+			thinkingLevel: undefined,
 			isFallback: true,
 		};
 		expect(session.servingModel).toEqual(served);
@@ -5952,6 +6043,8 @@ describe("AgentSession retry fallback", () => {
 		await session.waitForIdle();
 		expect(session.servingModel).toEqual({
 			selector: `${firstFallback.provider}/${firstFallback.id}`,
+			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
+			thinkingLevel: undefined,
 			isFallback: true,
 		});
 
@@ -5970,6 +6063,8 @@ describe("AgentSession retry fallback", () => {
 		expect(session.model?.id).toBe(secondFallback.id);
 		expect(session.servingModel).toEqual({
 			selector: `${firstFallback.provider}/${firstFallback.id}`,
+			modelIdentity: `${firstFallback.provider}/${firstFallback.id}`,
+			thinkingLevel: undefined,
 			isFallback: true,
 		});
 		// Never the incoming candidate: mid-swap it has produced nothing.
@@ -6026,6 +6121,8 @@ describe("AgentSession retry fallback", () => {
 		expect(requestedModels).toEqual([`${fallbackModel.provider}/${fallbackModel.id}`]);
 		expect(session.servingModel).toEqual({
 			selector: `${fallbackModel.provider}/${fallbackModel.id}`,
+			modelIdentity: `${fallbackModel.provider}/${fallbackModel.id}`,
+			thinkingLevel: undefined,
 			isFallback: true,
 		});
 	});

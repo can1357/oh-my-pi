@@ -27,6 +27,7 @@ const EXTENSION_LANG: Record<string, readonly [string, string]> = {
 	hpp: ["cpp", "cpp"],
 	hxx: ["cpp", "cpp"],
 	cu: ["cpp", "cpp"],
+	cuh: ["cpp", "cpp"],
 	ino: ["cpp", "cpp"],
 	zig: ["zig", "zig"],
 

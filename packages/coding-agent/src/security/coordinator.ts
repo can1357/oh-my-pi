@@ -346,7 +346,7 @@ async function prepareSecurityExecutionTarget(
 	const repo = vcs.requireGit(plan.repositoryRoot);
 	let added = false;
 	try {
-		await repo.worktreeAdd(cwd, headRevision, true, signal);
+		await repo.worktreeAdd(cwd, headRevision, { detach: true, clone: false }, signal);
 		added = true;
 		const diffText = await adapter.diffTree(plan.repositoryRoot, baseRevision, headRevision, signal);
 		return {

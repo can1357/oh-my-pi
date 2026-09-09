@@ -18,7 +18,7 @@ import {
 	opencodeZenModelManagerOptions,
 } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
-import type { FetchImpl } from "@oh-my-pi/pi-utils";
+import { USER_AGENT, type FetchImpl } from "@oh-my-pi/pi-utils";
 import { mergePreviousSnapshotModels } from "../scripts/generate-models";
 
 const LIVE_FREE_MODEL_IDS = [
@@ -657,6 +657,67 @@ describe("OpenCode provider discovery", () => {
 				api: "openai-responses",
 				baseUrl: "https://opencode.ai/zen/go/v1",
 			});
+		}
+	});
+
+	test("routes muse-spark-1.3 contributor ids to the responses API (#10610)", () => {
+		// models.dev omits the muse-spark-1.3 ids under both gateways, so without
+		// an override they fall through to openai-completions even though the Go
+		// and Zen gateways serve them only at /v1/responses
+		// (opencode.ai/docs/go/#endpoints, opencode.ai/docs/zen/#endpoints).
+		// Sending completions requests 500s on every turn.
+		const goDescriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
+		expect(goDescriptor?.resolveApi?.("muse-spark-1.3-contributor", { tool_call: true })).toEqual({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+		const zenDescriptor = MODELS_DEV_PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-zen");
+		expect(zenDescriptor?.resolveApi?.("muse-spark-1.3-contributor-free", { tool_call: true })).toEqual({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/v1",
+		});
+	});
+
+	test("routes unbundled future muse-spark revisions to responses on both gateways", async () => {
+		// Both gateways serve every Muse Spark SKU at /responses; a revision
+		// that neither models.dev nor the exact pins know yet must not fall
+		// through to chat completions and 500 on every request (#10610).
+		const go = opencodeGoModelManagerOptions({
+			apiKey: "test-key",
+			fetch: async () => modelListResponse(["muse-spark-1.4-contributor"]),
+		});
+		const zen = opencodeZenModelManagerOptions({
+			apiKey: "test-key",
+			fetch: async () => modelListResponse(["muse-spark-1.4-contributor-free"]),
+		});
+		const [goModels, zenModels] = await Promise.all([go.fetchDynamicModels?.(), zen.fetchDynamicModels?.()]);
+		expect(goModels?.find(model => model.id === "muse-spark-1.4-contributor")).toMatchObject({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/go/v1",
+		});
+		expect(zenModels?.find(model => model.id === "muse-spark-1.4-contributor-free")).toMatchObject({
+			api: "openai-responses",
+			baseUrl: "https://opencode.ai/zen/v1",
+		});
+	});
+
+	test("sends attribution headers on live gateway discovery", async () => {
+		// The gateway requires x-opencode-session from 09/06 and uses it for
+		// optimization; without omp's UA the request arrives as "Bun fetch".
+		for (const makeOptions of [opencodeGoModelManagerOptions, opencodeZenModelManagerOptions]) {
+			const seen: Array<Record<string, string>> = [];
+			const options = makeOptions({
+				apiKey: "test-key",
+				fetch: (async (input: string | URL | Request, init?: RequestInit) => {
+					seen.push(Object.fromEntries(new Headers(init?.headers).entries()));
+					return modelListResponse(["muse-spark-1.4-contributor"]);
+				}) as typeof fetch,
+			});
+			await options.fetchDynamicModels?.();
+			expect(seen).toHaveLength(1);
+			expect(seen[0]?.["user-agent"]).toBe(USER_AGENT);
+			expect(typeof seen[0]?.["x-opencode-session"]).toBe("string");
+			expect(seen[0]?.["x-opencode-session"]?.length).toBeGreaterThan(0);
 		}
 	});
 
