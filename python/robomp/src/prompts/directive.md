@@ -14,7 +14,7 @@ Current PR state: `{{state.pr_status}}`.
 
 ## Action
 
-Read thread first: reviewer bots (e.g. `chatgpt-codex-connector`) may reference earlier comments by line; directive is a delta on established context.
+Read thread first: reviewer bots (e.g. `chatgpt-codex-connector`) may reference earlier comments by line; directive is a delta on established context. Reviewer-bot housekeeping on a PR (walkthrough/summary boilerplate) or any point already addressed on `{{workspace.branch}}` or already answered in this thread: no-op — no commit, no comment. NEVER post a second "already resolved" reply.
 
 Request type:
 - **Code change**: commit on `{{workspace.branch}}`; NEVER open a second PR; push to this branch. `gh_push_branch` / `gh_open_pr`: run `bun run fix` + `bun check` before remote contact — you do NOT; `gh_open_pr` also runs the full `bun run test` and opens nothing while it is red. If either refuses an enhancement/proposal because directive author lacks implementation authority, post ONE `gh_post_comment` stating a repo OWNER or allowlisted maintainer must explicitly authorize implementation; stop. After pushing, post ONE `gh_post_comment` summarizing the fix, one line per concrete change. Multiple issues (e.g. several inline review comments): address each; group in reply.

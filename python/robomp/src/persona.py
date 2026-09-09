@@ -373,6 +373,7 @@ def followup_review(
     comment_body: str,
     comment_path: str,
     comment_line_range: str,
+    thread: tuple = (),
 ) -> str:
     return render(
         _load("followup_review.md"),
@@ -386,6 +387,7 @@ def followup_review(
                 "path": comment_path,
                 "line_range": comment_line_range,
             },
+            "thread": _render_thread(thread),
         },
     )
 

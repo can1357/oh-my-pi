@@ -310,7 +310,7 @@ class Settings(BaseSettings):
 
     @property
     def reviewer_bots(self) -> frozenset[str]:
-        items = [piece.strip().lstrip("@").lower() for piece in self.reviewer_bots_raw.split(",")]
+        items = [piece.strip().lstrip("@").lower().removesuffix("[bot]") for piece in self.reviewer_bots_raw.split(",")]
         return frozenset(item for item in items if item)
 
     @property
