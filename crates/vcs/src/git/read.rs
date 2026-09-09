@@ -99,6 +99,36 @@ impl GitRepo {
 		Ok(self.resolve_ref(name)?.is_some())
 	}
 
+	/// Whether `ancestor` is an ancestor of (or equal to) `descendant`.
+	///
+	/// Reftable repositories route through `git merge-base --is-ancestor`; a
+	/// non-zero exit (including an unresolvable revision) reports `false`.
+	pub fn is_ancestor_of(&self, ancestor: &str, descendant: &str) -> Result<bool> {
+		if self.is_reftable() {
+			let args = [
+				"merge-base".to_owned(),
+				"--is-ancestor".to_owned(),
+				ancestor.to_owned(),
+				descendant.to_owned(),
+			];
+			return Ok(super::cli::run_sync(self.root(), &args)?.exit_code == 0);
+		}
+		let repo = self.gix()?;
+		let ancestor_id = repo
+			.rev_parse_single(ancestor)
+			.map_err(|err| Error::backend_source("git merge-base", err))?
+			.detach();
+		let descendant_id = repo
+			.rev_parse_single(descendant)
+			.map_err(|err| Error::backend_source("git merge-base", err))?
+			.detach();
+		match repo.merge_base(ancestor_id, descendant_id) {
+			Ok(base) => Ok(base.detach() == ancestor_id),
+			Err(gix::repository::merge_base::Error::NotFound { .. }) => Ok(false),
+			Err(err) => Err(Error::backend_source("git merge-base", err)),
+		}
+	}
+
 	/// List tags pointing at `rev`, peeled through annotated tags.
 	pub fn tags_at(&self, rev: &str) -> Result<Vec<String>> {
 		if self.is_reftable() {
@@ -1354,6 +1384,37 @@ mod tests {
 		assert_eq!(worktrees[0].path, dir.path());
 		assert_eq!(worktrees[1].path, linked.canonicalize()?);
 		assert_eq!(worktrees[1].branch.as_deref(), Some("refs/heads/linked-branch"));
+		Ok(())
+	}
+
+	#[test]
+	fn is_ancestor_of_reads_commit_topology() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "one", "one\n", "base")?;
+		let base = git(dir.path(), &["rev-parse", "HEAD"])?.trim().to_owned();
+		commit(dir.path(), "two", "two\n", "child")?;
+		let child = git(dir.path(), &["rev-parse", "HEAD"])?.trim().to_owned();
+		git(dir.path(), &["checkout", "-q", "-b", "side", &base])?;
+		commit(dir.path(), "three", "three\n", "sibling")?;
+		let sibling = git(dir.path(), &["rev-parse", "HEAD"])?.trim().to_owned();
+
+		assert!(repo.is_ancestor_of(&base, &child)?, "base is an ancestor of its child");
+		assert!(repo.is_ancestor_of(&base, &base)?, "a commit is an ancestor of itself");
+		assert!(!repo.is_ancestor_of(&child, &base)?, "a child is not an ancestor of its parent");
+		assert!(!repo.is_ancestor_of(&sibling, &child)?, "a divergent sibling is not an ancestor",);
+		Ok(())
+	}
+
+	#[test]
+	fn is_ancestor_of_preserves_revision_errors() -> TestResult {
+		let (dir, repo) = repo()?;
+		commit(dir.path(), "one", "one\n", "base")?;
+
+		let error = repo
+			.is_ancestor_of("missing-revision", "HEAD")
+			.expect_err("an unresolved revision must fail");
+		assert!(matches!(&error, crate::error::Error::BackendSource { .. }));
+		assert!(std::error::Error::source(&error).is_some());
 		Ok(())
 	}
 }
