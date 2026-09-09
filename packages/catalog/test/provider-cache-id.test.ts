@@ -76,3 +76,18 @@ test("GitHub Copilot cache scope uses accountId when present and falls back to t
 	});
 	expect(multiAccountReordered).toBe(multiAccount);
 });
+
+test("GitHub Copilot cache scope uses credential-neutral baseUrl regardless of apiEndpoint in token", () => {
+	const personalKey = JSON.stringify({ token: "ghu_token1", accountId: "user-42" });
+	const businessKey = JSON.stringify({
+		token: "ghu_token1",
+		accountId: "user-42",
+		apiEndpoint: "https://api.business.githubcopilot.com",
+	});
+	expect(resolveModelCacheProviderId("github-copilot", { apiKey: businessKey })).toBe(
+		resolveModelCacheProviderId("github-copilot", { apiKey: personalKey }),
+	);
+	expect(resolveModelCacheProviderId("github-copilot", { accountIdentities: ["user-42"] })).toBe(
+		resolveModelCacheProviderId("github-copilot", { apiKey: businessKey }),
+	);
+});

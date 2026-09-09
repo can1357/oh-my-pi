@@ -1,8 +1,4 @@
-import {
-	getGitHubCopilotBaseUrl,
-	parseGitHubCopilotApiKey,
-	PERSONAL_GITHUB_COPILOT_BASE_URL,
-} from "../wire/github-copilot";
+import { parseGitHubCopilotApiKey, PERSONAL_GITHUB_COPILOT_BASE_URL } from "../wire/github-copilot";
 
 export interface ModelCacheProviderIdOptions {
 	apiKey?: string;
@@ -113,12 +109,7 @@ export function resolveModelCacheProviderId(providerId: string, options: ModelCa
 				options.accountIdentities && options.accountIdentities.length > 0
 					? Array.from(new Set(options.accountIdentities)).sort().join(",")
 					: defaultIdentity;
-			const baseUrl =
-				options.baseUrl ??
-				(parsed?.apiEndpoint ||
-					(parsed?.enterpriseUrl
-						? getGitHubCopilotBaseUrl(parsed.enterpriseUrl)
-						: PERSONAL_GITHUB_COPILOT_BASE_URL));
+			const baseUrl = options.baseUrl ?? PERSONAL_GITHUB_COPILOT_BASE_URL;
 			const scope = `${identity}\u0000${baseUrl}`;
 			return `github-copilot:models-v4:${Bun.hash(scope).toString(36)}`;
 		}

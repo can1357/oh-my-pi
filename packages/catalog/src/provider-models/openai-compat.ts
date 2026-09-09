@@ -6246,12 +6246,6 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 	const configuredBaseUrl = config?.baseUrl ?? "https://api.githubcopilot.com";
 	const parsedApiKey = rawApiKey ? parseGitHubCopilotApiKey(rawApiKey) : undefined;
 	const apiKey = parsedApiKey?.accessToken;
-	const baseUrl =
-		parsedApiKey?.apiEndpoint && configuredBaseUrl.includes("githubcopilot.com")
-			? parsedApiKey.apiEndpoint
-			: parsedApiKey?.enterpriseUrl && configuredBaseUrl.includes("githubcopilot.com")
-				? getGitHubCopilotBaseUrl(parsedApiKey.enterpriseUrl)
-				: configuredBaseUrl;
 	const resolveAccounts = config?.resolveAccounts;
 	let providerReferences: Map<string, ModelSpec<Api>> | undefined;
 	const getProviderReferences = () => (providerReferences ??= createBundledReferenceMap<Api>("github-copilot"));
@@ -6514,7 +6508,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 		providerId: "github-copilot",
 		cacheProviderId: resolveModelCacheProviderId("github-copilot", {
 			apiKey: rawApiKey,
-			baseUrl,
+			baseUrl: configuredBaseUrl,
 			accountIdentities: config?.accountIdentities,
 		}),
 		dropCachedModelIdsOnStaticMismatch: COPILOT_CACHE_INVALIDATED_MODEL_IDS,
@@ -6548,7 +6542,7 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 								return parsed.accountId || parsed.accessToken || account.apiKey;
 							});
 							managerOptions.cacheProviderId = resolveModelCacheProviderId("github-copilot", {
-								baseUrl,
+								baseUrl: configuredBaseUrl,
 								accountIdentities,
 							});
 							const results = await Promise.all(

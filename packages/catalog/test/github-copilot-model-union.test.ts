@@ -1,6 +1,10 @@
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
 import { describe, expect, it } from "bun:test";
 import { resolveModelCacheProviderId } from "@oh-my-pi/pi-catalog/provider-models";
 import { githubCopilotModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
+import { createModelManager } from "../src/model-manager";
 
 const BASE_URL = "https://copilot.example.com";
 
@@ -241,5 +245,91 @@ describe("github-copilot multi-account discovery failures", () => {
 		expect(byId.get("oauth-only-model")?.oauthCredentialIds).toEqual([101]);
 		// Env-only model cannot subsequently resolve credentials in an OAuth-enabled environment and is omitted
 		expect(byId.get("env-only-model")).toBeUndefined();
+	});
+
+	it("reports retained authoritative cache as source cache even when models.dev succeeds", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-copilot-cache-"));
+		try {
+			const cacheDbPath = path.join(tempDir, "models.db");
+			let failFetch = false;
+			const options = githubCopilotModelManagerOptions({
+				baseUrl: BASE_URL,
+				apiKey: "test-key",
+				fetch: async () => {
+					if (failFetch) return new Response(null, { status: 503 });
+					return Response.json({
+						data: [{ id: "cached-copilot-model", capabilities: { type: "chat" } }],
+					});
+				},
+			});
+			const manager = createModelManager({
+				...options,
+				dynamicModelsAuthoritative: true,
+				cacheDbPath,
+				modelsDev: {
+					fetch: async () => [{ id: "models-dev-model" }],
+					map: payload =>
+						(payload as { id: string }[]).map(p => ({
+							id: p.id,
+							name: p.id,
+							provider: "github-copilot",
+							api: "openai-responses",
+							baseUrl: BASE_URL,
+							reasoning: false,
+							input: ["text"],
+							cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+							contextWindow: 128_000,
+							maxTokens: 16_000,
+						})),
+				},
+			});
+
+			const initial = await manager.refresh("online");
+			expect(initial.authoritative).toBe(true);
+			expect(initial.models.map(m => m.id)).toEqual(["cached-copilot-model"]);
+
+			failFetch = true;
+			const result = await manager.refresh("online");
+			expect(result.authoritative).toBe(true);
+			expect(result.source).toBe("cache");
+			expect(result.models.map(m => m.id)).toEqual(["cached-copilot-model"]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
+	it("reports retained empty authoritative cache as source cache rather than bundled", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-copilot-cache-empty-"));
+		try {
+			const cacheDbPath = path.join(tempDir, "models.db");
+			let failFetch = false;
+			const options = githubCopilotModelManagerOptions({
+				baseUrl: BASE_URL,
+				apiKey: "test-key",
+				fetch: async () => {
+					if (failFetch) return new Response(null, { status: 503 });
+					return Response.json({
+						data: [{ id: "disabled-model", policy: { state: "disabled" } }],
+					});
+				},
+			});
+			const manager = createModelManager({
+				...options,
+				dynamicModelsAuthoritative: true,
+				cacheDbPath,
+			});
+
+			const initial = await manager.refresh("online");
+			expect(initial.authoritative).toBe(true);
+			expect(initial.models).toEqual([]);
+
+			failFetch = true;
+			const result = await manager.refresh("online");
+			expect(result.authoritative).toBe(true);
+			expect(result.source).toBe("cache");
+			expect(result.models).toEqual([]);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
 	});
 });

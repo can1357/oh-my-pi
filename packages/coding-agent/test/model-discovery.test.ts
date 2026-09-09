@@ -901,6 +901,57 @@ describe("ModelRegistry runtime discovery", () => {
 		);
 		expect(cacheAfterFailure).not.toBeNull();
 		expect(cacheAfterFailure!.updatedAt).toBe(initialUpdatedAt);
+
+		// Discovery state must report source as "cache" and status as "cached", NOT "models.dev"
+		const discoveryState = registry.getProviderDiscoveryState("github-copilot");
+		expect(discoveryState?.source).toBe("cache");
+		expect(discoveryState?.status).toBe("cached");
+	});
+
+	test("github-copilot reports retained empty authoritative catalog as cache-sourced and cached status on failed refresh", async () => {
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "account-token",
+				refresh: "account-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "account-user",
+			},
+		]);
+
+		let failFetch = false;
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async input => {
+				if (failFetch) throw new Error("network down");
+				const url = String(input);
+				if (url.includes("models.dev")) return Response.json([]);
+				if (url.endsWith("/models")) {
+					return Response.json({
+						data: [{ id: "disabled-model", policy: { state: "disabled" } }],
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			},
+		});
+
+		await registry.refreshProvider("github-copilot", "online");
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+		expect(getModelsForProvider(registry, "github-copilot")).toEqual([]);
+		expect(registry.getProviderDiscoveryState("github-copilot")?.status).toBe("empty");
+
+		// Sleep briefly and fail subsequent refresh
+		await Bun.sleep(10);
+		failFetch = true;
+		await registry.refreshProvider("github-copilot", "online");
+
+		// Must retain the empty authoritative catalog, staying authoritative
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+		expect(getModelsForProvider(registry, "github-copilot")).toEqual([]);
+
+		// Discovery state must report source as "cache" and status as "cached", NOT "idle" or "bundled"
+		const discoveryState = registry.getProviderDiscoveryState("github-copilot");
+		expect(discoveryState?.source).toBe("cache");
+		expect(discoveryState?.status).toBe("cached");
 	});
 
 	test("resolveGitHubCopilotDiscoveryAccounts does not combine fallback key with refreshed OAuth accounts", async () => {
@@ -1271,6 +1322,72 @@ describe("ModelRegistry runtime discovery", () => {
 				Bun.env.COPILOT_GITHUB_TOKEN = originalCopilotToken;
 			}
 		}
+	});
+
+	test("github-copilot keeps cache scope stable across startup when OAuth account uses apiEndpoint", async () => {
+		const authPath = path.join(tempDir, "auth-enterprise-copilot.db");
+		authStorage.close();
+		authStorage = await AuthStorage.create(authPath, { usageProviderResolver: () => undefined });
+		await authStorage.set("github-copilot", [
+			{
+				type: "oauth",
+				access: "oauth-token",
+				refresh: "oauth-refresh",
+				expires: Date.now() + 3_600_000,
+				accountId: "enterprise-user",
+			},
+		]);
+
+		const registry = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async (input, _init) => {
+				const url = String(input);
+				if (url === "https://api.github.com/copilot_internal/user") {
+					return Response.json({ endpoints: { api: "https://api.business.githubcopilot.com" } });
+				}
+				if (url.includes("models.dev")) {
+					return Response.json([]);
+				}
+				if (url.includes("business.githubcopilot.com") && url.endsWith("/models")) {
+					return Response.json({
+						data: [
+							{
+								id: "enterprise-model",
+								capabilities: {
+									type: "chat",
+									limits: { max_context_window_tokens: 128_000, max_output_tokens: 16_000 },
+								},
+							},
+						],
+					});
+				}
+				throw new Error(`Unexpected URL: ${url}`);
+			},
+		});
+
+		await registry.refreshProvider("github-copilot", "online");
+		expect(registry.isAuthoritativeProvider("github-copilot")).toBe(true);
+		expect(registry.find("github-copilot", "enterprise-model")).toBeDefined();
+
+		const startupIdentities = resolveGitHubCopilotAccountIdentities(authStorage);
+		const [oauthRow] = authStorage.listStoredCredentials("github-copilot").filter(r => r.credential.type === "oauth");
+		expect(startupIdentities).toEqual([`enterprise-user:${oauthRow.id}`]);
+
+		authStorage.close();
+		authStorage = await AuthStorage.create(authPath, { usageProviderResolver: () => undefined });
+		await authStorage.reload();
+
+		let networkCalls = 0;
+		const restarted = new ModelRegistry(authStorage, modelsJsonPath, {
+			fetch: async () => {
+				networkCalls++;
+				throw new Error("Offline cache hydration must not fetch");
+			},
+		});
+		await restarted.hydrateCredentialScopedModelCaches();
+
+		expect(restarted.isAuthoritativeProvider("github-copilot")).toBe(true);
+		expect(restarted.find("github-copilot", "enterprise-model")).toBeDefined();
+		expect(networkCalls).toBe(0);
 	});
 
 	test("github-copilot discovery honors a runtime key instead of stored OAuth accounts", async () => {

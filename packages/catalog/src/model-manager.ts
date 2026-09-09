@@ -414,13 +414,15 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 		}
 	}
 	const cacheContributed = cacheModels.length > 0;
-	const source: ModelResolutionSource = dynamicFetchSucceeded
-		? "provider"
-		: modelsDevFetchSucceeded
-			? "models.dev"
-			: cacheContributed
-				? "cache"
-				: "bundled";
+	const source: ModelResolutionSource = retainAuthoritativeCache
+		? "cache"
+		: dynamicFetchSucceeded
+			? "provider"
+			: modelsDevFetchSucceeded
+				? "models.dev"
+				: cacheContributed
+					? "cache"
+					: "bundled";
 	return {
 		models,
 		stale: !resolutionAuthoritative,
