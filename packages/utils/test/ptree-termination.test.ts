@@ -168,25 +168,36 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 	it.skipIf(process.platform === "win32")(
 		"terminates a detached group before Bun reports the leader's exit",
 		async () => {
-			const child = spawn(["/bin/sh", "-c", "sleep 30 & echo $!"], { detached: true });
-			const reader = child.stdout.getReader();
-			let descendant: Process | null = null;
-			try {
+			// The window under test is "the leader is gone but Bun's reaper has not
+			// run yet". The root races our read into it, and polling for its exit
+			// hands the reaper the turn it needs, so the setup is retried until one
+			// attempt lands. Never observing the window is a failure, not a skip.
+			for (let attempt = 1; ; attempt++) {
+				const child = spawn(["/bin/sh", "-c", "sleep 30 & echo $!"], { detached: true });
+				const reader = child.stdout.getReader();
 				const output = await reader.read();
-				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
-				if (!descendant) throw new Error("Descendant exited before termination");
-				// The window under test: the leader is already gone, but Bun's reaper
-				// has not run yet, so exitCode still reads null. Asserted rather than
-				// assumed — without it this silently becomes the exited-root case above.
-				expect(child.proc.exitCode).toBe(null);
-				expect(Process.fromPid(child.pid)?.status()).toBe(ProcessStatus.Exited);
-				expect(descendant.status()).toBe(ProcessStatus.Running);
-				await child.killAndWait(undefined, -1);
-				expect(descendant.status()).toBe(ProcessStatus.Exited);
-			} finally {
-				descendant?.killTree(9);
-				child.kill(undefined, -1);
-				await reader.cancel();
+				const descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
+				const landed =
+					descendant !== null &&
+					child.proc.exitCode === null &&
+					Process.fromPid(child.pid)?.status() === ProcessStatus.Exited;
+				if (!landed || !descendant) {
+					descendant?.killTree(9);
+					child.kill(undefined, -1);
+					await reader.cancel();
+					if (attempt >= 10) throw new Error("Never observed the leader's exit ahead of Bun's reaper");
+					continue;
+				}
+				try {
+					expect(descendant.status()).toBe(ProcessStatus.Running);
+					await child.killAndWait(undefined, -1);
+					expect(descendant.status()).toBe(ProcessStatus.Exited);
+					return;
+				} finally {
+					descendant.killTree(9);
+					child.kill(undefined, -1);
+					await reader.cancel();
+				}
 			}
 		},
 	);
