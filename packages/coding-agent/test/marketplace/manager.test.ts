@@ -599,6 +599,24 @@ describe("MarketplaceManager", () => {
 		await expect(ctx.manager.installPlugin("hello-plugin", "test-marketplace")).rejects.toThrow(/already installed/);
 	});
 
+	it("validateInstallPlugin checks preconditions without mutating registries", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		await expect(
+			ctx.manager.validateInstallPlugin("hello-plugin", "test-marketplace", { scope: "project" }),
+		).resolves.toBeUndefined();
+
+		const projectReg = await readInstalledPluginsRegistry(path.join(ctx.tmpDir, "project_installed_plugins.json"));
+		expect(projectReg.plugins["hello-plugin@test-marketplace"]).toBeUndefined();
+
+		await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
+		await expect(ctx.manager.validateInstallPlugin("hello-plugin", "test-marketplace")).rejects.toThrow(
+			/already installed/,
+		);
+		await expect(
+			ctx.manager.validateInstallPlugin("hello-plugin", "test-marketplace", { force: true }),
+		).resolves.toBeUndefined();
+	});
+
 	it("installPlugin with force:true → replaces existing", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		const first = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");

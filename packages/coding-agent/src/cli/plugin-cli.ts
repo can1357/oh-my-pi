@@ -371,7 +371,10 @@ async function handleInstall(
 		if (target.type === "marketplace") {
 			if (flags.dryRun) {
 				try {
-					const preview = await previewMarketplaceInstall(mktMgr, target);
+					const preview = await previewMarketplaceInstall(mktMgr, target, {
+						force: flags.force,
+						scope: flags.scope,
+					});
 					if (flags.json) {
 						console.log(JSON.stringify(preview, null, 2));
 					} else {

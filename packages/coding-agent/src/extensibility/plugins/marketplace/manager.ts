@@ -72,6 +72,17 @@ export interface MarketplaceManagerOptions {
 
 // ── Manager ──────────────────────────────────────────────────────────────────
 
+type InstallValidation = {
+	force: boolean;
+	scope: "user" | "project";
+	registryPath: string;
+	mktEntry: MarketplaceRegistryEntry;
+	catalog: MarketplaceCatalog;
+	pluginEntry: MarketplacePluginEntry;
+	pluginId: string;
+	existing: InstalledPluginEntry[] | undefined;
+};
+
 export class MarketplaceManager {
 	#opts: MarketplaceManagerOptions;
 
@@ -238,23 +249,21 @@ export class MarketplaceManager {
 
 	// ── Install / uninstall ───────────────────────────────────────────────────
 
-	async installPlugin(
+	async #validateInstall(
 		name: string,
 		marketplace: string,
 		options?: { force?: boolean; scope?: "user" | "project" },
-	): Promise<InstalledPluginEntry> {
+	): Promise<InstallValidation> {
 		const force = options?.force ?? false;
 		const scope = options?.scope ?? "user";
 		const registryPath = this.#registryPath(scope);
 
-		// 1. Find marketplace entry
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const mktEntry = getMarketplaceEntry(mktReg, marketplace);
 		if (!mktEntry) {
 			throw new Error(`Marketplace "${marketplace}" not found`);
 		}
 
-		// 2. Find plugin in catalog
 		const catalog = await this.#readCatalog(mktEntry);
 		const pluginEntry = catalog.plugins.find(p => p.name === name);
 		if (!pluginEntry) {
@@ -262,13 +271,33 @@ export class MarketplaceManager {
 		}
 
 		const pluginId = buildPluginId(name, marketplace);
-
-		// 3. Check if already installed
 		const instReg = await readInstalledPluginsRegistry(registryPath);
 		const existing = getInstalledPlugin(instReg, pluginId);
 		if (existing && existing.length > 0 && !force) {
 			throw new Error(`Plugin "${pluginId}" is already installed. Use force option to reinstall.`);
 		}
+
+	return { force, scope, registryPath, mktEntry, catalog, pluginEntry, pluginId, existing };
+	}
+
+	async validateInstallPlugin(
+		name: string,
+		marketplace: string,
+		options?: { force?: boolean; scope?: "user" | "project" },
+	): Promise<void> {
+		await this.#validateInstall(name, marketplace, options);
+	}
+
+	async installPlugin(
+		name: string,
+		marketplace: string,
+		options?: { force?: boolean; scope?: "user" | "project" },
+	): Promise<InstalledPluginEntry> {
+		const { force, scope, registryPath, mktEntry, catalog, pluginEntry, pluginId, existing } = await this.#validateInstall(
+			name,
+			marketplace,
+			options,
+		);
 
 		// 4. Resolve source path.
 		// marketplaceClonePath is the marketplace root — the directory containing .claude-plugin/

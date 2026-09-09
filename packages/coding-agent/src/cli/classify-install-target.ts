@@ -52,8 +52,14 @@ export type ClassifiedInstallTarget =
 	| { type: "marketplace"; name: string; marketplace: string }
 	| { type: "npm"; spec: string };
 
+export type MarketplaceInstallOptions = { force?: boolean; scope?: "user" | "project" };
+
 export interface MarketplacePreviewReader {
-	getPluginInfo(name: string, marketplace: string): Promise<unknown>;
+	validateInstallPlugin(
+		name: string,
+		marketplace: string,
+		options?: MarketplaceInstallOptions,
+	): Promise<void>;
 }
 
 export type MarketplaceInstallPreview = {
@@ -66,11 +72,9 @@ export type MarketplaceInstallPreview = {
 export async function previewMarketplaceInstall(
 	manager: MarketplacePreviewReader,
 	target: Extract<ClassifiedInstallTarget, { type: "marketplace" }>,
+	options?: MarketplaceInstallOptions,
 ): Promise<MarketplaceInstallPreview> {
-	const entry = await manager.getPluginInfo(target.name, target.marketplace);
-	if (!entry) {
-		throw new Error(`Plugin "${target.name}" not found in marketplace "${target.marketplace}"`);
-	}
+	await manager.validateInstallPlugin(target.name, target.marketplace, options);
 	return {
 		dryRun: true,
 		action: "install",

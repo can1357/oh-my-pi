@@ -84,20 +84,24 @@ describe("classifyInstallTarget", () => {
 	});
 });
 
-it("marketplace dry-run preview resolves metadata without invoking installPlugin", async () => {
+it("marketplace dry-run validates preconditions without invoking installPlugin", async () => {
 	const manager = {
-		getPluginInfo: async () => ({ name: "hello" }),
+		validateInstallPlugin: async () => undefined,
 		installPlugin: async () => undefined,
 	};
-	const infoSpy = spyOn(manager, "getPluginInfo");
+	const validationSpy = spyOn(manager, "validateInstallPlugin");
 	const installSpy = spyOn(manager, "installPlugin");
-	const preview = await previewMarketplaceInstall(manager, {
-		type: "marketplace",
-		name: "hello",
-		marketplace: "my-marketplace",
-	});
+	const preview = await previewMarketplaceInstall(
+		manager,
+		{
+			type: "marketplace",
+			name: "hello",
+			marketplace: "my-marketplace",
+		},
+		{ force: true, scope: "project" },
+	);
 
-	expect(infoSpy).toHaveBeenCalledWith("hello", "my-marketplace");
+	expect(validationSpy).toHaveBeenCalledWith("hello", "my-marketplace", { force: true, scope: "project" });
 	expect(installSpy).not.toHaveBeenCalled();
 	expect(preview).toEqual({
 		dryRun: true,
