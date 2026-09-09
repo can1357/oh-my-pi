@@ -1,7 +1,8 @@
 use std::{collections::BTreeMap, fmt::Write as _, io::Read as _};
 
 use flate2::read::GzDecoder;
-use omp_core::{Str, sf};
+use omp_core::Str;
+use omp_tool::{Diag, DiagKind};
 use serde_json::{Map, Value};
 use smallvec::SmallVec;
 use url::Url;
@@ -63,7 +64,9 @@ fn render_response(body: &[u8], target: &Target) -> Option<RenderResult> {
 	let crate_doc = decode_rustdoc_crate(body)?;
 	let content = render_target(&crate_doc, target)?;
 	let mut result = build_result(&content, "docs.rs");
-	result.notes.push(sf!("Fetched via docs.rs rustdoc JSON"));
+	result
+		.diags
+		.push(Diag::info(DiagKind::Provenance, "Fetched via docs.rs rustdoc JSON"));
 	Some(result)
 }
 
@@ -888,14 +891,9 @@ mod tests {
 		let rendered = render_response(RUSTDOC_FIXTURE.as_bytes(), &target(&["demo"], None))
 			.expect("representative response renders");
 		assert_eq!(rendered.method.as_str(), "docs.rs");
-		assert_eq!(
-			rendered
-				.notes
-				.iter()
-				.map(|note| note.as_str())
-				.collect::<Vec<_>>(),
-			vec!["Fetched via docs.rs rustdoc JSON"]
-		);
+		assert_eq!(rendered.diags.len(), 1);
+		assert_eq!(rendered.diags[0].native_kind(), Some(DiagKind::Provenance));
+		assert_eq!(rendered.diags[0].severity, Severity::Info);
 		assert_eq!(
 			rendered.content.as_str(),
 			"# demo\n\nModule docs.\n\n## Modules\n\n- **inner** — Inner docs.\n\n## Structs\n\n- \

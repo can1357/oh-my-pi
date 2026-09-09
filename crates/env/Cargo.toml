@@ -10,29 +10,30 @@ description = "Typed client boundary for OMP environment services"
 readme = "README.md"
 
 [dependencies]
-bytes = { workspace = true }
-flume = { workspace = true }
-omp-ar = { workspace = true }
-omp-core = { workspace = true }
-omp-proto = { workspace = true }
-parking_lot = { workspace = true }
-serde = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-toml = { workspace = true }
-url = { workspace = true }
+bytes.workspace = true
+flume.workspace = true
+omp-ar.workspace = true
+omp-core.workspace = true
+omp-proto.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+toml.workspace = true
+url.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true }
+windows-sys.workspace = true
 
 [target.'cfg(unix)'.dependencies]
-nix = { workspace = true }
+nix.workspace = true
 
 [dev-dependencies]
-tempfile = { workspace = true }
+tempfile.workspace = true
 
 [target.'cfg(unix)'.dev-dependencies]
-libc = { workspace = true }
+libc.workspace = true
 
 [lints]
 workspace = true

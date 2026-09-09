@@ -6,6 +6,8 @@ class "anthropic" {
 	family "opus" glob="*opus*"
 	family "sonnet" glob="*sonnet*"
 	family "haiku" glob="*haiku*"
+	family "fable" glob="*fable*"
+	family "mythos" glob="*mythos*"
 
 	revision prefix="claude-" anywhere=#true
 

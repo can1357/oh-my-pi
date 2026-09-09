@@ -5,12 +5,9 @@ use std::{fs, io, path::PathBuf, pin, sync::Arc};
 use bytes::Bytes;
 use futures::{Stream, StreamExt};
 use omp_core::Hash32;
+use omp_journal::blob::{self, BlobRef, BlobStore};
 use omp_proto::omp::blob::v1::{self as pb, blob_server};
-use omp_storage::{
-	blob,
-	blob::{BlobRef, BlobStore},
-};
-use tokio::task;
+use tokio::{io::AsyncReadExt as _, task};
 use tonic::{Request, Response, Status};
 
 const CHUNK_SIZE: usize = 64 * 1024;
@@ -34,6 +31,11 @@ impl BlobRpc {
 impl blob_server::Blob for BlobRpc {
 	type GetStream = BlobStream;
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "blob", rpc.method = "stat")
+	)]
 	async fn stat(
 		&self,
 		request: Request<pb::StatRequest>,
@@ -56,6 +58,11 @@ impl blob_server::Blob for BlobRpc {
 		}
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "blob", rpc.method = "get")
+	)]
 	async fn get(
 		&self,
 		request: Request<pb::GetRequest>,
@@ -63,45 +70,53 @@ impl blob_server::Blob for BlobRpc {
 		let request = request.into_inner();
 		let hash = parse_hash(&request.hash)?;
 		let store = Arc::clone(&self.store);
-		let bytes = task::spawn_blocking(move || {
-			let path = store.path(&BlobRef { hash, size: 0 });
-			let size = fs::metadata(&path)?.len();
-			let bytes = fs::read(path)?;
-			Ok::<_, io::Error>((size, Bytes::from(bytes)))
-		})
-		.await
-		.map_err(join_status)?
-		.map_err(io_status)?;
-		let (size, bytes) = bytes;
-		if request.offset > size {
-			return Err(Status::out_of_range("blob range offset exceeds stored size"));
-		}
-		let end = if request.length == 0 {
-			size
-		} else {
-			request.offset.saturating_add(request.length).min(size)
-		};
-		let start = usize::try_from(request.offset)
-			.map_err(|_| Status::out_of_range("blob offset exceeds platform limits"))?;
-		let end = usize::try_from(end)
-			.map_err(|_| Status::out_of_range("blob range exceeds platform limits"))?;
-		let ranged = bytes.slice(start..end);
+		let range =
+			task::spawn_blocking(move || store.open_range(hash, request.offset, request.length))
+				.await
+				.map_err(join_status)?
+				.map_err(storage_status)?;
+		let reference = range.reference();
+		let length = range.len();
+		let mut file = tokio::fs::File::from_std(range.into_file());
 		let stream = async_stream::try_stream! {
-			if ranged.is_empty() {
-				yield pb::Chunk { data: Bytes::new(), hash: Bytes::copy_from_slice(hash.as_bytes()), size: Some(size) };
-			} else {
-				for (index, chunk) in ranged.chunks(CHUNK_SIZE).enumerate() {
-					yield pb::Chunk {
-						data: Bytes::copy_from_slice(chunk),
-						hash: if index == 0 { Bytes::copy_from_slice(hash.as_bytes()) } else { Bytes::new() },
-						size: (index == 0).then_some(size),
-					};
+			let mut sent = 0_u64;
+			if length == 0 {
+				yield pb::Chunk {
+					data: Bytes::new(),
+					hash: Bytes::copy_from_slice(reference.hash.as_bytes()),
+					size: Some(reference.size),
+				};
+			}
+			while sent < length {
+				let wanted = usize::try_from((length - sent).min(CHUNK_SIZE as u64))
+					.expect("blob chunk bound fits usize");
+				let mut data = vec![0_u8; wanted];
+				let count = file.read(&mut data).await.map_err(io_status)?;
+				if count == 0 {
+					Err(Status::data_loss("blob range ended before its declared length"))?;
 				}
+				data.truncate(count);
+				let first = sent == 0;
+				sent += u64::try_from(count).expect("blob chunk count fits u64");
+				yield pb::Chunk {
+					data: Bytes::from(data),
+					hash: if first {
+						Bytes::copy_from_slice(reference.hash.as_bytes())
+					} else {
+						Bytes::new()
+					},
+					size: first.then_some(reference.size),
+				};
 			}
 		};
 		Ok(Response::new(Box::pin(stream)))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "blob", rpc.method = "put")
+	)]
 	async fn put(
 		&self,
 		request: Request<tonic::Streaming<pb::Chunk>>,
@@ -146,6 +161,11 @@ impl blob_server::Blob for BlobRpc {
 		}))
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "blob", rpc.method = "delete")
+	)]
 	async fn delete(
 		&self,
 		request: Request<pb::DeleteRequest>,
@@ -202,6 +222,10 @@ fn io_status(error: io::Error) -> Status {
 fn storage_status(error: blob::Error) -> Status {
 	match error {
 		blob::Error::NotFound => Status::not_found("blob not found"),
+		blob::Error::RangeOutOfBounds { .. } => {
+			Status::out_of_range("blob range offset exceeds stored size")
+		},
+		blob::Error::Corrupt { .. } => Status::data_loss("stored blob size is corrupt"),
 		other => Status::internal(format!("blob store failed: {other}")),
 	}
 }

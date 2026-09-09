@@ -19,6 +19,7 @@ local-embedding = ["dep:fastembed"]
 [dependencies]
 fastembed = { workspace = true, optional = true }
 flume.workspace = true
+jiff.workspace = true
 omp-core.workspace = true
 parking_lot.workspace = true
 rusqlite.workspace = true

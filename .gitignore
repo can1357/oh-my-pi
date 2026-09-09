@@ -25,10 +25,8 @@ __pycache__/
 /.plan/
 /elastic/
 /*PLAN.md
-/pi-transcript.md
 .omp/artifacts/
 .omp/local/
 .omp/plans/
 .omp/config.toml.lock
 .omp/omp-*.md
-.omp/pi-*.md

@@ -9,9 +9,7 @@ use std::{
 
 use miette::{IntoDiagnostic as _, miette};
 use nix::sys::termios::{LocalFlags, SetArg, tcgetattr, tcsetattr};
-use omp_catalog::ProviderId;
-use omp_core::ExposeSecret as _;
-use omp_inference::{
+use omp_ai::{
 	Client,
 	answer::{
 		AuthAnswer, AuthEvent, AuthPrompt, AuthPromptKind as InferenceAuthPromptKind, AuthResponse,
@@ -21,10 +19,12 @@ use omp_inference::{
 	receipt::ExecutionBudget,
 	router,
 };
+use omp_catalog::ProviderId;
+use omp_core::{ExposeSecret as _, SecretString, Str};
 use tokio::task;
 use zeroize::Zeroizing;
 
-use crate::{chat_ui, chat_ui::AuthPromptKind, cli::AuthCommand};
+use crate::cli::AuthCommand;
 
 /// Opens encrypted credential state and executes one typed authentication
 /// operation.
@@ -49,9 +49,10 @@ pub async fn run(database: PathBuf, command: AuthCommand) -> miette::Result<()> 
 			let provider = ProviderId::from(provider);
 			(provider.clone(), AuthRequest::Login(LoginRequest { provider, method: None }))
 		},
-		AuthCommand::List { provider } => {
-			let provider = provider.map_or(default_provider, ProviderId::from);
-			(provider.clone(), AuthRequest::ListAccounts { provider: Some(provider) })
+		AuthCommand::List { provider } | AuthCommand::Status { provider } => {
+			let requested = provider.map(ProviderId::from);
+			let target = requested.clone().unwrap_or(default_provider);
+			(target, AuthRequest::ListAccounts { provider: requested })
 		},
 		AuthCommand::Refresh { account } => {
 			(default_provider.clone(), AuthRequest::Refresh { account: AccountId::from(account) })
@@ -61,11 +62,13 @@ pub async fn run(database: PathBuf, command: AuthCommand) -> miette::Result<()> 
 		},
 	};
 	let meta = CallMeta {
-		id:       RequestId::from("omp-auth-cli"),
-		target:   Target::ProviderService(provider),
-		deadline: None,
-		budget:   ExecutionBudget::default(),
-		session:  None,
+		id:             RequestId::from("omp-auth-cli"),
+		target:         Target::ProviderService(provider),
+		deadline:       None,
+		budget:         ExecutionBudget::default(),
+		session:        None,
+		debug_session:  None,
+		response_hooks: Default::default(),
 	};
 	let planner = router::Router::new(registry.clone(), time::Duration::from_secs(30));
 	let mut client = Client::new(registry.service(), planner, meta);
@@ -78,7 +81,14 @@ async fn print_auth(answer: AuthAnswer, database: &Path) -> miette::Result<()> {
 			let session_id = session.id.clone();
 			while let Ok(event) = session.events.recv_async().await {
 				match event.into_diagnostic()? {
-					AuthEvent::OpenUrl(url) => println!("\nOpen this URL in your browser:\n{url}\n"),
+					AuthEvent::OpenUrl { url, launch } => {
+						println!("\nOpen this URL in your browser:\n{url}");
+						if let Some(launch) = launch {
+							println!("or open {launch}\n");
+						} else {
+							println!();
+						}
+					},
 					AuthEvent::ShowDeviceCode { code, verification_url } => println!(
 						"complete device authorization at {verification_url} using code {}",
 						code.expose_secret()
@@ -104,7 +114,17 @@ async fn print_auth(answer: AuthAnswer, database: &Path) -> miette::Result<()> {
 		},
 		AuthAnswer::Accounts(accounts) => {
 			for account in accounts {
-				println!("{} {}", account.account, account.provider);
+				print!(
+					"selector={} provider={} state={:?}",
+					account.account, account.provider, account.state
+				);
+				if let Some(principal) = account.principal {
+					print!(" principal={principal}");
+				}
+				if let Some(label) = account.label {
+					print!(" label={label}");
+				}
+				println!();
 			}
 		},
 		AuthAnswer::Refreshed(account) => println!("{} {}", account.account, account.provider),
@@ -156,15 +176,28 @@ fn auth_input(prompt: &AuthPrompt, value: &str) -> miette::Result<AuthInput> {
 		) {
 		return Err(miette!("authentication input must not be empty"));
 	}
-	let kind = match prompt.input {
-		InferenceAuthPromptKind::AuthorizationCode => AuthPromptKind::AuthorizationCode,
-		InferenceAuthPromptKind::ApiKey => AuthPromptKind::ApiKey,
-		InferenceAuthPromptKind::SessionToken => AuthPromptKind::SessionToken,
-		InferenceAuthPromptKind::PlainText => AuthPromptKind::PlainText,
-		InferenceAuthPromptKind::OptionalSecret => AuthPromptKind::OptionalSecret,
-		InferenceAuthPromptKind::Confirmation => AuthPromptKind::Confirmation,
-	};
-	Ok(chat_ui::auth_input(kind, value.to_owned()))
+	Ok(match prompt.input {
+		InferenceAuthPromptKind::AuthorizationCode => {
+			if value.contains("://") {
+				AuthInput::CallbackUrl(SecretString::from(value))
+			} else {
+				AuthInput::AuthorizationCode(SecretString::from(value))
+			}
+		},
+		InferenceAuthPromptKind::ApiKey => AuthInput::ApiKey(SecretString::from(value)),
+		InferenceAuthPromptKind::SessionToken => AuthInput::SessionToken(SecretString::from(value)),
+		InferenceAuthPromptKind::PlainText => AuthInput::PlainText(Str::new(value)),
+		InferenceAuthPromptKind::OptionalSecret => {
+			AuthInput::OptionalSecret(SecretString::from(value))
+		},
+		InferenceAuthPromptKind::Confirmation => {
+			if matches!(value.trim().to_ascii_lowercase().as_str(), "" | "y" | "yes") {
+				AuthInput::DeviceConfirmed
+			} else {
+				AuthInput::Cancel
+			}
+		},
+	})
 }
 
 #[cfg(test)]

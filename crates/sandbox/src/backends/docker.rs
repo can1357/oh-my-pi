@@ -44,7 +44,7 @@ struct ImageConfig {
 	volumes: Option<std::collections::BTreeMap<String, serde_json::Value>>,
 }
 
-pub(crate) fn compile(
+pub fn compile(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -53,7 +53,7 @@ pub(crate) fn compile(
 	compile_for(Backend::DockerEphemeral, spec, program, requested, enforced)
 }
 
-pub(crate) fn compile_runsc(
+pub fn compile_runsc(
 	spec: &SandboxSpec,
 	program: &Path,
 	requested: CapabilitySet,
@@ -80,6 +80,22 @@ fn compile_for(
 	}
 	let readable = &spec.readable;
 	let writable = &spec.writable;
+	let has_future_write_deny = spec.write_deny.iter().any(|path| !path.exists());
+	let has_unmounted_write_deny = spec
+		.write_deny
+		.iter()
+		.any(|path| !path_under_any(path, writable));
+	if has_future_write_deny || has_unmounted_write_deny {
+		enforced = enforced.difference(CapabilitySet::one(Capability::FsWriteDeny));
+		if spec.degradation == DegradationPolicy::Reject
+			&& !spec.tolerated.contains(Capability::FsWriteDeny)
+		{
+			return Err(SandboxError::BackendCapabilities {
+				backend,
+				missing: CapabilitySet::one(Capability::FsWriteDeny),
+			});
+		}
+	}
 
 	if let Some(dir) = &spec.dir
 		&& !path_under_any(dir, readable)
@@ -127,9 +143,16 @@ fn compile_for(
 		push_mount(&mut argv, backend, path, path, false)?;
 	}
 	for path in &spec.unix_sockets {
-		if !path_under_any(path, &readable) && !path_under_any(path, &writable) {
+		if !path_under_any(path, readable) && !path_under_any(path, writable) {
 			push_mount(&mut argv, backend, path, path, true)?;
 		}
+	}
+	for path in spec
+		.write_deny
+		.iter()
+		.filter(|path| path.exists() && path_under_any(path, writable))
+	{
+		push_mount(&mut argv, backend, path, path, true)?;
 	}
 	if let Some(dir) = &spec.dir {
 		push_pair(&mut argv, "--workdir", dir.as_os_str());
@@ -171,8 +194,11 @@ fn compile_for(
 	if spec.write == WriteMode::Overlay && enforced.contains(Capability::FsWriteEphemeral) {
 		semantic_missing = semantic_missing.union(CapabilitySet::one(Capability::FsWriteEphemeral));
 	}
-	if spec.degradation == DegradationPolicy::Reject && !semantic_missing.is_empty() {
-		return Err(SandboxError::BackendCapabilities { backend, missing: semantic_missing });
+	if spec.degradation == DegradationPolicy::Reject {
+		let fatal = semantic_missing.difference(spec.tolerated);
+		if !fatal.is_empty() {
+			return Err(SandboxError::BackendCapabilities { backend, missing: fatal });
+		}
 	}
 	enforced = enforced.difference(semantic_missing);
 
@@ -208,6 +234,25 @@ fn compile_for(
 			"Docker read-deny masks apply only within container and mounted paths; broad host reads \
 			 are never exposed",
 		));
+	}
+	if !spec.write_deny.is_empty() {
+		plan.add_caveat(Caveat::capability(
+			Capability::FsWriteDeny,
+			"Docker overlays existing denied write subtrees with read-only bind mounts",
+		));
+		if has_future_write_deny {
+			plan.add_caveat(Caveat::capability(
+				Capability::FsWriteDeny,
+				"Docker cannot pre-mount a read-only carve-out for a path that does not yet exist",
+			));
+		}
+		if has_unmounted_write_deny {
+			plan.add_caveat(Caveat::capability(
+				Capability::FsWriteDeny,
+				"Docker cannot carve an image or temporary path read-only without replacing it with a \
+				 host bind mount",
+			));
+		}
 	}
 	if matches!(spec.write, WriteMode::Scoped | WriteMode::Overlay) {
 		plan.add_caveat(Caveat::general(
@@ -256,7 +301,7 @@ fn compile_for(
 	Ok(plan)
 }
 
-pub(crate) fn probe(backend: Backend) -> BackendStatus {
+pub fn probe(backend: Backend) -> BackendStatus {
 	let Some(image) = env::var_os(IMAGE_ENV) else {
 		return BackendStatus::unavailable(backend, ProbeFailure::Configuration {
 			backend,
@@ -308,7 +353,7 @@ pub(crate) fn probe(backend: Backend) -> BackendStatus {
 	}
 }
 
-pub(crate) fn prepare(
+pub fn prepare(
 	plan: &Plan,
 	spec: &SandboxSpec,
 	prepared: &mut PreparedSandbox,
@@ -592,10 +637,10 @@ fn writable_destinations(argv: &[OsString]) -> Vec<String> {
 			)),
 			Some("--mount") => {
 				let mount = argv[index + 1].to_string_lossy();
-				if mount_writable(&mount) {
-					if let Some(destination) = mount_destination(&mount) {
-						destinations.push(destination);
-					}
+				if mount_writable(&mount)
+					&& let Some(destination) = mount_destination(&mount)
+				{
+					destinations.push(destination);
 				}
 			},
 			_ => {},

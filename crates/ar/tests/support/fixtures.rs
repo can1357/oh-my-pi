@@ -1,7 +1,7 @@
 //! Access to the validated fixture bundle shared with the TypeScript suite.
 //!
 //! The bundle is `tests/fixtures/ar.tar.gz`, produced and cross-validated by
-//! the pi archive test suite; reading it through [`Archive`] dogfoods the
+//! the archive suite; reading it through [`Archive`] dogfoods the
 //! tar.gz path on every suite run.
 
 use std::{path::Path, sync::OnceLock};

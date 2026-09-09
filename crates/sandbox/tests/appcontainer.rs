@@ -1,4 +1,4 @@
-//! AppContainer plan, ACL, environment, and resource-limit contracts.
+//! `AppContainer` plan, ACL, environment, and resource-limit contracts.
 
 use std::{ffi::OsString, path::PathBuf};
 

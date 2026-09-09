@@ -116,6 +116,12 @@ pub enum Error {
 }
 
 /// Collects, redacts, bounds, and writes a deterministic TAR.GZ bundle.
+#[tracing::instrument(
+	level = "debug",
+	name = "diagnostic_bundle",
+	skip_all,
+	fields(output = %spec.output.display())
+)]
 pub fn create_bundle(spec: BundleSpec) -> Result<BundleSummary, Error> {
 	let mut collector = Collector::new(spec.max_bytes, spec.max_file_bytes);
 	collector.add_file("session/session.jsonl", &spec.journal, true)?;
@@ -183,7 +189,16 @@ pub fn create_bundle(spec: BundleSpec) -> Result<BundleSummary, Error> {
 	}
 	fs::write(&spec.output, archive)
 		.map_err(|source| Error::Write { path: spec.output.clone(), source })?;
-	Ok(BundleSummary { output: spec.output, files, uncompressed_bytes, omitted: collector.omitted })
+	let summary =
+		BundleSummary { output: spec.output, files, uncompressed_bytes, omitted: collector.omitted };
+	tracing::info!(
+		files = summary.files,
+		uncompressed_bytes = summary.uncompressed_bytes,
+		omitted = summary.omitted,
+		output = %summary.output.display(),
+		"diagnostic bundle created"
+	);
+	Ok(summary)
 }
 
 struct Collector {
@@ -223,7 +238,7 @@ impl Collector {
 		validate_member(member)?;
 		if textual || str::from_utf8(&bytes).is_ok() {
 			let text = String::from_utf8_lossy(&bytes);
-			bytes = omp_telemetry::redact::redact_sensitive_credentials(&text).into_bytes();
+			bytes = omp_observability::redact::redact_sensitive_credentials(&text).into_bytes();
 		}
 		let size = bytes.len() as u64;
 		if size > self.file_max || size > self.max.saturating_sub(self.used) {
@@ -250,7 +265,7 @@ fn validate_member(path: &str) -> Result<(), Error> {
 fn sanitize_json(value: serde_json::Value) -> serde_json::Value {
 	match value {
 		serde_json::Value::String(text) => {
-			serde_json::Value::String(omp_telemetry::redact::redact_sensitive_credentials(&text))
+			serde_json::Value::String(omp_observability::redact::redact_sensitive_credentials(&text))
 		},
 		serde_json::Value::Array(values) => {
 			serde_json::Value::Array(values.into_iter().map(sanitize_json).collect())
@@ -282,7 +297,37 @@ fn sanitized_environment() -> BTreeMap<&'static str, String> {
 		.filter_map(|name| {
 			env::var(name)
 				.ok()
-				.map(|value| (*name, omp_telemetry::redact::redact_sensitive_credentials(&value)))
+				.map(|value| (*name, omp_observability::redact::redact_sensitive_credentials(&value)))
 		})
 		.collect()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn bundle_writes_real_bounded_archive_with_profiles() {
+		let directory = tempfile::tempdir().expect("temp directory");
+		let journal = directory.path().join("session.oms");
+		fs::write(&journal, "event: journal@1\ndata: {}\n").expect("journal");
+		let output = directory.path().join("report.tar.gz");
+		let mut spec =
+			BundleSpec::new(output.clone(), journal, serde_json::json!({ "model": "test" }));
+		spec.profiles.push(ProfilePayload {
+			path:   "work.folded".to_owned(),
+			format: "folded-stacks-microseconds".to_owned(),
+			bytes:  b"omp;test 1\n".to_vec(),
+		});
+		let summary = create_bundle(spec).expect("bundle");
+		assert_eq!(summary.output, output);
+		assert!(summary.files >= 5);
+		assert!(summary.uncompressed_bytes > 0);
+		assert!(summary.output.is_file());
+		assert!(
+			fs::metadata(summary.output)
+				.expect("archive metadata")
+				.len() > 0
+		);
+	}
 }

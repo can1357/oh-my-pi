@@ -6,7 +6,6 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
-	error::Error,
 	fmt::{self, Display},
 	mem::size_of,
 	sync::Arc,
@@ -163,11 +162,12 @@ impl OverlayStore {
 /// Public construction path for one immutable [`CatalogOverlay`].
 #[derive(Clone, Debug)]
 pub struct CatalogOverlayBuilder {
-	source:    ProvenanceSource,
-	providers: Vec<ProviderDef>,
-	models:    Vec<ModelOverlay>,
-	routes:    Vec<RouteOverlay>,
-	aliases:   Vec<ScopedAlias>,
+	source:     ProvenanceSource,
+	auth_specs: Vec<AuthSpec>,
+	providers:  Vec<ProviderDef>,
+	models:     Vec<ModelOverlay>,
+	routes:     Vec<RouteOverlay>,
+	aliases:    Vec<ScopedAlias>,
 }
 
 impl CatalogOverlayBuilder {
@@ -176,6 +176,7 @@ impl CatalogOverlayBuilder {
 	pub const fn new(source: ProvenanceSource) -> Self {
 		Self {
 			source,
+			auth_specs: Vec::new(),
 			providers: Vec::new(),
 			models: Vec::new(),
 			routes: Vec::new(),
@@ -186,6 +187,12 @@ impl CatalogOverlayBuilder {
 	/// Adds one complete provider definition.
 	pub fn with_provider(mut self, provider: ProviderDef) -> Self {
 		self.providers.push(provider);
+		self
+	}
+
+	/// Adds one interned authentication-specification addition.
+	pub fn with_auth_spec(mut self, spec: AuthSpec) -> Self {
+		self.auth_specs.push(spec);
 		self
 	}
 
@@ -216,11 +223,12 @@ impl CatalogOverlayBuilder {
 	/// Freezes the accumulated layer for publication in an [`OverlayStack`].
 	pub fn build(self) -> CatalogOverlay {
 		CatalogOverlay {
-			source:    self.source,
-			providers: self.providers.into_boxed_slice(),
-			models:    self.models.into_boxed_slice(),
-			routes:    self.routes.into_boxed_slice(),
-			aliases:   self.aliases.into_boxed_slice(),
+			source:     self.source,
+			auth_specs: self.auth_specs.into_boxed_slice(),
+			providers:  self.providers.into_boxed_slice(),
+			models:     self.models.into_boxed_slice(),
+			routes:     self.routes.into_boxed_slice(),
+			aliases:    self.aliases.into_boxed_slice(),
 		}
 	}
 }
@@ -319,9 +327,10 @@ pub struct ProviderDeclaration {
 }
 
 /// Activation failure for a provider declaration set.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum ProviderActivationError {
 	/// Two unrelated declarations had the same winning priority.
+	#[error("provider {provider} has equal-priority declarations {first} and {second}")]
 	EqualPriority {
 		/// Contested provider namespace.
 		provider: ProviderId,
@@ -331,6 +340,7 @@ pub enum ProviderActivationError {
 		second:   ProviderDeclarationId,
 	},
 	/// An extension declaration named a provider base that is unavailable.
+	#[error("provider declaration {declaration} extends unavailable base {base}")]
 	MissingBase {
 		/// Declaration that requested the base.
 		declaration: ProviderDeclarationId,
@@ -338,22 +348,6 @@ pub enum ProviderActivationError {
 		base:        ProviderId,
 	},
 }
-
-impl Display for ProviderActivationError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::EqualPriority { provider, first, second } => write!(
-				formatter,
-				"provider {provider} has equal-priority declarations {first} and {second}"
-			),
-			Self::MissingBase { declaration, base } => {
-				write!(formatter, "provider declaration {declaration} extends unavailable base {base}")
-			},
-		}
-	}
-}
-
-impl Error for ProviderActivationError {}
 
 const _: () = assert!(
 	size_of::<ProviderActivationError>() <= 64,
@@ -520,17 +514,18 @@ mod tests {
 
 	fn overlay(origin: &str) -> CatalogOverlay {
 		CatalogOverlay {
-			source:    ProvenanceSource {
+			auth_specs: Box::new([]),
+			source:     ProvenanceSource {
 				kind:           ProvenanceKind::Configured,
 				origin:         origin.to_str(),
 				revision:       None,
 				confidence:     EvidenceConfidence::Declared,
 				observed_at_ms: None,
 			},
-			providers: Box::new([]),
-			models:    Box::new([]),
-			routes:    Box::new([]),
-			aliases:   Box::new([]),
+			providers:  Box::new([]),
+			models:     Box::new([]),
+			routes:     Box::new([]),
+			aliases:    Box::new([]),
 		}
 	}
 

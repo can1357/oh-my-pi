@@ -1,8 +1,12 @@
 //! Symbol targeting and bounded normalization for LSP navigation results.
 
-use omp_core::Str;
-use omp_docserver::position::PositionEncoding;
+use std::collections::BTreeMap;
+
+use omp_core::{Str, StrMut};
+use omp_proto::lsp::PositionEncoding;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
+use url::Url;
 
 /// Parsed `symbol#N` target, where occurrence is one-based.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -57,10 +61,13 @@ pub fn resolve_symbol_column(
 		if left_boundary && right_boundary {
 			occurrence += 1;
 			if occurrence == target.occurrence {
-				return encoding
-					.offset_to_position(line, start)
-					.ok()
-					.map(|position| position.character);
+				let prefix = line.get(..start)?;
+				let units = match encoding {
+					PositionEncoding::Utf8 => prefix.len(),
+					PositionEncoding::Utf16 => prefix.encode_utf16().count(),
+					PositionEncoding::Utf32 => prefix.chars().count(),
+				};
+				return u32::try_from(units).ok();
 			}
 		}
 		offset = end;
@@ -79,6 +86,24 @@ mod tests {
 		assert_eq!(resolve_symbol_column(line, &target, PositionEncoding::Utf16), Some(14));
 		assert_eq!(resolve_symbol_column(line, &target, PositionEncoding::Utf32), Some(13));
 	}
+
+	#[test]
+	fn semantic_locations_are_grouped_and_one_based() {
+		let locations = serde_json::json!([
+			{"uri":"file:///tmp/a.rs","range":{"start":{"line":2,"character":4},"end":{"line":2,"character":7}}},
+			{"uri":"file:///tmp/a.rs","range":{"start":{"line":8,"character":0},"end":{"line":8,"character":3}}},
+			{"uri":"untitled:buffer","range":{"start":{"line":0,"character":1},"end":{"line":0,"character":2}}},
+		]);
+		let groups = group_locations(&locations);
+		assert_eq!(groups.len(), 2);
+		assert_eq!(groups[0].locations[0], LocationPoint { line: 3, col: 5 });
+		let rendered = render_references(&locations);
+		assert!(rendered.starts_with("Found 3 references:\n"));
+		assert!(rendered.contains("/tmp/a.rs:3:5"));
+		assert!(rendered.contains("untitled:buffer:1:2"));
+		assert_eq!(render_locations("definition", &serde_json::json!([])), "No definition found");
+		assert_eq!(render_references(&serde_json::json!([])), "No references found");
+	}
 }
 
 const fn is_word_byte(byte: u8) -> bool {
@@ -89,7 +114,26 @@ fn is_word_character(character: char) -> bool {
 	character == '_' || character.is_alphanumeric()
 }
 
-/// Normalizes LSP Location and LocationLink results to a bounded location list.
+/// One model-independent location in a grouped navigation result.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LocationPoint {
+	/// One-based source line.
+	pub line: u64,
+	/// One-based source column.
+	pub col:  u64,
+}
+
+/// Locations grouped by their decoded file path for semantic presentation.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct LocationGroup {
+	/// Local path when the URI is a file URL; otherwise the original URI.
+	pub path:      Str,
+	/// Locations in server response order.
+	pub locations: Vec<LocationPoint>,
+}
+
+/// Normalizes LSP Location and `LocationLink` results to a bounded location
+/// list.
 pub fn normalize_locations(value: &Value, limit: usize) -> Vec<Value> {
 	let values = value
 		.as_array()
@@ -111,7 +155,87 @@ pub fn normalize_locations(value: &Value, limit: usize) -> Vec<Value> {
 		.collect()
 }
 
-/// Extracts Markdown, MarkedString, and plaintext hover contents.
+/// Groups normalized locations by decoded path without losing response order.
+pub fn group_locations(value: &Value) -> Vec<LocationGroup> {
+	let mut groups = Vec::<LocationGroup>::new();
+	let mut indexes = BTreeMap::<Str, usize>::new();
+	for location in value.as_array().into_iter().flatten() {
+		let Some(uri) = location.get("uri").and_then(Value::as_str) else {
+			continue;
+		};
+		let path = display_path(uri);
+		let line = location
+			.pointer("/range/start/line")
+			.and_then(Value::as_u64)
+			.unwrap_or_default()
+			.saturating_add(1);
+		let col = location
+			.pointer("/range/start/character")
+			.and_then(Value::as_u64)
+			.unwrap_or_default()
+			.saturating_add(1);
+		let index = if let Some(index) = indexes.get(&path).copied() {
+			index
+		} else {
+			let index = groups.len();
+			indexes.insert(path.clone(), index);
+			groups.push(LocationGroup { path, locations: Vec::new() });
+			index
+		};
+		groups[index].locations.push(LocationPoint { line, col });
+	}
+	groups
+}
+
+/// Renders definition-style results with explicit counts and one-based
+/// locations.
+pub fn render_locations(noun: &str, value: &Value) -> Str {
+	render_locations_with_empty(noun, noun, value)
+}
+
+/// Renders reference results with a plural empty state.
+pub fn render_references(value: &Value) -> Str {
+	render_locations_with_empty("reference", "references", value)
+}
+
+fn render_locations_with_empty(noun: &str, empty_noun: &str, value: &Value) -> Str {
+	let groups = group_locations(value);
+	let count = groups
+		.iter()
+		.map(|group| group.locations.len())
+		.sum::<usize>();
+	if count == 0 {
+		return Str::from(format!("No {empty_noun} found"));
+	}
+	let mut output = StrMut::new("");
+	output.push_str("Found ");
+	output.push_str(count.to_string().as_str());
+	output.push_str(" ");
+	output.push_str(noun);
+	output.push_str(if count == 1 { ":\n" } else { "s:\n" });
+	for group in groups {
+		for location in group.locations {
+			output.push_str("  ");
+			output.push_str(&group.path);
+			output.push_str(":");
+			output.push_str(location.line.to_string().as_str());
+			output.push_str(":");
+			output.push_str(location.col.to_string().as_str());
+			output.push_str("\n");
+		}
+	}
+	output.freeze()
+}
+
+fn display_path(uri: &str) -> Str {
+	Url::parse(uri)
+		.ok()
+		.filter(|url| url.scheme() == "file")
+		.and_then(|url| url.to_file_path().ok())
+		.map_or_else(|| Str::from(uri), |path| Str::from(path.to_string_lossy().as_ref()))
+}
+
+/// Extracts Markdown, `MarkedString`, and plaintext hover contents.
 pub fn hover_text(contents: &Value) -> Str {
 	fn append(value: &Value, output: &mut String) {
 		match value {

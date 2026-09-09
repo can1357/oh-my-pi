@@ -440,10 +440,10 @@ impl Component for Tree {
 			x = pc
 				.frame
 				.put(x, y, expander, tint(Style::new().fg(pc.ctx.theme.muted)));
-			let lead = if !row.icon.is_empty() {
-				pc.ctx.charset.icon_named(&row.icon).unwrap_or(&row.icon)
-			} else {
+			let lead = if row.icon.is_empty() {
 				&row.badge
+			} else {
+				pc.ctx.charset.icon_named(&row.icon).unwrap_or(&row.icon)
 			};
 			if !lead.is_empty() {
 				let color =
@@ -552,7 +552,7 @@ impl Component for Tree {
 			Key::Home | Key::Char('g') => self.move_to(0, ec.view_rows),
 			Key::End | Key::Char('G') => self.move_to(self.rows.len() - 1, ec.view_rows),
 			Key::PageUp => {
-				self.move_to(current.saturating_sub(usize::from(ec.view_rows.max(1))), ec.view_rows)
+				self.move_to(current.saturating_sub(usize::from(ec.view_rows.max(1))), ec.view_rows);
 			},
 			Key::PageDown => self.move_to(
 				current
@@ -771,10 +771,10 @@ fn resolve_color(value: Option<&PropValue>, theme: &Theme) -> Option<Color> {
 }
 
 fn row_width(row: &TreeRow, ctx: &UiContext) -> u16 {
-	let lead = if !row.icon.is_empty() {
-		ctx.charset.icon_named(&row.icon).unwrap_or(&row.icon)
-	} else {
+	let lead = if row.icon.is_empty() {
 		&row.badge
+	} else {
+		ctx.charset.icon_named(&row.icon).unwrap_or(&row.icon)
 	};
 	2_u16
 		.saturating_add(row.depth)

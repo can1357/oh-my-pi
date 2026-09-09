@@ -1,6 +1,7 @@
 //! Layered key→value bags feeding template rendering.
 
 use omp_core::{IntoStr, Str};
+use omp_dom::Dom;
 
 use crate::Value;
 
@@ -46,6 +47,15 @@ impl Props {
 		}
 	}
 
+	/// Binds this value bag to the authoritative session DOM for one render.
+	///
+	/// The returned view borrows both inputs; no DOM snapshot, serialization,
+	/// or string round-trip is performed.
+	#[must_use]
+	pub const fn with_dom<'a>(&'a self, dom: &'a Dom) -> ScopedProps<'a> {
+		ScopedProps { values: self, dom }
+	}
+
 	/// Iterates props in key order.
 	pub fn iter(&self) -> impl Iterator<Item = (&Str, &Value)> + '_ {
 		self.map.iter()
@@ -59,6 +69,30 @@ impl Props {
 	/// Whether the bag holds no props.
 	pub fn is_empty(&self) -> bool {
 		self.map.is_empty()
+	}
+}
+
+/// A render-scoped prop view carrying a borrowed session DOM.
+///
+/// Templates access the tree only through the registered `select` and
+/// `count` functions. The DOM cannot escape the render lifetime.
+#[derive(Clone, Copy)]
+pub struct ScopedProps<'a> {
+	pub(crate) values: &'a Props,
+	pub(crate) dom:    &'a Dom,
+}
+
+impl ScopedProps<'_> {
+	/// Returns the ordinary template values in this render scope.
+	#[must_use]
+	pub const fn values(&self) -> &Props {
+		self.values
+	}
+
+	/// Returns the authoritative session tree bound to this render scope.
+	#[must_use]
+	pub const fn dom(&self) -> &Dom {
+		self.dom
 	}
 }
 

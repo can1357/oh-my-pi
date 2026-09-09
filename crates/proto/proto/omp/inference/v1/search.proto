@@ -99,6 +99,8 @@ message SearchResponse {
     string author = 5;
     // Engine-relative relevance, 0..1 where reported.
     optional double score = 6;
+    // Whole seconds since publication at projection time, when known.
+    uint64 age_seconds = 7;
   }
   message Citation {
     string url = 1;

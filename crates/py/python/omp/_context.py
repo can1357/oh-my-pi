@@ -57,6 +57,11 @@ class Context:
     settings: Mapping[str, object] = field(default_factory=lambda: _EMPTY_SETTINGS)
     deadline: float | None = None
     _scope: _scope.Scope | None = field(default=None, repr=False, compare=False)
+    _update_sink: Callable[[object], None] | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def from_scope(cls, scope: _scope.Scope) -> Context:
@@ -96,6 +101,20 @@ class Context:
             raise LookupError("no active omp invocation context") from error
         return cls.from_scope(scope)
 
+    async def convar(self, name: str) -> object:
+        """Read one live control-plane variable by canonical name."""
+
+        from . import convars
+
+        return await convars.get(name)
+
+    def observe_convar(self, name: str) -> AsyncIterator[object]:
+        """Observe the current value and committed changes to one convar."""
+
+        from . import convars
+
+        return convars.observe(name)
+
     @property
     def root(self) -> WorkspaceUri:
         """Return the primary workspace root."""
@@ -113,10 +132,23 @@ class Context:
         """Return whether cancellation has been requested for this scope."""
         return bool(self._scope is not None and self._scope.cancelled)
 
+    @property
+    def signal(self) -> asyncio.Event:
+        """Return the invocation-fenced cancellation event."""
+        if self._scope is None:
+            raise RuntimeError("context is not attached to an invocation scope")
+        return self._scope.cancel_signal
+
     def checkpoint(self) -> None:
         """Raise ``CancelledError`` when cancellation is pending."""
         if self.cancelled():
             raise asyncio.CancelledError
+    def update(self, value: object) -> None:
+        """Emit one ephemeral progress value for the active tool invocation."""
+        if self._update_sink is None:
+            raise RuntimeError("context is not attached to a tool update sink")
+        payload = getattr(value, "payload", value)
+        self._update_sink(payload)
 
     def on_cancel(self, fn: Callable[[], None]) -> Callable[[], None]:
         """Register a synchronous cancellation callback and return its remover."""

@@ -1,2081 +1,2055 @@
-//! Single runtime-owner command and presence authority for live collaboration.
+//! Process-local owner for replica-backed collaboration relay sessions.
 
-use std::{
-	collections::HashMap,
-	path::{Path, PathBuf},
-	time::Duration,
-};
+use std::{collections::BTreeMap, time::Duration};
 
 use bytes::Bytes;
-use flume::{Receiver, Sender};
-use omp_agent::{MailboxSender, ReplicationSubscription};
 use omp_collab::{
+	PROTOCOL_REVISION,
 	codec::RelayRoute,
-	crypto::{CryptoError, RoomKey},
-	guest::{
-		GuestReplicaError, GuestReplicaHandle, GuestStateEffects, GuestStateMirror,
-		SNAPSHOT_RECORD_MAX,
-	},
 	host::{
-		AuthenticatedPeer, HostAdmission, HostAgentClass, HostAgentRuntime, HostUiAnswer,
-		HostUiDispatcher, RemoteOperation, VisibilityClass as HostVisibilityClass, bus_visibility,
-		read_transcript_chunk, route_agent_command,
+		AuthenticatedPeer, AuthorizedMutation, HostAdmission, HostUiAnswer, HostUiBeginError,
+		HostUiDispatcher,
 	},
-	link::{CollabLink, HostedRoom, RelayEndpoint, WebEndpoint},
-	presence::{ConnectionState, PresenceFacts},
-	relay::{Handshake, RelayClient, RelayError, RelayInbound, RelayRole, SendDisposition},
+	link::{CollabLink, HostedRoom, RelayEndpoint},
+	presence::{CollabRole, ConnectionState, PresenceFacts},
+	relay::{Handshake, RelayClient, RelayInbound, RelayRole, SendDisposition},
 };
-use omp_core::{RemotePrincipal, Str};
-use omp_proto::collab::{
-	v1,
-	v1::{Bye, Hello, PromptRequest, Welcome, collab_frame},
+use omp_core::{Str, base64_url};
+use omp_dom::{Dom, Event, Snapshot, SnapshotDecodeError};
+use omp_journal::EntryId;
+use omp_proto::collab::v1::{
+	AbortRequest, AgentCommand, AgentViewCancel, AgentViewEnd, AgentViewEvent, AgentViewRequest,
+	AgentViewSnapshot, CollabFrame, ErrorMessage, Hello, ImageAttachment, JournalRecord,
+	Participant, PromptRequest, RegistrySnapshot, SessionHeader, SessionStateUpdate, SnapshotChunk,
+	UiRequest, UiResponse, VisibilityClass, Welcome, collab_frame,
 };
-use thiserror::Error;
-use tokio::{sync::watch, task::JoinHandle, time, time::error::Elapsed};
+use serde::Deserialize;
+use serde_json::value::RawValue;
+use tokio::{sync::watch, task::JoinHandle};
+use tokio_util::sync::CancellationToken;
 
-use super::{
-	host_bridge::{
-		HostBridgeError, HostJournalBridge, HostReplicationEvent, SNAPSHOT_CHUNK_SOFT_BYTES,
-	},
-	remote_admission::enqueue_prompt,
+use super::observer::{
+	AgentViewFailureCode, HostAgentBridge, RemoteAgentView, RemoteAgentViewError, registry_snapshot,
 };
-const COMMAND_CAPACITY: usize = 16;
-const LIVE_PRESENTATION_CAPACITY: usize = 64;
-const HOST_OPERATION_CAPACITY: usize = 64;
-const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
-const WELCOME_TIMEOUT: Duration = Duration::from_secs(30);
-const SNAPSHOT_PROGRESS_TIMEOUT: Duration = Duration::from_secs(30);
-const SNAPSHOT_ENTRY_CHUNK: usize = 256;
 
-/// One visible host agent plus its host-local transcript location.
-#[derive(Clone, Debug, PartialEq)]
-pub struct HostAgentProjection {
-	/// Public registry row sent to guests.
-	pub summary:         v1::AgentSummary,
-	/// Host-local transcript path used for bounded guest reads.
-	pub transcript_path: Option<PathBuf>,
-}
+const INITIAL_HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(30);
+const SNAPSHOT_CHUNK_BYTES: usize = 256 * 1024;
+const SNAPSHOT_CHUNK_MAX_COUNT: usize = 256;
+const SNAPSHOT_MAX_BYTES: usize = SNAPSHOT_CHUNK_BYTES * SNAPSHOT_CHUNK_MAX_COUNT;
+const AGENT_VIEW_SNAPSHOT_MAX_BYTES: usize = 16 * 1024 * 1024;
+const AGENT_VIEW_REQUEST_CAP: usize = 32;
+const AGENT_VIEW_EVENT_CAP: usize = 256;
+const HOST_UI_REQUEST_CAP: usize = 16;
 
-/// Coalesced visible registry input for the collaboration owner.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct HostRegistryUpdate {
-	/// Public registry snapshot sent to guests.
-	pub snapshot: v1::RegistrySnapshot,
-	/// Host-local routing metadata keyed by public agent id.
-	pub agents:   HashMap<Str, HostAgentProjection>,
-}
-
-impl HostRegistryUpdate {
-	/// Builds an update from a public snapshot without transcript locations.
-	pub fn public_only(snapshot: v1::RegistrySnapshot) -> Self {
-		let agents = snapshot
-			.agents
-			.iter()
-			.cloned()
-			.map(|summary| {
-				(Str::new(&summary.id), HostAgentProjection { summary, transcript_path: None })
-			})
-			.collect();
-		Self { snapshot, agents }
-	}
-}
-
-/// One admitted host-owned effect delivered to the interactive app owner.
-#[derive(Clone, Debug)]
-pub enum HostOperation {
-	/// Interrupt the active host turn.
-	Abort {
-		/// Authenticated guest requesting the interrupt.
-		principal: RemotePrincipal,
-		/// Guest-supplied audit reason.
-		reason:    Str,
-	},
-	/// Chat with a visible main or subagent.
-	AgentChat {
-		/// Authenticated guest requesting the operation.
-		principal: RemotePrincipal,
-		/// Public agent id.
-		agent_id:  Str,
-		/// Trimmed chat text.
-		text:      Str,
-	},
-	/// Kill a visible main or subagent.
-	AgentKill {
-		/// Authenticated guest requesting the operation.
-		principal: RemotePrincipal,
-		/// Public agent id.
-		agent_id:  Str,
-	},
-	/// Revive a visible main or subagent.
-	AgentRevive {
-		/// Authenticated guest requesting the operation.
-		principal: RemotePrincipal,
-		/// Public agent id.
-		agent_id:  Str,
-	},
-	/// First accepted answer to a host-owned UI request.
-	UiAnswer {
-		/// Authenticated guest supplying the answer.
-		principal: RemotePrincipal,
-		/// Settled request and selected value.
-		answer:    HostUiAnswer,
-	},
-}
-
-/// Single-consumer stream of admitted host effects.
-pub struct HostOperationReceiver {
-	operations: Receiver<HostOperation>,
-}
-
-impl HostOperationReceiver {
-	/// Receives the next admitted operation with backpressure.
-	pub async fn recv(&self) -> Result<HostOperation, flume::RecvError> {
-		self.operations.recv_async().await
-	}
-}
-
-enum HostPresentationInput {
-	Stream(v1::StreamEvent),
-	Bus(v1::BusEvent),
-	BeginUi { request: v1::UiRequest, reply: Sender<Result<u32, HostLiveError>> },
-	CancelUi(u32),
-}
-
-/// Clone-cheap producer for bounded live host presentation.
+/// One operation serialized through the collaboration owner.
 #[derive(Clone)]
-pub struct HostLiveHandle {
-	state:        watch::Sender<v1::SessionStateUpdate>,
-	registry:     watch::Sender<HostRegistryUpdate>,
-	presentation: Sender<HostPresentationInput>,
-}
-
-impl HostLiveHandle {
-	/// Replaces the pending state projection; slow consumers observe the latest.
-	pub fn publish_state(&self, state: v1::SessionStateUpdate) {
-		self.state.send_replace(state);
-	}
-
-	/// Replaces the pending visible registry and transcript routing metadata.
-	pub fn publish_registry(&self, registry: HostRegistryUpdate) {
-		self.registry.send_replace(registry);
-	}
-
-	/// Delivers one ordered stream event through the bounded presentation lane.
-	pub async fn send_stream(&self, event: v1::StreamEvent) -> Result<(), HostLiveError> {
-		self
-			.presentation
-			.send_async(HostPresentationInput::Stream(event))
-			.await
-			.map_err(|_| HostLiveError::Stopped)
-	}
-
-	/// Delivers one ordered public task-bus event through the bounded lane.
-	pub async fn send_bus(&self, event: v1::BusEvent) -> Result<(), HostLiveError> {
-		if bus_visibility(event.channel) != HostVisibilityClass::PublicPresentation {
-			return Err(HostLiveError::PrivateBusChannel);
-		}
-		self
-			.presentation
-			.send_async(HostPresentationInput::Bus(event))
-			.await
-			.map_err(|_| HostLiveError::Stopped)
-	}
-
-	/// Begins a host-owned UI request and returns its collaboration request id.
-	pub async fn begin_ui(&self, request: v1::UiRequest) -> Result<u32, HostLiveError> {
-		let (reply, response) = flume::bounded(1);
-		self
-			.presentation
-			.send_async(HostPresentationInput::BeginUi { request, reply })
-			.await
-			.map_err(|_| HostLiveError::Stopped)?;
-		response
-			.recv_async()
-			.await
-			.map_err(|_| HostLiveError::Stopped)?
-	}
-
-	/// Cancels one active host-owned UI request.
-	pub async fn cancel_ui(&self, request_id: u32) -> Result<(), HostLiveError> {
-		self
-			.presentation
-			.send_async(HostPresentationInput::CancelUi(request_id))
-			.await
-			.map_err(|_| HostLiveError::Stopped)
-	}
-}
-
-/// Host live-input failure.
-#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
-pub enum HostLiveError {
-	/// The collaboration owner has stopped.
-	#[error("collaboration live owner has stopped")]
-	Stopped,
-	/// A UI request had no writable guest recipient.
-	#[error("collaboration UI request has no writable guest")]
-	NoWritableGuest,
-	/// A host-local or unknown bus channel cannot enter peer presentation.
-	#[error("collaboration bus channel is not public")]
-	PrivateBusChannel,
-}
-
-/// Agent-owned services required by an authoritative hosted room.
-pub struct HostRuntime {
-	bridge:             HostJournalBridge,
-	history:            Vec<v1::JournalRecord>,
-	snapshot_watermark: u64,
-	header:             v1::SessionHeader,
-	state:              v1::SessionStateUpdate,
-	agents:             v1::RegistrySnapshot,
-	agent_routes:       HashMap<Str, HostAgentProjection>,
-	mailbox:            MailboxSender,
-	state_updates:      watch::Receiver<v1::SessionStateUpdate>,
-	registry_updates:   watch::Receiver<HostRegistryUpdate>,
-	presentation:       Receiver<HostPresentationInput>,
-	operations:         Sender<HostOperation>,
-	ui:                 HostUiDispatcher,
-}
-
-/// App-facing endpoints paired with one host runtime.
-pub struct HostRuntimePorts {
-	/// Producer for coalesced state/registry and bounded presentation events.
-	pub live:       HostLiveHandle,
-	/// Single-consumer stream of authenticated host operations.
-	pub operations: HostOperationReceiver,
-}
-
-impl HostRuntime {
-	/// Captures the race-free journal snapshot and creates bounded live ports.
-	pub fn new(
-		subscription: ReplicationSubscription,
-		header: v1::SessionHeader,
-		state: v1::SessionStateUpdate,
-		agents: v1::RegistrySnapshot,
-		mailbox: MailboxSender,
-	) -> Result<(Self, HostRuntimePorts), HostBridgeError> {
-		let mut bridge = HostJournalBridge::from_subscription(subscription);
-		let chunks = bridge.snapshot_chunks()?;
-		let snapshot_watermark = chunks
-			.last()
-			.map_or(0, |chunk| chunk.host_revision_watermark);
-		let history = chunks.into_iter().flat_map(|chunk| chunk.entries).collect();
-		let registry = HostRegistryUpdate::public_only(agents.clone());
-		let agent_routes = registry.agents.clone();
-		let (state_sender, state_updates) = watch::channel(state.clone());
-		let (registry_sender, registry_updates) = watch::channel(registry);
-		let (presentation_sender, presentation) = flume::bounded(LIVE_PRESENTATION_CAPACITY);
-		let (operations, operation_receiver) = flume::bounded(HOST_OPERATION_CAPACITY);
-		let runtime = Self {
-			bridge,
-			history,
-			snapshot_watermark,
-			header,
-			state,
-			agents,
-			agent_routes,
-			mailbox,
-			state_updates,
-			registry_updates,
-			presentation,
-			operations,
-			ui: HostUiDispatcher::default(),
-		};
-		let ports = HostRuntimePorts {
-			live:       HostLiveHandle {
-				state:        state_sender,
-				registry:     registry_sender,
-				presentation: presentation_sender,
-			},
-			operations: HostOperationReceiver { operations: operation_receiver },
-		};
-		Ok((runtime, ports))
-	}
-}
-
-/// Validated options for starting an authoritative room.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct HostOptions {
-	/// relay origin.
-	pub relay: RelayEndpoint,
-	/// Browser UI origin used only to render fragment links.
-	pub web:   WebEndpoint,
-}
-
-/// One operation serialized through the sole live collaboration owner.
-#[derive(Clone, Debug, Eq, PartialEq)]
 pub enum CollabOwnerCommand {
-	/// Start hosting a writable room.
-	Start(HostOptions),
-	/// Render the read-only link for an existing hosted room.
-	View,
-	/// Return current role, connection, and participant facts.
-	Status,
-	/// End an authoritative hosted room.
-	Stop,
+	/// Host a generated room and begin broadcasting this session's snapshot and
+	/// ordered patch stream.
+	Start {
+		/// Validated relay origin.
+		relay:    RelayEndpoint,
+		/// Race-free session snapshot captured with `events`.
+		snapshot: Snapshot,
+		/// Events following `snapshot` in journal order.
+		events:   flume::Receiver<Event>,
+		/// Controller-owned child transcript subscription authority.
+		agents:   HostAgentBridge,
+	},
 	/// Join a parsed room link under the resolved local identity.
 	Join {
-		/// Strictly parsed room link and credentials.
+		/// Parsed room endpoint and credentials.
 		link:         CollabLink,
-		/// Trimmed setting/OS/fallback participant name.
+		/// Local participant name.
 		display_name: Str,
 	},
-	/// Submit a writable guest prompt through the host authority.
+	/// Submit a prompt through the authenticated host controller.
 	Prompt {
-		/// Prompt text after expanding staged text attachments.
+		/// User-authored text.
 		text:   Str,
-		/// Bounded staged image attachments.
-		images: Vec<RemoteImage>,
+		/// Inline images transported to the host's blob authority.
+		images: Vec<ImageAttachment>,
 	},
-	/// Interrupt the active host turn through a writable link.
-	Abort {
-		/// Guest-supplied audit reason.
-		reason: Str,
-	},
-	/// Control one visible host agent through a writable link.
-	AgentCommand {
-		/// Requested chat, kill, or revive operation.
-		command:  v1::agent_command::Command,
-		/// Public agent id.
-		agent_id: Str,
-		/// Chat text; absent for kill and revive.
-		text:     Option<Str>,
-	},
-	/// Answer one active host-owned UI request.
-	UiResponse {
-		/// Host-assigned request id.
-		request_id: u32,
-		/// Selected/editor value; `None` is a genuine cancel.
-		value:      Option<Str>,
-	},
-	/// Fetch a bounded transcript increment for one visible agent.
-	TranscriptRequest {
-		/// Guest request correlation id.
-		request_id: u32,
-		/// Public agent id.
-		agent_id:   Str,
-		/// First byte not yet present locally.
-		from_byte:  u64,
-	},
-	/// Leave a replica and restore the prior local session.
+	/// Interrupt the host's active generation.
+	Abort,
+	/// Control one host-visible agent.
+	Agent(AgentCommand),
+	/// Answer a host-owned UI request.
+	UiResponse(UiResponse),
+	/// Leave or close the active room.
 	Leave,
+	/// Broadcast one host-owned UI request to writable guests.
+	HostUi {
+		/// Select/editor specification; the owner assigns its correlation id.
+		request: UiRequest,
+		/// Cancellation for the originating local dialog/request.
+		cancel:  CancellationToken,
+		/// First remote answer, or a typed unavailability.
+		answer:  flume::Sender<Result<HostUiAnswer, HostUiRequestError>>,
+	},
+	/// Subscribe to a host agent as a remote actor.
+	ObserveAgent {
+		/// Stable host agent id.
+		agent_id: Str,
+		/// Correlated snapshot-plus-events result.
+		reply:    flume::Sender<Result<RemoteAgentView, RemoteAgentViewError>>,
+	},
+	/// Read the current room state.
+	Status,
 }
 
-/// One remote prompt image loaded by the guest UI boundary.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct RemoteImage {
-	/// Exact image bytes.
-	pub data:      Bytes,
-	/// Detected media type.
-	pub mime_type: Str,
+/// Host dialog broadcast failure.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum HostUiRequestError {
+	/// The active room is not a host.
+	#[error("collaboration UI broadcast requires a host connection")]
+	NotHost,
+	/// No writable guest is connected.
+	#[error("no writable collaboration peer is connected")]
+	Unavailable,
+	/// The request exceeds the bounded collaboration frame budget.
+	#[error("collaboration UI request is too large")]
+	TooLarge,
+	/// The bounded request correlation table is full.
+	#[error("collaboration UI request capacity is exhausted")]
+	Capacity,
+	/// The originating request was cancelled.
+	#[error("collaboration UI request was cancelled")]
+	Cancelled,
+	/// The relay owner stopped before an answer arrived.
+	#[error("collaboration UI request owner stopped")]
+	OwnerStopped,
 }
 
-/// Owner-produced result rendered by slash-command adapters.
+/// Settled collaboration command result.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CollabCommandResult {
-	/// Current presence facts, absent after stop/leave.
-	pub presence:      Option<PresenceFacts>,
-	/// Writable compact room link when hosting.
-	pub full_link:     Option<Str>,
-	/// Read-only compact room link when hosting.
-	pub view_link:     Option<Str>,
-	/// Writable browser deep link when hosting.
-	pub web_link:      Option<Str>,
-	/// Read-only browser deep link when hosting.
-	pub web_view_link: Option<Str>,
+	/// Current presence facts.
+	pub presence:    Option<PresenceFacts>,
+	/// Writable guest link while hosting.
+	pub editor_link: Option<Str>,
+	/// Read-only guest link while hosting.
+	pub viewer_link: Option<Str>,
 }
 
-impl CollabCommandResult {
-	/// Constructs an inactive result after stop or leave.
-	pub const fn inactive() -> Self {
-		Self {
-			presence:      None,
-			full_link:     None,
-			view_link:     None,
-			web_link:      None,
-			web_view_link: None,
-		}
-	}
+/// Collaboration owner failure.
+#[derive(Debug, thiserror::Error)]
+pub enum CollabCommandFault {
+	/// Owner task has stopped.
+	#[error("collaboration owner stopped")]
+	OwnerStopped,
+	/// Relay operation failed.
+	#[error("collaboration relay failed")]
+	Relay(#[from] omp_collab::relay::RelayError),
+	/// Room key was invalid.
+	#[error("collaboration room key was invalid")]
+	Crypto(#[from] omp_collab::crypto::CryptoError),
+	/// Snapshot or patch projection failed.
+	#[error("collaboration replication projection failed")]
+	Projection(#[from] serde_json::Error),
+	/// A replica snapshot was malformed or internally inconsistent.
+	#[error("collaboration replica snapshot was invalid")]
+	Snapshot(#[from] SnapshotDecodeError),
+	/// A replicated DOM event could not be applied.
+	#[error("collaboration replica event was invalid")]
+	Dom(#[from] omp_dom::DomError),
+	/// The host did not complete the welcome and snapshot handshake in time.
+	#[error("collaboration host handshake timed out")]
+	HandshakeTimeout,
+	/// The host refused the guest handshake.
+	#[error("collaboration host refused the guest handshake")]
+	HandshakeRefused,
+	/// The host welcome did not include a complete DOM snapshot.
+	#[error("collaboration host welcome omitted the session snapshot")]
+	MissingSnapshot,
+	/// A DOM snapshot fragment was not a valid authenticated chunk.
+	#[error("collaboration host sent an invalid session snapshot fragment")]
+	InvalidSnapshotFragment,
+	/// A snapshot exceeded the bounded in-memory replica budget.
+	#[error("collaboration snapshot uses {actual} bytes; maximum is {maximum}")]
+	SnapshotTooLarge {
+		/// Observed byte count.
+		actual:  usize,
+		/// Maximum accepted byte count.
+		maximum: usize,
+	},
+	/// A local mutation was attempted from a read-only guest link.
+	#[error("collaboration link is read-only")]
+	ReadOnly,
+	/// No room is active.
+	#[error("not joined to a collaboration room")]
+	NotJoined,
+	/// This operation is available only while joined as a guest.
+	#[error("collaboration operation requires a guest connection")]
+	NotGuest,
+	/// This operation is available only while hosting.
+	#[error("collaboration operation requires a host connection")]
+	NotHost,
+	/// A bounded collaboration request queue is full.
+	#[error("collaboration request capacity is exhausted")]
+	RequestCapacity,
+	/// The relay did not confirm delivery of a guest mutation.
+	#[error("collaboration mutation was not delivered while the relay was connected")]
+	MutationNotDelivered,
 }
 
-struct OwnerRequest {
+struct Request {
 	command: CollabOwnerCommand,
-	reply:   Sender<Result<CollabCommandResult, CollabCommandFault>>,
-}
-/// Latest coalesced state and registry consumed from host frames.
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct GuestLiveProjection {
-	/// Latest authoritative host state.
-	pub state:   Option<v1::SessionStateUpdate>,
-	/// Latest visible-agent registry.
-	pub agents:  v1::RegistrySnapshot,
-	/// UI effects derived while consuming the latest state.
-	pub effects: Option<GuestStateEffects>,
+	reply:   flume::Sender<Result<CollabCommandResult, CollabCommandFault>>,
 }
 
-/// One ordered non-coalescible presentation frame consumed by the guest owner.
-#[derive(Clone, Debug, PartialEq)]
-pub enum GuestPresentationEvent {
-	/// A welcome began a new snapshot; dismiss all prior transient UI.
-	Resync,
-	/// Incremental host stream presentation.
-	Stream(v1::StreamEvent),
-	/// Host-owned UI request to present.
-	UiRequest(v1::UiRequest),
-	/// Host-owned UI request to dismiss.
-	UiRequestEnd(v1::UiRequestEnd),
-	/// Bounded transcript read response.
-	Transcript(v1::TranscriptChunk),
-	/// Public task-bus lifecycle or progress event.
-	Bus(v1::BusEvent),
-	/// Targeted host protocol error.
-	Error(v1::ErrorMessage),
-}
-
-/// Single-UI-owner receiver for ordered guest presentation frames.
+/// Cloneable command, presence, replica, and admitted-mutation projection.
 #[derive(Clone)]
-pub struct GuestPresentationReceiver {
-	events: Receiver<GuestPresentationEvent>,
+pub struct CollabCommandHandle {
+	commands:         flume::Sender<Request>,
+	presence:         watch::Receiver<Option<PresenceFacts>>,
+	state:            watch::Receiver<Option<SessionStateUpdate>>,
+	agents:           watch::Receiver<RegistrySnapshot>,
+	host_state:       watch::Sender<SessionStateUpdate>,
+	replica:          watch::Receiver<Option<Snapshot>>,
+	replica_events:   flume::Receiver<Event>,
+	remote_ui:        flume::Receiver<RemoteUiRequest>,
+	remote_mutations: flume::Receiver<AuthorizedMutation>,
 }
 
-impl GuestPresentationReceiver {
-	/// Receives the next ordered presentation frame with backpressure.
-	pub async fn recv(&self) -> Result<GuestPresentationEvent, flume::RecvError> {
-		self.events.recv_async().await
+impl CollabCommandHandle {
+	/// Requests one serialized owner operation.
+	pub async fn request(
+		&self,
+		command: CollabOwnerCommand,
+	) -> Result<CollabCommandResult, CollabCommandFault> {
+		let (reply, result) = flume::bounded(1);
+		self
+			.commands
+			.send_async(Request { command, reply })
+			.await
+			.map_err(|_| CollabCommandFault::OwnerStopped)?;
+		result
+			.recv_async()
+			.await
+			.map_err(|_| CollabCommandFault::OwnerStopped)?
+	}
+
+	/// Returns current presence facts.
+	#[must_use]
+	pub fn presence(&self) -> Option<PresenceFacts> {
+		*self.presence.borrow()
+	}
+
+	/// Subscribes to presence changes.
+	#[must_use]
+	pub fn subscribe_presence(&self) -> watch::Receiver<Option<PresenceFacts>> {
+		self.presence.clone()
+	}
+
+	/// Returns the latest authoritative session state received from the host.
+	#[must_use]
+	pub fn state(&self) -> Option<SessionStateUpdate> {
+		self.state.borrow().clone()
+	}
+
+	/// Subscribes to authoritative session-state changes.
+	#[must_use]
+	pub fn subscribe_state(&self) -> watch::Receiver<Option<SessionStateUpdate>> {
+		self.state.clone()
+	}
+
+	/// Returns the latest host agent-registry projection.
+	#[must_use]
+	pub fn agents(&self) -> RegistrySnapshot {
+		self.agents.borrow().clone()
+	}
+
+	/// Subscribes to host agent-registry projection changes.
+	#[must_use]
+	pub fn subscribe_agents(&self) -> watch::Receiver<RegistrySnapshot> {
+		self.agents.clone()
+	}
+
+	/// Opens one remote child through the same detached actor contract as a
+	/// local child inspector.
+	pub async fn observe_agent(
+		&self,
+		agent_id: impl Into<Str>,
+	) -> Result<RemoteAgentView, RemoteAgentViewError> {
+		let (reply, result) = flume::bounded(1);
+		self
+			.request(CollabOwnerCommand::ObserveAgent { agent_id: agent_id.into(), reply })
+			.await
+			.map_err(|error| match error {
+				CollabCommandFault::RequestCapacity => RemoteAgentViewError::Capacity,
+				CollabCommandFault::NotJoined | CollabCommandFault::NotGuest => {
+					RemoteAgentViewError::NotGuest
+				},
+				_ => RemoteAgentViewError::Disconnected,
+			})?;
+		result
+			.recv_async()
+			.await
+			.unwrap_or(Err(RemoteAgentViewError::Disconnected))
+	}
+
+	/// Broadcasts a host-owned UI request; the first writable response wins.
+	pub async fn request_guest_ui(
+		&self,
+		request: UiRequest,
+		cancel: CancellationToken,
+	) -> Result<HostUiAnswer, HostUiRequestError> {
+		let (answer, settled) = flume::bounded(1);
+		self
+			.request(CollabOwnerCommand::HostUi { request, cancel, answer })
+			.await
+			.map_err(|error| match error {
+				CollabCommandFault::NotJoined | CollabCommandFault::NotHost => {
+					HostUiRequestError::NotHost
+				},
+				CollabCommandFault::RequestCapacity => HostUiRequestError::Capacity,
+				_ => HostUiRequestError::OwnerStopped,
+			})?;
+		settled
+			.recv_async()
+			.await
+			.unwrap_or(Err(HostUiRequestError::OwnerStopped))
+	}
+
+	/// Replaces the host's locally projected session state.
+	///
+	/// Presence membership is owned by the relay task and is merged into this
+	/// projection before it is published locally or sent to guests.
+	pub fn publish_state(&self, state: SessionStateUpdate) {
+		if *self.host_state.borrow() != state {
+			self.host_state.send_replace(state);
+		}
+	}
+
+	/// Returns the host's latest locally projected session state.
+	#[must_use]
+	pub fn published_state(&self) -> SessionStateUpdate {
+		self.host_state.borrow().clone()
+	}
+
+	/// Returns the latest complete guest replica snapshot.
+	#[must_use]
+	pub fn replica_snapshot(&self) -> Option<Snapshot> {
+		self.replica.borrow().clone()
+	}
+
+	/// Returns the single ordered queue of post-snapshot replica events.
+	///
+	/// The app controller must create one receiver and retain it for its
+	/// lifetime. Clones compete for delivery and therefore are not actor
+	/// subscriptions.
+	#[must_use]
+	pub fn replica_events(&self) -> flume::Receiver<Event> {
+		self.replica_events.clone()
+	}
+
+	/// Returns the guest actor's bounded host-dialog queue.
+	///
+	/// Exactly one actor should retain this receiver. Answer through
+	/// [`CollabOwnerCommand::UiResponse`].
+	#[must_use]
+	pub fn remote_ui_requests(&self) -> flume::Receiver<RemoteUiRequest> {
+		self.remote_ui.clone()
+	}
+
+	/// Returns the host controller's authenticated remote-mutation queue.
+	///
+	/// Every item was admitted against the room's write token before entering
+	/// this queue.
+	#[must_use]
+	pub fn remote_mutations(&self) -> flume::Receiver<AuthorizedMutation> {
+		self.remote_mutations.clone()
 	}
 }
 
-mod command_handle {
-	use tokio::sync::watch::Receiver;
+struct Outbound {
+	frame: CollabFrame,
+	reply: flume::Sender<bool>,
+}
 
-	use super::*;
+/// One host-owned select/editor request delivered to the guest actor.
+pub struct RemoteUiRequest {
+	/// Correlated request specification.
+	pub request: UiRequest,
+	/// Cancelled when another peer answers, the host withdraws the request, or
+	/// this guest disconnects.
+	pub cancel:  CancellationToken,
+}
 
-	/// Clone-cheap command/presence handle installed only when the production
-	/// collaboration owner is constructed.
-	#[derive(Clone)]
-	pub struct CollabCommandHandle {
-		pub(super) commands:     Sender<OwnerRequest>,
-		pub(super) presence:     Receiver<Option<PresenceFacts>>,
-		pub(super) replica:      Option<GuestReplicaHandle>,
-		pub(super) guest_live:   Receiver<GuestLiveProjection>,
-		pub(super) guest_events: GuestPresentationReceiver,
+struct AgentViewOpen {
+	agent_id: Str,
+	reply:    flume::Sender<Result<RemoteAgentView, RemoteAgentViewError>>,
+}
+
+struct HostUiOpen {
+	request: UiRequest,
+	cancel:  CancellationToken,
+	answer:  flume::Sender<Result<HostUiAnswer, HostUiRequestError>>,
+}
+
+struct HostUiWaiter {
+	answer:       flume::Sender<Result<HostUiAnswer, HostUiRequestError>>,
+	cancellation: JoinHandle<()>,
+}
+
+struct ActiveSession {
+	cancel:      CancellationToken,
+	task:        JoinHandle<()>,
+	presence:    watch::Receiver<Option<PresenceFacts>>,
+	outbound:    Option<flume::Sender<Outbound>>,
+	agent_views: Option<flume::Sender<AgentViewOpen>>,
+	host_ui:     Option<flume::Sender<HostUiOpen>>,
+	editor_link: Option<Str>,
+	viewer_link: Option<Str>,
+}
+
+impl ActiveSession {
+	fn result(&self) -> CollabCommandResult {
+		CollabCommandResult {
+			presence:    *self.presence.borrow(),
+			editor_link: self.editor_link.clone(),
+			viewer_link: self.viewer_link.clone(),
+		}
 	}
 
-	impl CollabCommandHandle {
-		/// Requests a serialized owner operation and awaits its settled result.
-		pub async fn request(
-			&self,
-			command: CollabOwnerCommand,
-		) -> Result<CollabCommandResult, CollabCommandFault> {
-			let (reply, result) = flume::bounded(1);
-			self
-				.commands
-				.send_async(OwnerRequest { command, reply })
-				.await
-				.map_err(|_| CollabCommandFault::OwnerStopped)?;
-			result
-				.recv_async()
-				.await
-				.map_err(|_| CollabCommandFault::OwnerStopped)?
-		}
-
-		/// Returns the most recently published role/connection/participant facts.
-		pub fn presence(&self) -> Option<PresenceFacts> {
-			*self.presence.borrow()
-		}
-
-		/// Subscribes to role and presence changes for command filtering and
-		/// status rendering.
-		pub fn subscribe_presence(&self) -> Receiver<Option<PresenceFacts>> {
-			self.presence.clone()
-		}
-
-		/// Returns the guest transcript projection handle when replica storage
-		/// was attached to this owner.
-		pub fn guest_replica(&self) -> Option<GuestReplicaHandle> {
-			self.replica.clone()
-		}
-
-		/// Returns the latest coalesced host state and visible registry.
-		pub fn guest_live(&self) -> GuestLiveProjection {
-			self.guest_live.borrow().clone()
-		}
-
-		/// Subscribes to coalesced host state and registry updates.
-		pub fn subscribe_guest_live(&self) -> Receiver<GuestLiveProjection> {
-			self.guest_live.clone()
-		}
-
-		/// Returns the ordered presentation stream for the single guest UI owner.
-		pub fn guest_presentation(&self) -> GuestPresentationReceiver {
-			self.guest_events.clone()
-		}
+	async fn close(self) {
+		self.cancel.cancel();
+		let _ = self.task.await;
 	}
 }
 
-pub use command_handle::CollabCommandHandle;
-
-/// Receiving half retained by the production host/guest lifecycle owner.
+/// Receiving half retained by the relay lifecycle owner.
 pub struct CollabSessionAuthority {
-	commands:         Receiver<OwnerRequest>,
+	commands:         flume::Receiver<Request>,
 	presence:         watch::Sender<Option<PresenceFacts>>,
-	replica:          Option<GuestReplicaHandle>,
-	host:             Option<HostRuntime>,
-	guest_mirror:     GuestStateMirror,
-	guest_live:       watch::Sender<GuestLiveProjection>,
-	guest_projection: GuestLiveProjection,
-	guest_events:     Sender<GuestPresentationEvent>,
+	state:            watch::Sender<Option<SessionStateUpdate>>,
+	agents:           watch::Sender<RegistrySnapshot>,
+	host_state:       watch::Receiver<SessionStateUpdate>,
+	replica:          watch::Sender<Option<Snapshot>>,
+	replica_events:   flume::Sender<Event>,
+	remote_ui:        flume::Sender<RemoteUiRequest>,
+	remote_mutations: flume::Sender<AuthorizedMutation>,
 }
 
 impl CollabSessionAuthority {
-	/// Constructs the sole authority and its clone-cheap UI handle.
+	/// Constructs the collaboration owner.
+	#[must_use]
 	pub fn new() -> (Self, CollabCommandHandle) {
-		Self::with_guest_replica(None)
-	}
-
-	/// Constructs the sole authority with guest replica storage attached.
-	pub fn with_guest_replica(replica: Option<GuestReplicaHandle>) -> (Self, CollabCommandHandle) {
-		Self::with_runtimes(replica, None)
-	}
-
-	/// Constructs the sole authority with guest storage and host services.
-	pub fn with_runtimes(
-		replica: Option<GuestReplicaHandle>,
-		host: Option<HostRuntime>,
-	) -> (Self, CollabCommandHandle) {
-		let (commands, requests) = flume::bounded(COMMAND_CAPACITY);
-		let (presence, observed_presence) = watch::channel(None);
-		let guest_projection = GuestLiveProjection::default();
-		let (guest_live, observed_guest_live) = watch::channel(guest_projection.clone());
-		let (guest_events, observed_guest_events) = flume::bounded(LIVE_PRESENTATION_CAPACITY);
+		let (commands, requests) = flume::bounded(16);
+		let (presence, observed) = watch::channel(None);
+		let (state, state_observed) = watch::channel(None);
+		let (agents, agents_observed) = watch::channel(RegistrySnapshot::default());
+		let (host_state, host_state_observed) = watch::channel(SessionStateUpdate::default());
+		let (replica, replica_observed) = watch::channel(None);
+		let (replica_events, observed_events) = flume::bounded(AGENT_VIEW_EVENT_CAP);
+		let (remote_ui, observed_ui) = flume::bounded(HOST_UI_REQUEST_CAP);
+		let (remote_mutations, observed_mutations) = flume::bounded(64);
 		(
 			Self {
 				commands: requests,
 				presence,
-				replica: replica.clone(),
-				host,
-				guest_mirror: GuestStateMirror::default(),
-				guest_live,
-				guest_projection,
-				guest_events,
+				state,
+				agents,
+				host_state: host_state_observed,
+				replica,
+				replica_events,
+				remote_ui,
+				remote_mutations,
 			},
 			CollabCommandHandle {
 				commands,
-				presence: observed_presence,
-				replica,
-				guest_live: observed_guest_live,
-				guest_events: GuestPresentationReceiver { events: observed_guest_events },
+				presence: observed,
+				state: state_observed,
+				agents: agents_observed,
+				host_state,
+				replica: replica_observed,
+				replica_events: observed_events,
+				remote_ui: observed_ui,
+				remote_mutations: observed_mutations,
 			},
 		)
 	}
 
-	/// Receives the next serialized owner request.
-	pub async fn recv(&self) -> Result<CollabOwnerRequest, CollabCommandFault> {
-		let request = self
-			.commands
-			.recv_async()
-			.await
-			.map_err(|_| CollabCommandFault::OwnerStopped)?;
-		Ok(CollabOwnerRequest { command: request.command, reply: Some(request.reply) })
-	}
-
-	/// Atomically publishes role/connection/participant changes.
-	pub fn publish_presence(&self, facts: Option<PresenceFacts>) {
-		self.presence.send_replace(facts);
-	}
-}
-/// Starts the native relay-backed command owner.
-///
-/// The returned task owns every active relay socket. Dropping all command
-/// handles ends the loop and closes the current room.
-pub fn spawn_session_owner(authority: CollabSessionAuthority) -> JoinHandle<()> {
-	tokio::spawn(authority.run())
-}
-
-enum ActiveSession {
-	Host {
-		relay:     RelayClient,
-		admission: HostAdmission,
-		peers:     HashMap<u32, AuthenticatedPeer>,
-		sequence:  u64,
-		result:    CollabCommandResult,
-	},
-	Guest {
-		relay:             RelayClient,
-		sequence:          u64,
-		hello:             v1::CollabFrame,
-		room_id:           Str,
-		replica:           GuestReplicaHandle,
-		result:            CollabCommandResult,
-		snapshot_deadline: Option<time::Instant>,
-	},
-}
-
-impl ActiveSession {
-	fn result(&self) -> &CollabCommandResult {
-		match self {
-			Self::Host { result, .. } | Self::Guest { result, .. } => result,
-		}
-	}
-
-	async fn close(&mut self, reason: &'static str) -> Result<(), CollabCommandFault> {
-		let relay = match self {
-			Self::Host { relay, .. } | Self::Guest { relay, .. } => relay,
-		};
-		let frame = v1::CollabFrame {
-			protocol_revision: omp_collab::PROTOCOL_REVISION,
-			sequence: 1,
-			payload: Some(collab_frame::Payload::Bye(Bye { reason: reason.to_owned() })),
-			..Default::default()
-		};
-		let _ = relay.send(RelayRoute { peer_id: 0 }, &frame).await?;
-		relay.close().await?;
-		Ok(())
-	}
-}
-
-impl CollabSessionAuthority {
-	async fn run(mut self) {
-		let mut active = None;
-		let mut state_updates = self.host.as_ref().map(|host| host.state_updates.clone());
-		let mut registry_updates = self.host.as_ref().map(|host| host.registry_updates.clone());
-		let presentation = self.host.as_ref().map(|host| host.presentation.clone());
-		loop {
-			enum Input {
-				Request(Result<CollabOwnerRequest, CollabCommandFault>),
-				Inbound(Result<Option<RelayInbound>, RelayError>),
-				Replication(Result<HostReplicationEvent, HostBridgeError>),
-				State(v1::SessionStateUpdate),
-				Registry(HostRegistryUpdate),
-				Presentation(HostPresentationInput),
-				SnapshotTimeout,
-			}
-			let input = match active.as_mut() {
-				Some(ActiveSession::Guest { relay, snapshot_deadline, .. }) => tokio::select! {
-					request = self.recv() => Input::Request(request),
-					inbound = relay.receive() => Input::Inbound(inbound),
-					replication = recv_replication(self.host.as_ref()) => Input::Replication(replication),
-					state = recv_state(&mut state_updates) => Input::State(state),
-					registry = recv_registry(&mut registry_updates) => Input::Registry(registry),
-					presentation = recv_presentation(presentation.as_ref()) => Input::Presentation(presentation),
-					() = wait_snapshot_deadline(*snapshot_deadline) => Input::SnapshotTimeout,
-				},
-				Some(ActiveSession::Host { relay, .. }) => tokio::select! {
-					request = self.recv() => Input::Request(request),
-					inbound = relay.receive() => Input::Inbound(inbound),
-					replication = recv_replication(self.host.as_ref()) => Input::Replication(replication),
-					state = recv_state(&mut state_updates) => Input::State(state),
-					registry = recv_registry(&mut registry_updates) => Input::Registry(registry),
-					presentation = recv_presentation(presentation.as_ref()) => Input::Presentation(presentation),
-				},
-				None => tokio::select! {
-					request = self.recv() => Input::Request(request),
-					replication = recv_replication(self.host.as_ref()) => Input::Replication(replication),
-					state = recv_state(&mut state_updates) => Input::State(state),
-					registry = recv_registry(&mut registry_updates) => Input::Registry(registry),
-					presentation = recv_presentation(presentation.as_ref()) => Input::Presentation(presentation),
-				},
-			};
-			match input {
-				Input::Request(Ok(request)) => {
-					let clears_presence = matches!(
-						request.command(),
-						CollabOwnerCommand::Start(_) | CollabOwnerCommand::Join { .. }
-					);
-					let result = self.apply(request.command(), &mut active).await;
-					if clears_presence && result.is_err() {
-						self.publish_presence(None);
+	async fn run(self) {
+		let mut active: Option<ActiveSession> = None;
+		while let Ok(request) = self.commands.recv_async().await {
+			let result = match request.command {
+				CollabOwnerCommand::Start { relay, snapshot, events, agents } => {
+					if let Some(previous) = active.take() {
+						previous.close().await;
 					}
-					let _ = request.settle(result);
-				},
-				Input::Request(Err(_)) => break,
-				Input::Inbound(Ok(inbound)) => {
-					if self.apply_inbound(inbound, &mut active).await.is_err() {
-						self.publish_presence(None);
-						active = None;
-					}
-				},
-				Input::Inbound(Err(_)) => {
-					self.publish_presence(None);
-					active = None;
-				},
-				Input::Replication(Ok(event)) => {
-					if self.apply_replication(event, &mut active).await.is_err() {
-						self.publish_presence(None);
-						active = None;
-					}
-				},
-				Input::Replication(Err(_)) => {
-					self.host = None;
-					if matches!(active, Some(ActiveSession::Host { .. })) {
-						self.publish_presence(None);
-						active = None;
-					}
-				},
-				Input::State(state) => {
-					if self.apply_host_state(state, &mut active).await.is_err() {
-						self.publish_presence(None);
-						active = None;
-					}
-				},
-				Input::Registry(registry) => {
-					if self
-						.apply_host_registry(registry, &mut active)
-						.await
-						.is_err()
+					self.replica.send_replace(None);
+					self.state.send_replace(None);
+					self.agents.send_replace(RegistrySnapshot::default());
+					match start_host(
+						relay,
+						snapshot,
+						events,
+						agents,
+						self.presence.clone(),
+						self.state.clone(),
+						self.agents.clone(),
+						self.host_state.clone(),
+						self.remote_mutations.clone(),
+					)
+					.await
 					{
-						self.publish_presence(None);
-						active = None;
-					}
-				},
-				Input::Presentation(presentation) => {
-					if self
-						.apply_host_presentation(presentation, &mut active)
-						.await
-						.is_err()
-					{
-						self.publish_presence(None);
-						active = None;
-					}
-				},
-				Input::SnapshotTimeout => {
-					if self.restart_guest_snapshot(&mut active).await.is_err() {
-						self.publish_presence(None);
-						active = None;
-					}
-				},
-			}
-		}
-		if let Some(mut session) = active {
-			let _ = session.close("runtime stopped").await;
-		}
-	}
-
-	async fn apply_inbound(
-		&mut self,
-		inbound: Option<RelayInbound>,
-		active: &mut Option<ActiveSession>,
-	) -> Result<(), CollabCommandFault> {
-		match active {
-			Some(ActiveSession::Host { .. }) => self.apply_host_inbound(inbound, active).await,
-			Some(ActiveSession::Guest { .. }) => self.apply_guest_inbound(inbound, active).await,
-			None => Ok(()),
-		}
-	}
-
-	async fn apply_guest_inbound(
-		&mut self,
-		inbound: Option<RelayInbound>,
-		active: &mut Option<ActiveSession>,
-	) -> Result<(), CollabCommandFault> {
-		let Some(ActiveSession::Guest {
-			relay,
-			hello,
-			room_id,
-			replica,
-			result,
-			snapshot_deadline,
-			..
-		}) = active.as_mut()
-		else {
-			return Ok(());
-		};
-		let Some(inbound) = inbound else {
-			let read_only = result.presence.is_some_and(PresenceFacts::read_only);
-			let presence = PresenceFacts::guest(ConnectionState::Reconnecting, 0, read_only);
-			result.presence = Some(presence);
-			*snapshot_deadline = None;
-			self.publish_presence(Some(presence));
-			reconnect(relay).await?;
-			return send_required(relay, RelayRoute { peer_id: 0 }, hello).await;
-		};
-		let RelayInbound::Frame(frame) = inbound else {
-			return Ok(());
-		};
-		match frame.frame.payload {
-			Some(collab_frame::Payload::Welcome(welcome)) => {
-				let read_only = welcome.read_only;
-				self
-					.guest_events
-					.send_async(GuestPresentationEvent::Resync)
-					.await
-					.map_err(|_| CollabCommandFault::GuestPresentationStopped)?;
-				begin_guest_snapshot(replica, room_id.clone(), &welcome).await?;
-				if let Some(state) = welcome.initial_state.clone() {
-					self.consume_guest_state(state);
-				}
-				if let Some(agents) = welcome.initial_agents.clone() {
-					self.consume_guest_registry(agents);
-				}
-				let participant_count = welcome
-					.initial_state
-					.as_ref()
-					.map_or(1, |state| state.participants.len().max(1));
-				let presence =
-					PresenceFacts::guest(ConnectionState::Connecting, participant_count, read_only);
-				result.presence = Some(presence);
-				*snapshot_deadline = Some(time::Instant::now() + SNAPSHOT_PROGRESS_TIMEOUT);
-				self.publish_presence(Some(presence));
-			},
-			Some(collab_frame::Payload::SnapshotChunk(chunk)) => {
-				let projection = replica.push_snapshot_chunk(chunk).await?;
-				if projection.ready && !projection.gap {
-					*snapshot_deadline = None;
-					let read_only = result.presence.is_some_and(PresenceFacts::read_only);
-					let participants = result.presence.map_or(1, PresenceFacts::participant_count);
-					let presence =
-						PresenceFacts::guest(ConnectionState::Connected, participants, read_only);
-					result.presence = Some(presence);
-					self.publish_presence(Some(presence));
-				} else {
-					*snapshot_deadline = Some(time::Instant::now() + SNAPSHOT_PROGRESS_TIMEOUT);
-				}
-			},
-			Some(collab_frame::Payload::JournalRecord(record)) => {
-				if replica.append_live(record).await.is_err() {
-					*snapshot_deadline = None;
-					return send_required(relay, RelayRoute { peer_id: 0 }, hello).await;
-				}
-			},
-			Some(collab_frame::Payload::State(state)) => {
-				let read_only = result.presence.is_some_and(PresenceFacts::read_only);
-				self.consume_guest_state(state.clone());
-				let connection = result
-					.presence
-					.map_or(ConnectionState::Connecting, PresenceFacts::connection);
-				let presence =
-					PresenceFacts::guest(connection, state.participants.len().max(1), read_only);
-				result.presence = Some(presence);
-				self.publish_presence(Some(presence));
-			},
-			Some(collab_frame::Payload::Agents(agents)) => {
-				self.consume_guest_registry(agents);
-			},
-			Some(collab_frame::Payload::Event(event)) => {
-				self
-					.guest_events
-					.send_async(GuestPresentationEvent::Stream(event))
-					.await
-					.map_err(|_| CollabCommandFault::GuestPresentationStopped)?;
-			},
-			Some(collab_frame::Payload::UiRequest(request)) => {
-				self
-					.guest_events
-					.send_async(GuestPresentationEvent::UiRequest(request))
-					.await
-					.map_err(|_| CollabCommandFault::GuestPresentationStopped)?;
-			},
-			Some(collab_frame::Payload::UiRequestEnd(end)) => {
-				self
-					.guest_events
-					.send_async(GuestPresentationEvent::UiRequestEnd(end))
-					.await
-					.map_err(|_| CollabCommandFault::GuestPresentationStopped)?;
-			},
-			Some(collab_frame::Payload::Transcript(transcript)) => {
-				self
-					.guest_events
-					.send_async(GuestPresentationEvent::Transcript(transcript))
-					.await
-					.map_err(|_| CollabCommandFault::GuestPresentationStopped)?;
-			},
-			Some(collab_frame::Payload::BusEvent(event)) => {
-				self
-					.guest_events
-					.send_async(GuestPresentationEvent::Bus(event))
-					.await
-					.map_err(|_| CollabCommandFault::GuestPresentationStopped)?;
-			},
-			Some(collab_frame::Payload::Error(error)) => {
-				self
-					.guest_events
-					.send_async(GuestPresentationEvent::Error(error))
-					.await
-					.map_err(|_| CollabCommandFault::GuestPresentationStopped)?;
-			},
-			Some(collab_frame::Payload::Bye(_)) => {
-				self.publish_presence(None);
-				result.presence = None;
-				relay.close().await?;
-			},
-			_ => {},
-		}
-		Ok(())
-	}
-
-	fn consume_guest_state(&mut self, state: v1::SessionStateUpdate) {
-		let effects = self.guest_mirror.apply_state(state.clone());
-		self.guest_projection.state = Some(state);
-		self.guest_projection.effects = Some(effects);
-		self.guest_live.send_replace(self.guest_projection.clone());
-	}
-
-	fn consume_guest_registry(&mut self, agents: v1::RegistrySnapshot) {
-		self.guest_mirror.apply_registry(agents.clone());
-		self.guest_projection.agents = agents;
-		self.guest_live.send_replace(self.guest_projection.clone());
-	}
-
-	async fn apply_host_inbound(
-		&mut self,
-		inbound: Option<RelayInbound>,
-		active: &mut Option<ActiveSession>,
-	) -> Result<(), CollabCommandFault> {
-		let Some(ActiveSession::Host { relay, admission, peers, sequence, result }) = active.as_mut()
-		else {
-			return Ok(());
-		};
-		let Some(inbound) = inbound else {
-			peers.clear();
-			let state = {
-				let runtime = self
-					.host
-					.as_mut()
-					.ok_or(CollabCommandFault::HostUnavailable)?;
-				runtime.state.participants = host_participants(&runtime.state, peers);
-				runtime.state.clone()
-			};
-			let reconnecting = PresenceFacts::host(ConnectionState::Reconnecting, 0);
-			result.presence = Some(reconnecting);
-			self.publish_presence(Some(reconnecting));
-			reconnect(relay).await?;
-			*sequence = sequence.saturating_add(1);
-			send_required(
-				relay,
-				RelayRoute { peer_id: 0 },
-				&payload_frame(*sequence, collab_frame::Payload::State(state)),
-			)
-			.await?;
-			let connected = PresenceFacts::host(ConnectionState::Connected, 0);
-			result.presence = Some(connected);
-			self.publish_presence(Some(connected));
-			return Ok(());
-		};
-		match inbound {
-			RelayInbound::PeerJoined(_) => {},
-			RelayInbound::PeerLeft(peer) => {
-				peers.remove(&peer.peer_id);
-				let runtime = self
-					.host
-					.as_mut()
-					.ok_or(CollabCommandFault::HostUnavailable)?;
-				runtime.state.participants = host_participants(&runtime.state, peers);
-				*sequence = sequence.saturating_add(1);
-				send_required(
-					relay,
-					RelayRoute { peer_id: 0 },
-					&payload_frame(*sequence, collab_frame::Payload::State(runtime.state.clone())),
-				)
-				.await?;
-				let presence = PresenceFacts::host(ConnectionState::Connected, peers.len());
-				result.presence = Some(presence);
-				self.publish_presence(Some(presence));
-			},
-			RelayInbound::Frame(routed) => {
-				let peer_id = routed.route.peer_id;
-				let Some(payload) = routed.frame.payload else {
-					return Ok(());
-				};
-				if let collab_frame::Payload::Hello(hello) = &payload {
-					let peer = match admission.authenticate(peer_id, hello) {
-						Ok(peer) => peer,
-						Err(error) => {
-							*sequence = sequence.saturating_add(1);
-							send_required(
-								relay,
-								RelayRoute { peer_id },
-								&error_frame(*sequence, error.to_string()),
-							)
-							.await?;
-							return Ok(());
+						Ok(session) => {
+							let result = session.result();
+							active = Some(session);
+							Ok(result)
 						},
-					};
-					peers.insert(peer_id, peer.clone());
-					let runtime = self
-						.host
-						.as_mut()
-						.ok_or(CollabCommandFault::HostUnavailable)?;
-					runtime.state.participants = host_participants(&runtime.state, peers);
-					let header = runtime.header.clone();
-					let state = runtime.state.clone();
-					let agents = runtime.agents.clone();
-					let snapshot_watermark = runtime.snapshot_watermark;
-					let pending_ui = runtime.ui.replay_for_join(peer_id, &peer);
-					let history = &runtime.history;
-					if history.len() > SNAPSHOT_RECORD_MAX {
-						return Err(CollabCommandFault::SnapshotTooLarge);
+						Err(error) => {
+							self.presence.send_replace(None);
+							self.state.send_replace(None);
+							self.agents.send_replace(RegistrySnapshot::default());
+							Err(error)
+						},
 					}
-					let welcome = Welcome {
-						protocol_revision: omp_collab::PROTOCOL_REVISION,
-						header:            Some(header),
-						initial_state:     Some(state.clone()),
-						initial_agents:    Some(agents),
-						total_entry_count: u32::try_from(history.len())
-							.map_err(|_| CollabCommandFault::SnapshotTooLarge)?,
-						read_only:         peer.read_only(),
-					};
-					*sequence = sequence.saturating_add(1);
-					send_required(
-						relay,
-						RelayRoute { peer_id },
-						&Handshake::welcome(*sequence, welcome),
-					)
-					.await?;
-					let chunks = snapshot_entries(&history);
-					if chunks.is_empty() {
-						*sequence = sequence.saturating_add(1);
-						send_required(
-							relay,
-							RelayRoute { peer_id },
-							&snapshot_frame(*sequence, Vec::new(), true, snapshot_watermark),
-						)
-						.await?;
-					} else {
-						let chunk_count = chunks.len();
-						for (index, entries) in chunks.into_iter().enumerate() {
-							*sequence = sequence.saturating_add(1);
-							send_required(
-								relay,
-								RelayRoute { peer_id },
-								&snapshot_frame(
-									*sequence,
-									entries,
-									index + 1 == chunk_count,
-									snapshot_watermark,
-								),
-							)
-							.await?;
-						}
+				},
+				CollabOwnerCommand::Join { link, display_name } => {
+					if let Some(previous) = active.take() {
+						previous.close().await;
 					}
-					for targeted in pending_ui {
-						*sequence = sequence.saturating_add(1);
-						let mut frame = targeted.frame;
-						frame.sequence = *sequence;
-						send_required(relay, RelayRoute { peer_id: targeted.peer_id }, &frame).await?;
-					}
-					*sequence = sequence.saturating_add(1);
-					send_required(
-						relay,
-						RelayRoute { peer_id: 0 },
-						&payload_frame(*sequence, collab_frame::Payload::State(state)),
+					self.replica.send_replace(None);
+					self.state.send_replace(None);
+					self.agents.send_replace(RegistrySnapshot::default());
+					match start_guest(
+						link,
+						display_name,
+						self.presence.clone(),
+						self.state.clone(),
+						self.agents.clone(),
+						self.replica.clone(),
+						self.replica_events.clone(),
+						self.remote_ui.clone(),
 					)
-					.await?;
-					let presence = PresenceFacts::host(ConnectionState::Connected, peers.len());
-					result.presence = Some(presence);
-					self.publish_presence(Some(presence));
-					return Ok(());
-				}
-				let peer = match peers.get(&peer_id) {
-					Some(peer) => peer,
-					None => {
-						*sequence = sequence.saturating_add(1);
-						send_required(
-							relay,
-							RelayRoute { peer_id },
-							&error_frame(*sequence, "authenticate before sending operations".to_owned()),
-						)
-						.await?;
-						return Ok(());
-					},
-				};
-				if let collab_frame::Payload::TranscriptRequest(request) = &payload {
-					let runtime = self
-						.host
-						.as_ref()
-						.ok_or(CollabCommandFault::HostUnavailable)?;
-					let transcript = runtime
-						.agent_routes
-						.get(request.agent_id.as_str())
-						.and_then(|agent| agent.transcript_path.as_deref())
-						.map_or_else(
-							|| v1::TranscriptChunk {
-								request_id: request.request_id,
-								text_utf8:  Bytes::new(),
-								new_size:   request.from_byte,
-								error:      Some("no transcript available".to_owned()),
-							},
-							|path| transcript_response(path, request),
-						);
-					*sequence = sequence.saturating_add(1);
-					send_required(
-						relay,
-						RelayRoute { peer_id },
-						&payload_frame(*sequence, collab_frame::Payload::Transcript(transcript)),
-					)
-					.await?;
-					return Ok(());
-				}
-				let mutation = match admission.admit_mutation(peer, &payload) {
-					Ok(mutation) => mutation,
-					Err(error) => {
-						*sequence = sequence.saturating_add(1);
-						send_required(
-							relay,
-							RelayRoute { peer_id },
-							&error_frame(*sequence, error.to_string()),
-						)
-						.await?;
-						return Ok(());
-					},
-				};
-				let operation_result = match &mutation.operation {
-					RemoteOperation::Prompt(_) => enqueue_prompt(
-						&self
-							.host
-							.as_ref()
-							.ok_or(CollabCommandFault::HostUnavailable)?
-							.mailbox,
-						omp_agent::InterruptClass::Immediate,
-						mutation.clone(),
-					)
-					.map_err(|error| error.to_string()),
-					RemoteOperation::Abort(request) => self
-						.host
-						.as_ref()
-						.ok_or(CollabCommandFault::HostUnavailable)?
-						.operations
-						.try_send(HostOperation::Abort {
-							principal: mutation.principal.clone(),
-							reason:    Str::new(request.reason.trim()),
-						})
-						.map_err(|error| HostOperationRouteError::from(error).to_string()),
-					RemoteOperation::AgentCommand(command) => {
-						let runtime = self
-							.host
-							.as_ref()
-							.ok_or(CollabCommandFault::HostUnavailable)?;
-						let router = HostOperationRouter {
-							agents:     &runtime.agent_routes,
-							operations: &runtime.operations,
-							principal:  mutation.principal.clone(),
-						};
-						route_agent_command(peer, command, &router).map_err(|error| error.to_string())
-					},
-					RemoteOperation::UiResponse(response) => {
-						async {
-							let runtime = self
-								.host
-								.as_mut()
-								.ok_or_else(|| CollabCommandFault::HostUnavailable.to_string())?;
-							let settled = runtime
-								.ui
-								.answer(
-									peer_id,
-									peer,
-									(**response).clone(),
-									peers.iter().map(|(id, peer)| (*id, peer)),
-								)
-								.map_err(|error| error.to_string())?;
-							let Some((answer, cleanup)) = settled else {
-								return Ok(());
-							};
-							runtime
-								.operations
-								.send_async(HostOperation::UiAnswer {
-									principal: mutation.principal.clone(),
-									answer,
-								})
-								.await
-								.map_err(|error| error.to_string())?;
-							for targeted in cleanup {
-								*sequence = sequence.saturating_add(1);
-								let mut frame = targeted.frame;
-								frame.sequence = *sequence;
-								send_required(relay, RelayRoute { peer_id: targeted.peer_id }, &frame)
-									.await
-									.map_err(|error| error.to_string())?;
-							}
-							Ok(())
-						}
-						.await
-					},
-				};
-				if let Err(error) = operation_result {
-					*sequence = sequence.saturating_add(1);
-					send_required(relay, RelayRoute { peer_id }, &error_frame(*sequence, error)).await?;
-				}
-			},
-		}
-		Ok(())
-	}
-
-	async fn apply_host_state(
-		&mut self,
-		state: v1::SessionStateUpdate,
-		active: &mut Option<ActiveSession>,
-	) -> Result<(), CollabCommandFault> {
-		let runtime = self
-			.host
-			.as_mut()
-			.ok_or(CollabCommandFault::HostUnavailable)?;
-		let state = match active {
-			Some(ActiveSession::Host { peers, .. }) => {
-				let mut state = state;
-				state.participants = host_participants(&state, peers);
-				state
-			},
-			_ => state,
-		};
-		runtime.state = state.clone();
-		if let Some(ActiveSession::Host { relay, sequence, .. }) = active {
-			*sequence = sequence.saturating_add(1);
-			send_required(
-				relay,
-				RelayRoute { peer_id: 0 },
-				&payload_frame(*sequence, collab_frame::Payload::State(state)),
-			)
-			.await?;
-		}
-		Ok(())
-	}
-
-	async fn apply_host_registry(
-		&mut self,
-		registry: HostRegistryUpdate,
-		active: &mut Option<ActiveSession>,
-	) -> Result<(), CollabCommandFault> {
-		let runtime = self
-			.host
-			.as_mut()
-			.ok_or(CollabCommandFault::HostUnavailable)?;
-		runtime.agents = registry.snapshot.clone();
-		runtime.agent_routes = registry
-			.snapshot
-			.agents
-			.iter()
-			.filter_map(|summary| {
-				registry
-					.agents
-					.get(summary.id.as_str())
-					.filter(|projection| &projection.summary == summary)
-					.cloned()
-					.map(|projection| (Str::new(&summary.id), projection))
-			})
-			.collect();
-		if let Some(ActiveSession::Host { relay, sequence, .. }) = active {
-			*sequence = sequence.saturating_add(1);
-			send_required(
-				relay,
-				RelayRoute { peer_id: 0 },
-				&payload_frame(*sequence, collab_frame::Payload::Agents(registry.snapshot)),
-			)
-			.await?;
-		}
-		Ok(())
-	}
-
-	async fn apply_host_presentation(
-		&mut self,
-		input: HostPresentationInput,
-		active: &mut Option<ActiveSession>,
-	) -> Result<(), CollabCommandFault> {
-		match input {
-			HostPresentationInput::Stream(event) => {
-				if let Some(ActiveSession::Host { relay, sequence, .. }) = active {
-					*sequence = sequence.saturating_add(1);
-					send_required(
-						relay,
-						RelayRoute { peer_id: 0 },
-						&payload_frame(*sequence, collab_frame::Payload::Event(event)),
-					)
-					.await?;
-				}
-			},
-			HostPresentationInput::Bus(event) => {
-				if let Some(ActiveSession::Host { relay, sequence, .. }) = active {
-					*sequence = sequence.saturating_add(1);
-					send_required(
-						relay,
-						RelayRoute { peer_id: 0 },
-						&payload_frame(*sequence, collab_frame::Payload::BusEvent(event)),
-					)
-					.await?;
-				}
-			},
-			HostPresentationInput::BeginUi { request, reply } => {
-				let Some(ActiveSession::Host { relay, peers, sequence, .. }) = active else {
-					let _ = reply.send(Err(HostLiveError::NoWritableGuest));
-					return Ok(());
-				};
-				let runtime = self
-					.host
-					.as_mut()
-					.ok_or(CollabCommandFault::HostUnavailable)?;
-				let Some(frames) = runtime
-					.ui
-					.begin(request, peers.iter().map(|(id, peer)| (*id, peer)))
-				else {
-					let _ = reply.send(Err(HostLiveError::NoWritableGuest));
-					return Ok(());
-				};
-				let request_id = frames
-					.first()
-					.and_then(|targeted| targeted.frame.payload.as_ref())
-					.and_then(|payload| match payload {
-						collab_frame::Payload::UiRequest(request) => Some(request.request_id),
-						_ => None,
-					})
-					.expect("host UI dispatcher emits UI request frames");
-				for targeted in frames {
-					*sequence = sequence.saturating_add(1);
-					let mut frame = targeted.frame;
-					frame.sequence = *sequence;
-					send_required(relay, RelayRoute { peer_id: targeted.peer_id }, &frame).await?;
-				}
-				let _ = reply.send(Ok(request_id));
-			},
-			HostPresentationInput::CancelUi(request_id) => {
-				let Some(ActiveSession::Host { relay, peers, sequence, .. }) = active else {
-					return Ok(());
-				};
-				let runtime = self
-					.host
-					.as_mut()
-					.ok_or(CollabCommandFault::HostUnavailable)?;
-				for targeted in runtime
-					.ui
-					.cancel(request_id, peers.iter().map(|(id, peer)| (*id, peer)))
-				{
-					*sequence = sequence.saturating_add(1);
-					let mut frame = targeted.frame;
-					frame.sequence = *sequence;
-					send_required(relay, RelayRoute { peer_id: targeted.peer_id }, &frame).await?;
-				}
-			},
-		}
-		Ok(())
-	}
-
-	async fn apply_replication(
-		&mut self,
-		event: HostReplicationEvent,
-		active: &mut Option<ActiveSession>,
-	) -> Result<(), CollabCommandFault> {
-		let runtime = self
-			.host
-			.as_mut()
-			.ok_or(CollabCommandFault::HostUnavailable)?;
-		match event {
-			HostReplicationEvent::Record(record) => {
-				let expected = runtime.snapshot_watermark.saturating_add(1);
-				if record.revision != expected {
-					return Err(CollabCommandFault::ReplicationGap {
-						expected,
-						actual: record.revision,
-					});
-				}
-				runtime.history.push(record.clone());
-				runtime.snapshot_watermark = record.revision;
-				if let Some(ActiveSession::Host { relay, sequence, .. }) = active {
-					*sequence = sequence.saturating_add(1);
-					let frame = v1::CollabFrame {
-						protocol_revision: omp_collab::PROTOCOL_REVISION,
-						sequence: *sequence,
-						payload: Some(collab_frame::Payload::JournalRecord(record)),
-						..Default::default()
-					};
-					send_required(relay, RelayRoute { peer_id: 0 }, &frame).await?;
-				}
-			},
-			HostReplicationEvent::Terminal(_) => return Err(CollabCommandFault::ReplicationEnded),
-		}
-		Ok(())
-	}
-
-	async fn restart_guest_snapshot(
-		&self,
-		active: &mut Option<ActiveSession>,
-	) -> Result<(), CollabCommandFault> {
-		let Some(ActiveSession::Guest { relay, hello, result, snapshot_deadline, .. }) = active
-		else {
-			return Ok(());
-		};
-		let read_only = result.presence.is_some_and(PresenceFacts::read_only);
-		let presence = PresenceFacts::guest(ConnectionState::Reconnecting, 0, read_only);
-		result.presence = Some(presence);
-		*snapshot_deadline = None;
-		self.publish_presence(Some(presence));
-		reconnect(relay).await?;
-		send_required(relay, RelayRoute { peer_id: 0 }, hello).await
-	}
-
-	async fn apply(
-		&self,
-		command: &CollabOwnerCommand,
-		active: &mut Option<ActiveSession>,
-	) -> Result<CollabCommandResult, CollabCommandFault> {
-		match command {
-			CollabOwnerCommand::Start(options) => {
-				if active.is_some() {
-					return Err(CollabCommandFault::AlreadyActive);
-				}
-				if self.host.is_none() {
-					return Err(CollabCommandFault::HostUnavailable);
-				}
-				self.publish_presence(Some(PresenceFacts::host(ConnectionState::Connecting, 0)));
-				let room = HostedRoom::generate(options.relay.clone())?;
-				let full_link = Str::from(room.full.compact());
-				let view_link = Str::from(room.view.compact());
-				let web_link = Str::from(room.full.browser(&options.web));
-				let web_view_link = Str::from(room.view.browser(&options.web));
-				let mut relay = RelayClient::new(room.full.room_url(), RelayRole::Host, room.room_key)?;
-				connect(&mut relay).await?;
-				let room_id = Str::from(
-					omp_core::base64_url::encode_raw(room.full.room_id().as_bytes()).into_string(),
-				);
-				let admission = HostAdmission::new(room_id, room.write_token);
-				let presence = PresenceFacts::host(ConnectionState::Connected, 0);
-				let result = CollabCommandResult {
-					presence:      Some(presence),
-					full_link:     Some(full_link),
-					view_link:     Some(view_link),
-					web_link:      Some(web_link),
-					web_view_link: Some(web_view_link),
-				};
-				*active = Some(ActiveSession::Host {
-					relay,
-					admission,
-					peers: HashMap::new(),
-					sequence: 0,
-					result: result.clone(),
-				});
-				self.publish_presence(Some(presence));
-				Ok(result)
-			},
-			CollabOwnerCommand::View => match active {
-				Some(ActiveSession::Host { result, .. }) => Ok(result.clone()),
-				Some(ActiveSession::Guest { .. }) | None => Err(CollabCommandFault::NotHosting),
-			},
-			CollabOwnerCommand::Status => Ok(active
-				.as_ref()
-				.map_or_else(CollabCommandResult::inactive, |session| session.result().clone())),
-			CollabOwnerCommand::Stop => {
-				let Some(ActiveSession::Host { .. }) = active else {
-					return Err(CollabCommandFault::NotHosting);
-				};
-				let mut session = active.take().expect("host matched above");
-				session.close("host stopped").await?;
-				self.publish_presence(None);
-				Ok(CollabCommandResult::inactive())
-			},
-			CollabOwnerCommand::Join { link, display_name } => {
-				if active.is_some() {
-					return Err(CollabCommandFault::AlreadyActive);
-				}
-				let replica = self
-					.replica
-					.clone()
-					.ok_or(CollabCommandFault::ReplicaUnavailable)?;
-				self.publish_presence(Some(PresenceFacts::guest(
-					ConnectionState::Connecting,
-					0,
-					link.credentials().is_read_only(),
-				)));
-				let key = RoomKey::from_bytes(*link.credentials().key())?;
-				let write_token = link
-					.credentials()
-					.write_token()
-					.map(|token| Bytes::copy_from_slice(token.as_bytes()));
-				let mut relay = RelayClient::new(link.room_url(), RelayRole::Guest, key)?;
-				connect(&mut relay).await?;
-				let hello = Handshake::hello(1, Hello {
-					protocol_revision: omp_collab::PROTOCOL_REVISION,
-					display_name: display_name.to_string(),
-					write_token,
-					client_version: env!("CARGO_PKG_VERSION").to_owned(),
-				});
-				send_required(&mut relay, RelayRoute { peer_id: 0 }, &hello).await?;
-				let inbound = time::timeout(WELCOME_TIMEOUT, relay.receive())
 					.await
-					.map_err(|source| CollabCommandFault::WelcomeTimeout { source })??
-					.ok_or(CollabCommandFault::UnexpectedWelcome)?;
-				let RelayInbound::Frame(frame) = inbound else {
-					return Err(CollabCommandFault::UnexpectedWelcome);
-				};
-				let mut handshake = Handshake::new(RelayRole::Guest);
-				handshake.accept(&frame.frame)?;
-				let Some(collab_frame::Payload::Welcome(welcome)) = frame.frame.payload else {
-					return Err(CollabCommandFault::UnexpectedWelcome);
-				};
-				if welcome.read_only != link.credentials().is_read_only() {
-					return Err(CollabCommandFault::CredentialTierMismatch);
-				}
-				let room_id =
-					Str::from(omp_core::base64_url::encode_raw(link.room_id().as_bytes()).into_string());
-				begin_guest_snapshot(&replica, room_id.clone(), &welcome).await?;
-				let participant_count = welcome
-					.initial_state
+					{
+						Ok(session) => {
+							let result = session.result();
+							active = Some(session);
+							Ok(result)
+						},
+						Err(error) => {
+							self.presence.send_replace(None);
+							self.state.send_replace(None);
+							self.agents.send_replace(RegistrySnapshot::default());
+							Err(error)
+						},
+					}
+				},
+				CollabOwnerCommand::Prompt { text, images } => {
+					send_guest_frame(
+						active.as_ref(),
+						collab_frame::Payload::Prompt(PromptRequest { text: text.to_string(), images }),
+					)
+					.await
+				},
+				CollabOwnerCommand::Abort => {
+					send_guest_frame(
+						active.as_ref(),
+						collab_frame::Payload::Abort(AbortRequest {
+							reason: "User interrupt".to_owned(),
+						}),
+					)
+					.await
+				},
+				CollabOwnerCommand::Agent(command) => {
+					send_guest_frame(active.as_ref(), collab_frame::Payload::AgentCommand(command)).await
+				},
+				CollabOwnerCommand::UiResponse(response) => {
+					send_guest_frame(active.as_ref(), collab_frame::Payload::UiResponse(response)).await
+				},
+				CollabOwnerCommand::HostUi { request, cancel, answer } => {
+					enqueue_host_ui(active.as_ref(), request, cancel, answer)
+				},
+				CollabOwnerCommand::ObserveAgent { agent_id, reply } => {
+					enqueue_agent_view(active.as_ref(), agent_id, reply)
+				},
+				CollabOwnerCommand::Leave => match active.take() {
+					Some(session) => {
+						session.close().await;
+						self.presence.send_replace(None);
+						self.state.send_replace(None);
+						self.agents.send_replace(RegistrySnapshot::default());
+						self.replica.send_replace(None);
+						Ok(disconnected_result())
+					},
+					None => Err(CollabCommandFault::NotJoined),
+				},
+				CollabOwnerCommand::Status => active
 					.as_ref()
-					.map_or(1, |state| state.participants.len().max(1));
-				let presence = PresenceFacts::guest(
-					ConnectionState::Connecting,
-					participant_count,
-					welcome.read_only,
-				);
-				let result =
-					CollabCommandResult { presence: Some(presence), ..CollabCommandResult::inactive() };
-				*active = Some(ActiveSession::Guest {
-					relay,
-					sequence: 1,
-					hello,
-					room_id,
-					replica,
-					result: result.clone(),
-					snapshot_deadline: Some(time::Instant::now() + SNAPSHOT_PROGRESS_TIMEOUT),
-				});
-				self.publish_presence(Some(presence));
-				Ok(result)
-			},
-			CollabOwnerCommand::Prompt { text, images } => {
-				let payload = collab_frame::Payload::Prompt(PromptRequest {
-					text:   text.to_string(),
-					images: images
-						.iter()
-						.map(|image| v1::ImageAttachment {
-							data:      image.data.clone(),
-							mime_type: image.mime_type.to_string(),
-						})
-						.collect(),
-				});
-				send_guest_operation(active, payload, true).await
-			},
-			CollabOwnerCommand::Abort { reason } => {
-				send_guest_operation(
-					active,
-					collab_frame::Payload::Abort(v1::AbortRequest { reason: reason.to_string() }),
-					true,
-				)
-				.await
-			},
-			CollabOwnerCommand::AgentCommand { command, agent_id, text } => {
-				send_guest_operation(
-					active,
-					collab_frame::Payload::AgentCommand(v1::AgentCommand {
-						command:  *command as i32,
-						agent_id: agent_id.to_string(),
-						text:     text.as_ref().map(ToString::to_string),
-					}),
-					true,
-				)
-				.await
-			},
-			CollabOwnerCommand::UiResponse { request_id, value } => {
-				send_guest_operation(
-					active,
-					collab_frame::Payload::UiResponse(v1::UiResponse {
-						request_id: *request_id,
-						value:      value.as_ref().map(ToString::to_string),
-					}),
-					true,
-				)
-				.await
-			},
-			CollabOwnerCommand::TranscriptRequest { request_id, agent_id, from_byte } => {
-				send_guest_operation(
-					active,
-					collab_frame::Payload::TranscriptRequest(v1::TranscriptRequest {
-						request_id: *request_id,
-						agent_id:   agent_id.to_string(),
-						from_byte:  *from_byte,
-					}),
-					false,
-				)
-				.await
-			},
-			CollabOwnerCommand::Leave => {
-				let Some(ActiveSession::Guest { .. }) = active else {
-					return Err(CollabCommandFault::NotGuest);
-				};
-				let mut session = active.take().expect("guest matched above");
-				session.close("guest left").await?;
-				self.publish_presence(None);
-				Ok(CollabCommandResult::inactive())
-			},
+					.map(ActiveSession::result)
+					.ok_or(CollabCommandFault::NotJoined),
+			};
+			let _ = request.reply.send(result);
+		}
+		if let Some(session) = active {
+			session.close().await;
 		}
 	}
 }
 
-async fn send_guest_operation(
-	active: &mut Option<ActiveSession>,
-	payload: collab_frame::Payload,
-	requires_write: bool,
+fn enqueue_host_ui(
+	active: Option<&ActiveSession>,
+	request: UiRequest,
+	cancel: CancellationToken,
+	answer: flume::Sender<Result<HostUiAnswer, HostUiRequestError>>,
 ) -> Result<CollabCommandResult, CollabCommandFault> {
-	let Some(ActiveSession::Guest { relay, sequence, result, .. }) = active else {
+	let active = active.ok_or(CollabCommandFault::NotJoined)?;
+	let sender = active.host_ui.as_ref().ok_or(CollabCommandFault::NotHost)?;
+	sender
+		.try_send(HostUiOpen { request, cancel, answer })
+		.map_err(|error| match error {
+			flume::TrySendError::Full(open) => {
+				let _ = open.answer.try_send(Err(HostUiRequestError::Capacity));
+				CollabCommandFault::RequestCapacity
+			},
+			flume::TrySendError::Disconnected(open) => {
+				let _ = open.answer.try_send(Err(HostUiRequestError::OwnerStopped));
+				CollabCommandFault::OwnerStopped
+			},
+		})?;
+	Ok(active.result())
+}
+
+fn enqueue_agent_view(
+	active: Option<&ActiveSession>,
+	agent_id: Str,
+	reply: flume::Sender<Result<RemoteAgentView, RemoteAgentViewError>>,
+) -> Result<CollabCommandResult, CollabCommandFault> {
+	let active = active.ok_or(CollabCommandFault::NotJoined)?;
+	let sender = active
+		.agent_views
+		.as_ref()
+		.ok_or(CollabCommandFault::NotGuest)?;
+	sender
+		.try_send(AgentViewOpen { agent_id, reply })
+		.map_err(|error| match error {
+			flume::TrySendError::Full(open) => {
+				let _ = open.reply.try_send(Err(RemoteAgentViewError::Capacity));
+				CollabCommandFault::RequestCapacity
+			},
+			flume::TrySendError::Disconnected(open) => {
+				let _ = open.reply.try_send(Err(RemoteAgentViewError::Disconnected));
+				CollabCommandFault::OwnerStopped
+			},
+		})?;
+	Ok(active.result())
+}
+
+async fn send_guest_frame(
+	active: Option<&ActiveSession>,
+	payload: collab_frame::Payload,
+) -> Result<CollabCommandResult, CollabCommandFault> {
+	let active = active.ok_or(CollabCommandFault::NotJoined)?;
+	let presence = (*active.presence.borrow()).ok_or(CollabCommandFault::NotJoined)?;
+	if presence.role() != CollabRole::Guest {
 		return Err(CollabCommandFault::NotGuest);
-	};
-	if requires_write && result.presence.is_some_and(PresenceFacts::read_only) {
+	}
+	if presence.read_only() {
 		return Err(CollabCommandFault::ReadOnly);
 	}
-	if result.presence.map(PresenceFacts::connection) != Some(ConnectionState::Connected) {
-		return Err(CollabCommandFault::SnapshotInProgress);
+	let outbound = active
+		.outbound
+		.as_ref()
+		.ok_or(CollabCommandFault::NotGuest)?;
+	let (reply, delivered) = flume::bounded(1);
+	outbound
+		.send_async(Outbound {
+			frame: CollabFrame {
+				protocol_revision: PROTOCOL_REVISION,
+				payload: Some(payload),
+				..CollabFrame::default()
+			},
+			reply,
+		})
+		.await
+		.map_err(|_| CollabCommandFault::OwnerStopped)?;
+	if !delivered
+		.recv_async()
+		.await
+		.map_err(|_| CollabCommandFault::OwnerStopped)?
+	{
+		return Err(CollabCommandFault::MutationNotDelivered);
 	}
-	*sequence = sequence.saturating_add(1);
-	send_required(relay, RelayRoute { peer_id: 0 }, &payload_frame(*sequence, payload)).await?;
-	Ok(result.clone())
+	Ok(active.result())
 }
 
-async fn recv_replication(
-	host: Option<&HostRuntime>,
-) -> Result<HostReplicationEvent, HostBridgeError> {
-	match host {
-		Some(host) => host.bridge.recv().await,
-		None => std::future::pending().await,
-	}
+fn disconnected_result() -> CollabCommandResult {
+	CollabCommandResult { presence: None, editor_link: None, viewer_link: None }
 }
-async fn recv_state(
-	receiver: &mut Option<watch::Receiver<v1::SessionStateUpdate>>,
-) -> v1::SessionStateUpdate {
-	let Some(receiver) = receiver else {
-		return std::future::pending().await;
+
+struct ActiveHostView {
+	generation: u64,
+	cancel:     CancellationToken,
+}
+
+struct HostViewReady {
+	peer_id:    u32,
+	request_id: u32,
+	generation: u64,
+	result:     Result<RemoteAgentView, super::observer::AgentViewError>,
+}
+
+struct HostViewEvent {
+	peer_id:    u32,
+	request_id: u32,
+	generation: u64,
+	event:      Option<Event>,
+}
+
+struct GuestView {
+	agent_id: Str,
+	reply:    Option<flume::Sender<Result<RemoteAgentView, RemoteAgentViewError>>>,
+	events:   Option<flume::Sender<Event>>,
+	chunks:   Vec<Bytes>,
+	next:     u32,
+}
+
+async fn start_host(
+	relay_endpoint: RelayEndpoint,
+	snapshot: Snapshot,
+	events: flume::Receiver<Event>,
+	agents: HostAgentBridge,
+	presence_tx: watch::Sender<Option<PresenceFacts>>,
+	state_tx: watch::Sender<Option<SessionStateUpdate>>,
+	agents_tx: watch::Sender<RegistrySnapshot>,
+	mut host_state: watch::Receiver<SessionStateUpdate>,
+	remote_mutations: flume::Sender<AuthorizedMutation>,
+) -> Result<ActiveSession, CollabCommandFault> {
+	let room = HostedRoom::generate(relay_endpoint)?;
+	let room_id = Str::from(base64_url::encode_raw(room.full.room_id().as_bytes()).into_string());
+	let admission = HostAdmission::new(room_id, room.write_token.clone());
+	let mut relay = RelayClient::new(room.full.room_url(), RelayRole::Host, room.room_key)?;
+	presence_tx.send_replace(Some(PresenceFacts::host(ConnectionState::Connecting, 0)));
+	relay.connect().await?;
+	presence_tx.send_replace(Some(PresenceFacts::host(ConnectionState::Connected, 0)));
+	state_tx.send_replace(Some(session_state(&BTreeMap::new(), &host_state.borrow())));
+	let cancel = CancellationToken::new();
+	let task_cancel = cancel.clone();
+	let (host_ui, host_ui_rx) = flume::bounded::<HostUiOpen>(HOST_UI_REQUEST_CAP);
+	let editor_link = Some(Str::new(room.full.compact()));
+	let viewer_link = Some(Str::new(room.view.compact()));
+	let presence = presence_tx.subscribe();
+	let task = tokio::spawn(async move {
+		let mut replica = Dom::from_snapshot(&snapshot);
+		let mut peers = BTreeMap::<u32, AuthenticatedPeer>::new();
+		let mut ui = HostUiDispatcher::default();
+		let mut ui_answers = BTreeMap::<u32, HostUiWaiter>::new();
+		let (ui_cancel, ui_cancel_rx) = flume::bounded::<u32>(HOST_UI_REQUEST_CAP);
+		let (view_ready, view_ready_rx) = flume::bounded::<HostViewReady>(AGENT_VIEW_REQUEST_CAP);
+		let (view_event, view_event_rx) = flume::bounded::<HostViewEvent>(AGENT_VIEW_EVENT_CAP);
+		let mut views = BTreeMap::<(u32, u32), ActiveHostView>::new();
+		let mut view_generation = 0_u64;
+		let mut sequence = 0_u64;
+		let initial_registry = registry_snapshot(&replica, &host_state.borrow());
+		agents_tx.send_replace(initial_registry);
+		loop {
+			enum Wake {
+				Cancel,
+				Event(Result<Event, flume::RecvError>),
+				State(Result<(), watch::error::RecvError>),
+				HostUi(Result<HostUiOpen, flume::RecvError>),
+				UiCancel(Result<u32, flume::RecvError>),
+				ViewReady(Result<HostViewReady, flume::RecvError>),
+				ViewEvent(Result<HostViewEvent, flume::RecvError>),
+				Inbound(Result<Option<RelayInbound>, omp_collab::relay::RelayError>),
+			}
+			let wake = tokio::select! {
+				() = task_cancel.cancelled() => Wake::Cancel,
+				event = events.recv_async() => Wake::Event(event),
+				state = host_state.changed() => Wake::State(state),
+				request = host_ui_rx.recv_async() => Wake::HostUi(request),
+				request_id = ui_cancel_rx.recv_async() => Wake::UiCancel(request_id),
+				ready = view_ready_rx.recv_async() => Wake::ViewReady(ready),
+				event = view_event_rx.recv_async() => Wake::ViewEvent(event),
+				inbound = relay.receive() => Wake::Inbound(inbound),
+			};
+			match wake {
+				Wake::Cancel => break,
+				Wake::Event(Ok(event)) => {
+					if replica.apply_event(&event).is_err() {
+						break;
+					}
+					sequence = sequence.saturating_add(1);
+					let Ok(record) = event_record(sequence, event) else {
+						break;
+					};
+					let frame = live_record_frame(sequence, record);
+					if relay.send(RelayRoute { peer_id: 0 }, &frame).await.is_err() {
+						break;
+					}
+					let registry = registry_snapshot(&replica, &host_state.borrow());
+					if *agents_tx.borrow() != registry {
+						agents_tx.send_replace(registry.clone());
+						sequence = sequence.saturating_add(1);
+						let frame = registry_frame(sequence, registry);
+						if relay.send(RelayRoute { peer_id: 0 }, &frame).await.is_err() {
+							break;
+						}
+					}
+				},
+				Wake::Event(Err(_)) => break,
+				Wake::State(Ok(())) => {
+					sequence = sequence.saturating_add(1);
+					let state = session_state(&peers, &host_state.borrow());
+					state_tx.send_replace(Some(state.clone()));
+					let frame = state_frame(sequence, state);
+					if relay.send(RelayRoute { peer_id: 0 }, &frame).await.is_err() {
+						break;
+					}
+					let registry = registry_snapshot(&replica, &host_state.borrow());
+					if *agents_tx.borrow() != registry {
+						agents_tx.send_replace(registry.clone());
+						sequence = sequence.saturating_add(1);
+						let frame = registry_frame(sequence, registry);
+						if relay.send(RelayRoute { peer_id: 0 }, &frame).await.is_err() {
+							break;
+						}
+					}
+				},
+				Wake::State(Err(_)) => break,
+				Wake::HostUi(Ok(open)) => {
+					match ui.begin(open.request, peers.iter().map(|(&id, peer)| (id, peer))) {
+						Ok(frames) => {
+							let request_id = frames
+								.first()
+								.and_then(|target| target.frame.payload.as_ref())
+								.and_then(|payload| match payload {
+									collab_frame::Payload::UiRequest(request) => Some(request.request_id),
+									_ => None,
+								})
+								.expect("dispatcher emits UI request frames");
+							let cancelled = open.cancel;
+							let tx = ui_cancel.clone();
+							let cancellation = tokio::spawn(async move {
+								cancelled.cancelled().await;
+								let _ = tx.send_async(request_id).await;
+							});
+							ui_answers
+								.insert(request_id, HostUiWaiter { answer: open.answer, cancellation });
+							for mut target in frames {
+								sequence = sequence.saturating_add(1);
+								target.frame.sequence = sequence;
+								if relay
+									.send(RelayRoute { peer_id: target.peer_id }, &target.frame)
+									.await
+									.is_err()
+								{
+									break;
+								}
+							}
+						},
+						Err(HostUiBeginError::NoWritablePeer) => {
+							let _ = open.answer.try_send(Err(HostUiRequestError::Unavailable));
+						},
+						Err(HostUiBeginError::PayloadTooLarge { .. }) => {
+							let _ = open.answer.try_send(Err(HostUiRequestError::TooLarge));
+						},
+						Err(HostUiBeginError::Capacity { .. } | HostUiBeginError::IdExhausted) => {
+							let _ = open.answer.try_send(Err(HostUiRequestError::Capacity));
+						},
+					}
+				},
+				Wake::HostUi(Err(_)) => break,
+				Wake::UiCancel(Ok(request_id)) => {
+					for mut target in ui.cancel(request_id, peers.iter().map(|(&id, peer)| (id, peer))) {
+						sequence = sequence.saturating_add(1);
+						target.frame.sequence = sequence;
+						let _ = relay
+							.send(RelayRoute { peer_id: target.peer_id }, &target.frame)
+							.await;
+					}
+					if let Some(waiter) = ui_answers.remove(&request_id) {
+						waiter.cancellation.abort();
+						let _ = waiter.answer.try_send(Err(HostUiRequestError::Cancelled));
+					}
+				},
+				Wake::UiCancel(Err(_)) => break,
+				Wake::ViewReady(Ok(ready)) => {
+					let key = (ready.peer_id, ready.request_id);
+					let Some(active) = views.get(&key) else {
+						continue;
+					};
+					if active.generation != ready.generation {
+						continue;
+					}
+					let cancel = active.cancel.clone();
+					match ready.result {
+						Ok(view) => {
+							if view.snapshot.as_bytes().len() > AGENT_VIEW_SNAPSHOT_MAX_BYTES {
+								sequence = sequence.saturating_add(1);
+								let frame = agent_view_end_frame(
+									sequence,
+									ready.request_id,
+									Some(AgentViewFailureCode::Capacity),
+								);
+								let _ = relay
+									.send(RelayRoute { peer_id: ready.peer_id }, &frame)
+									.await;
+								views.remove(&key);
+								continue;
+							}
+							let chunks = view
+								.snapshot
+								.as_bytes()
+								.chunks(SNAPSHOT_CHUNK_BYTES)
+								.collect::<Vec<_>>();
+							let mut sent = true;
+							for (index, bytes) in chunks.iter().enumerate() {
+								sequence = sequence.saturating_add(1);
+								let frame = agent_view_snapshot_frame(
+									sequence,
+									ready.request_id,
+									u32::try_from(index).unwrap_or(u32::MAX),
+									Bytes::copy_from_slice(bytes),
+									index + 1 == chunks.len(),
+								);
+								if relay
+									.send(RelayRoute { peer_id: ready.peer_id }, &frame)
+									.await
+									.is_err()
+								{
+									cancel.cancel();
+									sent = false;
+									break;
+								}
+							}
+							if !sent {
+								views.remove(&key);
+								continue;
+							}
+							if let Some(events) = view.events {
+								let tx = view_event.clone();
+								tokio::spawn(async move {
+									loop {
+										tokio::select! {
+											() = cancel.cancelled() => break,
+											event = events.recv_async() => match event {
+												Ok(event) => {
+													let update = HostViewEvent {
+														peer_id: ready.peer_id,
+														request_id: ready.request_id,
+														generation: ready.generation,
+														event: Some(event),
+													};
+													tokio::select! {
+														() = cancel.cancelled() => break,
+														result = tx.send_async(update) => {
+															if result.is_err() {
+																break;
+															}
+														},
+													}
+												},
+												Err(_) => break,
+											},
+										}
+									}
+									let _ = tx
+										.send_async(HostViewEvent {
+											peer_id:    ready.peer_id,
+											request_id: ready.request_id,
+											generation: ready.generation,
+											event:      None,
+										})
+										.await;
+								});
+							} else {
+								sequence = sequence.saturating_add(1);
+								let frame = agent_view_end_frame(sequence, ready.request_id, None);
+								let _ = relay
+									.send(RelayRoute { peer_id: ready.peer_id }, &frame)
+									.await;
+								views.remove(&key);
+							}
+						},
+						Err(error) => {
+							let code = match error {
+								super::observer::AgentViewError::UnknownAgent => {
+									AgentViewFailureCode::UnknownAgent
+								},
+								super::observer::AgentViewError::Session(_) => {
+									AgentViewFailureCode::Unavailable
+								},
+							};
+							sequence = sequence.saturating_add(1);
+							let frame = agent_view_end_frame(sequence, ready.request_id, Some(code));
+							let _ = relay
+								.send(RelayRoute { peer_id: ready.peer_id }, &frame)
+								.await;
+							views.remove(&key);
+						},
+					}
+				},
+				Wake::ViewReady(Err(_)) => break,
+				Wake::ViewEvent(Ok(update)) => {
+					let key = (update.peer_id, update.request_id);
+					if views
+						.get(&key)
+						.is_none_or(|active| active.generation != update.generation)
+					{
+						continue;
+					}
+					match update.event {
+						Some(event) => {
+							sequence = sequence.saturating_add(1);
+							let Ok(record) = event_record(sequence, event) else {
+								if let Some(active) = views.remove(&key) {
+									active.cancel.cancel();
+								}
+								sequence = sequence.saturating_add(1);
+								let frame = agent_view_end_frame(
+									sequence,
+									update.request_id,
+									Some(AgentViewFailureCode::InvalidProjection),
+								);
+								let _ = relay
+									.send(RelayRoute { peer_id: update.peer_id }, &frame)
+									.await;
+								continue;
+							};
+							let frame = agent_view_event_frame(sequence, update.request_id, record);
+							if relay
+								.send(RelayRoute { peer_id: update.peer_id }, &frame)
+								.await
+								.is_err() && let Some(active) = views.remove(&key)
+							{
+								active.cancel.cancel();
+							}
+						},
+						None => {
+							sequence = sequence.saturating_add(1);
+							let frame = agent_view_end_frame(sequence, update.request_id, None);
+							let _ = relay
+								.send(RelayRoute { peer_id: update.peer_id }, &frame)
+								.await;
+							views.remove(&key);
+						},
+					}
+				},
+				Wake::ViewEvent(Err(_)) => break,
+				Wake::Inbound(Ok(Some(RelayInbound::PeerJoined(_)))) => {},
+				Wake::Inbound(Ok(Some(RelayInbound::PeerLeft(left)))) => {
+					peers.remove(&left.peer_id);
+					let abandoned = views
+						.keys()
+						.filter(|(peer_id, _)| *peer_id == left.peer_id)
+						.copied()
+						.collect::<Vec<_>>();
+					for key in abandoned {
+						if let Some(active) = views.remove(&key) {
+							active.cancel.cancel();
+						}
+					}
+					presence_tx
+						.send_replace(Some(PresenceFacts::host(ConnectionState::Connected, peers.len())));
+					sequence = sequence.saturating_add(1);
+					let state = session_state(&peers, &host_state.borrow());
+					state_tx.send_replace(Some(state.clone()));
+					let frame = state_frame(sequence, state);
+					let _ = relay.send(RelayRoute { peer_id: 0 }, &frame).await;
+				},
+				Wake::Inbound(Ok(Some(RelayInbound::Frame(routed)))) => {
+					let peer_id = routed.route.peer_id;
+					match routed.frame.payload.as_ref() {
+						Some(collab_frame::Payload::Hello(hello)) => {
+							let mut handshake = Handshake::new(RelayRole::Host);
+							if handshake.accept(&routed.frame).is_err() {
+								send_error(&mut relay, peer_id, "protocol", "Protocol mismatch").await;
+								continue;
+							}
+							let Ok(peer) = admission.authenticate(peer_id, hello) else {
+								send_error(&mut relay, peer_id, "admission", "Guest admission failed")
+									.await;
+								continue;
+							};
+							let read_only = peer.read_only();
+							peers.insert(peer_id, peer);
+							presence_tx.send_replace(Some(PresenceFacts::host(
+								ConnectionState::Connected,
+								peers.len(),
+							)));
+							let snapshot = replica.snapshot();
+							if snapshot.as_bytes().len() > SNAPSHOT_MAX_BYTES {
+								peers.remove(&peer_id);
+								presence_tx.send_replace(Some(PresenceFacts::host(
+									ConnectionState::Connected,
+									peers.len(),
+								)));
+								send_error(
+									&mut relay,
+									peer_id,
+									"snapshot_too_large",
+									"Host session snapshot exceeds the collaboration limit",
+								)
+								.await;
+								continue;
+							}
+							let chunks = snapshot_chunks(snapshot.as_bytes());
+							let chunk_count = chunks.len();
+							sequence = sequence.saturating_add(1);
+							let welcome = welcome_frame(
+								sequence,
+								read_only,
+								u32::try_from(chunk_count).unwrap_or(u32::MAX),
+								session_state(&peers, &host_state.borrow()),
+								registry_snapshot(&replica, &host_state.borrow()),
+							);
+							if relay.send(RelayRoute { peer_id }, &welcome).await.is_err() {
+								continue;
+							}
+							for (index, bytes) in chunks.into_iter().enumerate() {
+								sequence = sequence.saturating_add(1);
+								let frame = snapshot_frame(
+									sequence,
+									bytes,
+									index + 1 == chunk_count,
+									u64::try_from(chunk_count).unwrap_or(u64::MAX),
+								);
+								if relay.send(RelayRoute { peer_id }, &frame).await.is_err() {
+									break;
+								}
+							}
+							sequence = sequence.saturating_add(1);
+							let state = session_state(&peers, &host_state.borrow());
+							state_tx.send_replace(Some(state.clone()));
+							let frame = state_frame(sequence, state);
+							let _ = relay.send(RelayRoute { peer_id: 0 }, &frame).await;
+							if let Some(peer) = peers.get(&peer_id) {
+								for mut target in ui.replay_for_join(peer_id, peer) {
+									sequence = sequence.saturating_add(1);
+									target.frame.sequence = sequence;
+									let _ = relay
+										.send(RelayRoute { peer_id: target.peer_id }, &target.frame)
+										.await;
+								}
+							}
+						},
+						Some(collab_frame::Payload::AgentViewRequest(request)) => {
+							let Some(_peer) = peers.get(&peer_id) else {
+								send_error(&mut relay, peer_id, "hello_required", "Guest hello required")
+									.await;
+								continue;
+							};
+							if views.len() >= AGENT_VIEW_REQUEST_CAP {
+								sequence = sequence.saturating_add(1);
+								let frame = agent_view_end_frame(
+									sequence,
+									request.request_id,
+									Some(AgentViewFailureCode::Capacity),
+								);
+								let _ = relay.send(RelayRoute { peer_id }, &frame).await;
+								continue;
+							}
+							let key = (peer_id, request.request_id);
+							if let Some(previous) = views.remove(&key) {
+								previous.cancel.cancel();
+							}
+							view_generation = view_generation.saturating_add(1);
+							let generation = view_generation;
+							let cancel = CancellationToken::new();
+							views.insert(key, ActiveHostView { generation, cancel });
+							let bridge = agents.clone();
+							let ready = view_ready.clone();
+							let agent_id = request.agent_id.clone();
+							let request_id = request.request_id;
+							tokio::spawn(async move {
+								let result = bridge.view(&agent_id).await;
+								let _ = ready
+									.send_async(HostViewReady { peer_id, request_id, generation, result })
+									.await;
+							});
+						},
+						Some(collab_frame::Payload::AgentViewCancel(request)) => {
+							if let Some(active) = views.remove(&(peer_id, request.request_id)) {
+								active.cancel.cancel();
+							}
+						},
+						Some(collab_frame::Payload::UiResponse(response)) => {
+							let Some(peer) = peers.get(&peer_id) else {
+								send_error(&mut relay, peer_id, "hello_required", "Guest hello required")
+									.await;
+								continue;
+							};
+							match ui.answer(
+								peer_id,
+								peer,
+								response.clone(),
+								peers.iter().map(|(&id, peer)| (id, peer)),
+							) {
+								Ok(Some((answer, cleanup))) => {
+									if let Some(waiter) = ui_answers.remove(&answer.request_id) {
+										waiter.cancellation.abort();
+										let _ = waiter.answer.try_send(Ok(answer));
+									}
+									for mut target in cleanup {
+										sequence = sequence.saturating_add(1);
+										target.frame.sequence = sequence;
+										let _ = relay
+											.send(RelayRoute { peer_id: target.peer_id }, &target.frame)
+											.await;
+									}
+								},
+								Ok(None) => {},
+								Err(_) => {
+									send_error(&mut relay, peer_id, "read_only", "UI response is disabled")
+										.await;
+								},
+							}
+						},
+						Some(payload) => {
+							let Some(peer) = peers.get(&peer_id) else {
+								send_error(&mut relay, peer_id, "hello_required", "Guest hello required")
+									.await;
+								continue;
+							};
+							match admission.admit_mutation(peer, payload) {
+								Ok(mutation) => {
+									if remote_mutations.try_send(mutation).is_err() {
+										send_error(
+											&mut relay,
+											peer_id,
+											"capacity",
+											"Host collaboration command queue is full",
+										)
+										.await;
+									}
+								},
+								Err(_) => {
+									send_error(
+										&mut relay,
+										peer_id,
+										"read_only",
+										"Mutation is disabled on a read-only link",
+									)
+									.await;
+								},
+							}
+						},
+						None => {},
+					}
+				},
+				Wake::Inbound(Ok(None)) | Wake::Inbound(Err(_)) => {
+					peers.clear();
+					for (_, active) in views.split_off(&(0, 0)) {
+						active.cancel.cancel();
+					}
+					presence_tx
+						.send_replace(Some(PresenceFacts::host(ConnectionState::Reconnecting, 0)));
+					if !reconnect(&mut relay, &task_cancel).await {
+						break;
+					}
+					presence_tx.send_replace(Some(PresenceFacts::host(ConnectionState::Connected, 0)));
+				},
+			}
+		}
+		for (_, waiter) in ui_answers {
+			waiter.cancellation.abort();
+			let _ = waiter
+				.answer
+				.try_send(Err(HostUiRequestError::OwnerStopped));
+		}
+		for (_, active) in views {
+			active.cancel.cancel();
+		}
+		presence_tx.send_replace(Some(PresenceFacts::host(ConnectionState::Disconnected, 0)));
+		state_tx.send_replace(None);
+		agents_tx.send_replace(RegistrySnapshot::default());
+		let _ = relay.close().await;
+	});
+	Ok(ActiveSession {
+		cancel,
+		task,
+		presence,
+		outbound: None,
+		agent_views: None,
+		host_ui: Some(host_ui),
+		editor_link,
+		viewer_link,
+	})
+}
+
+async fn start_guest(
+	link: CollabLink,
+	display_name: Str,
+	presence_tx: watch::Sender<Option<PresenceFacts>>,
+	state_tx: watch::Sender<Option<SessionStateUpdate>>,
+	agents_tx: watch::Sender<RegistrySnapshot>,
+	replica_tx: watch::Sender<Option<Snapshot>>,
+	replica_events: flume::Sender<Event>,
+	remote_ui: flume::Sender<RemoteUiRequest>,
+) -> Result<ActiveSession, CollabCommandFault> {
+	let key = omp_collab::crypto::RoomKey::from_bytes(*link.credentials().key())?;
+	let mut relay = RelayClient::new(link.room_url(), RelayRole::Guest, key)?;
+	let read_only = link.credentials().is_read_only();
+	presence_tx.send_replace(Some(PresenceFacts::guest(ConnectionState::Connecting, 1, read_only)));
+	relay.connect().await?;
+	let hello = Hello {
+		protocol_revision: PROTOCOL_REVISION,
+		display_name:      display_name.to_string(),
+		write_token:       link
+			.credentials()
+			.write_token()
+			.map(|token| Bytes::copy_from_slice(token.as_bytes())),
+		client_version:    env!("CARGO_PKG_VERSION").to_owned(),
 	};
-	if receiver.changed().await.is_err() {
-		return std::future::pending().await;
-	}
-	let state = receiver.borrow_and_update().clone();
-	state
-}
-
-async fn recv_registry(
-	receiver: &mut Option<watch::Receiver<HostRegistryUpdate>>,
-) -> HostRegistryUpdate {
-	let Some(receiver) = receiver else {
-		return std::future::pending().await;
-	};
-	if receiver.changed().await.is_err() {
-		return std::future::pending().await;
-	}
-	let registry = receiver.borrow_and_update().clone();
-	registry
-}
-
-async fn recv_presentation(
-	receiver: Option<&Receiver<HostPresentationInput>>,
-) -> HostPresentationInput {
-	let Some(receiver) = receiver else {
-		return std::future::pending().await;
-	};
-	match receiver.recv_async().await {
-		Ok(input) => input,
-		Err(_) => std::future::pending().await,
-	}
-}
-
-async fn wait_snapshot_deadline(deadline: Option<time::Instant>) {
-	match deadline {
-		Some(deadline) => time::sleep_until(deadline).await,
-		None => std::future::pending().await,
-	}
-}
-
-async fn send_required(
-	relay: &mut RelayClient,
-	route: RelayRoute,
-	frame: &v1::CollabFrame,
-) -> Result<(), CollabCommandFault> {
-	if relay.send(route, frame).await? == SendDisposition::Sent {
-		Ok(())
-	} else {
-		Err(CollabCommandFault::OutboundQueued)
-	}
-}
-
-fn snapshot_frame(
-	sequence: u64,
-	entries: Vec<v1::JournalRecord>,
-	r#final: bool,
-	host_revision_watermark: u64,
-) -> v1::CollabFrame {
-	v1::CollabFrame {
-		protocol_revision: omp_collab::PROTOCOL_REVISION,
-		sequence,
-		payload: Some(collab_frame::Payload::SnapshotChunk(v1::SnapshotChunk {
-			entries,
-			r#final,
-			host_revision_watermark,
-		})),
-		..Default::default()
-	}
-}
-
-fn payload_frame(sequence: u64, payload: collab_frame::Payload) -> v1::CollabFrame {
-	v1::CollabFrame {
-		protocol_revision: omp_collab::PROTOCOL_REVISION,
-		sequence,
-		payload: Some(payload),
-		..Default::default()
-	}
-}
-
-fn transcript_response(path: &Path, request: &v1::TranscriptRequest) -> v1::TranscriptChunk {
-	match read_transcript_chunk(path, request.request_id, request.from_byte) {
-		Ok(chunk) => chunk,
-		Err(error) => v1::TranscriptChunk {
-			request_id: request.request_id,
-			text_utf8:  Bytes::new(),
-			new_size:   request.from_byte,
-			error:      Some(error.to_string()),
+	let mut sequence = 1_u64;
+	let hello_frame = Handshake::hello(sequence, hello.clone());
+	let _ = relay.send(RelayRoute { peer_id: 0 }, &hello_frame).await?;
+	let cancel = CancellationToken::new();
+	let task_cancel = cancel.clone();
+	let (outbound, outbound_rx) = flume::bounded::<Outbound>(64);
+	let (agent_views, agent_views_rx) = flume::bounded::<AgentViewOpen>(AGENT_VIEW_REQUEST_CAP);
+	let (ready_tx, ready_rx) = flume::bounded(1);
+	let presence = presence_tx.subscribe();
+	let task = tokio::spawn(async move {
+		let mut handshake = Handshake::new(RelayRole::Guest);
+		let mut replica: Option<Dom> = None;
+		let mut snapshot_records = Vec::<JournalRecord>::new();
+		let mut views = BTreeMap::<u32, GuestView>::new();
+		let mut ui_requests = BTreeMap::<u32, CancellationToken>::new();
+		let mut next_view_id = 0_u32;
+		let mut sweep = tokio::time::interval(Duration::from_secs(1));
+		sweep.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+		let mut initial = true;
+		loop {
+			enum Wake {
+				Cancel,
+				Outbound(Result<Outbound, flume::RecvError>),
+				AgentView(Result<AgentViewOpen, flume::RecvError>),
+				Sweep,
+				Inbound(Result<Option<RelayInbound>, omp_collab::relay::RelayError>),
+			}
+			let wake = tokio::select! {
+				() = task_cancel.cancelled() => Wake::Cancel,
+				frame = outbound_rx.recv_async() => Wake::Outbound(frame),
+				request = agent_views_rx.recv_async() => Wake::AgentView(request),
+				_ = sweep.tick() => Wake::Sweep,
+				inbound = relay.receive() => Wake::Inbound(inbound),
+			};
+			match wake {
+				Wake::Cancel => break,
+				Wake::Outbound(Ok(mut outbound)) => {
+					sequence = sequence.saturating_add(1);
+					outbound.frame.sequence = sequence;
+					outbound.frame.protocol_revision = PROTOCOL_REVISION;
+					let delivered = matches!(
+						relay.send(RelayRoute { peer_id: 0 }, &outbound.frame).await,
+						Ok(SendDisposition::Sent)
+					);
+					let _ = outbound.reply.send(delivered);
+					if !delivered {
+						continue;
+					}
+				},
+				Wake::Outbound(Err(_)) => break,
+				Wake::AgentView(Ok(open)) => {
+					if views.len() >= AGENT_VIEW_REQUEST_CAP {
+						let _ = open.reply.try_send(Err(RemoteAgentViewError::Capacity));
+						continue;
+					}
+					let Some(request_id) = allocate_view_id(&mut next_view_id, &views) else {
+						let _ = open.reply.try_send(Err(RemoteAgentViewError::Capacity));
+						continue;
+					};
+					sequence = sequence.saturating_add(1);
+					let frame = agent_view_request_frame(sequence, request_id, open.agent_id.clone());
+					if !matches!(
+						relay.send(RelayRoute { peer_id: 0 }, &frame).await,
+						Ok(SendDisposition::Sent)
+					) {
+						let _ = open.reply.try_send(Err(RemoteAgentViewError::Disconnected));
+						continue;
+					}
+					views.insert(request_id, GuestView {
+						agent_id: open.agent_id,
+						reply:    Some(open.reply),
+						events:   None,
+						chunks:   Vec::new(),
+						next:     0,
+					});
+				},
+				Wake::AgentView(Err(_)) => break,
+				Wake::Sweep => {
+					let closed = views
+						.iter()
+						.filter_map(|(&id, view)| {
+							view
+								.events
+								.as_ref()
+								.is_some_and(flume::Sender::is_disconnected)
+								.then_some(id)
+						})
+						.collect::<Vec<_>>();
+					for request_id in closed {
+						views.remove(&request_id);
+						sequence = sequence.saturating_add(1);
+						let frame = agent_view_cancel_frame(sequence, request_id);
+						let _ = relay.send(RelayRoute { peer_id: 0 }, &frame).await;
+					}
+				},
+				Wake::Inbound(Ok(Some(RelayInbound::Frame(routed)))) => {
+					if matches!(&routed.frame.payload, Some(collab_frame::Payload::Welcome(_)))
+						&& handshake.accept(&routed.frame).is_err()
+					{
+						if initial {
+							let _ = ready_tx.send(Err(CollabCommandFault::HandshakeRefused));
+						}
+						break;
+					}
+					match routed.frame.payload {
+						Some(collab_frame::Payload::Welcome(welcome)) => {
+							snapshot_records.clear();
+							let participant_count = welcome
+								.initial_state
+								.as_ref()
+								.map_or(1, |state| state.participants.len().max(1));
+							state_tx.send_replace(welcome.initial_state.clone());
+							agents_tx.send_replace(welcome.initial_agents.unwrap_or_default());
+							for (&request_id, view) in &mut views {
+								view.chunks.clear();
+								view.next = 0;
+								sequence = sequence.saturating_add(1);
+								let frame =
+									agent_view_request_frame(sequence, request_id, view.agent_id.clone());
+								let _ = relay.send(RelayRoute { peer_id: 0 }, &frame).await;
+							}
+							presence_tx.send_replace(Some(PresenceFacts::guest(
+								ConnectionState::Connecting,
+								participant_count,
+								welcome.read_only,
+							)));
+						},
+						Some(collab_frame::Payload::SnapshotChunk(chunk)) => {
+							if snapshot_records.len().saturating_add(chunk.entries.len())
+								> SNAPSHOT_CHUNK_MAX_COUNT
+							{
+								if initial {
+									let _ = ready_tx.send(Err(CollabCommandFault::SnapshotTooLarge {
+										actual:  snapshot_records.len().saturating_add(chunk.entries.len())
+											* SNAPSHOT_CHUNK_BYTES,
+										maximum: SNAPSHOT_MAX_BYTES,
+									}));
+								}
+								break;
+							}
+							snapshot_records.extend(chunk.entries);
+							if chunk.r#final {
+								if snapshot_records.is_empty() {
+									if initial {
+										let _ = ready_tx.send(Err(CollabCommandFault::MissingSnapshot));
+									}
+									break;
+								}
+								let encoded = match decode_snapshot_chunks(&snapshot_records) {
+									Ok(encoded) => encoded,
+									Err(error) => {
+										if initial {
+											let _ = ready_tx.send(Err(error));
+										}
+										break;
+									},
+								};
+								match Snapshot::from_bytes(&encoded) {
+									Ok(snapshot) => {
+										replica = Some(Dom::from_snapshot(&snapshot));
+										replica_tx.send_replace(Some(snapshot.clone()));
+										if !initial
+											&& replica_events.try_send(Event::Reset { snapshot }).is_err()
+										{
+											break;
+										}
+										presence_tx.send_replace(Some(PresenceFacts::guest(
+											ConnectionState::Connected,
+											(*presence_tx.borrow())
+												.map_or(1, PresenceFacts::participant_count),
+											read_only,
+										)));
+										if initial {
+											initial = false;
+											let _ = ready_tx.send(Ok(()));
+										}
+									},
+									Err(error) => {
+										if initial {
+											let _ = ready_tx.send(Err(CollabCommandFault::Snapshot(error)));
+										}
+										break;
+									},
+								}
+							}
+						},
+						Some(collab_frame::Payload::JournalRecord(record)) => {
+							let Some(dom) = replica.as_mut() else {
+								continue;
+							};
+							match decode_event(&record).and_then(|event| {
+								dom.apply_event(&event)?;
+								Ok(event)
+							}) {
+								Ok(event) => {
+									if replica_events.try_send(event).is_err() {
+										break;
+									}
+								},
+								Err(_) => break,
+							}
+						},
+						Some(collab_frame::Payload::Agents(registry)) => {
+							agents_tx.send_replace(registry);
+						},
+						Some(collab_frame::Payload::UiRequest(request)) => {
+							if read_only || ui_requests.contains_key(&request.request_id) {
+								continue;
+							}
+							let cancel = CancellationToken::new();
+							if remote_ui
+								.try_send(RemoteUiRequest {
+									request: request.clone(),
+									cancel:  cancel.clone(),
+								})
+								.is_ok()
+							{
+								ui_requests.insert(request.request_id, cancel);
+							}
+						},
+						Some(collab_frame::Payload::UiRequestEnd(end)) => {
+							if let Some(cancel) = ui_requests.remove(&end.request_id) {
+								cancel.cancel();
+							}
+						},
+						Some(collab_frame::Payload::AgentViewSnapshot(chunk)) => {
+							let Some(view) = views.get_mut(&chunk.request_id) else {
+								continue;
+							};
+							if chunk.chunk_index != view.next {
+								if let Some(reply) = view.reply.take() {
+									let _ = reply.try_send(Err(RemoteAgentViewError::InvalidProjection));
+								}
+								views.remove(&chunk.request_id);
+								cancel_remote_view(&mut relay, &mut sequence, chunk.request_id).await;
+								continue;
+							}
+							let aggregate = view
+								.chunks
+								.iter()
+								.map(Bytes::len)
+								.sum::<usize>()
+								.saturating_add(chunk.snapshot_bytes.len());
+							if aggregate > AGENT_VIEW_SNAPSHOT_MAX_BYTES {
+								if let Some(reply) = view.reply.take() {
+									let _ = reply.try_send(Err(RemoteAgentViewError::Capacity));
+								}
+								views.remove(&chunk.request_id);
+								cancel_remote_view(&mut relay, &mut sequence, chunk.request_id).await;
+								continue;
+							}
+							view.next = view.next.saturating_add(1);
+							view.chunks.push(chunk.snapshot_bytes);
+							if chunk.r#final {
+								let mut encoded = Vec::new();
+								for bytes in view.chunks.drain(..) {
+									encoded.extend_from_slice(&bytes);
+								}
+								let Ok(snapshot) = Snapshot::from_bytes(&encoded) else {
+									if let Some(reply) = view.reply.take() {
+										let _ = reply.try_send(Err(RemoteAgentViewError::InvalidProjection));
+									}
+									views.remove(&chunk.request_id);
+									cancel_remote_view(&mut relay, &mut sequence, chunk.request_id).await;
+									continue;
+								};
+								if let Some(reply) = view.reply.take() {
+									let (events, observed) = flume::bounded(AGENT_VIEW_EVENT_CAP);
+									view.events = Some(events);
+									let _ = reply
+										.try_send(Ok(RemoteAgentView { snapshot, events: Some(observed) }));
+								} else if let Some(events) = &view.events
+									&& events.try_send(Event::Reset { snapshot }).is_err()
+								{
+									views.remove(&chunk.request_id);
+									cancel_remote_view(&mut relay, &mut sequence, chunk.request_id).await;
+								}
+							}
+						},
+						Some(collab_frame::Payload::AgentViewEvent(update)) => {
+							let Some(record) = update.event.as_ref() else {
+								if let Some(view) = views.remove(&update.request_id)
+									&& let Some(reply) = view.reply
+								{
+									let _ = reply.try_send(Err(RemoteAgentViewError::InvalidProjection));
+								}
+								cancel_remote_view(&mut relay, &mut sequence, update.request_id).await;
+								continue;
+							};
+							let Ok(event) = decode_event(record) else {
+								if let Some(view) = views.remove(&update.request_id)
+									&& let Some(reply) = view.reply
+								{
+									let _ = reply.try_send(Err(RemoteAgentViewError::InvalidProjection));
+								}
+								cancel_remote_view(&mut relay, &mut sequence, update.request_id).await;
+								continue;
+							};
+							let disconnected = views
+								.get(&update.request_id)
+								.and_then(|view| view.events.as_ref())
+								.is_none_or(|events| events.try_send(event).is_err());
+							if disconnected {
+								views.remove(&update.request_id);
+								cancel_remote_view(&mut relay, &mut sequence, update.request_id).await;
+							}
+						},
+						Some(collab_frame::Payload::AgentViewEnd(end)) => {
+							if let Some(view) = views.remove(&end.request_id)
+								&& let Some(reply) = view.reply
+							{
+								let error = end
+									.error
+									.map_or(RemoteAgentViewError::Disconnected, |error| {
+										RemoteAgentViewError::Refused {
+											code: error
+												.code
+												.parse()
+												.unwrap_or(AgentViewFailureCode::Unavailable),
+										}
+									});
+								let _ = reply.try_send(Err(error));
+							}
+						},
+						Some(collab_frame::Payload::State(state)) => {
+							let participant_count = state.participants.len().max(1);
+							state_tx.send_replace(Some(state));
+							presence_tx.send_replace(Some(PresenceFacts::guest(
+								ConnectionState::Connected,
+								participant_count,
+								read_only,
+							)));
+						},
+						Some(collab_frame::Payload::Error(_)) if initial => {
+							let _ = ready_tx.send(Err(CollabCommandFault::HandshakeRefused));
+							break;
+						},
+						Some(collab_frame::Payload::Bye(_)) => break,
+						_ => {},
+					}
+				},
+				Wake::Inbound(Ok(Some(RelayInbound::PeerJoined(_) | RelayInbound::PeerLeft(_)))) => {},
+				Wake::Inbound(Ok(None)) | Wake::Inbound(Err(_)) => {
+					for (_, cancel) in std::mem::take(&mut ui_requests) {
+						cancel.cancel();
+					}
+					presence_tx.send_replace(Some(PresenceFacts::guest(
+						ConnectionState::Reconnecting,
+						(*presence_tx.borrow()).map_or(1, PresenceFacts::participant_count),
+						read_only,
+					)));
+					if !reconnect(&mut relay, &task_cancel).await {
+						if initial {
+							let _ = ready_tx.send(Err(CollabCommandFault::HandshakeRefused));
+						}
+						break;
+					}
+					handshake = Handshake::new(RelayRole::Guest);
+					sequence = sequence.saturating_add(1);
+					let frame = Handshake::hello(sequence, hello.clone());
+					if relay.send(RelayRoute { peer_id: 0 }, &frame).await.is_err() {
+						break;
+					}
+				},
+			}
+		}
+		for (_, view) in views {
+			if let Some(reply) = view.reply {
+				let _ = reply.try_send(Err(RemoteAgentViewError::Disconnected));
+			}
+		}
+		for (_, cancel) in ui_requests {
+			cancel.cancel();
+		}
+		presence_tx.send_replace(Some(PresenceFacts::guest(
+			ConnectionState::Disconnected,
+			1,
+			read_only,
+		)));
+		state_tx.send_replace(None);
+		agents_tx.send_replace(RegistrySnapshot::default());
+		let _ = relay.close().await;
+	});
+	match tokio::time::timeout(INITIAL_HANDSHAKE_TIMEOUT, ready_rx.recv_async()).await {
+		Ok(Ok(Ok(()))) => Ok(ActiveSession {
+			cancel,
+			task,
+			presence,
+			outbound: Some(outbound),
+			agent_views: Some(agent_views),
+			host_ui: None,
+			editor_link: None,
+			viewer_link: None,
+		}),
+		Ok(Ok(Err(error))) => {
+			cancel.cancel();
+			let _ = task.await;
+			Err(error)
+		},
+		Ok(Err(_)) => {
+			cancel.cancel();
+			let _ = task.await;
+			Err(CollabCommandFault::OwnerStopped)
+		},
+		Err(_) => {
+			cancel.cancel();
+			let _ = task.await;
+			Err(CollabCommandFault::HandshakeTimeout)
 		},
 	}
 }
 
-fn host_participants(
-	state: &v1::SessionStateUpdate,
-	peers: &HashMap<u32, AuthenticatedPeer>,
-) -> Vec<v1::Participant> {
-	let mut participants = state
-		.participants
-		.iter()
-		.filter(|participant| participant.is_host)
-		.cloned()
-		.collect::<Vec<_>>();
-	participants.extend(peers.iter().map(|(peer_id, peer)| v1::Participant {
-		display_name: peer.principal().display_name().to_owned(),
-		is_host:      false,
-		read_only:    peer.read_only(),
-		peer_id:      *peer_id,
-	}));
-	participants.sort_by_key(|participant| participant.peer_id);
-	participants
+async fn cancel_remote_view(relay: &mut RelayClient, sequence: &mut u64, request_id: u32) {
+	*sequence = sequence.saturating_add(1);
+	let frame = agent_view_cancel_frame(*sequence, request_id);
+	let _ = relay.send(RelayRoute { peer_id: 0 }, &frame).await;
 }
 
-fn snapshot_entries(records: &[v1::JournalRecord]) -> Vec<Vec<v1::JournalRecord>> {
-	let mut chunks = Vec::new();
-	let mut entries = Vec::new();
-	let mut bytes = 0_usize;
-	for record in records {
-		let record_bytes = record.transcript_v4_json.len().saturating_add(128);
-		if !entries.is_empty()
-			&& (entries.len() >= SNAPSHOT_ENTRY_CHUNK
-				|| bytes.saturating_add(record_bytes) > SNAPSHOT_CHUNK_SOFT_BYTES)
-		{
-			chunks.push(std::mem::take(&mut entries));
-			bytes = 0;
-		}
-		bytes = bytes.saturating_add(record_bytes);
-		entries.push(record.clone());
-	}
-	if !entries.is_empty() {
-		chunks.push(entries);
-	}
-	chunks
+fn allocate_view_id(next: &mut u32, views: &BTreeMap<u32, GuestView>) -> Option<u32> {
+	(1..=u32::MAX).find_map(|_| {
+		*next = next.wrapping_add(1).max(1);
+		(!views.contains_key(next)).then_some(*next)
+	})
 }
 
-fn error_frame(sequence: u64, message: String) -> v1::CollabFrame {
-	v1::CollabFrame {
-		protocol_revision: omp_collab::PROTOCOL_REVISION,
-		sequence,
-		payload: Some(collab_frame::Payload::Error(v1::ErrorMessage {
-			code: "mutation-refused".to_owned(),
-			message,
-		})),
-		..Default::default()
-	}
-}
-
-async fn connect(relay: &mut RelayClient) -> Result<(), CollabCommandFault> {
-	time::timeout(CONNECT_TIMEOUT, relay.connect())
-		.await
-		.map_err(|source| CollabCommandFault::ConnectTimeout { source })??;
-	Ok(())
-}
-
-async fn reconnect(relay: &mut RelayClient) -> Result<(), CollabCommandFault> {
+async fn reconnect(relay: &mut RelayClient, cancel: &CancellationToken) -> bool {
 	loop {
-		time::sleep(relay.reconnect_delay()?).await;
-		match time::timeout(CONNECT_TIMEOUT, relay.connect()).await {
-			Ok(Ok(())) => return Ok(()),
-			Ok(Err(RelayError::Socket(_))) | Err(_) => {},
-			Ok(Err(error)) => return Err(error.into()),
+		let Ok(delay) = relay.reconnect_delay() else {
+			return false;
+		};
+		tokio::select! {
+			() = cancel.cancelled() => return false,
+			() = tokio::time::sleep(delay) => {},
+		}
+		if relay.connect().await.is_ok() {
+			return true;
 		}
 	}
 }
 
-async fn begin_guest_snapshot(
-	replica: &GuestReplicaHandle,
-	room_id: Str,
-	welcome: &Welcome,
-) -> Result<(), CollabCommandFault> {
-	let header = welcome
-		.header
-		.clone()
-		.ok_or(CollabCommandFault::MissingWelcomeHeader)?;
-	replica
-		.begin_snapshot(
-			room_id,
-			header,
-			usize::try_from(welcome.total_entry_count)
-				.expect("protobuf u32 record count fits in usize"),
-		)
-		.await?;
-	Ok(())
+async fn send_error(
+	relay: &mut RelayClient,
+	peer_id: u32,
+	code: &'static str,
+	message: &'static str,
+) {
+	let frame = CollabFrame {
+		protocol_revision: PROTOCOL_REVISION,
+		payload: Some(collab_frame::Payload::Error(ErrorMessage {
+			code:    code.to_owned(),
+			message: message.to_owned(),
+		})),
+		..CollabFrame::default()
+	};
+	let _ = relay.send(RelayRoute { peer_id }, &frame).await;
 }
 
-struct HostOperationRouter<'a> {
-	agents:     &'a HashMap<Str, HostAgentProjection>,
-	operations: &'a Sender<HostOperation>,
-	principal:  RemotePrincipal,
+fn welcome_frame(
+	sequence: u64,
+	read_only: bool,
+	total_entry_count: u32,
+	state: SessionStateUpdate,
+	agents: RegistrySnapshot,
+) -> CollabFrame {
+	Handshake::welcome(sequence, Welcome {
+		protocol_revision: PROTOCOL_REVISION,
+		header: Some(SessionHeader {
+			session_id: state.session_name.clone(),
+			title: state.session_name.clone(),
+			host_cwd: state.host_cwd.clone(),
+			..SessionHeader::default()
+		}),
+		initial_state: Some(state),
+		initial_agents: Some(agents),
+		total_entry_count,
+		read_only,
+	})
 }
 
-impl HostAgentRuntime for HostOperationRouter<'_> {
-	type Error = HostOperationRouteError;
+fn registry_frame(sequence: u64, agents: RegistrySnapshot) -> CollabFrame {
+	CollabFrame {
+		protocol_revision: PROTOCOL_REVISION,
+		sequence,
+		payload: Some(collab_frame::Payload::Agents(agents)),
+		..CollabFrame::default()
+	}
+}
 
-	fn class(&self, agent_id: &str) -> Option<HostAgentClass> {
-		let agent = self.agents.get(agent_id)?;
-		match v1::agent_summary::Kind::try_from(agent.summary.kind).ok()? {
-			v1::agent_summary::Kind::Main => Some(HostAgentClass::Main),
-			v1::agent_summary::Kind::Sub => Some(HostAgentClass::Subagent),
+fn agent_view_request_frame(sequence: u64, request_id: u32, agent_id: Str) -> CollabFrame {
+	CollabFrame {
+		protocol_revision: PROTOCOL_REVISION,
+		sequence,
+		payload: Some(collab_frame::Payload::AgentViewRequest(AgentViewRequest {
+			request_id,
+			agent_id: agent_id.to_string(),
+		})),
+		..CollabFrame::default()
+	}
+}
+
+fn agent_view_cancel_frame(sequence: u64, request_id: u32) -> CollabFrame {
+	CollabFrame {
+		protocol_revision: PROTOCOL_REVISION,
+		sequence,
+		payload: Some(collab_frame::Payload::AgentViewCancel(AgentViewCancel { request_id })),
+		..CollabFrame::default()
+	}
+}
+
+fn agent_view_snapshot_frame(
+	sequence: u64,
+	request_id: u32,
+	chunk_index: u32,
+	snapshot_bytes: Bytes,
+	r#final: bool,
+) -> CollabFrame {
+	CollabFrame {
+		protocol_revision: PROTOCOL_REVISION,
+		sequence,
+		payload: Some(collab_frame::Payload::AgentViewSnapshot(AgentViewSnapshot {
+			request_id,
+			chunk_index,
+			snapshot_bytes,
+			r#final,
+		})),
+		..CollabFrame::default()
+	}
+}
+
+fn agent_view_event_frame(sequence: u64, request_id: u32, event: JournalRecord) -> CollabFrame {
+	CollabFrame {
+		protocol_revision: PROTOCOL_REVISION,
+		sequence,
+		payload: Some(collab_frame::Payload::AgentViewEvent(AgentViewEvent {
+			request_id,
+			event: Some(event),
+		})),
+		..CollabFrame::default()
+	}
+}
+
+fn agent_view_end_frame(
+	sequence: u64,
+	request_id: u32,
+	error: Option<AgentViewFailureCode>,
+) -> CollabFrame {
+	CollabFrame {
+		protocol_revision: PROTOCOL_REVISION,
+		sequence,
+		payload: Some(collab_frame::Payload::AgentViewEnd(AgentViewEnd {
+			request_id,
+			error: error
+				.map(|code| ErrorMessage { code: code.to_string(), message: code.to_string() }),
+		})),
+		..CollabFrame::default()
+	}
+}
+
+fn state_frame(sequence: u64, state: SessionStateUpdate) -> CollabFrame {
+	CollabFrame {
+		protocol_revision: PROTOCOL_REVISION,
+		sequence,
+		payload: Some(collab_frame::Payload::State(state)),
+		..CollabFrame::default()
+	}
+}
+
+fn session_state(
+	peers: &BTreeMap<u32, AuthenticatedPeer>,
+	base: &SessionStateUpdate,
+) -> SessionStateUpdate {
+	let mut participants = Vec::with_capacity(peers.len() + 1);
+	participants.push(Participant {
+		display_name: "Host".to_owned(),
+		is_host:      true,
+		read_only:    false,
+		peer_id:      0,
+	});
+	participants.extend(peers.iter().map(|(&peer_id, peer)| Participant {
+		display_name: peer.principal().display_name().to_owned(),
+		is_host: false,
+		read_only: peer.read_only(),
+		peer_id,
+	}));
+	SessionStateUpdate { participants, ..base.clone() }
+}
+
+fn snapshot_chunks(bytes: &[u8]) -> Vec<Bytes> {
+	bytes
+		.chunks(SNAPSHOT_CHUNK_BYTES)
+		.enumerate()
+		.map(|(index, chunk)| {
+			Bytes::from(
+				serde_json::to_vec(&serde_json::json!({
+					"kind": "dom.snapshot.chunk@1",
+					"index": index,
+					"data": base64_url::encode_raw(chunk).into_string(),
+				}))
+				.expect("snapshot chunk JSON is infallible"),
+			)
+		})
+		.collect()
+}
+
+fn decode_snapshot_chunks(records: &[JournalRecord]) -> Result<Vec<u8>, CollabCommandFault> {
+	if records.len() > SNAPSHOT_CHUNK_MAX_COUNT {
+		return Err(CollabCommandFault::SnapshotTooLarge {
+			actual:  records.len().saturating_mul(SNAPSHOT_CHUNK_BYTES),
+			maximum: SNAPSHOT_MAX_BYTES,
+		});
+	}
+	let mut decoded = Vec::new();
+	for (expected, record) in records.iter().enumerate() {
+		let value: serde_json::Value = serde_json::from_slice(&record.transcript_v4_json)?;
+		if value.get("kind").and_then(serde_json::Value::as_str) != Some("dom.snapshot.chunk@1")
+			|| value.get("index").and_then(serde_json::Value::as_u64) != u64::try_from(expected).ok()
+		{
+			return Err(CollabCommandFault::InvalidSnapshotFragment);
 		}
-	}
-
-	fn chat(&self, agent_id: &str, text: &str) -> Result<(), Self::Error> {
-		self
-			.operations
-			.try_send(HostOperation::AgentChat {
-				principal: self.principal.clone(),
-				agent_id:  Str::new(agent_id),
-				text:      Str::new(text),
-			})
-			.map_err(HostOperationRouteError::from)
-	}
-
-	fn kill(&self, agent_id: &str) -> Result<(), Self::Error> {
-		self
-			.operations
-			.try_send(HostOperation::AgentKill {
-				principal: self.principal.clone(),
-				agent_id:  Str::new(agent_id),
-			})
-			.map_err(HostOperationRouteError::from)
-	}
-
-	fn revive(&self, agent_id: &str) -> Result<(), Self::Error> {
-		self
-			.operations
-			.try_send(HostOperation::AgentRevive {
-				principal: self.principal.clone(),
-				agent_id:  Str::new(agent_id),
-			})
-			.map_err(HostOperationRouteError::from)
-	}
-}
-
-#[derive(Clone, Copy, Debug, Error)]
-enum HostOperationRouteError {
-	#[error("collaboration host operation queue is full")]
-	Full,
-	#[error("collaboration host operation owner has stopped")]
-	Stopped,
-}
-
-impl<T> From<flume::TrySendError<T>> for HostOperationRouteError {
-	fn from(error: flume::TrySendError<T>) -> Self {
-		match error {
-			flume::TrySendError::Full(_) => Self::Full,
-			flume::TrySendError::Disconnected(_) => Self::Stopped,
+		let data = value
+			.get("data")
+			.and_then(serde_json::Value::as_str)
+			.ok_or(CollabCommandFault::InvalidSnapshotFragment)?;
+		let bytes = base64_url::decode_raw(data.as_bytes())
+			.into_vec()
+			.map_err(|_| CollabCommandFault::InvalidSnapshotFragment)?;
+		let actual = decoded.len().saturating_add(bytes.len());
+		if actual > SNAPSHOT_MAX_BYTES {
+			return Err(CollabCommandFault::SnapshotTooLarge { actual, maximum: SNAPSHOT_MAX_BYTES });
 		}
+		decoded.extend_from_slice(&bytes);
+	}
+	Ok(decoded)
+}
+
+fn event_record(revision: u64, event: Event) -> Result<JournalRecord, serde_json::Error> {
+	let value = match event {
+		Event::Patch(patch) => serde_json::json!({"kind": "patch@1", "data": patch}),
+		Event::Reset { snapshot } => serde_json::json!({
+			"kind": "snapshot@1",
+			"data": serde_json::from_slice::<serde_json::Value>(snapshot.as_bytes())?,
+		}),
+		Event::Stream { cause, sid, op, node, prop, text } => serde_json::json!({
+			"kind": "stream@1",
+			"cause": cause,
+			"sid": sid,
+			"op": op,
+			"node": node,
+			"prop": prop,
+			"text": text,
+		}),
+	};
+	Ok(JournalRecord {
+		revision,
+		transcript_v4_json: Bytes::from(serde_json::to_vec(&value)?),
+		visibility_class: VisibilityClass::PublicTranscript as i32,
+	})
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "kind")]
+enum ReplicatedEvent {
+	#[serde(rename = "patch@1")]
+	Patch { data: omp_dom::Patch },
+	#[serde(rename = "snapshot@1")]
+	Reset { data: Box<RawValue> },
+	#[serde(rename = "stream@1")]
+	Stream {
+		cause: EntryId,
+		sid:   omp_dom::Sid,
+		op:    omp_dom::StreamOp,
+		node:  Option<omp_dom::Handle>,
+		prop:  Option<omp_dom::PropKey>,
+		text:  Option<Str>,
+	},
+}
+
+fn decode_event(record: &JournalRecord) -> Result<Event, CollabCommandFault> {
+	let event: ReplicatedEvent = serde_json::from_slice(&record.transcript_v4_json)?;
+	Ok(match event {
+		ReplicatedEvent::Patch { data } => Event::Patch(data),
+		ReplicatedEvent::Reset { data } => {
+			Event::Reset { snapshot: Snapshot::from_bytes(data.get().as_bytes())? }
+		},
+		ReplicatedEvent::Stream { cause, sid, op, node, prop, text } => {
+			Event::Stream { cause, sid, op, node, prop, text }
+		},
+	})
+}
+
+fn snapshot_frame(sequence: u64, bytes: Bytes, r#final: bool, watermark: u64) -> CollabFrame {
+	CollabFrame {
+		protocol_revision: PROTOCOL_REVISION,
+		sequence,
+		payload: Some(collab_frame::Payload::SnapshotChunk(SnapshotChunk {
+			entries: vec![JournalRecord {
+				revision:           sequence,
+				transcript_v4_json: bytes,
+				visibility_class:   VisibilityClass::PublicTranscript as i32,
+			}],
+			r#final,
+			host_revision_watermark: watermark,
+		})),
+		..CollabFrame::default()
 	}
 }
 
-/// One owner request that must settle exactly once.
-pub struct CollabOwnerRequest {
-	command: CollabOwnerCommand,
-	reply:   Option<Sender<Result<CollabCommandResult, CollabCommandFault>>>,
-}
-
-impl CollabOwnerRequest {
-	/// Returns the requested operation.
-	pub const fn command(&self) -> &CollabOwnerCommand {
-		&self.command
-	}
-
-	/// Settles the waiting slash-command adapter.
-	pub fn settle(
-		mut self,
-		result: Result<CollabCommandResult, CollabCommandFault>,
-	) -> Result<(), CollabCommandFault> {
-		self
-			.reply
-			.take()
-			.expect("collaboration request reply is present until settlement")
-			.send(result)
-			.map_err(|_| CollabCommandFault::CallerStopped)
+fn live_record_frame(sequence: u64, record: JournalRecord) -> CollabFrame {
+	CollabFrame {
+		protocol_revision: PROTOCOL_REVISION,
+		sequence,
+		payload: Some(collab_frame::Payload::JournalRecord(record)),
+		..CollabFrame::default()
 	}
 }
 
-/// Collaboration command authority failure.
-#[derive(Debug, Error)]
-pub enum CollabCommandFault {
-	/// Hosting was requested without an attached agent journal and mailbox.
-	#[error("collaboration host runtime is unavailable")]
-	HostUnavailable,
-	/// The host journal cannot fit its entry count into the wire contract.
-	#[error("collaboration host snapshot has too many entries")]
-	SnapshotTooLarge,
-	/// Guest mutations remain disabled until the snapshot commits.
-	#[error("collaboration snapshot is still in progress")]
-	SnapshotInProgress,
-	/// The authoritative journal replication stream ended.
-	#[error("collaboration journal replication ended")]
-	ReplicationEnded,
-	/// Live journal replication skipped or repeated a physical revision.
-	#[error("collaboration replication expected revision {expected}, received {actual}")]
-	ReplicationGap {
-		/// Next required physical revision.
-		expected: u64,
-		/// Received physical revision.
-		actual:   u64,
-	},
-	/// Production collaboration owner has stopped.
-	#[error("collaboration runtime owner has stopped")]
-	OwnerStopped,
-	/// The single guest presentation owner has stopped consuming frames.
-	#[error("collaboration guest presentation owner has stopped")]
-	GuestPresentationStopped,
-	/// The requesting command surface disappeared before settlement.
-	#[error("collaboration command caller has stopped")]
-	CallerStopped,
-	/// A host-only operation was requested while not hosting.
-	#[error("no collaboration room is being hosted")]
-	NotHosting,
-	/// A leave operation was requested while not joined as a guest.
-	#[error("not joined to a collaboration room")]
-	NotGuest,
-	/// A second room cannot replace an active host or guest implicitly.
-	#[error("a collaboration room is already active")]
-	AlreadyActive,
-	/// Room cryptographic material could not be created or imported.
-	#[error(transparent)]
-	Crypto(#[from] CryptoError),
-	/// Native relay transport failed.
-	#[error(transparent)]
-	Relay(#[from] RelayError),
-	/// Initial relay connection exceeded the host/guest deadline.
-	#[error("collaboration relay connection timed out")]
-	ConnectTimeout {
-		/// Timeout source.
-		#[source]
-		source: Elapsed,
-	},
-	/// Guest welcome progress exceeded its deadline.
-	#[error("collaboration host welcome timed out")]
-	WelcomeTimeout {
-		/// Timeout source.
-		#[source]
-		source: Elapsed,
-	},
-	/// The relay produced a non-welcome item during guest handshake.
-	#[error("collaboration host did not send the expected welcome")]
-	UnexpectedWelcome,
-	/// A connected outbound operation unexpectedly entered reconnect buffering.
-	#[error("collaboration operation could not be sent on the connected relay")]
-	OutboundQueued,
-	/// Host welcome access tier disagreed with the supplied credential width.
-	#[error("collaboration host returned a mismatched credential tier")]
-	CredentialTierMismatch,
-	/// Viewer credentials cannot submit prompts.
-	#[error("this collaboration link is read-only")]
-	ReadOnly,
-	/// Guest join was composed without a durable transcript replica.
-	#[error("collaboration guest replica storage is unavailable")]
-	ReplicaUnavailable,
-	/// Host welcome omitted the required session header.
-	#[error("collaboration host welcome omitted its session header")]
-	MissingWelcomeHeader,
-	/// Guest transcript projection failed.
-	#[error(transparent)]
-	GuestReplica(#[from] GuestReplicaError),
+/// Starts the native relay-backed command owner.
+#[must_use]
+pub fn spawn_session_owner(authority: CollabSessionAuthority) -> JoinHandle<()> {
+	tokio::spawn(authority.run())
 }
 
 #[cfg(test)]
 mod tests {
-	use omp_collab::presence::{ConnectionState, PresenceFacts};
-
 	use super::*;
 
-	#[tokio::test]
-	async fn owner_request_settles_one_waiting_caller() {
-		let (owner, handle) = CollabSessionAuthority::new();
-		let caller = tokio::spawn({
-			let handle = handle.clone();
-			async move { handle.request(CollabOwnerCommand::Status).await }
-		});
-		let request = owner.recv().await.expect("request");
-		assert!(matches!(request.command(), CollabOwnerCommand::Status));
-		request
-			.settle(Ok(CollabCommandResult::inactive()))
-			.expect("settle");
-		assert_eq!(
-			caller.await.expect("caller task").expect("command"),
-			CollabCommandResult::inactive(),
-		);
+	fn pending_view(id: &'static str) -> GuestView {
+		let (reply, _) = flume::bounded(1);
+		GuestView {
+			agent_id: Str::new_static(id),
+			reply:    Some(reply),
+			events:   None,
+			chunks:   Vec::new(),
+			next:     0,
+		}
 	}
 
 	#[test]
-	fn presence_watch_is_authoritative() {
-		let (owner, handle) = CollabSessionAuthority::new();
-		let facts = PresenceFacts::host(ConnectionState::Connected, 2);
-		owner.publish_presence(Some(facts));
-		assert_eq!(handle.presence(), Some(facts));
-	}
-	#[test]
-	fn snapshot_frame_preserves_physical_omissions_and_authoritative_watermark() {
-		let records = vec![
-			v1::JournalRecord {
-				revision:           1,
-				transcript_v4_json: Bytes::from_static(br#"{"ts":1,"k":"reset"}"#),
-				visibility_class:   v1::VisibilityClass::PublicTranscript as i32,
-			},
-			v1::JournalRecord {
-				revision:           2,
-				transcript_v4_json: Bytes::from_static(
-					br#"{"ts":2,"k":"collab_omitted","rev":"host_local.v1"}"#,
-				),
-				visibility_class:   v1::VisibilityClass::HostLocalOmitted as i32,
-			},
-			v1::JournalRecord {
-				revision:           3,
-				transcript_v4_json: Bytes::from_static(br#"{"ts":3,"k":"reset"}"#),
-				visibility_class:   v1::VisibilityClass::PublicTranscript as i32,
-			},
-		];
-		let chunks = snapshot_entries(&records);
-		assert_eq!(chunks.concat(), records);
-		let frame = snapshot_frame(7, chunks.into_iter().next().expect("chunk"), true, 3);
-		let Some(collab_frame::Payload::SnapshotChunk(chunk)) = frame.payload else {
-			panic!("snapshot payload");
-		};
-		assert_eq!(chunk.host_revision_watermark, 3);
-		assert_eq!(chunk.entries.len(), 3);
-		assert_eq!(chunk.entries[1].visibility_class, v1::VisibilityClass::HostLocalOmitted as i32,);
+	fn agent_view_request_ids_skip_live_ids_across_wrap() {
+		let mut views = BTreeMap::new();
+		views.insert(1, pending_view("one"));
+		let mut next = u32::MAX;
+		assert_eq!(allocate_view_id(&mut next, &views), Some(2));
 	}
 
 	#[test]
-	fn guest_owner_consumes_state_and_registry_frames_into_live_projection() {
-		let (mut owner, handle) = CollabSessionAuthority::new();
-		owner.consume_guest_state(v1::SessionStateUpdate {
-			is_streaming: true,
-			session_name: "remote".to_owned(),
-			participants: vec![v1::Participant {
-				display_name: "host".to_owned(),
-				is_host:      true,
-				read_only:    false,
-				peer_id:      0,
-			}],
-			..Default::default()
-		});
-		owner.consume_guest_registry(v1::RegistrySnapshot {
-			agents: vec![v1::AgentSummary {
-				id: "agent-1".to_owned(),
-				display_name: "worker".to_owned(),
-				kind: v1::agent_summary::Kind::Sub as i32,
-				..Default::default()
-			}],
-		});
-		let projection = handle.guest_live();
-		assert!(projection.state.is_some_and(|state| state.is_streaming));
-		assert_eq!(projection.agents.agents[0].id, "agent-1");
-		assert_eq!(
-			projection.effects.expect("state effects").activity,
-			omp_collab::guest::GuestActivityTransition::Started,
-		);
+	fn replica_snapshot_fragment_count_is_bounded_before_decoding() {
+		let records = (0..=SNAPSHOT_CHUNK_MAX_COUNT)
+			.map(|_| JournalRecord::default())
+			.collect::<Vec<_>>();
+		assert!(matches!(
+			decode_snapshot_chunks(&records),
+			Err(CollabCommandFault::SnapshotTooLarge { maximum: SNAPSHOT_MAX_BYTES, .. })
+		));
 	}
 }

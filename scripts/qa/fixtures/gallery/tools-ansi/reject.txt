@@ -1,0 +1,30 @@
+[38;2;0;180;255m── reject ──────────────────────────────────────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mResolve[39m: [38;2;156;163;176mreject[39m [38;2;255;179;71m⟨proposed -> rejected⟩[39m [38;2;107;114;128m[38;2;156;163;176mThe patch would also[39m[39m                                       
+                                                                                                    
+
+[38;2;107;114;128m  · in progress[39m
+                                                                                                    
+[38;2;156;163;176m[39m [38;2;0;180;255mResolve[39m: [38;2;156;163;176mreject[39m [38;2;255;179;71m⟨proposed -> rejected⟩[39m [38;2;107;114;128m[38;2;156;163;176mThe patch would also delete the migration script.[39m[39m          
+                                                                                                    
+
+[38;2;107;114;128m  · done[39m
+                                                                                                    
+[38;2;255;179;71m                                                                                                    [39m
+[38;2;255;179;71m  Discard: pending action                                                                          [39m
+[38;2;255;179;71m                                                                                                    [39m
+[38;2;255;179;71m The patch would also delete the migration script.                                                  [39m
+[38;2;255;179;71m                                                                                                    [39m
+                                                                                                    
+
+[38;2;107;114;128m  · failed[39m
+                                                                                                    
+[38;2;255;71;87m                                                                                                    [39m
+[38;2;255;71;87m  Discard: pending action                                                                          [39m
+[38;2;255;71;87m                                                                                                    [39m
+[38;2;255;71;87m The patch would also delete the migration script.                                                  [39m
+[38;2;255;71;87m                                                                                                    [39m
+                                                                                                    
+

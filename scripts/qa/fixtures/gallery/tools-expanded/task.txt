@@ -1,0 +1,52 @@
+── task — Task ─────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+╭───  Task: task ─────────────────────────────────────────────────────────────────────────────────╮
+│ Read packages/server/src/auth/*.ts and summarize the session-cookie                              │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ • AuthLoader: Read packages/server/src/auth/*.ts and summarize the session-co…                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · in progress
+                                                                                                    
+╭───  Task: task ─────────────────────────────────────────────────────────────────────────────────╮
+│ Read packages/server/src/auth/session.ts and middleware.ts, then document the session-cookie     │
+│ validation flow and any TODOs.                                                                   │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ • AuthLoader: Read packages/server/src/auth/session.ts and middleware.ts, the…                   │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · done
+                                                                                                    
+╭─── • Task 1 agent ───────────────────────────────────────────────────────────────────────────────╮
+│ Read packages/server/src/auth/session.ts and middleware.ts, then document the session-cookie     │
+│ validation flow and any TODOs.                                                                   │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│ • AuthLoader: Load auth middleware ⟨done⟩ · 6 req · 11.6%/200K · $0.12 · 41.9s                   │
+│   Task                                                                                           │
+│     Read packages/server/src/auth/session.ts and middleware.ts, then docu…                       │
+│   Output                                                                                         │
+│     Session validation runs in middleware.ts:42 via verifySessionCookie().                       │
+│     Cookies are HMAC-signed (SHA-256) and checked against the session sto…                       │
+│     TODO at session.ts:88 — sliding-expiration refresh is stubbed.                               │
+│ ⟨1 succeeded · 6 req · 48.2s⟩                                                                    │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  Task 1 agent ───────────────────────────────────────────────────────────────────────────────╮
+│ Read packages/server/src/auth/session.ts and middleware.ts, then document the session-cookie     │
+│ validation flow and any TODOs.                                                                   │
+├──────────────────────────────────────────────────────────────────────────────────────────────────┤
+│  RateLimiter: Audit rate limiter ⟨failed⟩ · 3 req · 3.2%/200K · $0.10 · 9.8s                    │
+│   Task                                                                                           │
+│     Inspect packages/server/src/auth/rate-limit.ts. Confirm the 429 path …                       │
+│   Subagent exited 1: target file packages/server/src/auth/rate-limit.ts…                         │
+│ ⟨1 failed · 3 req · 9.8s⟩                                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

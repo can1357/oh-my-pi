@@ -1,15 +1,17 @@
 // Provider-wire compat for "openrouter"; regenerated from the frozen census using deployment contract selectors.
 
 provider "openrouter" {
+	// Replaces the OpenRouter provider wire-model-id dispatch branch.
+	wire-model-id-mode "openrouter"
+	// Replaces the strict-mode provider whitelist entry.
+	supports-strict-mode #true
 	thinking-format "openrouter"
 	thinking-mode "effort"
-	class "deepseek" {
-		family "r1" {
-			thinking-efforts "high"
-		}
-		family "v3" {
-			thinking-efforts "high"
-		}
+	class "anthropic" {
+		// OpenRouter's Anthropic upstream rejects oversized compiled strict-tool
+		// grammars; retry the turn without strict tools. Replaces the
+		// isOpenRouterAnthropicModel checks in the OpenAI request builders.
+		retry-without-strict-on-grammar-error #true
 	}
 	class "minimax" {
 		family "m3" {
@@ -23,7 +25,6 @@ provider "openrouter" {
 	}
 	class "stepfun" {
 		family "step" {
-			supports-tool-choice #false
 			thinking-efforts "minimal" "low" "medium" "high"
 		}
 	}
@@ -34,12 +35,6 @@ provider "openrouter" {
 	models "*thinking-2507" "*thinking:free" "arcee-ai/trinity-large-thinking" \
 		"nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free" {
 		thinking-requires-effort #true
-	}
-	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "arcee-ai/trinity-large-preview*" "amazon/nova-lite-v1" "amazon/nova-micro-v1" \
-		"amazon/nova-premier-v1" "amazon/nova-pro-v1" "baidu/cobuddy:free" "minimax/minimax-m2.5:free" \
-		"openrouter/owl-alpha" {
-		supports-tool-choice #false
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "deepseek/deepseek-chat-v3.1" "deepseek/deepseek-v4-pro" {
@@ -59,11 +54,9 @@ provider "openrouter" {
 		thinking-format "openrouter"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
-	models "z*5" "z-ai/glm-4.6*" "z-ai/glm-4.7*" "~anthropic*" "~google*" "~openai*" \
-		"amazon/nova-2-lite-v1" "baidu/ernie-4.5-vl-28b-a3b" "cohere/north-mini-code:free" \
+	models "z*5" "z-ai/glm-4.6*" "z-ai/glm-4.7*" "amazon/nova-2-lite-v1" "baidu/ernie-4.5-vl-28b-a3b" "cohere/north-mini-code:free" \
 		"minimax/minimax-m1" "nvidia/llama-3.3-nemotron-super-49b-v1.5" "openai/gpt-5.1-codex" \
-		"openai/gpt-5.1-codex-max" "openai/gpt-chat-latest" "z-ai/glm-4.5v" "z-ai/glm-5.1" \
-		"~moonshotai/kimi-latest" {
+		"openai/gpt-5.1-codex-max" "openai/gpt-chat-latest" "z-ai/glm-4.5v" "z-ai/glm-5.1" {
 		thinking-efforts "minimal" "low" "medium" "high"
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.

@@ -46,15 +46,63 @@ class Backend:
                 "height": 40, "graphics": "cells", "hyperlinks": True,
                 "has_ui": True,
             }
+        if operation == "omp.ui.commands":
+            return {
+                "commands": [{
+                    "name": "review", "aliases": ["rv"],
+                    "description": "Review changes", "source": "extension",
+                }]
+            }
         if operation == "omp.ui.icons":
             return ["check", "chevron-right"]
         if operation == "omp.ui.editor_text":
             return "draft"
         if operation == "omp.ui.confirm":
+            title = arguments["title"]
+            if title == "Declined":
+                return {
+                    "accepted": False, "value": None, "values": None,
+                    "answers": None, "reason": None,
+                }
+            if title == "Dismissed":
+                return {
+                    "accepted": False, "value": None, "values": None,
+                    "answers": None, "reason": "dismissed",
+                }
+            if title == "Timed out":
+                return {
+                    "accepted": False, "value": None, "values": None,
+                    "answers": None, "reason": "timed_out",
+                }
             return {
-                "cancelled": False, "reason": None, "confirmed": True,
-                "value": None, "values": [], "fields": {}, "answers": [],
-                "elapsed": None,
+                "accepted": True, "value": None, "values": None,
+                "answers": None, "reason": None,
+            }
+        if operation == "omp.ui.select":
+            return {
+                "accepted": True, "value": "alpha", "values": None,
+                "answers": None, "reason": None,
+            }
+        if operation == "omp.ui.multi_select":
+            return {
+                "accepted": True, "value": None, "values": ["alpha", "beta"],
+                "answers": None, "reason": None,
+            }
+        if operation == "omp.ui.form":
+            return {
+                "accepted": True, "value": None, "values": None,
+                "answers": {"name": "Ada", "enabled": True}, "reason": None,
+            }
+        if operation == "omp.ui.ask_user":
+            return {
+                "accepted": True, "value": None, "values": None,
+                "answers": {
+                    "language": {
+                        "selected": ["python"], "freeform": None,
+                        "note": "preferred", "timed_out": False,
+                    },
+                },
+                "reason": None,
             }
         if operation == "omp.ui.overlay":
             return {"id": "overlay-1"}
@@ -105,10 +153,38 @@ omp._install_control_backend(backend)
 
 # Synchronous effects enter the configured host queue rather than disappearing.
 omp.ui.mount(omp.ui.Slot.HEADER, omp.ui.text("connected"), key="contract")
-omp.ui.notify("ready")
+omp.ui.notify(
+    "ready", level=omp.ui.Level.WARN, title="Contract", desktop=True,
+    sound=omp.ui.Sound.WARNING, urgency=omp.ui.Urgency.CRITICAL,
+)
+omp.ui.set_status(
+    "contract-status", omp.ui.text("left"), order=7, side=omp.ui.Slot.STATUS_LEFT,
+)
+omp.ui.set_progress(omp.ui.Progress.value(42))
+image = omp.ui.image(b"P6 image bytes", w=2, h=1, trim=True)
 omp.ui.set_editor_text("hello")
-assert [effect["kind"] for effect in backend.effects] == ["mount", "notify", "set_editor_text"]
+omp.ui.set_working_indicator(())
+assert [effect["kind"] for effect in backend.effects] == [
+    "mount", "notify", "set_status", "set_progress", "image", "set_editor_text",
+    "set_working_indicator",
+]
 assert backend.effects[0]["body"]["content"] == {"source": "<text>connected</text>"}
+assert backend.effects[1]["body"] == {
+    "message": "ready", "level": "warn", "title": "Contract",
+    "desktop": True, "sound": "warning", "urgency": "critical",
+}
+assert backend.effects[2]["body"] == {
+    "key": "contract-status", "content": {"source": "<text>left</text>"},
+    "order": 7, "side": "status_left",
+}
+assert backend.effects[3]["body"] == {"state": {"kind": "value", "pct": 42}}
+image_body = backend.effects[4]["body"]
+assert image_body["source"] == b"P6 image bytes"
+assert image_body["resource"].startswith("ext-image-")
+assert image.source == (
+    f"<img src={image_body['resource']} w=2 h=1 trim/>"
+)
+assert backend.effects[-1]["body"] == {"frames": [], "interval_ms": None}
 
 ui_callbacks = []
 
@@ -174,10 +250,33 @@ async def contract():
     assert presentation.charset is omp.ui.Charset.ASCII
     assert presentation.appearance is omp.ui.Appearance.LIGHT
     assert presentation.has_ui and presentation.width == 120
+    assert await omp.ui.commands() == ({
+        "name": "review", "aliases": ("rv",),
+        "description": "Review changes", "source": "extension",
+    },)
     assert await omp.ui.icons("ch") == ("check", "chevron-right")
     assert await omp.ui.editor_text() == "draft"
     outcome = await omp.ui.confirm("Continue?")
-    assert isinstance(outcome, omp.ui.DialogOutcome) and outcome.confirmed
+    assert isinstance(outcome, omp.ui.DialogOutcome)
+    assert not outcome.cancelled and outcome.confirmed and outcome.reason is None
+    declined = await omp.ui.confirm("Declined")
+    assert not declined.cancelled and not declined.confirmed and declined.reason is None
+    dismissed = await omp.ui.confirm("Dismissed")
+    assert dismissed.cancelled and dismissed.reason is omp.ui.DialogCancel.DISMISSED
+    timed_out = await omp.ui.confirm("Timed out")
+    assert timed_out.cancelled and timed_out.reason is omp.ui.DialogCancel.TIMED_OUT
+    selected = await omp.ui.select("Choose", ["alpha"])
+    assert selected.value == "alpha" and selected.values == ()
+    multi = await omp.ui.multi_select("Choose", ["alpha", "beta"])
+    assert multi.values == ("alpha", "beta")
+    form = await omp.ui.form("Profile", ())
+    assert form.fields == {"name": "Ada", "enabled": True}
+    answers = await omp.ui.ask_user(omp.ui.AskQuestion("language", "Language?"))
+    assert answers.answers == (
+        omp.ui.AskAnswer(
+            "language", selected=("python",), note="preferred", timed_out=False,
+        ),
+    )
     overlay = await omp.ui.overlay(omp.ui.text("form"))
     assert await overlay.values() == {"name": "Ada"}
     await overlay.close()

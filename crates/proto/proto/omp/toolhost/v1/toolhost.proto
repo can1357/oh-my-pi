@@ -19,7 +19,7 @@ import "omp/ui/v1/ui.proto";
 //   - Receivers skip unknown fields and enum values.
 //   - Experimental extensions use a namespaced ValueMap at tag 15.
 //   - Field numbers are never reused; removed fields are reserved.
-//   - A terminal ToolComplete, ToolArgs, or ToolAborted fuses an invocation.
+//   - A terminal ToolResultComplete, ToolArgs, or ToolAborted fuses an invocation.
 //   - New domains use nested envelopes; the original direct arms remain fixed.
 message WorkerHello {
   uint32 schema_rev = 1;
@@ -86,6 +86,11 @@ enum PreludeParamKind {
   PRELUDE_PARAM_KIND_POSITIONAL_OR_KEYWORD = 1;
   PRELUDE_PARAM_KIND_KEYWORD_ONLY = 2;
 }
+enum ToolExecutionMode {
+  TOOL_EXECUTION_MODE_UNSPECIFIED = 0;
+  TOOL_EXECUTION_MODE_PARALLEL = 1;
+  TOOL_EXECUTION_MODE_SEQUENTIAL = 2;
+}
 
 // Python parameter shape for an eval-prelude helper (declarations with
 // revision family "prelude").
@@ -112,7 +117,13 @@ message ToolDecl {
   // Maximum device envelope; Core may only narrow it at authorization.
   optional omp.policy.v1.EffectEnvelope effects = 11;
   repeated PreludeParam prelude_params = 12;
+  // Declaration intent ("soft" or "hard"); Core resolves the mounted surface.
+  string kind = 13;
+  // Per-tool batch scheduling constraint.
+  ToolExecutionMode execution_mode = 14;
   omp.inference.v1.ValueMap props = 15;
+  // Frozen Python placement spelling: host, env, or worker:<name>.
+  string place = 16;
 }
 
 message ExtensionDecl {
@@ -128,18 +139,14 @@ message SlotDecl {
   sint32 priority = 3;
   omp.inference.v1.ValueMap props = 15;
 }
-message CommandDecl {
-  string name = 1;
-  string summary = 2;
-  string usage = 3;
-  omp.inference.v1.ValueMap props = 15;
-}
 message RegisterTools {
+  reserved 5;
+  reserved "commands";
+
   repeated ToolDecl tools = 1;
   uint64 generation = 2;
   repeated ExtensionDecl extensions = 3;
   repeated SlotDecl slots = 4;
-  repeated CommandDecl commands = 5;
   omp.inference.v1.ValueMap props = 15;
 }
 
@@ -177,16 +184,38 @@ enum OutcomeKind {
   OUTCOME_KIND_ARGS_REJECTED = 3;
   OUTCOME_KIND_ABORTED = 4;
 }
-message ToolComplete {
+
+// One result stream is Start, one or more non-empty Chunk frames, then
+// Complete. The host stages chunks directly into its CAS before accepting the
+// completion; the worker never mints artifact identities.
+message ToolResultStart {
   string call_id = 1;
   repeated omp.thread.v1.Part parts = 2;
-  bytes details_json = 3;
-  bool is_error = 4;
-  bool useless = 5;
-  optional ArgIssue args_issue = 6;
-  optional omp.thread.v1.Blob details_blob = 7;
+  bool useless = 3;
+  optional ArgIssue args_issue = 4;
+  // Suppress the automatic model follow-up only when every result in the batch opts in.
+  optional bool terminate = 5;
   omp.inference.v1.ValueMap props = 15;
   OutcomeKind kind = 16;
+}
+
+// data is bounded to RESULT_CHUNK_MAX_BYTES by the host preflight.
+message ToolResultChunk {
+  string call_id = 1;
+  bytes data = 2;
+  omp.inference.v1.ValueMap props = 15;
+}
+message ToolResultComplete {
+  string call_id = 1;
+  omp.inference.v1.ValueMap props = 15;
+}
+message ResultWorkerEnvelope {
+  oneof body {
+    ToolResultStart start = 1;
+    ToolResultChunk chunk = 2;
+    ToolResultComplete complete = 3;
+  }
+  omp.inference.v1.ValueMap props = 15;
 }
 message ToolArgs {
   string call_id = 1;
@@ -531,17 +560,19 @@ enum HookEventId {
   HOOK_EVENT_EXTENSION_UNLOAD = 56;
   HOOK_EVENT_HOST_RECONNECT = 57;
   HOOK_EVENT_TTSR_TRIGGERED = 58;
-  HOOK_EVENT_TODO_REMINDER = 59;
+  reserved 59; // Permanent tombstone: provisional todo_reminder was never public.
   HOOK_EVENT_RETRY_START = 60;
   HOOK_EVENT_RETRY_END = 61;
   HOOK_EVENT_FALLBACK_APPLIED = 62;
   HOOK_EVENT_FALLBACK_SUCCEEDED = 63;
-  reserved 64 to max;
+  HOOK_EVENT_MCP_NOTIFICATION = 64;
+  HOOK_EVENT_PROVIDER_RESPONSE = 65;
+  HOOK_EVENT_SESSION_RENAMED = 66;
 }
 
 // Revision 1 payloads for authoritative observational lifecycle events.
 // Producers truncate strings before dispatch: ids <= 128 bytes, rule/model/reason
-// fields <= 512 bytes, and reminder/matched fields <= 4096 bytes.
+// fields <= 512 bytes, and matched fields <= 4096 bytes.
 message LifecycleEventContext {
   string session_id = 1;
   string turn_id = 2;
@@ -553,12 +584,6 @@ message TtsrTriggeredEventV1 {
   string rule = 2;
   string matched = 3;
   bool interrupted = 4;
-}
-
-message TodoReminderEventV1 {
-  LifecycleEventContext context = 1;
-  uint32 pending = 2;
-  string reminder = 3;
 }
 
 message RetryLifecycleEventV1 {
@@ -576,11 +601,67 @@ message FallbackLifecycleEventV1 {
   string target_model = 3;
   string reason = 4;
 }
+message McpNotificationEventV1 {
+  string server = 1;
+  string method = 2;
+  bytes params_json = 3;
+  uint64 sequence = 4;
+}
+message ProviderResponseEventV1 {
+  string provider = 1;
+  string model = 2;
+  string api = 3;
+  uint32 status = 4;
+  map<string, string> headers = 5;
+  optional string request_id = 6;
+}
+message SessionRenamedEventV1 {
+  string session = 1;
+  optional string name = 2;
+}
+message SessionOriginV1 {
+  string session_id = 1;
+  optional uint64 at_event = 2;
+}
+message SessionStartEventV1 {
+  string session_id = 1;
+  string root = 2;
+  string cwd = 3;
+  repeated string dirs = 4;
+  bool resumed = 5;
+  optional SessionOriginV1 forked_from = 6;
+  optional string agent = 7;
+  string trust = 8;
+  uint64 head_event = 9;
+  string prompt_rev = 10;
+  optional string previous_session = 11;
+}
+message SessionShutdownEventV1 {
+  string session_id = 1;
+  string reason = 2;
+  uint64 budget_ms = 3;
+  optional string target_session = 4;
+}
+message HookModelRefV1 {
+  string provider = 1;
+  string api = 2;
+  string model = 3;
+}
+message ModelChangedEventV1 {
+  optional HookModelRefV1 from_model = 1;
+  HookModelRefV1 to_model = 2;
+  string role = 3;
+  string reason = 4;
+  optional string previous_thinking = 5;
+  optional string thinking = 6;
+}
 message When {
   repeated string names = 1;
   repeated string providers = 2;
   repeated string targets = 3;
   repeated string roles = 4;
+  repeated string servers = 5;
+  repeated string method_globs = 6;
   omp.inference.v1.ValueMap props = 15;
 }
 message SubscriptionSpec {
@@ -1173,6 +1254,46 @@ message QueryUsage {
   bool include_tree = 2;
   omp.inference.v1.ValueMap props = 15;
 }
+
+// One canonically encoded extension-owned journal seed.
+message SessionSeedEntry {
+  string kind = 1;
+  string rev = 2;
+  bytes data_json = 3;
+  omp.inference.v1.ValueMap props = 15;
+}
+
+// One visible user-message part admitted for a new interactive session.
+message SessionPromptPart {
+  oneof kind {
+    string text = 1;
+    omp.thread.v1.Blob blob = 2;
+  }
+}
+
+// Presence-bearing initial prompt. An empty parts list is invalid.
+message SessionPrompt {
+  repeated SessionPromptPart parts = 1;
+  omp.inference.v1.ValueMap props = 15;
+}
+
+// Declarative, immutable inputs to one create/seed/switch transaction.
+message SessionSetup {
+  optional string title = 1;
+  optional string parent = 2;
+  repeated SessionSeedEntry entries = 3;
+  optional SessionPrompt initial_prompt = 4;
+  omp.inference.v1.ValueMap props = 15;
+}
+
+// One generation-fenced and replay-safe create/seed/switch request.
+message CreateSession {
+  SessionSetup setup = 1;
+  string idempotency_key = 2;
+  uint64 host_generation = 3;
+  uint64 session_generation = 4;
+  omp.inference.v1.ValueMap props = 15;
+}
 message AdoptArtifact {
   string source_url = 1;
   string lifetime = 2;
@@ -1282,6 +1403,54 @@ message StateChanged {
   bytes value_json = 2;
   omp.inference.v1.ValueMap props = 15;
 }
+
+// Immutable index projection returned after the new journal is durable.
+message CreatedSession {
+  string session = 1;
+  optional string title = 2;
+  string cwd_uri = 3;
+  string project = 4;
+  uint64 created_at_ms = 5;
+  uint64 updated_at_ms = 6;
+  optional string parent = 7;
+  uint64 entries = 8;
+  omp.inference.v1.ValueMap props = 15;
+}
+
+// Successful terminal result of one create/seed/switch transaction.
+message CreateSessionResult {
+  CreatedSession session = 1;
+  repeated uint64 seed_indexes = 2;
+  omp.inference.v1.ValueMap props = 15;
+}
+
+enum SessionTransitionRefusalCode {
+  SESSION_TRANSITION_REFUSAL_CODE_UNSPECIFIED = 0;
+  SESSION_TRANSITION_REFUSAL_CODE_INVALID_SETUP = 1;
+  SESSION_TRANSITION_REFUSAL_CODE_INACCESSIBLE_PARENT = 2;
+  SESSION_TRANSITION_REFUSAL_CODE_INVALID_ORIGIN = 3;
+  SESSION_TRANSITION_REFUSAL_CODE_UI_BUSY = 4;
+  SESSION_TRANSITION_REFUSAL_CODE_EFFECTS_NOT_AUTHORIZED = 5;
+  SESSION_TRANSITION_REFUSAL_CODE_QUOTA_EXCEEDED = 6;
+  SESSION_TRANSITION_REFUSAL_CODE_STALE_GENERATION = 7;
+}
+
+// Typed pre-durability refusal. No session or index row was created.
+message SessionTransitionDenied {
+  SessionTransitionRefusalCode code = 1;
+  string message = 2;
+  omp.inference.v1.ValueMap details = 15;
+}
+
+// The durability acknowledgement was lost or could not be classified.
+//
+// The idempotency key is permanently fused: callers must not retry the
+// transition because Core cannot prove whether the new journal committed.
+message SessionTransitionIndeterminate {
+  string idempotency_key = 1;
+  string message = 2;
+  omp.inference.v1.ValueMap details = 15;
+}
 message JournalWorkerEnvelope {
   oneof body {
     DeclareEntryKinds declare_entry_kinds = 1;
@@ -1297,6 +1466,7 @@ message JournalWorkerEnvelope {
     StateGet state_get = 11;
     StateCas state_cas = 12;
     StateWatch state_watch = 13;
+    CreateSession create_session = 14;
   }
   omp.inference.v1.ValueMap props = 15;
 }
@@ -1309,6 +1479,9 @@ message JournalHostEnvelope {
     ArtifactRow artifact_row = 5;
     StateValue state_value = 6;
     StateChanged state_changed = 7;
+    CreateSessionResult create_session_result = 8;
+    SessionTransitionDenied session_transition_denied = 9;
+    SessionTransitionIndeterminate session_transition_indeterminate = 10;
   }
   omp.inference.v1.ValueMap props = 15;
 }
@@ -1444,12 +1617,14 @@ message HostFrame {
 }
 
 message WorkerFrame {
+  reserved 5;
+  reserved "tool_complete";
+
   uint64 request_id = 1;
   oneof body {
     WorkerHello hello = 2;
     RegisterTools register_tools = 3;
     ToolUpdate tool_update = 4;
-    ToolComplete tool_complete = 5;
     ToolAborted tool_aborted = 6;
     Pong pong = 7;
     Ping ping = 8;
@@ -1465,6 +1640,7 @@ message WorkerFrame {
     InferenceWorkerEnvelope inference = 19;
     TelemetryWorkerEnvelope telemetry = 20;
     RegimeWorkerEnvelope regimes = 21;
+    ResultWorkerEnvelope result = 22;
   }
   omp.inference.v1.ValueMap props = 15;
 }

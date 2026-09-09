@@ -2,6 +2,9 @@
 
 use std::{fmt::Write as _, time::Duration};
 
+use omp_core::{Str, fmts_mut};
+use strum::IntoStaticStr;
+
 use crate::{
 	component::{Component, PaintCtx, Slot, next_slot},
 	context::UiContext,
@@ -13,29 +16,53 @@ const SECOND_MS: u64 = 1_000;
 const MINUTE_MS: u64 = 60 * SECOND_MS;
 const HOUR_MS: u64 = 60 * MINUTE_MS;
 const DAY_MS: u64 = 24 * HOUR_MS;
+const WEEK_MS: u64 = 7 * DAY_MS;
+const MONTH_MS: u64 = 30 * DAY_MS;
+const YEAR_MS: u64 = 365 * DAY_MS;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum Mode {
 	Duration,
 	Relative,
+	/// Whole seconds since a presentation-clock instant (`ms`), shown as
+	/// ` Ns` in a running tool-card badge.
+	Elapsed,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, IntoStaticStr, PartialEq)]
 enum RelativeUnit {
+	#[strum(serialize = "")]
 	Now,
+	#[strum(serialize = "s")]
 	Second,
+	#[strum(serialize = "m")]
 	Minute,
+	#[strum(serialize = "h")]
 	Hour,
+	#[strum(serialize = "d")]
 	Day,
+	#[strum(serialize = "w")]
+	Week,
+	#[strum(serialize = "mo")]
+	Month,
+	#[strum(serialize = "y")]
+	Year,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum FormatKey {
 	Duration(u64),
 	Relative(RelativeUnit, u64),
+	Elapsed(u64),
 }
 
-/// A compact duration or live relative age backing the `<time>` markup tag.
+/// A compact duration, live relative age, or live elapsed-seconds badge
+/// backing the `<time>` markup tag.
+///
+/// - `<time ms=N/>`: compact duration (`1.2s`, `3m04s`).
+/// - `<time kind=relative ms=N/>`: age that keeps counting from first paint.
+/// - `<time kind=elapsed ms=N/>`: `Ns` whole seconds since presentation-clock
+///   instant `N`, never negative, repainting exactly on each second boundary.
 pub struct Time {
 	props:  Props,
 	slot:   Slot,
@@ -63,14 +90,10 @@ impl Time {
 	}
 
 	fn mode(&self) -> Mode {
-		if self
-			.props
-			.str_of(Prop::Kind)
-			.is_some_and(|kind| kind == "relative")
-		{
-			Mode::Relative
-		} else {
-			Mode::Duration
+		match self.props.str_of(Prop::Kind).map(Str::as_str) {
+			Some("relative") => Mode::Relative,
+			Some("elapsed") => Mode::Elapsed,
+			_ => Mode::Duration,
 		}
 	}
 
@@ -100,27 +123,50 @@ impl Time {
 			Mode::Relative => {
 				let age = self.age_at(now);
 				let (unit, value, period) = relative_parts(age);
-				let delta = period - age % period;
+				let unit_delta = period - age % period;
+				// A display-family boundary may precede the next tick of the
+				// current unit: `4w` becomes `1mo` at 30 days, not 5 weeks.
+				let transition = match unit {
+					RelativeUnit::Now => Some(SECOND_MS),
+					RelativeUnit::Second => Some(MINUTE_MS),
+					RelativeUnit::Minute => Some(HOUR_MS),
+					RelativeUnit::Hour => Some(DAY_MS),
+					RelativeUnit::Day => Some(WEEK_MS),
+					RelativeUnit::Week => Some(MONTH_MS),
+					RelativeUnit::Month => Some(YEAR_MS),
+					RelativeUnit::Year => None,
+				};
+				let delta = transition
+					.and_then(|at| at.checked_sub(age))
+					.filter(|delta| *delta != 0)
+					.map_or(unit_delta, |delta| unit_delta.min(delta));
 				let next = age.checked_add(delta).map(|_| delta);
 				(FormatKey::Relative(unit, value), next)
+			},
+			Mode::Elapsed => {
+				self.anchor = None;
+				let since = Duration::from_millis(self.source_ms());
+				let elapsed = u64::try_from(now.saturating_sub(since).as_millis()).unwrap_or(u64::MAX);
+				// A clock still behind the start instant reads zero until
+				// one full second after it.
+				let lead = u64::try_from(since.saturating_sub(now).as_millis()).unwrap_or(u64::MAX);
+				let seconds = elapsed / SECOND_MS;
+				// Wake exactly on the next whole-second boundary since `since`.
+				let next = seconds
+					.checked_add(1)
+					.and_then(|next| next.checked_mul(SECOND_MS))
+					.and_then(|at| at.checked_sub(elapsed))
+					.and_then(|delta| delta.checked_add(lead));
+				(FormatKey::Elapsed(seconds), next)
 			},
 		};
 		if self.key != Some(key) {
 			self.text.clear();
 			match key {
 				FormatKey::Duration(ms) => write_duration(&mut self.text, ms),
-				FormatKey::Relative(RelativeUnit::Now, _) => self.text.push_str("now"),
-				FormatKey::Relative(RelativeUnit::Second, value) => {
-					write!(self.text, "{value}s ago").expect("writing to String cannot fail");
-				},
-				FormatKey::Relative(RelativeUnit::Minute, value) => {
-					write!(self.text, "{value}m ago").expect("writing to String cannot fail");
-				},
-				FormatKey::Relative(RelativeUnit::Hour, value) => {
-					write!(self.text, "{value}h ago").expect("writing to String cannot fail");
-				},
-				FormatKey::Relative(RelativeUnit::Day, value) => {
-					write!(self.text, "{value}d ago").expect("writing to String cannot fail");
+				FormatKey::Relative(unit, value) => write_relative(&mut self.text, unit, value),
+				FormatKey::Elapsed(seconds) => {
+					write!(self.text, "{seconds}s").expect("writing to String cannot fail");
 				},
 			}
 			self.key = Some(key);
@@ -173,7 +219,7 @@ impl Component for Time {
 	}
 }
 
-fn relative_parts(age: u64) -> (RelativeUnit, u64, u64) {
+const fn relative_parts(age: u64) -> (RelativeUnit, u64, u64) {
 	if age < SECOND_MS {
 		(RelativeUnit::Now, 0, SECOND_MS)
 	} else if age < MINUTE_MS {
@@ -182,8 +228,33 @@ fn relative_parts(age: u64) -> (RelativeUnit, u64, u64) {
 		(RelativeUnit::Minute, age / MINUTE_MS, MINUTE_MS)
 	} else if age < DAY_MS {
 		(RelativeUnit::Hour, age / HOUR_MS, HOUR_MS)
-	} else {
+	} else if age < WEEK_MS {
 		(RelativeUnit::Day, age / DAY_MS, DAY_MS)
+	} else if age < MONTH_MS {
+		(RelativeUnit::Week, age / WEEK_MS, WEEK_MS)
+	} else if age < YEAR_MS {
+		(RelativeUnit::Month, age / MONTH_MS, MONTH_MS)
+	} else {
+		(RelativeUnit::Year, age / YEAR_MS, YEAR_MS)
+	}
+}
+/// Formats an elapsed age in milliseconds as the compact relative label the
+/// `<time kind=relative>` tag paints ("now", "5s ago", "3mo ago") for plain
+/// string contexts that cannot host a live component.
+pub fn relative_age(age_ms: u64) -> Str {
+	let (unit, value, _) = relative_parts(age_ms);
+	match unit {
+		RelativeUnit::Now => Str::new_static("now"),
+		unit => fmts_mut!("{value}{} ago", <&str>::from(unit)).freeze(),
+	}
+}
+
+fn write_relative(out: &mut String, unit: RelativeUnit, value: u64) {
+	match unit {
+		RelativeUnit::Now => out.push_str("now"),
+		unit => {
+			write!(out, "{value}{} ago", <&str>::from(unit)).expect("writing to String cannot fail");
+		},
 	}
 }
 
@@ -213,6 +284,12 @@ mod tests {
 
 	fn relative(ms: u64) -> Time {
 		Time::new().with(Prop::Ms, ms).with(Prop::Kind, "relative")
+	}
+
+	fn elapsed(since_ms: u64) -> Time {
+		Time::new()
+			.with(Prop::Ms, since_ms)
+			.with(Prop::Kind, "elapsed")
 	}
 
 	fn paint_at(time: &mut Time, now_ms: u64) -> (String, Vec<Wake>) {
@@ -254,6 +331,11 @@ mod tests {
 			(3_600_000, "1h ago", 3_600_000),
 			(86_399_999, "23h ago", 1),
 			(86_400_000, "1d ago", 86_400_000),
+			(2_591_999_999, "4w ago", 1),
+			(2_592_000_000, "1mo ago", 2_592_000_000),
+			(5_183_999_999, "1mo ago", 1),
+			(31_536_000_000, "1y ago", 31_536_000_000),
+			(63_071_999_999, "1y ago", 1),
 		];
 		for (age, expected, delta) in cases {
 			let mut time = relative(age);
@@ -268,6 +350,34 @@ mod tests {
 	}
 
 	#[test]
+	fn elapsed_badge_counts_whole_seconds_and_wakes_on_the_boundary() {
+		// Started at 2.4 s on the shared clock; painted 350 ms later.
+		let mut time = elapsed(2_400);
+		let (text, wakes) = paint_at(&mut time, 2_750);
+		assert_eq!(text, "0s");
+		assert_eq!(wakes, vec![Wake {
+			slot:   time.slot,
+			at:     Duration::from_millis(3_400),
+			layout: false,
+		}]);
+		// Exactly on the boundary the count flips and the next wake is one
+		// full second later — no drift, no sub-second repaints.
+		let (text, wakes) = paint_at(&mut time, 3_400);
+		assert_eq!(text, "1s");
+		assert_eq!(wakes[0].at, Duration::from_millis(4_400));
+		let (text, wakes) = paint_at(&mut time, 61_399);
+		assert_eq!(text, "58s");
+		assert_eq!(wakes[0].at, Duration::from_millis(61_400));
+		let pointer = time.text.as_ptr();
+		assert_eq!(paint_at(&mut time, 61_399).0, "58s");
+		assert_eq!(time.text.as_ptr(), pointer, "an unchanged second re-slices the cached text");
+		// A clock behind the start instant reads as zero, never negative.
+		let mut future = elapsed(9_000);
+		assert_eq!(paint_at(&mut future, 1_000).0, "0s");
+		assert_eq!(paint_at(&mut future, 1_000).1[0].at, Duration::from_millis(10_000));
+	}
+
+	#[test]
 	fn relative_age_advances_from_first_paint_and_saturates() {
 		let mut time = relative(999);
 		assert_eq!(paint_at(&mut time, 500).0, "now");
@@ -278,10 +388,18 @@ mod tests {
 		for age in [u64::MAX - 1, u64::MAX] {
 			let mut saturated = relative(age);
 			let (text, wakes) = paint_at(&mut saturated, 10);
-			assert_eq!(text, format!("{}d ago", age / DAY_MS));
+			assert_eq!(text, format!("{}y ago", age / YEAR_MS));
 			assert!(wakes.is_empty());
 			assert_eq!(paint_at(&mut saturated, u64::MAX).0, text);
 		}
+	}
+
+	#[test]
+	fn relative_age_matches_painted_labels() {
+		assert_eq!(relative_age(0), "now");
+		assert_eq!(relative_age(59_000), "59s ago");
+		assert_eq!(relative_age(2_592_000_000), "1mo ago");
+		assert_eq!(relative_age(94_608_000_000), "3y ago");
 	}
 
 	#[test]

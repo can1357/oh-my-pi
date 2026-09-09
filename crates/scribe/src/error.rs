@@ -171,6 +171,9 @@ pub enum TypeErrorKind {
 /// carried as the source of [`Error::Helper`].
 #[derive(Clone, Copy, Debug, Error, PartialEq, Eq)]
 pub enum HelperError {
+	/// A DOM-only helper was called without a render-scoped session tree.
+	#[error("function requires a session DOM")]
+	MissingDom,
 	/// Too few or too many helper arguments.
 	#[error("expected {expected} argument(s), got {got}")]
 	Arity {
@@ -179,6 +182,9 @@ pub enum HelperError {
 		/// Number of arguments supplied.
 		got:      usize,
 	},
+	/// An argument had to be a selector string or selected-node list.
+	#[error("argument must be a selector string or selected-node list")]
+	SelectorOrList,
 	/// An argument had to be a string.
 	#[error("argument must be a string")]
 	ExpectedString,

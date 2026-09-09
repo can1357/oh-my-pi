@@ -914,6 +914,21 @@ bytes into an active regular-file destination is not a filesystem copy at all �
 content commit that preserves the destination's document identity, and the Environment performs it
 as one.
 
+There is deliberately no pi-style permission-denied write/delete fallback hook. Running Python
+after `DOC_WRITE` or `FS_WRITE` rejects an operation would let an extension claim durable success
+outside the sole writer, bypassing revision/CAS checks, canonical-path and symlink containment,
+transaction atomicity, capability enforcement, and audit state. Permission, read-only-filesystem,
+and unsupported-operation failures therefore remain typed `Denied`, `Io`, or `Unsupported`;
+no Python callback can convert one into success. The ambient-syscall boundary is the deployment's
+[sandbox enforcement](06-policy.md#ompsandboxenforcement), not a post-denial callback.
+
+A deployment that needs privileged storage must implement an Environment backend **below**
+`DocumentAuthority`, selected and consented as deployment policy. That backend must preserve the
+same revision/CAS, canonical-path containment, symlink, transaction, and durable-success
+semantics. Its conformance proof must cover CAS conflicts, symlink escape, delete-versus-directory,
+transaction atomicity, and reporting success only after durable commit. Putting that transport
+above the dispatch gate, in an extension hook, is not a supported migration.
+
 `remove` on a missing path is an error, not an idempotent success. This is intentional: "delete if
 present" is a decision, and the caller makes it.
 
@@ -980,6 +995,18 @@ they are the Environment's data structures, not a process you hope stays alive.
 
 One-shot: opens a session, runs one command to completion, closes the session, returns the
 terminal status with output collected. The convenience path for the overwhelmingly common case.
+`env` is a command-local `Mapping[str, str | None]`: strings add or replace exported variables and
+`None` unsets them. The delta overlays the session environment only while this run executes; it
+does not alter the workspace snapshot or any later command.
+
+To modify a user-issued shell command, declare a fail-closed
+`user_bash/TRANSFORM` hook and return
+`omp.Modify(env_overrides={**event.env_overrides, "TOKEN_FILE": token_file})`; ordered REPLACE
+composition means the next TRANSFORM receives that updated mapping. Use `None` as a value to unset
+a variable for the command. A device that executes its own subprocess does **not** trigger
+`user_bash`: it owns that effect and must pass the delta explicitly with
+`await omp.env.sh.run(script, env=delta)`. `dyn` dispatch is likewise not shell execution. In both
+paths the delta is ephemeral and affects one run only.
 
 - **Raises** `TimedOut`, `Cancelled`, `Denied`, `EffectsNotAuthorized`, `Invalid`
 - **Channel** DATA · **Latency** `stream` · **Capability** `EXEC` · **Effect** yes · **Fail** closed
@@ -1602,7 +1629,7 @@ async def edit_pro(args: EditProArgs, ctx: omp.Context):
 | `writeAtomic` temp-and-rename | The daemon's, not yours, and it is the only writer. |
 | 150 ms preview debounce + `previewGeneration` | `dry_run` against a pinned revision is cheap, deterministic, and cannot race the executor, because they are the same function against the same lease. |
 | `tool_result` hook re-reading after `write` | `EditResult` already tells you the committed revision, whether a rebase fired, whether formatting changed the text, and exactly which ranges moved. |
-| Disabling the built-in `edit` | Unnecessary by design: an extension's editor is a device dispatched through the `xd` builtin inside the core `shell` tool (`xd <device> [args…]`; soft/hard intent, surface decided by the dynamic tool policy — `docs/py/01-devices.md`), so by default it occupies no schema slot and competes with nothing. Note this is the target, not today's behaviour — see [Known defects](#known-defects-in-code-this-namespace-depends-on). |
+| Disabling the built-in `edit` | Unnecessary by design: an extension's editor is a device dispatched through the `dyn` builtin inside the core `shell` tool (`dyn <device> [args…]`; soft/hard intent, surface decided by the dynamic tool policy — `docs/py/01-devices.md`), so by default it occupies no schema slot and competes with nothing. Note this is the target, not today's behaviour — see [Known defects](#known-defects-in-code-this-namespace-depends-on). |
 
 The interesting part is what the port *gains*: `result.rebased` is now a queryable fact. "Show me
 every `edit_pro@hl.*` call where the fuzzy rebase fired and the model retried anyway" is a query,
@@ -1718,13 +1745,13 @@ once the edge exists*.
 | `env/v1` typed client, request correlation, `RunGuard` | `crates/env/src/client.rs`, `crates/env/src/guard.rs` | Complete. `RunGuard::relinquish` already models detached work; drop already queues cancellation on a separate unbounded control channel so drop never blocks. |
 | `env/v1` server dispatch, UDS + in-process serving, hello/retire, connection ownership tables | `crates/app/src/envd/server.rs` | Complete for the frames that exist. `MIN_SCHEMA_REV = 4`, 64 MiB frame limit, 300 s default tool deadline, 250 ms native cancel grace. |
 | Exec host: persistent sessions, PTY, per-command `ExecRun` with TERM-then-KILL drop, spawn-observed process groups, named processes with restart and readiness | `crates/app/src/envd/exec.rs` | Complete. `ExecRun::drop` → `cancel(250 ms)`; `SpawnBook` implements `SpawnObserver` so every process group is tracked from birth. |
-| In-process bash: full AST, expansion, 51 Bash builtins, 58 coreutils, 8 process builtins, job control | `crates/shell-engine/src/builtins/factory.rs`, `crates/shell-builtins/src/factory.rs`, `crates/shell/` | Complete. `sh.parse` is a thin projection of `parser::ast`. Counts are registration-site names, several platform-gated (`exec`, `ulimit`, `umask`, `errno` are Unix-only; `kill`/`printf` Unix-or-Windows). |
-| Document authority: leases, `Revision` (BLAKE3-256 + sequence), transactions, fuzzy 3-way rebase, LSP mux, formatting roundtrip, `workspace/applyEdit` lowering, native watches, tree-sitter summaries, hashline/replace edit adapters | `crates/docserver/` | Complete, over `document/v1`. |
+| In-process bash: full AST, expansion, 51 Bash builtins, 58 coreutils, 8 process builtins, job control | `crates/shell-engine/src/builtins/factory.rs`, `crates/shell-builtins/src/factory.rs` | Complete. `sh.parse` is a thin projection of `parser::ast`. Counts are registration-site names, several platform-gated (`exec`, `ulimit`, `umask`, `errno` are Unix-only; `kill`/`printf` Unix-or-Windows). |
+| Document authority: leases, `Revision` (BLAKE3-256 + sequence), transactions, fuzzy 3-way rebase, LSP mux, formatting roundtrip, `workspace/applyEdit` lowering, native watches, tree-sitter summaries, hashline/replace edit adapters | `crates/envd/src/docserver/` | Complete, over `document/v1`. |
 | Env-side document client with revision-pinned lease type whose `Drop` sends a best-effort close | `crates/app/src/envd/docs.rs` | Complete. `DocumentLease`, `DocumentHost::{open,read,summarize,commit,commit_transaction,close}` — this is exactly the Rust shape `omp.env.docs` mirrors. |
 | Walker: cached, gitignore-layered, parallel, cancellation-heartbeat, glob filters, ranking | `crates/walker/` | Complete. `WorkspaceHost` in `crates/app/src/envd/workspace.rs` already enforces root containment by canonicalization. |
 | Grep engine: ripgrep regex with PCRE2 fallback, bounded leading-window reads, binary detection, context | `crates/grep/` | Complete. |
 | Blob store over `omp.blob.v1`, streaming put/get with commit-gated visibility | `crates/proto/proto/omp/blob/v1/blob.proto`, `crates/app/src/envd/blobs.rs` | Complete. |
-| Hashline: `#TAG` as `{:04X}` of `normalized_file_xxh32(bytes) & 0xffff` with the UTF-8 BOM stripped and pre-newline whitespace ignored, full op vocabulary, strict/partial apply, named registers, numbered diff | `crates/hashline/src/snapshots.rs`, `crates/hashline/src/apply.rs`, `crates/hashline/src/clipboard.rs` | Complete. |
+| Hashline: `#TAG` as `{:04X}` of `normalized_file_xxh32(bytes) & 0xffff` with the UTF-8 BOM stripped and pre-newline whitespace ignored, full op vocabulary, strict/partial apply, named registers, numbered diff | `crates/edit/src/store.rs`, `crates/edit/src/modes/hashline/apply.rs`, `crates/edit/src/modes/hashline/clipboard.rs` | Complete. |
 | Free-threaded CPython 3.14t embedding and the child-worker re-exec pattern | `crates/py/`, `crates/tools/src/eval/kernel.rs` | Complete. |
 | Python worker protocol: `toolhost/v1` over varint-delimited protobuf on stdio, with `WorkerHello`, `RegisterTools`/`ToolDecl` (carrying `rev` and `ToolConstraint`), `InvokeTool`, `CancelTool`, `ToolUpdate`, `ToolComplete`, `ToolAborted`, `Ping`/`Pong`, `ProtocolError` | `crates/proto/proto/omp/toolhost/v1/toolhost.proto`, `crates/app/src/envd/worker.rs` | Complete as a **CONTROL-shaped** channel. Supervisor with bounded-backoff respawn and registration-equality checks on restart; `sys.stdout` is redirected to stderr in the child so `print()` cannot corrupt the frame stream. |
 
@@ -2181,10 +2208,12 @@ synchronization* (100-108), *Atomic text edit and workspace edit application eng
   the parent precondition) or these stay tool-only. **Open question; leaning virtual drivers**,
   because the alternative means an extension cannot read a notebook cell through a lease, and
   *Jupyter Notebook Virtual Text Translation* (`tools-file.md:190-195`) has exactly the same shape.
-- *Permission-Denied Fallback Seam* (`tools-file.md:131-137`). A `sudo` escalation path needs a
-  structured request/response over the DATA socket *and* a CONTROL-side approval, because the
-  approving party is the user, not the Environment. Deliberately absent from `omp.env` above; it
-  is a policy surface. See `docs/py/06-policy.md`.
+- *Permission-Denied Fallback Seam* (`tools-file.md:131-137`). **Rejected.** A callback after
+  `DOC_WRITE`/`FS_WRITE` denial would bypass the docserver's sole-writer, revision, capability,
+  containment, transaction, and durable-success invariants. Privileged storage belongs below
+  `DocumentAuthority` as a deployment-selected Environment backend, with the conformance contract
+  stated under [Raw filesystem](#raw-filesystem--ompenvfs); sandbox enforcement remains
+  [`omp.SandboxEnforcement`](06-policy.md#ompsandboxenforcement).
 - **DAP, entirely** (`lsp-dap.md:192-240`: adapter registry, client protocol engine, session
   manager and state machine, debug agent actions). Nothing in `env/v1` or `document/v1` carries
   DAP. A debug adapter is a long-lived child speaking a framed protocol with request/response and
@@ -2356,6 +2385,6 @@ Changes this file made for Rev 2, and the review point that drove each:
   durable approval tickets (`PLAN.md` §D5). Both Rev 2 flags are kept in prose as
   historical records.
 
-**Revision 2.2** — the `xd` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `xd` builtin of the embedded shell, inside the core `shell` tool: `xd` lists the catalog (`xd --q <text>` searches), `xd <device> --help` returns docs plus schema-derived CLI usage, and `xd <device> [args…]` (or `xd <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `xd resolve "<reason>"` / `xd reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `xd` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
+**Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
 
-- **Environment editor prose.** The live pi-mechanism table now routes extension editors through `xd` inside `shell` while preserving the dynamic-policy and zero-device-schema-slot claims.
+- **Environment editor prose.** The live pi-mechanism table now routes extension editors through `dyn` inside `shell` while preserving the dynamic-policy and zero-device-schema-slot claims.

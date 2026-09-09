@@ -735,21 +735,33 @@ pub fn command_symbol(name: &str) -> Option<&'static str> {
 /// Resolves a LaTeX math font command.
 pub fn math_font(command: &str) -> Option<MathFont> {
 	Some(match command {
-		"mathbf" | "pmb" | "textbf" => MathFont::Bf,
-		"mathit" | "textit" => MathFont::It,
+		"mathbf" | "pmb" => MathFont::Bf,
+		"mathit" => MathFont::It,
 		"boldsymbol" | "bm" | "mathbfit" => MathFont::BfIt,
 		"mathbb" | "Bbb" | "mathds" | "mathbbm" => MathFont::Bb,
 		"mathcal" => MathFont::Cal,
 		"mathscr" | "mathbfscr" | "mathbfcal" => MathFont::Scr,
 		"mathfrak" => MathFont::Frak,
 		"mathbffrak" | "mathfrakbold" => MathFont::BfFrak,
-		"mathsf" | "textsf" => MathFont::Sf,
+		"mathsf" => MathFont::Sf,
 		"mathsfbf" | "mathbfsf" => MathFont::SfBf,
 		"mathsfit" => MathFont::SfIt,
 		"mathsfbfit" | "mathbfsfit" => MathFont::SfBfIt,
-		"mathtt" | "texttt" => MathFont::Tt,
+		"mathtt" => MathFont::Tt,
 		_ => return None,
 	})
+}
+/// Applies a text-mode LaTeX command to terminal style attributes.
+pub(super) fn terminal_text_style(mut style: Style, command: &str) -> Option<Style> {
+	match command {
+		"textbf" => style.bold = true,
+		"textit" | "textsl" | "emph" => style.italic = true,
+		"textmd" => style.bold = false,
+		"textup" => style.italic = false,
+		"texttt" | "textsf" => {},
+		_ => return None,
+	}
+	Some(style)
 }
 
 const fn plane(font: MathFont) -> (u32, u32, Option<u32>, &'static str) {
@@ -1422,6 +1434,13 @@ impl<'a> Parser<'a> {
 	}
 
 	fn apply_command(&mut self, name: &str, font: Option<MathFont>) -> Row {
+		if let Some(style) = terminal_text_style(self.current, name) {
+			let outer = self.current;
+			self.current = style;
+			let line = self.argument(font).line;
+			self.current = outer;
+			return line;
+		}
 		if let Some(requested) = math_font(name) {
 			return self.argument(Some(requested)).line;
 		}
@@ -2012,18 +2031,7 @@ fn script_or_fallback(line: &Row, sup: bool, style: Style, group: bool) -> Row {
 fn is_text_command(name: &str) -> bool {
 	matches!(
 		name,
-		"text"
-			| "textrm"
-			| "textnormal"
-			| "textup"
-			| "textmd"
-			| "textsc"
-			| "textsl"
-			| "emph"
-			| "mathrm"
-			| "mathnormal"
-			| "mbox"
-			| "hbox"
+		"text" | "textrm" | "textnormal" | "textsc" | "mathrm" | "mathnormal" | "mbox" | "hbox"
 	)
 }
 fn is_function(name: &str) -> bool {
@@ -2245,35 +2253,73 @@ pub fn is_bare_math_environment(name: &str) -> bool {
 	)
 }
 
-/// Finds the closing dollar byte offset in text following an inline-math
-/// opener.
-pub fn inline_math_span_end(text: &str) -> Option<usize> {
-	let first = text.chars().next()?;
-	if matches!(first, ' ' | '\t' | '\n' | '$') {
+/// Returns the math body and consumed bytes when `text` begins with a complete
+/// `$…$`, `$$…$$`, `\(…\)`, or `\[…\]` span.
+///
+/// Every form closes at its first unescaped matching delimiter. The single
+/// dollar form additionally follows Pandoc's anti-currency whitespace, digit,
+/// and single-line rules.
+pub fn math_span(text: &str) -> Option<(&str, usize)> {
+	if text.starts_with("$$") {
+		let close = delimiter_end(text, "$$", 2)?;
+		let body = &text[2..close];
+		return (!body.trim().is_empty()).then_some((body, close + 2));
+	}
+	if text.starts_with("\\(") {
+		let close = delimiter_end(text, "\\)", 2)?;
+		return Some((&text[2..close], close + 2));
+	}
+	if text.starts_with("\\[") {
+		let close = delimiter_end(text, "\\]", 2)?;
+		return Some((&text[2..close], close + 2));
+	}
+	if !text.starts_with('$') {
 		return None;
 	}
-	let mut iter = text.char_indices().peekable();
-	while let Some((index, ch)) = iter.next() {
-		if ch == '\\' {
-			iter.next();
-			continue;
-		}
-		if ch == '\n' {
+	let body_start = 1;
+	let after = *text.as_bytes().get(body_start)?;
+	if matches!(after, b' ' | b'\t' | b'\n' | b'$') {
+		return None;
+	}
+	for (offset, byte) in text.as_bytes()[body_start..].iter().copied().enumerate() {
+		let at = body_start + offset;
+		if byte == b'\n' {
 			return None;
 		}
-		if ch == '$' {
-			let previous = text[..index].chars().next_back();
-			if matches!(previous, Some(' ' | '\t')) {
-				return None;
-			}
-			let next = iter.peek().map(|(_, ch)| *ch);
-			if next.is_some_and(|ch| ch.is_ascii_digit()) {
-				continue;
-			}
-			return (!text[..index].trim().is_empty()).then_some(index);
+		if byte != b'$' || escaped_at(text, at, body_start) {
+			continue;
 		}
+		if matches!(text.as_bytes().get(at - 1), Some(b' ' | b'\t')) {
+			return None;
+		}
+		if text.as_bytes().get(at + 1).is_some_and(u8::is_ascii_digit) {
+			continue;
+		}
+		let body = &text[body_start..at];
+		return (!body.trim().is_empty()).then_some((body, at + 1));
 	}
 	None
+}
+
+fn delimiter_end(text: &str, delimiter: &str, from: usize) -> Option<usize> {
+	let mut cursor = from;
+	while let Some(relative) = text.get(cursor..)?.find(delimiter) {
+		let at = cursor + relative;
+		if !escaped_at(text, at, from) {
+			return Some(at);
+		}
+		cursor = at + 1;
+	}
+	None
+}
+
+const fn escaped_at(text: &str, at: usize, from: usize) -> bool {
+	let bytes = text.as_bytes();
+	let mut cursor = at;
+	while cursor > from && bytes[cursor - 1] == b'\\' {
+		cursor -= 1;
+	}
+	(at - cursor) % 2 == 1
 }
 
 #[cfg(test)]
@@ -2337,6 +2383,32 @@ mod tests {
 		let line = latex_row(r"\cancel{x}\underline{y}", base);
 		assert_eq!(line[0].0, base.strikethrough());
 		assert_eq!(line[1].0, base.underline());
+		let line = latex_row(r"\textbf{\frac{a}{b}}", base);
+		assert_eq!(text_of(&line), "a/b");
+		assert!(line.iter().all(|(style, _)| style.spec().bold));
+
+		let line = latex_row(r"\textbf{A\textmd{B}C}", base);
+		assert_eq!(text_of(&line), "ABC");
+		assert!(line[0].0.spec().bold);
+		assert!(!line[1].0.spec().bold);
+		assert!(line[2].0.spec().bold);
+
+		let line = latex_row(r"\boxed{\textcolor{red}{x}}", base);
+		assert_eq!(text_of(&line), "[x]");
+		assert_eq!(line[0].0, base);
+		assert_eq!(line[1].0, base.fg(Color::Rgb(255, 0, 0)));
+		assert_eq!(line[2].0, base);
+		let line = latex_row(r"x_{\textit{word}}\pmod{\textbf{n}}", base);
+		assert_eq!(text_of(&line), "x_(word)(mod n)");
+		for (style, text) in &line {
+			if text.as_str() == "word" {
+				assert!(style.spec().italic);
+			} else if text.as_str() == "n" {
+				assert!(style.spec().bold);
+			} else {
+				assert_eq!(*style, base);
+			}
+		}
 	}
 
 	#[test]
@@ -2351,9 +2423,12 @@ mod tests {
 
 	#[test]
 	fn span_and_environment_rules() {
-		assert_eq!(inline_math_span_end("x$ rest"), Some(1));
-		assert_eq!(inline_math_span_end("5 and $10"), None);
-		assert_eq!(inline_math_span_end("x\\$y$ rest"), Some(4));
+		assert_eq!(math_span("$x$ rest"), Some(("x", 3)));
+		assert_eq!(math_span("$5 and $10"), None);
+		assert_eq!(math_span(r"$x\$y$ rest"), Some((r"x\$y", 6)));
+		assert_eq!(math_span(r"\$x$"), None);
+		assert_eq!(math_span(r"\(x \\) y\) end"), Some((r"x \\) y", 11)));
+		assert_eq!(math_span(r"$$a \$$ b$$"), Some((r"a \$$ b", 11)));
 		assert!(is_bare_math_environment("align*"));
 		assert!(!is_bare_math_environment("tabular"));
 	}

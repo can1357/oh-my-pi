@@ -14,8 +14,6 @@ pub mod resolver;
 pub mod trust;
 pub mod upgrade;
 
-use std::error::Error;
-
 use omp_core::Str;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString, IntoStaticStr};
@@ -52,13 +50,28 @@ pub enum TrustTier {
 ///
 /// Every extension subsystem emits one of these values; callers should use
 /// [`ExtensionCode::as_ref`] rather than inventing string codes.
-#[derive(Clone, Copy, Debug, Display, EnumString, Eq, Hash, IntoStaticStr, PartialEq)]
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Deserialize,
+	Display,
+	EnumString,
+	Eq,
+	Hash,
+	IntoStaticStr,
+	PartialEq,
+	Serialize,
+)]
+#[serde(rename_all = "SCREAMING-KEBAB-CASE")]
 #[strum(serialize_all = "SCREAMING-KEBAB-CASE", ascii_case_insensitive)]
 pub enum ExtensionCode {
 	/// A named source had no extension manifest.
 	ENoManifest,
 	/// An extension manifest could not be parsed.
 	EManifestParse,
+	/// A requested or declared feature is unknown or malformed.
+	EFeature,
 	/// A capability lies outside the closed vocabulary.
 	ECapUnknown,
 	/// An executable capability was open-ended.
@@ -121,6 +134,8 @@ pub enum ExtensionCode {
 	EGrantUnknown,
 	/// Extension settings attempted to carry a secret.
 	ESettingSecret,
+	/// Startup update policy attempted scope escalation or was malformed.
+	EUpdatePolicy,
 	/// A trusted extension failed to load.
 	ETrustedLoad,
 	/// A host binary does not export the `CPython` C API.
@@ -131,8 +146,12 @@ pub enum ExtensionCode {
 	WKeyRotated,
 	/// An offline revocation list was stale.
 	WRevocationStale,
+	/// A locked site tree or required entry is missing.
+	ESiteMissing,
 	/// A site tree contains an untracked entry.
 	WSiteExtra,
+	/// An installed extension is not covered by an exact operator grant.
+	WUngranted,
 	/// A vendored dependency duplicates a resolved one.
 	WVendorDup,
 	/// Resident host cost exceeded the configured budget.
@@ -153,8 +172,38 @@ pub enum ExtensionCode {
 	WIndexDrift,
 }
 
+impl ExtensionCode {
+	/// Process exit status assigned to this stable diagnostic class.
+	pub const fn exit_code(self) -> u8 {
+		match self {
+			Self::EFeature | Self::EUrlRequire | Self::EGitFloating => 2,
+			Self::EUnsat | Self::EFrozenConflict | Self::ETargetMissing | Self::EAbiRejected => 3,
+			Self::EIntegrity | Self::ESig | Self::EKeyChanged | Self::ERevoked => 4,
+			Self::EConsent | Self::EGrantUnknown => 5,
+			Self::EOffline => 6,
+			Self::EIndexDrift | Self::ELockDrift => 7,
+			Self::WYanked
+			| Self::WKeyRotated
+			| Self::WRevocationStale
+			| Self::WSiteExtra
+			| Self::WUngranted
+			| Self::WVendorDup
+			| Self::WPoolCount
+			| Self::WApiSkew
+			| Self::WForeignRoot
+			| Self::WWorkspaceAnon
+			| Self::WReplaceDenied
+			| Self::WNoLock
+			| Self::WSiteOverride
+			| Self::WIndexDrift => 0,
+			_ => 1,
+		}
+	}
+}
+
 /// A structured extension failure or warning.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error("{code}: {detail}")]
 pub struct ExtensionError {
 	/// Stable diagnostic code.
 	pub code:   ExtensionCode,
@@ -169,19 +218,12 @@ impl ExtensionError {
 	}
 }
 
-mod extension_error_display {
-	use std::fmt::{self, Display};
-
-	use super::ExtensionError;
-
-	impl Display for ExtensionError {
-		fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-			write!(formatter, "{}: {}", self.code, self.detail)
-		}
+impl ExtensionError {
+	/// Stable process status for the diagnostic class.
+	pub const fn exit_code(&self) -> u8 {
+		self.code.exit_code()
 	}
 }
-
-impl Error for ExtensionError {}
 
 /// Typed provenance fields stamped wherever an extension acts.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -209,4 +251,21 @@ pub struct WorkspaceUri {
 	pub uri:    Str,
 	/// BLAKE3 workspace identity digest.
 	pub digest: Str,
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn extension_diagnostic_exit_statuses_follow_the_cli_contract() {
+		assert_eq!(ExtensionCode::EFeature.exit_code(), 2);
+		assert_eq!(ExtensionCode::EUnsat.exit_code(), 3);
+		assert_eq!(ExtensionCode::EIntegrity.exit_code(), 4);
+		assert_eq!(ExtensionCode::EConsent.exit_code(), 5);
+		assert_eq!(ExtensionCode::EOffline.exit_code(), 6);
+		assert_eq!(ExtensionCode::ELockDrift.exit_code(), 7);
+		assert_eq!(ExtensionCode::WNoLock.exit_code(), 0);
+		assert_eq!(ExtensionCode::EManifestParse.exit_code(), 1);
+	}
 }

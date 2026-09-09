@@ -79,7 +79,7 @@ const LANG_ALIASES: &[(&[&str], &str)] = &[
 
 /// Semantic styles applied to parsed syntax scopes.
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) struct HighlightStyles {
+pub struct HighlightStyles {
 	base:        Style,
 	comment:     Style,
 	keyword:     Style,
@@ -98,17 +98,17 @@ impl HighlightStyles {
 	/// Derives syntax categories from the shared semantic palette.
 	pub(crate) const fn from_theme(theme: &Theme) -> Self {
 		Self {
-			base:        Style::new().fg(theme.fg),
-			comment:     Style::new().fg(theme.muted).italic(),
-			keyword:     Style::new().fg(theme.accent).bold(),
-			function:    Style::new().fg(theme.info),
+			base:        Style::new(),
+			comment:     Style::new().fg(theme.muted),
+			keyword:     Style::new().fg(theme.accent),
+			function:    Style::new().fg(theme.ok),
 			variable:    Style::new().fg(theme.fg),
-			string:      Style::new().fg(theme.ok),
+			string:      Style::new().fg(theme.code_border),
 			number:      Style::new().fg(theme.warn),
 			type_name:   Style::new().fg(theme.warn),
 			operator:    Style::new().fg(theme.accent),
-			punctuation: Style::new().fg(theme.muted),
-			inserted:    Style::new().fg(theme.ok),
+			punctuation: Style::new().fg(theme.output),
+			inserted:    Style::new().fg(theme.info),
 			deleted:     Style::new().fg(theme.err),
 		}
 	}
@@ -132,7 +132,7 @@ impl HighlightStyles {
 }
 
 /// Reports whether `language` resolves to a bundled syntax.
-pub(crate) fn supports_language(language: &str) -> bool {
+pub fn supports_language(language: &str) -> bool {
 	!language.is_empty() && find_syntax(syntaxes(), language).is_some()
 }
 
@@ -140,7 +140,7 @@ pub(crate) fn supports_language(language: &str) -> bool {
 ///
 /// One instance must be retained for the whole source side so scope state
 /// survives batch boundaries.
-pub(crate) struct HighlightStream {
+pub struct HighlightStream {
 	parse_state: ParseState,
 	scope_stack: ScopeStack,
 }
@@ -196,7 +196,7 @@ impl HighlightStream {
 	}
 }
 
-pub(crate) fn render(
+pub fn render(
 	source: &str,
 	language: &str,
 	line_count: usize,
@@ -422,14 +422,14 @@ mod tests {
 		let mut rendered = RichText::default();
 		assert!(render(nix, "nix", 1, &styles, &mut rendered));
 		assert_eq!(color_containing(&rendered, "let"), palette.accent);
-		assert_eq!(color_containing(&rendered, "hello"), palette.ok);
+		assert_eq!(color_containing(&rendered, "hello"), palette.code_border);
 		assert_eq!(color_containing(&rendered, "greeting"), palette.muted);
 
 		let mermaid = "graph TD\n  A[\"Start\"] --> B\n  %% note";
 		rendered.clear();
 		assert!(render(mermaid, "mermaid", 3, &styles, &mut rendered));
 		assert_eq!(color_containing(&rendered, "graph"), palette.accent);
-		assert_eq!(color_containing(&rendered, "Start"), palette.ok);
+		assert_eq!(color_containing(&rendered, "Start"), palette.code_border);
 		assert_eq!(color_containing(&rendered, "-->"), palette.accent);
 		assert_eq!(color_containing(&rendered, "note"), palette.muted);
 	}

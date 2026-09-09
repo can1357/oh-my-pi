@@ -10,7 +10,7 @@ use std::{
 	time::SystemTime,
 };
 
-use omp_telemetry::redact::redact_sensitive_credentials;
+use omp_observability::redact::redact_sensitive_credentials;
 use thiserror::Error;
 
 /// Maximum bytes returned by one viewer page.
@@ -218,4 +218,30 @@ fn parse_timestamp_ms(line: &str) -> Option<u64> {
 		.get("timestamp_ms")
 		.or_else(|| value.get("time_ms"))?
 		.as_u64()
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn log_source_reads_real_files_in_order_and_redacts() {
+		let directory = tempfile::tempdir().expect("temp directory");
+		let secret = format!("gho_{}", "A".repeat(36));
+		fs::write(
+			directory.path().join("omp.2026-09-03.1.log"),
+			format!("first\nsecond {secret}\nthird\n"),
+		)
+		.expect("log fixture");
+		let source =
+			LogSource::discover(directory.path(), SystemTime::UNIX_EPOCH).expect("discover logs");
+		let cursor = source.newest().expect("newest").expect("cursor");
+		let chunk = source
+			.read_older(cursor, DEFAULT_CHUNK_BYTES)
+			.expect("read logs");
+		assert_eq!(chunk.lines.len(), 3);
+		assert_eq!(chunk.lines[0], "first");
+		assert_eq!(chunk.lines[2], "third");
+		assert!(!chunk.lines[1].contains(&secret));
+	}
 }

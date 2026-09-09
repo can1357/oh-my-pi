@@ -25,8 +25,8 @@ pub struct BuiltinRuleAsset {
 	pub source:   &'static str,
 }
 
-/// All 27 pi-parity modernization rules. They are parsed and glob-matched like
-/// authored rules, never appended unconditionally.
+/// All 27 modernization rules. They are parsed and glob-matched like authored
+/// rules, never appended unconditionally.
 pub const BUILTIN_RULES: &[BuiltinRuleAsset] = &[
 	BuiltinRuleAsset {
 		name:     "go-add-cleanup",

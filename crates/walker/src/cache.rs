@@ -49,7 +49,7 @@ static WALK_POOL: LazyLock<Option<ThreadPool>> = LazyLock::new(|| {
 	}
 	rayon::ThreadPoolBuilder::new()
 		.num_threads(workers)
-		.thread_name(|index| format!("pi-walker-{index}"))
+		.thread_name(|index| format!("omp-walker-{index}"))
 		.build()
 		.ok()
 });

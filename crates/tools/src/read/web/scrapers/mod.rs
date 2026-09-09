@@ -25,7 +25,7 @@ mod youtube;
 
 /// A supported site-specific renderer.
 ///
-/// `ALL` preserves the relative first-match precedence from pi's scraper
+/// `ALL` preserves the relative first-match precedence from the scraper
 /// registry. Dispatch is a concrete match so a request never allocates a trait
 /// object or boxed future.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -36,7 +36,7 @@ pub enum Scraper {
 	GitHub,
 	/// GitLab repositories and content.
 	GitLab,
-	/// Pi's ordered long-tail public API catalog.
+	/// Ordered long-tail public API catalog.
 	LongTail,
 	/// `YouTube` videos and channels.
 	YouTube,
@@ -154,8 +154,8 @@ pub fn scraper_for(url: &Url) -> Option<Scraper> {
 
 /// Renders a URL with the first site-specific scraper that accepts it.
 ///
-/// Pi invokes handlers in registry order and treats `None` as a decline, so a
-/// later handler may still accept the same URL. `None` from the full registry
+/// Handlers run in registry order and treat `None` as a decline, so a later
+/// handler may still accept the same URL. `None` from the full registry
 /// allows the caller to use the ordinary fetch pipeline. Typed scraper errors
 /// stop dispatch and propagate unchanged.
 pub async fn render<C: HttpClient + Sync>(

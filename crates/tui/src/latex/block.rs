@@ -10,7 +10,8 @@ use omp_core::{IntoStr, Str, StrMut};
 use smallvec::SmallVec;
 
 use super::unicode::{
-	MathFont, Row, apply_math_font, latex_row, latex_superscript_row, math_font, resolve_latex_color,
+	MathFont, Row, apply_math_font, latex_row, latex_superscript_row, math_font,
+	resolve_latex_color, terminal_text_style,
 };
 #[cfg(test)]
 use crate::rich::RichText;
@@ -1397,6 +1398,7 @@ fn parse_expr(src: &str, initial: Context) -> MathBox {
 			}
 			if matches!(name, "textcolor" | "colorbox" | "fcolorbox" | "underline" | "cancel" | "sout")
 				|| math_font(name).is_some()
+				|| terminal_text_style(ctx.style, name).is_some()
 			{
 				let mut next = skip_spaces(src, end_name);
 				let mut child = ctx;
@@ -1455,6 +1457,8 @@ fn parse_expr(src: &str, initial: Context) -> MathBox {
 					child.style = child.style.underline();
 				} else if matches!(name, "cancel" | "sout") {
 					child.style = child.style.strikethrough();
+				} else if let Some(style) = terminal_text_style(child.style, name) {
+					child.style = style;
 				} else {
 					child.font = math_font(name);
 				}
@@ -1766,7 +1770,7 @@ pub fn latex_block(expr: &str, base: Style, sink: &mut dyn RichSink) -> bool {
 	true
 }
 
-/// Trims a row and collapses whitespace exactly like pi's global
+/// Trims a row and collapses whitespace using the global
 /// `[ \t]*\n[ \t]*` → `" "` replacement: each newline (with its surrounding
 /// spaces/tabs) becomes one space, so `a\n\nb` keeps two spaces.
 fn collapse_interior_whitespace(row: &str) -> borrow::Cow<'_, str> {
@@ -1812,7 +1816,7 @@ mod tests {
 	}
 	#[test]
 	fn interior_newline_runs_collapse_one_space_per_newline() {
-		// pi's global `[ \t]*\n[ \t]*` → " " replaces each newline match
+		// `[ \t]*\n[ \t]*` → " " replaces each newline match
 		// independently, so a blank line inside a group keeps two spaces
 		assert_eq!(plain("\\text{a\n\nb}"), ["a  b"]);
 		assert_eq!(plain("\\text{a \n b}"), ["a b"]);
@@ -1829,9 +1833,30 @@ mod tests {
 	fn nested_fractions() {
 		assert_eq!(plain("\\frac{\\frac{a}{b}}{c}"), ["  a  ", " ─── ", "  b  ", "─────", "  c  "]);
 	}
+
+	#[test]
+	fn text_mode_style_spans_stacked_fraction_rows() {
+		let mut rich = RichText::default();
+		assert!(latex_block(r"\textbf{\frac{a}{b}}", Style::new(), &mut rich));
+		assert_eq!(
+			(0..rich.rows())
+				.map(|row| rich.row_text(row))
+				.collect::<Vec<_>>(),
+			[" a ", "───", " b "],
+		);
+		for row in [0, 2] {
+			assert!(
+				rich
+					.row_runs(row)
+					.filter(|(_, text)| !text.trim().is_empty())
+					.all(|(style, _)| style.spec().bold),
+			);
+		}
+	}
+
 	#[test]
 	fn nested_command_arguments_share_arity_across_whitespace() {
-		// pi fe86512: a nested command consumes exactly its own arity —
+		// A nested command consumes exactly its own arity —
 		// adjacent, spaced, and source-line-split forms all parse alike
 		let sqrt_fraction = ["  ┌── ", " ╲│ a ", "──────", "  b   "];
 		assert_eq!(plain(r"\frac\sqrt{a}{b}"), sqrt_fraction);

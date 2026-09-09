@@ -12,7 +12,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
@@ -103,6 +103,7 @@ fn app() -> Command {
 		.arg(
 			Arg::new(OPT_IP_ADDRESS)
 				.short('i')
+				.short_alias('I')
 				.long("ip-address")
 				.overrides_with_all([OPT_DOMAIN, OPT_IP_ADDRESS, OPT_FQDN, OPT_SHORT])
 				.help("Display the network address(es) of the host")
@@ -157,6 +158,13 @@ fn current_hostname() -> io::Result<OsString> {
 }
 
 fn display_hostname(matches: &ArgMatches, host: &mut Host) -> Result<(), String> {
+	if matches.get_flag(OPT_IP_ADDRESS) && host.kernel_sandbox_active() {
+		return Err(
+			"address lookup is unavailable in a kernel sandbox because in-process DNS would bypass \
+			 its network policy"
+				.to_string(),
+		);
+	}
 	let hostname = current_hostname()
 		.map_err(|err| format!("failed to get hostname: {err}"))?
 		.to_string_lossy()

@@ -25,10 +25,12 @@
 use std::{
 	cell::Cell,
 	ffi::OsString,
+	future::Future,
 	io::{self, BufWriter, LineWriter, Read, Write},
 	marker::PhantomData,
 	panic::{AssertUnwindSafe, catch_unwind},
 	path::{Path, PathBuf},
+	pin::Pin,
 	sync::{
 		Arc,
 		atomic::{AtomicBool, Ordering},
@@ -38,14 +40,127 @@ use std::{
 #[cfg(unix)]
 use std::{ffi::OsStr, os::fd};
 
+use bytes::Bytes;
 use im::HashMap;
-use omp_shell_engine::{
-	Error, ExecutionContext, ExecutionResult, ShellExtensions,
+use omp_core::Str;
+use omp_shell::{
+	Error, ExecutionContext, ExecutionResult, PathPolicy, ProcessScope, ShellExtensions,
+	SpawnObserver, SpawnWrapper,
 	builtins::{self, Registration},
 	openfiles::{self, OpenFile, OpenFiles},
 	sys::fs,
 };
+#[cfg(test)]
+use omp_shell::{OpenRequest, PathAccess, PathDenied};
+use omp_tool::Diag;
 use parking_lot::Mutex;
+use serde_json::Value;
+use tokio_util::sync::CancellationToken;
+
+/// A boxed dynamic-device host operation.
+///
+/// Device discovery and invocation are cold I/O boundaries, so one boxed
+/// future per shell command keeps the host trait object-safe without affecting
+/// interpreter hot paths.
+pub type DynFuture<'a, T> = Pin<Box<dyn Future<Output = Result<T, DynFault>> + Send + 'a>>;
+
+/// One live operation advertised by the dynamic-device host.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DynDevice {
+	/// Canonical `namespace/tool` invocation name.
+	pub name:        Str,
+	/// Concise operation description used for discovery search.
+	pub description: Option<Str>,
+}
+
+/// The JSON schema and documentation for one dynamic operation.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynSchema {
+	/// Canonical `namespace/tool` invocation name.
+	pub name:        Str,
+	/// Concise operation description.
+	pub description: Option<Str>,
+	/// JSON Schema describing the operation's argument object.
+	pub schema:      Value,
+}
+
+/// One dynamic operation result plus out-of-band harness diagnostics.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DynCallOutput {
+	/// Successful output written to stdout by the builtin.
+	pub output: DynOutput,
+	/// Structured harness notices that must not be written to stdout.
+	pub diags:  Vec<Diag>,
+}
+
+impl From<DynOutput> for DynCallOutput {
+	fn from(output: DynOutput) -> Self {
+		Self { output, diags: Vec::new() }
+	}
+}
+
+/// A successful dynamic operation result.
+///
+/// The builtin writes every variant to stdout: plain and Markdown text
+/// verbatim, JSON compact, image blobs as terminal graphics passthrough
+/// ([`crate::graphics::encode_image_passthrough`]) and other blobs as raw
+/// bytes, so `dyn tts … > speech.mp3` and `dyn image_gen …` both compose with
+/// redirection.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DynOutput {
+	/// Plain text written directly to stdout.
+	Text(Str),
+	/// Markdown text. Shell composition writes the source bytes unchanged;
+	/// direct presentation consumers may render the semantic form.
+	Markdown(Str),
+	/// Structured output serialized as JSON on stdout.
+	Json(Value),
+	/// Binary media with its MIME type.
+	Blob {
+		/// MIME type of `bytes`.
+		mime:  Str,
+		/// Exact media bytes.
+		bytes: Bytes,
+	},
+	/// Several outputs written in order; text, JSON, and media may mix.
+	Parts(Vec<DynOutput>),
+}
+
+/// A host-reported operation fault rendered by the builtin.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DynFault {
+	/// User-facing fault detail.
+	pub message: Str,
+}
+
+impl DynFault {
+	/// Creates a fault from host-owned diagnostic text.
+	pub fn new(message: impl Into<Str>) -> Self {
+		Self { message: message.into() }
+	}
+}
+
+/// Environment capability behind the stable in-process `dyn` builtin.
+///
+/// Implementations own their catalogs and invocation authority. The shell only
+/// maps JSON schemas to CLI arguments; it never mutates the model-facing tool
+/// roster or starts an external command.
+pub trait DynHost: Send + Sync + 'static {
+	/// Returns the complete live catalog.
+	fn list(&self) -> DynFuture<'_, Vec<DynDevice>>;
+
+	/// Returns the current schema for one exact live operation.
+	fn schema(&self, name: &str) -> DynFuture<'_, DynSchema>;
+
+	/// Invokes one operation with schema-shaped JSON arguments and the shell
+	/// command's cancellation token.
+	fn call(
+		&self,
+		name: &str,
+		args: Value,
+		cancel: CancellationToken,
+	) -> DynFuture<'_, DynCallOutput>;
+}
 
 /// A command-line utility implemented as a shell builtin.
 ///
@@ -99,6 +214,10 @@ pub(crate) struct Host {
 	name:                  String,
 	cwd:                   PathBuf,
 	env:                   HashMap<String, String>,
+	path_policy:           Option<Arc<dyn PathPolicy>>,
+	spawn_wrapper:         Option<Arc<dyn SpawnWrapper>>,
+	process_scope:         Option<Arc<dyn ProcessScope>>,
+	spawn_observer:        Option<Arc<dyn SpawnObserver>>,
 	cancel:                Arc<AtomicBool>,
 	exit_code:             i32,
 	stdin_is_search_input: bool,
@@ -142,20 +261,96 @@ impl Host {
 		}
 	}
 
-	/// Looks up an exported shell variable.
+	/// Resolves a user-named write path and admits it through the installed
+	/// policy.
+	pub fn ensure_writable(&self, path: impl AsRef<Path>) -> io::Result<PathBuf> {
+		let path = self.resolve(path);
+		if let Some(policy) = &self.path_policy {
+			policy.check_write(&path).map_err(io::Error::other)?;
+		}
+		Ok(path)
+	}
+
+	/// Returns the installed write-path policy.
+	pub fn path_policy(&self) -> Option<&Arc<dyn PathPolicy>> {
+		self.path_policy.as_ref()
+	}
+
+	/// Returns whether this builtin is running behind a kernel sandbox launcher.
+	pub fn kernel_sandbox_active(&self) -> bool {
+		self
+			.spawn_wrapper
+			.as_ref()
+			.is_some_and(|wrapper| wrapper.launcher().is_some())
+	}
+
+	/// Returns whether the active process scope permits observing `pid`.
+	pub fn may_observe(&self, pid: i32) -> bool {
+		self
+			.process_scope
+			.as_ref()
+			.is_none_or(|scope| scope.may_observe(pid))
+	}
+
+	/// Returns whether the active process scope permits signalling `pid`.
+	pub fn may_signal(&self, pid: i32) -> bool {
+		self
+			.process_scope
+			.as_ref()
+			.is_none_or(|scope| scope.may_signal(pid))
+	}
+
+	/// Records a child spawned internally by this utility.
+	pub fn observe_spawn(&self, pid: u32) {
+		if let (Some(observer), Ok(pid)) = (&self.spawn_observer, i32::try_from(pid)) {
+			observer.on_spawn(pid, None);
+		}
+	}
+
+	/// Builds a child command with the sandbox launcher prefix when installed.
+	pub fn command(&self, program: impl AsRef<ffi::OsStr>) -> process::Command {
+		let program = program.as_ref();
+		let mut command = if let Some((launcher, prefix)) = self
+			.spawn_wrapper
+			.as_ref()
+			.and_then(|wrapper| wrapper.launcher())
+		{
+			let mut command = process::Command::new(launcher);
+			command.args(prefix).arg(program);
+			command
+		} else {
+			process::Command::new(program)
+		};
+		command.current_dir(&self.cwd).env_clear();
+		if let Some(wrapper) = &self.spawn_wrapper {
+			let mut environment: Vec<_> = self
+				.env
+				.iter()
+				.map(|(key, value)| (OsString::from(key), OsString::from(value)))
+				.collect();
+			wrapper.resolve_env(&mut environment);
+			command.envs(environment);
+		} else {
+			command.envs(self.env());
+		}
+		command
+	}
+
+	/// Iterates the exported shell variables captured for this utility
+	/// invocation.
 	///
 	/// The shell's exported variables are *not* present in the host process
 	/// environment, so `std::env::var` would miss them.
-	pub fn var(&self, key: &str) -> Option<&str> {
-		self.env.get(key).map(String::as_str)
+	pub fn env(&self) -> impl Iterator<Item = (&str, &str)> {
+		self
+			.env
+			.iter()
+			.map(|(key, value)| (key.as_str(), value.as_str()))
 	}
 
-	/// The exported shell environment, for building a child process
-	/// environment (`env_clear().envs(host.env())`).
-	pub fn env(
-		&self,
-	) -> impl Iterator<Item = (&str, &str)> + ExactSizeIterator + iter::FusedIterator {
-		self.env.iter().map(|(k, v)| (k.as_str(), v.as_str()))
+	/// Looks up one exported shell variable.
+	pub fn var(&self, key: &str) -> Option<&str> {
+		self.env.get(key).map(String::as_str)
 	}
 
 	/// Whether the host has asked this invocation to stop (shell abort or
@@ -194,6 +389,7 @@ impl Host {
 
 	/// Writes `<name>: <message>` to stderr and records exit status `code`.
 	pub fn error(&mut self, message: impl Display, code: i32) {
+		tracing::warn!(builtin = self.name.as_str(), exit_code = code, "builtin operation failed");
 		let _ = writeln!(self.stderr, "{}: {message}", self.name);
 		self.fail(code);
 	}
@@ -229,15 +425,18 @@ impl Host {
 	/// its compressor from inside the temp-file abstraction, for instance.
 	pub fn child_env(&self) -> ChildEnv {
 		ChildEnv {
-			cwd:    self.cwd.clone(),
-			env:    Arc::new(
+			cwd:            self.cwd.clone(),
+			env:            Arc::new(
 				self
 					.env
 					.iter()
 					.map(|(k, v)| (k.clone(), v.clone()))
 					.collect(),
 			),
-			stderr: self.stderr.dup_file(),
+			stderr:         self.stderr.dup_file(),
+			wrapper:        self.spawn_wrapper.clone(),
+			spawn_observer: self.spawn_observer.clone(),
+			process_scope:  self.process_scope.clone(),
 		}
 	}
 
@@ -250,8 +449,8 @@ impl Host {
 	/// streams through on the calling thread while a helper thread drains
 	/// stderr into a buffer, which is forwarded once the child exits.
 	///
-	/// Callers remain responsible for `current_dir` and the child environment
-	/// (`env_clear().envs(host.env())`).
+	/// Callers must construct the command through [`Host::command`] so its
+	/// directory, environment policy, and launcher prefix are already installed.
 	pub fn run_captured(
 		&mut self,
 		command: &mut process::Command,
@@ -261,6 +460,7 @@ impl Host {
 			.stdout(process::Stdio::piped())
 			.stderr(process::Stdio::piped());
 		let mut child = command.spawn()?;
+		self.observe_spawn(child.id());
 
 		let mut child_err = child.stderr.take();
 		let stderr_thread = thread::spawn(move || {
@@ -434,9 +634,12 @@ fn same_destination(_a: &OpenFile, _b: &OpenFile) -> bool {
 /// [`ChildEnv::forward_stderr`] drains it to the command's own fd 2.
 #[derive(Clone)]
 pub(crate) struct ChildEnv {
-	cwd:    PathBuf,
-	env:    Arc<Vec<(String, String)>>,
-	stderr: OpenFile,
+	cwd:            PathBuf,
+	env:            Arc<Vec<(String, String)>>,
+	stderr:         OpenFile,
+	wrapper:        Option<Arc<dyn SpawnWrapper>>,
+	spawn_observer: Option<Arc<dyn SpawnObserver>>,
+	process_scope:  Option<Arc<dyn ProcessScope>>,
 }
 
 impl ChildEnv {
@@ -446,12 +649,31 @@ impl ChildEnv {
 	/// Stdin and stdout are left untouched for the caller to wire; they default
 	/// to inherited, so a caller that leaves them alone MUST redirect them.
 	pub fn command(&self, program: impl AsRef<ffi::OsStr>) -> process::Command {
-		let mut command = process::Command::new(program);
+		let program = program.as_ref();
+		let mut command = if let Some((launcher, prefix)) =
+			self.wrapper.as_ref().and_then(|wrapper| wrapper.launcher())
+		{
+			let mut command = process::Command::new(launcher);
+			command.args(prefix).arg(program);
+			command
+		} else {
+			process::Command::new(program)
+		};
 		command
 			.current_dir(&self.cwd)
 			.env_clear()
-			.envs(self.env.iter().map(|(k, v)| (k, v)))
 			.stderr(process::Stdio::piped());
+		if let Some(wrapper) = &self.wrapper {
+			let mut environment: Vec<_> = self
+				.env
+				.iter()
+				.map(|(key, value)| (OsString::from(key), OsString::from(value)))
+				.collect();
+			wrapper.resolve_env(&mut environment);
+			command.envs(environment);
+		} else {
+			command.envs(self.env.iter().map(|(key, value)| (key, value)));
+		}
 		command
 	}
 
@@ -466,6 +688,23 @@ impl ChildEnv {
 		let mut stderr = self.stderr.clone();
 		thread::spawn(move || {
 			let _ = io::copy(&mut child_stderr, &mut stderr);
+		})
+	}
+
+	/// Records a child spawned through this environment.
+	pub fn observe_spawn(&self, pid: u32) {
+		if let (Some(observer), Ok(pid)) = (&self.spawn_observer, i32::try_from(pid)) {
+			observer.on_spawn(pid, None);
+		}
+	}
+
+	/// Returns whether the active process scope permits signalling `pid`.
+	pub fn may_signal(&self, pid: u32) -> bool {
+		i32::try_from(pid).is_ok_and(|pid| {
+			self
+				.process_scope
+				.as_ref()
+				.is_none_or(|scope| scope.may_signal(pid))
 		})
 	}
 }
@@ -717,6 +956,7 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 	let argv = match U::rewrite_argv(argv) {
 		Ok(argv) => argv,
 		Err(message) => {
+			tracing::warn!(builtin = U::NAME, "builtin argument rewrite failed");
 			let _ = writeln!(context.stderr(), "{}: {message}", U::NAME);
 			return Ok(ExecutionResult::new(U::USAGE_ERROR));
 		},
@@ -729,6 +969,11 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 			// stdout with a success status, everything else on stderr.
 			let rendered = err.to_string();
 			if err.use_stderr() {
+				tracing::warn!(
+					builtin = U::NAME,
+					error_kind = ?err.kind(),
+					"builtin arguments rejected"
+				);
 				let _ = write!(context.stderr(), "{rendered}");
 				return Ok(ExecutionResult::new(U::USAGE_ERROR));
 			}
@@ -761,20 +1006,38 @@ async fn run_utility<U: Utility, SE: ShellExtensions>(
 				biased;
 				() = token.cancelled() => {
 					cancel_flag.store(true, Ordering::Relaxed);
-					let _ = (&mut handle).await;
+					let _ = resolve_builtin_task::<U>((&mut handle).await);
 					130
 				},
 				result = &mut handle => {
 					// If the token already fired, the task only finished because
 					// our cancel flag unblocked it — report interrupted.
-					if token_check.is_cancelled() { 130 } else { result.unwrap_or(1) }
+					if token_check.is_cancelled() {
+						130
+					} else {
+						resolve_builtin_task::<U>(result)
+					}
 				},
 			}
 		},
-		None => handle.await.unwrap_or(1),
+		None => resolve_builtin_task::<U>(handle.await),
 	};
 
 	Ok(ExecutionResult::new((code & 0xff) as u8))
+}
+
+fn resolve_builtin_task<U: Utility>(result: Result<i32, task::JoinError>) -> i32 {
+	match result {
+		Ok(code) => code,
+		Err(error) => {
+			tracing::error!(
+				builtin = U::NAME,
+				cancelled = error.is_cancelled(),
+				"builtin worker task failed"
+			);
+			1
+		},
+	}
 }
 
 /// Runs a utility body, containing any panic at the builtin boundary.
@@ -796,6 +1059,7 @@ pub(crate) fn run_caught<U: Utility>(parsed: U, host: &mut Host) -> i32 {
 	match catch_unwind(AssertUnwindSafe(|| parsed.run(host))) {
 		Ok(code) => code,
 		Err(_) => {
+			tracing::error!(builtin = U::NAME, "builtin panicked");
 			let _ = writeln!(host.stderr, "{}: internal error", U::NAME);
 			1
 		},
@@ -831,6 +1095,7 @@ fn build_host<SE: ShellExtensions>(
 			env.insert(key.clone(), var.value().to_cow_str(context.shell).into_owned());
 		}
 	}
+	let spawn_wrapper = context.params.spawn_wrapper().cloned();
 
 	let invoked = if context.command_name.is_empty() {
 		name.to_string()
@@ -858,6 +1123,10 @@ fn build_host<SE: ShellExtensions>(
 		name: invoked,
 		cwd: context.shell.working_dir().to_path_buf(),
 		env,
+		path_policy: context.params.path_policy().cloned(),
+		spawn_wrapper,
+		process_scope: context.params.process_scope().cloned(),
+		spawn_observer: context.params.spawn_observer().cloned(),
 		cancel,
 		exit_code: 0,
 		stdin_is_search_input,
@@ -876,10 +1145,10 @@ fn or_null(file: Option<OpenFile>) -> Result<OpenFile, Error> {
 
 /// Recognizes brush's process-substitution arguments (`/dev/fd/<shell fd>`).
 #[cfg(unix)]
-fn process_substitution_fd(arg: &OsStr) -> Option<omp_shell_engine::ShellFd> {
+fn process_substitution_fd(arg: &OsStr) -> Option<omp_shell::ShellFd> {
 	arg.to_str()?
 		.strip_prefix("/dev/fd/")?
-		.parse::<omp_shell_engine::ShellFd>()
+		.parse::<omp_shell::ShellFd>()
 		.ok()
 }
 
@@ -959,13 +1228,77 @@ mod testing {
 	#[cfg(unix)]
 	use std::os::fd;
 
-	use omp_shell_engine::error;
+	use omp_shell::error;
 	use parking_lot::Mutex;
 
 	use super::{
-		Arc, AtomicBool, Error, HashMap, Host, OpenFile, Ordering, OsString, PathBuf, Read, Stdin,
-		StreamWriter, Utility, Write, io, openfiles, run_caught,
+		Arc, AtomicBool, Error, HashMap, Host, OpenFile, OpenRequest, Ordering, OsString, PathAccess,
+		PathBuf, PathDenied, PathPolicy, Read, SpawnWrapper, Stdin, StreamWriter, Utility, Write, io,
+		openfiles, run_caught,
 	};
+
+	/// Test policy admitting writes only beneath one root.
+	pub(crate) struct ScopedPathPolicy {
+		root: PathBuf,
+	}
+
+	impl ScopedPathPolicy {
+		/// Creates a policy admitting `root` and its descendants.
+		pub(crate) fn new(root: impl AsRef<std::path::Path>) -> Self {
+			Self { root: root.as_ref().to_path_buf() }
+		}
+	}
+
+	impl PathPolicy for ScopedPathPolicy {
+		fn check_read(&self, path: &std::path::Path) -> Result<(), PathDenied> {
+			if path.starts_with(&self.root) {
+				Ok(())
+			} else {
+				Err(PathDenied { path: path.to_path_buf(), access: PathAccess::Read })
+			}
+		}
+
+		fn check_write(&self, path: &std::path::Path) -> Result<(), PathDenied> {
+			if path.starts_with(&self.root) {
+				Ok(())
+			} else {
+				Err(PathDenied { path: path.to_path_buf(), access: PathAccess::Write })
+			}
+		}
+
+		fn open(
+			&self,
+			path: &std::path::Path,
+			request: OpenRequest,
+		) -> Result<std::fs::File, PathDenied> {
+			let access = request.access;
+			if !path.starts_with(&self.root) {
+				return Err(PathDenied { path: path.to_path_buf(), access });
+			}
+			std::fs::File::options()
+				.read(matches!(access, PathAccess::Read | PathAccess::ReadWrite))
+				.write(!matches!(access, PathAccess::Read))
+				.create(!matches!(access, PathAccess::Read))
+				.truncate(matches!(access, PathAccess::Truncate))
+				.append(matches!(access, PathAccess::Append))
+				.create_new(matches!(access, PathAccess::CreateNew))
+				.open(path)
+				.map_err(|_| PathDenied { path: path.to_path_buf(), access })
+		}
+	}
+	struct TestSpawnWrapper {
+		prefix: Vec<OsString>,
+	}
+
+	impl SpawnWrapper for TestSpawnWrapper {
+		fn launcher(&self) -> Option<(&std::ffi::OsStr, &[OsString])> {
+			Some((std::ffi::OsStr::new("/fake-wrapper"), &self.prefix))
+		}
+
+		fn env_allowed(&self, key: &str) -> bool {
+			key != "SECRET"
+		}
+	}
 
 	/// Captured in-memory output from [`Host::for_test`].
 	pub(crate) struct Capture {
@@ -1037,6 +1370,10 @@ mod testing {
 				name: name.to_string(),
 				cwd: cwd.into(),
 				env: HashMap::new(),
+				path_policy: None,
+				spawn_wrapper: None,
+				process_scope: None,
+				spawn_observer: None,
 				cancel,
 				exit_code: 0,
 				stdin_is_search_input: false,
@@ -1050,10 +1387,44 @@ mod testing {
 			self.env.insert(key.to_string(), value.to_string());
 		}
 
+		/// Installs a write-path policy on a test host.
+		pub(crate) fn set_test_path_policy(&mut self, policy: Arc<dyn PathPolicy>) {
+			self.path_policy = Some(policy);
+		}
+
+		/// Installs a child spawn wrapper on a test host.
+		pub(crate) fn set_test_spawn_wrapper(&mut self, wrapper: Arc<dyn SpawnWrapper>) {
+			self.spawn_wrapper = Some(wrapper);
+		}
+
 		/// Requests cancellation on a test host.
 		pub(crate) fn cancel_for_test(&self) {
 			self.cancel.store(true, Ordering::Relaxed);
 		}
+	}
+	#[test]
+	fn child_command_applies_wrapper_prefix_and_environment_filter() {
+		let (mut host, _) = Host::for_test("test", "", "/");
+		host.set_test_var("KEEP", "yes");
+		host.set_test_var("SECRET", "no");
+		host.set_test_spawn_wrapper(Arc::new(TestSpawnWrapper {
+			prefix: vec![OsString::from("--capture")],
+		}));
+
+		let command = host.command("/bin/echo");
+		assert_eq!(command.get_program(), std::ffi::OsStr::new("/fake-wrapper"));
+		assert_eq!(command.get_args().collect::<Vec<_>>(), [
+			std::ffi::OsStr::new("--capture"),
+			std::ffi::OsStr::new("/bin/echo")
+		]);
+		assert!(command.get_envs().any(|(key, value)| {
+			key == std::ffi::OsStr::new("KEEP") && value == Some(std::ffi::OsStr::new("yes"))
+		}));
+		assert!(
+			!command
+				.get_envs()
+				.any(|(key, _)| key == std::ffi::OsStr::new("SECRET"))
+		);
 	}
 
 	#[cfg(windows)]
@@ -1072,7 +1443,29 @@ mod testing {
 		stdin: &str,
 		cwd: impl Into<PathBuf>,
 	) -> (i32, Capture) {
+		run_util_inner::<U>(argv, stdin, cwd.into(), None)
+	}
+
+	/// Runs a utility with a write-path policy installed on its host.
+	pub(crate) fn run_util_with_policy<U: Utility>(
+		argv: &[&str],
+		stdin: &str,
+		cwd: impl Into<PathBuf>,
+		policy: Arc<dyn PathPolicy>,
+	) -> (i32, Capture) {
+		run_util_inner::<U>(argv, stdin, cwd.into(), Some(policy))
+	}
+
+	fn run_util_inner<U: Utility>(
+		argv: &[&str],
+		stdin: &str,
+		cwd: PathBuf,
+		policy: Option<Arc<dyn PathPolicy>>,
+	) -> (i32, Capture) {
 		let (mut host, capture) = Host::for_test(U::NAME, stdin.as_bytes().to_vec(), cwd);
+		if let Some(policy) = policy {
+			host.set_test_path_policy(policy);
+		}
 		let full: Vec<OsString> = iter::once(OsString::from(U::NAME))
 			.chain(argv.iter().map(OsString::from))
 			.collect();
@@ -1243,9 +1636,9 @@ mod testing {
 	}
 }
 
-use std::{borrow, ffi, fmt, fmt::Display, iter, process, thread};
+use std::{borrow, ffi, fmt, fmt::Display, process, thread};
 
 #[cfg(test)]
 #[allow(unused_imports, reason = "used by utility test modules, which are feature-gated")]
-pub(crate) use testing::{Capture, run_util};
+pub(crate) use testing::{Capture, ScopedPathPolicy, run_util, run_util_with_policy};
 use tokio::task;

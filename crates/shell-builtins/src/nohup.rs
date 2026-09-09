@@ -1,4 +1,4 @@
-//! The `nohup` command, moved from `pi-shell`.
+//! The `nohup` command.
 //!
 //! This builtin detaches a backgrounded operand into a new session so a server
 //! survives the embedded shell's kill-on-drop teardown. A system `nohup` does
@@ -9,7 +9,7 @@
 use std::{future::Future, io::Write, result};
 
 use clap::Parser;
-use omp_shell_engine::{
+use omp_shell::{
 	ExecutionContext, ExecutionExitCode, ExecutionResult, ProcessGroupPolicy, SourceInfo, builtins,
 };
 
@@ -49,7 +49,7 @@ impl NohupCommand {
 }
 
 impl builtins::Command for NohupCommand {
-	type Error = omp_shell_engine::Error;
+	type Error = omp_shell::Error;
 
 	fn new<I>(args: I) -> result::Result<Self, clap::Error>
 	where
@@ -59,10 +59,10 @@ impl builtins::Command for NohupCommand {
 		Ok(Self::from_argv(args.into_iter().skip(1).collect()))
 	}
 
-	fn execute<SE: omp_shell_engine::ShellExtensions>(
+	fn execute<SE: omp_shell::ShellExtensions>(
 		&self,
 		context: ExecutionContext<'_, SE>,
-	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell_engine::Error>> + Send {
+	) -> impl Future<Output = result::Result<ExecutionResult, omp_shell::Error>> + Send {
 		let command = self.command.clone();
 		let (help, version) = (self.help, self.version);
 		async move {
@@ -83,6 +83,7 @@ impl builtins::Command for NohupCommand {
 			}
 			// coreutils `nohup` with no operand fails with exit code 125.
 			if command.is_empty() {
+				tracing::warn!(builtin = "nohup", "builtin operand missing");
 				return Ok(report_missing_operand(context.stderr()));
 			}
 
@@ -97,7 +98,7 @@ impl builtins::Command for NohupCommand {
 
 			let mut params = context.params.clone();
 			params.process_group_policy = ProcessGroupPolicy::NewProcessGroup;
-			let source_info = SourceInfo::from("pi-natives:nohup");
+			let source_info = SourceInfo::from("omp-builtins:nohup");
 			context
 				.shell
 				.run_string(command_line, &source_info, &params)
@@ -169,7 +170,7 @@ mod tests {
 
 	#[test]
 	fn new_skips_command_name() {
-		use omp_shell_engine::builtins::Command as _;
+		use omp_shell::builtins::Command as _;
 
 		let cmd = NohupCommand::new(["nohup", "--", "sleep", "1"].map(String::from))
 			.expect("nohup argv parsing is infallible");

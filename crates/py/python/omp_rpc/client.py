@@ -1430,14 +1430,14 @@ class RpcClient:
     def _normalize_host_tool_event(self, payload: JsonObject) -> None:
         """Rename transport tool events for in-flight host-tool dispatches.
 
-        With `tools.xdev` enabled, omp mounts custom tools as `xd://` devices
-        and the agent invokes them through the `write` tool, so
+        When dynamic devices are mounted, omp invokes them through the transport
+        tool (`dyn` builtin inside shell or direct transport), and
         `tool_execution_update`/`tool_execution_end` events report the
-        transport tool (`write`) rather than the host tool that actually ran.
+        transport tool rather than the host tool that actually ran.
         The `host_tool_call` frame carries the outer call's `toolCallId` (the
         device dispatch forwards it verbatim), which lets events for that call
         be renamed to the executed host tool — consumers observe the same tool
-        names regardless of transport. A top-level call (xdev off) maps the
+        names regardless of transport. A top-level call maps the
         name onto itself. `tool_execution_start` precedes the `host_tool_call`
         frame on the wire, so start events keep the transport name.
         """

@@ -1,6 +1,0 @@
-id = "examples.precedence-conflict"
-entry = "precedence_conflict"
-version = "0.1.0"
-description = "Mechanical two-claimant probes for frozen registry collision rules."
-requires = []
-capabilities = []

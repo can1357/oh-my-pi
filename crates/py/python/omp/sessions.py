@@ -8,10 +8,11 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Any
 
-from _omp import Duration, EnvPath, OmpError
+from _omp import Duration, EnvPath, OmpError, SessionSetup
 
 from ._errors import NotWiredError
 from .journal import EntryId, JournalEntry
+from ._verdicts import BlobPart, TextPart
 
 
 class SessionError(OmpError):
@@ -28,6 +29,32 @@ class SessionAccessDenied(SessionError):
 
 class SessionNotFound(OmpError):
     """The requested session does not exist or is not visible to the caller."""
+
+class SessionTransitionDenied(SessionError):
+    """Core refused a session transition before creating any durable state."""
+
+    def __init__(
+        self, reason: str, *, details: Mapping[str, object] | None = None
+    ) -> None:
+        self.reason = reason
+        self.details = {} if details is None else dict(details)
+        super().__init__(reason)
+
+
+class SessionTransitionIndeterminate(SessionError):
+    """Core cannot prove whether a create transaction became durable."""
+
+    def __init__(
+        self,
+        idempotency_key: str | None,
+        reason: str,
+        *,
+        details: Mapping[str, object] | None = None,
+    ) -> None:
+        self.idempotency_key = idempotency_key
+        self.reason = reason
+        self.details = {} if details is None else dict(details)
+        super().__init__(reason)
 
 
 class SessionStatus(StrEnum):
@@ -148,6 +175,19 @@ class SessionLink:
     id: str
     parent: str | None
     at: int | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class SessionNode:
+    """One immutable node in a materialized physical session tree."""
+
+    id: EntryId
+    parent: EntryId | None
+    kind: str
+    ts: int
+    data: Mapping[str, object]
+    label: str | None = None
+    children: tuple[SessionNode, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -449,6 +489,28 @@ def _decode_journal_entry(value: object, session_id: str) -> JournalEntry[Any]:
         raise TypeError("journal entry response is malformed") from error
 
 
+def _decode_node(value: object, session_id: str) -> SessionNode:
+    if isinstance(value, SessionNode):
+        return value
+    if not isinstance(value, Mapping):
+        raise TypeError("session node response must be a mapping")
+    data = value.get("data", {})
+    if not isinstance(data, Mapping):
+        raise TypeError("session node data must be a mapping")
+    try:
+        parent = value.get("parent")
+        return SessionNode(
+            id=_decode_entry_id(value["id"], session_id),
+            parent=None if parent is None else _decode_entry_id(parent, session_id),
+            kind=str(value["kind"]),
+            ts=int(value["ts"]),
+            data=dict(data),
+            label=None if value.get("label") is None else str(value["label"]),
+        )
+    except (KeyError, TypeError, ValueError) as error:
+        raise TypeError("session node response is malformed") from error
+
+
 def current() -> SessionInfo:
     """Read the current session's host-materialized index projection."""
 
@@ -503,6 +565,62 @@ async def resume(session_id: str) -> SessionInfo:
     return _decode_session(
         await _request("omp.sessions.resume", session_id=session_id)
     )
+
+def _wire_initial_prompt(value: str | tuple[object, ...] | None) -> object:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return [{"kind": "text", "text": value}]
+    if not value:
+        raise ValueError("SessionSetup.initial_prompt tuple must not be empty")
+    parts: list[dict[str, object]] = []
+    for part in value:
+        if isinstance(part, TextPart):
+            parts.append({"kind": "text", "text": part.text})
+        elif isinstance(part, BlobPart):
+            from .agents import _wire
+
+            parts.append({"kind": "blob", "blob": _wire(part.blob), "alt": part.alt})
+        else:
+            raise TypeError(
+                "SessionSetup.initial_prompt accepts only omp.Part.text() and omp.Part.blob() values"
+            )
+    return parts
+
+
+def _wire_setup(setup: SessionSetup) -> dict[str, object]:
+    if not isinstance(setup, SessionSetup):
+        raise TypeError("setup must be an omp.SessionSetup")
+    return {
+        "schema": "omp.sessions.setup.v1",
+        "title": setup.title,
+        "parent": setup.parent,
+        "entries": [],
+        "initial_prompt": _wire_initial_prompt(setup.initial_prompt),
+    }
+
+
+async def create(setup: SessionSetup = SessionSetup()) -> SessionInfo:
+    """Atomically create, seed, and switch to a top-level interactive session."""
+
+    try:
+        return _decode_session(
+            await _request("omp.sessions.create", setup=_wire_setup(setup))
+        )
+    except Exception as error:
+        code = getattr(error, "code", None)
+        details = getattr(error, "details", None)
+        detail = details if isinstance(details, Mapping) else {}
+        if code == "SessionTransitionDenied":
+            raise SessionTransitionDenied(str(error), details=detail) from error
+        if code == "SessionTransitionIndeterminate":
+            key = detail.get("idempotency_key")
+            raise SessionTransitionIndeterminate(
+                None if key is None else str(key),
+                str(error),
+                details=detail,
+            ) from error
+        raise
 
 
 async def rename(session_id: str, title: str) -> SessionInfo:
@@ -580,11 +698,116 @@ async def journal(
             raise TypeError("session journal page omitted its continuation cursor")
         cursor = next_cursor
 
+async def _structure(session_id: str) -> tuple[tuple[SessionNode, ...], EntryId | None]:
+    cursor: str | None = None
+    nodes: list[SessionNode] = []
+    leaf: EntryId | None = None
+    while True:
+        response = await _request(
+            "omp.sessions.journal",
+            session_id=session_id,
+            structure=True,
+            cursor=cursor,
+        )
+        if not isinstance(response, Mapping):
+            raise TypeError("session structure response must be a page mapping")
+        rows = response.get("entries", ())
+        if not isinstance(rows, Sequence) or isinstance(
+            rows, (str, bytes, bytearray)
+        ):
+            raise TypeError("session structure page entries must be a sequence")
+        nodes.extend(_decode_node(row, session_id) for row in rows)
+        raw_leaf = response.get("leaf")
+        if raw_leaf is not None:
+            leaf = _decode_entry_id(raw_leaf, session_id)
+        if bool(response.get("done", False)):
+            return tuple(nodes), leaf
+        next_cursor = response.get("cursor")
+        if not isinstance(next_cursor, str) or not next_cursor or next_cursor == cursor:
+            raise TypeError("session structure page omitted its continuation cursor")
+        cursor = next_cursor
+
+
+async def tree(session_id: str | None = None) -> tuple[SessionNode, ...]:
+    """Materialize the physical session tree, returning every orphan as a root."""
+
+    selected = current().id if session_id is None else str(session_id)
+    nodes, _leaf = await _structure(selected)
+    by_id = {node.id: node for node in nodes}
+    children: dict[EntryId, list[SessionNode]] = {}
+    roots: list[SessionNode] = []
+    for node in nodes:
+        if node.parent is None or node.parent not in by_id:
+            roots.append(node)
+        else:
+            children.setdefault(node.parent, []).append(node)
+
+    seen: set[EntryId] = set()
+
+    def materialize(node: SessionNode, visiting: frozenset[EntryId]) -> SessionNode:
+        if node.id in visiting:
+            return node
+        seen.add(node.id)
+        branch = visiting | {node.id}
+        return SessionNode(
+            id=node.id,
+            parent=node.parent,
+            kind=node.kind,
+            ts=node.ts,
+            data=node.data,
+            label=node.label,
+            children=tuple(
+                materialize(child, branch)
+                for child in children.get(node.id, ())
+                if child.id not in branch
+            ),
+        )
+
+    result = [materialize(root, frozenset()) for root in roots]
+    result.extend(
+        materialize(node, frozenset())
+        for node in nodes
+        if node.id not in seen
+    )
+    return tuple(result)
+
+
+async def branch(from_id: EntryId | int | None = None) -> tuple[SessionNode, ...]:
+    """Materialize one root-first physical branch, defaulting to the live leaf."""
+
+    if isinstance(from_id, EntryId):
+        session_id = from_id.session
+        target = from_id
+    else:
+        session_id = current().id
+        if from_id is not None and (
+            not isinstance(from_id, int) or isinstance(from_id, bool) or from_id < 0
+        ):
+            raise TypeError("from_id must be an EntryId, non-negative int, or None")
+        target = None if from_id is None else EntryId(session_id, from_id)
+    nodes, leaf = await _structure(session_id)
+    cursor = leaf if target is None else target
+    by_id = {node.id: node for node in nodes}
+    path: list[SessionNode] = []
+    seen: set[EntryId] = set()
+    while cursor is not None and cursor not in seen:
+        seen.add(cursor)
+        node = by_id.get(cursor)
+        if node is None:
+            break
+        path.append(node)
+        cursor = node.parent
+    path.reverse()
+    return tuple(path)
+
 
 __all__ = (
     "Bucket", "Cost", "GroupBy", "SessionAccessDenied", "SessionError",
     "SessionFilter", "SessionInfo", "SessionKind", "SessionLink", "SessionNotFound",
-    "SessionStatus", "TitleSource", "Usage",
-    "UsageAccuracy", "UsageBucket", "UsageQuery", "UsageReport", "current", "delete",
+    "SessionNode",
+    "SessionSetup", "SessionStatus", "SessionTransitionDenied",
+    "SessionTransitionIndeterminate", "TitleSource", "Usage",
+    "UsageAccuracy", "UsageBucket", "UsageQuery", "UsageReport", "create", "current", "delete",
     "get", "journal", "lineage", "list", "rename", "resume", "usage",
+    "branch", "tree",
 )

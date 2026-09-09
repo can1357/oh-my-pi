@@ -93,14 +93,16 @@ fn write_changelog(manifest: &Path) {
 		.output()
 		.ok()
 		.filter(|output| output.status.success() && !output.stdout.is_empty())
-		.map(|output| output.stdout)
-		.unwrap_or_else(|| {
-			format!(
-				"## v{}\n\nCurrent release.\n",
-				env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_owned())
-			)
-			.into_bytes()
-		});
+		.map_or_else(
+			|| {
+				format!(
+					"## v{}\n\nCurrent release.\n",
+					env::var("CARGO_PKG_VERSION").unwrap_or_else(|_| "unknown".to_owned())
+				)
+				.into_bytes()
+			},
+			|output| output.stdout,
+		);
 	let output =
 		PathBuf::from(env::var_os("OUT_DIR").expect("Cargo provides OUT_DIR")).join("changelog.md");
 	fs::write(output, generated).expect("write embedded changelog");

@@ -1,0 +1,1 @@
+{"name": "qaenvpath", "worker": {"module": "qaenvpath"}, "capabilities": {"data": []}, "declarations": [{"id": "hello", "kind": "hard", "module": "qaenvpath", "key": "hello@qaenvpath.1", "trigger": "lazy", "api": 1, "failure": "fail-closed"}]}

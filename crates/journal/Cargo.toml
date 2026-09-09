@@ -1,0 +1,27 @@
+[package]
+name = "omp-journal"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Crash-tolerant raw-SSE session journal and content-addressed blob storage for omp"
+
+[dependencies]
+bytes.workspace = true
+cap-std.workspace = true
+memchr.workspace = true
+omp-ar.workspace = true
+omp-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+tempfile.workspace = true
+
+[lints]
+workspace = true

@@ -89,7 +89,7 @@ pub fn route_resource_mutation(
 	{
 		return Err(MutationRouteFault::PartialSelector { selector: Str::new(selector) });
 	}
-	if parsed.query.is_some() && !matches!(parsed.scheme, Scheme::Vault | Scheme::Unknown) {
+	if parsed.query.is_some() && !matches!(parsed.scheme, Scheme::Unknown | Scheme::Vault) {
 		return Err(MutationRouteFault::QueryNotAllowed { scheme: parsed.scheme.into() });
 	}
 	let uri = parsed.selector_text.map_or_else(
@@ -118,7 +118,7 @@ mod tests {
 			MutationCapability::Ssh
 		);
 		assert_eq!(
-			route_resource_mutation("vault://notes/file.md?op=overwrite", "body")
+			route_resource_mutation("vault://notes/file.md", "body")
 				.unwrap()
 				.unwrap()
 				.capability,
@@ -139,7 +139,7 @@ mod tests {
 	}
 
 	#[test]
-	fn rejects_partial_writes_and_non_vault_queries() {
+	fn rejects_partial_writes_and_resource_queries() {
 		assert!(matches!(
 			route_resource_mutation("ssh://host/path:1-2", "body"),
 			Err(MutationRouteFault::PartialSelector { .. })
@@ -148,5 +148,10 @@ mod tests {
 			route_resource_mutation("attachment://session/image?q=x", "body"),
 			Err(MutationRouteFault::QueryNotAllowed { .. })
 		));
+		let vault = route_resource_mutation("vault://notes/file.md?op=create", "body")
+			.expect("vault query route")
+			.expect("vault request");
+		assert_eq!(vault.capability, MutationCapability::Vault);
+		assert_eq!(vault.uri, "vault://notes/file.md?op=create");
 	}
 }

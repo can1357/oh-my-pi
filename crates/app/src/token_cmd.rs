@@ -5,14 +5,14 @@ use std::{
 	time::{SystemTime, UNIX_EPOCH},
 };
 
-use miette::{IntoDiagnostic as _, miette};
-use omp_catalog::ProviderId;
-use omp_core::Str;
-use omp_inference::{
+use miette::{Context as _, IntoDiagnostic as _, miette};
+use omp_ai::{
 	answer::{AccountState, AuthAnswer},
 	auth::AuditedCredentialReveal,
 	call::AuthRequest,
 };
+use omp_catalog::ProviderId;
+use omp_core::Str;
 use serde_json::Value;
 
 use crate::cli::TokenArgs;
@@ -20,11 +20,19 @@ use crate::cli::TokenArgs;
 /// Lists or prints one provider credential after durable reveal auditing.
 pub(crate) async fn run(args: TokenArgs) -> miette::Result<()> {
 	let data = omp_core::dirs::data_dir(None).into_diagnostic()?;
-	let store =
-		omp_driver::registry::open_credential_store(data.join("credentials.db")).into_diagnostic()?;
+	let store = omp_driver::registry::open_credential_store(data.join("credentials.db"))
+		.into_diagnostic()
+		.wrap_err(
+			"credential storage could not be unlocked; unattended callers may set \
+			 OMP_LLM_KEY_SOURCE=local-file for the owner-only local encrypted store",
+		)?;
 	let (_registry, auth) = omp_driver::registry::production_rpc_registry(&data, store.clone())
 		.await
-		.into_diagnostic()?;
+		.into_diagnostic()
+		.wrap_err(
+			"credential storage could not be unlocked; unattended callers may set \
+			 OMP_LLM_KEY_SOURCE=local-file for the owner-only local encrypted store",
+		)?;
 	let provider = ProviderId::from(args.provider.clone());
 	let accounts = match auth
 		.execute(AuthRequest::ListAccounts { provider: Some(provider.clone()) })

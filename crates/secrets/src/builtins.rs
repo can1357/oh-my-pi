@@ -13,7 +13,7 @@ const CREDENTIAL_PATTERN: &str = concat!(
 	"|sk-[A-Za-z0-9_*-]{48,})"
 );
 
-/// Returns built-in reversible GitHub, GitLab, OpenAI, and Anthropic token
+/// Returns built-in reversible GitHub, GitLab, `OpenAI`, and Anthropic token
 /// rules.
 pub fn credential_rules() -> Result<Vec<SecretRule>, SecretRuleError> {
 	Ok(vec![

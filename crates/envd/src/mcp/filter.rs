@@ -5,12 +5,12 @@ use std::{
 	fmt,
 };
 
-use omp_catalog::ProviderId;
-use omp_core::{ExposeSecret as _, Secret, SecretString, Str};
-use omp_inference::{
+use omp_ai::{
 	auth::{self, AuthControlHandle, CredentialControlWrite},
 	id::PrincipalId,
 };
+use omp_catalog::ProviderId;
+use omp_core::{ExposeSecret as _, Secret, SecretString, Str};
 use url::Url;
 
 use super::config::{McpServerConfig, ResolvedServer, TransportKind};
@@ -299,6 +299,7 @@ mod tests {
 				args:              Vec::new(),
 				env:               BTreeMap::new(),
 				env_policy:        None,
+				env_literal_keys:  BTreeSet::new(),
 				cwd:               None,
 				url:               Some(Str::from(url)),
 				headers:           BTreeMap::new(),

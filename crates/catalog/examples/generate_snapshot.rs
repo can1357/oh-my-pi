@@ -35,7 +35,7 @@ fn main() -> Result<(), Box<dyn error::Error>> {
 		.expect("catalog crate is in workspace/crates");
 	let lock_path = crate_dir.join("data/sources.lock.json");
 	let lock: SourceLock = serde_json::from_slice(&fs::read(&lock_path)?)?;
-	if lock.schema_version != 1 {
+	if lock.schema_version != 2 {
 		return Err(format!("unsupported source-lock schema {}", lock.schema_version).into());
 	}
 	let source_digest = verify_sources(workspace, &lock)?;

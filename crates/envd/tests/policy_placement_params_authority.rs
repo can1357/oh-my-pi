@@ -11,7 +11,7 @@ use std::{
 
 use async_trait::async_trait;
 use bytes::Bytes;
-use omp_agent::{ApprovalBook, ApprovalSpec};
+use omp_agent::{ApprovalBook, ApprovalRoute, ApprovalSpec, ApprovalTicket};
 use omp_core::{InvocationPhase, LifecyclePhase, Principal, Str, sf};
 use omp_envd::{
 	exthost::{
@@ -155,10 +155,7 @@ struct PolicyAudit(AtomicBool);
 
 #[async_trait]
 impl PolicyAuditSink for PolicyAudit {
-	async fn approval_decided(
-		&self,
-		_ticket: &omp_agent::ApprovalTicket,
-	) -> Result<(), PolicyControlFailure> {
+	async fn approval_decided(&self, _ticket: &ApprovalTicket) -> Result<(), PolicyControlFailure> {
 		self.0.store(true, Ordering::Release);
 		Ok(())
 	}
@@ -280,11 +277,12 @@ async fn domains_delegate_to_native_owners_with_generation_and_audit_fences() {
 	let context = context(Arc::clone(&identity));
 
 	let approvals = Arc::new(ApprovalBook::new());
+	let (approval_route, _approval_inbox) = ApprovalRoute::new(approvals, None);
 	let audit = Arc::new(PolicyAudit(AtomicBool::new(false)));
 	let policy = PolicyControlOwner::new(
 		Arc::clone(&identity),
 		Arc::new(PolicyRuntime),
-		Arc::clone(&approvals),
+		approval_route,
 		audit,
 	);
 	let parsed = policy
@@ -365,4 +363,102 @@ async fn domains_delegate_to_native_owners_with_generation_and_audit_fences() {
 		.expect("audited exceptional filesystem owner executes request");
 	assert_eq!(output["audit_receipt"], "journal:17");
 	assert!(output["data"]["$bytes"].is_string());
+}
+
+fn approval_spec(require_human: bool) -> ApprovalSpec {
+	ApprovalSpec {
+		title: sf!("Push"),
+		body: sf!("git push origin main"),
+		subject: sf!("git push"),
+		kind: sf!("exec"),
+		scopes: vec![sf!("once")],
+		default: None,
+		route: sf!("user"),
+		approver: None,
+		timeout_ms: 0,
+		unreachable: sf!("fail_closed"),
+		require_human,
+		pattern: None,
+		evidence: Vec::new(),
+	}
+}
+
+fn decision(source: &str) -> Value {
+	json!({
+		"approved": true,
+		"scope": "once",
+		"source": source,
+		"decided_by": "fixture",
+		"reason": null,
+		"audited": false,
+	})
+}
+
+/// Every decision source obeys the merged ticket's human-only requirement.
+#[tokio::test]
+async fn require_human_is_enforced_for_every_decision_source() {
+	let sources = [
+		("user", true),
+		("external", true),
+		("forwarded", false),
+		("config", false),
+		("extension", false),
+		("timeout", false),
+		("unavailable", false),
+	];
+	for require_human in [false, true] {
+		for (source, human) in sources {
+			let identity = identity();
+			let context = context(Arc::clone(&identity));
+			let (approval_route, inbox) = ApprovalRoute::new(Arc::new(ApprovalBook::new()), None);
+			let audit = Arc::new(PolicyAudit(AtomicBool::new(false)));
+			let audit_sink: Arc<dyn PolicyAuditSink> = audit.clone();
+			let policy = PolicyControlOwner::new(
+				Arc::clone(&identity),
+				Arc::new(PolicyRuntime),
+				approval_route.clone(),
+				audit_sink,
+			);
+			let requester = approval_route.clone();
+			let pending = tokio::spawn(async move {
+				requester
+					.request(
+						Some(sf!("call-1")),
+						vec![approval_spec(false), approval_spec(require_human)],
+						1,
+					)
+					.await
+			});
+			let request = inbox.recv().await.expect("prompt dispatched");
+			let ticket_id = request.ticket.ticket_id.clone();
+			let arguments = serde_json::Map::from_iter([
+				("ticket_id".to_owned(), Value::String(ticket_id.to_string())),
+				("decision".to_owned(), decision(source)),
+			]);
+
+			let result = policy
+				.request(context, sf!("omp.policy.decide"), arguments)
+				.await;
+			let allowed = !require_human || human;
+			if allowed {
+				result.expect("permitted source settles the ticket");
+				let ticket = pending.await.expect("request task");
+				assert!(ticket.decision.expect("decided").approved);
+				assert!(audit.0.load(Ordering::Acquire));
+			} else {
+				let rejected = result.expect_err("non-human source must be rejected");
+				assert_eq!(rejected.code, "ApprovalHumanRequired");
+				assert!(!audit.0.load(Ordering::Acquire), "rejected decisions are never audited");
+				assert_eq!(approval_route.pending().len(), 1, "ticket stays pending");
+				pending.abort();
+				assert!(
+					pending
+						.await
+						.expect_err("request task was cancelled")
+						.is_cancelled()
+				);
+				assert!(approval_route.pending().is_empty(), "cancelled request is withdrawn");
+			}
+		}
+	}
 }

@@ -3,31 +3,39 @@
 use std::sync::Arc;
 
 use async_stream::stream;
+use bytes::Bytes;
 use futures::Stream;
 use omp_core::{Str, StrMut, sf};
 use omp_memory::{
 	MemoryRuntime,
 	recall::{RecallBounds, RecallResult},
+	runtime::{
+		MAX_MEMORY_BATCH_BYTES, MAX_MEMORY_CONTENT_BYTES, MAX_MEMORY_CONTEXT_BYTES, SaveRequest,
+	},
 };
 use omp_tool::{
-	ArgIssue, ArgIssueKind, CommitError, Constraint, Effects, Ev, IncomingParams, ParamError, Part,
-	PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, CallOutcome, CommitError, Constraint, Effects, Ev,
+	IncomingParams, LiftedCall, ParamError, Part, PromptCaps, RecordedCall, Rev, Tool, ToolSpec,
+	ToolTerminal,
 };
 use schemars::JsonSchema;
-use serde::{Deserialize, Serialize};
+use serde::{Deserialize, Serialize, de::DeserializeOwned};
 
 const DEFAULT_TOKEN_BUDGET: usize = 2_000;
 const MAX_TOKEN_BUDGET: usize = 16_000;
+const MAX_QUERY_BYTES: usize = 64 * 1024;
 const MAX_RETAIN_ITEMS: usize = 64;
 
-/// Arguments accepted by `recall@1`.
+/// Arguments accepted by `recall@2`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RecallParams {
 	/// Natural-language search query.
+	#[schemars(length(min = 1, max = 65536))]
 	pub query:        Str,
 	/// Approximate result token budget.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[schemars(range(min = 1, max = 16000))]
 	pub token_budget: Option<usize>,
 }
 
@@ -40,17 +48,20 @@ pub struct RecallPayload {
 	pub items: Vec<RecallResult>,
 }
 
-/// Arguments accepted by `reflect@1`.
+/// Arguments accepted by `reflect@2`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct ReflectParams {
 	/// Question answered from long-term memory.
+	#[schemars(length(min = 1, max = 65536))]
 	pub query:        Str,
 	/// Optional angle or current context for synthesis.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[schemars(length(max = 65536))]
 	pub context:      Option<Str>,
 	/// Approximate recall token budget.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[schemars(range(min = 1, max = 16000))]
 	pub token_budget: Option<usize>,
 }
 
@@ -63,22 +74,25 @@ pub struct ReflectPayload {
 	pub recalled: usize,
 }
 
-/// One durable fact supplied to `retain@1`.
+/// One durable fact supplied to `retain@2`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainItem {
 	/// Specific, self-contained information to remember.
+	#[schemars(length(min = 1, max = 262144))]
 	pub content: Str,
 	/// Optional source context.
 	#[serde(default, skip_serializing_if = "Option::is_none")]
+	#[schemars(length(max = 65536))]
 	pub context: Option<Str>,
 }
 
-/// Arguments accepted by `retain@1`.
+/// Arguments accepted by `retain@2`.
 #[derive(Clone, Debug, Deserialize, Eq, JsonSchema, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct RetainParams {
 	/// Durable facts to store as one bounded batch.
+	#[schemars(length(min = 1, max = 64))]
 	pub items: Vec<RetainItem>,
 }
 
@@ -147,38 +161,53 @@ impl<H: ReflectionHost + ?Sized> ReflectionHost for Arc<H> {
 	}
 }
 
-/// Typed `recall@1` executor.
+/// Typed `recall@2` executor.
 pub struct RecallTool {
 	runtime: Arc<MemoryRuntime>,
 	spec:    ToolSpec,
 }
 
-/// Typed `reflect@1` executor.
+/// Typed `reflect@2` executor.
 pub struct ReflectTool<H> {
 	runtime: Arc<MemoryRuntime>,
 	host:    H,
 	spec:    ToolSpec,
 }
 
-/// Typed `retain@1` executor.
+/// Typed `retain@2` executor.
 pub struct RetainTool {
 	runtime: Arc<MemoryRuntime>,
 	spec:    ToolSpec,
 }
 
+/// Builds the host-free `recall@2` declaration.
+pub fn recall_spec() -> ToolSpec {
+	memory_spec::<RecallParams>("recall", RECALL_DESCRIPTION)
+}
+
+/// Builds the host-free `reflect@2` declaration.
+pub fn reflect_spec() -> ToolSpec {
+	memory_spec::<ReflectParams>("reflect", REFLECT_DESCRIPTION)
+}
+
+/// Builds the host-free `retain@2` declaration.
+pub fn retain_spec() -> ToolSpec {
+	memory_spec::<RetainParams>("retain", RETAIN_DESCRIPTION)
+}
+
 /// Creates the revisioned recall leaf.
 pub fn recall_tool(runtime: Arc<MemoryRuntime>) -> RecallTool {
-	RecallTool { runtime, spec: spec::<RecallParams>("recall", RECALL_DESCRIPTION) }
+	RecallTool { runtime, spec: recall_spec() }
 }
 
 /// Creates the revisioned reflect leaf.
 pub fn reflect_tool<H: ReflectionHost>(runtime: Arc<MemoryRuntime>, host: H) -> ReflectTool<H> {
-	ReflectTool { runtime, host, spec: spec::<ReflectParams>("reflect", REFLECT_DESCRIPTION) }
+	ReflectTool { runtime, host, spec: reflect_spec() }
 }
 
 /// Creates the revisioned retain leaf.
 pub fn retain_tool(runtime: Arc<MemoryRuntime>) -> RetainTool {
-	RetainTool { runtime, spec: spec::<RetainParams>("retain", RETAIN_DESCRIPTION) }
+	RetainTool { runtime, spec: retain_spec() }
 }
 
 impl Tool for RecallTool {
@@ -200,7 +229,12 @@ impl Tool for RecallTool {
 				Ok(value) => value,
 				Err(error) => { yield param_event(error); return; },
 			};
-			if params.query.trim().is_empty() {
+			if params.query.trim().is_empty()
+				|| params.query.len() > MAX_QUERY_BYTES
+				|| params
+					.token_budget
+					.is_some_and(|budget| budget == 0 || budget > MAX_TOKEN_BUDGET)
+			{
 				yield terminal(Err(Fault::InvalidInput), true);
 				return;
 			}
@@ -222,6 +256,10 @@ impl Tool for RecallTool {
 				Err(_) => yield terminal(Err(Fault::Operation), false),
 			}
 		}
+	}
+
+	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
+		lift_v1::<RecallParams, RecallPayload>(from, call)
 	}
 
 	fn prompt(&self, view: Result<&RecallPayload, &Fault>, _: &PromptCaps) -> Vec<Part> {
@@ -253,7 +291,13 @@ impl<H: ReflectionHost> Tool for ReflectTool<H> {
 				Ok(value) => value,
 				Err(error) => { yield param_event(error); return; },
 			};
-			if params.query.trim().is_empty() {
+			if params.query.trim().is_empty()
+				|| params.query.len() > MAX_QUERY_BYTES
+				|| params.context.as_ref().is_some_and(|context| context.len() > MAX_MEMORY_CONTEXT_BYTES)
+				|| params
+					.token_budget
+					.is_some_and(|budget| budget == 0 || budget > MAX_TOKEN_BUDGET)
+			{
 				yield terminal(Err(Fault::InvalidInput), true);
 				return;
 			}
@@ -306,13 +350,35 @@ impl<H: ReflectionHost> Tool for ReflectTool<H> {
 				memories: Arc::from(outcome.items),
 			};
 			let recalled = request.memories.len();
-			match self.host.reflect(request).await {
-				Ok(answer) if !answer.trim().is_empty() => {
-					yield terminal(Ok(ReflectPayload { answer, recalled }), false);
+			let fallback = render_reflection_evidence(&request.memories);
+			let reflection = self.host.reflect(request);
+			tokio::pin!(reflection);
+			tokio::select! {
+				biased;
+				interrupt = incoming.next_interrupt() => {
+					yield match interrupt {
+						Ok(interrupt) => Ev::Aborted(Abort::Interrupted { reason: interrupt.reason }),
+						Err(_) => Ev::Aborted(Abort::InputDropped),
+					};
 				},
-				_ => yield terminal(Err(Fault::Synthesis), false),
+				result = &mut reflection => match result {
+					Ok(answer) if !answer.trim().is_empty() => {
+						yield terminal(Ok(ReflectPayload { answer, recalled }), false);
+					},
+					Err(ReflectionHostError::Unavailable) => {
+						yield terminal(Ok(ReflectPayload {
+							answer: fallback,
+							recalled,
+						}), false);
+					},
+					_ => yield terminal(Err(Fault::Synthesis), false),
+				},
 			}
 		}
+	}
+
+	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
+		lift_v1::<ReflectParams, ReflectPayload>(from, call)
 	}
 
 	fn prompt(&self, view: Result<&ReflectPayload, &Fault>, _: &PromptCaps) -> Vec<Part> {
@@ -344,9 +410,19 @@ impl Tool for RetainTool {
 				Ok(value) => value,
 				Err(error) => { yield param_event(error); return; },
 			};
+			let aggregate_bytes = params.items.iter().try_fold(0usize, |total, item| {
+				total
+					.checked_add(item.content.len())
+					.and_then(|bytes| bytes.checked_add(item.context.as_ref().map_or(0, Str::len)))
+			});
 			if params.items.is_empty()
 				|| params.items.len() > MAX_RETAIN_ITEMS
-				|| params.items.iter().any(|item| item.content.trim().is_empty())
+				|| params.items.iter().any(|item| {
+					item.content.trim().is_empty()
+						|| item.content.len() > MAX_MEMORY_CONTENT_BYTES
+						|| item.context.as_ref().is_some_and(|context| context.len() > MAX_MEMORY_CONTEXT_BYTES)
+				})
+				|| aggregate_bytes.is_none_or(|bytes| bytes > MAX_MEMORY_BATCH_BYTES)
 			{
 				yield terminal(Err(Fault::InvalidInput), true);
 				return;
@@ -355,23 +431,29 @@ impl Tool for RetainTool {
 				yield commit_event(error);
 				return;
 			}
-			let mut ids = Vec::with_capacity(params.items.len());
-			for item in params.items {
-				match self.runtime.save(
-					item.content.as_str(),
-					"coding-agent-retain",
-					0.75,
-					item.context.as_deref(),
-				) {
-					Ok(outcome) => match outcome.id {
-						Some(id) => ids.push(id),
-						None => { yield terminal(Err(Fault::Unavailable), false); return; },
-					},
-					Err(_) => { yield terminal(Err(Fault::Operation), false); return; },
-				}
+			let requests = params
+				.items
+				.iter()
+				.map(|item| SaveRequest {
+					content: item.content.as_str(),
+					context: item.context.as_deref(),
+				})
+				.collect::<Vec<_>>();
+			match self.runtime.save_batch(&requests, "coding-agent-retain", 0.75) {
+				Ok(outcome) if outcome.message.is_some() => {
+					yield terminal(Err(Fault::Unavailable), false);
+				},
+				Ok(outcome) => yield terminal(Ok(RetainPayload { ids: outcome.ids }), false),
+				Err(omp_memory::Error::InputTooLarge | omp_memory::Error::InvalidIdentifier) => {
+					yield terminal(Err(Fault::InvalidInput), true);
+				},
+				Err(_) => yield terminal(Err(Fault::Operation), false),
 			}
-			yield terminal(Ok(RetainPayload { ids }), false);
 		}
+	}
+
+	fn lift(&self, from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
+		lift_v1::<RetainParams, RetainPayload>(from, call)
 	}
 
 	fn prompt(&self, view: Result<&RetainPayload, &Fault>, _: &PromptCaps) -> Vec<Part> {
@@ -392,10 +474,10 @@ impl Tool for RetainTool {
 	}
 }
 
-fn spec<P: JsonSchema>(name: &'static str, description: &'static str) -> ToolSpec {
+fn memory_spec<P: JsonSchema>(name: &'static str, description: &'static str) -> ToolSpec {
 	ToolSpec {
 		name:            Str::new_static(name),
-		rev:             Rev { family: Str::default(), n: 1 },
+		rev:             Rev { family: Str::default(), n: 2 },
 		description:     Str::new_static(description),
 		schema:          omp_tool::schema::<P>(),
 		constraint:      Constraint::Schema {
@@ -412,6 +494,42 @@ fn spec<P: JsonSchema>(name: &'static str, description: &'static str) -> ToolSpe
 	}
 }
 
+fn lift_v1<P, O>(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall>
+where
+	P: DeserializeOwned,
+	O: DeserializeOwned,
+{
+	if !from.family.is_empty() || from.n != 1 {
+		return None;
+	}
+	let mut raw_args = serde_json::from_slice::<serde_json::Value>(call.raw_args).ok()?;
+	let object = raw_args.as_object_mut()?;
+	object.remove("i");
+	object.remove("notrunc");
+	serde_json::from_value::<P>(raw_args).ok()?;
+	serde_json::from_slice::<CallOutcome<O, Fault>>(call.verdict).ok()?;
+	Some(LiftedCall {
+		raw_args: Bytes::copy_from_slice(call.raw_args),
+		verdict:  Bytes::copy_from_slice(call.verdict),
+	})
+}
+
+fn render_reflection_evidence(memories: &[RecallResult]) -> Str {
+	let mut output = StrMut::new("Based on recalled memories:\n\n");
+	use std::fmt::Write as _;
+	for item in memories {
+		let source = item.memory.source.as_deref().unwrap_or("unknown");
+		let date = item
+			.memory
+			.timestamp
+			.get(..10)
+			.unwrap_or(item.memory.timestamp.as_str());
+		let _ =
+			writeln!(output, "- {} [{source}] ({date}, c:{:.2})", item.memory.content, item.score);
+	}
+	output.freeze()
+}
+
 fn render_recall(payload: &RecallPayload) -> Str {
 	if payload.items.is_empty() {
 		return sf!("No relevant memories found.");
@@ -420,16 +538,22 @@ fn render_recall(payload: &RecallPayload) -> Str {
 	use std::fmt::Write as _;
 	let _ = writeln!(output, "Found {} relevant memories:\n", payload.items.len());
 	for item in &payload.items {
+		let source = item.memory.source.as_deref().unwrap_or("unknown");
+		let date = item
+			.memory
+			.timestamp
+			.get(..10)
+			.unwrap_or(item.memory.timestamp.as_str());
 		let _ = writeln!(
 			output,
-			"- [{}] {} (memory://{})",
-			item.memory.bank, item.memory.content, item.memory.id,
+			"- [{}] {} (memory://{}) [{source}] ({date}, c:{:.2})",
+			item.memory.bank, item.memory.content, item.memory.id, item.score,
 		);
 	}
 	output.freeze()
 }
 
-fn terminal<U, P>(result: Result<P, Fault>, useless: bool) -> Ev<U, P, Fault> {
+const fn terminal<U, P>(result: Result<P, Fault>, useless: bool) -> Ev<U, P, Fault> {
 	Ev::Done(ToolTerminal::Done { result, useless })
 }
 

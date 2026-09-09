@@ -24,7 +24,7 @@ const MAX_REDIRECTS: u32 = 10;
 
 #[derive(Clone)]
 pub struct HttpEgressHost {
-	client: reqwest::Client,
+	client: omp_http::Client,
 }
 
 impl HttpEgressHost {
@@ -33,18 +33,33 @@ impl HttpEgressHost {
 		Self { client }
 	}
 
+	#[tracing::instrument(
+		name = "http_egress_request",
+		level = "debug",
+		skip_all,
+		fields(method = %request.method, host = tracing::field::Empty),
+	)]
 	pub(crate) async fn request(
 		&self,
 		request: pb::HttpRequest,
 	) -> Result<pb::HttpResponse, HttpEgressError> {
+		if let Ok(url) = Url::parse(&request.url)
+			&& let Some(host) = url.host_str()
+		{
+			tracing::Span::current().record("host", host);
+		}
 		let timeout_ms = request.timeout_ms;
 		let request = self.request_once(request);
 		if timeout_ms == 0 {
 			request.await
 		} else {
-			time::timeout(Duration::from_millis(timeout_ms), request)
-				.await
-				.map_err(|_| HttpEgressError::TimedOut)?
+			match time::timeout(Duration::from_millis(timeout_ms), request).await {
+				Ok(result) => result,
+				Err(_) => {
+					tracing::warn!("HTTP egress request timed out");
+					Err(HttpEgressError::TimedOut)
+				},
+			}
 		}
 	}
 

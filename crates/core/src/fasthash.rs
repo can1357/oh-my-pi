@@ -2,7 +2,7 @@
 //!
 //! [foldhash](https://docs.rs/foldhash) won omp's hasher benchmark on every
 //! workload class (integer keys, short string keys, and multi-KiB buffers)
-//! against fxhash, ahash, xxh3, and SipHash. Every discretionary in-memory
+//! against fxhash, ahash, xxh3, and `SipHash`. Every discretionary in-memory
 //! hash — map states, cache keys, dirty-check fingerprints — routes through
 //! these aliases so the choice stays in one place.
 //!

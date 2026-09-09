@@ -1,7 +1,7 @@
 //! Extension-host child spawning over a dedicated CONTROL descriptor.
 
 use std::{
-	env, io, mem,
+	env, fs, io, mem,
 	os::fd,
 	path::PathBuf,
 	process::Stdio,
@@ -11,6 +11,8 @@ use std::{
 	},
 	time::Duration,
 };
+#[cfg(target_os = "macos")]
+use std::{ffi::CStr, path::Path};
 
 use flume::Receiver;
 #[cfg(unix)]
@@ -54,6 +56,8 @@ pub const PACKAGE_SNAPSHOT_ENV: &str = "OMP_EXT_PACKAGE_SNAPSHOT";
 pub const MANIFEST_SNAPSHOT_ENV: &str = "OMP_EXT_MANIFEST_SNAPSHOT";
 /// Environment variable carrying manifest-ordered declaration modules as JSON.
 pub const DECLARATION_MODULES_ENV: &str = "OMP_EXT_DECLARATION_MODULES";
+/// Environment variable carrying the operator-admitted exact entry file.
+pub const ENTRY_PATH_ENV: &str = "OMP_EXT_ENTRY_PATH";
 
 /// One captured child output fragment.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -83,8 +87,14 @@ pub struct SpawnSpec {
 	pub executable:          PathBuf,
 	/// Per-extension Python site tree.
 	pub python_site:         PathBuf,
+	/// Exact operator-admitted entry file loaded before symbolic imports.
+	pub entry_path:          Option<PathBuf>,
 	/// Scoped Environment DATA socket.
 	pub env_socket:          PathBuf,
+	/// Authoritative extension process working directory.
+	pub current_dir:         Option<PathBuf>,
+	/// Optional workspace root granted to declared local callback sinks.
+	pub workspace_root:      Option<PathBuf>,
 	/// Generation assigned to this newly spawned child.
 	pub host_generation:     u64,
 	/// Session generation shared with the CONTROL parent.
@@ -124,9 +134,12 @@ pub struct RunningHost {
 	cancellation: CancellationLadder,
 	restart_spec: SpawnSpec,
 	identity:     ControlConnectionIdentity,
-	authority:    Arc<dyn ControlAuthority>,
 	snapshot:     ControlAuthoritySnapshot,
 	sandbox:      Option<PreparedSandbox>,
+}
+
+const fn cancellation_stops_child(outcome: &CancellationOutcome) -> bool {
+	matches!(outcome, CancellationOutcome::Killed(_) | CancellationOutcome::Disabled(_))
 }
 
 /// Failure while driving a live child or its cancellation ladder.
@@ -148,6 +161,16 @@ pub enum RunningHostError {
 
 impl SpawnedHost {
 	/// Starts the sole parent reader and installs synchronous Core authority.
+	#[tracing::instrument(
+		level = "debug",
+		name = "extension_host_handshake",
+		skip_all,
+		fields(
+			extension_id = %self.key.extension(),
+			host_generation = identity.host_generation,
+			session_generation = identity.session_generation,
+		)
+	)]
 	pub async fn start_control(
 		self,
 		identity: ControlConnectionIdentity,
@@ -156,13 +179,32 @@ impl SpawnedHost {
 	) -> Result<RunningHost, RunningHostError> {
 		let Self { key, mut child, control, logs, restart_spec, sandbox } = self;
 		let (runtime, handle) =
-			ControlRuntime::new(control, key.clone(), identity.clone(), Arc::clone(&authority));
+			ControlRuntime::new(control, key.clone(), identity.clone(), authority);
 		let pump = tokio::spawn(runtime.serve());
 		if let Err(error) = handle.install_authority_snapshot(snapshot).await {
 			pump.abort();
 			let _ = child.start_kill();
+			let failure_kind = match &error {
+				ControlRuntimeError::Io(_) => "io",
+				ControlRuntimeError::Json(_) => "json",
+				ControlRuntimeError::Protocol(_) => "protocol",
+				ControlRuntimeError::Dispatch(_) => "dispatch",
+				ControlRuntimeError::Remote(_) => "remote",
+			};
+			tracing::warn!(
+				extension_id = %key.extension(),
+				host_generation = identity.host_generation,
+				failure_kind,
+				"extension host control handshake failed",
+			);
 			return Err(error.into());
 		}
+		tracing::info!(
+			extension_id = %key.extension(),
+			host_generation = identity.host_generation,
+			session_generation = identity.session_generation,
+			"extension host control handshake completed",
+		);
 		Ok(RunningHost {
 			key,
 			child,
@@ -172,7 +214,6 @@ impl SpawnedHost {
 			cancellation: CancellationLadder::default(),
 			restart_spec,
 			identity,
-			authority,
 			snapshot: snapshot.clone(),
 			sandbox,
 		})
@@ -209,9 +250,12 @@ impl RunningHost {
 		self.cancellation.disabled(&self.key)
 	}
 
-	/// Reaps the current process group and starts its next authenticated
-	/// generation.
-	pub async fn restart(&mut self) -> Result<(), RunningHostError> {
+	/// Reaps the current process group and starts its next generation with a
+	/// freshly identity-bound CONTROL authority.
+	pub async fn restart_with_authority(
+		&mut self,
+		authority: Arc<dyn ControlAuthority>,
+	) -> Result<(), RunningHostError> {
 		self.terminate().await;
 		let mut spec = self.restart_spec.clone();
 		spec.host_generation = spec
@@ -223,7 +267,7 @@ impl RunningHost {
 		let cancellation = mem::take(&mut self.cancellation);
 		let spawned = spawn(spec).await?;
 		let mut replacement = spawned
-			.start_control(identity, Arc::clone(&self.authority), &self.snapshot)
+			.start_control(identity, authority, &self.snapshot)
 			.await?;
 		replacement.cancellation = cancellation;
 		*self = replacement;
@@ -237,6 +281,10 @@ impl RunningHost {
 
 	/// Runs all three cancellation stages, killing only this process group when
 	/// Python remains live after both courtesy graces.
+	///
+	/// A forced kill leaves the host stopped. The supervisor must acquire a
+	/// freshly generation-bound authority before calling
+	/// [`Self::restart_with_authority`].
 	pub async fn cancel_dispatch(
 		&mut self,
 		invocation: &str,
@@ -255,10 +303,8 @@ impl RunningHost {
 			self
 				.cancellation
 				.kill_after_grace(self.key.clone(), &mut self.child, last_frame)?;
-		match outcome {
-			CancellationOutcome::Killed(_) => self.restart().await?,
-			CancellationOutcome::Disabled(_) => self.terminate().await,
-			CancellationOutcome::DispatchCancel | CancellationOutcome::InterruptThread => {},
+		if cancellation_stops_child(&outcome) {
+			self.terminate().await;
 		}
 		Ok(outcome)
 	}
@@ -283,6 +329,16 @@ impl RunningHost {
 	}
 
 	/// Waits for the sole CONTROL pump to finish.
+	#[tracing::instrument(
+		level = "debug",
+		name = "extension_host_control_drain",
+		skip_all,
+		fields(
+			extension_id = %self.key.extension(),
+			host_generation = self.identity.host_generation,
+			session_generation = self.identity.session_generation,
+		)
+	)]
 	pub async fn wait_control(mut self) -> Result<(), RunningHostError> {
 		let result = match (&mut self.pump).await {
 			Ok(result) => result.map_err(Into::into),
@@ -294,6 +350,24 @@ impl RunningHost {
 				.into(),
 			),
 		};
+		match &result {
+			Ok(()) => tracing::debug!(
+				extension_id = %self.key.extension(),
+				host_generation = self.identity.host_generation,
+				"extension host control reader drained",
+			),
+			Err(error) => tracing::warn!(
+				extension_id = %self.key.extension(),
+				host_generation = self.identity.host_generation,
+				failure_kind = match error {
+					RunningHostError::Control(_) => "control",
+					RunningHostError::Cancellation(_) => "cancellation",
+					RunningHostError::Spawn(_) => "spawn",
+					RunningHostError::GenerationExhausted => "generation_exhausted",
+				},
+				"extension host control reader failed",
+			),
+		}
 		self.terminate().await;
 		result
 	}
@@ -346,6 +420,12 @@ impl HostChildLimit {
 		let previous = self.live.fetch_add(1, Ordering::AcqRel);
 		if previous >= self.limit {
 			self.live.fetch_sub(1, Ordering::AcqRel);
+			tracing::warn!(
+				extension_id = %spec.key.extension(),
+				host_generation = spec.host_generation,
+				limit = self.limit,
+				"extension host admission denied by child limit",
+			);
 			return Err(SpawnError::ChildLimit { limit: self.limit });
 		}
 		match spawn(spec).await {
@@ -363,20 +443,107 @@ impl HostChildLimit {
 	}
 }
 
+/// Adds the exact non-system image directories already loaded by this same
+/// binary.
+#[cfg(target_os = "macos")]
+fn allow_loaded_runtime_images(
+	sandbox: &mut SandboxSpec,
+	executable: &Path,
+) -> Result<(), SandboxError> {
+	unsafe extern "C" {
+		fn _dyld_image_count() -> u32;
+		fn _dyld_get_image_name(image_index: u32) -> *const std::ffi::c_char;
+	}
+
+	let executable = fs::canonicalize(executable)
+		.map_err(|source| SandboxError::Canonicalize { path: executable.to_path_buf(), source })?;
+	let image_count = unsafe { _dyld_image_count() };
+	for index in 0..image_count {
+		let name = unsafe { _dyld_get_image_name(index) };
+		if name.is_null() {
+			continue;
+		}
+		let Ok(name) = unsafe { CStr::from_ptr(name) }.to_str() else {
+			continue;
+		};
+		let image = Path::new(name);
+		if !image.is_absolute() || image.starts_with("/System") || image.starts_with("/usr/lib") {
+			continue;
+		}
+		let Ok(canonical) = fs::canonicalize(image) else {
+			continue;
+		};
+		if canonical == executable {
+			continue;
+		}
+		if let Some(parent) = image.parent() {
+			sandbox.allow_read(parent)?;
+		}
+		if let Some(parent) = canonical.parent() {
+			sandbox.allow_read(parent)?;
+		}
+		// Package managers load through symlink farms (`/opt/homebrew/opt/<pkg>`
+		// → `../Cellar/<pkg>/<version>`); the child resolves install names via
+		// the LINK path, which never appears in this process's canonical image
+		// list. Grant the whole world-readable prefix instead of chasing links.
+		for prefix in ["/opt/homebrew", "/usr/local/Cellar", "/usr/local/opt", "/opt/local"] {
+			if (image.starts_with(prefix) || canonical.starts_with(prefix))
+				&& fs::symlink_metadata(prefix).is_ok()
+			{
+				sandbox.allow_read(Path::new(prefix))?;
+			}
+		}
+	}
+	Ok(())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn allow_loaded_runtime_images(
+	_sandbox: &mut SandboxSpec,
+	_executable: &std::path::Path,
+) -> Result<(), SandboxError> {
+	Ok(())
+}
+
 /// Spawns one isolated extension host with CONTROL on descriptor three.
+#[tracing::instrument(
+	level = "debug",
+	name = "extension_host_spawn",
+	skip_all,
+	fields(
+		extension_id = %spec.key.extension(),
+		host_generation = spec.host_generation,
+		session_generation = spec.session_generation,
+		trust_tier = %spec.key.tier(),
+	)
+)]
 pub async fn spawn(spec: SpawnSpec) -> Result<SpawnedHost, SpawnError> {
 	let restart_spec = spec.clone();
 	let (parent, child_control) = UnixStream::pair()?;
 	let fd = fd::AsRawFd::as_raw_fd(&child_control);
+	let env_socket = if spec.key.tier().as_str() == "sandboxed" {
+		fs::canonicalize(&spec.env_socket)
+			.map_err(|source| SandboxError::Canonicalize { path: spec.env_socket.clone(), source })?
+	} else {
+		spec.env_socket.clone()
+	};
 	let sandbox_launch = match spec.key.tier().as_str() {
 		"sandboxed" => {
 			let mut sandbox = SandboxSpec::new(spec.executable.as_os_str());
 			sandbox.arg(EXT_HOST_ARG);
 			sandbox.allow_read(&spec.executable)?;
+			allow_loaded_runtime_images(&mut sandbox, &spec.executable)?;
 			sandbox.allow_read(&spec.python_site)?;
+			if let Some(entry_path) = &spec.entry_path {
+				sandbox.allow_read(entry_path)?;
+			}
 			sandbox.set_write(WriteMode::Scoped);
-			sandbox.allow_write(&spec.env_socket)?;
-			sandbox.allow_unix_socket(&spec.env_socket)?;
+			sandbox.allow_write(&env_socket)?;
+			if let Some(root) = &spec.workspace_root {
+				sandbox.allow_read(root)?;
+				sandbox.allow_write(root)?;
+			}
+			sandbox.allow_unix_socket(&env_socket)?;
 			sandbox.set_network(NetworkMode::Disabled);
 			sandbox.set_degradation(DegradationPolicy::Reject);
 			Some({
@@ -398,7 +565,7 @@ pub async fn spawn(spec: SpawnSpec) -> Result<SpawnedHost, SpawnError> {
 	command
 		.env(CONTROL_FD_ENV, "3")
 		.env(PY_SITE_ENV, &spec.python_site)
-		.env(ENV_SOCKET_ENV, &spec.env_socket)
+		.env(ENV_SOCKET_ENV, &env_socket)
 		.env("OMP_EXT_LAYER", spec.key.layer().as_str())
 		.env("OMP_EXT_TIER", spec.key.tier().as_str())
 		.env("OMP_EXT_HOST_GENERATION", spec.host_generation.to_string())
@@ -419,6 +586,14 @@ pub async fn spawn(spec: SpawnSpec) -> Result<SpawnedHost, SpawnError> {
 		.stdout(Stdio::piped())
 		.stderr(Stdio::piped())
 		.kill_on_drop(true);
+	if let Some(entry_path) = &spec.entry_path {
+		command.env(ENTRY_PATH_ENV, entry_path);
+	} else {
+		command.env_remove(ENTRY_PATH_ENV);
+	}
+	if let Some(root) = &spec.current_dir {
+		command.current_dir(root);
+	}
 	if let Some(snapshot) = &spec.package_snapshot {
 		command.env(PACKAGE_SNAPSHOT_ENV, snapshot.as_str());
 	} else {
@@ -442,6 +617,15 @@ pub async fn spawn(spec: SpawnSpec) -> Result<SpawnedHost, SpawnError> {
 				{
 					return Err(io::Error::last_os_error());
 				}
+				// The socketpair end was registered with tokio in the parent and
+				// carries O_NONBLOCK on its file description; the child's codec
+				// reads synchronously and must see a blocking descriptor.
+				let status = nix::libc::fcntl(3, nix::libc::F_GETFL);
+				if status == -1
+					|| nix::libc::fcntl(3, nix::libc::F_SETFL, status & !nix::libc::O_NONBLOCK) == -1
+				{
+					return Err(io::Error::last_os_error());
+				}
 				Ok(())
 			});
 		}
@@ -449,12 +633,27 @@ pub async fn spawn(spec: SpawnSpec) -> Result<SpawnedHost, SpawnError> {
 	let mut child = command.spawn().map_err(SpawnError::Spawn)?;
 	drop(child_control);
 	let (logs_tx, logs) = flume::unbounded();
+	let extension_id = spec.key.extension().clone();
+	let host_generation = spec.host_generation;
 	if let Some(stdout) = child.stdout.take() {
-		capture(stdout, HostLogStream::Stdout, logs_tx.clone());
+		capture(
+			stdout,
+			HostLogStream::Stdout,
+			logs_tx.clone(),
+			extension_id.clone(),
+			host_generation,
+		);
 	}
 	if let Some(stderr) = child.stderr.take() {
-		capture(stderr, HostLogStream::Stderr, logs_tx);
+		capture(stderr, HostLogStream::Stderr, logs_tx, extension_id, host_generation);
 	}
+	tracing::info!(
+		extension_id = %spec.key.extension(),
+		host_generation = spec.host_generation,
+		session_generation = spec.session_generation,
+		process_id = ?child.id(),
+		"extension host spawned",
+	);
 	Ok(SpawnedHost {
 		key: spec.key,
 		child,
@@ -465,18 +664,39 @@ pub async fn spawn(spec: SpawnSpec) -> Result<SpawnedHost, SpawnError> {
 	})
 }
 
-fn capture<R>(stream: R, source: HostLogStream, logs: flume::Sender<HostLog>)
-where
+fn capture<R>(
+	stream: R,
+	source: HostLogStream,
+	logs: flume::Sender<HostLog>,
+	extension_id: Str,
+	host_generation: u64,
+) where
 	R: AsyncRead + Unpin + Send + 'static,
 {
 	tokio::spawn(async move {
 		let mut stream = stream;
 		let mut bytes = [0_u8; 4096];
 		loop {
-			let Ok(read) = stream.read(&mut bytes).await else {
-				return;
+			let read = match stream.read(&mut bytes).await {
+				Ok(read) => read,
+				Err(error) => {
+					tracing::warn!(
+						%extension_id,
+						host_generation,
+						stream = ?source,
+						%error,
+						"extension host output reader failed",
+					);
+					return;
+				},
 			};
 			if read == 0 {
+				tracing::debug!(
+					%extension_id,
+					host_generation,
+					stream = ?source,
+					"extension host output reader drained",
+				);
 				return;
 			}
 			if logs
@@ -484,6 +704,12 @@ where
 				.await
 				.is_err()
 			{
+				tracing::debug!(
+					%extension_id,
+					host_generation,
+					stream = ?source,
+					"extension host output drain receiver closed",
+				);
 				return;
 			}
 		}
@@ -548,6 +774,20 @@ fn install_package_snapshot(engine: &omp_py::Engine) -> Result<(), SpawnError> {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	use crate::exthost::cancel::{CancelStage, CancellationJournal};
+
+	#[test]
+	fn forced_cancellation_stops_before_authorized_restart() {
+		assert!(!cancellation_stops_child(&CancellationOutcome::DispatchCancel));
+		assert!(!cancellation_stops_child(&CancellationOutcome::InterruptThread));
+		let journal = CancellationJournal {
+			extension:  HostKey::new("project", "trusted", "fixture"),
+			last_frame: 7,
+			stage:      CancelStage::ProcessGroupKill,
+		};
+		assert!(cancellation_stops_child(&CancellationOutcome::Killed(journal.clone())));
+		assert!(cancellation_stops_child(&CancellationOutcome::Disabled(journal)));
+	}
 
 	#[tokio::test]
 	async fn unknown_trust_tier_never_falls_back_to_raw_spawn() {
@@ -555,7 +795,10 @@ mod tests {
 			key:                 HostKey::new("workspace", "unknown", "fixture"),
 			executable:          PathBuf::from("/definitely/not/an/executable"),
 			python_site:         PathBuf::from("/definitely/not/a/site"),
+			entry_path:          None,
 			env_socket:          PathBuf::from("/definitely/not/a/socket"),
+			current_dir:         None,
+			workspace_root:      None,
 			host_generation:     1,
 			session_generation:  1,
 			package_snapshot:    None,

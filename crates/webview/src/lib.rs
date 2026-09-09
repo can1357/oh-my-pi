@@ -10,7 +10,8 @@
 //! - **system** — the platform webview, in-process (`WKWebView` on macOS).
 //! - **chromium** — any installed Chromium-family browser (Chrome, Edge, Brave,
 //!   Chromium, Vivaldi, ...), spawned and driven over the Chrome `DevTools`
-//!   Protocol.
+//!   Protocol, or a non-owned browser/relay attached through an existing CDP
+//!   discovery or websocket endpoint.
 //! - **firefox** — any installed Gecko-family browser (Firefox, `LibreWolf`,
 //!   ...), spawned and driven over `WebDriver` `BiDi`.
 //!
@@ -51,11 +52,12 @@
 //!
 //! # Remote-engine profiles
 //!
-//! Remote engines never touch the user's daily browsing profile: modern
+//! Owned remote engines never touch the user's daily browsing profile: modern
 //! Chrome refuses automation on the default profile, and clobbering user
-//! state would be hostile anyway. By default each view gets an ephemeral
+//! state would be hostile anyway. By default each owned view gets an ephemeral
 //! profile deleted on close; pass [`WebViewBuilder::profile`] for a
-//! persistent one (cookies and logins survive across views).
+//! persistent one (cookies and logins survive across views). Attached CDP
+//! views adopt exactly one caller-selected page and detach without closing it.
 //!
 //! The `OMP_WEBVIEW_BROWSER` environment variable (path to a browser binary)
 //! overrides [`Engine::find`]'s discovery for remote surfaces.
@@ -85,7 +87,7 @@ pub use wk::request_screen_capture;
 
 pub use crate::{
 	discover::{BrowserKind, EngineFamily, InstalledBrowser, discover},
-	error::{Error, Result},
+	error::{CdpDiscoveryError, Error, Result},
 	event::{Frame, WebViewEvent},
 	geometry::Rect,
 	input::{Input, Key, Modifiers, MouseButton},
@@ -97,6 +99,30 @@ use crate::{
 	options::PageOptions,
 	remote::{Command, RemoteView, chromium, firefox},
 };
+pub(crate) fn navigation_scheme(url: &str) -> &'static str {
+	let Some((scheme, _)) = url.split_once(':') else {
+		return "none";
+	};
+	if scheme.eq_ignore_ascii_case("http") {
+		"http"
+	} else if scheme.eq_ignore_ascii_case("https") {
+		"https"
+	} else if scheme.eq_ignore_ascii_case("file") {
+		"file"
+	} else if scheme.eq_ignore_ascii_case("about") {
+		"about"
+	} else if scheme.eq_ignore_ascii_case("data") {
+		"data"
+	} else if scheme.eq_ignore_ascii_case("blob") {
+		"blob"
+	} else if scheme.eq_ignore_ascii_case("ws") {
+		"ws"
+	} else if scheme.eq_ignore_ascii_case("wss") {
+		"wss"
+	} else {
+		"other"
+	}
+}
 
 /// A concrete engine choice for [`WebViewBuilder::new`].
 #[derive(Clone, Debug)]
@@ -108,6 +134,22 @@ pub enum Engine {
 	Chromium {
 		/// Path to the browser binary.
 		binary: PathBuf,
+	},
+	/// An existing Chromium-compatible CDP endpoint. Dropping a view detaches
+	/// from its target but never closes the foreign browser or page.
+	ChromiumCdp {
+		/// Browser HTTP discovery URL or browser websocket URL.
+		endpoint: Str,
+		/// Optional URL/title substring selecting an existing page target.
+		target:   Option<Str>,
+	},
+	/// An OMP Chromium relay endpoint. Relay identity is explicit so generic
+	/// CDP proxies are never sent relay-private commands.
+	ChromiumRelay {
+		/// Relay HTTP discovery URL or websocket URL.
+		endpoint: Str,
+		/// Optional URL/title substring selecting an existing page target.
+		target:   Option<Str>,
 	},
 	/// An installed Gecko-family browser, driven over `WebDriver` `BiDi`.
 	Firefox {
@@ -126,6 +168,19 @@ impl Engine {
 	/// A Chromium-family browser at `binary`.
 	pub fn chromium(binary: impl Into<PathBuf>) -> Self {
 		Self::Chromium { binary: binary.into() }
+	}
+
+	/// Attach to an existing Chromium-compatible CDP endpoint.
+	pub fn chromium_cdp(endpoint: impl IntoStr, target: Option<Str>) -> Self {
+		Self::ChromiumCdp { endpoint: endpoint.to_str(), target }
+	}
+
+	/// Attach through an OMP Chromium relay.
+	///
+	/// Unlike [`Self::chromium_cdp`], this explicitly enables the relay
+	/// handshake and user-tab focus protections independently of URL shape.
+	pub fn chromium_relay(endpoint: impl IntoStr, target: Option<Str>) -> Self {
+		Self::ChromiumRelay { endpoint: endpoint.to_str(), target }
 	}
 
 	/// A Gecko-family browser at `binary`.
@@ -185,7 +240,9 @@ impl Engine {
 		match self {
 			#[cfg(target_os = "macos")]
 			Self::System => EngineKind::System,
-			Self::Chromium { .. } => EngineKind::Chromium,
+			Self::Chromium { .. } | Self::ChromiumCdp { .. } | Self::ChromiumRelay { .. } => {
+				EngineKind::Chromium
+			},
 			Self::Firefox { .. } => EngineKind::Firefox,
 		}
 	}
@@ -271,12 +328,52 @@ impl WebViewBuilder {
 		self
 	}
 
+	/// Add one argument to an owned remote browser process.
+	///
+	/// Attached CDP endpoints ignore process arguments because the host does
+	/// not own that process.
+	pub fn argument(mut self, argument: impl IntoStr) -> Self {
+		self.page.arguments.push(argument.to_str());
+		self
+	}
+
+	/// Add arguments to an owned remote browser process.
+	pub fn arguments(mut self, arguments: impl IntoIterator<Item = impl IntoStr>) -> Self {
+		self
+			.page
+			.arguments
+			.extend(arguments.into_iter().map(|argument| argument.to_str()));
+		self
+	}
+
+	/// Bound connection and readiness work for an attached automation endpoint.
+	pub const fn connect_timeout(mut self, timeout: std::time::Duration) -> Self {
+		self.page.connect_timeout = Some(timeout);
+		self
+	}
+
+	/// Mark the frame viewport as explicitly requested by the caller.
+	///
+	/// OMP relay attachments otherwise preserve the viewport of the
+	/// user-owned tab. Other engines continue to apply their normal viewport
+	/// behavior.
+	pub const fn viewport_explicit(mut self, explicit: bool) -> Self {
+		self.page.viewport_explicit = explicit;
+		self
+	}
+
 	/// Embed as a native child view of `parent` at `bounds` (system engine).
 	///
 	/// # Errors
 	///
 	/// [`Error::Unsupported`] on remote engines, [`Error::MainThread`] off
 	/// the main thread, [`Error::WindowHandle`] for foreign handles.
+	#[tracing::instrument(
+		name = "webview_initialize",
+		level = "debug",
+		skip_all,
+		fields(engine = %self.engine.kind(), surface = %SurfaceKind::Child)
+	)]
 	pub fn build_child(self, parent: &impl HasWindowHandle, bounds: Rect) -> Result<WebView> {
 		match self.engine {
 			#[cfg(target_os = "macos")]
@@ -285,7 +382,15 @@ impl WebViewBuilder {
 				let state = SharedState::default();
 				let handle = parent.window_handle().map_err(|_| Error::WindowHandle)?;
 				let view =
-					wk::WkView::create(&self.page, handle.as_raw(), bounds, events_tx, state.clone())?;
+					wk::WkView::create(&self.page, handle.as_raw(), bounds, events_tx, state.clone())
+						.inspect_err(|error| {
+							tracing::warn!(
+								engine = "system",
+								surface = "child",
+								error = error.kind(),
+								"webview initialization failed"
+							);
+						})?;
 				Ok(WebView {
 					inner: Inner::Wk(view),
 					events,
@@ -313,20 +418,73 @@ impl WebViewBuilder {
 	///
 	/// Launch/connect/capture-setup failures from the engine;
 	/// [`Error::MainThread`] off the main thread on the system engine.
+	#[tracing::instrument(
+		name = "webview_initialize",
+		level = "debug",
+		skip_all,
+		fields(engine = %self.engine.kind(), surface = %SurfaceKind::Frames)
+	)]
 	pub fn build_frames(self, config: FrameConfig) -> Result<WebView> {
 		let engine = self.engine.kind();
 		let (view, events, state) = match self.engine {
 			Engine::Chromium { binary } => {
-				remote::spawn(self.page, move |ctx| chromium::drive_frames(binary, config, ctx))?
+				remote::spawn(self.page, move |ctx| chromium::drive_frames(binary, config, ctx))
+					.inspect_err(|error| {
+						tracing::warn!(
+							engine = %engine,
+							surface = "frames",
+							error = error.kind(),
+							"webview initialization failed"
+						);
+					})?
 			},
+			Engine::ChromiumCdp { endpoint, target } => remote::spawn(self.page, move |ctx| {
+				chromium::drive_attached(endpoint, target, config, ctx)
+			})
+			.inspect_err(|error| {
+				tracing::warn!(
+					engine = %engine,
+					surface = "frames",
+					error = error.kind(),
+					"attached webview initialization failed"
+				);
+			})?,
+			Engine::ChromiumRelay { endpoint, target } => remote::spawn(self.page, move |ctx| {
+				chromium::drive_relay_attached(endpoint, target, config, ctx)
+			})
+			.inspect_err(|error| {
+				tracing::warn!(
+					engine = %engine,
+					surface = "frames",
+					error = error.kind(),
+					"relay webview initialization failed"
+				);
+			})?,
 			Engine::Firefox { binary } => {
-				remote::spawn(self.page, move |ctx| firefox::drive_frames(binary, config, ctx))?
+				remote::spawn(self.page, move |ctx| firefox::drive_frames(binary, config, ctx))
+					.inspect_err(|error| {
+						tracing::warn!(
+							engine = %engine,
+							surface = "frames",
+							error = error.kind(),
+							"webview initialization failed"
+						);
+					})?
 			},
 			#[cfg(target_os = "macos")]
 			Engine::System => {
 				let (events_tx, events) = flume::unbounded();
 				let state = SharedState::default();
-				let view = WkFrames::create(&self.page, config, events_tx, state.clone())?;
+				let view = WkFrames::create(&self.page, config, events_tx, state.clone()).inspect_err(
+					|error| {
+						tracing::warn!(
+							engine = %engine,
+							surface = "frames",
+							error = error.kind(),
+							"webview initialization failed"
+						);
+					},
+				)?;
 				return Ok(WebView {
 					inner: Inner::WkFrames(view),
 					events,
@@ -351,14 +509,68 @@ impl WebViewBuilder {
 	///
 	/// [`Error::Unsupported`] on the system engine; launch/connect failures
 	/// from the remote engine.
+	#[tracing::instrument(
+		name = "webview_initialize",
+		level = "debug",
+		skip_all,
+		fields(engine = %self.engine.kind(), surface = %SurfaceKind::Window)
+	)]
 	pub fn build_window(self, config: WindowConfig) -> Result<WebView> {
 		let engine = self.engine.kind();
 		let (view, events, state) = match self.engine {
 			Engine::Chromium { binary } => {
-				remote::spawn(self.page, move |ctx| chromium::drive_window(binary, config, ctx))?
+				remote::spawn(self.page, move |ctx| chromium::drive_window(binary, config, ctx))
+					.inspect_err(|error| {
+						tracing::warn!(
+							engine = %engine,
+							surface = "window",
+							error = error.kind(),
+							"webview initialization failed"
+						);
+					})?
 			},
+			Engine::ChromiumCdp { endpoint, target } => remote::spawn(self.page, move |ctx| {
+				chromium::drive_attached(
+					endpoint,
+					target,
+					FrameConfig { width: config.width, height: config.height, ..FrameConfig::default() },
+					ctx,
+				)
+			})
+			.inspect_err(|error| {
+				tracing::warn!(
+					engine = %engine,
+					surface = "window",
+					error = error.kind(),
+					"attached webview initialization failed"
+				);
+			})?,
+			Engine::ChromiumRelay { endpoint, target } => remote::spawn(self.page, move |ctx| {
+				chromium::drive_relay_attached(
+					endpoint,
+					target,
+					FrameConfig { width: config.width, height: config.height, ..FrameConfig::default() },
+					ctx,
+				)
+			})
+			.inspect_err(|error| {
+				tracing::warn!(
+					engine = %engine,
+					surface = "window",
+					error = error.kind(),
+					"relay webview initialization failed"
+				);
+			})?,
 			Engine::Firefox { binary } => {
-				remote::spawn(self.page, move |ctx| firefox::drive_window(binary, config, ctx))?
+				remote::spawn(self.page, move |ctx| firefox::drive_window(binary, config, ctx))
+					.inspect_err(|error| {
+						tracing::warn!(
+							engine = %engine,
+							surface = "window",
+							error = error.kind(),
+							"webview initialization failed"
+						);
+					})?
 			},
 			#[cfg(target_os = "macos")]
 			Engine::System => {
@@ -402,13 +614,29 @@ pub struct WebView {
 impl WebView {
 	/// Navigate to `url`.
 	pub fn navigate(&self, url: &str) -> Result<()> {
-		match &self.inner {
+		tracing::debug!(
+			engine = %self.engine,
+			surface = %self.surface,
+			scheme = navigation_scheme(url),
+			"webview navigation requested"
+		);
+		let result = match &self.inner {
 			#[cfg(target_os = "macos")]
 			Inner::Wk(view) => view.navigate(url),
 			#[cfg(target_os = "macos")]
 			Inner::WkFrames(view) => view.navigate(url),
 			Inner::Remote(view) => view.send(Command::Navigate(url.to_str())),
+		};
+		if let Err(error) = &result {
+			tracing::warn!(
+				engine = %self.engine,
+				surface = %self.surface,
+				scheme = navigation_scheme(url),
+				error = error.kind(),
+				"webview navigation rejected"
+			);
 		}
+		result
 	}
 
 	/// Replace the document with `html` (null origin).
@@ -576,5 +804,19 @@ impl WebView {
 	/// How this view is presented.
 	pub const fn surface(&self) -> SurfaceKind {
 		self.surface
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn relay_identity_is_explicit_and_independent_of_endpoint_path() {
+		let generic = Engine::chromium_cdp("ws://proxy.example/cdp", None);
+		let relay = Engine::chromium_relay("wss://proxy.example/rewritten/browser", None);
+
+		assert!(matches!(generic, Engine::ChromiumCdp { .. }));
+		assert!(matches!(relay, Engine::ChromiumRelay { .. }));
 	}
 }

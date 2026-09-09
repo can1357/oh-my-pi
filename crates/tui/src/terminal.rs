@@ -919,7 +919,7 @@ pub fn simulate_resize_signal() {
 	let _ = pump::send_event(TerminalEvent::Resize);
 }
 
-pub(crate) fn record_resize_signal() {
+pub fn record_resize_signal() {
 	RESIZE_GENERATION.fetch_add(1, Ordering::Relaxed);
 }
 
@@ -1043,6 +1043,14 @@ const IN_BAND_RESIZE_MODE: u8 = 2;
 #[cfg(any(windows, test))]
 const UTF8_CODEPAGE: u32 = 65001;
 
+/// Maximum byte count passed to one Unix terminal write.
+///
+/// Terminal.app can stop draining after one multi-hundred-KiB PTY write;
+/// bounded syscalls let the emulator consume a large history replay
+/// incrementally.
+#[cfg(unix)]
+const MAX_TTY_WRITE_CHUNK_BYTES: usize = 16 * 1024;
+
 #[cfg(any(windows, test))]
 trait ConsoleCodepage {
 	fn output_codepage(&mut self) -> u32;
@@ -1074,8 +1082,29 @@ impl ConsoleCodepage for SystemConsoleCodepage {
 	}
 }
 
+/// Writes a fully materialized terminal payload, bounding individual Unix
+/// writes so terminal emulators can drain large frames incrementally.
+#[cfg(unix)]
 pub fn terminal_write_all<W: io::Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
-	#[cfg(windows)]
+	let mut offset = 0;
+	while offset < bytes.len() {
+		let end = offset
+			.saturating_add(MAX_TTY_WRITE_CHUNK_BYTES)
+			.min(bytes.len());
+		match writer.write(&bytes[offset..end]) {
+			Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+			Ok(written) => offset += written,
+			Err(error) if error.kind() == io::ErrorKind::Interrupted => {},
+			Err(error) => return Err(error),
+		}
+	}
+	Ok(())
+}
+
+/// Writes a fully materialized terminal payload after restoring the Windows
+/// console's UTF-8 output codepage.
+#[cfg(windows)]
+pub fn terminal_write_all<W: io::Write>(writer: &mut W, bytes: &[u8]) -> io::Result<()> {
 	ensure_console_utf8(&mut SystemConsoleCodepage);
 	writer.write_all(bytes)
 }
@@ -1300,6 +1329,7 @@ pub struct Terminal {
 impl Terminal {
 	/// Takes ownership of the controlling terminal and emits one
 	/// capability-aware entry batch.
+	#[tracing::instrument(level = "debug", name = "terminal_enter", skip_all)]
 	pub fn enter(mut options: TerminalOptions) -> io::Result<Self> {
 		ensure_restore_hooks()?;
 		let (caps, probe) = match options.caps {
@@ -1341,6 +1371,7 @@ impl Terminal {
 			deactivate_emergency_state();
 			return Err(error);
 		}
+		omp_core::logging::set_stderr_muted(true);
 
 		let keyboard = keyboard_mode(caps.kitty_keyboard);
 		let xterm_scroll_restore_modes = xterm_scroll_restore_modes(caps);
@@ -1509,6 +1540,7 @@ impl Terminal {
 		if raw_restored {
 			self.active = false;
 			deactivate_emergency_state();
+			omp_core::logging::set_stderr_muted(false);
 		}
 		if let Some(error) = first_error {
 			Err(error)
@@ -1549,6 +1581,25 @@ impl Terminal {
 	pub fn edit_keymap(&mut self, edit: impl FnOnce(&mut Keymap)) {
 		edit(&mut self.keymap);
 		self.pump.set_keymap(self.keymap.clone());
+	}
+
+	/// Enables or disables inline pointer reporting without leaving raw mode.
+	///
+	/// Hosts use this while a modal or fullscreen interactive surface owns
+	/// focus, returning native terminal text selection when it closes.
+	pub fn set_mouse(&mut self, mouse: bool) -> io::Result<()> {
+		if self.mouse == mouse {
+			return Ok(());
+		}
+		let payload = if mouse {
+			MOUSE_TRACKING_ON
+		} else {
+			MOUSE_TRACKING_OFF
+		};
+		terminal_write_all(&mut self.tty, payload)?;
+		self.tty.flush()?;
+		self.mouse = mouse;
+		Ok(())
 	}
 
 	/// Returns the controlling terminal's current cell dimensions.
@@ -1818,10 +1869,13 @@ impl Terminal {
 	/// Copies `text` to the system clipboard.
 	///
 	/// Writes OSC 52 to the terminal first (works over SSH and multiplexers
-	/// that forward it), then spawns a detached best-effort native write via
-	/// [`crate::paste::write_clipboard_text`] for local sessions whose
-	/// terminal ignores OSC 52.
-	pub fn copy_to_clipboard(&mut self, text: &str) -> io::Result<()> {
+	/// that forward it), then starts a detached native write for local
+	/// sessions whose terminal ignores OSC 52. The returned receiver preserves
+	/// the native backend outcome for hosts that surface copy notices.
+	pub fn copy_to_clipboard(
+		&mut self,
+		text: &str,
+	) -> io::Result<tokio::sync::oneshot::Receiver<paste::ClipboardWriteOutcome>> {
 		let encoded = base64::encode(text.as_bytes()).into_string();
 		let mut sequence = String::with_capacity(esc!(osc, "52;c;").len() + encoded.len() + 1);
 		sequence.push_str(esc!(osc, "52;c;"));
@@ -1829,13 +1883,7 @@ impl Terminal {
 		sequence.push('\x07');
 		terminal_write_all(&mut self.tty, sequence.as_bytes())?;
 		self.tty.flush()?;
-		let text = text.to_owned();
-		thread::Builder::new()
-			.name("omp-tui-clipboard".into())
-			.spawn(move || {
-				let _ = paste::write_clipboard_text(&text);
-			})?;
-		Ok(())
+		Ok(paste::spawn_clipboard_write(Str::new(text)))
 	}
 
 	fn set_appearance(&mut self, appearance: Appearance) {
@@ -1993,7 +2041,7 @@ impl Terminal {
 	/// The caller must deliver and flush this prefix with the main-screen
 	/// repaint, then call [`Terminal::commit_alt_leave`]. Keeping ownership
 	/// live until that commit lets [`Drop`] recover when the repaint fails.
-	pub fn stage_alt_leave(&self) -> Option<&'static str> {
+	pub const fn stage_alt_leave(&self) -> Option<&'static str> {
 		if !self.alt_screen {
 			return None;
 		}
@@ -2342,6 +2390,7 @@ fn emergency_restore_inner() {
 	// This must precede every other crash-path operation: panic reporting uses
 	// fd 2, and Unix restoration is only an atomic swap plus dup2/close.
 	platform::emergency_restore_stderr();
+	omp_core::logging::set_stderr_muted(false);
 	if !ACTIVE.swap(false, Ordering::AcqRel) {
 		return;
 	}
@@ -2405,6 +2454,7 @@ mod tests {
 	use std::{
 		env,
 		fs::{self, File, OpenOptions},
+		io,
 		mem::MaybeUninit,
 		os::fd::AsRawFd as _,
 		process::{self, Command, Output},
@@ -2427,14 +2477,14 @@ mod tests {
 	use super::{
 		ACTIVE, ALT_SCREEN_ACTIVE, ANSI_INSERT_MODE, ANSI_NEWLINE_MODE,
 		APPEARANCE_NOTIFICATIONS_MODE, AltScreenUse, ConsoleCodepage, CursorStyle,
-		IN_BAND_RESIZE_MODE, INPUT_REPORTS_OFF, KeyboardMode, MOUSE_TRACKING_ON, OSC11_QUERY,
-		Progress, RESIZE_GENERATION, ResizeWatch, TITLE_POP, TITLE_PUSH, Terminal, UTF8_CODEPAGE,
-		XTERM_SCROLL_ON_KEY_PRESS, XTERM_SCROLL_ON_OUTPUT, ansi_mode_restore_modes,
-		ansi_mode_restore_payload, base64, compose_enter, compose_input_reports_off, compose_leave,
-		compose_progress, compose_title, emergency_restore_payload, ensure_console_utf8,
-		ensure_restore_hooks, keyboard_mode, notification_modes_off_payload,
-		owned_notification_modes, platform, progress_state, reconcile_in_band_geometry,
-		rounded_cell_pixels,
+		IN_BAND_RESIZE_MODE, INPUT_REPORTS_OFF, KeyboardMode, MAX_TTY_WRITE_CHUNK_BYTES,
+		MOUSE_TRACKING_ON, OSC11_QUERY, Progress, RESIZE_GENERATION, ResizeWatch, TITLE_POP,
+		TITLE_PUSH, Terminal, UTF8_CODEPAGE, XTERM_SCROLL_ON_KEY_PRESS, XTERM_SCROLL_ON_OUTPUT,
+		ansi_mode_restore_modes, ansi_mode_restore_payload, base64, compose_enter,
+		compose_input_reports_off, compose_leave, compose_progress, compose_title,
+		emergency_restore_payload, ensure_console_utf8, ensure_restore_hooks, keyboard_mode,
+		notification_modes_off_payload, owned_notification_modes, platform, progress_state,
+		reconcile_in_band_geometry, rounded_cell_pixels, terminal_write_all,
 	};
 	use crate::{
 		Appearance, InputDecoder, InputEvent, Key, Keymap, Mods, Mouse, MouseButton, MouseReport,
@@ -2543,6 +2593,33 @@ mod tests {
 		assert_eq!(legacy.sets, [UTF8_CODEPAGE]);
 		ensure_console_utf8(&mut legacy);
 		assert_eq!(legacy.sets, [UTF8_CODEPAGE]);
+	}
+
+	#[derive(Default)]
+	struct RecordingWriter {
+		requested: Vec<usize>,
+		output:    Vec<u8>,
+	}
+
+	impl io::Write for RecordingWriter {
+		fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+			self.requested.push(bytes.len());
+			self.output.extend_from_slice(bytes);
+			Ok(bytes.len())
+		}
+
+		fn flush(&mut self) -> io::Result<()> {
+			Ok(())
+		}
+	}
+
+	#[test]
+	fn large_terminal_payload_is_split_into_bounded_unix_writes() {
+		let payload = vec![b'x'; MAX_TTY_WRITE_CHUNK_BYTES * 2 + 7];
+		let mut writer = RecordingWriter::default();
+		terminal_write_all(&mut writer, &payload).unwrap();
+		assert_eq!(writer.requested, [MAX_TTY_WRITE_CHUNK_BYTES, MAX_TTY_WRITE_CHUNK_BYTES, 7]);
+		assert_eq!(writer.output, payload);
 	}
 
 	#[test]

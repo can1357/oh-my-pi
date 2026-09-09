@@ -3,7 +3,7 @@
 //!
 //! One [`ProcInfo`] implementation per platform exposes the same accessors so
 //! process builtins stay platform-agnostic. Shell session and teardown process
-//! management remains a separate concern in `omp-shell`.
+//! management remains a separate application concern.
 
 #![allow(
 	dead_code,
@@ -88,6 +88,12 @@ mod proc_snapshot {
 	impl ProcInfo {
 		/// Captures every process currently visible to the caller.
 		pub fn all() -> Vec<Self> {
+			Self::all_filtered(|_| true)
+		}
+
+		/// Captures every process whose numeric identifier is accepted by
+		/// `allowed`.
+		pub fn all_filtered(mut allowed: impl FnMut(i32) -> bool) -> Vec<Self> {
 			let Ok(entries) = fs::read_dir("/proc") else {
 				return Vec::new();
 			};
@@ -100,6 +106,9 @@ mod proc_snapshot {
 				else {
 					continue;
 				};
+				if !allowed(pid) {
+					continue;
+				}
 				if let Some(process) = Self::from_pid(pid) {
 					result.push(process);
 				}
@@ -414,6 +423,12 @@ mod proc_snapshot {
 	impl ProcInfo {
 		/// Captures every process currently visible to the caller.
 		pub fn all() -> Vec<Self> {
+			Self::all_filtered(|_| true)
+		}
+
+		/// Captures every process whose numeric identifier is accepted by
+		/// `allowed`.
+		pub fn all_filtered(mut allowed: impl FnMut(i32) -> bool) -> Vec<Self> {
 			// SAFETY: null/zero is libproc's documented sizing query.
 			let reported = unsafe { proc_listallpids(ptr::null_mut(), 0) };
 			if reported <= 0 {
@@ -428,7 +443,11 @@ mod proc_snapshot {
 				return Vec::new();
 			}
 			pids.truncate((actual as usize).min(pids.len()));
-			pids.into_iter().filter_map(Self::from_pid).collect()
+			pids
+				.into_iter()
+				.filter(|pid| allowed(*pid))
+				.filter_map(Self::from_pid)
+				.collect()
 		}
 
 		fn from_pid(pid: i32) -> Option<Self> {
@@ -842,8 +861,20 @@ mod proc_snapshot {
 	impl ProcInfo {
 		/// Captures every process currently visible to the caller.
 		pub fn all() -> Vec<Self> {
+			Self::all_filtered(|_| true)
+		}
+
+		/// Captures every process whose numeric identifier is accepted by
+		/// `allowed`.
+		pub fn all_filtered(mut allowed: impl FnMut(i32) -> bool) -> Vec<Self> {
 			let mut handles = HashMap::new();
 			for entry in snapshot_entries() {
+				let Ok(pid) = i32::try_from(entry.pid) else {
+					continue;
+				};
+				if !allowed(pid) {
+					continue;
+				}
 				if let Some(identity) = open_process_identity(entry.pid) {
 					handles.insert(entry.pid, identity);
 				}
@@ -852,6 +883,8 @@ mod proc_snapshot {
 			snapshot_entries()
 				.into_iter()
 				.filter_map(|entry| {
+					let pid = i32::try_from(entry.pid).ok()?;
+					allowed(pid).then_some(())?;
 					let (handle, creation) = handles.remove(&entry.pid)?;
 					Self::from_entry(&entry, handle, creation)
 				})

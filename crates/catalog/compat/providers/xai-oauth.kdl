@@ -1,18 +1,21 @@
 // Provider-wire compat for "xai-oauth"; regenerated from the frozen census using deployment contract selectors.
 
 provider "xai-oauth" {
+	// Replaces the provider-keyed prompt-cache session-header baseline.
+	prompt-cache-session-header "x-grok-conv-id"
+	// SuperGrok shares the paid validator: leftover root anyOf/oneOf tool
+	// schemas 400; replaces the provider check in the OpenAI request builders.
+	reject-root-object-union #true
 	class "xai" {
 		family "grok" {
-			// pi 651f20957b/01db5b04ee flip these to encrypted-reasoning
-			// replay (filter #false, include #true), but the frozen source
-			// rows' legacy compat pins both values, so that flip rides the
-			// next snapshot import. The summary rejection and root-union
-			// flattening are new axes the legacy compat is silent on.
-			filter-reasoning-history #true
-			flatten-root-unions #true
-			include-encrypted-reasoning #false
+			// SuperGrok shares the paid /v1/responses dialect: encrypted reasoning
+			// is requested and replayed, and history keeps native reasoning items.
+			filter-reasoning-history #false
+			include-encrypted-reasoning #true
 			reasoning-effort-map {
 				minimal "low"
+				xhigh "high"
+				max "high"
 			}
 			supports-image-detail-original #false
 			supports-reasoning-summary #false
@@ -26,25 +29,16 @@ provider "xai-oauth" {
 			}
 		}
 	}
-	// SuperGrok requires an explicit native effort and defaults to high. The
-	// frozen source row's legacy compat pins the effort ladder (including the
-	// dead `minimal` alias), so the ladder cleanup rides the next snapshot
-	// import; only the default and the mandatory-effort contract apply now.
-	models "grok-4.5" {
-		thinking-default-level "high"
-		thinking-requires-effort #true
-	}
-	// Dormant until a catalog snapshot ships grok-4.6; xhigh is native there.
-	models "grok-4.6" {
-		reasoning-effort-map {}
-		thinking-efforts "low" "medium" "high" "xhigh"
-		thinking-default-level "high"
-		thinking-requires-effort #true
-	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "*reasoning" "grok-build" {
 		omit-reasoning-effort #true
 		supports-reasoning-effort #false
+	}
+	// xhigh-capable SKUs keep xhigh unmapped.
+	models "grok-4.6*" "grok-4.20-multi-agent*" priority=1 {
+		reasoning-effort-map {
+			minimal "low"
+		}
 	}
 	// residue: taxonomy ranks and exact globs do not isolate these models.
 	models "grok-4.20-multi-agent-0309" {

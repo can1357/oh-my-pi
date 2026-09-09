@@ -1,0 +1,24 @@
+── hub_wait — Hub wait ─────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+  IRC  AuthLoader                                                                                 
+                                                                                                    
+
+  · in progress
+                                                                                                    
+  IRC  AuthLoader timeout 1m                                                                      
+                                                                                                    
+
+  · done
+                                                                                                    
+  IRC  AuthLoader just now                                                                        
+   │ session-store rename is merged; auth.ts is yours.                                              
+                                                                                                    
+
+  · failed
+                                                                                                    
+  IRC  AuthLoader timed out                                                                       
+   Error: operation failed                                                                          
+                                                                                                    
+

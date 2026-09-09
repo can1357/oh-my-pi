@@ -9,95 +9,113 @@ repository.workspace = true
 description = "Project environment daemon: filesystem, process, document, tool, and extension-host authority for OMP"
 readme = "README.md"
 
+[features]
+default = []
+local-tts = ["omp-ai/local-tts"]
+
 [dependencies]
-async-stream = { workspace = true }
-async-trait = { workspace = true }
-bytes = { workspace = true }
-flume = { workspace = true }
-futures = { workspace = true }
-gix = { workspace = true }
-globset = { workspace = true }
-http = { workspace = true }
-hyper = { workspace = true }
-im = { workspace = true }
-miette = { workspace = true }
-nix = { workspace = true }
-omp-agent = { workspace = true }
-omp-catalog = { workspace = true }
-omp-core = { workspace = true, features = ["schemars"] }
-omp-desktop = { workspace = true }
-omp-docserver = { workspace = true }
-omp-env = { workspace = true }
-omp-ext = { workspace = true }
-omp-grep = { workspace = true }
-omp-hashline = { workspace = true }
-omp-inference = { workspace = true }
-omp-http = { workspace = true }
-omp-memory = { workspace = true }
-omp-oauth = { workspace = true }
-omp-proto = { workspace = true, features = ["tonic"] }
-omp-py = { workspace = true }
-omp-secrets = { workspace = true }
-omp-sandbox = { workspace = true }
-omp-settings = { workspace = true }
-omp-shell-engine = { workspace = true }
-omp-storage = { workspace = true }
-omp-telemetry = { workspace = true }
-omp-tool = { workspace = true }
-omp-tools = { workspace = true }
-omp-voice = { workspace = true }
-omp-walker = { workspace = true }
-omp-webview = { workspace = true }
-parking_lot = { workspace = true }
-prost = { workspace = true }
-pyo3 = { workspace = true }
-rand = { workspace = true }
-regex = { workspace = true }
-ring = { workspace = true }
-rusqlite = { workspace = true }
-schemars = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-strum = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-tonic = { workspace = true }
-url = { workspace = true }
+async-stream.workspace = true
+async-trait.workspace = true
+arboard.workspace = true
+bytes.workspace = true
+cap-std.workspace = true
+flume.workspace = true
+futures.workspace = true
+globset.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+im.workspace = true
+jiff.workspace = true
+miette.workspace = true
+nix.workspace = true
+omp-agent.workspace = true
+omp-ast.workspace = true
+omp-audio.workspace = true
+omp-session.workspace = true
+omp-dom.workspace = true
+omp-catalog.workspace = true
+omp-con.workspace = true
+omp-core.workspace = true
+omp-desktop.workspace = true
+omp-env.workspace = true
+omp-ext.workspace = true
+bytecount.workspace = true
+grep-matcher.workspace = true
+grep-pcre2.workspace = true
+grep-regex.workspace = true
+omp-edit.workspace = true
+omp-ai.workspace = true
+omp-journal.workspace = true
+omp-http.workspace = true
+omp-memory.workspace = true
+omp-oauth.workspace = true
+omp-proto.workspace = true
+omp-py.workspace = true
+omp-secrets.workspace = true
+omp-sandbox.workspace = true
+omp-shell-builtins.workspace = true
+omp-shell.workspace = true
+omp-cache.workspace = true
+omp-observability.workspace = true
+omp-tool.workspace = true
+omp-tools.workspace = true
+omp-vcs.workspace = true
+omp-walker.workspace = true
+omp-webview.workspace = true
+parking_lot.workspace = true
+prost.workspace = true
+pyo3.workspace = true
+rand.workspace = true
+regex.workspace = true
+ring.workspace = true
+rusqlite.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+similar.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-tungstenite.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+url.workspace = true
 reqwest.workspace = true
-zeroize = { workspace = true }
-zstd = { workspace = true }
+zeroize.workspace = true
+zstd.workspace = true
 
-tracing = { workspace = true }
+tracing.workspace = true
 
-russh = { workspace = true }
+russh.workspace = true
 
-russh-sftp = { workspace = true }
+russh-sftp.workspace = true
 
-encoding_rs = { workspace = true }
+encoding_rs.workspace = true
 
-bytecount = { workspace = true }
+smallvec.workspace = true
+tempfile.workspace = true
 
-smallvec = { workspace = true }
+xutf.workspace = true
 
-xutf = { workspace = true }
+libc.workspace = true
 
-libc = { workspace = true }
+serde_yaml.workspace = true
 
-serde_yaml = { workspace = true }
+notify.workspace = true
 
-notify = { workspace = true }
+toml.workspace = true
 
-toml = { workspace = true }
+omp-ar.workspace = true
 
-omp-ar = { workspace = true }
+flate2.workspace = true
 
-flate2 = { workspace = true }
+[target.'cfg(unix)'.dependencies]
+rustix.workspace = true
 
 [dev-dependencies]
-http-body-util = { workspace = true }
-hyper-util = { workspace = true }
-tempfile = { workspace = true }
+tempfile.workspace = true
 
 [lints]
 workspace = true

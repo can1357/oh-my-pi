@@ -7,7 +7,7 @@ use parking_lot::Mutex;
 
 use crate::{
 	Result,
-	recall::RecallResult,
+	recall::{RecallBounds, RecallResult},
 	store::{BankStore, IndexGeneration},
 };
 
@@ -40,6 +40,7 @@ struct CacheEntry {
 	tokens:    HashSet<Str>,
 	embedding: Option<Vec<f32>>,
 	stamps:    Vec<BankStamp>,
+	bounds:    RecallBounds,
 	results:   Vec<RecallResult>,
 }
 
@@ -68,11 +69,18 @@ impl RecallCache {
 	}
 
 	/// Returns an exact query hit under identical bank generations.
-	pub fn exact(&self, query: &str, current: &[BankStamp]) -> Option<Vec<RecallResult>> {
+	pub fn exact(
+		&self,
+		query: &str,
+		current: &[BankStamp],
+		bounds: RecallBounds,
+	) -> Option<Vec<RecallResult>> {
 		let normalized = normalize_query(query);
 		let mut entries = self.entries.lock();
 		entries.retain(|entry| entry.stamps == current);
-		let index = entries.iter().position(|entry| entry.query == normalized)?;
+		let index = entries
+			.iter()
+			.position(|entry| entry.query == normalized && entry.bounds == bounds)?;
 		let entry = entries.remove(index)?;
 		let results = entry.results.clone();
 		entries.push_back(entry);
@@ -88,13 +96,18 @@ impl RecallCache {
 		query: &str,
 		embedding: Option<&[f32]>,
 		current: &[BankStamp],
+		bounds: RecallBounds,
 	) -> Option<Vec<RecallResult>> {
 		let tokens = token_set(query);
 		let embedding = embedding.and_then(normalize_embedding);
 		let mut entries = self.entries.lock();
 		entries.retain(|entry| entry.stamps == current);
 		let mut best: Option<(usize, f32)> = None;
-		for (index, entry) in entries.iter().enumerate() {
+		for (index, entry) in entries
+			.iter()
+			.enumerate()
+			.filter(|(_, entry)| entry.bounds == bounds)
+		{
 			let score = match (embedding.as_deref(), entry.embedding.as_deref()) {
 				(Some(left), Some(right)) if left.len() == right.len() => cosine(left, right),
 				_ => jaccard(&tokens, &entry.tokens),
@@ -121,6 +134,7 @@ impl RecallCache {
 		query: &str,
 		embedding: Option<&[f32]>,
 		stamps: Vec<BankStamp>,
+		bounds: RecallBounds,
 		results: Vec<RecallResult>,
 	) {
 		let bytes = results
@@ -136,10 +150,11 @@ impl RecallCache {
 			query,
 			embedding: embedding.and_then(normalize_embedding),
 			stamps,
+			bounds,
 			results,
 		};
 		let mut entries = self.entries.lock();
-		entries.retain(|existing| existing.query != entry.query);
+		entries.retain(|existing| existing.query != entry.query || existing.bounds != entry.bounds);
 		entries.push_back(entry);
 		while entries.len() > self.capacity {
 			entries.pop_front();

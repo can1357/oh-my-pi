@@ -126,7 +126,7 @@ pub fn raw_stream_dump(text: &str) -> ProfilePayload {
 	ProfilePayload {
 		path:   "raw-stream.txt".to_owned(),
 		format: "omp-redacted-provider-stream-v1".to_owned(),
-		bytes:  omp_telemetry::redact::redact_sensitive_credentials(text).into_bytes(),
+		bytes:  omp_observability::redact::redact_sensitive_credentials(text).into_bytes(),
 	}
 }
 

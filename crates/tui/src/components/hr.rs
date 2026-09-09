@@ -7,7 +7,7 @@ use xutf::Text as _;
 use crate::{
 	component::{Component, PaintCtx, Slot, next_slot},
 	context::UiContext,
-	frame::Rect,
+	frame::{CellContent, Rect, Style},
 	markup::{Align, Border},
 	props::{Prop, PropValue, Props},
 };
@@ -156,9 +156,26 @@ impl Component for Hr {
 		if rect.y >= pc.clip {
 			return;
 		}
+		let join_left = find_border_left(pc.frame, rect.x, rect.y, vertical);
+		let join_right =
+			find_border_right(pc.frame, rect.x.saturating_add(rect.width), rect.y, vertical);
+		let line_x = join_left.map_or(rect.x, |edge| edge.saturating_add(1));
+		let line_right = join_right.unwrap_or_else(|| rect.x.saturating_add(rect.width));
+		let rect = Rect::new(line_x, rect.y, line_right.saturating_sub(line_x), rect.height);
 		self.bar.clear();
 		repeated_char(&mut self.bar, horizontal, usize::from(rect.width));
 		pc.frame.put(rect.x, rect.y, &self.bar, line);
+		let middle = pc.ctx.charset.grid().middle;
+		if let Some(edge) = join_left {
+			let mut encoded = [0; 4];
+			pc.frame
+				.put(edge, rect.y, middle.0.encode_utf8(&mut encoded), line);
+		}
+		if let Some(edge) = join_right {
+			let mut encoded = [0; 4];
+			pc.frame
+				.put(edge, rect.y, middle.2.encode_utf8(&mut encoded), line);
+		}
 		// `label` is the canonical section-header spelling. Keep `title` as a
 		// compatibility fallback because it also supplies the established
 		// alignment contract.
@@ -173,17 +190,36 @@ impl Component for Hr {
 			// at widths where retaining it would drop the label altogether.
 			let interior = rect.width - 2;
 			let left_pad = interior >= 2;
-			let right_pad = interior >= 3;
-			let fit = interior
-				.saturating_sub(u16::from(left_pad))
-				.saturating_sub(u16::from(right_pad));
-			let label = truncate_to_width(label, fit);
+			let title_pad = self.props.title_pad();
+			let mut right_pad = interior >= 3;
+			let fit = if title_pad > 1 {
+				interior
+					.saturating_sub(u16::from(left_pad))
+					.saturating_sub(u16::from(right_pad))
+					.saturating_sub(title_pad)
+			} else {
+				interior
+					.saturating_sub(u16::from(left_pad))
+					.saturating_sub(u16::from(right_pad))
+			};
+			let authored = label;
+			let mut label = truncate_to_width(authored, fit);
+			if title_pad > 1 && label.ellipsis {
+				right_pad = false;
+				let fit = interior
+					.saturating_sub(u16::from(left_pad))
+					.saturating_sub(title_pad);
+				label = truncate_to_width(authored, fit);
+			}
 			let total = label
 				.width
 				.saturating_add(u16::from(left_pad))
 				.saturating_add(u16::from(right_pad));
 			let x = match self.props.title_align() {
-				Align::Start => rect.x.saturating_add(2),
+				Align::Start => rect
+					.x
+					.saturating_add(self.props.title_pad())
+					.saturating_add(u16::from(join_left.is_none())),
 				Align::Center => rect.x.saturating_add(rect.width.saturating_sub(total) / 2),
 				Align::End => rect
 					.x
@@ -195,24 +231,70 @@ impl Component for Hr {
 					.x
 					.saturating_add(rect.width.saturating_sub(1).saturating_sub(total)),
 			);
+			let gap_style = Style::new().bg(style.background_color());
 			let label_style = if self.props.has_foreground() {
-				style.bold()
+				style
 			} else {
-				style.fg(pc.ctx.theme.fg).bold()
+				gap_style
 			};
 			let mut end = x;
 			if left_pad {
-				end = pc.frame.put(end, rect.y, " ", style);
+				end = pc.frame.put(end, rect.y, " ", gap_style);
 			}
 			end = pc.frame.put(end, rect.y, label.text, label_style);
 			if label.ellipsis {
 				end = pc.frame.put(end, rect.y, "…", label_style);
 			}
 			if right_pad {
-				pc.frame.put(end, rect.y, " ", style);
+				pc.frame.put(end, rect.y, " ", gap_style);
 			}
 		}
 	}
+}
+
+fn find_border_left(frame: &crate::Frame, from: u16, y: u16, vertical: char) -> Option<u16> {
+	let mut x = from;
+	while x > 0 {
+		x -= 1;
+		let content = frame.cell(x, y).content();
+		if is_vertical_border(content, vertical) {
+			return Some(x);
+		}
+		if !is_blank(content) {
+			return None;
+		}
+	}
+	None
+}
+
+fn find_border_right(frame: &crate::Frame, mut x: u16, y: u16, vertical: char) -> Option<u16> {
+	while x < frame.size().width {
+		let content = frame.cell(x, y).content();
+		if is_vertical_border(content, vertical) {
+			return Some(x);
+		}
+		if !is_blank(content) {
+			return None;
+		}
+		x += 1;
+	}
+	None
+}
+
+fn is_vertical_border(content: &CellContent, vertical: char) -> bool {
+	matches!(
+		content,
+		CellContent::Grapheme { text, width: 1 }
+			if {
+				let mut chars = text.chars();
+				chars.next() == Some(vertical) && chars.next().is_none()
+			}
+	)
+}
+
+fn is_blank(content: &CellContent) -> bool {
+	matches!(content, CellContent::Blank)
+		|| matches!(content, CellContent::Grapheme { text, width: 1 } if text.as_str() == " ")
 }
 
 /// Flexible blank space backing the `<spacer>` markup tag.
@@ -325,7 +407,7 @@ mod tests {
 			Rect::new(0, 0, 12, 1),
 		);
 		assert_eq!(frame_row_text(&frame, 0), "── Output ──");
-		assert_eq!(frame.cell(3, 0).style, Style::new().fg(ctx.theme.fg).bold());
+		assert_eq!(frame.cell(3, 0).style, Style::new());
 	}
 
 	#[test]

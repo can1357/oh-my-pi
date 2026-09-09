@@ -1,225 +1,111 @@
 //! Typed Git branch, ref, remote, configuration, and checkout commands.
 
-use std::{
-	cmp::Ordering,
-	path::Path,
-	str,
-	sync::atomic::{AtomicBool, Ordering as AtomicOrdering},
-};
+use std::{path::Path, sync::Arc};
 
-use bytes::Bytes;
-use gix::bstr::ByteSlice;
-use omp_core::{IntoStr, Str, sf};
+use omp_core::{IntoStr, Str};
 use tokio_util::sync::CancellationToken;
 
-use super::{
-	lock, native,
-	repo::Repository,
-	runner::{GitDeadline, GitRunError, GitRunOptions, GitRunOutput, GitRunner},
-};
+use super::{blocking, lock, repo::Repository};
 
-/// A Git command completed unsuccessfully.
+/// A Git operation failed.
 #[derive(Debug, thiserror::Error)]
 pub enum CommandError {
-	/// The process could not produce a complete result.
+	/// The in-process VCS backend rejected the operation.
 	#[error(transparent)]
-	Run(#[from] GitRunError),
-	/// Git rejected the operation.
-	#[error("Git command exited with status {code}")]
-	Exit {
-		/// Process exit code.
-		code:   i32,
-		/// Bounded standard output.
-		stdout: Bytes,
-		/// Bounded standard error.
-		stderr: Bytes,
-	},
+	Vcs(#[from] omp_vcs::Error),
+	/// A plumbing record was not valid UTF-8 or was structurally incomplete.
+	#[error("Git emitted invalid plumbing output")]
+	NonUtf8,
 	/// A remote name already exists with another URL.
 	#[error("Git remote {name} already exists with a different URL")]
 	RemoteConflict {
-		/// Remote name.
+		/// Conflicting remote name.
 		name:      Str,
-		/// Existing URL.
+		/// URL already configured for the remote.
 		existing:  Str,
-		/// Requested URL.
+		/// URL requested by the caller.
 		requested: Str,
 	},
-	/// A mutating command was cancelled while waiting for repository authority.
+	/// A mutating operation was cancelled while waiting for repository
+	/// authority.
 	#[error(transparent)]
 	Lock(#[from] lock::LockError),
-	/// Git emitted data that is not UTF-8 where its plumbing format requires
-	/// UTF-8.
-	#[error("Git emitted non-UTF-8 scalar output")]
-	NonUtf8,
 }
 
 /// Environment-owned typed Git command facade.
-///
-/// Reads run in-process via gitoxide with system-Git fallback; mutations stay
-/// on system Git for hook, lock, and worktree semantics.
-#[derive(Clone)]
-pub struct GitCommands {
-	runner: GitRunner,
-}
+#[derive(Clone, Copy, Default)]
+pub struct GitCommands;
 
 impl GitCommands {
-	/// Creates a command facade over the hardened runner.
-	pub const fn new(runner: GitRunner) -> Self {
-		Self { runner }
+	/// Creates a command facade.
+	pub const fn new() -> Self {
+		Self
 	}
 
-	async fn output(
-		&self,
+	async fn repo(
 		cwd: &Path,
-		argv: &[&str],
-		read_only: bool,
-		deadline: GitDeadline,
 		cancel: &CancellationToken,
-	) -> Result<GitRunOutput, CommandError> {
-		let result = self
-			.runner
-			.run(cwd, argv, GitRunOptions { read_only, parse_sensitive: true, deadline }, cancel)
-			.await?;
-		Ok(result)
+	) -> Result<Arc<omp_vcs::git::GitRepo>, CommandError> {
+		let cwd = cwd.to_owned();
+		blocking(Some(cancel), move || omp_vcs::git::GitRepo::require(&cwd).map(Arc::new))
+			.await
+			.map_err(Into::into)
 	}
 
-	async fn checked(
-		&self,
-		cwd: &Path,
-		argv: &[&str],
-		read_only: bool,
-		deadline: GitDeadline,
-		cancel: &CancellationToken,
-	) -> Result<GitRunOutput, CommandError> {
-		let result = self.output(cwd, argv, read_only, deadline, cancel).await?;
-		if result.exit_code == 0 {
-			Ok(result)
-		} else {
-			Err(CommandError::Exit {
-				code:   result.exit_code,
-				stdout: result.stdout,
-				stderr: result.stderr,
-			})
-		}
-	}
-
-	async fn scalar(
-		&self,
-		cwd: &Path,
-		argv: &[&str],
-		cancel: &CancellationToken,
-	) -> Result<Option<Str>, CommandError> {
-		let result = self
-			.output(cwd, argv, true, GitDeadline::Local, cancel)
-			.await?;
-		if result.exit_code != 0 {
-			return Ok(None);
-		}
-		let value = str::from_utf8(&result.stdout)
-			.map_err(|_| CommandError::NonUtf8)?
-			.trim();
-		Ok((!value.is_empty()).then(|| value.to_str()))
-	}
-
-	async fn mutate(
-		&self,
-		repository: &Repository,
-		argv: &[&str],
-		deadline: GitDeadline,
-		cancel: &CancellationToken,
-	) -> Result<(), CommandError> {
-		let _guard = lock::write(repository, cancel).await?;
-		self
-			.checked(&repository.worktree_root, argv, false, deadline, cancel)
-			.await?;
-		Ok(())
-	}
-
-	/// Returns the current branch, or `None` for detached HEAD.
+	/// Reads the current branch name, or `None` for detached `HEAD`.
 	pub async fn current_branch(
 		&self,
 		cwd: &Path,
 		cancel: &CancellationToken,
 	) -> Result<Option<Str>, CommandError> {
-		match native::with_repository(cwd, cancel, native_current_branch).await {
-			Ok(value) => return Ok(value),
-			Err(error) if error.is_cancelled() => return Err(GitRunError::Cancelled.into()),
-			Err(error) => tracing::debug!(%error, "in-process Git read fell back to system Git"),
-		}
-		self
-			.scalar(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"], cancel)
-			.await
+		let repo = Self::repo(cwd, cancel).await?;
+		Ok(blocking(Some(cancel), move || repo.current_branch())
+			.await?
+			.map(Str::from))
 	}
 
-	/// Discovers the symbolic default branch from origin then upstream.
+	/// Discovers the repository's configured or conventional default branch.
 	pub async fn default_branch(
 		&self,
 		cwd: &Path,
 		cancel: &CancellationToken,
 	) -> Result<Option<Str>, CommandError> {
-		match native::with_repository(cwd, cancel, native_default_branch).await {
-			Ok(value) => return Ok(value),
-			Err(error) if error.is_cancelled() => return Err(GitRunError::Cancelled.into()),
-			Err(error) => tracing::debug!(%error, "in-process Git read fell back to system Git"),
-		}
-		for remote in ["origin", "upstream"] {
-			let reference = format!("refs/remotes/{remote}/HEAD");
-			if let Some(target) = self
-				.scalar(cwd, &["symbolic-ref", "--quiet", reference.as_str()], cancel)
-				.await?
-			{
-				let prefix = format!("refs/remotes/{remote}/");
-				if let Some(branch) = target.as_str().strip_prefix(&prefix)
-					&& !branch.is_empty()
-				{
-					return Ok(Some(branch.to_str()));
-				}
-			}
-		}
-		Ok(None)
+		let repo = Self::repo(cwd, cancel).await?;
+		Ok(blocking(Some(cancel), move || repo.default_branch())
+			.await?
+			.map(Str::from))
 	}
 
-	/// Lists local branches, optionally including remote refs.
+	/// Lists local branches and optionally remote-tracking branches.
 	pub async fn list_branches(
 		&self,
 		cwd: &Path,
 		all: bool,
 		cancel: &CancellationToken,
 	) -> Result<Vec<Str>, CommandError> {
-		match native::with_repository(cwd, cancel, move |repository, stop| {
-			native_list_branches(repository, stop, all)
-		})
-		.await
-		{
-			Ok(value) => return Ok(value),
-			Err(error) if error.is_cancelled() => return Err(GitRunError::Cancelled.into()),
-			Err(error) => tracing::debug!(%error, "in-process Git read fell back to system Git"),
-		}
-		let argv = if all {
-			["branch", "--all", "--format=%(refname:short)"]
-		} else {
-			["branch", "--list", "--format=%(refname:short)"]
-		};
-		let output = self
-			.checked(cwd, &argv, true, GitDeadline::Local, cancel)
-			.await?;
-		lines(&output.stdout)
+		let repo = Self::repo(cwd, cancel).await?;
+		Ok(blocking(Some(cancel), move || repo.list_branches(all))
+			.await?
+			.into_iter()
+			.map(Str::from)
+			.collect())
 	}
 
-	/// Creates a branch at `start_point`.
+	/// Creates a branch at the requested starting revision.
 	pub async fn create_branch(
 		&self,
 		repository: &Repository,
 		name: &str,
-		start_point: &str,
+		start: &str,
 		cancel: &CancellationToken,
 	) -> Result<(), CommandError> {
-		self
-			.mutate(repository, &["branch", name, start_point], GitDeadline::Local, cancel)
-			.await
+		let _guard = lock::write(repository, cancel).await?;
+		let (repo, name, start) = (repository.handle.clone(), name.to_owned(), start.to_owned());
+		blocking(Some(cancel), move || repo.create_branch(&name, &start, false)).await?;
+		Ok(())
 	}
 
-	/// Deletes a branch, forcibly unless `force` is false.
+	/// Deletes a branch after acquiring repository mutation authority.
 	pub async fn delete_branch(
 		&self,
 		repository: &Repository,
@@ -227,125 +113,78 @@ impl GitCommands {
 		force: bool,
 		cancel: &CancellationToken,
 	) -> Result<(), CommandError> {
-		self
-			.mutate(
-				repository,
-				&["branch", if force { "-D" } else { "-d" }, name],
-				GitDeadline::Local,
-				cancel,
-			)
-			.await
+		let _guard = lock::write(repository, cancel).await?;
+		let (repo, name) = (repository.handle.clone(), name.to_owned());
+		blocking(Some(cancel), move || repo.delete_branch(&name, force).map(drop)).await?;
+		Ok(())
 	}
 
-	/// Checks out an existing ref.
+	/// Checks out an existing branch or revision.
 	pub async fn checkout(
 		&self,
 		repository: &Repository,
 		reference: &str,
 		cancel: &CancellationToken,
 	) -> Result<(), CommandError> {
-		self
-			.mutate(repository, &["checkout", reference], GitDeadline::Local, cancel)
-			.await
+		let _guard = lock::write(repository, cancel).await?;
+		let (repo, reference) = (repository.handle.clone(), reference.to_owned());
+		blocking(Some(cancel), move || repo.checkout(&reference)).await?;
+		Ok(())
 	}
 
-	/// Creates and checks out a branch.
+	/// Creates and checks out a branch from the current `HEAD`.
 	pub async fn checkout_new(
 		&self,
 		repository: &Repository,
 		name: &str,
 		cancel: &CancellationToken,
 	) -> Result<(), CommandError> {
-		self
-			.mutate(repository, &["checkout", "-b", name], GitDeadline::Local, cancel)
-			.await
+		let _guard = lock::write(repository, cancel).await?;
+		let (repo, name) = (repository.handle.clone(), name.to_owned());
+		blocking(Some(cancel), move || repo.checkout_new_branch(&name)).await?;
+		Ok(())
 	}
 
-	/// Resolves a revision to its object ID, returning `None` when absent.
+	/// Resolves a revision expression to an object identifier when it exists.
 	pub async fn resolve_ref(
 		&self,
 		cwd: &Path,
 		reference: &str,
 		cancel: &CancellationToken,
 	) -> Result<Option<Str>, CommandError> {
-		let native_reference = reference.to_owned();
-		match native::with_repository(cwd, cancel, move |repository, stop| {
-			native_resolve_ref(repository, stop, &native_reference)
-		})
-		.await
-		{
-			Ok(value) => return Ok(value),
-			Err(error) if error.is_cancelled() => return Err(GitRunError::Cancelled.into()),
-			Err(error) => tracing::debug!(%error, "in-process Git read fell back to system Git"),
-		}
-		self
-			.scalar(cwd, &["rev-parse", "--verify", reference], cancel)
-			.await
+		let repo = Self::repo(cwd, cancel).await?;
+		let reference = reference.to_owned();
+		Ok(blocking(Some(cancel), move || repo.resolve_ref(&reference))
+			.await?
+			.map(Str::from))
 	}
 
-	/// Tests whether a ref exists.
+	/// Reports whether a revision expression resolves in the repository.
 	pub async fn ref_exists(
 		&self,
 		cwd: &Path,
 		reference: &str,
 		cancel: &CancellationToken,
 	) -> Result<bool, CommandError> {
-		let native_reference = reference.to_owned();
-		match native::with_repository(cwd, cancel, move |repository, stop| {
-			native_ref_exists(repository, stop, &native_reference)
-		})
-		.await
-		{
-			Ok(value) => return Ok(value),
-			Err(error) if error.is_cancelled() => return Err(GitRunError::Cancelled.into()),
-			Err(error) => tracing::debug!(%error, "in-process Git read fell back to system Git"),
-		}
-		let output = self
-			.output(
-				cwd,
-				&["show-ref", "--verify", "--quiet", reference],
-				true,
-				GitDeadline::Local,
-				cancel,
-			)
-			.await?;
-		Ok(output.exit_code == 0)
+		let repo = Self::repo(cwd, cancel).await?;
+		let reference = reference.to_owned();
+		Ok(blocking(Some(cancel), move || repo.ref_exists(&reference)).await?)
 	}
 
-	/// Lists version-sorted tags pointing at a ref.
+	/// Lists tags that point at the requested revision.
 	pub async fn tags(
 		&self,
 		cwd: &Path,
 		reference: &str,
 		cancel: &CancellationToken,
 	) -> Result<Vec<Str>, CommandError> {
-		let native_reference = reference.to_owned();
-		match native::with_repository(cwd, cancel, move |repository, stop| {
-			native_tags(repository, stop, &native_reference)
-		})
-		.await
-		{
-			Ok(value) => return Ok(value),
-			Err(error) if error.is_cancelled() => return Err(GitRunError::Cancelled.into()),
-			Err(error) => tracing::debug!(%error, "in-process Git read fell back to system Git"),
-		}
-		let output = self
-			.checked(
-				cwd,
-				&[
-					"for-each-ref",
-					"--points-at",
-					reference,
-					"--sort=-version:refname",
-					"--format=%(refname:strip=2)",
-					"refs/tags",
-				],
-				true,
-				GitDeadline::Local,
-				cancel,
-			)
-			.await?;
-		lines(&output.stdout)
+		let repo = Self::repo(cwd, cancel).await?;
+		let reference = reference.to_owned();
+		Ok(blocking(Some(cancel), move || repo.tags_at(&reference))
+			.await?
+			.into_iter()
+			.map(Str::from)
+			.collect())
 	}
 
 	/// Lists configured remote names.
@@ -354,38 +193,29 @@ impl GitCommands {
 		cwd: &Path,
 		cancel: &CancellationToken,
 	) -> Result<Vec<Str>, CommandError> {
-		match native::with_repository(cwd, cancel, native_remotes).await {
-			Ok(value) => return Ok(value),
-			Err(error) if error.is_cancelled() => return Err(GitRunError::Cancelled.into()),
-			Err(error) => tracing::debug!(%error, "in-process Git read fell back to system Git"),
-		}
-		let output = self
-			.checked(cwd, &["remote"], true, GitDeadline::Local, cancel)
-			.await?;
-		lines(&output.stdout)
+		let repo = Self::repo(cwd, cancel).await?;
+		Ok(blocking(Some(cancel), move || repo.remote_list())
+			.await?
+			.into_iter()
+			.map(Str::from)
+			.collect())
 	}
 
-	/// Returns a remote URL when the remote exists.
+	/// Reads a remote's URL when that remote exists.
 	pub async fn remote_url(
 		&self,
 		cwd: &Path,
 		name: &str,
 		cancel: &CancellationToken,
 	) -> Result<Option<Str>, CommandError> {
-		let native_name = name.to_owned();
-		match native::with_repository(cwd, cancel, move |repository, stop| {
-			native_remote_url(repository, stop, &native_name)
-		})
-		.await
-		{
-			Ok(value) => return Ok(value),
-			Err(error) if error.is_cancelled() => return Err(GitRunError::Cancelled.into()),
-			Err(error) => tracing::debug!(%error, "in-process Git read fell back to system Git"),
-		}
-		self.scalar(cwd, &["remote", "get-url", name], cancel).await
+		let repo = Self::repo(cwd, cancel).await?;
+		let name = name.to_owned();
+		Ok(blocking(Some(cancel), move || repo.remote_url(&name))
+			.await?
+			.map(Str::from))
 	}
 
-	/// Adds a remote idempotently, rejecting a conflicting existing URL.
+	/// Adds a remote unless the name already maps to another URL.
 	pub async fn add_remote(
 		&self,
 		repository: &Repository,
@@ -393,19 +223,6 @@ impl GitCommands {
 		url: &str,
 		cancel: &CancellationToken,
 	) -> Result<(), CommandError> {
-		let _guard = lock::write(repository, cancel).await?;
-		let result = self
-			.output(
-				&repository.worktree_root,
-				&["remote", "add", name, url],
-				false,
-				GitDeadline::Local,
-				cancel,
-			)
-			.await?;
-		if result.exit_code == 0 {
-			return Ok(());
-		}
 		if let Some(existing) = self
 			.remote_url(&repository.worktree_root, name, cancel)
 			.await?
@@ -419,14 +236,13 @@ impl GitCommands {
 				requested: url.to_str(),
 			});
 		}
-		Err(CommandError::Exit {
-			code:   result.exit_code,
-			stdout: result.stdout,
-			stderr: result.stderr,
-		})
+		let _guard = lock::write(repository, cancel).await?;
+		let (repo, name, url) = (repository.handle.clone(), name.to_owned(), url.to_owned());
+		blocking(Some(cancel), move || repo.remote_add(&name, &url)).await?;
+		Ok(())
 	}
 
-	/// Fetches exactly one forced refspec from a remote.
+	/// Fetches one source refspec into a local target reference.
 	pub async fn fetch_refspec(
 		&self,
 		repository: &Repository,
@@ -435,38 +251,28 @@ impl GitCommands {
 		target: &str,
 		cancel: &CancellationToken,
 	) -> Result<(), CommandError> {
-		let refspec = format!("+{source}:{target}");
-		self
-			.mutate(
-				repository,
-				&["fetch", "--no-tags", remote, refspec.as_str()],
-				GitDeadline::Network,
-				cancel,
-			)
-			.await
+		repository
+			.handle
+			.fetch(remote, source, target, None, Some(cancel.clone()))
+			.await?;
+		Ok(())
 	}
 
-	/// Reads a Git configuration scalar.
+	/// Reads a repository configuration value when present.
 	pub async fn config_get(
 		&self,
 		cwd: &Path,
 		key: &str,
 		cancel: &CancellationToken,
 	) -> Result<Option<Str>, CommandError> {
-		let native_key = key.to_owned();
-		match native::with_repository(cwd, cancel, move |repository, stop| {
-			native_config_get(repository, stop, &native_key)
-		})
-		.await
-		{
-			Ok(value) => return Ok(value),
-			Err(error) if error.is_cancelled() => return Err(GitRunError::Cancelled.into()),
-			Err(error) => tracing::debug!(%error, "in-process Git read fell back to system Git"),
-		}
-		self.scalar(cwd, &["config", "--get", key], cancel).await
+		let repo = Self::repo(cwd, cancel).await?;
+		let key = key.to_owned();
+		Ok(blocking(Some(cancel), move || repo.config_get(&key))
+			.await?
+			.map(Str::from))
 	}
 
-	/// Writes a Git configuration scalar under repository serialization.
+	/// Writes a repository configuration value under mutation authority.
 	pub async fn config_set(
 		&self,
 		repository: &Repository,
@@ -474,445 +280,22 @@ impl GitCommands {
 		value: &str,
 		cancel: &CancellationToken,
 	) -> Result<(), CommandError> {
-		self
-			.mutate(repository, &["config", key, value], GitDeadline::Local, cancel)
-			.await
+		let _guard = lock::write(repository, cancel).await?;
+		let (repo, key, value) = (repository.handle.clone(), key.to_owned(), value.to_owned());
+		blocking(Some(cancel), move || repo.config_set(&key, &value)).await?;
+		Ok(())
 	}
 
-	/// Resolves `prefix` relative to the repository worktree and returns Git's
-	/// canonical workdir-relative prefix.
+	/// Computes the repository-relative prefix of a working directory.
 	pub async fn workdir_prefix(
 		&self,
 		cwd: &Path,
 		cancel: &CancellationToken,
 	) -> Result<Option<Str>, CommandError> {
-		match native::with_repository(cwd, cancel, {
-			let cwd = cwd.to_path_buf();
-			move |repository, stop| native_workdir_prefix(repository, stop, &cwd)
-		})
-		.await
-		{
-			Ok(value) => return Ok(value),
-			Err(error) if error.is_cancelled() => return Err(GitRunError::Cancelled.into()),
-			Err(error) => tracing::debug!(%error, "in-process Git read fell back to system Git"),
-		}
-		self
-			.scalar(cwd, &["rev-parse", "--show-prefix"], cancel)
-			.await
-	}
-}
-
-fn lines(bytes: &[u8]) -> Result<Vec<Str>, CommandError> {
-	let text = str::from_utf8(bytes).map_err(|_| CommandError::NonUtf8)?;
-	Ok(text
-		.lines()
-		.filter(|line| !line.is_empty())
-		.map(|line| line.to_str())
-		.collect())
-}
-
-fn cancelled(stop: &AtomicBool) -> Result<(), native::NativeError> {
-	if stop.load(AtomicOrdering::Relaxed) {
-		Err(native::NativeError::Cancelled)
-	} else {
-		Ok(())
-	}
-}
-
-fn native_current_branch(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-) -> Result<Option<Str>, native::NativeError> {
-	cancelled(stop)?;
-	let head = repository.head().map_err(native::op_error)?;
-	let name = match &head.kind {
-		gix::head::Kind::Symbolic(reference) => reference.name.as_bstr(),
-		gix::head::Kind::Unborn(reference) => reference.as_bstr(),
-		gix::head::Kind::Detached { .. } => return Ok(None),
-	};
-	name
-		.strip_prefix(b"refs/heads/")
-		.filter(|name| !name.is_empty())
-		.map(native_utf8)
-		.transpose()
-}
-
-fn native_default_branch(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-) -> Result<Option<Str>, native::NativeError> {
-	for remote in ["origin", "upstream"] {
-		cancelled(stop)?;
-		let name = format!("refs/remotes/{remote}/HEAD");
-		let Some(reference) = repository
-			.try_find_reference(name.as_str())
-			.map_err(native::op_error)?
-		else {
-			continue;
-		};
-		let gix::refs::TargetRef::Symbolic(target) = reference.target() else {
-			continue;
-		};
-		let prefix = format!("refs/remotes/{remote}/");
-		if let Some(branch) = target
-			.as_bstr()
-			.strip_prefix(prefix.as_bytes())
-			.filter(|name| !name.is_empty())
-		{
-			return native_utf8(branch).map(Some);
-		}
-	}
-	Ok(None)
-}
-
-fn native_list_branches(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-	all: bool,
-) -> Result<Vec<Str>, native::NativeError> {
-	let mut branches = native_refs_with_prefix(repository, stop, b"refs/heads/")?;
-	if all {
-		branches.extend(native_refs_with_prefix(repository, stop, b"refs/remotes/")?);
-	}
-	Ok(branches)
-}
-
-fn native_refs_with_prefix(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-	prefix: &[u8],
-) -> Result<Vec<Str>, native::NativeError> {
-	let references = repository.references().map_err(native::op_error)?;
-	let mut values = Vec::new();
-	for reference in references.prefixed(prefix).map_err(native::op_error)? {
-		cancelled(stop)?;
-		let reference = reference.map_err(native::NativeError::Operation)?;
-		let name = reference
-			.name()
-			.as_bstr()
-			.strip_prefix(prefix)
-			.expect("reference iterator returned its requested prefix");
-		values.push(native_utf8(name)?);
-	}
-	Ok(values)
-}
-
-fn native_resolve_ref(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-	reference: &str,
-) -> Result<Option<Str>, native::NativeError> {
-	cancelled(stop)?;
-	Ok(repository
-		.rev_parse_single(reference)
-		.ok()
-		.map(|id| sf!("{}", id)))
-}
-
-fn native_ref_exists(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-	reference: &str,
-) -> Result<bool, native::NativeError> {
-	cancelled(stop)?;
-	if !reference.starts_with("refs/") {
-		return Ok(false);
-	}
-	Ok(repository
-		.try_find_reference(reference)
-		.map_err(native::op_error)?
-		.is_some())
-}
-
-fn native_tags(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-	reference: &str,
-) -> Result<Vec<Str>, native::NativeError> {
-	cancelled(stop)?;
-	let Ok(target) = repository.rev_parse_single(reference) else {
-		return Ok(Vec::new());
-	};
-	let target = target.detach();
-	let references = repository.references().map_err(native::op_error)?;
-	let mut tags = Vec::new();
-	for reference in references.tags().map_err(native::op_error)? {
-		cancelled(stop)?;
-		let mut reference = reference.map_err(native::NativeError::Operation)?;
-		let direct = reference.try_id().map(gix::Id::detach);
-		let peeled = reference.peel_to_id().map_err(native::op_error)?.detach();
-		if direct == Some(target) || peeled == target {
-			let name = reference
-				.name()
-				.as_bstr()
-				.strip_prefix(b"refs/tags/")
-				.expect("tag iterator returned a tag");
-			tags.push(native_utf8(name)?);
-		}
-	}
-	tags.sort_by(|left, right| versioncmp(right.as_str(), left.as_str()));
-	Ok(tags)
-}
-
-fn native_remotes(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-) -> Result<Vec<Str>, native::NativeError> {
-	repository
-		.remote_names()
-		.into_iter()
-		.map(|name| {
-			cancelled(stop)?;
-			native_utf8(name.as_bstr())
-		})
-		.collect()
-}
-
-fn native_remote_url(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-	name: &str,
-) -> Result<Option<Str>, native::NativeError> {
-	cancelled(stop)?;
-	let Some(remote) = repository.try_find_remote(name) else {
-		return Ok(None);
-	};
-	let remote = remote.map_err(native::op_error)?;
-	let Some(url) = remote.url(gix::remote::Direction::Fetch) else {
-		return Ok(None);
-	};
-	native_utf8(url.to_bstring().as_bstr()).map(Some)
-}
-
-fn native_config_get(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-	key: &str,
-) -> Result<Option<Str>, native::NativeError> {
-	cancelled(stop)?;
-	let Some(value) = repository.config_snapshot().string(key) else {
-		return Ok(None);
-	};
-	let value = str::from_utf8(value.as_ref())
-		.map_err(|_| native::op_error(CommandError::NonUtf8))?
-		.trim();
-	Ok((!value.is_empty()).then(|| value.to_str()))
-}
-
-fn native_workdir_prefix(
-	repository: &mut gix::Repository,
-	stop: &AtomicBool,
-	cwd: &Path,
-) -> Result<Option<Str>, native::NativeError> {
-	cancelled(stop)?;
-	let Some(worktree) = repository.workdir() else {
-		return Ok(None);
-	};
-	let cwd = std::fs::canonicalize(cwd).map_err(native::op_error)?;
-	let worktree = std::fs::canonicalize(worktree).map_err(native::op_error)?;
-	let prefix = cwd.strip_prefix(worktree).map_err(native::op_error)?;
-	if prefix.as_os_str().is_empty() {
-		return Ok(None);
-	}
-	let value = prefix
-		.to_str()
-		.ok_or_else(|| native::op_error(CommandError::NonUtf8))?;
-	Ok(Some(format!("{value}/").replace('\\', "/").to_str()))
-}
-
-fn native_utf8(bytes: &[u8]) -> Result<Str, native::NativeError> {
-	str::from_utf8(bytes)
-		.map(|value| value.to_str())
-		.map_err(|_| native::op_error(CommandError::NonUtf8))
-}
-
-fn versioncmp(left: &str, right: &str) -> Ordering {
-	let (left, right) = (left.as_bytes(), right.as_bytes());
-	let (mut left_at, mut right_at) = (0, 0);
-	while left_at < left.len() && right_at < right.len() {
-		if left[left_at].is_ascii_digit() && right[right_at].is_ascii_digit() {
-			let left_end = left_at
-				+ left[left_at..]
-					.iter()
-					.take_while(|byte| byte.is_ascii_digit())
-					.count();
-			let right_end = right_at
-				+ right[right_at..]
-					.iter()
-					.take_while(|byte| byte.is_ascii_digit())
-					.count();
-			let order = version_digits(&left[left_at..left_end], &right[right_at..right_end]);
-			if order != Ordering::Equal {
-				return order;
-			}
-			left_at = left_end;
-			right_at = right_end;
-		} else {
-			let order = left[left_at].cmp(&right[right_at]);
-			if order != Ordering::Equal {
-				return order;
-			}
-			left_at += 1;
-			right_at += 1;
-		}
-	}
-	left.len().cmp(&right.len())
-}
-
-fn version_digits(left: &[u8], right: &[u8]) -> Ordering {
-	let left_significant = left
-		.iter()
-		.position(|byte| *byte != b'0')
-		.unwrap_or(left.len());
-	let right_significant = right
-		.iter()
-		.position(|byte| *byte != b'0')
-		.unwrap_or(right.len());
-	let left_digits = &left[left_significant..];
-	let right_digits = &right[right_significant..];
-	left_digits
-		.len()
-		.cmp(&right_digits.len())
-		.then_with(|| left_digits.cmp(right_digits))
-		.then_with(|| right_significant.cmp(&left_significant))
-}
-
-#[cfg(test)]
-mod tests {
-	use std::{fs, path::Path, process::Command, sync::atomic::AtomicBool};
-
-	use super::*;
-
-	fn git(cwd: &Path, arguments: &[&str]) {
-		let output = Command::new("git")
-			.current_dir(cwd)
-			.args(arguments)
-			.output()
-			.expect("fixture git launches");
-		assert!(
-			output.status.success(),
-			"git {arguments:?}: {}",
-			String::from_utf8_lossy(&output.stderr)
-		);
-	}
-
-	fn fixture() -> tempfile::TempDir {
-		let root = tempfile::tempdir().expect("temporary repository");
-		git(root.path(), &["init", "-b", "main"]);
-		git(root.path(), &["config", "user.name", "OMP Test"]);
-		git(root.path(), &["config", "user.email", "omp@example.invalid"]);
-		fs::write(root.path().join("seed"), "seed").expect("seed");
-		git(root.path(), &["add", "seed"]);
-		git(root.path(), &["commit", "-m", "seed"]);
-		root
-	}
-
-	fn repository(path: &Path) -> gix::Repository {
-		gix::discover(path).expect("discover fixture")
-	}
-
-	#[test]
-	fn native_refs_and_head_paths_match_git() {
-		let stop = AtomicBool::new(false);
-		let root = fixture();
-		let mut repo = repository(root.path());
-		assert_eq!(
-			native_current_branch(&mut repo, &stop)
-				.expect("head")
-				.as_deref(),
-			Some("main")
-		);
-		assert!(
-			native_resolve_ref(&mut repo, &stop, "HEAD")
-				.expect("resolve")
-				.is_some()
-		);
-		assert_eq!(native_resolve_ref(&mut repo, &stop, "missing").expect("missing"), None);
-		assert!(native_ref_exists(&mut repo, &stop, "refs/heads/main").expect("exists"));
-		assert!(!native_ref_exists(&mut repo, &stop, "main").expect("not full ref"));
-		git(root.path(), &["branch", "topic"]);
-		git(root.path(), &["update-ref", "refs/remotes/origin/x", "HEAD"]);
-		git(root.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/x"]);
-		assert_eq!(
-			native_default_branch(&mut repo, &stop)
-				.expect("default")
-				.as_deref(),
-			Some("x")
-		);
-		assert_eq!(native_list_branches(&mut repo, &stop, false).expect("locals"), vec![
-			"main".to_str(),
-			"topic".to_str()
-		]);
-		assert_eq!(native_list_branches(&mut repo, &stop, true).expect("all"), vec![
-			"main".to_str(),
-			"topic".to_str(),
-			"origin/HEAD".to_str(),
-			"origin/x".to_str()
-		]);
-		git(root.path(), &["checkout", "--detach"]);
-		let mut detached = repository(root.path());
-		assert_eq!(native_current_branch(&mut detached, &stop).expect("detached"), None);
-		let unborn = tempfile::tempdir().expect("unborn root");
-		git(unborn.path(), &["init", "-b", "main"]);
-		let mut unborn = repository(unborn.path());
-		assert_eq!(
-			native_current_branch(&mut unborn, &stop)
-				.expect("unborn")
-				.as_deref(),
-			Some("main")
-		);
-	}
-
-	#[test]
-	fn native_tags_remotes_config_and_prefix_match_git() {
-		let stop = AtomicBool::new(false);
-		let root = fixture();
-		git(root.path(), &["tag", "v1.9"]);
-		git(root.path(), &["tag", "-a", "v1.10", "-m", "tag"]);
-		git(root.path(), &["tag", "v2.0"]);
-		git(root.path(), &["remote", "add", "origin", "https://old.example/repo"]);
-		git(root.path(), &["config", "answer.value", "  value  "]);
-		let mut repo = repository(root.path());
-		assert_eq!(native_tags(&mut repo, &stop, "HEAD").expect("tags"), vec![
-			"v2.0".to_str(),
-			"v1.10".to_str(),
-			"v1.9".to_str()
-		]);
-		assert_eq!(native_remotes(&mut repo, &stop).expect("remotes"), vec!["origin".to_str()]);
-		assert_eq!(
-			native_remote_url(&mut repo, &stop, "origin")
-				.expect("url")
-				.as_deref(),
-			Some("https://old.example/repo")
-		);
-		assert_eq!(native_remote_url(&mut repo, &stop, "missing").expect("missing url"), None);
-		assert_eq!(
-			native_config_get(&mut repo, &stop, "answer.value")
-				.expect("config")
-				.as_deref(),
-			Some("value")
-		);
-		assert_eq!(
-			native_config_get(&mut repo, &stop, "missing.value").expect("missing config"),
-			None
-		);
-		assert_eq!(native_workdir_prefix(&mut repo, &stop, root.path()).expect("root prefix"), None);
-		fs::create_dir(root.path().join("nested")).expect("nested");
-		let mut nested = repository(&root.path().join("nested"));
-		assert_eq!(
-			native_workdir_prefix(&mut nested, &stop, &root.path().join("nested"))
-				.expect("nested prefix")
-				.as_deref(),
-			Some("nested/")
-		);
-	}
-
-	#[test]
-	fn version_comparison_matches_version_sort_edges() {
-		assert!(versioncmp("v1.9", "v1.10").is_lt());
-		assert!(versioncmp("v1.2", "v1.2.1").is_lt());
-		assert!(versioncmp("002", "02").is_lt());
-		assert!(versioncmp("02", "2").is_lt());
-		assert_eq!(versioncmp("v1.0", "v1.0"), Ordering::Equal);
+		let repo = Self::repo(cwd, cancel).await?;
+		let cwd = cwd.to_owned();
+		Ok(blocking(Some(cancel), move || Ok(repo.prefix_of(&cwd)))
+			.await?
+			.map(Str::from))
 	}
 }

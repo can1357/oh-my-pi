@@ -284,7 +284,7 @@ fn link_definition(line: &str) -> Option<(String, String)> {
 	(!destination.is_empty()).then(|| (normalize_reference_label(label), destination.to_owned()))
 }
 
-fn reference_bracket_close(text: &str, start: usize) -> Option<usize> {
+const fn reference_bracket_close(text: &str, start: usize) -> Option<usize> {
 	let bytes = text.as_bytes();
 	let mut at = start;
 	while at < bytes.len() {
@@ -1222,8 +1222,8 @@ fn render_list(
 					if list_marker(lines[*index]).is_some_and(|next| next.indent >= root_indent)
 						|| next_indent > root_indent
 					{
-						// pi renders loose lists tight: blank lines between
-						// items or item paragraphs never survive
+						// Render loose lists tight: blank lines between items or
+						// item paragraphs never survive.
 						continue;
 					}
 				}
@@ -1890,8 +1890,8 @@ pub(crate) fn decode_entities(text: &str, output: &mut StrMut) {
 		} else if entity.eq_ignore_ascii_case("apos") {
 			Some('\'')
 		} else if entity.eq_ignore_ascii_case("nbsp") {
-			// pi decodes to a plain space; the run survives because prose
-			// whitespace is never collapsed
+			// Decode to a plain space; the run survives because prose whitespace
+			// is never collapsed.
 			Some(' ')
 		} else if let Some(hex) = entity
 			.strip_prefix("#x")
@@ -1979,6 +1979,71 @@ mod tests {
 		assert!(
 			rows.iter().any(|row| row.contains("| :--- | :--- |")),
 			"streaming render repaired the fence: {rows:?}",
+		);
+	}
+
+	#[test]
+	fn orphan_closing_fence_before_heading_is_repaired() {
+		let source = Str::new(
+			"Latency: 1,240 ms\n```\n\n### Status\n\n| Workload | Pods |\n| --- | --- |\n| api | 1/1 \
+			 |",
+		);
+		assert_eq!(
+			repair_orphan_closing_fence(&source),
+			"Latency: 1,240 ms\n\n### Status\n\n| Workload | Pods |\n| --- | --- |\n| api | 1/1 |",
+		);
+		let rows = plain(source.as_str(), 80);
+		assert!(rows.iter().any(|row| row.contains("Status")), "heading lost: {rows:?}");
+		assert!(!rows.iter().any(|row| row.contains("```")), "fence rendered literally: {rows:?}");
+	}
+
+	#[test]
+	fn orphan_fence_before_table_is_repaired() {
+		let source = Str::new(
+			"Results below\n```\n| Name | Value |\n|:---|---:|\n| a | 1 |\n\n## Summary\nDone",
+		);
+		assert_eq!(
+			repair_orphan_closing_fence(&source),
+			"Results below\n| Name | Value |\n|:---|---:|\n| a | 1 |\n\n## Summary\nDone",
+		);
+		let rows = plain(source.as_str(), 80);
+		assert!(!rows.iter().any(|row| row.contains("|:---|")), "delimiter stayed literal: {rows:?}");
+		// Without the heading the shape is ambiguous, so keep the fence.
+		let table_only = Str::new("Results below\n```\n| Name | Value |\n|:---|---:|\n| a | 1 |");
+		assert_eq!(repair_orphan_closing_fence(&table_only), table_only);
+	}
+
+	#[test]
+	fn real_closing_fence_is_kept() {
+		for source in [
+			// A matched pair is never an orphan.
+			"```rust\nlet x = 1;\n```\n\n### After\n\n| a | b |\n| --- | --- |",
+			// An opener with an info string is a code block, not an orphan.
+			"intro\n```yaml\n### key\n\n| a | b |\n| --- | --- |",
+			// A fence introduced by a colon or a source intro is intentional.
+			"Here is the output:\n```\n### key\n\n| a | b |\n| --- | --- |",
+			"Markdown source\n```\n### key\n\n| a | b |\n| --- | --- |",
+			// A fence opening the document has no prose before it.
+			"```\n### key\n\n| a | b |\n| --- | --- |",
+		] {
+			let source = Str::new(source);
+			assert_eq!(repair_orphan_closing_fence(&source), source, "repaired {source:?}");
+		}
+	}
+
+	#[test]
+	fn partial_render_does_not_repair() {
+		let source = "Latency: 1,240 ms\n```\n\n### Status\n\n| Workload | Pods |\n| --- | --- |\n| \
+		              api | 1/1 |";
+		let streaming = plain_partial(source, 80);
+		assert!(
+			streaming.iter().any(|row| row.contains("| --- | --- |")),
+			"streaming render repaired the fence: {streaming:?}",
+		);
+		let settled = plain(source, 80);
+		assert!(
+			!settled.iter().any(|row| row.contains("| --- | --- |")),
+			"final render kept the orphan: {settled:?}",
 		);
 	}
 
@@ -2105,7 +2170,7 @@ mod tests {
 						.any(|rows| rows[0].is_empty() && rows[1].is_empty()),
 					"{left_name} then {right_name}",
 				);
-				// blank-separated sibling lists merge tight (pi parity), and a
+				// blank-separated sibling lists merge tight, and a
 				// paragraph flows straight into a following list
 				let merges = (left_name == "paragraph" || left_name == "list") && right_name == "list";
 				if !merges {
@@ -2125,7 +2190,7 @@ mod tests {
 			"  - second",
 			"11. next"
 		]);
-		// pi renders loose lists tight: the separating blank never survives
+		// Loose lists render tight: the separating blank never survives.
 		assert_eq!(plain("- first\n\n- second", 80), ["- first", "- second"]);
 	}
 
@@ -2204,8 +2269,8 @@ mod tests {
 
 	#[test]
 	fn lazy_continuation_boundaries_match_marked() {
-		// pi utils-marked-lazy-indent boundary shapes (cross-checked against
-		// marked v18): a line indented by at least four spaces directly
+		// Lazy-indent boundary shapes (cross-checked against marked v18): a
+		// line indented by at least four spaces directly
 		// attached to paragraph text stays a lazy continuation even when a
 		// block probe matches downstream, while a whitespace-padded blank
 		// line detaches it so the next indented run still opens indented
@@ -2235,13 +2300,13 @@ mod tests {
 		);
 		let fenced = rendered(source.as_str(), 80, &theme);
 		assert_eq!(style_containing(&fenced, "pub").foreground_color(), palette.accent);
-		assert_eq!(style_containing(&fenced, "hi").foreground_color(), palette.ok);
+		assert_eq!(style_containing(&fenced, "hi").foreground_color(), palette.code_border);
 		assert_eq!(style_containing(&fenced, "second").foreground_color(), palette.muted);
 
 		let listed = Str::new("- ```rust\n  let value = \"ok\";\n  ```");
 		let nested = rendered(listed.as_str(), 80, &theme);
 		assert_eq!(style_containing(&nested, "let").foreground_color(), palette.accent);
-		assert_eq!(style_containing(&nested, "ok").foreground_color(), palette.ok);
+		assert_eq!(style_containing(&nested, "ok").foreground_color(), palette.code_border);
 
 		let unknown = Str::new("```not-a-language\nanswer = 42\n```");
 		let fallback = rendered(unknown.as_str(), 80, &theme);
@@ -2380,6 +2445,8 @@ mod tests {
 		let paragraph = plain("$$x^2$$", 40);
 		assert_eq!(block, paragraph);
 		assert!(block.iter().any(|line| line.contains('²')));
+		assert_eq!(plain("$$\r\nx^2\r\n$$\r\n", 40), block);
+		assert_eq!(plain("\\[\r\nx^2\r\n\\]\r\n", 40), block);
 	}
 
 	#[test]

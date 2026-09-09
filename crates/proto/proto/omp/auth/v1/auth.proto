@@ -195,6 +195,8 @@ message BeginLoginResponse {
     // Open in a browser on the client host; the callback or pasted code
     // comes back via SubmitCode.
     string url = 1;
+    // Short loopback URL that redirects to the full authorization URL.
+    optional string launch_url = 2;
   }
   message DeviceCode {
     string user_code = 1;
@@ -362,6 +364,7 @@ message UsageWindow {
     UNIT_MINUTES = 5;
     UNIT_BYTES = 6;
     UNIT_UNKNOWN = 7;
+    UNIT_CREDITS = 8;
   }
   Unit unit = 10;
   uint32 consumed_decimal_exponent = 11;
@@ -461,15 +464,23 @@ message GetClientUsageRequest {
 
 message GetClientUsageResponse {
   message ClientUsage {
-    string client_id = 1;
-    // Human label ("tui@laptop", "ci/nightly").
-    string label = 2;
-    uint64 input_tokens = 3;
-    uint64 output_tokens = 4;
-    uint64 cache_read_tokens = 5;
-    uint64 cache_write_tokens = 6;
-    uint64 nanos_usd = 7;
-    uint64 last_seen_ms = 8;
+    message ProviderUsage {
+      // Empty only for rows migrated from a pre-app schema.
+      string app = 1;
+      string provider = 2;
+      string model = 3;
+      uint64 requests = 4;
+      uint64 input_tokens = 5;
+      uint64 output_tokens = 6;
+      uint64 cache_read_tokens = 7;
+      uint64 cache_write_tokens = 8;
+      uint64 nanos_usd = 9;
+    }
+    string install_id = 1;
+    string hostname = 2;
+    uint64 first_seen_ms = 3;
+    uint64 last_seen_ms = 4;
+    repeated ProviderUsage providers = 5;
   }
   repeated ClientUsage clients = 1;
 }

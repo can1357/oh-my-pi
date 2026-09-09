@@ -3,14 +3,11 @@
 use std::collections::BTreeMap;
 
 use omp_core::{Str, StrMut};
-use omp_docserver::diagnostics::{Diagnostic, Severity, normalize};
+use omp_proto::lsp::{Diagnostic, Severity, normalize};
 use serde::{Deserialize, Serialize};
 
 /// Maximum explicit file targets from one glob.
 pub const MAX_GLOB_TARGETS: usize = 20;
-/// Maximum rendered findings.
-pub const MAX_DIAGNOSTICS: usize = 50;
-
 /// Source-independent diagnostics result.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub struct DiagnosticResult {
@@ -23,15 +20,10 @@ pub struct DiagnosticResult {
 }
 
 impl DiagnosticResult {
-	/// Normalizes, sorts, and bounds findings.
+	/// Normalizes and sorts findings without applying a second tool-local
+	/// output bound. The runtime owns inline projection and artifact spill.
 	pub fn new(diagnostics: Vec<Diagnostic>, complete: bool) -> Self {
-		let diagnostics = normalize(diagnostics);
-		let omitted = diagnostics.len().saturating_sub(MAX_DIAGNOSTICS);
-		Self {
-			diagnostics: diagnostics.into_iter().take(MAX_DIAGNOSTICS).collect(),
-			omitted,
-			complete,
-		}
+		Self { diagnostics: normalize(diagnostics), omitted: 0, complete }
 	}
 }
 
@@ -68,11 +60,6 @@ pub fn render(result: &DiagnosticResult) -> Str {
 			output.push_str(&diagnostic.message);
 			output.push_str("\n");
 		}
-	}
-	if result.omitted > 0 {
-		output.push_str("[diagnostics omitted: ");
-		output.push_str(result.omitted.to_string().as_str());
-		output.push_str("]\n");
 	}
 	output.freeze()
 }

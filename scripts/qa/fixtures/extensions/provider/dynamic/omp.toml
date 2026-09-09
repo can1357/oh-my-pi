@@ -1,0 +1,13 @@
+id = "qa_provider"
+version = "0.1.0"
+omp_api = 1
+entry = "qa_provider"
+
+[[declarations]]
+id = "qa_dynamic"
+kind = "provider"
+module = "qa_provider"
+key = "qa-dynamic"
+trigger = "lazy"
+api = 1
+failure = "fault"

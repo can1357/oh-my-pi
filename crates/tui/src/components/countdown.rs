@@ -74,10 +74,26 @@ impl Component for Countdown {
 	}
 
 	fn paint(&mut self, pc: &mut PaintCtx<'_>, rect: Rect) {
-		let remaining = self.remaining(pc.ctx.now);
+		let now = pc.ctx.now;
+		let remaining = self.remaining(now);
 		if remaining != self.shown {
 			self.shown = remaining;
 			self.text = sf!("{} · {remaining}s", self.label);
+		}
+		// Use a one-second cadence until the deadline; the next label change
+		// lands exactly on the next whole-second
+		// boundary of the remaining time.
+		if !self.expired(now) {
+			let elapsed = now.saturating_sub(self.started);
+			let left = self.duration.saturating_sub(elapsed);
+			let into_second =
+				Duration::from_nanos(u64::try_from(left.as_nanos() % 1_000_000_000).unwrap_or(0));
+			let step = if into_second.is_zero() {
+				Duration::from_secs(1)
+			} else {
+				into_second
+			};
+			pc.wake(self.slot, now.saturating_add(step));
 		}
 		let color = if remaining <= 5 {
 			pc.ctx.theme.err
@@ -123,5 +139,26 @@ mod tests {
 		assert!(render_at(&mut countdown, Duration::from_secs(10)).contains("Retrying · 3s"));
 		assert!(render_at(&mut countdown, Duration::from_secs(12)).contains("Retrying · 1s"));
 		assert!(render_at(&mut countdown, Duration::from_secs(30)).contains("Retrying · 0s"));
+	}
+
+	#[test]
+	fn wakes_on_whole_second_boundaries_until_expiry() {
+		let wakes_at = |now: Duration| {
+			let mut countdown =
+				Countdown::new("Retrying", Duration::from_secs(10), Duration::from_millis(2500));
+			let mut ctx = UiContext::default();
+			ctx.now = now;
+			let mut frame = Frame::new(Size::new(24, 1));
+			let mut hits = Vec::new();
+			let mut wakes = Vec::new();
+			let mut pc = PaintCtx::new(&mut frame, &ctx, &mut hits, &mut wakes);
+			countdown.paint(&mut pc, Rect::new(0, 0, 24, 1));
+			wakes.first().map(|wake| wake.at)
+		};
+		// 2.5s left: the label flips to 2s after 500ms.
+		assert_eq!(wakes_at(Duration::from_secs(10)), Some(Duration::from_millis(10_500)));
+		// Exactly 2s left: next flip in a full second.
+		assert_eq!(wakes_at(Duration::from_millis(10_500)), Some(Duration::from_millis(11_500)));
+		assert_eq!(wakes_at(Duration::from_secs(30)), None, "an expired countdown stops waking");
 	}
 }

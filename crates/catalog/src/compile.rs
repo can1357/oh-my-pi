@@ -5,7 +5,7 @@ use std::{
 	io, str, time,
 };
 
-use omp_core::{Str, hex, sf};
+use omp_core::{SemVer, Str, hex, sf};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Number, Value, value::RawValue};
 use sha2::{Digest, Sha256};
@@ -27,23 +27,24 @@ use crate::{
 	cascade::{AxisMap, CascadeError, CompatCascade, ResolveTarget},
 	classify::{
 		ClassificationInput, ClassificationPhase, EffortTier, ModelClassification, classify,
-		strip_effort_lane, supports_dynamic_effort_siblings,
+		strip_effort_lane, supports_dynamic_effort_siblings, variant_family,
 	},
 	discover::DiscoveryDefaults,
 	id::{
-		AuthSpecId, CatalogRevision, CodecId, DiscoverySpecId, ModelKey, OAuthSpecId, ProviderId,
-		RouteId, ThinkingPolicyId, WireModelId, WirePolicyId,
+		AuthSpecId, CatalogRevision, ClassId, CodecId, DiscoverySpecId, FamilyId, ModelKey,
+		OAuthSpecId, ProviderId, RouteId, ThinkingPolicyId, WireModelId, WirePolicyId,
 	},
 	model::{
-		ContextStrategy, EvidenceConfidence, ModelAvailability, ModelLimits, ModelProvenance,
-		ModelRemoteCompaction, ModelSpec, ProvenanceKind, ProvenanceSource,
+		CatalogModelMetrics, ContextStrategy, EvidenceConfidence, ModelAvailability, ModelLimits,
+		ModelProvenance, ModelRemoteCompaction, ModelSpec, ProvenanceKind, ProvenanceSource,
 	},
 	policy::{
 		ApplyPatchWireKind, CacheControlFormat, ComputerUseConfigSupport, ComputerUseWireSupport,
-		ExtendedContextMode, MaxOutputTokensEmission, PromptCacheMode, ReasoningBodyOverride,
-		StreamWatchdog, ToolCallIdProfile, WhenThinkingPolicy, WirePolicy,
+		ExtendedContextMode, MaxOutputTokensEmission, NativeToolChoicePenalty, PromptCacheMode,
+		ReasoningBodyOverride, StreamWatchdog, ToolCallIdProfile, ToolPolicy, WhenThinkingPolicy,
+		WirePolicy,
 	},
-	pricing::{PremiumMultiplier, Price, PriceTier, PriceUnit, Pricing},
+	pricing::{PremiumMultiplier, Price, PriceTier, PriceUnit, Pricing, ServiceTierPrice},
 	provider::{
 		AccountScope, ApplicationDefaultSource, AuthSpec, AuthSpecKind, CodecProfile,
 		CodexTransportPreference, CredentialSourceSpec, DiscoveryKind, DiscoveryPagination,
@@ -56,7 +57,7 @@ use crate::{
 	thinking::{ReasoningMode, ThinkingEffort, ThinkingMode, ThinkingPolicy, ThinkingRouting},
 };
 /// Schema version of reviewable normalized compiler output.
-pub const COMPILED_SCHEMA_VERSION: u32 = 1;
+pub const COMPILED_SCHEMA_VERSION: u32 = 2;
 /// An explicit opaque source-model property boundary.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -150,7 +151,7 @@ pub enum SourceTransport {
 }
 
 /// Typed source price components in decimal US dollars.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceCost {
 	/// Input price per million tokens.
@@ -171,7 +172,7 @@ pub struct SourceCost {
 }
 
 /// Typed long-context source price schedule.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SourceLongContextCost {
 	/// Exclusive prompt-token threshold.
@@ -179,6 +180,9 @@ pub struct SourceLongContextCost {
 	/// Whether the source threshold itself activates the replacement schedule.
 	#[serde(default)]
 	pub input_threshold_inclusive: bool,
+	/// Optional multiplier applied to the row's live base rates.
+	#[serde(default)]
+	pub multiplier:                Option<Number>,
 	/// Input price.
 	#[serde(default = "zero_number")]
 	pub input:                     Number,
@@ -191,6 +195,41 @@ pub struct SourceLongContextCost {
 	/// Cache-write price.
 	#[serde(default = "zero_number")]
 	pub cache_write:               Number,
+}
+
+/// Source-declared model identity emitted by the catalog compiler.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SourceModelIdentity {
+	/// Normalized model class.
+	#[serde(default)]
+	pub class:            Option<ClassId>,
+	/// Product family within the class.
+	#[serde(default)]
+	pub family:           Option<FamilyId>,
+	/// Semantic revision spelling.
+	#[serde(default)]
+	pub revision:         Option<Str>,
+	/// Effort route represented by this row.
+	#[serde(default)]
+	pub effort:           Option<EffortTier>,
+	/// Logical identifier shared by routed siblings.
+	#[serde(default)]
+	pub logical_id:       Option<Str>,
+	/// Whether this row is a reasoning sibling.
+	#[serde(default)]
+	pub thinking_variant: Option<bool>,
+}
+
+fn source_semver(value: &str) -> Option<SemVer> {
+	let mut parts = value.split('.');
+	let major = parts.next()?.parse().ok()?;
+	let minor = parts.next()?.parse().ok()?;
+	let patch = parts.next().map(str::parse).transpose().ok()?.unwrap_or(0);
+	parts
+		.next()
+		.is_none()
+		.then_some(SemVer::new(major, minor, patch))
 }
 
 /// Closed typed record parsed from one oracle model row.
@@ -206,6 +245,9 @@ pub struct SourceModelRecord {
 	/// Optional denormalized provider.
 	#[serde(default)]
 	pub provider: Option<Str>,
+	/// Compiler-declared normalized identity.
+	#[serde(default)]
+	pub identity: Option<SourceModelIdentity>,
 	/// Optional per-model transport override.
 	#[serde(default)]
 	pub api: Option<SourceTransport>,
@@ -227,6 +269,12 @@ pub struct SourceModelRecord {
 	/// Typed pricing.
 	#[serde(default)]
 	pub cost: SourceCost,
+	/// Catalog-estimated intelligence score.
+	#[serde(default)]
+	pub int: Option<Number>,
+	/// Catalog-estimated output tokens per second.
+	#[serde(default)]
+	pub tps: Option<Number>,
 	/// Context window.
 	#[serde(default)]
 	pub context_window: Option<u64>,
@@ -296,10 +344,16 @@ pub struct SourceModelRecord {
 	/// Typed compatibility properties.
 	#[serde(default)]
 	pub compat: Option<SourceWirePolicy>,
-	/// Verbatim sparse compatibility properties retained by pi alongside the
-	/// resolved compatibility record.
+	/// Verbatim sparse compatibility properties retained alongside the resolved
+	/// compatibility record.
 	#[serde(default)]
 	pub compat_config: Option<SourceWirePolicy>,
+	/// Whether Cursor needs its provider-specific tool schema projection.
+	#[serde(default)]
+	pub requires_cursor_tool_schema_projection: Option<bool>,
+	/// Per-service-tier price multipliers.
+	#[serde(default)]
+	pub service_tier_cost: BTreeMap<Str, Number>,
 	/// Whether the model requires reversible private-use glyph tokenization.
 	#[serde(default)]
 	pub requires_glyph_tokenization: Option<bool>,
@@ -368,6 +422,9 @@ pub struct SourceThinking {
 	/// Effort-specific token budgets.
 	#[serde(default)]
 	pub effort_budgets:    BTreeMap<ThinkingEffort, u64>,
+	/// Prefix-binding support.
+	#[serde(default)]
+	pub prefix_binding:    Option<bool>,
 	/// Adaptive display support.
 	#[serde(default)]
 	pub supports_display:  Option<bool>,
@@ -435,13 +492,16 @@ pub enum SourceAuth {
 	GoogleAdc {
 		/// API-key environment order.
 		#[serde(default)]
-		api_key_env:  Vec<Str>,
+		api_key_env:     Vec<Str>,
 		/// Project environment order.
 		#[serde(default)]
-		project_env:  Vec<Str>,
+		project_env:     Vec<Str>,
 		/// Location environment order.
 		#[serde(default)]
-		location_env: Vec<Str>,
+		location_env:    Vec<Str>,
+		/// Credential-file path environment order.
+		#[serde(default)]
+		credentials_env: Vec<Str>,
 	},
 	/// OAuth flow.
 	Oauth {
@@ -490,12 +550,9 @@ pub struct SourceDiscovery {
 }
 
 /// Sparse typed provider/model wire-policy source.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct SourceWirePolicy {
-	/// Streaming usage support.
-	#[serde(alias = "supportsUsageInStreaming")]
-	pub usage_in_streaming: Option<bool>,
 	/// Reversible private-use glyph tokenization at the provider wire boundary.
 	pub glyph_tokenization: Option<bool>,
 	/// Multiple system-message support.
@@ -514,9 +571,6 @@ pub struct SourceWirePolicy {
 	pub tool_strict_mode: Option<Str>,
 	/// Named tool choice.
 	pub named_tool_choice: Option<bool>,
-	/// Forced tool choice.
-	#[serde(alias = "supportsForcedToolChoice")]
-	pub forced_tool_choice: Option<bool>,
 	/// General tool-choice support.
 	#[serde(alias = "supportsToolChoice")]
 	pub supports_tool_choice: Option<bool>,
@@ -539,8 +593,8 @@ pub struct SourceWirePolicy {
 	#[serde(alias = "promptCacheMinimumTokens")]
 	pub prompt_cache_minimum_tokens: Option<u64>,
 	/// Bedrock maximum explicit prompt-cache checkpoints.
-	#[serde(alias = "promptCacheMaxCheckpoints")]
-	pub prompt_cache_max_checkpoints: Option<u8>,
+	#[serde(alias = "prompt_cache_max_checkpoints", alias = "promptCacheMaxCheckpoints")]
+	pub prompt_cache_maximum_checkpoints: Option<u8>,
 	/// Image encoding.
 	pub image_encoding_format: Option<Str>,
 	/// Stop-sequence support.
@@ -549,8 +603,8 @@ pub struct SourceWirePolicy {
 	pub tool_schema_flavor: Option<Str>,
 	/// Leaked-thinking healer.
 	pub leaked_thinking_healer: Option<Str>,
-	/// Thinking loop guard.
-	pub thinking_loop_guard: Option<bool>,
+	/// Thinking loop guard profile.
+	pub thinking_loop_guard: Option<Str>,
 	/// Stream watchdog.
 	pub stream_watchdog: Option<SourceStreamWatchdog>,
 	/// Model stream idle timeout.
@@ -656,6 +710,138 @@ pub struct SourceWirePolicy {
 	/// Original image detail support.
 	#[serde(alias = "supportsImageDetailOriginal")]
 	pub supports_image_detail_original: Option<bool>,
+	/// Compiled `allow-anthropic-header-overrides` compatibility fact.
+	pub allow_anthropic_header_overrides: Option<bool>,
+	/// Compiled `always-send-max-tokens` compatibility fact.
+	pub always_send_max_tokens: Option<bool>,
+	/// Compiled `antigravity-claude-tool-mode` compatibility fact.
+	pub antigravity_claude_tool_mode: Option<bool>,
+	/// Compiled `antigravity-usage-label` compatibility fact.
+	pub antigravity_usage_label: Option<Str>,
+	/// Compiled `cca-legacy-parameters-schema` compatibility fact.
+	pub cca_legacy_parameters_schema: Option<bool>,
+	/// Compiled `clamp-output-to-model-max` compatibility fact.
+	pub clamp_output_to_model_max: Option<bool>,
+	/// Compiled `claude-thinking-beta-header` compatibility fact.
+	pub claude_thinking_beta_header: Option<bool>,
+	/// Compiled `disable-reasoning-on-forced-tool-choice` compatibility fact.
+	pub disable_reasoning_on_forced_tool_choice: Option<bool>,
+	/// Compiled `disable-strict-tools` compatibility fact.
+	pub disable_strict_tools: Option<bool>,
+	/// Compiled `drop-thinking-when-reasoning-effort` compatibility fact.
+	pub drop_thinking_when_reasoning_effort: Option<bool>,
+	/// Compiled `drop-unsigned-thinking` compatibility fact.
+	pub drop_unsigned_thinking: Option<bool>,
+	/// Compiled `empty-length-finish-is-context-error` compatibility fact.
+	pub empty_length_finish_is_context_error: Option<bool>,
+	/// Compiled `flash-stream-leak-workaround` compatibility fact.
+	pub flash_stream_leak_workaround: Option<bool>,
+	/// Compiled `harmony-leak-mitigation` compatibility fact.
+	pub harmony_leak_mitigation: Option<bool>,
+	/// Compiled `inject-claude-code-instruction` compatibility fact.
+	pub inject_claude_code_instruction: Option<bool>,
+	/// Compiled `kimi-api-format` compatibility fact.
+	pub kimi_api_format: Option<Str>,
+	/// Compiled `model-router` compatibility fact.
+	pub model_router: Option<bool>,
+	/// Compiled `multimodal-function-response` compatibility fact.
+	pub multimodal_function_response: Option<bool>,
+	/// Compiled `native-kimi-k3-reasoning` compatibility fact.
+	pub native_kimi_k3_reasoning: Option<bool>,
+	/// Compiled `prompt-cache-breakpoint-ttl` compatibility fact.
+	pub prompt_cache_breakpoint_ttl: Option<Str>,
+	/// Compiled `prompt-cache-session-header` compatibility fact.
+	pub prompt_cache_session_header: Option<Str>,
+	/// Compiled `qwen-preserve-thinking` compatibility fact.
+	pub qwen_preserve_thinking: Option<bool>,
+	/// Compiled `reasoning-deltas-may-be-cumulative` compatibility fact.
+	pub reasoning_deltas_may_be_cumulative: Option<bool>,
+	/// Compiled `reject-root-object-union` compatibility fact.
+	pub reject_root_object_union: Option<bool>,
+	/// Compiled `replay-reasoning-content` compatibility fact.
+	pub replay_reasoning_content: Option<bool>,
+	/// Compiled `requires-assistant-after-tool-result` compatibility fact.
+	pub requires_assistant_after_tool_result: Option<bool>,
+	/// Compiled `requires-mistral-tool-ids` compatibility fact.
+	pub requires_mistral_tool_ids: Option<bool>,
+	/// Compiled `requires-reasoning-off-juice-instruction` compatibility fact.
+	pub requires_reasoning_off_juice_instruction: Option<bool>,
+	/// Compiled `requires-skip-thought-signature` compatibility fact.
+	pub requires_skip_thought_signature: Option<bool>,
+	/// Compiled `requires-skip-thought-signature-on-first-function-call` fact.
+	pub requires_skip_thought_signature_on_first_function_call: Option<bool>,
+	/// Compiled `requires-thinking-as-text` compatibility fact.
+	pub requires_thinking_as_text: Option<bool>,
+	/// Compiled `requires-tool-result-name` compatibility fact.
+	pub requires_tool_result_name: Option<bool>,
+	/// Compiled `retry-without-strict-on-grammar-error` compatibility fact.
+	pub retry_without_strict_on_grammar_error: Option<bool>,
+	/// Compiled `stream-first-event-timeout-ms` compatibility fact.
+	pub stream_first_event_timeout_ms: Option<u64>,
+	/// Compiled `stream-markup-healing-pattern` compatibility fact.
+	pub stream_markup_healing_pattern: Option<Str>,
+	/// Compiled `strict-responses-pairing` compatibility fact.
+	pub strict_responses_pairing: Option<bool>,
+	/// Compiled `strip-deepseek-special-tokens` compatibility fact.
+	pub strip_deepseek_special_tokens: Option<bool>,
+	/// Compiled `strip-image-input` compatibility fact.
+	pub strip_image_input: Option<bool>,
+	/// Compiled `supports-all-turns-reasoning-context` compatibility fact.
+	pub supports_all_turns_reasoning_context: Option<bool>,
+	/// Compiled `supports-context-management` compatibility fact.
+	pub supports_context_management: Option<bool>,
+	/// Compiled `supports-forced-tool-choice` compatibility fact.
+	#[serde(alias = "forced_tool_choice", alias = "supportsForcedToolChoice")]
+	pub supports_forced_tool_choice: Option<bool>,
+	/// Provider-declared cost of using native forced tool choice.
+	pub forced_tool_choice_penalty: Option<NativeToolChoicePenalty>,
+	/// Compiled `supports-function-part-id` compatibility fact.
+	pub supports_function_part_id: Option<bool>,
+	/// Compiled `supports-long-prompt-cache-retention` compatibility fact.
+	pub supports_long_prompt_cache_retention: Option<bool>,
+	/// Compiled `supports-mid-conversation-tool-changes` compatibility fact.
+	pub supports_mid_conversation_tool_changes: Option<bool>,
+	/// Compiled `supports-multiple-system-messages` compatibility fact.
+	pub supports_multiple_system_messages: Option<bool>,
+	/// Compiled `supports-named-tool-choice` compatibility fact.
+	pub supports_named_tool_choice: Option<bool>,
+	/// Compiled `supports-obfuscation-opt-out` compatibility fact.
+	pub supports_obfuscation_opt_out: Option<bool>,
+	/// Compiled `supports-output-effort` compatibility fact.
+	pub supports_output_effort: Option<bool>,
+	/// Compiled `supports-parallel-tool-calls` compatibility fact.
+	pub supports_parallel_tool_calls: Option<bool>,
+	/// Compiled `supports-penalty-and-stop-params` compatibility fact.
+	pub supports_penalty_and_stop_params: Option<bool>,
+	/// Compiled `supports-per-message-effort` compatibility fact.
+	pub supports_per_message_effort: Option<bool>,
+	/// Compiled `supports-prompt-cache-breakpoints` compatibility fact.
+	pub supports_prompt_cache_breakpoints: Option<bool>,
+	/// Compiled `supports-prompt-cache-key` compatibility fact.
+	pub supports_prompt_cache_key: Option<bool>,
+	/// Compiled `supports-reasoning-params` compatibility fact.
+	pub supports_reasoning_params: Option<bool>,
+	/// Compiled `supports-strict-mode` compatibility fact.
+	pub supports_strict_mode: Option<bool>,
+	/// Compiled `supports-thinking-binding-controls` compatibility fact.
+	pub supports_thinking_binding_controls: Option<bool>,
+	/// Compiled `supports-turn-scoped-system` compatibility fact.
+	pub supports_turn_scoped_system: Option<bool>,
+	/// Compiled `supports-usage-in-streaming` compatibility fact.
+	#[serde(alias = "usage_in_streaming", alias = "supportsUsageInStreaming")]
+	pub supports_usage_in_streaming: Option<bool>,
+	/// Compiled `template-reasoning-effort` compatibility fact.
+	pub qwen_template_reasoning_effort: Option<bool>,
+	/// Compiled `thinking-keep` compatibility fact.
+	pub thinking_keep: Option<bool>,
+	/// Compiled `trust-explicit-thinking-only` compatibility fact.
+	pub trust_explicit_thinking_only: Option<bool>,
+	/// Compiled `uses-openai-tool-call-id-limit` compatibility fact.
+	pub uses_openai_tool_call_id_limit: Option<bool>,
+	/// Compiled `wire-model-id-mode` compatibility fact.
+	pub wire_model_id_mode: Option<Str>,
+	/// Compiled `zai-reasoning-effort-dialect` compatibility fact.
+	pub zai_reasoning_effort_dialect: Option<bool>,
 }
 
 /// Typed source watchdog bounds.
@@ -698,6 +884,12 @@ pub enum SourceFacet {
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SourceProviderRecord {
+	/// Human-readable provider name when identifier humanization is not exact.
+	#[serde(default)]
+	pub name:                  Option<Str>,
+	/// Provider-recommended default wire-model selector.
+	#[serde(default)]
+	pub default_model:         Option<Str>,
 	/// Source transport.
 	pub transport:             SourceTransport,
 	/// Additional wire protocols exposed at the primary base URL.
@@ -934,12 +1126,24 @@ pub enum CompileError {
 	/// Compatibility cascade parsing or resolution failed.
 	#[error("compatibility cascade is invalid: {0}")]
 	Cascade(#[from] CascadeError),
+	/// A computed pricing multiplier was not a finite JSON number.
+	#[error("computed pricing multiplier is not finite")]
+	InvalidPriceMultiplier,
 	/// Source data violated a catalog invariant.
 	#[error("catalog invariant failed: {0}")]
 	Invariant(Str),
 }
 
 /// Parses the two checked-in oracle source formats into typed records.
+#[tracing::instrument(
+	name = "catalog_oracle_parse",
+	level = "debug",
+	skip_all,
+	fields(
+		provider_source_bytes = providers_toml.len(),
+		model_source_bytes = models_json_zstd.len()
+	)
+)]
 pub fn parse_oracle(
 	providers_toml: &str,
 	models_json_zstd: &[u8],
@@ -974,6 +1178,15 @@ pub fn compile(source: CatalogSource) -> Result<CompiledCatalog, CompileError> {
 	compile_with_oauth(source, include_str!("../../../fixtures/llm-oracle/catalog/oauth.toml"))
 }
 
+#[tracing::instrument(
+	name = "catalog_compile",
+	level = "debug",
+	skip_all,
+	fields(
+		provider_count = source.providers.len(),
+		model_provider_count = source.models.len()
+	)
+)]
 fn compile_with_oauth(
 	source: CatalogSource,
 	oauth_toml: &str,
@@ -2551,7 +2764,12 @@ fn inherit_source_references(models: &mut BTreeMap<Str, BTreeMap<Str, SourceMode
 				if !visited.insert(reference.clone()) {
 					break;
 				}
-				let reference_row = &snapshot[&reference.0][&reference.1];
+				let Some(reference_row) = snapshot
+					.get(&reference.0)
+					.and_then(|models| models.get(&reference.1))
+				else {
+					break;
+				};
 				let inheritance_policy = EXACT_INHERITANCE_POLICIES.iter().find(|policy| {
 					debug_assert!(review_metadata_is_valid(
 						policy.rationale,
@@ -2937,19 +3155,29 @@ fn compile_providers(
 	let mut provider_policies = BTreeMap::new();
 	for (provider_key, source) in providers {
 		let provider_id = ProviderId::new(provider_key.clone());
-		let auth = compile_auth(&source.auth, oauth_ids)?;
+		let provider_name = source
+			.name
+			.clone()
+			.unwrap_or_else(|| humanize(&provider_key));
+		let auth = compile_auth(&source.auth, oauth_ids, None)?;
 		let auth_id = auth.id.clone();
 		auth_by_id.entry(auth_id.clone()).or_insert(auth);
 		let mut provider_auth_ids = Vec::with_capacity(3);
+		let signing_service = (source
+			.codec
+			.as_ref()
+			.is_some_and(|codec| codec.as_str() == "bedrock-mantle")
+			&& matches!(source.oauth_auth.as_ref(), Some(SourceAuth::AwsSigV4)))
+		.then_some("bedrock-mantle");
 		let oauth_auth = source
 			.oauth_auth
 			.as_ref()
-			.map(|auth| compile_auth(auth, oauth_ids))
+			.map(|auth| compile_auth(auth, oauth_ids, signing_service))
 			.transpose()?;
 		let login_auth = if let Some(flow) = source.oauth_flow.as_ref()
 			&& !matches!(&source.auth, SourceAuth::Oauth { flow: request_flow } if request_flow == flow)
 		{
-			Some(compile_auth(&SourceAuth::Oauth { flow: flow.clone() }, oauth_ids)?)
+			Some(compile_auth(&SourceAuth::Oauth { flow: flow.clone() }, oauth_ids, None)?)
 		} else {
 			None
 		};
@@ -3155,7 +3383,14 @@ fn compile_providers(
 		});
 		output.push(ProviderDef {
 			id: provider_id,
-			name: humanize(&provider_key),
+			name: provider_name,
+			default_model: source.default_model.as_ref().map(|model| {
+				ModelKey::new(if model.contains('/') {
+					model.clone()
+				} else {
+					Str::from(format!("{provider_key}/{model}"))
+				})
+			}),
 			auth: provider_auth_ids.into_boxed_slice(),
 			management: ManagementCapabilities {
 				operations: management_operations,
@@ -3268,8 +3503,12 @@ fn compile_model_routes(
 			if let Some(lite) = row.use_responses_lite {
 				route.use_responses_lite = Some(lite);
 			}
-			if row.prefer_websockets == Some(true) {
-				route.codex_transport = CodexTransportPreference::WebsocketPreferred;
+			if let Some(prefer_websockets) = row.prefer_websockets {
+				route.codex_transport = if prefer_websockets {
+					CodexTransportPreference::WebsocketPreferred
+				} else {
+					CodexTransportPreference::HttpOnly
+				};
 			}
 			route.priority = row.priority;
 			let shape = serde_json::to_vec(&(
@@ -3333,9 +3572,13 @@ fn compile_models(
 		let provider_policy_id = provider_policies.get(&provider).ok_or_else(|| {
 			CompileError::Invariant(Str::from(format!("provider `{provider}` has no wire policy")))
 		})?;
-		if !policies.contains_key(provider_policy_id) {
-			return Err(CompileError::Invariant(sf!("provider wire policy was not interned",)));
-		}
+		let provider_policy = policies
+			.get(provider_policy_id)
+			.ok_or_else(|| CompileError::Invariant(sf!("provider wire policy was not interned",)))?;
+		// The native forced-tool-choice penalty is a host-imposed contract
+		// declared once per provider; every model served by that host pays it
+		// unless a more specific rule declares otherwise (ADR 0019).
+		let provider_forced_choice_penalty = provider_policy.tool.forced_choice_penalty;
 		let facets = provider_facets
 			.get(&provider)
 			.map(Vec::as_slice)
@@ -3345,18 +3588,42 @@ fn compile_models(
 			.copied()
 			.ok_or_else(|| CompileError::Invariant(sf!("provider transport is missing")))?;
 		let identities: BTreeMap<Str, ModelClassification> = rows
-			.keys()
-			.map(|model| {
-				let classified = classify(ClassificationInput {
+			.iter()
+			.map(|(model, row)| {
+				let mut classified = classify(ClassificationInput {
 					phase: ClassificationPhase::CatalogCompiler,
 					provider: &provider,
 					model,
 					observed_at_ms: None,
 				});
+				if let Some(identity) = &row.identity {
+					if let Some(logical) = &identity.logical_id {
+						classified.logical_model = logical.clone();
+					}
+					if let Some(class) = &identity.class {
+						classified.class = class.clone();
+					}
+					if let Some(family) = &identity.family {
+						classified.family = Some(family.clone());
+					}
+					if let Some(revision) = identity
+						.revision
+						.as_ref()
+						.and_then(|revision| source_semver(revision.as_str()))
+					{
+						classified.revision = Some(revision);
+					}
+					if let Some(effort) = identity.effort {
+						classified.effort = Some(effort);
+					}
+					if let Some(thinking_variant) = identity.thinking_variant {
+						classified.thinking_variant = thinking_variant;
+					}
+				}
 				(model.clone(), classified)
 			})
 			.collect();
-		let collapsible = collapsible_groups(&identities);
+		let collapsible = collapsible_groups(provider.as_str(), &identities);
 		let mut logical: BTreeMap<Str, Vec<(Str, SourceModelRecord, ModelClassification)>> =
 			BTreeMap::new();
 		for (wire, row) in rows {
@@ -3375,6 +3642,7 @@ fn compile_models(
 		}
 		for (logical_id, members) in logical {
 			let first = &members[0];
+			let reviewed_family = variant_family(provider.as_str(), logical_id.as_str());
 			let mut merged_row = first.1.clone();
 			for (_, row, _) in members.iter().skip(1) {
 				for input in &row.input {
@@ -3394,21 +3662,23 @@ fn compile_models(
 				});
 			merged_row.reasoning = merged_row.reasoning || tier_reasoning;
 			let class = first.2.class.clone();
-			let display_name = first
-				.1
-				.name
-				.clone()
-				.map(|name| {
-					if provider == "cursor"
-						&& logical_id.as_str().starts_with("cursor-grok-")
-						&& !name.as_str().starts_with("Cursor ")
-					{
-						Str::from(format!("Cursor {name}"))
-					} else {
-						name
-					}
-				})
-				.unwrap_or_else(|| humanize(&logical_id));
+			let display_name = reviewed_family
+				.as_ref()
+				.map(|family| family.name.clone())
+				.or_else(|| first.1.name.clone())
+				.map_or_else(
+					|| humanize(&logical_id),
+					|name| {
+						if provider == "cursor"
+							&& logical_id.as_str().starts_with("cursor-grok-")
+							&& !name.as_str().starts_with("Cursor ")
+						{
+							Str::from(format!("Cursor {name}"))
+						} else {
+							name
+						}
+					},
+				);
 			let context_window = members
 				.iter()
 				.filter_map(|(_, row, _)| row.context_window)
@@ -3437,11 +3707,30 @@ fn compile_models(
 			}
 			routes.sort();
 			routes.dedup();
-			if members.len() > 1 {
+			if members.len() > 1 && reviewed_family.is_none() {
 				for route in &routes {
 					wire_ids.push((route.clone(), WireModelId::new(logical_id.clone())));
 				}
 			}
+			let present = members
+				.iter()
+				.map(|(wire, ..)| wire.as_str())
+				.collect::<BTreeSet<_>>();
+			let preferred_wire = reviewed_family
+				.as_ref()
+				.and_then(|family| family.preferred_default(&present));
+			wire_ids.sort_by(|left, right| {
+				left
+					.0
+					.cmp(&right.0)
+					.then_with(|| {
+						let left_preferred = preferred_wire == Some(left.1.as_str());
+						let right_preferred = preferred_wire == Some(right.1.as_str());
+						right_preferred.cmp(&left_preferred)
+					})
+					.then_with(|| left.1.cmp(&right.1))
+			});
+			wire_ids.dedup();
 			let capability_override = exact_capability_override(&provider, &logical_id);
 			let resolved = cascade.resolve(&ResolveTarget {
 				provider:  provider.as_str(),
@@ -3456,7 +3745,22 @@ fn compile_models(
 				logical_id.as_str(),
 				&first.1.cost,
 				resolved.catalog.get("longContext"),
-			)?;
+			)?
+			.with_service_tiers(
+				first
+					.1
+					.service_tier_cost
+					.iter()
+					.map(|(tier, multiplier)| {
+						Ok(ServiceTierPrice {
+							tier:       tier.clone(),
+							multiplier: PremiumMultiplier::from_millionths(decimal_millionths(
+								multiplier,
+							)?),
+						})
+					})
+					.collect::<Result<Vec<_>, CompileError>>()?,
+			);
 			let edit_revision = resolved
 				.catalog
 				.get("editRevision")
@@ -3505,6 +3809,10 @@ fn compile_models(
 					wire_policy = compile_wire_policy(wire_policy, source)?;
 				}
 			}
+			wire_policy.tool.forced_choice_penalty = wire_policy
+				.tool
+				.forced_choice_penalty
+				.or(provider_forced_choice_penalty);
 			if let Some(enabled) = first.1.cursor_max_mode {
 				wire_policy.context.extended_mode = Some(ExtendedContextMode::from_enabled(enabled));
 			}
@@ -3541,13 +3849,21 @@ fn compile_models(
 				});
 			}
 			let (thinking, mut thinking_routing) = if capabilities.chat.is_some() {
-				compile_thinking(provider.as_str(), &members, thinking_profile)?
+				compile_thinking(
+					provider.as_str(),
+					&members,
+					thinking_profile,
+					reviewed_family.as_ref(),
+				)?
 			} else {
 				(None, ThinkingRouting::default())
 			};
 			if let Some(chat) = capabilities.chat.as_mut() {
 				chat.reasoning = reasoning_capabilities(merged_row.reasoning, thinking.as_ref());
 				chat.prompt_caching = prompt_cache_capabilities(&wire_policy, &pricing);
+				if let Availability::Native(tools) = &mut chat.tools {
+					tools.features = tool_feature_bits(&wire_policy.tool);
+				}
 			}
 			let wire_policy_id = wire_policy.content_id();
 			policies
@@ -3576,6 +3892,24 @@ fn compile_models(
 						target:     key.clone(),
 						rationale:  classified.evidence.rationale.clone(),
 						provenance: classified.evidence.provenance.clone(),
+					});
+				}
+			}
+			if let Some(family) = &reviewed_family {
+				for alias in family
+					.members
+					.iter()
+					.chain(family.retired_members.iter())
+					.chain(family.extra_aliases.iter())
+				{
+					if alias.as_str() == logical_id.as_str() {
+						continue;
+					}
+					aliases.push(CatalogAlias {
+						alias:      Str::from(format!("{provider}/{alias}")),
+						target:     key.clone(),
+						rationale:  sf!("reviewed provider variant belongs to one logical model"),
+						provenance: sf!("compat/taxonomy/_collapse.kdl"),
 					});
 				}
 			}
@@ -3652,6 +3986,20 @@ fn compile_models(
 				wire_policy: wire_policy_id,
 				context: ContextStrategy::Replay,
 				pricing,
+				catalog_metrics: CatalogModelMetrics {
+					intelligence_millionths:             first
+						.1
+						.int
+						.as_ref()
+						.map(decimal_metric_millionths)
+						.transpose()?,
+					output_tokens_per_second_millionths: first
+						.1
+						.tps
+						.as_ref()
+						.map(decimal_metric_millionths)
+						.transpose()?,
+				},
 				availability: ModelAvailability::Unspecified,
 				provenance: ModelProvenance {
 					sources:          provenance_sources.into_boxed_slice(),
@@ -3803,10 +4151,17 @@ fn retarget_collapsed_model_reference(
 	}
 }
 
-fn collapsible_groups(classified: &BTreeMap<Str, ModelClassification>) -> BTreeSet<Str> {
+fn collapsible_groups(
+	provider: &str,
+	classified: &BTreeMap<Str, ModelClassification>,
+) -> BTreeSet<Str> {
 	let raw: BTreeSet<&str> = classified.keys().map(Str::as_str).collect();
 	let mut tiers: BTreeMap<&str, Vec<EffortTier>> = BTreeMap::new();
-	let mut result = BTreeSet::new();
+	let mut result = classified
+		.keys()
+		.filter_map(|wire| variant_family(provider, wire.as_str()))
+		.map(|family| family.logical)
+		.collect::<BTreeSet<_>>();
 	for value in classified.values() {
 		if value.thinking_variant && raw.contains(value.logical_model.as_str()) {
 			result.insert(value.logical_model.clone());
@@ -3830,12 +4185,7 @@ fn collapsible_groups(classified: &BTreeMap<Str, ModelClassification>) -> BTreeS
 fn axis_map_to_source_wire_policy(source: AxisMap) -> Result<SourceWirePolicy, CompileError> {
 	let mut object = Map::new();
 	for (key, value) in source {
-		let key = match key.as_str() {
-			"supports_usage_in_streaming" => "usage_in_streaming",
-			"supports_forced_tool_choice" => "forced_tool_choice",
-			key => key,
-		};
-		object.insert(key.to_owned(), value);
+		object.insert(key.as_str().to_owned(), value);
 	}
 	Ok(serde_json::from_value(Value::Object(object))?)
 }
@@ -3852,12 +4202,15 @@ fn compile_wire_policy(
 	mut policy: WirePolicy,
 	source: &SourceWirePolicy,
 ) -> Result<WirePolicy, CompileError> {
-	policy.usage.in_streaming = source.usage_in_streaming.or(policy.usage.in_streaming);
+	policy.usage.in_streaming = source
+		.supports_usage_in_streaming
+		.or(policy.usage.in_streaming);
 	policy.context.glyph_tokenization = source
 		.glyph_tokenization
 		.or(policy.context.glyph_tokenization);
 	policy.role.multiple_system_messages = source
-		.multiple_system_messages
+		.supports_multiple_system_messages
+		.or(source.multiple_system_messages)
 		.or(policy.role.multiple_system_messages);
 	policy.context.max_tokens_field =
 		parse_policy(source.max_tokens_field.as_deref(), policy.context.max_tokens_field)?;
@@ -3865,8 +4218,16 @@ fn compile_wire_policy(
 	policy.structured.penalties = source.penalties.or(policy.structured.penalties);
 	policy.tool.strict_mode =
 		parse_policy(source.tool_strict_mode.as_deref(), policy.tool.strict_mode)?;
-	policy.tool.named_choice = source.named_tool_choice.or(policy.tool.named_choice);
-	policy.tool.forced_choice = source.forced_tool_choice.or(policy.tool.forced_choice);
+	policy.tool.named_choice = source
+		.supports_named_tool_choice
+		.or(source.named_tool_choice)
+		.or(policy.tool.named_choice);
+	policy.tool.forced_choice = source
+		.supports_forced_tool_choice
+		.or(policy.tool.forced_choice);
+	policy.tool.forced_choice_penalty = source
+		.forced_tool_choice_penalty
+		.or(policy.tool.forced_choice_penalty);
 	policy.tool.flatten_root_unions = source
 		.flatten_root_unions
 		.or(policy.tool.flatten_root_unions);
@@ -3893,7 +4254,7 @@ fn compile_wire_policy(
 		.prompt_cache_minimum_tokens
 		.or(policy.cache.minimum_tokens);
 	policy.cache.maximum_checkpoints = source
-		.prompt_cache_max_checkpoints
+		.prompt_cache_maximum_checkpoints
 		.or(policy.cache.maximum_checkpoints);
 	policy.image.encoding =
 		parse_policy(source.image_encoding_format.as_deref(), policy.image.encoding)?;
@@ -3902,7 +4263,13 @@ fn compile_wire_policy(
 		parse_policy(source.tool_schema_flavor.as_deref(), policy.tool.schema_flavor)?;
 	policy.reasoning.leaked_healer =
 		parse_policy(source.leaked_thinking_healer.as_deref(), policy.reasoning.leaked_healer)?;
-	policy.reasoning.loop_guard = source.thinking_loop_guard.or(policy.reasoning.loop_guard);
+	policy.reasoning.loop_guard_profile =
+		parse_policy(source.thinking_loop_guard.as_deref(), policy.reasoning.loop_guard_profile)?;
+	policy.reasoning.loop_guard = source
+		.thinking_loop_guard
+		.as_ref()
+		.map(|_| true)
+		.or(policy.reasoning.loop_guard);
 	if let Some(watchdog) = source.stream_watchdog {
 		policy.streaming.watchdog = Some(StreamWatchdog {
 			first_event_ms: watchdog.first_event_ms,
@@ -3950,7 +4317,8 @@ fn compile_wire_policy(
 		.omit_reasoning_effort
 		.or(policy.reasoning.omit_effort);
 	policy.reasoning.template_reasoning_effort = source
-		.template_reasoning_effort
+		.qwen_template_reasoning_effort
+		.or(source.template_reasoning_effort)
 		.or(policy.reasoning.template_reasoning_effort);
 	if !source.reasoning_effort_map.is_empty() {
 		policy
@@ -4005,7 +4373,8 @@ fn compile_wire_policy(
 			Some(serde_json::from_str::<WhenThinkingPolicy>(raw.json())?);
 	}
 	policy.cache.supports_long_retention = source
-		.supports_long_cache_retention
+		.supports_long_prompt_cache_retention
+		.or(source.supports_long_cache_retention)
 		.or(policy.cache.supports_long_retention);
 	policy.context.supports_store = source.supports_store.or(policy.context.supports_store);
 	policy.image.supports_detail_original = source
@@ -4019,6 +4388,183 @@ fn compile_wire_policy(
 	policy.streaming.thinking_close_max_retries = source
 		.thinking_close_max_retries
 		.or(policy.streaming.thinking_close_max_retries);
+
+	policy.headers.allow_anthropic_overrides = source
+		.allow_anthropic_header_overrides
+		.or(policy.headers.allow_anthropic_overrides);
+	policy.context.always_send_max_tokens = source
+		.always_send_max_tokens
+		.or(policy.context.always_send_max_tokens);
+	policy.tool.antigravity_claude_mode = source
+		.antigravity_claude_tool_mode
+		.or(policy.tool.antigravity_claude_mode);
+	policy.usage.antigravity_label = source
+		.antigravity_usage_label
+		.clone()
+		.or(policy.usage.antigravity_label);
+	policy.tool.cca_legacy_parameters_schema = source
+		.cca_legacy_parameters_schema
+		.or(policy.tool.cca_legacy_parameters_schema);
+	policy.context.clamp_output_to_model_max = source
+		.clamp_output_to_model_max
+		.or(policy.context.clamp_output_to_model_max);
+	policy.headers.claude_thinking_beta = source
+		.claude_thinking_beta_header
+		.or(policy.headers.claude_thinking_beta);
+	policy.tool.disable_reasoning_on_forced_choice = source
+		.disable_reasoning_on_forced_tool_choice
+		.or(policy.tool.disable_reasoning_on_forced_choice);
+	policy.tool.disable_strict_tools = source
+		.disable_strict_tools
+		.or(policy.tool.disable_strict_tools);
+	policy.reasoning.drop_thinking_when_effort = source
+		.drop_thinking_when_reasoning_effort
+		.or(policy.reasoning.drop_thinking_when_effort);
+	policy.reasoning.drop_unsigned = source
+		.drop_unsigned_thinking
+		.or(policy.reasoning.drop_unsigned);
+	policy.streaming.empty_length_finish_is_context_error = source
+		.empty_length_finish_is_context_error
+		.or(policy.streaming.empty_length_finish_is_context_error);
+	policy.streaming.flash_leak_workaround = source
+		.flash_stream_leak_workaround
+		.or(policy.streaming.flash_leak_workaround);
+	policy.streaming.harmony_leak_mitigation = source
+		.harmony_leak_mitigation
+		.or(policy.streaming.harmony_leak_mitigation);
+	policy.role.inject_claude_code_instruction = source
+		.inject_claude_code_instruction
+		.or(policy.role.inject_claude_code_instruction);
+	policy.dialect.kimi_api_format =
+		parse_policy(source.kimi_api_format.as_deref(), policy.dialect.kimi_api_format)?;
+	policy.dialect.model_router = source.model_router.or(policy.dialect.model_router);
+	policy.image.multimodal_function_response = source
+		.multimodal_function_response
+		.or(policy.image.multimodal_function_response);
+	policy.reasoning.native_kimi_k3 = source
+		.native_kimi_k3_reasoning
+		.or(policy.reasoning.native_kimi_k3);
+	policy.cache.breakpoint_ttl =
+		parse_policy(source.prompt_cache_breakpoint_ttl.as_deref(), policy.cache.breakpoint_ttl)?;
+	policy.headers.prompt_cache_session = parse_policy(
+		source.prompt_cache_session_header.as_deref(),
+		policy.headers.prompt_cache_session,
+	)?;
+	policy.reasoning.qwen_preserve_thinking = source
+		.qwen_preserve_thinking
+		.or(policy.reasoning.qwen_preserve_thinking);
+	policy.streaming.reasoning_deltas_cumulative = source
+		.reasoning_deltas_may_be_cumulative
+		.or(policy.streaming.reasoning_deltas_cumulative);
+	policy.tool.reject_root_object_union = source
+		.reject_root_object_union
+		.or(policy.tool.reject_root_object_union);
+	policy.reasoning.replay_content = source
+		.replay_reasoning_content
+		.or(policy.reasoning.replay_content);
+	policy.tool.requires_assistant_after_result = source
+		.requires_assistant_after_tool_result
+		.or(policy.tool.requires_assistant_after_result);
+	policy.tool.requires_mistral_ids = source
+		.requires_mistral_tool_ids
+		.or(policy.tool.requires_mistral_ids);
+	policy.reasoning.requires_off_juice_instruction = source
+		.requires_reasoning_off_juice_instruction
+		.or(policy.reasoning.requires_off_juice_instruction);
+	policy.tool.requires_skip_thought_signature = source
+		.requires_skip_thought_signature
+		.or(policy.tool.requires_skip_thought_signature);
+	policy
+		.tool
+		.requires_skip_thought_signature_on_first_function_call = source
+		.requires_skip_thought_signature_on_first_function_call
+		.or(
+			policy
+				.tool
+				.requires_skip_thought_signature_on_first_function_call,
+		);
+	policy.reasoning.requires_thinking_as_text = source
+		.requires_thinking_as_text
+		.or(policy.reasoning.requires_thinking_as_text);
+	policy.tool.requires_result_name = source
+		.requires_tool_result_name
+		.or(policy.tool.requires_result_name);
+	policy.tool.retry_without_strict_on_grammar_error = source
+		.retry_without_strict_on_grammar_error
+		.or(policy.tool.retry_without_strict_on_grammar_error);
+	if let Some(first_event_ms) = source.stream_first_event_timeout_ms {
+		let mut watchdog = policy.streaming.watchdog.unwrap_or_default();
+		watchdog.first_event_ms = Some(first_event_ms);
+		policy.streaming.watchdog = Some(watchdog);
+	}
+	policy.streaming.markup_healing_pattern = parse_policy(
+		source.stream_markup_healing_pattern.as_deref(),
+		policy.streaming.markup_healing_pattern,
+	)?;
+	policy.tool.strict_responses_pairing = source
+		.strict_responses_pairing
+		.or(policy.tool.strict_responses_pairing);
+	policy.streaming.strip_deepseek_special_tokens = source
+		.strip_deepseek_special_tokens
+		.or(policy.streaming.strip_deepseek_special_tokens);
+	policy.image.strip_input = source.strip_image_input.or(policy.image.strip_input);
+	policy.reasoning.supports_all_turns_context = source
+		.supports_all_turns_reasoning_context
+		.or(policy.reasoning.supports_all_turns_context);
+	policy.context.supports_management = source
+		.supports_context_management
+		.or(policy.context.supports_management);
+	policy.tool.supports_function_part_id = source
+		.supports_function_part_id
+		.or(policy.tool.supports_function_part_id);
+	policy.tool.supports_mid_conversation_changes = source
+		.supports_mid_conversation_tool_changes
+		.or(policy.tool.supports_mid_conversation_changes);
+	policy.streaming.supports_obfuscation_opt_out = source
+		.supports_obfuscation_opt_out
+		.or(policy.streaming.supports_obfuscation_opt_out);
+	policy.reasoning.supports_output_effort = source
+		.supports_output_effort
+		.or(policy.reasoning.supports_output_effort);
+	policy.tool.supports_parallel_calls = source
+		.supports_parallel_tool_calls
+		.or(policy.tool.supports_parallel_calls);
+	policy.structured.penalty_and_stop_params = source
+		.supports_penalty_and_stop_params
+		.or(policy.structured.penalty_and_stop_params);
+	policy.reasoning.supports_per_message_effort = source
+		.supports_per_message_effort
+		.or(policy.reasoning.supports_per_message_effort);
+	policy.cache.supports_breakpoints = source
+		.supports_prompt_cache_breakpoints
+		.or(policy.cache.supports_breakpoints);
+	policy.cache.supports_key = source
+		.supports_prompt_cache_key
+		.or(policy.cache.supports_key);
+	policy.reasoning.supports_params = source
+		.supports_reasoning_params
+		.or(policy.reasoning.supports_params);
+	policy.tool.supports_strict_mode = source
+		.supports_strict_mode
+		.or(policy.tool.supports_strict_mode);
+	policy.reasoning.supports_binding_controls = source
+		.supports_thinking_binding_controls
+		.or(policy.reasoning.supports_binding_controls);
+	policy.role.supports_turn_scoped_system = source
+		.supports_turn_scoped_system
+		.or(policy.role.supports_turn_scoped_system);
+	policy.reasoning.keep = source.thinking_keep.or(policy.reasoning.keep);
+	policy.reasoning.trust_explicit_only = source
+		.trust_explicit_thinking_only
+		.or(policy.reasoning.trust_explicit_only);
+	policy.tool.uses_openai_id_limit = source
+		.uses_openai_tool_call_id_limit
+		.or(policy.tool.uses_openai_id_limit);
+	policy.dialect.wire_model_id_mode =
+		parse_policy(source.wire_model_id_mode.as_deref(), policy.dialect.wire_model_id_mode)?;
+	policy.dialect.zai_reasoning_effort = source
+		.zai_reasoning_effort_dialect
+		.or(policy.dialect.zai_reasoning_effort);
 	Ok(policy)
 }
 
@@ -4058,6 +4604,7 @@ fn compile_thinking(
 	provider: &str,
 	members: &[(Str, SourceModelRecord, ModelClassification)],
 	profile: Option<ThinkingPolicy>,
+	reviewed_family: Option<&crate::taxonomy::VariantFamily>,
 ) -> Result<(Option<ThinkingPolicy>, ThinkingRouting), CompileError> {
 	let source = members.iter().find_map(|(_, row, _)| row.thinking.as_ref());
 	let mut classified_efforts: SmallVec<ThinkingEffort, 6> = members
@@ -4067,9 +4614,42 @@ fn compile_thinking(
 	classified_efforts.sort();
 	classified_efforts.dedup();
 	let tier_collapsed = classified_efforts.len() >= 2;
-	let synthesize_cursor =
-		supports_dynamic_effort_siblings(provider) && tier_collapsed && source.is_none();
-	let mut profile = if synthesize_cursor {
+	let synthesize_cursor = reviewed_family.is_none()
+		&& supports_dynamic_effort_siblings(provider)
+		&& tier_collapsed
+		&& source.is_none();
+	let reviewed_profile = reviewed_family.and_then(|family| {
+		(!family.no_thinking)
+			.then_some(family.mode)
+			.flatten()
+			.map(|mode| ThinkingPolicy {
+				mode,
+				efforts: family
+					.efforts
+					.iter()
+					.copied()
+					.map(translate_effort)
+					.collect(),
+				default_level: family.default_level.map(translate_effort),
+				effort_budgets: family
+					.effort_budgets
+					.iter()
+					.map(|(effort, budget)| (translate_effort(*effort), *budget))
+					.collect(),
+				effort_map: BTreeMap::new(),
+				prefix_binding: None,
+				supports_display: None,
+				suppress_when_off: family.suppress_when_off,
+				requires_effort: family.requires_effort,
+			})
+	});
+	let mut profile = if reviewed_family.is_some_and(|family| family.no_thinking) {
+		None
+	} else if let Some(profile) = profile {
+		Some(profile)
+	} else if reviewed_profile.is_some() {
+		reviewed_profile
+	} else if synthesize_cursor {
 		let efforts = classified_efforts
 			.iter()
 			.copied()
@@ -4091,12 +4671,13 @@ fn compile_thinking(
 			efforts,
 			default_level,
 			effort_budgets: BTreeMap::new(),
+			effort_map: BTreeMap::new(),
+			prefix_binding: None,
 			supports_display: None,
 			suppress_when_off: None,
 			requires_effort: (!has_off_route).then_some(true),
 		})
-	} else if profile.is_none()
-		&& let Some(source) = source
+	} else if let Some(source) = source
 		&& !source.efforts.is_empty()
 	{
 		Some(ThinkingPolicy {
@@ -4104,12 +4685,14 @@ fn compile_thinking(
 			efforts:           source.efforts.clone(),
 			default_level:     source.default_level,
 			effort_budgets:    source.effort_budgets.clone(),
-			supports_display:  None,
-			suppress_when_off: None,
-			requires_effort:   None,
+			effort_map:        source.effort_map.clone(),
+			prefix_binding:    source.prefix_binding,
+			supports_display:  source.supports_display,
+			suppress_when_off: source.suppress_when_off,
+			requires_effort:   source.requires_effort,
 		})
 	} else {
-		profile
+		None
 	};
 	if supports_dynamic_effort_siblings(provider)
 		&& let Some(profile) = profile.as_mut()
@@ -4142,6 +4725,26 @@ fn compile_thinking(
 				.or_insert_with(|| {
 					WireModelId::new(row.request_model_id.clone().unwrap_or_else(|| wire.clone()))
 				});
+		}
+	}
+	if let Some(family) = reviewed_family
+		&& !family.no_thinking
+	{
+		let present = members
+			.iter()
+			.map(|(wire, ..)| wire.as_str())
+			.collect::<BTreeSet<_>>();
+		for (effort, target) in &family.routing {
+			let target_present = present
+				.iter()
+				.any(|candidate| *candidate == target.as_str());
+			let preserve_absent = *effort != EffortTier::Off && family.preserve_absent_effort_routes;
+			let retired = family.retired_members.contains(target);
+			if (target_present || preserve_absent) && !retired {
+				routing
+					.effort_routing
+					.insert(translate_effort(*effort), WireModelId::new(target.clone()));
+			}
 		}
 	}
 	for (wire, row, classified) in members {
@@ -4198,6 +4801,20 @@ fn compile_thinking(
 					.unwrap_or_else(|| base_wire.clone()),
 			),
 		);
+	}
+	if (tier_collapsed || provider == "cursor")
+		&& !routing.effort_routing.is_empty()
+		&& let Some(profile) = profile.as_mut()
+	{
+		profile
+			.efforts
+			.retain(|effort| routing.effort_routing.contains_key(effort));
+		if profile
+			.default_level
+			.is_some_and(|effort| !profile.efforts.contains(&effort))
+		{
+			profile.default_level = profile.efforts.first().copied();
+		}
 	}
 	if let Some(profile) = &profile {
 		routing
@@ -4487,13 +5104,7 @@ fn conservative_capabilities(
 			} else {
 				Availability::Native(modalities(&row.input))
 			},
-			image_input:       if !row.input.contains(&SourceModality::Image) {
-				if row.input.is_empty() {
-					Availability::Unknown
-				} else {
-					Availability::Unsupported
-				}
-			} else {
+			image_input:       if row.input.contains(&SourceModality::Image) {
 				let decoder = row
 					.image_input_decoder
 					.unwrap_or(ImageDecoderFamily::Native);
@@ -4502,6 +5113,10 @@ fn conservative_capabilities(
 					ImageDecoderFamily::Stb => ImageInputFormatBits::STB,
 				};
 				Availability::Native(ImageInputCapabilities { formats, decoder })
+			} else if row.input.is_empty() {
+				Availability::Unknown
+			} else {
+				Availability::Unsupported
 			},
 			tools:             match row.supports_tools {
 				Some(true) => Availability::Native(ToolCapabilities {
@@ -4610,7 +5225,7 @@ fn conservative_capabilities(
 	}
 }
 
-fn reasoning_effort(effort: ThinkingEffort) -> ReasoningEffort {
+const fn reasoning_effort(effort: ThinkingEffort) -> ReasoningEffort {
 	match effort {
 		ThinkingEffort::Off => ReasoningEffort::Off,
 		ThinkingEffort::Minimal => ReasoningEffort::Minimal,
@@ -4673,6 +5288,34 @@ fn reasoning_capabilities(
 		minimum_budget_tokens,
 		maximum_budget_tokens,
 	})
+}
+
+/// Derives the router-facing tool feature bits from compiled tool policy.
+///
+/// Only an affirmative compiled fact sets a bit (ADR 0017: unknown is
+/// unsupported). A route that rejects every tool-choice control clears the
+/// choice bits even when a broader rule declared forced or named choice, so
+/// the forced-call ladder (ADR 0019) never reaches for a selector the wire
+/// refuses.
+fn tool_feature_bits(policy: &ToolPolicy) -> ToolFeatureBits {
+	let mut features = ToolFeatureBits::empty();
+	let choice_accepted = policy.supports_tool_choice != Some(false);
+	if choice_accepted && policy.forced_choice == Some(true) {
+		features |= ToolFeatureBits::REQUIRED_CHOICE;
+	}
+	if choice_accepted && policy.named_choice == Some(true) {
+		features |= ToolFeatureBits::NAMED_CHOICE;
+	}
+	if policy.supports_tool_choice == Some(true) {
+		features |= ToolFeatureBits::DISABLED_CHOICE;
+	}
+	if policy.supports_strict_mode == Some(true) {
+		features |= ToolFeatureBits::STRICT_SCHEMA;
+	}
+	if policy.supports_parallel_calls == Some(true) {
+		features |= ToolFeatureBits::PARALLEL;
+	}
+	features
 }
 
 fn prompt_cache_capabilities(
@@ -4786,7 +5429,7 @@ fn compile_pricing(
 			}
 		}
 	}
-	let authored_long_context = authored_long_context
+	let mut authored_long_context = authored_long_context
 		.map(|value| {
 			serde_json::from_value::<SourceLongContextCost>(value.clone()).map_err(|error| {
 				CompileError::Invariant(Str::from(format!(
@@ -4795,6 +5438,21 @@ fn compile_pricing(
 			})
 		})
 		.transpose()?;
+	if let Some(tier) = authored_long_context.as_mut()
+		&& let Some(multiplier) = tier.multiplier.as_ref()
+	{
+		let base_has_price = [&cost.input, &cost.output, &cost.cache_read, &cost.cache_write]
+			.into_iter()
+			.any(|price| price.as_f64().is_some_and(|price| price != 0.0));
+		if base_has_price {
+			tier.input = multiply_number(&cost.input, multiplier)?;
+			tier.output = multiply_number(&cost.output, multiplier)?;
+			tier.cache_read = multiply_number(&cost.cache_read, multiplier)?;
+			tier.cache_write = multiply_number(&cost.cache_write, multiplier)?;
+		} else {
+			authored_long_context = None;
+		}
+	}
 	let long_context = authored_long_context
 		.as_ref()
 		.or(cost.long_context.as_ref());
@@ -4818,6 +5476,15 @@ fn compile_pricing(
 	Pricing::new(components, tiers).map_err(|error| {
 		CompileError::Invariant(Str::from(format!("invalid pricing schedule: {error}")))
 	})
+}
+
+fn multiply_number(value: &Number, multiplier: &Number) -> Result<Number, CompileError> {
+	let product = value
+		.as_f64()
+		.zip(multiplier.as_f64())
+		.and_then(|(value, multiplier)| Number::from_f64(value * multiplier))
+		.ok_or(CompileError::InvalidPriceMultiplier)?;
+	Ok(product)
 }
 
 fn price_components(
@@ -4847,6 +5514,10 @@ fn decimal_nanos(number: &Number) -> Result<u64, CompileError> {
 }
 fn decimal_millionths(number: &Number) -> Result<u64, CompileError> {
 	decimal_scaled(number, 6)
+}
+fn decimal_metric_millionths(number: &Number) -> Result<u32, CompileError> {
+	u32::try_from(decimal_millionths(number)?)
+		.map_err(|_| CompileError::Invariant(sf!("catalog metric is out of range")))
 }
 fn decimal_scaled(number: &Number, scale: usize) -> Result<u64, CompileError> {
 	let text = number.to_string();
@@ -4908,8 +5579,12 @@ impl Default for SourceCost {
 fn compile_auth(
 	source: &SourceAuth,
 	oauth_ids: &BTreeMap<Str, OAuthSpecId>,
+	signing_service: Option<&str>,
 ) -> Result<AuthSpec, CompileError> {
-	let canonical = serde_json::to_vec(source)?;
+	let canonical = match signing_service {
+		Some(service) => serde_json::to_vec(&(source, service))?,
+		None => serde_json::to_vec(source)?,
+	};
 	let id = AuthSpecId::new(content_id("auth", &canonical));
 	let mut credential_sources = Vec::new();
 	let (kind, header_name, query_parameter, prefix, sealed_body, account_scope, oauth, signing) =
@@ -5020,22 +5695,28 @@ fn compile_auth(
 					None,
 					AccountScope::Region,
 					None,
-					Some(SigV4Spec { service: sf!("bedrock"), region: RegionSource::RouteEndpoint }),
+					Some(SigV4Spec {
+						service: signing_service.map_or_else(|| sf!("bedrock"), Str::new),
+						region:  RegionSource::RouteEndpoint,
+					}),
 				)
 			},
-			SourceAuth::GoogleAdc { api_key_env, project_env, location_env } => {
+			SourceAuth::GoogleAdc { api_key_env, project_env, location_env, credentials_env } => {
 				let api_key_env = canonical_env_names(api_key_env)?;
 				let project_env = canonical_env_names(project_env)?;
 				let location_env = canonical_env_names(location_env)?;
+				let credentials_env = canonical_env_names(credentials_env)?;
 				let mut sources = api_key_env
 					.iter()
 					.cloned()
 					.map(|variable| ApplicationDefaultSource::EnvironmentAccessToken { variable })
 					.collect::<Vec<_>>();
-				sources.push(ApplicationDefaultSource::CredentialFile {
-					path_environment: Some(sf!("OMP_GOOGLE_APPLICATION_CREDENTIALS")),
-					default_path:     None,
-				});
+				sources.extend(credentials_env.iter().cloned().map(|variable| {
+					ApplicationDefaultSource::CredentialFile {
+						path_environment: Some(variable),
+						default_path:     None,
+					}
+				}));
 				sources.push(ApplicationDefaultSource::Metadata { url: sf!("http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token"), headers: Box::new([StaticHeader { name: sf!("metadata-flavor"), value: sf!("Google") }]) });
 				credential_sources.push(CredentialSourceSpec::ApplicationDefault {
 					api_key_env,
@@ -5089,12 +5770,13 @@ fn compile_auth(
 }
 
 fn canonical_env_names(names: &[Str]) -> Result<Box<[Str]>, CompileError> {
-	for name in names {
-		if !name.starts_with("OMP_") {
-			return Err(CompileError::Invariant(Str::from(format!(
-				"credential environment variable `{name}` must use the OMP_ prefix"
-			))));
-		}
+	let Some(first) = names.first() else {
+		return Err(CompileError::Invariant(sf!("credential environment source must not be empty")));
+	};
+	if !first.starts_with("OMP_") {
+		return Err(CompileError::Invariant(sf!(
+			"credential environment source must lead with an OMP_* name"
+		)));
 	}
 	Ok(names.to_vec().into_boxed_slice())
 }
@@ -5131,6 +5813,15 @@ fn compile_discovery(source: &SourceDiscovery) -> Result<DiscoverySpec, CompileE
 		authoritative: source.authoritative,
 		interval: source.interval_ms.map(time::Duration::from_millis),
 	})
+}
+
+/// Resolves a source `api` selector (including serde aliases) to its
+/// canonical codec and transport, e.g. `openai-completions` →
+/// (`openai-chat`, HTTP).
+pub fn resolve_source_transport(name: &str) -> Option<(CodecId, TransportKind)> {
+	let source: SourceTransport =
+		serde_json::from_value(serde_json::Value::String(name.to_owned())).ok()?;
+	Some(translate_transport(source))
 }
 
 fn translate_transport(source: SourceTransport) -> (CodecId, TransportKind) {
@@ -5229,6 +5920,229 @@ mod tests {
 		serde_json::from_value(value).expect("source model")
 	}
 
+	#[test]
+	fn every_new_wire_axis_reaches_typed_wire_policy() {
+		let cases = [
+			(
+				"allow_anthropic_header_overrides",
+				serde_json::json!(true),
+				"/headers/allow_anthropic_overrides",
+			),
+			("always_send_max_tokens", serde_json::json!(true), "/context/always_send_max_tokens"),
+			("antigravity_claude_tool_mode", serde_json::json!(true), "/tool/antigravity_claude_mode"),
+			("antigravity_usage_label", serde_json::json!("claude"), "/usage/antigravity_label"),
+			("cache_control_format", serde_json::json!("anthropic"), "/cache/control_format"),
+			(
+				"cca_legacy_parameters_schema",
+				serde_json::json!(true),
+				"/tool/cca_legacy_parameters_schema",
+			),
+			(
+				"clamp_output_to_model_max",
+				serde_json::json!(true),
+				"/context/clamp_output_to_model_max",
+			),
+			("claude_thinking_beta_header", serde_json::json!(true), "/headers/claude_thinking_beta"),
+			(
+				"disable_reasoning_on_forced_tool_choice",
+				serde_json::json!(true),
+				"/tool/disable_reasoning_on_forced_choice",
+			),
+			("disable_strict_tools", serde_json::json!(true), "/tool/disable_strict_tools"),
+			(
+				"drop_thinking_when_reasoning_effort",
+				serde_json::json!(true),
+				"/reasoning/drop_thinking_when_effort",
+			),
+			("drop_unsigned_thinking", serde_json::json!(true), "/reasoning/drop_unsigned"),
+			(
+				"empty_length_finish_is_context_error",
+				serde_json::json!(true),
+				"/streaming/empty_length_finish_is_context_error",
+			),
+			(
+				"flash_stream_leak_workaround",
+				serde_json::json!(true),
+				"/streaming/flash_leak_workaround",
+			),
+			("harmony_leak_mitigation", serde_json::json!(true), "/streaming/harmony_leak_mitigation"),
+			(
+				"inject_claude_code_instruction",
+				serde_json::json!(true),
+				"/role/inject_claude_code_instruction",
+			),
+			("kimi_api_format", serde_json::json!("openai"), "/dialect/kimi_api_format"),
+			("model_router", serde_json::json!(true), "/dialect/model_router"),
+			(
+				"multimodal_function_response",
+				serde_json::json!(true),
+				"/image/multimodal_function_response",
+			),
+			("native_kimi_k3_reasoning", serde_json::json!(true), "/reasoning/native_kimi_k3"),
+			("prompt_cache_breakpoint_ttl", serde_json::json!("30m"), "/cache/breakpoint_ttl"),
+			("prompt_cache_maximum_checkpoints", serde_json::json!(7), "/cache/maximum_checkpoints"),
+			("prompt_cache_minimum_tokens", serde_json::json!(7), "/cache/minimum_tokens"),
+			("prompt_cache_mode", serde_json::json!("none"), "/cache/prompt_cache_mode"),
+			(
+				"prompt_cache_session_header",
+				serde_json::json!("x-grok-conv-id"),
+				"/headers/prompt_cache_session",
+			),
+			("qwen_preserve_thinking", serde_json::json!(true), "/reasoning/qwen_preserve_thinking"),
+			(
+				"reasoning_deltas_may_be_cumulative",
+				serde_json::json!(true),
+				"/streaming/reasoning_deltas_cumulative",
+			),
+			("reject_root_object_union", serde_json::json!(true), "/tool/reject_root_object_union"),
+			("replay_reasoning_content", serde_json::json!(true), "/reasoning/replay_content"),
+			(
+				"requires_assistant_after_tool_result",
+				serde_json::json!(true),
+				"/tool/requires_assistant_after_result",
+			),
+			("requires_mistral_tool_ids", serde_json::json!(true), "/tool/requires_mistral_ids"),
+			(
+				"requires_reasoning_off_juice_instruction",
+				serde_json::json!(true),
+				"/reasoning/requires_off_juice_instruction",
+			),
+			(
+				"requires_skip_thought_signature",
+				serde_json::json!(true),
+				"/tool/requires_skip_thought_signature",
+			),
+			(
+				"requires_thinking_as_text",
+				serde_json::json!(true),
+				"/reasoning/requires_thinking_as_text",
+			),
+			("requires_tool_result_name", serde_json::json!(true), "/tool/requires_result_name"),
+			(
+				"retry_without_strict_on_grammar_error",
+				serde_json::json!(true),
+				"/tool/retry_without_strict_on_grammar_error",
+			),
+			(
+				"stream_first_event_timeout_ms",
+				serde_json::json!(7),
+				"/streaming/watchdog/first_event_ms",
+			),
+			(
+				"stream_markup_healing_pattern",
+				serde_json::json!("kimi"),
+				"/streaming/markup_healing_pattern",
+			),
+			("strict_responses_pairing", serde_json::json!(true), "/tool/strict_responses_pairing"),
+			(
+				"strip_deepseek_special_tokens",
+				serde_json::json!(true),
+				"/streaming/strip_deepseek_special_tokens",
+			),
+			("strip_image_input", serde_json::json!(true), "/image/strip_input"),
+			(
+				"supports_all_turns_reasoning_context",
+				serde_json::json!(true),
+				"/reasoning/supports_all_turns_context",
+			),
+			("supports_context_management", serde_json::json!(true), "/context/supports_management"),
+			("supports_function_part_id", serde_json::json!(true), "/tool/supports_function_part_id"),
+			(
+				"supports_long_prompt_cache_retention",
+				serde_json::json!(true),
+				"/cache/supports_long_retention",
+			),
+			(
+				"supports_mid_conversation_tool_changes",
+				serde_json::json!(true),
+				"/tool/supports_mid_conversation_changes",
+			),
+			(
+				"supports_multiple_system_messages",
+				serde_json::json!(true),
+				"/role/multiple_system_messages",
+			),
+			("supports_named_tool_choice", serde_json::json!(true), "/tool/named_choice"),
+			(
+				"supports_obfuscation_opt_out",
+				serde_json::json!(true),
+				"/streaming/supports_obfuscation_opt_out",
+			),
+			("supports_output_effort", serde_json::json!(true), "/reasoning/supports_output_effort"),
+			("supports_parallel_tool_calls", serde_json::json!(true), "/tool/supports_parallel_calls"),
+			(
+				"supports_penalty_and_stop_params",
+				serde_json::json!(true),
+				"/structured/penalty_and_stop_params",
+			),
+			(
+				"supports_per_message_effort",
+				serde_json::json!(true),
+				"/reasoning/supports_per_message_effort",
+			),
+			(
+				"supports_prompt_cache_breakpoints",
+				serde_json::json!(true),
+				"/cache/supports_breakpoints",
+			),
+			("supports_prompt_cache_key", serde_json::json!(true), "/cache/supports_key"),
+			("supports_reasoning_params", serde_json::json!(true), "/reasoning/supports_params"),
+			("supports_strict_mode", serde_json::json!(true), "/tool/supports_strict_mode"),
+			(
+				"supports_thinking_binding_controls",
+				serde_json::json!(true),
+				"/reasoning/supports_binding_controls",
+			),
+			(
+				"supports_turn_scoped_system",
+				serde_json::json!(true),
+				"/role/supports_turn_scoped_system",
+			),
+			("thinking_keep", serde_json::json!(true), "/reasoning/keep"),
+			("thinking_loop_guard", serde_json::json!("gemini"), "/reasoning/loop_guard_profile"),
+			("tool_schema_flavor", serde_json::json!("moonshot-mfjs"), "/tool/schema_flavor"),
+			("tool_strict_mode", serde_json::json!("all_strict"), "/tool/strict_mode"),
+			(
+				"trust_explicit_thinking_only",
+				serde_json::json!(true),
+				"/reasoning/trust_explicit_only",
+			),
+			("uses_openai_tool_call_id_limit", serde_json::json!(true), "/tool/uses_openai_id_limit"),
+			("wire_model_id_mode", serde_json::json!("raw"), "/dialect/wire_model_id_mode"),
+			("zai_reasoning_effort_dialect", serde_json::json!(true), "/dialect/zai_reasoning_effort"),
+		];
+		assert_eq!(cases.len(), 67);
+		for (resolved_key, value, pointer) in cases {
+			let source = axis_map_to_source_wire_policy(BTreeMap::from([(
+				Str::new(resolved_key),
+				value.clone(),
+			)]))
+			.expect("axis source compiles");
+			let policy = compile_wire_policy(WirePolicy::overrides(), &source)
+				.expect("typed wire policy compiles");
+			let encoded = serde_json::to_value(policy).expect("typed wire policy serializes");
+			assert_eq!(encoded.pointer(pointer), Some(&value), "{resolved_key} -> {pointer}");
+		}
+	}
+
+	#[test]
+	fn new_thinking_axes_reach_typed_thinking_policy() {
+		let effort_map = serde_json::json!({ "low": "low-native" });
+		let source = axis_map_to_thinking_policy(BTreeMap::from([
+			(sf!("mode"), serde_json::json!("effort")),
+			(sf!("efforts"), serde_json::json!([])),
+			(sf!("defaultLevel"), Value::Null),
+			(sf!("effortMap"), effort_map),
+			(sf!("prefixBinding"), serde_json::json!(true)),
+			(sf!("supportsDisplay"), Value::Null),
+			(sf!("suppressWhenOff"), Value::Null),
+			(sf!("requiresEffort"), Value::Null),
+		]))
+		.expect("thinking axes compile");
+		assert_eq!(source.effort_map.get(&ThinkingEffort::Low).map(Str::as_str), Some("low-native"));
+		assert_eq!(source.prefix_binding, Some(true));
+	}
+
 	fn classifications(
 		provider: &str,
 		rows: &BTreeMap<Str, SourceModelRecord>,
@@ -5264,7 +6178,7 @@ mod tests {
 				)
 			})
 			.collect::<BTreeMap<_, _>>();
-		assert!(collapsible_groups(&classifications("cursor", &rows)).contains("review"));
+		assert!(collapsible_groups("cursor", &classifications("cursor", &rows)).contains("review"));
 
 		let duplicate = ["low", "xhigh", "extra-high"]
 			.into_iter()
@@ -5275,7 +6189,10 @@ mod tests {
 				)
 			})
 			.collect::<BTreeMap<_, _>>();
-		assert!(!collapsible_groups(&classifications("cursor", &duplicate)).contains("duplicate"));
+		assert!(
+			!collapsible_groups("cursor", &classifications("cursor", &duplicate))
+				.contains("duplicate")
+		);
 	}
 
 	#[test]
@@ -5299,7 +6216,7 @@ mod tests {
 			(Str::from("review-low"), source_model(serde_json::json!({ "api": "cursor" }))),
 			(Str::from("review-high"), source_model(serde_json::json!({ "api": "cursor" }))),
 		]);
-		assert!(collapsible_groups(&classifications("cursor", &rows)).contains("review"));
+		assert!(collapsible_groups("cursor", &classifications("cursor", &rows)).contains("review"));
 	}
 
 	#[test]
@@ -5319,6 +6236,15 @@ mod tests {
 		let mut stale = Some(ModelKey::from("cursor/stale"));
 		retarget_collapsed_model_reference(&mut stale, &live, &aliases);
 		assert_eq!(stale, Some(ModelKey::from("cursor/stale")));
+	}
+
+	#[test]
+	fn credential_environment_names_require_only_the_leading_name_to_be_omp_prefixed() {
+		let names = canonical_env_names(&[sf!("OMP_ANTHROPIC_API_KEY"), sf!("ANTHROPIC_API_KEY")])
+			.expect("vendor fallback after canonical name");
+		assert_eq!(names.as_ref(), &[sf!("OMP_ANTHROPIC_API_KEY"), sf!("ANTHROPIC_API_KEY")]);
+		assert!(canonical_env_names(&[]).is_err());
+		assert!(canonical_env_names(&[sf!("ANTHROPIC_API_KEY")]).is_err());
 	}
 
 	#[test]
@@ -5394,7 +6320,7 @@ mod tests {
 				observed_at_ms: None,
 			}),
 		)]);
-		assert!(collapsible_groups(&single).is_empty());
+		assert!(collapsible_groups("p", &single).is_empty());
 		let siblings = BTreeMap::from([
 			(
 				sf!("model-low"),
@@ -5415,14 +6341,14 @@ mod tests {
 				}),
 			),
 		]);
-		assert!(collapsible_groups(&siblings).contains("model"));
+		assert!(collapsible_groups("p", &siblings).contains("model"));
 	}
 
 	#[test]
 	fn coreweave_discovery_is_authoritative() {
 		// CoreWeave Serverless Inference (W&B Inference) is a reseller with a
 		// rotating model menu: runtime /v1/models discovery must replace stale
-		// bundled rows instead of merging over them (pi 309d5712af, PR #8923).
+		// bundled rows instead of merging over them.
 		let providers = include_str!("../../../fixtures/llm-oracle/catalog/providers.toml");
 		let models = zstd::stream::encode_all(&br"{}"[..], 1).expect("fixture compression");
 		let source = parse_oracle(providers, &models).expect("fixture providers parse");
@@ -5488,6 +6414,38 @@ facets = ["chat"]
 			.find(|model| model.key.as_str() == "synthetic/model")
 			.expect("compiled model");
 		assert_eq!(model.routes.as_ref(), &[RouteId::from("synthetic/primary")]);
+	}
+
+	#[test]
+	fn model_websocket_preference_overrides_the_provider_in_both_directions() {
+		let providers = r#"
+[providers.synthetic]
+transport = "open-ai-responses"
+base_url = "https://example.test/v1"
+facets = ["chat"]
+codex_transport = "websocket-preferred"
+"#;
+		let models = br#"{"synthetic":{"http":{"input":["text"],"preferWebsockets":false},"websocket":{"input":["text"],"preferWebsockets":true}}}"#;
+		let compressed = zstd::stream::encode_all(&models[..], 1).expect("fixture compression");
+		let compiled = compile(parse_oracle(providers, &compressed).expect("typed source"))
+			.expect("catalog compilation");
+
+		for (model_key, expected) in [
+			("synthetic/http", CodexTransportPreference::HttpOnly),
+			("synthetic/websocket", CodexTransportPreference::WebsocketPreferred),
+		] {
+			let model = compiled
+				.models
+				.iter()
+				.find(|model| model.key.as_str() == model_key)
+				.expect("compiled model");
+			let route = compiled
+				.routes
+				.iter()
+				.find(|route| model.routes.first().is_some_and(|id| &route.id == id))
+				.expect("model route");
+			assert_eq!(route.codex_transport, expected);
+		}
 	}
 
 	#[test]
@@ -5565,6 +6523,16 @@ facets = ["chat"]
 			.iter()
 			.find(|provider| provider.id.as_str() == "anthropic")
 			.expect("Anthropic provider");
+		let anthropic_policy = compiled
+			.wire_policies
+			.iter()
+			.find(|policy| policy.content_id() == anthropic.wire_policy)
+			.expect("Anthropic wire policy");
+		assert_eq!(
+			anthropic_policy.tool.forced_choice_penalty,
+			Some(NativeToolChoicePenalty::CacheInvalidated),
+		);
+
 		let anthropic_auth = anthropic
 			.auth
 			.iter()
@@ -5579,6 +6547,12 @@ facets = ["chat"]
 				_ => None,
 			})
 			.expect("Anthropic API-key environment");
+		assert_eq!(api_key_names.as_ref(), &[
+			sf!("OMP_ANTHROPIC_API_KEY"),
+			sf!("OMP_ANTHROPIC_FOUNDRY_API_KEY"),
+			sf!("ANTHROPIC_API_KEY"),
+			sf!("ANTHROPIC_FOUNDRY_API_KEY"),
+		]);
 		assert!(
 			!api_key_names
 				.iter()
@@ -5593,7 +6567,10 @@ facets = ["chat"]
 				_ => None,
 			})
 			.expect("Anthropic OAuth bearer environment");
-		assert_eq!(bearer_names.as_ref(), &[sf!("OMP_ANTHROPIC_OAUTH_TOKEN")]);
+		assert_eq!(bearer_names.as_ref(), &[
+			sf!("OMP_ANTHROPIC_OAUTH_TOKEN"),
+			sf!("ANTHROPIC_OAUTH_TOKEN"),
+		]);
 
 		let azure = compiled
 			.routes
@@ -5627,6 +6604,240 @@ facets = ["chat"]
 			.expect("GitLab route operations");
 		assert!(operations.contains_kind(OperationKind::Chat));
 		assert!(operations.contains_kind(OperationKind::DiscoverModels));
+	}
+
+	#[test]
+	fn vendor_standard_environment_names_follow_omp_overrides() {
+		let compiled = compile_provider_registry();
+		let provider_auth = |provider: &str| {
+			let provider = compiled
+				.providers
+				.iter()
+				.find(|candidate| candidate.id.as_str() == provider)
+				.unwrap_or_else(|| panic!("{provider} provider"));
+			provider
+				.auth
+				.iter()
+				.filter_map(|id| compiled.auth_specs.iter().find(|auth| &auth.id == id))
+				.collect::<Vec<_>>()
+		};
+
+		let vertex = provider_auth("google-vertex");
+		let adc = vertex
+			.iter()
+			.flat_map(|auth| auth.credential_sources.iter())
+			.find_map(|source| match source {
+				CredentialSourceSpec::ApplicationDefault {
+					api_key_env,
+					project_env,
+					location_env,
+					sources,
+				} => Some((api_key_env, project_env, location_env, sources)),
+				_ => None,
+			})
+			.expect("Vertex application-default source");
+		assert_eq!(adc.0.as_ref(), &[sf!("OMP_GOOGLE_CLOUD_API_KEY"), sf!("GOOGLE_CLOUD_API_KEY")],);
+		assert_eq!(adc.1.as_ref(), &[
+			sf!("OMP_GOOGLE_CLOUD_PROJECT"),
+			sf!("OMP_GCP_PROJECT"),
+			sf!("OMP_GCLOUD_PROJECT"),
+			sf!("GOOGLE_CLOUD_PROJECT"),
+			sf!("GCP_PROJECT"),
+			sf!("GCLOUD_PROJECT"),
+		],);
+		assert_eq!(adc.2.as_ref(), &[
+			sf!("OMP_GOOGLE_VERTEX_LOCATION"),
+			sf!("OMP_GOOGLE_CLOUD_LOCATION"),
+			sf!("OMP_VERTEX_LOCATION"),
+			sf!("GOOGLE_VERTEX_LOCATION"),
+			sf!("GOOGLE_CLOUD_LOCATION"),
+			sf!("VERTEX_LOCATION"),
+		],);
+		assert!(adc.3.iter().any(|source| matches!(
+			source,
+			ApplicationDefaultSource::CredentialFile {
+				path_environment: Some(name),
+				..
+			} if name.as_str() == "GOOGLE_APPLICATION_CREDENTIALS"
+		)));
+
+		let bedrock = provider_auth("amazon-bedrock");
+		let bearer = bedrock
+			.iter()
+			.find(|auth| auth.kind == AuthSpecKind::Bearer)
+			.and_then(|auth| auth.credential_sources.first())
+			.and_then(|source| match source {
+				CredentialSourceSpec::Environment { ordered_names } => Some(ordered_names),
+				_ => None,
+			})
+			.expect("Bedrock bearer source");
+		assert_eq!(bearer.as_ref(), &[
+			sf!("OMP_AWS_BEARER_TOKEN_BEDROCK"),
+			sf!("AWS_BEARER_TOKEN_BEDROCK"),
+		]);
+
+		let mantle = provider_auth("bedrock-mantle");
+		let mantle_bearer = mantle
+			.iter()
+			.find(|auth| auth.kind == AuthSpecKind::Bearer)
+			.and_then(|auth| auth.credential_sources.first())
+			.and_then(|source| match source {
+				CredentialSourceSpec::Environment { ordered_names } => Some(ordered_names),
+				_ => None,
+			})
+			.expect("Bedrock Mantle bearer source");
+		assert_eq!(mantle_bearer.as_ref(), &[
+			sf!("OMP_AWS_BEARER_TOKEN_BEDROCK"),
+			sf!("AWS_BEARER_TOKEN_BEDROCK"),
+		]);
+		let mantle_sigv4 = mantle
+			.iter()
+			.find(|auth| auth.kind == AuthSpecKind::AwsSigv4)
+			.and_then(|auth| auth.signing.as_ref())
+			.expect("Bedrock Mantle SigV4 fallback");
+		assert_eq!(mantle_sigv4.service.as_str(), "bedrock-mantle");
+		assert!(matches!(mantle_sigv4.region, RegionSource::RouteEndpoint));
+
+		let mantle_route = compiled
+			.routes
+			.iter()
+			.find(|route| route.id.as_str() == "bedrock-mantle/primary")
+			.expect("Bedrock Mantle primary route");
+		assert_eq!(mantle_route.codec.as_str(), "bedrock-mantle");
+		assert_eq!(mantle_route.codec_profile, CodecProfile::Standard);
+		assert_eq!(
+			mantle_route.endpoint.base_url.as_str(),
+			"https://bedrock-mantle.{region}.api.aws/openai/v1",
+		);
+	}
+
+	#[test]
+	fn aws_provider_inventory_and_accounting_matches_pi() {
+		let providers = include_str!("../../../fixtures/llm-oracle/catalog/providers.toml");
+		let models = include_bytes!("../../../fixtures/llm-oracle/catalog/models.json.zst");
+		let source = parse_oracle(providers, models).expect("AWS source inventory parses");
+		assert_eq!(source.models["amazon-bedrock"].len(), 149);
+		assert_eq!(source.models["bedrock-mantle"].len(), 5);
+
+		let bedrock_source = &source.providers["amazon-bedrock"];
+		assert_eq!(bedrock_source.facets, [SourceFacet::Chat]);
+		assert!(!bedrock_source.usage);
+		let bedrock_discovery = bedrock_source
+			.discovery
+			.as_ref()
+			.expect("Bedrock discovery source");
+		assert_eq!(bedrock_discovery.label.as_str(), "Amazon Bedrock");
+		assert!(!bedrock_discovery.authoritative);
+
+		let mantle_source = &source.providers["bedrock-mantle"];
+		assert_eq!(mantle_source.facets, [SourceFacet::Chat]);
+		assert!(!mantle_source.usage);
+		let mantle_discovery = mantle_source
+			.discovery
+			.as_ref()
+			.expect("Mantle discovery source");
+		assert_eq!(mantle_discovery.label.as_str(), "Amazon Bedrock Mantle");
+		assert!(mantle_discovery.authoritative);
+
+		let compiled = compile(source).expect("AWS source inventory compiles");
+		for (provider_id, name, default_model, auth_kinds, authoritative) in [
+			(
+				"amazon-bedrock",
+				"Amazon Bedrock",
+				"amazon-bedrock/us.anthropic.claude-opus-4-8",
+				[AuthSpecKind::AwsSigv4, AuthSpecKind::Bearer],
+				false,
+			),
+			(
+				"bedrock-mantle",
+				"Amazon Bedrock Mantle",
+				"bedrock-mantle/openai.gpt-5.6-terra",
+				[AuthSpecKind::Bearer, AuthSpecKind::AwsSigv4],
+				true,
+			),
+		] {
+			let provider = compiled
+				.providers
+				.iter()
+				.find(|candidate| candidate.id.as_str() == provider_id)
+				.expect("AWS provider");
+			assert_eq!(provider.name.as_str(), name);
+			assert_eq!(provider.default_model.as_ref().map(ModelKey::as_str), Some(default_model));
+			let actual_auth_kinds = provider
+				.auth
+				.iter()
+				.map(|id| {
+					compiled
+						.auth_specs
+						.iter()
+						.find(|auth| &auth.id == id)
+						.expect("AWS auth record")
+						.kind
+				})
+				.collect::<Vec<_>>();
+			assert_eq!(actual_auth_kinds, auth_kinds);
+			assert!(provider.management.supports(OperationKind::Auth));
+			assert!(provider.management.supports(OperationKind::DiscoverModels));
+			assert!(!provider.management.supports(OperationKind::Usage));
+			let route = compiled
+				.routes
+				.iter()
+				.find(|candidate| candidate.id == provider.routes[0])
+				.expect("AWS primary route");
+			let operations = route
+				.capability_limits
+				.operations
+				.expect("AWS route operations");
+			assert!(operations.contains_kind(OperationKind::Chat));
+			assert!(operations.contains_kind(OperationKind::Auth));
+			assert!(operations.contains_kind(OperationKind::DiscoverModels));
+			assert!(!operations.contains_kind(OperationKind::Usage));
+			let discovery = compiled
+				.discovery_specs
+				.iter()
+				.find(|discovery| Some(&discovery.id) == route.discovery.as_ref())
+				.expect("AWS discovery record");
+			assert_eq!(discovery.authoritative, authoritative);
+		}
+
+		for (model_id, prices) in [
+			("openai.gpt-5.4", [2_750_000_000, 16_500_000_000, 275_000_000, 0]),
+			("openai.gpt-5.5", [5_500_000_000, 33_000_000_000, 550_000_000, 0]),
+			("openai.gpt-5.6-luna", [220_000_000, 1_320_000_000, 22_000_000, 275_000_000]),
+			("openai.gpt-5.6-sol", [5_500_000_000, 33_000_000_000, 550_000_000, 6_880_000_000]),
+			("openai.gpt-5.6-terra", [2_200_000_000, 13_200_000_000, 220_000_000, 2_750_000_000]),
+		] {
+			let model_key = format!("bedrock-mantle/{model_id}");
+			let model = compiled
+				.models
+				.iter()
+				.find(|model| model.key.as_str() == model_key.as_str())
+				.expect("Mantle static model");
+			assert_eq!(model.availability, ModelAvailability::Unspecified);
+			assert_eq!(model.limits.context_window, Some(272_000));
+			assert_eq!(model.limits.maximum_output_tokens, Some(128_000));
+			assert_eq!(model.pricing.components.as_ref(), &[
+				Price { unit: PriceUnit::MtokInput, nanos_usd: prices[0] },
+				Price { unit: PriceUnit::MtokOutput, nanos_usd: prices[1] },
+				Price { unit: PriceUnit::MtokCacheRead, nanos_usd: prices[2] },
+				Price { unit: PriceUnit::MtokCacheWrite, nanos_usd: prices[3] },
+			]);
+		}
+
+		let deepseek = compiled
+			.models
+			.iter()
+			.find(|model| model.key.as_str() == "amazon-bedrock/deepseek.v3.2")
+			.expect("Bedrock DeepSeek model");
+		assert_eq!(deepseek.catalog_metrics.intelligence_millionths, Some(25_100_000));
+		assert_eq!(deepseek.catalog_metrics.output_tokens_per_second_millionths, None);
+		let nemotron = compiled
+			.models
+			.iter()
+			.find(|model| model.key.as_str() == "amazon-bedrock/nvidia.nemotron-nano-9b-v2")
+			.expect("Bedrock Nemotron model");
+		assert_eq!(nemotron.catalog_metrics.intelligence_millionths, Some(7_200_000));
+		assert_eq!(nemotron.catalog_metrics.output_tokens_per_second_millionths, Some(159_900_000));
 	}
 
 	#[test]
@@ -5682,6 +6893,73 @@ facets = ["chat"]
 		assert!(cache.retention.contains(CacheRetentionBits::LONG));
 		assert_eq!(cache.minimum_prefix_tokens, Some(1_024));
 		assert_eq!(cache.maximum_breakpoints, Some(4));
+	}
+
+	#[test]
+	fn tool_feature_bits_follow_affirmative_wire_policy_only() {
+		assert_eq!(tool_feature_bits(&WirePolicy::overrides().tool), ToolFeatureBits::empty());
+
+		let baseline = WirePolicy::baseline();
+		let features = tool_feature_bits(&baseline.tool);
+		assert!(features.contains(ToolFeatureBits::REQUIRED_CHOICE));
+		assert!(features.contains(ToolFeatureBits::NAMED_CHOICE));
+		assert!(!features.contains(ToolFeatureBits::DISABLED_CHOICE));
+		assert!(!features.contains(ToolFeatureBits::STRICT_SCHEMA));
+		assert!(!features.contains(ToolFeatureBits::PARALLEL));
+
+		let mut policy = baseline.tool;
+		policy.supports_tool_choice = Some(true);
+		policy.supports_strict_mode = Some(true);
+		policy.supports_parallel_calls = Some(true);
+		let features = tool_feature_bits(&policy);
+		assert!(features.contains(ToolFeatureBits::DISABLED_CHOICE));
+		assert!(features.contains(ToolFeatureBits::STRICT_SCHEMA));
+		assert!(features.contains(ToolFeatureBits::PARALLEL));
+
+		policy.supports_tool_choice = Some(false);
+		let features = tool_feature_bits(&policy);
+		assert!(
+			!features.contains(ToolFeatureBits::REQUIRED_CHOICE)
+				&& !features.contains(ToolFeatureBits::NAMED_CHOICE)
+				&& !features.contains(ToolFeatureBits::DISABLED_CHOICE),
+			"a route refusing tool choice exposes no selector bit",
+		);
+		assert!(features.contains(ToolFeatureBits::STRICT_SCHEMA));
+
+		let providers = r#"
+[providers.anthropic]
+transport = "anthropic-messages"
+base_url = "https://api.anthropic.test"
+facets = ["chat"]
+compat = { "forced_tool_choice_penalty" = "cache_invalidated" }
+"#;
+		let models = br#"{"anthropic":{"claude-sonnet-4-5":{"api":"anthropic-messages","input":["text"],"supportsTools":true}}}"#;
+		let compressed = zstd::stream::encode_all(&models[..], 1).expect("fixture compression");
+		let compiled = compile(parse_oracle(providers, &compressed).expect("typed source"))
+			.expect("catalog compilation");
+		let anthropic = compiled
+			.models
+			.iter()
+			.find(|model| model.key.as_str() == "anthropic/claude-sonnet-4-5")
+			.expect("compiled Anthropic Sonnet model");
+		let tools = anthropic
+			.capabilities
+			.chat
+			.as_ref()
+			.and_then(|chat| chat.tools.constraints())
+			.expect("native Anthropic tools");
+		assert!(tools.features.contains(ToolFeatureBits::REQUIRED_CHOICE));
+		assert!(tools.features.contains(ToolFeatureBits::NAMED_CHOICE));
+		let policy = compiled
+			.wire_policies
+			.iter()
+			.find(|policy| policy.content_id() == anthropic.wire_policy)
+			.expect("Anthropic model wire policy");
+		assert_eq!(
+			policy.tool.forced_choice_penalty,
+			Some(NativeToolChoicePenalty::CacheInvalidated),
+			"the host-declared native forced-choice penalty reaches every served model",
+		);
 	}
 
 	#[test]
@@ -5779,7 +7057,6 @@ usage = true
 			r#"class "qwen" {
 				template-reasoning-effort #true
 				thinking-format "chat-template"
-				thinking-tool-choice-conflict "drop_thinking_when_any"
 			}"#,
 		)])
 		.expect("KDL grammar accepts the reasoning axes");
@@ -5801,10 +7078,25 @@ usage = true
 			policy.reasoning.thinking_format,
 			Some(crate::policy::ThinkingFormat::ChatTemplate)
 		);
+	}
+
+	#[test]
+	fn thinking_tool_choice_conflict_is_a_provider_compat_fact_not_a_kdl_axis() {
+		let source: SourceWirePolicy =
+			serde_json::from_str(r#"{"thinking_tool_choice_conflict":"drop_thinking_when_any"}"#)
+				.expect("provider compat accepts the conflict policy");
+		let policy = compile_wire_policy(WirePolicy::baseline(), &source).expect("compiles");
 		assert_eq!(
 			policy.tool.thinking_conflict,
 			Some(crate::policy::ThinkingToolChoiceConflict::DropThinkingWhenAny)
 		);
+		assert!(matches!(
+			CompatCascade::parse(&[(
+				"conflict.kdl",
+				r#"class "qwen" { thinking-tool-choice-conflict "drop_thinking_when_any" }"#,
+			)]),
+			Err(CascadeError::UnknownDirective { .. })
+		));
 	}
 
 	#[test]

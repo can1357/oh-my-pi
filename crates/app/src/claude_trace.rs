@@ -9,7 +9,7 @@ use std::{
 
 use clap::Parser;
 use miette::{Context as _, IntoDiagnostic as _, Result};
-use omp_inference::transport::{CaptureSnapshot, cassette::CassetteReplayDriver};
+use omp_ai::transport::{CaptureSnapshot, cassette::CassetteReplayDriver};
 
 #[derive(Debug, Parser)]
 #[command(name = "claude-trace", about = "Maintainer-only provider cassette utility")]

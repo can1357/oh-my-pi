@@ -61,11 +61,13 @@ use super::{
 };
 
 const MAX_DISPLAY_IMAGE_BYTES: usize = 16 * 1024 * 1024;
+const OUTPUT_CHUNK_BYTES: usize = 64 * 1024;
 
 const BOOTSTRAP: &ffi::CStr = c_str!(
 	r#"
 import ast as _omp_ast
 import asyncio as _omp_asyncio
+import codecs as _omp_codecs
 import contextvars as _omp_contextvars
 import inspect as _omp_inspect
 import json as _omp_json
@@ -136,27 +138,39 @@ class _OmpShellResult(list):
         self.returncode = returncode
 
 def _omp_shell(command):
-    process = _omp_subprocess.run(
+    process = _omp_subprocess.Popen(
         command,
         shell=True,
         stdin=_omp_subprocess.DEVNULL,
         stdout=_omp_subprocess.PIPE,
         stderr=_omp_subprocess.STDOUT,
-        text=True,
-        errors="replace",
     )
-    output = process.stdout or ""
-    encoded = output.encode("utf-8", "replace")
-    lines = output.splitlines()
-    truncated = len(encoded) > 1024 * 1024 or len(lines) > 3000
-    if truncated:
-        encoded = encoded[:1024 * 1024]
-        output = encoded.decode("utf-8", "ignore")
-        lines = output.splitlines()[:3000]
-        output = "\n".join(lines) + "\n[…shell output truncated…]\n"
-    if output:
-        print(output, end="" if output.endswith("\n") else "\n")
-    return _OmpShellResult(lines, process.returncode)
+    decoder = _omp_codecs.getincrementaldecoder("utf-8")("replace")
+    pieces = []
+    try:
+        while True:
+            chunk = process.stdout.read(64 * 1024)
+            if not chunk:
+                break
+            text = decoder.decode(chunk)
+            if text:
+                pieces.append(text)
+                print(text, end="")
+        tail = decoder.decode(b"", final=True)
+        if tail:
+            pieces.append(tail)
+            print(tail, end="")
+        returncode = process.wait()
+    except BaseException:
+        process.kill()
+        process.wait()
+        raise
+    finally:
+        process.stdout.close()
+    output = "".join(pieces)
+    if output and not output.endswith("\n"):
+        print()
+    return _OmpShellResult(output.splitlines(), returncode)
 
 def _omp_magic_env(argument):
     if "=" in argument:
@@ -237,7 +251,7 @@ def _omp_cell_magic(source):
     header = lines[0].strip()
     body = "\n".join(lines[1:])
     if header == "%%bash":
-        return f"_omp_shell({_omp_json.dumps(body)})"
+        return f"_omp_shell({_omp_json.dumps(body)})\nNone"
     if header.startswith("%%capture "):
         name = header[len("%%capture "):].strip()
         if not _omp_re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", name):
@@ -270,6 +284,7 @@ def _omp_transform_cell(source):
         elif stripped.startswith("!"):
             transformed.append(
                 f"{indent}_omp_shell({_omp_json.dumps(stripped[1:].strip())})")
+            transformed.append(f"{indent}None")
         elif stripped.startswith("%cd "):
             transformed.append(
                 f"{indent}_omp_os.chdir(_omp_os.path.expanduser("
@@ -290,9 +305,11 @@ def _omp_transform_cell(source):
                 + _omp_json.dumps(stripped[5:].strip())
             )
             transformed.append(f"{indent}_omp_shell({command})")
+            transformed.append(f"{indent}None")
         elif stripped.startswith("%ls"):
             transformed.append(
                 f"{indent}_omp_shell({_omp_json.dumps('ls ' + stripped[3:].strip())})")
+            transformed.append(f"{indent}None")
         elif stripped.startswith("%load "):
             target = stripped[6:].strip()
             transformed.append(
@@ -578,33 +595,9 @@ static SINK_VAR: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
 static OPEN_SINKS: LazyLock<Arc<SinkRegistry>> =
 	LazyLock::new(|| Arc::new(SinkRegistry::default()));
 
-/// Byte and line accounting for one output channel of a cell.
-#[derive(Default)]
-struct ChannelTally {
-	bytes:             usize,
-	newlines:          usize,
-	ends_with_newline: bool,
-}
-
-impl ChannelTally {
-	fn record(&mut self, data: &[u8]) {
-		self.bytes += data.len();
-		self.newlines += bytecount::count(data, b'\n');
-		self.ends_with_newline = data.last() == Some(&b'\n');
-	}
-
-	/// Line count equal to `split_inclusive('\n')` over the concatenated
-	/// stream.
-	fn lines(&self) -> usize {
-		self.newlines + usize::from(self.bytes > 0 && !self.ends_with_newline)
-	}
-}
-
 struct SinkState {
 	open:     bool,
 	sequence: u64,
-	stdout:   ChannelTally,
-	stderr:   ChannelTally,
 }
 
 /// Gated per-cell event sink shared by the router, the worker, and Python.
@@ -615,17 +608,8 @@ struct SinkShared {
 }
 
 impl SinkShared {
-	fn new(session: Bytes, events: Sender<Result<RunEvent, Fault>>) -> Self {
-		Self {
-			session,
-			events,
-			state: Mutex::new(SinkState {
-				open:     true,
-				sequence: 0,
-				stdout:   ChannelTally::default(),
-				stderr:   ChannelTally::default(),
-			}),
-		}
+	const fn new(session: Bytes, events: Sender<Result<RunEvent, Fault>>) -> Self {
+		Self { session, events, state: Mutex::new(SinkState { open: true, sequence: 0 }) }
 	}
 
 	/// Emits one ordered output event, or `None` once the cell is sealed.
@@ -638,25 +622,21 @@ impl SinkShared {
 		if !state.open {
 			return None;
 		}
-		match channel {
-			OutputChannel::Stdout => state.stdout.record(text.as_bytes()),
-			OutputChannel::Stderr => state.stderr.record(text.as_bytes()),
+		for chunk in text.as_bytes().chunks(OUTPUT_CHUNK_BYTES) {
+			let sequence = state.sequence;
+			state.sequence += 1;
+			let _ = self.events.send(Ok(RunEvent::Output(Update {
+				channel,
+				data: CowBytes::owned(Bytes::copy_from_slice(chunk)),
+				sequence,
+			})));
 		}
-		let sequence = state.sequence;
-		state.sequence += 1;
-		let _ = self.events.send(Ok(RunEvent::Output(Update {
-			channel,
-			data: CowBytes::owned(Bytes::copy_from_slice(text.as_bytes())),
-			sequence,
-		})));
 		Some(text.chars().count())
 	}
 
-	/// Seals the sink and returns `(total_lines, total_bytes)`. Idempotent.
-	fn close(&self) -> (usize, usize) {
-		let mut state = self.state.lock();
-		state.open = false;
-		(state.stdout.lines() + state.stderr.lines(), state.stdout.bytes + state.stderr.bytes)
+	/// Seals the sink. Idempotent.
+	fn close(&self) {
+		self.state.lock().open = false;
 	}
 }
 
@@ -705,14 +685,14 @@ impl SinkGuard {
 		Self { registry, shared }
 	}
 
-	/// Seals the sink and returns `(total_lines, total_bytes)`. Idempotent.
-	fn close(&self) -> (usize, usize) {
+	/// Seals the sink. Idempotent.
+	fn close(&self) {
 		self
 			.registry
 			.open
 			.lock()
 			.retain(|sink| !Arc::ptr_eq(sink, &self.shared));
-		self.shared.close()
+		self.shared.close();
 	}
 }
 
@@ -1213,7 +1193,7 @@ impl EvalExec for EmbeddedPython {
 		let number = self.inner.next_cell.fetch_add(1, Ordering::Relaxed);
 		let cell_id =
 			Bytes::from(format!("{}:cell-{number}", String::from_utf8_lossy(session.id.as_ref())));
-		let (events, receiver) = flume::unbounded();
+		let (events, receiver) = flume::bounded(1);
 		let cancelled = Arc::new(AtomicBool::new(false));
 		let command = Command {
 			cell_id,
@@ -1392,7 +1372,7 @@ impl IdleSigint {
 				return Err(error);
 			}
 			state.executing += 1;
-			return Ok(ExecutingSigint { idle: self, target });
+			Ok(ExecutingSigint { idle: self, target })
 		}
 		#[cfg(not(unix))]
 		{
@@ -1610,10 +1590,6 @@ const fn cancelled_completion() -> RunCompletion {
 		},
 		result:          None,
 		display_outputs: Vec::new(),
-		truncated:       false,
-		spilled_output:  None,
-		total_lines:     0,
-		total_bytes:     0,
 	}
 }
 fn timed_out_completion(mut completion: RunCompletion) -> RunCompletion {
@@ -1772,7 +1748,7 @@ fn execute_cell(
 	if let Some(task) = watchdog_task {
 		task.abort();
 	}
-	let (total_lines, total_bytes) = capture.close();
+	capture.close();
 	let ended = installer.end_cell(py, namespace.bind(py), cell_id);
 	let value = match (execution, ended) {
 		(Err(error), _) => return Err(error),
@@ -1833,10 +1809,6 @@ fn execute_cell(
 		},
 		result: cell_value,
 		display_outputs,
-		truncated: false,
-		spilled_output: None,
-		total_lines,
-		total_bytes,
 	})
 }
 
@@ -2055,6 +2027,38 @@ mod tests {
 		assert_eq!(done.result.expect("result").json, Some(serde_json::json!({"ok": true})));
 	}
 
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn shell_magic_streams_beyond_legacy_byte_and_line_limits_exactly() {
+		let _globals = PROCESS_GLOBALS.read();
+		let runtime = runtime();
+		let session = runtime.open_session().await.expect("session opens");
+		let (updates, done) = run_to_completion(
+			&runtime,
+			&session,
+			"%%bash\ni=0\nwhile [ \"$i\" -lt 3001 ]; do\n  printf '%0350d\\n' 0\n  i=$((i + 1))\ndone",
+			false,
+		)
+		.await;
+		assert_eq!(done.status.outcome, CellOutcome::Complete);
+		assert_eq!(done.result, None);
+		assert!(
+			updates
+				.iter()
+				.all(|update| update.data.len() <= OUTPUT_CHUNK_BYTES)
+		);
+		let stdout = updates
+			.into_iter()
+			.filter(|update| update.channel == OutputChannel::Stdout)
+			.flat_map(|update| update.data.to_vec())
+			.collect::<Vec<_>>();
+		let mut line = vec![b'0'; 350];
+		line.push(b'\n');
+		let expected = line.repeat(3_001);
+		assert!(expected.len() > 1024 * 1024);
+		assert_eq!(stdout, expected);
+	}
+
 	#[test]
 	fn context_less_pool_thread_print_is_never_routed_to_an_open_cell() {
 		let registry = Arc::new(SinkRegistry::default());
@@ -2099,7 +2103,7 @@ with ThreadPoolExecutor(max_workers=1) as pool:
 		let guard = SinkGuard::open(Arc::clone(&registry), session.clone(), events);
 		assert_eq!(guard.shared.write(OutputChannel::Stdout, "before\n"), Some(7));
 		assert_eq!(guard.shared.write(OutputChannel::Stderr, "partial"), Some(7));
-		assert_eq!(guard.close(), (2, 14));
+		guard.close();
 
 		// Writes after sealing are refused, so nothing can trail the terminal
 		// event, and the fallback route is gone.
@@ -2394,22 +2398,18 @@ print("right")"#
 		let original = env::current_dir().expect("current directory");
 		let first = tempfile::tempdir().expect("first runtime directory");
 		let second = tempfile::tempdir().expect("second runtime directory");
-		let snapshot = |cwd: &Path, session_file: Option<&str>| RuntimeSnapshot {
+		let snapshot = |cwd: &Path, local_roots: Option<&str>| RuntimeSnapshot {
 			cwd:         Some(cwd.to_path_buf()),
-			managed_env: [
-				(sf!("OMP_ARTIFACTS_DIR"), None),
-				(sf!("OMP_EVAL_LOCAL_ROOTS"), None),
-				(sf!("OMP_SESSION_FILE"), session_file.map(Str::new)),
-			]
-			.into_iter()
-			.collect(),
+			managed_env: [(sf!("OMP_EVAL_LOCAL_ROOTS"), local_roots.map(Str::new))]
+				.into_iter()
+				.collect(),
 		};
 		let mut first_run = runtime
 			.run(&session, RunRequest {
-				code:    sf!("import os\n(os.getcwd(), os.environ.get('OMP_SESSION_FILE'))"),
+				code:    sf!("import os\n(os.getcwd(), os.environ.get('OMP_EVAL_LOCAL_ROOTS'))"),
 				timeout: Some(StdDuration::from_secs(2)),
 				reset:   false,
-				runtime: snapshot(first.path(), Some("first")),
+				runtime: snapshot(first.path(), Some(r#"{"local":"first"}"#)),
 			})
 			.await
 			.expect("first runtime starts");
@@ -2422,13 +2422,15 @@ print("right")"#
 					.canonicalize()
 					.expect("canonical first")
 					.to_string_lossy(),
-				"first"
+				r#"{"local":"first"}"#
 			])),
 		);
 
 		let mut second_run = runtime
 			.run(&session, RunRequest {
-				code:    sf!("import os\n(os.getcwd(), os.environ.get('OMP_SESSION_FILE') is None)"),
+				code:    sf!(
+					"import os\n(os.getcwd(), os.environ.get('OMP_EVAL_LOCAL_ROOTS') is None)"
+				),
 				timeout: Some(StdDuration::from_secs(2)),
 				reset:   false,
 				runtime: snapshot(second.path(), None),

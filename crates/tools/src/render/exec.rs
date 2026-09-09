@@ -58,11 +58,17 @@ impl RenderFold for ShellRenderer {
 		state.cached = Some(render_shell_live(state).into());
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, complete: bool) {
-		if let Some(command) = args.get("command").and_then(omp_slopjson::Value::as_str) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, complete: bool) {
+		if let Some(command) = args
+			.get("command")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.shell_command = Some(Str::new(command));
 		}
-		if let Some(timeout_seconds) = args.get("timeout").and_then(omp_slopjson::Value::as_f64) {
+		if let Some(timeout_seconds) = args
+			.get("timeout")
+			.and_then(omp_core::slopjson::Value::as_f64)
+		{
 			state.shell_timeout_known = true;
 			state.shell_timeout_ms =
 				(timeout_seconds != 0.0).then_some((timeout_seconds * 1_000.0).ceil() as u64);
@@ -81,23 +87,25 @@ impl RenderFold for ShellRenderer {
 					.clone()
 					.unwrap_or_else(|| render_shell_live(state).into()),
 			),
-			Some(ShellRenderOutcome::Call(CallOutcome::Ok(payload)))
-			| Some(ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
-				result: Ok(payload),
-				..
-			})) => Some(render_shell_payload(payload, state).into()),
-			Some(ShellRenderOutcome::Call(CallOutcome::Faulted(ShellFault::CommandFailed {
-				payload,
-			})))
-			| Some(ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
-				result: Err(ShellFault::CommandFailed { payload }),
-				..
-			})) => Some(render_shell_payload(payload, state).into()),
-			Some(ShellRenderOutcome::Call(CallOutcome::Faulted(fault)))
-			| Some(ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
-				result: Err(fault),
-				..
-			})) => Some(render_fault("bash", &shell_fault(fault)).into()),
+			Some(
+				ShellRenderOutcome::Call(CallOutcome::Ok(payload))
+				| ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
+					result: Ok(payload), ..
+				}),
+			) => Some(render_shell_payload(payload, state).into()),
+			Some(
+				ShellRenderOutcome::Call(CallOutcome::Faulted(ShellFault::CommandFailed { payload }))
+				| ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
+					result: Err(ShellFault::CommandFailed { payload }),
+					..
+				}),
+			) => Some(render_shell_payload(payload, state).into()),
+			Some(
+				ShellRenderOutcome::Call(CallOutcome::Faulted(fault))
+				| ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Done {
+					result: Err(fault), ..
+				}),
+			) => Some(render_fault("bash", &shell_fault(fault)).into()),
 			Some(ShellRenderOutcome::Terminal(omp_tool::ToolTerminal::Detached(job))) => {
 				Some(render_shell_detached(job).into())
 			},
@@ -123,17 +131,20 @@ impl RenderFold for EvalRenderer {
 		append_bounded_tail(&mut state.tail, update.data.as_ref());
 	}
 
-	fn fold_args(&self, state: &mut Self::State, args: &omp_slopjson::Value, complete: bool) {
+	fn fold_args(&self, state: &mut Self::State, args: &omp_core::slopjson::Value, complete: bool) {
 		if let Some(language) = args
 			.get("language")
 			.and_then(|value| value.deserialize_into::<EvalLanguage>().ok())
 		{
 			state.eval_language = Some(language);
 		}
-		if let Some(code) = args.get("code").and_then(omp_slopjson::Value::as_str) {
+		if let Some(code) = args.get("code").and_then(omp_core::slopjson::Value::as_str) {
 			state.eval_code = Some(Str::new(code));
 		}
-		if let Some(title) = args.get("title").and_then(omp_slopjson::Value::as_str) {
+		if let Some(title) = args
+			.get("title")
+			.and_then(omp_core::slopjson::Value::as_str)
+		{
 			state.eval_title = Some(Str::new(title));
 		} else if complete {
 			state.eval_title = None;
@@ -143,7 +154,7 @@ impl RenderFold for EvalRenderer {
 	fn view(&self, state: &Self::State, outcome: Option<&Self::Outcome>) -> Option<Str> {
 		match outcome {
 			None => Some(render_eval_live(state).into()),
-			Some(CallOutcome::Ok(payload)) => Some(render_eval_payload(payload).into()),
+			Some(CallOutcome::Ok(payload)) => Some(render_eval_payload(payload, state).into()),
 			Some(CallOutcome::Faulted(fault)) => Some(render_fault("eval", &eval_fault(fault)).into()),
 			Some(CallOutcome::ArgsRejected(_) | CallOutcome::Aborted { .. }) => None,
 		}
@@ -323,7 +334,7 @@ fn render_shell_payload(payload: &ShellPayload, state: &StreamState) -> El {
 	}
 }
 
-fn shell_state_status(payload: &ShellPayload) -> &'static str {
+const fn shell_state_status(payload: &ShellPayload) -> &'static str {
 	match (payload.status.outcome, payload.status.exit_code) {
 		(ExecOutcome::Exited, Some(0) | None) => "completed",
 		(ExecOutcome::Cancelled | ExecOutcome::Timeout, _) => "stopped",
@@ -331,7 +342,7 @@ fn shell_state_status(payload: &ShellPayload) -> &'static str {
 	}
 }
 
-fn shell_status_tone(payload: &ShellPayload) -> Tone {
+const fn shell_status_tone(payload: &ShellPayload) -> Tone {
 	match (payload.status.outcome, payload.status.exit_code) {
 		(ExecOutcome::Exited, Some(0) | None) => Tone::Ok,
 		(ExecOutcome::Cancelled | ExecOutcome::Timeout, _) => Tone::Warn,
@@ -375,7 +386,7 @@ fn eval_fault(fault: &EvalFault) -> String {
 	}
 }
 
-fn eval_state_status(outcome: CellOutcome) -> &'static str {
+const fn eval_state_status(outcome: CellOutcome) -> &'static str {
 	match outcome {
 		CellOutcome::Complete => "completed",
 		CellOutcome::Error => "failed",
@@ -383,7 +394,7 @@ fn eval_state_status(outcome: CellOutcome) -> &'static str {
 	}
 }
 
-fn eval_status_tone(outcome: CellOutcome) -> Tone {
+const fn eval_status_tone(outcome: CellOutcome) -> Tone {
 	match outcome {
 		CellOutcome::Complete => Tone::Ok,
 		CellOutcome::Error => Tone::Err,
@@ -391,9 +402,10 @@ fn eval_status_tone(outcome: CellOutcome) -> Tone {
 	}
 }
 
-fn render_eval_payload(payload: &EvalPayload) -> El {
+fn render_eval_payload(payload: &EvalPayload, state: &StreamState) -> El {
 	let status = eval_state_status(payload.status.outcome);
 	let status_tone = eval_status_tone(payload.status.outcome);
+	let streamed = String::from_utf8_lossy(&state.tail);
 	view! {
 		<col gap=0>
 			<row gap=1>
@@ -410,6 +422,9 @@ fn render_eval_payload(payload: &EvalPayload) -> El {
 			</row>
 			<pre fg=accent max-rows=12 overflow="code">{&payload.code}</pre>
 			<hr label="Output"/>
+			if !state.tail.is_empty() {
+				<pre max-rows=20 overflow="output">{streamed.as_ref()}</pre>
+			}
 			if let Some(exception) = &payload.status.exception {
 				<pre fg=err max-rows=20 overflow="traceback">
 					for (index, line) in exception.traceback.iter().enumerate() {
@@ -422,19 +437,13 @@ fn render_eval_payload(payload: &EvalPayload) -> El {
 						{": "}{&exception.message}
 					}
 				</pre>
-			} else if payload.frames.is_empty()
+			} else if state.tail.is_empty()
+				&& !payload.had_output
 				&& payload.result.is_none()
 				&& payload.display_outputs.is_empty()
 			{
 				<text fg=muted>{"(no output)"}</text>
 			} else {
-				if !payload.frames.is_empty() {
-					<pre max-rows=20 overflow="output">
-						for frame in &payload.frames {
-							{String::from_utf8_lossy(frame.data.as_ref()).into_owned()}
-						}
-					</pre>
-				}
 				if let Some(result) = &payload.result {
 					<pre fg=info max-rows=20 overflow="result">{&result.text}</pre>
 				}
@@ -458,25 +467,15 @@ fn render_eval_payload(payload: &EvalPayload) -> El {
 					}
 				}
 			}
-			if payload.truncated {
-				<callout kind="warn">{"Output was truncated."}</callout>
-			}
-			if payload.spilled_output.is_some() {
-				<fact label="output">{"full output stored as blob"}</fact>
-			}
 		</col>
 	}
 }
 
 /// Native shell and eval renderer lifecycle fixtures for the visual QA gallery.
-pub(crate) fn gallery_fixtures(
-	shell: ToolIdentity,
-	eval: ToolIdentity,
-) -> Vec<RendererGalleryFixture> {
+pub fn gallery_fixtures(shell: ToolIdentity, eval: ToolIdentity) -> Vec<RendererGalleryFixture> {
 	vec![
 		RendererGalleryFixture {
 			identity: shell,
-			title: "git status --short && git log --oneline -5",
 			streaming_args: r#"{"command":"git status --short && git log --on"#,
 			args: r#"{"command":"git status --short && git log --oneline -5","cwd":"packages/coding-agent","timeout":30}"#,
 			progress_update: Some(
@@ -487,14 +486,13 @@ pub(crate) fn gallery_fixtures(
 		},
 		RendererGalleryFixture {
 			identity: eval,
-			title: "load config",
 			streaming_args: r#"{"language":"py","title":"load config","code":"import json\nfrom pathlib import Path\n\ndata = json.loads(Path(\"package.js"#,
 			args: r#"{"language":"py","title":"load config","code":"import json\nfrom pathlib import Path\n\ndata = json.loads(Path(\"package.json\").read_text())\ndeps = data.get(\"dependencies\", {})\nprint(f\"{data['name']} v{data['version']}\")\nprint(f\"{len(deps)} dependencies\")\ndisplay(sorted(deps)[:3])"}"#,
 			progress_update: Some(
 				br#"{"channel":"stdout","data":[64,111,104,45,109,121,45,112,105,47,99,111,100,105,110,103,45,97,103,101,110,116,32,118,48,46,52,50,46,48,10],"sequence":1}"#,
 			),
-			success_outcome: br#"{"kind":"ok","value":{"session_id":[1],"cell_id":[1],"language":"py","title":"load config","code":"import json\nfrom pathlib import Path\n\ndata = json.loads(Path(\"package.json\").read_text())\ndeps = data.get(\"dependencies\", {})\nprint(f\"{data['name']} v{data['version']}\")\nprint(f\"{len(deps)} dependencies\")\ndisplay(sorted(deps)[:3])","reset":false,"frames":[{"channel":"stdout","data":[64,111,104,45,109,121,45,112,105,47,99,111,100,105,110,103,45,97,103,101,110,116,32,118,48,46,52,50,46,48,10,51,55,32,100,101,112,101,110,100,101,110,99,105,101,115,10],"sequence":1}],"result":null,"display_outputs":[{"type":"json","data":["@ai-sdk/anthropic","@oh-my-pi/pi-ai","@oh-my-pi/pi-tui"]}],"status":{"outcome":"complete","exit_code":0,"duration_ms":64,"exception":null},"truncated":false,"spilled_output":null,"total_lines":2,"total_bytes":48}}"#,
-			error_outcome: br#"{"kind":"ok","value":{"session_id":[1],"cell_id":[2],"language":"py","title":"load config","code":"import json\nfrom pathlib import Path\n\ndata = json.loads(Path(\"package.json\").read_text())\ndeps = data.get(\"dependencies\", {})\nprint(f\"{data['name']} v{data['version']}\")","reset":false,"frames":[],"result":null,"display_outputs":[],"status":{"outcome":"error","exit_code":1,"duration_ms":41,"exception":{"name":"json.decoder.JSONDecodeError","message":"Expecting ',' delimiter: line 12 column 3 (char 318)","traceback":["Traceback (most recent call last):","  File \"<cell 0>\", line 4, in <module>","    data = json.loads(Path(\"package.json\").read_text())","          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"]}},"truncated":false,"spilled_output":null,"total_lines":5,"total_bytes":318}}"#,
+			success_outcome: br#"{"kind":"ok","value":{"session_id":[1],"cell_id":[1],"language":"py","title":"load config","code":"import json\nfrom pathlib import Path\n\ndata = json.loads(Path(\"package.json\").read_text())\ndeps = data.get(\"dependencies\", {})\nprint(f\"{data['name']} v{data['version']}\")\nprint(f\"{len(deps)} dependencies\")\ndisplay(sorted(deps)[:3])","reset":false,"had_output":true,"result":null,"display_outputs":[{"type":"json","data":["@ai-sdk/anthropic","@oh-my-pi/pi-ai","@oh-my-pi/pi-tui"]}],"status":{"outcome":"complete","exit_code":0,"duration_ms":64,"exception":null}}}"#,
+			error_outcome: br#"{"kind":"ok","value":{"session_id":[1],"cell_id":[2],"language":"py","title":"load config","code":"import json\nfrom pathlib import Path\n\ndata = json.loads(Path(\"package.json\").read_text())\ndeps = data.get(\"dependencies\", {})\nprint(f\"{data['name']} v{data['version']}\")","reset":false,"had_output":false,"result":null,"display_outputs":[],"status":{"outcome":"error","exit_code":1,"duration_ms":41,"exception":{"name":"json.decoder.JSONDecodeError","message":"Expecting ',' delimiter: line 12 column 3 (char 318)","traceback":["Traceback (most recent call last):","  File \"<cell 0>\", line 4, in <module>","    data = json.loads(Path(\"package.json\").read_text())","          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^"]}}}}"#,
 		},
 	]
 }
@@ -550,7 +548,7 @@ mod tests {
 			serde_json::from_slice(shell.progress_update.expect("shell progress")).unwrap();
 		let shell_renderer = ShellRenderer;
 		let mut shell_state = StreamState::default();
-		let streaming_args = omp_slopjson::parse_streaming(shell.streaming_args);
+		let streaming_args = omp_core::slopjson::parse_streaming(shell.streaming_args);
 		shell_renderer.fold_args(&mut shell_state, &streaming_args, false);
 		shell_renderer.fold(&mut shell_state, shell_update);
 		let live = shell_renderer.view(&shell_state, None).unwrap();
@@ -559,7 +557,7 @@ mod tests {
 		assert!(live.contains("<hr label=Output/>"));
 		assert!(live.contains("<pre max-rows=12 overflow=output>"));
 		assert!(!live.contains("ctrl+o"));
-		let args = omp_slopjson::parse(shell.args).unwrap();
+		let args = omp_core::slopjson::parse(shell.args).unwrap();
 		shell_renderer.fold_args(&mut shell_state, &args, true);
 		let shell_ok: ShellRenderOutcome = serde_json::from_slice(shell.success_outcome).unwrap();
 		let shell_error: ShellRenderOutcome = serde_json::from_slice(shell.error_outcome).unwrap();
@@ -594,7 +592,7 @@ mod tests {
 			serde_json::from_slice(eval.progress_update.expect("eval progress")).unwrap();
 		let eval_renderer = EvalRenderer;
 		let mut eval_state = StreamState::default();
-		let streaming_args = omp_slopjson::parse_streaming(eval.streaming_args);
+		let streaming_args = omp_core::slopjson::parse_streaming(eval.streaming_args);
 		eval_renderer.fold_args(&mut eval_state, &streaming_args, false);
 		eval_renderer.fold(&mut eval_state, update);
 		let live = eval_renderer.view(&eval_state, None).unwrap();
@@ -603,7 +601,7 @@ mod tests {
 		assert!(live.contains("label=running"));
 		assert!(live.contains("<bytes value=31/>"), "{live}");
 		assert!(live.contains("<pre fg=accent max-rows=12 overflow=code>"));
-		let args = omp_slopjson::parse(eval.args).unwrap();
+		let args = omp_core::slopjson::parse(eval.args).unwrap();
 		eval_renderer.fold_args(&mut eval_state, &args, true);
 		let eval_ok: CallOutcome<EvalPayload, EvalFault> =
 			serde_json::from_slice(eval.success_outcome).unwrap();
@@ -612,7 +610,7 @@ mod tests {
 		let success = eval_renderer.view(&eval_state, Some(&eval_ok)).unwrap();
 		assert!(success.contains("load config"));
 		assert!(success.contains("json.loads"));
-		assert!(success.contains("@oh-my-pi/coding-agent v0.42.0"));
+		assert_eq!(success.matches("@oh-my-pi/coding-agent v0.42.0").count(), 1);
 		assert!(success.contains("@ai-sdk/anthropic"));
 		assert!(success.contains("<json max-depth=3 max-rows=12 max-chars=80>"));
 		assert!(success.contains("<time ms=64 kind=duration/>"));

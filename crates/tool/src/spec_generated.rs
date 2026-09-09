@@ -278,6 +278,22 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 	),
 	symbol!(
 		"docs/py/09-journal.md",
+		"omp.sessions.SessionSetup",
+		"(title=None, parent=None, entries=(), initial_prompt=None)",
+		CallbackAbi::None,
+		OPEN_LOCAL,
+		"omp.SessionSetup(title=\"Handoff\", initial_prompt=\"Continue here\")"
+	),
+	symbol!(
+		"docs/py/09-journal.md",
+		"omp.sessions.create",
+		"(setup=SessionSetup()) -> SessionInfo",
+		CallbackAbi::None,
+		CORE_DURABLE,
+		"await omp.sessions.create(omp.SessionSetup(title=\"Handoff\"))"
+	),
+	symbol!(
+		"docs/py/09-journal.md",
 		"omp.sessions.list",
 		"(filter=None, *, cursor=None, limit=50) -> SessionPage",
 		CallbackAbi::None,
@@ -461,6 +477,14 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		ENV_EPHEMERAL,
 		"await omp.env.lsp.bindings(path)",
 		Some("omp.env.lsp.get_bindings")
+	),
+	symbol!(
+		"docs/py/11-env.md",
+		"omp.env.lsp.status",
+		"(reload=False) -> list[LspServerStatus]",
+		CallbackAbi::None,
+		ENV_EPHEMERAL,
+		"await omp.env.lsp.status()"
 	),
 	symbol!(
 		"docs/py/11-env.md",
@@ -712,6 +736,62 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 		CallbackAbi::None,
 		ENV_WRITE,
 		"await omp.env.blobs.delete(blob)"
+	),
+	symbol!(
+		"docs/py/12-agents.md",
+		"omp.env.workspace.snapshot",
+		"(*, root=None) -> WorkspaceSnapshot",
+		CallbackAbi::None,
+		ENV_WRITE,
+		"await omp.env.workspace.snapshot()"
+	),
+	symbol!(
+		"docs/py/12-agents.md",
+		"omp.agents.abort",
+		"() -> None",
+		CallbackAbi::None,
+		CORE_DURABLE,
+		"await omp.agents.abort()"
+	),
+	symbol!(
+		"docs/py/12-agents.md",
+		"omp.agents.shutdown",
+		"(reason='') -> None",
+		CallbackAbi::None,
+		CORE_DURABLE,
+		"await omp.agents.shutdown()"
+	),
+	symbol!(
+		"docs/py/12-agents.md",
+		"omp.agents.reload_extensions",
+		"() -> None",
+		CallbackAbi::None,
+		CORE_EFFECT,
+		"await omp.agents.reload_extensions()"
+	),
+	symbol!(
+		"docs/py/12-agents.md",
+		"omp.agents.is_idle",
+		"() -> bool",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"await omp.agents.is_idle()"
+	),
+	symbol!(
+		"docs/py/12-agents.md",
+		"omp.agents.wait_for_idle",
+		"() -> None",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"await omp.agents.wait_for_idle()"
+	),
+	symbol!(
+		"docs/py/12-agents.md",
+		"omp.agents.pending_messages",
+		"() -> int",
+		CallbackAbi::None,
+		OPEN_METERED,
+		"await omp.agents.pending_messages()"
 	),
 	symbol!(
 		"docs/py/12-agents.md",
@@ -1116,7 +1196,7 @@ pub static RUNTIME_SYMBOLS: &[RuntimeSymbolSpec] = &[
 	symbol!(
 		"docs/py/02-verdicts.md",
 		"omp.renderer",
-		"(name, *, family=None, rev=None, reduce=None) -> Decorator",
+		"(name, *, family=None, rev=None, reduce=None, decorates=False) -> Decorator",
 		CallbackAbi::PayloadContext,
 		OPEN_LOCAL,
 		"@omp.renderer(\"tool\")\ndef render(view, ctx): return None"

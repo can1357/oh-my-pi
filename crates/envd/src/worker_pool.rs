@@ -14,8 +14,8 @@ use async_trait::async_trait;
 use flume::{Receiver, Sender};
 use omp_core::{CowBytes, Str, encoding::hex};
 use omp_env::WorkerLease;
+use omp_journal::blob::{self, BlobStage, BlobStore};
 use omp_proto::{env::v1::WorkerData, thread::v1};
-use omp_storage::blob::{self, BlobStore};
 use omp_tools::edit::SnapshotFault;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
@@ -24,9 +24,12 @@ use thiserror::Error;
 use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
-use super::exthost::control::{
-	ControlAuthority, ControlConnectionIdentity, ControlEffect, ControlProtocolError,
-	ControlRequestContext,
+use super::{
+	blobs::{BlobError, BlobHost},
+	exthost::control::{
+		ControlAuthority, ControlConnectionIdentity, ControlEffect, ControlProtocolError,
+		ControlRequestContext,
+	},
 };
 
 /// Largest tunnel header accepted before any buffer allocation.
@@ -118,11 +121,12 @@ impl TunnelFrame {
 }
 /// The sole environment-side minting authority for spilled worker payloads.
 ///
-/// Both remote-frame diversion and verdict spilling enter through
-/// [`Self::put_reader`], which delegates directly to [`BlobStore::put_reader`].
+/// Remote-frame diversion uses [`Self::put_reader`]; streamed verdicts use
+/// [`Self::begin_verdict`] and [`Self::finish_verdict`]. Both paths delegate to
+/// the same [`BlobHost`] authority.
 #[derive(Clone, Debug)]
 pub struct SpillDiverter {
-	store: Arc<BlobStore>,
+	host: BlobHost,
 }
 
 /// A value that can spill a verdict through the environment blob authority.
@@ -136,8 +140,31 @@ pub trait VerdictSpill {
 
 impl SpillDiverter {
 	/// Binds the diverter to the Environment's unique blob store.
-	pub const fn new(store: Arc<BlobStore>) -> Self {
-		Self { store }
+	pub const fn new(host: BlobHost) -> Self {
+		Self { host }
+	}
+
+	/// Opens the single staged writer used for an incremental worker verdict.
+	///
+	/// # Errors
+	/// Returns the blob-host error if the temporary stage cannot be created.
+	pub fn begin_verdict(&self) -> Result<BlobStage, BlobError> {
+		self.host.begin_worker_verdict()
+	}
+
+	/// Finishes a staged worker verdict and returns its hash-only wire identity.
+	///
+	/// # Errors
+	/// Returns the blob-host error if synchronization, retention, or atomic
+	/// placement fails.
+	pub fn finish_verdict(&self, stage: BlobStage) -> Result<v1::Blob, BlobError> {
+		let id = self.host.finish_worker_verdict(stage)?;
+		Ok(v1::Blob { hash: id.hash.to_vec().into(), size: id.size, ..v1::Blob::default() })
+	}
+
+	/// Borrows the underlying store for validation reads after staged placement.
+	pub(crate) fn store(&self) -> &BlobStore {
+		self.host.worker_verdict_store()
 	}
 
 	/// Streams one out-of-band buffer into the blob store without rebuilding it.
@@ -145,7 +172,7 @@ impl SpillDiverter {
 	/// # Errors
 	/// Returns the blob-store error if durable placement fails.
 	pub fn put_reader(&self, reader: impl Read) -> Result<v1::Blob, blob::Error> {
-		let reference = self.store.put_reader(reader)?;
+		let reference = self.host.store().put_reader(reader)?;
 		Ok(v1::Blob {
 			hash: reference.hash.as_bytes().to_vec().into(),
 			size: reference.size,
@@ -336,14 +363,40 @@ impl WorkerSupervisor {
 				WorkerLease::new(route.key.name.clone(), route.generation, self.terminate_tx.clone());
 			return Ok((route, lease));
 		}
-		reserve(&self.layer_live, self.layer_ceiling).ok_or(WorkerUnavailable::LayerCeiling)?;
+		if !reserve(&self.layer_live, self.layer_ceiling) {
+			tracing::warn!(
+				extension = %key.extension,
+				worker = %key.name,
+				site = %key.site,
+				layer_live = self.layer_live.load(Ordering::Acquire),
+				layer_ceiling = self.layer_ceiling,
+				"worker spawn denied by layer capacity",
+			);
+			return Err(WorkerUnavailable::LayerCeiling);
+		}
 		if !reserve(&self.spawn_live, self.spawn_ceiling) {
 			self.layer_live.fetch_sub(1, Ordering::AcqRel);
+			tracing::warn!(
+				extension = %key.extension,
+				worker = %key.name,
+				site = %key.site,
+				spawn_live = self.spawn_live.load(Ordering::Acquire),
+				spawn_ceiling = self.spawn_ceiling,
+				"worker spawn denied by concurrent capacity",
+			);
 			return Err(WorkerUnavailable::SpawnCeiling);
 		}
 		let route = WorkerRoute { key: key.clone(), generation: 1 };
 		self.workers.lock().insert(key.name.clone(), route.clone());
 		self.spawn_live.fetch_sub(1, Ordering::AcqRel);
+		tracing::debug!(
+			extension = %route.key.extension,
+			worker = %route.key.name,
+			site = %route.key.site,
+			generation = route.generation,
+			layer_live = self.layer_live.load(Ordering::Acquire),
+			"worker route opened",
+		);
 		let lease = WorkerLease::new(key.name, route.generation, self.terminate_tx.clone());
 		Ok((route, lease))
 	}
@@ -381,7 +434,11 @@ impl WorkerSupervisor {
 		{
 			self.process_changed.notify_waiters();
 		}
-		self.layer_live.fetch_sub(1, Ordering::AcqRel);
+		let layer_live = self
+			.layer_live
+			.fetch_sub(1, Ordering::AcqRel)
+			.saturating_sub(1);
+		tracing::debug!(worker = %name, generation, layer_live, "worker route closed");
 		true
 	}
 
@@ -394,6 +451,14 @@ impl WorkerSupervisor {
 			return None;
 		}
 		route.generation = route.generation.checked_add(1)?;
+		tracing::debug!(
+			extension = %route.key.extension,
+			worker = %route.key.name,
+			site = %route.key.site,
+			previous_generation = generation,
+			generation = route.generation,
+			"worker route replaced",
+		);
 		Some(route.clone())
 	}
 
@@ -465,7 +530,18 @@ impl WorkerSupervisor {
 		{
 			self.process_changed.notify_waiters();
 		}
-		self.layer_live.fetch_sub(1, Ordering::AcqRel);
+		let layer_live = self
+			.layer_live
+			.fetch_sub(1, Ordering::AcqRel)
+			.saturating_sub(1);
+		tracing::debug!(
+			extension = %extension,
+			worker = %name,
+			site = %site,
+			generation,
+			layer_live,
+			"worker route closed",
+		);
 		true
 	}
 
@@ -486,6 +562,14 @@ impl WorkerSupervisor {
 			return None;
 		}
 		route.generation = route.generation.checked_add(1)?;
+		tracing::debug!(
+			extension = %extension,
+			worker = %name,
+			site = %site,
+			previous_generation = generation,
+			generation = route.generation,
+			"worker route replaced",
+		);
 		Some(route.clone())
 	}
 

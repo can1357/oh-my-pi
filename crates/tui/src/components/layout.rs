@@ -238,7 +238,7 @@ fn column_bounds(
 /// cells align vertically across every row. Column bounds aggregate across
 /// rows; a `grow` cell marks its column as the surplus absorber, and the
 /// deficit pass shrinks the widest flexible column first, which pairs with
-/// cell-level `truncate` for pi-style name collapse.
+/// cell-level `truncate` for compact name collapse.
 pub(super) fn solve_columns(
 	ctx: &UiContext,
 	cells: &mut [Cached],

@@ -2,7 +2,7 @@
 
 use http::{
 	HeaderMap, HeaderName, Method, StatusCode,
-	header::{AUTHORIZATION, COOKIE, HOST, LOCATION, PROXY_AUTHORIZATION},
+	header::{HOST, LOCATION},
 };
 use url::Url;
 
@@ -68,9 +68,11 @@ impl RedirectPolicy {
 		if !self.origin_locked || Origin::from_url(&self.current)? == self.configured_origin {
 			return merge_headers(generated, configured);
 		}
-		let mut stripped = generated.clone();
-		for name in [AUTHORIZATION, COOKIE, HOST, PROXY_AUTHORIZATION] {
-			stripped.remove(name);
+		let mut stripped = HeaderMap::with_capacity(generated.len());
+		for (name, value) in generated {
+			if !is_sensitive_header(name) && name.as_str() != HOST.as_str() {
+				stripped.append(name.clone(), value.clone());
+			}
 		}
 		Ok(stripped)
 	}
@@ -134,6 +136,28 @@ impl Origin {
 	}
 }
 
+/// Returns whether a header can carry credentials and must be redacted or
+/// removed when an origin-locked redirect crosses origins.
+pub(crate) fn is_sensitive_header(name: &HeaderName) -> bool {
+	let folded = name.as_str();
+	[
+		"authorization",
+		"cookie",
+		"secret",
+		"password",
+		"token",
+		"credential",
+		"api-key",
+		"apikey",
+		"private-key",
+		"signature",
+		"mcp-session-id",
+		"last-event-id",
+	]
+	.iter()
+	.any(|needle| folded.contains(needle))
+}
+
 /// Returns the redirect location as UTF-8 when present.
 pub fn redirect_location(headers: &HeaderMap) -> Option<&str> {
 	headers.get(LOCATION).and_then(|value| value.to_str().ok())
@@ -179,7 +203,7 @@ mod tests {
 			HeaderValue::from_static("Bearer stale"),
 		)]);
 		assert_eq!(
-			merge_headers(&generated, &configured).expect("merge")[AUTHORIZATION],
+			merge_headers(&generated, &configured).expect("merge")["authorization"],
 			"Bearer live"
 		);
 		let reserved = HeaderMap::from_iter([(
@@ -205,13 +229,19 @@ mod tests {
 				.redirect(&Method::POST, StatusCode::TEMPORARY_REDIRECT, Some("https://two.test/mcp"))
 				.expect("redirect")
 		);
-		let generated = HeaderMap::from_iter([(AUTHORIZATION, HeaderValue::from_static("secret"))]);
+		let generated = HeaderMap::from_iter([
+			(HeaderName::from_static("authorization"), HeaderValue::from_static("secret")),
+			(HeaderName::from_static("x-api-key"), HeaderValue::from_static("secret")),
+			(HeaderName::from_static("mcp-session-id"), HeaderValue::from_static("session-secret")),
+		]);
 		let configured = HeaderMap::from_iter([(
 			HeaderName::from_static("x-package-secret"),
 			HeaderValue::from_static("secret"),
 		)]);
 		let headers = policy.headers(&generated, &configured).expect("headers");
-		assert!(!headers.contains_key(AUTHORIZATION));
+		assert!(!headers.contains_key("authorization"));
+		assert!(!headers.contains_key("x-api-key"));
+		assert!(!headers.contains_key("mcp-session-id"));
 		assert!(!headers.contains_key("x-package-secret"));
 	}
 

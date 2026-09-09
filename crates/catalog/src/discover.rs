@@ -2,8 +2,6 @@
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
-	error::Error,
-	fmt::{self, Display},
 	sync::Arc,
 	time::Instant,
 };
@@ -13,13 +11,14 @@ use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-	Availability, CatalogAlias, CatalogOverlay, CatalogOverlayBuilder, ChatCapabilities, ClassId,
-	ClassificationEvidence, ClassificationInput, ClassificationPhase, ContextStrategy,
-	DiscoveryPagination, DiscoverySpec, DiscoverySpecId, EffortTier, EvidenceConfidence,
-	ExactSelector, ExtendedContextMode, ModelAvailability, ModelCapabilities, ModelKey, ModelLimits,
-	ModelOverlay, ModelPatch, ModelProvenance, ModelSpec, OperationBits, OperationKind, Pricing,
-	ProvenanceKind, ProvenanceSource, ProviderDef, ProviderId, RouteDef, RouteId, ScopedAlias,
-	ThinkingEffort, ThinkingPolicyId, ThinkingRouting, WireModelId, WirePolicyId, classify,
+	Availability, CatalogAlias, CatalogModelMetrics, CatalogOverlay, CatalogOverlayBuilder,
+	ChatCapabilities, ClassId, ClassificationEvidence, ClassificationInput, ClassificationPhase,
+	ContextStrategy, DiscoveryPagination, DiscoverySpec, DiscoverySpecId, EffortTier,
+	EvidenceConfidence, ExactSelector, ExtendedContextMode, ModelAvailability, ModelCapabilities,
+	ModelKey, ModelLimits, ModelOverlay, ModelPatch, ModelProvenance, ModelSpec, OperationBits,
+	OperationKind, Price, PriceUnit, Pricing, ProvenanceKind, ProvenanceSource, ProviderDef,
+	ProviderId, RouteDef, RouteId, ScopedAlias, ThinkingEffort, ThinkingPolicyId, ThinkingRouting,
+	WireModelId, WirePolicyId, classify,
 	classify::{strip_effort_lane, supports_dynamic_effort_siblings},
 };
 
@@ -45,6 +44,10 @@ pub struct DiscoveredModel {
 	pub declared_capabilities: Option<ModelCapabilities>,
 	/// Provider-declared limits, if present.
 	pub declared_limits:       Option<ModelLimits>,
+	/// Provider-declared partial base pricing. Missing dimensions inherit route
+	/// defaults; discovery never invents omitted prices.
+	#[serde(default)]
+	pub declared_pricing:      Box<[Price]>,
 	/// Provider-declared standard or extended context serving mode.
 	pub extended_context_mode: Option<ExtendedContextMode>,
 	/// Provider-declared availability, if present.
@@ -75,9 +78,13 @@ pub struct DiscoveryDefaults {
 }
 
 /// Runtime discovery normalization failure.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum DiscoveryError {
 	/// Extended context evidence lacked a pre-interned extended lowering policy.
+	#[error(
+		"discovery normalization failed: {provider} model {model} declared extended context without \
+		 an extended wire policy"
+	)]
 	MissingExtendedContextPolicy {
 		/// Provider whose discovery row declared extended context.
 		provider: Box<ProviderId>,
@@ -86,6 +93,10 @@ pub enum DiscoveryError {
 	},
 	/// A discovered row was not emitted by the projector's bound provider and
 	/// route.
+	#[error(
+		"discovery normalization failed: row from {actual_provider}/{actual_route} projected for \
+		 {expected_provider}/{expected_route}"
+	)]
 	RowScopeMismatch {
 		/// Expected provider.
 		expected_provider: Box<ProviderId>,
@@ -97,8 +108,13 @@ pub enum DiscoveryError {
 		actual_route:      Box<RouteId>,
 	},
 	/// The route is not configured for discovery.
+	#[error("discovery normalization failed: route {0} has no discovery specification")]
 	RouteDiscoveryMissing(Box<RouteId>),
 	/// The supplied discovery specification is not the one bound to the route.
+	#[error(
+		"discovery normalization failed: route {route} is bound to discovery {expected}, not \
+		 {actual}"
+	)]
 	RouteDiscoveryMismatch {
 		/// Route being projected.
 		route:    Box<RouteId>,
@@ -108,6 +124,7 @@ pub enum DiscoveryError {
 		actual:   Box<DiscoverySpecId>,
 	},
 	/// The route belongs to a different provider.
+	#[error("discovery normalization failed: route {route} belongs to {actual}, not {expected}")]
 	RouteProviderMismatch {
 		/// Route being projected.
 		route:    Box<RouteId>,
@@ -117,6 +134,10 @@ pub enum DiscoveryError {
 		actual:   Box<ProviderId>,
 	},
 	/// The supplied provider defaults use a different wire policy.
+	#[error(
+		"discovery normalization failed: {provider} defaults use wire policy {actual}, expected \
+		 {expected}"
+	)]
 	ProviderPolicyMismatch {
 		/// Provider being projected.
 		provider: Box<ProviderId>,
@@ -126,8 +147,10 @@ pub enum DiscoveryError {
 		actual:   Box<WirePolicyId>,
 	},
 	/// A single-page discovery endpoint returned a continuation cursor.
+	#[error("discovery normalization failed: single-page discovery {0} returned a continuation")]
 	UnexpectedContinuation(Box<DiscoverySpecId>),
 	/// A page-number continuation was not canonical decimal text.
+	#[error("discovery normalization failed: discovery {spec} returned non-decimal page {value:?}")]
 	InvalidPageNumber {
 		/// Discovery specification that rejected the value.
 		spec:  Box<DiscoverySpecId>,
@@ -135,6 +158,7 @@ pub enum DiscoveryError {
 		value: Box<Str>,
 	},
 	/// Two discovered models declared the same alias for different targets.
+	#[error("discovery normalization failed: alias {alias} names both {first} and {second}")]
 	AliasConflict {
 		/// Conflicting alias.
 		alias:  Box<Str>,
@@ -144,14 +168,6 @@ pub enum DiscoveryError {
 		second: Box<ModelKey>,
 	},
 }
-
-impl Display for DiscoveryError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		write!(formatter, "discovery normalization failed: {self:?}")
-	}
-}
-
-impl Error for DiscoveryError {}
 
 /// Typed continuation for the next route-bound discovery request.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -509,7 +525,8 @@ impl DiscoveryNormalizer {
 				thinking_routing: ThinkingRouting::default(),
 				wire_policy,
 				context: self.defaults.context,
-				pricing: self.defaults.pricing.clone(),
+				pricing: merge_declared_pricing(&self.defaults.pricing, &row.declared_pricing),
+				catalog_metrics: CatalogModelMetrics::default(),
 				availability: row.availability.unwrap_or(ModelAvailability::Unspecified),
 				provenance: ModelProvenance {
 					sources:          Box::new([declared, classified]),
@@ -557,6 +574,29 @@ impl DiscoveryNormalizer {
 			}
 		}
 		Ok(grouped.into_values().collect())
+	}
+}
+
+fn merge_declared_pricing(defaults: &Pricing, declared: &[Price]) -> Pricing {
+	if declared.is_empty() {
+		return defaults.clone();
+	}
+	let mut components = defaults
+		.components
+		.iter()
+		.map(|price| (price.unit, price.nanos_usd))
+		.collect::<BTreeMap<PriceUnit, u64>>();
+	for price in declared {
+		components.insert(price.unit, price.nanos_usd);
+	}
+	Pricing {
+		components:    components
+			.into_iter()
+			.map(|(unit, nanos_usd)| Price { unit, nanos_usd })
+			.collect::<Vec<_>>()
+			.into_boxed_slice(),
+		tiers:         defaults.tiers.clone(),
+		service_tiers: defaults.service_tiers.clone(),
 	}
 }
 
@@ -806,7 +846,8 @@ fn declared_capabilities(row: &DiscoveredModel) -> ModelCapabilities {
 	capabilities
 }
 
-const fn unknown_chat_capabilities() -> ChatCapabilities {
+/// Returns a chat-capability record containing no positive evidence.
+pub const fn unknown_chat_capabilities() -> ChatCapabilities {
 	ChatCapabilities {
 		roles:             Availability::Unknown,
 		mid_session_roles: Availability::Unknown,
@@ -960,6 +1001,7 @@ mod tests {
 			declared_operations:   OperationBits::empty(),
 			declared_capabilities: None,
 			declared_limits:       None,
+			declared_pricing:      Box::new([]),
 			extended_context_mode: None,
 			availability:          None,
 			source:                sf!("provider-list"),
@@ -973,6 +1015,7 @@ mod tests {
 		let provider = ProviderDef {
 			id:                 ProviderId::from("provider"),
 			name:               sf!("Provider"),
+			default_model:      None,
 			auth:               Box::new([AuthSpecId::from("auth")]),
 			management:         ManagementCapabilities {
 				operations:        OperationBits::empty(),
@@ -1111,6 +1154,56 @@ mod tests {
 		assert!(normalized.model.capabilities.chat.is_none());
 		assert_eq!(normalized.model.limits, ModelLimits::default());
 		assert_eq!(normalized.model.provenance.sources[0].confidence, EvidenceConfidence::Declared);
+	}
+
+	#[test]
+	fn partial_discovery_pricing_overrides_only_reported_dimensions() {
+		let mut configured = defaults();
+		configured.pricing = Pricing {
+			components:    vec![
+				Price { unit: PriceUnit::MtokInput, nanos_usd: 1 },
+				Price { unit: PriceUnit::MtokOutput, nanos_usd: 2 },
+				Price { unit: PriceUnit::MtokCacheRead, nanos_usd: 3 },
+				Price { unit: PriceUnit::MtokCacheWrite, nanos_usd: 4 },
+			]
+			.into_boxed_slice(),
+			tiers:         Box::new([]),
+			service_tiers: Box::new([]),
+		};
+		let mut discovered = row("partial-pricing");
+		discovered.declared_pricing =
+			vec![Price { unit: PriceUnit::MtokInput, nanos_usd: 9 }, Price {
+				unit:      PriceUnit::MtokCacheRead,
+				nanos_usd: 8,
+			}]
+			.into_boxed_slice();
+
+		let normalized = DiscoveryNormalizer::new(configured)
+			.normalize(&discovered)
+			.expect("partial pricing normalizes");
+
+		assert_eq!(normalized.model.pricing.components.as_ref(), [
+			Price { unit: PriceUnit::MtokInput, nanos_usd: 9 },
+			Price { unit: PriceUnit::MtokOutput, nanos_usd: 2 },
+			Price { unit: PriceUnit::MtokCacheRead, nanos_usd: 8 },
+			Price { unit: PriceUnit::MtokCacheWrite, nanos_usd: 4 },
+		]);
+	}
+
+	#[test]
+	fn discovered_alias_keeps_its_provider_route_transport_defaults() {
+		let mut configured = defaults();
+		configured.wire_policy = WirePolicyId::from("private-litellm-wire");
+		let normalized = DiscoveryNormalizer::new(configured)
+			.normalize(&row("kimi-k3"))
+			.expect("colliding alias normalizes");
+		assert_eq!(normalized.model.wire_policy, WirePolicyId::from("private-litellm-wire"));
+		assert_eq!(normalized.model.routes.as_ref(), [RouteId::from("route")]);
+		assert_eq!(normalized.model.wire_ids.as_ref(), [(
+			RouteId::from("route"),
+			WireModelId::from("kimi-k3")
+		)]);
+		assert_eq!(normalized.model.thinking, None);
 	}
 
 	#[test]

@@ -1,0 +1,43 @@
+── report_tool_issue — Report Tool Issue ───────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ 󱑍 Report Tool Issue                                                                                
+                                                                                                    
+ Args                                                                                               
+ └─  tool: "lsp"                                                                                   
+                                                                                                    
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ 󱑍 Report Tool Issue                                                                                
+                                                                                                    
+ Args                                                                                               
+ └─  tool: "lsp"                                                                                   
+ └─  report: "Rename returned no edit for an exported symbol that has 12 references"               
+                                                                                                    
+                                                                                                    
+
+  · done
+                                                                                                    
+ • Report Tool Issue                                                                                
+                                                                                                    
+ Args                                                                                               
+ └─  tool: "lsp"                                                                                   
+ └─  report: "Rename returned no edit for an exported symbol that has 12 references"               
+                                                                                                    
+ Noted, thanks!                                                                                     
+                                                                                                    
+
+  · failed
+                                                                                                    
+  Report Tool Issue                                                                                
+                                                                                                    
+ Args                                                                                               
+ └─  tool: "lsp"                                                                                   
+ └─  report: "Rename returned no edit for an exported symbol that has 12 references"               
+                                                                                                    
+ Could not record the report: issue tracker unreachable                                             
+                                                                                                    
+

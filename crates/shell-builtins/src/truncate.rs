@@ -11,7 +11,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
@@ -244,6 +244,12 @@ fn file_truncate(
 	}
 
 	let create = !no_create;
+	if !create && !resolved.exists() {
+		return Ok(());
+	}
+	let resolved = host
+		.ensure_writable(filename)
+		.map_err(|error| error.to_string())?;
 	let file = match OpenOptions::new()
 		.write(true)
 		.create(create)

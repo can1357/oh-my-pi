@@ -2,7 +2,6 @@
 
 use std::{
 	fmt::{self, Display},
-	fs,
 	path::{Path, PathBuf},
 	str,
 	sync::{Arc, OnceLock},
@@ -10,26 +9,110 @@ use std::{
 };
 
 use bytes::BytesMut;
-use futures::{StreamExt as _, future::BoxFuture};
+use futures::StreamExt as _;
 use http::{
 	HeaderMap, HeaderValue,
 	header::{ACCEPT, ETAG, IF_NONE_MATCH, USER_AGENT},
 };
-use omp_catalog::AuthSpecId;
-use omp_core::{CowBytes, Str, sf};
-use omp_inference::{
-	auth::{CredentialError, CredentialLease, CredentialNeed, HeaderPlacement},
+use omp_ai::{
+	auth::{CredentialError, CredentialFuture, CredentialLease, CredentialNeed, HeaderPlacement},
 	id::{AccountId, PrincipalId},
 };
-use omp_storage::github_cache::{
-	GithubCache, GithubCacheKey, GithubCacheStatus, GithubResourceKind,
+use omp_cache::github_cache::{GithubCache, GithubCacheKey, GithubCacheStatus, GithubResourceKind};
+use omp_catalog::AuthSpecId;
+use omp_core::{CowBytes, Str, sf};
+use omp_tool::{Diag, DiagKind};
+use omp_tools::read::{
+	Fault,
+	resolver::{Resolve, ResolvedRead},
+	selector::ParsedSelector,
 };
-use omp_tools::read::{Fault, resolver::Resolve, selector::ParsedSelector};
+use omp_vcs::git::GitRepo;
 use serde_json::Value;
+use smallvec::smallvec;
 
 use super::tool_url;
 
 const MAX_BODY: usize = 8 * 1024 * 1024;
+
+pub(super) const GITHUB_HOST: &str = "github.com";
+
+#[derive(Clone, Debug)]
+pub(super) struct GithubRepo {
+	host:     Str,
+	slug:     Str,
+	identity: Str,
+}
+
+impl GithubRepo {
+	pub(super) fn parse(value: &str) -> Result<Self, Fault> {
+		let mut parts = value.trim().trim_end_matches(".git").split('/');
+		let first = parts.next().unwrap_or_default();
+		let second = parts.next().unwrap_or_default();
+		let third = parts.next();
+		if parts.next().is_some() {
+			return Err(invalid("GitHub repository must be [host/]owner/repo."));
+		}
+		match third {
+			Some(name) => Self::new(first, second, name),
+			None => Self::new(GITHUB_HOST, first, second),
+		}
+	}
+
+	pub(super) fn new(host: &str, owner: &str, name: &str) -> Result<Self, Fault> {
+		if !valid_github_host(host) || !valid_repo_component(owner) || !valid_repo_component(name) {
+			return Err(invalid("GitHub repository must be [host/]owner/repo."));
+		}
+		let host = Str::new(host);
+		let slug = Str::new(format!("{owner}/{name}"));
+		let identity = if host.eq_ignore_ascii_case(GITHUB_HOST) {
+			slug.clone()
+		} else {
+			Str::new(format!("{host}/{slug}"))
+		};
+		Ok(Self { host, slug, identity })
+	}
+
+	pub(super) fn host(&self) -> &str {
+		&self.host
+	}
+
+	pub(super) fn slug(&self) -> &str {
+		&self.slug
+	}
+
+	pub(super) fn identity(&self) -> &str {
+		&self.identity
+	}
+
+	pub(super) fn api_url(&self, path: &str) -> String {
+		api_url_for_host(&self.host, path)
+	}
+}
+
+pub(super) fn api_url_for_host(host: &str, path: &str) -> String {
+	if host.eq_ignore_ascii_case(GITHUB_HOST) {
+		format!("https://api.github.com{path}")
+	} else {
+		format!("https://{host}/api/v3{path}")
+	}
+}
+
+fn valid_github_host(host: &str) -> bool {
+	!host.is_empty()
+		&& host.len() <= 255
+		&& host
+			.bytes()
+			.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b':'))
+}
+
+fn valid_repo_component(component: &str) -> bool {
+	!component.is_empty()
+		&& component.len() <= 255
+		&& component
+			.bytes()
+			.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
 
 /// Provider credential authority consumed by environment-owned GitHub
 /// resources.
@@ -38,7 +121,7 @@ pub trait CredentialAuthority: Send + Sync + 'static {
 	fn provider_lease(
 		&self,
 		need: CredentialNeed,
-	) -> BoxFuture<'_, Result<CredentialLease, CredentialError>>;
+	) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>>;
 }
 
 /// Late-bound projection of the one combined daemon credential authority.
@@ -67,13 +150,26 @@ impl GithubCredentialBridge {
 
 	/// Leases one named provider credential when one is available.
 	pub async fn lease_for(&self, spec: &str) -> Result<Option<CredentialLease>, Fault> {
+		self.lease_for_account(spec, None).await
+	}
+
+	/// Leases one named provider credential, optionally pinned to its durable
+	/// account row.
+	pub async fn lease_for_account(
+		&self,
+		spec: &str,
+		account: Option<u64>,
+	) -> Result<Option<CredentialLease>, Fault> {
 		let Some(authority) = self.authority.get() else {
 			return Ok(None);
 		};
 		match authority
 			.provider_lease(CredentialNeed {
 				spec:        AuthSpecId::from(Str::new(spec)),
-				account:     Some(AccountId::from(sf!("{spec}:environment"))),
+				account:     Some(account.map_or_else(
+					|| AccountId::from(sf!("{spec}:environment")),
+					|account| AccountId::from(account.to_string()),
+				)),
 				principal:   Some(PrincipalId::from("environment")),
 				valid_after: SystemTime::now(),
 			})
@@ -106,7 +202,7 @@ pub(super) struct GithubResolver {
 	root:        PathBuf,
 	cache:       Arc<GithubCache>,
 	credentials: Arc<GithubCredentialBridge>,
-	client:      reqwest::Client,
+	client:      omp_http::Client,
 }
 
 impl GithubResolver {
@@ -119,8 +215,18 @@ impl GithubResolver {
 		Self { scheme, root, cache, credentials, client: omp_http::no_redirect_client() }
 	}
 
-	async fn resolve(&self, resource: &str, query: Option<&str>) -> Result<Vec<u8>, Fault> {
+	#[tracing::instrument(
+		name = "github_resource_resolve",
+		level = "debug",
+		skip_all,
+		fields(scheme = ?self.scheme, repo = tracing::field::Empty, number = tracing::field::Empty),
+	)]
+	async fn resolve(&self, resource: &str, query: Option<&str>) -> Result<GithubRead, Fault> {
 		let target = Target::parse(self.scheme, resource, query, &self.root)?;
+		tracing::Span::current().record("repo", target.repo.identity());
+		if let Some(number) = target.number {
+			tracing::Span::current().record("number", number);
+		}
 		let key = target.cache_key()?;
 		let now = now_ms();
 		let cached = self.cache.get(&key, now).map_err(cache_fault)?;
@@ -128,7 +234,7 @@ impl GithubResolver {
 			.as_ref()
 			.is_some_and(|entry| entry.status == GithubCacheStatus::Fresh)
 		{
-			return Ok(cached.expect("fresh entry").body.to_vec());
+			return Ok(GithubRead { data: cached.expect("fresh entry").body.to_vec(), stale: false });
 		}
 		match self
 			.fetch(&target, cached.as_ref().and_then(|entry| entry.etag.as_deref()))
@@ -136,19 +242,23 @@ impl GithubResolver {
 		{
 			Ok(Fetch::NotModified) => {
 				self.cache.touch(&key, now).map_err(cache_fault)?;
-				Ok(cached.expect("304 requires cached entity").body.to_vec())
+				Ok(GithubRead {
+					data:  cached.expect("304 requires cached entity").body.to_vec(),
+					stale: false,
+				})
 			},
 			Ok(Fetch::Body { body, etag }) => {
 				let comments = if target.comments_enabled() {
 					match self.fetch_comments(&target).await {
 						Ok(comments) => Some(comments),
 						Err(error) => {
+							tracing::warn!(
+								error = ?error,
+								cached = cached.is_some(),
+								"GitHub comments refresh failed",
+							);
 							if let Some(cached) = &cached {
-								let mut warning =
-									b"> WARNING: Live GitHub comments refresh failed; cached content may be stale.\n\n"
-										.to_vec();
-								warning.extend_from_slice(&cached.body);
-								return Ok(warning);
+								return Ok(GithubRead { data: cached.body.to_vec(), stale: true });
 							}
 							return Err(error);
 						},
@@ -161,15 +271,16 @@ impl GithubResolver {
 					.cache
 					.put(&key, &rendered, etag.as_deref(), now)
 					.map_err(cache_fault)?;
-				Ok(rendered)
+				Ok(GithubRead { data: rendered, stale: false })
 			},
 			Err(error) => {
+				tracing::warn!(
+					error = ?error,
+					cached = cached.is_some(),
+					"GitHub resource refresh failed",
+				);
 				if let Some(cached) = cached {
-					let mut warning =
-						b"> WARNING: Live GitHub refresh failed; cached content may be stale.\n\n"
-							.to_vec();
-					warning.extend_from_slice(&cached.body);
-					Ok(warning)
+					Ok(GithubRead { data: cached.body.to_vec(), stale: true })
 				} else {
 					Err(error)
 				}
@@ -177,6 +288,12 @@ impl GithubResolver {
 		}
 	}
 
+	#[tracing::instrument(
+		name = "github_resource_fetch",
+		level = "debug",
+		skip_all,
+		fields(scheme = ?target.scheme, repo = %target.repo.identity(), number = ?target.number),
+	)]
 	async fn fetch(&self, target: &Target, etag: Option<&str>) -> Result<Fetch, Fault> {
 		let mut headers = HeaderMap::new();
 		headers.insert(USER_AGENT, HeaderValue::from_static("omp/issue-pr-resolver"));
@@ -226,6 +343,12 @@ impl GithubResolver {
 		Ok(Fetch::Body { body: bytes.freeze().to_vec(), etag })
 	}
 
+	#[tracing::instrument(
+		name = "github_comments_fetch",
+		level = "debug",
+		skip_all,
+		fields(scheme = ?target.scheme, repo = %target.repo.identity(), number = ?target.number),
+	)]
 	async fn fetch_comments(&self, target: &Target) -> Result<Vec<Value>, Fault> {
 		let mut comments = Vec::new();
 		let mut retained_bytes = 0usize;
@@ -284,8 +407,19 @@ impl Resolve for GithubResolver {
 		resource: &'a str,
 		selector: &'a ParsedSelector,
 	) -> Result<CowBytes<'static>, Fault> {
-		let bytes = self.resolve(resource, None).await?;
-		tool_url::select_bytes(&Default::default(), resource, CowBytes::from(bytes), selector)
+		self
+			.read_with_diags(resource, selector)
+			.await
+			.map(|resolved| resolved.data)
+	}
+
+	async fn read_with_diags<'a>(
+		&'a self,
+		resource: &'a str,
+		selector: &'a ParsedSelector,
+	) -> Result<ResolvedRead, Fault> {
+		let resolved = self.resolve(resource, None).await?;
+		selected_read(resolved, resource, selector)
 	}
 
 	async fn read_query<'a>(
@@ -294,15 +428,54 @@ impl Resolve for GithubResolver {
 		query: Option<&'a str>,
 		selector: &'a ParsedSelector,
 	) -> Result<CowBytes<'static>, Fault> {
-		let bytes = self.resolve(resource, query).await?;
-		tool_url::select_bytes(&Default::default(), resource, CowBytes::from(bytes), selector)
+		self
+			.read_query_with_diags(resource, query, selector)
+			.await
+			.map(|resolved| resolved.data)
 	}
+
+	async fn read_query_with_diags<'a>(
+		&'a self,
+		resource: &'a str,
+		query: Option<&'a str>,
+		selector: &'a ParsedSelector,
+	) -> Result<ResolvedRead, Fault> {
+		let resolved = self.resolve(resource, query).await?;
+		selected_read(resolved, resource, selector)
+	}
+}
+
+fn selected_read(
+	resolved: GithubRead,
+	resource: &str,
+	selector: &ParsedSelector,
+) -> Result<ResolvedRead, Fault> {
+	let data = tool_url::select_bytes(
+		&Default::default(),
+		resource,
+		CowBytes::from(resolved.data),
+		selector,
+	)?;
+	let diags = if resolved.stale {
+		smallvec![Diag::warn(
+			DiagKind::StaleCache,
+			"Live GitHub refresh failed; cached content may be stale.",
+		)]
+	} else {
+		smallvec![]
+	};
+	Ok(ResolvedRead { data, diags })
 }
 
 impl fmt::Debug for GithubResolver {
 	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
 		f.write_str("GithubResolver(..)")
 	}
+}
+
+struct GithubRead {
+	data:  Vec<u8>,
+	stale: bool,
 }
 
 enum Fetch {
@@ -325,7 +498,7 @@ enum DiffMode {
 #[derive(Clone, Debug)]
 struct Target {
 	scheme: GithubScheme,
-	repo:   Str,
+	repo:   GithubRepo,
 	number: Option<u64>,
 	view:   View,
 }
@@ -349,11 +522,23 @@ impl Target {
 			[number] if number.bytes().all(|b| b.is_ascii_digit()) => {
 				(infer_repo(root)?, Some(parse_number(number)?), &[][..])
 			},
-			[owner, repo] => (Str::new(format!("{owner}/{repo}")), None, &[][..]),
-			[owner, repo, number, tail @ ..] => {
-				(Str::new(format!("{owner}/{repo}")), Some(parse_number(number)?), tail)
+			[host, owner, repo] if host.contains('.') => {
+				(GithubRepo::new(host, owner, repo)?, None, &[][..])
 			},
-			_ => return Err(invalid("Expected issue://<n>, issue://owner/repo/<n>, or a repo list.")),
+			[host, owner, repo, number, tail @ ..]
+				if number.bytes().all(|byte| byte.is_ascii_digit()) =>
+			{
+				(GithubRepo::new(host, owner, repo)?, Some(parse_number(number)?), tail)
+			},
+			[owner, repo] => (GithubRepo::new(GITHUB_HOST, owner, repo)?, None, &[][..]),
+			[owner, repo, number, tail @ ..] => {
+				(GithubRepo::new(GITHUB_HOST, owner, repo)?, Some(parse_number(number)?), tail)
+			},
+			_ => {
+				return Err(invalid(
+					"Expected issue://<n>, issue://[host/]owner/repo/<n>, or a repo list.",
+				));
+			},
 		};
 		let params = query
 			.map(|query| {
@@ -413,7 +598,7 @@ impl Target {
 				_ if self.scheme == GithubScheme::Issue => GithubResourceKind::Issue,
 				_ => GithubResourceKind::PullRequest,
 			},
-			self.repo.clone(),
+			self.repo.identity(),
 			self.number,
 			self.view_key(),
 		)
@@ -433,7 +618,7 @@ impl Target {
 	}
 
 	fn api_url(&self) -> String {
-		let base = format!("https://api.github.com/repos/{}", self.repo);
+		let base = self.repo.api_url(&format!("/repos/{}", self.repo.slug()));
 		match &self.view {
 			View::List { state, limit, author, label } => {
 				let family = if self.scheme == GithubScheme::Issue {
@@ -477,17 +662,17 @@ impl Target {
 	}
 
 	fn comments_url(&self, page: u32) -> String {
-		format!(
-			"https://api.github.com/repos/{}/issues/{}/comments?per_page=100&page={page}",
-			self.repo,
+		self.repo.api_url(&format!(
+			"/repos/{}/issues/{}/comments?per_page=100&page={page}",
+			self.repo.slug(),
 			self.number.expect("comments require a detail number"),
-		)
+		))
 	}
 
 	fn render(&self, body: &[u8], comments: Option<&[Value]>) -> Result<Vec<u8>, Fault> {
 		if let View::Diff { mode } = &self.view {
 			let text = str::from_utf8(body).map_err(|_| invalid("GitHub diff is not UTF-8."))?;
-			return render_diff(text, mode, &self.repo, self.number.expect("diff number"));
+			return render_diff(text, mode, self.repo.identity(), self.number.expect("diff number"));
 		}
 		let value: Value = serde_json::from_slice(body).map_err(|error| Fault::Invalid {
 			message: Str::new(format!("Invalid GitHub JSON: {error}")),
@@ -504,7 +689,7 @@ impl Target {
 					if self.scheme == GithubScheme::Issue && item.get("pull_request").is_some() {
 						continue;
 					}
-					render_item(&mut out, &item, &self.repo, self.scheme);
+					render_item(&mut out, &item, self.repo.identity(), self.scheme);
 				}
 			},
 			(View::Detail { comments: include_comments }, item) => {
@@ -602,23 +787,66 @@ fn render_diff(text: &str, mode: &DiffMode, repo: &str, number: u64) -> Result<V
 	}
 	Ok(out.into_bytes())
 }
-pub(super) fn infer_repo(root: &Path) -> Result<Str, Fault> {
-	let config = fs::read_to_string(root.join(".git/config"))
-		.map_err(|_| invalid("Cannot infer GitHub repo; use owner/repo explicitly."))?;
-	let url = config
-		.lines()
-		.map(str::trim)
-		.find_map(|line| line.strip_prefix("url = "))
+pub(super) fn infer_repo(root: &Path) -> Result<GithubRepo, Fault> {
+	let repo = GitRepo::require(root)
+		.map_err(|_| invalid("Cannot infer GitHub repo; use [host/]owner/repo explicitly."))?;
+	let config = std::fs::read_to_string(repo.info().common_dir.join("config"))
+		.map_err(|_| invalid("Git repository config is unavailable."))?;
+	let mut in_origin = false;
+	let mut first_remote = None;
+	let mut origin = None;
+	for line in config.lines().map(str::trim) {
+		if line.starts_with('[') {
+			in_origin = line.eq_ignore_ascii_case("[remote \"origin\"]");
+		} else if let Some(url) = line.strip_prefix("url = ") {
+			if first_remote.is_none() {
+				first_remote = Some(url);
+			}
+			if in_origin {
+				origin = Some(url);
+				break;
+			}
+		}
+	}
+	let remote = origin
+		.or(first_remote)
 		.ok_or_else(|| invalid("Git origin URL is missing."))?;
-	let path = url
-		.strip_prefix("git@github.com:")
-		.or_else(|| url.strip_prefix("https://github.com/"))
-		.ok_or_else(|| invalid("Origin is not GitHub."))?
-		.trim_end_matches(".git");
-	if path.split('/').count() != 2 {
+	repo_from_remote(remote)
+}
+
+fn repo_from_remote(remote: &str) -> Result<GithubRepo, Fault> {
+	let remote = remote.trim();
+	if remote.contains("://") {
+		let parsed =
+			url::Url::parse(remote).map_err(|_| invalid("Git origin is not a GitHub remote."))?;
+		let host = parsed
+			.host_str()
+			.ok_or_else(|| invalid("Git origin is not a GitHub remote."))?;
+		let host = parsed
+			.port()
+			.map_or_else(|| host.to_owned(), |port| format!("{host}:{port}"));
+		repo_from_host_path(&host, parsed.path().trim_start_matches('/'))
+	} else {
+		let (authority, path) = remote
+			.split_once(':')
+			.ok_or_else(|| invalid("Git origin is not a GitHub remote."))?;
+		let host = authority
+			.rsplit_once('@')
+			.map_or(authority, |(_, host)| host);
+		repo_from_host_path(host, path)
+	}
+}
+
+/// Builds the repo identity from a remote's host and path segments.
+fn repo_from_host_path(host: &str, path: &str) -> Result<GithubRepo, Fault> {
+	let path = path.trim_end_matches('/').trim_end_matches(".git");
+	let mut parts = path.split('/');
+	let owner = parts.next().unwrap_or_default();
+	let name = parts.next().unwrap_or_default();
+	if parts.next().is_some() {
 		return Err(invalid("GitHub origin is not owner/repo."));
 	}
-	Ok(Str::new(path))
+	GithubRepo::new(host, owner, name)
 }
 fn parse_number(value: &str) -> Result<u64, Fault> {
 	value
@@ -640,4 +868,81 @@ fn cache_fault(error: impl Display) -> Fault {
 }
 fn http_fault(error: impl Display) -> Fault {
 	Fault::Source { message: Str::new(format!("GitHub API request failed: {error}")) }
+}
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn stale_cache_is_reported_out_of_band_without_changing_document_bytes() {
+		let cached = b"# Cached issue\n\nBody".to_vec();
+		let resolved = selected_read(
+			GithubRead { data: cached.clone(), stale: true },
+			"owner/repo/1",
+			&ParsedSelector::None,
+		)
+		.expect("cached resource");
+		assert_eq!(resolved.data.as_ref(), cached.as_slice());
+		assert_eq!(resolved.diags.len(), 1);
+		assert_eq!(resolved.diags[0].native_kind(), Some(DiagKind::StaleCache));
+		assert_eq!(resolved.diags[0].severity, omp_tool::Severity::Warn);
+	}
+
+	#[test]
+	fn target_parses_dotted_and_single_label_enterprise_hosts() {
+		let root = Path::new("/unused");
+		let dotted =
+			Target::parse(GithubScheme::PullRequest, "ghe.example.com/owner/repo/7", None, root)
+				.expect("dotted enterprise target");
+		assert_eq!(dotted.repo.identity(), "ghe.example.com/owner/repo");
+		assert_eq!(dotted.api_url(), "https://ghe.example.com/api/v3/repos/owner/repo/pulls/7",);
+
+		let single = Target::parse(GithubScheme::PullRequest, "ghe/owner/repo/7", None, root)
+			.expect("single-label enterprise target");
+		assert_eq!(single.repo.identity(), "ghe/owner/repo");
+		assert_eq!(single.api_url(), "https://ghe/api/v3/repos/owner/repo/pulls/7");
+		let issue = Target::parse(GithubScheme::Issue, "ghe.example.com/owner/repo/8", None, root)
+			.expect("enterprise issue target");
+		assert_eq!(issue.api_url(), "https://ghe.example.com/api/v3/repos/owner/repo/issues/8",);
+	}
+
+	#[test]
+	fn numeric_tail_disambiguates_host_from_diff_suffix() {
+		let root = Path::new("/unused");
+		let slice = Target::parse(GithubScheme::PullRequest, "owner/repo/77/diff/1", None, root)
+			.expect("default-host diff slice");
+		assert_eq!(slice.repo.identity(), "owner/repo");
+		assert!(matches!(slice.view, View::Diff { mode: DiffMode::Slice(1) }));
+
+		assert!(
+			Target::parse(GithubScheme::PullRequest, "ghe/owner/repo", None, root).is_err(),
+			"an unnumbered single-label host is ambiguous and must not be guessed",
+		);
+	}
+
+	#[test]
+	fn remote_urls_preserve_enterprise_hosts_and_normalize_github_dot_com() {
+		let enterprise =
+			repo_from_remote("git@ghe.example.com:Owner/Repo.git").expect("enterprise SSH remote");
+		assert_eq!(enterprise.identity(), "ghe.example.com/Owner/Repo");
+		assert_eq!(
+			enterprise.api_url("/repos/Owner/Repo"),
+			"https://ghe.example.com/api/v3/repos/Owner/Repo",
+		);
+
+		let default =
+			repo_from_remote("https://github.com/Owner/Repo.git").expect("github.com remote");
+		assert_eq!(default.identity(), "Owner/Repo");
+		assert_eq!(default.api_url("/repos/Owner/Repo"), "https://api.github.com/repos/Owner/Repo");
+		let workspace = tempfile::tempdir().expect("workspace");
+		std::fs::create_dir(workspace.path().join(".git")).expect("git directory");
+		std::fs::write(
+			workspace.path().join(".git/config"),
+			"[remote \"upstream\"]\n\turl = https://github.com/other/upstream.git\n[remote \
+			 \"origin\"]\n\turl = ssh://git@ghe/Owner/Repo.git\n",
+		)
+		.expect("git config");
+		let inferred = infer_repo(workspace.path()).expect("origin repo");
+		assert_eq!(inferred.identity(), "ghe/Owner/Repo");
+	}
 }

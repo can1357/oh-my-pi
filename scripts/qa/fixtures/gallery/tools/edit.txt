@@ -1,0 +1,49 @@
+── edit — Edit ─────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+╭─── Edit:  packages/coding-agent/src/tools/read.ts ──────────────────────────────────────────────╮
+│@@ -88,3 +88,4 @@                                                                                 │
+│    const offset = args.offset ?? 1;                                                              │
+│-···const limit = args.limit ?? 2000;                                                             │
+│+···const limit = args.limit ?? 4000;                                                             │
+│󱑌 (preview)                                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · in progress
+                                                                                                    
+╭─── Edit:  packages/coding-agent/src/tools/read.ts ──────────────────────────────────────────────╮
+│@@ -88,5 +88,6 @@                                                                                 │
+│    const offset = args.offset ?? 1;                                                              │
+│-···const limit = args.limit ?? 2000;                                                             │
+│+···const limit = args.limit ?? 4000;                                                             │
+│    const raw = await Bun.file(path).text();                                                      │
+│-···return raw.slice(offset , offset + limit);                                                    │
+│+···return raw.split("\n").slice(offset - 1, offset - 1 + limit).join("\n");                      │
+│(preview)                                                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  Edit:  packages/coding-agent/src/tools/read.ts ⟨+2/-2⟩ ────────────────────────────────────╮
+│@@ -88,5 +88,6 @@                                                                                 │
+│    const offset = args.offset ?? 1;                                                              │
+│-···const limit = args.limit ?? 2000;                                                             │
+│+···const limit = args.limit ?? 4000;                                                             │
+│    const raw = await Bun.file(path).text();                                                      │
+│-···return raw.slice(offset , offset + limit);                                                    │
+│+···return raw.split("\n").slice(offset - 1, offset - 1 + limit).join("\n");                      │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  Edit:  packages/coding-agent/src/tools/read.ts ────────────────────────────────────────────╮
+│No match for the search text. Expected `const limit = args.limit ?? 2000;` near line 89, but the  │
+│file has `const limit = args.limit ?? 1000;`. Re-read the file and retry with the current         │
+│contents.                                                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

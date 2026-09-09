@@ -692,7 +692,7 @@ pub struct ChatCapabilities {
 	pub logprobs:          Availability<LogProbabilityCapabilities>,
 }
 
-fn unknown_image_input() -> Availability<ImageInputCapabilities> {
+const fn unknown_image_input() -> Availability<ImageInputCapabilities> {
 	Availability::Unknown
 }
 

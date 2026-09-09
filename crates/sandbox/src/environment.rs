@@ -5,7 +5,7 @@ use std::{
 	path::Path,
 };
 
-use globset::{Glob, GlobMatcher};
+use globset::{GlobBuilder, GlobMatcher};
 use omp_core::Str;
 
 use crate::SandboxError;
@@ -16,6 +16,8 @@ pub enum EnvironmentSource {
 	/// Inherit the caller's environment at preparation time.
 	#[default]
 	Inherit,
+	/// Inherit only platform-core environment names.
+	Core,
 	/// Use exactly these `NAME=VALUE` entries, including an explicitly empty
 	/// list.
 	Exact(Vec<OsString>),
@@ -24,22 +26,33 @@ pub enum EnvironmentSource {
 /// Ordered environment source and name filters for a sandboxed process.
 #[derive(Clone, Default)]
 pub struct EnvironmentPolicy {
-	source: EnvironmentSource,
-	allow:  Vec<EnvironmentPattern>,
-	deny:   Vec<EnvironmentPattern>,
+	source:    EnvironmentSource,
+	allow:     Vec<EnvironmentPattern>,
+	deny:      Vec<EnvironmentPattern>,
+	overrides: Vec<(OsString, OsString)>,
 }
 
 impl EnvironmentPolicy {
 	/// Creates a policy that inherits the caller's complete environment.
 	#[must_use]
 	pub const fn inherit() -> Self {
-		Self { source: EnvironmentSource::Inherit, allow: Vec::new(), deny: Vec::new() }
+		Self {
+			source:    EnvironmentSource::Inherit,
+			allow:     Vec::new(),
+			deny:      Vec::new(),
+			overrides: Vec::new(),
+		}
 	}
 
 	/// Creates a policy from exact `NAME=VALUE` entries.
 	#[must_use]
 	pub const fn exact(entries: Vec<OsString>) -> Self {
-		Self { source: EnvironmentSource::Exact(entries), allow: Vec::new(), deny: Vec::new() }
+		Self {
+			source:    EnvironmentSource::Exact(entries),
+			allow:     Vec::new(),
+			deny:      Vec::new(),
+			overrides: Vec::new(),
+		}
 	}
 
 	/// Returns the source evaluated before filtering.
@@ -58,6 +71,10 @@ impl EnvironmentPolicy {
 		self.deny.iter().map(|pattern| pattern.text.as_str())
 	}
 
+	pub(crate) fn overrides(&self) -> &[(OsString, OsString)] {
+		&self.overrides
+	}
+
 	pub(crate) fn set_source(&mut self, source: EnvironmentSource) {
 		self.source = source;
 	}
@@ -70,33 +87,86 @@ impl EnvironmentPolicy {
 		insert_pattern(&mut self.deny, pattern.as_ref())
 	}
 
+	pub(crate) fn set_override(&mut self, key: &str, value: &str) {
+		let key = OsString::from(key);
+		let value = OsString::from(value);
+		match self
+			.overrides
+			.binary_search_by(|(existing, _)| existing.cmp(&key))
+		{
+			Ok(index) => self.overrides[index].1 = value,
+			Err(index) => self.overrides.insert(index, (key, value)),
+		}
+	}
+
 	pub(crate) const fn scrubs(&self) -> bool {
-		!self.allow.is_empty() || !self.deny.is_empty()
+		!matches!(self.source, EnvironmentSource::Inherit)
+			|| !self.allow.is_empty()
+			|| !self.deny.is_empty()
+			|| !self.overrides.is_empty()
+	}
+
+	pub(crate) fn allows(&self, name: &str) -> bool {
+		let name = OsStr::new(name);
+		if self.overrides.iter().any(|(key, _)| key == name) {
+			return true;
+		}
+		self.source_allows(name)
+			&& (self.allow.is_empty() || matches_any(name, &self.allow))
+			&& !matches_any(name, &self.deny)
+	}
+
+	pub(crate) fn resolve_env<I, K, V>(&self, environment: I) -> Vec<(OsString, OsString)>
+	where
+		I: IntoIterator<Item = (K, V)>,
+		K: Into<OsString>,
+		V: Into<OsString>,
+	{
+		let mut resolved: Vec<(OsString, OsString)> = match &self.source {
+			EnvironmentSource::Inherit | EnvironmentSource::Core => environment
+				.into_iter()
+				.map(|(key, value)| (key.into(), value.into()))
+				.filter(|(key, _)| self.source_allows(key))
+				.collect(),
+			EnvironmentSource::Exact(entries) => {
+				entries.iter().map(|entry| split_entry(entry)).collect()
+			},
+		};
+		resolved.retain(|(key, _)| {
+			(self.allow.is_empty() || matches_any(key, &self.allow))
+				&& !matches_any(key, &self.deny)
+				&& !self
+					.overrides
+					.iter()
+					.any(|(override_key, _)| override_key == key)
+		});
+		resolved.extend(self.overrides.iter().cloned());
+		resolved
 	}
 
 	pub(crate) fn resolve(&self) -> Option<Vec<OsString>> {
-		let entries = match &self.source {
-			EnvironmentSource::Inherit if !self.scrubs() => return None,
-			EnvironmentSource::Inherit => std::env::vars_os()
-				.map(|(name, value)| {
-					let mut entry = name;
-					entry.push("=");
-					entry.push(value);
-					entry
-				})
-				.collect(),
-			EnvironmentSource::Exact(entries) => entries.clone(),
-		};
+		if !self.scrubs() {
+			return None;
+		}
 		Some(
-			entries
+			self
+				.resolve_env(std::env::vars_os())
 				.into_iter()
-				.filter(|entry| {
-					let name = env_name(entry);
-					(self.allow.is_empty() || matches_any(name.as_ref(), &self.allow))
-						&& !matches_any(name.as_ref(), &self.deny)
+				.map(|(mut name, value)| {
+					name.push("=");
+					name.push(value);
+					name
 				})
 				.collect(),
 		)
+	}
+
+	fn source_allows(&self, name: &OsStr) -> bool {
+		match &self.source {
+			EnvironmentSource::Inherit => true,
+			EnvironmentSource::Core => is_core_environment_name(name),
+			EnvironmentSource::Exact(entries) => entries.iter().any(|entry| &*env_name(entry) == name),
+		}
 	}
 }
 
@@ -121,6 +191,7 @@ impl fmt::Debug for EnvironmentPolicy {
 					.map(|pattern| &pattern.text)
 					.collect::<Vec<_>>(),
 			)
+			.field("overrides", &self.overrides)
 			.finish()
 	}
 }
@@ -135,18 +206,50 @@ fn insert_pattern(
 	patterns: &mut Vec<EnvironmentPattern>,
 	pattern: &str,
 ) -> Result<(), SandboxError> {
-	if pattern.trim().is_empty() {
-		return Err(SandboxError::EmptyEnvironmentPattern);
-	}
+	validate_env_pattern(pattern)?;
 	let text = Str::from(pattern);
-	let matcher = Glob::new(pattern)
-		.map_err(|source| SandboxError::InvalidEnvironmentPattern { pattern: text.clone(), source })?
+	let matcher = GlobBuilder::new(pattern)
+		.case_insensitive(true)
+		.build()
+		.expect("validated environment pattern")
 		.compile_matcher();
 	match patterns.binary_search_by(|existing| existing.text.cmp(&text)) {
 		Ok(_) => {},
 		Err(index) => patterns.insert(index, EnvironmentPattern { text, matcher }),
 	}
 	Ok(())
+}
+
+/// Validates one case-insensitive environment-name glob.
+pub fn validate_env_pattern(pattern: &str) -> Result<(), SandboxError> {
+	if pattern.trim().is_empty() {
+		return Err(SandboxError::EmptyEnvironmentPattern);
+	}
+	let text = Str::from(pattern);
+	GlobBuilder::new(pattern)
+		.case_insensitive(true)
+		.build()
+		.map(|_| ())
+		.map_err(|source| SandboxError::InvalidEnvironmentPattern { pattern: text, source })
+}
+
+/// Returns platform-core environment names and patterns.
+#[must_use]
+pub const fn core_environment_names() -> &'static [&'static str] {
+	&["HOME", "PATH", "USER", "SHELL", "LOGNAME", "TERM", "TMPDIR", "LANG", "LC_*"]
+}
+
+fn is_core_environment_name(name: &OsStr) -> bool {
+	let name = name.to_string_lossy();
+	core_environment_names()
+		.iter()
+		.copied()
+		.any(|pattern| match pattern.strip_suffix('*') {
+			Some(prefix) => name
+				.get(..prefix.len())
+				.is_some_and(|candidate| candidate.eq_ignore_ascii_case(prefix)),
+			None => name.eq_ignore_ascii_case(pattern),
+		})
 }
 
 fn matches_any(name: &OsStr, patterns: &[EnvironmentPattern]) -> bool {
@@ -165,7 +268,7 @@ fn env_name(entry: &OsStr) -> Cow<'_, OsStr> {
 			.iter()
 			.position(|byte| *byte == b'=')
 			.unwrap_or(bytes.len());
-		return Cow::Borrowed(OsStr::from_bytes(&bytes[..end]));
+		Cow::Borrowed(OsStr::from_bytes(&bytes[..end]))
 	}
 	#[cfg(not(unix))]
 	{
@@ -175,7 +278,7 @@ fn env_name(entry: &OsStr) -> Cow<'_, OsStr> {
 	}
 }
 
-pub(crate) fn split_entry(entry: &OsStr) -> (OsString, OsString) {
+pub fn split_entry(entry: &OsStr) -> (OsString, OsString) {
 	#[cfg(unix)]
 	{
 		use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
@@ -191,7 +294,7 @@ pub(crate) fn split_entry(entry: &OsStr) -> (OsString, OsString) {
 		} else {
 			OsString::from_vec(bytes[split + 1..].to_vec())
 		};
-		return (name, value);
+		(name, value)
 	}
 	#[cfg(windows)]
 	{

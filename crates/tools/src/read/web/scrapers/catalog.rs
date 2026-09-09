@@ -1,7 +1,7 @@
 //! Long-tail public-site extractor catalog.
 //!
-//! The table follows pi's registry order. Matching is deliberately separate
-//! from rendering so a recognized URL may decline and fall through to the
+//! The table follows registry order. Matching is deliberately separate from
+//! rendering so a recognized URL may decline and fall through to the
 //! generic bounded fetch pipeline.
 
 use std::{fmt::Write as _, str};
@@ -163,8 +163,8 @@ pub(super) async fn render<C: HttpClient + Sync>(
 	}
 	let content_type = response.header("content-type").unwrap_or("");
 	let mut markdown = String::new();
-	writeln!(markdown, "# {}\n", site).expect("writing markdown to a string");
-	writeln!(markdown, "**Source:** {}\n", url).expect("writing markdown to a string");
+	writeln!(markdown, "# {site}\n").expect("writing markdown to a string");
+	writeln!(markdown, "**Source:** {url}\n").expect("writing markdown to a string");
 	if content_type.contains("json")
 		|| response
 			.body

@@ -116,7 +116,7 @@ pub struct ServerResponseError {
 }
 
 /// Transport failure with retry-accounting evidence.
-#[derive(Debug, thiserror::Error)]
+#[derive(thiserror::Error)]
 #[error("MCP transport failed after dispatch state {dispatch:?}")]
 pub struct TransportError {
 	/// Best available dispatch evidence.
@@ -124,6 +124,16 @@ pub struct TransportError {
 	/// Typed failure cause.
 	#[source]
 	pub cause:    TransportFailure,
+}
+
+impl std::fmt::Debug for TransportError {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		formatter
+			.debug_struct("TransportError")
+			.field("dispatch", &self.dispatch)
+			.field("cause", &self.cause)
+			.finish()
+	}
 }
 
 impl TransportError {
@@ -139,7 +149,8 @@ impl TransportError {
 }
 
 /// Typed MCP transport failure cause.
-#[derive(Debug, thiserror::Error)]
+#[derive(strum::IntoStaticStr, thiserror::Error)]
+#[strum(serialize_all = "snake_case")]
 pub enum TransportFailure {
 	/// Caller cancellation won the operation race.
 	#[error("MCP transport operation was cancelled")]
@@ -156,13 +167,25 @@ pub enum TransportFailure {
 	/// A frame exceeded its bounded size.
 	#[error("MCP transport frame exceeded its size limit")]
 	FrameTooLarge,
+	/// Platform spawn planning rejected the configured command vector.
+	#[error("MCP stdio child process command is invalid")]
+	InvalidSpawnPlan,
 	/// Child process could not be spawned.
 	#[error("MCP stdio child process could not be started")]
 	Spawn(#[source] io::Error),
 	/// Pipe or socket I/O failed.
 	#[error("MCP transport I/O failed")]
 	Io(#[source] io::Error),
-	/// HTTP client failed.
+	/// HTTP endpoint could not be reached.
+	#[error("MCP HTTP endpoint could not be reached")]
+	HttpConnect(#[source] reqwest::Error),
+	/// HTTP connection was reset after it was opened.
+	#[error("MCP HTTP connection was reset")]
+	HttpReset(#[source] reqwest::Error),
+	/// HTTP connection ended before a complete frame arrived.
+	#[error("MCP HTTP connection ended unexpectedly")]
+	HttpEof(#[source] reqwest::Error),
+	/// HTTP client failed without a more specific stable class.
 	#[error("MCP HTTP transport failed")]
 	Http(#[source] reqwest::Error),
 	/// HTTP response status is not successful.
@@ -175,9 +198,13 @@ pub enum TransportFailure {
 	/// Header policy rejected configuration or redirect behavior.
 	#[error("MCP HTTP header or redirect policy rejected the request")]
 	HeaderPolicy(#[source] HeaderPolicyError),
-	/// JSON frame was malformed.
+	/// JSON serialization or buffered response decoding failed.
 	#[error("MCP transport received malformed JSON")]
 	Json(#[source] serde_json::Error),
+	/// A streaming frame was malformed. The input is intentionally omitted so
+	/// credential-bearing payloads cannot enter diagnostics.
+	#[error("MCP transport received a malformed frame")]
+	MalformedFrame,
 	/// JSON-RPC response did not correlate with the request.
 	#[error("MCP transport received an uncorrelated JSON-RPC response")]
 	Correlation,
@@ -190,4 +217,63 @@ pub enum TransportFailure {
 	/// SSE stream or endpoint event was malformed.
 	#[error("MCP server-sent-event stream was malformed")]
 	SseProtocol,
+}
+
+impl TransportFailure {
+	/// Classifies a reqwest failure without copying its potentially
+	/// credential-bearing diagnostic text.
+	pub fn from_http(source: reqwest::Error) -> Self {
+		use std::error::Error as _;
+
+		let mut current = source.source();
+		let mut io_kind = None;
+		while let Some(error) = current {
+			if let Some(io) = error.downcast_ref::<io::Error>() {
+				io_kind = Some(io.kind());
+				break;
+			}
+			current = error.source();
+		}
+		match io_kind {
+			Some(io::ErrorKind::ConnectionReset) => Self::HttpReset(source),
+			Some(io::ErrorKind::UnexpectedEof | io::ErrorKind::BrokenPipe) => Self::HttpEof(source),
+			_ if source.is_connect() => Self::HttpConnect(source),
+			_ if source.is_timeout() => Self::TimedOut,
+			_ => Self::Http(source),
+		}
+	}
+}
+
+impl std::fmt::Debug for TransportFailure {
+	fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+		let kind: &'static str = self.into();
+		let mut debug = formatter.debug_struct("TransportFailure");
+		debug.field("kind", &kind);
+		match self {
+			Self::HttpStatus { status } => {
+				debug.field("status", status);
+			},
+			Self::JsonRpc { code } => {
+				debug.field("code", code);
+			},
+			_ => {},
+		}
+		debug.finish()
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use super::*;
+
+	#[test]
+	fn transport_debug_never_exposes_inner_diagnostics() {
+		let error = TransportError::effects_unknown(TransportFailure::Io(io::Error::other(
+			"Authorization: Bearer top-secret",
+		)));
+		let debug = format!("{error:?}");
+		assert!(!debug.contains("top-secret"));
+		assert!(debug.contains("io"));
+		assert!(debug.contains("EffectsUnknown"));
+	}
 }

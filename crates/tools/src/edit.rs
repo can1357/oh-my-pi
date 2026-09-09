@@ -5,32 +5,48 @@ pub mod apply_patch;
 pub mod observer;
 pub mod projection;
 pub mod replace;
-use std::{fmt::Write as _, future, future::Future, ops, path::Path};
+use std::{fmt::Write as _, future, future::Future, ops};
 
 pub use apply_patch::{
-	FreeformEditParams, FreeformEditTool, apply_patch_tool, apply_patch_tool_with_observer,
-	patch_tool, patch_tool_with_observer, sloppy_tool, sloppy_tool_with_observer,
+	FreeformEditParams, FreeformEditTool, PatchEditEntry, PatchOp, PatchParams, apply_patch_tool,
+	apply_patch_tool_with_observer, legacy_patch_tool_with_observer, patch_tool,
+	patch_tool_with_observer, sloppy_tool, sloppy_tool_with_observer,
 };
 use async_stream::stream;
 use bytes::Bytes;
 use futures::{FutureExt, Stream, pin_mut, select_biased};
 use observer::{AppliedEditSnapshot, EditObserver, PendingBlackbox};
 use omp_core::{IntoStr, Str, sf};
-use omp_hashline::{
-	ApplyMode, ApplyOptions, Clipboard, FileOp, HEADTAIL_DRIFT_WARNING, MismatchDetails,
-	MismatchError, Patch, apply_parsed_patch, compute_snapshot_tag,
-	diff_preview::{CompactDiffOptions, build_compact_diff_preview},
-	format_hashline_header, is_head_tail_only, numbered_diff,
-	recovery::{ByteRange, ExactByteEdit, RecoveryEdit, recover_exact},
+use omp_edit::{
+	EditMode,
+	diff_string::{
+		BlockContextSource, CompactDiffOptions, build_compact_diff_preview, generate_diff_string,
+	},
+	grammar,
+	modes::hashline::{
+		apply::{ApplyOptions, EmptyPaste, apply_edits, is_head_tail_only},
+		format::format_hashline_header,
+		input::{Parsed, Patch, SplitOptions},
+		messages::HEADTAIL_DRIFT_WARNING,
+		mismatch::{MismatchDetails, format_mismatch_message},
+		recovery::{RecoveryChain, recover_text},
+		types::{BlockOpKind, Edit, FileOp},
+	},
+	store::{Clipboard, file_hash},
+	text::{LineEnding, detect_line_ending, normalize_to_lf, restore_line_endings, strip_bom},
 };
 use omp_tool::{
-	Abort, ArgIssue, ArgIssueKind, ArgPath, CallOutcome, CommitError, Constraint, Dialect,
-	DocEffects, Effects, Ev, IncomingParams, InterruptWaitError, LiftedCall, ParamError, Part,
-	PromptCaps, RecordedCall, Rev, Tool, ToolSpec, ToolTerminal,
+	Abort, ArgIssue, ArgIssueKind, ArgPath, CallOutcome, CommitError, Constraint, Diag, DiagKind,
+	Dialect, DocEffects, Effects, Ev, IncomingParams, InterruptWaitError, LiftedCall, ParamError,
+	Part, PromptCaps, RecordedCall, Rev, Tool, ToolSpec, ToolTerminal,
 };
-pub use replace::{ReplaceParams, ReplaceTool, replace_tool, replace_tool_with_observer};
+pub use replace::{
+	LegacyReplaceOperation, LegacyReplaceParams, ReplaceParams, ReplaceTool,
+	legacy_replace_tool_with_observer, replace_tool, replace_tool_with_observer,
+};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
+use tracing::Instrument as _;
 
 use crate::{
 	path::{HostPaths, normalize_target},
@@ -48,11 +64,14 @@ pub struct EditDialectRegistration {
 	pub dialect:  Dialect,
 }
 
-/// Every built-in edit revision which may be selected or lifted.
+/// Every built-in edit revision retained for current selection or historical
+/// replay.
 pub const EDIT_DIALECTS: &[EditDialectRegistration] = &[
 	EditDialectRegistration { family: "rep", revision: 1, dialect: Dialect::Replace },
+	EditDialectRegistration { family: "rep", revision: 2, dialect: Dialect::Replace },
 	EditDialectRegistration { family: "hl", revision: 1, dialect: Dialect::Hashline },
 	EditDialectRegistration { family: "patch", revision: 1, dialect: Dialect::Patch },
+	EditDialectRegistration { family: "patch", revision: 2, dialect: Dialect::Patch },
 	EditDialectRegistration { family: "apply_patch", revision: 1, dialect: Dialect::ApplyPatch },
 	EditDialectRegistration { family: "sloppy", revision: 1, dialect: Dialect::Sloppy },
 ];
@@ -81,7 +100,7 @@ pub enum EditRevisionSource {
 /// records its precedence without coupling edit behavior to model names.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct EditRevisionCandidates<'a> {
-	/// Catalog-selected revision such as `rep.1`.
+	/// Catalog-selected revision such as `rep.2`.
 	pub model_rule:     Option<&'a Rev>,
 	/// Optional `OMP_EDIT_DIALECT` value.
 	pub environment:    Option<&'a str>,
@@ -130,13 +149,13 @@ pub fn resolve_edit_revision(
 	] {
 		let Some(value) = value else { continue };
 		match value.parse::<Rev>() {
-			Ok(revision) if is_registered_edit_revision(&revision) => {
+			Ok(revision) if is_selectable_edit_revision(&revision) => {
 				return Ok(ResolvedEditRevision { revision, source });
 			},
 			_ if candidates.strict => {
 				return Err(
 					format!(
-						"unknown edit revision {value:?}; use hl.1, rep.1, patch.1, apply_patch.1, or \
+						"unknown edit revision {value:?}; use hl.1, rep.2, patch.2, apply_patch.1, or \
 						 sloppy.1"
 					)
 					.into(),
@@ -157,11 +176,16 @@ fn registered_revision(
 	revision: &Rev,
 	source: EditRevisionSource,
 ) -> Result<ResolvedEditRevision, Str> {
-	if is_registered_edit_revision(revision) {
+	if is_selectable_edit_revision(revision) {
 		Ok(ResolvedEditRevision { revision: revision.clone(), source })
 	} else {
-		Err(format!("unregistered edit revision {revision}").into())
+		Err(format!("edit revision {revision} is historical and cannot be selected").into())
 	}
+}
+
+fn is_selectable_edit_revision(revision: &Rev) -> bool {
+	is_registered_edit_revision(revision)
+		&& !matches!((revision.family.as_str(), revision.n), ("rep" | "patch", 1))
 }
 
 fn is_registered_edit_revision(revision: &Rev) -> bool {
@@ -333,8 +357,6 @@ pub struct SectionPayload {
 	pub first_changed_line:   Option<usize>,
 	/// Syntax-aware block resolutions.
 	pub block_resolutions:    Vec<ResolvedBlock>,
-	/// Parser and application warnings in authored order.
-	pub warnings:             Vec<Str>,
 	/// Revision-bound LSP diagnostics for this committed section.
 	#[serde(default)]
 	pub diagnostics:          Vec<EditDiagnostic>,
@@ -351,23 +373,33 @@ pub struct Payload {
 }
 
 /// Formatting requested of the document transaction coordinator.
-#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(
+	Clone,
+	Copy,
+	Debug,
+	Deserialize,
+	Eq,
+	PartialEq,
+	Serialize,
+	strum::EnumString,
+	strum::IntoStaticStr,
+	strum::VariantNames,
+)]
 #[serde(rename_all = "snake_case")]
+#[strum(serialize_all = "snake_case", ascii_case_insensitive)]
+#[derive(Default)]
 pub enum FormatPolicy {
 	/// Never invoke a formatter.
 	Disabled,
 	/// Use a formatter when available, retaining committed bytes on formatter
 	/// absence or failure.
+	#[default]
 	BestEffort,
 	/// Require formatter availability and successful completion.
 	Required,
 }
 
-impl Default for FormatPolicy {
-	fn default() -> Self {
-		Self::BestEffort
-	}
-}
+omp_con::con_enum!(FormatPolicy);
 
 /// Stale-base behavior requested of the transaction coordinator.
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
@@ -395,11 +427,31 @@ pub struct PrepareRequest {
 	pub guard_generated: bool,
 }
 
+/// How a missing authored edit path was recovered.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PathRecoveryHow {
+	/// A retained snapshot matched both the filename and authored snapshot tag.
+	FilenameSnapshotTag,
+	/// Exactly one workspace path ended with the authored path components.
+	WorkspaceSuffix,
+}
+
+/// Typed recovery facts retained by a prepared edit lease.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PathRecovery {
+	/// Missing path supplied by the model.
+	pub authored: Str,
+	/// Canonical path selected by the document host.
+	pub resolved: Str,
+	/// Recovery strategy which established the unique match.
+	pub how:      PathRecoveryHow,
+}
+
 /// Borrowed view exposed by an opaque, revision-pinned prepared lease.
 pub trait EditPrepared: Send + Sync {
 	/// Canonical path pinned by this lease.
 	fn path(&self) -> &Str;
-	/// Model-facing path after any tag-based path recovery.
+	/// Model-facing path after any host path recovery.
 	fn display_path(&self) -> &Str {
 		self.path()
 	}
@@ -411,8 +463,8 @@ pub trait EditPrepared: Send + Sync {
 	fn exists(&self) -> bool {
 		true
 	}
-	/// Non-fatal preparation diagnostics such as tag-based path recovery.
-	fn warnings(&self) -> &[Str] {
+	/// Typed missing-path recoveries discovered while preparing this lease.
+	fn path_recoveries(&self) -> &[PathRecovery] {
 		&[]
 	}
 	/// Exact retained bytes named by the authored tag, or live bytes when
@@ -565,7 +617,7 @@ impl Fault {
 /// Session loop-guard result for one byte-identical edit.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct NoopResult {
-	/// Exact pi-compatible soft or hard diagnostic.
+	/// Exact soft or hard diagnostic.
 	pub diagnostic: Str,
 	/// Whether this attempt reached the mandatory hard-failure threshold.
 	pub escalate:   bool,
@@ -624,6 +676,40 @@ pub struct EditTool<D, S = NoSnapshotStore> {
 	spec:            ToolSpec,
 }
 
+/// Returns the host-free `edit@hl.1` specification.
+pub fn hashline_spec() -> ToolSpec {
+	ToolSpec {
+		name:            sf!("edit"),
+		rev:             Rev { family: sf!("hl"), n: 1 },
+		description:     sf!(DESCRIPTION),
+		schema:          omp_tool::schema::<Params>(),
+		constraint:      Constraint::Grammar {
+			syntax:         omp_tool::GrammarSyntax::Lark,
+			definition:     Str::new_static(
+				grammar(EditMode::Hashline).expect("hashline mode ships a grammar"),
+			),
+			priority:       100,
+			on_unsupported: omp_tool::Fallback::Unspecified,
+		},
+		effects:         Effects {
+			documents: Some(DocEffects {
+				read:        true,
+				write_globs: [sf!("**")].into_iter().collect(),
+			}),
+			exec:      None,
+			inference: None,
+			desktop:   None,
+			subagents: 0,
+		},
+		projection_code: omp_tool::native_projection_code(
+			env!("CARGO_PKG_NAME"),
+			env!("CARGO_PKG_VERSION"),
+			include_bytes!("edit.rs"),
+		)
+		.into(),
+	}
+}
+
 /// Constructs the built-in hashline edit tool.
 pub fn tool<D: EditDocuments>(
 	documents: D,
@@ -655,34 +741,7 @@ pub fn tool_with_observer<D: EditDocuments, S: EditSnapshotStore>(
 		format_policy,
 		observer,
 		guard_generated,
-		spec: ToolSpec {
-			name:            sf!("edit"),
-			rev:             Rev { family: sf!("hl"), n: 1 },
-			description:     sf!(DESCRIPTION),
-			schema:          omp_tool::schema::<Params>(),
-			constraint:      Constraint::Grammar {
-				syntax:         omp_tool::GrammarSyntax::Lark,
-				definition:     Str::new_static(omp_hashline::grammars::HASHLINE),
-				priority:       100,
-				on_unsupported: omp_tool::Fallback::Unspecified,
-			},
-			effects:         Effects {
-				documents: Some(DocEffects {
-					read:        true,
-					write_globs: [sf!("**")].into_iter().collect(),
-				}),
-				exec:      None,
-				inference: None,
-				desktop:   None,
-				subagents: 0,
-			},
-			projection_code: omp_tool::native_projection_code(
-				env!("CARGO_PKG_NAME"),
-				env!("CARGO_PKG_VERSION"),
-				include_bytes!("edit.rs"),
-			)
-			.into(),
-		},
+		spec: hashline_spec(),
 	}
 }
 
@@ -700,6 +759,12 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 		&'c self,
 		mut params: IncomingParams<'c>,
 	) -> impl Stream<Item = Ev<EditUpdate, Payload, Fault>> + Send + 'c {
+		let span = tracing::debug_span!(
+			"edit_execution",
+			revision = "hl.1",
+			path_count = tracing::field::Empty,
+			path = tracing::field::Empty,
+		);
 		stream! {
 			let Params { input } = match params.whole::<Params>().await {
 				Ok(params) => params,
@@ -711,7 +776,7 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 				return;
 			}
 
-			let patch = match Patch::parse_default(&input) {
+			let patch = match Patch::parse(&input, &SplitOptions::default()) {
 				Ok(patch) if !patch.sections.is_empty() => patch,
 				Ok(_) => {
 					yield done_fault(Fault::invalid("No hashline sections found in input."));
@@ -728,39 +793,47 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 					return;
 				},
 			};
+			span.record("path_count", patch.sections.len());
+			if let Some(section) = patch.sections.first() {
+				span.record("path", tracing::field::display(&section.path));
+			}
 
 			let mut parsed_sections = Vec::with_capacity(patch.sections.len());
-			for mut section in patch.sections {
+			for section in patch.sections {
 				let normalized = normalize_target(&section.path, None, HostPaths::current());
-				let mut canonical_recovery = normalized.recovery_notice();
-				section.path = normalized.canonical;
+				let mut diags = normalized.recovered().then(|| {
+					Diag::info(
+						DiagKind::PathRecovered,
+						sf!("{} -> {}", normalized.authored, normalized.canonical),
+					)
+				}).into_iter().collect::<Vec<_>>();
 				let mut parsed = match section.parse() {
-					Ok(parsed) => parsed,
+					Ok(parsed) => parsed.clone(),
 					Err(error) => { yield done_fault(Fault::invalid(error.to_string())); return; },
 				};
 				if let Some(FileOp::Move { dest }) = &mut parsed.file_op {
 					let normalized = normalize_target(dest, None, HostPaths::current());
-					if let Some(notice) = normalized.recovery_notice() {
-						canonical_recovery = Some(match canonical_recovery {
-							Some(existing) => sf!("{existing}\n{notice}"),
-							None => notice,
-						});
+					if normalized.recovered() {
+						diags.push(Diag::info(
+							DiagKind::PathRecovered,
+							sf!("{} -> {}", normalized.authored, normalized.canonical),
+						));
 					}
-					*dest = normalized.canonical;
+					*dest = normalized.canonical.to_string();
 				}
 				let anchors = match section.collect_anchor_lines() {
-					Ok(anchors) => anchors,
+					Ok(anchors) => anchors.into_iter().map(|line| line as usize).collect(),
 					Err(error) => { yield done_fault(Fault::invalid(error.to_string())); return; },
 				};
 				let request = PrepareRequest {
-					path: section.path.clone(),
-					file_hash: section.file_hash.clone(),
+					path: normalized.canonical,
+					file_hash: section.file_hash.as_deref().map(Str::new),
 					anchor_lines: anchors,
 					allow_unpinned: false,
 					allow_missing: false,
 					guard_generated: self.guard_generated,
 				};
-				let prepared = match self.documents.prepare(request).await {
+				let prepared = match self.documents.prepare(request).instrument(span.clone()).await {
 					Ok(prepared) => prepared,
 					Err(fault) => { yield done_fault(fault); return; },
 				};
@@ -773,10 +846,10 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 				}
 				parsed_sections.push(PreparedWork {
 					section_path: prepared.display_path().clone(),
-					file_hash: section.file_hash,
+					file_hash: section.file_hash.map(Into::into),
 					parsed,
 					prepared,
-					canonical_recovery,
+					diags,
 				});
 			}
 
@@ -787,79 +860,102 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 			let observer_args =
 				serde_json::to_value(Params { input: input.clone() }).unwrap_or_default();
 			for work in &parsed_sections {
-				let applied = match apply_parsed_patch(
-					work.prepared.authored_bytes().clone(), &work.parsed, &mut clipboard,
-					ApplyOptions { mode: ApplyMode::Strict, path: Some(work.prepared.path()) },
-				) {
+				let authored = match document_text(work.prepared.authored_bytes(), "authored document") {
+					Ok(text) => text,
+					Err(fault) => { yield done_fault(fault); return; },
+				};
+				let base = match document_text(work.prepared.base_bytes(), "current document") {
+					Ok(text) => text,
+					Err(fault) => { yield done_fault(fault); return; },
+				};
+				let applied = match apply_edits(&authored.text, &work.parsed.edits, ApplyOptions {
+					clipboard: Some(&mut clipboard),
+					path: Some(work.prepared.path()),
+					on_empty_paste: EmptyPaste::Throw,
+				}) {
 					Ok(applied) => applied,
 					Err(error) => { yield done_fault(Fault::invalid(error.to_string())); return; },
 				};
 
 				let stale = work.prepared.authored_bytes() != work.prepared.base_bytes();
 				let mut head_tail_drift = false;
+				let mut recovery_warnings = Vec::new();
+				let mut first_changed_line = applied.first_changed_line;
 				let mut after = if !stale {
-					applied.bytes.clone()
-				} else if is_head_tail_only(&work.parsed) {
-					match apply_parsed_patch(
-						work.prepared.base_bytes().clone(),
-						&work.parsed,
-						&mut Clipboard::default(),
-						ApplyOptions {
-							mode: ApplyMode::Strict,
-							path: Some(work.prepared.path()),
-						},
-					) {
+					restore_text(&applied.text, &authored)
+				} else if is_head_tail_only(&work.parsed.edits) {
+					match apply_edits(&base.text, &work.parsed.edits, ApplyOptions {
+						clipboard: None,
+						path: Some(work.prepared.path()),
+						on_empty_paste: EmptyPaste::Throw,
+					}) {
 						Ok(live) => {
 							head_tail_drift = true;
-							live.bytes
+							first_changed_line = live.first_changed_line;
+							restore_text(&live.text, &base)
 						},
 						Err(error) => {
+							tracing::warn!(
+								parent: &span,
+								path = %work.prepared.display_path(),
+								"edit head-tail rebase failed",
+							);
 							yield done_fault(Fault::invalid(error.to_string()));
 							return;
 						},
 					}
-				} else if applied.edits.is_empty() {
-					let message = stale_message(work, true);
-					yield done_fault(Fault::stale(message));
-					return;
+				} else if let Ok(Some(recovered)) = recover_text(
+					&authored.text,
+					&base.text,
+					&work.parsed.edits,
+					Some(&mut clipboard),
+					Some(work.prepared.path()),
+					RecoveryChain::Session,
+				) {
+					first_changed_line = recovered.first_changed_line;
+					recovery_warnings = recovered.warnings;
+					restore_text(&recovered.text, &base)
 				} else {
-					let recovery_edits = match recovery_edits(&applied.edits) {
-						Ok(edits) => edits,
-						Err(fault) => { yield done_fault(fault); return; },
-					};
-					match recover_exact(
-						work.prepared.authored_bytes(),
-						work.prepared.base_bytes(),
-						&recovery_edits,
-					) {
-						Ok(recovered) => match apply_live_recovery_edits(
-							work.prepared.base_bytes(),
-							recovered.live_edits(),
-						) {
-							Ok(content) => content,
-							Err(fault) => {
-								yield done_fault(fault);
-								return;
-							},
-						},
-						Err(_) => {
-							yield done_fault(Fault::stale(stale_message(work, true)));
-							return;
-						},
-					}
+					tracing::warn!(
+						parent: &span,
+						path = %work.prepared.display_path(),
+						"edit rebase overlapped a concurrent change",
+					);
+					yield done_fault(Fault::stale(stale_message(work, true)));
+					return;
 				};
-
-				let mut warnings = work.canonical_recovery.iter().cloned()
-					.chain(work.prepared.warnings().iter().cloned())
-					.chain(work.parsed.diagnostics.iter().map(|warning| warning.message.clone()))
-					.chain(applied.warnings.iter().map(|warning| Str::from(warning.to_string())))
-					.collect::<Vec<_>>();
-				if head_tail_drift {
-					warnings.push(Str::new_static(HEADTAIL_DRIFT_WARNING));
+				if stale {
+					tracing::warn!(
+						parent: &span,
+						path = %work.prepared.display_path(),
+						strategy = if head_tail_drift { "head_tail" } else { "non_overlapping" },
+						"edit rebased over a changed document",
+					);
 				}
-				if !matches!(work.parsed.file_op, Some(FileOp::Rem)) {
+
+				let mut diags = work.diags.clone();
+				diags.extend(work.prepared.path_recoveries().iter().map(path_recovery_diag));
+				diags.extend(
+					work.parsed
+						.warnings
+						.iter()
+						.chain(&applied.warnings)
+						.map(|warning| Diag::warn(DiagKind::Advisory, Str::new(warning))),
+				);
+				diags.extend(
+					recovery_warnings
+						.iter()
+						.map(|warning| Diag::warn(DiagKind::AnchorDrift, Str::new(warning))),
+				);
+				if head_tail_drift {
+					diags.push(Diag::warn(
+						DiagKind::AnchorDrift,
+						Str::new_static(HEADTAIL_DRIFT_WARNING),
+					));
+				}
+				if !matches!(&work.parsed.file_op, Some(FileOp::Rem)) {
 					let target = match &work.parsed.file_op {
-						Some(FileOp::Move { dest }) => dest.clone(),
+						Some(FileOp::Move { dest }) => Str::new(dest),
 						Some(FileOp::Rem) | None => work.prepared.path().clone(),
 					};
 					let inspected = self.observer.inspect(
@@ -870,15 +966,19 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 						},
 						"hashline",
 						&observer_args,
-					).await;
+					).instrument(span.clone()).await;
 					after = inspected.content;
-					warnings.extend(inspected.notice);
+					if let Err(fault) = utf8(&after, "edited document") {
+						yield done_fault(fault);
+						return;
+					}
+					diags.extend(inspected.diag);
 					pending_blackbox.extend(inspected.pending);
 				}
 				let action = match &work.parsed.file_op {
 					Some(FileOp::Rem) => EditAction::Delete,
 					Some(FileOp::Move { dest }) => EditAction::Move {
-						destination: dest.clone(), content: after.clone(),
+						destination: Str::new(dest), content: after.clone(),
 					},
 					None => EditAction::Write { content: after.clone() },
 				};
@@ -889,12 +989,19 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 				projections.push(ProjectionWork {
 					after,
 					applied_ops: op_details(&work.parsed.edits),
-					first_changed_line: applied.first_changed_line,
+					first_changed_line: first_changed_line.map(|line| line as usize),
 					block_resolutions: applied.block_resolutions.into_iter().map(|resolution| ResolvedBlock {
-						anchor_line: resolution.anchor_line, start: resolution.start, end: resolution.end,
-						operation: Str::new_static(resolution.mode.into()),
+						anchor_line: resolution.anchor_line as usize,
+						start: resolution.start as usize,
+						end: resolution.end as usize,
+						operation: Str::new_static(match resolution.op {
+							BlockOpKind::Replace => "replace",
+							BlockOpKind::InsertAfter => "insert_after",
+							BlockOpKind::Cut => "cut",
+							BlockOpKind::PasteAfter => "paste_after",
+						}),
 					}).collect(),
-					warnings,
+					diags,
 				});
 			}
 
@@ -902,15 +1009,18 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 			let mut added_lines = 0;
 			let mut removed_lines = 0;
 			for (work, projection) in parsed_sections.iter().zip(&projections) {
-				let Ok(diff) = numbered_diff(
-					work.prepared.base_bytes(),
-					&projection.after,
-					Some(Path::new(work.section_path.as_str())),
-				) else {
+				let Ok(base) = document_text(work.prepared.base_bytes(), "current document") else {
 					continue;
 				};
+				let Ok(after) = document_text(&projection.after, "edited document") else {
+					continue;
+				};
+				let diff = generate_diff_string(&base.text, &after.text, None, &BlockContextSource {
+					path: Some(work.section_path.as_str()),
+					lang: None,
+				});
 				let compact =
-					build_compact_diff_preview(diff.text.as_str(), CompactDiffOptions::default());
+					build_compact_diff_preview(diff.diff.as_str(), &CompactDiffOptions::default());
 				if !preview.is_empty() && !compact.preview.is_empty() {
 					preview.push('\n');
 				}
@@ -957,6 +1067,9 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 							return;
 						},
 					};
+					for diag in &projections[0].diags {
+						yield Ev::Diag(diag.clone());
+					}
 					yield Ev::Done(ToolTerminal::Done { result: Ok(payload), useless: true });
 				}
 				return;
@@ -974,7 +1087,7 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 			let result = {
 				let prepared =
 					parsed_sections.iter_mut().map(|work| &mut work.prepared).collect();
-				let commit = self.documents.commit(prepared, proposals, clipboard).fuse();
+				let commit = self.documents.commit(prepared, proposals, clipboard).instrument(span.clone()).fuse();
 				let interrupt = params.next_interrupt().fuse();
 				pin_mut!(commit, interrupt);
 				let result = select_biased! {
@@ -993,6 +1106,21 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 			let Some(result) = result else { return; };
 			match result {
 				Ok(result) if result.sections.len() == parsed_sections.len() => {
+					for (work, committed) in parsed_sections.iter().zip(&result.sections) {
+						if let Some(content) = &committed.content
+							&& let Err(fault) = utf8(content, "committed document")
+						{
+							yield done_fault(fault);
+							return;
+						}
+						if committed.rebased {
+							tracing::warn!(
+								parent: &span,
+								path = %work.prepared.display_path(),
+								"edit transaction rebased a concurrent change",
+							);
+						}
+					}
 					for work in &parsed_sections {
 						self.documents.reset_noop(work.prepared.path());
 					}
@@ -1013,11 +1141,22 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 					for pending in pending_blackbox {
 						self.observer.record_committed(pending).await;
 					}
+					for projection in &projections {
+						for diag in &projection.diags {
+							yield Ev::Diag(diag.clone());
+						}
+					}
 					yield Ev::Done(ToolTerminal::Done { result: Ok(payload), useless: false });
 				},
 				Ok(_) => yield Ev::Aborted(Abort::EffectsUnknown { reason: sf!("document transaction returned the wrong section count") }),
-				Err(EditCommitError::Rejected(fault)) => yield done_fault(fault),
-				Err(EditCommitError::EffectsUnknown { reason }) => yield Ev::Aborted(Abort::EffectsUnknown { reason }),
+				Err(EditCommitError::Rejected(fault)) => {
+					warn_edit_rejection(&span, &fault);
+					yield done_fault(fault);
+				},
+				Err(EditCommitError::EffectsUnknown { reason }) => {
+					tracing::warn!(parent: &span, "edit commit result is unknown");
+					yield Ev::Aborted(Abort::EffectsUnknown { reason });
+				},
 			}
 		}
 	}
@@ -1051,7 +1190,6 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 							move_dest:         section.move_dest.as_deref(),
 							preview:           &section.preview,
 							block_resolutions: &section.block_resolutions,
-							warnings:          &section.warnings,
 						})
 					})
 					.collect::<Vec<_>>();
@@ -1070,13 +1208,17 @@ impl<D: EditDocuments, S: EditSnapshotStore> Tool for EditTool<D, S> {
 }
 
 fn lift_replace_to_hashline(from: &Rev, call: RecordedCall<'_>) -> Option<LiftedCall> {
-	if from.family.as_str() != "rep" || from.n != 1 {
+	if from.family.as_str() != "rep" || !matches!(from.n, 1 | 2) {
 		return None;
 	}
-	// Decode the historical arguments to prove the source dialect. Anchors
-	// come from the dialect-neutral resolved outcome, never from old search
-	// strings, which may have matched fuzzily.
-	serde_json::from_slice::<ReplaceParams>(call.raw_args).ok()?;
+	// Decode the source revision to prove the dialect. Anchors come from the
+	// dialect-neutral resolved outcome, never from old search strings, which
+	// may have matched fuzzily.
+	if from.n == 1 {
+		serde_json::from_slice::<LegacyReplaceParams>(call.raw_args).ok()?;
+	} else {
+		serde_json::from_slice::<ReplaceParams>(call.raw_args).ok()?;
+	}
 	let outcome = serde_json::from_slice::<CallOutcome<Payload, Fault>>(call.verdict).ok()?;
 	let input = match outcome {
 		CallOutcome::Ok(payload) => payload
@@ -1084,10 +1226,10 @@ fn lift_replace_to_hashline(from: &Rev, call: RecordedCall<'_>) -> Option<Lifted
 			.iter()
 			.filter(|section| !section.resolved_edits.is_empty())
 			.map(|section| {
-				let mut section_input = format!(
-					"{}\n",
-					format_hashline_header(&section.path, &compute_snapshot_tag(&section.before))
-				);
+				let before = document_text(&section.before, "replacement outcome source")
+					.expect("replacement outcome source is UTF-8");
+				let mut section_input =
+					format!("{}\n", format_hashline_header(&section.path, &file_hash(&before.text)));
 				for edit in &section.resolved_edits {
 					if edit.body.is_empty() {
 						let _ = writeln!(section_input, "CUT {}.={}", edit.start, edit.end);
@@ -1112,11 +1254,11 @@ fn lift_replace_to_hashline(from: &Rev, call: RecordedCall<'_>) -> Option<Lifted
 }
 
 struct PreparedWork<P> {
-	section_path:       Str,
-	file_hash:          Option<Str>,
-	parsed:             omp_hashline::ParsedPatch,
-	prepared:           P,
-	canonical_recovery: Option<Str>,
+	section_path: Str,
+	file_hash:    Option<Str>,
+	parsed:       Parsed,
+	prepared:     P,
+	diags:        Vec<Diag>,
 }
 
 struct ProjectionWork {
@@ -1124,70 +1266,63 @@ struct ProjectionWork {
 	applied_ops:        Vec<AppliedOp>,
 	first_changed_line: Option<usize>,
 	block_resolutions:  Vec<ResolvedBlock>,
-	warnings:           Vec<Str>,
+	diags:              Vec<Diag>,
 }
 
-fn apply_live_recovery_edits(live: &Bytes, edits: &[ExactByteEdit]) -> Result<Bytes, Fault> {
-	let mut output = Vec::with_capacity(live.len());
-	let mut cursor = 0usize;
-	for edit in edits {
-		let range = edit.range();
-		let start = usize::try_from(range.start())
-			.map_err(|_| Fault::invalid("recovered edit byte offset overflow"))?;
-		let end = usize::try_from(range.end())
-			.map_err(|_| Fault::invalid("recovered edit byte offset overflow"))?;
-		if start < cursor || end < start || end > live.len() {
-			return Err(Fault::invalid("recovered edits overlap or exceed the live document"));
-		}
-		output.extend_from_slice(&live[cursor..start]);
-		output.extend_from_slice(edit.replacement());
-		cursor = end;
-	}
-	output.extend_from_slice(&live[cursor..]);
-	Ok(Bytes::from(output))
+fn path_recovery_diag(recovery: &PathRecovery) -> Diag {
+	Diag::info(DiagKind::PathRecovered, sf!("{} -> {}", recovery.authored, recovery.resolved))
 }
 
-fn recovery_edits(edits: &[omp_hashline::ByteEdit]) -> Result<Vec<RecoveryEdit>, Fault> {
-	edits
-		.iter()
-		.map(|edit| {
-			let start =
-				u64::try_from(edit.start).map_err(|_| Fault::invalid("edit byte offset overflow"))?;
-			let end =
-				u64::try_from(edit.end).map_err(|_| Fault::invalid("edit byte offset overflow"))?;
-			let range =
-				ByteRange::new(start, end).map_err(|error| Fault::invalid(error.to_string()))?;
-			Ok(RecoveryEdit::new(range, edit.replacement.clone()))
-		})
-		.collect()
+fn utf8<'a>(bytes: &'a Bytes, what: &str) -> Result<&'a str, Fault> {
+	std::str::from_utf8(bytes).map_err(|_| Fault::invalid(format!("{what} is not valid UTF-8")))
+}
+
+struct DocumentText {
+	text:   String,
+	bom:    &'static str,
+	ending: LineEnding,
+}
+
+fn document_text(bytes: &Bytes, what: &str) -> Result<DocumentText, Fault> {
+	let raw = utf8(bytes, what)?;
+	let (bom, body) = strip_bom(raw);
+	Ok(DocumentText {
+		text: normalize_to_lf(body).into_owned(),
+		bom,
+		ending: detect_line_ending(body),
+	})
+}
+
+fn restore_text(text: &str, shape: &DocumentText) -> Bytes {
+	let body = restore_line_endings(text, shape.ending);
+	let mut restored = String::with_capacity(shape.bom.len() + body.len());
+	restored.push_str(shape.bom);
+	restored.push_str(&body);
+	Bytes::from(restored)
 }
 
 fn stale_message<P: EditPrepared>(work: &PreparedWork<P>, recognized: bool) -> Str {
-	let lines = String::from_utf8_lossy(work.prepared.base_bytes())
-		.lines()
-		.map(Str::new)
-		.collect();
+	let current = document_text(work.prepared.base_bytes(), "current document")
+		.expect("current edit document was validated as UTF-8");
+	let lines = current.text.lines().map(str::to_owned).collect();
 	let anchors = work
 		.parsed
 		.edits
 		.iter()
 		.filter_map(|edit| match edit {
-			omp_hashline::Edit::Delete { anchor, .. } | omp_hashline::Edit::Block { anchor, .. } => {
-				Some(anchor.line)
-			},
-			omp_hashline::Edit::Cut { range, .. } => Some(range.start.line),
-			omp_hashline::Edit::Paste { .. } | omp_hashline::Edit::Insert { .. } => None,
+			Edit::Delete { anchor, .. } | Edit::Block { anchor, .. } => Some(anchor.line),
+			Edit::Cut { range, .. } => Some(range.start.line),
+			Edit::Paste { .. } | Edit::Insert { .. } => None,
 		})
 		.collect();
-	MismatchError::new(MismatchDetails {
-		path:               Some(work.section_path.clone()),
-		expected_file_hash: work.file_hash.clone().unwrap_or_default(),
-		actual_file_hash:   compute_snapshot_tag(work.prepared.base_bytes()),
+	format_mismatch_message(&MismatchDetails {
+		path:               Some(work.section_path.to_string()),
+		expected_file_hash: work.file_hash.as_deref().unwrap_or_default().to_owned(),
+		actual_file_hash:   file_hash(&current.text),
 		file_lines:         lines,
 		anchor_lines:       anchors,
 		hash_recognized:    recognized,
 	})
-	.to_string()
 	.into()
 }
 
@@ -1201,10 +1336,10 @@ async fn build_payload<P: EditPrepared, S: EditSnapshotStore>(
 	let mut inline_remaining = MAX_EDIT_SNAPSHOT_INLINE_BYTES;
 	for (index, (work, projection)) in works.iter().zip(projections).enumerate() {
 		let move_dest = match &work.parsed.file_op {
-			Some(FileOp::Move { dest }) => Some(dest.clone()),
+			Some(FileOp::Move { dest }) => Some(Str::new(dest)),
 			_ => None,
 		};
-		let op = match work.parsed.file_op {
+		let op = match &work.parsed.file_op {
 			Some(FileOp::Rem) => SectionOp::Delete,
 			Some(FileOp::Move { .. }) => SectionOp::Move,
 			None if work.prepared.base_bytes() == &projection.after => SectionOp::Noop,
@@ -1219,18 +1354,21 @@ async fn build_payload<P: EditPrepared, S: EditSnapshotStore>(
 				.and_then(|section| section.content.clone())
 				.unwrap_or_else(|| projection.after.clone())
 		};
+		let before_text = document_text(work.prepared.base_bytes(), "current document")
+			.expect("prepared edit document was validated as UTF-8");
+		let after_text = document_text(&exact_after, "edited document")
+			.expect("edited document was validated as UTF-8");
 		let header = (op != SectionOp::Delete)
-			.then(|| format_hashline_header(output_path, &compute_snapshot_tag(&exact_after)));
-		let numbered = numbered_diff(
-			work.prepared.base_bytes(),
-			&exact_after,
-			Some(Path::new(output_path.as_str())),
-		)
-		.ok();
-		let diff = numbered
-			.as_ref()
-			.map_or_else(Str::default, |diff| diff.text.clone());
-		let preview = build_compact_diff_preview(&diff, CompactDiffOptions::default()).preview;
+			.then(|| format_hashline_header(output_path, &file_hash(&after_text.text)).into());
+		let numbered =
+			generate_diff_string(&before_text.text, &after_text.text, None, &BlockContextSource {
+				path: Some(output_path.as_str()),
+				lang: None,
+			});
+		let diff = Str::from(numbered.diff);
+		let preview = build_compact_diff_preview(&diff, &CompactDiffOptions::default())
+			.preview
+			.into();
 		let exact_before = work.prepared.base_bytes().clone();
 		let (before, before_blob, after, after_blob) =
 			retain_snapshot_pair(snapshots, exact_before, exact_after, &mut inline_remaining).await?;
@@ -1253,7 +1391,6 @@ async fn build_payload<P: EditPrepared, S: EditSnapshotStore>(
 			preview,
 			first_changed_line: projection.first_changed_line,
 			block_resolutions: projection.block_resolutions.clone(),
-			warnings: projection.warnings.clone(),
 			diagnostics: committed_section
 				.map_or_else(Vec::new, |section| section.diagnostics.clone()),
 			diagnostics_complete: committed_section.is_none_or(|section| section.diagnostics_complete),
@@ -1297,19 +1434,33 @@ fn snapshot_fault_reason(fault: SnapshotFault) -> Str {
 	}
 }
 
-fn op_details(edits: &[omp_hashline::Edit]) -> Vec<AppliedOp> {
+fn op_details(edits: &[Edit]) -> Vec<AppliedOp> {
 	edits
 		.iter()
 		.map(|edit| AppliedOp {
 			kind:       Str::new_static(edit.into()),
-			patch_line: edit.line_num(),
-			index:      edit.index(),
+			patch_line: edit.line_num() as usize,
+			index:      edit.index() as usize,
 		})
 		.collect()
 }
 
 const fn done_fault(fault: Fault) -> Ev<EditUpdate, Payload, Fault> {
 	Ev::Done(ToolTerminal::Done { result: Err(fault), useless: false })
+}
+pub(super) fn warn_edit_rejection(span: &tracing::Span, fault: &Fault) {
+	let reason = match &fault.reason {
+		RejectionReason::Conflict => "conflict",
+		RejectionReason::StaleUnrecoverable { .. } => "stale_unrecoverable",
+		RejectionReason::Format { .. } => "format",
+		RejectionReason::InvalidPatch { .. } => "invalid_patch",
+	};
+	tracing::warn!(
+		parent: span,
+		reason = reason,
+		conflict_count = fault.conflicts.len(),
+		"edit transaction rejected",
+	);
 }
 
 fn param_event(error: ParamError) -> Ev<EditUpdate, Payload, Fault> {
@@ -1386,12 +1537,12 @@ mod tests {
 
 	#[test]
 	fn revision_cascade_is_registered_and_caps_derived() {
-		let model = Rev { family: "rep".into(), n: 1 };
+		let model = Rev { family: "rep".into(), n: 2 };
 		let pinned = Rev { family: "hl".into(), n: 1 };
 		let resolved = resolve_edit_revision(EditRevisionCandidates {
 			model_rule:     Some(&model),
 			environment:    Some("hl.1"),
-			setting:        Some("rep.1"),
+			setting:        Some("rep.2"),
 			pin:            Some(&pinned),
 			force_hashline: false,
 			strict:         true,
@@ -1420,7 +1571,7 @@ mod tests {
 		);
 		assert_eq!(
 			resolve_edit_revision(EditRevisionCandidates {
-				environment: Some("rep.1"),
+				environment: Some("rep.2"),
 				setting: Some("hl.1"),
 				..EditRevisionCandidates::default()
 			})
@@ -1430,7 +1581,7 @@ mod tests {
 		);
 		assert_eq!(
 			resolve_edit_revision(EditRevisionCandidates {
-				setting: Some("rep.1"),
+				setting: Some("rep.2"),
 				..EditRevisionCandidates::default()
 			})
 			.expect("setting revision")
@@ -1454,7 +1605,7 @@ mod tests {
 				..EditRevisionCandidates::default()
 			}),
 			Err(
-				"unknown edit revision \"unknown.7\"; use hl.1, rep.1, patch.1, apply_patch.1, or \
+				"unknown edit revision \"unknown.7\"; use hl.1, rep.2, patch.2, apply_patch.1, or \
 				 sloppy.1"
 					.into()
 			)
@@ -1487,21 +1638,19 @@ mod tests {
 				before_blob:          None,
 				after:                Bytes::from_static(b"one\nTWO\n"),
 				after_blob:           None,
-				header:               Some(format_hashline_header(
-					"a.txt",
-					&compute_snapshot_tag(b"one\nTWO\n"),
-				)),
+				header:               Some(
+					format_hashline_header("a.txt", &file_hash("one\nTWO\n")).into(),
+				),
 				diff:                 Str::default(),
 				preview:              Str::default(),
 				first_changed_line:   Some(2),
 				block_resolutions:    Vec::new(),
-				warnings:             Vec::new(),
 				diagnostics:          Vec::new(),
 				diagnostics_complete: true,
 			}],
 		};
-		let args = ReplaceParams {
-			edits: vec![replace::ReplaceOperation {
+		let args = LegacyReplaceParams {
+			edits: vec![LegacyReplaceOperation {
 				path:        "a.txt".into(),
 				old:         "two".into(),
 				new:         "TWO".into(),
@@ -1521,7 +1670,7 @@ mod tests {
 			serde_json::from_slice(&lifted.raw_args).expect("hashline lift arguments");
 		assert_eq!(
 			lifted_args.input,
-			format!("[a.txt#{}]\nPUT 2.=2:\n+TWO\n", compute_snapshot_tag(&before))
+			format!("[a.txt#{}]\nPUT 2.=2:\n+TWO\n", file_hash("one\ntwo\n"))
 		);
 		assert_eq!(lifted.verdict.as_ref(), verdict.as_slice());
 	}
@@ -1595,7 +1744,14 @@ mod tests {
 		let mut registry = Registry::new();
 		registry
 			.register(
-				replace_tool(NoDocuments, FormatPolicy::BestEffort),
+				legacy_replace_tool_with_observer(
+					NoDocuments,
+					FormatPolicy::BestEffort,
+					EditObserver::default(),
+					true,
+					true,
+					false,
+				),
 				Presentation::Slot,
 				claims.clone(),
 			)
@@ -1603,7 +1759,7 @@ mod tests {
 		registry
 			.register(tool(NoDocuments, FormatPolicy::BestEffort), Presentation::Slot, claims)
 			.expect("register live hashline destination");
-		let source_args = serde_json::to_vec(&ReplaceParams { edits: Vec::new() })
+		let source_args = serde_json::to_vec(&LegacyReplaceParams { edits: Vec::new() })
 			.expect("serialize replacement source args");
 		let source_verdict =
 			serde_json::to_vec(&CallOutcome::<Payload, Fault>::Faulted(Fault::invalid("no match")))

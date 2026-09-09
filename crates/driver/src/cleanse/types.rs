@@ -119,7 +119,7 @@ pub struct FileIssues {
 	pub file:        Option<Str>,
 	/// Complete diagnostics for the file.
 	pub diagnostics: Vec<Diagnostic>,
-	/// Pi-compatible severity/detail weight.
+	/// Severity/detail weight.
 	pub weight:      u64,
 }
 
@@ -137,9 +137,9 @@ pub struct Assignment {
 /// User-facing cleanse options.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CleanseArgs {
-	/// Maximum file-disjoint repair agents. Pi default: 32.
+	/// Maximum file-disjoint repair agents. Default: 32.
 	pub agents:  usize,
-	/// Repair/discovery model selector. Pi default: `@smol`.
+	/// Repair/discovery model selector. Default: `@smol`.
 	pub model:   Str,
 	/// Include configured project tests.
 	pub tests:   bool,

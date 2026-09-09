@@ -5,9 +5,13 @@ if "__omp_prelude_loaded__" not in globals():
     __omp_prelude_loaded__ = True
     from pathlib import Path
     import os, json, math, re
+    import asyncio as _asyncio
+    import collections.abc as _collections_abc
     import inspect as _inspect
     import keyword as _keyword
-    from urllib.parse import unquote
+    import types as _types
+    import typing as _typing
+    from urllib.parse import quote as _url_quote, unquote
 
     INTENT_FIELD = "i"
 
@@ -231,7 +235,12 @@ if "__omp_prelude_loaded__" not in globals():
         offset: int | None = None,
         limit: int | None = None,
     ) -> str | dict | list[dict]:
-        """Read task/agent output by ID. Returns text or JSON depending on format.
+        """Read current task, job, or CAS output through the host Read authority.
+
+        Plain IDs resolve through ``agent://`` against the journal-derived live
+        session/job projection. Explicit ``agent://`` and ``artifact://sha256/``
+        addresses are passed through unchanged. This helper never derives a
+        legacy sidecar path from the session journal.
 
         Args:
             *ids: Output IDs to read (e.g., 'scout_0', 'reviewer_1')
@@ -251,22 +260,6 @@ if "__omp_prelude_loaded__" not in globals():
             output('scout_0', offset=10, limit=20)  # Lines 10-29
             output('scout_0', 'reviewer_1')  # Read multiple outputs
         """
-        # Prefer the namespace-scoped artifacts directory so concurrent eval
-        # sessions do not mutate process-wide environment. Fall back to the
-        # same OMP-prefixed environment contract for standalone kernels.
-        artifacts_dir = globals().get("OMP_ARTIFACTS_DIR") or os.environ.get("OMP_ARTIFACTS_DIR")
-        if not artifacts_dir:
-            session_file = globals().get("OMP_SESSION_FILE") or os.environ.get("OMP_SESSION_FILE")
-            if not session_file:
-                _emit_status("output", error="No session file available")
-                raise RuntimeError("No session - output artifacts unavailable")
-            artifacts_dir = session_file.rsplit(".", 1)[0]  # Strip .jsonl extension
-        if not Path(artifacts_dir).exists():
-            _emit_status(
-                "output", error="Artifacts directory not found", path=artifacts_dir
-            )
-            raise RuntimeError(f"No artifacts directory found: {artifacts_dir}")
-
         if not ids:
             _emit_status("output", error="No IDs provided")
             raise ValueError("At least one output ID is required")
@@ -279,12 +272,61 @@ if "__omp_prelude_loaded__" not in globals():
         not_found: list[str] = []
 
         for output_id in ids:
-            output_path = Path(artifacts_dir) / f"{output_id}.md"
-            if not output_path.exists():
+            if not isinstance(output_id, str) or not output_id:
+                raise TypeError("output IDs must be nonempty strings")
+            output_uri = (
+                output_id
+                if _OMP_INTERNAL_URL_RE.match(output_id)
+                else f"agent://{_url_quote(output_id, safe='@._-')}"
+            )
+            delegated_range = (
+                output_uri.lower().startswith("artifact://")
+                and query is None
+                and (offset is not None or limit is not None)
+            )
+            if delegated_range:
+                selector = _read_line_selector(offset or 1, limit)
+                read_uri = output_uri + (f":{selector}" if selector is not None else ":raw")
+            else:
+                read_uri = (
+                    output_uri
+                    if (
+                        "?" in output_uri
+                        or output_uri.endswith(":raw")
+                        or not output_uri.lower().startswith(("agent://", "artifact://"))
+                    )
+                    else output_uri + ":raw"
+                )
+            try:
+                resolved = (
+                    ""
+                    if delegated_range and limit is not None and limit <= 0
+                    else _read_tool_text(read_uri)
+                )
+            except Exception:
                 not_found.append(output_id)
                 continue
 
-            raw_content = output_path.read_text(encoding="utf-8")
+            # agent:// returns a journal-derived envelope so callers can query
+            # metadata while raw mode retains the historical final-output
+            # behavior. artifact:// returns the CAS body directly.
+            envelope = None
+            if output_uri.lower().startswith("agent://"):
+                try:
+                    candidate = json.loads(resolved)
+                    if isinstance(candidate, dict):
+                        envelope = candidate
+                except (json.JSONDecodeError, TypeError):
+                    pass
+            raw_value = (
+                envelope.get("output")
+                if envelope is not None and "output" in envelope
+                else resolved
+            )
+            if isinstance(raw_value, str):
+                raw_content = raw_value
+            else:
+                raw_content = json.dumps(raw_value, ensure_ascii=False)
             raw_lines = raw_content.splitlines()
             total_lines = len(raw_lines)
 
@@ -311,6 +353,14 @@ if "__omp_prelude_loaded__" not in globals():
                     selected_content = str(result_value)
 
             # Handle offset/limit
+            elif delegated_range:
+                start_line = max(1, offset or 1)
+                end_line = start_line + max(0, total_lines - 1)
+                range_info = {
+                    "start_line": start_line,
+                    "end_line": end_line,
+                    "total_lines": None,
+                }
             elif offset is not None or limit is not None:
                 start_line = max(1, offset or 1)
                 if start_line > total_lines:
@@ -345,7 +395,7 @@ if "__omp_prelude_loaded__" not in globals():
             if format == "json":
                 result_data = {
                     "id": output_id,
-                    "path": str(output_path),
+                    "uri": output_uri,
                     "line_count": total_lines
                     if not query
                     else len(selected_content.splitlines()),
@@ -354,6 +404,10 @@ if "__omp_prelude_loaded__" not in globals():
                     else len(selected_content),
                     "content": selected_content,
                 }
+                if envelope is not None:
+                    for key in ("kind", "status", "data", "result"):
+                        if key in envelope:
+                            result_data[key] = envelope[key]
                 if range_info:
                     result_data["range"] = range_info
                 if query:
@@ -364,13 +418,8 @@ if "__omp_prelude_loaded__" not in globals():
 
         # Handle not found
         if not_found:
-            available = sorted([f.stem for f in Path(artifacts_dir).glob("*.md")])
             error_msg = f"Output not found: {', '.join(not_found)}"
-            if available:
-                error_msg += f"\n\nAvailable outputs: {', '.join(available[:20])}"
-                if len(available) > 20:
-                    error_msg += f" (and {len(available) - 20} more)"
-            _emit_status("output", not_found=not_found, available_count=len(available))
+            _emit_status("output", not_found=not_found)
             raise FileNotFoundError(error_msg)
 
         # Return format
@@ -494,10 +543,265 @@ if "__omp_prelude_loaded__" not in globals():
                 merged[INTENT_FIELD] = "py prelude"
             return _bridge_call(self._name, merged)
 
+    def _eval_tool_annotation_schema(annotation) -> dict:
+        """Map the useful subset of Python annotations to JSON Schema."""
+        if annotation is _inspect.Parameter.empty or annotation is _typing.Any:
+            return {}
+        origin = _typing.get_origin(annotation)
+        args = _typing.get_args(annotation)
+        if origin is _typing.Annotated:
+            schema = _eval_tool_annotation_schema(args[0])
+            description = next((item for item in args[1:] if isinstance(item, str)), None)
+            return {**schema, "description": description} if description is not None else schema
+        if origin is _typing.Literal:
+            return {"enum": list(args)}
+        if origin in (_typing.Union, _types.UnionType):
+            non_null = [item for item in args if item is not type(None)]
+            if len(non_null) == 1 and len(non_null) != len(args):
+                return {
+                    "anyOf": [
+                        _eval_tool_annotation_schema(non_null[0]),
+                        {"type": "null"},
+                    ]
+                }
+            return {}
+        if annotation is str:
+            return {"type": "string"}
+        if annotation is int:
+            return {"type": "integer"}
+        if annotation is float:
+            return {"type": "number"}
+        if annotation is bool:
+            return {"type": "boolean"}
+        array_origins = {list, tuple, set, _collections_abc.Sequence}
+        if annotation in array_origins or origin in array_origins:
+            schema = {"type": "array"}
+            if args:
+                schema["items"] = _eval_tool_annotation_schema(args[0])
+            return schema
+        object_origins = {dict, _collections_abc.Mapping}
+        if annotation in object_origins or origin in object_origins:
+            schema = {"type": "object"}
+            if len(args) >= 2:
+                schema["additionalProperties"] = _eval_tool_annotation_schema(args[1])
+            return schema
+        return {}
+
+    def _eval_tool_schema(fn) -> dict:
+        """Infer one eval-defined tool's closed object schema."""
+        signature = _inspect.signature(fn)
+        try:
+            hints = _typing.get_type_hints(fn, include_extras=True)
+        except Exception:
+            hints = getattr(fn, "__annotations__", {})
+        properties = {}
+        required = []
+        for parameter in signature.parameters.values():
+            if parameter.kind is _inspect.Parameter.POSITIONAL_ONLY:
+                raise TypeError("tool parameters must be keyword-capable")
+            if parameter.kind in (
+                _inspect.Parameter.VAR_POSITIONAL,
+                _inspect.Parameter.VAR_KEYWORD,
+            ):
+                continue
+            schema = _eval_tool_annotation_schema(
+                hints.get(parameter.name, parameter.annotation)
+            )
+            if parameter.default is _inspect.Parameter.empty:
+                required.append(parameter.name)
+            else:
+                try:
+                    json.dumps(parameter.default)
+                except (TypeError, ValueError):
+                    pass
+                else:
+                    schema = {**schema, "default": parameter.default}
+            properties[parameter.name] = schema
+        return {
+            "type": "object",
+            "properties": properties,
+            "required": required,
+            "additionalProperties": False,
+        }
+
+    class _EvalDefinedTool:
+        """One process-local handler plus its immutable advertised contract."""
+
+        __slots__ = (
+            "name",
+            "fn",
+            "description",
+            "parameters",
+            "rev",
+            "handler",
+        )
+
+        def __init__(
+            self,
+            name,
+            fn,
+            description,
+            parameters,
+            rev,
+            handler,
+        ):
+            self.name = name
+            self.fn = fn
+            self.description = description
+            self.parameters = parameters
+            self.rev = rev
+            self.handler = handler
+
+        def describe(self, generation) -> dict:
+            return {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.parameters,
+                "rev": self.rev,
+                "handler": self.handler,
+                "generation": generation,
+            }
+
+    __omp_eval_tools__: dict[str, _EvalDefinedTool] = {}
+    __omp_eval_tool_generation__ = 0
+    globals()["__omp_eval_tools__"] = __omp_eval_tools__
+
+    def _eval_tool_jsonable(value):
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        if isinstance(value, dict):
+            return {str(key): _eval_tool_jsonable(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple, set)):
+            return [_eval_tool_jsonable(item) for item in value]
+        return repr(value)
+
+    def __omp_eval_tool_request__(request):
+        """Describe or invoke a generation-fenced handler in this namespace."""
+        if not isinstance(request, dict):
+            return {"ok": False, "error": "eval tool request must be an object"}
+        operation = request.get("op")
+        if operation == "describe":
+            requested = request.get("names")
+            if requested is None or requested == []:
+                requested = list(__omp_eval_tools__)
+            if not isinstance(requested, list) or not all(
+                isinstance(name, str) for name in requested
+            ):
+                return {"ok": False, "error": "eval tool names must be strings"}
+            return {
+                "ok": True,
+                "generation": __omp_eval_tool_generation__,
+                "tools": [
+                    __omp_eval_tools__[name].describe(
+                        __omp_eval_tool_generation__
+                    )
+                    for name in requested
+                    if name in __omp_eval_tools__
+                ],
+                "missing": [
+                    name for name in requested if name not in __omp_eval_tools__
+                ],
+            }
+        if operation != "call":
+            return {"ok": False, "error": f"unknown eval tool operation {operation!r}"}
+        name = request.get("name")
+        spec = __omp_eval_tools__.get(name)
+        if spec is None:
+            return {"ok": False, "error": f"eval tool {name!r} is not defined"}
+        if (
+            request.get("generation") != __omp_eval_tool_generation__
+            or request.get("rev") != spec.rev
+            or request.get("handler") != spec.handler
+        ):
+            return {
+                "ok": False,
+                "error": f"eval tool {name!r} registration is stale",
+            }
+        args = request.get("args")
+        if not isinstance(args, dict):
+            return {"ok": False, "error": "eval tool arguments must be an object"}
+        try:
+            value = spec.fn(**args)
+            if _inspect.isawaitable(value):
+                value = _asyncio.run(value)
+            return {"ok": True, "value": _eval_tool_jsonable(value)}
+        except BaseException as error:
+            return {
+                "ok": False,
+                "error": f"{type(error).__name__}: {error}",
+            }
+
     class _ToolProxy:
-        """`tool.<name>(args)` proxy mirroring the JS runtime bridge."""
+        """Define eval tools or invoke host tools through one stable surface."""
 
         __slots__ = ()
+
+        def __call__(
+            self,
+            fn=None,
+            /,
+            *,
+            name=None,
+            description=None,
+            rev=1,
+        ):
+            if fn is None:
+                return lambda decorated: self(
+                    decorated,
+                    name=name,
+                    description=description,
+                    rev=rev,
+                )
+            if not callable(fn):
+                raise TypeError("@tool expects a function")
+            resolved_name = name or getattr(fn, "__name__", "")
+            if (
+                not isinstance(resolved_name, str)
+                or re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", resolved_name)
+                is None
+            ):
+                raise ValueError(f"invalid tool name {resolved_name!r}")
+            if (
+                not isinstance(rev, int)
+                or isinstance(rev, bool)
+                or rev <= 0
+                or rev > 65535
+            ):
+                raise ValueError("tool revision must be an integer from 1 through 65535")
+            schema = _eval_tool_schema(fn)
+            resolved_description = (
+                description
+                if isinstance(description, str) and description
+                else _inspect.getdoc(fn) or f"Python tool {resolved_name}"
+            )
+            global __omp_eval_tool_generation__
+            __omp_eval_tool_generation__ += 1
+            handler = os.urandom(16).hex()
+            __omp_eval_tools__[resolved_name] = _EvalDefinedTool(
+                resolved_name,
+                fn,
+                resolved_description,
+                schema,
+                rev,
+                handler,
+            )
+            _emit_status(
+                "tool_define",
+                name=resolved_name,
+                rev=rev,
+                params=list(schema["properties"]),
+            )
+            return fn
+
+        def defined(self) -> list[str]:
+            return list(__omp_eval_tools__)
+
+        def undefine(self, name) -> bool:
+            global __omp_eval_tool_generation__
+            removed = __omp_eval_tools__.pop(name, None) is not None
+            if removed:
+                __omp_eval_tool_generation__ += 1
+            return removed
 
         def __getattr__(self, name: str) -> _ToolCallable:
             if name.startswith("_"):
@@ -610,6 +914,91 @@ if "__omp_prelude_loaded__" not in globals():
             if src_key in details:
                 node[dst_key] = details[src_key]
         return node
+
+    if "__workpool__" in globals().get("__omp_bridge_capabilities__", ()):
+        class WorkPool:
+            """Pool of persistent subagents fed through the authenticated host bridge."""
+
+            __slots__ = ("name", "agent", "limit")
+
+            def __init__(self, name, agent, limit):
+                self.name = name
+                self.agent = agent
+                self.limit = limit
+
+            def push(self, *items):
+                if not all(isinstance(item, str) for item in items):
+                    raise TypeError("WorkPool.push() expects string items")
+                result = _bridge_call(
+                    "__workpool__",
+                    {"op": "push", "name": self.name, "items": list(items)},
+                )
+                return result.get("ids", []) if isinstance(result, dict) else []
+
+            def status(self):
+                return _bridge_call(
+                    "__workpool__",
+                    {"op": "status", "name": self.name},
+                )
+
+            def peek(self):
+                return _bridge_call(
+                    "__workpool__",
+                    {"op": "peek", "name": self.name},
+                )
+
+            def close(self):
+                return _bridge_call(
+                    "__workpool__",
+                    {"op": "close", "name": self.name},
+                )
+
+            def __repr__(self):
+                return f"<workpool {self.name} ({self.agent}) {self.limit} agents>"
+
+        def workpool(agent=None, *, name=None, context=None, tools=None):
+            """Create a persistent parent-owned subagent pool."""
+            args = {"op": "create"}
+            if agent is not None:
+                args["agent"] = agent
+            if name is not None:
+                args["name"] = name
+            if context is not None:
+                args["context"] = context
+            if tools is not None:
+                if isinstance(tools, (str, bytes)):
+                    raise TypeError("workpool tools must be an iterable of names")
+                requested_tools = list(tools)
+                if not all(
+                    isinstance(tool_name, str) and tool_name
+                    for tool_name in requested_tools
+                ):
+                    raise TypeError("workpool tools must be non-empty strings")
+                if len(set(requested_tools)) != len(requested_tools):
+                    raise ValueError("workpool tools must not contain duplicates")
+                missing_tools = [
+                    tool_name
+                    for tool_name in requested_tools
+                    if tool_name not in __omp_eval_tools__
+                ]
+                if missing_tools:
+                    available = ", ".join(sorted(__omp_eval_tools__)) or "none"
+                    raise LookupError(
+                        "unknown eval tool(s): "
+                        + ", ".join(missing_tools)
+                        + f"; available: {available}"
+                    )
+                args["tools"] = requested_tools
+                args["tool_registrations"] = [
+                    __omp_eval_tools__[tool_name].describe(
+                        __omp_eval_tool_generation__
+                    )
+                    for tool_name in requested_tools
+                ]
+            result = _bridge_call("__workpool__", args)
+            if not isinstance(result, dict) or not isinstance(result.get("name"), str):
+                raise RuntimeError("workpool() did not return a pool")
+            return WorkPool(result["name"], result.get("agent"), result.get("limit"))
 
     def _concurrency_limit():
         """Return the live worker-pool ceiling, or ``None`` for unlimited."""

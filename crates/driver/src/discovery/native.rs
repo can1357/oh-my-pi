@@ -1,904 +1,915 @@
-//! Native OMP filesystem discovery with explicit, bounded ancestor walks.
+//! Typed discovery and admission for local Python extensions.
+//!
+//! Discovery is intentionally narrow: an extension is a Python distribution
+//! root with `omp.toml`, a wheel-style `*.dist-info/omp.toml`, or a
+//! `pyproject.toml` containing `[tool.omp]`. JavaScript and TypeScript files
+//! are never inspected or inferred as extensions.
 
 use std::{
 	collections::{BTreeMap, BTreeSet},
-	env, fs,
-	io::Read,
+	fs, io,
 	path::{Path, PathBuf},
+	str::FromStr as _,
 };
 
-use omp_core::Str;
-use omp_ext::lock::InstalledRecord;
-use omp_walker::WalkRequest;
-use serde::Deserialize;
-
-use super::{
-	containment::contained_existing,
-	manifest::{
-		CapabilityPayload, ContextPayload, DiscoveredCapability, ExtensionPayload, HookPayload,
-		HookPhase, InstructionPayload, PromptPayload, PythonWorkerDeclaration, SettingsPayload,
-		SourceProvenance, SourceScope, SystemPromptPayload, ToolHandlerDeclaration, ToolPayload,
+use omp_agent::HookPhase;
+use omp_core::{ArtifactDigest, Hash32, Provenance, Str, sf};
+use omp_envd::{
+	exthost::{
+		DeclarationSet, ExtensionManifest, HookDeclarationKey, ServiceManifest, ToolDeclarationKey,
 	},
-	mcp_ssh::{parse_mcp_file, parse_ssh_file},
-	packages::{self, ExtensionRootMode},
-	rules::{self, RuleSource},
-	skills::{self, SkillDiscoverySettings, SkillSource},
-	slash_commands,
+	policy::Grants,
+	worker::{ExtHostSpec, HostKey},
 };
+use omp_ext::config::{
+	CliSettingOverride, DeploymentManifest, StaticDeclarations, resolve_extension_settings,
+};
+use thiserror::Error;
 
-/// A native OMP configuration root.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ConfigRoot {
-	/// Root directory containing the configuration.
-	pub path:     PathBuf,
-	/// `true` for a user-home root, `false` for a project root.
-	pub user:     bool,
-	/// Stable native precedence (project before user).
-	pub priority: u8,
-}
-
-/// Returns only native `.omp` roots eligible for config/model/settings loads.
-/// Foreign roots are intentionally excluded from this authority.
-pub fn config_roots(cwd: &Path, home: &Path, max_depth: usize) -> Vec<ConfigRoot> {
-	let mut roots = Vec::new();
-	let mut current = cwd;
-	for _ in 0..=max_depth {
-		let path = current.join(".omp");
-		if directory_has_entries(&path) {
-			roots.push(ConfigRoot { path, user: false, priority: 2 });
-			break;
-		}
-		let Some(parent) = current.parent() else {
-			break;
-		};
-		if parent == current || current == home {
-			break;
-		}
-		current = parent;
-	}
-	let user = user_config_root(home);
-	if user.is_dir() {
-		roots.push(ConfigRoot { path: user, user: true, priority: 1 });
-	}
-	roots
-}
-
-/// A read-only foreign repository content root. It is never eligible for
-/// settings, models, keybindings, commands, plugins, or MCP decoding.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct ForeignContentRoot {
-	/// Foreign family label retained as provenance for content assets.
-	pub label: &'static str,
-	/// Existing repository-local content directory.
-	pub path:  PathBuf,
-}
-
-/// Finds labeled foreign repository content roots for discovery owners that
-/// consume prompt/instruction assets. This does not inspect user-home roots.
-pub fn foreign_content_roots(cwd: &Path, home: &Path, max_depth: usize) -> Vec<ForeignContentRoot> {
-	let mut roots = Vec::new();
-	let mut current = cwd;
-	for _ in 0..=max_depth {
-		for (name, label) in
-			[(".claude", "claude-content"), (".codex", "codex-content"), (".gemini", "gemini-content")]
-		{
-			let path = current.join(name);
-			if path.is_dir() {
-				roots.push(ForeignContentRoot { label, path });
-			}
-		}
-		if current == home {
-			break;
-		}
-		let Some(parent) = current.parent() else {
-			break;
-		};
-		if parent == current {
-			break;
-		}
-		current = parent;
-	}
-	roots
-}
-
-/// Native configuration roots ordered from highest to lowest precedence.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct NativeRoots {
-	/// Profile-scoped user agent directory.
-	pub user:    PathBuf,
-	/// Nearest-first `.omp` directories between the cwd and filesystem root.
-	pub project: Vec<PathBuf>,
-	/// Nearest-first standalone instruction files.
-	pub agents:  Vec<PathBuf>,
-}
-
-/// Resolves the native user config root. `OMP_PROFILE` scopes profiles without
-/// changing the project `.omp` convention.
-pub fn user_config_root(home: &Path) -> PathBuf {
-	let base = env::var_os("OMP_CONFIG_DIR")
-		.filter(|value| !value.is_empty())
-		.map(PathBuf::from)
-		.unwrap_or_else(|| home.join(".omp"));
-	let profile = omp_core::dirs::selected_profile()
-		.map(str::to_owned)
-		.or_else(|| {
-			env::var("OMP_PROFILE")
-				.ok()
-				.filter(|profile| !profile.is_empty())
-		});
-	match profile {
-		Some(profile) => base.join("profiles").join(profile).join("agent"),
-		None => base.join("agent"),
-	}
-}
-
-/// Collects native `.omp` and standalone `AGENTS.md` walk-ups. The cap is an
-/// I/O bound as well as a cycle guard for malformed synthetic test paths.
-pub fn discover_roots(cwd: &Path, home: &Path, max_depth: usize) -> NativeRoots {
-	let mut project = Vec::new();
-	let mut agents = Vec::new();
-	let mut native_owner_found = false;
-	let mut current = cwd;
-	for _ in 0..=max_depth {
-		let omp = current.join(".omp");
-		if !native_owner_found && directory_has_entries(&omp) {
-			project.push(omp);
-			native_owner_found = true;
-		}
-		let agents_file = current.join("AGENTS.md");
-		if agents_file.is_file() {
-			agents.push(agents_file);
-		}
-		if current == home {
-			break;
-		}
-		let Some(parent) = current.parent() else {
-			break;
-		};
-		if parent == current {
-			break;
-		}
-		current = parent;
-	}
-	NativeRoots { user: user_config_root(home), project, agents }
-}
-
-fn directory_has_entries(path: &Path) -> bool {
-	fs::read_dir(path)
-		.ok()
-		.and_then(|mut entries| entries.next())
-		.is_some()
-}
-
-/// Scans one capability directory without recursive imports, hidden entries,
-/// or ignored files. `omp-walker` owns full gitignore semantics.
-pub fn scan_capability_dir(root: &Path) -> Vec<PathBuf> {
-	WalkRequest::new(root)
-		.hidden(false)
-		.gitignore(true)
-		.skip_git(true)
-		.depth(1, 1)
-		.collect_files()
-		.unwrap_or_default()
-		.into_iter()
-		.map(|entry| entry.absolute_path(root))
-		.collect()
-}
-
-/// Explicit native-root composition policy.
+/// How invocation roots compose with automatic user and workspace roots.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
-pub enum NativeRootMode {
-	/// Explicit roots precede normally discovered project/user roots.
+pub enum NativeLoadMode {
+	/// Explicit roots precede automatic roots.
 	#[default]
 	Merge,
-	/// Only explicit roots participate.
+	/// Only explicit roots are loaded.
 	ExplicitOnly,
+	/// No native extension roots are loaded.
+	Disabled,
 }
 
-/// Native static capability discovery options.
+/// Inputs to one native extension discovery pass.
 #[derive(Clone, Debug)]
-pub struct NativeDiscoveryOptions {
-	/// Ordered explicit `.omp`/agent roots.
-	pub explicit_roots:    Vec<PathBuf>,
-	/// Explicit-root merge behavior.
-	pub root_mode:         NativeRootMode,
-	/// Skill source, name, and custom-directory policy for every native root.
-	pub skill_settings:    SkillDiscoverySettings,
-	/// Whether implicit project roots and standalone project files participate.
+pub struct NativeAdmissionOptions<'a> {
+	/// Ordered invocation-local extension roots.
+	pub explicit_roots:    &'a [PathBuf],
+	/// Explicit/automatic root composition.
+	pub mode:              NativeLoadMode,
+	/// Whether `<project>/.omp/extensions` participates.
 	pub include_workspace: bool,
-	/// Authoritative selected-profile installed extension record.
-	pub client_installed:  Option<PathBuf>,
-}
-impl Default for NativeDiscoveryOptions {
-	fn default() -> Self {
-		Self {
-			explicit_roots:    Vec::new(),
-			root_mode:         NativeRootMode::Merge,
-			skill_settings:    SkillDiscoverySettings::default(),
-			include_workspace: true,
-			client_installed:  None,
-		}
-	}
+	/// Typed setting overrides applied before environment attachment.
+	pub setting_overrides: &'a [CliSettingOverride],
+	/// Manifest ids never loaded (`cl_disabled_extensions`,
+	/// [`super::CL_DISABLED_EXTENSIONS`]); explicit roots are still honored
+	/// because the operator named them on this invocation.
+	pub disabled:          &'a [Str],
 }
 
-/// Complete native static provider output.
-#[derive(Clone, Debug, Default)]
-pub struct NativeDiscovery {
-	/// Typed declarations. Discovery never executes tool or hook paths.
-	pub declarations: Vec<DiscoveredCapability>,
-	/// Bounded non-fatal source diagnostics.
-	pub warnings:     Vec<Str>,
+/// An admitted extension and the source root that produced it.
+#[derive(Clone, Debug)]
+pub struct AdmittedNativeExtension {
+	/// Canonical Python distribution root.
+	pub root: PathBuf,
+	/// Complete environment-host launch contract.
+	pub spec: ExtHostSpec,
 }
 
-/// Discovers the canonical native content surface from realpath-deduplicated
-/// roots. Roots are ordered explicit, nearest project, then user unless
-/// explicit-only mode is selected.
-pub fn discover_capabilities(
-	cwd: &Path,
-	home: &Path,
-	max_depth: usize,
-	options: &NativeDiscoveryOptions,
-) -> NativeDiscovery {
-	let discovered = discover_roots(cwd, home, max_depth);
-	let standalone_agents = discovered.agents.clone();
-	let mut roots = options
-		.explicit_roots
-		.iter()
-		.map(|path| (path.clone(), SourceScope::Project))
-		.collect::<Vec<_>>();
-	if options.root_mode == NativeRootMode::Merge {
-		if options.include_workspace {
-			roots.extend(
-				discovered
-					.project
-					.into_iter()
-					.map(|path| (path, SourceScope::Project)),
-			);
-		}
-		roots.push((discovered.user, SourceScope::User));
-	}
-	let mut seen = BTreeSet::new();
-	roots.retain_mut(|(path, _)| {
-		let canonical = fs::canonicalize(&*path).unwrap_or_else(|_| path.clone());
-		*path = canonical.clone();
-		canonical.is_dir() && seen.insert(canonical)
-	});
-
-	let mut output = NativeDiscovery::default();
-	let custom_skills = skills::discover(&[], &options.skill_settings);
-	output.declarations.extend(custom_skills.declarations);
-	output.warnings.extend(
-		custom_skills
-			.warnings
-			.into_iter()
-			.map(|warning| warning.message),
-	);
-	let mut root_skill_settings = options.skill_settings.clone();
-	root_skill_settings.custom_directories.clear();
-	let mut install_records = roots
-		.iter()
-		.map(|(root, _)| root.join("installed.toml"))
-		.collect::<Vec<_>>();
-	if let Some(installed) = &options.client_installed
-		&& !install_records.contains(installed)
-	{
-		install_records.push(installed.clone());
-	}
-	for (root, scope) in roots {
-		load_root(&root, scope, &root_skill_settings, &mut output);
-	}
-	let mut extension_roots = BTreeSet::new();
-	for installed_path in install_records {
-		let installed = match InstalledRecord::read(&installed_path) {
-			Ok(installed) => installed,
-			Err(error) => {
-				output.warnings.push(Str::from(format!(
-					"ignored native extension record {}: {error}",
-					installed_path.display()
-				)));
-				continue;
-			},
-		};
-		let packages = packages::discover(&installed, &[], ExtensionRootMode::Merge);
-		output.warnings.extend(packages.warnings);
-		for extension in packages.roots {
-			if extension_roots.insert(extension.path.clone()) {
-				load_root(&extension.path, SourceScope::Package, &root_skill_settings, &mut output);
-			}
-		}
-	}
-	for path in standalone_agents
-		.into_iter()
-		.filter(|_| options.root_mode == NativeRootMode::Merge && options.include_workspace)
-	{
-		let Ok(content) = fs::read_to_string(&path) else {
-			continue;
-		};
-		if content.trim().is_empty() {
-			continue;
-		}
-		let key = Str::from(path.to_string_lossy().as_ref());
-		output.declarations.push(DiscoveredCapability::keyed(
-			key,
-			CapabilityPayload::ContextFiles(ContextPayload {
-				path:    path.clone(),
-				content: Str::from(content),
-				depth:   None,
-			}),
-			SourceProvenance::native("native-project-context", path, SourceScope::Project),
-		));
-	}
-	if options.root_mode == NativeRootMode::Merge && options.include_workspace {
-		let mut current = cwd;
-		for _ in 0..=max_depth {
-			load_standalone(current, &mut output);
-			if current == home {
-				break;
-			}
-			let Some(parent) = current.parent() else {
-				break;
-			};
-			if parent == current {
-				break;
-			}
-			current = parent;
-		}
-	}
-	output
-}
-
-fn load_standalone(root: &Path, output: &mut NativeDiscovery) {
-	for filename in ["mcp.json", ".mcp.json"] {
-		let path = root.join(filename);
-		if !path.is_file() {
-			continue;
-		}
-		match parse_mcp_file(&path, None) {
-			Ok(servers) => output
-				.declarations
-				.extend(servers.into_iter().map(|server| {
-					let key = server.name.clone();
-					DiscoveredCapability::keyed(
-						key,
-						CapabilityPayload::Mcps(server),
-						SourceProvenance::native(
-							"native-project-root",
-							path.clone(),
-							SourceScope::Project,
-						),
-					)
-				})),
-			Err(_) => output
-				.warnings
-				.push(Str::from(format!("failed to load {}", path.display()))),
-		}
-	}
-	let path = root.join("ssh.json");
-	if path.is_file() {
-		match parse_ssh_file(&path, None) {
-			Ok(hosts) => output.declarations.extend(hosts.into_iter().map(|host| {
-				let key = host.name.clone();
-				DiscoveredCapability::keyed(
-					key,
-					CapabilityPayload::Ssh(host),
-					SourceProvenance::native("native-project-root", path.clone(), SourceScope::Project),
-				)
-			})),
-			Err(_) => output
-				.warnings
-				.push(Str::from(format!("failed to load {}", path.display()))),
-		}
-	}
-}
-
-fn load_root(
-	root: &Path,
-	scope: SourceScope,
-	skill_settings: &SkillDiscoverySettings,
-	output: &mut NativeDiscovery,
-) {
-	let source_id = match scope {
-		SourceScope::Project => Str::from("native-project"),
-		SourceScope::User => Str::from("native-user"),
-		_ => Str::from("native"),
-	};
-	let skill_result = skills::discover(
-		&[SkillSource {
-			id: source_id.clone(),
-			root: root.join("skills"),
-			scope,
-			include_root: false,
-			require_description: true,
-			contain_root: None,
-			read_only: false,
-		}],
-		skill_settings,
-	);
-	output.declarations.extend(skill_result.declarations);
-	output.warnings.extend(
-		skill_result
-			.warnings
-			.into_iter()
-			.map(|warning| warning.message),
-	);
-
-	let mut rule_sources =
-		vec![RuleSource { id: source_id.clone(), root: root.join("rules"), scope, read_only: false }];
-	if root.join("RULES.md").is_file() {
-		rule_sources.push(RuleSource {
-			id: source_id.clone(),
-			root: root.join("RULES.md"),
-			scope,
-			read_only: false,
-		});
-	}
-	let rule_result = rules::discover(&rule_sources);
-	output.declarations.extend(rule_result.declarations);
-	output.warnings.extend(
-		rule_result
-			.warnings
-			.into_iter()
-			.map(|warning| warning.message),
-	);
-
-	for (directory, kind) in [
-		("prompts", CapabilityFileKind::Prompt),
-		("instructions", CapabilityFileKind::Instruction),
-		("commands", CapabilityFileKind::Command),
-	] {
-		load_markdown_dir(root, directory, kind, source_id.clone(), scope, output);
-	}
-	load_hooks(root, source_id.clone(), scope, output);
-	load_tools(root, source_id.clone(), scope, output);
-	load_settings(root, source_id.clone(), scope, output);
-	load_extension(root, source_id.clone(), scope, output);
-
-	for filename in ["mcp.json", ".mcp.json"] {
-		let path = root.join(filename);
-		if !path.is_file() {
-			continue;
-		}
-		match parse_mcp_file(&path, None) {
-			Ok(servers) => output
-				.declarations
-				.extend(servers.into_iter().map(|server| {
-					let key = server.name.clone();
-					DiscoveredCapability::keyed(
-						key,
-						CapabilityPayload::Mcps(server),
-						SourceProvenance::native(source_id.clone(), path.clone(), scope),
-					)
-				})),
-			Err(_) => output
-				.warnings
-				.push(Str::from(format!("failed to load {}", path.display()))),
-		}
-	}
-	let ssh = root.join("ssh.json");
-	if ssh.is_file() {
-		match parse_ssh_file(&ssh, None) {
-			Ok(hosts) => output.declarations.extend(hosts.into_iter().map(|host| {
-				let key = host.name.clone();
-				DiscoveredCapability::keyed(
-					key,
-					CapabilityPayload::Ssh(host),
-					SourceProvenance::native(source_id.clone(), ssh.clone(), scope),
-				)
-			})),
-			Err(_) => output
-				.warnings
-				.push(Str::from(format!("failed to load {}", ssh.display()))),
-		}
-	}
-	for filename in ["SYSTEM.md", "AGENTS.md"] {
-		let path = root.join(filename);
-		let Ok(content) = fs::read_to_string(&path) else {
-			continue;
-		};
-		if content.trim().is_empty() {
-			continue;
-		}
-		let payload = if filename == "SYSTEM.md" {
-			CapabilityPayload::SystemPrompt(SystemPromptPayload {
-				path:    path.clone(),
-				content: Str::from(content),
+impl AdmittedNativeExtension {
+	/// Returns contained generated-skill roots declared by this distribution.
+	///
+	/// Runtime `@omp.skill` registration must exactly match these manifest
+	/// rows; discovery can therefore expose their materialized files without
+	/// importing Python in the engine process.
+	#[must_use]
+	pub fn skill_roots(&self) -> Vec<PathBuf> {
+		let site = self.spec.python_site.as_deref().unwrap_or(&self.root);
+		let mut roots = self
+			.spec
+			.manifest
+			.static_declarations()
+			.ordered
+			.iter()
+			.filter(|row| row.kind == "skills")
+			.filter_map(|row| row.path.as_deref())
+			.filter_map(|path| fs::canonicalize(site.join(path)).ok())
+			.filter(|path| {
+				path.starts_with(&self.root) && path.file_name().is_some_and(|name| name == "SKILL.md")
 			})
-		} else {
-			CapabilityPayload::ContextFiles(ContextPayload {
-				path:    path.clone(),
-				content: Str::from(content),
-				depth:   None,
-			})
-		};
-		output.declarations.push(DiscoveredCapability::keyed(
-			filename,
-			payload,
-			SourceProvenance::native(source_id.clone(), path, scope),
-		));
+			.filter_map(|path| path.parent()?.parent().map(Path::to_path_buf))
+			.collect::<Vec<_>>();
+		roots.sort_unstable();
+		roots.dedup();
+		roots
 	}
+}
+
+/// One contained native-extension discovery pass.
+///
+/// A malformed or unreadable package contributes one typed diagnostic without
+/// suppressing unrelated extensions discovered later in precedence order.
+#[derive(Debug, Default)]
+pub struct NativeAdmissionReport {
+	/// Successfully admitted extensions.
+	pub extensions: Vec<AdmittedNativeExtension>,
+	/// Per-root discovery, manifest, and lowering failures.
+	pub errors:     Vec<NativeExtensionError>,
+}
+
+/// Failure while discovering or admitting a local Python extension.
+#[derive(Debug, Error)]
+pub enum NativeExtensionError {
+	/// Selected user profile was invalid.
+	#[error("user profile could not be resolved")]
+	Profile(#[from] omp_core::dirs::ProfileNameError),
+	/// An explicit root could not be resolved.
+	#[error("explicit extension root does not exist: {path}")]
+	MissingExplicitRoot {
+		/// Requested path.
+		path:   PathBuf,
+		/// Filesystem failure.
+		#[source]
+		source: io::Error,
+	},
+	/// An explicit root was neither a directory nor a supported manifest file.
+	#[error("explicit extension root is not a directory or Python extension manifest: {path}")]
+	InvalidExplicitRoot {
+		/// Requested path.
+		path: PathBuf,
+	},
+	/// An explicit root contained no accepted Python extension manifest.
+	#[error("explicit extension root contains no omp.toml or [tool.omp] pyproject.toml: {path}")]
+	MissingManifest {
+		/// Canonical root.
+		path: PathBuf,
+	},
+	/// An automatic root escaped its owner-controlled directory.
+	#[error("automatic extension root is outside its trusted container: {path}")]
+	UntrustedAutomaticRoot {
+		/// Escaping extension path.
+		path:      PathBuf,
+		/// User or project container which was being scanned.
+		container: PathBuf,
+	},
+	/// A directory could not be enumerated.
+	#[error("failed to scan extension directory {path}")]
+	Scan {
+		/// Directory being scanned.
+		path:   PathBuf,
+		/// Filesystem failure.
+		#[source]
+		source: io::Error,
+	},
+	/// A manifest could not be read.
+	#[error("failed to read extension manifest {path}")]
+	ReadManifest {
+		/// Manifest path.
+		path:   PathBuf,
+		/// Filesystem failure.
+		#[source]
+		source: io::Error,
+	},
+	/// A projected `omp.toml` manifest was invalid.
+	#[error("invalid extension manifest {path}")]
+	Manifest {
+		/// Manifest path.
+		path:   PathBuf,
+		/// Typed manifest failure.
+		#[source]
+		source: omp_ext::ExtensionError,
+	},
+	/// A source `pyproject.toml` was malformed.
+	#[error("invalid Python project manifest {path}")]
+	PyProject {
+		/// Manifest path.
+		path:   PathBuf,
+		/// TOML decoding failure.
+		#[source]
+		source: toml::de::Error,
+	},
+	/// The manifest did not provide a usable identity or Python entry module.
+	#[error("extension manifest {path} must declare non-empty id and entry fields")]
+	MissingIdentity {
+		/// Manifest path.
+		path: PathBuf,
+	},
+	/// The declared Python entry module is absent from the distribution root.
+	#[error("extension {extension} entry module {module} was not found below {root}")]
+	MissingEntryModule {
+		/// Extension identity.
+		extension: Str,
+		/// Declared import module.
+		module:    Str,
+		/// Canonical distribution root.
+		root:      PathBuf,
+	},
+	/// Static declarations could not be lowered to the environment-host schema.
+	#[error("extension manifest declarations are invalid: {path}")]
+	Declarations {
+		/// Manifest path.
+		path:   PathBuf,
+		/// Typed JSON projection failure.
+		#[source]
+		source: serde_json::Error,
+	},
+	/// Manifest settings or invocation overrides were invalid.
+	#[error("extension settings are invalid: {path}")]
+	Settings {
+		/// Manifest path.
+		path:   PathBuf,
+		/// Typed setting failure.
+		#[source]
+		source: omp_ext::ExtensionError,
+	},
 }
 
 #[derive(Clone, Copy)]
-enum CapabilityFileKind {
-	Prompt,
-	Instruction,
-	Command,
+enum RootOrigin {
+	Explicit,
+	User,
+	Workspace,
 }
 
-fn load_markdown_dir(
-	root: &Path,
-	directory: &str,
-	kind: CapabilityFileKind,
-	source_id: Str,
-	scope: SourceScope,
-	output: &mut NativeDiscovery,
-) {
-	let capability_root = root.join(directory);
-	let paths = if matches!(kind, CapabilityFileKind::Command) {
-		scan_command_dir(&capability_root)
+impl RootOrigin {
+	const fn layer(self) -> &'static str {
+		match self {
+			Self::Explicit => "invocation",
+			Self::User => "user",
+			Self::Workspace => "project",
+		}
+	}
+}
+
+struct LoadedManifest {
+	root:     PathBuf,
+	path:     PathBuf,
+	text:     String,
+	manifest: DeploymentManifest,
+}
+
+/// Discovers and admits the effective local Python extension set.
+///
+/// This compatibility entry point preserves fail-fast callers. Production
+/// composition uses [`admit_native_extensions_contained`] so one broken
+/// package cannot suppress independent extensions.
+pub fn admit_native_extensions(
+	project_root: &Path,
+	home: &Path,
+	options: NativeAdmissionOptions<'_>,
+) -> Result<Vec<AdmittedNativeExtension>, NativeExtensionError> {
+	let mut report = admit_native_extensions_contained(project_root, home, options);
+	if report.errors.is_empty() {
+		Ok(report.extensions)
 	} else {
-		scan_capability_dir(&capability_root)
-	};
-	for path in paths.into_iter().filter(|path| {
-		path
-			.extension()
-			.is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
-	}) {
-		let Ok(content) = fs::read_to_string(&path) else {
-			continue;
-		};
-		let name = if matches!(kind, CapabilityFileKind::Command) {
-			let Some(name) = command_name(&capability_root, &path) else {
-				output
-					.warnings
-					.push(Str::from(format!("ignored invalid command path {}", path.display())));
-				continue;
-			};
-			name
-		} else {
-			Str::from(
-				path
-					.file_stem()
-					.and_then(|name| name.to_str())
-					.unwrap_or("declaration"),
-			)
-		};
-		let payload = match kind {
-			CapabilityFileKind::Prompt => CapabilityPayload::Prompts(PromptPayload {
-				name:    name.clone(),
-				path:    path.clone(),
-				content: Str::from(content),
-			}),
-			CapabilityFileKind::Instruction => CapabilityPayload::Instructions(InstructionPayload {
-				name:     name.clone(),
-				path:     path.clone(),
-				content:  Str::from(content),
-				apply_to: None,
-			}),
-			CapabilityFileKind::Command => {
-				let command = match slash_commands::parse_markdown(name.clone(), path.clone(), &content)
-				{
-					Ok(command) => command,
-					Err(error) => {
-						output
-							.warnings
-							.push(Str::from(format!("ignored /{name} from {}: {error}", path.display(),)));
-						continue;
-					},
-				};
-				CapabilityPayload::SlashCommands(command)
-			},
-		};
-		output.declarations.push(DiscoveredCapability::keyed(
-			name,
-			payload,
-			SourceProvenance::native(source_id.clone(), path, scope),
-		));
+		Err(report.errors.remove(0))
 	}
 }
 
-fn scan_command_dir(root: &Path) -> Vec<PathBuf> {
-	WalkRequest::new(root)
-		.hidden(false)
-		.gitignore(true)
-		.skip_git(true)
-		.depth(1, 16)
-		.limit(1_024)
-		.collect_files()
-		.unwrap_or_default()
-		.into_iter()
-		.map(|entry| entry.absolute_path(root))
-		.filter(|path| contained_existing(root, path).is_ok())
-		.collect()
-}
+/// Discovers extensions while containing every package-local failure.
+///
+/// Explicit roots retain precedence over user and workspace roots. Automatic
+/// symlink escapes are reported and skipped rather than allowing one hostile
+/// directory entry to hide the remaining trusted children.
+pub fn admit_native_extensions_contained(
+	project_root: &Path,
+	home: &Path,
+	options: NativeAdmissionOptions<'_>,
+) -> NativeAdmissionReport {
+	if options.mode == NativeLoadMode::Disabled {
+		return NativeAdmissionReport::default();
+	}
 
-fn command_name(root: &Path, path: &Path) -> Option<Str> {
-	let relative = path.strip_prefix(root).ok()?;
-	let count = relative.components().count();
-	let mut name = String::new();
-	for (index, component) in relative.components().enumerate() {
-		let component = component.as_os_str().to_str()?;
-		let component = if index + 1 == count {
-			component.strip_suffix(".md")?
-		} else {
-			component
-		};
-		if component.is_empty() || component.starts_with('.') || component.contains(['/', '\\', ':'])
+	let mut report = NativeAdmissionReport::default();
+	let mut candidates = Vec::new();
+	for root in options.explicit_roots {
+		collect_explicit_contained(root, &mut candidates, &mut report.errors);
+	}
+	if options.mode == NativeLoadMode::Merge {
+		match omp_core::dirs::profile_config_dir(home) {
+			Ok(config) => collect_automatic_contained(
+				&config.join("agent/extensions"),
+				RootOrigin::User,
+				&mut candidates,
+				&mut report.errors,
+			),
+			Err(error) => report.errors.push(NativeExtensionError::Profile(error)),
+		}
+		if options.include_workspace {
+			collect_automatic_contained(
+				&project_root.join(".omp/extensions"),
+				RootOrigin::Workspace,
+				&mut candidates,
+				&mut report.errors,
+			);
+		}
+	}
+
+	let mut seen = BTreeSet::new();
+	for (loaded, origin) in candidates {
+		if !seen.insert(loaded.manifest.id.clone()) {
+			continue;
+		}
+		if !matches!(origin, RootOrigin::Explicit)
+			&& options.disabled.iter().any(|id| *id == loaded.manifest.id)
 		{
-			return None;
-		}
-		if !name.is_empty() {
-			name.push(':');
-		}
-		name.push_str(component);
-	}
-	(!name.is_empty()).then(|| Str::from(name))
-}
-
-fn load_hooks(root: &Path, source_id: Str, scope: SourceScope, output: &mut NativeDiscovery) {
-	for (directory, phase) in [("pre", HookPhase::Pre), ("post", HookPhase::Post)] {
-		for path in scan_capability_dir(&root.join("hooks").join(directory)) {
-			let Some(filename) = path.file_name().and_then(|name| name.to_str()) else {
-				continue;
-			};
-			let tool = filename.rsplit_once('.').map_or(filename, |(stem, _)| stem);
-			let payload = HookPayload {
-				name: Str::from(filename),
-				path: path.clone(),
-				phase,
-				tool: Str::from(tool),
-			};
-			output.declarations.push(DiscoveredCapability::keyed(
-				format!("{directory}:{filename}"),
-				CapabilityPayload::Hooks(payload),
-				SourceProvenance::native(source_id.clone(), path, scope),
-			));
-		}
-	}
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ToolHeader {
-	name:         Option<String>,
-	description:  Option<String>,
-	input_schema: Option<serde_json::Value>,
-}
-
-fn script_tool_header(path: &Path) -> ToolHeader {
-	const HEADER_BYTES: u64 = 4096;
-	let mut source = String::new();
-	let Some(mut file) = fs::File::open(path)
-		.ok()
-		.map(|file| file.take(HEADER_BYTES))
-	else {
-		return ToolHeader::default();
-	};
-	if file.read_to_string(&mut source).is_err() {
-		return ToolHeader::default();
-	}
-	let Some(start) = source.find("/**").map(|start| start.saturating_add(3)) else {
-		return ToolHeader::default();
-	};
-	let Some(end) = source[start..]
-		.find("*/")
-		.map(|end| end.saturating_add(start))
-	else {
-		return ToolHeader::default();
-	};
-	let description = source[start..end]
-		.lines()
-		.map(|line| line.trim().trim_start_matches('*').trim())
-		.filter(|line| !line.is_empty() && !line.to_ascii_lowercase().starts_with("symlink:"))
-		.collect::<Vec<_>>()
-		.join("\n");
-	ToolHeader {
-		description: (!description.is_empty()).then_some(description),
-		..ToolHeader::default()
-	}
-}
-
-fn load_tools(root: &Path, source_id: Str, scope: SourceScope, output: &mut NativeDiscovery) {
-	for path in scan_capability_dir(&root.join("tools")) {
-		let extension = path
-			.extension()
-			.and_then(|ext| ext.to_str())
-			.unwrap_or_default();
-		if !matches!(extension, "json" | "md" | "py" | "sh" | "bash" | "js" | "ts") {
+			tracing::debug!(id = %loaded.manifest.id, "extension disabled by cl_disabled_extensions");
 			continue;
 		}
-		let fallback = path
-			.file_stem()
-			.and_then(|name| name.to_str())
-			.unwrap_or("tool")
-			.to_owned();
-		let header = match extension {
-			"json" => fs::read_to_string(&path)
-				.ok()
-				.and_then(|source| serde_json::from_str::<ToolHeader>(&source).ok())
-				.unwrap_or_default(),
-			"md" => fs::read_to_string(&path)
-				.ok()
-				.and_then(|source| {
-					let rest = source.strip_prefix("---\n")?;
-					let (header, _) = rest.split_once("\n---\n")?;
-					serde_yaml::from_str::<ToolHeader>(header).ok()
-				})
-				.unwrap_or_default(),
-			_ => script_tool_header(&path),
-		};
-		let name = header
-			.name
-			.as_deref()
-			.map(str::trim)
-			.filter(|value| !value.is_empty())
-			.unwrap_or(fallback.as_str());
-		let name = Str::from(name);
-		let description = header
-			.description
-			.filter(|value| !value.trim().is_empty())
-			.unwrap_or_else(|| format!("{name} custom tool"));
-		let payload = ToolPayload {
-			name:         name.clone(),
-			path:         path.clone(),
-			description:  Str::from(description),
-			input_schema: header
-				.input_schema
-				.unwrap_or_else(|| serde_json::json!({"type":"object","additionalProperties":true})),
-			handler:      ToolHandlerDeclaration::Process {
-				program: path.clone(),
-				args:    Vec::new(),
-			},
-		};
-		output.declarations.push(DiscoveredCapability::keyed(
-			name,
-			CapabilityPayload::Tools(payload),
-			SourceProvenance::native(source_id.clone(), path, scope),
-		));
+		match lower_manifest(loaded, origin, options.setting_overrides) {
+			Ok(extension) => report.extensions.push(extension),
+			Err(error) => report.errors.push(error),
+		}
 	}
+	report
 }
 
-fn load_settings(root: &Path, source_id: Str, scope: SourceScope, output: &mut NativeDiscovery) {
-	for filename in ["settings.toml", "config.toml"] {
-		let path = root.join(filename);
-		let Some(table) = fs::read_to_string(&path)
-			.ok()
-			.and_then(|source| toml::from_str::<toml::Table>(&source).ok())
-		else {
-			continue;
-		};
-		output.declarations.push(DiscoveredCapability::unkeyed(
-			CapabilityPayload::Settings(SettingsPayload { path: path.clone(), data: table }),
-			SourceProvenance::native(source_id.clone(), path, scope),
-		));
-	}
-}
-
-#[derive(Default, Deserialize)]
-struct ExtensionManifest {
-	name:        Option<String>,
-	description: Option<String>,
-	worker:      Option<PythonWorkerDeclaration>,
-	#[serde(default)]
-	cli:         Vec<omp_ext::config::CliContribution>,
-	#[serde(flatten)]
-	extra:       BTreeMap<Str, serde_json::Value>,
-}
-
-fn load_extension(root: &Path, source_id: Str, scope: SourceScope, output: &mut NativeDiscovery) {
-	let path = root.join("extension.json");
-	let Some(manifest) = fs::read_to_string(&path)
-		.ok()
-		.and_then(|source| serde_json::from_str::<ExtensionManifest>(&source).ok())
-	else {
+fn collect_explicit_contained(
+	requested: &Path,
+	out: &mut Vec<(LoadedManifest, RootOrigin)>,
+	errors: &mut Vec<NativeExtensionError>,
+) {
+	let canonical = match fs::canonicalize(requested) {
+		Ok(path) => path,
+		Err(source) => {
+			errors.push(NativeExtensionError::MissingExplicitRoot {
+				path: requested.to_path_buf(),
+				source,
+			});
+			return;
+		},
+	};
+	let root = if canonical.is_dir() {
+		canonical
+	} else if canonical.is_file()
+		&& matches!(
+			canonical.file_name().and_then(|name| name.to_str()),
+			Some("omp.toml" | "pyproject.toml")
+		) {
+		canonical
+			.parent()
+			.expect("a canonical manifest path has a parent")
+			.to_path_buf()
+	} else {
+		errors.push(NativeExtensionError::InvalidExplicitRoot { path: canonical });
 		return;
 	};
-	let name = manifest.name.as_deref().unwrap_or_else(|| {
-		root
-			.file_name()
-			.and_then(|name| name.to_str())
-			.unwrap_or("extension")
-	});
-	let payload = ExtensionPayload {
-		name:        Str::from(name),
-		root:        root.to_path_buf(),
-		description: manifest.description.map(Str::from),
-		worker:      manifest.worker,
-		cli:         manifest.cli,
-		manifest:    manifest.extra,
+	match load_manifest(&root) {
+		Ok(Some(manifest)) => {
+			out.push((manifest, RootOrigin::Explicit));
+			return;
+		},
+		Err(error) => {
+			errors.push(error);
+			return;
+		},
+		Ok(None) => {},
+	}
+	// Agent Plugins packages contribute data-only skills/MCP resources. They
+	// are deliberately not admitted to the locked CPython extension runtime.
+	if super::skills::is_agent_plugin_root(&root) {
+		return;
+	}
+	let before = out.len();
+	let errors_before = errors.len();
+	let children = match sorted_children(&root) {
+		Ok(children) => children,
+		Err(error) => {
+			errors.push(error);
+			return;
+		},
 	};
-	output.declarations.push(DiscoveredCapability::keyed(
-		name,
-		CapabilityPayload::Extensions(payload),
-		SourceProvenance::native(source_id, path, scope),
-	));
+	for child in children {
+		if !child.is_dir() {
+			continue;
+		}
+		match load_manifest(&child) {
+			Ok(Some(manifest)) => out.push((manifest, RootOrigin::Explicit)),
+			Ok(None) => {},
+			Err(error) => errors.push(error),
+		}
+	}
+	if out.len() == before && errors.len() == errors_before {
+		errors.push(NativeExtensionError::MissingManifest { path: root });
+	}
+}
+
+fn collect_automatic_contained(
+	container: &Path,
+	origin: RootOrigin,
+	out: &mut Vec<(LoadedManifest, RootOrigin)>,
+	errors: &mut Vec<NativeExtensionError>,
+) {
+	if !container.exists() {
+		return;
+	}
+	let trusted = match fs::canonicalize(container) {
+		Ok(path) => path,
+		Err(source) => {
+			errors.push(NativeExtensionError::Scan { path: container.to_path_buf(), source });
+			return;
+		},
+	};
+	let children = match sorted_children(container) {
+		Ok(children) => children,
+		Err(error) => {
+			errors.push(error);
+			return;
+		},
+	};
+	for child in children {
+		if !child.is_dir() {
+			continue;
+		}
+		let canonical = match fs::canonicalize(&child) {
+			Ok(path) => path,
+			Err(source) => {
+				errors.push(NativeExtensionError::Scan { path: child, source });
+				continue;
+			},
+		};
+		if !canonical.starts_with(&trusted) {
+			errors.push(NativeExtensionError::UntrustedAutomaticRoot {
+				path:      canonical,
+				container: trusted.clone(),
+			});
+			continue;
+		}
+		match load_manifest(&canonical) {
+			Ok(Some(manifest)) => out.push((manifest, origin)),
+			Ok(None) => {},
+			Err(error) => errors.push(error),
+		}
+	}
+}
+
+fn sorted_children(root: &Path) -> Result<Vec<PathBuf>, NativeExtensionError> {
+	let mut children = fs::read_dir(root)
+		.map_err(|source| NativeExtensionError::Scan { path: root.to_path_buf(), source })?
+		.map(|entry| entry.map(|entry| entry.path()))
+		.collect::<Result<Vec<_>, _>>()
+		.map_err(|source| NativeExtensionError::Scan { path: root.to_path_buf(), source })?;
+	children.sort_unstable();
+	Ok(children)
+}
+
+fn load_manifest(root: &Path) -> Result<Option<LoadedManifest>, NativeExtensionError> {
+	let direct = root.join("omp.toml");
+	if direct.is_file() {
+		return read_projected_manifest(root, direct).map(Some);
+	}
+	for child in sorted_children(root)? {
+		if child.is_dir()
+			&& child
+				.file_name()
+				.and_then(|name| name.to_str())
+				.is_some_and(|name| name.ends_with(".dist-info"))
+		{
+			let projected = child.join("omp.toml");
+			if projected.is_file() {
+				return read_projected_manifest(root, projected).map(Some);
+			}
+		}
+	}
+	let pyproject = root.join("pyproject.toml");
+	if !pyproject.is_file() {
+		return Ok(None);
+	}
+	let text = fs::read_to_string(&pyproject)
+		.map_err(|source| NativeExtensionError::ReadManifest { path: pyproject.clone(), source })?;
+	let document = toml::from_str::<toml::Value>(&text)
+		.map_err(|source| NativeExtensionError::PyProject { path: pyproject.clone(), source })?;
+	let Some(projected) = document
+		.get("tool")
+		.and_then(|tool| tool.get("omp"))
+		.cloned()
+	else {
+		return Ok(None);
+	};
+	let manifest = projected
+		.try_into::<DeploymentManifest>()
+		.map_err(|source| NativeExtensionError::PyProject { path: pyproject.clone(), source })?;
+	validate_manifest(&pyproject, &manifest)?;
+	Ok(Some(LoadedManifest { root: root.to_path_buf(), path: pyproject, text, manifest }))
+}
+
+fn read_projected_manifest(
+	root: &Path,
+	path: PathBuf,
+) -> Result<LoadedManifest, NativeExtensionError> {
+	let text = fs::read_to_string(&path)
+		.map_err(|source| NativeExtensionError::ReadManifest { path: path.clone(), source })?;
+	let manifest = DeploymentManifest::parse(&text)
+		.map_err(|source| NativeExtensionError::Manifest { path: path.clone(), source })?;
+	validate_manifest(&path, &manifest)?;
+	Ok(LoadedManifest { root: root.to_path_buf(), path, text, manifest })
+}
+
+fn validate_manifest(
+	path: &Path,
+	manifest: &DeploymentManifest,
+) -> Result<(), NativeExtensionError> {
+	manifest
+		.validate()
+		.map_err(|source| NativeExtensionError::Manifest { path: path.to_path_buf(), source })?;
+	if manifest.id.is_empty() || manifest.entry.is_empty() {
+		return Err(NativeExtensionError::MissingIdentity { path: path.to_path_buf() });
+	}
+	Ok(())
+}
+
+fn lower_manifest(
+	loaded: LoadedManifest,
+	origin: RootOrigin,
+	overrides: &[CliSettingOverride],
+) -> Result<AdmittedNativeExtension, NativeExtensionError> {
+	let LoadedManifest { root, path, text, manifest } = loaded;
+	let selected = manifest
+		.features
+		.iter()
+		.filter_map(|(name, feature)| feature.default.then(|| name.clone()))
+		.collect::<Vec<_>>();
+	let projection = manifest
+		.project(&selected)
+		.map_err(|source| NativeExtensionError::Manifest { path: path.clone(), source })?;
+	let mut properties = BTreeMap::new();
+	properties.insert(
+		Str::new_static("declarations"),
+		serde_json::to_value(&projection.declarations)
+			.map_err(|source| NativeExtensionError::Declarations { path: path.clone(), source })?,
+	);
+	properties.insert(
+		Str::new_static("capabilities"),
+		serde_json::json!({ "data": projection.capabilities }),
+	);
+	let declarations = StaticDeclarations::from_properties(&properties)
+		.map_err(|source| NativeExtensionError::Declarations { path: path.clone(), source })?;
+	let (python_site, entry_path) = resolve_entry(&root, &manifest.id, &manifest.entry)?;
+	if !matches!(origin, RootOrigin::Explicit) {
+		let canonical_entry = fs::canonicalize(&entry_path).map_err(|source| {
+			NativeExtensionError::ReadManifest { path: entry_path.clone(), source }
+		})?;
+		if !canonical_entry.starts_with(&root) {
+			return Err(NativeExtensionError::UntrustedAutomaticRoot {
+				path:      canonical_entry,
+				container: root.clone(),
+			});
+		}
+	}
+	let tools = declarations.tools.iter().filter_map(|row| {
+		let rev = u16::try_from(row.api.max(1)).ok()?;
+		Some(ToolDeclarationKey::new(
+			if row.key.is_empty() {
+				row.id.clone()
+			} else {
+				row.key.clone()
+			},
+			row.properties
+				.get("family")
+				.and_then(serde_json::Value::as_str)
+				.map(Str::new)
+				.unwrap_or_default(),
+			rev,
+		))
+	});
+	let hooks = declarations.hooks.iter().filter_map(|row| {
+		let (event, phase) = row
+			.key
+			.rsplit_once('/')
+			.map_or((row.id.as_str(), "precheck"), |(event, phase)| (event, phase));
+		HookPhase::from_str(&phase.to_ascii_lowercase())
+			.ok()
+			.map(|phase| HookDeclarationKey::new(event, phase))
+	});
+	let runtime_declarations = DeclarationSet::new(tools, hooks);
+	let digest = ArtifactDigest::new(Hash32::sum(text.as_bytes()).into_bytes());
+	let publisher = sf!("unsigned:path:{}", Hash32::sum(root.to_string_lossy().as_bytes()).to_hex());
+	let layer = origin.layer();
+	let provenance = Provenance::new(
+		publisher,
+		manifest.id.clone(),
+		Str::new_static("local"),
+		digest,
+		Str::new_static(layer),
+		Str::new_static("sandboxed"),
+		1,
+	);
+	let runtime_manifest = ExtensionManifest::new_with_static(
+		provenance,
+		manifest.entry.clone(),
+		[],
+		runtime_declarations,
+		ServiceManifest::default(),
+		declarations,
+		[],
+		[],
+	)
+	.with_setting_schemas(manifest.settings.clone());
+	let settings = resolve_extension_settings(&manifest, &BTreeMap::new(), overrides)
+		.map_err(|source| NativeExtensionError::Settings { path: path.clone(), source })?;
+	let key = HostKey::new(layer, "sandboxed", manifest.id.clone());
+	let mut spec = ExtHostSpec::new(key, runtime_manifest);
+	spec.data_grants = Grants::supported(projection.capabilities);
+	spec.python_site = Some(python_site);
+	spec.entry_path = Some(entry_path);
+	spec.settings = settings;
+	spec.watch_root = Some(root.clone());
+	Ok(AdmittedNativeExtension { root, spec })
+}
+
+fn resolve_entry(
+	root: &Path,
+	extension: &Str,
+	module: &Str,
+) -> Result<(PathBuf, PathBuf), NativeExtensionError> {
+	let relative = module.as_str().replace('.', "/");
+	for site in [root.join("src"), root.to_path_buf()] {
+		for entry in [site.join(format!("{relative}.py")), site.join(&relative).join("__init__.py")] {
+			if entry.is_file() {
+				return Ok((site, entry));
+			}
+		}
+	}
+	Err(NativeExtensionError::MissingEntryModule {
+		extension: extension.clone(),
+		module:    module.clone(),
+		root:      root.to_path_buf(),
+	})
 }
 
 #[cfg(test)]
 mod tests {
 	use std::fs;
 
+	use omp_con::Value as ConValue;
+
 	use super::*;
+
+	fn extension(root: &Path, id: &str, default: bool) {
+		fs::create_dir_all(root.join("src/demo")).expect("module directory");
+		fs::write(root.join("src/demo/__init__.py"), "# inert test extension\n").expect("module");
+		fs::write(
+			root.join("omp.toml"),
+			format!(
+				r#"id = "{id}"
+entry = "demo"
+
+[settings.enabled]
+type = "boolean"
+default = {default}
+"#
+			),
+		)
+		.expect("manifest");
+	}
+
 	#[test]
-	fn config_roots_exclude_foreign_families() {
+	fn explicit_extension_reaches_registration_set_and_excludes_configured_extension() {
 		let tree = tempfile::tempdir().expect("tree");
 		let home = tree.path().join("home");
-		let cwd = tree.path().join("repo/work");
-		fs::create_dir_all(cwd.join(".claude")).expect("project");
-		fs::create_dir_all(home.join(".omp/agent")).expect("user");
-		let roots = config_roots(&cwd, &home, 3);
-		assert_eq!(roots, vec![ConfigRoot {
-			path:     home.join(".omp/agent"),
-			user:     true,
-			priority: 1,
-		}]);
-		assert_eq!(foreign_content_roots(&cwd, &home, 3), vec![ForeignContentRoot {
-			label: "claude-content",
-			path:  cwd.join(".claude"),
-		}],);
+		let project = tree.path().join("project");
+		let explicit = tree.path().join("explicit");
+		let configured = home.join(".o2/agent/extensions/configured");
+		extension(&explicit, "test.explicit", false);
+		extension(&configured, "test.configured", false);
+		fs::create_dir_all(&project).expect("project");
+		let admitted = admit_native_extensions(&project, &home, NativeAdmissionOptions {
+			explicit_roots:    &[explicit],
+			mode:              NativeLoadMode::ExplicitOnly,
+			include_workspace: true,
+			setting_overrides: &[],
+			disabled:          &[],
+		})
+		.expect("admission");
+		assert_eq!(admitted.len(), 1);
+		assert_eq!(admitted[0].spec.key.extension().as_str(), "test.explicit");
 	}
+
 	#[test]
-	fn nearest_non_empty_native_root_owns_project_discovery() {
+	fn explicit_root_outranks_automatic_root_with_the_same_identity() {
 		let tree = tempfile::tempdir().expect("tree");
-		let root = tree.path();
-		let cwd = root.join("a/b/c");
-		fs::create_dir_all(cwd.join(".omp")).expect("nested");
-		fs::create_dir_all(root.join("a/.omp")).expect("parent");
-		fs::write(cwd.join(".omp/AGENTS.md"), "nearest native").expect("nearest native");
-		fs::write(root.join("a/.omp/AGENTS.md"), "far native").expect("far native");
-		fs::write(root.join("a/AGENTS.md"), "parent").expect("agents");
-		let roots = discover_roots(&cwd, root, 2);
-		assert_eq!(roots.project, vec![cwd.join(".omp")]);
-		assert_eq!(roots.agents, vec![root.join("a/AGENTS.md")]);
+		let home = tree.path().join("home");
+		let project = tree.path().join("project");
+		let explicit = tree.path().join("explicit");
+		let automatic = home.join(".o2/agent/extensions/automatic");
+		extension(&explicit, "test.priority", false);
+		extension(&automatic, "test.priority", true);
+		fs::create_dir_all(&project).expect("project");
+
+		let admitted = admit_native_extensions(&project, &home, NativeAdmissionOptions {
+			explicit_roots:    &[explicit],
+			mode:              NativeLoadMode::Merge,
+			include_workspace: true,
+			setting_overrides: &[],
+			disabled:          &[],
+		})
+		.expect("admission");
+		assert_eq!(admitted.len(), 1);
+		assert_eq!(admitted[0].root.file_name().and_then(|name| name.to_str()), Some("explicit"));
+		assert_eq!(admitted[0].spec.settings["enabled"], serde_json::json!(false));
 	}
+
+	/// `cl_disabled_extensions` is the control
+	/// plane's only enablement knob: a listed manifest id is never loaded from
+	/// an automatic root, while an explicitly requested root still is.
 	#[test]
-	fn scan_respects_gitignore_and_is_non_recursive() {
+	fn disabled_extension_ids_are_not_admitted_from_automatic_roots() {
 		let tree = tempfile::tempdir().expect("tree");
-		let root = tree.path();
-		fs::write(root.join(".gitignore"), "ignored.md\n").expect("ignore");
-		fs::write(root.join("kept.md"), "x").expect("kept");
-		fs::write(root.join("ignored.md"), "x").expect("ignored");
-		fs::create_dir(root.join("nested")).expect("nested");
-		fs::write(root.join("nested/child.md"), "x").expect("child");
-		assert_eq!(scan_capability_dir(root), vec![root.join("kept.md")]);
+		let home = tree.path().join("home");
+		let project = tree.path().join("project");
+		let explicit = tree.path().join("explicit");
+		extension(&home.join(".o2/agent/extensions/off"), "test.off", false);
+		extension(&project.join(".omp/extensions/on"), "test.on", false);
+		extension(&explicit, "test.explicit", false);
+		let disabled = [Str::new_static("test.off"), Str::new_static("test.explicit")];
+		let admitted = admit_native_extensions(&project, &home, NativeAdmissionOptions {
+			explicit_roots:    &[explicit],
+			mode:              NativeLoadMode::Merge,
+			include_workspace: true,
+			setting_overrides: &[],
+			disabled:          &disabled,
+		})
+		.expect("admission");
+		let ids = admitted
+			.iter()
+			.map(|extension| extension.spec.key.extension().as_str().to_owned())
+			.collect::<Vec<_>>();
+		assert_eq!(ids, ["test.explicit", "test.on"]);
 	}
+
 	#[test]
-	fn nested_command_paths_become_colon_names_and_parse_failures_warn() {
+	fn no_workspace_suppresses_project_roots() {
 		let tree = tempfile::tempdir().expect("tree");
-		let root = tree.path().join(".omp");
-		fs::create_dir_all(root.join("commands/git")).expect("commands");
-		fs::write(
-			root.join("commands/git/commit.md"),
-			"---\ndescription: Commit staged changes\n---\nReview and commit $ARGUMENTS",
+		let home = tree.path().join("home");
+		let project = tree.path().join("project");
+		extension(&project.join(".omp/extensions/project-ext"), "test.project", false);
+		let admitted = admit_native_extensions(&project, &home, NativeAdmissionOptions {
+			explicit_roots:    &[],
+			mode:              NativeLoadMode::Merge,
+			include_workspace: false,
+			setting_overrides: &[],
+			disabled:          &[],
+		})
+		.expect("admission");
+		assert!(admitted.is_empty());
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn automatic_symlink_escape_is_rejected_as_untrusted() {
+		use std::os::unix::fs::symlink;
+
+		let tree = tempfile::tempdir().expect("tree");
+		let home = tree.path().join("home");
+		let project = tree.path().join("project");
+		let outside = tree.path().join("outside");
+		extension(&outside, "test.escape", false);
+		let container = project.join(".omp/extensions");
+		fs::create_dir_all(&container).expect("container");
+		symlink(&outside, container.join("escape")).expect("symlink");
+		let error = admit_native_extensions(&project, &home, NativeAdmissionOptions {
+			explicit_roots:    &[],
+			mode:              NativeLoadMode::Merge,
+			include_workspace: true,
+			setting_overrides: &[],
+			disabled:          &[],
+		})
+		.expect_err("escape rejected");
+		assert!(matches!(error, NativeExtensionError::UntrustedAutomaticRoot { .. }));
+	}
+
+	#[test]
+	fn contributed_settings_are_ready_for_convar_registration_before_activation() {
+		let tree = tempfile::tempdir().expect("tree");
+		let project = tree.path().join("project");
+		let root = tree.path().join("extension");
+		extension(&root, "test.settings", false);
+		let override_value =
+			CliSettingOverride::parse("test.settings.enabled=true").expect("override");
+		let admitted = admit_native_extensions(&project, tree.path(), NativeAdmissionOptions {
+			explicit_roots:    &[root],
+			mode:              NativeLoadMode::ExplicitOnly,
+			include_workspace: false,
+			setting_overrides: &[override_value],
+			disabled:          &[],
+		})
+		.expect("admission");
+		let spec = &admitted[0].spec;
+		let con = omp_con::Ctx::new();
+		omp_envd::exthost::register_extension_setting_convars(
+			&con,
+			spec.key.extension().as_str(),
+			&spec.manifest.setting_schemas,
+			&spec.settings,
 		)
-		.expect("command");
-		fs::write(root.join("commands/broken.md"), "---\ndescription: broken").expect("broken");
-		let mut output = NativeDiscovery::default();
-		load_root(&root, SourceScope::Project, &SkillDiscoverySettings::default(), &mut output);
-		assert!(output.declarations.iter().any(|declaration| {
-			matches!(
-				&declaration.payload,
-				CapabilityPayload::SlashCommands(command) if command.name == "git:commit"
-			)
-		}));
-		assert!(
-			output
-				.warnings
-				.iter()
-				.any(|warning| warning.contains("/broken"))
+		.expect("register before activation");
+		assert_eq!(con.get("ext::test.settings::enabled").expect("convar"), ConValue::Bool(true));
+	}
+
+	#[test]
+	fn pyproject_tool_omp_is_the_only_source_manifest_projection() {
+		let tree = tempfile::tempdir().expect("tree");
+		let project = tree.path().join("project");
+		let root = tree.path().join("source");
+		fs::create_dir_all(root.join("src/demo")).expect("module directory");
+		fs::write(root.join("src/demo/__init__.py"), "# inert test extension\n").expect("module");
+		fs::write(
+			root.join("pyproject.toml"),
+			r#"[project]
+name = "ordinary-python-package"
+version = "1.0.0"
+
+[tool.omp]
+id = "test.pyproject"
+entry = "demo"
+"#,
+		)
+		.expect("pyproject");
+		fs::write(root.join("package.json"), r#"{"main":"extension.js"}"#).expect("JS metadata");
+		fs::write(root.join("extension.ts"), "throw new Error('must never load');")
+			.expect("TS source");
+
+		let admitted = admit_native_extensions(&project, tree.path(), NativeAdmissionOptions {
+			explicit_roots:    &[root],
+			mode:              NativeLoadMode::ExplicitOnly,
+			include_workspace: false,
+			setting_overrides: &[],
+			disabled:          &[],
+		})
+		.expect("Python manifest admission");
+		assert_eq!(admitted.len(), 1);
+		assert_eq!(admitted[0].spec.manifest.entry, "demo");
+	}
+
+	#[test]
+	fn manifest_sealed_generated_skills_publish_contained_discovery_roots() {
+		let tree = tempfile::tempdir().expect("tree");
+		let root = tree.path().join("extension");
+		let module = root.join("src/demo");
+		let skill_root = module.join(".omp-generated/skills/review");
+		fs::create_dir_all(&skill_root).expect("skill root");
+		fs::write(module.join("__init__.py"), "# extension\n").expect("module");
+		fs::write(
+			skill_root.join("SKILL.md"),
+			"---\nname: review\ndescription: Review changes\n---\n\nReview the change.\n",
+		)
+		.expect("skill");
+		fs::write(
+			root.join("omp.toml"),
+			r#"id = "test.skills"
+entry = "demo"
+
+[[declarations]]
+kind = "skills"
+path = "demo/.omp-generated/skills/review/SKILL.md"
+"#,
+		)
+		.expect("manifest");
+
+		let admitted = admit_native_extensions(tree.path(), tree.path(), NativeAdmissionOptions {
+			explicit_roots:    &[root],
+			mode:              NativeLoadMode::ExplicitOnly,
+			include_workspace: false,
+			setting_overrides: &[],
+			disabled:          &[],
+		})
+		.expect("admission");
+		assert_eq!(admitted[0].skill_roots(), [fs::canonicalize(
+			skill_root.parent().expect("skills root")
+		)
+		.expect("canonical skill root")]);
+		assert_eq!(
+			admitted[0].spec.manifest.activation_triggers,
+			[omp_envd::exthost::ActivationTrigger::Static]
+				.into_iter()
+				.collect(),
 		);
 	}
+
 	#[test]
-	fn script_tool_header_keeps_jsdoc_and_drops_symlink_footnotes() {
+	fn contained_discovery_keeps_valid_siblings_after_a_manifest_error() {
 		let tree = tempfile::tempdir().expect("tree");
-		let path = tree.path().join("bundle.ts");
-		fs::write(
-			&path,
-			"/**\n * Inspect and control system services.\n *\n * Symlink: ~/.omp/tools/bundle.ts\n \
-			 */\nexport default {};\n",
-		)
-		.expect("tool");
-		let header = script_tool_header(&path);
-		assert_eq!(header.description.as_deref(), Some("Inspect and control system services."));
+		let project = tree.path().join("project");
+		let container = project.join(".omp/extensions");
+		extension(&container.join("good"), "test.good", false);
+		let broken = container.join("broken");
+		fs::create_dir_all(&broken).expect("broken extension root");
+		fs::write(broken.join("omp.toml"), "id = [not-valid").expect("broken manifest");
+
+		let report =
+			admit_native_extensions_contained(&project, tree.path(), NativeAdmissionOptions {
+				explicit_roots:    &[],
+				mode:              NativeLoadMode::Merge,
+				include_workspace: true,
+				setting_overrides: &[],
+				disabled:          &[],
+			});
+		assert_eq!(report.extensions.len(), 1);
+		assert_eq!(report.extensions[0].spec.key.extension().as_str(), "test.good");
+		assert_eq!(report.errors.len(), 1);
+		assert!(matches!(&report.errors[0], NativeExtensionError::Manifest { .. }));
+	}
+
+	#[test]
+	fn missing_explicit_root_is_a_typed_error() {
+		let tree = tempfile::tempdir().expect("tree");
+		let missing = tree.path().join("missing");
+		let error = admit_native_extensions(tree.path(), tree.path(), NativeAdmissionOptions {
+			explicit_roots:    &[missing],
+			mode:              NativeLoadMode::ExplicitOnly,
+			include_workspace: false,
+			setting_overrides: &[],
+			disabled:          &[],
+		})
+		.expect_err("missing root");
+		assert!(matches!(error, NativeExtensionError::MissingExplicitRoot { .. }));
 	}
 }

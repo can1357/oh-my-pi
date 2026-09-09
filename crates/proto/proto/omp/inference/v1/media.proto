@@ -16,9 +16,8 @@ import "omp/thread/v1/thread.proto";
 // expire (Sora: 1h) — ingesting at the gateway is what makes results
 // durable and re-usable as conversation parts.
 //
-// Prompt engineering (pi's subject/action/scene/style prompt assembly) is
-// tool-level policy and stays OUT of this protocol; requests carry the
-// final prompt.
+// Prompt engineering and style assembly are tool-level policy and stay OUT of
+// this protocol; requests carry the final prompt.
 
 // ── Shared media vocabulary ─────────────────────────────────────────────
 

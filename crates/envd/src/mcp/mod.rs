@@ -11,6 +11,7 @@ pub mod config_store;
 pub(crate) mod config_values;
 pub mod control;
 pub mod device;
+mod discovery;
 pub(crate) mod filter;
 pub(crate) mod header_policy;
 pub(crate) mod http;
@@ -22,6 +23,7 @@ pub mod oauth;
 pub(crate) mod prompts;
 pub(crate) mod resources;
 pub(crate) mod settings;
+pub mod smithery;
 pub(crate) mod stdio;
 pub(crate) mod timeout;
 pub mod transport;
@@ -39,9 +41,9 @@ use std::{
 use bytes::Bytes;
 use flume::Receiver;
 use futures::future::BoxFuture;
+use omp_cache::mcp_cache::{McpCacheError, McpDefinitionCache};
 use omp_core::Str;
 use omp_proto::env::v1 as pb;
-use omp_storage::mcp_cache::{McpCacheError, McpDefinitionCache};
 use omp_tool::{
 	LeafCatalogSnapshot, LeafOwner, LeafReplacementError, LeafReplacementRegistry, LeafVersion,
 	RegistryLeaf, Rev,
@@ -207,12 +209,8 @@ impl McpService {
 	}
 
 	/// Binds this Environment's native user/project MCP mutation roots.
-	pub fn bind_config_paths(&self, data_dir: &Path, project_root: &Path) {
-		*self.config_paths.write() = Some(McpConfigPaths {
-			user:    data_dir.join("mcp.json"),
-			project: project_root.join(".omp/mcp.json"),
-			root:    project_root.join(".mcp.json"),
-		});
+	pub fn bind_config_paths(&self, paths: McpConfigPaths) {
+		*self.config_paths.write() = Some(paths);
 	}
 
 	/// Binds the supervisor which owns live transports for successful config
@@ -221,9 +219,10 @@ impl McpService {
 		*self.manager.write() = Some(Arc::downgrade(manager));
 	}
 
-	/// Loads, precedence-resolves, and mounts every persisted native source.
-	/// This must be called once after transport credential authorities are
-	/// bound; subsequent config mutations reuse the retained discovery policy.
+	/// Loads, precedence-resolves, and mounts native plus discovered foreign
+	/// sources. This must be called once after transport credential authorities
+	/// are bound; subsequent config mutations reuse the retained discovery
+	/// policy.
 	pub async fn start_native_configs(
 		&self,
 		enable_project_config: bool,
@@ -234,9 +233,9 @@ impl McpService {
 		self.reload_native_configs().await
 	}
 
-	/// Reloads persisted native sources using the retained settings policy.
-	/// Late-bound credential authorities call this after composition so OAuth
-	/// headers and native Exa imports participate in the mounted specs.
+	/// Reloads persisted native and foreign sources using the retained settings
+	/// policy. Late-bound credential authorities call this after composition so
+	/// OAuth headers and native Exa imports participate in the mounted specs.
 	pub async fn reload_native_configs(&self) -> Result<manager::StartupSnapshot, McpServiceError> {
 		let paths = self
 			.config_paths
@@ -267,7 +266,7 @@ impl McpService {
 			.map_or_else(Vec::new, |manager| manager.resource_uris())
 	}
 
-	/// Resolves a PI-compatible opaque `mcp://<advertised-uri>` payload to the
+	/// Resolves an opaque `mcp://<advertised-uri>` payload to the
 	/// deterministic current server which advertised it.
 	pub(crate) fn resolve_resource_server(&self, uri: &str) -> Option<pb::McpServerRef> {
 		let name = self
@@ -360,7 +359,7 @@ impl McpService {
 			})
 			.collect();
 		let epoch = self.leaves.replace(owner, version, leaves)?;
-		self.definition_epoch.store(epoch, Ordering::Release);
+		self.definition_epoch.fetch_max(epoch, Ordering::AcqRel);
 		Ok(epoch)
 	}
 
@@ -401,7 +400,7 @@ impl McpService {
 		}
 		self
 			.definition_epoch
-			.store(server.definition_epoch, Ordering::Release);
+			.fetch_max(server.definition_epoch, Ordering::AcqRel);
 		state
 			.servers
 			.insert(name, ServerEntry { status: status.clone(), backend });
@@ -425,6 +424,12 @@ impl McpService {
 		let mut state = self.state.write();
 		let removed = state.servers.remove(server.name.as_str()).is_some();
 		if removed {
+			state.history.retain(|notification| {
+				notification
+					.server
+					.as_ref()
+					.is_none_or(|candidate| candidate.name.as_str() != server.name.as_str())
+			});
 			let epoch = self.definition_epoch();
 			broadcast(
 				&mut state,
@@ -647,11 +652,58 @@ impl McpService {
 	}
 }
 
-#[derive(Clone)]
-struct McpConfigPaths {
-	user:    PathBuf,
-	project: PathBuf,
-	root:    PathBuf,
+/// Native MCP mutation paths plus the roots used for read-only discovery.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct McpConfigPaths {
+	/// User-owned `<config root>/mcp.json` (`~/.o2/mcp.json`, profile-aware).
+	pub user: PathBuf,
+	/// Project-owned `<project>/.omp/mcp.json`.
+	pub project: PathBuf,
+	/// Project-root `<project>/.mcp.json` fallback.
+	pub root: PathBuf,
+	/// Home root used by read-only foreign-provider discovery.
+	pub(crate) home: PathBuf,
+	/// Explicit contained Agent Plugins package roots.
+	pub(crate) agent_plugin_roots: Vec<PathBuf>,
+}
+
+impl McpConfigPaths {
+	/// Resolves the files under the user configuration root and the project
+	/// root. User configuration lives in `~/.o2`
+	/// ([`omp_core::dirs::user_config_root`]), never under the data or state
+	/// directory, so `omp config mcp` and the Environment's `/mcp` mutations
+	/// address one file.
+	#[must_use]
+	pub fn new(user_config_root: &Path, project_root: &Path) -> Self {
+		let configured_home = user_config_root
+			.ancestors()
+			.find(|path| path.file_name().is_some_and(|name| name == ".o2"))
+			.and_then(Path::parent)
+			.map(Path::to_path_buf);
+		let home = omp_core::dirs::home_dir()
+			.filter(|home| user_config_root.starts_with(home))
+			.or(configured_home)
+			.unwrap_or_else(|| {
+				user_config_root
+					.parent()
+					.unwrap_or(user_config_root)
+					.to_path_buf()
+			});
+		Self {
+			user: user_config_root.join("mcp.json"),
+			project: project_root.join(".omp/mcp.json"),
+			root: project_root.join(".mcp.json"),
+			home,
+			agent_plugin_roots: Vec::new(),
+		}
+	}
+
+	/// Adds explicit data-only Agent Plugins package roots.
+	#[must_use]
+	pub fn with_agent_plugin_roots(mut self, roots: Vec<PathBuf>) -> Self {
+		self.agent_plugin_roots = roots;
+		self
+	}
 }
 
 fn load_resolved_config(
@@ -660,19 +712,18 @@ fn load_resolved_config(
 ) -> Result<config::ResolvedConfig, McpServiceError> {
 	use config::{ConfigSource, ConfigSourceKind};
 
-	let sources = [
-		(ConfigSourceKind::User, paths.user),
-		(ConfigSourceKind::Project, paths.project),
-		(ConfigSourceKind::Root, paths.root),
+	let mut sources = [
+		(ConfigSourceKind::User, paths.user.clone()),
+		(ConfigSourceKind::Project, paths.project.clone()),
+		(ConfigSourceKind::Root, paths.root.clone()),
 	]
 	.into_iter()
 	.map(|(kind, path)| {
-		let file = config_store::McpConfigStore::new(path.clone())
-			.read()
-			.map_err(|_| McpServiceError::InvalidRequest)?;
+		let file = config_store::McpConfigStore::new(path.clone()).read()?;
 		Ok(ConfigSource { path, kind, file })
 	})
 	.collect::<Result<Vec<_>, McpServiceError>>()?;
+	sources.extend(discovery::sources(&paths));
 	Ok(config::resolve_sources(&sources, enable_project_config))
 }
 
@@ -718,28 +769,21 @@ fn config_request(
 	};
 	match action {
 		pb::McpConfigAction::Unspecified => return Err(McpServiceError::InvalidRequest),
-		pb::McpConfigAction::Add => selected()?
-			.add(&request.name, parse()?)
-			.map_err(|_| McpServiceError::InvalidRequest)?,
-		pb::McpConfigAction::Update => selected()?
-			.update(&request.name, parse()?)
-			.map_err(|_| McpServiceError::InvalidRequest)?,
-		pb::McpConfigAction::Remove => selected()?
-			.remove(&request.name)
-			.map_err(|_| McpServiceError::InvalidRequest)?,
+		pb::McpConfigAction::Add => selected()?.add(&request.name, parse()?)?,
+		pb::McpConfigAction::Update => selected()?.update(&request.name, parse()?)?,
+		pb::McpConfigAction::Remove => selected()?.remove(&request.name)?,
 		pb::McpConfigAction::Enable | pb::McpConfigAction::Disable => set_server_enabled(
 			&user,
 			&project,
-			Some((&root, true)),
+			Some(&root),
 			&request.name,
 			action == pb::McpConfigAction::Enable,
-		)
-		.map_err(|_| McpServiceError::InvalidRequest)?,
+		)?,
 		pb::McpConfigAction::Get | pb::McpConfigAction::List => {},
 	}
 	let mut entries = Vec::new();
 	for (scope, store) in stores {
-		let file = store.read().map_err(|_| McpServiceError::InvalidRequest)?;
+		let file = store.read()?;
 		for (name, server) in file.mcp_servers {
 			if action == pb::McpConfigAction::Get && name.as_str() != request.name {
 				continue;
@@ -771,11 +815,15 @@ impl fmt::Debug for McpService {
 }
 
 /// Environment MCP service failure.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[derive(Debug, thiserror::Error)]
 pub enum McpServiceError {
 	/// Revisioned leaf replacement was fenced or conflicted.
 	#[error(transparent)]
 	LeafReplacement(#[from] LeafReplacementError),
+	/// A scoped MCP configuration file could not be read, validated, locked, or
+	/// atomically replaced.
+	#[error(transparent)]
+	Config(#[from] config_store::ConfigStoreError),
 	/// Request omitted or contradicted required typed fields.
 	#[error("MCP request is invalid")]
 	InvalidRequest,
@@ -846,15 +894,25 @@ mod config_tests {
 		}
 	}
 
+	/// User MCP configuration is a configuration file: it resolves under the
+	/// `~/.o2` configuration root, never under the data or state directory.
+	#[test]
+	fn user_mcp_config_lives_in_the_configuration_root() {
+		let paths = McpConfigPaths::new(Path::new("/home/owner/.o2"), Path::new("/work/proj"));
+		assert_eq!(paths.user, Path::new("/home/owner/.o2/mcp.json"));
+		assert_eq!(paths.project, Path::new("/work/proj/.omp/mcp.json"));
+		assert_eq!(paths.root, Path::new("/work/proj/.mcp.json"));
+	}
+
 	#[tokio::test]
 	async fn startup_loads_persisted_sources_and_honors_project_policy() {
 		let scratch = tempfile::tempdir().expect("scratch");
-		let data = scratch.path().join("data");
+		let user_root = scratch.path().join(".o2");
 		let project = scratch.path().join("project");
 		fs::create_dir_all(project.join(".omp")).expect("project config directory");
-		fs::create_dir_all(&data).expect("data directory");
+		fs::create_dir_all(&user_root).expect("user config root");
 		fs::write(
-			data.join("mcp.json"),
+			user_root.join("mcp.json"),
 			br#"{"mcpServers":{"user-server":{"type":"stdio","command":"user"}}}"#,
 		)
 		.expect("user config");
@@ -864,7 +922,7 @@ mod config_tests {
 		)
 		.expect("root config");
 		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
-		service.bind_config_paths(&data, &project);
+		service.bind_config_paths(McpConfigPaths::new(&user_root, &project));
 		let manager = McpManager::new(
 			Arc::clone(&service),
 			Arc::new(RejectConnector),
@@ -889,13 +947,20 @@ mod config_tests {
 	}
 
 	#[tokio::test]
-	async fn native_config_rpc_mutates_and_lists_one_environment_store() {
+	async fn native_config_rpc_mutates_updates_manager_and_lists_one_environment_store() {
 		let scratch = tempfile::tempdir().expect("scratch");
-		let data = scratch.path().join("data");
+		let user_root = scratch.path().join(".o2");
 		let project = scratch.path().join("project");
 		fs::create_dir_all(&project).expect("project");
 		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
-		service.bind_config_paths(&data, &project);
+		service.bind_config_paths(McpConfigPaths::new(&user_root, &project));
+		let manager = McpManager::new(
+			Arc::clone(&service),
+			Arc::new(RejectConnector),
+			Arc::from([]),
+			project.clone(),
+		);
+		service.bind_manager(&manager);
 		service
 			.config(pb::McpConfigRequest {
 				action:        pb::McpConfigAction::Add as i32,
@@ -918,5 +983,34 @@ mod config_tests {
 		assert_eq!(listed.entries.len(), 1);
 		assert_eq!(listed.entries[0].name, "fixture");
 		assert!(listed.entries[0].writable);
+		assert_eq!(manager.inspector_snapshots().len(), 1);
+		assert_eq!(manager.inspector_snapshots()[0].server, "fixture");
+	}
+
+	#[tokio::test]
+	async fn config_load_errors_retain_the_failing_scope_path() {
+		let scratch = tempfile::tempdir().expect("scratch");
+		let user_root = scratch.path().join(".o2");
+		let project = scratch.path().join("project");
+		fs::create_dir_all(&user_root).expect("user config root");
+		fs::create_dir_all(&project).expect("project");
+		let user_path = user_root.join("mcp.json");
+		fs::write(&user_path, b"{invalid").expect("invalid user config");
+
+		let service = McpService::open(scratch.path().join("cache.sqlite3")).expect("service");
+		service.bind_config_paths(McpConfigPaths::new(&user_root, &project));
+		let manager =
+			McpManager::new(Arc::clone(&service), Arc::new(RejectConnector), Arc::from([]), project);
+		service.bind_manager(&manager);
+
+		let error = service
+			.start_native_configs(true)
+			.await
+			.expect_err("invalid scoped config");
+		assert!(matches!(
+			error,
+			McpServiceError::Config(config_store::ConfigStoreError::Json { path, .. })
+				if path == user_path
+		));
 	}
 }

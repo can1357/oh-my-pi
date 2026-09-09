@@ -955,6 +955,7 @@ message UsageResponse {
       UNIT_MINUTES = 5;
       UNIT_BYTES = 6;
       UNIT_UNKNOWN = 7;
+      UNIT_CREDITS = 8;
     }
     enum Status {
       STATUS_UNSPECIFIED = 0;

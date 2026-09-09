@@ -60,6 +60,7 @@ impl ThemeWatcher {
 		}
 		self.active.store(None);
 		state.revision = revision;
+		tracing::debug!(revision, "custom theme cleared");
 		Ok(())
 	}
 
@@ -80,6 +81,11 @@ impl ThemeWatcher {
 		state
 			.subscribers
 			.retain(|subscriber| subscriber.try_send(update.clone()).is_ok());
+		tracing::debug!(
+			revision,
+			subscriber_count = state.subscribers.len(),
+			"custom theme revision published"
+		);
 		Ok(update)
 	}
 

@@ -1,0 +1,32 @@
+── ast_edit — AST Edit ─────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ AST Edit: countEditFiles($$$ARGS) in packages/coding-agent/src/**/*.ts                            
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ AST Edit: countEditFiles($$$ARGS) in packages/coding-agent/src/**/*.ts                            
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  AST Edit: countEditFiles($$$ARGS) ⟨proposed⟩ 3 replacements · 2 files · in packages/coding-…╮
+│ # edit/                                                                                          │
+│ ## renderer.ts (2 replacements)                                                                  │
+│ -468       fileCount = countEditFiles(editArgs.edits);                                           │
+│ +468       fileCount = countDistinctFiles(editArgs.edits);                                       │
+│ -488       const totalFiles = args?.edits ? countEditFiles(args.edits) : 0;                      │
+│ +488       const totalFiles = args?.edits ? countDistinctFiles(args.edits) : 0;                  │
+│ … 1 more change                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  AST Edit ───────────────────────────────────────────────────────────────────────────────────╮
+│   Pattern parse error in ops[0].pat: unbalanced parenthesis in `countEditFiles($$$ARGS`          │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

@@ -1,10 +1,5 @@
 //! Private no-op reasoning scratch tool.
 
-use std::{
-	error,
-	fmt::{self, Display},
-};
-
 use async_stream::stream;
 use futures::Stream;
 use omp_core::{Str, sf};
@@ -35,7 +30,8 @@ pub struct Payload {
 pub enum Update {}
 
 /// A rejected scratch note.
-#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize, thiserror::Error)]
+#[error("{message}")]
 pub struct Fault {
 	message: Str,
 }
@@ -45,12 +41,6 @@ impl Fault {
 		&self.message
 	}
 }
-impl Display for Fault {
-	fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-		f.write_str(&self.message)
-	}
-}
-impl error::Error for Fault {}
 
 /// No-op scratch executor; normal tool journaling is the note's durable truth.
 pub struct Think {

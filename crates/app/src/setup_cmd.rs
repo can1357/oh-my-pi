@@ -3,21 +3,19 @@
 use std::{cell::Cell, fs, io, io::IsTerminal as _, path::Path, str::FromStr as _};
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_catalog::snapshot;
-use omp_chat_ui::ListRow;
-use omp_core::Str;
-use omp_inference::local::{
+use omp_ai::local::{
 	ArtifactStore, LocalCancellation, SystemArtifactFetcher,
 	artifact::ArtifactCacheStatus,
 	speech_catalog::{STT_PRESETS, SpeechArtifactManifests, SpeechCatalog, SttPreset},
 };
+use omp_core::Str;
 use serde_json::json;
 
 use crate::{
 	cli::{SetupArgs, SetupCommand},
 	pickers,
+	pickers::ListRow,
 	progress_reporter::ProgressReporter,
-	wizard,
 };
 
 /// Executes one standalone setup flow.
@@ -26,9 +24,13 @@ pub async fn run(args: SetupArgs) -> miette::Result<()> {
 	fs::create_dir_all(&data_dir).into_diagnostic()?;
 	match args.command.unwrap_or(SetupCommand::Wizard) {
 		SetupCommand::Wizard => {
-			let catalog =
-				snapshot::Catalog::try_embedded().map_err(|error| miette!(error.to_string()))?;
-			wizard::run(&data_dir, catalog).await?;
+			let catalog = omp_driver::registry::production_catalog(&data_dir)
+				.map_err(|source| miette!(source))?;
+			println!(
+				"OMP is ready with {} models. Use `omp auth login <provider>` to add credentials and \
+				 `omp config set ai_model <provider/model>` to choose the default.",
+				catalog.models().len(),
+			);
 			Ok(())
 		},
 		SetupCommand::Python { json } => python(json),
@@ -71,7 +73,7 @@ async fn speech(
 	let root = data_dir.join("models");
 	fs::create_dir_all(&root).into_diagnostic()?;
 	let store = ArtifactStore::open(&root).into_diagnostic()?;
-	let manifests = SpeechArtifactManifests::pi_parity().into_diagnostic()?;
+	let manifests = SpeechArtifactManifests::curated().into_diagnostic()?;
 	let cancel = LocalCancellation::new();
 	let snapshot = SpeechCatalog
 		.snapshot(&store, &manifests, &cancel)

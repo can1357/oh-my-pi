@@ -1,13 +1,19 @@
 //! Validated, indexed access to the checked-in binary catalog snapshot.
 
-use std::{fs, io, mem, path::Path, sync::LazyLock};
+use std::{
+	collections::{BTreeMap, BTreeSet},
+	fs, io, mem,
+	path::Path,
+	sync::LazyLock,
+};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::{
-	CatalogOverlay, OverlayStack, ResolveError, UnsafeTrustScope,
-	compile::{CatalogAlias, CompileError, CompiledCatalog, CompilerCensus},
+	CatalogOverlay, CatalogOverlayBuilder, EvidenceConfidence, ExactSelector, ModelOverlay,
+	ModelPatch, OverlayStack, ProvenanceKind, ProvenanceSource, ResolveError, UnsafeTrustScope,
+	compile::{CatalogAlias, CompileError, CompiledCatalog, CompilerCensus, compile_oracle},
 	contrib::RuntimeProviderRecords,
 	discover::DiscoveryDefaults,
 	id::{
@@ -17,14 +23,17 @@ use crate::{
 	model::ModelSpec,
 	policy::WirePolicy,
 	provider::{AuthSpec, DiscoverySpec, HeaderProfile, OAuthSpec, ProviderDef, RouteDef},
+	resolve::retain_additive_models,
 	thinking::ThinkingPolicy,
 };
 
 const MAGIC: &[u8; 8] = b"OMPLLCAT";
-const SCHEMA_VERSION: u32 = 1;
+const SCHEMA_VERSION: u32 = 2;
 const HEADER_LEN: usize = 8 + 4 + 32 + 32 + 32;
 const EMBEDDED_BYTES: &[u8] = include_bytes!("../data/catalog.postcard");
-const OVERLAY_CACHE_SCHEMA: u32 = 1;
+const OVERLAY_CACHE_SCHEMA: u32 = 2;
+const BUNDLED_PROVIDERS: &str = include_str!("../../../fixtures/llm-oracle/catalog/providers.toml");
+const BUNDLED_OAUTH: &str = include_str!("../../../fixtures/llm-oracle/catalog/oauth.toml");
 
 static EMBEDDED: LazyLock<Result<Catalog, SnapshotError>> = LazyLock::new(load_embedded);
 
@@ -72,6 +81,12 @@ struct CachedOverlaySnapshot {
 }
 
 /// Writes one complete credential-blind discovery overlay for restart recovery.
+#[tracing::instrument(
+	name = "catalog_overlay_cache_write",
+	level = "debug",
+	skip_all,
+	fields(path = %path.display())
+)]
 pub fn write_discovery_overlay_cache(
 	path: &Path,
 	overlay: &CatalogOverlay,
@@ -87,28 +102,45 @@ pub fn write_discovery_overlay_cache(
 		.and_then(|name| name.to_str())
 		.unwrap_or("catalog-cache");
 	let temporary = parent.join(format!(".{name}.{}.tmp", std::process::id()));
+	let byte_count = encoded.len();
 	fs::write(&temporary, encoded)?;
 	if let Err(source) = fs::rename(&temporary, path) {
 		let _ = fs::remove_file(&temporary);
 		return Err(OverlayCacheError::Io(source));
 	}
+	tracing::debug!(byte_count, "discovery overlay cache published");
 	Ok(())
 }
 
 /// Loads a credential-blind discovery overlay, rejecting unsupported cache
 /// schemas.
+#[tracing::instrument(
+	name = "catalog_overlay_cache_read",
+	level = "debug",
+	skip_all,
+	fields(path = %path.display())
+)]
 pub fn read_discovery_overlay_cache(
 	path: &Path,
 ) -> Result<Option<CatalogOverlay>, OverlayCacheError> {
 	let encoded = match fs::read(path) {
 		Ok(encoded) => encoded,
-		Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+		Err(error) if error.kind() == io::ErrorKind::NotFound => {
+			tracing::debug!("discovery overlay cache miss");
+			return Ok(None);
+		},
 		Err(error) => return Err(error.into()),
 	};
 	let cached: CachedOverlaySnapshot = serde_json::from_slice(&encoded)?;
 	if cached.schema != OVERLAY_CACHE_SCHEMA {
+		tracing::warn!(
+			schema = cached.schema,
+			expected_schema = OVERLAY_CACHE_SCHEMA,
+			"discovery overlay cache schema rejected"
+		);
 		return Err(OverlayCacheError::UnsupportedSchema(cached.schema));
 	}
+	tracing::debug!(byte_count = encoded.len(), "discovery overlay cache hit");
 	Ok(Some(cached.overlay))
 }
 
@@ -124,6 +156,17 @@ pub enum OverlayCacheError {
 	/// The cache schema is newer or older than this runtime.
 	#[error("unsupported discovery overlay cache schema {0}")]
 	UnsupportedSchema(u32),
+}
+
+/// Failure to compile or admit a runtime shared-catalog snapshot.
+#[derive(Debug, thiserror::Error)]
+pub enum SharedCatalogError {
+	/// Remote model data did not match the bundled compiler contract.
+	#[error("shared catalog compilation failed")]
+	Compile(#[source] CompileError),
+	/// A persisted layer claimed authority outside runtime discovery.
+	#[error("shared catalog cache has non-discovery provenance {0}")]
+	WrongProvenance(ProvenanceKind),
 }
 
 /// Failure to generate deterministic snapshot artifacts.
@@ -182,6 +225,125 @@ impl Catalog {
 	/// Tries to open the process-wide embedded catalog without parsing JSON.
 	pub fn try_embedded() -> Result<&'static Self, &'static SnapshotError> {
 		EMBEDDED.as_ref()
+	}
+
+	/// Compiles one compressed models.dev-style catalog with the same provider
+	/// and compatibility inputs as the bundled snapshot, then retains only safe
+	/// additions for providers and routes already known to this binary.
+	pub fn additive_shared_catalog_overlay(
+		&self,
+		models_json_zstd: &[u8],
+		observed_at_ms: u64,
+	) -> Result<CatalogOverlay, SharedCatalogError> {
+		let remote = compile_oracle(BUNDLED_PROVIDERS, models_json_zstd, BUNDLED_OAUTH)
+			.map_err(SharedCatalogError::Compile)?;
+		let source = ProvenanceSource {
+			kind:           ProvenanceKind::Discovered,
+			origin:         omp_core::Str::new_static("models.dev"),
+			revision:       Some(remote.revision.clone()),
+			confidence:     EvidenceConfidence::Declared,
+			observed_at_ms: Some(observed_at_ms),
+		};
+		let route_providers = remote
+			.routes
+			.iter()
+			.map(|route| (route.id.clone(), route.provider.clone()))
+			.collect::<BTreeMap<_, _>>();
+		let existing_models = self
+			.models()
+			.iter()
+			.map(|model| model.key.clone())
+			.collect::<BTreeSet<_>>();
+		let known_providers = self
+			.providers()
+			.iter()
+			.map(|provider| provider.id.clone())
+			.collect::<BTreeSet<_>>();
+		let candidate_models = remote
+			.models
+			.iter()
+			.filter(|model| !existing_models.contains(&model.key))
+			.map(|model| model.key.clone())
+			.collect::<BTreeSet<_>>();
+		let mut builder = CatalogOverlayBuilder::new(source.clone());
+		for mut model in remote.models.into_vec() {
+			if existing_models.contains(&model.key)
+				|| !self.supports_shared_catalog_model(&model, &candidate_models)
+			{
+				continue;
+			}
+			let providers = model
+				.routes
+				.iter()
+				.filter_map(|route| route_providers.get(route))
+				.filter(|provider| known_providers.contains(*provider))
+				.cloned()
+				.collect::<BTreeSet<_>>();
+			if providers.is_empty() {
+				continue;
+			}
+			model.provenance.sources = Box::new([source.clone()]);
+			for provider in providers {
+				builder = builder.with_model(ModelOverlay {
+					selector: ExactSelector::new(provider, model.key.clone()),
+					added:    Some(model.clone()),
+					patch:    ModelPatch::default(),
+				});
+			}
+		}
+		Ok(retain_additive_models(builder.build(), &existing_models, &known_providers, |model| {
+			self.supports_shared_catalog_model(model, &candidate_models)
+		}))
+	}
+
+	/// Revalidates a persisted shared-catalog overlay against the current
+	/// bundled providers, routes, interned policies, and additive-only boundary.
+	pub fn sanitize_shared_catalog_overlay(
+		&self,
+		overlay: CatalogOverlay,
+	) -> Result<CatalogOverlay, SharedCatalogError> {
+		if overlay.source().kind != ProvenanceKind::Discovered {
+			return Err(SharedCatalogError::WrongProvenance(overlay.source().kind));
+		}
+		let existing_models = self
+			.models()
+			.iter()
+			.map(|model| model.key.clone())
+			.collect::<BTreeSet<_>>();
+		let known_providers = self
+			.providers()
+			.iter()
+			.map(|provider| provider.id.clone())
+			.collect::<BTreeSet<_>>();
+		let candidate_models = overlay.added_model_keys();
+		Ok(retain_additive_models(overlay, &existing_models, &known_providers, |model| {
+			self.supports_shared_catalog_model(model, &candidate_models)
+		}))
+	}
+
+	fn supports_shared_catalog_model(
+		&self,
+		model: &ModelSpec,
+		candidate_models: &BTreeSet<ModelKey>,
+	) -> bool {
+		model.routes.iter().all(|route| self.route(route).is_some())
+			&& model
+				.wire_ids
+				.iter()
+				.all(|(route, _)| self.route(route).is_some())
+			&& self.wire_policy(&model.wire_policy).is_some()
+			&& model
+				.thinking
+				.as_ref()
+				.is_none_or(|policy| self.thinking_policy(policy).is_some())
+			&& model
+				.context_promotion_target
+				.as_ref()
+				.is_none_or(|target| self.model(target).is_some() || candidate_models.contains(target))
+			&& model
+				.compaction_model
+				.as_ref()
+				.is_none_or(|target| self.model(target).is_some() || candidate_models.contains(target))
 	}
 
 	/// Produces canonical JSON and the private postcard snapshot from compiled
@@ -648,6 +810,20 @@ fn validate_catalog(catalog: &CompiledCatalog) -> Result<(), SnapshotError> {
 		|record| &record.id,
 		"discovery specs are not uniquely sorted",
 	)?;
+	for provider in &catalog.providers {
+		if let Some(default_model) = &provider.default_model
+			&& !catalog
+				.models
+				.iter()
+				.any(|model| &model.key == default_model)
+			&& !catalog
+				.aliases
+				.iter()
+				.any(|alias| alias.alias.as_str() == default_model.as_str())
+		{
+			return Err(SnapshotError::Invariant("provider default references an unknown model"));
+		}
+	}
 	for auth in &catalog.auth_specs {
 		if let Some(oauth) = &auth.oauth
 			&& catalog
@@ -778,8 +954,21 @@ fn ensure_strictly_sorted<T: Ord>(
 	Ok(())
 }
 
+#[tracing::instrument(
+	name = "catalog_snapshot_load",
+	level = "debug",
+	skip_all,
+	fields(snapshot_bytes = EMBEDDED_BYTES.len())
+)]
 fn load_embedded() -> Result<Catalog, SnapshotError> {
-	Catalog::decode_for_source(EMBEDDED_BYTES, embedded_source_digest())
+	let catalog = Catalog::decode_for_source(EMBEDDED_BYTES, embedded_source_digest())?;
+	tracing::debug!(
+		provider_count = catalog.providers().len(),
+		model_count = catalog.models().len(),
+		route_count = catalog.routes().len(),
+		"embedded catalog snapshot loaded"
+	);
+	Ok(catalog)
 }
 
 fn embedded_source_digest() -> [u8; 32] {
@@ -843,6 +1032,75 @@ mod tests {
 				.discovery_defaults(ProviderId::from_ref("missing-provider"))
 				.is_none()
 		);
+	}
+
+	#[test]
+	fn shared_catalog_overlay_is_additive_and_leaves_other_providers_untouched() {
+		let catalog = Catalog::embedded();
+		let compressed = include_bytes!("../../../fixtures/llm-oracle/catalog/models.json.zst");
+		let decoded = zstd::stream::decode_all(compressed.as_slice()).expect("decode models");
+		let mut document: serde_json::Value =
+			serde_json::from_slice(&decoded).expect("models document");
+		let providers = document.as_object_mut().expect("provider map");
+		let zai = providers
+			.get_mut("zai")
+			.and_then(serde_json::Value::as_object_mut)
+			.expect("zai models");
+		let mut row = zai.values().next().expect("zai model").clone();
+		if let Some(record) = row.as_object_mut() {
+			record.insert(
+				"id".to_owned(),
+				serde_json::Value::String("runtime-addition-fixture".to_owned()),
+			);
+			record.insert(
+				"name".to_owned(),
+				serde_json::Value::String("Runtime Addition Fixture".to_owned()),
+			);
+		}
+		zai.insert("runtime-addition-fixture".to_owned(), row);
+		let remote = zstd::stream::encode_all(
+			serde_json::to_vec(&document)
+				.expect("encode models")
+				.as_slice(),
+			3,
+		)
+		.expect("compress models");
+		let untouched = catalog
+			.models()
+			.iter()
+			.find(|model| {
+				model.routes.iter().all(|route| {
+					catalog
+						.route(route)
+						.is_some_and(|route| route.provider.as_str() != "zai")
+				})
+			})
+			.expect("untouched provider model")
+			.clone();
+		let bundled_zai = catalog
+			.models()
+			.iter()
+			.find(|model| {
+				model.routes.iter().any(|route| {
+					catalog
+						.route(route)
+						.is_some_and(|route| route.provider.as_str() == "zai")
+				})
+			})
+			.expect("bundled zai model")
+			.clone();
+		let overlay = catalog
+			.additive_shared_catalog_overlay(&remote, 123)
+			.expect("shared overlay");
+		assert!(overlay.model_count() > 0);
+		let resolved = catalog
+			.with_overlay_stack(
+				&OverlayStack::from_layers([(OverlaySource::Discovery, overlay)]),
+				UnsafeTrustScope::NONE,
+			)
+			.expect("materialize");
+		assert_eq!(resolved.model(&untouched.key), Some(&untouched));
+		assert_eq!(resolved.model(&bundled_zai.key), Some(&bundled_zai));
 	}
 
 	#[test]

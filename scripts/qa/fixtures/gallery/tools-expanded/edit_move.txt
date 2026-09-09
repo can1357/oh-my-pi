@@ -1,0 +1,24 @@
+── edit_move — Move ────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Move:  scripts/prune-changelogs.ts → scripts/archived/prune-changelogs.ts                        
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Move:  scripts/prune-changelogs.ts → scripts/archived/prune-changelogs.ts                        
+                                                                                                    
+
+  · done
+                                                                                                    
+ Move:  scripts/prune-changelogs.ts → scripts/archived/prune-changelogs.ts                        
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  Edit:  scripts/prune-changelogs.ts → scripts/archived/prune-changelogs.ts ─────────────────╮
+│MV destination scripts/archived/prune-changelogs.ts already exists.                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

@@ -27,17 +27,22 @@ shell.
 - `scene` is the host contract: a `Scene` produces `SceneFrame`s and routes
   input; `mux` is the pure split-tree layout; `host` is the winit shell that
   drives windows → tabs → split panes (one scene per pane) — window
-  lifecycle, cell geometry, animation ticks, smooth transcript scrolling,
-  clipboard pastes, mux hotkeys, and window chrome (tab strip, pane
-  dividers, drag zones, vibrancy, rounded corners).
+  lifecycle, IME marked-text/candidate-caret synchronization, native
+  file/media drops, OS focus/resize/appearance changes, cell geometry,
+  animation ticks, smooth transcript scrolling, clipboard pastes, mux
+  hotkeys, and window chrome (tab strip, pane dividers, drag zones,
+  vibrancy, rounded corners).
 
 ## Philosophy
 
 Text is parsed once, at the component boundary, exactly like the terminal
 host: the GUI consumes the retained cell grid, never escape sequences. The
 window is chrome the application never thinks about — it renders the same
-document and layers the terminal would, with pixel freedom the terminal does
-not have: smooth scrolling, soft shadows, translucency, and real emoji.
+document and layers the terminal would, with pixel freedom the terminal does not have: smooth scrolling, soft shadows, translucency, and real emoji.
+The native adapter still projects the terminal actor's retained `Frame`; its
+named off-screen debug socket drives the same scene methods as winit and can
+inject IME, drop, focus, theme, key, mouse, paste, resize, and clean-close
+events without gaining controller or session authority.
 
 ## Run the chat demo
 

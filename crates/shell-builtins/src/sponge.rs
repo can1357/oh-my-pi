@@ -1,9 +1,8 @@
 //! `sponge` builtin: soak up all of standard input before writing it to a file
 //! or standard output.
 //!
-//! Ported from pi-shell's in-process implementation of the moreutils tool. The
-//! delayed open makes `command < file | sponge file` safe: the destination is
-//! not opened or truncated until its former contents have reached EOF.
+//! The delayed open makes `command < file | sponge file` safe: the destination
+//! is not opened or truncated until its former contents have reached EOF.
 
 use std::{
 	ffi::{OsStr, OsString},
@@ -16,7 +15,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::host::{Host, Utility, format_usage, matches_parser, util};
 
@@ -58,7 +57,13 @@ impl Utility for Sponge {
 			return 0;
 		};
 
-		let target = host.resolve(file);
+		let target = match host.ensure_writable(file) {
+			Ok(path) => path,
+			Err(err) => {
+				host.error(format_args!("{}: {err}", file.to_string_lossy()), 1);
+				return 1;
+			},
+		};
 		let result = if self.matches.get_flag(OPT_APPEND) {
 			append_to(&target, &buffer)
 		} else {
@@ -76,7 +81,7 @@ impl Utility for Sponge {
 
 fn command() -> Command {
 	Command::new("sponge")
-		.version("sponge (pi-shell) 17.2.11")
+		.version("sponge 17.2.11")
 		.about("Soak up all standard input, then write it to a file.")
 		.override_usage(format_usage("sponge [-a] [FILE]"))
 		.disable_help_flag(true)
@@ -198,10 +203,31 @@ pub(crate) fn sponge_builtin<SE: ShellExtensions>() -> Registration<SE> {
 
 #[cfg(test)]
 mod tests {
-	use std::{ffi::OsString, fs, str};
+	use std::{ffi::OsString, fs, str, sync::Arc};
 
 	use super::Sponge;
-	use crate::host::run_util;
+	use crate::host::{ScopedPathPolicy, run_util, run_util_with_policy};
+
+	#[test]
+	fn write_policy_denies_outside_root_and_allows_inside() {
+		let dir = tempfile::tempdir().unwrap();
+		let allowed = dir.path().join("allowed");
+		fs::create_dir(&allowed).unwrap();
+		let denied = dir.path().join("denied");
+		fs::write(&denied, b"original").unwrap();
+		let policy = Arc::new(ScopedPathPolicy::new(&allowed));
+
+		let (code, capture) =
+			run_util_with_policy::<Sponge>(&["denied"], "replacement", dir.path(), policy.clone());
+		assert_eq!(code, 1);
+		assert!(capture.err().contains("sandbox denied write"));
+		assert_eq!(fs::read(&denied).unwrap(), b"original");
+
+		let (code, capture) =
+			run_util_with_policy::<Sponge>(&["allowed/output"], "written", dir.path(), policy);
+		assert_eq!((code, capture.err()), (0, String::new()));
+		assert_eq!(fs::read(allowed.join("output")).unwrap(), b"written");
+	}
 
 	#[test]
 	fn stdin_written_to_file_exactly() {

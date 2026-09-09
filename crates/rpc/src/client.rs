@@ -591,9 +591,7 @@ impl ClientState {
 			.unwrap_or_default();
 		let handler = {
 			let registry = self.host_uri_schemes.read().await;
-			if registry.generation != request.generation {
-				None
-			} else {
+			if registry.generation == request.generation {
 				registry
 					.schemes
 					.get(scheme)
@@ -601,6 +599,8 @@ impl ClientState {
 						request.operation == HostUriOperation::Read || registered.definition.writable
 					})
 					.map(|registered| Arc::clone(&registered.handler))
+			} else {
+				None
 			}
 		};
 		let Some(handler) = handler else {
@@ -705,6 +705,7 @@ pub struct RpcClient {
 impl RpcClient {
 	/// Spawns `omp rpc`, waits for `ready`, and negotiates protocol v2 when
 	/// advertised.
+	#[tracing::instrument(level = "debug", skip_all, fields(rpc.service = "stdio", rpc.method = "connect"))]
 	pub async fn spawn(options: RpcClientOptions) -> Result<Self, ClientError> {
 		let mut command = Command::new(&options.executable);
 		command.arg("rpc");
@@ -763,12 +764,14 @@ impl RpcClient {
 			let mut stdin = stdin;
 			while let Ok(frame) = writer_rx.recv_async().await {
 				if let Err(error) = stdin.write_all(&frame).await {
+					tracing::warn!(%error, "RPC transport write failed");
 					writer_state
 						.fail_all(format!("stdin write failed: {error}"))
 						.await;
 					return;
 				}
 				if let Err(error) = stdin.flush().await {
+					tracing::warn!(%error, "RPC transport flush failed");
 					writer_state
 						.fail_all(format!("stdin flush failed: {error}"))
 						.await;
@@ -791,6 +794,7 @@ impl RpcClient {
 					},
 					Ok(count) => count,
 					Err(error) => {
+						tracing::warn!(%error, "RPC transport read failed");
 						reader_state
 							.fail_all(format!("stdout read failed: {error}"))
 							.await;
@@ -802,12 +806,14 @@ impl RpcClient {
 					match logical.push_frame(&frame) {
 						Ok(Some(value)) => {
 							if let Err(error) = reader_state.dispatch(value).await {
+								tracing::warn!(%error, "RPC response dispatch failed");
 								reader_state.fail_all(error.to_string()).await;
 								return;
 							}
 						},
 						Ok(None) => {},
 						Err(error) => {
+							tracing::warn!(%error, "RPC frame decoding failed");
 							reader_state.fail_all(error.to_string()).await;
 							return;
 						},
@@ -848,15 +854,18 @@ impl RpcClient {
 		let ready = match time::timeout(options.ready_timeout, ready_rx).await {
 			Ok(Ok(ready)) => ready,
 			Ok(Err(_)) => {
+				tracing::warn!("RPC child exited before ready handshake");
 				client.shutdown().await?;
 				return Err(ClientError::Disconnected("child exited before ready".into()));
 			},
 			Err(_) => {
+				tracing::warn!("RPC ready handshake timed out");
 				client.shutdown().await?;
 				return Err(ClientError::ReadyTimeout);
 			},
 		};
 		if let Err(error) = Self::validate_ready(&ready) {
+			tracing::warn!(%error, "RPC ready handshake rejected");
 			let _ = client.shutdown().await;
 			return Err(error);
 		}
@@ -869,6 +878,7 @@ impl RpcClient {
 			{
 				Ok(negotiated) => negotiated,
 				Err(error) => {
+					tracing::warn!(%error, "RPC protocol negotiation failed");
 					let _ = client.shutdown().await;
 					return Err(error);
 				},
@@ -876,11 +886,13 @@ impl RpcClient {
 			if negotiated.protocol_version != ProtocolVersion::V2 {
 				let error =
 					ClientError::IncompatibleHandshake("server did not activate protocol v2".into());
+				tracing::warn!(%error, "RPC protocol negotiation rejected");
 				let _ = client.shutdown().await;
 				return Err(error);
 			}
 			client.state.protocol.store(PROTOCOL_V2, Ordering::Release);
 		}
+		tracing::debug!(protocol = client.protocol_version().0, "RPC channel handshake completed");
 		Ok(client)
 	}
 
@@ -917,6 +929,11 @@ impl RpcClient {
 	}
 
 	/// Generic request escape hatch with an explicit response deadline.
+	#[tracing::instrument(
+		level = "debug",
+		skip_all,
+		fields(rpc.service = "stdio", rpc.method = %command)
+	)]
 	pub async fn request_with_timeout<P, R>(
 		&self,
 		command: &str,

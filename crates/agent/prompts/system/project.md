@@ -75,7 +75,7 @@ Some entries were elided under the tree cap; use mounted discovery/read tools to
 {% endif %}
 {% if additional_roots %}
 <workspace-roots>
-Additional workspace directories. This CURRENT workspace state supersedes earlier workspace changes. Use absolute paths under these roots. Manage with `/add-dir` and `/remove-dir`; `/dirs` lists them.
+Additional workspace directories. This CURRENT workspace state supersedes earlier workspace changes. Use absolute paths under these roots. Manage with `/dir add` and `/dir remove`; `/dir` lists them.
 {% for root in additional_roots %}
 - {{ root.canonical_uri }}
 {% endfor %}

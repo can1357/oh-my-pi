@@ -20,7 +20,7 @@ use clap::{
 	builder::{TypedValueParser, ValueParserFactory},
 	error,
 };
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 use rand::{
 	RngExt as _, SeedableRng as _,
 	rngs::{self, SmallRng},
@@ -521,7 +521,7 @@ fn exec(
 ) -> Result<PathBuf, MkTempError> {
 	// Only the filesystem-facing form is resolved. The returned path retains
 	// the spelling implied by the user's operands, which scripts consume.
-	let resolved_dir = host.resolve(dir);
+	let resolved_dir = host.ensure_writable(dir)?;
 	let created = if make_dir {
 		make_temp_dir(&resolved_dir, dir, prefix, rand, suffix)?
 	} else {

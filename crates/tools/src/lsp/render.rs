@@ -3,7 +3,7 @@
 use omp_core::{Str, StrMut};
 use serde_json::Value;
 
-/// Stable SymbolKind label.
+/// Stable `SymbolKind` label.
 pub fn symbol_kind(kind: u64) -> &'static str {
 	const LABELS: [&str; 27] = [
 		"unknown",

@@ -21,6 +21,7 @@ const ACTION_TIMEOUT: Duration = Duration::from_secs(8);
 const ZERO_MATCH_TIMEOUT: Duration = Duration::from_secs(2);
 const POLL_INTERVAL: Duration = Duration::from_millis(100);
 const MAX_AX_SNAPSHOT_BYTES: usize = 4 * 1024 * 1024;
+const MAX_EXTRACT_BYTES: usize = 4 * 1024 * 1024;
 const MAX_SCREENSHOT_BYTES: usize = 32 * 1024 * 1024;
 
 const HELPERS: &str = r#"
@@ -97,7 +98,7 @@ const HELPERS: &str = r#"
 pub enum Selector {
 	/// A CSS selector.
 	Css(Str),
-	/// An XPath expression.
+	/// An `XPath` expression.
 	XPath(Str),
 	/// Visible accessible text.
 	Text(Str),
@@ -371,11 +372,26 @@ impl<'view> TabHandle<'view> {
 				.recv_timeout(deadline.saturating_duration_since(Instant::now()))
 			{
 				Ok(WebViewEvent::Frame(frame)) => return Ok(frame),
-				Ok(WebViewEvent::Closed | WebViewEvent::Crashed(_)) => {
+				Ok(WebViewEvent::Closed) => {
+					tracing::warn!(
+						engine = %self.view.engine(),
+						surface = %self.view.surface(),
+						error = "closed",
+						"webview frame capture failed"
+					);
 					return Err(Error::Closed);
 				},
+				Ok(WebViewEvent::Crashed(_)) => return Err(Error::Closed),
 				Ok(_) => {},
-				Err(_) => return Err(Error::Timeout("capturing browser frame")),
+				Err(_) => {
+					tracing::warn!(
+						engine = %self.view.engine(),
+						surface = %self.view.surface(),
+						error = "timeout",
+						"webview frame capture failed"
+					);
+					return Err(Error::Timeout("capturing browser frame"));
+				},
 			}
 		}
 	}
@@ -402,9 +418,32 @@ impl<'view> TabHandle<'view> {
 				return Err(Error::Unsupported("direct screenshot requires remote Chromium"));
 			};
 			let (tx, rx) = flume::bounded(1);
-			remote.send(Command::Screenshot { clip, full_page, reply: tx })?;
-			rx.recv_timeout(timeout)
-				.map_err(|_| Error::Timeout("capturing PNG screenshot"))??
+			remote
+				.send(Command::Screenshot { clip, full_page, reply: tx })
+				.inspect_err(|error| {
+					tracing::warn!(
+						engine = %self.view.engine(),
+						surface = %self.view.surface(),
+						error = error.kind(),
+						"webview screenshot capture failed"
+					);
+				})?;
+			let result = rx
+				.recv_timeout(timeout)
+				.map_err(|_| Error::Timeout("capturing PNG screenshot"))
+				.and_then(|result| result);
+			match result {
+				Ok(data) => data,
+				Err(error) => {
+					tracing::warn!(
+						engine = %self.view.engine(),
+						surface = %self.view.surface(),
+						error = error.kind(),
+						"webview screenshot capture failed"
+					);
+					return Err(error);
+				},
+			}
 		} else {
 			if selector.is_some() || full_page {
 				return Err(Error::Unsupported(
@@ -427,11 +466,14 @@ impl<'view> TabHandle<'view> {
 				"document.documentElement ? document.documentElement.outerHTML : ''"
 			},
 		};
-		self
-			.eval_value(expression, QUICK_TIMEOUT)?
+		let value = self.eval_value(expression, QUICK_TIMEOUT)?;
+		let text = value
 			.as_str()
-			.map(Str::new)
-			.ok_or_else(|| Error::Protocol("document extraction returned a non-string".to_str()))
+			.ok_or_else(|| Error::Protocol("document extraction returned a non-string".to_str()))?;
+		if text.len() > MAX_EXTRACT_BYTES {
+			return Err(Error::Protocol("document extraction exceeds byte limit".to_str()));
+		}
+		Ok(Str::new(text))
 	}
 
 	/// Return native Chromium AX or injected ARIA YAML on other engines.
@@ -535,7 +577,7 @@ impl<'view> DocumentHandle<'view> {
 	/// Observe a bounded set of document elements.
 	pub fn observe(self, options: ObserveOptions) -> Result<Observation> {
 		let script = format!(
-			r#"{HELPERS}
+			r"{HELPERS}
 (() => {{
  const all=[...document.querySelectorAll('body *')];
  const candidates=all.filter(el=>{{ const m=window.__ompMetadata(el); if(!m)return false;
@@ -543,7 +585,7 @@ impl<'view> DocumentHandle<'view> {
   return {all}||['button','link','textbox','checkbox','combobox','option','menuitem','tab'].includes(m.role)||el.tabIndex>=0; }});
  const chosen=candidates.slice(0,{limit}).map(window.__ompMetadata);
  return {{url:location.href,title:document.title,text:(document.body?.innerText||'').slice(0,65536),elements:chosen,truncated:candidates.length>chosen.length}};
-}})()"#,
+}})()",
 			viewport = options.viewport_only,
 			all = options.include_all,
 			limit = options.limit.max(1)

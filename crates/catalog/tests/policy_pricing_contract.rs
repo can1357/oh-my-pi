@@ -218,12 +218,12 @@ fn xai_oauth_grok_45_and_46_default_to_mandatory_high_effort() {
 				ThinkingEffort::Low,
 				ThinkingEffort::Medium,
 				ThinkingEffort::High,
-				ThinkingEffort::XHigh,
 			][..],
 		),
 		(
 			"xai-oauth/grok-4.6",
 			&[
+				ThinkingEffort::Minimal,
 				ThinkingEffort::Low,
 				ThinkingEffort::Medium,
 				ThinkingEffort::High,
@@ -246,9 +246,9 @@ fn xai_oauth_grok_45_and_46_default_to_mandatory_high_effort() {
 			.find(|policy| policy.content_id() == *thinking_id)
 			.unwrap_or_else(|| panic!("{key} interned thinking policy"));
 		assert_eq!(thinking.efforts.as_slice(), expected, "{key} efforts");
-		assert_eq!(thinking.default_level, Some(ThinkingEffort::High), "{key} default");
-		assert_eq!(thinking.requires_effort, Some(true), "{key} mandatory effort");
-		assert!(!thinking.supports(ThinkingEffort::Off), "{key} has no off switch");
+		assert_eq!(thinking.default_level, None, "{key} default");
+		assert_eq!(thinking.requires_effort, None, "{key} optional effort");
+		assert!(thinking.supports(ThinkingEffort::Off), "{key} has an off switch");
 	}
 	let grok_46 = compiled
 		.models
@@ -261,8 +261,8 @@ fn xai_oauth_grok_45_and_46_default_to_mandatory_high_effort() {
 		.find(|policy| policy.content_id() == *grok_46.thinking.as_ref().expect("grok-4.6 thinking"))
 		.expect("grok-4.6 interned thinking policy");
 	assert!(
-		!grok_46_thinking.supports(ThinkingEffort::Minimal),
-		"grok-4.6 rejects the false minimal tier"
+		grok_46_thinking.supports(ThinkingEffort::Minimal),
+		"grok-4.6 exposes the synchronized minimal tier"
 	);
 }
 

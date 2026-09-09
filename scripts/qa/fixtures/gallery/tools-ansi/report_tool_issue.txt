@@ -1,0 +1,30 @@
+[38;2;0;180;255m── report_tool_issue — Report Tool Issue ───────────────────────────────────────────────────────────[39m
+
+[38;2;107;114;128m  · streaming args[39m
+[48;2;15;18;22m                                                                                                    [49m
+[48;2;15;18;22m 󱑎 [38;2;0;180;255mReport Tool Issue[39m                                                                                [49m
+[48;2;15;18;22m  [38;2;107;114;128m└─[39m [38;2;107;114;128mtool="lsp"[39m                                                                                     [49m
+[48;2;15;18;22m                                                                                                    [49m
+
+[38;2;107;114;128m  · in progress[39m
+[48;2;15;18;22m                                                                                                    [49m
+[48;2;15;18;22m 󱑎 [38;2;0;180;255mReport Tool Issue[39m                                                                                [49m
+[48;2;15;18;22m  [38;2;107;114;128m└─[39m [38;2;107;114;128mtool="lsp", report="Rename returned no edit for an exported symbol that has 12 references"[39m     [49m
+[48;2;15;18;22m                                                                                                    [49m
+
+[38;2;107;114;128m  · done[39m
+[48;2;15;18;22m                                                                                                    [49m
+[48;2;15;18;22m [38;2;0;255;136m•[39m [38;2;0;180;255mReport Tool Issue[39m                                                                                [49m
+[48;2;15;18;22m  [38;2;107;114;128m└─[39m [38;2;107;114;128mtool="lsp", report="Rename returned no edit for an exported symbol that has 12 references"[39m     [49m
+[48;2;15;18;22m [38;2;156;163;176mNoted, thanks![39m                                                                                     [49m
+[48;2;15;18;22m [38;2;107;114;128m⟨Ctrl+O: Expand⟩[39m                                                                                   [49m
+[48;2;15;18;22m                                                                                                    [49m
+
+[38;2;107;114;128m  · failed[39m
+[48;2;26;15;16m                                                                                                    [49m
+[48;2;26;15;16m [38;2;255;71;87m[39m [38;2;0;180;255mReport Tool Issue[39m                                                                                [49m
+[48;2;26;15;16m  [38;2;107;114;128m└─[39m [38;2;107;114;128mtool="lsp", report="Rename returned no edit for an exported symbol that has 12 references"[39m     [49m
+[48;2;26;15;16m [38;2;156;163;176mCould not record the report: issue tracker unreachable[39m                                             [49m
+[48;2;26;15;16m [38;2;107;114;128m⟨Ctrl+O: Expand⟩[39m                                                                                   [49m
+[48;2;26;15;16m                                                                                                    [49m
+

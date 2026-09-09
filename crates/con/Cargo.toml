@@ -1,0 +1,26 @@
+[package]
+name = "omp-con"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Typed command-stream control plane with layered convars, cfg scripts, binds, and replication"
+
+[lints]
+workspace = true
+
+[dependencies]
+flume = { workspace = true }
+linkme = { workspace = true }
+omp-core = { workspace = true }
+parking_lot = { workspace = true }
+serde = { workspace = true }
+strum = { workspace = true }
+thiserror = { workspace = true }
+
+[dev-dependencies]
+omp-session = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }

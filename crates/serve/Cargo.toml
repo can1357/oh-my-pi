@@ -10,25 +10,25 @@ description = "gRPC transport projections serving OMP inference, auth, and blob 
 readme = "README.md"
 
 [dependencies]
-async-stream = { workspace = true }
-bytes = { workspace = true }
-flume = { workspace = true }
-futures = { workspace = true }
-im = { workspace = true }
-omp-agent = { workspace = true }
-omp-core = { workspace = true }
-omp-catalog = { workspace = true }
-omp-inference = { workspace = true }
-omp-proto = { workspace = true, features = ["tonic"] }
-omp-storage = { workspace = true }
-omp-tool = { workspace = true }
-parking_lot = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-tonic = { workspace = true }
-tracing = { workspace = true }
+async-stream.workspace = true
+bytes.workspace = true
+flume.workspace = true
+futures.workspace = true
+im.workspace = true
+omp-core.workspace = true
+omp-session.workspace = true
+omp-catalog.workspace = true
+omp-ai.workspace = true
+omp-journal.workspace = true
+omp-proto.workspace = true
+omp-tool.workspace = true
+parking_lot.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tonic.workspace = true
+tracing.workspace = true
 
 [lints]
 workspace = true

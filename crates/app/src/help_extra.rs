@@ -8,39 +8,15 @@ use clap::Args as _;
 pub const ENVIRONMENT_VARIABLES: &[(&str, &str)] = &[
 	("OMP_PROFILE", "named profile selected before settings load"),
 	("OMP_DATA_DIR", "application data and credential root"),
-	("OMP_CONFIG_FILES", "platform-separated read-only TOML overlays"),
+	("OMP_CONFIG_FILES", "platform-separated command-stream cfg overlays"),
 	("OMP_DEFAULT_MODEL", "primary model-role override"),
 	("OMP_SMOL_MODEL", "fast/low-cost model-role override"),
 	("OMP_SLOW_MODEL", "deep-reasoning model-role override"),
 	("OMP_PLAN_MODEL", "planning model-role override"),
+	("OMP_CODING_AGENT_SESSION_DIR", "session storage and lookup directory"),
+	("OMP_NO_PTY", "disable PTY-backed shell execution when set to 1"),
 	("OMP_WORKTREE_DIR", "isolated worktree base directory"),
 	("OMP_PY_SITE", "supervised CPython site-packages root"),
-];
-
-/// Built-in Environment tool names. Kept as one public metadata table so help,
-/// validation, and completion callers consume one ordering.
-pub const BUILTIN_TOOL_NAMES: &[&str] = &[
-	"ask",
-	"checkpoint",
-	"computer",
-	"edit",
-	"eval",
-	"fetch",
-	"glob",
-	"goal",
-	"grep",
-	"hub",
-	"image_gen",
-	"read",
-	"report_issue",
-	"rewind",
-	"shell",
-	"think",
-	"todo",
-	"tts",
-	"vibe",
-	"write",
-	"yield",
 ];
 
 /// Renders one `-s, --long <VALUE>` column for a named launch option.
@@ -49,6 +25,9 @@ fn option_column(argument: &clap::Arg) -> Option<String> {
 	let mut column = argument
 		.get_short()
 		.map_or_else(|| format!("    --{long}"), |short| format!("-{short}, --{long}"));
+	for alias in argument.get_visible_aliases().into_iter().flatten() {
+		let _ = write!(column, ", --{alias}");
+	}
 	if argument.get_action().takes_values() {
 		let value = argument
 			.get_value_names()
@@ -94,6 +73,12 @@ pub fn render() -> String {
 	let mut output = String::from(
 		"Launch options (default `chat` command; accepted before or without a command):\n",
 	);
+	output.push_str(concat!(
+		"      --profile <NAME>             Select an isolated profile before settings load\n",
+		"      --alias <COMMAND>           Install a shell wrapper for the selected profile and \
+		 exit\n",
+		"  -p, --print                     Process the prompt non-interactively and exit\n",
+	));
 	append_options(&mut output, &chat, &excluded);
 	excluded.extend(chat.get_arguments().filter_map(clap::Arg::get_long));
 	output.push_str("\nHeadless additions (`-p`/`--print`, a leading prompt, or piped stdin):\n");
@@ -107,6 +92,11 @@ pub fn render() -> String {
 		let _ = writeln!(output, "  {name:<24} {description}");
 	}
 	output.push_str("\nBuilt-in tools:\n  ");
-	output.push_str(&BUILTIN_TOOL_NAMES.join(", "));
+	let names = omp_tools::builtin_tool_identities()
+		.iter()
+		.filter(|tool| !tool.hidden)
+		.map(|tool| tool.name)
+		.collect::<Vec<_>>();
+	output.push_str(&names.join(", "));
 	output
 }

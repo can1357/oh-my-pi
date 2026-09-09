@@ -45,6 +45,12 @@ impl LocalEndpoint {
 	}
 
 	/// Connects to either supported endpoint transport.
+	#[tracing::instrument(
+		name = "endpoint_connect",
+		level = "debug",
+		skip_all,
+		fields(endpoint = %self)
+	)]
 	pub async fn connect(&self) -> Result<Channel, EndpointConnectError> {
 		match self {
 			Self::Local(path) => omp_rpc::uds::connect(path)

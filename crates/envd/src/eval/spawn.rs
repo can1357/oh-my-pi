@@ -3,8 +3,10 @@
 
 use std::collections::HashSet;
 
-use omp_agent::{SubagentDisposition, SubagentTerminalKind};
 use omp_core::Str;
+pub use omp_tools::task::{
+	ChildResult as SpawnResultV1, Fault as SpawnFaultV1, Payload as SpawnPayloadV1,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use thiserror::Error;
@@ -270,51 +272,6 @@ impl SpawnRequestV1 {
 			return Err(SpawnContractError::ConflictingDisposition);
 		}
 		Ok(())
-	}
-}
-
-/// One bounded, structured result returned by every spawn helper shape.
-#[derive(Clone, Debug, Deserialize, PartialEq, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct SpawnResultV1 {
-	/// Contract revision.
-	pub revision:      u16,
-	/// Stable opaque identity used for follow-up and routing.
-	pub stable_id:     Str,
-	/// Session-local display name selected by the caller or allocator.
-	pub name:          Str,
-	/// Resolved definition name.
-	pub agent:         Str,
-	/// Terminal classification; never replaced by a generic bridge error.
-	pub status:        SubagentTerminalKind,
-	/// Structured bounded artifact and workspace disposition.
-	pub disposition:   SubagentDisposition,
-	/// Serving model when different from or more specific than the requested
-	/// role.
-	pub serving_model: Option<Str>,
-	/// Validated structured data, when the request selected a schema.
-	pub data:          Option<Value>,
-}
-
-impl SpawnResultV1 {
-	/// Constructs a current-revision result and enforces disposition bounds.
-	pub fn new(
-		stable_id: Str,
-		name: Str,
-		agent: Str,
-		status: SubagentTerminalKind,
-		disposition: SubagentDisposition,
-	) -> Self {
-		Self {
-			revision: SPAWN_CONTRACT_REVISION,
-			stable_id,
-			name,
-			agent,
-			status,
-			disposition: disposition.bounded(),
-			serving_model: None,
-			data: None,
-		}
 	}
 }
 

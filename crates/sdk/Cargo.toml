@@ -6,31 +6,25 @@ license.workspace = true
 authors.workspace = true
 homepage.workspace = true
 repository.workspace = true
-description = "Stable native embedding facade for OMP sessions, callbacks, discovery, and tools"
+description = "Stable native embedding facade for journal-first OMP sessions"
 readme = "README.md"
 
 [dependencies]
-bytes = { workspace = true }
-flume = { workspace = true }
-futures = { workspace = true }
-omp-docserver = { workspace = true }
-omp-agent = { workspace = true }
-omp-env = { workspace = true }
-omp-core = { workspace = true }
-omp-catalog = { workspace = true }
-omp-inference = { workspace = true }
-omp-proto = { workspace = true }
-omp-secrets = { workspace = true }
-omp-telemetry = { workspace = true }
-omp-tool = { workspace = true }
-omp-tools = { workspace = true }
-omp-walker = { workspace = true }
-parking_lot = { workspace = true }
-serde_json = { workspace = true }
-strum = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-url = { workspace = true }
+flume.workspace = true
+omp-agent.workspace = true
+omp-core.workspace = true
+omp-dom.workspace = true
+omp-session.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+futures.workspace = true
+omp-catalog.workspace = true
+omp-ai.workspace = true
+omp-journal.workspace = true
+omp-tool.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true

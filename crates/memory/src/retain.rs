@@ -50,7 +50,7 @@ pub struct RetentionMessage<'a> {
 }
 
 /// Result of one retention decision.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct RetentionOutcome {
 	/// Whether a new durable episode was stored.
 	pub stored_id:           Option<Str>,
@@ -89,7 +89,7 @@ impl<'a> Retainer<'a> {
 		}
 	}
 
-	/// Retains only when the Pi-default user-turn interval has elapsed.
+	/// Retains only when the configured user-turn interval has elapsed.
 	pub fn retain_periodic(&self, messages: &[RetentionMessage<'_>]) -> Result<RetentionOutcome> {
 		self.retain(messages, false)
 	}
@@ -100,12 +100,27 @@ impl<'a> Retainer<'a> {
 		self.retain(messages, true)
 	}
 
+	#[tracing::instrument(
+		level = "debug",
+		name = "memory_retention",
+		skip_all,
+		fields(force = force, message_count = messages.len())
+	)]
 	fn retain(&self, messages: &[RetentionMessage<'_>], force: bool) -> Result<RetentionOutcome> {
 		let cursor = self.store.retention_cursor(self.session_id)?;
 		let user_turns = messages
 			.iter()
 			.filter(|message| message.role == RetentionRole::User)
 			.count() as u64;
+		tracing::debug!(
+			force,
+			user_turns,
+			retained_through = cursor,
+			interval = self.retain_every_n_turns,
+			due = user_turns > cursor
+				&& (force || user_turns - cursor >= self.retain_every_n_turns as u64),
+			"memory retention evaluated"
+		);
 		if user_turns <= cursor || (!force && user_turns - cursor < self.retain_every_n_turns as u64)
 		{
 			return Ok(RetentionOutcome { retained_through: cursor, ..RetentionOutcome::default() });
@@ -139,6 +154,12 @@ impl<'a> Retainer<'a> {
 			retained_through_user_turn: user_turns,
 		})?;
 		let extraction_enqueued = stored_id.is_some() && extraction_text.is_some();
+		tracing::debug!(
+			stored = stored_id.is_some(),
+			retained_through = user_turns,
+			extraction_enqueued,
+			"memory retention completed"
+		);
 		Ok(RetentionOutcome {
 			stored_id,
 			retained_through: user_turns,

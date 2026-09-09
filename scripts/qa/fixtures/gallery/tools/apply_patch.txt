@@ -1,0 +1,52 @@
+── apply_patch — Apply Patch ───────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+╭─── Edit:  packages/coding-agent/src/edit/renderer.ts ───────────────────────────────────────────╮
+│@@ -464,2 +464,2 @@                                                                               │
+│-······fileCount = countEditFiles(editArgs.edits);                                                │
+│+······fileCount = countDistinctFiles(editArgs.edits);                                            │
+│󱑎 (preview)                                                                                       │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · in progress
+                                                                                                    
+╭─── Edit:  packages/coding-agent/src/edit/renderer.ts ───────────────────────────────────────────╮
+│@@ -177,4 +177,4 @@                                                                               │
+│ /** Count distinct file paths in an edits array. */                                              │
+│-function countEditFiles(edits: EditRenderEntry[]): number {                                      │
+│+function countDistinctFiles(edits: EditRenderEntry[]): number {                                  │
+│    return new Set(edits.map(edit => filePathFromEditEntry(edit.path)).filter(Boolean)).size;     │
+│ }                                                                                                │
+│@@ -467,2 +467,2 @@                                                                               │
+│-······fileCount = countEditFiles(editArgs.edits);                                                │
+│+······fileCount = countDistinctFiles(editArgs.edits);                                            │
+│(preview)                                                                                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  Edit:  packages/coding-agent/src/edit/renderer.ts ⟨+2/-2⟩ ─────────────────────────────────╮
+│@@ -177,4 +177,4 @@                                                                               │
+│ /** Count distinct file paths in an edits array. */                                              │
+│-function countEditFiles(edits: EditRenderEntry[]): number {                                      │
+│+function countDistinctFiles(edits: EditRenderEntry[]): number {                                  │
+│    return new Set(edits.map(edit => filePathFromEditEntry(edit.path)).filter(Boolean)).size;     │
+│ }                                                                                                │
+│@@ -467,2 +467,2 @@                                                                               │
+│-······fileCount = countEditFiles(editArgs.edits);                                                │
+│+······fileCount = countDistinctFiles(editArgs.edits);                                            │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  Edit:  packages/coding-agent/src/edit/renderer.ts ─────────────────────────────────────────╮
+│Hunk @@ -177,4 +177,4 @@ failed to apply: the context line `function countEditFiles(edits:        │
+│EditRenderEntry[]): number {` does not match the file. The file may have changed since it was     │
+│read.                                                                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

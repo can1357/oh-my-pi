@@ -1,4 +1,5 @@
-//! Production compression-only sessions and document-authority adapter.
+//! Production compression sessions over the journal-first kernel and
+//! Environment documents.
 
 use std::{
 	mem,
@@ -9,16 +10,9 @@ use std::{
 
 use async_stream::stream;
 use futures::Stream;
-use omp_agent::TurnId;
-use omp_core::{Str, sf};
-use omp_proto::{
-	document::v1::{
-		self as doc_pb, commit_transaction_response, read_document_response, read_selection,
-		text_mutation,
-	},
-	thread::v1::{Item, Message, Part as ThreadPart, Role, item},
-};
-use omp_sdk::Url;
+use omp_core::{EnvPath, Str, sf};
+use omp_env::{EnvClient, TransactionOutcome};
+use omp_proto::document::v1::{self as doc_pb, read_selection, text_mutation};
 use omp_tool::{
 	Abort, ArgIssue, ArgIssueKind, Claims, CommitError, Constraint, Effects, Ev, IncomingParams,
 	ParamError, Part, Precedence, Presentation, PromptCaps, Rev, Tool, ToolSpec, ToolTerminal,
@@ -27,28 +21,34 @@ use parking_lot::Mutex;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio_util::sync::CancellationToken;
+use url::Url;
 
 use super::{Action, CompressHost, IsolationPolicy, Loss, Status};
-use crate::{
-	bridges::{AgentGoalControl, InferenceBridge, builtin_with_content},
-	chat, discovery,
-	headless::{HeadlessSession, HeadlessSessionOptions},
-};
+use crate::headless::kernel::{ComposedInference, KernelOptions, compose_kernel};
 
 const SYSTEM_PROMPT: &str = include_str!("system_prompt.txt");
 
-/// Failure from production session or document ownership.
+/// Failure from production kernel or document ownership.
 #[derive(Debug, thiserror::Error)]
 pub enum ProductionError {
+	/// Filesystem preparation failed.
+	#[error("compression filesystem operation failed")]
+	Io(#[from] std::io::Error),
 	/// Project Environment construction failed.
 	#[error(transparent)]
 	Environment(#[from] omp_envd::EnvdError),
-	/// Canonical project/session composition failed.
-	#[error("compression child session failed")]
-	Session,
-	/// Document authority rejected or failed an operation.
+	/// Journal-first kernel composition failed.
 	#[error(transparent)]
-	Document(#[from] omp_envd::docs::DocumentError),
+	Headless(#[from] crate::headless::HeadlessError),
+	/// Kernel turn failed.
+	#[error(transparent)]
+	Kernel(#[from] omp_agent::KernelError),
+	/// Environment DATA document authority rejected or failed an operation.
+	#[error(transparent)]
+	Document(#[from] omp_env::ClientError),
+	/// The caller cancelled an in-flight operation.
+	#[error("document operation was cancelled")]
+	Cancelled,
 	/// Document bytes were not UTF-8.
 	#[error("compression source is not UTF-8: {path:?}")]
 	Utf8 {
@@ -67,7 +67,7 @@ pub enum ProductionError {
 	/// The atomic document transaction was rejected.
 	#[error("document authority rejected the approved compression write")]
 	WriteRejected,
-	/// The document authority reported a partial single-operation commit.
+	/// The document authority reported a partial commit.
 	#[error("document authority partially committed the approved compression write")]
 	WritePartial,
 	/// Restricted tool registration failed.
@@ -78,24 +78,25 @@ pub enum ProductionError {
 	MissingModel,
 }
 
-/// One compression-only production child.
+/// One restricted compression child.
 pub struct CompressionSession {
-	session: HeadlessSession,
+	kernel:  omp_agent::Kernel<ComposedInference>,
+	session: omp_session::Session,
 	actions: Arc<Mutex<Vec<Action>>>,
 	first:   bool,
 }
 
-/// Presentation-owned progress sink for compression work.
+/// Presentation-owned progress sink.
 pub trait CompressProgress: Send + Sync + 'static {
-	/// Observes one file reaching a new compression status.
+	/// Observes one file reaching a new status.
 	fn update(&self, completed: usize, total: usize, path: &Path, status: Status);
 }
 
-/// Production owner for document I/O and isolated child sessions.
+/// Production owner for Environment document I/O and restricted children.
 pub struct ProductionCompressHost {
 	root:           PathBuf,
 	data_dir:       PathBuf,
-	documents:      omp_envd::docs::DocumentHost,
+	documents:      EnvClient,
 	model_settings: omp_catalog::settings::ModelSettings,
 	_environment:   omp_envd::ProjectEnvironment,
 	progress:       Arc<dyn CompressProgress>,
@@ -108,68 +109,32 @@ impl ProductionCompressHost {
 		data_dir: PathBuf,
 		progress: Arc<dyn CompressProgress>,
 	) -> Result<Self, ProductionError> {
-		let root = chat::canonical_project(&root).map_err(|_| ProductionError::Session)?;
-		let manager = omp_settings::manager::SettingsManager::open(
-			omp_settings::manager::SettingsPaths::discover(&data_dir, Some(&root)),
-		)
-		.map_err(|_| ProductionError::Session)?;
-		let settings_snapshot = manager.snapshot();
+		let root = std::fs::canonicalize(root)?;
+		let ctx = Arc::new(omp_con::Ctx::new());
 		let home = std::env::var_os("HOME").map_or_else(|| root.clone(), PathBuf::from);
-		let model_settings = settings_snapshot
-			.project::<omp_catalog::settings::ModelSettings>()
-			.map_err(|_| ProductionError::Session)?
-			.get()
-			.resolve_path_scopes(&root, &home);
-		let state_dir = omp_env::project_state::directory(&data_dir, &root)
-			.map_err(|_| ProductionError::Session)?;
-		chat::ensure_state_directory(&state_dir).map_err(|_| ProductionError::Session)?;
-		let prompt_settings = discovery::PromptDiscoverySettings {
-			model:   model_settings.clone(),
-			skills:  settings_snapshot
-				.project::<discovery::skills::SkillDiscoverySettings>()
-				.map_err(|_| ProductionError::Session)?
-				.get()
-				.clone(),
-			foreign: settings_snapshot
-				.project::<discovery::foreign::ForeignContentSettings>()
-				.map_err(|_| ProductionError::Session)?
-				.get()
-				.clone(),
-			rules:   settings_snapshot
-				.project::<crate::rulebook::RulebookSettings>()
-				.map_err(|_| ProductionError::Session)?
-				.get()
-				.clone(),
-			native:  discovery::native::NativeDiscoveryOptions::default(),
-		};
-		let active = discovery::active_prompt_snapshots(&root, &[], &home, &prompt_settings).content;
-		let bridges = builtin_with_content(
-			&root,
-			Arc::new(InferenceBridge::default()),
-			AgentGoalControl::default(),
-			None,
-			omp_agent::advisor::AdvisorAdviceQueue::default(),
-			&active,
-		);
-		let environment = omp_envd::ProjectEnvironment::start_with_settings_snapshot(
-			&root,
-			&state_dir,
-			&omp_env::project_state::document_socket(&state_dir),
-			false,
-			active.extensions.as_ref(),
-			&[],
-			settings_snapshot,
-			bridges,
-		)
-		.await?;
-		let documents = environment.documents().clone();
+		let model_settings =
+			omp_catalog::settings::ModelSettings::from_con(&ctx).resolve_path_scopes(&root, &home);
+		let state_dir = omp_env::project_state::directory(&data_dir, &root)?;
+		std::fs::create_dir_all(&state_dir)?;
+		let environment =
+			omp_envd::ProjectEnvironment::attach(&root, &state_dir, omp_envd::AttachOptions {
+				py_eval:            false,
+				approval_mode:      None,
+				trusted_extensions: Vec::new(),
+				contributed_values: Vec::new(),
+				con:                Arc::clone(&ctx),
+				bridges:            omp_envd::RegistryBridges::default(),
+				spawn_idle_timeout: None,
+			})
+			.await?;
+		let documents = environment.client().clone();
 		Ok(Self { root, data_dir, documents, model_settings, _environment: environment, progress })
 	}
 
 	fn resolve_model(&self, requested: Option<&str>) -> Result<Str, ProductionError> {
-		let catalog =
-			omp_catalog::snapshot::Catalog::try_embedded().map_err(|_| ProductionError::Session)?;
-		let roles = crate::discovery::roles::resolve_launch_roles(
+		let catalog = omp_catalog::snapshot::Catalog::try_embedded()
+			.map_err(|_| ProductionError::MissingModel)?;
+		crate::discovery::roles::resolve_launch_roles(
 			catalog,
 			&self.model_settings,
 			requested,
@@ -177,11 +142,10 @@ impl ProductionCompressHost {
 			None,
 			None,
 		)
-		.map_err(|_| ProductionError::Session)?;
-		roles
-			.primary
-			.map(|model| Str::new(model.as_str()))
-			.ok_or(ProductionError::MissingModel)
+		.map_err(|_| ProductionError::MissingModel)?
+		.primary
+		.map(|model| Str::new(model.as_str()))
+		.ok_or(ProductionError::MissingModel)
 	}
 }
 
@@ -196,27 +160,29 @@ impl CompressHost for ProductionCompressHost {
 	) -> impl Future<Output = Result<Str, Self::Error>> + Send {
 		let path = path.to_owned();
 		async move {
+			if cancel.is_cancelled() {
+				return Err(ProductionError::Cancelled);
+			}
 			let uri = Url::from_file_path(&path)
 				.map_err(|()| ProductionError::MissingContent { path: path.clone() })?;
-			let lease = self
-				.documents
-				.open(Str::new(uri.as_str()), None, cancel)
-				.await?;
+			let env_path = EnvPath::new(Str::new(uri.as_str()))
+				.map_err(|_| ProductionError::MissingContent { path: path.clone() })?;
+			let lease = self.documents.open_document(&env_path, None).await?;
 			let response = self
 				.documents
-				.read(
+				.read_document(
 					&lease,
-					doc_pb::ReadSelection {
+					None,
+					Some(doc_pb::ReadSelection {
 						selection: Some(read_selection::Selection::Whole(doc_pb::WholeDocument {})),
-					},
-					cancel,
+					}),
 				)
 				.await?;
-			let content = match response.body {
-				Some(read_document_response::Body::Content(content)) => content,
-				_ => return Err(ProductionError::MissingContent { path }),
-			};
-			self.documents.close(lease, cancel).await?;
+			let content = response
+				.content()
+				.cloned()
+				.ok_or_else(|| ProductionError::MissingContent { path: path.clone() })?;
+			lease.close().await?;
 			let text =
 				str::from_utf8(&content).map_err(|source| ProductionError::Utf8 { path, source })?;
 			Ok(Str::new(text))
@@ -225,46 +191,27 @@ impl CompressHost for ProductionCompressHost {
 
 	fn open_session(
 		&self,
-		name: &str,
+		_name: &str,
 		model: Option<&str>,
 		policy: IsolationPolicy,
 		_cancel: &CancellationToken,
 	) -> impl Future<Output = Result<Self::Session, Self::Error>> + Send {
-		let name = Str::new(name);
 		let model = self.resolve_model(model);
+		let root = self.root.clone();
+		let data = self.data_dir.clone();
 		async move {
 			debug_assert_eq!(policy, super::ISOLATION_POLICY);
 			let actions = Arc::new(Mutex::new(Vec::new()));
-			let registry = compression_registry(Arc::clone(&actions))?;
-			let session = HeadlessSession::open_with_registry(
-				self.data_dir.clone(),
-				HeadlessSessionOptions {
-					project:               self.root.clone(),
-					settings_overlays:     Box::new([]),
-					additional_roots:      Box::new([]),
-					model:                 model?,
-					initial_regime:        None,
-					initial_prompt_slot:   None,
-					plan_handoff:          None,
-					resume:                None,
-					fork:                  None,
-					py_eval:               false,
-					approval_mode:         None,
-					pty_denied:            false,
-					credential_provider:   None,
-					api_key:               None,
-					prompt_cache_affinity: None,
-					session_generation:    1,
-				},
-				Arc::new(registry),
+			let registry = Arc::new(compression_registry(Arc::clone(&actions))?);
+			let (kernel, session, _) = compose_kernel(
+				&data,
+				&root,
+				model?.as_str(),
+				Arc::new(omp_con::Ctx::new()),
+				KernelOptions { ephemeral: true, tool_registry: Some(registry), ..Default::default() },
 			)
-			.await
-			.map_err(|_| ProductionError::Session)?;
-			session
-				.set_title(name)
-				.await
-				.map_err(|_| ProductionError::Session)?;
-			Ok(CompressionSession { session, actions, first: true })
+			.await?;
+			Ok(CompressionSession { kernel, session, actions, first: true })
 		}
 	}
 
@@ -276,33 +223,28 @@ impl CompressHost for ProductionCompressHost {
 	) -> impl Future<Output = Result<Vec<Action>, Self::Error>> + Send + 'a {
 		async move {
 			session.actions.lock().clear();
-			let mut items = Vec::with_capacity(usize::from(session.first) + 1);
-			if session.first {
-				items.push(message(Role::System, SYSTEM_PROMPT));
-				session.first = false;
-			}
-			items.push(message(Role::User, prompt.as_str()));
-			let interrupt = session.session.interrupt_handle();
-			let result = tokio::select! {
-				result = session.session.submit(items, TurnId::new(format!("compress-{}", omp_core::Ulid::generate()))) => result,
-				() = cancel.cancelled() => {
-					interrupt.interrupt();
-					return Ok(Vec::new());
-				},
+			let text = if mem::take(&mut session.first) {
+				Str::new(format!("{SYSTEM_PROMPT}\n\n{prompt}"))
+			} else {
+				prompt
 			};
-			result.map_err(|_| ProductionError::Session)?;
+			session
+				.kernel
+				.run_turn(
+					&mut session.session,
+					omp_agent::TurnInput { text, attachments: Vec::new() },
+					omp_agent::RunControl::new(cancel.clone(), None),
+				)
+				.await?;
 			Ok(mem::take(&mut *session.actions.lock()))
 		}
 	}
 
 	fn close_session(
 		&self,
-		mut session: Self::Session,
+		_session: Self::Session,
 	) -> impl Future<Output = Result<(), Self::Error>> + Send {
-		async move {
-			session.session.dispose().await;
-			Ok(())
-		}
+		async { Ok(()) }
 	}
 
 	fn write_approved(
@@ -314,15 +256,17 @@ impl CompressHost for ProductionCompressHost {
 		let path = path.to_owned();
 		let text = bytes::Bytes::copy_from_slice(text.as_bytes());
 		async move {
+			if cancel.is_cancelled() {
+				return Err(ProductionError::Cancelled);
+			}
 			let uri = Url::from_file_path(&path)
 				.map_err(|()| ProductionError::MissingContent { path: path.clone() })?;
-			let mut lease = self
+			let env_path = EnvPath::new(Str::new(uri.as_str()))
+				.map_err(|_| ProductionError::MissingContent { path: path.clone() })?;
+			let mut lease = self.documents.open_document(&env_path, None).await?;
+			let outcome = self
 				.documents
-				.open(Str::new(uri.as_str()), None, cancel)
-				.await?;
-			let result = self
-				.documents
-				.commit(
+				.commit_document(
 					&mut lease,
 					bytes::Bytes::copy_from_slice(omp_core::Ulid::generate().to_string().as_bytes()),
 					doc_pb::TextMutation {
@@ -331,19 +275,13 @@ impl CompressHost for ProductionCompressHost {
 						stale_policy:  doc_pb::StalePolicy::Fail as i32,
 						format_policy: doc_pb::FormatPolicy::Disabled as i32,
 					},
-					cancel,
 				)
 				.await?;
-			self.documents.close(lease, cancel).await?;
-			match result.outcome {
-				Some(commit_transaction_response::Outcome::Committed(_)) => Ok(()),
-				Some(commit_transaction_response::Outcome::Rejected(_)) => {
-					Err(ProductionError::WriteRejected)
-				},
-				Some(commit_transaction_response::Outcome::PartiallyCommitted(_)) => {
-					Err(ProductionError::WritePartial)
-				},
-				None => Err(ProductionError::WriteRejected),
+			lease.close().await?;
+			match outcome {
+				TransactionOutcome::Committed(_) => Ok(()),
+				TransactionOutcome::Rejected(_) => Err(ProductionError::WriteRejected),
+				TransactionOutcome::Partial(_) => Err(ProductionError::WritePartial),
 			}
 		}
 	}
@@ -557,19 +495,6 @@ fn protocol_issue(message: Str) -> ArgIssue {
 	}
 }
 
-fn message(role: Role, text: &str) -> Item {
-	Item {
-		kind: Some(item::Kind::Message(Message {
-			role: role as i32,
-			parts: vec![ThreadPart {
-				kind: Some(omp_proto::thread::v1::part::Kind::Text(text.to_owned())),
-				..ThreadPart::default()
-			}],
-			..Message::default()
-		})),
-		..Item::default()
-	}
-}
 #[cfg(test)]
 mod tests {
 	use super::*;

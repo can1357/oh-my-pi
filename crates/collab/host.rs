@@ -1,24 +1,21 @@
 //! Host-side peer authentication, visibility classification, and mutation
 //! admission.
 
-use std::{
-	collections::BTreeMap,
-	error::Error as StdError,
-	fs, io,
-	io::{Read, Seek, SeekFrom},
-	path::Path,
-	str,
-};
+use std::{collections::BTreeMap, error::Error as StdError, str};
 
-use bytes::Bytes;
 use omp_core::{CredentialTier, Hash32, RemotePrincipal, Str, sf};
 use omp_proto::collab::v1::{
-	AbortRequest, AgentCommand, CollabFrame, Hello, PromptRequest, TranscriptChunk, UiRequest,
-	UiRequestEnd, UiResponse, VisibilityClass as WireVisibility, agent_command, collab_frame,
+	AbortRequest, AgentCommand, CollabFrame, Hello, PromptRequest, UiRequest, UiRequestEnd,
+	UiResponse, VisibilityClass as WireVisibility, agent_command, collab_frame,
 };
+use prost::Message;
 use thiserror::Error;
 
-use crate::{PROTOCOL_REVISION, crypto::WriteToken};
+use crate::{
+	PROTOCOL_REVISION,
+	codec::{FIELD_MAX_BYTES, REPEATED_MAX_COUNT},
+	crypto::WriteToken,
+};
 
 const DISPLAY_NAME_MAX_CHARS: usize = 64;
 
@@ -200,8 +197,8 @@ pub enum AdmissionError {
 		action: MutationAction,
 	},
 }
-/// Maximum transcript payload returned by one incremental guest fetch.
-pub const TRANSCRIPT_READ_CAP: usize = 4 * 1024 * 1024;
+/// Maximum number of unanswered host dialogs retained at once.
+pub const MAX_PENDING_UI_REQUESTS: usize = 64;
 
 /// One peer-targeted host frame.
 #[derive(Clone, Debug)]
@@ -239,25 +236,42 @@ impl HostUiDispatcher {
 		&mut self,
 		mut request: UiRequest,
 		peers: impl IntoIterator<Item = (u32, &'a AuthenticatedPeer)>,
-	) -> Option<Vec<TargetedFrame>> {
+	) -> Result<Vec<TargetedFrame>, HostUiBeginError> {
+		let encoded = request.encoded_len();
+		let options = request.spec.as_ref().map_or(0, |spec| match spec {
+			omp_proto::collab::v1::ui_request::Spec::Select(select) => select.options.len(),
+			omp_proto::collab::v1::ui_request::Spec::Editor(_) => 0,
+		});
+		if encoded > FIELD_MAX_BYTES || options > REPEATED_MAX_COUNT {
+			return Err(HostUiBeginError::PayloadTooLarge {
+				actual:  encoded,
+				maximum: FIELD_MAX_BYTES,
+			});
+		}
+		if self.pending.len() >= MAX_PENDING_UI_REQUESTS {
+			return Err(HostUiBeginError::Capacity { maximum: MAX_PENDING_UI_REQUESTS });
+		}
 		let writable = peers
 			.into_iter()
 			.filter(|(_, peer)| !peer.read_only())
 			.map(|(peer_id, _)| peer_id)
 			.collect::<Vec<_>>();
 		if writable.is_empty() {
-			return None;
+			return Err(HostUiBeginError::NoWritablePeer);
 		}
-		self.next_id = self.next_id.wrapping_add(1).max(1);
-		request.request_id = self.next_id;
+		let request_id = (1..=u32::MAX)
+			.find_map(|_| {
+				self.next_id = self.next_id.wrapping_add(1).max(1);
+				(!self.pending.contains_key(&self.next_id)).then_some(self.next_id)
+			})
+			.ok_or(HostUiBeginError::IdExhausted)?;
+		request.request_id = request_id;
 		let frame = collab_frame(request.clone(), collab_frame::Payload::UiRequest);
-		self.pending.insert(request.request_id, request);
-		Some(
-			writable
-				.into_iter()
-				.map(|peer_id| TargetedFrame { peer_id, frame: frame.clone() })
-				.collect(),
-		)
+		self.pending.insert(request_id, request);
+		Ok(writable
+			.into_iter()
+			.map(|peer_id| TargetedFrame { peer_id, frame: frame.clone() })
+			.collect())
 	}
 
 	/// Replays every pending request to a newly authenticated writable guest.
@@ -391,50 +405,37 @@ pub fn route_agent_command<R: HostAgentRuntime>(
 	Ok(())
 }
 
-/// Reads a bounded, UTF-8 and JSONL-aligned transcript increment.
-pub fn read_transcript_chunk(
-	path: &Path,
-	request_id: u32,
-	from_byte: u64,
-) -> Result<TranscriptChunk, TranscriptReadError> {
-	let mut file = fs::File::open(path)?;
-	let size = file.metadata()?.len();
-	if size <= from_byte {
-		return Ok(TranscriptChunk {
-			request_id,
-			text_utf8: Bytes::new(),
-			new_size: size,
-			error: None,
-		});
-	}
-	let remaining = size - from_byte;
-	let wanted = usize::try_from(remaining.min(TRANSCRIPT_READ_CAP as u64))
-		.expect("bounded transcript read fits usize");
-	let mut bytes = vec![0_u8; wanted];
-	file.seek(SeekFrom::Start(from_byte))?;
-	file.read_exact(&mut bytes)?;
-	let reached_eof = from_byte + wanted as u64 >= size;
-	if !reached_eof {
-		let Some(end) = bytes.iter().rposition(|byte| *byte == b'\n') else {
-			return Err(TranscriptReadError::EntryTooLarge);
-		};
-		bytes.truncate(end + 1);
-	}
-	str::from_utf8(&bytes)?;
-	let new_size = if reached_eof {
-		size
-	} else {
-		from_byte + bytes.len() as u64
-	};
-	Ok(TranscriptChunk { request_id, text_utf8: Bytes::from(bytes), new_size, error: None })
-}
-
 fn collab_frame<T>(message: T, wrap: impl FnOnce(T) -> collab_frame::Payload) -> CollabFrame {
 	CollabFrame {
 		protocol_revision: PROTOCOL_REVISION,
 		payload: Some(wrap(message)),
 		..CollabFrame::default()
 	}
+}
+
+/// Failure to start a host UI broadcast.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum HostUiBeginError {
+	/// No connected editor can answer.
+	#[error("no writable collaboration peer is connected")]
+	NoWritablePeer,
+	/// The request exceeds the bounded frame budget.
+	#[error("collaboration UI request uses {actual} bytes; maximum is {maximum}")]
+	PayloadTooLarge {
+		/// Encoded protobuf byte count.
+		actual:  usize,
+		/// Maximum accepted byte count.
+		maximum: usize,
+	},
+	/// The bounded correlation table is full.
+	#[error("collaboration UI request capacity {maximum} is exhausted")]
+	Capacity {
+		/// Maximum simultaneous requests.
+		maximum: usize,
+	},
+	/// Every non-zero request identity is still live.
+	#[error("collaboration UI request identities are exhausted")]
+	IdExhausted,
 }
 
 /// Host UI routing failure.
@@ -468,20 +469,6 @@ pub enum AgentCommandError<E: StdError + 'static> {
 	Runtime(#[from] E),
 }
 
-/// Incremental transcript read failure.
-#[derive(Debug, Error)]
-pub enum TranscriptReadError {
-	/// Transcript file access failed.
-	#[error(transparent)]
-	Io(#[from] io::Error),
-	/// A single JSONL row exceeded the reply cap.
-	#[error("transcript entry exceeds the 4 MiB collaboration fetch cap")]
-	EntryTooLarge,
-	/// Journal bytes were not valid UTF-8.
-	#[error(transparent)]
-	Utf8(#[from] str::Utf8Error),
-}
-
 /// Classifies an agent registry row without exposing advisor identities.
 pub const fn registry_visibility(is_advisor: bool) -> VisibilityClass {
 	if is_advisor {
@@ -491,7 +478,7 @@ pub const fn registry_visibility(is_advisor: bool) -> VisibilityClass {
 	}
 }
 
-/// Classifies EventBus channels; only the two task channels are peer-visible.
+/// Classifies `EventBus` channels; only the two task channels are peer-visible.
 pub fn bus_visibility(channel: i32) -> VisibilityClass {
 	use omp_proto::collab::v1::bus_event::Channel;
 	match Channel::try_from(channel) {
@@ -558,6 +545,52 @@ mod tests {
 			AdmissionError::ReadOnly { action: MutationAction::Abort }
 		);
 	}
+	#[test]
+	fn ui_dispatch_capacity_and_no_editor_are_typed() {
+		let authority = admission();
+		let viewer = authority
+			.authenticate(2, &Hello {
+				protocol_revision: PROTOCOL_REVISION,
+				display_name:      "viewer".to_owned(),
+				write_token:       None,
+				client_version:    String::new(),
+			})
+			.expect("authenticate");
+		let writable = authority
+			.authenticate(7, &Hello {
+				protocol_revision: PROTOCOL_REVISION,
+				display_name:      "editor".to_owned(),
+				write_token:       Some(vec![9; 16].into()),
+				client_version:    String::new(),
+			})
+			.expect("authenticate");
+		let mut dispatcher = HostUiDispatcher::default();
+		assert_eq!(
+			dispatcher
+				.begin(UiRequest::default(), [(2, &viewer)])
+				.unwrap_err(),
+			HostUiBeginError::NoWritablePeer
+		);
+		assert!(matches!(
+			dispatcher
+				.begin(UiRequest { title: "x".repeat(FIELD_MAX_BYTES + 1), ..UiRequest::default() }, [
+					(7, &writable)
+				]),
+			Err(HostUiBeginError::PayloadTooLarge { .. })
+		));
+		for _ in 0..MAX_PENDING_UI_REQUESTS {
+			dispatcher
+				.begin(UiRequest::default(), [(7, &writable)])
+				.expect("within cap");
+		}
+		assert_eq!(
+			dispatcher
+				.begin(UiRequest::default(), [(7, &writable)])
+				.unwrap_err(),
+			HostUiBeginError::Capacity { maximum: MAX_PENDING_UI_REQUESTS }
+		);
+	}
+
 	#[test]
 	fn ui_dispatch_settles_first_writable_answer_and_replays_late_joiners() {
 		let authority = admission();

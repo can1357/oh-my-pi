@@ -13,9 +13,10 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-im = { workspace = true }
-omp-core = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-smallvec = { workspace = true }
-thiserror = { workspace = true }
+im.workspace = true
+omp-core.workspace = true
+omp-dom.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+smallvec.workspace = true
+thiserror.workspace = true

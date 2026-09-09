@@ -13,7 +13,7 @@ autolink, and color chips for #C5FFD6, #4A90D9, and `#fff`.
 
 | Feature | State | Notes |
 | --- | --- | --- |
-| tables | done | box borders, pi column widths |
+| tables | done | box borders, fixed column widths |
 | math | done | inline and display |
 | mermaid | done | fenced blocks |
 | graphviz | done | `dot`, `graphviz`, and `gv` fences |

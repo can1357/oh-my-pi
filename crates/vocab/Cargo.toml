@@ -1,0 +1,17 @@
+[package]
+name = "omp-vocab"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Canonical session-tree and presentation markup vocabulary shared by omp-dom, omp-tui, and macros"
+
+[dependencies]
+omp-core.workspace = true
+serde.workspace = true
+strum.workspace = true
+
+[lints]
+workspace = true

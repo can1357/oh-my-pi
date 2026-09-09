@@ -18,6 +18,7 @@ ignore.workspace = true
 parking_lot.workspace = true
 rayon.workspace = true
 thiserror.workspace = true
+tracing.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 libc.workspace = true

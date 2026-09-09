@@ -12,35 +12,36 @@ description = "Core data structures, compact strings and bytes, sparse collectio
 workspace = true
 
 [dependencies]
-bytes = { workspace = true }
-bytes-utils = { workspace = true }
-foldhash = { workspace = true }
-futures-core = { workspace = true }
-heapless = { workspace = true }
-jiff = { workspace = true }
-parking_lot = { workspace = true }
-parking_lot_core = { workspace = true }
-rand = { workspace = true }
+bytes.workspace = true
+bytes-utils.workspace = true
+foldhash.workspace = true
+futures-core.workspace = true
+heapless.workspace = true
+jiff.workspace = true
+parking_lot.workspace = true
+parking_lot_core.workspace = true
+rand.workspace = true
 schemars = { workspace = true, optional = true }
-serde = { workspace = true }
-sha2 = { workspace = true }
-smallvec = { workspace = true }
-smol_bitmap = { workspace = true }
-strum = { workspace = true }
-thiserror = { workspace = true }
-tracing = { workspace = true }
-url = { workspace = true }
-zeroize = { workspace = true }
+serde.workspace = true
+sha2.workspace = true
+smallvec.workspace = true
+smol_bitmap.workspace = true
+strum.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+url.workspace = true
+zeroize.workspace = true
 
 [target.'cfg(target_arch = "aarch64")'.dependencies]
 # Runtime-dispatched ARMv8 SHA instructions for `Hash32`.
-sha2 = { workspace = true, features = ["asm"] }
+sha2.workspace = true
 
 [dev-dependencies]
-futures = { workspace = true }
-proptest = { workspace = true }
-postcard = { workspace = true }
-serde_json = { workspace = true }
+futures.workspace = true
+proptest.workspace = true
+postcard.workspace = true
+serde_json.workspace = true
+
 [features]
 # JSON Schema generation for `Str` (mirrors `String`'s schema).
 schemars = ["dep:schemars"]

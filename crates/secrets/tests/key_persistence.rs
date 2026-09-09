@@ -12,7 +12,7 @@ fn exclusive_key_creators_converge_on_one_owner_only_file() {
 	let path = Arc::new(
 		scratch
 			.path()
-			.join(omp_storage::secret_key::PLACEHOLDER_KEY_FILE),
+			.join(omp_cache::secret_key::PLACEHOLDER_KEY_FILE),
 	);
 	let barrier = Arc::new(Barrier::new(8));
 	let threads: Vec<_> = (0..8)
@@ -21,7 +21,7 @@ fn exclusive_key_creators_converge_on_one_owner_only_file() {
 			let barrier = Arc::clone(&barrier);
 			thread::spawn(move || {
 				barrier.wait();
-				omp_storage::secret_key::load_or_create_at(&path).expect("creator")
+				omp_cache::secret_key::load_or_create_at(&path).expect("creator")
 			})
 		})
 		.collect();
@@ -31,7 +31,7 @@ fn exclusive_key_creators_converge_on_one_owner_only_file() {
 		.collect();
 	assert!(keys.iter().all(|key| key == &keys[0]));
 	assert_eq!(
-		omp_storage::secret_key::read_at(&path)
+		omp_cache::secret_key::read_at(&path)
 			.expect("read winner")
 			.as_deref(),
 		Some(keys[0].as_str())

@@ -34,7 +34,7 @@ impl TempTree {
 			.duration_since(UNIX_EPOCH)
 			.expect("system time should be after UNIX epoch")
 			.as_nanos();
-		let root = env::temp_dir().join(format!("pi-walker-parallel-{name}-{unique}"));
+		let root = env::temp_dir().join(format!("omp-walker-parallel-{name}-{unique}"));
 		fs::create_dir(&root).expect("temporary root should be created");
 		Self { root }
 	}

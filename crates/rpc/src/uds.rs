@@ -50,6 +50,7 @@ pub type Incoming = flume::r#async::RecvStream<'static, Result<NamedPipeConnecti
 /// when it is a socket that cannot be connected to; an active socket or a
 /// non-socket path is left untouched.
 #[cfg(unix)]
+#[tracing::instrument(level = "debug", skip_all, fields(transport = "unix", socket = %path.display()))]
 pub async fn listen(path: &Path) -> Result<Incoming, Error> {
 	if let Some(parent) = path.parent()
 		&& !parent.as_os_str().is_empty()
@@ -59,16 +60,24 @@ pub async fn listen(path: &Path) -> Result<Incoming, Error> {
 
 	match tokio::fs::symlink_metadata(path).await {
 		Ok(metadata) if metadata.file_type().is_socket() => {
-			if UnixStream::connect(path).await.is_ok() {
-				return Err(
-					io::Error::new(
-						io::ErrorKind::AddrInUse,
-						"Unix socket is already accepting connections",
-					)
-					.into(),
-				);
+			match UnixStream::connect(path).await {
+				Ok(_) => {
+					return Err(
+						io::Error::new(
+							io::ErrorKind::AddrInUse,
+							"Unix socket is already accepting connections",
+						)
+						.into(),
+					);
+				},
+				Err(error) => {
+					tracing::warn!(
+						socket = %path.display(),
+						%error,
+						"stale RPC socket probe failed; removing socket"
+					);
+				},
 			}
-			tracing::debug!(socket = %path.display(), "removing stale Unix socket");
 			tokio::fs::remove_file(path).await?;
 		},
 		Ok(_) => {},
@@ -78,11 +87,13 @@ pub async fn listen(path: &Path) -> Result<Incoming, Error> {
 
 	let listener = UnixListener::bind(path)?;
 	tokio::fs::set_permissions(path, fs::Permissions::from_mode(0o600)).await?;
+	tracing::info!(transport = "unix", socket = %path.display(), "RPC listener ready");
 	Ok(UnixListenerStream::new(listener))
 }
 
 /// Connect a tonic channel to a Unix-domain socket.
 #[cfg(unix)]
+#[tracing::instrument(level = "debug", skip_all, fields(transport = "unix", socket = %path.display()))]
 pub async fn connect(path: &Path) -> Result<Channel, Error> {
 	let path = path.to_owned();
 	let endpoint = transport::Endpoint::from_static("http://[::]:50051");
@@ -97,22 +108,26 @@ pub async fn connect(path: &Path) -> Result<Channel, Error> {
 
 /// Binds an owner-local Windows named pipe and accepts successive instances.
 #[cfg(windows)]
+#[tracing::instrument(level = "debug", skip_all, fields(transport = "named_pipe", pipe = %path.display()))]
 pub async fn listen(path: &Path) -> Result<Incoming, Error> {
 	let name = path.to_string_lossy().into_owned();
 	let first = ServerOptions::new()
 		.first_pipe_instance(true)
 		.create(&name)?;
+	tracing::info!(transport = "named_pipe", pipe = %path.display(), "RPC listener ready");
 	let (sender, receiver) = flume::bounded(16);
 	tokio::spawn(async move {
 		let mut pending = first;
 		loop {
 			if let Err(error) = pending.connect().await {
+				tracing::warn!(transport = "named_pipe", pipe = %name, %error, "RPC listener accept failed");
 				let _ = sender.send_async(Err(error)).await;
 				break;
 			}
 			let next = match ServerOptions::new().create(&name) {
 				Ok(next) => next,
 				Err(error) => {
+					tracing::warn!(transport = "named_pipe", pipe = %name, %error, "RPC listener instance creation failed");
 					let _ = sender.send_async(Err(error)).await;
 					break;
 				},
@@ -132,6 +147,7 @@ pub async fn listen(path: &Path) -> Result<Incoming, Error> {
 
 /// Connects a tonic channel to an owner-local Windows named pipe.
 #[cfg(windows)]
+#[tracing::instrument(level = "debug", skip_all, fields(transport = "named_pipe", pipe = %path.display()))]
 pub async fn connect(path: &Path) -> Result<Channel, Error> {
 	let name = path.to_string_lossy().into_owned();
 	let endpoint = transport::Endpoint::from_static("http://[::]:50051");

@@ -1,9 +1,9 @@
 # omp-driver
 
-`omp-driver` is OMP's headless coding-agent harness and reusable composition
-boundary. It assembles durable agent sessions, execution modes, discovery,
-settings, inference services, environment-host bridges, and orchestration
-without depending on CLI, TUI, or desktop presentation crates.
+`omp-driver` is OMP's journal-first coding-agent composition boundary. It
+assembles `omp-agent`, `omp-session`, inference, project-environment tools,
+convars, subagent spawning, and live-session routing without depending on CLI,
+TUI, or desktop presentation crates.
 
 The crate sits above `omp-envd`, `omp-env`, and `omp-serve` and below
 `omp-app`. Driver code composes the session; app code selects a command or
@@ -11,20 +11,23 @@ presentation adapter.
 
 ## Structure
 
-- `chat` owns durable project-chat composition shared across frontends:
-  journals and session projections, tool selection, agent state, and
-  higher-level control bindings.
-- `headless` constructs the production non-interactive session used by print,
-  RPC, and ACP adapters. It owns the joined lifetime of the agent, inference
-  registry, environment composition, and environment client.
-- `modes`, `subagent`, `collab`, `plan`, and related modules own reusable
-  agent-runtime orchestration rather than UI behavior.
-- `discovery`, `skills`, `settings`, and `rulebook` resolve the headless
-  runtime's configuration and authored inputs.
-- `registry` assembles inference and service registries.
-- `bridges` implements driver-owned capabilities injected into `omp-envd`
-  through `RegistryBridges`, including inference-backed search, active
-  content, goal control, and telemetry integration.
+- `headless::kernel` constructs the production kernel, `.oms` session,
+  inference route, environment authority, and session-owned `task`/`hub`
+  tools reused by chat, print, RPC, and ACP.
+- `sessions` is the disposable process-local routing index for live kernel
+  mailboxes and detached DOM snapshots.
+- `subagent` seeds child convars and composes child kernels through the same
+  headless path.
+- `registry` assembles catalog, credential, inference, and service
+  authorities.
+- `discovery` retains credential-blind model configuration and role selection,
+  plus the prompt material the kernel journals as `prompt-facts`: `skills`
+  (`SKILL.md`, `skill://`), `rules` (context files such as `AGENTS.md` /
+  `CLAUDE.md` walked up from the project, and `.omp/rules` / `RULES.md` /
+  `.cursor/rules` / `.clinerules` rule documents served as `rule://`), and
+  `prompts` (Markdown prompt templates that become `/name` slash commands with
+  `$1` / `$ARGUMENTS` substitution). `--no-context-files`, `--no-rules`,
+  `--no-prompt-templates`, and `--prompt-template <path>` are their seams.
 
 `omp-driver` may construct `omp_envd::ProjectEnvironment` and supply the
 higher-layer bridges it needs, but the filesystem/process/document/tool host

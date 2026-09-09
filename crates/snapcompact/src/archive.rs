@@ -31,7 +31,7 @@ pub enum DataUrlContext {
 
 const DAMAGED_PAYLOAD_MIN_CHARS: usize = 40;
 
-fn ascii_eq(left: u8, right: u8) -> bool {
+const fn ascii_eq(left: u8, right: u8) -> bool {
 	left.eq_ignore_ascii_case(&right)
 }
 
@@ -43,7 +43,7 @@ fn starts_ascii_case_insensitive(bytes: &[u8], needle: &[u8]) -> bool {
 			.all(|(&left, &right)| ascii_eq(left, right))
 }
 
-fn media_token(byte: u8) -> bool {
+const fn media_token(byte: u8) -> bool {
 	byte.is_ascii_alphanumeric()
 		|| matches!(
 			byte,
@@ -283,7 +283,7 @@ pub enum BillingFamily {
 	Anthropic,
 	/// Google fixed media-resolution billing.
 	Google,
-	/// OpenAI patch billing.
+	/// `OpenAI` patch billing.
 	OpenAi,
 	/// Conservative unknown-provider billing.
 	Unknown,
@@ -447,7 +447,7 @@ fn billed_tokens(family: BillingFamily, frame_size: u32) -> u64 {
 	}
 }
 
-/// Selects Pi's eval-winning geometry for a model and carrying API.
+/// Selects eval-winning geometry for a model and carrying API.
 pub fn resolve_shape(target: ShapeTarget<'_>) -> Shape {
 	let family = billing_family(target.api);
 	let id = target.model_id.unwrap_or_default().to_ascii_lowercase();
@@ -497,7 +497,7 @@ fn shape_options(shape: Shape) -> SnapcompactRenderOptions {
 	}
 }
 
-fn frame_capacity(shape: Shape) -> (usize, u32, u32) {
+const fn frame_capacity(shape: Shape) -> (usize, u32, u32) {
 	let cols = shape.frame_size / shape.cell_width;
 	let rows = shape.frame_size / shape.cell_height / shape.line_repeat;
 	((cols as usize).saturating_mul(rows as usize), cols, rows)
@@ -533,6 +533,18 @@ fn take_frame_end(
 /// `source_tokens` must be measured by the active model tokenizer. Frames are
 /// admitted only when their conservative image bill remains at least ten
 /// percent below that source measurement.
+#[tracing::instrument(
+	level = "debug",
+	name = "snapshot_compaction",
+	skip_all,
+	fields(
+		provider = provider.unwrap_or("unknown"),
+		model = target.model_id.unwrap_or("unknown"),
+		api = target.api.unwrap_or("unknown"),
+		source_tokens = source_tokens,
+		existing_images = existing_images
+	)
+)]
 pub fn render_archive(
 	text: &str,
 	source_tokens: u64,
@@ -589,6 +601,16 @@ pub fn render_archive(
 		image_tokens as f64 / source_tokens as f64
 	};
 	let frame_count = frames.len();
+	tracing::info!(
+		provider = provider.unwrap_or("unknown"),
+		model = target.model_id.unwrap_or("unknown"),
+		source_tokens,
+		image_tokens,
+		png_bytes,
+		frames = frame_count,
+		ratio,
+		"snapshot compaction completed"
+	);
 	Ok(Archive {
 		frames,
 		truncated_chars,

@@ -8,4 +8,4 @@ mod unicode;
 
 pub use block::latex_block;
 pub use unicode::latex_inline;
-pub(crate) use unicode::{inline_math_span_end, is_bare_math_environment};
+pub(crate) use unicode::{is_bare_math_environment, math_span};

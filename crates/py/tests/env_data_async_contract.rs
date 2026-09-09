@@ -79,6 +79,18 @@ receipt = omp.env.EnvInfo(
     remote=False,
 )
 tokens = omp.env._install_backend(backend, receipt)
+completed = omp.env._as_completed({
+    "outcome": "timeout",
+    "exit_code": None,
+    "signal": "SIGKILL",
+    "wall": omp.Duration("25ms"),
+    "output": b"partial",
+    "artifact": None,
+    "aborted": True,
+})
+assert completed.outcome is omp.env.Outcome.TIMEOUT
+assert completed.exit_code is None and completed.signal == "SIGKILL"
+assert completed.aborted and completed.wall == omp.Duration("25ms")
 
 async def chunks():
     yield b"one"

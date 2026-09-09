@@ -1,0 +1,48 @@
+── bash — Bash ─────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ $ git status --short && git log --on                                                             │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · in progress
+                                                                                                    
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ $ cd packages/coding-agent && git status --short && git log --oneline -5                         │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · done
+                                                                                                    
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ $ cd packages/coding-agent && git status --short && git log --oneline -5                         │
+├─── Output ───────────────────────────────────────────────────────────────────────────────────────┤
+│  M src/cli/gallery-cli.ts                                                                        │
+│  M src/tools/bash.ts                                                                             │
+│ ?? src/cli/gallery-fixtures/shell.ts                                                             │
+│ a1b2c3d Wire gallery command into CLI dispatch                                                   │
+│ 9f8e7d6 Add ToolExecutionComponent lifecycle states                                              │
+│ 4c5b6a7 Extract createShellRenderer from bashToolRenderer                                        │
+│ 2d3e4f5 Strip LLM-facing notices before TUI render                                               │
+│ 7a8b9c0 Cap preview lines in pending command block                                               │
+│ ⟨Wall: 0.18s | Timeout: 30s⟩                                                                     │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ $ cd packages/coding-agent && git status --short && git log --oneline -5                         │
+├─── Output ───────────────────────────────────────────────────────────────────────────────────────┤
+│ src/tools/bash.ts:1142:34 - error TS2339: Property 'requestedTimeoutSeconds' does not exist on   │
+│ type 'BashToolDetails'.                                                                          │
+│                                                                                                  │
+│ 1142   const requestedTimeoutSeconds = details?.requestedTimeoutSeconds;                         │
+│                                             ~~~~~~~~~~~~~~~~~~~~~~~~                             │
+│ Found 1 error in src/tools/bash.ts:1142                                                          │
+│ ⟨Wall: 5.12s | Timeout: 30s | Exit: 2⟩                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

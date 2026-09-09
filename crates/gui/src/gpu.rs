@@ -42,6 +42,12 @@ pub struct Gpu {
 
 impl Gpu {
 	/// Brings up an adapter/device, optionally compatible with a surface.
+	#[tracing::instrument(
+		name = "gpu_device_initialize",
+		level = "debug",
+		skip_all,
+		fields(compatible_surface = compatible.is_some())
+	)]
 	pub fn new(compatible: Option<&wgpu::Surface<'_>>) -> Result<Self, GpuError> {
 		let instance = wgpu::Instance::default();
 		let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
@@ -49,7 +55,10 @@ impl Gpu {
 			force_fallback_adapter: false,
 			compatible_surface:     compatible,
 			apply_limit_buckets:    false,
-		}))?;
+		}))
+		.inspect_err(|error| {
+			tracing::warn!(%error, "gpu adapter initialization failed");
+		})?;
 		let (device, queue) = pollster::block_on(adapter.request_device(&wgpu::DeviceDescriptor {
 			label: Some("omp-gui"),
 			// Instance structs are wider than the downlevel default stride.
@@ -58,7 +67,10 @@ impl Gpu {
 				..Default::default()
 			},
 			..Default::default()
-		}))?;
+		}))
+		.inspect_err(|error| {
+			tracing::warn!(%error, "gpu device initialization failed");
+		})?;
 		Ok(Self { instance, adapter, device, queue })
 	}
 }
@@ -559,8 +571,14 @@ impl WindowGpu {
 	/// Creates and configures the surface for `window`, preferring a
 	/// non-sRGB format (gamma-space text blending) and premultiplied alpha
 	/// (translucent window compositing).
+	#[tracing::instrument(name = "window_surface_initialize", level = "debug", skip_all)]
 	pub fn new(gpu: &Gpu, window: Arc<Window>) -> Result<Self, GpuError> {
-		let surface = gpu.instance.create_surface(Arc::clone(&window))?;
+		let surface = gpu
+			.instance
+			.create_surface(Arc::clone(&window))
+			.inspect_err(|error| {
+				tracing::warn!(%error, "window surface initialization failed");
+			})?;
 		let caps = surface.get_capabilities(&gpu.adapter);
 		let format = caps
 			.formats

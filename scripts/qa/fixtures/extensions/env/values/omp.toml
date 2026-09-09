@@ -1,0 +1,13 @@
+id = "qaenvvalues"
+version = "0.1.0"
+omp_api = 1
+entry = "qaenvvalues"
+
+[[declarations]]
+id = "hello"
+kind = "hard"
+module = "qaenvvalues"
+key = "hello@qaenvvalues.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"

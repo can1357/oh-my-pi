@@ -41,7 +41,7 @@ impl CaseHint {
 	}
 }
 
-/// Infers pi's U/L/C/M ASCII case hint.
+/// Infers the U/L/C/M ASCII case hint.
 pub fn infer_case_hint(secret: &str) -> Option<CaseHint> {
 	let mut has_upper = false;
 	let mut has_lower = false;
@@ -102,7 +102,7 @@ pub fn sanitized_label_collides_with_secret(label: &str, secret: &str) -> bool {
 			|| (label.len() >= MAX_FRIENDLY_NAME_LEN && secret.starts_with(label)))
 }
 
-/// Builds pi's 12-character, least-significant-digit-first base36 HMAC tag.
+/// Builds the 12-character, least-significant-digit-first base36 HMAC tag.
 pub fn build_hash_base(key: &str, value: &str) -> String {
 	let mut mac =
 		Hmac::<Sha256>::new_from_slice(key.as_bytes()).expect("HMAC accepts every key size");
@@ -360,7 +360,7 @@ pub fn rule_needs_placeholder_key(rule: &SecretRule) -> bool {
 	}
 }
 
-/// Simulates pi's ordered plain-replacement phase before deciding to persist a
+/// Simulates the ordered plain-replacement phase before deciding to persist a
 /// key.
 pub fn rules_need_placeholder_key(rules: &[SecretRule]) -> bool {
 	let mut phase = Vec::<(&str, String)>::new();

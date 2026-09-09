@@ -63,14 +63,21 @@ pub(crate) async fn run(args: PsArgs) -> miette::Result<()> {
 		},
 		PsAction::Logs => logs(env, process, &args).await?,
 		PsAction::Stop => {
+			let grace_ms = args.timeout.unwrap_or(5).saturating_mul(1000);
 			env.stop_process(StopProcess {
-				name:       name.into(),
-				grace_ms:   args.timeout.unwrap_or(5).saturating_mul(1000),
+				name: name.into(),
+				grace_ms,
 				generation: process.generation,
-				props:      None,
+				props: None,
 			})
 			.await
 			.into_diagnostic()?;
+			wait_for_process_terminal(
+				env,
+				process,
+				Duration::from_millis(grace_ms) + Duration::from_secs(2),
+			)
+			.await?;
 			println!("Stopped {name}");
 		},
 		PsAction::Kill => {
@@ -82,6 +89,7 @@ pub(crate) async fn run(args: PsArgs) -> miette::Result<()> {
 			})
 			.await
 			.into_diagnostic()?;
+			wait_for_process_terminal(env, process, Duration::from_secs(2)).await?;
 			println!("Killed {name}");
 		},
 		PsAction::Restart => {
@@ -100,11 +108,74 @@ pub(crate) async fn run(args: PsArgs) -> miette::Result<()> {
 	Ok(())
 }
 
+async fn wait_for_process_terminal(
+	env: &EnvClient,
+	process: &ProcessInfo,
+	timeout: Duration,
+) -> miette::Result<ProcessInfo> {
+	if matches!(process.state(), ProcessState::Exited | ProcessState::Stopped | ProcessState::Failed)
+	{
+		return Ok(process.clone());
+	}
+	let mut attachment = env
+		.attach_output(AttachOutput {
+			name:             process.name.clone(),
+			after_sequence:   process.log_end_offset,
+			generation:       process.generation,
+			max_bytes:        1,
+			terminal_text:    false,
+			terminal_columns: 1,
+			terminal_rows:    1,
+			props:            None,
+		})
+		.await
+		.into_diagnostic()?;
+	let deadline = tokio::time::Instant::now() + timeout;
+	loop {
+		let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+		if remaining.is_zero() {
+			return Err(miette!(
+				"process `{}` generation {} did not settle after bounded cleanup",
+				process.name,
+				process.generation
+			));
+		}
+		let event = tokio::time::timeout(remaining, attachment.next_event())
+			.await
+			.map_err(|_| {
+				miette!(
+					"process `{}` generation {} did not settle after bounded cleanup",
+					process.name,
+					process.generation
+				)
+			})?
+			.into_diagnostic()?;
+		let Some(event) = event else {
+			return Err(miette!(
+				"process `{}` generation {} attachment closed before settlement",
+				process.name,
+				process.generation
+			));
+		};
+		if let ProcessAttachmentEvent::State(state) = event
+			&& let Some(settled) = state.process
+			&& matches!(
+				settled.state(),
+				ProcessState::Exited | ProcessState::Stopped | ProcessState::Failed
+			) {
+			return Ok(settled);
+		}
+	}
+}
+
 fn process_json(process: &ProcessInfo) -> serde_json::Value {
 	serde_json::json!({
 		"name": process.name,
 		"generation": process.generation,
 		"state": process.state().as_str_name().to_ascii_lowercase(),
+		"exitCode": process.status.as_ref().and_then(|status| status.exit_code),
+		"signal": process.status.as_ref().map(|status| status.signal.as_str()),
+		"durationMs": process.status.as_ref().map(|status| status.wall_clock_ms),
 		"pid": process.identity.as_ref().map(|identity| identity.pid),
 		"logStart": process.log_start_offset,
 		"logEnd": process.log_end_offset,
@@ -201,5 +272,6 @@ mod tests {
 		assert_eq!(value["name"], "worker");
 		assert_eq!(value["generation"], 7);
 		assert_eq!(value["restartCount"], 2);
+		assert!(value["exitCode"].is_null());
 	}
 }

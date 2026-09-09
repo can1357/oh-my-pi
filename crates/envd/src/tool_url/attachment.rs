@@ -1,7 +1,11 @@
 //! Live-session `attachment://N` resolver.
 
-use omp_core::{CowBytes, Hash32, Str};
-use omp_storage::blob::{BlobRef, BlobStore};
+use std::sync::Arc;
+
+use omp_agent::SessionAuthority;
+use omp_core::{CowBytes, Str};
+use omp_dom::{Dom, KnownTag, PropId, PropKey, Tag, Value};
+use omp_journal::blob::{BlobRef, BlobStore};
 use omp_tools::read::{
 	Fault,
 	resolver::{LineOffsetCache, Resolve},
@@ -9,14 +13,19 @@ use omp_tools::read::{
 };
 
 pub(crate) struct AttachmentUrlResolver {
-	store:   BlobStore,
-	session: Str,
-	lines:   LineOffsetCache,
+	store:     BlobStore,
+	session:   Str,
+	authority: Option<Arc<dyn SessionAuthority>>,
+	lines:     LineOffsetCache,
 }
 
 impl AttachmentUrlResolver {
-	pub(super) fn new(store: BlobStore, session: &str) -> Self {
-		Self { store, session: Str::new(session), lines: LineOffsetCache::default() }
+	pub(super) fn new(
+		store: BlobStore,
+		session: &str,
+		authority: Option<Arc<dyn SessionAuthority>>,
+	) -> Self {
+		Self { store, session: Str::new(session), authority, lines: LineOffsetCache::default() }
 	}
 }
 
@@ -27,25 +36,49 @@ impl Resolve for AttachmentUrlResolver {
 		selector: &'a ParsedSelector,
 	) -> Result<CowBytes<'static>, Fault> {
 		use super::select_bytes;
-		let snapshot =
-			omp_agent::attachments::session_attachments(&self.session).ok_or_else(|| {
-				Fault::Source { message: Str::new_static("No live attachment snapshot is available.") }
-			})?;
-		let uri = format!("attachment://{resource}");
-		let attachment = snapshot.resolve(&uri).map_err(|_| Fault::Source {
-			message: Str::new_static("Attachment was not found in the latest user image set."),
+		let authority = self.authority.as_deref().ok_or_else(|| Fault::Source {
+			message: Str::new_static("No live session registry is bound."),
 		})?;
-		let bytes = if !attachment.blob.inline.is_empty() {
-			CowBytes::from(attachment.blob.inline.clone())
-		} else {
-			let hash = <[u8; 32]>::try_from(attachment.blob.hash.as_ref()).map_err(|_| {
-				Fault::Source { message: Str::new_static("Attachment has an invalid content digest.") }
+		let endpoint = authority
+			.lookup(self.session.as_str())
+			.ok_or_else(|| Fault::Source {
+				message: Str::new_static("No live attachment snapshot is available."),
 			})?;
-			let reference = BlobRef { hash: Hash32::new(hash), size: attachment.blob.size };
-			CowBytes::from(self.store.get(&reference).map_err(|_| Fault::Source {
-				message: Str::new_static("Attachment content is unavailable."),
-			})?)
+		let dom = Dom::from_snapshot(&endpoint.snapshot.read());
+		let latest = dom
+			.handles()
+			.collect::<Vec<_>>()
+			.into_iter()
+			.rev()
+			.find_map(|handle| {
+				let node = dom.get(handle)?;
+				(node.tag == Tag::Known(KnownTag::User))
+					.then(|| node.prop(&PropKey::from(PropId::Data)))
+					.flatten()
+			});
+		let attachments = match latest {
+			Some(Value::Json(value)) => {
+				serde_json::from_str::<Vec<BlobRef>>(value.get()).map_err(|_| Fault::Source {
+					message: Str::new_static("Attachment metadata is invalid."),
+				})?
+			},
+			_ => Vec::new(),
 		};
+		let ordinal = resource
+			.trim_matches('/')
+			.parse::<usize>()
+			.map_err(|_| Fault::Invalid {
+				message: Str::new_static("Attachment identity must be a positive ordinal."),
+			})?;
+		let reference = attachments
+			.get(ordinal.saturating_sub(1))
+			.copied()
+			.ok_or_else(|| Fault::Source {
+				message: Str::new_static("Attachment was not found in the latest user attachment set."),
+			})?;
+		let bytes = CowBytes::from(self.store.get(&reference).map_err(|_| Fault::Source {
+			message: Str::new_static("Attachment content is unavailable."),
+		})?);
 		select_bytes(&self.lines, resource, bytes, selector)
 	}
 }

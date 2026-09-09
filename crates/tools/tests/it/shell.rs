@@ -1,15 +1,24 @@
 //! Behavioral contracts for the persistent native `bash@1` executor.
 
-use std::{collections::VecDeque, convert, future, io::Cursor, sync::Arc, thread, time::Duration};
+use std::{
+	collections::{BTreeMap, VecDeque},
+	convert, future,
+	io::Cursor,
+	sync::Arc,
+	thread,
+	time::Duration,
+};
 
 use bytes::Bytes;
 use futures::{FutureExt, StreamExt, executor::block_on, pin_mut};
 use omp_core::{CowBytes, Str, sf};
 use omp_proto::inference::v1::invoke_input::{self, chunk};
+use omp_shell_builtins::encode_image_passthrough;
 use omp_tool::{
 	Abort, ArtifactLifetime, CallOutcome, CallOutcomeDetails, CallOutcomeSpill, CapsBase, Claims,
-	ErasedEv, ErasedOutcome, Ev, IncomingParams, Interrupt, JobOwner, ModelClass, Part, Precedence,
-	Presentation, PromptCaps, Registry, Tool, ToolIdentity, ToolTerminal,
+	DiagEnvelope, DiagKind, ErasedEv, ErasedOutcome, Ev, IncomingParams, Interrupt, JobOwner,
+	ModelClass, Part, Precedence, Presentation, PromptCaps, Registry, Severity, Tool, ToolIdentity,
+	ToolTerminal,
 };
 use omp_tools::{
 	auto_background::DetachedJob,
@@ -165,7 +174,36 @@ impl ShellExec for FakeExec {
 				}
 				events.push_back(RunEvent::Exit(status(ExecOutcome::Exited)));
 			},
+			"graphics" => {
+				let mut encoded = b"before\n".to_vec();
+				encode_image_passthrough("image/png", b"\x89PNG\r\n\x1a\npixels", &mut encoded);
+				encoded.extend_from_slice(b"\nafter\n");
+				let split = encoded.len() / 2;
+				for (sequence, data) in [(1, encoded[..split].to_vec()), (2, encoded[split..].to_vec())]
+				{
+					events.push_back(RunEvent::Output(Update {
+						channel: OutputChannel::Stdout,
+						data: CowBytes::owned(Bytes::from(data)),
+						sequence,
+						exec_id: Bytes::new(),
+						started: false,
+						terminal: false,
+					}));
+				}
+				events.push_back(RunEvent::Exit(status(ExecOutcome::Exited)));
+			},
 			"timeout" => events.push_back(RunEvent::Exit(status(ExecOutcome::Timeout))),
+			"sandboxed" => {
+				let mut terminal = status(ExecOutcome::Exited);
+				terminal.diags.push(omp_tool::Diag::info(
+					DiagKind::Sandbox,
+					sf!(
+						"sandbox: backend=seatbelt; mode=workspace-write; writes outside workspace are \
+						 denied"
+					),
+				));
+				events.push_back(RunEvent::Exit(terminal));
+			},
 			"nonzero" => {
 				let mut terminal = status(ExecOutcome::Exited);
 				terminal.exit_code = Some(17);
@@ -182,7 +220,7 @@ impl ShellExec for FakeExec {
 				}));
 				let mut terminal = status(ExecOutcome::Exited);
 				terminal.spilled_output = Some(omp_tool::BlobRef {
-					hash:       sf!("sha256:overflow"),
+					hash:       sf!("overflow"),
 					media_type: sf!("application/octet-stream"),
 					byte_len:   4096,
 				});
@@ -200,6 +238,18 @@ impl ShellExec for FakeExec {
 			events,
 			cancelled: Arc::new(Mutex::new(None)),
 			state: Arc::clone(&self.state),
+		}))
+	}
+
+	fn store_attachment(
+		&self,
+		bytes: Bytes,
+		media_type: Str,
+	) -> impl future::Future<Output = Result<omp_tool::BlobRef, Fault>> + Send + '_ {
+		future::ready(Ok(omp_tool::BlobRef {
+			hash: Str::from(omp_core::Hash32::sum(&bytes).to_hex().as_str()),
+			media_type,
+			byte_len: bytes.len() as u64,
 		}))
 	}
 
@@ -224,6 +274,7 @@ fn status(outcome: ExecOutcome) -> ExecStatus {
 		spilled_output: None,
 		aborted: matches!(outcome, ExecOutcome::Timeout | ExecOutcome::Cancelled),
 		effects_unknown: false,
+		diags: Vec::new(),
 		final_cwd_uri: None,
 		final_cwd_revision: 0,
 	}
@@ -305,6 +356,13 @@ fn constructed_tool_spec_preserves_the_bash_schema_contract() {
 		}))
 		.is_err()
 	);
+	let params = serde_json::from_value::<shell::Params>(serde_json::json!({
+		"command": "echo env",
+		"env": {"ADD": "value", "REMOVE": null}
+	}))
+	.expect("environment delta accepts set and unset values");
+	assert_eq!(params.env.get("ADD"), Some(&Some(sf!("value"))));
+	assert_eq!(params.env.get("REMOVE"), Some(&None));
 }
 
 #[test]
@@ -347,6 +405,20 @@ fn one_session_is_reused_with_its_cwd_and_environment_state() {
 			.all(|run| run.0 == Bytes::from_static(b"session-1"))
 	);
 }
+
+#[test]
+fn command_environment_is_routed_to_the_run_not_the_session() {
+	let exec = FakeExec::default();
+	let registry = registry(exec.clone(), 1024);
+	let _ = call(&registry, r#"{"command":"show-env","env":{"ADD":"value","REMOVE":null}}"#);
+	let state = exec.state.lock();
+	assert!(state.session_options[0].env.is_empty());
+	assert_eq!(
+		state.runs[0].1.environment,
+		BTreeMap::from([(sf!("ADD"), Some(sf!("value"))), (sf!("REMOVE"), None),]),
+	);
+}
+
 #[test]
 fn explicit_cwd_and_shell_expansions_preserve_leading_cd_commands() {
 	let explicit = FakeExec::default();
@@ -413,6 +485,23 @@ fn timeout_clamp_journals_a_receipt_and_returns_a_failed_outcome() {
 }
 
 #[test]
+fn timeout_zero_disables_and_values_above_3600_seconds_clamp() {
+	let exec = FakeExec::default();
+	let registry = registry(exec.clone(), 1024);
+
+	let zero = payload(&call(&registry, r#"{"command":"zero","timeout":0}"#));
+	assert!(zero.adjustments.is_empty());
+	assert_eq!(exec.state.lock().runs[0].1.timeout_ms, None);
+
+	let clamped = payload(&call(&registry, r#"{"command":"large","timeout":4000}"#));
+	assert_eq!(exec.state.lock().runs[1].1.timeout_ms, Some(3_600_000));
+	assert_eq!(clamped.adjustments, [AdjustmentReceipt::TimeoutClamped {
+		requested_ms: 4_000_000,
+		effective_ms: 3_600_000,
+	}]);
+}
+
+#[test]
 fn aborted_foreground_run_quarantines_its_pooled_session() {
 	let exec = FakeExec::default();
 	let registry = registry(exec.clone(), 1024);
@@ -426,13 +515,54 @@ fn aborted_foreground_run_quarantines_its_pooled_session() {
 }
 
 #[test]
-fn spill_threshold_keeps_complete_output_for_the_central_blob_gate() {
+fn shell_wrapper_preserves_the_host_projection_without_a_second_bound() {
 	let exec = FakeExec::default();
 	let events = call(&registry(exec, 4), r#"{"command":"overflow"}"#);
 	let result = payload(&events);
 	assert_eq!(result.transcript[0].data, b"xxxxxxxxxxxxxxxx");
-	assert_eq!(result.status.spilled_output.as_ref().unwrap().hash, "sha256:overflow");
-	assert!(matches!(events.first(), Some(ErasedEv::Update(_))), "live output is never capped");
+	assert_eq!(result.status.spilled_output.as_ref().unwrap().hash, "overflow");
+	assert!(
+		matches!(events.first(), Some(ErasedEv::Update(_))),
+		"the shell wrapper forwards the already-bounded host projection"
+	);
+}
+
+#[test]
+fn shell_extracts_split_graphics_as_full_typed_attachments() {
+	let registry = registry(FakeExec::default(), 1024);
+	let events = call(&registry, r#"{"command":"graphics"}"#);
+	let result = payload(&events);
+	assert_eq!(result.attachments.len(), 1);
+	assert_eq!(result.attachments[0].media_type, "image/png");
+	assert_eq!(result.attachments[0].byte_len, 14);
+	let text = result
+		.transcript
+		.iter()
+		.flat_map(|frame| frame.data.as_ref())
+		.copied()
+		.collect::<Vec<_>>();
+	assert_eq!(text, b"before\n\nafter\n");
+
+	let ErasedEv::Done(ErasedOutcome::Done { verdict, .. }) = events.last().unwrap() else {
+		panic!("graphics command must produce a verdict")
+	};
+	let (name, rev) = registry.live_identity("bash").unwrap();
+	let caps = PromptCaps::for_tool(
+		CapsBase {
+			maximum_parts:      2,
+			maximum_text_bytes: 1024,
+			media:              true,
+			model_class:        ModelClass::Standard,
+		},
+		rev,
+	);
+	let parts = registry
+		.prompt(&ToolIdentity { name: name.clone(), rev: rev.clone() }, verdict, &caps)
+		.unwrap()
+		.unwrap();
+	assert!(
+		matches!(parts.last(), Some(Part::Blob { blob, .. }) if blob.media_type == "image/png" && blob.byte_len == 14)
+	);
 }
 
 #[tokio::test]
@@ -671,6 +801,22 @@ fn malformed_whole_arguments_are_a_structured_args_verdict() {
 }
 
 #[test]
+fn sandbox_notice_is_a_structured_diag_not_process_output() {
+	let events = call(&registry(FakeExec::default(), 1024), r#"{"command":"sandboxed"}"#);
+	let diags = events
+		.iter()
+		.filter_map(|event| match event {
+			ErasedEv::Update(json) => serde_json::from_slice::<DiagEnvelope>(json).ok(),
+			ErasedEv::Done(_) => None,
+		})
+		.collect::<Vec<_>>();
+	assert_eq!(diags.len(), 1);
+	assert_eq!(diags[0].diag.native_kind(), Some(DiagKind::Sandbox));
+	assert_eq!(diags[0].diag.severity, Severity::Info);
+	assert!(payload(&events).transcript.is_empty());
+}
+
+#[test]
 fn nonzero_exit_is_a_failed_outcome_with_transcript_and_status() {
 	let events = call(&registry(FakeExec::default(), 1024), r#"{"command":"nonzero"}"#);
 	let result = failed_payload(&events);
@@ -703,7 +849,7 @@ fn effects_unknown_cancelled_status_aborts_the_tool_outcome() {
 }
 
 #[test]
-fn prompt_projection_retains_status_and_obeys_text_caps() {
+fn prompt_projection_retains_status_and_the_host_bounded_stream_without_reprojection() {
 	let registry = registry(FakeExec::default(), 1024);
 	let events = call(&registry, r#"{"command":"ordered"}"#);
 	let ErasedEv::Done(ErasedOutcome::Done { verdict, .. }) = events.last().unwrap() else {
@@ -713,7 +859,7 @@ fn prompt_projection_retains_status_and_obeys_text_caps() {
 	let caps = PromptCaps::for_tool(
 		CapsBase {
 			maximum_parts:      1,
-			maximum_text_bytes: 96,
+			maximum_text_bytes: 1024,
 			media:              false,
 			model_class:        ModelClass::Standard,
 		},
@@ -726,6 +872,21 @@ fn prompt_projection_retains_status_and_obeys_text_caps() {
 	let [Part::Text { text }] = parts.as_ref() else {
 		panic!("shell prompt must be one capped text part")
 	};
-	assert!(text.len() <= 96);
+	assert!(text.len() <= 1024);
 	assert!(text.contains("status=Exited"));
+	assert!(text.contains("onetwothree"));
+	assert!(!text.contains("output middle omitted"));
+
+	let overflow = call(&registry, r#"{"command":"overflow"}"#);
+	let ErasedEv::Done(ErasedOutcome::Done { verdict, .. }) = overflow.last().unwrap() else {
+		panic!("overflow call must produce a verdict")
+	};
+	let parts = registry
+		.prompt(&ToolIdentity { name: name.clone(), rev: rev.clone() }, verdict, &caps)
+		.unwrap()
+		.unwrap();
+	let [Part::Text { text }] = parts.as_ref() else {
+		panic!("overflow prompt must be text")
+	};
+	assert!(text.contains("artifact://sha256/overflow"));
 }

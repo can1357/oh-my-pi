@@ -1,8 +1,10 @@
 //! Environment-daemon process and persistent shell-session host.
 
 use std::{
-	collections::{BTreeSet, HashMap, HashSet},
-	env, fs, future,
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+	env,
+	ffi::{OsStr, OsString},
+	fs, future,
 	io::{self, Read, Write as _},
 	net,
 	os::fd::{self, AsFd as _, AsRawFd as _},
@@ -20,7 +22,10 @@ use bytes::{Buf as _, Bytes, BytesMut};
 use flume::Receiver;
 use futures::future::try_join_all;
 use nix::errno::Errno;
+use omp_agent::{ApprovalRoute, ApprovalScope, ApprovalSpec, TicketState};
+use omp_cache::github_cache::GithubCache;
 use omp_core::{Hash32, Str, sf};
+use omp_journal::blob::{BlobStage, BlobStore};
 use omp_proto::{
 	env::{
 		v1,
@@ -34,14 +39,18 @@ use omp_proto::{
 			RestartPolicy, RestartProcess, StartProcess, ready_probe,
 		},
 	},
+	inference::v1::{Value as WireValue, ValueMap as WireValueMap, value as wire_value},
+	thread::v1::Blob as WireBlob,
 	toolhost::v1::{HostFrame, Ping, WorkerFrame, host_frame, worker_frame},
 };
-use omp_shell_engine::{
-	ExecutionParameters, Shell, ShellVariable, SourceInfo, SpawnObserver,
+use omp_shell::{
+	ExecutionParameters, PathAccess, ProcessScope, Shell, ShellValue, ShellVariable, SourceInfo,
+	SpawnObserver, SpawnWrapper,
+	env::EnvironmentScope,
 	openfiles::{OpenFile, OpenFiles},
 	processes::{ProcessSignal, signal_process_group},
+	variables::ShellValueUnsetType,
 };
-use omp_storage::github_cache::GithubCache;
 use parking_lot::Mutex;
 use prost::Message as _;
 use regex::bytes::Regex;
@@ -52,6 +61,8 @@ use url::Url;
 use super::{
 	admission,
 	admission::GithubMutationTarget,
+	exec_sandbox::{ApprovedPathScope, ExecSandbox, SandboxDenialFact},
+	exec_settings::{ExecSandboxMode, SandboxNetworkMode, SandboxSettings},
 	process_identity::{IdentityError, ProcessIdentity},
 	process_log,
 	process_log::{LogChunk, ProcessLog},
@@ -63,9 +74,20 @@ use super::{
 
 const CANCEL_GRACE: Duration = Duration::from_millis(250);
 const OUTPUT_CHUNK_BYTES: usize = 16 * 1024;
+const OUTPUT_EVENT_CAPACITY: usize = 8;
+const LIVE_OUTPUT_BYTES: usize = 64 * 1024;
+const LIVE_OUTPUT_FRAMES: usize = 64;
+const COMPLETE_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+const COMPLETE_OUTPUT_FRAMES: usize = COMPLETE_OUTPUT_BYTES / OUTPUT_CHUNK_BYTES;
 const RESTART_HEALTHY_UPTIME: Duration = Duration::from_secs(30);
 const RESTART_MAX_DELAY: Duration = Duration::from_secs(30);
 const RESTART_BASE_DELAY: Duration = Duration::from_secs(1);
+const RUN_ENVIRONMENT_PROP: &str = "omp/run-environment";
+const SANDBOX_DENIED_PATH_PROP: &str = "omp/sandbox-denied-path";
+const SANDBOX_DIAGNOSTIC_BYTES: usize = 16 * 1024;
+const PATH_DENIED_DIAGNOSTIC: &[u8] = b"sandbox denied ";
+const SANDBOX_PROXY_ENV: [&str; 6] =
+	["HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"];
 
 /// Content identity of the process environment inherited by new shell sessions.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -105,6 +127,9 @@ pub enum ExecError {
 	/// The control operation was outside the declared vocabulary.
 	#[error("exec control kind is invalid")]
 	InvalidControl,
+	/// A command-local environment delta used an invalid wire value.
+	#[error("command-local environment delta is invalid")]
+	InvalidRunEnvironment,
 	/// The requested named process does not exist.
 	#[error("named process {0:?} was not found")]
 	ProcessNotFound(Str),
@@ -141,6 +166,9 @@ pub enum ExecError {
 	/// The target actor has stopped.
 	#[error("exec session has closed")]
 	SessionClosed,
+	/// Shell output could not enter the content-addressed artifact store.
+	#[error(transparent)]
+	OutputStore(#[from] omp_journal::blob::Error),
 	/// A named process used an invalid durable name.
 	#[error("process name must be 1-48 ASCII letters, digits, dot, underscore, or hyphen")]
 	InvalidProcessName,
@@ -156,6 +184,15 @@ pub enum ExecError {
 	/// Another daemon already owns the durable process namespace.
 	#[error(transparent)]
 	ProcessLease(#[from] LeaseError),
+	/// The configured command sandbox could not be compiled.
+	#[error("failed to enable sandbox mode {mode}")]
+	Sandbox {
+		/// Requested user-facing posture.
+		mode:   &'static str,
+		/// Typed sandbox compiler failure.
+		#[source]
+		source: omp_sandbox::SandboxError,
+	},
 }
 
 /// One ordered event emitted by an execution.
@@ -244,18 +281,26 @@ pub struct ExecHost {
 }
 
 struct HostInner {
-	next_id:       AtomicU64,
-	next_revision: AtomicU64,
-	sessions:      Mutex<HashMap<Bytes, SessionHandle>>,
-	runs:          Mutex<HashMap<Bytes, Weak<RunControl>>>,
-	final_cwds:    Mutex<HashMap<Bytes, ExecFinalCwd>>,
-	processes:     Mutex<HashMap<Str, Arc<NamedProcess>>>,
-	starting:      Mutex<HashSet<Str>>,
-	environment:   Mutex<WorkspaceEnvironment>,
-	github_cache:  Mutex<Option<Arc<GithubCache>>>,
-	devices:       Mutex<Option<Arc<crate::xd::XdHost>>>,
-	persistence:   Mutex<Option<ProcessPersistence>>,
-	next_order:    AtomicU64,
+	next_id:                AtomicU64,
+	next_revision:          AtomicU64,
+	sessions:               Mutex<HashMap<Bytes, SessionHandle>>,
+	runs:                   Mutex<HashMap<Bytes, Weak<RunControl>>>,
+	final_cwds:             Mutex<HashMap<Bytes, ExecFinalCwd>>,
+	processes:              Mutex<HashMap<Str, Arc<NamedProcess>>>,
+	starting:               Mutex<HashSet<Str>>,
+	environment:            Mutex<WorkspaceEnvironment>,
+	github_cache:           Mutex<Option<Arc<GithubCache>>>,
+	devices:                Mutex<Option<Arc<crate::devices_host::DynHost>>>,
+	output_store:           Mutex<Option<BlobStore>>,
+	persistence:            Mutex<Option<ProcessPersistence>>,
+	next_order:             AtomicU64,
+	sandbox:                Mutex<Option<SandboxConfig>>,
+	sandbox_approval_route: Mutex<Option<ApprovalRoute>>,
+}
+
+struct SandboxConfig {
+	settings:       SandboxSettings,
+	workspace_root: PathBuf,
 }
 
 struct ProcessPersistence {
@@ -266,16 +311,12 @@ struct ProcessPersistence {
 
 #[derive(Clone)]
 struct SessionHandle {
-	tx:             flume::Sender<SessionCommand>,
-	pty:            Option<PtySpec>,
-	command_prefix: Str,
-	user_shell:     Option<UserShell>,
-}
-#[derive(Clone)]
-struct UserShell {
-	executable: Str,
-	args:       Arc<[Str]>,
-	login:      bool,
+	tx:                flume::Sender<SessionCommand>,
+	pty:               Option<PtySpec>,
+	command_prefix:    Str,
+	sandbox:           Option<Arc<ExecSandbox>>,
+	process_scope:     Arc<SpawnBook>,
+	sandbox_announced: Arc<AtomicBool>,
 }
 
 struct NamedProcess {
@@ -292,6 +333,7 @@ struct NamedProcess {
 	detached:        bool,
 	persist:         bool,
 	stopping:        AtomicBool,
+	restart_pending: AtomicBool,
 	timed_out:       AtomicBool,
 	timeout:         Option<Duration>,
 	deadline_cancel: CancellationToken,
@@ -418,19 +460,30 @@ enum InputSink {
 }
 
 struct SpawnBook {
-	groups: Mutex<Vec<i32>>,
+	groups:  Mutex<Vec<i32>>,
+	pids:    Mutex<Vec<i32>>,
+	session: Option<Arc<SpawnBook>>,
 }
 
+#[derive(Clone)]
 struct SessionCommand {
-	host:           Weak<HostInner>,
-	exec:           Bytes,
-	source:         Str,
-	timeout:        Option<Duration>,
-	pty:            Option<PtySpec>,
-	control:        Arc<RunControl>,
-	cancel_rx:      Receiver<CancelRequest>,
-	events:         flume::Sender<ExecEvent>,
+	host: Weak<HostInner>,
+	exec: Bytes,
+	source: Str,
+	environment: Option<EnvironmentDelta>,
+	timeout: Option<Duration>,
+	pty: Option<PtySpec>,
+	control: Arc<RunControl>,
+	cancel_rx: Receiver<CancelRequest>,
+	events: flume::Sender<ExecEvent>,
+	output: Arc<Mutex<OutputCapture>>,
 	github_targets: Vec<GithubMutationTarget>,
+	sandbox: Option<Arc<ExecSandbox>>,
+	sandbox_announced: Arc<AtomicBool>,
+	diags: Arc<Mutex<Vec<omp_tool::Diag>>>,
+	sequence: Arc<AtomicU64>,
+	rerun: bool,
+	sandbox_environment_update: bool,
 }
 
 impl Default for ExecHost {
@@ -444,20 +497,121 @@ impl ExecHost {
 	pub fn new() -> Self {
 		Self {
 			inner: Arc::new(HostInner {
-				next_id:       AtomicU64::new(1),
-				next_revision: AtomicU64::new(1),
-				sessions:      Mutex::new(HashMap::new()),
-				runs:          Mutex::new(HashMap::new()),
-				final_cwds:    Mutex::new(HashMap::new()),
-				processes:     Mutex::new(HashMap::new()),
-				starting:      Mutex::new(HashSet::new()),
-				environment:   Mutex::new(read_workspace_environment()),
-				github_cache:  Mutex::new(None),
-				devices:       Mutex::new(None),
-				persistence:   Mutex::new(None),
-				next_order:    AtomicU64::new(1),
+				next_id:                AtomicU64::new(1),
+				next_revision:          AtomicU64::new(1),
+				sessions:               Mutex::new(HashMap::new()),
+				runs:                   Mutex::new(HashMap::new()),
+				final_cwds:             Mutex::new(HashMap::new()),
+				processes:              Mutex::new(HashMap::new()),
+				starting:               Mutex::new(HashSet::new()),
+				environment:            Mutex::new(read_workspace_environment()),
+				github_cache:           Mutex::new(None),
+				devices:                Mutex::new(None),
+				output_store:           Mutex::new(None),
+				persistence:            Mutex::new(None),
+				next_order:             AtomicU64::new(1),
+				sandbox:                Mutex::new(None),
+				sandbox_approval_route: Mutex::new(None),
 			}),
 		}
+	}
+
+	/// Configures sandbox policy for subsequently opened sessions and detached
+	/// processes.
+	pub(crate) fn configure_sandbox(&self, settings: &SandboxSettings, workspace_root: &Path) {
+		let config = (settings.mode != ExecSandboxMode::Off
+			|| settings.network_mode != SandboxNetworkMode::Disabled
+			|| !settings.allow_unix_sockets.is_empty()
+			|| settings.read_mode != crate::exec_settings::ReadMode::Host
+			|| !settings.readable_roots.is_empty()
+			|| !settings.read_deny.is_empty()
+			|| !settings.read_deny_globs.is_empty()
+			|| !settings.environment_policy_is_default())
+		.then(|| SandboxConfig {
+			settings:       settings.clone(),
+			workspace_root: workspace_root.to_path_buf(),
+		});
+		*self.inner.sandbox.lock() = config;
+	}
+
+	pub(crate) fn active_sandbox(&self) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
+		self.compiled_sandbox(true)
+	}
+
+	fn detached_sandbox(&self) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
+		self.compiled_sandbox(false)
+	}
+
+	fn compiled_sandbox(&self, supervised: bool) -> Result<Option<Arc<ExecSandbox>>, ExecError> {
+		let (settings, workspace_root) = {
+			let config = self.inner.sandbox.lock();
+			let Some(config) = config.as_ref() else {
+				return Ok(None);
+			};
+			(config.settings.clone(), config.workspace_root.clone())
+		};
+		ExecSandbox::compile(&settings, &workspace_root, supervised)
+			.map_err(|source| ExecError::Sandbox { mode: settings.mode.into(), source })
+	}
+
+	/// Binds the interactive approval route used for one-shot sandbox
+	/// amendments.
+	pub(crate) fn bind_sandbox_approval_route(&self, route: Option<ApprovalRoute>) {
+		*self.inner.sandbox_approval_route.lock() = route;
+	}
+
+	/// Forwards the invocation-scoped approval route to installed dynamic
+	/// devices so nested `dyn` calls admit their own exact effects.
+	pub(crate) fn bind_dynamic_approval_route(&self, route: Option<ApprovalRoute>) {
+		if let Some(host) = self.inner.devices.lock().as_ref() {
+			host.bind_approval_route(route);
+		}
+	}
+
+	async fn approve_sandbox_amendment(
+		&self,
+		command: &str,
+		fact: &SandboxDenialFact,
+		scope: &str,
+	) -> bool {
+		let Some(route) = self.inner.sandbox_approval_route.lock().clone() else {
+			return false;
+		};
+		let fact_label = sandbox_fact_label(fact);
+		let scope = Str::from(scope);
+		let ticket = route
+			.request(
+				None,
+				vec![ApprovalSpec {
+					title:         sf!("Approve scoped sandbox amendment"),
+					body:          sf!(
+						"The sandbox denied {fact_label}. Approve {scope} for this exact command one \
+						 time?\n\n{command}"
+					),
+					subject:       scope.clone(),
+					kind:          sf!("sandbox_amendment"),
+					scopes:        vec![sf!("once")],
+					default:       Some(false),
+					route:         sf!("local"),
+					approver:      None,
+					timeout_ms:    120_000,
+					unreachable:   sf!("fail_closed"),
+					require_human: true,
+					pattern:       Some(Str::from(command)),
+					evidence:      vec![fact_label, scope.clone()],
+				}],
+				unix_time_ms(),
+			)
+			.await;
+		ticket.state == TicketState::Decided
+			&& ticket
+				.decision
+				.as_ref()
+				.is_some_and(|decision| decision.approved && decision.scope == ApprovalScope::Once)
+			&& ticket
+				.reasons
+				.iter()
+				.any(|reason| reason.kind == "sandbox_amendment" && reason.subject == scope)
 	}
 
 	/// Enables durable named-process metadata and recovers verified detached
@@ -506,9 +660,16 @@ impl ExecHost {
 		self
 	}
 
+	/// Binds the content-addressed store that retains complete oversized
+	/// execution output before the live event stream is projected.
+	pub fn with_output_store(self, store: BlobStore) -> Self {
+		*self.inner.output_store.lock() = Some(store);
+		self
+	}
+
 	/// Installs the live dynamic-device bridge used by subsequently opened
 	/// sessions.
-	pub fn install_devices(&self, host: Arc<crate::xd::XdHost>) {
+	pub fn install_devices(&self, host: Arc<crate::devices_host::DynHost>) {
 		*self.inner.devices.lock() = Some(host);
 	}
 
@@ -520,12 +681,10 @@ impl ExecHost {
 		let profile = request.shell_profile.as_ref();
 		if let Some(profile) = profile {
 			let requested = profile.profile.trim();
-			let supported = matches!(requested, "" | "brush" | "user" | "bash" | "zsh" | "fish");
-			let external = !matches!(requested, "" | "brush");
-			if profile.wire_revision != omp_proto::SCHEMA_REV
-				|| !supported
-				|| external && profile.executable.trim().is_empty()
-			{
+			// ADR 0028: the in-process interpreter is the only shell; external
+			// shells never run a session script.
+			let supported = matches!(requested, "" | "brush");
+			if profile.wire_revision != omp_proto::SCHEMA_REV || !supported {
 				return Err(ExecError::UnsupportedShellProfile {
 					profile: Str::from(if requested.is_empty() {
 						"brush"
@@ -536,20 +695,48 @@ impl ExecHost {
 			}
 		}
 		let cwd = cwd_from_uri(&request.cwd_uri)?.map_or_else(env::current_dir, Ok)?;
+		let sandbox = self.active_sandbox()?;
 		let variables = Arc::clone(&self.inner.environment.lock().variables);
+		let variables = sandbox.as_ref().map_or_else(
+			|| {
+				variables
+					.iter()
+					.map(|(name, value)| (OsString::from(name.as_str()), OsString::from(value.as_str())))
+					.collect()
+			},
+			|sandbox| {
+				sandbox.resolve_env(variables.iter().map(|(name, value)| {
+					(OsString::from(name.as_str()), OsString::from(value.as_str()))
+				}))
+			},
+		);
 		let mut builder = Shell::builder()
-			.profile(omp_shell_engine::ProfileLoadBehavior::Skip)
-			.rc(omp_shell_engine::RcLoadBehavior::Skip)
+			.profile(omp_shell::ProfileLoadBehavior::Skip)
+			.rc(omp_shell::RcLoadBehavior::Skip)
 			.working_dir(cwd)
 			.do_not_inherit_env(true)
-			.builtins(omp_shell_engine::builtins::default_builtins());
+			.builtins(omp_shell::builtins::default_builtins())
+			.builtins(
+				omp_shell_builtins::utility_builtins()
+					.into_iter()
+					.map(|(name, registration)| (name.to_owned(), registration)),
+			)
+			.builtins(
+				omp_shell_builtins::process_builtins()
+					.into_iter()
+					.map(|(name, registration)| (name.to_owned(), registration)),
+			);
 		if let Some(host) = self.inner.devices.lock().clone() {
-			builder = builder.builtin("xd", crate::xd::registration(host));
+			builder = builder.builtin("dyn", omp_shell_builtins::dyn_builtin(host));
 		}
-		for (name, value) in variables.iter() {
-			let mut variable = ShellVariable::new(value.to_string());
+		for (name, value) in &variables {
+			let Some(name) = name.to_str() else { continue };
+			let Some(value) = value.to_str() else {
+				continue;
+			};
+			let mut variable = ShellVariable::new(value);
 			variable.export();
-			builder = builder.var(name.to_string(), variable);
+			builder = builder.var(name, variable);
 		}
 		let mut shell = builder.build().await.map_err(shell_error)?;
 		if let Some(pty) = request.pty.as_ref()
@@ -565,23 +752,21 @@ impl ExecHost {
 			apply_env_delta(&mut shell, profile.env_delta.as_ref()).map_err(shell_error)?;
 		}
 		apply_env_delta(&mut shell, request.env_delta.as_ref()).map_err(shell_error)?;
+		if let Some(sandbox) = sandbox.as_ref() {
+			apply_sandbox_environment(&mut shell, sandbox.as_ref(), EnvironmentScope::Global)
+				.map_err(shell_error)?;
+		}
 
 		let command_prefix =
 			profile.map_or_else(Str::default, |profile| Str::from(profile.command_prefix.trim()));
-		let user_shell = profile.and_then(|profile| {
-			(!matches!(profile.profile.trim(), "" | "brush")).then(|| UserShell {
-				executable: Str::from(profile.executable.trim()),
-				args:       profile
-					.args
-					.iter()
-					.map(|arg| Str::from(arg.as_str()))
-					.collect(),
-				login:      profile.login,
-			})
-		});
 		let session = self.new_id();
 		let lease = self.new_id();
 		let (tx, rx) = flume::unbounded();
+		let process_scope = Arc::new(SpawnBook {
+			groups:  Mutex::new(Vec::new()),
+			pids:    Mutex::new(Vec::new()),
+			session: None,
+		});
 		let sessions = Arc::downgrade(&self.inner);
 		let session_for_task = session.clone();
 		tokio::spawn(async move {
@@ -598,7 +783,9 @@ impl ExecHost {
 				tx,
 				pty: request.pty.clone(),
 				command_prefix,
-				user_shell,
+				sandbox,
+				process_scope,
+				sandbox_announced: Arc::new(AtomicBool::new(false)),
 			});
 
 		Ok(OpenSessionResponse {
@@ -703,10 +890,7 @@ impl ExecHost {
 			resize:              true,
 			final_cwd:           true,
 			materialization:     true,
-			shell_profiles:      ["brush", "user", "bash", "zsh", "fish"]
-				.into_iter()
-				.map(String::from)
-				.collect(),
+			shell_profiles:      vec![String::from("brush")],
 			wire_revision:       omp_proto::SCHEMA_REV,
 		}
 	}
@@ -715,6 +899,14 @@ impl ExecHost {
 	pub async fn exec(
 		&self,
 		request: ExecRequest,
+		timeout: Option<Duration>,
+	) -> Result<(ExecStarted, ExecRun), ExecError> {
+		self.exec_controlled(request, timeout).await
+	}
+
+	async fn exec_controlled(
+		&self,
+		mut request: ExecRequest,
 		timeout: Option<Duration>,
 	) -> Result<(ExecStarted, ExecRun), ExecError> {
 		let session = self
@@ -726,7 +918,9 @@ impl ExecHost {
 			.ok_or(ExecError::SessionNotFound)?;
 		let source = request
 			.source
+			.take()
 			.ok_or_else(|| ExecError::Shell(sf!("missing script")))?;
+		let environment = take_run_environment(&mut request)?;
 		let github_targets = admission::bash_ir(
 			"bash",
 			&serde_json::json!({ "command": source.text.as_str() }),
@@ -734,25 +928,36 @@ impl ExecHost {
 			Path::new("/"),
 		)
 		.map_or_else(Vec::new, |bash| admission::github_mutation_targets(&bash));
-		let persistent_cd = simple_cd(&source.text);
 		let source = if session.command_prefix.is_empty() {
 			Str::from(source.text)
 		} else {
 			sf!("{} {}", session.command_prefix, source.text)
 		};
-		let source = session
-			.user_shell
-			.as_ref()
-			.filter(|_| !persistent_cd)
-			.map_or(source.clone(), |shell| user_shell_command(shell, &source));
 		let exec = self.new_id();
-		let (events_tx, events) = flume::unbounded();
+		// A bounded host-owned channel backpressures the pipe readers before
+		// untrusted output can accumulate in memory. OutputCapture separately
+		// streams the complete byte sequence to the artifact store.
+		let (events_tx, events) = flume::bounded(OUTPUT_EVENT_CAPACITY);
 		let events = Arc::new(events);
+		let output_request = match v1::OutputRequest::try_from(request.output_request) {
+			Ok(v1::OutputRequest::Complete) => omp_tool::OutputRequest::Complete,
+			Ok(v1::OutputRequest::Bounded | v1::OutputRequest::Unspecified) | Err(_) => {
+				omp_tool::OutputRequest::Bounded
+			},
+		};
+		let output = Arc::new(Mutex::new(OutputCapture::new_with_request(
+			self.inner.output_store.lock().as_ref(),
+			output_request,
+		)?));
 		let (cancel_tx, cancel_rx) = flume::bounded(1);
 		let control = Arc::new(RunControl {
 			cancel_tx,
 			input: Mutex::new(None),
-			spawns: Arc::new(SpawnBook { groups: Mutex::new(Vec::new()) }),
+			spawns: Arc::new(SpawnBook {
+				groups:  Mutex::new(Vec::new()),
+				pids:    Mutex::new(Vec::new()),
+				session: Some(session.process_scope.clone()),
+			}),
 			finished: AtomicBool::new(false),
 			retained: Mutex::new(None),
 			events: Arc::downgrade(&events),
@@ -761,17 +966,24 @@ impl ExecHost {
 			host: Arc::downgrade(&self.inner),
 			exec: exec.clone(),
 			source,
+			environment,
 			timeout,
 			pty: session.pty,
 			control: control.clone(),
 			cancel_rx,
 			events: events_tx,
+			output,
 			github_targets,
+			sandbox: session.sandbox,
+			sandbox_announced: session.sandbox_announced,
+			diags: Arc::new(Mutex::new(Vec::new())),
+			sequence: Arc::new(AtomicU64::new(1)),
+			rerun: false,
+			sandbox_environment_update: false,
 		};
 		session
 			.tx
-			.send_async(command)
-			.await
+			.send(command)
 			.map_err(|_| ExecError::SessionClosed)?;
 		self
 			.inner
@@ -906,9 +1118,10 @@ impl ExecHost {
 		let executed = self
 			.exec(
 				ExecRequest {
-					session: private_session.clone(),
-					source:  spec.source.clone(),
-					props:   Default::default(),
+					session:        private_session.clone(),
+					source:         spec.source.clone(),
+					output_request: v1::OutputRequest::Bounded as i32,
+					props:          Default::default(),
 				},
 				timeout,
 			)
@@ -939,6 +1152,8 @@ impl ExecHost {
 						ProcessState::Starting as i32
 					},
 					ready_pending: ready_condition_names(&ready),
+					spec: Some(spec.clone()),
+					ready: ready.clone(),
 					props: spec.props.clone(),
 					..ProcessInfo::default()
 				},
@@ -953,6 +1168,7 @@ impl ExecHost {
 			detached: false,
 			persist: spec.persist,
 			stopping: AtomicBool::new(false),
+			restart_pending: AtomicBool::new(false),
 			timed_out: AtomicBool::new(false),
 			timeout,
 			deadline_cancel: CancellationToken::new(),
@@ -994,17 +1210,14 @@ impl ExecHost {
 		}
 		if !ready.is_empty() {
 			let mut stream = process.stream.lock();
-			if process_state_is_terminal(stream.info.state) {
-				return Err(ExecError::Readiness(sf!(
-					"process exited while readiness probes were running",
-				)));
+			if !process_state_is_terminal(stream.info.state) {
+				stream.info.state = ProcessState::Ready as i32;
+				stream.info.ready_pending.clear();
+				let info = stream.info.clone();
+				stream.broadcast(ProcessEvent::State(info));
+				drop(stream);
+				self.persist_process(&process, ProcessPhase::Running)?;
 			}
-			stream.info.state = ProcessState::Ready as i32;
-			stream.info.ready_pending.clear();
-			let info = stream.info.clone();
-			stream.broadcast(ProcessEvent::State(info));
-			drop(stream);
-			self.persist_process(&process, ProcessPhase::Running)?;
 		}
 		let log_offset = process.log.lock().end_offset();
 		let endpoint = process.stream.lock().info.endpoint.clone();
@@ -1052,13 +1265,26 @@ impl ExecHost {
 			.text
 			.clone();
 		let cwd = cwd_from_uri(&spec.cwd_uri)?.map_or_else(env::current_dir, Ok)?;
-		let mut command = detached_command(&source);
+		let sandbox = self.detached_sandbox()?;
+		let mut command = detached_command(&source, sandbox.as_deref())?;
 		command
 			.current_dir(cwd)
 			.stdin(Stdio::null())
 			.stdout(Stdio::from(output))
 			.stderr(Stdio::from(stderr));
-		if let Some(delta) = spec.env_delta.as_ref() {
+		if let Some(sandbox) = sandbox.as_deref() {
+			let mut environment = env::vars_os().collect::<Vec<_>>();
+			if let Some(delta) = spec.env_delta.as_ref() {
+				environment.retain(|(name, _)| {
+					!delta.unset.iter().any(|unset| name == OsStr::new(unset))
+						&& !delta.set.keys().any(|set| name == OsStr::new(set.as_str()))
+				});
+				environment.extend(delta.set.iter().map(|(name, value)| {
+					(OsString::from(name.as_str()), OsString::from(value.as_str()))
+				}));
+			}
+			command.env_clear().envs(sandbox.resolve_env(environment));
+		} else if let Some(delta) = spec.env_delta.as_ref() {
 			command.envs(&delta.set);
 			for name in &delta.unset {
 				command.env_remove(name);
@@ -1094,7 +1320,11 @@ impl ExecHost {
 		let control = Arc::new(RunControl {
 			cancel_tx,
 			input: Mutex::new(None),
-			spawns: Arc::new(SpawnBook { groups: Mutex::new(vec![pid as i32]) }),
+			spawns: Arc::new(SpawnBook {
+				groups:  Mutex::new(vec![pid as i32]),
+				pids:    Mutex::new(Vec::new()),
+				session: None,
+			}),
 			finished: AtomicBool::new(false),
 			retained: Mutex::new(None),
 			events: Weak::new(),
@@ -1119,6 +1349,8 @@ impl ExecHost {
 					},
 					identity: Some(identity.to_wire()),
 					ready_pending: ready_condition_names(&ready),
+					spec: Some(spec.clone()),
+					ready: ready.clone(),
 					props: spec.props.clone(),
 					..ProcessInfo::default()
 				},
@@ -1133,6 +1365,7 @@ impl ExecHost {
 			detached: true,
 			persist: true,
 			stopping: AtomicBool::new(false),
+			restart_pending: AtomicBool::new(false),
 			timed_out: AtomicBool::new(false),
 			timeout,
 			deadline_cancel: CancellationToken::new(),
@@ -1174,17 +1407,14 @@ impl ExecHost {
 		}
 		if !ready.is_empty() {
 			let mut stream = process.stream.lock();
-			if process_state_is_terminal(stream.info.state) {
-				return Err(ExecError::Readiness(sf!(
-					"process exited while readiness probes were running",
-				)));
+			if !process_state_is_terminal(stream.info.state) {
+				stream.info.state = ProcessState::Ready as i32;
+				stream.info.ready_pending.clear();
+				let info = stream.info.clone();
+				stream.broadcast(ProcessEvent::State(info));
+				drop(stream);
+				self.persist_process(&process, ProcessPhase::Running)?;
 			}
-			stream.info.state = ProcessState::Ready as i32;
-			stream.info.ready_pending.clear();
-			let info = stream.info.clone();
-			stream.broadcast(ProcessEvent::State(info));
-			drop(stream);
-			self.persist_process(&process, ProcessPhase::Running)?;
 		}
 		let log_offset = process.log.lock().end_offset();
 		let endpoint = process.stream.lock().info.endpoint.clone();
@@ -1242,6 +1472,11 @@ impl ExecHost {
 				.iter()
 				.map(|probe| probe.encode_to_vec())
 				.collect(),
+			status_wire: stream
+				.info
+				.status
+				.as_ref()
+				.map_or_else(Vec::new, |status| status.encode_to_vec()),
 			process_dir,
 			generation: process.generation,
 			identity: process.identity.clone(),
@@ -1251,6 +1486,7 @@ impl ExecHost {
 			log_start_offset: log.start_offset(),
 			log_end_offset: log.end_offset(),
 			log_rotations: log.rotations(),
+			restart_pending: process.restart_pending.load(Ordering::Acquire),
 			restart_count: supervisor.restart_count,
 			consecutive_failures: supervisor.consecutive_failures,
 			restart_history: supervisor.history.clone(),
@@ -1277,8 +1513,26 @@ impl ExecHost {
 		Ok(())
 	}
 
+	fn clear_restart_pending(&self, process: &Arc<NamedProcess>) {
+		process.restart_pending.store(false, Ordering::Release);
+		let current = self
+			.inner
+			.processes
+			.lock()
+			.get(&process.name)
+			.is_some_and(|current| Arc::ptr_eq(current, process));
+		if current {
+			let phase = phase_for_state(process.stream.lock().info.state);
+			let _ = self.persist_process(process, phase);
+		}
+	}
+
 	fn recover_records(&self, records: Vec<ProcessRecord>) -> Result<(), ExecError> {
 		for record in records {
+			if record.restart_pending {
+				self.recover_pending_restart(record);
+				continue;
+			}
 			if !record.phase.is_active() {
 				continue;
 			}
@@ -1305,7 +1559,11 @@ impl ExecHost {
 			let control = Arc::new(RunControl {
 				cancel_tx,
 				input: Mutex::new(None),
-				spawns: Arc::new(SpawnBook { groups: Mutex::new(vec![record.identity.pid as i32]) }),
+				spawns: Arc::new(SpawnBook {
+					groups:  Mutex::new(vec![record.identity.pid as i32]),
+					pids:    Mutex::new(Vec::new()),
+					session: None,
+				}),
 				finished: AtomicBool::new(false),
 				retained: Mutex::new(None),
 				events: Weak::new(),
@@ -1335,6 +1593,8 @@ impl ExecHost {
 						} else {
 							Vec::new()
 						},
+						spec: Some(spec.clone()),
+						ready: ready.clone(),
 						props: spec.props.clone(),
 						..ProcessInfo::default()
 					},
@@ -1349,6 +1609,7 @@ impl ExecHost {
 				detached: true,
 				persist: true,
 				stopping: AtomicBool::new(false),
+				restart_pending: AtomicBool::new(false),
 				timed_out: AtomicBool::new(false),
 				timeout: spec
 					.timeout_ms
@@ -1370,6 +1631,56 @@ impl ExecHost {
 			}
 		}
 		Ok(())
+	}
+
+	fn recover_pending_restart(&self, record: ProcessRecord) {
+		let Ok(spec) = ProcessSpec::decode(record.spec_wire.as_slice()) else {
+			let _ = self.mark_recovered_terminal(&record, ProcessPhase::Failed);
+			return;
+		};
+		let ready = record
+			.ready_wire
+			.iter()
+			.filter_map(|wire| ReadyProbe::decode(wire.as_slice()).ok())
+			.collect::<Vec<_>>();
+		let timeout = spec
+			.timeout_ms
+			.filter(|timeout| *timeout != 0)
+			.map(Duration::from_millis);
+		let due_ms = record
+			.restart_history
+			.last()
+			.map_or(0, |restart| restart.at_ms.saturating_add(restart.delay_ms));
+		let delay = Duration::from_millis(due_ms.saturating_sub(unix_time_ms()));
+		if !self.inner.starting.lock().insert(record.name.clone()) {
+			let _ = self.mark_recovered_terminal(&record, ProcessPhase::Failed);
+			return;
+		}
+		let reservation =
+			ProcessReservation { host: Arc::downgrade(&self.inner), name: record.name.clone() };
+		let Ok(runtime) = runtime::Handle::try_current() else {
+			let _ = self.mark_recovered_terminal(&record, ProcessPhase::Failed);
+			return;
+		};
+		let host = self.clone();
+		runtime.spawn(async move {
+			let _reservation = reservation;
+			time::sleep(delay).await;
+			let name = record.name.clone();
+			let generation = record.generation.saturating_add(1);
+			let launched = if record.detached {
+				host
+					.launch_detached(name, spec, ready, generation, Some(&record), timeout)
+					.await
+			} else {
+				host
+					.launch_attached(name, spec, ready, generation, Some(&record), timeout)
+					.await
+			};
+			if launched.is_err() {
+				let _ = host.mark_recovered_terminal(&record, ProcessPhase::Failed);
+			}
+		});
 	}
 
 	fn persisted_record(&self, name: &str) -> Option<ProcessRecord> {
@@ -1401,6 +1712,7 @@ impl ExecHost {
 			.find(|stored| stored.name == record.name)
 		{
 			stored.phase = phase;
+			stored.restart_pending = false;
 			stored.recent_order = self.inner.next_order.fetch_add(1, Ordering::Relaxed);
 		}
 		persistence.store.save(&persistence.snapshot)?;
@@ -1444,6 +1756,7 @@ impl ExecHost {
 					generation,
 					state: ProcessState::Running as i32,
 					status: None,
+					spec: Some(ProcessSpec::default()),
 					..ProcessInfo::default()
 				},
 				history:     Vec::new(),
@@ -1457,6 +1770,7 @@ impl ExecHost {
 			detached: false,
 			persist: false,
 			stopping: AtomicBool::new(false),
+			restart_pending: AtomicBool::new(false),
 			timed_out: AtomicBool::new(false),
 			timeout: None,
 			deadline_cancel: CancellationToken::new(),
@@ -1544,6 +1858,28 @@ impl ExecHost {
 				)
 				.await
 		}
+	}
+
+	/// Returns whether a live named process requires this daemon to remain
+	/// available after its last client disconnects.
+	pub(crate) fn has_live_persistent_processes(&self) -> bool {
+		self.inner.processes.lock().values().any(|process| {
+			process.persist
+				&& (!process_state_is_terminal(process.stream.lock().info.state)
+					|| process.restart_pending.load(Ordering::Acquire)
+						&& !process.stopping.load(Ordering::Acquire))
+		}) || self
+			.inner
+			.persistence
+			.lock()
+			.as_ref()
+			.is_some_and(|persistence| {
+				persistence
+					.snapshot
+					.processes
+					.iter()
+					.any(|record| record.persist && record.restart_pending)
+			})
 	}
 
 	/// Lists active processes oldest-to-newest followed by at most ten newest
@@ -1761,14 +2097,20 @@ impl ExecHost {
 		if !self.inner.starting.lock().insert(name.clone()) {
 			return Err(ExecError::ProcessExists(name));
 		}
+		let retained_generation = self
+			.persisted_record(&name)
+			.map_or(0, |record| record.generation);
 		let generation = if let Some(process) = self.inner.processes.lock().get(&name).cloned() {
 			if !process_state_is_terminal(process.stream.lock().info.state) {
 				self.inner.starting.lock().remove(&name);
 				return Err(ExecError::ProcessExists(name));
 			}
-			process.generation.saturating_add(1)
+			process
+				.generation
+				.max(retained_generation)
+				.saturating_add(1)
 		} else {
-			1
+			retained_generation.saturating_add(1)
 		};
 		Ok((ProcessReservation { host: Arc::downgrade(&self.inner), name }, generation))
 	}
@@ -1830,16 +2172,52 @@ impl RunControl {
 }
 
 impl SpawnObserver for SpawnBook {
-	fn on_spawn(&self, _pid: i32, pgid: Option<i32>) {
+	fn on_spawn(&self, pid: i32, pgid: Option<i32>) {
+		self.record_spawn(pid, pgid);
+		if let Some(session) = self.session.as_ref() {
+			session.record_spawn(pid, pgid);
+		}
+	}
+}
+impl ProcessScope for SpawnBook {
+	fn may_signal(&self, pid: i32) -> bool {
+		self.owns_process(pid)
+	}
+
+	fn may_observe(&self, pid: i32) -> bool {
+		self.owns_process(pid)
+	}
+}
+
+impl SpawnBook {
+	fn record_spawn(&self, pid: i32, pgid: Option<i32>) {
+		let mut pids = self.pids.lock();
+		if !pids.contains(&pid) {
+			pids.push(pid);
+		}
+		drop(pids);
 		let Some(pgid) = pgid else { return };
 		let mut groups = self.groups.lock();
 		if !groups.contains(&pgid) {
 			groups.push(pgid);
 		}
 	}
-}
 
-impl SpawnBook {
+	fn owns_process(&self, pid: i32) -> bool {
+		if pid == process::id() as i32 {
+			return false;
+		}
+		self.pids.lock().contains(&pid)
+			|| self.groups.lock().contains(&pid)
+			|| pid
+				.checked_neg()
+				.is_some_and(|pgid| self.groups.lock().contains(&pgid))
+			|| self
+				.session
+				.as_ref()
+				.is_some_and(|session| session.owns_process(pid))
+	}
+
 	fn signal(&self, signal: ProcessSignal) -> Result<(), io::Error> {
 		for pgid in self.groups.lock().iter().copied() {
 			signal_process_group(pgid, signal)?;
@@ -1917,13 +2295,17 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 		Err(flume::TryRecvError::Empty) => {},
 	}
 	let cancel_rx = command.cancel_rx.clone();
+	let sandbox_active = command.sandbox.is_some();
 	let setup = setup_io(
 		command.pty.as_ref(),
 		command.control.clone(),
 		command.exec.clone(),
 		command.events.clone(),
+		command.output.clone(),
+		command.sequence.clone(),
+		sandbox_active,
 	);
-	let Ok((mut params, readers)) = setup else {
+	let Ok((mut params, readers, sequencer)) = setup else {
 		finish_session_command(
 			&command,
 			RunTerminal::Failed,
@@ -1932,11 +2314,60 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 		);
 		return false;
 	};
+	if let Some(sandbox) = command.sandbox.as_ref()
+		&& !command.sandbox_announced.swap(true, Ordering::AcqRel)
+	{
+		command
+			.diags
+			.lock()
+			.push(omp_tool::Diag::info(omp_tool::DiagKind::Sandbox, sandbox.session_note().clone()));
+	}
+	let attempt = command.sandbox.as_ref().map(ExecSandbox::begin_attempt);
+	let environment_scoped =
+		command.environment.is_some() || command.sandbox_environment_update || attempt.is_some();
+	if environment_scoped {
+		shell.env_mut().push_scope(EnvironmentScope::Command);
+		if command
+			.environment
+			.as_ref()
+			.is_some_and(|environment| apply_run_environment_delta(shell, environment).is_err())
+			|| command.sandbox.as_ref().is_some_and(|_| {
+				(if command.environment.is_some() {
+					apply_sandbox_environment(
+						shell,
+						attempt.as_deref().expect("sandbox attempt exists"),
+						EnvironmentScope::Command,
+					)
+				} else {
+					apply_amended_proxy_environment(
+						shell,
+						attempt.as_deref().expect("sandbox attempt exists"),
+						EnvironmentScope::Command,
+					)
+				})
+				.is_err()
+			}) {
+			let _ = shell.env_mut().pop_scope(EnvironmentScope::Command);
+			finish_session_command(
+				&command,
+				RunTerminal::Failed,
+				started_at.elapsed(),
+				shell.working_dir(),
+			);
+			return false;
+		}
+	}
 	let _ = command
 		.events
 		.send(ExecEvent::Started { exec_id: command.exec.clone() });
-	params.process_group_policy = omp_shell_engine::ProcessGroupPolicy::NewProcessGroup;
+	params.process_group_policy = omp_shell::ProcessGroupPolicy::NewProcessGroup;
 	params.set_spawn_observer(command.control.spawns.clone());
+	params.set_process_scope(command.control.spawns.clone());
+	params.set_protect_host_process(true);
+	if let Some(attempt) = attempt.as_ref() {
+		params.set_path_policy(attempt.clone());
+		params.set_spawn_wrapper(attempt.clone());
+	}
 	let source_info = SourceInfo::from("env/v1 exec");
 	let result = {
 		let timeout = async {
@@ -1946,41 +2377,131 @@ async fn run_session_command(shell: &mut Shell, command: SessionCommand) -> bool
 			}
 		};
 		tokio::pin!(timeout);
-		let execution = shell.run_string(command.source.to_string(), &source_info, &params);
+		let execution = crate::devices_host::scope_exec_diags(
+			Arc::clone(&command.diags),
+			shell.run_string(command.source.to_string(), &source_info, &params),
+		);
 		tokio::pin!(execution);
 		tokio::select! {
 			  result = &mut execution => match result {
-					 Ok(result) => RunTerminal::Exited(i32::from(u8::from(result.exit_code))),
-					 Err(_error) => RunTerminal::Failed,
+					 Ok(result) => (
+						 RunTerminal::Exited(i32::from(u8::from(result.exit_code))),
+						 None,
+					 ),
+					 Err(error) => (RunTerminal::Failed, Some(error)),
 			  },
 			  request = cancel_rx.recv_async() => {
 					 let request = request.unwrap_or(CancelRequest { grace: CANCEL_GRACE });
 					 command.control.spawns.terminate(request.grace).await;
-					 RunTerminal::Cancelled
+					 (RunTerminal::Cancelled, None)
 			  },
 			  () = &mut timeout => {
 					 command.control.spawns.terminate(CANCEL_GRACE).await;
-					 RunTerminal::Timeout
+					 (RunTerminal::Timeout, None)
 			  },
 		}
 	};
+	let (result, shell_error) = result;
+	if let Some(error) = shell_error.as_ref()
+		&& sandbox_active
+	{
+		let mut stderr = params.stderr(shell);
+		let _ = shell.display_error(&mut stderr, error);
+	}
 	drop(params);
 	command.control.close_input();
 	for reader in readers {
 		let _ = reader.await;
 	}
+	let broker_denial = attempt.as_ref().and_then(|attempt| attempt.take_denial());
 	let cancelled = result == RunTerminal::Cancelled;
+	let result = if environment_scoped
+		&& shell
+			.env_mut()
+			.pop_scope(EnvironmentScope::Command)
+			.is_err()
+	{
+		RunTerminal::Failed
+	} else {
+		result
+	};
+	let denial = {
+		let sequencer = sequencer.lock();
+		classify_sandbox_denial(
+			sandbox_active,
+			broker_denial,
+			&result,
+			shell_error.as_ref(),
+			sequencer.sandbox_diagnostic.as_deref().unwrap_or_default(),
+		)
+	};
+	if let Some(denial) = denial {
+		if !command.rerun
+			&& let Some(sandbox) = command.sandbox.as_deref()
+			&& let Some(amendment) = approved_amendment(sandbox, &denial.fact)
+			&& let Some(host) = command.host.upgrade()
+		{
+			let scope = amendment.scope_label();
+			let host = ExecHost { inner: host };
+			let approval = host.approve_sandbox_amendment(&command.source, &denial.fact, &scope);
+			tokio::pin!(approval);
+			let approved = tokio::select! {
+				approved = &mut approval => approved,
+				_ = command.cancel_rx.recv_async() => {
+					finish_session_command(
+						&command,
+						RunTerminal::Cancelled,
+						started_at.elapsed(),
+						shell.working_dir(),
+					);
+					return true;
+				},
+			};
+			if approved {
+				let network_amendment = matches!(&amendment, ApprovedSandboxAmendment::Network(_));
+				let amended = match &amendment {
+					ApprovedSandboxAmendment::Path(scope) => sandbox.amended_scope(scope),
+					ApprovedSandboxAmendment::Network(fact) => sandbox.amended_network(fact),
+				};
+				if let Ok(Some(sandbox)) = amended {
+					command.diags.lock().push(omp_tool::Diag::info(
+						omp_tool::DiagKind::Sandbox,
+						sf!("sandbox: rerun with approved scope: {scope}"),
+					));
+					let mut rerun = command.clone();
+					rerun.sandbox = Some(sandbox);
+					rerun.rerun = true;
+					rerun.sandbox_environment_update = network_amendment;
+					return Box::pin(run_session_command(shell, rerun)).await;
+				}
+			}
+		}
+		finish_session_command(
+			&command,
+			RunTerminal::Denied { exit_code: denial.exit_code, fact: denial.fact },
+			started_at.elapsed(),
+			shell.working_dir(),
+		);
+		return cancelled;
+	}
 	finish_session_command(&command, result, started_at.elapsed(), shell.working_dir());
 	cancelled
 }
 
 fn finish_session_command(
 	command: &SessionCommand,
-	result: RunTerminal,
+	mut result: RunTerminal,
 	elapsed: Duration,
 	working_dir: &Path,
 ) {
 	command.control.finished.store(true, Ordering::Release);
+	let (spilled_output, projection) = match command.output.lock().finish_with_projection() {
+		Ok((spilled, projection)) => (spilled.as_ref().map(wire_blob), Some(projection)),
+		Err(_) => {
+			result = RunTerminal::Failed;
+			(None, None)
+		},
+	};
 	let (final_cwd_uri, final_cwd_revision) = command.host.upgrade().map_or_else(
 		|| (String::new(), 0),
 		|host| {
@@ -2015,9 +2536,11 @@ fn finish_session_command(
 			let _ = cache.invalidate_repo(&repo);
 		}
 	}
+	let mut status = result.status_with_projection(elapsed, spilled_output, projection);
+	status.diags = command.diags.lock().iter().map(wire_diag).collect();
 	let event = ExecEvent::Exit(ExitEvent {
 		exec: command.exec.clone(),
-		status: Some(result.status(elapsed)),
+		status: Some(status),
 		final_cwd_uri,
 		final_cwd_revision,
 		props: Default::default(),
@@ -2025,33 +2548,231 @@ fn finish_session_command(
 	let _ = command.events.send(event);
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
+#[derive(Clone, Eq, PartialEq)]
 enum RunTerminal {
 	Exited(i32),
 	Failed,
 	Timeout,
 	Cancelled,
+	Denied { exit_code: Option<i32>, fact: SandboxDenialFact },
+}
+
+fn wire_blob(reference: &omp_journal::blob::BlobRef) -> WireBlob {
+	WireBlob {
+		hash:   Bytes::copy_from_slice(reference.hash.as_bytes()),
+		mime:   String::from("application/octet-stream"),
+		size:   reference.size,
+		inline: Bytes::new(),
+		detail: Default::default(),
+	}
+}
+
+pub(crate) fn wire_diag(diag: &omp_tool::Diag) -> v1::ToolDiag {
+	let severity = match diag.severity {
+		omp_tool::Severity::Info => v1::ToolDiagSeverity::Info,
+		omp_tool::Severity::Warn => v1::ToolDiagSeverity::Warn,
+		omp_tool::Severity::Error => v1::ToolDiagSeverity::Error,
+	};
+	let omitted = diag.omitted.map(|omitted| v1::ToolDiagOmitted {
+		count: omitted.count,
+		unit:  match omitted.unit {
+			omp_tool::Unit::Lines => v1::ToolDiagUnit::Lines,
+			omp_tool::Unit::Rows => v1::ToolDiagUnit::Rows,
+			omp_tool::Unit::Entries => v1::ToolDiagUnit::Entries,
+			omp_tool::Unit::Files => v1::ToolDiagUnit::Files,
+			omp_tool::Unit::Bytes => v1::ToolDiagUnit::Bytes,
+			omp_tool::Unit::Chars => v1::ToolDiagUnit::Chars,
+			omp_tool::Unit::Items => v1::ToolDiagUnit::Items,
+		} as i32,
+	});
+	v1::ToolDiag {
+		severity: severity as i32,
+		kind: diag.kind.to_string(),
+		text: diag.text.to_string(),
+		continuation: diag.continuation.as_ref().map(ToString::to_string),
+		artifact: diag.artifact.as_ref().map(ToString::to_string),
+		omitted,
+	}
 }
 
 impl RunTerminal {
-	fn status(self, elapsed: Duration) -> ExecStatusMsg {
-		let (outcome, exit_code, aborted) = match self {
-			Self::Exited(code) if code == 0 => (ExecOutcome::Exited, Some(code), false),
-			Self::Exited(code) => (ExecOutcome::Failed, Some(code), false),
-			Self::Failed => (ExecOutcome::Failed, None, false),
-			Self::Timeout => (ExecOutcome::Timeout, None, true),
-			Self::Cancelled => (ExecOutcome::Cancelled, None, true),
+	fn status(self, elapsed: Duration, spilled_output: Option<WireBlob>) -> ExecStatusMsg {
+		self.status_with_projection(elapsed, spilled_output, None)
+	}
+
+	fn status_with_projection(
+		self,
+		elapsed: Duration,
+		spilled_output: Option<WireBlob>,
+		projection: Option<v1::OutputProjection>,
+	) -> ExecStatusMsg {
+		let props = match &self {
+			Self::Denied { fact, .. } => Some(WireValueMap {
+				fields: BTreeMap::from([(SANDBOX_DENIED_PATH_PROP.to_owned(), WireValue {
+					kind: Some(wire_value::Kind::String(sandbox_fact_label(fact).to_string())),
+				})]),
+			}),
+			_ => None,
+		};
+		let (outcome, exit_code, signal, aborted) = match self {
+			Self::Exited(code) if code == 0 => (ExecOutcome::Exited, Some(code), "", false),
+			Self::Exited(code) => (ExecOutcome::Failed, Some(code), "", false),
+			Self::Failed => (ExecOutcome::Failed, None, "", false),
+			Self::Timeout => (ExecOutcome::Timeout, None, "SIGKILL", true),
+			Self::Cancelled => (ExecOutcome::Cancelled, None, "", true),
+			Self::Denied { exit_code, .. } => (ExecOutcome::Denied, exit_code, "", false),
 		};
 		ExecStatusMsg {
 			outcome: outcome as i32,
 			exit_code,
-			signal: String::new(),
+			signal: signal.to_owned(),
 			wall_clock_ms: elapsed.as_millis().try_into().unwrap_or(u64::MAX),
-			spilled_output: None,
+			spilled_output,
 			aborted,
-			props: Default::default(),
+			projection,
+			diags: Vec::new(),
+			props,
 		}
 	}
+}
+
+struct SandboxDenial {
+	exit_code: Option<i32>,
+	fact:      SandboxDenialFact,
+}
+fn sandbox_fact_label(fact: &SandboxDenialFact) -> Str {
+	match fact {
+		SandboxDenialFact::ReadPath(path) => sf!("read {}", path.display()),
+		SandboxDenialFact::WritePath(path) => sf!("write {}", path.display()),
+		SandboxDenialFact::Network { host, port } => sf!("network {host}:{port}"),
+		SandboxDenialFact::Unknown => sf!("unknown sandbox denial"),
+	}
+}
+
+enum ApprovedSandboxAmendment {
+	Path(ApprovedPathScope),
+	Network(SandboxDenialFact),
+}
+
+impl ApprovedSandboxAmendment {
+	fn scope_label(&self) -> Str {
+		match self {
+			Self::Path(scope) => scope.label(),
+			Self::Network(fact) => sandbox_fact_label(fact),
+		}
+	}
+}
+
+fn approved_amendment(
+	sandbox: &ExecSandbox,
+	fact: &SandboxDenialFact,
+) -> Option<ApprovedSandboxAmendment> {
+	match fact {
+		SandboxDenialFact::ReadPath(_) | SandboxDenialFact::WritePath(_) => sandbox
+			.freeze_amendment(fact)
+			.map(ApprovedSandboxAmendment::Path),
+		SandboxDenialFact::Network { host, port } => {
+			Some(ApprovedSandboxAmendment::Network(SandboxDenialFact::Network {
+				host: host.clone(),
+				port: *port,
+			}))
+		},
+		SandboxDenialFact::Unknown => None,
+	}
+}
+
+fn classify_sandbox_denial(
+	sandbox_active: bool,
+	broker_denial: Option<SandboxDenialFact>,
+	result: &RunTerminal,
+	error: Option<&omp_shell::Error>,
+	stderr: &[u8],
+) -> Option<SandboxDenial> {
+	if !sandbox_active {
+		return None;
+	}
+	if let Some(omp_shell::ErrorKind::PathDenied(denied)) = error.map(omp_shell::Error::kind) {
+		return Some(SandboxDenial {
+			exit_code: None,
+			fact:      match denied.access {
+				PathAccess::Read => SandboxDenialFact::ReadPath(denied.path.clone()),
+				_ => SandboxDenialFact::WritePath(denied.path.clone()),
+			},
+		});
+	}
+	let command_failed = matches!(result, RunTerminal::Failed)
+		|| matches!(result, RunTerminal::Exited(code) if *code != 0);
+	if command_failed && let Some(fact) = broker_denial {
+		return Some(SandboxDenial {
+			exit_code: match result {
+				RunTerminal::Exited(code) => Some(*code),
+				_ => None,
+			},
+			fact,
+		});
+	}
+	let RunTerminal::Exited(exit_code) = result else {
+		return None;
+	};
+	(*exit_code != 0 && sandbox_denial_marker(stderr).is_some()).then_some(SandboxDenial {
+		exit_code: Some(*exit_code),
+		fact:      SandboxDenialFact::Unknown,
+	})
+}
+
+fn shell_path_denied_path(stderr: &[u8]) -> Option<Str> {
+	let marker = stderr
+		.windows(PATH_DENIED_DIAGNOSTIC.len())
+		.position(|window| window == PATH_DENIED_DIAGNOSTIC)?;
+	let path_start = marker + PATH_DENIED_DIAGNOSTIC.len();
+	let path_end = stderr[path_start..]
+		.iter()
+		.position(|byte| *byte == b'\n' || *byte == b'\r')
+		.map_or(stderr.len(), |position| path_start + position);
+	let path = String::from_utf8_lossy(&stderr[path_start..path_end]);
+	let path = path.trim();
+	let path = path.rsplit_once(" to ").map_or(path, |(_, path)| path);
+	(!path.is_empty()).then(|| Str::from(path))
+}
+fn sandbox_denial_marker(stderr: &[u8]) -> Option<usize> {
+	const PHRASES: &[&[u8]] = &[
+		b"sandbox denied",
+		b"x-omp-policy-blocked:",
+		b"operation not permitted",
+		b"permission denied",
+		b"read-only file system",
+	];
+	const ERRNOS: &[&[u8]] = &[b"eperm", b"eacces", b"erofs"];
+	for phrase in PHRASES {
+		if let Some(position) = stderr
+			.windows(phrase.len())
+			.position(|window| window.eq_ignore_ascii_case(phrase))
+		{
+			return Some(position);
+		}
+	}
+	for errno in ERRNOS {
+		if let Some(position) =
+			stderr
+				.windows(errno.len())
+				.enumerate()
+				.find_map(|(position, window)| {
+					if !window.eq_ignore_ascii_case(errno) {
+						return None;
+					}
+					let before = position
+						.checked_sub(1)
+						.and_then(|index| stderr.get(index))
+						.is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
+					let after = stderr
+						.get(position + errno.len())
+						.is_none_or(|byte| !byte.is_ascii_alphanumeric() && *byte != b'_');
+					(before && after).then_some(position)
+				}) {
+			return Some(position);
+		}
+	}
+	None
 }
 
 fn write_input(control: &RunControl, data: Option<&[u8]>) -> Result<(), ExecError> {
@@ -2075,9 +2796,19 @@ fn setup_io(
 	control: Arc<RunControl>,
 	exec: Bytes,
 	events: flume::Sender<ExecEvent>,
-) -> Result<(ExecutionParameters, Vec<task::JoinHandle<()>>), ExecError> {
+	output: Arc<Mutex<OutputCapture>>,
+	sequence: Arc<AtomicU64>,
+	capture_sandbox_diagnostic: bool,
+) -> Result<(ExecutionParameters, Vec<task::JoinHandle<()>>, Arc<Mutex<OutputSequencer>>), ExecError>
+{
 	let mut params = ExecutionParameters::default();
-	let sequencer = Arc::new(Mutex::new(OutputSequencer { next: 1, events }));
+	let sequencer = Arc::new(Mutex::new(OutputSequencer {
+		next: sequence.load(Ordering::Acquire),
+		sequence,
+		events,
+		output,
+		sandbox_diagnostic: capture_sandbox_diagnostic.then(Vec::new),
+	}));
 	if let Some(pty) = pty {
 		let winsize = nix::pty::Winsize {
 			ws_row:    clamp_u16(pty.rows),
@@ -2098,8 +2829,9 @@ fn setup_io(
 		params.set_fd(OpenFiles::STDOUT_FD, OpenFile::from(slave.try_clone()?));
 		params.set_fd(OpenFiles::STDERR_FD, OpenFile::from(slave));
 		*control.input.lock() = Some(InputSink::Pty(master_write));
-		let reader = spawn_reader(fs::File::from(master_read), OutputChannel::Pty, exec, sequencer);
-		Ok((params, vec![reader]))
+		let reader =
+			spawn_reader(fs::File::from(master_read), OutputChannel::Pty, exec, sequencer.clone());
+		Ok((params, vec![reader], sequencer))
 	} else {
 		let (stdin_read, stdin_write) = io::pipe()?;
 		let (stdout_read, stdout_write) = io::pipe()?;
@@ -2123,16 +2855,131 @@ fn setup_io(
 		params.set_fd(OpenFiles::STDOUT_FD, stdout_write.into());
 		params.set_fd(OpenFiles::STDERR_FD, stderr_write.into());
 		*control.input.lock() = Some(InputSink::Pipe(stdin_write));
-		Ok((params, vec![
-			spawn_reader(stdout_read, OutputChannel::Stdout, exec.clone(), sequencer.clone()),
-			spawn_reader(stderr_read, OutputChannel::Stderr, exec, sequencer),
-		]))
+		Ok((
+			params,
+			vec![
+				spawn_reader(stdout_read, OutputChannel::Stdout, exec.clone(), sequencer.clone()),
+				spawn_reader(stderr_read, OutputChannel::Stderr, exec, sequencer.clone()),
+			],
+			sequencer,
+		))
+	}
+}
+
+struct OutputCapture {
+	stage:             Option<BlobStage>,
+	request:           omp_tool::OutputRequest,
+	inline_limit:      usize,
+	frame_limit:       usize,
+	source_bytes:      u64,
+	projected_bytes:   usize,
+	projected_frames:  usize,
+	projection_closed: bool,
+	spilled:           bool,
+	error:             Option<io::Error>,
+}
+
+impl OutputCapture {
+	fn new_with_request(
+		store: Option<&BlobStore>,
+		request: omp_tool::OutputRequest,
+	) -> Result<Self, ExecError> {
+		let (inline_limit, frame_limit) = match request {
+			omp_tool::OutputRequest::Bounded => (LIVE_OUTPUT_BYTES, LIVE_OUTPUT_FRAMES),
+			omp_tool::OutputRequest::Complete => (COMPLETE_OUTPUT_BYTES, COMPLETE_OUTPUT_FRAMES),
+		};
+		Ok(Self {
+			stage: store.map(BlobStore::begin_put).transpose()?,
+			request,
+			inline_limit,
+			frame_limit,
+			source_bytes: 0,
+			projected_bytes: 0,
+			projected_frames: 0,
+			projection_closed: false,
+			spilled: false,
+			error: None,
+		})
+	}
+
+	fn project(&mut self, data: &[u8]) -> Option<Bytes> {
+		self.source_bytes = self
+			.source_bytes
+			.saturating_add(u64::try_from(data.len()).unwrap_or(u64::MAX));
+		if let Some(stage) = self.stage.as_mut()
+			&& let Err(error) = stage.write_all(data)
+		{
+			self.error = Some(error);
+		}
+		if self.projection_closed {
+			self.spilled = true;
+			return None;
+		}
+		let remaining = self.inline_limit.saturating_sub(self.projected_bytes);
+		let projected = if self.projected_frames < self.frame_limit {
+			remaining.min(data.len())
+		} else {
+			0
+		};
+		self.projected_bytes += projected;
+		self.projected_frames += usize::from(projected != 0);
+		self.spilled |= projected < data.len();
+		(projected != 0).then(|| Bytes::copy_from_slice(&data[..projected]))
+	}
+
+	fn close_projection(&mut self) {
+		self.projection_closed = true;
+		self.spilled = true;
+	}
+
+	fn finish_with_projection(
+		&mut self,
+	) -> Result<(Option<omp_journal::blob::BlobRef>, v1::OutputProjection), omp_journal::blob::Error>
+	{
+		if let Some(error) = self.error.take() {
+			self.stage.take();
+			return Err(error.into());
+		}
+		let artifact = self.stage.take().map(BlobStage::finish).transpose()?;
+		let projection = v1::OutputProjection {
+			request:      match self.request {
+				omp_tool::OutputRequest::Bounded => v1::OutputRequest::Bounded as i32,
+				omp_tool::OutputRequest::Complete => v1::OutputRequest::Complete as i32,
+			},
+			source_bytes: self.source_bytes,
+			inline_bytes: u64::try_from(self.projected_bytes).unwrap_or(u64::MAX),
+			omitted:      self.spilled,
+			artifact:     artifact.as_ref().map(wire_blob),
+		};
+		Ok((self.spilled.then_some(artifact).flatten(), projection))
 	}
 }
 
 struct OutputSequencer {
-	next:   u64,
-	events: flume::Sender<ExecEvent>,
+	next:               u64,
+	sequence:           Arc<AtomicU64>,
+	events:             flume::Sender<ExecEvent>,
+	output:             Arc<Mutex<OutputCapture>>,
+	sandbox_diagnostic: Option<Vec<u8>>,
+}
+impl OutputSequencer {
+	fn capture_sandbox_diagnostic(&mut self, data: &[u8]) {
+		let Some(diagnostic) = self.sandbox_diagnostic.as_mut() else {
+			return;
+		};
+		if shell_path_denied_path(diagnostic).is_some() || sandbox_denial_marker(diagnostic).is_some()
+		{
+			return;
+		}
+		diagnostic.extend_from_slice(data);
+		if shell_path_denied_path(diagnostic).is_none()
+			&& sandbox_denial_marker(diagnostic).is_none()
+			&& diagnostic.len() > SANDBOX_DIAGNOSTIC_BYTES
+		{
+			let discard = diagnostic.len() - SANDBOX_DIAGNOSTIC_BYTES;
+			diagnostic.drain(..discard);
+		}
+	}
 }
 
 fn spawn_reader<R: Read + Send + 'static>(
@@ -2149,16 +2996,25 @@ fn spawn_reader<R: Read + Send + 'static>(
 				Ok(read) => read,
 			};
 			let mut sequencer = sequencer.lock();
-			let frame = OutputFrame {
-				exec:     exec.clone(),
-				channel:  channel as i32,
-				data:     Bytes::copy_from_slice(&buffer[..read]),
-				sequence: sequencer.next,
-				props:    Default::default(),
-			};
+			if matches!(channel, OutputChannel::Stderr | OutputChannel::Pty) {
+				sequencer.capture_sandbox_diagnostic(&buffer[..read]);
+			}
+			let projected = sequencer.output.lock().project(&buffer[..read]);
+			let sequence = sequencer.next;
 			sequencer.next += 1;
-			let event = ExecEvent::Output(frame);
-			let _ = sequencer.events.send(event);
+			sequencer.sequence.store(sequencer.next, Ordering::Release);
+			if let Some(data) = projected {
+				let event = ExecEvent::Output(OutputFrame {
+					exec: exec.clone(),
+					channel: channel as i32,
+					data,
+					sequence,
+					props: Default::default(),
+				});
+				if sequencer.events.try_send(event).is_err() {
+					sequencer.output.lock().close_projection();
+				}
+			}
 		}
 	})
 }
@@ -2302,13 +3158,13 @@ fn settle_named_process(
 		stream.info.restart_count = supervisor.restart_count;
 		stream.info.consecutive_failures = supervisor.consecutive_failures;
 		stream.info.status = Some(if timed_out {
-			RunTerminal::Timeout.status(uptime)
+			RunTerminal::Timeout.status(uptime, None)
 		} else if cancelled {
-			RunTerminal::Cancelled.status(uptime)
+			RunTerminal::Cancelled.status(uptime, None)
 		} else {
 			exit_code
 				.map_or(RunTerminal::Failed, RunTerminal::Exited)
-				.status(uptime)
+				.status(uptime, None)
 		});
 		stream.info.state = if timed_out {
 			ProcessState::Failed as i32
@@ -2333,6 +3189,9 @@ fn settle_named_process(
 	} else {
 		ProcessPhase::Exited
 	};
+	process
+		.restart_pending
+		.store(restart_delay.is_some(), Ordering::Release);
 	let _ = host.persist_process(&process, phase);
 	let Some(delay) = restart_delay else {
 		return;
@@ -2347,23 +3206,29 @@ fn settle_named_process(
 	tokio::spawn(async move {
 		time::sleep(delay).await;
 		if process.stopping.load(Ordering::Acquire) {
+			host.clear_restart_pending(&process);
 			return;
 		}
 		let Ok((_reservation, current)) = host.reserve_process_generation(&name, process.generation)
 		else {
+			host.clear_restart_pending(&process);
 			return;
 		};
 		if !Arc::ptr_eq(&current, &process) {
+			host.clear_restart_pending(&process);
 			return;
 		}
-		if detached {
-			let _ = host
+		let launched = if detached {
+			host
 				.launch_detached(name, spec, ready, generation, record.as_ref(), timeout)
-				.await;
+				.await
 		} else {
-			let _ = host
+			host
 				.launch_attached(name, spec, ready, generation, record.as_ref(), timeout)
-				.await;
+				.await
+		};
+		if launched.is_err() {
+			host.clear_restart_pending(&process);
 		}
 	});
 }
@@ -2437,9 +3302,14 @@ fn ready_condition_names(ready: &[ReadyProbe]) -> Vec<String> {
 }
 
 fn process_info_from_record(record: &ProcessRecord) -> ProcessInfo {
-	let props = ProcessSpec::decode(record.spec_wire.as_slice())
-		.ok()
-		.and_then(|spec| spec.props);
+	let spec = ProcessSpec::decode(record.spec_wire.as_slice()).ok();
+	let props = spec.as_ref().and_then(|spec| spec.props.clone());
+	let status = ExecStatusMsg::decode(record.status_wire.as_slice()).ok();
+	let ready = record
+		.ready_wire
+		.iter()
+		.filter_map(|wire| ReadyProbe::decode(wire.as_slice()).ok())
+		.collect();
 	let state = match record.phase {
 		ProcessPhase::Starting | ProcessPhase::WaitingReady => ProcessState::Starting,
 		ProcessPhase::Running => ProcessState::Running,
@@ -2451,11 +3321,14 @@ fn process_info_from_record(record: &ProcessRecord) -> ProcessInfo {
 		name: record.name.to_string(),
 		generation: record.generation,
 		state: state as i32,
+		status,
 		identity: Some(record.identity.to_wire()),
 		log_start_offset: record.log_start_offset,
 		log_end_offset: record.log_end_offset,
 		restart_count: record.restart_count,
 		consecutive_failures: record.consecutive_failures,
+		spec,
+		ready,
 		props,
 		..ProcessInfo::default()
 	}
@@ -2471,18 +3344,20 @@ fn phase_for_state(state: i32) -> ProcessPhase {
 	}
 }
 
-#[cfg(unix)]
-fn detached_command(source: &str) -> Command {
-	let mut command = Command::new("/bin/sh");
-	command.arg("-lc").arg(source);
-	command
-}
-
-#[cfg(windows)]
-fn detached_command(source: &str) -> Command {
-	let mut command = Command::new("cmd.exe");
-	command.arg("/d").arg("/s").arg("/c").arg(source);
-	command
+/// Detached scripts re-enter this executable as a hidden in-process shell
+/// child (ADR 0028): never `/bin/sh`, never `cmd.exe`.
+fn detached_command(source: &str, sandbox: Option<&ExecSandbox>) -> Result<Command, ExecError> {
+	let executable = env::current_exe()?;
+	let args = crate::shell_child::child_args(source);
+	let args = [args[0].as_os_str(), args[1].as_os_str()];
+	let mut command = sandbox.map_or_else(
+		|| Command::new(&executable),
+		|sandbox| sandbox.command(executable.as_os_str(), &args),
+	);
+	if sandbox.is_none() {
+		command.args(args);
+	}
+	Ok(command)
 }
 
 #[cfg(unix)]
@@ -2794,10 +3669,162 @@ impl ProcessStreamState {
 	}
 }
 
+pub(crate) fn set_run_environment(request: &mut ExecRequest, delta: EnvironmentDelta) {
+	if delta.set.is_empty() && delta.unset.is_empty() {
+		return;
+	}
+	let mut fields = delta
+		.set
+		.into_iter()
+		.map(|(name, value)| (name, WireValue { kind: Some(wire_value::Kind::String(value)) }))
+		.collect::<BTreeMap<_, _>>();
+	fields.extend(
+		delta
+			.unset
+			.into_iter()
+			.map(|name| (name, WireValue { kind: Some(wire_value::Kind::Null(true)) })),
+	);
+	request
+		.props
+		.get_or_insert_default()
+		.fields
+		.insert(String::from(RUN_ENVIRONMENT_PROP), WireValue {
+			kind: Some(wire_value::Kind::Map(WireValueMap { fields })),
+		});
+}
+
+fn take_run_environment(request: &mut ExecRequest) -> Result<Option<EnvironmentDelta>, ExecError> {
+	let Some(value) = request
+		.props
+		.as_mut()
+		.and_then(|props| props.fields.remove(RUN_ENVIRONMENT_PROP))
+	else {
+		return Ok(None);
+	};
+	let Some(wire_value::Kind::Map(values)) = value.kind else {
+		return Err(ExecError::InvalidRunEnvironment);
+	};
+	let mut set = BTreeMap::new();
+	let mut unset = Vec::new();
+	for (name, value) in values.fields {
+		match value.kind {
+			Some(wire_value::Kind::String(value)) => {
+				set.insert(name, value);
+			},
+			Some(wire_value::Kind::Null(_)) => unset.push(name),
+			_ => return Err(ExecError::InvalidRunEnvironment),
+		}
+	}
+	Ok(Some(EnvironmentDelta { set, unset, props: None }))
+}
+
+fn apply_sandbox_environment(
+	shell: &mut Shell,
+	sandbox: &impl SpawnWrapper,
+	scope: EnvironmentScope,
+) -> Result<(), omp_shell::Error> {
+	let inherited = shell
+		.env()
+		.iter_exported()
+		.map(|(name, variable)| {
+			(OsString::from(name), OsString::from(variable.value().to_cow_str(shell).as_ref()))
+		})
+		.collect::<Vec<_>>();
+	let mut resolved = inherited.clone();
+	sandbox.resolve_env(&mut resolved);
+	let mut effective = resolved.into_iter().collect::<HashMap<_, _>>();
+	for (name, value) in inherited {
+		let replacement = effective.remove(&name);
+		let Some(name) = name.to_str() else { continue };
+		match replacement {
+			Some(replacement) if replacement == value => {},
+			Some(replacement) => {
+				let Some(value) = replacement.to_str() else {
+					continue;
+				};
+				let mut variable = ShellVariable::new(value);
+				variable.export();
+				shell.env_mut().add(name, variable, scope)?;
+			},
+			None => {
+				let mut unset = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
+				unset.export();
+				shell.env_mut().add(name, unset, scope)?;
+			},
+		}
+	}
+	for (name, value) in effective {
+		let Some(name) = name.to_str() else { continue };
+		let Some(value) = value.to_str() else {
+			continue;
+		};
+		let mut variable = ShellVariable::new(value);
+		variable.export();
+		shell.env_mut().add(name, variable, scope)?;
+	}
+	Ok(())
+}
+
+fn apply_amended_proxy_environment(
+	shell: &mut Shell,
+	sandbox: &impl SpawnWrapper,
+	scope: EnvironmentScope,
+) -> Result<(), omp_shell::Error> {
+	let inherited = shell
+		.env()
+		.iter_exported()
+		.map(|(name, variable)| {
+			(OsString::from(name), OsString::from(variable.value().to_cow_str(shell).as_ref()))
+		})
+		.collect::<Vec<_>>();
+	let mut resolved = inherited.clone();
+	sandbox.resolve_env(&mut resolved);
+	for (name, value) in resolved {
+		let Some(name_text) = name.to_str() else {
+			continue;
+		};
+		if !SANDBOX_PROXY_ENV.contains(&name_text)
+			|| inherited
+				.iter()
+				.any(|(current_name, current_value)| current_name == &name && current_value == &value)
+		{
+			continue;
+		}
+		let Some(value) = value.to_str() else {
+			continue;
+		};
+		let mut variable = ShellVariable::new(value);
+		variable.export();
+		shell.env_mut().add(name_text, variable, scope)?;
+	}
+	Ok(())
+}
+
+fn apply_run_environment_delta(
+	shell: &mut Shell,
+	delta: &EnvironmentDelta,
+) -> Result<(), omp_shell::Error> {
+	for name in &delta.unset {
+		let mut variable = ShellVariable::new(ShellValue::Unset(ShellValueUnsetType::Untyped));
+		variable.export();
+		shell
+			.env_mut()
+			.add(name.clone(), variable, EnvironmentScope::Command)?;
+	}
+	for (name, value) in &delta.set {
+		let mut variable = ShellVariable::new(value.clone());
+		variable.export();
+		shell
+			.env_mut()
+			.add(name.clone(), variable, EnvironmentScope::Command)?;
+	}
+	Ok(())
+}
+
 fn apply_env_delta(
 	shell: &mut Shell,
 	delta: Option<&EnvironmentDelta>,
-) -> Result<(), omp_shell_engine::Error> {
+) -> Result<(), omp_shell::Error> {
 	let Some(delta) = delta else { return Ok(()) };
 	for name in &delta.unset {
 		shell.env_mut().unset(name)?;
@@ -2887,42 +3914,6 @@ fn github_repo_from_remote(remote: &str) -> Option<Str> {
 	Some(sf!("{owner}/{repo}"))
 }
 
-fn simple_cd(command: &str) -> bool {
-	let command = command.trim();
-	command.strip_prefix("cd").is_some_and(|rest| {
-		rest.starts_with(char::is_whitespace)
-			&& !rest
-				.chars()
-				.any(|character| matches!(character, '\n' | ';' | '&' | '|' | '<' | '>'))
-	})
-}
-
-fn user_shell_command(shell: &UserShell, command: &str) -> Str {
-	let mut rendered = String::new();
-	push_shell_word(&mut rendered, &shell.executable);
-	for argument in shell.args.iter() {
-		rendered.push(' ');
-		push_shell_word(&mut rendered, argument);
-	}
-	if shell.login {
-		rendered.push_str(" -l");
-	}
-	rendered.push_str(" -c ");
-	push_shell_word(&mut rendered, command);
-	Str::new(rendered)
-}
-
-fn push_shell_word(output: &mut String, word: &str) {
-	output.push('\'');
-	for part in word.split('\'') {
-		if !output.ends_with('\'') {
-			output.push_str("'\\''");
-		}
-		output.push_str(part);
-	}
-	output.push('\'');
-}
-
 fn cwd_from_uri(uri: &str) -> Result<Option<PathBuf>, ExecError> {
 	if uri.is_empty() {
 		return Ok(None);
@@ -2974,7 +3965,7 @@ fn clamp_u16(value: u32) -> u16 {
 	value.min(u32::from(u16::MAX)) as u16
 }
 
-fn shell_error(error: omp_shell_engine::Error) -> ExecError {
+fn shell_error(error: omp_shell::Error) -> ExecError {
 	ExecError::Shell(Str::from(error.to_string()))
 }
 
@@ -2985,6 +3976,524 @@ fn errno_io(error: Errno) -> ExecError {
 #[cfg(test)]
 mod tests {
 	use super::*;
+	#[test]
+	fn spawn_book_scopes_process_authority_to_observed_children() {
+		let book = SpawnBook {
+			groups:  Mutex::new(Vec::new()),
+			pids:    Mutex::new(Vec::new()),
+			session: None,
+		};
+		book.on_spawn(41_001, Some(41_000));
+		assert!(book.may_signal(41_001));
+		assert!(book.may_observe(41_000));
+		assert!(book.may_signal(-41_000));
+		assert!(!book.may_observe(41_002));
+		assert!(!book.may_signal(process::id() as i32));
+		let session = Arc::new(SpawnBook {
+			groups:  Mutex::new(Vec::new()),
+			pids:    Mutex::new(Vec::new()),
+			session: None,
+		});
+		session.on_spawn(42_001, Some(42_000));
+		let next_run = SpawnBook {
+			groups:  Mutex::new(Vec::new()),
+			pids:    Mutex::new(Vec::new()),
+			session: Some(session),
+		};
+		assert!(next_run.may_observe(42_001));
+	}
+
+	#[test]
+	fn sandbox_denial_classification_is_typed_and_conservative() {
+		let denied_path = PathBuf::from("/private/blocked");
+		let write_error: omp_shell::Error = omp_shell::PathDenied {
+			path:   denied_path.clone(),
+			access: omp_shell::PathAccess::Write,
+		}
+		.into();
+		let denial =
+			classify_sandbox_denial(true, None, &RunTerminal::Failed, Some(&write_error), b"")
+				.expect("typed write denial");
+		assert_eq!(denial.fact, SandboxDenialFact::WritePath(denied_path));
+		assert_eq!(denial.exit_code, None);
+
+		let denial = classify_sandbox_denial(
+			true,
+			None,
+			&RunTerminal::Exited(2),
+			None,
+			b"env/v1 exec: sandbox denied write to /private/handled\n",
+		)
+		.expect("shell-handled typed write denial");
+		assert_eq!(denial.fact, SandboxDenialFact::Unknown);
+		assert_eq!(denial.exit_code, Some(2));
+
+		let denial = classify_sandbox_denial(
+			true,
+			None,
+			&RunTerminal::Exited(1),
+			None,
+			b"touch: /private/blocked: Operation not permitted\n",
+		)
+		.expect("EPERM-shaped stderr");
+		assert_eq!(denial.fact, SandboxDenialFact::Unknown);
+
+		let denial = classify_sandbox_denial(
+			true,
+			None,
+			&RunTerminal::Exited(1),
+			None,
+			b"X-Omp-Policy-Blocked: api.example.test:8443\r\n",
+		)
+		.expect("scoped proxy denial");
+		assert_eq!(denial.fact, SandboxDenialFact::Unknown);
+
+		let denial = classify_sandbox_denial(
+			true,
+			Some(SandboxDenialFact::Network { host: sf!("api.example.test"), port: 8443 }),
+			&RunTerminal::Exited(1),
+			None,
+			b"",
+		)
+		.expect("attempt-scoped broker denial");
+		assert_eq!(denial.fact, SandboxDenialFact::Network {
+			host: sf!("api.example.test"),
+			port: 8443,
+		});
+
+		assert!(
+			classify_sandbox_denial(
+				false,
+				None,
+				&RunTerminal::Exited(1),
+				None,
+				b"touch: /private/blocked: Operation not permitted",
+			)
+			.is_none()
+		);
+		assert!(
+			classify_sandbox_denial(true, None, &RunTerminal::Exited(0), None, b"EPERM",).is_none()
+		);
+		assert!(
+			classify_sandbox_denial(true, None, &RunTerminal::Exited(1), None, b"permission denied",)
+				.is_some()
+		);
+		for diagnostic in [
+			b"EACCES".as_slice(),
+			b"Permission denied".as_slice(),
+			b"EROFS".as_slice(),
+			b"Read-only file system".as_slice(),
+		] {
+			assert!(
+				classify_sandbox_denial(true, None, &RunTerminal::Exited(1), None, diagnostic)
+					.is_some(),
+				"missing denial classification for {diagnostic:?}"
+			);
+		}
+		assert!(
+			classify_sandbox_denial(true, None, &RunTerminal::Exited(1), None, b"NOT_EPERMISSION",)
+				.is_none()
+		);
+	}
+
+	#[tokio::test]
+	async fn jit_approval_names_only_the_detected_capability_and_exact_command() {
+		let host = ExecHost::new();
+		let (route, inbox) = ApprovalRoute::new(Arc::new(omp_agent::ApprovalBook::new()), None);
+		host.bind_sandbox_approval_route(Some(route));
+		let command = "printf ready; touch /private/blocked";
+		let fact = SandboxDenialFact::WritePath(PathBuf::from("/private/blocked"));
+		let approval = host.approve_sandbox_amendment(command, &fact, "/private");
+		tokio::pin!(approval);
+		let request = tokio::select! {
+			request = inbox.recv() => request.expect("scoped approval request"),
+			approved = &mut approval => panic!("approval settled before a decision: {approved}"),
+		};
+		let reason = request.ticket.reasons.first().expect("approval reason");
+		assert_eq!(reason.kind, "sandbox_amendment");
+		assert_eq!(reason.subject, "/private");
+		assert_eq!(reason.pattern.as_deref(), Some(command));
+		assert_eq!(reason.evidence, [sf!("write /private/blocked"), sf!("/private")],);
+		request
+			.respond(omp_agent::ApprovalDecision {
+				approved:   true,
+				scope:      ApprovalScope::Once,
+				source:     omp_agent::ApprovalSource::User,
+				decided_by: Some(sf!("test approver")),
+				reason:     None,
+				audited:    false,
+			})
+			.expect("approval response");
+		assert!(approval.await);
+
+		let command = "curl https://api.example.test/data";
+		let fact = SandboxDenialFact::Network { host: sf!("api.example.test"), port: 443 };
+		let approval = host.approve_sandbox_amendment(command, &fact, "network api.example.test:443");
+		tokio::pin!(approval);
+		let request = tokio::select! {
+			request = inbox.recv() => request.expect("network approval request"),
+			approved = &mut approval => panic!("network approval settled early: {approved}"),
+		};
+		let reason = request
+			.ticket
+			.reasons
+			.first()
+			.expect("network approval reason");
+		assert_eq!(reason.subject, "network api.example.test:443");
+		assert_eq!(reason.pattern.as_deref(), Some(command));
+		assert_eq!(reason.evidence, [
+			sf!("network api.example.test:443"),
+			sf!("network api.example.test:443"),
+		],);
+		request
+			.respond(omp_agent::ApprovalDecision {
+				approved:   true,
+				scope:      ApprovalScope::Once,
+				source:     omp_agent::ApprovalSource::User,
+				decided_by: Some(sf!("test approver")),
+				reason:     None,
+				audited:    false,
+			})
+			.expect("network approval response");
+		assert!(approval.await);
+	}
+
+	#[test]
+	fn terminal_receipts_distinguish_exit_failure_timeout_and_cancellation() {
+		let success = RunTerminal::Exited(0).status(Duration::from_millis(1), None);
+		assert_eq!(success.outcome, ExecOutcome::Exited as i32);
+		assert_eq!(success.exit_code, Some(0));
+		assert!(success.signal.is_empty());
+		assert!(!success.aborted);
+
+		let failure = RunTerminal::Exited(17).status(Duration::from_millis(2), None);
+		assert_eq!(failure.outcome, ExecOutcome::Failed as i32);
+		assert_eq!(failure.exit_code, Some(17));
+		assert!(failure.signal.is_empty());
+		assert!(!failure.aborted);
+
+		let timeout = RunTerminal::Timeout.status(Duration::from_millis(3), None);
+		assert_eq!(timeout.outcome, ExecOutcome::Timeout as i32);
+		assert_eq!(timeout.exit_code, None);
+		assert_eq!(timeout.signal, "SIGKILL");
+		assert!(timeout.aborted);
+
+		let cancelled = RunTerminal::Cancelled.status(Duration::from_millis(4), None);
+		assert_eq!(cancelled.outcome, ExecOutcome::Cancelled as i32);
+		assert_eq!(cancelled.exit_code, None);
+		assert_eq!(cancelled.signal, "");
+		assert!(cancelled.aborted);
+
+		let denied = RunTerminal::Denied {
+			exit_code: Some(1),
+			fact:      SandboxDenialFact::WritePath(PathBuf::from("/private/blocked")),
+		}
+		.status(Duration::from_millis(5), None);
+		assert_eq!(denied.outcome, ExecOutcome::Denied as i32);
+		assert_eq!(denied.exit_code, Some(1));
+		assert_eq!(
+			denied
+				.props
+				.as_ref()
+				.and_then(|props| props.fields.get(SANDBOX_DENIED_PATH_PROP))
+				.and_then(|value| value.kind.as_ref()),
+			Some(&wire_value::Kind::String(String::from("write /private/blocked")))
+		);
+	}
+
+	async fn run_output(host: &ExecHost, request: ExecRequest) -> Vec<u8> {
+		let (_, run) = host.exec(request, None).await.expect("exec starts");
+		let mut output = Vec::new();
+		loop {
+			match run.next_event().await {
+				Some(ExecEvent::Output(frame)) => output.extend_from_slice(&frame.data),
+				Some(ExecEvent::Exit(event)) => {
+					let status = event.status.expect("exit status");
+					assert_eq!(status.outcome, ExecOutcome::Exited as i32);
+					assert_eq!(status.exit_code, Some(0));
+					return output;
+				},
+				Some(ExecEvent::Started { .. }) => {},
+				None => panic!("exec event stream closed before exit"),
+			}
+		}
+	}
+	async fn run_exit_code(host: &ExecHost, request: ExecRequest) -> Option<i32> {
+		let (_, run) = host.exec(request, None).await.expect("exec starts");
+		loop {
+			match run.next_event().await {
+				Some(ExecEvent::Output(_) | ExecEvent::Started { .. }) => {},
+				Some(ExecEvent::Exit(event)) => return event.status.expect("exit status").exit_code,
+				None => panic!("exec event stream closed before exit"),
+			}
+		}
+	}
+	async fn run_failure(
+		host: &ExecHost,
+		request: ExecRequest,
+	) -> (i32, Option<i32>, Vec<u8>, Vec<v1::ToolDiag>) {
+		let (_, run) = host.exec(request, None).await.expect("exec starts");
+		let mut output = Vec::new();
+		loop {
+			match run.next_event().await {
+				Some(ExecEvent::Output(frame)) => output.extend_from_slice(&frame.data),
+				Some(ExecEvent::Exit(event)) => {
+					let status = event.status.expect("exit status");
+					return (status.outcome, status.exit_code, output, status.diags);
+				},
+				Some(ExecEvent::Started { .. }) => {},
+				None => panic!("exec event stream closed before exit"),
+			}
+		}
+	}
+
+	fn script_request(session: &Bytes, text: &str) -> ExecRequest {
+		ExecRequest {
+			session: session.clone(),
+			source: Some(v1::Script { text: text.to_owned(), ..Default::default() }),
+			..Default::default()
+		}
+	}
+
+	/// Live proof for both enforcement lanes: the Seatbelt launcher confines
+	/// external commands while the in-process write policy covers redirections,
+	/// with the `.git` carve-out denied and secret-shaped names filtered from
+	/// child environments.
+	#[cfg(target_os = "macos")]
+	#[tokio::test]
+	async fn sandboxed_session_enforces_kernel_and_software_write_lanes() {
+		if !omp_sandbox::backend_status(omp_sandbox::Backend::Seatbelt).is_available() {
+			return;
+		}
+		let root = tempfile::tempdir().unwrap();
+		let workspace = root.path().canonicalize().unwrap();
+		fs::create_dir(workspace.join(".git")).unwrap();
+		let host = ExecHost::new();
+		host.configure_sandbox(
+			&crate::exec_settings::SandboxSettings {
+				mode: crate::exec_settings::ExecSandboxMode::WorkspaceWrite,
+				..Default::default()
+			},
+			&workspace,
+		);
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(&workspace).unwrap().to_string(),
+				env_delta: Some(EnvironmentDelta {
+					set: BTreeMap::from([(String::from("MY_TOKEN"), String::from("secret"))]),
+					..EnvironmentDelta::default()
+				}),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session opens");
+		let session = &opened.session;
+
+		// Software lane: the same redirection into the carve-out is denied.
+		let (outcome, exit, output, diags) =
+			run_failure(&host, script_request(session, "echo no > .git/blocked.txt")).await;
+		assert_eq!(outcome, ExecOutcome::Denied as i32);
+		assert_ne!(exit, Some(0));
+		let output = String::from_utf8_lossy(&output);
+		assert!(output.contains("sandbox denied write"));
+		assert!(output.contains(".git/blocked.txt"));
+		assert!(!output.contains("sandbox: backend="));
+		assert_eq!(diags.len(), 1);
+		assert_eq!(diags[0].kind, "sandbox");
+		assert!(diags[0].text.contains("sandbox: backend="));
+		assert!(!workspace.join(".git/blocked.txt").exists());
+
+		// The one-time session note must not change ordinary command behavior.
+		assert_eq!(
+			run_exit_code(&host, script_request(session, "echo ok > allowed.txt")).await,
+			Some(0)
+		);
+		assert_eq!(fs::read(workspace.join("allowed.txt")).unwrap(), b"ok\n");
+		assert_eq!(
+			run_exit_code(&host, script_request(session, "[ -z \"${MY_TOKEN+x}\" ]")).await,
+			Some(0)
+		);
+
+		// The next ordinary command is sandboxed again.
+		let (outcome, ..) =
+			run_failure(&host, script_request(session, "echo no > .git/blocked-again.txt")).await;
+		assert_eq!(outcome, ExecOutcome::Denied as i32);
+		assert!(!workspace.join(".git/blocked-again.txt").exists());
+		// A dangling redirect still resolves through its symlink into `.git`.
+		std::os::unix::fs::symlink(".git/new", workspace.join("redirect")).unwrap();
+		assert_ne!(
+			run_exit_code(&host, script_request(session, "echo no > redirect/blocked.txt")).await,
+			Some(0)
+		);
+		assert!(!workspace.join(".git/new/blocked.txt").exists());
+		// `/dev/null` remains the one globally writable device sink.
+		assert_eq!(
+			run_exit_code(&host, script_request(session, "echo ok > /dev/null")).await,
+			Some(0)
+		);
+
+		// Kernel lane: an external binary writes inside the workspace.
+		assert_eq!(
+			run_exit_code(&host, script_request(session, "/usr/bin/touch external.txt")).await,
+			Some(0)
+		);
+		assert!(workspace.join("external.txt").exists());
+		// Kernel lane: the Seatbelt profile denies the carve-out for externals.
+		assert_ne!(
+			run_exit_code(&host, script_request(session, "/usr/bin/touch .git/external.txt")).await,
+			Some(0)
+		);
+		assert!(!workspace.join(".git/external.txt").exists());
+
+		// Environment policy applies before shell expansion and child launch.
+		assert_eq!(
+			run_output(&host, script_request(session, "printf '%s' \"$MY_TOKEN\"")).await,
+			b""
+		);
+		assert_ne!(
+			run_exit_code(&host, script_request(session, "/usr/bin/printenv MY_TOKEN")).await,
+			Some(0)
+		);
+		host.close_session(&opened.session).expect("session closes");
+	}
+
+	/// ADR 0028: a detached script never reaches `/bin/sh`; it re-enters this
+	/// executable as the hidden in-process shell child.
+	#[test]
+	fn detached_scripts_reenter_the_in_process_shell() {
+		let command = detached_command("echo hi; sleep 1", None).expect("command builds");
+		assert_eq!(command.get_program(), env::current_exe().unwrap().as_os_str());
+		let args = command.get_args().collect::<Vec<_>>();
+		assert_eq!(args, [
+			OsStr::new(crate::shell_child::SHELL_CHILD_ARG),
+			OsStr::new("echo hi; sleep 1")
+		]);
+	}
+
+	/// ADR 0028: configured host shell executables and `-c` arguments are not
+	/// session profiles.
+	#[tokio::test]
+	async fn host_shell_profiles_are_rejected_before_session_start() {
+		let host = ExecHost::new();
+		let error = host
+			.open_session(OpenSessionRequest {
+				shell_profile: Some(v1::ShellProfileInput {
+					profile: String::from("bash"),
+					executable: String::from("/bin/bash"),
+					args: vec![String::from("-c")],
+					wire_revision: omp_proto::SCHEMA_REV,
+					..Default::default()
+				}),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect_err("configured host shells are unsupported");
+		assert!(matches!(
+			error,
+			ExecError::UnsupportedShellProfile { profile } if profile == "bash"
+		));
+	}
+
+	/// ADR 0028: production shells own coreutils and process utilities in
+	/// process, even when `$PATH` is empty.
+	#[tokio::test]
+	async fn production_session_owns_coreutils_and_process_builtins() {
+		let host = ExecHost::new();
+		let opened = host
+			.open_session(OpenSessionRequest {
+				env_delta: Some(EnvironmentDelta {
+					set: BTreeMap::from([(String::from("PATH"), String::new())]),
+					..EnvironmentDelta::default()
+				}),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("session opens");
+		let session = &opened.session;
+		let output = run_output(
+			&host,
+			script_request(session, "printf 'b\\na\\nb\\n' | sort | uniq -c | wc -l"),
+		)
+		.await;
+		assert_eq!(String::from_utf8_lossy(&output).trim(), "2");
+		for name in ["sort", "uniq", "wc", "seq", "cut", "sed", "sleep", "pgrep", "ps", "timeout"] {
+			let output = run_output(&host, script_request(session, &format!("type -t {name}"))).await;
+			assert_eq!(String::from_utf8_lossy(&output).trim(), "builtin", "{name} is a builtin");
+		}
+		host.close_session(&opened.session).expect("session closes");
+	}
+
+	#[test]
+	fn tiny_output_frames_are_count_bounded_and_spilled_whole() {
+		let root = tempfile::tempdir().expect("temporary artifact root");
+		let store = BlobStore::open(root.path().join("artifacts")).expect("artifact store");
+		let mut capture =
+			OutputCapture::new_with_request(Some(&store), omp_tool::OutputRequest::Bounded)
+				.expect("output capture");
+		let mut projected = Vec::new();
+		for _ in 0..(LIVE_OUTPUT_FRAMES + 17) {
+			if let Some(frame) = capture.project(b"x") {
+				projected.extend_from_slice(&frame);
+			}
+		}
+		assert_eq!(projected, vec![b'x'; LIVE_OUTPUT_FRAMES]);
+		let reference = capture
+			.finish_with_projection()
+			.expect("capture finalizes")
+			.0
+			.expect("frame overflow spills");
+		let expected = vec![b'x'; LIVE_OUTPUT_FRAMES + 17];
+		assert_eq!(
+			store
+				.get(&reference)
+				.expect("complete output artifact")
+				.as_ref(),
+			expected.as_slice(),
+		);
+	}
+
+	#[tokio::test]
+	async fn fast_output_is_host_bounded_and_complete_in_the_spill_artifact() {
+		let root = tempfile::tempdir().expect("temporary artifact root");
+		let store = BlobStore::open(root.path().join("artifacts")).expect("artifact store");
+		let host = ExecHost::new().with_output_store(store.clone());
+		let opened = host
+			.open_session(OpenSessionRequest::default())
+			.await
+			.expect("session opens");
+		let (_, run) = host
+			.exec(script_request(&opened.session, "seq 1 20000"), None)
+			.await
+			.expect("fast command starts");
+
+		time::sleep(Duration::from_millis(50)).await;
+		assert!(
+			run.events.len() <= OUTPUT_EVENT_CAPACITY,
+			"the host queue must remain bounded before a consumer drains it"
+		);
+
+		let mut projected = Vec::new();
+		let status = loop {
+			match run.next_event().await {
+				Some(ExecEvent::Output(frame)) => projected.extend_from_slice(&frame.data),
+				Some(ExecEvent::Exit(event)) => break event.status.expect("terminal status"),
+				Some(ExecEvent::Started { .. }) => {},
+				None => panic!("exec event stream closed before exit"),
+			}
+		};
+		let expected = (1..=20_000)
+			.map(|number| format!("{number}\n"))
+			.collect::<String>();
+		assert!(projected.len() <= LIVE_OUTPUT_BYTES);
+		assert_eq!(projected, expected.as_bytes()[..projected.len()]);
+		let spill = status.spilled_output.expect("oversized output spills");
+		let hash: [u8; 32] = spill.hash.as_ref().try_into().expect("SHA-256 digest");
+		let complete = store
+			.get(&omp_journal::blob::BlobRef { hash: Hash32::new(hash), size: spill.size })
+			.expect("complete output artifact");
+		assert_eq!(complete.as_ref(), expected.as_bytes());
+		host.close_session(&opened.session).expect("session closes");
+	}
 
 	struct InterruptedReader {
 		interrupts: usize,
@@ -3002,6 +4511,153 @@ mod tests {
 			self.bytes = &self.bytes[length..];
 			Ok(length)
 		}
+	}
+
+	#[tokio::test]
+	async fn command_environment_add_and_unset_do_not_leak_to_the_next_run() {
+		let host = ExecHost::new();
+		let opened = host
+			.open_session(OpenSessionRequest {
+				env_delta: Some(EnvironmentDelta {
+					set: BTreeMap::from([(String::from("OMP_RUN_UNSET"), String::from("baseline"))]),
+					..EnvironmentDelta::default()
+				}),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("session opens");
+
+		let mut first = ExecRequest {
+			session: opened.session.clone(),
+			source: Some(v1::Script {
+				text: String::from("printf '%s|%s' \"$OMP_RUN_ADD\" \"${OMP_RUN_UNSET-unset}\""),
+				..Default::default()
+			}),
+			..Default::default()
+		};
+		set_run_environment(&mut first, EnvironmentDelta {
+			set:   BTreeMap::from([(String::from("OMP_RUN_ADD"), String::from("command"))]),
+			unset: vec![String::from("OMP_RUN_UNSET")],
+			props: None,
+		});
+		assert_eq!(run_output(&host, first).await, b"command|unset");
+
+		let second = ExecRequest {
+			session: opened.session.clone(),
+			source: Some(v1::Script {
+				text: String::from("printf '%s|%s' \"${OMP_RUN_ADD-unset}\" \"$OMP_RUN_UNSET\""),
+				..Default::default()
+			}),
+			..Default::default()
+		};
+		assert_eq!(run_output(&host, second).await, b"unset|baseline");
+		host.close_session(&opened.session).expect("session closes");
+	}
+
+	#[tokio::test]
+	async fn sandboxed_session_preserves_ordinary_environment_mutations() {
+		let root = tempfile::tempdir().expect("workspace");
+		let host = ExecHost::new();
+		host.configure_sandbox(
+			&crate::exec_settings::SandboxSettings {
+				env_set: BTreeMap::from([(
+					Str::new_static("OMP_SANDBOX_POLICY"),
+					Str::new_static("1"),
+				)]),
+				..Default::default()
+			},
+			root.path(),
+		);
+		let opened = host
+			.open_session(OpenSessionRequest {
+				cwd_uri: Url::from_directory_path(root.path())
+					.expect("workspace URI")
+					.to_string(),
+				env_delta: Some(EnvironmentDelta {
+					set: BTreeMap::from([(String::from("OMP_SANDBOX_POLICY"), String::from("user"))]),
+					..EnvironmentDelta::default()
+				}),
+				..OpenSessionRequest::default()
+			})
+			.await
+			.expect("sandboxed session");
+		let first =
+			run_output(&host, script_request(&opened.session, "printf '%s' \"$OMP_SANDBOX_POLICY\""))
+				.await;
+		assert!(first.ends_with(b"1"));
+		assert_eq!(
+			run_output(&host, script_request(&opened.session, "export PATH=/persistent")).await,
+			b"",
+		);
+		assert_eq!(
+			run_output(&host, script_request(&opened.session, "printf '%s' \"$PATH\"")).await,
+			b"/persistent",
+		);
+		host.close_session(&opened.session).expect("session closes");
+	}
+
+	#[tokio::test]
+	async fn concurrent_sessions_own_distinct_sandbox_denial_slots() {
+		use omp_shell::PathPolicy as _;
+
+		let root = tempfile::tempdir().expect("workspace");
+		let host = ExecHost::new();
+		host.configure_sandbox(
+			&crate::exec_settings::SandboxSettings {
+				env_set: BTreeMap::from([(
+					Str::new_static("OMP_SANDBOX_POLICY"),
+					Str::new_static("1"),
+				)]),
+				write_deny: vec![Str::from(root.path().to_string_lossy().as_ref())],
+				..Default::default()
+			},
+			root.path(),
+		);
+		let request = || OpenSessionRequest {
+			cwd_uri: Url::from_directory_path(root.path())
+				.expect("workspace URI")
+				.to_string(),
+			..OpenSessionRequest::default()
+		};
+		let (first, second) =
+			tokio::join!(host.open_session(request()), host.open_session(request()));
+		let first = first.expect("first session");
+		let second = second.expect("second session");
+		let (first_sandbox, second_sandbox) = {
+			let sessions = host.inner.sessions.lock();
+			(
+				sessions[&first.session]
+					.sandbox
+					.clone()
+					.expect("first sandbox"),
+				sessions[&second.session]
+					.sandbox
+					.clone()
+					.expect("second sandbox"),
+			)
+		};
+		assert!(!Arc::ptr_eq(&first_sandbox, &second_sandbox));
+		let first_attempt = first_sandbox.begin_attempt();
+		let second_attempt = second_sandbox.begin_attempt();
+		let first_path = root.path().join("first-denied");
+		let second_path = root.path().join("second-denied");
+		assert!(first_attempt.check_write(&first_path).is_err());
+		assert!(second_attempt.check_write(&second_path).is_err());
+		let canonical = fs::canonicalize(root.path()).expect("canonical root");
+		assert_eq!(
+			first_attempt.take_denial(),
+			Some(SandboxDenialFact::WritePath(canonical.join("first-denied"))),
+		);
+		assert_eq!(
+			second_attempt.take_denial(),
+			Some(SandboxDenialFact::WritePath(canonical.join("second-denied"))),
+		);
+		host
+			.close_session(&first.session)
+			.expect("first session closes");
+		host
+			.close_session(&second.session)
+			.expect("second session closes");
 	}
 
 	#[tokio::test]
@@ -3030,13 +4686,7 @@ mod tests {
 			.unwrap();
 		assert!(capabilities.final_cwd);
 		assert!(capabilities.materialization);
-		assert_eq!(capabilities.shell_profiles, [
-			String::from("brush"),
-			String::from("user"),
-			String::from("bash"),
-			String::from("zsh"),
-			String::from("fish")
-		]);
+		assert_eq!(capabilities.shell_profiles, [String::from("brush")]);
 
 		let (started, run) = host
 			.exec(
@@ -3136,6 +4786,65 @@ mod tests {
 		assert_eq!(second.generation, first.generation + 1);
 		wait_for_terminal(&host, &second.name, second.generation).await;
 		assert!(host.inner.sessions.lock().is_empty());
+	}
+
+	#[tokio::test]
+	async fn observed_readiness_survives_a_fast_process_exit() {
+		let root = tempfile::tempdir().unwrap();
+		let host = ExecHost::new();
+		let mut request = process_request("fast-ready-exit", root.path(), "printf READY");
+		request.ready.push(ReadyProbe {
+			probe:      Some(ready_probe::Probe::Log(v1::ReadyLog {
+				pattern: String::from("READY"),
+				props:   None,
+			})),
+			timeout_ms: 1_000,
+			props:      None,
+		});
+		let started = host
+			.start_process(request)
+			.await
+			.expect("observed readiness must complete start");
+		let info = wait_for_terminal(&host, &started.name, started.generation).await;
+		assert_eq!(info.ready_match, "READY");
+	}
+
+	#[tokio::test]
+	async fn recovered_terminal_name_reuse_preserves_the_generation_fence() {
+		let root = tempfile::tempdir().unwrap();
+		let store = ProcessStore::new(root.path().join("processes").join("meta.json"));
+		let identity = ProcessIdentity::current().unwrap();
+		let mut snapshot = ProcessStoreSnapshot::new(identity.clone());
+		snapshot.processes.push(ProcessRecord {
+			name: Str::new_static("recovered-reuse"),
+			spec_wire: Vec::new(),
+			ready_wire: Vec::new(),
+			status_wire: Vec::new(),
+			process_dir: root.path().join("processes").join("recovered-reuse"),
+			generation: 41,
+			identity,
+			detached: false,
+			persist: false,
+			phase: ProcessPhase::Running,
+			log_start_offset: 0,
+			log_end_offset: 0,
+			log_rotations: 0,
+			restart_pending: false,
+			restart_count: 0,
+			consecutive_failures: 0,
+			restart_history: Vec::new(),
+			started_order: 1,
+			recent_order: 0,
+		});
+		store.save(&snapshot).unwrap();
+
+		let host = ExecHost::new().with_process_store(store).unwrap();
+		let started = host
+			.start_process(process_request("recovered-reuse", root.path(), "printf replacement"))
+			.await
+			.unwrap();
+		assert_eq!(started.generation, 42);
+		wait_for_terminal(&host, &started.name, started.generation).await;
 	}
 
 	#[tokio::test]

@@ -74,7 +74,11 @@ impl Plan {
 		argv: Vec<OsString>,
 		command_backed: bool,
 	) -> Self {
-		debug_assert!(enforced.difference(backend.capabilities()).is_empty());
+		debug_assert!(
+			enforced.difference(backend.capabilities()).is_empty(),
+			"backend {backend} cannot enforce requested set {enforced:?}; capabilities={:?}",
+			backend.capabilities(),
+		);
 		Self {
 			backend,
 			requested,

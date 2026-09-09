@@ -18,19 +18,21 @@ use tokio::{
 use crate::{
 	Backend, BackendStatus, CapabilitySet, Caveat, CleanupFailure, CleanupFailures,
 	DegradationPolicy, Plan, RunFailure, SandboxError, SandboxSpec,
-	backends::{appcontainer, bubblewrap, docker, gvisor, seatbelt},
+	backends::{appcontainer, bubblewrap, docker, gvisor, landlock, seatbelt},
 	environment::split_entry,
 	paths::resolve_program,
 };
 
 static SEATBELT_STATUS: LazyLock<BackendStatus> = LazyLock::new(seatbelt::probe);
 static BUBBLEWRAP_STATUS: LazyLock<BackendStatus> = LazyLock::new(bubblewrap::probe);
+static LANDLOCK_STATUS: LazyLock<BackendStatus> = LazyLock::new(landlock::probe);
 static GVISOR_STATUS: LazyLock<BackendStatus> = LazyLock::new(gvisor::probe);
 static DOCKER_STATUS: LazyLock<BackendStatus> =
 	LazyLock::new(|| docker::probe(Backend::DockerEphemeral));
 static DOCKER_RUNSC_STATUS: LazyLock<BackendStatus> =
 	LazyLock::new(|| docker::probe(Backend::DockerRunscEphemeral));
 static APP_CONTAINER_STATUS: LazyLock<BackendStatus> = LazyLock::new(appcontainer::probe);
+pub const COMMAND_WRAPPER_PLACEHOLDER: &str = "<omp-sandbox-command>";
 
 /// Returns the cached live status for one backend.
 #[must_use]
@@ -38,6 +40,7 @@ pub fn backend_status(backend: Backend) -> BackendStatus {
 	match backend {
 		Backend::Seatbelt => SEATBELT_STATUS.clone(),
 		Backend::Bubblewrap => BUBBLEWRAP_STATUS.clone(),
+		Backend::Landlock => LANDLOCK_STATUS.clone(),
 		Backend::Gvisor => GVISOR_STATUS.clone(),
 		Backend::DockerEphemeral => DOCKER_STATUS.clone(),
 		Backend::DockerRunscEphemeral => DOCKER_RUNSC_STATUS.clone(),
@@ -65,16 +68,40 @@ impl Runner {
 
 	/// Selects the first live backend whose compiled plan enforces every
 	/// request.
+	///
+	/// Landlock is intentionally excluded from automatic selection because it
+	/// cannot enforce the namespace-based default carve-outs; use
+	/// [`Runner::for_backend`] to select it explicitly.
+	#[tracing::instrument(
+		name = "sandbox_admission",
+		level = "debug",
+		skip_all,
+		fields(
+			requested_capabilities = spec.requested_capabilities().len(),
+			tolerated_capabilities = spec.tolerated.len(),
+			network = %spec.network,
+			write = %spec.write,
+			degradation = %spec.degradation,
+		)
+	)]
 	pub fn for_spec(spec: &SandboxSpec) -> Result<Self, SandboxError> {
-		spec.validate()?;
+		if let Err(error) = spec.validate() {
+			tracing::warn!(%error, "sandbox specification rejected");
+			return Err(error);
+		}
 		let requested = spec.requested_capabilities();
+		let required = requested.difference(spec.tolerated);
 		let candidates = candidates();
 		if candidates.is_empty() {
+			tracing::warn!(
+				os = std::env::consts::OS,
+				"sandbox admission denied: no supported backend"
+			);
 			return Err(SandboxError::UnsupportedHost { os: std::env::consts::OS });
 		}
 
 		let mut available = Vec::new();
-		let mut smallest_missing = requested;
+		let mut smallest_missing = required;
 		for backend in candidates.iter().copied() {
 			let status = backend_status(backend);
 			if !status.is_available() {
@@ -84,14 +111,25 @@ impl Runner {
 			let runner = Self { backend };
 			match runner.compile(spec) {
 				Ok(plan) => {
-					let missing = requested.difference(plan.enforced());
+					let missing = requested
+						.difference(plan.enforced())
+						.difference(spec.tolerated);
 					if missing.is_empty() {
 						if backend == Backend::Gvisor {
-							let requirements = gvisor::check_requirements(spec)?;
+							let requirements = gvisor::check_requirements(spec).map_err(|error| {
+								tracing::warn!(%error, "sandbox admission denied");
+								error
+							})?;
 							if !requirements.is_available() {
 								continue;
 							}
 						}
+						tracing::debug!(
+							backend = %backend,
+							enforced_capabilities = plan.enforced().len(),
+							caveat_count = plan.caveats().len(),
+							"sandbox backend admitted"
+						);
 						return Ok(runner);
 					}
 					if missing.len() < smallest_missing.len() {
@@ -99,30 +137,60 @@ impl Runner {
 					}
 				},
 				Err(SandboxError::BackendCapabilities { missing, .. }) => {
+					let missing = missing.difference(spec.tolerated);
+					if missing.is_empty() {
+						tracing::debug!(
+							backend = %backend,
+							"sandbox backend admitted with tolerated capability gaps"
+						);
+						return Ok(runner);
+					}
 					if missing.len() < smallest_missing.len() {
 						smallest_missing = missing;
 					}
 				},
-				Err(error) => return Err(error),
+				Err(error) => {
+					tracing::warn!(%error, "sandbox admission denied");
+					return Err(error);
+				},
 			}
 		}
 
 		if spec.degradation == DegradationPolicy::AllowCaveats {
-			let native = fallback_backend()?;
+			let native = fallback_backend().map_err(|error| {
+				tracing::warn!(%error, "sandbox admission denied");
+				error
+			})?;
 			let status = backend_status(native);
 			return if status.is_available() {
+				tracing::debug!(
+					backend = %native,
+					"sandbox fallback backend admitted"
+				);
 				Ok(Self { backend: native })
 			} else {
+				tracing::warn!(
+					backend = %native,
+					"sandbox admission denied: fallback backend unavailable"
+				);
 				Err(unavailable(status))
 			};
 		}
 		if available.is_empty() {
+			tracing::warn!("sandbox admission denied: no backend passed its live probe");
 			return Err(unavailable(backend_status(candidates[0])));
 		}
+		tracing::warn!(
+			missing_capabilities = %smallest_missing,
+			"sandbox admission denied: required capabilities unavailable"
+		);
 		Err(SandboxError::NoBackendCapabilities { missing: smallest_missing })
 	}
 
 	/// Returns the live normal-child backend required for inherited descriptors.
+	///
+	/// Linux normal-child execution requires Bubblewrap and does not fall back
+	/// to Landlock.
 	pub fn native_command() -> Result<Self, SandboxError> {
 		let backend = native_command_backend()?;
 		let status = backend_status(backend);
@@ -146,26 +214,57 @@ impl Runner {
 	}
 
 	/// Purely compiles a specification into an inspectable plan.
+	#[tracing::instrument(
+		name = "sandbox_profile_build",
+		level = "debug",
+		skip_all,
+		fields(
+			backend = %self.backend,
+			requested_capabilities = spec.requested_capabilities().len(),
+			network = %spec.network,
+			write = %spec.write,
+		)
+	)]
 	pub fn compile(self, spec: &SandboxSpec) -> Result<Plan, SandboxError> {
 		spec.validate()?;
 		let program = resolve_program(&spec.program)?;
+		self.compile_program(spec, &program)
+	}
+
+	fn compile_program(self, spec: &SandboxSpec, program: &Path) -> Result<Plan, SandboxError> {
+		spec.validate()?;
 		let requested = spec.requested_capabilities();
 		let missing = requested.difference(self.capabilities());
 		let enforced = requested.intersection(self.capabilities());
 		let mut plan = match self.backend {
-			Backend::Seatbelt => seatbelt::compile(spec, &program, requested, enforced),
-			Backend::Bubblewrap => bubblewrap::compile(spec, &program, requested, enforced),
-			Backend::Gvisor => gvisor::compile(spec, &program, requested, enforced),
-			Backend::DockerEphemeral => docker::compile(spec, &program, requested, enforced),
-			Backend::DockerRunscEphemeral => {
-				docker::compile_runsc(spec, &program, requested, enforced)
-			},
-			Backend::AppContainer => appcontainer::compile(spec, &program, requested, enforced),
+			Backend::Seatbelt => seatbelt::compile(spec, program, requested, enforced),
+			Backend::Bubblewrap => bubblewrap::compile(spec, program, requested, enforced),
+			Backend::Landlock => landlock::compile(spec, program, requested, enforced),
+			Backend::Gvisor => gvisor::compile(spec, program, requested, enforced),
+			Backend::DockerEphemeral => docker::compile(spec, program, requested, enforced),
+			Backend::DockerRunscEphemeral => docker::compile_runsc(spec, program, requested, enforced),
+			Backend::AppContainer => appcontainer::compile(spec, program, requested, enforced),
 		}?;
 		if spec.degradation == DegradationPolicy::Reject {
 			let missing = requested.difference(plan.enforced());
-			if !missing.is_empty() {
-				return Err(SandboxError::BackendCapabilities { backend: self.backend, missing });
+			let fatal = missing.difference(spec.tolerated);
+			if !fatal.is_empty() {
+				return Err(SandboxError::BackendCapabilities {
+					backend: self.backend,
+					missing: fatal,
+				});
+			}
+			for capability in missing.iter() {
+				if !plan
+					.caveats()
+					.iter()
+					.any(|caveat| caveat.capability == Some(capability))
+				{
+					plan.add_caveat(Caveat::capability(
+						capability,
+						Str::from(format!("{} cannot enforce tolerated {capability}", self.backend)),
+					));
+				}
 			}
 		}
 		if spec.degradation == DegradationPolicy::AllowCaveats {
@@ -182,7 +281,90 @@ impl Runner {
 				}
 			}
 		}
+		tracing::debug!(
+			backend = %self.backend,
+			enforced_capabilities = plan.enforced().len(),
+			caveat_count = plan.caveats().len(),
+			profile_generated = plan.profile().is_some(),
+			"sandbox profile built"
+		);
 		Ok(plan)
+	}
+
+	/// Compiles a reusable native launcher prefix from a program-less policy.
+	pub fn wrap_template(self, spec: &SandboxSpec) -> Result<CommandWrapper, SandboxError> {
+		if !matches!(self.backend, Backend::Seatbelt | Backend::Bubblewrap | Backend::Landlock) {
+			return Err(SandboxError::CommandWrapperUnsupported { backend: self.backend });
+		}
+		if self.backend != native_command_backend()? {
+			return Err(SandboxError::CommandWrapperUnsupported { backend: self.backend });
+		}
+		if spec.no_exec {
+			return Err(SandboxError::CommandWrapperNoExec { backend: self.backend });
+		}
+
+		let placeholder = Path::new(COMMAND_WRAPPER_PLACEHOLDER);
+		let plan = self.compile_program(spec, placeholder)?;
+		let caveats = plan.caveats().to_vec();
+		let mut preparation_spec = spec.clone();
+		preparation_spec.environment = crate::EnvironmentPolicy::exact(Vec::new());
+		let mut prepared = self.prepare(plan, &preparation_spec)?;
+		let launcher = prepared
+			.program
+			.take()
+			.ok_or(SandboxError::EmptyPlanArgv { backend: self.backend })?;
+		let mut prefix_args = std::mem::take(&mut prepared.args);
+		match self.backend {
+			Backend::Seatbelt => {
+				prefix_args.truncate(2);
+				prefix_args.push(OsString::from("--"));
+			},
+			Backend::Bubblewrap => {
+				let end = if prefix_args
+					.iter()
+					.any(|arg| arg == OsStr::new(landlock::HIDDEN_CHILD_ARG))
+				{
+					prefix_args
+						.iter()
+						.position(|arg| arg == OsStr::new(COMMAND_WRAPPER_PLACEHOLDER))
+						.ok_or(SandboxError::MissingPlanPlaceholder {
+							backend:     self.backend,
+							placeholder: COMMAND_WRAPPER_PLACEHOLDER,
+						})?
+				} else {
+					prefix_args
+						.iter()
+						.position(|arg| arg == OsStr::new("--"))
+						.map(|separator| separator + 1)
+						.ok_or(SandboxError::MissingPlanPlaceholder {
+							backend:     self.backend,
+							placeholder: "--",
+						})?
+				};
+				prefix_args.truncate(end);
+			},
+			Backend::Landlock => {
+				let command = prefix_args
+					.iter()
+					.position(|arg| arg == OsStr::new(COMMAND_WRAPPER_PLACEHOLDER))
+					.ok_or(SandboxError::MissingPlanPlaceholder {
+						backend:     self.backend,
+						placeholder: COMMAND_WRAPPER_PLACEHOLDER,
+					})?;
+				prefix_args.truncate(command);
+			},
+			Backend::Gvisor
+			| Backend::DockerEphemeral
+			| Backend::DockerRunscEphemeral
+			| Backend::AppContainer => unreachable!("native backend checked above"),
+		}
+		Ok(CommandWrapper {
+			launcher: Some(launcher),
+			prefix_args,
+			environment: spec.environment.clone(),
+			caveats,
+			resources: std::mem::take(&mut prepared.resources),
+		})
 	}
 
 	/// Materializes runtime-only files, values, and owned cleanup resources.
@@ -226,7 +408,17 @@ impl Runner {
 				crate::runtime::macos::prepare(spec, &mut prepared)?;
 			},
 			Backend::Bubblewrap => {
+				if prepared
+					.args
+					.iter()
+					.any(|arg| arg == OsStr::new(landlock::BPF_PLACEHOLDER))
+				{
+					landlock::prepare(spec, &mut prepared)?;
+				}
 				prepared = crate::runtime::bubblewrap::prepare(prepared)?;
+			},
+			Backend::Landlock => {
+				landlock::prepare(spec, &mut prepared)?;
 			},
 			Backend::Gvisor => {
 				#[cfg(target_os = "linux")]
@@ -275,6 +467,11 @@ impl Runner {
 				Err(SandboxError::UnsupportedHost { os: std::env::consts::OS })
 			},
 			Backend::Bubblewrap => {
+				let result = run_command(&prepared, options, CommandRuntime::Plain).await;
+				let cleanup = prepared.cleanup();
+				finish_run(self.backend, result, cleanup)
+			},
+			Backend::Landlock => {
 				let result = run_command(&prepared, options, CommandRuntime::Plain).await;
 				let cleanup = prepared.cleanup();
 				finish_run(self.backend, result, cleanup)
@@ -367,6 +564,76 @@ pub struct RunOutput {
 	pub stdout: CowBytes<'static>,
 	/// Captured standard error, empty unless requested.
 	pub stderr: CowBytes<'static>,
+}
+
+/// Precompiled sandbox launcher reused across many command spawns.
+///
+/// Temporary profile, BPF, policy, and bind-mask resources remain alive until
+/// this value is dropped. The wrapper is `Send + Sync`; launcher and policy
+/// accessors allocate nothing.
+pub struct CommandWrapper {
+	launcher:    Option<OsString>,
+	prefix_args: Vec<OsString>,
+	environment: crate::EnvironmentPolicy,
+	caveats:     Vec<Caveat>,
+	resources:   Vec<PreparedResource>,
+}
+
+impl CommandWrapper {
+	/// Creates an environment-filtering wrapper without a kernel launcher.
+	#[must_use]
+	pub fn environment_only(spec: &SandboxSpec) -> Self {
+		Self {
+			launcher:    None,
+			prefix_args: Vec::new(),
+			environment: spec.environment.clone(),
+			caveats:     Vec::new(),
+			resources:   Vec::new(),
+		}
+	}
+
+	/// Returns the launcher program, such as `sandbox-exec` or `bwrap`.
+	#[must_use]
+	pub fn launcher(&self) -> Option<&OsStr> {
+		self.launcher.as_deref()
+	}
+
+	/// Returns arguments placed before the wrapped program.
+	#[must_use]
+	pub fn prefix_args(&self) -> &[OsString] {
+		&self.prefix_args
+	}
+
+	/// Reports whether an exported environment variable may reach the child.
+	#[must_use]
+	pub fn env_allowed(&self, key: &str) -> bool {
+		self.environment.allows(key)
+	}
+
+	/// Applies the environment base, include-only filters, deny filters, and
+	/// explicit overrides in policy order.
+	pub fn resolve_env<I, K, V>(&self, environment: I) -> Vec<(OsString, OsString)>
+	where
+		I: IntoIterator<Item = (K, V)>,
+		K: Into<OsString>,
+		V: Into<OsString>,
+	{
+		self.environment.resolve_env(environment)
+	}
+
+	/// Returns caveats recorded by the backend for this compiled policy.
+	#[must_use]
+	pub fn caveats(&self) -> &[Caveat] {
+		&self.caveats
+	}
+}
+
+impl Drop for CommandWrapper {
+	fn drop(&mut self) {
+		while let Some(mut resource) = self.resources.pop() {
+			let _ = resource.cleanup();
+		}
+	}
 }
 
 /// Prepared normal-child command plus resources that must outlive it.
@@ -468,7 +735,7 @@ impl Drop for PreparedSandbox {
 	}
 }
 
-pub(crate) enum PreparedResource {
+pub enum PreparedResource {
 	Directory(Option<tempfile::TempDir>),
 	File(Option<tempfile::NamedTempFile>),
 }
@@ -665,9 +932,10 @@ async fn run_command(
 	let stdout = capture(child.child_mut().stdout.take());
 	let stderr = capture(child.child_mut().stderr.take());
 	let status = match options.timeout {
-		Some(timeout) => match time::timeout(timeout, child.wait()).await {
-			Ok(status) => status?,
-			Err(_) => {
+		Some(timeout) => {
+			if let Ok(status) = time::timeout(timeout, child.wait()).await {
+				status?
+			} else {
 				if let CommandRuntime::Docker(state) = &mut runtime {
 					let _ = state.terminate_and_reap(child.child_mut()).await;
 					let _ = child.wait().await;
@@ -683,7 +951,7 @@ async fn run_command(
 				let _ = join_output(stdout, prepared.backend).await;
 				let _ = join_output(stderr, prepared.backend).await;
 				return Err(SandboxError::Timeout { backend: prepared.backend });
-			},
+			}
 		},
 		None => child.wait().await?,
 	};
@@ -766,11 +1034,11 @@ struct ChildGuard {
 }
 
 impl ChildGuard {
-	fn new(child: Child, backend: Backend) -> Self {
+	const fn new(child: Child, backend: Backend) -> Self {
 		Self { child: Some(child), backend, reaped: false }
 	}
 
-	fn child_mut(&mut self) -> &mut Child {
+	const fn child_mut(&mut self) -> &mut Child {
 		self.child.as_mut().expect("child exists until reaped")
 	}
 
@@ -830,7 +1098,7 @@ fn sandbox_exit(status: ExitStatus) -> SandboxExit {
 	#[cfg(unix)]
 	{
 		use std::os::unix::process::ExitStatusExt as _;
-		return SandboxExit { code: status.code(), signal: status.signal() };
+		SandboxExit { code: status.code(), signal: status.signal() }
 	}
 	#[cfg(not(unix))]
 	{
@@ -885,6 +1153,8 @@ fn unavailable(status: BackendStatus) -> SandboxError {
 #[cfg(test)]
 mod tests {
 	use super::candidates_for;
+	#[cfg(target_os = "linux")]
+	use super::{fallback_backend, native_command_backend};
 	use crate::Backend;
 
 	#[test]
@@ -900,7 +1170,18 @@ mod tests {
 			Backend::DockerRunscEphemeral,
 			Backend::DockerEphemeral,
 		],);
+		assert!(!candidates_for("linux").contains(&Backend::Landlock));
 		assert_eq!(candidates_for("windows"), [Backend::AppContainer]);
 		assert!(candidates_for("plan9").is_empty());
+	}
+
+	#[cfg(target_os = "linux")]
+	#[test]
+	fn linux_native_selection_requires_bubblewrap() {
+		assert_eq!(fallback_backend().expect("Linux fallback backend"), Backend::Bubblewrap);
+		assert_eq!(
+			native_command_backend().expect("Linux native command backend"),
+			Backend::Bubblewrap
+		);
 	}
 }

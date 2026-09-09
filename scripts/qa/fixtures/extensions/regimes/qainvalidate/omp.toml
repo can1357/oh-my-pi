@@ -1,0 +1,13 @@
+id = "qainvalidate"
+version = "0.1.0"
+omp_api = 1
+entry = "qainvalidate"
+
+[[declarations]]
+id = "hello"
+kind = "hard"
+module = "qainvalidate"
+key = "hello@qainvalidate.1"
+trigger = "lazy"
+api = 1
+failure = "fail-closed"

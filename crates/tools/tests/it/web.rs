@@ -12,7 +12,8 @@ use futures::StreamExt as _;
 use omp_ar::zip::Writer;
 use omp_core::{Str, sf};
 use omp_tool::{
-	BlobRef, CapsBase, Ev, IncomingParams, ModelClass, Part, PromptCaps, Tool, ToolTerminal,
+	BlobRef, CapsBase, DiagKind, Ev, IncomingParams, ModelClass, Part, PromptCaps, Severity, Tool,
+	ToolTerminal, Unit,
 };
 use omp_tools::read::{
 	self, DirectorySource, Fault, ReadBlobs, ReadLease, ReadSources, SnapshotRecord, SourceStat,
@@ -164,8 +165,8 @@ async fn read_tool_text(path: &str, responses: impl IntoIterator<Item = HttpResp
 		.args_committed(Str::new(json!({ "path": path }).to_string()))
 		.expect("read invocation remains live");
 	let events = tool.call(params).collect::<Vec<_>>().await;
-	let [Ev::Done(ToolTerminal::Done { result, .. })] = events.as_slice() else {
-		panic!("expected one terminal read event: {events:?}");
+	let Some(Ev::Done(ToolTerminal::Done { result, .. })) = events.last() else {
+		panic!("expected a terminal read event: {events:?}");
 	};
 	let parts = tool.prompt(
 		result.as_ref(),
@@ -227,6 +228,16 @@ fn sqlite_fixture() -> Bytes {
 		.serialize("main")
 		.expect("serialize SQLite fixture");
 	Bytes::copy_from_slice(&serialized)
+}
+
+fn assert_single_diag(rendered: &RenderResult, kind: DiagKind, severity: Severity) {
+	assert_eq!(rendered.diags.len(), 1);
+	let diag = &rendered.diags[0];
+	assert_eq!(diag.native_kind(), Some(kind));
+	assert_eq!(diag.severity, severity);
+	assert_eq!(diag.continuation, None);
+	assert_eq!(diag.artifact, None);
+	assert_eq!(diag.omitted, None);
 }
 
 fn assert_github_api_request(request: &HttpRequest, expected_url: &str) {
@@ -335,11 +346,7 @@ async fn content_type_dispatch_is_observable_in_method_and_content() {
 
 #[tokio::test]
 async fn binary_content_types_take_their_specialized_dispatch_before_fallback() {
-	for (content_type, expected_note) in [
-		("application/pdf", "markit conversion failed"),
-		("application/zip", "Archive rendering failed"),
-		("application/vnd.sqlite3", "SQLite rendering failed"),
-	] {
+	for content_type in ["application/pdf", "application/zip", "application/vnd.sqlite3"] {
 		let rendered = web::read(
 			&CannedHttp::from_responses([response(200, content_type, "not a valid binary fixture")]),
 			&Url::parse("https://example.test/download").expect("fixture URL parses"),
@@ -350,14 +357,7 @@ async fn binary_content_types_take_their_specialized_dispatch_before_fallback() 
 		assert_eq!(rendered.method.as_str(), "binary", "{content_type}");
 		let prefix = format!("[Binary content: {content_type},");
 		assert!(rendered.content.starts_with(prefix.as_str()));
-		assert!(
-			rendered
-				.notes
-				.iter()
-				.any(|note| note.contains(expected_note)),
-			"{content_type} notes: {:?}",
-			rendered.notes
-		);
+		assert_single_diag(&rendered, DiagKind::Fallback, Severity::Warn);
 	}
 }
 
@@ -378,7 +378,7 @@ async fn raw_binary_urls_keep_image_archive_and_sqlite_specialized_dispatch() {
 	);
 	assert_eq!(image.render.content_type.as_deref(), Some("image/webp"));
 	assert_eq!(image.render.method, "image");
-	assert_eq!(image.render.notes.as_slice(), [sf!("Fetched image binary")]);
+	assert_single_diag(&image.render, DiagKind::Provenance, Severity::Info);
 	let processed = image
 		.image
 		.expect("raw image retains processed media bytes");
@@ -399,7 +399,7 @@ async fn raw_binary_urls_keep_image_archive_and_sqlite_specialized_dispatch() {
 	assert_eq!(archive.content, "hello.txt (6B)");
 	assert_eq!(archive.content_type.as_deref(), Some("application/zip"));
 	assert_eq!(archive.method, "archive");
-	assert!(archive.notes.is_empty());
+	assert!(archive.diags.is_empty());
 
 	let sqlite = web::read(
 		&CannedHttp::from_responses([response(200, "application/vnd.sqlite3", sqlite_fixture())]),
@@ -411,7 +411,7 @@ async fn raw_binary_urls_keep_image_archive_and_sqlite_specialized_dispatch() {
 	assert_eq!(sqlite.content, "items (1 rows)");
 	assert_eq!(sqlite.content_type.as_deref(), Some("application/vnd.sqlite3"));
 	assert_eq!(sqlite.method, "sqlite");
-	assert!(sqlite.notes.is_empty());
+	assert!(sqlite.diags.is_empty());
 }
 
 #[tokio::test]
@@ -575,9 +575,7 @@ async fn github_gist_parity_is_exact_for_anonymous_ordered_files_and_request() {
 
 	assert_eq!(rendered.method.as_str(), "github-gist");
 	assert_eq!(rendered.content_type.as_deref(), Some("text/markdown"));
-	assert_eq!(rendered.notes.iter().map(Str::as_str).collect::<Vec<_>>(), [
-		"Fetched via GitHub API"
-	]);
+	assert_single_diag(&rendered, DiagKind::Provenance, Severity::Info);
 	assert_eq!(
 		rendered.content.as_str(),
 		"# Gist by anonymous\n\n**Created:** 2024-01-01T01:02:03Z · **Updated:** \
@@ -614,9 +612,7 @@ async fn github_repo_metadata_tree_readme_and_request_order_match_pi() {
 
 	assert_eq!(rendered.method.as_str(), "github-repo");
 	assert_eq!(rendered.content_type.as_deref(), Some("text/markdown"));
-	assert_eq!(rendered.notes.iter().map(Str::as_str).collect::<Vec<_>>(), [
-		"Fetched via GitHub API"
-	]);
+	assert_single_diag(&rendered, DiagKind::Provenance, Severity::Info);
 	assert_eq!(
 		rendered.content.as_str(),
 		"# owner/repo\n\nRepository summary\n\nStars: 7 · Forks: 2 · Issues: 3\nLanguage: \
@@ -660,9 +656,7 @@ async fn github_tree_sorts_directory_first_and_renders_raw_readme_exactly() {
 		 link\n      README.MD (12 bytes)\n      z.txt\n```\n\n---\n\n## README\n\n# Directory \
 		 README\n\ncontents"
 	);
-	assert_eq!(rendered.notes.iter().map(Str::as_str).collect::<Vec<_>>(), [
-		"Fetched via GitHub API"
-	]);
+	assert_single_diag(&rendered, DiagKind::Provenance, Severity::Info);
 
 	let requests = client.requests();
 	assert_eq!(requests.len(), 3);
@@ -693,9 +687,7 @@ async fn github_blob_preserves_encoded_path_and_reports_canonical_raw_request() 
 	assert_eq!(rendered.method.as_str(), "github-raw");
 	assert_eq!(rendered.content_type.as_deref(), Some("text/plain"));
 	assert_eq!(rendered.content.as_str(), "raw body");
-	assert_eq!(rendered.notes.iter().map(Str::as_str).collect::<Vec<_>>(), [
-		"Fetched raw: https://raw.githubusercontent.com/owner/repo/main/dir/space%20name.txt"
-	]);
+	assert_single_diag(&rendered, DiagKind::Provenance, Severity::Info);
 	assert_eq!(client.requests(), [HttpRequest::new(
 		"https://raw.githubusercontent.com/owner/repo/main/dir/space%20name.txt"
 	)]);
@@ -755,9 +747,7 @@ async fn github_issue_comments_paginate_and_render_in_api_order_exactly() {
 	}
 	assert_eq!(rendered.content.as_str(), expected.trim());
 	assert_eq!(rendered.method.as_str(), "github-issue");
-	assert_eq!(rendered.notes.iter().map(Str::as_str).collect::<Vec<_>>(), [
-		"Fetched via GitHub API"
-	]);
+	assert_single_diag(&rendered, DiagKind::Provenance, Severity::Info);
 
 	let requests = client.requests();
 	assert_eq!(requests.len(), 3);
@@ -794,9 +784,7 @@ async fn github_commit_metadata_and_diff_fallback_match_pi_exactly() {
 		 0123456789ab\n\nCommit body\n\n---\n\n## Files (1)\n\n### new.bin\n\nmodified · +3 \
 		 −2\n\n*No textual diff (binary or too large).*"
 	);
-	assert_eq!(rendered.notes.iter().map(Str::as_str).collect::<Vec<_>>(), [
-		"Fetched via GitHub API"
-	]);
+	assert_single_diag(&rendered, DiagKind::Provenance, Severity::Info);
 	let requests = client.requests();
 	assert_eq!(requests.len(), 1);
 	assert_github_api_request(
@@ -885,7 +873,7 @@ async fn github_repository_file_listing_uses_pi_hundred_entry_limit() {
 }
 
 #[tokio::test]
-async fn github_raw_output_uses_shared_character_limit_and_note_order() {
+async fn github_raw_output_uses_shared_character_limit_and_diag_order() {
 	let client =
 		CannedHttp::from_responses([response(200, "text/plain", "x".repeat(MAX_OUTPUT_CHARS + 1))]);
 	let rendered = Scraper::GitHub
@@ -900,10 +888,21 @@ async fn github_raw_output_uses_shared_character_limit_and_note_order() {
 
 	assert_eq!(rendered.content.chars().count(), MAX_OUTPUT_CHARS);
 	assert!(rendered.content.chars().all(|character| character == 'x'));
-	assert_eq!(rendered.notes.iter().map(Str::as_str).collect::<Vec<_>>(), [
-		"Fetched raw: https://raw.githubusercontent.com/owner/repo/main/large.txt",
-		"Output truncated to 500000 characters",
-	]);
+	assert_eq!(rendered.diags.len(), 2);
+	let provenance = &rendered.diags[0];
+	assert_eq!(provenance.native_kind(), Some(DiagKind::Provenance));
+	assert_eq!(provenance.severity, Severity::Info);
+	assert_eq!(provenance.continuation, None);
+	assert_eq!(provenance.artifact, None);
+	assert_eq!(provenance.omitted, None);
+	let bounded = &rendered.diags[1];
+	assert_eq!(bounded.native_kind(), Some(DiagKind::OutputBounded));
+	assert_eq!(bounded.severity, Severity::Warn);
+	assert_eq!(bounded.continuation, None);
+	assert_eq!(bounded.artifact, None);
+	let omitted = bounded.omitted.as_ref().expect("truncation count is typed");
+	assert_eq!(omitted.count, 1);
+	assert_eq!(omitted.unit, Unit::Chars);
 }
 
 #[tokio::test]
@@ -1135,9 +1134,7 @@ async fn port_npm_scraper_parity() {
 		 Grace\n\n## Dependencies\n\n- dep-a: ^1\n- dep-b: ~2\n\n---\n\n## README\n\ncanned npm \
 		 readme"
 	);
-	assert_eq!(rendered.notes.iter().map(Str::as_str).collect::<Vec<_>>(), [
-		"Fetched via npm registry"
-	]);
+	assert_single_diag(&rendered, DiagKind::Provenance, Severity::Info);
 	assert_eq!(
 		client
 			.requests()
@@ -1218,9 +1215,7 @@ async fn port_pypi_scraper_parity() {
 		 https://git.example/pkg\n- Docs: https://docs.example/pkg\n\n**Keywords:** alpha beta\n\n## \
 		 Dependencies\n\n- dep-a>=1\n- dep-b~=2\n\n---\n\n## Description\n\ncanned PyPI description"
 	);
-	assert_eq!(rendered.notes.iter().map(Str::as_str).collect::<Vec<_>>(), [
-		"Fetched via PyPI JSON API"
-	]);
+	assert_single_diag(&rendered, DiagKind::Provenance, Severity::Info);
 	assert_eq!(
 		client
 			.requests()
@@ -1310,9 +1305,7 @@ async fn port_crates_io_scraper_parity() {
 			 downloads\n\n---\n\n## README\n\n{readme}"
 		)
 	);
-	assert_eq!(rendered.notes.iter().map(Str::as_str).collect::<Vec<_>>(), [
-		"Fetched via crates.io API"
-	]);
+	assert_single_diag(&rendered, DiagKind::Provenance, Severity::Info);
 	let requests = client.requests();
 	assert_eq!(
 		requests

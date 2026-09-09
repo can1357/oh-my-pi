@@ -1,12 +1,12 @@
 //! Deterministic pre-chat native subsystem probes.
 
 use std::{
-	env, fs, io,
+	env, fs,
 	time::{SystemTime, UNIX_EPOCH},
 };
 
 use omp_catalog::snapshot;
-use omp_storage::index::SessionIndex;
+use omp_journal::Journal;
 
 /// One named smoke probe result.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -21,6 +21,7 @@ pub struct ProbeResult {
 
 /// Runs every enabled native probe, prints deterministic rows, and fails after
 /// all probes have had a chance to report.
+#[tracing::instrument(level = "debug", name = "smoke_test", skip_all)]
 pub async fn run() -> miette::Result<()> {
 	let results = [
 		probe_inference(),
@@ -32,6 +33,13 @@ pub async fn run() -> miette::Result<()> {
 	];
 	for result in &results {
 		let status = if result.ok { "ok" } else { "FAILED" };
+		if !result.ok {
+			tracing::warn!(
+				probe = result.name,
+				detail = %result.detail,
+				"smoke-test probe failed"
+			);
+		}
 		if result.detail.is_empty() {
 			println!("smoke-test: {:<10} {status}", result.name);
 		} else {
@@ -40,6 +48,7 @@ pub async fn run() -> miette::Result<()> {
 	}
 	let failures = results.iter().filter(|result| !result.ok).count();
 	if failures == 0 {
+		tracing::info!(probe_count = results.len(), "smoke test completed");
 		println!("smoke-test: ok");
 		Ok(())
 	} else {
@@ -70,9 +79,9 @@ fn probe_storage() -> ProbeResult {
 		.as_nanos();
 	let root = env::temp_dir().join(format!("omp-smoke-{}-{stamp}", std::process::id()));
 	let result = fs::create_dir(&root).and_then(|()| {
-		SessionIndex::open(root.join("sessions.sqlite3"))
+		Journal::create(root.join("session.oms"))
 			.map(|_| ())
-			.map_err(io::Error::other)
+			.map_err(std::io::Error::other)
 	});
 	let _ = fs::remove_dir_all(&root);
 	match result {

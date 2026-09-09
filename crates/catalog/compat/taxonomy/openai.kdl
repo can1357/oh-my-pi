@@ -1,5 +1,6 @@
 class "openai" {
 	namespace "openai"
+	namespace "openai" bounded=#true
 	prefix "gpt-"
 	prefix "chatgpt-"
 	prefix "codex-"
@@ -26,9 +27,11 @@ class "openai" {
 	family "o-series" glob="o4.*"
 	// Codex is a distinct product line even when its identifier is nested under GPT.
 	family "codex" glob="*codex*" priority=10
+	// Spark is its own Codex lane (independent meter, own context budget).
+	family "codex-spark" glob="*codex-spark*" priority=20
 
 	revision prefix="chatgpt-"
-	revision prefix="gpt-"
+	revision prefix="gpt-" anywhere=#true
 	revision prefix="o"
 	// Bare o-series names denote product lines, not numeric revisions.
 	revision skip-bare "o1" "o3" "o4"

@@ -132,7 +132,9 @@ fn malformed_pdf_retains_a_typed_converter_failure() {
 }
 
 #[test]
-fn converted_pdf_uses_the_standard_bounded_document_projection() {
+fn converted_pdf_projection_keeps_an_oversized_line_complete() {
+	// A single 60 KiB line exceeds the former 50 KiB read cap; the projection
+	// must still carry it whole and leave bounding to the dispatcher.
 	let long_line = "A".repeat(60 * 1024);
 	let bytes = text_pdf(&[&long_line], None);
 	let conversion = markit::convert(Path::new("large.pdf"), &bytes)
@@ -144,10 +146,9 @@ fn converted_pdf_uses_the_standard_bounded_document_projection() {
 		TextFormatOptions::new("document"),
 	);
 
-	assert!(formatted.truncated);
 	assert_eq!(formatted.total_lines, 3);
-	assert_eq!(
-		formatted.text,
-		"1:<!-- Page 1 -->\n2:\n\n[Showing lines 1-2 of 3. Use :3 to continue]"
-	);
+	assert!(formatted.text.starts_with("1:<!-- Page 1 -->\n2:\n3:"), "{}", formatted.text);
+	assert!(formatted.text.contains(&long_line), "the oversized line must be carried whole");
+	assert!(!formatted.text.contains("[Showing lines"));
+	assert!(!formatted.text.contains("[truncated:"));
 }

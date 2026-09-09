@@ -69,8 +69,7 @@ impl Row {
 		self
 			.props
 			.str_of(Prop::Sep)
-			.map(|separator| u16::try_from(xutf::width_str(separator)).unwrap_or(u16::MAX))
-			.unwrap_or(0)
+			.map_or(0, |separator| u16::try_from(xutf::width_str(separator)).unwrap_or(u16::MAX))
 	}
 
 	fn child_has_paint_content(&mut self, ctx: &UiContext, index: usize) -> bool {

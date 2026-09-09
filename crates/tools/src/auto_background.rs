@@ -17,7 +17,7 @@ use omp_tool::{
 use tokio::{runtime, time};
 
 /// Default time a managed tool waits in the foreground before detaching.
-pub const DEFAULT_AUTO_BACKGROUND_THRESHOLD: Duration = Duration::from_secs(60);
+pub const DEFAULT_AUTO_BACKGROUND_THRESHOLD: Duration = Duration::from_secs(15);
 const TIMEOUT_BUFFER: Duration = Duration::from_secs(1);
 
 /// Detached work returned by a resource adapter after ownership transfer.
@@ -145,20 +145,29 @@ mod tests {
 	#[test]
 	fn wait_budget_keeps_timeout_buffer() {
 		assert_eq!(
-			resolve_auto_background_wait(Duration::from_secs(60), Some(Duration::from_secs(30))),
-			Duration::from_secs(29),
+			resolve_auto_background_wait(
+				DEFAULT_AUTO_BACKGROUND_THRESHOLD,
+				Some(Duration::from_secs(10)),
+			),
+			Duration::from_secs(9),
 		);
 		assert_eq!(
-			resolve_auto_background_wait(Duration::from_secs(60), Some(Duration::from_millis(500))),
+			resolve_auto_background_wait(
+				DEFAULT_AUTO_BACKGROUND_THRESHOLD,
+				Some(Duration::from_millis(500)),
+			),
 			Duration::from_millis(500),
 		);
 		assert_eq!(
-			resolve_auto_background_wait(Duration::from_secs(60), Some(Duration::from_secs(120))),
-			Duration::from_secs(60),
+			resolve_auto_background_wait(
+				DEFAULT_AUTO_BACKGROUND_THRESHOLD,
+				Some(Duration::from_secs(120)),
+			),
+			Duration::from_secs(15),
 		);
 		assert_eq!(
-			resolve_auto_background_wait(Duration::from_secs(60), None),
-			Duration::from_secs(60),
+			resolve_auto_background_wait(DEFAULT_AUTO_BACKGROUND_THRESHOLD, None),
+			Duration::from_secs(15),
 		);
 	}
 

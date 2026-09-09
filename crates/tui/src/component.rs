@@ -20,7 +20,7 @@ use crate::{
 	anim::{self, Easing, Lerp, Tween},
 	components::{Markdown, hr::truncate_to_width},
 	context::UiContext,
-	frame::{Color, Decor, DecorFill, DecorKind, Frame, Gradient, Rect, Style},
+	frame::{Color, Decor, DecorFill, DecorKind, Frame, Gradient, Rect, RowMark, Style},
 	input::{Key, Mods, Mouse, UiEvent},
 	markup::{Align, Border, Dim},
 	props::{Prop, PropValue, Props},
@@ -401,6 +401,26 @@ impl Cached {
 		if self.comp.props().noselect() {
 			// The whole chrome opts out of host text selection.
 			pc.frame.push_noselect(chrome);
+		}
+		if self
+			.comp
+			.props()
+			.str_of(Prop::Zone)
+			.is_some_and(|zone| zone.as_str() == "prompt")
+			&& chrome.height > 0
+		{
+			// The chrome's first and last painted rows bracket an OSC 133
+			// prompt zone; rows past the paint clip
+			// are not on screen, so the zone closes on the last visible one.
+			let bottom = chrome
+				.y
+				.saturating_add(chrome.height)
+				.min(pc.clip)
+				.min(pc.frame.size().height);
+			if chrome.y < bottom {
+				pc.frame.mark_row(chrome.y, RowMark::PromptStart);
+				pc.frame.mark_row(bottom - 1, RowMark::PromptEnd);
+			}
 		}
 		if risen > 0 {
 			paint_lift_shadow(pc, chrome, rect);
@@ -1263,12 +1283,12 @@ fn paint_border(
 	if rect.y < pc.clip
 		&& let Some(title) = props.title()
 	{
-		border_label(pc, rect, rect.y, title, props.title_align(), base, true);
+		border_label(pc, rect, rect.y, title, props.title_align(), props.title_pad(), base, true);
 	}
 	if bottom_y < pc.clip
 		&& let Some(footer) = props.footer()
 	{
-		border_label(pc, rect, bottom_y, footer, props.footer_align(), base, false);
+		border_label(pc, rect, bottom_y, footer, props.footer_align(), 1, base, false);
 	}
 }
 
@@ -1285,6 +1305,7 @@ fn border_label(
 	y: u16,
 	text: &str,
 	align: Align,
+	title_pad: u16,
 	base: Style,
 	bold: bool,
 ) {
@@ -1293,17 +1314,32 @@ fn border_label(
 	}
 	let interior = rect.width - 2;
 	let left_pad = interior >= 2;
-	let right_pad = interior >= 3;
-	let fit = interior
-		.saturating_sub(u16::from(left_pad))
-		.saturating_sub(u16::from(right_pad));
-	let text = truncate_to_width(text, fit);
+	let mut right_pad = interior >= 3;
+	let fit = if title_pad > 1 {
+		interior
+			.saturating_sub(u16::from(left_pad))
+			.saturating_sub(u16::from(right_pad))
+			.saturating_sub(title_pad)
+	} else {
+		interior
+			.saturating_sub(u16::from(left_pad))
+			.saturating_sub(u16::from(right_pad))
+	};
+	let authored = text;
+	let mut text = truncate_to_width(authored, fit);
+	if title_pad > 1 && text.ellipsis {
+		right_pad = false;
+		let fit = interior
+			.saturating_sub(u16::from(left_pad))
+			.saturating_sub(title_pad);
+		text = truncate_to_width(authored, fit);
+	}
 	let total = text
 		.width
 		.saturating_add(u16::from(left_pad))
 		.saturating_add(u16::from(right_pad));
 	let x = match align {
-		Align::Start => rect.x.saturating_add(2),
+		Align::Start => rect.x.saturating_add(1).saturating_add(title_pad),
 		Align::Center => rect.x.saturating_add(rect.width.saturating_sub(total) / 2),
 		Align::End => rect
 			.x

@@ -10,6 +10,15 @@ use std::{
 	time::Duration,
 };
 
+use omp_ai::{
+	AccountId, PrincipalId, auth,
+	auth::{
+		APP_HEADER, AuditedCredentialReveal, AuthControlHandle, CommandCredentialError,
+		CommandCredentialExecutor, CommandExecutionFuture, CredentialControlWrite, CredentialGrants,
+		HOSTNAME_HEADER, INSTALL_ID_HEADER, OAuthControlImport, ScopedCredentialGrant,
+		UsageAttribution,
+	},
+};
 use omp_core::{EnvPath, ExposeSecret as _, InvocationPhase, Secret, SecretString, Str};
 use omp_env::{EnvClient, ExecEvent};
 pub use omp_envd::mcp::auth_authority::CombinedAuthAuthority;
@@ -19,14 +28,6 @@ use omp_envd::{
 		ControlConnectionIdentity, ControlEffect, ControlProtocolError, ControlRequestContext,
 	},
 	mcp::auth_authority::CredentialAuthority,
-};
-use omp_inference::{
-	AccountId, PrincipalId, auth,
-	auth::{
-		AuditedCredentialReveal, AuthControlHandle, CommandCredentialError,
-		CommandCredentialExecutor, CommandExecutionFuture, CredentialControlWrite, CredentialGrants,
-		OAuthControlImport, ScopedCredentialGrant,
-	},
 };
 use omp_proto::{
 	env::v1::{
@@ -49,13 +50,14 @@ use omp_secrets::{
 use serde_json::{Map, Value, json};
 use tokio_util::sync::CancellationToken;
 use tonic::{Request, metadata::MetadataValue, transport::Channel};
+use tracing::Instrument as _;
 use zeroize::Zeroizing;
 
 use crate::secrets::{key, session::SecretSessionSnapshot};
 
 /// Composes provider and MCP leasing over the one encrypted credential store.
 pub fn combined_authority(
-	store: sync::Arc<omp_inference::auth::CredentialStore>,
+	store: sync::Arc<omp_ai::auth::CredentialStore>,
 ) -> CombinedAuthAuthority {
 	CombinedAuthAuthority::new(store)
 }
@@ -72,19 +74,17 @@ impl GithubCredentialAuthority {
 	}
 }
 /// Composes the encrypted store and adapts it to environment-owned GitHub URLs.
-pub fn github_authority(
-	store: Arc<omp_inference::auth::CredentialStore>,
-) -> GithubCredentialAuthority {
+pub fn github_authority(store: Arc<omp_ai::auth::CredentialStore>) -> GithubCredentialAuthority {
 	GithubCredentialAuthority::new(Arc::new(combined_authority(store)))
 }
 
 impl omp_envd::github_url::CredentialAuthority for GithubCredentialAuthority {
 	fn provider_lease(
 		&self,
-		need: omp_inference::auth::CredentialNeed,
-	) -> futures::future::BoxFuture<
+		need: omp_ai::auth::CredentialNeed,
+	) -> omp_ai::auth::CredentialFuture<
 		'_,
-		Result<omp_inference::auth::CredentialLease, omp_inference::auth::CredentialError>,
+		Result<omp_ai::auth::CredentialLease, omp_ai::auth::CredentialError>,
 	> {
 		CredentialAuthority::provider_lease(self.inner.as_ref(), need)
 	}
@@ -343,12 +343,37 @@ impl ControlAuthority for CredentialSecretControlAuthority {
 				self.metadata_value(account)
 			},
 			"omp.creds.refresh" => {
-				let account = self.selected_account(&arguments)?;
-				self
-					.control
-					.refresh(account.clone())
-					.await
-					.map_err(auth_control_error)?;
+				let provider = self.provider(&arguments)?;
+				let account = match self.selected_account(&arguments) {
+					Ok(account) => account,
+					Err(error) => {
+						tracing::debug!(
+							error = %error,
+							"credential refresh preflight rejected"
+						);
+						return Err(error);
+					},
+				};
+				let span = tracing::debug_span!(
+					"oauth_refresh",
+					authority = "local",
+					provider = %provider,
+					credential_id = credential_id(&account)
+				);
+				if let Err(error) = self.control.refresh(account.clone()).instrument(span).await {
+					tracing::warn!(
+						provider = %provider,
+						credential_id = credential_id(&account),
+						error = %error,
+						"OAuth credential refresh failed"
+					);
+					return Err(auth_control_error(error));
+				}
+				tracing::debug!(
+					provider = %provider,
+					credential_id = credential_id(&account),
+					"OAuth credential refresh completed"
+				);
 				self.metadata_value(self.account_record(&account)?)
 			},
 			"omp.creds.clear" => {
@@ -363,14 +388,16 @@ impl ControlAuthority for CredentialSecretControlAuthority {
 			"omp.creds.disable" | "omp.creds.enable" => {
 				let account = self.selected_account(&arguments)?;
 				let enabled = operation.as_str() == "omp.creds.enable";
+				let cause = (!enabled)
+					.then(|| required_str(&arguments, "cause"))
+					.transpose()?;
 				let record = self
 					.control
-					.set_enabled(&account, enabled)
+					.set_enabled(&account, enabled, cause)
 					.map_err(store_control_error)?;
 				let mut value = self.metadata_value(record)?;
-				if !enabled {
-					value["disabled_cause"] =
-						Value::String(required_str(&arguments, "cause")?.to_owned());
+				if let Some(cause) = cause {
+					value["disabled_cause"] = Value::String(cause.to_owned());
 				}
 				Ok(value)
 			},
@@ -541,7 +568,7 @@ impl CredentialSecretControlAuthority {
 	fn account_record(
 		&self,
 		account: &AccountId<str>,
-	) -> Result<omp_inference::account::AccountRecord, ControlProtocolError> {
+	) -> Result<omp_ai::account::AccountRecord, ControlProtocolError> {
 		self
 			.control
 			.accounts(None)
@@ -552,7 +579,7 @@ impl CredentialSecretControlAuthority {
 
 	fn metadata_value(
 		&self,
-		account: omp_inference::account::AccountRecord,
+		account: omp_ai::account::AccountRecord,
 	) -> Result<Value, ControlProtocolError> {
 		let metadata = self
 			.control
@@ -598,16 +625,19 @@ impl CredentialSecretControlAuthority {
 pub struct GatewayCredentialSecretControlFactory {
 	channel:         Channel,
 	bearer_token:    Option<Arc<SecretString>>,
+	attribution:     UsageAttribution,
 	grants:          Arc<BTreeMap<Str, CredentialControlGrant>>,
 	base_rules:      Arc<[SecretRule]>,
 	placeholder_key: Arc<str>,
 }
 
 /// Constructs the credential authority used by gateway-mode application
-/// composition.
+/// composition. `attribution` is resolved once by the application and reused
+/// for every broker request.
 pub fn gateway_credential_control_factory(
 	channel: Channel,
 	bearer_token: Option<SecretString>,
+	attribution: UsageAttribution,
 	grants: BTreeMap<Str, CredentialControlGrant>,
 	base_rules: Arc<[SecretRule]>,
 	placeholder_key: impl Into<Arc<str>>,
@@ -615,6 +645,7 @@ pub fn gateway_credential_control_factory(
 	GatewayCredentialSecretControlFactory {
 		channel,
 		bearer_token: bearer_token.map(Arc::new),
+		attribution,
 		grants: Arc::new(grants),
 		base_rules,
 		placeholder_key: placeholder_key.into(),
@@ -624,12 +655,14 @@ pub fn gateway_credential_control_factory(
 /// session CONTROL factory.
 pub fn gateway_credential_secret_control_factory(
 	channel: Channel,
+	attribution: UsageAttribution,
 	grants: BTreeMap<Str, CredentialControlGrant>,
 	snapshot: &SecretSessionSnapshot,
 ) -> GatewayCredentialSecretControlFactory {
 	gateway_credential_control_factory(
 		channel,
 		None,
+		attribution,
 		grants,
 		Arc::from(snapshot.rules().to_vec()),
 		Arc::<str>::from(key::placeholder_key()),
@@ -659,6 +692,7 @@ impl ControlAuthorityFactory for GatewayCredentialSecretControlFactory {
 			identity,
 			client: AuthClient::new(self.channel.clone()),
 			bearer_token: self.bearer_token.clone(),
+			attribution: self.attribution.clone(),
 			grant,
 			masking,
 		}))
@@ -669,6 +703,7 @@ struct GatewayCredentialSecretControlAuthority {
 	identity:     Arc<ControlConnectionIdentity>,
 	client:       AuthClient<Channel>,
 	bearer_token: Option<Arc<SecretString>>,
+	attribution:  UsageAttribution,
 	grant:        CredentialControlGrant,
 	masking:      SecretMaskingAuthority,
 }
@@ -828,6 +863,15 @@ impl GatewayCredentialSecretControlAuthority {
 
 	fn authenticated<T>(&self, message: T) -> Result<Request<T>, ControlProtocolError> {
 		let mut request = Request::new(message);
+		let attribution = self.attribution.headers();
+		for name in [INSTALL_ID_HEADER, APP_HEADER, HOSTNAME_HEADER] {
+			if let Some(value) = attribution.get(name)
+				&& let Ok(value) = value.to_str()
+				&& let Ok(value) = MetadataValue::try_from(value)
+			{
+				request.metadata_mut().insert(name, value);
+			}
+		}
 		if let Some(token) = &self.bearer_token {
 			let encoded = Zeroizing::new(format!("Bearer {}", token.expose_secret()));
 			let mut value = MetadataValue::try_from(encoded.as_str())
@@ -951,12 +995,42 @@ impl GatewayCredentialSecretControlAuthority {
 					.map(|response| remote_metadata_value(response.into_inner()))
 			},
 			"omp.creds.refresh" => {
-				let id = self.selected_credential_id(&provider, arguments).await?;
-				client
+				let id = match self.selected_credential_id(&provider, arguments).await {
+					Ok(id) => id,
+					Err(error) => {
+						tracing::debug!(
+							provider = %provider,
+							error = %error,
+							"credential refresh preflight rejected"
+						);
+						return Err(error);
+					},
+				};
+				let span = tracing::debug_span!(
+					"oauth_refresh",
+					authority = "gateway",
+					provider = %provider,
+					credential_id = id
+				);
+				let response = client
 					.refresh_credential(self.authenticated(RefreshCredentialRequest { id })?)
+					.instrument(span)
 					.await
-					.map_err(remote_control_error)
-					.map(|response| remote_metadata_value(response.into_inner()))
+					.map_err(|error| {
+						tracing::warn!(
+							provider = %provider,
+							credential_id = id,
+							error = %error,
+							"OAuth credential refresh failed"
+						);
+						remote_control_error(error)
+					})?;
+				tracing::debug!(
+					provider = %provider,
+					credential_id = id,
+					"OAuth credential refresh completed"
+				);
+				Ok(remote_metadata_value(response.into_inner()))
 			},
 			"omp.creds.clear" => {
 				let id = self.selected_credential_id(&provider, arguments).await?;
@@ -1226,7 +1300,7 @@ fn store_control_error(error: auth::StoreError) -> ControlProtocolError {
 	}
 }
 
-fn auth_control_error(error: omp_inference::Error) -> ControlProtocolError {
+fn auth_control_error(error: omp_ai::Error) -> ControlProtocolError {
 	control_error("CredentialOperationFailed", error.to_string())
 }
 

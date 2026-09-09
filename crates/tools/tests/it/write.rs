@@ -1,12 +1,12 @@
-//! Pi-equivalent `write@1` schema, guards, transactions, and exact output
-//! contracts.
+//! `write@2` schema, guards, transactions, and exact output contracts.
 
 use std::{future, future::Future, sync::Arc, time::Duration};
 
 use futures::{StreamExt, executor::block_on};
 use omp_core::{Str, sf};
 use omp_tool::{
-	Abort, CapsBase, Ev, IncomingParams, Interrupt, ModelClass, Part, PromptCaps, Tool, ToolTerminal,
+	Abort, CapsBase, Diag, DiagKind, Ev, IncomingParams, Interrupt, ModelClass, Part, PromptCaps,
+	Severity, Tool, ToolTerminal,
 };
 use omp_tools::{
 	read::selector::LiteralPathProbe,
@@ -110,6 +110,7 @@ struct Invocation {
 	result:  Result<write::Payload, Fault>,
 	useless: bool,
 	text:    String,
+	diags:   Vec<Diag>,
 }
 
 fn committed(
@@ -135,8 +136,18 @@ fn invoke(documents: FakeDocuments, raw: &str) -> Invocation {
 		.args_committed(Str::new(raw))
 		.expect("invocation consumer remains live");
 	let events = block_on(tool.call(params).collect::<Vec<_>>());
-	let [Ev::Done(ToolTerminal::Done { result, useless })] = events.as_slice() else {
-		panic!("expected one terminal write outcome: {events:?}");
+	let Some((terminal, preceding)) = events.split_last() else {
+		panic!("expected a terminal write outcome");
+	};
+	let diags = preceding
+		.iter()
+		.map(|event| match event {
+			Ev::Diag(diag) => diag.clone(),
+			_ => panic!("expected diagnostics before terminal write outcome: {events:?}"),
+		})
+		.collect();
+	let Ev::Done(ToolTerminal::Done { result, useless }) = terminal else {
+		panic!("expected terminal write outcome last: {events:?}");
 	};
 	let parts = tool.prompt(
 		result.as_ref(),
@@ -158,7 +169,7 @@ fn invoke(documents: FakeDocuments, raw: &str) -> Invocation {
 			Part::Blob { .. } => panic!("write must never project blobs"),
 		})
 		.collect();
-	Invocation { result: result.clone(), useless: *useless, text }
+	Invocation { result: result.clone(), useless: *useless, text, diags }
 }
 
 #[test]
@@ -169,7 +180,7 @@ fn generated_schema_definition_and_revision_are_exact() {
 	);
 	let tool = write::tool(documents);
 	assert_eq!(tool.spec().name, "write");
-	assert_eq!(tool.spec().rev.to_string(), "1");
+	assert_eq!(tool.spec().rev.to_string(), "2");
 	assert_eq!(
 		tool.spec().schema.as_ref(),
 		omp_tool::schema::<write::Params>().as_ref(),
@@ -180,10 +191,18 @@ fn generated_schema_definition_and_revision_are_exact() {
 		json!({
 			"type": "object",
 			"additionalProperties": false,
-			"required": ["path", "content"],
+			"required": ["i", "path", "content"],
 			"properties": {
 				"path": {"type": "string", "description": "file path"},
-				"content": {"type": "string", "description": "file content"}
+				"content": {"type": "string", "description": "file content"},
+				"i": {
+					"type": "string",
+					"description": "Short present-participle intent for this call."
+				},
+				"notrunc": {
+					"type": "boolean",
+					"description": "Prefer complete output inline up to the host security ceiling; overflow or transport backpressure remains available through its artifact."
+				}
 			}
 		})
 	);
@@ -202,10 +221,14 @@ fn generated_schema_definition_and_revision_are_exact() {
 		 `.tar.gz`/`.tgz`, and `.tar.zst` archive entries via `archive.ext:path/inside/archive`; \
 		 other archive formats (including `.asar`) are read-only\n- Supports SQLite row operations \
 		 via `db.sqlite:table` (insert), `db.sqlite:table:key` (update with JSON content, delete \
-		 with empty content)\n- Supports registered merge-conflict splices via `conflict://<id>` \
-		 and `@ours`/`@base`/`@theirs`/`@both`\n</conditions>\n\n<critical>\n- You SHOULD use Edit \
-		 tool for modifying existing files\n- You NEVER create documentation files (*.md, README) \
-		 unless explicitly requested\n- You NEVER use emojis unless requested\n</critical>"
+		 with empty content)\n- Supports whole-file writes to configured or Obsidian-discovered \
+		 `vault://<name>/path` resources; Obsidian operations use `?op=create[&overwrite]`, \
+		 `?op=move&to=<path>`, `?op=delete[&permanent]`, or `?op=open[&newtab]` (the latter three \
+		 require empty content); partial selectors remain read-only\n- Supports registered \
+		 merge-conflict splices via `conflict://<id>` and \
+		 `@ours`/`@base`/`@theirs`/`@both`\n</conditions>\n\n<critical>\n- You SHOULD use Edit tool \
+		 for modifying existing files\n- You NEVER create documentation files (*.md, README) unless \
+		 explicitly requested\n- You NEVER use emojis unless requested\n</critical>"
 	);
 }
 
@@ -265,7 +288,7 @@ fn success_count_matches_javascript_utf16_length_while_payload_keeps_utf8_bytes(
 }
 
 #[test]
-fn copied_hashline_display_is_stripped_before_commit_with_exact_notice() {
+fn copied_hashline_display_emits_content_normalized_diag() {
 	let documents = FakeDocuments::success(
 		LiteralPathProbe::Missing,
 		committed(WriteDisposition::Created, 13, false, Some("BEEF")),
@@ -275,11 +298,13 @@ fn copied_hashline_display_is_stripped_before_commit_with_exact_notice() {
 		documents,
 		r#"{"path":"[out.txt#1234]","content":"[source.txt#ABCD]\n1:first\n2:second\n"}"#,
 	);
-	assert_eq!(
-		invocation.text,
-		"[out.txt#BEEF]\nSuccessfully wrote 13 bytes to out.txt\nNote: auto-stripped hashline \
-		 display prefixes from content before writing."
-	);
+	assert_eq!(invocation.text, "[out.txt#BEEF]\nSuccessfully wrote 13 bytes to out.txt");
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::ContentNormalized));
+	assert_eq!(invocation.diags[0].severity, Severity::Info);
+	assert_eq!(invocation.diags[0].continuation, None);
+	assert_eq!(invocation.diags[0].artifact, None);
+	assert_eq!(invocation.diags[0].omitted, None);
 	assert!(
 		invocation
 			.result
@@ -295,17 +320,19 @@ fn copied_hashline_display_is_stripped_before_commit_with_exact_notice() {
 }
 
 #[test]
-fn shebang_chmod_truth_appends_the_exact_notice() {
+fn shebang_execute_bits_emit_made_executable_diag() {
 	let documents = FakeDocuments::success(
 		LiteralPathProbe::Missing,
 		committed(WriteDisposition::Created, 18, true, Some("C0DE")),
 	);
 	let invocation = invoke(documents, r##"{"path":"out.txt","content":"#!/bin/sh\necho hi\n"}"##);
-	assert_eq!(
-		invocation.text,
-		"[out.txt#C0DE]\nSuccessfully wrote 18 bytes to out.txt\n[Notice: Made executable via chmod \
-		 +x]"
-	);
+	assert_eq!(invocation.text, "[out.txt#C0DE]\nSuccessfully wrote 18 bytes to out.txt");
+	assert_eq!(invocation.diags.len(), 1);
+	assert_eq!(invocation.diags[0].native_kind(), Some(DiagKind::MadeExecutable));
+	assert_eq!(invocation.diags[0].severity, Severity::Info);
+	assert_eq!(invocation.diags[0].continuation, None);
+	assert_eq!(invocation.diags[0].artifact, None);
+	assert_eq!(invocation.diags[0].omitted, None);
 	assert!(
 		invocation
 			.result
@@ -398,82 +425,31 @@ fn unsupported_uri_is_rejected_before_any_document_probe() {
 }
 
 #[test]
-fn retired_device_write_targets_are_rejected_with_xd_builtin_guidance() {
-	let cases = [
-		("xd/report_issue", Some("report_issue"), true),
-		("xd://report_issue", Some("report_issue"), true),
-		("xd:/report_issue", Some("report_issue"), true),
-		("dx:/report_issue", Some("report_issue"), true),
-		("xdd://report_issue", Some("report_issue"), true),
-		("xdt:/report_issue", Some("report_issue"), true),
-		("device:/custom_tool", Some("custom_tool"), false),
-		("xd/", None, true),
-	];
+fn uri_like_device_target_is_rejected_with_dyn_builtin_guidance() {
+	let target = "device:/custom_tool";
+	let documents = FakeDocuments::success(
+		LiteralPathProbe::Missing,
+		committed(WriteDisposition::Created, 0, false, None),
+	);
+	let probed = Arc::clone(&documents.probed);
+	let requests = Arc::clone(&documents.requests);
+	let raw = serde_json::to_string(&json!({
+		"path": target,
+		"content": "payload"
+	}))
+	.unwrap();
+	let invocation = invoke(documents, &raw);
 
-	for (target, tool_name, is_retired) in cases {
-		let documents = FakeDocuments::success(
-			LiteralPathProbe::Missing,
-			committed(WriteDisposition::Created, 0, false, None),
-		);
-		let probed = Arc::clone(&documents.probed);
-		let requests = Arc::clone(&documents.requests);
-		let raw = serde_json::to_string(&json!({
-			"path": target,
-			"content": "payload"
-		}))
-		.unwrap();
-		let invocation = invoke(documents, &raw);
+	assert!(invocation.result.is_err());
+	assert!(probed.lock().is_empty());
+	assert!(requests.lock().is_empty());
 
-		assert!(invocation.result.is_err(), "target '{target}' should fail");
-		assert!(probed.lock().is_empty(), "target '{target}' probed document");
-		assert!(requests.lock().is_empty(), "target '{target}' requested write");
-
-		let text = &invocation.text;
-		if is_retired {
-			assert!(
-				text.starts_with("Unknown retired device target."),
-				"expected retired target prefix for '{target}', got: '{text}'"
-			);
-		} else {
-			assert!(
-				text.starts_with(&format!("Unknown URI-like write target '{target}'.")),
-				"expected URI-like target prefix for '{target}', got: '{text}'"
-			);
-		}
-		assert!(
-			text.contains("`xd` runs in the bash tool"),
-			"missing shell builtin guidance in '{text}' for '{target}'"
-		);
-		assert!(
-			text.contains("`xd` lists devices"),
-			"missing catalog guidance in '{text}' for '{target}'"
-		);
-		if let Some(name) = tool_name {
-			assert!(
-				text.contains(&format!("`xd {name} --help` shows usage")),
-				"missing specific help command in '{text}' for '{target}'"
-			);
-			assert!(
-				text.contains(&format!("`xd {name} [args…]` invokes")),
-				"missing specific invocation command in '{text}' for '{target}'"
-			);
-		} else {
-			assert!(
-				text.contains("`xd <device> --help` shows usage"),
-				"missing generic help command in '{text}' for '{target}'"
-			);
-			assert!(
-				text.contains("`xd <device> [args…]` invokes"),
-				"missing generic invocation command in '{text}' for '{target}'"
-			);
-		}
-		assert!(
-			!text.contains("xd://"),
-			"diagnostic for '{target}' suggests an xd invocation URL: '{text}'"
-		);
-		assert!(!text.contains("dyn"), "retired dyn guidance in '{text}' for '{target}'");
-		assert!(!text.contains("do_"), "retired do_ guidance in '{text}' for '{target}'");
-	}
+	let text = &invocation.text;
+	assert!(text.starts_with("Unknown URI-like write target 'device:/custom_tool'."));
+	assert!(text.contains("`dyn` runs in the bash tool"));
+	assert!(text.contains("`dyn` lists devices"));
+	assert!(text.contains("`dyn custom_tool --help` shows usage"));
+	assert!(text.contains("`dyn custom_tool [args…]` invokes"));
 }
 
 async fn interrupt_stalled_special_write(

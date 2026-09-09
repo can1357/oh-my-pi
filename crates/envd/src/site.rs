@@ -14,11 +14,8 @@ use std::{
 use bytes::Bytes;
 use omp_core::{ArtifactDigest, Hash32, Str, encoding::hex};
 use omp_ext::{ExtensionCode, ExtensionError, config::StaticDeclarations};
+use omp_journal::blob::{self, BlobRef, BlobStore};
 use omp_proto::env::v1 as pb;
-use omp_storage::{
-	blob,
-	blob::{BlobRef, BlobStore},
-};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 static SITE_TEMP_SEQUENCE: AtomicU64 = AtomicU64::new(0);
@@ -119,9 +116,17 @@ pub fn validate_trusted_module(path: &Path) -> Result<TrustedModule, SiteError> 
 	if !canonical.is_file() {
 		return Err(trusted_load_error(path, "trusted module is not a regular file"));
 	}
-	let module = canonical
-		.file_stem()
-		.and_then(|value| value.to_str())
+	let stem = canonical.file_stem().and_then(|value| value.to_str());
+	// A package `__init__.py` imports under its directory's name.
+	let module = if stem == Some("__init__") {
+		canonical
+			.parent()
+			.and_then(|parent| parent.file_name())
+			.and_then(|name| name.to_str())
+	} else {
+		stem
+	};
+	let module = module
 		.filter(|value| python_identifier(value))
 		.map(Str::new)
 		.ok_or_else(|| trusted_load_error(path, "module filename is not a Python identifier"))?;
@@ -526,8 +531,8 @@ fn create_directory_symlink(target: &Path, link: &Path) -> io::Result<()> {
 mod tests {
 	use bytes::Bytes;
 	use omp_core::sf;
+	use omp_journal::blob::BlobStore;
 	use omp_proto::env::v1;
-	use omp_storage::blob::BlobStore;
 
 	use super::{OwnershipMap, SiteError, SiteMaterializer};
 

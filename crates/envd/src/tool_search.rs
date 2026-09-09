@@ -3,18 +3,20 @@
 use std::{
 	cmp,
 	collections::{HashMap, HashSet, VecDeque},
-	fmt::{self, Display},
-	fs,
-	future::Future,
-	io,
+	fmt::Display,
+	fs, io,
 	path::{Component, Path, PathBuf},
-	sync,
+	str,
+	sync::{
+		self, Arc,
+		atomic::{AtomicBool, Ordering},
+	},
 	time::{Duration, Instant, UNIX_EPOCH},
 };
 
 use bytes::Bytes;
-use omp_core::{Hash32, Str};
-use omp_hashline::{RevisionToken, compute_snapshot_tag};
+use omp_core::Str;
+use omp_edit::store::file_hash;
 use omp_tools::{
 	glob::{self, WalkMatch, WalkResult},
 	grep::{
@@ -35,12 +37,13 @@ use tokio::{task, time};
 use tokio_util::sync::CancellationToken;
 
 use super::{
-	docs::DocumentHost, tool_read_sources::ReadSourceAdapter, tool_url::UrlResolver,
-	workspace::WorkspaceHost,
+	docs::DocumentHost, tool_document::snapshot_text, tool_read_sources::ReadSourceAdapter,
+	tool_url::UrlResolver, workspace::WorkspaceHost,
 };
 
 const CANCELLED_REASON: &str = "workspace traversal future was dropped";
 const SNAPSHOT_MAX_BYTES: u64 = 4 * 1024 * 1024;
+const INTERNAL_ROOT_MAX_ENTRIES: usize = 4_096;
 
 /// Cloneable bridge from generic search tools to the app-owned workspace and
 /// session document state.
@@ -66,6 +69,29 @@ impl WorkspaceSearchAdapter {
 }
 
 impl WorkspaceSearch for WorkspaceSearchAdapter {
+	fn prepare_roots(
+		&self,
+		roots: Vec<SearchRoot>,
+		unsplit: Option<SearchRoot>,
+	) -> impl Future<Output = Result<Vec<SearchRoot>, grep::Fault>> + Send + '_ {
+		let host = self.host.clone();
+		async move {
+			let Some(mut unsplit) = unsplit.filter(|root| root.kind == SearchRootKind::Filesystem)
+			else {
+				return Ok(roots);
+			};
+			if resolve_literal_grep_target(&host, unsplit.original.as_str())?.is_some() {
+				unsplit.path = unsplit.original.clone();
+				unsplit.ranges = Box::default();
+				return Ok(vec![unsplit]);
+			}
+			if resolve_literal_grep_target(&host, unsplit.path.as_str())?.is_some() {
+				return Ok(vec![unsplit]);
+			}
+			Ok(roots)
+		}
+	}
+
 	fn search(
 		&self,
 		request: grep::SearchRequest,
@@ -75,7 +101,11 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 		let resolvers = sync::Arc::clone(&self.resolvers);
 		async move {
 			let cancel = CancellationToken::new();
-			let cancel_on_drop = CancelOnDrop(cancel.clone());
+			let blocking_cancel = Arc::new(AtomicBool::new(false));
+			let cancel_on_drop = BlockingCancelOnDrop {
+				token:    cancel.clone(),
+				blocking: Arc::clone(&blocking_cancel),
+			};
 			let deadline = Instant::now()
 				.checked_add(Duration::from_millis(u64::from(request.timeout_ms)))
 				.unwrap_or_else(Instant::now);
@@ -89,7 +119,7 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 			)
 			.await?;
 			let operation = task::spawn_blocking(move || {
-				search_blocking(&host, request, external, deadline, &cancel)
+				search_blocking(&host, request, external, deadline, &cancel, blocking_cancel)
 			});
 			let result = operation.await.map_err(|error| grep::Fault::Workspace {
 				message: Str::from(format!("workspace search task failed: {error}")),
@@ -99,17 +129,37 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 		}
 	}
 
+	fn stage_snapshots(&self, snapshots: Vec<SearchSnapshot>) -> Result<(), grep::Fault> {
+		let store = self.documents.snapshot_store();
+		for snapshot in snapshots {
+			let text = snapshot_text(&snapshot.bytes).ok_or_else(|| grep::Fault::Workspace {
+				message: Str::new_static("grep snapshot content is not UTF-8"),
+			})?;
+			store.record(Path::new(snapshot.source_key.as_str()), &text, None);
+		}
+		Ok(())
+	}
+
 	fn record_snapshots(&self, records: Vec<grep::SnapshotRecord>) -> Result<(), grep::Fault> {
-		let mut store = self.documents.snapshot_store().lock();
+		let store = self.documents.snapshot_store();
 		for record in records {
-			store
-				.record(
-					record.source_key,
-					RevisionToken::new(&record.revision),
-					record.bytes,
-					record.seen_lines,
-				)
-				.map_err(grep_workspace_message)?;
+			let tag = str::from_utf8(&record.revision).map_err(|_| grep::Fault::Workspace {
+				message: Str::new_static("grep snapshot identity is invalid"),
+			})?;
+			let path = Path::new(record.source_key.as_str());
+			let Some(snapshot) = store.by_hash(path, tag) else {
+				return Err(grep::Fault::Workspace {
+					message: Str::new_static(
+						"grep snapshot revision expired before visibility authorization",
+					),
+				});
+			};
+			let seen_lines = record
+				.seen_lines
+				.into_iter()
+				.filter_map(|line| u32::try_from(line).ok())
+				.collect::<Vec<_>>();
+			store.record_seen_lines(path, &snapshot.hash, &seen_lines);
 		}
 		Ok(())
 	}
@@ -117,12 +167,12 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 	fn glob(
 		&self,
 		request: glob::WalkRequest,
+		cancellation: CancellationToken,
 	) -> impl Future<Output = Result<WalkResult, glob::Fault>> + Send + '_ {
 		let host = self.host.clone();
 		async move {
-			let cancel = CancellationToken::new();
-			let cancel_on_drop = CancelOnDrop(cancel.clone());
-			let operation = task::spawn_blocking(move || glob_blocking(&host, request, &cancel));
+			let cancel_on_drop = CancelOnDrop(cancellation.clone());
+			let operation = task::spawn_blocking(move || glob_blocking(&host, request, &cancellation));
 			let result = operation.await.map_err(|error| glob::Fault::Workspace {
 				message: Str::from(format!("workspace walk task failed: {error}")),
 			})?;
@@ -134,34 +184,87 @@ impl WorkspaceSearch for WorkspaceSearchAdapter {
 	fn glob_resource(
 		&self,
 		request: glob::WalkRequest,
+		cancellation: CancellationToken,
 	) -> impl Future<Output = Option<Result<WalkResult, glob::Fault>>> + Send + '_ {
 		let resolvers = sync::Arc::clone(&self.resolvers);
+		let host = self.host.clone();
 		async move {
-			if !request.path.as_str().split(';').any(|target| {
-				target.trim().to_ascii_lowercase().starts_with("ssh://")
-					|| target.trim().to_ascii_lowercase().starts_with("memory://")
-			}) {
+			if !split_top_level_semicolons(request.path.as_str())
+				.into_iter()
+				.any(is_resource_glob_target)
+			{
 				return None;
 			}
-			Some(resource_glob(&resolvers, request).await)
+			Some(resource_glob(&resolvers, &host, request, &cancellation).await)
 		}
 	}
 }
 
+fn is_resource_glob_target(target: &str) -> bool {
+	let Some((scheme, _)) = target.trim().split_once("://") else {
+		return false;
+	};
+	matches!(Scheme::parse(scheme), Scheme::Ssh | Scheme::Vault | Scheme::Memory)
+}
+
 async fn resource_glob(
 	resolvers: &ResolverTable<UrlResolver>,
+	host: &WorkspaceHost,
 	request: glob::WalkRequest,
+	cancellation: &CancellationToken,
 ) -> Result<WalkResult, glob::Fault> {
+	let deadline = time::Instant::now() + Duration::from_millis(request.timeout_ms);
 	let mut matches = Vec::new();
 	let mut missing_paths = Vec::new();
+	let mut found_target = false;
 	let mut truncated = false;
-	for target in request
-		.path
-		.as_str()
-		.split(';')
+	let mut timed_out = false;
+	'targets: for target in split_top_level_semicolons(request.path.as_str())
+		.into_iter()
 		.map(str::trim)
 		.filter(|target| !target.is_empty())
 	{
+		if cancellation.is_cancelled() {
+			return Err(cancelled_glob());
+		}
+		if time::Instant::now() >= deadline {
+			timed_out = true;
+			break;
+		}
+		if !target.contains("://") {
+			let remaining = deadline.saturating_duration_since(time::Instant::now());
+			let local_request = glob::WalkRequest {
+				path:       Str::new(target),
+				hidden:     request.hidden,
+				gitignore:  request.gitignore,
+				limit:      request.limit,
+				timeout_ms: duration_millis(remaining),
+			};
+			let local_host = host.clone();
+			let local_cancellation = cancellation.clone();
+			let local = task::spawn_blocking(move || {
+				glob_blocking(&local_host, local_request, &local_cancellation)
+			})
+			.await
+			.map_err(|error| glob::Fault::Workspace {
+				message: Str::from(format!("workspace walk task failed: {error}")),
+			})?;
+			match local {
+				Ok(result) => {
+					found_target = true;
+					matches.extend(result.matches);
+					missing_paths.extend(result.missing_paths);
+					truncated |= result.truncated;
+					if result.timed_out {
+						timed_out = true;
+						break;
+					}
+				},
+				Err(glob::Fault::PathNotFound { paths }) => missing_paths.extend(paths),
+				Err(fault) => return Err(fault),
+			}
+			continue;
+		}
 		let parsed = parse_uri(target)
 			.map_err(|error| glob::Fault::Workspace { message: Str::new(error.to_string()) })?
 			.ok_or_else(|| glob::Fault::UnsupportedScheme { scheme: Str::new_static("file") })?;
@@ -194,20 +297,41 @@ async fn resource_glob(
 		let mut pending = VecDeque::from([Str::new(base)]);
 		let mut listed_any = false;
 		while let Some(directory) = pending.pop_front() {
+			if cancellation.is_cancelled() {
+				return Err(cancelled_glob());
+			}
+			if time::Instant::now() >= deadline {
+				timed_out = true;
+				break 'targets;
+			}
 			if matches.len() >= request.limit as usize || pending.len() > 10_000 {
 				truncated = true;
 				break;
 			}
-			let Some(listed) = resolvers
-				.list(parsed.scheme, &directory, request.limit as usize + 1, 1024 * 1024)
-				.await
-			else {
+			let listed = tokio::select! {
+				biased;
+				() = cancellation.cancelled() => return Err(cancelled_glob()),
+				result = time::timeout_at(
+					deadline,
+					resolvers.list(parsed.scheme, &directory, request.limit as usize + 1, 1024 * 1024),
+				) => match result {
+					Ok(result) => result,
+					Err(_) => {
+						timed_out = true;
+						break 'targets;
+					},
+				},
+			};
+			let Some(listed) = listed else {
 				return Err(glob::Fault::UnsupportedScheme {
 					scheme: Str::new(parsed.raw_scheme.to_ascii_lowercase()),
 				});
 			};
 			let listed = match listed {
-				Ok(value) => value,
+				Ok(value) => {
+					found_target = true;
+					value
+				},
 				Err(_) if !listed_any => {
 					missing_paths.push(Str::new(target));
 					break;
@@ -237,12 +361,23 @@ async fn resource_glob(
 			}
 		}
 	}
-	if matches.is_empty() && !missing_paths.is_empty() {
+	if !found_target && !missing_paths.is_empty() {
 		return Err(glob::Fault::PathNotFound { paths: missing_paths });
 	}
-	matches.sort_unstable_by(|left, right| left.path.cmp(&right.path));
-	matches.dedup_by(|left, right| left.path == right.path);
-	Ok(WalkResult { matches, missing_paths, timed_out: false, truncated })
+	matches.sort_by(|left, right| {
+		right
+			.modified_ms
+			.cmp(&left.modified_ms)
+			.then_with(|| left.path.cmp(&right.path))
+	});
+	let mut seen = HashSet::with_capacity(matches.len());
+	matches.retain(|entry| seen.insert(entry.path.clone()));
+	let retain = usize::try_from(request.limit).unwrap_or(usize::MAX);
+	if matches.len() > retain {
+		truncated = true;
+		matches.truncate(retain);
+	}
+	Ok(WalkResult { matches, missing_paths, timed_out, truncated })
 }
 
 #[must_use]
@@ -251,6 +386,19 @@ struct CancelOnDrop(CancellationToken);
 impl Drop for CancelOnDrop {
 	fn drop(&mut self) {
 		self.0.cancel();
+	}
+}
+
+#[must_use]
+struct BlockingCancelOnDrop {
+	token:    CancellationToken,
+	blocking: Arc<AtomicBool>,
+}
+
+impl Drop for BlockingCancelOnDrop {
+	fn drop(&mut self) {
+		self.blocking.store(true, Ordering::Relaxed);
+		self.token.cancel();
 	}
 }
 
@@ -301,6 +449,15 @@ async fn materialize_external_roots(
 						.map_err(|_| grep::Fault::TimedOut)?;
 				match archive {
 					Ok((targets, unreadable)) => {
+						if !root.ranges.is_empty() && targets.len().saturating_add(unreadable.len()) != 1
+						{
+							return Err(grep::Fault::InvalidSelector {
+								message: Str::from(format!(
+									"Line-range selector requires a single archive member: {}",
+									root.original
+								)),
+							});
+						}
 						if !targets.is_empty() {
 							materialized.by_root.insert(root_index, targets);
 						}
@@ -318,11 +475,19 @@ async fn materialize_external_roots(
 				materialized.by_root.insert(root_index, vec![target]);
 			},
 			SearchRootKind::Internal => {
-				let target =
+				let targets =
 					time::timeout(remaining, materialize_internal_root(resolvers, root, root_index))
 						.await
 						.map_err(|_| grep::Fault::TimedOut)??;
-				materialized.by_root.insert(root_index, vec![target]);
+				if !root.ranges.is_empty() && targets.len() != 1 {
+					return Err(grep::Fault::InvalidSelector {
+						message: Str::from(format!(
+							"Line-range selector requires a single internal resource: {}",
+							root.original
+						)),
+					});
+				}
+				materialized.by_root.insert(root_index, targets);
 			},
 		}
 	}
@@ -452,10 +617,44 @@ async fn materialize_internal_root(
 	resolvers: &ResolverTable<UrlResolver>,
 	root: &SearchRoot,
 	root_index: usize,
-) -> Result<MemorySearchTarget, grep::Fault> {
+) -> Result<Vec<MemorySearchTarget>, grep::Fault> {
 	let parsed = parse_uri(root.path.as_str())
 		.map_err(grep_workspace_message)?
 		.ok_or_else(|| grep_workspace_message(format!("invalid internal URI: {}", root.path)))?;
+	let root_index = u64::try_from(root_index).unwrap_or(u64::MAX);
+	if parsed.scheme == Scheme::Omp
+		&& (parsed.resource.is_empty() || parsed.resource.trim_matches('/') == "docs")
+	{
+		let (completions, truncated) = resolvers
+			.complete(Scheme::Omp, "", INTERNAL_ROOT_MAX_ENTRIES)
+			.await
+			.ok_or_else(|| grep_workspace_message("omp:// documentation resolver is unavailable"))?
+			.map_err(|error| grep_workspace_message(error.message()))?;
+		if truncated {
+			return Err(grep_workspace_message(
+				"omp:// documentation catalog exceeded the bounded search inventory",
+			));
+		}
+		let mut targets = Vec::with_capacity(completions.len());
+		for completion in completions {
+			let uri = completion.value;
+			let doc = parse_uri(uri.as_str())
+				.map_err(grep_workspace_message)?
+				.ok_or_else(|| grep_workspace_message(format!("invalid documentation URI: {uri}")))?;
+			let content = resolvers
+				.read_query(doc.scheme, &doc.resource, doc.query, &ParsedSelector::None)
+				.await
+				.ok_or_else(|| grep_workspace_message("omp:// documentation resolver disappeared"))?
+				.map_err(|error| grep_workspace_message(error.message()))?;
+			targets.push(MemorySearchTarget {
+				root_index,
+				source_key: uri.clone(),
+				path: uri,
+				content: content.into_bytes(),
+			});
+		}
+		return Ok(targets);
+	}
 	let content = resolvers
 		.read_query(parsed.scheme, &parsed.resource, parsed.query, &ParsedSelector::None)
 		.await
@@ -463,12 +662,12 @@ async fn materialize_internal_root(
 			grep_workspace_message(format!("unsupported internal URI scheme: {}", parsed.raw_scheme))
 		})?
 		.map_err(|error| grep_workspace_message(error.message()))?;
-	Ok(MemorySearchTarget {
-		root_index: u64::try_from(root_index).unwrap_or(u64::MAX),
+	Ok(vec![MemorySearchTarget {
+		root_index,
 		source_key: root.path.clone(),
-		path:       root.path.clone(),
-		content:    content.into_bytes(),
-	})
+		path: root.path.clone(),
+		content: content.into_bytes(),
+	}])
 }
 
 #[derive(Debug)]
@@ -482,6 +681,7 @@ fn search_blocking(
 	mut external: ExternalMaterialization,
 	deadline: Instant,
 	cancel: &CancellationToken,
+	blocking_cancel: Arc<AtomicBool>,
 ) -> Result<SearchResult, grep::Fault> {
 	check_grep_cancel(cancel)?;
 	let mut targets = Vec::new();
@@ -509,6 +709,14 @@ fn search_blocking(
 			},
 			SearchRootKind::Filesystem => match resolve_grep_target(host, root.path.as_str())? {
 				Some(GrepTarget::Filesystem { path, glob, is_file, .. }) => {
+					if !root.ranges.is_empty() && !is_file {
+						return Err(grep::Fault::InvalidSelector {
+							message: Str::from(format!(
+								"Line-range selector requires a single file: {} is a directory",
+								root.original
+							)),
+						});
+					}
 					targets.push(GrepTarget::Filesystem {
 						root_index: u64::try_from(root_index).unwrap_or(u64::MAX),
 						path,
@@ -545,6 +753,7 @@ fn search_blocking(
 	};
 	let mut remaining = request.max_count;
 	let mut matches = Vec::new();
+	let mut seen_matches = HashSet::new();
 	let mut limit_reached = false;
 	let mut skipped_oversized = 0_u32;
 	let mut oversized_files = Vec::new();
@@ -560,7 +769,8 @@ fn search_blocking(
 		let (display_path, glob) = match target {
 			GrepTarget::Filesystem { path, glob, is_file, .. } => {
 				if *is_file
-					&& fs::metadata(path).is_ok_and(|metadata| metadata.len() > omp_grep::MAX_FILE_BYTES)
+					&& fs::metadata(path)
+						.is_ok_and(|metadata| metadata.len() > crate::grep::MAX_FILE_BYTES)
 				{
 					oversized_files.push(workspace_relative(host.root(), path)?);
 				}
@@ -568,7 +778,7 @@ fn search_blocking(
 			},
 			GrepTarget::Memory(memory) => (memory.path.clone(), None),
 		};
-		let options = omp_grep::GrepOptions {
+		let options = crate::grep::GrepOptions {
 			pattern: request.pattern.clone(),
 			path: display_path,
 			glob,
@@ -581,20 +791,23 @@ fn search_blocking(
 			context_before: request.context_before,
 			context_after: request.context_after,
 			max_columns: Some(request.max_columns),
-			mode: omp_grep::GrepOutputMode::Content,
+			mode: crate::grep::GrepOutputMode::Content,
 			timeout_ms: Some(timeout_ms),
 		};
 		let native = match target {
 			GrepTarget::Filesystem { .. } => {
-				omp_grep::grep(&options).map_err(map_native_grep_fault)?
+				crate::grep::grep_with_cancellation(&options, blocking_cancel.as_ref())
+					.map_err(map_native_grep_fault)?
 			},
-			GrepTarget::Memory(memory) => {
-				omp_grep::search(&memory.content, &options).map_err(map_native_grep_fault)?
-			},
+			GrepTarget::Memory(memory) => crate::grep::search_with_cancellation(
+				&memory.content,
+				&options,
+				blocking_cancel.as_ref(),
+			)
+			.map_err(map_native_grep_fault)?,
 		};
 		skipped_oversized = skipped_oversized.saturating_add(native.skipped_oversized);
 		limit_reached |= native.limit_reached;
-		remaining = remaining.saturating_sub(u32::try_from(native.matches.len()).unwrap_or(u32::MAX));
 
 		for matched in native.matches {
 			check_grep_cancel(cancel)?;
@@ -626,6 +839,9 @@ fn search_blocking(
 					(memory.source_key.clone(), memory.path.clone(), memory.root_index)
 				},
 			};
+			if !seen_matches.insert((source_key.clone(), matched.line_number)) {
+				continue;
+			}
 			matches.push(SearchMatch {
 				source_key,
 				path,
@@ -637,6 +853,11 @@ fn search_blocking(
 				context_after,
 				snapshot_tag: None,
 			});
+			remaining = remaining.saturating_sub(1);
+			if remaining == 0 {
+				limit_reached = true;
+				break;
+			}
 		}
 	}
 	let mut pending_snapshots: Vec<_> = pending_snapshots.into_iter().collect();
@@ -645,7 +866,10 @@ fn search_blocking(
 	let mut snapshot_tags = HashMap::with_capacity(pending_snapshots.len());
 	for (source_key, pending) in pending_snapshots {
 		if let Some(snapshot) = prepare_grep_snapshot(source_key.clone(), &pending.path) {
-			snapshot_tags.insert(source_key, compute_snapshot_tag(&snapshot.bytes));
+			snapshot_tags.insert(
+				source_key,
+				Str::from(str::from_utf8(&snapshot.revision).expect("prepared tag is UTF-8")),
+			);
 			snapshots.push(snapshot);
 		}
 	}
@@ -733,23 +957,27 @@ fn prepare_grep_snapshot(source_key: Str, path: &Path) -> Option<SearchSnapshot>
 		return None;
 	}
 	let bytes = Bytes::from(fs::read(path).ok()?);
-	let revision = Bytes::copy_from_slice(Hash32::sum(&bytes).as_bytes());
+	let text = snapshot_text(&bytes)?;
+	let revision = Bytes::from(file_hash(&text));
 	Some(SearchSnapshot { source_key, revision, bytes })
 }
 
-fn map_native_grep_fault(error: omp_grep::GrepError) -> grep::Fault {
+fn map_native_grep_fault(error: crate::grep::GrepError) -> grep::Fault {
 	match error {
-		omp_grep::GrepError::InvalidRegex { regex, pcre2 } => {
+		crate::grep::GrepError::InvalidRegex { regex, pcre2 } => {
 			let message = format!("{regex}; PCRE2 fallback: {pcre2}");
 			grep::Fault::InvalidRegex { message: Str::from(strip_regex_error_prefix(&message)) }
 		},
-		omp_grep::GrepError::Timeout { .. } => grep::Fault::TimedOut,
-		omp_grep::GrepError::PathNotFound { path } => {
+		crate::grep::GrepError::Timeout { .. } => grep::Fault::TimedOut,
+		crate::grep::GrepError::Cancelled => {
+			grep::Fault::Cancelled { reason: Str::from(CANCELLED_REASON) }
+		},
+		crate::grep::GrepError::PathNotFound { path } => {
 			grep::Fault::AllPathsMissing { paths: vec![path] }
 		},
-		omp_grep::GrepError::InvalidGlob { message }
-		| omp_grep::GrepError::Walk { message }
-		| omp_grep::GrepError::Search { message } => grep::Fault::Workspace { message },
+		crate::grep::GrepError::InvalidGlob { message }
+		| crate::grep::GrepError::Walk { message }
+		| crate::grep::GrepError::Search { message } => grep::Fault::Workspace { message },
 	}
 }
 fn strip_regex_error_prefix(message: &str) -> &str {
@@ -984,21 +1212,14 @@ struct GlobTargetOutcome {
 	timed_out: bool,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, thiserror::Error)]
 enum WalkStop {
+	#[error("cancelled")]
 	Cancelled,
+	#[error("timed out")]
 	TimedOut,
+	#[error("{0}")]
 	Workspace(Str),
-}
-
-impl Display for WalkStop {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::Cancelled => formatter.write_str("cancelled"),
-			Self::TimedOut => formatter.write_str("timed out"),
-			Self::Workspace(message) => formatter.write_str(message),
-		}
-	}
 }
 
 fn walk_glob_target(
@@ -1095,13 +1316,15 @@ fn split_glob_inputs(host: &WorkspaceHost, raw: &str) -> Result<Vec<String>, glo
 	if normalized.is_empty() {
 		return Err(glob::Fault::EmptyPath);
 	}
-	if !normalized.contains(';')
-		|| fs::metadata(resolve_input_path(host.root(), &normalized)).is_ok()
-	{
+	if fs::metadata(resolve_input_path(host.root(), &normalized)).is_ok() {
 		return Ok(vec![normalized]);
 	}
-	let inputs: Vec<String> = normalized
-		.split(';')
+	let raw_inputs = split_top_level_semicolons(&normalized);
+	if raw_inputs.len() == 1 {
+		return Ok(vec![normalized]);
+	}
+	let inputs: Vec<String> = raw_inputs
+		.into_iter()
 		.map(normalize_input)
 		.filter(|entry| !entry.is_empty())
 		.collect();
@@ -1110,6 +1333,31 @@ fn split_glob_inputs(host: &WorkspaceHost, raw: &str) -> Result<Vec<String>, glo
 	} else {
 		Ok(inputs)
 	}
+}
+
+fn split_top_level_semicolons(input: &str) -> Vec<&str> {
+	let mut parts = Vec::new();
+	let mut brace_depth = 0_u32;
+	let mut start = 0;
+	let mut escaped = false;
+	for (index, character) in input.char_indices() {
+		if escaped {
+			escaped = false;
+			continue;
+		}
+		match character {
+			'\\' => escaped = true,
+			'{' => brace_depth = brace_depth.saturating_add(1),
+			'}' => brace_depth = brace_depth.saturating_sub(1),
+			';' if brace_depth == 0 => {
+				parts.push(&input[start..index]);
+				start = index + character.len_utf8();
+			},
+			_ => {},
+		}
+	}
+	parts.push(&input[start..]);
+	parts
 }
 
 fn glob_max_depth(pattern: &str) -> usize {
@@ -1276,18 +1524,22 @@ mod tests {
 	use std::future;
 
 	use omp_core::sf;
-	use omp_docserver::{
-		Environment, ServerConfig,
-		connection::{ConnectionConfig, serve_connection},
-	};
-	use omp_tools::read::web::types::WebError;
+	use omp_tools::read::{resolver::SchemeEntry, web::types::WebError};
 	use tokio::{
 		io::{AsyncReadExt as _, AsyncWriteExt as _, duplex},
 		net::TcpListener,
 	};
 
 	use super::*;
-	use crate::document_cache::project_document_cache;
+	use crate::{
+		docserver::{
+			Environment, ServerConfig,
+			connection::{ConnectionConfig, serve_connection},
+		},
+		document_cache::project_document_cache,
+		tool_url::{UrlResolver, docs::DocsResolver, vault::VaultResolver},
+		vault::{VaultPaths, VaultService},
+	};
 
 	async fn connected_search_adapter(root: &Path) -> WorkspaceSearchAdapter {
 		let config = ServerConfig::new(root).expect("docserver config");
@@ -1306,6 +1558,141 @@ mod tests {
 			read_sources,
 			sync::Arc::new(ResolverTable::default()),
 		)
+	}
+
+	#[tokio::test]
+	async fn grep_expands_omp_root_into_individually_searchable_documents() {
+		let mut builder = ResolverTable::builder();
+		builder
+			.register(
+				SchemeEntry::new(Scheme::Omp, true, false, "packaged OMP documentation")
+					.with_capabilities(true, false, true),
+				UrlResolver::Docs(DocsResolver::default()),
+			)
+			.expect("unique docs resolver");
+		let table = builder.build();
+		let root = SearchRoot {
+			original: sf!("omp://"),
+			path:     sf!("omp://"),
+			kind:     SearchRootKind::Internal,
+			ranges:   Box::default(),
+		};
+		let targets = materialize_internal_root(&table, &root, 3)
+			.await
+			.expect("materialize docs");
+		assert!(targets.len() > 1);
+		assert!(
+			targets
+				.iter()
+				.all(|target| target.path.starts_with("omp://"))
+		);
+		assert!(targets.iter().all(|target| target.root_index == 3));
+		assert!(targets.windows(2).all(|pair| pair[0].path < pair[1].path));
+	}
+
+	#[tokio::test]
+	async fn grep_prefers_an_existing_literal_semicolon_path_before_root_splitting() {
+		let directory = tempfile::tempdir().expect("temp directory");
+		fs::write(directory.path().join("semi;colon.txt"), "needle\n").expect("fixture");
+		let adapter = connected_search_adapter(directory.path()).await;
+		let roots = vec![
+			SearchRoot {
+				original: sf!("semi"),
+				path:     sf!("semi"),
+				kind:     SearchRootKind::Filesystem,
+				ranges:   Box::default(),
+			},
+			SearchRoot {
+				original: sf!("colon.txt"),
+				path:     sf!("colon.txt"),
+				kind:     SearchRootKind::Filesystem,
+				ranges:   Box::default(),
+			},
+		];
+		let unsplit = SearchRoot {
+			original: sf!("semi;colon.txt"),
+			path:     sf!("semi;colon.txt"),
+			kind:     SearchRootKind::Filesystem,
+			ranges:   Box::default(),
+		};
+		let prepared = adapter
+			.prepare_roots(roots, Some(unsplit))
+			.await
+			.expect("prepare roots");
+		assert_eq!(prepared.len(), 1);
+		assert_eq!(prepared[0].path, "semi;colon.txt");
+
+		let mut request = search_request("semi;colon.txt", SearchRootKind::Filesystem, 5_000);
+		request.roots = prepared;
+		let result = adapter
+			.search(request)
+			.await
+			.expect("literal semicolon search");
+		assert_eq!(result.matches.len(), 1);
+		assert_eq!(result.matches[0].path, "semi;colon.txt");
+	}
+
+	#[tokio::test]
+	async fn grep_missing_targets_fail_only_when_no_searchable_root_survives() {
+		let directory = tempfile::tempdir().expect("temp directory");
+		fs::write(directory.path().join("live.txt"), "needle\n").expect("fixture");
+		let adapter = connected_search_adapter(directory.path()).await;
+
+		let missing = adapter
+			.search(search_request("gone.txt", SearchRootKind::Filesystem, 5_000))
+			.await;
+		assert!(matches!(
+			missing,
+			Err(grep::Fault::AllPathsMissing { paths }) if paths == [sf!("gone.txt")]
+		));
+
+		let mut mixed = search_request("gone.txt", SearchRootKind::Filesystem, 5_000);
+		mixed.roots.push(SearchRoot {
+			original: sf!("live.txt"),
+			path:     sf!("live.txt"),
+			kind:     SearchRootKind::Filesystem,
+			ranges:   Box::default(),
+		});
+		let result = adapter.search(mixed).await.expect("surviving root");
+		assert_eq!(result.matches.len(), 1);
+		assert_eq!(result.missing_paths, [sf!("gone.txt")]);
+	}
+
+	#[tokio::test]
+	async fn grep_global_budget_counts_unique_rows_across_overlapping_roots() {
+		let directory = tempfile::tempdir().expect("temp directory");
+		fs::write(directory.path().join("a.txt"), "needle a\n").expect("fixture a");
+		fs::write(directory.path().join("b.txt"), "needle b\n").expect("fixture b");
+		let adapter = connected_search_adapter(directory.path()).await;
+		let mut request = search_request("a.txt", SearchRootKind::Filesystem, 5_000);
+		request.max_count = 2;
+		request.roots = ["a.txt", "a.txt", "b.txt"]
+			.into_iter()
+			.map(|path| SearchRoot {
+				original: Str::new(path),
+				path:     Str::new(path),
+				kind:     SearchRootKind::Filesystem,
+				ranges:   Box::default(),
+			})
+			.collect();
+		let result = adapter.search(request).await.expect("overlap search");
+		assert_eq!(result.matches.len(), 2);
+		assert_eq!(result.matches[0].path, "a.txt");
+		assert_eq!(result.matches[1].path, "b.txt");
+	}
+
+	#[tokio::test]
+	async fn grep_rejects_line_selectors_on_directories() {
+		let directory = tempfile::tempdir().expect("temp directory");
+		fs::create_dir(directory.path().join("src")).expect("fixture directory");
+		fs::write(directory.path().join("src/lib.rs"), "needle\n").expect("fixture");
+		let adapter = connected_search_adapter(directory.path()).await;
+		let mut request = search_request("src", SearchRootKind::Filesystem, 5_000);
+		request.roots[0].original = sf!("src:1-2");
+		request.roots[0].ranges =
+			vec![omp_tools::read::selector::LineRange { start_line: 1, end_line: Some(2) }]
+				.into_boxed_slice();
+		assert!(matches!(adapter.search(request).await, Err(grep::Fault::InvalidSelector { .. })));
 	}
 
 	fn search_request(
@@ -1329,6 +1716,236 @@ mod tests {
 			max_columns: 512,
 			timeout_ms,
 		}
+	}
+
+	#[test]
+	fn resource_glob_target_routing_keeps_vault_uris() {
+		assert!(is_resource_glob_target("vault://reports/**/*.json"));
+		assert!(is_resource_glob_target(" VAULT://reports/**/*.json "));
+		assert!(is_resource_glob_target("ssh://host/**/*.rs"));
+		assert!(is_resource_glob_target("memory://notes/*"));
+		assert!(!is_resource_glob_target("artifact://sha256/*"));
+	}
+
+	#[tokio::test]
+	async fn resource_glob_walks_configured_vault_paths() {
+		let fixture = tempfile::tempdir().expect("fixture");
+		let vault_root = fixture.path().join("vault");
+		fs::create_dir_all(vault_root.join("reports")).expect("vault directories");
+		fs::write(vault_root.join("reports/a.json"), "{}").expect("vault file");
+		fs::write(vault_root.join("reports/b.txt"), "skip").expect("nonmatching vault file");
+		let user_config = fixture.path().join("config");
+		fs::create_dir_all(&user_config).expect("config directory");
+		fs::write(user_config.join("vaults.toml"), format!("[vaults]\nreports = {:?}\n", vault_root))
+			.expect("vault config");
+		let service = VaultService::load_layered(&VaultPaths::new(&user_config, fixture.path()))
+			.expect("vault service");
+		let mut builder = ResolverTable::builder();
+		builder
+			.register(
+				omp_tools::read::resolver::SchemeEntry::new(Scheme::Vault, true, false, "test vault")
+					.with_capabilities(true, false, true),
+				UrlResolver::Vault(VaultResolver::new(service)),
+			)
+			.expect("vault resolver");
+		let resolvers = builder.build();
+		let host = WorkspaceHost::open(fixture.path()).expect("workspace host");
+		let result = resource_glob(
+			&resolvers,
+			&host,
+			glob::WalkRequest {
+				path:       Str::new_static("vault://reports/**/*.json"),
+				hidden:     true,
+				gitignore:  true,
+				limit:      20,
+				timeout_ms: 30_000,
+			},
+			&CancellationToken::new(),
+		)
+		.await
+		.expect("vault glob");
+		assert_eq!(result.matches.len(), 1);
+		assert_eq!(result.matches[0].path, "vault://reports/reports/a.json");
+
+		fs::create_dir(fixture.path().join("local")).expect("local directory");
+		fs::write(fixture.path().join("local/a.json"), "{}").expect("local file");
+		let mixed = resource_glob(
+			&resolvers,
+			&host,
+			glob::WalkRequest {
+				path:       Str::new_static("local/**/*.json; vault://reports/**/*.json"),
+				hidden:     true,
+				gitignore:  true,
+				limit:      20,
+				timeout_ms: 30_000,
+			},
+			&CancellationToken::new(),
+		)
+		.await
+		.expect("mixed local and resource glob");
+		assert_eq!(
+			mixed
+				.matches
+				.iter()
+				.map(|entry| entry.path.as_str())
+				.collect::<Vec<_>>(),
+			["local/a.json", "vault://reports/reports/a.json"]
+		);
+	}
+
+	#[test]
+	fn glob_semicolon_recovery_preserves_literals_and_top_level_roots() {
+		let fixture = tempfile::tempdir().expect("fixture");
+		fs::write(fixture.path().join("literal;name.rs"), "").expect("semicolon literal");
+		fs::write(fixture.path().join("route[id].rs"), "").expect("literal glob characters");
+		let host = WorkspaceHost::open(fixture.path()).expect("workspace host");
+
+		assert_eq!(split_glob_inputs(&host, "literal;name.rs").expect("literal path"), [
+			"literal;name.rs"
+		]);
+		assert_eq!(
+			split_glob_inputs(&host, "src/{one;two}.rs; tests/**/*.rs").expect("top-level roots"),
+			["src/{one;two}.rs", "tests/**/*.rs"]
+		);
+		assert_eq!(
+			split_glob_inputs(&host, "one.rs; two.rs;").expect("missing roots still split"),
+			["one.rs", "two.rs"]
+		);
+		assert_eq!(
+			split_glob_inputs(&host, r"src/a\;b.rs").expect("escaped delimiter stays literal"),
+			[r"src/a\;b.rs"]
+		);
+
+		let literal_match = glob_blocking(
+			&host,
+			glob::WalkRequest {
+				path:       sf!("route[id].rs"),
+				hidden:     true,
+				gitignore:  false,
+				limit:      200,
+				timeout_ms: 5_000,
+			},
+			&CancellationToken::new(),
+		)
+		.expect("existing glob-shaped path stays literal");
+		assert_eq!(literal_match.matches.len(), 1);
+		assert_eq!(literal_match.matches[0].path, "route[id].rs");
+	}
+
+	#[test]
+	fn glob_hidden_and_gitignore_toggles_are_independent() {
+		let fixture = tempfile::tempdir().expect("fixture");
+		fs::write(fixture.path().join(".gitignore"), "ignored.rs\n").expect("ignore file");
+		fs::write(fixture.path().join(".hidden.rs"), "").expect("hidden file");
+		fs::write(fixture.path().join("ignored.rs"), "").expect("ignored file");
+		fs::write(fixture.path().join("visible.rs"), "").expect("visible file");
+		let host = WorkspaceHost::open(fixture.path()).expect("workspace host");
+
+		let respected = glob_blocking(
+			&host,
+			glob::WalkRequest {
+				path:       sf!("**/*.rs"),
+				hidden:     true,
+				gitignore:  true,
+				limit:      200,
+				timeout_ms: 5_000,
+			},
+			&CancellationToken::new(),
+		)
+		.expect("gitignore-respecting glob");
+		let respected_paths = respected
+			.matches
+			.iter()
+			.map(|entry| entry.path.as_str())
+			.collect::<Vec<_>>();
+		assert!(respected_paths.contains(&".hidden.rs"));
+		assert!(respected_paths.contains(&"visible.rs"));
+		assert!(!respected_paths.contains(&"ignored.rs"));
+
+		let ignored_disabled = glob_blocking(
+			&host,
+			glob::WalkRequest {
+				path:       sf!("**/*.rs"),
+				hidden:     false,
+				gitignore:  false,
+				limit:      200,
+				timeout_ms: 5_000,
+			},
+			&CancellationToken::new(),
+		)
+		.expect("unignored visible glob");
+		let visible_paths = ignored_disabled
+			.matches
+			.iter()
+			.map(|entry| entry.path.as_str())
+			.collect::<Vec<_>>();
+		assert!(!visible_paths.contains(&".hidden.rs"));
+		assert!(visible_paths.contains(&"ignored.rs"));
+		assert!(visible_paths.contains(&"visible.rs"));
+	}
+
+	#[test]
+	fn glob_multi_root_missing_timeout_and_cancellation_are_explicit() {
+		let fixture = tempfile::tempdir().expect("fixture");
+		fs::create_dir(fixture.path().join("one")).expect("first root");
+		fs::create_dir(fixture.path().join("two")).expect("second root");
+		fs::write(fixture.path().join("one/a.rs"), "").expect("first match");
+		fs::write(fixture.path().join("two/b.rs"), "").expect("second match");
+		let host = WorkspaceHost::open(fixture.path()).expect("workspace host");
+
+		let result = glob_blocking(
+			&host,
+			glob::WalkRequest {
+				path:       sf!("one/**/*.rs; missing/**/*.rs; two/**/*.rs"),
+				hidden:     true,
+				gitignore:  false,
+				limit:      200,
+				timeout_ms: 5_000,
+			},
+			&CancellationToken::new(),
+		)
+		.expect("surviving roots");
+		assert_eq!(
+			result
+				.matches
+				.iter()
+				.map(|entry| entry.path.as_str())
+				.collect::<Vec<_>>(),
+			["one/a.rs", "two/b.rs"]
+		);
+		assert_eq!(result.missing_paths, [sf!("missing/**/*.rs")]);
+
+		let timed_out = glob_blocking(
+			&host,
+			glob::WalkRequest {
+				path:       sf!("one/**/*.rs"),
+				hidden:     true,
+				gitignore:  false,
+				limit:      200,
+				timeout_ms: 0,
+			},
+			&CancellationToken::new(),
+		)
+		.expect("timeout is partial success");
+		assert!(timed_out.timed_out);
+		assert!(timed_out.matches.is_empty());
+
+		let cancellation = CancellationToken::new();
+		cancellation.cancel();
+		assert!(matches!(
+			glob_blocking(
+				&host,
+				glob::WalkRequest {
+					path:       sf!("one/**/*.rs"),
+					hidden:     true,
+					gitignore:  false,
+					limit:      200,
+					timeout_ms: 5_000,
+				},
+				&cancellation,
+			),
+			Err(glob::Fault::Cancelled { .. })
+		));
 	}
 
 	#[test]
@@ -1375,10 +1992,10 @@ mod tests {
 		let GrepTarget::Filesystem { path, .. } = target else {
 			panic!("external file resolved to memory");
 		};
-		let result = omp_grep::grep(&omp_grep::GrepOptions {
+		let result = crate::grep::grep(&crate::grep::GrepOptions {
 			pattern: sf!("needle"),
 			path: Str::from(path.to_string_lossy().into_owned()),
-			..omp_grep::GrepOptions::default()
+			..crate::grep::GrepOptions::default()
 		})
 		.expect("grep external file");
 
@@ -1451,39 +2068,64 @@ mod tests {
 			adapter
 				.documents
 				.snapshot_store()
-				.lock()
-				.head(source_key.as_str())
+				.head(Path::new(source_key.as_str()))
 				.is_none(),
 			"native overfetch must not authorize lines before final projection"
 		);
 		let [snapshot] = result.snapshots.as_slice() else {
 			panic!("one editable snapshot candidate expected: {:?}", result.snapshots);
 		};
+		WorkspaceSearch::stage_snapshots(&adapter, vec![snapshot.clone()])
+			.expect("stage exact snapshot without visibility");
+		assert!(
+			adapter
+				.documents
+				.snapshot_store()
+				.head(Path::new(source_key.as_str()))
+				.is_some_and(|snapshot| snapshot.seen_lines.is_none()),
+			"staging bytes must not authorize any source line"
+		);
 		WorkspaceSearch::record_snapshots(&adapter, vec![grep::SnapshotRecord {
 			source_key: snapshot.source_key.clone(),
 			revision:   snapshot.revision.clone(),
-			bytes:      snapshot.bytes.clone(),
 			seen_lines: vec![2],
 		}])
 		.expect("record final visible line");
 		let retained = adapter
 			.documents
 			.snapshot_store()
-			.lock()
-			.head(source_key.as_str())
+			.head(Path::new(source_key.as_str()))
 			.expect("visible snapshot retained");
 
-		assert_eq!(retained.seen_lines().iter().copied().collect::<Vec<_>>(), vec![2]);
+		assert_eq!(
+			retained
+				.seen_lines
+				.expect("visible lines recorded")
+				.into_iter()
+				.collect::<Vec<_>>(),
+			vec![2]
+		);
 	}
 
 	#[test]
-	fn cancellation_guard_trips_the_walker_token() {
+	fn cancellation_guard_trips_the_walker_and_blocking_search_tokens() {
 		let token = CancellationToken::new();
 		{
 			let _guard = CancelOnDrop(token.clone());
 			assert!(!token.is_cancelled());
 		}
 		assert!(token.is_cancelled());
+
+		let token = CancellationToken::new();
+		let blocking = Arc::new(AtomicBool::new(false));
+		{
+			let _guard =
+				BlockingCancelOnDrop { token: token.clone(), blocking: Arc::clone(&blocking) };
+			assert!(!token.is_cancelled());
+			assert!(!blocking.load(Ordering::Relaxed));
+		}
+		assert!(token.is_cancelled());
+		assert!(blocking.load(Ordering::Relaxed));
 	}
 
 	#[test]
@@ -1522,10 +2164,10 @@ mod tests {
 		assert_eq!(targets.len(), 1);
 		assert_eq!(targets[0].path, "fixture.zip:docs/readme.txt");
 		assert_eq!(unreadable, vec![sf!("fixture.zip:docs/blob.bin (binary archive entry)")]);
-		let result = omp_grep::search(&targets[0].content, &omp_grep::GrepOptions {
+		let result = crate::grep::search(&targets[0].content, &crate::grep::GrepOptions {
 			pattern: sf!("needle"),
 			path: targets[0].path.clone(),
-			..omp_grep::GrepOptions::default()
+			..crate::grep::GrepOptions::default()
 		})
 		.expect("search materialized member");
 		assert_eq!(result.matches.len(), 1);
@@ -1563,10 +2205,10 @@ mod tests {
 		let target = materialize_url_root(&CannedHttpClient, &root, 3)
 			.await
 			.expect("materialize URL");
-		let result = omp_grep::search(&target.content, &omp_grep::GrepOptions {
+		let result = crate::grep::search(&target.content, &crate::grep::GrepOptions {
 			pattern: sf!("needle"),
 			path: target.path.clone(),
-			..omp_grep::GrepOptions::default()
+			..crate::grep::GrepOptions::default()
 		})
 		.expect("search URL");
 
@@ -1653,13 +2295,17 @@ mod tests {
 		let authored = format!("{external}/a/../b/**/*.rs;{external}/b/**/*.rs");
 		let adapter = connected_search_adapter(&workspace).await;
 
-		let result = WorkspaceSearch::glob(&adapter, glob::WalkRequest {
-			path:       Str::from(authored),
-			hidden:     true,
-			gitignore:  false,
-			limit:      200,
-			timeout_ms: 5_000,
-		})
+		let result = WorkspaceSearch::glob(
+			&adapter,
+			glob::WalkRequest {
+				path:       Str::from(authored),
+				hidden:     true,
+				gitignore:  false,
+				limit:      200,
+				timeout_ms: 5_000,
+			},
+			tokio_util::sync::CancellationToken::new(),
+		)
 		.await
 		.expect("glob equivalent external absolute targets");
 
@@ -1686,13 +2332,17 @@ mod tests {
 		let alias = alias.to_string_lossy().replace('\\', "/");
 		let adapter = connected_search_adapter(&workspace).await;
 
-		let result = WorkspaceSearch::glob(&adapter, glob::WalkRequest {
-			path:       Str::from(format!("{alias}/**/*.rs")),
-			hidden:     true,
-			gitignore:  false,
-			limit:      200,
-			timeout_ms: 5_000,
-		})
+		let result = WorkspaceSearch::glob(
+			&adapter,
+			glob::WalkRequest {
+				path:       Str::from(format!("{alias}/**/*.rs")),
+				hidden:     true,
+				gitignore:  false,
+				limit:      200,
+				timeout_ms: 5_000,
+			},
+			tokio_util::sync::CancellationToken::new(),
+		)
 		.await
 		.expect("glob authored external symlink alias");
 
@@ -1710,13 +2360,17 @@ mod tests {
 		let source = external.join("lib.rs");
 		fs::write(&source, "fn external() {}\n").expect("external source");
 		let adapter = connected_search_adapter(&workspace).await;
-		let result = WorkspaceSearch::glob(&adapter, glob::WalkRequest {
-			path:       sf!("../external/**/*.rs"),
-			hidden:     true,
-			gitignore:  false,
-			limit:      200,
-			timeout_ms: 5_000,
-		})
+		let result = WorkspaceSearch::glob(
+			&adapter,
+			glob::WalkRequest {
+				path:       sf!("../external/**/*.rs"),
+				hidden:     true,
+				gitignore:  false,
+				limit:      200,
+				timeout_ms: 5_000,
+			},
+			tokio_util::sync::CancellationToken::new(),
+		)
 		.await
 		.expect("glob external parent-relative directory through adapter");
 

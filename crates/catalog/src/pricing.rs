@@ -1,11 +1,9 @@
 //! Dimensioned integer pricing, long-context tiers, and checked cost
 //! arithmetic.
 
-use std::{
-	error,
-	fmt::{self, Display},
-};
+use std::fmt::{self, Display};
 
+use omp_core::Str;
 use serde::{Deserialize, Serialize};
 use strum::{Display, EnumString};
 
@@ -102,13 +100,24 @@ pub struct PriceTier {
 	pub components:          Box<[Price]>,
 }
 
+/// Price multiplier billed for one provider service tier.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct ServiceTierPrice {
+	/// Wire tier name (`flex`, `priority`, …).
+	pub tier:       Str,
+	/// Multiplier applied to every component when this tier is served.
+	pub multiplier: PremiumMultiplier,
+}
+
 /// Integer-only model pricing schedule.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct Pricing {
 	/// Base component prices in deterministic unit order.
-	pub components: Box<[Price]>,
+	pub components:    Box<[Price]>,
 	/// Threshold tiers in ascending threshold order.
-	pub tiers:      Box<[PriceTier]>,
+	pub tiers:         Box<[PriceTier]>,
+	/// Service-tier multipliers in ascending tier-name order.
+	pub service_tiers: Box<[ServiceTierPrice]>,
 }
 
 impl Pricing {
@@ -121,10 +130,30 @@ impl Pricing {
 			tier.components = prices.into_boxed_slice();
 		}
 		tiers.sort_unstable_by_key(|tier| tier.prompt_tokens_above);
-		let pricing =
-			Self { components: components.into_boxed_slice(), tiers: tiers.into_boxed_slice() };
+		let pricing = Self {
+			components:    components.into_boxed_slice(),
+			tiers:         tiers.into_boxed_slice(),
+			service_tiers: Box::default(),
+		};
 		pricing.validate()?;
 		Ok(pricing)
+	}
+
+	/// Attaches service-tier multipliers, sorted by tier name.
+	pub fn with_service_tiers(mut self, mut service_tiers: Vec<ServiceTierPrice>) -> Self {
+		service_tiers.sort_unstable_by(|left, right| left.tier.as_str().cmp(right.tier.as_str()));
+		service_tiers.dedup_by(|left, right| left.tier == right.tier);
+		self.service_tiers = service_tiers.into_boxed_slice();
+		self
+	}
+
+	/// Returns the declared multiplier for a served tier, if any.
+	pub fn service_tier_multiplier(&self, tier: &str) -> Option<PremiumMultiplier> {
+		self
+			.service_tiers
+			.binary_search_by(|price| price.tier.as_str().cmp(tier))
+			.ok()
+			.map(|index| self.service_tiers[index].multiplier)
 	}
 
 	/// Validates deterministic ordering and uniqueness.
@@ -172,12 +201,34 @@ impl Pricing {
 	) -> Result<NanoUsd, CostError> {
 		self.validate().map_err(CostError::InvalidSchedule)?;
 		let prompt_tokens = usage.prompt_tokens().ok_or(CostError::Overflow)?;
+		let components = self.components_for_prompt(prompt_tokens);
 		let mut total = 0_u128;
-		for price in self.components_for_prompt(prompt_tokens) {
+		for price in components {
 			let (quantity, divisor) = usage.quantity(price.unit);
 			let product = u128::from(price.nanos_usd) * u128::from(quantity);
 			let charge = ceil_div(product, divisor);
 			total = total.checked_add(charge).ok_or(CostError::Overflow)?;
+		}
+		// One-hour cache writes bill at twice the base input rate; `MtokCacheWrite` is
+		// the five-minute rate and only
+		// covers the remainder. A schedule without an input price keeps the
+		// flat cache-write rate so write tokens never become free.
+		if usage.cache_write_1h_tokens > 0 {
+			let one_hour_nanos = components
+				.iter()
+				.find(|price| price.unit == PriceUnit::MtokInput)
+				.map(|price| u128::from(price.nanos_usd) * 2)
+				.or_else(|| {
+					components
+						.iter()
+						.find(|price| price.unit == PriceUnit::MtokCacheWrite)
+						.map(|price| u128::from(price.nanos_usd))
+				});
+			if let Some(nanos) = one_hour_nanos {
+				let product = nanos * u128::from(usage.cache_write_1h_tokens);
+				let charge = ceil_div(product, MILLION);
+				total = total.checked_add(charge).ok_or(CostError::Overflow)?;
+			}
 		}
 		let total = u64::try_from(total).map_err(|_| CostError::Overflow)?;
 		let cost = NanoUsd::from_nanos(total);
@@ -199,6 +250,8 @@ fn validate_components(components: &[Price]) -> Result<(), PricingError> {
 	Ok(())
 }
 
+const MILLION: u64 = 1_000_000;
+
 const fn ceil_div(numerator: u128, divisor: u64) -> u128 {
 	if numerator == 0 {
 		return 0;
@@ -210,23 +263,27 @@ const fn ceil_div(numerator: u128, divisor: u64) -> u128 {
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, Serialize, Deserialize)]
 pub struct UsageDimensions {
 	/// Uncached prompt tokens.
-	pub input_tokens:       u64,
+	pub input_tokens:          u64,
 	/// Generated tokens.
-	pub output_tokens:      u64,
+	pub output_tokens:         u64,
 	/// Prompt-cache read tokens.
-	pub cache_read_tokens:  u64,
+	pub cache_read_tokens:     u64,
 	/// Prompt-cache write tokens.
-	pub cache_write_tokens: u64,
+	pub cache_write_tokens:    u64,
+	/// Subset of `cache_write_tokens` written with one-hour retention; billed
+	/// at twice the base input rate rather than the five-minute write rate.
+	#[serde(default)]
+	pub cache_write_1h_tokens: u64,
 	/// Generated images.
-	pub images:             u64,
+	pub images:                u64,
 	/// Generated video seconds.
-	pub video_seconds:      u64,
+	pub video_seconds:         u64,
 	/// Generated or transcribed audio seconds.
-	pub audio_seconds:      u64,
+	pub audio_seconds:         u64,
 	/// Input characters.
-	pub input_characters:   u64,
+	pub input_characters:      u64,
 	/// Billable requests.
-	pub requests:           u64,
+	pub requests:              u64,
 }
 
 impl UsageDimensions {
@@ -239,12 +296,16 @@ impl UsageDimensions {
 	}
 
 	const fn quantity(self, unit: PriceUnit) -> (u64, u64) {
-		const MILLION: u64 = 1_000_000;
 		match unit {
 			PriceUnit::MtokInput => (self.input_tokens, MILLION),
 			PriceUnit::MtokOutput => (self.output_tokens, MILLION),
 			PriceUnit::MtokCacheRead => (self.cache_read_tokens, MILLION),
-			PriceUnit::MtokCacheWrite => (self.cache_write_tokens, MILLION),
+			PriceUnit::MtokCacheWrite => (
+				self
+					.cache_write_tokens
+					.saturating_sub(self.cache_write_1h_tokens),
+				MILLION,
+			),
 			PriceUnit::Image => (self.images, 1),
 			PriceUnit::VideoSecond => (self.video_seconds, 1),
 			PriceUnit::AudioSecond => (self.audio_seconds, 1),
@@ -286,49 +347,27 @@ impl PremiumMultiplier {
 }
 
 /// Invalid price schedule.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum PricingError {
 	/// Price units were duplicated or not in canonical order.
+	#[error("price components must have unique units in canonical order")]
 	ComponentsNotStrictlyOrdered,
 	/// Tier thresholds were duplicated or not in ascending order.
+	#[error("price tiers must have unique ascending thresholds")]
 	TiersNotStrictlyOrdered,
 }
 
-impl Display for PricingError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::ComponentsNotStrictlyOrdered => {
-				formatter.write_str("price components must have unique units in canonical order")
-			},
-			Self::TiersNotStrictlyOrdered => {
-				formatter.write_str("price tiers must have unique ascending thresholds")
-			},
-		}
-	}
-}
-
-impl error::Error for PricingError {}
-
 /// Checked cost calculation failure.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum CostError {
 	/// The input schedule was not canonical and valid.
+	#[error("invalid price schedule: {0}")]
 	InvalidSchedule(PricingError),
 	/// Prompt aggregation, cost accumulation, or multiplier application
 	/// overflowed.
+	#[error("nano-USD cost overflow")]
 	Overflow,
 }
-
-impl Display for CostError {
-	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-		match self {
-			Self::InvalidSchedule(error) => write!(formatter, "invalid price schedule: {error}"),
-			Self::Overflow => formatter.write_str("nano-USD cost overflow"),
-		}
-	}
-}
-
-impl error::Error for CostError {}
 
 #[cfg(test)]
 mod tests {
@@ -404,18 +443,83 @@ mod tests {
 		let pricing = Pricing::new(components, Vec::new()).expect("ordered dimensions");
 		let cost = pricing
 			.cost(UsageDimensions {
-				input_tokens:       1,
-				output_tokens:      1,
-				cache_read_tokens:  1,
-				cache_write_tokens: 1,
-				images:             1,
-				video_seconds:      1,
-				audio_seconds:      1,
-				input_characters:   1,
-				requests:           1,
+				input_tokens:          1,
+				output_tokens:         1,
+				cache_read_tokens:     1,
+				cache_write_tokens:    1,
+				cache_write_1h_tokens: 0,
+				images:                1,
+				video_seconds:         1,
+				audio_seconds:         1,
+				input_characters:      1,
+				requests:              1,
 			})
 			.expect("small exact cost");
 		assert_eq!(cost, NanoUsd::from_nanos(22));
+	}
+
+	#[test]
+	fn one_hour_cache_writes_bill_at_twice_base_input() {
+		// Sonnet-shaped card: $3/M input, $3.75/M five-minute cache write.
+		let pricing = Pricing::new(
+			vec![Price { unit: PriceUnit::MtokInput, nanos_usd: 3_000_000_000 }, Price {
+				unit:      PriceUnit::MtokCacheWrite,
+				nanos_usd: 3_750_000_000,
+			}],
+			Vec::new(),
+		)
+		.expect("ordered dimensions");
+		let flat = pricing
+			.cost(UsageDimensions { cache_write_tokens: 1_000_000, ..UsageDimensions::default() })
+			.expect("flat cost");
+		assert_eq!(flat, NanoUsd::from_nanos(3_750_000_000));
+
+		let long = pricing
+			.cost(UsageDimensions {
+				cache_write_tokens: 1_000_000,
+				cache_write_1h_tokens: 1_000_000,
+				..UsageDimensions::default()
+			})
+			.expect("long retention cost");
+		assert_eq!(long, NanoUsd::from_nanos(6_000_000_000));
+
+		// Mixed breakpoints price each component at its own rate.
+		let mixed = pricing
+			.cost(UsageDimensions {
+				cache_write_tokens: 1_000_000,
+				cache_write_1h_tokens: 400_000,
+				..UsageDimensions::default()
+			})
+			.expect("mixed cost");
+		assert_eq!(mixed, NanoUsd::from_nanos(600_000 * 3_750 + 400_000 * 6_000));
+
+		// A stale breakdown larger than the total never makes writes free or
+		// double-charges the remainder.
+		let stale = pricing
+			.cost(UsageDimensions {
+				cache_write_tokens: 100,
+				cache_write_1h_tokens: 200,
+				..UsageDimensions::default()
+			})
+			.expect("stale breakdown cost");
+		assert_eq!(stale, NanoUsd::from_nanos(200 * 6_000));
+
+		// Without an input price the flat write rate still applies.
+		let write_only = Pricing::new(
+			vec![Price { unit: PriceUnit::MtokCacheWrite, nanos_usd: 3_750_000_000 }],
+			Vec::new(),
+		)
+		.expect("single component");
+		assert_eq!(
+			write_only
+				.cost(UsageDimensions {
+					cache_write_tokens: 1_000_000,
+					cache_write_1h_tokens: 1_000_000,
+					..UsageDimensions::default()
+				})
+				.expect("fallback cost"),
+			NanoUsd::from_nanos(3_750_000_000),
+		);
 	}
 
 	#[test]

@@ -14,7 +14,7 @@
 > [`04-placement.md`](04-placement.md). `omp.BlobRef` and typed paths → [`11-env.md`](11-env.md).
 > `omp.env` request surface and env-side policy → [`11-env.md`](11-env.md).
 > Hook events and the failure table → [`05-hooks.md`](05-hooks.md).
-> The `xd` shell builtin, `@omp.tool`, and `omp.ToolPath` addressing → [`01-devices.md`](01-devices.md).
+> The `dyn` shell builtin, `@omp.tool`, and `omp.ToolPath` addressing → [`01-devices.md`](01-devices.md).
 > Consent presentation primitive → [`07-ui.md`](07-ui.md) §4.9.
 
 ---
@@ -258,7 +258,7 @@ both are packaging facts, so they belong here rather than in a performance note:
 *active* extension never boots an interpreter. Lazy spawn requires that every declared
 surface — devices, hooks, and the rest of §3.1.5's declaration table — be known from the
 **static manifest**, not from importing the extension. The table is authoritative for
-serving the device catalog behind `xd`, for the hook
+serving the device catalog behind `dyn`, for the hook
 subscription mask, and for every activation
 trigger; handshake `RegisterTools` verifies rather than defines. If registration were the
 source of truth, every installed extension would have to boot at session start and the
@@ -520,6 +520,7 @@ entry       = "acme_reviewer.review"
 default     = true
 requires    = ["unidiff>=0.7"]
 description = "PR review device and hooks"
+capabilities = ["env.docs.read"]
 
 [tool.omp.vendored]            # §3.6.5
 namespace = "acme_reviewer._vendor"
@@ -553,6 +554,7 @@ pool = "bundle"                # advisory hint to JOIN a sharing group; the inst
 | `features.<name>.default` | bool | `false` | Whether enabled on install without `--features`. |
 | `features.<name>.requires` | array | `[]` | Additional dependencies pulled **only** when the feature is enabled. |
 | `features.<name>.description` | string | `""` | Shown in `omp ext features` and the consent diff. |
+| `features.<name>.capabilities` | array | `[]` | Capabilities effective, consented, and locked only while the feature is selected. |
 | `vendored.namespace` | string | — | Import prefix under which private copies live. Must be a submodule of `entry`'s top-level package. |
 | `vendored.packages` | array | `[]` | Distribution names vendored under that namespace. Declared so `omp ext doctor` can report them and the resolver can *exclude* them (§3.6.5). |
 | `binaries[].name` | string | *required* | Logical name; materialized as `$OMP_DATA_DIR/ext/bin/<id>/<name>`. |
@@ -603,10 +605,10 @@ Three properties fall out, and downstream consumers may rely on them:
   is evidence the artifact was tampered with or built from different code than it claims.
   `omp ext verify` treats that divergence as an integrity failure (exit 4), not a warning.
 - The table is **exactly enough to avoid booting a child to answer "what exists"**: the
-  `xd` catalog listing, the hook
+  `dyn` catalog listing, the hook
   subscription mask, every activation trigger in §3.1.5, and
   the spawn decision all read from the manifest. Full schemas, docs, and examples come from
-  import, fetched by `xd <path> --help`, which may spawn
+  import, fetched by `dyn <path> --help`, which may spawn
   the child lazily — a deliberate
   model action and an acceptable place to pay for a boot. This is what makes per-extension
   host children affordable (§2.2).
@@ -643,7 +645,7 @@ check any backend's output.
 > `[[devices]]` had already dissolved into a `kind`, the ruling lands as a split of that
 > kind: `soft` and `hard` are two of **thirteen executable** kinds, and they state **intent, not
 > surface** — `@omp.tool` declares either, `@omp.device` lowers with implicit `soft`
-> intent, and the surface an intent gets (a catalog entry behind the `xd` shell builtin, or a
+> intent, and the surface an intent gets (a catalog entry behind the `dyn` shell builtin, or a
 > model-facing tool slot) is decided by the user's dynamic tool policy (`tools.policy`,
 > [`01-devices.md`](01-devices.md), which owns the decorators and the mode table).
 > Rev 2.1-internal correction: an earlier draft of this revision spelled the vocabulary
@@ -670,19 +672,32 @@ key     = "review@rv.2"             # static key: kind-specific identity, resolv
 trigger = "lazy"                    # activation class; fixed per kind, may only narrow lazy → eager
 api     = 1                         # required omp API level
 failure = "fault"                   # failure class when the implementation is unavailable
+feature = "review"                 # optional owning feature; absent means base surface
 ```
 
-Executable rows have exactly the fields above. Content rows have a separate, exact shape;
-for example, the authoring row `[[skills]]` lowers 1:1 to:
+Executable rows have exactly the fields above. Content rows have a separate, exact shape.
+Today the decorator registry records `@omp.skill` as a generated content declaration during
+bootstrap. Declaration lowering evaluates its zero-argument body once and deterministically
+materializes the complete generated bytes and row:
 
 ```toml
 [[declarations]]
 kind = "skills"
-path = "acme_reviewer/skills/review/SKILL.md"
-metadata = { name = "review", description = "Review a change." }
+path = "acme_reviewer/.omp-generated/skills/review/SKILL.md"
+metadata = { name = "review", description = "Review a change.", hidden = false, disable_model_invocation = false, autoload = false }
 ```
 
-The same lowering applies to `[[rules]]`, `[[context-files]]`, and `[[prompts]]`.
+The checked-in tree has no `omp-build` PEP 517 backend. The future packaging contract is exact:
+a wheel builder writes those already-lowered bytes at `path`, includes that path in wheel
+`RECORD`, and emits the byte-identical row above. Repeating lowering with identical decorator
+inputs produces identical file bytes and row ordering; changing the body or metadata changes the
+packaged artifact. Runtime FREEZE compares the decorator's generated path and metadata with this
+admitted static row, but never asks a lazy child to provide skill bodies. A skills-only extension
+is consequently enumerable and readable from the static manifest and recorded wheel resource
+without starting Python.
+
+Hand-authored `[[skills]]` rows use the same `kind/path/metadata` shape. The same lowering applies
+to `[[rules]]`, `[[context-files]]`, and `[[prompts]]`.
 `path` is a distribution-relative POSIX path or glob covered by the wheel's `RECORD`.
 `metadata` is the content row's author metadata table (for example `name`, `description`,
 slot, class, or priority); it is preserved verbatim for enumeration. Thus the frozen row
@@ -704,6 +719,38 @@ importing the extension or walking outside its recorded distribution files.
 Content rows do not have `id`, `module`, `key`, `trigger`, `api`, or `failure`: reaching one
 resolves data, not a callback. `omp.packages.own().declarations` returns their typed
 `ContentDeclaration(kind, path, metadata)` values without filesystem walking.
+Every executable or content row may carry one optional `feature`. The name must exist in
+`[features]`; an executable row's `module` must equal that feature's `entry`, and rows
+emitted by a feature entry without their `feature` owner are rejected. Projection happens
+before any PUBLISH payload, trigger index, hook bitmap, `RegisterTools` expected set, or
+wire encoding is built: disabled rows have no runtime identity and cannot boot a child.
+
+Three additional signed static content kinds use the same exact `kind/path/metadata` shape:
+
+```toml
+[[declarations]]
+kind = "agents"
+path = "acme_reviewer/agents/*.md"
+metadata = { format = "omp-agent-markdown" }
+
+[[declarations]]
+kind = "lsp-servers"
+path = "acme_reviewer/catalog/lsp.json"
+metadata = { format = "json" }
+
+[[declarations]]
+kind = "dap-adapters"
+path = "acme_reviewer/catalog/dap.yaml"
+metadata = { format = "yaml" }
+```
+
+All matches are distribution-relative, contained, and covered by `RECORD`. Agent rows feed
+the native catalog at project > user > extension > bundled precedence and retain extension
+identity/path provenance. LSP/DAP rows have `Manifest` provenance below native user/project
+configuration. Their `command` must name a lock-materialized `[[binaries]]` entry or an
+environment executable named by an explicit grant; client paths and path separators are
+rejected before process spawn. These rows are static inventory: they add no tool, hook bit,
+extension callback, or Python host.
 
 **Activation classes per kind.** Four classes: **static** (served entirely from the
 manifest; Python never boots for it), **lazy** (child boots on first reach),
@@ -713,7 +760,7 @@ doc, which also defines the exact trigger event; this table owns which class app
 
 | `kind` | Static key | Class | Boots on | Owner |
 |---|---|---|---|---|
-| `soft` | `name@family.rev` (from `@omp.tool`, or `@omp.device` with implicit `soft` intent) | lazy | first `xd <path> --help` detail fetch or first `xd <path> [args…]` dispatch, or a direct slot call under `tools.policy = tool_only` ([`01-devices.md`](01-devices.md) owns the mode table) | [`01-devices.md`](01-devices.md) |
+| `soft` | `name@family.rev` (from `@omp.tool`, or `@omp.device` with implicit `soft` intent) | lazy | first `dyn <path> --help` detail fetch or first `dyn <path> [args…]` dispatch, or a direct slot call under `tools.policy = tool_only` ([`01-devices.md`](01-devices.md) owns the mode table) | [`01-devices.md`](01-devices.md) |
 | `hard` | `name@family.rev` + a named slot claim | lazy — the advertised schema is served from the manifest, so occupying a slot never boots the child | first dispatch or first detail fetch, as for `soft`; under the default `tools.policy = auto` the slot exists only under a `tools.hard` grant (§3.9.2) | [`01-devices.md`](01-devices.md) |
 | `hook` | `event/phase` | lazy; **eager-prompt when `failure = "fail-closed"`** | first delivery of a subscribed event; mandatory gates boot before the first prompt so admission never pays a boot inside its deadline | [`05-hooks.md`](05-hooks.md) |
 | `worker` | worker name | lazy | first `place="worker:<name>"` dispatch | [`04-placement.md`](04-placement.md) |
@@ -730,6 +777,9 @@ doc, which also defines the exact trigger event; this table owns which class app
 | `rules` | content path or glob | static; bytes lazy | never boots Python; the rules-slot inventory resolves matching data when rendered | [`08-context.md`](08-context.md) |
 | `context-files` | content path or glob | static; bytes lazy | never boots Python; context discovery resolves matching data on demand | [`08-context.md`](08-context.md) |
 | `prompts` | content path or glob | static; bytes lazy | never boots Python; prompt or command lookup resolves matching data on demand | [`07-ui.md`](07-ui.md), [`08-context.md`](08-context.md) |
+| `agents` | content path or glob | static; bytes lazy | never boots Python; native agent-catalog composition reads matching markdown | [`12-agents.md`](12-agents.md) |
+| `lsp-servers` | content path or glob | static; bytes lazy | never boots Python; first matching language operation may start the declared server | [`11-env.md`](11-env.md) |
+| `dap-adapters` | content path or glob | static; bytes lazy | never boots Python; explicit launch/attach may start the declared adapter | [`11-env.md`](11-env.md) |
 
 **Historical sessions.** Reopening an old session replays journal entries whose kinds may be
 declared by extensions that have never booted in this session — or were installed after the
@@ -793,6 +843,13 @@ Design consequences:
   body and `requires` naming sibling extension distributions. §3.4.2 defines how an
   extension declares *another extension* as a dependency, which is the only way this shape
   works without a bespoke aggregation mechanism.
+Install specs carry the feature request directly: shell-quote
+`'pkg[review,lint]'`; `pkg[]` selects none, `pkg[*]` selects all, and named lists are
+trimmed, deduplicated, and sorted. On a **new** unbracketed install, only
+`features.*.default = true` expands. On reinstall or upgrade, an unbracketed spec preserves
+the installed concrete set. Unknown names are `E-FEATURE` before any grant, lock, install
+record, or generation changes. Only selected `requires`, capabilities, executable rows,
+and content rows enter the resolution and runtime projection.
 
 #### 3.2.2 Native binaries are the common native case, not native wheels
 
@@ -1259,7 +1316,7 @@ TOML. One per layer per scope: `<workspace cwd>/.omp/omp.lock` (committed — th
 point) and `$OMP_DATA_DIR/ext/omp.lock` (not committed, it is the user's own machine).
 
 ```toml
-version        = 1
+version        = 2
 generated_by   = "omp 0.4.1"
 generated_at   = "2026-08-19T09:14:02Z"
 layer          = "workspace"
@@ -1277,7 +1334,9 @@ tier              = "sandboxed"
 features          = ["review"]
 source            = { index = "https://ext.omp.dev/simple", dist = "acme-reviewer" }
 manifest_digest   = "b3:4c1f…"
+declaration_digest = "b3:f011…"
 capability_digest = "b3:9a70…"
+manifest_capability_digest = "b3:aa31…"
 publisher         = "ed25519:5f3a…"
 signature         = "ed25519:sig:8b2c…"
 attestation       = "b3:d011…"
@@ -1346,12 +1405,14 @@ exec   = "acme-index"
 | `version` | PEP 440 version | yes | Exact. |
 | `tier` | `"trusted"` \| `"sandboxed"` | yes | The tier **requested**. The tier *granted* comes from the grant record; a lock asking for `trusted` does not confer it. |
 | `pool` | string | no | Sharing-group name. **Absent unless the extension joined a pool** (§3.6.4). An earlier draft wrote `"main"` for every unpooled extension — a `(layer, tier, pool)` remnant; the host key's default slot is the extension's own id, and the lock now says nothing rather than naming a pool that does not exist. |
-| `features` | array of strings | yes | Enabled features at resolve time. Determines which `features.*.requires` are in the graph (R11). |
+| `features` | array of strings | yes | Fully expanded concrete selection, trimmed, unique, and lexically sorted. Never `null` or `"*"`. Only selected `features.*.requires` enter the graph (R11), provenance, site-tree key, and GC roots. |
 | `source` | table | yes | Exactly one of `{ index, dist }`, `{ pypi }`, `{ git, rev }`, `{ url }`, `{ bundle }`. `{ link }` is **never** written (§3.3.1); encountering it is `E-LOCK-LINK`. |
 | `manifest_digest` | `b3:` hex | yes | blake3 of the canonicalized `omp.toml`. Detects a manifest that changed without a version bump. |
-| `capability_digest` | `b3:` hex | yes | blake3 of `omp-capabilities.json` (§3.9.1). The consent pin: a change here re-prompts even on a patch upgrade. |
+| `declaration_digest` | `b3:` hex | yes | Canonical digest of base plus selected declaration rows. Changes with feature projection while `manifest_digest` does not. |
+| `capability_digest` | `b3:` hex | yes | Canonical digest of the effective base-plus-selected capability set. This selection-specific value is the consent pin. |
+| `manifest_capability_digest` | `b3:` hex | yes | Canonical digest of the complete base-and-feature capability graph. Publisher signatures cover this full graph because publishers cannot pre-sign every feature power set. |
 | `publisher` | `ed25519:` key | yes for `index`/`pypi` | Publisher public key. Must match the TOFU pin in `keys.toml` or installation is `E-KEY-CHANGED`. |
-| `signature` | `ed25519:sig:` | yes for `index` | Detached signature over `blake3 ‖ sha256 ‖ capability_digest`. |
+| `signature` | `ed25519:sig:` | yes for `index` | Detached signature over `blake3 ‖ sha256 ‖ manifest_capability_digest`. |
 | `attestation` | `b3:` hex | no | Index attestation digest (§3.10.4). Absent for `pypi:`, `git:`, `path:` sources. |
 | `ship` | `"installed"` \| `"source"` \| `"pickle"` | yes | Code-shipping grant level (§3.9.2). |
 | `requires` | array of PEP 508 | yes | Recorded verbatim so a `--check` can detect a manifest edit. |
@@ -1387,7 +1448,7 @@ extension identity — the fields that make an omp lock an omp lock.
 Per scope. Not a lock: it is *what the operator asked for*, from which a lock is derived.
 
 ```toml
-version = 1
+version = 2
 scope   = "user"                      # "user" | "project"
 
 [[extension]]
@@ -1501,8 +1562,12 @@ serialization of everything the manifest asks for, with a fixed normalization:
 - Values normalized: fs scopes as sorted, `..`-free, workspace-relative globs; network
   hosts lowercased and IDNA-encoded; port lists sorted and range-merged; capability names
   from a closed vocabulary (unknown name → `E-CAP-UNKNOWN` at build and at parse).
-- Feature-scoped capabilities are tagged with their feature name, so enabling a new feature
-  changes the digest.
+- `manifest_capability_digest` hashes the complete base-and-feature graph with each
+  feature-scoped capability tagged by feature name. It is stable across selections and is
+  the digest covered by the publisher artifact signature.
+- `capability_digest` hashes only the effective base-plus-selected set. Enabling a feature
+  changes this consent digest; disabling one removes its authority. Install/upgrade prompts
+  only for newly effective capabilities.
 - The digest is `blake3-256` over that byte string, matching `omp_storage::BlobRef`'s hash
   (`crates/storage/src/blob.rs:37`) so one hash function covers the whole system.
 
@@ -1610,20 +1675,28 @@ path to the thing the user wanted, with no memory and no non-interactive route. 
 is not "prompt harder". It is that **a prompt on a hot path will be automated away, and if
 we do not ship the automation someone else will ship a worse one.** Four consequences:
 
-1. **Install-time only.** Consent is requested when the capability set changes, never
-   per-session and never mid-turn. There is no permission dialog during a turn; runtime
-   enforcement refuses-and-journals instead of asking ([`07-ui.md`](07-ui.md)).
+1. **Install-time first, admission fallback.** Consent is normally recorded when the
+   capability set changes at install. If DISCOVER/ADMIT (or first-reach activation before
+   extension code starts) finds that the effective install grant is absent or stale, an
+   interactive session opens exactly one Core-owned approval ticket showing publisher,
+   extension identity, requested capabilities, and the currently granted subset. The choices
+   are allow once (session-scoped), allow and remember (atomically updates the client-side
+   `grants.toml` through the trust owner), or deny. Headless and non-interactive sessions do
+   not prompt: they preserve the typed refusal, journal it, omit/degrade the extension, and
+   continue. Runtime effects after activation still refuse-and-journal rather than prompting
+   ([`07-ui.md`](07-ui.md)).
 2. **Digest-pinned** (§3.9.1), so ordinary upgrades are silent.
 3. **First-class non-interactive paths**, documented and supported rather than grudging:
    `--yes` (grant exactly what the manifest declares, echo the full diff to the log),
    `--grant <cap>[,…]` (grant a named subset; anything undeclared-but-granted is
    `E-GRANT-UNKNOWN`, anything declared-but-ungranted means the extension is omitted), and
    `OMP_EXT_GRANT` for CI. All three are *operator* channels, preserving §3.9.3(1).
-4. **The diff is the artifact.** Presentation is a shell-rendered modal built from the same
-   TML overlay primitive as other dialogs ([`07-ui.md`](07-ui.md) §4.9). There is
-   deliberately **no Python-visible symbol for install-time consent**: at consent time no
-   host is running, and an extension describing its own permissions would be the fox
-   writing the henhouse inspection report.
+4. **The diff is the artifact.** Presentation is a Core-rendered modal built from the same
+   reserved approval surface as policy tickets ([`06-policy.md`](06-policy.md) §Approvals).
+   There is deliberately **no Python-visible symbol for consent**: the prompt is constructed
+   only from authenticated install/lock facts, and extension code is not running. An
+   extension describing or rendering its own permissions would be the fox writing the
+   henhouse inspection report.
 
 Diff rendering rules: additions highlighted, removals shown as removals (a *narrowing*
 upgrade is worth showing and is auto-approved), `net = true` and `secrets` in a distinct
@@ -1719,14 +1792,24 @@ network, omp **warns and proceeds** (`W-REVOCATION-STALE`). Fail-closed on a sta
 revocation list would mean losing your tooling on a plane, which trains users to pass
 whatever flag disables the check. `--locked` plus `OMP_EXT_OFFLINE=strict` opts into
 fail-closed for environments that genuinely want it.
+The session-start update check refreshes revocations **before** selecting a version.
+Ordinary offline admission keeps the warning policy above, but stale metadata is never
+sufficient authority for an automatic commit: the candidate is reported as
+`stale_revocations` and remains notify-only. A fresh snapshot that newly revokes an
+extension in the immutable startup generation causes immediate quarantine of that
+generation. Its manifest-derived `failure="fail-closed"` routes remain registered as deny
+stubs, the notification is high severity, and omp will not roll forward unless a separate
+candidate passes every signature, attestation, key, hash, capability, and revocation gate.
 
 #### 3.10.4 Index attestations
 
 For first-party extensions the index publishes an attestation over
 `(wheel blake3, capability_digest, review outcome, build provenance)`, signed by the index
 key. It is what lets `omp ext list` say "capabilities reviewed" rather than "capabilities
-declared". It is **advisory**: absence downgrades a badge, never blocks an install. Making
-review mandatory would make the index a gatekeeper for a pre-release ecosystem, and would
+declared". It is **advisory for an explicit install**: absence downgrades a badge and the
+operator may still consent. Background `auto` has no interactive consent boundary, so an
+absent or invalid attestation makes that candidate notify-only. Making review mandatory for
+explicit installs would make the index a gatekeeper for a pre-release ecosystem, and would
 guarantee that the interesting extensions live outside it.
 
 ### 3.11 Distribution: the index
@@ -2008,6 +2091,10 @@ status, and the lock entry verbatim.
 Exit 1 if `<id>` is unknown.
 
 #### 3.13.3 `omp ext install <spec>…`
+`<spec>` accepts a quoted feature suffix before an optional version:
+`'pkg[review,lint]'`, `'pkg[]'`, or `'pkg[*]'`. Brackets and `--features` are mutually
+exclusive. Absence means defaults only on a new install and preserves the concrete lock-v2
+selection on reinstall/upgrade.
 
 | Flag | Value | Meaning |
 |---|---|---|
@@ -2067,8 +2154,22 @@ merge behavior. Exit 0 if already in the requested state.
 | `--list` | Print available features with defaults, descriptions, and per-feature `requires`. |
 
 Any mutation re-resolves (R11) and may therefore fail with exit 3 or require consent
-(a feature's capabilities change the digest). Forward-ports pi's `plugin features`
-(`/work/pi/packages/coding-agent/src/cli/plugin-cli.ts:25-39`).
+(a feature's capabilities change the digest).
+**`omp ext config`** opens the native alternate-buffer resource selector. `--layer
+workspace` starts in workspace mode; other layer selections start in client mode. Tab switches
+between the exact user `config.toml` and project `.omp/config.toml` layers without writing.
+Space or a pointer click changes the focused extension or package resource; Enter/Apply commits
+the staged `[extensions]` table atomically, while Escape, Cancel, Ctrl-C, or terminal closure
+writes nothing.
+
+Client extension rows toggle `enabled` / `disabled`. Workspace rows cycle an explicit delta
+against the client result: `inherit` → the opposite of the inherited state → the other explicit
+state → `inherit`. Skill, prompt, theme, and executable-entry rows use the same visible state
+machine and persist exact `+path` / `-path` entries under
+`[extensions.resources.\"<extension-id>\"]`. A workspace filter created only for such an override
+has `autoload = false`, so it changes the named resource without replacing the package default;
+returning every family row to `inherit` removes that empty delta. Existing plain include globs and
+`!` exclusion globs are preserved.
 
 #### 3.13.8 `omp ext lock` / `resolve` / `sync` / `upgrade` / `pin`
 
@@ -2111,13 +2212,43 @@ reconciliation command.
 | `--allow-capability-widening` | Non-interactive consent to a widened capability set. Without it, a widening upgrade with `--json` and no TTY exits 5 rather than silently escalating. |
 
 Rollback is the previous resolution directory plus a symlink swap (§3.5); `omp ext upgrade
---rollback <id>` performs it and is instantaneous. There is no *automatic* update. pi's
-marketplace auto-update worker (`.plan/feature-map/FEATURES.md:989`,
-`/work/pi/…/marketplace-auto-update.ts:19-45`) silently changed executing code on session
-start; with hash-pinned locks and digest-pinned consent, the equivalent is
-`omp ext upgrade` in a scheduled job the operator wrote, and `omp ext list --outdated`
-reports availability without acting. Deliberate divergence from pi's UX, and the one place
-this document knowingly gives up convenience.
+--rollback <id>` performs it and is instantaneous.
+
+Session startup also supports a verified, one-shot background check:
+
+```toml
+[extensions.updates]
+mode = "notify"                 # "off" | "notify" | "auto"; default "notify"
+interval = "24h"
+```
+
+This table is operator-owned. Workspace config may reduce the effective mode to `off`; it
+may not set an interval, select `notify`, or select `auto`. The driver first freezes the
+client/workspace lock snapshot used by the new session, then schedules (without awaiting)
+one due-checked task for each scope. A per-scope advisory lock and durable
+`last_checked` coalesce simultaneous sessions, so network failure and verification work
+never delay the first prompt and each typed error is journaled only once per due window.
+
+- `off` performs no catalog/version fetch. Normal signature and revocation admission still
+  runs.
+- `notify` refreshes signed revocations first, then signed index metadata, resolves into a
+  temporary generation, and emits one deduplicated item containing version, concrete
+  feature, declaration, effective-capability, and complete capability-graph diffs. It does
+  not change lock, install, site-tree, or active-generation bytes.
+- `auto` is still notify-only for a workspace lock: background work never rewrites committed
+  `.omp/omp.lock`. For a client lock only, it atomically records and commits a restorable
+  generation when the publisher is unchanged, every current concrete feature still exists,
+  exact pins permit the version, the effective capability digest is unchanged, revocation
+  metadata is fresh, and artifact hashes, publisher signature, signed key rotation, and
+  index attestation all verify. The session that requested the check retains its frozen
+  generation; only a later session can observe the commit.
+- Feature removal, capability change, pin, stale revocations, bad signature or attestation,
+  unsigned key change, yank, or revocation is a typed refusal and downgrades the whole
+  candidate to notify-only. A newly discovered revocation of the startup generation follows
+  §3.10.3 quarantine semantics instead of being treated as an update.
+
+The check is a session-start one-shot, not a resident daemon and not extension-callable
+authority.
 
 **`omp ext pin <id> <version>` / `omp ext unpin <id>`** — freeze an extension's version in
 the install record. `upgrade` skips pinned entries and reports them; `--force` on `upgrade`
@@ -2127,7 +2258,7 @@ does not override a pin (use `unpin`).
 
 | Flag | Meaning |
 |---|---|
-| `--apply` | Actually delete. Default is a dry run, matching pi's `omp gc` convention (`.plan/feature-map/cli.md:224`). |
+| `--apply` | Actually delete. Default is a dry run. |
 | `--keep-generations <N>` | Retain the last N resolution directories per host key. Default 2, which is "current plus rollback". |
 | `--keep-cache` | Do not prune the download cache. |
 | `--all-projects` | Consider every known workspace's locks when computing reachability, not just `--project`. |
@@ -2200,7 +2331,7 @@ vendored tree containing native objects (`E-VENDOR-NATIVE`).
 
 **`search <QUERY>`** — query the catalog. `--limit <N>` (default 20), `--capability <cap>` to
 filter by declared capability, `--attested` for reviewed only, `--json`. `omp ext discover`
-is a visible alias, matching pi's vocabulary (`.plan/feature-map/FEATURES.md:72`).
+is a visible alias.
 
 **`index <add|remove|list>`** — manage the index list. `add <NAME> <URL> [--first]`,
 `remove <NAME>`, `list [--json]`. Order is resolution order (R8).
@@ -2208,6 +2339,55 @@ is a visible alias, matching pi's vocabulary (`.plan/feature-map/FEATURES.md:72`
 **`where [<id>]`** — print resolved paths: store root, site tree for each host key, `bin`
 dir, lock, install record, grants file. The command to run before reading any of this
 document's path claims.
+
+#### 3.13.13 Linked development loop
+
+`omp ext new <id>` creates a minimal manifest-first extension in `./<id>`:
+`omp.toml` declares one soft tool and one observe hook, and
+`src/<python_package>/__init__.py` implements them with `@omp.tool` and `@omp.hook`.
+The scaffold passes the same manifest validation used by admission; no extension code runs
+to discover its declarations.
+
+Link the directory once, then iterate in place:
+
+```console
+$ omp ext new demo
+$ omp ext link demo
+$ $EDITOR demo/src/demo/__init__.py
+$ omp ext doctor
+```
+
+A link is recorded as `source = { link = "<canonical-path>" }`. It is unsigned and
+therefore exempt from artifact-signature verification, but its effective tier is pinned to
+`sandboxed` unless an explicit operator grant admits a different tier. The Environment
+watches the linked source tree. One burst of source changes drains and respawns only that
+extension's supervised child with restart reason `HOT_RELOAD`; other extension generations
+do not change. `omp ext doctor` identifies the canonical linked source and reports its
+unsigned, signature-exempt state, making the edit → auto-respawn → doctor loop observable.
+
+#### 3.13.14 Invocation setting overrides
+
+The root-global, repeatable form is:
+
+```console
+$ omp --ext demo.verbose=true --ext demo.limit=12
+```
+
+Argument parsing treats each value only as inert `<extension-id>.<key>=<text>` data. It
+does not import or spawn extension code. During ADMIT, the target extension's `omp.toml`
+`[settings.<key>]` schema supplies the type, enum membership, and numeric bounds. An
+unknown key or invalid value rejects that extension with a diagnostic naming its id.
+
+Resolved extension settings use this precedence, from lowest to highest:
+
+1. manifest default;
+2. user `[extensions.settings.<id>]`;
+3. project `[extensions.settings.<id>]`;
+4. repeatable `--ext <id>.<key>=<value>` values, with the last occurrence for a key winning.
+
+The resulting immutable map is the extension's `ctx.settings` snapshot for activation,
+hooks, and device calls. `--extension` / `-e` remains the invocation-local extension-root
+selector; `--ext` is reserved for setting overrides so parsing never needs dynamic flags.
 
 ### 3.14 Environment variables
 
@@ -2227,7 +2407,7 @@ All `OMP_*` per repository policy. Every one has a flag equivalent except where 
 | `OMP_EXT_EXCLUDE_NEWER` | unset | Default R9 clamp for resolutions that do not specify one. |
 | `OMP_EXT_DISABLE` | unset | Comma-separated `id`s never admitted, in any layer. Highest-precedence negative, above config. The emergency brake. |
 | `OMP_EXT_NO_WORKSPACE` | unset | `1` ≡ `--no-workspace-ext`: suppress the whole workspace layer (P9). |
-| `OMP_EXT_GRANT` | unset | Non-interactive grants: `id:cap,cap;id2:*` or `id:*` for everything declared. `id:tier=trusted` grants a tier. Operator channel for CI (§3.9.3(1)). |
+| `OMP_EXT_GRANT` | unset | Non-interactive grants: `id:cap,cap;id2:*` or `id:*` for everything declared. `id:tier=trusted` grants a tier. Operator channel for CI (§3.9.3(1)); headless admission never opens the interactive trust dialog. |
 | `OMP_EXT_ALLOW_BUILD` | unset | `1` ≡ `--allow-build` for `path`/`git` sources. Never affects index or PyPI sources. |
 | `OMP_EXT_SIGN_KEY` | unset | ed25519 private key path for `omp ext publish`. |
 | `OMP_EXT_UV` | discovered on `PATH` | Path to the `uv` binary. |
@@ -2355,6 +2535,7 @@ member's value is the corresponding `E-*` or `W-*` spelling in the table below.
 |---|---|---|---|---|
 | `E-NO-MANIFEST` | discover | 1 | Named path has no `omp.toml` and no `[tool.omp]` | Hard error when named explicitly; silent skip during ambient scan. |
 | `E-MANIFEST-PARSE` | discover | 1 | Malformed TOML, bad `id` grammar, unknown top-level key | Extension omitted; layer continues; notification item. |
+| `E-FEATURE` | install / build / link | 2 | Unknown, malformed, or wrongly owned feature selection/declaration | Refused before lock/install mutation; names and owning row are reported. |
 | `E-CAP-UNKNOWN` | discover | 1 | Capability name outside the closed vocabulary | Refused. Prevents a typo silently granting nothing. |
 | `E-CAP-EXEC-OPEN` | build/discover | 1 | `exec = true` | Refused; `exec` must name programs. |
 | `E-DUP-ID` | discover | 1 | Same `extension_id` twice within one layer, any publisher (P6) | Both sources reported; neither loads. |
@@ -2386,7 +2567,7 @@ member's value is the corresponding `E-*` or `W-*` spelling in the table below.
 | `E-CONSENT` | admit | 5 | Consent declined | Extension omitted; session continues normally. |
 | `E-GRANT-UNKNOWN` | admit | 5 | `--grant` names an undeclared capability | Refused; likely a typo hiding an ungranted capability. |
 | `E-SETTING-SECRET` | admit | 1 | A secret in `[extensions.settings]` | Refused; use `omp.creds.*`. |
-| `E-TRUSTED-LOAD` | admit | 1 | A `trusted` or `--ext-only` extension fails to load | **Fatal.** Session does not start. pi parity (`/work/pi/…/main.ts:1644-1647`). |
+| `E-TRUSTED-LOAD` | admit | 1 | A `trusted` or `--ext-only` extension fails to load | **Fatal.** Session does not start. |
 | `E-ABI-EXPORT` | admit | 1 | Native module `dlopen` fails for missing CPython symbols | Host binary was not linked with `-Wl,-export_dynamic`. Diagnosed by `omp ext doctor`. |
 | `W-YANKED` | resolve | 0 | Lock pins a yanked version | Proceeds. |
 | `W-KEY-ROTATED` | materialize | 0 | Signed key rotation accepted | Proceeds; logged. |
@@ -2809,9 +2990,9 @@ exists to prevent. The fix is clean because route-awareness already exists elsew
 The target behavior, fixed by the Rev 2.1 rulings, is stricter than a route filter alone
 and is parameterized by the user's dynamic tool policy (`tools.policy`,
 [`01-devices.md`](01-devices.md)): under the default `auto`, `advertise` lowers **core
-tools + granted hard tools; devices ride the `xd` builtin inside `shell`** — `kind="hard"` declarations admitted under a
+tools + granted hard tools; devices ride the `dyn` builtin inside `shell`** — `kind="hard"` declarations admitted under a
 `tools.hard` grant (§3.9.2) — and nothing else; `device_only` drops the hard set;
-`tool_only` drops the `xd` builtin and lowers every declaration as a slot, a prompt-cache and TTFT
+`tool_only` drops the `dyn` builtin and lowers every declaration as a slot, a prompt-cache and TTFT
 cost the user explicitly bought.
 
 #### 6.0.2 `live_hash` is not the availability identity
@@ -2837,7 +3018,7 @@ this namespace touches the slot digest.
 
 Extensions register with the **host**, never with the **model**. `RegisterTools`/`ToolDecl`
 (`toolhost.proto:52-64`) exist and are host-facing — the host must know a device's name,
-schema, rev, and constraints to serve the device catalog and help behind `xd` at all.
+schema, rev, and constraints to serve the device catalog and help behind `dyn` at all.
 Registration adds no schema slot to the model's request; the paths that do are a granted
 hard tool (§3.9.2) and the user's own `tools.policy = tool_only` setting
 ([`01-devices.md`](01-devices.md)) — a grant and a setting, never a registration. (Which,
@@ -3193,12 +3374,11 @@ project overrides) — §3.1.3, §3.7.
 
 **Conflicts, deliberately.**
 
-1. **Marketplace auto-update** (`FEATURES.md:989`, `/work/pi/…/marketplace-auto-update.ts:19-45`)
-   is **removed**, not ported. A background worker that changes executing code on session
-   start is incompatible with hash-pinned locks and digest-pinned consent. Replacement:
-   `omp ext list --outdated` reports, `omp ext upgrade` acts, the operator schedules it.
-   This is the one place this document knowingly trades pi's convenience for a property, and
-   it should be argued with users rather than assumed.
+1. **Marketplace auto-update is adapted, not copied**
+   (`FEATURES.md:989`, `/work/pi/…/marketplace-auto-update.ts:19-45`). The session-start
+   runner in §3.13.8 is non-blocking and generation-based: notify is immutable, auto may
+   commit only a same-publisher/same-effective-capability client generation for a later
+   session, workspace locks remain notify-only, and every trust or policy refusal is typed.
 2. **Multi-root config precedence** `.omp > .claude > .codex > .gemini`
    (`config.md:4`, `FEATURES.md:95`) does **not** extend to extensions (§3.3.2). A
    `.claude/` plugin is not a Python distribution. Foreign roots are reported as
@@ -3324,10 +3504,10 @@ missing and the other two are decoration.
   same mmap-and-point path the stdlib gets. That is a real win and a real complexity cost;
   it should be measured, not assumed.
 - **Resident host count** is the multiplier, and it is now the design's main cost. One child
-  per *active* extension, lazily spawned, so `omp ext list` and `xd` catalog listings
+  per *active* extension, lazily spawned, so `omp ext list` and `dyn` catalog listings
   cost zero interpreters (§3.1.5's manifest-generated declaration
-  table is what makes that possible). A child boots on first `xd <path> [args…]` dispatch
-  or first `xd <path> --help` detail fetch. What
+  table is what makes that possible). A child boots on first `dyn <path> [args…]` dispatch
+  or first `dyn <path> --help` detail fetch. What
   is shared across children of the same executable: the frozen stdlib blob, because it is
   `include_bytes!` static data in the binary and the OS page cache serves those read-only
   pages once. What is per-child: the unmarshalled subset actually imported, the interpreter
@@ -3587,6 +3767,6 @@ review round; reversals recorded here and at the point of change:
   dispatch path, not the per-invocation decision procedure" — and §2.3 item 2 and §6.3
   now cite it as decision text.
 
-**Revision 2.2** — the `xd` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `xd` builtin of the embedded shell, inside the core `shell` tool: `xd` lists the catalog (`xd --q <text>` searches), `xd <device> --help` returns docs plus schema-derived CLI usage, and `xd <device> [args…]` (or `xd <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `xd resolve "<reason>"` / `xd reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `xd` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
+**Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
 
-In this file, live deployment activation, catalog, and policy-mode prose now uses `xd`; under `tool_only`, the `xd` builtin is absent and declarations are lowered as model-facing slots.
+In this file, live deployment activation, catalog, and policy-mode prose now uses `dyn`; under `tool_only`, the `dyn` builtin is absent and declarations are lowered as model-facing slots.

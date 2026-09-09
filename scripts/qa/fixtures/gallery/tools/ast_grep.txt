@@ -1,0 +1,23 @@
+── ast_grep — AST Grep ─────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ AST Grep: useState(                                                                               
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ AST Grep: useState($A) in packages/tui/src/components                                             
+                                                                                                    
+
+  · done
+                                                                                                    
+ AST Grep: useState($A) 2 matches · 2 files · in packages/tui/src/components · searched 14         
+└─ … 1 more match                                                                                   
+                                                                                                    
+
+  · failed
+                                                                                                    
+ Error: Pattern parse error: incomplete node `useState(` — expected a closing `)`                  
+                                                                                                    
+

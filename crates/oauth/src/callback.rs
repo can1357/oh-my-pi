@@ -5,7 +5,7 @@ use std::{
 	time::Duration,
 };
 
-use omp_core::{SecretString, Str};
+use omp_core::{SecretString, Str, ct_eq};
 use tokio::{
 	io::{AsyncReadExt as _, AsyncWriteExt as _},
 	net::{TcpListener, TcpStream},
@@ -30,6 +30,10 @@ pub fn validate_redirect_pair(
 	let listener = Url::parse(listener_uri).map_err(|_| CallbackBindError::InvalidRedirect)?;
 	if listener.scheme() != "http"
 		|| !is_loopback_host(listener.host())
+		|| !listener.username().is_empty()
+		|| listener.password().is_some()
+		|| !redirect.username().is_empty()
+		|| redirect.password().is_some()
 		|| listener.fragment().is_some()
 		|| redirect.fragment().is_some()
 		|| !matches!(redirect.scheme(), "http" | "https")
@@ -49,7 +53,7 @@ pub fn validate_redirect_pair(
 	Ok(())
 }
 
-fn is_loopback_host(host: Option<Host<&str>>) -> bool {
+const fn is_loopback_host(host: Option<Host<&str>>) -> bool {
 	match host {
 		Some(Host::Domain(host)) => host.eq_ignore_ascii_case("localhost"),
 		Some(Host::Ipv4(address)) => address.is_loopback(),
@@ -117,7 +121,7 @@ impl LoopbackCallback {
 	}
 
 	/// Overrides the bounded callback deadline for an embedding application.
-	pub fn with_timeout(mut self, timeout: Duration) -> Self {
+	pub const fn with_timeout(mut self, timeout: Duration) -> Self {
 		self.timeout = timeout;
 		self
 	}
@@ -135,12 +139,11 @@ impl LoopbackCallback {
 				() = &mut deadline => return Err(CallbackError::TimedOut),
 				accepted = self.listeners.accept() => accepted?,
 			};
-			let target = match read_request_target(&mut stream).await {
-				Ok(target) => target,
-				Err(_) => {
-					let _ = write_response(&mut stream, 400, "Bad Request").await;
-					continue;
-				},
+			let target = if let Ok(target) = read_request_target(&mut stream).await {
+				target
+			} else {
+				let _ = write_response(&mut stream, 400, "Bad Request").await;
+				continue;
 			};
 			let (path, query) = target.split_once('?').unwrap_or((&target, ""));
 			if path != self.path.as_str() {
@@ -149,7 +152,7 @@ impl LoopbackCallback {
 			}
 			let mut code = query_value(query, "code")?.ok_or(CallbackError::MissingCode)?;
 			let state = query_value(query, "state")?.ok_or(CallbackError::StateMismatch)?;
-			if state.as_str() != self.state.as_str() {
+			if !ct_eq(state.as_bytes(), self.state.as_bytes()) {
 				write_response(&mut stream, 400, "State mismatch").await?;
 				return Err(CallbackError::StateMismatch);
 			}
@@ -256,8 +259,8 @@ fn decode_form_component(value: &str) -> Result<Zeroizing<String>, CallbackError
 	Ok(Zeroizing::new(decoded))
 }
 
-async fn read_request_target(stream: &mut TcpStream) -> io::Result<String> {
-	let mut request = [0_u8; MAX_REQUEST_BYTES];
+async fn read_request_target(stream: &mut TcpStream) -> io::Result<Zeroizing<String>> {
+	let mut request = Zeroizing::new([0_u8; MAX_REQUEST_BYTES]);
 	let mut length = 0;
 	loop {
 		if length == request.len() {
@@ -288,7 +291,7 @@ async fn read_request_target(stream: &mut TcpStream) -> io::Result<String> {
 	line
 		.next()
 		.filter(|target| target.starts_with('/'))
-		.map(ToOwned::to_owned)
+		.map(|target| Zeroizing::new(target.to_owned()))
 		.ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "request target is invalid"))
 }
 

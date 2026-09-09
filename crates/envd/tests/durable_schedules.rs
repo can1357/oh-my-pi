@@ -6,11 +6,11 @@ use std::{
 	time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use omp_agent::scheduler::BudgetReservation;
 use omp_core::Str;
 use omp_envd::schedules::{
-	ScheduleCaller, ScheduleDeliveryBackend, ScheduleDeliveryReceipt, ScheduleDeliveryRequest,
-	open_durable_scheduler, open_durable_scheduler_manual,
+	BudgetReservation, DurableScheduleError, ScheduleCaller, ScheduleDeliveryBackend,
+	ScheduleDeliveryReceipt, ScheduleDeliveryRequest, open_durable_scheduler,
+	open_durable_scheduler_manual, open_durable_scheduler_unbound,
 };
 use serde_json::{Map, Value, json};
 use tokio::{task, time};
@@ -119,6 +119,25 @@ async fn history(handle: &omp_envd::schedules::DurableScheduleHandle, id: &str) 
 		.as_array()
 		.expect("history rows")
 		.clone()
+}
+
+#[tokio::test]
+async fn replaced_owner_bind_is_generation_fenced_and_newest_owner_binds() {
+	let temp = tempfile::tempdir().expect("tempdir");
+	let path = temp.path().join("schedules.sqlite");
+	let fenced = open_durable_scheduler_unbound(&path).expect("open first scheduler");
+	let owner = open_durable_scheduler_unbound(&path).expect("open replacement scheduler");
+	let delivery = Delivery::new(BudgetReservation::default());
+	let error = fenced
+		.bind_delivery(delivery.clone())
+		.await
+		.expect_err("replaced owner must be fenced");
+	assert!(matches!(error, DurableScheduleError::StaleGeneration { expected, active }
+		if expected == fenced.generation() && active == owner.generation()));
+	owner
+		.bind_delivery(delivery)
+		.await
+		.expect("newest owner binds");
 }
 
 #[tokio::test]

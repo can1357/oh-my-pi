@@ -37,7 +37,7 @@ use windows_sys::Win32::{
 	},
 };
 
-use crate::EnvClient;
+use crate::{EnvClient, partition::FramePipe};
 
 /// Maximum encoded size of one `env/v1` frame.
 pub const FRAME_LIMIT: usize = 64 * 1024 * 1024;
@@ -108,7 +108,7 @@ pub fn current_user_name() -> io::Result<Str> {
 	Ok(Str::from(name))
 }
 
-/// Connects an environment client to an owner-local Windows named pipe.
+/// Connects raw frame channels to an owner-local Windows named pipe.
 ///
 /// Only local pipe names in the `\\.\pipe\` namespace are accepted. Access is
 /// ultimately authorized by the listener's current-user-only DACL; this
@@ -117,12 +117,18 @@ pub fn current_user_name() -> io::Result<Str> {
 /// # Errors
 /// Returns an OS error when the endpoint is not a canonical local named pipe
 /// or its ready listener cannot be opened.
-pub fn connect_owner_pipe(
+#[tracing::instrument(
+	name = "environment_connect",
+	level = "debug",
+	skip_all,
+	fields(endpoint = %endpoint.as_ref().display())
+)]
+pub fn connect_owner_pipe_frames(
 	endpoint: impl AsRef<Path>,
-) -> io::Result<(EnvClient, JoinHandle<io::Result<()>>)> {
+) -> io::Result<(FramePipe, JoinHandle<io::Result<()>>)> {
 	let stream = open_owner_pipe(endpoint)?;
-	let (client, transport) = EnvClient::in_process(64);
-	let (requests, responses) = transport.into_parts();
+	let (outgoing, requests) = flume::bounded(64);
+	let (responses, incoming) = flume::bounded(64);
 	let task = tokio::spawn(async move {
 		let (mut reader, mut writer) = {
 			use tokio::io;
@@ -151,7 +157,20 @@ pub fn connect_owner_pipe(
 			result = write => result,
 		}
 	});
-	Ok((client, task))
+	Ok((FramePipe::new(outgoing, incoming), task))
+}
+
+/// Connects an environment client to an owner-local Windows named pipe.
+///
+/// # Errors
+/// Returns an OS error when the endpoint is not a canonical local named pipe
+/// or its ready listener cannot be opened.
+pub fn connect_owner_pipe(
+	endpoint: impl AsRef<Path>,
+) -> io::Result<(EnvClient, JoinHandle<io::Result<()>>)> {
+	let (frames, task) = connect_owner_pipe_frames(endpoint)?;
+	let (outgoing, incoming) = frames.into_parts();
+	Ok((EnvClient::from_channels(outgoing, incoming), task))
 }
 
 /// Reads one length-delimited client frame from a Windows DATA byte stream.
@@ -235,6 +254,12 @@ impl OwnerPipeListener {
 	/// # Errors
 	/// Returns an OS error for an invalid or already-owned endpoint or when the
 	/// current-user security descriptor cannot be installed.
+	#[tracing::instrument(
+		name = "environment_bind",
+		level = "debug",
+		skip_all,
+		fields(endpoint = %endpoint.as_ref().display())
+	)]
 	pub fn bind(endpoint: impl AsRef<Path>) -> io::Result<Self> {
 		let endpoint = endpoint.as_ref();
 		validate_local_pipe(endpoint.as_os_str())?;

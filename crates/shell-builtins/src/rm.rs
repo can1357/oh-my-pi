@@ -24,7 +24,7 @@ use clap::{
 };
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle, TermLike};
 use omp_core::NormalizePath;
-use omp_shell_engine::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
+use omp_shell::{ShellExtensions, builtins::Registration, openfiles::OpenFile};
 use parking_lot::Mutex;
 use thiserror::Error;
 
@@ -193,6 +193,9 @@ mod platform {
 		let file_name = path.file_name()?;
 
 		let dir_fd = DirFd::open(&host.resolve(parent), SymlinkBehavior::Follow).ok()?;
+		if let Err(error) = host.ensure_writable(path) {
+			return Some(show_removal_error(host, error, path));
+		}
 
 		match dir_fd.unlink_at(file_name, false) {
 			Ok(_) => {
@@ -225,6 +228,9 @@ mod platform {
 		let dir_name = path.file_name()?;
 
 		let dir_fd = DirFd::open(&host.resolve(parent), SymlinkBehavior::Follow).ok()?;
+		if let Err(error) = host.ensure_writable(path) {
+			return Some(show_removal_error(host, error, path));
+		}
 
 		match dir_fd.unlink_at(dir_name, true) {
 			Ok(_) => {
@@ -273,6 +279,9 @@ mod platform {
 		// When we can't open a subdirectory due to permission denied,
 		// try to remove it directly (it might be empty).
 		// This matches GNU rm behavior with -f flag.
+		if let Err(error) = host.ensure_writable(entry_path) {
+			return show_removal_error(host, error, entry_path);
+		}
 		if let Err(_remove_err) = dir_fd.unlink_at(entry_name, true) {
 			// The directory is not empty (or another error) and we can't read it
 			// to remove its contents. Report the original permission denied error.
@@ -295,6 +304,9 @@ mod platform {
 		is_dir: bool,
 		options: &Options,
 	) -> bool {
+		if let Err(error) = host.ensure_writable(entry_path) {
+			return show_removal_error(host, error, entry_path);
+		}
 		if let Err(e) = dir_fd.unlink_at(entry_name, is_dir) {
 			show_error!(host, "cannot remove {}: {e}", entry_path.quote());
 			true
@@ -315,7 +327,11 @@ mod platform {
 		options: &Options,
 		error_occurred: bool,
 	) -> bool {
-		match fs::remove_dir(host.resolve(path)) {
+		let fs_path = match host.ensure_writable(path) {
+			Ok(path) => path,
+			Err(error) => return show_removal_error(host, error, path),
+		};
+		match fs::remove_dir(fs_path) {
 			Err(_) if !error_occurred && !is_readable(host, path) => {
 				// For compatibility with GNU test case
 				// `tests/rm/unread2.sh`, show "Permission denied" in this
@@ -374,7 +390,11 @@ mod platform {
 				// handle the error appropriately and try to remove if possible
 				if e.kind() == io::ErrorKind::PermissionDenied {
 					// Try to remove the directory directly if it's empty
-					if fs::remove_dir(host.resolve(path)).is_ok() {
+					let fs_path = match host.ensure_writable(path) {
+						Ok(path) => path,
+						Err(error) => return show_removal_error(host, error, path),
+					};
+					if fs::remove_dir(fs_path).is_ok() {
 						verbose_removed_directory(host, path, options);
 						return false;
 					}
@@ -599,7 +619,11 @@ fn show_permission_denied_error(host: &mut Host, path: &Path) -> bool {
 
 /// Helper function to remove a directory and handle results
 fn remove_dir_with_feedback(host: &mut Host, path: &Path, options: &Options) -> bool {
-	match fs::remove_dir(host.resolve(path)) {
+	let fs_path = match host.ensure_writable(path) {
+		Ok(path) => path,
+		Err(error) => return show_removal_error(host, error, path),
+	};
+	match fs::remove_dir(fs_path) {
 		Ok(_) => {
 			verbose_removed_directory(host, path, options);
 			false
@@ -1250,7 +1274,11 @@ fn remove_dir_recursive(
 	{
 		if let Some(s) = path.to_str() {
 			if s.len() > 1000 {
-				match fs::remove_dir_all(host.resolve(path)) {
+				let fs_path = match host.ensure_writable(path) {
+					Ok(path) => path,
+					Err(error) => return show_removal_error(host, error, path),
+				};
+				match fs::remove_dir_all(fs_path) {
 					Ok(_) => return false,
 					Err(e) => {
 						show_error!(host, "cannot remove {}: {e}", path.quote());
@@ -1291,7 +1319,11 @@ fn remove_dir_recursive(
 		}
 
 		// Try removing the directory itself.
-		match fs::remove_dir(host.resolve(path)) {
+		let fs_path = match host.ensure_writable(path) {
+			Ok(path) => path,
+			Err(error) => return show_removal_error(host, error, path),
+		};
+		match fs::remove_dir(fs_path) {
 			Err(_) if !error && !is_readable(host, path) => {
 				// For compatibility with GNU test case
 				// `tests/rm/unread2.sh`, show "Permission denied" in this
@@ -1438,7 +1470,11 @@ fn remove_file(
 		}
 
 		// Fallback method for non-Unix, Redox, or when safe traversal is unavailable
-		match fs::remove_file(host.resolve(path)) {
+		let fs_path = match host.ensure_writable(path) {
+			Ok(path) => path,
+			Err(error) => return show_removal_error(host, error, path),
+		};
+		match fs::remove_file(fs_path) {
 			Ok(_) => {
 				verbose_removed_file(host, path, options);
 			},

@@ -29,7 +29,7 @@ mod render;
 mod value;
 
 pub use error::{Error, HelperError, SyntaxErrorKind, TypeErrorKind};
-pub use props::Props;
+pub use props::{Props, ScopedProps};
 pub use render::{Engine, Template};
 pub use value::Value;
 

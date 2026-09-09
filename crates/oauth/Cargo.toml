@@ -9,28 +9,29 @@ repository.workspace = true
 description = "Provider-independent bounded OAuth protocol primitives for OMP"
 
 [dependencies]
-bytes = { workspace = true }
-flume = { workspace = true }
-futures = { workspace = true }
-http = { workspace = true }
-http-body-util = { workspace = true }
-hyper = { workspace = true }
-hyper-rustls = { workspace = true }
-hyper-util = { workspace = true, features = ["client-legacy", "http1", "http2", "tokio"] }
-omp-core = { workspace = true }
-ring = { workspace = true }
-rustls = { workspace = true }
-serde = { workspace = true }
-serde_json = { workspace = true }
-sha2 = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
-url = { workspace = true }
-zeroize = { workspace = true }
+bytes.workspace = true
+flume.workspace = true
+futures.workspace = true
+http.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-rustls.workspace = true
+hyper-util.workspace = true
+omp-core.workspace = true
+ring.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+url.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio.workspace = true
 
 [lints]
 workspace = true

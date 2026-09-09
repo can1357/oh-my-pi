@@ -1,4 +1,4 @@
-//! Native Mnemopi configuration and Pi-compatible defaults.
+//! Native Mnemopi configuration and defaults.
 
 use std::path::PathBuf;
 
@@ -164,9 +164,9 @@ pub struct RemoteLlmSettings {
 	pub credential: CredentialRef,
 }
 
-/// Mnemopi settings. [`Self::normalize`] applies Pi-compatible floors and hard
-/// safety ceilings.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// Mnemopi settings. [`Self::normalize`] applies floors and hard safety
+/// ceilings.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MnemopiSettings {
 	/// Optional primary database path; otherwise the app supplies its memory
 	/// data root.
@@ -315,14 +315,14 @@ impl MnemopiSettings {
 }
 
 /// Persisted memory selector and backend settings.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MemorySettings {
 	/// Active backend; omitted means [`MemoryBackend::Off`].
 	#[serde(default)]
 	pub backend: MemoryBackend,
 }
 
-/// Pi-compatible automatic-learning settings.
+/// Automatic-learning settings.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct AutolearnSettings {
 	/// Enables managed-skill guidance and capture eligibility.

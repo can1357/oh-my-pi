@@ -13,21 +13,20 @@ readme = "README.md"
 workspace = true
 
 [dependencies]
-async-stream = { workspace = true }
-bytes = { workspace = true }
-flume = { workspace = true }
-futures = { workspace = true }
-omp-core = { workspace = true, features = ["schemars"] }
-omp-catalog = { workspace = true }
-omp-inference = { workspace = true }
-omp-slopjson = { workspace = true }
-parking_lot = { workspace = true }
-omp-proto = { workspace = true }
-serde = { workspace = true, features = ["rc"] }
-schemars = { workspace = true }
-smallvec = { workspace = true }
-strum = { workspace = true }
-serde_json = { workspace = true }
-thiserror = { workspace = true }
-tokio = { workspace = true }
-tokio-util = { workspace = true }
+async-stream.workspace = true
+bytes.workspace = true
+flume.workspace = true
+futures.workspace = true
+omp-core.workspace = true
+omp-catalog.workspace = true
+omp-ai.workspace = true
+parking_lot.workspace = true
+omp-proto.workspace = true
+serde.workspace = true
+schemars.workspace = true
+smallvec.workspace = true
+strum.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true

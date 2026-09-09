@@ -10,7 +10,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command, builder::ValueParser, parser::ValuesRef};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 #[cfg(unix)]
 use rustix::fs;
 
@@ -324,7 +324,10 @@ fn create_single_dir(
 	config: &Config,
 	host: &mut Host,
 ) -> Result<(), MkdirError> {
-	let fs_path = host.resolve(path);
+	let mut fs_path = host.resolve(path);
+	if !fs_path.exists() {
+		fs_path = host.ensure_writable(path).map_err(MkdirError::io)?;
+	}
 	#[cfg(all(unix, target_os = "linux"))]
 	let path_exists = fs_path.exists();
 

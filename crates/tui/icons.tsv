@@ -10,6 +10,7 @@ adhesive-bandage	object.adhesiveBandage	bandg	🩹	
 admin	user.admin	admin	👑	
 admission-ticket	object.admissionTicket	tkt	🎟	
 advisor	icon.advisor	(adv)	👁	
+advisor-closed	icon.advisorClosed	(adv)	🙈	
 agents	icon.agents	AG	👥	
 airplane	object.airplane	plane	✈	
 airplane-arrival	object.airplaneArrival	<fly	🛬	
@@ -134,6 +135,7 @@ cancelled	status.cancelled	[x]	⊘	
 candle	object.candle	candle	🕯	󰗢
 candy	object.candy	candy	🍬	󱥰
 capricorn	object.capricorn	Cap	♑	󰪀
+card-bullet	format.cardBullet	*	•	•
 card-file-word-box	file.cardFileWordBox	cards	🗃	󰈭
 card-index-card	object.cardIndexCard	card	📇	󰭯
 carousel-horse	object.carouselHorse	ride	🎠	
@@ -246,6 +248,9 @@ desktop	device.desktop	desk	🖥	
 diamond-dot	object.diamondDot	<.>	💠	
 diamond-suit	object.diamondSuit	<>	♦	
 diff	git.diff	diff	±	
+diff-gap	diff.gap	...	…	…
+diff-indent-space	diff.indentSpace	.	·	·
+diff-indent-tab	diff.indentTab	>	→	→
 dim-button-five	device.dimButtonFive	dim	🔅	󰃞
 disabled	status.disabled	[\s]	⦸	
 divide-sign	object.divideSign	/	➗	
@@ -499,6 +504,7 @@ last-quarter-moon	object.lastQuarterMoon	moon	🌗	󰽣
 latin-cross	object.latinCross	cross	✝	
 latin-letters-input	object.latinLettersInput	ABC	🔤	󱌯
 launch	tool.launch	run	🚀	
+launch-pending	status.launchPending	[*]	⏳	󱑍
 leafless-tree	object.leaflessTree	tree	🪾	
 leafy-green	object.leafyGreen	leaf	🥬	
 left	nav.left	<	◀	
@@ -622,7 +628,7 @@ oil-drum	object.oilDrum	oil	🛢	
 ok-button	status.okButton	OK	🆗	
 okay-hand	object.okayHand	OK	👌	󰩐
 om	object.om	om	🕉	
-omp	icon.omp	⍧	⍧	󰵗
+omp	icon.omp	pi	π	󰵗
 on-arrow	nav.onArrow	on	🔛	󰁁
 oncoming-automobile	object.oncomingAutomobile	car	🚘	
 oncoming-bus	object.oncomingBus	bus	🚍	
@@ -897,6 +903,9 @@ speaker-low	device.speakerLow	vol-	🔈	
 speedboat-sailboat	object.speedboatSailboat	boat	🚤	󰻈
 spider	object.spider	spider	🕷	
 spider-web	object.spiderWeb	web	🕸	󰯊
+spin-2	anim.spin2	o	◶	󱑌
+spin-3	anim.spin3	o	◷	󱑍
+spin-4	anim.spin4	o	◴	󱑎
 split	git.split	[|]	◫	
 spoon	object.spoon	spoon	🥄	
 sport-utility-car-sports	object.sportUtilityCarSports	SUV	🚙	󰞬
@@ -918,6 +927,7 @@ stopwatch	object.stopwatch	timer	⏱	
 storm-cloud-rain	object.stormCloudRain	storm	⛈	
 straight-ruler	object.straightRuler	ruler	📏	
 straw-cup	object.strawCup	cup	🥤	󰆪
+stream-cursor	status.streamCursor	|	▌	▌
 studio-microphone	device.studioMicrophone	mic	🎙	
 subscription	icon.subscription	(sub)	(sub)	󰙺
 success	status.success	[ok]	✔	
@@ -1031,6 +1041,7 @@ usb	device.usb	usb	🔌	
 user-add	user.add	+usr	👤	
 user-remove	user.remove	-usr	👤	
 vertical-traffic-light	object.verticalTrafficLight	light	🚦	
+vibe-send-arrow	tool.vibeSendArrow	->	→	→
 vibrate	cmd.vibrate	vib	📳	󰕦
 video	comm.video	cam	📹	
 video-file	file.video	[vid]	🎥	

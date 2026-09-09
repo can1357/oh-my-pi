@@ -1,0 +1,32 @@
+── grep — Grep ─────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+  Grep: useState                                                                                   
+                                                                                                    
+
+  · in progress
+                                                                                                    
+  Grep: useState in packages/tui/src                                                               
+                                                                                                    
+
+  · done
+                                                                                                    
+  Grep: useState 5 matches · 3 files · in packages/tui/src                                         
+ ├─ # packages/tui/src/components/                                                                  
+ │  ## SearchBox.tsx                                                                                
+ │  *18│  const [query, setQuery] = useState("");                                                   
+ │  *19│  const [results, setResults] = useState<Match[]>([]);                                      
+ │  ## StatusBar.tsx                                                                                
+ │  *27│  const [expanded, setExpanded] = useState(false);                                          
+ └─ # packages/tui/src/hooks/                                                                       
+    ## useDebounced.ts                                                                              
+     *9│  const [value, setValue] = useState(initial);                                              
+    *10│  const [pending, setPending] = useState(false);                                            
+                                                                                                    
+
+  · failed
+                                                                                                    
+  Error: Invalid regex pattern: unclosed group near index 8                                        
+                                                                                                    
+

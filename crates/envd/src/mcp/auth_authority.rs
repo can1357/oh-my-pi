@@ -1,19 +1,20 @@
 //! MCP projection of the app's combined encrypted credential authority.
 
-use std::{fmt, sync::Arc, time::SystemTime};
+use std::{fmt, mem, sync::Arc, time::SystemTime};
 
 use futures::future::BoxFuture;
-use omp_catalog::AuthSpecId;
-use omp_core::{ExposeSecret as _, Hash32, SecretBox, SecretString, Str};
-use omp_inference::{
+use omp_ai::{
 	auth::{
-		AuditedCredentialReveal, AuthRejection, CredentialError, CredentialLease, CredentialNeed,
-		CredentialOrigin, CredentialSource, CredentialStore, CredentialWrite, StoreError,
-		StoredCredentialSource,
+		AuditedCredentialReveal, AuthRejection, CredentialError, CredentialFuture, CredentialLease,
+		CredentialNeed, CredentialOrigin, CredentialSource, CredentialStore, CredentialWrite,
+		StoreError, StoredCredentialSource,
 	},
 	id::{AccountId, PrincipalId},
 };
+use omp_catalog::AuthSpecId;
+use omp_core::{ExposeSecret as _, Hash32, SecretBox, SecretString, Str};
 use serde::{Deserialize, Serialize};
+use zeroize::{Zeroize, Zeroizing};
 
 /// Opaque session-safe affinity. It contains no token, key, header, or URL.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
@@ -55,7 +56,7 @@ struct StoredMcpOAuthCredentialRef<'a> {
 	expires_at_ms:  Option<u64>,
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Zeroize)]
 struct StoredMcpOAuthCredentialOwned {
 	access_token:   String,
 	refresh_token:  Option<String>,
@@ -76,7 +77,7 @@ pub trait CredentialAuthority: CredentialSource {
 	fn provider_lease(
 		&self,
 		need: CredentialNeed,
-	) -> BoxFuture<'_, Result<CredentialLease, CredentialError>>;
+	) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>>;
 
 	/// Issues an MCP lease pinned to session-safe affinity.
 	fn mcp_lease<'a>(
@@ -119,18 +120,15 @@ impl CombinedAuthAuthority {
 		self.stored.lease(need).await
 	}
 
-	/// Derives a non-reversible account identity from profile and MCP server
-	/// identity. The source URL/name is never persisted as affinity.
-	pub fn mcp_affinity(
-		profile: &str,
-		server_identity: &str,
-		principal: PrincipalId,
-	) -> AuthAffinity {
+	/// Derives a non-reversible account identity from profile and the configured
+	/// MCP server URL. Mount display names never participate, so renaming a
+	/// mount preserves its grant while changing its endpoint cannot reuse one.
+	pub fn mcp_affinity(profile: &str, server_url: &str, principal: PrincipalId) -> AuthAffinity {
 		let mut hasher = Hash32::hasher();
 		hasher.update(b"omp-mcp-affinity/v1\0");
 		hasher.update(profile.as_bytes());
 		hasher.update(b"\0");
-		hasher.update(server_identity.as_bytes());
+		hasher.update(server_url.as_bytes());
 		let digest = hasher.finalize();
 		AuthAffinity { account: AccountId::new(format!("mcp/{}", digest.to_hex())), principal }
 	}
@@ -241,13 +239,14 @@ impl CombinedAuthAuthority {
 				secret.expose(|bytes| serde_json::from_slice::<StoredMcpOAuthCredentialOwned>(bytes))
 			})?;
 		let decoded = decoded.map_err(|_| McpOAuthStoreError::InvalidRecord)?;
+		let mut decoded = Zeroizing::new(decoded);
 		Ok(Some(StoredMcpOAuthCredential {
-			access_token:   SecretString::from(decoded.access_token),
-			refresh_token:  decoded.refresh_token.map(SecretString::from),
-			token_endpoint: Str::from(decoded.token_endpoint),
-			client_id:      Str::from(decoded.client_id),
-			client_secret:  decoded.client_secret.map(SecretString::from),
-			resource:       decoded.resource.map(Str::from),
+			access_token:   SecretString::from(mem::take(&mut decoded.access_token)),
+			refresh_token:  mem::take(&mut decoded.refresh_token).map(SecretString::from),
+			token_endpoint: Str::from(mem::take(&mut decoded.token_endpoint)),
+			client_id:      Str::from(mem::take(&mut decoded.client_id)),
+			client_secret:  mem::take(&mut decoded.client_secret).map(SecretString::from),
+			resource:       mem::take(&mut decoded.resource).map(Str::from),
 			expires_at_ms:  decoded.expires_at_ms,
 			generation:     metadata.generation,
 		}))
@@ -280,7 +279,7 @@ impl CredentialAuthority for CombinedAuthAuthority {
 	fn provider_lease(
 		&self,
 		need: CredentialNeed,
-	) -> BoxFuture<'_, Result<CredentialLease, CredentialError>> {
+	) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>> {
 		self.stored.lease(need)
 	}
 
@@ -310,7 +309,7 @@ impl CredentialSource for CombinedAuthAuthority {
 	fn lease(
 		&self,
 		need: CredentialNeed,
-	) -> BoxFuture<'_, Result<CredentialLease, CredentialError>> {
+	) -> CredentialFuture<'_, Result<CredentialLease, CredentialError>> {
 		self.stored.lease(need)
 	}
 
@@ -318,7 +317,7 @@ impl CredentialSource for CombinedAuthAuthority {
 		&'a self,
 		lease: &'a CredentialLease,
 		evidence: AuthRejection,
-	) -> BoxFuture<'a, Result<(), CredentialError>> {
+	) -> CredentialFuture<'a, Result<(), CredentialError>> {
 		self.stored.reject(lease, evidence)
 	}
 }
@@ -342,7 +341,7 @@ impl fmt::Debug for CombinedAuthAuthority {
 
 #[cfg(test)]
 mod tests {
-	use omp_inference::auth::{CredentialKind, HeadlessKeySource, KeyId};
+	use omp_ai::auth::{CredentialKind, HeadlessKeySource, KeyId};
 
 	use super::*;
 
@@ -441,6 +440,31 @@ mod tests {
 			"secret"
 		);
 		assert_eq!(credential.resource.as_deref(), Some("https://mcp.example"));
+	}
+
+	#[test]
+	fn affinity_is_profile_and_server_url_scoped() {
+		let principal = PrincipalId::from("default");
+		let first = CombinedAuthAuthority::mcp_affinity(
+			"default",
+			"https://mcp.example/one",
+			principal.clone(),
+		);
+		let same = CombinedAuthAuthority::mcp_affinity(
+			"default",
+			"https://mcp.example/one",
+			principal.clone(),
+		);
+		let other_url = CombinedAuthAuthority::mcp_affinity(
+			"default",
+			"https://mcp.example/two",
+			principal.clone(),
+		);
+		let other_profile =
+			CombinedAuthAuthority::mcp_affinity("work", "https://mcp.example/one", principal);
+		assert_eq!(first, same);
+		assert_ne!(first, other_url);
+		assert_ne!(first, other_profile);
 	}
 
 	#[tokio::test]

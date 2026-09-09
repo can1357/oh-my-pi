@@ -2,7 +2,6 @@
 
 use std::{
 	collections::BTreeSet,
-	env,
 	fs::{self, OpenOptions},
 	io,
 	path::{Path, PathBuf},
@@ -10,14 +9,14 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_catalog::{ProviderId, provider::OAuthFlowSpec, snapshot};
-use omp_core::SecretString;
-use omp_inference::{
+use omp_ai::{
 	account::{AccountRecord, AccountStateStore},
 	auth::{CredentialOrigin, OAuthCredentialImport},
 	call::AccountRoutingContext,
 	id::{AccountId, PrincipalId},
 };
+use omp_catalog::{ProviderId, provider::OAuthFlowSpec, snapshot};
+use omp_core::SecretString;
 use ring::rand::{SecureRandom as _, SystemRandom};
 use serde::Deserialize;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
@@ -70,7 +69,7 @@ pub async fn run(args: AuthBrokerArgs) -> miette::Result<()> {
 		AuthBrokerCommand::Token { regenerate } => token(&data_dir, regenerate),
 		AuthBrokerCommand::Login { provider, via, dry_run } => {
 			if let Some(alias) = via {
-				remote_login(&data_dir, provider.as_str(), alias.as_str(), dry_run).await
+				remote_login(provider.as_str(), alias.as_str(), dry_run).await
 			} else {
 				auth_cli::run(data_dir.join("credentials.db"), AuthCommand::Login { provider }).await
 			}
@@ -104,12 +103,7 @@ pub(crate) fn token(data_dir: &Path, regenerate: bool) -> miette::Result<()> {
 	Ok(())
 }
 
-async fn remote_login(
-	data_dir: &Path,
-	provider: &str,
-	alias: &str,
-	dry_run: bool,
-) -> miette::Result<()> {
+async fn remote_login(provider: &str, alias: &str, dry_run: bool) -> miette::Result<()> {
 	use tokio::io;
 	let callback_port = oauth_callback_port(provider)?;
 	let command = format!("omp auth-broker login {}", shell_quote(provider));
@@ -121,11 +115,7 @@ async fn remote_login(
 		}
 		return Ok(());
 	}
-	let project = env::current_dir()
-		.into_diagnostic()?
-		.join(".omp/hosts.toml");
-	let user = data_dir.join("hosts.toml");
-	let service = ssh_cmd::service(alias, &project, &user)?;
+	let service = ssh_cmd::service(alias, &ssh_cmd::host_paths()?)?;
 	let forward = match callback_port {
 		Some(port) => Some(
 			service
@@ -304,6 +294,12 @@ fn import(
 				routing:               AccountRoutingContext::default(),
 			})
 			.into_diagnostic()?;
+		tracing::info!(
+			provider = %plan.provider,
+			source = %plan.source.display(),
+			disabled = plan.disabled,
+			"credential imported"
+		);
 		println!(
 			"imported {}: {}{} from {}",
 			plan.provider,
@@ -338,6 +334,11 @@ fn load_import_plan(
 		let input = match fs::read(&source) {
 			Ok(input) => Zeroizing::new(input),
 			Err(error) => {
+				tracing::warn!(
+					path = %source.display(),
+					%error,
+					"credential import skipped unreadable file"
+				);
 				eprintln!("skip {}: unreadable credential file: {error}", source.display());
 				continue;
 			},
@@ -345,11 +346,20 @@ fn load_import_plan(
 		let record: CliProxyCredential = match serde_json::from_slice(&input) {
 			Ok(record) => record,
 			Err(error) => {
+				tracing::warn!(
+					path = %source.display(),
+					%error,
+					"credential import skipped malformed JSON"
+				);
 				eprintln!("skip {}: unreadable JSON: {error}", source.display());
 				continue;
 			},
 		};
 		if record.disabled && !include_disabled {
+			tracing::warn!(
+				path = %source.display(),
+				"credential import skipped disabled record"
+			);
 			eprintln!(
 				"skip {}: credential marked disabled (use --include-disabled to import anyway)",
 				source.display()
@@ -357,6 +367,10 @@ fn load_import_plan(
 			continue;
 		}
 		let Some(provider) = resolve_cli_proxy_provider(&record, &source, override_provider) else {
+			tracing::warn!(
+				path = %source.display(),
+				"credential import skipped unresolved provider"
+			);
 			eprintln!(
 				"skip {}: cannot determine OMP provider from type={}",
 				source.display(),
@@ -365,16 +379,29 @@ fn load_import_plan(
 			continue;
 		};
 		let (Some(access), Some(refresh)) = (record.access_token, record.refresh_token) else {
+			tracing::warn!(
+				path = %source.display(),
+				"credential import skipped incomplete token pair"
+			);
 			eprintln!("skip {}: missing access_token or refresh_token", source.display());
 			continue;
 		};
 		let Some(expired) = record.expired else {
+			tracing::warn!(
+				path = %source.display(),
+				"credential import skipped missing expiration"
+			);
 			eprintln!("skip {}: missing expired timestamp", source.display());
 			continue;
 		};
 		let expires_at = match expired.parse::<jiff::Timestamp>() {
 			Ok(timestamp) => SystemTime::from(timestamp),
 			Err(error) => {
+				tracing::warn!(
+					path = %source.display(),
+					%error,
+					"credential import skipped invalid expiration"
+				);
 				eprintln!("skip {}: cannot parse expired={expired}: {error}", source.display());
 				continue;
 			},
@@ -399,6 +426,11 @@ fn load_import_plan(
 			.map(|route| route.id.clone())
 			.collect::<BTreeSet<_>>();
 		if routes.is_empty() {
+			tracing::warn!(
+				path = %source.display(),
+				%provider,
+				"credential import skipped unknown provider"
+			);
 			eprintln!("skip {}: unknown credential provider `{provider}`", source.display());
 			continue;
 		}

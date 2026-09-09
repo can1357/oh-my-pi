@@ -79,7 +79,7 @@ impl DiffStat {
 		self.ops.update(self.props.ops(), Field::Ops);
 	}
 
-	fn labels(&self) -> [(&CountLabel, Field); 3] {
+	const fn labels(&self) -> [(&CountLabel, Field); 3] {
 		[(&self.added, Field::Added), (&self.removed, Field::Removed), (&self.ops, Field::Ops)]
 	}
 

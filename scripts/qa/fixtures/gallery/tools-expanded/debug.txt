@@ -1,0 +1,43 @@
+── debug — Debug ───────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ Debug: stack trace                                                                                
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ Debug: stack trace                                                                                
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  Debug stack trace ──────────────────────────────────────────────────────────────────────────╮
+├─── Session ──────────────────────────────────────────────────────────────────────────────────────┤
+│ Session dbg-1                                                                                    │
+│ Adapter: debugpy                                                                                 │
+│ Status: stopped                                                                                  │
+│ CWD: /Users/dev/project                                                                          │
+│ Program: ./app/server.py                                                                         │
+│ Stop reason: breakpoint                                                                          │
+│ Frame: validate_token                                                                            │
+│ Instruction pointer: 0x00000001000034a8                                                          │
+│ Location: app/server.py:42:14                                                                    │
+├─── Output ───────────────────────────────────────────────────────────────────────────────────────┤
+│ Stack trace:                                                                                     │
+│ - #1000 validate_token @ app/server.py:42:14                                                     │
+│ - #1001 authenticate @ app/server.py:88:9                                                        │
+│ - #1002 handle_request @ app/router.py:153:20                                                    │
+│ - #1003 dispatch @ app/router.py:97:5                                                            │
+│ - #1004 <module> @ app/server.py:212:1                                                           │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───  Debug stack trace ──────────────────────────────────────────────────────────────────────────╮
+├─── Output ───────────────────────────────────────────────────────────────────────────────────────┤
+│ No active debug session. Launch or attach first.                                                 │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

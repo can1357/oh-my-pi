@@ -1,0 +1,43 @@
+── custom — Custom Tool ────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ 󱑌 Custom Tool                                                                                      
+                                                                                                    
+ Args                                                                                               
+ └─  query: "weather"                                                                              
+                                                                                                    
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ 󱑌 Custom Tool                                                                                      
+                                                                                                    
+ Args                                                                                               
+ └─  query: "weather in Tokyo"                                                                     
+ └─  units: "metric"                                                                               
+                                                                                                    
+                                                                                                    
+
+  · done
+                                                                                                    
+ • Custom Tool                                                                                      
+                                                                                                    
+ Args                                                                                               
+ └─  query: "weather in Tokyo"                                                                     
+ └─  units: "metric"                                                                               
+                                                                                                    
+ Tokyo: 22°C, partly cloudy, humidity 64%.                                                          
+                                                                                                    
+
+  · failed
+                                                                                                    
+  Custom Tool                                                                                      
+                                                                                                    
+ Args                                                                                               
+ └─  query: "weather in Tokyo"                                                                     
+ └─  units: "metric"                                                                               
+                                                                                                    
+ Upstream provider returned 503 Service Unavailable                                                 
+                                                                                                    
+

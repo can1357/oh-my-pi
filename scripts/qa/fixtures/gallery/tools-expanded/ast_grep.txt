@@ -1,0 +1,29 @@
+── ast_grep — AST Grep ─────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ AST Grep: useState(                                                                               
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ AST Grep: useState($A) in packages/tui/src/components                                             
+                                                                                                    
+
+  · done
+                                                                                                    
+ AST Grep: useState($A) 2 matches · 2 files · in packages/tui/src/components · searched 14         
+└─ # packages/tui/src/components/                                                                   
+   ## SearchBox.tsx                                                                                 
+   *18│  const [query, setQuery] = useState("");                                                    
+     meta: $A=""                                                                                    
+   ## StatusBar.tsx                                                                                 
+   *27│  const [expanded, setExpanded] = useState(false);                                           
+     meta: $A=false                                                                                 
+                                                                                                    
+
+  · failed
+                                                                                                    
+ Error: Pattern parse error: incomplete node `useState(` — expected a closing `)`                  
+                                                                                                    
+

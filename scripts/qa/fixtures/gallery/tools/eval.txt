@@ -1,0 +1,64 @@
+── eval — Eval ─────────────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+╭───  󱑍 running load config ──────────────────────────────────────────────────────────────────────╮
+│ import json                                                                                      │
+│ from pathlib import Path                                                                         │
+│                                                                                                  │
+│ data = json.loads(Path("package.js                                                               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · in progress
+                                                                                                    
+╭───  󱑍 running load config ──────────────────────────────────────────────────────────────────────╮
+│ import json                                                                                      │
+│ from pathlib import Path                                                                         │
+│                                                                                                  │
+│ data = json.loads(Path("package.json").read_text())                                              │
+│ deps = data.get("dependencies", {})                                                              │
+│ print(f"{data[\"name\"]} v{data[\"version\"]}")                                                  │
+│ print(f"{len(deps)} dependencies")                                                               │
+│ display(sorted(deps)[:3])                                                                        │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+
+  · done
+                                                                                                    
+╭───  • load config · (64ms) ─────────────────────────────────────────────────────────────────────╮
+│ import json                                                                                      │
+│ from pathlib import Path                                                                         │
+│                                                                                                  │
+│ data = json.loads(Path("package.json").read_text())                                              │
+│ deps = data.get("dependencies", {})                                                              │
+│ print(f"{data[\"name\"]} v{data[\"version\"]}")                                                  │
+│ print(f"{len(deps)} dependencies")                                                               │
+│ display(sorted(deps)[:3])                                                                        │
+├─── Output ───────────────────────────────────────────────────────────────────────────────────────┤
+│ @oh-my-pi/coding-agent v0.42.0                                                                   │
+│ 37 dependencies                                                                                  │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+├─  [0]: "@ai-sdk/anthropic"                                                                       
+├─  [1]: "@oh-my-pi/pi-ai"                                                                         
+└─  [2]: "@oh-my-pi/pi-tui"                                                                        
+                                                                                                    
+
+  · failed
+                                                                                                    
+╭───   load config · (41ms) ─────────────────────────────────────────────────────────────────────╮
+│ import json                                                                                      │
+│ from pathlib import Path                                                                         │
+│                                                                                                  │
+│ data = json.loads(Path("package.json").read_text())                                              │
+│ deps = data.get("dependencies", {})                                                              │
+│ print(f"{data[\"name\"]} v{data[\"version\"]}")                                                  │
+├─── Output ───────────────────────────────────────────────────────────────────────────────────────┤
+│ Traceback (most recent call last):                                                               │
+│   File "<cell 0>", line 4, in <module>                                                           │
+│     data = json.loads(Path("package.json").read_text())                                          │
+│ json.decoder.JSONDecodeError: Expecting ',' delimiter: line 12 column 3 (char 318)               │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+                                                                                                    
+

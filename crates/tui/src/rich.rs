@@ -15,7 +15,7 @@ use xutf::{Text, width_char};
 use crate::{
 	context::JamoWidth,
 	escape::esc,
-	frame::{Color, Style},
+	frame::{Color, Style, Underline},
 	renderer::push_style_parameters,
 };
 
@@ -265,19 +265,34 @@ fn consume_escape(input: &str, start: usize, style: &mut Style) -> usize {
 fn apply_sgr(parameters: &str, style: &mut Style) {
 	let mut parameters = parameters.split(';');
 	while let Some(parameter) = parameters.next() {
-		let code = if parameter.is_empty() {
+		let (head, subparameter) = match parameter.split_once(':') {
+			Some((head, rest)) => (head, Some(rest)),
+			None => (parameter, None),
+		};
+		let code = if head.is_empty() {
 			0
-		} else if let Ok(code) = parameter.parse::<u16>() {
+		} else if let Ok(code) = head.parse::<u16>() {
 			code
 		} else {
 			continue;
 		};
+		// Colon sub-parameters are only understood for underline shapes; other
+		// colon forms stay ignored as before.
+		if subparameter.is_some() && code != 4 {
+			continue;
+		}
 		match code {
 			0 => *style = Style::new(),
 			1 => style.bold = true,
 			2 => style.dim = true,
 			3 => style.italic = true,
-			4 => style.underline = true,
+			4 => {
+				style.underline = match subparameter.and_then(|value| value.split(':').next()) {
+					Some("0") => Underline::None,
+					Some("3") => Underline::Curly,
+					_ => Underline::Straight,
+				}
+			},
 			7 => style.reverse = true,
 			9 => style.strikethrough = true,
 			22 => {
@@ -285,7 +300,7 @@ fn apply_sgr(parameters: &str, style: &mut Style) {
 				style.dim = false;
 			},
 			23 => style.italic = false,
-			24 => style.underline = false,
+			24 => style.underline = Underline::None,
 			27 => style.reverse = false,
 			29 => style.strikethrough = false,
 			30..=37 => style.foreground = Color::Indexed((code - 30) as u8),
@@ -327,13 +342,13 @@ fn apply_sgr(parameters: &str, style: &mut Style) {
 	}
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct Run {
 	end:   u32,
 	style: Style,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq)]
 struct RowMeta {
 	run_end: u32,
 	width:   u16,
@@ -342,7 +357,7 @@ struct RowMeta {
 }
 
 /// Flat rendered rich text with coalesced styled runs and row metadata.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct RichText {
 	text:          String,
 	runs:          Vec<Run>,
@@ -942,7 +957,17 @@ impl<'p, S: RichSink> Wrap<'p, S> {
 		let runs = mem::take(&mut self.word_runs);
 		let word_width = mem::take(&mut self.word_width);
 		self.start_row();
-		let join_gap = self.gap_width.max(1);
+		let leading_gap = !self.content && !self.gap_text.is_empty();
+		if leading_gap {
+			self.emit_gap();
+			self.line_width = self.line_width.saturating_add(self.gap_width);
+			self.content = true;
+		}
+		let join_gap = if leading_gap {
+			0
+		} else {
+			self.gap_width.max(1)
+		};
 		if self.content
 			&& self
 				.line_width
@@ -952,7 +977,7 @@ impl<'p, S: RichSink> Wrap<'p, S> {
 		{
 			self.break_row(false);
 			self.start_row();
-		} else if self.content {
+		} else if self.content && !leading_gap {
 			self.emit_gap();
 			self.line_width = self.line_width.saturating_add(join_gap);
 		}
@@ -1252,6 +1277,30 @@ mod tests {
 			Style::new().fg(Color::Rgb(1, 2, 3)),
 			"rgb"
 		)]);
+	}
+
+	#[test]
+	fn decompose_parses_underline_shape_subparameters() {
+		let mut output = RichText::default();
+		decompose("\x1b[4mline\x1b[24m \x1b[4:3mcurl\x1b[4:0m plain", &mut output);
+		assert_eq!(output.row_runs(0).collect::<Vec<_>>(), [
+			(Style::new().underline(), "line"),
+			(Style::new(), " "),
+			(Style::new().undercurl(), "curl"),
+			(Style::new(), " plain"),
+		]);
+	}
+
+	#[test]
+	fn string_sink_emits_undercurl_shape_and_color() {
+		let mut output = String::new();
+		output.run(
+			Style::new()
+				.undercurl()
+				.underline_color(Color::Rgb(255, 95, 95)),
+			"typo",
+		);
+		assert_eq!(output, "\x1b[0;4:3;58:2::255:95:95mtypo");
 	}
 
 	#[test]

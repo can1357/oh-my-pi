@@ -1,7 +1,7 @@
 //! Idempotent shell wrapper installation for named OMP profiles.
 
 use std::{
-	env, fs, io,
+	env,
 	path::{Path, PathBuf},
 };
 
@@ -55,9 +55,9 @@ pub enum AliasError {
 	/// A managed block has no closing marker.
 	#[error("managed profile alias block for `{0}` is malformed")]
 	MalformedBlock(Str),
-	/// Shell configuration I/O failed.
-	#[error("profile alias configuration I/O failed")]
-	Io(#[from] io::Error),
+	/// Atomic profile update failed with path and operation attribution.
+	#[error(transparent)]
+	Config(#[from] omp_con::ConError),
 }
 
 /// Installs or replaces one marked shell wrapper.
@@ -68,13 +68,13 @@ pub fn install(
 ) -> Result<AliasInstall, AliasError> {
 	let shell = shell.map_or_else(detect_shell, Ok)?;
 	validate_name(name, shell)?;
-	validate_profile(profile)?;
+	let profile = normalize_profile(profile)?;
 	let home = env::var_os("HOME")
 		.map(PathBuf::from)
 		.ok_or(AliasError::MissingHome)?;
 	let path = config_path(shell, &home);
-	install_at(&path, shell, name, profile)?;
-	Ok(AliasInstall { shell, path, name: Str::new(name), profile: Str::new(profile) })
+	install_at(&path, shell, name, profile.as_str())?;
+	Ok(AliasInstall { shell, path, name: Str::new(name), profile })
 }
 
 /// Installs into an explicit path; useful for deterministic operator tooling.
@@ -85,19 +85,13 @@ pub fn install_at(
 	profile: &str,
 ) -> Result<(), AliasError> {
 	validate_name(name, shell)?;
-	validate_profile(profile)?;
-	let current = match fs::read_to_string(path) {
-		Ok(value) => value,
-		Err(error) if error.kind() == io::ErrorKind::NotFound => String::new(),
-		Err(error) => return Err(error.into()),
-	};
-	let block = render(shell, name, profile);
+	let profile = normalize_profile(profile)?;
+	let transaction = omp_driver::cfg::ConfigFileLock::acquire(path.to_path_buf())?;
+	let current = transaction.read()?.unwrap_or_default();
+	let block = render(shell, name, profile.as_str());
 	let updated = upsert(&current, name, &block)?;
 	if updated != current {
-		if let Some(parent) = path.parent() {
-			fs::create_dir_all(parent)?;
-		}
-		fs::write(path, updated)?;
+		transaction.replace_raw(updated.as_bytes())?;
 	}
 	Ok(())
 }
@@ -134,11 +128,10 @@ fn config_path(shell: ProfileShell, home: &Path) -> PathBuf {
 	}
 }
 
-fn validate_profile(value: &str) -> Result<(), AliasError> {
-	if safe_name(value) {
-		Ok(())
-	} else {
-		Err(AliasError::InvalidProfile(Str::new(value)))
+fn normalize_profile(value: &str) -> Result<Str, AliasError> {
+	match omp_core::dirs::normalize_profile_name(value) {
+		Ok(Some(profile)) => Ok(profile),
+		Ok(None) | Err(_) => Err(AliasError::InvalidProfile(Str::new(value))),
 	}
 }
 
@@ -221,9 +214,36 @@ mod tests {
 			let dir = tempfile::tempdir().expect("temp");
 			let path = dir.path().join("profile");
 			install_at(&path, shell, "omp_work", "work").expect("first");
-			let first = fs::read_to_string(&path).expect("read");
+			let first = std::fs::read_to_string(&path).expect("read");
 			install_at(&path, shell, "omp_work", "work").expect("second");
-			assert_eq!(fs::read_to_string(&path).expect("read"), first);
+			assert_eq!(std::fs::read_to_string(&path).expect("read"), first);
 		}
+	}
+
+	#[test]
+	fn profile_validation_matches_bootstrap_resolution() {
+		assert_eq!(normalize_profile(" 2.work_profile ").unwrap().as_str(), "2.work_profile");
+		for invalid in ["default", "Work", "../work", "con.txt"] {
+			assert!(normalize_profile(invalid).is_err(), "{invalid}");
+		}
+	}
+
+	#[test]
+	fn concurrent_alias_installs_preserve_both_blocks() {
+		let dir = tempfile::tempdir().expect("temp");
+		let path = dir.path().join("profile");
+		let first_path = path.clone();
+		let first = std::thread::spawn(move || {
+			install_at(&first_path, ProfileShell::Zsh, "omp_work", "work").unwrap();
+		});
+		let second_path = path.clone();
+		let second = std::thread::spawn(move || {
+			install_at(&second_path, ProfileShell::Zsh, "omp_personal", "personal").unwrap();
+		});
+		first.join().unwrap();
+		second.join().unwrap();
+		let text = std::fs::read_to_string(path).unwrap();
+		assert!(text.contains("omp profile alias: omp_work"), "{text}");
+		assert!(text.contains("omp profile alias: omp_personal"), "{text}");
 	}
 }

@@ -2,9 +2,10 @@
 //! clipboards.
 //!
 //! [`PasteEvents`] implements the sans-I/O OSC 5522 conversation,
-//! [`dropped_paths`] classifies terminal drops, and the clipboard functions
-//! provide blocking native backends. Terminal and runtime integration belongs
-//! beside [`crate::Terminal`].
+//! [`dropped_paths`] extracts explicit terminal-drop paths,
+//! [`classify_attachment_path`] distinguishes previewable images/videos, and
+//! the clipboard functions provide blocking native backends. Terminal and
+//! runtime integration belongs beside [`crate::Terminal`].
 //!
 //! The clipboard functions block — subprocess bridges are killed after a few
 //! seconds, but a wedged native clipboard (a dead X11 connection, a stuck
@@ -33,7 +34,8 @@ use crate::{Key, imagefmt, imagefmt::ImageFormat};
 const CLI_TIMEOUT: Duration = Duration::from_secs(5);
 const POWERSHELL_TIMEOUT: Duration = Duration::from_secs(8);
 const PASTE_EVENT_NAME_BASE64: &str = "UGFzdGUgZXZlbnQ=";
-const IMAGE_MIMES: [&str; 4] = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+const IMAGE_PRIORITY: [ImageFormat; 4] =
+	[ImageFormat::Png, ImageFormat::Jpeg, ImageFormat::Webp, ImageFormat::Gif];
 
 /// A completed out-of-band paste delivered by the terminal or clipboard.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -95,23 +97,53 @@ impl PastedImage {
 /// matching the decoder's bracketed-paste ceiling. A runaway or malicious
 /// transfer resets instead of growing without bound.
 const MAX_READ_PAYLOAD_BYTES: usize = 64 * 1024 * 1024;
-/// MIME listings beyond this length stop accumulating; no real terminal
-/// offers more than a handful of types.
-const MAX_LISTED_MIMES: usize = 64;
+/// Bounds protocol overhead independently of payload bytes. Only a handful of
+/// metadata fields and MIME types are valid in a real offer; hard limits keep
+/// adversarial terminal replies from turning tiny payloads into large heaps.
+const MAX_METADATA_FIELDS: usize = 32;
+const MAX_PASSWORD_BYTES: usize = 4 * 1024;
+const MAX_ENCODED_MIME_BYTES: usize = 256;
+const MAX_ENCODED_MIME_LIST_BYTES: usize = 16 * 1024;
+const MAX_READ_CHUNKS: usize = 64 * 1024;
 /// Idle gap after which an unfinished conversation is considered abandoned
 /// (a DONE lost to a truncated link) and resets before the next packet.
 const READ_INACTIVITY_TIMEOUT: Duration = Duration::from_secs(5);
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PasteMime {
+	Image(ImageFormat),
+	Text,
+}
+
+impl PasteMime {
+	fn parse(value: &str) -> Option<Self> {
+		if value == "text/plain" {
+			return Some(Self::Text);
+		}
+		IMAGE_PRIORITY
+			.into_iter()
+			.find(|format| format.media_type() == value)
+			.map(Self::Image)
+	}
+
+	const fn as_str(self) -> &'static str {
+		match self {
+			Self::Image(format) => format.media_type(),
+			Self::Text => "text/plain",
+		}
+	}
+}
+
 #[derive(Debug)]
 enum PastePhase {
 	Listing {
-		mimes:     SmallVec<Str, 5>,
+		mimes:     SmallVec<PasteMime, 5>,
 		kitty_dot: bool,
 		pw:        Option<Str>,
 		loc:       Option<Str>,
 	},
 	Reading {
-		mime:   Str,
+		mime:   PasteMime,
 		chunks: SmallVec<Str, 4>,
 		/// Aggregate encoded length across `chunks`.
 		bytes:  usize,
@@ -169,10 +201,17 @@ impl PasteEvents {
 		match metadata_value(&metadata, "status") {
 			Some("OK") => {
 				if !matches!(self.phase, Some(PastePhase::Reading { .. })) {
+					let pw = metadata_value(&metadata, "pw");
+					if pw.is_some_and(|value| {
+						value.len() > MAX_PASSWORD_BYTES || !valid_metadata_token(value)
+					}) {
+						self.reset();
+						return PasteProgress::Consumed;
+					}
 					self.phase = Some(PastePhase::Listing {
 						mimes:     SmallVec::new(),
 						kitty_dot: false,
-						pw:        metadata_value(&metadata, "pw").map(Str::new),
+						pw:        pw.map(Str::new),
 						loc:       (metadata_value(&metadata, "loc") == Some("primary"))
 							.then(|| sf!("primary")),
 					});
@@ -198,11 +237,12 @@ impl PasteEvents {
 		self.last_packet = None;
 	}
 
-	fn handle_data(&mut self, metadata: &[(Str, Str)], payload: &str) {
+	fn handle_data(&mut self, metadata: &[(&str, &str)], payload: &str) {
 		let Some(encoded_mime) = metadata_value(metadata, "mime") else {
 			return;
 		};
-		let Some(mime) = decode_base64_text(encoded_mime) else {
+		let Some(mime) = decode_base64_text(encoded_mime, MAX_ENCODED_MIME_BYTES) else {
+			self.reset();
 			return;
 		};
 		let overflow = match self.phase.as_mut() {
@@ -210,22 +250,26 @@ impl PasteEvents {
 				if payload.is_empty() {
 					return;
 				}
-				let Some(listing) = decode_base64_text(payload) else {
+				let Some(listing) = decode_base64_text(payload, MAX_ENCODED_MIME_LIST_BYTES) else {
+					self.reset();
 					return;
 				};
 				*kitty_dot = true;
-				mimes.extend(
-					listing
-						.split_ascii_whitespace()
-						.filter(|candidate| !candidate.is_empty() && *candidate != ".")
-						.take(MAX_LISTED_MIMES.saturating_sub(mimes.len()))
-						.map(Str::new),
-				);
+				for candidate in listing
+					.split_ascii_whitespace()
+					.filter_map(PasteMime::parse)
+				{
+					if !mimes.contains(&candidate) {
+						mimes.push(candidate);
+					}
+				}
 				false
 			},
 			Some(PastePhase::Listing { mimes, .. }) => {
-				if mimes.len() < MAX_LISTED_MIMES {
-					mimes.push(Str::new(mime));
+				if let Some(mime) = PasteMime::parse(&mime)
+					&& !mimes.contains(&mime)
+				{
+					mimes.push(mime);
 				}
 				false
 			},
@@ -233,7 +277,7 @@ impl PasteEvents {
 				if selected.as_str() == mime && !payload.is_empty() =>
 			{
 				*bytes = bytes.saturating_add(payload.len());
-				if *bytes > MAX_READ_PAYLOAD_BYTES {
+				if *bytes > MAX_READ_PAYLOAD_BYTES || chunks.len() >= MAX_READ_CHUNKS {
 					true
 				} else {
 					chunks.push(Str::new(payload));
@@ -258,7 +302,7 @@ impl PasteEvents {
 				let Some(mime) = choose_mime(&mimes) else {
 					return PasteProgress::Consumed;
 				};
-				let encoded = base64::encode(mime.as_bytes()).into_string();
+				let encoded = base64::encode(mime.as_str().as_bytes()).into_string();
 				let mut reply = String::from("\x1b]5522;type=read");
 				if let Some(loc) = loc {
 					reply.push_str(":loc=");
@@ -290,60 +334,65 @@ impl PasteEvents {
 				if bytes.is_empty() {
 					return PasteProgress::Consumed;
 				}
-				if mime == "text/plain" {
+				if mime == PasteMime::Text {
 					return PasteProgress::Done(Pasted::Text(Str::new(
 						String::from_utf8_lossy(&bytes).as_ref(),
 					)));
 				}
-				let image = imagefmt::format(&bytes)
-					.or_else(|| mime_format(&mime))
-					.map(|format| PastedImage { bytes, format });
-				image.map_or(PasteProgress::Consumed, |image| PasteProgress::Done(Pasted::Image(image)))
+				let PasteMime::Image(declared_format) = mime else {
+					unreachable!("text paste returned above")
+				};
+				let image =
+					PastedImage { format: imagefmt::format(&bytes).unwrap_or(declared_format), bytes };
+				PasteProgress::Done(Pasted::Image(image))
 			},
 		}
 	}
 }
 
-fn parse_metadata(raw: &str) -> SmallVec<(Str, Str), 6> {
+fn parse_metadata(raw: &str) -> SmallVec<(&str, &str), 6> {
 	raw.split(':')
 		.filter_map(|part| {
 			let (key, value) = part.split_once('=')?;
-			(!key.is_empty()).then(|| (Str::new(key), Str::new(value)))
+			(!key.is_empty()).then_some((key, value))
 		})
+		.take(MAX_METADATA_FIELDS)
 		.collect()
 }
 
-fn metadata_value<'a>(metadata: &'a [(Str, Str)], key: &str) -> Option<&'a str> {
+fn metadata_value<'a>(metadata: &[(&'a str, &'a str)], key: &str) -> Option<&'a str> {
 	metadata
 		.iter()
 		.rev()
-		.find_map(|(candidate, value)| (candidate == key).then(|| value.as_str()))
+		.find_map(|(candidate, value)| (*candidate == key).then_some(*value))
 }
 
-fn decode_base64_text(encoded: &str) -> Option<String> {
+fn decode_base64_text(encoded: &str, max_encoded_bytes: usize) -> Option<String> {
+	if encoded.len() > max_encoded_bytes {
+		return None;
+	}
 	let bytes = base64::decode(encoded.as_bytes()).into_vec().ok()?;
 	String::from_utf8(bytes).ok()
 }
 
-fn choose_mime(mimes: &[Str]) -> Option<Str> {
-	IMAGE_MIMES
+fn valid_metadata_token(value: &str) -> bool {
+	value
+		.bytes()
+		.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'/' | b'=' | b'-' | b'_'))
+}
+
+fn choose_mime(mimes: &[PasteMime]) -> Option<PasteMime> {
+	IMAGE_PRIORITY
 		.into_iter()
-		.chain(["text/plain"])
-		.find(|candidate| mimes.iter().any(|mime| mime == candidate))
-		.map(Str::new_static)
+		.map(PasteMime::Image)
+		.chain([PasteMime::Text])
+		.find(|candidate| mimes.contains(candidate))
 }
 
-fn mime_format(mime: &str) -> Option<ImageFormat> {
-	match mime {
-		"image/png" => Some(ImageFormat::Png),
-		"image/jpeg" => Some(ImageFormat::Jpeg),
-		"image/gif" => Some(ImageFormat::Gif),
-		"image/webp" => Some(ImageFormat::Webp),
-		_ => None,
-	}
-}
-
-/// Classifies a dropped string as one or more absolute local paths.
+/// Classifies a dropped string as one or more explicit local paths.
+///
+/// Every whitespace- or quote-delimited segment must be explicit. Ambiguous
+/// bare relative text falls through unchanged instead of partially attaching.
 pub fn dropped_paths(text: &str) -> SmallVec<Str, 2> {
 	let trimmed = text.trim();
 	if trimmed.is_empty() {
@@ -354,7 +403,7 @@ pub fn dropped_paths(text: &str) -> SmallVec<Str, 2> {
 		let mut valid = true;
 		for token in tokens {
 			match normalize_path(&token) {
-				Some(path) if has_absolute_anchor(&path) => paths.push(path),
+				Some(path) if is_explicit_path(&path) => paths.push(path),
 				_ => {
 					valid = false;
 					break;
@@ -365,12 +414,34 @@ pub fn dropped_paths(text: &str) -> SmallVec<Str, 2> {
 			return paths;
 		}
 	}
-	whole_text_image_path(trimmed)
+	whole_text_attachment_path(trimmed)
 		.into_iter()
 		.collect::<SmallVec<Str, 2>>()
 }
 
+/// Previewable media kind inferred from a pasted path's extension.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PastedPathKind {
+	/// A directly supported image container.
+	Image,
+	/// A video container accepted by the composer media path.
+	Video,
+}
+
+/// Classifies a path as a previewable image or video attachment.
+#[must_use]
+pub fn classify_attachment_path(path: &str) -> Option<PastedPathKind> {
+	if is_image_path(path) {
+		Some(PastedPathKind::Image)
+	} else if is_video_path(path) {
+		Some(PastedPathKind::Video)
+	} else {
+		None
+	}
+}
+
 /// Returns whether a path has a supported image extension.
+#[must_use]
 pub fn is_image_path(path: &str) -> bool {
 	let Some((_, extension)) = path.rsplit_once('.') else {
 		return false;
@@ -378,6 +449,35 @@ pub fn is_image_path(path: &str) -> bool {
 	["png", "jpg", "jpeg", "gif", "webp"]
 		.into_iter()
 		.any(|candidate| extension.eq_ignore_ascii_case(candidate))
+}
+
+/// Returns whether a path has a supported video-container extension.
+#[must_use]
+pub fn is_video_path(path: &str) -> bool {
+	video_media_type(path).is_some()
+}
+
+/// Returns the media type for a supported video-container path.
+#[must_use]
+pub fn video_media_type(path: &str) -> Option<&'static str> {
+	let (_, extension) = path.rsplit_once('.')?;
+	if extension.eq_ignore_ascii_case("mp4") {
+		Some("video/mp4")
+	} else if extension.eq_ignore_ascii_case("mov") {
+		Some("video/quicktime")
+	} else if extension.eq_ignore_ascii_case("mkv") {
+		Some("video/x-matroska")
+	} else if extension.eq_ignore_ascii_case("webm") {
+		Some("video/webm")
+	} else if extension.eq_ignore_ascii_case("m4v") {
+		Some("video/x-m4v")
+	} else if extension.eq_ignore_ascii_case("avi") {
+		Some("video/x-msvideo")
+	} else if extension.eq_ignore_ascii_case("wmv") {
+		Some("video/x-ms-wmv")
+	} else {
+		None
+	}
 }
 
 fn split_path_tokens(text: &str) -> Option<Vec<Str>> {
@@ -443,13 +543,7 @@ fn normalize_path(raw: &str) -> Option<Str> {
 	{
 		return normalize_file_url(unquoted);
 	}
-	let unescaped = shell_unescape(unquoted);
-	if let Some(rest) = unescaped.strip_prefix("~/") {
-		#[allow(deprecated, reason = "the standard-library home lookup matches shell path expansion")]
-		let home = env::home_dir()?;
-		return Some(sf!("{}/{}", home.display(), rest));
-	}
-	Some(unescaped)
+	Some(shell_unescape(unquoted))
 }
 
 fn normalize_file_url(url: &str) -> Option<Str> {
@@ -511,11 +605,31 @@ fn shell_unescape(text: &str) -> Str {
 	Str::from(output)
 }
 
-fn has_absolute_anchor(path: &str) -> bool {
-	path.starts_with('/')
-		|| path.starts_with("~/")
-		|| path.starts_with("\\\\")
-		|| is_windows_drive_path(path)
+fn is_explicit_path(path: &str) -> bool {
+	if has_raw_anchor(path)
+		|| path.starts_with("./")
+		|| path.starts_with("../")
+		|| path.starts_with(".\\")
+		|| path.starts_with("..\\")
+	{
+		return true;
+	}
+	if has_uri_scheme(path) {
+		return false;
+	}
+	path.contains('\\')
+}
+
+fn has_uri_scheme(path: &str) -> bool {
+	let Some((scheme, _)) = path.split_once(':') else {
+		return false;
+	};
+	!scheme.is_empty()
+		&& scheme.as_bytes()[0].is_ascii_alphabetic()
+		&& scheme
+			.as_bytes()
+			.iter()
+			.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.'))
 }
 
 const fn is_windows_drive_path(path: &str) -> bool {
@@ -526,26 +640,18 @@ const fn is_windows_drive_path(path: &str) -> bool {
 		&& matches!(bytes[2], b'/' | b'\\')
 }
 
-fn whole_text_image_path(text: &str) -> Option<Str> {
+fn whole_text_attachment_path(text: &str) -> Option<Str> {
 	if text.contains('\r')
 		|| text.contains('\n')
 		|| !has_raw_anchor(text)
-		|| !is_image_path(text)
+		|| classify_attachment_path(text).is_none()
 		|| has_interior_anchor(text)
+		|| has_complete_media_token_before_whitespace(text)
 	{
 		return None;
 	}
-	if split_path_tokens(text).is_some_and(|tokens| {
-		tokens.len() > 1
-			&& tokens[..tokens.len() - 1].iter().any(|token| {
-				normalize_path(token)
-					.is_some_and(|path| has_absolute_anchor(&path) && is_image_path(&path))
-			})
-	}) {
-		return None;
-	}
 	let path = normalize_path(text)?;
-	(has_absolute_anchor(&path) && is_image_path(&path)).then_some(path)
+	(is_explicit_path(&path) && classify_attachment_path(&path).is_some()).then_some(path)
 }
 
 fn has_raw_anchor(path: &str) -> bool {
@@ -556,6 +662,24 @@ fn has_raw_anchor(path: &str) -> bool {
 			.is_some_and(|prefix| prefix.eq_ignore_ascii_case("file://"))
 		|| path.starts_with("\\\\")
 		|| is_windows_drive_path(path)
+}
+
+fn has_complete_media_token_before_whitespace(text: &str) -> bool {
+	let mut escaped = false;
+	for (index, ch) in text.char_indices() {
+		if ch == '\\' {
+			escaped = !escaped;
+			continue;
+		}
+		if is_ascii_path_whitespace(ch)
+			&& !escaped
+			&& classify_attachment_path(text[..index].trim_end()).is_some()
+		{
+			return true;
+		}
+		escaped = false;
+	}
+	false
 }
 
 fn has_interior_anchor(text: &str) -> bool {
@@ -594,18 +718,65 @@ pub enum Clipboard {
 	Paths(Vec<Str>),
 }
 
-/// Reads smart clipboard content, preferring image data, then file paths, then
-/// text.
+/// Typed result of reading the system clipboard.
 ///
-/// One exception, ported from pi (#8769): macOS Finder `Cmd+C` on an image
-/// file advertises BOTH a `public.file-url` representation and a generated
-/// 1024x1024 file-icon bitmap, and `arboard::get_image()` succeeds with the
-/// icon — so a file URL resolving to a supported image file wins over the
-/// co-advertised bitmap. Pure bitmap pasteboards (screenshots, browser
-/// copies) and non-image file URLs still fall through to the image path.
+/// Non-payload outcomes stay distinct through the background-reader and host
+/// boundaries so presentation can explain the failure without guessing from
+/// an absent value.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ClipboardReadOutcome {
+	/// A supported clipboard payload.
+	Payload(Clipboard),
+	/// The clipboard contains no data.
+	Empty,
+	/// The operating system refused clipboard access.
+	PermissionDenied,
+	/// The clipboard contains data, but not in a supported representation.
+	UnsupportedFormat,
+	/// The backend could not complete the read.
+	ReadFailure,
+}
+
+/// Typed result of writing the system clipboard.
+///
+/// Write outcomes remain distinct through detached host workers so the actor
+/// can acknowledge a completed copy or explain why it did not land.
+#[must_use]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ClipboardWriteOutcome {
+	/// A native or platform clipboard backend accepted the text.
+	Success,
+	/// The operating system refused clipboard access.
+	PermissionDenied,
+	/// No clipboard backend is available in this environment.
+	Unavailable,
+	/// An available backend failed to write the text.
+	WriteFailure,
+}
+
+impl ClipboardWriteOutcome {
+	const fn fallback(self, next: Self) -> Self {
+		match (self, next) {
+			(Self::Success, _) | (_, Self::Success) => Self::Success,
+			(Self::PermissionDenied, _) | (_, Self::PermissionDenied) => Self::PermissionDenied,
+			(Self::WriteFailure, _) | (_, Self::WriteFailure) => Self::WriteFailure,
+			(Self::Unavailable, Self::Unavailable) => Self::Unavailable,
+		}
+	}
+}
+
+/// Reads smart clipboard content, preferring previewable file paths, then image
+/// data, remaining file paths, and text.
+///
+/// macOS Finder `Cmd+C` on an image or video file advertises BOTH a
+/// `public.file-url` representation and a generated file-icon bitmap, and
+/// `arboard::get_image()` succeeds with the icon — so a file URL resolving to
+/// previewable media wins over the co-advertised bitmap. Pure bitmap
+/// pasteboards and non-media file URLs still fall through to the image path.
 /// [`read_file_urls`] is a no-op off Darwin.
-pub fn read_clipboard() -> Option<Clipboard> {
+pub fn read_clipboard() -> ClipboardReadOutcome {
 	smart_clipboard(read_file_urls(), read_clipboard_image, read_clipboard_text)
+		.map_or_else(|| classify_clipboard_miss(ClipboardRead::Smart), ClipboardReadOutcome::Payload)
 }
 
 /// Pure ordering core of [`read_clipboard`], separated for tests.
@@ -615,12 +786,21 @@ fn smart_clipboard(
 	read_text: impl FnOnce() -> Option<String>,
 ) -> Option<Clipboard> {
 	let file_urls = match file_urls {
-		// The authoritative file bytes are what the user copied: an image
-		// file URL beats the co-advertised Finder icon bitmap.
-		Some(paths) if paths.iter().any(|path| is_image_path(path)) => {
-			return Some(Clipboard::Paths(paths));
+		Some(paths) => {
+			// The authoritative media file bytes beat Finder's co-advertised
+			// icon bitmap. Mixed Finder selections attach only previewable
+			// media, preserving their source order.
+			let previewable = paths
+				.iter()
+				.filter(|path| classify_attachment_path(path).is_some())
+				.cloned()
+				.collect::<Vec<_>>();
+			if !previewable.is_empty() {
+				return Some(Clipboard::Paths(previewable));
+			}
+			Some(paths)
 		},
-		other => other,
+		None => None,
 	};
 	if let Some(image) = read_image() {
 		return Some(Clipboard::Image(image));
@@ -655,20 +835,26 @@ impl ClipboardRead {
 	}
 
 	/// Runs the blocking read this scope selects.
-	fn read(self) -> Option<Clipboard> {
+	fn read(self) -> ClipboardReadOutcome {
 		match self {
 			Self::Smart => read_clipboard(),
-			Self::Text => read_clipboard_text().map(Clipboard::Text),
+			Self::Text => read_clipboard_text()
+				.filter(|text| !text.is_empty())
+				.map_or_else(
+					|| classify_clipboard_miss(Self::Text),
+					|text| ClipboardReadOutcome::Payload(Clipboard::Text(text)),
+				),
 		}
 	}
 }
 
 /// Starts one background clipboard read on a detached thread, delivering
-/// the result through the returned one-shot channel.
+/// the typed result through the returned one-shot channel.
 ///
-/// `Ok(None)` means the clipboard was empty or unreadable; a channel
-/// closed without a value means the reader thread could not be spawned,
-/// so callers never wait on a read that will not happen.
+/// A channel closed without a value means the reader thread could not be
+/// spawned. Callers map that transport failure to
+/// [`ClipboardReadOutcome::ReadFailure`] rather than pretending the
+/// clipboard was empty.
 ///
 /// The reader is deliberately a detached thread, not a tokio blocking
 /// task: a running blocking task cannot be aborted and would stall
@@ -676,7 +862,7 @@ impl ClipboardRead {
 /// thread dies with the process. Backend subprocesses cap themselves at
 /// 5–8 s, but a hung *native* handle can outlive that — pair the receiver
 /// with a deadline and drop it to abandon the read.
-pub fn spawn_clipboard_read(scope: ClipboardRead) -> Receiver<Option<Clipboard>> {
+pub fn spawn_clipboard_read(scope: ClipboardRead) -> Receiver<ClipboardReadOutcome> {
 	let (tx, rx) = oneshot::channel();
 	// A spawn error drops `tx`, closing the channel: the failure is
 	// observable immediately instead of after the caller's deadline.
@@ -695,7 +881,7 @@ pub fn spawn_clipboard_read(scope: ClipboardRead) -> Receiver<Option<Clipboard>>
 /// the native arboard backend as the fallback when no bridge is installed.
 pub fn read_clipboard_text() -> Option<String> {
 	if cfg!(target_os = "macos") {
-		return capture_text(&["pbpaste"], CLI_TIMEOUT);
+		return capture_text(&["pbpaste"], CLI_TIMEOUT).or_else(native_read_text);
 	}
 	if cfg!(windows) {
 		// PowerShell over arboard: `Get-Clipboard -Raw` survives console
@@ -722,34 +908,56 @@ pub fn read_clipboard_text() -> Option<String> {
 	None
 }
 
-/// Writes clipboard text, native backend first with CLI bridges as fallback.
-pub fn write_clipboard_text(text: &str) -> bool {
+/// Writes clipboard text, native backend first with platform CLI bridges as
+/// fallback.
+pub fn write_clipboard_text(text: &str) -> ClipboardWriteOutcome {
 	let bytes = Some(text.as_bytes());
-	if env::var_os("TERMUX_VERSION").is_some()
-		&& run_capture(&["termux-clipboard-set"], bytes, CLI_TIMEOUT).is_some()
-	{
-		return true;
+	let mut outcome = ClipboardWriteOutcome::Unavailable;
+	if env::var_os("TERMUX_VERSION").is_some() {
+		outcome = outcome.fallback(write_capture(&["termux-clipboard-set"], bytes));
+		if outcome == ClipboardWriteOutcome::Success {
+			return outcome;
+		}
 	}
-	if native_write_text(text) {
-		return true;
+	outcome = outcome.fallback(native_write_text(text));
+	if outcome == ClipboardWriteOutcome::Success {
+		return outcome;
 	}
 	if cfg!(target_os = "macos") {
-		return run_capture(&["pbcopy"], bytes, CLI_TIMEOUT).is_some();
+		return outcome.fallback(write_capture(&["pbcopy"], bytes));
 	}
 	if cfg!(windows) {
-		return run_capture(&["clip.exe"], bytes, CLI_TIMEOUT).is_some();
+		return outcome.fallback(write_capture(&["clip.exe"], bytes));
 	}
-	if env::var_os("WAYLAND_DISPLAY").is_some()
-		&& run_capture(&["wl-copy"], bytes, CLI_TIMEOUT).is_some()
-	{
-		return true;
+	if env::var_os("WAYLAND_DISPLAY").is_some() {
+		outcome = outcome.fallback(write_capture(&["wl-copy"], bytes));
+		if outcome == ClipboardWriteOutcome::Success {
+			return outcome;
+		}
 	}
 	if env::var_os("DISPLAY").is_some() {
-		return run_capture(&["xclip", "-selection", "clipboard", "-i"], bytes, CLI_TIMEOUT)
-			.is_some()
-			|| run_capture(&["xsel", "--clipboard", "--input"], bytes, CLI_TIMEOUT).is_some();
+		outcome = outcome.fallback(write_capture(&["xclip", "-selection", "clipboard", "-i"], bytes));
+		if outcome != ClipboardWriteOutcome::Success {
+			outcome = outcome.fallback(write_capture(&["xsel", "--clipboard", "--input"], bytes));
+		}
 	}
-	false
+	outcome
+}
+
+/// Starts one background clipboard write, delivering its typed outcome through
+/// the returned one-shot channel.
+///
+/// A channel closed without a value means the writer thread could not be
+/// spawned; callers classify that transport failure as
+/// [`ClipboardWriteOutcome::WriteFailure`].
+pub fn spawn_clipboard_write(text: Str) -> Receiver<ClipboardWriteOutcome> {
+	let (tx, rx) = oneshot::channel();
+	let _ = thread::Builder::new()
+		.name("omp-tui-clipboard-write".into())
+		.spawn(move || {
+			let _ = tx.send(write_clipboard_text(&text));
+		});
+	rx
 }
 
 fn read_clipboard_image() -> Option<PastedImage> {
@@ -765,7 +973,7 @@ fn read_clipboard_image() -> Option<PastedImage> {
 		// arboard rejects the CF_DIBV5 payloads Qt-based screenshot tools
 		// (PixPin, Snipaste, ...) put up; PowerShell's
 		// `[Clipboard]::GetImage()` reads them fine, so it backs the native
-		// path instead of a hand-rolled DIB decoder (pi-natives #3426).
+		// path instead of a hand-rolled DIB decoder.
 		return native_read_image().or_else(read_powershell_image);
 	}
 	if cfg!(target_os = "macos") {
@@ -799,6 +1007,146 @@ fn native_read_text() -> Option<String> {
 	arboard::Clipboard::new().ok()?.get_text().ok()
 }
 
+/// Classifies a supported-payload miss without collapsing absence, access
+/// refusal, backend failure, and an incompatible representation.
+fn classify_clipboard_miss(scope: ClipboardRead) -> ClipboardReadOutcome {
+	let probe = if cfg!(target_os = "macos") {
+		probe_clipboard_command(&["osascript", "-e", "clipboard info"], scope)
+	} else if cfg!(windows) {
+		probe_clipboard_command(
+			&[
+				"powershell.exe",
+				"-NoProfile",
+				"-NonInteractive",
+				"-Sta",
+				"-Command",
+				POWERSHELL_CLIPBOARD_STATE_SCRIPT,
+			],
+			scope,
+		)
+	} else if env::var_os("TERMUX_VERSION").is_some() {
+		probe_clipboard_command(&["termux-clipboard-get"], scope)
+	} else if is_wsl() {
+		probe_clipboard_command(
+			&[
+				"powershell.exe",
+				"-NoProfile",
+				"-NonInteractive",
+				"-Sta",
+				"-Command",
+				POWERSHELL_CLIPBOARD_STATE_SCRIPT,
+			],
+			scope,
+		)
+	} else if env::var_os("WAYLAND_DISPLAY").is_some() {
+		probe_clipboard_command(&["wl-paste", "--list-types"], scope)
+	} else if env::var_os("DISPLAY").is_some() {
+		probe_clipboard_command(&["xclip", "-selection", "clipboard", "-t", "TARGETS", "-o"], scope)
+	} else {
+		None
+	};
+	probe.unwrap_or_else(probe_native_clipboard)
+}
+
+fn probe_clipboard_command(argv: &[&str], scope: ClipboardRead) -> Option<ClipboardReadOutcome> {
+	Some(match run_capture_outcome(argv, None, CLI_TIMEOUT) {
+		CaptureOutcome::Output(bytes) => {
+			let output = String::from_utf8_lossy(&bytes);
+			let trimmed = output.trim();
+			if trimmed.is_empty() || trimmed == "{}" || trimmed.eq_ignore_ascii_case("EMPTY") {
+				ClipboardReadOutcome::Empty
+			} else if advertised_format_is_supported(trimmed, scope) {
+				// The backend advertised something this read supports, yet
+				// the payload path failed to materialize it.
+				ClipboardReadOutcome::ReadFailure
+			} else {
+				ClipboardReadOutcome::UnsupportedFormat
+			}
+		},
+		CaptureOutcome::Empty => ClipboardReadOutcome::Empty,
+		CaptureOutcome::PermissionDenied => ClipboardReadOutcome::PermissionDenied,
+		CaptureOutcome::Unavailable => return None,
+		CaptureOutcome::Failed => ClipboardReadOutcome::ReadFailure,
+	})
+}
+
+fn advertised_format_is_supported(advertised: &str, scope: ClipboardRead) -> bool {
+	let advertised = advertised.to_ascii_lowercase();
+	let text = ["text", "utf8", "unicode", "string"]
+		.iter()
+		.any(|needle| advertised.contains(needle));
+	text
+		|| scope == ClipboardRead::Smart
+			&& [
+				"image/",
+				"bitmap",
+				"png",
+				"jpeg",
+				"gif",
+				"webp",
+				"file-url",
+				"filedrop",
+				"public.file",
+			]
+			.iter()
+			.any(|needle| advertised.contains(needle))
+}
+
+fn probe_native_clipboard() -> ClipboardReadOutcome {
+	let mut clipboard = match arboard::Clipboard::new() {
+		Ok(clipboard) => clipboard,
+		Err(error) => return classify_arboard_error(&error),
+	};
+	match clipboard.get_text() {
+		Ok(text) if text.is_empty() => return ClipboardReadOutcome::Empty,
+		Ok(_) => return ClipboardReadOutcome::ReadFailure,
+		Err(arboard::Error::ContentNotAvailable) => {},
+		Err(error) => return classify_arboard_error(&error),
+	}
+	match clipboard.get_image() {
+		Ok(_) => ClipboardReadOutcome::ReadFailure,
+		Err(arboard::Error::ContentNotAvailable) => ClipboardReadOutcome::UnsupportedFormat,
+		Err(error) => classify_arboard_error(&error),
+	}
+}
+
+fn classify_arboard_error(error: &arboard::Error) -> ClipboardReadOutcome {
+	match error {
+		arboard::Error::ConversionFailure => ClipboardReadOutcome::UnsupportedFormat,
+		arboard::Error::Unknown { description } if is_permission_diagnostic(description) => {
+			ClipboardReadOutcome::PermissionDenied
+		},
+		arboard::Error::ContentNotAvailable => ClipboardReadOutcome::UnsupportedFormat,
+		_ => ClipboardReadOutcome::ReadFailure,
+	}
+}
+
+fn is_permission_diagnostic(message: &str) -> bool {
+	let message = message.to_ascii_lowercase();
+	[
+		"permission denied",
+		"operation not permitted",
+		"access is denied",
+		"not authorized",
+		"not allowed",
+	]
+	.iter()
+	.any(|needle| message.contains(needle))
+}
+
+fn is_empty_diagnostic(message: &str) -> bool {
+	let message = message.to_ascii_lowercase();
+	[
+		"clipboard is empty",
+		"no selection",
+		"content not available",
+		"target does not exist",
+		"target not available",
+	]
+	.iter()
+	.any(|needle| message.contains(needle))
+}
+
 /// Writes text through arboard, keeping the Linux handle alive.
 ///
 /// X11 and Wayland selections are owner-based: the writing process must stay
@@ -807,7 +1155,7 @@ fn native_read_text() -> Option<String> {
 /// does — a transient handle would empty the selection the moment it drops.
 /// One process-lifetime instance keeps that owner thread serving.
 #[cfg(target_os = "linux")]
-fn native_write_text(text: &str) -> bool {
+fn native_write_text(text: &str) -> ClipboardWriteOutcome {
 	use std::sync::LazyLock;
 
 	use parking_lot::Mutex;
@@ -816,11 +1164,19 @@ fn native_write_text(text: &str) -> bool {
 		LazyLock::new(|| Mutex::new(None));
 	let mut guard = CLIPBOARD.lock();
 	if guard.is_none() {
-		*guard = arboard::Clipboard::new().ok();
+		match arboard::Clipboard::new() {
+			Ok(clipboard) => *guard = Some(clipboard),
+			Err(error) => return classify_arboard_write_error(&error),
+		}
 	}
 	guard
 		.as_mut()
-		.is_some_and(|clipboard| clipboard.set_text(text).is_ok())
+		.map_or(ClipboardWriteOutcome::Unavailable, |clipboard| {
+			clipboard.set_text(text).map_or_else(
+				|error| classify_arboard_write_error(&error),
+				|()| ClipboardWriteOutcome::Success,
+			)
+		})
 }
 
 /// Writes text through a transient arboard handle.
@@ -828,10 +1184,41 @@ fn native_write_text(text: &str) -> bool {
 /// macOS and Windows retain clipboard contents after the writer exits, so
 /// no owner handle needs to outlive the call.
 #[cfg(not(target_os = "linux"))]
-fn native_write_text(text: &str) -> bool {
-	arboard::Clipboard::new()
-		.and_then(|mut clipboard| clipboard.set_text(text))
-		.is_ok()
+fn native_write_text(text: &str) -> ClipboardWriteOutcome {
+	let mut clipboard = match arboard::Clipboard::new() {
+		Ok(clipboard) => clipboard,
+		Err(error) => return classify_arboard_write_error(&error),
+	};
+	clipboard.set_text(text).map_or_else(
+		|error| classify_arboard_write_error(&error),
+		|()| ClipboardWriteOutcome::Success,
+	)
+}
+
+fn classify_arboard_write_error(error: &arboard::Error) -> ClipboardWriteOutcome {
+	match error {
+		arboard::Error::Unknown { description } if is_permission_diagnostic(description) => {
+			ClipboardWriteOutcome::PermissionDenied
+		},
+		arboard::Error::Unknown { description } if is_unavailable_diagnostic(description) => {
+			ClipboardWriteOutcome::Unavailable
+		},
+		_ => ClipboardWriteOutcome::WriteFailure,
+	}
+}
+
+fn is_unavailable_diagnostic(message: &str) -> bool {
+	let message = message.to_ascii_lowercase();
+	[
+		"no display",
+		"display not set",
+		"couldn't connect to display",
+		"could not connect to display",
+		"wayland connection",
+		"x11 connection",
+	]
+	.iter()
+	.any(|needle| message.contains(needle))
 }
 
 /// Encodes an arboard RGBA payload as a PNG [`PastedImage`].
@@ -854,13 +1241,14 @@ fn encode_rgba_png(image: &arboard::ImageData<'_>) -> Option<PastedImage> {
 
 fn read_wayland_image() -> Option<PastedImage> {
 	let offered = capture_text(&["wl-paste", "--list-types"], CLI_TIMEOUT)?;
-	for mime in IMAGE_MIMES {
+	for declared_format in IMAGE_PRIORITY {
+		let mime = declared_format.media_type();
 		if !offered.lines().any(|line| line.trim() == mime) {
 			continue;
 		}
 		let bytes = run_capture(&["wl-paste", "--type", mime], None, CLI_TIMEOUT)?;
 		if !bytes.is_empty() {
-			let format = imagefmt::format(&bytes).or_else(|| mime_format(mime))?;
+			let format = imagefmt::format(&bytes).unwrap_or(declared_format);
 			return Some(PastedImage { bytes, format });
 		}
 	}
@@ -923,23 +1311,68 @@ fn capture_text(argv: &[&str], timeout: Duration) -> Option<String> {
 	run_capture(argv, None, timeout).map(|bytes| String::from_utf8_lossy(&bytes).into_owned())
 }
 
+#[derive(Debug)]
+enum CaptureOutcome {
+	Output(Vec<u8>),
+	Empty,
+	PermissionDenied,
+	Unavailable,
+	Failed,
+}
+
 fn run_capture(argv: &[&str], stdin: Option<&[u8]>, timeout: Duration) -> Option<Vec<u8>> {
-	let (program, args) = argv.split_first()?;
+	match run_capture_outcome(argv, stdin, timeout) {
+		CaptureOutcome::Output(output) => Some(output),
+		_ => None,
+	}
+}
+
+fn write_capture(argv: &[&str], stdin: Option<&[u8]>) -> ClipboardWriteOutcome {
+	match run_capture_outcome(argv, stdin, CLI_TIMEOUT) {
+		CaptureOutcome::Output(_) => ClipboardWriteOutcome::Success,
+		CaptureOutcome::PermissionDenied => ClipboardWriteOutcome::PermissionDenied,
+		CaptureOutcome::Unavailable => ClipboardWriteOutcome::Unavailable,
+		CaptureOutcome::Empty | CaptureOutcome::Failed => ClipboardWriteOutcome::WriteFailure,
+	}
+}
+
+fn run_capture_outcome(argv: &[&str], stdin: Option<&[u8]>, timeout: Duration) -> CaptureOutcome {
+	let Some((program, args)) = argv.split_first() else {
+		return CaptureOutcome::Failed;
+	};
 	let mut command = Command::new(program);
 	command
 		.args(args)
 		.stdout(Stdio::piped())
-		.stderr(Stdio::null())
+		.stderr(Stdio::piped())
 		.stdin(if stdin.is_some() {
 			Stdio::piped()
 		} else {
 			Stdio::null()
 		});
-	let mut child = command.spawn().ok()?;
-	let mut stdout = child.stdout.take()?;
-	let reader = thread::spawn(move || {
+	let mut child = match command.spawn() {
+		Ok(child) => child,
+		Err(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+			return CaptureOutcome::PermissionDenied;
+		},
+		Err(error) if error.kind() == io::ErrorKind::NotFound => {
+			return CaptureOutcome::Unavailable;
+		},
+		Err(_) => return CaptureOutcome::Failed,
+	};
+	let Some(mut stdout) = child.stdout.take() else {
+		return CaptureOutcome::Failed;
+	};
+	let Some(mut stderr) = child.stderr.take() else {
+		return CaptureOutcome::Failed;
+	};
+	let output_reader = thread::spawn(move || {
 		let mut output = Vec::new();
 		stdout.read_to_end(&mut output).ok().map(|_| output)
+	});
+	let error_reader = thread::spawn(move || {
+		let mut output = String::new();
+		stderr.read_to_string(&mut output).ok().map(|_| output)
 	});
 	let writer = stdin.map(|input| {
 		let input = input.to_vec();
@@ -947,22 +1380,35 @@ fn run_capture(argv: &[&str], stdin: Option<&[u8]>, timeout: Duration) -> Option
 		thread::spawn(move || child_stdin.write_all(&input).ok())
 	});
 	let deadline = Instant::now() + timeout;
-	let status = loop {
+	let (status, timed_out) = loop {
 		match child.try_wait() {
-			Ok(Some(status)) => break Some(status),
+			Ok(Some(status)) => break (Some(status), false),
 			Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(20)),
 			Ok(None) => {
 				let _ = child.kill();
-				break child.wait().ok();
+				break (child.wait().ok(), true);
 			},
-			Err(_) => break None,
+			Err(_) => break (None, false),
 		}
 	};
 	if let Some(writer) = writer {
 		let _ = writer.join();
 	}
-	let output = reader.join().ok().flatten()?;
-	status?.success().then_some(output)
+	let output = output_reader.join().ok().flatten();
+	let diagnostic = error_reader.join().ok().flatten().unwrap_or_default();
+	if timed_out || status.is_none() || output.is_none() {
+		return CaptureOutcome::Failed;
+	}
+	if status.is_some_and(|status| status.success()) {
+		return CaptureOutcome::Output(output.expect("checked as present"));
+	}
+	if is_permission_diagnostic(&diagnostic) {
+		CaptureOutcome::PermissionDenied
+	} else if is_empty_diagnostic(&diagnostic) {
+		CaptureOutcome::Empty
+	} else {
+		CaptureOutcome::Failed
+	}
 }
 
 fn is_wsl() -> bool {
@@ -1010,6 +1456,17 @@ const MAC_FILE_URL_SCRIPT: &str = r#"on run
 end run
 "#;
 
+const POWERSHELL_CLIPBOARD_STATE_SCRIPT: &str = r"
+$ErrorActionPreference = 'Stop'
+Add-Type -AssemblyName System.Windows.Forms
+$data = [System.Windows.Forms.Clipboard]::GetDataObject()
+if (($null -eq $data) -or ($data.GetFormats().Count -eq 0)) {
+	[Console]::Out.Write('EMPTY')
+} else {
+	[Console]::Out.Write(($data.GetFormats() -join [Environment]::NewLine))
+}
+";
+
 const POWERSHELL_IMAGE_SCRIPT: &str = r"
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName System.Windows.Forms
@@ -1034,6 +1491,17 @@ mod tests {
 
 	fn b64(text: &str) -> String {
 		base64::encode(text.as_bytes()).into_string()
+	}
+
+	#[test]
+	fn clipboard_write_fallback_retains_the_most_actionable_outcome() {
+		use ClipboardWriteOutcome::{PermissionDenied, Success, Unavailable, WriteFailure};
+
+		assert_eq!(Unavailable.fallback(Unavailable), Unavailable);
+		assert_eq!(Unavailable.fallback(WriteFailure), WriteFailure);
+		assert_eq!(WriteFailure.fallback(PermissionDenied), PermissionDenied);
+		assert_eq!(PermissionDenied.fallback(Success), Success);
+		assert_eq!(Success.fallback(WriteFailure), Success);
 	}
 
 	fn offer(events: &mut PasteEvents, mime: &str) {
@@ -1211,9 +1679,12 @@ mod tests {
 	}
 
 	#[test]
-	fn classifies_dropped_paths() {
+	fn classifies_explicit_dropped_paths_without_reordering() {
 		let cases: &[(&str, &[&str])] = &[
 			("/tmp/a.png", &["/tmp/a.png"]),
+			("./images/a.png", &["./images/a.png"]),
+			("../images/a.png", &["../images/a.png"]),
+			("'.\\images\\a.png'", &[".\\images\\a.png"]),
 			("'/tmp/a b.png'", &["/tmp/a b.png"]),
 			("\"/tmp/a b.png\"", &["/tmp/a b.png"]),
 			("/tmp/a\\ b.png", &["/tmp/a b.png"]),
@@ -1222,6 +1693,11 @@ mod tests {
 			("'/tmp/a b.png' /tmp/c.gif", &["/tmp/a b.png", "/tmp/c.gif"]),
 			("C:\\Users\\me\\a.png", &["C:\\Users\\me\\a.png"]),
 			("\\\\server\\share\\a.png", &["\\\\server\\share\\a.png"]),
+			("/tmp/first.png C:\\Users\\me\\second.mov \\\\srv\\share\\third.webp", &[
+				"/tmp/first.png",
+				"C:\\Users\\me\\second.mov",
+				"\\\\srv\\share\\third.webp",
+			]),
 		];
 		for (text, expected) in cases {
 			assert_eq!(dropped_paths(text).as_slice(), *expected, "{text:?}");
@@ -1229,28 +1705,69 @@ mod tests {
 	}
 
 	#[test]
-	fn whole_text_fallback_recovers_macos_screenshot() {
-		let path = "/Users/me/Desktop/Screenshot 2026-06-25 at 1.23.45\u{202f}PM.png";
-		assert_eq!(dropped_paths(path).as_slice(), [path]);
+	fn whole_text_fallback_recovers_one_anchored_spaced_media_path() {
+		for (text, expected) in [
+			(
+				"/Users/me/Desktop/Screenshot 2026-06-25 at 1.23.45\u{202f}PM.png",
+				"/Users/me/Desktop/Screenshot 2026-06-25 at 1.23.45\u{202f}PM.png",
+			),
+			(
+				"C:\\Users\\me\\My Pictures\\launch cut.MOV",
+				"C:\\Users\\me\\My Pictures\\launch cut.MOV",
+			),
+			(
+				"~/Pictures/Cleanshot 2026-06-25 at 12.00.png",
+				"~/Pictures/Cleanshot 2026-06-25 at 12.00.png",
+			),
+			("/tmp/odd dir\\ /sub/a b.png", "/tmp/odd dir /sub/a b.png"),
+		] {
+			assert_eq!(dropped_paths(text).as_slice(), [expected], "{text:?}");
+		}
 	}
 
 	#[test]
 	fn rejects_non_paths_and_ambiguous_paths() {
 		for text in [
 			"plain prose",
+			"icon.png",
+			"api/file/icon/867d45144217eec6d3c5805fd5a2d548.png",
 			"/tmp/a.png relative.png",
 			"http://example.com/a.png",
 			"file://example.com/a.png",
 			"/tmp/a.png /tmp/b shot.png",
+			"/tmp/a.png\n/tmp/b shot.png",
+			"/tmp/a.png ./b shot.png",
+			"C:\\Users\\me\\a.png .\\b shot.png",
+			"\\\\srv\\share\\a.png \\\\srv\\share\\b shot.png",
 		] {
 			assert!(dropped_paths(text).is_empty(), "accepted {text:?}");
 		}
 	}
 
 	#[test]
-	fn expands_home_path_when_available() {
-		if let Some(home) = env::home_dir() {
-			assert_eq!(dropped_paths("~/image.png").as_slice(), [sf!("{}/image.png", home.display())]);
+	fn preserves_explicit_home_path_for_the_consumer_to_resolve() {
+		assert_eq!(dropped_paths("~/image.png").as_slice(), ["~/image.png"]);
+	}
+
+	#[test]
+	fn classifies_previewable_image_and_video_extensions() {
+		for path in ["a.PNG", "a.jpg", "a.JPEG", "a.Gif", "a.webp"] {
+			assert_eq!(classify_attachment_path(path), Some(PastedPathKind::Image));
+		}
+		for (path, mime) in [
+			("a.mp4", "video/mp4"),
+			("a.MOV", "video/quicktime"),
+			("a.mkv", "video/x-matroska"),
+			("a.webm", "video/webm"),
+			("a.m4v", "video/x-m4v"),
+			("a.avi", "video/x-msvideo"),
+			("a.wmv", "video/x-ms-wmv"),
+		] {
+			assert_eq!(classify_attachment_path(path), Some(PastedPathKind::Video));
+			assert_eq!(video_media_type(path), Some(mime));
+		}
+		for path in ["a.bmp", "a.ppm", "png", "a.png.txt", "a.mp4.txt"] {
+			assert_eq!(classify_attachment_path(path), None);
 		}
 	}
 
@@ -1285,16 +1802,26 @@ mod tests {
 	}
 
 	#[test]
-	fn image_file_url_wins_over_co_advertised_icon_bitmap() {
-		// pi #8769: Finder `Cmd+C` on an image file advertises both the file
-		// URL and a generated icon bitmap; the file path must win so vision
-		// models receive the copied image, not a generic document icon.
+	fn previewable_file_url_wins_over_co_advertised_icon_bitmap() {
+		// Finder advertises both the authoritative file URL and a
+		// generated icon bitmap. Image and video files must both beat the icon.
+		for path in ["/Users/me/Desktop/screenshot.png", "/Users/me/Desktop/launch.mov"] {
+			let clipboard = smart_clipboard(
+				Some(vec![sf!(path)]),
+				|| Some(icon_bitmap()),
+				|| unreachable!("text is never consulted when a media path resolves"),
+			);
+			assert_eq!(clipboard, Some(Clipboard::Paths(vec![sf!(path)])));
+		}
 		let clipboard = smart_clipboard(
-			Some(vec![sf!("/Users/me/Desktop/screenshot.png")]),
+			Some(vec![sf!("/tmp/first.png"), sf!("/tmp/notes.txt"), sf!("/tmp/second.webm")]),
 			|| Some(icon_bitmap()),
-			|| unreachable!("text is never consulted when an image path resolves"),
+			|| unreachable!("previewable file URLs win"),
 		);
-		assert_eq!(clipboard, Some(Clipboard::Paths(vec![sf!("/Users/me/Desktop/screenshot.png")])));
+		assert_eq!(
+			clipboard,
+			Some(Clipboard::Paths(vec![sf!("/tmp/first.png"), sf!("/tmp/second.webm")]))
+		);
 	}
 
 	#[test]
@@ -1326,5 +1853,32 @@ mod tests {
 		);
 		assert_eq!(smart_clipboard(None, || None, || Some(String::new())), None);
 		assert_eq!(smart_clipboard(None, || None, || None), None);
+	}
+
+	#[test]
+	fn advertised_clipboard_formats_distinguish_failure_from_unsupported_data() {
+		for text in ["public.utf8-plain-text", "UTF8_STRING", "UnicodeText"] {
+			assert!(advertised_format_is_supported(text, ClipboardRead::Text), "{text}");
+			assert!(advertised_format_is_supported(text, ClipboardRead::Smart), "{text}");
+		}
+		for media in ["image/png", "Bitmap", "FileDrop", "public.file-url"] {
+			assert!(advertised_format_is_supported(media, ClipboardRead::Smart), "{media}");
+			assert!(!advertised_format_is_supported(media, ClipboardRead::Text), "{media}");
+		}
+		assert!(!advertised_format_is_supported("application/pdf", ClipboardRead::Smart));
+	}
+
+	#[test]
+	fn backend_diagnostics_classify_permission_and_empty_without_overlap() {
+		for denied in
+			["Permission denied", "Operation not permitted", "Access is denied", "not authorized"]
+		{
+			assert!(is_permission_diagnostic(denied), "{denied}");
+			assert!(!is_empty_diagnostic(denied), "{denied}");
+		}
+		for empty in ["clipboard is empty", "No selection", "target not available"] {
+			assert!(is_empty_diagnostic(empty), "{empty}");
+			assert!(!is_permission_diagnostic(empty), "{empty}");
+		}
 	}
 }

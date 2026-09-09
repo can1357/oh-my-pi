@@ -18,7 +18,7 @@ pub enum McpTimeout {
 
 impl McpTimeout {
 	/// Resolves process override, then per-mount value, then global value, then
-	/// the pi thirty-second default. Invalid environment values are ignored.
+	/// the thirty-second default. Invalid environment values are ignored.
 	pub fn resolve(global: Option<Duration>, mount_ms: Option<u64>) -> Self {
 		Self::resolve_with(env::var(MCP_TIMEOUT_ENV).ok().as_deref(), global, mount_ms)
 	}

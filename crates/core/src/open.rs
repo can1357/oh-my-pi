@@ -1,8 +1,8 @@
 //! Best-effort launcher for URLs and file paths via the OS default handler.
 //!
-//! Port of pi's `utils/open.ts`: `open` on macOS, `ShellExecute` through
-//! PowerShell on Windows, `wslview`/`xdg-open` on Linux. Callers always keep a
-//! visible copy-URL fallback; launch failures are logged, never surfaced.
+//! Uses `open` on macOS, `ShellExecute` through PowerShell on Windows, and
+//! `wslview`/`xdg-open` on Linux. Callers always keep a visible copy-URL
+//! fallback; launch failures are logged, never surfaced.
 
 use std::{
 	process::{Command, Stdio},
@@ -50,7 +50,7 @@ fn opener_command(target: &str) -> Command {
 	command
 }
 
-/// ShellExecute via PowerShell `Start-Process`, mirroring pi's opener:
+/// ShellExecute via PowerShell `Start-Process`:
 /// unlike `rundll32 url.dll,FileProtocolHandler` it reports launch failures
 /// (missing target, no handler, access denied) as a non-zero exit, and
 /// `-EncodedCommand` keeps cmd/PowerShell metacharacter parsing (OAuth URLs
@@ -147,7 +147,7 @@ fn wsl_windows_path(target: &str) -> Option<String> {
 	(!converted.is_empty()).then(|| converted.to_owned())
 }
 
-/// Mirrors pi's `URL_SCHEME_PATTERN` (`^[a-zA-Z][a-zA-Z\d+.-]*:`).
+/// Recognizes URI schemes (`^[a-zA-Z][a-zA-Z\d+.-]*:`).
 #[cfg(not(any(target_os = "macos", windows)))]
 fn has_url_scheme(target: &str) -> bool {
 	let mut bytes = target.bytes();

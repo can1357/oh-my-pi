@@ -11,7 +11,7 @@ use std::{
 use clap::{Arg, ArgAction, ArgMatches, Command};
 use num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
-use omp_shell_engine::{ShellExtensions, builtins::Registration};
+use omp_shell::{ShellExtensions, builtins::Registration};
 
 use crate::{
 	host::{Host, Utility, format_usage, matches_parser, util},
@@ -936,8 +936,8 @@ mod numberparse {
 mod error {
 	//! Errors returned by seq.
 
-	// pi-uutils: `translate!` message lookups are literalized with the en-US
-	// strings from upstream's locales/en-US.ftl.
+	// Message lookups are literalized with the en-US strings from the bundled
+	// locale data.
 
 	use thiserror::Error;
 

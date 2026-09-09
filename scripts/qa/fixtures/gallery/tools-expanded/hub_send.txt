@@ -1,0 +1,29 @@
+── hub_send — Hub send ─────────────────────────────────────────────────────────────────────────────
+
+  · streaming args
+                                                                                                    
+ IRC  AuthLoader                                                                                  
+  │ Are you still touching                                                                          
+                                                                                                    
+
+  · in progress
+                                                                                                    
+ IRC  AuthLoader await reply                                                                      
+  │ Are you still touching src/server/auth.ts? I need to add a 401 path.                            
+                                                                                                    
+
+  · done
+                                                                                                    
+ IRC  AuthLoader revived                                                                          
+  │ Are you still touching src/server/auth.ts? I need to add a 401 path.                            
+   AuthLoader just now                                                                             
+  │ Done with auth.ts — go ahead, just rebase past my session-store rename.                         
+                                                                                                    
+
+  · failed
+                                                                                                    
+ IRC  RateLimiter failed                                                                          
+  │ Are you still touching src/server/auth.ts? I need to add a 401 path.                            
+└─ RateLimiter ⟨failed⟩ – unknown agent "RateLimiter"                                               
+                                                                                                    
+

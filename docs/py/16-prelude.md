@@ -2,9 +2,9 @@
 
 `@omp.prelude` lets an extension publish a small, named Python helper into every new eval namespace. The eval-side name is a synchronous function even when the extension implementation is `async def`.
 
-A prelude helper is **not a tool**. It is not inserted into the tool `Registry`, advertised to the model as a tool schema, included in the tool prompt, available as `tool.<name>`, or routed through the `xd` shell builtin. Use it for an operation that should read naturally inside Python eval code and whose arguments and result have a JSON representation.
+A prelude helper is **not a tool**. It is not inserted into the tool `Registry`, advertised to the model as a tool schema, included in the tool prompt, available as `tool.<name>`, or routed through the `dyn` shell builtin. Use it for an operation that should read naturally inside Python eval code and whose arguments and result have a JSON representation.
 
-Packaging, installation, activation, and the rest of the manifest belong to [14-deploy.md](14-deploy.md). Tool and `xd` transport semantics belong to [01-devices.md](01-devices.md).
+Packaging, installation, activation, and the rest of the manifest belong to [14-deploy.md](14-deploy.md). Tool and `dyn` transport semantics belong to [01-devices.md](01-devices.md).
 
 ## Declare and package a helper
 
@@ -64,7 +64,7 @@ module  = "example_labels"
 summary = "Normalize a label for lookup."
 ```
 
-`family = "prelude"` and `rev = 1` authenticate the decorator's `prelude.1` declaration identity. `kind = "soft"` is required by the current `[[tools]]` authoring vocabulary; it does **not** register this declaration as a soft tool or expose it through the `xd` shell builtin. The manifest name, family, revision, and module must agree with the imported declaration. See [14-deploy.md](14-deploy.md) for authoritative manifest generation, verification, packaging, and deployment rules.
+`family = "prelude"` and `rev = 1` authenticate the decorator's `prelude.1` declaration identity. `kind = "soft"` is required by the current `[[tools]]` authoring vocabulary; it does **not** register this declaration as a soft tool or expose it through the `dyn` shell builtin. The manifest name, family, revision, and module must agree with the imported declaration. See [14-deploy.md](14-deploy.md) for authoritative manifest generation, verification, packaging, and deployment rules.
 
 The extension body may be synchronous:
 
@@ -128,6 +128,6 @@ For a failure before a body runs, inspect the local `TypeError` and `inspect.sig
 
 `omp.agents.*` remains `NotWired` in extension workers. A prelude body may use only SDK surfaces already wired for extensions; declaring a helper does not grant agent APIs, capabilities, or an indirect route to them. Agent APIs are outside this feature's boundary.
 
-**Revision 2.2** — the `xd` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `xd` builtin of the embedded shell, inside the core `shell` tool: `xd` lists the catalog (`xd --q <text>` searches), `xd <device> --help` returns docs plus schema-derived CLI usage, and `xd <device> [args…]` (or `xd <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `xd resolve "<reason>"` / `xd reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `xd` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
+**Revision 2.2** — the `dyn` shell-builtin transport ruling: the dedicated `dyn` core tool and its `do_` envelope are deleted. Devices are discovered, documented, and dispatched through the `dyn` builtin of the embedded shell, inside the core `shell` tool: `dyn` lists the catalog (`dyn --q <text>` searches), `dyn <device> --help` returns docs plus schema-derived CLI usage, and `dyn <device> [args…]` (or `dyn <device> --json '<payload>'`) invokes — arguments arrive as one nested JSON document mapped from the CLI ([01-devices.md](01-devices.md) owns the schema→CLI grammar). Staged-proposal resolution is `dyn resolve "<reason>"` / `dyn reject "<reason>"`. The `do_`/trailing-underscore reserved-parameter rule is deleted with the envelope. The one-gate rule transfers intact: an `dyn` device dispatch fires one `tool_call` with the RESOLVED `target=DeviceCall(...)`; catalog and docs reads fire `target=CoreTool("shell")` — the builtin is transport, never the policy subject. The model's tool array shrinks by the `dyn` slot; a device still has no schema in the request.
 
-In this file, the live exclusions now state that prelude helpers are not routed through or exposed by the `xd` shell builtin.
+In this file, the live exclusions now state that prelude helpers are not routed through or exposed by the `dyn` shell builtin.

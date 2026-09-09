@@ -8,20 +8,20 @@ use std::{
 };
 
 use miette::{IntoDiagnostic as _, miette};
-use omp_catalog::ProviderId;
-use omp_core::Str;
-use omp_inference::{
+use omp_ai::{
 	account::AccountStateStore,
 	answer::{UsageQuantity, UsageReport},
 	call::{UsageRequest, UsageScope},
 	id::AccountId,
 };
-use omp_storage::index::{SessionIndex, UsageDimension, UsageQuery};
+use omp_catalog::ProviderId;
+use omp_core::Str;
 use serde_json::{Value, json};
 
 use crate::cli::UsageArgs;
 
-/// Renders durable quota snapshots or explicitly invalidates them.
+/// Renders durable quota snapshots, client attribution, or explicitly
+/// invalidates them.
 pub async fn run(args: UsageArgs) -> miette::Result<()> {
 	if args.account.is_some() && args.provider.is_some() {
 		return Err(miette!("--account and --provider are mutually exclusive"));
@@ -61,13 +61,21 @@ pub async fn run(args: UsageArgs) -> miette::Result<()> {
 	Ok(())
 }
 
-struct QuotaSnapshot {
-	rows:           Vec<Value>,
-	reports:        Vec<UsageReport>,
-	refresh_errors: Vec<String>,
+/// Durable quota rows merged with one fresh refresh per account.
+pub(crate) struct QuotaSnapshot {
+	/// One JSON row per `(provider, account, window)`: `provider`,
+	/// `account` (masked), `window`, `label`, `consumed`, `limit`,
+	/// `remaining`, `resetAtMs`, `observedAtMs`, `fresh`.
+	pub(crate) rows:           Vec<Value>,
+	/// Fresh provider reports, one per refreshed account.
+	pub(crate) reports:        Vec<UsageReport>,
+	/// Refresh failures, one line per account.
+	pub(crate) refresh_errors: Vec<String>,
 }
 
-async fn collect_quota(
+/// Loads durable quota windows and refreshes every stored account with a
+/// 20 s deadline each (the chat `/usage` dashboard and the CLI share it).
+pub(crate) async fn collect_quota(
 	data_dir: &Path,
 	provider: Option<&ProviderId>,
 	account: Option<&AccountId>,
@@ -152,92 +160,26 @@ async fn collect_quota(
 	Ok(QuotaSnapshot { rows, reports, refresh_errors })
 }
 
-/// Renders durable per-model accounting and the latest provider quota windows.
+/// Renders the latest provider quota windows.
 pub async fn render_report(data_dir: &Path) -> miette::Result<Str> {
 	fs::create_dir_all(data_dir).into_diagnostic()?;
-	let index = SessionIndex::open_authoritative_reader(data_dir.join("sessions.sqlite3"))
-		.into_diagnostic()?;
-	let models = index.usage(&UsageQuery::default()).into_diagnostic()?;
 	let quota = collect_quota(data_dir, None, None).await?;
-
 	let mut rendered = String::from("**Usage**\n\n");
-	if models.is_empty() {
-		rendered.push_str("No durable model usage receipts recorded.\n");
-	} else {
-		rendered.push_str("| Model | Input | Output | Cache read | Cache write | Cost |\n");
-		rendered.push_str("|---|---:|---:|---:|---:|---:|\n");
-		let mut total_input = 0_u64;
-		let mut total_output = 0_u64;
-		let mut total_cache_read = 0_u64;
-		let mut total_cache_write = 0_u64;
-		let mut total_cost = 0_u64;
-		for bucket in &models {
-			let model = bucket
-				.key
-				.iter()
-				.find_map(|(dimension, value)| {
-					(*dimension == UsageDimension::Model).then_some(value.as_str())
-				})
-				.unwrap_or("unknown");
-			total_input = total_input.saturating_add(bucket.usage.input_tokens);
-			total_output = total_output.saturating_add(bucket.usage.output_tokens);
-			total_cache_read = total_cache_read.saturating_add(bucket.usage.cache_read_tokens);
-			total_cache_write = total_cache_write.saturating_add(bucket.usage.cache_write_tokens);
-			total_cost = total_cost.saturating_add(bucket.cost.nanos_usd);
-			let _ = writeln!(
-				rendered,
-				"| `{model}` | {} | {} | {} | {} | ${:.6} |",
-				bucket.usage.input_tokens,
-				bucket.usage.output_tokens,
-				bucket.usage.cache_read_tokens,
-				bucket.usage.cache_write_tokens,
-				bucket.cost.nanos_usd as f64 / 1_000_000_000.0,
-			);
-		}
-		let _ = writeln!(
-			rendered,
-			"| **Total** | **{total_input}** | **{total_output}** | **{total_cache_read}** | \
-			 **{total_cache_write}** | **${:.6}** |",
-			total_cost as f64 / 1_000_000_000.0,
-		);
-	}
-
-	rendered.push_str("\n**Quota windows**\n");
 	if quota.rows.is_empty() {
-		rendered.push_str("\nNo quota observations.\n");
+		rendered.push_str("No provider quota observations recorded.\n");
 	} else {
 		for row in &quota.rows {
 			let provider = row["provider"].as_str().unwrap_or("unknown");
-			let account = row["account"].as_str().unwrap_or("********");
-			let window = row["window"].as_str().unwrap_or("unknown");
-			let label = row["label"].as_str().unwrap_or(window);
-			let consumed = row["consumed"].as_f64();
-			let limit = row["limit"].as_f64();
-			let remaining = row["remaining"].as_f64();
-			let fraction = consumed
-				.zip(limit)
-				.and_then(|(used, total)| (total != 0.0).then_some(used / total));
-			let _ = write!(
-				rendered,
-				"\n- **{provider}** `{account}` · {label}\n  `{}` {} / {}",
-				quota_bar(fraction),
-				consumed.map_or_else(|| "?".to_owned(), format_number),
-				limit.map_or_else(|| "?".to_owned(), format_number),
-			);
-			if let Some(remaining) = remaining {
-				let _ = write!(rendered, " · {} remaining", format_number(remaining));
-			}
-			if let Some(reset_at) = row["resetAtMs"].as_u64() {
-				let _ = write!(rendered, " · resets at {reset_at}");
-			}
-			if let Some(observed_at) = row["observedAtMs"].as_u64() {
-				let _ = write!(rendered, " · observed at {observed_at}");
-			}
-			rendered.push('\n');
+			let consumed = row["consumed"]
+				.as_f64()
+				.map(format_number)
+				.unwrap_or_else(|| "—".to_owned());
+			let limit = row["limit"]
+				.as_f64()
+				.map(format_number)
+				.unwrap_or_else(|| "—".to_owned());
+			let _ = writeln!(rendered, "- `{provider}`: {consumed} / {limit}");
 		}
-	}
-	for error in quota.refresh_errors {
-		let _ = writeln!(rendered, "\n_{error}_");
 	}
 	Ok(Str::from(rendered))
 }
@@ -354,7 +296,8 @@ fn quantity_value(quantity: UsageQuantity) -> f64 {
 	quantity.units as f64 / 10_f64.powi(i32::from(quantity.decimal_exponent))
 }
 
-fn mask(value: &str) -> String {
+/// Masks an account id to its first and last four characters.
+pub(crate) fn mask(value: &str) -> String {
 	if value.len() <= 8 {
 		return "********".to_owned();
 	}

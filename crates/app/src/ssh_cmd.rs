@@ -8,7 +8,7 @@ use std::{
 use clap::{Args, Subcommand, ValueEnum};
 use miette::IntoDiagnostic as _;
 use omp_core::Str;
-use omp_envd::ssh::{AuthPolicy, HostConfig, HostStore, SshService};
+use omp_envd::ssh::{AuthPolicy, HostConfig, HostPaths, HostStore, SshService};
 
 /// Native SSH command options.
 #[derive(Clone, Debug, Args)]
@@ -24,7 +24,7 @@ pub enum SshScope {
 	/// Repository-local `.omp/hosts.toml`.
 	#[default]
 	Project,
-	/// Profile-local `hosts.toml`.
+	/// User configuration root `hosts.toml` (`~/.o2`, profile-aware).
 	User,
 }
 
@@ -85,15 +85,10 @@ pub enum SshCommand {
 
 /// Runs scoped writer and bounded native transport operations.
 pub async fn run(args: SshArgs) -> miette::Result<()> {
-	let user = omp_core::dirs::data_dir(None)
-		.into_diagnostic()?
-		.join("hosts.toml");
-	let project = env::current_dir()
-		.into_diagnostic()?
-		.join(".omp/hosts.toml");
+	let paths = host_paths()?;
 	match args.command {
 		SshCommand::List { scope } => {
-			for (label, path) in scoped_paths(scope, &project, &user) {
+			for (label, path) in scoped_paths(scope, &paths) {
 				let store = HostStore::load(path).into_diagnostic()?;
 				for alias in store.aliases() {
 					let host = store.get(alias.as_str()).into_diagnostic()?;
@@ -103,7 +98,7 @@ pub async fn run(args: SshArgs) -> miette::Result<()> {
 			Ok(())
 		},
 		SshCommand::Add { alias, host, user: remote_user, port, host_key, key, scope } => {
-			let path = scope_path(scope, &project, &user);
+			let path = scope_path(scope, &paths);
 			let store = HostStore::load(path).into_diagnostic()?;
 			store
 				.upsert(path, alias.clone(), HostConfig {
@@ -119,7 +114,7 @@ pub async fn run(args: SshArgs) -> miette::Result<()> {
 			Ok(())
 		},
 		SshCommand::Remove { alias, scope } => {
-			let path = scope_path(scope, &project, &user);
+			let path = scope_path(scope, &paths);
 			let removed = HostStore::load(path)
 				.into_diagnostic()?
 				.remove(path, alias.as_str())
@@ -134,13 +129,13 @@ pub async fn run(args: SshArgs) -> miette::Result<()> {
 			Ok(())
 		},
 		SshCommand::Probe { alias } => {
-			let service = service(alias.as_str(), &project, &user)?;
+			let service = service(alias.as_str(), &paths)?;
 			let caps = service.probe(alias.as_str()).await.into_diagnostic()?;
 			println!("{}: exec={} sftp={}", alias, caps.exec, caps.sftp);
 			Ok(())
 		},
 		SshCommand::Exec { alias, command } => {
-			let service = service(alias.as_str(), &project, &user)?;
+			let service = service(alias.as_str(), &paths)?;
 			let command = command
 				.iter()
 				.map(Str::as_str)
@@ -163,32 +158,33 @@ pub async fn run(args: SshArgs) -> miette::Result<()> {
 	}
 }
 
-pub(crate) fn service(alias: &str, project: &Path, user: &Path) -> miette::Result<SshService> {
-	let project_store = HostStore::load(project).into_diagnostic()?;
-	if project_store.get(alias).is_ok() {
-		Ok(SshService::new(project_store))
-	} else {
-		let user_store = HostStore::load(user).into_diagnostic()?;
-		user_store.get(alias).into_diagnostic()?;
-		Ok(SshService::new(user_store))
+/// The `hosts.toml` pair for the current working directory: project
+/// `.omp/hosts.toml` over the user configuration root (`~/.o2`).
+pub(crate) fn host_paths() -> miette::Result<HostPaths> {
+	let user_root = omp_core::dirs::user_config_root().into_diagnostic()?;
+	let project_root = env::current_dir().into_diagnostic()?;
+	Ok(HostPaths::new(&user_root, &project_root))
+}
+
+/// Opens the effective host authority (project aliases shadow user ones) and
+/// verifies `alias` is configured.
+pub(crate) fn service(alias: &str, paths: &HostPaths) -> miette::Result<SshService> {
+	let store = HostStore::load_layered(paths).into_diagnostic()?;
+	store.get(alias).into_diagnostic()?;
+	Ok(SshService::new(store))
+}
+
+fn scope_path(scope: SshScope, paths: &HostPaths) -> &Path {
+	match scope {
+		SshScope::Project => &paths.project,
+		SshScope::User => &paths.user,
 	}
 }
 
-fn scope_path<'a>(scope: SshScope, project: &'a Path, user: &'a Path) -> &'a Path {
+fn scoped_paths(scope: Option<SshScope>, paths: &HostPaths) -> Vec<(&'static str, &Path)> {
 	match scope {
-		SshScope::Project => project,
-		SshScope::User => user,
-	}
-}
-
-fn scoped_paths<'a>(
-	scope: Option<SshScope>,
-	project: &'a Path,
-	user: &'a Path,
-) -> Vec<(&'static str, &'a Path)> {
-	match scope {
-		Some(SshScope::Project) => vec![("project", project)],
-		Some(SshScope::User) => vec![("user", user)],
-		None => vec![("project", project), ("user", user)],
+		Some(SshScope::Project) => vec![("project", paths.project.as_path())],
+		Some(SshScope::User) => vec![("user", paths.user.as_path())],
+		None => vec![("project", paths.project.as_path()), ("user", paths.user.as_path())],
 	}
 }

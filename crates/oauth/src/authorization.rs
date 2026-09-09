@@ -1,6 +1,7 @@
 use std::fmt;
 
-use omp_core::{SecretString, Str};
+use omp_core::{SecretString, Str, ct_eq};
+use tokio_util::sync::CancellationToken;
 use url::Url;
 
 use crate::{
@@ -39,10 +40,10 @@ impl fmt::Debug for PendingAuthorization {
 	fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
 		formatter
 			.debug_struct("PendingAuthorization")
-			.field("browser_url", &self.browser_url)
+			.field("browser_url", &"[REDACTED]")
 			.field("pkce", &"[REDACTED]")
-			.field("redirect_uri", &self.redirect_uri)
-			.field("resource", &self.resource)
+			.field("redirect_uri", &"[REDACTED]")
+			.field("resource", &self.resource.as_ref().map(|_| "[REDACTED]"))
 			.finish()
 	}
 }
@@ -142,16 +143,12 @@ pub async fn complete_authorization(
 	token_endpoint: &str,
 	client_id: &str,
 	client_secret: Option<&SecretString>,
+	cancel: &CancellationToken,
 	pending: PendingAuthorization,
 	code: SecretString,
 	returned_state: &str,
 ) -> Result<TokenGrant, CompleteAuthorizationError> {
-	if !pending
-		.pkce
-		.state()
-		.as_bytes()
-		.eq(returned_state.as_bytes())
-	{
+	if !ct_eq(pending.pkce.state().as_bytes(), returned_state.as_bytes()) {
 		return Err(CompleteAuthorizationError::StateMismatch);
 	}
 	let (verifier, ..) = pending.pkce.into_parts();
@@ -160,6 +157,7 @@ pub async fn complete_authorization(
 		client_id: Some(client_id),
 		client_secret,
 		resource: pending.resource.as_deref(),
+		cancellation: Some(cancel),
 	};
 	exchange_authorization_code(http, &request, &code, pending.redirect_uri.as_str(), &verifier)
 		.await
@@ -179,7 +177,11 @@ pub enum CompleteAuthorizationError {
 
 fn checked_http_url(value: &str) -> Result<Url, AuthorizationError> {
 	let url = Url::parse(value).map_err(|_| AuthorizationError::InvalidUrl)?;
-	if !matches!(url.scheme(), "http" | "https") || url.host().is_none() || url.fragment().is_some()
+	if !matches!(url.scheme(), "http" | "https")
+		|| url.host().is_none()
+		|| !url.username().is_empty()
+		|| url.password().is_some()
+		|| url.fragment().is_some()
 	{
 		return Err(AuthorizationError::InvalidUrl);
 	}

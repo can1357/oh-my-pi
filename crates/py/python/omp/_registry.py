@@ -9,12 +9,15 @@ transports.
 from __future__ import annotations
 
 import importlib
+import importlib.util
 import inspect
 import json
+import sys
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import MISSING, dataclass, fields, is_dataclass, replace
 from enum import Enum, StrEnum
-from types import UnionType
+from pathlib import Path
+from types import MappingProxyType, UnionType
 from typing import (
     Annotated,
     Any,
@@ -46,7 +49,7 @@ from . import packages as _packages
 _T = TypeVar("_T", bound=type)
 _ToolKey = tuple[str, str, int]
 _HookKey = tuple[str, str]
-_EntryKindKey = tuple[str, str]
+_HookSubscriptionKey = tuple[str, str, str]
 _ServiceKey = tuple[str, int]
 _ProviderKey = str
 _WorkerKey = str
@@ -66,7 +69,8 @@ _EXECUTABLE_KINDS = frozenset(
         "soft",
         "hard",
         "hook",
-        "regime",
+        "director",
+        "component",
         "worker",
         "provider",
         "prompt_slot",
@@ -74,6 +78,7 @@ _EXECUTABLE_KINDS = frozenset(
         "shortcut",
         "completion",
         "message_renderer",
+        "markdown_transformer",
         "verdict_renderer",
         "telemetry",
         "service",
@@ -178,16 +183,6 @@ class ServiceDefinition:
     trigger: _ActivationTrigger = _ActivationTrigger.LAZY
 
 @dataclass(frozen=True, slots=True)
-class EntryKindDefinition:
-    """One import-time ``@omp.entry_kind`` declaration."""
-
-    name: str
-    rev: str
-    display: bool | None
-    spill: bool
-    implementation: type
-    trigger: _ActivationTrigger = _ActivationTrigger.LAZY
-@dataclass(frozen=True, slots=True)
 class ProviderDefinition:
     """One import-time ``@omp.provider`` declaration."""
 
@@ -266,6 +261,8 @@ class DeviceDefinition:
     tier: object
     deadline: object | None
     aliases: Mapping[str, str] | None
+    constraint: object | None
+    serial: bool
     body: object
     arg_specs: tuple[ArgSpec, ...] = ()
     trigger: _ActivationTrigger = _ActivationTrigger.LAZY
@@ -297,7 +294,7 @@ class PreludeDefinition:
 
 @dataclass(frozen=True, slots=True)
 class WorkerToolDefinition:
-    """One runnable tool projection retained by the sealed worker registry."""
+    """One runnable tool projection retained by the sealed CONTROL registry."""
 
     name: str
     family: str
@@ -310,6 +307,14 @@ class WorkerToolDefinition:
     source_module: str
     kind: str
     place: object
+    effects: object | None
+    constraint: object | None
+    serial: bool
+    precedence: int = 0
+    replaces: str | None = None
+    summary: str | None = None
+    docs: object | None = None
+    examples: tuple[object, ...] = ()
     legacy: bool = False
 
 
@@ -375,6 +380,45 @@ class ApproverDefinition:
 
 
 @dataclass(frozen=True, slots=True)
+class SkillDecl:
+    """One deterministic extension-authored generated skill resource."""
+
+    name: str
+    description: str
+    hidden: bool
+    disable_model_invocation: bool
+    autoload: bool
+    contain_root: str | None
+    path: str
+    content: bytes
+
+    @property
+    def metadata(self) -> Mapping[str, object]:
+        """Return the exact signed metadata projected into the content row."""
+
+        values: dict[str, object] = {
+            "name": self.name,
+            "description": self.description,
+            "hidden": self.hidden,
+            "disable_model_invocation": self.disable_model_invocation,
+            "autoload": self.autoload,
+        }
+        if self.contain_root is not None:
+            values["contain_root"] = self.contain_root
+        return MappingProxyType(values)
+
+    @property
+    def declaration(self) -> _packages.ContentDeclaration:
+        """Lower this generated resource to the uniform manifest row."""
+
+        return _packages.ContentDeclaration(
+            kind=_packages.ContentKind.SKILLS,
+            path=self.path,
+            metadata=self.metadata,
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class HookDefinition:
     """One import-time hook subscription and its activation trigger."""
 
@@ -382,6 +426,28 @@ class HookDefinition:
     phase: str
     handler: object
     trigger: _ActivationTrigger
+    def __getattr__(self, name: str) -> object: return getattr(self.handler, name)
+
+
+@dataclass(frozen=True, slots=True)
+class DirectorDefinition:
+    """One lifecycle behavior registered on the engine Director stack."""
+
+    id: str
+    callable: object
+    claims: tuple[str, ...]
+    binds: Mapping[str, bool | int | float | str]
+    trigger: _ActivationTrigger = _ActivationTrigger.LAZY
+
+
+@dataclass(frozen=True, slots=True)
+class ComponentDefinition:
+    """One pure journal-to-``<meta>`` component reducer."""
+
+    id: str
+    callable: object
+    interested: tuple[str, ...]
+    trigger: _ActivationTrigger = _ActivationTrigger.LAZY
 
 
 @dataclass(frozen=True, slots=True)
@@ -391,6 +457,7 @@ class UIDefinition:
     kind: str
     name: object
     value: object
+    metadata: object | None
     trigger: _ActivationTrigger
 
 
@@ -398,7 +465,7 @@ class UIDefinition:
 class DeclarationSnapshot:
     """Immutable view of the complete decorator registry."""
 
-    entry_kinds: tuple[EntryKindDefinition, ...]
+    skills: tuple[SkillDecl, ...]
     tools: frozenset[_ToolKey]
     capabilities: frozenset[str]
     hooks: frozenset[_HookKey]
@@ -418,10 +485,12 @@ class DeclarationSnapshot:
     arg_specs: tuple[tuple[_ToolKey, tuple[ArgSpec, ...]], ...] = ()
     hook_definitions: tuple[HookDefinition, ...] = ()
     service_definitions: tuple[ServiceDefinition, ...] = ()
+    directors: tuple[DirectorDefinition, ...] = ()
+    components: tuple[ComponentDefinition, ...] = ()
     completions: tuple[UIDefinition, ...] = ()
     message_renderers: tuple[UIDefinition, ...] = ()
+    markdown_transformers: tuple[UIDefinition, ...] = ()
     verdict_renderers: tuple[UIDefinition, ...] = ()
-    regimes: tuple[object, ...] = ()
 
 
 class DeclarationRegistry:
@@ -433,13 +502,15 @@ class DeclarationRegistry:
         "_commands",
         "_completions",
         "_message_renderers",
+        "_markdown_transformers",
         "_verdict_renderers",
         "_shortcuts",
         "_device_claims",
         "_device_definitions",
         "_child_device_definitions",
         "_device_states",
-        "_entry_kinds",
+        "_directors",
+        "_components",
         "_export_sequence",
         "_exports",
         "_extension_id",
@@ -447,7 +518,6 @@ class DeclarationRegistry:
         "_provider_candidates",
         "_hooks",
         "_hook_definitions",
-        "_regimes",
         "_prompt_slots",
         "_preludes",
         "_telemetry",
@@ -455,6 +525,7 @@ class DeclarationRegistry:
         "_manifest_capabilities",
         "_manifest_executables",
         "_uniform_manifest_configured",
+        "_trust_runtime_declarations",
         "_manifest_requires",
         "_manifest_services",
         "_manifest_tools",
@@ -462,6 +533,8 @@ class DeclarationRegistry:
         "_sealed",
         "_service_instances",
         "_services",
+        "_skills",
+        "_manifest_content",
         "_tools",
         "_workers",
         "_verified",
@@ -475,6 +548,7 @@ class DeclarationRegistry:
         self._commands: dict[str, CommandDefinition] = {}
         self._completions: dict[object, UIDefinition] = {}
         self._message_renderers: dict[object, UIDefinition] = {}
+        self._markdown_transformers: dict[object, UIDefinition] = {}
         self._verdict_renderers: dict[object, UIDefinition] = {}
         self._shortcuts: dict[str, ShortcutDefinition] = {}
         self._tools: dict[_ToolKey, object] = {}
@@ -484,12 +558,12 @@ class DeclarationRegistry:
             str, list[tuple[int, str | None, _ToolKey]]
         ] = {}
         self._device_states: dict[_ToolKey, tuple[bool, str | None]] = {}
-        self._entry_kinds: dict[_EntryKindKey, EntryKindDefinition] = {}
+        self._directors: dict[str, DirectorDefinition] = {}
+        self._components: dict[str, ComponentDefinition] = {}
         self._provider_candidates: dict[_ProviderKey, list[ProviderDefinition]] = {}
         self._providers: dict[_ProviderKey, ProviderDefinition] = {}
-        self._hooks: dict[_HookKey, object] = {}
-        self._hook_definitions: dict[_HookKey, HookDefinition] = {}
-        self._regimes: dict[str, object] = {}
+        self._hooks: dict[_HookSubscriptionKey, object] = {}
+        self._hook_definitions: dict[_HookSubscriptionKey, HookDefinition] = {}
         self._telemetry: dict[str, TelemetryDefinition] = {}
         self._exports: dict[int, ExportDefinition] = {}
         self._export_sequence = 0
@@ -503,10 +577,13 @@ class DeclarationRegistry:
         self._manifest_hooks: frozenset[_HookKey] = frozenset()
         self._manifest_capabilities: frozenset[str] = frozenset()
         self._manifest_services: frozenset[_ServiceKey] = frozenset()
+        self._manifest_content: tuple[_packages.ContentDeclaration, ...] = ()
+        self._skills: dict[str, SkillDecl] = {}
         self._manifest_executables: dict[
             tuple[str, str], _ExecutableDeclaration
         ] = {}
         self._uniform_manifest_configured = False
+        self._trust_runtime_declarations = False
         self._manifest_requires: frozenset[_ServiceKey] = frozenset()
         self._legacy_worker_tools: dict[_ToolKey, WorkerToolDefinition] = {}
 
@@ -539,10 +616,13 @@ class DeclarationRegistry:
             _packages.ContentDeclaration | Mapping[str, object]
         ] | None = None,
         extension: str | None = None,
+        trust_runtime_declarations: bool = False,
     ) -> None:
         """Install authoritative manifest sets before the first module import."""
 
         self._ensure_open("manifest")
+        if not isinstance(trust_runtime_declarations, bool):
+            raise TypeError("trust_runtime_declarations must be bool")
         content_declarations: list[_packages.ContentDeclaration] = []
         executable_declarations: dict[
             tuple[str, str], _ExecutableDeclaration
@@ -585,30 +665,35 @@ class DeclarationRegistry:
         if (
             self._tools
             or self._hooks
-            or self._regimes
+            or self._directors
+            or self._components
             or self._services
             or self._commands
             or self._completions
             or self._message_renderers
+            or self._markdown_transformers
             or self._verdict_renderers
             or self._shortcuts
             or self._approvers
             or self._preludes
+            or self._skills
         ):
             raise RuntimeError("manifest must be configured before declaration import")
         if declarations is not None:
+            self._manifest_content = tuple(content_declarations)
             _packages._configure_own_declarations(
-                extension, tuple(content_declarations)
+                extension, self._manifest_content
             )
-        manifest_tools = {_tool_key(*item) for item in tools}
-        manifest_hooks = {_hook_key(*item) for item in hooks}
-        for executable in executable_declarations.values():
-            if executable.kind in {"soft", "hard"}:
-                manifest_tools.add(_manifest_tool_key(executable.key))
-            elif executable.kind == "hook":
-                manifest_hooks.add(_manifest_hook_key(executable.key))
-        self._manifest_tools = frozenset(manifest_tools)
-        self._manifest_hooks = frozenset(manifest_hooks)
+        if declarations is None:
+            self._manifest_tools = frozenset(_tool_key(*item) for item in tools)
+            self._manifest_hooks = frozenset(_hook_key(*item) for item in hooks)
+            self._manifest_services = frozenset(
+                _service_key(*item) for item in services
+            )
+        else:
+            self._manifest_tools = frozenset()
+            self._manifest_hooks = frozenset()
+            self._manifest_services = frozenset()
         normalized_capabilities = frozenset(capabilities)
         if any(
             not isinstance(capability, str) or not capability
@@ -616,10 +701,10 @@ class DeclarationRegistry:
         ):
             raise ManifestError("omp.toml", "capabilities", "capabilities must be non-empty strings")
         self._manifest_capabilities = normalized_capabilities
-        self._manifest_services = frozenset(_service_key(*item) for item in services)
         self._manifest_requires = frozenset(_service_key(*item) for item in requires)
         self._manifest_executables = executable_declarations
         self._uniform_manifest_configured = declarations is not None
+        self._trust_runtime_declarations = trust_runtime_declarations
         self._extension_id = extension
         self._configured = True
 
@@ -728,21 +813,65 @@ class DeclarationRegistry:
             source_module=source_module,
             kind="legacy",
             place="host",
+            effects=None,
+            constraint=None,
+            serial=False,
+            summary=description or None,
             legacy=True,
         )
         self.register_tool(name, family, rev, handler)
         self._legacy_worker_tools[key] = projected
         return projected
 
+    def _control_tool_key(self, key: _ToolKey) -> _ToolKey:
+        """Map decorator sugar to the exact authenticated manifest identity."""
+
+        if key in self._manifest_tools:
+            return key
+        name, family, rev = key
+        manifest_key = (name, "", rev)
+        definition = self._device_definitions.get(key)
+        body = None if definition is None else definition.body
+        kind = getattr(body, "__omp_tool_kind__", None)
+        uniform = (
+            self._manifest_executables.get(
+                (str(kind), _manifest_tool_static_key(manifest_key))
+            )
+            if kind in {"soft", "hard"}
+            else None
+        )
+        if (
+            family == (self._extension_id or "")
+            and body is not None
+            and kind in {"soft", "hard"}
+            and (
+                manifest_key in self._manifest_tools
+                or uniform is not None
+            )
+        ):
+            return manifest_key
+        return key
+
     def worker_tool_definitions(self) -> tuple[WorkerToolDefinition, ...]:
-        """Project every sealed tool identity to one runnable worker row."""
+        """Project every sealed tool identity to one runnable CONTROL row."""
 
         if not self._verified:
-            raise RuntimeError("worker tools are unavailable before FREEZE")
+            raise RuntimeError("CONTROL tools are unavailable before FREEZE")
         projected: list[WorkerToolDefinition] = []
         for key in sorted(self._tools):
+            control_key = self._control_tool_key(key)
             if key in self._legacy_worker_tools:
-                projected.append(self._legacy_worker_tools[key])
+                legacy = self._legacy_worker_tools[key]
+                static_key = _manifest_tool_static_key(control_key)
+                declared_kind = next(
+                    (
+                        kind
+                        for kind in ("soft", "hard")
+                        if (kind, static_key) in self._manifest_executables
+                    ),
+                    legacy.kind,
+                )
+                projected.append(replace(legacy, kind=declared_kind))
                 continue
             definition = self._device_definitions.get(key)
             if definition is None:
@@ -754,9 +883,9 @@ class DeclarationRegistry:
             kind = getattr(body, "__omp_tool_kind__", "soft")
             projected.append(
                 WorkerToolDefinition(
-                    name=definition.name,
-                    family=definition.family,
-                    rev=definition.rev,
+                    name=control_key[0],
+                    family=control_key[1],
+                    rev=control_key[2],
                     description=_worker_description(definition),
                     schema=_worker_schema(definition, kind),
                     strict=True if kind == "hard" else None,
@@ -765,6 +894,14 @@ class DeclarationRegistry:
                     source_module=source_module,
                     kind=kind,
                     place=str(definition.place),
+                    effects=definition.effects,
+                    constraint=definition.constraint,
+                    serial=definition.serial,
+                    precedence=definition.precedence,
+                    replaces=definition.replaces,
+                    summary=definition.summary,
+                    docs=definition.docs,
+                    examples=definition.examples,
                 )
             )
         return tuple(projected)
@@ -883,9 +1020,9 @@ class DeclarationRegistry:
         return tuple(self._exports[key] for key in sorted(self._exports))
 
     def register_hook(self, event: str, phase: object, handler: object) -> object:
-        """Records a hook decorator during sequential manifest import."""
+        """Records a named hook subscription during sequential manifest import."""
 
-        key = _hook_key(event, phase)
+        key = _hook_subscription_key(event, phase, getattr(handler, "name", None))
         trigger = (
             _ActivationTrigger.EAGER_PROMPT
             if str(getattr(handler, "on_failure", "")) == "fail-closed"
@@ -896,16 +1033,40 @@ class DeclarationRegistry:
             key[0], key[1], handler, trigger
         )
         return handler
-    def register_regime(self, regime_id: str, declaration: object) -> object:
-        """Record one regime decorator during sequential manifest import."""
+    def register_director(
+        self,
+        director_id: str,
+        callback: object,
+        claims: tuple[str, ...],
+        binds: Mapping[str, bool | int | float | str],
+    ) -> object:
+        """Record one Director callback during sequential manifest import."""
 
-        self._insert(self._regimes, regime_id, declaration, "regime")
-        return declaration
+        definition = DirectorDefinition(director_id, callback, claims, binds)
+        self._insert(self._directors, director_id, definition, "director")
+        return callback
 
-    def regime_definitions(self) -> tuple[object, ...]:
-        """Return regime declarations in stable identifier order."""
+    def director_definitions(self) -> tuple[DirectorDefinition, ...]:
+        """Return Director declarations in stable identifier order."""
 
-        return tuple(self._regimes[key] for key in sorted(self._regimes))
+        return tuple(self._directors[key] for key in sorted(self._directors))
+
+    def register_component(
+        self,
+        component_id: str,
+        callback: object,
+        interested: tuple[str, ...],
+    ) -> object:
+        """Record one journal-to-DOM Component callback."""
+
+        definition = ComponentDefinition(component_id, callback, interested)
+        self._insert(self._components, component_id, definition, "component")
+        return callback
+
+    def component_definitions(self) -> tuple[ComponentDefinition, ...]:
+        """Return Component declarations in stable identifier order."""
+
+        return tuple(self._components[key] for key in sorted(self._components))
 
     def register_approver(
         self,
@@ -969,34 +1130,6 @@ class DeclarationRegistry:
         self._insert(self._prompt_slots, key, definition, "prompt slot")
         return renderer
 
-    def register_entry_kind(
-        self,
-        name: str,
-        rev: str,
-        display: bool | None,
-        spill: bool,
-        implementation: type,
-    ) -> type:
-        """Records one typed journal entry declaration during import."""
-
-        key = _entry_kind_key(name, rev)
-        if not isinstance(implementation, type):
-            raise TypeError("@omp.entry_kind may decorate only a class")
-        if display is not None and not isinstance(display, bool):
-            raise TypeError("entry kind display must be bool or None")
-        if not isinstance(spill, bool):
-            raise TypeError("entry kind spill must be bool")
-        definition = EntryKindDefinition(
-            key[0], key[1], display, spill, implementation
-        )
-        self._insert(self._entry_kinds, key, definition, "entry kind")
-        return implementation
-
-
-    def entry_kind_definitions(self) -> tuple[EntryKindDefinition, ...]:
-        """Returns entry-kind rows in deterministic declaration-key order."""
-
-        return tuple(self._entry_kinds[key] for key in sorted(self._entry_kinds))
     def register_provider(
         self,
         provider_id: str,
@@ -1141,7 +1274,12 @@ class DeclarationRegistry:
         return tuple(self._commands[key] for key in sorted(self._commands))
 
     def register_ui(
-        self, kind: str, name: object, value: object
+        self,
+        kind: str,
+        name: object,
+        value: object,
+        *,
+        metadata: object | None = None,
     ) -> object:
         """Insert one completion or renderer through the shared declaration gate."""
 
@@ -1154,6 +1292,10 @@ class DeclarationRegistry:
                 self._message_renderers,
                 _ActivationTrigger.LAZY,
             ),
+            "markdown_transformer": (
+                self._markdown_transformers,
+                _ActivationTrigger.LAZY,
+            ),
             "verdict_renderer": (
                 self._verdict_renderers,
                 _ActivationTrigger.LAZY,
@@ -1164,13 +1306,13 @@ class DeclarationRegistry:
         except (KeyError, TypeError) as error:
             raise ValueError(
                 "UI declaration kind must be completion, message_renderer, "
-                "or verdict_renderer"
+                "markdown_transformer, or verdict_renderer"
             ) from error
         try:
             hash(name)
         except TypeError as error:
             raise TypeError("UI declaration name must be hashable") from error
-        definition = UIDefinition(kind, name, value, trigger)
+        definition = UIDefinition(kind, name, value, metadata, trigger)
         self._insert(declarations, name, definition, kind)
         return value
 
@@ -1236,6 +1378,19 @@ class DeclarationRegistry:
         self._insert(self._services, key, definition, "service")
         return implementation
 
+    def register_skill(self, declaration: SkillDecl) -> SkillDecl:
+        """Record one already-lowered generated skill before FREEZE."""
+
+        self._ensure_open(declaration.name)
+        self._check_declaration_limit()
+        self._insert(self._skills, declaration.name, declaration, "skill")
+        return declaration
+
+    def skill_declarations(self) -> tuple[SkillDecl, ...]:
+        """Return generated skill resources in deterministic name order."""
+
+        return tuple(self._skills[name] for name in sorted(self._skills))
+
     def freeze(self) -> DeclarationSnapshot:
         """Seals the Core-verified registry and returns its immutable sets."""
 
@@ -1248,17 +1403,22 @@ class DeclarationRegistry:
         undeclared_hooks: frozenset[_HookKey] = frozenset()
         missing_services: frozenset[_ServiceKey] = frozenset()
         undeclared_services: frozenset[_ServiceKey] = frozenset()
-        if self._configured:
-            actual_tools = frozenset(self._tools).union(
+        if (
+            self._configured
+            and not self._uniform_manifest_configured
+            and not self._trust_runtime_declarations
+        ):
+            actual_tools = frozenset(
+                self._control_tool_key(key) for key in self._tools
+            ).union(
                 (definition.name, "prelude", definition.rev)
                 for definition in self._preludes.values()
             )
             missing_tools = self._manifest_tools.difference(actual_tools)
             undeclared_tools = actual_tools.difference(self._manifest_tools)
-            missing_hooks = self._manifest_hooks.difference(self._hooks)
-            undeclared_hooks = frozenset(self._hooks).difference(
-                self._manifest_hooks
-            )
+            actual_hooks = frozenset(key[:2] for key in self._hooks)
+            missing_hooks = self._manifest_hooks.difference(actual_hooks)
+            undeclared_hooks = actual_hooks.difference(self._manifest_hooks)
             uniform_service_names = {
                 declaration.key
                 for declaration in self._manifest_executables.values()
@@ -1273,7 +1433,7 @@ class DeclarationRegistry:
             )
         missing_declarations: frozenset[tuple[str, str]] = frozenset()
         undeclared_declarations: frozenset[tuple[str, str]] = frozenset()
-        if self._uniform_manifest_configured:
+        if self._uniform_manifest_configured and not self._trust_runtime_declarations:
             manifest_declarations = frozenset(self._manifest_executables)
             decorated_declarations = self._decorated_executable_keys()
             missing_declarations = manifest_declarations.difference(
@@ -1282,6 +1442,27 @@ class DeclarationRegistry:
             undeclared_declarations = decorated_declarations.difference(
                 manifest_declarations
             )
+        if self._configured and not self._trust_runtime_declarations:
+            manifest_skills = tuple(
+                declaration
+                for declaration in self._manifest_content
+                if declaration.kind is _packages.ContentKind.SKILLS
+                and ".omp-generated/skills/" in declaration.path
+            )
+            decorated_skills = tuple(
+                declaration.declaration for declaration in self.skill_declarations()
+            )
+            if manifest_skills != decorated_skills:
+                missing_declarations = missing_declarations.union(
+                    ("skills", declaration.path)
+                    for declaration in manifest_skills
+                    if declaration not in decorated_skills
+                )
+                undeclared_declarations = undeclared_declarations.union(
+                    ("skills", declaration.path)
+                    for declaration in decorated_skills
+                    if declaration not in manifest_skills
+                )
         if (
             missing_tools
             or undeclared_tools
@@ -1339,12 +1520,16 @@ class DeclarationRegistry:
             if kind is None and body is not None:
                 kind = getattr(body.body, "__omp_tool_kind__", None)
             declarations.add(
-                (str(kind or "soft"), _manifest_tool_static_key(key))
+                (
+                    str(kind or "soft"),
+                    _manifest_tool_static_key(self._control_tool_key(key)),
+                )
             )
         declarations.update(
-            ("hook", _manifest_hook_static_key(key)) for key in self._hooks
+            ("hook", _manifest_hook_static_key(key[:2])) for key in self._hooks
         )
-        declarations.update(("regime", key) for key in self._regimes)
+        declarations.update(("director", key) for key in self._directors)
+        declarations.update(("component", key) for key in self._components)
         declarations.update(("service", key[0]) for key in self._services)
         declarations.update(("command", key) for key in self._commands)
         declarations.update(("shortcut", key) for key in self._shortcuts)
@@ -1359,6 +1544,7 @@ class DeclarationRegistry:
         for kind, values in (
             ("completion", self._completions),
             ("message_renderer", self._message_renderers),
+            ("message_renderer", self._markdown_transformers),
             ("verdict_renderer", self._verdict_renderers),
         ):
             declarations.update(
@@ -1370,10 +1556,10 @@ class DeclarationRegistry:
         """Returns the current declaration existence sets without mutation."""
 
         return DeclarationSnapshot(
-            entry_kinds=self.entry_kind_definitions(),
+            skills=self.skill_declarations(),
             tools=frozenset(self._tools),
             capabilities=self._manifest_capabilities,
-            hooks=frozenset(self._hooks),
+            hooks=frozenset(key[:2] for key in self._hooks),
             services=frozenset(self._services),
             preludes=self.prelude_definitions(),
             commands=self.command_definitions(),
@@ -1383,6 +1569,8 @@ class DeclarationRegistry:
                 self._prompt_slots[key] for key in sorted(self._prompt_slots)
             ),
             providers=self.provider_definitions(),
+            directors=self.director_definitions(),
+            components=self.component_definitions(),
             workers=self.worker_definitions(),
             device_definitions=self.device_definitions(),
             child_device_definitions=self.child_device_definitions(),
@@ -1409,11 +1597,14 @@ class DeclarationRegistry:
                 self._message_renderers[key]
                 for key in sorted(self._message_renderers, key=repr)
             ),
+            markdown_transformers=tuple(
+                self._markdown_transformers[key]
+                for key in sorted(self._markdown_transformers, key=repr)
+            ),
             verdict_renderers=tuple(
                 self._verdict_renderers[key]
                 for key in sorted(self._verdict_renderers, key=repr)
             ),
-            regimes=self.regime_definitions(),
         )
 
 
@@ -1454,16 +1645,17 @@ class DeclarationRegistry:
             + len(self._verdict_renderers)
             + len(self._shortcuts)
             + len(self._hooks)
-            + len(self._regimes)
+            + len(self._directors)
+            + len(self._components)
             + len(self._approvers)
             + len(self._services)
-            + len(self._entry_kinds)
             + len(self._telemetry)
             + len(self._prompt_slots)
             + sum(len(candidates) for candidates in self._provider_candidates.values())
             + len(self._workers)
             + len(self._exports)
             + len(self._preludes)
+            + len(self._skills)
         )
         if count >= MAX_DECLARATIONS:
             raise DeclarationLimit(count + 1, MAX_DECLARATIONS)
@@ -1608,6 +1800,7 @@ def configure_manifest(
         _packages.ContentDeclaration | Mapping[str, object]
     ] | None = None,
     extension: str | None = None,
+    trust_runtime_declarations: bool = False,
 ) -> None:
     """Install authoritative existence and content sets before sequential import."""
 
@@ -1619,6 +1812,7 @@ def configure_manifest(
         requires=requires,
         declarations=declarations,
         extension=extension,
+        trust_runtime_declarations=trust_runtime_declarations,
     )
 
 
@@ -1632,15 +1826,16 @@ def prelude_definitions() -> tuple[PreludeDefinition, ...]:
 
     return registry.prelude_definitions()
 
-def bootstrap_worker_registry(
+def bootstrap_extension_registry(
     manifest_json: str,
     modules: Iterable[str],
-) -> tuple[tuple[WorkerToolDefinition, ...], str]:
-    """Configure, sequentially import, seal, and project one admitted worker."""
+    entry_path: str | None = None,
+) -> DeclarationSnapshot:
+    """Configure, exactly load the entry, import declarations, and seal."""
 
     manifest = json.loads(manifest_json)
     if not isinstance(manifest, Mapping):
-        raise TypeError("worker manifest snapshot must encode an object")
+        raise TypeError("extension manifest snapshot must encode an object")
     configure_manifest(
         tools=manifest.get("tools", ()),
         hooks=manifest.get("hooks", ()),
@@ -1649,20 +1844,57 @@ def bootstrap_worker_registry(
         requires=manifest.get("requires", ()),
         declarations=manifest.get("declarations"),
         extension=manifest.get("extension"),
+        trust_runtime_declarations=manifest.get(
+            "trust_runtime_declarations", False
+        ),
     )
+    if entry_path is not None and (
+        not isinstance(entry_path, str) or not entry_path
+    ):
+        raise TypeError("extension entry path must be a non-empty string or None")
     seen: set[str] = set()
-    for module_name in modules:
+    for index, module_name in enumerate(modules):
         if not isinstance(module_name, str) or not module_name:
             raise TypeError("worker import modules must be non-empty strings")
         if module_name in seen:
             continue
         seen.add(module_name)
-        module = importlib.import_module(module_name)
+        if index == 0 and entry_path is not None:
+            module = _load_entry_module(module_name, entry_path)
+        else:
+            module = importlib.import_module(module_name)
         legacy = getattr(module, "OMP_TOOLS", ())
         for declaration in legacy:
             register_legacy_worker_tool(declaration)
     freeze_declarations()
-    return project_worker_registry()
+    return registry.snapshot()
+
+
+def _load_entry_module(module_name: str, entry_path: str) -> object:
+    """Execute the operator-admitted entry file under its exact module name."""
+
+    path = Path(entry_path)
+    package_paths = [str(path.parent)] if path.name == "__init__.py" else None
+    spec = importlib.util.spec_from_file_location(
+        module_name,
+        path,
+        submodule_search_locations=package_paths,
+    )
+    if spec is None or spec.loader is None:
+        raise ImportError(f"cannot load extension entry {module_name!r} from {entry_path!r}")
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.modules.get(module_name)
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        if previous is None:
+            sys.modules.pop(module_name, None)
+        else:
+            sys.modules[module_name] = previous
+        raise
+    return module
+
 
 def register_legacy_worker_tool(
     declaration: Mapping[str, object],
@@ -1672,24 +1904,82 @@ def register_legacy_worker_tool(
     return registry.register_legacy_worker_tool(declaration)
 
 
-def project_worker_registry() -> tuple[tuple[WorkerToolDefinition, ...], str]:
-    """Project the complete sealed registry for the production stdio worker."""
+def project_control_registry() -> dict[str, object]:
+    """Project every frozen declaration needed by the Rust CONTROL supervisor."""
 
     if not registry.sealed:
-        raise RuntimeError("worker registry projection requires FREEZE")
+        raise RuntimeError("CONTROL registry projection requires FREEZE")
     snapshot = registry.snapshot()
     tools = registry.worker_tool_definitions()
-    metadata = {
+    return {
+        "declaration_keys": [
+            {"kind": kind, "key": key}
+            for kind, key in sorted(registry._decorated_executable_keys())
+        ],
         "tools": [
             {
                 "name": tool.name,
                 "family": tool.family,
                 "rev": tool.rev,
+                "description": tool.description,
+                "schema": _control_wire_value(tool.schema),
+                "strict": tool.strict,
+                "streams_args": tool.streams_args,
+                "source_module": tool.source_module,
                 "kind": tool.kind,
                 "place": str(tool.place),
-                "source_module": tool.source_module,
+                "effects": _control_wire_value(tool.effects),
+                "constraint": _control_wire_value(tool.constraint),
+                "serial": tool.serial,
+                "precedence": max(0, tool.precedence),
+                "replaces": tool.replaces,
+                "summary": tool.summary,
+                "docs": _control_wire_value(tool.docs),
+                "examples": _control_wire_value(tool.examples),
+                "callback": {
+                    "operation": "omp.devices.call",
+                    "path": tool.name,
+                    "family": tool.family,
+                    "rev": tool.rev,
+                },
             }
             for tool in tools
+        ],
+        "preludes": [
+            {
+                "name": definition.name,
+                "rev": definition.rev,
+                "doc": definition.doc,
+                "summary": definition.summary,
+                "source_module": getattr(definition.body, "__module__", ""),
+                "params": [
+                    {
+                        "name": parameter.name,
+                        "kind": parameter.kind,
+                        "default_json": parameter.default_json,
+                        "annotation": parameter.annotation,
+                    }
+                    for parameter in definition.params
+                ],
+                "callback": {
+                    "operation": "omp.devices.call",
+                    "path": definition.name,
+                    "family": "prelude",
+                    "rev": definition.rev,
+                },
+            }
+            for definition in snapshot.preludes
+        ],
+        "availability": [
+            {
+                "name": name,
+                "family": family,
+                "rev": rev,
+                "mounted": mounted,
+                "reason": reason,
+            }
+            for key, mounted, reason in snapshot.device_states
+            for name, family, rev in (registry._control_tool_key(key),)
         ],
         "hooks": [
             {
@@ -1702,16 +1992,17 @@ def project_worker_registry() -> tuple[tuple[WorkerToolDefinition, ...], str]:
                     if declaration.on_failure is None
                     else declaration.on_failure.value
                 ),
-                "timeout": _worker_wire_value(declaration.timeout),
+                "timeout": _control_wire_value(declaration.timeout),
                 "concurrency": declaration.concurrency,
                 "threadsafe": declaration.threadsafe,
-                "when": _worker_wire_value(declaration.when),
+                "callback": _control_wire_value(declaration.handler.handler),
+                "when": _control_wire_value(declaration.when),
                 "event_rev": _hook_catalog(declaration.event).rev,
                 "event_on_failure": _hook_catalog(declaration.event).on_failure.value,
                 "event_default": (
                     "allow" if _hook_catalog(declaration.event).gateable else None
                 ),
-                "event_timeout": _worker_wire_value(
+                "event_timeout": _control_wire_value(
                     _hook_catalog(declaration.event).default_timeout
                 ),
                 "composition": {
@@ -1721,37 +2012,56 @@ def project_worker_registry() -> tuple[tuple[WorkerToolDefinition, ...], str]:
             }
             for declaration in snapshot.hook_definitions
         ],
+        "skills": [
+            {
+                "path": declaration.path,
+                "metadata": dict(declaration.metadata),
+            }
+            for declaration in snapshot.skills
+        ],
         "services": [
             {
                 "name": definition.name,
                 "rev": definition.rev,
                 "source_module": definition.implementation.__module__,
                 "methods": [
-                    _worker_wire_value(method)
+                    _control_wire_value(method)
                     for method in definition.method_schemas
                 ],
+                "callback": {"operation": "omp.services.dispatch"},
             }
             for definition in snapshot.service_definitions
         ],
-        "entry_kinds": [_worker_wire_value(value) for value in snapshot.entry_kinds],
-        "providers": [_worker_wire_value(value) for value in snapshot.providers],
-        "regimes": [_worker_wire_value(value) for value in snapshot.regimes],
-        "commands": [_worker_wire_value(value) for value in snapshot.commands],
-        "shortcuts": [_worker_wire_value(value) for value in snapshot.shortcuts],
-        "telemetry": [_worker_wire_value(value) for value in snapshot.telemetry],
-        "prompt_slots": [_worker_wire_value(value) for value in snapshot.prompt_slots],
-        "workers": [_worker_wire_value(value) for value in snapshot.workers],
-        "exports": [_worker_wire_value(value) for value in snapshot.exports],
-        "approvers": [_worker_wire_value(value) for value in snapshot.approvers],
-        "completions": [_worker_wire_value(value) for value in snapshot.completions],
+        "prompt_slots": [
+            {
+                "slot": definition.slot,
+                "priority": definition.priority,
+                "class": definition.cls,
+                "callback": _control_wire_value(definition.renderer),
+                "trigger": definition.trigger.value,
+            }
+            for definition in snapshot.prompt_slots
+        ],
+        "providers": [_control_wire_value(value) for value in snapshot.providers],
+        "directors": [_control_wire_value(value) for value in snapshot.directors],
+        "components": [_control_wire_value(value) for value in snapshot.components],
+        "commands": [_control_wire_value(value) for value in snapshot.commands],
+        "shortcuts": [_control_wire_value(value) for value in snapshot.shortcuts],
+        "telemetry": [_control_wire_value(value) for value in snapshot.telemetry],
+        "workers": [_control_wire_value(value) for value in snapshot.workers],
+        "exports": [_control_wire_value(value) for value in snapshot.exports],
+        "approvers": [_control_wire_value(value) for value in snapshot.approvers],
+        "completions": [_control_wire_value(value) for value in snapshot.completions],
         "message_renderers": [
-            _worker_wire_value(value) for value in snapshot.message_renderers
+            _control_wire_value(value) for value in snapshot.message_renderers
+        ],
+        "markdown_transformers": [
+            _control_wire_value(value) for value in snapshot.markdown_transformers
         ],
         "verdict_renderers": [
-            _worker_wire_value(value) for value in snapshot.verdict_renderers
+            _control_wire_value(value) for value in snapshot.verdict_renderers
         ],
     }
-    return tools, json.dumps(metadata, sort_keys=True, separators=(",", ":"))
 
 
 def _hook_catalog(event: str) -> object:
@@ -1762,7 +2072,7 @@ def _hook_catalog(event: str) -> object:
     return spec(event)
 
 
-def _worker_wire_value(value: object) -> object:
+def _control_wire_value(value: object) -> object:
     """Lower declaration metadata without serializing executable Python objects."""
 
     if callable(value):
@@ -1774,29 +2084,148 @@ def _worker_wire_value(value: object) -> object:
     if value is None or isinstance(value, (bool, int, float, str)):
         return value
     if isinstance(value, Enum):
-        return _worker_wire_value(value.value)
+        return _control_wire_value(value.value)
     if isinstance(value, bytes):
         return value.hex()
     if isinstance(value, Mapping):
         return {
-            str(key): _worker_wire_value(item)
+            str(key): _control_wire_value(item)
             for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))
         }
     if isinstance(value, (tuple, list)):
-        return [_worker_wire_value(item) for item in value]
+        return [_control_wire_value(item) for item in value]
     if isinstance(value, (set, frozenset)):
         return [
-            _worker_wire_value(item)
+            _control_wire_value(item)
             for item in sorted(value, key=lambda item: repr(item))
         ]
     if is_dataclass(value) and not isinstance(value, type):
         return {
-            field.name: _worker_wire_value(getattr(value, field.name))
+            field.name: _control_wire_value(getattr(value, field.name))
             for field in fields(value)
         }
     return str(value)
 
 
+
+
+def skill(
+    name: str,
+    *,
+    description: str,
+    hidden: bool = False,
+    disable_model_invocation: bool = False,
+    autoload: bool = False,
+    contain_root: str | None = None,
+) -> Callable[[Callable[[], str]], Callable[[], str]]:
+    """Declare and deterministically lower one generated ``SKILL.md`` resource."""
+
+    if (
+        not isinstance(name, str)
+        or not 1 <= len(name) <= 64
+        or not name[0].isalnum()
+        or name != name.lower()
+        or any(
+            not character.isascii()
+            or not (character.isalnum() or character == "-")
+            for character in name
+        )
+    ):
+        raise ValueError(
+            "skill name must be 1-64 lowercase ASCII letters, digits, or hyphens "
+            "and start with a letter or digit"
+        )
+    if not isinstance(description, str):
+        raise TypeError("skill description must be str")
+    description = " ".join(description.split())
+    if not description:
+        raise ValueError("skill description must not be empty")
+    for field_name, value in (
+        ("hidden", hidden),
+        ("disable_model_invocation", disable_model_invocation),
+        ("autoload", autoload),
+    ):
+        if not isinstance(value, bool):
+            raise TypeError(f"skill {field_name} must be bool")
+    if contain_root is not None:
+        if not isinstance(contain_root, str):
+            raise TypeError("skill contain_root must be str or None")
+        parts = contain_root.replace("\\", "/").split("/")
+        if (
+            not contain_root
+            or contain_root.startswith("/")
+            or any(part in {"", ".", ".."} for part in parts)
+        ):
+            raise ValueError("skill contain_root must be a contained relative POSIX path")
+        contain_root = "/".join(parts)
+
+    def decorate(function: Callable[[], str]) -> Callable[[], str]:
+        registry._ensure_open(name)
+        declaration = _lower_skill_declaration(
+            function,
+            name=name,
+            description=description,
+            hidden=hidden,
+            disable_model_invocation=disable_model_invocation,
+            autoload=autoload,
+            contain_root=contain_root,
+        )
+        registry.register_skill(declaration)
+        return function
+
+    return decorate
+
+
+def _lower_skill_declaration(
+    function: Callable[[], str],
+    *,
+    name: str,
+    description: str,
+    hidden: bool,
+    disable_model_invocation: bool,
+    autoload: bool,
+    contain_root: str | None,
+) -> SkillDecl:
+    """Evaluate one skill body exactly once and produce deterministic bytes."""
+
+    if not callable(function):
+        raise TypeError("@omp.skill may decorate only a callable")
+    signature = inspect.signature(function)
+    if signature.parameters:
+        raise TypeError("@omp.skill callable must take no arguments")
+    module_root = function.__module__.split(".", 1)[0]
+    if not module_root or module_root == "__main__":
+        module_root = "extension"
+    body = function()
+    if not isinstance(body, str):
+        raise TypeError("@omp.skill callable must return str")
+    body = body.strip()
+    escaped_description = description.replace("'", "''")
+    lines = [
+        "---",
+        f"name: {name}",
+        f"description: '{escaped_description}'",
+    ]
+    if hidden:
+        lines.append("hidden: true")
+    if disable_model_invocation:
+        lines.append("disableModelInvocation: true")
+    if autoload:
+        lines.append("alwaysApply: true")
+    lines.extend(("---", "", body, ""))
+    content = "\n".join(lines).encode()
+    if len(content) > 64_000:
+        raise ValueError("generated skill exceeds the 64,000-byte UTF-8 limit")
+    return SkillDecl(
+        name=name,
+        description=description,
+        hidden=hidden,
+        disable_model_invocation=disable_model_invocation,
+        autoload=autoload,
+        contain_root=contain_root,
+        path=f"{module_root}/.omp-generated/skills/{name}/SKILL.md",
+        content=content,
+    )
 
 
 def service(name: str, *, rev: int) -> Callable[[_T], _T]:
@@ -1810,25 +2239,6 @@ def service(name: str, *, rev: int) -> Callable[[_T], _T]:
 
     return decorate
 
-
-def entry_kind(
-    name: str,
-    *,
-    rev: str,
-    display: bool | None = None,
-    spill: bool = True,
-) -> Callable[[_T], _T]:
-    """Declare a typed, versioned session-journal entry kind."""
-
-    key = _entry_kind_key(name, rev)
-
-    def decorate(implementation: _T) -> _T:
-        registry.register_entry_kind(
-            key[0], key[1], display, spill, implementation
-        )
-        return implementation
-
-    return decorate
 
 
 async def dispatch_service(
@@ -1851,6 +2261,106 @@ async def dispatch_service(
     return request_id, result
 
 
+async def dispatch_device_control(
+    path: str,
+    args: Mapping[str, object],
+    *,
+    family: str | None = None,
+    rev: int | None = None,
+) -> object:
+    """Dispatch one exact frozen tool or prelude through its live update sink."""
+
+    if family == "prelude":
+        result = dispatch_prelude(path, args, family=family, rev=rev)
+        if inspect.isawaitable(result):
+            result = await result
+        return _lower_worker_result(result)
+    matches = tuple(
+        definition
+        for definition in registry.worker_tool_definitions()
+        if definition.name == path
+        and (family is None or definition.family == family)
+        and (rev is None or definition.rev == rev)
+    )
+    if len(matches) == 1:
+        if matches[0].legacy:
+            return await _consume_worker_result(matches[0].handler(dict(args)))
+        from . import Context
+
+        try:
+            context = Context.current()
+        except LookupError:
+            context = None
+        return await matches[0].handler(args, context)
+    from .devices import _dispatch_device
+
+    return await _dispatch_device(path, args, family=family, rev=rev)
+
+
+def dispatch_prelude(
+    path: str,
+    args: Mapping[str, object],
+    *,
+    family: str | None = None,
+    rev: int | None = None,
+) -> object:
+    """Invoke one exact frozen eval-prelude helper over CONTROL."""
+
+    if not isinstance(path, str) or not path:
+        raise LookupError("prelude dispatch omitted its helper name")
+    if family != "prelude" or isinstance(rev, bool) or not isinstance(rev, int):
+        raise LookupError("prelude dispatch omitted its exact revision")
+    if not isinstance(args, Mapping):
+        raise TypeError("prelude dispatch arguments must be a mapping")
+    matches = tuple(
+        definition
+        for definition in registry.prelude_definitions()
+        if definition.name == path and definition.rev == rev
+    )
+    if len(matches) != 1:
+        raise LookupError(
+            f"prelude helper {path!r} rev {rev} does not match one frozen declaration"
+        )
+    return matches[0].handler(dict(args))
+
+
+def dispatch_prompt_slot(
+    slot: str,
+    callback: str,
+    context: Mapping[str, object],
+) -> dict[str, object]:
+    """Render one exact frozen prompt contribution received over CONTROL."""
+
+    if not isinstance(slot, str) or not slot:
+        raise ValueError("prompt dispatch slot must be a non-empty string")
+    if not isinstance(callback, str) or not callback:
+        raise ValueError("prompt dispatch callback must be a non-empty string")
+    if not isinstance(context, Mapping):
+        raise TypeError("prompt dispatch context must be a mapping")
+    matches = tuple(
+        definition
+        for definition in registry.snapshot().prompt_slots
+        if definition.slot == slot
+        and _control_wire_value(definition.renderer).get("$omp.callable") == callback
+    )
+    if len(matches) != 1:
+        raise LookupError("prompt dispatch does not match one frozen declaration")
+    from .prompts import PromptContext, SlotClass, VolatilePrompt
+
+    values = dict(context)
+    values["slot"] = slot
+    values["cls"] = SlotClass(str(values.get("cls", matches[0].cls)))
+    values["roots"] = tuple(map(str, values.get("roots", ())))
+    prompt_context = PromptContext(**values)
+    first = matches[0].renderer(prompt_context)
+    second = matches[0].renderer(prompt_context)
+    if not isinstance(first, str) or not isinstance(second, str):
+        raise TypeError("prompt-slot renderers must return str")
+    if first != second:
+        raise VolatilePrompt(f"prompt-slot renderer {callback!r} returned unstable bytes")
+    return {"slot": slot, "callback": callback, "content": first}
+
+
 
 
 def _executable_declaration(
@@ -1870,7 +2380,26 @@ def _executable_declaration(
             f"declarations[{index}].{field}",
             "required executable declaration field is missing",
         )
-    unknown = fields.difference(required)
+    optional = {
+        "command": frozenset(
+            {"aliases", "description", "args", "hint", "callback", "arg_completions"}
+        ),
+        "shortcut": frozenset(
+            {"action_id", "action", "description", "when", "callback"}
+        ),
+        "completion": frozenset(
+            {
+                "callback",
+                "at_line_start",
+                "min_chars",
+                "debounce",
+                "max_results",
+                "cache",
+                "refine_locally",
+            }
+        ),
+    }.get(value.get("kind"), frozenset())
+    unknown = fields.difference(required | optional | {"grants"})
     if unknown:
         field = sorted(str(item) for item in unknown)[0]
         raise ManifestError(
@@ -2301,6 +2830,78 @@ def _schema_for_annotation(annotation: object) -> dict[str, object]:
 
 
 
+def _bind_tool_arguments(
+    body: object, params: Mapping[str, object], context: object
+) -> tuple[list[object], dict[str, object]]:
+    """Ergonomic parameter binding shared by decorated and legacy CONTROL tools.
+
+    ``ctx`` parameters receive ``context``; every other parameter binds from
+    ``params`` with defaults honored, unknown arguments rejected unless the
+    body declares ``**kwargs``.
+    """
+    if context is not None:
+        from ._host import dispatch_update_sink
+
+        context = replace(context, _update_sink=dispatch_update_sink())
+    signature = inspect.signature(body)
+    positional: list[object] = []
+    keywords: dict[str, object] = {}
+    consumed: set[str] = set()
+    has_var_kwargs = False
+    for parameter in signature.parameters.values():
+        if parameter.name == "ctx":
+            value = context
+        elif parameter.kind is inspect.Parameter.VAR_KEYWORD:
+            has_var_kwargs = True
+            continue
+        elif parameter.kind is inspect.Parameter.VAR_POSITIONAL:
+            continue
+        elif parameter.name in params:
+            value = params[parameter.name]
+            consumed.add(parameter.name)
+        elif parameter.default is not inspect.Parameter.empty:
+            continue
+        else:
+            raise TypeError(f"missing required tool argument {parameter.name!r}")
+        if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
+            positional.append(value)
+        else:
+            keywords[parameter.name] = value
+    unexpected = set(params).difference(consumed)
+    if unexpected and not has_var_kwargs:
+        raise TypeError(f"unexpected tool argument {sorted(unexpected)[0]!r}")
+    if has_var_kwargs:
+        keywords.update((name, params[name]) for name in unexpected)
+    return positional, keywords
+
+
+async def _consume_worker_result(result: object) -> object:
+    """Emit every yielded update before lowering one terminal device result."""
+
+    from ._host import emit_dispatch_update
+    from ._verdicts import Done, Update
+
+    if inspect.isawaitable(result):
+        result = await result
+    if inspect.isasyncgen(result):
+        terminal: object = None
+        async for item in result:
+            if isinstance(item, Done):
+                terminal = item.result
+                break
+            emit_dispatch_update(item.payload if isinstance(item, Update) else item)
+        result = terminal
+    elif inspect.isgenerator(result):
+        terminal = None
+        for item in result:
+            if isinstance(item, Done):
+                terminal = item.result
+                break
+            emit_dispatch_update(item.payload if isinstance(item, Update) else item)
+        result = terminal
+    return _lower_worker_result(result)
+
+
 def _worker_handler(
     definition: DeviceDefinition, kind: object
 ) -> Callable[[Mapping[str, object], object], Awaitable[object]]:
@@ -2310,45 +2911,42 @@ def _worker_handler(
     async def invoke(params: Mapping[str, object], context: object) -> object:
         if not isinstance(params, Mapping):
             raise TypeError("worker tool arguments must decode to an object")
+        if context is not None and not ergonomic:
+            from ._host import dispatch_update_sink
+
+            context = replace(context, _update_sink=dispatch_update_sink())
         if ergonomic:
-            signature = inspect.signature(body)
-            positional: list[object] = []
-            keywords: dict[str, object] = {}
-            consumed: set[str] = set()
-            has_var_kwargs = False
-            for parameter in signature.parameters.values():
-                if parameter.name == "ctx":
-                    value = context
-                elif parameter.kind is inspect.Parameter.VAR_KEYWORD:
-                    has_var_kwargs = True
-                    continue
-                elif parameter.kind is inspect.Parameter.VAR_POSITIONAL:
-                    continue
-                elif parameter.name in params:
-                    value = params[parameter.name]
-                    consumed.add(parameter.name)
-                elif parameter.default is not inspect.Parameter.empty:
-                    continue
-                else:
-                    raise TypeError(f"missing required tool argument {parameter.name!r}")
-                if parameter.kind is inspect.Parameter.POSITIONAL_ONLY:
-                    positional.append(value)
-                else:
-                    keywords[parameter.name] = value
-            unexpected = set(params).difference(consumed)
-            if unexpected and not has_var_kwargs:
-                raise TypeError(f"unexpected tool argument {sorted(unexpected)[0]!r}")
-            if has_var_kwargs:
-                keywords.update((name, params[name]) for name in unexpected)
+            positional, keywords = _bind_tool_arguments(body, params, context)
             result = body(*positional, **keywords)
         else:
             parameters = tuple(inspect.signature(body).parameters.values())
             result = body(params, context) if len(parameters) > 1 else body(params)
-        if inspect.isawaitable(result):
-            return await result
-        return result
+        return await _consume_worker_result(result)
 
     return invoke
+
+
+def _lower_worker_result(
+    result: object, streamed_updates: list[object] | None = None
+) -> object:
+    """Lower one Python result to the CONTROL completion shape."""
+
+    from . import Fault
+    from ._verdicts import Faulted, Ok, Payload, _canonical_json
+
+    if isinstance(result, (Payload, Fault)):
+        outcome = Ok(result) if isinstance(result, Payload) else Faulted(result)
+        return {
+            "updates": streamed_updates or [],
+            "details": json.loads(_canonical_json(outcome)),
+            "is_error": isinstance(result, Fault),
+            "terminate": result.terminate,
+        }
+    if streamed_updates is not None:
+        if isinstance(result, Mapping):
+            return {"updates": streamed_updates, **result}
+        return {"updates": streamed_updates, "details": result}
+    return result
 
 
 def _extract_arg_specs(body: object, schema: object | None) -> tuple[ArgSpec, ...]:
@@ -2429,15 +3027,14 @@ def _hook_key(event: str, phase: object) -> _HookKey:
     return event, value.lower()
 
 
-def _entry_kind_key(name: str, rev: str) -> _EntryKindKey:
-    if not isinstance(name, str) or "." not in name or name.startswith("omp."):
-        raise ValueError("entry kind name must be a non-core globally qualified name")
-    if not isinstance(rev, str):
-        raise TypeError("entry kind rev must be a string")
-    family, separator, number = rev.rpartition(".")
-    if not separator or not family or not number.isascii() or not number.isdigit():
-        raise ValueError("entry kind rev must have the form '<family>.<n>'")
-    return name, rev
+def _hook_subscription_key(
+    event: str, phase: object, name: object
+) -> _HookSubscriptionKey:
+    event_name, phase_name = _hook_key(event, phase)
+    if not isinstance(name, str) or not name:
+        raise ValueError("hook subscription name must be a non-empty string")
+    return event_name, phase_name, name
+
 
 
 def _service_key(name: str, rev: int) -> _ServiceKey:
@@ -2459,15 +3056,17 @@ __all__ = (
     "DeclarationDrift",
     "CommandDefinition",
     "ShortcutDefinition",
+    "ComponentDefinition",
     "DeclarationRegistry",
+    "DirectorDefinition",
     "ChildDeviceDefinition",
     "DeviceDefinition",
     "DeclarationSnapshot",
+    "SkillDecl",
     "PreludeDefinition",
     "PreludeParamSpec",
     "MAX_DECLARATIONS",
     "QuotaExceeded",
-    "EntryKindDefinition",
     "ExportDefinition",
     "QuotaStatus",
     "ResourceReceipt",
@@ -2476,13 +3075,16 @@ __all__ = (
     "ServiceMethodDefinition",
     "Services",
     "WorkerToolDefinition",
-    "entry_kind",
+    "bootstrap_extension_registry",
     "configure_manifest",
+    "dispatch_prompt_slot",
     "dispatch_service",
     "freeze_declarations",
     "prelude_definitions",
+    "project_control_registry",
     "registry",
     "resources",
     "service",
     "services",
+    "skill",
 )
