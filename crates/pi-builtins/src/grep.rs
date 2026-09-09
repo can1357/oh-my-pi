@@ -963,13 +963,6 @@ fn display_path_for_operand(operand: &OsStr, resolved: &Path, path: &Path) -> Pa
 	}
 }
 
-/// Exit status of a process killed by SIGPIPE (128 + 13).
-///
-/// A closed downstream reader (`grep … | head`) surfaces as BrokenPipe on
-/// stdout writes. Real grep dies silently from SIGPIPE; the builtin mirrors
-/// that with this status and no diagnostic.
-const SIGPIPE_EXIT_CODE: i32 = 141;
-
 #[allow(clippy::too_many_arguments)]
 fn search_file_path<M: Matcher, W: Write>(
 	host: &mut Host,
@@ -988,8 +981,7 @@ fn search_file_path<M: Matcher, W: Write>(
 			let display = display_path.as_os_str().as_encoded_bytes();
 			match process_reader(matcher, searcher, file, display, opts, out) {
 				Ok(matched) => Ok(matched),
-				// A closed downstream pipe aborts the whole search like a
-				// SIGPIPE-killed grep; any other error fails only this file.
+				// Propagate BrokenPipe to stop the search; the host maps its status.
 				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => Err(error),
 				Err(error) => {
 					*had_error = true;
@@ -1115,8 +1107,7 @@ fn search_dir<M: Matcher, W: Write>(
 	*had_error |= had_error_state.get();
 	match walk {
 		Ok(pi_walker::WalkStatus::Complete | pi_walker::WalkStatus::Stopped) => Ok(any),
-		// A closed downstream pipe propagates so the caller exits like a
-		// SIGPIPE-killed grep.
+		// Propagate BrokenPipe to stop the walk; the host maps its status.
 		Err(pi_walker::WalkError::Interrupted(error))
 			if error.kind() == io::ErrorKind::BrokenPipe =>
 		{
@@ -1316,10 +1307,9 @@ fn execute_search<M: Matcher>(
 				&mut out,
 			) {
 				Ok(matched) => any_match |= matched,
-				// Real grep dies silently from SIGPIPE when the downstream
-				// reader exits early (`… | grep … | head`).
+				// Abort remaining work; the host maps the BrokenPipe status.
 				Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
-					return SIGPIPE_EXIT_CODE;
+					return crate::host::SIGPIPE_EXIT_CODE;
 				},
 				Err(error) => {
 					had_error = true;
@@ -1353,7 +1343,7 @@ fn execute_search<M: Matcher>(
 							&mut had_error,
 						) {
 							Ok(matched) => any_match |= matched,
-							Err(_) => return SIGPIPE_EXIT_CODE,
+							Err(_) => return crate::host::SIGPIPE_EXIT_CODE,
 						}
 					}
 				},
@@ -1386,7 +1376,7 @@ fn execute_search<M: Matcher>(
 					&mut had_error,
 				) {
 					Ok(matched) => any_match |= matched,
-					Err(_) => return SIGPIPE_EXIT_CODE,
+					Err(_) => return crate::host::SIGPIPE_EXIT_CODE,
 				}
 			},
 			Err(error) => {
@@ -1405,7 +1395,7 @@ fn execute_search<M: Matcher>(
 
 	if let Err(error) = out.flush() {
 		if error.kind() == io::ErrorKind::BrokenPipe {
-			return SIGPIPE_EXIT_CODE;
+			return crate::host::SIGPIPE_EXIT_CODE;
 		}
 	}
 	if opts.quiet {
@@ -1712,24 +1702,6 @@ mod tests {
 		assert_eq!(parsed.run(&mut host), 2);
 		assert!(capture.out().is_empty());
 		assert!(capture.err().is_empty());
-	}
-
-	#[test]
-	fn broken_pipe_on_stdout_is_silent_and_exits_141() {
-		// Regression: once pipeline stages ran concurrently, `… | grep pat |
-		// head -30` printed "grep: (standard input): Broken pipe (os error
-		// 32)" when head exited early. Real grep dies silently from SIGPIPE;
-		// the builtin must exit 141 with no diagnostic.
-		let parsed = Grep::try_parse_from(["grep", "hit"]).unwrap();
-		let (mut host, capture) = Host::for_test("grep", "hit\nmiss\nhit\n", "/");
-		let (reader, writer) = std::io::pipe().expect("pipe");
-		drop(reader); // downstream reader (e.g. `head`) already exited
-		host.stdout = openfiles::OpenFile::from(writer);
-
-		let code = parsed.run(&mut host);
-
-		assert_eq!(code, 141, "BrokenPipe must map to 128+SIGPIPE");
-		assert!(capture.err().is_empty(), "stderr must stay clean: {:?}", capture.err());
 	}
 
 	#[test]

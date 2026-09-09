@@ -27,7 +27,6 @@
 		"test": "bun test"
 	},
 	"dependencies": {
-		"@oh-my-pi/hashline": "catalog:",
 		"@oh-my-pi/pi-agent-core": "catalog:",
 		"@oh-my-pi/pi-ai": "catalog:",
 		"@oh-my-pi/pi-catalog": "catalog:",

@@ -375,9 +375,27 @@ export type StdinBufferOptions = {
 	pasteByteLimit?: number;
 };
 
+const KITTY_ENTER = /^\x1b\[13(?:;1)?u/u;
+
+/**
+ * The Enter keypress that immediately follows a bracketed-paste end marker in
+ * the same stdin read: legacy CR/LF, or the kitty CSI-u encoding with no
+ * modifier. Nothing else qualifies — any other trailing byte takes the normal
+ * data route.
+ */
+function leadingEnter(input: string): string | undefined {
+	if (input.startsWith("\r") || input.startsWith("\n")) return input[0];
+	return KITTY_ENTER.exec(input)?.[0];
+}
+
 export type StdinBufferEventMap = {
 	data: [string];
-	paste: [string];
+	/**
+	 * A completed bracketed paste. `enter` carries an Enter keypress that shared
+	 * the paste's stdin read, so the terminal can dispatch paste and submit to
+	 * the same focused component before a paste-triggered overlay can take focus.
+	 */
+	paste: [content: string, enter?: string];
 };
 
 /**
@@ -577,10 +595,15 @@ export class StdinBuffer extends EventEmitter<StdinBufferEventMap> {
 		this.#pasteBytes = 0;
 		this.#pendingKittyPrintableCodepoint = undefined;
 
-		this.emit("paste", pastedContent);
+		// A paste-and-Enter burst (automation, terminals that batch reads) must
+		// not split into two dispatches: the paste may open an overlay that
+		// would then swallow the Enter meant to submit it.
+		const enter = leadingEnter(remaining);
+		this.emit("paste", pastedContent, enter);
 
-		if (remaining.length > 0) {
-			this.process(remaining);
+		const rest = enter === undefined ? remaining : remaining.slice(enter.length);
+		if (rest.length > 0) {
+			this.process(rest);
 		}
 	}
 

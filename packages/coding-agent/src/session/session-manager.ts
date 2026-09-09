@@ -561,7 +561,7 @@ export class SessionManager {
 
 	#suppressBreadcrumb = false;
 	/**
-	 * The last breadcrumb this manager wrote marked a lazy `/new` boundary whose
+	 * The last breadcrumb this manager wrote marked a lazy fresh session whose
 	 * JSONL is not yet on disk. Cleared (and the crumb re-stamped non-fresh) once
 	 * the session materializes, so a materialized-then-deleted session still falls
 	 * back to the most-recent session instead of being treated as a fresh crumb.
@@ -586,7 +586,7 @@ export class SessionManager {
 	}
 
 	/**
-	 * Re-stamp a fresh `/new` breadcrumb as non-fresh once the session has
+	 * Re-stamp a fresh-session breadcrumb as non-fresh once the session has
 	 * materialized on disk. A no-op unless the current breadcrumb is still fresh.
 	 */
 	#materializeBreadcrumb(): void {
@@ -1475,10 +1475,17 @@ export class SessionManager {
 		if (this.sanitizeLoadedOpenAIResponsesReplayMetadata()) this.#rewriteRequired = true;
 	}
 
-	/** Start a new session. Drains and closes any existing writer first. */
+	/**
+	 * Start a new session and persist its header before returning.
+	 *
+	 * The durable empty boundary prevents a later process on another terminal
+	 * from selecting the previous conversation as the most recent session.
+	 */
 	async newSession(options?: NewSessionOptions): Promise<string | undefined> {
 		await this.#drainAndCloseWriter();
-		return this.#resetToNewSession(options);
+		const sessionFile = this.#resetToNewSession(options);
+		await this.ensureOnDisk();
+		return sessionFile;
 	}
 
 	/** Delete a session file and its artifact directory. ENOENT is treated as success. */
@@ -3022,12 +3029,12 @@ export class SessionManager {
 		let chosenSession: string | null | undefined;
 
 		if (breadcrumb) {
-			// A fresh `/new` boundary whose JSONL was never materialized (lazy
-			// new-session persistence, then a process exit before any assistant
-			// output). Honor the boundary: start fresh rather than falling back to
-			// findMostRecentSession(), which would resurrect the pre-`/new`
-			// transcript. A materialized (or genuinely stale/deleted) crumb reports
-			// exists=false only when fresh, so this never masks a real stale crumb.
+			// A lazy fresh-session boundary whose JSONL was never materialized
+			// (for example, initial creation followed by exit before any assistant
+			// output). Honor the boundary rather than falling back to
+			// findMostRecentSession(), which would resurrect an older transcript.
+			// Explicit newSession() boundaries are materialized before it returns so
+			// this remains correct even when the relaunch has a different terminal id.
 			if (breadcrumb.fresh && !breadcrumb.exists) {
 				const manager = new SessionManager(cwd, dir, true, storage);
 				manager.#resetToNewSession();

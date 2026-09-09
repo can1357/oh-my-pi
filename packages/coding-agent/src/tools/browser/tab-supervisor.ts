@@ -7,13 +7,13 @@ import {
 	withTimeout,
 	workerHostEntry,
 } from "@oh-my-pi/pi-utils";
-import type { Page, Target } from "puppeteer-core";
+import type { CDPSession, Page, Target } from "puppeteer-core";
 import { callSessionTool } from "../../eval/js/tool-bridge";
 import { webpExclusionForModel } from "../../utils/image-loading";
 import type { ToolSession } from "../index";
 import { expandPath } from "../path-utils";
 import { ToolAbortError, ToolError } from "../tool-errors";
-import { pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
+import { gracefulKillTreeOnce, pickElectronTarget, shouldPreserveConnectedBrowserFocus } from "./attach";
 import { CmuxTab, runCmuxCode } from "./cmux/cmux-tab";
 import { mapWaitUntil } from "./cmux/rpc";
 import { DEFAULT_VIEWPORT } from "./launch";
@@ -85,6 +85,21 @@ interface TabSessionBase<TBrowser extends BrowserHandle = BrowserHandle> {
 	 * Undefined when the acquirer did not identify itself.
 	 */
 	ownerSessionId?: string;
+	/**
+	 * Opt out of settle-freeze and idle-close reaping. Recorded on the tab
+	 * when created (never on reuse), mirroring `ownerSessionId`: keeping a
+	 * tab live across turns is the creator's explicit decision.
+	 */
+	persist?: boolean;
+	/** Wall-clock (`Date.now()`) last use: create, reuse, or run start. Drives idle-close. */
+	lastActivityAt: number;
+	/**
+	 * True after a successful settle-freeze (`Page.setWebLifecycleState`
+	 * frozen). Cleared on unfreeze/create. Freeze pauses rAF/timers so an
+	 * idle animated page stops burning CPU/GPU; the renderer, worker, and
+	 * DOM state stay alive for millisecond resume.
+	 */
+	frozen: boolean;
 }
 
 export interface WorkerTabSession extends TabSessionBase<PuppeteerBrowserHandle> {
@@ -126,6 +141,12 @@ export interface AcquireTabOptions {
 	 * dispose. Optional — omitting it opts the tab out of session-scoped reap.
 	 */
 	ownerSessionId?: string;
+	/**
+	 * Keep the tab live across turn settle and idle close. Recorded on the
+	 * tab when created (never on reuse) so a later caller cannot silently
+	 * extend another session's tab lifetime.
+	 */
+	persist?: boolean;
 }
 
 export interface AcquireTabResult {
@@ -273,6 +294,28 @@ async function acquireTabImpl(
 				tempHold = true;
 				await releaseTab(name, { kill: false });
 			} else {
+				// Reuse counts as use: refresh the idle clock and resume a
+				// settle-frozen page before driving it again. A refused
+				// resume fails the open here with the same actionable
+				// error a run would raise, instead of reporting a reuse
+				// that can never execute.
+				existing.lastActivityAt = Date.now();
+				// Resume BEFORE applying `persist` below: flipping the flag
+				// first would make `isSettleManaged` reject this very
+				// resume, so reopening a frozen tab with `persist: true`
+				// would always fail.
+				if (!(await unfreezeTabSession(existing))) {
+					throw new ToolError(
+						`Tab ${JSON.stringify(name)} is frozen and could not be resumed. Close and reopen it.`,
+					);
+				}
+				// The creator may opt out later: an explicit `persist` on
+				// reuse by the owning session updates the tab (omitted
+				// leaves it). Reuse by any other session never changes it.
+				// Applied after the resume above for the reason stated there.
+				if (opts.persist !== undefined && existing.ownerSessionId === opts.ownerSessionId) {
+					existing.persist = opts.persist;
+				}
 				const reuseSteps: string[] = [];
 				if (opts.viewport && browser.kind.kind !== "cmux") {
 					const dsf = opts.viewport.deviceScaleFactor;
@@ -405,6 +448,9 @@ async function acquireTabImpl(
 		kindTag: browser.kind.kind,
 		activateForScreenshot: initPayload.mode === "headless" || initPayload.activateForScreenshot !== false,
 		ownerSessionId: opts.ownerSessionId,
+		persist: opts.persist ?? false,
+		lastActivityAt: Date.now(),
+		frozen: false,
 	};
 	worker.onMessage(msg => handleTabMessage(tab, msg));
 	tabs.set(name, tab);
@@ -480,6 +526,9 @@ async function acquireCmuxTab(
 			kindTag: browser.kind.kind,
 			cmuxAttachedSurface: attachedSurface,
 			ownerSessionId: opts.ownerSessionId,
+			persist: opts.persist ?? false,
+			lastActivityAt: Date.now(),
+			frozen: false,
 		};
 		tabs.set(name, tab);
 		return { tab, created: true };
@@ -518,6 +567,12 @@ async function runInTabWithSnapshot(
 		);
 	}
 	if (tab.pending.size > 0) throw new ToolError(`Tab ${JSON.stringify(name)} is busy`);
+	// An already-aborted call never runs: without this early exit the worker
+	// branch below would send `abort` before `run`, which the worker ignores
+	// for a not-yet-active run and then execute anyway.
+	if (opts.signal?.aborted) throw new ToolAbortError();
+	// A run is use: refresh the idle clock for idle-close.
+	tab.lastActivityAt = Date.now();
 	const id = Snowflake.next();
 	const { promise, resolve, reject } = Promise.withResolvers<RunResultOk>();
 	// `releaseTab` calls `pending.reject(closeError)` when the tab dies
@@ -544,7 +599,42 @@ async function runInTabWithSnapshot(
 		toolCalls: new Map(),
 		closeAc,
 	};
+	// Register BEFORE the unfreeze await below. Settle-freeze guards on
+	// `pending` (and undoes a transition already in flight when it observes
+	// one at completion), so a turn-end freeze can neither start nor land
+	// mid-run. Without this ordering a parent's settle could freeze a tab a
+	// subagent is reusing between our unfreeze check and this registration,
+	// stalling timer/rAF-dependent code to timeout.
 	tab.pending.set(id, pending);
+	// Observe the run promise from registration on: every exit below this
+	// point (resume failure, teardown race) throws before the backends
+	// attach their consumers, and an unobserved `pending.reject` would fire
+	// `unhandledRejection` and tear the whole session down (issue #4499).
+	promise.catch(() => undefined);
+	// Resume a settle-frozen page before driving it — frozen rAF/timers would
+	// otherwise hang the execution below. A refused resume fails the run
+	// here with an actionable error instead of stalling to timeout.
+	if (!(await unfreezeTabSession(tab))) {
+		tab.pending.delete(id);
+		throw new ToolError(`Tab ${JSON.stringify(name)} is frozen and could not be resumed. Close and reopen it.`);
+	}
+	// An abort that landed during the resume roundtrip must not dispatch:
+	// the worker ignores `abort` for a run that was never started.
+	if (opts.signal?.aborted) {
+		tab.pending.delete(id);
+		throw new ToolAbortError();
+	}
+	const current = tabs.get(name);
+	if (current !== tab || current.state === "dead") {
+		// A teardown won the race with our unfreeze roundtrip. Prefer its
+		// close error when one was recorded (`releaseTab` rejects `pending`
+		// synchronously, so it is already settled here); otherwise surface
+		// the closure. `race` — not a bare `await promise` — so a teardown
+		// that never settled the run cannot hang us.
+		tab.pending.delete(id);
+		const notAlive = new ToolError(`Tab ${JSON.stringify(name)} is not alive. Open it first with action:"open".`);
+		return await Promise.race([promise, Promise.reject(notAlive)]);
+	}
 	if (tab.backend === "cmux") {
 		const runSignal = opts.signal ? AbortSignal.any([opts.signal, closeAc.signal]) : closeAc.signal;
 		try {
@@ -563,6 +653,9 @@ async function runInTabWithSnapshot(
 			return await promise;
 		} finally {
 			tab.pending.delete(id);
+			// Completion is use too: a run outlasting the idle timeout must
+			// not look stale to the sweep right after it finishes.
+			tab.lastActivityAt = Date.now();
 		}
 	}
 	const abort = (): void => {
@@ -612,8 +705,21 @@ async function runInTabWithSnapshot(
 	} finally {
 		opts.signal?.removeEventListener("abort", abort);
 		tab.pending.delete(id);
+		// Completion is use too: a run outlasting the idle timeout must
+		// not look stale to the sweep right after it finishes.
+		tab.lastActivityAt = Date.now();
 	}
 }
+
+/**
+ * In-flight releases by tab object. A second `releaseTab` for a tab already
+ * being torn down joins the first instead of redoubling teardown: without
+ * this, a same-name acquire racing a sweep's release would publish a
+ * replacement that the first release's unconditional delete then removes
+ * (and the shared browser hold would release twice). Joiners share the
+ * first release's outcome.
+ */
+const releaseInflight = new WeakMap<TabSession, { promise: Promise<boolean>; opts: ReleaseTabOptions }>();
 
 export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Promise<boolean> {
 	const tab = tabs.get(name);
@@ -621,6 +727,48 @@ export async function releaseTab(name: string, opts: ReleaseTabOptions = {}): Pr
 		logger.debug("releaseTab: unknown tab", { name });
 		return false;
 	}
+	const ongoing = releaseInflight.get(tab);
+	if (ongoing) {
+		// Coalesce cleanup strength: a joining disposal must not lose its
+		// kill request to an earlier non-killing close — `releaseBrowser`
+		// reads `opts.kill` at teardown time, so the upgrade lands as long
+		// as the first release has not finished. (Not directly testable
+		// in-process: observing it needs a real spawned application.)
+		ongoing.opts.kill = ongoing.opts.kill || opts.kill;
+		const joined = await ongoing.promise;
+		// The upgrade above lands too late when the first release already
+		// passed `releaseBrowser`: verify a still-running spawned app is
+		// terminated rather than trusting the joined outcome.
+		if (opts.kill) await ensureSpawnedKilled(tab.browser);
+		return joined;
+	}
+	const entry = { promise: releaseTabInner(tab, name, opts), opts };
+	releaseInflight.set(tab, entry);
+	try {
+		return await entry.promise;
+	} finally {
+		releaseInflight.delete(tab);
+	}
+}
+
+/**
+ * Best-effort termination of a spawned app that outlived a joined teardown.
+ * Fires only behind a live subprocess handle (kernel-tracked, so no
+ * pid-reuse hazard): anything else already died or was never ours to kill.
+ */
+async function ensureSpawnedKilled(browser: BrowserHandle): Promise<void> {
+	if (browser.kind.kind !== "spawned" || !("subprocess" in browser)) return;
+	const { pid, subprocess } = browser;
+	if (pid === undefined || !subprocess || subprocess.exitCode !== null) return;
+	await gracefulKillTreeOnce(pid).catch(() => undefined);
+}
+
+/** Test hook for the kill guards without a live application. */
+export function ensureSpawnedKilledForTest(browser: BrowserHandle): Promise<void> {
+	return ensureSpawnedKilled(browser);
+}
+
+async function releaseTabInner(tab: TabSession, name: string, opts: ReleaseTabOptions): Promise<boolean> {
 	const wasAlive = tab.state === "alive";
 	tab.state = "dead";
 	const closeError = postmortem.markExpectedCleanupError(new ToolError(`Tab ${JSON.stringify(name)} was closed`));
@@ -754,6 +902,295 @@ export async function releaseTabsForOwner(ownerId: string, opts: ReleaseTabOptio
 		if (await releaseTab(name, opts)) count++;
 	}
 	return count;
+}
+
+/**
+ * Tabs this settle machinery may ever touch: OMP-launched headless puppeteer
+ * tabs (`kindTag === "headless"` covers hidden and visible shared-daemon
+ * tabs) that are alive and not opted out with `persist`. Connected, relay,
+ * and spawned tabs drive the user's own pages/apps, and cmux surfaces are a
+ * different backend with no CDP lifecycle — all are never frozen or reaped
+ * here. Ownership follows the `releaseTabsForOwner` contract: recorded on
+ * creation, never transferred by reuse.
+ */
+function isSettleManaged(tab: TabSession): boolean {
+	return tab.backend === "worker" && tab.kindTag === "headless" && tab.state === "alive" && !tab.persist;
+}
+
+/**
+ * Find the live puppeteer target backing a tab. Mirrors the tab worker's
+ * attach scan: fast `_targetId` path first, CDP comparison across targets
+ * otherwise. Returns undefined when the target is already gone.
+ */
+async function findTargetForTab(tab: WorkerTabSession): Promise<Target | undefined> {
+	for (const target of tab.browser.browser.targets()) {
+		if ((await targetIdForTarget(target).catch(() => "")) !== tab.targetId) continue;
+		return target;
+	}
+	return undefined;
+}
+
+/**
+ * Set a tab's web lifecycle state through a supervisor-owned CDP session —
+ * no worker-protocol change needed; CDP allows multiple sessions per target.
+ * `frozen` pauses rAF/timers (the SwiftShader burn in #8246); `active`
+ * resumes. Best-effort in the safe direction: false when the tab is gone or
+ * the protocol call fails, leaving `frozen` untouched so the next checkpoint
+ * retries and close paths still apply.
+ *
+ * Race protocol (all flag reads/writes below run atomically between awaits):
+ * runs register `pending` before driving the page, so a freeze that starts
+ * after a run began stands down at the guard. A freeze already past the
+ * guard when a run registers rechecks `pending` after its CDP roundtrip and
+ * re-asserts `active` on the same session — a frozen frame already sent
+ * cannot be unsent, so the undo guarantees the run never executes on a
+ * frozen page. Unfreezing always proceeds: resuming is safe under any
+ * pending state.
+ */
+async function setTabFrozen(tab: TabSession, frozen: boolean): Promise<boolean> {
+	if (!isSettleManaged(tab) || tab.backend !== "worker") return false;
+	if (tab.frozen === frozen) return false;
+	if (frozen && tab.pending.size > 0) return false;
+	const target = await findTargetForTab(tab).catch(() => undefined);
+	if (!target) return false;
+	const session = await target.createCDPSession().catch(() => null);
+	if (!session) return false;
+	try {
+		await session.send("Page.enable").catch(() => undefined);
+		await session.send("Page.setWebLifecycleState", { state: frozen ? "frozen" : "active" });
+		if (tab.state !== "alive") return false;
+		if (frozen) {
+			if (tab.frozen) return false;
+			if (tab.pending.size > 0 || tab.persist) {
+				// A run registered, or the owner opted out with `persist`,
+				// while our CDP roundtrip was in flight. Either way the
+				// frozen frame may already have landed, so re-assert
+				// `active` instead of recording frozen — a persist tab left
+				// frozen could never resume (unfreeze is rejected by the
+				// same persist eligibility gate).
+				if (await sendLifecycleState(session, "active")) return false;
+				// One retry for the in-flight run's sake: a brief frozen
+				// blip is harmless (rAF just skips frames), but an
+				// indefinite freeze stalls it to timeout.
+				await Bun.sleep(100);
+				if (await sendLifecycleState(session, "active")) return false;
+				tab.frozen = true;
+				return false;
+			}
+			tab.frozen = true;
+			return true;
+		}
+		tab.frozen = false;
+		return true;
+	} catch (error) {
+		logger.debug("Browser tab lifecycle transition failed; leaving tab lifecycle state unchanged", {
+			name: tab.name,
+			frozen,
+			error: error instanceof Error ? error.message : String(error),
+		});
+		return false;
+	} finally {
+		await session.detach().catch(() => undefined);
+	}
+}
+
+/** Best-effort lifecycle write on an owned CDP session; false when the call fails. */
+async function sendLifecycleState(session: CDPSession, state: "frozen" | "active"): Promise<boolean> {
+	try {
+		await session.send("Page.setWebLifecycleState", { state });
+		return true;
+	} catch {
+		return false;
+	}
+}
+
+/** Test hook for the lifecycle transition without a tabs-map entry. */
+export function setTabFrozenForTest(tab: TabSession, frozen: boolean): Promise<boolean> {
+	return setTabFrozen(tab, frozen);
+}
+
+/**
+ * Resume a tab before driving it. Returns false only when the page target
+ * exists but refuses the `active` transition even after one retry — the
+ * page is most likely still paused, so the caller must not dispatch onto
+ * it. A vanished target returns true: the run proceeds and surfaces the
+ * real page error immediately instead of hanging to timeout.
+ */
+async function unfreezeTabSession(tab: TabSession): Promise<boolean> {
+	if (!tab.frozen) return true;
+	if (tab.backend === "worker") {
+		const target = await findTargetForTab(tab).catch(() => undefined);
+		// Page target gone: let the run proceed and surface the real page
+		// error immediately instead of hanging to timeout.
+		if (!target) return true;
+	}
+	if (await setTabFrozen(tab, false).catch(() => false)) return true;
+	await Bun.sleep(100);
+	return await setTabFrozen(tab, false).catch(() => false);
+}
+
+/** Test hook for the pre-run resume without a tabs-map entry. */
+export function unfreezeTabSessionForTest(tab: TabSession): Promise<boolean> {
+	return unfreezeTabSession(tab);
+}
+
+/**
+ * Freeze every managed tab owned by `ownerId` (issue #8246). Turn-settle
+ * checkpoint: an idle animated page stops burning CPU/GPU while keeping its
+ * renderer, worker, and DOM state for millisecond resume on next use. Tabs
+ * with in-flight runs are skipped at the guard; a freeze already past the
+ * guard when a run registers undoes itself at completion (see
+ * `setTabFrozen`), so neither path can stall a run mid-execution.
+ */
+export async function freezeTabsForOwner(ownerId: string): Promise<number> {
+	if (!ownerId) return 0;
+	let count = 0;
+	for (const tab of tabs.values()) {
+		if (tab.ownerSessionId !== ownerId) continue;
+		if (await setTabFrozen(tab, true).catch(() => false)) count++;
+	}
+	return count;
+}
+/**
+ * Idle-close eligibility: owned, settle-managed, no in-flight run, and idle
+ * past the deadline. An executing tab is not idle even when its run outlasts
+ * the timeout. Exported so the never-touch contract is unit-testable;
+ * `releaseIdleTabsForOwner` walks the map with exactly this predicate.
+ */
+export function isIdleCloseCandidate(tab: TabSession, ownerId: string, nowMs: number, idleMs: number): boolean {
+	return (
+		tab.ownerSessionId === ownerId &&
+		isSettleManaged(tab) &&
+		tab.pending.size === 0 &&
+		nowMs - tab.lastActivityAt >= idleMs
+	);
+}
+/**
+ * Close managed tabs owned by `ownerId` idle longer than `idleMs` — the
+ * memory backstop under settle-freeze (frozen tabs still hold their renderer
+ * and worker). Never throws: a wedged tab counts as unclosed and the sweep
+ * continues, returning the partial count — reapers must not fail callers.
+ */
+export async function releaseIdleTabsForOwner(
+	ownerId: string,
+	opts: { idleMs: number } & ReleaseTabOptions = { idleMs: 0 },
+): Promise<number> {
+	if (!ownerId) return 0;
+	const now = Date.now();
+	const names = [...tabs.values()]
+		.filter(tab => isIdleCloseCandidate(tab, ownerId, now, opts.idleMs))
+		.map(tab => tab.name);
+	let count = 0;
+	// Program-order token: a cancel landing after this increment suppresses
+	// the re-arm below, so disabling mid-sweep cannot resurrect the deadline.
+	const sweepSeq = ++idleCloseSeq;
+	try {
+		for (const name of names) {
+			// Revalidate immediately before closing: an earlier close in this
+			// loop awaits worker cleanup, during which a later candidate may
+			// have been reused or started a run.
+			const current = tabs.get(name);
+			if (!current || !isIdleCloseCandidate(current, ownerId, Date.now(), opts.idleMs)) continue;
+			try {
+				if (await releaseTab(name, opts)) count++;
+			} catch (error) {
+				// One tab's wedged cleanup must not abandon the remaining
+				// candidates; the tab is already removed from the map, so
+				// the next sweep (or close path) retries it.
+				logger.debug("Failed to close idle browser tab; continuing sweep", {
+					name,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+	} finally {
+		// Leave the next deadline armed even when a close threw — unless
+		// cancelled mid-sweep. Sweeps only fire on turns, opens, and timer
+		// callbacks, so without re-arming the survivors would never close.
+		if ((idleCloseCancelSeq.get(ownerId) ?? 0) <= sweepSeq) {
+			armIdleCloseForOwner(ownerId, opts.idleMs);
+		}
+	}
+	return count;
+}
+
+/** Per-owner one-shot timers arming the idle-close backstop. Always unref'd. */
+const idleCloseTimers = new Map<string, NodeJS.Timeout>();
+
+/**
+ * Monotonic clock ordering sweeps against cancels: each sweep entry and
+ * each cancel takes the next value, so a sweep can tell whether a cancel
+ * landed mid-flight.
+ */
+let idleCloseSeq = 0;
+/** Last cancel sequence per owner; sweeps re-arm only when uncancelled. */
+const idleCloseCancelSeq = new Map<string, number>();
+
+/** Recheck cadence when a firing sweep skips due-but-busy tabs. Overridable in tests. */
+const IDLE_DUE_RETRY_MS = 30_000;
+
+/**
+ * Milliseconds until the owner's next managed tab goes idle, `0` when one
+ * already is, or undefined when no managed tab is tracked. The sweep
+ * checkpoints (turn settle, open) handle the due case synchronously; the
+ * timer covers abandonment with no further activity.
+ */
+export function earliestIdleCloseInMs(ownerId: string, idleMs: number, nowMs: number = Date.now()): number | undefined {
+	if (!ownerId || !(idleMs > 0)) return undefined;
+	let earliest: number | undefined;
+	for (const tab of tabs.values()) {
+		if (tab.ownerSessionId !== ownerId || !isSettleManaged(tab)) continue;
+		const remaining = idleMs - (nowMs - tab.lastActivityAt);
+		if (remaining <= 0) return 0;
+		earliest = earliest === undefined ? remaining : Math.min(earliest, remaining);
+	}
+	return earliest;
+}
+
+/** Drop a pending idle-close deadline and invalidate a sweep in flight. */
+export function cancelIdleCloseForOwner(ownerId: string): void {
+	if (!ownerId) return;
+	clearIdleCloseTimer(ownerId);
+	idleCloseCancelSeq.set(ownerId, ++idleCloseSeq);
+}
+
+/** Test probe: whether the owner currently has an armed deadline. */
+export function hasIdleCloseTimerForTest(ownerId: string): boolean {
+	return idleCloseTimers.has(ownerId);
+}
+
+function clearIdleCloseTimer(ownerId: string): void {
+	const existing = idleCloseTimers.get(ownerId);
+	if (existing === undefined) return;
+	idleCloseTimers.delete(ownerId);
+	clearTimeout(existing);
+}
+
+/**
+ * (Re)arm the owner-scoped one-shot that closes idle tabs when the timeout
+ * elapses without further activity. Without this, a tab used in the final
+ * turn before an idle session would sit until the next turn, open, or
+ * dispose despite the advertised timeout. The timer is unref'd so it never
+ * holds the process open (print/RPC exits are unaffected), firing
+ * re-enters through `releaseIdleTabsForOwner` — which re-arms while
+ * survivors remain — and disposal needs no cleanup since a fired sweep
+ * over released tabs is a no-op. Due-but-busy survivors re-arm on a short
+ * retry cadence instead of losing their deadline until the next sweep.
+ * @param retryMs recheck cadence for due-but-busy survivors; keep well above zero.
+ */
+export function armIdleCloseForOwner(ownerId: string, idleMs: number, retryMs: number = IDLE_DUE_RETRY_MS): void {
+	clearIdleCloseTimer(ownerId);
+	const delay = earliestIdleCloseInMs(ownerId, idleMs);
+	if (delay === undefined) return;
+	const wait = delay <= 0 ? retryMs : Math.min(delay, 2_147_483_647);
+	const timer = setTimeout(() => {
+		idleCloseTimers.delete(ownerId);
+		void releaseIdleTabsForOwner(ownerId, { idleMs })
+			.then(() => armIdleCloseForOwner(ownerId, idleMs, retryMs))
+			.catch(() => undefined);
+	}, wait);
+	timer.unref();
+	idleCloseTimers.set(ownerId, timer);
 }
 
 /** Test-only accessor for the module-global tabs map. */

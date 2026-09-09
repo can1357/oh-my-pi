@@ -624,6 +624,36 @@ export class MnemopiSessionState {
 	}
 
 	/**
+	 * Promote age-eligible working-memory rows to episodic once at session start,
+	 * before any write can trigger the working-memory TTL trim.
+	 *
+	 * `remember` runs `trimWorkingMemory` on every write, which deletes
+	 * unconsolidated rows older than `workingMemoryTtlHours` (24h). Consolidation
+	 * (`sleep`) is age-gated to rows >= 12h old, but otherwise only ran via the
+	 * explicit `/memory enqueue` path (`dispose` passes `sleep:false`, #4843), so
+	 * `retain`/`learn`/transcript rows that were never manually enqueued were
+	 * silently deleted after a >24h session gap (#10770). Running the age-gated
+	 * sleep here stamps `consolidated_at` on those rows before the session's first
+	 * write, so the `consolidated_at IS NULL` trim filter no longer removes them.
+	 *
+	 * Bank-global because each bank opens with `sessionId = <bank>`, so a single
+	 * session-scoped `sleep` covers rows written by every prior session. Cheap
+	 * when nothing is old enough — `sleep` short-circuits to a no-op with no
+	 * eligible rows — and failures are logged, never thrown, so a consolidation
+	 * error cannot make the backend inert.
+	 */
+	promoteEligibleWorkingMemory(): void {
+		if (this.aliasOf) return;
+		for (const memory of this.scoped.owned) {
+			try {
+				memory.sleep(false);
+			} catch (error) {
+				this.#logLifecycleFailure("startup consolidation", [this.scoped.retain.bank], error);
+			}
+		}
+	}
+
+	/**
 	 * Capture the current transcript by default, drain in-flight fact extraction,
 	 * and optionally run beam consolidation on every owned bank.
 	 * The explicit `/memory enqueue` path

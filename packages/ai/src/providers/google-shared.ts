@@ -216,6 +216,7 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 			// Check if message is from same provider and model - only then keep thinking blocks
 			const isSameProviderAndModel = msg.provider === model.provider && msg.model === model.id;
 			const dropsUnsignedThinking = model.compat.dropUnsignedThinking;
+			let isFirstToolCall = true;
 
 			for (const block of msg.content) {
 				if (block.type === "text") {
@@ -244,16 +245,17 @@ export function convertMessages<T extends GoogleApiType>(model: Model<T>, contex
 					}
 				} else if (block.type === "toolCall") {
 					emittedToolCallNames.set(block.id, block.name);
-					// Gemini 3 requires a thought signature on function calls it makes. For
-					// calls we cannot sign (cross-model replay, secret-redacted args, or the
-					// secondary calls of a parallel turn), the public Gemini API accepts the
-					// `skip_thought_signature_validator` sentinel as a bypass. Cloud Code
-					// Assist / Antigravity and Vertex AI reject that sentinel with 400
-					// INVALID_ARGUMENT — permanently wedging any session whose history
-					// contains one — so for those transports we omit the field instead. (#9638)
+					// Gemini 3 requires a thought signature on function calls it makes. The
+					// public API requires the bypass sentinel on every unsigned call. Cloud
+					// Code Assist requires it only when the first call itself is unsigned;
+					// signed-first parallel turns must leave unsigned secondary calls bare.
+					// Vertex rejects the sentinel and receives neither fallback. (#9638, #10602)
 					const thoughtSignature = resolveThoughtSignature(isSameProviderAndModel, block.thoughtSignature);
-					const effectiveSignature =
-						thoughtSignature || (model.compat.requiresSkipThoughtSignature ? SKIP_THOUGHT_SIGNATURE : undefined);
+					const requiresFallback =
+						model.compat.requiresSkipThoughtSignature ||
+						(isFirstToolCall && model.compat.requiresSkipThoughtSignatureOnFirstFunctionCall);
+					const effectiveSignature = thoughtSignature || (requiresFallback ? SKIP_THOUGHT_SIGNATURE : undefined);
+					isFirstToolCall = false;
 
 					const part: Part = {
 						functionCall: {

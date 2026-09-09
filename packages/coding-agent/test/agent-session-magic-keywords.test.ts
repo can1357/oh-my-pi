@@ -136,10 +136,11 @@ describe("AgentSession magic keyword settings", () => {
 		}>;
 		const notice = promptMessages.find(message => message.customType === "workflow-notice");
 		expect(notice?.customType).toBe("workflow-notice");
-		expect(notice?.content).toContain("`eval`");
-		expect(notice?.content).toContain("`parallel(thunks)`");
-		expect(notice?.content).toContain("**Python (`eval`, Python backend):**");
-		expect(notice?.content).toContain("**JavaScript (`eval`, JavaScript backend):**");
+		expect(notice?.content).toContain("Default to `workpool()`");
+		expect(notice?.content).toContain('`hub` with `op:"wait", ids:["<pool-name>"]`');
+		expect(notice?.content).toContain("**Python:**");
+		expect(notice?.content).toContain("**JavaScript:**");
+		expect(notice?.content).not.toContain("parallel(thunks)");
 	});
 
 	it("updates the workflowz notice when scout is disabled during the session", async () => {

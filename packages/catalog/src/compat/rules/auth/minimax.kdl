@@ -1,0 +1,3 @@
+auth "minimax" {
+	name "MiniMax"
+}

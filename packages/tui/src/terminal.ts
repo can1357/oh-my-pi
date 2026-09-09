@@ -1359,10 +1359,13 @@ export class ProcessTerminal implements Terminal {
 			}
 		});
 
-		// Re-wrap paste content with bracketed paste markers for existing editor handling
-		this.#stdinBuffer.on("paste", (content: string) => {
+		// Re-wrap paste content with bracketed paste markers for existing editor
+		// handling. An Enter that shared the paste's stdin read rides along so
+		// paste and submit reach the component focused right now, not one the
+		// paste itself is about to open.
+		this.#stdinBuffer.on("paste", (content: string, enter?: string) => {
 			if (this.#inputHandler) {
-				this.#inputHandler(`\x1b[200~${content}\x1b[201~`);
+				this.#inputHandler(`\x1b[200~${content}\x1b[201~${enter ?? ""}`);
 			}
 		});
 

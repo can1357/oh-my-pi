@@ -33,6 +33,35 @@ class "glm" {
 			thinking-efforts "minimal" "low" "medium" "high" "xhigh"
 		}
 	}
+	// Abliteration serves abliterated GLM deployments behind opaque product ids
+	// (docs.abliteration.ai/capabilities/thinking, 2026-09). The large models
+	// run fewer modes than the six-level ladder they accept, rounding aliases
+	// UP at the midpoint (medium → high, xhigh → max). Those aliases stay in
+	// the ladder so a request is never clamped down past its documented mode,
+	// and the map sends the native mode on the wire.
+	on "abliteration" {
+		// Base `abliterated-model`: distinct depths; Responses rejects `max`.
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+		// Large (GLM-5.2): high/max, default high; minimal..high → high.
+		revision ">=5.2 <5.3" {
+			thinking-default-level "high"
+			thinking-efforts "high" "xhigh" "max"
+			reasoning-effort-map {
+				xhigh "max"
+			}
+		}
+		// Large V2 (GLM-5.3): low/high/max, default max; reasoning cannot be
+		// disabled (disable-shaped controls run at hidden low).
+		revision ">=5.3" {
+			thinking-default-level "max"
+			thinking-efforts "low" "medium" "high" "xhigh" "max"
+			thinking-requires-effort #true
+			reasoning-effort-map {
+				medium "high"
+				xhigh "max"
+			}
+		}
+	}
 	// GLM Coding Plan: the selectable 1M-context served ids; pin them so
 	// endpoint discovery or older bundled fallbacks cannot regress to 200k.
 	on "zai" "zhipu-coding-plan" {

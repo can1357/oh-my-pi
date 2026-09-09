@@ -99,7 +99,7 @@ describe("compat rules conformance", () => {
 	test("every rules/**/*.kdl file was compiled", async () => {
 		const rulesDir = path.join(import.meta.dir, "../src/compat/rules");
 		const onDisk: string[] = [];
-		for (const group of ["taxonomy", "classes", "providers", "runtime"]) {
+		for (const group of ["taxonomy", "classes", "providers", "runtime", "auth"]) {
 			for (const name of await fs.readdir(path.join(rulesDir, group))) {
 				if (name.endsWith(".kdl")) onDisk.push(`${group}/${name}`);
 			}

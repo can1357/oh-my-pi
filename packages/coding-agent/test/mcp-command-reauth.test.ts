@@ -6,9 +6,9 @@ import * as path from "node:path";
 import { AuthStorage, SqliteAuthCredentialStore } from "@oh-my-pi/pi-ai";
 import * as mcpClient from "@oh-my-pi/pi-coding-agent/mcp/client";
 import * as oauthFlow from "@oh-my-pi/pi-coding-agent/mcp/oauth-flow";
+import type { SourceMeta } from "@oh-my-pi/pi-coding-agent/capability/types";
 import type { MCPServerConfig } from "@oh-my-pi/pi-coding-agent/mcp/types";
 import { MCPCommandController } from "@oh-my-pi/pi-coding-agent/modes/controllers/mcp-command-controller";
-import { OAuthManualInputManager } from "@oh-my-pi/pi-coding-agent/modes/oauth-manual-input";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import {
 	getConfigRootDir,
@@ -18,6 +18,11 @@ import {
 	setAgentDir,
 	setProjectDir,
 } from "@oh-my-pi/pi-utils";
+import {
+	createInteractiveModeContext,
+	createMcpManagerStub,
+	type McpManagerOverrides,
+} from "./helpers/interactive-mode-context";
 
 const RAW_SERVER_URL = `https://\${MCP_HOST}/mcp`;
 const EXPANDED_SERVER_URL = "https://mcp.example.com/mcp";
@@ -42,42 +47,42 @@ function restoreEnvValue(name: string, value: string | undefined): void {
 	Bun.env[name] = value;
 	process.env[name] = value;
 }
-function createController(authStorage: AuthStorage, mcpManagerOverrides: Record<string, unknown> = {}) {
-	const showError = vi.fn();
-	const showStatus = vi.fn();
-	const present = vi.fn();
-	const editor: { onEscape?: () => void } = {};
+/**
+ * Resolve when the controller installs its `editor.onEscape` hook.
+ *
+ * The hook is installed part-way through an async flow, so a test that needs
+ * it has to wait. Polling to a wall-clock deadline would make that wait a
+ * timing budget rather than a synchronisation point: on a loaded runner the
+ * deadline can expire before correct code has installed the hook, and the
+ * assertion then fails on a value that was merely late. Intercepting the
+ * assignment bounds the wait by the event it is actually waiting for, leaving
+ * `bun test --timeout` as the only backstop for a genuine hang.
+ */
+function whenEscapeInstalled(editor: { onEscape?: (() => void) | undefined }): Promise<void> {
+	const installed = Promise.withResolvers<void>();
+	let current = editor.onEscape;
+	if (typeof current === "function") installed.resolve();
+	Object.defineProperty(editor, "onEscape", {
+		configurable: true,
+		enumerable: true,
+		get: () => current,
+		set: (value: (() => void) | undefined) => {
+			current = value;
+			if (typeof value === "function") installed.resolve();
+		},
+	});
+	return installed.promise;
+}
+
+function createController(authStorage: AuthStorage, mcpManagerOverrides: McpManagerOverrides = {}) {
 	const prepareConfig = vi.fn(async (config: MCPServerConfig) => config);
-	const mcpManager = {
-		prepareConfig,
-		disconnectAll: vi.fn(async () => {}),
-		discoverAndConnect: vi.fn(async () => ({ errors: new Map<string, string>() })),
-		getTools: vi.fn(() => []),
-		waitForConnection: vi.fn(async () => {}),
-		getConnectionStatus: vi.fn(() => "connected"),
-		...mcpManagerOverrides,
-	};
-	const oauthManualInput = new OAuthManualInputManager();
-	const ctx = {
-		chatContainer: { addChild: vi.fn() },
-		present,
-		presentCommandOutput: present,
-		ui: { requestRender: vi.fn() },
-		editor,
-		showError,
-		showStatus,
-		oauthManualInput,
-		settings: {
-			get: vi.fn((_key: string): unknown => undefined),
-		},
-		session: {
-			refreshMCPTools: vi.fn(),
-			setMCPPromptCommands: vi.fn(),
-			modelRegistry: { authStorage },
-		},
+	const mcpManager = createMcpManagerStub({ prepareConfig, ...mcpManagerOverrides });
+	const ctx = createInteractiveModeContext({
+		session: { modelRegistry: { authStorage } },
 		mcpManager,
-	} as never;
+	});
 	const controller = new MCPCommandController(ctx);
+	const { showError, showStatus, present, editor, oauthManualInput } = ctx;
 
 	return { controller, ctx, showError, showStatus, present, editor, oauthManualInput, prepareConfig, mcpManager };
 }
@@ -831,27 +836,21 @@ describe("/mcp auth commands", () => {
 
 		const { controller, showError, showStatus, editor } = createController(authStorage);
 
+		// Gate on #handleOAuthFlow installing its editor.onEscape hook.
+		const escapeInstalled = whenEscapeInstalled(editor);
 		const reauthPromise = controller.handle("/mcp reauth envserver");
-
-		// Wait for #handleOAuthFlow to install its editor.onEscape hook.
-		const deadline = Date.now() + 1_000;
-		while (typeof editor.onEscape !== "function" && Date.now() < deadline) {
-			await Bun.sleep(10);
-		}
+		await escapeInstalled;
 		expect(typeof editor.onEscape).toBe("function");
 
 		const installedEscape = editor.onEscape;
 		editor.onEscape?.();
 
-		// Cancellation must resolve the reauth promise promptly (well under the
-		// 5-minute production timeout); a 2s race exposes a hung flow as a test
-		// failure rather than a suite hang.
-		await Promise.race([
-			reauthPromise,
-			Bun.sleep(2_000).then(() => {
-				throw new Error("reauth did not resolve within 2s of Esc");
-			}),
-		]);
+		// Cancellation must resolve the reauth promise (well under the 5-minute
+		// production timeout). Awaited directly rather than raced against a 2s
+		// timer: a hung flow is already a failure via `bun test --timeout`, which
+		// reports the test name, whereas a wall-clock race also fails correct code
+		// that merely resolved late on a loaded runner.
+		await reauthPromise;
 
 		expect(showError).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith(expect.stringMatching(/cancel/i));
@@ -889,27 +888,26 @@ describe("/mcp auth commands", () => {
 		});
 
 		const { controller, ctx, showError, showStatus, editor, oauthManualInput } = createController(authStorage);
+		// Event-gate the claim instead of polling to a wall-clock deadline: on a
+		// loaded runner the old 1s budget could expire before the flow claimed the
+		// manual-input slot, and the assertion below then read `undefined` from a
+		// slot that was merely late. Resolving off `tryClaimInput` itself makes the
+		// wait bounded by the event it is actually waiting for.
+		const claimed = Promise.withResolvers<void>();
+		const tryClaimInput = oauthManualInput.tryClaimInput.bind(oauthManualInput);
+		vi.spyOn(oauthManualInput, "tryClaimInput").mockImplementation(providerId => {
+			const result = tryClaimInput(providerId);
+			if (result) claimed.resolve();
+			return result;
+		});
 		const firstReauth = controller.handle("/mcp reauth envserver");
-		const claimDeadline = Date.now() + 1_000;
-		while (!oauthManualInput.hasPending() && Date.now() < claimDeadline) {
-			await Bun.sleep(10);
-		}
+		await claimed.promise;
 		expect(oauthManualInput.pendingProviderId).toBe("mcp");
 
 		const replacementReauth = new MCPCommandController(ctx).handle("/mcp reauth envserver");
-		await Promise.race([
-			replacementReauth,
-			Bun.sleep(2_000).then(() => {
-				throw new Error("replacement reauth did not resolve within 2s");
-			}),
-		]);
+		await replacementReauth;
 		if (oauthManualInput.hasPending()) editor.onEscape?.();
-		await Promise.race([
-			firstReauth,
-			Bun.sleep(2_000).then(() => {
-				throw new Error("superseded reauth did not resolve within 2s");
-			}),
-		]);
+		await firstReauth;
 
 		expect(loginAttempt).toBe(2);
 		expect(showError).not.toHaveBeenCalled();
@@ -932,20 +930,13 @@ describe("/mcp auth commands", () => {
 		vi.spyOn(oauthFlow.MCPOAuthFlow.prototype, "login").mockReturnValue(Promise.withResolvers<never>().promise);
 		const { controller, showError, showStatus, editor } = createController(authStorage);
 
+		const escapeInstalled = whenEscapeInstalled(editor);
 		const reauthPromise = controller.handle("/mcp reauth envserver");
-		const deadline = Date.now() + 1_000;
-		while (typeof editor.onEscape !== "function" && Date.now() < deadline) {
-			await Bun.sleep(10);
-		}
+		await escapeInstalled;
 		expect(typeof editor.onEscape).toBe("function");
 		editor.onEscape?.();
 
-		await Promise.race([
-			reauthPromise,
-			Bun.sleep(2_000).then(() => {
-				throw new Error("reauth did not resolve within 2s of pre-wait Esc");
-			}),
-		]);
+		await reauthPromise;
 
 		expect(showError).not.toHaveBeenCalled();
 		expect(showStatus).toHaveBeenCalledWith(expect.stringMatching(/cancel/i));
@@ -1014,8 +1005,13 @@ describe("/mcp auth commands", () => {
 			expires: Date.now() + 3_600_000,
 		});
 		const { controller, showError } = createController(authStorage, {
-			getServerConfig: vi.fn(() => ({ type: "http", url: EXPANDED_SERVER_URL })),
-			getSource: vi.fn(() => ({ provider: "test", path: "/tmp/discovered.json" })),
+			getServerConfig: vi.fn((): MCPServerConfig => ({ type: "http", url: EXPANDED_SERVER_URL })),
+			getSource: vi.fn((): SourceMeta => ({
+				provider: "test",
+				providerName: "Test",
+				path: "/tmp/discovered.json",
+				level: "project",
+			})),
 		});
 
 		await controller.handle("/mcp unauth discovered");

@@ -1,5 +1,6 @@
 import * as fs from "node:fs/promises";
 import { logger } from "@oh-my-pi/pi-utils";
+import { MAIN_AGENT_RULE_NAME, SUB_AGENT_RULE_NAME } from "../capability/rule";
 import type { ModelRegistry } from "../config/model-registry";
 import { formatModelRoleAlias } from "../config/model-roles";
 import type { Settings } from "../config/settings";
@@ -135,6 +136,24 @@ export function createPersistedSubagentReviverFactory(
 				sessionManager: reopened,
 				agentId: ref.id,
 				agentDisplayName: ref.displayName,
+				// `agents` rule scoping keys on the durable definition name (`scout`,
+				// `reviewer`, …), not the registry display label — cold-revived refs
+				// register with `displayName: id` (registry/persisted-agents.ts), so a
+				// generated task id would silently drop every agent-scoped rule.
+				// `init.agent` carries the real name; only files predating that field
+				// fall back to the display label. A parked transcript may also predate
+				// the `main`/`sub` definition-name reservation (discovery/helpers.ts): a
+				// persisted `init.agent` of either sentinel value from such a legacy
+				// custom agent must not masquerade as that sentinel here, so it falls
+				// back to the display label too, keeping it scoped as an ordinary
+				// subagent under its generated id instead of `main` or the shared `sub`
+				// bucket.
+				agentName:
+					init.agent &&
+					init.agent.trim().toLowerCase() !== MAIN_AGENT_RULE_NAME &&
+					init.agent.trim().toLowerCase() !== SUB_AGENT_RULE_NAME
+						? init.agent
+						: ref.displayName,
 				parentTaskPrefix: ref.id,
 				parentAgentId: ref.parentId,
 				expectedAgentRef: expectedRef,

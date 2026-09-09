@@ -88,11 +88,16 @@ function nonWildcardBytes(glob: string): number {
 	return count;
 }
 
-function classifyFamily(cls: CompiledClass, bare: string, model: string, lenient: boolean): string | undefined {
+interface FamilyRanking {
+	winner?: { rank: readonly [number, number]; id: string };
+	tied?: readonly [string, string];
+}
+
+function rankFamilies(cls: CompiledClass, subject: string): FamilyRanking {
 	let winner: { rank: readonly [number, number]; id: string } | undefined;
 	let tied: readonly [string, string] | undefined;
 	for (const family of cls.families) {
-		if (!globMatch(family.glob, bare)) continue;
+		if (!globMatch(family.glob, subject)) continue;
 		const rank = [family.priority, nonWildcardBytes(family.glob)] as const;
 		if (winner && winner.rank[0] === rank[0] && winner.rank[1] === rank[1] && winner.id !== family.id) {
 			tied = [winner.id, family.id];
@@ -101,11 +106,31 @@ function classifyFamily(cls: CompiledClass, bare: string, model: string, lenient
 			tied = undefined;
 		}
 	}
-	if (tied) {
-		if (lenient) return undefined;
-		throw new AmbiguousIdentityError(model, tied[0], tied[1], "family");
+	return { winner, tied };
+}
+
+function stripClassNamespace(cls: CompiledClass, bare: string): string | undefined {
+	const separator = bare.search(/[.:]/);
+	if (separator <= 0 || separator === bare.length - 1) return undefined;
+	const namespace = bare.slice(0, separator);
+	if (!cls.matchers.some(matcher => matcher.token === namespace)) return undefined;
+	return bare.slice(separator + 1);
+}
+
+function classifyFamily(cls: CompiledClass, bare: string, model: string, lenient: boolean): string | undefined {
+	const initial = rankFamilies(cls, bare);
+	const tied = initial.tied;
+	if (!tied) return initial.winner?.id;
+
+	// A Bedrock-style `vendor.model` id names the product after the class
+	// namespace. Rescore only ambiguities so existing classifications stay put.
+	const scoped = stripClassNamespace(cls, bare);
+	if (scoped !== undefined) {
+		const rescored = rankFamilies(cls, scoped);
+		if (rescored.winner && !rescored.tied) return rescored.winner.id;
 	}
-	return winner?.id;
+	if (lenient) return undefined;
+	throw new AmbiguousIdentityError(model, tied[0], tied[1], "family");
 }
 
 function extractRevision(cls: CompiledClass, bare: string): string | undefined {

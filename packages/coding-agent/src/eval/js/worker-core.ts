@@ -23,6 +23,24 @@ interface ActiveRun {
 	floatingRejections: unknown[];
 }
 
+interface KernelToolSpec {
+	name: string;
+	fn: (args: Record<string, unknown>) => unknown;
+	description: string;
+	parameters: Record<string, unknown>;
+}
+
+function isKernelToolSpec(value: unknown): value is KernelToolSpec {
+	if (value === null || typeof value !== "object") return false;
+	return (
+		typeof Reflect.get(value, "name") === "string" &&
+		typeof Reflect.get(value, "fn") === "function" &&
+		typeof Reflect.get(value, "description") === "string" &&
+		Reflect.get(value, "parameters") !== null &&
+		typeof Reflect.get(value, "parameters") === "object"
+	);
+}
+
 type RunResult = Extract<WorkerOutbound, { type: "result" }>;
 
 export type RejectionInterceptor = (handler: (reason: unknown) => boolean) => () => void;
@@ -218,6 +236,9 @@ export class WorkerCore {
 			case "run":
 				void this.#runOne(msg.runId, msg.code, msg.filename, msg.snapshot);
 				return;
+			case "tool":
+				void this.#invokeTool(msg);
+				return;
 			case "tool-reply":
 				this.#deliverToolReply(msg.id, msg.reply);
 				return;
@@ -288,6 +309,7 @@ export class WorkerCore {
 		try {
 			const runtime = this.#ensureRuntime(snapshot, runId);
 			runtime.setCwd(snapshot.cwd);
+			runtime.syncPreludes(snapshot.preludes ?? []);
 			const value = await runtime.run(code, filename, hooks, { runId, cwd: snapshot.cwd });
 			runtime.displayValue(value, hooks);
 			result = { type: "result", runId, ok: true };
@@ -304,6 +326,64 @@ export class WorkerCore {
 			this.#runs.delete(runId);
 			this.#rememberCellFile(filename);
 			this.#transport.send(result);
+		}
+	}
+
+	async #invokeTool(msg: Extract<WorkerInbound, { type: "tool" }>): Promise<void> {
+		const active: ActiveRun = {
+			runId: msg.runId,
+			filename: `tool-${msg.runId}`,
+			pendingTools: new Map(),
+			floatingRejections: [],
+		};
+		this.#runs.set(msg.runId, active);
+		const hooks: RuntimeHooks = {
+			onText: chunk => this.#transport.send({ type: "text", runId: msg.runId, chunk }),
+			onDisplay: output => this.#transport.send({ type: "display", runId: msg.runId, output }),
+			callTool: (name, args) => this.#callTool(active, name, args),
+		};
+
+		try {
+			const runtime = this.#runtime;
+			if (!runtime) throw new ToolError("JavaScript kernel is not running");
+			const rawRegistry = runtime.getGlobal("__omp_tools__");
+			const tools = new Map<string, KernelToolSpec>();
+			if (rawRegistry instanceof Map) {
+				for (const [name, value] of rawRegistry) {
+					if (typeof name === "string" && isKernelToolSpec(value)) tools.set(name, value);
+				}
+			}
+
+			let envelope: Record<string, unknown>;
+			if (msg.op === "describe") {
+				const names = msg.names.length > 0 ? msg.names : [...tools.keys()];
+				envelope = {
+					ok: true,
+					tools: names.flatMap(name => {
+						const spec = tools.get(name);
+						return spec ? [{ name: spec.name, description: spec.description, parameters: spec.parameters }] : [];
+					}),
+					missing: names.filter(name => !tools.has(name)),
+				};
+			} else {
+				const spec = tools.get(msg.name);
+				if (!spec) throw new ToolError(`tool ${JSON.stringify(msg.name)} is not defined`);
+				const value = await runtime.runCallback(msg.runId, hooks, () => spec.fn(msg.args ?? {}));
+				let cloneable: unknown;
+				try {
+					cloneable = structuredClone(value);
+				} catch {
+					cloneable = String(value);
+				}
+				envelope = { ok: true, value: cloneable };
+			}
+			this.#transport.send({ type: "display", runId: msg.runId, output: { type: "json", data: envelope } });
+			this.#transport.send({ type: "result", runId: msg.runId, ok: true });
+		} catch (error) {
+			this.#transport.send({ type: "result", runId: msg.runId, ok: false, error: errorPayload(error) });
+		} finally {
+			this.#runs.delete(msg.runId);
+			this.#rememberCellFile(active.filename);
 		}
 	}
 
