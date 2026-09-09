@@ -106,6 +106,33 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 		},
 	);
 
+	it.skipIf(process.platform === "win32")(
+		"hard-kills a descendant orphaned when the root dies to the polite signal",
+		async () => {
+			// The descendant reports its pid only after ignoring TERM, and SIG_IGN
+			// survives the exec, so the root exits to the polite signal first and
+			// reparents the survivor out of the hard wave's descendant walk.
+			const child = spawn(["/bin/sh", "-c", `/bin/sh -c 'trap "" TERM; echo $$; exec sleep 30' & wait`]);
+			const root = Process.fromPid(child.pid);
+			if (!root) throw new Error("Root exited before termination");
+			const reader = child.stdout.getReader();
+			let orphan: Process | null = null;
+			try {
+				const output = await reader.read();
+				orphan = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));
+				if (!orphan) throw new Error("Descendant exited before termination");
+				expect(orphan.status()).toBe(ProcessStatus.Running);
+				await child.killAndWait(undefined, 100);
+				expect(root.status()).toBe(ProcessStatus.Exited);
+				expect(orphan.status()).toBe(ProcessStatus.Exited);
+			} finally {
+				orphan?.killTree(9);
+				child.kill(undefined, -1);
+				await reader.cancel();
+			}
+		},
+	);
+
 	it.skipIf(process.platform !== "linux")(
 		"waits for subreaper descendants during immediate hard termination",
 		async () => {
