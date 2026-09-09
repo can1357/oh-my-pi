@@ -276,6 +276,9 @@ describe("toolSmokePrompt", () => {
 		expect(echoLikeShellCommand(`echo ${ping} | tee /tmp/out.txt`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`echo ${ping} | grep -v ${ping}`, ping)).toBe(false);
 		expect(echoLikeShellCommand(`echo ${ping} | cat`, ping)).toBe(false);
+		// Conditional arms after `&&` / `||` are unreachable for fabricated results.
+		expect(echoLikeShellCommand(`false && echo ${ping}`, ping)).toBe(false);
+		expect(echoLikeShellCommand(`true || echo ${ping}`, ping)).toBe(false);
 	});
 
 	test("binds read/write shell smoke evidence to the operation statement", () => {
@@ -371,6 +374,15 @@ describe("toolSmokePrompt", () => {
 			matchesToolSmokeCall(
 				"write",
 				{ name: "Shell", arguments: { command: `exit 0 && printf '%s\\n' ${ping} > ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		// `false && echo … > path` must not pass via the unreachable write arm.
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `false && echo ${ping} > ${writePath}` } },
 				ping,
 				id,
 			),

@@ -174,16 +174,22 @@ export function readLikeShellCommand(command: string): boolean {
 	return /(?:^|[;&|\n]\s*)(?:cat|head|sed)\b/.test(cmd);
 }
 
-/** Strip `#` comments, then split into statements (`\n`, `;`, `&&`, `&`). Pipes stay together. */
+/** Strip `#` comments, then split into unconditionally reachable statements.
+ * Sequential separators: `\n`, `;`. Within a unit, only the first conjunct of
+ * `&&` / `||` / `&` counts — later arms are conditional, so `false && echo ping`
+ * cannot pass a fabricated smoke gate via the unreachable echo. Pipes stay together.
+ */
 function shellStatementSegments(command: string): string[] {
 	const withoutComments = command
 		.split("\n")
 		.map(line => line.replace(/(^|[\t ;&|])#[^\n]*/g, "$1"))
 		.join("\n");
-	return withoutComments
-		.split(/\n|&&|&|;/)
-		.map(s => s.trim())
-		.filter(Boolean);
+	const out: string[] = [];
+	for (const sequential of withoutComments.split(/\n|;/)) {
+		const first = sequential.split(/\s*(?:&&|\|\||&)\s*/)[0]?.trim();
+		if (first) out.push(first);
+	}
+	return out;
 }
 
 /** True when a statement would prevent later statements from running. */

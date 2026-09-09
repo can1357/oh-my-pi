@@ -53,6 +53,18 @@ import toolsSystemPrompt from "./grokbot-catalog-matrix/tools-system.md" with { 
 import toolsFollowupSystemPrompt from "./grokbot-catalog-matrix/tools-followup-system.md" with { type: "text" };
 import ompToolsUserPrompt from "./grokbot-catalog-matrix/omp-tools-user.md" with { type: "text" };
 import ompTextUserPrompt from "./grokbot-catalog-matrix/omp-text-user.md" with { type: "text" };
+import ompToolBashDescription from "./grokbot-catalog-matrix/omp-tool-bash-description.md" with { type: "text" };
+import ompToolBashCommandDescription from "./grokbot-catalog-matrix/omp-tool-bash-command-description.md" with {
+	type: "text",
+};
+import ompToolReadDescription from "./grokbot-catalog-matrix/omp-tool-read-description.md" with { type: "text" };
+import ompToolReadPathDescription from "./grokbot-catalog-matrix/omp-tool-read-path-description.md" with {
+	type: "text",
+};
+import ompToolReadTargetFileDescription from "./grokbot-catalog-matrix/omp-tool-read-target-file-description.md" with {
+	type: "text",
+};
+import ompToolWriteDescription from "./grokbot-catalog-matrix/omp-tool-write-description.md" with { type: "text" };
 
 const ROOT = path.resolve(import.meta.dir, "..");
 const TEXT_TOKEN = "pong42";
@@ -76,28 +88,28 @@ type Row = {
 const OMP_TOOLS: Tool[] = [
 	{
 		name: "bash",
-		description: "Run a shell command and return stdout/stderr.",
+		description: ompToolBashDescription.trim(),
 		parameters: {
 			type: "object",
-			properties: { command: { type: "string", description: "Command to run" } },
+			properties: { command: { type: "string", description: ompToolBashCommandDescription.trim() } },
 			required: ["command"],
 		},
 	} as Tool,
 	{
 		name: "read",
-		description: "Read a file from disk.",
+		description: ompToolReadDescription.trim(),
 		parameters: {
 			type: "object",
 			properties: {
-				path: { type: "string", description: "Absolute path" },
-				target_file: { type: "string", description: "File path (alias of path)" },
+				path: { type: "string", description: ompToolReadPathDescription.trim() },
+				target_file: { type: "string", description: ompToolReadTargetFileDescription.trim() },
 			},
 			required: ["path"],
 		},
 	} as Tool,
 	{
 		name: "write",
-		description: "Write a file to disk.",
+		description: ompToolWriteDescription.trim(),
 		parameters: {
 			type: "object",
 			properties: {

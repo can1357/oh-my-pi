@@ -8,6 +8,7 @@ import {
 	assistantTextForJsonPromotion,
 	looksLikePromotableToolText,
 	parseGeminiInbandToolCall,
+	parseGeminiInbandToolCalls,
 	parseJsonTextToolCall,
 	shouldHoldPromotableToolText,
 	shouldPromoteJsonTextToolCall,
@@ -70,6 +71,20 @@ describe("parseJsonTextToolCall", () => {
 			arguments: { command: "echo hi" },
 		});
 		expect(parseGeminiInbandToolCall("just thinking about files", advertised)).toBeUndefined();
+	});
+
+	test("promotes every advertised call inside one tool_code fence", () => {
+		// Parallel default_api expressions must all become tool calls — returning
+		// only the first would drop sibling Shell/Read work from the fence.
+		expect(
+			parseGeminiInbandToolCalls(
+				'```tool_code\ndefault_api.bash(command="echo a")\ndefault_api.read(path="notes/a.txt")\n```',
+				["bash", "read", "Shell", "Read"],
+			),
+		).toEqual([
+			{ name: "bash", arguments: { command: "echo a" } },
+			{ name: "read", arguments: { path: "notes/a.txt" } },
+		]);
 	});
 
 	test("rejects prose that merely mentions a call-shaped expression", () => {

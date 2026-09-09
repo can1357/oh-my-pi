@@ -48,7 +48,7 @@ import {
 	assistantTextForJsonPromotion,
 	shouldHoldPromotableToolText,
 	shouldPromoteJsonTextToolCall,
-	parseGeminiInbandToolCall,
+	parseGeminiInbandToolCalls,
 	parseJsonTextToolCall,
 } from "./grokbot/json-text-tool-call";
 import { nativeToolParametersForIdentity } from "./grokbot/tool-policy";
@@ -1751,8 +1751,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				) {
 					const text = assistantTextForJsonPromotion(output.content, sendToUserTextIndexes);
 					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
-					const promoted = parseJsonTextToolCall(text, advertised) ?? parseGeminiInbandToolCall(text, advertised);
-					if (promoted) {
+					const promotedJson = parseJsonTextToolCall(text, advertised);
+					const promotedList = promotedJson
+						? [promotedJson]
+						: parseGeminiInbandToolCalls(text, advertised);
+					if (promotedList.length > 0) {
 						const removedIndexes = new Set<number>();
 						for (let i = 0; i < output.content.length; i++) {
 							if (sendToUserTextIndexes.has(i)) continue;
@@ -1791,14 +1794,17 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							}
 							attemptEventBuffer = remappedEvents;
 						}
-						upsertTool({
-							toolCallId: `call_json_${crypto.randomUUID()}`,
-							toolName: promoted.name,
-							args: JSON.stringify(promoted.arguments),
-							isComplete: true,
-						});
+						for (const promoted of promotedList) {
+							upsertTool({
+								toolCallId: `call_json_${crypto.randomUUID()}`,
+								toolName: promoted.name,
+								args: JSON.stringify(promoted.arguments),
+								isComplete: true,
+							});
+						}
 						logger.info("grokbot: promoted JSON-as-text tool call", {
-							toolName: promoted.name,
+							toolName: promotedList.map(p => p.name).join(","),
+							toolCount: promotedList.length,
 							wireMode: anthropicWire.wireMode,
 							routedResponseModel: routedResponseModel || undefined,
 						});

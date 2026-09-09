@@ -295,28 +295,38 @@ export function shouldHoldPromotableToolText(text: string): boolean {
 /**
  * Promote Gemini ```tool_code / default_api.bash(...) dumps that sand leaves
  * as thinking or text instead of toolCallPart (gemini-3-flash empty-body).
+ * Returns every advertised call in the fence (parallel tool_code expressions).
  */
-export function parseGeminiInbandToolCall(
+export function parseGeminiInbandToolCalls(
 	text: string,
 	advertisedNames: Iterable<string>,
-): JsonTextToolCall | undefined {
+): JsonTextToolCall[] {
 	const advertised = advertisedNames instanceof Set ? advertisedNames : new Set(advertisedNames);
-	if (advertised.size === 0) return undefined;
+	if (advertised.size === 0) return [];
 	const trimmed = text.trim();
-	if (!trimmed) return undefined;
+	if (!trimmed) return [];
 	const fencedBody = stripSoleToolCodeFence(trimmed);
 	const body = fencedBody !== undefined ? fencedBody : isStandaloneGeminiCallExpression(trimmed) ? trimmed : undefined;
-	if (body === undefined) return undefined;
+	if (body === undefined) return [];
 	const scanned = `\`\`\`tool_code\n${body}\n\`\`\``;
 	const scanner = new GeminiInbandScanner({ parseThinking: true });
 	const events = [...scanner.feed(scanned), ...scanner.flush()];
+	const out: JsonTextToolCall[] = [];
 	for (const event of events) {
 		if (event.type !== "toolEnd") continue;
 		const name = resolveAdvertisedName(event.name, advertised);
 		if (!name) continue;
 		const args = asArgsObject(event.arguments);
 		if (!args) continue;
-		return { name, arguments: args };
+		out.push({ name, arguments: args });
 	}
-	return undefined;
+	return out;
+}
+
+/** First advertised Gemini in-band call, or undefined when none. */
+export function parseGeminiInbandToolCall(
+	text: string,
+	advertisedNames: Iterable<string>,
+): JsonTextToolCall | undefined {
+	return parseGeminiInbandToolCalls(text, advertisedNames)[0];
 }
