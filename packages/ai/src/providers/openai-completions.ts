@@ -1150,6 +1150,14 @@ const streamOpenAICompletionsOnce = (
 				const streamError = createOpenAICompletionsStreamError(chunk, model.provider);
 				if (streamError) throw streamError;
 
+				// Rate-limit/overload bodies sent inside an HTTP 200 stream (Azure,
+				// LiteLLM-style aggregators, some gates) arrive as an `error` member or
+				// a bare `{ code, status }` chunk. They must advance the fallback chain
+				// exactly like an HTTP-status 429 — see body-error.ts. Nothing here
+				// fabricates a status; unknown error envelopes fall through untouched.
+				const inBand = AIError.createInBandProviderError(chunk);
+				if (inBand) throw inBand;
+
 				// OpenAI documents ChatCompletionChunk.id as the unique chat completion identifier,
 				// and each chunk in a streamed completion carries the same id.
 				output.responseId ||= chunk.id;

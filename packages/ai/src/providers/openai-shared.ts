@@ -3363,6 +3363,11 @@ export async function processResponsesStream<TApi extends Api>(
 				const error = response?.error ?? (response as any)?.status_details?.error;
 				const details = response?.incomplete_details;
 				const statusDetailsReason = (response as any)?.status_details?.reason;
+				// A rate-limit/overload body inside a terminal response envelope must
+				// advance the fallback chain exactly like an HTTP-status 429 would
+				// (body-error.ts). Non-retryable failures keep their existing message.
+				const inBand = details ? undefined : AIError.createInBandProviderError({ error });
+				if (inBand) throw inBand;
 				const message = error
 					? `${error.code || "unknown"}: ${error.message || "no message"}`
 					: details?.reason
@@ -3405,6 +3410,11 @@ export async function processResponsesStream<TApi extends Api>(
 			break;
 		} else if (event.type === "error") {
 			const err = (event as any).error ?? event;
+			// An in-band rate-limit/overload `error` event advances the fallback chain
+			// like an HTTP-status 429 (body-error.ts); other codes keep the existing
+			// `Error Code <code>: <message>` message that error tests pin on.
+			const inBand = AIError.createInBandProviderError(err);
+			if (inBand) throw inBand;
 			const code = err.code ?? "unknown";
 			const message = err.message ?? "no message";
 			throw new AIError.ProviderResponseError(`Error Code ${code}: ${message}`, {
@@ -3415,6 +3425,8 @@ export async function processResponsesStream<TApi extends Api>(
 			populateResponsesUsageFromResponse(output, event.response?.usage);
 			const error = event.response?.error ?? (event.response as any)?.status_details?.error;
 			const details = event.response?.incomplete_details;
+			const inBand = details ? undefined : AIError.createInBandProviderError({ error });
+			if (inBand) throw inBand;
 			const message = error
 				? `${error.code || "unknown"}: ${error.message || "no message"}`
 				: details?.reason

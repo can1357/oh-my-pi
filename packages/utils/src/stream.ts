@@ -261,6 +261,41 @@ export async function* readSseJson<T>(
 }
 
 /**
+ * Like {@link readSseJson}, but a `data:` frame that is not valid JSON is yielded
+ * as its raw text instead of raising a `SyntaxError`. Cut-off container-shaped
+ * stream tails stay recoverable, exactly as they are in {@link readSseJson}.
+ *
+ * Consumers that only understand objects must treat a `string` yield as a
+ * transport-level failure (for example a `429 Too Many Requests` or an HTML
+ * throttle page from a reverse proxy that already committed to the stream). This
+ * exists because `readSseJson`'s baseline consumers span unrelated transports
+ * whose error handling a text yield would subtly change; new call sites opt in.
+ */
+export async function* readSseJsonOrText<T>(
+	stream: ReadableStream<Uint8Array>,
+	signal?: AbortSignal,
+	onEvent?: SseEventObserver,
+): AsyncGenerator<T | string> {
+	for await (const sse of readSseEvents(stream, signal)) {
+		const isTrailing = trailingEvents.has(sse);
+		notifySseEventObserver(onEvent, sse);
+		const data = sse.data;
+		if (data === "" || data === "[DONE]") {
+			if (data === "[DONE]") return;
+			continue;
+		}
+		try {
+			yield JSON.parse(data) as T;
+		} catch (err) {
+			if (err instanceof SyntaxError && isTrailing && isRecoverableTrailingJson(data)) {
+				return;
+			}
+			yield data;
+		}
+	}
+}
+
+/**
  * A single Server-Sent Event dispatched on a blank-line boundary.
  *
  * - `event` is the value of the most recent `event:` field, or `null` if none.
