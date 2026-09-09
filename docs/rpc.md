@@ -26,7 +26,7 @@ Behavior notes:
 - RPC/ACP host defaults cover task isolation/execution, memory, advisor, tier, async-job, and bash auto-background settings. They are applied only when a path is not explicitly configured; project/global config, `--config`, and isolated settings remain authoritative. Todo settings are not host-defaulted.
 - The process claims stdin before extension discovery, then parses it one non-empty JSONL line at a time. Malformed JSON emits a recoverable `command: "parse"` failure and does not terminate the loop.
 - At startup it writes a `ready` frame before processing commands. The frame advertises supported protocol versions and transport limits.
-- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, and the process exits with code `0`.
+- When stdin closes, pending extension UI, host-tool, and host-URI requests are rejected; accepted commands are drained, the session is disposed, pending stdout is delivered, and the process exits with code `0`.
 - Responses/events are written as one JSON object per line.
 
 ## Transport and Framing
@@ -67,6 +67,10 @@ After the success response, oversized stdout objects are emitted losslessly as a
 Clients MUST validate `chunkId`, `index`, `count`, and `byteLength`, reject interleaved or interrupted sequences, enforce the advertised reassembly limit, concatenate decoded bytes in index order, decode them as strict UTF-8, and parse the result as one JSON object. The TypeScript `RpcFrameDecoder`, exported from `@oh-my-pi/pi-coding-agent/modes/rpc/rpc-frame`, implements this validation. The bundled TypeScript and Python `RpcClient` implementations negotiate v2 automatically when the ready frame advertises it.
 
 Legacy clients may ignore the added ready fields and remain on v1. V1 retains its bounded fallback behavior for oversized output. Frames above the v2 reassembly ceiling still fail explicitly; large history APIs should use pagination rather than depending on arbitrarily large logical frames.
+
+Output goes directly to stdout while the reader keeps up. Under backpressure, the server spills pending bytes to a private temporary file and drains it in 64 KiB blocks, preserving frame order. This limits queued output memory at the cost of disk I/O and temporary disk usage, which can grow until the reader catches up. The file is removed when the backlog drains or the process shuts down. Output or spool failures are logged, dispose the session, and exit with code `1`.
+
+Clients MUST continue reading stdout after closing stdin. Normal EOF and extension-requested shutdown wait for pending output delivery; a client that keeps its stdout pipe open without reading can delay exit indefinitely.
 
 ### Outbound frame categories (stdout)
 

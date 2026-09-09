@@ -10,10 +10,9 @@
  * - Events: AgentSessionEvent objects streamed as they occur
  * - Extension UI: Extension UI requests are emitted, client responds with extension_ui_response
  */
-import { once } from "node:events";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
-import { $env, isRecord, Snowflake } from "@oh-my-pi/pi-utils";
+import { $env, isRecord, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../../capability";
 import { clearPluginRootsAndCaches, resolveActiveProjectRegistryPath } from "../../discovery/helpers";
 import {
@@ -44,6 +43,7 @@ import { isRpcHostUriResult, RpcHostUriBridge } from "./host-uris";
 import { MAX_RPC_FRAME_BYTES, MAX_RPC_REASSEMBLED_BYTES, RpcFrameEncoder } from "./rpc-frame";
 import { claimRpcInput, readRpcInputFrames } from "./rpc-input";
 import { pageRpcMessages, RPC_MESSAGES_PAGE_BUSY_ERROR, RpcMessagesPageError } from "./rpc-messages";
+import { RpcOutputWriter } from "./rpc-output";
 import { RpcSubagentRegistry, readRpcSubagentTranscript } from "./rpc-subagents";
 import type {
 	RpcCommand,
@@ -783,21 +783,11 @@ export async function runRpcMode(
 	process.env.PI_NOTIFICATIONS = "off";
 
 	const frameEncoder = new RpcFrameEncoder();
-	// Ordered stdout writer honoring backpressure: chunked v2 frames are produced
-	// lazily by the encoder and written one physical line at a time, so a near-limit
-	// logical frame never materializes its full base64 transport in memory.
-	let stdoutQueue: Promise<void> = Promise.resolve();
-	const writeFrames = (frames: Iterable<string>) => {
-		stdoutQueue = stdoutQueue
-			.then(async () => {
-				for (const line of frames) {
-					if (!process.stdout.write(line)) await once(process.stdout, "drain");
-				}
-			})
-			// stdout gone (host exited) — nothing left to deliver; keep the queue alive.
-			.catch(() => {});
-	};
-	writeFrames(
+	const outputWriter = new RpcOutputWriter(process.stdout, failure => {
+		logger.error("RPC output delivery failed", { error: String(failure) });
+		void session.dispose().finally(() => process.exit(1));
+	});
+	outputWriter.write(
 		frameEncoder.encodeFrames({
 			type: "ready",
 			protocolVersion: 1,
@@ -807,7 +797,7 @@ export async function runRpcMode(
 		}),
 	);
 	const output = (obj: RpcResponse | RpcExtensionUIRequest | object) => {
-		writeFrames(frameEncoder.encodeFrames(obj));
+		outputWriter.write(frameEncoder.encodeFrames(obj));
 		if (isRecord(obj) && obj.type === "response" && obj.command === "negotiate_protocol" && obj.success === true)
 			frameEncoder.setProtocolVersion(2);
 	};
@@ -1578,6 +1568,7 @@ export async function runRpcMode(
 			// must NOT emit it separately here or the event fires twice. Skipping
 			// dispose left OMP-owned Chromium alive after RPC shutdown (#5643).
 			await session.dispose();
+			await outputWriter.close();
 			process.exit(0);
 		},
 	});
@@ -1623,5 +1614,6 @@ export async function runRpcMode(
 	// prior pi.shutdown() through the coordinator makes this await settle
 	// immediately.
 	await session.dispose();
+	await outputWriter.close();
 	process.exit(0);
 }
