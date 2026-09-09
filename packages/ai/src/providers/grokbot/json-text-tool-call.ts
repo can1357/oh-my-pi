@@ -297,10 +297,7 @@ export function shouldHoldPromotableToolText(text: string): boolean {
  * as thinking or text instead of toolCallPart (gemini-3-flash empty-body).
  * Returns every advertised call in the fence (parallel tool_code expressions).
  */
-export function parseGeminiInbandToolCalls(
-	text: string,
-	advertisedNames: Iterable<string>,
-): JsonTextToolCall[] {
+export function parseGeminiInbandToolCalls(text: string, advertisedNames: Iterable<string>): JsonTextToolCall[] {
 	const advertised = advertisedNames instanceof Set ? advertisedNames : new Set(advertisedNames);
 	if (advertised.size === 0) return [];
 	const trimmed = text.trim();

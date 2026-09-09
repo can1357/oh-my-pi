@@ -316,6 +316,73 @@ function shellWriteRedirect(segment: string): { before: string; after: string; o
 	return null;
 }
 
+/** Quote-aware shell words (no expansion); keeps quote characters off tokens. */
+function shellWords(text: string): string[] {
+	const out: string[] = [];
+	let quote: "'" | '"' | "`" | null = null;
+	let escaped = false;
+	let cur = "";
+	const flush = () => {
+		if (cur) {
+			out.push(cur);
+			cur = "";
+		}
+	};
+	for (let i = 0; i < text.length; i++) {
+		const ch = text[i]!;
+		if (escaped) {
+			cur += ch;
+			escaped = false;
+			continue;
+		}
+		if (quote) {
+			if (ch === "\\" && quote !== "'") {
+				escaped = true;
+				continue;
+			}
+			if (ch === quote) {
+				quote = null;
+				continue;
+			}
+			cur += ch;
+			continue;
+		}
+		if (ch === "'" || ch === '"' || ch === "`") {
+			quote = ch;
+			continue;
+		}
+		if (ch === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (/\s/.test(ch)) {
+			flush();
+			continue;
+		}
+		cur += ch;
+	}
+	flush();
+	return out;
+}
+
+/**
+ * Bash redirect destination is exactly the first word after `>`/`>>` (later
+ * words are command arguments). `tee` takes optional flags then file args —
+ * require a single file destination for smoke evidence.
+ */
+function redirectDestination(after: string, op: ">" | ">>" | "tee"): string | undefined {
+	const words = shellWords(after);
+	if (words.length === 0) return undefined;
+	if (op === "tee") {
+		let i = 0;
+		while (i < words.length && words[i]!.startsWith("-")) i++;
+		const files = words.slice(i);
+		if (files.length !== 1) return undefined;
+		return files[0];
+	}
+	return words[0];
+}
+
 /** True when `filePath` appears as a whole path segment (not a prefix of `….txt.bak`). */
 function commandMentionsPath(segment: string, filePath: string): boolean {
 	let from = 0;
@@ -374,8 +441,10 @@ export function readPathInShellCommand(command: string, filePath: string): boole
 
 /**
  * Write smoke: unquoted redirect/`tee` of the ping into `filePath` in the same
- * statement. Quoted `>` (`echo 'ping > path'`) and earlier `exit`/`return`
- * statements do not count — `runOneTool` fabricates success without executing.
+ * statement. Only the redirect's destination word counts (`echo ping > /dev/null
+ * path` redirects to `/dev/null`, not `path`). Quoted `>` and earlier
+ * `exit`/`return` statements do not count — `runOneTool` fabricates success
+ * without executing.
  */
 export function writePathPingInShellCommand(command: string, filePath: string, ping: string): boolean {
 	if (!filePath || !ping) return false;
@@ -386,8 +455,10 @@ export function writePathPingInShellCommand(command: string, filePath: string, p
 		const redirect = shellWriteRedirect(segment);
 		if (!redirect) continue;
 		if (!redirect.before.includes(ping)) continue;
-		if (!commandMentionsPath(redirect.after, filePath)) continue;
-		return true;
+		const dest = redirectDestination(redirect.after, redirect.op);
+		if (!dest) continue;
+		// Destination must be exactly the expected path (not a sibling token).
+		if (dest === filePath || commandMentionsPath(dest, filePath)) return true;
 	}
 	return false;
 }

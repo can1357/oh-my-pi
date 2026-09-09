@@ -399,6 +399,29 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(false);
+		// Only the first redirect destination counts — `/dev/null` wins, not a trailing path arg.
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{
+					name: "Shell",
+					arguments: { command: `echo ${ping} > /dev/null ${writePath}` },
+				},
+				ping,
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{
+					name: "Shell",
+					arguments: { command: `echo ${ping} > "${writePath}"` },
+				},
+				ping,
+				id,
+			),
+		).toBe(true);
 	});
 
 	test("rejects tool calls that only match by name", () => {

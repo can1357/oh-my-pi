@@ -42,7 +42,14 @@ export interface AxisDef {
 const OAI = ["openai", "openai-responses"] as const;
 const EFFORTS = ["minimal", "low", "medium", "high", "xhigh", "max"] as const;
 /** Reviewed Grok Bot Anthropic+tools auto wire profiles (routers). */
-const SAND_TOOLS_WIRES = ["parent-chat", "automation", "keep-model", "error", "native", "sand-default-fallback"] as const;
+const SAND_TOOLS_WIRES = [
+	"parent-chat",
+	"automation",
+	"keep-model",
+	"error",
+	"native",
+	"sand-default-fallback",
+] as const;
 const SAND_WIRE_MODEL_ID_WHEN = ["tools"] as const;
 
 /** Effort tiers accepted by taxonomy collapse/override vocabulary (`Effort` ∪ `"off"`). */

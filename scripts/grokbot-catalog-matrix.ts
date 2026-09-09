@@ -54,16 +54,10 @@ import toolsFollowupSystemPrompt from "./grokbot-catalog-matrix/tools-followup-s
 import ompToolsUserPrompt from "./grokbot-catalog-matrix/omp-tools-user.md" with { type: "text" };
 import ompTextUserPrompt from "./grokbot-catalog-matrix/omp-text-user.md" with { type: "text" };
 import ompToolBashDescription from "./grokbot-catalog-matrix/omp-tool-bash-description.md" with { type: "text" };
-import ompToolBashCommandDescription from "./grokbot-catalog-matrix/omp-tool-bash-command-description.md" with {
-	type: "text",
-};
+import ompToolBashCommandDescription from "./grokbot-catalog-matrix/omp-tool-bash-command-description.md" with { type: "text" };
 import ompToolReadDescription from "./grokbot-catalog-matrix/omp-tool-read-description.md" with { type: "text" };
-import ompToolReadPathDescription from "./grokbot-catalog-matrix/omp-tool-read-path-description.md" with {
-	type: "text",
-};
-import ompToolReadTargetFileDescription from "./grokbot-catalog-matrix/omp-tool-read-target-file-description.md" with {
-	type: "text",
-};
+import ompToolReadPathDescription from "./grokbot-catalog-matrix/omp-tool-read-path-description.md" with { type: "text" };
+import ompToolReadTargetFileDescription from "./grokbot-catalog-matrix/omp-tool-read-target-file-description.md" with { type: "text" };
 import ompToolWriteDescription from "./grokbot-catalog-matrix/omp-tool-write-description.md" with { type: "text" };
 
 const ROOT = path.resolve(import.meta.dir, "..");
