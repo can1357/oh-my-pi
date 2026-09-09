@@ -3447,6 +3447,7 @@ export class AuthStorage {
 			// Not part of UsageCredential — carried from the stored row so the
 			// interactive-login anchor survives usage-path refresh persists.
 			authorizedAt: entry.credential.authorizedAt,
+			cliDisabled: entry.credential.cliDisabled,
 		});
 	}
 
@@ -5789,6 +5790,7 @@ export class AuthStorage {
 				orgId: result.newCredentials.orgId ?? selection.credential.orgId,
 				orgName: result.newCredentials.orgName ?? selection.credential.orgName,
 				authorizedAt: result.newCredentials.authorizedAt ?? selection.credential.authorizedAt,
+				cliDisabled: result.newCredentials.cliDisabled ?? selection.credential.cliDisabled,
 			};
 			if (credentialId !== undefined) {
 				const idx = this.#replaceCredentialById(provider, credentialId, updated);
@@ -7168,6 +7170,7 @@ export class AuthStorage {
 				orgId: refreshed.orgId ?? attempted.orgId,
 				orgName: refreshed.orgName ?? attempted.orgName,
 				authorizedAt: refreshed.authorizedAt ?? attempted.authorizedAt,
+				cliDisabled: refreshed.cliDisabled ?? attempted.cliDisabled,
 			};
 			// Persist by id: the array may have been reordered/shrunk while the
 			// refresh was in flight, so the pre-await positional index is unsafe. A
