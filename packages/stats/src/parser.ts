@@ -1,3 +1,4 @@
+import type * as nodeFs from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import {
@@ -392,22 +393,18 @@ function scanLastServiceTier(bytes: Uint8Array): ServiceTierByFamily | undefined
 	});
 	return currentServiceTier;
 }
-/**
- * Parse a session file and extract all assistant message stats.
- * Uses incremental reading with offset tracking.
- *
- * Service-tier carry-over: `currentServiceTier` is a session-scoped piece of
- * state derived from `service_tier_change` entries that affects whether
- * subsequent OpenAI assistant replies count as premium requests. Incremental
- * syncs that resume past the most-recent tier change would otherwise lose
- * that state and silently record `premiumRequests = 0` for priority traffic
- * (the coding-agent stopped folding the tier into `usage.premiumRequests`
- * after 13f59162e — the parser is now the sole source of truth). When
- * `fromOffset > 0` we therefore scan the bytes preceding `fromOffset`
- * for the latest service-tier value before parsing the unprocessed tail.
- * The scan only keeps the current tier and does not materialize prefix
- * entries, preserving offset-based memory behavior for large sessions.
- */
+export interface SessionParserState {
+	version: 1;
+	offset: number;
+	dev: number;
+	ino: number;
+	birthtimeMs: number;
+	size: number;
+	mtimeMs: number;
+	checkpoint: string;
+	serviceTier: ServiceTierByFamily | null;
+}
+
 export interface ParseSessionResult {
 	stats: MessageStats[];
 	userStats: UserMessageStats[];
@@ -415,11 +412,80 @@ export interface ParseSessionResult {
 	toolCalls: ToolCallStats[];
 	toolResults: ToolResultLink[];
 	newOffset: number;
+	parserState?: SessionParserState;
+	reset?: boolean;
 }
-export async function parseSessionFile(sessionPath: string, fromOffset = 0): Promise<ParseSessionResult> {
+
+const CHECKPOINT_BYTES = 256;
+
+async function readCheckpoint(handle: fs.FileHandle, end: number): Promise<Uint8Array> {
+	// Positional reads keep the descriptor at zero for Bun.file(fd)'s subsequent tail read.
+	const start = Math.max(0, end - CHECKPOINT_BYTES);
+	const bytes = new Uint8Array(end - start);
+	let read = 0;
+	while (read < bytes.length) {
+		const result = await handle.read(bytes, read, bytes.length - read, start + read);
+		if (result.bytesRead === 0) break;
+		read += result.bytesRead;
+	}
+	return bytes.subarray(0, read);
+}
+
+export function matchesSessionFile(state: SessionParserState, info: nodeFs.Stats): boolean {
+	return state.dev === info.dev && state.ino === info.ino && state.birthtimeMs === info.birthtimeMs;
+}
+
+/** Offset-only callers reconstruct service-tier state once; persisted cursors read only the appended tail. */
+export async function parseSessionFile(
+	sessionPath: string,
+	fromOffset = 0,
+	state?: SessionParserState,
+	replay = false,
+): Promise<ParseSessionResult> {
 	let bytes: Uint8Array;
+	let start = fromOffset;
+	let reset = false;
+	let currentServiceTier: ServiceTierByFamily | undefined;
+	let info: nodeFs.Stats;
+	let checkpoint: string;
+	let read: number;
+	let entries: SessionEntry[];
 	try {
-		bytes = await Bun.file(sessionPath).bytes();
+		const handle = await fs.open(sessionPath, "r");
+		try {
+			info = await handle.stat();
+			const file = Bun.file(handle.fd);
+			let resume = state?.version === 1 && state.offset === fromOffset;
+			if (resume && state) {
+				reset =
+					!matchesSessionFile(state, info) ||
+					info.size < state.size ||
+					(info.size === state.size && info.mtimeMs !== state.mtimeMs);
+				if (!reset) {
+					const previous = await readCheckpoint(handle, fromOffset);
+					reset = Bun.hash(previous).toString(16) !== state.checkpoint;
+				}
+				resume = !reset;
+			}
+			if (fromOffset > info.size) reset = true;
+			if (replay) resume = false;
+			start = reset || replay ? 0 : Math.max(0, fromOffset);
+			const readStart = resume ? start : 0;
+			bytes = await file.slice(readStart, info.size).bytes();
+			currentServiceTier = resume
+				? (state?.serviceTier ?? undefined)
+				: scanLastServiceTier(bytes.subarray(0, start));
+			({ entries, read } = parseSessionEntriesLenient(bytes.subarray(start - readStart)));
+			const newOffset = start + read;
+			const checkpointStart = Math.max(0, newOffset - CHECKPOINT_BYTES);
+			const previous =
+				checkpointStart >= readStart
+					? bytes.subarray(checkpointStart - readStart, newOffset - readStart)
+					: await readCheckpoint(handle, newOffset);
+			checkpoint = Bun.hash(previous).toString(16);
+		} finally {
+			await handle.close();
+		}
 	} catch (err) {
 		if (isEnoent(err))
 			return { stats: [], userStats: [], userLinks: [], toolCalls: [], toolResults: [], newOffset: fromOffset };
@@ -434,13 +500,6 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 	const toolCalls: ToolCallStats[] = [];
 	const toolResults: ToolResultLink[] = [];
 	const userByEntryId = new Map<string, UserMessageStats>();
-	const start = Math.max(0, Math.min(fromOffset, bytes.length));
-	const unprocessed = bytes.subarray(start);
-	const { entries, read } = parseSessionEntriesLenient(unprocessed);
-	let currentServiceTier: ServiceTierByFamily | undefined;
-	if (start > 0) {
-		currentServiceTier = scanLastServiceTier(bytes.subarray(0, start));
-	}
 	for (const entry of entries) {
 		if (isServiceTierChange(entry)) {
 			currentServiceTier = coerceServiceTierByFamily(entry.serviceTier);
@@ -490,7 +549,27 @@ export async function parseSessionFile(sessionPath: string, fromOffset = 0): Pro
 		}
 	}
 
-	return { stats, userStats, userLinks, toolCalls, toolResults, newOffset: start + read };
+	const newOffset = start + read;
+	return {
+		stats,
+		userStats,
+		userLinks,
+		toolCalls,
+		toolResults,
+		newOffset,
+		reset,
+		parserState: {
+			version: 1,
+			offset: newOffset,
+			dev: info.dev,
+			ino: info.ino,
+			birthtimeMs: info.birthtimeMs,
+			size: info.size,
+			mtimeMs: info.mtimeMs,
+			checkpoint,
+			serviceTier: currentServiceTier ?? null,
+		},
+	};
 }
 
 /**

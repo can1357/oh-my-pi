@@ -9,7 +9,7 @@ import {
 } from "@oh-my-pi/pi-catalog/models";
 import type { ModelCost } from "@oh-my-pi/pi-catalog/types";
 import { getConfigRootDir, getStatsDbPath } from "@oh-my-pi/pi-utils";
-import { classifyAgentType } from "./parser";
+import { classifyAgentType, type ParseSessionResult, type SessionParserState } from "./parser";
 import type {
 	AgentType,
 	AgentTypeStats,
@@ -192,7 +192,8 @@ export async function initDb(): Promise<Database> {
 		CREATE TABLE IF NOT EXISTS file_offsets (
 			session_file TEXT PRIMARY KEY,
 			offset INTEGER NOT NULL,
-			last_modified INTEGER NOT NULL
+			last_modified INTEGER NOT NULL,
+			parser_state TEXT
 		);
 
 		CREATE TABLE IF NOT EXISTS user_messages (
@@ -244,6 +245,10 @@ export async function initDb(): Promise<Database> {
 		);
 	`);
 
+	const offsetColumns = db.prepare("PRAGMA table_info(file_offsets)").all() as { name: string }[];
+	if (!offsetColumns.some(column => column.name === "parser_state")) {
+		db.run("ALTER TABLE file_offsets ADD COLUMN parser_state TEXT");
+	}
 	const messageColumns = db.prepare("PRAGMA table_info(messages)").all() as { name: string }[];
 	if (!messageColumns.some(column => column.name === "premium_requests")) {
 		db.run("ALTER TABLE messages ADD COLUMN premium_requests REAL NOT NULL DEFAULT 0");
@@ -484,26 +489,104 @@ function backfillNoCacheInputCosts(database: Database): void {
 /**
  * Get the stored offset for a session file.
  */
-export function getFileOffset(sessionFile: string): { offset: number; lastModified: number } | null {
+export function getFileOffset(
+	sessionFile: string,
+): { offset: number; lastModified: number; parserState?: SessionParserState } | null {
 	if (!db) return null;
 
-	const stmt = db.prepare("SELECT offset, last_modified FROM file_offsets WHERE session_file = ?");
-	const row = stmt.get(sessionFile) as { offset: number; last_modified: number } | undefined;
-
-	return row ? { offset: row.offset, lastModified: row.last_modified } : null;
+	const stmt = db.prepare("SELECT offset, last_modified, parser_state FROM file_offsets WHERE session_file = ?");
+	const row = stmt.get(sessionFile) as
+		| { offset: number; last_modified: number; parser_state: string | null }
+		| undefined;
+	if (!row) return null;
+	let parserState: SessionParserState | undefined;
+	if (row.parser_state) {
+		try {
+			const state = JSON.parse(row.parser_state) as SessionParserState;
+			if (state?.version === 1 && state.offset === row.offset) parserState = state;
+		} catch {
+			/* A missing cursor is reconstructed from the transcript. */
+		}
+	}
+	return { offset: row.offset, lastModified: row.last_modified, parserState };
 }
 
 /**
  * Update the stored offset for a session file.
  */
-export function setFileOffset(sessionFile: string, offset: number, lastModified: number): void {
+export function setFileOffset(
+	sessionFile: string,
+	offset: number,
+	lastModified: number,
+	parserState?: SessionParserState,
+): void {
 	if (!db) return;
 
 	const stmt = db.prepare(`
-		INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified)
-		VALUES (?, ?, ?)
+		INSERT OR REPLACE INTO file_offsets (session_file, offset, last_modified, parser_state)
+		VALUES (?, ?, ?, ?)
 	`);
-	stmt.run(sessionFile, offset, lastModified);
+	stmt.run(sessionFile, offset, lastModified, parserState ? JSON.stringify(parserState) : null);
+}
+
+export function applySessionParseResult(
+	sessionFile: string,
+	result: ParseSessionResult,
+	rebuild = false,
+): { processed: number; reconcile: boolean } {
+	const parserState = result.parserState;
+	if (!db || !parserState) return { processed: 0, reconcile: false };
+	const database = db;
+	return database.transaction(() => {
+		let reconcile = result.reset ?? false;
+		if (result.reset || rebuild) {
+			const retainedMessages = new Set(result.stats.map(row => JSON.stringify([row.entryId, row.timestamp])));
+			const retainedUsers = new Set(result.userStats.map(row => JSON.stringify([row.entryId, row.timestamp])));
+			const retainedTools = new Set(
+				result.toolCalls.map(row => JSON.stringify([row.entryId, row.timestamp, row.toolCallId])),
+			);
+			const messages = database
+				.prepare("SELECT entry_id, timestamp FROM messages WHERE session_file = ?")
+				.all(sessionFile) as {
+				entry_id: string;
+				timestamp: number;
+			}[];
+			const users = database
+				.prepare("SELECT entry_id, timestamp FROM user_messages WHERE session_file = ?")
+				.all(sessionFile) as { entry_id: string; timestamp: number }[];
+			const tools = database
+				.prepare("SELECT entry_id, timestamp, tool_call_id FROM tool_calls WHERE session_file = ?")
+				.all(sessionFile) as { entry_id: string; timestamp: number; tool_call_id: string }[];
+			// A removed owner may have surviving fork copies skipped earlier in this pass.
+			reconcile ||=
+				messages.some(row => !retainedMessages.has(JSON.stringify([row.entry_id, row.timestamp]))) ||
+				users.some(row => !retainedUsers.has(JSON.stringify([row.entry_id, row.timestamp]))) ||
+				tools.some(row => !retainedTools.has(JSON.stringify([row.entry_id, row.timestamp, row.tool_call_id])));
+			database.prepare("DELETE FROM messages WHERE session_file = ?").run(sessionFile);
+			database.prepare("DELETE FROM user_messages WHERE session_file = ?").run(sessionFile);
+			database.prepare("DELETE FROM tool_calls WHERE session_file = ?").run(sessionFile);
+		}
+		if (reconcile) {
+			database
+				.prepare("INSERT OR REPLACE INTO meta (key, value) VALUES ('session_reconciliation', 'pending')")
+				.run();
+		}
+		if (result.stats.length > 0) insertMessageStats(result.stats);
+		if (result.userStats.length > 0) insertUserMessageStats(result.userStats);
+		if (result.userLinks.length > 0) updateUserMessageLinks(result.userLinks);
+		if (result.toolCalls.length > 0) insertToolCalls(result.toolCalls);
+		if (result.toolResults.length > 0) updateToolResults(result.toolResults);
+		setFileOffset(sessionFile, result.newOffset, parserState.mtimeMs, parserState);
+		return { processed: result.stats.length + result.userStats.length, reconcile };
+	})();
+}
+
+export function prepareSessionSync(): boolean {
+	return Boolean(db?.prepare("SELECT 1 FROM meta WHERE key = 'session_reconciliation'").get());
+}
+
+export function completeSessionSync(reconcile: boolean): void {
+	if (!reconcile) db?.prepare("DELETE FROM meta WHERE key = 'session_reconciliation'").run();
 }
 
 /**
