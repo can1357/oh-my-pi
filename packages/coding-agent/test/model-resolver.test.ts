@@ -2147,13 +2147,9 @@ describe("provider routing selector (@upstream)", () => {
 			maxTokens: 65_536,
 		});
 		const catalog = [...allModels, openRouterGemini];
-		const registry = { getAll: () => catalog, getAvailable: () => catalog } as unknown as Parameters<
-			typeof resolveCliModel
-		>[0]["modelRegistry"];
-
 		const result = resolveCliModel({
 			cliModel: "openrouter/google/gemini-3.8-flash@google-ai-studio",
-			modelRegistry: registry,
+			modelRegistry: { getAll: () => catalog, getAvailable: () => catalog },
 		});
 
 		expect(result.error).toBeUndefined();
@@ -2164,7 +2160,7 @@ describe("provider routing selector (@upstream)", () => {
 
 		const withThinking = resolveCliModel({
 			cliModel: "openrouter/google/gemini-3.8-flash@google-ai-studio:high",
-			modelRegistry: registry,
+			modelRegistry: { getAll: () => catalog, getAvailable: () => catalog },
 		});
 
 		expect(withThinking.error).toBeUndefined();
