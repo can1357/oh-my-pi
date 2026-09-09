@@ -989,6 +989,73 @@ describe("CollabSocket send backpressure", () => {
 		}
 	}, 15_000);
 
+	it("does not report a reply for a peer whose retirement its own release evicted", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/evict", role: "host", key: {} as CryptoKey });
+		try {
+			socket.connect();
+			const ws = BackpressuredWebSocket.instances[0]!;
+			ws.open();
+			// One reply outstanding per departed peer, one past the cap, so every
+			// record is protected and the trim cannot get the map back under it.
+			const captures: (() => boolean)[] = [];
+			for (let peer = 1; peer <= RETIREMENT_CAP + 1; peer++) captures.push(socket.addressee(peer));
+			for (let peer = 1; peer <= RETIREMENT_CAP + 1; peer++) {
+				ws.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer }) } as MessageEvent);
+			}
+			await Bun.sleep(20);
+
+			// The socket knows peer 1 is gone, so releasing the capture that was
+			// holding its record must not be what makes the reply admissible: the
+			// release is what unprotects the record the answer turns on.
+			expect(socket.isServing(1)).toBe(false);
+			expect(captures[0]!()).toBe(false);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
+	it("does not let an old room's release unprotect the new room's capture", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/rooms", role: "host", key: {} as CryptoKey });
+		try {
+			socket.connect();
+			const first = BackpressuredWebSocket.instances[0]!;
+			first.open();
+			const stale = socket.addressee(1);
+
+			// The room is recreated and peer 1 is reissued to somebody else, who asks
+			// for a transcript of their own.
+			first.close();
+			await waitUntil(
+				() => BackpressuredWebSocket.instances.length > 1,
+				"socket never retried after the transient drop",
+			);
+			const second = BackpressuredWebSocket.instances[1]!;
+			second.open();
+			const fresh = socket.addressee(1);
+
+			// Releasing the old room's capture is correct to refuse, but it must not
+			// spend the new capture's protection doing it.
+			expect(stale()).toBe(false);
+
+			second.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer: 1 }) } as MessageEvent);
+			for (let peer = 2; peer <= RETIREMENT_CAP + 44; peer++) {
+				second.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer }) } as MessageEvent);
+			}
+			await Bun.sleep(20);
+
+			expect(socket.isServing(1)).toBe(false);
+			expect(fresh()).toBe(false);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
 	it("charges a lazy batch for the snapshot it keeps reachable", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;

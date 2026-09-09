@@ -1,5 +1,13 @@
 /**
- * Contract: what a welcome snapshot is charged for is what the queue will hold.
+ * Contract: a session larger than the send budget is still shareable, and what
+ * a welcome snapshot is charged for is what the queue will hold.
+ *
+ * The budget admits an entry with nothing ahead of it whatever it costs, which
+ * is the only reason an oversized snapshot ships at all. That exception is
+ * worthless if the host puts something ahead of it itself, so the welcome and
+ * the chunks built with it are one queue entry; and the traffic the same hello
+ * generates has to be droppable, or the join notice ends sharing over the
+ * snapshot it just admitted.
  *
  * The charge is levied at admission and covers the clone the batch's iterator
  * keeps reachable, so it has to be the size of the snapshot actually retained.
@@ -24,6 +32,27 @@ afterEach(() => {
 	for (const cleanup of cleanups.splice(0).reverse()) cleanup();
 	uninstallInMemoryRelay();
 });
+
+/**
+ * 34 x 512 KiB is ~17 MiB: past `MAX_PENDING_SEND_BYTES`, so nothing but the
+ * empty-queue exception can admit it.
+ */
+function makeOversizedSnapshot(): Snapshot {
+	const entries: SessionEntry[] = [];
+	for (let i = 0; i < 34; i++) {
+		entries.push({
+			type: "message",
+			id: `big-${i}`,
+			parentId: null,
+			timestamp: "2026-09-09T00:00:00Z",
+			message: { role: "user", content: "x".repeat(512 * 1024), timestamp: 0 },
+		});
+	}
+	return {
+		header: { type: "session", id: "sess-large", timestamp: "2026-09-09T00:00:00Z", cwd: "/tmp" },
+		entries,
+	};
+}
 
 /**
  * 26 MiB of base64 image data over 1 MiB of text: past
@@ -85,6 +114,29 @@ async function waitForSnapshot(frames: CollabFrame[], message: string, ended: ()
 		await Bun.sleep(5);
 	}
 }
+
+it("welcomes the first guest of a session larger than the whole send budget", async () => {
+	const snapshot = makeOversizedSnapshot();
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const { parsed, key } = await startHost(snapshot, seen);
+	const ended = () => seen.notices.some(notice => notice.includes("Collab ended"));
+
+	const frames = joinGuest(parsed.wsUrl, key, "first-guest");
+	await waitForSnapshot(frames, "the first guest never received a complete snapshot", ended);
+
+	// One guest, an empty queue, and the whole replica delivered: a session this
+	// size is not an overload the host has to end sharing over.
+	expect(seen.notices.filter(notice => notice.includes("Collab ended"))).toEqual([]);
+	const welcomes = frames.filter(frame => frame.t === "welcome");
+	expect(welcomes.length).toBe(1);
+	const header = welcomes[0];
+	if (header?.t !== "welcome") throw new Error("expected a welcome frame");
+	const delivered = frames
+		.filter(frame => frame.t === "snapshot-chunk")
+		.flatMap(frame => frame.entries.map(entry => entry.id));
+	expect(delivered).toEqual(snapshot.entries.map(entry => entry.id));
+	expect(delivered.length).toBe(header.entryCount);
+}, 60_000);
 
 it("charges a stripped welcome snapshot for what it retained, not what arrived", async () => {
 	const snapshot = makeImageHeavySnapshot();

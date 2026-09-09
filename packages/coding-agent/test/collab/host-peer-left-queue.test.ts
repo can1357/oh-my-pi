@@ -205,6 +205,81 @@ it("does not let a reissued peer id inherit write permission", async () => {
 	expect(joins()).toBe(1);
 }, 30_000);
 
+/** Past `MAX_PEER_PENDING_SENDS`, so the stale replies alone can fill the successor's share. */
+const STALE_PROMPTS = 40;
+
+it("does not spend a reissued id's share on the departed asker's stale errors", async () => {
+	const relay = installInMemoryRelay();
+	const probe = instrumentRelay(relay, { throttle: true });
+	const snapshot = makeSnapshot();
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const context = makeHostContext(snapshot, seen);
+	// A turn that fails long after the guest that started it is gone: the error
+	// reply is best-effort, and what it must not do is cost somebody else.
+	const turn = Promise.withResolvers<void>();
+	let started = 0;
+	(context.session as unknown as { promptCustomMessage: () => Promise<void> }).promptCustomMessage = () => {
+		started++;
+		return turn.promise;
+	};
+	const host = new CollabHost(context);
+	cleanups.push(() => void host.stop("test done"));
+
+	await host.start("ws://localhost:8788");
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+	const joins = () => seen.notices.filter(notice => notice.includes("joined the collab session")).length;
+
+	const asker = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	cleanups.push(() => asker.close());
+	asker.onOpen = () => {
+		asker.send({ t: "hello", proto: COLLAB_PROTO, name: "asker", writeToken });
+		for (let i = 0; i < STALE_PROMPTS; i++) asker.send({ t: "prompt", text: `turn ${i}` });
+	};
+	asker.connect();
+	await waitFor(() => started >= STALE_PROMPTS, "host never started the asker's turns");
+
+	// The room is destroyed and the next one issues peer ids from 1 again, so the
+	// asker's id now belongs to a newcomer mid-snapshot behind a stalled uplink.
+	probe.hostSocket().close();
+	await waitFor(() => probe.hostSocket().readyState === FakeWebSocket.OPEN, "host never reconnected", 8_000);
+	const successor = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	cleanups.push(() => successor.close());
+	const received: CollabFrame[] = [];
+	successor.onFrame = frame => received.push(frame);
+	successor.onOpen = () => successor.send({ t: "hello", proto: COLLAB_PROTO, name: "successor", writeToken });
+	successor.connect();
+	await waitFor(() => joins() >= 2, "host never handled the successor");
+	await waitFor(() => received.some(frame => frame.t === "snapshot-chunk"), "successor's snapshot never started");
+	expect(received.some(frame => frame.t === "snapshot-chunk" && frame.final)).toBe(false);
+
+	turn.reject(new Error("turn failed"));
+	await Bun.sleep(100);
+
+	// The successor's replication survives: a stale line addressed to an id whose
+	// owner left is not worth its share of the queue, let alone its welcome.
+	expect(seen.notices.filter(notice => notice.includes("fell too far behind"))).toEqual([]);
+	expect(received.filter(frame => frame.t === "error")).toEqual([]);
+	const hostWs = probe.hostSocket();
+	const drain = setInterval(() => {
+		hostWs.bufferedAmount = 0;
+	}, 10);
+	try {
+		await waitFor(
+			() => received.some(frame => frame.t === "snapshot-chunk" && frame.final),
+			"successor never completed its snapshot",
+		);
+	} finally {
+		clearInterval(drain);
+	}
+	const delivered = received
+		.filter(frame => frame.t === "snapshot-chunk")
+		.flatMap(frame => frame.entries.map(entry => entry.id));
+	expect(delivered).toEqual(snapshot.entries.map(entry => entry.id));
+}, 30_000);
+
 it("ignores a hello that finishes decrypting after its sender's peer-left", async () => {
 	const relay = installInMemoryRelay();
 	const probe = instrumentRelay(relay, { throttle: false });

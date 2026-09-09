@@ -100,6 +100,132 @@ it("settles a guest ask the queue refused instead of awaiting an answer", async 
 	expect(settled).toEqual({ kind: "unavailable" });
 }, 30_000);
 
+/** Past the peer's share, so the queue takes some of these and then sheds the peer holding them. */
+const ASK_FLOOD = 40;
+
+it("settles the asks a shed guest was holding", async () => {
+	const relay = installInMemoryRelay();
+	const probe = instrumentRelay(relay, { throttle: true });
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
+	cleanups.push(() => void host.stop("test done"));
+
+	await host.start("ws://localhost:8788");
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+
+	const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	cleanups.push(() => guest.close());
+	const received: CollabFrame[] = [];
+	guest.onFrame = frame => received.push(frame);
+	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "answerer", writeToken });
+	guest.connect();
+	await waitFor(
+		() => seen.notices.some(notice => notice.includes("joined the collab session")),
+		"host never welcomed the guest",
+	);
+	await waitFor(
+		() => probe.hostSocket().bufferedAmount >= HIGH_WATER_MARK,
+		"the host transport never stalled with the snapshot still queued",
+	);
+
+	// Every one of these is offered to a writable guest, so every one is
+	// registered as an outstanding ask. The queue takes the first of them behind
+	// the stalled snapshot and then sheds the peer holding the lot.
+	const asks: Promise<unknown>[] = [];
+	for (let i = 0; i < ASK_FLOOD; i++) {
+		const ask = host.requestGuestUi({ kind: "select", title: `ask ${i}`, options: [{ label: "yes" }] });
+		if (!ask) throw new Error(`host stopped offering asks to the writable guest at ${i}`);
+		asks.push(ask);
+	}
+	await waitFor(
+		() => seen.notices.some(notice => notice.includes("fell too far behind")),
+		"host never shed the guest holding the asks",
+	);
+
+	// Nothing was delivered and nobody is left to answer, so no caller may still
+	// be waiting: `requestGuestUi` has no timeout of its own.
+	expect(received.filter(frame => frame.t === "ui-request")).toEqual([]);
+	expect(host.participants.filter(participant => participant.role === "guest")).toEqual([]);
+	const settled = await Promise.race([Promise.all(asks), Bun.sleep(2_000).then(() => "still waiting" as const)]);
+	expect(settled).toEqual(asks.map(() => ({ kind: "unavailable" })));
+}, 30_000);
+
+it("settles an ask the guest holding it left with", async () => {
+	const relay = installInMemoryRelay();
+	instrumentRelay(relay, { throttle: false });
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
+	cleanups.push(() => void host.stop("test done"));
+
+	await host.start("ws://localhost:8788");
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+
+	const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	cleanups.push(() => guest.close());
+	const received: CollabFrame[] = [];
+	guest.onFrame = frame => received.push(frame);
+	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "answerer", writeToken });
+	guest.connect();
+	await waitFor(
+		() => seen.notices.some(notice => notice.includes("joined the collab session")),
+		"host never welcomed the guest",
+	);
+
+	// Delivered this time: the dialog is on the guest's screen when it closes the
+	// tab, which leaves the ask with no recipient that can answer it.
+	const ask = host.requestGuestUi({ kind: "select", title: "pick one", options: [{ label: "a" }] });
+	if (!ask) throw new Error("host did not offer the ask to the writable guest");
+	await waitFor(() => received.some(frame => frame.t === "ui-request"), "guest never received the dialog");
+
+	guest.close();
+	await waitFor(
+		() => seen.notices.some(notice => notice.includes("left the collab session")),
+		"host never observed the guest leaving",
+	);
+	const settled = await Promise.race([ask, Bun.sleep(2_000).then(() => "still waiting" as const)]);
+	expect(settled).toEqual({ kind: "unavailable" });
+}, 30_000);
+
+it("settles an ask whose holder gave up write permission", async () => {
+	const relay = installInMemoryRelay();
+	instrumentRelay(relay, { throttle: false });
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const host = new CollabHost(makeHostContext(makeSnapshot(), seen));
+	cleanups.push(() => void host.stop("test done"));
+
+	await host.start("ws://localhost:8788");
+	const parsed = parseCollabLink(host.link);
+	if ("error" in parsed) throw new Error(parsed.error);
+	const key = await importRoomKey(parsed.key);
+	const writeToken = parsed.writeToken ? Buffer.from(parsed.writeToken).toString("base64url") : undefined;
+	const joins = () => seen.notices.filter(notice => notice.includes("joined the collab session")).length;
+
+	const guest = new CollabSocket({ wsUrl: parsed.wsUrl, role: "guest", key });
+	cleanups.push(() => guest.close());
+	const received: CollabFrame[] = [];
+	guest.onFrame = frame => received.push(frame);
+	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name: "answerer", writeToken });
+	guest.connect();
+	await waitFor(() => joins() >= 1, "host never welcomed the writable guest");
+
+	const ask = host.requestGuestUi({ kind: "select", title: "pick one", options: [{ label: "a" }] });
+	if (!ask) throw new Error("host did not offer the ask to the writable guest");
+	await waitFor(() => received.some(frame => frame.t === "ui-request"), "guest never received the dialog");
+
+	// The same peer says hello again without the write token. A read-only peer's
+	// `ui-response` is rejected, so it is no longer somebody who can answer.
+	guest.send({ t: "hello", proto: COLLAB_PROTO, name: "answerer" });
+	await waitFor(() => joins() >= 2, "host never handled the second hello");
+	const settled = await Promise.race([ask, Bun.sleep(2_000).then(() => "still waiting" as const)]);
+	expect(settled).toEqual({ kind: "unavailable" });
+}, 30_000);
+
 it("does not answer a transcript request at an id retired while it was reading", async () => {
 	const relay = installInMemoryRelay();
 	const probe = instrumentRelay(relay, { throttle: false });
@@ -122,6 +248,9 @@ it("does not answer a transcript request at an id retired while it was reading",
 		() => seen.notices.some(notice => notice.includes("joined the collab session")),
 		"host never welcomed the guest",
 	);
+	// The welcome is sealed asynchronously, so wait for the id to appear on the
+	// wire rather than reading whatever has been forwarded by now.
+	await waitFor(() => probe.targets.some(peer => peer !== 0), "no targeted frame identified the guest's peer id");
 	const peerId = probe.targets.find(peer => peer !== 0);
 	if (!peerId) throw new Error("no targeted frame identified the guest's peer id");
 

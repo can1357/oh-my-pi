@@ -199,7 +199,8 @@ export class CollabSocket {
 	 *
 	 * Only for work that finishes in bounded time: retention is why this is safe,
 	 * and a capture held across something as long as a model turn would let a
-	 * departed peer pin a record for the length of it.
+	 * departed peer pin a record for the length of it. Use
+	 * {@link bestEffortAddressee} for work that cannot be bounded.
 	 */
 	addressee(peerId: number): () => boolean {
 		const generation = this.#roomGeneration;
@@ -208,12 +209,42 @@ export class CollabSocket {
 		return () => {
 			if (released) return false;
 			released = true;
-			const outstanding = (this.#peerOps.get(peerId) ?? 1) - 1;
-			if (outstanding > 0) this.#peerOps.set(peerId, outstanding);
-			else this.#peerOps.delete(peerId);
-			this.#trimRetired();
-			return generation === this.#roomGeneration && this.isServing(peerId);
+			const sameRoom = generation === this.#roomGeneration;
+			// Read before releasing. The release drops this capture's own protection
+			// against eviction, and the trim it runs would then forget the very
+			// retirement the answer turns on — reporting a departed peer as the asker.
+			const stillTheAsker = sameRoom && this.isServing(peerId);
+			// And release only into this capture's own room: #resetForRecreatedRoom
+			// already cleared the map, so an old-room capture has nothing of its own
+			// left here, while the id it held may now carry a live capture for the
+			// new room's occupant. Decrementing that one would unprotect a record
+			// somebody is still owed a reply against.
+			if (sameRoom) {
+				const outstanding = (this.#peerOps.get(peerId) ?? 1) - 1;
+				if (outstanding > 0) this.#peerOps.set(peerId, outstanding);
+				else this.#peerOps.delete(peerId);
+				this.#trimRetired();
+			}
+			return stillTheAsker;
 		};
+	}
+
+	/**
+	 * Room-scoped addressee check for a reply whose latency has no bound. The
+	 * returned predicate reads the room, holds nothing, and may be called
+	 * whenever the answer finally exists.
+	 *
+	 * {@link addressee} is the exact one and the one to prefer: it pins the
+	 * retirement record, which is what makes its answer exact — and also why it
+	 * is only for bounded work. This keeps the room instead, so a departure the
+	 * record still remembers is suppressed and a room boundary always is. Past
+	 * eviction, in the same room, a retired id reads as served again; a relay
+	 * never reissues an id inside one room, so the residual cost is one stale
+	 * line the relay drops on arrival rather than a reply to the wrong peer.
+	 */
+	bestEffortAddressee(peerId: number): () => boolean {
+		const generation = this.#roomGeneration;
+		return () => generation === this.#roomGeneration && this.isServing(peerId);
 	}
 
 	/** Fires on every reconnect: the relay recreated the room and reissues peer ids from 1. */

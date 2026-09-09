@@ -145,7 +145,17 @@ export class CollabHost {
 	 * An old id that maps to nothing is harmless.
 	 */
 	#uiReqSeq = 0;
-	#pendingUi = new Map<number, { request: CollabUiRequest; settle(result: CollabGuestUiResult): void }>();
+	/**
+	 * Outstanding asks. `recipients` is the set of peers that were handed the
+	 * dialog and can still answer it — the queue admitting a `ui-request` is what
+	 * puts a peer in, and losing write permission, being shed or leaving is what
+	 * takes it out. Emptying it settles the ask, because the caller awaits this
+	 * with no timeout of its own.
+	 */
+	#pendingUi = new Map<
+		number,
+		{ request: CollabUiRequest; recipients: Set<number>; settle(result: CollabGuestUiResult): void }
+	>();
 	#lastStateJson = "";
 	#stateDebounce: Timer | null = null;
 	#streamingInterval: Timer | null = null;
@@ -202,15 +212,19 @@ export class CollabHost {
 		const onAbort = (): void => settle({ kind: "unavailable" });
 		if (signal?.aborted) return Promise.resolve({ kind: "unavailable" });
 		signal?.addEventListener("abort", onAbort, { once: true });
-		this.#pendingUi.set(reqId, { request: fullRequest, settle });
-		// A registration only means something if somebody was asked. The queue can
+		const recipients = new Set<number>();
+		this.#pendingUi.set(reqId, { request: fullRequest, recipients, settle });
+		// A registration only means something if somebody was asked, and it stops
+		// meaning anything once nobody who was asked can answer. The queue can
 		// refuse a targeted frame under pressure, and the caller awaits this with no
 		// timeout of its own, so an ask nobody received settles here instead of
 		// waiting for a reply that cannot come. A partial delivery still stands: one
-		// guest holding the dialog is enough to answer it.
-		if (this.#sendWritablePeers({ t: "ui-request", request: fullRequest }) === 0) {
-			settle({ kind: "unavailable" });
+		// guest holding the dialog is enough to answer it, which is why the
+		// recipients are tracked rather than counted.
+		for (const peerId of this.#sendWritablePeers({ t: "ui-request", request: fullRequest })) {
+			recipients.add(peerId);
 		}
+		if (recipients.size === 0) settle({ kind: "unavailable" });
 		return promise;
 	}
 
@@ -221,15 +235,29 @@ export class CollabHost {
 		return false;
 	}
 
-	/** @returns how many writable peers the frame was admitted for. */
-	#sendWritablePeers(frame: CollabFrame): number {
+	/** @returns the writable peers the frame was admitted for. */
+	#sendWritablePeers(frame: CollabFrame): number[] {
 		const socket = this.#socket;
-		if (!socket) return 0;
-		let admitted = 0;
+		if (!socket) return [];
+		const admitted: number[] = [];
 		for (const [peerId, peer] of this.#peers) {
-			if (peer.canWrite && socket.send(frame, peerId)) admitted++;
+			if (peer.canWrite && socket.send(frame, peerId)) admitted.push(peerId);
 		}
 		return admitted;
+	}
+
+	/**
+	 * Drop {@link peer} from every outstanding ask, settling the ones it was the
+	 * last recipient of. Called wherever a peer stops being able to answer:
+	 * departure, a shed, or a `hello` that gives up write permission. Without it
+	 * an ask the queue admitted counts as delivered for ever, and its caller waits
+	 * for a reply from somebody the host has already written off.
+	 */
+	#dropAskRecipient(peer: number): void {
+		for (const pending of this.#pendingUi.values()) {
+			if (!pending.recipients.delete(peer)) continue;
+			if (pending.recipients.size === 0) pending.settle({ kind: "unavailable" });
+		}
 	}
 
 	async start(relayUrl: string, webUrl = ""): Promise<void> {
@@ -474,8 +502,15 @@ export class CollabHost {
 		socket.sendBatch(this.#welcomeWithSnapshot(welcome, entries), fromPeer, snapshotBytes);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
-				socket.send({ t: "ui-request", request: pending.request }, fromPeer);
+				if (socket.send({ t: "ui-request", request: pending.request }, fromPeer)) {
+					pending.recipients.add(fromPeer);
+				}
 			}
+		} else {
+			// A repeated hello without the write token demotes the peer, and a
+			// read-only peer's answer is rejected, so it is no longer a recipient of
+			// anything it was handed while it could still write.
+			this.#dropAskRecipient(fromPeer);
 		}
 		this.#ctx.session.emitNotice(
 			"info",
@@ -492,7 +527,10 @@ export class CollabHost {
 	 * terminates it, so a guest given one without the other finalizes a replica it
 	 * believes is complete. Yielding both from one generator makes them a single
 	 * queue entry, so admission, supersede and cancellation are one decision and a
-	 * partial admission cannot be expressed.
+	 * partial admission cannot be expressed. It is also what lets a snapshot past
+	 * the whole send budget ship at all: the budget admits an entry with nothing
+	 * ahead of it, and a welcome queued on the line before would be that
+	 * something.
 	 */
 	*#welcomeWithSnapshot(
 		welcome: CollabFrame,
@@ -559,6 +597,12 @@ export class CollabHost {
 			this.#ctx.ui.requestRender();
 			this.#scheduleStateBroadcast();
 		}
+		// A turn can outlast the guest by minutes, which is too long to hold a
+		// retirement record for, so this reply is best-effort. Captured up front all
+		// the same: `isServing` read at the reply site knows nothing about room
+		// boundaries, and a reconnect reissues this id to somebody else, whose own
+		// share of the queue a burst of stale errors is enough to spend.
+		const stillTheAsker = this.#socket?.bestEffortAddressee(fromPeer);
 		this.#ctx.session
 			.promptCustomMessage(
 				{
@@ -572,12 +616,8 @@ export class CollabHost {
 			)
 			.catch(err => {
 				logger.warn("collab guest prompt failed", { error: String(err) });
-				// A turn can outlast the guest by minutes, which is too long to hold a
-				// retirement record for, so this is best-effort: a departure the record
-				// still remembers suppresses it, and past that the reply is one stale
-				// error line.
-				if (this.#socket?.isServing(fromPeer)) {
-					this.#socket.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
+				if (stillTheAsker?.()) {
+					this.#socket?.send({ t: "error", message: `prompt failed: ${String(err)}` }, fromPeer);
 				}
 			});
 	}
@@ -627,6 +667,7 @@ export class CollabHost {
 	#handlePeerLeft(peer: number): void {
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
+		this.#dropAskRecipient(peer);
 		if (name) this.#ctx.session.emitNotice("info", `${name} left the collab session`, "collab");
 		this.#updateStatusSegment();
 		this.#scheduleStateBroadcast();
@@ -637,6 +678,9 @@ export class CollabHost {
 		if (this.#stopped) return;
 		const name = this.#peers.get(peer)?.name;
 		this.#peers.delete(peer);
+		// Before the resync error, so the `ui-request-end` frames a settle fans out
+		// are not addressed to the peer that just lost its backlog.
+		this.#dropAskRecipient(peer);
 		this.#socket?.send({ t: "error", message: "the host discarded your backlog; rejoin to resync" }, peer);
 		if (name) {
 			this.#ctx.session.emitNotice(
@@ -730,10 +774,13 @@ export class CollabHost {
 			this.#socket?.send({ t: "error", message: `agent ${agentId}: advisor transcripts are read-only` }, fromPeer);
 			return;
 		}
+		// Best-effort and room-scoped for the same reason as a failed prompt: agent
+		// work has no bound, and past a reconnect this id is somebody else's.
+		const stillTheAsker = this.#socket?.bestEffortAddressee(fromPeer);
 		const fail = (err: unknown) => {
 			logger.warn("collab agent-cmd failed", { cmd, agentId, error: String(err) });
-			if (!this.#socket?.isServing(fromPeer)) return;
-			this.#socket.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
+			if (!stillTheAsker?.()) return;
+			this.#socket?.send({ t: "error", message: `agent ${agentId}: ${String(err)}` }, fromPeer);
 		};
 		switch (cmd) {
 			case "chat": {
