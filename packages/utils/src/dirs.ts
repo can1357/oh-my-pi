@@ -383,9 +383,18 @@ class DirResolver {
 		return result;
 	}
 
+	/** Preserve the no-I/O fast path for the usual omitted or exact active path. */
+	isActiveAgentDir(userAgentDir: string | undefined): boolean {
+		return (
+			!userAgentDir ||
+			userAgentDir === this.agentDir ||
+			normalizePathForComparison(userAgentDir) === normalizePathForComparison(this.agentDir)
+		);
+	}
+
 	/** Agent subdirectory, with optional XDG override. */
 	agentSubdir(userAgentDir: string | undefined, subdir: string, xdg?: XdgCategory): string {
-		if (!userAgentDir || userAgentDir === this.agentDir) {
+		if (this.isActiveAgentDir(userAgentDir)) {
 			const cached = this.#agentCache.get(subdir);
 			if (cached) return cached;
 			const base = xdg ? this.#agentDirs[xdg] : this.agentDir;
@@ -393,7 +402,7 @@ class DirResolver {
 			this.#agentCache.set(subdir, result);
 			return result;
 		}
-		return path.join(userAgentDir, subdir);
+		return path.join(userAgentDir!, subdir);
 	}
 }
 
@@ -795,8 +804,15 @@ export function getNativesDir(): string {
 	return dirs.rootSubdir("natives", "cache");
 }
 
-/** Get the stats database path (~/.omp/stats.db). */
-export function getStatsDbPath(): string {
+/**
+ * Get the stats database path (~/.omp/stats.db), honoring profile and XDG resolution.
+ * An omitted or active agent directory uses the normal root-level database;
+ * a different custom directory uses <agentDir>/stats.db, matching GC's historical scope.
+ */
+export function getStatsDbPath(agentDir?: string): string {
+	if (!dirs.isActiveAgentDir(agentDir)) {
+		return path.join(agentDir!, "stats.db");
+	}
 	return dirs.rootSubdir("stats.db", "data");
 }
 
@@ -871,6 +887,11 @@ export function getComposerCacheDir(agentDir?: string): string {
 /** Get the sessions directory (~/.omp/agent/sessions). */
 export function getSessionsDir(agentDir?: string): string {
 	return dirs.agentSubdir(agentDir, "sessions", "data");
+}
+
+/** Get archived sessions alongside the active sessions tree. */
+export function getArchivedSessionsDir(agentDir?: string): string {
+	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
 }
 
 /** Get the content-addressed blob store directory (~/.omp/agent/blobs). */

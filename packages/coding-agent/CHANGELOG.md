@@ -2,8 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Storage reports safely render control characters and share blob classification and stats database paths with GC.
+- Storage reports recognize active agent directory aliases and keep session-local and nested blob-store artifacts in their correct categories.
+- Storage reports classify legacy journal backups consistently with GC, including empty backup suffixes.
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
 ### Added
 
+- Added `omp gc --report` to inspect storage sizes and large files without running maintenance or changing files.
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
 - `/loop` accepts `--until '<cmd>'` / `--while '<cmd>'` to gate each iteration on a shell command's exit status, so a loop can stop on real project state instead of only a count or duration. ([#10858](https://github.com/can1357/oh-my-pi/pull/10858) by [@andyhite](https://github.com/andyhite))
 

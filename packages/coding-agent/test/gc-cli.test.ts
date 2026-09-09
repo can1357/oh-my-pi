@@ -6,6 +6,7 @@ import * as path from "node:path";
 import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import { type GcResult, runGcCommand } from "@oh-my-pi/pi-coding-agent/cli/gc-cli";
+import { collectStorageReport } from "@oh-my-pi/pi-coding-agent/cli/gc-report";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import {
 	getAgentDir,
@@ -142,6 +143,64 @@ describe("runGcCommand blob sweep", () => {
 		expect(result.blobs?.wouldDelete).toBe(1);
 		expect(result.blobs?.deleted).toBe(0);
 		expect(await Bun.file(blob).exists()).toBe(true);
+	});
+
+	test("scans legacy journal backups using the shared filename classifier", async () => {
+		const referencedHash = hashFor("legacy-backup-reference");
+		const referenced = await writeBlob(root, referencedHash, "referenced");
+		await agePath(referenced);
+		const sessionDir = path.join(getSessionsDir(root), "project");
+		await fs.mkdir(sessionDir, { recursive: true });
+		await Bun.write(
+			path.join(sessionDir, "legacy.jsonl..bak"),
+			JSON.stringify({ type: "message", message: { role: "user", content: `blob:sha256:${referencedHash}` } }),
+		);
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		expect(result.blobs?.referenced).toBe(1);
+		expect(result.blobs?.deleted).toBe(0);
+		expect(await Bun.file(referenced).exists()).toBe(true);
+	});
+
+	test("storage reports and blob GC agree on canonical files, typed sidecars, and auxiliary files", async () => {
+		const hash = "a".repeat(64);
+		const otherHash = "b".repeat(64);
+		const blobNames = [hash, `${hash}.PNG`, `${hash}.9.a_-`, `${otherHash}.x`, `${otherHash}.${"x".repeat(32)}`];
+		const auxiliaryNames = [
+			"index.json",
+			"metadata.json",
+			"C".repeat(64),
+			`${"D".repeat(64)}.png`,
+			"e".repeat(63),
+			"e".repeat(65),
+			`${hash}..png`,
+			`${hash}._png`,
+			`${hash}.-png`,
+			`${otherHash}.${"x".repeat(33)}`,
+			path.join("nested", hash),
+			path.join("nested", `${otherHash}.png`),
+		];
+		for (const name of [...blobNames, ...auxiliaryNames]) {
+			await agePath(await writeBlob(root, name, name));
+		}
+		const blobBytes = blobNames.reduce((total, name) => total + Buffer.byteLength(name), 0);
+		const auxiliaryBytes = auxiliaryNames.reduce((total, name) => total + Buffer.byteLength(name), 0);
+		const report = await collectStorageReport(root);
+		expect(report.categories.blobs).toEqual({ files: blobNames.length, logicalBytes: blobBytes });
+		expect(report.categories.blobAuxiliary).toEqual({ files: auxiliaryNames.length, logicalBytes: auxiliaryBytes });
+
+		const result = await runGcCommand({ flags: { agentDir: root, blobs: true, apply: true } });
+		expect(result.blobs).toEqual({
+			referenced: 0,
+			candidates: 2,
+			wouldDelete: blobNames.length,
+			deleted: blobNames.length,
+			bytes: blobBytes,
+			errors: [],
+		});
+		expect((await fs.readdir(getBlobsDir(root))).sort()).toEqual(
+			[...new Set(auxiliaryNames.map(name => name.split(path.sep)[0]!))].sort(),
+		);
+		expect(await Bun.file(path.join(getBlobsDir(root), "nested", hash)).text()).toBe(path.join("nested", hash));
 	});
 
 	test("--apply deletes unreferenced blobs and keeps referenced blobs", async () => {

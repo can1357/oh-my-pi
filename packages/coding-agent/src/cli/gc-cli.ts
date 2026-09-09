@@ -5,6 +5,7 @@ import { gunzipSync, gzipSync } from "node:zlib";
 import { withStatsSyncLock } from "@oh-my-pi/omp-stats/aggregator";
 import {
 	getAgentDir,
+	getArchivedSessionsDir,
 	getBlobsDir,
 	getHistoryDbPath,
 	getModelDbPath,
@@ -14,15 +15,12 @@ import {
 } from "@oh-my-pi/pi-utils";
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
-import { BLOB_HASH_RE } from "../session/blob-store";
+import { BLOB_FILE_RE, BLOB_HASH_RE } from "../session/blob-store";
+import { SESSION_JOURNAL_GLOBS } from "../session/session-paths";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 
-const BLOB_FILE_RE = /^([a-f0-9]{64})(?:\.[A-Za-z0-9][A-Za-z0-9._-]{0,31})?$/;
 const BLOB_REF_RE = /\bblob:sha256:([a-f0-9]{64})\b/gi;
-const JSONL_GLOB = new Bun.Glob("**/*.jsonl");
-const JSONL_GZ_GLOB = new Bun.Glob("**/*.jsonl.gz");
-const JSONL_BACKUP_GLOB = new Bun.Glob("**/*.jsonl.*.bak");
 const ACTIVE_STATUSES: ReadonlySet<SessionStatus> = new Set(["pending", "interrupted", "unknown"]);
 const DAY_MS = 86_400_000;
 const GC_WRITE_GRACE_MS = 5 * 60_000;
@@ -198,10 +196,6 @@ export function collectGcErrors(result: GcResult): string[] {
 	];
 }
 
-function getArchivedSessionsDir(agentDir: string): string {
-	return path.join(path.dirname(getSessionsDir(agentDir)), "archive", "sessions");
-}
-
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -245,7 +239,7 @@ async function readTextIfPresent(file: string): Promise<string> {
 
 async function collectJsonlFiles(root: string): Promise<string[]> {
 	try {
-		const files = await Array.fromAsync(JSONL_GLOB.scan(root), name => path.join(root, name));
+		const files = await Array.fromAsync(SESSION_JOURNAL_GLOBS.plain.scan(root), name => path.join(root, name));
 		files.sort();
 		return files;
 	} catch (error) {
@@ -256,7 +250,7 @@ async function collectJsonlFiles(root: string): Promise<string[]> {
 
 async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
 	try {
-		const files = await Array.fromAsync(JSONL_GZ_GLOB.scan(root), name => path.join(root, name));
+		const files = await Array.fromAsync(SESSION_JOURNAL_GLOBS.compressed.scan(root), name => path.join(root, name));
 		files.sort();
 		return files;
 	} catch (error) {
@@ -267,7 +261,7 @@ async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
 
 async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	try {
-		const files = await Array.fromAsync(JSONL_BACKUP_GLOB.scan(root), name => path.join(root, name));
+		const files = await Array.fromAsync(SESSION_JOURNAL_GLOBS.backup.scan(root), name => path.join(root, name));
 		files.sort();
 		return files;
 	} catch (error) {
@@ -1159,10 +1153,7 @@ async function cleanupStatsRowsForArchivedSessions(
 	newlyArchivedSessions: SessionInfo[],
 	result: ArchiveGcResult,
 ): Promise<void> {
-	const dbPath =
-		path.resolve(options.agentDir) === path.resolve(getAgentDir())
-			? getStatsDbPath()
-			: path.join(options.agentDir, "stats.db");
+	const dbPath = getStatsDbPath(options.agentDir);
 	if (!(await pathExists(dbPath))) return;
 	const sessionsRoot = getSessionsDir(options.agentDir);
 
