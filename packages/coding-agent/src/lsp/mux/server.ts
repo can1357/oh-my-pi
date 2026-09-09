@@ -196,6 +196,12 @@ export class LspMuxServer {
 	#activityClock = Date.now();
 	#shuttingDown = false;
 	#shutdownPromise?: Promise<void>;
+	// Stops still running, kept here rather than only on the server instance:
+	// a server is retired from `#servers` as soon as its root termination
+	// finishes, which can be well before its helper sweep does, so enumerating
+	// the tracked servers alone would let shutdown skip — and never report — a
+	// sweep that is still going or about to fail.
+	readonly #stopsInFlight = new Set<Promise<void>>();
 
 	/** Number of currently connected mux links, including unbound ping links. */
 	get sessionCount(): number {
@@ -235,7 +241,8 @@ export class LspMuxServer {
 		this.#shuttingDown = true;
 		clearTimeout(this.#idleTimer);
 		for (const session of Array.from(this.#sessions)) session.socket.destroy();
-		const results = await Promise.allSettled([...this.#servers].map(server => this.#stopServer(server)));
+		const stops = [...this.#servers].map(server => this.#stopServer(server));
+		const results = await Promise.allSettled(new Set([...stops, ...this.#stopsInFlight]));
 		const listener = this.#netServer;
 		this.#netServer = undefined;
 		if (listener) {
@@ -749,8 +756,11 @@ export class LspMuxServer {
 		// reporting — a helper that is still terminating or ultimately times out.
 		if (server.stopPromise) return server.stopPromise;
 		if (server.terminationPromise) return server.terminationPromise;
-		server.stopPromise = this.#performStopServer(server);
-		return server.stopPromise;
+		const stop = this.#performStopServer(server);
+		this.#stopsInFlight.add(stop);
+		void stop.catch(() => {}).finally(() => this.#stopsInFlight.delete(stop));
+		server.stopPromise = stop;
+		return stop;
 	}
 
 	async #performStopServer(server: ServerInstance): Promise<void> {

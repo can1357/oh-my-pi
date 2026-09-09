@@ -47,11 +47,19 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 			const pidFile = path.join(os.tmpdir(), `omp-ptree-pid-${stamp}`);
 			const report = readerState === "unread" ? `echo $! > ${pidFile}` : "echo $!";
 			const filler = readerState === "paused" ? "sleep 0.05; echo filler;" : "";
+			// The survivor keeps the root's stdout for the raw case, which is the one
+			// whose point is a descendant still holding that pipe once the root is
+			// gone. The states that need an EOF cannot afford a second writer.
+			const survivorPipes = readerState === "raw" ? "2>/dev/null" : ">/dev/null 2>&1";
 			// Closing both pipes lets the stdout consumer and the internal stderr
 			// drain reach EOF while the root is still alive, so these really are
 			// the zero-reader states rather than ones whose drains never finished.
 			const close = readerState === "eof" || readerState === "unread" ? "exec 1>&- 2>&-;" : "";
-			const script = `sleep 30 >/dev/null 2>&1 & ${report}; ${filler} ${close} while [ ! -f ${goFile} ]; do sleep 0.01; done`;
+			// Written last, so observing it in the drained tail is evidence that
+			// everything before it — including the buffered filler — has been
+			// written, instead of waiting a fixed time and assuming so.
+			const sentinel = "stderr-drained";
+			const script = `sleep 30 ${survivorPipes} & ${report}; ${filler} echo ${sentinel} >&2; ${close} while [ ! -f ${goFile} ]; do sleep 0.01; done`;
 			const child = spawn(["/bin/sh", "-c", script], { detached: true });
 			// Declared by inference rather than annotation: Bun's reader carries an
 			// extra `readMany`, so the DOM lib type is not assignable to it.
@@ -70,9 +78,11 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 					await reader?.cancel();
 					reader = undefined;
 				}
-				// Long enough for the buffered chunk to land, and for the internal
-				// drains to settle on the states that closed their pipes.
-				await Bun.sleep(readerState === "paused" ? 150 : 50);
+				const drained = Date.now() + 5_000;
+				while (!child.peekStderr().includes(sentinel)) {
+					if (Date.now() > drained) throw new Error("Internal stderr drain never reported");
+					await Bun.sleep(5);
+				}
 				expect(descendant.status()).toBe(ProcessStatus.Running);
 
 				fs.writeFileSync(goFile, "");

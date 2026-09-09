@@ -13,7 +13,7 @@
 ### Fixed
 
 - Fixed dead-root cleanup broadcasting SIGKILL to whatever process group had inherited the exited leader's pid, and killing that group's members individually; without the pidfd process-group scope both now require the pinned leader's identity to still occupy the pid.
-- Fixed process-tree termination reporting success over a process group it could not attribute. An unattributable group is no longer read as an empty one, so a group member reparented out of the root's subtree before capture can no longer pass as a completed termination.
+- Fixed process-tree termination reporting success over a process group it could not attribute. An unattributable group is no longer read as an empty one, so a group member reparented out of the root's subtree before capture can no longer pass as a completed termination. A process-table scan that comes back empty for a group the kernel does resolve counts as unattributable too, since that is what a failed `/proc` enumeration looks like.
 
 ## [18.1.13] - 2026-09-07
 

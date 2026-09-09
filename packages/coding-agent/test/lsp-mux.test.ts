@@ -423,6 +423,55 @@ describe("LspMuxServer", () => {
 	);
 
 	it.skipIf(process.platform === "win32")(
+		"reports a helper sweep still running after its server was retired",
+		async () => {
+			// A server is retired the moment its root termination finishes, which is
+			// before its helper sweep does, so by the time shutdown enumerates the
+			// tracked servers there is nothing left to enumerate. The stop itself has
+			// to be what shutdown waits on, or a helper that is still being swept —
+			// and about to fail — is neither waited for nor reported.
+			const helperFile = path.join(tmpDir, "helper.pid");
+			connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
+			const { client } = await link();
+			await initialize(client);
+			const helperPid = await readPid(helperFile);
+			const sweeping = Promise.withResolvers<void>();
+			const release = Promise.withResolvers<void>();
+			const killTreeAndWait = Process.prototype.killTreeAndWait;
+			const helperSpy = spyOn(Process.prototype, "killTreeAndWait").mockImplementation(
+				async function (this: Process, options) {
+					if (this.pid !== helperPid) return killTreeAndWait.call(this, options);
+					sweeping.resolve();
+					await release.promise;
+					return false;
+				},
+			);
+			const schedule = globalThis.setTimeout;
+			const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+				handler: () => void,
+				delay?: number,
+				...args: unknown[]
+			) => schedule(handler, delay === 5 * 60 * 1_000 ? 1 : delay, ...args)) as typeof setTimeout);
+			try {
+				client.destroy();
+				await withTimeout(sweeping.promise, "idle stop reaching the helper sweep", 6_000);
+				await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "server retirement", 4_000);
+				const shutdown = server.shutdown();
+				release.resolve();
+				await expect(shutdown).rejects.toThrow("LSP mux shutdown incomplete");
+			} finally {
+				release.resolve();
+				helperSpy.mockRestore();
+				timerSpy.mockRestore();
+				killPid(helperPid);
+				// The memoized rejection would resurface in afterEach's own shutdown.
+				server = new LspMuxServer();
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
 		"bounds helper termination by the hard-termination budget",
 		async () => {
 			// Asserted on the budget handed to the native wait rather than on elapsed
