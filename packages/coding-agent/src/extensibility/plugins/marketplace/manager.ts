@@ -281,6 +281,19 @@ export class MarketplaceManager {
 			marketplaceClonePath,
 			catalogMetadata: catalog.metadata,
 		});
+		const validationCachePath = path.join(os.tmpdir(), "omp-marketplace-validation");
+		if (
+			typeof pluginEntry.lspServers === "string" &&
+			!pathIsWithin(validationCachePath, path.resolve(validationCachePath, pluginEntry.lspServers))
+		) {
+			throw new Error(`Plugin "${pluginEntry.name}" lspServers path escapes the plugin directory`);
+		}
+		if (
+			typeof pluginEntry.dapAdapters === "string" &&
+			!pathIsWithin(validationCachePath, path.resolve(validationCachePath, pluginEntry.dapAdapters))
+		) {
+			throw new Error(`Plugin "${pluginEntry.name}" dapAdapters path escapes the plugin directory`);
+		}
 
 		const pluginId = buildPluginId(name, marketplace);
 		const instReg = await readInstalledPluginsRegistry(registryPath);

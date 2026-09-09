@@ -53,6 +53,15 @@ describe("resolvePluginSource", () => {
 		).rejects.toThrow(/escapes the cloned repository/);
 	});
 
+	it("allows git-subdir parent segments that remain contained", async () => {
+		await expect(
+			validatePluginSource(
+				makeEntry({ source: "git-subdir", url: "owner/repo", path: "packages/../plugins/foo" }),
+				{},
+			),
+		).resolves.toBeUndefined();
+	});
+
 	it("throws when source string would escape marketplace root", async () => {
 		// "../../escape" does not start with "./" — hits the non-relative guard
 		const entry = makeEntry("../../escape");

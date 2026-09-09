@@ -617,6 +617,20 @@ describe("MarketplaceManager", () => {
 		).resolves.toBeUndefined();
 	});
 
+	it("validateInstallPlugin rejects embedded config paths outside the plugin directory", async () => {
+		await ctx.manager.addMarketplace(FIXTURE_DIR);
+		const registry = await readMarketplacesRegistry(path.join(ctx.tmpDir, "marketplaces.json"));
+		const catalogPath = registry.marketplaces[0]?.catalogPath;
+		if (!catalogPath) throw new Error("test marketplace catalog path is missing");
+		const catalog = JSON.parse(fs.readFileSync(catalogPath, "utf8")) as { plugins: Array<Record<string, unknown>> };
+		catalog.plugins[0].lspServers = "../outside.json";
+		fs.writeFileSync(catalogPath, JSON.stringify(catalog));
+
+		await expect(ctx.manager.validateInstallPlugin("hello-plugin", "test-marketplace")).rejects.toThrow(
+			/lspServers path escapes the plugin directory/,
+		);
+	});
+
 	it("installPlugin with force:true → replaces existing", async () => {
 		await ctx.manager.addMarketplace(FIXTURE_DIR);
 		const first = await ctx.manager.installPlugin("hello-plugin", "test-marketplace");
