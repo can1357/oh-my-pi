@@ -16,6 +16,7 @@ import {
 import { Settings } from "../config/settings";
 import { getDefault } from "../config/settings-schema";
 import { BLOB_FILE_RE, BLOB_HASH_RE } from "../session/blob-store";
+import { isSessionJournalFilename } from "../session/session-paths";
 import { listSessionsReadOnly, type SessionInfo, type SessionStatus } from "../session/session-listing";
 import { FileSessionStorage } from "../session/session-storage";
 
@@ -243,7 +244,7 @@ async function collectJsonlFiles(root: string): Promise<string[]> {
 	try {
 		const files = await Array.fromAsync(JSONL_GLOB.scan(root), name => path.join(root, name));
 		files.sort();
-		return files;
+		return files.filter(file => isSessionJournalFilename(path.basename(file)));
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
@@ -254,7 +255,7 @@ async function collectCompressedJsonlFiles(root: string): Promise<string[]> {
 	try {
 		const files = await Array.fromAsync(JSONL_GZ_GLOB.scan(root), name => path.join(root, name));
 		files.sort();
-		return files;
+		return files.filter(file => isSessionJournalFilename(path.basename(file)));
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;
@@ -265,7 +266,7 @@ async function collectBackupJsonlFiles(root: string): Promise<string[]> {
 	try {
 		const files = await Array.fromAsync(JSONL_BACKUP_GLOB.scan(root), name => path.join(root, name));
 		files.sort();
-		return files;
+		return files.filter(file => isSessionJournalFilename(path.basename(file)));
 	} catch (error) {
 		if (codeOf(error) === "ENOENT") return [];
 		throw error;

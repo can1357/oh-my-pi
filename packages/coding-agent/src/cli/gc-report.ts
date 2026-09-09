@@ -14,6 +14,7 @@ import {
 	sanitizeText,
 } from "@oh-my-pi/pi-utils";
 import { BLOB_FILE_RE } from "../session/blob-store";
+import { isSessionJournalFilename } from "../session/session-paths";
 
 const CATEGORY_LABELS = {
 	sessionJournals: "Session journals",
@@ -62,7 +63,7 @@ function treeFileCategory(name: string, tree: StorageTree): StorageCategory {
 	if (tree === "blobs") {
 		return BLOB_FILE_RE.test(name) ? "blobs" : "blobAuxiliary";
 	}
-	const journal = name.endsWith(".jsonl") || name.endsWith(".jsonl.gz") || /\.jsonl\..+\.bak$/.test(name);
+	const journal = isSessionJournalFilename(name);
 	if (tree === "sessions") {
 		return journal ? "sessionJournals" : name.endsWith(".log") ? "sessionLogs" : "sessionArtifacts";
 	}

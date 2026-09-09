@@ -196,6 +196,11 @@ export function computeDefaultSessionDir(
 	return sessionDir;
 }
 
+/** Return whether a basename belongs to a managed session journal or backup. */
+export function isSessionJournalFilename(name: string): boolean {
+	return name.endsWith(".jsonl") || name.endsWith(".jsonl.gz") || /\.jsonl\..*\.bak$/.test(name);
+}
+
 // =============================================================================
 // Terminal breadcrumbs: maps terminal (TTY) -> last session file for --continue
 // =============================================================================
