@@ -793,15 +793,8 @@ export class PluginManager {
 			await fs.promises.mkdir(scopeDir, { recursive: true });
 		}
 
-		// Remove existing
-		try {
-			const stats = await fs.promises.lstat(linkPath);
-			if (stats.isSymbolicLink() || stats.isDirectory()) {
-				await fs.promises.unlink(linkPath);
-			}
-		} catch (err) {
-			if (!isEnoent(err)) throw err;
-		}
+		// Whatever is there — a stale link, or a real directory from a git install.
+		await fs.promises.rm(linkPath, { recursive: true, force: true });
 
 		await fs.promises.symlink(absolutePath, linkPath);
 

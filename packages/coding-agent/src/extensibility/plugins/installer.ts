@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getAgentDir, getProjectDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getProjectDir } from "@oh-my-pi/pi-utils";
 import { extractPackageName } from "./parser";
 import type { InstalledPlugin } from "./types";
 
@@ -186,15 +186,8 @@ export async function linkPlugin(localPath: string): Promise<void> {
 		await fs.mkdir(scopeDir, { recursive: true });
 	}
 
-	// Remove existing if present
-	try {
-		const stats = await fs.lstat(linkPath);
-		if (stats.isSymbolicLink() || stats.isDirectory()) {
-			await fs.unlink(linkPath);
-		}
-	} catch (err) {
-		if (!isEnoent(err)) throw err;
-	}
+	// Whatever is there — a stale link, or a real directory from a git install.
+	await fs.rm(linkPath, { recursive: true, force: true });
 
 	// Create symlink using fs instead of shell command
 	await fs.symlink(absolutePath, linkPath);
