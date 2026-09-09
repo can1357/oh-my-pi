@@ -6,6 +6,7 @@ import {
 	extractMcpAuthServerUrl,
 	extractOAuthChallengeScopes,
 	fetchResourceMetadataScopes,
+	rfc9728ProtectedResourceMetadataUrl,
 } from "@oh-my-pi/pi-coding-agent/mcp/oauth-discovery";
 import { type FetchInput, mockFetch } from "./helpers/fetch-mock";
 
@@ -89,9 +90,8 @@ describe("path-prefixed auth servers", () => {
 			authorizationUrl: "https://gateway.example.com/my-service/oauth/authorize",
 			tokenUrl: "https://gateway.example.com/my-service/oauth/token",
 		});
-		// Absolute well-known was tried first (existing behavior)
-		expect(calls[0]).toBe("https://gateway.example.com/.well-known/oauth-authorization-server");
-		// Relative well-known was tried as fallback
+		// Resource-server fallback probes RFC 9728 path-inserted PR metadata first.
+		expect(calls[0]).toBe("https://gateway.example.com/.well-known/oauth-protected-resource/my-service/mcp");
 		expect(calls).toContain("https://gateway.example.com/my-service/.well-known/oauth-authorization-server");
 	});
 
@@ -125,22 +125,22 @@ describe("path-prefixed auth servers", () => {
 			authorizationUrl: "https://gateway.example.com/my-service/oauth/authorize",
 			tokenUrl: "https://gateway.example.com/my-service/oauth/token",
 		});
-		expect(calls[0]).toBe("https://gateway.example.com/.well-known/oauth-authorization-server");
+		expect(calls[0]).toBe("https://gateway.example.com/.well-known/oauth-protected-resource/my-service");
 		expect(calls).toContain("https://gateway.example.com/my-service/.well-known/oauth-authorization-server");
 	});
 
-	it("falls back to RFC 8414 path-ful issuer form (/.well-known/oauth-authorization-server/<path>)", async () => {
+	it("discovers OIDC metadata appended to a multi-segment issuer path", async () => {
 		const calls: string[] = [];
 		const fetchImpl = mockFetch((input: FetchInput) => {
 			const url = String(input);
 			calls.push(url);
 
-			if (url === "https://gateway.example.com/.well-known/oauth-authorization-server/my-service") {
+			if (url === "https://auth.example.com/auth/realms/myrealm/.well-known/openid-configuration") {
 				return new Response(
 					JSON.stringify({
-						authorization_endpoint: "https://gateway.example.com/my-service/oauth",
-						token_endpoint: "https://gateway.example.com/my-service/token",
-						registration_endpoint: "https://gateway.example.com/my-service/register",
+						issuer: "https://auth.example.com/auth/realms/myrealm",
+						authorization_endpoint: "https://auth.example.com/auth/realms/myrealm/protocol/openid-connect/auth",
+						token_endpoint: "https://auth.example.com/auth/realms/myrealm/protocol/openid-connect/token",
 					}),
 					{ status: 200, headers: { "Content-Type": "application/json" } },
 				);
@@ -149,16 +149,61 @@ describe("path-prefixed auth servers", () => {
 			return new Response("not found", { status: 404 });
 		});
 
-		const oauth = await discoverOAuthEndpoints("https://gateway.example.com/my-service", undefined, undefined, {
-			fetch: fetchImpl,
-		});
+		const oauth = await discoverOAuthEndpoints(
+			"https://mcp.example.com/mcp",
+			"https://auth.example.com/auth/realms/myrealm",
+			undefined,
+			{ fetch: fetchImpl },
+		);
 
 		expect(oauth).toEqual({
-			authorizationUrl: "https://gateway.example.com/my-service/oauth",
-			tokenUrl: "https://gateway.example.com/my-service/token",
-			registrationUrl: "https://gateway.example.com/my-service/register",
+			authorizationUrl: "https://auth.example.com/auth/realms/myrealm/protocol/openid-connect/auth",
+			issuerUrl: "https://auth.example.com/auth/realms/myrealm",
+			tokenUrl: "https://auth.example.com/auth/realms/myrealm/protocol/openid-connect/token",
 		});
-		expect(calls).toContain("https://gateway.example.com/.well-known/oauth-authorization-server/my-service");
+		expect(calls).toContain("https://auth.example.com/auth/realms/myrealm/.well-known/openid-configuration");
+		expect(calls).not.toContain("https://auth.example.com/.well-known/openid-configuration/auth/realms/myrealm");
+		// The standard issuer form is tried before the parent-relative fallback, so the
+		// slow/absent parent-relative URL is never probed once the issuer form succeeds.
+		expect(calls).not.toContain("https://auth.example.com/auth/realms/.well-known/openid-configuration");
+	});
+
+	it("tries RFC 8414 path-ful metadata before the path-appended compatibility form", async () => {
+		const calls: string[] = [];
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+			calls.push(url);
+
+			if (url === "https://auth.example.com/.well-known/oauth-authorization-server/tenants/acme") {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://auth.example.com/tenants/acme",
+						authorization_endpoint: "https://auth.example.com/tenants/acme/oauth",
+						token_endpoint: "https://auth.example.com/tenants/acme/token",
+						registration_endpoint: "https://auth.example.com/tenants/acme/register",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(
+			"https://mcp.example.com/mcp",
+			"https://auth.example.com/tenants/acme",
+			undefined,
+			{ fetch: fetchImpl },
+		);
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://auth.example.com/tenants/acme/oauth",
+			issuerUrl: "https://auth.example.com/tenants/acme",
+			tokenUrl: "https://auth.example.com/tenants/acme/token",
+			registrationUrl: "https://auth.example.com/tenants/acme/register",
+		});
+		expect(calls).toContain("https://auth.example.com/.well-known/oauth-authorization-server/tenants/acme");
+		expect(calls).not.toContain("https://auth.example.com/tenants/acme/.well-known/oauth-authorization-server");
 	});
 
 	it("prefers absolute well-known when it succeeds (origin-root servers still work)", async () => {
@@ -320,6 +365,7 @@ describe("resource_metadata chain", () => {
 
 		expect(oauth).toEqual({
 			authorizationUrl: "https://sso.example.com/oauth/auth",
+			issuerUrl: "https://sso.example.com",
 			tokenUrl: "https://sso.example.com/oauth/token",
 			scopes: "k8s.logging-mcp-server k8s.annotations",
 			resource: "https://gateway.example.com",
@@ -366,6 +412,7 @@ describe("resource_metadata chain", () => {
 
 		expect(oauth).toEqual({
 			authorizationUrl: "https://ws.cloud.databricks.com/oidc/v1/authorize",
+			issuerUrl: "https://ws.cloud.databricks.com/oidc",
 			tokenUrl: "https://ws.cloud.databricks.com/oidc/v1/token",
 			scopes: "genie offline_access",
 			resource: "https://ws.cloud.databricks.com/api/2.0/mcp/genie",
@@ -529,6 +576,93 @@ describe("relative Mcp-Auth-Server URL", () => {
 	});
 });
 
+describe("RFC 9728 path-inserted protected resource", () => {
+	const mcpUrl = "https://mcp.gateway.example/platform/v1/d/tenant.example/prod/service";
+	const pathfulPr =
+		"https://mcp.gateway.example/.well-known/oauth-protected-resource/platform/v1/d/tenant.example/prod/service";
+	const originRootPr = "https://mcp.gateway.example/.well-known/oauth-protected-resource";
+	const originAs = "https://mcp.gateway.example/.well-known/oauth-authorization-server";
+	const tenantOidc = "https://tenant.example/.well-known/openid-configuration";
+
+	it("builds the path-inserted protected-resource URL between origin and MCP path", () => {
+		expect(rfc9728ProtectedResourceMetadataUrl(mcpUrl)).toBe(pathfulPr);
+		expect(rfc9728ProtectedResourceMetadataUrl("https://mcp.gateway.example")).toBe(originRootPr);
+		expect(rfc9728ProtectedResourceMetadataUrl(undefined)).toBeUndefined();
+	});
+
+	it("synthesizes resource_metadata for a 401 that omits WWW-Authenticate", () => {
+		const error = new Error('HTTP 401: {"errors":[{"message":"JWT Token is required"}]}');
+		const auth = analyzeAuthError(error, mcpUrl);
+		expect(auth.requiresAuth).toBe(true);
+		expect(auth.authType).toBe("oauth");
+		expect(auth.resourceMetadataUrl).toBe(pathfulPr);
+		expect(analyzeAuthError(error, "https://mcp.gateway.example").resourceMetadataUrl).toBe(originRootPr);
+	});
+
+	it("does not classify a JWT bearer 401 as an API key", () => {
+		const error = new Error('HTTP 401: {"errors":[{"message":"JWT Token is required"}]}');
+		expect(analyzeAuthError(error).authType).toBe("oauth");
+	});
+
+	it("prefers path-inserted PR metadata over origin-root AS for a shared gateway", async () => {
+		const calls: string[] = [];
+		const fetchImpl = mockFetch((input: FetchInput) => {
+			const url = String(input);
+			calls.push(url);
+
+			if (url === pathfulPr) {
+				return new Response(
+					JSON.stringify({
+						resource: mcpUrl,
+						authorization_servers: ["https://tenant.example"],
+						scopes_supported: ["mcp_api", "offline_access"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			if (url === originAs) {
+				return new Response(
+					JSON.stringify({
+						authorization_endpoint: "https://login.hub.example/oauth/authorize",
+						token_endpoint: "https://login.hub.example/oauth/token",
+						scopes_supported: ["api", "profile", "refresh_token"],
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			if (url === tenantOidc) {
+				return new Response(
+					JSON.stringify({
+						issuer: "https://tenant.example",
+						authorization_endpoint: "https://tenant.example/oauth/authorize",
+						token_endpoint: "https://tenant.example/oauth/token",
+					}),
+					{ status: 200, headers: { "Content-Type": "application/json" } },
+				);
+			}
+
+			return new Response("not found", { status: 404 });
+		});
+
+		const oauth = await discoverOAuthEndpoints(mcpUrl, undefined, undefined, { fetch: fetchImpl });
+
+		expect(oauth).toEqual({
+			authorizationUrl: "https://tenant.example/oauth/authorize",
+			tokenUrl: "https://tenant.example/oauth/token",
+			scopes: "mcp_api offline_access",
+			resource: mcpUrl,
+			issuerUrl: "https://tenant.example",
+			clientId: undefined,
+			registrationUrl: undefined,
+		});
+		expect(calls[0]).toBe(pathfulPr);
+		expect(calls).toContain(tenantOidc);
+		expect(calls).not.toContain(originAs);
+	});
+});
+
 describe("RFC 8414 §3.3 issuer validation", () => {
 	it("accepts cross-host issuer metadata on resource-server fallback (Atlassian regression)", async () => {
 		const calls: string[] = [];
@@ -557,10 +691,11 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 
 		expect(oauth).toEqual({
 			authorizationUrl: "https://mcp.atlassian.com/v1/authorize",
+			issuerUrl: "https://cf.mcp.atlassian.com",
 			tokenUrl: "https://cf.mcp.atlassian.com/v1/token",
 			registrationUrl: "https://cf.mcp.atlassian.com/v1/register",
 		});
-		expect(calls[0]).toBe("https://mcp.atlassian.com/.well-known/oauth-authorization-server");
+		expect(calls).toContain("https://mcp.atlassian.com/.well-known/oauth-authorization-server");
 	});
 
 	it("rejects origin-root metadata whose issuer mismatches the path-scoped auth server (Plane regression)", async () => {
@@ -568,10 +703,9 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 		// origin-root well-known *and* a path-scoped issuer
 		// (`https://mcp.plane.so/http`) at the path-prefixed well-known. The
 		// `/http/mcp` endpoint advertises only the path-scoped issuer via
-		// protected-resource metadata, but the discovery loop probes origin-root
-		// first; before the fix it accepted the wrong-issuer metadata and routed
-		// the OAuth flow to `https://mcp.plane.so/authorize`, which rejects every
-		// grant with `server_error`.
+		// protected-resource metadata. Origin-root AS metadata must not win:
+		// it routes the grant to `https://mcp.plane.so/authorize`, which rejects
+		// every grant with `server_error`.
 		const calls: string[] = [];
 		const fetchImpl = mockFetch((input: FetchInput) => {
 			const url = String(input);
@@ -624,13 +758,14 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 
 		expect(oauth).toEqual({
 			authorizationUrl: "https://mcp.plane.so/http/authorize",
+			issuerUrl: "https://mcp.plane.so/http",
 			tokenUrl: "https://mcp.plane.so/http/token",
 			registrationUrl: "https://mcp.plane.so/http/register",
 			resource: "https://mcp.plane.so/http/mcp",
 		});
-		// Wrong-issuer origin-root metadata WAS fetched and skipped.
-		expect(calls).toContain("https://mcp.plane.so/.well-known/oauth-authorization-server");
-		// Path-prefixed well-known is the one that supplied the result.
+		// Path-prefixed well-known is tried before origin-root, so the
+		// wrong-issuer origin document is never consulted.
+		expect(calls).not.toContain("https://mcp.plane.so/.well-known/oauth-authorization-server");
 		expect(calls).toContain("https://mcp.plane.so/http/.well-known/oauth-authorization-server");
 	});
 
@@ -657,6 +792,7 @@ describe("RFC 8414 §3.3 issuer validation", () => {
 
 		expect(oauth).toEqual({
 			authorizationUrl: "https://auth.example.com/oauth/authorize",
+			issuerUrl: "https://auth.example.com/",
 			tokenUrl: "https://auth.example.com/oauth/token",
 		});
 	});

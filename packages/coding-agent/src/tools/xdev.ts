@@ -33,8 +33,9 @@ import type { AgentToolContext, AgentToolResult, AgentToolUpdateCallback, ToolLo
 import { type Tool as AiTool, jsonSchemaToTypeScript, toolWireSchema, validateToolArguments } from "@oh-my-pi/pi-ai";
 import { type Component, Container, Text } from "@oh-my-pi/pi-tui";
 import { parseStreamingJson } from "@oh-my-pi/pi-utils";
+import { schemaDeclaresIntentField } from "../utils/tool-schema";
 import type { RenderResultOptions } from "../extensibility/custom-tools/types";
-import { XD_URL_PREFIX } from "../internal-urls/xd-protocol";
+import { stripXdUrlPrefix, XD_URL_PREFIX } from "../internal-urls/xd-protocol";
 import { parseMCPToolName } from "../mcp/tool-bridge";
 import type { Theme } from "../modes/theme/theme";
 import { truncateHeadBytes } from "../session/streaming-output";
@@ -112,13 +113,6 @@ let rendererLookup: ((name: string) => ToolRenderer | undefined) | undefined;
 /** Wire the wrapped-renderer lookup. Called once by `renderers.ts`. */
 export function setXdevRendererLookup(lookup: (name: string) => ToolRenderer | undefined): void {
 	rendererLookup = lookup;
-}
-
-/** Whether a wire JSON schema declares a top-level `i` (intent) property. */
-function schemaDeclaresIntentField(schema: unknown): boolean {
-	if (!schema || typeof schema !== "object" || !("properties" in schema)) return false;
-	const props = schema.properties;
-	return !!props && typeof props === "object" && "i" in props;
 }
 
 function renderDocs(inst: Tool, heading = "#", descriptionCap?: number): string {
@@ -270,9 +264,17 @@ export function resolveXdevTool(state: XdevState, name: string): Tool | undefine
 	return state.tools.get(name);
 }
 
-/** Resolve a mounted tool for top-level fallback execution. */
+/**
+ * Resolve a mounted tool for top-level fallback execution.
+ *
+ * A model may reach a mounted device by emitting a direct tool call instead of
+ * a `write`; the fallback in `sdk.ts` routes that here. Names arrive both bare
+ * (`github`) and carrying the very `xd://` prefix the device docs advertise
+ * (`xd://github`) — strip it so both spellings resolve to the same device.
+ */
 export function resolveMountedXdevTool(state: XdevState, name: string): Tool | undefined {
-	return state.mountedNames.has(name) ? state.tools.get(name) : undefined;
+	const canonicalName = stripXdUrlPrefix(name);
+	return state.mountedNames.has(canonicalName) ? state.tools.get(canonicalName) : undefined;
 }
 
 /** Resolve a mounted tool with its execution-only permission decorator. */

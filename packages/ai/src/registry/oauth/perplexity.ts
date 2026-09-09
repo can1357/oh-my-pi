@@ -199,10 +199,11 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 		signal: ctrl.signal,
 	});
 
-	const verifyData = (await verifyResponse.json()) as {
+	let verifyData = (await verifyResponse.json()) as {
 		token?: string;
 		challenge_token?: string;
 		status?: string;
+		error?: string;
 		error_code?: string;
 		text?: string;
 	};
@@ -216,7 +217,52 @@ async function httpEmailLogin(ctrl: OAuthController): Promise<OAuthCredentials> 
 		});
 	}
 
-	const token = verifyData.challenge_token || verifyData.token;
+	if (verifyData.status === "totp_challenge_required" && verifyData.challenge_token) {
+		const totp = await ctrl.onPrompt({
+			message: "Enter the code from your authenticator app",
+			placeholder: "123456",
+		});
+		if (ctrl.signal?.aborted) throw new AIError.LoginCancelledError();
+		const trimmedTotp = totp.trim();
+		if (!trimmedTotp) {
+			throw new AIError.OAuthError("Authenticator code is required", {
+				kind: "validation",
+				provider: "perplexity",
+			});
+		}
+		ctrl.onProgress?.("Verifying authenticator code...");
+		const totpResponse = await request("https://www.perplexity.ai/api/auth/totp/challenge-verify", {
+			method: "POST",
+			headers: {
+				"Content-Type": "application/json",
+				"User-Agent": APP_USER_AGENT,
+				"X-App-ApiVersion": API_VERSION,
+			},
+			body: JSON.stringify({
+				token: verifyData.challenge_token,
+				code: trimmedTotp,
+			}),
+			signal: ctrl.signal,
+		});
+		verifyData = (await totpResponse.json()) as typeof verifyData;
+		if (!totpResponse.ok) {
+			const reason = verifyData.text ?? verifyData.error_code ?? verifyData.status ?? "TOTP verification failed";
+			throw new AIError.OAuthError(`Perplexity authenticator verification failed: ${reason}`, {
+				kind: "validation",
+				provider: "perplexity",
+				status: totpResponse.status,
+			});
+		}
+		if (!verifyData.token) {
+			verifyData = {
+				token:
+					cookies.get("__Secure-next-auth.session-token") ?? cookies.get("next-auth.session-token") ?? undefined,
+				status: "success",
+			};
+		}
+	}
+
+	const token = verifyData.token ?? verifyData.challenge_token;
 	if (!token || verifyData.error_code || (verifyData.status && verifyData.status !== "success")) {
 		const reason = verifyData.text ?? verifyData.error_code ?? verifyData.status ?? "missing token";
 		throw new AIError.OAuthError(`Perplexity OTP verification response rejected: ${reason}`, {

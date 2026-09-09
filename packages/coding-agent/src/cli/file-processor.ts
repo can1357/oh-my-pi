@@ -10,6 +10,15 @@ import { resolveReadPath } from "../tools/path-utils";
 import { formatBytes } from "../tools/render-utils";
 import { formatDimensionNote, resizeImage } from "../utils/image-resize";
 import { CONVERTIBLE_EXTENSIONS, convertFileWithMarkit } from "../utils/markit";
+import {
+	VideoError,
+	buildVideoContactSheetPng,
+	createVideoPreviewImage,
+	formatVideoDetails,
+	isVideoPath,
+	probeVideo,
+	videoMimeForPath,
+} from "../utils/video";
 
 // Keep CLI startup responsive and avoid OOM when users pass huge files.
 // If a file exceeds these limits, we include it as a path-only <file/> block.
@@ -45,6 +54,28 @@ export async function processFileArguments(fileArgs: string[], options?: Process
 		const imageMetadata = await readImageMetadata(absolutePath);
 		const mimeType = imageMetadata?.mimeType;
 		const ext = path.extname(absolutePath).toLowerCase();
+		if (isVideoPath(absolutePath)) {
+			try {
+				const meta = await probeVideo(absolutePath);
+				const sheet = await buildVideoContactSheetPng(absolutePath, meta);
+				let attachment: ImageContent = { type: "image", data: sheet.png.data, mimeType: sheet.png.mimeType };
+				if (autoResizeImages) {
+					try {
+						const resized = await resizeImage(attachment);
+						attachment = { type: "image", mimeType: resized.mimeType, data: resized.data };
+					} catch {
+						// Keep the extracted sheet when resize fails.
+					}
+				}
+				images.push(createVideoPreviewImage(attachment, absolutePath));
+				const details = formatVideoDetails(absolutePath, meta, stat.size, videoMimeForPath(absolutePath));
+				text += `<file name="${absolutePath}">\n${details}\nPreview grid: ${sheet.thumbs} frames (${sheet.cols}x${sheet.rows})\n</file>\n`;
+			} catch (error) {
+				const reason = error instanceof VideoError ? error.message : "video preview failed";
+				text += `<file name="${absolutePath}">(skipped: ${reason})</file>\n`;
+			}
+			continue;
+		}
 		const maxBytes = mimeType ? MAX_CLI_IMAGE_BYTES : MAX_CLI_TEXT_BYTES;
 		if (stat.size > maxBytes) {
 			console.error(

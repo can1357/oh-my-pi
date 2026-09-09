@@ -45,13 +45,13 @@ export function formatUsageRow(
 	if (timestamp !== undefined && Number.isFinite(timestamp) && timestamp > 0) {
 		parts.push(formatUsageTimestamp(timestamp));
 	}
-	// The delta the operator actually waited, clock-suffixed so it reads apart
-	// from the TTFT figure below (which reuses the same clock icon).
+	// The delta the operator actually waited, bare with a space so it scans
+	// apart from the TTFT figure below (which keeps the clock icon).
 	// `message.duration` comes from performance.now(), so the combined value is
 	// fractional; round before formatDuration so the label never prints a raw
 	// float (e.g. `347.28381699998863ms`).
 	if (turnElapsedMs !== undefined && turnElapsedMs > 0) {
-		parts.push(`${theme.icon.time}Δ${formatDuration(Math.round(turnElapsedMs))}`);
+		parts.push(`Δ ${formatDuration(Math.round(turnElapsedMs))}`);
 	}
 	parts.push(`${theme.icon.input} ${formatNumber(totalInput)}`);
 	parts.push(`${theme.icon.output} ${formatNumber(usage.output)}`);
@@ -71,6 +71,14 @@ export function formatUsageRow(
 	return parts.join("  ");
 }
 
+/** Blocks minted by {@link createUsageRowBlock}, so transcript walkers can attribute them to the turn above. */
+const usageRowBlocks = new WeakSet<Container>();
+
+/** Whether `component` is a per-turn usage/metrics row from {@link createUsageRowBlock}. */
+export function isUsageRowBlock(component: object): boolean {
+	return usageRowBlocks.has(component as Container);
+}
+
 // `timestamp` and `turnElapsedMs` are optional and trail the throughput args to
 // preserve the existing (usage, durationMs, ttftMs) call contract — this
 // function is part of the package's public export surface (./modes/components/*).
@@ -84,5 +92,6 @@ export function createUsageRowBlock(
 	const block = new Container();
 	block.addChild(new Spacer(1));
 	block.addChild(new Text(theme.fg("dim", formatUsageRow(usage, durationMs, ttftMs, timestamp, turnElapsedMs)), 1, 0));
+	usageRowBlocks.add(block);
 	return block;
 }

@@ -1,11 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { scheduler } from "node:timers/promises";
 import { streamSimple } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import {
 	buildTransformedCodexRequestBody,
 	createOpenAICodexCompatibilityMetadata,
 	getOpenAICodexTransportDetails,
 	getOpenAICodexWebSocketDebugStats,
+	openCodexCompactionEventStream,
 	prewarmOpenAICodexResponses,
 	resetOpenAICodexHistoryAfterCompaction,
 	streamOpenAICodexResponses,
@@ -407,7 +409,7 @@ describe("openai-codex streaming", () => {
 		expect(requestHeaders?.get("Authorization")).toBe("Bearer opaque-proxy-key");
 		expect(requestHeaders?.has("chatgpt-account-id")).toBe(false);
 		expect(requestHeaders?.get("OpenAI-Beta")).toBe("responses=experimental");
-		expect(requestHeaders?.get("originator")).toBe("pi");
+		expect(requestHeaders?.get("originator")).toBe("omp");
 		// An opaque proxy key is not a JWT, so no residency claim to declare.
 		expect(requestHeaders?.has("x-openai-internal-codex-residency")).toBe(false);
 	});
@@ -529,7 +531,7 @@ describe("openai-codex streaming", () => {
 		expect(capturedHeaders?.authorization).toBe("Bearer opaque-proxy-key");
 		expect(capturedHeaders?.["chatgpt-account-id"]).toBeUndefined();
 		expect(capturedHeaders?.["openai-beta"]).toBe("responses_websockets=2026-02-06");
-		expect(capturedHeaders?.originator).toBe("pi");
+		expect(capturedHeaders?.originator).toBe("omp");
 		expect(capturedHeaders?.["x-openai-internal-codex-residency"]).toBeUndefined();
 	});
 
@@ -1915,7 +1917,7 @@ describe("openai-codex streaming", () => {
 				expect(headers?.get("Authorization")).toBe(`Bearer ${token}`);
 				expect(headers?.get("chatgpt-account-id")).toBe("acc_test");
 				expect(headers?.get("OpenAI-Beta")).toBe("responses=experimental");
-				expect(headers?.get("originator")).toBe("pi");
+				expect(headers?.get("originator")).toBe("omp");
 				expect(headers?.get("accept")).toBe("text/event-stream");
 				expect(headers?.has("x-api-key")).toBe(false);
 				return new Response(stream, {
@@ -1972,7 +1974,7 @@ describe("openai-codex streaming", () => {
 		expect(sawDone).toBe(true);
 	});
 
-	it("includes the default service_tier in SSE payloads when requested", async () => {
+	it("includes the default service_tier in SSE payloads and the routing hint header when requested", async () => {
 		const tempDir = TempDir.createSync("@pi-codex-stream-");
 		setAgentDir(tempDir.path());
 
@@ -1982,6 +1984,7 @@ describe("openai-codex streaming", () => {
 		).toBase64();
 		const token = `aaa.${payload}.bbb`;
 		let capturedBody: Record<string, unknown> | undefined;
+		let capturedHeaders: Headers | undefined;
 
 		const sse = `${[
 			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_1", role: "assistant", status: "in_progress", content: [] } })}`,
@@ -1992,6 +1995,7 @@ describe("openai-codex streaming", () => {
 		].join("\n\n")}\n\n`;
 		const fetchMock = vi.fn(async (_input: string | URL, init?: RequestInit) => {
 			capturedBody = JSON.parse(decodeCodexRequestBody(init?.body)) as Record<string, unknown>;
+			capturedHeaders = new Headers(init?.headers);
 			return new Response(sse, {
 				status: 200,
 				headers: { "content-type": "text/event-stream" },
@@ -2023,9 +2027,67 @@ describe("openai-codex streaming", () => {
 		}).result();
 		expect(result.stopReason).toBe("stop");
 		expect(capturedBody?.service_tier).toBe("default");
+		// codex-rs `x-codex-routing-hint`: model plus the explicit tier.
+		expect(capturedHeaders?.get("x-codex-routing-hint")).toBe("model=gpt-5.1-codex;tier=default");
 		expect(result.usage.cost.input).toBeCloseTo(0.00001);
 		expect(result.usage.cost.output).toBeCloseTo(0.000012);
 		expect(result.usage.cost.total).toBeCloseTo(0.000022);
+	});
+	it("bills priority turns at the model's baked serviceTierCost multiplier (gpt-5.5 = 2.5x)", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+
+		const payload = Buffer.from(
+			JSON.stringify({ "https://api.openai.com/auth": { chatgpt_account_id: "acc_test" } }),
+			"utf8",
+		).toBase64();
+		const token = `aaa.${payload}.bbb`;
+
+		const sse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_1", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", service_tier: "priority", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock: FetchImpl = async () =>
+			new Response(sse, { status: 200, headers: { "content-type": "text/event-stream" } });
+
+		const context: Context = {
+			systemPrompt: ["You are a helpful assistant."],
+			messages: [{ role: "user", content: "Say hello", timestamp: Date.now() }],
+		};
+		const spec: Omit<ModelSpec<"openai-codex-responses">, "id"> = {
+			name: "Codex",
+			api: "openai-codex-responses",
+			provider: "openai-codex",
+			baseUrl: "https://chatgpt.com/backend-api",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 1, output: 2, cacheRead: 0.5, cacheWrite: 0 },
+			contextWindow: 400000,
+			maxTokens: 128000,
+		};
+
+		// gpt-5.5: the exact `service-tier-cost` rule bakes { flex: 0.5, priority: 2.5 }.
+		const tiered = buildModel({ ...spec, id: "gpt-5.5" });
+		expect(tiered.serviceTierCost).toEqual({ flex: 0.5, priority: 2.5 });
+		const tieredResult = await streamOpenAICodexResponses(tiered, context, {
+			fetch: fetchMock,
+			apiKey: token,
+			serviceTier: "priority",
+		}).result();
+		// 5 input tokens at $1/MTok * 2.5, 3 output at $2/MTok * 2.5.
+		expect(tieredResult.usage.cost.input).toBeCloseTo(0.0000125);
+		expect(tieredResult.usage.cost.output).toBeCloseTo(0.000015);
+
+		// Other Codex models inherit the provider-root { flex: 0.5, priority: 2 } rule.
+		const generic = buildModel({ ...spec, id: "gpt-5.1-codex" });
+		expect(generic.serviceTierCost).toEqual({ flex: 0.5, priority: 2 });
+		const genericResult = await streamOpenAICodexResponses(generic, context, {
+			fetch: fetchMock,
+			apiKey: token,
+			serviceTier: "priority",
+		}).result();
+		expect(genericResult.usage.cost.input).toBeCloseTo(0.00001);
+		expect(genericResult.usage.cost.output).toBeCloseTo(0.000012);
 	});
 
 	it("fails truncated SSE streams that never emit a terminal response event", async () => {
@@ -2092,6 +2154,44 @@ describe("openai-codex streaming", () => {
 		}).result();
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("terminal completion event");
+		expect(AIError.retriable(result.errorId)).toBe(true);
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+	});
+
+	it("retries a replay-safe SSE stream that ends before its terminal event", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		vi.spyOn(scheduler, "wait").mockResolvedValue(undefined);
+		const token = createCodexTestToken();
+		let requestCount = 0;
+		const truncatedSse = `data: ${JSON.stringify({
+			type: "response.created",
+			response: { id: "resp_truncated", status: "in_progress" },
+		})}\n\n`;
+		const successSse = `${[
+			`data: ${JSON.stringify({ type: "response.output_item.added", item: { type: "message", id: "msg_retry", role: "assistant", status: "in_progress", content: [] } })}`,
+			`data: ${JSON.stringify({ type: "response.content_part.added", part: { type: "output_text", text: "" } })}`,
+			`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "Hello after retry" })}`,
+			`data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "message", id: "msg_retry", role: "assistant", status: "completed", content: [{ type: "output_text", text: "Hello after retry" }] } })}`,
+			`data: ${JSON.stringify({ type: "response.completed", response: { status: "completed", usage: { input_tokens: 5, output_tokens: 3, total_tokens: 8, input_tokens_details: { cached_tokens: 0 } } } })}`,
+		].join("\n\n")}\n\n`;
+		const fetchMock = vi.fn(async () => {
+			requestCount += 1;
+			return new Response(requestCount === 1 ? truncatedSse : successSse, {
+				status: 200,
+				headers: { "content-type": "text/event-stream" },
+			});
+		});
+		const model = { ...createCodexTestModel("https://chatgpt.com/backend-api"), preferWebsockets: false };
+
+		const result = await streamOpenAICodexResponses(model, createCodexTestContext(), {
+			apiKey: token,
+			fetch: fetchMock,
+		}).result();
+
+		expect(fetchMock).toHaveBeenCalledTimes(2);
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.find(block => block.type === "text")?.text).toBe("Hello after retry");
 	});
 
 	it("stops reading SSE responses after a terminal response event", async () => {
@@ -2881,6 +2981,113 @@ describe("openai-codex streaming", () => {
 		expect(fallbackDetails.lastTransport).toBe("sse");
 		expect(fallbackDetails.websocketDisabled).toBe(true);
 		expect(fallbackDetails.fallbackCount).toBe(1);
+	});
+
+	it.each(["during handshake", "before request", "during request"] as const)(
+		"preserves timeout classification when compaction is aborted %s",
+		async phase => {
+			const tempDir = TempDir.createSync("@pi-codex-stream-");
+			setAgentDir(tempDir.path());
+			const controller = new AbortController();
+			const timeout = new DOMException("The operation timed out.", "TimeoutError");
+			const providerSessionState = new Map<string, ProviderSessionState>();
+			const fetchMock = vi.fn<FetchImpl>(() => {
+				throw new Error("Aborted compaction must not fall back to SSE");
+			});
+			class TimeoutWebSocket extends MockWebSocket {
+				constructor(url: string, options?: WsOptions) {
+					super(url, options);
+					if (phase === "during handshake") {
+						queueMicrotask(() => controller.abort(timeout));
+					} else {
+						this.scheduleOpen();
+					}
+				}
+
+				override send(): void {
+					controller.abort(timeout);
+				}
+
+				override close(): void {
+					super.close();
+					this.emit("close", { code: 1000 } as CloseEvent);
+				}
+			}
+			global.WebSocket = TimeoutWebSocket as unknown as typeof WebSocket;
+			const model = createCodexTestModel();
+			try {
+				const error = await (async () => {
+					const events = await openCodexCompactionEventStream(
+						model,
+						{ model: model.id, input: [{ type: "compaction_trigger" }] },
+						{
+							apiKey: createCodexTestToken(),
+							signal: controller.signal,
+							fetch: fetchMock,
+							sessionId: `compaction-timeout-${phase}`,
+							providerSessionState,
+						},
+					);
+					if (phase === "before request") controller.abort(timeout);
+					return events.next();
+				})().then(
+					() => {
+						throw new Error("Compaction must reject when its deadline expires");
+					},
+					(error: unknown) => error,
+				);
+				expect(AIError.is(AIError.classify(error), AIError.Flag.Timeout)).toBe(true);
+				expect(fetchMock).not.toHaveBeenCalled();
+			} finally {
+				for (const state of providerSessionState.values()) state.close();
+			}
+		},
+	);
+
+	it("keeps caller cancellation distinct from a compaction timeout", async () => {
+		const tempDir = TempDir.createSync("@pi-codex-stream-");
+		setAgentDir(tempDir.path());
+		const controller = new AbortController();
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const fetchMock = vi.fn<FetchImpl>(() => {
+			throw new Error("Cancelled compaction must not fall back to SSE");
+		});
+		class CancelledWebSocket extends MockWebSocket {
+			constructor(url: string, options?: WsOptions) {
+				super(url, options);
+				this.scheduleOpen();
+			}
+
+			override send(): void {
+				controller.abort();
+			}
+		}
+		global.WebSocket = CancelledWebSocket as unknown as typeof WebSocket;
+		const model = createCodexTestModel();
+		try {
+			const events = await openCodexCompactionEventStream(
+				model,
+				{ model: model.id, input: [{ type: "compaction_trigger" }] },
+				{
+					apiKey: createCodexTestToken(),
+					signal: controller.signal,
+					fetch: fetchMock,
+					sessionId: "compaction-caller-cancel",
+					providerSessionState,
+				},
+			);
+			const error = await events.next().then(
+				() => {
+					throw new Error("Compaction must reject when cancelled");
+				},
+				(error: unknown) => error,
+			);
+			expect(error).toBeInstanceOf(Error);
+			expect(AIError.is(AIError.classify(error), AIError.Flag.Timeout)).toBe(false);
+			expect(fetchMock).not.toHaveBeenCalled();
+		} finally {
+			for (const state of providerSessionState.values()) state.close();
+		}
 	});
 
 	it("carries fatal websocket fallback into isolated compaction transport", async () => {
@@ -5230,7 +5437,6 @@ describe("openai-codex streaming", () => {
 
 		const sentTypesByConnection: string[][] = [];
 		let constructorCount = 0;
-		let abortSecondRequest: (() => void) | undefined;
 
 		class AbortResetWebSocket extends MockWebSocket {
 			#connectionIndex: number;
@@ -5318,7 +5524,7 @@ describe("openai-codex streaming", () => {
 		expect(firstResult.role).toBe("assistant");
 
 		const secondAbortController = new AbortController();
-		abortSecondRequest = () => {
+		const abortSecondRequest = () => {
 			secondAbortController.abort();
 		};
 		const secondResult = await streamOpenAICodexResponses(model, secondContext, {

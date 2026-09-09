@@ -128,6 +128,7 @@ type PromptQueueState = {
 type PromptLifecycleError = Error & { readonly code: "ACP_SESSION_CLOSED" };
 
 type PromptTurnState = {
+	abortController: AbortController;
 	cancelRequested: boolean;
 	settled: boolean;
 	/**
@@ -275,14 +276,12 @@ function buildAcpSpeechModelsCatalog(): Record<string, unknown> {
 			speechVoiceSetting: "speech.voice",
 			defaultModel: DEFAULT_TTS_LOCAL_MODEL_KEY,
 			defaultVoice: DEFAULT_TTS_VOICE,
-			models: TTS_LOCAL_MODELS.map(
-				({ key, label, description, voices: modelVoices }): AcpSpeechTtsModelOption => ({
-					value: key,
-					label,
-					description,
-					voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
-				}),
-			),
+			models: TTS_LOCAL_MODELS.map(({ key, label, description, voices: modelVoices }): AcpSpeechTtsModelOption => ({
+				value: key,
+				label,
+				description,
+				voices: modelVoices.map(({ id, label: voiceLabel }) => ({ value: id, label: voiceLabel })),
+			})),
 			voices,
 		},
 	};
@@ -855,6 +854,7 @@ export class AcpAgent implements Agent {
 			const converted = this.#convertPromptBlocks(params.prompt);
 			const pendingPrompt = Promise.withResolvers<PromptResponse>();
 			record.promptTurn = {
+				abortController: new AbortController(),
 				cancelRequested: false,
 				settled: false,
 				errorTextDelivery: undefined,
@@ -961,8 +961,9 @@ export class AcpAgent implements Agent {
 	}
 
 	async #runPromptOrCommand(record: ManagedSessionRecord, text: string, images: AgentImageContent[]): Promise<void> {
+		const promptTurn = record.promptTurn;
 		const skillResult = await this.#tryRunSkillCommand(record, text);
-		if (skillResult) {
+		if (skillResult || promptTurn?.cancelRequested) {
 			return;
 		}
 
@@ -971,6 +972,7 @@ export class AcpAgent implements Agent {
 			sessionManager: record.session.sessionManager,
 			settings: record.session.settings,
 			cwd: record.session.sessionManager.getCwd(),
+			signal: promptTurn?.abortController.signal,
 			output: output => this.#emitCommandOutput(record, output),
 			refreshCommands: () => this.#emitAvailableCommandsUpdate(record),
 			reloadPlugins: () => this.#reloadPluginState(record),
@@ -998,6 +1000,7 @@ export class AcpAgent implements Agent {
 				await this.#pushConfigOptionUpdate(record);
 			},
 		});
+		if (promptTurn?.cancelRequested) return;
 		if (builtinResult !== false) {
 			if ("prompt" in builtinResult) {
 				const residualBaseline = new Set(record.extensionUserMessageTasks);
@@ -1014,7 +1017,6 @@ export class AcpAgent implements Agent {
 				}
 				return;
 			}
-			const promptTurn = record.promptTurn;
 			this.#finishPrompt(record, {
 				stopReason: "end_turn",
 				usage: this.#buildTurnUsage(
@@ -1093,6 +1095,7 @@ export class AcpAgent implements Agent {
 			return promptTurn.cleanup;
 		}
 		promptTurn.cancelRequested = true;
+		promptTurn.abortController.abort();
 		promptTurn.unsubscribe?.();
 		const cleanup = this.#runCancelCleanup(record, promptTurn);
 		promptTurn.cleanup = cleanup;
@@ -1521,7 +1524,7 @@ export class AcpAgent implements Agent {
 	/**
 	 * Surface a turn-fatal provider error that never reached the client. A
 	 * request that fails before streaming any assistant events — e.g. GitHub
-	 * Copilot's `HTTP 400 model_not_supported` after retries — emits only
+	 * Copilot's `HTTP 400 model_not_supported` — emits only
 	 * `agent_end` with an empty assistant message carrying `errorMessage`
 	 * (`Agent#runLoop`'s catch), so no `message_update`/`message_end` ever maps
 	 * to a session update and the client sees the turn end silently. Errors

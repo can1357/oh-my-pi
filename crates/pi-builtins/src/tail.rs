@@ -2823,26 +2823,15 @@ use follow::Observer;
 use paths::{FileExtTail, HeaderPrinter, Input, InputKind};
 
 
-const SIGPIPE_EXIT_CODE: i32 = 141;
-
 #[derive(Debug)]
 pub(crate) enum TailError {
 	Io(io::Error),
 	Message(String),
-	BrokenPipe,
 }
 
 impl TailError {
 	pub(crate) fn message(message: impl Into<String>) -> Self {
 		Self::Message(message.into())
-	}
-
-	fn code(&self) -> i32 {
-		if matches!(self, Self::BrokenPipe) {
-			SIGPIPE_EXIT_CODE
-		} else {
-			1
-		}
 	}
 }
 
@@ -2851,7 +2840,6 @@ impl std::fmt::Display for TailError {
 		match self {
 			Self::Io(error) => error.fmt(f),
 			Self::Message(message) => f.write_str(message),
-			Self::BrokenPipe => f.write_str("Broken pipe"),
 		}
 	}
 }
@@ -2860,11 +2848,7 @@ impl std::error::Error for TailError {}
 
 impl From<io::Error> for TailError {
 	fn from(error: io::Error) -> Self {
-		if error.kind() == ErrorKind::BrokenPipe {
-			Self::BrokenPipe
-		} else {
-			Self::Io(error)
-		}
+		Self::Io(error)
 	}
 }
 
@@ -2999,7 +2983,7 @@ impl Utility for Tail {
 			Ok(settings) => settings,
 			Err(error) => {
 				let _ = writeln!(host.stderr, "tail: {error}");
-				return error.code();
+				return 1;
 			},
 		};
 		settings.resolve_paths(host);
@@ -3007,11 +2991,8 @@ impl Utility for Tail {
 		match tail_main(&settings, host) {
 			Ok(()) => host.exit_code(),
 			Err(error) => {
-				let code = error.code();
-				if code != SIGPIPE_EXIT_CODE {
-					let _ = writeln!(host.stderr, "tail: {error}");
-				}
-				code
+				let _ = writeln!(host.stderr, "tail: {error}");
+				1
 			},
 		}
 	}
@@ -3041,7 +3022,7 @@ fn run_reverse(matches: &ArgMatches, host: &mut Host) -> i32 {
 		Ok(settings) => settings,
 		Err(error) => {
 			let _ = writeln!(host.stderr, "tail: {error}");
-			return error.code();
+			return 1;
 		},
 	};
 
@@ -3060,11 +3041,8 @@ fn run_reverse(matches: &ArgMatches, host: &mut Host) -> i32 {
 	match reverse_main(&settings, all_lines, host) {
 		Ok(()) => host.exit_code(),
 		Err(error) => {
-			let code = error.code();
-			if code != SIGPIPE_EXIT_CODE {
-				let _ = writeln!(host.stderr, "tail: {error}");
-			}
-			code
+			let _ = writeln!(host.stderr, "tail: {error}");
+			1
 		},
 	}
 }

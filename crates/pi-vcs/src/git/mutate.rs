@@ -10,10 +10,17 @@ use std::{
 
 use gix::bstr::{BString, ByteSlice};
 
-use super::{GitRepo, normalize_path};
+use super::{
+	GitRepo, normalize_path,
+	open::{load_index_or_empty, load_index_or_head, status_with_fresh_index, status_with_index},
+	read::literal_pathspec,
+};
 use crate::{
 	error::{Error, Result},
-	types::{CleanOptions, CommitOptions, DetachGitDirResult, ResetMode, RestoreOptions},
+	types::{
+		CleanOptions, CommitOptions, DetachGitDirResult, ResetMode, RestoreOptions,
+		WorktreeAddOptions, WorktreeAddResult, WorktreeClone,
+	},
 };
 
 const INDEX_WRITE: gix::index::write::Options = gix::index::write::Options {
@@ -75,27 +82,44 @@ pub(crate) fn update_reference(
 
 impl GitRepo {
 	/// Stage worktree files, or every change when `files` is empty.
+	///
+	/// Empty `files` matches `git add -A`: refresh tracked paths and add
+	/// untracked files that survive the standard ignore stack (nested
+	/// `.gitignore`, exclude files). When `core.precomposeUnicode` is set,
+	/// a worktree path that is a unicode-composition equivalent of an
+	/// existing index path (macOS NFD dirent vs NFC index name) is stored
+	/// under the index name. Unrelated names that share an inode (hardlinks)
+	/// and distinct NFC/NFD files when precompose is off stay separate.
 	pub fn stage_files(&self, files: &[String]) -> Result<()> {
 		let repo = self.gix()?;
-		let mut index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|err| Error::backend("git add", err))?
-			.into_owned();
-		let mut selected = collect_stage_paths(self.root(), files)?;
+		let mut index = load_index_or_head(&repo, "git add")?;
 		let all = files.is_empty();
-		let requested: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+		let mut requested: BTreeSet<String> = files
+			.iter()
+			.map(|path| normalize_stage_path(path))
+			.collect();
+		if precompose_unicode_enabled(&repo) {
+			requested = remap_composed_index_paths(self.root(), &index, requested);
+		}
+		let mut selected = collect_stage_paths(self, &requested, all)?;
 		for entry in index.entries() {
 			let path = entry.path(&index).to_str_lossy().into_owned();
-			if (all || requested.iter().any(|wanted| path_matches(&path, wanted)))
+			if (all
+				|| requested
+					.iter()
+					.any(|wanted| stage_path_matches(&path, wanted)))
 				&& fs::symlink_metadata(self.root().join(&path)).is_ok()
 			{
 				selected.insert(path);
 			}
 		}
 		index.remove_entries(|_, path, _| {
-			let p = path.to_str_lossy();
-			(all || requested.iter().any(|wanted| path_matches(&p, wanted)))
-				&& !selected.contains(&p.into_owned())
+			let path = path.to_str_lossy();
+			(all
+				|| requested
+					.iter()
+					.any(|wanted| stage_path_matches(&path, wanted)))
+				&& !selected.contains(path.as_ref())
 		});
 		for path in selected {
 			stage_one(&repo, self.root(), &mut index, &path)?;
@@ -111,10 +135,7 @@ impl GitRepo {
 		let repo = self.gix()?;
 		let head = head_tree(&repo)?;
 		let head_index = index_for_tree(&repo, head.as_ref())?;
-		let mut current = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|err| Error::backend("git reset", err))?
-			.into_owned();
+		let mut current = load_index_or_head(&repo, "git reset")?;
 		copy_index_paths(&mut current, &head_index, files);
 		current
 			.write(INDEX_WRITE)
@@ -132,10 +153,7 @@ impl GitRepo {
 			.try_peel_to_id()
 			.map_err(|err| Error::backend("git commit", err))?
 			.map(|id| id.detach());
-		let index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|err| Error::backend("git commit", err))?
-			.into_owned();
+		let index = load_index_or_head(&repo, "git commit")?;
 		let tree = if options.files.is_empty() {
 			write_index_tree(&repo, &index)?
 		} else {
@@ -334,10 +352,7 @@ impl GitRepo {
 	pub fn restore(&self, options: &RestoreOptions) -> Result<()> {
 		let repo = self.gix()?;
 		let restore_worktree = options.worktree || !options.staged;
-		let mut index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|e| Error::backend("git restore", e))?
-			.into_owned();
+		let mut index = load_index_or_head(&repo, "git restore")?;
 		if options.staged {
 			let source = resolve_tree(&repo, options.source.as_deref().unwrap_or("HEAD"))?;
 			let source_index = index_for_tree(&repo, Some(&source))?;
@@ -372,38 +387,75 @@ impl GitRepo {
 
 	/// Remove untracked files and directories according to ignore mode.
 	pub fn clean(&self, options: &CleanOptions) -> Result<()> {
-		let repo = self.gix()?;
-		let index = repo
-			.index_or_load_from_head_or_empty()
-			.map_err(|e| Error::backend("git clean", e))?;
-		let tracked: BTreeSet<String> = index
-			.entries()
-			.iter()
-			.map(|e| e.path(&index).to_str_lossy().into_owned())
-			.collect();
-		let ignores = load_ignore_patterns(self.root());
-		let mut paths = Vec::new();
-		walk_files(self.root(), self.root(), &mut paths)?;
-		for rel in paths {
-			if tracked.contains(&rel)
-				|| !options.paths.is_empty() && !options.paths.iter().any(|p| path_matches(&rel, p))
-			{
-				continue;
+		// `.` (and `./`) normalize to "" and mean "everything", so they drop out
+		// of the restriction set. A literally empty string is rejected the way
+		// git rejects it instead of silently widening to the whole worktree.
+		let mut paths = BTreeSet::new();
+		for raw in &options.paths {
+			if raw.is_empty() {
+				return Err(Error::backend("git clean", "empty string is not a valid pathspec"));
 			}
-			let ignored = is_ignored(&rel, &ignores);
-			if (options.ignored_only && !ignored)
-				|| (!options.ignored_only && !options.include_ignored && ignored)
-			{
-				continue;
-			}
-			let path = self.root().join(&rel);
-			if path.is_dir() {
-				fs::remove_dir_all(path)?;
-			} else {
-				fs::remove_file(path)?;
+			let normalized = normalize_stage_path(raw);
+			if !normalized.is_empty() {
+				paths.insert(normalized);
 			}
 		}
-		remove_empty_dirs(self.root(), self.root())?;
+
+		// Fresh open: the cached handle snapshots config, so a
+		// `core.excludesFile` configured after first use would be missed and
+		// its excluded files deleted.
+		let repo = self.gix_fresh()?;
+		let mut platform =
+			status_with_index(&repo, "git clean", load_index_or_head(&repo, "git clean")?)?
+				.untracked_files(gix::status::UntrackedFiles::Files);
+		let emit_ignored = options.include_ignored || options.ignored_only;
+		let for_deletion = if emit_ignored {
+			gix::dir::walk::ForDeletionMode::FindNonBareRepositoriesInIgnoredDirectories
+		} else {
+			gix::dir::walk::ForDeletionMode::IgnoredDirectoriesCanHideNestedRepositories
+		};
+		platform = platform.dirwalk_options(|opts| {
+			let opts = opts
+				.emit_empty_directories(true)
+				.for_deletion(Some(for_deletion));
+			if emit_ignored {
+				opts.emit_ignored(Some(gix::dir::walk::EmissionMode::Matching))
+			} else {
+				opts
+			}
+		});
+
+		let iter = platform
+			.into_index_worktree_iter(
+				paths
+					.iter()
+					.map(|path| literal_pathspec(path).into_bytes().into()),
+			)
+			.map_err(|e| Error::backend("git clean", e))?;
+
+		for item in iter {
+			let item = item.map_err(|e| Error::backend("git clean", e))?;
+			let gix::status::index_worktree::Item::DirectoryContents { entry, .. } = item else {
+				continue;
+			};
+			if entry.disk_kind == Some(gix::dir::entry::Kind::Repository) {
+				continue;
+			}
+			let wanted = if options.ignored_only {
+				matches!(entry.status, gix::dir::entry::Status::Ignored(_))
+			} else if options.include_ignored {
+				entry.status == gix::dir::entry::Status::Untracked
+					|| matches!(entry.status, gix::dir::entry::Status::Ignored(_))
+			} else {
+				entry.status == gix::dir::entry::Status::Untracked
+			};
+			if !wanted {
+				continue;
+			}
+			let full = self.root().join(entry.rela_path.to_str_lossy().as_ref());
+			remove_existing(&full)?;
+			prune_empty_parents(self.root(), full.parent(), &paths)?;
+		}
 		Ok(())
 	}
 
@@ -458,7 +510,12 @@ impl GitRepo {
 	}
 
 	/// Create a linked worktree and materialize its checkout.
-	pub fn worktree_add(&self, path: &Path, ref_name: &str, detach: bool) -> Result<()> {
+	pub fn worktree_add(
+		&self,
+		path: &Path,
+		ref_name: &str,
+		options: WorktreeAddOptions,
+	) -> Result<WorktreeAddResult> {
 		let repo = self.gix()?;
 		let id = resolve_commit(&repo, ref_name)?;
 		if path.exists() && fs::read_dir(path)?.next().is_some() {
@@ -467,14 +524,19 @@ impl GitRepo {
 				"destination already exists and is not empty",
 			));
 		}
-		fs::create_dir_all(path)?;
-		let name = worktree_admin_name(&self.info().common_dir, path);
-		let admin = self.info().common_dir.join("worktrees").join(&name);
-		fs::create_dir_all(&admin)?;
-		fs::write(path.join(".git"), format!("gitdir: {}\n", admin.display()))?;
-		fs::write(admin.join("gitdir"), format!("{}\n", path.join(".git").display()))?;
-		fs::write(admin.join("commondir"), "../..\n")?;
-		let head = if detach {
+		if options.keep_changes {
+			let source_head = repo
+				.head_id()
+				.map_err(|e| Error::backend("git worktree add", e))?
+				.detach();
+			if source_head != id {
+				return Err(Error::backend(
+					"git worktree add",
+					"keeping uncommitted changes requires the target to be the source HEAD",
+				));
+			}
+		}
+		let head = if options.detach {
 			id.to_hex().to_string()
 		} else {
 			let full = if ref_name.starts_with("refs/heads/") {
@@ -505,11 +567,231 @@ impl GitRepo {
 			}
 			format!("ref: {full}")
 		};
-		fs::write(admin.join("HEAD"), format!("{head}\n"))?;
+
+		let preferred = match options.clone {
+			WorktreeClone::Off => None,
+			WorktreeClone::Auto => Some(None),
+			WorktreeClone::Prefer(kind) => Some(Some(kind)),
+		};
+		let mut clone_error = None;
+		if let Some(preferred) = preferred {
+			for kind in pi_iso::clone_candidates(preferred) {
+				match self.worktree_add_cloned(path, id, &head, kind, options.keep_changes) {
+					Ok(()) => {
+						return Ok(WorktreeAddResult { cloned_with: Some(kind), clone_error });
+					},
+					Err(err) => {
+						clone_error = Some(err.to_string());
+						cleanup_worktree_add(path, &self.info().common_dir);
+					},
+				}
+			}
+		}
+
+		fs::create_dir_all(path)?;
+		let admin = register_worktree(path, &self.info().common_dir, &head)?;
 		let linked = Self::require(path)?;
 		let linked_repo = linked.gix()?;
 		checkout_tree(&linked, &linked_repo, id, true)?;
+		if options.keep_changes {
+			self.seed_worktree_changes(path, &admin)?;
+		}
+		Ok(WorktreeAddResult { cloned_with: None, clone_error })
+	}
+
+	/// Replicate the source checkout's uncommitted state onto a freshly
+	/// materialized worktree at `path`: copy every dirty tracked and
+	/// untracked file (deleting what the source deleted), then install the
+	/// source index so staged hunks stay staged.
+	fn seed_worktree_changes(&self, path: &Path, admin: &Path) -> Result<()> {
+		let repo = self.gix()?;
+		let (dirty_tracked, untracked) = collect_clone_reconciliation_paths(&repo)?;
+		for relative in dirty_tracked.iter().chain(untracked.iter()) {
+			let relative = relative.to_path_lossy();
+			let src = self.root().join(&relative);
+			let dst = path.join(&relative);
+			match fs::symlink_metadata(&src) {
+				Ok(meta) if meta.file_type().is_symlink() => {
+					remove_existing(&dst)?;
+					if let Some(parent) = dst.parent() {
+						fs::create_dir_all(parent)?;
+					}
+					copy_symlink(&src, &dst)?;
+				},
+				Ok(meta) if meta.is_file() => {
+					remove_existing(&dst)?;
+					if let Some(parent) = dst.parent() {
+						fs::create_dir_all(parent)?;
+					}
+					fs::copy(&src, &dst)?;
+				},
+				Ok(_) => {},
+				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+					remove_existing(&dst)?;
+					prune_empty_parents(path, dst.parent(), &BTreeSet::new())?;
+				},
+				Err(err) => return Err(err.into()),
+			}
+		}
+		let source_index = self.info().git_dir.join("index");
+		if source_index.is_file() {
+			fs::copy(source_index, admin.join("index"))?;
+		}
 		Ok(())
+	}
+
+	fn worktree_add_cloned(
+		&self,
+		path: &Path,
+		id: gix::hash::ObjectId,
+		head: &str,
+		kind: pi_iso::BackendKind,
+		keep_changes: bool,
+	) -> Result<()> {
+		let repo = self.gix()?;
+		for key in ["core.sparseCheckout", "core.splitIndex"] {
+			if repo.config_snapshot().string(key).is_some_and(|value| {
+				!matches!(value.to_str_lossy().as_ref(), "false" | "no" | "off" | "0")
+			}) {
+				return Err(Error::backend("git worktree add", format!("{key} is enabled")));
+			}
+		}
+		let source_index = self.info().git_dir.join("index");
+		if !source_index.is_file() {
+			return Err(Error::backend("git worktree add", "source index is missing"));
+		}
+
+		pi_iso::backend(kind)
+			.clone_tree(self.root(), path, &[OsStr::new(".git")])
+			.map_err(|err| Error::backend("git worktree add", err))?;
+		let admin = register_worktree(path, &self.info().common_dir, head)?;
+		fs::copy(&source_index, admin.join("index"))?;
+
+		let (dirty_tracked, untracked) = collect_clone_reconciliation_paths(&repo)?;
+		let linked = Self::require(path)?;
+		let linked_repo = linked.gix()?;
+		let mut current = load_index_or_empty(&linked_repo, "git worktree add")?;
+		if keep_changes {
+			// The clone already mirrors the source's live tree and the copied
+			// index carries its staged state. Only the stat cache is stale
+			// (new inodes); refresh it for entries the source reports clean so
+			// dirty files still hash on the next status.
+			for (entry, entry_path) in current.entries_mut_with_paths() {
+				if dirty_tracked.contains(entry_path) {
+					continue;
+				}
+				let Ok(metadata) = gix::index::fs::Metadata::from_path_no_follow(
+					&path.join(entry_path.to_path_lossy()),
+				) else {
+					continue;
+				};
+				entry.stat = gix::index::entry::Stat::from_fs(&metadata)
+					.map_err(|err| Error::backend("git worktree add", err))?;
+			}
+			return current
+				.write(INDEX_WRITE)
+				.map_err(|err| Error::backend("git worktree add", err));
+		}
+		let tree = commit_tree(&linked_repo, &id)?;
+		let mut target = linked_repo
+			.index_from_tree(&tree)
+			.map_err(|err| Error::backend("git worktree add", err))?;
+
+		let current_paths: BTreeSet<BString> = current
+			.entries()
+			.iter()
+			.map(|entry| entry.path(&current).to_owned())
+			.collect();
+		let target_paths: BTreeSet<BString> = target
+			.entries()
+			.iter()
+			.map(|entry| entry.path(&target).to_owned())
+			.collect();
+		let mut delete = current_paths
+			.difference(&target_paths)
+			.cloned()
+			.collect::<BTreeSet<_>>();
+		delete.extend(untracked);
+		delete.extend(dirty_tracked.difference(&target_paths).cloned());
+
+		let mut write = BTreeSet::new();
+		for entry in target.entries() {
+			let path = entry.path(&target);
+			if current
+				.entry_by_path(path)
+				.is_none_or(|old| old.id != entry.id || old.mode != entry.mode)
+				|| dirty_tracked.contains(path)
+			{
+				write.insert(path.to_owned());
+			}
+		}
+
+		for relative in &delete {
+			let full = path.join(relative.to_path_lossy());
+			match fs::remove_file(&full) {
+				Ok(()) => prune_empty_parents(path, full.parent(), &BTreeSet::new())?,
+				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
+				Err(err) => return Err(err.into()),
+			}
+		}
+
+		// `remove_entries` keeps the path backing even when it drops every
+		// entry, and gix's checkout asserts the two are empty together; a
+		// clone that already matches the target tree must not enter it.
+		let changed = if write.is_empty() {
+			None
+		} else {
+			let mut changed = target.clone();
+			changed.remove_entries(|_, entry_path, _| !write.contains(entry_path));
+			let mut checkout_options = linked_repo
+				.checkout_options(gix::worktree::stack::state::attributes::Source::IdMapping)
+				.map_err(|err| Error::backend("git worktree add", err))?;
+			checkout_options.overwrite_existing = true;
+			let progress = gix::progress::Discard;
+			let interrupt = std::sync::atomic::AtomicBool::new(false);
+			let outcome = gix::worktree::state::checkout(
+				&mut changed,
+				path,
+				linked_repo
+					.objects
+					.into_arc()
+					.map_err(|err| Error::backend("git worktree add", err))?,
+				&progress,
+				&progress,
+				&interrupt,
+				checkout_options,
+			)
+			.map_err(|err| Error::backend("git worktree add", err))?;
+			if !outcome.collisions.is_empty() || !outcome.errors.is_empty() {
+				return Err(Error::backend(
+					"git worktree add",
+					format!(
+						"checkout reported {} collisions and {} errors",
+						outcome.collisions.len(),
+						outcome.errors.len()
+					),
+				));
+			}
+			Some(changed)
+		};
+
+		for (entry, entry_path) in target.entries_mut_with_paths() {
+			if let Some(written) = changed
+				.as_ref()
+				.and_then(|changed| changed.entry_by_path(entry_path))
+			{
+				entry.stat = written.stat;
+			} else {
+				let metadata = gix::index::fs::Metadata::from_path_no_follow(
+					&path.join(entry_path.to_path_lossy()),
+				)?;
+				entry.stat = gix::index::entry::Stat::from_fs(&metadata)
+					.map_err(|err| Error::backend("git worktree add", err))?;
+			}
+		}
+		target
+			.write(INDEX_WRITE)
+			.map_err(|err| Error::backend("git worktree add", err))
 	}
 
 	/// Remove a linked worktree, returning false when dirty and not forced.
@@ -804,25 +1086,122 @@ fn index_for_tree(
 	}
 }
 
-fn collect_stage_paths(root: &Path, files: &[String]) -> Result<BTreeSet<String>> {
-	let ignores = load_ignore_patterns(root);
-	let mut candidates = Vec::new();
-	if files.is_empty() {
-		walk_files(root, root, &mut candidates)?;
+fn collect_stage_paths(
+	repo: &GitRepo,
+	requested: &BTreeSet<String>,
+	all: bool,
+) -> Result<BTreeSet<String>> {
+	let untracked = if all || requested.contains("") {
+		repo.ls_files(true, true)?
 	} else {
-		for item in files {
-			let path = root.join(item);
-			if path.is_dir() {
-				walk_files(root, &path, &mut candidates)?;
-			} else if path.exists() || fs::symlink_metadata(&path).is_ok() {
-				candidates.push(item.replace('\\', "/"));
+		repo.ls_files_at_paths(true, true, requested)?
+	};
+	Ok(untracked.into_iter().collect())
+}
+
+fn normalize_stage_path(path: &str) -> String {
+	let normalized = path.replace('\\', "/");
+	let mut relative = normalized.as_str();
+	while let Some(stripped) = relative.strip_prefix("./") {
+		relative = stripped;
+	}
+	if relative == "." {
+		String::new()
+	} else {
+		relative.trim_end_matches('/').to_owned()
+	}
+}
+
+fn stage_path_matches(path: &str, wanted: &str) -> bool {
+	wanted.is_empty() || path_matches(path, wanted)
+}
+
+fn remap_composed_index_paths(
+	root: &Path,
+	index: &gix::index::File,
+	selected: BTreeSet<String>,
+) -> BTreeSet<String> {
+	let mut exact = BTreeSet::new();
+	let mut by_composed = BTreeMap::new();
+	let mut dir_by_composed: BTreeMap<String, String> = BTreeMap::new();
+	for entry in index.entries() {
+		let Ok(name) = entry.path(index).to_str() else {
+			continue;
+		};
+		exact.insert(name.to_owned());
+		by_composed
+			.entry(precomposed(name).into_owned())
+			.or_insert_with(|| name.to_owned());
+		let mut start = 0;
+		while let Some(slash) = name[start..].find('/') {
+			let dir = &name[..start + slash];
+			if !dir.is_empty() {
+				dir_by_composed
+					.entry(precomposed(dir).into_owned())
+					.or_insert_with(|| dir.to_owned());
 			}
+			start += slash + 1;
 		}
 	}
-	Ok(candidates
+	selected
 		.into_iter()
-		.filter(|path| !is_ignored(path, &ignores))
-		.collect())
+		.map(|path| {
+			if exact.contains(&path) {
+				return path;
+			}
+			if let Some(alias) = by_composed.get(precomposed(&path).as_ref())
+				&& alias != &path
+			{
+				let Ok(meta) = fs::symlink_metadata(root.join(&path)) else {
+					return path;
+				};
+				let Ok(imeta) = fs::symlink_metadata(root.join(alias)) else {
+					return path;
+				};
+				if same_worktree_file(&meta, &imeta) {
+					return alias.clone();
+				}
+			}
+			let composed = precomposed(&path);
+			if let Some(alias_dir) = dir_by_composed.get(composed.as_ref())
+				&& alias_dir != &path
+			{
+				let Ok(meta) = fs::symlink_metadata(root.join(&path)) else {
+					return path;
+				};
+				let Ok(imeta) = fs::symlink_metadata(root.join(alias_dir)) else {
+					return path;
+				};
+				if same_worktree_file(&meta, &imeta) {
+					return alias_dir.clone();
+				}
+			}
+			path
+		})
+		.collect()
+}
+
+fn precompose_unicode_enabled(repo: &gix::Repository) -> bool {
+	repo
+		.config_snapshot()
+		.boolean("core.precomposeUnicode")
+		.unwrap_or(false)
+}
+
+fn precomposed(path: &str) -> std::borrow::Cow<'_, str> {
+	gix_utils::str::precompose(std::borrow::Cow::Borrowed(path))
+}
+
+#[cfg(unix)]
+fn same_worktree_file(left: &fs::Metadata, right: &fs::Metadata) -> bool {
+	use std::os::unix::fs::MetadataExt;
+	left.dev() == right.dev() && left.ino() == right.ino()
+}
+
+#[cfg(not(unix))]
+#[allow(clippy::missing_const_for_fn, reason = "matches non-const unix signature")]
+fn same_worktree_file(_: &fs::Metadata, _: &fs::Metadata) -> bool {
+	false
 }
 
 fn stage_one(
@@ -870,6 +1249,7 @@ fn is_executable(meta: &fs::Metadata) -> bool {
 	meta.permissions().mode() & 0o111 != 0
 }
 #[cfg(not(unix))]
+#[allow(clippy::missing_const_for_fn, reason = "matches non-const unix signature")]
 fn is_executable(_: &fs::Metadata) -> bool {
 	false
 }
@@ -971,10 +1351,7 @@ fn checkout_tree(
 	let mut target = repo
 		.index_from_tree(&tree)
 		.map_err(|e| Error::backend("git checkout", e))?;
-	let current = repo
-		.index_or_load_from_head_or_empty()
-		.map_err(|e| Error::backend("git checkout", e))?
-		.into_owned();
+	let current = load_index_or_head(repo, "git checkout")?;
 	let conflicts = checkout_conflicts(owner.root(), repo, &current, &target)?;
 	if !overwrite && !conflicts.is_empty() {
 		return Err(Error::Conflict { paths: conflicts });
@@ -1133,105 +1510,6 @@ fn path_matches(path: &str, wanted: &str) -> bool {
 			.is_some_and(|r| r.starts_with('/'))
 }
 
-fn walk_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
-	for entry in fs::read_dir(dir)? {
-		let entry = entry?;
-		let path = entry.path();
-		if path == root.join(".git") {
-			continue;
-		}
-		let kind = entry.file_type()?;
-		if kind.is_dir() {
-			walk_files(root, &path, out)?;
-		} else {
-			out.push(
-				path
-					.strip_prefix(root)
-					.map_err(|e| Error::backend("git walk", e))?
-					.to_string_lossy()
-					.replace('\\', "/"),
-			);
-		}
-	}
-	Ok(())
-}
-
-fn load_ignore_patterns(root: &Path) -> Vec<String> {
-	let mut out = Vec::new();
-	for path in [root.join(".gitignore"), root.join(".git/info/exclude")] {
-		if let Ok(text) = fs::read_to_string(path) {
-			out.extend(
-				text
-					.lines()
-					.map(str::trim)
-					.filter(|l| !l.is_empty() && !l.starts_with('#'))
-					.map(str::to_owned),
-			);
-		}
-	}
-	out
-}
-
-fn is_ignored(path: &str, patterns: &[String]) -> bool {
-	let mut ignored = false;
-	for raw in patterns {
-		let (negate, pattern) = raw
-			.strip_prefix('!')
-			.map_or((false, raw.as_str()), |p| (true, p));
-		let pattern = pattern.trim_start_matches('/').trim_end_matches('/');
-		let matches = if pattern.contains('*') {
-			wildcard_match(pattern, path) || path.split('/').any(|part| wildcard_match(pattern, part))
-		} else {
-			path == pattern
-				|| path.starts_with(&format!("{pattern}/"))
-				|| path.split('/').any(|part| part == pattern)
-		};
-		if matches {
-			ignored = !negate;
-		}
-	}
-	ignored
-}
-
-const fn wildcard_match(pattern: &str, text: &str) -> bool {
-	let (mut p, mut t, mut star, mut mark) = (0, 0, None, 0);
-	let (pb, tb) = (pattern.as_bytes(), text.as_bytes());
-	while t < tb.len() {
-		if p < pb.len() && (pb[p] == b'?' || pb[p] == tb[t]) {
-			p += 1;
-			t += 1;
-		} else if p < pb.len() && pb[p] == b'*' {
-			star = Some(p);
-			p += 1;
-			mark = t;
-		} else if let Some(s) = star {
-			p = s + 1;
-			mark += 1;
-			t = mark;
-		} else {
-			return false;
-		}
-	}
-	while p < pb.len() && pb[p] == b'*' {
-		p += 1;
-	}
-	p == pb.len()
-}
-
-fn remove_empty_dirs(root: &Path, dir: &Path) -> Result<bool> {
-	for entry in fs::read_dir(dir)? {
-		let path = entry?.path();
-		if path.is_dir() && path != root.join(".git") {
-			remove_empty_dirs(root, &path)?;
-		}
-	}
-	let empty = dir != root && fs::read_dir(dir)?.next().is_none();
-	if empty {
-		fs::remove_dir(dir)?;
-	}
-	Ok(empty)
-}
-
 fn set_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
 	let mut config = if path.exists() {
 		gix::config::File::from_path_no_includes(path.to_owned(), gix::config::Source::Local)
@@ -1245,6 +1523,141 @@ fn set_config_file(path: &Path, key: &str, value: &str) -> Result<()> {
 	let mut bytes = Vec::new();
 	config.write_to(&mut bytes)?;
 	fs::write(path, bytes)?;
+	Ok(())
+}
+
+fn collect_clone_reconciliation_paths(
+	repo: &gix::Repository,
+) -> Result<(BTreeSet<BString>, BTreeSet<BString>)> {
+	let platform = status_with_fresh_index(repo, "git worktree add")?
+		.untracked_files(gix::status::UntrackedFiles::Files);
+	let iter = platform
+		.into_iter(std::iter::empty::<gix::bstr::BString>())
+		.map_err(|err| Error::backend("git worktree add", err))?;
+	let mut dirty_tracked = BTreeSet::new();
+	let mut untracked = BTreeSet::new();
+	for item in iter {
+		let item = item.map_err(|err| Error::backend("git worktree add", err))?;
+		let gix::status::Item::IndexWorktree(change) = item else {
+			continue;
+		};
+		use gix::status::index_worktree;
+		match change {
+			index_worktree::Item::Modification { rela_path, status, .. }
+				if !matches!(
+					status,
+					gix::status::plumbing::index_as_worktree::EntryStatus::NeedsUpdate(_)
+				) =>
+			{
+				dirty_tracked.insert(rela_path);
+			},
+			index_worktree::Item::DirectoryContents { entry, .. }
+				if entry.status == gix::dir::entry::Status::Untracked =>
+			{
+				untracked.insert(entry.rela_path);
+			},
+			index_worktree::Item::Rewrite { source, dirwalk_entry, .. } => {
+				dirty_tracked.insert(dirwalk_entry.rela_path);
+				match source {
+					index_worktree::RewriteSource::RewriteFromIndex { source_rela_path, .. } => {
+						dirty_tracked.insert(source_rela_path);
+					},
+					index_worktree::RewriteSource::CopyFromDirectoryEntry {
+						source_dirwalk_entry,
+						..
+					} => {
+						untracked.insert(source_dirwalk_entry.rela_path);
+					},
+				}
+			},
+			_ => {},
+		}
+	}
+	Ok((dirty_tracked, untracked))
+}
+
+fn register_worktree(path: &Path, common: &Path, head: &str) -> Result<PathBuf> {
+	fs::create_dir_all(path)?;
+	let name = worktree_admin_name(common, path);
+	let admin = common.join("worktrees").join(name);
+	fs::create_dir_all(&admin)?;
+	fs::write(path.join(".git"), format!("gitdir: {}\n", admin.display()))?;
+	fs::write(admin.join("gitdir"), format!("{}\n", path.join(".git").display()))?;
+	fs::write(admin.join("commondir"), "../..\n")?;
+	fs::write(admin.join("HEAD"), format!("{head}\n"))?;
+	Ok(admin)
+}
+
+fn cleanup_worktree_add(path: &Path, common: &Path) {
+	let admin = registered_admin(&path.join(".git")).ok().flatten();
+	let _ = fs::remove_dir_all(path);
+	if let Some(admin) = admin.filter(|admin| admin.starts_with(common.join("worktrees"))) {
+		let _ = fs::remove_dir_all(admin);
+	}
+}
+
+/// Remove a file, symlink, or directory tree at `path`; missing is fine.
+fn remove_existing(path: &Path) -> Result<()> {
+	match fs::symlink_metadata(path) {
+		Ok(meta) if meta.is_dir() => fs::remove_dir_all(path)?,
+		Ok(_) => fs::remove_file(path)?,
+		Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
+		Err(err) => return Err(err.into()),
+	}
+	Ok(())
+}
+
+/// Recreate the symlink at `src` as `dst` (a plain file holding the link
+/// target on platforms without symlinks, matching git's `core.symlinks=false`).
+fn copy_symlink(src: &Path, dst: &Path) -> Result<()> {
+	let target = fs::read_link(src)?;
+	#[cfg(unix)]
+	std::os::unix::fs::symlink(&target, dst)?;
+	#[cfg(not(unix))]
+	fs::write(dst, target.to_string_lossy().as_bytes())?;
+	Ok(())
+}
+
+/// Remove now-empty ancestors of a deleted entry, walking up from `parent`
+/// and stopping at `root`, the first non-empty directory, or — when `scope`
+/// is non-empty — the first directory outside every scoped pathspec.
+fn prune_empty_parents(
+	root: &Path,
+	mut parent: Option<&Path>,
+	scope: &BTreeSet<String>,
+) -> Result<()> {
+	while let Some(dir) = parent {
+		if dir == root {
+			break;
+		}
+		if !scope.is_empty() {
+			let Ok(rel) = dir.strip_prefix(root) else {
+				break;
+			};
+			let rel = rel.to_string_lossy().replace('\\', "/");
+			let in_scope = scope.iter().any(|p| {
+				*p == rel
+					|| rel
+						.strip_prefix(p.as_str())
+						.is_some_and(|r| r.starts_with('/'))
+			});
+			if !in_scope {
+				break;
+			}
+		}
+		match fs::remove_dir(dir) {
+			Ok(()) => parent = dir.parent(),
+			Err(err)
+				if matches!(
+					err.kind(),
+					std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+				) =>
+			{
+				break;
+			},
+			Err(err) => return Err(err.into()),
+		}
+	}
 	Ok(())
 }
 
@@ -1278,10 +1691,7 @@ fn branch_is_checked_out(common: &Path, full_ref: &str) -> bool {
 
 fn tracked_worktree_dirty(repo: &GitRepo) -> Result<bool> {
 	let gix = repo.gix()?;
-	let index = gix
-		.index_or_load_from_head_or_empty()
-		.map_err(|e| Error::backend("git worktree remove", e))?
-		.into_owned();
+	let index = load_index_or_head(&gix, "git worktree remove")?;
 	for entry in index.entries() {
 		if worktree_id(
 			&gix,
@@ -1430,12 +1840,207 @@ mod tests {
 		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "?? new");
 	}
 
+	#[test]
+	fn stage_all_skips_nested_gitignore_like_git_add() {
+		let (temp, repo) = fixture();
+		fs::create_dir_all(temp.path().join("tests/e2e/screenshots")).unwrap();
+		fs::write(temp.path().join("tests/e2e/.gitignore"), "screenshots/\ntest-results/\n").unwrap();
+		fs::write(temp.path().join("tests/e2e/screenshots/homepage.png"), "png").unwrap();
+		fs::write(temp.path().join("tests/e2e/visible.txt"), "ok\n").unwrap();
+		repo.stage_files(&[]).unwrap();
+		let status = git(temp.path(), &["status", "--porcelain"]);
+		assert!(!status.contains("screenshots"), "nested-ignored screenshot was staged:\n{status}");
+		assert!(
+			status.contains("tests/e2e/.gitignore"),
+			"gitignore itself should be staged:\n{status}"
+		);
+		assert!(
+			status.contains("tests/e2e/visible.txt"),
+			"unignored sibling should be staged:\n{status}"
+		);
+	}
+
+	#[test]
+	fn stage_explicit_ignored_file_is_skipped() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join(".gitignore"), "secret\n").unwrap();
+		fs::write(temp.path().join("secret"), "x\n").unwrap();
+		fs::write(temp.path().join("visible"), "y\n").unwrap();
+		repo
+			.stage_files(&["secret".into(), "visible".into()])
+			.unwrap();
+		let status = git(temp.path(), &["status", "--porcelain"]);
+		assert!(!status.contains("secret"), "explicit ignored path was staged:\n{status}");
+		assert!(status.contains("visible"), "explicit unignored path should be staged:\n{status}");
+	}
+
+	#[test]
+	fn stage_dot_pathspec_matches_repository_root() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join("a"), "changed\n").unwrap();
+		fs::write(temp.path().join(".gitignore"), "secret\n").unwrap();
+		fs::write(temp.path().join("visible"), "visible\n").unwrap();
+		fs::write(temp.path().join("secret"), "secret\n").unwrap();
+
+		repo.stage_files(&[".".into()]).unwrap();
+		let status = git(temp.path(), &["status", "--porcelain"]);
+		assert!(status.contains("M  a"), "tracked root file should be staged:\n{status}");
+		assert!(status.contains("A  visible"), "untracked root file should be staged:\n{status}");
+		assert!(
+			!git(temp.path(), &["ls-files"])
+				.lines()
+				.any(|path| path == "secret"),
+			"ignored root file must stay untracked"
+		);
+	}
+
+	#[test]
+	fn stage_dot_prefixed_directory_pathspec_is_scoped() {
+		let (temp, repo) = fixture();
+		fs::create_dir(temp.path().join("dir")).unwrap();
+		fs::write(temp.path().join("dir/tracked"), "base\n").unwrap();
+		git(temp.path(), &["add", "--", "dir/tracked"]);
+		git(temp.path(), &["commit", "-qm", "directory"]);
+		fs::write(temp.path().join("dir/tracked"), "changed\n").unwrap();
+		fs::write(temp.path().join("dir/new"), "new\n").unwrap();
+		fs::write(temp.path().join("outside"), "outside\n").unwrap();
+
+		repo.stage_files(&["./dir".into()]).unwrap();
+		let status = git(temp.path(), &["status", "--porcelain"]);
+		assert!(status.contains("M  dir/tracked"), "tracked child should be staged:\n{status}");
+		assert!(status.contains("A  dir/new"), "untracked child should be staged:\n{status}");
+		assert!(status.contains("?? outside"), "unrequested path should stay untracked:\n{status}");
+	}
+
+	#[test]
+	fn stage_explicit_metachar_directory_is_literal() {
+		let (temp, repo) = fixture();
+		fs::create_dir(temp.path().join("[x]")).unwrap();
+		fs::create_dir(temp.path().join("x")).unwrap();
+		fs::write(temp.path().join("[x]/selected"), "selected\n").unwrap();
+		fs::write(temp.path().join("x/unselected"), "unselected\n").unwrap();
+
+		repo.stage_files(&["[x]".into()]).unwrap();
+		let status = git(temp.path(), &["status", "--porcelain"]);
+		assert!(
+			status.contains("A  [x]/selected"),
+			"literal metacharacter directory should be staged:\n{status}"
+		);
+		assert!(
+			status.contains("?? x/"),
+			"pattern lookalike directory should stay untracked:\n{status}"
+		);
+	}
+
+	#[cfg(target_os = "macos")]
+	#[test]
+	fn stage_all_does_not_add_nfd_duplicate_of_nfc_index_path() {
+		let (temp, repo) = fixture();
+		let nfc = "caf\u{e9}.txt";
+		let nfd = "cafe\u{301}.txt";
+		fs::write(temp.path().join(nfc), "hello\n").unwrap();
+		git(temp.path(), &["add", "--", nfc]);
+		git(temp.path(), &["commit", "-qm", "accent"]);
+		let before = git(temp.path(), &["ls-files", "-z"]);
+		assert!(
+			before.split('\0').filter(|p| p.contains("caf")).count() == 1,
+			"setup should track one NFC path, got {before:?}"
+		);
+		assert!(!before.contains('\u{301}'), "git add should store NFC, got {before:?}");
+
+		repo.stage_files(&[]).unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		let after = git(temp.path(), &["ls-files", "-z"]);
+		let cafe: Vec<_> = after.split('\0').filter(|p| p.contains("caf")).collect();
+		assert_eq!(cafe, [nfc], "native add created a unicode duplicate: {after:?}");
+
+		repo.stage_files(&[nfd.to_owned()]).unwrap();
+		assert_eq!(git(temp.path(), &["status", "--porcelain"]), "");
+		let after_explicit = git(temp.path(), &["ls-files", "-z"]);
+		let cafe: Vec<_> = after_explicit
+			.split('\0')
+			.filter(|p| p.contains("caf"))
+			.collect();
+		assert_eq!(cafe, [nfc], "explicit NFD add created a unicode duplicate: {after_explicit:?}");
+	}
+
+	#[cfg(unix)]
+	#[test]
+	fn stage_explicit_hardlink_keeps_unrelated_name() {
+		let (temp, repo) = fixture();
+		fs::hard_link(temp.path().join("a"), temp.path().join("link")).unwrap();
+		repo.stage_files(&["link".into()]).unwrap();
+		let files = git(temp.path(), &["ls-files"]);
+		assert!(files.contains('a'), "tracked original must remain:\n{files}");
+		assert!(
+			files.contains("link"),
+			"unrelated hardlink name must be staged as its own path:\n{files}"
+		);
+	}
+
+	#[test]
+	fn stage_keeps_distinct_nfc_and_nfd_when_precompose_is_off() {
+		let temp = tempfile::tempdir().unwrap();
+		git(temp.path(), &["init", "-q", "-b", "main"]);
+		git(temp.path(), &["config", "user.name", "Test"]);
+		git(temp.path(), &["config", "user.email", "test@example.com"]);
+		git(temp.path(), &["config", "core.precomposeunicode", "false"]);
+		fs::write(temp.path().join("tracked"), "base\n").unwrap();
+		git(temp.path(), &["add", "."]);
+		git(temp.path(), &["commit", "-qm", "base"]);
+		let repo = GitRepo::require(temp.path()).unwrap();
+
+		let nfc = "caf\u{e9}.txt";
+		let nfd = "cafe\u{301}.txt";
+		fs::write(temp.path().join(nfc), "nfc\n").unwrap();
+		fs::write(temp.path().join(nfd), "nfd\n").unwrap();
+		let nfc_body = fs::read_to_string(temp.path().join(nfc)).unwrap();
+		let nfd_body = fs::read_to_string(temp.path().join(nfd)).unwrap();
+		if nfc_body == nfd_body {
+			return;
+		}
+
+		git(temp.path(), &["add", "--", nfc]);
+		git(temp.path(), &["commit", "-qm", "nfc"]);
+		repo.stage_files(&[nfd.to_owned()]).unwrap();
+		let files = git(temp.path(), &["ls-files", "-z"]);
+		let cafe: Vec<_> = files.split('\0').filter(|p| p.contains("caf")).collect();
+		assert_eq!(cafe.len(), 2, "NFC and NFD must stay distinct when precompose is off: {files:?}");
+		assert!(cafe.contains(&nfc), "{cafe:?}");
+		assert!(cafe.contains(&nfd), "{cafe:?}");
+	}
+
 	#[cfg(unix)]
 	fn write_hook(path: &Path, body: &str, executable: bool) {
 		use std::os::unix::fs::PermissionsExt;
 		fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
 		let mode = if executable { 0o755 } else { 0o644 };
 		fs::set_permissions(path, fs::Permissions::from_mode(mode)).unwrap();
+	}
+
+	#[test]
+	fn stage_commit_survives_unadvanced_index_mtime() {
+		// Regression: a commit right after staging on the same cached handle used
+		// to read a stale in-memory index snapshot when the on-disk index mtime
+		// did not advance past the snapshot's (sub-second writes / coarse mtime
+		// filesystems), failing with "nothing to commit, working tree clean".
+		let (temp, repo) = fixture();
+		// Pin the mtime so the snapshot captured while staging and the index the
+		// write leaves behind collide on the exact same tick.
+		crate::git::pin_index_mtime(&repo);
+
+		fs::write(temp.path().join("a"), "changed\n").unwrap();
+		repo.stage_files(&["a".into()]).unwrap();
+		// Staging bumped the mtime; forcing it back reproduces the same-tick
+		// collision that made gix serve the pre-stage index.
+		crate::git::pin_index_mtime(&repo);
+
+		let sha = repo
+			.commit_create("change", &CommitOptions::default())
+			.unwrap();
+		assert_eq!(git(temp.path(), &["rev-parse", "HEAD"]), sha);
+		// The commit must carry the staged content, not the stale base index.
+		assert_eq!(git(temp.path(), &["show", "HEAD:a"]), "changed");
 	}
 
 	#[cfg(unix)]
@@ -1554,6 +2159,203 @@ mod tests {
 		);
 	}
 
+	#[test]
+	fn clean_respects_nested_ignores_and_preserves_submodules() {
+		let (temp, repo) = fixture();
+		let outside = tempfile::tempdir().unwrap();
+		// 1. Nested gitignore
+		let nested = temp.path().join("nested");
+		fs::create_dir_all(&nested).unwrap();
+		fs::write(nested.join(".gitignore"), "secret.env\n").unwrap();
+		repo.stage_files(&["nested/.gitignore".into()]).unwrap();
+		repo
+			.commit_create("add nested gitignore", &CommitOptions::default())
+			.unwrap();
+		fs::write(nested.join("secret.env"), "secret\n").unwrap();
+		fs::write(nested.join("untracked.txt"), "delete\n").unwrap();
+
+		// 2. Checked-out submodule
+		let sub = temp.path().join("sub-repo");
+		fs::create_dir_all(&sub).unwrap();
+		git(&sub, &["init", "-q", "-b", "main"]);
+		git(&sub, &["config", "user.email", "test@example.com"]);
+		git(&sub, &["config", "user.name", "test"]);
+		fs::write(sub.join("sub-file.txt"), "committed-in-sub\n").unwrap();
+		git(&sub, &["add", "."]);
+		git(&sub, &["commit", "-qm", "sub init"]);
+
+		git(temp.path(), &[
+			"-c",
+			"protocol.file.allow=always",
+			"submodule",
+			"-q",
+			"add",
+			sub.to_str().unwrap(),
+			"my-submodule",
+		]);
+		git(temp.path(), &["commit", "-qm", "add submodule"]);
+
+		let checked_out_sub = temp.path().join("my-submodule");
+		fs::write(checked_out_sub.join("dirty-untracked.txt"), "sub untracked\n").unwrap();
+		fs::write(checked_out_sub.join("sub-file.txt"), "sub modified\n").unwrap();
+
+		// 3. Parent untracked file
+		fs::write(temp.path().join("parent-untracked.txt"), "delete\n").unwrap();
+
+		// 4. Global excludesfile (core.excludesFile), configured *after* `repo`'s
+		//    cached gix handle was opened by the staging calls above. The clean below
+		//    must observe it or `global.env` is deleted.
+		let global_exclude = outside.path().join("global-excludes");
+		fs::write(&global_exclude, "global.env\n").unwrap();
+		git(temp.path(), &["config", "core.excludesFile", global_exclude.to_str().unwrap()]);
+		fs::write(temp.path().join("global.env"), "global-secret\n").unwrap();
+
+		// 4b. Repository-local `.git/info/exclude`
+		let info_dir = repo.info().git_dir.join("info");
+		fs::create_dir_all(&info_dir).unwrap();
+		fs::write(info_dir.join("exclude"), "info-excluded.env\n").unwrap();
+		fs::write(temp.path().join("info-excluded.env"), "info-secret\n").unwrap();
+
+		// 5. Untracked nested repository
+		let untracked_repo = temp.path().join("untracked-nested-repo");
+		fs::create_dir_all(&untracked_repo).unwrap();
+		git(&untracked_repo, &["init", "-q", "-b", "main"]);
+		fs::write(untracked_repo.join("nested.txt"), "nested content\n").unwrap();
+
+		// 6. Symlink to directory (must unlink the symlink, not delete the target
+		//    directory)
+		#[cfg(unix)]
+		let target_dir = outside.path().join("target-dir");
+		#[cfg(unix)]
+		{
+			fs::create_dir_all(&target_dir).unwrap();
+			fs::write(target_dir.join("important.txt"), "keep this\n").unwrap();
+			std::os::unix::fs::symlink(&target_dir, temp.path().join("symlink-to-dir")).unwrap();
+		}
+
+		// 7. Untracked directory with file inside: empty directory gets pruned
+		let to_prune = temp.path().join("untracked-dir/subdir");
+		fs::create_dir_all(&to_prune).unwrap();
+		fs::write(to_prune.join("leaf.txt"), "leaf\n").unwrap();
+
+		// 8. Untracked directory initially empty: pruned (-d contract)
+		let initially_empty = temp.path().join("initially-empty-dir");
+		fs::create_dir_all(&initially_empty).unwrap();
+
+		// 9. Ignored empty directory: MUST SURVIVE
+		let ignored_empty = temp.path().join("ignored-empty-dir");
+		fs::create_dir_all(&ignored_empty).unwrap();
+		let sub_gitignore = temp.path().join(".gitignore");
+		let mut current_gitignore = fs::read_to_string(&sub_gitignore).unwrap_or_default();
+		current_gitignore.push_str("ignored-empty-dir/\n");
+		fs::write(&sub_gitignore, current_gitignore).unwrap();
+
+		repo
+			.clean(&CleanOptions { paths: vec!["nested".into()], ..Default::default() })
+			.unwrap();
+		assert!(
+			!nested.join("untracked.txt").exists(),
+			"pathspec-scoped clean removes matches under the path"
+		);
+		assert!(
+			nested.join("secret.env").exists(),
+			"pathspec-scoped clean still honors nested ignores"
+		);
+		assert!(
+			temp.path().join("parent-untracked.txt").exists(),
+			"pathspec-scoped clean leaves paths outside the pathspec"
+		);
+		assert!(
+			initially_empty.exists(),
+			"pathspec-scoped clean leaves directories outside the pathspec"
+		);
+		// 10. Pathspec scoping: cleaning with a pathspec prunes empty dirs inside the
+		//     pathspec but preserves the parent
+		let pathspec_dir = temp.path().join("pathspec-parent/child/grandchild");
+		fs::create_dir_all(&pathspec_dir).unwrap();
+		fs::write(pathspec_dir.join("leaf.txt"), "leaf\n").unwrap();
+		repo
+			.clean(&CleanOptions { paths: vec!["pathspec-parent/child".into()], ..Default::default() })
+			.unwrap();
+		assert!(
+			!temp.path().join("pathspec-parent/child").exists(),
+			"empty dir inside pathspec must be pruned"
+		);
+		assert!(
+			temp.path().join("pathspec-parent").exists(),
+			"parent directory outside pathspec must not be pruned"
+		);
+
+		repo.clean(&CleanOptions::default()).unwrap();
+
+		// Untracked files deleted and parent directories pruned
+		assert!(!temp.path().join("parent-untracked.txt").exists());
+		assert!(!nested.join("untracked.txt").exists());
+		assert!(!temp.path().join("untracked-dir").exists());
+		assert!(!temp.path().join("pathspec-parent").exists());
+		assert!(!initially_empty.exists(), "empty untracked directory must be pruned by -d");
+
+		// Ignored empty directory MUST SURVIVE
+		assert!(ignored_empty.exists(), "ignored empty directory must survive clean");
+
+		// Nested ignored file MUST SURVIVE
+		assert!(nested.join("secret.env").exists());
+		assert_eq!(fs::read_to_string(nested.join("secret.env")).unwrap(), "secret\n");
+
+		// Global excluded file MUST SURVIVE (config set after the handle was cached)
+		assert!(temp.path().join("global.env").exists());
+		assert_eq!(fs::read_to_string(temp.path().join("global.env")).unwrap(), "global-secret\n");
+
+		// `.git/info/exclude` file MUST SURVIVE
+		assert_eq!(
+			fs::read_to_string(temp.path().join("info-excluded.env")).unwrap(),
+			"info-secret\n"
+		);
+
+		// Submodule files and .git MUST SURVIVE
+		assert!(checked_out_sub.join(".git").exists());
+		assert!(checked_out_sub.join("sub-file.txt").exists());
+		assert_eq!(
+			fs::read_to_string(checked_out_sub.join("sub-file.txt")).unwrap(),
+			"sub modified\n"
+		);
+		assert!(checked_out_sub.join("dirty-untracked.txt").exists());
+
+		// Untracked nested repo MUST SURVIVE
+		assert!(untracked_repo.join(".git").exists());
+		assert!(untracked_repo.join("nested.txt").exists());
+		// Symlink to directory: symlink is removed, target directory content survives
+		#[cfg(unix)]
+		{
+			assert!(!temp.path().join("symlink-to-dir").exists());
+			assert!(target_dir.join("important.txt").exists());
+		}
+	}
+
+	#[test]
+	fn clean_rejects_empty_pathspec_and_treats_dot_as_everything() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join("untracked.txt"), "x").unwrap();
+
+		let err = repo
+			.clean(&CleanOptions { paths: vec![String::new()], ..Default::default() })
+			.unwrap_err();
+		assert!(
+			err.to_string()
+				.contains("empty string is not a valid pathspec"),
+			"{err}"
+		);
+		assert!(
+			temp.path().join("untracked.txt").exists(),
+			"an empty pathspec must not widen to the whole worktree"
+		);
+
+		repo
+			.clean(&CleanOptions { paths: vec!["./".into()], ..Default::default() })
+			.unwrap();
+		assert!(!temp.path().join("untracked.txt").exists(), "`.` selects everything like git");
+	}
+
 	#[cfg(unix)]
 	#[test]
 	fn detach_git_dir_does_not_mutate_when_index_snapshot_fails() {
@@ -1562,7 +2364,13 @@ mod tests {
 		let (temp, repo) = fixture();
 		let linked = temp.path().join("../linked-unreadable-index");
 		let _ = fs::remove_dir_all(&linked);
-		repo.worktree_add(&linked, "main", true).unwrap();
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
 		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
 		let linked_repo = GitRepo::require(&linked).unwrap();
 		let index_path = linked_repo.info().git_dir.join("index");
@@ -1582,11 +2390,188 @@ mod tests {
 	}
 
 	#[test]
+	fn clone_first_worktree_reconciles_source_state_to_target_tree() {
+		let (temp, repo) = fixture();
+		fs::write(temp.path().join(".gitignore"), "build/\n").unwrap();
+		git(temp.path(), &["add", ".gitignore"]);
+		git(temp.path(), &["commit", "-qm", "ignore build"]);
+		git(temp.path(), &["checkout", "-qb", "target"]);
+		fs::write(temp.path().join("a"), "target\n").unwrap();
+		fs::remove_file(temp.path().join("b")).unwrap();
+		fs::write(temp.path().join("c"), "added\n").unwrap();
+		git(temp.path(), &["add", "-A"]);
+		git(temp.path(), &["commit", "-qm", "target tree"]);
+		git(temp.path(), &["checkout", "-q", "main"]);
+		fs::write(temp.path().join("a"), "dirty\n").unwrap();
+		fs::write(temp.path().join("untracked"), "untracked\n").unwrap();
+		fs::create_dir_all(temp.path().join("build")).unwrap();
+		fs::write(temp.path().join("build/out.txt"), "ignored\n").unwrap();
+
+		let linked = temp.path().join("../linked-clone-first");
+		let _ = fs::remove_dir_all(&linked);
+		let result = repo
+			.worktree_add(&linked, "target", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+
+		assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "target\n");
+		assert_eq!(fs::read_to_string(linked.join("c")).unwrap(), "added\n");
+		assert!(!linked.join("b").exists());
+		assert!(!linked.join("untracked").exists());
+		assert!(
+			fs::read_to_string(linked.join(".git"))
+				.unwrap()
+				.starts_with("gitdir: ")
+		);
+		let linked_repo = GitRepo::require(&linked).unwrap();
+		assert_eq!(
+			fs::read_to_string(&linked_repo.info().head_path).unwrap(),
+			"ref: refs/heads/target\n"
+		);
+		let gix = linked_repo.gix().unwrap();
+		let mut status = status_with_fresh_index(&gix, "git status")
+			.unwrap()
+			.untracked_files(gix::status::UntrackedFiles::Files)
+			.into_iter(std::iter::empty::<BString>())
+			.unwrap();
+		assert!(status.next().is_none());
+
+		if result.cloned_with.is_some() {
+			assert_eq!(fs::read_to_string(linked.join("build/out.txt")).unwrap(), "ignored\n");
+		} else {
+			assert!(!linked.join("build/out.txt").exists());
+			assert!(
+				result.clone_error.is_some() || pi_iso::clone_candidates(None).is_empty(),
+				"a failed clone attempt must surface its reason"
+			);
+		}
+		let _ = repo.worktree_remove(&linked, true);
+	}
+
+	/// Whether any host-available clone backend can actually clone a tree
+	/// on `dir`'s filesystem. `pi_iso::clone_candidates` is a host-level
+	/// probe only: Linux reports reflink support even when the temp dir
+	/// sits on ext4, where `FICLONE` fails with `EOPNOTSUPP`.
+	fn clone_works_on(dir: &Path) -> bool {
+		let source = dir.join("clone-probe-src");
+		let target = dir.join("clone-probe-dst");
+		fs::create_dir_all(&source).unwrap();
+		fs::write(source.join("file"), b"probe\n").unwrap();
+		let works = pi_iso::clone_candidates(None).into_iter().any(|kind| {
+			let _ = fs::remove_dir_all(&target);
+			pi_iso::backend(kind)
+				.clone_tree(&source, &target, &[])
+				.is_ok()
+		});
+		let _ = fs::remove_dir_all(&source);
+		let _ = fs::remove_dir_all(&target);
+		works
+	}
+
+	#[test]
+	fn clone_first_worktree_at_source_head_needs_no_checkout() {
+		let (temp, repo) = fixture();
+		git(temp.path(), &["branch", "same-as-head"]);
+		let linked = temp.path().join("../linked-clone-noop");
+		let _ = fs::remove_dir_all(&linked);
+		let clone_works = clone_works_on(temp.path());
+		let result = repo
+			.worktree_add(&linked, "same-as-head", WorktreeAddOptions {
+				detach:       false,
+				clone:        WorktreeClone::Auto,
+				keep_changes: false,
+			})
+			.unwrap();
+		if clone_works {
+			assert!(
+				result.cloned_with.is_some(),
+				"an identical tree must not fail the clone path: {:?}",
+				result.clone_error
+			);
+		} else {
+			assert!(
+				result.clone_error.is_some() || pi_iso::clone_candidates(None).is_empty(),
+				"a failed clone attempt must surface its reason"
+			);
+		}
+		assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "HEAD"]));
+		assert_eq!(git(&linked, &["status", "--porcelain"]), "");
+		let _ = repo.worktree_remove(&linked, true);
+	}
+
+	#[test]
+	fn worktree_add_keep_changes_carries_dirty_state_on_both_paths() {
+		for clone in [WorktreeClone::Auto, WorktreeClone::Off] {
+			let (temp, repo) = fixture();
+			fs::write(temp.path().join(".gitignore"), "build/\n").unwrap();
+			git(temp.path(), &["add", ".gitignore"]);
+			git(temp.path(), &["commit", "-qm", "ignore build"]);
+			fs::write(temp.path().join("a"), "staged\n").unwrap();
+			git(temp.path(), &["add", "a"]);
+			fs::write(temp.path().join("a"), "staged then edited\n").unwrap();
+			fs::remove_file(temp.path().join("b")).unwrap();
+			fs::create_dir_all(temp.path().join("new/dir")).unwrap();
+			fs::write(temp.path().join("new/dir/untracked"), "untracked\n").unwrap();
+			fs::create_dir_all(temp.path().join("build")).unwrap();
+			fs::write(temp.path().join("build/out.txt"), "ignored\n").unwrap();
+			git(temp.path(), &["branch", "kept"]);
+
+			let linked = temp.path().join(format!("../linked-keep-{clone:?}"));
+			let _ = fs::remove_dir_all(&linked);
+			let result = repo
+				.worktree_add(&linked, "kept", WorktreeAddOptions {
+					detach: false,
+					clone,
+					keep_changes: true,
+				})
+				.unwrap();
+			if clone == WorktreeClone::Off {
+				assert!(result.cloned_with.is_none());
+			}
+
+			assert_eq!(fs::read_to_string(linked.join("a")).unwrap(), "staged then edited\n");
+			assert!(!linked.join("b").exists());
+			assert_eq!(fs::read_to_string(linked.join("new/dir/untracked")).unwrap(), "untracked\n");
+			assert_eq!(
+				linked.join("build/out.txt").exists(),
+				result.cloned_with.is_some(),
+				"ignored files ride along only with a clone"
+			);
+			assert_eq!(
+				git(&linked, &["status", "--porcelain"]),
+				git(temp.path(), &["status", "--porcelain"]),
+				"linked worktree must report the same staged/unstaged/untracked set"
+			);
+			assert_eq!(git(&linked, &["rev-parse", "HEAD"]), git(temp.path(), &["rev-parse", "HEAD"]));
+			assert_eq!(git(&linked, &["symbolic-ref", "HEAD"]), "refs/heads/kept");
+			// The source keeps its own dirty state untouched.
+			assert_eq!(fs::read_to_string(temp.path().join("a")).unwrap(), "staged then edited\n");
+
+			let rejected = repo.worktree_add(
+				&temp.path().join("../linked-keep-rejected"),
+				"HEAD~1",
+				WorktreeAddOptions { detach: true, clone, keep_changes: true },
+			);
+			assert!(rejected.is_err(), "keep_changes must require the source HEAD as target");
+			let _ = repo.worktree_remove(&linked, true);
+		}
+	}
+
+	#[test]
 	fn mutate_worktree_and_detach() {
 		let (temp, repo) = fixture();
 		let linked = temp.path().join("../linked-mut");
 		let _ = fs::remove_dir_all(&linked);
-		repo.worktree_add(&linked, "main", true).unwrap();
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
 		assert!(
 			git(temp.path(), &["worktree", "list", "--porcelain"])
 				.contains(linked.to_string_lossy().as_ref())
@@ -1595,7 +2580,13 @@ mod tests {
 
 		let linked = temp.path().join("../linked-detach");
 		let _ = fs::remove_dir_all(&linked);
-		repo.worktree_add(&linked, "main", true).unwrap();
+		repo
+			.worktree_add(&linked, "main", WorktreeAddOptions {
+				detach:       true,
+				clone:        WorktreeClone::Off,
+				keep_changes: false,
+			})
+			.unwrap();
 		let common = fs::canonicalize(repo.info().common_dir.clone()).unwrap();
 		let source_head = git(temp.path(), &["rev-parse", "HEAD"]);
 		assert_eq!(detach_git_dir(&linked, &common).unwrap(), DetachGitDirResult::Detached);

@@ -14,7 +14,7 @@ Current native consumers:
 
 `crates/pi-natives/src/grep.rs` uses `WalkRequest` for candidate discovery but explicitly sets `.cache(false)`; the current public `GrepOptions` has no cache field.
 
-The public invalidation binding remains `invalidateFsScanCache(path?)` in `packages/natives/native/index.d.ts` / `index.js`. Coding-agent mutation helpers live in `packages/coding-agent/src/tools/fs-cache-invalidation.ts`.
+The N-API DTO layer that bridges walker results to JavaScript lives in `crates/pi-natives/src/iofs.rs`; per its own header, "`pi-walker` owns traversal and cache policy" and `iofs.rs` keeps only the JS-facing shapes and conversions. The public invalidation binding remains `invalidateFsScanCache(path?)` — declared in `iofs.rs` (forwarding to `pi_walker::invalidate_path_string` / `pi_walker::invalidate_all`) and exported in `packages/natives/native/index.d.ts` / `index.js`. Coding-agent mutation helpers live in `packages/coding-agent/src/tools/fs-cache-invalidation.ts`.
 
 ## Cache key partitioning
 
@@ -98,7 +98,7 @@ Coding-agent helpers:
 - `invalidateFsScanAfterDelete(path)`
 - `invalidateFsScanAfterRename(oldPath, newPath)` — invalidates both sides when different
 
-Current write, hashline, patch, and replace mutation paths call these helpers after successful changes. Any new filesystem mutation path must do the same.
+Current write, hashline, patch, replace, auto-repair, sloppy-edit, and ACP-bridge mutation paths call these helpers after successful changes. Any new filesystem mutation path must do the same.
 
 ## Adding a cache consumer
 

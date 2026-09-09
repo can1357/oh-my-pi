@@ -1,0 +1,19 @@
+// Provider-wire compat for "firepass"; regenerated from the frozen census using deployment contract selectors.
+
+provider "firepass" {
+	// Replaces the Fireworks-hosted minimal-effort remap for Fire Pass.
+	thinking-effort-map {
+		minimal "none"
+	}
+	// Replaces the Fire Pass wire-model-id dispatch baseline.
+	wire-model-id-mode "firepass"
+	class "glm" priority=1 {
+		thinking-mode "effort"
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+
+	class "kimi" priority=1 {
+		thinking-mode "effort"
+		thinking-efforts "low" "high" "max"
+	}
+}

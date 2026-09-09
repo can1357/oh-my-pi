@@ -1,9 +1,11 @@
 import { afterAll, afterEach, describe, expect, it, vi } from "bun:test";
+import { stripVTControlCharacters } from "node:util";
 import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InteractiveMode } from "@oh-my-pi/pi-coding-agent/modes/interactive-mode";
 import { initTheme, theme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
+import { executeBuiltinSlashCommand } from "@oh-my-pi/pi-coding-agent/slash-commands/builtin-registry";
 import * as sessionColor from "@oh-my-pi/pi-coding-agent/utils/session-color";
 import { adjustHsv, TempDir } from "@oh-my-pi/pi-utils";
 
@@ -57,8 +59,11 @@ async function createHarness(sessionName: string): Promise<Harness> {
 		messages: [],
 		systemPrompt: [],
 		state: { model: undefined },
+		isStreaming: true,
 		model: undefined,
 		thinkingLevel: undefined,
+		titleGenerationSignal: new AbortController().signal,
+		notifyTitleGenerationStart: () => undefined,
 	} as unknown as AgentSession;
 	const mode = new InteractiveMode(session, "test");
 	harness = { mode, sessionManager, tempDir };
@@ -178,5 +183,42 @@ describe("InteractiveMode working-message session accent cache", () => {
 		mode.loadingAnimation?.setMessage("Accent enabled");
 		expect(renderLoader(mode)).toContain(accentAnsi);
 		expect(getHex).toHaveBeenCalledTimes(2);
+	});
+});
+
+describe("InteractiveMode working activity", () => {
+	it("preserves the active loader when blank /rename reports usage", async () => {
+		const { mode } = await createHarness("Active rename session");
+		mode.ensureLoadingAnimation();
+		const loader = defined(mode.loadingAnimation);
+		expect(mode.session.isStreaming).toBe(true);
+
+		try {
+			const handled = await executeBuiltinSlashCommand("/rename", { ctx: mode });
+
+			expect(handled).toBe(true);
+			expect(mode.session.isStreaming).toBe(true);
+			expect(mode.loadingAnimation).toBe(loader);
+			expect(stripVTControlCharacters(renderLoader(mode))).toContain("Working");
+		} finally {
+			loader.stop();
+		}
+	});
+
+	it("restarts a working loader detached by transient status cleanup", async () => {
+		const { mode } = await createHarness("Detached loader session");
+		mode.ensureLoadingAnimation();
+		const loader = defined(mode.loadingAnimation);
+		expect(loader.debugState()).toMatchObject({ running: true });
+
+		mode.statusContainer.disposeChildren();
+		expect(loader.debugState()).toMatchObject({ running: false });
+
+		mode.ensureLoadingAnimation();
+
+		expect(mode.loadingAnimation).toBe(loader);
+		expect(mode.statusContainer.children).toContain(loader);
+		expect(loader.debugState()).toMatchObject({ running: true });
+		loader.stop();
 	});
 });
