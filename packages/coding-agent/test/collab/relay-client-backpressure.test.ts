@@ -1261,6 +1261,47 @@ describe("CollabSocket send backpressure", () => {
 		}
 	});
 
+	it("keeps admitting live traffic behind an oversized snapshot, and still sheds its peer for a flood", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({
+			wsUrl: "ws://localhost:8788/r/oversized-live",
+			role: "host",
+			key: {} as CryptoKey,
+		});
+		let reason: string | undefined;
+		socket.onClose = message => {
+			reason = message;
+		};
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			// Past the whole budget with nothing ahead of it, so only the floor admits
+			// it — and its charge is then excluded, or the queue reads as over capacity
+			// for the entire drain and the next replica-bearing broadcast evicts the
+			// peer the floor just admitted it for.
+			socket.sendBatch(welcomeBatch("oversized snapshot"), GREEDY, 64 * 1024 * 1024);
+			expect(socket.send({ t: "entry", entry: { id: "live" } } as unknown as CollabFrame)).toBe(true);
+			expect(shed).toEqual([]);
+
+			// The exclusion is on bytes alone. A peer's share is an entry count and the
+			// batch is one of its entries, so its own flood still reaches the cap.
+			for (let i = 0; i < PEER_SHARE - 1; i++) {
+				expect(socket.send({ t: "error", message: `reply ${i}` }, GREEDY)).toBe(true);
+			}
+			expect(shed).toEqual([]);
+			expect(socket.send({ t: "error", message: "one past the share" }, GREEDY)).toBe(false);
+			for (let flush = 0; flush < 4; flush++) await Promise.resolve();
+			expect(shed).toEqual([GREEDY]);
+			expect(reason).toBeUndefined();
+		} finally {
+			socket.close();
+		}
+	});
+
 	it("delivers more than 256 lazy snapshot chunks in order before live traffic through a slow transport", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;

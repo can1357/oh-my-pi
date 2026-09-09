@@ -9,6 +9,13 @@
  * generates has to be droppable, or the join notice ends sharing over the
  * snapshot it just admitted.
  *
+ * It is equally worthless if the next frame reverses it. Counting that entry's
+ * charge leaves the queue over capacity for its whole drain, and over capacity is
+ * what every eviction path keys on — so a guest joining a session mid-turn lost
+ * its half-delivered snapshot to the turn's next `entry` broadcast, and the
+ * rejoin that shed asked for was admitted and shed the same way. The charge is
+ * therefore excluded once admitted, and live traffic queues behind the snapshot.
+ *
  * The charge is levied at admission and covers the clone the batch's iterator
  * keeps reachable, so it has to be the size of the snapshot actually retained.
  * An image-heavy session is stripped before it is queued and can shrink by an
@@ -24,8 +31,14 @@ import { CollabHost } from "@oh-my-pi/pi-coding-agent/collab/host";
 import { COLLAB_PROTO, type CollabFrame, parseCollabLink } from "@oh-my-pi/pi-coding-agent/collab/protocol";
 import { CollabSocket } from "@oh-my-pi/pi-coding-agent/collab/relay-client";
 import type { SessionEntry } from "@oh-my-pi/pi-coding-agent/session/session-entries";
-import { installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
-import { type HostObservations, instrumentRelay, makeHostContext, type Snapshot } from "./helpers/throttled-host";
+import { type FakeWebSocket, installInMemoryRelay, uninstallInMemoryRelay } from "./helpers/in-memory-relay";
+import {
+	type HostObservations,
+	instrumentRelay,
+	makeHostContext,
+	type Snapshot,
+	waitFor,
+} from "./helpers/throttled-host";
 
 const cleanups: (() => void)[] = [];
 afterEach(() => {
@@ -85,25 +98,44 @@ function makeImageHeavySnapshot(): Snapshot {
 	};
 }
 
-async function startHost(snapshot: Snapshot, seen: HostObservations) {
+async function startHost(snapshot: Snapshot, seen: HostObservations, throttle = false) {
 	const relay = installInMemoryRelay();
-	const probe = instrumentRelay(relay, { throttle: false });
-	const host = new CollabHost(makeHostContext(snapshot, seen));
+	const probe = instrumentRelay(relay, { throttle });
+	const context = makeHostContext(snapshot, seen);
+	const host = new CollabHost(context);
 	cleanups.push(() => void host.stop("test done"));
 	await host.start("ws://localhost:8788");
 	const parsed = parseCollabLink(host.link);
 	if ("error" in parsed) throw new Error(parsed.error);
-	return { host, probe, parsed, key: await importRoomKey(parsed.key) };
+	return { host, context, probe, parsed, key: await importRoomKey(parsed.key) };
 }
 
-function joinGuest(wsUrl: string, key: CryptoKey, name: string): CollabFrame[] {
+function joinGuest(wsUrl: string, key: CryptoKey, name: string): { frames: CollabFrame[]; close: () => void } {
 	const guest = new CollabSocket({ wsUrl, role: "guest", key });
 	cleanups.push(() => guest.close());
 	const frames: CollabFrame[] = [];
 	guest.onFrame = frame => frames.push(frame);
 	guest.onOpen = () => guest.send({ t: "hello", proto: COLLAB_PROTO, name });
 	guest.connect();
-	return frames;
+	return { frames, close: () => guest.close() };
+}
+
+/** Zero the throttled host transport's buffer for {@link ms}, so its queue drains. */
+async function drainFor(hostWs: FakeWebSocket, ms: number): Promise<void> {
+	const deadline = Date.now() + ms;
+	while (Date.now() < deadline) {
+		hostWs.bufferedAmount = 0;
+		await Bun.sleep(5);
+	}
+}
+
+async function drainUntil(hostWs: FakeWebSocket, done: () => boolean, message: string): Promise<void> {
+	const deadline = Date.now() + 20_000;
+	while (!done()) {
+		if (Date.now() > deadline) throw new Error(message);
+		hostWs.bufferedAmount = 0;
+		await Bun.sleep(5);
+	}
 }
 
 async function waitForSnapshot(frames: CollabFrame[], message: string, ended: () => boolean): Promise<void> {
@@ -121,7 +153,7 @@ it("welcomes the first guest of a session larger than the whole send budget", as
 	const { parsed, key } = await startHost(snapshot, seen);
 	const ended = () => seen.notices.some(notice => notice.includes("Collab ended"));
 
-	const frames = joinGuest(parsed.wsUrl, key, "first-guest");
+	const { frames } = joinGuest(parsed.wsUrl, key, "first-guest");
 	await waitForSnapshot(frames, "the first guest never received a complete snapshot", ended);
 
 	// One guest, an empty queue, and the whole replica delivered: a session this
@@ -146,8 +178,8 @@ it("charges a stripped welcome snapshot for what it retained, not what arrived",
 
 	// Both joins are enqueued before either drains, so the second one is admitted
 	// against whatever the first is still charged for.
-	const first = joinGuest(parsed.wsUrl, key, "first-viewer");
-	const second = joinGuest(parsed.wsUrl, key, "second-viewer");
+	const { frames: first } = joinGuest(parsed.wsUrl, key, "first-viewer");
+	const { frames: second } = joinGuest(parsed.wsUrl, key, "second-viewer");
 	await waitForSnapshot(first, "the first guest never received a complete snapshot", ended);
 	await waitForSnapshot(second, "the second guest never received a complete snapshot", ended);
 
@@ -160,3 +192,57 @@ it("charges a stripped welcome snapshot for what it retained, not what arrived",
 		expect(chunked.filter(entry => JSON.stringify(entry).includes('"type":"image"'))).toEqual([]);
 	}
 }, 60_000);
+
+it("keeps an oversized snapshot when the turn it is joining keeps broadcasting", async () => {
+	const snapshot = makeOversizedSnapshot();
+	const seen: HostObservations = { notices: [], participantCounts: [] };
+	const { context, probe, parsed, key } = await startHost(snapshot, seen, true);
+	const hostWs = probe.hostSocket();
+	const appended = context.sessionManager.onEntryAppended;
+	if (!appended) throw new Error("the host never tapped entry appends");
+	const shedReports = () => seen.notices.filter(notice => notice.includes("fell too far behind"));
+
+	// Three joins in a row, because one shed is a fairness cost and a repeating one
+	// is a session nobody can join: the shed asks the guest to rejoin, and the
+	// rejoin is admitted by the same floor and met by the same live traffic.
+	for (let round = 1; round <= 3; round++) {
+		// The floor only admits an oversized batch with nothing ahead of it, so let
+		// the previous round's traffic and its state debounce clear first.
+		await drainFor(hostWs, 300);
+		hostWs.bufferedAmount = 0;
+
+		const joiner = joinGuest(parsed.wsUrl, key, `joiner-${round}`);
+		await waitFor(
+			() => joiner.frames.some(frame => frame.t === "welcome"),
+			`round ${round}: the joiner never received a welcome`,
+		);
+		// The throttle parks the drain one chunk in, so the snapshot is still queued
+		// and still charged when the turn appends its next entry. That broadcast is
+		// replica-bearing, so it cannot be dropped — before this was fixed it shed
+		// the peer whose half-delivered snapshot was the only thing in the queue.
+		appended({
+			type: "message",
+			id: `live-${round}`,
+			parentId: null,
+			timestamp: "2026-09-09T00:00:00Z",
+			message: { role: "user", content: `turn output ${round}`, timestamp: 0 },
+		} as never);
+
+		const complete = () => joiner.frames.some(frame => frame.t === "snapshot-chunk" && frame.final);
+		const live = () => joiner.frames.some(frame => frame.t === "entry" && frame.entry.id === `live-${round}`);
+		await drainUntil(hostWs, () => complete() && live(), `round ${round}: the joiner was cut off mid-snapshot`);
+
+		expect(shedReports()).toEqual([]);
+		expect(seen.notices.filter(notice => notice.includes("Collab ended"))).toEqual([]);
+		const delivered = joiner.frames
+			.filter(frame => frame.t === "snapshot-chunk")
+			.flatMap(frame => frame.entries.map(entry => entry.id));
+		expect(delivered).toEqual(snapshot.entries.map(entry => entry.id));
+		// Behind, not instead of: the live entry queues after the batch it could not
+		// evict, so the guest applies it to a replica that is already complete.
+		const finalAt = joiner.frames.findIndex(frame => frame.t === "snapshot-chunk" && frame.final);
+		const liveAt = joiner.frames.findIndex(frame => frame.t === "entry" && frame.entry.id === `live-${round}`);
+		expect(liveAt).toBeGreaterThan(finalAt);
+		joiner.close();
+	}
+}, 120_000);

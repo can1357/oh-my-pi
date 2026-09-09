@@ -29,11 +29,12 @@ const MAX_PENDING_SENDS = 256;
  * that.
  *
  * A bound on the declarations, not on the heap and not on cumulative work: for
- * finite non-negative declarations the queue carries at most this much charge, or
- * one oversized entry admitted with nothing ahead of it. A declaration is only a
- * proxy for the object graph, loose in both directions. Serialized chunk bytes
- * are transient by comparison — one chunk is materialized at a time — and are
- * not charged again as they pass through.
+ * finite non-negative declarations the queue carries at most this much charge,
+ * plus at most one entry the empty-queue floor admitted past it — see
+ * {@link CollabSocket.#chargedBytes}. A declaration is only a proxy for the
+ * object graph, loose in both directions. Serialized chunk bytes are transient by
+ * comparison — one chunk is materialized at a time — and are not charged again as
+ * they pass through.
  */
 const MAX_PENDING_SEND_BYTES = 16 * 1024 * 1024;
 /**
@@ -83,6 +84,11 @@ interface PendingSend {
 	lazy: boolean;
 	/** Carries no replica state, so it may be discarded instead of ending the room. */
 	advisory: boolean;
+	/**
+	 * Admitted past the whole budget by the empty-queue floor, so its charge is
+	 * excluded from every later capacity decision. See {@link CollabSocket.#chargedBytes}.
+	 */
+	exempt: boolean;
 	cancelled: boolean;
 }
 
@@ -441,7 +447,11 @@ export class CollabSocket {
 				return false;
 			}
 		}
-		this.#pendingSends.push({ frames, targetPeer, bytes, lazy, advisory, cancelled: false });
+		// The floor below admits an entry with nothing ahead of it whatever it costs.
+		// Record when that is the only reason it fits, because its charge must not
+		// read as pressure afterwards — see #chargedBytes.
+		const exempt = this.#pendingSends.length === 0 && bytes > MAX_PENDING_SEND_BYTES;
+		this.#pendingSends.push({ frames, targetPeer, bytes, lazy, advisory, exempt, cancelled: false });
 		this.#pendingSendBytes += bytes;
 		this.#pumpSends();
 		return true;
@@ -453,7 +463,37 @@ export class CollabSocket {
 		// larger than the whole budget still has to be shareable, and the queue can
 		// only shrink from here. The ceiling is therefore the budget plus one entry.
 		if (this.#pendingSends.length === 0) return false;
-		return this.#pendingSendBytes + bytes > MAX_PENDING_SEND_BYTES;
+		return this.#chargedBytes() + bytes > MAX_PENDING_SEND_BYTES;
+	}
+
+	/**
+	 * The charge the budget is measured against: everything except an entry the
+	 * empty-queue floor admitted past the budget on its own.
+	 *
+	 * Counting that one holds the queue over capacity for its entire drain, and
+	 * over capacity is what every eviction path keys on — so the first
+	 * replica-bearing broadcast after it sheds the peer the floor just admitted it
+	 * for, which for a snapshot is the joining guest losing a half-delivered
+	 * replica. `CollabHost` broadcasts an `entry` per appended entry and an `event`
+	 * per agent event, so on a busy session that is the next few milliseconds, and
+	 * the rejoin it asks for is admitted by the same floor and shed the same way.
+	 * Excluding it makes the ceiling the budget *plus* that one entry, which is what
+	 * the floor always meant: live traffic queues behind the oversized snapshot in
+	 * order rather than evicting it.
+	 *
+	 * Derived rather than accumulated, so it cannot drift from {@link
+	 * CollabSocket.#pendingSendBytes} across the four sites that maintain it. At
+	 * most one entry is ever exempt — the floor only fires on an empty queue, so a
+	 * second cannot be admitted while the first is still queued — and what bounds
+	 * the traffic behind it is {@link MAX_PENDING_SENDS} plus a full budget's worth
+	 * of charge, both of which still shed as usual.
+	 */
+	#chargedBytes(): number {
+		let charged = this.#pendingSendBytes;
+		for (const pending of this.#pendingSends) {
+			if (pending.exempt) charged -= pending.bytes;
+		}
+		return charged;
 	}
 
 	/** Whether admitting {@link bytes} for {@link targetPeer} would have to evict something first. */

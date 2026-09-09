@@ -81,6 +81,11 @@ The two axes are independent, and the policy currently keys on the first.
      otherwise drop. The reservation is for a join, not for every response a peer
      can ask for.
 
+Every "over capacity" above is `#overCapacity`, which is three tests in order: the
+entry cap, then the floor that admits an entry with nothing ahead of it whatever
+it costs, then the byte budget — measured against `#chargedBytes`, the queue's
+charge less the one entry the floor admitted past the budget.
+
 ## Shed order for a broadcast, and why
 
 ```
@@ -111,6 +116,7 @@ room for its own frame and then report it as overloaded.
 | Peer shed for exceeding its share       | A targeted `error` telling it to rejoin, best-effort: under saturation that frame is itself droppable, and the guest's 30 s first-welcome timer and snapshot-progress timer are the client-side backstop |
 | Heaviest peer shed to admit a broadcast | Same as above                                                                                                                                                                                            |
 | Pair not admittable at all              | No welcome and no chunks; the first-welcome timer fires                                                                                                                                                  |
+| Live traffic during an oversized join   | The joiner's replica completes, then every delta that arrived while it drained, in order. Each other guest sees those deltas late by the whole drain, since one FIFO serves the room                     |
 | A `ui-request` no writable peer took    | No dialog. The host's `requestGuestUi` resolves `unavailable` rather than awaiting an answer nobody was asked for                                                                                        |
 | An ask whose last recipient is gone     | A `ui-request-end` for anyone still in the room; `requestGuestUi` resolves `unavailable` rather than waiting on the peer that was shed or left                                                           |
 | A reply computed after the asker left   | Nothing, and nothing for whoever holds the id now                                                                                                                                                        |
@@ -260,19 +266,61 @@ charge levied by the drain loop could not be refunded by an evictor that could
 not see it.
 
 The first consequence is load-bearing and easy to lose: with a snapshot that only
-the empty-queue exception can admit, the host must put nothing ahead of it and
-everything the same `hello` generates behind it must be droppable. The welcome is
-inside the batch for the first reason. The join notice is advisory for the second
-— as a replica-bearing broadcast it takes the terminal path on a queue that the
-snapshot it just admitted has spoken for, which ends sharing for the guest that
-was joining.
+the empty-queue floor can admit, the host must put nothing ahead of it. The
+welcome is inside the batch for exactly that reason.
+
+### An admission the floor makes, the next frame must not reverse
+
+The floor is worth nothing on its own, because the charge it admits is then
+counted. A 17 MiB snapshot leaves the queue over capacity for its whole drain,
+over capacity is what every eviction path keys on, and the only peer holding
+anything is the one the floor just admitted it for. `CollabHost` broadcasts an
+`entry` per appended entry and an `event` per agent event, so during a turn the
+next replica-bearing broadcast is milliseconds away, and it sheds that peer and
+its half-delivered replica. The shed asks the guest to rejoin, the rejoin is
+admitted by the same floor and met by the same traffic: a large busy session was
+one nobody could ever finish joining.
+
+So the entry the floor admits past the budget is _exempt_: its declared charge is
+excluded from every later capacity decision, which is what makes the ceiling the
+budget _plus_ one entry rather than that entry and nothing else. Live traffic
+queues behind the snapshot in order instead of evicting it, and the guest applies
+each delta to a replica that is already complete.
+
+What that costs is head-of-line delay: everything admitted behind an oversized
+batch waits for its whole drain. That is not a new class of delay. A snapshot small
+enough to leave the room's live traffic space in the budget already sits at the head
+for its full drain and nothing sheds it, because the queue never reads as over
+capacity;
+`MAX_PENDING_SEND_BYTES` was never a delay bound, only the point past which the
+join was destroyed rather than delayed. Measured over the in-memory relay, one
+live `entry` broadcast per join and three rejoins in a row: a 14,683,997-byte
+snapshot completed every round both before this rule and after it, a
+17,830,547-byte one completed no round before it and every round after.
+
+Three things keep the exemption from being a bypass, and none of them are relaxed.
+At most one entry is exempt at a time, because the floor only fires on an empty
+queue. What accumulates behind it is still bounded, by `MAX_PENDING_SENDS` entries
+and by a full budget's worth of charge. And the exclusion is on bytes alone — a
+peer's share is an entry count and the batch is one of its entries, so a peer
+flooding its own share is still shed, and `#shedHeaviestPeer` still picks an exempt
+entry once the budget behind it genuinely fills. That shed frees no counted charge,
+so `#failOverload` follows inside the same admission — the same terminal point as
+before, because a queue holding nothing but a full budget of replica-bearing
+broadcasts is the state that path is for. Measured behind a 64 MiB exempt batch: 31
+broadcasts of 512 KiB are admitted and the 32nd ends sharing.
+
+The join notice stays advisory. Not because a replica-bearing one would now be
+refused — behind an exempt batch it would be admitted — but because a guest causes
+one per `hello` at will, which is the causation invariant, and because the notice
+is worth a transcript line.
 
 ## Bounds
 
 | Bound                                                 | Value                   | Why this number                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | ----------------------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `MAX_PENDING_SENDS`                                   | 256                     | Entries, not bytes. Deep enough to ride out a reconnect without buffering a session's worth of live traffic                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
-| `MAX_PENDING_SEND_BYTES`                              | 16 MiB                  | Declared charge, once per entry, as a proxy for retained memory — a `transcript` reply alone can be 4 MiB and a welcome batch holds a whole session clone. Enough for several concurrent joins on a normal session; a lone entry is admitted past it so an unusually large one still ships. The invariant is on the declarations, not on the heap and not on cumulative work: for finite non-negative declarations the queue holds at most this much charge, or one oversized entry                                                                                |
+| `MAX_PENDING_SEND_BYTES`                              | 16 MiB                  | Declared charge, once per entry, as a proxy for retained memory — a `transcript` reply alone can be 4 MiB and a welcome batch holds a whole session clone. Enough for several concurrent joins on a normal session; a lone entry is admitted past it so an unusually large one still ships, and that entry's charge is then excluded so live traffic can queue behind it rather than evict it. The invariant is on the declarations, not on the heap and not on cumulative work: for finite non-negative declarations the queue holds at most this much charge, plus at most one entry admitted past it by the empty-queue floor                                                                                |
 | `MAX_PEER_PENDING_SENDS`                              | 32                      | Legitimate targeted traffic for one peer is a welcome-plus-snapshot and a handful of `ui-request`s, so a peer holding this many is spamming or hopelessly behind                                                                                                                                                                                                                                                                                                                                                                                                   |
 | `MAX_PEER_PENDING_BATCHES`                            | 1                       | A batch always follows a welcome that re-primes the guest's accumulator, so only the newest welcome+snapshot pair is self-consistent. With the welcome inside the generator this reads as one snapshot per peer                                                                                                                                                                                                                                                                                                                                                    |
 | `MAX_RETIRED_PEERS`                                   | 256                     | A memory backstop, not the correctness bound. Correctness is an _ordering_ obligation — a record must outlive the frames already on `#recvChain` when the departure arrived — and connection churn can cross any count while an earlier frame is still decrypting, so eviction skips records whose obligation is unmet — undispatched frames, or a reply still being computed for the id — and this bounds only the remainder. Capped at all because relay ids climb for the room's lifetime, and a client with the view link can connect and disconnect in a loop |
