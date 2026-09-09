@@ -10,6 +10,7 @@ import type { IrcDeliveryReceipt, IrcMessage } from "../../irc/bus";
 import type { OutputArtifactError } from "../../session/streaming-output";
 import type { OutputMeta } from "../output-meta";
 import type { StructuredSubagentOutput } from "../../task/types";
+import type { ConfiguredThinkingLevel } from "../../thinking";
 import type { LaunchParams, LaunchToolDetails } from "./launch";
 
 /**
@@ -67,6 +68,12 @@ export interface JobSnapshot {
 	durationMs: number;
 	/** Effective task model selector, including an explicit reasoning suffix when configured. */
 	resolvedModel?: string;
+	/** Provider/id including routing, with no added thinking suffix. */
+	resolvedModelIdentity?: string;
+	/** Explicit thinking metadata, independent of the model identity. */
+	resolvedThinkingLevel?: ConfiguredThinkingLevel;
+	/** True when the task progress reports an attached live advisor. */
+	advisor?: boolean;
 	resultText?: string;
 	errorText?: string;
 	artifactError?: OutputArtifactError;

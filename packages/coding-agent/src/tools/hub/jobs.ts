@@ -6,18 +6,18 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
+import { Text, visibleWidth } from "@oh-my-pi/pi-tui";
 import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "../../async";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
 import { renderStructuredJson } from "../../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
-import { formatArtifactErrorNotice } from "../output-meta";
 import type { StructuredSubagentOutput } from "../../task/types";
 import { parseConfiguredThinkingLevel } from "../../thinking";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
 import type { ToolSession } from "..";
+import { formatArtifactErrorNotice } from "../output-meta";
 import {
 	FEED_MODEL_BADGE_WIDTH,
 	formatBadge,
@@ -747,12 +747,13 @@ export function jobsRenderResult(
 								`  ${uiTheme.fg("toolOutput", truncateToWidth(visibleLabelLines[i]!, continuationWidth))}`,
 							);
 						}
-
 						if (job.artifactError) {
-			lines.push(uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(job.artifactError), width)));
-		}
+							lines.push(
+								uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(job.artifactError), rowWidth)),
+							);
+						}
 
-		const preview = flattenStructuredPreview(
+						const preview = flattenStructuredPreview(
 							stripTaskResultEnvelope(job.errorText?.trim() || job.resultText?.trim() || ""),
 						);
 						if (preview) {
