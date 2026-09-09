@@ -8,7 +8,7 @@ use std::{
 };
 
 use omp_core::Str;
-use smallvec::{SmallVec, smallvec};
+use smallvec::SmallVec;
 use xutf::{IntoUnicodeNormalized, Text};
 
 use crate::{
@@ -584,7 +584,7 @@ impl InputDecoder {
 	fn emit(&mut self, decoded: Decoded, now: Instant, out: &mut Vec<InputEvent>) {
 		let (event, chords, kitty_dedup, bare) = match decoded {
 			Decoded::Event(event) => (Some(event), SmallVec::new(), None, false),
-			Decoded::Chord(chord) => (None, smallvec![chord], None, false),
+			Decoded::Chord(chord) => (None, SmallVec::from([chord]), None, false),
 			Decoded::Release(chord) => {
 				// Releases never take part in the press dedup window and only
 				// hosts that asked for edges see them.
@@ -597,10 +597,10 @@ impl InputDecoder {
 				}
 				return;
 			},
-			Decoded::BareChord(chord) => (None, smallvec![chord], None, true),
+			Decoded::BareChord(chord) => (None, SmallVec::from([chord]), None, true),
 			Decoded::KittyChord(chord) => {
 				let dedup = chord_printable_codepoint(chord);
-				(None, smallvec![chord], dedup, false)
+				(None, SmallVec::from([chord]), dedup, false)
 			},
 			Decoded::KittyText { chords, dedup } => (None, chords, dedup, false),
 			Decoded::PasteStart | Decoded::None => return,

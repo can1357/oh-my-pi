@@ -2956,6 +2956,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "fancy-regex"
+version = "0.19.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "52e0387578e845beb7a1acff126228499f26cb18edf12919cc513bb863266464"
+dependencies = [
+ "bit-set 0.8.0",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
 name = "fast-float2"
 version = "0.2.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8147,7 +8158,6 @@ name = "omp-e2e"
 version = "0.1.0"
 dependencies = [
  "async-stream",
- "async-trait",
  "bytes",
  "flume",
  "futures",
@@ -8224,6 +8234,7 @@ dependencies = [
  "omp-proto",
  "parking_lot",
  "serde",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",
@@ -8407,7 +8418,6 @@ dependencies = [
  "omp-vocab",
  "proc-macro2",
  "quote",
- "strum",
  "syn 2.0.119",
 ]
 
@@ -8477,6 +8487,7 @@ dependencies = [
  "serde",
  "serde_json",
  "smallvec 2.0.0-alpha.13",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tracing",
@@ -8667,7 +8678,7 @@ dependencies = [
  "chrono",
  "clap",
  "command-fds",
- "fancy-regex 0.17.0",
+ "fancy-regex 0.19.1",
  "futures",
  "im",
  "insta",
@@ -8709,7 +8720,7 @@ dependencies = [
  "codesnake",
  "crc32fast",
  "digest 0.10.7",
- "fancy-regex 0.17.0",
+ "fancy-regex 0.19.1",
  "flume",
  "futures",
  "grep-cli",
@@ -8900,6 +8911,7 @@ dependencies = [
  "gix",
  "jj-lib",
  "libc",
+ "strum",
  "tempfile",
  "thiserror 2.0.20",
  "tokio",

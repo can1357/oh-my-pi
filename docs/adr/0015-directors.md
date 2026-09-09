@@ -127,5 +127,6 @@ assistant node for replay.
   candidate yields", "Plan mode, completely", "Hooks, Directors, and inference"
 - 0002 (one owner), 0003 (tree as authority), 0004 (rewind/resume derive from the tree),
   0016 (semantic requests), 0019 (forced-call escalation)
-- `crates/agent/src/regime.rs`, `crates/agent/src/arbiter.rs`, `crates/agent/src/control.rs`,
+- `crates/agent/src/director.rs`, `crates/agent/src/vars.rs` (Director-bound control-plane
+  variables, e.g. `AI_PROMPT_MODE`),
   `docs/architecture/agent-loop.md`, `docs/py/15-regimes.md`, `AGENTS.md` "Locked Deviations"

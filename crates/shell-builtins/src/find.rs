@@ -158,16 +158,16 @@ pub mod matchers {
 
 				if let Err(error) = matcher_io.host().ensure_writable(path) {
 					matcher_io.set_exit_code(1);
-					writeln!(&mut matcher_io.host().stderr, "Failed to delete {path_str}: {error}")
-						.unwrap();
+					let _ =
+						writeln!(&mut matcher_io.host().stderr, "Failed to delete {path_str}: {error}");
 					return false;
 				}
 				match self.delete(file_info) {
 					Ok(()) => true,
 					Err(e) => {
 						matcher_io.set_exit_code(1);
-						writeln!(&mut matcher_io.host().stderr, "Failed to delete {path_str}: {e}")
-							.unwrap();
+						let _ =
+							writeln!(&mut matcher_io.host().stderr, "Failed to delete {path_str}: {e}");
 						false
 					},
 				}
@@ -203,13 +203,12 @@ pub mod matchers {
 					match file_info.metadata() {
 						Ok(meta) => meta.len() == 0,
 						Err(err) => {
-							writeln!(
+							let _ = writeln!(
 								&mut matcher_io.host().stderr,
 								"Error getting size for {}: {}",
 								file_info.path().display(),
 								err
-							)
-							.unwrap();
+							);
 							false
 						},
 					}
@@ -217,13 +216,12 @@ pub mod matchers {
 					match read_dir(file_info.path()) {
 						Ok(mut it) => it.next().is_none(),
 						Err(err) => {
-							writeln!(
+							let _ = writeln!(
 								&mut matcher_io.host().stderr,
 								"Error getting contents of {}: {}",
 								file_info.path().display(),
 								err
-							)
-							.unwrap();
+							);
 							false
 						},
 					}
@@ -605,13 +603,12 @@ pub mod matchers {
 				match matcher_io.host().run_captured(&mut command) {
 					Ok(status) => status.success(),
 					Err(e) => {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Failed to run {}: {}",
 							self.executable,
 							e
-						)
-						.unwrap();
+						);
 						false
 					},
 				}
@@ -637,6 +634,8 @@ pub mod matchers {
 				exec_in_parent_dir: bool,
 			) -> Result<Self, Box<dyn Error>> {
 				let transformed_args = args.iter().map(OsString::from).collect();
+				let mut command = argmax::Command::new(executable);
+				command.try_args(&transformed_args)?;
 
 				Ok(Self {
 					executable: executable.to_string(),
@@ -648,7 +647,11 @@ pub mod matchers {
 
 			fn new_command(&self, matcher_io: &mut MatcherIO) -> argmax::Command {
 				let mut command = argmax::Command::new(&self.executable);
-				command.try_args(&self.args).unwrap();
+				// Infallible: the fixed executable arguments were accepted by argmax
+				// when this matcher was constructed, and the command has not changed.
+				command
+					.try_args(&self.args)
+					.expect("fixed -exec arguments were validated when the matcher was built");
 				if !self.exec_in_parent_dir {
 					// `-exec ... +` (non-execdir) dispatches in find's working dir;
 					// resolve the operand-relative paths against the shell cwd.
@@ -659,9 +662,10 @@ pub mod matchers {
 
 			fn run_command(&self, command: &mut argmax::Command, matcher_io: &mut MatcherIO) {
 				// `argmax::Command` only Derefs immutably into `std::process::Command`,
-				// so rebuild a std command from its accumulated state to attach the
-				// scope environment and context-captured stdio — the host process's
-				// stdio belongs to the embedding TUI and must never be inherited.
+				// so rebuild a std command from its accumulated state to attach
+				// the scope environment and context-captured stdio — the host
+				// process's stdio belongs to the embedding TUI and must never be
+				// inherited.
 				let mut std_command = matcher_io.host().command(command.get_program());
 				std_command.args(command.get_args());
 				if let Some(dir) = command.get_current_dir() {
@@ -674,13 +678,12 @@ pub mod matchers {
 						}
 					},
 					Err(e) => {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Failed to run {}: {}",
 							self.executable,
 							e
-						)
-						.unwrap();
+						);
 						matcher_io.set_exit_code(1);
 					},
 				}
@@ -724,13 +727,12 @@ pub mod matchers {
 					// Reset command status.
 					*command = self.new_command(matcher_io);
 					if let Err(e) = command.try_arg(&path_to_file) {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Cannot fit a single argument {}: {}",
 							path_to_file.to_string_lossy(),
 							e
-						)
-						.unwrap();
+						);
 						matcher_io.set_exit_code(1);
 					}
 				}
@@ -853,12 +855,11 @@ pub mod matchers {
 				match get_file_system_type(file_info.path(), &self.cache) {
 					Ok(result) => result == self.fs_text,
 					Err(_) => {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting filesystem type for {}",
 							file_info.path().to_string_lossy()
-						)
-						.unwrap();
+						);
 
 						false
 					},
@@ -1026,8 +1027,12 @@ pub mod matchers {
 		impl Pattern {
 			/// Parse an fnmatch()-style glob.
 			pub fn new(pattern: &str, caseless: bool) -> Self {
-				// As long as glob_to_regex() is correct, this should never fail.
-				let regex = glob_to_regex(pattern).map(|r| parse_bre(&r, caseless).unwrap());
+				// Infallible: glob_to_regex validates bracket expressions and emits
+				// only syntax accepted by the basic-regex parser.
+				let regex = glob_to_regex(pattern).map(|r| {
+					parse_bre(&r, caseless)
+						.expect("glob_to_regex emits a valid basic regular expression")
+				});
 				Self { regex }
 			}
 
@@ -1146,13 +1151,12 @@ pub mod matchers {
 					// If it's not a symlink, then it's not an error that should be
 					// shown.
 					if err.kind() != io::ErrorKind::InvalidInput {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error reading target of {}: {}",
 							file_info.path().display(),
 							err
-						)
-						.unwrap();
+						);
 					}
 
 					None
@@ -1266,8 +1270,10 @@ pub mod matchers {
 			pub fn build(mut self) -> Box<dyn Matcher> {
 				// special case. If there's only one submatcher, just return that directly
 				if self.submatchers.len() == 1 {
-					// safe to unwrap: we've just checked the size
-					return self.submatchers.pop().unwrap();
+					return self
+						.submatchers
+						.pop()
+						.expect("submatcher count checked to be one");
 				}
 				AndMatcher::new(self.submatchers).into_box()
 			}
@@ -1327,16 +1333,21 @@ pub mod matchers {
 
 		impl OrMatcherBuilder {
 			pub fn new_and_condition(&mut self, matcher: impl Matcher) {
-				// safe to unwrap. submatchers always has at least one member
-				self
+				let submatcher = self
 					.submatchers
 					.last_mut()
-					.unwrap()
-					.new_and_condition(matcher);
+					.expect("OrMatcherBuilder always starts with one condition");
+				submatcher.new_and_condition(matcher);
 			}
 
 			pub fn new_or_condition(&mut self, arg: &str) -> Result<(), Box<dyn Error>> {
-				if self.submatchers.last().unwrap().submatchers.is_empty() {
+				if self
+					.submatchers
+					.last()
+					.expect("OrMatcherBuilder always starts with one condition")
+					.submatchers
+					.is_empty()
+				{
 					return Err(From::from(format!(
 						"invalid expression; you have used a binary operator '{arg}' with nothing \
 						 before it."
@@ -1356,8 +1367,11 @@ pub mod matchers {
 			pub fn build(mut self) -> Box<dyn Matcher> {
 				// Special case: if there's only one submatcher, just return that directly
 				if self.submatchers.len() == 1 {
-					// safe to unwrap: we've just checked the size
-					return self.submatchers.pop().unwrap().build();
+					return self
+						.submatchers
+						.pop()
+						.expect("submatcher count checked to be one")
+						.build();
 				}
 				let mut submatchers = vec![];
 				for x in self.submatchers {
@@ -1420,22 +1434,31 @@ pub mod matchers {
 
 		impl ListMatcherBuilder {
 			pub fn new_and_condition(&mut self, matcher: impl Matcher) {
-				// safe to unwrap. submatchers always has at least one member
-				self
+				let submatcher = self
 					.submatchers
 					.last_mut()
-					.unwrap()
-					.new_and_condition(matcher);
+					.expect("ListMatcherBuilder always starts with one condition");
+				submatcher.new_and_condition(matcher);
 			}
 
 			pub fn new_or_condition(&mut self, arg: &str) -> Result<(), Box<dyn Error>> {
-				self.submatchers.last_mut().unwrap().new_or_condition(arg)
+				self
+					.submatchers
+					.last_mut()
+					.expect("ListMatcherBuilder always starts with one condition")
+					.new_or_condition(arg)
 			}
 
 			pub fn check_new_and_condition(&mut self) -> Result<(), Box<dyn Error>> {
 				{
-					let child_or_matcher = &self.submatchers.last().unwrap();
-					let grandchild_and_matcher = &child_or_matcher.submatchers.last().unwrap();
+					let child_or_matcher = self
+						.submatchers
+						.last()
+						.expect("ListMatcherBuilder always starts with one condition");
+					let grandchild_and_matcher = child_or_matcher
+						.submatchers
+						.last()
+						.expect("OrMatcherBuilder always starts with one condition");
 
 					if grandchild_and_matcher.submatchers.is_empty() {
 						return Err(From::from(
@@ -1449,8 +1472,14 @@ pub mod matchers {
 
 			pub fn new_list_condition(&mut self) -> Result<(), Box<dyn Error>> {
 				{
-					let child_or_matcher = &self.submatchers.last().unwrap();
-					let grandchild_and_matcher = &child_or_matcher.submatchers.last().unwrap();
+					let child_or_matcher = self
+						.submatchers
+						.last()
+						.expect("ListMatcherBuilder always starts with one condition");
+					let grandchild_and_matcher = child_or_matcher
+						.submatchers
+						.last()
+						.expect("OrMatcherBuilder always starts with one condition");
 
 					if grandchild_and_matcher.submatchers.is_empty() {
 						return Err(From::from(
@@ -1473,8 +1502,11 @@ pub mod matchers {
 			pub fn build(mut self) -> Box<dyn Matcher> {
 				// Special case: if there's only one submatcher, just return that directly
 				if self.submatchers.len() == 1 {
-					// safe to unwrap: we've just checked the size
-					return self.submatchers.pop().unwrap().build();
+					return self
+						.submatchers
+						.pop()
+						.expect("submatcher count checked to be one")
+						.build();
 				}
 				let mut submatchers = vec![];
 				for x in self.submatchers {
@@ -1599,7 +1631,19 @@ pub mod matchers {
 			) {
 				use std::os::unix::fs::{MetadataExt, PermissionsExt};
 
-				let metadata = file_info.metadata().unwrap();
+				let metadata = match file_info.metadata() {
+					Ok(metadata) => metadata,
+					Err(error) => {
+						let _ = writeln!(
+							&mut matcher_io.host().stderr,
+							"Error getting metadata for {}: {}",
+							file_info.path().to_string_lossy(),
+							error
+						);
+						matcher_io.set_exit_code(1);
+						return;
+					},
+				};
 
 				let inode_number = metadata.ino();
 				let number_of_blocks = {
@@ -1619,11 +1663,24 @@ pub mod matchers {
 				};
 				let permission = format_permissions(metadata.permissions().mode() as libc::mode_t);
 				let hard_links = metadata.nlink();
-				let user = uid2usr(metadata.uid()).unwrap();
-				let group = gid2grp(metadata.gid()).unwrap();
+				// GNU find falls back to numeric IDs when the name database has no entry.
+				let user = uid2usr(metadata.uid()).unwrap_or_else(|_| metadata.uid().to_string());
+				let group = gid2grp(metadata.gid()).unwrap_or_else(|_| metadata.gid().to_string());
 				let size = metadata.size();
 				let last_modified = {
-					let system_time = metadata.modified().unwrap();
+					let system_time = match metadata.modified() {
+						Ok(system_time) => system_time,
+						Err(error) => {
+							let _ = writeln!(
+								&mut matcher_io.host().stderr,
+								"Error getting modification time for {}: {}",
+								file_info.path().to_string_lossy(),
+								error
+							);
+							matcher_io.set_exit_code(1);
+							return;
+						},
+					};
 					let timestamp = Timestamp::try_from(system_time).unwrap_or(Timestamp::UNIX_EPOCH);
 					strtime::format("%b %e %H:%M", &timestamp.to_zoned(TimeZone::UTC))
 						.unwrap_or_default()
@@ -1646,13 +1703,12 @@ pub mod matchers {
 					Ok(_) => {},
 					Err(e) => {
 						if print_error_message {
-							writeln!(
+							let _ = writeln!(
 								&mut matcher_io.host().stderr,
 								"Error writing {:?} for {}",
 								file_info.display_path().to_string_lossy(),
 								e
-							)
-							.unwrap();
+							);
 							matcher_io.set_exit_code(1);
 						}
 					},
@@ -1669,7 +1725,19 @@ pub mod matchers {
 			) {
 				use std::os::windows::fs::MetadataExt;
 
-				let metadata = file_info.metadata().unwrap();
+				let metadata = match file_info.metadata() {
+					Ok(metadata) => metadata,
+					Err(error) => {
+						let _ = writeln!(
+							&mut matcher_io.host().stderr,
+							"Error getting metadata for {}: {}",
+							file_info.path().to_string_lossy(),
+							error
+						);
+						matcher_io.set_exit_code(1);
+						return;
+					},
+				};
 
 				let inode_number = 0;
 				let number_of_blocks = {
@@ -1693,7 +1761,19 @@ pub mod matchers {
 				let group = 0;
 				let size = metadata.file_size();
 				let last_modified = {
-					let system_time = metadata.modified().unwrap();
+					let system_time = match metadata.modified() {
+						Ok(system_time) => system_time,
+						Err(error) => {
+							let _ = writeln!(
+								&mut matcher_io.host().stderr,
+								"Error getting modification time for {}: {}",
+								file_info.path().to_string_lossy(),
+								error
+							);
+							matcher_io.set_exit_code(1);
+							return;
+						},
+					};
 					let timestamp = Timestamp::try_from(system_time).unwrap_or(Timestamp::UNIX_EPOCH);
 					strtime::format("%b %e %H:%M", &timestamp.to_zoned(TimeZone::UTC))
 						.unwrap_or_default()
@@ -1716,13 +1796,12 @@ pub mod matchers {
 					Ok(_) => {},
 					Err(e) => {
 						if print_error_message {
-							writeln!(
+							let _ = writeln!(
 								&mut matcher_io.host().stderr,
 								"Error writing {:?} for {}",
 								file_info.display_path().to_string_lossy(),
 								e
-							)
-							.unwrap();
+							);
 							matcher_io.set_exit_code(1);
 						}
 					},
@@ -1929,13 +2008,12 @@ pub mod matchers {
 							.mode_bits_match(pattern, metadata.permissions().mode())
 					},
 					Err(e) => {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting permissions for {}: {}",
 							file_info.path().to_string_lossy(),
 							e
-						)
-						.unwrap();
+						);
 						false
 					},
 				}
@@ -1943,11 +2021,10 @@ pub mod matchers {
 
 			#[cfg(not(unix))]
 			fn matches(&self, _dummy_file_info: &WalkEntry, matcher_io: &mut MatcherIO) -> bool {
-				writeln!(
+				let _ = writeln!(
 					&mut matcher_io.host().stderr,
 					"Permission matching not available on this platform!"
-				)
-				.unwrap();
+				);
 				return false;
 			}
 		}
@@ -1999,22 +2076,31 @@ pub mod matchers {
 				mut out: impl Write,
 				print_error_message: bool,
 			) {
-				match write!(out, "{}{}", file_info.display_path().to_string_lossy(), self.delimiter) {
-					Ok(_) => {},
-					Err(e) => {
-						if print_error_message {
-							writeln!(
-								&mut matcher_io.host().stderr,
-								"Error writing {:?} for {}",
-								file_info.display_path().to_string_lossy(),
-								e
-							)
-							.unwrap();
-							matcher_io.set_exit_code(1);
-						}
-					},
+				let path = file_info.display_path().to_string_lossy();
+				if let Err(error) = write!(out, "{}{}", path, self.delimiter) {
+					if print_error_message {
+						let _ = writeln!(
+							&mut matcher_io.host().stderr,
+							"Error writing {:?} for {}",
+							file_info.display_path().to_string_lossy(),
+							error
+						);
+					}
+					matcher_io.set_exit_code(1);
+					return;
 				}
-				out.flush().unwrap();
+
+				if let Err(error) = out.flush() {
+					if print_error_message {
+						let _ = writeln!(
+							&mut matcher_io.host().stderr,
+							"Error writing {:?} for {}",
+							file_info.display_path().to_string_lossy(),
+							error
+						);
+					}
+					matcher_io.set_exit_code(1);
+				}
 			}
 		}
 
@@ -2052,7 +2138,7 @@ pub mod matchers {
 			convert,
 			error::Error,
 			fs::{self, File},
-			io::Write,
+			io::{self, Write},
 			path::Path,
 			time::SystemTime,
 		};
@@ -2215,8 +2301,11 @@ pub mod matchers {
 					&& let Ok(code) = self.peek(OCTAL_LEN).and_then(|octal| {
 						u32::from_str_radix(octal, OCTAL_RADIX).map_err(convert::Into::into)
 					}) {
-					// safe to unwrap: .peek() already succeeded above.
-					let octal = self.advance_by(OCTAL_LEN).unwrap();
+					// Infallible: the preceding `peek(OCTAL_LEN)` accepted this
+					// exact slice before advancing.
+					let octal = self
+						.advance_by(OCTAL_LEN)
+						.expect("octal length was validated before advancing");
 					return match char::from_u32(code) {
 						Some(c) => Ok(FormatComponent::Literal(c.to_string())),
 						None => Err(format!("Invalid character value: \\{octal}").into()),
@@ -2251,8 +2340,10 @@ pub mod matchers {
 
 				while self.front().map(|c| c.is_ascii_digit()).unwrap_or(false) {
 					digits += 1;
-					// safe to unwrap: the front() check already succeeded above.
-					self.advance_one().unwrap();
+					// Infallible: `front()` returned the digit consumed here.
+					self
+						.advance_one()
+						.expect("format width digit was present after front");
 				}
 
 				if digits > 0 {
@@ -2294,8 +2385,10 @@ pub mod matchers {
 						_ => break,
 					}
 
-					// safe to unwrap: .front() already succeeded above.
-					self.advance_one().unwrap();
+					// Infallible: `front()` returned the justification byte consumed here.
+					self
+						.advance_one()
+						.expect("format justification byte was present after front");
 				}
 
 				let width = self.parse_format_width()?;
@@ -2347,17 +2440,21 @@ pub mod matchers {
 
 				while let Some(i) = self.string.find(['%', '\\']) {
 					if i > 0 {
-						// safe to unwrap: i is an index into the string, so it cannot
-						// be any shorter.
-						let literal = self.advance_by(i).unwrap();
+						// Infallible: `i` is the byte index of the next ASCII
+						// delimiter, so the prefix has at least `i` bytes.
+						let literal = self
+							.advance_by(i)
+							.expect("literal prefix length was found in the format string");
 						if !literal.is_empty() {
 							components.push(FormatComponent::Literal(literal.to_owned()));
 						}
 					}
 
-					// safe to unwrap: we've only advanced as far as 'i', which is right
-					// before the character it identified.
-					let component = match self.advance_one().unwrap() {
+					// Infallible: `find` identified a delimiter at the current front.
+					let component = match self
+						.advance_one()
+						.expect("format delimiter was present after find")
+					{
 						'\\' => self.parse_escape_sequence()?,
 						'%' => self.parse_format_specifier()?,
 						_ => panic!("{}", "Stopped at unexpected character: {self.string}"),
@@ -2388,9 +2485,7 @@ pub mod matchers {
 				.display_path()
 				.ancestors()
 				.nth(file_info.depth())
-				// safe to unwrap: the file's depth should never be longer than its path
-				// (...right?).
-				.unwrap()
+				.expect("walk depth always identifies a starting-point ancestor")
 		}
 
 		fn format_non_link_file_type(file_type: FileType) -> char {
@@ -2481,7 +2576,7 @@ pub mod matchers {
 				#[cfg(unix)]
 				FormatDirective::Filesystem => {
 					let dev_id = meta()?.dev().to_string();
-					let fs_list = read_fs_list().expect("Could not find the filesystem info");
+					let fs_list = read_fs_list()?;
 					fs_list
 						.into_iter()
 						.find(|fs| fs.dev_id == dev_id)
@@ -2521,9 +2616,7 @@ pub mod matchers {
 					} else {
 						Path::new("")
 					})
-					// safe to unwrap: the prefix is derived *from* the path to begin
-					// with, so it cannot be invalid.
-					.unwrap()
+					.expect("starting point is an ancestor of the displayed path")
 					.to_string_lossy(),
 
 				FormatDirective::Permissions(PermissionsFormat::Symbolic) => {
@@ -2616,33 +2709,34 @@ pub mod matchers {
 				Ok(Self { format: FormatString::parse(format)?, output_file })
 			}
 
-			fn print(&self, file_info: &WalkEntry, mut out: impl Write, mut err: impl Write) {
+			fn print(
+				&self,
+				file_info: &WalkEntry,
+				mut out: impl Write,
+				mut err: impl Write,
+			) -> io::Result<()> {
 				for component in &self.format.components {
 					match component {
-						FormatComponent::Literal(literal) => write!(out, "{literal}").unwrap(),
-						FormatComponent::Flush => out.flush().unwrap(),
+						FormatComponent::Literal(literal) => write!(out, "{literal}")?,
+						FormatComponent::Flush => out.flush()?,
 						FormatComponent::Directive { directive, width, justify } => {
 							match format_directive(file_info, directive) {
 								Ok(content) => {
 									if let Some(width) = width {
 										match justify {
-											Justify::Left => {
-												write!(out, "{content:<width$}").unwrap();
-											},
-											Justify::Right => {
-												write!(out, "{content:>width$}").unwrap();
-											},
+											Justify::Left => write!(out, "{content:<width$}")?,
+											Justify::Right => write!(out, "{content:>width$}")?,
 										}
 									} else {
-										write!(out, "{content}").unwrap();
+										write!(out, "{content}")?;
 									}
 								},
-								Err(e) => {
+								Err(error) => {
 									let _ = writeln!(
 										err,
 										"Error processing '{}': {}",
 										file_info.path().to_string_lossy(),
-										e
+										error
 									);
 									break;
 								},
@@ -2650,18 +2744,28 @@ pub mod matchers {
 						},
 					}
 				}
+				Ok(())
 			}
 		}
 
 		impl Matcher for Printf {
 			fn matches(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO) -> bool {
 				let err = matcher_io.host().stderr_clone();
-				if let Some(file) = &self.output_file {
-					self.print(file_info, file, err);
+				let result = if let Some(file) = &self.output_file {
+					self.print(file_info, file, err)
 				} else {
-					self.print(file_info, &mut *matcher_io.deps.get_output().borrow_mut(), err);
-				}
+					self.print(file_info, &mut *matcher_io.deps.get_output().borrow_mut(), err)
+				};
 
+				if let Err(error) = result {
+					let _ = writeln!(
+						&mut matcher_io.host().stderr,
+						"Error writing {:?} for {}",
+						file_info.display_path().to_string_lossy(),
+						error
+					);
+					matcher_io.set_exit_code(1);
+				}
 				true
 			}
 
@@ -2982,13 +3086,12 @@ pub mod matchers {
 						.value_to_match
 						.matches(byte_size_to_unit_size(self.unit, metadata.len())),
 					Err(e) => {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting file size for {}: {}",
 							file_info.path().to_string_lossy(),
 							e
-						)
-						.unwrap();
+						);
 						false
 					},
 				}
@@ -3120,13 +3223,12 @@ pub mod matchers {
 			fn matches(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO) -> bool {
 				match self.matches_impl(file_info) {
 					Err(e) => {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting modification time for {}: {}",
 							file_info.path().to_string_lossy(),
 							e
-						)
-						.unwrap();
+						);
 						false
 					},
 					Ok(t) => t,
@@ -3207,14 +3309,13 @@ pub mod matchers {
 			fn matches(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO) -> bool {
 				match self.matches_impl(file_info) {
 					Err(e) => {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting {:?} time for {}: {}",
 							self.x_option,
 							file_info.path().to_string_lossy(),
 							e
-						)
-						.unwrap();
+						);
 						false
 					},
 					Ok(t) => t,
@@ -3254,14 +3355,13 @@ pub mod matchers {
 			fn matches(&self, file_info: &WalkEntry, matcher_io: &mut MatcherIO) -> bool {
 				match self.matches_impl(file_info) {
 					Err(e) => {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting {:?} time for {}: {}",
 							self.newer_time_type,
 							file_info.path().to_string_lossy(),
 							e
-						)
-						.unwrap();
+						);
 						false
 					},
 					Ok(t) => t,
@@ -3329,14 +3429,13 @@ pub mod matchers {
 				let start_time = get_time(matcher_io, self.today_start);
 				match self.matches_impl(file_info, start_time) {
 					Err(e) => {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting {:?} time for {}: {}",
 							self.file_time_type,
 							file_info.path().to_string_lossy(),
 							e
-						)
-						.unwrap();
+						);
 						false
 					},
 					Ok(t) => t,
@@ -3402,14 +3501,13 @@ pub mod matchers {
 				let start_time = get_time(matcher_io, self.today_start);
 				match self.matches_impl(file_info, start_time) {
 					Err(e) => {
-						writeln!(
+						let _ = writeln!(
 							&mut matcher_io.host().stderr,
 							"Error getting {:?} time for {}: {}",
 							self.file_time_type,
 							file_info.path().to_string_lossy(),
 							e
-						)
-						.unwrap();
+						);
 						false
 					},
 					Ok(t) => t,
@@ -4052,7 +4150,8 @@ pub mod matchers {
 			return Some(("c".to_string(), "m".to_string()));
 		}
 
-		let re = Regex::new(r"-newer([aBcm])([aBcmt])").unwrap();
+		let re = Regex::new(r"-newer([aBcm])([aBcmt])")
+			.expect("hard-coded -newer predicate regex is valid");
 		if let Some(captures) = re.captures(input) {
 			let x = captures.get(1)?.as_str().to_string();
 			let y = captures.get(2)?.as_str().to_string();
@@ -4600,7 +4699,10 @@ pub mod matchers {
 	// from a text file. eg. dummy | find -files0-from -
 	// eg. find -files0-from rust.txt -name "cargo"
 	fn parse_files0_args(config: &mut Config, host: &mut Host) -> Result<(), Box<dyn Error>> {
-		let mode = config.files0_argument.as_ref().unwrap();
+		let mode = config
+			.files0_argument
+			.as_deref()
+			.expect("files0_argument is set before parsing file entries");
 		let mut buffer = Vec::new();
 		let new_paths = config.new_paths.insert(Vec::new());
 

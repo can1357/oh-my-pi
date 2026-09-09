@@ -155,10 +155,11 @@ fn render_profile_node(
 		labels.push(decorated_label(current));
 	}
 
-	let path = if labels.len() <= 4 {
-		labels.join(" › ")
-	} else {
-		format!("{} › ⋯{} frames⋯ › {}", labels[0], labels.len() - 2, labels.last().unwrap())
+	let path = match labels.as_slice() {
+		[first, middle @ .., last] if labels.len() > 4 => {
+			format!("{first} › ⋯{} frames⋯ › {last}", middle.len())
+		},
+		_ => labels.join(" › "),
 	};
 	out.push(format!(
 		"{:>width$} {:>6}  {}{}",

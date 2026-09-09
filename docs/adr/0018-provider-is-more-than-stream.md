@@ -66,11 +66,11 @@ extensions.
 
 ## Status in omp
 
-**Implemented.** Primary implementation: `crates/inference/src/provider`. Provider infrastructure owns auth, codecs, routing, streaming, and typed errors. Local and configured model discovery is implemented by `crates/inference/src/discovery`, the bounded `crates/envd/src/model_discovery.rs` HTTP authority, and driver-owned cache/catalog composition.
+**Implemented.** Primary implementation: `crates/ai/src/provider`. Provider infrastructure owns auth, codecs, routing, streaming, and typed errors. Local and configured model discovery is implemented by `crates/ai/src/discovery`, the bounded `crates/envd/src/model_discovery.rs` HTTP authority, and driver-owned cache/catalog composition.
 
 ## References
 
 - The Harness Playbook, "The inference" — "A provider is more than `stream`"
 - pi `packages/ai/src/image-models.ts` (parallel provider surface grown outside `stream`)
 - 0002, 0016, 0017, 0019, 0021
-- `crates/inference/src/operation/mod.rs`, `docs/py/13-inference.md`
+- `crates/ai/src/operation/mod.rs`, `docs/py/13-inference.md`

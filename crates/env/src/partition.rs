@@ -105,7 +105,8 @@ impl PartitionedEnvTransport {
 	}
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, strum::IntoStaticStr)]
+#[strum(serialize_all = "snake_case", const_into_str)]
 enum Backend {
 	Local,
 	Remote,
@@ -113,10 +114,7 @@ enum Backend {
 
 impl Backend {
 	const fn name(self) -> &'static str {
-		match self {
-			Self::Local => "local",
-			Self::Remote => "remote",
-		}
+		self.into_str()
 	}
 }
 

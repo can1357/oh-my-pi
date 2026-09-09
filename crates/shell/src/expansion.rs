@@ -1845,7 +1845,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			if !pattern.is_empty() {
 				let regex = pattern.to_regex(false, false)?;
 				let result = regex
-					.replace_all(s.as_ref(), |caps: &fancy_regex::Captures<'_>| caps[0].to_uppercase());
+					.replace_all(s.as_ref(), |caps: &fancy_regex::Captures<'_, str>| caps[0].to_uppercase());
 				Ok(result.into_owned())
 			} else {
 				Ok(s.to_uppercase())
@@ -1863,7 +1863,7 @@ impl<'a, SE: extensions::ShellExtensions> WordExpander<'a, SE> {
 			if !pattern.is_empty() {
 				let regex = pattern.to_regex(false, false)?;
 				let result = regex
-					.replace_all(s.as_ref(), |caps: &fancy_regex::Captures<'_>| caps[0].to_lowercase());
+					.replace_all(s.as_ref(), |caps: &fancy_regex::Captures<'_, str>| caps[0].to_lowercase());
 				Ok(result.into_owned())
 			} else {
 				Ok(s.to_lowercase())

@@ -84,6 +84,20 @@ codegen-backend = "llvm"
 # `catch_unwind`; cranelift does not emit the required landing pads.
 [profile.dev.package.omp-observability]
 codegen-backend = "llvm"
+# Audio shutdown joins failed workers and must unwind through callback frames.
+[profile.dev.package.omp-audio]
+codegen-backend = "llvm"
+# Core's panic-safety contracts catch unwinds; Cranelift skips those handlers.
+[profile.dev.package.omp-core]
+codegen-backend = "llvm"
+# Builtins isolate utility panics via `catch_unwind`
+# (crates/shell-builtins/src/host.rs:1059); Cranelift skips those handlers.
+[profile.dev.package.omp-shell-builtins]
+codegen-backend = "llvm"
+# The desktop worker thread isolates request panics via `catch_unwind`
+# (crates/desktop/src/lib.rs:741); Cranelift skips those handlers.
+[profile.dev.package.omp-desktop]
+codegen-backend = "llvm"
 [profile.dev.build-override]
 codegen-backend = "llvm"
 [profile.release]

@@ -1,4 +1,6 @@
+#![expect(missing_docs, reason = "strum IntoStaticStr emits undocumented inherent methods")]
 use bytes::Bytes;
+use strum::IntoStaticStr;
 
 /// Monitor geometry in both global logical desktop coordinates and composite
 /// screenshot pixels.
@@ -252,7 +254,8 @@ pub struct AxQuery {
 }
 
 /// Capture or input destination within a desktop session.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, Debug, Eq, IntoStaticStr, PartialEq)]
+#[strum(serialize_all = "lowercase", const_into_str)]
 pub enum Target {
 	/// The composite desktop spanning the session's selected displays.
 	Desktop,
@@ -279,10 +282,7 @@ impl Target {
 	}
 
 	pub(crate) const fn kind(&self) -> &'static str {
-		match self {
-			Self::Desktop => "desktop",
-			Self::Window(_) => "window",
-		}
+		self.into_str()
 	}
 }
 

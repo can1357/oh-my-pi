@@ -73,10 +73,14 @@ pub fn resolve_auto_background_wait(threshold: Duration, timeout: Option<Duratio
 	let Some(timeout) = timeout else {
 		return threshold;
 	};
+	// A short invocation cannot spare the buffer, so it waits out its full
+	// timeout instead.
 	let wait = if timeout <= TIMEOUT_BUFFER {
 		timeout
 	} else {
-		timeout.checked_sub(TIMEOUT_BUFFER).unwrap()
+		timeout
+			.checked_sub(TIMEOUT_BUFFER)
+			.expect("timeout exceeds the buffer, so the subtraction cannot underflow")
 	};
 	threshold.min(wait)
 }
