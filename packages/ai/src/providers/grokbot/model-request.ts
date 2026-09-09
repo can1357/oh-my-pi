@@ -21,10 +21,9 @@ export type GrokbotRequestedModelOptions = {
 	effortMap?: Partial<Record<string, string>>;
 	/**
 	 * sand `fast` parameter; only sent when the model lists `fast`.
-	 * Default: explicit `fast`, then `sandParameterDefaults.fast`, then
-	 * `false` when `thinking` is also advertised (Cursor Anthropic defaults),
-	 * otherwise `true` (Cursor composer / Grok defaults).
-	 * Note: Grok models reject `fast=false` with tools (sand HTTP 422); keep the default.
+	 * Default: explicit `fast`, then `sandParameterDefaults.fast`. When discovery
+	 * left no default, the parameter is omitted (do not invent `true`/`false`).
+	 * Reviewed provider fallbacks belong in KDL `sand-parameter-defaults`, not here.
 	 */
 	fast?: boolean;
 	/**
@@ -166,15 +165,18 @@ export function resolveGrokbotRequestedModel(
 		}
 		if (allowed.has("fast")) {
 			const discoveredFast = defaults?.fast?.trim();
-			const fast =
-				options?.fast !== undefined
-					? options.fast
-					: discoveredFast === "true"
-						? true
-						: discoveredFast === "false"
-							? false
-							: !allowed.has("thinking");
-			parameters.push({ id: "fast", value: fast ? "true" : "false" });
+			let fast: boolean | undefined;
+			if (options?.fast !== undefined) {
+				fast = options.fast;
+			} else if (discoveredFast === "true") {
+				fast = true;
+			} else if (discoveredFast === "false") {
+				fast = false;
+			}
+			// Never invent true/false — unadvertised defaults can pin the wrong tier.
+			if (fast !== undefined) {
+				parameters.push({ id: "fast", value: fast ? "true" : "false" });
+			}
 		}
 	}
 

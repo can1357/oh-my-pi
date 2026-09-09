@@ -57,7 +57,7 @@ export async function fetchGrokbotAvailableModels(
 	options: GrokbotModelDiscoveryOptions = {},
 ): Promise<ModelSpec<"grokbot-sand">[] | null> {
 	const timeoutMs = options.timeoutMs ?? 8_000;
-	const resolvedBaseUrl = (options.baseUrl ?? GROKBOT_BACKEND).replace(/\/+$/, "") || GROKBOT_BACKEND;
+	const resolvedBaseUrl = options.baseUrl?.trim() || GROKBOT_BACKEND;
 	const requestUrl = joinGrokbotBackendUrl(resolvedBaseUrl, GROKBOT_AVAILABLE_MODELS_PATH).href;
 
 	const controller = new AbortController();

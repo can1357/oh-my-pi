@@ -16,6 +16,7 @@
 ### Fixed
 
 - Grok Bot backend URL join appends endpoints onto the pathname while preserving reverse-proxy query strings, including trailing `/` inside query values (mint + AvailableModels).
+- Grok Bot AvailableModels discovery passes the configured base URL unmodified into `joinGrokbotBackendUrl` (no whole-URL trailing-slash strip before parse).
 - Opaque Grok Bot variant/legacy selectors resolve full model policy (identity, thinking, compat, catalog assignments/corrections) from `requestModelId` in `buildModel`.
 - Grok Bot model-manager discovery mints with the captured `cacheCredential` when `apiKey` is the `<authenticated>` sentinel (does not re-read ambient secrets mid-flight).
 - Grok Bot auth/discovery tests inject secrets path and env via `runWithGrokbotAuthSource` (no process-wide `setAgentDir` / `process.env` mutation).

@@ -285,10 +285,7 @@ describe("grokbot requested model mapping", () => {
 		});
 		expect(textOnly).toEqual({
 			modelId: "gemini-3-flash",
-			parameters: [
-				{ id: "effort", value: "low" },
-				{ id: "fast", value: "true" },
-			],
+			parameters: [{ id: "effort", value: "low" }],
 		});
 		const autoText = resolveGrokbotRequestedModel("default", {
 			sandWireModelId: "sand-default",
@@ -311,10 +308,7 @@ describe("grokbot requested model mapping", () => {
 		});
 		expect(low).toEqual({
 			modelId: "grok-4.6",
-			parameters: [
-				{ id: "effort", value: "low" },
-				{ id: "fast", value: "true" },
-			],
+			parameters: [{ id: "effort", value: "low" }],
 		});
 		const withFast = resolveGrokbotRequestedModel("grok-4.6", {
 			effort: "xhigh",
@@ -327,18 +321,24 @@ describe("grokbot requested model mapping", () => {
 		]);
 	});
 
-	test("defaults fast to true when the model advertises the parameter", () => {
+	test("omits fast when discovery left no default (does not invent true/false)", () => {
 		expect(
 			resolveGrokbotRequestedModel("grok-4.6", {
 				sandParameterIds: ["effort", "fast"],
 			}).parameters,
-		).toEqual([{ id: "fast", value: "true" }]);
+		).toBeUndefined();
 		expect(
 			resolveGrokbotRequestedModel("grok-4.6", {
 				fast: false,
 				sandParameterIds: ["effort", "fast"],
 			}).parameters,
 		).toEqual([{ id: "fast", value: "false" }]);
+		expect(
+			resolveGrokbotRequestedModel("grok-4.6", {
+				sandParameterIds: ["effort", "fast"],
+				sandParameterDefaults: { fast: "true" },
+			}).parameters,
+		).toEqual([{ id: "fast", value: "true" }]);
 		expect(
 			resolveGrokbotRequestedModel("grok-4.6", {
 				sandParameterIds: ["effort"],
@@ -422,14 +422,11 @@ describe("grokbot requested model mapping", () => {
 		).toEqual([{ id: "effort", value: "low" }]);
 	});
 
-	test("defaults fast to true when advertised; preserves explicit false", () => {
+	test("omits fast when advertised without a discovered default; preserves explicit values", () => {
 		const bare = resolveGrokbotRequestedModel("composer-2.5", {
 			sandParameterIds: ["fast"],
 		});
-		expect(bare).toEqual({
-			modelId: "composer-2.5",
-			parameters: [{ id: "fast", value: "true" }],
-		});
+		expect(bare).toEqual({ modelId: "composer-2.5" });
 		const fast = resolveGrokbotRequestedModel("composer-2.5", {
 			fast: true,
 			sandParameterIds: ["fast"],
@@ -478,7 +475,7 @@ describe("grokbot requested model mapping", () => {
 				sandParameterIds: ["context", "reasoning", "fast"],
 				sandMaxMode: false,
 			}).parameters,
-		).toEqual([{ id: "fast", value: "true" }]);
+		).toBeUndefined();
 		expect(
 			resolveGrokbotRequestedModel("gpt-5.6-sol", {
 				sandParameterIds: ["context"],
@@ -527,7 +524,7 @@ describe("grokbot requested model mapping", () => {
 			resolveGrokbotRequestedModel("claude-opus-5", {
 				effort: "max",
 				sandParameterIds: ["thinking", "context", "effort", "fast"],
-				sandParameterDefaults: { context: "300k" },
+				sandParameterDefaults: { context: "300k", fast: "false" },
 			}),
 		).toEqual({
 			modelId: "claude-opus-5",
@@ -563,7 +560,18 @@ describe("grokbot requested model mapping", () => {
 			{ id: "thinking", value: "false" },
 			{ id: "context", value: "300k" },
 			{ id: "effort", value: "low" },
-			{ id: "fast", value: "false" },
+		]);
+		// Without discovered/explicit fast, omit it (do not invent from thinking).
+		expect(
+			resolveGrokbotRequestedModel("claude-opus-5", {
+				effort: "max",
+				sandParameterIds: ["thinking", "context", "effort", "fast"],
+				sandParameterDefaults: { context: "300k" },
+			}).parameters,
+		).toEqual([
+			{ id: "thinking", value: "true" },
+			{ id: "context", value: "300k" },
+			{ id: "effort", value: "max" },
 		]);
 		// Discovered thinking=false must win over effort-derived true (Codex P1).
 		expect(
@@ -580,15 +588,13 @@ describe("grokbot requested model mapping", () => {
 		]);
 		// Advertised thinking with no discovered default and no effort must omit
 		// the parameter — inventing thinking=false silently disables the server default.
+		// Same for fast: do not invent false from thinking being advertised.
 		expect(
 			resolveGrokbotRequestedModel("claude-opus-5", {
 				sandParameterIds: ["thinking", "context", "effort", "fast"],
 				sandParameterDefaults: { context: "300k" },
 			}).parameters,
-		).toEqual([
-			{ id: "context", value: "300k" },
-			{ id: "fast", value: "false" },
-		]);
+		).toEqual([{ id: "context", value: "300k" }]);
 	});
 });
 

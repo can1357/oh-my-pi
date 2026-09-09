@@ -1111,7 +1111,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					anthropicOriginalModelId: anthropicWire.originalModelId,
 				});
 
-				const backend = (model.baseUrl || GROKBOT_BACKEND).replace(/\/+$/, "");
+				const backend = model.baseUrl || GROKBOT_BACKEND;
 				const response = await fetchImpl(joinGrokbotBackendUrl(backend, STREAM_PATH), {
 					method: "POST",
 					headers,

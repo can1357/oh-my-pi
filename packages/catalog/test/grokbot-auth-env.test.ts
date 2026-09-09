@@ -584,6 +584,48 @@ describe("grokbot AvailableModels headers", () => {
 		expect(seen[1]?.headers["connect-protocol-version"]).toBe("1");
 	});
 
+	test("AvailableModels preserves trailing slash inside proxy query values", async () => {
+		// Callers must not pre-strip `/` from the whole base URL — that would
+		// invalidate `?token=signed-value/` before joinGrokbotBackendUrl parses.
+		const seen: string[] = [];
+		const fetchImpl = Object.assign(
+			async (url: string | URL | Request) => {
+				seen.push(String(url));
+				if (String(url).includes("inference-credential")) {
+					return new Response(JSON.stringify({ accessToken: "tok", expiresAtMs: Date.now() + 600_000 }), {
+						status: 200,
+						headers: { "content-type": "application/json" },
+					});
+				}
+				return new Response(JSON.stringify({ models: [] }), {
+					status: 200,
+					headers: { "content-type": "application/json" },
+				});
+			},
+			{ preconnect: fetch.preconnect },
+		) as typeof fetch;
+		await runWithGrokbotAuthSourceAsync(
+			{
+				env: {
+					...CLEAR_GROKBOT_ENV,
+					GROKBOT_MACHINE_ID: "machine",
+					GROKBOT_NAMESPACE: "prod",
+					GROKBOT_CLIENT_VERSION: "0.30.0",
+				},
+			},
+			() =>
+				fetchGrokbotAvailableModels({
+					apiKey: "renewer",
+					baseUrl: "https://proxy.example/grokbot?token=signed-value/",
+					fetch: fetchImpl,
+				}),
+		);
+		expect(seen).toEqual([
+			"https://proxy.example/grokbot/sand-box/inference-credential?token=signed-value/",
+			"https://proxy.example/grokbot/aiserver.v1.AiService/AvailableModels?token=signed-value/",
+		]);
+	});
+
 	test("remints once and retries AvailableModels after a cached JWT is rejected", async () => {
 		let mintCount = 0;
 		let availableModelsCalls = 0;
