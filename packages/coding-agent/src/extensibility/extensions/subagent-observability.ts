@@ -199,7 +199,7 @@ export function createSubagentObservability(
 			rootAgentId: options.rootAgentId,
 			...(ref.parentId ? { parentAgentId: ref.parentId } : {}),
 			...(extra?.parentToolCallId ? { parentToolCallId: extra.parentToolCallId } : {}),
-			kind: ref.id === options.rootAgentId ? "root" : ref.kind === "sub" ? "task" : "other",
+			kind: ref.id === options.rootAgentId ? "root" : ref.kind === "sub" ? (ref.invocationKind ?? "task") : "other",
 			status: statuses.get(ref.id) ?? registryStatus(ref.status),
 			detached: extra?.detached ?? false,
 			...(sessionId ? { sessionId } : {}),

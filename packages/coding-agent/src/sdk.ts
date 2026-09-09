@@ -605,6 +605,8 @@ export interface CreateAgentSessionOptions {
 	 * top-level "Main" session, which has no parent.
 	 */
 	parentAgentId?: string;
+	/** Structural launch surface for registry observability of subagent sessions. */
+	invocationKind?: "task" | "eval";
 	/** Inherited eval executor session id for subagents sharing parent eval state. */
 	parentEvalSessionId?: string;
 
@@ -3322,6 +3324,7 @@ async function createAgentSessionScoped(options: CreateAgentSessionOptions): Pro
 			id: resolvedAgentId,
 			displayName: resolvedAgentDisplayName,
 			kind: agentKind,
+			invocationKind: options.invocationKind,
 			parentId: options.parentAgentId,
 			session: null,
 			sessionFile: sessionManager.getSessionFile() ?? null,

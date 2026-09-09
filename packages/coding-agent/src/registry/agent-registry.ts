@@ -73,6 +73,8 @@ export interface AgentRef {
 	id: string;
 	displayName: string;
 	kind: AgentKind;
+	/** Structural launch surface for subagents; independent of labels and agent definitions. */
+	invocationKind?: "task" | "eval";
 	parentId?: string;
 	status: AgentStatus;
 	/** Null exactly when parked/aborted. */
@@ -100,6 +102,8 @@ export interface RegisterInput {
 	id: string;
 	displayName: string;
 	kind: AgentKind;
+	/** Structural launch surface for subagents; independent of labels and agent definitions. */
+	invocationKind?: "task" | "eval";
 	parentId?: string;
 	session: AgentSession | null;
 	sessionFile?: string | null;
@@ -147,6 +151,7 @@ export class AgentRegistry {
 			id: input.id,
 			displayName: input.displayName,
 			kind: input.kind,
+			invocationKind: input.invocationKind,
 			parentId: input.parentId,
 			status: input.status ?? "running",
 			session: input.session,

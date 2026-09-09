@@ -137,6 +137,25 @@ describe("public subagent observability", () => {
 		}
 	});
 
+	test("reports an explicitly registered eval invocation as eval in its event and snapshot", () => {
+		const { registry, observer } = createHarness();
+		const events: SubagentEvent[] = [];
+		observer.subscribe(event => events.push(event));
+
+		registry.register({
+			id: "Eval",
+			displayName: "eval",
+			kind: "sub",
+			parentId: "Root",
+			session: null,
+			invocationKind: "eval",
+		});
+
+		const registered = events.find(event => event.type === "registered");
+		expect(registered?.type === "registered" ? registered.agent.kind : undefined).toBe("eval");
+		expect(observer.getSnapshot().agents.find(agent => agent.agentId === "Eval")?.kind).toBe("eval");
+	});
+
 	test("emits ordered register, park, revive, cancel, terminal, and remove events", () => {
 		const { registry, bus, observer } = createHarness();
 		const events: SubagentEvent[] = [];
