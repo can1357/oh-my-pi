@@ -1139,6 +1139,17 @@ export interface Model<TApi extends Api = Api> {
 	 */
 	sandWireModelId?: string;
 	/**
+	 * When to apply `sandWireModelId` (KDL `sand-wire-model-id-when`).
+	 * `tools` ⇒ rewrite only when the request includes tools.
+	 */
+	sandWireModelIdWhen?: "tools";
+	/**
+	 * Promote JSON / Gemini in-band tool dumps into toolCallParts
+	 * (KDL `sand-promote-json-text-tools`). Opt-in for routes that emit Shell
+	 * JSON as text instead of toolCallPart.
+	 */
+	sandPromoteJsonTextTools?: boolean;
+	/**
 	 * Default Grok Bot `requestedModel.parameters` values from live AvailableModels
 	 * variants (e.g. default `context` tier). Wire mapping prefers explicit request
 	 * options, then these defaults, then reviewed fallbacks.

@@ -46,6 +46,7 @@ import {
 	advertisedNamesForJsonTextToolCall,
 	assistantTextForJsonPromotion,
 	shouldHoldPromotableToolText,
+	shouldPromoteJsonTextToolCall,
 	parseGeminiInbandToolCall,
 	parseJsonTextToolCall,
 } from "./grokbot/json-text-tool-call";
@@ -954,18 +955,26 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				) {
 					// Hold JSON / tool_code fallback text until end-of-stream
 					// promotion — early flush cannot retract published deltas.
-					const block = output.content[event.contentIndex];
-					const text = block?.type === "text" && typeof block.text === "string" ? block.text : "";
-					const hasPromotableThinking = output.content.some(
-						b =>
-							b.type === "thinking" &&
-							typeof b.thinking === "string" &&
-							shouldHoldPromotableToolText(b.thinking),
-					);
-					// Also hold while earlier thinking still looks promotable — flushing
-					// SendToUser text would publish thinking at index 0 that promotion
-					// later removes without remapping live consumers.
-					if (!shouldHoldPromotableToolText(text) && !hasPromotableThinking) flushAttemptEvents();
+					const mayPromote = shouldPromoteJsonTextToolCall({
+						sandPromoteJsonTextTools: model.sandPromoteJsonTextTools,
+						wireMode: anthropicWire.wireMode,
+					});
+					if (!mayPromote) {
+						flushAttemptEvents();
+					} else {
+						const block = output.content[event.contentIndex];
+						const text = block?.type === "text" && typeof block.text === "string" ? block.text : "";
+						const hasPromotableThinking = output.content.some(
+							b =>
+								b.type === "thinking" &&
+								typeof b.thinking === "string" &&
+								shouldHoldPromotableToolText(b.thinking),
+						);
+						// Also hold while earlier thinking still looks promotable — flushing
+						// SendToUser text would publish thinking at index 0 that promotion
+						// later removes without remapping live consumers.
+						if (!shouldHoldPromotableToolText(text) && !hasPromotableThinking) flushAttemptEvents();
+					}
 				}
 			};
 
@@ -1004,6 +1013,8 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					canonicalModelId: model.requestModelId,
 					sandVariantStringRepresentation: model.sandVariantStringRepresentation,
 					sandWireModelId: model.sandWireModelId,
+					sandWireModelIdWhen: model.sandWireModelIdWhen,
+					toolCount: tools.length,
 				});
 				body = {
 					messages,
@@ -1597,7 +1608,15 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				// `{"name":"Shell","arguments":{…}}` instead of toolCallPart.
 				// Gemini/GPT-mini thought-only turns hide the same JSON in thinking,
 				// or emit ```tool_code / default_api.bash(...) instead.
-				if (!output.content.some(b => b.type === "toolCall")) {
+				// Catalog `sand-promote-json-text-tools` (or product wire profiles)
+				// opts into promotion — native models keep example JSON as text.
+				if (
+					shouldPromoteJsonTextToolCall({
+						sandPromoteJsonTextTools: model.sandPromoteJsonTextTools,
+						wireMode: anthropicWire.wireMode,
+					}) &&
+					!output.content.some(b => b.type === "toolCall")
+				) {
 					const text = assistantTextForJsonPromotion(output.content, sendToUserTextIndexes);
 					const advertised = advertisedNamesForJsonTextToolCall(body.tools, context.tools);
 					const promoted = parseJsonTextToolCall(text, advertised) ?? parseGeminiInbandToolCall(text, advertised);

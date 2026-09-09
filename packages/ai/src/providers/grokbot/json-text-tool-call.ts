@@ -14,6 +14,20 @@ export type JsonTextToolCall = {
 	arguments: Record<string, unknown>;
 };
 
+/**
+ * Gate JSON-as-text promotion to catalog-opted models or product wire profiles
+ * that dump Shell JSON instead of toolCallPart. Native models without the
+ * catalog fact keep advertised-looking JSON as plain text.
+ */
+export function shouldPromoteJsonTextToolCall(opts: {
+	sandPromoteJsonTextTools?: boolean;
+	wireMode?: string;
+}): boolean {
+	if (opts.sandPromoteJsonTextTools === true) return true;
+	const wire = opts.wireMode;
+	return wire === "automation" || wire === "parent-chat" || wire === "keep-model";
+}
+
 function stripMarkdownFence(text: string): string | undefined {
 	const trimmed = text.trim();
 	if (!trimmed) return undefined;

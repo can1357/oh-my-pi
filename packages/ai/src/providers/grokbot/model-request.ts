@@ -62,6 +62,13 @@ export type GrokbotRequestedModelOptions = {
 	 * sand-default.
 	 */
 	sandWireModelId?: string;
+	/**
+	 * Catalog `sand-wire-model-id-when`. `tools` ⇒ apply the rewrite only when
+	 * `toolCount > 0` so text-only requests keep the selected AvailableModels id.
+	 */
+	sandWireModelIdWhen?: "tools";
+	/** Number of tools on this request (drives tools-scoped wire rewrites). */
+	toolCount?: number;
 };
 
 /**
@@ -103,7 +110,11 @@ export function resolveGrokbotRequestedModel(
 	const slug = raw.startsWith("grokbot/") ? raw.slice("grokbot/".length) : raw;
 	const rewrite = options?.sandWireModelId?.trim();
 	if (rewrite) {
-		return { modelId: rewrite };
+		const toolsOnly = options?.sandWireModelIdWhen === "tools";
+		const hasTools = (options?.toolCount ?? 0) > 0;
+		if (!toolsOnly || hasTools) {
+			return { modelId: rewrite };
+		}
 	}
 	const wireId = options?.canonicalModelId?.trim() || slug;
 

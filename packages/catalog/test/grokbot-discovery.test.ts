@@ -267,6 +267,8 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(geminiFlash?.sandWireModelId).toBeUndefined();
 		expect(buildModel(geminiFlash!).sandToolsWire).toBeUndefined();
 		expect(buildModel(geminiFlash!).sandWireModelId).toBe("gemini-3.8-flash");
+		expect(buildModel(geminiFlash!).sandWireModelIdWhen).toBe("tools");
+		expect(buildModel(geminiFlash!).sandPromoteJsonTextTools).toBe(true);
 		expect(buildModel(geminiFlash!).id).toBe("gemini-3-flash");
 		const geminiFlashVariant = models.find(m => m.id === "gemini-3-flash[]");
 		expect(geminiFlashVariant?.requestModelId).toBe("gemini-3-flash");
@@ -288,6 +290,10 @@ describe("grokbot AvailableModels normalize", () => {
 		expect(bundled.find(m => m.id === "auto")?.sandToolsWire).toBe("parent-chat");
 		expect(bundled.find(m => m.id === "default")?.sandWireModelId).toBe("sand-default");
 		expect(bundled.find(m => m.id === "auto")?.sandWireModelId).toBe("sand-default");
+		expect(bundled.find(m => m.id === "default")?.sandWireModelIdWhen).toBe("tools");
+		expect(bundled.find(m => m.id === "auto")?.sandWireModelIdWhen).toBe("tools");
+		expect(bundled.find(m => m.id === "sand-automation")?.sandPromoteJsonTextTools).toBe(true);
+		expect(bundled.find(m => m.id === "sand-default")?.sandPromoteJsonTextTools).toBe(true);
 		expect(bundled.find(m => m.id === "sand-cua")?.sandWireModelId).toBeUndefined();
 		expect(bundled.find(m => m.id === "sand-default")?.sandWireModelId).toBeUndefined();
 

@@ -10,6 +10,8 @@
 - Grok Bot `sand-cua` now has catalog `sand-tools-wire=parent-chat` so router tools use the product field-2 wire.
 - Grok Bot Auto routers (`default`, `default[]`, `auto`) now use catalog `sand-tools-wire=parent-chat` so tools stay off the grok-4.5 native 422 path.
 - Grok Bot `gemini-3-flash` / `gemini-3-flash[]` now rewrite `requestedModel` to bare `gemini-3.8-flash` (`sand-wire-model-id`) so tools use the working peer while AvailableModels still lists the old slug.
+- Grok Bot `sand-wire-model-id` rewrites apply only when tools are present (`sand-wire-model-id-when=tools`); text-only requests keep the selected AvailableModels id.
+- Grok Bot JSON-as-text tool promotion is opt-in via `sand-promote-json-text-tools` (routers + gemini-3-flash) so native models keep example Shell JSON as text.
 
 ### Fixed
 

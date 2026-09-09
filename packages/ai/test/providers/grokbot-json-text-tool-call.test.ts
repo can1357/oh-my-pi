@@ -9,6 +9,7 @@ import {
 	parseGeminiInbandToolCall,
 	parseJsonTextToolCall,
 	shouldHoldPromotableToolText,
+	shouldPromoteJsonTextToolCall,
 } from "../../src/providers/grokbot/json-text-tool-call";
 import {
 	CONNECT_END_STREAM_FLAG,
@@ -104,6 +105,15 @@ describe("parseJsonTextToolCall", () => {
 		expect(names.has("bash")).toBe(true);
 		expect(names.has("Read")).toBe(true);
 		expect(names.has("read")).toBe(true);
+	});
+
+	test("shouldPromoteJsonTextToolCall requires catalog fact or product wire profiles", () => {
+		expect(shouldPromoteJsonTextToolCall({})).toBe(false);
+		expect(shouldPromoteJsonTextToolCall({ sandPromoteJsonTextTools: true })).toBe(true);
+		expect(shouldPromoteJsonTextToolCall({ wireMode: "automation" })).toBe(true);
+		expect(shouldPromoteJsonTextToolCall({ wireMode: "parent-chat" })).toBe(true);
+		expect(shouldPromoteJsonTextToolCall({ wireMode: "keep-model" })).toBe(true);
+		expect(shouldPromoteJsonTextToolCall({ wireMode: "native" })).toBe(false);
 	});
 });
 
@@ -804,6 +814,46 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		const result = await streamGrokBot(model, context, { apiKey: "renew", fetch: fetchImpl }).result();
 		expect(result.stopReason).toBe("stop");
 		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "pong42" })]);
+	});
+
+	test("native models without catalog promote fact keep example Shell JSON as text", async () => {
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const native = buildModel({
+			id: "grok-4.6",
+			name: "grok-4.6",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandParameterIds: ["effort", "fast"],
+		});
+		const fenced = '```json\n{"name":"Shell","arguments":{"command":"echo example-only"}}\n```';
+		const text = frameConnectProto(encodeInferenceStreamResponse({ textPart: { text: fenced, isFinal: true } }));
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(text, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "Show an example Shell JSON payload", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(native as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
+		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: fenced })]);
 	});
 
 	test("preserves output-token-limit stopReason when only thinking was emitted", async () => {

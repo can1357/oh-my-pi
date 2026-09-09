@@ -5,6 +5,8 @@
 ### Fixed
 
 - Grok Bot `register-builtins` loads `streamGrokBot` via a top-level import (AGENTS.md; no `import("./grokbot")` dynamic path).
+- Grok Bot `sand-wire-model-id` rewrites are tools-scoped (`sand-wire-model-id-when=tools`) so text-only requests keep the selected model.
+- Grok Bot JSON-as-text tool promotion requires catalog `sand-promote-json-text-tools` or a product wire profile (native example JSON stays text).
 
 ## [18.1.15] - 2026-09-08
 

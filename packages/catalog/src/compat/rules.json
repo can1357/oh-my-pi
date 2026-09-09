@@ -8840,11 +8840,12 @@
 				],
 				"catalog": {
 					"reasoning": true,
-					"sandToolsWire": "parent-chat"
+					"sandToolsWire": "parent-chat",
+					"sandPromoteJsonTextTools": true
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:20",
+				"source": "providers/grokbot.kdl:21",
 				"providers": [
 					"grokbot"
 				],
@@ -8855,11 +8856,12 @@
 					}
 				],
 				"catalog": {
-					"sandToolsWire": "parent-chat"
+					"sandToolsWire": "parent-chat",
+					"sandPromoteJsonTextTools": true
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:23",
+				"source": "providers/grokbot.kdl:25",
 				"providers": [
 					"grokbot"
 				],
@@ -8870,11 +8872,12 @@
 					}
 				],
 				"catalog": {
-					"sandToolsWire": "automation"
+					"sandToolsWire": "automation",
+					"sandPromoteJsonTextTools": true
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:31",
+				"source": "providers/grokbot.kdl:35",
 				"providers": [
 					"grokbot"
 				],
@@ -8898,11 +8901,13 @@
 				],
 				"catalog": {
 					"sandToolsWire": "parent-chat",
-					"sandWireModelId": "sand-default"
+					"sandWireModelId": "sand-default",
+					"sandWireModelIdWhen": "tools",
+					"sandPromoteJsonTextTools": true
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:38",
+				"source": "providers/grokbot.kdl:45",
 				"providers": [
 					"grokbot"
 				],
@@ -8917,11 +8922,13 @@
 					}
 				],
 				"catalog": {
-					"sandWireModelId": "gemini-3.8-flash"
+					"sandWireModelId": "gemini-3.8-flash",
+					"sandWireModelIdWhen": "tools",
+					"sandPromoteJsonTextTools": true
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:41",
+				"source": "providers/grokbot.kdl:50",
 				"providers": [
 					"grokbot"
 				],
@@ -8960,7 +8967,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:49",
+				"source": "providers/grokbot.kdl:58",
 				"providers": [
 					"grokbot"
 				],
@@ -8989,7 +8996,7 @@
 				}
 			},
 			{
-				"source": "providers/grokbot.kdl:57",
+				"source": "providers/grokbot.kdl:66",
 				"providers": [
 					"grokbot"
 				],

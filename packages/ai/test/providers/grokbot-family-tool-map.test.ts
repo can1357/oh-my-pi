@@ -151,6 +151,8 @@ describe("grokbot family tool mapping", () => {
 				sandParameterIds: ["effort", "fast"],
 				sandVariantStringRepresentation: id.endsWith("[]"),
 				sandWireModelId: "gemini-3.8-flash",
+				sandWireModelIdWhen: "tools",
+				toolCount: 1,
 			});
 			expect(parameterized).toEqual({ modelId: "gemini-3.8-flash" });
 		}

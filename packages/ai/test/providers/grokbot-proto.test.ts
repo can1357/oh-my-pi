@@ -252,6 +252,8 @@ describe("grokbot requested model mapping", () => {
 			sandVariantStringRepresentation: true,
 			canonicalModelId: "gemini-3-flash",
 			sandWireModelId: "gemini-3.8-flash",
+			sandWireModelIdWhen: "tools",
+			toolCount: 1,
 		});
 		expect(rewritten).toEqual({ modelId: "gemini-3.8-flash" });
 		const variant = resolveGrokbotRequestedModel("gemini-3-flash[]", {
@@ -260,6 +262,8 @@ describe("grokbot requested model mapping", () => {
 			sandVariantStringRepresentation: true,
 			canonicalModelId: "gemini-3-flash",
 			sandWireModelId: "gemini-3.8-flash",
+			sandWireModelIdWhen: "tools",
+			toolCount: 2,
 		});
 		expect(variant).toEqual({ modelId: "gemini-3.8-flash" });
 		expect(resolveGrokbotRequestedModel("gemini-3.8-flash", { sandParameterIds: ["effort"], effort: "low" })).toEqual(
@@ -268,6 +272,31 @@ describe("grokbot requested model mapping", () => {
 				parameters: [{ id: "effort", value: "low" }],
 			},
 		);
+	});
+
+	test("sand-wire-model-id-when=tools preserves the selected model for text-only requests", () => {
+		const textOnly = resolveGrokbotRequestedModel("gemini-3-flash", {
+			effort: "low",
+			sandParameterIds: ["effort", "fast"],
+			canonicalModelId: "gemini-3-flash",
+			sandWireModelId: "gemini-3.8-flash",
+			sandWireModelIdWhen: "tools",
+			toolCount: 0,
+		});
+		expect(textOnly).toEqual({
+			modelId: "gemini-3-flash",
+			parameters: [
+				{ id: "effort", value: "low" },
+				{ id: "fast", value: "true" },
+			],
+		});
+		const autoText = resolveGrokbotRequestedModel("default", {
+			sandWireModelId: "sand-default",
+			sandWireModelIdWhen: "tools",
+			toolCount: 0,
+			sandParameterIds: [],
+		});
+		expect(autoText).toEqual({ modelId: "default" });
 	});
 
 	test("sand-default stays bare with no maxMode or parameters", () => {
@@ -2082,7 +2111,7 @@ describe("grokbot request headers", () => {
 		expect(result.responseId).toBe("resp-1");
 	});
 
-	test("gemini-3-flash catalog rewrite sends bare gemini-3.8-flash on the wire", async () => {
+	test("gemini-3-flash catalog rewrite sends bare gemini-3.8-flash only when tools are present", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
 			machineId: "machine",
@@ -2125,9 +2154,10 @@ describe("grokbot request headers", () => {
 			});
 			expect(gemini.id).toBe(spec.id);
 			expect(gemini.sandWireModelId).toBe("gemini-3.8-flash");
+			expect(gemini.sandWireModelIdWhen).toBe("tools");
 			expect(gemini.sandToolsWire).toBeUndefined();
 
-			let requested: unknown;
+			let textOnlyRequested: unknown;
 			await streamGrokBot(
 				gemini as Model<"grokbot-sand">,
 				{ messages: [{ role: "user", content: "hi", timestamp: 1 }] },
@@ -2136,12 +2166,49 @@ describe("grokbot request headers", () => {
 					fetch: fetchImpl,
 					effort: "low",
 					onPayload: body => {
-						requested = (body as { requestedModel?: unknown }).requestedModel;
+						textOnlyRequested = (body as { requestedModel?: unknown }).requestedModel;
 						return body;
 					},
 				},
 			).result();
-			expect(requested).toEqual({ modelId: "gemini-3.8-flash" });
+			expect(textOnlyRequested).toEqual(
+				spec.sandParameterIds
+					? {
+							modelId: "gemini-3-flash",
+							isVariantStringRepresentation: true,
+							parameters: [{ id: "effort", value: "low" }],
+						}
+					: { modelId: "gemini-3-flash" },
+			);
+
+			let withToolsRequested: unknown;
+			await streamGrokBot(
+				gemini as Model<"grokbot-sand">,
+				{
+					messages: [{ role: "user", content: "hi", timestamp: 1 }],
+					tools: [
+						{
+							name: "bash",
+							description: "Run a shell command.",
+							parameters: {
+								type: "object",
+								properties: { command: { type: "string" } },
+								required: ["command"],
+							},
+						},
+					],
+				},
+				{
+					apiKey: "renew",
+					fetch: fetchImpl,
+					effort: "low",
+					onPayload: body => {
+						withToolsRequested = (body as { requestedModel?: unknown }).requestedModel;
+						return body;
+					},
+				},
+			).result();
+			expect(withToolsRequested).toEqual({ modelId: "gemini-3.8-flash" });
 		}
 	});
 
