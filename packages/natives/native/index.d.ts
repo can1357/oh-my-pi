@@ -297,10 +297,13 @@ export declare class Process {
    */
   killTreeAndWait(options?: ProcessWaitOptions | undefined | null): Promise<boolean>
   /**
-   * Hard-kill a caller-owned group and wait up to 5000ms for its captured
-   * members.
+   * Hard-kill the process group this process leads and wait up to 5000ms for
+   * its captured members.
+   *
+   * Rejects when the pid has since been handed to a different process,
+   * because the group would then be someone else's.
    */
-  static killGroupAndWait(pgid: number, options?: ProcessWaitOptions | undefined | null): Promise<boolean>
+  killOwnGroupAndWait(options?: ProcessWaitOptions | undefined | null): Promise<boolean>
   /**
    * Gracefully terminate this process and its descendants.
    *

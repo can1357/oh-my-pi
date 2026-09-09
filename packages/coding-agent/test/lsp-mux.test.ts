@@ -13,6 +13,7 @@ import {
 	type MuxConnectResult,
 } from "../src/lsp/mux/protocol";
 import { LspMuxServer } from "../src/lsp/mux/server";
+import { ChildProcess } from "@oh-my-pi/pi-utils/ptree";
 
 interface RpcMessage {
 	jsonrpc: "2.0";
@@ -286,6 +287,41 @@ describe("LspMuxServer", () => {
 			6_000,
 		);
 	}
+
+	it.skipIf(process.platform === "win32")(
+		"retires a server that exits after its termination failed",
+		async () => {
+			const { client, connected } = await link();
+			const pid = connected.pid;
+			if (pid === undefined) throw new Error("Mux did not report the language-server pid");
+			await initialize(client);
+			const rejected = Promise.withResolvers<void>();
+			// Fail termination without touching the process, so the failure lands
+			// while the server is still alive and only its later exit can clean up.
+			const spy = spyOn(ChildProcess.prototype, "killAndWait").mockImplementation(
+				async function (this: ChildProcess) {
+					if (this.pid !== pid) return;
+					rejected.resolve();
+					throw new Error(`Process tree termination timed out: ${pid}`);
+				},
+			);
+			try {
+				client.notify(MUX_RESTART_METHOD);
+				await withTimeout(rejected.promise, "failed termination", 4_000);
+				expect(server.serverKeys).toEqual([connected.key]);
+				expect(server.sessionCount).toBe(1);
+				process.kill(pid, "SIGKILL");
+				await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "late-exit cleanup", 4_000);
+				await pollUntil(() => Promise.resolve(server.sessionCount === 0), "session close", 4_000);
+			} finally {
+				spy.mockRestore();
+				try {
+					process.kill(pid, "SIGKILL");
+				} catch {}
+			}
+		},
+		10_000,
+	);
 
 	for (const disconnectFirst of [false, true]) {
 		it.skipIf(process.platform === "win32")(
