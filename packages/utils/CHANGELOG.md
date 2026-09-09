@@ -6,6 +6,9 @@
 
 - Added `parseEnvFileAsync` for non-blocking dotenv reads on login/discovery/stream paths.
 
+### Fixed
+
+- Fixed `$which` capturing `Bun.which` at import on Linux and Windows, so `Bun.which` stubs installed later (e.g. per-test spies) are honoured and PATH-only language servers no longer leak into test results.
 
 ## [18.1.13] - 2026-09-07
 
