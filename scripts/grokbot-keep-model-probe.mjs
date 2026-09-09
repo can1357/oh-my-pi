@@ -41,6 +41,7 @@ import automationShellUserPrompt from "./grokbot-probes/automation-shell-user.md
 import automationSystemPrompt from "./grokbot-probes/automation-system.md" with { type: "text" };
 import codingAgentSystemPrompt from "./grokbot-probes/coding-agent-system.md" with { type: "text" };
 import shellEchoUserPrompt from "./grokbot-probes/shell-echo-user.md" with { type: "text" };
+import { probeOmpTools } from "./grokbot-probes/probe-omp-tools.ts";
 
 import {
 	GROKBOT_BACKEND,
@@ -123,46 +124,7 @@ async function sendStream(token, cfg, body) {
 
 // ─── Tool set ───
 
-const ompTools = [
-	{
-		name: "bash",
-		description: "Run a shell command.",
-		parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] },
-	},
-	{
-		name: "read",
-		description: "Read a file.",
-		parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] },
-	},
-	{
-		name: "write",
-		description: "Write a file.",
-		parameters: {
-			type: "object",
-			properties: { path: { type: "string" }, content: { type: "string" } },
-			required: ["path", "content"],
-		},
-	},
-	{
-		name: "edit",
-		description: "Patch a file.",
-		parameters: {
-			type: "object",
-			properties: { path: { type: "string" }, old: { type: "string" }, new: { type: "string" } },
-			required: ["path", "old", "new"],
-		},
-	},
-	{
-		name: "grep",
-		description: "Search files.",
-		parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] },
-	},
-	{
-		name: "glob",
-		description: "Find files.",
-		parameters: { type: "object", properties: { glob: { type: "string" } }, required: ["glob"] },
-	},
-];
+const ompTools = probeOmpTools();
 
 // ─── Tests ───
 

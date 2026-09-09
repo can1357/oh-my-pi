@@ -28,29 +28,11 @@ import {
 import * as prompt from "../packages/utils/src/prompt.ts";
 import automationShellUserPrompt from "./grokbot-probes/automation-shell-user.md" with { type: "text" };
 import automationSystemPrompt from "./grokbot-probes/automation-system.md" with { type: "text" };
+import { probeOmpToolsAutomation } from "./grokbot-probes/probe-omp-tools.ts";
 
 const STREAM = "/aiserver.v1.InferenceService/Stream";
 
-const ompTools = [
-	{
-		name: "bash",
-		description: "Run a shell command.",
-		parameters: {
-			type: "object",
-			properties: { command: { type: "string" } },
-			required: ["command"],
-		},
-	},
-	{
-		name: "read",
-		description: "Read a file.",
-		parameters: {
-			type: "object",
-			properties: { path: { type: "string" } },
-			required: ["path"],
-		},
-	},
-];
+const ompTools = probeOmpToolsAutomation();
 
 function parseFrames(buf) {
 	let o = 0;

@@ -14,8 +14,6 @@
 - Grok Bot JSON-as-text tool promotion is opt-in via `sand-promote-json-text-tools` (routers + gemini-3-flash) so native models keep example Shell JSON as text.
 - Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).
 
-## [18.1.14] - 2026-09-07
-
 ### Fixed
 
 - Grok Bot Anthropic+tools auto wire defaults to catalog `sand-tools-wire` (KDL class anthropic → keep-model); TypeScript no longer forces keep-model from taxonomy class.
@@ -91,6 +89,7 @@
 ## [18.1.14] - 2026-09-07
 
 ### Fixed
+
 - Bills Astra API requests above 272K input at the documented 2x input / 1.5x output long-context tier; the Codex subscription route stays exempt with free cache writes ([#11157](https://github.com/can1357/oh-my-pi/pull/11157) by [@H4vC](https://github.com/H4vC)).
 - Fixed Astra's extended window over-advertising input by 128K; it now uses the documented 922K input cap inside the 1.05M total context ([#11157](https://github.com/can1357/oh-my-pi/pull/11157) by [@H4vC](https://github.com/H4vC)).
 - Fixed explicit Codex context-window overrides widening past the server-honored maximum; they now clamp to the documented ceiling like upstream Codex ([#11157](https://github.com/can1357/oh-my-pi/pull/11157) by [@H4vC](https://github.com/H4vC)).

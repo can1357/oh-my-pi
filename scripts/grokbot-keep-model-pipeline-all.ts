@@ -16,10 +16,11 @@ import { classifyModel } from "@oh-my-pi/pi-catalog/compat/taxonomy";
 import { buildModel } from "../packages/catalog/src/build.ts";
 import type { ModelSpec } from "../packages/catalog/src/types.ts";
 import { streamGrokBot } from "../packages/ai/src/providers/grokbot.ts";
-import type { Context, Model, Tool, Message, AssistantMessage, ToolCall } from "../packages/ai/src/types.ts";
+import type { Context, Model, Message, AssistantMessage, ToolCall } from "../packages/ai/src/types.ts";
 import * as prompt from "../packages/utils/src/prompt.ts";
 import pipelineAllSystemPrompt from "./grokbot-probes/pipeline-all-system.md" with { type: "text" };
 import pipelineAllShellUserPrompt from "./grokbot-probes/pipeline-all-shell-user.md" with { type: "text" };
+import { probeOmpTools } from "./grokbot-probes/probe-omp-tools.ts";
 
 const ANTHROPIC_IDS = [
 	"claude-opus-5",
@@ -36,46 +37,7 @@ const ANTHROPIC_IDS = [
 	"claude-sonnet-4",
 ];
 
-const tools: Tool[] = [
-	{
-		name: "bash",
-		description: "Run a shell command.",
-		parameters: { type: "object", properties: { command: { type: "string" } }, required: ["command"] } as const,
-	},
-	{
-		name: "read",
-		description: "Read a file.",
-		parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"] } as const,
-	},
-	{
-		name: "write",
-		description: "Write a file.",
-		parameters: {
-			type: "object",
-			properties: { path: { type: "string" }, content: { type: "string" } },
-			required: ["path", "content"],
-		} as const,
-	},
-	{
-		name: "edit",
-		description: "Patch a file.",
-		parameters: {
-			type: "object",
-			properties: { path: { type: "string" }, old: { type: "string" }, new: { type: "string" } },
-			required: ["path", "old", "new"],
-		} as const,
-	},
-	{
-		name: "grep",
-		description: "Search files.",
-		parameters: { type: "object", properties: { pattern: { type: "string" } }, required: ["pattern"] } as const,
-	},
-	{
-		name: "glob",
-		description: "Find files.",
-		parameters: { type: "object", properties: { glob: { type: "string" } }, required: ["glob"] } as const,
-	},
-];
+const tools = probeOmpTools();
 
 function makeContext(messages: Message[]): Context {
 	return {
