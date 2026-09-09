@@ -172,7 +172,7 @@ opentelemetry_sdk = { version = "0.32.1", features = ["logs", "metrics", "rt-tok
 opus = "0.3.1"
 parking_lot = "0.12"
 parking_lot_core = "0.9.12"
-parse_datetime = "0.14"
+parse_datetime = "0.16"
 peg = "0.8"
 pep440_rs = "0.7"
 pdf-inspector = "1"
