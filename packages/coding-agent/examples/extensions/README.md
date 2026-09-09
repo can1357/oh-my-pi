@@ -27,7 +27,7 @@ cp permission-gate.ts ~/.omp/agent/extensions/
 
 | Extension         | Description                                                                 |
 | ----------------- | --------------------------------------------------------------------------- |
-| `pii-redact.ts`   | Scrub emails/phones/SSNs on `tool_result` + `context` (+ optional PAW CLI)  |
+| `pii-redact.ts`   | Scrub emails/phones/SSNs on `tool_result`/`context`/`before_provider_request` (+ optional PAW CLI) |
 
 Full local NER plugin (ProgramAsWeights): https://github.com/kvnloo/pii/tree/main/integrations/omp
 
