@@ -2154,13 +2154,30 @@ export class TurnRecovery {
 		if (!fallbackInitialRequest) this.#retryAttempt++;
 		const errorMessage = message.errorMessage || "Unknown error";
 		const parsedRetryAfterMs = this.#parseRetryAfterMsFromError(errorMessage);
-		const hardErrorSameModelRetry =
+		const hardErrorBudgetAvailable =
 			options?.hardErrorFallback === true &&
 			!AIError.isPayloadRejection(message) &&
-			this.#hardErrorSameModelRetryCount < retrySettings.hardErrorSameModelRetries &&
+			this.#hardErrorSameModelRetryCount < retrySettings.hardErrorSameModelRetries;
+		// Gate on the actual same-model wait: prospective backoff vs parsed hint.
+		// A hint-only check lets an over-cap backoff suppress fallback and then
+		// fail fast without trying it.
+		let prospectiveSameModelBackoffMs: number | undefined;
+		if (hardErrorBudgetAvailable) {
+			prospectiveSameModelBackoffMs = calculateRetryBackoffDelayMs(
+				retrySettings.baseDelayMs,
+				this.#hardErrorSameModelRetryCount + 1,
+			);
+		}
+		const effectiveSameModelDelayMs =
+			prospectiveSameModelBackoffMs === undefined
+				? parsedRetryAfterMs
+				: parsedRetryAfterMs === undefined
+					? prospectiveSameModelBackoffMs
+					: Math.max(prospectiveSameModelBackoffMs, parsedRetryAfterMs);
+		const hardErrorSameModelRetry =
+			hardErrorBudgetAvailable &&
 			(retrySettings.maxDelayMs <= 0 ||
-				parsedRetryAfterMs === undefined ||
-				parsedRetryAfterMs <= retrySettings.maxDelayMs);
+				(effectiveSameModelDelayMs !== undefined && effectiveSameModelDelayMs <= retrySettings.maxDelayMs));
 		if (hardErrorSameModelRetry) this.#hardErrorSameModelRetryCount++;
 		let recoveryAttempt = hardErrorSameModelRetry ? this.#hardErrorSameModelRetryCount : this.#retryAttempt;
 
@@ -2192,9 +2209,13 @@ export class TurnRecovery {
 		const staleOpenAIResponsesReplayError = AIError.is(id, AIError.Flag.StaleResponsesItem);
 		const accountPolicyDenial = AIError.is(id, AIError.Flag.AccountPolicy);
 		const recordedUsageLimitOutcome = await this.#usageLimitOutcomes.get(message);
-		let delayMs = staleOpenAIResponsesReplayError
-			? 0
-			: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, recoveryAttempt);
+		// Reuse the gated backoff draw so the cap decision and the sleep agree.
+		let delayMs =
+			hardErrorSameModelRetry && prospectiveSameModelBackoffMs !== undefined && !staleOpenAIResponsesReplayError
+				? prospectiveSameModelBackoffMs
+				: staleOpenAIResponsesReplayError
+					? 0
+					: calculateRetryBackoffDelayMs(retrySettings.baseDelayMs, recoveryAttempt);
 		// Transient rate/concurrency caps stay on the same credential, but must
 		// honor their reason-specific windows. The default exponential base
 		// (≈500ms, capped at 8s) otherwise re-hits the cap and burns the retry
