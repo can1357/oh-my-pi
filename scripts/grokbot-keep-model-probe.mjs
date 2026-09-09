@@ -2,8 +2,7 @@
 /**
  * Live empirical probe: keep-model wire for Anthropic-labeled grokbot models.
  *
- * Auth helpers live in `grokbot-probe-config.mjs` (dependency-neutral mirror of
- * catalog/ai auth) so probes stay off the `@oh-my-pi/pi-utils` barrel.
+ * Auth helpers re-export shipping catalog `grokbot-auth` via `grokbot-probe-config.mjs`.
  * Imports wire/proto logic directly from source.
  *
  * Tests:
@@ -372,7 +371,7 @@ async function testKeepModelNoopOnGrok() {
 // ─── Main ───
 
 async function main() {
-	const cfg = loadGrokbotConfig();
+	const cfg = await loadGrokbotConfig();
 	console.log(
 		`config: machineId=${cfg.machineId.slice(0, 8)}… namespace=${cfg.namespace} client=${cfg.clientVersion}`,
 	);

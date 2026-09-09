@@ -317,7 +317,7 @@ async function testModel(token, cfg, modelId, tools, label) {
 }
 
 async function main() {
-	const cfg = loadGrokbotConfig();
+	const cfg = await loadGrokbotConfig();
 	console.log(
 		`config: machineId=${cfg.machineId.slice(0, 8)}… namespace=${cfg.namespace} client=${cfg.clientVersion}`,
 	);

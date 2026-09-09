@@ -17,6 +17,8 @@
 - Catalog matrix bash/read smoke rejects probes after an earlier `exit`/`return` (matching write).
 - Catalog matrix write smoke rejects `printf` commands that mention the ping only as an unused argument.
 - Catalog matrix bash/read smoke rejects no-op printf and zero-length readers (`head -n 0`, quiet sed without print).
+- Catalog matrix G1/G2 tool prompts and automation OMP tool descriptions load from static `.md` assets; probe rows forward live sand defaults/max-mode.
+- Grok Bot keep-model probes reuse catalog `grokbot-auth` instead of a forked checksum/mint helper.
 - `--models` / `enabledModels` exact matches on ordinary built-ins (e.g. `openai/…`) no longer force a synchronous credential-scoped discovery refresh when the cold catalog already satisfies the scope.
 - `--models` / `enabledModels` resolve bracketed Grok Bot variant selectors (e.g. `grokbot/default[]`) by exact id before glob matching so `[]` is not treated as an empty character class.
 - Cold catalog refresh also uses a provider-qualified `modelRoles.default` when no CLI model flags are set, and the SDK discovery fallback refreshes built-in descriptor providers (e.g. Grok Bot) the same way.

@@ -2,7 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { loadGrokbotConfig, mintGrokbotAccessToken } from "./grokbot-probe-config.mjs";
+import {
+	loadGrokbotConfig,
+	mintGrokbotAccessToken,
+	runWithGrokbotAuthSource,
+	runWithGrokbotAuthSourceAsync,
+} from "./grokbot-probe-config.mjs";
 
 const tempDirs: string[] = [];
 
@@ -22,7 +27,7 @@ afterEach(() => {
 });
 
 describe("grokbot-probe-config secrets parsing", () => {
-	test("loads export-prefixed, quoted, and inline-comment credentials like the CLI", () => {
+	test("loads export-prefixed, quoted, and inline-comment credentials like the CLI", async () => {
 		// Hand-rolled KEY=VALUE splits miss `export`, keep quotes, and retain
 		// trailing comments — probes would mint with different credentials than omp.
 		const agentDir = fs.mkdtempSync(path.join(os.tmpdir(), "grokbot-probe-cfg-"));
@@ -37,10 +42,13 @@ describe("grokbot-probe-config secrets parsing", () => {
 			].join("\n"),
 		);
 
-		const cfg = loadGrokbotConfig({
-			agentDir,
-			env: CLEAR_GROKBOT_ENV,
-		});
+		const cfg = await runWithGrokbotAuthSource(
+			{
+				secretsPath: path.join(agentDir, "secrets", "grokbot.env"),
+				env: CLEAR_GROKBOT_ENV,
+			},
+			() => loadGrokbotConfig(),
+		);
 		expect(cfg.machineId).toBe("machine-quoted");
 		expect(cfg.renewal).toBe("renew-secret");
 		expect(cfg.namespace).toBe("lab");

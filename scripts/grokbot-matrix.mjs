@@ -35,6 +35,10 @@ import textUserPrompt from "./grokbot-catalog-matrix/text-user.md" with { type: 
 import matrixOpusSystemPrompt from "./grokbot-probes/matrix-opus-system.md" with { type: "text" };
 import matrixOpusShellUserPrompt from "./grokbot-probes/matrix-opus-shell-user.md" with { type: "text" };
 import matrixBashThenTokenUserPrompt from "./grokbot-probes/matrix-bash-then-token-user.md" with { type: "text" };
+import matrixToolReadDescription from "./grokbot-probes/matrix-tool-read-description.md" with { type: "text" };
+import matrixToolReadPathDescription from "./grokbot-probes/matrix-tool-read-path-description.md" with { type: "text" };
+import automationOmpToolBashDescription from "./grokbot-probes/automation-omp-tool-bash-description.md" with { type: "text" };
+import automationOmpToolReadDescription from "./grokbot-probes/automation-omp-tool-read-description.md" with { type: "text" };
 
 const ROOT = resolve(import.meta.dir, "..");
 const STREAM = "/aiserver.v1.InferenceService/Stream";
@@ -46,14 +50,7 @@ const OPUS_SHELL_USER = prompt.render(matrixOpusShellUserPrompt, { token: "opus-
 const BASH_THEN_TOKEN_USER = prompt.render(matrixBashThenTokenUserPrompt, { token: TOKEN }).trim();
 
 /** Probe id sets — wire params/effort come from live catalog + buildModel policy. */
-const TOOL_MODEL_IDS = [
-	"grok-4.6",
-	"composer-2.5",
-	"gemini-3.7-flash",
-	"gpt-5.6-sol",
-	"kimi-k3",
-	"glm-5.2",
-];
+const TOOL_MODEL_IDS = ["grok-4.6", "composer-2.5", "gemini-3.7-flash", "gpt-5.6-sol", "kimi-k3", "glm-5.2"];
 const CLAUDE_TEXT_MODEL_IDS = ["claude-opus-5", "claude-sonnet-5", "claude-haiku-4-5"];
 const GROK45_ID = "grok-4.5";
 
@@ -86,10 +83,14 @@ function matrixRowFromCatalog(id, byId) {
 			: efforts.includes("low")
 				? "low"
 				: efforts[0];
+	const sandParameterDefaults = built.sandParameterDefaults ? { ...built.sandParameterDefaults } : undefined;
+	const sandMaxMode = built.sandMaxMode === true;
 	return {
 		id,
 		sandParameterIds,
 		...(effort ? { effort } : {}),
+		...(sandParameterDefaults ? { sandParameterDefaults } : {}),
+		...(sandMaxMode ? { sandMaxMode: true } : {}),
 	};
 }
 
@@ -150,7 +151,7 @@ function parseFrames(buf) {
 	};
 }
 
-async function sandProbe({ id, sandParameterIds, effort, tools }) {
+async function sandProbe({ id, sandParameterIds, effort, sandParameterDefaults, sandMaxMode, tools }) {
 	const cfg = await loadGrokbotConfig();
 	const token = await mintGrokbotAccessToken(cfg, fetch, GROKBOT_BACKEND);
 	const headers = {
@@ -163,13 +164,13 @@ async function sandProbe({ id, sandParameterIds, effort, tools }) {
 		"connect-protocol-version": "1",
 		"x-request-id": crypto.randomUUID(),
 	};
-	// Omit `fast`/`thinking` so resolveGrokbotRequestedModel applies catalog defaults:
-	// thinking models → thinking=true when effort is set, fast=false;
-	// Grok/composer/etc → fast=true. Explicit fast=false on Grok+tools → HTTP 422.
+	// Omit explicit `fast`/`thinking`/`context` so resolveGrokbotRequestedModel
+	// applies live AvailableModels defaults (and sandMaxMode) from the catalog row.
 	const requestedModel = resolveGrokbotRequestedModel(id, {
 		effort,
 		sandParameterIds,
-		sandMaxMode: false,
+		sandParameterDefaults,
+		sandMaxMode: sandMaxMode === true,
 	});
 	const body = {
 		messages: [
@@ -180,10 +181,12 @@ async function sandProbe({ id, sandParameterIds, effort, tools }) {
 			? [
 					{
 						name: "read",
-						description: "Read a file from disk.",
+						description: matrixToolReadDescription.trim(),
 						parameters: {
 							type: "object",
-							properties: { path: { type: "string", description: "Absolute path" } },
+							properties: {
+								path: { type: "string", description: matrixToolReadPathDescription.trim() },
+							},
 							required: ["path"],
 						},
 					},
@@ -310,7 +313,7 @@ async function runTools(catalog) {
 const AUTOMATION_OMP_TOOLS = [
 	{
 		name: "bash",
-		description: "Run a shell command.",
+		description: automationOmpToolBashDescription.trim(),
 		parameters: {
 			type: "object",
 			properties: { command: { type: "string" } },
@@ -319,7 +322,7 @@ const AUTOMATION_OMP_TOOLS = [
 	},
 	{
 		name: "read",
-		description: "Read a file.",
+		description: automationOmpToolReadDescription.trim(),
 		parameters: {
 			type: "object",
 			properties: { path: { type: "string" } },
@@ -341,11 +344,14 @@ async function sandAutomationProbe(catalog) {
 		"connect-protocol-version": "1",
 		"x-request-id": crypto.randomUUID(),
 	};
-	const opus = catalog.CLAUDE_TEXT_MODELS.find(m => m.id === "claude-opus-5") ?? matrixRowFromCatalog("claude-opus-5", new Map());
+	const opus =
+		catalog.CLAUDE_TEXT_MODELS.find(m => m.id === "claude-opus-5") ??
+		matrixRowFromCatalog("claude-opus-5", new Map());
 	const requestedModel = resolveGrokbotRequestedModel("claude-opus-5", {
 		effort: opus.effort,
 		sandParameterIds: opus.sandParameterIds,
-		sandMaxMode: false,
+		sandParameterDefaults: opus.sandParameterDefaults,
+		sandMaxMode: opus.sandMaxMode === true,
 	});
 	const wired = applyAnthropicSandToolWire(
 		{
