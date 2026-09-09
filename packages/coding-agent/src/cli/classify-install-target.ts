@@ -55,11 +55,7 @@ export type ClassifiedInstallTarget =
 export type MarketplaceInstallOptions = { force?: boolean; scope?: "user" | "project" };
 
 export interface MarketplacePreviewReader {
-	validateInstallPlugin(
-		name: string,
-		marketplace: string,
-		options?: MarketplaceInstallOptions,
-	): Promise<void>;
+	validateInstallPlugin(name: string, marketplace: string, options?: MarketplaceInstallOptions): Promise<void>;
 }
 
 export type MarketplaceInstallPreview = {

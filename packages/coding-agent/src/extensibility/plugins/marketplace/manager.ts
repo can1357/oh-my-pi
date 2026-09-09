@@ -277,7 +277,7 @@ export class MarketplaceManager {
 			throw new Error(`Plugin "${pluginId}" is already installed. Use force option to reinstall.`);
 		}
 
-	return { force, scope, registryPath, mktEntry, catalog, pluginEntry, pluginId, existing };
+		return { force, scope, registryPath, mktEntry, catalog, pluginEntry, pluginId, existing };
 	}
 
 	async validateInstallPlugin(
@@ -293,7 +293,7 @@ export class MarketplaceManager {
 		marketplace: string,
 		options?: { force?: boolean; scope?: "user" | "project" },
 	): Promise<InstalledPluginEntry> {
-		const { force, scope, registryPath, mktEntry, catalog, pluginEntry, pluginId, existing } = await this.#validateInstall(
+		const { scope, registryPath, mktEntry, catalog, pluginEntry, pluginId, existing } = await this.#validateInstall(
 			name,
 			marketplace,
 			options,
