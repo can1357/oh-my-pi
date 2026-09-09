@@ -358,6 +358,13 @@ describe("product wire helpers", () => {
 	test("parent profile injects SendToUser", () => {
 		const tools = toProductField2Tools([], "parent-chat");
 		expect(tools[0]?.name).toBe("SendToUser");
+		expect(tools[0]?.description).toContain("user-visible message");
+		expect(tools[0]?.description).toContain("SendToUser");
+		const schema = (
+			tools[0]?.parameters as { jsonSchema?: { properties?: Record<string, { description?: string }> } }
+		).jsonSchema;
+		expect(schema?.properties?.type?.description).toContain("visible to the user");
+		expect(schema?.properties?.content?.description).toContain("user will see");
 	});
 
 	test("prefers write over edit for the shared Write wire slot", () => {

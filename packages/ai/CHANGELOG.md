@@ -11,6 +11,7 @@
 - Grok Bot correlates name-less SendToUser continuation frames by call id/index so parent-chat replies stay synthetic text.
 - Grok Bot omits `fast` when discovery left no default (does not invent `true`/`false` from whether `thinking` is advertised).
 - Grok Bot stream and AvailableModels pass the configured base URL unmodified into `joinGrokbotBackendUrl` (preserves trailing `/` inside query values).
+- Grok Bot parent-chat `SendToUser` tool/schema descriptions load from static `.md` prompt assets.
 
 ## [18.1.15] - 2026-09-08
 

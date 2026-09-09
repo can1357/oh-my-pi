@@ -6,6 +6,9 @@
  */
 import type { Context } from "../../types";
 import { toolWireSchema } from "../../utils/schema/wire";
+import sendToUserContentDescription from "./send-to-user-content-description.md" with { type: "text" };
+import sendToUserDescription from "./send-to-user-description.md" with { type: "text" };
+import sendToUserTypeDescription from "./send-to-user-type-description.md" with { type: "text" };
 
 export type ProductWireProfile = "automation" | "parent-chat";
 
@@ -249,18 +252,18 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 export function sendToUserProductTool(): ProductWireTool {
 	return {
 		name: SEND_TO_USER_WIRE_NAME,
-		description: "Send a user-visible message. The user cannot see tool output or your thinking — only SendToUser.",
+		description: sendToUserDescription.trim(),
 		parameters: wrapToolParameters({
 			type: "object",
 			properties: {
 				type: {
 					type: "string",
 					enum: ["text"],
-					description: "text for chat messages visible to the user",
+					description: sendToUserTypeDescription.trim(),
 				},
 				content: {
 					type: "string",
-					description: "Message content the user will see",
+					description: sendToUserContentDescription.trim(),
 				},
 			},
 			required: ["type", "content"],

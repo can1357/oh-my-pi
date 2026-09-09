@@ -170,7 +170,16 @@ describe("grokbot family tool mapping", () => {
 	});
 
 	test("parent-chat strips thinking/effort/fast from parameterized default and sand-default", () => {
-		const parameterized = requested("default", ["thinking", "context", "effort", "fast"]);
+		// Explicit values required — discovery without defaults no longer invents
+		// thinking/effort/fast/context, so a bare allowlist alone yields no parameters.
+		const parameterized = resolveGrokbotRequestedModel("default", {
+			sandParameterIds: ["thinking", "context", "effort", "fast"],
+			thinking: true,
+			context: "300k",
+			effort: "high",
+			fast: false,
+			sandMaxMode: false,
+		});
 		expect(parameterized.parameters?.length).toBeGreaterThan(0);
 		const wired = applyAnthropicSandToolWire(
 			{
@@ -186,7 +195,12 @@ describe("grokbot family tool mapping", () => {
 		expect(wired.requestedModel).toEqual({ modelId: "sand-default" });
 		const sand = applyAnthropicSandToolWire(
 			{
-				requestedModel: requested("sand-default", ["thinking", "effort"]),
+				requestedModel: resolveGrokbotRequestedModel("sand-default", {
+					sandParameterIds: ["thinking", "effort"],
+					thinking: true,
+					effort: "high",
+					sandMaxMode: false,
+				}),
 				tools: OMP_CORE,
 				modelId: "sand-default",
 				ompTools: OMP_CORE,
@@ -198,7 +212,14 @@ describe("grokbot family tool mapping", () => {
 	});
 
 	test("automation wire strips thinking/effort/fast from a parameterized sand-automation request", () => {
-		const requestedModel = requested("sand-automation", ["thinking", "context", "effort", "fast"]);
+		const requestedModel = resolveGrokbotRequestedModel("sand-automation", {
+			sandParameterIds: ["thinking", "context", "effort", "fast"],
+			thinking: true,
+			context: "300k",
+			effort: "high",
+			fast: false,
+			sandMaxMode: false,
+		});
 		expect(requestedModel.parameters?.length).toBeGreaterThan(0);
 		const wired = applyAnthropicSandToolWire(
 			{
