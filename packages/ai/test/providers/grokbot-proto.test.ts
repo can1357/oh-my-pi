@@ -739,6 +739,26 @@ describe("grokbot checksum", () => {
 		expect(hostLine).not.toContain("leak");
 		expect(hostLine).not.toContain("keep=1");
 	});
+
+	test("redacts userinfo and query from malformed Host URLs without a scheme", async () => {
+		spyOn(grokbotCatalogAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew-present",
+			machineId: "machine-present",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotCatalogAuth, "grokbotSecretsPath").mockReturnValue("/tmp/agent/secrets/grokbot.env");
+
+		const status = await formatGrokbotStatus({
+			baseUrl: "user:sekrit@proxy.local?x-api-key=leak&keep=1",
+		});
+		const hostLine = status.split("\n").find(line => line.startsWith("Host:"));
+		expect(hostLine).toBe("Host: proxy.local");
+		expect(hostLine).not.toContain("sekrit");
+		expect(hostLine).not.toContain("x-api-key");
+		expect(hostLine).not.toContain("leak");
+		expect(hostLine).not.toContain("keep=1");
+	});
 });
 
 describe("grokbot sand-host client parity", () => {

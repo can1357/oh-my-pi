@@ -322,6 +322,7 @@ describe("product wire helpers", () => {
 		expect(schema?.properties).toHaveProperty("target_file");
 		expect(schema?.required ?? []).not.toContain("path");
 		expect(schema?.anyOf).toEqual([{ required: ["path"] }, { required: ["target_file"] }]);
+		expect((schema?.properties?.target_file as { description?: string })?.description).toContain("alias of path");
 	});
 
 	test("Write schema advertises contents as an alias of content", () => {
@@ -353,6 +354,7 @@ describe("product wire helpers", () => {
 		expect(schema?.properties).toHaveProperty("contents");
 		expect(schema?.required).toEqual(["path"]);
 		expect(schema?.anyOf).toEqual([{ required: ["content"] }, { required: ["contents"] }]);
+		expect((schema?.properties?.contents as { description?: string })?.description).toContain("alias of content");
 	});
 
 	test("Read alias preserves preexisting anyOf required groups via allOf", () => {

@@ -50,10 +50,22 @@ function formatGrokbotStatusValue(value: string): string {
 }
 
 /** Strip URL userinfo and all query params before `/grokbot` Host display. */
+function scrubMalformedGrokbotDisplayHost(raw: string): string {
+	// Scheme-less / opaque endpoints used while diagnosing proxies — strip
+	// userinfo and query/fragment conservatively (never echo secrets).
+	let scrubbed = raw.replace(/^(?:([a-z][a-z0-9+.-]*:\/\/))?([^/?#]*@)/i, "$1");
+	const cut = scrubbed.search(/[?#]/);
+	if (cut >= 0) scrubbed = scrubbed.slice(0, cut);
+	return scrubbed.replace(/\/+$/, "") || GROKBOT_BACKEND;
+}
+
 function formatGrokbotDisplayHost(raw: string): string {
 	const trimmed = raw.replace(/\/+$/, "") || GROKBOT_BACKEND;
 	try {
 		const url = new URL(trimmed);
+		// `user:sekrit@proxy.local` parses as opaque scheme `user:` with empty
+		// host — do not trust pathname (still holds userinfo). Scrub raw instead.
+		if (!url.host) return formatGrokbotStatusValue(scrubMalformedGrokbotDisplayHost(trimmed));
 		url.username = "";
 		url.password = "";
 		// Omit the entire query string — reverse proxies may auth with arbitrary
@@ -62,7 +74,7 @@ function formatGrokbotDisplayHost(raw: string): string {
 		const display = `${url.protocol}//${url.host}${url.pathname}${url.hash}`.replace(/\/+$/, "");
 		return formatGrokbotStatusValue(display || GROKBOT_BACKEND);
 	} catch {
-		return formatGrokbotStatusValue(trimmed);
+		return formatGrokbotStatusValue(scrubMalformedGrokbotDisplayHost(trimmed));
 	}
 }
 

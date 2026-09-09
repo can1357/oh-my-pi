@@ -1139,12 +1139,11 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 
 				let openKind: "" | "text" | "thinking" = "";
 				let openIndex = -1;
-				let sendToUserArgsText = "";
-				let sendToUserLastContent = "";
 				/** Content indexes whose text came from synthetic SendToUser — never promote. */
 				const sendToUserTextIndexes = new Set<number>();
-				/** Open SendToUser correlation keys (`id:…` / `idx:…`) for name-less continuation frames. */
-				const openSendToUserKeys = new Set<string>();
+				/** Per-call SendToUser reconstruction keyed by `id:…` / `idx:…` (concurrent-safe). */
+				type SendToUserCallState = { argsText: string; lastContent: string; keys: Set<string> };
+				const openSendToUserByKey = new Map<string, SendToUserCallState>();
 				const toolStates = new Map<
 					string,
 					{ key: string; index: number; block: ToolCall; argsText: string; ended: boolean; isGrammar: boolean }
@@ -1160,7 +1159,24 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				};
 
 				const isOpenSendToUserPart = (part: Record<string, unknown>): boolean =>
-					sendToUserKeysForPart(part).some(key => openSendToUserKeys.has(key));
+					sendToUserKeysForPart(part).some(key => openSendToUserByKey.has(key));
+
+				const resolveSendToUserState = (part: Record<string, unknown>): SendToUserCallState => {
+					const keys = sendToUserKeysForPart(part);
+					let state: SendToUserCallState | undefined;
+					for (const key of keys) {
+						state = openSendToUserByKey.get(key);
+						if (state) break;
+					}
+					if (!state) {
+						state = { argsText: "", lastContent: "", keys: new Set() };
+					}
+					for (const key of keys) {
+						state.keys.add(key);
+						openSendToUserByKey.set(key, state);
+					}
+					return state;
+				};
 
 				const closeOpen = () => {
 					if (openKind === "text" && openIndex >= 0) {
@@ -1231,16 +1247,14 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 				};
 
 				const handleSendToUser = (part: Record<string, unknown>) => {
-					for (const key of sendToUserKeysForPart(part)) openSendToUserKeys.add(key);
+					const state = resolveSendToUserState(part);
 					const argsText =
 						part.args == null ? "" : typeof part.args === "string" ? part.args : JSON.stringify(part.args);
-					if (argsText) sendToUserArgsText = argsText;
-					const parsed = parseSendToUserContent(sendToUserArgsText);
-					if (parsed !== undefined && parsed !== sendToUserLastContent) {
-						const delta = parsed.startsWith(sendToUserLastContent)
-							? parsed.slice(sendToUserLastContent.length)
-							: parsed;
-						sendToUserLastContent = parsed;
+					if (argsText) state.argsText = argsText;
+					const parsed = parseSendToUserContent(state.argsText);
+					if (parsed !== undefined && parsed !== state.lastContent) {
+						const delta = parsed.startsWith(state.lastContent) ? parsed.slice(state.lastContent.length) : parsed;
+						state.lastContent = parsed;
 						if (delta) {
 							const idx = ensureText();
 							sendToUserTextIndexes.add(idx);
@@ -1250,14 +1264,9 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 					}
 					if (part.isComplete ?? part.is_complete) {
 						closeOpen();
-						// Next SendToUser call must rebuild independently — do not
-						// suffix/dedupe against the previous message's content.
-						sendToUserArgsText = "";
-						sendToUserLastContent = "";
-						// Drop every correlation key for this call (id and/or index).
-						// Continuations may omit one side; clearing the whole set
-						// avoids leaving a stale id after an index-only final frame.
-						openSendToUserKeys.clear();
+						// Drop only this call's correlation keys — concurrent SendToUser
+						// streams keep their own reconstruction state.
+						for (const key of state.keys) openSendToUserByKey.delete(key);
 					}
 				};
 
@@ -1482,7 +1491,7 @@ export const streamGrokBot: StreamFunction<"grokbot-sand"> = (
 							// Only intercept the synthetic parent-chat helper. When an
 							// extension owns the SendToUser wire name, dispatch it.
 							// Name-less continuation frames (id/index only) stay on this
-							// path via openSendToUserKeys — same correlation as upsertTool.
+							// path via openSendToUserByKey — same correlation as upsertTool.
 							const ompOwnsSendToUser =
 								Array.isArray(context.tools) &&
 								context.tools.some(tool => {

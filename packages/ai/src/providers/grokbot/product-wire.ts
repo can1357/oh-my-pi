@@ -9,6 +9,8 @@ import { toolWireSchema } from "../../utils/schema/wire";
 import sendToUserContentDescription from "./send-to-user-content-description.md" with { type: "text" };
 import sendToUserDescription from "./send-to-user-description.md" with { type: "text" };
 import sendToUserTypeDescription from "./send-to-user-type-description.md" with { type: "text" };
+import readTargetFileAliasDescription from "./read-target-file-alias-description.md" with { type: "text" };
+import writeContentsAliasDescription from "./write-contents-alias-description.md" with { type: "text" };
 
 export type ProductWireProfile = "automation" | "parent-chat";
 
@@ -221,7 +223,7 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 						...props,
 						contents: {
 							type: "string",
-							description: "File contents (alias of content)",
+							description: writeContentsAliasDescription.trim(),
 						},
 					},
 				},
@@ -240,7 +242,7 @@ function mapOmpToolToProduct(tool: Tool): ProductWireTool | undefined {
 						...props,
 						target_file: {
 							type: "string",
-							description: "File path (alias of path)",
+							description: readTargetFileAliasDescription.trim(),
 						},
 					},
 				},

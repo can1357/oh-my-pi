@@ -1169,6 +1169,95 @@ describe("streamGrokBot JSON-as-text promotion", () => {
 		expect(result.content).toEqual([expect.objectContaining({ type: "text", text: "hello world" })]);
 	});
 
+	test("keeps concurrent SendToUser streams independent when frames interleave", async () => {
+		// Completing call A must not clear call B's open keys / args accumulators —
+		// a later name-less continuation for B would otherwise fall through to upsertTool.
+		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew",
+			machineId: "machine",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotAuth, "mintGrokbotAccessToken").mockResolvedValue("fake-jwt");
+
+		const parent = buildModel({
+			id: "sand-default",
+			name: "sand-default",
+			api: "grokbot-sand",
+			provider: "grokbot",
+			baseUrl: "https://api2.cursor.sh",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 100_000,
+			maxTokens: 8_000,
+			sandToolsWire: "parent-chat",
+			sandParameterIds: [],
+		});
+		const startA = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu-a",
+					toolName: "SendToUser",
+					toolIndex: 0,
+					args: '{"type":"text","content":"alpha"}',
+					isComplete: false,
+				},
+			}),
+		);
+		const startB = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu-b",
+					toolName: "SendToUser",
+					toolIndex: 1,
+					args: '{"type":"text","content":"beta"}',
+					isComplete: false,
+				},
+			}),
+		);
+		const doneA = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu-a",
+					toolIndex: 0,
+					args: '{"type":"text","content":"alpha-done"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const contBNameless = frameConnectProto(
+			encodeInferenceStreamResponse({
+				toolCallPart: {
+					toolCallId: "stu-b",
+					args: '{"type":"text","content":"beta-final"}',
+					isComplete: true,
+				},
+			}),
+		);
+		const trailer = frameConnectProto(Buffer.alloc(0), CONNECT_END_STREAM_FLAG);
+		const fetchImpl = (async () => connectBody(startA, startB, doneA, contBNameless, trailer)) as FetchImpl;
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: 1 }],
+			tools: [bashTool],
+		};
+
+		const result = await streamGrokBot(parent as Model<"grokbot-sand">, context, {
+			apiKey: "renew",
+			fetch: fetchImpl,
+		}).result();
+		expect(result.stopReason).toBe("stop");
+		// Without per-call state, completing A clears B's open keys and the
+		// name-less B continuation falls through to upsertTool as a toolCall.
+		expect(result.content.some(b => b.type === "toolCall")).toBe(false);
+		const text = result.content
+			.filter(b => b.type === "text")
+			.map(b => (b.type === "text" ? b.text : ""))
+			.join("");
+		// Interleaved deltas share one text stream: A("alpha")+B("beta")+A("-done")+B("-final").
+		expect(text).toBe("alphabeta-done-final");
+	});
+
 	test("SendToUser text that looks like a tool JSON stays visible text", async () => {
 		spyOn(grokbotAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew",
