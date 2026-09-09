@@ -756,35 +756,19 @@ impl GithubService {
 			})?;
 		let path = self.worktrees.join(format!("pr-{number}"));
 		let metadata_path = self.worktrees.join(format!("pr-{number}.json"));
-		let previous = load_checkout_metadata(&metadata_path);
 		let reused = path.exists();
-		let sync = tokio::select! {
-			result = checkout_git(
-				&self.root,
-				&path,
-				number,
-				clone_url,
-				head,
-				force,
-				cancellation.clone(),
-			) => result?,
-			() = cancellation.cancelled() => return Err(cancelled_fault()),
-		};
-		fs::create_dir_all(&path).map_err(io_fault)?;
-		let metadata = CheckoutMetadata {
-			repo:          repo.identity().to_owned(),
-			clone_url:     clone_url.to_owned(),
-			head:          head.to_owned(),
-			expected_head: lease_expected_head(
-				sync.synced_to_remote,
-				&sync.worktree_head,
-				previous
-					.as_ref()
-					.map(|metadata| metadata.expected_head.as_str()),
-			),
-		};
-		fs::write(metadata_path, serde_json::to_vec(&metadata).expect("metadata serializes"))
-			.map_err(io_fault)?;
+		checkout_git(
+			&self.root,
+			&path,
+			&metadata_path,
+			number,
+			clone_url,
+			head,
+			repo.identity(),
+			force,
+			cancellation.clone(),
+		)
+		.await?;
 		Ok(json!({
 			"pr": number,
 			"url": api.value.get("html_url").and_then(Value::as_str),
@@ -860,31 +844,22 @@ impl GithubService {
 			self.resolve_pr(repo, value, cancellation).await?.0
 		};
 		let path = self.worktrees.join(format!("pr-{number}"));
-		let mut metadata: CheckoutMetadata = serde_json::from_slice(
-			&fs::read(self.worktrees.join(format!("pr-{number}.json"))).map_err(io_fault)?,
-		)
-		.map_err(|_| fault("github_checkout_missing", "pull request checkout metadata is invalid"))?;
-		if !metadata.repo.eq_ignore_ascii_case(repo.identity()) {
-			return Err(fault(
-				"github_repo_mismatch",
-				"pull request checkout belongs to a different repository",
-			));
-		}
-		let pushed_head = tokio::select! {
-			result = push_git(path.clone(), &metadata, force, cancellation.clone()) => result?,
+		let metadata_path = self.worktrees.join(format!("pr-{number}.json"));
+		let remote_branch = tokio::select! {
+			result = push_git(
+				path.clone(),
+				metadata_path,
+				repo.identity(),
+				force,
+				cancellation.clone(),
+			) => result?,
 			() = cancellation.cancelled() => return Err(cancelled_fault()),
 		};
-		metadata.expected_head = pushed_head.to_string();
-		fs::write(
-			self.worktrees.join(format!("pr-{number}.json")),
-			serde_json::to_vec(&metadata).expect("metadata serializes"),
-		)
-		.map_err(io_fault)?;
 		self.invalidate_repo(repo)?;
 		Ok(json!({
 			"pr": number,
 			"path": path,
-			"remote_branch": metadata.head,
+			"remote_branch": remote_branch,
 			"force_with_lease": force,
 		}))
 	}
@@ -1266,44 +1241,84 @@ struct CheckoutMetadata {
 /// Result of materializing a pull-request worktree.
 struct CheckoutSync {
 	/// HEAD currently checked out in the worktree.
-	worktree_head:    String,
-	/// Whether that HEAD is the fetched remote pull-request tip.
-	synced_to_remote: bool,
+	worktree_head: String,
+	/// Lease SHA a later force-with-lease push may overwrite.
+	expected_head: String,
 }
 
 fn load_checkout_metadata(path: &Path) -> Option<CheckoutMetadata> {
 	serde_json::from_slice(&fs::read(path).ok()?).ok()
 }
 
-/// Choose the SHA a later force-with-lease push may overwrite.
+/// `git reset --hard` equivalent for a reused pull-request worktree.
 ///
-/// Advance the lease target to the worktree HEAD only after that worktree
-/// actually contains the fetched remote tip. Reusing a stale worktree must
-/// keep the previous lease SHA so `pr_push` cannot clobber remote-only
-/// commits the local tree never incorporated.
-fn lease_expected_head(
-	synced_to_remote: bool,
-	worktree_head: &str,
-	previous_expected_head: Option<&str>,
-) -> String {
-	if synced_to_remote {
-		worktree_head.to_owned()
-	} else if let Some(previous) = previous_expected_head.filter(|head| !head.is_empty()) {
-		previous.to_owned()
-	} else {
-		worktree_head.to_owned()
+/// `GitRepo::reset` updates HEAD, the index, and tracked files but leaves
+/// in-progress merge state and refuses untracked paths that obstruct the
+/// target. A destructive forced checkout must clear both so the tree ends up
+/// exactly at `target`.
+fn reset_hard(worktree: &GitRepo, target: &str) -> Result<(), Fault> {
+	match worktree.reset(ResetMode::Hard, Some(target)) {
+		Ok(()) => {},
+		Err(omp_vcs::Error::Conflict { paths }) => {
+			// With `overwrite=true` the only conflicts are untracked paths
+			// blocking target entries; native `git reset --hard` replaces them.
+			for path in paths {
+				remove_untracked(worktree.root(), &path)?;
+			}
+			worktree
+				.reset(ResetMode::Hard, Some(target))
+				.map_err(git_fault)?;
+		},
+		Err(error) => return Err(git_fault(error)),
 	}
+	clear_operation_state(worktree)?;
+	Ok(())
+}
+
+/// Remove an untracked file or directory that obstructs a forced checkout.
+fn remove_untracked(root: &Path, rel: &str) -> Result<(), Fault> {
+	let full = root.join(rel);
+	if fs::symlink_metadata(&full).map_err(io_fault)?.is_dir() {
+		fs::remove_dir_all(&full).map_err(io_fault)
+	} else {
+		fs::remove_file(&full).map_err(io_fault)
+	}
+}
+
+/// Drop in-progress merge/cherry-pick/revert state the way `git reset --hard`
+/// does, so a forced checkout cannot leave a stale `MERGE_HEAD` behind.
+fn clear_operation_state(worktree: &GitRepo) -> Result<(), Fault> {
+	let git_dir = &worktree.info().git_dir;
+	for name in [
+		"MERGE_HEAD",
+		"MERGE_MSG",
+		"MERGE_MODE",
+		"CHERRY_PICK_HEAD",
+		"REVERT_HEAD",
+		"SQUASH_MSG",
+		"REBASE_HEAD",
+		"AUTO_MERGE",
+	] {
+		match fs::remove_file(git_dir.join(name)) {
+			Ok(()) => {},
+			Err(error) if error.kind() == io::ErrorKind::NotFound => {},
+			Err(error) => return Err(io_fault(error)),
+		}
+	}
+	Ok(())
 }
 
 async fn checkout_git(
 	root: &Path,
 	path: &Path,
+	metadata_path: &Path,
 	number: u64,
 	remote: &str,
 	head: &str,
+	repo_identity: &str,
 	force: bool,
 	cancel: CancellationToken,
-) -> Result<CheckoutSync, Fault> {
+) -> Result<(), Fault> {
 	let parent = path
 		.parent()
 		.ok_or_else(|| fault("github_git_failed", "invalid worktree path"))?;
@@ -1317,18 +1332,49 @@ async fn checkout_git(
 	let repository = crate::vcs::git::repo::Repository::from_handle(Arc::clone(&repo));
 	let _guard = crate::vcs::git::lock::write(&repository, &cancel)
 		.await
-		.map_err(|_| fault("github_git_failed", "Git repository mutation lock failed"))?;
+		.map_err(|error| match error {
+			crate::vcs::git::lock::LockError::Cancelled => cancelled_fault(),
+			crate::vcs::git::lock::LockError::Closed => {
+				fault("github_git_failed", "Git repository mutation lock failed")
+			},
+		})?;
+	// Read the prior lease under the same write lock that serializes the
+	// mutation and the metadata write below, so a concurrent push or checkout
+	// cannot be persisted out of order.
+	let previous = load_checkout_metadata(metadata_path)
+		.map(|metadata| metadata.expected_head)
+		.filter(|head| !head.is_empty());
 	let fetch_branch = format!("omp/github-fetch/pr-{number}");
 	let fetch_ref = format!("refs/heads/{fetch_branch}");
 	repo
-		.fetch(remote, head, &fetch_ref, None, Some(cancel))
+		.fetch(remote, head, &fetch_ref, None, Some(cancel.clone()))
 		.await
-		.map_err(git_fault)?;
+		.map_err(|error| match error {
+			omp_vcs::Error::Canceled => cancelled_fault(),
+			other => git_fault(other),
+		})?;
+	// Cancellation is decisive only before the worktree mutation starts: a
+	// running blocking reset cannot be aborted, so once spawned it is always
+	// awaited to completion rather than reported as cancelled mid-mutation.
+	if cancel.is_cancelled() {
+		return Err(cancelled_fault());
+	}
 
 	let path = path.to_owned();
-	task::spawn_blocking(move || finish_checkout_git(repo, &path, number, &fetch_branch, force))
-		.await
-		.map_err(|_| fault("github_git_failed", "GitHub checkout worker failed"))?
+	let sync = task::spawn_blocking(move || {
+		finish_checkout_git(repo, &path, number, &fetch_branch, force, previous)
+	})
+	.await
+	.map_err(|_| fault("github_git_failed", "GitHub checkout worker failed"))??;
+	let metadata = CheckoutMetadata {
+		repo:          repo_identity.to_owned(),
+		clone_url:     remote.to_owned(),
+		head:          head.to_owned(),
+		expected_head: sync.expected_head,
+	};
+	fs::write(metadata_path, serde_json::to_vec(&metadata).expect("metadata serializes"))
+		.map_err(io_fault)?;
+	Ok(())
 }
 
 fn finish_checkout_git(
@@ -1337,6 +1383,7 @@ fn finish_checkout_git(
 	number: u64,
 	fetch_branch: &str,
 	force: bool,
+	previous_expected_head: Option<String>,
 ) -> Result<CheckoutSync, Fault> {
 	let branch = format!("pr-{number}");
 	let fetch_ref = format!("refs/heads/{fetch_branch}");
@@ -1359,16 +1406,33 @@ fn finish_checkout_git(
 			.head_sha()
 			.map_err(git_fault)?
 			.ok_or_else(|| fault("github_git_failed", "pull request worktree has no HEAD commit"))?;
-		if worktree_head == fetched {
-			return Ok(CheckoutSync { worktree_head, synced_to_remote: true });
+		if force {
+			// A forced reuse must leave a clean tree at the fetched tip even
+			// when HEAD already matches.
+			reset_hard(&worktree, &fetched)?;
+			return Ok(CheckoutSync { worktree_head: fetched.clone(), expected_head: fetched });
 		}
-		if !force {
-			return Ok(CheckoutSync { worktree_head, synced_to_remote: false });
+		if worktree
+			.is_ancestor_of(&fetched, &worktree_head)
+			.map_err(git_fault)?
+		{
+			// The worktree already contains the fetched tip (equal or ahead).
+			return Ok(CheckoutSync { worktree_head, expected_head: fetched });
 		}
-		worktree
-			.reset(ResetMode::Hard, Some(&fetched))
-			.map_err(git_fault)?;
-		return Ok(CheckoutSync { worktree_head: fetched, synced_to_remote: true });
+		// Stale reuse: keep the prior lease only while the worktree still
+		// contains it. A lease written before the tree synced — or one whose
+		// commit is no longer reachable — is untrusted and must not be leased.
+		let expected_head = match previous_expected_head {
+			Some(prior)
+				if worktree
+					.is_ancestor_of(&prior, &worktree_head)
+					.unwrap_or(false) =>
+			{
+				prior
+			},
+			_ => worktree_head.clone(),
+		};
+		return Ok(CheckoutSync { worktree_head, expected_head });
 	}
 
 	match repo
@@ -1393,15 +1457,16 @@ fn finish_checkout_git(
 		_ => {},
 	}
 	repo.worktree_add(path, &branch, false).map_err(git_fault)?;
-	Ok(CheckoutSync { worktree_head: fetched, synced_to_remote: true })
+	Ok(CheckoutSync { worktree_head: fetched.clone(), expected_head: fetched })
 }
 
 async fn push_git(
 	path: PathBuf,
-	metadata: &CheckoutMetadata,
+	metadata_path: PathBuf,
+	repo_identity: &str,
 	force: bool,
 	cancel: CancellationToken,
-) -> Result<Str, Fault> {
+) -> Result<String, Fault> {
 	let repo = task::spawn_blocking(move || GitRepo::require(&path).map(Arc::new))
 		.await
 		.map_err(|_| fault("github_git_failed", "GitHub push worker failed"))?
@@ -1410,6 +1475,17 @@ async fn push_git(
 	let _guard = crate::vcs::git::lock::write(&repository, &cancel)
 		.await
 		.map_err(|_| fault("github_git_failed", "Git repository mutation lock failed"))?;
+	let metadata: CheckoutMetadata =
+		serde_json::from_slice(&fs::read(&metadata_path).map_err(io_fault)?).map_err(|_| {
+			fault("github_checkout_missing", "pull request checkout metadata is invalid")
+		})?;
+	if !metadata.repo.eq_ignore_ascii_case(repo_identity) {
+		return Err(fault(
+			"github_repo_mismatch",
+			"pull request checkout belongs to a different repository",
+		));
+	}
+	let remote_branch = metadata.head.clone();
 	let pushed_head = repo
 		.head_sha()
 		.map_err(git_fault)?
@@ -1435,7 +1511,13 @@ async fn push_git(
 		)
 		.await
 		.map_err(git_fault)?;
-	Ok(Str::new(pushed_head))
+	// Persist the new lease under the same write lock that serialized the push,
+	// so a concurrent checkout cannot overwrite it with a stale decision.
+	let mut metadata = metadata;
+	metadata.expected_head = pushed_head;
+	fs::write(&metadata_path, serde_json::to_vec(&metadata).expect("metadata serializes"))
+		.map_err(io_fault)?;
+	Ok(remote_branch)
 }
 
 fn current_git_snapshot(root: &Path) -> Result<(Str, Str), Fault> {
@@ -2643,8 +2725,8 @@ mod tests {
 		ActionsState, DateField, Operation, Params, PrMetadata, UNIX_EPOCH, actions_runs_endpoint,
 		actions_state, branch_endpoint, compare_endpoint, date_qualifier, days_from_civil,
 		decode_file_response, failed_jobs, file_endpoint, fill_from_commits, finish_checkout_git,
-		has_scope, lease_expected_head, normalize_date_bound, parse_pr_number, parse_run_reference,
-		poll_sleep, pr_branch_endpoint, render_output, run_jobs_endpoint, tail_limit, tail_lines,
+		has_scope, normalize_date_bound, parse_pr_number, parse_run_reference, poll_sleep,
+		pr_branch_endpoint, render_output, run_jobs_endpoint, tail_limit, tail_lines,
 	};
 	use crate::github_url::GithubRepo;
 
@@ -2934,30 +3016,6 @@ mod tests {
 		let pending = json!({ "workflow_runs": [] });
 		assert!(matches!(actions_state(&pending), ActionsState::Pending));
 	}
-	#[test]
-	fn lease_expected_head_does_not_advance_until_the_worktree_contains_remote() {
-		assert_eq!(
-			lease_expected_head(true, "ccc", Some("aaa")),
-			"ccc",
-			"a worktree reset to the fetched tip may lease that tip",
-		);
-		assert_eq!(
-			lease_expected_head(false, "aaa", Some("aaa")),
-			"aaa",
-			"reusing a stale worktree must keep the previous lease SHA",
-		);
-		assert_eq!(
-			lease_expected_head(false, "aaa", Some("")),
-			"aaa",
-			"missing prior metadata falls back to the worktree HEAD",
-		);
-		assert_eq!(
-			lease_expected_head(false, "local", Some("remote-only")),
-			"remote-only",
-			"stale reuse must not replace the lease with a never-synced remote SHA",
-		);
-	}
-
 	fn git(dir: &std::path::Path, args: &[&str]) -> String {
 		let output = std::process::Command::new("git")
 			.arg("-C")
@@ -2972,8 +3030,16 @@ mod tests {
 			.to_owned()
 	}
 
-	#[test]
-	fn reused_pr_worktree_stays_put_unless_forced() {
+	/// A repo whose `pr-7` worktree sits on `base` while the fetch branch
+	/// `omp/github-fetch/pr-7` points at a divergent `fetched` tip.
+	fn pr_worktree_fixture() -> (
+		tempfile::TempDir,
+		std::path::PathBuf,
+		std::path::PathBuf,
+		String,
+		String,
+		std::sync::Arc<omp_vcs::git::GitRepo>,
+	) {
 		let temp = tempfile::tempdir().expect("tempdir");
 		let root = temp.path().join("repo");
 		std::fs::create_dir_all(&root).expect("repo dir");
@@ -2996,24 +3062,129 @@ mod tests {
 		git(&root, &["checkout", "-q", "main"]);
 
 		let repo = std::sync::Arc::new(omp_vcs::git::GitRepo::require(&root).expect("open repo"));
+		(temp, root, worktree, base, fetched, repo)
+	}
+
+	#[test]
+	fn reused_pr_worktree_stays_put_unless_forced() {
+		let (_temp, root, worktree, base, fetched, repo) = pr_worktree_fixture();
 		let sync = finish_checkout_git(
 			std::sync::Arc::clone(&repo),
 			&worktree,
 			7,
 			"omp/github-fetch/pr-7",
 			false,
+			None,
 		)
 		.expect("reuse without force");
-		assert!(!sync.synced_to_remote);
 		assert_eq!(sync.worktree_head, base);
+		assert_eq!(sync.expected_head, base, "no prior lease falls back to the worktree HEAD");
 		assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), base);
 
 		git(&root, &["branch", "omp/github-fetch/pr-7", &fetched]);
-		let sync = finish_checkout_git(repo, &worktree, 7, "omp/github-fetch/pr-7", true)
+		let sync = finish_checkout_git(repo, &worktree, 7, "omp/github-fetch/pr-7", true, None)
 			.expect("force reset");
-		assert!(sync.synced_to_remote);
 		assert_eq!(sync.worktree_head, fetched);
+		assert_eq!(sync.expected_head, fetched);
 		assert_eq!(git(&worktree, &["rev-parse", "HEAD"]), fetched);
+	}
+
+	#[test]
+	fn reused_pr_worktree_distrusts_lease_not_in_worktree() {
+		let (_temp, _root, worktree, base, fetched, repo) = pr_worktree_fixture();
+		// The fetched tip was leased by the old checkout path while the worktree
+		// stayed behind; unreachable from the tree, it must not be preserved.
+		let sync =
+			finish_checkout_git(repo, &worktree, 7, "omp/github-fetch/pr-7", false, Some(fetched))
+				.expect("reuse without force");
+		assert_eq!(sync.worktree_head, base);
+		assert_eq!(sync.expected_head, base, "an unreachable lease falls back to the worktree HEAD",);
+	}
+
+	#[test]
+	fn reused_pr_worktree_keeps_reachable_lease() {
+		let (_temp, _root, worktree, _base, _fetched, repo) = pr_worktree_fixture();
+		// Commit on top of the checked-out base so the worktree is ahead of the
+		// prior lease yet still does not contain the fetched tip.
+		let prior = git(&worktree, &["rev-parse", "HEAD"]);
+		std::fs::write(worktree.join("local"), "local\n").expect("local file");
+		git(&worktree, &["add", "."]);
+		git(&worktree, &["commit", "-qm", "local"]);
+		let local = git(&worktree, &["rev-parse", "HEAD"]);
+
+		let sync = finish_checkout_git(
+			repo,
+			&worktree,
+			7,
+			"omp/github-fetch/pr-7",
+			false,
+			Some(prior.clone()),
+		)
+		.expect("reuse without force");
+		assert_eq!(sync.worktree_head, local);
+		assert_eq!(sync.expected_head, prior, "a reachable prior lease is preserved");
+	}
+
+	#[test]
+	fn reused_pr_worktree_ahead_of_fetched_is_synced() {
+		let (_temp, _root, worktree, _base, fetched, repo) = pr_worktree_fixture();
+		// Bring the worktree to the fetched tip, then commit on top so it
+		// contains the remote head without being equal to it.
+		git(&worktree, &["reset", "-q", "--hard", &fetched]);
+		std::fs::write(worktree.join("local"), "local\n").expect("local file");
+		git(&worktree, &["add", "."]);
+		git(&worktree, &["commit", "-qm", "local"]);
+		let local = git(&worktree, &["rev-parse", "HEAD"]);
+
+		let sync = finish_checkout_git(repo, &worktree, 7, "omp/github-fetch/pr-7", false, None)
+			.expect("reuse without force");
+		assert_eq!(sync.worktree_head, local);
+		assert_eq!(
+			sync.expected_head, fetched,
+			"a worktree containing the fetched tip leases that tip",
+		);
+	}
+
+	#[test]
+	fn forced_reuse_resets_dirty_tree_and_clears_merge_state() {
+		let (_temp, _root, worktree, _base, fetched, repo) = pr_worktree_fixture();
+		// Worktree already at the fetched tip but dirty and mid-merge: a forced
+		// checkout must still reset tracked edits and drop the merge state.
+		git(&worktree, &["reset", "-q", "--hard", &fetched]);
+		std::fs::write(worktree.join("a"), "dirty\n").expect("dirty edit");
+		let git_dir = omp_vcs::git::GitRepo::require(&worktree)
+			.expect("worktree")
+			.info()
+			.git_dir
+			.clone();
+		std::fs::write(git_dir.join("MERGE_HEAD"), format!("{fetched}\n")).expect("MERGE_HEAD");
+
+		let sync = finish_checkout_git(repo, &worktree, 7, "omp/github-fetch/pr-7", true, None)
+			.expect("forced reset");
+		assert_eq!(sync.worktree_head, fetched);
+		assert_eq!(sync.expected_head, fetched);
+		assert_eq!(std::fs::read_to_string(worktree.join("a")).expect("file"), "remote\n");
+		assert!(!git_dir.join("MERGE_HEAD").exists(), "forced reset clears merge state");
+	}
+
+	#[test]
+	fn forced_reuse_removes_untracked_collisions() {
+		let (_temp, root, worktree, _base, _fetched, repo) = pr_worktree_fixture();
+		// Extend the fetched tip with a path the reused worktree only has as an
+		// untracked file; a forced reset must replace the obstruction.
+		git(&root, &["checkout", "-q", "omp/github-fetch/pr-7"]);
+		std::fs::write(root.join("b"), "tracked\n").expect("tracked file");
+		git(&root, &["add", "."]);
+		git(&root, &["commit", "-qm", "add b"]);
+		let fetched = git(&root, &["rev-parse", "HEAD"]);
+		git(&root, &["checkout", "-q", "main"]);
+		std::fs::write(worktree.join("b"), "untracked\n").expect("untracked file");
+
+		let sync = finish_checkout_git(repo, &worktree, 7, "omp/github-fetch/pr-7", true, None)
+			.expect("forced reset");
+		assert_eq!(sync.worktree_head, fetched);
+		assert_eq!(sync.expected_head, fetched);
+		assert_eq!(std::fs::read_to_string(worktree.join("b")).expect("file"), "tracked\n");
 	}
 
 	#[tokio::test]
