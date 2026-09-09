@@ -513,8 +513,15 @@ export class CollabSocket {
 		// the owner's resync error is admitted. A departure inside the window
 		// overwrites the mask, and lifting it then would un-retire the peer.
 		if (this.#notServing.has(peerId)) return;
+		const generation = this.#roomGeneration;
 		this.#notServing.set(peerId, { reason: "shed", settled: true });
 		queueMicrotask(() => {
+			// Same ownership rule as every other deferral here. A transient reconnect
+			// lands a task later so this is protected by timing alone, but `close()`
+			// and `connect()` are synchronous and can both run before the microtask:
+			// the mask would then be lifted off a record in the reopened room, and the
+			// owner told to drop a peer id that now belongs to somebody else.
+			if (generation !== this.#roomGeneration) return;
 			if (this.#notServing.get(peerId)?.reason === "shed") this.#notServing.delete(peerId);
 			this.#reporting = true;
 			try {
@@ -621,6 +628,11 @@ export class CollabSocket {
 		this.#pendingSends.length = 0;
 		this.#pendingSendBytes = 0;
 		this.#notServing.clear();
+		// With the records. A lease only exists to hold one against eviction, so
+		// leaving them behind protects nothing and, across a `connect()` that reopens
+		// this socket, would have the reopened room's trim skipping records for
+		// replies the closed room was owed.
+		this.#peerOps.clear();
 		this.#sending = false;
 		this.#wakeSender?.();
 	}

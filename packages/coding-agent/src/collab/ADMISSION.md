@@ -235,14 +235,22 @@ chunks pass through are _not_ charged again: one chunk is materialized at a time
 so the retained charge is the larger and the longer-lived of the two.
 `SNAPSHOT_CHUNK_BYTES` is a _soft_ cap on a chunk — `#snapshotChunks` always puts
 at least one entry in a chunk, so an entry larger than the cap ships in a chunk of
-its own — and the per-entry ceiling behind it is softer than it looks.
-`shrinkForReplication` compares `JSON.stringify(entry).length` with
-`MAX_REPLICATED_PAYLOAD_BYTES`, so that 1 MiB is 1 Mi UTF-16 code units: measured,
-a CJK entry of 700,112 code units comes back unchanged at 2,100,112 bytes, and
-`#snapshotChunks` measures its own target in code units too. The last shrink pass
-is returned whether or not it fits, as well. So the transient is bounded by up to
-3x the nominal figure on non-ASCII text — still comfortably under the relay's
-16 MB frame cap, but not the margin the number reads as.
+its own. Behind it there is **no enforced per-entry ceiling at all**, and this note
+claimed one twice before saying so. `shrinkForReplication` bounds two axes, long
+strings and long array tails, and returns its last pass whether or not the result
+fits; `MAX_REPLICATED_PAYLOAD_BYTES` is the threshold that decides whether to try,
+not a limit on what comes back. Measured, unchanged, against a nominal 1 MiB: an
+entry whose object key is 17 MiB comes back at 17,825,799 bytes, an object of
+200,000 short keys at 5,377,781, and a 50,000-deep nesting throws
+`RangeError: Maximum call stack size exceeded` out of the walk. The comparison is
+also in UTF-16 code units, so a CJK entry of 700,112 code units passes the
+threshold untouched at 2,100,112 bytes.
+
+Nothing downstream re-checks, so the real ceiling on a chunk is whatever the relay
+enforces: a payload past its `maxPayloadLength` closes the host socket with 1006,
+which `CollabSocket` treats as transient and retries into the same send — issue
+#3739, the loop the shrink helper was written to break. It breaks it for the shape
+that caused it, a single giant string, and not in general.
 
 Two consequences worth stating. An entry with nothing ahead of it is admitted
 whatever it costs, so a session larger than the whole budget is still shareable
@@ -279,6 +287,16 @@ was joining.
   is to reject a second `hello` from a peer already in `#peers` — a reconnecting
   guest always gets a fresh relay id, so a repeat from a live id is never
   legitimate — but it changes join semantics and is not done here.
+- **`shrinkForReplication` has no enforced ceiling.** It bounds string length and
+  array length; object key length, object key _count_ and nesting depth are all
+  unbounded, and the final pass is returned without a size check. Enforcing one
+  needs a decision this policy cannot make on its own: the helper's contract is
+  that the wire shape survives — only string leaves and array tails change, so
+  discriminators and ids reach the guest intact — and no bounded fallback exists
+  inside that contract. Anything that actually fits has to abandon the shape, which
+  is a replication-semantics change (what a guest sees in place of an entry the
+  host cannot ship) rather than a queue-policy one. The code is unchanged from
+  `main`, so this is not something the admission work introduced.
 - **A transcript read pins a retirement record for as long as it takes.** Each
   `fetch-transcript` reply is capped at `TRANSCRIPT_READ_CAP` (4 MiB) and costs the
   asker one queue entry, so the queue side is accounted for and the work per read

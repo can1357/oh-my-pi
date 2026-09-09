@@ -26,6 +26,22 @@ async function waitUntil(predicate: () => boolean, message: string): Promise<voi
 	}
 }
 
+/**
+ * Flush microtasks until {@link done} holds. Fake timers make a real wait
+ * impossible, and a fixed number of turns is a guess at how deep the sealing
+ * pipeline happens to be.
+ */
+async function flushUntil(done: () => boolean, message: string): Promise<void> {
+	for (let turn = 0; turn < 200; turn++) {
+		if (done()) return;
+		await Promise.resolve();
+	}
+	throw new Error(message);
+}
+
+/** Turns to let a frame appear that should not; a negative can only be bounded. */
+const SETTLE_TURNS = 20;
+
 class BackpressuredWebSocket {
 	static readonly CONNECTING = 0;
 	static readonly OPEN = 1;
@@ -1110,6 +1126,70 @@ describe("CollabSocket send backpressure", () => {
 		}
 	}, 15_000);
 
+	it("does not report a reply captured before the socket was closed and reopened", async () => {
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = 0;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/reopen", role: "host", key: {} as CryptoKey });
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			const leased = socket.addressee(4);
+			const bestEffort = socket.bestEffortAddressee(4);
+
+			// Explicit reuse rather than a transient drop. The relay this comes back
+			// to hands out ids from 1 the same way, so peer 4 is a different client.
+			socket.close();
+			socket.connect();
+			BackpressuredWebSocket.instances[1]!.open();
+
+			expect(leased()).toBe(false);
+			expect(bestEffort()).toBe(false);
+
+			// And the closed room's lease is gone rather than left holding an id in
+			// the reopened one. A lease makes `#trimRetired` skip its record, so a
+			// leaked one pins that record for the socket's lifetime — and while it
+			// stands, the peer the relay reissued the id to is never served at all.
+			const second = BackpressuredWebSocket.instances[1]!;
+			second.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer: 4 }) } as MessageEvent);
+			for (let peer = 5; peer <= RETIREMENT_CAP + 50; peer++) {
+				second.onmessage?.({ data: JSON.stringify({ t: "peer-left", peer }) } as MessageEvent);
+			}
+			await Bun.sleep(20);
+			expect(socket.isServing(4)).toBe(true);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
+	it("does not report an overload into a room the socket reopened first", async () => {
+		vi.spyOn(crypto.subtle, "encrypt").mockResolvedValue(new Uint8Array([1, 2, 3, 4]).buffer);
+		BackpressuredWebSocket.instances = [];
+		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
+		globalThis.WebSocket = BackpressuredWebSocket as unknown as typeof WebSocket;
+		const socket = new CollabSocket({ wsUrl: "ws://localhost:8788/r/late", role: "host", key: {} as CryptoKey });
+		const shed: number[] = [];
+		socket.onPeerOverload = peer => shed.push(peer);
+		try {
+			socket.connect();
+			BackpressuredWebSocket.instances[0]!.open();
+			// Shed a peer, then reopen before the deferred report can run: everything
+			// here is synchronous, so the microtask lands in the new room.
+			for (let i = 0; i <= PEER_SHARE; i++) socket.send({ t: "error", message: `p1-${i}` }, 1);
+			socket.close();
+			socket.connect();
+			BackpressuredWebSocket.instances[1]!.open();
+			await Bun.sleep(20);
+
+			// Reporting it now would tell the owner to drop peer 1 — an id the relay
+			// has just reissued to somebody who has done nothing wrong.
+			expect(shed).toEqual([]);
+			expect(socket.isServing(1)).toBe(true);
+		} finally {
+			socket.close();
+		}
+	}, 15_000);
+
 	it("charges a lazy batch for the snapshot it keeps reachable", async () => {
 		BackpressuredWebSocket.instances = [];
 		BackpressuredWebSocket.initialBufferedAmount = HIGH_WATER_MARK;
@@ -1290,17 +1370,18 @@ describe("CollabSocket send backpressure", () => {
 			if (!ws) throw new Error("CollabSocket did not construct a WebSocket");
 			ws.open();
 			socket.send({ t: "bye", reason: "slow relay" });
-			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+			for (let flush = 0; flush < SETTLE_TURNS; flush++) await Promise.resolve();
 			expect(ws.sent).toHaveLength(0);
 
 			vi.advanceTimersByTime(DRAIN_RETRY_MS);
-			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
+			for (let flush = 0; flush < SETTLE_TURNS; flush++) await Promise.resolve();
 			expect(ws.sent).toHaveLength(0);
 
 			ws.bufferedAmount = 0;
 			vi.advanceTimersByTime(DRAIN_RETRY_MS);
-			for (let flush = 0; flush < 5; flush++) await Promise.resolve();
-			expect(ws.sent).toHaveLength(1);
+			// Positive condition rather than a turn count: the send only has to happen,
+			// and how many microtasks the pipeline takes to get there is not the point.
+			await flushUntil(() => ws.sent.length === 1, "the queued frame never reached the drained transport");
 		} finally {
 			socket.close();
 		}

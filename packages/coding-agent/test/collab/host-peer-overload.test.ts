@@ -40,6 +40,25 @@ afterEach(() => {
 	uninstallInMemoryRelay();
 });
 
+/**
+ * Drain the throttled host transport until {@link done} holds, then keep draining
+ * one interval longer so a frame that should never arrive still gets the chance
+ * to. Quiescence is not completion: one slow interval mid-drain looks exactly
+ * like a finished one, and the counts asserted afterwards depend on the
+ * difference.
+ */
+async function drainUntil(hostWs: FakeWebSocket, done: () => boolean, message: string): Promise<void> {
+	const drain = setInterval(() => {
+		hostWs.bufferedAmount = 0;
+	}, 10);
+	try {
+		await waitFor(done, message, 8_000);
+		await Bun.sleep(60);
+	} finally {
+		clearInterval(drain);
+	}
+}
+
 it("does not end the room when a guest's renaming drives the state broadcast", async () => {
 	const relay = installInMemoryRelay();
 	const probe = instrumentRelay(relay, { throttle: true });
@@ -256,13 +275,13 @@ it("never leaves a superseded welcome without the snapshot built with it", async
 	guest.send({ t: "hello", proto: COLLAB_PROTO, name: "repeater" });
 	await waitFor(() => joins() >= 2, "host never handled the second hello");
 
-	let previous = -1;
-	const deadline = Date.now() + 8_000;
-	while (Date.now() < deadline && previous !== frames.length) {
-		previous = frames.length;
-		hostWs.bufferedAmount = 0;
-		await Bun.sleep(60);
-	}
+	await drainUntil(
+		hostWs,
+		() =>
+			frames.some(frame => frame.t === "welcome") &&
+			frames.some(frame => frame.t === "snapshot-chunk" && frame.final),
+		"the surviving welcome and its snapshot never both arrived",
+	);
 
 	// The superseded generation's welcome must go with its batch. A surviving
 	// welcome whose batch was discarded is the frame that later, under a saturated
@@ -310,16 +329,13 @@ it("keeps only the newest snapshot batch when a guest repeats hello", async () =
 	// queue here is the batch cap alone.
 	expect(seen.notices.filter(notice => notice.includes("fell too far behind"))).toEqual([]);
 
-	// Drain to quiescence rather than to the first terminator, so the count below
-	// reflects everything that was queued.
-	let previous = -1;
-	const deadline = Date.now() + 8_000;
-	while (Date.now() < deadline && previous !== repeaterFrames.length) {
-		previous = repeaterFrames.length;
-		hostWs.bufferedAmount = 0;
-		await Bun.sleep(60);
-	}
-	expect(repeaterFrames.some(frame => frame.t === "snapshot-chunk" && frame.final)).toBe(true);
+	// Past the terminator and one interval further, so the count below reflects
+	// everything that was queued rather than everything that had arrived by then.
+	await drainUntil(
+		hostWs,
+		() => repeaterFrames.some(frame => frame.t === "snapshot-chunk" && frame.final),
+		"the surviving snapshot never terminated",
+	);
 
 	const chunks = repeaterFrames.filter(frame => frame.t === "snapshot-chunk");
 	// Eight hellos, one transcript on the wire: the older batches were superseded
