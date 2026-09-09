@@ -1138,21 +1138,27 @@ function shouldInheritDefaultBeforePriority(role: ModelRole): boolean {
 
 /**
  * Roles that have no priority.json chain of their own reuse another role's
- * list. The advisor — a second-opinion reviewer — defaults to the `slow`
- * reasoning chain, but (unlike the `slow` role, see
- * {@link shouldInheritDefaultBeforePriority}) never inherits the primary's
- * model, so it stays a distinct strong model out of the box. The `tiny` role —
- * the override for online title/memory/classifier tasks — reuses the `smol`
- * fast chain so an unset tiny role auto-resolves to the same fast model smol
- * would pick.
+ * list. The advisor — a second-opinion reviewer — uses a configured `slow`
+ * role before that list, but never inherits the primary's model when `slow`
+ * is unset, so it stays a distinct strong model out of the box. The `tiny`
+ * role — the override for online title/memory/classifier tasks — resolves
+ * through `smol` so it picks the same configured, inherited, or built-in fast
+ * model.
  */
 const ROLE_PRIORITY_ALIAS: Partial<Record<ModelRole, keyof typeof MODEL_PRIO>> = {
 	advisor: "slow",
 	tiny: "smol",
 };
 
-const ROLE_CONFIGURED_FALLBACK: Partial<Record<ModelRole, ModelRole>> = {
-	tiny: "smol",
+interface ConfiguredRoleFallback {
+	role: ModelRole;
+	/** Skip the target role's default inheritance when it has no explicit configuration. */
+	configuredOnly: boolean;
+}
+
+const ROLE_CONFIGURED_FALLBACK: Partial<Record<ModelRole, ConfiguredRoleFallback>> = {
+	advisor: { role: "slow", configuredOnly: true },
+	tiny: { role: "smol", configuredOnly: false },
 };
 
 /** Built-in priority patterns for a role, following {@link ROLE_PRIORITY_ALIAS}. */
@@ -1226,10 +1232,16 @@ function resolveConfiguredRolePattern(
 	const roleDefaults = isModelRole(role) ? rolePriorityDefaults(role) : [];
 	const configuredFallback = isModelRole(role) ? ROLE_CONFIGURED_FALLBACK[role] : undefined;
 	const fallbackPatterns =
-		configured || !configuredFallback
+		configured ||
+		!configuredFallback ||
+		(configuredFallback.configuredOnly && !settings?.getModelRole(configuredFallback.role)?.trim())
 			? undefined
 			: (
-					resolveConfiguredRolePattern(formatModelRoleAlias(configuredFallback), settings, new Set(visited)) ?? []
+					resolveConfiguredRolePattern(
+						formatModelRoleAlias(configuredFallback.role),
+						settings,
+						new Set(visited),
+					) ?? []
 				).flatMap(pattern => {
 					const { base, level } = splitThinkingSuffix(
 						pattern,
@@ -1691,10 +1703,10 @@ export function resolveRoleSelection(
 /**
  * Resolve the model for the `advisor` role. A configured `modelRoles.advisor`
  * wins outright (a bad override surfaces as no model rather than silently
- * running something else); when unset it falls back to the `slow` priority
- * chain via {@link ROLE_PRIORITY_ALIAS} — a strong reasoning model that, unlike
- * the `slow` role itself, never inherits the primary's model. Returns undefined
- * only when no candidate in the resolved chain is available.
+ * running something else); when unset it uses a configured `slow` role before
+ * the built-in slow priority chain. It never inherits the primary model through
+ * an unconfigured `slow` role. Returns undefined only when no candidate in the
+ * resolved chain is available.
  */
 export function resolveAdvisorRoleSelection(
 	settings: Settings,
