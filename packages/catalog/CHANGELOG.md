@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Astra on Codex clamps disabled thinking to its lowest supported effort instead of sending unsupported `none`.
+
 ## [18.1.14] - 2026-09-07
 
 ### Fixed

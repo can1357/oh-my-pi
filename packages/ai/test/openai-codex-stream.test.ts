@@ -6496,3 +6496,35 @@ describe("openai-codex SSE statelessness", () => {
 		expect(stats).toMatchObject({ fullContextRequests: 2, deltaRequests: 0 });
 	});
 });
+
+it("clamps disabled Astra reasoning to low before sending a Codex request", async () => {
+	using tempDir = TempDir.createSync("@pi-codex-astra-");
+	setAgentDir(tempDir.path());
+	const model = buildModel({
+		id: "gpt-6-astra",
+		name: "GPT-6 Astra",
+		provider: "openai-codex",
+		api: "openai-codex-responses",
+		baseUrl: "https://chatgpt.com/backend-api",
+		reasoning: true,
+		input: ["text"],
+		preferWebsockets: false,
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow: 272000,
+		maxTokens: 128000,
+	});
+	let requestBody: { reasoning?: { effort?: string } } | undefined;
+	const fetchMock: FetchImpl = async (_input, init) => {
+		requestBody = JSON.parse(decodeCodexRequestBody(init?.body));
+		return new Response(createCompletedCodexSse("Hello"), {
+			status: 200,
+			headers: { "content-type": "text/event-stream" },
+		});
+	};
+	await streamSimple(
+		model,
+		{ messages: [{ role: "user", content: "hello", timestamp: 0 }] },
+		{ apiKey: createCodexTestToken(), forceReasoningOff: true, fetch: fetchMock },
+	).result();
+	expect(requestBody?.reasoning?.effort).toBe("low");
+});

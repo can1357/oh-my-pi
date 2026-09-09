@@ -10905,6 +10905,21 @@
 				}
 			},
 			{
+				"source": "providers/openai-codex.kdl:152",
+				"providers": [
+					"openai-codex"
+				],
+				"models": [
+					{
+						"kind": "exact",
+						"value": "gpt-6-astra"
+					}
+				],
+				"thinking": {
+					"requiresEffort": true
+				}
+			},
+			{
 				"source": "providers/openai-codex.kdl:3",
 				"providers": [
 					"openai-codex"
