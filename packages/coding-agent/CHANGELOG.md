@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Command output from native Windows tools on Chinese (and other non-UTF-8) locales is decoded using the system ANSI code page instead of turning into replacement characters.
+
 ## [18.1.16] - 2026-09-09
 
 ### Added

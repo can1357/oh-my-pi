@@ -291,6 +291,7 @@ libc = "0.2"
 os_pipe = "1"
 windows-sys = { version = "0.61", features = [
    "Win32_Foundation",
+   "Win32_Globalization",
    "Win32_Media_Audio",
    "Win32_Media_Multimedia",
    "Win32_Security",

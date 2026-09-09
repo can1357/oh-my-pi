@@ -6,7 +6,6 @@ use std::{
 	collections::HashMap,
 	fs,
 	io::{self},
-	str,
 	sync::Arc,
 	time::Duration,
 };
@@ -31,7 +30,9 @@ use tokio_util::sync::CancellationToken;
 use crate::windows::configure_windows_path;
 use crate::{
 	cancel::{AbortReason, AbortToken, CancelToken},
-	minimizer, process,
+	minimizer,
+	output_decode::{OutputDecoder, decode_bytes},
+	process,
 };
 
 struct ShellSessionCore {
@@ -1618,10 +1619,9 @@ async fn read_output(
 	cancel_token: CancellationToken,
 	activity: Sender<()>,
 ) {
-	const REPLACEMENT: &str = "\u{FFFD}";
 	const BUF: usize = 65536;
-	let mut buf = vec![0u8; BUF + 4]; // +4 for max UTF-8 char
-	let mut it = 0;
+	let mut buf = vec![0u8; BUF];
+	let mut decoder = OutputDecoder::new();
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
@@ -1641,7 +1641,7 @@ async fn read_output(
 			}) else {
 				break;
 			};
-			match readiness.try_io(|inner| read_nonblocking(inner.get_ref(), &mut buf[it..BUF])) {
+			match readiness.try_io(|inner| read_nonblocking(inner.get_ref(), &mut buf)) {
 				Ok(Ok(0)) => break,
 				Ok(Ok(n)) => n,
 				Ok(Err(e)) if e.kind() == io::ErrorKind::Interrupted => continue,
@@ -1651,7 +1651,7 @@ async fn read_output(
 		};
 		#[cfg(not(unix))]
 		let n = {
-			let read_future = reader.read(&mut buf[it..BUF]);
+			let read_future = reader.read(&mut buf);
 			tokio::pin!(read_future);
 			match tokio::select! {
 				res = &mut read_future => res,
@@ -1665,58 +1665,16 @@ async fn read_output(
 		};
 		if n > 0 {
 			let _ = activity.try_send(());
-		}
-		it += n;
-
-		// Consume as much of `pending` as is decodable *right now*.
-		while it > 0 {
-			let pending = &buf[..it];
-			match str::from_utf8(pending) {
-				Ok(text) => {
-					emit_chunk(text, on_chunk.as_ref()).await;
-					it = 0;
-					break;
-				},
-				Err(err) => {
-					let p = err.valid_up_to();
-					if p > 0 {
-						// SAFETY: [..p] is guaranteed valid UTF-8 by valid_up_to().
-						let text = unsafe { str::from_utf8_unchecked(&pending[..p]) };
-						emit_chunk(text, on_chunk.as_ref()).await;
-						// copy p..it to the beginning of the buffer
-						buf.copy_within(p..it, 0);
-						it -= p;
-					}
-
-					match err.error_len() {
-						Some(p) => {
-							// Invalid byte sequence: emit replacement and drop those bytes.
-							emit_chunk(REPLACEMENT, on_chunk.as_ref()).await;
-							// copy p..it to the beginning of the buffer
-							buf.copy_within(p..it, 0);
-							it -= p;
-							// continue loop in case more bytes remain after the
-							// invalid sequence
-						},
-						None => {
-							// Incomplete UTF-8 sequence at end: keep bytes for next read.
-							break;
-						},
-					}
-				},
+			let text = decoder.push(&buf[..n]);
+			if !text.is_empty() {
+				emit_chunk(&text, on_chunk.as_ref()).await;
 			}
 		}
 	}
 
-	// Flush whatever is left at EOF (including an incomplete final sequence).
-	for chunk in buf[..it].utf8_chunks() {
-		let valid = chunk.valid();
-		if !valid.is_empty() {
-			emit_chunk(valid, on_chunk.as_ref()).await;
-		}
-		if !chunk.invalid().is_empty() {
-			emit_chunk(REPLACEMENT, on_chunk.as_ref()).await;
-		}
+	let rest = decoder.finish();
+	if !rest.is_empty() {
+		emit_chunk(&rest, on_chunk.as_ref()).await;
 	}
 }
 
@@ -1727,16 +1685,12 @@ async fn read_output_buffered(
 	activity: Sender<()>,
 	max_capture_bytes: usize,
 ) -> BufferedOutput {
-	const REPLACEMENT: &str = "\u{FFFD}";
 	const BUF: usize = 65536;
 	let mut buf = vec![0u8; BUF];
 	let mut input_bytes = 0usize;
 	let mut captured = Vec::new();
 	let mut exceeded = false;
-	// Pending bytes from a prior read that ended mid-UTF-8 sequence. We hold
-	// them back so we emit only valid UTF-8 to the streaming callback while
-	// still capturing every byte into `captured` for post-processing.
-	let mut pending = Vec::<u8>::new();
+	let mut decoder = OutputDecoder::new();
 
 	#[cfg(unix)]
 	let Ok(reader) = register_nonblocking_pipe(reader) else {
@@ -1794,52 +1748,18 @@ async fn read_output_buffered(
 			}
 		}
 
-		// Stream whatever is validly decodable *right now* to the callback,
-		// carrying incomplete trailing UTF-8 bytes over to the next iteration.
-		if let Some(cb) = on_chunk.as_ref() {
-			pending.extend_from_slice(&buf[..n]);
-			while !pending.is_empty() {
-				match str::from_utf8(&pending) {
-					Ok(text) => {
-						emit_chunk(text, Some(cb)).await;
-						pending.clear();
-						break;
-					},
-					Err(err) => {
-						let p = err.valid_up_to();
-						if p > 0 {
-							// SAFETY: [..p] is valid UTF-8 per valid_up_to().
-							let text = unsafe { str::from_utf8_unchecked(&pending[..p]) };
-							emit_chunk(text, Some(cb)).await;
-							pending.drain(..p);
-						}
-						match err.error_len() {
-							Some(skip) => {
-								emit_chunk(REPLACEMENT, Some(cb)).await;
-								pending.drain(..skip);
-							},
-							None => break,
-						}
-					},
-				}
-			}
+		let text = decoder.push(&buf[..n]);
+		if !text.is_empty() {
+			emit_chunk(&text, on_chunk.as_ref()).await;
 		}
 	}
 
-	// Flush any trailing bytes the streaming decoder held back at EOF.
-	if let Some(cb) = on_chunk.as_ref() {
-		for chunk in pending.utf8_chunks() {
-			let valid = chunk.valid();
-			if !valid.is_empty() {
-				emit_chunk(valid, Some(cb)).await;
-			}
-			if !chunk.invalid().is_empty() {
-				emit_chunk(REPLACEMENT, Some(cb)).await;
-			}
-		}
+	let rest = decoder.finish();
+	if !rest.is_empty() {
+		emit_chunk(&rest, on_chunk.as_ref()).await;
 	}
 
-	BufferedOutput { text: String::from_utf8_lossy(&captured).into_owned(), input_bytes, exceeded }
+	BufferedOutput { text: decode_bytes(&captured), input_bytes, exceeded }
 }
 
 #[cfg(unix)]
@@ -1993,6 +1913,22 @@ mod tests {
 		.expect("shell execution");
 		let output = rx.try_iter().collect();
 		(result, output)
+	}
+
+	/// Native Windows tools write the ANSI code page to pipes. On a Chinese
+	/// system that is GBK; treating it as UTF-8 used to turn `echo 中文` into
+	/// replacement characters.
+	#[cfg(windows)]
+	#[tokio::test(flavor = "multi_thread")]
+	async fn cmd_echo_chinese_decodes_from_system_acp() {
+		// SAFETY: GetACP has no preconditions.
+		let acp = unsafe { windows_sys::Win32::Globalization::GetACP() };
+		if acp != 936 {
+			return;
+		}
+		let (result, output) = execute_captured("cmd.exe /c echo 中文".to_string()).await;
+		assert_eq!(result.exit_code, Some(0), "{output:?}");
+		assert!(output.contains("中文"), "garbled command output: {output:?}");
 	}
 
 	/// Regression for issue #8925: a host env entry whose key or value is not
