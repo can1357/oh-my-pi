@@ -1992,9 +1992,11 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 								},
 							};
 						} else {
-							outputText += `\n\n[Showing line ${startLineDisplay} (partial, ${formatBytes(
-								snippet.bytes,
-							)} of ${formatBytes(firstLineBytes)}); file not scanned to EOF]`;
+							outputText += shouldAddHashLines
+								? "\n\n[File not scanned to EOF]"
+								: `\n\n[Showing line ${startLineDisplay} (partial, ${formatBytes(
+										snippet.bytes,
+									)} of ${formatBytes(firstLineBytes)}); file not scanned to EOF]`;
 							details = {};
 						}
 					} else if (!reachedEof) {
