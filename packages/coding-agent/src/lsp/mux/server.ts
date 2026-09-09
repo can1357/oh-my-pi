@@ -1,7 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as net from "node:net";
-import * as os from "node:os";
-import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
+import { groupOutlivesItsLeader, Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { isRecord, logger, postmortem, ptree, setProcessName, withTimeout } from "@oh-my-pi/pi-utils";
 import { MessageFramer } from "../../jsonrpc/message-framing";
 import type { LspJsonRpcId, LspJsonRpcNotification, LspJsonRpcRequest, LspJsonRpcResponse } from "../types";
@@ -19,33 +18,23 @@ import {
 } from "./protocol";
 
 /**
- * Whether a process group on this host stays attributable after its leader has
- * been reaped.
+ * Whether the mux takes ownership of a language server's process group.
  *
- * Taking group ownership of a language server is only sound where it does. The
- * mux learns the root exited from Bun, which has already reaped it by then, and
- * a pgid whose leader is gone is just a number the kernel is free to hand to an
- * unrelated session — so the native sweep refuses to signal it, which is right.
- * Linux 6.9's `PIDFD_SIGNAL_PROCESS_GROUP` reaches the group through the
- * leader's retained pidfd instead, where no such proof is needed.
+ * Read through a holder rather than a constant so both sides of the gate stay
+ * exercisable on one host; the underlying probe is cached natively, so calling
+ * it per spawn costs a binding hop.
  *
- * Read from the release string rather than measured. The measured form is the
- * `pidfd_send_signal` argument-validation probe in `pi-shell`, which the native
- * bindings do not expose; a host that reports 6.9 while refusing the flag falls
- * back to reporting the group as unattributable, never to signalling it.
+ * Group ownership has a precondition. The mux hears about a server's exit from
+ * Bun, which has already reaped it, and a pgid whose leader is gone is a number
+ * the kernel may hand to an unrelated session — so the native sweep refuses to
+ * signal it, which is right. Only where a signal can be scoped to the leader's
+ * retained pidfd is the group reachable without that proof. Where it is not,
+ * detaching would buy nothing the pinned descendant set does not already give
+ * and would turn a helper that sweep can still reach into a failed shutdown.
  */
-export function serverGroupOutlivesItsLeader(): boolean {
-	if (process.platform !== "linux") return false;
-	const [major, minor] = os
-		.release()
-		.split(".", 2)
-		.map(part => Number.parseInt(part, 10));
-	if (!Number.isInteger(major) || !Number.isInteger(minor)) return false;
-	return major > 6 || (major === 6 && minor >= 9);
-}
-
-/** Fixed for the process: the kernel does not gain the scope while it runs. */
-const OWNS_SERVER_GROUP = serverGroupOutlivesItsLeader();
+export const groupOwnership = {
+	available: (): boolean => groupOutlivesItsLeader(),
+};
 
 const SERVER_LINGER_MS = 5 * 60 * 1_000;
 const MUX_IDLE_MS = 15 * 60 * 1_000;
@@ -149,14 +138,22 @@ class ServerInstance {
 		// and outlives the leader, so it names the subtree at termination time
 		// rather than at capture time, which is the one thing an instant cannot do.
 		//
-		// Only where the group stays attributable once the leader is reaped. Taking
-		// ownership of a group the sweep will then refuse to signal would turn a
-		// helper the pinned sweep can still reach into a failed shutdown.
+		// This narrows the hole rather than closing it. Membership is inherited, not
+		// enforced: a helper born after the pin that then calls `setsid(2)` or
+		// `setpgid(2)` is in neither the pinned set nor the group, and nothing here
+		// can name it. Containment that survives a process leaving every inherited
+		// relation needs a cgroup or a subreaper, neither of which this spawn owns.
+		// The server itself cannot escape — it is already a session leader, so both
+		// calls return `EPERM`.
+		//
+		// Gated, because ownership has a precondition: taking a group the sweep will
+		// then refuse to signal would turn a helper the pinned sweep can still reach
+		// into a failed shutdown.
 		this.proc = ptree.spawn([params.command, ...params.args], {
 			cwd: params.cwd,
 			stdin: "pipe",
 			env: { ...Bun.env, ...params.env },
-			detached: OWNS_SERVER_GROUP,
+			detached: groupOwnership.available(),
 		});
 	}
 
@@ -867,12 +864,16 @@ export class LspMuxServer {
 		} finally {
 			resolve();
 			server.pending.delete(id);
-			// Started before the root's own termination, which now sweeps the whole
-			// process group: the group signal would otherwise reach these helpers
-			// first, and a sweep whose targets are already dying reports nothing
-			// about whether it could have terminated them. This one holds pinned
-			// identities and needs no proof of the group's ownership, so it is also
-			// the only sweep that still works where the group cannot be attributed.
+			// Started before the root's own termination, which sweeps the whole
+			// process group where the mux owns one: the group signal would otherwise
+			// reach these helpers first, and a sweep whose targets are already dying
+			// reports nothing about whether it could have terminated them. Ordering
+			// is enough because the native side captures and hard-signals its targets
+			// synchronously, before it returns the promise this does not await.
+			//
+			// This one holds pinned identities and needs no proof of the group's
+			// ownership, so it is also the only sweep that works where the group
+			// cannot be attributed, or where a helper has left it.
 			const helperSweep = this.#killHelpers(server, helpers);
 			const outcomes = await Promise.allSettled([helperSweep, this.#killServer(server)]);
 			const failures = outcomes.flatMap(outcome => (outcome.status === "rejected" ? [outcome.reason] : []));

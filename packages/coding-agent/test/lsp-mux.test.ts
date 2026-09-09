@@ -3,7 +3,7 @@ import * as fs from "node:fs/promises";
 import * as net from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
-import { Process } from "@oh-my-pi/pi-natives";
+import { Process, ProcessStatus } from "@oh-my-pi/pi-natives";
 import { MessageFramer } from "../src/jsonrpc/message-framing";
 import {
 	MUX_CONNECT_METHOD,
@@ -12,7 +12,7 @@ import {
 	type MuxConnectParams,
 	type MuxConnectResult,
 } from "../src/lsp/mux/protocol";
-import { LspMuxServer, serverGroupOutlivesItsLeader, TERMINATION_BUDGET_MS } from "../src/lsp/mux/server";
+import { groupOwnership, LspMuxServer, TERMINATION_BUDGET_MS } from "../src/lsp/mux/server";
 import { ChildProcess } from "@oh-my-pi/pi-utils/ptree";
 
 interface RpcMessage {
@@ -167,6 +167,16 @@ function processAlive(pid: number): boolean {
 	} catch (error) {
 		return (error as NodeJS.ErrnoException).code !== "ESRCH";
 	}
+}
+
+/**
+ * Running as the kernel reports it.
+ *
+ * `kill(pid, 0)` succeeds against an unreaped zombie, so it cannot answer a
+ * question asked the instant a termination returns; the native status can.
+ */
+function processRunning(pid: number): boolean {
+	return Process.fromPid(pid)?.status() === ProcessStatus.Running;
 }
 
 function killPid(pid: number): void {
@@ -326,10 +336,10 @@ describe("LspMuxServer", () => {
 	);
 
 	// Gated on the same precondition the mechanism is: where a reaped leader's
-	// group cannot be attributed, the mux does not take group ownership at all
-	// and this helper is still unreachable.
-	it.skipIf(!serverGroupOutlivesItsLeader())(
-		"terminates a helper the language server spawns during the shutdown handshake",
+	// group cannot be attributed the mux takes no group ownership, and this
+	// helper is unreachable there.
+	it.skipIf(!groupOwnership.available())(
+		"terminates a handshake-spawned helper before shutdown reports success",
 		async () => {
 			// Every snapshot this shutdown could take of the server's subtree predates
 			// the helper: the server creates it while answering `shutdown` and then
@@ -337,15 +347,87 @@ describe("LspMuxServer", () => {
 			// dead root. Only a relation the helper inherited at fork — its process
 			// group — can still name it here.
 			const handshakeFile = path.join(tmpDir, "handshake-helper.pid");
-			connectParams.env = { TEST_LSP_HANDSHAKE_HELPER_PID_FILE: handshakeFile };
+			const shutdownFile = path.join(tmpDir, "handshake-shutdown.json");
+			connectParams.env = {
+				TEST_LSP_HANDSHAKE_HELPER_PID_FILE: handshakeFile,
+				TEST_LSP_SHUTDOWN_FILE: shutdownFile,
+			};
 			const { client } = await link();
 			await initialize(client);
-			await server.shutdown();
+			// Read while the handshake is still running. Afterwards is too late twice
+			// over: the contract is about the state when shutdown returns, and a pid
+			// read after a rejection can no longer be cleaned up.
+			const settled = server.shutdown().then(
+				() => undefined,
+				(error: unknown) => error,
+			);
 			const helperPid = await readPid(handshakeFile);
 			try {
-				await pollUntil(() => Promise.resolve(!processAlive(helperPid)), "handshake helper termination", 6_000);
+				const failure = await settled;
+				if (failure !== undefined) throw failure;
+				// Not polled: reporting success while this is still running is the
+				// defect, so the deadline for it is the return itself.
+				expect(processRunning(helperPid)).toBe(false);
+				// And the root left on `exit` rather than being hard-killed at the
+				// budget, so the helper really was orphaned by a graceful exit.
+				expect(await Bun.file(shutdownFile).json()).toEqual({ shutdownReceived: true, exitReceived: true });
 			} finally {
 				killPid(helperPid);
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"does not reach a handshake helper that leaves the process group",
+		async () => {
+			// A characterization of the residual rather than a wish. Group membership
+			// is inherited, not enforced: a helper born after the pin that then calls
+			// `setsid(2)` is in neither cleanup set, and no relation it carries still
+			// leads back here. Containing it needs a cgroup or a subreaper, neither of
+			// which the mux owns. Asserted so the gap cannot pass for coverage — it
+			// fails the moment either half of it changes.
+			const escapeFile = path.join(tmpDir, "escaping-helper.pid");
+			connectParams.env = { TEST_LSP_ESCAPING_HELPER_PID_FILE: escapeFile };
+			const { client } = await link();
+			await initialize(client);
+			const settled = server.shutdown().then(
+				() => undefined,
+				(error: unknown) => error,
+			);
+			const helperPid = await readPid(escapeFile);
+			try {
+				const failure = await settled;
+				if (failure !== undefined) throw failure;
+				expect(processRunning(helperPid)).toBe(true);
+			} finally {
+				killPid(helperPid);
+			}
+		},
+		10_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"terminates a helper through pinned identities when the group is not owned",
+		async () => {
+			// The pinned sweep is the whole mechanism on a host that cannot attribute
+			// a reaped leader's group, so it has to keep working with the gate shut.
+			const gateSpy = spyOn(groupOwnership, "available").mockReturnValue(false);
+			try {
+				const helperFile = path.join(tmpDir, "helper.pid");
+				connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
+				const { client } = await link();
+				await initialize(client);
+				const helperPid = await readPid(helperFile);
+				try {
+					expect(processRunning(helperPid)).toBe(true);
+					await server.shutdown();
+					expect(processRunning(helperPid)).toBe(false);
+				} finally {
+					killPid(helperPid);
+				}
+			} finally {
+				gateSpy.mockRestore();
 			}
 		},
 		10_000,

@@ -162,6 +162,20 @@ async function handleRequest(message: JsonRpcMessage): Promise<void> {
 				helper.unref();
 				await Bun.write(handshakeFile, String(helper.pid));
 			}
+			// The same helper, but `setsid(2)` on the way in, so it inherits this
+			// server's process group and then leaves it. Nothing this server passed
+			// on still names it.
+			const escapeFile = Bun.env.TEST_LSP_ESCAPING_HELPER_PID_FILE;
+			if (escapeFile) {
+				const helper = Bun.spawn(["sleep", "60"], {
+					stdin: "ignore",
+					stdout: "ignore",
+					stderr: "ignore",
+					detached: true,
+				});
+				helper.unref();
+				await Bun.write(escapeFile, String(helper.pid));
+			}
 			respond(id, null);
 			break;
 		}

@@ -1761,6 +1761,24 @@ export interface GrepResult {
 }
 
 /**
+ * Whether a process group on this host stays reachable once its leader has
+ * been reaped.
+ *
+ * Callers that terminate a detached child learn of its exit only after the
+ * runtime has reaped it, and from there a pgid number alone cannot be told
+ * apart from one the kernel has since handed to an unrelated session. Where
+ * this returns true the group is reached through the leader's retained pidfd
+ * instead and needs no such proof; where it returns false, taking group
+ * ownership of a child buys nothing a pinned descendant set does not already
+ * give.
+ *
+ * Measured from the syscall's argument validation, not inferred from a release
+ * string, and it promises only that the scope exists — a group can still empty
+ * or be refused, so callers keep their own attribution checks.
+ */
+export declare function groupOutlivesItsLeader(): boolean
+
+/**
  * Count canonical hashline op header shapes (`PUT N.=M:`, `CUT N*`, …) in
  * a payload; empty when it carries no hashline ops.
  */

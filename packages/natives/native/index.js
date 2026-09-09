@@ -69,6 +69,7 @@ export const getSupportedLanguages = nativeBindings.getSupportedLanguages;
 export const getWorkProfile = nativeBindings.getWorkProfile;
 export const glob = nativeBindings.glob;
 export const grep = nativeBindings.grep;
+export const groupOutlivesItsLeader = nativeBindings.groupOutlivesItsLeader;
 export const hashlineCountOps = nativeBindings.hashlineCountOps;
 export const hashlineFileHash = nativeBindings.hashlineFileHash;
 export const hashlineFormatHeader = nativeBindings.hashlineFormatHeader;

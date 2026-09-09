@@ -2212,12 +2212,18 @@ async fn wait_for_processes(
 
 	let poll_interval = Duration::from_millis(50);
 	// Measured against the clock, never summed from the naps this loop asked
-	// for. A task resumed after runtime saturation, a suspended host, or a long
-	// scheduler pause has spent that wall time whether or not it slept through
-	// it, and a waiter crediting itself only what it requested buys another
-	// near-complete budget past the deadline it advertised. `tokio`'s clock
-	// rather than the standard one because it is the clock the naps below are
-	// scheduled against, so the two cannot disagree.
+	// for. A task delayed by runtime saturation or a long scheduler pause
+	// resumes having spent that time whether or not it slept through it, and a
+	// waiter crediting itself only what it requested buys another near-complete
+	// budget past the deadline it advertised. `tokio`'s clock rather than the
+	// standard one because it is the clock the naps below are scheduled
+	// against, so the two cannot disagree.
+	//
+	// Not suspend-inclusive: this clock is monotonic, which on Linux excludes
+	// time the host spent suspended, so a resume still under-counts. Covering
+	// that needs `CLOCK_BOOTTIME`, which the timer these naps run on does not
+	// use. Started here rather than at entry, so the budget bounds the polling
+	// and not the initial status scan above it.
 	let started = tokio::time::Instant::now();
 	loop {
 		let sleep_for = match timeout {
@@ -2260,6 +2266,31 @@ pub enum GroupScope {
 	/// reference does not lead the group. The caller has to fall back to the
 	/// numeric broadcast and establish ownership itself.
 	Unresolved,
+}
+
+/// Whether a process group on this host stays reachable once its leader has
+/// been reaped.
+///
+/// A pgid outlives its leader, but the kernel releases the number once the
+/// group empties and the leader is reaped, after which it can name an unrelated
+/// session — so a caller that only learns of the leader's exit after the fact
+/// has no way to prove the number is still its own. Linux 6.9's
+/// `PIDFD_SIGNAL_PROCESS_GROUP` reads the group off the leader's *retained* pid
+/// object instead, which needs no such proof.
+///
+/// This answers only whether the scope exists. It does not promise that any
+/// later signal resolves — a group can still empty, and every consumer keeps
+/// its own attribution checks.
+#[must_use]
+pub fn group_outlives_its_leader() -> bool {
+	#[cfg(target_os = "linux")]
+	{
+		platform::pidfd_group_scope_supported()
+	}
+	#[cfg(not(target_os = "linux"))]
+	{
+		false
+	}
 }
 
 /// Send `signal` to the process group `pgid`.
@@ -2601,15 +2632,17 @@ mod tests {
 		assert_eq!(status, ProcessStatus::Exited);
 	}
 
-	/// The poll loop's budget is wall time, not the sum of the naps it asked
-	/// for. A task delayed by runtime saturation, a suspended host, or a long
-	/// scheduler pause resumes having spent far more than it requested, and a
-	/// waiter that credits itself only the requested amount then replays nearly
-	/// its whole budget past the deadline it advertised.
+	/// The poll loop's budget is elapsed time, not the sum of the naps it asked
+	/// for. A task delayed by runtime saturation or a long scheduler pause
+	/// resumes having spent far more than it requested, and a waiter that
+	/// credits itself only the requested amount then replays nearly its whole
+	/// budget past the deadline it advertised.
 	///
-	/// Held to a virtual clock rather than a wall-clock stopwatch: the jump is
+	/// Held to a virtual clock rather than a wall-clock stopwatch: the stall is
 	/// injected, so the assertion is about the waiter's arithmetic and not about
-	/// how loaded the machine running it happens to be.
+	/// how loaded the machine running it happens to be. What it models is a
+	/// delayed task, not a suspended host — the monotonic clock does not advance
+	/// across suspension, so no test on it could establish that case.
 	#[cfg(unix)]
 	#[tokio::test(start_paused = true)]
 	async fn exit_waiter_measures_its_budget_against_the_clock_not_its_own_naps() {
@@ -2620,16 +2653,16 @@ mod tests {
 		let root =
 			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child");
 		let budget = Duration::from_millis(5_000);
-		let jump = Duration::from_secs(60);
+		let stall = Duration::from_secs(60);
 
 		let started = tokio::time::Instant::now();
 		let waiter = tokio::spawn(async move {
 			wait_for_processes(&[root], Some(budget), CancelToken::default()).await
 		});
 		// Let the waiter reach its first poll nap before the clock moves, so the
-		// jump lands inside a sleep the way a suspend or a stalled runtime would.
+		// stall lands inside a sleep the way a starved runtime would.
 		tokio::task::yield_now().await;
-		tokio::time::advance(jump).await;
+		tokio::time::advance(stall).await;
 		let pending = waiter.await.expect("waiter task");
 		let total = started.elapsed();
 
@@ -2642,9 +2675,9 @@ mod tests {
 		// amount of slack this side of `budget` can absorb.
 		let slack = Duration::from_millis(250);
 		assert!(
-			total < jump + slack,
+			total < stall + slack,
 			"a budget already spent must not buy another round of polling: {total:?} of virtual time \
-			 against a {budget:?} deadline that a {jump:?} stall had already exhausted"
+			 against a {budget:?} deadline that a {stall:?} stall had already exhausted"
 		);
 	}
 
@@ -2783,6 +2816,21 @@ mod tests {
 		let _ = leader.wait();
 		assert!(swept.expect("wait for the swept group"), "the group must be reported gone");
 		assert_eq!(survivor_status, ProcessStatus::Exited, "the survivor must be swept");
+	}
+
+	/// The accessor callers gate on has to answer for the kernel, not for the
+	/// probe's own premise. Corroborated against the independent measurement
+	/// below, which builds a real group and requires the scoped call to resolve
+	/// it — where the production probe asks only the syscall's argument
+	/// validation and needs no process at all.
+	#[cfg(unix)]
+	#[test]
+	fn group_outlives_its_leader_agrees_with_the_kernel() {
+		assert_eq!(
+			group_outlives_its_leader(),
+			kernel_scopes_pidfd_signals_to_groups(),
+			"the gate callers read must match what the kernel actually does with a group scope"
+		);
 	}
 
 	/// Whether this kernel scopes a pidfd signal to the process group, measured
