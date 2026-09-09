@@ -58,6 +58,10 @@ interface PlacementEmitState {
 	cellsArchived: boolean;
 }
 
+/** A surface the renderer paints frames on. */
+type Surface = "screen" | "alt";
+const SURFACES: readonly Surface[] = ["screen", "alt"];
+
 /**
  * The live/text split of one drawing surface. The normal screen and the
  * alternate buffer hold separate frames with separate display orders, so each
@@ -151,20 +155,15 @@ export class ImageBudget {
 	// tail, bottom-up. Such a pass cannot derive display order from observe()
 	// call order, so its suppression decisions replay the committed split below.
 	#stablePass = false;
+	/** The surface the in-flight pass composes for; selected by {@link beginPass}. */
+	#surface: Surface = "screen";
 	/**
-	 * Image ids rendered as live graphics in the last frame painted on the normal
-	 * screen. A fullscreen overlay borrows the alternate buffer without walking
-	 * that frame, so its pass would otherwise report every normal-buffer image as
-	 * retired; see {@link limitResidentImages}.
+	 * Image ids rendered as live graphics by the frame standing on each surface.
+	 * A pass walks one surface, so the other's entry is what stops {@link #retire}
+	 * from deleting a graphic that is merely out of view — the transcript behind a
+	 * fullscreen overlay keeps its placements and is restored from cache on exit.
 	 */
-	#screenLiveIds = new Set<number>();
-	/**
-	 * True while the in-flight pass composes a frame for the alternate buffer.
-	 * Its live/text split describes the modal only: the normal screen keeps its
-	 * own placements standing behind it, so neither the demotion purge nor the
-	 * store bound may destroy a graphic {@link #screenLiveIds} still shows.
-	 */
-	#altScreenPass = false;
+	#liveIds: Record<Surface, Set<number>> = { screen: new Set(), alt: new Set() };
 	/**
 	 * Per-image direct-placement emit state: source pixel geometry for the
 	 * renderer's clipped source rectangle, plus the placement-id epoch (see
@@ -239,6 +238,7 @@ export class ImageBudget {
 	 */
 	beginAltScreenLifecycle(): void {
 		resetSurfaceSplit(this.#altSplit);
+		this.#liveIds.alt.clear();
 	}
 
 	/**
@@ -258,8 +258,13 @@ export class ImageBudget {
 		this.#passIds.length = 0;
 		this.#passSuppression.clear();
 		this.#stablePass = stable;
-		this.#altScreenPass = altScreen;
+		this.#surface = altScreen ? "alt" : "screen";
 		this.#split = altScreen ? this.#altSplit : this.#screenSplit;
+		// The alternate buffer holds a frame only while it is the current surface:
+		// TUI#doRender routes every alt-buffer owner (fullscreen overlay, resize
+		// borrow) away from the normal-screen paths, so composing for the screen
+		// means nothing stands on alt to protect.
+		if (!altScreen) this.#liveIds.alt.clear();
 		this.#applyingReset = !stable && this.#cap > 0 && this.#split.planned > this.#split.onTerminal;
 	}
 
@@ -298,18 +303,10 @@ export class ImageBudget {
 		const split = this.#split;
 		split.lastTotal = total;
 		if (this.#applyingReset) {
+			// This frame replaced these with their text fallback, so their graphics
+			// are retired as far as this surface is concerned.
 			for (let i = split.onTerminal; i < split.planned && i < total; i++) {
-				const id = this.#passIds[i];
-				// The modal renders its own copy as text, but deleting the graphic
-				// would take the normal buffer's placement of the same id with it —
-				// and that frame is restored from cache, so its row is never rewritten.
-				if (this.#altScreenPass && this.#screenLiveIds.has(id)) continue;
-				// A transmit queued by a discarded discovery pass never reached
-				// the terminal, so cancel it instead of transmitting then purging.
-				if (!this.#pendingTransmits.delete(id)) this.#purgeIds.push(id);
-				this.#transmitted.delete(id);
-				this.#deletePlacementState(id);
-				this.#forgetKeyForId(id);
+				this.#retire(this.#passIds[i]);
 			}
 			split.onTerminal = split.planned;
 			this.#applyingReset = false;
@@ -328,23 +325,41 @@ export class ImageBudget {
 	 * retires the graphics this frame replaced with text; this sweeps the ones no
 	 * frame shows any more — images the pass simply stopped observing.
 	 *
-	 * Eviction removes the image's scrollback placements too, and a frame diff
-	 * only rewrites rows whose text changed, so an image still shown on the
-	 * screen can never be a candidate — on the normal buffer or, while an
-	 * alt-screen pass ({@link beginPass}) covers it, behind the modal.
+	 * Also records what this frame leaves standing on its surface, which is how
+	 * the next pass on the *other* surface knows what it may not destroy.
 	 */
 	limitResidentImages(): void {
-		const liveIds = new Set(this.#passIds.filter(id => !this.#passSuppression.get(id)));
-		if (!this.#altScreenPass) this.#screenLiveIds = liveIds;
+		this.#liveIds[this.#surface] = new Set(this.#passIds.filter(id => !this.#passSuppression.get(id)));
 		if (this.#cap <= 0 || this.#transmitted.size <= this.#cap) return;
 		for (const id of this.#transmitted) {
 			if (this.#transmitted.size <= this.#cap) break;
-			if (liveIds.has(id) || this.#screenLiveIds.has(id)) continue;
-			if (!this.#pendingTransmits.delete(id)) this.#purgeIds.push(id);
-			this.#transmitted.delete(id);
-			this.#deletePlacementState(id);
-			this.#forgetKeyForId(id);
+			this.#retire(id);
 		}
+	}
+
+	/**
+	 * Drop `imageId` from the terminal's image store: queue its `d=I` (or cancel
+	 * a transmit that never went out) and forget its placement ledger and key.
+	 *
+	 * The single gate on every destruction path. `d=I` removes an image's
+	 * placements everywhere, scrollback included, and a frame diff only rewrites
+	 * rows whose text changed — so a graphic some standing frame still shows
+	 * cannot be repaired once deleted, and must never be a candidate. Refuses
+	 * when the in-flight pass renders the image live, or when the frame on any
+	 * surface this pass is not repainting does. Returns whether it was retired.
+	 */
+	#retire(imageId: number): boolean {
+		if (this.#passSuppression.get(imageId) === false) return false;
+		for (const surface of SURFACES) {
+			if (surface !== this.#surface && this.#liveIds[surface].has(imageId)) return false;
+		}
+		// A transmit queued by a discarded discovery pass never reached the
+		// terminal, so cancel it instead of transmitting then purging.
+		if (!this.#pendingTransmits.delete(imageId)) this.#purgeIds.push(imageId);
+		this.#transmitted.delete(imageId);
+		this.#deletePlacementState(imageId);
+		this.#forgetKeyForId(imageId);
+		return true;
 	}
 
 	/** Image ids to delete from the terminal this frame; clears the pending set. */
@@ -366,7 +381,7 @@ export class ImageBudget {
 		this.#idToKey.clear();
 		this.#placementState.clear();
 		this.#watchedPlacements.clear();
-		this.#screenLiveIds.clear();
+		for (const surface of SURFACES) this.#liveIds[surface].clear();
 		return ids;
 	}
 
