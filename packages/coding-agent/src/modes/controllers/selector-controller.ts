@@ -520,7 +520,7 @@ export class SelectorController {
 		switch (id) {
 			// Session-managed settings (not in SettingsManager)
 			case "autoCompact":
-				this.ctx.session.setAutoCompactionEnabled(value as boolean);
+				this.ctx.session.setAutoCompactionEnabled(value as boolean, true);
 				this.ctx.statusLine.setAutoCompactEnabled(value as boolean);
 				break;
 			case "composer.shape":

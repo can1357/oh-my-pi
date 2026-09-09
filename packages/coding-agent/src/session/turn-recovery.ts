@@ -2630,10 +2630,17 @@ export class TurnRecovery {
 	}
 
 	/**
-	 * Toggle auto-retry setting.
+	 * Toggle auto-retry. When `persist` is false (the default) the change is a
+	 * session-scoped runtime override rather than a durable global write, so the
+	 * `set_auto_retry` RPC command configures only its own session instead of
+	 * mutating the machine-global `config.yml`.
 	 */
-	setAutoRetryEnabled(enabled: boolean): void {
-		this.#host.settings.set("retry.enabled", enabled);
+	setAutoRetryEnabled(enabled: boolean, persist = false): void {
+		if (persist) {
+			this.#host.settings.set("retry.enabled", enabled);
+		} else {
+			this.#host.settings.override("retry.enabled", enabled);
+		}
 	}
 	/**
 	 * Whether the transcript tail is a failed/aborted assistant turn whose most
