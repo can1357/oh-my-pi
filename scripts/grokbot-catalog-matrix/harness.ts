@@ -342,6 +342,12 @@ function shellWords(text: string): string[] {
 			}
 			if (ch === quote) {
 				quote = null;
+				// Empty quotes followed by a separator still produce an empty argv
+				// word (`printf '' ping`). Adjacent `"foo"bar` stays one word via cur.
+				if (cur === "") {
+					const next = text[i + 1];
+					if (next === undefined || /\s/.test(next)) out.push("");
+				}
 				continue;
 			}
 			cur += ch;
@@ -381,6 +387,70 @@ function redirectDestination(after: string, op: ">" | ">>" | "tee"): string | un
 		return files[0];
 	}
 	return words[0];
+}
+
+/**
+ * Approximate bytes a `printf` format+args would emit (no shell expansion).
+ * Unused arguments after the format's conversions are ignored — so
+ * `printf '' ping` emits nothing even though `ping` appears lexically.
+ */
+function printfEmittedText(before: string): string | undefined {
+	const words = shellWords(before);
+	const cmd = words[0];
+	if (cmd !== "printf" && cmd !== "/bin/printf" && cmd !== "/usr/bin/printf") return undefined;
+	if (words.length < 2) return "";
+	const format = words[1]!;
+	const args = words.slice(2);
+	let argIdx = 0;
+	let out = "";
+	for (let i = 0; i < format.length; i++) {
+		const ch = format[i]!;
+		if (ch !== "%") {
+			out += ch;
+			continue;
+		}
+		if (format[i + 1] === "%") {
+			out += "%";
+			i++;
+			continue;
+		}
+		let j = i + 1;
+		// flags / width / precision (enough for smoke; not a full printf parser)
+		while (j < format.length && /[-+ #0]/.test(format[j]!)) j++;
+		while (j < format.length && /[0-9]/.test(format[j]!)) j++;
+		if (format[j] === ".") {
+			j++;
+			while (j < format.length && /[0-9]/.test(format[j]!)) j++;
+		}
+		if (j >= format.length) break;
+		const spec = format[j]!;
+		i = j;
+		const arg = args[argIdx++] ?? "";
+		// Smoke only needs whether `ping` lands in the written bytes.
+		if (spec === "s" || spec === "b" || spec === "c") out += arg;
+		else if (/[diouxXeEfFgGaA]/.test(spec)) out += arg;
+		// Unknown / incomplete conversion: stop consuming (reject via empty emit).
+		else return out;
+	}
+	return out;
+}
+
+/** True when the command left of a write redirect would emit `ping` into the file. */
+function redirectBeforeEmitsPing(before: string, ping: string): boolean {
+	const words = shellWords(before);
+	const cmd = words[0];
+	if (!cmd) return false;
+	if (cmd === "echo") {
+		let i = 1;
+		while (i < words.length && /^-[neE]+$/.test(words[i]!)) i++;
+		return words.slice(i).join(" ").includes(ping);
+	}
+	if (cmd === "printf" || cmd === "/bin/printf" || cmd === "/usr/bin/printf") {
+		const emitted = printfEmittedText(before);
+		return emitted !== undefined && emitted.includes(ping);
+	}
+	// `cat … > path` does not invent the ping from argv; reject for write smoke.
+	return false;
 }
 
 /** True when `filePath` appears as a whole path segment (not a prefix of `….txt.bak`). */
@@ -447,7 +517,8 @@ export function readPathInShellCommand(command: string, filePath: string): boole
 /**
  * Write smoke: unquoted redirect/`tee` of the ping into `filePath` in the same
  * statement. Only the redirect's destination word counts (`echo ping > /dev/null
- * path` redirects to `/dev/null`, not `path`). Quoted `>` and earlier
+ * path` redirects to `/dev/null`, not `path`). The left-hand command must emit
+ * the ping (`printf '' ping` writes nothing). Quoted `>` and earlier
  * `exit`/`return` statements do not count — `runOneTool` fabricates success
  * without executing.
  */
@@ -459,7 +530,7 @@ export function writePathPingInShellCommand(command: string, filePath: string, p
 		if (earlyExitShellSegment(segment)) return false;
 		const redirect = shellWriteRedirect(segment);
 		if (!redirect) continue;
-		if (!redirect.before.includes(ping)) continue;
+		if (!redirectBeforeEmitsPing(redirect.before, ping)) continue;
 		const dest = redirectDestination(redirect.after, redirect.op);
 		if (!dest) continue;
 		// Destination must be exactly the expected path (not a sibling token).

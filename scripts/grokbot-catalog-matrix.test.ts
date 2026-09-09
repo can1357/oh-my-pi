@@ -356,6 +356,23 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(true);
+		// Unused printf args are not written — empty format creates an empty file.
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `printf '' ${ping} > ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"write",
+				{ name: "Shell", arguments: { command: `printf '%s\\n' wrong ${ping} > ${writePath}` } },
+				ping,
+				id,
+			),
+		).toBe(false);
 		expect(
 			matchesToolSmokeCall(
 				"write",
