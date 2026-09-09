@@ -270,7 +270,7 @@ function handle(frame) {
 			});
 			function handle(frame) {
 				if (frame.type === "set_host_tools") {
-					require("fs").writeFileSync("${capturePath}", JSON.stringify(frame.tools));
+					require("fs").writeFileSync(${JSON.stringify(capturePath)}, JSON.stringify(frame.tools));
 					process.stdout.write(JSON.stringify({ id: frame.id, type: "response", command: "set_host_tools", success: true, data: { toolNames: frame.tools.map(tool => tool.name) } }) + "\\n");
 				}
 			}
