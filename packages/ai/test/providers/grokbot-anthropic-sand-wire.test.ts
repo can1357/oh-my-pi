@@ -490,13 +490,19 @@ describe("product wire helpers", () => {
 	test("parent profile injects SendToUser", () => {
 		const tools = toProductField2Tools([], "parent-chat");
 		expect(tools[0]?.name).toBe("SendToUser");
-		expect(tools[0]?.description).toContain("user-visible message");
-		expect(tools[0]?.description).toContain("SendToUser");
 		const schema = (
-			tools[0]?.parameters as { jsonSchema?: { properties?: Record<string, { description?: string }> } }
+			tools[0]?.parameters as {
+				jsonSchema?: {
+					properties?: Record<string, { type?: string; enum?: string[] }>;
+					required?: string[];
+				};
+			}
 		).jsonSchema;
-		expect(schema?.properties?.type?.description).toContain("visible to the user");
-		expect(schema?.properties?.content?.description).toContain("user will see");
+		expect(schema?.properties).toHaveProperty("type");
+		expect(schema?.properties).toHaveProperty("content");
+		expect(schema?.properties?.type?.enum).toEqual(["text"]);
+		expect(schema?.properties?.content?.type).toBe("string");
+		expect(schema?.required).toEqual(["type", "content"]);
 	});
 
 	test("parent profile still injects SendToUser when an extension only aliases away from it", () => {
