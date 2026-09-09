@@ -421,6 +421,16 @@ export interface OpenAICompat {
 	strictResponsesPairing?: boolean;
 	/** Whether the Responses API accepts the `detail: "original"` image hint. Default: auto-detected (false for GitHub Copilot, which rejects it with a 400). */
 	supportsImageDetailOriginal?: boolean;
+	/**
+	 * Whether the Responses endpoint accepts `configuration_update` input items
+	 * that change `reasoning.effort` mid-conversation while the request-level
+	 * effort stays pinned for prompt caching (GPT-6 Astra). Default:
+	 * rule-detected (`true` for `gpt-6-astra` on any host, `false` otherwise).
+	 * Set `false` for custom `openai-responses` / `openai-codex-responses`
+	 * endpoints that reject the item type with HTTP 400; effort changes are then
+	 * sent as the top-level `reasoning.effort`.
+	 */
+	supportsConfigurationUpdate?: boolean;
 	/** Whether streamed reasoning deltas for the same field may repeat the full cumulative text snapshot. Default: false. */
 	reasoningDeltasMayBeCumulative?: boolean;
 	/** Strip leaked DeepSeek chat-template special tokens from visible content deltas. Default: auto-detected. */
@@ -791,6 +801,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "thinkingKeep"
 			| "strictResponsesPairing"
 			| "supportsImageDetailOriginal"
+			| "supportsConfigurationUpdate"
 			| "stripImageInput"
 			| "thinkingLoopGuard"
 			| "whenThinking"
