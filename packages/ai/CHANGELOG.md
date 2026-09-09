@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.18] - 2026-09-09
+
 ### Fixed
 
 - Codex credential selection now checks account-scoped model capabilities before ranking, sticky reuse, and retry fallback, preventing models such as Astra from being routed through an account that does not advertise them.

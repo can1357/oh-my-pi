@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.18] - 2026-09-09
+
 ### Fixed
 
 - Added account-scoped Codex discovery caches that do not treat bundled models as account entitlements, and updated the fallback Codex discovery client version so npm lookup failures no longer hide modern models.

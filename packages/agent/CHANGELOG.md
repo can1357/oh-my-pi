@@ -2,6 +2,8 @@
 
 ## [Unreleased]
 
+## [16.4.18] - 2026-09-09
+
 ### Fixed
 
 - "Tool not found" errors are now self-correcting: near-miss tool names (a namespaced call like `irc.send`, a dropped namespace, or wrong casing) get a `Did you mean "…"?` suffix pointing at the closest active tool, instead of a bare error that reads as a broken capability.
