@@ -298,6 +298,23 @@ describe("toolSmokePrompt", () => {
 				id,
 			),
 		).toBe(true);
+		// Pipelines can suppress file contents; fabricated tool results must not pass.
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat ${readPath} | grep -v tools-pong-read-x` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
+		expect(
+			matchesToolSmokeCall(
+				"read",
+				{ name: "Shell", arguments: { command: `cat ${readPath} | cat` } },
+				"tools-pong-read-x",
+				id,
+			),
+		).toBe(false);
 		expect(
 			matchesToolSmokeCall(
 				"write",
