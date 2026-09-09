@@ -49,10 +49,17 @@ import {
 	DEFAULT_VIEWPORT,
 	loadPuppeteerInWorker,
 } from "./launch";
+import { redactBrowserOutput, redactBrowserText } from "./output-redact";
 import { extractReadableFromHtml, type ReadableFormat } from "./readable";
-
 import { cloneSafe, RunOutput } from "./run-output";
+import {
+	checkNavigationTarget,
+	isBlockedCommittedNavigation,
+	navigationBlockedMessage,
+	policyFromSettings,
+} from "./url-guard";
 import type {
+	NavigationGuardSettings,
 	Observation,
 	ObservationEntry,
 	ReadyInfo,
@@ -648,22 +655,34 @@ function createRunPageScope(page: Page): RunPageScope {
 function errorPayload(error: unknown): RunErrorPayload {
 	const recoverTab = error instanceof RequestInterceptionCleanupError || undefined;
 	if (error instanceof ToolAbortError) {
-		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: true };
+		return {
+			name: error.name,
+			message: redactBrowserText(error.message),
+			stack: error.stack ? redactBrowserText(error.stack) : error.stack,
+			isToolError: false,
+			isAbort: true,
+		};
 	}
 	if (error instanceof ToolError) {
 		return {
 			name: error.name,
-			message: error.message,
-			stack: error.stack,
+			message: redactBrowserText(error.message),
+			stack: error.stack ? redactBrowserText(error.stack) : error.stack,
 			isToolError: true,
 			isAbort: false,
 			recoverTab,
 		};
 	}
 	if (error instanceof Error) {
-		return { name: error.name, message: error.message, stack: error.stack, isToolError: false, isAbort: false };
+		return {
+			name: error.name,
+			message: redactBrowserText(error.message),
+			stack: error.stack ? redactBrowserText(error.stack) : error.stack,
+			isToolError: false,
+			isAbort: false,
+		};
 	}
-	return { name: "Error", message: String(error), isToolError: false, isAbort: false };
+	return { name: "Error", message: redactBrowserText(String(error)), isToolError: false, isAbort: false };
 }
 
 function replyError(payload: RunErrorPayload): Error {
@@ -968,6 +987,12 @@ export class WorkerCore {
 	#dialogPolicy?: DialogPolicy;
 	#dialogHandler?: (dialog: Dialog) => void;
 	#openDialog?: OpenDialogInfo;
+	/** SSRF policy from the init payload; per-run snapshots override it. */
+	#navigation?: NavigationGuardSettings;
+	/** Active navigation policy (init payload, refreshed with every run). */
+	#currentNavigation?: NavigationGuardSettings;
+	/** Committed navigation that violated the policy during the active run; blocks the ok reply. */
+	#navViolation?: string;
 
 	constructor(transport: Transport, isolated: boolean) {
 		this.#transport = transport;
@@ -1069,6 +1094,8 @@ export class WorkerCore {
 	async #init(payload: WorkerInitPayload): Promise<void> {
 		try {
 			this.#mode = payload.mode;
+			this.#navigation = payload.navigation;
+			this.#currentNavigation = payload.navigation;
 			this.#activateForScreenshot = payload.mode === "headless" || payload.activateForScreenshot !== false;
 			const puppeteer = await loadPuppeteerInWorker(payload.safeDir);
 			this.#browser = await puppeteer.connect({
@@ -1106,7 +1133,9 @@ export class WorkerCore {
 				this.#observeDialogs();
 				if (payload.dialogs) this.#applyDialogPolicy(payload.dialogs);
 			}
+			this.#observeNavigationViolations();
 			if (payload.url) {
+				await this.#guardNavigation(payload.url, this.#navigation);
 				await this.#page.goto(payload.url, {
 					// Default to "load" because dev servers with HMR/WS never reach networkidle.
 					waitUntil: payload.waitUntil ?? "load",
@@ -1125,6 +1154,39 @@ export class WorkerCore {
 			}
 			this.#transport.send({ type: "init-failed", error: errorPayload(error) });
 		}
+	}
+
+	/**
+	 * SSRF pre-check for a model-requested navigation. Runs inside the tab
+	 * worker (the boundary the model's code actually crosses) on the
+	 * serializable policy that travelled with the init/run message — the main
+	 * thread's acquire-time pre-check is UX, this is enforcement. Absent
+	 * policy fails closed: private ranges and file:// blocked, metadata floor
+	 * always blocked.
+	 */
+	async #guardNavigation(url: string, settings: NavigationGuardSettings | undefined): Promise<void> {
+		const verdict = await checkNavigationTarget(url, policyFromSettings(settings));
+		if (!verdict.allow) throw new ToolError(navigationBlockedMessage(verdict));
+	}
+
+	/**
+	 * Post-commit recheck seam: a redirect or client-side navigation that
+	 * landed on a disallowed target gets the load stopped and the page pulled
+	 * back to `about:blank`, and the run is failed at reply time. DNS cannot
+	 * be pinned over CDP (see url-guard header), so this suppression — not
+	 * prevention — is what keeps private-range content away from the model.
+	 */
+	#observeNavigationViolations(): void {
+		const page = this.#requirePage();
+		page.on("framenavigated", frame => {
+			if (frame !== page.mainFrame()) return;
+			const landed = frame.url();
+			if (!landed || landed === "about:blank") return;
+			if (!isBlockedCommittedNavigation(landed, policyFromSettings(this.#currentNavigation))) return;
+			this.#navViolation = landed;
+			void this.#stopLoading().catch(() => undefined);
+			void page.goto("about:blank", { timeout: 5_000 }).catch(() => undefined);
+		});
 	}
 
 	async #findAttachedTarget(targetId: string): Promise<Target> {
@@ -1201,7 +1263,7 @@ export class WorkerCore {
 		this.#targetId = targetId;
 		return {
 			url: redactUrlCredentials(page.url()),
-			title: await page.title().catch(() => undefined),
+			title: await page.title().then(title => redactBrowserText(title)).catch(() => undefined),
 			viewport: page.viewport() ?? DEFAULT_VIEWPORT,
 			targetId,
 		};
@@ -1249,6 +1311,10 @@ export class WorkerCore {
 			});
 			return;
 		}
+		// Per-run snapshot policy wins over the init payload; the post-commit
+		// observer reads `#currentNavigation`, so refresh it before any code runs.
+		this.#currentNavigation = msg.session.navigation ?? this.#navigation;
+		this.#navViolation = undefined;
 		const timeoutSignal = AbortSignal.timeout(msg.timeoutMs);
 		const ac = new AbortController();
 		const runAc = new AbortController();
@@ -1370,6 +1436,24 @@ export class WorkerCore {
 			failure = this.#foldFloatingRejections(active, failure);
 			if (this.#active?.id === msg.id) this.#active = null;
 		}
+		// A committed policy violation outranks every other outcome: the run's
+		// output must never reach the model, and the flag is consumed here so
+		// it cannot leak into the next run's reply.
+		const violation = this.#navViolation;
+		this.#navViolation = undefined;
+		if (violation) {
+			this.#transport.send({
+				type: "result",
+				id: msg.id,
+				ok: false,
+				error: errorPayload(
+					new ToolError(
+						`Blocked: navigation committed to ${JSON.stringify(violation)}, a private/internal or disallowed target. The page was pulled back to about:blank and this run's output was discarded.`,
+					),
+				),
+			});
+			return;
+		}
 		if (failure) {
 			this.#transport.send({ type: "result", id: msg.id, ok: false, error: errorPayload(failure.error) });
 			return;
@@ -1380,7 +1464,16 @@ export class WorkerCore {
 				type: "result",
 				id: msg.id,
 				ok: true,
-				payload: { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots },
+				// Every browser-originated value that reaches the model passes the
+				// secret-shape redaction pass here (display payloads, buffered
+				// console/print text, and the evaluated return value).
+				payload: {
+					displays: output
+						.finish()
+						.map(entry => (entry.type === "text" ? { ...entry, text: redactBrowserText(entry.text) } : entry)),
+					returnValue: redactBrowserOutput(cloneSafe(returnValue)),
+					screenshots,
+				},
 			});
 		}
 	}
@@ -1588,6 +1681,9 @@ export class WorkerCore {
 			title: () => op("tab.title()", INF, sig => untilAborted(sig, () => page.title())),
 			goto: (url, opts) =>
 				op(`tab.goto(${JSON.stringify(url)})`, INF, async sig => {
+					// SSRF enforcement for model-authored navigations: the run's
+					// snapshot policy (falling back to the init payload's).
+					await this.#guardNavigation(url, session.navigation ?? this.#navigation);
 					this.#clearElementCache();
 					try {
 						// Default to "load" because dev servers with HMR/WS never reach networkidle.
@@ -1865,8 +1961,8 @@ export class WorkerCore {
 			}),
 		)) as Observation["scroll"];
 		return {
-			url: page.url(),
-			title: (await untilAborted(options.signal, () => page.title())) as string,
+			url: redactBrowserText(redactUrlCredentials(page.url())),
+			title: redactBrowserText((await untilAborted(options.signal, () => page.title())) as string),
 			viewport: page.viewport() ?? DEFAULT_VIEWPORT,
 			scroll,
 			elements: entries,

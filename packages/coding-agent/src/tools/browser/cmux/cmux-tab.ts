@@ -21,9 +21,23 @@ import {
 import { ToolAbortError, ToolError, throwIfAborted } from "../../tool-errors";
 import { type AriaSnapshotOptions, assertSelectorString, buildAriaSnapshotScript } from "../aria/aria-snapshot";
 import { DEFAULT_VIEWPORT } from "../launch";
+import { redactBrowserOutput, redactBrowserText } from "../output-redact";
 import { extractReadableFromHtml, type ReadableFormat } from "../readable";
 import { cloneSafe, RunOutput } from "../run-output";
-import type { Observation, ReadyInfo, RunResultOk, ScreenshotResult, SessionSnapshot } from "../tab-protocol";
+import type {
+	NavigationGuardSettings,
+	Observation,
+	ReadyInfo,
+	RunResultOk,
+	ScreenshotResult,
+	SessionSnapshot,
+} from "../tab-protocol";
+import {
+	checkNavigationTarget,
+	isBlockedCommittedNavigation,
+	navigationBlockedMessage,
+	policyFromSettings,
+} from "../url-guard";
 import {
 	type CmuxEvalResult,
 	type CmuxGeometry,
@@ -333,8 +347,23 @@ export class CmuxTab {
 	readonly #elementRefs = new Map<number, CachedElementRef>();
 	#pageFacade: CmuxPageFacade | undefined;
 	#browserFacade: CmuxBrowserFacade | undefined;
-	constructor(opts: { client: CmuxSocketClient; surfaceId: string; url?: string; title?: string }) {
+	/** SSRF navigation-guard policy recorded at acquisition (config-resolved). */
+	#navigation: NavigationGuardSettings | undefined;
+	/**
+	 * Landed URL of a committed navigation that the guard forbids. cmux has no
+	 * frame-navigation event, so this is set by `goto`'s post-commit recheck
+	 * after the navigate request; the run's reply is failed by `runCmuxCode`.
+	 */
+	#navViolation: string | undefined;
+	constructor(opts: {
+		client: CmuxSocketClient;
+		surfaceId: string;
+		url?: string;
+		title?: string;
+		navigation?: NavigationGuardSettings;
+	}) {
 		this.#client = opts.client;
+		this.#navigation = opts.navigation;
 		this.#surfaceId = opts.surfaceId;
 		if (opts.url) this.#lastUrl = opts.url;
 		this.#lastTitle = opts.title;
@@ -387,8 +416,8 @@ export class CmuxTab {
 			: viewport;
 		await this.title().catch(() => "");
 		return {
-			url: this.#lastUrl,
-			title: this.#lastTitle,
+			url: redactBrowserText(this.#lastUrl),
+			title: this.#lastTitle === undefined ? undefined : redactBrowserText(this.#lastTitle),
 			viewport: this.#lastViewport,
 			targetId: this.#surfaceId,
 		};
@@ -402,11 +431,32 @@ export class CmuxTab {
 		this.#runContext = undefined;
 	}
 
+	/** Clear the per-run committed-navigation violation flag (run start). */
+	beginNavigationRun(): void {
+		this.#navViolation = undefined;
+	}
+
+	/** Consume the committed-navigation violation recorded during the run. */
+	takeNavigationViolation(): string | undefined {
+		const violation = this.#navViolation;
+		this.#navViolation = undefined;
+		return violation;
+	}
+
 	async goto(url: string, opts?: { waitUntil?: WaitUntil; timeoutMs?: number }): Promise<void> {
 		const timeoutMs = opts?.timeoutMs ?? this.#runContext?.timeoutMs ?? 30_000;
+		const settings = this.#runContext?.session.navigation ?? this.#navigation;
+		const verdict = await checkNavigationTarget(url, policyFromSettings(settings));
+		if (!verdict.allow) throw new ToolError(navigationBlockedMessage(verdict));
 		const result = await this.#request("browser.navigate", { url }, timeoutMs);
 		const navigatedUrl = result.url;
 		this.#lastUrl = typeof navigatedUrl === "string" && navigatedUrl.length > 0 ? navigatedUrl : url;
+		// Server-issued redirects can land somewhere the request URL did not:
+		// recheck the committed URL DNS-free and quarantine the surface.
+		if (isBlockedCommittedNavigation(this.#lastUrl, policyFromSettings(settings))) {
+			this.#navViolation = this.#lastUrl;
+			await this.goto("about:blank", { timeoutMs: 5_000 }).catch(() => undefined);
+		}
 		if (opts?.waitUntil) {
 			await this.#request(
 				"browser.wait",
@@ -1377,6 +1427,7 @@ export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promi
 	const activeRun: ActiveCmuxRun = { filename, floatingRejections: [] };
 	activeCmuxRuns.set(filename, activeRun);
 	tab.setRunContext({ session: opts.snapshot, output, screenshots, signal, timeoutMs: opts.timeoutMs });
+	tab.beginNavigationRun();
 
 	const { promise: cancelRejection, reject } = Promise.withResolvers<never>();
 	// If the synchronous setup below throws (same-realm ownership conflict)
@@ -1498,6 +1549,13 @@ export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promi
 			}
 			throw runError;
 		}
+		const violation = tab.takeNavigationViolation();
+		if (violation !== undefined) {
+			throw new ToolError(
+				`Blocked: navigation committed to ${JSON.stringify(violation)}, a private/internal or disallowed target. ` +
+					"The page was pulled back to about:blank and this run's output was discarded.",
+			);
+		}
 		if (activeRun.floatingRejections.length > 0) {
 			const messages = activeRun.floatingRejections.map(reason =>
 				reason instanceof Error ? reason.message : String(reason),
@@ -1506,7 +1564,13 @@ export async function runCmuxCode(tab: CmuxTab, opts: RunCmuxCodeOptions): Promi
 				rejections: activeRun.floatingRejections,
 			});
 		}
-		return { displays: output.finish(), returnValue: cloneSafe(returnValue), screenshots };
+		return {
+			displays: output
+				.finish()
+				.map(entry => (entry.type === "text" ? { ...entry, text: redactBrowserText(entry.text) } : entry)),
+			returnValue: redactBrowserOutput(cloneSafe(returnValue)),
+			screenshots,
+		};
 	} finally {
 		runActive = false;
 		uninstallRejectionInterceptor();

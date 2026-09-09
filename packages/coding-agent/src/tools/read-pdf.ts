@@ -109,6 +109,10 @@ export async function renderPdfPageScreenshot(
 				url: url.href,
 				waitUntil: "load",
 				timeoutMs: PDF_RENDER_TIMEOUT_MS,
+				// Internal call-site exemption: the renderer hands a local
+				// file:// to Chromium's built-in PDF viewer. Never settings- or
+				// page-driven; private/metadata ranges stay blocked.
+				navigation: { allowFileUrls: true },
 				deadlineStartMs: deadlineStart,
 				signal: renderSignal,
 				ownerSessionId: session.getSessionId?.() ?? undefined,
