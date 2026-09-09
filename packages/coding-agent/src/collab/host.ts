@@ -412,19 +412,28 @@ export class CollabHost {
 		// Enqueue the snapshot synchronously so live traffic cannot overtake it;
 		// materialize its chunks only as the transport drains.
 		const snapshot = this.#ctx.sessionManager.snapshotForReplication();
-		let snapshotBytes = JSON.stringify(snapshot).length;
-		if (snapshotBytes > WELCOME_IMAGE_STRIP_THRESHOLD) {
+		let serialized = JSON.stringify(snapshot);
+		// Two units, deliberately. The strip threshold compares UTF-16 code units,
+		// the unit it was tuned in: measured against bytes it would fire at a third
+		// of the size on a session written in CJK and take that guest's images out
+		// of replicated history three times sooner, which is a lossy degradation and
+		// not something a unit tidy-up gets to decide.
+		if (serialized.length > WELCOME_IMAGE_STRIP_THRESHOLD) {
 			let stripped = 0;
 			for (const entry of snapshot.entries) {
 				if (entry.type === "message") stripped += stripImagesFromMessage(entry.message);
 			}
-			// Re-measure: stripping is what decides how much of this snapshot the
+			// Re-serialize: stripping is what decides how much of this snapshot the
 			// queue will hold, and an image-heavy session shrinks by an order of
 			// magnitude. Charging the arrival size instead refuses joins the budget
 			// has room for and sheds guests to make room for memory nobody holds.
-			if (stripped > 0) snapshotBytes = JSON.stringify(snapshot).length;
-			logger.info("collab welcome exceeded size threshold; stripped images", { stripped, snapshotBytes });
+			if (stripped > 0) serialized = JSON.stringify(snapshot);
+			logger.info("collab welcome exceeded size threshold; stripped images", { stripped });
 		}
+		// The charge is in bytes, the unit every other charge and the budget itself
+		// are in. Free next to the serialization it reads, and it costs nothing to
+		// hold the string this far: the batch below retains the whole clone anyway.
+		const snapshotBytes = Buffer.byteLength(serialized);
 		const entries = snapshot.entries.filter(isWireSessionEntry);
 		const socket = this.#socket;
 		if (!socket) return;
@@ -441,9 +450,9 @@ export class CollabHost {
 			fromPeer,
 		);
 		// snapshotForReplication clones, and the batch holds that clone until it
-		// drains, so the queue is told what it is keeping alive: the serialized
-		// length of what stripping left, before an entry filter that only shrinks
-		// it further.
+		// drains, so the queue is told what it is keeping alive: the serialized byte
+		// length of what stripping left, before an entry filter that only shrinks it
+		// further.
 		socket.sendBatch(this.#snapshotChunks(entries), fromPeer, snapshotBytes);
 		if (canWrite) {
 			for (const pending of this.#pendingUi.values()) {
