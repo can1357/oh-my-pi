@@ -36,8 +36,21 @@ impl GitRepo {
 	pub fn diff_text(&self, options: &DiffOptions) -> Result<String> {
 		let repo = self.gix()?;
 		let changes = collect_changes(&repo, options)?;
-		render_changes(&repo, &changes, options.context.unwrap_or(3), options.binary)
-			.map(|rendered| rendered.into_iter().map(|item| item.text).collect())
+		let rendered = render_changes(
+			&repo,
+			&changes,
+			options.context.unwrap_or(3),
+			options.binary,
+			options.max_bytes,
+		)?;
+		// Size the joined patch once: growing it by doubling would hold up to
+		// twice the output during the copy, on top of the per-change strings
+		// that are released as they are consumed.
+		let mut text = String::with_capacity(rendered.iter().map(|item| item.text.len()).sum());
+		for item in rendered {
+			text.push_str(&item.text);
+		}
+		Ok(text)
 	}
 
 	/// Return changed paths, using the destination path for renames.
@@ -53,7 +66,7 @@ impl GitRepo {
 	pub fn numstat(&self, options: &DiffOptions) -> Result<Vec<NumstatEntry>> {
 		let repo = self.gix()?;
 		let changes = collect_changes(&repo, options)?;
-		let rendered = render_changes(&repo, &changes, 0, false)?;
+		let rendered = render_changes(&repo, &changes, 0, false, None)?;
 		Ok(changes
 			.into_iter()
 			.zip(rendered)
@@ -164,7 +177,7 @@ impl GitRepo {
 			None
 		};
 		let changes = tree_changes(&repo, parent_tree.as_ref(), Some(&tree), &[])?;
-		for rendered in render_changes(&repo, &changes, 3, false)? {
+		for rendered in render_changes(&repo, &changes, 3, false, None)? {
 			text.push_str(&rendered.text);
 		}
 
@@ -508,6 +521,7 @@ fn render_changes(
 	changes: &[FileChange],
 	context: u32,
 	binary_patch: bool,
+	max_bytes: Option<usize>,
 ) -> Result<Vec<Rendered>> {
 	let roots = if changes.iter().any(|change| change.worktree_new) {
 		gix::diff::blob::pipeline::WorktreeRoots {
@@ -521,11 +535,54 @@ fn render_changes(
 		.diff_resource_cache(gix::diff::blob::pipeline::Mode::ToGit, roots)
 		.map_err(|err| Error::backend("git diff", err))?;
 	let mut out = Vec::with_capacity(changes.len());
+	let mut total = 0usize;
 	for change in changes {
-		out.push(render_change(repo, &mut cache, change, context, binary_patch)?);
+		// Rendering loads both sides of a change into memory, so a single file
+		// larger than what is left of the cap would breach it before the
+		// post-render check below could see the output. Refuse it up front from
+		// object headers and file metadata, which cost no content reads.
+		if let Some(limit) = max_bytes
+			&& total.saturating_add(change_input_bytes(repo, change)) > limit
+		{
+			return Err(Error::OutputTooLarge { operation: "diffText", limit });
+		}
+		let rendered = render_change(repo, &mut cache, change, context, binary_patch)?;
 		cache.clear_resource_cache_keep_allocation();
+		total += rendered.text.len();
+		if let Some(limit) = max_bytes
+			&& total > limit
+		{
+			return Err(Error::OutputTooLarge { operation: "diffText", limit });
+		}
+		out.push(rendered);
 	}
 	Ok(out)
+}
+
+/// Bytes `render_change` holds in memory for `change`: both blob sizes read
+/// from object headers, or the working-tree file's size for a side that lives
+/// there. Best effort — a side that cannot be sized counts as zero and is left
+/// to the post-render check.
+fn change_input_bytes(repo: &gix::Repository, change: &FileChange) -> usize {
+	let blob_bytes = |id: gix::ObjectId| -> usize {
+		if id.is_null() {
+			return 0;
+		}
+		repo
+			.try_find_header(id)
+			.ok()
+			.flatten()
+			.map_or(0, |header| usize::try_from(header.size()).unwrap_or(usize::MAX))
+	};
+	let new_bytes = if change.worktree_new {
+		repo
+			.workdir()
+			.and_then(|dir| std::fs::symlink_metadata(dir.join(&change.new_path)).ok())
+			.map_or(0, |meta| usize::try_from(meta.len()).unwrap_or(usize::MAX))
+	} else {
+		blob_bytes(change.new_id)
+	};
+	blob_bytes(change.old_id).saturating_add(new_bytes)
 }
 
 fn render_change(
@@ -1497,6 +1554,59 @@ mod tests {
 			repo.diff_text(&cached_binary).expect("cached binary diff"),
 			git(dir.path(), &["diff", "--cached", "--binary"])
 		);
+	}
+
+	// Regression: an isolated-task baseline once rendered the whole index-vs-HEAD
+	// patch before anyone looked at its size; on a 15-way jj conflict exported to
+	// git that was ~1.7M blobs and grew the process to 141 GB. A cap one byte
+	// under the patch must surface as `OutputTooLarge`; a cap equal to it must
+	// return the same bytes as an uncapped render.
+	#[test]
+	fn max_bytes_rejects_oversized_patch_and_passes_one_within_cap() {
+		let dir = fixture();
+		fs::write(dir.path().join("file.txt"), "one\nchanged\nthree\n").expect("write");
+		fs::remove_file(dir.path().join("delete.txt")).expect("delete");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let full = repo.diff_text(&DiffOptions::default()).expect("diff");
+
+		let roomy = DiffOptions { max_bytes: Some(full.len()), ..DiffOptions::default() };
+		assert_eq!(repo.diff_text(&roomy).expect("diff within cap"), full);
+
+		let tight = DiffOptions { max_bytes: Some(full.len() - 1), ..DiffOptions::default() };
+		let err = repo.diff_text(&tight).unwrap_err();
+		assert_eq!(err.kind(), "OutputTooLarge");
+		assert!(
+			matches!(err, Error::OutputTooLarge { operation: "diffText", limit } if limit == full.len() - 1),
+			"{err:?}"
+		);
+	}
+
+	// The cap bounds memory, not just output: rendering loads both sides of a
+	// change, so one file larger than the cap must be refused from its object
+	// header even when its rendered diff would be a few lines.
+	#[test]
+	fn max_bytes_refuses_a_change_whose_inputs_exceed_the_cap_before_rendering() {
+		let dir = fixture();
+		let body = "0123456789abcdef\n".repeat(256);
+		fs::write(dir.path().join("big.txt"), &body).expect("write big");
+		git(dir.path(), &["add", "big.txt"]);
+		git(dir.path(), &["commit", "-qm", "big"]);
+		fs::write(dir.path().join("big.txt"), format!("{body}tail\n")).expect("modify big");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		let rendered = repo.diff_text(&DiffOptions::default()).expect("diff");
+		assert!(rendered.len() < 1024, "one-line change renders small: {}", rendered.len());
+
+		let capped = DiffOptions { max_bytes: Some(1024), ..DiffOptions::default() };
+		let err = repo.diff_text(&capped).unwrap_err();
+		assert!(matches!(err, Error::OutputTooLarge { limit: 1024, .. }), "{err:?}");
+
+		let roomy =
+			DiffOptions { max_bytes: Some(2 * body.len() + rendered.len()), ..DiffOptions::default() };
+		assert_eq!(repo.diff_text(&roomy).expect("diff within cap"), rendered);
 	}
 
 	#[cfg(unix)]

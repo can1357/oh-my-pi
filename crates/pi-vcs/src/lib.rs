@@ -258,6 +258,9 @@ const fn require_jj_diff_options(options: &DiffOptions) -> Result<()> {
 	if options.base.is_some() || options.head.is_some() {
 		return Err(Error::Unsupported { operation: "revDiff", backend: VcsKind::Jj });
 	}
+	if options.max_bytes.is_some() {
+		return Err(Error::Unsupported { operation: "diffMaxBytes", backend: VcsKind::Jj });
+	}
 	Ok(())
 }
 
@@ -354,6 +357,15 @@ mod tests {
 		assert_eq!(revision.kind(), "Unsupported");
 		assert!(matches!(revision, Error::Unsupported {
 			operation: "revDiff",
+			backend:   VcsKind::Jj,
+		}));
+
+		let capped = repo
+			.diff_text(&DiffOptions { max_bytes: Some(1), ..DiffOptions::default() })
+			.unwrap_err();
+		assert_eq!(capped.kind(), "Unsupported");
+		assert!(matches!(capped, Error::Unsupported {
+			operation: "diffMaxBytes",
 			backend:   VcsKind::Jj,
 		}));
 	}

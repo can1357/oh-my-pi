@@ -2773,6 +2773,13 @@ export interface VcsDiffOptions {
   files?: Array<string>
   context?: number
   binary?: boolean
+  /**
+   * Fail with an `OutputTooLarge` `VcsError` once the rendered patch exceeds
+   * this many bytes, instead of buffering an arbitrarily large string.
+   * Carried as a double so a budget past 2^32 reaches the renderer intact
+   * (a `u32` field would wrap it); values beyond `usize` saturate.
+   */
+  maxBytes?: number
 }
 
 /** Discover the repository owning a directory. */

@@ -31,7 +31,8 @@ export interface VcsError extends Error {
 		| "Io"
 		| "Backend"
 		| "Canceled"
-		| "Unsupported";
+		| "Unsupported"
+		| "OutputTooLarge";
 	exitCode: number;
 	stdout: string;
 	stderr: string;
