@@ -35,6 +35,15 @@ const clientLocks = new Map<string, PendingClient>();
 const invalidatedClientKeys = new Set<string>();
 const clientReloadBarriers = new Map<string, Promise<unknown>>();
 const fileOperationLocks = new Map<string, Promise<void>>();
+/**
+ * URIs whose server overlay OMP has intentionally advanced ahead of the on-disk
+ * file for an in-flight write/edit: the writethrough syncs the new (and possibly
+ * formatted) text to the language server before committing it to disk, so while
+ * a write is pending the file on disk is *older* than the overlay. Refcounted by
+ * {@link beginPendingDiskWrite}/{@link endPendingDiskWrite} so overlapping writes
+ * to the same file stay marked until the last one commits.
+ */
+const pendingDiskWrites = new Map<string, number>();
 
 /** Negative cache of recent init failures so a broken server fails fast instead of re-spawning per call. */
 const INIT_FAILURE_BACKOFF_MS = 3 * 60 * 1000;
@@ -1233,6 +1242,29 @@ function documentSignature(content: string): number | bigint {
 }
 
 /**
+ * Mark a file whose server overlay OMP has advanced ahead of disk for an in-flight
+ * write. While marked, {@link reconcileFileFromDisk} skips reading disk back into
+ * the server, because the on-disk file is the *stale* side until the write commits.
+ * Every call MUST be balanced by {@link endPendingDiskWrite}.
+ */
+export function beginPendingDiskWrite(filePath: string): void {
+	const uri = fileToUri(filePath);
+	pendingDiskWrites.set(uri, (pendingDiskWrites.get(uri) ?? 0) + 1);
+}
+
+/** Release a mark set by {@link beginPendingDiskWrite}; the overlay is authoritative until then. */
+export function endPendingDiskWrite(filePath: string): void {
+	const uri = fileToUri(filePath);
+	const count = pendingDiskWrites.get(uri);
+	if (count === undefined) return;
+	if (count > 1) {
+		pendingDiskWrites.set(uri, count - 1);
+	} else {
+		pendingDiskWrites.delete(uri);
+	}
+}
+
+/**
  * Ensure a file is opened in the LSP client.
  * Sends didOpen notification if the file is not already tracked.
  */
@@ -1309,12 +1341,22 @@ export async function ensureFileOpen(client: LspClient, filePath: string, signal
  * text last sent to the server, pushes a `didChange` so the server's copy matches
  * the disk text the position was derived from. Untracked files fall through to
  * {@link ensureFileOpen}; unchanged files send nothing.
+ * A file with an in-flight OMP write ({@link beginPendingDiskWrite}) is skipped
+ * entirely: its overlay leads disk, so reading disk back would revert the server
+ * to pre-write content.
  */
 export async function reconcileFileFromDisk(client: LspClient, filePath: string, signal?: AbortSignal): Promise<void> {
 	throwIfAborted(signal);
 	const uri = fileToUri(filePath);
 	if (!client.openFiles.has(uri)) {
 		await ensureFileOpen(client, filePath, signal);
+		return;
+	}
+
+	// An in-flight OMP write has already synced newer (possibly formatted) text to
+	// the server ahead of committing it to disk; the on-disk file is the stale side,
+	// so reconciling from it would clobber the overlay. Leave it to the write.
+	if (pendingDiskWrites.has(uri)) {
 		return;
 	}
 
@@ -1341,6 +1383,9 @@ export async function reconcileFileFromDisk(client: LspClient, filePath: string,
 			throw err;
 		}
 
+		// Re-check after the (awaited) disk read: a write may have started and
+		// synced its overlay in the meantime, making this disk snapshot stale.
+		if (pendingDiskWrites.has(uri)) return;
 		const signature = documentSignature(content);
 		if (signature === info.syncedHash) return;
 

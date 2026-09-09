@@ -3386,6 +3386,71 @@ describe("lsp regressions", () => {
 		}
 	});
 
+	it("skips disk reconciliation while an OMP write holds the overlay ahead of disk", async () => {
+		const tempDir = TempDir.createSync("@omp-lsp-pending-write-");
+		const filePath = path.join(tempDir.path(), "target.py");
+		const original = "def target():\n    return 1\n";
+		const sent: string[] = [];
+		try {
+			await Bun.write(filePath, original);
+			const serverConfig: ServerConfig = { command: "fake-pyls", fileTypes: ["py"], rootMarkers: [] };
+			const client: LspClient = {
+				name: "pending-write-lsp",
+				cwd: tempDir.path(),
+				config: serverConfig,
+				proc: {
+					stdin: {
+						write(data: string | Uint8Array) {
+							const text = typeof data === "string" ? data : Buffer.from(data).toString("utf-8");
+							const body = text.slice(text.indexOf("\r\n\r\n") + 4);
+							try {
+								const msg: unknown = JSON.parse(body);
+								if (msg && typeof msg === "object" && "method" in msg && typeof msg.method === "string") {
+									sent.push(msg.method);
+								}
+							} catch {
+								// framing chunk without a JSON body; ignore
+							}
+							return typeof data === "string" ? Buffer.byteLength(data) : data.length;
+						},
+						flush: () => {},
+					},
+				} as unknown as LspClient["proc"],
+				requestId: 0,
+				diagnostics: new Map(),
+				diagnosticsVersion: 0,
+				openFiles: new Map(),
+				pendingRequests: new Map(),
+				messageBuffer: new Uint8Array(),
+				isReading: false,
+				status: "ready",
+				lastActivity: Date.now(),
+				writeQueue: Promise.resolve(),
+				activeProgressTokens: new Set(),
+				projectLoaded: Promise.resolve(),
+				resolveProjectLoaded: () => {},
+			};
+
+			await lspClient.ensureFileOpen(client, filePath);
+			expect(sent).toContain("textDocument/didOpen");
+
+			// Simulate an in-flight OMP write: writethrough has synced the new text
+			// to the server and marked the file, but disk still holds the old bytes.
+			lspClient.beginPendingDiskWrite(filePath);
+			await Bun.write(filePath, `\n\n${original}`);
+			sent.length = 0;
+			await lspClient.reconcileFileFromDisk(client, filePath);
+			expect(sent).toHaveLength(0);
+
+			// Once the write commits and clears the mark, the next reconcile syncs.
+			lspClient.endPendingDiskWrite(filePath);
+			await lspClient.reconcileFileFromDisk(client, filePath);
+			expect(sent).toContain("textDocument/didChange");
+		} finally {
+			tempDir.removeSync();
+		}
+	});
+
 	it("flushes pending descendant text edits before a folder rename", async () => {
 		const tempDir = TempDir.createSync("@omp-lsp-folder-rename-");
 		try {
