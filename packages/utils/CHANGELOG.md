@@ -5,6 +5,7 @@
 ### Added
 
 - Added `parseEnvFileAsync` for non-blocking dotenv reads on login/discovery/stream paths.
+
 ## [18.1.16] - 2026-09-09
 
 ### Fixed

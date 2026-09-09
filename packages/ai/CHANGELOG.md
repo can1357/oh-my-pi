@@ -2,8 +2,6 @@
 
 ## [Unreleased]
 
-## [18.1.16] - 2026-09-09
-
 ### Fixed
 
 - Grok Bot product Read/Write alias schemas rewrite branch-local `required` under `anyOf`/`oneOf`/`allOf` so advertised `contents`/`target_file` calls validate.
@@ -56,6 +54,11 @@
 - Grok Bot product Read/Write alias schemas retain preexisting `allOf` entries when combining with `anyOf` alias constraints.
 - Grok Bot product Read/Write property-alias descriptions load from static `.md` prompt assets.
 - Grok Bot parent-chat keeps concurrent SendToUser reconstruction state per call so interleaved name-less frames do not fall through to unknown tool calls.
+
+## [18.1.16] - 2026-09-09
+
+### Fixed
+
 - Codex SSE streams that end without a terminal completion event now retry when replay-safe and remain transient errors when partial output prevents replay ([#11349](https://github.com/can1357/oh-my-pi/issues/11349)).
 
 ## [18.1.15] - 2026-09-08

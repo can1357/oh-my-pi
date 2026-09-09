@@ -12,9 +12,6 @@
 - Grok Bot `gemini-3-flash` / `gemini-3-flash[]` now rewrite `requestedModel` to bare `gemini-3.8-flash` (`sand-wire-model-id`) so tools use the working peer while AvailableModels still lists the old slug.
 - Grok Bot `sand-wire-model-id` rewrites apply only when tools are present (`sand-wire-model-id-when=tools`); text-only requests keep the selected AvailableModels id.
 - Grok Bot JSON-as-text tool promotion is opt-in via `sand-promote-json-text-tools` (routers + gemini-3-flash) so native models keep example Shell JSON as text.
-## [18.1.16] - 2026-09-09
-
-- Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).
 
 ### Fixed
 
@@ -87,6 +84,10 @@
 - Grok Bot Auto routers bake catalog `sand-wire-model-id=sand-default` so parent-chat rewrite no longer special-cases `sand-cua` in TypeScript.
 - Grok Bot auth is only advertised when both the renewer and machine id are present, so models are not selectable before streaming can succeed.
 - Grok Bot exports `resolveGrokbotMachineId` so CLI credential overrides can require the same machine-id pair as env auth.
+
+## [18.1.16] - 2026-09-09
+
+- Updated Fire Pass (`firepass`) login validation probe to `accounts/fireworks/routers/glm-5p2-fast` and bundled `glm-5.2-fast` and `kimi-k3-fast` models in place of decommissioned `kimi-k2.6-turbo` ([#10859](https://github.com/can1357/oh-my-pi/pull/10859) by [@olegpulatov](https://github.com/olegpulatov)).
 
 ## [18.1.14] - 2026-09-07
 
