@@ -8,6 +8,8 @@
  * The installed registry MUST pass `parseClaudePluginsRegistry()` validation —
  * it uses `version: 2` (numeric) and `plugins: Record<string, ...[]>`.
  */
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 
 // ── Plugin ID helpers ────────────────────────────────────────────────
 
@@ -203,7 +205,8 @@ export const MAX_RUNTIME_PACKAGE_NAME_LENGTH = 214;
 /** Validate and return a runtime package name, or throw with a clear error. */
 export function assertRuntimePackageName(name: string): string {
 	if (name.length > MAX_RUNTIME_PACKAGE_NAME_LENGTH || !RUNTIME_PACKAGE_NAME_RE.test(name)) {
-		throw new Error(`Invalid marketplace plugin package name: ${JSON.stringify(name)}`);
+		const safeName = replaceTabs(truncateToWidth(sanitizeText(JSON.stringify(name)), TRUNCATE_LENGTHS.SHORT));
+		throw new Error(`Invalid marketplace plugin package name: ${safeName}`);
 	}
 	return name;
 }

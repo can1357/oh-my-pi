@@ -30,6 +30,7 @@ import {
 	writeMarketplacesRegistry,
 } from "./registry";
 import { resolveNpmVersion, resolvePluginSource } from "./source-resolver";
+import { mapWithConcurrencyLimit } from "../../../task/parallel";
 import type {
 	InstalledPluginEntry,
 	InstalledPluginSummary,
@@ -629,8 +630,6 @@ export class MarketplaceManager {
 	async checkForUpdates(): Promise<Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }>> {
 		const mktReg = await readMarketplacesRegistry(this.#opts.marketplacesRegistryPath);
 		const updates: Array<{ pluginId: string; scope: "user" | "project"; from: string; to: string }> = [];
-		const npmVersionCache = new Map<string, string>();
-		const npmFailed = new Set<string>();
 
 		// Keyed by (path, scope) so each scope is checked independently.
 		// A plugin current in user scope but stale in project scope must still appear.
@@ -639,6 +638,15 @@ export class MarketplaceManager {
 			registryEntries.push([this.#opts.projectInstalledRegistryPath, "project"]);
 		}
 
+		interface Candidate {
+			scope: "user" | "project";
+			pluginId: string;
+			installed: InstalledPluginEntry;
+			catalogVersion: string | undefined;
+			npmSource: PluginSourceNpm | undefined;
+		}
+
+		const candidates: Candidate[] = [];
 		for (const [regPath, scope] of registryEntries) {
 			const instReg = await readInstalledPluginsRegistry(regPath);
 			for (const [pluginId, entries] of Object.entries(instReg.plugins)) {
@@ -663,42 +671,63 @@ export class MarketplaceManager {
 					continue;
 				}
 
-				// An npm selector is a moving target: the catalog may pin a range like
-				// "^1.2.0" or omit the version entirely (dist-tag `latest`), while
-				// installation persisted the exact version it resolved to. Comparing the
-				// selector string against that exact version can never observe an
-				// ordinary registry release, so an npm source is always resolved against
-				// the registry and its selected version is the comparison.
-				let comparisonVersion = catalogVersion;
-				if (npmSource) {
-					const key = JSON.stringify([npmSource.package, npmSource.version, npmSource.registry]);
-					if (npmFailed.has(key)) continue;
-					const cached = npmVersionCache.get(key);
-					if (cached) {
-						comparisonVersion = cached;
-					} else {
-						try {
-							comparisonVersion = await resolveNpmVersion(npmSource);
-							npmVersionCache.set(key, comparisonVersion);
-						} catch {
-							npmFailed.add(key);
-							continue;
-						}
-					}
-				}
-				if (!comparisonVersion || comparisonVersion === installed.version) continue;
+				candidates.push({ scope, pluginId, installed, catalogVersion, npmSource });
+			}
+		}
 
-				// Treat newer semver as an update; fall back to inequality for non-semver tags.
-				let isNewer: boolean;
-				try {
-					isNewer = Bun.semver.order(comparisonVersion, installed.version) > 0;
-				} catch {
-					isNewer = comparisonVersion !== installed.version;
-				}
+		const npmTasks = candidates
+			.map((candidate, index) => ({ index, candidate, source: candidate.npmSource }))
+			.filter(
+				(item): item is { index: number; candidate: Candidate; source: PluginSourceNpm } =>
+					item.source !== undefined,
+			);
 
-				if (isNewer) {
-					updates.push({ pluginId, scope, from: installed.version, to: comparisonVersion });
-				}
+		// Shared in-flight promise cache keyed by [package, version, registry].
+		// Deduplicates identical npm selectors across user/project scopes without
+		// suppressing different packages or caching a registry-wide failure.
+		const npmPromiseCache = new Map<string, Promise<string>>();
+
+		const concurrency = Math.min(8, npmTasks.length || 1);
+		const { results } = await mapWithConcurrencyLimit(npmTasks, concurrency, async ({ source }) => {
+			const key = JSON.stringify([source.package, source.version, source.registry]);
+			let p = npmPromiseCache.get(key);
+			if (!p) {
+				p = resolveNpmVersion(source);
+				npmPromiseCache.set(key, p);
+			}
+			try {
+				return { ok: true, version: await p } as const;
+			} catch {
+				return { ok: false } as const;
+			}
+		});
+
+		const resolvedVersions = new Map<number, string>();
+		for (const [i, result] of results.entries()) {
+			if (result?.ok) {
+				resolvedVersions.set(npmTasks[i].index, result.version);
+			}
+		}
+
+		for (const [i, candidate] of candidates.entries()) {
+			const comparisonVersion = candidate.npmSource ? resolvedVersions.get(i) : candidate.catalogVersion;
+			if (!comparisonVersion || comparisonVersion === candidate.installed.version) continue;
+
+			// Treat newer semver as an update; fall back to inequality for non-semver tags.
+			let isNewer: boolean;
+			try {
+				isNewer = Bun.semver.order(comparisonVersion, candidate.installed.version) > 0;
+			} catch {
+				isNewer = comparisonVersion !== candidate.installed.version;
+			}
+
+			if (isNewer) {
+				updates.push({
+					pluginId: candidate.pluginId,
+					scope: candidate.scope,
+					from: candidate.installed.version,
+					to: comparisonVersion,
+				});
 			}
 		}
 

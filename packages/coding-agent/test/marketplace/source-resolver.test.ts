@@ -466,6 +466,24 @@ describe("resolvePluginSource — npm", () => {
 		});
 		await expect(resolvePluginSource(entry, { tmpDir })).rejects.toThrow(/Invalid.*package name/);
 	});
+	it("rejects invalid package name with width-bounded single-line diagnostic", async () => {
+		const badName = "INVALID\t\n\r" + "a".repeat(500);
+		const entry = makeEntry({
+			source: "npm",
+			package: badName,
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		let thrown: Error | undefined;
+		try {
+			await resolvePluginSource(entry, { tmpDir });
+		} catch (err) {
+			thrown = err as Error;
+		}
+		expect(thrown).toBeDefined();
+		expect(thrown?.message).not.toMatch(/[\r\n]/);
+		expect((thrown?.message ?? "").length).toBeLessThanOrEqual(120);
+	});
 
 	it("rejects empty version expression", async () => {
 		const entry = makeEntry({
@@ -1544,6 +1562,7 @@ describe("resolvePluginSource — npm", () => {
 	});
 
 	it("accepts tarball whose runtime dependencies are all bundled", async () => {
+		const depPkgJson = JSON.stringify({ name: "left-pad", version: "1.0.0" });
 		const pkgJson = JSON.stringify({
 			name: "test-plugin",
 			version: "1.0.0",
@@ -1554,6 +1573,8 @@ describe("resolvePluginSource — npm", () => {
 			["package/", ""],
 			["package/package.json", pkgJson],
 			["package/.claude-plugin/plugin.json", pkgJson],
+			["package/node_modules/left-pad/", ""],
+			["package/node_modules/left-pad/package.json", depPkgJson],
 		];
 		const tarballBytes = await encodeArchive("tar.gz", entries);
 		const integrity = sriSha512(tarballBytes);
@@ -1647,11 +1668,185 @@ describe("resolvePluginSource — npm", () => {
 	});
 
 	it("accepts tarball whose optional dependencies are bundled", async () => {
+		const depPkgJson = JSON.stringify({ name: "left-pad", version: "1.0.0" });
 		const pkgJson = JSON.stringify({
 			name: "test-plugin",
 			version: "1.0.0",
 			optionalDependencies: { "left-pad": "^1.0.0" },
 			bundledDependencies: ["left-pad"],
+		});
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pkgJson],
+			["package/.claude-plugin/plugin.json", pkgJson],
+			["package/node_modules/left-pad/", ""],
+			["package/node_modules/left-pad/package.json", depPkgJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.dir).toMatch(/package$/);
+		expect(result.resolvedVersion).toBe("1.0.0");
+	});
+
+	it("rejects bundledDependencies array when node_modules tree is absent", async () => {
+		const pkgJson = JSON.stringify({
+			name: "test-plugin",
+			version: "1.0.0",
+			dependencies: { "left-pad": "^1.0.0" },
+			bundledDependencies: ["left-pad"],
+		});
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pkgJson],
+			["package/.claude-plugin/plugin.json", pkgJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		let thrown: Error | undefined;
+		try {
+			await resolvePluginSource(entry, { tmpDir });
+		} catch (err) {
+			thrown = err as Error;
+		}
+		expect(thrown).toBeDefined();
+		expect(thrown?.message).toMatch(/runtime dependencies its npm tarball does not ship/);
+		expect(thrown?.message).toContain("left-pad");
+	});
+
+	it("rejects bundledDependencies: true when node_modules tree is absent", async () => {
+		const pkgJson = JSON.stringify({
+			name: "test-plugin",
+			version: "1.0.0",
+			dependencies: { "left-pad": "^1.0.0" },
+			bundledDependencies: true,
+		});
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pkgJson],
+			["package/.claude-plugin/plugin.json", pkgJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		let thrown: Error | undefined;
+		try {
+			await resolvePluginSource(entry, { tmpDir });
+		} catch (err) {
+			thrown = err as Error;
+		}
+		expect(thrown).toBeDefined();
+		expect(thrown?.message).toMatch(/runtime dependencies its npm tarball does not ship/);
+		expect(thrown?.message).toContain("left-pad");
+	});
+
+	it("rejects unmet required peer dependency", async () => {
+		const pkgJson = JSON.stringify({
+			name: "test-plugin",
+			version: "1.0.0",
+			peerDependencies: { "host-api": "^1.0.0" },
+		});
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pkgJson],
+			["package/.claude-plugin/plugin.json", pkgJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		let thrown: Error | undefined;
+		try {
+			await resolvePluginSource(entry, { tmpDir });
+		} catch (err) {
+			thrown = err as Error;
+		}
+		expect(thrown).toBeDefined();
+		expect(thrown?.message).toMatch(/peer dependencies that are not host-provided or bundled/);
+		expect(thrown?.message).toContain("host-api");
+	});
+
+	it("accepts optional peer dependency", async () => {
+		const pkgJson = JSON.stringify({
+			name: "test-plugin",
+			version: "1.0.0",
+			peerDependencies: { "host-api": "^1.0.0" },
+			peerDependenciesMeta: { "host-api": { optional: true } },
+		});
+		const entries: readonly [string, string][] = [
+			["package/", ""],
+			["package/package.json", pkgJson],
+			["package/.claude-plugin/plugin.json", pkgJson],
+		];
+		const tarballBytes = await encodeArchive("tar.gz", entries);
+		const integrity = sriSha512(tarballBytes);
+		await setupNpmMock({
+			pkg: "test-plugin",
+			versions: [{ version: "1.0.0", integrity }],
+			tarballBytes,
+		});
+
+		const entry = makeEntry({
+			source: "npm",
+			package: "test-plugin",
+			version: "1.0.0",
+			registry: REGISTRY_ORIGIN,
+		});
+		const result = await resolvePluginSource(entry, { tmpDir });
+		expect(result.dir).toMatch(/package$/);
+		expect(result.resolvedVersion).toBe("1.0.0");
+	});
+
+	it("accepts host-provided peer dependency", async () => {
+		const pkgJson = JSON.stringify({
+			name: "test-plugin",
+			version: "1.0.0",
+			peerDependencies: { "@oh-my-pi/pi-agent-core": "^1.0.0" },
 		});
 		const entries: readonly [string, string][] = [
 			["package/", ""],

@@ -1125,6 +1125,11 @@ function remapLegacyPiSpecifier(specifier: string): string | null {
 	return `${CANONICAL_PI_SCOPE}/${remappedSubpath}`;
 }
 
+/** Check whether a bare specifier is provided by the host runtime. */
+export function isHostProvidedPeer(specifier: string): boolean {
+	return remapLegacyPiSpecifier(specifier) !== null || TYPEBOX_SPECIFIER_FILTER.test(specifier);
+}
+
 function getResolvedSpecifier(specifier: string): string {
 	const cached = resolvedSpecifierFallbacks.get(specifier);
 	if (cached) {

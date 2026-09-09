@@ -19,7 +19,8 @@ import { extractArchive } from "@oh-my-pi/pi-utils/ar";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../../tools/render-utils";
 
 import type { MarketplaceCatalogMetadata, MarketplacePluginEntry, PluginSource, PluginSourceNpm } from "./types";
-import { assertRuntimePackageName } from "./types";
+import { assertRuntimePackageName, MAX_RUNTIME_PACKAGE_NAME_LENGTH, RUNTIME_PACKAGE_NAME_RE } from "./types";
+import { isHostProvidedPeer } from "../legacy-pi-compat";
 
 const GIT_CLONE_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -374,7 +375,7 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 		// is not bundled leaves the installed plugin unloadable with a
 		// module-not-found error at first import. Reject here, where the reason is
 		// still visible, rather than letting installation report success.
-		const unbundled = unbundledRuntimeDeps(manifest);
+		const { unbundled, missingPeers } = await validateRuntimeDependencies(manifest, pkgPath);
 		if (unbundled.length > 0) {
 			const shown = unbundled
 				.slice(0, 5)
@@ -388,6 +389,19 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 			);
 		}
 
+		if (missingPeers.length > 0) {
+			const shown = missingPeers
+				.slice(0, 5)
+				.map(name => sanitizeFragment(name))
+				.join(", ");
+			const extra = missingPeers.length > 5 ? ` (and ${missingPeers.length - 5} more)` : "";
+			throw new Error(
+				stage(
+					`package declares peer dependencies that are not host-provided or bundled: ${shown}${extra} — install them, mark them optional, or depend on a host-provided package`,
+				),
+			);
+		}
+
 		return { dir: pkgPath, tempCloneRoot: tempRoot, resolvedVersion: selectedVersion };
 	} catch (err) {
 		// Clean up on any failure — the temp root is private and disposable.
@@ -395,7 +409,6 @@ async function resolveNpmSource(source: PluginSourceNpm, context: ResolveContext
 		throw err;
 	}
 }
-
 /** Extracted `package/package.json` fields this resolver reads. */
 interface NpmPackageManifest {
 	name?: unknown;
@@ -404,31 +417,102 @@ interface NpmPackageManifest {
 	optionalDependencies?: unknown;
 	bundledDependencies?: unknown;
 	bundleDependencies?: unknown;
+	peerDependencies?: unknown;
+	peerDependenciesMeta?: unknown;
+}
+
+interface DependencyValidationResult {
+	unbundled: string[];
+	missingPeers: string[];
+}
+
+/** Check whether a claimed bundled dependency is actually present under package/node_modules. */
+async function isBundledDependencyPresent(pkgPath: string, name: string): Promise<boolean> {
+	if (name.length > MAX_RUNTIME_PACKAGE_NAME_LENGTH || !RUNTIME_PACKAGE_NAME_RE.test(name)) {
+		return false;
+	}
+	const depPath = path.join(pkgPath, "node_modules", name);
+	if (!pathIsWithin(pkgPath, depPath)) {
+		return false;
+	}
+	try {
+		const stat = await fs.stat(depPath);
+		return stat.isDirectory();
+	} catch {
+		return false;
+	}
 }
 
 /**
- * Runtime dependencies an npm tarball will not carry. npm packs
- * `bundledDependencies` (and its `bundleDependencies` alias) into the tarball's
- * own node_modules, and either spelling may be `true` to bundle everything.
- * Anything left in `dependencies` or `optionalDependencies` needs a package
- * manager, which plugin installation deliberately never runs — so from this
- * installer's point of view an optional dependency is simply always absent.
+ * Validate that every dependency the manifest claims is bundled actually exists
+ * under package/node_modules, and that every required peer is either provided
+ * by the host runtime or bundled in the tarball. Optional peers are skipped.
  */
-function unbundledRuntimeDeps(manifest: NpmPackageManifest): string[] {
-	const bundled = manifest.bundledDependencies ?? manifest.bundleDependencies;
-	if (bundled === true) return [];
-	const names = new Set(Array.isArray(bundled) ? bundled.filter(d => typeof d === "string") : []);
+async function validateRuntimeDependencies(
+	manifest: NpmPackageManifest,
+	pkgPath: string,
+): Promise<DependencyValidationResult> {
 	const unbundled: string[] = [];
-	// `optionalDependencies` counts the same way: npm would install it, the
-	// tarball does not carry it, and this installer runs no package manager, so
-	// a plugin that imports one loads against a package that is never there.
+	const missingPeers: string[] = [];
+	const bundled = manifest.bundledDependencies ?? manifest.bundleDependencies;
+	const bundledNames = new Set<string>();
+
+	if (Array.isArray(bundled)) {
+		for (const name of bundled) {
+			if (typeof name === "string") bundledNames.add(name);
+		}
+	}
+
+	// Runtime dependencies and optional dependencies must be bundled. When the
+	// manifest uses the `true` form, every runtime dep name is claimed bundled.
 	for (const deps of [manifest.dependencies, manifest.optionalDependencies]) {
 		if (!deps || typeof deps !== "object" || Array.isArray(deps)) continue;
 		for (const name of Object.keys(deps)) {
-			if (!names.has(name) && !unbundled.includes(name)) unbundled.push(name);
+			const isClaimedBundled = bundled === true || bundledNames.has(name);
+			if (isClaimedBundled) {
+				if (!(await isBundledDependencyPresent(pkgPath, name))) {
+					if (!unbundled.includes(name)) unbundled.push(name);
+				}
+			} else {
+				if (!unbundled.includes(name)) unbundled.push(name);
+			}
 		}
 	}
-	return unbundled;
+
+	// Optional peers are tolerated; required peers must be host-provided or bundled.
+	const optionalPeers = new Set<string>();
+	if (
+		manifest.peerDependenciesMeta &&
+		typeof manifest.peerDependenciesMeta === "object" &&
+		!Array.isArray(manifest.peerDependenciesMeta)
+	) {
+		for (const name of Object.keys(manifest.peerDependenciesMeta)) {
+			const meta = Reflect.get(manifest.peerDependenciesMeta, name);
+			if (isOptionalPeerMeta(meta)) {
+				optionalPeers.add(name);
+			}
+		}
+	}
+
+	if (
+		manifest.peerDependencies &&
+		typeof manifest.peerDependencies === "object" &&
+		!Array.isArray(manifest.peerDependencies)
+	) {
+		for (const name of Object.keys(manifest.peerDependencies)) {
+			if (optionalPeers.has(name)) continue;
+			if (isHostProvidedPeer(name)) continue;
+			if (!(await isBundledDependencyPresent(pkgPath, name))) {
+				if (!missingPeers.includes(name)) missingPeers.push(name);
+			}
+		}
+	}
+
+	return { unbundled, missingPeers };
+}
+
+function isOptionalPeerMeta(meta: unknown): boolean {
+	return !!meta && typeof meta === "object" && !Array.isArray(meta) && "optional" in meta && meta.optional === true;
 }
 
 /**
