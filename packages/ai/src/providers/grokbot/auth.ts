@@ -71,7 +71,9 @@ function formatGrokbotDisplayHost(raw: string): string {
 		// Omit the entire query string — reverse proxies may auth with arbitrary
 		// keys (`x-api-key`, signed tokens, …) that no allowlist can exhaust.
 		url.search = "";
-		const display = `${url.protocol}//${url.host}${url.pathname}${url.hash}`.replace(/\/+$/, "");
+		// Fragments commonly carry tokens (`#access_token=…`); never show them.
+		url.hash = "";
+		const display = `${url.protocol}//${url.host}${url.pathname}`.replace(/\/+$/, "");
 		return formatGrokbotStatusValue(display || GROKBOT_BACKEND);
 	} catch {
 		return formatGrokbotStatusValue(scrubMalformedGrokbotDisplayHost(trimmed));

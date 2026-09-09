@@ -740,6 +740,25 @@ describe("grokbot checksum", () => {
 		expect(hostLine).not.toContain("keep=1");
 	});
 
+	test("redacts URL fragments from Host status", async () => {
+		spyOn(grokbotCatalogAuth, "loadGrokbotConfig").mockResolvedValue({
+			renewal: "renew-present",
+			machineId: "machine-present",
+			namespace: "prod",
+			clientVersion: "0.30.0",
+		});
+		spyOn(grokbotCatalogAuth, "grokbotSecretsPath").mockReturnValue("/tmp/agent/secrets/grokbot.env");
+
+		const status = await formatGrokbotStatus({
+			baseUrl: "https://proxy.example/grokbot#token=secret",
+		});
+		const hostLine = status.split("\n").find(line => line.startsWith("Host:"));
+		expect(hostLine).toBe("Host: https://proxy.example/grokbot");
+		expect(hostLine).not.toContain("token");
+		expect(hostLine).not.toContain("secret");
+		expect(hostLine).not.toContain("#");
+	});
+
 	test("redacts userinfo and query from malformed Host URLs without a scheme", async () => {
 		spyOn(grokbotCatalogAuth, "loadGrokbotConfig").mockResolvedValue({
 			renewal: "renew-present",

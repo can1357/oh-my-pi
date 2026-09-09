@@ -268,9 +268,14 @@ export function readPathInShellCommand(command: string, filePath: string): boole
 	if (!filePath) return false;
 	const cmd = command.trim();
 	if (!cmd || writeLikeShellCommand(cmd)) return false;
-	return shellStatementSegments(cmd).some(
-		segment => /^(?:cat|head|sed)\b/.test(segment) && commandMentionsPath(segment, filePath),
-	);
+	return shellStatementSegments(cmd).some(segment => {
+		if (!/^(?:cat|head|sed)\b/.test(segment)) return false;
+		// Redirects / any pipeline can discard or transform stdout — `runOneTool`
+		// fabricates the expected token without executing, so `cat path | grep -v`
+		// would otherwise pass the gate.
+		if (/(?:>>?|\|)/.test(segment)) return false;
+		return commandMentionsPath(segment, filePath);
+	});
 }
 
 /**
