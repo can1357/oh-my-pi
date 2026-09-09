@@ -1302,15 +1302,30 @@ export class CommandController {
 	}
 
 	async handleRenameCommand(title: string): Promise<void> {
+		const session = this.ctx.session;
+		const sessionManager = this.ctx.sessionManager;
+		const sessionId = sessionManager.getSessionId();
+		const signal = session.titleGenerationSignal;
+		let titleRevision = sessionManager.titleRevision;
+		const isCurrent = () =>
+			this.ctx.session === session &&
+			this.ctx.sessionManager === sessionManager &&
+			!signal.aborted &&
+			sessionManager.getSessionId() === sessionId &&
+			sessionManager.titleRevision === titleRevision;
 		try {
-			const stored = await this.ctx.sessionManager.setSessionName(title, "user");
+			const persistence = sessionManager.setSessionName(title, "user");
+			titleRevision = sessionManager.titleRevision;
+			const stored = await persistence;
+			if (!isCurrent()) return;
 			if (!stored) {
 				this.ctx.showError("Session name cannot be empty.");
 				return;
 			}
-			const name = this.ctx.sessionManager.getSessionName()!;
+			const name = sessionManager.getSessionName()!;
 			this.ctx.showStatus(`Session renamed to "${name}".`);
 		} catch (err) {
+			if (!isCurrent()) return;
 			this.ctx.showError(`Rename failed: ${err instanceof Error ? err.message : String(err)}`);
 		}
 	}
