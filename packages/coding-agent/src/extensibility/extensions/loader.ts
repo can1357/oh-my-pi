@@ -605,7 +605,14 @@ async function discoverExtensionsInDir(dir: string): Promise<string[]> {
 				isFile = target.isFile();
 				isDirectory = target.isDirectory();
 			} catch (err) {
-				if (isEnoent(err) || isEacces(err) || hasFsCode(err, "ENOTDIR") || hasFsCode(err, "EPERM")) continue;
+				if (
+					isEnoent(err) ||
+					isEacces(err) ||
+					hasFsCode(err, "ENOTDIR") ||
+					hasFsCode(err, "ELOOP") ||
+					hasFsCode(err, "EPERM")
+				)
+					continue;
 				throw err;
 			}
 		}
