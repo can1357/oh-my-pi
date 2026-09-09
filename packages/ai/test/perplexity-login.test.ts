@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
-import { loginPerplexity } from "@oh-my-pi/pi-ai/registry/oauth/perplexity";
+import { getProviderDefinition } from "@oh-my-pi/pi-ai/registry";
+import type { OAuthCredentials, OAuthController } from "@oh-my-pi/pi-ai/registry/oauth/types";
 import type { FetchImpl } from "@oh-my-pi/pi-ai/types";
 import { withEnv } from "./helpers";
 
@@ -10,6 +11,18 @@ type CapturedRequest = {
 
 function cookiePairs(header: string | null): Set<string> {
 	return new Set(header?.split("; ") ?? []);
+}
+
+async function loginPerplexity(callbacks: OAuthController): Promise<OAuthCredentials> {
+	const provider = getProviderDefinition("perplexity");
+	if (!provider?.login) throw new Error("expected perplexity provider");
+	const result = await provider.login({
+		...callbacks,
+		onAuth: callbacks.onAuth ?? (() => {}),
+		onPrompt: callbacks.onPrompt ?? (async () => ""),
+	});
+	if (typeof result === "string") throw new Error("expected Perplexity OAuth credentials");
+	return result;
 }
 
 afterEach(() => {

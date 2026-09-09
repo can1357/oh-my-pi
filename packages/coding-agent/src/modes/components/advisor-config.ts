@@ -352,16 +352,16 @@ export class AdvisorConfigOverlayComponent implements Component {
 		if (this.#doc.advisors.length === 0) this.#doc.advisors.push({ name: "default" });
 	}
 
-	#isBareDefaultDoc(doc: WatchdogConfigDoc): boolean {
-		if (doc.advisors.length !== 1 || doc.instructions?.trim()) return false;
+	#hasSyntheticDefaultAdvisor(doc: WatchdogConfigDoc): boolean {
+		if (doc.advisors.length !== 1) return false;
 		const advisor = doc.advisors[0];
-		if (!advisor) return false;
 		return (
-			advisor.name === "default" &&
+			advisor?.name === "default" &&
 			!advisor.model?.trim() &&
 			advisor.tools === undefined &&
 			!advisor.instructions?.trim() &&
-			advisor.enabled !== false
+			advisor.enabled !== false &&
+			advisor.maxNotesPerUpdate === undefined
 		);
 	}
 
@@ -422,7 +422,8 @@ export class AdvisorConfigOverlayComponent implements Component {
 			return;
 		}
 		if (value === "save") {
-			await this.#cb.save(this.#scope, this.#isBareDefaultDoc(this.#doc) ? { advisors: [] } : this.#doc);
+			const doc = this.#hasSyntheticDefaultAdvisor(this.#doc) ? { ...this.#doc, advisors: [] } : this.#doc;
+			await this.#cb.save(this.#scope, doc);
 			this.#dirty = false;
 			this.#showList();
 			return;

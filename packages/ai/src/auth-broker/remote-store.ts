@@ -204,7 +204,7 @@ function mergeUsageReports(base: UsageReport, overlay: UsageReport): UsageReport
 		limits,
 		metadata: {
 			...overlayMetadata,
-			...(base.metadata ?? {}),
+			...base.metadata,
 			...(overlayMetadata.headersUpdatedAt !== undefined
 				? { headersUpdatedAt: overlayMetadata.headersUpdatedAt }
 				: {}),

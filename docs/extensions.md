@@ -190,9 +190,10 @@ Also exposed:
 - `deliverAs: "steer"` (default) — interrupts current run
 - `deliverAs: "followUp"` — queued to run after current run
 - `deliverAs: "nextTurn"` — stored and injected on the next user prompt
+- `deliverAs: "aside"` — injected at the next agent step boundary without interrupting the current tool batch; when idle it starts a turn (`triggerTurn` is ignored; plan mode folds it into context instead)
 - `triggerTurn: true` — starts a turn when idle (also honored with `deliverAs: "nextTurn"`: idle prompts immediately; while streaming the queued message schedules an internal continuation)
 
-`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes.
+`pi.sendUserMessage(content, { deliverAs })` always goes through prompt flow. Omit `deliverAs` to start a normal prompt when idle; while streaming, omitted `deliverAs` queues the message as a steer. Set `deliverAs: "followUp"` to wait until the current run finishes. Set `deliverAs: "aside"` to inject the prompt at the next step boundary while a run is live (idle sends start a turn as usual).
 
 Payloads passed to `pi.sendMessage` are normalized before delivery (`normalizeCustomMessagePayload` in `session/messages.ts`): non-object payloads are coerced to string content under the default custom type, missing `customType`/`attribution` fields are defaulted, and invalid content collapses to an empty string — malformed payloads no longer persist entries that crash later session resumes.
 

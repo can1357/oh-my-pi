@@ -1,4 +1,5 @@
 import type { Model, ProviderResponseMetadata, RawSseEvent } from "@oh-my-pi/pi-ai";
+import { materializeString } from "@oh-my-pi/pi-utils";
 
 const MAX_RAW_SSE_EVENTS = 1_000;
 const MAX_RAW_SSE_CHARS = 512_000;
@@ -206,6 +207,8 @@ function trimRawLines(raw: string[]): TrimResult {
 	} else if (lines === raw) {
 		lines = raw.slice();
 	}
+	// Kept windows outlive the incoming frame; detach them from its backing storage.
+	lines = lines.map(materializeString);
 	lines.push(`: omp-debug-truncated originalChars=${originalChars}`);
 	return { raw: lines, truncated: true, originalChars, chars: countLines(lines) + 1 };
 }
@@ -338,10 +341,8 @@ export class RawSseDebugBuffer {
 	/**
 	 * Drop every retained record and reset accounting. Called from
 	 * {@link AgentSession} teardown so a disposed (e.g. parked subagent) session
-	 * stops pinning captured wire frames — each trimmed record holds a
-	 * `slice()` of its parent SSE frame, which under JSC keeps the whole
-	 * multi-MB frame alive. Notifies subscribers so a live debug viewer redraws
-	 * empty.
+	 * releases its bounded captured wire records. Notifies subscribers so a live
+	 * debug viewer redraws empty.
 	 */
 	clear(): void {
 		this.#records = [];

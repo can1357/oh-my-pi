@@ -1,0 +1,9 @@
+auth "coreweave" {
+	name "CoreWeave Serverless Inference"
+	login "api-key" {
+		auth-url "https://wandb.ai/settings"
+		instructions "Create or select a CoreWeave Serverless Inference project, add export COREWEAVE_PROJECT=<team>/<project> to your shell startup file (for example ~/.zshrc, ~/.bashrc, or your shell's profile/rc file) for the OpenAI-Project header, then copy your API key from account settings"
+		prompt "Paste your CoreWeave Serverless Inference API key" placeholder="api-key"
+		validate "models-endpoint" label="CoreWeave Serverless Inference" url="https://api.inference.wandb.ai/v1/models" headers-hook="coreweave-project"
+	}
+}

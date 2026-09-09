@@ -61,6 +61,10 @@ export interface ActiveRetryFallbackState {
 export interface ServingModel {
 	/** Full selector including routing and thinking level. */
 	selector: string;
+	/** Provider/id including routing, with no added thinking suffix. */
+	modelIdentity?: string;
+	/** Concrete thinking level captured with the attributed model. */
+	thinkingLevel?: ThinkingLevel;
 	/** Whether fallback routing, rather than the configured primary, owns it. */
 	isFallback: boolean;
 }
@@ -442,13 +446,17 @@ function getRetryFallbackEffectiveChain(
 	return chain;
 }
 
-/** Return the candidates after the current selector in an effective chain. */
+/**
+ * Return candidates after the current selector in an effective chain.
+ * `wrapAround` additionally appends entries before the current selector,
+ * without returning the current selector itself.
+ */
 export function findRetryFallbackCandidates(
 	context: RetryFallbackResolutionContext,
 	chainKey: string,
 	currentSelector: string,
 	currentModel?: Model | null,
-	options?: { allowMissingPrimary?: boolean },
+	options?: { allowMissingPrimary?: boolean; wrapAround?: boolean },
 ): RetryFallbackSelector[] {
 	const chain = getRetryFallbackEffectiveChain(
 		context,
@@ -474,13 +482,19 @@ export function findRetryFallbackCandidates(
 	const exactIndex = chain.findIndex(
 		selector => selector.raw === currentSelector || selector.raw === currentPlainSelector,
 	);
-	if (exactIndex >= 0) return chain.slice(exactIndex + 1);
+	if (exactIndex >= 0) {
+		const candidatesAfter = chain.slice(exactIndex + 1);
+		return options?.wrapAround ? [...candidatesAfter, ...chain.slice(0, exactIndex)] : candidatesAfter;
+	}
 	const baseIndex = currentBaseSelector
 		? chain.findIndex(selector => {
 				const selectorBase = formatRetryFallbackBaseSelector(selector);
 				return selectorBase === currentBaseSelector || selectorBase === currentPlainBaseSelector;
 			})
 		: -1;
-	if (baseIndex >= 0) return chain.slice(baseIndex + 1);
+	if (baseIndex >= 0) {
+		const candidatesAfter = chain.slice(baseIndex + 1);
+		return options?.wrapAround ? [...candidatesAfter, ...chain.slice(0, baseIndex)] : candidatesAfter;
+	}
 	return chain.slice(1);
 }
