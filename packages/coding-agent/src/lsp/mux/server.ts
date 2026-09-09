@@ -202,6 +202,11 @@ export class LspMuxServer {
 	// the tracked servers alone would let shutdown skip — and never report — a
 	// sweep that is still going or about to fail.
 	readonly #stopsInFlight = new Set<Promise<void>>();
+	// Stops that already failed. A failure can land long before any shutdown —
+	// an idle server's stop is the usual case — and by then the server is retired
+	// and the stop settled, so neither set would carry it and the shutdown that
+	// follows would report success over whatever the failure left behind.
+	readonly #failedStops = new Set<Promise<void>>();
 
 	/** Number of currently connected mux links, including unbound ping links. */
 	get sessionCount(): number {
@@ -242,7 +247,7 @@ export class LspMuxServer {
 		clearTimeout(this.#idleTimer);
 		for (const session of Array.from(this.#sessions)) session.socket.destroy();
 		const stops = [...this.#servers].map(server => this.#stopServer(server));
-		const results = await Promise.allSettled(new Set([...stops, ...this.#stopsInFlight]));
+		const results = await Promise.allSettled(new Set([...stops, ...this.#stopsInFlight, ...this.#failedStops]));
 		const listener = this.#netServer;
 		this.#netServer = undefined;
 		if (listener) {
@@ -358,7 +363,7 @@ export class LspMuxServer {
 			// began but this request arrived after, so spawning here would put a
 			// server behind the snapshot just as surely as a late connection would.
 			if (this.#shuttingDown) {
-				this.#sendSession(session, rpcError(message.id, -32603, "lsp mux is shutting down"));
+				this.#sendSession(session, rpcError(message.id, -32002, "lsp mux is shutting down"));
 				return;
 			}
 			const key = muxServerKey(params);
@@ -773,7 +778,13 @@ export class LspMuxServer {
 		if (server.terminationPromise) return server.terminationPromise;
 		const stop = this.#performStopServer(server);
 		this.#stopsInFlight.add(stop);
-		void stop.catch(() => {}).finally(() => this.#stopsInFlight.delete(stop));
+		void stop.then(
+			() => this.#stopsInFlight.delete(stop),
+			() => {
+				this.#stopsInFlight.delete(stop);
+				this.#failedStops.add(stop);
+			},
+		);
 		server.stopPromise = stop;
 		return stop;
 	}
@@ -833,8 +844,11 @@ export class LspMuxServer {
 	async #killHelpers(server: ServerInstance, helpers: Process[]): Promise<void> {
 		const survivors = helpers.filter(helper => helper.status() === ProcessStatus.Running);
 		if (survivors.length === 0) return;
+		// Normalized into promises rather than called bare: a synchronous throw from
+		// any one of them would abandon the rest of the batch mid-map, leaving later
+		// helpers unattempted and earlier ones unawaited.
 		const results = await Promise.allSettled(
-			survivors.map(helper => helper.killTreeAndWait({ timeoutMs: TERMINATION_BUDGET_MS })),
+			survivors.map(helper => Promise.try(() => helper.killTreeAndWait({ timeoutMs: TERMINATION_BUDGET_MS }))),
 		);
 		const failures = results.flatMap((result, index) => {
 			const pid = survivors[index].pid;

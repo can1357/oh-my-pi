@@ -196,7 +196,7 @@ mod platform {
 			if !pidfd_group_scope_supported() {
 				return GroupScope::Unresolved;
 			}
-			match pidfd_group_signal(self.pidfd.as_raw_fd(), signal) {
+			match pidfd_signal(self.pidfd.as_raw_fd(), signal, PIDFD_SIGNAL_PROCESS_GROUP) {
 				Ok(()) => GroupScope::Signalled,
 				Err(errno) if errno == libc::ESRCH => GroupScope::Empty,
 				Err(_) => GroupScope::Unresolved,
@@ -325,19 +325,20 @@ mod platform {
 	/// `PIDFD_SIGNAL_PROCESS_GROUP`, added in Linux 6.9. Not in libc yet.
 	const PIDFD_SIGNAL_PROCESS_GROUP: u32 = 4;
 
-	/// `pidfd_send_signal` with the process-group scope, as a raw errno result.
-	fn pidfd_group_signal(pidfd: RawFd, signal: i32) -> Result<(), i32> {
-		// SAFETY: `pidfd` is an owned descriptor from a successful `pidfd_open` held by
-		// the caller for the duration of this call. A null `siginfo_t` makes the kernel
-		// synthesize the same metadata as `kill(2)`. The flag names exactly one signal
-		// scope, which is the only form the syscall accepts.
+	/// `pidfd_send_signal` as a raw errno result.
+	fn pidfd_signal(pidfd: RawFd, signal: i32, flags: u32) -> Result<(), i32> {
+		// SAFETY: `pidfd` is passed by value and never dereferenced by this crate; a
+		// null `siginfo_t` makes the kernel synthesize the same metadata as `kill(2)`.
+		// An invalid descriptor is a valid argument here — the kernel reports `EBADF`
+		// rather than touching caller memory — which is what the capability probe
+		// below relies on.
 		let ret = unsafe {
 			libc::syscall(
 				libc::SYS_pidfd_send_signal,
 				pidfd,
 				signal,
 				ptr::null::<libc::siginfo_t>(),
-				PIDFD_SIGNAL_PROCESS_GROUP,
+				flags,
 			)
 		};
 		if ret == 0 {
@@ -352,43 +353,37 @@ mod platform {
 
 	/// Whether this kernel accepts a process-group scope on `pidfd_send_signal`.
 	///
-	/// Measured once against the caller's own process group, which is live by
-	/// construction — the caller is a member of it.
+	/// Asked of the syscall's argument validation rather than of any process:
+	/// the flags are rejected before the descriptor is ever looked up, so a
+	/// deliberately closed descriptor separates the two answers cleanly.
+	/// `EINVAL` is the scope being refused, `EBADF` is the scope being accepted
+	/// and the descriptor then failing. Nothing has to exist for that, which is
+	/// what keeps the answer independent of the caller's own process group —
+	/// whose leader a long-lived host has usually outlived, and which may be
+	/// group 1, a number `kill(2)` cannot address as a group at all. Both of
+	/// those made a probe through a real group answer "unsupported" on a
+	/// capable kernel.
+	///
+	/// Paired with the same call at the default scope, so a filter answering
+	/// uniformly cannot pass as a kernel that distinguishes the two.
+	///
+	/// What this cannot do is authenticate a *success*. A filter can match this
+	/// syscall on its flags alone — answering only the group-scoped form while
+	/// every other signal this module sends still works — so a forged resolve is
+	/// narrowly reachable rather than something that would have to break
+	/// everything. What it buys is bounded: a forged resolve makes a group look
+	/// signalled and its members attributable, which is why emptiness is never
+	/// taken from this path alone and is corroborated numerically wherever it is
+	/// read.
 	pub fn pidfd_group_scope_supported() -> bool {
 		static SUPPORTED: OnceLock<bool> = OnceLock::new();
-		// SAFETY: `getpgid(0)` reads the caller's own group and touches no
-		// caller-owned memory.
-		*SUPPORTED.get_or_init(|| probe_group_scope(unsafe { libc::getpgid(0) }))
-	}
-
-	/// Whether the group-scoped form resolves `pgid`, which the caller must
-	/// already know to be a live group.
-	///
-	/// The liveness is established through `kill(-pgid, 0)`, a different kernel
-	/// path from the one under test, and that corroboration is the whole point:
-	/// on a working kernel a live group cannot answer `ESRCH` through a pidfd
-	/// that leads it, so an `ESRCH` here is something answering *for* the kernel
-	/// — a seccomp filter synthesizing an errno without running the syscall —
-	/// and not evidence that the form is understood. Only a resolve counts, and
-	/// everything else leaves the scope unavailable, which costs no more than
-	/// the numeric fallback.
-	///
-	/// A forged *success* is not detectable from here, but a filter that reports
-	/// delivery it never performed breaks every signal this module sends rather
-	/// than only this one.
-	pub fn probe_group_scope(pgid: i32) -> bool {
-		if pgid <= 0 {
-			return false;
-		}
-		// SAFETY: `kill` takes scalars by value; the null signal delivers nothing
-		// and only reports whether any task carries the group.
-		if unsafe { libc::kill(-pgid, 0) } != 0 {
-			return false;
-		}
-		let Some(pidfd) = open_pidfd(pgid) else {
-			return false;
-		};
-		pidfd_group_signal(pidfd.as_raw_fd(), 0).is_ok()
+		*SUPPORTED.get_or_init(|| {
+			const CLOSED: RawFd = -1;
+			matches!(
+				(pidfd_signal(CLOSED, 0, PIDFD_SIGNAL_PROCESS_GROUP), pidfd_signal(CLOSED, 0, 0)),
+				(Err(libc::EBADF), Err(libc::EBADF))
+			)
+		})
 	}
 
 	/// Find processes whose `/proc/{pid}/exe` symlink resolves to exactly
@@ -1553,24 +1548,25 @@ impl TerminationPlan {
 		let leader = self.group_leader.as_ref();
 		// Scanned before the group is resolved, never after: only a resolve that
 		// follows the scan vouches for it.
-		let members = Process::group_members(pgid);
+		let (members, complete) = Process::group_members_checked(pgid);
 		// A group that resolves but scans empty is a contradiction rather than an
 		// empty group — `/proc` enumeration can fail wholesale or skip entries, and
 		// the leader of a numerically proven group is itself a member that has to
 		// appear. Reading it as emptiness would report the very survivor this
 		// exists to find as accounted for, which is the one thing it must not do.
 		match leader.map_or(GroupScope::Unresolved, |leader| leader.probe_own_group(pgid)) {
-			GroupScope::Signalled if !members.is_empty() => {},
+			GroupScope::Signalled if complete && !members.is_empty() => {},
 			// Nothing is attached to the retained pid object, and `kill(-pgid, 0)`
 			// agrees, so nothing that answers to the number is this group's. Without
 			// that second path the emptiness is not evidence: an errno can be
 			// synthesized for a group that is in fact populated.
-			GroupScope::Empty if !process_group_alive(pgid) => {
+			GroupScope::Empty if complete && !process_group_alive(pgid) => {
 				return GroupSurvivors::Known(Vec::new());
 			},
 			// Nothing but the number to go on, so the scan is only attributable while
 			// the leader's pid still holds the leader.
-			GroupScope::Unresolved if group_still_led_by(pgid, leader) && !members.is_empty() => {},
+			GroupScope::Unresolved
+				if complete && group_still_led_by(pgid, leader) && !members.is_empty() => {},
 			_ => return GroupSurvivors::Unattributable,
 		}
 		GroupSurvivors::Known(
@@ -1661,6 +1657,38 @@ impl Process {
 		self.signalable_descendants(&host_protected_pids())
 	}
 
+	/// Collect the group again after signalling it, folding the arrivals into
+	/// `members`.
+	///
+	/// Every group signal is a broadcast to whatever is attached at the instant
+	/// it fires, which is not what the scan before it named: a task that joined
+	/// in between is signalled and then never waited for, and one that could not
+	/// be signalled at all is dropped entirely. So the second collection has to
+	/// end in an outcome rather than a conditional union — a group signal can
+	/// succeed while some member of it was unsignalable, and losing that member
+	/// for want of a second answer is the same false success by a longer route.
+	#[cfg(not(target_os = "windows"))]
+	fn recollect_after_signal(&self, pgid: i32, members: &mut Vec<Self>) -> Result<()> {
+		let (arrivals, complete) = Self::group_members_checked(pgid);
+		let vouched = match self.probe_own_group(pgid) {
+			GroupScope::Signalled => true,
+			// Nothing is attached and the number agrees, so there is nothing left to
+			// have arrived and the members already collected are the whole of it.
+			GroupScope::Empty if !process_group_alive(pgid) => return Ok(()),
+			// Without the scope the number is all there is, and only the leader still
+			// occupying its pid can vouch for a scan of it.
+			GroupScope::Unresolved => self.leads_group(pgid),
+			GroupScope::Empty => false,
+		};
+		anyhow::ensure!(vouched, "cannot account for process group {pgid} after signalling it");
+		anyhow::ensure!(
+			complete && !arrivals.is_empty(),
+			"cannot observe members of process group {pgid}"
+		);
+		extend_by_identity(members, arrivals);
+		Ok(())
+	}
+
 	/// Snapshot and hard-kill the tree before returning its exit waiter.
 	///
 	/// Fails rather than returning a waiter it knows to be incomplete: a process
@@ -1677,16 +1705,19 @@ impl Process {
 			// that reference can be reaped between the answer and this scan, which
 			// releases the pgid for an unrelated session leader to claim. So the scan
 			// still needs vouching for, and only a resolve that follows it can do that.
-			let members = Self::group_members(pgid);
+			let (members, complete) = Self::group_members_checked(pgid);
 			match self.signal_own_group(pgid, KILL_SIGNAL) {
 				GroupScope::Signalled => {
 					// This reference is a live leader, so it is a member of its own group
-					// and has to appear in the scan. An empty one is the scan failing,
-					// which must not read as a group with nothing in it.
+					// and has to appear in the scan. An empty or admittedly partial one
+					// is the scan failing, which must not read as a group with nothing
+					// left in it.
 					anyhow::ensure!(
-						!members.is_empty(),
+						complete && !members.is_empty(),
 						"cannot observe members of process group {pgid}"
 					);
+					let mut members = members;
+					self.recollect_after_signal(pgid, &mut members)?;
 					processes.extend(members);
 				},
 				// Nothing is attached to the retained pid object and the number agrees,
@@ -1699,6 +1730,8 @@ impl Process {
 				GroupScope::Unresolved => {
 					if self.leads_group(pgid) {
 						let _ = kill_process_group(pgid, KILL_SIGNAL);
+						let mut members = members;
+						self.recollect_after_signal(pgid, &mut members)?;
 						processes.extend(members);
 					}
 				},
@@ -1730,7 +1763,11 @@ impl Process {
 	/// if its query fails, and neither check is atomic with the signal.
 	#[must_use]
 	pub fn signal_own_group(&self, pgid: i32, signal: i32) -> GroupScope {
-		if pgid <= 0 || pgid != self.pid() || is_self_process_group(pgid) {
+		// Group 1 is excluded along with the nonsensical ones: `kill(-1, sig)`
+		// addresses every process the caller may signal rather than that group, so
+		// none of the numeric corroboration this module leans on means anything
+		// there, and a group led by init is never ours to sweep.
+		if pgid <= 1 || pgid != self.pid() || is_self_process_group(pgid) {
 			return GroupScope::Unresolved;
 		}
 		self.inner.signal_own_group(signal)
@@ -1767,7 +1804,7 @@ impl Process {
 	pub fn hard_kill_own_group(&self) -> Result<ProcessExitWait> {
 		let pgid = self.pid();
 		anyhow::ensure!(
-			pgid > 0 && !is_self_process_group(pgid),
+			pgid > 1 && !is_self_process_group(pgid),
 			"refusing to kill process group {pgid}"
 		);
 		#[cfg(target_os = "windows")]
@@ -1779,7 +1816,7 @@ impl Process {
 			// for exactly as long as the retained pid object has tasks attached to
 			// it. Resolving first would prove nothing about a later scan, which
 			// could still capture a group that took the number in between.
-			let members = Self::group_members(pgid);
+			let (members, complete) = Self::group_members_checked(pgid);
 			let protected = host_protected_pids();
 			match self.signal_own_group(pgid, KILL_SIGNAL) {
 				GroupScope::Signalled => {
@@ -1788,29 +1825,11 @@ impl Process {
 					// entries, and reading that as emptiness would report the very member
 					// this path exists to reach as already gone.
 					anyhow::ensure!(
-						!members.is_empty(),
+						complete && !members.is_empty(),
 						"cannot observe members of process group {pgid}"
 					);
-					// The broadcast above reaches tasks that joined after the scan, which
-					// the scan cannot name, so they would be signalled and never waited
-					// for. A second scan collects them — and has to end in an outcome
-					// rather than a conditional union, because a group signal can succeed
-					// while some member of it was not signalable, and dropping that member
-					// for want of a second resolve is the same false success by a longer
-					// route.
 					let mut members = members;
-					let arrivals = Self::group_members(pgid);
-					match self.probe_own_group(pgid) {
-						GroupScope::Signalled => {
-							anyhow::ensure!(
-								!arrivals.is_empty(),
-								"cannot observe members of process group {pgid}"
-							);
-							extend_by_identity(&mut members, arrivals);
-						},
-						GroupScope::Empty if !process_group_alive(pgid) => {},
-						_ => anyhow::bail!("cannot account for process group {pgid} after signalling it"),
-					}
+					self.recollect_after_signal(pgid, &mut members)?;
 					Ok(Self::hard_kill_processes(members, &protected))
 				},
 				// Nothing is attached to the retained pid object, and the number agrees,
@@ -1829,7 +1848,7 @@ impl Process {
 				),
 				GroupScope::Unresolved => {
 					anyhow::ensure!(
-						!members.is_empty() || !process_group_alive(pgid),
+						complete && (!members.is_empty() || !process_group_alive(pgid)),
 						"cannot observe members of process group {pgid}"
 					);
 					// Zombies carry the pgid but need no signal, so a group with nothing
@@ -1848,6 +1867,9 @@ impl Process {
 							"process group {pgid} cannot be proven to still be ours"
 						);
 						let _ = kill_process_group(pgid, KILL_SIGNAL);
+						let mut members = members;
+						self.recollect_after_signal(pgid, &mut members)?;
+						return Ok(Self::hard_kill_processes(members, &protected));
 					}
 					Ok(Self::hard_kill_processes(members, &protected))
 				},
@@ -1860,15 +1882,23 @@ impl Process {
 		pgid == self.pid() && group_still_led_by(pgid, Some(self))
 	}
 
-	fn group_members(pgid: i32) -> Vec<Self> {
-		pi_builtins::ProcInfo::all()
+	/// Members of `pgid`, and whether the walk that found them saw everything.
+	///
+	/// The completeness matters more than the membership: a caller deciding that
+	/// a group holds nothing, or holds only what it can see, is reasoning about
+	/// an absence, and an enumeration that quietly lost entries produces exactly
+	/// the same answer as a group that really is empty.
+	fn group_members_checked(pgid: i32) -> (Vec<Self>, bool) {
+		let (all, complete) = pi_builtins::ProcInfo::all_checked();
+		let members = all
 			.into_iter()
 			.filter(|process| process.group_id() == Some(pgid))
 			.filter_map(|process| Self::from_pid(process.pid()))
 			.filter(|process| {
 				process.status() == ProcessStatus::Exited || process.group_id() == Some(pgid)
 			})
-			.collect()
+			.collect();
+		(members, complete)
 	}
 
 	fn hard_kill_processes(processes: Vec<Self>, protected: &HashSet<i32>) -> ProcessExitWait {
@@ -2230,7 +2260,7 @@ pub fn kill_process_group(pgid: i32, signal: i32) -> bool {
 	// process group. Doing so terminates the harness along with the targets.
 	// `SpawnRegistry` only ever records pgids brush created for this run (never
 	// the harness pgid); this catches any future caller that bypasses it.
-	if pgid <= 0 || is_self_process_group(pgid) {
+	if pgid <= 1 || is_self_process_group(pgid) {
 		return false;
 	}
 	platform::kill_process_group(pgid, signal)
@@ -2701,39 +2731,53 @@ mod tests {
 	/// rather than inferred from a version, because it decides which contract
 	/// the group fallback is held to.
 	///
-	/// Reaches for the syscalls directly instead of asking the code under test:
-	/// an oracle built on the production detection classifies a broken
-	/// implementation as an incapable kernel and then holds it to the weaker
-	/// contract, so the capable path would never be required of anything. The
-	/// rule it re-implements is the corroborated one — the caller's own group is
-	/// live by construction, so its leader has to resolve, and an `ESRCH` there
-	/// is something answering for the kernel rather than evidence about it.
+	/// Deliberately built the *other* way round from the production probe, which
+	/// asks the syscall's argument validation and needs no process at all. This
+	/// one creates a real group for the purpose, establishes that it is live
+	/// through `kill(-pgid, 0)`, and requires the scoped call to resolve it
+	/// through its own leader's pidfd. Re-implementing the same rule would not
+	/// be independence — both copies would carry the same premise, and a
+	/// premise that is wrong would make them agree incorrectly.
 	#[cfg(target_os = "linux")]
 	fn kernel_scopes_pidfd_signals_to_groups() -> bool {
+		use std::os::unix::process::CommandExt;
+
 		const SYS_PIDFD_OPEN: libc::c_long = 434;
 		const PROCESS_GROUP: libc::c_uint = 4;
 
-		// SAFETY: every call here takes scalars by value; the null signal delivers
-		// nothing, and the descriptor is closed on both paths out.
-		unsafe {
-			let pgid = libc::getpgid(0);
-			if pgid <= 0 || libc::kill(-pgid, 0) != 0 {
-				return false;
+		let Ok(mut leader) = std::process::Command::new("sleep")
+			.arg("30")
+			.process_group(0)
+			.spawn()
+		else {
+			return false;
+		};
+		let Ok(pgid) = i32::try_from(leader.id()) else {
+			let _ = leader.kill();
+			let _ = leader.wait();
+			return false;
+		};
+		// SAFETY: every call takes scalars by value; the null signal delivers
+		// nothing, and the descriptor is closed before returning.
+		let resolved = unsafe {
+			libc::kill(-pgid, 0) == 0 && {
+				let pidfd = libc::syscall(SYS_PIDFD_OPEN, pgid, 0 as libc::c_uint);
+				pidfd >= 0 && {
+					let ret = libc::syscall(
+						libc::SYS_pidfd_send_signal,
+						pidfd as libc::c_int,
+						0,
+						std::ptr::null::<libc::siginfo_t>(),
+						PROCESS_GROUP,
+					);
+					libc::close(pidfd as libc::c_int);
+					ret == 0
+				}
 			}
-			let pidfd = libc::syscall(SYS_PIDFD_OPEN, pgid, 0 as libc::c_uint);
-			if pidfd < 0 {
-				return false;
-			}
-			let ret = libc::syscall(
-				libc::SYS_pidfd_send_signal,
-				pidfd as libc::c_int,
-				0,
-				std::ptr::null::<libc::siginfo_t>(),
-				PROCESS_GROUP,
-			);
-			libc::close(pidfd as libc::c_int);
-			ret == 0
-		}
+		};
+		let _ = leader.kill();
+		let _ = leader.wait();
+		resolved
 	}
 
 	/// Non-Linux Unix has no pidfd at all, so the scope can never be available.
@@ -2742,42 +2786,82 @@ mod tests {
 		false
 	}
 
-	/// Set on the re-entrant child of the detection test below.
+	/// Carries the verdict path into the re-entrant child of the test below.
 	#[cfg(target_os = "linux")]
-	const SCOPE_CHILD_ENV: &str = "OMP_TEST_GROUP_SCOPE_CHILD";
+	const SCOPE_CHILD_ENV: &str = "OMP_TEST_GROUP_SCOPE_VERDICT";
 
-	/// Detection must not depend on the caller leading its own process group.
-	/// The syscall reads the group list off the retained pid object, so a pidfd
-	/// for a non-leading caller answers `ESRCH` no matter how capable the kernel
-	/// is — which is what most hosts look like, and what once disabled the scope
-	/// outright. Exercised in a fresh child so the answer is computed from an
-	/// uninitialised cache in a process that inherited its parent's group.
+	/// Detection must not be a question about the caller's own process group.
+	/// A hosted process usually does not lead its group, and a long-lived one
+	/// has usually outlived the leader entirely — and a reaped leader's pid
+	/// answers `ESRCH` to `pidfd_open` however capable the kernel is. Probing
+	/// through that leader therefore reported "unsupported" and silently gave
+	/// up the capability. Exercised in a grandchild whose group leader has been
+	/// reaped, with a cache that has never been written.
 	#[cfg(target_os = "linux")]
 	#[test]
-	fn group_scope_detection_survives_a_caller_that_does_not_lead_its_group() {
-		if std::env::var_os(SCOPE_CHILD_ENV).is_some() {
+	fn group_scope_detection_survives_a_caller_whose_group_leader_is_gone() {
+		use std::os::unix::process::CommandExt;
+
+		if let Some(verdict_path) = std::env::var_os(SCOPE_CHILD_ENV) {
 			// SAFETY: both calls read the caller's own identifiers.
 			let (pid, pgid) = unsafe { (libc::getpid(), libc::getpgid(0)) };
-			assert_ne!(pid, pgid, "the child has to inherit its parent's group to test anything");
-			assert_eq!(
-				platform::pidfd_group_scope_supported(),
-				kernel_scopes_pidfd_signals_to_groups(),
-				"detection has to agree with the kernel from a process that leads no group"
-			);
+			let detected = platform::pidfd_group_scope_supported();
+			let expected = kernel_scopes_pidfd_signals_to_groups();
+			let verdict = if pid == pgid {
+				format!("the child leads its own group ({pid}), so nothing is under test")
+			} else if Process::from_pid(pgid).is_some() {
+				format!("the group leader {pgid} is still openable, so nothing is under test")
+			} else if detected != expected {
+				format!("detection said {detected} where the kernel says {expected}")
+			} else {
+				"ok".to_owned()
+			};
+			let _ = std::fs::write(verdict_path, verdict);
 			return;
 		}
-		let status =
-			std::process::Command::new(std::env::current_exe().expect("path to the test binary"))
-				// Filtered by substring rather than `--exact`, which would need the fully
-				// qualified path this name does not carry. The name is unique in the crate.
-				.args([
-					"group_scope_detection_survives_a_caller_that_does_not_lead_its_group",
-					"--nocapture",
-				])
-				.env(SCOPE_CHILD_ENV, "1")
-				.status()
-				.expect("re-run this test in a child process");
-		assert!(status.success(), "detection must hold in a process that leads no group");
+
+		let verdict_path = std::env::temp_dir().join(format!(
+			"omp-scope-verdict-{}-{}",
+			std::process::id(),
+			std::time::SystemTime::now()
+				.duration_since(std::time::UNIX_EPOCH)
+				.map_or(0, |since| since.as_nanos())
+		));
+		let _ = std::fs::remove_file(&verdict_path);
+		let binary = std::env::current_exe().expect("path to the test binary");
+		// The shell leads a group of its own and exits at once, so the test binary
+		// it leaves behind runs in a group whose leader is reaped by the `status()`
+		// below. Filtered by substring rather than `--exact`, which would want the
+		// fully qualified path this name does not carry; the name is unique.
+		let script = format!(
+			"{} group_scope_detection_survives_a_caller_whose_group_leader_is_gone --nocapture \
+			 >/dev/null 2>&1 &",
+			binary.display()
+		);
+		let status = std::process::Command::new("/bin/sh")
+			.arg("-c")
+			.arg(&script)
+			.process_group(0)
+			.env(SCOPE_CHILD_ENV, &verdict_path)
+			.status()
+			.expect("run the group leader");
+		assert!(status.success(), "the intermediate group leader must exit cleanly");
+
+		let deadline = std::time::Instant::now() + Duration::from_secs(30);
+		let verdict = loop {
+			if let Ok(verdict) = std::fs::read_to_string(&verdict_path)
+				&& !verdict.is_empty()
+			{
+				break verdict;
+			}
+			assert!(
+				std::time::Instant::now() < deadline,
+				"the orphaned child never reported a verdict"
+			);
+			std::thread::sleep(Duration::from_millis(20));
+		};
+		let _ = std::fs::remove_file(&verdict_path);
+		assert_eq!(verdict, "ok", "detection must hold where the caller's group has no leader");
 	}
 
 	/// `EINVAL` is an answer about one call, not about the kernel: an invalid
@@ -2873,6 +2957,29 @@ mod tests {
 		}
 	}
 
+	/// Read a value a shell published by renaming it into place.
+	///
+	/// A redirection creates its file before anything is written to it, so mere
+	/// existence proves nothing and an immediate read can see an empty one. The
+	/// scripts here write to a sibling and `mv` it, which is a rename within one
+	/// directory and therefore atomic; this waits for content rather than for
+	/// the name to appear.
+	#[cfg(unix)]
+	fn read_published(path: &std::path::Path, within: Duration) -> Option<String> {
+		let deadline = std::time::Instant::now() + within;
+		loop {
+			if let Ok(text) = std::fs::read_to_string(path)
+				&& !text.trim().is_empty()
+			{
+				return Some(text);
+			}
+			if std::time::Instant::now() >= deadline {
+				return None;
+			}
+			std::thread::sleep(Duration::from_millis(5));
+		}
+	}
+
 	/// A process group does not only shrink while it is being terminated: a
 	/// surviving member can fork into it after the plan was captured, and such a
 	/// member is in no walk rooted at the root either. Whatever reaches it — the
@@ -2902,10 +3009,13 @@ mod tests {
 		// so readiness means the member is orphaned and the grace wait will run its
 		// full length once the waves start.
 		let member_file = arrival.with_extension("member");
+		let ack = arrival.with_extension("ack");
 		let _ = std::fs::remove_file(&member_file);
+		let _ = std::fs::remove_file(&ack);
 		let script = format!(
-			r#"( /bin/sh -c 'trap "" TERM; echo $$ >{member}; read release; /bin/sh -c "echo \$\$ >{arrival}; exec sleep 30" >/dev/null 2>&1 & exec sleep 30' & ) ; wait; while [ ! -f {member} ]; do sleep 0.01; done; trap "" TERM; echo rooted; exec sleep 30"#,
+			r#"exec 3<&0; ( /bin/sh -c 'trap "" TERM; echo $$ >{member}.tmp; mv {member}.tmp {member}; read release <&3 || exit 9; echo ok >{ack}.tmp; mv {ack}.tmp {ack}; /bin/sh -c "echo \$\$ >{arrival}.tmp; mv {arrival}.tmp {arrival}; exec sleep 30" >/dev/null 2>&1 & exec sleep 30' & ) ; wait; while [ ! -f {member} ]; do sleep 0.01; done; trap "" TERM; echo rooted; exec sleep 30"#,
 			arrival = arrival.display(),
+			ack = ack.display(),
 			member = member_file.display()
 		);
 		let mut root = std::process::Command::new("/bin/sh")
@@ -2925,7 +3035,7 @@ mod tests {
 		// TERM-ignore, so there is nothing left to race.
 		assert_eq!(rooted.trim(), "rooted", "the root announces only once everything is in place");
 		let member = Process::from_pid(
-			std::fs::read_to_string(&member_file)
+			read_published(&member_file, Duration::from_secs(5))
 				.expect("member pid file")
 				.trim()
 				.parse()
@@ -2943,21 +3053,24 @@ mod tests {
 			"the member has to be outside the capture for the group to be the only route"
 		);
 
-		// Released only now, so the arrival provably post-dates the capture.
+		assert!(
+			!std::fs::exists(&ack).unwrap_or(false),
+			"the member must still be waiting on the release at capture time"
+		);
+		// Released only now, so the arrival provably post-dates the capture. The
+		// member reads through an inherited descriptor rather than stdin, which a
+		// backgrounded command has redirected from `/dev/null`, and acknowledges
+		// before forking so a read that failed cannot pass for one that succeeded.
 		root
 			.stdin
 			.take()
 			.expect("root stdin")
 			.write_all(b"go\n")
 			.expect("release the member");
-		let deadline = std::time::Instant::now() + Duration::from_secs(5);
-		while !std::fs::exists(&arrival).unwrap_or(false) {
-			assert!(std::time::Instant::now() < deadline, "the member never forked into the group");
-			std::thread::sleep(Duration::from_millis(5));
-		}
+		read_published(&ack, Duration::from_secs(5)).expect("the member never acknowledged release");
 		let arrived = Process::from_pid(
-			std::fs::read_to_string(&arrival)
-				.unwrap_or_default()
+			read_published(&arrival, Duration::from_secs(5))
+				.expect("the member never forked into the group")
 				.trim()
 				.parse()
 				.expect("arrival pid"),
@@ -2974,6 +3087,7 @@ mod tests {
 		let _ = root.wait();
 		let _ = std::fs::remove_file(&arrival);
 		let _ = std::fs::remove_file(&member_file);
+		let _ = std::fs::remove_file(&ack);
 		assert_eq!(
 			arrival_status,
 			ProcessStatus::Exited,
@@ -3014,7 +3128,7 @@ mod tests {
 		let member_file = marker.with_extension("member");
 		let _ = std::fs::remove_file(&member_file);
 		let script = format!(
-			r#"( /bin/sh -c 'trap "echo reached >{marker}; exit 0" TERM; echo $$ >{member}; while :; do sleep 0.05; done' & ) ; wait; while [ ! -f {member} ]; do sleep 0.01; done; trap "" TERM; echo rooted; exec sleep 30"#,
+			r#"( /bin/sh -c 'trap "echo reached >{marker}.tmp; mv {marker}.tmp {marker}; exit 0" TERM; echo $$ >{member}.tmp; mv {member}.tmp {member}; while :; do sleep 0.05; done' & ) ; wait; while [ ! -f {member} ]; do sleep 0.01; done; trap "" TERM; echo rooted; exec sleep 30"#,
 			marker = marker.display(),
 			member = member_file.display()
 		);
@@ -3034,7 +3148,7 @@ mod tests {
 		// TERM-ignore, so there is nothing left to race.
 		assert_eq!(rooted.trim(), "rooted", "the root announces only once everything is in place");
 		let member = Process::from_pid(
-			std::fs::read_to_string(&member_file)
+			read_published(&member_file, Duration::from_secs(5))
 				.expect("member pid file")
 				.trim()
 				.parse()
@@ -3409,6 +3523,11 @@ mod tests {
 		assert!(
 			!kill_process_group(0, TERM_SIGNAL),
 			"kill_process_group must reject non-positive pgids",
+		);
+		assert!(
+			!kill_process_group(1, TERM_SIGNAL),
+			"kill_process_group must reject group 1, which `kill(2)` reads as every process the \
+			 caller may signal rather than as that group",
 		);
 	}
 

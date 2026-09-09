@@ -474,6 +474,84 @@ describe("LspMuxServer", () => {
 	);
 
 	it.skipIf(process.platform === "win32")(
+		"attempts every helper when one of them throws before returning a promise",
+		async () => {
+			// The native side captures its tree synchronously, so a preparation
+			// failure surfaces as a throw rather than a rejection. Called bare inside
+			// the map that feeds `allSettled`, one such throw abandons the rest of the
+			// batch: later helpers are never attempted and earlier ones never awaited.
+			const helperFile = path.join(tmpDir, "helper.pid");
+			const grandchildFile = path.join(tmpDir, "grandchild.pid");
+			connectParams.env = {
+				TEST_LSP_HELPER_PID_FILE: helperFile,
+				TEST_LSP_GRANDCHILD_PID_FILE: grandchildFile,
+			};
+			const { client } = await link();
+			await initialize(client);
+			const helperPid = await readPid(helperFile);
+			const grandchildPid = await readPid(grandchildFile);
+			const attempted: number[] = [];
+			const spy = spyOn(Process.prototype, "killTreeAndWait").mockImplementation(function (this: Process) {
+				attempted.push(this.pid);
+				throw new Error(`Native helper termination failed: ${this.pid}`);
+			});
+			try {
+				await expect(server.shutdown()).rejects.toThrow("LSP mux shutdown incomplete");
+				expect(attempted).toContain(helperPid);
+				expect(attempted).toContain(grandchildPid);
+			} finally {
+				spy.mockRestore();
+				killPid(helperPid);
+				killPid(grandchildPid);
+				server = new LspMuxServer();
+			}
+		},
+		15_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
+		"reports a stop that already failed to a later shutdown",
+		async () => {
+			// An idle server's stop can fail long before anyone calls shutdown, and by
+			// then the server is retired and the stop settled. Neither the tracked
+			// servers nor the in-flight stops carry it, so the failure has to be kept
+			// or the shutdown that follows reports success over what it left behind.
+			const helperFile = path.join(tmpDir, "helper.pid");
+			connectParams.env = { TEST_LSP_HELPER_PID_FILE: helperFile };
+			const { client } = await link();
+			await initialize(client);
+			const helperPid = await readPid(helperFile);
+			const killTreeAndWait = Process.prototype.killTreeAndWait;
+			const helperSpy = spyOn(Process.prototype, "killTreeAndWait").mockImplementation(
+				async function (this: Process, options) {
+					if (this.pid !== helperPid) return killTreeAndWait.call(this, options);
+					return false;
+				},
+			);
+			const schedule = globalThis.setTimeout;
+			const timerSpy = spyOn(globalThis, "setTimeout").mockImplementation(((
+				handler: () => void,
+				delay?: number,
+				...args: unknown[]
+			) => schedule(handler, delay === 5 * 60 * 1_000 ? 1 : delay, ...args)) as typeof setTimeout);
+			try {
+				client.destroy();
+				await pollUntil(() => Promise.resolve(server.serverKeys.length === 0), "idle stop retirement", 6_000);
+				// The stop rejects after the retirement it races; give it the turns it
+				// needs so this really is the settled-and-forgotten case.
+				await Bun.sleep(200);
+				await expect(server.shutdown()).rejects.toThrow("LSP mux shutdown incomplete");
+			} finally {
+				helperSpy.mockRestore();
+				timerSpy.mockRestore();
+				killPid(helperPid);
+				server = new LspMuxServer();
+			}
+		},
+		15_000,
+	);
+
+	it.skipIf(process.platform === "win32")(
 		"reports a helper sweep still running after its server was retired",
 		async () => {
 			// A server is retired the moment its root termination finishes, which is

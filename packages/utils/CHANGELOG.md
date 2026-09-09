@@ -13,6 +13,10 @@
 ### Fixed
 
 - Fixed dead-root cleanup broadcasting SIGKILL to whatever process group had inherited the exited leader's pid, and killing that group's members individually; without the pidfd process-group scope both now require the pinned leader's identity to still occupy the pid.
+- Fixed the process-group scope being given up on kernels that support it. It was probed through the caller's own process group, which answers "unsupported" whenever that group's leader has already been reaped — the usual state of a long-lived process — or when it is group 1. Detection no longer needs a process at all.
+- Fixed group signals that were sent without collecting the group again afterwards, on the tree sweep and on the numeric fallback: a member that joined between the scan and the signal was signalled and then never waited for.
+- Process-group operations now refuse group 1, which `kill(2)` reads as every process the caller may signal rather than as that group, making every numeric check of it meaningless.
+- A `/proc` walk that loses entries it should have seen now says so, and a group scan that admits a gap counts as unattributable rather than as a group with nothing in it.
 - Fixed process-tree termination reporting success over a process group it could not attribute. An unattributable group is no longer read as an empty one, so a group member reparented out of the root's subtree before capture can no longer pass as a completed termination. A process-table scan that comes back empty for a group the kernel does resolve counts as unattributable too, since that is what a failed `/proc` enumeration looks like.
 
 ## [18.1.13] - 2026-09-07

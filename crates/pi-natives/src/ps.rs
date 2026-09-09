@@ -128,12 +128,14 @@ impl Process {
 		let options = options.unwrap_or_default();
 		let timeout = Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(5000)));
 		let ct = task::CancelToken::new(None, options.signal);
-		let waiter = self
-			.inner
-			.hard_kill_tree()
-			.map_err(|err| napi::Error::from_reason(err.to_string()))?;
+		// Captured synchronously, because the tree is only observable before the hop
+		// onto the executor — but reported through the promise, because a method
+		// that throws synchronously interrupts whatever loop is building a batch of
+		// these calls instead of merely failing its own.
+		let waiter = self.inner.hard_kill_tree();
 		task::future(env, "process.kill_tree_and_wait", async move {
 			waiter
+				.map_err(|err| napi::Error::from_reason(err.to_string()))?
 				.wait(timeout, ct.into_core())
 				.await
 				.map_err(|err| napi::Error::from_reason(err.to_string()))
@@ -154,12 +156,14 @@ impl Process {
 		let options = options.unwrap_or_default();
 		let timeout = Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(5000)));
 		let ct = task::CancelToken::new(None, options.signal);
-		let waiter = self
-			.inner
-			.hard_kill_own_group()
-			.map_err(|err| napi::Error::from_reason(err.to_string()))?;
+		// Captured synchronously, because the tree is only observable before the hop
+		// onto the executor — but reported through the promise, because a method
+		// that throws synchronously interrupts whatever loop is building a batch of
+		// these calls instead of merely failing its own.
+		let waiter = self.inner.hard_kill_own_group();
 		task::future(env, "process.kill_own_group_and_wait", async move {
 			waiter
+				.map_err(|err| napi::Error::from_reason(err.to_string()))?
 				.wait(timeout, ct.into_core())
 				.await
 				.map_err(|err| napi::Error::from_reason(err.to_string()))
