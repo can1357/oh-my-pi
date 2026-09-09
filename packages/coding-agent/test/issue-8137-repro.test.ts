@@ -73,7 +73,7 @@ describe("issue #8137 — inline /skill in mode-command prompts", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		mode?.stop();
-		HistoryStorage.resetInstance();
+		HistoryStorage.close();
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();
@@ -81,7 +81,7 @@ describe("issue #8137 — inline /skill in mode-command prompts", () => {
 	});
 
 	it("dispatches an inline /skill invocation from a /plan prompt as a skill message", async () => {
-		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(undefined);
+		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(true);
 		let submitted: { text: string } | undefined;
 		mode.onInputCallback = input => {
 			submitted = input;
@@ -100,7 +100,7 @@ describe("issue #8137 — inline /skill in mode-command prompts", () => {
 
 	it("dispatches an inline /skill invocation from a /vibe prompt as a skill message", async () => {
 		vi.spyOn(session, "activateVibeTools").mockResolvedValue(undefined);
-		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(undefined);
+		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(true);
 		let submitted: { text: string } | undefined;
 		mode.onInputCallback = input => {
 			submitted = input;
@@ -146,7 +146,7 @@ describe("issue #8137 — inline /skill in mode-command prompts", () => {
 	});
 
 	it("forwards draft images into the dispatched skill message", async () => {
-		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(undefined);
+		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(true);
 		const image = { type: "image" as const, data: "aGk=", mimeType: "image/png" };
 
 		await mode.handlePlanModeCommand("do X /skill:grilling", { images: [image] });
@@ -166,7 +166,7 @@ describe("issue #8137 — inline /skill in mode-command prompts", () => {
 	});
 
 	it("still submits a non-skill /plan prompt as a normal prompt", async () => {
-		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(undefined);
+		const promptCustomMessage = vi.spyOn(session, "promptCustomMessage").mockResolvedValue(true);
 		let submitted: { text: string } | undefined;
 		mode.onInputCallback = input => {
 			submitted = input;

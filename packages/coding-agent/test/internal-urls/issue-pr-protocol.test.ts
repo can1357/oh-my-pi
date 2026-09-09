@@ -2,7 +2,7 @@
  * `issue://` / `pr://` protocol handler tests.
  *
  * Every test isolates `OMP_GITHUB_CACHE_DB` to a temp file and resets the
- * cache + router singletons. `git.github.json` / `git.github.text` are spied
+ * cache + router singletons. `github.json` / `github.text` are spied
  * per-test and restored in `afterEach`.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
@@ -12,7 +12,7 @@ import * as path from "node:path";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { resetForTests as resetCacheForTests } from "@oh-my-pi/pi-coding-agent/tools/github-cache";
-import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
+import { github } from "@oh-my-pi/pi-coding-agent/utils/github";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 let tempDir: string;
@@ -156,7 +156,7 @@ function makePrDiff(files: DiffFileSpec[]): string {
 
 describe("issue:// protocol handler", () => {
 	it("resolves issue://owner/repo/<n> through the shared cache", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(42, "issue body", ["c1"]) as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue(issuePayload(42, "issue body", ["c1"]) as never);
 
 		const router = InternalUrlRouter.instance();
 		const first = await router.resolve("issue://owner/example/42");
@@ -176,7 +176,7 @@ describe("issue:// protocol handler", () => {
 	});
 
 	it("marks soft-expired issue fallback content as stale when live refresh fails", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(43, "cached body") as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue(issuePayload(43, "cached body") as never);
 		const settings = Settings.isolated({
 			"github.cache.softTtlSec": 0,
 			"github.cache.hardTtlSec": 86400,
@@ -197,7 +197,7 @@ describe("issue:// protocol handler", () => {
 	});
 
 	it("retries issue://owner/repo/<n> without stateReason when gh does not support it", async () => {
-		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+		const spy = vi.spyOn(github, "json").mockImplementation(async (_cwd, args) => {
 			if (requestedJsonFields(args).has("stateReason")) {
 				throw new Error('Unknown JSON field: "stateReason"');
 			}
@@ -215,9 +215,7 @@ describe("issue:// protocol handler", () => {
 	});
 
 	it("?comments=0 selects a separate cache row with comments suppressed", async () => {
-		const spy = vi
-			.spyOn(git.github, "json")
-			.mockResolvedValue(issuePayload(9, "body9", ["visible comment"]) as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue(issuePayload(9, "body9", ["visible comment"]) as never);
 
 		const router = InternalUrlRouter.instance();
 		const withComments = await router.resolve("issue://owner/example/9");
@@ -242,7 +240,7 @@ describe("issue:// protocol handler", () => {
 
 describe("pr:// protocol handler", () => {
 	it("resolves pr://owner/repo/<n> through the shared cache", async () => {
-		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+		const spy = vi.spyOn(github, "json").mockImplementation(async (_cwd, args) => {
 			if (args.includes("/repos/owner/example/pulls/77/comments")) {
 				return [] as never;
 			}
@@ -267,7 +265,7 @@ describe("pr:// protocol handler", () => {
 	});
 
 	it("requests and renders formal reviews when comments are enabled", async () => {
-		vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+		vi.spyOn(github, "json").mockImplementation(async (_cwd, args) => {
 			if (args.includes("/repos/owner/example/pulls/78/comments")) {
 				return [] as never;
 			}
@@ -305,7 +303,7 @@ describe("pr:// protocol handler", () => {
 	});
 
 	it("routes pr://<host>/<owner>/<repo>/<n> at that host", async () => {
-		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+		const spy = vi.spyOn(github, "json").mockImplementation(async (_cwd, args) => {
 			if (args.includes("/repos/owner/example/pulls/77/comments")) {
 				return [] as never;
 			}
@@ -327,7 +325,7 @@ describe("pr:// protocol handler", () => {
 	});
 
 	it("routes a single-label host prefix by shape", async () => {
-		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+		const spy = vi.spyOn(github, "json").mockImplementation(async (_cwd, args) => {
 			if (args.includes("/repos/owner/example/pulls/77/comments")) {
 				return [] as never;
 			}
@@ -345,7 +343,7 @@ describe("pr:// protocol handler", () => {
 	});
 
 	it("keeps the bare diff form out of the host-prefix branch", async () => {
-		const spy = vi.spyOn(git.github, "text").mockResolvedValue(makePrDiff([{ name: "a.ts", adds: 1, dels: 0 }]));
+		const spy = vi.spyOn(github, "text").mockResolvedValue(makePrDiff([{ name: "a.ts", adds: 1, dels: 0 }]));
 
 		const router = InternalUrlRouter.instance();
 		const resource = await router.resolve("pr://owner/example/77/diff/1");
@@ -357,7 +355,7 @@ describe("pr:// protocol handler", () => {
 	});
 
 	it("shares one cache row with the bare form while still pinning github.com", async () => {
-		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+		const spy = vi.spyOn(github, "json").mockImplementation(async (_cwd, args) => {
 			if (args.includes("/repos/owner/example/pulls/79/comments")) {
 				return [] as never;
 			}
@@ -379,7 +377,7 @@ describe("pr:// protocol handler", () => {
 	});
 
 	it("keeps github.com rows separate from the host GH_HOST names", async () => {
-		const spy = vi.spyOn(git.github, "json").mockImplementation(async (_cwd, args) => {
+		const spy = vi.spyOn(github, "json").mockImplementation(async (_cwd, args) => {
 			if (args.some(arg => arg.endsWith("/comments"))) {
 				return [] as never;
 			}
@@ -421,7 +419,7 @@ describe("pr://.../diff family", () => {
 	]);
 
 	it("pr://owner/repo/<n>/diff lists files with per-file hint URLs", async () => {
-		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(diffText);
+		const textSpy = vi.spyOn(github, "text").mockResolvedValue(diffText);
 
 		const router = InternalUrlRouter.instance();
 		const resource = await router.resolve("pr://owner/example/77/diff");
@@ -437,7 +435,7 @@ describe("pr://.../diff family", () => {
 	});
 
 	it("pr://owner/repo/<n>/diff renders an empty-file body when the PR has no changes", async () => {
-		vi.spyOn(git.github, "text").mockResolvedValue("");
+		vi.spyOn(github, "text").mockResolvedValue("");
 
 		const router = InternalUrlRouter.instance();
 		const resource = await router.resolve("pr://owner/example/77/diff");
@@ -446,7 +444,7 @@ describe("pr://.../diff family", () => {
 	});
 
 	it("pr://owner/repo/<n>/diff/all returns the verbatim unified diff as text/plain", async () => {
-		vi.spyOn(git.github, "text").mockResolvedValue(diffText);
+		vi.spyOn(github, "text").mockResolvedValue(diffText);
 
 		const router = InternalUrlRouter.instance();
 		const resource = await router.resolve("pr://owner/example/77/diff/all");
@@ -455,7 +453,7 @@ describe("pr://.../diff family", () => {
 	});
 
 	it("pr://owner/repo/<n>/diff/<i> slices the i-th file (1-indexed) as text/plain", async () => {
-		vi.spyOn(git.github, "text").mockResolvedValue(diffText);
+		vi.spyOn(github, "text").mockResolvedValue(diffText);
 
 		const router = InternalUrlRouter.instance();
 		const first = await router.resolve("pr://owner/example/77/diff/1");
@@ -472,7 +470,7 @@ describe("pr://.../diff family", () => {
 	});
 
 	it("rejects out-of-range and non-decimal diff indices with friendly errors", async () => {
-		vi.spyOn(git.github, "text").mockResolvedValue(diffText);
+		vi.spyOn(github, "text").mockResolvedValue(diffText);
 
 		const router = InternalUrlRouter.instance();
 		await expect(router.resolve("pr://owner/example/77/diff/9")).rejects.toThrow(/out of range/);
@@ -480,7 +478,7 @@ describe("pr://.../diff family", () => {
 	});
 
 	it("shares one `gh pr diff` invocation across /diff, /diff/all, and /diff/<i> reads", async () => {
-		const textSpy = vi.spyOn(git.github, "text").mockResolvedValue(diffText);
+		const textSpy = vi.spyOn(github, "text").mockResolvedValue(diffText);
 
 		const router = InternalUrlRouter.instance();
 		await router.resolve("pr://owner/example/77/diff");
@@ -510,7 +508,7 @@ describe("issue://.../diff rejection", () => {
 
 describe("issue:// / pr:// listing", () => {
 	it("issue://owner/repo issues a live `gh issue list` and renders entries", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue([
+		const spy = vi.spyOn(github, "json").mockResolvedValue([
 			{
 				number: 1,
 				title: "Hello",
@@ -554,7 +552,7 @@ describe("issue:// / pr:// listing", () => {
 	});
 
 	it("pr://owner/repo passes state and limit query params through to gh", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue([] as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue([] as never);
 
 		const router = InternalUrlRouter.instance();
 		const resource = await router.resolve("pr://owner/example?state=merged&limit=5&author=alice&label=bug");
@@ -570,7 +568,7 @@ describe("issue:// / pr:// listing", () => {
 	});
 
 	it("invalid state errors instead of silently falling back to 'open'", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue([] as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue([] as never);
 
 		const router = InternalUrlRouter.instance();
 		await expect(router.resolve("issue://owner/example?state=banana")).rejects.toThrow(
@@ -581,7 +579,7 @@ describe("issue:// / pr:// listing", () => {
 	});
 
 	it("treats `diff` as a repository name in repo-scoped listing URLs", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue([] as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue([] as never);
 
 		const router = InternalUrlRouter.instance();
 		await router.resolve("issue://owner/diff");
@@ -597,7 +595,7 @@ describe("issue:// / pr:// listing", () => {
 
 	it("issue:// (no repo, no session) surfaces a friendly resolution error", async () => {
 		// resolveDefaultRepoMemoized calls `gh repo view`; intercept it.
-		vi.spyOn(git.github, "text").mockRejectedValue(new Error("not a git repository"));
+		vi.spyOn(github, "text").mockRejectedValue(new Error("not a git repository"));
 		const router = InternalUrlRouter.instance();
 		await expect(router.resolve("issue://")).rejects.toThrow(/could not resolve a default repo/);
 	});
@@ -605,7 +603,7 @@ describe("issue:// / pr:// listing", () => {
 
 describe("cross-handler cache sharing", () => {
 	it("identical markdown is served whether the protocol handler or a second handler call resolves it", async () => {
-		const spy = vi.spyOn(git.github, "json").mockResolvedValue(issuePayload(101, "shared body") as never);
+		const spy = vi.spyOn(github, "json").mockResolvedValue(issuePayload(101, "shared body") as never);
 
 		const router = InternalUrlRouter.instance();
 		const r1 = await router.resolve("issue://owner/example/101");

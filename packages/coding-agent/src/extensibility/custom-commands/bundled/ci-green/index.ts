@@ -1,12 +1,12 @@
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { prompt } from "@oh-my-pi/pi-utils";
 import type { CustomCommand, CustomCommandAPI } from "../../../../extensibility/custom-commands/types";
 import type { HookCommandContext } from "../../../../extensibility/hooks/types";
 import ciGreenRequestTemplate from "../../../../prompts/ci-green-request.md" with { type: "text" };
-import * as git from "../../../../utils/git";
 
 async function getHeadTag(api: CustomCommandAPI): Promise<string | undefined> {
 	try {
-		return (await git.ref.tags(api.cwd))[0];
+		return (await vcs.requireGit(api.cwd).tagsAt("HEAD"))[0];
 	} catch {
 		return undefined;
 	}
@@ -14,7 +14,7 @@ async function getHeadTag(api: CustomCommandAPI): Promise<string | undefined> {
 
 async function getCurrentBranch(api: CustomCommandAPI): Promise<string> {
 	try {
-		return (await git.branch.current(api.cwd)) ?? "HEAD";
+		return (await vcs.git(api.cwd)?.currentBranch()) ?? "HEAD";
 	} catch {
 		return "HEAD";
 	}
@@ -22,9 +22,11 @@ async function getCurrentBranch(api: CustomCommandAPI): Promise<string> {
 
 async function getPushRemote(api: CustomCommandAPI, branch: string): Promise<string | undefined> {
 	try {
+		const repository = vcs.git(api.cwd);
 		return (
-			(await git.config.getBranch(api.cwd, branch, "pushRemote")) ??
-			(await git.config.getBranch(api.cwd, branch, "remote"))
+			(await repository?.configGet(`branch.${branch}.pushRemote`)) ??
+			(await repository?.configGet(`branch.${branch}.remote`)) ??
+			undefined
 		);
 	} catch {
 		return undefined;

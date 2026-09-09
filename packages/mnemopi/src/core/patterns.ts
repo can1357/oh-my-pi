@@ -203,7 +203,7 @@ export class DetectedPattern {
 		this.description = init.description;
 		this.confidence = init.confidence;
 		this.samples = [...(init.samples ?? [])];
-		this.metadata = { ...(init.metadata ?? {}) };
+		this.metadata = { ...init.metadata };
 	}
 
 	toDict(): Record<string, unknown> {

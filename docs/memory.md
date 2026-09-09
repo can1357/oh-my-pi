@@ -1,6 +1,6 @@
 # Autonomous Memory
 
-Oh My Pi supports four memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
+Oh My Pi supports five memory modes. Memory is disabled by default; select one backend via `/settings` or `config.yml`:
 
 | `memory.backend` | Storage and behavior                                                   | Guide                                                   |
 | ---------------- | ---------------------------------------------------------------------- | ------------------------------------------------------- |
@@ -8,6 +8,7 @@ Oh My Pi supports four memory modes. Memory is disabled by default; select one b
 | `local`          | Project-scoped summaries and lessons generated from persisted sessions | This page                                               |
 | `hindsight`      | Remote, bank-scoped Hindsight memory                                   | [Hindsight](#hindsight-remote-backend)                  |
 | `mnemopi`        | Local Mnemopi SQLite memory                                            | [Mnemopi memory backend](./mnemosyne-memory-backend.md) |
+| `sharpshooter`   | Friction-gated project decision files (architecture/product/style), consolidated in the background | —                           |
 
 Enable the local summary pipeline:
 
@@ -36,6 +37,9 @@ The agent can read memory files directly using `memory://` URLs with the `read` 
 | `memory://root/MEMORY.md`              | Full long-term memory document       |
 | `memory://root/learned.md`             | Lessons captured by the `learn` tool |
 | `memory://root/skills/<name>/SKILL.md` | A generated skill playbook           |
+| `memory://<memory-id>`                 | Full Mnemopi memory row (working or episodic) with a YAML frontmatter metadata header; only available when `memory.backend` is `mnemopi` |
+
+The `memory://<memory-id>` form returns the full stored row rather than the clipped recall preview (recall content that exceeds the preview cap ends with a trailing `…`); agents are instructed to read it before any `memory_edit update`.
 
 ### `/memory` slash command
 
@@ -44,8 +48,11 @@ The agent can read memory files directly using `memory://` URLs with the `read` 
 | `view`                | Show the current backend injection payload                |
 | `stats`               | Show backend-specific memory statistics, when supported   |
 | `diagnose`            | Show backend-specific diagnostics, when supported         |
+| `queue`               | Show pending memory deltas awaiting consolidation         |
+| `sync`                | Run memory consolidation now                              |
 | `clear` / `reset`     | Delete active backend memory data/artifacts               |
 | `enqueue` / `rebuild` | Force consolidation/retention work for the active backend |
+| `mm …`                | Hindsight mental-model maintenance (`list`/`show`/`refresh`/`history`/`seed`/`delete`/`reload`); unsupported in ACP mode |
 
 ### Capturing lessons
 

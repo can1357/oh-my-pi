@@ -111,33 +111,5 @@
     "pageBg": "poimandresBg",
     "cardBg": "poimandresFocus",
     "infoBg": "poimandresFocus"
-  },
-  "symbols": {
-    "preset": "nerd",
-    "overrides": {
-      "status.success": "●",
-      "status.error": "✖",
-      "status.warning": "◆",
-      "status.info": "○",
-      "status.pending": "◌",
-      "nav.cursor": "▸",
-      "nav.selected": "▴",
-      "thinking.minimal": "∘",
-      "thinking.low": "◌",
-      "thinking.medium": "◍",
-      "thinking.high": "◎",
-      "thinking.xhigh": "◉",
-      "thinking.max": "●",
-      "icon.model": "◇",
-      "icon.plan": "◈",
-      "icon.goal": "⊙",
-      "icon.pause": "‖",
-      "icon.loop": "↻",
-      "icon.folder": "▸",
-      "icon.scratchFolder": "◌",
-      "icon.pi": "π",
-      "format.bullet": "◦",
-      "md.bullet": "◦"
-    }
   }
 }

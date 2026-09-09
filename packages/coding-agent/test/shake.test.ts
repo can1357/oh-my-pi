@@ -131,6 +131,81 @@ describe("AgentSession shake", () => {
 			expect(text).toContain("shaken");
 		});
 
+		it("preserves mixed tool-result images while eliding only recoverable text", async () => {
+			const largeText = "mixed tool output ".repeat(2_000);
+			const image: ImageContent = {
+				type: "image",
+				data: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB",
+				mimeType: "image/png",
+				detail: "original",
+				providerFile: { provider: "openai", id: "file_shake_image" },
+				url: "https://images.example.invalid/shake.png",
+			};
+			const imageSnapshot = structuredClone(image);
+			seedHeavyToolResult(largeText);
+			const [mixedResult] = branchToolResults();
+			mixedResult.content = [{ type: "text", text: largeText }, image];
+			const tailBefore = recentProtectedTail("newer context");
+			appendRecentProtectedTail();
+
+			const result = await session.shake("elide");
+
+			expect(result.toolResultsDropped).toBe(1);
+			expect(result.imagesDropped).toBeUndefined();
+			expect(result.artifactId).toBeDefined();
+			const placeholder = mixedResult.content[0];
+			expect(placeholder?.type).toBe("text");
+			if (placeholder?.type !== "text") throw new Error("Expected shake placeholder text");
+			expect(placeholder.text).toContain("shaken");
+			expect(placeholder.text).toContain(`artifact://${result.artifactId}`);
+			expect(mixedResult.content[1]).toBe(image);
+			expect(mixedResult.content[1]).toEqual(imageSnapshot);
+
+			const tokenizer = new Tokenizer();
+			const expectedFreed = tokenizer.countTokens(largeText) - tokenizer.countTokens(placeholder.text);
+			expect(result.tokensFreed).toBe(expectedFreed);
+			expect(result.tokensFreed).toBeGreaterThan(0);
+
+			if (!result.artifactId) throw new Error("Expected shake artifact");
+			const artifactPath = await sessionManager.getArtifactPath(result.artifactId);
+			if (!artifactPath) throw new Error("Expected persisted shake artifact");
+			expect(await Bun.file(artifactPath).text()).toContain(largeText);
+
+			const latestUser = sessionManager
+				.getBranch()
+				.findLast(entry => entry.type === "message" && entry.message.role === "user");
+			expect(
+				latestUser?.type === "message" && latestUser.message.role === "user"
+					? latestUser.message.content
+					: undefined,
+			).toEqual([{ type: "text", text: tailBefore }]);
+
+			const sessionFile = sessionManager.getSessionFile();
+			if (!sessionFile) throw new Error("Expected persisted shake session");
+			const persisted = await SessionManager.open(sessionFile, tempDir.path());
+			try {
+				const persistedResult = persisted
+					.getBranch()
+					.find(
+						entry =>
+							entry.type === "message" &&
+							entry.message.role === "toolResult" &&
+							entry.message.toolCallId === mixedResult.toolCallId,
+					);
+				const persistedImage =
+					persistedResult?.type === "message" && persistedResult.message.role === "toolResult"
+						? persistedResult.message.content.find(block => block.type === "image")
+						: undefined;
+				expect(persistedImage).toEqual(imageSnapshot);
+			} finally {
+				await persisted.close();
+			}
+
+			const imageResult = await session.shake("images");
+			expect(imageResult.imagesDropped).toBe(1);
+			expect(mixedResult.content.some(block => block.type === "image")).toBe(false);
+		});
+
 		it("updates provider-anchored context usage immediately after rewriting prompt history", async () => {
 			seedHeavyToolResult("X".repeat(20_000));
 			sessionManager.appendMessage({

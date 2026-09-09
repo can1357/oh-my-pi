@@ -98,6 +98,65 @@ export declare class DiffStream {
   finish(context?: number | undefined | null): Promise<DiffStreamResult>
 }
 
+/** One edit tool call's streaming session. */
+export declare class EditSession {
+  /**
+   * Open a session. `onPreview` (optional) receives every settled preview
+   * batch; batches are delivered one at a time, in generation order.
+   */
+  constructor(store: EditStore, policy: EditPolicy, onPreview?: ((error: Error | null, batch: EditPreviewBatch) => void) | undefined | null)
+  /** Append a raw streamed argument fragment. */
+  push(delta: string): void
+  /** Replace the buffer with the complete argument JSON (no-delta path). */
+  setArgsJson(argsJson: string): void
+  /** Arguments are complete; triggers the final untrimmed preview. */
+  finish(): void
+  /**
+   * Stage and apply the finished edit through `writer`. Never rejects for
+   * engine failures: those come back as `isError` outcomes carrying the
+   * model-facing message.
+   */
+  apply(request: EditApplyRequest, writer: (error: Error | null, request: EditWriteRequest) => Promise<EditWriteResponse>): Promise<EditApplyOutcome>
+  /** Stop the preview pump and release buffers. */
+  close(): void
+}
+
+/** Session-scoped snapshots, clipboard registers, and the no-op loop guard. */
+export declare class EditStore {
+  constructor()
+  /**
+   * Record `text` (any line endings) as the current snapshot of
+   * `absolutePath` and return its 4-hex tag.
+   */
+  recordSnapshot(absolutePath: string, text: string, seenLines?: Array<number> | undefined | null): string
+  /**
+   * Read `absolutePath` from disk and record it; null when the file is
+   * unreadable or larger than 4 MiB.
+   */
+  recordSnapshotFile(absolutePath: string, seenLines?: Array<number> | undefined | null): string | null
+  /** Merge displayed lines into the snapshot tagged `tag`. */
+  recordSeenLines(absolutePath: string, tag: string, lines: Array<number>): void
+  /**
+   * Merge the lines a hashline-formatted `body` displays into the
+   * snapshot tagged `tag`.
+   */
+  recordSeenLinesFromBody(absolutePath: string, tag: string, body: string): void
+  /** Latest recorded text for `absolutePath`. */
+  headText(absolutePath: string): string | null
+  /** Latest recorded tag for `absolutePath`. */
+  headHash(absolutePath: string): string | null
+  /** Recorded text of `absolutePath` tagged `hash`. */
+  byHashText(absolutePath: string, hash: string): string | null
+  /**
+   * Displayed lines recorded for the snapshot tagged `hash`; null when no
+   * provenance was recorded.
+   */
+  seenLines(absolutePath: string, hash: string): Array<number> | null
+  invalidate(absolutePath: string): void
+  relocate(from: string, to: string): void
+  clear(): void
+}
+
 /**
  * Process-owned cross-platform advisory lock.
  *
@@ -174,20 +233,36 @@ export declare class MacAppearanceObserver {
   stop(): void
 }
 
-/**
- * Long-lived macOS power assertion.
- *
- * On macOS this acquires one or more `IOKit` assertions that prevent the
- * requested sleep modes until the handle is stopped or dropped. On other
- * platforms it is a no-op handle so the caller can keep one cross-platform
- * code path.
- */
-export declare class MacOSPowerAssertion {
+/** A transactional, process-owned native OAuth callback receiver. */
+export declare class NativeOAuthCallback {
+  /** Create a receiver without touching the filesystem or OS registration. */
+  constructor(options: NativeOAuthCallbackOptions)
   /**
-   * Acquire a macOS power assertion. On non-macOS platforms returns a
-   * no-op handle so callers can stay cross-platform.
+   * Register the scheme transactionally. Returns false on unsupported or
+   * remote sessions.
    */
-  static start(options?: MacOSPowerAssertionOptions | undefined | null): MacOSPowerAssertion
+  start(): Promise<boolean>
+  /** Cancel an in-progress start and every pending callback wait. */
+  cancel(): void
+  /** Wait for and atomically claim the callback URL. */
+  waitForCallback(timeoutMs?: number | undefined | null): Promise<string>
+  /** Restore prior OS state and release ownership. Safe to call repeatedly. */
+  dispose(): Promise<undefined>
+}
+
+/**
+ * Long-lived cross-platform power assertion.
+ *
+ * macOS uses `IOKit`, Linux holds login1 and desktop `ScreenSaver` inhibitors,
+ * and Windows holds thread-affine execution state until the handle is stopped
+ * or dropped. Other platforms return a no-op handle.
+ */
+export declare class PowerAssertion {
+  /**
+   * Acquire a power assertion. Unsupported platforms return a no-op handle
+   * so callers can stay cross-platform.
+   */
+  static start(options?: PowerAssertionOptions | undefined | null): PowerAssertion
   /**
    * Release every assertion held by this handle. Safe to call multiple
    * times; subsequent calls are a no-op.
@@ -331,6 +406,203 @@ export declare class TtyWriter {
   stop(flushTimeoutMs: number): void
 }
 
+/** In-process Git repository handle. */
+export declare class VcsGitRepo {
+  /** Repository metadata. */
+  info(): VcsGitRepoInfo
+  /** Primary checkout root. */
+  primaryRoot(): string
+  /** Linked-worktree metadata. */
+  linkedWorktree(): VcsLinkedWorktree | null
+  /** Resolve HEAD synchronously. */
+  headSync(): VcsHeadState
+  /** Worktree-relative prefix of a directory. */
+  prefixOf(dir: string): string | null
+  /** Resolve HEAD. */
+  head(signal?: unknown | undefined | null): Promise<VcsHeadState>
+  /** Resolve HEAD SHA. */
+  headSha(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Current branch. */
+  currentBranch(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Default remote branch. */
+  defaultBranch(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Resolve a revision. */
+  resolveRef(name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Test revision existence. */
+  refExists(name: string, signal?: unknown | undefined | null): Promise<boolean>
+  /** Tags pointing at a revision. */
+  tagsAt(rev: string, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List branches. */
+  listBranches(all: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /**
+   * Whether default porcelain status reports a staged, unstaged, or untracked
+   * change.
+   */
+  isDirty(signal?: unknown | undefined | null): Promise<boolean>
+  /** Porcelain status. */
+  statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Read config. */
+  configGet(key: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Set config. */
+  configSet(key: string, value: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** List remotes. */
+  remoteList(signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Remote URL. */
+  remoteUrl(name: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Add remote. */
+  remoteAdd(name: string, url: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** List worktrees. */
+  worktrees(signal?: unknown | undefined | null): Promise<Array<VcsWorktreeEntry>>
+  /** Add worktree. */
+  worktreeAdd(path: string, refName: string, options: VcsWorktreeAddOptions, signal?: unknown | undefined | null): Promise<VcsWorktreeAddResult>
+  /** Remove worktree. */
+  worktreeRemove(path: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Prune worktrees. */
+  worktreePrune(signal?: unknown | undefined | null): Promise<undefined>
+  /** Recent subjects. */
+  logSubjects(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Recent one-line commits. */
+  logOnelines(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commits in a range. */
+  revListRange(base: string, head: string, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Best common ancestor of two revisions. */
+  mergeBase(a: string, b: string, signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Commits touching a file. */
+  revListTouching(rev: string, file: string, limit: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commit details. */
+  commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
+  /** List index or untracked paths. */
+  lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List tree paths. */
+  lsTree(rev: string, paths: Array<string>, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** List submodule paths. */
+  submodulePaths(signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Read blob bytes. */
+  showBlob(spec: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /** Read commit and patch bytes. */
+  showCommit(rev: string, maxBytes?: number | undefined | null, signal?: unknown | undefined | null): Promise<VcsShowResult>
+  /** Local LFS media directory. */
+  lfsMediaDir(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Render a patch. */
+  diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Render a no-index patch between two filesystem paths. */
+  diffNoIndex(left: string, right: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** Changed paths. */
+  changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Per-file line counts. */
+  numstat(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<VcsNumstatEntry>>
+  /** Test for a diff. */
+  hasDiff(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<boolean>
+  /** Diff two trees. */
+  diffTree(base: string, head: string, binary: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** Stage paths. */
+  stageFiles(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
+  /** Unstage paths. */
+  unstage(files: Array<string>, signal?: unknown | undefined | null): Promise<undefined>
+  /** Stage selected hunks. */
+  stageHunks(selections: Array<VcsHunkSelection>, rawDiff?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Create commit. */
+  commitCreate(message: string, options: VcsCommitOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Checkout revision. */
+  checkout(rev: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Create branch. */
+  createBranch(name: string, start: string, force: boolean, signal?: unknown | undefined | null): Promise<undefined>
+  /** Delete branch. */
+  deleteBranch(name: string, force: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Create and checkout branch. */
+  checkoutNewBranch(name: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Restore paths. */
+  restore(options: VcsRestoreOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Reset repository state. */
+  reset(mode: string, target?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Clean untracked paths. */
+  clean(options: VcsCleanOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Read tree into index. */
+  readTree(treeish: string, indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<undefined>
+  /** Write index tree. */
+  writeTree(indexPath?: string | undefined | null, signal?: unknown | undefined | null): Promise<string>
+  /** Apply patch. */
+  applyPatch(patch: string, options: VcsApplyOptions, signal?: unknown | undefined | null): Promise<undefined>
+  /** Check patch applicability. */
+  canApplyPatch(patch: string, options: VcsApplyOptions, signal?: unknown | undefined | null): Promise<boolean>
+  /** Cherry-pick commit. */
+  cherryPick(rev: string, signal?: unknown | undefined | null): Promise<undefined>
+  /** Abort cherry-pick. */
+  cherryPickAbort(signal?: unknown | undefined | null): Promise<undefined>
+  /** Skip cherry-pick. */
+  cherryPickSkip(signal?: unknown | undefined | null): Promise<undefined>
+  /** Push stash. */
+  stashPush(message?: string | undefined | null, signal?: unknown | undefined | null): Promise<boolean>
+  /** Pop stash if cleanly applicable. */
+  stashTryPop(reinstateIndex: boolean, signal?: unknown | undefined | null): Promise<boolean>
+  /** Push via Git CLI. */
+  push(options: VcsPushOptions, signal?: unknown | undefined | null): Promise<void>
+  /** Fetch a refspec via Git CLI. */
+  fetch(remote: string, source: string, target: string, timeoutMs?: number | undefined | null, signal?: unknown | undefined | null): Promise<void>
+}
+
+/** In-process Jujutsu workspace handle. */
+export declare class VcsJjWorkspace {
+  /** Workspace root. */
+  root(): string
+  /** Shared store directory. */
+  storeDir(): string
+  /** Working-copy label. */
+  workingCopyLabel(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Render working-copy patch. */
+  diffText(files: Array<string>, snapshot: boolean, signal?: unknown | undefined | null): Promise<string>
+  /** List changed paths. */
+  changedFiles(files: Array<string>, snapshot: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+}
+
+/** Backend-agnostic repository handle for portable VCS reads. */
+export declare class VcsRepo {
+  /** Backend kind (`"git"` or `"jj"`). */
+  kind(): string
+  /** Checkout or workspace root. */
+  root(): string
+  /** Primary checkout or default workspace root. */
+  primaryRoot(): string
+  /** Worktree-relative prefix of a directory. */
+  prefixOf(dir: string): string | null
+  /** Filesystem target to watch for repository-head changes. */
+  watchTarget(): string
+  /** Whether this backend implements a portable feature. */
+  supports(feature: string): boolean
+  /** Git-specific handle when this repository is backed by Git. */
+  asGit(): VcsGitRepo | null
+  /** Jujutsu-specific handle when this repository is backed by Jujutsu. */
+  asJj(): VcsJjWorkspace | null
+  /** Human label for the working copy. */
+  label(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Working-copy commit id. */
+  headId(signal?: unknown | undefined | null): Promise<string | undefined | null>
+  /** Status counts. */
+  statusSummary(signal?: unknown | undefined | null): Promise<VcsStatusSummary>
+  /** Porcelain status. */
+  statusPorcelain(options: VcsStatusOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Render a patch. */
+  diffText(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<string>
+  /** Changed paths. */
+  changedFiles(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Per-file line counts. */
+  numstat(options: VcsDiffOptions, signal?: unknown | undefined | null): Promise<Array<VcsNumstatEntry>>
+  /** Every working-copy change since the last commit. */
+  uncommittedDiff(files: Array<string>, signal?: unknown | undefined | null): Promise<string>
+  /** Recent subjects. */
+  logSubjects(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Recent one-line commits. */
+  logOnelines(count: number, signal?: unknown | undefined | null): Promise<Array<string>>
+  /** Commit details. */
+  commitDetails(rev: string, signal?: unknown | undefined | null): Promise<VcsCommitDetails>
+  /** List tracked or untracked paths. */
+  lsFiles(others: boolean, excludeStandard: boolean, signal?: unknown | undefined | null): Promise<Array<string>>
+}
+
 /**
  * Install the bounded Tokio runtime napi-rs adopts for async exports and the
  * bounded Rayon global pool used by native parallel iterators.
@@ -376,7 +648,7 @@ export declare function __ompInstallTokioRuntime(): void
  * `packages/natives/native/index.js` (which derives the name from
  * `package.json#version`).
  */
-export declare function __piNativesV18_0_8(): void
+export declare function __piNativesV18_1_15(): void
 
 /**
  * Apply ast-grep rewrite rules to matching files; honors `dryRun` and returns
@@ -739,6 +1011,16 @@ export declare function cosineSimilarityPairs(vectors: Float64Array, count: numb
  */
 export declare function countTokens(input: string | string[], encoding?: Encoding | undefined | null): number
 
+/**
+ * Decode one complete SIXEL control string into a PNG.
+ *
+ * The decoder is deliberately bounded before handing the stream to
+ * `icy_sixel`: raster declarations, repeats, and row advances are scanned
+ * first so hostile dimensions cannot make the dependency allocate its much
+ * larger internal maximum.
+ */
+export declare function decodeSixelToPng(bytes: Uint8Array): Uint8Array
+
 export interface DesktopCapabilities {
   backend: string
   displayServer?: string
@@ -939,6 +1221,169 @@ export interface DiffStreamResult {
  */
 export declare function diffWords(oldText: string, newText: string): Array<DiffChange>
 
+/**
+ * Whole-call apply outcome. `is_error` carries the model-facing failure in
+ * `text` with no files.
+ */
+export interface EditApplyOutcome {
+  text: string
+  files: Array<EditFileOutcome>
+  isError: boolean
+}
+
+/** Apply-time knobs. */
+export interface EditApplyRequest {
+  lspBatchId?: string
+  lspFlush: boolean
+}
+
+/**
+ * Auto-generated-file guard: the rejection message when `absolutePath`
+ * (displayed as `displayPath`) must not be edited, else null. Missing or
+ * unreadable files are editable.
+ */
+export declare function editAutoGeneratedMessage(absolutePath: string, displayPath: string): string | null
+
+/** Tool description markdown for `mode`. */
+export declare function editDescription(mode: string): string
+
+/** Numbered unified diff plus the first changed line. */
+export interface EditDiffResult {
+  diff: string
+  firstChangedLine?: number
+}
+
+/** Numbered unified diff between two texts (`generateDiffString`). */
+export declare function editDiffString(oldText: string, newText: string, path?: string | undefined | null): EditDiffResult
+
+/** A destructive file operation a payload declares. */
+export interface EditFileOpIntent {
+  /** `delete` | `move`. */
+  kind: string
+  path: string
+  to?: string
+}
+
+/** One file's apply outcome. */
+export interface EditFileOutcome {
+  /** Absolute path. */
+  path: string
+  displayPath: string
+  /** `create` | `update` | `delete`. */
+  op: string
+  moveTo?: string
+  diff: string
+  firstChangedLine?: number
+  oldText?: string
+  newText?: string
+  snapshotsPruned: boolean
+  diagnosticsJson?: string
+  /** Engine warnings (already rendered into `text`). */
+  warnings: Array<string>
+  /** Model-facing text for this file. */
+  text: string
+  /** The file parsed before the edit and no longer does. */
+  parseRegressed: boolean
+}
+
+/** One file's streamed diff preview. */
+export interface EditFilePreview {
+  /** Display path as authored (after suffix recovery). */
+  path: string
+  /** Numbered unified diff; mutually exclusive with `error`. */
+  diff?: string
+  firstChangedLine?: number
+  /** Model-facing error text. */
+  error?: string
+  /** `create` | `update` | `delete`. */
+  op?: string
+  rename?: string
+}
+
+/** Lark grammar for `mode`, when it has a custom wire format. */
+export declare function editGrammar(mode: string): string | null
+
+/**
+ * Inspect `argsJson` (the JSON-serialized, possibly partial tool args)
+ * without touching the filesystem.
+ */
+export declare function editInspect(mode: string, argsJson: string): EditInspection
+
+/**
+ * Static projection of a payload: target paths, per-file digests, and
+ * delete/move intents.
+ */
+export interface EditInspection {
+  paths: Array<string>
+  entries: Array<EditMatcherEntry>
+  fileOps: Array<EditFileOpIntent>
+}
+
+/** `(path, added-lines digest)` for stream matchers. */
+export interface EditMatcherEntry {
+  path: string
+  digest: string
+}
+
+/** Session-wide policy; TypeScript builds it once per tool call. */
+export interface EditPolicy {
+  cwd: string
+  /** `replace` | `patch` | `apply_patch` | `hashline` | `sloppy`. */
+  mode: string
+  allowFuzzy: boolean
+  fuzzyThreshold: number
+  enforceSeenLines: boolean
+  blockAutoGenerated: boolean
+  planActive: boolean
+  /** Root of the `local://` artifact sandbox; null when the session has none. */
+  localSandboxRoot?: string
+  /** Cached vault roots; null when the vault protocol is disabled. */
+  vaultRoots?: Array<EditVaultRoot>
+  homeDir: string
+  /** The payload is a verbatim custom-format string, not JSON. */
+  rawInput: boolean
+}
+
+/** A batch of previews for one session generation. */
+export interface EditPreviewBatch {
+  /** Monotonically increasing per session. */
+  generation: number
+  /** False for the final untrimmed pass after `finish()`. */
+  streaming: boolean
+  files: Array<EditFilePreview>
+}
+
+/** A cached `vault://` root. */
+export interface EditVaultRoot {
+  /** Vault name; `_` is the active vault. */
+  name: string
+  root: string
+}
+
+/** Host write request; the host owns the bytes. */
+export interface EditWriteRequest {
+  /** Absolute path. */
+  path: string
+  displayPath: string
+  /** `create` | `update` | `delete` | `move`. */
+  op: string
+  /** Absolute destination for `move` (write `content` there, delete `path`). */
+  moveTo?: string
+  /** Final bytes as text; null for `delete`. */
+  content?: string
+  /** Last write of this call and the LSP batch requested a flush. */
+  flushLsp: boolean
+  lspBatchId?: string
+}
+
+/** Host write response. */
+export interface EditWriteResponse {
+  /** Text actually persisted (a bridge may reformat); empty for deletes. */
+  written: string
+  /** `FileDiagnosticsResult` serialized by the host; opaque here. */
+  diagnosticsJson?: string
+}
+
 /** Ellipsis strategy for [`truncate_to_width`]. */
 export declare enum Ellipsis {
   /** Use a single Unicode ellipsis character ("…"). */
@@ -1010,6 +1455,22 @@ export declare enum Encoding {
 }
 
 /**
+ * Replace the current process image via `execvp(3)`.
+ *
+ * On success this never returns: the kernel tears down every other thread and
+ * the new program takes over this PID, controlling terminal, and inherited
+ * (non-`CLOEXEC`) file descriptors. Callers must flush logs and restore the
+ * terminal first — no JS or native cleanup runs after a successful call.
+ *
+ * # Errors
+ * Returns an error, leaving the process untouched, when `argv` is empty, an
+ * argument contains an interior NUL byte, or the exec itself fails (e.g.
+ * executable not found). Windows has no exec-replace semantics, so this
+ * always errors there; callers fall back to spawn-and-wait.
+ */
+export declare function execReplace(argv: Array<string>): void
+
+/**
  * Execute a brush shell command.
  *
  * Creates a fresh session for each call. The `on_chunk` callback receives
@@ -1017,6 +1478,9 @@ export declare enum Encoding {
  * completes, or flags when cancelled or timed out.
  */
 export declare function executeShell(options: ShellExecuteOptions, onChunk?: ((error: Error | null, chunk: string) => void) | undefined | null): Promise<ShellRunResult>
+
+/** Locate `<SM:EDIT path="…">` payloads the model emitted as plain text. */
+export declare function extractInlineSloppyRegions(text: string): Array<InlineSloppyRegion>
 
 /**
  * Extract the before/after slices around an overlay region.
@@ -1275,6 +1739,30 @@ export interface GrepResult {
 }
 
 /**
+ * Count canonical hashline op header shapes (`PUT N.=M:`, `CUT N*`, …) in
+ * a payload; empty when it carries no hashline ops.
+ */
+export declare function hashlineCountOps(input: string): Array<HashlineOpCount>
+
+/** 4-hex hashline content tag for `text`. */
+export declare function hashlineFileHash(text: string): string
+
+/** `[path#TAG]` section header. */
+export declare function hashlineFormatHeader(path: string, tag: string): string
+
+/** `N:line` numbered display rows starting at `startLine` (default 1). */
+export declare function hashlineFormatNumberedLines(text: string, startLine?: number | undefined | null): string
+
+/** Count of one canonical hashline op header shape in a payload. */
+export interface HashlineOpCount {
+  label: string
+  count: number
+}
+
+/** Strip hashline display prefixes (`N:` / `+N:` …) from pasted rows. */
+export declare function hashlineStripPrefixes(lines: Array<string>): Array<string>
+
+/**
  * Quick check if content matches a pattern.
  *
  * # Arguments
@@ -1345,6 +1833,13 @@ export interface HtmlToMarkdownOptions {
   cleanContent?: boolean
   /** Skip images during conversion. */
   skipImages?: boolean
+}
+
+/** One stray sloppy payload region inside prose (UTF-16 offsets). */
+export interface InlineSloppyRegion {
+  start: number
+  end: number
+  payload: string
 }
 
 /**
@@ -1559,30 +2054,6 @@ export declare function macOSCheckSpelling(text: string): Promise<Array<Spelling
  */
 export declare function macOSCompleteWord(text: string, start: number, length: number): Promise<Array<string>>
 
-/**
- * Options for starting a macOS power assertion.
- *
- * Each boolean maps to a `caffeinate(8)` flag and a corresponding `IOKit`
- * `IOPMAssertion` type. Multiple flags can be combined; when set, one
- * assertion is taken per flag and all are released together when the
- * handle is stopped or dropped.
- *
- * If every flag is unset (or omitted), the handle behaves as if `idle`
- * were `true` — preserving the historical default of `caffeinate -i`.
- */
-export interface MacOSPowerAssertionOptions {
-  /** Human-readable reason shown in macOS power diagnostics. */
-  reason?: string
-  /** `caffeinate -i`: prevent the system from idle-sleeping. */
-  idle?: boolean
-  /** `caffeinate -s`: prevent the system from sleeping (AC power only). */
-  system?: boolean
-  /** `caffeinate -u`: declare the user is active (wakes the display). */
-  user?: boolean
-  /** `caffeinate -d`: prevent the display from idle-sleeping. */
-  display?: boolean
-}
-
 /** Whether the host can use Apple's native spelling service. */
 export declare function macOSSpellCheckerAvailable(): boolean
 
@@ -1722,6 +2193,12 @@ export interface MinimizerResult {
  */
 export declare function mmrRerankIndices(contents: Array<string>, scores: Float64Array, lambdaParam: number, topK: number): Uint32Array
 
+/** Construction options for [`NativeOAuthCallback`]. */
+export interface NativeOAuthCallbackOptions {
+  /** Custom URL scheme to register. */
+  scheme: string
+}
+
 /**
  * Named-node chain containing `options.line`, innermost-first, excluding the
  * whole-file root.
@@ -1741,6 +2218,9 @@ export interface NodeSpan {
   /** Tree-sitter grammar node kind (e.g. `attribute_item`, `function_item`). */
   kind: string
 }
+
+/** Decode notebook JSON into the editable cell-marker text. */
+export declare function notebookToEditableText(json: string, displayPath: string): string
 
 /** Parsed Kitty keyboard protocol sequence result for a Kitty input sequence. */
 export interface ParsedKittyResult {
@@ -1818,6 +2298,30 @@ export interface PointerOptions {
   count?: number
   modifiers?: Array<string>
   deliveryMode?: string
+}
+
+/**
+ * Options for starting a power assertion.
+ *
+ * Each boolean maps to a `caffeinate(8)` flag and the closest corresponding
+ * platform capability. Multiple flags can be combined; when set, one
+ * assertion is taken per flag and all are released together when the
+ * handle is stopped or dropped.
+ *
+ * If every flag is unset (or omitted), the handle behaves as if `idle`
+ * were `true` — preserving the historical default of `caffeinate -i`.
+ */
+export interface PowerAssertionOptions {
+  /** Human-readable reason shown in platform power diagnostics. */
+  reason?: string
+  /** `caffeinate -i`: prevent the system from idle-sleeping. */
+  idle?: boolean
+  /** `caffeinate -s`: prevent the system from sleeping (AC power only). */
+  system?: boolean
+  /** `caffeinate -u`: declare the user is active (wakes the display). */
+  user?: boolean
+  /** `caffeinate -d`: prevent the display from idle-sleeping. */
+  display?: boolean
 }
 
 /** Current state of a process reference. */
@@ -2212,6 +2716,195 @@ export declare function supportsLanguage(lang: string): boolean
  * Pads with spaces when requested.
  */
 export declare function truncateToWidth(text: string, maxWidth: number, ellipsisKind: Ellipsis | undefined | null, pad: boolean | undefined | null, tabWidth: number): string
+
+/** Patch application options. */
+export interface VcsApplyOptions {
+  cached?: boolean
+  indexPath?: string
+  reverse?: boolean
+  threeWay?: boolean
+}
+
+/** Clean options. */
+export interface VcsCleanOptions {
+  ignoredOnly?: boolean
+  includeIgnored?: boolean
+  paths?: Array<string>
+}
+
+/** Clone options. */
+export interface VcsCloneOptions {
+  refName?: string
+  sha?: string
+  timeoutMs?: number
+}
+
+/** Commit author identity. */
+export interface VcsCommitAuthor {
+  name: string
+  email: string
+  date?: string
+}
+
+/** Commit metadata. */
+export interface VcsCommitDetails {
+  sha: string
+  parents: Array<string>
+  author: VcsCommitAuthor
+  message: string
+}
+
+/** Commit creation options. */
+export interface VcsCommitOptions {
+  author?: VcsCommitAuthor
+  allowEmpty?: boolean
+  amend?: boolean
+  files?: Array<string>
+}
+
+/** Detach copied Git metadata. */
+export declare function vcsDetachGitDir(worktreeRoot: string, sourceCommonDir: string, signal?: unknown | undefined | null): Promise<string>
+
+/** Diff generation options. */
+export interface VcsDiffOptions {
+  cached?: boolean
+  base?: string
+  head?: string
+  files?: Array<string>
+  context?: number
+  binary?: boolean
+}
+
+/** Discover the repository owning a directory. */
+export declare function vcsDiscover(dir: string): VcsRepo | null
+
+/** Clone a Git repository. */
+export declare function vcsGitClone(url: string, target: string, options: VcsCloneOptions, signal?: unknown | undefined | null): Promise<void>
+
+/** Discover the Git checkout containing a directory. */
+export declare function vcsGitDiscover(dir: string): VcsGitRepo | null
+
+/** Discover Git metadata without opening the repository. */
+export declare function vcsGitRepoInfo(dir: string): VcsGitRepoInfo | null
+
+/** Discovered Git repository paths. */
+export interface VcsGitRepoInfo {
+  repoRoot: string
+  gitEntryPath: string
+  gitDir: string
+  commonDir: string
+  headPath: string
+  isReftable: boolean
+}
+
+/** Resolved HEAD state. */
+export interface VcsHeadState {
+  kind: string
+  refName?: string
+  branch?: string
+  commit?: string
+}
+
+/** Selected hunks or line range for a path. */
+export interface VcsHunkSelection {
+  path: string
+  kind: string
+  indices?: Array<number>
+  start?: number
+  end?: number
+}
+
+/** Invalid hunk selection. */
+export interface VcsHunkSelectionError {
+  path: string
+  message: string
+}
+
+/** Test whether a directory is a pure jj workspace. */
+export declare function vcsIsPureJj(dir: string): boolean
+
+/** Discover a Jujutsu workspace. */
+export declare function vcsJjDiscover(dir: string): VcsJjWorkspace | null
+
+/** Join patch fragments. */
+export declare function vcsJoinPatches(parts: Array<string>): string
+
+/** Linked worktree metadata. */
+export interface VcsLinkedWorktree {
+  root: string
+  primaryRoot: string
+}
+
+/** Per-file line counts. */
+export interface VcsNumstatEntry {
+  path: string
+  added?: number
+  removed?: number
+}
+
+/** Push options. */
+export interface VcsPushOptions {
+  remote?: string
+  refspec?: string
+  forceWithLease?: boolean
+}
+
+/** Restore options. */
+export interface VcsRestoreOptions {
+  source?: string
+  staged?: boolean
+  worktree?: boolean
+  files?: Array<string>
+}
+
+/** Bounded object contents. */
+export interface VcsShowResult {
+  data: Buffer
+  truncated: boolean
+}
+
+/** Status query options. */
+export interface VcsStatusOptions {
+  untracked?: string
+  pathspecs?: Array<string>
+  nulTerminated?: boolean
+}
+
+/** Git status counts. */
+export interface VcsStatusSummary {
+  staged: number
+  unstaged: number
+  untracked: number
+}
+
+/** Validate hunk selections. */
+export declare function vcsValidateHunkSelections(rawDiff: string, selections: Array<VcsHunkSelection>): Array<VcsHunkSelectionError>
+
+/** Worktree creation options. */
+export interface VcsWorktreeAddOptions {
+  detach: boolean
+  clone: boolean
+  backend?: IsoBackendKind
+  /**
+   * Carry the source checkout's uncommitted changes into the new worktree
+   * (target must be the source `HEAD`).
+   */
+  keepChanges?: boolean
+}
+
+/** Worktree creation outcome. */
+export interface VcsWorktreeAddResult {
+  clonedWith?: IsoBackendKind
+  cloneError?: string
+}
+
+/** One worktree listing row. */
+export interface VcsWorktreeEntry {
+  path: string
+  head?: string
+  branch?: string
+  detached: boolean
+}
 
 /**
  * Score every row of a normalized `f32` matrix against `query` and return

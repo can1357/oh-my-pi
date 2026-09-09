@@ -2,7 +2,7 @@ telemetry = false
 
 [install]
 minimumReleaseAge = 259200 # 3 days in seconds
-minimumReleaseAgeExcludes = ["@types/bun", "bun-types", "kitty-vt-wasm"]
+minimumReleaseAgeExcludes = ["@types/bun", "bun-types", "kitty-vt-wasm", "@stencil-hq/vibemon"]
 linker = "hoisted"
 exact = true
 saveTextLockfile = true

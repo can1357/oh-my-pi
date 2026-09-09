@@ -8,10 +8,12 @@ describe("InputController tool output expansion", () => {
 		const expandable = { setExpanded: vi.fn() };
 		const inert = { render: vi.fn(() => []) };
 		const requestRender = vi.fn();
+		const showStatus = vi.fn();
 		const ctx = {
 			toolOutputExpanded: false,
 			chatContainer: { children: [expandable, inert] },
 			ui: { requestRender },
+			showStatus,
 		} as unknown as InteractiveModeContext;
 
 		new InputController(ctx).toggleToolOutputExpansion();
@@ -22,6 +24,7 @@ describe("InputController tool output expansion", () => {
 		// at their new heights in the same frame.
 		expect(requestRender).toHaveBeenCalledTimes(1);
 		expect(requestRender).toHaveBeenCalledWith(true);
+		expect(showStatus).toHaveBeenCalledWith("Tool output expansion: enabled");
 	});
 
 	it("does not expand hidden tool activity and explains why", () => {

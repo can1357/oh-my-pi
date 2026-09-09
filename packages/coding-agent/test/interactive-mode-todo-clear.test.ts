@@ -533,13 +533,10 @@ describe("InteractiveMode todo HUD anchor", () => {
 		mode.setTodos([
 			{
 				name: "Implementation",
-				tasks: Array.from(
-					{ length: 8 },
-					(_, index): TodoItem => ({
-						content: `Task ${index + 1}`,
-						status: index === 0 ? "in_progress" : "pending",
-					}),
-				),
+				tasks: Array.from({ length: 8 }, (_, index): TodoItem => ({
+					content: `Task ${index + 1}`,
+					status: index === 0 ? "in_progress" : "pending",
+				})),
 			},
 		]);
 

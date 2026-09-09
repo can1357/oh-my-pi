@@ -15,8 +15,10 @@ import type { AgentSession, AgentSessionEvent, PromptOptions } from "@oh-my-pi/p
 import type { CustomMessage } from "@oh-my-pi/pi-coding-agent/session/messages";
 import { resolveSoftRequestBudget, runSubprocess } from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { AgentDefinition } from "@oh-my-pi/pi-coding-agent/task/types";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task/types";
 import { EventBus } from "@oh-my-pi/pi-coding-agent/utils/event-bus";
 import { TempDir } from "@oh-my-pi/pi-utils";
+import { createSessionDefaults } from "../helpers/session-defaults";
 
 /**
  * Contracts under test — the soft request budget must degrade gracefully
@@ -62,10 +64,12 @@ function createMockSession(
 		| undefined;
 
 	const emit = (event: AgentSessionEvent) => {
+		// oxlint-disable-next-line unicorn/no-useless-spread -- listeners may change during dispatch
 		for (const listener of [...listeners]) listener(event);
 	};
 
 	const session: Partial<AgentSession> = {
+		...createSessionDefaults(),
 		state: { messages: [] } as never,
 		agent: { state: { systemPrompt: ["test"] } } as never,
 		model: { api: "anthropic-messages" } as never,
@@ -73,7 +77,6 @@ function createMockSession(
 		sessionManager: { appendSessionInit: () => {} } as never,
 		getActiveToolNames: () => ["read", "yield"],
 		getEnabledToolNames: () => ["read", "yield"],
-		setActiveToolsByName: async () => {},
 		subscribe: (listener: (event: AgentSessionEvent) => void) => {
 			listeners.push(listener);
 			return () => {
@@ -87,13 +90,12 @@ function createMockSession(
 			await onPrompt({ promptIndex, emit, pushMessage: message => messages.push(message) });
 			return true;
 		},
-		waitForIdle: async () => {},
 		getLastAssistantMessage: () => messages[messages.length - 1] as never,
 		sendUserMessage: async () => {},
 		setIrcWakeTurnObserver: observer => {
 			ircWakeTurnObserver = observer;
 		},
-		subscribeRunState: () => () => {},
+		trackIrcReply: () => {},
 		deliverIrcMessage: async msg => {
 			const record: CustomMessage = {
 				role: "custom",
@@ -112,7 +114,7 @@ function createMockSession(
 						type: "toolCall" as const,
 						id: "tool-irc-yield",
 						name: "yield",
-						arguments: { result: { data: { report: "resumed findings" } } },
+						arguments: { data: { report: "resumed findings" } },
 					},
 				],
 				stopReason: "toolUse" as const,
@@ -185,7 +187,7 @@ describe("runSubprocess soft request budget", () => {
 		tempDir[Symbol.dispose]();
 	});
 
-	function baseOptions(id: string, eventBus?: EventBus) {
+	function baseOptions(id: string, eventBus?: EventBus, subagentEventBus?: EventBus) {
 		return {
 			cwd: "/tmp",
 			agent: baseAgent,
@@ -197,6 +199,7 @@ describe("runSubprocess soft request budget", () => {
 			enableLsp: false,
 			artifactsDir: tempDir.path(),
 			eventBus,
+			subagentEventBus: subagentEventBus ?? eventBus,
 		};
 	}
 
@@ -233,7 +236,7 @@ describe("runSubprocess soft request budget", () => {
 						type: "toolCall" as const,
 						id: "tool-forced-yield",
 						name: "yield",
-						arguments: { result: { data: { report: "partial findings" } } },
+						arguments: { data: { report: "partial findings" } },
 					},
 				],
 				stopReason: "toolUse" as const,
@@ -295,31 +298,56 @@ describe("runSubprocess soft request budget", () => {
 		rpcRegistry.setSubscriptionLevel("progress");
 		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
 			if (promptIndex !== 1) return;
+			// Configuration alone must not show an advisor to remote observers.
+			expect(
+				frames.some(frame => frame.type === "subagent_progress" && frame.payload.progress.advisor === true),
+			).toBe(false);
+			// Model discovery can attach the runtime after the monitor subscribes.
+			advisorActive.mockReturnValue(true);
 			// Never yields: budget 2 → stop at 3, grace exhausted at 3 + 5 = 8.
 			for (let i = 1; i <= 8; i++) {
 				const message = assistantText(`burning request ${i}`);
 				pushMessage(message);
 				emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+				if (i === 1) {
+					const advisedProgress = frames.find(
+						frame => frame.type === "subagent_progress" && frame.payload.progress.advisor === true,
+					);
+					expect(advisedProgress).toMatchObject({ payload: { progress: { requests: 0 } } });
+					// Losing the runtime later must not erase this run's advised history.
+					advisorActive.mockReturnValue(false);
+				}
 			}
 		});
+		const advisorActive = vi.spyOn(handle.session, "isAdvisorActive");
 		mockCreateAgentSession(handle.session);
 		registerRunning(id, handle.session);
 
-		const result = await runSubprocess(baseOptions(id, eventBus));
+		const result = await runSubprocess({
+			...baseOptions(id, eventBus),
+			agent: { ...baseAgent, advisor: true },
+		});
 
 		expect(result.aborted).toBe(true);
 		expect(result.abortReason).toMatch(/Soft request budget exceeded/);
+		expect(result.advisor).toBe(true);
 		// Resumable stop, not a terminal kill: the ref stays adopted and live.
 		expect(AgentRegistry.global().get(id)?.status).toBe("idle");
 		expect(AgentLifecycleManager.global().has(id)).toBe(true);
 		expect(handle.disposeCalls()).toBe(0);
 
-		const expectRpcTurn = (): void => {
+		const expectRpcTurn = (advised: boolean): void => {
 			expect(frames[0]).toMatchObject({
 				type: "subagent_lifecycle",
 				payload: { id, status: "started" },
 			});
-			expect(frames.some(frame => frame.type === "subagent_progress")).toBe(true);
+			const firstProgress = frames.find(frame => frame.type === "subagent_progress");
+			expect(firstProgress).toBeDefined();
+			expect(firstProgress?.payload.progress.advisor === true).toBe(advised);
+			if (advised) {
+				// The badge must appear before the awakened agent emits its first request.
+				expect(firstProgress?.payload.progress.requests).toBe(0);
+			}
 			expect(frames.at(-1)).toMatchObject({
 				type: "subagent_lifecycle",
 				payload: { id, status: "completed" },
@@ -327,20 +355,23 @@ describe("runSubprocess soft request budget", () => {
 		};
 
 		frames.length = 0;
+		advisorActive.mockReturnValue(true);
 		const idleTerminal = waitForFollowUpTerminal();
 		const idleReceipt = await new IrcBus().send({ from: "Main", to: id, body: "resume your inventory" });
 		expect(idleReceipt.outcome).toBe("woken");
 		await idleTerminal;
-		expectRpcTurn();
+		expectRpcTurn(true);
 
 		await AgentLifecycleManager.global().park(id);
 		expect(AgentRegistry.global().get(id)?.status).toBe("parked");
 		frames.length = 0;
+		// Parking can rebuild an unadvised session; don't retain the prior turn's marker.
+		advisorActive.mockReturnValue(false);
 		const revivedTerminal = waitForFollowUpTerminal();
 		const revivedReceipt = await new IrcBus().send({ from: "Main", to: id, body: "resume after parking" });
 		expect(revivedReceipt.outcome).toBe("revived");
 		await revivedTerminal;
-		expectRpcTurn();
+		expectRpcTurn(false);
 		rpcRegistry.dispose();
 	});
 
@@ -457,6 +488,103 @@ describe("runSubprocess soft request budget", () => {
 		const restoredRegistry = new AgentRegistry();
 		await registerPersistedSubagents(restoredRegistry, rootSessionFile);
 		expect(restoredRegistry.get(id)?.status).toBe("parked");
+	});
+
+	it("a nested spawn reaches the root RPC surface through the inherited observability bus", async () => {
+		const id = "WiringScout";
+		// Separate session and observability buses, the way the CLI wires them.
+		const sessionBus = new EventBus();
+		const treeBus = new EventBus();
+		const frames: RpcSubagentFrame[] = [];
+		let resolveTerminalLatch: (() => void) | undefined;
+		const waitForTerminal = (): Promise<void> => {
+			const deferred = Promise.withResolvers<void>();
+			resolveTerminalLatch = deferred.resolve;
+			return deferred.promise;
+		};
+		const rpcRegistry = new RpcSubagentRegistry(treeBus, frame => {
+			frames.push(frame);
+			if (frame.type !== "subagent_lifecycle" || frame.payload.status === "started") return;
+			resolveTerminalLatch?.();
+			resolveTerminalLatch = undefined;
+		});
+		rpcRegistry.setSubscriptionLevel("events");
+		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
+			if (promptIndex !== 1) return;
+			// The depth-2 executor publishes on the bus its spawner handed down —
+			// captured from the real spawn options, not the test's own bus.
+			capturedOptions?.subagentEventBus?.emit(TASK_SUBAGENT_LIFECYCLE_CHANNEL, {
+				id: `${id}.Grandkid`,
+				agent: "task",
+				agentSource: "bundled",
+				status: "started",
+				parentToolCallId: "call-grandkid",
+				index: 2,
+			});
+			const message = assistantText("settling");
+			pushMessage(message);
+			emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+		});
+		let capturedOptions: { subagentEventBus?: EventBus } | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			capturedOptions = options;
+			return {
+				session: handle.session,
+				extensionsResult: {} as unknown as LoadExtensionsResult,
+				setToolUIContext: () => {},
+				eventBus: new EventBus(),
+			} satisfies CreateAgentSessionResult;
+		});
+		registerRunning(id, handle.session);
+
+		const terminal = waitForTerminal();
+		await runSubprocess(baseOptions(id, sessionBus, treeBus));
+		await terminal;
+
+		// The spawn wiring inherited the tree bus into the nested session.
+		expect(capturedOptions?.subagentEventBus).toBe(treeBus);
+		// The root RPC surface observed the depth-1 run…
+		expect(frames.some(frame => frame.type === "subagent_lifecycle" && frame.payload.id === id)).toBe(true);
+		// …and the depth-2 frame published on the inherited bus.
+		expect(frames.some(frame => frame.type === "subagent_lifecycle" && frame.payload.id === `${id}.Grandkid`)).toBe(
+			true,
+		);
+	});
+
+	it("an aliased observability bus does not duplicate lifecycle frames", async () => {
+		const id = "AliasScout";
+		// An SDK caller wiring the same EventBus into both slots must not see
+		// every frame twice — the executor skips the aliased re-emit.
+		const sharedBus = new EventBus();
+		const settled: string[] = [];
+		const terminal = Promise.withResolvers<void>();
+		sharedBus.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, frame => {
+			const payload = frame as { id?: string; status?: string };
+			if (payload.id !== id) return;
+			if (payload.status === "started") return;
+			settled.push(payload.status ?? "");
+			terminal.resolve();
+		});
+		const handle = createMockSession(({ promptIndex, emit, pushMessage }) => {
+			if (promptIndex !== 1) return;
+			const message = assistantText("settling");
+			pushMessage(message);
+			emit({ type: "message_end", message } as unknown as AgentSessionEvent);
+		});
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async () => {
+			return {
+				session: handle.session,
+				extensionsResult: {} as unknown as LoadExtensionsResult,
+				setToolUIContext: () => {},
+				eventBus: new EventBus(),
+			} satisfies CreateAgentSessionResult;
+		});
+		registerRunning(id, handle.session);
+
+		await runSubprocess(baseOptions(id, sharedBus, sharedBus));
+		await terminal.promise;
+
+		expect(settled).toEqual(["completed"]);
 	});
 
 	it("a caller-signal abort stays terminal and irc names the aborted agent precisely", async () => {

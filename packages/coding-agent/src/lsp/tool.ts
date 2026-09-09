@@ -24,6 +24,7 @@ import {
 	getOrCreateClient,
 	isRustAnalyzerClient,
 	type LspServerStatus,
+	reconcileIdleChecker,
 	refreshFile,
 	sendNotification,
 	sendRequest,
@@ -31,7 +32,7 @@ import {
 	waitForProjectLoaded,
 } from "./client";
 import { getLinterClient } from "./clients";
-import { getServersForFile } from "./config";
+import { configCache, getConfig, getServersForFile } from "./config";
 import {
 	BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	formatLocationWithContext,
@@ -39,6 +40,7 @@ import {
 	isOnlyQueriedDeclaration,
 	MAX_GLOB_DIAGNOSTIC_TARGETS,
 	normalizeLocationResult,
+	PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS,
 	PROJECT_INDEXED_ACTIONS,
 	REFERENCE_CONTEXT_LIMIT,
 	REFERENCES_RETRY_COUNT,
@@ -56,8 +58,6 @@ import {
 } from "./edits";
 import { detectLspmux } from "./lspmux";
 import {
-	configCache,
-	getConfig,
 	getLspServerForFile,
 	getLspServers,
 	getLspServersForFile,
@@ -291,10 +291,9 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 				};
 			}
 
-			let targets: string[];
 			let truncatedGlobTargets = false;
 			const resolvedTargets = await resolveDiagnosticTargets(file, this.session.cwd, MAX_GLOB_DIAGNOSTIC_TARGETS);
-			targets = resolvedTargets.matches;
+			const targets = resolvedTargets.matches;
 			truncatedGlobTargets = resolvedTargets.truncated;
 
 			if (targets.length === 0) {
@@ -305,9 +304,6 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			}
 
 			const detailed = targets.length > 1 || truncatedGlobTargets;
-			const diagnosticsWaitTimeoutMs = detailed
-				? Math.min(BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000)
-				: Math.min(SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS, timeoutSec * 1000);
 			const results: string[] = [];
 			const allServerNames = new Set<string>();
 			let totalServerAttempts = 0;
@@ -355,8 +351,17 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 						const minVersion = client.diagnosticsVersion;
 						await refreshFile(client, resolved, signal);
 						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
+						// Project-aware servers (Roslyn, tsserver, …) compute pull diagnostics
+						// on demand; their first response routinely overruns the 3s single-file
+						// budget, which would otherwise surface as a false "OK". An explicit
+						// diagnostics request can afford to wait, bounded by the tool timeout.
+						const waitCapMs = detailed
+							? BATCH_DIAGNOSTICS_WAIT_TIMEOUT_MS
+							: isProjectAwareLspServer(serverConfig)
+								? PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS
+								: SINGLE_DIAGNOSTICS_WAIT_TIMEOUT_MS;
 						const diagnostics = await waitForDiagnostics(client, uri, {
-							timeoutMs: diagnosticsWaitTimeoutMs,
+							timeoutMs: Math.min(waitCapMs, timeoutSec * 1000),
 							signal,
 							minVersion,
 							expectedDocumentVersion,
@@ -1088,6 +1093,7 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 			// the process lifetime (#3546).
 			configCache.delete(this.session.cwd);
 			const refreshedConfig = getConfig(this.session.cwd);
+			reconcileIdleChecker();
 			const servers = getLspServers(refreshedConfig);
 			// Identity-aware client keys make a changed server resolve to a fresh
 			// client below, but the process spawned from the superseded config

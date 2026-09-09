@@ -226,7 +226,7 @@ where
 /// cost; aborting the whole host process is not. `forget` on a
 /// `Box<dyn Any + Send>` is always memory-safe (it only skips the destructor
 /// and leaks the allocation).
-fn dispose_panic_payload(payload: Box<dyn std::any::Any + Send>) {
+pub(crate) fn dispose_panic_payload(payload: Box<dyn std::any::Any + Send>) {
 	if let Err(secondary) = catch_unwind(AssertUnwindSafe(|| {
 		crate::crash_handler::blocking_task_panic_scope(|| drop(payload));
 	})) {
@@ -235,6 +235,102 @@ fn dispose_panic_payload(payload: Box<dyn std::any::Any + Send>) {
 }
 
 pub type Promise<T> = AsyncTask<Blocking<T>>;
+/// Like [`Blocking`], but the work closure fails with a typed domain error
+/// that a reject hook converts on the JS thread.
+///
+/// The hook runs with `Env` access, so rejections can carry a real error
+/// object (name/code/custom properties) instead of a bare message string.
+pub struct BlockingMapped<T, E>
+where
+	T: Send + 'static,
+	E: Send + 'static,
+{
+	tag:          &'static str,
+	cancel_token: CancelToken,
+	work:         Option<MappedWork<T, E>>,
+	/// Domain error stashed by `compute` for `reject` to convert with `Env`.
+	error:        Option<E>,
+	reject_hook:  fn(Env, E) -> Error,
+}
+/// Boxed work closure for [`BlockingMapped`].
+type MappedWork<T, E> = Box<dyn FnOnce(CancelToken) -> std::result::Result<T, E> + Send>;
+
+impl<T, E> Task for BlockingMapped<T, E>
+where
+	T: ToNapiValue + Send + 'static + TypeName,
+	E: Send + 'static,
+{
+	type JsValue = T;
+	type Output = T;
+
+	fn compute(&mut self) -> Result<Self::Output> {
+		let _guard = profile_region(self.tag);
+		let work = self
+			.work
+			.take()
+			.ok_or_else(|| Error::from_reason("BlockingMapped: work already consumed"))?;
+		let cancel_token = self.cancel_token.clone();
+		let tag = self.tag;
+		// Same FFI-boundary panic guard as [`Blocking::compute`]; see its
+		// comment for why the unwind must be caught here.
+		match catch_unwind(AssertUnwindSafe(move || {
+			crate::crash_handler::blocking_task_panic_scope(move || work(cancel_token))
+		})) {
+			Ok(Ok(value)) => Ok(value),
+			Ok(Err(domain)) => {
+				// Stash the typed error; the placeholder reason is replaced in
+				// `reject`, which has the `Env` needed to build the rich error.
+				self.error = Some(domain);
+				Err(Error::from_reason("BlockingMapped: pending domain error"))
+			},
+			Err(payload) => {
+				let message = crate::crash_handler::panic_payload(&*payload);
+				dispose_panic_payload(payload);
+				Err(Error::new(
+					Status::GenericFailure,
+					format!("native task `{tag}` panicked: {message}"),
+				))
+			},
+		}
+	}
+
+	fn reject(&mut self, env: Env, err: Error) -> Result<Self::JsValue> {
+		match self.error.take() {
+			Some(domain) => Err((self.reject_hook)(env, domain)),
+			None => Err(err),
+		}
+	}
+
+	fn resolve(&mut self, _env: Env, output: Self::Output) -> Result<Self::JsValue> {
+		Ok(output)
+	}
+}
+
+/// Promise type produced by [`blocking_mapped`].
+pub type MappedPromise<T, E> = AsyncTask<BlockingMapped<T, E>>;
+
+/// Like [`blocking`], but the closure fails with a typed domain error and
+/// `reject_hook` converts it into the JS error on the JS thread (with `Env`),
+/// allowing rejections to carry structured properties.
+pub fn blocking_mapped<T, E, F>(
+	tag: &'static str,
+	cancel_token: impl Into<CancelToken>,
+	reject_hook: fn(Env, E) -> Error,
+	work: F,
+) -> MappedPromise<T, E>
+where
+	F: FnOnce(CancelToken) -> std::result::Result<T, E> + Send + 'static,
+	T: ToNapiValue + TypeName + Send + 'static,
+	E: Send + 'static,
+{
+	AsyncTask::new(BlockingMapped {
+		tag,
+		cancel_token: cancel_token.into(),
+		work: Some(Box::new(work)),
+		error: None,
+		reject_hook,
+	})
+}
 
 /// Create an `AsyncTask` that runs blocking work on libuv's thread pool.
 ///

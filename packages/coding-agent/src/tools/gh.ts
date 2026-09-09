@@ -6,6 +6,7 @@ import type {
 	AgentToolUpdateCallback,
 	ToolApprovalDecision,
 } from "@oh-my-pi/pi-agent-core";
+import type { IsoBackendKind } from "@oh-my-pi/pi-natives";
 import {
 	BINARY_SNIFF_BYTES,
 	formatBytes,
@@ -15,7 +16,7 @@ import {
 	untilAborted,
 } from "@oh-my-pi/pi-utils";
 import githubDescription from "../prompts/tools/github.md" with { type: "text" };
-import * as git from "../utils/git";
+import { github } from "../utils/github";
 import { loadImageAttachmentInput, webpExclusionForModel } from "../utils/image-loading";
 import type { ToolSession } from ".";
 import {
@@ -154,6 +155,7 @@ export interface GhPrCheckoutSummary {
 	remote: string;
 	remoteBranch: string;
 	reused: boolean;
+	clonedWith?: IsoBackendKind;
 }
 
 export interface GhRunWatchJobDetails {
@@ -216,7 +218,7 @@ export class GithubTool implements AgentTool<typeof githubSchema, GhToolDetails>
 	constructor(private readonly session: ToolSession) {}
 
 	static createIf(session: ToolSession): GithubTool | null {
-		if (!git.github.available()) return null;
+		if (!github.available()) return null;
 		return new GithubTool(session);
 	}
 
@@ -286,7 +288,7 @@ async function executeFileRead(
 	if (branch) {
 		args.push("-f", `ref=${branch}`);
 	}
-	const response = await git.github.json<GitHubContentsResponse>(session.cwd, args, signal, {
+	const response = await github.json<GitHubContentsResponse>(session.cwd, args, signal, {
 		repoProvided: true,
 		trimOutput: false,
 	});

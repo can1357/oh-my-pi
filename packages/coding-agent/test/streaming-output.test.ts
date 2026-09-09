@@ -154,6 +154,17 @@ describe("truncateTail", () => {
 		expect(result.truncatedBy).toBe("bytes");
 		expect(result.lastLinePartial).toBe(true);
 	});
+
+	test("fills the remaining byte budget from a giant line before smaller trailing lines", () => {
+		const result = truncateTail("abcdefghijk\n}\n```", { maxLines: 10, maxBytes: 10 });
+
+		expect(result.content).toBe("hijk\n}\n```");
+		expect(result.truncatedBy).toBe("bytes");
+		expect(result.outputLines).toBe(3);
+		expect(result.outputBytes).toBe(10);
+		expect(result.partialByteWindows).toBe(true);
+		expect(result.lastLinePartial).toBe(false);
+	});
 });
 
 describe("truncateLine", () => {
@@ -544,7 +555,7 @@ describe("truncation notice formatting", () => {
 		expect(formatTailTruncationNotice(truncation)).toBe("");
 	});
 
-	test("formatTailTruncationNotice supports partial-line and complete-line notices", () => {
+	test("formatTailTruncationNotice distinguishes partial leading and final lines", () => {
 		const partialLineTruncation = truncateTail("abcdefghij", { maxLines: 10, maxBytes: 4 });
 		const partialLineNotice = formatTailTruncationNotice(partialLineTruncation, {
 			fullOutputPath: "/tmp/full.log",
@@ -560,6 +571,11 @@ describe("truncation notice formatting", () => {
 
 		const byteTruncation = truncateTail("aaa\nbbbb\ncc", { maxLines: 10, maxBytes: 6 });
 		expect(formatTailTruncationNotice(byteTruncation)).toBe("\n\n[Showing lines 3-3 of 3]");
+
+		const leadingPartialTruncation = truncateTail("abcdefghijk\n}\n```", { maxLines: 10, maxBytes: 10 });
+		expect(formatTailTruncationNotice(leadingPartialTruncation)).toBe(
+			"\n\n[Showing last 10B across lines 1-3 of 3; line 1 is partial]",
+		);
 	});
 
 	test("formatHeadTruncationNotice returns empty string for non-truncated results", () => {
@@ -607,17 +623,65 @@ describe("truncateMiddle", () => {
 		expect(result.elidedBytes).toBeGreaterThan(0);
 	});
 
-	test("falls back to tail-only when head budget cannot accept the first line", () => {
+	test("uses non-overlapping byte windows when the first line exceeds the head budget", () => {
 		const giantFirstLine = `${"x".repeat(200)}\nshort-2\nshort-3`;
 		const result = truncateMiddle(giantFirstLine, {
 			maxBytes: 40,
 			maxLines: 10,
-			maxHeadBytes: 8, // first line is 200 bytes — exceeds head budget
+			maxHeadBytes: 8,
 			maxHeadLines: 1,
 		});
 		expect(result.truncated).toBe(true);
-		// Should not contain the elision marker; it's a regular tail truncation.
-		expect(result.content).not.toContain("elided");
+		expect(result.truncatedBy).toBe("middle");
+		expect(result.content.startsWith("xxxxxxxx")).toBe(true);
+		expect(result.content.endsWith("short-3")).toBe(true);
+		expect(result.content).toContain("elided");
+		expect(result.elidedBytes).toBeGreaterThan(0);
+		expect(result.headLines).toBe(1);
+		expect(result.tailLines).toBe(3);
+		expect(result.partialByteWindows).toBe(true);
+		expect(result.lastLinePartial).toBe(false);
+	});
+
+	test("does not duplicate overlapping fallback windows", () => {
+		const content = `${"x".repeat(5000)}\n${Array.from({ length: 100 }, (_, i) => `line-${i}`).join("\n")}`;
+		const result = truncateMiddle(content, { maxBytes: 8192, maxLines: 80 });
+
+		expect(result.truncatedBy).toBe("middle");
+		expect(result.elidedBytes).toBeGreaterThan(0);
+		expect(result.content).not.toContain("[…0B elided…]");
+		expect(result.headLines).toBe(1);
+		expect(result.tailLines).toBeLessThanOrEqual(40);
+		expect(result.outputBytes).toBeLessThanOrEqual(8192 + 64);
+	});
+
+	test("marks multi-line partial byte windows so exact ranges are omitted", () => {
+		const content = `${"x".repeat(20_000)}\n${"y".repeat(20_000)}`;
+		const result = truncateMiddle(content, { maxBytes: 8192, maxLines: 80 });
+
+		expect(result.truncatedBy).toBe("middle");
+		expect(result.partialByteWindows).toBe(true);
+		expect(result.elidedBytes).toBeGreaterThan(0);
+	});
+
+	test("keeps a giant trailing line within budget", () => {
+		const content = `label\n${"x".repeat(20_000)}`;
+		const result = truncateMiddle(content, { maxBytes: 8192, maxLines: 80 });
+
+		expect(result.truncated).toBe(true);
+		expect(result.truncatedBy).toBe("middle");
+		expect(result.content.startsWith("label\n")).toBe(true);
+		expect(result.content).toContain("elided");
+		expect(result.outputBytes).toBeLessThanOrEqual(8192 + 64);
+	});
+
+	test("marks single-line byte windows so line ranges can be omitted", () => {
+		const result = truncateMiddle("x".repeat(20_000), { maxBytes: 8192, maxLines: 80 });
+
+		expect(result.truncatedBy).toBe("middle");
+		expect(result.partialByteWindows).toBe(true);
+		expect(result.headLines).toBe(1);
+		expect(result.tailLines).toBe(1);
 	});
 
 	test("formatMiddleElisionMarker uses lines, falling back to bytes for <=1 line", () => {

@@ -57,7 +57,7 @@ describe("issue #2510 — /plan toggles plan → plan_paused → none", () => {
 	afterEach(async () => {
 		vi.restoreAllMocks();
 		mode?.stop();
-		HistoryStorage.resetInstance();
+		HistoryStorage.close();
 		await session?.dispose();
 		authStorage?.close();
 		tempDir?.removeSync();

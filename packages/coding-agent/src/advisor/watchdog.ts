@@ -1,11 +1,12 @@
 import * as os from "node:os";
 import * as path from "node:path";
+import * as vcs from "@oh-my-pi/pi-natives/vcs";
 import { getAgentDir, isEnoent, logger, prompt } from "@oh-my-pi/pi-utils";
 import { expandAtImports } from "../discovery/at-imports";
 import activeRepoWatchdogTemplate from "../prompts/advisor/active-repo-watchdog.md" with { type: "text" };
 import contextFilesTemplate from "../prompts/advisor/context-files.md" with { type: "text" };
+import memoryContextTemplate from "../prompts/advisor/memory-context.md" with { type: "text" };
 import type { ActiveRepoContext } from "../utils/active-repo-context";
-import { repo } from "../utils/git";
 import { normalizePromptPath } from "../utils/prompt-path";
 
 export function formatActiveRepoWatchdogPrompt(activeRepoContext: ActiveRepoContext): string {
@@ -28,6 +29,18 @@ export function formatAdvisorContextPrompt(
 ): string | undefined {
 	if (contextFiles.length === 0) return undefined;
 	return prompt.render(contextFilesTemplate, { contextFiles }).trim() || undefined;
+}
+
+/**
+ * Wrap the active memory backend's developer instructions (the same block the
+ * primary agent gets appended to its system prompt) for an advisor's system
+ * prompt. The wrapper marks the block as shared background knowledge and warns
+ * that memory tools mentioned inside may be absent from the advisor's own tool
+ * list. Returns undefined when the backend injected nothing.
+ */
+export function formatAdvisorMemoryPrompt(memoryInstructions: string | undefined): string | undefined {
+	if (!memoryInstructions?.trim()) return undefined;
+	return prompt.render(memoryContextTemplate, { memoryInstructions: memoryInstructions.trim() }).trim() || undefined;
 }
 
 /**
@@ -60,9 +73,9 @@ export async function collectConfigCandidates(
 	const userPaths = new Set<string>();
 	let repoRoot: string | null = null;
 	try {
-		repoRoot = await repo.root(cwd);
+		repoRoot = vcs.repo(cwd)?.root() ?? null;
 	} catch (err) {
-		logger.debug("Failed to resolve git root for config discovery", { err: String(err) });
+		logger.debug("Failed to resolve VCS root for config discovery", { err: String(err) });
 	}
 
 	const candidates = new Set<string>();

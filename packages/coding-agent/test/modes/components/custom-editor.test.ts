@@ -4,6 +4,7 @@ import { CURSOR_MARKER } from "@oh-my-pi/pi-tui";
 import { setKittyProtocolActive } from "@oh-my-pi/pi-tui/keys";
 import { $ } from "bun";
 import { getDefaultPasteImageKeys } from "../../../src/config/keybindings";
+import { chipLabel } from "../../../src/modes/composer-attachments";
 import {
 	CustomEditor,
 	extractBracketedImagePastePaths,
@@ -180,6 +181,19 @@ describe("CustomEditor bracketed path paste", () => {
 		expect(extractBracketedImagePastePaths(bracketedPaste("icon-photo-default.png"))).toBeUndefined();
 	});
 
+	it("inserts a relative .png API address as text instead of treating it as a local image", () => {
+		const { editor } = makeEditor();
+		const address = "api/file/icon/867d45144217eec6d3c5805fd5a2d548.png";
+		const onPasteImagePath = vi.fn();
+		editor.onPasteImagePath = onPasteImagePath;
+
+		editor.handleInput(bracketedPaste(address));
+
+		expect(editor.getText()).toBe(address);
+		expect(onPasteImagePath).not.toHaveBeenCalled();
+		expect(extractImagePathFromText(address)).toBeUndefined();
+	});
+
 	it("extracts explicit local image paths for attachment", () => {
 		expect(extractBracketedImagePastePaths(bracketedPaste("/tmp/icon-photo-default.png"))).toEqual([
 			"/tmp/icon-photo-default.png",
@@ -187,6 +201,34 @@ describe("CustomEditor bracketed path paste", () => {
 		expect(extractBracketedImagePastePaths(bracketedPaste("C:\\Users\\me\\icon-photo-default.png"))).toEqual([
 			"C:\\Users\\me\\icon-photo-default.png",
 		]);
+		expect(extractBracketedImagePastePaths(bracketedPaste("./images/icon-photo-default.png"))).toEqual([
+			"./images/icon-photo-default.png",
+		]);
+	});
+
+	it("routes a pasted video path through the attachment callback", () => {
+		const { editor } = makeEditor();
+		const video = "/Users/me/Movies/launch cut.mp4";
+		const pasted: string[] = [];
+		editor.onPasteImagePath = path => {
+			pasted.push(path);
+		};
+
+		editor.handleInput(bracketedPaste(video));
+
+		expect(extractBracketedImagePastePaths(bracketedPaste(video))).toEqual([video]);
+		expect(pasted).toEqual([video]);
+		expect(editor.getText()).toBe("");
+	});
+
+	it("keeps video previews distinct from image chips", () => {
+		const { editor } = makeEditor();
+		editor.pendingImages = [{ type: "image", data: "aW1hZ2U=", mimeType: "image/png" }];
+		editor.pendingImageLinks = ["/tmp/launch.mp4"];
+		editor.setCollapsedText("[Video #1, 960x480]");
+
+		expect(editor.getText()).toBe(chipLabel("video", 1));
+		expect(editor.composerChips()).toMatchObject([{ kind: "video", n: 1 }]);
 	});
 
 	it("strips `file://` URLs to the local filesystem path before loading the image", () => {
@@ -280,10 +322,11 @@ describe("CustomEditor configured paste image keys", () => {
 });
 
 describe("extractImagePathFromText (issue #3506)", () => {
-	it("returns the path when the text is a single image file path", () => {
+	it("returns the path when the text is a single image or video file path", () => {
 		expect(extractImagePathFromText("/tmp/screenshot.png")).toBe("/tmp/screenshot.png");
 		expect(extractImagePathFromText("/Users/me/Pictures/photo.jpeg")).toBe("/Users/me/Pictures/photo.jpeg");
 		expect(extractImagePathFromText("C:\\Users\\me\\img.gif")).toBe("C:\\Users\\me\\img.gif");
+		expect(extractImagePathFromText("/Users/me/Movies/launch.mp4")).toBe("/Users/me/Movies/launch.mp4");
 	});
 
 	it("ignores surrounding whitespace from a clipboard read", () => {

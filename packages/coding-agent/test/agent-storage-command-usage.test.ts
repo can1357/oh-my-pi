@@ -7,7 +7,7 @@ describe("AgentStorage command usage", () => {
 	let tempDir: TempDir | undefined;
 
 	afterEach(async () => {
-		AgentStorage.resetInstance();
+		AgentStorage.close();
 		if (tempDir) {
 			try {
 				await tempDir.remove();
@@ -27,7 +27,7 @@ describe("AgentStorage command usage", () => {
 		expect(storage.listCommandUsage()).toEqual({ model: 2, "skill:review": 1 });
 
 		// Counts are a cross-session contract: a fresh handle must see them.
-		AgentStorage.resetInstance();
+		AgentStorage.close();
 		const reopened = await AgentStorage.open(dbPath);
 		expect(reopened.listCommandUsage()).toEqual({ model: 2, "skill:review": 1 });
 		reopened.recordCommandUsage("model");
