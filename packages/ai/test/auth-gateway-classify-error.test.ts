@@ -339,6 +339,14 @@ describe("classifyGatewayError authoritative-status precedence", () => {
 		expect(c.disposition).toBe("model_unavailable");
 	});
 
+	it("maps a message-only model_not_available code to model_unavailable", () => {
+		const c = classifyGatewayError(
+			Object.assign(new Error("request failed: model_not_available_for_integrator"), { status: 400 }),
+		);
+		expect(c.owner).toBe("model");
+		expect(c.disposition).toBe("model_unavailable");
+	});
+
 	it("treats invalid_token 401 as a permanent credential failure", () => {
 		const c = classifyGatewayError(Object.assign(new Error("Unauthorized (401): invalid_token"), { status: 401 }));
 		expect(c.owner).toBe("credential");
