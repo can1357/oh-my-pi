@@ -1329,12 +1329,29 @@ chrome.debugger.onDetach.addListener((source, reason) => {
 
 chrome.tabs.onCreated.addListener((tab) => {
 	const snap = snapshot(tab);
-	if (snap) post({ t: "tabCreated", tab: snap });
+	if (snap) {
+		// A same-socket refreshHello() may have snapshotted chrome.tabs.query()
+		// before this tab was created, so its in-flight hello omits the new tab.
+		// Delivered after this `tabCreated`, that stale hello makes
+		// RelayBridge.#onHello() treat its tab list as authoritative and drop the
+		// just-created target with no later event to restore it. Mark the refresh
+		// dirty so the stale send is suppressed and the rebuild re-queries the live
+		// tab set, mirroring the onRemoved invalidation.
+		invalidateHelloRefresh();
+		post({ t: "tabCreated", tab: snap });
+	}
 });
 
 chrome.tabs.onUpdated.addListener((_tabId, _changeInfo, tab) => {
 	const snap = snapshot(tab);
-	if (snap) post({ t: "tabUpdated", tab: snap });
+	if (snap) {
+		// Same race as tabCreated: an in-flight refresh whose snapshot predates this
+		// update would send stale metadata that RelayBridge.#onHello() restores over
+		// the newer `tabUpdated`. Invalidate so the rebuilt hello reflects the live
+		// tab state.
+		invalidateHelloRefresh();
+		post({ t: "tabUpdated", tab: snap });
+	}
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
