@@ -32,4 +32,10 @@ describe("validateProviderConfiguration (models-config auth)", () => {
 			),
 		).not.toThrow();
 	});
+
+	test("discoveryTimeoutMs alone is a valid override-only provider entry", () => {
+		expect(() =>
+			validateProviderConfiguration("litellm", { discoveryTimeoutMs: 30_000, models: [] }, "models-config"),
+		).not.toThrow();
+	});
 });
