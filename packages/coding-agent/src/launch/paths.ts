@@ -1,6 +1,6 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getDaemonRuntimeDir, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
+import { getDaemonRuntimeDir, hasFsCode, isEacces, isEisdir, isEnoent } from "@oh-my-pi/pi-utils";
 
 /** Resolve the private runtime directory shared by omp processes in one project directory. */
 export { getDaemonRuntimeDir as daemonRuntimeDir };
@@ -11,14 +11,15 @@ const SCOPE_FILE = "scope.json";
 /**
  * Canonicalize a project directory the same way every broker client does, so
  * hash-keyed runtime dirs and Windows pipe names agree across processes.
- * Missing paths resolve without realpath instead of failing.
+ * Missing paths and permission-denied lookups (EPERM/EACCES on protected
+ * parent directories) resolve without realpath instead of failing.
  */
 export async function canonicalProjectDir(projectDir: string): Promise<string> {
 	const resolved = path.resolve(projectDir);
 	try {
 		return await fs.realpath(resolved);
 	} catch (error) {
-		if (isEnoent(error) || isEisdir(error)) return resolved;
+		if (isEnoent(error) || isEisdir(error) || isEacces(error) || hasFsCode(error, "EPERM")) return resolved;
 		throw error;
 	}
 }

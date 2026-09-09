@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- macOS self-updates preserve executable backups still used by running sessions, preventing lost privacy-permission attribution.
+- Startup and daemon commands no longer crash when project-directory canonicalization encounters EPERM or EACCES.
+
 ## [18.1.16] - 2026-09-09
 
 ### Added
