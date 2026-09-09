@@ -10,7 +10,7 @@ use std::{
 };
 
 use jj_lib::{
-	backend::{CommitId, CopyId, TreeValue},
+	backend::{CommitId, CopyId, MergedTreeValue, TreeValue},
 	commit::Commit,
 	config::{ConfigSource, StackedConfig},
 	conflicts::{ConflictMarkerStyle, ConflictMaterializeOptions, materialize_tree_value},
@@ -21,7 +21,7 @@ use jj_lib::{
 	},
 	gitignore::GitIgnoreFile,
 	matchers::{EverythingMatcher, NothingMatcher},
-	merge::{Diff, MergedTreeValue},
+	merge::Diff,
 	merged_tree::MergedTree,
 	object_id::{HexPrefix, ObjectId as _, PrefixResolution},
 	repo::{ReadonlyRepo, Repo},
@@ -101,6 +101,7 @@ impl JjWorkspace {
 
 				let prefix_len = repo
 					.shortest_unique_change_id_prefix_len(wc_commit.change_id())
+					.await
 					.map_err(|err| Error::backend("jj log", err))?
 					.max(8);
 				let change_id = wc_commit.change_id().reverse_hex();
@@ -234,6 +235,7 @@ impl JjWorkspace {
 				for commit in commits {
 					let prefix_len = repo
 						.shortest_unique_change_id_prefix_len(commit.change_id())
+						.await
 						.map_err(|err| Error::backend("jj log", err))?
 						.max(8);
 					let change_id = commit.change_id().reverse_hex();
@@ -250,7 +252,8 @@ impl JjWorkspace {
 		let rev = rev.to_owned();
 		self.with_current_repo("jj show", move |workspace, repo| {
 			Box::pin(async move {
-				let commit_id = resolve_commit_id(workspace, repo.as_ref(), &rev)?
+				let commit_id = resolve_commit_id(workspace, repo.as_ref(), &rev)
+					.await?
 					.ok_or_else(|| Error::ObjectNotFound { spec: rev.clone() })?;
 				let commit = repo
 					.store()
@@ -413,7 +416,7 @@ fn commit_subject(commit: &Commit) -> String {
 		.to_owned()
 }
 
-fn resolve_commit_id(
+async fn resolve_commit_id(
 	workspace: &Workspace,
 	repo: &dyn Repo,
 	rev: &str,
@@ -427,6 +430,7 @@ fn resolve_commit_id(
 	if let Some(prefix) = HexPrefix::try_from_reverse_hex(rev) {
 		let resolution = repo
 			.resolve_change_id_prefix(&prefix)
+			.await
 			.map_err(|err| Error::backend("jj show", err))?;
 		if let PrefixResolution::SingleMatch(targets) = resolution {
 			let mut visible = targets.visible_with_offsets().map(|(_, id)| id.clone());
@@ -440,6 +444,7 @@ fn resolve_commit_id(
 		let resolution = repo
 			.index()
 			.resolve_commit_id_prefix(&prefix)
+			.await
 			.map_err(|err| Error::backend("jj show", err))?;
 		if let PrefixResolution::SingleMatch(id) = resolution {
 			return Ok(Some(id));
@@ -686,8 +691,8 @@ fn collect_changes(
 	for path in removed {
 		if path_selected(&path, &path, files) {
 			changes.push(TreeChange {
-				before_path:    path.clone(),
-				after_path:     path.clone(),
+				before_path:    path.to_owned(),
+				after_path:     path.to_owned(),
 				before:         before[&path].clone(),
 				after:          MergedTreeValue::absent(),
 				copy_operation: None,

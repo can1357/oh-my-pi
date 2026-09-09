@@ -1091,7 +1091,7 @@ const BASE85: &[u8; 85] =
 	b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz!#$%&()*+-;<=>?@^_`{|}~";
 
 fn zlib_compress(data: &[u8]) -> Result<Vec<u8>> {
-	let mut writer = gix::features::zlib::stream::deflate::Write::new(Vec::new());
+	let mut writer = gix::zlib::stream::deflate::Write::new(Vec::new(), gix::zlib::Compression::BEST_SPEED);
 	writer
 		.write_all(data)
 		.and_then(|()| writer.flush())
@@ -1316,25 +1316,22 @@ fn sort_changes(changes: &mut [FileChange]) {
 }
 #[cfg(test)]
 mod tests {
-	use std::{fs, path::Path, process::Command};
+	use std::{fs, path::Path};
 
 	use tempfile::TempDir;
 
-	use super::*;
+	use super::{
+		super::{oracle_git, oracle_git_stdout},
+		*,
+	};
 
 	fn git(dir: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.args(args)
-			.current_dir(dir)
-			.output()
-			.unwrap_or_else(|err| panic!("run git {args:?}: {err}"));
-		assert!(output.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&output.stderr));
-		String::from_utf8(output.stdout).expect("git output is UTF-8")
+		oracle_git_stdout(dir, args)
 	}
+	/// Oracle expecting exit code 1: `git diff --no-index` reports "differences
+	/// found" that way, which is not an error.
 	fn git_diff(dir: &Path, args: &[&str]) -> String {
-		let output = Command::new("git")
-			.args(args)
-			.current_dir(dir)
+		let output = oracle_git(dir, args)
 			.output()
 			.unwrap_or_else(|err| panic!("run git {args:?}: {err}"));
 		assert_eq!(
@@ -1552,5 +1549,27 @@ mod tests {
 			repo.diff_text(&DiffOptions::default()).expect("diff"),
 			git(dir.path(), &["diff"])
 		);
+	}
+	/// The oracle must emit git's canonical patch text even when the
+	/// repository's own config sets a hostile external diff driver —
+	/// otherwise every parity assertion above silently compares the backend
+	/// against a third-party renderer instead of git.
+	#[test]
+	fn oracle_ignores_repo_local_external_diff_config() {
+		let dir = fixture();
+		git(dir.path(), &["config", "diff.external", "false"]);
+		git(dir.path(), &["config", "diff.mnemonicPrefix", "true"]);
+		git(dir.path(), &["config", "diff.context", "10"]);
+		git(dir.path(), &["config", "diff.noprefix", "true"]);
+		git(dir.path(), &["config", "color.diff", "always"]);
+		fs::write(dir.path().join("file.txt"), "one\nchanged\nthree\n").expect("write");
+		let expected = git(dir.path(), &["diff"]);
+		assert!(expected.starts_with("diff --git a/file.txt b/file.txt\n"), "{expected}");
+		assert!(expected.contains("--- a/file.txt\n+++ b/file.txt\n"), "{expected}");
+		assert!(!expected.contains('\u{1b}'), "no ANSI colour escapes: {expected}");
+		let repo = GitRepo::discover(dir.path())
+			.expect("discover")
+			.expect("repository");
+		assert_eq!(repo.diff_text(&DiffOptions::default()).expect("diff"), expected);
 	}
 }
