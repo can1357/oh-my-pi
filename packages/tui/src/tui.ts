@@ -1590,7 +1590,7 @@ export class TUI extends Container {
 		const provider = this.#frameProvider;
 		let rendered: readonly string[];
 		do {
-			this.#imageBudget.beginPass();
+			this.#imageBudget.beginPass(false, true);
 			rendered =
 				provider?.renderResizeFrame?.({ columns: width, rows: height }) ??
 				(provider ? provider.renderFrame({ columns: width, rows: height }).viewport : this.render(width));
@@ -2564,7 +2564,7 @@ export class TUI extends Container {
 		}
 		// Every image of this frame — overlays included — has now been observed,
 		// so the store bound can tell a retired graphic from a displayed one.
-		this.#imageBudget.limitResidentImages(false);
+		this.#imageBudget.limitResidentImages();
 		const history = offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
 		if (offered !== undefined && offered.id <= this.#acceptedHistoryBatchId) provider?.acknowledgeHistory(offered.id);
 
@@ -3145,7 +3145,7 @@ export class TUI extends Container {
 		const base: string[] = new Array(Math.max(0, height)).fill("");
 		let lines: string[];
 		do {
-			this.#imageBudget.beginPass();
+			this.#imageBudget.beginPass(false, true);
 			lines = this.#compositeOverlaysIntoWindow(base, width, height);
 		} while (this.#imageBudget.endPass());
 		this.#extractCursorMarkers(lines);
@@ -3162,9 +3162,9 @@ export class TUI extends Container {
 		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const fitted: string[] = new Array(height);
 		for (let r = 0; r < height; r++) fitted[r] = lines[r] ?? "";
-		// Alt-buffer frame: the normal screen keeps its own placements behind this
-		// one and is restored verbatim on exit, so its images are not retired.
-		this.#imageBudget.limitResidentImages(true);
+		// The pass that composed this frame ran with `altScreen`, so the normal
+		// screen's own placements behind it are not treated as retired.
+		this.#imageBudget.limitResidentImages();
 		// Flush queued image-data transmits (`a=t`, no visible output) before the
 		// paint so id-keyed placements and placeholder cells composed into this
 		// frame resolve against loaded data. The normal-screen path flushes these

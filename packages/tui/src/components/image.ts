@@ -128,6 +128,13 @@ export class ImageBudget {
 	 */
 	#screenLiveIds = new Set<number>();
 	/**
+	 * True while the in-flight pass composes a frame for the alternate buffer.
+	 * Its live/text split describes the modal only: the normal screen keeps its
+	 * own placements standing behind it, so neither the demotion purge nor the
+	 * store bound may destroy a graphic {@link #screenLiveIds} still shows.
+	 */
+	#altScreenPass = false;
+	/**
 	 * Per-image direct-placement emit state: source pixel geometry for the
 	 * renderer's clipped source rectangle, plus the placement-id epoch (see
 	 * {@link resolvePlacementEmit}). Entries deliberately live as long as the
@@ -194,11 +201,17 @@ export class ImageBudget {
 	 * whole tree in display order (the resize viewport fast path): {@link observe}
 	 * then replays the last committed per-id decision instead of one derived from
 	 * call order, and the pass must NOT be closed with {@link endPass}.
+	 *
+	 * Pass `altScreen: true` when the frame is painted on the alternate buffer
+	 * (fullscreen overlay, resize borrow). The pass then walks only that buffer's
+	 * content while the normal screen keeps its placements, so its live set adds
+	 * to the recorded normal-screen one instead of replacing it.
 	 */
-	beginPass(stable = false): void {
+	beginPass(stable = false, altScreen = false): void {
 		this.#passIds.length = 0;
 		this.#passSuppression.clear();
 		this.#stablePass = stable;
+		this.#altScreenPass = altScreen;
 		this.#applyingReset = !stable && this.#cap > 0 && this.#planned > this.#onTerminal;
 	}
 
@@ -238,6 +251,10 @@ export class ImageBudget {
 		if (this.#applyingReset) {
 			for (let i = this.#onTerminal; i < this.#planned && i < total; i++) {
 				const id = this.#passIds[i];
+				// The modal renders its own copy as text, but deleting the graphic
+				// would take the normal buffer's placement of the same id with it —
+				// and that frame is restored from cache, so its row is never rewritten.
+				if (this.#altScreenPass && this.#screenLiveIds.has(id)) continue;
 				// A transmit queued by a discarded discovery pass never reached
 				// the terminal, so cancel it instead of transmitting then purging.
 				if (!this.#pendingTransmits.delete(id)) this.#purgeIds.push(id);
@@ -265,14 +282,12 @@ export class ImageBudget {
 	 *
 	 * Eviction removes the image's scrollback placements too, and a frame diff
 	 * only rewrites rows whose text changed, so an image still shown on the
-	 * screen can never be a candidate. `altScreen` marks a frame painted on the
-	 * alternate buffer: the normal screen keeps its placements standing behind
-	 * the modal and is restored verbatim on exit, so that frame's live set is
-	 * not authoritative for the normal buffer and merely adds to it.
+	 * screen can never be a candidate — on the normal buffer or, while an
+	 * alt-screen pass ({@link beginPass}) covers it, behind the modal.
 	 */
-	limitResidentImages(altScreen: boolean): void {
+	limitResidentImages(): void {
 		const liveIds = new Set(this.#passIds.filter(id => !this.#passSuppression.get(id)));
-		if (!altScreen) this.#screenLiveIds = liveIds;
+		if (!this.#altScreenPass) this.#screenLiveIds = liveIds;
 		if (this.#cap <= 0 || this.#transmitted.size <= this.#cap) return;
 		for (const id of this.#transmitted) {
 			if (this.#transmitted.size <= this.#cap) break;

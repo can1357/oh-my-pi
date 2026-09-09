@@ -841,6 +841,52 @@ describe("TUI inline-image budget", () => {
 		}
 	});
 
+	it("keeps a shared image placed when an over-cap fullscreen overlay demotes it", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { resident, placed } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = makeImage(tui.imageBudget, "behind");
+		const shared = makeImage(tui.imageBudget, "shared");
+		const sharedId = tui.imageBudget.acquireId("shared");
+		// Same imageKey, so the modal's copy carries the transcript's graphics id.
+		// Rendering it first puts that id in the over-cap demotion prefix while its
+		// normal-buffer placement still stands behind the alt screen.
+		const modalImages = [
+			makeImage(tui.imageBudget, "shared"),
+			makeImage(tui.imageBudget, "modal-0"),
+			makeImage(tui.imageBudget, "modal-1"),
+		];
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: [behind, shared].flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect(placed.has(sharedId)).toBe(true);
+
+			const overlay = tui.showOverlay(
+				{ render: width => modalImages.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+
+			overlay.hide();
+			await settle(term);
+
+			expect(placed.has(sharedId)).toBe(true);
+			expect(resident.has(sharedId)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
 	it("keeps a non-fullscreen overlay image placed while the provider frame fills the cap", async () => {
 		const originalGraphics = { ...getKittyGraphics() };
 		const term = new VirtualTerminal(40, 12);
