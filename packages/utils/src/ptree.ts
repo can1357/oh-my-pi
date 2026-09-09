@@ -180,14 +180,12 @@ export class ChildProcess<In extends InMask = InMask> {
 	#exitReasonPending?: Exception;
 	#stderrDone: Promise<void>;
 	#exited: Promise<number>;
-	#openPipeReaders = 1;
 	// Pipe reads race this cutoff only when attachTimeout() configures a
 	// command deadline. Untimed commands preserve complete EOF-based capture.
 	#drainCutoff: Promise<void>;
 	#resolveDrainCutoff: () => void;
 	#timeoutTimer?: NodeJS.Timeout;
 	#stderrStream?: ReadableStream<Uint8Array>;
-	#stdoutStream?: ReadableStream<Uint8Array>;
 	// Termination in flight after kill(); aborted exits await it before reporting.
 	#terminating?: Promise<boolean | void>;
 	#terminateGroup: boolean;
@@ -253,7 +251,6 @@ export class ChildProcess<In extends InMask = InMask> {
 					trim();
 				}
 			} catch {}
-			this.#openPipeReaders--;
 			this.#stderrTail += dec.decode();
 			trim();
 		})();
@@ -315,46 +312,7 @@ export class ChildProcess<In extends InMask = InMask> {
 
 	/** Raw stdout stream. Must be consumed to prevent pipe deadlock. */
 	get stdout() {
-		if (!this.#stdoutStream) {
-			const reader = this.proc.stdout.getReader();
-			// Handing the stream out transfers the pipe to the consumer, and only
-			// EOF, cancel, or a read error hand it back. Counting pending reads
-			// instead loses the pipe whenever an unread chunk fills the queue: pull
-			// is not re-entered until the consumer resumes, so a paused reader that
-			// still owns stdout would read as nobody holding it.
-			this.#openPipeReaders++;
-			let owned = true;
-			const release = () => {
-				if (!owned) return;
-				owned = false;
-				this.#openPipeReaders--;
-				reader.releaseLock();
-			};
-			this.#stdoutStream = new ReadableStream<Uint8Array>({
-				pull: async controller => {
-					try {
-						const chunk = await reader.read();
-						if (chunk.done) {
-							controller.close();
-							release();
-						} else {
-							controller.enqueue(chunk.value);
-						}
-					} catch (error) {
-						controller.error(error);
-						release();
-					}
-				},
-				cancel: async reason => {
-					try {
-						await reader.cancel(reason);
-					} finally {
-						release();
-					}
-				},
-			});
-		}
-		return this.#stdoutStream;
+		return this.proc.stdout;
 	}
 
 	/** Optional stderr stream (only when requested in spawn options). */
@@ -414,18 +372,19 @@ export class ChildProcess<In extends InMask = InMask> {
 			}
 		}
 		const groupLeader = this.#groupLeader;
-		if (groupLeader && this.#openPipeReaders > 0 && !this.#rootIsLive()) {
+		if (groupLeader && !this.#rootIsLive()) {
 			// Bun detached children are POSIX session/process-group leaders. If the
 			// leader has exited, the native Process handle cannot rediscover its
 			// PGID, so the group is reached through the pinned leader, which refuses
-			// once that pid belongs to someone else. Retained stdout ownership shows
-			// only that buffered data is left, not that a live writer remains, so it
-			// cannot stand in for that identity check.
+			// once that pid belongs to someone else. That identity check is what
+			// makes the attempt safe, so it is unconditional: gating it on a live
+			// stdout reader only meant survivors of a caller that never read — or
+			// finished reading — were never signalled at all.
 			this.#terminating = Promise.try(() => groupLeader.killOwnGroupAndWait());
 			void this.#terminating.catch(() => {});
 			return;
 		}
-		if (this.#windowsRootProcess && this.#openPipeReaders > 0 && !this.#rootIsLive()) {
+		if (this.#windowsRootProcess && !this.#rootIsLive()) {
 			// The retained handle keeps the dead root PID reserved, making the
 			// Windows Toolhelp descendant walk identity-safe after root exit.
 			const root = this.#windowsRootProcess;
@@ -618,13 +577,11 @@ export class ChildProcess<In extends InMask = InMask> {
 		// A clean command clears it in wait(), so fast invocations do not hold
 		// the event loop for the unused remainder.
 		const timer = setTimeout(() => {
-			// A detached group can remain alive after its leader exits. Only use
-			// the dead-leader fallback while an inherited pipe proves that exact
-			// group still has a live member; this avoids stale-PGID reuse.
-			if (
-				this.proc.exitCode === null ||
-				(this.#openPipeReaders > 0 && (this.#terminateGroup || this.#windowsRootProcess))
-			) {
+			// A detached group can remain alive after its leader exits, so the
+			// deadline still has work to do once the root is gone: reach that group
+			// through the pinned leader (or the retained Windows handle), both of
+			// which refuse a pid that is no longer ours.
+			if (this.proc.exitCode === null || this.#terminateGroup || this.#windowsRootProcess) {
 				this.kill(new TimeoutError(ms, this.#stderrTail), -1);
 			}
 			this.#resolveDrainCutoff();
