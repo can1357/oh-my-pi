@@ -1,0 +1,29 @@
+npm http fetch GET 200 https://registry.npmjs.org/react 142ms
+npm http fetch GET 200 https://registry.npmjs.org/react-dom 138ms
+npm http fetch GET 200 https://registry.npmjs.org/lodash 95ms
+npm http fetch GET 200 https://registry.npmjs.org/webpack 210ms
+npm http fetch GET 200 https://registry.npmjs.org/typescript 188ms
+npm http fetch GET 200 https://registry.npmjs.org/eslint 176ms
+npm http fetch GET 200 https://registry.npmjs.org/jest 201ms
+npm http fetch GET 200 https://registry.npmjs.org/babel-core 165ms
+Progress: resolved 1 / 1248, reused 0, downloaded 1, added 0
+Progress: resolved 312 / 1248, reused 120, downloaded 192, added 64
+Progress: resolved 640 / 1248, reused 280, downloaded 360, added 210
+Progress: resolved 980 / 1248, reused 510, downloaded 470, added 540
+Progress: resolved 1248 / 1248, reused 800, downloaded 448, added 1248
+npm warn deprecated inflight@1.0.6: This module is not supported, and leaks memory. Do not use it.
+npm warn deprecated rimraf@2.7.1: Rimraf versions prior to v4 are no longer supported.
+npm warn deprecated glob@7.2.3: Glob versions prior to v9 are no longer supported.
+npm notice
+npm notice New major version of npm available! 9.8.1 -> 10.2.4
+npm notice Changelog: https://github.com/npm/cli/releases/tag/v10.2.4
+npm notice Run npm install -g npm@10.2.4 to update!
+npm notice
+resolved 1248 packages in 8s
+reused 800, downloaded 448, added 1248
+added 1248 packages, and audited 1249 packages in 14s
+
+142 packages are looking for funding
+  run `npm fund` for details
+
+found 0 vulnerabilities

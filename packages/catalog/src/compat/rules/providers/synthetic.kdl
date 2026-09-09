@@ -1,0 +1,16 @@
+// Provider-wire compat for "synthetic"; regenerated from the frozen census using deployment contract selectors.
+
+provider "synthetic" {
+	thinking-mode "effort"
+	class "unknown" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "hf:zai-org/GLM-4.7-Flash" {
+		thinking-efforts "minimal" "low" "medium" "high" "xhigh"
+	}
+	// residue: taxonomy ranks and exact globs do not isolate these models.
+	models "hf:zai-org/GLM-5.2" {
+		thinking-efforts "minimal" "low" "medium" "high" "max"
+	}
+}

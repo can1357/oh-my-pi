@@ -1,0 +1,26 @@
+diff --git a/out/constraint.js b/out/constraint.js
+index 19ad1869c46cf57bde4a09dcb6400ab2c83809e1..4f3df3198713856ad76dd49cc378f0f41fc769e6 100644
+--- a/out/constraint.js
++++ b/out/constraint.js
+@@ -51,8 +51,10 @@ export const constraintKeyParser = (kind) => (schema, ctx) => {
+         }
+         const nodes = schema.map(schema => ctx.$.node(kind, schema));
+         // predicate order must be preserved to ensure inputs are narrowed
+-        // and checked in the correct order
+-        if (kind === "predicate")
++        // and checked in the correct order; required/optional preserve authored
++        // key order too so tool wire schemas stream in declaration order rather
++        // than alphabetized-by-hash order (oh-my-pi patch)
++        if (kind === "predicate" || kind === "required" || kind === "optional")
+             return nodes;
+         return nodes.sort((l, r) => (l.hash < r.hash ? -1 : 1));
+     }
+@@ -111,7 +113,7 @@ export const flattenConstraints = (inner) => {
+         .sort((l, r) => l.precedence < r.precedence ? -1
+         : l.precedence > r.precedence ? 1
+             // preserve order for predicates
+-            : l.kind === "predicate" && r.kind === "predicate" ? 0
++            : (l.kind === "predicate" && r.kind === "predicate") || (l.kind === r.kind && (l.kind === "required" || l.kind === "optional")) ? 0
+                 : l.hash < r.hash ? -1
+                     : 1);
+     return result;

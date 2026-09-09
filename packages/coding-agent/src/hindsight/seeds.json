@@ -1,0 +1,32 @@
+{
+	"$schema_doc": "Built-in mental model seeds. Each entry is created once per bank if absent. Existing models are NEVER modified by the bootstrap path — operators who want to change a curated model must delete and re-seed (or call refreshMentalModel for a content-only refresh). Tags must intersect the tags actually attached to retains, otherwise refresh returns empty (Hindsight all_strict matching). Source queries live here and not in TS so changes are reviewable as data, not code. `max_tokens` bounds server-side reflect generation per model; a separate client-side render budget bounds the total injected block.",
+	"seeds": [
+		{
+			"id": "user-preferences",
+			"name": "User Preferences",
+			"source_query": "What does the user prefer in coding style, tooling, communication, and review? Capture only durable preferences expressed across sessions, not one-off requests.",
+			"scopes": ["global", "per-project", "per-project-tagged"],
+			"projectTagged": false,
+			"max_tokens": 600,
+			"trigger": { "mode": "delta", "refresh_after_consolidation": true }
+		},
+		{
+			"id": "project-conventions",
+			"name": "Project Conventions",
+			"source_query": "What are this project's conventions for code style, build, testing, release, and pull-request review? Only include conventions that are explicit in the project (settings, scripts, contributor docs, repeatedly enforced in review).",
+			"scopes": ["per-project", "per-project-tagged"],
+			"projectTagged": true,
+			"max_tokens": 800,
+			"trigger": { "mode": "delta", "refresh_after_consolidation": true }
+		},
+		{
+			"id": "project-decisions",
+			"name": "Project Decisions",
+			"source_query": "What durable architectural or product decisions have been made for this project, and what rationale or trade-offs were recorded? Include only decisions that are stable across sessions; exclude transient plans, unresolved ideas, and active task state.",
+			"scopes": ["per-project", "per-project-tagged"],
+			"projectTagged": true,
+			"max_tokens": 800,
+			"trigger": { "mode": "delta", "refresh_after_consolidation": true }
+		}
+	]
+}

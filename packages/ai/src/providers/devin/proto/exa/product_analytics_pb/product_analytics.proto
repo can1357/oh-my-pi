@@ -1,0 +1,37 @@
+syntax = "proto3";
+
+package exa.product_analytics_pb;
+
+import "buf/validate/validate.proto";
+
+message RecordAnalyticsEventRequest {
+  string event_name = 1;
+  string api_key = 2;
+  string installation_id = 3;
+  string ide_name = 4;
+  string os = 5;
+  string codeium_version = 6;
+  string ide_version = 7;
+  uint64 duration_ms = 8;
+  map<string, string> extra = 9;
+  map<string, bool> experiments = 10;
+  string plan_tier = 11 [deprecated = true];
+  string device_fingerprint = 12;
+  string ide_type = 13;
+}
+
+message RecordAnalyticsEventResponse {
+}
+
+message BatchRecordAnalyticsEventsRequest {
+  repeated .exa.product_analytics_pb.RecordAnalyticsEventRequest events = 1;
+  string api_key = 2;
+}
+
+message BatchRecordAnalyticsEventsResponse {
+}
+
+service ProductAnalyticsService {
+  rpc RecordAnalyticsEvent (.exa.product_analytics_pb.RecordAnalyticsEventRequest) returns (.exa.product_analytics_pb.RecordAnalyticsEventResponse);
+  rpc BatchRecordAnalyticsEvents (.exa.product_analytics_pb.BatchRecordAnalyticsEventsRequest) returns (.exa.product_analytics_pb.BatchRecordAnalyticsEventsResponse);
+}

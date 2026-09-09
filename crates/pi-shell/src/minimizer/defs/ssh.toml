@@ -1,0 +1,45 @@
+# ssh: mostly passthrough. Trim login banners / motd noise; leave the remote
+# command output untouched.
+
+[filters.ssh]
+description = "Strip ssh login banner and motd"
+match_command = "^ssh$"
+strip_ansi = true
+strip_lines_matching = [
+	"^Welcome to .*(LTS|GNU/Linux|UNIX|Fedora|Debian|CentOS|AlmaLinux|Rocky Linux)",
+	"^Last login:",
+	"^Last failed login:",
+	"^ \\* Documentation:",
+	"^ \\* Management:",
+	"^ \\* Support:",
+	"^The programs included with ",
+	"^Ubuntu comes with ABSOLUTELY NO WARRANTY",
+	"^This system has been minimized",
+	"^Warning: Permanently added",
+	"^Connection to .+ closed",
+	"^Authenticated to",
+	"^debug1:",
+	"^OpenSSH_",
+	"^Pseudo-terminal",
+]
+max_lines = 200
+
+[[tests.ssh]]
+name = "strips banner keeps command output"
+input = "Welcome to Ubuntu 22.04.3 LTS (GNU/Linux 5.15.0-84-generic x86_64)\n * Documentation:  https://help.ubuntu.com\nLast login: Mon Nov 13 09:00:00 2023 from 10.0.0.1\nhello from remote\n"
+expected = "hello from remote\n"
+
+[[tests.ssh]]
+name = "pure command output passthrough"
+input = "hello from remote\n"
+expected = "hello from remote\n"
+
+[[tests.ssh]]
+name = "strips connection banners retains blank lines"
+input = "Warning: Permanently added '192.168.1.10' (ED25519) to the list of known hosts.\n\ntotal 32\ndrwxr-xr-x 4 user user 4096 Mar 10 12:00 app\n-rw-r--r-- 1 user user 1234 Mar 10 11:00 config.yaml\n\nConnection to 192.168.1.10 closed.\n"
+expected = "\ntotal 32\ndrwxr-xr-x 4 user user 4096 Mar 10 12:00 app\n-rw-r--r-- 1 user user 1234 Mar 10 11:00 config.yaml\n\n"
+
+[[tests.ssh]]
+name = "verbose debug lines stripped retains blanks"
+input = "debug1: Connecting to host.example.com port 22.\ndebug1: Connection established.\nAuthenticated to host.example.com ([1.2.3.4]:22).\nuptime: 12:00:00 up 42 days, load average: 0.10, 0.15, 0.12\nConnection to host.example.com closed.\n"
+expected = "uptime: 12:00:00 up 42 days, load average: 0.10, 0.15, 0.12\n"

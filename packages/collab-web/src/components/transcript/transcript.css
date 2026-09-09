@@ -1,0 +1,442 @@
+/* Transcript — dense gutter-labeled rows, terminal heritage. tr-* namespace. */
+
+.tr-root {
+	height: 100%;
+	overflow-y: auto;
+	overflow-x: hidden;
+	padding: 12px 16px 24px;
+	font-family: var(--font-ui);
+	font-size: 13px;
+	line-height: 1.5;
+	color: var(--fg);
+}
+
+.tr-empty {
+	padding: 24px 0;
+	text-align: center;
+	color: var(--fg-faint);
+	font-family: var(--font-mono);
+	font-size: 12px;
+}
+
+/* ---- rows ---- */
+
+.tr-row {
+	display: grid;
+	grid-template-columns: 72px minmax(0, 1fr);
+	gap: 0 12px;
+	padding: 5px 0;
+}
+
+.tr-gutter {
+	padding-top: 3px;
+	text-align: right;
+	font-family: var(--font-mono);
+	font-size: 10px;
+	font-weight: 500;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	color: var(--fg-faint);
+	user-select: none;
+}
+
+.tr-row--user .tr-gutter {
+	color: var(--accent);
+}
+
+.tr-body {
+	min-width: 0;
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 4px;
+}
+
+.tr-row--assistant .tr-body {
+	gap: 8px;
+}
+
+.tr-body > .tr-md {
+	align-self: stretch;
+}
+
+
+.tr-row--custom .tr-body {
+	color: var(--fg-muted);
+}
+
+.tr-custom {
+	display: flex;
+	flex-direction: column;
+	align-items: flex-start;
+	gap: 4px;
+}
+
+.tr-msg-img {
+	max-height: 240px;
+	max-width: 100%;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+}
+
+/* ---- chips & badges ---- */
+
+.tr-badge {
+	display: inline-block;
+	padding: 0 5px;
+	border-radius: var(--radius-sm);
+	background: var(--accent-muted);
+	color: var(--accent);
+	font-family: var(--font-mono);
+	font-size: 10px;
+	line-height: 16px;
+	text-transform: none;
+	letter-spacing: 0;
+}
+
+.tr-chip {
+	display: inline-flex;
+	align-items: center;
+	height: 16px;
+	padding: 0 6px;
+	border: 1px solid var(--border);
+	border-radius: var(--radius-sm);
+	background: var(--bg-inset);
+	color: var(--fg-muted);
+	font-family: var(--font-mono);
+	font-size: 10px;
+	white-space: nowrap;
+}
+
+.tr-chip--err {
+	border-color: color-mix(in oklch, var(--err) 50%, var(--border));
+	color: var(--err);
+	background: color-mix(in oklch, var(--err) 10%, transparent);
+}
+
+.tr-chip--warn {
+	border-color: color-mix(in oklch, var(--warn) 50%, var(--border));
+	color: var(--warn);
+	background: color-mix(in oklch, var(--warn) 10%, transparent);
+}
+
+.tr-stop {
+	display: flex;
+	align-items: baseline;
+	gap: 8px;
+	margin-top: 2px;
+}
+
+.tr-stop-msg {
+	color: var(--err);
+	font-family: var(--font-mono);
+	font-size: 11.5px;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+/* ---- thinking ---- */
+
+.tr-think-head {
+	display: inline-flex;
+	align-items: center;
+	gap: 4px;
+	padding: 0;
+	border: none;
+	background: none;
+	cursor: pointer;
+	color: var(--fg-faint);
+	font-family: var(--font-ui);
+	font-size: 12px;
+	font-style: italic;
+}
+
+.tr-think-head:hover {
+	color: var(--fg-muted);
+}
+
+.tr-think-body {
+	align-self: stretch;
+	margin: 2px 0;
+	padding: 2px 0 2px 10px;
+	border-left: 2px solid var(--border);
+	color: var(--fg-muted);
+	font-style: italic;
+	font-size: 12px;
+	white-space: pre-wrap;
+	word-break: break-word;
+}
+
+.tr-chev {
+	flex: none;
+	color: var(--fg-faint);
+	transition: transform 150ms ease-out;
+}
+
+.tr-chev--open {
+	transform: rotate(90deg);
+}
+
+/* ---- dividers & markers ---- */
+
+.tr-divider {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+	margin: 10px 0;
+	color: var(--fg-faint);
+	font-family: var(--font-mono);
+	font-size: 10px;
+	text-transform: uppercase;
+	letter-spacing: 0.08em;
+	user-select: none;
+}
+
+.tr-divider::before,
+.tr-divider::after {
+	content: "";
+	flex: 1;
+	height: 1px;
+	background: var(--border);
+}
+
+.tr-marker {
+	color: var(--fg-faint);
+	font-family: var(--font-mono);
+	font-size: 11px;
+}
+
+.tr-shimmer {
+	color: var(--fg-muted);
+	font-size: 12.5px;
+	animation: tr-pulse 1.4s ease-in-out infinite;
+}
+
+/* ---- tool cards ----
+ * Cards themselves are rendered by src/tool-render (tv-* namespace);
+ * only host-level layout lives here. */
+
+.tr-body > .tv-card {
+	align-self: stretch;
+	background: var(--bg-raised);
+}
+
+/* ---- markdown ---- */
+
+/* Match the TUI's word-boundary wrapping: keep Korean/CJK words intact when
+ * possible, but still emergency-break long URLs or identifiers before they
+ * overflow the transcript. */
+.tr-md {
+	line-height: 1.55;
+	overflow-wrap: break-word;
+	word-break: keep-all;
+}
+
+.tr-md > :first-child {
+	margin-top: 0;
+}
+
+.tr-md > :last-child {
+	margin-bottom: 0;
+}
+
+.tr-md p {
+	margin: 6px 0;
+}
+
+.tr-md p,
+.tr-md li {
+	white-space: pre-wrap;
+}
+
+.tr-md h1,
+.tr-md h2,
+.tr-md h3,
+.tr-md h4,
+.tr-md h5,
+.tr-md h6 {
+	margin: 14px 0 6px;
+	font-weight: 600;
+	line-height: 1.3;
+}
+
+.tr-md h1 {
+	font-size: 17px;
+}
+
+.tr-md h2 {
+	font-size: 15px;
+}
+
+.tr-md h3 {
+	font-size: 14px;
+}
+
+.tr-md h4,
+.tr-md h5,
+.tr-md h6 {
+	font-size: 13px;
+}
+
+.tr-md ul,
+.tr-md ol {
+	margin: 6px 0;
+	padding-left: 22px;
+}
+
+.tr-md li {
+	margin: 2px 0;
+}
+
+.tr-md li > ul,
+.tr-md li > ol {
+	white-space: normal;
+}
+
+.tr-md li > p {
+	margin: 2px 0;
+}
+
+.tr-md code {
+	padding: 1px 4px;
+	border-radius: var(--radius-sm);
+	background: var(--bg-inset);
+	font-family: var(--font-mono);
+	font-size: 12px;
+}
+
+.tr-md pre {
+	margin: 8px 0;
+	padding: 8px 10px;
+	overflow-x: auto;
+	border: 1px solid var(--border);
+	border-radius: var(--radius);
+	background: var(--bg-inset);
+}
+
+.tr-md pre code {
+	padding: 0;
+	border-radius: 0;
+	background: none;
+	font-size: 12px;
+	line-height: 1.5;
+}
+
+.tr-md blockquote {
+	margin: 8px 0;
+	padding: 2px 12px;
+	border-left: 3px solid var(--border-strong);
+	color: var(--fg-muted);
+}
+
+.tr-md table {
+	margin: 8px 0;
+	border-collapse: collapse;
+	font-size: 12.5px;
+}
+
+/* Table cells need `anywhere` so long URLs/identifiers contribute a shrinkable
+ * intrinsic width instead of expanding under the transcript's clipped overflow. */
+.tr-md th,
+.tr-md td {
+	padding: 3px 8px;
+	border: 1px solid var(--border);
+	overflow-wrap: anywhere;
+	text-align: left;
+	word-break: keep-all;
+}
+
+.tr-md th {
+	background: var(--bg-inset);
+	font-weight: 600;
+}
+
+.tr-md a {
+	color: var(--accent);
+	text-decoration: none;
+}
+
+.tr-md a:hover {
+	text-decoration: underline;
+}
+
+.tr-md hr {
+	margin: 12px 0;
+	border: none;
+	height: 1px;
+	background: var(--border);
+}
+
+.tr-md img {
+	max-width: 100%;
+	max-height: 320px;
+	border-radius: var(--radius-sm);
+}
+
+/* Math is native MathML (see transcript/math.ts): it must opt out of the
+ * `pre-wrap` on `.tr-md p`/`li`. Display equations scroll inside `.tr-math`
+ * rather than inside the `math` element, whose ink overflows its own box; the
+ * vertical padding absorbs that ink so the box never scrolls vertically. */
+.tr-md math {
+	white-space: normal;
+}
+
+.tr-md .tr-math {
+	display: block;
+	margin: 4px 0;
+	padding-block: 0.5em;
+	overflow-x: auto;
+}
+
+/* ---- compact variant (agent drawer) ---- */
+
+.tr-root--compact {
+	padding: 8px 10px 16px;
+	font-size: 12px;
+}
+
+.tr-root--compact .tr-row {
+	grid-template-columns: 52px 1fr;
+	gap: 0 8px;
+	padding: 3px 0;
+}
+
+.tr-root--compact .tr-gutter {
+	font-size: 9px;
+}
+
+.tr-root--compact .tv-pre {
+	max-height: 200px;
+	overflow-y: auto;
+}
+
+/* ---- animation ---- */
+
+@keyframes tr-pulse {
+	0%,
+	100% {
+		opacity: 0.45;
+	}
+	50% {
+		opacity: 1;
+	}
+}
+
+/* ---- responsive mobile styles ---- */
+@media (max-width: 640px) {
+	.tr-row {
+		display: flex;
+		flex-direction: column;
+		gap: 4px;
+		padding: 8px 0;
+	}
+	.tr-gutter {
+		text-align: left;
+		padding-top: 0;
+		font-size: 10px;
+		margin-bottom: 2px;
+	}
+	.tr-gutter:empty {
+		display: none;
+	}
+}

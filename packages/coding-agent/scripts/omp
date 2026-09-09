@@ -1,0 +1,51 @@
+#!/bin/sh
+# Dev launcher for the omp CLI, installed by `bun run setup`.
+#
+# Problem it solves: Bun reads `bunfig.toml` from the *current working
+# directory* at startup and evaluates its `preload` entries before running the
+# script. A bun-shebang bin (what `bun link` creates for `src/cli.ts`)
+# therefore inherits whatever `preload` the directory you happen to be in
+# declares. Running `omp`/`pi` inside an unrelated Bun project can execute — and
+# crash on — that project's preload, e.g.
+#   error: Cannot find module '@v12sh/utils/frontmatter' from '.../loader.ts'
+#
+# Bun only reads the *exact* cwd (it does not walk parents) and ignores
+# `--config`/`BUN_BE_BUN` for this, so the fix is to launch Bun from an empty,
+# bunfig-free directory and restore the real cwd inside the process via the
+# preload shim alongside this file.
+set -e
+
+# Resolve this script's real location even when invoked through a symlink
+# (`$HOME/.bun/bin/omp` -> this file).
+self=$0
+while [ -L "$self" ]; do
+	link=$(readlink "$self")
+	case $link in
+	/*) self=$link ;;
+	*) self=$(dirname "$self")/$link ;;
+	esac
+done
+scripts_dir=$(CDPATH= cd -- "$(dirname -- "$self")" && pwd -P)
+cli=$scripts_dir/../src/cli.ts
+preload=$scripts_dir/omp.ts
+timing_preload=$scripts_dir/../../utils/src/module-timer.ts
+
+launch_dir=${OMP_DEV_LAUNCH_DIR:-${HOME}/.omp/.dev-cwd}
+mkdir -p "$launch_dir"
+
+OMP_LAUNCH_CWD=$PWD
+export OMP_LAUNCH_CWD
+cd "$launch_dir"
+# Herdr 0.7.5 validates the foreground process name. The macOS shell can
+# preserve OMP's identity while still running the development CLI through Bun.
+run_bun() {
+	if [ "${HERDR_ENV:-}" = 1 ] && [ "$(uname -s)" = Darwin ]; then
+		exec -a omp bun "$@"
+	fi
+	exec bun "$@"
+}
+
+if [ -n "${PI_TIMING:-}" ]; then
+	run_bun --preload "$preload" --preload "$timing_preload" "$cli" "$@"
+fi
+run_bun --preload "$preload" "$cli" "$@"

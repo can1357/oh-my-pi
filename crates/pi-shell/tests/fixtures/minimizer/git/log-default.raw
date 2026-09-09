@@ -1,0 +1,15 @@
+commit 8cb198e4a3d2f1b5c7e9a0d4f6b8c2e1a3d5f7b9 (HEAD -> main, tag: v0.22.0)
+Author: Release Bot <release-bot@users.noreply.example.com>
+Date:   Wed Feb 19 10:30:45 2026 +0100
+
+    chore(master): release 0.22.0 (#201)
+
+    Release-As: 0.22.0
+
+commit 393fa5b2c4d6e8a0b2d4f6a8c0e2d4f6a8b0c2d4
+Author: Contributor One <one@users.noreply.example.com>
+Date:   Wed Feb 19 09:15:30 2026 +0100
+
+    feat: add `rtk wc` command (#175)
+
+    Adds a compact word-count subcommand.

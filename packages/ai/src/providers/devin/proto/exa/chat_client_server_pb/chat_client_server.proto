@@ -1,0 +1,57 @@
+syntax = "proto3";
+
+package exa.chat_client_server_pb;
+
+import "exa/codeium_common_pb/codeium_common.proto";
+
+message StartChatClientRequestStreamRequest {
+}
+
+message ChatClientRequest {
+  oneof request {
+    .exa.chat_client_server_pb.AddCascadeInputRequest add_cascade_input = 1;
+    .exa.chat_client_server_pb.SendActionToChatPanelRequest send_action_to_chat_panel = 2;
+    .exa.chat_client_server_pb.InitialAckRequest initial_ack = 3;
+    .exa.chat_client_server_pb.RefreshCustomizationRequest refresh_customization = 4;
+    .exa.chat_client_server_pb.SendCascadeInputRequest send_cascade_input = 5;
+    .exa.chat_client_server_pb.ImplementPlanRequest implement_plan = 6;
+  }
+}
+
+message AddCascadeInputRequest {
+  repeated .exa.codeium_common_pb.TextOrScopeItem items = 1;
+  repeated .exa.codeium_common_pb.ImageData images = 2;
+}
+
+message SendCascadeInputRequest {
+  repeated .exa.codeium_common_pb.TextOrScopeItem items = 1;
+  repeated .exa.codeium_common_pb.ImageData images = 2;
+}
+
+message ImplementPlanRequest {
+  string plan_path = 1;
+  string plan_title = 2;
+}
+
+message SendActionToChatPanelRequest {
+  string action_type = 1;
+  repeated bytes payload = 2;
+}
+
+message FileDiffState {
+  string uri = 1;
+  int32 num_insertions = 2;
+  int32 num_deletions = 3;
+  optional string cascade_id = 4;
+}
+
+message InitialAckRequest {
+}
+
+message RefreshCustomizationRequest {
+  .exa.codeium_common_pb.RefreshCustomizationType config_type = 1;
+}
+
+service ChatClientServerService {
+  rpc StartChatClientRequestStream (.exa.chat_client_server_pb.StartChatClientRequestStreamRequest) returns (stream .exa.chat_client_server_pb.ChatClientRequest);
+}

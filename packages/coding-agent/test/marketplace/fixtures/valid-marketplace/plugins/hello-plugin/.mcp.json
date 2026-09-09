@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "test-server": {
+      "command": "${CLAUDE_PLUGIN_ROOT}/bin/server",
+      "args": ["--port", "3000"]
+    }
+  }
+}

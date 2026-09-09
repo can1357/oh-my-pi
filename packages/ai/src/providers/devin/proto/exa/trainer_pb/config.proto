@@ -1,0 +1,647 @@
+syntax = "proto3";
+
+package exa.trainer_pb;
+
+import "exa/codeium_common_pb/codeium_common.proto";
+
+enum TrainFramework {
+  TRAIN_FRAMEWORK_UNSPECIFIED = 0;
+  TRAIN_FRAMEWORK_TORCH = 1;
+  TRAIN_FRAMEWORK_MEGATRON = 3;
+
+  reserved 2;
+  reserved "TRAIN_FRAMEWORK_JAX";
+}
+
+enum LoopType {
+  LOOP_TYPE_UNSPECIFIED = 0;
+  LOOP_TYPE_TRAIN = 1;
+  LOOP_TYPE_WEIGHT_UPDATE_BENCHMARK = 2;
+}
+
+enum TrainObjective {
+  TRAIN_OBJECTIVE_UNSPECIFIED = 0;
+  TRAIN_OBJECTIVE_CAUSAL_LM = 1;
+  TRAIN_OBJECTIVE_EMBEDDING = 2;
+  TRAIN_OBJECTIVE_PREFIX_LM = 3;
+  TRAIN_OBJECTIVE_REWARD = 4;
+  TRAIN_OBJECTIVE_SEQ2SEQ = 5;
+  TRAIN_OBJECTIVE_DPO = 6;
+  TRAIN_OBJECTIVE_RECORD_ACTIVATIONS = 7;
+  TRAIN_OBJECTIVE_KNOWLEDGE_DISTILLATION = 8;
+  TRAIN_OBJECTIVE_KTO = 9;
+  TRAIN_OBJECTIVE_GRPO = 10;
+
+  reserved 11;
+  reserved "TRAIN_OBJECTIVE_ON_POLICY_DPO";
+}
+
+enum OptimizerType {
+  OPTIMIZER_TYPE_UNSPECIFIED = 0;
+  OPTIMIZER_TYPE_NONE = 1;
+  OPTIMIZER_TYPE_ADAMW = 2;
+  OPTIMIZER_TYPE_LION = 3;
+
+  reserved 4;
+}
+
+enum OptimizerExpAvgDtype {
+  OPTIMIZER_EXP_AVG_DTYPE_UNSPECIFIED = 0;
+  OPTIMIZER_EXP_AVG_DTYPE_FLOAT32 = 1;
+  OPTIMIZER_EXP_AVG_DTYPE_FLOAT16 = 2;
+}
+
+enum ActivationType {
+  ACTIVATION_TYPE_UNSPECIFIED = 0;
+  ACTIVATION_TYPE_GELU = 1;
+  ACTIVATION_TYPE_SWIGLU = 2;
+  ACTIVATION_TYPE_SQUARED_RELU = 3;
+  ACTIVATION_TYPE_SWISH = 4;
+}
+
+enum InitializationMethod {
+  INITIALIZATION_METHOD_UNSPECIFIED = 0;
+  INITIALIZATION_METHOD_TRUNCATED_NORMAL = 1;
+  INITIALIZATION_METHOD_DEEP_NORM = 2;
+}
+
+enum PreferenceLoss {
+  PREFERENCE_LOSS_UNSPECIFIED = 0;
+  PREFERENCE_LOSS_DPO = 1;
+  PREFERENCE_LOSS_SIMPO = 2;
+  PREFERENCE_LOSS_IPO = 3;
+  PREFERENCE_LOSS_RPO = 4;
+}
+
+enum QuantizationMethod {
+  QUANTIZATION_METHOD_UNSPECIFIED = 0;
+  QUANTIZATION_METHOD_INT8 = 1;
+  QUANTIZATION_METHOD_INT8_FULL = 4;
+  QUANTIZATION_METHOD_INT4 = 2;
+  QUANTIZATION_METHOD_NF4 = 3;
+  QUANTIZATION_METHOD_FP8 = 5;
+  QUANTIZATION_METHOD_FP8_VECTOR_NO_LM_HEAD = 6;
+}
+
+enum CheckpointBackend {
+  CHECKPOINT_BACKEND_UNSPECIFIED = 0;
+  CHECKPOINT_BACKEND_TORCH_DCP = 1;
+  CHECKPOINT_BACKEND_ZARR = 2;
+}
+
+enum MoeBackend {
+  MOE_BACKEND_UNSPECIFIED = 0;
+  MOE_BACKEND_DEEPEP = 1;
+  MOE_BACKEND_A2A = 2;
+}
+
+enum ExperimentProject {
+  EXPERIMENT_PROJECT_UNSPECIFIED = 0;
+  EXPERIMENT_PROJECT_CODER_MODEL = 1;
+  EXPERIMENT_PROJECT_TAB_TO_JUMP = 2;
+  EXPERIMENT_PROJECT_TAB_MODEL = 3;
+}
+
+enum InferenceObjective {
+  INFERENCE_OBJECTIVE_UNSPECIFIED = 0;
+  INFERENCE_OBJECTIVE_CAUSAL_LM = 1;
+  INFERENCE_OBJECTIVE_EMBEDDING = 2;
+  INFERENCE_OBJECTIVE_REWARD = 3;
+}
+
+enum QuantizationPrecision {
+  QUANTIZATION_PRECISION_UNSPECIFIED = 0;
+  QUANTIZATION_PRECISION_FP32 = 1;
+  QUANTIZATION_PRECISION_FP16 = 2;
+  QUANTIZATION_PRECISION_BF16 = 3;
+  QUANTIZATION_PRECISION_FP8_E4M3 = 4;
+  QUANTIZATION_PRECISION_INT8 = 5;
+  QUANTIZATION_PRECISION_NF4 = 6;
+}
+
+message RoPEEmbeddingConfig {
+  float min_timescale = 1;
+  float max_timescale = 2;
+  oneof scaling {
+    .exa.trainer_pb.RoPEScalingLlama31Config scaling_llama31 = 3;
+    .exa.trainer_pb.RoPEScalingDeepseekV2Config scaling_deepseek_v2 = 4;
+  }
+}
+
+message RoPEScalingLlama31Config {
+  float factor = 1;
+  float low_freq_factor = 2;
+  float high_freq_factor = 3;
+  float old_context_len = 4;
+}
+
+message RoPEScalingDeepseekV2Config {
+  float factor = 1;
+  float low_freq_factor = 2;
+  float high_freq_factor = 3;
+  float old_context_len = 4;
+  float mscale = 5;
+  float mscale_all_dim = 6;
+}
+
+message XPosEmbeddingConfig {
+  float min_timescale = 1;
+  float max_timescale = 2;
+  float gamma = 3;
+  float scale_base = 4;
+  bool tile = 5;
+}
+
+message MUPConfig {
+  reserved 2;
+
+  float sigma_base = 1;
+  float sigma_input_embedding = 6;
+  float sigma_output_embedding = 7;
+  float lr = 3;
+  float lr_input_embedding = 4;
+  float lr_biases = 5;
+  float o_wo_init_multiplier = 8;
+}
+
+message DPOConfig {
+  float beta = 1;
+  float label_smoothing = 2;
+  bool average_log_probs = 3;
+  bool mask_prompt_tokens_loss = 4;
+  float gamma = 5;
+  .exa.trainer_pb.PreferenceLoss loss_type = 6;
+  float eta = 7;
+  float sft_loss_coefficient = 8;
+}
+
+message KTOConfig {
+  float lambda_positive = 1;
+  float lambda_negative = 2;
+  float beta = 3;
+}
+
+message KnowledgeDistillationConfig {
+  float generation_temperature = 1;
+  repeated uint32 stop_tokens = 2;
+  float beta = 3;
+  float lambda_kd = 4;
+  float divergence_temperature = 5;
+}
+
+message OnPolicyGRPOConfig {
+  float reference_policy_kl_penalty_beta = 1;
+  float ratio_clip_min = 2;
+  float ratio_clip_max = 3;
+  bool use_dr_grpo_length_normalization = 4;
+}
+
+message LearningRateParamGroup {
+  string name_regex = 1;
+  float lr_multiplier = 2;
+  float wd_multiplier = 3;
+}
+
+message CrossAttentionConfig {
+  uint32 start_layer_idx = 1;
+  uint32 stop_layer_idx = 2;
+  uint32 layer_step = 3;
+  uint32 num_heads = 4;
+  uint32 head_dim = 5;
+  uint32 num_kv_heads = 6;
+  uint32 kv_embed_dim = 7;
+  oneof positional_embedding {
+    .exa.trainer_pb.RoPEEmbeddingConfig rope_config = 8;
+    .exa.trainer_pb.XPosEmbeddingConfig xpos_config = 9;
+  }
+}
+
+message SlidingWindowAttentionConfig {
+  uint32 window_start = 1;
+  uint32 window_end = 2;
+}
+
+message AttentionModification {
+  uint32 start_layer_idx = 1;
+  uint32 end_layer_idx = 2;
+  uint32 layer_step = 3;
+  oneof modification {
+    .exa.trainer_pb.SlidingWindowAttentionConfig sliding_window_attn = 4;
+  }
+}
+
+message MultiLatentAttentionConfig {
+  int64 q_lora_rank = 1;
+  int64 kv_lora_rank = 2;
+  int64 qk_nope_head_dim = 3;
+  int64 qk_rope_head_dim = 4;
+  int64 v_head_dim = 5;
+}
+
+message MixtureOfExpertsConfig {
+  int64 n_shared_experts = 1;
+  int64 n_routed_experts = 2;
+  int64 num_experts_per_tok = 3;
+  float routed_scaling_factor = 4;
+  string scoring_func = 5;
+  int64 routed_n_group = 6;
+  int64 routed_topk_group = 7;
+  string routed_topk_method = 8;
+  int64 moe_hidden_size = 9;
+  int64 first_k_layers_dense_replace = 10;
+  bool force_non_homogeneous_layers = 11;
+}
+
+message MultiTokenPredictionConfig {
+  uint32 num_layers = 1;
+  float loss_scale = 2;
+  bool no_load_from_checkpoint = 3;
+  uint32 num_layers_to_load_from_checkpoint = 4;
+  bool freeze_checkpoint_weights = 5;
+  uint32 num_loaded_mtp_layers_to_unfreeze = 6;
+}
+
+message TransformerModelConfig {
+  reserved 26;
+  reserved 34;
+  reserved 38;
+  reserved 39;
+  reserved 40;
+  reserved 41;
+  reserved "dpo_config", "use_uneven_pipeline_sharding", "first_pipeline_num_layers", "last_pipeline_num_layers", "knowledge_distillation_config";
+
+  uint32 num_layers = 1;
+  uint32 head_dim = 2;
+  uint32 num_heads = 4;
+  float rotary_dim_ratio = 5;
+  uint32 embed_dim = 44;
+  uint32 mlp_intermediate_dim_ratio = 6;
+  uint32 seq_mlp_hidden_dim = 31;
+  float seq_mlp_intermediate_dim_ratio = 30;
+  uint32 vocab_size = 7;
+  float embedding_dropout = 8;
+  float attention_dropout = 9;
+  float residual_dropout = 10;
+  bool lm_head_shared_embedding = 11;
+  bool affine_layer_norm = 12;
+  bool layernorm_zero_centered_gamma = 36;
+  bool mlp_bias = 13;
+  optional bool attn_bias = 73;
+  optional float layer_norm_eps = 74;
+  optional bool qk_layernorm = 75;
+  bool lm_head_bias = 14;
+  oneof positional_embedding {
+    .exa.trainer_pb.RoPEEmbeddingConfig rope_config = 15;
+    .exa.trainer_pb.XPosEmbeddingConfig xpos_config = 16;
+  }
+  .exa.trainer_pb.MUPConfig mup_config = 21;
+  .exa.trainer_pb.ActivationType activation = 17;
+  bool post_layer_norm = 18;
+  bool deep_norm_residual = 19;
+  .exa.trainer_pb.InitializationMethod initialization_method = 20;
+  bool multi_query_attention = 22;
+  uint32 lora_r = 23;
+  float lora_alpha = 24;
+  float lora_dropout = 25;
+  .exa.trainer_pb.QuantizationMethod quantization_method = 27;
+  bool sequential = 28;
+  uint32 num_kv_heads = 29;
+  .exa.trainer_pb.CrossAttentionConfig xattn_config = 32;
+  bool causal_rm = 33;
+  repeated .exa.trainer_pb.AttentionModification attention_modifications = 35;
+  .exa.trainer_pb.QuantizationPolicySet quantization_policy = 37;
+  .exa.trainer_pb.MultiLatentAttentionConfig mla_config = 42;
+  .exa.trainer_pb.MixtureOfExpertsConfig moe_config = 43;
+  .exa.trainer_pb.MultiTokenPredictionConfig mtp_config = 45;
+}
+
+message EncoderDecoderModelConfig {
+  .exa.trainer_pb.TransformerModelConfig encoder = 1;
+  .exa.trainer_pb.TransformerModelConfig decoder = 2;
+}
+
+message BaseModelConfig {
+  reserved 2;
+
+  oneof architecture {
+    .exa.trainer_pb.TransformerModelConfig gptj = 1;
+    .exa.trainer_pb.EncoderDecoderModelConfig t5 = 3;
+  }
+}
+
+message ExperimentMetadata {
+  .exa.trainer_pb.ExperimentProject project = 1;
+  string group = 2;
+  string job_type = 3;
+  repeated string tag = 4;
+}
+
+message MockedInferenceProviderConfig {
+}
+
+message QuantizationConfig {
+  string activation_scheme = 1;
+  string fmt = 2;
+  string quant_method = 3;
+  repeated int32 weight_block_size = 4;
+}
+
+message SGLangInferenceProviderConfig {
+  reserved 1;
+  reserved 4;
+
+  uint32 world_size = 3;
+  string model_type = 5;
+  .exa.trainer_pb.QuantizationConfig quantization_config = 6;
+  bool log_weight_update_progress = 7;
+  repeated string sglang_addr_list = 8;
+  bool disable_batch_weight_update = 9;
+  bool disable_sequential_pipeline_update = 10;
+  bool disable_fanout_v2 = 11;
+}
+
+message TrainInferenceConfig {
+  reserved 4;
+
+  .exa.codeium_common_pb.CompletionConfiguration completion_config = 1;
+  oneof inference_provider_config {
+    .exa.trainer_pb.MockedInferenceProviderConfig mocked_inference_provider_config = 2;
+    .exa.trainer_pb.SGLangInferenceProviderConfig sglang_inference_provider_config = 3;
+  }
+}
+
+message WeightUpdateBenchmarkConfig {
+  uint32 update_interval_seconds = 1;
+  uint32 num_weight_updates = 2;
+}
+
+message TrainerConfig {
+  reserved 1;
+  reserved 3;
+  reserved 5;
+  reserved 6;
+  reserved 7;
+  reserved 9;
+  reserved 10;
+  reserved 96;
+  reserved "rollout_data_service_config";
+
+  string name = 51;
+  string description = 45;
+  .exa.trainer_pb.ExperimentMetadata metadata = 88;
+  string user = 89;
+  .exa.trainer_pb.BaseModelConfig base_model_config = 44;
+  .exa.trainer_pb.TrainObjective train_objective = 39;
+  oneof objective_config {
+    .exa.trainer_pb.DPOConfig dpo_config = 82;
+    .exa.trainer_pb.KnowledgeDistillationConfig knowledge_distillation_config = 83;
+    .exa.trainer_pb.KTOConfig kto_config = 87;
+    .exa.trainer_pb.OnPolicyGRPOConfig on_policy_grpo_config = 95;
+  }
+  string train_data_dir = 2;
+  string eval_data_dir = 4;
+  uint32 block_size = 8;
+  uint32 bytes_per_token = 52;
+  bool use_loss_weight = 64;
+  bool use_loss_magnitude = 66;
+  bool use_packed_sequence_lengths = 73;
+  string checkpoint_dir = 46;
+  string tmp_checkpoint_dir = 59;
+  string log_dir = 47;
+  .exa.trainer_pb.TrainFramework train_framework = 38;
+  .exa.trainer_pb.LoopType loop_type = 104;
+  .exa.trainer_pb.WeightUpdateBenchmarkConfig weight_update_benchmark_config = 105;
+  uint32 train_steps = 11;
+  uint32 train_batch_size = 12;
+  uint32 gradient_accumulation_steps = 13;
+  bool bf16 = 14;
+  bool fp8 = 61;
+  bool gradient_checkpointing = 15;
+  bool activation_checkpoint_lm_head = 90;
+  uint32 num_embedding_splits_per_microbatch = 40;
+  string activations_dir = 71;
+  .exa.trainer_pb.MoeBackend moe_backend = 102;
+  bool allow_nondeterministic = 75;
+  uint32 eval_batch_size = 16;
+  uint32 eval_steps = 17;
+  uint32 eval_frequency = 18;
+  float beta1 = 19;
+  float beta2 = 20;
+  float epsilon = 21;
+  float weight_decay = 22;
+  float gradient_clip_norm = 23;
+  .exa.trainer_pb.OptimizerType optimizer = 48;
+  bool use_distributed_optimizer = 70;
+  .exa.trainer_pb.OptimizerExpAvgDtype optimizer_exp_avg_dtype = 78;
+  string lr_scheduler_type = 24;
+  float learning_rate = 25;
+  uint32 warmup_steps = 26;
+  float lr_floor_fraction = 27;
+  float lr_decay_power = 49;
+  float lr_decay_offset = 50;
+  uint32 cooldown_steps = 57;
+  uint32 lr_cyclical_frequency = 62;
+  float lr_cyclical_magnitude = 63;
+  repeated .exa.trainer_pb.LearningRateParamGroup learning_rate_param_group = 65;
+  string pretrained_model_path = 28;
+  .exa.trainer_pb.CheckpointBackend pretrained_model_checkpoint_backend = 69;
+  bool load_LM_checkpoint_into_embed_model = 42;
+  bool load_LM_checkpoint_into_lora_model = 53;
+  bool load_optimizer_state_for_finetuning = 58;
+  .exa.trainer_pb.TrainerConfig teacher_model_config = 72;
+  bool fold_dpo_sequences = 74;
+  string checkpoint_path_to_load = 29;
+  bool load_most_recent_checkpoint = 30;
+  uint32 checkpoint_frequency = 31;
+  string checkpoint_staging_dir = 60;
+  bool optim_loading_avoid_copy = 81;
+  bool load_and_broadcast_from_first_dp_rank = 92;
+  uint32 num_nodes = 33;
+  uint32 num_processes_per_node = 34;
+  uint32 model_partitions = 41;
+  uint32 data_partitions = 56;
+  uint32 pipeline_partitions = 67;
+  uint32 context_partitions = 91;
+  bool use_uneven_pipeline_sharding = 84;
+  uint32 first_pipeline_num_layers = 85;
+  uint32 last_pipeline_num_layers = 86;
+  uint32 expert_partitions = 77;
+  bool full_2d_partitioning = 43;
+  string tpu_topology = 54;
+  int64 dataloader_num_workers = 36;
+  int64 dataloader_prefetch_factor = 37;
+  int64 dataloader_max_shards = 55;
+  string data_service_address = 93;
+  bool async_data_service_generation = 103;
+  bool scheduler_managed_data_service = 106;
+  .exa.trainer_pb.TrainInferenceConfig inference_config = 94;
+  uint32 ref_policy_update_frequency = 98;
+  uint32 inference_weight_update_frequency = 99;
+  uint32 old_policy_update_frequency = 100;
+  int64 seed = 35;
+  bool use_checkpoint_cache = 68;
+  bool async_checkpoints = 76;
+  string hf_model_id = 79;
+  bool optimizer_cpu_offload = 80;
+  string task_pod_ip = 97;
+  bool use_cuda_graphs = 101;
+}
+
+message SweepConfig {
+  string name_prefix = 1;
+  string description = 2;
+  .exa.trainer_pb.TrainerConfig base_config = 3;
+  repeated .exa.trainer_pb.SweepAxis axis = 4;
+}
+
+message SweepAxis {
+  string short_name = 1;
+  repeated .exa.trainer_pb.SweepItem value = 2;
+}
+
+message SweepItem {
+  string short_name = 1;
+  map<string, .exa.trainer_pb.ConfigValue> field = 2;
+}
+
+message ConfigValue {
+  oneof value {
+    string string_value = 1;
+    int64 int_value = 2;
+    float float_value = 3;
+    .exa.trainer_pb.QuantizationMethod quantization_method_value = 4;
+    bool bool_value = 5;
+  }
+}
+
+message InferenceConfig {
+  .exa.codeium_common_pb.Model model_id = 1;
+  .exa.trainer_pb.InferenceObjective inference_objective = 2;
+  string tokenizer = 3;
+  uint32 lm_max_context_length = 4;
+  uint32 lm_max_generation_length = 5;
+  uint32 lm_max_num_completions = 6;
+  uint32 lm_max_top_k = 7;
+  uint32 embedding_max_context_length = 8;
+  uint32 reward_max_context_length = 10;
+  uint32 reserved_memory_mib = 9;
+  optional uint32 top_draft_tokens = 11;
+}
+
+message ModelLoaderConfig {
+  reserved 2;
+
+  string base_model_path = 1;
+  string inference_config_path = 3;
+  oneof parallelism_oneof {
+    int32 mp_shards = 4;
+    .exa.trainer_pb.ParallelismConfig parallelism_config = 8;
+  }
+  uint32 priority = 5;
+  bool load_mock_model = 6;
+  .exa.trainer_pb.TransformerModelConfig mock_model_config = 7;
+}
+
+message ModelLoaderConfigs {
+  repeated .exa.trainer_pb.ModelLoaderConfig model_loader_configs = 1;
+}
+
+message ScheduledModel {
+  .exa.codeium_common_pb.Model model_id = 1;
+  float memory_fraction = 2;
+  optional float memory_fragmentation_factor = 5;
+  optional int64 max_tokens_per_forward_pass = 6;
+  optional int64 chunked_prefill_length = 3;
+  optional int64 speculative_copy_length = 4;
+  float max_generation_to_prompt_scaling_term = 7;
+  int64 max_generation_to_prompt_constant_term = 8;
+  float prompt_cache_cpu_memory_mib = 9;
+  int64 prompt_cache_persistence_s = 10;
+  string prompt_cache_shm_name = 12;
+  int64 top_draft_tokens = 11;
+}
+
+message SchedulingGroupConfig {
+  int32 num_gpus = 1;
+  int32 replicas = 3;
+  repeated .exa.trainer_pb.ScheduledModel models = 2;
+}
+
+message DraftTargetModelPair {
+  .exa.codeium_common_pb.Model draft_model_id = 1;
+  .exa.codeium_common_pb.Model target_model_id = 2;
+  int32 gamma = 3;
+  float draft_temperature = 4;
+}
+
+message SchedulingGroupConfigs {
+  repeated .exa.trainer_pb.SchedulingGroupConfig scheduling_group_configs = 1;
+  repeated .exa.trainer_pb.DraftTargetModelPair draft_target_model_pairs = 2;
+  repeated .exa.trainer_pb.DeviceWorkerRoutingInfo device_worker_routing_infos = 3;
+}
+
+message DeviceWorkerRoutingInfo {
+  oneof info {
+    string ip = 1;
+    string message_queue_name = 2;
+  }
+}
+
+message QuantizationPolicySet {
+  repeated .exa.trainer_pb.QuantizationPolicy policy = 1;
+}
+
+message QuantizationPolicy {
+  repeated string selector = 1;
+  oneof layer_quantization {
+    .exa.trainer_pb.TokenEmbeddingQuantization token_embedding = 2;
+    .exa.trainer_pb.TransformerLayerQuantization transformer_layer = 3;
+    .exa.trainer_pb.TokenOutputProjectionQuantization token_output_projection = 4;
+    .exa.trainer_pb.LayerNormQuantization layer_norm = 5;
+  }
+}
+
+message TokenEmbeddingQuantization {
+  .exa.trainer_pb.QuantizationPrecision word_embedding_precision = 1;
+  .exa.trainer_pb.QuantizationPrecision output_precision = 2;
+}
+
+message TransformerLayerQuantization {
+  .exa.trainer_pb.LinearQuantization attention_linear = 2;
+  .exa.trainer_pb.LinearQuantization mlp_linear = 3;
+  float residual_branch_scale = 4;
+  uint32 num_mlp_hidden_scaling_groups = 5;
+}
+
+message TokenOutputProjectionQuantization {
+  .exa.trainer_pb.LinearQuantization linear = 2;
+}
+
+message LinearQuantization {
+  .exa.trainer_pb.QuantizationPrecision activation_precision = 1;
+  .exa.trainer_pb.QuantizationPrecision weight_precision = 2;
+  .exa.trainer_pb.QuantizationPrecision bias_precision = 3;
+  .exa.trainer_pb.QuantizationPrecision output_precision = 4;
+  bool vectorwise_scaling = 5;
+  float scale_upper_bound = 6;
+}
+
+message LayerNormQuantization {
+  .exa.trainer_pb.QuantizationPrecision weight_precision = 1;
+  .exa.trainer_pb.QuantizationPrecision output_precision = 2;
+}
+
+message LayerParallelismConfig {
+  oneof expert_mlp_mp {
+    int64 expert_mp = 1;
+    int64 mlp_mp = 2;
+  }
+  int64 num_replica_layers = 3;
+}
+
+message ParallelismConfig {
+  int64 embedding_parallelism = 1;
+  repeated .exa.trainer_pb.LayerParallelismConfig layer_parallelism_configs = 2;
+  int64 attention_mp = 3;
+  int64 num_attention_units = 4;
+}

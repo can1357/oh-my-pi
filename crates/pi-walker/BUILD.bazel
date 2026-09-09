@@ -1,0 +1,39 @@
+load("@crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["Cargo.toml"])
+
+rust_library(
+    name = "pi-walker",
+    srcs = glob(["src/**/*.rs"]),
+    aliases = aliases(),
+    crate_name = "pi_walker",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "17.1.5",
+    deps = all_crate_deps(normal = True),
+)
+
+rust_test(
+    name = "pi-walker_test",
+    crate = ":pi-walker",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)
+
+[
+    rust_test(
+        name = name + "_test",
+        srcs = ["tests/" + name + ".rs"],
+        edition = "2024",
+        proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+        deps = all_crate_deps(normal_dev = True) + [":pi-walker"],
+    )
+    for name in [
+        "parallel",
+        "perf",
+    ]
+]

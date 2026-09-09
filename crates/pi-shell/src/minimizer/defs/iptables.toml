@@ -1,0 +1,26 @@
+# iptables -L / -S output. Big tables stay head/tail compact.
+
+[filters.iptables]
+description = "Compact iptables rule listings"
+match_command = "^(ip6?tables|iptables-save|ip6tables-save)$"
+strip_ansi = true
+strip_lines_matching = [
+	"^Chain DOCKER",
+	"^Chain BR-",
+	"^\\s*$",
+]
+truncate_lines_at = 250
+head_lines = 40
+tail_lines = 20
+max_lines = 80
+on_empty = "iptables: empty"
+
+[[tests.iptables]]
+name = "small listing passes through"
+input = "Chain INPUT (policy ACCEPT 0 packets, 0 bytes)\n pkts bytes target     prot opt in     out     source               destination\n"
+expected = "Chain INPUT (policy ACCEPT 0 packets, 0 bytes)\n pkts bytes target     prot opt in     out     source               destination\n"
+
+[[tests.iptables]]
+name = "strips docker/bridge chain headers and blanks, keeps policy and rules"
+input = "Chain INPUT (policy ACCEPT)\n1    ACCEPT     all  --  0.0.0.0/0            0.0.0.0/0\n\nChain DOCKER (1 references)\n    DOCKER     all  --  0.0.0.0/0            0.0.0.0/0\nChain BR-abcdef (0 references)\n"
+expected = "Chain INPUT (policy ACCEPT)\n1    ACCEPT     all  --  0.0.0.0/0            0.0.0.0/0\n    DOCKER     all  --  0.0.0.0/0            0.0.0.0/0\n"

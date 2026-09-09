@@ -1,0 +1,31 @@
+{
+	// Fallow configuration — see `bunx fallow config-schema` for the full schema.
+	//
+	// `entry` is critical: fallow's dead-code analyzer treats unlisted test files
+	// as unreachable, which means any helper imported only from other tests looks
+	// orphaned. Without this, `fallow fix` strips real `export` keywords from
+	// shared test utilities (e.g. `e2eApiKey`, `withEnv`, `waitForDelayOrAbort`),
+	// breaking the test build with `noUnusedVariables` lint errors.
+	"entry": [
+		"packages/*/test/**/*.{ts,tsx}",
+		"packages/*/test/**/*.test.{ts,tsx}",
+		"packages/*/bench/**/*.{ts,tsx}",
+		"packages/*/scripts/**/*.ts"
+	],
+	"ignoreDependencies": [
+		// Used via `node_modules/.bin/napi` from packages/natives/scripts/build-native.ts.
+		"@napi-rs/cli"
+	],
+	"duplicates": {
+		"ignore": [
+			// Generated from `packages/natives/scripts/native-index.template.js` via gen-enums.ts.
+			"packages/natives/native/index.js",
+			// Embedded HTML asset shipped as a static template, not a code module.
+			"packages/coding-agent/src/export/html/template.js",
+			// Generated/owned upstream — see packages/ai/scripts/generate-models.ts.
+			"packages/ai/src/models.json"
+		],
+		"ignoreImports": true
+	},
+	"rules": {}
+}

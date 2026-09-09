@@ -1,0 +1,24 @@
+# JSON-patch (kubectl --type=json --patch-file) appending the bazel-remote
+# egress rule to the arc-runners `runner-egress-lockdown` NetworkPolicy.
+# Mirrors the existing sccache/RustFS rule (service CIDR + namespaceSelector).
+#
+# NOT idempotent on its own - `add` on `/spec/egress/-` appends every time.
+# setup.sh guards it with a jq presence check; apply by hand the same way:
+#
+#   kubectl -n arc-runners get networkpolicy runner-egress-lockdown -o json \
+#     | jq -e '.spec.egress[].to[]? | select(.namespaceSelector.matchLabels["kubernetes.io/metadata.name"] == "bazel-cache")' >/dev/null \
+#     || kubectl -n arc-runners patch networkpolicy runner-egress-lockdown \
+#          --type=json --patch-file=infra/bazel-remote/runner-egress-patch.yaml
+- op: add
+  path: /spec/egress/-
+  value:
+    # bazel-remote shared cache (gRPC) over the cluster network.
+    to:
+      - ipBlock:
+          cidr: 10.43.0.0/16
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: bazel-cache
+    ports:
+      - port: 9092
+        protocol: TCP

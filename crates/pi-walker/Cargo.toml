@@ -1,0 +1,29 @@
+[package]
+name = "pi-walker"
+version.workspace = true
+edition.workspace = true
+license = "MIT"
+authors.workspace = true
+repository.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+dashmap.workspace = true
+globset.workspace = true
+ignore.workspace = true
+parking_lot.workspace = true
+rayon.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { workspace = true, features = [
+	"Wdk_Storage_FileSystem",
+	"Win32_Foundation",
+	"Win32_Security",
+	"Win32_Storage_FileSystem",
+	"Win32_System_IO",
+] }

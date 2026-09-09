@@ -1,0 +1,4555 @@
+syntax = "proto3";
+
+package agent.v1;
+
+enum AppliedAgentChange_ChangeType {
+   CHANGE_TYPE_UNSPECIFIED = 0;
+   CHANGE_TYPE_CREATED = 1;
+   CHANGE_TYPE_MODIFIED = 2;
+   CHANGE_TYPE_DELETED = 3;
+}
+
+enum MouseButton {
+   MOUSE_BUTTON_UNSPECIFIED = 0;
+   MOUSE_BUTTON_LEFT = 1;
+   MOUSE_BUTTON_RIGHT = 2;
+   MOUSE_BUTTON_MIDDLE = 3;
+   MOUSE_BUTTON_BACK = 4;
+   MOUSE_BUTTON_FORWARD = 5;
+}
+
+enum ScrollDirection {
+   SCROLL_DIRECTION_UNSPECIFIED = 0;
+   SCROLL_DIRECTION_UP = 1;
+   SCROLL_DIRECTION_DOWN = 2;
+   SCROLL_DIRECTION_LEFT = 3;
+   SCROLL_DIRECTION_RIGHT = 4;
+}
+
+enum CursorRuleSource {
+   CURSOR_RULE_SOURCE_UNSPECIFIED = 0;
+   CURSOR_RULE_SOURCE_TEAM = 1;
+   CURSOR_RULE_SOURCE_USER = 2;
+}
+
+enum DiagnosticSeverity {
+   DIAGNOSTIC_SEVERITY_UNSPECIFIED = 0;
+   DIAGNOSTIC_SEVERITY_ERROR = 1;
+   DIAGNOSTIC_SEVERITY_WARNING = 2;
+   DIAGNOSTIC_SEVERITY_INFORMATION = 3;
+   DIAGNOSTIC_SEVERITY_HINT = 4;
+}
+
+enum RecordingMode {
+   RECORDING_MODE_UNSPECIFIED = 0;
+   RECORDING_MODE_START_RECORDING = 1;
+   RECORDING_MODE_SAVE_RECORDING = 2;
+   RECORDING_MODE_DISCARD_RECORDING = 3;
+}
+
+enum RequestedFilePathRejectedReason {
+   REQUESTED_FILE_PATH_REJECTED_REASON_UNSPECIFIED = 0;
+   REQUESTED_FILE_PATH_REJECTED_REASON_SLASHES_NOT_ALLOWED = 1;
+}
+
+enum PackageType {
+   PACKAGE_TYPE_UNSPECIFIED = 0;
+   PACKAGE_TYPE_CURSOR_PROJECT = 1;
+   PACKAGE_TYPE_CURSOR_PERSONAL = 2;
+   PACKAGE_TYPE_CLAUDE_SKILL = 3;
+   PACKAGE_TYPE_CLAUDE_PLUGIN = 4;
+}
+
+enum SandboxPolicy_Type {
+   TYPE_UNSPECIFIED = 0;
+   TYPE_INSECURE_NONE = 1;
+   TYPE_WORKSPACE_READWRITE = 2;
+   TYPE_WORKSPACE_READONLY = 3;
+}
+
+enum TimeoutBehavior {
+   TIMEOUT_BEHAVIOR_UNSPECIFIED = 0;
+   TIMEOUT_BEHAVIOR_CANCEL = 1;
+   TIMEOUT_BEHAVIOR_BACKGROUND = 2;
+}
+
+enum ShellAbortReason {
+   SHELL_ABORT_REASON_UNSPECIFIED = 0;
+   SHELL_ABORT_REASON_USER_ABORT = 1;
+   SHELL_ABORT_REASON_TIMEOUT = 2;
+}
+
+enum CustomSubagentPermissionMode {
+   CUSTOM_SUBAGENT_PERMISSION_MODE_UNSPECIFIED = 0;
+   CUSTOM_SUBAGENT_PERMISSION_MODE_DEFAULT = 1;
+   CUSTOM_SUBAGENT_PERMISSION_MODE_READONLY = 2;
+}
+
+enum TodoStatus {
+   TODO_STATUS_UNSPECIFIED = 0;
+   TODO_STATUS_PENDING = 1;
+   TODO_STATUS_IN_PROGRESS = 2;
+   TODO_STATUS_COMPLETED = 3;
+   TODO_STATUS_CANCELLED = 4;
+}
+
+enum ClientOS {
+   CLIENT_OS_UNSPECIFIED = 0;
+   CLIENT_OS_WINDOWS = 1;
+   CLIENT_OS_MACOS = 2;
+   CLIENT_OS_LINUX = 3;
+}
+
+enum ArtifactUploadDispatchStatus {
+   ARTIFACT_UPLOAD_DISPATCH_STATUS_UNSPECIFIED = 0;
+   ARTIFACT_UPLOAD_DISPATCH_STATUS_ACCEPTED = 1;
+   ARTIFACT_UPLOAD_DISPATCH_STATUS_REJECTED = 2;
+   ARTIFACT_UPLOAD_DISPATCH_STATUS_SKIPPED_ALREADY_IN_PROGRESS = 3;
+}
+
+enum Frame_Kind {
+   KIND_UNSPECIFIED = 0;
+   KIND_REQUEST = 1;
+   KIND_RESPONSE = 2;
+   KIND_ERROR = 3;
+}
+
+enum BugbotDeeplinkEventKind {
+   BUGBOT_DEEPLINK_EVENT_KIND_UNSPECIFIED = 0;
+   BUGBOT_DEEPLINK_EVENT_KIND_CLICKED = 1;
+   BUGBOT_DEEPLINK_EVENT_KIND_HANDLED_DIALOG_SHOWN = 2;
+   BUGBOT_DEEPLINK_EVENT_KIND_HANDLED_CHAT_CREATED = 3;
+   BUGBOT_DEEPLINK_EVENT_KIND_ERROR = 4;
+   BUGBOT_DEEPLINK_EVENT_KIND_HANDLED_FIX_IN_WEB = 5;
+}
+
+message GlobToolResult {
+   oneof result {
+      GlobToolSuccess success = 1;
+      GlobToolError error = 2;
+   }
+}
+
+message GlobToolError {
+   string error = 1;
+}
+
+// Only file results are needed for this tool
+message GlobToolSuccess {
+   string pattern = 1;
+   string path = 2;
+   repeated string files = 3;
+   int32 total_files = 4;
+   bool client_truncated = 5;
+   bool ripgrep_truncated = 6;
+}
+
+message GlobToolCall {
+   bytes args = 1;
+   GlobToolResult result = 2;
+}
+
+message ReadLintsToolCall {
+   ReadLintsToolArgs args = 1;
+   ReadLintsToolResult result = 2;
+}
+
+message ReadLintsToolArgs {
+   repeated string paths = 1;
+}
+
+message ReadLintsToolResult {
+   oneof result {
+      ReadLintsToolSuccess success = 1;
+      ReadLintsToolError error = 2;
+   }
+}
+
+message ReadLintsToolSuccess {
+   repeated FileDiagnostics file_diagnostics = 1;
+   int32 total_files = 2;
+   int32 total_diagnostics = 3;
+}
+
+message FileDiagnostics {
+   string path = 1;
+   repeated DiagnosticItem diagnostics = 2;
+   int32 diagnostics_count = 3;
+}
+
+message DiagnosticItem {
+   DiagnosticSeverity severity = 1;
+   DiagnosticRange range = 2;
+   string message = 3;
+   string source = 4;
+   string code = 5;
+   bool is_stale = 6;
+}
+
+message DiagnosticRange {
+   Position start = 1;
+   Position end = 2;
+}
+
+message ReadLintsToolError {
+   string error_message = 1;
+}
+
+message McpToolError {
+   string error = 1;
+   string read_tool_def_reminder = 2;
+}
+
+// Result for MCP tool calls (separate from exec results)
+message McpToolResult {
+   oneof result {
+      McpSuccess success = 1;
+      McpToolError error = 2;
+      McpRejected rejected = 3;
+      McpPermissionDenied permission_denied = 4;
+   }
+}
+
+message McpToolCall {
+   McpArgs args = 1;
+   McpToolResult result = 2;
+   optional string description = 3;
+}
+
+message SemSearchToolCall {
+   SemSearchToolArgs args = 1;
+   SemSearchToolResult result = 2;
+}
+
+message SemSearchToolArgs {
+   string query = 1;
+   repeated string target_directories = 2;
+   string explanation = 3;
+}
+
+message SemSearchToolResult {
+   oneof result {
+      SemSearchToolSuccess success = 1;
+      SemSearchToolError error = 2;
+   }
+}
+
+message SemSearchToolSuccess {
+   string results = 1;
+   repeated bytes code_results = 2;
+}
+
+message SemSearchToolError {
+   string error_message = 1;
+}
+
+message ListMcpResourcesToolCall {
+   ListMcpResourcesExecArgs args = 1;
+   ListMcpResourcesExecResult result = 2;
+}
+
+message ReadMcpResourceToolCall {
+   ReadMcpResourceExecArgs args = 1;
+   ReadMcpResourceExecResult result = 2;
+}
+
+message FetchToolCall {
+   FetchArgs args = 1;
+   FetchResult result = 2;
+}
+
+message RecordScreenToolCall {
+   RecordScreenArgs args = 1;
+   RecordScreenResult result = 2;
+}
+
+message WriteShellStdinToolCall {
+   WriteShellStdinArgs args = 1;
+   WriteShellStdinResult result = 2;
+}
+
+message ReflectArgs {
+   string unexpected_action_outcomes = 1;
+   string relevant_instructions = 2;
+   string scenario_analysis = 3;
+   string critical_synthesis = 4;
+   string next_steps = 5;
+   string tool_call_id = 6;
+}
+
+message ReflectResult {
+   oneof result {
+      ReflectSuccess success = 1;
+      ReflectError error = 2;
+   }
+}
+
+message ReflectSuccess {
+}
+
+message ReflectError {
+   string error = 1;
+}
+
+message ReflectToolCall {
+   ReflectArgs args = 1;
+   ReflectResult result = 2;
+}
+
+message StartGrindExecutionArgs {
+   // Optional explanation for why the agent is requesting to begin executing.
+   optional string explanation = 1;
+   string tool_call_id = 2;
+}
+
+message StartGrindExecutionResult {
+   oneof result {
+      StartGrindExecutionSuccess success = 1;
+      StartGrindExecutionError error = 2;
+   }
+}
+
+message StartGrindExecutionSuccess {
+}
+
+message StartGrindExecutionError {
+   string error = 1;
+}
+
+message StartGrindExecutionToolCall {
+   StartGrindExecutionArgs args = 1;
+   StartGrindExecutionResult result = 2;
+}
+
+message StartGrindPlanningArgs {
+   // Optional explanation for why the agent is requesting to return to planning.
+   optional string explanation = 1;
+   string tool_call_id = 2;
+}
+
+message StartGrindPlanningResult {
+   oneof result {
+      StartGrindPlanningSuccess success = 1;
+      StartGrindPlanningError error = 2;
+   }
+}
+
+message StartGrindPlanningSuccess {
+}
+
+message StartGrindPlanningError {
+   string error = 1;
+}
+
+message StartGrindPlanningToolCall {
+   StartGrindPlanningArgs args = 1;
+   StartGrindPlanningResult result = 2;
+}
+
+// var AgentMode; (function (AgentMode) { AgentMode[AgentMode["UNSPECIFIED"] = 0] = "UNSPECIFIED"; AgentMode[AgentMode["AGENT"] = 1] = "AGENT"; AgentMode[AgentMode["ASK"] = 2] = "ASK"; AgentMode[AgentMode["PLAN"] = 3] = "PLAN"; AgentMode[AgentMode["DEBUG"] = 4] = "DEBUG"; AgentMode[AgentMode["TRIAGE"] = 5] = "TRIAGE"; AgentMode[AgentMode["PROJECT"] = 6] = "PROJECT"; })(AgentMode || (AgentMode = {})); // Retrieve enum metadata with: proto3.getEnumType(AgentMode) proto3/* int32 */.C.util.setEnumType(AgentMode, "agent.v1.AgentMode", [ { no: 0, name: "AGENT_MODE_UNSPECIFIED" }, { no: 1, name: "AGENT_MODE_AGENT" }, { no: 2, name: "AGENT_MODE_ASK" }, { no: 3, name: "AGENT_MODE_PLAN" }, { no: 4, name: "AGENT_MODE_DEBUG" }, { no: 5, name: "AGENT_MODE_TRIAGE" }, { no: 6, name: "AGENT_MODE_PROJECT" }, ]);
+message TaskArgs {
+   string description = 1;
+   string prompt = 2;
+   SubagentType subagent_type = 3;
+   optional string model = 4;
+   optional string resume = 5;
+}
+
+message TaskSuccess {
+   repeated ConversationStep conversation_steps = 1;
+   optional string agent_id = 2;
+   bool is_background = 3;
+   optional uint64 duration_ms = 4;
+}
+
+message TaskError {
+   string error = 1;
+}
+
+message TaskResult {
+   oneof result {
+      TaskSuccess success = 1;
+      TaskError error = 2;
+   }
+}
+
+message TaskToolCall {
+   TaskArgs args = 1;
+   TaskResult result = 2;
+}
+
+message TaskToolCallDelta {
+   InteractionUpdate interaction_update = 1;
+}
+
+// Tool messages (from tool.proto)
+message ToolCall {
+   oneof tool {
+      ShellToolCall shell_tool_call = 1;
+      DeleteToolCall delete_tool_call = 3;
+      GlobToolCall glob_tool_call = 4;
+      GrepToolCall grep_tool_call = 5;
+      ReadToolCall read_tool_call = 8;
+      UpdateTodosToolCall update_todos_tool_call = 9;
+      ReadTodosToolCall read_todos_tool_call = 10;
+      EditToolCall edit_tool_call = 12;
+      LsToolCall ls_tool_call = 13;
+      ReadLintsToolCall read_lints_tool_call = 14;
+      McpToolCall mcp_tool_call = 15;
+      SemSearchToolCall sem_search_tool_call = 16;
+      CreatePlanToolCall create_plan_tool_call = 17;
+      WebSearchToolCall web_search_tool_call = 18;
+      TaskToolCall task_tool_call = 19;
+      ListMcpResourcesToolCall list_mcp_resources_tool_call = 20;
+      ReadMcpResourceToolCall read_mcp_resource_tool_call = 21;
+      ApplyAgentDiffToolCall apply_agent_diff_tool_call = 22;
+      AskQuestionToolCall ask_question_tool_call = 23;
+      FetchToolCall fetch_tool_call = 24;
+      SwitchModeToolCall switch_mode_tool_call = 25;
+      ExaSearchToolCall exa_search_tool_call = 26;
+      ExaFetchToolCall exa_fetch_tool_call = 27;
+      GenerateImageToolCall generate_image_tool_call = 28;
+      RecordScreenToolCall record_screen_tool_call = 29;
+      ComputerUseToolCall computer_use_tool_call = 30;
+      WriteShellStdinToolCall write_shell_stdin_tool_call = 31;
+      ReflectToolCall reflect_tool_call = 32;
+      SetupVmEnvironmentToolCall setup_vm_environment_tool_call = 33;
+      TruncatedToolCall truncated_tool_call = 34;
+      StartGrindExecutionToolCall start_grind_execution_tool_call = 35;
+      StartGrindPlanningToolCall start_grind_planning_tool_call = 36;
+      PiReadToolCall pi_read_tool_call = 61;
+      PiBashToolCall pi_bash_tool_call = 62;
+      PiEditToolCall pi_edit_tool_call = 63;
+      PiWriteToolCall pi_write_tool_call = 64;
+      PiGrepToolCall pi_grep_tool_call = 65;
+      PiFindToolCall pi_find_tool_call = 66;
+      PiLsToolCall pi_ls_tool_call = 67;
+      ConnectScmToolCall connect_scm_tool_call = 68;
+      SearchConversationsToolCall search_conversations_tool_call = 69;
+      FetchToolCall web_fetch_tool_call = 37;
+   }
+   // Modern builds carry the call id on the envelope instead of inside each
+   // variant's args. Field 37 is the hosted WebFetch tool. Fields 38-53, 55,
+   // 56, 58 (further tool variants) and 54 (hook_additional_contexts),
+   // 59/60 (started_at_ms/completed_at_ms) are not modelled and decode into
+   // unknown fields; do not reuse those numbers.
+   optional string tool_call_id = 57;
+}
+
+message TruncatedToolCallArgs {
+}
+
+message TruncatedToolCallSuccess {
+}
+
+message TruncatedToolCallError {
+   string error = 1;
+}
+
+message TruncatedToolCallResult {
+   oneof result {
+      TruncatedToolCallSuccess success = 1;
+      TruncatedToolCallError error = 2;
+   }
+}
+
+// Placeholder for tool calls that were truncated due to size limits.
+message TruncatedToolCall {
+   bytes original_step_blob_id = 1;
+   // unused, just matches the discriminated union for other tool calls
+   TruncatedToolCallArgs args = 2;
+   TruncatedToolCallResult result = 3;
+}
+
+message ToolCallDelta {
+   oneof delta {
+      ShellToolCallDelta shell_tool_call_delta = 1;
+      TaskToolCallDelta task_tool_call_delta = 2;
+      EditToolCallDelta edit_tool_call_delta = 3;
+   }
+}
+
+message ConversationStep {
+   oneof message {
+      AssistantMessage assistant_message = 1;
+      ToolCall tool_call = 2;
+      ThinkingMessage thinking_message = 3;
+   }
+}
+
+message ConversationAction {
+   oneof action {
+      UserMessageAction user_message_action = 1;
+      ResumeAction resume_action = 2;
+      CancelAction cancel_action = 3;
+      SummarizeAction summarize_action = 4;
+      ShellCommandAction shell_command_action = 5;
+      StartPlanAction start_plan_action = 6;
+      ExecutePlanAction execute_plan_action = 7;
+      AsyncAskQuestionCompletionAction async_ask_question_completion_action = 8;
+   }
+}
+
+message UserMessageAction {
+   UserMessage user_message = 1;
+   RequestContext request_context = 2;
+   optional bool send_to_interaction_listener = 3;
+}
+
+message CancelAction {
+}
+
+message ResumeAction {
+   RequestContext request_context = 2;
+}
+
+message AsyncAskQuestionCompletionAction {
+   // Contains the original tool call ID and the result from the user
+   string original_tool_call_id = 1;
+   AskQuestionArgs original_args = 2;
+   AskQuestionResult result = 3;
+}
+
+message SummarizeAction {
+}
+
+message ShellCommandAction {
+   ShellCommand shell_command = 1;
+   // unique identifier for preemptive exec attachment
+   string exec_id = 2;
+}
+
+message StartPlanAction {
+   UserMessage user_message = 1;
+   RequestContext request_context = 2;
+   bool is_spec = 3;
+}
+
+message ExecutePlanAction {
+   RequestContext request_context = 1;
+   optional ConversationPlan plan = 2;
+   // e.g., "cursor-plan://composerId/plan.md"
+   optional string plan_file_uri = 3;
+   // The actual plan content from the file
+   optional string plan_file_content = 4;
+}
+
+message UserMessage {
+   string text = 1;
+   string message_id = 2;
+   optional SelectedContext selected_context = 3;
+   int32 mode = 4;
+   optional bool is_simulated_msg = 5;
+   optional string best_of_n_group_id = 6;
+   optional bool try_use_best_of_n_promotion = 7;
+   optional string rich_text = 8;
+}
+
+message AssistantMessage {
+   string text = 1;
+}
+
+message ThinkingMessage {
+   string text = 1;
+   uint32 duration_ms = 2;
+}
+
+message ShellCommand {
+   string command = 1;
+}
+
+message ShellOutput {
+   string stdout = 1;
+   string stderr = 2;
+   int32 exit_code = 3;
+}
+
+message ConversationTurn {
+   oneof turn {
+      AgentConversationTurn agent_conversation_turn = 1;
+      ShellConversationTurn shell_conversation_turn = 2;
+   }
+}
+
+message ConversationPlan {
+   string plan = 1;
+}
+
+message ConversationTurnStructure {
+   oneof turn {
+      AgentConversationTurnStructure agent_conversation_turn = 1;
+      ShellConversationTurnStructure shell_conversation_turn = 2;
+   }
+}
+
+message AgentConversationTurn {
+   UserMessage user_message = 1;
+   repeated ConversationStep steps = 2;
+   // The request ID associated with this turn, used for analytics tracking
+   optional string request_id = 3;
+}
+
+message AgentConversationTurnStructure {
+   bytes user_message = 1;
+   repeated bytes steps = 2;
+   // The request ID associated with this turn, used for analytics tracking
+   optional string request_id = 3;
+}
+
+message ShellConversationTurn {
+   ShellCommand shell_command = 1;
+   ShellOutput shell_output = 2;
+}
+
+message ShellConversationTurnStructure {
+   bytes shell_command = 1;
+   bytes shell_output = 2;
+}
+
+message ConversationSummary {
+   string summary = 1;
+}
+
+message ConversationSummaryArchive {
+   repeated bytes summarized_messages = 1;
+   string summary = 2;
+   uint32 window_tail = 3;
+   bytes summary_message = 4;
+}
+
+message ConversationTokenDetails {
+   uint32 used_tokens = 1;
+   uint32 max_tokens = 2;
+}
+
+message FileState {
+   // Optional content. If not set or undefined, the file is considered deleted.
+   optional string content = 1;
+   // Optional initial content captured when the file was first tracked. If not set or undefined, the file did not exist when tracking began.
+   optional string initial_content = 2;
+}
+
+message FileStateStructure {
+   // Optional content. If not set or undefined, the file is considered deleted.
+   optional bytes content = 1;
+   // Optional initial content captured when the file was first tracked. If not set or undefined, the file did not exist when tracking began.
+   optional bytes initial_content = 2;
+}
+
+message StepTiming {
+   uint64 duration_ms = 1;
+   uint64 timestamp_ms = 2;
+}
+
+message ConversationState {
+   repeated string root_prompt_messages_json = 1;
+   repeated ConversationTurn turns = 8;
+   repeated TodoItem todos = 3;
+   // Raw JSON stringified tool-call content parts awaiting execution
+   repeated string pending_tool_calls = 4;
+   ConversationTokenDetails token_details = 5;
+   // only for when the user explicitly asks for a summary through the summary action
+   optional ConversationSummary summary = 6;
+   optional ConversationPlan plan = 7;
+   optional ConversationSummaryArchive summary_archive = 9;
+   // Deprecated, use summary_archives instead @deprecated summaryArchive;
+   map<string, FileState> file_states = 10;
+   repeated ConversationSummaryArchive summary_archives = 11;
+}
+
+message SubagentPersistedState {
+   // The subagent's conversation state structure
+   ConversationStateStructure conversation_state = 1;
+   // Timestamp when this subagent was first created
+   uint64 created_timestamp_ms = 2;
+   // Timestamp when this subagent was last used (by task tool call)
+   uint64 last_used_timestamp_ms = 3;
+   // The subagent type (e.g., computerUse, custom with name)
+   SubagentType subagent_type = 4;
+}
+
+message ConversationStateStructure {
+   repeated bytes turns_old = 2;
+   // @deprecated turnsOld = [];
+   repeated bytes root_prompt_messages_json = 1;
+   repeated bytes turns = 8;
+   repeated bytes todos = 3;
+   // Raw JSON stringified tool-call content parts awaiting execution
+   repeated string pending_tool_calls = 4;
+   ConversationTokenDetails token_details = 5;
+   // only for when the user explicitly asks for a summary through the summary action
+   optional bytes summary = 6;
+   optional bytes plan = 7;
+   repeated string previous_workspace_uris = 9;
+   // Current mode of the conversation
+   optional int32 mode = 10;
+   optional bytes summary_archive = 11;
+   map<string, bytes> file_states = 12;
+   // Deprecated, use summary_archives instead @deprecated summaryArchive; Map of file paths to their latest content (stored as blob IDs in the KV store) Each blob contains a serialized FileState message @deprecated fileStates = {}; Map of file paths to their latest content (stored as FileStateStructure)
+   map<string, FileStateStructure> file_states_v2 = 15;
+   repeated bytes summary_archives = 13;
+   repeated StepTiming turn_timings = 14;
+   // Subagent resume tracking Map of subagent ID to the persisted subagent state (stored inline)
+   map<string, SubagentPersistedState> subagent_states = 16;
+   // Count of self-summaries generated for this conversation
+   uint32 self_summary_count = 17;
+   // Set of file paths that have been read during this conversation
+   repeated string read_paths = 18;
+}
+
+message ThinkingDetails {
+}
+
+message ApiKeyCredentials {
+   string api_key = 1;
+   // For OpenAI-compatible endpoints
+   optional string base_url = 2;
+}
+
+message AzureCredentials {
+   string api_key = 1;
+   string base_url = 2;
+   string deployment = 3;
+}
+
+message BedrockCredentials {
+   string access_key = 1;
+   string secret_key = 2;
+   string region = 3;
+   optional string session_token = 4;
+}
+
+message ModelDetails {
+   string model_id = 1;
+   string display_model_id = 3;
+   string display_name = 4;
+   string display_name_short = 5;
+   repeated string aliases = 6;
+   optional ThinkingDetails thinking_details = 2;
+   optional bool max_mode = 7;
+   oneof credentials {
+      ApiKeyCredentials api_key_credentials = 8;
+      AzureCredentials azure_credentials = 9;
+      BedrockCredentials bedrock_credentials = 10;
+   }
+}
+
+message RequestedModel {
+   string model_id = 1;
+   bool max_mode = 2;
+   repeated RequestedModel_ModelParameterbytes parameters = 3;
+   oneof credentials {
+      ApiKeyCredentials api_key_credentials = 4;
+      AzureCredentials azure_credentials = 5;
+      BedrockCredentials bedrock_credentials = 6;
+   }
+}
+
+message RequestedModel_ModelParameterbytes {
+   string id = 1;
+   // All paramters are encoded as strings. For boolean parameters, the value is either "true" or "false". For enum parameters, the value is one of the values in the enum.
+   string value = 2;
+}
+
+message AgentRunRequest {
+   ConversationStateStructure conversation_state = 1;
+   ConversationAction action = 2;
+   // TODO: Today we use model_details, but we are getting ready to deprecate that and use requested_model instead.
+   ModelDetails model_details = 3;
+   optional RequestedModel requested_model = 9;
+   McpTools mcp_tools = 4;
+   optional string conversation_id = 5;
+   optional McpFileSystemOptions mcp_file_system_options = 6;
+   // Deprecated, use the one in RequestContext message in request_context_exec.proto instead
+   optional SkillOptions skill_options = 7;
+   // Custom system prompt override. Allowlisted for specific teams only.
+   optional string custom_system_prompt = 8;
+}
+
+message TextDeltaUpdate {
+   string text = 1;
+}
+
+message ToolCallStartedUpdate {
+   string call_id = 1;
+   ToolCall tool_call = 2;
+   // groups tool calls that originate from the same model provider call
+   string model_call_id = 3;
+}
+
+message ToolCallCompletedUpdate {
+   string call_id = 1;
+   ToolCall tool_call = 2;
+   // groups tool calls that originate from the same model provider call
+   string model_call_id = 3;
+}
+
+message ToolCallDeltaUpdate {
+   string call_id = 1;
+   ToolCallDelta tool_call_delta = 2;
+   // groups tool calls that originate from the same model provider call
+   string model_call_id = 3;
+}
+
+// Streaming update for partial tool call arguments
+message PartialToolCallUpdate {
+   string call_id = 1;
+   ToolCall tool_call = 2;
+   // Aggregated args text so far (as JSON text). May be incomplete until final tool call.
+   string args_text_delta = 3;
+   // groups tool calls that originate from the same model provider call
+   string model_call_id = 4;
+}
+
+message ThinkingDeltaUpdate {
+   string text = 1;
+}
+
+message ThinkingCompletedUpdate {
+   int32 thinking_duration_ms = 1;
+}
+
+message TokenDeltaUpdate {
+   int32 tokens = 1;
+}
+
+message SummaryUpdate {
+   string summary = 1;
+}
+
+message SummaryStartedUpdate {
+}
+
+message HeartbeatUpdate {
+}
+
+message SummaryCompletedUpdate {
+}
+
+message ShellOutputDeltaUpdate {
+   oneof event {
+      ShellStreamStdout stdout = 1;
+      ShellStreamStderr stderr = 2;
+      ShellStreamExit exit = 3;
+      ShellStreamStart start = 4;
+   }
+}
+
+message TurnEndedUpdate {
+}
+
+// Only: user message appended update
+message UserMessageAppendedUpdate {
+   UserMessage user_message = 1;
+}
+
+message StepStartedUpdate {
+   uint64 step_id = 1;
+}
+
+message StepCompletedUpdate {
+   uint64 step_id = 1;
+   int64 step_duration_ms = 2;
+}
+
+message InteractionUpdate {
+   oneof message {
+      TextDeltaUpdate text_delta = 1;
+      PartialToolCallUpdate partial_tool_call = 7;
+      ToolCallDeltaUpdate tool_call_delta = 15;
+      ToolCallStartedUpdate tool_call_started = 2;
+      ToolCallCompletedUpdate tool_call_completed = 3;
+      ThinkingDeltaUpdate thinking_delta = 4;
+      ThinkingCompletedUpdate thinking_completed = 5;
+      UserMessageAppendedUpdate user_message_appended = 6;
+      TokenDeltaUpdate token_delta = 8;
+      SummaryUpdate summary = 9;
+      SummaryStartedUpdate summary_started = 10;
+      SummaryCompletedUpdate summary_completed = 11;
+      ShellOutputDeltaUpdate shell_output_delta = 12;
+      HeartbeatUpdate heartbeat = 13;
+      TurnEndedUpdate turn_ended = 14;
+      StepStartedUpdate step_started = 16;
+      StepCompletedUpdate step_completed = 17;
+   }
+}
+
+// Interaction query messages for bidirectional communication
+message InteractionQuery {
+   uint32 id = 1;
+   oneof query {
+      WebSearchRequestQuery web_search_request_query = 2;
+      AskQuestionInteractionQuery ask_question_interaction_query = 3;
+      SwitchModeRequestQuery switch_mode_request_query = 4;
+      ExaSearchRequestQuery exa_search_request_query = 5;
+      ExaFetchRequestQuery exa_fetch_request_query = 6;
+      CreatePlanRequestQuery create_plan_request_query = 7;
+      SetupVmEnvironmentArgs setup_vm_environment_args = 8;
+      WebFetchRequestQuery web_fetch_request_query = 9;
+   }
+}
+
+message InteractionResponse {
+   uint32 id = 1;
+   oneof result {
+      WebSearchRequestResponse web_search_request_response = 2;
+      AskQuestionInteractionResponse ask_question_interaction_response = 3;
+      SwitchModeRequestResponse switch_mode_request_response = 4;
+      ExaSearchRequestResponse exa_search_request_response = 5;
+      ExaFetchRequestResponse exa_fetch_request_response = 6;
+      CreatePlanRequestResponse create_plan_request_response = 7;
+      SetupVmEnvironmentResult setup_vm_environment_result = 8;
+      WebFetchRequestResponse web_fetch_request_response = 9;
+   }
+}
+
+message WebFetchRequestQuery {
+   FetchArgs args = 1;
+}
+
+message WebFetchRequestResponse {
+   oneof result {
+      WebFetchRequestResponse_Approved approved = 1;
+      WebFetchRequestResponse_Rejected rejected = 2;
+   }
+}
+
+message WebFetchRequestResponse_Approved {
+}
+
+message WebFetchRequestResponse_Rejected {
+   string reason = 1;
+}
+
+message AskQuestionInteractionQuery {
+   AskQuestionArgs args = 1;
+   string tool_call_id = 2;
+}
+
+message AskQuestionInteractionResponse {
+   AskQuestionResult result = 1;
+}
+
+message ClientHeartbeat {
+}
+
+// Prewarm request - sent before the actual action to prepare the backend Contains all config needed for auth, model routing, and session building The actual ConversationAction is sent separately after prewarming completes
+message PrewarmRequest {
+   ModelDetails model_details = 1;
+   optional RequestedModel requested_model = 9;
+   optional string conversation_id = 2;
+   ConversationStateStructure conversation_state = 3;
+   McpTools mcp_tools = 4;
+   optional McpFileSystemOptions mcp_file_system_options = 5;
+   // Best-of-N context for usage billing (same fields as UserMessage)
+   optional string best_of_n_group_id = 6;
+   optional bool try_use_best_of_n_promotion = 7;
+   // Custom system prompt override. Allowlisted for specific teams only.
+   optional string custom_system_prompt = 8;
+}
+
+message ExecServerAbort {
+   uint32 id = 1;
+}
+
+message ExecServerControlMessage {
+   oneof message {
+      ExecServerAbort abort = 1;
+   }
+}
+
+message AgentClientMessage {
+   oneof message {
+      AgentRunRequest run_request = 1;
+      ExecClientMessage exec_client_message = 2;
+      ExecClientControlMessage exec_client_control_message = 5;
+      KvClientMessage kv_client_message = 3;
+      ConversationAction conversation_action = 4;
+      InteractionResponse interaction_response = 6;
+      ClientHeartbeat client_heartbeat = 7;
+      PrewarmRequest prewarm_request = 8;
+   }
+}
+
+message AgentServerMessage {
+   oneof message {
+      InteractionUpdate interaction_update = 1;
+      ExecServerMessage exec_server_message = 2;
+      ExecServerControlMessage exec_server_control_message = 5;
+      ConversationStateStructure conversation_checkpoint_update = 3;
+      KvServerMessage kv_server_message = 4;
+      InteractionQuery interaction_query = 7;
+   }
+}
+
+// New unary API for naming an agent from a user message
+message NameAgentRequest {
+   string user_message = 1;
+}
+
+message NameAgentResponse {
+   string name = 1;
+}
+
+message GetUsableModelsRequest {
+   // Not used right now, but can use to populate info about custom models the user passes in that we don't send down by default
+   repeated string custom_model_ids = 1;
+}
+
+message GetUsableModelsResponse {
+   repeated ModelDetails models = 1;
+}
+
+message GetDefaultModelForCliRequest {
+}
+
+message GetDefaultModelForCliResponse {
+   ModelDetails model = 1;
+}
+
+// Internal endpoint: returns all allowed model intents for devs
+message GetAllowedModelIntentsRequest {
+}
+
+message GetAllowedModelIntentsResponse {
+   repeated string model_intents = 1;
+}
+
+// IDE state persistence for clients (CLI / VSCode integration) Mirrors a subset of aiserver.v1.ConversationMessage.IdeEditorsState, but only contains the recently viewed files and avoids any deprecated fields.
+message IdeEditorsStateFile {
+   string relative_path = 1;
+   string absolute_path = 2;
+   optional bool is_currently_focused = 3;
+   optional int32 current_line_number = 4;
+   optional string current_line_text = 5;
+   optional int32 line_count = 6;
+}
+
+message IdeEditorsStateLite {
+   repeated IdeEditorsStateFile recently_viewed_files = 1;
+}
+
+message ApplyAgentDiffToolCall {
+   ApplyAgentDiffArgs args = 1;
+   ApplyAgentDiffResult result = 2;
+}
+
+message ApplyAgentDiffArgs {
+   string agent_id = 1;
+}
+
+message ApplyAgentDiffResult {
+   oneof result {
+      ApplyAgentDiffSuccess success = 1;
+      ApplyAgentDiffError error = 2;
+   }
+}
+
+message ApplyAgentDiffSuccess {
+   repeated AppliedAgentChange applied_changes = 1;
+}
+
+message AppliedAgentChange {
+   string path = 1;
+   int32 change_type = 2;
+   optional string before_content = 3;
+   optional string after_content = 4;
+   optional string error = 5;
+   // Detailed result message from the execution (e.g., "Successfully deleted file: path (123 bytes)")
+   optional string message_for_model = 6;
+}
+
+message ApplyAgentDiffError {
+   string error = 1;
+   repeated AppliedAgentChange applied_changes = 2;
+}
+
+message AskQuestionToolCall {
+   AskQuestionArgs args = 1;
+   AskQuestionResult result = 2;
+}
+
+message AskQuestionArgs {
+   // optional form title
+   string title = 1;
+   // 1+ questions
+   repeated AskQuestionArgs_Question questions = 2;
+   // if true, return immediately with async marker instead of blocking
+   bool run_async = 5;
+   // if set, indicates this is a synthetic completion for the original async tool call with this ID
+   string async_original_tool_call_id = 6;
+}
+
+message AskQuestionArgs_Question {
+   // unique, model-provided
+   string id = 1;
+   // the question text
+   string prompt = 2;
+   // choices
+   repeated AskQuestionArgs_Option options = 3;
+   // multi-select vs single-select
+   bool allow_multiple = 4;
+}
+
+message AskQuestionArgs_Option {
+   // stable option id
+   string id = 1;
+   // display text
+   string label = 2;
+}
+
+// Marker indicating that questions have been sent asynchronously Answers will arrive later as a separate ask_question tool call
+message AskQuestionAsync {
+}
+
+message AskQuestionResult {
+   oneof result {
+      AskQuestionSuccess success = 1;
+      AskQuestionError error = 2;
+      AskQuestionRejected rejected = 3;
+      AskQuestionAsync async = 4;
+   }
+}
+
+message AskQuestionSuccess {
+   repeated AskQuestionSuccess_Answer answers = 1;
+}
+
+message AskQuestionSuccess_Answer {
+   string question_id = 1;
+   // empty if unanswered
+   repeated string selected_option_ids = 2;
+}
+
+message AskQuestionError {
+   string error_message = 1;
+}
+
+message AskQuestionRejected {
+   string reason = 1;
+}
+
+message BackgroundShellSpawnArgs {
+   string command = 1;
+   string working_directory = 2;
+   string tool_call_id = 3;
+   ShellCommandParsingResult parsing_result = 4;
+   optional SandboxPolicy sandbox_policy = 5;
+   bool enable_write_shell_stdin_tool = 6;
+   optional string description = 7;
+   optional CommandClassifierResult classifier_result = 8;
+   optional ShellOutputNotificationConfig output_notification = 9;
+   optional SmartModeApproval smart_mode_approval = 10;
+   optional ShellHookApprovalRequirement hook_approval_requirement = 11;
+   bool skip_approval = 12;
+   optional string conversation_id = 13;
+}
+
+// Result of spawning a background shell
+message BackgroundShellSpawnResult {
+   oneof result {
+      BackgroundShellSpawnSuccess success = 1;
+      BackgroundShellSpawnError error = 2;
+      ShellRejected rejected = 3;
+      ShellPermissionDenied permission_denied = 4;
+   }
+}
+
+message BackgroundShellSpawnSuccess {
+   uint32 shell_id = 1;
+   string command = 2;
+   string working_directory = 3;
+   // Process ID of the spawned shell
+   optional uint32 pid = 4;
+}
+
+message BackgroundShellSpawnError {
+   string command = 1;
+   string working_directory = 2;
+   string error = 3;
+}
+
+message WriteShellStdinArgs {
+   uint32 shell_id = 1;
+   string chars = 2;
+}
+
+message WriteShellStdinResult {
+   oneof result {
+      WriteShellStdinSuccess success = 1;
+      WriteShellStdinError error = 2;
+   }
+}
+
+message WriteShellStdinSuccess {
+   uint32 shell_id = 1;
+   uint32 terminal_file_length_before_input_written = 2;
+}
+
+message WriteShellStdinError {
+   string error = 1;
+}
+
+message Coordinate {
+   int32 x = 1;
+   int32 y = 2;
+}
+
+// Arguments for the computer-use tool
+message ComputerUseArgs {
+   string tool_call_id = 1;
+   repeated ComputerUseAction actions = 2;
+}
+
+// A single computer-use action. This is our internal canonical representation. Provider-specific formats are converted to this by adapters.
+message ComputerUseAction {
+   oneof action {
+      MouseMoveAction mouse_move = 1;
+      ClickAction click = 2;
+      MouseDownAction mouse_down = 3;
+      MouseUpAction mouse_up = 4;
+      DragAction drag = 5;
+      ScrollAction scroll = 6;
+      TypeAction type = 7;
+      KeyAction key = 8;
+      WaitAction wait = 9;
+      ScreenshotAction screenshot = 10;
+      CursorPositionAction cursor_position = 11;
+   }
+}
+
+// Move mouse to coordinate (required)
+message MouseMoveAction {
+   Coordinate coordinate = 1;
+}
+
+// Unified click action - coordinate: optional, clicks at current cursor if omitted - button: which mouse button (default: LEFT) - count: click count (1=single, 2=double, 3=triple, default: 1) - modifier_keys: optional, held during click (e.g., "ctrl", "shift", "ctrl+shift")
+message ClickAction {
+   optional Coordinate coordinate = 1;
+   int32 button = 2;
+   int32 count = 3;
+   optional string modifier_keys = 4;
+}
+
+// Press mouse button down (for fine-grained drag control)
+message MouseDownAction {
+   int32 button = 1;
+}
+
+// Release mouse button (for fine-grained drag control)
+message MouseUpAction {
+   int32 button = 1;
+}
+
+// Drag action - path of coordinates (at least 2 points: [start, ..., end])
+message DragAction {
+   repeated Coordinate path = 1;
+   int32 button = 2;
+}
+
+// Scroll action - coordinate: optional, scrolls at current cursor if omitted - direction: scroll direction (required) - amount: number of scroll "clicks" (default: 3) - modifier_keys: optional, held during scroll (e.g., "ctrl" for zoom)
+message ScrollAction {
+   optional Coordinate coordinate = 1;
+   int32 direction = 2;
+   int32 amount = 3;
+   optional string modifier_keys = 4;
+}
+
+// Type text
+message TypeAction {
+   string text = 1;
+}
+
+// Press key or key combination (xdotool-style: "ctrl+a", "Return", "Alt+Left") If hold_duration_ms is set, holds the key for that duration
+message KeyAction {
+   string key = 1;
+   optional int32 hold_duration_ms = 2;
+}
+
+// Wait for a duration
+message WaitAction {
+   int32 duration_ms = 1;
+}
+
+// Take a screenshot
+message ScreenshotAction {
+}
+
+// Get current cursor position
+message CursorPositionAction {
+}
+
+// Result of computer-use execution
+message ComputerUseResult {
+   oneof result {
+      ComputerUseSuccess success = 1;
+      ComputerUseError error = 2;
+   }
+}
+
+message ComputerUseSuccess {
+   int32 action_count = 1;
+   int32 duration_ms = 2;
+   // Base64 WebP at API resolution
+   optional string screenshot = 3;
+   optional string log = 4;
+   optional string screenshot_path = 5;
+   // In API resolution
+   optional Coordinate cursor_position = 6;
+}
+
+message ComputerUseError {
+   string error = 1;
+   int32 action_count = 2;
+   int32 duration_ms = 3;
+   optional string log = 4;
+   // Base64 WebP of screen state at error time
+   optional string screenshot = 5;
+   // Path where screenshot was saved
+   optional string screenshot_path = 6;
+}
+
+message ComputerUseToolCall {
+   ComputerUseArgs args = 1;
+   ComputerUseResult result = 2;
+}
+
+message CreatePlanToolCall {
+   CreatePlanArgs args = 1;
+   CreatePlanResult result = 2;
+}
+
+// A phase groups related todos together for project-mode plans
+message Phase {
+   string name = 1;
+   repeated TodoItem todos = 2;
+}
+
+message CreatePlanArgs {
+   string plan = 1;
+   repeated TodoItem todos = 2;
+   string overview = 3;
+   string name = 4;
+   // When true, uses phases instead of flat todos (mutually exclusive)
+   bool is_project = 5;
+   // Implementation phases (only valid when is_project=true)
+   repeated Phase phases = 6;
+}
+
+message CreatePlanResult {
+   // URI of the plan file (returned when file_based_plan_edits is enabled)
+   string plan_uri = 3;
+   oneof result {
+      CreatePlanSuccess success = 1;
+      CreatePlanError error = 2;
+   }
+}
+
+message CreatePlanSuccess {
+}
+
+message CreatePlanError {
+   string error = 1;
+}
+
+// Query sent from server to client to create a plan file
+message CreatePlanRequestQuery {
+   CreatePlanArgs args = 1;
+   string tool_call_id = 2;
+}
+
+// Response from client with the created plan URI
+message CreatePlanRequestResponse {
+   CreatePlanResult result = 1;
+}
+
+message CursorRuleTypeGlobal {
+}
+
+message CursorRuleTypeFileGlobs {
+   repeated string globs = 1;
+}
+
+message CursorRuleTypeAgentFetched {
+   string description = 1;
+}
+
+message CursorRuleTypeManuallyAttached {
+}
+
+message CursorRuleType {
+   oneof type {
+      CursorRuleTypeGlobal global = 1;
+      CursorRuleTypeFileGlobs file_globbed = 2;
+      CursorRuleTypeAgentFetched agent_fetched = 3;
+      CursorRuleTypeManuallyAttached manually_attached = 4;
+   }
+}
+
+message CursorRule {
+   // absolute path to the .mdc file
+   string full_path = 1;
+   // rule body, trimmed to reasonable size if needed by client
+   string content = 2;
+   // classification of rule
+   CursorRuleType type = 3;
+   // source of the rule
+   int32 source = 4;
+   // Git remote origin URL for the repository containing this rule, if available. Normalized to host/path format (e.g., "github.com/owner/repo").
+   optional string git_remote_origin = 5;
+   optional string parse_error = 6;
+}
+
+message DeleteArgs {
+   string path = 1;
+   string tool_call_id = 2;
+}
+
+message DeleteResult {
+   oneof result {
+      DeleteSuccess success = 1;
+      DeleteFileNotFound file_not_found = 2;
+      DeleteNotFile not_file = 3;
+      DeletePermissionDenied permission_denied = 4;
+      DeleteFileBusy file_busy = 5;
+      DeleteRejected rejected = 6;
+      DeleteError error = 7;
+   }
+}
+
+message DeleteSuccess {
+   string path = 1;
+   string deleted_file = 2;
+   int64 file_size = 3;
+   string prev_content = 4;
+}
+
+message DeleteFileNotFound {
+   string path = 1;
+}
+
+message DeleteNotFile {
+   string path = 1;
+   // "directory" or "other"
+   string actual_type = 2;
+}
+
+message DeletePermissionDenied {
+   string path = 1;
+   string client_visible_error = 2;
+   bool is_readonly = 3;
+}
+
+message DeleteFileBusy {
+   string path = 1;
+}
+
+message DeleteRejected {
+   string path = 1;
+   string reason = 2;
+}
+
+message DeleteError {
+   string path = 1;
+   string error = 2;
+}
+
+message DeleteToolCall {
+   DeleteArgs args = 1;
+   DeleteResult result = 2;
+}
+
+message DiagnosticsArgs {
+   string path = 1;
+   string tool_call_id = 2;
+}
+
+message DiagnosticsResult {
+   oneof result {
+      DiagnosticsSuccess success = 1;
+      DiagnosticsError error = 2;
+      DiagnosticsRejected rejected = 3;
+      DiagnosticsFileNotFound file_not_found = 4;
+      DiagnosticsPermissionDenied permission_denied = 5;
+   }
+}
+
+message DiagnosticsSuccess {
+   string path = 1;
+   repeated Diagnostic diagnostics = 2;
+   int32 total_diagnostics = 3;
+}
+
+message Diagnostic {
+   int32 severity = 1;
+   Range range = 2;
+   string message = 3;
+   string source = 4;
+   string code = 5;
+   bool is_stale = 6;
+}
+
+message DiagnosticsError {
+   string path = 1;
+   string error = 2;
+}
+
+message DiagnosticsRejected {
+   string path = 1;
+   string reason = 2;
+}
+
+message DiagnosticsFileNotFound {
+   string path = 1;
+}
+
+message DiagnosticsPermissionDenied {
+   string path = 1;
+}
+
+message EditArgs {
+   string path = 1;
+   optional string stream_content = 6;
+}
+
+message EditResult {
+   oneof result {
+      EditSuccess success = 1;
+      EditFileNotFound file_not_found = 2;
+      EditReadPermissionDenied read_permission_denied = 3;
+      EditWritePermissionDenied write_permission_denied = 4;
+      EditRejected rejected = 6;
+      EditError error = 7;
+   }
+}
+
+message EditSuccess {
+   string path = 1;
+   optional int32 lines_added = 3;
+   optional int32 lines_removed = 4;
+   // Concatenated chunk diff strings separated by "\n...\n"
+   optional string diff_string = 5;
+   // undefined if file didn't exist before the edit
+   optional string before_full_file_content = 6;
+   string after_full_file_content = 7;
+   // Formatted message for display to model (resultForModel from EditTransformResult)
+   optional string message = 8;
+}
+
+message EditFileNotFound {
+   string path = 1;
+}
+
+message EditReadPermissionDenied {
+   string path = 1;
+}
+
+message EditWritePermissionDenied {
+   string path = 1;
+   string error = 2;
+   bool is_readonly = 3;
+}
+
+message EditRejected {
+   string path = 1;
+   string reason = 2;
+}
+
+message EditError {
+   string path = 1;
+   string error = 2;
+   optional string model_visible_error = 5;
+}
+
+message EditToolCall {
+   EditArgs args = 1;
+   EditResult result = 2;
+}
+
+message EditToolCallDelta {
+   string stream_content_delta = 1;
+}
+
+message ExaFetchArgs {
+   repeated string ids = 1;
+   string tool_call_id = 2;
+}
+
+message ExaFetchResult {
+   oneof result {
+      ExaFetchSuccess success = 1;
+      ExaFetchError error = 2;
+      ExaFetchRejected rejected = 3;
+   }
+}
+
+message ExaFetchSuccess {
+   repeated ExaFetchContent contents = 1;
+}
+
+message ExaFetchError {
+   string error = 1;
+}
+
+message ExaFetchRejected {
+   string reason = 1;
+}
+
+message ExaFetchContent {
+   string title = 1;
+   string url = 2;
+   string text = 3;
+   string published_date = 4;
+}
+
+message ExaFetchToolCall {
+   ExaFetchArgs args = 1;
+   ExaFetchResult result = 2;
+}
+
+message ExaFetchRequestQuery {
+   ExaFetchArgs args = 1;
+}
+
+message ExaFetchRequestResponse {
+   oneof result {
+      ExaFetchRequestResponse_Approved approved = 1;
+      ExaFetchRequestResponse_Rejected rejected = 2;
+   }
+}
+
+message ExaFetchRequestResponse_Approved {
+}
+
+message ExaFetchRequestResponse_Rejected {
+   string reason = 1;
+}
+
+message ExaSearchArgs {
+   string query = 1;
+   // "auto", "neural", or "keyword"
+   string type = 2;
+   int32 num_results = 3;
+   string tool_call_id = 4;
+}
+
+message ExaSearchResult {
+   oneof result {
+      ExaSearchSuccess success = 1;
+      ExaSearchError error = 2;
+      ExaSearchRejected rejected = 3;
+   }
+}
+
+message ExaSearchSuccess {
+   repeated ExaSearchReference references = 1;
+}
+
+message ExaSearchError {
+   string error = 1;
+}
+
+message ExaSearchRejected {
+   string reason = 1;
+}
+
+message ExaSearchReference {
+   string title = 1;
+   string url = 2;
+   string text = 3;
+   string published_date = 4;
+}
+
+message ExaSearchToolCall {
+   ExaSearchArgs args = 1;
+   ExaSearchResult result = 2;
+}
+
+message ExaSearchRequestQuery {
+   ExaSearchArgs args = 1;
+}
+
+message ExaSearchRequestResponse {
+   oneof result {
+      ExaSearchRequestResponse_Approved approved = 1;
+      ExaSearchRequestResponse_Rejected rejected = 2;
+   }
+}
+
+message ExaSearchRequestResponse_Approved {
+}
+
+message ExaSearchRequestResponse_Rejected {
+   string reason = 1;
+}
+
+message ExecClientStreamClose {
+   uint32 id = 1;
+}
+
+message ExecClientThrow {
+   uint32 id = 1;
+   string error = 2;
+   optional string stack_trace = 3;
+   optional string error_code = 4;
+}
+
+message ExecClientHeartbeat {
+   uint32 id = 1;
+}
+
+message ExecClientControlMessage {
+   oneof message {
+      ExecClientStreamClose stream_close = 1;
+      ExecClientThrow throw = 2;
+      ExecClientHeartbeat heartbeat = 3;
+   }
+}
+
+// Simplified span context for tracing exec calls
+message SpanContext {
+   // Trace identifier (128-bit as hex string, same for all spans in a trace)
+   string trace_id = 1;
+   // Unique span identifier (64-bit as hex string)
+   string span_id = 2;
+   // Trace flags bit field following OTEL SPAN_FLAGS_* semantics
+   optional uint32 trace_flags = 3;
+   // W3C trace-state header string (optional)
+   optional string trace_state = 4;
+}
+
+// Empty abort message for aborting running execs
+message AbortArgs {
+}
+
+message AbortResult {
+}
+
+message ExecServerMessage {
+   uint32 id = 1;
+   // Optional exec ID for attachable executions
+   string exec_id = 15;
+   // Optional parent span context for tracing
+   optional SpanContext span_context = 19;
+   oneof message {
+      ShellArgs shell_args = 2;
+      WriteArgs write_args = 3;
+      DeleteArgs delete_args = 4;
+      GrepArgs grep_args = 5;
+      ReadArgs read_args = 7;
+      LsArgs ls_args = 8;
+      DiagnosticsArgs diagnostics_args = 9;
+      RequestContextArgs request_context_args = 10;
+      McpArgs mcp_args = 11;
+      ShellArgs shell_stream_args = 14;
+      BackgroundShellSpawnArgs background_shell_spawn_args = 16;
+      ListMcpResourcesExecArgs list_mcp_resources_exec_args = 17;
+      ReadMcpResourceExecArgs read_mcp_resource_exec_args = 18;
+      FetchArgs fetch_args = 20;
+      RecordScreenArgs record_screen_args = 21;
+      ComputerUseArgs computer_use_args = 22;
+      WriteShellStdinArgs write_shell_stdin_args = 23;
+   ReadArgs redacted_read_args = 29;
+   McpStateExecArgs mcp_state_exec_args = 36;
+   ExecuteHookArgs execute_hook_args = 27;
+   SubagentArgs subagent_args = 28;
+   ForceBackgroundShellArgs force_background_shell_args = 30;
+   ForceBackgroundSubagentArgs force_background_subagent_args = 31;
+   SubagentAwaitArgs subagent_await_args = 37;
+   SmartModeClassifierArgs smart_mode_classifier_args = 38;
+   CanvasDiagnosticsArgs canvas_diagnostics_args = 40;
+   ShellAllowlistPrecheckArgs shell_allowlist_precheck_args = 41;
+   McpAllowlistPrecheckArgs mcp_allowlist_precheck_args = 42;
+   WebFetchAllowlistPrecheckArgs web_fetch_allowlist_precheck_args = 43;
+   GetDiffRequest git_diff_request = 44;
+   PiReadExecArgs pi_read_args = 45;
+   PiBashExecArgs pi_bash_args = 46;
+   PiEditExecArgs pi_edit_args = 47;
+   PiWriteExecArgs pi_write_args = 48;
+   PiGrepExecArgs pi_grep_args = 49;
+   PiFindExecArgs pi_find_args = 50;
+   PiLsExecArgs pi_ls_args = 51;
+   ShellArgs mini_swe_agent_bash_args = 52;
+   ConversationSearchArgs conversation_search_args = 53;
+   AgentStoreConflictArgs agent_store_conflict_args = 54;
+   }
+   optional bool accept_hook_additional_contexts = 55;
+}
+
+message ExecClientMessage {
+   uint32 id = 1;
+   // Optional exec ID for attachable executions
+   string exec_id = 15;
+   oneof message {
+      ShellResult shell_result = 2;
+      WriteResult write_result = 3;
+      DeleteResult delete_result = 4;
+      GrepResult grep_result = 5;
+      ReadResult read_result = 7;
+      LsResult ls_result = 8;
+      DiagnosticsResult diagnostics_result = 9;
+      RequestContextResult request_context_result = 10;
+      McpResult mcp_result = 11;
+      ShellStream shell_stream = 14;
+      BackgroundShellSpawnResult background_shell_spawn_result = 16;
+      ListMcpResourcesExecResult list_mcp_resources_exec_result = 17;
+      ReadMcpResourceExecResult read_mcp_resource_exec_result = 18;
+      FetchResult fetch_result = 20;
+      RecordScreenResult record_screen_result = 21;
+      ComputerUseResult computer_use_result = 22;
+      WriteShellStdinResult write_shell_stdin_result = 23;
+   ReadResult redacted_read_result = 29;
+   McpStateExecResult mcp_state_exec_result = 36;
+   ExecuteHookResult execute_hook_result = 27;
+   SubagentResult subagent_result = 28;
+   ForceBackgroundShellResult force_background_shell_result = 30;
+   ForceBackgroundSubagentResult force_background_subagent_result = 31;
+   SubagentAwaitResult subagent_await_result = 37;
+   SmartModeClassifierResult smart_mode_classifier_result = 38;
+   CanvasDiagnosticsResult canvas_diagnostics_result = 40;
+   ShellAllowlistPrecheckResult shell_allowlist_precheck_result = 41;
+   McpAllowlistPrecheckResult mcp_allowlist_precheck_result = 42;
+   WebFetchAllowlistPrecheckResult web_fetch_allowlist_precheck_result = 43;
+   GetDiffResponse git_diff_response = 44;
+   PiReadExecResult pi_read_result = 46;
+   PiBashExecResult pi_bash_result = 47;
+   PiEditExecResult pi_edit_result = 48;
+   PiWriteExecResult pi_write_result = 49;
+   PiGrepExecResult pi_grep_result = 50;
+   PiFindExecResult pi_find_result = 51;
+   PiLsExecResult pi_ls_result = 52;
+   ConversationSearchResult conversation_search_result = 53;
+   AgentStoreConflictResult agent_store_conflict_result = 54;
+   ShellResult mini_swe_agent_bash_result = 55;
+   }
+   optional int32 local_execution_time_ms = 39;
+   repeated HookAdditionalContext hook_additional_contexts = 45;
+}
+
+message FetchArgs {
+   string url = 1;
+   string tool_call_id = 2;
+}
+
+message FetchResult {
+   oneof result {
+      FetchSuccess success = 1;
+      FetchError error = 2;
+   }
+}
+
+message FetchSuccess {
+   string url = 1;
+   string content = 2;
+   int32 status_code = 3;
+   string content_type = 4;
+}
+
+message FetchError {
+   string url = 1;
+   string error = 2;
+}
+
+message GenerateImageArgs {
+   string description = 1;
+   optional string file_path = 2;
+   // Optional paths to reference images to use as input for image-to-image generation
+   repeated string reference_image_paths = 5;
+}
+
+message GenerateImageResult {
+   oneof result {
+      GenerateImageSuccess success = 1;
+      GenerateImageError error = 2;
+   }
+}
+
+message GenerateImageSuccess {
+   // Actual file path where the image was saved (e.g., /path/to/project/assets/image.png)
+   string file_path = 1;
+   // Base64-encoded image data
+   string image_data = 2;
+}
+
+message GenerateImageError {
+   string error = 1;
+}
+
+message GenerateImageToolCall {
+   GenerateImageArgs args = 1;
+   GenerateImageResult result = 2;
+}
+
+message GrepArgs {
+   string pattern = 1;
+   optional string path = 2;
+   optional string glob = 3;
+   // "content", "files_with_matches", "count"
+   optional string output_mode = 4;
+   optional int32 context_before = 5;
+   optional int32 context_after = 6;
+   optional int32 context = 7;
+   optional bool case_insensitive = 8;
+   // --type
+   optional string type = 9;
+   // | head -N
+   optional int32 head_limit = 10;
+   // -U --multiline-dotall
+   optional bool multiline = 11;
+   // --sort: "none", "path", "modified", "accessed", "created"
+   optional string sort = 12;
+   // if false, use --sortr for reverse sort
+   optional bool sort_ascending = 13;
+   string tool_call_id = 14;
+   optional SandboxPolicy sandbox_policy = 15;
+   optional int32 offset = 16;
+}
+
+message GrepResult {
+   oneof result {
+      GrepSuccess success = 1;
+      GrepError error = 2;
+   }
+}
+
+message GrepError {
+   string error = 1;
+}
+
+message GrepSuccess {
+   string pattern = 1;
+   string path = 2;
+   // "content", "files_with_matches", or "count"
+   string output_mode = 3;
+   map<string, GrepUnionResult> workspace_results = 4;
+   optional GrepUnionResult active_editor_result = 5;
+}
+
+message GrepUnionResult {
+   oneof result {
+      GrepCountResult count = 1;
+      GrepFilesResult files = 2;
+      GrepContentResult content = 3;
+   }
+}
+
+message GrepCountResult {
+   // ordered by relevance
+   repeated GrepFileCount counts = 1;
+   // The total count of files that the client found from the ripgrep call This is a lower bound if we truncated the output from the ripgrep call itself, but is accurate if client_truncated is true (but may be more than the number of files returned to the server)
+   int32 total_files = 2;
+   // The total count of matches that the client found from the ripgrep call This is a lower bound if we truncated the output from the ripgrep call itself, but is accurate if client_truncated is true (but may be more than the number of matches returned to the server)
+   int32 total_matches = 3;
+   // true if the client truncated the output sent to the server
+   bool client_truncated = 4;
+   // true if we truncated the output from the ripgrep call itself
+   bool ripgrep_truncated = 5;
+   optional int32 head_limit_applied = 6;
+   optional int32 offset_applied = 7;
+}
+
+message GrepFileCount {
+   string file = 1;
+   int32 count = 2;
+}
+
+message GrepFilesResult {
+   // ordered by relevance
+   repeated string files = 1;
+   // The total count of files that the client found from the ripgrep call This is a lower bound if we truncated the output from the ripgrep call itself, but is accurate if client_truncated is true (but may be more than the number of files returned to the server)
+   int32 total_files = 2;
+   // true if the client truncated the output sent to the server
+   bool client_truncated = 3;
+   // true if we truncated the output from the ripgrep call itself
+   bool ripgrep_truncated = 4;
+   optional int32 head_limit_applied = 5;
+   optional int32 offset_applied = 6;
+}
+
+message GrepContentResult {
+   // ordered by relevance
+   repeated GrepFileMatch matches = 1;
+   // The total count of lines that the client found from the ripgrep call This is a lower bound if we truncated the output from the ripgrep call itself, but is accurate if client_truncated is true (but may be more than the number of lines returned to the server)
+   int32 total_lines = 2;
+   // The total count of matches that the client found from the ripgrep call This is a lower bound if we truncated the output from the ripgrep call itself, but is accurate if client_truncated is true (but may be more than the number of matches returned to the server)
+   int32 total_matched_lines = 3;
+   // true if the client truncated the output sent to the server
+   bool client_truncated = 4;
+   // true if we truncated the output from the ripgrep call itself
+   bool ripgrep_truncated = 5;
+   optional int32 head_limit_applied = 6;
+   optional int32 offset_applied = 7;
+}
+
+message GrepFileMatch {
+   string file = 1;
+   repeated GrepContentMatch matches = 2;
+}
+
+message GrepContentMatch {
+   int32 line_number = 1;
+   string content = 2;
+   bool content_truncated = 3;
+   // true for context lines (-A/B/C)
+   bool is_context_line = 4;
+}
+
+message GrepStream {
+   string pattern = 1;
+}
+
+message GrepToolCall {
+   GrepArgs args = 1;
+   GrepResult result = 2;
+}
+
+message GetBlobArgs {
+   bytes blob_id = 1;
+}
+
+message GetBlobResult {
+   optional bytes blob_data = 1;
+}
+
+message SetBlobArgs {
+   bytes blob_id = 1;
+   bytes blob_data = 2;
+}
+
+message SetBlobResult {
+   optional Error error = 1;
+}
+
+message KvServerMessage {
+   uint32 id = 1;
+   // Span context for distributed tracing
+   optional SpanContext span_context = 4;
+   oneof message {
+      GetBlobArgs get_blob_args = 2;
+      SetBlobArgs set_blob_args = 3;
+   }
+}
+
+message KvClientMessage {
+   uint32 id = 1;
+   oneof message {
+      GetBlobResult get_blob_result = 2;
+      SetBlobResult set_blob_result = 3;
+   }
+}
+
+message LsArgs {
+   string path = 1;
+   repeated string ignore = 2;
+   string tool_call_id = 3;
+   optional SandboxPolicy sandbox_policy = 4;
+   // defaults to 5000ms
+   optional uint32 timeout_ms = 5;
+}
+
+message LsResult {
+   oneof result {
+      LsSuccess success = 1;
+      LsError error = 2;
+      LsRejected rejected = 3;
+      LsTimeout timeout = 4;
+   }
+}
+
+message LsSuccess {
+   LsDirectoryTreeNode directory_tree_root = 1;
+}
+
+message LsDirectoryTreeNode {
+   string abs_path = 1;
+   repeated LsDirectoryTreeNode children_dirs = 2;
+   repeated LsDirectoryTreeNode_File children_files = 3;
+   // Proto doesn't allow repeated fields to be optional, so in case of empty children arrays, this fields indicates if it happens: `true` - because directory really doesn't have any children `false` - because we stopped traversal before getting to its children
+   bool children_were_processed = 4;
+   // Count of extensions in the full sub-tree
+   map<string, int32> full_subtree_extension_counts = 5;
+   int32 num_files = 6;
+}
+
+message LsDirectoryTreeNode_File {
+   string name = 1;
+   optional TerminalMetadata terminal_metadata = 2;
+}
+
+message LsError {
+   string path = 1;
+   string error = 2;
+}
+
+message LsRejected {
+   string path = 1;
+   string reason = 2;
+}
+
+// Returned when ls operation timed out. Contains partial results gathered before timeout.
+message LsTimeout {
+   LsDirectoryTreeNode directory_tree_root = 1;
+}
+
+message TerminalMetadata {
+   optional string cwd = 1;
+   repeated TerminalMetadata_Command last_commands = 2;
+   optional int64 last_modified_ms = 3;
+   optional TerminalMetadata_Command current_command = 4;
+}
+
+message TerminalMetadata_Command {
+   string command = 1;
+   optional int32 exit_code = 2;
+   optional int64 timestamp_ms = 3;
+   optional int64 duration_ms = 4;
+}
+
+message LsToolCall {
+   LsArgs args = 1;
+   LsResult result = 2;
+}
+
+message McpArgs {
+   string name = 1;
+   map<string, bytes> args = 2;
+   string tool_call_id = 3;
+   string provider_identifier = 4;
+   string tool_name = 5;
+   optional SmartModeApproval smart_mode_approval = 6;
+   bool smart_mode_approval_only = 7;
+   bool skip_approval = 8;
+   string server_identifier = 9;
+}
+
+message McpResult {
+   oneof result {
+      McpSuccess success = 1;
+      McpError error = 2;
+      McpRejected rejected = 3;
+      McpPermissionDenied permission_denied = 4;
+      McpToolNotFound tool_not_found = 5;
+   McpServerNotFound server_not_found = 6;
+   McpApproved approved = 7;
+   }
+}
+
+message McpToolNotFound {
+   string name = 1;
+   repeated string available_tools = 2;
+}
+
+// Text content item
+message McpTextContent {
+   string text = 1;
+   // Optional file location for large outputs
+   optional OutputLocation output_location = 2;
+}
+
+// Image content item
+message McpImageContent {
+   // Raw bytes of the image. In JSON, this will be base64-encoded.
+   bytes data = 1;
+   // Optional MIME type, e.g. "image/png"
+   string mime_type = 2;
+}
+
+// A single tool result content item: either text or image
+message McpToolResultContentItem {
+   oneof content {
+      McpTextContent text = 1;
+      McpImageContent image = 2;
+   }
+}
+
+// Equivalent to the requested McpToolResult TypeScript type
+message McpSuccess {
+   repeated McpToolResultContentItem content = 1;
+   bool is_error = 2;
+}
+
+message McpError {
+   string error = 1;
+}
+
+message McpRejected {
+   string reason = 1;
+   bool is_readonly = 2;
+}
+
+message McpPermissionDenied {
+   string error = 1;
+   bool is_readonly = 2;
+}
+
+// List MCP resources exec args
+message ListMcpResourcesExecArgs {
+   // Optional server name to filter resources by
+   optional string server = 1;
+}
+
+// List MCP resources exec result
+message ListMcpResourcesExecResult {
+   oneof result {
+      ListMcpResourcesSuccess success = 1;
+      ListMcpResourcesError error = 2;
+      ListMcpResourcesRejected rejected = 3;
+   }
+}
+
+message ListMcpResourcesExecResult_McpResource {
+   string uri = 1;
+   optional string name = 2;
+   optional string description = 3;
+   optional string mime_type = 4;
+   // Server name that provides this resource
+   string server = 5;
+   // Additional metadata
+   map<string, string> annotations = 6;
+}
+
+message ListMcpResourcesSuccess {
+   repeated ListMcpResourcesExecResult_McpResource resources = 1;
+}
+
+message ListMcpResourcesError {
+   string error = 1;
+}
+
+message ListMcpResourcesRejected {
+   string reason = 1;
+}
+
+// Read MCP resource exec args
+message ReadMcpResourceExecArgs {
+   // Required server name
+   string server = 1;
+   // Required resource URI
+   string uri = 2;
+   // Optional: when set, the resource will be downloaded to this path relative to the workspace, and the content will not be returned to the model.
+   optional string download_path = 3;
+   string tool_call_id = 4;
+   optional SmartModeApproval smart_mode_approval = 5;
+}
+
+// Read MCP resource exec result
+message ReadMcpResourceExecResult {
+   oneof result {
+      ReadMcpResourceSuccess success = 1;
+      ReadMcpResourceError error = 2;
+      ReadMcpResourceRejected rejected = 3;
+      ReadMcpResourceNotFound not_found = 4;
+   }
+}
+
+message ReadMcpResourceSuccess {
+   string uri = 1;
+   optional string name = 2;
+   optional string description = 3;
+   optional string mime_type = 4;
+   // Additional metadata
+   map<string, string> annotations = 7;
+   // If set, resource was downloaded to this path
+   optional string download_path = 8;
+   oneof content {
+      string text = 5;
+      bytes blob = 6;
+   }
+   optional OutputLocation output_location = 9;
+}
+
+message ReadMcpResourceError {
+   string uri = 1;
+   string error = 2;
+}
+
+message ReadMcpResourceRejected {
+   string uri = 1;
+   string reason = 2;
+}
+
+message ReadMcpResourceNotFound {
+   string uri = 1;
+}
+
+message McpToolDefinition {
+   string name = 1;
+   string provider_identifier = 4;
+   string tool_name = 5;
+   string description = 2;
+   bytes input_schema = 3;
+   optional string input_schema_json = 6;
+}
+
+message McpTools {
+   repeated McpToolDefinition mcp_tools = 1;
+}
+
+// Represents MCP-provided instructions from a specific server
+message McpInstructions {
+   string server_name = 1;
+   string instructions = 2;
+   string server_identifier = 3;
+}
+
+message McpDescriptor {
+   // Display name of the MCP server associated with this folder.
+   string server_name = 1;
+   string server_identifier = 2;
+   // Absolute folder path where MCP tool descriptor JSON files are stored.
+   optional string folder_path = 3;
+   optional string server_use_instructions = 4;
+   repeated McpToolDescriptor tools = 5;
+   optional string plugin = 7;
+   optional string marketplace = 8;
+   optional string plugin_db_id = 9;
+   optional string marketplace_id = 10;
+}
+
+message McpToolDescriptor {
+   string tool_name = 1;
+   optional string definition_path = 2;
+   optional string description = 3;
+   optional string input_schema_json = 5;
+}
+
+message McpFileSystemOptions {
+   bool enabled = 1;
+   string workspace_project_dir = 2;
+   repeated McpDescriptor mcp_descriptors = 3;
+}
+
+message ReadArgs {
+   string path = 1;
+   string tool_call_id = 2;
+   optional int32 offset = 4;
+   optional uint32 limit = 5;
+   optional string encoding_hint = 6;
+}
+
+message ReadResult {
+   oneof result {
+      ReadSuccess success = 1;
+      ReadError error = 2;
+      ReadRejected rejected = 3;
+      ReadFileNotFound file_not_found = 4;
+      ReadPermissionDenied permission_denied = 5;
+      ReadInvalidFile invalid_file = 6;
+   }
+}
+
+message ReadSuccess {
+   string path = 1;
+   int32 total_lines = 3;
+   int64 file_size = 4;
+   // true if the content was truncated due to size limits
+   bool truncated = 6;
+   // Returns blob ID if the output was stored in the blob store. If provided, the output is stored separately from the rest of the tool result, and since it's already in the blob store, it need not be sent back to the client -- reducing bandwidth.
+   optional bytes output_blob_id = 7;
+   oneof output {
+      string content = 2;
+      bytes data = 5;
+   }
+   bool range_applied = 8;
+}
+
+message ReadError {
+   string path = 1;
+   string error = 2;
+}
+
+message ReadRejected {
+   string path = 1;
+   string reason = 2;
+}
+
+message ReadFileNotFound {
+   string path = 1;
+}
+
+message ReadPermissionDenied {
+   string path = 1;
+}
+
+message ReadInvalidFile {
+   string path = 1;
+   // e.g., "Path is a directory, not a file"
+   string reason = 2;
+}
+
+message ReadToolCall {
+   ReadToolArgs args = 1;
+   ReadToolResult result = 2;
+}
+
+message ReadToolArgs {
+   string path = 1;
+   optional int32 offset = 2;
+   optional int32 limit = 3;
+}
+
+message ReadToolResult {
+   oneof result {
+      ReadToolSuccess success = 1;
+      ReadToolError error = 2;
+   }
+}
+
+message ReadRange {
+   uint32 start_line = 1;
+   uint32 end_line = 2;
+}
+
+message ReadToolSuccess {
+   bool is_empty = 2;
+   bool exceeded_limit = 3;
+   uint32 total_lines = 4;
+   uint32 file_size = 5;
+   string path = 7;
+   optional ReadRange read_range = 8;
+   oneof output {
+      string content = 1;
+      bytes data = 6;
+      bytes data_blob_id = 9;
+      bytes content_blob_id = 10;
+   }
+}
+
+message ReadToolError {
+   string error_message = 1;
+}
+
+message RecordScreenArgs {
+   int32 mode = 1;
+   string tool_call_id = 2;
+   // Custom filename for SAVE_RECORDING mode
+   optional string save_as_filename = 3;
+}
+
+message RecordScreenResult {
+   oneof result {
+      RecordScreenStartSuccess start_success = 1;
+      RecordScreenSaveSuccess save_success = 2;
+      RecordScreenDiscardSuccess discard_success = 3;
+      RecordScreenFailure failure = 4;
+   }
+}
+
+message RecordScreenStartSuccess {
+   // True if a prior recording was cancelled, false otherwise
+   bool was_prior_recording_cancelled = 1;
+   // True if save_as_filename arg was passed to start tool and ignored
+   bool was_save_as_filename_ignored = 2;
+}
+
+message RecordScreenSaveSuccess {
+   // Path to the saved recording file
+   string path = 1;
+   // Duration of the recording in milliseconds
+   int64 recording_duration_ms = 2;
+   // Set if save_as_filename was invalid and default path was used instead
+   optional int32 requested_file_path_rejected_reason = 3;
+}
+
+// Empty message - recording discarded successfully
+message RecordScreenDiscardSuccess {
+}
+
+message RecordScreenFailure {
+   // Error message
+   string error = 1;
+}
+
+message CursorPackagePrompt {
+   string name = 1;
+   string file_path = 2;
+}
+
+message CursorPackage {
+   string name = 1;
+   string description = 2;
+   string folder_path = 3;
+   bool enabled = 4;
+   optional string parse_error = 5;
+   repeated CursorPackagePrompt prompts = 6;
+   string readme_file_path = 7;
+   int32 package_type = 8;
+}
+
+// TODO: you should be able to override / configure this list in your .vscode settings not exactly sure what that should look like... but i guess you should be able to specify an override URL because we use URLs for identifying repos and maybe you should be able to specify additional buckets too... like in the jane street case: i guess jane street should have some default buckets
+message RepositoryIndexingInfo {
+   // the relative path in the current workspace this is useful for locating the repo and identifying what repo a given file is in this should be unique for different repositories (I think)
+   string relative_workspace_path = 1;
+   // a git repo may have multiple remotes at the server we choose the remote (either origin, or the one we have embedded, or something else) invariant: len(remote_urls) == len(remote_names)
+   repeated string remote_urls = 2;
+   repeated string remote_names = 3;
+   string repo_name = 4;
+   string repo_owner = 5;
+   bool is_tracked = 6;
+   // If this is local
+   bool is_local = 7;
+   // the orthogonal transform seed if sent from the client! if the client sends up the transform seed then we use that for the orthogonal transform instead of the value stored in the database
+   optional double orthogonal_transform_seed = 8;
+   // The encrypted workspace uri for the repository.
+   string workspace_uri = 9;
+   // The encryption key for partial paths
+   string path_encryption_key = 10;
+}
+
+message RequestContextArgs {
+   optional string notes_session_id = 2;
+   optional string workspace_id = 3;
+   optional string read_only_pinned_tree_sha = 4;
+   optional string read_only_plugin_cache_root = 5;
+   optional bool use_cached = 7;
+}
+
+message RequestContextResult {
+   oneof result {
+      RequestContextSuccess success = 1;
+      RequestContextError error = 2;
+      RequestContextRejected rejected = 3;
+   }
+}
+
+message RequestContextSuccess {
+   RequestContext request_context = 1;
+   optional bool served_from_disk_cache = 2;
+}
+
+message RequestContextError {
+   string error = 1;
+}
+
+message RequestContextRejected {
+   string reason = 1;
+}
+
+// same as SelectedImage, but with the data field is the full image data
+message ImageProto {
+   bytes data = 1;
+   string uuid = 2;
+   string path = 3;
+   ImageProto_Dimension dimension = 4;
+   optional string task_specific_description = 6;
+   string mime_type = 7;
+}
+
+message ImageProto_Dimension {
+   int32 width = 1;
+   int32 height = 2;
+}
+
+// Git repository information for a workspace
+message GitRepoInfo {
+   string path = 1;
+   string status = 2;
+   string branch_name = 3;
+   optional string remote_url = 4;
+}
+
+// Environment details for system prompt/context
+message RequestContextEnv {
+   string os_version = 1;
+   repeated string workspace_paths = 2;
+   string shell = 3;
+   bool sandbox_enabled = 5;
+   string terminals_folder = 7;
+   string agent_shared_notes_folder = 8;
+   string agent_conversation_notes_folder = 9;
+   string time_zone = 10;
+   // Project-specific folder for storing artifacts, computed client-side as ~/.cursor/projects/{slug}/
+   string project_folder = 11;
+   // Folder where agent conversation transcripts are stored
+   string agent_transcripts_folder = 12;
+}
+
+message DebugModeConfig {
+   string log_path = 1;
+   string server_endpoint = 2;
+}
+
+message SkillDescriptor {
+   string name = 1;
+   string description = 2;
+   string folder_path = 3;
+   bool enabled = 4;
+   optional string parse_error = 5;
+   string readme_file_path = 6;
+   int32 package_type = 7;
+}
+
+message SkillOptions {
+   repeated SkillDescriptor skill_descriptors = 1;
+}
+
+message RequestContext {
+   // All rules, categorized by the embedded type
+   repeated CursorRule rules = 2;
+   RequestContextEnv env = 4;
+   repeated RepositoryIndexingInfo repository_info = 6;
+   repeated McpToolDefinition tools = 7;
+   optional string conversation_notes_listing = 8;
+   optional string shared_notes_listing = 9;
+   repeated GitRepoInfo git_repos = 11;
+   repeated LsDirectoryTreeNode project_layouts = 13;
+   repeated McpInstructions mcp_instructions = 14;
+   optional DebugModeConfig debug_mode_config = 15;
+   optional string cloud_rule = 16;
+   optional bool web_search_enabled = 17;
+   optional SkillOptions skill_options = 18;
+   optional bool repository_info_should_query_prod = 19;
+   map<string, string> file_contents = 20;
+   // Content of the user-intent/index.md file summarizing past conversations
+   optional string user_intent_summary = 21;
+   // Local custom subagent definitions loaded from workspace configuration
+   repeated CustomSubagent custom_subagents = 22;
+   // MCP file system options for agent MCP tool descriptor access
+   optional McpFileSystemOptions mcp_file_system_options = 23;
+}
+
+message SandboxPolicy {
+   int32 type = 1;
+   optional bool network_access = 2;
+   repeated string additional_readwrite_paths = 3;
+   repeated string additional_readonly_paths = 4;
+   optional string debug_output_dir = 5;
+   optional bool block_git_writes = 6;
+   // If true, excludes default tmp paths (/tmp/, /private/tmp/, /var/folders/) from the sandbox writable paths. Useful for testing readonly behavior.
+   optional bool disable_tmp_write = 7;
+}
+
+message SelectedImage {
+   string uuid = 2;
+   string path = 3;
+   SelectedImage_Dimension dimension = 4;
+   string mime_type = 7;
+   oneof data_or_blob_id {
+      bytes blob_id = 1;
+      bytes data = 8;
+      SelectedImage_BlobIdWithData blob_id_with_data = 9;
+   }
+}
+
+// Contains both blob_id and data together, for when the client has both and wants to populate the server-side cache without re-uploading
+message SelectedImage_BlobIdWithData {
+   bytes blob_id = 1;
+   bytes data = 2;
+}
+
+message SelectedImage_Dimension {
+   int32 width = 1;
+   int32 height = 2;
+}
+
+// Extra context entry that can be stored inline or as a blob reference
+message ExtraContextEntry {
+   oneof data_or_blob_id {
+      string data = 1;
+      bytes blob_id = 2;
+   }
+}
+
+// A selected file from the UI
+message SelectedFile {
+   string content = 1;
+   // This is the full path
+   string path = 2;
+   optional string relative_path = 3;
+}
+
+// A selected code selection from the UI
+message SelectedCodeSelection {
+   string content = 1;
+   // This is the full path
+   string path = 2;
+   optional string relative_path = 3;
+   Range range = 4;
+}
+
+// A selected terminal from the UI
+message SelectedTerminal {
+   string content = 1;
+   optional string title = 2;
+   optional string path = 3;
+}
+
+// A selected terminal selection from the UI
+message SelectedTerminalSelection {
+   string content = 1;
+   optional string title = 2;
+   optional string path = 3;
+   Range range = 4;
+}
+
+// A selected folder from the UI
+message SelectedFolder {
+   // This is the full path
+   string path = 1;
+   optional string relative_path = 2;
+   LsDirectoryTreeNode directory_tree = 3;
+}
+
+// An external link manually attached by the user
+message SelectedExternalLink {
+   string url = 1;
+   string uuid = 2;
+   // For local PDF files Base64-encoded PDF content
+   optional string pdf_content = 3;
+   optional bool is_pdf = 4;
+   optional string filename = 5;
+}
+
+// A cursor rule manually attached by the user
+message SelectedCursorRule {
+   CursorRule rule = 1;
+}
+
+// Git diff (uncommitted changes in working tree)
+message SelectedGitDiff {
+   // Raw git diff output
+   string content = 1;
+}
+
+// Git diff from branch to main
+message SelectedGitDiffFromBranchToMain {
+   // Raw git diff output
+   string content = 1;
+}
+
+// A git commit manually attached by the user
+message SelectedGitCommit {
+   string sha = 1;
+   string message = 2;
+   optional string description = 3;
+   // Raw git diff output for this commit
+   string diff = 4;
+}
+
+// A pull request manually attached by the user via @mention Uses the same folder structure as ViewedPullRequest for consistency
+message SelectedPullRequest {
+   int32 number = 1;
+   string url = 2;
+   optional string title = 3;
+   // Path to the folder containing PR details (diffs, metadata, etc.)
+   string folder_path = 4;
+   // Summary JSON containing file list and diff sizes (contents of summary.json)
+   optional string summary_json = 5;
+   // PR description/body
+   optional string description = 6;
+   // If set, other fields are empty and data should be fetched from the blob
+   optional bytes blob_id = 7;
+}
+
+// A selection from a pull request diff (for files that may not exist on disk)
+message SelectedGitPRDiffSelection {
+   // Full URL to the pull request
+   string pr_url = 1;
+   // Path to the file within the PR
+   string file_path = 2;
+   // Start line in the diff
+   int32 start_line = 3;
+   // End line in the diff
+   int32 end_line = 4;
+   // The diff content for this file (or selection)
+   optional string diff_content = 5;
+   // If set, other fields are empty and data should be fetched from the blob
+   optional bytes blob_id = 6;
+}
+
+// A cursor command manually attached by the user
+message SelectedCursorCommand {
+   string name = 1;
+   string content = 2;
+}
+
+// A documentation manually attached by the user
+message SelectedDocumentation {
+   string doc_id = 1;
+   string name = 2;
+}
+
+// A past chat manually attached by the user (transcript file)
+message SelectedPastChat {
+   string agent_id = 1;
+   string name = 2;
+}
+
+// A call frame from a stack trace
+message CallFrame {
+   optional string function_name = 1;
+   optional string url = 2;
+   optional int32 line_number = 3;
+   optional int32 column_number = 4;
+}
+
+// A stack trace
+message StackTrace {
+   repeated CallFrame call_frames = 1;
+   optional string raw_stack_trace = 2;
+}
+
+// A console log entry from the runtime
+message SelectedConsoleLog {
+   string message = 1;
+   // * Unix timestamp in milliseconds when this log entry was created
+   double timestamp = 2;
+   string level = 3;
+   string client_name = 4;
+   string session_id = 5;
+   optional StackTrace stack_trace = 6;
+   optional string object_data_json = 7;
+}
+
+// A UI element picked by the user from the runtime
+message SelectedUIElement {
+   string element = 1;
+   string xpath = 2;
+   string text_content = 3;
+   string extra = 4;
+   optional string component = 5;
+   optional string component_props_json = 6;
+}
+
+// A subagent selected by the user from the slash menu
+message SelectedSubagent {
+   string name = 1;
+}
+
+// Container for selected context from the UI
+message SelectedContext {
+   repeated SelectedImage selected_images = 1;
+   optional InvocationContext invocation_context = 2;
+   // Temporary hack for IDE-based context (@filename, @Diff, etc.) in background agents only. TODO: remove once proper IDE context format is implemented.
+   repeated string extra_context = 3;
+   repeated ExtraContextEntry extra_context_entries = 16;
+   // New context types
+   repeated SelectedFile files = 4;
+   repeated SelectedCodeSelection code_selections = 5;
+   repeated SelectedTerminal terminals = 6;
+   repeated SelectedTerminalSelection terminal_selections = 7;
+   repeated SelectedFolder folders = 8;
+   repeated SelectedExternalLink external_links = 9;
+   repeated SelectedCursorRule cursor_rules = 10;
+   optional SelectedGitDiff git_diff = 18;
+   optional SelectedGitDiffFromBranchToMain git_diff_from_branch_to_main = 11;
+   repeated SelectedCursorCommand cursor_commands = 12;
+   repeated SelectedDocumentation documentations = 13;
+   repeated SelectedUIElement ui_elements = 14;
+   repeated SelectedConsoleLog console_logs = 15;
+   repeated SelectedGitCommit git_commits = 17;
+   repeated SelectedPastChat past_chats = 19;
+   repeated SelectedGitPRDiffSelection git_pr_diff_selections = 20;
+   repeated SelectedPullRequest selected_pull_requests = 21;
+   repeated SelectedSubagent selected_subagents = 22;
+}
+
+// InvocationContext represents the context from the external app/integration that triggered this agent request.
+message InvocationContext {
+   oneof data {
+      InvocationContext_SlackThread slack_thread = 1;
+      InvocationContext_GithubPR github_pr = 2;
+      InvocationContext_IdeState ide_state = 3;
+      bytes blob_id = 10;
+   }
+}
+
+message InvocationContext_SlackThread {
+   string thread = 1;
+   optional string channel_name = 2;
+   optional string channel_purpose = 3;
+   optional string channel_topic = 4;
+}
+
+message InvocationContext_GithubPR {
+   string title = 1;
+   string description = 2;
+   string comments = 3;
+   optional string ci_failures = 4;
+}
+
+message InvocationContext_IdeState {
+   repeated InvocationContext_IdeState_File visible_files = 1;
+   repeated InvocationContext_IdeState_File recently_viewed_files = 2;
+   // PRs currently being viewed in the review editor (if any)
+   repeated InvocationContext_IdeState_ViewedPullRequest currently_viewed_prs = 3;
+}
+
+message InvocationContext_IdeState_File {
+   // This is the full path
+   string path = 1;
+   optional string relative_path = 2;
+   // Present if file is currently focused
+   optional InvocationContext_IdeState_File_CursorPosition cursor_position = 3;
+   int32 total_lines = 4;
+   // Present for terminal files
+   optional string active_command = 5;
+}
+
+message InvocationContext_IdeState_File_CursorPosition {
+   int32 line = 1;
+   string text = 2;
+}
+
+// Information about a PR currently being viewed in a review editor
+message InvocationContext_IdeState_ViewedPullRequest {
+   int32 number = 1;
+   string url = 2;
+   optional string title = 3;
+   // Path to the folder containing PR details (diffs, metadata, etc.)
+   optional string folder_path = 4;
+   // Summary JSON containing file list and diff sizes (contents of summary.json)
+   optional string summary_json = 5;
+   // PR description/body
+   optional string description = 6;
+}
+
+message SetupVmEnvironmentArgs {
+   // Command to install runtime dependencies (e.g., "npm install")
+   string install_command = 2;
+   string start_command = 3;
+}
+
+// Result of VM environment setup operations
+message SetupVmEnvironmentResult {
+   oneof result {
+      SetupVmEnvironmentSuccess success = 1;
+   }
+}
+
+// Successful VM environment setup result
+message SetupVmEnvironmentSuccess {
+}
+
+// Tool call structure for SetupVmEnvironment
+message SetupVmEnvironmentToolCall {
+   // Arguments for the tool call
+   SetupVmEnvironmentArgs args = 1;
+   // Result of the tool call (populated after execution)
+   SetupVmEnvironmentResult result = 2;
+}
+
+message ShellCommandParsingResult {
+   bool parsing_failed = 1;
+   repeated ShellCommandParsingResult_ExecutableCommand executable_commands = 2;
+   bool has_redirects = 3;
+   bool has_command_substitution = 4;
+   optional bool all_redirects_are_dev_null = 5;
+   repeated ShellCommandParsingResult_Redirect redirects = 6;
+}
+
+message ShellCommandParsingResult_ExecutableCommandArg {
+   string type = 1;
+   string value = 2;
+}
+
+message ShellCommandParsingResult_ExecutableCommand {
+   string name = 1;
+   repeated ShellCommandParsingResult_ExecutableCommandArg args = 2;
+   string full_text = 3;
+}
+
+message ShellArgs {
+   string command = 1;
+   string working_directory = 2;
+   int32 timeout = 3;
+   string tool_call_id = 4;
+   repeated string simple_commands = 5;
+   bool has_input_redirect = 6;
+   bool has_output_redirect = 7;
+   // Deprecated: use parsing_result instead @deprecated simpleCommands = []; Deprecated: use parsing_result instead @deprecated hasInputRedirect = false; Deprecated: use parsing_result instead @deprecated hasOutputRedirect = false;
+   ShellCommandParsingResult parsing_result = 8;
+   optional SandboxPolicy requested_sandbox_policy = 9;
+   // If output size exceeds this threshold (in bytes), write to file instead of inline. If unset or 0, always use inline output.
+   optional uint64 file_output_threshold_bytes = 10;
+   bool is_background = 11;
+   bool skip_approval = 12;
+   int32 timeout_behavior = 13;
+   // Hard timeout: kill the command after this many ms, even if running in background
+   optional int32 hard_timeout = 14;
+   optional string description = 15;
+   optional CommandClassifierResult classifier_result = 16;
+   bool close_stdin = 17;
+   optional ShellOutputNotificationConfig output_notification = 18;
+   optional SmartModeApproval smart_mode_approval = 19;
+   optional ShellHookApprovalRequirement hook_approval_requirement = 20;
+   optional string conversation_id = 21;
+}
+
+message ShellResult {
+   optional SandboxPolicy sandbox_policy = 101;
+   // Rendering is affected by this flag, pass forward from args.
+   optional bool is_background = 102;
+   // Rendering is affected by this flag, pass forward from args.
+   optional string terminals_folder = 103;
+   // Process ID, used for backgrounded shells.
+   optional uint32 pid = 104;
+   oneof result {
+      ShellSuccess success = 1;
+      ShellFailure failure = 2;
+      ShellTimeout timeout = 3;
+      ShellRejected rejected = 4;
+      ShellSpawnError spawn_error = 5;
+      ShellPermissionDenied permission_denied = 7;
+   }
+}
+
+message ShellStreamStdout {
+   string data = 1;
+}
+
+message ShellStreamStderr {
+   string data = 1;
+}
+
+message ShellStreamExit {
+   uint32 code = 1;
+   string cwd = 2;
+   optional OutputLocation output_location = 3;
+   bool aborted = 4;
+   // If aborted is true, this field indicates the reason for the abort
+   optional int32 abort_reason = 5;
+   optional int32 local_execution_time_ms = 6;
+}
+
+message ShellStreamStart {
+   optional SandboxPolicy sandbox_policy = 1;
+}
+
+message ShellStreamBackgrounded {
+   uint32 shell_id = 1;
+   string command = 2;
+   string working_directory = 3;
+   optional uint32 pid = 4;
+   // The ms_to_wait value that was used for backgrounding, for display purposes
+   optional int32 ms_to_wait = 5;
+   optional ShellBackgroundReason reason = 6;
+}
+
+message ShellStream {
+   oneof event {
+      ShellStreamStdout stdout = 1;
+      ShellStreamStderr stderr = 2;
+      ShellStreamExit exit = 3;
+      ShellStreamStart start = 4;
+      ShellRejected rejected = 5;
+      ShellPermissionDenied permission_denied = 6;
+      ShellStreamBackgrounded backgrounded = 7;
+   ShellStreamHookContext hook_context = 8;
+   }
+}
+
+message OutputLocation {
+   // Absolute path to the output file
+   string file_path = 1;
+   // Size of the output in bytes
+   int64 size_bytes = 2;
+   // Number of lines in the output
+   int64 line_count = 3;
+}
+
+message ShellSuccess {
+   string command = 1;
+   string working_directory = 2;
+   int32 exit_code = 3;
+   string signal = 4;
+   // Inline stdout - populated when write_output_to_file is false, empty when true
+   string stdout = 5;
+   // Inline stderr - populated when write_output_to_file is false, empty when true
+   string stderr = 6;
+   int32 execution_time = 7;
+   // File-based output - populated when write_output_to_file is true (chronologically merged stdout+stderr)
+   optional OutputLocation output_location = 8;
+   // Used by background shell executor
+   optional uint32 shell_id = 9;
+   optional string interleaved_output = 10;
+   // Process ID, used for backgrounded shells
+   optional uint32 pid = 11;
+   // The ms_to_wait value used for backgrounding (for display in result)
+   optional int32 ms_to_wait = 12;
+   optional int32 local_execution_time_ms = 13;
+   optional ShellBackgroundReason background_reason = 14;
+   optional string output_head = 15;
+   optional string output_tail = 16;
+   optional uint32 elided_chars = 17;
+}
+
+message ShellFailure {
+   string command = 1;
+   string working_directory = 2;
+   int32 exit_code = 3;
+   string signal = 4;
+   // Inline stdout - populated when write_output_to_file is false, empty when true
+   string stdout = 5;
+   // Inline stderr - populated when write_output_to_file is false, empty when true
+   string stderr = 6;
+   int32 execution_time = 7;
+   // File-based output - populated when write_output_to_file is true (chronologically merged stdout+stderr)
+   optional OutputLocation output_location = 8;
+   optional string interleaved_output = 9;
+   // If the command was aborted, this indicates the reason
+   optional int32 abort_reason = 10;
+   // Whether the command was aborted (by user or timeout)
+   bool aborted = 11;
+   optional int32 local_execution_time_ms = 12;
+   optional string output_head = 13;
+   optional string output_tail = 14;
+   optional uint32 elided_chars = 15;
+}
+
+message ShellTimeout {
+   string command = 1;
+   string working_directory = 2;
+   int32 timeout_ms = 3;
+}
+
+message ShellRejected {
+   string command = 1;
+   string working_directory = 2;
+   string reason = 3;
+   bool is_readonly = 4;
+}
+
+message ShellPermissionDenied {
+   string command = 1;
+   string working_directory = 2;
+   string error = 3;
+   bool is_readonly = 4;
+}
+
+message ShellSpawnError {
+   string command = 1;
+   string working_directory = 2;
+   string error = 3;
+}
+
+message ShellPartialResult {
+   string stdout_delta = 1;
+   string stderr_delta = 2;
+}
+
+message ShellToolCall {
+   ShellArgs args = 1;
+   ShellResult result = 2;
+}
+
+message ShellToolCallStdoutDelta {
+   string content = 1;
+}
+
+message ShellToolCallStderrDelta {
+   string content = 1;
+}
+
+message ShellToolCallDelta {
+   oneof delta {
+      ShellToolCallStdoutDelta stdout = 1;
+      ShellToolCallStderrDelta stderr = 2;
+   }
+}
+
+message SubagentType {
+   oneof type {
+      SubagentTypeUnspecified unspecified = 1;
+      SubagentTypeComputerUse computer_use = 2;
+      SubagentTypeCustom custom = 3;
+      SubagentTypeExplore explore = 4;
+   }
+}
+
+// Empty message for unspecified subagent type
+message SubagentTypeUnspecified {
+}
+
+// Empty message for computer use subagent type
+message SubagentTypeComputerUse {
+}
+
+// Empty message for explore subagent type (read-only codebase exploration)
+message SubagentTypeExplore {
+}
+
+// Custom subagent type with a name field
+message SubagentTypeCustom {
+   // unique identifier of the custom subagent
+   string name = 1;
+}
+
+// Custom subagent definition loaded from local workspace configuration.
+message CustomSubagent {
+   // absolute path to the markdown definition file
+   string full_path = 1;
+   // unique identifier of the subagent
+   string name = 2;
+   // short summary of the agent's specialization
+   string description = 3;
+   // list of tool names the subagent can access
+   repeated string tools = 4;
+   // preferred model (or "inherit" to use parent's model)
+   string model = 5;
+   // full prompt contents from the markdown file
+   string prompt = 6;
+   // default permission mode for subagent execution
+   int32 permission_mode = 7;
+}
+
+message SwitchModeArgs {
+   // The unified mode id to switch to (agent/chat/plan/spec/debug/triage)
+   string target_mode_id = 1;
+   // Optional explanation for why the mode switch is requested
+   optional string explanation = 2;
+   string tool_call_id = 3;
+}
+
+message SwitchModeResult {
+   oneof result {
+      SwitchModeSuccess success = 1;
+      SwitchModeError error = 2;
+      SwitchModeRejected rejected = 3;
+   }
+}
+
+message SwitchModeSuccess {
+   // The mode we switched from
+   string from_mode_id = 1;
+   // The mode we switched to
+   string to_mode_id = 2;
+}
+
+message SwitchModeError {
+   string error = 1;
+}
+
+message SwitchModeRejected {
+   string reason = 1;
+}
+
+message SwitchModeToolCall {
+   SwitchModeArgs args = 1;
+   SwitchModeResult result = 2;
+}
+
+message SwitchModeRequestQuery {
+   SwitchModeArgs args = 1;
+}
+
+message SwitchModeRequestResponse {
+   oneof result {
+      SwitchModeRequestResponse_Approved approved = 1;
+      SwitchModeRequestResponse_Rejected rejected = 2;
+   }
+}
+
+message SwitchModeRequestResponse_Approved {
+}
+
+message SwitchModeRequestResponse_Rejected {
+   string reason = 1;
+}
+
+message TodoItem {
+   string id = 1;
+   string content = 2;
+   int32 status = 3;
+   int64 created_at = 4;
+   int64 updated_at = 5;
+   // IDs of other TODOs this depends on
+   repeated string dependencies = 6;
+}
+
+// UpdateTodos tool call
+message UpdateTodosToolCall {
+   UpdateTodosArgs args = 1;
+   UpdateTodosResult result = 2;
+}
+
+message UpdateTodosArgs {
+   repeated TodoItem todos = 1;
+   bool merge = 2;
+}
+
+message UpdateTodosResult {
+   oneof result {
+      UpdateTodosSuccess success = 1;
+      UpdateTodosError error = 2;
+   }
+}
+
+message UpdateTodosSuccess {
+   repeated TodoItem todos = 1;
+   int32 total_count = 2;
+   // Whether this was a merge operation (needed for conditional rendering)
+   bool was_merge = 3;
+}
+
+message UpdateTodosError {
+   string error = 1;
+}
+
+// ReadTodos tool call
+message ReadTodosToolCall {
+   ReadTodosArgs args = 1;
+   ReadTodosResult result = 2;
+}
+
+message ReadTodosArgs {
+   // Optional: filter by status
+   repeated int32 status_filter = 1;
+   // Optional: filter by IDs
+   repeated string id_filter = 2;
+}
+
+message ReadTodosResult {
+   oneof result {
+      ReadTodosSuccess success = 1;
+      ReadTodosError error = 2;
+   }
+}
+
+message ReadTodosSuccess {
+   repeated TodoItem todos = 1;
+   int32 total_count = 2;
+}
+
+message ReadTodosError {
+   string error = 1;
+}
+
+message Range {
+   Position start = 1;
+   Position end = 2;
+}
+
+message Position {
+   uint32 line = 1;
+   uint32 column = 2;
+}
+
+message Error {
+   string message = 1;
+}
+
+message WebSearchArgs {
+   string search_term = 1;
+   string tool_call_id = 2;
+}
+
+message WebSearchResult {
+   oneof result {
+      WebSearchSuccess success = 1;
+      WebSearchError error = 2;
+      WebSearchRejected rejected = 3;
+   }
+}
+
+message WebSearchSuccess {
+   repeated WebSearchReference references = 1;
+}
+
+message WebSearchError {
+   string error = 1;
+}
+
+message WebSearchRejected {
+   string reason = 1;
+}
+
+message WebSearchReference {
+   string title = 1;
+   string url = 2;
+   string chunk = 3;
+}
+
+message WebSearchToolCall {
+   WebSearchArgs args = 1;
+   WebSearchResult result = 2;
+}
+
+message WebSearchRequestQuery {
+   WebSearchArgs args = 1;
+}
+
+message WebSearchRequestResponse {
+   oneof result {
+      WebSearchRequestResponse_Approved approved = 1;
+      WebSearchRequestResponse_Rejected rejected = 2;
+   }
+}
+
+message WebSearchRequestResponse_Approved {
+}
+
+message WebSearchRequestResponse_Rejected {
+   string reason = 1;
+}
+
+message WriteArgs {
+   string path = 1;
+   string file_text = 2;
+   string tool_call_id = 3;
+   bool return_file_content_after_write = 4;
+   // Raw binary data to write. When set, file_text is ignored and the bytes are written directly without any text processing (e.g., line ending normalization).
+   bytes file_bytes = 5;
+   optional string encoding_hint = 6;
+}
+
+message WriteResult {
+   oneof result {
+      WriteSuccess success = 1;
+      WritePermissionDenied permission_denied = 3;
+      WriteNoSpace no_space = 4;
+      WriteError error = 5;
+      WriteRejected rejected = 6;
+   }
+}
+
+message WriteSuccess {
+   string path = 1;
+   int32 lines_created = 2;
+   int32 file_size = 3;
+   optional string file_content_after_write = 4;
+}
+
+message WritePermissionDenied {
+   string path = 1;
+   string directory = 2;
+   // "create_directory" or "create_file"
+   string operation = 3;
+   string error = 4;
+   bool is_readonly = 5;
+}
+
+message WriteNoSpace {
+   string path = 1;
+}
+
+message WriteError {
+   string path = 1;
+   string error = 2;
+}
+
+message WriteRejected {
+   string path = 1;
+   string reason = 2;
+}
+
+message BootstrapStatsigRequest {
+   // When true, the server should evaluate gates as if dev/internal status is ignored. This is used by clients to simulate a prod user experience.
+   optional bool ignore_dev_status = 1;
+   optional int32 operating_system = 2;
+}
+
+message PingResponse {
+}
+
+message ExecRequest {
+   string command = 1;
+   optional string cwd = 2;
+   repeated string args = 3;
+   map<string, string> environment = 4;
+}
+
+message ExecResponse {
+   oneof event {
+      StdoutEvent stdout_event = 1;
+      StderrEvent stderr_event = 2;
+      ExitEvent exit_event = 3;
+   }
+}
+
+message StdoutEvent {
+   string data = 1;
+}
+
+message StderrEvent {
+   string data = 1;
+}
+
+message ExitEvent {
+   int32 exit_code = 1;
+}
+
+message ReadTextFileRequest {
+   string path = 1;
+}
+
+message ReadTextFileResponse {
+   string content = 1;
+}
+
+message WriteTextFileRequest {
+   string path = 1;
+   string content = 2;
+}
+
+// Empty response - success is implied by RPC completion
+message WriteTextFileResponse {
+}
+
+message ReadBinaryFileRequest {
+   string path = 1;
+}
+
+message ReadBinaryFileResponse {
+   bytes content = 1;
+}
+
+message WriteBinaryFileRequest {
+   string path = 1;
+   bytes content = 2;
+}
+
+// Empty response - success is implied by RPC completion
+message WriteBinaryFileResponse {
+}
+
+message GetWorkspaceChangesHashRequest {
+   string root_path = 1;
+   string base_ref = 2;
+}
+
+message GetWorkspaceChangesHashResponse {
+   string hash = 1;
+}
+
+message RefreshGithubAccessTokenRequest {
+   string github_access_token = 1;
+   // e.g., "github.com", "gitlab.com", "gitlab.example.com"
+   string hostname = 2;
+}
+
+// Empty response - success is implied by RPC completion
+message RefreshGithubAccessTokenResponse {
+}
+
+message WarmRemoteAccessServerRequest {
+   string commit = 1;
+   int32 port = 2;
+   string connection_token = 3;
+}
+
+// Empty response - success is implied by RPC completion
+message WarmRemoteAccessServerResponse {
+}
+
+message ListArtifactsRequest {
+}
+
+message ArtifactUploadMetadata {
+   string absolute_path = 1;
+   uint64 size_bytes = 2;
+   int64 updated_at_unix_ms = 3;
+   int32 status = 4;
+   uint64 bytes_uploaded = 5;
+   string last_error = 6;
+   uint32 upload_attempts = 7;
+   int64 last_started_at_unix_ms = 8;
+   int64 last_finished_at_unix_ms = 9;
+   string upload_id = 10;
+}
+
+message ListArtifactsResponse {
+   repeated ArtifactUploadMetadata artifacts = 1;
+}
+
+message UploadArtifactsRequest {
+   repeated ArtifactUploadInstruction uploads = 1;
+}
+
+message ArtifactUploadInstruction {
+   string absolute_path = 1;
+   string upload_url = 2;
+   string method = 3;
+   map<string, string> headers = 4;
+   optional string content_type = 5;
+   optional string slack_upload_url = 6;
+   optional string slack_file_id = 7;
+}
+
+message ArtifactUploadDispatchResult {
+   string absolute_path = 1;
+   int32 status = 2;
+   string message = 3;
+   optional string slack_file_id = 4;
+}
+
+message UploadArtifactsResponse {
+   repeated ArtifactUploadDispatchResult results = 1;
+}
+
+message GetMcpRefreshTokensRequest {
+}
+
+message GetMcpRefreshTokensResponse {
+   // Map from server URL to refresh token
+   map<string, string> refresh_tokens = 1;
+}
+
+message UpdateEnvironmentVariablesRequest {
+   // Environment variables to manage (plaintext values).
+   map<string, string> env = 1;
+   // If true, unset previously-managed keys that are not present in `env`.
+   bool replace = 2;
+}
+
+message UpdateEnvironmentVariablesResponse {
+   uint32 applied = 1;
+   uint32 removed = 2;
+}
+
+// Check if an error is caused by the client disconnecting (e.g., due to timeout or abort). This includes errors like ERR_STREAM_DESTROYED which occur when the HTTP response stream is closed by the client while the server is still writing to it. function isClientDisconnectError(error) { if (!(error instanceof Error)) { return false; const code = error.code; return (code === "ERR_STREAM_DESTROYED" || code === "ERR_STREAM_PREMATURE_CLOSE" || code === "ECONNRESET" || code === "EPIPE"); ;// ../proto/dist/generated/aiserver/v1/mcp_pb.js // @ts-nocheck
+message McpOAuthStoredData {
+   string refresh_token = 1;
+   string client_id = 2;
+   optional string client_secret = 3;
+   repeated string redirect_uris = 4;
+}
+
+message Frame {
+   // Correlation ID
+   string id = 1;
+   // RPC method (e.g., "/agent.v1.ControlService/Ping")
+   string method = 2;
+   // Serialized payload
+   bytes data = 3;
+   int32 kind = 4;
+   // Error message (kind == ERROR)
+   string error = 5;
+}
+
+// var Frame_Kind; (function (Frame_Kind) { Frame_Kind[Frame_Kind["UNSPECIFIED"] = 0] = "UNSPECIFIED"; Frame_Kind[Frame_Kind["REQUEST"] = 1] = "REQUEST"; Frame_Kind[Frame_Kind["RESPONSE"] = 2] = "RESPONSE"; Frame_Kind[Frame_Kind["ERROR"] = 3] = "ERROR"; })(Frame_Kind || (Frame_Kind = {})); // Retrieve enum metadata with: proto3.getEnumType(Frame_Kind) proto3/* int32 */.C.util.setEnumType(Frame_Kind, "agent.v1.Frame.Kind", [ { no: 0, name: "KIND_UNSPECIFIED" }, { no: 1, name: "KIND_REQUEST" }, { no: 2, name: "KIND_RESPONSE" }, { no: 3, name: "KIND_ERROR" }, ]);
+message Empty {
+}
+
+message BidiRequestId {
+   string request_id = 1;
+}
+
+// Agent Service with bidirectional streaming
+service AgentService {
+   rpc Run(AgentClientMessage) returns (AgentServerMessage);
+   rpc RunSSE(BidiRequestId) returns (AgentServerMessage);
+   // Generate a very short, succinct agent name from the provided user message.
+   rpc NameAgent(NameAgentRequest) returns (NameAgentResponse);
+   rpc GetUsableModels(GetUsableModelsRequest) returns (GetUsableModelsResponse);
+   rpc GetDefaultModelForCli(GetDefaultModelForCliRequest) returns (GetDefaultModelForCliResponse);
+   // Internal endpoint: returns all allowed model intents for devs
+   rpc GetAllowedModelIntents(GetAllowedModelIntentsRequest) returns (GetAllowedModelIntentsResponse);
+}
+
+service ControlService {
+   // Spawn
+   // File read / write
+   rpc ReadTextFile(ReadTextFileRequest) returns (ReadTextFileResponse);
+   rpc WriteTextFile(WriteTextFileRequest) returns (WriteTextFileResponse);
+   // Binary file read / write
+   rpc ReadBinaryFile(ReadBinaryFileRequest) returns (ReadBinaryFileResponse);
+   rpc WriteBinaryFile(WriteBinaryFileRequest) returns (WriteBinaryFileResponse);
+   // Git
+   rpc GetWorkspaceChangesHash(GetWorkspaceChangesHashRequest) returns (GetWorkspaceChangesHashResponse);
+   rpc RefreshGithubAccessToken(RefreshGithubAccessTokenRequest) returns (RefreshGithubAccessTokenResponse);
+   // Remote access
+   rpc WarmRemoteAccessServer(WarmRemoteAccessServerRequest) returns (WarmRemoteAccessServerResponse);
+   // Artifact uploads
+   rpc ListArtifacts(ListArtifactsRequest) returns (ListArtifactsResponse);
+   rpc UploadArtifacts(UploadArtifactsRequest) returns (UploadArtifactsResponse);
+   rpc GetMcpRefreshTokens(GetMcpRefreshTokensRequest) returns (GetMcpRefreshTokensResponse);
+   // Update the exec-daemon's environment variables for subsequent process spawns. This does NOT affect already-running processes.
+   rpc UpdateEnvironmentVariables(UpdateEnvironmentVariablesRequest) returns (UpdateEnvironmentVariablesResponse);
+}
+
+// Agent Service with unary RPC
+service ExecService {
+}
+
+service PrivateWorkerBridgeExternalService {
+   rpc Connect(Frame) returns (Frame);
+}
+
+// LifecycleService is exposed by the bridge *client*, in addition to ExecService (tool calls) and ControlService (control operations "within the daemon"). It operates at a similar abstraction level as AnyrunService: it represents operations similar to creating a VM, checking out a repository, etc.
+service LifecycleService {
+   // Resets a long-lived worker
+   rpc ResetInstance(Empty) returns (Empty);
+   // Asks worker to exit(0) so that a new worker can take his place
+   rpc RenewInstance(Empty) returns (Empty);
+}
+
+// ===== Pi exec tools (modern Cursor CLI, ExecServerMessage 45-51) =====
+
+message PiTruncation {
+   bool truncated = 1;
+   string truncated_by = 2;
+   uint32 total_lines = 3;
+   uint32 output_lines = 4;
+   uint32 output_bytes = 5;
+   optional uint32 max_lines = 6;
+   optional uint32 max_bytes = 7;
+   bool first_line_exceeds_limit = 8;
+   bool last_line_partial = 9;
+}
+
+message PiEditReplacement {
+   string old_text = 1;
+   string new_text = 2;
+}
+
+message PiReadExecArgs {
+   string path = 1;
+   optional int32 offset = 2;
+   optional int32 limit = 3;
+}
+
+message PiReadExecSuccess {
+   string output = 1;
+   optional PiTruncation truncation = 2;
+}
+
+message PiReadExecError {
+   string error = 1;
+}
+
+message PiReadExecResult {
+   oneof result {
+      PiReadExecSuccess success = 1;
+      PiReadExecError error = 2;
+   }
+}
+
+message PiBashExecArgs {
+   string command = 1;
+   optional double timeout = 2;
+}
+
+message PiBashExecSuccess {
+   string output = 1;
+   optional PiTruncation truncation = 2;
+   optional string full_output_path = 3;
+}
+
+message PiBashExecError {
+   string error = 1;
+   optional PiTruncation truncation = 2;
+   optional string full_output_path = 3;
+}
+
+message PiBashExecResult {
+   oneof result {
+      PiBashExecSuccess success = 1;
+      PiBashExecError error = 2;
+   }
+}
+
+message PiEditExecArgs {
+   string path = 1;
+   repeated PiEditReplacement edits = 2;
+}
+
+message PiEditExecSuccess {
+   string output = 1;
+   string diff = 2;
+   string patch = 3;
+   optional uint32 first_changed_line = 4;
+}
+
+message PiEditExecError {
+   string error = 1;
+}
+
+message PiEditExecRejected {
+   string reason = 1;
+}
+
+message PiEditExecResult {
+   oneof result {
+      PiEditExecSuccess success = 1;
+      PiEditExecError error = 2;
+      PiEditExecRejected rejected = 3;
+   }
+}
+
+message PiWriteExecArgs {
+   string path = 1;
+   string content = 2;
+}
+
+message PiWriteExecSuccess {
+   string output = 1;
+}
+
+message PiWriteExecError {
+   string error = 1;
+}
+
+message PiWriteExecRejected {
+   string reason = 1;
+}
+
+message PiWriteExecResult {
+   oneof result {
+      PiWriteExecSuccess success = 1;
+      PiWriteExecError error = 2;
+      PiWriteExecRejected rejected = 3;
+   }
+}
+
+message PiGrepExecArgs {
+   string pattern = 1;
+   optional string path = 2;
+   optional string glob = 3;
+   optional bool ignore_case = 4;
+   optional bool literal = 5;
+   optional int32 context = 6;
+   optional int32 limit = 7;
+}
+
+message PiGrepExecSuccess {
+   string output = 1;
+   optional PiTruncation truncation = 2;
+   optional uint32 match_limit_reached = 3;
+   bool lines_truncated = 4;
+}
+
+message PiGrepExecError {
+   string error = 1;
+}
+
+message PiGrepExecResult {
+   oneof result {
+      PiGrepExecSuccess success = 1;
+      PiGrepExecError error = 2;
+   }
+}
+
+message PiFindExecArgs {
+   string pattern = 1;
+   optional string path = 2;
+   optional int32 limit = 3;
+}
+
+message PiFindExecSuccess {
+   string output = 1;
+   optional PiTruncation truncation = 2;
+   optional uint32 result_limit_reached = 3;
+}
+
+message PiFindExecError {
+   string error = 1;
+}
+
+message PiFindExecResult {
+   oneof result {
+      PiFindExecSuccess success = 1;
+      PiFindExecError error = 2;
+   }
+}
+
+message PiLsExecArgs {
+   optional string path = 1;
+   optional int32 limit = 2;
+}
+
+message PiLsExecSuccess {
+   string output = 1;
+   optional PiTruncation truncation = 2;
+   optional uint32 entry_limit_reached = 3;
+}
+
+message PiLsExecError {
+   string error = 1;
+}
+
+message PiLsExecResult {
+   oneof result {
+      PiLsExecSuccess success = 1;
+      PiLsExecError error = 2;
+   }
+}
+
+// ===== MCP (modern) =====
+
+message McpServerNotFound {
+   string name = 1;
+   repeated string available_servers = 2;
+}
+
+message McpApproved {
+}
+
+message McpStateExecArgs {
+   repeated string server_identifiers = 1;
+   bool kick_only = 2;
+}
+
+message McpStateServer {
+   string server_name = 1;
+   string server_identifier = 2;
+   optional string plugin = 3;
+   optional string marketplace = 4;
+   repeated McpToolDefinition tools = 5;
+   repeated McpInstructions instructions = 6;
+   optional string status = 7;
+}
+
+message McpStateSuccess {
+   repeated McpStateServer servers = 1;
+}
+
+message McpStateError {
+   string error = 1;
+}
+
+message McpStateRejected {
+   string reason = 1;
+}
+
+message McpStateExecResult {
+   oneof result {
+      McpStateSuccess success = 1;
+      McpStateError error = 2;
+      McpStateRejected rejected = 3;
+   }
+}
+
+// ===== Allowlist prechecks =====
+
+enum CommandClassifierResult_SuggestedSandboxMode {
+   SUGGESTED_SANDBOX_MODE_UNSPECIFIED = 0;
+   SUGGESTED_SANDBOX_MODE_SANDBOX = 1;
+   SUGGESTED_SANDBOX_MODE_NO_SANDBOX = 2;
+   SUGGESTED_SANDBOX_MODE_UNDETERMINED = 3;
+}
+
+message CommandClassifierResult_ClassifiedCommand {
+   string name = 1;
+   repeated string arguments = 2;
+   optional string suggested_allowlist_entry = 3;
+   repeated string subcommand_tokens = 4;
+}
+
+message CommandClassifierResult {
+   repeated CommandClassifierResult_ClassifiedCommand commands = 1;
+   CommandClassifierResult_SuggestedSandboxMode suggested_sandbox_mode = 2;
+   bool classification_failed = 3;
+}
+
+message ShellCommandParsingResult_Redirect {
+   string operator = 1;
+   repeated uint32 destination_fds = 2;
+   string target_node_type = 3;
+   optional string target_text = 4;
+}
+
+message ShellAllowlistPrecheckArgs {
+   string command = 1;
+   string working_directory = 2;
+   ShellCommandParsingResult parsing_result = 3;
+   optional CommandClassifierResult classifier_result = 4;
+   optional string tool_call_id = 5;
+}
+
+message ShellAllowlistPrecheckResult {
+   bool allowlisted = 1;
+}
+
+message McpAllowlistPrecheckArgs {
+   string provider_identifier = 1;
+   string tool_name = 2;
+   optional string tool_call_id = 3;
+}
+
+message McpAllowlistPrecheckResult {
+   bool allowlisted = 1;
+}
+
+message WebFetchAllowlistPrecheckArgs {
+   string url = 1;
+   optional string tool_call_id = 2;
+}
+
+message WebFetchAllowlistPrecheckResult {
+   bool allowlisted = 1;
+}
+
+// ===== Shell (modern additions) =====
+
+message SmartModeApproval {
+   string request_id = 1;
+   string reason = 2;
+}
+
+message ShellOutputNotificationConfig {
+   string pattern = 1;
+   string reason = 2;
+   optional double debounce = 3;
+   optional int32 notification_limit = 4;
+}
+
+enum ShellHookApprovalRequirement_Kind {
+   SHELL_HOOK_APPROVAL_REQUIREMENT_KIND_UNSPECIFIED = 0;
+   SHELL_HOOK_APPROVAL_REQUIREMENT_KIND_FORCE_PROMPT = 1;
+}
+
+message ShellHookApprovalRequirement {
+   ShellHookApprovalRequirement_Kind kind = 1;
+   optional string reason = 2;
+}
+
+enum ShellBackgroundReason {
+   SHELL_BACKGROUND_REASON_UNSPECIFIED = 0;
+   SHELL_BACKGROUND_REASON_TIMEOUT = 1;
+   SHELL_BACKGROUND_REASON_USER_REQUEST = 2;
+}
+
+enum ForceBackgroundShellStatus {
+   FORCE_BACKGROUND_SHELL_STATUS_UNSPECIFIED = 0;
+   FORCE_BACKGROUND_SHELL_STATUS_ACCEPTED = 1;
+   FORCE_BACKGROUND_SHELL_STATUS_NOT_FOUND = 2;
+}
+
+message ForceBackgroundShellArgs {
+   string tool_call_id = 1;
+}
+
+message ForceBackgroundShellResult {
+   ForceBackgroundShellStatus status = 1;
+   optional ShellResult shell_result = 2;
+}
+
+message HookAdditionalContext {
+   string hook_event_name = 1;
+   string content = 2;
+}
+
+message ShellStreamHookContext {
+   repeated HookAdditionalContext hook_additional_contexts = 1;
+}
+
+// ===== Subagents =====
+
+enum SubagentBackgroundReason {
+   SUBAGENT_BACKGROUND_REASON_UNSPECIFIED = 0;
+   SUBAGENT_BACKGROUND_REASON_AGENT_REQUEST = 1;
+   SUBAGENT_BACKGROUND_REASON_USER_REQUEST = 2;
+   SUBAGENT_BACKGROUND_REASON_QUEUED_FOLLOW_UP = 3;
+}
+
+enum ForceBackgroundSubagentStatus {
+   FORCE_BACKGROUND_SUBAGENT_STATUS_UNSPECIFIED = 0;
+   FORCE_BACKGROUND_SUBAGENT_STATUS_ACCEPTED = 1;
+   FORCE_BACKGROUND_SUBAGENT_STATUS_NOT_FOUND = 2;
+}
+
+// Subset: only the fields this client reads. Upstream also defines model_id=3, readonly=5,
+// resume_agent_id=6, run_in_background=7, continuation_config=8, parent_conversation_id=9,
+// credentials 10-12, interrupt=13, mode=14, fork_agent_id=15, root_parent_conversation_id=16,
+// selected_context=17, direct_meta_parent_child_subagent=18, environment=19, cloud_base_branch=20.
+// Those decode into unknown fields; do not reuse these numbers.
+message SubagentArgs {
+   string tool_call_id = 1;
+   string subagent_type = 2;
+   string prompt = 4;
+}
+
+message SubagentSuccess {
+   string agent_id = 1;
+   optional string final_message = 2;
+   int32 tool_call_count = 3;
+   SubagentBackgroundReason background_reason = 4;
+   optional string transcript_path = 5;
+}
+
+message SubagentError {
+   optional string agent_id = 1;
+   string error = 2;
+}
+
+message SubagentResult {
+   oneof result {
+      SubagentSuccess success = 1;
+      SubagentError error = 2;
+   }
+}
+
+message SubagentAwaitArgs {
+   string agent_id = 1;
+   uint32 timeout_ms = 2;
+}
+
+message SubagentAwaitComplete {
+   string agent_id = 1;
+   optional string transcript_path = 2;
+   int32 tool_call_count = 3;
+   optional string final_message = 4;
+}
+
+message SubagentAwaitStillRunning {
+   string agent_id = 1;
+   optional string transcript_path = 2;
+}
+
+message SubagentAwaitNotFound {
+   string agent_id = 1;
+}
+
+message SubagentAwaitError {
+   optional string agent_id = 1;
+   string error = 2;
+}
+
+message SubagentAwaitResult {
+   oneof result {
+      SubagentAwaitComplete complete = 1;
+      SubagentAwaitStillRunning still_running = 2;
+      SubagentAwaitNotFound not_found = 3;
+      SubagentAwaitError error = 4;
+   }
+}
+
+message ForceBackgroundSubagentArgs {
+   string tool_call_id = 1;
+}
+
+message ForceBackgroundSubagentResult {
+   ForceBackgroundSubagentStatus status = 1;
+}
+
+// ===== Hooks =====
+
+// Payload not modelled: this client runs no Cursor hooks and only reads the oneof case.
+message PreCompactRequestQuery {
+}
+
+// Payload not modelled: this client runs no Cursor hooks and only reads the oneof case.
+message SubagentStartRequestQuery {
+}
+
+// Payload not modelled: this client runs no Cursor hooks and only reads the oneof case.
+message SubagentStopRequestQuery {
+}
+
+// Payload not modelled: this client runs no Cursor hooks and only reads the oneof case.
+message PreToolUseRequestQuery {
+}
+
+// Payload not modelled: this client runs no Cursor hooks and only reads the oneof case.
+message PostToolUseRequestQuery {
+}
+
+// Payload not modelled: this client runs no Cursor hooks and only reads the oneof case.
+message PostToolUseFailureRequestQuery {
+}
+
+// Payload not modelled: this client runs no Cursor hooks and only reads the oneof case.
+message BeforeSubmitPromptRequestQuery {
+}
+
+// Payload not modelled: this client runs no Cursor hooks and only reads the oneof case.
+message AfterAgentResponseRequestQuery {
+}
+
+// Payload not modelled: this client runs no Cursor hooks and only reads the oneof case.
+message AfterAgentThoughtRequestQuery {
+}
+
+// Payload not modelled: this client runs no Cursor hooks and only reads the oneof case.
+message StopRequestQuery {
+}
+
+message PreCompactRequestResponse {
+   optional string user_message = 1;
+}
+
+message SubagentStartRequestResponse {
+   optional string permission = 1;
+   optional string user_message = 2;
+   optional string additional_context = 3;
+}
+
+message SubagentStopRequestResponse {
+   optional string followup_message = 1;
+   optional string additional_context = 2;
+}
+
+message PreToolUseRequestResponse {
+   optional string permission = 1;
+   optional string user_message = 2;
+   optional string agent_message = 3;
+   optional string updated_input = 4;
+   optional string additional_context = 5;
+}
+
+message PostToolUseRequestResponse {
+   optional string additional_context = 1;
+}
+
+message PostToolUseFailureRequestResponse {
+   optional string additional_context = 1;
+}
+
+message BeforeSubmitPromptRequestResponse {
+   optional bool continue = 1;
+   optional string user_message = 2;
+   optional string additional_context = 3;
+}
+
+message AfterAgentResponseRequestResponse {
+}
+
+message AfterAgentThoughtRequestResponse {
+}
+
+message StopRequestResponse {
+   optional string followup_message = 1;
+}
+
+message ExecuteHookRequest {
+   oneof request {
+      PreCompactRequestQuery pre_compact = 1;
+      SubagentStartRequestQuery subagent_start = 2;
+      SubagentStopRequestQuery subagent_stop = 3;
+      PreToolUseRequestQuery pre_tool_use = 4;
+      PostToolUseRequestQuery post_tool_use = 5;
+      PostToolUseFailureRequestQuery post_tool_use_failure = 6;
+      BeforeSubmitPromptRequestQuery before_submit_prompt = 7;
+      AfterAgentResponseRequestQuery after_agent_response = 8;
+      AfterAgentThoughtRequestQuery after_agent_thought = 9;
+      StopRequestQuery stop = 11;
+   }
+}
+
+message ExecuteHookResponse {
+   oneof response {
+      PreCompactRequestResponse pre_compact = 1;
+      SubagentStartRequestResponse subagent_start = 2;
+      SubagentStopRequestResponse subagent_stop = 3;
+      PreToolUseRequestResponse pre_tool_use = 4;
+      PostToolUseRequestResponse post_tool_use = 5;
+      PostToolUseFailureRequestResponse post_tool_use_failure = 6;
+      BeforeSubmitPromptRequestResponse before_submit_prompt = 7;
+      AfterAgentResponseRequestResponse after_agent_response = 8;
+      AfterAgentThoughtRequestResponse after_agent_thought = 9;
+      StopRequestResponse stop = 11;
+   }
+}
+
+message ExecuteHookArgs {
+   ExecuteHookRequest request = 1;
+}
+
+message ExecuteHookResult {
+   ExecuteHookResponse response = 1;
+}
+
+// ===== Smart-mode classifier =====
+
+enum SmartModeClassifierDecision {
+   SMART_MODE_CLASSIFIER_DECISION_UNSPECIFIED = 0;
+   SMART_MODE_CLASSIFIER_DECISION_ALLOW = 1;
+   SMART_MODE_CLASSIFIER_DECISION_BLOCK = 2;
+}
+
+// Subset: arguments=2 (google.protobuf.Struct) decodes into unknown fields; do not reuse.
+message SmartModeRiskTarget {
+   string action = 1;
+}
+
+message SmartModeClassifierConversationMessage {
+   string role = 1;
+   string content = 2;
+}
+
+message SmartModeClassifierArgs {
+   string tool_call_id = 1;
+   optional string parent_conversation_id = 2;
+   SmartModeRiskTarget target = 3;
+   repeated SmartModeClassifierConversationMessage conversation_context = 4;
+}
+
+message SmartModeClassifierSuccess {
+   SmartModeClassifierDecision decision = 1;
+   optional string block_reason = 2;
+}
+
+message SmartModeClassifierError {
+   string error = 1;
+}
+
+message SmartModeClassifierResult {
+   oneof result {
+      SmartModeClassifierSuccess success = 1;
+      SmartModeClassifierError error = 2;
+   }
+}
+
+// ===== Canvas diagnostics =====
+
+message CanvasDiagnosticsArgs {
+   string path = 1;
+   string tool_call_id = 2;
+}
+
+message CanvasDiagnosticsSuccess {
+   string path = 1;
+   repeated Diagnostic diagnostics = 2;
+}
+
+message CanvasDiagnosticsError {
+   string path = 1;
+   string error = 2;
+}
+
+message CanvasDiagnosticsResult {
+   oneof result {
+      CanvasDiagnosticsSuccess success = 1;
+      CanvasDiagnosticsError error = 2;
+   }
+}
+
+// ===== Conversation search =====
+
+enum ConversationSearchSource {
+   CONVERSATION_SEARCH_SOURCE_UNSPECIFIED = 0;
+   CONVERSATION_SEARCH_SOURCE_LOCAL = 1;
+   CONVERSATION_SEARCH_SOURCE_CLOUD_CACHE = 2;
+}
+
+message ConversationSearchHit {
+   string conversation_id = 1;
+   string title = 2;
+   ConversationSearchSource source = 3;
+   int64 updated_at_ms = 4;
+   optional string snippet = 5;
+}
+
+message ConversationSearchSuccess {
+   repeated ConversationSearchHit hits = 1;
+   bool truncated = 2;
+   bool partial = 3;
+   bool rebuilding = 4;
+}
+
+message ConversationSearchError {
+   string error = 1;
+}
+
+message ConversationSearchArgs {
+   string query = 1;
+   string tool_call_id = 2;
+   optional int32 limit = 3;
+}
+
+message ConversationSearchResult {
+   oneof result {
+      ConversationSearchSuccess success = 1;
+      ConversationSearchError error = 2;
+   }
+}
+
+// ===== Agent store conflicts =====
+
+message AgentStoreConflictCursor {
+   string journal_epoch = 1;
+   uint64 seq = 2;
+   string last_event_id = 3;
+}
+
+message AgentStoreConflictEvent {
+   uint32 v = 1;
+   string event_id = 2;
+   string journal_epoch = 3;
+   uint64 seq = 4;
+   uint64 ts_ms = 5;
+   string kind = 6;
+   optional string store_id = 7;
+   optional string original_rel_path = 8;
+   optional string conflict_rel_path = 9;
+   optional string original_abs_path = 10;
+   optional string conflict_abs_path = 11;
+   optional uint64 preserved_bytes = 12;
+}
+
+message AgentStoreConflictSuccess {
+   repeated AgentStoreConflictEvent events = 1;
+   AgentStoreConflictCursor next_cursor = 2;
+   bool gap = 3;
+}
+
+message AgentStoreConflictError {
+   string error = 1;
+}
+
+message AgentStoreConflictArgs {
+   optional AgentStoreConflictCursor cursor = 1;
+   optional bool advance = 2;
+}
+
+message AgentStoreConflictResult {
+   oneof result {
+      AgentStoreConflictSuccess success = 1;
+      AgentStoreConflictError error = 2;
+   }
+}
+
+// ===== Git diff (upstream aiserver.v1; declared here in agent.v1 — the exec channel is binary
+// protobuf, so field numbers, not type names, define wire compatibility) =====
+
+enum GetDiffRequest_OutputFormat {
+   OUTPUT_FORMAT_UNSPECIFIED = 0;
+   OUTPUT_FORMAT_NAME_STATUS = 1;
+   OUTPUT_FORMAT_NAME_STATUS_AND_NUMSTAT = 2;
+   OUTPUT_FORMAT_FILE_DIFFS = 3;
+   OUTPUT_FORMAT_DIFFS_WITH_BEFORE_AND_AFTER = 4;
+}
+
+enum GitDiff_DiffType {
+   DIFF_TYPE_UNSPECIFIED = 0;
+   DIFF_TYPE_DIFF_TO_HEAD = 1;
+   DIFF_TYPE_DIFF_FROM_BRANCH_TO_MAIN = 2;
+}
+
+message FileDiff_Chunk {
+   string content = 1;
+   repeated string lines = 2;
+   int32 old_start = 3;
+   int32 old_lines = 4;
+   int32 new_start = 5;
+   int32 new_lines = 6;
+}
+
+message FileDiff {
+   int32 added = 4;
+   int32 removed = 5;
+   string from = 1;
+   string to = 2;
+   repeated FileDiff_Chunk chunks = 3;
+   optional string before_file_contents = 6;
+   optional string after_file_contents = 7;
+   optional bool is_generated = 8;
+}
+
+message GitDiff {
+   repeated FileDiff diffs = 1;
+   GitDiff_DiffType diff_type = 2;
+}
+
+message GetDiffResponse_SubmoduleDiff {
+   string relative_path = 1;
+   GitDiff diff = 2;
+   bool errored = 3;
+}
+
+message GetDiffRequest {
+   string cwd = 1;
+   string ref = 2;
+   string base_ref = 3;
+   bool merge_base = 4;
+   repeated string target_paths = 5;
+   optional int32 unified_context_lines = 6;
+   int32 max_untracked_files = 7;
+   int32 submodule_recurse_depth = 9;
+   bool include_space_changes = 10;
+   bool committed_only = 11;
+   bool compute_patch_id = 12;
+   optional bool return_head_sha = 13;
+   optional int32 max_response_bytes = 14;
+   optional GetDiffRequest_OutputFormat output_format = 8;
+}
+
+message GetDiffResponse {
+   GitDiff diff = 1;
+   repeated GetDiffResponse_SubmoduleDiff submodule_diffs = 2;
+   optional string patch_id = 3;
+   optional string head_sha = 4;
+   optional bool has_uncommitted_changes = 5;
+}
+
+// ===== Pi tool calls (ToolCall 61-67) =====
+//
+// The streamed `ToolCall` wrappers for the Pi exec frames. Their `args`/`result`
+// payloads are field-identical to the `Pi*Exec*` messages above (verified against
+// the modern CLI's `pi_*_tool_pb.js`), and the exec channel is binary protobuf,
+// so field numbers — not type names — define wire compatibility. Reusing the
+// exec messages keeps one shape per Pi tool instead of two that must stay in sync.
+
+message PiReadToolCall {
+   PiReadExecArgs args = 1;
+   PiReadExecResult result = 2;
+}
+
+message PiBashToolCall {
+   PiBashExecArgs args = 1;
+   PiBashExecResult result = 2;
+}
+
+message PiEditToolCall {
+   PiEditExecArgs args = 1;
+   PiEditExecResult result = 2;
+}
+
+message PiWriteToolCall {
+   PiWriteExecArgs args = 1;
+   PiWriteExecResult result = 2;
+}
+
+message PiGrepToolCall {
+   PiGrepExecArgs args = 1;
+   PiGrepExecResult result = 2;
+}
+
+message PiFindToolCall {
+   PiFindExecArgs args = 1;
+   PiFindExecResult result = 2;
+}
+
+message PiLsToolCall {
+   PiLsExecArgs args = 1;
+   PiLsExecResult result = 2;
+}
+
+// ===== Conversation search / SCM tool calls (ToolCall 68-69) =====
+
+message SearchConversationsToolCall {
+   ConversationSearchArgs args = 1;
+   ConversationSearchResult result = 2;
+}
+
+message ConnectScmGithubRepository {
+   string owner = 1;
+   string repo = 2;
+}
+
+message ConnectScmGithub {
+   ConnectScmGithubRepository repository = 1;
+   optional string ghe_application = 2;
+}
+
+message ConnectScmArgs {
+   string tool_call_id = 1;
+   oneof target {
+      ConnectScmGithub github = 2;
+   }
+}
+
+message ConnectScmSuccess {
+}
+
+message ConnectScmError {
+   string error = 1;
+}
+
+message ConnectScmRejected {
+   string reason = 1;
+}
+
+message ConnectScmResult {
+   oneof result {
+      ConnectScmSuccess success = 1;
+      ConnectScmError error = 2;
+      ConnectScmRejected rejected = 3;
+   }
+}
+
+message ConnectScmToolCall {
+   ConnectScmArgs args = 1;
+   ConnectScmResult result = 2;
+}

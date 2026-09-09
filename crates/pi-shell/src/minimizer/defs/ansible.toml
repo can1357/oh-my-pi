@@ -1,0 +1,25 @@
+[filters.ansible]
+description = "ansible / ansible-playbook run"
+match_command = "^(ansible|ansible-playbook|ansible-galaxy)$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^PLAY RECAP \\*+\\s*$",
+	"^TASK \\[Gathering Facts\\]",
+	"^TASK \\[setup\\]",
+	"^ok: \\[",
+	"^skipping: \\[",
+	"^\\[WARNING\\]: Consider using the",
+]
+truncate_lines_at = 300
+max_lines = 80
+
+[[tests.ansible]]
+name = "keeps failed tasks"
+input = "ok: [host1]\nok: [host2]\nfatal: [host1]: FAILED! => changed=false\nTASK [apt] ********"
+expected = "fatal: [host1]: FAILED! => changed=false\nTASK [apt] ********\n"
+
+[[tests.ansible]]
+name = "all ok gets stripped but kept via tail"
+input = "ok: [host1]\nok: [host2]\nok: [host3]\n"
+expected = ""

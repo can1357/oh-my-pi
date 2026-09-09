@@ -1,0 +1,40 @@
+Just Another Query Tool
+
+Usage: jaq [OPTION]... [FILTER] [ARG]...
+
+Arguments:
+  [FILTER]  Filter to execute
+  [ARG]...  Positional arguments, by default used as input files
+
+Input options:
+  -n, --null-input          Use null as single input value
+  -R, --raw-input           Read lines of the input as sequence of strings
+  -s, --slurp               Read (slurp) all input values into one array
+
+Output options:
+  -c, --compact-output      Print JSON compactly, omitting whitespace
+  -r, --raw-output          Write strings without escaping them with quotes
+  -j, --join-output         Do not print a newline after each value
+  -i, --in-place            Overwrite input file with its output
+  -S, --sort-keys           Print objects sorted by their keys
+  -C, --color-output        Always color output
+  -M, --monochrome-output   Do not color output
+      --tab                 Use tabs for indentation rather than spaces
+      --indent <N>          Use N spaces for indentation [default: 2]
+
+Compilation options:
+  -f, --from-file           Read filter from a file given by filter argument
+  -L, --library-path <DIR>  Search for modules and data in given directory
+
+Variable options:
+      --arg       <A> <V>   Set variable `$A` to string `V`
+      --argjson   <A> <V>   Set variable `$A` to JSON value `V`
+      --slurpfile <A> <F>   Set variable `$A` to array containing the JSON values in file `F`
+      --rawfile   <A> <F>   Set variable `$A` to string containing the contents of file `F`
+      --args                Collect remaining positional arguments into `$ARGS.positional`
+
+Remaining options:
+      --run-tests <FILE>    Run tests from a file
+  -e, --exit-status         Use the last output value as exit status code
+  -V, --version             Print version
+  -h, --help                Print help

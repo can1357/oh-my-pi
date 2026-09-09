@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "codex-security-plugin",
+          "version": "0.1.14",
+          "rules": [
+            {
+              "id": "path-traversal.archive-extraction",
+              "shortDescription": { "text": "Unsafe archive extraction" }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "path-traversal.archive-extraction",
+          "level": "error",
+          "message": { "text": "Unsafe archive extraction can escape the output directory" },
+          "locations": [
+            {
+              "physicalLocation": {
+                "artifactLocation": { "uri": "src/extract.py" },
+                "region": { "startLine": 41, "endLine": 44 }
+              }
+            }
+          ],
+          "fingerprints": {
+            "codex-security/v1": "codex-security/v1:sha256:990a4a6a2ec18440dd47eac4d7256c0ee2c02db1b43104720cab3cbe9db706ca"
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,238 @@
+/**
+ * Core types for the capability-based config discovery system.
+ *
+ * This architecture inverts control: instead of callers knowing about paths like
+ * `.claude`, `.codex`, `.gemini`, they simply ask for `load("mcps")` and get back
+ * a unified array of MCP servers.
+ */
+
+/** Extension sub-discovery mode; `explicit-only` suppresses ambient sources. */
+export type ExtensionRootMode = "merge" | "explicit-only";
+
+/**
+ * Session-local extension-root inputs for sub-discovery, threaded as one value
+ * so no dimension is lost between the construction-time invocation scope and
+ * post-startup reloads. `explicit` are the SDK `additionalExtensionPaths` / CLI
+ * `--extension` roots (always active, user-level); `configured` is the live
+ * `extensions:` setting (ambient, only in `merge` mode); `configuredLevel` is
+ * its provenance as resolved by `Settings` (the authority — includes foreign
+ * project providers like `.claude/settings.json`, never re-derived from `.omp`
+ * on disk); `mode` gates the ambient/installed sources.
+ */
+export interface EffectiveExtensionRoots {
+	explicit: readonly string[];
+	mode: ExtensionRootMode;
+	configured: readonly string[];
+	configuredLevel: "user" | "project";
+}
+
+/**
+ * Context passed to every provider loader.
+ */
+export interface LoadContext {
+	/** Current working directory (project root) */
+	cwd: string;
+	/** User home directory */
+	home: string;
+	/** Git repository root (directory containing .git), or null if not in a repo */
+	repoRoot: string | null;
+	/**
+	 * Session-local extension roots for sub-discovery. When set, extension
+	 * discovery uses these lanes instead of the invocation-scoped snapshot or
+	 * the process defaults, so post-startup reloads stay byte-identical to the
+	 * construction-time scoped load. Left unset by {@link loadCapability}; SDK
+	 * sessions carry their value explicitly (or via the invocation scope).
+	 */
+	extensionRoots?: EffectiveExtensionRoots;
+	/** Provider IDs explicitly requested by caller in LoadOptions */
+	explicitProviders?: Set<string>;
+	/**
+	 * Scan foreign `~/` sources even when not opted in. Set for
+	 * `includeDisabled` (dashboard) loads so opted-out items are listed
+	 * and can be switched on.
+	 */
+	includeOptOutUserSources?: boolean;
+}
+
+/**
+ * Result from a provider's load function.
+ */
+export interface LoadResult<T> {
+	items: T[];
+	/** Warnings encountered during loading (parse errors, etc.) */
+	warnings?: string[];
+}
+
+/**
+ * A provider that can load items for a capability.
+ */
+export interface Provider<T> {
+	/** Unique provider ID (e.g., "claude", "omp", "mcp-json", "agents-md") */
+	id: string;
+
+	/** Human-readable name for UI display (e.g., "Claude Code", "OpenAI Codex") */
+	displayName: string;
+
+	/** Short description for settings UI (e.g., "Load config from ~/.claude and .claude/") */
+	description: string;
+
+	/**
+	 * Priority (higher = checked first, wins on conflicts).
+	 * Suggested ranges:
+	 *   100+ : Primary providers (omp, pi)
+	 *   50-99: Tool-specific providers (claude, codex, gemini)
+	 *   1-49 : Shared standards (mcp-json, agents-md)
+	 */
+	priority: number;
+
+	/**
+	 * Load items for this capability.
+	 * Returns items in provider's preferred order (usually project before user).
+	 */
+	load(ctx: LoadContext): Promise<LoadResult<T>>;
+}
+
+/**
+ * Options for loading a capability.
+ */
+export interface LoadOptions<T = unknown> {
+	/** Only use these providers (by ID). Default: all registered */
+	providers?: string[];
+	/** Exclude these providers (by ID). Default: none */
+	excludeProviders?: string[];
+	/** Custom cwd. Default: getProjectDir() */
+	cwd?: string;
+	/** Include items even if they fail validation. Default: false */
+	includeInvalid?: boolean;
+	/** Include items disabled via settings. Default: false */
+	includeDisabled?: boolean;
+	/** Explicit disabled extension IDs to apply instead of settings. */
+	disabledExtensions?: string[];
+	/**
+	 * Session-local extension roots for this load, forwarded to
+	 * {@link LoadContext.extensionRoots}. Post-startup reloads MUST pass their
+	 * live session value so explicit roots, discovery mode, and configured
+	 * extensions all survive outside the construction-time invocation scope.
+	 */
+	extensionRoots?: EffectiveExtensionRoots;
+	/**
+	 * Drop items before deduplication as if they never existed (e.g. scope
+	 * exclusions). A dropped item neither survives nor claims its dedupe key,
+	 * so it cannot shadow anything. Receives the item with its attached
+	 * `_source`.
+	 */
+	filter?(item: T & { _source: SourceMeta }): boolean;
+	/**
+	 * Exclude items from the results while letting them claim their dedupe key.
+	 * A suppressed higher-priority item still shadows same-key lower-priority
+	 * items (a disabled project server keeps the same-named user server off),
+	 * but never equivalence-shadows a differently-keyed survivor — so a
+	 * suppressed alias cannot starve an enabled equivalent connection.
+	 * Return `true` to suppress. Receives the item with its attached `_source`.
+	 */
+	suppress?(item: T & { _source: SourceMeta }): boolean;
+}
+
+/**
+ * Source metadata attached to every loaded item.
+ */
+export interface SourceMeta {
+	/** Provider ID that loaded this item */
+	provider: string;
+	/** Provider display name (for UI) */
+	providerName: string;
+	/** Absolute path to the source file */
+	path: string;
+	/** Whether this came from user-level, project-level, or native config */
+	level: "user" | "project" | "native";
+	/**
+	 * Registry or CLI source that supplied a plugin root, when the provider
+	 * tracks it (currently `claude-plugins`: `"claude"` for `~/.claude/plugins`,
+	 * `"omp"` for omp's own registry, `"plugin-dir"` for `--plugin-dir`). Lets
+	 * user-scope gating distinguish omp's own installs from the foreign Claude
+	 * tree — see `isSourceEnabled` in `extensibility/skills.ts` (#10743).
+	 */
+	origin?: string;
+}
+
+/**
+ * Merged result from loading a capability across all providers.
+ */
+export interface CapabilityResult<T> {
+	/** Deduplicated items in priority order */
+	items: Array<T & { _source: SourceMeta }>;
+	/** All items including shadowed duplicates (for diagnostics) */
+	all: Array<T & { _source: SourceMeta; _shadowed?: boolean }>;
+	/** Warnings from all providers */
+	warnings: string[];
+	/** Which providers contributed items (IDs) */
+	providers: string[];
+}
+
+/**
+ * Definition of a capability.
+ */
+export interface Capability<T> {
+	/** Capability ID (e.g., "mcps", "skills", "context-files") */
+	id: string;
+
+	/** Human-readable name for UI display (e.g., "MCP Servers", "Skills") */
+	displayName: string;
+
+	/** Short description for settings/status UI */
+	description: string;
+
+	/**
+	 * Extract a unique key from an item for deduplication.
+	 * Items with the same key: first one wins (highest priority provider).
+	 * Return undefined to never deduplicate (all items kept).
+	 */
+	key(item: T): string | undefined;
+
+	/** Treat items with different keys as aliases; the first equivalent item wins. */
+	equivalent?(left: T, right: T): boolean;
+
+	/**
+	 * Optional validation. Return error message if invalid, undefined if valid.
+	 */
+	validate?(item: T): string | undefined;
+
+	/**
+	 * Optional disabledExtensions ID for this item.
+	 * When present, loadCapability() can hide items disabled via settings.
+	 */
+	toExtensionId?(item: T): string | undefined;
+
+	/** Registered providers, sorted by priority (highest first) */
+	providers: Provider<T>[];
+}
+
+/**
+ * Metadata about a capability (for introspection/UI).
+ */
+export interface CapabilityInfo {
+	id: string;
+	displayName: string;
+	description: string;
+	providers: Array<{
+		id: string;
+		displayName: string;
+		description: string;
+		priority: number;
+		enabled: boolean;
+	}>;
+}
+
+/**
+ * Metadata about a provider (for introspection/UI).
+ */
+export interface ProviderInfo {
+	id: string;
+	displayName: string;
+	description: string;
+	priority: number;
+	/** Which capabilities this provider is registered for */
+	capabilities: string[];
+	/** Whether this provider is currently enabled */
+	enabled: boolean;
+}

@@ -1,0 +1,95 @@
+# rustc: stateless per-line keep for direct `rustc` invocations (NOT the
+# cargo-claimed path — cargo/clippy run through filters/cargo.rs). rustc is not
+# Rust-claimed in mod.rs, so a TOML def is the correct home.
+#
+# Keep diagnostics that carry failure signal: error[E…]/error: headers, warning
+# headers, the `-->` source-pointer lines that name file:line:col, the trailing
+# "aborting due to" / "For more information" summary, "could not compile"
+# trailers, and — critically — ICE/panic lines ("thread '…' panicked",
+# "internal compiler error", "panicked at", "rustc <version> running on …").
+# The intervening snippet/caret/label lines (`  |`, ` 3 | …`, `  = note:`) are
+# dropped: they are recoverable context, not signal, and the kept `-->` pointer
+# already localizes the diagnostic.
+# Query/help output is not a diagnostic stream. Preserve it when no diagnostic
+# line matches, rather than letting the engine turn the meaningful response into
+# a generic success sentinel.
+#
+# DELIBERATELY no on_empty: that stage is not exit-gated, so a failed compile
+# whose error text happened to miss the keep-set would otherwise collapse to a
+# fake "rustc: ok". The engine's ensure_success_visible prints "OK" only on
+# exit 0, which is the correct, exit-gated success sentinel.
+
+[filters.rustc]
+description = "Compact rustc output — keep diagnostics, ICE/panic, and failure trailers"
+match_command = "^rustc$"
+strip_ansi = true
+preserve_if_empty = true
+keep_lines_matching = [
+	"^error",
+	"^warning",
+	"^\\s*-->",
+	"aborting due to",
+	"For more information",
+	"could not compile",
+	"^rustc \\d",
+	"^thread '",
+	"internal compiler error",
+	"panicked at",
+]
+truncate_lines_at = 300
+max_lines = 80
+
+[[tests.rustc]]
+name = "borrow error keeps header and source pointer"
+input = """
+error[E0382]: borrow of moved value: `s`
+ --> src/main.rs:4:20
+  |
+3 |     let s = String::from("hi");
+  |         - move occurs because `s` has type `String`, which does not implement the `Copy` trait
+4 |     let _t = s;
+  |              - value moved here
+5 |     println!("{s}");
+  |               ^^^ value borrowed here after move
+
+error: aborting due to 1 previous error
+
+For more information about this error, try `rustc --explain E0382`.
+"""
+expected = "error[E0382]: borrow of moved value: `s`\n --> src/main.rs:4:20\nerror: aborting due to 1 previous error\nFor more information about this error, try `rustc --explain E0382`.\n"
+
+[[tests.rustc]]
+name = "internal compiler error / panic is never collapsed to ok"
+input = """
+warning: this is unrelated
+
+thread 'rustc' panicked at compiler/rustc_middle/src/ty/mod.rs:1234:13:
+internal compiler error: unexpected type variable
+stack backtrace:
+   0: std::panicking::begin_panic
+   1: rustc_middle::something
+rustc 1.79.0 (129f3b996 2024-06-10) running on x86_64-unknown-linux-gnu
+note: compiler flags: --crate-type bin
+error: the compiler unexpectedly panicked. this is a bug.
+"""
+expected = "warning: this is unrelated\nthread 'rustc' panicked at compiler/rustc_middle/src/ty/mod.rs:1234:13:\ninternal compiler error: unexpected type variable\nrustc 1.79.0 (129f3b996 2024-06-10) running on x86_64-unknown-linux-gnu\nerror: the compiler unexpectedly panicked. this is a bug.\n"
+
+[[tests.rustc]]
+name = "warning-only run keeps the warning and pointer"
+input = """
+warning: unused variable: `x`
+ --> src/lib.rs:2:9
+  |
+2 |     let x = 1;
+  |         ^ help: if this is intentional, prefix it with an underscore: `_x`
+  |
+  = note: `#[warn(unused_variables)]` on by default
+
+warning: 1 warning emitted
+"""
+expected = "warning: unused variable: `x`\n --> src/lib.rs:2:9\nwarning: 1 warning emitted\n"
+
+[[tests.rustc]]
+name = "query output is preserved instead of collapsed to ok"
+input = "/opt/rust/lib/rustlib\n"
+expected = "/opt/rust/lib/rustlib\n"

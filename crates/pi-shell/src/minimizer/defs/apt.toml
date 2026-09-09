@@ -1,0 +1,52 @@
+[filters.apt]
+description = "Compact apt/apt-get/yum/dnf/apk package manager output — strip progress lines, keep errors and final result"
+match_command = "^(apt|apt-get|yum|dnf|apk)$"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s*(Get:|Hit:|Ign:)",
+  "^\\s*(Fetched|Processing|Selecting|Preparing|Unpacking|Setting up|Reading|Building)\\s",
+  "^\\s*\\[\\d+%\\]",
+  "^\\(Reading database",
+  "^Loaded plugins:",
+  "^Loading mirror",
+  "^\\s*-->",
+  "^\\s*Package\\s",
+  "^\\s*Marking\\s",
+  "^fetch\\s",
+  "^\\(\\d+/\\d+\\)",
+  "^OK:",
+  "^\\s*\\d+/\\d+:",
+]
+max_lines = 60
+on_empty = "ok"
+
+[[tests.apt]]
+name = "successful apt-get install strips noise and keeps summary"
+input = """
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+The following NEW packages will be installed:
+  curl
+0 upgraded, 1 newly installed, 0 to remove and 0 not upgraded.
+Get:1 http://archive.ubuntu.com/ubuntu focal/main amd64 curl amd64 7.68.0-1ubuntu2 [161 kB]
+Fetched 161 kB in 1s (189 kB/s)
+Selecting previously unselected package curl.
+(Reading database ... 112300 files and directories currently installed.)
+Preparing to unpack .../curl_7.68.0-1ubuntu2_amd64.deb ...
+Unpacking curl (7.68.0-1ubuntu2) ...
+Setting up curl (7.68.0-1ubuntu2) ...
+Processing triggers for man-db (2.9.1-1) ...
+"""
+expected = "The following NEW packages will be installed:\n  curl\n0 upgraded, 1 newly installed, 0 to remove and 0 not upgraded.\n"
+
+[[tests.apt]]
+name = "failed install passes through error block"
+input = """
+Reading package lists... Done
+Building dependency tree... Done
+Reading state information... Done
+E: Unable to locate package nonexistent-pkg
+"""
+expected = "E: Unable to locate package nonexistent-pkg\n"

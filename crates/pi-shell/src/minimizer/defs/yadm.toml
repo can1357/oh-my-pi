@@ -1,0 +1,27 @@
+# yadm (dotfile manager, wraps git). Strip ANSI and blank lines.
+
+[filters.yadm]
+description = "Compact yadm output"
+match_command = "^yadm$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^\\s*\\(use \"",
+]
+truncate_lines_at = 200
+max_lines = 80
+on_empty = "yadm: clean"
+
+[[filters.yadm.match_output]]
+pattern = "nothing to commit, working tree clean"
+message = "yadm: clean"
+
+[[tests.yadm]]
+name = "clean tree short-circuits"
+input = "On branch main\nnothing to commit, working tree clean\n"
+expected = "yadm: clean"
+
+[[tests.yadm]]
+name = "strips hint lines"
+input = "On branch main\n  (use \"yadm add <file>\" to track)\nmodified: file.txt\n"
+expected = "On branch main\nmodified: file.txt\n"

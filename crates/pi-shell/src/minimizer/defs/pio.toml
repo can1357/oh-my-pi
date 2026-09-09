@@ -1,0 +1,46 @@
+# PlatformIO / pio run build output.
+
+[filters.pio]
+description = "Compact PlatformIO run output"
+match_command = "^(pio|platformio)$"
+match_subcommand = "^run$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^Processing ",
+	"^-+$",
+	"^=+$",
+	"^Verbose mode ",
+	"^PLATFORM: ",
+	"^HARDWARE: ",
+	"^DEBUG: ",
+	"^PACKAGES: ",
+	"^LDF: ",
+	"^LDF Modes: ",
+	"^Library Manager: ",
+	"^LibraryManager: ",
+	"^Dependency Graph$",
+	"^\\|--",
+	"^Compiling ",
+	"^Archiving ",
+	"^Linking ",
+	"^Indexing ",
+	"^Building in ",
+	"^Checking size ",
+	"^Retrieving maximum ",
+	"^Advanced Memory Usage ",
+	"^Memory Usage -> ",
+]
+truncate_lines_at = 300
+max_lines = 80
+on_empty = "pio: ok"
+
+[[tests.pio]]
+name = "keeps compile error"
+input = "Processing esp32dev (platform: espressif32)\nCompiling .pio/build/main.o\nsrc/main.cpp:5:1: error: 'foo' was not declared\n*** [.pio/build/main.o] Error 1"
+expected = "src/main.cpp:5:1: error: 'foo' was not declared\n*** [.pio/build/main.o] Error 1\n"
+
+[[tests.pio]]
+name = "success line kept"
+input = "Processing esp32dev\nCompiling x.o\nLinking foo.elf\n========= [SUCCESS] Took 3.21 seconds ========="
+expected = "========= [SUCCESS] Took 3.21 seconds =========\n"

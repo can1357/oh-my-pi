@@ -1,0 +1,109 @@
+{
+  "search": {
+    "ecosia": [
+      {
+        "title": "Alpha & Omega",
+        "href": "https://example.com/a",
+        "snippet": "First result."
+      }
+    ],
+    "google": [
+      {
+        "title": "Google Result",
+        "href": "https://example.com/g",
+        "snippet": "Google snippet"
+      }
+    ],
+    "mojeek": [
+      {
+        "title": "Mojeek",
+        "href": "https://example.com/m",
+        "snippet": "Independent search"
+      }
+    ],
+    "startpage": [
+      {
+        "title": "Startpage",
+        "href": "https://example.com/s",
+        "snippet": "Private search"
+      }
+    ],
+    "hidden": [
+      [
+        "sc",
+        "token&1"
+      ],
+      [
+        "lang",
+        "en"
+      ]
+    ]
+  },
+  "nitter": {
+    "primary": [
+      "Hello world & friends",
+      "Ada Lovelace",
+      "@ada",
+      "1h",
+      "1 reply  2 likes"
+    ],
+    "replies": [
+      {
+        "text": "Hello world & friends",
+        "username": "@ada"
+      },
+      {
+        "text": "A reply",
+        "username": "@grace"
+      }
+    ]
+  },
+  "atom": {
+    "title": "Research & News",
+    "entries": [
+      {
+        "title": "First <Paper>",
+        "authors": [
+          "Ada",
+          "Grace"
+        ],
+        "categories": [
+          "cs.AI"
+        ],
+        "pdf": "https://example.com/paper.pdf",
+        "summary": "Line one\nline two."
+      },
+      {
+        "title": "Second",
+        "authors": [],
+        "categories": [],
+        "pdf": null,
+        "summary": "Details"
+      }
+    ]
+  },
+  "wikipedia": [
+    {
+      "heading": "History",
+      "tag": "H2",
+      "paragraphs": [
+        "The first paragraph contains enough useful text for extraction.",
+        "Short."
+      ]
+    },
+    {
+      "heading": "Details & impact",
+      "tag": "H3",
+      "paragraphs": [
+        "Another paragraph with more than twenty characters."
+      ]
+    },
+    {
+      "heading": "References",
+      "tag": "H2",
+      "paragraphs": [
+        "This paragraph should be ignored by the scraper pipeline."
+      ]
+    }
+  ]
+}

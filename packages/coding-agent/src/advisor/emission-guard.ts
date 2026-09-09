@@ -1,0 +1,182 @@
+/**
+ * Per-session policy gate for advisor `advise()` calls.
+ *
+ * The advisor system prompt tells the watcher model a per-update advice budget
+ * (default 4 non-blockers, `blocker` exempt):
+ *
+ * > max N non-blockers/update (`blocker` exempt)
+ * > NEVER repeat advice you already gave, and NEVER send the same advice twice
+ *
+ * Real advisor models violate this. Issue #3520 captured a session where
+ * `__advisor.jsonl` recorded 309 `advise` calls covering 92 unique notes —
+ * 114× `Stop.`, 52× `No issue; continue.`, 41× `Done.` — flooding the primary
+ * transcript with `<advisory severity="blocker">Stop.</advisory>` after the
+ * task was already complete. The fix is to make the rules load-bearing in code
+ * instead of prose: classify duplicates, content-free self-talk, and over-budget
+ * calls at the emission boundary so the primary stays clean even when the advisor
+ * misbehaves. `AdviseTool` reports the resulting decision; in particular, an
+ * actionable over-budget note is told to retry instead of being falsely recorded.
+ */
+
+import type { AdvisorSeverity } from "./advise-tool";
+
+/**
+ * Case-insensitive, punctuation-folded normalization. Collapses every run of
+ * non-letter / non-digit characters into a single space and trims, so
+ * `"Stop."`, `"*Stop*"`, and `"  stop  "` all key to `stop`, while
+ * `"No issue; continue."` keys to `no issue continue`.
+ *
+ * Exported for tests.
+ */
+export function normalizeAdvisorNote(note: string): string {
+	return note
+		.toLowerCase()
+		.normalize("NFKC")
+		.replace(/[^\p{L}\p{N}]+/gu, " ")
+		.trim();
+}
+
+/**
+ * Normalized phrases the advisor occasionally emits that carry no concrete
+ * actionable content. Each must be the output of {@link normalizeAdvisorNote}
+ * so a single membership check covers every punctuation/casing variant
+ * (`"Stop."`, `"stop"`, `"STOP!"`).
+ *
+ * The list is conservative — only short, content-free filler the reporter
+ * observed driving primary-transcript pollution. A genuine `blocker` like
+ * `"Stop: 'await' missing on writeStream.end() will lose buffered writes."`
+ * does not match.
+ */
+const SUPPRESSED_NORMALIZED_PHRASES: Record<string, true> = {
+	// Self-stop noise — telling the agent to "stop" without a reason is useless.
+	stop: true,
+	"stop here": true,
+	"stop now": true,
+	halt: true,
+	abort: true,
+	// Completion self-talk — the agent already finished the task.
+	done: true,
+	"task done": true,
+	"task complete": true,
+	complete: true,
+	finished: true,
+	ok: true,
+	okay: true,
+	"ok done": true,
+	// "Nothing to flag" — silence is the correct expression of "no concerns".
+	"no issue": true,
+	"no issues": true,
+	"no issue continue": true,
+	"no concerns": true,
+	"no concern": true,
+	"nothing to add": true,
+	"nothing to flag": true,
+	"nothing to report": true,
+	"no notes": true,
+	"no further input": true,
+	"no further input needed": true,
+	"no further input required": true,
+	"no further watcher input": true,
+	"no further watcher input needed": true,
+	"no further advice": true,
+	"no further advice needed": true,
+	// Endorsements — equivalent to silence.
+	lgtm: true,
+	"looks good": true,
+	"all good": true,
+	"agent is on track": true,
+	"agent on track": true,
+	"on track": true,
+	continue: true,
+	"carry on": true,
+};
+
+/**
+ * Bounds the dedupe history. Sessions with very long advisor activity could
+ * otherwise grow the set without bound. The reporter's pathological session
+ * had 92 unique notes; 4096 leaves headroom while staying tiny (≤ ~256 KB of
+ * normalized strings even at long max).
+ */
+const DEFAULT_HISTORY_CAPACITY = 4096;
+
+/** Maximum non-blocker advise notes allowed per update cycle across all configurations. */
+export const ADVISOR_MAX_BUDGET_PER_UPDATE = 32;
+
+/** Default non-blocker advise notes allowed per update cycle when unspecified. */
+export const ADVISOR_DEFAULT_BUDGET_PER_UPDATE = 4;
+/** Why an advisor note was accepted or rejected by the emission policy. */
+export type AdvisorEmissionDecision = "accepted" | "duplicate" | "rate_limited" | "suppressed_noise";
+/**
+ * Decides whether an advisor `advise()` call should reach the primary agent.
+ *
+ * Enforces — in this order — the noise filter, session-scoped exact-text
+ * dedupe (FIFO-evicted at {@link DEFAULT_HISTORY_CAPACITY}), and a per-update
+ * budget of accepted notes per advisor model prompt. Suppressed calls
+ * never consume the per-update budget — a noise call doesn't burn the slot
+ * for a real concern that follows in the same update. A `blocker` is exempt
+ * from the budget: it must always interrupt, so a lower-severity note emitted
+ * earlier in the same update can never rate-limit it out.
+ *
+ * Reset on advisor reset (compaction, session switch, `/new`) via
+ * {@link reset}. Per-update gate is cleared at the start of every advisor
+ * `agent.prompt()` cycle via {@link beginUpdate}.
+ */
+export class AdvisorEmissionGuard {
+	#seen = new Set<string>();
+	/** Insertion-order log to drive FIFO eviction without an extra Map. */
+	#seenOrder: string[] = [];
+	#acceptedThisUpdate = 0;
+	readonly #budgetPerUpdate: number;
+	readonly #capacity: number;
+
+	constructor(opts: { capacity?: number; budgetPerUpdate?: number } = {}) {
+		this.#capacity = opts.capacity ?? DEFAULT_HISTORY_CAPACITY;
+		const budget = opts.budgetPerUpdate;
+		this.#budgetPerUpdate =
+			typeof budget === "number" && Number.isFinite(budget)
+				? Math.min(ADVISOR_MAX_BUDGET_PER_UPDATE, Math.max(1, Math.trunc(budget)))
+				: ADVISOR_DEFAULT_BUDGET_PER_UPDATE;
+	}
+
+	/**
+	 * Drop all dedupe and per-update state. Called from
+	 * `AgentSession#resetAdvisorSessionState()` whenever the advisor runtime is
+	 * reset — same boundary as `yieldQueue.clear("advisor")`, so a re-primed
+	 * advisor can re-raise old issues (the primary transcript was rewritten).
+	 */
+	reset(): void {
+		this.#seen.clear();
+		this.#seenOrder.length = 0;
+		this.#acceptedThisUpdate = 0;
+	}
+
+	/**
+	 * Clear the per-update rate-limit gate. Called by `AdvisorRuntime` right
+	 * before each `agent.prompt(batch)` invocation so the next advisor model
+	 * cycle starts with a fresh budget.
+	 */
+	beginUpdate(): void {
+		this.#acceptedThisUpdate = 0;
+	}
+
+	/**
+	 * Classify and reserve a proposed note. Accepted notes consume the update
+	 * budget and enter the dedupe history; rejected notes leave both unchanged.
+	 * A `blocker` still runs the noise and dedupe filters but bypasses the
+	 * per-update budget so it always reaches the primary.
+	 */
+	accept(note: string, severity?: AdvisorSeverity): AdvisorEmissionDecision {
+		const key = normalizeAdvisorNote(note);
+		if (!key || SUPPRESSED_NORMALIZED_PHRASES[key]) return "suppressed_noise";
+		if (this.#seen.has(key)) return "duplicate";
+		if (severity !== "blocker" && this.#acceptedThisUpdate >= this.#budgetPerUpdate) return "rate_limited";
+		if (severity !== "blocker") this.#acceptedThisUpdate++;
+		this.#seen.add(key);
+		this.#seenOrder.push(key);
+		if (this.#seenOrder.length > this.#capacity) {
+			const stale = this.#seenOrder.shift();
+			if (stale !== undefined) this.#seen.delete(stale);
+		}
+		return "accepted";
+	}
+}

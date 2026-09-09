@@ -1,0 +1,48 @@
+# Swift Package Manager build/test output.
+
+[filters.swift-build]
+description = "Compact swift build/test output"
+match_command = "^swift$"
+match_subcommand = "^(build|test)$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^Fetching ",
+	"^Cloning ",
+	"^Resolving ",
+	"^Computing version",
+	"^Resolved source packages",
+	"^Compiling \\S",
+	"^Building for ",
+	"^Linking ",
+	"^\\[\\d+/\\d+\\] Compiling ",
+	"^\\[\\d+/\\d+\\] Emitting ",
+	"^\\[\\d+/\\d+\\] Write ",
+	"^\\[\\d+/\\d+\\] Linking ",
+]
+match_output = [
+	{ pattern = "Build complete!", message = "ok (build complete)", unless = "warning:|error:|Test Suite|failed" },
+]
+truncate_lines_at = 300
+max_lines = 80
+on_empty = "swift: ok"
+
+[[tests.swift-build]]
+name = "keeps build failure"
+input = "Fetching https://github.com/foo/bar\nCompiling Foo Bar.swift\nFoo.swift:3:5: error: cannot find 'baz' in scope\nBuild failed"
+expected = "Foo.swift:3:5: error: cannot find 'baz' in scope\nBuild failed\n"
+
+[[tests.swift-build]]
+name = "noise collapses to sentinel"
+input = "Fetching https://github.com/foo/bar\nResolving foo\nCompiling Foo Bar.swift"
+expected = "swift: ok"
+
+[[tests.swift-build]]
+name = "warnings not swallowed when Build complete present"
+input = "CompileSwift normal x86_64 MyFile.swift\n/path/to/MyFile.swift:42:10: warning: unused variable 'x'\nBuild complete! (with warnings)\n"
+expected = "CompileSwift normal x86_64 MyFile.swift\n/path/to/MyFile.swift:42:10: warning: unused variable 'x'\nBuild complete! (with warnings)\n"
+
+[[tests.swift-build]]
+name = "passing swift test not short-circuited"
+input = "Building for debugging...\n[1/1] Linking MyAppPackageTests\nBuild complete! (1.23s)\nTest Suite 'All tests' started at 2026-06-10 12:00:00\nTest Suite 'All tests' passed at 2026-06-10 12:00:01\n"
+expected = "Build complete! (1.23s)\nTest Suite 'All tests' started at 2026-06-10 12:00:00\nTest Suite 'All tests' passed at 2026-06-10 12:00:01\n"

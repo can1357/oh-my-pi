@@ -1,0 +1,28 @@
+package appengine.base;
+
+message StringProto {
+  required string value = 1;
+}
+
+message Integer32Proto {
+  required int32 value = 1;
+}
+
+message Integer64Proto {
+  required int64 value = 1;
+}
+
+message BoolProto {
+  required bool value = 1;
+}
+
+message DoubleProto {
+  required double value = 1;
+}
+
+message BytesProto {
+  required bytes value = 1;
+}
+
+message VoidProto {
+}

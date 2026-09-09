@@ -1,0 +1,70 @@
+# Ported from https://github.com/rtk-ai/rtk/blob/master/src/filters/gcc.toml
+# match_command adapted for the local (program, subcommand) dispatch model.
+
+[filters.gcc]
+description = "Compact gcc/g++ compiler output — strip notes, keep errors and warnings"
+match_command = "^(gcc|g\\+\\+|clang|clang\\+\\+)$"
+strip_ansi = true
+strip_lines_matching = [
+  "^\\s*$",
+  "^\\s+\\|\\s*$",
+  "^In file included from",
+  "^\\s+from\\s",
+]
+max_lines = 50
+on_empty = "gcc: ok"
+
+[[tests.gcc]]
+name = "strips include chain, keeps errors and warnings"
+input = """
+In file included from /usr/include/stdio.h:42:
+                 from main.c:1:
+main.c:10:5: error: use of undeclared identifier 'foo'
+    foo();
+    ^
+main.c:15:12: warning: unused variable 'x' [-Wunused-variable]
+    int x = 42;
+        ^
+2 warnings generated.
+1 error generated.
+"""
+expected = "main.c:10:5: error: use of undeclared identifier 'foo'\n    foo();\n    ^\nmain.c:15:12: warning: unused variable 'x' [-Wunused-variable]\n    int x = 42;\n        ^\n2 warnings generated.\n1 error generated.\n"
+
+[[tests.gcc]]
+name = "clean compilation"
+input = """
+"""
+expected = "gcc: ok"
+
+[[tests.gcc]]
+name = "linker error kept"
+input = """
+/usr/bin/ld: /tmp/main.o: undefined reference to 'missing_func'
+collect2: error: ld returned 1 exit status
+"""
+expected = "/usr/bin/ld: /tmp/main.o: undefined reference to 'missing_func'\ncollect2: error: ld returned 1 exit status\n"
+
+[[tests.gcc]]
+name = "empty input returns on_empty message"
+input = ""
+expected = "gcc: ok"
+
+[[tests.gcc]]
+name = "clang variant errors"
+input = """
+foo.c:3:10: fatal error: 'missing.h' file not found
+#include "missing.h"
+         ^~~~~~~~~~~
+1 error generated.
+"""
+expected = "foo.c:3:10: fatal error: 'missing.h' file not found\n#include \"missing.h\"\n         ^~~~~~~~~~~\n1 error generated.\n"
+
+[[tests.gcc]]
+name = "clang++ variant errors"
+input = """
+foo.cpp:8:5: error: unknown type name 'Widget'
+    Widget w;
+    ^
+1 error generated.
+"""
+expected = "foo.cpp:8:5: error: unknown type name 'Widget'\n    Widget w;\n    ^\n1 error generated.\n"

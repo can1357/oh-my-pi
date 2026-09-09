@@ -1,0 +1,5 @@
+# Hermetic clang-cl + lld-link + xwin (MSVC CRT/SDK) cross toolchain for
+# x86_64-pc-windows-msvc, replacing cargo-xwin. The repository rules live in
+# llvm.bzl / sysroot.bzl / cc.bzl (instantiated from MODULE.bazel); the
+# toolchain() registrations live in //bazel/toolchains. See NOTES.md for the
+# knobs and what still needs validation on can.internal.

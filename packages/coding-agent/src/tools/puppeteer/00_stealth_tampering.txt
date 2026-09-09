@@ -1,0 +1,44 @@
+// Register native-looking source for common fingerprinted functions without
+// adding own toString properties.
+const patchedFns = [
+  [window.alert, "alert"],
+  [window.prompt, "prompt"],
+  [window.confirm, "confirm"],
+  [window.fetch, "fetch"],
+  [window.XMLHttpRequest, "XMLHttpRequest"],
+  [window.WebSocket, "WebSocket"],
+  [window.localStorage?.getItem, "getItem"],
+  [window.localStorage?.setItem, "setItem"],
+  [window.navigator.geolocation?.getCurrentPosition, "getCurrentPosition"],
+  [window.navigator.geolocation?.watchPosition, "watchPosition"],
+  [window.CanvasRenderingContext2D?.prototype.getImageData, "getImageData"],
+  [window.HTMLCanvasElement?.prototype.toDataURL, "toDataURL"],
+  [window.HTMLCanvasElement?.prototype.toBlob, "toBlob"],
+];
+
+for (const [fn, name] of patchedFns) {
+  patchToString(fn, name);
+}
+
+// Patch Object.getOwnPropertyDescriptor to return native-looking accessor
+// source through the shared Function.prototype.toString registry.
+const patchedGetOwnPropertyDescriptor = function getOwnPropertyDescriptor(obj, prop) {
+  const descriptor = Reflect_apply(Object_getOwnPropertyDescriptor, this, [obj, prop]);
+  if (!descriptor) return descriptor;
+
+  if (descriptor.get && typeof descriptor.get === "function") {
+    patchToString(descriptor.get, "get " + String(prop));
+  }
+  if (descriptor.set && typeof descriptor.set === "function") {
+    patchToString(descriptor.set, "set " + String(prop));
+  }
+
+  return descriptor;
+};
+patchToString(patchedGetOwnPropertyDescriptor, "getOwnPropertyDescriptor");
+Object_defineProperty(Object, "getOwnPropertyDescriptor", {
+  value: patchedGetOwnPropertyDescriptor,
+  writable: true,
+  configurable: true,
+  enumerable: false,
+});

@@ -1,0 +1,26 @@
+[filters.pre_commit]
+description = "pre-commit run output"
+match_command = "^pre-commit$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^\\[INFO\\] Installing environment for",
+	"^\\[INFO\\] Initializing environment for",
+	"^\\[INFO\\] Once installed this environment will be reused",
+	"^\\[INFO\\] This may take a few minutes",
+	"\\.\\.\\.\\.\\.*Passed$",
+	"\\.\\.\\.\\.\\.*Skipped$",
+]
+truncate_lines_at = 250
+max_lines = 60
+on_empty = "pre-commit: ok"
+
+[[tests.pre_commit]]
+name = "strip passed hooks keep failures"
+input = "check yaml...............Passed\ntrim whitespace..........Passed\nruff check...............Failed\n- hook id: ruff\n- exit code: 1\n"
+expected = "ruff check...............Failed\n- hook id: ruff\n- exit code: 1\n"
+
+[[tests.pre_commit]]
+name = "all passed"
+input = "check yaml...............Passed\ntrim whitespace..........Passed\n"
+expected = "pre-commit: ok"

@@ -1,0 +1,21 @@
+classDiagram
+  class BankAccount {
+    +String owner
+    -int balance
+    +deposit(int amount) void
+    +withdraw(int amount) bool
+    -validate() bool
+  }
+---
++-----------------+    
+| BankAccount     |    
++-----------------+    
+| +owner: String  |    
+| -balance: int   |    
++-----------------+    
+| +deposit: void  |    
+| +withdraw: bool |    
+| -validate: bool |    
++-----------------+    
+                       
+                       

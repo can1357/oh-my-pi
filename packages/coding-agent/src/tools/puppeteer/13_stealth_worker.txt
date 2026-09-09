@@ -1,0 +1,235 @@
+const patchWorkerConstructor = (name, OriginalWorker) => {
+	if (typeof OriginalWorker !== "function") return;
+
+	const windowDescriptor = Object_getOwnPropertyDescriptor(window, name);
+	if (windowDescriptor && windowDescriptor.configurable === false) return;
+
+	const NativeURL = window.URL;
+	const URL_createObjectURL = NativeURL && NativeURL.createObjectURL;
+	const URL_revokeObjectURL = NativeURL && NativeURL.revokeObjectURL;
+	if (
+		typeof NativeURL !== "function" ||
+		typeof URL_createObjectURL !== "function" ||
+		typeof URL_revokeObjectURL !== "function"
+	) {
+		return;
+	}
+
+	const sharedWorkerUrls = name === "SharedWorker" ? new Map() : undefined;
+
+	const revokeUrl = (url) => {
+		try {
+			Reflect_apply(URL_revokeObjectURL, NativeURL, [url]);
+		} catch {}
+	};
+
+	const scheduleWorkerUrlRevoke = (worker, url) => {
+		let revoked = false;
+		const revokeOnce = () => {
+			if (revoked) return;
+			revoked = true;
+			revokeUrl(url);
+		};
+		try {
+			if (typeof worker.addEventListener === "function") {
+				Reflect_apply(worker.addEventListener, worker, ["error", revokeOnce, { once: true }]);
+			}
+		} catch {}
+		Window_setTimeout(revokeOnce, 1000);
+	};
+
+	if (sharedWorkerUrls) {
+		try {
+			window.addEventListener("pagehide", (event) => {
+				if (event && event.persisted) return;
+				for (const url of sharedWorkerUrls.values()) {
+					revokeUrl(url);
+				}
+				sharedWorkerUrls.clear();
+			});
+		} catch {}
+	}
+
+	const canWrapArguments = (args) => {
+		if (!args || args.length !== 1) {
+			return name === "SharedWorker" && args && args.length === 2 && typeof args[1] === "string";
+		}
+		return true;
+	};
+
+	const resolveWorkerUrl = (scriptURL) => {
+		const baseUrl = document.baseURI || window.location.href;
+		const scriptUrlString =
+			typeof scriptURL === "string"
+				? scriptURL
+				: scriptURL instanceof NativeURL
+					? scriptURL.href
+					: undefined;
+		if (scriptUrlString === undefined) return undefined;
+		let absoluteUrl;
+		try {
+			absoluteUrl = new NativeURL(scriptUrlString, baseUrl);
+		} catch {
+			return undefined;
+		}
+		if (absoluteUrl.origin !== window.location.origin) return undefined;
+		if (absoluteUrl.protocol !== "http:" && absoluteUrl.protocol !== "https:") return undefined;
+		if (absoluteUrl.username || absoluteUrl.password) return undefined;
+		return absoluteUrl.href;
+	};
+
+	const buildWorkerPrelude = () => {
+		const values = [];
+		const addNavigatorString = (prop) => {
+			try {
+				const value = navigator[prop];
+				if (typeof value === "string") values.push([prop, value]);
+			} catch {}
+		};
+		addNavigatorString("userAgent");
+		addNavigatorString("platform");
+		if (!values.length) return "";
+
+		return `(() => {
+	try {
+		const values = ${JSON.stringify(values)};
+		const nav = self.navigator;
+		if (!nav) return;
+		const defineProperty = Object.defineProperty;
+		const getOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+		const getPrototypeOf = Object.getPrototypeOf;
+		const Reflect_apply = Reflect.apply;
+		const nativeFunctionToString = Function.prototype.toString;
+		const nativeSources = new WeakMap();
+		const WeakMap_get = WeakMap.prototype.get;
+		const WeakMap_has = WeakMap.prototype.has;
+		const WeakMap_set = WeakMap.prototype.set;
+		const rememberNative = (fn, source) => {
+			if (typeof fn === "function") Reflect_apply(WeakMap_set, nativeSources, [fn, source]);
+			return fn;
+		};
+		const findDescriptor = (prop) => {
+			let owner = nav;
+			while (owner) {
+				const descriptor = getOwnPropertyDescriptor(owner, prop);
+				if (descriptor) return [owner, descriptor];
+				owner = getPrototypeOf(owner);
+			}
+			return [getPrototypeOf(nav) || nav, undefined];
+		};
+		let patched = false;
+		for (let i = 0; i < values.length; i += 1) {
+			const prop = values[i][0];
+			const value = values[i][1];
+			try {
+				if (nav[prop] === value) continue;
+			} catch (_) {}
+			const found = findDescriptor(prop);
+			const owner = found[0];
+			const descriptor = found[1];
+			if (!owner || (descriptor && descriptor.configurable === false)) continue;
+			const getterDescriptor = getOwnPropertyDescriptor({ get [prop]() { return value; } }, prop);
+			const getter = getterDescriptor && getterDescriptor.get;
+			if (typeof getter !== "function") continue;
+			rememberNative(getter, "function get " + prop + "() { [native code] }");
+			defineProperty(owner, prop, {
+				get: getter,
+				enumerable: descriptor ? descriptor.enumerable : true,
+				configurable: true,
+			});
+			patched = true;
+		}
+		if (!patched) return;
+		const toStringDescriptor = getOwnPropertyDescriptor(Function.prototype, "toString");
+		if (toStringDescriptor && toStringDescriptor.configurable === false) return;
+		const functionToString = new Proxy(nativeFunctionToString, {
+			apply(target, thisArg, args) {
+				if (Reflect_apply(WeakMap_has, nativeSources, [thisArg])) return Reflect_apply(WeakMap_get, nativeSources, [thisArg]);
+				return Reflect_apply(target, thisArg, args);
+			},
+		});
+		rememberNative(functionToString, "function toString() { [native code] }");
+		defineProperty(Function.prototype, "toString", {
+			value: functionToString,
+			writable: toStringDescriptor ? toStringDescriptor.writable : true,
+			configurable: toStringDescriptor ? toStringDescriptor.configurable : true,
+			enumerable: toStringDescriptor ? toStringDescriptor.enumerable : false,
+		});
+	} catch (_) {}
+})();`;
+	};
+
+	const buildWrappedUrl = (scriptURL) => {
+		const originalUrl = resolveWorkerUrl(scriptURL);
+		if (!originalUrl) return undefined;
+		if (sharedWorkerUrls) {
+			const cachedUrl = sharedWorkerUrls.get(originalUrl);
+			if (cachedUrl) return { url: cachedUrl, cacheKey: originalUrl };
+		}
+
+		const prelude = buildWorkerPrelude();
+		if (!prelude) return undefined;
+
+		try {
+			const blob = new Window_Blob(
+				[prelude, "\n", `importScripts(${JSON.stringify(originalUrl)});`],
+				{ type: "application/javascript" },
+			);
+			const url = Reflect_apply(URL_createObjectURL, NativeURL, [blob]);
+			if (sharedWorkerUrls) sharedWorkerUrls.set(originalUrl, url);
+			return { url, cacheKey: sharedWorkerUrls ? originalUrl : undefined };
+		} catch {
+			return undefined;
+		}
+	};
+
+	const handler = {
+		construct(target, args, newTarget) {
+			if (!canWrapArguments(args)) {
+				return Reflect_construct(target, args || [], newTarget);
+			}
+
+			const wrapped = buildWrappedUrl(args[0]);
+			if (!wrapped) {
+				return Reflect_construct(target, args || [], newTarget);
+			}
+
+			const wrappedArgs = [wrapped.url];
+			for (let i = 1; i < args.length; i += 1) {
+				wrappedArgs[i] = args[i];
+			}
+
+			try {
+				const worker = Reflect_construct(target, wrappedArgs, newTarget);
+				if (!sharedWorkerUrls) {
+					scheduleWorkerUrlRevoke(worker, wrapped.url);
+				}
+				return worker;
+			} catch {
+				if (wrapped.cacheKey && sharedWorkerUrls) sharedWorkerUrls.delete(wrapped.cacheKey);
+				revokeUrl(wrapped.url);
+				return Reflect_construct(target, args || [], newTarget);
+			}
+		},
+		apply(target, thisArg, args) {
+			return Reflect_apply(target, thisArg, args || []);
+		},
+	};
+
+	const proxied = new Window_Proxy(OriginalWorker, handler);
+	patchToString(proxied, name);
+	Object_defineProperty(window, name, {
+		value: proxied,
+		writable:
+			windowDescriptor && "writable" in windowDescriptor
+				? windowDescriptor.writable
+				: true,
+		configurable: windowDescriptor ? windowDescriptor.configurable : true,
+		enumerable: windowDescriptor ? windowDescriptor.enumerable : false,
+	});
+};
+
+try {
+	patchWorkerConstructor("Worker", window.Worker);
+	patchWorkerConstructor("SharedWorker", window.SharedWorker);
+} catch {}

@@ -1,0 +1,38 @@
+name: Question
+description: Ask about usage or configuration
+labels: ["question"]
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: Question
+    validations:
+      required: true
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Context
+      description: What are you trying to do?
+
+  - type: dropdown
+    id: area
+    attributes:
+      label: Topic
+      options:
+        - Provider setup / Login
+        - Custom models (models.yml)
+        - Extensions
+        - MCP servers
+        - Skills / Commands
+        - Configuration
+        - Other
+
+  - type: dropdown
+    id: environment
+    attributes:
+      label: Platform
+      options:
+        - macOS
+        - Linux
+        - Windows

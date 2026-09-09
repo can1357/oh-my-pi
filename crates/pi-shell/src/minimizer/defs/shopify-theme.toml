@@ -1,0 +1,38 @@
+# Shopify CLI `shopify theme` push / pull / dev output.
+
+[filters.shopify-theme]
+description = "Compact shopify theme push/pull/dev output"
+match_command = "^shopify$"
+match_subcommand = "^theme$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^✓ ",
+	"^Synced ",
+	"^Uploaded ",
+	"^Downloaded ",
+	"^\\s*Downloading",
+	"^Fetching ",
+	"^\\s*Uploading",
+	"^Hashing ",
+	"^Processing ",
+	"^Preview your theme: ",
+]
+truncate_lines_at = 300
+max_lines = 80
+on_empty = "shopify theme: ok"
+
+[[tests.shopify-theme]]
+name = "keeps liquid error"
+input = "Fetching theme\nUploading assets/foo.js\nError: Liquid syntax error in templates/product.liquid line 5"
+expected = "Error: Liquid syntax error in templates/product.liquid line 5\n"
+
+[[tests.shopify-theme]]
+name = "push success kept"
+input = "Fetching theme\nUploading assets/foo.js\nTheme pushed successfully"
+expected = "Theme pushed successfully\n"
+
+[[tests.shopify-theme]]
+name = "strips indented downloading/uploading progress"
+input = "  Downloading templates/index.liquid\n  Uploading assets/app.css\nTheme pulled successfully"
+expected = "Theme pulled successfully\n"

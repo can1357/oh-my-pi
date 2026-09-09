@@ -1,0 +1,634 @@
+/* Tool renderer design system — `tv-` namespace.
+ *
+ * Host-adaptive tokens: collab-web defines --fg/--fg-muted/…, the HTML export
+ * page defines --text/--muted/--dim/… from the active theme. Every color used
+ * below resolves through the `--tv-*` bridge with a static fallback so the
+ * bundle also works standalone. Dense devtool aesthetic: mono type, hairlines,
+ * 4px radii, whisper hovers. */
+
+.tv-card {
+	--tv-fg: var(--fg, var(--text, oklch(0.92 0.01 307)));
+	--tv-muted: var(--fg-muted, var(--muted, oklch(0.71 0.016 307)));
+	--tv-faint: var(--fg-faint, var(--dim, oklch(0.53 0.018 307)));
+	--tv-accent: var(--accent, oklch(0.674 0.23 341));
+	--tv-ok: var(--ok, var(--success, oklch(0.76 0.14 150)));
+	--tv-err: var(--err, var(--error, oklch(0.66 0.19 25)));
+	--tv-warn: var(--warn, var(--warning, oklch(0.79 0.14 85)));
+	--tv-border: var(--border, oklch(1 0 0 / 9%));
+	--tv-inset: var(--bg-inset, var(--info-bg, oklch(0 0 0 / 22%)));
+	--tv-raised: var(--bg-raised, var(--container-bg, oklch(1 0 0 / 4%)));
+	--tv-ring: var(--ring, oklch(0.817 0.112 205 / 70%));
+	--tv-mono: var(--font-mono, ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace);
+
+	border: 1px solid var(--tv-border);
+	border-radius: 6px;
+	font-family: var(--tv-mono);
+	font-size: 12px;
+	line-height: 1.5;
+	color: var(--tv-fg);
+	isolation: isolate;
+	overflow: hidden;
+}
+
+.tv-card--error {
+	border-color: color-mix(in oklch, var(--tv-err) 40%, var(--tv-border));
+}
+
+/* ---- header ---- */
+
+.tv-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	width: 100%;
+	padding: 5px 10px;
+	background: none;
+	border: 0;
+	font: inherit;
+	color: inherit;
+	text-align: left;
+	cursor: pointer;
+	touch-action: manipulation;
+	-webkit-tap-highlight-color: transparent;
+}
+
+.tv-head:hover {
+	background: color-mix(in oklch, var(--tv-fg) 4%, transparent);
+}
+
+.tv-head:focus-visible {
+	outline: 2px solid var(--tv-ring);
+	outline-offset: -2px;
+}
+
+.tv-status {
+	flex: none;
+	width: 7px;
+	height: 7px;
+	border-radius: 50%;
+}
+
+.tv-status--ok {
+	background: var(--tv-ok);
+}
+
+.tv-status--err {
+	background: var(--tv-err);
+}
+
+.tv-status--pending {
+	background: var(--tv-faint);
+}
+
+.tv-spin {
+	flex: none;
+	width: 9px;
+	height: 9px;
+	border-radius: 50%;
+	border: 1.5px solid color-mix(in oklch, var(--tv-faint) 50%, transparent);
+	border-top-color: var(--tv-accent);
+	animation: tv-rot 0.7s linear infinite;
+}
+
+.tv-name {
+	flex: none;
+	font-size: 11px;
+	font-weight: 600;
+	letter-spacing: 0.02em;
+	color: var(--tv-muted);
+}
+
+.tv-sum {
+	flex: 1;
+	min-width: 0;
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+	font-size: 11.5px;
+	color: var(--tv-muted);
+}
+
+.tv-sum > * {
+	white-space: nowrap;
+}
+
+.tv-chev {
+	flex: none;
+	width: 7px;
+	height: 7px;
+	margin-left: 2px;
+	border-right: 1.5px solid var(--tv-faint);
+	border-bottom: 1.5px solid var(--tv-faint);
+	transform: rotate(-45deg) translateY(-1px);
+	transition: transform 0.15s ease;
+}
+
+.tv-head[aria-expanded="true"] .tv-chev {
+	transform: rotate(45deg);
+}
+
+/* ---- body ---- */
+
+.tv-body {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+	padding: 8px 10px 10px;
+	border-top: 1px solid var(--tv-border);
+}
+
+.tv-intent {
+	font-style: italic;
+	font-size: 11px;
+	color: var(--tv-faint);
+}
+
+.tv-partial {
+	margin: 0;
+	padding: 6px 10px;
+	border-top: 1px solid var(--tv-border);
+	font-size: 11px;
+	line-height: 1.45;
+	color: var(--tv-faint);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	max-height: 160px;
+	overflow-y: auto;
+}
+
+/* ---- inline atoms ---- */
+
+.tv-badge {
+	display: inline-block;
+	padding: 0 5px;
+	border-radius: 3px;
+	background: var(--tv-raised);
+	font-size: 10px;
+	line-height: 16px;
+	color: var(--tv-muted);
+	vertical-align: 1px;
+}
+
+.tv-badge--accent {
+	background: color-mix(in oklch, var(--tv-accent) 16%, transparent);
+	color: color-mix(in oklch, var(--tv-accent) 80%, var(--tv-fg));
+}
+
+.tv-badge--ok {
+	background: color-mix(in oklch, var(--tv-ok) 14%, transparent);
+	color: var(--tv-ok);
+}
+
+.tv-badge--err {
+	background: color-mix(in oklch, var(--tv-err) 14%, transparent);
+	color: var(--tv-err);
+}
+
+.tv-badge--warn {
+	background: color-mix(in oklch, var(--tv-warn) 14%, transparent);
+	color: var(--tv-warn);
+}
+
+.tv-badges {
+	display: inline-flex;
+	gap: 4px;
+	flex-wrap: wrap;
+}
+
+.tv-path {
+	color: var(--tv-fg);
+}
+
+.tv-lines {
+	color: var(--tv-faint);
+}
+
+.tv-pattern {
+	color: color-mix(in oklch, var(--tv-accent) 75%, var(--tv-fg));
+}
+
+.tv-muted {
+	color: var(--tv-muted);
+}
+
+.tv-faint {
+	color: var(--tv-faint);
+}
+
+.tv-err-text {
+	color: var(--tv-err);
+}
+
+.tv-ok-text {
+	color: var(--tv-ok);
+}
+
+.tv-agent-link {
+	border: 0;
+	font: inherit;
+	font-size: 10px;
+	cursor: pointer;
+}
+
+.tv-agent-link:hover {
+	background: color-mix(in oklch, var(--tv-accent) 26%, transparent);
+	text-decoration: underline;
+}
+
+.tv-agent-link:focus-visible {
+	outline: 2px solid var(--tv-ring);
+	outline-offset: 1px;
+}
+
+.tv-agent-link-arrow {
+	opacity: 0.7;
+}
+
+.tv-warn-text {
+	color: var(--tv-warn);
+}
+
+.tv-trunc {
+	overflow: hidden;
+	text-overflow: ellipsis;
+	white-space: nowrap;
+}
+
+/* ---- key/value rows ---- */
+
+.tv-kv {
+	display: grid;
+	grid-template-columns: max-content 1fr;
+	gap: 2px 10px;
+	font-size: 11.5px;
+}
+
+.tv-kv-key {
+	color: var(--tv-faint);
+}
+
+.tv-kv-val {
+	min-width: 0;
+	color: var(--tv-fg);
+	overflow-wrap: anywhere;
+}
+
+/* ---- output / code blocks ---- */
+
+.tv-out {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.tv-pre {
+	margin: 0;
+	padding: 7px 9px;
+	border-radius: 4px;
+	background: var(--tv-inset);
+	font-family: var(--tv-mono);
+	font-size: 11.5px;
+	line-height: 1.5;
+	overflow-x: auto;
+	tab-size: 3;
+}
+
+.tv-pre--wrap {
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.tv-pre--bare {
+	background: none;
+	padding: 0 1px;
+}
+
+.tv-pre--error {
+	color: var(--tv-err);
+}
+
+.tv-out-title {
+	padding: 0 1px 3px;
+	font-size: 10px;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--tv-faint);
+}
+
+.tv-expand {
+	align-self: flex-start;
+	margin-top: 3px;
+	padding: 0 1px;
+	background: none;
+	border: 0;
+	font-family: var(--tv-mono);
+	font-size: 10.5px;
+	color: var(--tv-faint);
+	cursor: pointer;
+}
+
+.tv-expand:hover {
+	color: var(--tv-fg);
+	text-decoration: underline;
+}
+
+.tv-expand:focus-visible {
+	outline: 2px solid var(--tv-ring);
+	outline-offset: 1px;
+	border-radius: 2px;
+}
+
+/* ---- command line (bash/ssh) ---- */
+
+.tv-cmd {
+	display: flex;
+	gap: 7px;
+	font-size: 11.5px;
+}
+
+.tv-cmd-prompt {
+	flex: none;
+	color: var(--tv-accent);
+	user-select: none;
+}
+
+.tv-cmd-text {
+	min-width: 0;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+.tv-cmd-env {
+	color: var(--tv-faint);
+}
+
+/* ---- diff ---- */
+
+.tv-diff {
+	margin: 0;
+	border-radius: 4px;
+	background: var(--tv-inset);
+	font-size: 11.5px;
+	line-height: 1.5;
+	overflow-x: auto;
+	padding: 5px 0;
+}
+
+.tv-diff-row {
+	padding: 0 9px;
+	white-space: pre;
+}
+
+.tv-diff-row--add {
+	background: color-mix(in oklch, var(--tv-ok) 11%, transparent);
+	color: color-mix(in oklch, var(--tv-ok) 70%, var(--tv-fg));
+}
+
+.tv-diff-row--del {
+	background: color-mix(in oklch, var(--tv-err) 11%, transparent);
+	color: color-mix(in oklch, var(--tv-err) 70%, var(--tv-fg));
+}
+
+.tv-diff-row--hunk {
+	color: var(--tv-faint);
+}
+
+.tv-diff-row--gap {
+	color: var(--tv-faint);
+	user-select: none;
+}
+
+/* ---- cells (eval / ast ops) ---- */
+
+.tv-cells {
+	display: flex;
+	flex-direction: column;
+	gap: 8px;
+}
+
+.tv-cell {
+	display: flex;
+	flex-direction: column;
+	min-width: 0;
+}
+
+.tv-cell-title {
+	padding: 0 1px 3px;
+	font-size: 10px;
+	letter-spacing: 0.05em;
+	text-transform: uppercase;
+	color: var(--tv-faint);
+}
+
+/* ---- generic row lists ---- */
+
+.tv-list {
+	display: flex;
+	flex-direction: column;
+	gap: 3px;
+	font-size: 11.5px;
+}
+
+.tv-row {
+	display: flex;
+	gap: 7px;
+	min-width: 0;
+}
+
+.tv-row-key {
+	flex: none;
+	color: var(--tv-faint);
+}
+
+.tv-row-val {
+	min-width: 0;
+	overflow-wrap: anywhere;
+}
+
+/* ---- todo ---- */
+
+.tv-todo {
+	display: flex;
+	flex-direction: column;
+	gap: 2px;
+	font-size: 11.5px;
+}
+
+.tv-todo-phase {
+	margin-top: 4px;
+	color: var(--tv-muted);
+	font-weight: 600;
+	font-size: 10.5px;
+	letter-spacing: 0.04em;
+	text-transform: uppercase;
+}
+
+.tv-todo-phase:first-child {
+	margin-top: 0;
+}
+
+.tv-task {
+	display: flex;
+	gap: 7px;
+	color: var(--tv-fg);
+}
+
+.tv-task-icon {
+	flex: none;
+	width: 12px;
+	text-align: center;
+	color: var(--tv-faint);
+}
+
+.tv-task--completed {
+	color: var(--tv-faint);
+}
+
+.tv-task--completed .tv-task-icon {
+	color: var(--tv-ok);
+}
+
+.tv-task--in_progress .tv-task-icon {
+	color: var(--tv-accent);
+}
+
+.tv-task--in_progress {
+	color: var(--tv-fg);
+}
+
+.tv-task--abandoned {
+	color: var(--tv-faint);
+	text-decoration: line-through;
+}
+
+/* ---- notes ---- */
+
+.tv-note {
+	padding: 6px 9px;
+	border-radius: 4px;
+	background: var(--tv-raised);
+	font-size: 11.5px;
+	color: var(--tv-muted);
+	overflow-wrap: anywhere;
+}
+
+.tv-note--err {
+	background: color-mix(in oklch, var(--tv-err) 10%, transparent);
+	color: var(--tv-err);
+}
+
+.tv-note--warn {
+	background: color-mix(in oklch, var(--tv-warn) 10%, transparent);
+	color: var(--tv-warn);
+}
+
+.tv-note--ok {
+	background: color-mix(in oklch, var(--tv-ok) 10%, transparent);
+	color: var(--tv-ok);
+}
+
+/* ---- images ---- */
+
+.tv-imgs {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px;
+}
+
+.tv-img {
+	max-height: 180px;
+	max-width: 100%;
+	border-radius: 4px;
+	border: 1px solid var(--tv-border);
+	cursor: zoom-in;
+	background: var(--tv-inset);
+}
+
+/* ---- markdown-ish prose (plain text bodies) ---- */
+
+.tv-prose {
+	font-size: 11.5px;
+	line-height: 1.55;
+	color: var(--tv-fg);
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+}
+
+/* ---- syntax tokens (highlight.js, scoped) ----
+ * Minimal monochrome-plus-accent palette; only applies when the host exposes
+ * a global hljs (the HTML export page). */
+
+.tv-pre .hljs-comment,
+.tv-pre .hljs-quote {
+	color: var(--tv-faint);
+	font-style: italic;
+}
+
+.tv-pre .hljs-keyword,
+.tv-pre .hljs-selector-tag,
+.tv-pre .hljs-section,
+.tv-pre .hljs-name,
+.tv-pre .hljs-tag {
+	color: color-mix(in oklch, var(--tv-accent) 72%, var(--tv-fg));
+}
+
+.tv-pre .hljs-string,
+.tv-pre .hljs-regexp,
+.tv-pre .hljs-addition {
+	color: var(--tv-ok);
+}
+
+.tv-pre .hljs-number,
+.tv-pre .hljs-literal,
+.tv-pre .hljs-symbol,
+.tv-pre .hljs-bullet,
+.tv-pre .hljs-link,
+.tv-pre .hljs-meta {
+	color: var(--tv-warn);
+}
+
+.tv-pre .hljs-title,
+.tv-pre .hljs-attr,
+.tv-pre .hljs-attribute,
+.tv-pre .hljs-selector-id,
+.tv-pre .hljs-selector-class,
+.tv-pre .hljs-type,
+.tv-pre .hljs-built_in {
+	color: color-mix(in oklch, var(--tv-fg) 80%, var(--tv-accent));
+}
+
+.tv-pre .hljs-deletion {
+	color: var(--tv-err);
+}
+
+.tv-pre .hljs-emphasis {
+	font-style: italic;
+}
+
+.tv-pre .hljs-strong {
+	font-weight: 600;
+}
+
+/* ---- animation ---- */
+
+@keyframes tv-rot {
+	to {
+		transform: rotate(360deg);
+	}
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.tv-spin {
+		animation: tv-pulse 1.4s ease-in-out infinite;
+	}
+
+	.tv-chev {
+		transition: none;
+	}
+
+	@keyframes tv-pulse {
+		50% {
+			opacity: 0.35;
+		}
+	}
+}

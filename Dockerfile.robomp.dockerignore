@@ -1,0 +1,98 @@
+# Build context for `Dockerfile.robomp` (robomp:dev). Shadows .dockerignore
+# for this file only — the pi-root build uses Dockerfile.dockerignore instead.
+#
+# Note: this duplicates most of the entries in Dockerfile.dockerignore. That's
+# the cost of per-Dockerfile shadows (no shared file to factor common rules
+# into). Keep them roughly in sync.
+
+# Heavy build outputs — must never reach the build context. Depth-agnostic for
+# the same reason as Dockerfile.dockerignore: bare `target/`/`dist/` only match
+# the context root, so nested build dirs (go-port/*/target, packages/*/dist)
+# were shipped on every build.
+**/target/
+bazel-*
+**/node_modules
+**/dist/
+runs/
+.xwin-cache/
+packages/coding-agent/binaries/
+packages/natives/npm/
+packages/natives/native/
+**/.cache/
+packages/snapcompact/research/results/
+# The addon comes from PI_BASE; nothing in this context needs one.
+**/*.node
+
+# Per-host scratch the pi codebase uses for parallel agents / worktrees.
+.fallow/
+.worktrees/
+.wt/
+.opencode/
+.pi_config/
+.omp/plugins/
+
+# VCS, editors, IDEs.
+.git/
+.npm/
+.vscode/
+.zed/
+.idea/
+
+# OS + transient noise.
+.DS_Store
+*.swp
+*.swo
+*~
+*.tmp
+
+# Logs + profiling artifacts.
+*.log
+*.cpuprofile
+*.heapprofile
+*.heapsnapshot
+CPU.*
+
+# Build / test side outputs.
+*.tsbuildinfo
+coverage/
+.nyc_output/
+__pycache__/
+compaction-results/
+changes/
+
+# Generated files (the in-image build regenerates them).
+packages/coding-agent/src/internal-urls/docs-index.generated.ts
+packages/natives/native/.build/
+packages/natives/native/pi_natives.darwin-*.node
+packages/natives/native/pi_natives.dev.node
+packages/ai/test/.temp-images/
+python/omp-rpc/src/omp_rpc.egg-info/
+python/robomp/data/
+python/robomp/.cache/
+python/robomp/src/robomp/static/
+python/robomp/web/dist/
+
+# Scratch files the repo creates ad-hoc.
+syntax.jsonl
+out.jsonl
+out.html
+pi-*.html
+
+# Host virtualenvs — the image installs its own interpreter deps.
+**/.venv/
+
+# Secrets. Should never be in the image regardless. Depth-agnostic: a bare
+# `.env` misses `python/robomp/.env`, which sits next to the copied src tree.
+**/.env
+
+# Robomp-only excludes. Natives + wheel + python + bun + rustup all come
+# from PI_BASE; the web-builder stage only needs root manifests + the
+# python/robomp/web tree; the runtime stage only COPYs python/robomp/
+# pyproject + src + entrypoint. Everything below is dead weight in the
+# robomp build context.
+crates/
+docs/
+assets/
+scripts/
+AGENTS.md
+README.md

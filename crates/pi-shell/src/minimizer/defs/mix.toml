@@ -1,0 +1,29 @@
+# Elixir mix compile / format / test output.
+
+[filters.mix]
+description = "Compact Elixir mix output"
+match_command = "^mix$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^Compiling \\d+ files? \\(\\.ex\\)",
+	"^Compiling \\d+ files? \\(\\.erl\\)",
+	"^Generated \\S+ app$",
+	"^==> \\S+$",
+	"^Resolving Hex dependencies",
+	"^Dependency resolution completed",
+	"^  \\S+ \\d+\\.\\d+",
+]
+truncate_lines_at = 300
+max_lines = 80
+on_empty = "mix: ok"
+
+[[tests.mix]]
+name = "keeps warnings"
+input = "==> myapp\nCompiling 12 files (.ex)\nwarning: variable \"x\" is unused\nGenerated myapp app"
+expected = "warning: variable \"x\" is unused\n"
+
+[[tests.mix]]
+name = "clean compile collapses"
+input = "==> myapp\nCompiling 3 files (.ex)\nGenerated myapp app"
+expected = "mix: ok"

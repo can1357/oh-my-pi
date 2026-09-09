@@ -1,0 +1,1309 @@
+@import "tailwindcss";
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Design tokens. Exposed both as plain CSS variables (for raw `var()` use)
+   and as Tailwind theme keys so utilities like `bg-surface-1`, `text-ink-100`,
+   `border-stroke` work without a separate config file.
+
+   These map the stats dashboard's flat pink-on-purple palette onto robomp's
+   semantic ramp. Dark values are the @theme defaults; unlayered :root /
+   [data-theme] blocks below are the authoritative + switchable layer
+   (unlayered beats Tailwind's @layer theme so utilities flip at runtime).
+   ────────────────────────────────────────────────────────────────────────── */
+@theme {
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display",
+    "Inter", system-ui, sans-serif;
+  --font-mono:
+    ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ink ramp: low = bright text, high = dark surface */
+  --color-ink-50: oklch(0.97 0.006 307);
+  --color-ink-100: oklch(0.92 0.01 307);
+  --color-ink-200: oklch(0.82 0.013 307);
+  --color-ink-300: oklch(0.71 0.016 307);
+  --color-ink-400: oklch(0.53 0.018 307);
+  --color-ink-500: oklch(0.44 0.018 307);
+  --color-ink-700: oklch(0.30 0.02 307);
+  --color-ink-800: oklch(0.235 0.026 307);
+  --color-ink-900: oklch(0.19 0.022 307);
+  --color-ink-950: oklch(0.16 0.02 307);
+
+  /* opaque flat surfaces (no translucency, no blur) */
+  --color-surface-1: oklch(0.19 0.022 307);
+  --color-surface-2: oklch(0.235 0.026 307);
+  --color-surface-3: oklch(0.27 0.03 307);
+  --color-stroke: oklch(1 0 0 / 9%);
+  --color-stroke-soft: oklch(1 0 0 / 6%);
+
+  /* brand accents: pink + cyan link */
+  --color-accent: oklch(0.674 0.23 341);
+  --color-accent-2: oklch(0.817 0.112 205);
+  --color-accent-fg: oklch(0.2 0.07 341);
+  --color-accent-muted: oklch(0.674 0.23 341 / 18%);
+  --color-ring: oklch(0.817 0.112 205 / 70%);
+
+  /* semantic states */
+  --color-ok: oklch(0.76 0.14 150);
+  --color-warn: oklch(0.79 0.14 85);
+  --color-err: oklch(0.66 0.19 25);
+  --color-info: oklch(0.817 0.112 205);
+
+  --radius-sm: 3px;
+  --radius-md: 6px;
+  --radius-lg: 8px;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Authoritative theme layer (unlayered → beats @layer theme). Dark is the
+   default; [data-theme="light"] + the prefers-color media block flip every
+   utility + var() consumer at runtime.
+   ────────────────────────────────────────────────────────────────────────── */
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+
+  --color-ink-50: oklch(0.97 0.006 307);
+  --color-ink-100: oklch(0.92 0.01 307);
+  --color-ink-200: oklch(0.82 0.013 307);
+  --color-ink-300: oklch(0.71 0.016 307);
+  --color-ink-400: oklch(0.53 0.018 307);
+  --color-ink-500: oklch(0.44 0.018 307);
+  --color-ink-700: oklch(0.30 0.02 307);
+  --color-ink-800: oklch(0.235 0.026 307);
+  --color-ink-900: oklch(0.19 0.022 307);
+  --color-ink-950: oklch(0.16 0.02 307);
+
+  --color-surface-1: oklch(0.19 0.022 307);
+  --color-surface-2: oklch(0.235 0.026 307);
+  --color-surface-3: oklch(0.27 0.03 307);
+  --color-stroke: oklch(1 0 0 / 9%);
+  --color-stroke-soft: oklch(1 0 0 / 6%);
+
+  --color-accent: oklch(0.674 0.23 341);
+  --color-accent-2: oklch(0.817 0.112 205);
+  --color-accent-fg: oklch(0.2 0.07 341);
+  --color-accent-muted: oklch(0.674 0.23 341 / 18%);
+  --color-ring: oklch(0.817 0.112 205 / 70%);
+
+  --color-ok: oklch(0.76 0.14 150);
+  --color-warn: oklch(0.79 0.14 85);
+  --color-err: oklch(0.66 0.19 25);
+  --color-info: oklch(0.817 0.112 205);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+
+  /* light ramp inverted: low ink = dark text, high ink = light surface */
+  --color-ink-50: oklch(0.22 0.03 307);
+  --color-ink-100: oklch(0.26 0.03 307);
+  --color-ink-200: oklch(0.36 0.03 307);
+  --color-ink-300: oklch(0.46 0.03 307);
+  --color-ink-400: oklch(0.58 0.025 307);
+  --color-ink-500: oklch(0.62 0.02 307);
+  --color-ink-700: oklch(0.80 0.01 307);
+  --color-ink-800: oklch(0.965 0.006 307);
+  --color-ink-900: oklch(1 0 0);
+  --color-ink-950: oklch(0.985 0.004 307);
+
+  --color-surface-1: oklch(1 0 0);
+  --color-surface-2: oklch(0.965 0.006 307);
+  --color-surface-3: oklch(0.93 0.008 307);
+  --color-stroke: oklch(0 0 0 / 10%);
+  --color-stroke-soft: oklch(0 0 0 / 6%);
+
+  --color-accent: oklch(0.62 0.23 341);
+  --color-accent-2: oklch(0.58 0.13 230);
+  --color-accent-fg: oklch(0.99 0.01 341);
+  --color-accent-muted: oklch(0.62 0.23 341 / 14%);
+  --color-ring: oklch(0.58 0.13 230 / 70%);
+
+  --color-ok: oklch(0.55 0.13 150);
+  --color-warn: oklch(0.6 0.13 85);
+  --color-err: oklch(0.55 0.19 25);
+  --color-info: oklch(0.58 0.13 230);
+}
+
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) {
+    color-scheme: light;
+
+    --color-ink-50: oklch(0.22 0.03 307);
+    --color-ink-100: oklch(0.26 0.03 307);
+    --color-ink-200: oklch(0.36 0.03 307);
+    --color-ink-300: oklch(0.46 0.03 307);
+    --color-ink-400: oklch(0.58 0.025 307);
+    --color-ink-500: oklch(0.62 0.02 307);
+    --color-ink-700: oklch(0.80 0.01 307);
+    --color-ink-800: oklch(0.965 0.006 307);
+    --color-ink-900: oklch(1 0 0);
+    --color-ink-950: oklch(0.985 0.004 307);
+
+    --color-surface-1: oklch(1 0 0);
+    --color-surface-2: oklch(0.965 0.006 307);
+    --color-surface-3: oklch(0.93 0.008 307);
+    --color-stroke: oklch(0 0 0 / 10%);
+    --color-stroke-soft: oklch(0 0 0 / 6%);
+
+    --color-accent: oklch(0.62 0.23 341);
+    --color-accent-2: oklch(0.58 0.13 230);
+    --color-accent-fg: oklch(0.99 0.01 341);
+    --color-accent-muted: oklch(0.62 0.23 341 / 14%);
+    --color-ring: oklch(0.58 0.13 230 / 70%);
+
+    --color-ok: oklch(0.55 0.13 150);
+    --color-warn: oklch(0.6 0.13 85);
+    --color-err: oklch(0.55 0.19 25);
+    --color-info: oklch(0.58 0.13 230);
+  }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Root + page chrome. Flat page background — no gradient, no blur.
+   ────────────────────────────────────────────────────────────────────────── */
+html,
+body,
+#app {
+  min-height: 100%;
+  margin: 0;
+  background-color: var(--color-ink-950);
+  color: var(--color-ink-100);
+  font-family: var(--font-sans);
+  font-feature-settings: "ss01", "ss03", "cv11";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+body {
+  background: var(--color-ink-950);
+}
+
+#app {
+  display: flex;
+  flex-direction: column;
+}
+
+::selection {
+  background: var(--color-accent-muted);
+  color: var(--color-ink-50);
+}
+
+a {
+  color: var(--color-accent-2);
+  text-decoration: none;
+  transition: color 150ms ease-out;
+}
+a:hover {
+  color: var(--color-info);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Reusable utility classes layered on top of Tailwind.
+   ────────────────────────────────────────────────────────────────────────── */
+.glass,
+.glass-flat {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-stroke);
+}
+
+.hairline {
+  border-color: var(--color-stroke-soft);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+.eyebrow {
+  font-size: 10.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-ink-300);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Pills — capsule status tags. Tints are flat color-mix backgrounds with a
+   matching flat text colour and no border (stats StatusPill convention).
+   ────────────────────────────────────────────────────────────────────────── */
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.02em;
+  border: none;
+  background: var(--color-surface-2);
+  color: var(--color-ink-300);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.pill.queued,
+.pill.open,
+.pill.processed {
+  background: color-mix(in oklch, var(--color-info) 18%, transparent);
+  color: var(--color-info);
+}
+.pill.running {
+  background: color-mix(in oklch, var(--color-warn) 18%, transparent);
+  color: var(--color-warn);
+}
+.pill.done {
+  background: color-mix(in oklch, var(--color-ok) 18%, transparent);
+  color: var(--color-ok);
+}
+.pill.failed {
+  background: color-mix(in oklch, var(--color-err) 18%, transparent);
+  color: var(--color-err);
+}
+.pill.skipped {
+  background: var(--color-surface-2);
+  color: var(--color-ink-300);
+}
+.pill.closed {
+  background: color-mix(in oklch, var(--color-accent) 18%, transparent);
+  color: var(--color-accent);
+}
+.pill.dot::before {
+  content: "";
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: currentColor;
+  display: inline-block;
+}
+
+/* Pulsing dot for running pills. */
+.pill.running.dot::before {
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.55; transform: scale(0.75); }
+}
+
+/* Light-mode pill text: the bright dark-mode state colors (warn/info/ok/err/
+   accent at L~0.55-0.62) wash out on their own light tints, so darken the TEXT
+   to the same hue at a lower L for AA legibility. Dark mode keeps the bright
+   tokens. The anti-flash script always sets data-theme, but mirror the system
+   fallback for the no-JS first paint. */
+[data-theme="light"] .pill.running { color: oklch(0.5 0.13 85); }
+[data-theme="light"] .pill.queued,
+[data-theme="light"] .pill.open,
+[data-theme="light"] .pill.processed { color: oklch(0.36 0.13 230); }
+[data-theme="light"] .pill.done { color: oklch(0.47 0.13 150); }
+[data-theme="light"] .pill.failed { color: oklch(0.48 0.19 25); }
+[data-theme="light"] .pill.closed { color: oklch(0.5 0.2 341); }
+@media (prefers-color-scheme: light) {
+  :root:not([data-theme]) .pill.running { color: oklch(0.5 0.13 85); }
+  :root:not([data-theme]) .pill.queued,
+  :root:not([data-theme]) .pill.open,
+  :root:not([data-theme]) .pill.processed { color: oklch(0.36 0.13 230); }
+  :root:not([data-theme]) .pill.done { color: oklch(0.47 0.13 150); }
+  :root:not([data-theme]) .pill.failed { color: oklch(0.48 0.19 25); }
+  :root:not([data-theme]) .pill.closed { color: oklch(0.5 0.2 341); }
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Buttons.
+   ────────────────────────────────────────────────────────────────────────── */
+button,
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  font: inherit;
+  font-weight: 500;
+  padding: 7px 14px;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--color-stroke);
+  background: var(--color-surface-1);
+  color: var(--color-ink-100);
+  cursor: pointer;
+  transition:
+    background 150ms ease-out,
+    border-color 150ms ease-out,
+    color 150ms ease-out,
+    transform 80ms ease-out;
+  user-select: none;
+}
+button:hover:not(:disabled),
+.btn:hover:not(:disabled) {
+  background: var(--color-surface-2);
+  border-color: var(--color-stroke);
+}
+button:active:not(:disabled),
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+button:disabled,
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+button.primary,
+.btn.primary {
+  background: var(--color-accent);
+  border-color: var(--color-accent);
+  color: var(--color-accent-fg);
+}
+button.primary:hover:not(:disabled),
+.btn.primary:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+button.ghost,
+.btn.ghost {
+  background: transparent;
+  border-color: transparent;
+  color: var(--color-ink-300);
+}
+button.ghost:hover:not(:disabled),
+.btn.ghost:hover:not(:disabled) {
+  background: var(--color-surface-1);
+  color: var(--color-ink-100);
+  border-color: var(--color-stroke);
+}
+button.danger,
+.btn.danger {
+  color: var(--color-err);
+  border-color: color-mix(in oklch, var(--color-err) 32%, transparent);
+  background: color-mix(in oklch, var(--color-err) 10%, transparent);
+}
+button.danger:hover:not(:disabled),
+.btn.danger:hover:not(:disabled) {
+  background: color-mix(in oklch, var(--color-err) 18%, transparent);
+  border-color: color-mix(in oklch, var(--color-err) 60%, transparent);
+  color: var(--color-err);
+}
+button.tiny,
+.btn.tiny {
+  padding: 3px 9px;
+  font-size: 11.5px;
+  border-radius: var(--radius-sm);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Form controls.
+   ────────────────────────────────────────────────────────────────────────── */
+input[type="text"],
+input[type="search"],
+input[type="password"],
+select {
+  font: inherit;
+  background: var(--color-surface-1);
+  color: var(--color-ink-100);
+  border: 1px solid var(--color-stroke);
+  border-radius: var(--radius-md);
+  padding: 7px 11px;
+  outline: none;
+  transition:
+    border-color 150ms ease-out,
+    background 150ms ease-out,
+    box-shadow 150ms ease-out;
+}
+input[type="text"]::placeholder,
+input[type="search"]::placeholder {
+  color: var(--color-ink-400);
+}
+input[type="text"]:focus,
+input[type="search"]:focus,
+input[type="password"]:focus,
+select:focus {
+  border-color: var(--color-accent);
+  box-shadow: 0 0 0 3px color-mix(in oklch, var(--color-ring) 45%, transparent);
+}
+select {
+  appearance: none;
+  background-image:
+    linear-gradient(45deg, transparent 50%, var(--color-ink-300) 50%),
+    linear-gradient(135deg, var(--color-ink-300) 50%, transparent 50%);
+  background-position:
+    calc(100% - 18px) calc(50% - 2px),
+    calc(100% - 13px) calc(50% - 2px);
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 30px;
+}
+input[type="checkbox"] {
+  accent-color: var(--color-accent);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Tables.
+   ────────────────────────────────────────────────────────────────────────── */
+table.t {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-variant-numeric: tabular-nums;
+  font-size: 13px;
+}
+table.t thead th {
+  text-align: left;
+  font-size: 10.5px;
+  font-weight: 500;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-ink-300);
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--color-stroke);
+  background: var(--color-surface-2);
+  white-space: nowrap;
+}
+table.t tbody td {
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--color-stroke-soft);
+  vertical-align: top;
+  color: var(--color-ink-100);
+}
+table.t tbody tr {
+  transition: background 120ms ease-out;
+}
+table.t tbody tr:hover td {
+  background: var(--color-surface-2);
+}
+table.t tbody tr:last-child td {
+  border-bottom: none;
+}
+table.t td .meta-line {
+  display: block;
+  margin-top: 2px;
+  color: var(--color-ink-300);
+  font-size: 11px;
+}
+.err-cell {
+  color: var(--color-err);
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-width: 460px;
+  font-size: 12px;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Code chips inline.
+   ────────────────────────────────────────────────────────────────────────── */
+code,
+.code {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-stroke-soft);
+  padding: 1px 6px;
+  border-radius: var(--radius-md);
+  color: var(--color-ink-200);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Error tint — flat 10% background for the needs-attention rows.
+   ────────────────────────────────────────────────────────────────────────── */
+.tint-err {
+  background: color-mix(in oklch, var(--color-err) 10%, transparent);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Scrollbar styling on opt-in containers — stats capsule look.
+   ────────────────────────────────────────────────────────────────────────── */
+.scrollable {
+  scrollbar-width: thin;
+  scrollbar-color: var(--color-stroke) transparent;
+}
+.scrollable::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+.scrollable::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollable::-webkit-scrollbar-thumb {
+  background: var(--color-stroke);
+  border-radius: 999px;
+}
+.scrollable::-webkit-scrollbar-thumb:hover {
+  background: var(--color-ink-400);
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Log viewer.
+   ────────────────────────────────────────────────────────────────────────── */
+.logs {
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 1.55;
+  max-height: 60vh;
+  overflow: auto;
+}
+.log-row {
+  display: grid;
+  grid-template-columns: 160px 56px 150px 1fr;
+  gap: 12px;
+  padding: 4px 16px;
+  border-bottom: 1px solid var(--color-stroke-soft);
+  align-items: baseline;
+}
+.log-row:hover {
+  background: var(--color-surface-2);
+}
+.log-row .ts {
+  color: var(--color-ink-400);
+  white-space: nowrap;
+}
+.log-row .lvl {
+  font-weight: 600;
+  letter-spacing: 0.04em;
+}
+.log-row .logger {
+  color: var(--color-ink-400);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.log-row .msg {
+  white-space: pre-wrap;
+  word-break: break-word;
+  color: var(--color-ink-100);
+}
+.log-row .extras {
+  color: var(--color-ink-300);
+  margin-left: 6px;
+}
+.log-row .extras b {
+  color: var(--color-ink-200);
+  font-weight: 500;
+}
+.log-row .exc {
+  color: var(--color-err);
+  white-space: pre-wrap;
+  display: block;
+  margin-top: 4px;
+}
+.lvl.INFO    { color: var(--color-info); }
+.lvl.DEBUG   { color: var(--color-ink-400); }
+.lvl.WARNING { color: var(--color-warn); }
+.lvl.ERROR   { color: var(--color-err); }
+.lvl.RAW     { color: var(--color-ink-400); }
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Reveal animation for the dashboard's first paint. Honour reduced motion.
+   ────────────────────────────────────────────────────────────────────────── */
+@keyframes glass-rise {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.glass-rise {
+  animation: glass-rise 360ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+}
+
+/* Tighter form rows. */
+.form-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Card section heading. */
+.section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 14px 18px 10px 18px;
+}
+.section-heading h2 {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-ink-300);
+  margin: 0;
+}
+.section-heading .accessory {
+  font-size: 11px;
+  color: var(--color-ink-400);
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.empty {
+  padding: 24px;
+  color: var(--color-ink-400);
+  font-style: italic;
+  text-align: center;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   App-shell classes (rail + main + topbar + content). Unlayered so Tailwind
+   v4 does not purge them; they consume only existing color and radius tokens
+   so light + dark both resolve. Ports the stats shell skeleton (stats- classes
+   renamed to rmp-).
+   ────────────────────────────────────────────────────────────────────────── */
+.rmp-app {
+  display: flex;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--color-ink-950);
+  color: var(--color-ink-100);
+}
+
+.rmp-rail {
+  width: 248px;
+  background: var(--color-surface-1);
+  border-right: 1px solid var(--color-stroke);
+  display: flex;
+  flex-direction: column;
+  flex-shrink: 0;
+  height: 100%;
+  overflow-y: auto;
+}
+.rmp-desktop-nav { display: flex; }
+@media (max-width: 1023px) {
+  .rmp-desktop-nav { display: none; }
+}
+
+/* Brand lockup */
+.rmp-rail-brand {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: center;
+  column-gap: 10px;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--color-stroke);
+  min-height: 56px;
+}
+.rmp-rail-mark {
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  background: linear-gradient(135deg, #ed4abf 0%, #9b4dff 50%, #5ad8e6 100%);
+  flex-shrink: 0;
+}
+.rmp-rail-wordmark {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.rmp-rail-name {
+  font-size: 14px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--color-ink-50);
+  line-height: 1.1;
+}
+.rmp-rail-tag {
+  font-size: 9.5px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--color-ink-400);
+  line-height: 1.3;
+}
+
+/* Vitals block — always-on glanceable signal */
+.rmp-vitals {
+  padding: 16px 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  border-bottom: 1px solid var(--color-stroke);
+}
+.rmp-vital-sync {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--color-ink-300);
+  font-variant-numeric: tabular-nums;
+}
+.rmp-vital-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  flex-shrink: 0;
+}
+.rmp-vital-dot.ok { background: var(--color-ok); }
+.rmp-vital-dot.warn { background: var(--color-warn); }
+.rmp-vital-dot.err { background: var(--color-err); }
+.rmp-vital-dot.pulse { animation: pulse-dot 1.8s ease-in-out infinite; }
+
+.rmp-vital-big {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px;
+}
+.rmp-vital-big-cell { display: flex; flex-direction: column; gap: 3px; }
+.rmp-vital-big-label {
+  font-size: 9.5px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--color-ink-400);
+}
+.rmp-vital-big-num {
+  font-size: 22px;
+  font-weight: 600;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-ink-100);
+}
+.rmp-vital-big-num.failed-nonzero { color: var(--color-err); }
+.rmp-vital-big-num.running-nonzero { color: var(--color-warn); }
+
+.rmp-vital-counts {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 9px 14px;
+}
+.rmp-vital-count { display: flex; flex-direction: column; gap: 1px; }
+.rmp-vital-count-label {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-ink-400);
+}
+.rmp-vital-count-num {
+  font-size: 14px;
+  font-weight: 500;
+  font-variant-numeric: tabular-nums;
+  color: var(--color-ink-200);
+}
+
+.rmp-vital-runtime {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+.rmp-vital-runtime-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.rmp-vital-runtime-label {
+  font-size: 9px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--color-ink-400);
+  flex-shrink: 0;
+}
+.rmp-vital-runtime-value {
+  font-size: 11px;
+  color: var(--color-ink-200);
+  text-align: right;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+.rmp-vital-runtime-value.mono { font-family: var(--font-mono); font-size: 10.5px; }
+
+/* Nav */
+.rmp-nav {
+  flex: 1;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+.rmp-nav-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-ink-300);
+  background: transparent;
+  border: none;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  text-align: left;
+  width: 100%;
+  transition: color 150ms ease, background 150ms ease;
+}
+.rmp-nav-item:hover {
+  color: var(--color-ink-100);
+  background: var(--color-surface-2);
+}
+.rmp-nav-item[data-active="true"] {
+  color: var(--color-accent);
+  background: var(--color-accent-muted);
+  position: relative;
+}
+.rmp-nav-item[data-active="true"]::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 18px;
+  width: 3px;
+  border-radius: 0 3px 3px 0;
+  background: var(--color-accent);
+  transform: translateY(-50%);
+}
+.rmp-nav-item[data-locked="true"] { opacity: 0.5; }
+.rmp-nav-item-icon { flex-shrink: 0; display: inline-flex; }
+.rmp-nav-item-label { flex: 1; min-width: 0; }
+.rmp-nav-item-lock { flex-shrink: 0; display: inline-flex; color: var(--color-ink-400); }
+
+/* Footer */
+.rmp-rail-footer {
+  padding: 14px 20px;
+  border-top: 1px solid var(--color-stroke);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.rmp-rail-footer-tag {
+  font-size: 9.5px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  color: var(--color-ink-500);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Main pane */
+.rmp-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+}
+.rmp-topbar {
+  height: 56px;
+  background: var(--color-surface-1);
+  border-bottom: 1px solid var(--color-stroke);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 24px;
+  flex-shrink: 0;
+}
+.rmp-topbar-left {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.rmp-topbar-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.rmp-page-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--color-ink-50);
+  margin: 0;
+}
+.rmp-mobile-menu-btn {
+  display: none;
+  background: transparent;
+  border: none;
+  color: var(--color-ink-200);
+  padding: 4px;
+  cursor: pointer;
+  border-radius: var(--radius-sm);
+}
+@media (max-width: 1023px) {
+  .rmp-mobile-menu-btn { display: inline-flex; }
+}
+
+/* Content — the only vertical scroller */
+.rmp-content {
+  flex: 1;
+  overflow-y: auto;
+}
+.rmp-content-inner {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
+}
+@media (max-width: 767px) {
+  .rmp-content-inner { padding: 16px; gap: 16px; }
+  .rmp-topbar { padding: 0 16px; }
+}
+
+/* View panes — all mounted, visibility toggled (state persists, no refetch).
+   Base is flex; inactive views get inline display:none. The enter animation
+   restarts automatically when an element flips none→flex (CSS animations
+   restart when re-entering the render tree) — so it fires on first paint +
+   view-switch ONLY, never on the 3s poll (polls never change display). */
+.rmp-view { display: flex; flex-direction: column; gap: 20px; }
+@media (max-width: 767px) { .rmp-view { gap: 16px; } }
+
+@keyframes rmp-view-rise {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.rmp-view-enter {
+  animation: rmp-view-rise 220ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+/* Trigger bar — slim command row for Operations */
+.rmp-trigger-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-stroke);
+  border-radius: var(--radius-lg);
+  flex-wrap: wrap;
+}
+.rmp-trigger-bar-status {
+  font-size: 11.5px;
+  color: var(--color-ink-300);
+  font-variant-numeric: tabular-nums;
+  margin-left: auto;
+}
+
+/* Activity view — shared trigger status surfaced under the events table so a
+   retry fired from this view shows success/error where the button was clicked. */
+.rmp-activity-status {
+  font-size: 12px;
+  color: var(--color-ink-300);
+  font-variant-numeric: tabular-nums;
+}
+
+/* Mobile drawer */
+.rmp-mobile-drawer-overlay {
+  position: fixed;
+  inset: 0;
+  background: oklch(0 0 0 / 45%);
+  z-index: 100;
+}
+.rmp-mobile-drawer {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 280px;
+  max-width: 86vw;
+  background: var(--color-surface-1);
+  border-right: 1px solid var(--color-stroke);
+  display: flex;
+  flex-direction: column;
+  z-index: 101;
+  animation: rmp-slide-in 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+}
+/* Inside the drawer the rail fills and is non-sticky */
+.rmp-mobile-drawer .rmp-rail {
+  width: 100%;
+  position: relative;
+  height: 100%;
+  border-right: none;
+}
+@keyframes rmp-slide-in {
+  from { transform: translateX(-100%); }
+  to { transform: translateX(0); }
+}
+.rmp-drawer-close {
+  background: transparent;
+  border: none;
+  color: var(--color-ink-300);
+  cursor: pointer;
+  padding: 4px;
+  display: inline-flex;
+  border-radius: var(--radius-sm);
+}
+.rmp-drawer-close:hover { color: var(--color-ink-100); background: var(--color-surface-2); }
+
+/* Read-only chip */
+.rmp-readonly-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 3px 9px;
+  font-size: 10.5px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+  color: var(--color-ink-300);
+  border: 1px solid var(--color-stroke);
+  white-space: nowrap;
+}
+
+/* First-run panel (Triage read-only) */
+.rmp-firstrun {
+  padding: 32px 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.rmp-firstrun-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.rmp-firstrun-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--color-ink-100);
+  margin: 0;
+}
+.rmp-firstrun-body {
+  font-size: 13px;
+  color: var(--color-ink-300);
+  line-height: 1.6;
+  margin: 0;
+}
+.rmp-firstrun-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 4px 0 0 0;
+  padding: 0;
+  list-style: none;
+}
+.rmp-firstrun-steps li {
+  font-size: 12.5px;
+  color: var(--color-ink-300);
+  padding-left: 18px;
+  position: relative;
+  line-height: 1.5;
+}
+.rmp-firstrun-steps li::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 7px;
+  width: 5px;
+  height: 5px;
+  border-radius: 999px;
+  background: var(--color-accent);
+}
+.rmp-firstrun-note {
+  font-size: 11.5px;
+  color: var(--color-ink-400);
+  margin: 0;
+}
+
+/* ──────────────────────────────────────────────────────────────────────────
+   Operations pipeline — unified issue-lifecycle cards. Replaces the old
+   working / needs-attention / active-issues tables. Token-only colours so
+   both themes resolve; flat (no shadow), full borders (no side-stripe),
+   radius capped at var(--radius-lg). State tint via [data-bucket].
+   ────────────────────────────────────────────────────────────────────────── */
+.rmp-pipeline-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 2px 2px 0;
+}
+.rmp-pipeline-head-label {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--color-ink-300);
+}
+.rmp-pipeline-head-count {
+  font-size: 11px;
+  color: var(--color-ink-400);
+}
+
+/* Breakpoint-free responsive grid (impeccable). */
+.rmp-card-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr));
+}
+
+.rmp-card {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px;
+  border-radius: var(--radius-lg);
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-stroke);
+  transition:
+    border-color 160ms cubic-bezier(0.16, 1, 0.3, 1),
+    background-color 160ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+.rmp-card:hover {
+  border-color: color-mix(in oklch, var(--color-ink-400) 30%, var(--color-stroke));
+}
+.rmp-card[data-bucket="failed"] {
+  background: color-mix(in oklch, var(--color-err) 9%, var(--color-surface-1));
+  border-color: color-mix(in oklch, var(--color-err) 22%, var(--color-stroke));
+}
+.rmp-card[data-bucket="running"] {
+  border-color: color-mix(in oklch, var(--color-accent) 22%, var(--color-stroke));
+}
+
+.rmp-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+.rmp-card-id {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.rmp-card-meta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 0;
+  font-size: 11.5px;
+  line-height: 1.5;
+  color: var(--color-ink-200);
+}
+.rmp-card-meta > :not(:first-child)::before {
+  content: "·";
+  margin: 0 8px;
+  color: var(--color-ink-500);
+}
+.rmp-card-meta-dim {
+  color: var(--color-ink-200);
+}
+
+.rmp-card-error {
+  margin-top: 0;
+  max-width: none;
+}
+.rmp-card-actions {
+  display: flex;
+  gap: 8px;
+}
+
+/* Lifecycle stepper — horizontal dot/segment/label track. Equal-width cells
+   keep dot centres evenly spaced; each cell's connector is absolutely placed
+   from its dot centre to the next, and the dot paints over it. */
+.rmp-step {
+  display: flex;
+  align-items: flex-start;
+}
+.rmp-step-cell {
+  flex: 1 1 0;
+  min-width: 0;
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+}
+.rmp-step-seg {
+  position: absolute;
+  top: 4px;
+  left: 50%;
+  width: 100%;
+  height: 1px;
+  background: var(--color-stroke);
+}
+.rmp-step-seg[data-state="complete"] {
+  background: var(--color-accent);
+}
+.rmp-step-node {
+  position: relative;
+  width: 9px;
+  height: 9px;
+  border-radius: 999px;
+  box-sizing: border-box;
+  flex-shrink: 0;
+}
+.rmp-step-node[data-state="complete"] {
+  background: var(--color-accent);
+}
+.rmp-step-node[data-state="current"] {
+  background: var(--color-surface-1);
+  border: 2px solid var(--color-accent);
+}
+.rmp-step-node[data-state="failed"] {
+  background: var(--color-err);
+}
+.rmp-step-node[data-state="pending"] {
+  background: var(--color-surface-1);
+  border: 1px solid var(--color-ink-500);
+}
+.rmp-step-node[data-live="true"] {
+  animation: pulse-dot 1.8s ease-in-out infinite;
+}
+.rmp-step-label {
+  max-width: 100%;
+  font-size: 10.5px;
+  text-align: center;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-ink-200);
+}
+.rmp-step-label[data-reached="true"] {
+  color: var(--color-ink-200);
+}
+
+/* First-load skeleton — calm opacity pulse, never a spinner. */
+@keyframes rmp-skeleton {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.55; }
+}
+.rmp-card-skeleton {
+  height: 138px;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--color-stroke);
+  background: var(--color-surface-1);
+  animation: rmp-skeleton 1.8s ease-in-out infinite;
+}
+
+/* Teaching empty state. */
+.rmp-pipeline-empty {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 32px 20px;
+  text-align: center;
+}
+.rmp-pipeline-empty-title {
+  font-size: 13px;
+  color: var(--color-ink-300);
+}
+.rmp-pipeline-empty-sub {
+  font-size: 12px;
+  color: var(--color-ink-400);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .rmp-nav-item,
+  .rmp-mobile-menu-btn,
+  .rmp-drawer-close,
+  .rmp-readonly-chip { transition: none; }
+  .rmp-mobile-drawer,
+  .rmp-view-enter { animation: none; }
+  .rmp-vital-dot.pulse { animation: none; }
+  .rmp-card { transition: none; }
+  .rmp-card-skeleton,
+  .rmp-step-node[data-live="true"] { animation: none; }
+}

@@ -1,0 +1,25 @@
+# systemctl status / show output.
+# Keep the unit header, Loaded:, Active:, Main PID:, and resource lines;
+# drop the journal tail (syslog-style timestamped lines) that blows up output.
+
+[filters.systemctl]
+description = "Compact systemctl status output"
+match_command = "^systemctl$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^[A-Z][a-z]{2}\\s+\\d+\\s+\\d\\d:\\d\\d:\\d\\d\\s",
+]
+truncate_lines_at = 250
+max_lines = 60
+on_empty = "systemctl: ok"
+
+[[tests.systemctl]]
+name = "drops journal lines keeps status header"
+input = "● nginx.service - A high performance web server\n     Loaded: loaded (/lib/systemd/system/nginx.service; enabled)\n     Active: active (running) since Mon 2023-11-13 09:00:00 UTC; 1 week ago\n   Main PID: 1234 (nginx)\n\nNov 13 09:00:00 host systemd[1]: Started nginx.service.\nNov 13 09:00:05 host nginx[1234]: worker process started\n"
+expected = "● nginx.service - A high performance web server\n     Loaded: loaded (/lib/systemd/system/nginx.service; enabled)\n     Active: active (running) since Mon 2023-11-13 09:00:00 UTC; 1 week ago\n   Main PID: 1234 (nginx)\n"
+
+[[tests.systemctl]]
+name = "all journal collapses to sentinel"
+input = "\nNov 13 09:00:00 host systemd[1]: Started nginx.service.\n"
+expected = "systemctl: ok"

@@ -1,0 +1,70 @@
+# Nx monorepo task runner output.
+# Strip the NX banner / "Running target" chatter, keep the actual task output.
+
+[filters.nx]
+description = "Compact Nx task runner output"
+match_command = "^nx$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^\\s*>\\s+NX\\s+Running target",
+	"^\\s*>\\s+NX\\s+Successfully ran target",
+	"^\\s*>\\s+NX\\s+Cloud",
+	"^\\s*>\\s+NX\\s+Distributed",
+	"^\\s*>\\s+NX\\s+View logs",
+	"^———————",
+	"^\\s*>\\s*NX\\s+Nx read the output",
+	"^\\s+Nx \\(powered by",
+]
+truncate_lines_at = 250
+max_lines = 80
+on_empty = "nx: ok"
+
+[[tests.nx]]
+name = "strips NX banner keeps task output"
+input = "\n >  NX   Running target build for 3 projects\n\n> nx run app:build\nError: build failed\n\n >  NX   Ran target build for 3 projects (2s)\n"
+expected = "> nx run app:build\nError: build failed\n >  NX   Ran target build for 3 projects (2s)\n"
+
+[[tests.nx]]
+name = "all noise becomes ok"
+input = "\n >  NX   Successfully ran target build for 3 projects\n\n"
+expected = "nx: ok"
+
+[[tests.nx]]
+name = "strips separator cache-replay and footer ad"
+input = "————————————————————————————————————————\n > NX   Nx read the output from the cache instead of running the command\nCompiled successfully.\n   Nx (powered by Nx Cloud)\n"
+expected = "Compiled successfully.\n"
+
+# Wrapper invocations: `pnpm nx build`, `npx nx ...`, `yarn nx ...` detect as
+# (program=pnpm|npx|yarn, subcommand=nx) and fall through pkg::supports to the
+# builtin defs. The bare `nx` entry only matches the program token, so this
+# companion claims the wrapped form with the same strip/cap/on_empty rules.
+[filters.nx-wrapped]
+description = "Compact Nx task runner output (pnpm/npx/yarn wrapper invocations)"
+match_command = "^(pnpm|npx|yarn)$"
+match_subcommand = "^nx$"
+strip_ansi = true
+strip_lines_matching = [
+	"^\\s*$",
+	"^\\s*>\\s+NX\\s+Running target",
+	"^\\s*>\\s+NX\\s+Successfully ran target",
+	"^\\s*>\\s+NX\\s+Cloud",
+	"^\\s*>\\s+NX\\s+Distributed",
+	"^\\s*>\\s+NX\\s+View logs",
+	"^———————",
+	"^\\s*>\\s*NX\\s+Nx read the output",
+	"^\\s+Nx \\(powered by",
+]
+truncate_lines_at = 250
+max_lines = 80
+on_empty = "nx: ok"
+
+[[tests.nx-wrapped]]
+name = "wrapped pnpm nx strips banner keeps task output"
+input = "\n >  NX   Running target build for 3 projects\n\n> nx run app:build\nError: build failed\n\n >  NX   Ran target build for 3 projects (2s)\n"
+expected = "> nx run app:build\nError: build failed\n >  NX   Ran target build for 3 projects (2s)\n"
+
+[[tests.nx-wrapped]]
+name = "wrapped all noise becomes ok"
+input = "\n >  NX   Successfully ran target build for 3 projects\n\n"
+expected = "nx: ok"

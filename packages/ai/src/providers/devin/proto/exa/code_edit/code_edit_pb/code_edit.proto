@@ -1,0 +1,186 @@
+syntax = "proto3";
+
+package exa.code_edit.code_edit_pb;
+
+import "exa/codeium_common_pb/codeium_common.proto";
+import "exa/context_module_pb/context_module.proto";
+import "exa/index_pb/index.proto";
+
+enum RelevanceReason {
+  RELEVANCE_REASON_UNSPECIFIED = 0;
+  RELEVANCE_REASON_SAME_COMMIT_OLD = 1;
+  RELEVANCE_REASON_SAME_COMMIT_NEW = 2;
+  RELEVANCE_REASON_REF_IN_DELETION = 3;
+  RELEVANCE_REASON_REF_IN_INSERTION = 4;
+  RELEVANCE_REASON_NOT_RELEVANT = 99;
+}
+
+enum DescriptionType {
+  DESCRIPTION_TYPE_UNSPECIFIED = 0;
+  DESCRIPTION_TYPE_EDIT_COMMAND = 1;
+  DESCRIPTION_TYPE_INSERTION_COMMAND = 2;
+}
+
+enum IntentType {
+  INTENT_TYPE_UNSPECIFIED = 0;
+  INTENT_TYPE_COMMIT_GOAL = 1;
+  INTENT_TYPE_DIFF_SEARCH = 2;
+  INTENT_TYPE_CLEAN_COMMIT = 3;
+  INTENT_TYPE_CCI_SIGNATURE_SEARCH = 4;
+  INTENT_TYPE_CCI_RAW_SOURCE_SEARCH = 5;
+}
+
+enum RetrieverType {
+  RETRIEVER_TYPE_UNSPECIFIED = 0;
+  RETRIEVER_TYPE_CONTEXT_MODULE_LOCAL = 1;
+  RETRIEVER_TYPE_CONTEXT_MODULE_SEARCH = 2;
+  RETRIEVER_TYPE_SEARCH = 3;
+  RETRIEVER_TYPE_MQUERY_OPENAI = 4;
+  RETRIEVER_TYPE_MQUERY_CODEIUM = 5;
+  RETRIEVER_TYPE_CONTEXT_MODULE_SEARCH_MQUERY_SCORER = 6;
+  RETRIEVER_TYPE_COMMIT_GRAPH = 7;
+  RETRIEVER_TYPE_MORPH_NORMAL = 8;
+  RETRIEVER_TYPE_MORPH_ADVANCED = 9;
+  RETRIEVER_TYPE_GRAPH_CLUSTERS = 10;
+  RETRIEVER_TYPE_OPENSEARCH = 11;
+}
+
+message RelevantCodeContext {
+  .exa.codeium_common_pb.CodeContextItem code_context_item = 1;
+  .exa.code_edit.code_edit_pb.RelevanceReason relevance_reason = 3;
+}
+
+message IntentRelevance {
+  string intent = 1;
+  float relevance_score = 2;
+  string rationale = 3;
+}
+
+message CodeContextItemChange {
+  .exa.codeium_common_pb.CodeContextItem start_cci = 1;
+  .exa.codeium_common_pb.CodeContextItem end_cci = 2;
+  repeated .exa.code_edit.code_edit_pb.RelevantCodeContext relevant_code_contexts = 3;
+  map<string, string> description_by_type = 4;
+  repeated .exa.code_edit.code_edit_pb.IntentRelevance intent_relevance = 5;
+}
+
+message FileChange {
+  string start_file_path_migrate_me_to_uri = 1 [deprecated = true];
+  string start_file_uri = 10;
+  string start_file_rel_path = 8;
+  string end_file_path_migrate_me_to_uri = 2 [deprecated = true];
+  string end_file_uri = 11;
+  string end_file_rel_path = 9;
+  string old_file_content = 3;
+  string new_file_content = 4;
+  repeated .exa.code_edit.code_edit_pb.CodeContextItemChange code_context_item_changes = 6;
+  repeated .exa.codeium_common_pb.CodeContextItem unchanged_code_context_items = 7;
+}
+
+message Intent {
+  string intent = 1;
+  .exa.code_edit.code_edit_pb.IntentType intent_type = 2;
+  bool include_test_files = 3;
+}
+
+message CodeChangeWithContext {
+  reserved 7;
+  reserved "intent_by_type";
+
+  .exa.codeium_common_pb.GitRepoInfo repository = 1;
+  repeated .exa.code_edit.code_edit_pb.FileChange file_changes = 2;
+  repeated .exa.code_edit.code_edit_pb.FileChange test_file_changes = 9;
+  string intent = 3;
+  oneof code_change_data_source {
+    .exa.code_edit.code_edit_pb.GitCommit git_commit = 4;
+  }
+  .exa.index_pb.IndexStats index_stats = 5;
+  repeated .exa.codeium_common_pb.CodeContextItem unrelated_ccis = 6;
+  repeated .exa.code_edit.code_edit_pb.Intent synthetic_intents = 8;
+}
+
+message GitCommit {
+  string commit_hash = 1;
+  string parent_commit_hash = 2;
+}
+
+message CommitToFileChangeRequest {
+  string repo_root = 1;
+  .exa.codeium_common_pb.GitRepoInfo repository = 2;
+  int32 unrelated_cci_multiple = 3;
+  string db_dir = 4;
+}
+
+message GitFilePatch {
+  string from = 1;
+  string to = 2;
+}
+
+message CommitToFileChangeResponse {
+  repeated .exa.code_edit.code_edit_pb.FileChange file_changes = 1;
+  string parent_commit_hash = 2;
+  .exa.index_pb.IndexStats index_stats = 3;
+  repeated .exa.codeium_common_pb.CodeContextItem unrelated_ccis = 4;
+}
+
+message CodeRetrievalEvalTask {
+  .exa.codeium_common_pb.GitRepoInfo repository = 1;
+  .exa.code_edit.code_edit_pb.GitCommit commit_info = 5;
+  string query = 2;
+  repeated .exa.code_edit.code_edit_pb.RelevantCodeContext target_code_contexts = 3;
+  string subdirectory = 4;
+}
+
+message CodeRetrievalResult {
+  reserved 2;
+  reserved "retrieved_code_contexts";
+
+  .exa.codeium_common_pb.GitRepoInfo repository = 1;
+  string retriever_name = 3;
+  .exa.code_edit.code_edit_pb.RetrieverInfo retriever_info = 4;
+  repeated .exa.context_module_pb.CodeContextItemWithRetrievalMetadata code_context_with_metadatas = 5;
+}
+
+message RetrieverClassification {
+  float relevance_score = 1;
+  .exa.code_edit.code_edit_pb.RetrieverInfo retriever_info = 2;
+}
+
+message CodeContextItemWithClassification {
+  .exa.code_edit.code_edit_pb.RelevantCodeContext code_context_item = 1;
+  bool relevant = 2;
+  .exa.code_edit.code_edit_pb.RetrieverClassification prediction = 3;
+}
+
+message RetrieverInfo {
+  .exa.code_edit.code_edit_pb.RetrieverType type = 1;
+  string model_name = 2;
+}
+
+message RetrievalMetrics {
+  .exa.code_edit.code_edit_pb.RetrieverInfo retriever_info = 1;
+  float precision_score = 2;
+  float recall_score = 3;
+  float accuracy_score = 4;
+  float label_ranking_average_precision_score = 5;
+  float roc_auc_score = 6;
+  float average_precision_score = 7;
+  float threshold = 8;
+}
+
+message CodeRetrievalEvalResult {
+  .exa.codeium_common_pb.GitRepoInfo repository = 1;
+  repeated .exa.code_edit.code_edit_pb.CodeContextItemWithClassification classified_items = 2;
+  .exa.code_edit.code_edit_pb.RetrievalMetrics metrics = 3;
+}
+
+message InstructionWithId {
+  int32 id = 1;
+  string file = 2;
+  string function = 3;
+  string instruction = 4;
+}
+
+message InstructionWithIdList {
+  repeated .exa.code_edit.code_edit_pb.InstructionWithId instructions = 1;
+}

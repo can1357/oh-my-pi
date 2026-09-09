@@ -1,0 +1,75 @@
+syntax = "proto3";
+
+package exa.file_system_provider_pb;
+
+import "buf/validate/validate.proto";
+import "google/protobuf/timestamp.proto";
+
+enum FileType {
+  FILE_TYPE_UNSPECIFIED = 0;
+  FILE_TYPE_DIRECTORY = 1;
+  FILE_TYPE_REGULAR = 2;
+  FILE_TYPE_SYMLINK = 3;
+}
+
+enum FileSystemError {
+  FILE_SYSTEM_ERROR_UNSPECIFIED = 0;
+  FILE_SYSTEM_ERROR_NOT_DIRECTORY = 1;
+  FILE_SYSTEM_ERROR_IS_DIRECTORY = 2;
+  FILE_SYSTEM_ERROR_NOT_EXIST = 3;
+  FILE_SYSTEM_ERROR_EXISTS = 4;
+  FILE_SYSTEM_ERROR_PERMISSION = 5;
+  FILE_SYSTEM_ERROR_INVALID_URI = 6;
+  FILE_SYSTEM_ERROR_OTHER = 7;
+}
+
+message FileStat {
+  .exa.file_system_provider_pb.FileType type = 1;
+  int64 size = 2;
+  .google.protobuf.Timestamp mtime = 3;
+  .google.protobuf.Timestamp ctime = 4;
+  .exa.file_system_provider_pb.FileSystemError error = 5;
+  string error_message = 6;
+}
+
+message StatRequest {
+  repeated string uri = 1;
+}
+
+message StatResponse {
+  repeated .exa.file_system_provider_pb.FileStat file_stat = 1;
+}
+
+message ReadDirectoryRequest {
+  repeated string uri = 1;
+}
+
+message ReadDirectoryResponse {
+  repeated .exa.file_system_provider_pb.DirEntries entries = 1;
+}
+
+message DirEntries {
+  map<string, .exa.file_system_provider_pb.FileStat> file_stat_entries = 1;
+  .exa.file_system_provider_pb.FileSystemError error = 2;
+  string error_message = 3;
+}
+
+message ReadFileRequest {
+  repeated string uri = 1;
+}
+
+message ReadFileResponse {
+  repeated .exa.file_system_provider_pb.FileData file_data = 1;
+}
+
+message FileData {
+  bytes content = 1;
+  .exa.file_system_provider_pb.FileSystemError error = 2;
+  string error_message = 3;
+}
+
+service FileSystemProviderService {
+  rpc Stat (.exa.file_system_provider_pb.StatRequest) returns (.exa.file_system_provider_pb.StatResponse);
+  rpc ReadDirectory (.exa.file_system_provider_pb.ReadDirectoryRequest) returns (.exa.file_system_provider_pb.ReadDirectoryResponse);
+  rpc ReadFile (.exa.file_system_provider_pb.ReadFileRequest) returns (.exa.file_system_provider_pb.ReadFileResponse);
+}

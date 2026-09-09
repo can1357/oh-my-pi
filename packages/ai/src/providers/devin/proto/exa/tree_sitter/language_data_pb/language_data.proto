@@ -1,0 +1,14 @@
+syntax = "proto3";
+
+package exa.tree_sitter.language_data_pb;
+
+import "exa/codeium_common_pb/codeium_common.proto";
+
+message LanguageData {
+  .exa.codeium_common_pb.Language language = 1;
+  repeated string block_node_types = 2;
+  repeated string block_node_parent_types = 3;
+  repeated string block_node_parent_start_keywords = 4;
+  repeated string special_node_types = 6;
+  bool curly = 5;
+}
