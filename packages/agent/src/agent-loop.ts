@@ -348,7 +348,10 @@ function snapshotToolResultProviderMetadata(value: unknown): {
 	};
 }
 
-function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantContentBlock {
+function snapshotAssistantContentBlock(
+	block: AssistantContentBlock,
+	completedToolArguments?: WeakMap<object, Record<string, unknown>>,
+): AssistantContentBlock {
 	switch (block.type) {
 		case "text":
 		case "image":
@@ -364,7 +367,7 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 		case "toolCall": {
 			const snap = {
 				...block,
-				arguments: structuredCloneJSON(block.arguments),
+				arguments: completedToolArguments?.get(block.arguments) ?? structuredCloneJSON(block.arguments),
 				providerMetadata: snapshotToolCallProviderMetadata(block.providerMetadata),
 			};
 			// Object spread copies enumerable symbols in Bun, but the Cursor
@@ -376,10 +379,13 @@ function snapshotAssistantContentBlock(block: AssistantContentBlock): AssistantC
 	}
 }
 
-function snapshotAssistantMessage(message: AssistantMessage): AssistantMessage {
+function snapshotAssistantMessage(
+	message: AssistantMessage,
+	completedToolArguments?: WeakMap<object, Record<string, unknown>>,
+): AssistantMessage {
 	return {
 		...message,
-		content: message.content.map(snapshotAssistantContentBlock),
+		content: message.content.map(block => snapshotAssistantContentBlock(block, completedToolArguments)),
 		usage: {
 			...message.usage,
 			cost: { ...message.usage.cost },
@@ -1779,6 +1785,7 @@ async function streamAssistantResponse(
 			let partialMessage: AssistantMessage | null = null;
 			let addedPartial = false;
 			const completedToolCallIds = new Set<string>();
+			let completedToolArguments = new WeakMap<object, Record<string, unknown>>();
 			const argStreams = new Map<number, { id: string; stream: AgentToolArgStream }>();
 			const cancelArgStreams = (): void => {
 				for (const { id, stream: argStream } of argStreams.values()) {
@@ -1951,6 +1958,7 @@ async function streamAssistantResponse(
 
 					switch (event.type) {
 						case "start":
+							completedToolArguments = new WeakMap();
 							partialMessage = event.partial;
 							if (addedPartial) {
 								context.messages[context.messages.length - 1] = partialMessage;
@@ -1988,12 +1996,37 @@ async function streamAssistantResponse(
 								}
 								partialMessage = event.partial;
 								context.messages[context.messages.length - 1] = partialMessage;
+								if (config.onAssistantMessageEvent && !config.onAssistantMessageEventReadOnly) {
+									completedToolArguments = new WeakMap();
+								}
 								config.onAssistantMessageEvent?.(partialMessage, event);
+								if (
+									event.type === "toolcall_start" ||
+									event.type === "toolcall_delta" ||
+									event.type === "toolcall_end"
+								) {
+									const block = partialMessage.content[event.contentIndex];
+									if (block?.type === "toolCall") completedToolArguments.delete(block.arguments);
+								}
 								// `message` and `assistantMessageEvent.partial` intentionally share one
 								// immutable snapshot of the streaming partial: every message_update
 								// consumer treats both as read-only, so cloning the identical partial
 								// twice per delta was pure waste.
-								const messageSnapshot = snapshotAssistantMessage(partialMessage);
+								const messageSnapshot = snapshotAssistantMessage(partialMessage, completedToolArguments);
+								if (event.type === "toolcall_end") {
+									const source = partialMessage.content[event.contentIndex];
+									const snapshot = messageSnapshot.content[event.contentIndex];
+									if (
+										source?.type === "toolCall" &&
+										snapshot?.type === "toolCall" &&
+										typeof source.arguments === "object" &&
+										source.arguments !== null
+									) {
+										// Only streaming consumers share this clone. Final dispatch hooks
+										// receive a fresh message so argument rewrites cannot change previews.
+										completedToolArguments.set(source.arguments, snapshot.arguments);
+									}
+								}
 								stream.push({
 									type: "message_update",
 									assistantMessageEvent: snapshotAssistantMessageEvent(event, messageSnapshot),

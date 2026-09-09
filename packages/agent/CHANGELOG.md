@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduced memory and copying while streaming after large tool calls finish.
+
 ## [18.1.10] - 2026-09-04
 
 ### Fixed

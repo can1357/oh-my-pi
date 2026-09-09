@@ -1675,16 +1675,19 @@ export class AgentSession {
 				build: buildAsyncResultBatchMessage,
 			});
 		}
-		this.agent.setAssistantMessageEventInterceptor((message, assistantMessageEvent) => {
-			const event: AgentEvent = {
-				type: "message_update",
-				message,
-				assistantMessageEvent,
-			};
-			this.#streamingEditGuard.preCache(event);
-			this.#streamingEditGuard.maybeAbort(event);
-			this.#loopGuards.onAssistantEvent(message, assistantMessageEvent);
-		});
+		this.agent.setAssistantMessageEventInterceptor(
+			(message, assistantMessageEvent) => {
+				const event: AgentEvent = {
+					type: "message_update",
+					message,
+					assistantMessageEvent,
+				};
+				this.#streamingEditGuard.preCache(event);
+				this.#streamingEditGuard.maybeAbort(event);
+				this.#loopGuards.onAssistantEvent(message, assistantMessageEvent);
+			},
+			{ readOnly: true },
+		);
 		// Tool-result hook owns synchronous post-tool actions that must affect the current loop.
 		this.agent.afterToolCall = ctx => this.#afterToolCall(ctx);
 		// Pre-scheduling tool_call wiring: extension handlers run at arg-prep
