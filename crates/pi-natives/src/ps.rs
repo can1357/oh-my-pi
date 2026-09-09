@@ -173,10 +173,13 @@ impl Process {
 		let graceful_ms = options.graceful_ms.unwrap_or(1000);
 		let timeout_ms = options.timeout_ms.unwrap_or(5000);
 		let ct = task::CancelToken::new(None, options.signal);
-		let process = self.inner.clone();
+		// Pin the group and descendants here, not inside the task: the root can
+		// exit during the hop onto the executor, and neither is observable once
+		// it has.
+		let plan = self.inner.capture_termination(group);
 		task::future(env, "process.terminate", async move {
-			process
-				.terminate_tree(group, graceful_ms, timeout_ms, ct.into_core())
+			plan
+				.terminate(graceful_ms, timeout_ms, ct.into_core())
 				.await
 				.map_err(|err| napi::Error::from_reason(err.to_string()))
 		})
