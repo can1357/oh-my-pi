@@ -299,6 +299,10 @@ export class CollabSocket {
 		// excluded from the sum. Deliberately not zero, which is the under-charge the
 		// charge exists to prevent, and deliberately not a refusal, because a caller
 		// bug should not silently cost a guest its only route to a replica.
+		//
+		// Signed zero passes: `-0` is a declaration of zero, not a malformed one, and
+		// it sums as zero wherever the charge is read. Rejecting it would refuse a
+		// legitimate empty batch to no purpose.
 		const declared =
 			Number.isFinite(retainedBytes) && retainedBytes >= 0 ? retainedBytes : MAX_PENDING_SEND_BYTES + 1;
 		if (declared !== retainedBytes) {
