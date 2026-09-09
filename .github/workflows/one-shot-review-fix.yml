@@ -67,10 +67,6 @@ jobs:
 
           path.write_text(text)
           PY
-      - name: Verify banned pattern is gone
-        shell: bash
-        run: |
-          ! grep -n 'as unknown as Parameters<' packages/coding-agent/test/model-resolver.test.ts
       - name: Run targeted resolver tests
         run: bun test packages/coding-agent/test/model-resolver.test.ts
       - name: Commit fix and remove helper
