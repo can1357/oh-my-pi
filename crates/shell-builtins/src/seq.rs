@@ -9,7 +9,7 @@ use std::{
 };
 
 use clap::{Arg, ArgAction, ArgMatches, Command};
-use num_bigint::BigUint;
+use bigdecimal::num_bigint::BigUint;
 use num_traits::{ToPrimitive, Zero};
 use omp_shell::{ShellExtensions, builtins::Registration};
 

@@ -117,7 +117,7 @@ objc2-web-kit = "0.3"
 objc2-foundation = "0.3.2"
 objc2-app-kit = "0.3"
 notify = { version = "=8.2.0", features = ["macos_kqueue"] }
-num-bigint = "0.4"
+num-bigint = "0.5"
 num-traits = "0.2"
 omp-agent = { path = "crates/agent", version = "0.1.0" }
 omp-app = { path = "crates/app", version = "0.1.0" }
