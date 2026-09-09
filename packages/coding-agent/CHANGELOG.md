@@ -6,6 +6,7 @@
 
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
 - `/loop` accepts `--until '<cmd>'` / `--while '<cmd>'` to gate each iteration on a shell command's exit status, so a loop can stop on real project state instead of only a count or duration. ([#10858](https://github.com/can1357/oh-my-pi/pull/10858) by [@andyhite](https://github.com/andyhite))
+- The `update` command now enables native addon staging before loading its module graph, so the updater loads the cache copy instead of locking the installed addon that the package manager must replace ([#4385](https://github.com/can1357/oh-my-pi/issues/4385)).
 
 ### Fixed
 

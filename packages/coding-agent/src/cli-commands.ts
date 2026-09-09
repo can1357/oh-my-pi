@@ -8,6 +8,7 @@
  * `launch` — see #1496 for the original "args silently leak to the LLM"
  * regression that motivated the split.
  */
+import { enableNativeAddonStaging } from "@oh-my-pi/pi-natives/loader";
 import type { CommandEntry } from "@oh-my-pi/pi-utils/cli";
 import * as commandHelp from "./cli/command-help";
 import {
@@ -189,7 +190,11 @@ export const commands: CommandEntry[] = [
 	},
 	{
 		name: "update",
-		load: () => import("./commands/update").then(m => m.default),
+		load: () => {
+			// Theme and file-lock imports load natives before the command can run.
+			enableNativeAddonStaging();
+			return import("./commands/update").then(m => m.default);
+		},
 		help: commandHelp.updateHelp,
 	},
 	{

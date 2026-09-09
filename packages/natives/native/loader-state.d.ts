@@ -1,3 +1,6 @@
+/** Enable Windows package-addon staging before the native API is loaded. */
+export function enableNativeAddonStaging(): void;
+
 export interface EmbeddedAddonFile {
 	variant: "modern" | "baseline" | "default";
 	filename: string;
@@ -39,6 +42,7 @@ export interface ShouldStageNodeModulesAddonInput {
 	platform: NodeJS.Platform | string;
 	isCompiledBinary: boolean;
 	nativeDir: string;
+	stagingEnabled?: boolean;
 }
 
 export function shouldStageNodeModulesAddon(input: ShouldStageNodeModulesAddonInput): boolean;
@@ -61,6 +65,7 @@ export interface InitLoaderContextOverrides {
 	platform?: NodeJS.Platform | string;
 	isCompiledBinary?: boolean;
 	leafPackageDir?: string | null;
+	stagingEnabled?: boolean;
 }
 
 export interface NativeLoaderContext {
