@@ -1391,6 +1391,7 @@ export class TUI extends Container {
 				this.#parkedViewportOffset = 0;
 			}
 			this.#noteAltBufferToggle();
+			this.#imageBudget.beginAltScreenLifecycle();
 			this.terminal.write(`\x1b[?1049h${this.#keyboardEnhancementEnter()}`);
 		}
 		this.#resizeSettleTimer?.cancel();
@@ -2791,6 +2792,7 @@ export class TUI extends Container {
 			// fullscreen overlays (Ghostty/kitty/iTerm2).
 			this.#noteAltBufferToggle();
 			const mouseEnter = wantMouseTracking ? MOUSE_TRACKING_ON : "";
+			this.#imageBudget.beginAltScreenLifecycle();
 			this.terminal.write(`\x1b[?1049h${this.#keyboardEnhancementEnter()}${mouseEnter}`);
 			setAltScreenActive(true);
 			this.terminal.hideCursor();

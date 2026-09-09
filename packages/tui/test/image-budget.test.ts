@@ -15,6 +15,7 @@ import {
 	encodeKittyPlacement,
 	encodeKittyTransmit,
 	getCellDimensions,
+	imageFallback,
 	ImageProtocol,
 	setCellDimensions,
 	TERMINAL,
@@ -895,6 +896,55 @@ describe("TUI inline-image budget", () => {
 
 			expect(placed.has(sharedId)).toBe(true);
 			expect(resident.has(sharedId)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("starts each alternate-buffer lifecycle without the previous overlay's split", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { writes } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		tui.setFrameProvider({
+			renderFrame: () => ({ viewport: ["transcript"] }),
+			acknowledgeHistory: () => {},
+		});
+		// Over cap, so its own pass settles at a stricter threshold.
+		const firstModal = Array.from({ length: 3 }, (_, i) => makeImage(tui.imageBudget, `first-${i}`));
+		const secondModal = makeImage(tui.imageBudget, "second");
+		const secondId = tui.imageBudget.acquireId("second");
+		const fallback = imageFallback("image/png", { widthPx: 1, heightPx: 1 });
+
+		try {
+			tui.start();
+			await settle(term);
+
+			const first = tui.showOverlay(
+				{ render: width => firstModal.flatMap(image => image.render(width)), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+			first.hide();
+			await settle(term);
+
+			writes.length = 0;
+			const second = tui.showOverlay(
+				{ render: width => secondModal.render(width), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+
+			// `?1049h` starts a cleared buffer, so the previous modal's split says
+			// nothing about this one. Carrying it renders the sole image as text for
+			// a frame and drops its key on the way.
+			expect(writes.join("")).not.toContain(fallback);
+			expect(tui.imageBudget.acquireId("second")).toBe(secondId);
+			second.hide();
 		} finally {
 			tui.stop();
 			setKittyGraphics(originalGraphics);

@@ -87,6 +87,14 @@ function newSurfaceSplit(): SurfaceSplit {
 	return { onTerminal: 0, planned: 0, lastTotal: 0, suppressedIds: new Set() };
 }
 
+/** Return a split to "nothing has been painted on this surface yet", in place. */
+function resetSurfaceSplit(split: SurfaceSplit): void {
+	split.onTerminal = 0;
+	split.planned = 0;
+	split.lastTotal = 0;
+	split.suppressedIds = new Set();
+}
+
 let nextImageBudgetSeed = Math.floor(Math.random() * 0xffffff);
 function nextImageIdSeed(): number {
 	nextImageBudgetSeed = (nextImageBudgetSeed + 0x10000) & 0xffffff;
@@ -216,6 +224,21 @@ export class ImageBudget {
 		const id = this.#nextId;
 		this.#nextId = (this.#nextId + 1) & 0xffffff || 1;
 		return id;
+	}
+
+	/**
+	 * Start an alternate-buffer lifecycle. Call once per `?1049h`, before the
+	 * first pass of the fullscreen overlay or resize borrow that owns the buffer.
+	 *
+	 * The alt split is a claim about the frame standing on that surface, and
+	 * `?1049h` hands over a cleared one: the previous occupant's threshold would
+	 * suppress this buffer's leading images against a frame that no longer
+	 * exists, painting them as text until a corrective render lands. Passes
+	 * *within* one lifecycle must keep sharing the split — that is what lets an
+	 * over-cap discovery pass converge before the frame is emitted.
+	 */
+	beginAltScreenLifecycle(): void {
+		resetSurfaceSplit(this.#altSplit);
 	}
 
 	/**
