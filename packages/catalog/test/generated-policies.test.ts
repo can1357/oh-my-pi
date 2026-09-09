@@ -8,7 +8,8 @@ import {
 	applyOllamaCloudOutputCap,
 	linkOpenAIPromotionTargets,
 } from "../scripts/generated-policies";
-import { CREDENTIAL_SCOPED_PROVIDERS, mergePreviousSnapshotModels } from "../scripts/generate-models";
+import { mergePreviousSnapshotModels } from "../scripts/generate-models";
+import { isCredentialScopedCatalogProvider } from "../src/compat/resolve";
 import { buildModel } from "../src/build";
 import { resolveModelPolicy } from "../src/compat/resolve";
 import { buildGrokbotStaticSeed } from "../src/provider-models/grokbot";
@@ -980,8 +981,9 @@ describe("Grok Bot generated thinking policy", () => {
 	it("excludes grokbot from gen:models catalog discovery like other credential-scoped providers", () => {
 		// A renewer in the generator environment must not bake AvailableModels into models.json,
 		// and prior private roster rows must not resurrect from the previous snapshot.
-		expect(CREDENTIAL_SCOPED_PROVIDERS.has("grokbot")).toBe(true);
-		expect(CREDENTIAL_SCOPED_PROVIDERS.has("devin")).toBe(true);
+		expect(isCredentialScopedCatalogProvider("grokbot")).toBe(true);
+		expect(isCredentialScopedCatalogProvider("devin")).toBe(true);
+		expect(isCredentialScopedCatalogProvider("openai")).toBe(false);
 		const stale = buildModel({
 			id: "account-private-model",
 			name: "private",

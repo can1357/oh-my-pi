@@ -119,6 +119,7 @@
 		"providers/coreweave.kdl",
 		"providers/cursor.kdl",
 		"providers/deepseek.kdl",
+		"providers/devin.kdl",
 		"providers/firepass.kdl",
 		"providers/fireworks.kdl",
 		"providers/github-copilot.kdl",
@@ -7995,6 +7996,15 @@
 						}
 					},
 					"supportsReasoningEffort": true
+				}
+			},
+			{
+				"source": "providers/devin.kdl:5",
+				"providers": [
+					"devin"
+				],
+				"catalog": {
+					"credentialScopedCatalog": true
 				}
 			},
 			{

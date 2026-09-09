@@ -1247,3 +1247,27 @@ export function resolveModelPolicy(spec: ModelSpec<Api>): ResolvedModelPolicy<Ap
 		catalog: axes.catalog,
 	};
 }
+
+/**
+ * Whether a provider's KDL policy marks catalogs as credential-scoped
+ * (`credential-scoped-catalog`). Used by gen:models exclusions and cold
+ * refresh gates so provider-name tables do not duplicate the rule tree.
+ */
+export function isCredentialScopedCatalogProvider(providerId: string): boolean {
+	const trimmed = providerId.trim();
+	if (!trimmed) return false;
+	return (
+		resolveModelPolicy({
+			id: "__omp_credential_scoped_probe__",
+			name: "__omp_credential_scoped_probe__",
+			api: "openai-completions",
+			provider: trimmed,
+			baseUrl: "https://example.invalid",
+			reasoning: false,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: null,
+			maxTokens: null,
+		}).catalog.credentialScopedCatalog === true
+	);
+}

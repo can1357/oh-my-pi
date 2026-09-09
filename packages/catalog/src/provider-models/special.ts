@@ -338,8 +338,8 @@ export interface DevinModelManagerConfig {
  * Cascade catalog is credential-scoped (gated per account/team), so catalog
  * generation never fetches it: baking one account's roster into the shared
  * bundle would misstate every other account's entitlements and leave zombie
- * rows behind (see CREDENTIAL_SCOPED_PROVIDERS in generate-models.ts). Both
- * SWE-1.6 lanes are verified live against `GetCliModelConfigs`; the
+ * rows behind (see `credential-scoped-catalog` / `isCredentialScopedCatalogProvider`).
+ * Both SWE-1.6 lanes are verified live against `GetCliModelConfigs`; the
  * descriptor's `defaultModel` (`swe-1-6`) must resolve synchronously at
  * boot, before credential-scoped runtime discovery replaces the seed. Field
  * shape mirrors `devinModelSpec` so seeded and discovered rows are

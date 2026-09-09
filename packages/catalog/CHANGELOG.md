@@ -18,6 +18,7 @@
 
 ### Fixed
 
+- Grok Bot / Devin gen:models exclusions derive from KDL `credential-scoped-catalog` (no TypeScript provider-name table).
 - Grok Bot is excluded from `gen:models` catalog discovery (credential-scoped like Devin) so a maintainer renewer cannot bake AvailableModels into the shared `models.json`.
 - Grok Bot `gemini-*` rows declare `sand-empty-tools-retry-wire keep-model` so empty first tool turns replay on product Shell/Read/Write without a TypeScript class branch.
 - Grok Bot `gemini-*` rows declare `sand-accept-empty-write-followup` so empty Write follow-ups are accepted via catalog policy, not a Gemini class check.

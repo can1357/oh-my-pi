@@ -10,6 +10,7 @@ import { createInterface } from "node:readline/promises";
 import { EventLoopKeepalive, type ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { ImageContent, Model } from "@oh-my-pi/pi-ai";
 import { getCatalogProviderEntry } from "@oh-my-pi/pi-catalog/provider-models";
+import { isCredentialScopedCatalogProvider } from "@oh-my-pi/pi-catalog/compat/resolve";
 import {
 	$env,
 	directoryIsMissing,
@@ -845,9 +846,15 @@ export async function resolveScopedModels(
 	const preferences = getModelMatchPreferences(activeSettings);
 	const scopedModels = await resolveModelScope(modelPatterns, modelRegistry, preferences, activeSettings);
 	const discoverable = modelRegistry.getDiscoverableProviders();
+	// Only force a partial-scope refresh for KDL credential-scoped providers
+	// (and wildcards that need live roster expansion). Ordinary built-ins with
+	// `createModelManagerOptions` (e.g. openai) already satisfied by the cold
+	// catalog must not block startup on a synchronous discovery pass.
 	const builtInProviders = credentialScopedProvidersFromPatterns(modelPatterns).filter(
 		providerId =>
-			modelRegistry.hasProvider(providerId) && providerSupportsCredentialScopedRefresh(providerId, modelRegistry),
+			modelRegistry.hasProvider(providerId) &&
+			providerSupportsCredentialScopedRefresh(providerId, modelRegistry) &&
+			isCredentialScopedCatalogProvider(providerId),
 	);
 	// Credential-scoped wildcards (`grokbot/*`) match offline seeds first; still
 	// refresh so live-only AvailableModels rows enter Ctrl+P scope before the

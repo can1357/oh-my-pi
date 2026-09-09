@@ -251,6 +251,32 @@ describe("resolveScopedModels", () => {
 		expect(registry.refreshProviderCalls).toEqual([{ providerId: "grokbot", strategy: "online-if-uncached" }]);
 		expect(scoped.map(entry => entry.model.id).sort()).toEqual(["live-only", "sand-default"]);
 	});
+
+	it("does not eagerly refresh ordinary built-ins when an exact cold-catalog scope already matches", async () => {
+		// `--models openai/gpt-5.5` with a present bundled row must not force
+		// discovery merely because openai has createModelManagerOptions.
+		const settings = Settings.isolated();
+		const gpt = buildModel({
+			id: "gpt-5.5",
+			name: "GPT-5.5",
+			api: "openai-responses",
+			provider: "openai",
+			baseUrl: "https://api.openai.com/v1",
+			reasoning: true,
+			input: ["text"],
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			contextWindow: 128_000,
+			maxTokens: 8_192,
+		});
+		const registry = new FakeRegistry([gpt]);
+		registry.discoverableProviders = [];
+
+		const scoped = await resolveScopedModels(parseArgs(["--models", "openai/gpt-5.5"]), registry, settings);
+
+		expect(registry.refreshCalls).toBe(0);
+		expect(registry.refreshProviderCalls).toEqual([]);
+		expect(scoped.map(entry => entry.model.id)).toEqual(["gpt-5.5"]);
+	});
 });
 
 describe("refreshCredentialScopedModelIfMissing", () => {

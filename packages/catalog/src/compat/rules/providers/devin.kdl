@@ -1,0 +1,7 @@
+// Provider-wire compat for "devin" (Cascade / GetCliModelConfigs).
+// The live roster is gated per account/team — gen:models must not bake it
+// into the shared bundle, and previous-snapshot private rows must not resurrect.
+
+provider "devin" {
+	credential-scoped-catalog #true
+}

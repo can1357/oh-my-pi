@@ -19,7 +19,7 @@ import { $env } from "@oh-my-pi/pi-utils";
 import { buildModel } from "../src/build";
 import { isRetiredProvider } from "../src/compat/behavior";
 import { collapseVariants } from "../src/compat/collapse";
-import { resolveModelPolicy } from "../src/compat/resolve";
+import { resolveModelPolicy, isCredentialScopedCatalogProvider } from "../src/compat/resolve";
 import { ANTIGRAVITY_PRIMARY_ENDPOINT, fetchAntigravityDiscoveryModels } from "../src/discovery/antigravity";
 import { buildGitLabDuoWorkflowFallbackModel } from "../src/discovery/gitlab-duo-workflow";
 import {
@@ -104,10 +104,9 @@ const DISCOVERY_ONLY_PROVIDERS = new Set(["ollama", "vllm", "lm-studio", "litell
  * authoritative to prune them. These providers are never fetched at generation
  * time and their previous-snapshot rows are dropped — the curated static seed is
  * the only bundled surface, and runtime discovery is authoritative per credential
- * (mirrors the GitLab Duo fallback-only policy below). Keep in sync with
- * `credential-scoped-catalog` in providers/*.kdl.
+ * (mirrors the GitLab Duo fallback-only policy below). Exclusion is derived from
+ * KDL `credential-scoped-catalog` via {@link isCredentialScopedCatalogProvider}.
  */
-export const CREDENTIAL_SCOPED_PROVIDERS = new Set(["devin", "grokbot"]);
 
 /**
  * Restores unfetched rows from a previous generated catalog while pruning
@@ -127,10 +126,9 @@ export function mergePreviousSnapshotModels(
 			if (
 				!fetchedKeys.has(`${model.provider}/${model.id}`) &&
 				!DISCOVERY_ONLY_PROVIDERS.has(model.provider) &&
-				!CREDENTIAL_SCOPED_PROVIDERS.has(model.provider) &&
+				resolveModelPolicy(model).catalog.credentialScopedCatalog !== true &&
 				// Yolo-Auto documented static seeds are the complete offline fallback;
-				// never resurrect retired ids from the previous snapshot. (Grok Bot is
-				// covered by CREDENTIAL_SCOPED_PROVIDERS.)
+				// never resurrect retired ids from the previous snapshot.
 				model.provider !== "yolo-auto" &&
 				!isRetiredProvider(model.provider) &&
 				!excludedProviders.has(model.provider)
@@ -551,7 +549,7 @@ async function generateModels() {
 		(descriptor): descriptor is CatalogProviderDescriptor =>
 			isCatalogDescriptor(descriptor) &&
 			!DISCOVERY_ONLY_PROVIDERS.has(descriptor.providerId) &&
-			!CREDENTIAL_SCOPED_PROVIDERS.has(descriptor.providerId),
+			!isCredentialScopedCatalogProvider(descriptor.providerId),
 	);
 	const catalogProviderModelBatches = await Promise.all(
 		catalogProviderDescriptors.map(async descriptor => ({
@@ -706,7 +704,7 @@ async function generateModels() {
 		allModels.push(buildGitLabDuoWorkflowFallbackModel());
 	}
 	// Seed Devin's SWE-1.6 lanes. Cascade's catalog is credential-scoped, so it
-	// is never fetched during generation (CREDENTIAL_SCOPED_PROVIDERS) and the
+	// is never fetched during generation (`credential-scoped-catalog` KDL) and the
 	// seed is the entire bundled surface: the descriptor's `swe-1-6`
 	// default must resolve synchronously at boot, before credential-scoped
 	// runtime discovery replaces the seed with the account's live catalog.

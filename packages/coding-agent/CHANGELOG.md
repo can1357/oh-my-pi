@@ -11,6 +11,7 @@
 
 - Grok Bot probe-config tests inject secrets path / env overlays instead of mutating process-wide credentials or the agent directory.
 - Catalog matrix shell smoke rejects conditional `&&` / `||` arms and loads OMP tool descriptions from static `.md` assets.
+- `--models` / `enabledModels` exact matches on ordinary built-ins (e.g. `openai/…`) no longer force a synchronous credential-scoped discovery refresh when the cold catalog already satisfies the scope.
 - `--models` / `enabledModels` resolve bracketed Grok Bot variant selectors (e.g. `grokbot/default[]`) by exact id before glob matching so `[]` is not treated as an empty character class.
 - Cold catalog refresh also uses a provider-qualified `modelRoles.default` when no CLI model flags are set, and the SDK discovery fallback refreshes built-in descriptor providers (e.g. Grok Bot) the same way.
 - Cold `--models` / `enabledModels` credential-scoped wildcards (e.g. `grokbot/*`) refresh live catalogs even when offline seeds already match, so Ctrl+P includes AvailableModels rows.
