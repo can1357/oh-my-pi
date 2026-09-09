@@ -90,27 +90,42 @@ export class AgentLifecycleManager {
 	static #global: AgentLifecycleManager | undefined;
 
 	static global(): AgentLifecycleManager {
-		if (!AgentLifecycleManager.#global) {
-			AgentLifecycleManager.#global = new AgentLifecycleManager();
+		const current = AgentLifecycleManager.#global;
+		if (current) {
+			// The manager captures its registry at construction and subscribes to
+			// it for the manager's lifetime. A test that swaps the global registry
+			// (`AgentRegistry.resetGlobalForTests`) without also resetting this
+			// manager would strand it on the dead instance: terminal transitions
+			// (`release`) would mutate the old registry while consumers subscribe
+			// to the new one, so `status_changed` never reaches them (issue #11432).
+			// Rebind by retiring the stale manager and reconstructing against the
+			// current global registry. In production the registry is never reset, so
+			// this always short-circuits and the singleton is stable.
+			if (current.#registry === AgentRegistry.global()) return current;
+			current.#retire();
 		}
+		AgentLifecycleManager.#global = new AgentLifecycleManager();
 		return AgentLifecycleManager.#global;
 	}
 
 	/** Reset the global manager. Test-only. */
 	static resetGlobalForTests(): void {
 		const current = AgentLifecycleManager.#global;
-		if (current) {
-			current.#unsubscribe?.();
-			current.#unsubscribe = undefined;
-			for (const adopted of current.#adopted.values()) {
-				clearTimeout(adopted.timer);
-			}
-			current.#adopted.clear();
-			current.#revivals.clear();
-			current.#parks.clear();
-			current.#persistedReviverFactory = undefined;
-		}
+		if (current) current.#retire();
 		AgentLifecycleManager.#global = undefined;
+	}
+
+	/** Detach from the registry and cancel every pending timer/park/revival. */
+	#retire(): void {
+		this.#unsubscribe?.();
+		this.#unsubscribe = undefined;
+		for (const adopted of this.#adopted.values()) {
+			clearTimeout(adopted.timer);
+		}
+		this.#adopted.clear();
+		this.#revivals.clear();
+		this.#parks.clear();
+		this.#persistedReviverFactory = undefined;
 	}
 
 	readonly #registry: AgentRegistry;
