@@ -1,10 +1,22 @@
 import { afterEach, describe, expect, it, vi } from "bun:test";
+import * as fs from "node:fs/promises";
+import * as os from "node:os";
+import * as path from "node:path";
+import type { AgentToolContext } from "@oh-my-pi/pi-agent-core";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import type { EvalToolDetails } from "@oh-my-pi/pi-coding-agent/eval/types";
+import { getThemeByName } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
+import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { evalToolRenderer } from "@oh-my-pi/pi-coding-agent/tools/eval-render";
+import {
+	formatOutputNotice,
+	stripOutputNotice,
+	wrapToolWithMetaNotice,
+} from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { removeWithRetries, sanitizeText } from "@oh-my-pi/pi-utils";
 
 function makeSession(settings = Settings.isolated()): ToolSession {
 	return {
@@ -108,4 +120,77 @@ describe("EvalTool live stdout streaming", () => {
 		expect(result.details?.meta?.truncation).toBeUndefined();
 		expect(formatOutputNotice(result.details?.meta)).toContain("Some lines truncated to 8 chars");
 	});
+
+	it.each([
+		{ scenario: "without window truncation", bytes: 50, respilled: false, cancelled: false },
+		{ scenario: "when the wrapper caps the preview", bytes: 2 * 1024, respilled: true, cancelled: false },
+		{ scenario: "when the cell was cancelled", bytes: 50, respilled: false, cancelled: true },
+	])(
+		"reports capture failure $scenario without changing the cell outcome",
+		async ({ bytes, respilled, cancelled }) => {
+			const dir = await fs.mkdtemp(path.join(os.tmpdir(), "eval-artifact-failure-"));
+			const sessionManager = SessionManager.inMemory(dir);
+			try {
+				const settings = Settings.isolated({
+					"tools.outputMaxColumns": 8,
+					"tools.artifactSpillThreshold": 1,
+					"tools.artifactTailBytes": 1,
+					"tools.artifactHeadBytes": 0,
+				});
+				const session = makeSession(settings);
+				session.allocateOutputArtifact = async () => ({ path: dir, id: "failed-stream" });
+				const saveArtifact = vi.spyOn(sessionManager, "saveArtifact");
+				const output = "x".repeat(bytes);
+				vi.spyOn(evalIndex.jsBackend, "execute").mockImplementation(async (_code, options) => {
+					options.onChunk(output);
+					return {
+						output,
+						exitCode: cancelled ? undefined : 0,
+						cancelled,
+						truncated: false,
+						artifactId: undefined,
+						totalLines: 1,
+						totalBytes: output.length,
+						outputLines: 1,
+						outputBytes: output.length,
+						displayOutputs: [],
+					};
+				});
+				const tool = wrapToolWithMetaNotice(new EvalTool(session));
+				const context = { sessionManager, settings } as unknown as AgentToolContext;
+				const result = await tool.execute(
+					"capture-failure",
+					{ language: "js", code: "print('output')" },
+					undefined,
+					undefined,
+					context,
+				);
+				const text = result.content.map(block => (block.type === "text" ? block.text : "")).join("\n");
+				const body = stripOutputNotice(text, result.details?.meta);
+
+				expect(Boolean(result.isError)).toBe(cancelled);
+				expect(result.details?.cells?.[0]?.status).toBe(cancelled ? "error" : "complete");
+				expect(result.details?.cells?.[0]?.exitCode).toBe(cancelled ? undefined : 0);
+				expect(text).toContain("not saved completely");
+				expect(text).not.toContain("artifact://");
+				expect(Buffer.byteLength(body)).toBeLessThanOrEqual(1024);
+				expect(Boolean(result.details?.meta?.truncation)).toBe(respilled);
+				expect(saveArtifact).not.toHaveBeenCalled();
+
+				const uiTheme = await getThemeByName("dark");
+				if (!uiTheme) throw new Error("Expected dark theme");
+				const rendered = sanitizeText(
+					evalToolRenderer
+						.renderResult(result, { expanded: false, isPartial: false }, uiTheme)
+						.render(160)
+						.join("\n"),
+				);
+				expect(rendered).toContain("not saved completely");
+				expect(rendered).not.toContain("artifact://");
+			} finally {
+				await sessionManager.close();
+				await removeWithRetries(dir);
+			}
+		},
+	);
 });

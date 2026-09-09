@@ -9,7 +9,8 @@
 
 import { type Component, Container, Loader, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { getSymbolTheme, theme } from "../../modes/theme/theme";
-import { formatTruncationMetaNotice, type TruncationMeta } from "../../tools/output-meta";
+import type { OutputArtifactError } from "../../session/streaming-output";
+import { formatArtifactErrorNotice, formatTruncationMetaNotice, type TruncationMeta } from "../../tools/output-meta";
 import { DynamicBorder } from "./dynamic-border";
 import { truncateToVisualLines } from "./visual-truncate";
 
@@ -68,6 +69,7 @@ export function buildStatusFooter(opts: {
 	status: ExecutionStatus;
 	exitCode: number | undefined;
 	truncation: TruncationMeta | undefined;
+	artifactError?: OutputArtifactError;
 	hiddenLineCount: number;
 	/** Suppress the "… N more lines" hint (used when sixel passthrough renders the full output). */
 	suppressHiddenCount?: boolean;
@@ -84,6 +86,9 @@ export function buildStatusFooter(opts: {
 	}
 	if (opts.truncation) {
 		parts.push(theme.fg("warning", formatTruncationMetaNotice(opts.truncation)));
+	}
+	if (opts.artifactError) {
+		parts.push(theme.fg("warning", formatArtifactErrorNotice(opts.artifactError)));
 	}
 
 	if (parts.length === 0) return undefined;

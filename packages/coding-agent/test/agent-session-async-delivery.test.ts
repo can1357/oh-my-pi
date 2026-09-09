@@ -15,6 +15,8 @@ import type { AsyncJob } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import type { DaemonCompletionNotification } from "@oh-my-pi/pi-coding-agent/launch/protocol";
+import { buildAsyncResultBlock } from "@oh-my-pi/pi-coding-agent/modes/utils/transcript-render-helpers";
+import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import {
 	buildAsyncResultBatchMessage,
@@ -118,6 +120,71 @@ describe("AgentSession owner-routed async delivery", () => {
 			),
 		);
 		expect(deliveredImages).toEqual([image]);
+	});
+
+	it("does not spill an incomplete background capture as full output during follow-up delivery", async () => {
+		const model = getBundledModel("anthropic", "claude-sonnet-4-5")!;
+		const mock = createMockModel({ handler: () => ({ content: ["Done"] }) });
+		const agent = new Agent({
+			getApiKey: () => "test-key",
+			initialState: { model, systemPrompt: ["Test"], tools: [] },
+			convertToLlm,
+			streamFn: mock.stream,
+		});
+		const authStorage = await AuthStorage.create(":memory:");
+		authStorages.push(authStorage);
+		authStorage.setRuntimeApiKey("anthropic", "test-key");
+		const manager = new AsyncJobManager({});
+		const sessionManager = SessionManager.inMemory();
+		const allocate = vi.spyOn(sessionManager, "allocateArtifactPath");
+		AsyncJobManager.setInstance(manager);
+		session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated(),
+			modelRegistry: new ModelRegistry(authStorage),
+			agentId: "CaptureOwner",
+			asyncJobManager: manager,
+		});
+		try {
+			manager.register(
+				"bash",
+				"failed capture",
+				async ({ reportProgress }) => {
+					const text = "preview-only ".repeat(2000);
+					await reportProgress(text, { meta: { artifactError: "write" } });
+					return text;
+				},
+				{ id: "capture-job", ownerId: "CaptureOwner" },
+			);
+			await session.settleAsyncWork();
+			const delivered = mock.calls
+				.flatMap(call => call.context.messages)
+				.map(message =>
+					typeof message.content === "string"
+						? message.content
+						: message.content.map(block => (block.type === "text" ? block.text : "")).join("\n"),
+				)
+				.find(text => text.includes("preview-only"));
+			expect(delivered).toContain("not saved completely");
+			expect(delivered).not.toContain("Full output: artifact://");
+			expect(allocate).not.toHaveBeenCalled();
+			const custom = agent.state.messages.find(
+				message => message.role === "custom" && message.customType === "async-result",
+			);
+			if (!custom || custom.role !== "custom") throw new Error("Expected async delivery message");
+			await initTheme(false, undefined, undefined, "dark", "light");
+			const persisted = JSON.parse(JSON.stringify(custom)) as typeof custom;
+			for (const message of [custom, persisted]) {
+				const rendered = buildAsyncResultBlock(message)
+					.render(100)
+					.map(line => Bun.stripANSI(line))
+					.join("\n");
+				expect(rendered).toContain("not saved completely");
+			}
+		} finally {
+			allocate.mockRestore();
+		}
 	});
 
 	it("carries a schema-valid background task's structured output as a pointer only", () => {

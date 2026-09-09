@@ -6,13 +6,14 @@
 
 import type { AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Text, visibleWidth } from "@oh-my-pi/pi-tui";
-import type { AsyncJob, AsyncJobManager, AsyncJobType } from "../../async";
+import { Text } from "@oh-my-pi/pi-tui";
+import type { AsyncJob, AsyncJobDetails, AsyncJobManager, AsyncJobType } from "../../async";
 import type { RenderResultOptions } from "../../extensibility/custom-tools/types";
 import { shimmerEnabled, shimmerText } from "../../modes/theme/shimmer";
 import type { Theme } from "../../modes/theme/theme";
 import { renderStructuredJson } from "../../session/async-job-delivery";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import { formatArtifactErrorNotice } from "../output-meta";
 import type { StructuredSubagentOutput } from "../../task/types";
 import { parseConfiguredThinkingLevel } from "../../thinking";
 import { Ellipsis, Hasher, type RenderCache, renderStatusLine, renderTreeList, truncateToWidth } from "../../tui";
@@ -154,7 +155,7 @@ interface TrackedJobLike {
 	status: string;
 	label: string;
 	startTime: number;
-	latestDetails?: Record<string, unknown>;
+	latestDetails?: AsyncJobDetails;
 	resultText?: string;
 	errorText?: string;
 	structured?: StructuredSubagentOutput;
@@ -212,6 +213,9 @@ export function snapshotJobs(session: ToolSession, jobs: TrackedJobLike[]): JobS
 			...(advisor ? { advisor: true } : {}),
 			...(!resultConsumed && latest.resultText ? { resultText: latest.resultText } : {}),
 			...(!resultConsumed && latest.errorText ? { errorText: latest.errorText } : {}),
+			...(!resultConsumed && latest.latestDetails?.meta?.artifactError
+				? { artifactError: latest.latestDetails.meta.artifactError }
+				: {}),
 			...(!resultConsumed && latest.structured
 				? { structured: latest.structured, agentUrlId: current?.agentId ?? latest.id }
 				: {}),
@@ -236,6 +240,7 @@ export function buildJobResult(
 	});
 	const jobResults = snapshotJobs(session, uniqueJobs);
 	const alreadyConsumed = new Set(jobResults.filter(job => manager.isJobResultConsumed(job.id)).map(job => job.id));
+	const artifactError = jobResults.find(job => job.artifactError)?.artifactError;
 
 	manager.consumeJobResults(jobResults.filter(j => j.status !== "running").map(j => j.id));
 
@@ -308,6 +313,7 @@ export function buildJobResult(
 
 	const details: CoordinationDetails = {
 		op,
+		...(artifactError ? { meta: { artifactError } } : {}),
 		jobs: jobResults,
 		...(cancelOutcomes.length ? { cancelled: cancelOutcomes.map(({ id, status }) => ({ id, status })) } : {}),
 		...(agents.length ? { agents } : {}),
@@ -742,7 +748,11 @@ export function jobsRenderResult(
 							);
 						}
 
-						const preview = flattenStructuredPreview(
+						if (job.artifactError) {
+			lines.push(uiTheme.fg("warning", truncateToWidth(formatArtifactErrorNotice(job.artifactError), width)));
+		}
+
+		const preview = flattenStructuredPreview(
 							stripTaskResultEnvelope(job.errorText?.trim() || job.resultText?.trim() || ""),
 						);
 						if (preview) {

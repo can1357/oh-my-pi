@@ -13,6 +13,7 @@ import type { AsyncJob, AsyncJobType } from "../async";
 import asyncResultTemplate from "../prompts/tools/async-result.md" with { type: "text" };
 import type { StructuredSubagentOutput } from "../task/types";
 import type { CustomMessage } from "./messages";
+import type { OutputMeta } from "../tools/output-meta";
 import { truncateMiddle } from "./streaming-output";
 
 /**
@@ -52,6 +53,7 @@ type AsyncResultJobDetails = {
 
 export type AsyncResultDetails = {
 	jobs: AsyncResultJobDetails[];
+	meta?: OutputMeta;
 };
 
 /**
@@ -98,7 +100,10 @@ export function buildAsyncResultBatchMessage(entries: AsyncResultEntry[]): Custo
 			schemaValid: structured?.status === "valid",
 		};
 	});
+	const artifactError = entries.find(entry => entry.job?.latestDetails?.meta?.artifactError)?.job?.latestDetails?.meta
+		?.artifactError;
 	const details: AsyncResultDetails = {
+		...(artifactError ? { meta: { artifactError } } : {}),
 		jobs: jobs.map(job => ({
 			jobId: job.jobId,
 			type: job.type,

@@ -1,6 +1,7 @@
 import type { ImageContent } from "@oh-my-pi/pi-ai";
 import { logger } from "@oh-my-pi/pi-utils";
 import type { StructuredSubagentOutput } from "../task/types";
+import type { OutputMeta } from "../tools/output-meta";
 
 const DELIVERY_RETRY_BASE_MS = 500;
 const DELIVERY_RETRY_MAX_MS = 30_000;
@@ -77,6 +78,8 @@ export class AsyncJobError extends Error {
 export interface AsyncJobDetails extends Record<string, unknown> {
 	/** Images recovered from command output, independent of text truncation. */
 	images?: ImageContent[];
+	/** Tool output metadata needed when a completion is delivered or recovered later. */
+	meta?: OutputMeta;
 }
 
 export interface AsyncJob {

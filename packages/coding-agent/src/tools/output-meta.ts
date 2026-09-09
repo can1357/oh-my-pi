@@ -16,7 +16,13 @@ import { isRecord, logger } from "@oh-my-pi/pi-utils";
 import { getDefault, type Settings } from "../config/settings";
 import { formatGroupedDiagnosticMessages } from "../lsp/utils";
 import type { Theme } from "../modes/theme/theme";
-import { type OutputSummary, type TruncationResult, truncateMiddle, truncateTail } from "../session/streaming-output";
+import {
+	type OutputArtifactError,
+	type OutputSummary,
+	type TruncationResult,
+	truncateMiddle,
+	truncateTail,
+} from "../session/streaming-output";
 import { formatBytes, wrapBrackets } from "./render-utils";
 import { renderError } from "./tool-errors";
 
@@ -83,6 +89,8 @@ export interface LimitsMeta {
  */
 export interface OutputMeta {
 	truncation?: TruncationMeta;
+	/** Artifact capture failed independently of command execution or inline truncation. */
+	artifactError?: OutputArtifactError;
 	source?: SourceMeta;
 	diagnostics?: DiagnosticMeta;
 	limits?: LimitsMeta;
@@ -229,8 +237,9 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add truncation info from OutputSummary. No-op if not truncated. */
+	/** Add truncation, column limits, and capture failures from OutputSummary. */
 	truncationFromSummary(summary: OutputSummary, options: TruncationSummaryOptions): this {
+		if (summary.artifactError) this.#meta.artifactError = summary.artifactError;
 		// A per-line column cap only trims individual lines (with a `…` marker);
 		// it is not a window/byte truncation, so surface it as its own limit
 		// notice rather than a "Showing lines X-Y … limit" range. This runs even
@@ -242,6 +251,7 @@ export class OutputMetaBuilder {
 
 		const { direction, startLine = 1, totalFileLines } = options;
 		const totalLines = totalFileLines ?? summary.totalLines;
+		const artifactId = summary.artifactError ? undefined : summary.artifactId;
 
 		// Middle elision: the sink retained head + tail with an elision marker.
 		if (summary.elidedBytes != null && summary.elidedBytes > 0) {
@@ -260,7 +270,7 @@ export class OutputMetaBuilder {
 				tailRange: tailLines > 0 ? { start: totalLines - tailLines + 1, end: totalLines } : undefined,
 				elidedBytes: summary.elidedBytes,
 				elidedLines,
-				artifactId: summary.artifactId,
+				artifactId,
 			};
 			return this;
 		}
@@ -291,7 +301,7 @@ export class OutputMetaBuilder {
 			outputLines: summary.outputLines,
 			outputBytes: summary.outputBytes,
 			shownRange: { start: shownStart, end: shownEnd },
-			artifactId: summary.artifactId,
+			artifactId,
 			nextOffset: direction === "head" ? shownEnd + 1 : undefined,
 		};
 
@@ -549,6 +559,10 @@ export function formatStyledArtifactReference(artifactId: string, theme: Theme):
 	return theme.fg("warning", formatFullOutputReference(artifactId));
 }
 
+export function formatArtifactErrorNotice(error: OutputArtifactError): string {
+	return `Full output was not saved completely (artifact ${error} failed)`;
+}
+
 /**
  * Format notices from OutputMeta for LLM consumption.
  * Returns empty string if no notices needed.
@@ -561,6 +575,9 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 	// Truncation notice
 	if (meta.truncation) {
 		parts.push(formatTruncationMetaNotice(meta.truncation));
+	}
+	if (meta.artifactError) {
+		parts.push(formatArtifactErrorNotice(meta.artifactError));
 	}
 
 	// Limit notices
@@ -592,13 +609,15 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 }
 
 /**
- * Format a styled truncation warning message.
- * Returns null if no truncation metadata present.
+ * Format styled truncation and artifact capture warnings.
+ * Returns null if neither warning is present.
  */
 export function formatStyledTruncationWarning(meta: OutputMeta | undefined, theme: Theme): string | null {
-	if (!meta?.truncation) return null;
-	const message = formatTruncationMetaNotice(meta.truncation);
-	return theme.fg("warning", wrapBrackets(message, theme));
+	if (!meta?.truncation && !meta?.artifactError) return null;
+	const parts: string[] = [];
+	if (meta.truncation) parts.push(formatTruncationMetaNotice(meta.truncation));
+	if (meta.artifactError) parts.push(formatArtifactErrorNotice(meta.artifactError));
+	return theme.fg("warning", wrapBrackets(parts.join(". "), theme));
 }
 
 /**
@@ -766,13 +785,17 @@ async function spillLargeResultToArtifact(
 	// `enforceInlineByteCap`: always truncate past the threshold, and only
 	// attach the `artifact://` recovery link when the save actually succeeded.
 	let artifactId: string | undefined;
-	try {
-		artifactId = await sessionManager.saveArtifact(fullText, toolName);
-	} catch (error) {
-		logger.warn("Failed to spill large tool result to artifact", {
-			tool: toolName,
-			error: error instanceof Error ? error.message : String(error),
-		});
+	// A failed stream capture only left a preview here. Saving that preview
+	// would invent a misleading full-output recovery link, not recover the log.
+	if (!existingMeta?.artifactError) {
+		try {
+			artifactId = await sessionManager.saveArtifact(fullText, toolName);
+		} catch (error) {
+			logger.warn("Failed to spill large tool result to artifact", {
+				tool: toolName,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
 	}
 
 	// Truncate: middle elision when a head budget is configured, otherwise tail-only.

@@ -254,6 +254,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 				meta: message.meta
 					? {
 							truncation: normalizeProviderReplayValue(message.meta.truncation),
+							artifactError: message.meta.artifactError,
 							limits: normalizeProviderReplayValue(message.meta.limits),
 							diagnostics: message.meta.diagnostics
 								? normalizeProviderReplayValue({
@@ -275,6 +276,7 @@ function normalizeSessionMessageForProviderReplay(message: AgentMessage): unknow
 				meta: message.meta
 					? {
 							truncation: normalizeProviderReplayValue(message.meta.truncation),
+							artifactError: message.meta.artifactError,
 							limits: normalizeProviderReplayValue(message.meta.limits),
 							diagnostics: message.meta.diagnostics
 								? normalizeProviderReplayValue({
