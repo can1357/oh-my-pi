@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- OpenAI Responses requests now honor per-effort `effortRouting` on custom models: one effort level can route to a sibling upstream wire model id while cost and identity stay on the configured model ([#11278](https://github.com/can1357/oh-my-pi/issues/11278)).
+
 ### Fixed
 
 - Codex SSE streams that end without a terminal completion event now retry when replay-safe and remain transient errors when partial output prevents replay ([#11349](https://github.com/can1357/oh-my-pi/issues/11349)).

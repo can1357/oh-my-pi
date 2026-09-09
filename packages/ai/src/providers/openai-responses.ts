@@ -1,5 +1,7 @@
 import { scheduler } from "node:timers/promises";
 import { $flag, logger, structuredCloneJSON } from "@oh-my-pi/pi-utils";
+import type { Effort } from "@oh-my-pi/pi-catalog/effort";
+import { resolveWireModelId } from "@oh-my-pi/pi-catalog/model-thinking";
 import * as AIError from "../error";
 import { getEnvApiKey } from "../stream";
 import type {
@@ -1182,11 +1184,7 @@ export function buildParams(
 
 	const cacheRetention = resolveCacheRetention(options?.cacheRetention);
 	const promptCacheKey = getOpenAIPromptCacheKey(options);
-	const modelId = applyWireModelIdTransform(
-		model.requestModelId ?? model.id,
-		model.compat.wireModelIdMode,
-		options?.openrouterVariant,
-	);
+	const modelId = model.requestModelId ?? model.id;
 	const params: OpenAIResponsesSamplingParams = {
 		model: modelId,
 		input: messages,
@@ -1282,6 +1280,15 @@ export function buildParams(
 		filterReasoningHistory: options?.filterReasoningHistory,
 		omitReasoningEffort: options?.omitReasoningEffort,
 	});
+	const routingEffort =
+		reasoningPolicy.reasoning.enabled && !options?.forceReasoningOff
+			? (reasoningPolicy.reasoning.requestedEffort as Effort)
+			: undefined;
+	params.model = applyWireModelIdTransform(
+		resolveWireModelId(model, routingEffort),
+		model.compat.wireModelIdMode,
+		options?.openrouterVariant,
+	);
 	applyResponsesCompatPolicy(params, reasoningPolicy, {
 		reasoningSummary: resolveReasoningSummaryOption(model, options),
 		forceReasoningOff: options?.forceReasoningOff,
