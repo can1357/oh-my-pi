@@ -2,8 +2,13 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Read error and preview rendering now sanitizes tabs and Windows-style CRLF (e.g. ssh host-key failures, tab-indented fetched content) so raw output can no longer tear the result frame.
+
 ### Added
 
+- Added an example PII redaction extension (`examples/extensions/pii-redact.ts`) documenting `tool_result` / `context` / `before_provider_request` privacy middleware, complementary to `secrets.enabled` ([#10829](https://github.com/can1357/oh-my-pi/pull/10829)).
 - Added opt-in experimental notes-backed context windows with persistent branch-local notes, searchable original session history, retained latest user requests, and a model-callable rollover tool, including in Code Mode.
 - `/loop` accepts `--until '<cmd>'` / `--while '<cmd>'` to gate each iteration on a shell command's exit status, so a loop can stop on real project state instead of only a count or duration. ([#10858](https://github.com/can1357/oh-my-pi/pull/10858) by [@andyhite](https://github.com/andyhite))
 
