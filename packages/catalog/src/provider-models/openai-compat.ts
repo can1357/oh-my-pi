@@ -39,6 +39,7 @@ import {
 	getGitHubCopilotBaseUrl,
 	isCopilotCliDisabled,
 	isPersonalGitHubCopilotBaseUrl,
+	markCopilotCliDisabled,
 	mergeCopilotApiHeaders,
 	parseGitHubCopilotApiKey,
 } from "../wire/github-copilot";
@@ -6286,6 +6287,12 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 		...(apiKey && {
 			fetchDynamicModels: async () => {
 				const fetchImpl = discoveryFetch(config?.fetch);
+				let lastDiscoveryStatus: number | undefined;
+				const trackedFetch: FetchImpl = async (input, init) => {
+					const response = await fetchImpl(input, init);
+					lastDiscoveryStatus = response.status;
+					return response;
+				};
 				const requestBaseUrl = isPersonalGitHubCopilotBaseUrl(baseUrl)
 					? ((await withCatalogDiscoveryTimeout(DEFAULT_OPENAI_COMPATIBLE_DISCOVERY_TIMEOUT_MS, signal =>
 							discoverGitHubCopilotApiEndpoint(apiKey, fetchImpl, signal),
@@ -6299,166 +6306,181 @@ export function githubCopilotModelManagerOptions(config?: GithubCopilotModelMana
 					"X-GitHub-Api-Version": COPILOT_API_VERSION,
 					"X-Initiator": "user",
 				};
-				const models = await fetchOpenAICompatibleModels<Api>({
-					api: "openai-completions",
-					provider: "github-copilot",
-					baseUrl: requestBaseUrl,
-					apiKey,
-					headers: discoveryHeaders,
-					mapModel: (
-						entry: OpenAICompatibleModelRecord,
-						defaults: ModelSpec<Api>,
-						_context: OpenAICompatibleModelMapperContext<Api>,
-					): ModelSpec<Api> | null => {
-						if (!isCopilotChatModel(entry)) {
-							return null;
-						}
-						const reference = resolveReference(defaults.id);
-						const copilotLimits = extractCopilotLimits(entry);
-						// Copilot exposes token limits under capabilities.limits.*.
-						// max_context_window_tokens is the model's total usable window;
-						// max_prompt_tokens is Copilot's prompt/summarization budget and
-						// must only be a fallback when total-window fields are absent.
-						const contextWindow = toPositiveNumber(
-							copilotLimits.maxContextWindowTokens,
-							toPositiveNumber(
-								entry.context_length,
-								toPositiveNumber(
-									copilotLimits.maxPromptTokens,
-									reference?.contextWindow ?? defaults.contextWindow,
-								),
-							),
-						);
-						const maxTokens = toPositiveNumber(
-							copilotLimits.maxOutputTokens,
-							toPositiveNumber(
-								entry.max_completion_tokens,
-								toPositiveNumber(
-									copilotLimits.maxNonStreamingOutputTokens,
-									reference?.maxTokens ?? defaults.maxTokens,
-								),
-							),
-						);
-						const name =
-							typeof entry.name === "string" && entry.name.trim().length > 0
-								? entry.name
-								: (reference?.name ?? defaults.name);
-						const api = inferCopilotApi(defaults.id);
-						const supportsVision = extractCopilotSupportsVision(entry);
-						const input: ModelSpec<Api>["input"] =
-							supportsVision === true
-								? ["text", "image"]
-								: supportsVision === false || !isPersonalGitHubCopilotBaseUrl(requestBaseUrl)
-									? ["text"]
-									: (reference?.input ?? defaults.input);
-						// With COPILOT_API_HEADERS the served window is the long-context
-						// ceiling; the default tier ends at token_prices.default.context_max
-						// prompt tokens. Cap the base entry to the default tier — the long
-						// tier is the opt-in `-1m` sibling below.
-						const tokenPrices = extractCopilotTokenPrices(entry);
-						const defaultContextMax = tokenPrices.defaultTier?.contextMax;
-						const defaultTierWindow =
-							defaultContextMax !== undefined &&
-							defaultContextMax > 0 &&
-							contextWindow !== null &&
-							maxTokens !== null
-								? Math.min(contextWindow, defaultContextMax + maxTokens)
-								: contextWindow;
-						const unreferencedIdentity =
-							reference === undefined && api === "anthropic-messages"
-								? classifyModel("github-copilot", defaults.id, { lenient: true })
-								: undefined;
-						const base: ModelSpec<Api> = reference
-							? {
-									...reference,
-									api,
-									provider: "github-copilot",
-									baseUrl: requestBaseUrl,
-									name,
-									input,
-									contextWindow: defaultTierWindow,
-									maxTokens,
-									headers: mergeCopilotApiHeaders(getProviderReferences().get(defaults.id)?.headers, {
-										cliDisabled,
-									}),
-									...(api === "openai-completions"
-										? {
-												compat: {
-													supportsStore: false,
-													supportsDeveloperRole: false,
-													supportsReasoningEffort: false,
-												},
-											}
-										: {}),
-								}
-							: {
-									...defaults,
-									api,
-									baseUrl: requestBaseUrl,
-									name,
-									input,
-									contextWindow: defaultTierWindow,
-									maxTokens,
-									headers: mergeCopilotApiHeaders(undefined, { cliDisabled }),
-									// Copilot's `/models` advertises no reasoning bit, so a
-									// thinking-capable Claude with no bundled reference would
-									// fall back to `reasoning: false` and lose its effort dial.
-									// Gate on the id classifier (not the transport alone) so a
-									// lagging enterprise catalog serving a pre-thinking Claude
-									// (<= 3.5) over the Messages proxy is not handed a fabricated
-									// dial it would reject; a modern reference-less model (e.g.
-									// claude-opus-5) is marked so `buildModel` derives the ladder.
-									...(unreferencedIdentity?.class === "anthropic" &&
-									revisionAtLeast(unreferencedIdentity.revision, "3.7")
-										? { reasoning: true }
-										: {}),
-									...(api === "openai-completions"
-										? {
-												compat: {
-													supportsStore: false,
-													supportsDeveloperRole: false,
-													supportsReasoningEffort: false,
-												},
-											}
-										: {}),
-								};
-						// Cross-provider fallback references (e.g. a Cursor
-						// collapsed family for an enterprise-only sibling id)
-						// carry provider-specific wire routing that must not
-						// transfer: the off-tier `requestModelId` pin would send
-						// every Copilot request under the `-none` sibling id
-						// regardless of thinking level.
-						if (reference && reference.provider !== "github-copilot") {
-							delete base.requestModelId;
-							if (base.thinking) {
-								// `base` is a shallow copy of the shared global
-								// reference: clone before deleting or the bundled
-								// entry loses its routing process-wide.
-								base.thinking = { ...base.thinking };
-								delete base.thinking.effortRouting;
+				const fetchCopilotCatalog = (headers: Record<string, string>, useChatIdentity: boolean) =>
+					fetchOpenAICompatibleModels<Api>({
+						api: "openai-completions",
+						provider: "github-copilot",
+						baseUrl: requestBaseUrl,
+						apiKey,
+						headers,
+						mapModel: (
+							entry: OpenAICompatibleModelRecord,
+							defaults: ModelSpec<Api>,
+							_context: OpenAICompatibleModelMapperContext<Api>,
+						): ModelSpec<Api> | null => {
+							if (!isCopilotChatModel(entry)) {
+								return null;
 							}
-						}
-						const defaultCost = copilotTierCost(tokenPrices.defaultTier);
-						if (defaultCost) {
-							// Cache writes are not reported per tier; retain the bundled provider rate.
-							base.cost = { ...defaultCost, cacheWrite: base.cost.cacheWrite };
-						}
-						const variant = createCopilotLongContextVariant(
-							base,
-							contextWindow,
-							maxTokens,
-							tokenPrices.longContext,
-						);
-						if (variant) {
-							longContextVariants.push(variant);
-							// Overflowing the default tier promotes into the 1M sibling
-							// unless the reference already pins a target.
-							base.contextPromotionTarget ??= `github-copilot/${variant.id}`;
-						}
-						return base;
-					},
-					fetch: fetchImpl,
-				});
+							const reference = resolveReference(defaults.id);
+							const copilotLimits = extractCopilotLimits(entry);
+							// Copilot exposes token limits under capabilities.limits.*.
+							// max_context_window_tokens is the model's total usable window;
+							// max_prompt_tokens is Copilot's prompt/summarization budget and
+							// must only be a fallback when total-window fields are absent.
+							const contextWindow = toPositiveNumber(
+								copilotLimits.maxContextWindowTokens,
+								toPositiveNumber(
+									entry.context_length,
+									toPositiveNumber(
+										copilotLimits.maxPromptTokens,
+										reference?.contextWindow ?? defaults.contextWindow,
+									),
+								),
+							);
+							const maxTokens = toPositiveNumber(
+								copilotLimits.maxOutputTokens,
+								toPositiveNumber(
+									entry.max_completion_tokens,
+									toPositiveNumber(
+										copilotLimits.maxNonStreamingOutputTokens,
+										reference?.maxTokens ?? defaults.maxTokens,
+									),
+								),
+							);
+							const name =
+								typeof entry.name === "string" && entry.name.trim().length > 0
+									? entry.name
+									: (reference?.name ?? defaults.name);
+							const api = inferCopilotApi(defaults.id);
+							const supportsVision = extractCopilotSupportsVision(entry);
+							const input: ModelSpec<Api>["input"] =
+								supportsVision === true
+									? ["text", "image"]
+									: supportsVision === false || !isPersonalGitHubCopilotBaseUrl(requestBaseUrl)
+										? ["text"]
+										: (reference?.input ?? defaults.input);
+							// With COPILOT_API_HEADERS the served window is the long-context
+							// ceiling; the default tier ends at token_prices.default.context_max
+							// prompt tokens. Cap the base entry to the default tier — the long
+							// tier is the opt-in `-1m` sibling below.
+							const tokenPrices = extractCopilotTokenPrices(entry);
+							const defaultContextMax = tokenPrices.defaultTier?.contextMax;
+							const defaultTierWindow =
+								defaultContextMax !== undefined &&
+								defaultContextMax > 0 &&
+								contextWindow !== null &&
+								maxTokens !== null
+									? Math.min(contextWindow, defaultContextMax + maxTokens)
+									: contextWindow;
+							const unreferencedIdentity =
+								reference === undefined && api === "anthropic-messages"
+									? classifyModel("github-copilot", defaults.id, { lenient: true })
+									: undefined;
+							const base: ModelSpec<Api> = reference
+								? {
+										...reference,
+										api,
+										provider: "github-copilot",
+										baseUrl: requestBaseUrl,
+										name,
+										input,
+										contextWindow: defaultTierWindow,
+										maxTokens,
+										headers: mergeCopilotApiHeaders(getProviderReferences().get(defaults.id)?.headers, {
+											cliDisabled: useChatIdentity,
+										}),
+										...(api === "openai-completions"
+											? {
+													compat: {
+														supportsStore: false,
+														supportsDeveloperRole: false,
+														supportsReasoningEffort: false,
+													},
+												}
+											: {}),
+									}
+								: {
+										...defaults,
+										api,
+										baseUrl: requestBaseUrl,
+										name,
+										input,
+										contextWindow: defaultTierWindow,
+										maxTokens,
+										headers: mergeCopilotApiHeaders(undefined, { cliDisabled: useChatIdentity }),
+										// Copilot's `/models` advertises no reasoning bit, so a
+										// thinking-capable Claude with no bundled reference would
+										// fall back to `reasoning: false` and lose its effort dial.
+										// Gate on the id classifier (not the transport alone) so a
+										// lagging enterprise catalog serving a pre-thinking Claude
+										// (<= 3.5) over the Messages proxy is not handed a fabricated
+										// dial it would reject; a modern reference-less model (e.g.
+										// claude-opus-5) is marked so `buildModel` derives the ladder.
+										...(unreferencedIdentity?.class === "anthropic" &&
+										revisionAtLeast(unreferencedIdentity.revision, "3.7")
+											? { reasoning: true }
+											: {}),
+										...(api === "openai-completions"
+											? {
+													compat: {
+														supportsStore: false,
+														supportsDeveloperRole: false,
+														supportsReasoningEffort: false,
+													},
+												}
+											: {}),
+									};
+							// Cross-provider fallback references (e.g. a Cursor
+							// collapsed family for an enterprise-only sibling id)
+							// carry provider-specific wire routing that must not
+							// transfer: the off-tier `requestModelId` pin would send
+							// every Copilot request under the `-none` sibling id
+							// regardless of thinking level.
+							if (reference && reference.provider !== "github-copilot") {
+								delete base.requestModelId;
+								if (base.thinking) {
+									// `base` is a shallow copy of the shared global
+									// reference: clone before deleting or the bundled
+									// entry loses its routing process-wide.
+									base.thinking = { ...base.thinking };
+									delete base.thinking.effortRouting;
+								}
+							}
+							const defaultCost = copilotTierCost(tokenPrices.defaultTier);
+							if (defaultCost) {
+								// Cache writes are not reported per tier; retain the bundled provider rate.
+								base.cost = { ...defaultCost, cacheWrite: base.cost.cacheWrite };
+							}
+							const variant = createCopilotLongContextVariant(
+								base,
+								contextWindow,
+								maxTokens,
+								tokenPrices.longContext,
+							);
+							if (variant) {
+								longContextVariants.push(variant);
+								// Overflowing the default tier promotes into the 1M sibling
+								// unless the reference already pins a target.
+								base.contextPromotionTarget ??= `github-copilot/${variant.id}`;
+							}
+							return base;
+						},
+						fetch: trackedFetch,
+					});
+				let models = await fetchCopilotCatalog(discoveryHeaders, cliDisabled);
+				if (models === null && lastDiscoveryStatus === 403 && !cliDisabled) {
+					longContextVariants.length = 0;
+					const fallbackHeaders = {
+						...getCopilotCapiIdentityHeaders({ cliDisabled: true }),
+						"X-GitHub-Api-Version": COPILOT_API_VERSION,
+						"X-Initiator": "user",
+					};
+					const retryModels = await fetchCopilotCatalog(fallbackHeaders, true);
+					if (retryModels) {
+						markCopilotCliDisabled(parsedKey.accessToken);
+						models = retryModels;
+					}
+				}
 				if (models === null) {
 					return null;
 				}
