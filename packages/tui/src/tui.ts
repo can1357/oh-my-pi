@@ -2562,6 +2562,9 @@ export class TUI extends Container {
 			while (viewport.length < height) viewport.push("");
 			viewport = this.#compositeOverlaysIntoWindow(viewport, width, height);
 		}
+		// Every image of this frame — overlays included — has now been observed,
+		// so the store bound can tell a retired graphic from a displayed one.
+		this.#imageBudget.limitResidentImages(false);
 		const history = offered !== undefined && offered.id > this.#acceptedHistoryBatchId ? offered : undefined;
 		if (offered !== undefined && offered.id <= this.#acceptedHistoryBatchId) provider?.acknowledgeHistory(offered.id);
 
@@ -3159,6 +3162,9 @@ export class TUI extends Container {
 		// oxlint-disable-next-line unicorn/no-new-array -- alt-frame length preallocation
 		const fitted: string[] = new Array(height);
 		for (let r = 0; r < height; r++) fitted[r] = lines[r] ?? "";
+		// Alt-buffer frame: the normal screen keeps its own placements behind this
+		// one and is restored verbatim on exit, so its images are not retired.
+		this.#imageBudget.limitResidentImages(true);
 		// Flush queued image-data transmits (`a=t`, no visible output) before the
 		// paint so id-keyed placements and placeholder cells composed into this
 		// frame resolve against loaded data. The normal-screen path flushes these

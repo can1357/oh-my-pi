@@ -121,6 +121,13 @@ export class ImageBudget {
 	// full, correctly-ordered walk.
 	#suppressedIds = new Set<number>();
 	/**
+	 * Image ids rendered as live graphics in the last frame painted on the normal
+	 * screen. A fullscreen overlay borrows the alternate buffer without walking
+	 * that frame, so its pass would otherwise report every normal-buffer image as
+	 * retired; see {@link limitResidentImages}.
+	 */
+	#screenLiveIds = new Set<number>();
+	/**
 	 * Per-image direct-placement emit state: source pixel geometry for the
 	 * renderer's clipped source rectangle, plus the placement-id epoch (see
 	 * {@link resolvePlacementEmit}). Entries deliberately live as long as the
@@ -247,16 +254,29 @@ export class ImageBudget {
 		// passes replay this per id (see #stablePass) instead of re-deriving it
 		// from a reversed, tail-only walk.
 		this.#suppressedIds = new Set(this.#passIds.slice(0, this.#onTerminal));
-		if (!retry) this.#limitResidentImages();
 		return retry;
 	}
 
-	#limitResidentImages(): void {
-		if (this.#cap <= 0 || this.#transmitted.size <= this.#cap) return;
+	/**
+	 * Bound the terminal's image store to `cap` once the frame's complete image
+	 * set is known — the renderer calls this at emit time, not at
+	 * {@link endPass}, because overlays composite into the window after the pass
+	 * closes and their {@link observe} calls land in the same pass record.
+	 *
+	 * Eviction removes the image's scrollback placements too, and a frame diff
+	 * only rewrites rows whose text changed, so an image still shown on the
+	 * screen can never be a candidate. `altScreen` marks a frame painted on the
+	 * alternate buffer: the normal screen keeps its placements standing behind
+	 * the modal and is restored verbatim on exit, so that frame's live set is
+	 * not authoritative for the normal buffer and merely adds to it.
+	 */
+	limitResidentImages(altScreen: boolean): void {
 		const liveIds = new Set(this.#passIds.filter(id => !this.#passSuppression.get(id)));
+		if (!altScreen) this.#screenLiveIds = liveIds;
+		if (this.#cap <= 0 || this.#transmitted.size <= this.#cap) return;
 		for (const id of this.#transmitted) {
 			if (this.#transmitted.size <= this.#cap) break;
-			if (liveIds.has(id)) continue;
+			if (liveIds.has(id) || this.#screenLiveIds.has(id)) continue;
 			if (!this.#pendingTransmits.delete(id)) this.#purgeIds.push(id);
 			this.#transmitted.delete(id);
 			this.#deletePlacementState(id);
@@ -283,6 +303,7 @@ export class ImageBudget {
 		this.#idToKey.clear();
 		this.#placementState.clear();
 		this.#watchedPlacements.clear();
+		this.#screenLiveIds.clear();
 		return ids;
 	}
 

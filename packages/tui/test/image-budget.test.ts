@@ -765,6 +765,117 @@ describe("TUI inline-image budget", () => {
 		});
 	}
 
+	/**
+	 * Track what the terminal's graphics store actually holds and which images
+	 * still have a placement on screen: an eviction that deletes a visible image
+	 * is only repaired if the frame re-emits its placement, and the frame diff
+	 * skips rows whose text is unchanged.
+	 */
+	function trackKittyGraphics(term: VirtualTerminal): { resident: Set<number>; placed: Set<number> } {
+		const resident = new Set<number>();
+		const placed = new Set<number>();
+		const realWrite = term.write.bind(term);
+		vi.spyOn(term, "write").mockImplementation((data: string) => {
+			for (const match of data.matchAll(/\x1b_G([^;\x1b]+)(?:;[^\x1b]*)?\x1b\\/g)) {
+				const fields = new Map(match[1]!.split(",").map(field => field.split("=") as [string, string]));
+				const id = Number(fields.get("i"));
+				const action = fields.get("a");
+				if (action === "t") resident.add(id);
+				if (action === "p" && resident.has(id)) placed.add(id);
+				if (action === "d" && fields.get("d") === "I") {
+					resident.delete(id);
+					placed.delete(id);
+				}
+				if (action === "d" && fields.get("d") === "A") {
+					resident.clear();
+					placed.clear();
+				}
+			}
+			realWrite(data);
+		});
+		return { resident, placed };
+	}
+
+	it("keeps normal-buffer placements visible across a fullscreen overlay pass", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { resident, placed } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
+		const behindIds = behind.map((_, i) => tui.imageBudget.acquireId(`behind-${i}`));
+		const modal = makeImage(tui.imageBudget, "modal");
+		const modalId = tui.imageBudget.acquireId("modal");
+		const ascending = (a: number, b: number) => a - b;
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: behind.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			expect([...placed].sort(ascending)).toEqual([...behindIds].sort(ascending));
+
+			// The modal's own image is a third graphic while the transcript's two
+			// stay untouched behind the alt buffer. Paying for it by deleting one
+			// of them blanks a row the restored normal frame never rewrites.
+			const overlay = tui.showOverlay(
+				{ render: width => modal.render(width), invalidate: () => {} },
+				{ fullscreen: true },
+			);
+			await settle(term);
+			expect(resident.has(modalId)).toBe(true);
+
+			overlay.hide();
+			await settle(term);
+
+			expect([...placed].sort(ascending)).toEqual([...behindIds].sort(ascending));
+			expect(resident.has(modalId)).toBe(false);
+			expect(resident.size).toBe(2);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
+	it("keeps a non-fullscreen overlay image placed while the provider frame fills the cap", async () => {
+		const originalGraphics = { ...getKittyGraphics() };
+		const term = new VirtualTerminal(40, 12);
+		const { resident, placed } = trackKittyGraphics(term);
+
+		setKittyGraphics({ unicodePlaceholders: false });
+		const tui = new TUI(term);
+		tui.setMaxInlineImages(2);
+		const behind = [makeImage(tui.imageBudget, "behind-0"), makeImage(tui.imageBudget, "behind-1")];
+		const modal = makeImage(tui.imageBudget, "modal");
+		const modalId = tui.imageBudget.acquireId("modal");
+		tui.setFrameProvider({
+			renderFrame: size => ({ viewport: behind.flatMap(image => image.render(size.columns)) }),
+			acknowledgeHistory: () => {},
+		});
+
+		try {
+			tui.start();
+			await settle(term);
+			tui.showOverlay({ render: width => modal.render(width), invalidate: () => {} }, { anchor: "center" });
+			await settle(term);
+			expect(placed.has(modalId)).toBe(true);
+
+			// Overlays composite after the budget pass closes, so a later repaint
+			// that leaves them byte-identical must not mistake them for retired.
+			tui.requestRender();
+			await settle(term);
+			expect(placed.has(modalId)).toBe(true);
+			expect(resident.has(modalId)).toBe(true);
+		} finally {
+			tui.stop();
+			setKittyGraphics(originalGraphics);
+		}
+	});
+
 	it("applies the image budget before emitting the first frame", async () => {
 		const term = new VirtualTerminal(40, 12);
 		const writes: string[] = [];
