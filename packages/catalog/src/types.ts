@@ -238,6 +238,14 @@ export interface OpenAICompat {
 	includeEncryptedReasoning?: boolean;
 	/** Whether replayed Responses history should strip native `type: "reasoning"` items before request encoding. Default: false. */
 	filterReasoningHistory?: boolean;
+	/**
+	 * Whether a resumed session replays provider-native Responses history (reasoning items with
+	 * `encrypted_content`, message ids) from its first request instead of rebuilding prior assistant
+	 * turns until the first response warms the provider session state. Keeps the prompt prefix
+	 * byte-stable across process restarts for providers that keep prior-turn thinking in context
+	 * (Anthropic behind OpenAI-compatible gateways). Responses only. Default: false.
+	 */
+	warmNativeHistoryReplay?: boolean;
 	/** Optional `thinking.keep` value for Z.ai/Moonshot-style thinking params. Set false to suppress auto-detected keep. Default: auto-detected. */
 	thinkingKeep?: "all" | false;
 	/** Which reasoning content field to emit on assistant messages. Default: auto-detected. */
@@ -749,6 +757,7 @@ export type ResolvedOpenAICompat = ResolvedOpenAISharedCompat &
 			| "omitReasoningEffort"
 			| "includeEncryptedReasoning"
 			| "filterReasoningHistory"
+			| "warmNativeHistoryReplay"
 			| "disableReasoningOnForcedToolChoice"
 			| "disableReasoningOnToolChoice"
 			| "supportsToolChoice"
@@ -817,6 +826,8 @@ export interface ResolvedOpenAIResponsesCompat extends ResolvedOpenAISharedCompa
 	strictResponsesPairing: boolean;
 	supportsImageDetailOriginal: boolean;
 	supportsObfuscationOptOut: boolean;
+	/** See {@link OpenAICompat.warmNativeHistoryReplay}. */
+	warmNativeHistoryReplay: boolean;
 	/**
 	 * Whether `reasoning.context: "all_turns"` (full cross-turn reasoning
 	 * replay) is accepted. Rule-owned: gpt-5.4+ wire generation on the Codex

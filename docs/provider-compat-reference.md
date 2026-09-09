@@ -69,6 +69,7 @@ Types: `OpenAICompat` / `ResolvedOpenAISharedCompat` in `packages/catalog/src/ty
 | `kimiApiFormat` | Per-model protocol metadata | `"openai"` vs `"anthropic"` transport for Kimi Code models (`providers/kimi.ts`) |
 | `includeEncryptedReasoning` | Chat: always `true`. Responses: `false` for `xai-oauth` | Whether Responses requests replay encrypted reasoning items |
 | `filterReasoningHistory` | Chat: OpenRouter Anthropic models. Responses: adds `xai-oauth` | Filters native reasoning items out of replayed Responses history |
+| `warmNativeHistoryReplay` | Always `false` (opt-in via models config `compat`). Responses only | Replays native Responses history (reasoning items, message ids) from the first request of a resumed session instead of rebuilding prior turns until the first response warms the provider session state — keeps the prompt-cache prefix stable across process restarts for providers that keep prior-turn thinking in context (Anthropic behind OpenAI-compatible gateways). A state closed by stale-replay recovery stays cold |
 
 #### Tool choice / strict interaction
 

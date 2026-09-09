@@ -849,6 +849,58 @@ describe("OpenAI responses history payload", () => {
 		]);
 	});
 
+	it("replays native history from the first request when compat.warmNativeHistoryReplay is set", async () => {
+		const base = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const model: Model<"openai-responses"> = { ...base, compat: { ...base.compat, warmNativeHistoryReplay: true } };
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		const payload = (await captureResponsesPayload(model, resumedSameProviderContext, providerSessionState)) as {
+			input?: unknown[];
+		};
+		expect(payload.input).toEqual([
+			{ type: "reasoning", encrypted_content: "enc_123" },
+			...snapshotHistoryItems,
+			{ role: "user", content: [{ type: "input_text", text: "follow-up user" }] },
+		]);
+	});
+
+	it("stays cold after the warmed provider session state was closed", async () => {
+		const base = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const model: Model<"openai-responses"> = { ...base, compat: { ...base.compat, warmNativeHistoryReplay: true } };
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		await captureResponsesPayload(model, resumedSameProviderContext, providerSessionState);
+		const [key, state] = providerSessionState.entries().next().value as [string, ProviderSessionState];
+		state.close();
+		providerSessionState.delete(key);
+		const payload = (await captureResponsesPayload(model, resumedSameProviderContext, providerSessionState)) as {
+			input?: unknown[];
+		};
+		expect(containsEncryptedReasoning(payload.input)).toBe(false);
+		expect(containsAssistantOutputText(payload.input, "generic assistant that should be rebuilt")).toBe(true);
+	});
+
+	it("keeps the closed marker out of the provider-state keyspace", async () => {
+		// Provider names are unrestricted strings: closing `openai` must not plant the marker at the
+		// state key of a provider literally named `openai:closed`, or that provider's next request
+		// would dereference the no-op marker as its session state.
+		const base = getOpenAIReasoningModel("openai", "gpt-5-mini");
+		const model: Model<"openai-responses"> = { ...base, compat: { ...base.compat, warmNativeHistoryReplay: true } };
+		const sibling: Model<"openai-responses"> = { ...model, provider: `${model.provider}:closed` };
+		const providerSessionState = new Map<string, ProviderSessionState>();
+		await captureResponsesPayload(model, resumedSameProviderContext, providerSessionState);
+		const [key, state] = providerSessionState.entries().next().value as [string, ProviderSessionState];
+		state.close();
+		providerSessionState.delete(key);
+		expect(providerSessionState.has(`openai-responses:${sibling.provider}`)).toBe(false);
+		const payload = (await captureResponsesPayload(sibling, resumedSameProviderContext, providerSessionState)) as {
+			input?: unknown[];
+		};
+		expect(Array.isArray(payload.input)).toBe(true);
+		const siblingState = providerSessionState.get(`openai-responses:${sibling.provider}`) as
+			| (ProviderSessionState & { chains?: unknown })
+			| undefined;
+		expect(siblingState?.chains).toBeInstanceOf(Map);
+	});
+
 	it("does not warm GitHub Copilot replay when only OpenAI replay state is warmed", async () => {
 		const openAiModel = getOpenAIReasoningModel("openai", "gpt-5-mini");
 		const copilotModel = getBundledModel("github-copilot", "gpt-5.4") as Model<"openai-responses">;
