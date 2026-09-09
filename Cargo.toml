@@ -56,7 +56,7 @@ dispatch2 = "0.3"
 encoding_rs = "0.8"
 enigo = { version = "=0.6.1", default-features = false }
 etagere = "0.3"
-fancy-regex = "0.17"
+fancy-regex = "0.19"
 fastembed = { version = "5.17.4", default-features = false, features = ["hf-hub-rustls-tls", "ort-download-binaries-rustls-tls"] }
 flate2 = { version = "1.1", default-features = false, features = ["rust_backend", "zlib-rs"] }
 flume = "0.11"

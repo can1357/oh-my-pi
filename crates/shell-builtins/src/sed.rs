@@ -7125,7 +7125,7 @@ pub mod fast_regex {
 	pub enum CaptureMatches<'t> {
 		Literal(LiteralCaptureMatches<'t>),
 		Byte(ByteCaptureMatches<'t, 't>),
-		Fancy(FancyCaptureMatches<'t, 't>),
+		Fancy(FancyCaptureMatches<'t, 't, str>),
 	}
 
 	impl<'t> Iterator for CaptureMatches<'t> {
@@ -7173,7 +7173,7 @@ pub mod fast_regex {
 	pub enum Captures<'t> {
 		Literal(Match<'t>), // only group 0
 		Byte(ByteCaptures<'t>),
-		Fancy(FancyCaptures<'t>),
+		Fancy(FancyCaptures<'t, str>),
 	}
 
 	impl<'t> Captures<'t> {
