@@ -127,7 +127,16 @@ import { tinyTitleClient } from "../tiny/title-client";
 import { isMCPToolName } from "../tools/builtin-names";
 import type { LspStartupServerInfo } from "../tools";
 import { normalizeLocalScheme, resolveToCwd } from "../tools/path-utils";
-import { formatMoreItems, replaceTabs, shortenPath, TRUNCATE_LENGTHS, truncateToWidth } from "../tools/render-utils";
+import {
+	FEED_MODEL_BADGE_WIDTH,
+	formatFeedModelBadge,
+	formatMoreItems,
+	isFeedModelBadgeEnabled,
+	replaceTabs,
+	shortenPath,
+	TRUNCATE_LENGTHS,
+	truncateToWidth,
+} from "../tools/render-utils";
 import { setAutoQaConsentHandler } from "../tools/report-tool-issue";
 import {
 	formatPhaseDisplayName,
@@ -198,13 +207,20 @@ import { TanCommandController } from "./controllers/tan-command-controller";
 import { TodoCommandController } from "./controllers/todo-command-controller";
 import { imageReferenceHyperlink, materializeImageReferenceLinks } from "./image-references";
 import {
+	describeLoopCondition,
+	evaluateLoopCondition,
+	type LoopConditionConfig,
+	type LoopConditionVerdict,
+} from "./loop-condition";
+import {
 	consumeLoopLimitIteration,
 	createLoopLimitRuntime,
 	describeLoopLimit,
 	describeLoopLimitRuntime,
 	isLoopDurationExpired,
+	isLoopLimitExhausted,
 	type LoopLimitRuntime,
-	parseLoopLimitArgs,
+	parseLoopArgs,
 } from "./loop-limit";
 import { OAuthManualInputManager } from "./oauth-manual-input";
 import { getRunningSubagentBadgeAgentIds, getRunningSubagentBadgeRegistry } from "./running-subagent-badge";
@@ -514,35 +530,55 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	const dot = theme.styledSymbol("status.done", "accent");
 	const visible = running.slice(0, SUBAGENT_HUD_VISIBLE_LIMIT);
 	const hiddenCount = running.length - visible.length;
+	const showModelBadge = isFeedModelBadgeEnabled();
+	const outerIndent = " ";
 	const rows = renderTreeList(
 		{
 			items: visible,
 			expanded: true,
-			renderItem: session => {
-				const displayId = formatTaskId(session.id);
+			renderItem: (session, context) => {
+				const rowWidth = Math.max(0, columns - visibleWidth(outerIndent) - (context.prefixWidth ?? 0));
 				const role = session.agent ?? session.progress?.agent;
-				const badge = agentTypeBadge(role, theme);
-				let line = `${dot} ${theme.fg("accent", theme.bold(displayId))}${badge}`;
+				const displayId = truncateToWidth(
+					formatTaskId(session.id),
+					Math.max(0, rowWidth - visibleWidth(`${dot} `)),
+				);
+				const badge = truncateToWidth(
+					agentTypeBadge(role, theme),
+					Math.max(0, rowWidth - visibleWidth(`${dot} ${displayId}`)),
+				);
+				const titleBudget = Math.max(0, rowWidth - visibleWidth(`${dot} ${displayId}${badge}`));
+				const modelBadge = showModelBadge
+					? formatFeedModelBadge(
+							session.progress?.resolvedModelIdentity ?? session.progress?.resolvedModel,
+							session.progress?.resolvedThinkingLevel,
+							session.progress?.advisor,
+							theme,
+							Math.min(FEED_MODEL_BADGE_WIDTH, Math.max(0, titleBudget - 1)),
+						)
+					: "";
+				const modelLead = modelBadge ? `${modelBadge} ` : "";
+				let line = `${dot} ${modelLead}${theme.fg("accent", theme.bold(displayId))}${badge}`;
 				const description = session.description?.trim() || session.progress?.description?.trim();
 				const distinctDescription =
 					description && !labelEchoesHandle(session.id, description) ? description : undefined;
 				if (distinctDescription) {
-					const budget = Math.max(
-						TRUNCATE_LENGTHS.SHORT,
-						columns - visibleWidth(displayId) - visibleWidth(Bun.stripANSI(badge)) - 10,
-					);
+					const budget = Math.max(0, rowWidth - visibleWidth(line) - visibleWidth(": "));
 					const formatted = replaceTabs(distinctDescription).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-					line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
+					if (budget > 0) {
+						line += `${theme.fg("accent", ":")} ${theme.fg("accent", truncateToWidth(formatted, budget))}`;
+					}
 				} else {
 					// No spawn description: fall back to a muted task preview, same as
 					// the inline task rows when a row has no label.
 					const taskPreview = session.progress?.task?.trim();
 					if (taskPreview && !labelEchoesHandle(session.id, taskPreview)) {
 						const formatted = replaceTabs(taskPreview).replace(/\s*[\r\n]+\s*/g, " ↵ ");
-						line += ` ${theme.fg("muted", truncateToWidth(formatted, TRUNCATE_LENGTHS.SHORT))}`;
+						const budget = Math.min(TRUNCATE_LENGTHS.SHORT, Math.max(0, rowWidth - visibleWidth(line) - 1));
+						if (budget > 0) line += ` ${theme.fg("muted", truncateToWidth(formatted, budget))}`;
 					}
 				}
-				return line;
+				return truncateToWidth(line, rowWidth, "");
 			},
 		},
 		theme,
@@ -550,7 +586,11 @@ export function renderSubagentHudLines(sessions: ObservableSession[], columns: n
 	if (hiddenCount > 0) {
 		rows.push(theme.fg("dim", `… ${hiddenCount} more running — open Agent Hub for full list`));
 	}
-	return ["", theme.bold(theme.fg("accent", "Subagents")), ...rows.map(line => ` ${line}`)];
+	return [
+		"",
+		truncateToWidth(theme.bold(theme.fg("accent", "Subagents")), columns),
+		...rows.map(line => truncateToWidth(`${outerIndent}${line}`, columns, "")),
+	];
 }
 
 const CTRL_L_APPEARANCE_RESPONSE_DEADLINE_MS = 2000;
@@ -604,6 +644,14 @@ export class InteractiveMode implements InteractiveModeContext {
 	loopModePaused = false;
 	loopPrompt: string | undefined = undefined;
 	loopLimit: LoopLimitRuntime | undefined = undefined;
+	loopCondition: LoopConditionConfig | undefined = undefined;
+	/**
+	 * Aborts the in-flight `--while` / `--until` evaluation. Esc between
+	 * iterations lands while the condition command is still running, and
+	 * `#cancelLoopAutoSubmit` only clears the pending timer — without this the
+	 * child process would outlive the loop it was gating.
+	 */
+	#loopConditionAbort: AbortController | undefined;
 	#loopAutoSubmitTimer: NodeJS.Timeout | undefined;
 	#todoAutoClearTimer: NodeJS.Timeout | undefined;
 	#modelCycleClearTimer: NodeJS.Timeout | undefined;
@@ -1791,6 +1839,28 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 
+		// An exhausted budget ends the loop regardless of the condition, so check
+		// it first: the user's command must not run one last time for nothing.
+		if (isLoopLimitExhausted(this.loopLimit)) {
+			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
+			return;
+		}
+
+		// The gate sits before the budget consume so a halt never burns an
+		// iteration that did not run, and after the blocked-check/defer above so
+		// a streaming turn cannot re-run the command on every retry tick.
+		if (this.loopCondition && !(await this.#passesLoopCondition(prompt))) return;
+
+		// The gate awaited a child process: a turn may have started meanwhile
+		// (async job, idle flush), so re-check before spending budget or
+		// compacting/resetting into the now-busy session.
+		if (this.#isAutoSubmitBlocked()) {
+			this.#deferLoopAutoSubmit(() => {
+				void this.#runLoopIteration(action, prompt);
+			});
+			return;
+		}
+
 		if (!consumeLoopLimitIteration(this.loopLimit)) {
 			this.disableLoopMode("Loop limit reached. Loop mode disabled.");
 			return;
@@ -1805,13 +1875,59 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.#submitLoopPromptWhenReady(prompt);
 	}
 
+	/**
+	 * Evaluate the `--while` / `--until` condition for one iteration.
+	 *
+	 * Returns false when the loop must not continue: either the condition said
+	 * to stop (already reported through {@link disableLoopMode}) or the loop was
+	 * paused/disabled while the command was still running.
+	 */
+	async #passesLoopCondition(prompt: string): Promise<boolean> {
+		const condition = this.loopCondition;
+		if (!condition) return true;
+
+		const controller = new AbortController();
+		// A prior evaluation can still be in flight when the next iteration
+		// starts (the user submitted mid-command); drop it instead of leaking a
+		// child process that Esc can no longer reach.
+		this.#abortLoopCondition();
+		this.#loopConditionAbort = controller;
+		let verdict: LoopConditionVerdict;
+		try {
+			verdict = await evaluateLoopCondition(condition, {
+				cwd: this.sessionManager.getCwd(),
+				timeoutMs: settings.get("loop.conditionTimeoutMs"),
+				signal: controller.signal,
+				sessionId: this.sessionManager.getSessionId(),
+			});
+		} finally {
+			if (this.#loopConditionAbort === controller) this.#loopConditionAbort = undefined;
+		}
+
+		// Running the condition is an await point: Esc (pauseLoop) or a second
+		// /loop (disableLoopMode) can land mid-command, so re-check the same
+		// guards the method entry used before acting on a now-stale verdict.
+		if (!this.loopModeEnabled || this.loopPrompt !== prompt || !this.onInputCallback) return false;
+		if (verdict.kind === "continue") return true;
+		if (verdict.kind === "aborted") return false;
+		this.disableLoopMode(verdict.message);
+		return false;
+	}
+
+	#abortLoopCondition(): void {
+		this.#loopConditionAbort?.abort();
+		this.#loopConditionAbort = undefined;
+	}
+
 	#syncLoopModeStatus(): void {
 		const state: "waiting" | "running" | "paused" = this.loopModePaused
 			? "paused"
 			: this.loopPrompt
 				? "running"
 				: "waiting";
-		this.statusLine.setLoopModeStatus(this.loopModeEnabled ? { state, limit: this.loopLimit } : undefined);
+		this.statusLine.setLoopModeStatus(
+			this.loopModeEnabled ? { state, limit: this.loopLimit, condition: this.loopCondition } : undefined,
+		);
 		this.ui.requestRender();
 	}
 
@@ -1821,7 +1937,9 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopModePaused = false;
 		this.loopPrompt = undefined;
 		this.loopLimit = undefined;
+		this.loopCondition = undefined;
 		this.#cancelLoopAutoSubmit();
+		this.#abortLoopCondition();
 		this.#syncLoopModeStatus();
 		if (wasEnabled) {
 			this.showStatus(message);
@@ -1830,6 +1948,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	setLoopPrompt(prompt: string): void {
 		if (!this.loopModeEnabled) return;
+		// Any manual submit supersedes whatever gate is currently pending, even
+		// one resubmitting identical text: the gate was checking the *previous*
+		// iteration, and that iteration's turn is about to be superseded either
+		// way. Abort immediately instead of letting it run for up to the
+		// configured timeout in parallel with the turn it can no longer gate.
+		this.#abortLoopCondition();
 		this.loopPrompt = prompt;
 		this.loopModePaused = false;
 		this.#syncLoopModeStatus();
@@ -1844,6 +1968,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopPrompt = undefined;
 		this.loopModePaused = true;
 		this.#cancelLoopAutoSubmit();
+		this.#abortLoopCondition();
 		this.#syncLoopModeStatus();
 	}
 
@@ -1852,7 +1977,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.disableLoopMode();
 			return undefined;
 		}
-		const parsed = parseLoopLimitArgs(args);
+		const parsed = parseLoopArgs(args);
 		if (typeof parsed === "string") {
 			this.showError(parsed);
 			return undefined;
@@ -1861,12 +1986,16 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.loopModePaused = false;
 		this.loopPrompt = undefined;
 		this.loopLimit = createLoopLimitRuntime(parsed.limit);
+		this.loopCondition = parsed.condition;
 		this.#syncLoopModeStatus();
 		const limitSuffix = parsed.limit ? ` Limited to ${describeLoopLimit(parsed.limit)}.` : "";
 		const remainingSuffix = this.loopLimit ? ` ${describeLoopLimitRuntime(this.loopLimit)}.` : "";
+		// The condition is a *continuation* signal: the first iteration always
+		// runs, and it is re-evaluated before each subsequent one.
+		const conditionSuffix = parsed.condition ? ` Continuing ${describeLoopCondition(parsed.condition)}.` : "";
 		const tail = parsed.prompt ? "Repeating it after each turn." : "Your next prompt will repeat after each turn.";
 		this.showStatus(
-			`Loop mode enabled.${limitSuffix}${remainingSuffix} ${tail} Esc cancels the current iteration; /loop again to disable.`,
+			`Loop mode enabled.${limitSuffix}${remainingSuffix}${conditionSuffix} ${tail} Esc cancels the current iteration; /loop again to disable.`,
 		);
 		// Hand any inline prompt back to the dispatcher so the normal submit flow
 		// runs the first iteration — it records the text as the loop prompt and
@@ -3869,8 +3998,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.session.clearPlanInternalAbortPending();
 		}
 
-		// Restore the execution tool set, but force-enable `read`: approved-plan
-		// prompts now require loading the durable local:// plan file before work.
+		// Restore the execution tool set, but force-enable `read` so the durable
+		// local:// plan remains available if the inline copy becomes unrecoverable.
 		const executionTools = previousPresentation.enabled.includes("read")
 			? previousPresentation.enabled
 			: [...previousPresentation.enabled, "read"];
@@ -3919,6 +4048,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		this.session.markPlanReferenceSent();
 		const planModePrompt = prompt.render(planModeApprovedPrompt, {
 			planFilePath: options.planFilePath,
+			planContent,
 			contextPreserved: options.preserveContext === true,
 		});
 		// Close the review overlay only now — after the async title write and plan
@@ -4870,6 +5000,12 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	/** Shared `shutdown()`/`restart()` teardown: dispose the session and hand the terminal back. */
 	async #teardown(): Promise<void> {
+		// An in-flight loop condition (or a deferred auto-submit timer) must not
+		// outlive session disposal: an unaborted `sleep 30`-style condition can
+		// resolve mid-teardown and drive `#passesLoopCondition` into invoking the
+		// pending input callback against a session that is already disposing.
+		this.#abortLoopCondition();
+		this.#cancelLoopAutoSubmit();
 		await this.#liveCommandController.stop();
 
 		this.#btwController.dispose();
@@ -5243,6 +5379,7 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	ensureLoadingAnimation(): void {
+		if (this.autoCompactionLoader || this.retryLoader) return;
 		if (!this.loadingAnimation) {
 			this.#clearWorkingMessageAccentCache();
 			this.statusContainer.disposeChildren();
@@ -5272,6 +5409,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			this.statusContainer.addChild(this.loadingAnimation);
 		} else if (!this.statusContainer.children.includes(this.loadingAnimation)) {
 			this.statusContainer.disposeChildren();
+			this.loadingAnimation.start();
 			this.statusContainer.addChild(this.loadingAnimation);
 			this.ui.requestRender();
 		}

@@ -4822,11 +4822,10 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:94",
+				"source": "classes/gemini.kdl:96",
 				"class": "gemini",
-				"providers": [
-					"google",
-					"opencode-zen"
+				"apis": [
+					"google-generative-ai"
 				],
 				"revision": [
 					{
@@ -4840,7 +4839,7 @@
 				}
 			},
 			{
-				"source": "classes/gemini.kdl:100",
+				"source": "classes/gemini.kdl:102",
 				"class": "gemini",
 				"providers": [
 					"google-antigravity",

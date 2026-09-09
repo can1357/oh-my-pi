@@ -12,4 +12,6 @@ export interface TreeContext {
 	theme: Theme;
 	prefix: string;
 	continuePrefix: string;
+	/** Maximum rendered branch/continuation prefix width reserved during pre-rendering. */
+	prefixWidth?: number;
 }

@@ -13,6 +13,7 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as fs from "node:fs/promises";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { type AsyncJob, AsyncJobManager } from "@oh-my-pi/pi-coding-agent/async/job-manager";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
@@ -20,8 +21,9 @@ import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry
 import { TaskTool } from "@oh-my-pi/pi-coding-agent/task";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
-import type { AgentDefinition, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
+import type { AgentDefinition, AgentProgress, SingleResult, TaskParams } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { snapshotJobs } from "@oh-my-pi/pi-coding-agent/tools/hub/jobs";
 
 const taskAgent: AgentDefinition = {
 	name: "task",
@@ -63,6 +65,11 @@ function makeResult(id: string, overrides: Partial<SingleResult> = {}): SingleRe
 		requests: 1,
 		...overrides,
 	};
+}
+
+function getJobProgress(job: AsyncJob): AgentProgress | undefined {
+	const progress = job.latestDetails?.progress;
+	return Array.isArray(progress) ? progress[0] : undefined;
 }
 
 interface Deferred {
@@ -148,6 +155,224 @@ describe("task spawn routing", () => {
 		expect(runSpy).toHaveBeenCalledTimes(1);
 		expect(runSpy.mock.calls[0]?.[0].modelOverride).toEqual(["openai/gpt-4.1-mini"]);
 	});
+
+	for (const { label, liveAdvisor, settledAdvisor, expectedAdvisor } of [
+		{
+			label: "retains an attached advisor through teardown",
+			liveAdvisor: true,
+			settledAdvisor: undefined,
+			expectedAdvisor: true,
+		},
+		{
+			label: "publishes an advisor attached at completion",
+			liveAdvisor: undefined,
+			settledAdvisor: true,
+			expectedAdvisor: true,
+		},
+		{
+			label: "omits an explicitly inactive advisor",
+			liveAdvisor: false,
+			settledAdvisor: false,
+			expectedAdvisor: undefined,
+		},
+	]) {
+		it(`${label} in detached job snapshots`, async () => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({
+				// Configuration alone must not claim an attached runtime.
+				agents: [{ ...taskAgent, advisor: true }],
+				projectAgentsDir: null,
+			});
+			const gate = deferred();
+			let publishAdvisor: (() => void) | undefined;
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				const progress = {
+					index: 0,
+					id: options.id ?? "?",
+					agent: "task",
+					agentSource: "bundled" as const,
+					status: "pending" as const,
+					task: "Do the thing.",
+					recentTools: [],
+					recentOutput: [],
+					toolCount: 0,
+					requests: 1,
+					tokens: 1,
+					cost: 0,
+					durationMs: 1,
+					resolvedModel: "custom/coding-router:max:high",
+					resolvedModelIdentity: "custom/coding-router:max",
+					resolvedThinkingLevel: ThinkingLevel.High,
+				};
+				options.onProgress?.(progress);
+				publishAdvisor = () => options.onProgress?.({ ...progress, tokens: 2, advisor: liveAdvisor });
+				await gate.promise;
+				return makeResult(options.id ?? "?", {
+					resolvedModel: progress.resolvedModel,
+					resolvedModelIdentity: progress.resolvedModelIdentity,
+					resolvedThinkingLevel: progress.resolvedThinkingLevel,
+					advisor: settledAdvisor,
+				});
+			});
+
+			const manager = createManager();
+			const session = createSession({ manager });
+			const tool = await TaskTool.create(session);
+			const result = await tool.execute("tc-advisor", {
+				agent: "task",
+				name: "Advised",
+				task: "Do the thing.",
+			} as TaskParams);
+			const job = manager.getJob(result.details!.async!.jobId)!;
+			try {
+				await pollUntil(() => publishAdvisor !== undefined);
+				await pollUntil(() => snapshotJobs(session, [job])[0]?.resolvedModel === "custom/coding-router:max:high");
+				expect(snapshotJobs(session, [job])[0]).toMatchObject({
+					id: job.id,
+					status: "running",
+					resolvedModel: "custom/coding-router:max:high",
+					resolvedModelIdentity: "custom/coding-router:max",
+					resolvedThinkingLevel: ThinkingLevel.High,
+				});
+				expect(snapshotJobs(session, [job])[0]?.advisor).toBeUndefined();
+
+				publishAdvisor!();
+				await pollUntil(() => {
+					const progress = job.latestDetails?.progress;
+					return Array.isArray(progress) && progress[0]?.tokens === 2;
+				});
+				expect(snapshotJobs(session, [job])[0]?.advisor).toBe(liveAdvisor === true ? true : undefined);
+				expect(snapshotJobs(session, [job])[0]?.status).toBe("running");
+			} finally {
+				gate.resolve();
+				await job.promise;
+			}
+
+			expect(snapshotJobs(session, [job])[0]?.status).toBe("completed");
+			expect(snapshotJobs(session, [job])[0]).toMatchObject({
+				resolvedModelIdentity: "custom/coding-router:max",
+				resolvedThinkingLevel: ThinkingLevel.High,
+			});
+			expect(snapshotJobs(session, [job])[0]?.advisor).toBe(expectedAdvisor);
+		});
+	}
+
+	it("clears stale model metadata and fallback state from detached progress", async () => {
+		vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+		const gate = deferred();
+		let publishProgress: ((metadata: Partial<AgentProgress>) => void) | undefined;
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			const progress: AgentProgress = {
+				...makeResult(options.id ?? "?"),
+				status: "running",
+				recentTools: [],
+				recentOutput: [],
+				toolCount: 0,
+				cost: 0,
+				resolvedModel: "custom/coding-router:max:high",
+				resolvedModelIdentity: "custom/coding-router:max",
+				resolvedThinkingLevel: ThinkingLevel.High,
+				resolvedModelIsFallback: true,
+			};
+			options.onProgress?.(progress);
+			publishProgress = metadata => options.onProgress?.({ ...progress, ...metadata });
+			await gate.promise;
+			return makeResult(options.id ?? "?");
+		});
+		const manager = createManager();
+		const session = createSession({ manager });
+		const tool = await TaskTool.create(session);
+		const result = await tool.execute("tc-metadata", { agent: "task", name: "Metadata", task: "work" } as TaskParams);
+		const job = manager.getJob(result.details!.async!.jobId)!;
+		try {
+			await pollUntil(
+				() =>
+					publishProgress !== undefined &&
+					snapshotJobs(session, [job])[0]?.resolvedThinkingLevel === ThinkingLevel.High,
+			);
+			expect(getJobProgress(job)?.resolvedModelIsFallback).toBe(true);
+			publishProgress!({
+				resolvedModel: undefined,
+				resolvedModelIdentity: undefined,
+				resolvedThinkingLevel: undefined,
+				resolvedModelIsFallback: true,
+			});
+			await pollUntil(() => snapshotJobs(session, [job])[0]?.resolvedModel === undefined);
+			expect(getJobProgress(job)?.resolvedModelIsFallback).toBeUndefined();
+
+			publishProgress!({});
+			await pollUntil(() => getJobProgress(job)?.resolvedModelIsFallback === true);
+			publishProgress!({
+				resolvedModel: "custom/legacy:low",
+				resolvedModelIdentity: undefined,
+				resolvedThinkingLevel: undefined,
+				resolvedModelIsFallback: undefined,
+			});
+			await pollUntil(() => snapshotJobs(session, [job])[0]?.resolvedModel === "custom/legacy:low");
+			const legacy = snapshotJobs(session, [job])[0];
+			expect(legacy?.resolvedModelIdentity).toBeUndefined();
+			expect(legacy?.resolvedThinkingLevel).toBeUndefined();
+			expect(getJobProgress(job)?.resolvedModelIsFallback).toBeUndefined();
+
+			publishProgress!({ resolvedModelIsFallback: false });
+			await pollUntil(() => getJobProgress(job)?.resolvedModelIsFallback === false);
+			publishProgress!({});
+			await pollUntil(() => getJobProgress(job)?.resolvedModelIsFallback === true);
+		} finally {
+			gate.resolve();
+			await job.promise;
+		}
+		const settled = snapshotJobs(session, [job])[0];
+		expect(settled?.status).toBe("completed");
+		expect(settled?.resolvedModel).toBeUndefined();
+		expect(settled?.resolvedModelIdentity).toBeUndefined();
+		expect(settled?.resolvedThinkingLevel).toBeUndefined();
+		expect(getJobProgress(job)?.resolvedModelIsFallback).toBeUndefined();
+	});
+
+	it.each([undefined, false, true])(
+		"uses the settled model's authoritative fallback state (%s), not the previous model's",
+		async settledFallback => {
+			vi.spyOn(discoveryModule, "discoverAgents").mockResolvedValue({ agents: [taskAgent], projectAgentsDir: null });
+			const gate = deferred();
+			vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+				options.onProgress?.({
+					...makeResult(options.id ?? "?"),
+					status: "running",
+					recentTools: [],
+					recentOutput: [],
+					toolCount: 0,
+					cost: 0,
+					resolvedModel: "custom/previous",
+					resolvedModelIdentity: "custom/previous",
+					resolvedModelIsFallback: settledFallback !== true,
+				});
+				await gate.promise;
+				return makeResult(options.id ?? "?", {
+					resolvedModel: "custom/settled",
+					resolvedModelIdentity: "custom/settled",
+					resolvedModelIsFallback: settledFallback,
+				});
+			});
+			const manager = createManager();
+			const tool = await TaskTool.create(createSession({ manager }));
+			const result = await tool.execute("tc-fallback", {
+				agent: "task",
+				name: "Fallback",
+				task: "work",
+			} as TaskParams);
+			const job = manager.getJob(result.details!.async!.jobId)!;
+			try {
+				await pollUntil(() => getJobProgress(job)?.resolvedModel === "custom/previous");
+				expect(getJobProgress(job)?.resolvedModelIsFallback).toBe(settledFallback !== true);
+			} finally {
+				gate.resolve();
+				await job.promise;
+			}
+			expect(job.status).toBe("completed");
+			expect(getJobProgress(job)?.resolvedModel).toBe("custom/settled");
+			expect(getJobProgress(job)?.resolvedModelIsFallback).toBe(settledFallback);
+		},
+	);
 
 	it("retains the temporary artifacts directory for a completed async spawn (in-memory session)", async () => {
 		// Regression: with no session file (in-memory session), leaseArtifacts()
