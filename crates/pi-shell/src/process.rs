@@ -1365,7 +1365,10 @@ impl TerminationPlan {
 				ct.clone(),
 			)
 			.await?;
-			if exited {
+			// The pinned set going quiet does not prove the tree is gone: a member
+			// reparented before capture carries the pgid but appears in neither the
+			// root nor a walk rooted at it, so only the group can still see it.
+			if exited && self.group_survivors().is_empty() {
 				return Ok(true);
 			}
 		}
@@ -1383,13 +1386,11 @@ impl TerminationPlan {
 		{
 			let _ = kill_process_group(pgid, KILL_SIGNAL);
 		}
+		// Group survivors join the captured set as targets in their own right, so
+		// the closing wait covers them instead of only the root's own subtree.
 		let rescan = self.root.signalable_descendants(&self.protected);
-		let mut seen: HashSet<i32> = self.descendants.iter().map(Process::pid).collect();
-		self.descendants.extend(
-			rescan
-				.into_iter()
-				.filter(|descendant| seen.insert(descendant.pid())),
-		);
+		let survivors = self.group_survivors();
+		extend_by_identity(&mut self.descendants, rescan.into_iter().chain(survivors));
 		for child in &self.descendants {
 			let _ = child.inner.kill(KILL_SIGNAL);
 		}
@@ -1404,6 +1405,33 @@ impl TerminationPlan {
 			ct,
 		)
 		.await
+	}
+
+	/// Live members of the captured process group, minus any protected pid.
+	///
+	/// A pgid outlives its leader, and a member reparented before capture never
+	/// shows up in a walk rooted at the root, so the group is the only remaining
+	/// handle on it. Filtered on `Running` rather than reusing
+	/// `process_group_alive`, which is `kill(-pgid, 0)` and so counts an
+	/// unreaped zombie as group liveness — and the root is normally exactly
+	/// that at this point, which would make a complete termination burn its
+	/// whole budget.
+	///
+	/// Only consulted once the pinned set has gone quiet, so the process-table
+	/// scan stays off the grace wait's polling loop.
+	fn group_survivors(&self) -> Vec<Process> {
+		let Some(pgid) = self.process_group else {
+			return Vec::new();
+		};
+		if !group_still_led_by(pgid, self.group_leader.as_ref()) {
+			return Vec::new();
+		}
+		Process::group_members(pgid)
+			.into_iter()
+			.filter(|member| {
+				member.status() == ProcessStatus::Running && !self.protected.contains(&member.pid())
+			})
+			.collect()
 	}
 }
 
@@ -1783,6 +1811,34 @@ fn pid_in_protected_subtree(
 		}
 	}
 	false
+}
+
+/// Append every candidate that is not already present *as the same process*.
+///
+/// Keyed on identity rather than pid. A target that exits and is reaped during
+/// a grace period frees its number for a replacement, so a numeric key would
+/// drop the live candidate and leave the wave signalling the corpse that still
+/// holds that number. Entries already in `retained` win ties, which is what
+/// lets a pinned handle survive a rescan that can no longer see it.
+fn extend_by_identity(retained: &mut Vec<Process>, candidates: impl IntoIterator<Item = Process>) {
+	let mut index: HashMap<i32, Vec<Process>> = HashMap::new();
+	for process in retained.iter() {
+		index
+			.entry(process.pid())
+			.or_default()
+			.push(process.clone());
+	}
+	for candidate in candidates {
+		let bucket = index.entry(candidate.pid()).or_default();
+		if bucket
+			.iter()
+			.any(|process| process.is_same_process(&candidate))
+		{
+			continue;
+		}
+		bucket.push(candidate.clone());
+		retained.push(candidate);
+	}
 }
 
 /// Whether `pgid` still names the group that `anchor` led when it was pinned.
@@ -2297,6 +2353,103 @@ mod tests {
 		assert!(
 			!first_pin.is_same_process(&second_pin),
 			"two distinct processes must never compare equal"
+		);
+	}
+
+	/// The union exists so pinned handles survive a rescan that cannot see them,
+	/// so an identity-keyed merge must resolve a tie in the pinned handle's
+	/// favour rather than swap in the equal-but-rescanned one.
+	#[cfg(unix)]
+	#[test]
+	fn identity_merge_keeps_the_pinned_handle_and_admits_a_distinct_process() {
+		let mut first = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn first");
+		let mut second = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn second");
+		let pin = |child: &std::process::Child| {
+			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child")
+		};
+		let pinned = pin(&first);
+		let rescanned = pin(&first);
+		let distinct = pin(&second);
+		let mut retained = vec![pinned.clone()];
+		extend_by_identity(&mut retained, [rescanned, distinct.clone()]);
+		let kept_pinned = retained[0].is_same_process(&pinned);
+		let length = retained.len();
+		let admitted = retained
+			.iter()
+			.any(|process| process.is_same_process(&distinct));
+		let _ = first.kill();
+		let _ = first.wait();
+		let _ = second.kill();
+		let _ = second.wait();
+
+		assert!(kept_pinned, "the pinned handle must stay in place");
+		assert_eq!(length, 2, "an equal identity is dropped and a distinct one admitted");
+		assert!(admitted, "a different process must be added even so");
+	}
+
+	/// A group member reparented before capture is in neither the root nor the
+	/// descendant walk, so the graceful wave must consult the group before it
+	/// can report the tree gone.
+	#[cfg(unix)]
+	#[tokio::test]
+	async fn graceful_wave_does_not_report_success_over_a_live_group_member() {
+		use std::{
+			io::{BufRead, BufReader},
+			os::unix::process::CommandExt,
+			process::Stdio,
+		};
+
+		// The intermediate shell forks the survivor with TERM ignored, reports its
+		// pid and exits, orphaning it while it keeps the leader's pgid. The leader
+		// then execs a plain sleep, so it dies to the polite signal.
+		let mut child = std::process::Command::new("/bin/sh")
+			.arg("-c")
+			.arg(r#"/bin/sh -c 'trap "" TERM; sleep 60 & echo $!' ; exec sleep 60"#)
+			.process_group(0)
+			.stdout(Stdio::piped())
+			.spawn()
+			.expect("spawn leader");
+		let mut line = String::new();
+		BufReader::new(child.stdout.take().expect("leader stdout"))
+			.read_line(&mut line)
+			.expect("read survivor pid");
+		let survivor =
+			Process::from_pid(line.trim().parse().expect("survivor pid")).expect("pin survivor");
+		let root =
+			Process::from_pid(i32::try_from(child.id()).expect("leader pid")).expect("pin leader");
+		// The intermediate has to be gone before the capture, or the survivor is
+		// still a captured descendant and the group plays no part in the outcome.
+		// Waited for rather than assumed: it exits on its own schedule.
+		let mut reparented = false;
+		for _ in 0..200 {
+			if !root.descendants().iter().any(|d| d.pid() == survivor.pid()) {
+				reparented = true;
+				break;
+			}
+			tokio::time::sleep(Duration::from_millis(10)).await;
+		}
+		let plan = root.capture_termination(true);
+		let captured_survivor = plan.descendants.iter().any(|d| d.pid() == survivor.pid());
+
+		let terminated = plan.terminate(200, 5000, CancelToken::default()).await;
+
+		let survivor_status = survivor.status();
+		let _ = survivor.inner.kill(KILL_SIGNAL);
+		let _ = child.kill();
+		let _ = child.wait();
+		assert!(reparented, "the intermediate never left the root's descendant walk");
+		assert!(!captured_survivor, "the survivor must be outside the captured descendant set");
+		assert!(terminated.expect("terminate plan"), "the tree must be reported gone");
+		assert_eq!(
+			survivor_status,
+			ProcessStatus::Exited,
+			"a live group member must keep the graceful wave from reporting success"
 		);
 	}
 
