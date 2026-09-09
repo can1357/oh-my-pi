@@ -195,6 +195,11 @@ export class ChildProcess<In extends InMask = InMask> {
 	// Windows has no process groups. Retaining the root's native handle pins
 	// its PID after exit so killTree() can still enumerate its original children.
 	#windowsRootProcess?: Process;
+	// A detached POSIX child leads its own group, and after it exits the pgid is
+	// just its old pid — a number the kernel hands out again once the group has
+	// emptied. Pinning the leader while it is alive is the only evidence that
+	// later separates our group from whoever inherited that number.
+	#groupLeader?: Process;
 	constructor(
 		readonly proc: PipedSubprocess<In>,
 		readonly exposeStderr: boolean,
@@ -205,6 +210,8 @@ export class ChildProcess<In extends InMask = InMask> {
 		this.#terminateGroup = terminateGroup;
 		this.#hardKillTree = hardKillTree;
 		this.#windowsRootProcess = process.platform === "win32" ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
+		this.#groupLeader =
+			terminateGroup && process.platform !== "win32" ? (Process.fromPid(proc.pid) ?? undefined) : undefined;
 		if (retainFullStderr) this.#stderrChunks = [];
 		// Eagerly drain stderr into a truncated tail, retaining raw chunks only for explicit full capture.
 		const dec = new TextDecoder();
@@ -406,11 +413,15 @@ export class ChildProcess<In extends InMask = InMask> {
 				return;
 			}
 		}
-		if (this.#terminateGroup && this.#openPipeReaders > 0 && process.platform !== "win32" && !this.#rootIsLive()) {
-			// Bun detached children are POSIX session/process-group leaders. If
-			// the leader has exited, the native Process handle cannot rediscover
-			// its PGID, but a pipe-holding descendant keeps that exact group alive.
-			this.#terminating = Promise.try(() => Process.killGroupAndWait(this.proc.pid));
+		const groupLeader = this.#groupLeader;
+		if (groupLeader && this.#openPipeReaders > 0 && !this.#rootIsLive()) {
+			// Bun detached children are POSIX session/process-group leaders. If the
+			// leader has exited, the native Process handle cannot rediscover its
+			// PGID, so the group is reached through the pinned leader, which refuses
+			// once that pid belongs to someone else. Retained stdout ownership shows
+			// only that buffered data is left, not that a live writer remains, so it
+			// cannot stand in for that identity check.
+			this.#terminating = Promise.try(() => groupLeader.killOwnGroupAndWait());
 			void this.#terminating.catch(() => {});
 			return;
 		}

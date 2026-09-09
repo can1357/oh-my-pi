@@ -137,20 +137,25 @@ impl Process {
 		})
 	}
 
-	/// Hard-kill a caller-owned group and wait up to 5000ms for its captured
-	/// members.
+	/// Hard-kill the process group this process leads and wait up to 5000ms for
+	/// its captured members.
+	///
+	/// Rejects when the pid has since been handed to a different process,
+	/// because the group would then be someone else's.
 	#[napi]
-	pub fn kill_group_and_wait<'env>(
+	pub fn kill_own_group_and_wait<'env>(
+		&self,
 		env: &'env Env,
-		pgid: i32,
 		options: Option<ProcessWaitOptions<'env>>,
 	) -> Result<PromiseRaw<'env, bool>> {
 		let options = options.unwrap_or_default();
 		let timeout = Duration::from_millis(u64::from(options.timeout_ms.unwrap_or(5000)));
 		let ct = task::CancelToken::new(None, options.signal);
-		let waiter = core_process::Process::hard_kill_group(pgid)
+		let waiter = self
+			.inner
+			.hard_kill_own_group()
 			.map_err(|err| napi::Error::from_reason(err.to_string()))?;
-		task::future(env, "process.kill_group_and_wait", async move {
+		task::future(env, "process.kill_own_group_and_wait", async move {
 			waiter
 				.wait(timeout, ct.into_core())
 				.await

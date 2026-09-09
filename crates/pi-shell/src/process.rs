@@ -154,6 +154,10 @@ mod platform {
 			split_nul_arguments(&content)
 		}
 
+		pub const fn is_same_process(&self, other: &Self) -> bool {
+			self.pid == other.pid && self.start_time == other.start_time
+		}
+
 		pub fn kill(&self, signal: i32) -> bool {
 			// SAFETY: `self.pidfd` is an owned file descriptor returned by a successful
 			// `pidfd_open` call and remains open for the duration of this syscall. A null
@@ -389,6 +393,12 @@ mod platform {
 				return Vec::new();
 			}
 			process_args(self.pid)
+		}
+
+		pub const fn is_same_process(&self, other: &Self) -> bool {
+			self.pid == other.pid
+				&& self.start_tvsec == other.start_tvsec
+				&& self.start_tvusec == other.start_tvusec
 		}
 
 		pub fn kill(&self, signal: i32) -> bool {
@@ -873,6 +883,10 @@ mod platform {
 
 		pub const fn pid(&self) -> i32 {
 			self.pid
+		}
+
+		pub const fn is_same_process(&self, other: &Self) -> bool {
+			self.pid == other.pid && self.creation_time == other.creation_time
 		}
 
 		pub fn parent_pid(&self) -> Option<i32> {
@@ -1444,9 +1458,43 @@ impl Process {
 		Self::hard_kill_processes(processes, &protected)
 	}
 
+	/// Whether both references describe the same process instance rather than
+	/// merely the same numeric pid.
+	#[must_use]
+	pub const fn is_same_process(&self, other: &Self) -> bool {
+		self.inner.is_same_process(&other.inner)
+	}
+
+	/// Snapshot and hard-kill the process group this reference leads, refusing
+	/// once its pid has been handed to a different process.
+	///
+	/// A detached child leads a group whose pgid is its own pid, so after the
+	/// leader exits that number is the only handle on the group. The kernel
+	/// keeps the number allocated while any member still carries the pgid, but
+	/// releases it once the group empties and the leader is reaped — and
+	/// `hard_kill_group` signals whoever holds the number at that point.
+	/// Comparing the pinned identity against the pid's current occupant is
+	/// therefore what separates our own descendants from an unrelated group
+	/// that inherited the id: a match (or an unallocated pid, which no live
+	/// task can hold) proves the group is still ours, and a mismatch proves it
+	/// is not.
+	pub fn hard_kill_own_group(&self) -> Result<ProcessExitWait> {
+		let pgid = self.pid();
+		if let Some(current) = Self::from_pid(pgid) {
+			anyhow::ensure!(
+				self.is_same_process(&current),
+				"process group {pgid} now belongs to a different process"
+			);
+		}
+		Self::hard_kill_group(pgid)
+	}
+
 	/// Snapshot and hard-kill a caller-owned process group, even after its
 	/// leader exits.
-	pub fn hard_kill_group(pgid: i32) -> Result<ProcessExitWait> {
+	///
+	/// Signals whatever currently carries `pgid`, so callers must establish that
+	/// the group is theirs. Reach it through [`Process::hard_kill_own_group`].
+	fn hard_kill_group(pgid: i32) -> Result<ProcessExitWait> {
 		anyhow::ensure!(
 			pgid > 0 && !is_self_process_group(pgid),
 			"refusing to kill process group {pgid}"
@@ -2132,6 +2180,42 @@ mod tests {
 			orphan_status,
 			ProcessStatus::Exited,
 			"a descendant orphaned by the polite wave must still be hard-killed"
+		);
+	}
+
+	/// `hard_kill_own_group` signals whatever carries the leader's old pid, so
+	/// the pinned identity is the only thing that can tell our own group apart
+	/// from one that inherited the number. Re-opening a pid must recognise the
+	/// same process, and must never confuse two different ones.
+	#[cfg(unix)]
+	#[test]
+	fn pinned_identity_separates_processes_sharing_nothing_but_a_pid_space() {
+		let mut first = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn first");
+		let mut second = std::process::Command::new("sleep")
+			.arg("30")
+			.spawn()
+			.expect("spawn second");
+		let pin = |child: &std::process::Child| {
+			Process::from_pid(i32::try_from(child.id()).expect("child pid")).expect("pin child")
+		};
+		let first_pin = pin(&first);
+		let second_pin = pin(&second);
+		let first_reopened = pin(&first);
+		let _ = first.kill();
+		let _ = first.wait();
+		let _ = second.kill();
+		let _ = second.wait();
+
+		assert!(
+			first_pin.is_same_process(&first_reopened),
+			"re-opening a live pid must recognise the same process"
+		);
+		assert!(
+			!first_pin.is_same_process(&second_pin),
+			"two distinct processes must never compare equal"
 		);
 	}
 

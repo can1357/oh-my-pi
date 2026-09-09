@@ -144,11 +144,13 @@ describe("ptree.ChildProcess.killAndWait()", () => {
 			const child = spawn(["/bin/sh", "-c", "sleep 30 & echo $!"], { detached: true });
 			const reader = child.stdout.getReader();
 			let descendant: Process | null = null;
-			const killGroupAndWait = Process.killGroupAndWait;
-			const spy = spyOn(Process, "killGroupAndWait").mockImplementation((pgid, options) => {
-				if (pgid === child.pid) throw new Error("Cannot observe process group");
-				return killGroupAndWait(pgid, options);
-			});
+			const killOwnGroupAndWait = Process.prototype.killOwnGroupAndWait;
+			const spy = spyOn(Process.prototype, "killOwnGroupAndWait").mockImplementation(
+				function (this: Process, options) {
+					if (this.pid === child.pid) throw new Error("Cannot observe process group");
+					return killOwnGroupAndWait.call(this, options);
+				},
+			);
 			try {
 				const output = await reader.read();
 				descendant = Process.fromPid(Number.parseInt(new TextDecoder().decode(output.value), 10));

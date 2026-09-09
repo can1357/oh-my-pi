@@ -100,6 +100,11 @@ class ServerInstance {
 	stopping = false;
 	stopPromise?: Promise<void>;
 	terminationPromise?: Promise<void>;
+	// True only while a termination attempt is still running and can therefore
+	// retire the server itself. `terminationPromise` is not a substitute: its
+	// deadline can expire while the attempt underneath is still going, and the
+	// attempt can fail outright and retire nothing.
+	terminating = false;
 
 	constructor(key: string, params: MuxConnectParams) {
 		this.key = key;
@@ -334,7 +339,7 @@ export class LspMuxServer {
 			}
 			const key = muxServerKey(params);
 			let server = [...this.#servers].find(candidate => candidate.key === key && candidate.sessions.size === 0);
-			if (server && server.proc.exitCode !== null && !server.terminationPromise) {
+			if (server && server.proc.exitCode !== null && !server.terminating) {
 				this.#serverExited(server);
 				server = undefined;
 			}
@@ -457,12 +462,8 @@ export class LspMuxServer {
 		this.#servers.add(server);
 		void this.#readServer(server);
 		server.proc.exited.then(
-			() => {
-				if (!server.terminationPromise) this.#serverExited(server);
-			},
-			() => {
-				if (!server.terminationPromise) this.#serverExited(server);
-			},
+			() => this.#serverExitedUnlessTerminating(server),
+			() => this.#serverExitedUnlessTerminating(server),
 		);
 		return server;
 	}
@@ -714,6 +715,20 @@ export class LspMuxServer {
 		}
 	}
 
+	/**
+	 * Retire a server whose OS process is gone, unless a termination attempt is
+	 * still running and will retire it itself.
+	 *
+	 * Deferring to a *settled* termination is what strands the server: a failed
+	 * attempt retires nothing, so ignoring the later exit would leave the server
+	 * in `#servers` with its sessions attached and every subsequent shutdown
+	 * replaying the same rejection.
+	 */
+	#serverExitedUnlessTerminating(server: ServerInstance): void {
+		if (server.terminating) return;
+		this.#serverExited(server);
+	}
+
 	#serverExited(server: ServerInstance): void {
 		server.stopping = true;
 		this.#servers.delete(server);
@@ -760,9 +775,24 @@ export class LspMuxServer {
 	#killServer(server: ServerInstance): Promise<void> {
 		if (server.terminationPromise) return server.terminationPromise;
 		server.stopping = true;
+		server.terminating = true;
 		if (server.lingerTimer) clearTimeout(server.lingerTimer);
+		const terminated = server.proc.killAndWait(undefined, -1).then(
+			() => {
+				server.terminating = false;
+				this.#serverExited(server);
+			},
+			error => {
+				// Termination failed, so nothing here will retire the server. Do it now
+				// if the process is already gone; otherwise the exit callback owns it,
+				// which the cleared flag now allows.
+				server.terminating = false;
+				if (server.proc.exitCode !== null) this.#serverExited(server);
+				throw error;
+			},
+		);
 		server.terminationPromise = withTimeout(
-			server.proc.killAndWait(undefined, -1).then(() => this.#serverExited(server)),
+			terminated,
 			TERMINATION_BUDGET_MS,
 			`LSP mux server termination timed out: ${server.key}`,
 		);
